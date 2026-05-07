@@ -32,7 +32,7 @@ test_generic_is_check_string_arg() `test {
 
 // --- Generic optional is-check ---
 
-test_generic_optional_is_check() `test(allow_leaks: true) {
+test_generic_optional_is_check() `test {
   Container[int] lc = LabeledContainer[int](value: 10, label: "ten");
   Container[int]? opt = lc;
   Container[int]? n = none;

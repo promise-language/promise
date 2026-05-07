@@ -603,7 +603,7 @@ custom_tag_decode_fieldless_test() `test {
   assert(enc.to_string() == "\{\"kind\":\"Scroll\"}", "custom tag decode Scroll");
 }
 
-custom_tag_roundtrip_test() `test(allow_leaks: true) {
+custom_tag_roundtrip_test() `test {
   InputEvent[] events = [InputEvent.Click(1, 2), InputEvent.KeyPress("a"), InputEvent.Scroll];
   int i = 0;
   for ev in events {

@@ -125,7 +125,7 @@ encode_point_test() `test {
   assert(s.contains("\"y\":4"), "has y:4");
 }
 
-decode_point_test() `test(allow_leaks: true) {
+decode_point_test() `test {
   Point p1 = Point(x: 10, y: 20);
   json.JsonEncoder enc = json.JsonEncoder();
   p1.encode(enc)!;
@@ -135,7 +135,7 @@ decode_point_test() `test(allow_leaks: true) {
   assert(p2.y == 20, "decoded y");
 }
 
-round_trip_point_test() `test(allow_leaks: true) {
+round_trip_point_test() `test {
   Point p1 = Point(x: 42, y: 99);
   json.JsonEncoder enc = json.JsonEncoder();
   p1.encode(enc)!;
@@ -158,7 +158,7 @@ mixed_fields_encode_test() `test {
   assert(s.contains("\"score\":"), "mixed: score present");
 }
 
-mixed_fields_round_trip_test() `test(allow_leaks: true) {
+mixed_fields_round_trip_test() `test {
   MixedFields m1 = MixedFields(label: "hello", count: 0, score: 2.5, active: false);
   json.JsonEncoder enc = json.JsonEncoder();
   m1.encode(enc)!;
@@ -183,7 +183,7 @@ nested_encode_test() `test {
   assert(s.contains("\"city\":\"NYC\""), "nested encode: city");
 }
 
-nested_decode_test() `test(allow_leaks: true) {
+nested_decode_test() `test {
   Person p1 = Person(name: "Bob", age: 25, address: Address(street: "456 Oak", city: "LA"));
   json.JsonEncoder enc = json.JsonEncoder();
   p1.encode(enc)!;
@@ -195,7 +195,7 @@ nested_decode_test() `test(allow_leaks: true) {
   assert(p2.address.city == "LA", "nested decode: city");
 }
 
-nested_round_trip_test() `test(allow_leaks: true) {
+nested_round_trip_test() `test {
   Person p1 = Person(name: "Carol", age: 40, address: Address(street: "789 Elm", city: "SF"));
   json.JsonEncoder enc = json.JsonEncoder();
   p1.encode(enc)!;
@@ -207,7 +207,7 @@ nested_round_trip_test() `test(allow_leaks: true) {
   assert(p2.address.city == "SF", "nested rt: city");
 }
 
-deep_nested_round_trip_test() `test(allow_leaks: true) {
+deep_nested_round_trip_test() `test {
   // 3 levels: uses Address → reuses existing types, but tests depth
   Person p1 = Person(name: "Deep", age: 1, address: Address(street: "A St", city: "B"));
   json.JsonEncoder enc = json.JsonEncoder();
@@ -231,7 +231,7 @@ nested_with_key_test() `test {
   assert(l2.pos.y == 4, "nested key decode: y");
 }
 
-multiple_nested_fields_test() `test(allow_leaks: true) {
+multiple_nested_fields_test() `test {
   Rect r1 = Rect(origin: Point(x: 0, y: 0), size: Point(x: 100, y: 50));
   json.JsonEncoder enc = json.JsonEncoder();
   r1.encode(enc)!;
@@ -267,7 +267,7 @@ array_round_trip_test() `test(allow_leaks: true) {
   assert(item2.tags[1] == "steel", "array rt: 1");
 }
 
-array_empty_test() `test(allow_leaks: true) {
+array_empty_test() `test {
   TaggedItem item1 = TaggedItem(name: "bare", tags: string[]());
   json.JsonEncoder enc = json.JsonEncoder();
   item1.encode(enc)!;
@@ -276,7 +276,7 @@ array_empty_test() `test(allow_leaks: true) {
   assert(item2.tags.len == 0, "array empty: no tags");
 }
 
-int_array_round_trip_test() `test(allow_leaks: true) {
+int_array_round_trip_test() `test {
   Scores s1 = Scores(label: "test", values: [10, 20, 30]);
   json.JsonEncoder enc = json.JsonEncoder();
   s1.encode(enc)!;
@@ -310,7 +310,7 @@ map_round_trip_test() `test(allow_leaks: true) {
   assert(cfg2.title == "web", "map rt: title");
 }
 
-map_empty_test() `test(allow_leaks: true) {
+map_empty_test() `test {
   Config cfg1 = Config(title: "empty", settings: map[string, string]());
   json.JsonEncoder enc = json.JsonEncoder();
   cfg1.encode(enc)!;
@@ -333,7 +333,7 @@ array_of_user_types_test() `test(allow_leaks: true) {
   assert(r2.waypoints[2].y == 10, "user type array: pt 3 y");
 }
 
-f64_array_test() `test(allow_leaks: true) {
+f64_array_test() `test {
   Measurements m1 = Measurements(values: [1.5, 2.5, 3.5]);
   json.JsonEncoder enc = json.JsonEncoder();
   m1.encode(enc)!;
@@ -343,7 +343,7 @@ f64_array_test() `test(allow_leaks: true) {
   assert(m2.values[0] == 1.5, "f64 array: 0");
 }
 
-bool_array_test() `test(allow_leaks: true) {
+bool_array_test() `test {
   Flags f1 = Flags(bits: [true, false, true]);
   json.JsonEncoder enc = json.JsonEncoder();
   f1.encode(enc)!;
@@ -354,7 +354,7 @@ bool_array_test() `test(allow_leaks: true) {
   assert(f2.bits[1] == false, "bool array: 1");
 }
 
-single_element_array_test() `test(allow_leaks: true) {
+single_element_array_test() `test {
   Flags f1 = Flags(bits: [true]);
   json.JsonEncoder enc = json.JsonEncoder();
   f1.encode(enc)!;
@@ -428,7 +428,7 @@ generic_wrapper_string_test() `test {
   assert(s.contains("\"value\":\"hello\""), "generic string: value");
 }
 
-generic_wrapper_round_trip_test() `test(allow_leaks: true) {
+generic_wrapper_round_trip_test() `test {
   GoodWrapper[int] w1 = GoodWrapper[int](value: 99, label: "test");
   json.JsonEncoder enc = json.JsonEncoder();
   w1.encode(enc)!;
@@ -447,7 +447,7 @@ skip_wrapper_test() `test {
   assert(!s.contains("\"value\""), "skip wrapper: value skipped");
 }
 
-generic_wrapper_user_type_test() `test(allow_leaks: true) {
+generic_wrapper_user_type_test() `test {
   GoodWrapper[Point] w1 = GoodWrapper[Point](value: Point(x: 1, y: 2), label: "pt");
   json.JsonEncoder enc = json.JsonEncoder();
   w1.encode(enc)!;
@@ -458,7 +458,7 @@ generic_wrapper_user_type_test() `test(allow_leaks: true) {
   assert(w2.label == "pt", "generic user type: label");
 }
 
-generic_wrapper_bool_test() `test(allow_leaks: true) {
+generic_wrapper_bool_test() `test {
   GoodWrapper[bool] w1 = GoodWrapper[bool](value: true, label: "flag");
   json.JsonEncoder enc = json.JsonEncoder();
   w1.encode(enc)!;
@@ -467,7 +467,7 @@ generic_wrapper_bool_test() `test(allow_leaks: true) {
   assert(w2.value == true, "generic bool: value");
 }
 
-generic_wrapper_f64_test() `test(allow_leaks: true) {
+generic_wrapper_f64_test() `test {
   GoodWrapper[f64] w1 = GoodWrapper[f64](value: 3.14, label: "pi");
   json.JsonEncoder enc = json.JsonEncoder();
   w1.encode(enc)!;
@@ -548,7 +548,7 @@ multiple_optionals_some_test() `test {
   assert(s.contains("\"level\":5"), "multi opt: level present");
 }
 
-multiple_optionals_round_trip_test() `test(allow_leaks: true) {
+multiple_optionals_round_trip_test() `test {
   WithOptionals w1 = WithOptionals(name: "test", level: 3);
   json.JsonEncoder enc = json.JsonEncoder();
   w1.encode(enc)!;
@@ -561,7 +561,7 @@ multiple_optionals_round_trip_test() `test(allow_leaks: true) {
 
 // ── Decode with optional fields ─────────────────────────────────────────────
 
-decode_optional_present_test() `test(allow_leaks: true) {
+decode_optional_present_test() `test {
   User u1 = User(name: "Eve", age: 40, email: "eve@test.com", _internal: "s");
   json.JsonEncoder enc = json.JsonEncoder();
   u1.encode(enc)!;
@@ -572,7 +572,7 @@ decode_optional_present_test() `test(allow_leaks: true) {
   assert(u2.email is present, "decode opt present: email exists");
 }
 
-decode_optional_missing_test() `test(allow_leaks: true) {
+decode_optional_missing_test() `test {
   User u1 = User(name: "Frank", age: 50, _internal: "s");
   json.JsonEncoder enc = json.JsonEncoder();
   u1.encode(enc)!;
@@ -585,7 +585,7 @@ decode_optional_missing_test() `test(allow_leaks: true) {
 
 // ── String escaping in field values ─────────────────────────────────────────
 
-string_escape_round_trip_test() `test(allow_leaks: true) {
+string_escape_round_trip_test() `test {
   MixedFields m1 = MixedFields(label: "has \"quotes\" and\nnewlines", count: 1, score: 0.0, active: true);
   json.JsonEncoder enc = json.JsonEncoder();
   m1.encode(enc)!;
@@ -596,7 +596,7 @@ string_escape_round_trip_test() `test(allow_leaks: true) {
 
 // ── Edge cases ──────────────────────────────────────────────────────────────
 
-zero_values_test() `test(allow_leaks: true) {
+zero_values_test() `test {
   MixedFields m1 = MixedFields(label: "", count: 0, score: 0.0, active: false);
   json.JsonEncoder enc = json.JsonEncoder();
   m1.encode(enc)!;
@@ -607,7 +607,7 @@ zero_values_test() `test(allow_leaks: true) {
   assert(m2.active == false, "zero: bool false");
 }
 
-negative_values_test() `test(allow_leaks: true) {
+negative_values_test() `test {
   Point p1 = Point(x: -42, y: -1);
   json.JsonEncoder enc = json.JsonEncoder();
   p1.encode(enc)!;
@@ -617,7 +617,7 @@ negative_values_test() `test(allow_leaks: true) {
   assert(p2.y == -1, "negative: y");
 }
 
-large_values_test() `test(allow_leaks: true) {
+large_values_test() `test {
   Point p1 = Point(x: 1000000, y: -999999);
   json.JsonEncoder enc = json.JsonEncoder();
   p1.encode(enc)!;
@@ -639,7 +639,7 @@ custom_encode_test() `test {
 
 // ── Decode with key renaming ────────────────────────────────────────────────
 
-decode_with_key_test() `test(allow_leaks: true) {
+decode_with_key_test() `test {
   User u1 = User(name: "Grace", age: 28, _internal: "x");
   json.JsonEncoder enc = json.JsonEncoder();
   u1.encode(enc)!;

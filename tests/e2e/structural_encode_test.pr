@@ -250,17 +250,17 @@ round_trip_via_generic[T: Encodable + Decodable](T val) T! {
   return T.decode(dec);
 }
 
-generic_round_trip_int() `test(allow_leaks: true) {
+generic_round_trip_int() `test {
   int v = round_trip_via_generic[int](42)!;
   assert(v == 42, "generic round trip: int");
 }
 
-generic_round_trip_string() `test(allow_leaks: true) {
+generic_round_trip_string() `test {
   string v = round_trip_via_generic[string]("hello")!;
   assert(v == "hello", "generic round trip: string");
 }
 
-generic_round_trip_bool() `test(allow_leaks: true) {
+generic_round_trip_bool() `test {
   bool v = round_trip_via_generic[bool](true)!;
   assert(v == true, "generic round trip: bool");
 }

@@ -15748,3 +15748,91 @@ func TestDropDiscardedOptionalUserTypePop(t *testing.T) {
 	assertContains(t, ir, "discard.drop")
 	assertContains(t, ir, "call void @Res.drop")
 }
+
+// B0211: Discarded constructor call for a heap user type without drop should emit pal_free.
+func TestDropDiscardedHeapTypeConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt {
+			int x;
+			int y;
+		}
+		test() {
+			Pt(x: 1, y: 2);
+		}
+	`)
+	assertContains(t, ir, "discard.heap.free")
+	assertContains(t, ir, "call void @pal_free")
+}
+
+// B0211: Discarded constructor call for a heap user type WITH drop should call drop.
+func TestDropDiscardedHeapTypeConstructorWithDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Res {
+			int id;
+			drop(~this) {}
+		}
+		test() {
+			Res(id: 1);
+		}
+	`)
+	assertContains(t, ir, "discard.heap.free")
+	assertContains(t, ir, "call void @Res.drop")
+}
+
+// B0211: Discarded method call returning a heap type should NOT emit discard.heap.free
+// (only constructor calls are safe to free — method returns may share instance pointers).
+func TestNoDropDiscardedMethodReturnHeapType(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt {
+			int x;
+			int y;
+		}
+		make_pt() Pt {
+			return Pt(x: 1, y: 2);
+		}
+		test() {
+			make_pt();
+		}
+	`)
+	testFn := extractFunction(ir, "test")
+	if strings.Contains(testFn, "discard.heap.free") {
+		t.Fatalf("expected test function to NOT contain discard.heap.free for method return\ngot:\n%s", testFn)
+	}
+}
+
+// B0211: Optional of heap user type without drop should register pal_free cleanup.
+func TestOptionalHeapTypeWithoutDropFreed(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt {
+			int x;
+			int y;
+		}
+		test() {
+			Pt? p = Pt(x: 1, y: 2);
+		}
+	`)
+	// Should have optional drop check and pal_free
+	assertContains(t, ir, "optdrop.check")
+	assertContains(t, ir, "call void @pal_free")
+}
+
+// B0211: String temp should NOT be claimed when constructor will strdup (NeedsSynthDrop).
+func TestStringTempNotClaimedForSynthDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Named {
+			string name;
+			new(~this, string name) {
+				this.name = name;
+			}
+		}
+		make_name() string {
+			return "hello";
+		}
+		test() {
+			Named n = Named(name: make_name());
+		}
+	`)
+	// The string from make_name() should be freed (not claimed by constructor).
+	// Look for promise_string_drop in the test function — indicates the temp is freed.
+	assertContains(t, ir, "promise_string_drop")
+}

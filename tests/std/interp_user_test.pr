@@ -17,7 +17,7 @@ test_user_type_mixed() `test {
   assert("point: {p}" == "point: (1, 2)", "mixed text + user type");
 }
 
-test_optional_user_type_some() `test(allow_leaks: true) {
+test_optional_user_type_some() `test {
   Pt? p = Pt(x: 5, y: 6);
   assert("{p}" == "(5, 6)", "optional user type some");
 }
@@ -269,7 +269,7 @@ test_interp_result_reuse() `test {
 }
 
 // Optional user type in mixed context
-test_optional_user_mixed_some() `test(allow_leaks: true) {
+test_optional_user_mixed_some() `test {
   Pt? p = Pt(x: 1, y: 2);
   int n = 99;
   assert("{n} -> {p}" == "99 -> (1, 2)", "optional some in mixed");

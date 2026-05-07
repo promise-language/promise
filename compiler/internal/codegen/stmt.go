@@ -201,6 +201,9 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		// droppable inner type, the inner value leaks because trackStringTemp
 		// only tracks bare i8* values, not {i1, T} optional structs.
 		c.dropDiscardedOptional(s.Expr, discardedResult)
+		// B0211: When a discarded expression returns a heap-allocated user type
+		// (e.g., bare constructor call like `Foo(x: 1);`), free the instance.
+		c.dropDiscardedHeapType(s.Expr, discardedResult)
 	case *ast.ReturnStmt:
 		c.genReturnStmt(s)
 	case *ast.TypedVarDecl:
@@ -1225,6 +1228,9 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		dropFunc = c.funcs[mangledName]
+	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() && !isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural():
+		// B0211: Heap user type without drop — use pal_free to free the instance.
+		dropFunc = c.palFree
 	default:
 		return // inner type not droppable
 	}
@@ -1631,6 +1637,72 @@ func (c *Compiler) dropDiscardedOptional(expr ast.Expr, result value.Value) {
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock
+}
+
+// dropDiscardedHeapType handles B0211: when an ExprStmt discards a heap-allocated
+// user type constructor result (e.g., `Foo(x: 1);`), the instance leaks.
+// Only handles constructor calls — method/getter returns may share instance
+// pointers with existing objects, so freeing them would cause use-after-free.
+func (c *Compiler) dropDiscardedHeapType(expr ast.Expr, result value.Value) {
+	if result == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	// Only handle constructor calls (CallExpr whose callee resolves to a type).
+	callExpr, isCall := expr.(*ast.CallExpr)
+	if !isCall {
+		return
+	}
+	calleeType := c.info.Types[callExpr.Callee]
+	if c.typeSubst != nil && calleeType != nil {
+		calleeType = types.Substitute(calleeType, c.typeSubst)
+	}
+	switch calleeType.(type) {
+	case *types.Named, *types.Instance:
+		// Constructor call — proceed
+	default:
+		return // Not a constructor
+	}
+
+	exprType := c.info.Types[expr]
+	if exprType == nil {
+		return
+	}
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	// Only handle user types with value struct layout {i8*, i8*}
+	named := extractNamed(exprType)
+	if named == nil || named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return
+	}
+	// Skip containers and strings — handled by trackStringTemp
+	if isContainerType(exprType) || named == types.TypString {
+		return
+	}
+	// Must be a struct value to extract instance pointer
+	if _, ok := result.Type().(*irtypes.StructType); !ok {
+		return
+	}
+
+	instance := c.extractInstancePtr(result)
+	nullCheck := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
+	freeBlock := c.newBlock("discard.heap.free")
+	doneBlock := c.newBlock("discard.heap.done")
+	c.block.NewCondBr(nullCheck, doneBlock, freeBlock)
+
+	c.block = freeBlock
+	if dropFunc := c.resolveDropFuncForTemp(named, exprType); dropFunc != nil && dropFunc != c.palFree {
+		c.block.NewCall(dropFunc, instance)
+		// Explicit drop (not synth) doesn't include pal_free
+		if named.HasDrop() && !named.NeedsSynthDrop() {
+			c.block.NewCall(c.palFree, instance)
+		}
+	} else {
+		c.block.NewCall(c.palFree, instance)
+	}
+	c.block.NewBr(doneBlock)
+
+	c.block = doneBlock
 }
 
 // emitStringDropCall emits a conditional promise_string_drop call for a string variable.

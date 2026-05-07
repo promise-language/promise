@@ -158,7 +158,7 @@ type Point {
   int y;
 }
 
-narrowing_type_present() `test(allow_leaks: true) {
+narrowing_type_present() `test {
   Point p = Point(x: 3, y: 4);
   Point? mp = p;
   if mp {
@@ -336,7 +336,7 @@ compound_narrowing_with_else() `test {
 
 // --- Optional chaining on user-defined types ---
 
-optional_chain_present() `test(allow_leaks: true) {
+optional_chain_present() `test {
   Point p = Point(x: 7, y: 8);
   Point? mp = p;
   int? px = mp?.x;
@@ -482,7 +482,7 @@ is_absent_narrows_user_type() `test {
 }
 
 // is_absent narrowing with return (not raise, since test funcs can't be failable)
-is_absent_narrows_user_type_return() `test(allow_leaks: true) {
+is_absent_narrows_user_type_return() `test {
   Point? p = Point(x: 1, y: 2);
   if p is absent {
     return;

@@ -1796,7 +1796,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				paramType := newParams[i].Type()
 				_, isMutRef := paramType.(*types.MutRef)
 				isMove := isMutRef || newParams[i].Ref() == types.RefMut
-				if !isMove && extractNamed(paramType) == types.TypString && named.HasDrop() {
+				if !isMove && extractNamed(paramType) == types.TypString && (named.HasDrop() || named.NeedsSynthDrop()) {
 					skipClear = true
 				}
 			}
@@ -1805,8 +1805,13 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 					c.clearDropFlag(ident.Name)
 				}
 			}
-			c.claimStringTemp(v) // B0168: ownership transferred to new() args
-			c.claimEnvTemp(v)    // T0100: claim env temp for closure args
+			// B0211: Don't claim string temp when the constructor will strdup
+			// (skipClear=true: borrow string on type with drop/synth-drop).
+			// The strdup creates an independent copy; the original temp should be freed.
+			if !skipClear {
+				c.claimStringTemp(v) // B0168: ownership transferred to new() args
+			}
+			c.claimEnvTemp(v) // T0100: claim env temp for closure args
 		}
 		// T0135: Claim heap temp before calling new() — args evaluated successfully.
 		c.claimHeapTemp(rawPtr)
@@ -2016,6 +2021,56 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	valStruct = c.block.NewInsertValue(valStruct, rawPtr, 1)
 
 	return valStruct
+}
+
+// resolveDropFuncForTemp returns the cleanup function for a heap-allocated
+// type's temporary instance (B0211). Returns nil for value types, copy types,
+// and primitive scalars that don't heap-allocate.
+func (c *Compiler) resolveDropFuncForTemp(named *types.Named, typ types.Type) *ir.Func {
+	if named == nil || named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) {
+		return nil
+	}
+	// Types with explicit drop method
+	if named.HasDrop() {
+		resolvedTyp := typ
+		if c.typeSubst != nil {
+			resolvedTyp = types.Substitute(typ, c.typeSubst)
+		}
+		ownerName := named.Obj().Name()
+		if inst, ok := resolvedTyp.(*types.Instance); ok {
+			ownerName = monoName(inst)
+		} else if !named.NeedsSynthDrop() {
+			ownerName = c.resolveMethodOwner(named, "drop")
+		}
+		mangledName := mangleMethodName(ownerName, "drop", false)
+		if fn, ok := c.funcs[mangledName]; ok {
+			return fn
+		}
+	}
+	// Types with synthesized drop
+	if named.NeedsSynthDrop() {
+		resolvedTyp := typ
+		if c.typeSubst != nil {
+			resolvedTyp = types.Substitute(typ, c.typeSubst)
+		}
+		ownerName := named.Obj().Name()
+		if inst, ok := resolvedTyp.(*types.Instance); ok {
+			ownerName = monoName(inst)
+		}
+		mangledName := mangleMethodName(ownerName, "drop", false)
+		if fn, ok := c.funcs[mangledName]; ok {
+			return fn
+		}
+	}
+	// Mono instance with codegen-detected synth drop (B0202)
+	if inst, ok := typ.(*types.Instance); ok && monoInstNeedsSynthDrop(inst) {
+		monoDropName := mangleMethodName(monoName(inst), "drop", false)
+		if fn, ok := c.funcs[monoDropName]; ok {
+			return fn
+		}
+	}
+	// Heap type without drop: use pal_free
+	return c.palFree
 }
 
 // genValueTypeConstructor builds a value type by insertvalue chain — no heap allocation.

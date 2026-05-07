@@ -78,7 +78,7 @@ type Point {
   int y;
 }
 
-optional_user_type_exact() `test(allow_leaks: true) {
+optional_user_type_exact() `test {
   Point? p = Point(x: 1, y: 2);
   Point? n = none;
   assert(p is Point, "present Point? is Point");

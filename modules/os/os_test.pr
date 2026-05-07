@@ -59,13 +59,13 @@ test_working_dir_absolute() `test(exclude: "wasm32") {
   assert(is_abs, "working directory should be absolute path");
 }
 
-test_args_returns_empty_in_test_runner() `test(allow_leaks: true, exclude: "wasm32") {
+test_args_returns_empty_in_test_runner() `test(exclude: "wasm32") {
   string[] a = args;
   // Test runner passes no user args, so args should be empty
   assert(a.len == 0, "args should be empty in test runner");
 }
 
-test_args_is_iterable() `test(allow_leaks: true, exclude: "wasm32") {
+test_args_is_iterable() `test(exclude: "wasm32") {
   string[] a = args;
   int count = 0;
   for _ in a {
@@ -74,12 +74,12 @@ test_args_is_iterable() `test(allow_leaks: true, exclude: "wasm32") {
   assert(count == 0, "iterating empty args should produce zero elements");
 }
 
-test_executable_path_returns_string() `test(allow_leaks: true, exclude: "wasm32") {
+test_executable_path_returns_string() `test(exclude: "wasm32") {
   string exe = executable_path;
   assert(exe.len > 0, "executable_path should be non-empty");
 }
 
-test_executable_path_contains_slash() `test(allow_leaks: true, exclude: "wasm32") {
+test_executable_path_contains_slash() `test(exclude: "wasm32") {
   string exe = executable_path;
   // The executable path should be an absolute or relative path with a separator.
   // On Windows the separator is "\", on POSIX it is "/".
@@ -87,7 +87,7 @@ test_executable_path_contains_slash() `test(allow_leaks: true, exclude: "wasm32"
   assert(has_sep, "executable_path should contain a path separator");
 }
 
-test_executable_path_is_stable() `test(allow_leaks: true, exclude: "wasm32") {
+test_executable_path_is_stable() `test(exclude: "wasm32") {
   string exe1 = executable_path;
   string exe2 = executable_path;
   assert(exe1 == exe2, "reading executable_path twice should return the same value");
@@ -796,7 +796,7 @@ test_env_has_entries() `test(allow_leaks: true, exclude: "wasm32") {
   assert(e.len > 0, "env should have at least one entry");
 }
 
-test_user_name_nonempty() `test(allow_leaks: true, exclude: "wasm32") {
+test_user_name_nonempty() `test(exclude: "wasm32") {
   string name = user_name;
   assert(name.len > 0, "user_name should be non-empty");
 }
@@ -811,7 +811,7 @@ test_group_id_nonnegative() `test(exclude: "wasm32") {
   assert(gid >= 0, "group_id should be non-negative");
 }
 
-test_home_dir_absolute() `test(allow_leaks: true, exclude: "wasm32") {
+test_home_dir_absolute() `test(exclude: "wasm32") {
   string home = home_dir;
   assert(home.len > 0, "home_dir should be non-empty");
   assert(home.starts_with("/"), "home_dir should be an absolute path");
@@ -825,12 +825,12 @@ test_home_dir_matches_env() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_hostname_nonempty() `test(allow_leaks: true, exclude: "wasm32") {
+test_hostname_nonempty() `test(exclude: "wasm32") {
   string host = hostname;
   assert(host.len > 0, "hostname should be non-empty");
 }
 
-test_hostname_no_newline() `test(allow_leaks: true, exclude: "wasm32") {
+test_hostname_no_newline() `test(exclude: "wasm32") {
   string host = hostname;
   assert(!host.contains("\n"), "hostname should not contain newline");
 }

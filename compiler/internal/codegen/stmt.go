@@ -5538,6 +5538,15 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
+
+	// B0214: Drop the temporary keys and values vectors after the loop.
+	// keys() and values() return freshly heap-allocated vectors that must be freed.
+	// Drop string elements first (emitVectorElementDropLoop is a no-op for non-string).
+	vectorDropFn := c.funcs["Vector.drop"]
+	c.emitVectorElementDropLoop(keysVec, keyType)
+	c.block.NewCall(vectorDropFn, keysVec)
+	c.emitVectorElementDropLoop(valsVec, valType)
+	c.block.NewCall(vectorDropFn, valsVec)
 }
 
 // --- For-in over strings ---

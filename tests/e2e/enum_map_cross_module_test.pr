@@ -3,7 +3,7 @@
 // monomorphization of Map methods in the std module.
 use json;
 
-test_forin_cross_module_enum_map() `test(allow_leaks: true) {
+test_forin_cross_module_enum_map() `test {
   map[string, json.JsonValue] m = {
     "name": json.JsonValue.Str(value: "Alice"),
     "age": json.JsonValue.Number(value: 30.0),
@@ -45,7 +45,7 @@ test_entries_cross_module() `test {
   assert(ents.len == 1, "ents len");
 }
 
-test_forin_values_cross_module() `test(allow_leaks: true) {
+test_forin_values_cross_module() `test {
   map[string, json.JsonValue] m = {
     "s": json.JsonValue.Str(value: "world"),
   };

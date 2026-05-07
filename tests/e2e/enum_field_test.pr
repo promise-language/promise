@@ -104,7 +104,7 @@ test_map_fieldless_enum_keys_values() `test {
   assert(vals.len == 2, "expected 2 values");
 }
 
-test_map_fieldless_enum_iteration() `test(allow_leaks: true) {
+test_map_fieldless_enum_iteration() `test {
   map[string, Color] m = {
     "r": Color.Red, "g": Color.Green, "b": Color.Blue
   };

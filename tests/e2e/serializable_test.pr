@@ -289,7 +289,7 @@ int_array_round_trip_test() `test {
 
 // ── Map fields (map[string, V]) ─────────────────────────────────────────────
 
-map_encode_test() `test(allow_leaks: true) {
+map_encode_test() `test {
   Config cfg = Config(title: "app", settings: map[string, string]());
   cfg.settings["color"] = "blue";
   cfg.settings["mode"] = "dark";
@@ -365,7 +365,7 @@ single_element_array_test() `test {
 
 // ── Map with non-string values ──────────────────────────────────────────────
 
-map_string_int_test() `test(allow_leaks: true) {
+map_string_int_test() `test {
   Counters c1 = Counters(counts: map[string, int]());
   c1.counts["views"] = 100;
   c1.counts["clicks"] = 5;
@@ -377,7 +377,7 @@ map_string_int_test() `test(allow_leaks: true) {
 
 // ── Map with non-string keys ────────────────────────────────────────────────
 
-int_key_map_encode_test() `test(allow_leaks: true) {
+int_key_map_encode_test() `test {
   IntKeyMap m = IntKeyMap(data: map[int, string]());
   m.data[42] = "answer";
   json.JsonEncoder enc = json.JsonEncoder();

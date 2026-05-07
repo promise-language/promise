@@ -3786,6 +3786,34 @@ func TestMapForIn(t *testing.T) {
 	assertContains(t, ir, "forin.exit")
 }
 
+// B0214: Map for-in drops temporary keys/values vectors after the loop.
+func TestMapForInVectorCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := {"a": 1, "b": 2};
+			for k, v in m {
+			}
+		}
+	`)
+	// Should call Vector.drop on both keys and values vectors in the exit block
+	assertContains(t, ir, "forin.exit")
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
+// B0214: Map for-in with string keys drops string elements before freeing keys vector.
+func TestMapForInStringKeyElementDrop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := {"a": 1, "b": 2};
+			for k, v in m {
+			}
+		}
+	`)
+	// String element drop loop for keys vector
+	assertContains(t, ir, "vecdrop.head")
+	assertContains(t, ir, "vecdrop.body")
+}
+
 // --- Part E: Lambda tests ---
 
 func TestLambdaExpr(t *testing.T) {

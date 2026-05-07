@@ -12,7 +12,7 @@ enum Shape {
 
 // --- for-in on map[string, fieldless enum] ---
 
-test_forin_fieldless_enum_map() `test(allow_leaks: true) {
+test_forin_fieldless_enum_map() `test {
   map[string, Color] m = {
     "r": Color.Red, "g": Color.Green, "b": Color.Blue
   };
@@ -30,7 +30,7 @@ test_forin_fieldless_enum_map() `test(allow_leaks: true) {
 
 // --- for-in on map[string, data enum] ---
 
-test_forin_data_enum_map() `test(allow_leaks: true) {
+test_forin_data_enum_map() `test {
   map[string, Shape] m = {
     "c": Shape.Circle(radius: 3.14),
     "r": Shape.Rect(w: 2.0, h: 3.0),
@@ -65,7 +65,7 @@ test_forin_data_enum_map() `test(allow_leaks: true) {
 
 // --- for-in on map[int, enum] ---
 
-test_forin_int_key_enum_map() `test(allow_leaks: true) {
+test_forin_int_key_enum_map() `test {
   map[int, Color] m = {
     1: Color.Red, 2: Color.Green, 3: Color.Blue
   };
@@ -142,7 +142,7 @@ test_entries_data_enum_content() `test {
 
 // --- Mutate then iterate ---
 
-test_mutate_then_forin() `test(allow_leaks: true) {
+test_mutate_then_forin() `test {
   map[string, Color] m = {
     "a": Color.Red
   };
@@ -200,7 +200,7 @@ test_map_in_enum_variant_lookup() `test {
   }
 }
 
-test_map_in_enum_variant_forin() `test(allow_leaks: true) {
+test_map_in_enum_variant_forin() `test {
   map[string, JsonNode] fields = {
     "a": JsonNode.Num(value: 1.0),
     "b": JsonNode.Text(value: "hi"),

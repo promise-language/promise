@@ -719,7 +719,7 @@ format_value_empty_array_test() `test(allow_leaks: true) {
   assert(s == "[]", "format empty array");
 }
 
-format_value_object_test() `test(allow_leaks: true) {
+format_value_object_test() `test {
   map[string, JsonValue] f = {
     "a": JsonValue.Number(1.0)
   };
@@ -950,7 +950,7 @@ encode_pretty_nested_test() `test {
   assert(result.contains("    42"), "pretty nested: double-indented value");
 }
 
-format_value_pretty_test() `test(allow_leaks: true) {
+format_value_pretty_test() `test {
   map[string, JsonValue] f = {
     "key": JsonValue.Bool(true)
   };
@@ -1317,7 +1317,7 @@ format_method_test() `test {
   assert(s == "\"hello\"", "format method");
 }
 
-format_method_object_test() `test(allow_leaks: true) {
+format_method_object_test() `test {
   map[string, JsonValue] fields = {
     "x": JsonValue.Number(1.0)
   };
@@ -1326,7 +1326,7 @@ format_method_object_test() `test(allow_leaks: true) {
   assert(s.contains("\"x\":1"), "format object method");
 }
 
-format_pretty_method_test() `test(allow_leaks: true) {
+format_pretty_method_test() `test {
   map[string, JsonValue] fields = {
     "key": JsonValue.Bool(true)
   };
@@ -1336,7 +1336,7 @@ format_pretty_method_test() `test(allow_leaks: true) {
   assert(s.contains("  \"key\""), "format_pretty has indented key");
 }
 
-format_pretty_custom_indent_test() `test(allow_leaks: true) {
+format_pretty_custom_indent_test() `test {
   map[string, JsonValue] fields = {
     "a": JsonValue.Number(1.0)
   };

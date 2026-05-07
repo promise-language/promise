@@ -122,7 +122,7 @@ test_clear() `test {
 
 // --- for-in iteration ---
 
-test_for_in_kv() `test(allow_leaks: true) {
+test_for_in_kv() `test {
   map[string, int] m = {
     "a": 1, "b": 2, "c": 3
   };
@@ -141,7 +141,7 @@ test_for_in_kv() `test(allow_leaks: true) {
   assert(seen_keys.contains("c"), "visited key c");
 }
 
-test_for_in_single() `test(allow_leaks: true) {
+test_for_in_single() `test {
   map[string, int] m = {
     "x": 10, "y": 20
   };
@@ -162,7 +162,7 @@ test_for_in_empty() `test {
   assert(count == 0, "empty map iterates zero times");
 }
 
-test_for_in_entry_name() `test(allow_leaks: true) {
+test_for_in_entry_name() `test {
   map[string, int] m = {
     "a": 1, "b": 2
   };
@@ -339,7 +339,7 @@ test_merge_into_empty() `test {
 
 // --- for k, v with int keys ---
 
-test_for_in_kv_int_keys() `test(allow_leaks: true) {
+test_for_in_kv_int_keys() `test {
   map[int, string] m = {
     1: "one", 2: "two", 3: "three"
   };

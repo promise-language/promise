@@ -7,7 +7,7 @@ join_empty() `test {
   assert(join(",") == "", "join empty");
 }
 
-join_single() `test(allow_leaks: true) {
+join_single() `test {
   assert(join(",", "hello") == "hello", "join single");
 }
 

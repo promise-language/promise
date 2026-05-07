@@ -9057,6 +9057,18 @@ func TestDropMoveToIndexAssign(t *testing.T) {
 	assertContains(t, ir, "store i1 false, i1*")
 }
 
+// B0195: Vector[string] index assign dups new value for independent ownership
+func TestVectorStringIndexAssignDup(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[] v = ["hello", "world"];
+			v[0] = "replaced";
+		}
+	`)
+	// Should dup the new value so vector owns an independent copy (like push)
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
 // Error propagation triggers scope cleanup
 func TestDropErrorPropagateCleansUp(t *testing.T) {
 	ir := generateIR(t, `

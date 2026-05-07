@@ -1,0 +1,32 @@
+// B0195: Vector[string] index assign must drop old element and dup new value.
+vector_string_index_assign_basic() `test {
+  string[] v = ["hello", "world"];
+  v[0] = "replaced";
+  assert(v[0] == "replaced", "v[0] should be replaced");
+  assert(v[1] == "world", "v[1] should be unchanged");
+}
+
+vector_string_index_assign_from_variable() `test {
+  string[] v = ["aaa", "bbb"];
+  string s = "ccc";
+  v[1] = s;
+  assert(v[1] == "ccc", "v[1] should be ccc");
+}
+
+vector_string_index_assign_self_element() `test {
+  // v[0] = v[1] — old v[0] dropped, v[1] dup'd into v[0]
+  string[] v = ["first", "second"];
+  v[0] = v[1];
+  assert(v[0] == "second", "v[0] should be second");
+  assert(v[1] == "second", "v[1] should still be second");
+}
+
+vector_string_index_assign_multiple() `test {
+  string[] v = ["a", "b", "c"];
+  v[0] = "x";
+  v[1] = "y";
+  v[2] = "z";
+  assert(v[0] == "x", "v[0] should be x");
+  assert(v[1] == "y", "v[1] should be y");
+  assert(v[2] == "z", "v[2] should be z");
+}

@@ -2436,6 +2436,33 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 		}
 
 	case *ast.IndexExpr:
+		// B0195: Vector[string] index assign — dup new value so vector owns
+		// an independent copy (like push, B0189). Source retains its string.
+		// Old element is NOT dropped here (see B0204 for why).
+		if s.Op == ast.OpAssign {
+			idxTargetType := c.info.Types[target.Target]
+			if c.typeSubst != nil {
+				idxTargetType = types.Substitute(idxTargetType, c.typeSubst)
+			}
+			// Unwrap borrows (auto-deref through &/&mut)
+			if ref, ok := idxTargetType.(*types.MutRef); ok {
+				idxTargetType = ref.Elem()
+			}
+			if ref, ok := idxTargetType.(*types.SharedRef); ok {
+				idxTargetType = ref.Elem()
+			}
+			if elemType, isVec := types.AsVector(idxTargetType); isVec {
+				resolvedElem := elemType
+				if c.typeSubst != nil {
+					resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+				}
+				if extractNamed(resolvedElem) == types.TypString {
+					dupVal := c.dupString(val)
+					c.genIndexAssign(target, s.Op, dupVal)
+					break
+				}
+			}
+		}
 		c.genIndexAssign(target, s.Op, val)
 		// Clear drop flag on RHS if it's being moved via simple assign
 		if s.Op == ast.OpAssign {
@@ -4445,6 +4472,11 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
 
 	if op == ast.OpAssign {
+		// B0195: New value is dup'd at the call site (like push, B0189) so the
+		// vector owns an independent copy. We do NOT drop the old element here
+		// because it may still be aliased by a local variable (e.g., swap pattern:
+		// tmp = vec[i]; vec[i] = vec[j]; vec[j] = tmp). Dropping old elements
+		// safely requires dup-on-read infrastructure — tracked separately.
 		c.block.NewStore(val, elemPtr)
 		return
 	}

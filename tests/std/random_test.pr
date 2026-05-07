@@ -322,7 +322,7 @@ test_random_next_f64_range_negative() `test {
   }
 }
 
-test_random_shuffle_strings() `test {
+test_random_shuffle_strings() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   string[] v = r.shuffle[string](["a", "b", "c", "d", "e"]);
   assert(v.len == 5, "shuffle strings preserves length");

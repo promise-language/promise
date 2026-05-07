@@ -445,8 +445,23 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// Clear drop flag when RHS is a borrow (container element, field access).
 	// T0095: Skip for string MemberExpr on droppable types — genFieldAccess
 	// dups the string, so the variable owns the copy (not a borrow).
+	// T0137: Skip for getter calls (IdentExpr not in locals, or module.getter MemberExpr) —
+	// getters return owned values, not borrows.
 	if isDroppableContainerOrString(dropType) && isStringBorrowExpr(s.Value) {
-		if !c.isStringFieldDup(s.Value, dropType) {
+		isGetterCall := false
+		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			if _, isLocal := c.locals[ident.Name]; !isLocal {
+				isGetterCall = true
+			}
+		}
+		if member, ok := s.Value.(*ast.MemberExpr); ok {
+			if ident, ok := member.Target.(*ast.IdentExpr); ok {
+				if c.resolveModuleName(ident) != "" {
+					isGetterCall = true
+				}
+			}
+		}
+		if !isGetterCall && !c.isStringFieldDup(s.Value, dropType) {
 			if rhsOldDropFlag != nil {
 				// T0106: Propagate RHS's ownership state at runtime.
 				if lhsFlag, ok := c.dropFlags[s.Name]; ok {
@@ -515,8 +530,23 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// The container/struct still owns the value — freeing it here would cause use-after-free.
 	// T0095: Skip for string MemberExpr on droppable types — genFieldAccess
 	// dups the string, so the variable owns the copy (not a borrow).
+	// T0137: Skip for getter calls (IdentExpr not in locals, or module.getter MemberExpr) —
+	// getters return owned values, not borrows.
 	if isDroppableContainerOrString(typ) && isStringBorrowExpr(s.Value) {
-		if !c.isStringFieldDup(s.Value, typ) {
+		isGetterCall := false
+		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			if _, isLocal := c.locals[ident.Name]; !isLocal {
+				isGetterCall = true
+			}
+		}
+		if member, ok := s.Value.(*ast.MemberExpr); ok {
+			if ident, ok := member.Target.(*ast.IdentExpr); ok {
+				if c.resolveModuleName(ident) != "" {
+					isGetterCall = true
+				}
+			}
+		}
+		if !isGetterCall && !c.isStringFieldDup(s.Value, typ) {
 			if rhsOldDropFlag != nil {
 				// T0106: Propagate RHS's ownership state at runtime.
 				// If RHS owned the value (flag was true), LHS takes ownership.

@@ -1,14 +1,14 @@
 use embedmod "./embedmod";
 
-test_module_embed_string() `test(allow_leaks: true) {
+test_module_embed_string() `test {
   assert(embedmod.text == "Module embedded data", "embedded string content mismatch");
 }
 
-test_module_embed_string_length() `test(allow_leaks: true) {
+test_module_embed_string_length() `test {
   assert(embedmod.text.len == 20, "embedded string length mismatch");
 }
 
-test_module_embed_bytes() `test(allow_leaks: true) {
+test_module_embed_bytes() `test {
   u8[] data = embedmod.binary;
   assert(data.len == 4, "embedded binary length should be 4");
   assert(data[0] == 222, "byte 0 should be 0xDE");

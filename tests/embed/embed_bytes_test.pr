@@ -1,11 +1,11 @@
 get binary_data u8[] `embed("data.bin");
 
-test_embed_bytes_length() `test(allow_leaks: true) {
+test_embed_bytes_length() `test {
   u8[] data = binary_data;
   assert(data.len == 8, "binary data should be 8 bytes");
 }
 
-test_embed_bytes_content() `test(allow_leaks: true) {
+test_embed_bytes_content() `test {
   u8[] data = binary_data;
   assert(data[0] == 222, "byte 0 should be 0xDE");
   assert(data[1] == 173, "byte 1 should be 0xAD");
@@ -17,7 +17,7 @@ test_embed_bytes_content() `test(allow_leaks: true) {
   assert(data[7] == 3, "byte 7 should be 3");
 }
 
-test_embed_bytes_independent_copies() `test(allow_leaks: true) {
+test_embed_bytes_independent_copies() `test {
   u8[] a = binary_data;
   u8[] b = binary_data;
   assert(a.len == b.len, "both copies should have same length");

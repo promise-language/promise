@@ -14705,6 +14705,45 @@ func TestEmbedEmptyFile(t *testing.T) {
 	assertContains(t, ir, "@promise_string_new")
 }
 
+// T0137: String embed getter result assigned to variable — drop flag must NOT be cleared.
+func TestEmbedStringGetterDrop(t *testing.T) {
+	file, info := parseWithStd(t, `
+		get greeting string `+"`embed(\"greeting.txt\")"+`;
+		test_it() `+"`test"+` {
+			string a = greeting;
+		}
+	`)
+	for _, embed := range info.Embeds {
+		embed.Data = []byte("hello")
+	}
+	result := Compile(file, info, "")
+	ir := result.Module.String()
+	// The variable should have a string drop at scope exit.
+	assertContains(t, ir, "@promise_string_drop")
+	// The drop flag must NOT be cleared to false immediately after being set to true.
+	// Before the fix, the IR had: store i1 true, %a.dropflag; store i1 false, %a.dropflag
+	assertNotContains(t, ir, "store i1 true, i1* %a.dropflag\n\tstore i1 false, i1* %a.dropflag")
+}
+
+// T0137: Bytes embed getter result assigned to variable — drop flag must NOT be cleared.
+func TestEmbedBytesGetterDrop(t *testing.T) {
+	file, info := parseWithStd(t, `
+		get binary u8[] `+"`embed(\"data.bin\")"+`;
+		test_it() `+"`test"+` {
+			u8[] d = binary;
+		}
+	`)
+	for _, embed := range info.Embeds {
+		embed.Data = []byte{0xDE, 0xAD}
+	}
+	result := Compile(file, info, "")
+	ir := result.Module.String()
+	// The variable should have a vector drop at scope exit.
+	assertContains(t, ir, "@Vector.drop")
+	// The drop flag must NOT be cleared to false immediately after being set to true.
+	assertNotContains(t, ir, "store i1 true, i1* %d.dropflag\n\tstore i1 false, i1* %d.dropflag")
+}
+
 // --- Coverage instrumentation tests (T0030) ---
 
 // generateIRWithCoverage compiles with coverage enabled and returns the IR.

@@ -694,7 +694,13 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 	// call the function with no args.
 	if fn, ok := c.funcs[e.Name]; ok {
 		if obj := c.lookupFunc(e.Name); obj != nil && obj.IsGetter() {
-			return c.block.NewCall(fn)
+			result := c.block.NewCall(fn)
+			// T0137: Track getter results as string temps so they're cleaned up
+			// when used as temporaries (not assigned to a variable).
+			if typ := c.info.Types[e]; typ != nil && extractNamed(typ) == types.TypString {
+				c.trackStringTemp(result)
+			}
+			return result
 		}
 		if _, isSig := c.info.Types[e].(*types.Signature); isSig {
 			// Named function used as first-class value: generate a thunk with
@@ -1365,7 +1371,13 @@ func (c *Compiler) genModuleGetterCall(e *ast.MemberExpr, moduleName, propName s
 	if !ok {
 		panic(fmt.Sprintf("codegen: undefined module getter %s.%s", moduleName, propName))
 	}
-	return c.block.NewCall(fn)
+	result := c.block.NewCall(fn)
+	// T0137: Track module getter results as string temps so they're cleaned up
+	// when used as temporaries (not assigned to a variable).
+	if typ := c.info.Types[e]; typ != nil && extractNamed(typ) == types.TypString {
+		c.trackStringTemp(result)
+	}
+	return result
 }
 
 // genGenericFuncCall generates a call to a monomorphic generic function instance.

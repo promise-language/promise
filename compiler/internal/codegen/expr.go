@@ -1719,6 +1719,10 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	rawPtr := c.block.NewCall(c.palAlloc, size)
 	typedPtr := c.block.NewBitCast(rawPtr, instancePtrType)
 
+	// T0135: Track allocation as heap temp so auto-propagation error paths
+	// free it if a failable constructor argument fails.
+	c.trackHeapTemp(rawPtr, c.palFree)
+
 	// Store type info pointer in _variant slot (field 0) for RTTI
 	variantFieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -1758,6 +1762,9 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			c.claimStringTemp(v) // B0168: ownership transferred to new() args
 			c.claimEnvTemp(v)    // T0100: claim env temp for closure args
 		}
+		// T0135: Claim heap temp before calling new() — args evaluated successfully.
+		c.claimHeapTemp(rawPtr)
+
 		newMethod := named.LookupMethod("new")
 		if newMethod != nil {
 			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params())
@@ -1947,6 +1954,10 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			}
 		}
 	}
+
+	// T0135: Claim the heap temp now that all arguments succeeded.
+	// If we reach this point, no auto-propagation happened.
+	c.claimHeapTemp(rawPtr)
 
 	// Build value struct: { vtable_ptr, instance_ptr }
 	var vtablePtr value.Value

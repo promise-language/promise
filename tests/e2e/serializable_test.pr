@@ -937,7 +937,7 @@ flatten_multiple_test() `test(allow_leaks: true) {
 }
 
 // Decode error: malformed JSON
-decode_string_error_test() `test(allow_leaks: true) {
+decode_string_error_test() `test {
   (p, err) := json.decode_string[Point]("not json");
   assert(err is present, "decode malformed: should error");
 }

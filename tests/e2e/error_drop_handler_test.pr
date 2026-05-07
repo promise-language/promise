@@ -1,0 +1,89 @@
+// T0135: Tests for error object dropping in failable error handlers.
+// --- Suppressed close error dropping ---
+type FailClose {
+  int id;
+
+  close(~this) void! {
+    raise error(message: "close err");
+  }
+}
+
+raise_with_close() void! {
+  use r := FailClose(id: 1);
+  raise error(message: "body err");
+}
+
+test_suppressed_close_error_dropped() `test {
+  raise_with_close()? e {
+    assert(e.message == "body err", "body error preserved");
+    return;
+  };
+  assert(false, "should not reach here");
+}
+
+non_failable_close() int {
+  use r := FailClose(id: 42);
+  return r.id;
+}
+
+test_non_failable_suppressed_close_dropped() `test {
+  int result = non_failable_close();
+  assert(result == 42, "non-failable returns value");
+}
+
+multi_close() void! {
+  use a := FailClose(id: 1);
+  use b := FailClose(id: 2);
+}
+
+test_duplicate_close_error_dropped() `test {
+  multi_close()? e {
+    assert(e.message == "close err", "first close error captured");
+    return;
+  };
+  assert(false, "should have gotten close error");
+}
+
+// --- Result capture error optional dropping ---
+
+make_err(string s) int! {
+  raise error(message: "err: " + s);
+}
+
+test_result_capture_error_dropped() `test {
+  (val, err) := make_err("test");
+  assert(val == 0, "zero on error");
+  if err is present {
+    assert(err.message == "err: test", "captured error message");
+  } else {
+    assert(false, "should have error");
+  }
+}
+
+test_result_capture_discard_val_error_dropped() `test {
+  (_, err) := make_err("discard");
+  if err is present {
+    assert(err.message == "err: discard", "discarded value, captured error");
+  } else {
+    assert(false, "should have error");
+  }
+}
+
+// --- Constructor allocation cleanup on auto-propagate ---
+
+type Holder {
+  int value;
+}
+
+auto_prop_ctor() int! {
+  h := Holder(value: make_err("ctor"));
+  return h.value;
+}
+
+test_ctor_alloc_freed_on_propagate() `test {
+  auto_prop_ctor()? e {
+    assert(e.message == "err: ctor", "error propagated from ctor arg");
+    return;
+  };
+  assert(false, "should have error");
+}

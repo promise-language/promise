@@ -55,7 +55,7 @@ raise_with_failable_close() int! {
   raise CloseError(message: "body error", code: 99);
 }
 
-test_raise_suppresses_close_error() `test(allow_leaks: true) {
+test_raise_suppresses_close_error() `test {
   int result = raise_with_failable_close()? e {
     assert(e.message == "body error", "original raise error preserved, not close error");
     return;
@@ -74,7 +74,7 @@ propagate_with_failable_close() void! {
   inner_fail()?;
 }
 
-test_propagate_suppresses_close_error() `test(allow_leaks: true) {
+test_propagate_suppresses_close_error() `test {
   propagate_with_failable_close()? e {
     assert(e.message == "inner error", "propagated error preserved, not close error");
     return;
@@ -89,7 +89,7 @@ non_failable_with_failable_close() int {
   return r.id;
 }
 
-test_non_failable_suppresses_close() `test(allow_leaks: true) {
+test_non_failable_suppresses_close() `test {
   int result = non_failable_with_failable_close();
   assert(result == 99, "non-failable function ignores close error");
 }
@@ -103,7 +103,7 @@ multiple_failable_close() void! {
   // b.close() fails first; a.close() also fails but that error is suppressed.
 }
 
-test_multiple_close_first_error_wins() `test(allow_leaks: true) {
+test_multiple_close_first_error_wins() `test {
   multiple_failable_close()? e {
     assert(e.message == "close failed", "first close error captured");
     return;

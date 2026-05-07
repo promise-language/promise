@@ -43,7 +43,7 @@ decode_color_test() `test {
   assert(enc.to_string() == "\"Green\"", "decode Green");
 }
 
-decode_error_unknown_variant_test() `test(allow_leaks: true) {
+decode_error_unknown_variant_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\"Purple\"");
   (v, err) := Color.decode(dec);
   assert(err is present, "unknown variant should error");
@@ -201,14 +201,14 @@ optional_enum_decode_missing_test() `test {
 
 // ── Decode error cases ──
 
-decode_error_non_string_input_test() `test(allow_leaks: true) {
+decode_error_non_string_input_test() `test {
   // JSON has a number where a string enum variant is expected
   json.JsonDecoder dec = json.JsonDecoder(data: "42");
   (v, err) := Color.decode(dec);
   assert(err is present, "non-string input should error");
 }
 
-decode_error_empty_string_test() `test(allow_leaks: true) {
+decode_error_empty_string_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\"\"");
   (v, err) := Color.decode(dec);
   assert(err is present, "empty string should error");
@@ -347,7 +347,7 @@ data_enum_decode_unknown_variant_test() `test(allow_leaks: true) {
   assert(err is present, "unknown variant error");
 }
 
-data_enum_decode_empty_object_test() `test(allow_leaks: true) {
+data_enum_decode_empty_object_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{}");
   (v, err) := Shape.decode(dec);
   assert(err is present, "empty object error");
@@ -625,7 +625,7 @@ custom_tag_wrong_discriminator_test() `test(allow_leaks: true) {
   assert(err is present, "wrong discriminator key error");
 }
 
-custom_tag_missing_discriminator_test() `test(allow_leaks: true) {
+custom_tag_missing_discriminator_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{}");
   (v, err) := InputEvent.decode(dec);
   assert(err is present, "missing discriminator key error");

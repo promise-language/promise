@@ -114,7 +114,7 @@ try_ctor_arg_fail() bool {
   return false;
 }
 
-test_ctor_arg_fail() `test(allow_leaks: true) {
+test_ctor_arg_fail() `test {
   assert(try_ctor_arg_fail(), "failable arg to constructor propagates error");
 }
 
@@ -364,7 +364,7 @@ try_explicit_new_fail() bool {
   return false;
 }
 
-test_explicit_new_arg_fail() `test(allow_leaks: true) {
+test_explicit_new_arg_fail() `test {
   assert(try_explicit_new_fail(), "failable arg to explicit new() propagates");
 }
 
@@ -668,6 +668,6 @@ try_super_fail() bool {
   return false;
 }
 
-test_super_arg_fail() `test(allow_leaks: true) {
+test_super_arg_fail() `test {
   assert(try_super_fail(), "failable arg to super() propagates");
 }

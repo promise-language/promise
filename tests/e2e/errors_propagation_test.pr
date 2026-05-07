@@ -120,7 +120,7 @@ test_result_capture_success() `test {
   }
 }
 
-test_result_capture_error() `test(allow_leaks: true) {
+test_result_capture_error() `test {
   (val, err) := parse_int("bad");
   // val is zero-initialized on error
   assert(val == 0, "captured value is 0 on error");
@@ -131,7 +131,7 @@ test_result_capture_error() `test(allow_leaks: true) {
   }
 }
 
-test_result_capture_discard_value() `test(allow_leaks: true) {
+test_result_capture_discard_value() `test {
   (_, err) := parse_int("bad");
   if err is present {
     assert(err.message == "bad: bad", "discarded value, captured error");
@@ -153,7 +153,7 @@ test_void_result_capture_success() `test {
   }
 }
 
-test_void_result_capture_error() `test(allow_leaks: true) {
+test_void_result_capture_error() `test {
   (_, err) := void_fail();
   if err is present {
     assert(err.message == "void failed", "void error captured");
@@ -292,7 +292,7 @@ test_typed_handler_bang_match() `test {
 // Section 5: Custom error tests (continued)
 // ============================================================
 
-test_result_capture_custom_error() `test(allow_leaks: true) {
+test_result_capture_custom_error() `test {
   (val, err) := fail_io();
   assert(val == 0, "value is zero on error");
   if err is present {
@@ -303,7 +303,7 @@ test_result_capture_custom_error() `test(allow_leaks: true) {
 }
 
 // Result capture in conditional flow
-test_result_capture_conditional() `test(allow_leaks: true) {
+test_result_capture_conditional() `test {
   (val1, err1) := parse_int("42");
   (val2, err2) := parse_int("bad");
 

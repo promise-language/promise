@@ -8008,6 +8008,83 @@ func TestUseFailableCloseInNonFailableFunc(t *testing.T) {
 	assertNotContains(t, ir, "close.err.flag")
 }
 
+// T0135: Suppressed close errors are dropped (not leaked)
+func TestSuppressedCloseErrorDropped(t *testing.T) {
+	ir := generateIR(t, `
+		type FRes {
+			int id;
+			close(~this)! { raise error(message: "close err"); }
+		}
+		process()! {
+			use r := FRes(id: 1);
+			raise error(message: "body err");
+		}
+	`)
+	// Error-in-flight path: close error should be dropped via __mod_std_error.drop
+	assertContains(t, ir, "close.err.drop")
+	assertContains(t, ir, "@__mod_std_error.drop")
+}
+
+// T0135: Non-failable function drops suppressed close errors
+func TestNonFailableSuppressedCloseErrorDropped(t *testing.T) {
+	ir := generateIR(t, `
+		type FRes {
+			int id;
+			close(~this)! { }
+		}
+		process() {
+			use r := FRes(id: 1);
+		}
+	`)
+	// Non-failable function: close error is suppressed and dropped
+	assertContains(t, ir, "close.err.drop")
+}
+
+// T0135: Duplicate close error is dropped when first error already captured
+func TestDuplicateCloseErrorDropped(t *testing.T) {
+	ir := generateIR(t, `
+		type FRes {
+			int id;
+			close(~this)! { }
+		}
+		process()! {
+			use a := FRes(id: 1);
+			use b := FRes(id: 2);
+		}
+	`)
+	// Multiple failable closes: second error should be dropped
+	assertContains(t, ir, "close.err.drop.dup")
+}
+
+// T0135: Failable result capture registers error optional for drop
+func TestFailableResultCaptureErrorDrop(t *testing.T) {
+	ir := generateIR(t, `
+		fail()! { raise error(message: "test"); }
+		test() {
+			(val, err) := fail();
+		}
+	`)
+	// Error optional should have a drop flag and be dropped at scope exit
+	assertContains(t, ir, "err.dropflag")
+	assertContains(t, ir, "optdrop.check")
+}
+
+// T0135: Constructor allocation tracked as heap temp for auto-propagation cleanup
+func TestConstructorAllocHeapTemp(t *testing.T) {
+	ir := generateIR(t, `
+		fail(string s) int! {
+			raise error(message: s);
+		}
+		type H { int v; }
+		process()! {
+			h := H(v: fail("x"));
+		}
+	`)
+	// Constructor allocation should be tracked and freed on error path
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "err.heap.drop")
+}
+
 func TestUseFailableCloseVirtualDispatchCapture(t *testing.T) {
 	ir := generateIR(t, `
 		type Conn {

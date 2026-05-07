@@ -21,7 +21,7 @@ test_failable_result_capture() `test {
   assert(val == 5, "20 / 4 == 5");
 }
 
-test_failable_result_capture_error() `test(allow_leaks: true) {
+test_failable_result_capture_error() `test {
   (val, err) := mathlib.safe_divide(1, 0);
   if err is absent {
     assert(false, "should have error for division by zero");

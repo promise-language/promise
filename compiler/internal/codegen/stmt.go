@@ -685,10 +685,33 @@ func (c *Compiler) genFailableDestructure(s *ast.DestructureVarDecl) {
 		c.locals[s.Names[0]] = alloca
 	}
 	if mergedErr != nil {
+		errVarName := s.Names[1]
 		alloca := c.block.NewAlloca(errOptType)
-		alloca.SetName(c.uniqueLocalName(s.Names[1]))
+		alloca.SetName(c.uniqueLocalName(errVarName))
 		c.block.NewStore(mergedErr, alloca)
-		c.locals[s.Names[1]] = alloca
+		c.locals[errVarName] = alloca
+
+		// T0135: Register error optional for drop at scope exit.
+		// The error instance inside the optional needs to be freed when present.
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(c.uniqueLocalName(errVarName + ".dropflag"))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+		c.dropFlags[errVarName] = dropFlag
+
+		dropName := mangleMethodName("__mod_std_error", "drop", false)
+		dropFunc := c.funcs[dropName]
+
+		binding := scopeBinding{
+			kind:     bindingDropOptional,
+			alloca:   alloca,
+			named:    types.TypError,
+			valType:  types.TypError,
+			dropFlag: dropFlag,
+			dropFunc: dropFunc,
+			varName:  errVarName,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[errVarName] = binding
 	}
 }
 
@@ -1300,28 +1323,51 @@ func (c *Compiler) emitCloseCall(b scopeBinding, cap *closeErrCapture) {
 		c.block = freeDone
 	}
 
-	// Capture failable close() error: store the first error into cap's allocas.
-	if cap != nil && b.closeIsFailable && result != nil {
+	// Handle failable close() errors: capture, suppress+drop, or ignore.
+	if b.closeIsFailable && result != nil {
 		resultType := result.Type().(*irtypes.StructType)
 		tag := c.block.NewExtractValue(result, 0)
 
-		errBlock := c.newBlock("close.err")
-		contBlock := c.newBlock("close.cont")
-		c.block.NewCondBr(tag, errBlock, contBlock)
+		if cap != nil {
+			// Capture path: save first error, drop subsequent errors (T0135).
+			errBlock := c.newBlock("close.err")
+			contBlock := c.newBlock("close.cont")
+			c.block.NewCondBr(tag, errBlock, contBlock)
 
-		// Error path: save only if no prior close error was captured
-		c.block = errBlock
-		hasErr := c.block.NewLoad(irtypes.I1, cap.flag)
-		saveBlock := c.newBlock("close.save")
-		c.block.NewCondBr(hasErr, contBlock, saveBlock)
+			c.block = errBlock
+			hasErr := c.block.NewLoad(irtypes.I1, cap.flag)
+			saveBlock := c.newBlock("close.save")
+			dropDupBlock := c.newBlock("close.err.drop.dup")
+			c.block.NewCondBr(hasErr, dropDupBlock, saveBlock)
 
-		c.block = saveBlock
-		c.block.NewStore(constant.NewInt(irtypes.I1, 1), cap.flag)
-		errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
-		c.block.NewStore(errVal, cap.val)
-		c.block.NewBr(contBlock)
+			// Save first error
+			c.block = saveBlock
+			c.block.NewStore(constant.NewInt(irtypes.I1, 1), cap.flag)
+			errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
+			c.block.NewStore(errVal, cap.val)
+			c.block.NewBr(contBlock)
 
-		c.block = contBlock
+			// T0135: Drop duplicate close error to prevent leak
+			c.block = dropDupBlock
+			dupErrVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
+			c.emitDropSuppressedError(dupErrVal)
+			c.block.NewBr(contBlock)
+
+			c.block = contBlock
+		} else {
+			// T0135: Suppress path (error in flight or non-failable function).
+			// Drop the close error to prevent leak.
+			errDropBlock := c.newBlock("close.err.drop")
+			contBlock := c.newBlock("close.cont")
+			c.block.NewCondBr(tag, errDropBlock, contBlock)
+
+			c.block = errDropBlock
+			errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
+			c.emitDropSuppressedError(errVal)
+			c.block.NewBr(contBlock)
+
+			c.block = contBlock
+		}
 	}
 }
 
@@ -1342,6 +1388,16 @@ func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture) {
 	c.block.NewRet(c.wrapError(errVal, resultType))
 
 	c.block = contBlock
+}
+
+// emitDropSuppressedError drops an error instance (i8*) that is being suppressed.
+// T0135: Used when a failable close() error is suppressed (error in flight or
+// duplicate close error). Calls error.drop to free the message string and instance.
+func (c *Compiler) emitDropSuppressedError(errPtr value.Value) {
+	dropName := mangleMethodName("__mod_std_error", "drop", false)
+	if dropFn, ok := c.funcs[dropName]; ok {
+		c.block.NewCall(dropFn, errPtr)
+	}
 }
 
 // emitDropCall emits a conditional drop() call for a droppable variable.

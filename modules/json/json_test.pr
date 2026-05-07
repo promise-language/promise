@@ -525,7 +525,7 @@ decode_error_invalid_bool_test() `test(allow_leaks: true) {
   assert(err is present, "invalid input should error");
 }
 
-decode_error_unterminated_string_test() `test(allow_leaks: true) {
+decode_error_unterminated_string_test() `test {
   (v, err) := decode_string[string]("\"unterminated");
   assert(err is present, "unterminated string should error");
 }
@@ -536,7 +536,7 @@ decode_error_negative_uint_test() `test(allow_leaks: true) {
   assert(err is present, "negative uint should error");
 }
 
-decode_error_position_test() `test(allow_leaks: true) {
+decode_error_position_test() `test {
   // DecodeError should include position information
   JsonDecoder dec = JsonDecoder(data: "   xyz");
   (v, err) := dec.decode_bool();
@@ -1091,7 +1091,7 @@ decode_array_has_next_empty_test() `test {
 
 // ── parse_value error cases ─────────────────────────────────────────────────
 
-parse_value_error_empty_test() `test(allow_leaks: true) {
+parse_value_error_empty_test() `test {
   (v, err) := parse_value("");
   assert(err is present, "empty input should error");
 }
@@ -1111,7 +1111,7 @@ parse_value_error_unterminated_object_test() `test(allow_leaks: true) {
   assert(err is present, "unterminated object should error");
 }
 
-parse_value_error_unterminated_string_test() `test(allow_leaks: true) {
+parse_value_error_unterminated_string_test() `test {
   (v, err) := parse_value("\"hello");
   assert(err is present, "unterminated string should error");
 }

@@ -11,6 +11,9 @@ PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
 # Homebrew (macOS): Apple Silicon (/opt/homebrew)
 PATH="/opt/homebrew/bin:$PATH"
 
+# Snap packages (Ubuntu/Linux)
+PATH="/snap/bin:$PATH"
+
 # Go: official tarball (/usr/local/go/bin) + go install'd tools ($HOME/go/bin)
 PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
 

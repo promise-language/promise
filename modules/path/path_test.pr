@@ -1,6 +1,6 @@
 // Test the path module (compiled as part of the module).
 // Tests use Platform.path_separator (s) so they pass on both POSIX and Windows.
-join_test() `test(allow_leaks: true) {
+join_test() `test {
   string s = Platform.path_separator;
   assert(join("/home", "user") == "/home" + s + "user", "join basic");
   assert(join("/home/", "user") == "/home/user", "join trailing slash");

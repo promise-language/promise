@@ -1,11 +1,11 @@
 use path;
 
-test_join_basic() `test {
+test_join_basic() `test(allow_leaks: true) {
   string s = Platform.path_separator;
   assert(path.join("foo", "bar") == "foo" + s + "bar", "join basic");
 }
 
-test_join_trailing_slash() `test {
+test_join_trailing_slash() `test(allow_leaks: true) {
   assert(path.join("foo/", "bar") == "foo/bar", "join trailing slash");
 }
 
@@ -176,7 +176,7 @@ test_join_both_empty() `test {
   assert(path.join("", "") == "", "join both empty");
 }
 
-test_join_dotdot_child() `test {
+test_join_dotdot_child() `test(allow_leaks: true) {
   string s = Platform.path_separator;
   assert(path.join("a", "..") == "a" + s + "..", "join dotdot child");
   assert(path.join("a", ".") == "a" + s + ".", "join dot child");

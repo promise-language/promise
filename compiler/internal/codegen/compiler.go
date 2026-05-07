@@ -4156,13 +4156,27 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 				alloca := c.entryBlock.NewAlloca(p.Typ)
 				c.entryBlock.NewStore(p, alloca)
 				c.locals[sp.Name()] = alloca
+
+				// T0087: Register drop binding for ~ (move) parameters.
+				if sp.Ref() == types.RefMut {
+					c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
+				}
+
+				// B0191: Register drop binding for variadic parameters.
+				// Variadic params receive an owned Vector[T] that must be freed at scope exit.
+				if sp.IsVariadic() {
+					c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
+				}
 			}
 		}
 
 		c.genBlock(fd.Body)
 
-		// Add implicit return if block not terminated
+		// Emit scope cleanup for drop bindings (variadic, move params)
 		if c.block != nil && c.block.Term == nil {
+			if len(c.scopeBindings) > 0 {
+				c.emitScopeCleanup(0, false)
+			}
 			if sig.CanError() {
 				c.block.NewRet(c.zeroValue(fn.Sig.RetType))
 			} else if fn.Sig.RetType == irtypes.Void {
@@ -4328,12 +4342,27 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 					alloca := c.entryBlock.NewAlloca(fn.Params[paramIdx+i].Typ)
 					c.entryBlock.NewStore(fn.Params[paramIdx+i], alloca)
 					c.locals[p.Name()] = alloca
+
+					// T0087: Register drop binding for ~ (move) parameters.
+					if p.Ref() == types.RefMut {
+						c.maybeRegisterDrop(p.Name(), alloca, p.Type())
+					}
+
+					// B0191: Register drop binding for variadic parameters.
+					// Variadic params receive an owned Vector[T] that must be freed at scope exit.
+					if p.IsVariadic() {
+						c.maybeRegisterDrop(p.Name(), alloca, p.Type())
+					}
 				}
 			}
 
 			c.genBlock(md.Body)
 
 			if c.block != nil && c.block.Term == nil {
+				// Emit scope cleanup for drop bindings (variadic, move params)
+				if len(c.scopeBindings) > 0 {
+					c.emitScopeCleanup(0, false)
+				}
 				if m.Sig().CanError() {
 					c.block.NewRet(c.zeroValue(fn.Sig.RetType))
 				} else if fn.Sig.RetType == irtypes.Void {

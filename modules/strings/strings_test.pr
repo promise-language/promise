@@ -1,5 +1,5 @@
 // Test the strings module (compiled as part of the module).
-join_basic() `test(allow_leaks: true) {
+join_basic() `test {
   assert(join(", ", "a", "b", "c") == "a, b, c", "join basic");
 }
 

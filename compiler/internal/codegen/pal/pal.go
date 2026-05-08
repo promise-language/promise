@@ -283,6 +283,53 @@ func emitLibcFree(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// emitLibcFreeDebug declares libc @free + a platform-specific size query function
+// and defines @pal_free with poison-fill (0xDE) before free for UAF detection.
+// sizeFnName is the platform's allocation-size query: "malloc_usable_size" (POSIX)
+// or "_msize" (Windows).
+func emitLibcFreeDebug(module *ir.Module, sizeFnName string) *ir.Func {
+	// declare void @free(i8* nocapture noundef) nounwind willreturn
+	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
+	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
+	addFuncAttr(freeFn, enum.FuncAttrWillReturn)
+
+	// declare i64 @malloc_usable_size(i8*) / @_msize(i8*)
+	sizeFn := getOrDeclareFunc(module, sizeFnName, irtypes.I64,
+		ir.NewParam("ptr", irtypes.I8Ptr))
+
+	// declare i8* @memset(i8*, i32, i64)
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("dest", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	allocCount := getOrCreateAllocCountGlobal(module)
+
+	// define void @pal_free(i8* %ptr) nounwind willreturn
+	fn := module.NewFunc("pal_free", irtypes.Void,
+		ir.NewParam("ptr", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	entry := fn.NewBlock(".entry")
+
+	// Track: if ptr is non-null, poison-fill + decrement alloc count + free
+	nonnull := entry.NewICmp(enum.IPredNE, fn.Params[0], constant.NewNull(irtypes.I8Ptr))
+	trackBlk := fn.NewBlock(".track")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+
+	trackBlk.NewAtomicRMW(enum.AtomicOpSub, allocCount, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	// Poison-fill: memset(ptr, 0xDE, malloc_usable_size(ptr))
+	size := trackBlk.NewCall(sizeFn, fn.Params[0])
+	trackBlk.NewCall(memsetFn, fn.Params[0], constant.NewInt(irtypes.I32, 0xDE), size)
+	trackBlk.NewCall(freeFn, fn.Params[0])
+	trackBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+
+	return fn
+}
+
 // emitLibcRealloc declares libc @realloc and defines @pal_realloc as a wrapper.
 // Includes allocation count tracking for leak detection (T0066):
 // - realloc(NULL, size) acts like malloc → increment alloc count

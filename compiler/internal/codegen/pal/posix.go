@@ -11,7 +11,8 @@ import (
 
 // PosixPAL implements PAL for POSIX systems (macOS, Linux) using libc write/exit.
 type PosixPAL struct {
-	target string // LLVM target triple (needed for platform-specific constants)
+	target    string // LLVM target triple (needed for platform-specific constants)
+	DebugFree bool   // poison-fill freed memory for UAF detection
 }
 
 // EmitWrite declares libc @write and defines @pal_write as a thin wrapper.
@@ -54,8 +55,13 @@ func (p *PosixPAL) EmitExit(module *ir.Module) *ir.Func {
 	return fn
 }
 
-func (p *PosixPAL) EmitAlloc(module *ir.Module) *ir.Func   { return emitLibcAlloc(module) }
-func (p *PosixPAL) EmitFree(module *ir.Module) *ir.Func    { return emitLibcFree(module) }
+func (p *PosixPAL) EmitAlloc(module *ir.Module) *ir.Func { return emitLibcAlloc(module) }
+func (p *PosixPAL) EmitFree(module *ir.Module) *ir.Func {
+	if p.DebugFree {
+		return emitLibcFreeDebug(module, "malloc_usable_size")
+	}
+	return emitLibcFree(module)
+}
 func (p *PosixPAL) EmitRealloc(module *ir.Module) *ir.Func { return emitLibcRealloc(module) }
 
 // --- POSIX threading via pthreads ---

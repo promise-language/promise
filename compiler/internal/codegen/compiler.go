@@ -304,6 +304,7 @@ type Compiler struct {
 	target      string // LLVM target triple
 	isWasm      bool   // true if targeting wasm32
 	isWindows   bool   // true if targeting windows-msvc
+	debugFree   bool   // poison-fill freed memory for UAF detection (debug builds)
 	nextDebugID int    // counter for emitDebugPrint global names
 
 	// Global constants for print/panic functions
@@ -503,6 +504,7 @@ func MonoName(inst *types.Instance) string {
 type CompileOptions struct {
 	CachedInstances map[string]bool // mono instance names whose .bc is already cached
 	CoverageEnabled bool            // instrument code for test coverage (T0030)
+	DebugFree       bool            // poison-fill freed memory for UAF detection (debug builds)
 }
 
 // CompileWithCache is like Compile but skips method body codegen for instances
@@ -575,6 +577,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	if opts != nil {
 		c.cachedInstances = opts.CachedInstances
 		c.coverageEnabled = opts.CoverageEnabled
+		c.debugFree = opts.DebugFree
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -1273,6 +1276,18 @@ func (c *Compiler) declareIntrinsics() {
 
 	// PAL: emit platform-specific allocator primitives (needed by string/vector funcs below)
 	p := pal.ForTarget(c.module.TargetTriple)
+	if c.debugFree {
+		switch pp := p.(type) {
+		case *pal.PosixPAL:
+			pp.DebugFree = true
+		case *pal.WindowsPAL:
+			pp.DebugFree = true
+		case *pal.WasmPAL:
+			pp.DebugFree = true
+		case *pal.WasmWebPAL:
+			pp.DebugFree = true
+		}
+	}
 	c.palAlloc = p.EmitAlloc(c.module)
 	c.palFree = p.EmitFree(c.module)
 	c.palRealloc = p.EmitRealloc(c.module)

@@ -374,6 +374,101 @@ func TestEmitFree(t *testing.T) {
 	})
 }
 
+// Debug free: pal_free should poison-fill (0xDE) via memset before calling free.
+func TestEmitFreeDebug(t *testing.T) {
+	// Posix: uses malloc_usable_size
+	t.Run("Posix", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &PosixPAL{DebugFree: true}
+		p.EmitAlloc(module) // needed for allocCount global
+		fn := p.EmitFree(module)
+		out := module.String()
+
+		if fn.Name() != "pal_free" {
+			t.Errorf("expected function name pal_free, got %s", fn.Name())
+		}
+		if !strings.Contains(out, "@malloc_usable_size(") {
+			t.Error("debug pal_free should declare @malloc_usable_size")
+		}
+		if !strings.Contains(out, "@memset(") {
+			t.Error("debug pal_free should call @memset for poison fill")
+		}
+		if !strings.Contains(out, "call void @free(") {
+			t.Error("debug pal_free should still call @free")
+		}
+	})
+
+	// Windows: uses _msize
+	t.Run("Windows", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WindowsPAL{DebugFree: true}
+		p.EmitAlloc(module)
+		fn := p.EmitFree(module)
+		out := module.String()
+
+		if fn.Name() != "pal_free" {
+			t.Errorf("expected function name pal_free, got %s", fn.Name())
+		}
+		if !strings.Contains(out, "@_msize(") {
+			t.Error("debug pal_free on Windows should declare @_msize")
+		}
+		if !strings.Contains(out, "@memset(") {
+			t.Error("debug pal_free should call @memset for poison fill")
+		}
+	})
+
+	// WASM: uses malloc_usable_size (provided by wasm_alloc.c)
+	t.Run("Wasm", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WasmPAL{DebugFree: true}
+		p.EmitAlloc(module)
+		fn := p.EmitFree(module)
+		out := module.String()
+
+		if fn.Name() != "pal_free" {
+			t.Errorf("expected function name pal_free, got %s", fn.Name())
+		}
+		if !strings.Contains(out, "@malloc_usable_size(") {
+			t.Error("WASM debug pal_free should declare @malloc_usable_size")
+		}
+		if !strings.Contains(out, "@memset(") {
+			t.Error("WASM debug pal_free should call @memset for poison fill")
+		}
+	})
+
+	// WasmWeb: propagates DebugFree to inner WasmPAL
+	t.Run("WasmWeb", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WasmWebPAL{DebugFree: true}
+		p.EmitAlloc(module)
+		fn := p.EmitFree(module)
+		out := module.String()
+
+		if fn.Name() != "pal_free" {
+			t.Errorf("expected function name pal_free, got %s", fn.Name())
+		}
+		if !strings.Contains(out, "@malloc_usable_size(") {
+			t.Error("WasmWeb debug pal_free should declare @malloc_usable_size")
+		}
+	})
+
+	// Non-debug should NOT have malloc_usable_size or _msize
+	t.Run("NonDebug", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &PosixPAL{}
+		p.EmitAlloc(module)
+		p.EmitFree(module)
+		out := module.String()
+
+		if strings.Contains(out, "malloc_usable_size") {
+			t.Error("non-debug pal_free should NOT use malloc_usable_size")
+		}
+		if strings.Contains(out, "@memset(") {
+			t.Error("non-debug pal_free should NOT call memset")
+		}
+	})
+}
+
 // T0020: pal_alloc and pal_free track allocations via __promise_alloc_count.
 func TestAllocTracking(t *testing.T) {
 	// Posix/Windows: atomic tracking

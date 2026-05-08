@@ -8,7 +8,9 @@ import (
 )
 
 // WasmPAL implements PAL for WebAssembly using WASI (WebAssembly System Interface).
-type WasmPAL struct{}
+type WasmPAL struct {
+	DebugFree bool // poison-fill freed memory for UAF detection
+}
 
 // EmitWrite declares WASI fd_write and defines @pal_write.
 // Builds a ciovec {i8*, i32} on the stack and calls fd_write with a single iovec.
@@ -133,6 +135,10 @@ func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
 // EmitFree declares extern @free and defines @pal_free as a wrapper.
 // Includes allocation count tracking for leak detection (T0020).
 func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
+	if p.DebugFree {
+		return emitWasmFreeDebug(module)
+	}
+
 	// declare void @free(i8* nocapture noundef) nounwind
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
@@ -155,6 +161,52 @@ func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
 
 	old := trackBlk.NewLoad(irtypes.I64, allocCount)
 	trackBlk.NewStore(trackBlk.NewSub(old, constant.NewInt(irtypes.I64, 1)), allocCount)
+	trackBlk.NewCall(freeFn, fn.Params[0])
+	trackBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+
+	return fn
+}
+
+// emitWasmFreeDebug defines @pal_free with poison-fill (0xDE) before free for UAF detection.
+// WASM uses i32 sizes and non-atomic alloc count tracking (single-threaded).
+func emitWasmFreeDebug(module *ir.Module) *ir.Func {
+	// declare void @free(i8* nocapture noundef) nounwind
+	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
+	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
+	addFuncAttr(freeFn, enum.FuncAttrWillReturn)
+
+	// declare i32 @malloc_usable_size(i8*) — provided by wasm_alloc.c
+	sizeFn := getOrDeclareFunc(module, "malloc_usable_size", irtypes.I32,
+		ir.NewParam("ptr", irtypes.I8Ptr))
+
+	// declare i8* @memset(i8*, i32, i32)
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("dest", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I32))
+
+	allocCount := getOrCreateAllocCountGlobal(module)
+
+	// define void @pal_free(i8* %ptr) nounwind willreturn
+	fn := module.NewFunc("pal_free", irtypes.Void,
+		ir.NewParam("ptr", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	entry := fn.NewBlock(".entry")
+
+	// Track: if ptr is non-null, poison-fill + decrement alloc count + free
+	nonnull := entry.NewICmp(enum.IPredNE, fn.Params[0], constant.NewNull(irtypes.I8Ptr))
+	trackBlk := fn.NewBlock(".track")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+
+	old := trackBlk.NewLoad(irtypes.I64, allocCount)
+	trackBlk.NewStore(trackBlk.NewSub(old, constant.NewInt(irtypes.I64, 1)), allocCount)
+	// Poison-fill: memset(ptr, 0xDE, malloc_usable_size(ptr))
+	size := trackBlk.NewCall(sizeFn, fn.Params[0])
+	trackBlk.NewCall(memsetFn, fn.Params[0], constant.NewInt(irtypes.I32, 0xDE), size)
 	trackBlk.NewCall(freeFn, fn.Params[0])
 	trackBlk.NewBr(doneBlk)
 

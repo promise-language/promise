@@ -126,6 +126,14 @@ void free(void *ptr) {
     // Oversized blocks are not reclaimed (acceptable for WASM lifetime)
 }
 
+size_t malloc_usable_size(void *ptr) {
+    if (!ptr) return 0;
+    header_t *hdr = (header_t *)((char *)ptr - HEADER_SIZE);
+    if (hdr->class_idx < NUM_CLASSES)
+        return class_size(hdr->class_idx) - HEADER_SIZE;
+    return hdr->size;
+}
+
 void *realloc(void *ptr, size_t new_size) {
     if (!ptr) return malloc(new_size);
     if (new_size == 0) {

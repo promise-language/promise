@@ -72,6 +72,8 @@ Commands:
 
 Options (build):
   -o <output>   Output file name (default: input file without extension)
+  --debug       Debug build (default) — poison-fills freed memory for UAF detection
+  --release     Release build — platform-default free behavior, no debug overhead
 
 Options (doc):
   -public         Show only public symbols (default)
@@ -295,6 +297,8 @@ func runBuild(args []string) {
 // buildToFile compiles a .pr file to an executable, returning the source path,
 // output path, and target triple.
 func buildToFile(args []string) (filename, outputFile, target string) {
+	debugMode := false
+	releaseMode := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-o":
@@ -307,13 +311,22 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 				target = args[i+1]
 				i++
 			}
+		case "--debug":
+			debugMode = true
+		case "--release":
+			releaseMode = true
 		default:
 			filename = args[i]
 		}
 	}
 
+	if debugMode && releaseMode {
+		fmt.Fprintln(os.Stderr, "error: --debug and --release are mutually exclusive")
+		os.Exit(1)
+	}
+
 	if filename == "" {
-		fmt.Fprintln(os.Stderr, "usage: promise build [-o output] [--target triple] <file.pr>")
+		fmt.Fprintln(os.Stderr, "usage: promise build [-o output] [--target triple] [--debug|--release] <file.pr>")
 		os.Exit(1)
 	}
 
@@ -332,8 +345,15 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 		}
 	}
 
+	// Default to debug mode (poison-fill freed memory for UAF detection).
+	// Use --release for production builds with platform-default free behavior.
+	debugFree := !releaseMode
+
 	file, info := compileFrontend(filename)
-	result := codegen.CompileWithCache(file, info, target, lookupCachedInstances(info, target))
+	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
+		CachedInstances: lookupCachedInstances(info, target),
+		DebugFree:       debugFree,
+	})
 
 	compileAndLink(result, outputFile, target, filename)
 	return filename, outputFile, target
@@ -776,7 +796,10 @@ func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
-	result := codegen.CompileWithCache(file, info, target, lookupCachedInstances(info, target))
+	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
+		CachedInstances: lookupCachedInstances(info, target),
+		DebugFree:       true, // tests always use debug mode
+	})
 	result.GenerateTestMain(info.Tests, testTimeouts)
 
 	ext := binaryExtension(target)
@@ -866,6 +889,7 @@ func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
 		CachedInstances: lookupCachedInstances(info, target),
 		CoverageEnabled: true,
+		DebugFree:       true, // tests always use debug mode
 	})
 	result.GenerateTestMain(info.Tests, testTimeouts)
 
@@ -1156,7 +1180,10 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	}
 
 	// Codegen with normal main (no GenerateTestMain)
-	result := codegen.CompileWithCache(file, info, target, lookupCachedInstances(info, target))
+	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
+		CachedInstances: lookupCachedInstances(info, target),
+		DebugFree:       true, // tests always use debug mode
+	})
 
 	ext := binaryExtension(target)
 	tmpOutput, err := os.CreateTemp("", "promise-e2e-*"+ext)
@@ -4879,7 +4906,10 @@ func runExec(args []string) {
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
-	result := codegen.CompileWithCache(file, info, target, lookupCachedInstances(info, target))
+	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
+		CachedInstances: lookupCachedInstances(info, target),
+		DebugFree:       true, // exec uses debug mode
+	})
 
 	// Compile and link to temp binary
 	ext := binaryExtension(target)

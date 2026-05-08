@@ -8,7 +8,9 @@ import (
 
 // WasmWebPAL implements PAL for WebAssembly targeting browser environments.
 // Imports from "promise_env" (JS glue module) instead of "wasi_snapshot_preview1".
-type WasmWebPAL struct{}
+type WasmWebPAL struct {
+	DebugFree bool // poison-fill freed memory for UAF detection
+}
 
 // EmitWrite declares a JS-provided write function and defines @pal_write.
 // The JS glue provides promise_env.write(fd, buf, len) → i64.
@@ -58,8 +60,10 @@ func (p *WasmWebPAL) EmitExit(module *ir.Module) *ir.Func {
 }
 
 // Alloc/Free/Realloc — same as WasmPAL (linked from wasm_alloc.o).
-func (p *WasmWebPAL) EmitAlloc(module *ir.Module) *ir.Func   { return (&WasmPAL{}).EmitAlloc(module) }
-func (p *WasmWebPAL) EmitFree(module *ir.Module) *ir.Func    { return (&WasmPAL{}).EmitFree(module) }
+func (p *WasmWebPAL) EmitAlloc(module *ir.Module) *ir.Func { return (&WasmPAL{}).EmitAlloc(module) }
+func (p *WasmWebPAL) EmitFree(module *ir.Module) *ir.Func {
+	return (&WasmPAL{DebugFree: p.DebugFree}).EmitFree(module)
+}
 func (p *WasmWebPAL) EmitRealloc(module *ir.Module) *ir.Func { return (&WasmPAL{}).EmitRealloc(module) }
 
 // Stubs — same as WasmPAL (no file I/O, threading, etc. in browser).

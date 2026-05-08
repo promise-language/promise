@@ -9133,6 +9133,60 @@ func TestVectorStringIndexAssignDropsOld(t *testing.T) {
 	assertContains(t, ir, "call void @promise_string_drop")
 }
 
+// B0235: Map overwrite should drop old Slot enum element.
+func TestMapOverwriteDropsOldSlot(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			map[string, string] m = {:};
+			m["a"] = "one";
+			m["a"] = "two";
+		}
+	`)
+	// Map.[]= should call Slot.drop on old element before storing new.
+	// The Slot enum has synthesized drop at mono time (Slot[string, string]).
+	assertContains(t, ir, `call void @"Slot[string, string].drop"(`)
+}
+
+// B0235: Vector[Enum] index assignment drops old enum element before storing new value.
+func TestVectorEnumIndexAssignDropsOld(t *testing.T) {
+	ir := generateIR(t, `
+		enum Value {
+			Null,
+			Str(string s),
+		}
+		main() {
+			Value[] v = [Value.Str("hello"), Value.Null];
+			v[0] = Value.Null;
+		}
+	`)
+	// Should drop old enum element before storing the new one.
+	// The drop is emitted in the indexassign.ok block, before the store.
+	assertContains(t, ir, "call void @Value.drop(")
+}
+
+// B0235: Vector[GenericEnum] index assignment drops old enum element (mono).
+func TestVectorMonoEnumIndexAssignDropsOld(t *testing.T) {
+	ir := generateIR(t, `
+		enum Slot[K, V] {
+			Empty,
+			Used(K key, V value),
+		}
+		type Container[K, V] {
+			Slot[K, V][] buckets;
+			overwrite(~this, int idx) {
+				this.buckets[idx] = Slot.Empty;
+			}
+		}
+		main() {
+			Slot[string, string][] b = [];
+			Container[string, string] c = Container[string, string](buckets: b);
+			c.overwrite(0);
+		}
+	`)
+	// Should drop old mono enum element before storing the new one.
+	assertContains(t, ir, `call void @"Slot[string, string].drop"(`)
+}
+
 // B0204: Vector[string] index read dups when stored in variable
 func TestVectorStringIndexReadDup(t *testing.T) {
 	ir := generateIR(t, `

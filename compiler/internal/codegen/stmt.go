@@ -5195,6 +5195,13 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 				oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 				c.block.NewCall(dropFn, oldVal)
 			}
+		} else if c.vecElemNeedsEnumDrop(elemType) {
+			// B0235: Drop old enum element before overwriting. Enum elements are
+			// stored by value in vector buffers, so each element is an independent
+			// copy. emitVariantFieldDrop allocas the old value, bitcasts to i8*,
+			// and calls the synthesized enum drop function.
+			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
+			c.emitVariantFieldDrop(oldVal, elemType)
 		}
 		c.block.NewStore(val, elemPtr)
 		return

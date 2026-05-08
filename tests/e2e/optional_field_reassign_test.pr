@@ -1,0 +1,49 @@
+// B0240: Optional field reassignment must drop/free old inner value.
+// When overwriting an optional field (e.g., p.location = none), the old
+// inner value must be cleaned up to prevent memory leaks.
+type Location {
+  int x;
+  int y;
+}
+
+type Place {
+  string name;
+  Location? location;
+}
+
+// Assigning none to optional user type field should free old value.
+test_optional_field_assign_none() `test {
+  p := Place(name: "a", location: Location(x: 1, y: 2));
+  p.location = none;
+}
+
+// Reassigning optional field with new value should free old value.
+test_optional_field_reassign_some() `test {
+  p := Place(name: "a", location: Location(x: 1, y: 2));
+  p.location = Location(x: 10, y: 20);
+  loc := p.location!;
+  assert(loc.x == 10, "reassigned x");
+  assert(loc.y == 20, "reassigned y");
+}
+
+// Assigning none to already-none field should be safe.
+test_optional_field_assign_none_to_none() `test {
+  p := Place(name: "a");
+  p.location = none;
+}
+
+// Optional string field reassignment should drop old string.
+type StringHolder {
+  string? value;
+}
+
+test_optional_string_field_reassign() `test {
+  h := StringHolder(value: "hello");
+  h.value = "world";
+  assert(h.value! == "world", "new value");
+}
+
+test_optional_string_field_assign_none() `test {
+  h := StringHolder(value: "hello");
+  h.value = none;
+}

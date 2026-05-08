@@ -5374,6 +5374,110 @@ func (c *Compiler) emitOptionalFieldDrop(opt *types.Optional, f *types.Field, la
 	c.block = skipBlock
 }
 
+// emitOptionalFieldReassignDrop emits a conditional drop/free for an optional-typed field
+// before reassignment (B0240). When overwriting an optional field (e.g., p.location = none),
+// the old inner value must be cleaned up. This handles string, vector, channel, and
+// heap user types (with or without drop methods).
+// Note: safe for the common case where the optional is overwritten without prior unwrap.
+// If the optional was force-unwrapped before reassignment, the unwrapped local also has
+// a scope binding (bindingFree) that will free the same instance — a double-free.
+// This is tracked by T0111 (dup-on-unwrap); until then, user code that unwraps and then
+// overwrites the same optional field has undefined behavior.
+func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *types.Field, ownerType types.Type, fieldPtr value.Value) {
+	elem := opt.Elem()
+	innerNamed := extractNamed(elem)
+
+	// Determine what cleanup is needed for the inner type.
+	var dropFunc *ir.Func
+	needsFreeOnly := false
+
+	switch {
+	case innerNamed == types.TypString:
+		dropFunc = c.funcs["promise_string_drop"]
+	case types.IsVector(elem):
+		dropFunc = c.funcs["Vector.drop"]
+	case types.IsChannel(elem):
+		dropFunc = c.funcs["Channel.drop"]
+	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() &&
+		!isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural() &&
+		!isOpaqueContainerType(elem):
+		// Heap user type — needs pal_free at minimum, plus drop() if it has one.
+		if innerNamed.HasDrop() || innerNamed.NeedsSynthDrop() {
+			ownerName := c.resolveMethodOwner(innerNamed, "drop")
+			mangledName := mangleMethodName(ownerName, "drop", false)
+			dropFunc = c.funcs[mangledName]
+		}
+		needsFreeOnly = true
+	default:
+		return // value type or primitive — no cleanup needed
+	}
+
+	if dropFunc == nil && !needsFreeOnly {
+		return
+	}
+
+	// Get the LLVM type of the optional field for loading.
+	layout := c.lookupTypeLayout(ownerType)
+	if layout == nil {
+		return
+	}
+	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
+	if !ok {
+		// Value type layout — optional fields in value types are uncommon but handle gracefully.
+		if fidx, ok2 := layout.ValueFieldIndex[field.Name()]; ok2 {
+			fieldIdx = fidx
+		} else {
+			return
+		}
+	}
+
+	var fieldLLVMType irtypes.Type
+	if layout.IsValueType {
+		fieldLLVMType = layout.Value.Fields[fieldIdx].LLVMType
+	} else {
+		fieldLLVMType = layout.Instance.Fields[fieldIdx].LLVMType
+	}
+
+	// Load old optional value and check has-value flag.
+	oldOpt := c.block.NewLoad(fieldLLVMType, fieldPtr)
+	hasVal := c.block.NewExtractValue(oldOpt, 0)
+
+	dropBlock := c.newBlock("field.optdrop")
+	mergeBlock := c.newBlock("field.optdrop.done")
+	c.block.NewCondBr(hasVal, dropBlock, mergeBlock)
+
+	c.block = dropBlock
+	innerVal := c.block.NewExtractValue(oldOpt, 1)
+
+	if innerNamed == types.TypString || types.IsVector(elem) || types.IsChannel(elem) {
+		// String/container: inner is i8*, call drop directly.
+		c.block.NewCall(dropFunc, innerVal)
+	} else {
+		// User type: inner is value struct {vtable*, instance*}.
+		instancePtr := c.extractInstancePtr(innerVal)
+		// Null-check: zero-initialized optionals may have null instance pointers.
+		nullCheck := c.block.NewICmp(enum.IPredEQ, instancePtr, constant.NewNull(irtypes.I8Ptr))
+		freeBlock := c.newBlock("field.optdrop.free")
+		skipFreeBlock := c.newBlock("field.optdrop.free.skip")
+		c.block.NewCondBr(nullCheck, skipFreeBlock, freeBlock)
+
+		c.block = freeBlock
+		if dropFunc != nil {
+			c.block.NewCall(dropFunc, instancePtr)
+		}
+		// Free the instance (synthesized drops include pal_free; explicit drops do not).
+		if innerNamed != nil && !innerNamed.NeedsSynthDrop() {
+			c.block.NewCall(c.palFree, instancePtr)
+		}
+		c.block.NewBr(skipFreeBlock)
+
+		c.block = skipFreeBlock
+	}
+
+	c.block.NewBr(mergeBlock)
+	c.block = mergeBlock
+}
+
 // emitFuncFieldEnvFree frees the env pointer of a function-typed field (B0217).
 // Function values are fat pointers {fn_ptr, env_ptr}. The env_ptr may be a
 // heap-allocated capture struct that needs freeing. Null-checks before freeing.

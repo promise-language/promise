@@ -608,7 +608,7 @@ optional_user_field_assign_some() `test {
   assert(loc.y == 20, "assigned location y");
 }
 
-optional_user_field_assign_none() `test(allow_leaks: true) {
+optional_user_field_assign_none() `test {
   p := Place(name: "a", location: Location(x: 1, y: 2));
   p.location = none;
 }

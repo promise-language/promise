@@ -3191,6 +3191,12 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 						c.block = mergeBlock
 					}
 				}
+				// B0240: Optional fields: drop old inner value before reassignment.
+				// When overwriting an optional field (e.g., p.location = none), the old
+				// inner value must be freed/dropped to prevent memory leaks.
+				if opt, ok := fieldType.(*types.Optional); ok {
+					c.emitOptionalFieldReassignDrop(opt, field, targetType, fieldPtr)
+				}
 			}
 		}
 		c.block.NewStore(val, fieldPtr)

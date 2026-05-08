@@ -16500,6 +16500,54 @@ func TestOptionalStructuralInterfaceDropOnReassign(t *testing.T) {
 	assertContains(t, ir, "optdrop")
 }
 
+// B0240: Assigning none to an optional field with a heap user type should
+// drop/free the old inner value before storing the new value.
+func TestOptionalFieldReassignDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Location { int x; int y; }
+		type Place { string name; Location? location; }
+		test() {
+			Place p = Place(name: "a", location: Location(x: 1, y: 2));
+			p.location = none;
+		}
+	`)
+	// The reassignment to none should emit a conditional drop for the old optional value.
+	assertContains(t, ir, "field.optdrop")
+	// Should free the inner Location instance.
+	assertContains(t, ir, "call void @pal_free")
+}
+
+// B0240: Assigning none to an optional string field should call promise_string_drop.
+func TestOptionalStringFieldReassignDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { string? value; }
+		test() {
+			Holder h = Holder(value: "hello");
+			h.value = none;
+		}
+	`)
+	assertContains(t, ir, "field.optdrop")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// B0240: Assigning none to an optional field with a droppable user type should
+// call the drop function before freeing.
+func TestOptionalDroppableFieldReassignDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		type Container { Resource? res; }
+		test() {
+			Container c = Container(res: Resource(id: 1));
+			c.res = none;
+		}
+	`)
+	assertContains(t, ir, "field.optdrop")
+	assertContains(t, ir, "call void @Resource.drop")
+}
+
 // B0237: Constructor temps passed as map literal values should be claimed.
 func TestConstructorTempClaimedInMapLiteral(t *testing.T) {
 	ir := generateIR(t, `

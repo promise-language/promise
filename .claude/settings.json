@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "PROMISE_NO_SHIM=1 bin/promise run tools/guard/guard.pr || exit 2",
+            "command": "go run $(git rev-parse --show-toplevel)/tools/guard/guard.go || exit 2",
             "timeout": 10
           }
         ]

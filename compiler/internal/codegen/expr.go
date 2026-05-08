@@ -1874,11 +1874,23 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	} else {
 		// Implicit constructor: match arguments to field names.
 		// Build field-type lookup for optional wrapping.
+		// B0210: Build a substitution map from the Instance type args so field types
+		// are properly substituted even when c.typeSubst is nil (user code calling
+		// a generic constructor directly, not inside a monomorphic method body).
+		var localSubst map[*types.TypeParam]types.Type
+		if inst, ok := typ.(*types.Instance); ok {
+			if origin, ok := inst.Origin().(*types.Named); ok && len(origin.TypeParams()) > 0 {
+				localSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			}
+		}
 		fieldTypeMap := make(map[string]types.Type)
 		for _, f := range named.AllFields() {
 			ft := f.Type()
 			if c.typeSubst != nil {
 				ft = types.Substitute(ft, c.typeSubst)
+			}
+			if localSubst != nil {
+				ft = types.Substitute(ft, localSubst)
 			}
 			fieldTypeMap[f.Name()] = ft
 		}
@@ -1912,12 +1924,24 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if !ok {
 				panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
 			}
-			// Set targetType for Optional fields so NoneLit produces the correct zero value (B0030)
-			if ft, isOpt := fieldTypeMap[arg.Name].(*types.Optional); isOpt {
-				c.targetType = ft
+			// B0210: For optional fields, generate none values directly from the layout
+			// type instead of resolveType(targetType), which may produce a wrong LLVM
+			// type when TypeParams aren't fully substituted in all code paths.
+			var val value.Value
+			if _, isOpt := fieldTypeMap[arg.Name].(*types.Optional); isOpt {
+				if _, isNone := arg.Value.(*ast.NoneLit); isNone {
+					// Generate zero value directly from the layout's LLVM type
+					val = c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType)
+				} else {
+					if ft, ok := fieldTypeMap[arg.Name].(*types.Optional); ok {
+						c.targetType = ft
+					}
+					val = c.genCallArgExpr(arg.Value)
+					c.targetType = nil
+				}
+			} else {
+				val = c.genCallArgExpr(arg.Value)
 			}
-			val := c.genCallArgExpr(arg.Value)
-			c.targetType = nil
 			// T0101: Save pre-wrap value for string temp claiming on optional fields
 			preWrapVal := val
 			val = maybeWrapOptional(val, arg.Value, arg.Name, fieldIdx)
@@ -2141,11 +2165,22 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 	}
 
 	// Implicit constructor: match arguments to field names
+	// B0210: Build a local substitution map from the Instance type args so field types
+	// are properly substituted even when c.typeSubst is nil.
+	var vtLocalSubst map[*types.TypeParam]types.Type
+	if inst, ok := typ.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Named); ok && len(origin.TypeParams()) > 0 {
+			vtLocalSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+		}
+	}
 	fieldTypeMap := make(map[string]types.Type)
 	for _, f := range named.AllFields() {
 		ft := f.Type()
 		if c.typeSubst != nil {
 			ft = types.Substitute(ft, c.typeSubst)
+		}
+		if vtLocalSubst != nil {
+			ft = types.Substitute(ft, vtLocalSubst)
 		}
 		fieldTypeMap[f.Name()] = ft
 	}
@@ -2177,13 +2212,25 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		if !ok {
 			panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
 		}
-		// Set targetType for Optional fields so NoneLit produces the correct zero value (B0030)
-		if ft, isOpt := fieldTypeMap[arg.Name].(*types.Optional); isOpt {
-			c.targetType = ft
+		// B0210: For optional fields, generate none values directly from the layout
+		// type instead of resolveType(targetType), which may produce a wrong LLVM
+		// type when TypeParams aren't fully substituted in all code paths.
+		var fieldVal value.Value
+		if _, isOpt := fieldTypeMap[arg.Name].(*types.Optional); isOpt {
+			if _, isNone := arg.Value.(*ast.NoneLit); isNone {
+				fieldVal = c.zeroValue(layout.Value.Fields[fieldIdx].LLVMType)
+			} else {
+				if ft, ok := fieldTypeMap[arg.Name].(*types.Optional); ok {
+					c.targetType = ft
+				}
+				fieldVal = c.genCallArgExpr(arg.Value)
+				c.targetType = nil
+				fieldVal = maybeWrapOptional(fieldVal, arg.Value, arg.Name, fieldIdx)
+			}
+		} else {
+			fieldVal = c.genCallArgExpr(arg.Value)
+			fieldVal = maybeWrapOptional(fieldVal, arg.Value, arg.Name, fieldIdx)
 		}
-		fieldVal := c.genCallArgExpr(arg.Value)
-		c.targetType = nil
-		fieldVal = maybeWrapOptional(fieldVal, arg.Value, arg.Name, fieldIdx)
 		val = c.block.NewInsertValue(val, fieldVal, uint64(fieldIdx))
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)

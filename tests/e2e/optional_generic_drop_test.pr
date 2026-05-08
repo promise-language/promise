@@ -1,13 +1,43 @@
 // B0209: Optional[TypeParam] fields should trigger synthesized drop at mono time.
-// NOTE: Runtime tests blocked by B0210 (mono layout mismatch for Optional[TypeParam]).
-// This file serves as a placeholder to be expanded once B0210 is fixed.
+// B0210: Optional[TypeParam] field types must be properly substituted in constructors.
 type MaybeVal[T] {
   T val;
 }
 
-// Non-optional TypeParam — works fine
+type MaybeOpt[T] {
+  T? val;
+}
 
+// Non-optional TypeParam — works fine
 test_typeparam_int() `test {
   MaybeVal[int] m = MaybeVal[int](val: 42);
   assert(m.val == 42, "TypeParam int works");
+}
+
+// B0210: Optional[TypeParam] with concrete int value
+test_optional_typeparam_int_value() `test {
+  m := MaybeOpt[int](val: 42);
+  assert(m.val is int, "should have value");
+  assert(m.val! == 42, "should be 42");
+}
+
+// B0210: Optional[TypeParam] with none — was the original panic trigger
+test_optional_typeparam_int_none() `test {
+  m := MaybeOpt[int](val: none);
+  v := m.val;
+  assert(!(v is int), "should be none");
+}
+
+// B0210: Optional[TypeParam] with string value
+test_optional_typeparam_string_value() `test {
+  m := MaybeOpt[string](val: "hello");
+  assert(m.val is string, "should have value");
+  assert(m.val! == "hello", "should be hello");
+}
+
+// B0210: Optional[TypeParam] with string none
+test_optional_typeparam_string_none() `test {
+  m := MaybeOpt[string](val: none);
+  v := m.val;
+  assert(!(v is string), "should be none");
 }

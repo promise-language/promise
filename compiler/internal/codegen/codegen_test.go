@@ -16559,3 +16559,42 @@ func TestConstructorTempClaimedInMapLiteral(t *testing.T) {
 	// Map literal initialization claims the heap temp.
 	assertContains(t, ir, "heap.claim")
 }
+
+// B0210: Optional[TypeParam] field with none value should not cause mono layout mismatch.
+// The mono layout computes the correct LLVM type for the optional field, but the none
+// value was generated using an unsubstituted TypeParam, producing a type mismatch.
+func TestOptionalTypeParamFieldNone(t *testing.T) {
+	ir := generateIR(t, `
+		type MaybeVal[T] { T? val; }
+		main() {
+			m := MaybeVal[int](val: none);
+		}
+	`)
+	// The optional field should use the correct substituted type (i64 for int)
+	assertContains(t, ir, "{ i1, i64 }")
+}
+
+// B0210: Optional[TypeParam] field with a concrete value should work too.
+func TestOptionalTypeParamFieldValue(t *testing.T) {
+	ir := generateIR(t, `
+		type MaybeVal[T] { T? val; }
+		main() {
+			m := MaybeVal[string](val: "hello");
+		}
+	`)
+	assertContains(t, ir, "{ i1, i8* }")
+}
+
+// B0210: Multiple Optional[TypeParam] fields with different instantiations.
+func TestOptionalTypeParamMultipleInstantiations(t *testing.T) {
+	ir := generateIR(t, `
+		type MaybeVal[T] { T? val; }
+		main() {
+			m1 := MaybeVal[int](val: none);
+			m2 := MaybeVal[string](val: none);
+		}
+	`)
+	// Both int? and string? layouts should be present
+	assertContains(t, ir, "{ i1, i64 }")
+	assertContains(t, ir, "{ i1, i8* }")
+}

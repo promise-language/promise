@@ -1,6 +1,6 @@
-# Promise Language Guide for AI Agents
+# Promise Language Guide
 
-Concise reference for generating correct Promise code. Load this before writing `.pr` files.
+Concise reference for writing correct Promise code.
 
 ---
 

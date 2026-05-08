@@ -2,7 +2,7 @@
 
 Statically-typed language designed for AI-agent efficiency. Explicit ownership (like Rust), goroutine-style concurrency (like Go), algebraic errors, generics, exhaustive pattern matching — zero hidden effects. Native LLVM compilation to Linux, macOS, Windows, and WASM.
 
-**Designed for AI agents.** Every design decision optimizes for an AI generating correct, self-contained programs in one shot. Reading a single `.pr` file tells you exactly what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic.
+**Designed for AI agents.** Read the [Language Guide](docs/language-guide.md) to start writing Promise code. Every design decision optimizes for an AI generating correct, self-contained programs in one shot. Reading a single `.pr` file tells you exactly what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic.
 
 **Mono-versioned catalog.** Promise eliminates dependency hell entirely. There are no per-package versions, no lockfiles, no version resolution. Instead, the entire ecosystem — compiler, standard library, and all catalog modules — ships as a single atomic release called an **epoch** (e.g., `2026.3`). Every module in an epoch is tested together as a unit. Your project declares which epoch it targets in `promise.toml`, and that's it. An AI agent only needs to know the epoch to generate correct imports — no version guessing, no compatibility reasoning, no `package.json` / `Cargo.toml` / `go.mod` boilerplate.
 
@@ -13,23 +13,19 @@ Statically-typed language designed for AI-agent efficiency. Explicit ownership (
 ## Example
 
 ```
-use io "std/io";
-
 type Circle {
-  Float radius;
+  f64 radius;
 
-  area(&this) Float `instance {
-    return 3.14159 * this.radius * this.radius;
-  }
+  get area f64 => 3.14159 * this.radius * this.radius;
 }
 
 main() {
-  Circle c = Circle(radius: 5.0);
-  io.print_line("Area: {c.area()}");
+  c := Circle(radius: 5.0);
+  print_line("Area: {c.area}");
 
-  Int[] numbers = [1, 2, 3, 4, 5];
-  Int sum = numbers.filter(|n| -> n > 2).fold(0, |acc, n| -> acc + n);
-  io.print_line("Sum: {sum}");
+  numbers := [1, 2, 3, 4, 5];
+  sum := numbers.filter(|n| -> n > 2).fold(0, |acc, n| -> acc + n);
+  print_line("Sum: {sum}");
 }
 ```
 
@@ -43,23 +39,14 @@ main() {
 - **String interpolation** -- `"Hello, {name}!"` with arbitrary expressions
 - **Goroutine-style concurrency** -- `go expr` returns `Task[T]`, `<-task` to receive
 - **Generators** -- `yield` and `yield* iter` for lazy `Stream[T]` production
-- **Meta annotations** -- `` `instance ``, `` `static ``, `` `abstract `` for declarative metadata
+- **Meta annotations** -- `` `public ``, `` `final ``, `` `value ``, `` `abstract ``, `` `structural ``, `` `test `` for declarative metadata
 - **No macros, no conditional compilation** -- all code is fully visible in the source file
 
 ## Status
 
-**Stage 8f (current):** The compiler pipeline is functional through code generation. Stages 1–8f are complete:
+**WARNING: Under active development, not for production use.**
 
-- **Stages 1–2:** ANTLR4 grammar, CST → AST builder
-- **Stages 3–4:** Type system, semantic analysis (type checking, name resolution, exhaustiveness)
-- **Stage 5:** Generic type substitution, constraint validation, instance tracking
-- **Stage 6:** Ownership analysis (move semantics, borrow tracking, return safety)
-- **Stage 7:** Meta annotation processing
-- **Stage 8a–8f:** LLVM IR codegen — primitives, strings, user types, enums, error handling, generic monomorphization, containers (tuples, optionals, slices, maps, lambdas), optional patterns, string interpolation, promise-first builtin types
-
-The compiler produces native binaries via LLVM IR + clang. 400+ tests across all packages.
-
-Upcoming stages: module system, package manager.
+The compiler is functional end-to-end: parsing, type checking, ownership analysis, and LLVM IR codegen all work. 3500+ tests across 300+ files. Modules, generics, concurrency, and the standard library are implemented. Active development.
 
 ## Building
 
@@ -111,11 +98,12 @@ echo 'print_line("hello")' | promise                 # bare pipe (auto-detected)
 cat program.pr | promise                              # pipe a file
 ```
 
-Errors in inline mode show the source line with a caret marker:
+Errors show the source line with context and a caret marker:
 
 ```
-1:12: undefined: foo
-    print_line(foo);
+1:11: undefined: foo
+    main() ! {
+  > print_line(foo);
                ^
 ```
 

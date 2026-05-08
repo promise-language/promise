@@ -338,7 +338,7 @@ The standard library (`modules/std/`, 37 files) is auto-imported via `use std as
 - `compiler/internal/formatter/formatter.go` — token-based source formatter (lexer + reformatter)
 - `compiler/cmd/promise/fmt.go` — `promise format` CLI wiring
 - `examples/` — 33 runnable examples (basics → concurrency → patterns), also verified as tests
-- `docs/language-guide-for-agents.md` — concise language reference for AI code generation
+- `docs/language-guide.md` — concise language reference
 
 ## Implementation Philosophy
 

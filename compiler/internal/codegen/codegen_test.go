@@ -10486,6 +10486,91 @@ func TestErrorFieldAccessDupsString(t *testing.T) {
 	assertContains(t, ir, "strdup.copy")
 }
 
+// B0236: Match destructure of droppable enum dups heap user type fields.
+func TestMatchDupHeapUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper {
+			string name;
+		}
+		enum Container {
+			Holding(Wrapper item),
+			Empty,
+		}
+		test() {
+			c := Container.Holding(Wrapper(name: "hello"));
+			match c {
+				Holding(w) => { string s = w.name; },
+				Empty => { },
+			}
+		}
+	`)
+	// Extracting Wrapper from droppable enum should dup the heap instance
+	assertContains(t, ir, "heapdup.copy")
+	assertContains(t, ir, "call i8* @pal_alloc(")
+}
+
+// B0236: Match destructure of droppable enum dups vector fields.
+func TestMatchDupVector(t *testing.T) {
+	ir := generateIR(t, `
+		enum Holder {
+			Data(int[] items),
+			None,
+		}
+		test() {
+			h := Holder.Data([1, 2, 3]);
+			match h {
+				Data(v) => { int x = v.len; },
+				None => { },
+			}
+		}
+	`)
+	// Extracting vector from droppable enum should dup via vecdup
+	assertContains(t, ir, "vecdup.copy")
+}
+
+// B0236: Match destructure of droppable enum dups channel fields.
+func TestMatchDupChannel(t *testing.T) {
+	ir := generateIR(t, `
+		enum Wrapper {
+			Chan(channel[int] ch),
+			None,
+		}
+		test() {
+			ch := channel[int](1);
+			w := Wrapper.Chan(ch);
+			match w {
+				Chan(c) => { },
+				None => { },
+			}
+		}
+	`)
+	// Extracting channel from droppable enum should dup via chdup (refcount increment)
+	assertContains(t, ir, "chdup.inc")
+}
+
+// B0236: Map (complex type with vector of droppable enum elements) should NOT
+// be heap-dup'd — shallow copy doesn't replicate the deep ownership structure.
+func TestMatchDupMapExcluded(t *testing.T) {
+	ir := generateIR(t, `
+		enum JsonNode {
+			Null,
+			Text(string value),
+			Dict(map[string, JsonNode] fields),
+		}
+		test() {
+			map[string, JsonNode] fields = {"k": JsonNode.Text(value: "v")};
+			JsonNode obj = JsonNode.Dict(fields: fields);
+			match obj {
+				Dict(f) => { int x = f.len; },
+				_ => { },
+			}
+		}
+	`)
+	if strings.Contains(ir, "heapdup.copy") {
+		t.Error("Map should not be heap-dup'd (vector of droppable enum elements)")
+	}
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

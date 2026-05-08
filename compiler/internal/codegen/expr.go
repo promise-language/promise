@@ -4278,12 +4278,13 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 		val := c.block.NewLoad(fieldType, fieldPtr)
 
-		// B0232: Dup string fields from droppable enums to create independent copies.
-		// Without this, match-extracted strings share instance pointers with the enum
+		// B0232/B0236: Dup droppable fields from droppable enums to create independent copies.
+		// Without this, match-extracted values share instance pointers with the enum
 		// data. When the enum element is dropped (e.g., Map._buckets scope exit or
-		// Map destruction), the shared string would be double-freed.
+		// Map destruction), the shared value would be double-freed.
 		if enumHasDrop && c.matchFieldNeedsDup(variant.Fields()[i].Type(), subjectType, enum) {
-			c.dupMatchBinding(binding, val, fieldType)
+			resolved := c.resolveMatchFieldType(variant.Fields()[i].Type(), subjectType, enum)
+			c.dupMatchBinding(binding, val, fieldType, resolved)
 			continue
 		}
 
@@ -4293,12 +4294,11 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 	}
 }
 
-// matchFieldNeedsDup returns true if a match-destructured field should be dup'd.
-// Currently only strings — other droppable types (heap user types) lack a dup mechanism.
-// B0232: Must build the substitution from the enum instance's TypeParams (not the owner
-// type's TypeParams) since variant fields reference the enum's own TypeParams.
-func (c *Compiler) matchFieldNeedsDup(fieldType types.Type, subjectType types.Type, enum *types.Enum) bool {
-	// Build substitution from the enum instance's type args → resolves enum's own TypeParams
+// resolveMatchFieldType resolves a match-destructured field's type using enum
+// instance substitution. B0232: Must build the substitution from the enum
+// instance's TypeParams (not the owner type's TypeParams) since variant fields
+// reference the enum's own TypeParams.
+func (c *Compiler) resolveMatchFieldType(fieldType types.Type, subjectType types.Type, enum *types.Enum) types.Type {
 	var subst map[*types.TypeParam]types.Type
 	if inst, ok := subjectType.(*types.Instance); ok && enum != nil && len(enum.TypeParams()) > 0 {
 		subst = types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
@@ -4309,20 +4309,208 @@ func (c *Compiler) matchFieldNeedsDup(fieldType types.Type, subjectType types.Ty
 	if subst != nil {
 		resolved = types.Substitute(resolved, subst)
 	}
-	return extractNamed(resolved) == types.TypString
+	return resolved
 }
 
-// dupMatchBinding dups a string value from a match destructure to create an
+// matchFieldNeedsDup returns true if a match-destructured field should be dup'd.
+// B0236: Extended from strings-only to also cover vectors, channels, and safe
+// heap user types. Prevents double-frees when match-extracted values share
+// instance pointers with enum data that will be dropped.
+func (c *Compiler) matchFieldNeedsDup(fieldType types.Type, subjectType types.Type, enum *types.Enum) bool {
+	resolved := c.resolveMatchFieldType(fieldType, subjectType, enum)
+	return c.typeNeedsMatchDup(resolved)
+}
+
+// typeNeedsMatchDup returns true if a resolved type needs duping when extracted
+// from a droppable enum via match destructure. Safe to dup:
+// - Strings (dupString creates independent copy)
+// - Channels (dupChannel increments refcount)
+// - Vectors (dupVector shallow-copies buffer — safe because vector drop only frees buffer)
+// - Heap user types WITHOUT explicit drops that only have safely-duppable fields
+// NOT safe: types with explicit drops (Map, Set, custom drop) — their drop logic
+// cannot be replicated by memcpy. These need a proper Clone trait (future work).
+func (c *Compiler) typeNeedsMatchDup(resolved types.Type) bool {
+	named := extractNamed(resolved)
+	if named == nil {
+		return false
+	}
+	if named == types.TypString {
+		return true
+	}
+	if _, ok := types.AsVector(resolved); ok || named == types.TypVector {
+		return true
+	}
+	if _, ok := types.AsChannel(resolved); ok || named == types.TypChannel {
+		return true
+	}
+	// Heap user types: only safe to shallow-dup (memcpy + field dup) if ALL droppable
+	// fields can be independently dup'd. Specifically:
+	// - String fields → dupString creates independent copy ✓
+	// - Channel fields → dupChannel increments refcount ✓
+	// - Vector fields → dupVector does SHALLOW element copy. Only safe if elements
+	//   have no drops (otherwise element data is shared → double-free). ✗ for droppable.
+	// - Other heap type fields → recursive check needed.
+	// Types with explicit (non-synthesized) drops have custom cleanup logic that
+	// memcpy cannot replicate → never safe.
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return false
+	}
+	return c.heapTypeSafeToDup(named, resolved, nil)
+}
+
+// heapTypeSafeToDup returns true if a heap user type can be safely dup'd via
+// memcpy + per-field dup. The `seen` map prevents infinite recursion on cyclic types.
+// B0236: A type is safe to dup when all its droppable fields are independently
+// duppable (strings, channels, or recursively safe heap types). Vector fields
+// with droppable elements are NOT safe (dupVector does shallow element copy).
+func (c *Compiler) heapTypeSafeToDup(named *types.Named, resolved types.Type, seen map[*types.Named]bool) bool {
+	if seen == nil {
+		seen = make(map[*types.Named]bool)
+	}
+	if seen[named] {
+		return false // cyclic reference — not safe
+	}
+	seen[named] = true
+
+	// Types with explicit (non-synthesized) drops → not safe.
+	if named.HasDrop() && !named.NeedsSynthDrop() {
+		return false
+	}
+	if named.LookupMethod("drop") != nil && !named.NeedsSynthDrop() {
+		return false
+	}
+
+	// Build substitution for generic instances
+	var subst map[*types.TypeParam]types.Type
+	if inst, ok := resolved.(*types.Instance); ok && len(named.TypeParams()) > 0 {
+		subst = types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+	}
+
+	for _, f := range named.AllFields() {
+		fType := f.Type()
+		if subst != nil {
+			fType = types.Substitute(fType, subst)
+		}
+		fNamed := extractNamed(fType)
+		if fNamed == nil {
+			continue
+		}
+
+		// String, channel → safe to dup
+		if fNamed == types.TypString {
+			continue
+		}
+		if _, isChan := types.AsChannel(fType); isChan || fNamed == types.TypChannel {
+			continue
+		}
+
+		// Vector → safe only if element type is non-droppable
+		if elemType, isVec := types.AsVector(fType); isVec || fNamed == types.TypVector {
+			if isVec && fieldTypeNeedsDrop(elemType) {
+				return false // vector of droppable elements → shallow copy is unsafe
+			}
+			continue
+		}
+
+		// Primitive/value/copy types → safe (no pointer sharing)
+		if fNamed.IsValueType() || fNamed.IsCopy() || isPrimitiveScalar(fNamed) || fNamed.IsStructural() {
+			continue
+		}
+
+		// Nested heap user type → check recursively
+		if !c.heapTypeSafeToDup(fNamed, fType, seen) {
+			return false
+		}
+	}
+	return true
+}
+
+// fieldTypeNeedsDrop returns true if a type needs drop cleanup (used for vector
+// element safety check in heapTypeSafeToDup).
+func fieldTypeNeedsDrop(typ types.Type) bool {
+	named := extractNamed(typ)
+	if named != nil {
+		if named == types.TypString || named == types.TypVector || named == types.TypChannel {
+			return true
+		}
+		if named.HasDrop() || named.NeedsSynthDrop() {
+			return true
+		}
+		if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+			return true // heap user type
+		}
+	}
+	// Check for enum types (extractNamed only handles *types.Named, not *types.Enum)
+	if enum := extractEnum(typ); enum != nil {
+		if enum.HasDrop() || enum.NeedsSynthDrop() {
+			return true
+		}
+	}
+	// Check Instance with Enum origin
+	if inst, ok := typ.(*types.Instance); ok {
+		if enum, ok := inst.Origin().(*types.Enum); ok {
+			if enum.HasDrop() || enum.NeedsSynthDrop() {
+				return true
+			}
+			// Generic enums with TypeParam fields may need drop at mono time
+			for _, v := range enum.Variants() {
+				for _, f := range v.Fields() {
+					if _, isTP := f.Type().(*types.TypeParam); isTP {
+						return true // conservatively assume TypeParam may resolve to droppable
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// dupMatchBinding dups a value from a match destructure to create an
 // independent copy that won't be invalidated when the enum is dropped.
-// B0232: Prevents double-frees when match-extracted strings share instance
+// B0232: Prevents double-frees when match-extracted values share instance
 // pointers with enum data (e.g., Slot elements in Map._buckets).
+// B0236: Extended to handle all droppable types: strings, vectors, channels,
+// and heap user types (not just strings).
 // B0237: The dup'd copy is owned by whoever consumes it (push, return via PHI, etc.).
-// No post-match cleanup — consumers manage the string's lifetime.
-func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtypes.Type) {
-	dupVal := c.dupString(val)
+// No post-match cleanup — consumers manage the value's lifetime.
+func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtypes.Type, resolvedType types.Type) {
+	named := extractNamed(resolvedType)
+	var dupVal value.Value
+
+	_, isVec := types.AsVector(resolvedType)
+	_, isChan := types.AsChannel(resolvedType)
+
+	if named == types.TypString {
+		dupVal = c.dupString(val)
+	} else if isVec || named == types.TypVector {
+		elemType, ok := types.AsVector(resolvedType)
+		if !ok {
+			dupVal = c.dupVector(val, 0)
+		} else {
+			elemLLVM := c.resolveType(elemType)
+			elemSize := int64(c.typeSize(elemLLVM))
+			dupVal = c.dupVector(val, elemSize)
+		}
+	} else if isChan || named == types.TypChannel {
+		dupVal = c.dupChannel(val)
+	} else {
+		// B0236: Heap user type — allocate new instance, memcpy, dup droppable sub-fields
+		dupVal = c.dupHeapValue(val, resolvedType)
+	}
+
 	bindAlloca := c.createEntryAlloca(llvmType)
 	c.locals[name] = bindAlloca
 	c.block.NewStore(dupVal, bindAlloca)
+
+	// B0236: Register dup'd binding for scope cleanup ONLY for new dup types
+	// (heap user types, vectors, channels). String dups are NOT registered —
+	// B0237 established that dup'd strings are consumed by their match arm body
+	// (push, return, etc.) and consumers manage lifetime. Adding scope cleanup
+	// for strings would break Map's internal Slot matching which was designed
+	// without cleanup.
+	if named != types.TypString {
+		c.maybeRegisterDrop(name, bindAlloca, resolvedType)
+	}
 }
 
 // --- If expressions ---

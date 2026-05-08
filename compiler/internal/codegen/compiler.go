@@ -1765,6 +1765,119 @@ func (c *Compiler) dupChannel(ptr value.Value) value.Value {
 	)
 }
 
+// dupHeapValue duplicates a heap user type value struct by allocating a new
+// instance, memcpy'ing the original, and dup'ing any droppable sub-fields.
+// B0236: Used for match destructure of droppable enums where extracted heap
+// user type values would otherwise share instance pointers with enum data.
+func (c *Compiler) dupHeapValue(val value.Value, resolvedType types.Type) value.Value {
+	named := extractNamed(resolvedType)
+	layout := c.lookupTypeLayout(resolvedType)
+	if layout == nil || layout.Instance == nil {
+		// No layout found — return as-is (shouldn't happen for heap user types)
+		return val
+	}
+
+	instanceStructType := layout.Instance.LLVMType
+	instancePtrType := layout.InstancePtrType
+
+	// Extract instance pointer from value struct (field 1)
+	instancePtr := c.extractInstancePtr(val)
+
+	// Null check
+	entryBlock := c.block
+	nullCheck := c.block.NewICmp(enum.IPredEQ, instancePtr, constant.NewNull(irtypes.I8Ptr))
+	dupBlock := c.newBlock("heapdup.copy")
+	mergeBlock := c.newBlock("heapdup.merge")
+	entryBlock.NewCondBr(nullCheck, mergeBlock, dupBlock)
+
+	c.block = dupBlock
+
+	// Compute instance size via GEP-from-null trick
+	nullPtr := constant.NewNull(instancePtrType)
+	sizePtr := c.block.NewGetElementPtr(instanceStructType, nullPtr,
+		constant.NewInt(irtypes.I32, 1))
+	sizeRaw := c.block.NewPtrToInt(sizePtr, c.ptrIntType())
+	var size value.Value = sizeRaw
+	if c.isWasm {
+		size = c.block.NewZExt(sizeRaw, irtypes.I64)
+	}
+
+	// Allocate and memcpy
+	newPtr := c.block.NewCall(c.palAlloc, size)
+	c.block.NewCall(c.funcs["llvm.memcpy"], newPtr, instancePtr, size, constant.False)
+
+	// Dup droppable sub-fields in the new instance
+	typedNewPtr := c.block.NewBitCast(newPtr, instancePtrType)
+	c.dupHeapValueFields(named, resolvedType, layout, typedNewPtr)
+
+	// Build new value struct: same vtable, new instance pointer
+	vtablePtr := c.extractVtablePtr(val)
+	valType := val.Type().(*irtypes.StructType)
+	newVal := c.block.NewInsertValue(constant.NewZeroInitializer(valType), vtablePtr, 0)
+	newVal2 := c.block.NewInsertValue(newVal, newPtr, 1)
+	dupEnd := c.block
+	dupEnd.NewBr(mergeBlock)
+
+	// Merge: null → original val, non-null → dup'd val
+	c.block = mergeBlock
+	return c.block.NewPhi(
+		ir.NewIncoming(val, entryBlock),
+		ir.NewIncoming(newVal2, dupEnd),
+	)
+}
+
+// dupHeapValueFields walks the fields of a heap user type instance and dups
+// any droppable sub-fields (strings, vectors, channels, nested heap types).
+// B0236: Called after memcpy to fix up shared pointers in the new copy.
+func (c *Compiler) dupHeapValueFields(named *types.Named, resolvedType types.Type, layout *TypeDeclLayout, typedNewPtr value.Value) {
+	// Build substitution for generic instances
+	var subst map[*types.TypeParam]types.Type
+	if inst, ok := resolvedType.(*types.Instance); ok && len(named.TypeParams()) > 0 {
+		subst = types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+	} else if c.typeSubst != nil {
+		subst = c.typeSubst
+	}
+
+	instanceStructType := layout.Instance.LLVMType
+	for _, f := range named.AllFields() {
+		fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
+		if !ok {
+			continue
+		}
+
+		fType := f.Type()
+		if subst != nil {
+			fType = types.Substitute(fType, subst)
+		}
+		fNamed := extractNamed(fType)
+		if fNamed == nil {
+			continue
+		}
+
+		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedNewPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		fieldLLVMType := layout.Instance.Fields[fieldIdx].LLVMType
+		fieldVal := c.block.NewLoad(fieldLLVMType, fieldPtr)
+
+		if fNamed == types.TypString {
+			dup := c.dupString(fieldVal)
+			c.block.NewStore(dup, fieldPtr)
+		} else if elemType, isVec := types.AsVector(fType); isVec {
+			elemLLVM := c.resolveType(elemType)
+			elemSize := int64(c.typeSize(elemLLVM))
+			dup := c.dupVector(fieldVal, elemSize)
+			c.block.NewStore(dup, fieldPtr)
+		} else if _, isChan := types.AsChannel(fType); isChan || fNamed == types.TypChannel {
+			dup := c.dupChannel(fieldVal)
+			c.block.NewStore(dup, fieldPtr)
+		} else if !fNamed.IsValueType() && !fNamed.IsCopy() && !isPrimitiveScalar(fNamed) && !fNamed.IsStructural() {
+			// Nested heap user type — recursive dup
+			dup := c.dupHeapValue(fieldVal, fType)
+			c.block.NewStore(dup, fieldPtr)
+		}
+	}
+}
+
 // defineStringDropFunc emits an LLVM IR function that conditionally frees a
 // string instance. Literal strings (sign bit set in len field) are in .rodata
 // and must not be freed. Heap-allocated strings (positive len) are freed via pal_free.

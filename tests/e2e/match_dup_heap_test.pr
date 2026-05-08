@@ -1,0 +1,73 @@
+// B0236: Match destructure of droppable enums must dup all droppable field types
+// (strings, vectors, channels, heap user types) to prevent double-frees.
+type Wrapper {
+  string name;
+  int value;
+}
+
+// Non-generic enum to avoid B0238 (generic enum drop registration issue).
+enum WrapperHolder {
+  Holding(Wrapper item),
+  Empty,
+}
+
+enum VecHolder {
+  Data(int[] items),
+  None,
+}
+
+// Test: extract a heap user type from a droppable enum via match.
+// Without the dup fix, the Wrapper instance pointer would be shared between
+// the match binding and the enum data, causing a double-free when both drop.
+match_dup_heap_type() `test {
+  h := WrapperHolder.Holding(Wrapper(name: "hello", value: 42));
+  match h {
+    Holding(w) => {
+      assert(w.name == "hello", "heap type name");
+      assert(w.value == 42, "heap type value");
+    },
+    Empty => {
+      assert(false, "unreachable");
+    },
+  }
+}
+
+// Test: extract a vector from a droppable enum via match.
+match_dup_vector() `test {
+  h := VecHolder.Data([10, 20, 30]);
+  match h {
+    Data(v) => {
+      assert(v.len == 3, "vector len");
+      assert(v[0] == 10, "vector first");
+      assert(v[2] == 30, "vector last");
+    },
+    None => {
+      assert(false, "unreachable");
+    },
+  }
+}
+
+// Test: nested heap type — Wrapper inside another heap type inside an enum.
+type Outer {
+  Wrapper inner;
+  int extra;
+}
+
+enum Box {
+  Full(Outer content),
+  EmptyBox,
+}
+
+match_dup_nested_heap() `test {
+  b := Box.Full(Outer(inner: Wrapper(name: "nested", value: 7), extra: 100));
+  match b {
+    Full(o) => {
+      assert(o.inner.name == "nested", "nested name");
+      assert(o.inner.value == 7, "nested value");
+      assert(o.extra == 100, "nested extra");
+    },
+    EmptyBox => {
+      assert(false, "unreachable");
+    },
+  }
+}

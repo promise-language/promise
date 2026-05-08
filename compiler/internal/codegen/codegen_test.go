@@ -17049,6 +17049,24 @@ func TestVectorUserTypeElementDropWithPush(t *testing.T) {
 	}
 }
 
+// B0257: Vector element drop loop must call both the user type's drop method
+// and pal_free to free the instance memory.
+func TestVectorUserTypeDropCallsFree(t *testing.T) {
+	ir := generateIR(t, `
+		type Res { int id; drop(~this) {} }
+		test() {
+			Res[] v = [];
+			v.push(Res(id: 1));
+		}
+	`)
+	// Element drop loop header must exist
+	assertContains(t, ir, "vecdrop.head")
+	// The loop body must call Res.drop AND pal_free (not just drop)
+	assertContains(t, ir, "call void @Res.drop(")
+	// pal_free must appear in the element drop loop (for the instance memory)
+	assertContains(t, ir, "call void @pal_free(")
+}
+
 // T0109: For-in over a call expression returning a vector registers a scope binding
 // to drop the temporary vector on all exit paths (normal exit, early return).
 func TestForInVectorCallExprScopeBinding(t *testing.T) {

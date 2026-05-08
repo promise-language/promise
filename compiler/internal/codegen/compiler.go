@@ -5945,7 +5945,10 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			}
 			return
 		}
-		// User type with explicit or synthesized drop: extract instance ptr and call drop
+		// User type with explicit or synthesized drop: extract instance ptr and call drop.
+		// B0257: For types with explicit (user-written) drop, the drop method does NOT
+		// free instance memory — pal_free must be emitted separately (matching scope-exit
+		// behavior). Synthesized drops already include pal_free in the generated body.
 		if named.HasDrop() || named.NeedsSynthDrop() {
 			instance := c.extractInstancePtr(fieldVal)
 			ownerName := c.resolveMethodOwner(named, "drop")
@@ -5956,6 +5959,11 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			if dropFn, ok := c.funcs[mangledName]; ok {
 				c.block.NewCall(dropFn, instance)
 			}
+			// B0257: Explicit (user-written) drops don't free instance memory —
+			// synthesized drops already include pal_free in the generated body.
+			if named.HasDrop() && !named.NeedsSynthDrop() {
+				c.block.NewCall(c.palFree, instance)
+			}
 			return
 		}
 		// B0202: Mono instance with codegen-time synthesized drop
@@ -5964,6 +5972,10 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			if dropFn, ok := c.funcs[mangledName]; ok {
 				instance := c.extractInstancePtr(fieldVal)
 				c.block.NewCall(dropFn, instance)
+				// B0257: Explicit (user-written) drops don't free instance memory.
+				if n, ok2 := inst.Origin().(*types.Named); ok2 && n.HasDrop() && !n.NeedsSynthDrop() {
+					c.block.NewCall(c.palFree, instance)
+				}
 				return
 			}
 		}

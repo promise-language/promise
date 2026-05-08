@@ -30,20 +30,41 @@ test_discard_nested_string_vector_pop() `test {
   assert(v.len == 1, "len after pop");
 }
 
-// Discarded pop() on Vector with user type with drop.
-// Remaining leak is from Vector scope-exit not cascading element drops (B0189).
+// Discarded pop() on Vector with user type with drop (B0257).
 type Resource {
   int id;
   drop(~this) {
   }
 }
-test_discard_user_drop_pop() `test(allow_leaks: true) {
-  // B0257
+test_discard_user_drop_pop() `test {
   Resource[] v = Resource[]();
   v.push(Resource(id: 1));
   v.push(Resource(id: 2));
   v.pop();
   assert(v.len == 1, "len after pop");
+}
+
+// B0257: Vector scope-exit drops cascade to user types — no pop, just scope exit.
+test_vector_scope_exit_user_drop() `test {
+  Resource[] v = Resource[]();
+  v.push(Resource(id: 10));
+  v.push(Resource(id: 20));
+  v.push(Resource(id: 30));
+  assert(v.len == 3, "len");
+}
+
+// B0257: Vector scope-exit drops cascade to user types with explicit drop
+// and droppable fields (compiler auto-inserts field drops + pal_free frees instance).
+type Named {
+  string name;
+  drop(~this) {
+  }
+}
+test_vector_scope_exit_synth_drop() `test {
+  Named[] v = Named[]();
+  v.push(Named(name: "alice"));
+  v.push(Named(name: "bob"));
+  assert(v.len == 2, "len");
 }
 
 // Multiple discarded pops in sequence.

@@ -67,7 +67,7 @@ test_hash_different_values_different_hash() `test {
 
 // --- User type as map key ---
 
-test_user_type_as_map_key_basic() `test(allow_leaks: true) {
+test_user_type_as_map_key_basic() `test {
   map[Point, string] m = {:};
   m[Point(x: 0, y: 0)] = "origin";
   m[Point(x: 1, y: 0)] = "unit x";
@@ -103,7 +103,7 @@ test_user_type_map_key_overwrite() `test(allow_leaks: true) {
   }
 }
 
-test_user_type_map_key_absent() `test(allow_leaks: true) {
+test_user_type_map_key_absent() `test {
   map[Point, int] m = {:};
   m[Point(x: 1, y: 1)] = 42;
   if _ := m[Point(x: 2, y: 2)] {
@@ -123,7 +123,7 @@ test_user_type_map_key_len() `test(allow_leaks: true) {
 
 // --- User type in Set ---
 
-test_user_type_in_set_basic() `test(allow_leaks: true) {
+test_user_type_in_set_basic() `test {
   Set[Point] s = Set[Point]();
   s.add(Point(x: 1, y: 2));
   s.add(Point(x: 3, y: 4));
@@ -267,7 +267,7 @@ type Pair is Equal {
   }
 }
 
-test_pair_as_map_key() `test(allow_leaks: true) {
+test_pair_as_map_key() `test {
   map[Pair, string] m = {:};
   m[Pair(first: 1, second: 2)] = "one-two";
   m[Pair(first: 3, second: 4)] = "three-four";

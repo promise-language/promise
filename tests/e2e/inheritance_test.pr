@@ -528,7 +528,7 @@ test_generic_abstract_polymorphic() `test {
   assert(m.apply(100) == "100", "polymorphic generic abstract dispatch");
 }
 
-test_generic_abstract_different_instantiations() `test(allow_leaks: true) {
+test_generic_abstract_different_instantiations() `test {
   assert(accept_int_mapper(IntToString()) == "42", "int->string mapper");
   s2i := StringToInt();
   assert(s2i.apply("hello") == 5, "string->int mapper");
@@ -825,7 +825,7 @@ apply_transform(Transformer[int] t, int val) int {
   return t.transform(val);
 }
 
-test_generic_virtual_dispatch() `test(allow_leaks: true) {
+test_generic_virtual_dispatch() `test {
   assert(apply_transform(Doubler(), 5) == 10, "doubler dispatch");
   assert(apply_transform(Negator(), 5) == -5, "negator dispatch");
 }
@@ -1004,7 +1004,7 @@ get_error(Validator v) string {
   return v.error_msg();
 }
 
-test_multiple_implementors() `test(allow_leaks: true) {
+test_multiple_implementors() `test {
   assert(run_validator(LengthValidator(min_len: 3), "hi") == false, "too short");
   assert(run_validator(LengthValidator(min_len: 3), "hello") == true, "long enough");
   assert(run_validator(NotEmptyValidator(), "") == false, "empty fails");
@@ -1012,7 +1012,7 @@ test_multiple_implementors() `test(allow_leaks: true) {
   assert(run_validator(AlwaysValid(), "") == true, "always valid");
 }
 
-test_multiple_implementors_error_msg() `test(allow_leaks: true) {
+test_multiple_implementors_error_msg() `test {
   assert(get_error(LengthValidator(min_len: 3)) == "too short", "length error msg");
   assert(get_error(NotEmptyValidator()) == "cannot be empty", "not-empty error msg");
   assert(get_error(AlwaysValid()) == "", "always valid no error");

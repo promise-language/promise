@@ -337,7 +337,7 @@ accept_str_adder(Adder[string] a) string {
   return a.add("foo", "bar");
 }
 
-test_multi_instantiation_dispatch() `test(allow_leaks: true) {
+test_multi_instantiation_dispatch() `test {
   assert(accept_int_adder(IntAdder()) == 30, "int adder dispatch");
   assert(accept_str_adder(StrAdder()) == "foobar", "str adder dispatch");
 }

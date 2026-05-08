@@ -791,7 +791,7 @@ test_env_values_match_get() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_env_has_entries() `test(allow_leaks: true, exclude: "wasm32") {
+test_env_has_entries() `test(exclude: "wasm32") {
   map[string, string] e = env;
   assert(e.len > 0, "env should have at least one entry");
 }

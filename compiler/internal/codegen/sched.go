@@ -33,7 +33,7 @@ const (
 // promise_panic_msg sets gPanickedHeapMsg (heap-allocated copy, must free in goroutine_exit).
 const (
 	gPanickedRodata  = 1 // panic_msg is a C string (may be .rodata — don't free)
-	gPanickedHeapMsg = 2 // panic_msg is a heap-allocated copy (must free, B0225)
+	gPanickedHeapMsg = 2 // panic_msg is a heap-allocated copy (must free)
 )
 
 // G status values.
@@ -259,18 +259,8 @@ func (c *Compiler) defineSchedulerGlobals() {
 	sched.Init = constant.NewZeroInitializer(schedTy)
 	c.schedGlobal = sched
 
-	// @__promise_panic_jmpbuf = [thread_local] global i8* null
-	// Each M thread stores a pointer to its stack-allocated jmp_buf here.
-	// promise_panic uses this to longjmp back to the scheduler on non-main goroutine panics.
-	panicJmpBuf := c.module.NewGlobal("__promise_panic_jmpbuf", irtypes.I8Ptr)
-	panicJmpBuf.Init = constant.NewNull(irtypes.I8Ptr)
-	if !c.isWasm {
-		panicJmpBuf.TLSModel = enum.TLSModelGeneric
-	}
-	c.panicJmpBufGlobal = panicJmpBuf
-
 	// @__promise_test_jmpbuf = [thread_local] global i8* null
-	// Separate from panicJmpBuf — used ONLY by the test trampoline for per-test
+	// Used ONLY by the test trampoline for per-test
 	// panic recovery. The test thread sets this before calling the test function.
 	// promise_panic checks this (for main goroutine / no goroutine context) to
 	// longjmp back to the trampoline instead of exiting.
@@ -678,14 +668,6 @@ func (c *Compiler) defineSchedLoopFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReadyCount)))
 	c.emitAtomicAdd(entry, readyField, constant.NewInt(irtypes.I32, 1), irtypes.I32)
 
-	// Alloca for setjmp jmp_buf must be in the entry block so LLVM treats it
-	// as a static alloca. A dynamic alloca in the run_g block would leak 256
-	// bytes per goroutine resume (never freed until function return).
-	jmpBufType := irtypes.NewArray(256, irtypes.I8)
-	jmpBufAlloca := entry.NewAlloca(jmpBufType)
-	// 16-byte align: required on MSVC x64 (_JUMP_BUFFER stores XMM regs), harmless elsewhere.
-	jmpBufAlloca.Align = 16
-
 	// Set TLS current_m once (M is fixed for this thread's lifetime).
 	entry.NewStore(mParam, c.currentMGlobal)
 	entry.NewBr(loop)
@@ -748,36 +730,10 @@ func (c *Compiler) defineSchedLoopFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldCoroHandle)))
 	coroHandle := runG.NewLoad(irtypes.I8Ptr, handleField)
 
-	// Set up setjmp for panic recovery before coro.resume.
-	// jmpBufAlloca is in the entry block (static alloca, reused each iteration).
-	jmpBufPtr := runG.NewBitCast(jmpBufAlloca, irtypes.I8Ptr)
-	runG.NewStore(jmpBufPtr, c.panicJmpBufGlobal)
-
-	setjmpResult := c.callSetjmp(runG, jmpBufPtr)
-	isPanicReturn := runG.NewICmp(enum.IPredNE, setjmpResult, constant.NewInt(irtypes.I32, 0))
-	normalResumeBlk := fn.NewBlock("normal_resume")
-	panicRecoveryBlk := fn.NewBlock("panic_recovery")
-	runG.NewCondBr(isPanicReturn, panicRecoveryBlk, normalResumeBlk)
-
-	// normalResume: call coro.resume (normal path)
-	normalResumeBlk.NewCall(c.coroResume, coroHandle)
-	normalResumeBlk.NewBr(afterResume)
-
-	// panicRecovery: goroutine panicked, longjmp'd back here.
-	// G.panicked is already set by promise_panic.
-	// goroutine_exit checks G.panicked and skips coro.destroy for panicked goroutines.
-
-	// Clear P.current_g before goroutine_exit
-	panicPRaw := panicRecoveryBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
-	panicPPtr := panicRecoveryBlk.NewBitCast(panicPRaw, irtypes.NewPointer(pTy))
-	pCurGFieldPanic := panicRecoveryBlk.NewGetElementPtr(pTy, panicPPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
-	panicRecoveryBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGFieldPanic)
-
-	panicRecoveryBlk.NewCall(c.funcs["promise_goroutine_exit"], gRaw)
-	panicRecoveryBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
-	panicRecoveryBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
-	panicRecoveryBlk.NewBr(loop)
+	// Resume coroutine. Panicked goroutines now reach final suspend via TLS
+	// panic flag propagation (T0146-T0148), so no setjmp/longjmp recovery needed.
+	runG.NewCall(c.coroResume, coroHandle)
+	runG.NewBr(afterResume)
 
 	// afterResume: check if coroutine is done
 	// Reload gRaw from TLS (may have been changed if G migrated, but for now it's safe)
@@ -1829,37 +1785,25 @@ func (c *Compiler) defineGoroutineExitFunc() {
 	// so we must NOT access G fields below — use early-loaded values instead.
 	waitersDone.NewCall(c.palMutexUnlock, doneLockExit)
 
-	// Destroy coroutine. Panicked goroutines can't use coro.destroy (UB on non-suspended
-	// coro after longjmp), so free the coroutine frame directly instead (B0225).
+	// Pre-load panic fields for cleanup in the non-task free path.
 	panickedField := entry.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
 	earlyPanicked := entry.NewLoad(irtypes.I8, panickedField)
-
-	// Pre-load panic_msg for cleanup in the non-task free path (B0225).
 	earlyPanicMsgField := entry.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
 	earlyPanicMsg := entry.NewLoad(irtypes.I8Ptr, earlyPanicMsgField)
 
-	isPanicked := waitersDone.NewICmp(enum.IPredNE, earlyPanicked, constant.NewInt(irtypes.I8, 0))
-	destroyCoroBlk := fn.NewBlock("destroy_coro")
-	freeFrameBlk := fn.NewBlock("free_coro_frame")
-	afterDestroyBlk := fn.NewBlock("after_destroy")
-	waitersDone.NewCondBr(isPanicked, freeFrameBlk, destroyCoroBlk)
-
-	// free_coro_frame: panicked goroutine — free coroutine frame directly (B0225).
-	freeFrameBlk.NewCall(c.palFree, earlyCoroHandle)
-	freeFrameBlk.NewBr(afterDestroyBlk)
-
-	destroyCoroBlk.NewCall(c.coroDestroy, earlyCoroHandle)
-	destroyCoroBlk.NewBr(afterDestroyBlk)
+	// Destroy coroutine. Panicked goroutines now reach final suspend via TLS
+	// panic flag propagation (T0146-T0148), so coro.destroy is always safe.
+	waitersDone.NewCall(c.coroDestroy, earlyCoroHandle)
 
 	// Signal main_done if this is G0 (id == 0)
-	isG0 := afterDestroyBlk.NewICmp(enum.IPredEQ, earlyGID, constant.NewInt(irtypes.I64, 0))
+	isG0 := waitersDone.NewICmp(enum.IPredEQ, earlyGID, constant.NewInt(irtypes.I64, 0))
 
 	signalMain := fn.NewBlock("signal_main")
 	freeG := fn.NewBlock("free_g")
 
-	afterDestroyBlk.NewCondBr(isG0, signalMain, freeG)
+	waitersDone.NewCondBr(isG0, signalMain, freeG)
 
 	// signalMain: signal main done
 	schedTy := schedStructType()
@@ -1895,7 +1839,7 @@ func (c *Compiler) defineGoroutineExitFunc() {
 	skipFreeCont := c.emitGsDrainSignal(fn, skipFree, gsCompletedField, "task")
 	skipFreeCont.NewRet(nil)
 
-	// doFree: free panic_msg if heap-allocated (panicked==2, B0225) then free G.
+	// doFree: free panic_msg if heap-allocated (panicked==2) then free G.
 	// panicked=1 (promise_panic) means C string that may be .rodata — don't free.
 	// panicked=2 (promise_panic_msg) means heap-allocated copy — must free.
 	isHeapMsg := doFree.NewICmp(enum.IPredEQ, earlyPanicked, constant.NewInt(irtypes.I8, int64(gPanickedHeapMsg)))

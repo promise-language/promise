@@ -268,7 +268,6 @@ type Compiler struct {
 	currentPGlobal      *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
 	currentMGlobal      *ir.Global // @__promise_current_m (TLS, i8*) — current M for syscall handoff
 	schedGlobal         *ir.Global // @__promise_sched (global Sched struct)
-	panicJmpBufGlobal   *ir.Global // @__promise_panic_jmpbuf (TLS, i8*) — setjmp buf for goroutine panic recovery
 	testJmpBufGlobal    *ir.Global // @__promise_test_jmpbuf (TLS, i8*) — setjmp buf for per-test panic recovery
 	testPanicMsgGlobal  *ir.Global // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
 	testDoneGlobal      *ir.Global // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion

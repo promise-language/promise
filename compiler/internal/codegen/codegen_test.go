@@ -12687,16 +12687,17 @@ func TestGoroutineExitUsesDoneLock(t *testing.T) {
 	assertContains(t, ir, "waiters_done")
 }
 
-// B0225: goroutine_exit must free the coroutine frame for panicked goroutines
-// (can't call coro.destroy — UB on non-suspended coro after longjmp).
-func TestGoroutineExitFreeCoroFrameOnPanic(t *testing.T) {
+// T0149: goroutine_exit always calls coro.destroy (panicked goroutines reach
+// final suspend via TLS flag propagation, so coro.destroy is safe).
+func TestGoroutineExitAlwaysCoroDestroy(t *testing.T) {
 	ir := generateIR(t, `
 		main() { }
 	`)
-	// goroutine_exit should have the free_coro_frame block for panicked goroutines
-	assertContains(t, ir, "free_coro_frame:")
-	// and the normal coro.destroy path for non-panicked goroutines
-	assertContains(t, ir, "destroy_coro:")
+	fn := extractFunction(ir, "promise_goroutine_exit")
+	// Must call coro.destroy unconditionally
+	assertContains(t, fn, "call void @llvm.coro.destroy")
+	// Must NOT have the old free_coro_frame fallback for panicked goroutines
+	assertNotContains(t, fn, "free_coro_frame:")
 }
 
 // B0225: goroutine_exit frees G.panic_msg when panicked==2 (heap-allocated msg).
@@ -14847,23 +14848,20 @@ func TestSchedLoopSetsCurrentM(t *testing.T) {
 	assertContains(t, ir, "promise_sched_loop")
 }
 
-func TestSchedLoopJmpBufInEntryBlock(t *testing.T) {
-	// B0120: jmpBuf alloca must be in the entry block (static alloca),
-	// not in the run_g block where it would leak 256 bytes per resume.
+func TestSchedLoopNoSetjmp(t *testing.T) {
+	// T0149: sched_loop no longer uses setjmp/longjmp for panic recovery.
+	// Panicked goroutines reach final suspend via TLS panic flag propagation
+	// (T0146-T0148), so the scheduler just calls coro.resume directly.
 	ir := generateIR(t, `
 		main() { }
 	`)
-	// The alloca [256 x i8] must appear in the entry block of sched_loop,
-	// before the first branch instruction (br label %loop).
 	fn := extractFunction(ir, "promise_sched_loop")
-	entryEnd := strings.Index(fn, "br label %loop")
-	if entryEnd < 0 {
-		t.Fatal("missing 'br label %loop' in sched_loop")
-	}
-	entryBlock := fn[:entryEnd]
-	if !strings.Contains(entryBlock, "alloca [256 x i8]") {
-		t.Error("jmpBuf alloca [256 x i8] must be in the entry block of sched_loop, not in run_g")
-	}
+	// Must NOT contain setjmp or jmpBuf alloca
+	assertNotContains(t, fn, "alloca [256 x i8]")
+	assertNotContains(t, fn, "setjmp")
+	assertNotContains(t, fn, "panic_recovery")
+	// Must contain direct coro.resume in the run_g flow
+	assertContains(t, fn, "call void @llvm.coro.resume")
 }
 
 func TestParkMConditionalRestore(t *testing.T) {

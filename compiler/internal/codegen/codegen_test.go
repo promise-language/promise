@@ -6391,6 +6391,18 @@ func TestReturnThisValueType(t *testing.T) {
 	assertContains(t, ir, "load %promise_Point_v")
 }
 
+// B0250: Assigning the result of a method that returns `this` must clear the
+// receiver's drop flag to prevent double-free (both variables share the same instance).
+func TestReturnThisClearsReceiverDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { int value; self() Wrapper { return this; } }
+		main() { w := Wrapper(value: 42); w2 := w.self(); }
+	`)
+	// Should emit a runtime instance-pointer comparison and conditional drop flag clear
+	assertContains(t, ir, "return.this.clear")
+	assertContains(t, ir, "return.this.skip")
+}
+
 func TestOptionalParamWrapping(t *testing.T) {
 	ir := generateIR(t, `
 		foo(int? x) int {

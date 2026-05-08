@@ -498,6 +498,20 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			c.clearDropFlag(ident.Name)
 		}
 	}
+	// B0250: If RHS is a method call returning the same heap instance as its receiver,
+	// clear the receiver's drop flag to prevent double-free. This handles the pattern
+	// `w2 := w.self()` where self() does `return this` from a borrowing method —
+	// both w and w2 would otherwise try to free the same heap allocation.
+	if !isStructuralTarget {
+		if call, ok := s.Value.(*ast.CallExpr); ok {
+			if member, ok := call.Callee.(*ast.MemberExpr); ok {
+				if recvIdent, ok := member.Target.(*ast.IdentExpr); ok {
+					c.maybeClearReceiverDropFlag(val, recvIdent.Name, resolvedExprType)
+				}
+			}
+		}
+	}
+
 	// T0073: Claim string temp — ownership transferred to this variable.
 	// B0204: Use resolvedExprType (substituted) so that generic T=string is handled.
 	if resolvedExprType != nil && extractNamed(resolvedExprType) == types.TypString {
@@ -621,6 +635,16 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 		}
 		c.clearDropFlag(ident.Name)
 	}
+	// B0250: If RHS is a method call returning the same heap instance as its receiver,
+	// clear the receiver's drop flag to prevent double-free.
+	if call, ok := s.Value.(*ast.CallExpr); ok {
+		if member, ok := call.Callee.(*ast.MemberExpr); ok {
+			if recvIdent, ok := member.Target.(*ast.IdentExpr); ok {
+				c.maybeClearReceiverDropFlag(val, recvIdent.Name, typ)
+			}
+		}
+	}
+
 	// T0073: Claim string temp — ownership transferred to this variable.
 	if extractNamed(typ) == types.TypString {
 		c.claimStringTemp(val)
@@ -3802,6 +3826,47 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 	result = c.block.NewInsertValue(result, vtablePtr, 0)
 	result = c.block.NewInsertValue(result, val, 1)
 	return result
+}
+
+// maybeClearReceiverDropFlag emits a runtime check: if the method call result's
+// instance pointer matches the receiver variable's instance pointer, clear the
+// receiver's drop flag. This prevents double-free when a borrowing method does
+// `return this` — both the receiver and the result would otherwise own the same
+// heap allocation. B0250.
+func (c *Compiler) maybeClearReceiverDropFlag(val value.Value, recvName string, retType types.Type) {
+	if retType == nil {
+		return
+	}
+	named := extractNamed(retType)
+	if named == nil || classify(named) != CatUnknown || named == types.TypString || named == types.TypVoid || named == types.TypNone || named.IsValueType() {
+		return
+	}
+	recvAlloca, exists := c.locals[recvName]
+	if !exists {
+		return
+	}
+	flag, hasDrop := c.dropFlags[recvName]
+	if !hasDrop {
+		return
+	}
+
+	// val must be a value struct {i8*, i8*} to extract the instance pointer.
+	if _, ok := val.Type().(*irtypes.StructType); !ok {
+		return
+	}
+	retInst := c.block.NewExtractValue(val, 1)
+	recvVal := c.block.NewLoad(userValueType(), recvAlloca)
+	recvInst := c.block.NewExtractValue(recvVal, 1)
+	same := c.block.NewICmp(enum.IPredEQ, retInst, recvInst)
+
+	clearBlk := c.newBlock("return.this.clear")
+	skipBlk := c.newBlock("return.this.skip")
+	c.block.NewCondBr(same, clearBlk, skipBlk)
+
+	clearBlk.NewStore(constant.False, flag)
+	clearBlk.NewBr(skipBlk)
+
+	c.block = skipBlk
 }
 
 // --- Raise ---

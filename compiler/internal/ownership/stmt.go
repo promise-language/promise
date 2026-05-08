@@ -6,7 +6,9 @@ import (
 )
 
 // checkBlock walks all statements in a block sequentially.
-// After each statement, call-scoped borrows are expired.
+// After each statement, call-scoped borrows are expired, and NLL borrow
+// narrowing (T0164) expires variable-scoped borrows whose borrower's last
+// use was this statement.
 func (c *Checker) checkBlock(block *ast.Block) {
 	if block == nil {
 		return
@@ -15,6 +17,13 @@ func (c *Checker) checkBlock(block *ast.Block) {
 		c.checkStmt(stmt)
 		if c.borrows != nil {
 			c.borrows.ExpireCallScoped()
+			// T0164: NLL borrow narrowing — expire borrows whose borrower
+			// variable's last use was this statement.
+			if names, ok := c.refLastUses[stmt]; ok {
+				for _, name := range names {
+					c.borrows.ExpireBorrower(name)
+				}
+			}
 		}
 	}
 }

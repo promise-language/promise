@@ -25,6 +25,11 @@ type Checker struct {
 	declOrder map[string]int        // variable name → declaration order (0-based)
 	nextOrder int                   // next declaration order to assign
 	varTypes  map[string]types.Type // variable name → type (for drop check)
+
+	// NLL borrow narrowing (T0164): maps statement → ref variable names whose
+	// last use is that statement. After processing such a statement, borrows
+	// held by those variables are expired.
+	refLastUses map[ast.Stmt][]string
 }
 
 // Check performs ownership analysis on the given file using sema results.
@@ -32,8 +37,9 @@ type Checker struct {
 // NLL last-use analysis results for early drop insertion in codegen (B0035).
 func Check(file *ast.File, info *sema.Info) []error {
 	c := &Checker{
-		file: file,
-		info: info,
+		file:        file,
+		info:        info,
+		refLastUses: AnalyzeRefLastUses(file, info), // T0164: NLL borrow narrowing
 	}
 	c.check()
 	// B0035: Run NLL last-use analysis after ownership check.

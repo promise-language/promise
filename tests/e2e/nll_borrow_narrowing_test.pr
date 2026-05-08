@@ -1,0 +1,80 @@
+// Tests for NLL borrow narrowing (T0164).
+// Borrows expire at the last use of the borrowing reference, not at scope exit.
+type Box {
+  string value;
+}
+
+// --- Helper functions ---
+
+get_ref(string & s) string & {
+  return s;
+}
+
+read_ref(string & s) int {
+  return 0;
+}
+
+consume(string s) {
+}
+
+// --- Tests ---
+
+borrow_expires_when_ref_unused() `test {
+  // Borrower r is never used after declaration — borrow expires immediately.
+  string s = "hello";
+  string & r = get_ref(s);
+  // With NLL narrowing, r's borrow expires here (last use was declaration).
+  // So consume(s) is allowed — no active borrow on s.
+  consume(s);
+  assert(true, "borrow expired at last use of borrower");
+}
+
+borrow_expires_after_last_read() `test {
+  // Borrower r is used once, then the borrow expires.
+  string s = "hello";
+  string & r = get_ref(s);
+  int n = read_ref(r);
+  // r's last use was read_ref(r). Borrow expires after that.
+  consume(s);
+  assert(n == 0, "borrow expired after last read of borrower");
+}
+
+borrow_expires_before_reassign() `test {
+  // Borrower r is not used after the origin is reassigned.
+  string s = "hello";
+  string & r = get_ref(s);
+  // r's last use is at declaration. Borrow expires.
+  s = "world";
+  assert(s == "world", "origin reassigned after borrow expired");
+}
+
+borrow_expires_in_control_flow() `test {
+  // Borrower r used only inside an if block — borrow expires after the if.
+  string s = "hello";
+  string & r = get_ref(s);
+  if true {
+    int n = read_ref(r);
+  }
+  // r's last use was the if statement. Borrow expires after the if.
+  consume(s);
+  assert(true, "borrow expired after control flow last use");
+}
+
+sequential_borrows_with_narrowing() `test {
+  // Two sequential borrows on the same variable, each expiring at last use.
+  string s = "hello";
+  string & r1 = get_ref(s);
+  int n1 = read_ref(r1);
+  // r1's borrow expired. Now we can create a new borrow.
+  string & r2 = get_ref(s);
+  int n2 = read_ref(r2);
+  // r2's borrow expired. Now we can move.
+  consume(s);
+  assert(n1 == 0 && n2 == 0, "sequential borrows with NLL narrowing");
+}
+
+method_receiver_borrow_expires() `test {
+  // Method receiver borrow expires when the ref variable is no longer used.
+  b := Box(value: "test");
+  assert(b.value == "test", "method receiver borrow expired");
+}

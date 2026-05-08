@@ -3,6 +3,7 @@ package ownership
 import (
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/sema"
+	"djabi.dev/go/promise_lang/internal/types"
 )
 
 // AnalyzeLastUses performs non-lexical lifetime (NLL) analysis to find early drop
@@ -540,6 +541,144 @@ func (a *lastUseAnalyzer) patternReferencesVar(pat ast.MatchPattern, name string
 		return a.exprReferencesVar(p.Expr, name)
 	case *ast.LiteralMatchPattern:
 		return a.exprReferencesVar(p.Value, name)
+	}
+	return false
+}
+
+// AnalyzeRefLastUses finds last-use points for reference-type variables (SharedRef/MutRef).
+// Used by the ownership checker for NLL borrow narrowing (T0164): borrows expire at the
+// last use of the borrower variable rather than at scope exit.
+// Returns a map from statement AST node to ref variable names whose last use is that
+// statement. Unlike AnalyzeLastUses, this includes last-statement cases because borrows
+// don't automatically expire at scope exit.
+func AnalyzeRefLastUses(file *ast.File, info *sema.Info) map[ast.Stmt][]string {
+	a := &lastUseAnalyzer{
+		info:       info,
+		earlyDrops: make(map[ast.Stmt][]string), // unused, satisfies struct
+	}
+	result := make(map[ast.Stmt][]string)
+
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Body != nil {
+				a.analyzeRefBlock(d.Body, result)
+			}
+		case *ast.TypeDecl:
+			for _, md := range d.Methods {
+				if md.Body != nil {
+					a.analyzeRefBlock(md.Body, result)
+				}
+			}
+		case *ast.EnumDecl:
+			for _, md := range d.Methods {
+				if md.Body != nil {
+					a.analyzeRefBlock(md.Body, result)
+				}
+			}
+		}
+	}
+	return result
+}
+
+// analyzeRefBlock finds last-use points for reference-type variables declared in this block.
+// Registers expiry for ALL last-use points (including the final statement) because
+// borrows don't automatically expire at scope exit — they need explicit expiry.
+func (a *lastUseAnalyzer) analyzeRefBlock(block *ast.Block, result map[ast.Stmt][]string) {
+	if block == nil || len(block.Stmts) == 0 {
+		return
+	}
+	stmts := block.Stmts
+
+	// Recurse into sub-blocks for inner-scope ref variables.
+	for _, stmt := range stmts {
+		a.analyzeRefStmtSubBlocks(stmt, result)
+	}
+
+	// Collect reference-type variable declarations in this block.
+	type varInfo struct {
+		name    string
+		declIdx int
+	}
+	var refVars []varInfo
+
+	for i, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.TypedVarDecl:
+			if s.Name != "_" && isRefTypeRef(s.Type) {
+				refVars = append(refVars, varInfo{name: s.Name, declIdx: i})
+			}
+		case *ast.InferredVarDecl:
+			if s.Name != "_" && a.isVarRefType(s.Value) {
+				refVars = append(refVars, varInfo{name: s.Name, declIdx: i})
+			}
+		}
+	}
+
+	if len(refVars) == 0 {
+		return
+	}
+
+	for _, v := range refVars {
+		lastUseIdx := -1
+		for i := len(stmts) - 1; i >= v.declIdx; i-- {
+			if a.stmtReferencesVar(stmts[i], v.name) {
+				lastUseIdx = i
+				break
+			}
+		}
+		if lastUseIdx == -1 {
+			continue
+		}
+		// Register ALL last-use points (including last stmt).
+		result[stmts[lastUseIdx]] = append(result[stmts[lastUseIdx]], v.name)
+	}
+}
+
+// analyzeRefStmtSubBlocks recurses into sub-blocks for ref last-use analysis.
+func (a *lastUseAnalyzer) analyzeRefStmtSubBlocks(stmt ast.Stmt, result map[ast.Stmt][]string) {
+	switch s := stmt.(type) {
+	case *ast.IfStmt:
+		a.analyzeRefBlock(s.Body, result)
+		if s.Else != nil {
+			a.analyzeRefStmtSubBlocks(s.Else, result)
+		}
+	case *ast.WhileStmt:
+		a.analyzeRefBlock(s.Body, result)
+	case *ast.WhileUnwrapStmt:
+		a.analyzeRefBlock(s.Body, result)
+	case *ast.ForInStmt:
+		a.analyzeRefBlock(s.Body, result)
+	case *ast.ClassicForStmt:
+		a.analyzeRefBlock(s.Body, result)
+	case *ast.InfiniteLoop:
+		a.analyzeRefBlock(s.Body, result)
+	case *ast.Block:
+		a.analyzeRefBlock(s, result)
+	}
+}
+
+// isRefTypeRef returns true if the type reference is a shared or mutable reference type.
+func isRefTypeRef(tr ast.TypeRef) bool {
+	switch tr.(type) {
+	case *ast.SharedRefTypeRef, *ast.MutRefTypeRef:
+		return true
+	}
+	return false
+}
+
+// isVarRefType returns true if the expression's resolved type is a reference type.
+func (a *lastUseAnalyzer) isVarRefType(expr ast.Expr) bool {
+	if expr == nil {
+		return false
+	}
+	typ := a.info.Types[expr]
+	if typ == nil {
+		return false
+	}
+	switch typ.(type) {
+	case *types.SharedRef, *types.MutRef:
+		return true
 	}
 	return false
 }

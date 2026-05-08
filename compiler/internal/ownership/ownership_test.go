@@ -900,7 +900,8 @@ func TestSequentialSharedThenMutOK(t *testing.T) {
 
 func TestStoredBorrowBlocksMove(t *testing.T) {
 	// When a function returns a ref type and the result is stored,
-	// borrow is promoted to variable-scoped. Moving the origin is blocked.
+	// borrow is promoted to variable-scoped. Moving the origin is blocked
+	// while the borrower is still alive (T0164: NLL narrows to last-use).
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		consume(string s) {}
@@ -908,13 +909,14 @@ func TestStoredBorrowBlocksMove(t *testing.T) {
 			string s = "hello";
 			string &r = getRef(s);
 			consume(s);
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
 }
 
 func TestStoredBorrowBlocksMutBorrow(t *testing.T) {
-	// Stored shared borrow blocks a subsequent mutable borrow.
+	// Stored shared borrow blocks a subsequent mutable borrow while borrower is alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		modify(string ~s) {}
@@ -922,13 +924,14 @@ func TestStoredBorrowBlocksMutBorrow(t *testing.T) {
 			string s = "hello";
 			string &r = getRef(s);
 			modify(s);
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot borrow 's' as mutable")
 }
 
 func TestStoredMutBorrowBlocksShared(t *testing.T) {
-	// Stored mutable borrow blocks a subsequent shared borrow.
+	// Stored mutable borrow blocks a subsequent shared borrow while borrower is alive.
 	errs := ownerErrs(t, `
 		getMut(string ~s) string~ { return s; }
 		read(string &s) {}
@@ -936,6 +939,7 @@ func TestStoredMutBorrowBlocksShared(t *testing.T) {
 			string s = "hello";
 			string ~r = getMut(s);
 			read(s);
+			string ~r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot borrow 's' as shared")
@@ -944,13 +948,14 @@ func TestStoredMutBorrowBlocksShared(t *testing.T) {
 // === Move-while-borrowed ===
 
 func TestMoveWhileBorrowedAssign(t *testing.T) {
-	// Assigning a borrowed variable to another variable is a move.
+	// Assigning a borrowed variable to another variable is a move while borrower is alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
 			string t = s;
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
@@ -959,13 +964,14 @@ func TestMoveWhileBorrowedAssign(t *testing.T) {
 // === Assignment-while-borrowed ===
 
 func TestAssignWhileBorrowed(t *testing.T) {
-	// Cannot reassign a variable while it is borrowed by another variable.
+	// Cannot reassign a variable while it is borrowed by another variable (borrower alive).
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
 			s = "world";
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot assign to 's' while it is borrowed")
@@ -973,7 +979,8 @@ func TestAssignWhileBorrowed(t *testing.T) {
 
 func TestBorrowerReassignExpiresBorrow(t *testing.T) {
 	// When the borrower variable is reassigned, the old borrow expires.
-	// However, if r is reassigned to a new borrow of s, s is still borrowed.
+	// However, if r is reassigned to a new borrow of s and r is still alive,
+	// s is still borrowed (T0164: NLL narrows to last-use of borrower).
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		consume(string s) {}
@@ -982,9 +989,10 @@ func TestBorrowerReassignExpiresBorrow(t *testing.T) {
 			string &r = getRef(s);
 			r = getRef(s);
 			consume(s);
+			string &r2 = r;
 		}
 	`)
-	// s is still borrowed through the new r
+	// s is still borrowed through the new r (r is alive past consume)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
 }
 
@@ -1053,7 +1061,8 @@ func TestMethodMutReceiverCallScoped(t *testing.T) {
 }
 
 func TestMethodReceiverStoredBorrow(t *testing.T) {
-	// Method returning a ref type creates a stored borrow on the receiver.
+	// Method returning a ref type creates a stored borrow on the receiver
+	// that persists while the borrower is alive (T0164: NLL).
 	errs := ownerErrs(t, `
 		type T {
 			int x;
@@ -1064,6 +1073,7 @@ func TestMethodReceiverStoredBorrow(t *testing.T) {
 			T t = T(x: 1);
 			int &r = t.getRef();
 			consume(t);
+			int &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 't' while it is borrowed")
@@ -1072,7 +1082,7 @@ func TestMethodReceiverStoredBorrow(t *testing.T) {
 // === Control flow and borrows ===
 
 func TestBorrowInIfBranch(t *testing.T) {
-	// Conservative: stored borrow created in then-branch persists after if.
+	// Stored borrow created in then-branch persists while borrower is alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		consume(string s) {}
@@ -1084,13 +1094,14 @@ func TestBorrowInIfBranch(t *testing.T) {
 				r = getRef(s);
 			}
 			consume(s);
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
 }
 
 func TestBorrowInLoop(t *testing.T) {
-	// Conservative: stored borrow created in loop body persists after loop.
+	// Stored borrow created in loop body persists while borrower is alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		consume(string s) {}
@@ -1102,13 +1113,14 @@ func TestBorrowInLoop(t *testing.T) {
 				break;
 			}
 			consume(s);
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
 }
 
 func TestBorrowInBothBranches(t *testing.T) {
-	// Conservative: stored borrow in both branches → borrow persists.
+	// Stored borrow in both branches persists while borrower is alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		consume(string s) {}
@@ -1122,6 +1134,7 @@ func TestBorrowInBothBranches(t *testing.T) {
 				r = getRef(s);
 			}
 			consume(s);
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
@@ -1186,7 +1199,7 @@ func TestMutBorrowParamDoesNotMove(t *testing.T) {
 // === Cross-statement borrow: inferred var decl ===
 
 func TestStoredBorrowInferredVarDecl(t *testing.T) {
-	// Borrow promotion should also work with inferred var decls.
+	// Borrow promotion works with inferred var decls; persists while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		consume(string s) {}
@@ -1194,6 +1207,7 @@ func TestStoredBorrowInferredVarDecl(t *testing.T) {
 			string s = "hello";
 			r := getRef(s);
 			consume(s);
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
@@ -2153,8 +2167,8 @@ func TestClassicForInitBorrowDoesNotLeakToBody(t *testing.T) {
 // --- Negative tests: variable-scoped borrows must still be caught ---
 
 func TestStoredBorrowStillBlocksInWhileBody(t *testing.T) {
-	// A stored borrow from before the loop must still block conflicting
-	// borrows inside the loop body — only call-scoped borrows are expired.
+	// A stored borrow blocks conflicting borrows inside a loop body
+	// while the borrower is alive (T0164: NLL narrows to last-use).
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		mutate(string ~s) {}
@@ -2165,13 +2179,14 @@ func TestStoredBorrowStillBlocksInWhileBody(t *testing.T) {
 				mutate(s);
 				break;
 			}
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot borrow 's' as mutable")
 }
 
 func TestStoredBorrowStillBlocksInWhileUnwrapBody(t *testing.T) {
-	// Variable-scoped borrow persists into while-unwrap body.
+	// Variable-scoped borrow persists into while-unwrap body while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		consume(string s) {}
@@ -2182,14 +2197,14 @@ func TestStoredBorrowStillBlocksInWhileUnwrapBody(t *testing.T) {
 			while v := nums.pop() {
 				consume(s);
 			}
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
 }
 
 func TestStoredBorrowCreatedInLoopPersists(t *testing.T) {
-	// A stored borrow created in a while-unwrap body persists after the
-	// loop (conservative merge), blocking subsequent moves.
+	// A stored borrow created in a while-unwrap body persists while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		consume(string s) {}
@@ -2201,13 +2216,14 @@ func TestStoredBorrowCreatedInLoopPersists(t *testing.T) {
 				r = getRef(s);
 			}
 			consume(s);
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
 }
 
 func TestStoredBorrowStillBlocksInIfBody(t *testing.T) {
-	// Variable-scoped borrow persists into if body — only call-scoped expired.
+	// Variable-scoped borrow persists into if body while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		mutate(string ~s) {}
@@ -2217,13 +2233,14 @@ func TestStoredBorrowStillBlocksInIfBody(t *testing.T) {
 			if true {
 				mutate(s);
 			}
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot borrow 's' as mutable")
 }
 
 func TestStoredBorrowStillBlocksInForInBody(t *testing.T) {
-	// Variable-scoped borrow persists into for-in body.
+	// Variable-scoped borrow persists into for-in body while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		consume(string s) {}
@@ -2234,13 +2251,14 @@ func TestStoredBorrowStillBlocksInForInBody(t *testing.T) {
 			for item in items {
 				consume(s);
 			}
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
 }
 
 func TestStoredBorrowStillBlocksInClassicForBody(t *testing.T) {
-	// Variable-scoped borrow persists into classic for body.
+	// Variable-scoped borrow persists into classic for body while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		consume(string s) {}
@@ -2250,6 +2268,7 @@ func TestStoredBorrowStillBlocksInClassicForBody(t *testing.T) {
 			for i := 0; i < 1; i += 1 {
 				consume(s);
 			}
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
@@ -2458,7 +2477,7 @@ func TestDisjointFieldBorrowsMixedOK(t *testing.T) {
 }
 
 func TestSameFieldStoredMutConflict(t *testing.T) {
-	// Stored mutable borrow of a field blocks a second mutable borrow of the same field.
+	// Stored mutable borrow of a field blocks a second mutable borrow while alive.
 	errs := ownerErrs(t, `
 		type Foo { string x; }
 		getMut(string ~s) string~ { return s; }
@@ -2467,13 +2486,14 @@ func TestSameFieldStoredMutConflict(t *testing.T) {
 			f := Foo(x: "hi");
 			string ~r = getMut(f.x);
 			mutate(f.x);
+			string ~r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot borrow 'f.x' as mutable")
 }
 
 func TestSameFieldStoredSharedThenMutConflict(t *testing.T) {
-	// Stored shared borrow of a field blocks a mutable borrow of the same field.
+	// Stored shared borrow of a field blocks a mutable borrow while borrower alive.
 	errs := ownerErrs(t, `
 		type Foo { string x; }
 		getRef(string &s) string& { return s; }
@@ -2482,13 +2502,14 @@ func TestSameFieldStoredSharedThenMutConflict(t *testing.T) {
 			f := Foo(x: "hi");
 			string &r = getRef(f.x);
 			mutate(f.x);
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot borrow 'f.x' as mutable")
 }
 
 func TestWholeVariableStoredVsFieldConflict(t *testing.T) {
-	// Stored whole-variable borrow conflicts with field mutable borrow.
+	// Stored whole-variable borrow conflicts with field mutable borrow while alive.
 	errs := ownerErrs(t, `
 		type Foo { string x; string y; }
 		getRef(Foo &f) Foo& { return f; }
@@ -2497,13 +2518,14 @@ func TestWholeVariableStoredVsFieldConflict(t *testing.T) {
 			f := Foo(x: "a", y: "b");
 			Foo &r = getRef(f);
 			mutate(f.x);
+			Foo &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot borrow 'f.x' as mutable")
 }
 
 func TestFieldStoredVsWholeVariableMutConflict(t *testing.T) {
-	// Stored field borrow then whole-variable mutable borrow — conflict.
+	// Stored field borrow then whole-variable mutable borrow — conflict while alive.
 	errs := ownerErrs(t, `
 		type Foo { string x; string y; }
 		getRef(string &s) string& { return s; }
@@ -2512,6 +2534,7 @@ func TestFieldStoredVsWholeVariableMutConflict(t *testing.T) {
 			f := Foo(x: "a", y: "b");
 			string &r = getRef(f.x);
 			mutate_whole(f);
+			string &r2 = r;
 		}
 	`)
 	expectOwnerError(t, errs, "cannot borrow 'f' as mutable")
@@ -2758,4 +2781,137 @@ func TestNLLCompoundAssignment(t *testing.T) {
 	if !hasEarlyDrop(info, "s") {
 		t.Error("expected early drop for 's' after get_val(s)")
 	}
+}
+
+// === NLL Phase 3: Borrow Narrowing (T0164) ===
+
+func TestNLLBorrowExpiredAfterLastUse(t *testing.T) {
+	// When a borrower is not used after the borrow, the borrow expires,
+	// allowing subsequent moves of the origin.
+	ownerOK(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			consume(s);
+		}
+	`)
+}
+
+func TestNLLBorrowExpiredMutAfterLastUse(t *testing.T) {
+	// Mutable borrow expires when the borrower's last use has passed.
+	ownerOK(t, `
+		getMut(string ~s) string~ { return s; }
+		read(string &s) {}
+		test() {
+			string s = "hello";
+			string ~r = getMut(s);
+			read(s);
+		}
+	`)
+}
+
+func TestNLLBorrowExpiredBeforeMove(t *testing.T) {
+	// Borrower used only in ExprStmt — borrow expires, move allowed after.
+	ownerOK(t, `
+		getRef(string &s) string& { return s; }
+		readRef(string &s) {}
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			readRef(r);
+			consume(s);
+		}
+	`)
+}
+
+func TestNLLBorrowActiveWhenUsedAfterConflict(t *testing.T) {
+	// Borrower used after the conflict point — borrow must be active.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		readRef(string &s) {}
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			consume(s);
+			readRef(r);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+func TestNLLBorrowExpiredInControlFlow(t *testing.T) {
+	// Borrower not used after control flow — borrow expires.
+	ownerOK(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			if true {
+				string &r2 = r;
+			}
+			consume(s);
+		}
+	`)
+}
+
+func TestNLLBorrowExpiredMethodReceiver(t *testing.T) {
+	// Method receiver borrow expires when borrower is no longer used.
+	ownerOK(t, `
+		type T {
+			int x;
+			getRef(&this) int& { return this.x; }
+		}
+		consume(T t) {}
+		test() {
+			T t = T(x: 1);
+			int &r = t.getRef();
+			consume(t);
+		}
+	`)
+}
+
+func TestNLLBorrowExpiredFieldBorrow(t *testing.T) {
+	// Field borrow expires when borrower is no longer used.
+	ownerOK(t, `
+		type Foo { string x; string y; }
+		getRef(string &s) string& { return s; }
+		mutate(string ~s) {}
+		test() {
+			f := Foo(x: "a", y: "b");
+			string &r = getRef(f.x);
+			mutate(f.x);
+		}
+	`)
+}
+
+func TestNLLBorrowExpiredInferredVarDecl(t *testing.T) {
+	// Inferred ref variable — borrow expires at last use.
+	ownerOK(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			r := getRef(s);
+			consume(s);
+		}
+	`)
+}
+
+func TestNLLBorrowExpiredReassigned(t *testing.T) {
+	// After borrower reassignment and no further use, borrow expires.
+	ownerOK(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			r = getRef(s);
+			consume(s);
+		}
+	`)
 }

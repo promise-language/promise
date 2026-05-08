@@ -285,8 +285,8 @@ func emitLibcFree(module *ir.Module) *ir.Func {
 
 // emitLibcFreeDebug declares libc @free + a platform-specific size query function
 // and defines @pal_free with poison-fill (0xDE) before free for UAF detection.
-// sizeFnName is the platform's allocation-size query: "malloc_usable_size" (POSIX)
-// or "_msize" (Windows).
+// sizeFnName is the platform's allocation-size query: "malloc_usable_size" (Linux),
+// "malloc_size" (macOS), or "_msize" (Windows).
 func emitLibcFreeDebug(module *ir.Module, sizeFnName string) *ir.Func {
 	// declare void @free(i8* nocapture noundef) nounwind willreturn
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)

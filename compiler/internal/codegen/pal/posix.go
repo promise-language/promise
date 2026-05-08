@@ -58,7 +58,12 @@ func (p *PosixPAL) EmitExit(module *ir.Module) *ir.Func {
 func (p *PosixPAL) EmitAlloc(module *ir.Module) *ir.Func { return emitLibcAlloc(module) }
 func (p *PosixPAL) EmitFree(module *ir.Module) *ir.Func {
 	if p.DebugFree {
-		return emitLibcFreeDebug(module, "malloc_usable_size")
+		// macOS uses malloc_size(); Linux/other POSIX uses malloc_usable_size().
+		sizeFn := "malloc_usable_size"
+		if strings.Contains(p.target, "darwin") || strings.Contains(p.target, "apple") {
+			sizeFn = "malloc_size"
+		}
+		return emitLibcFreeDebug(module, sizeFn)
 	}
 	return emitLibcFree(module)
 }

@@ -154,7 +154,8 @@ func (c *Compiler) definePrintStringBody(fn *ir.Func) {
 }
 
 // emitErrorPanic extracts the message string from an error instance pointer
-// and calls promise_panic with a null-terminated C string copy.
+// and calls promise_panic with a null-terminated C string copy, then does
+// panic return (cleanup + return zero).
 // The errInstPtr is an i8* pointing to the error instance struct (field 0 = _variant,
 // field 1 = message string instance pointer).
 func (c *Compiler) emitErrorPanic(errInstPtr value.Value) {
@@ -181,190 +182,116 @@ func (c *Compiler) emitErrorPanic(errInstPtr value.Value) {
 	c.block.NewStore(constant.NewInt(irtypes.I8, 0), nullPos)
 
 	c.block.NewCall(c.funcs["promise_panic"], cstr)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
+}
+
+// emitPanicReturn emits cleanup and return-zero after a direct panic call site
+// in user function codegen (Category A). Cleans up statement temps, heap temps,
+// and scope bindings, then returns the zero value for the current function's
+// return type. This is the inline panic equivalent of the error propagation
+// return path. B0228: panic flag is set, caller will detect via T0147.
+//
+// In coroutine context (main body or go blocks), branches to panicExitBlock
+// instead of ret — a ret from the middle of a coroutine body is invalid.
+func (c *Compiler) emitPanicReturn() {
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	c.emitStmtTempCleanupForErrorPath()
+	c.emitHeapTempCleanupForErrorPath()
+	if len(c.scopeBindings) > 0 {
+		c.emitScopeCleanup(0, true) // panic in flight — suppress close errors
+	}
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	// In coroutine context, branch to the panic exit block instead of ret.
+	// A ret from the middle of a coroutine body bypasses coro.end/final.suspend.
+	if c.panicExitBlock != nil {
+		c.block.NewBr(c.panicExitBlock)
+		return
+	}
+	retType := c.fn.Sig.RetType
+	if _, isVoid := retType.(*irtypes.VoidType); isVoid {
+		c.block.NewRet(nil)
+	} else {
+		c.block.NewRet(c.zeroValue(retType))
+	}
 }
 
 // definePanicBody adds a function body to promise_panic(i8* %msg).
-// msg is a null-terminated C string.
-// Recovery priority: (1) goroutine recovery via scheduler longjmp, (2) test recovery
-// via test trampoline longjmp, (3) write to stderr and exit.
-// On WASM: always exits (no longjmp recovery — single-threaded, no goroutine isolation).
+// msg is a null-terminated C string (may be .rodata or heap-allocated).
+// Sets TLS panic flag + stores msg pointer + returns. The caller is responsible
+// for checking the flag and propagating (T0147). Double-panic (flag already set)
+// is fatal: writes to stderr and exits with code 134.
 func (c *Compiler) definePanicBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	stderr := constant.NewInt(irtypes.I32, 2)
 
-	if c.isWasm {
-		// WASM: all panics write to stderr and exit
-		prefixPtr := entry.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		entry.NewCall(c.palWrite, stderr, prefixPtr, constant.NewInt(irtypes.I64, 7))
-		msgLen := entry.NewCall(c.funcs["strlen"], fn.Params[0])
-		entry.NewCall(c.palWrite, stderr, fn.Params[0], msgLen)
-		c.emitWriteNewline(entry, stderr)
-		entry.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
-		entry.NewUnreachable()
-		return
-	}
+	// Double-panic check: if flag already set → fatal exit
+	flag := entry.NewLoad(irtypes.I8, c.panicFlagGlobal)
+	alreadyPanicking := entry.NewICmp(enum.IPredNE, flag, constant.NewInt(irtypes.I8, 0))
+	doublePanicBlk := fn.NewBlock("double_panic")
+	setPanicBlk := fn.NewBlock("set_panic")
+	entry.NewCondBr(alreadyPanicking, doublePanicBlk, setPanicBlk)
 
-	gTy := goroutineStructType()
-
-	// Check if we're in a non-main goroutine that can recover
-	currentG := entry.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
-	hasG := entry.NewICmp(enum.IPredNE, currentG, constant.NewNull(irtypes.I8Ptr))
-
-	checkIdBlk := fn.NewBlock("check_id")
-	checkTestBlk := fn.NewBlock("check_test_jmpbuf")
-
-	entry.NewCondBr(hasG, checkIdBlk, checkTestBlk)
-
-	// checkId: if G.id != 0 (not main goroutine), use longjmp recovery to scheduler
-	gPtr := checkIdBlk.NewBitCast(currentG, irtypes.NewPointer(gTy))
-	idField := checkIdBlk.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldID)))
-	gID := checkIdBlk.NewLoad(irtypes.I64, idField)
-	isMain := checkIdBlk.NewICmp(enum.IPredEQ, gID, constant.NewInt(irtypes.I64, 0))
-
-	recoverBlk := fn.NewBlock("do_recover")
-	checkIdBlk.NewCondBr(isMain, checkTestBlk, recoverBlk)
-
-	// do_recover: set G.panicked=1, G.panic_msg=msg, longjmp back to scheduler
-	// No stderr output — recovered goroutines are silent.
-	// panicked=1 means C string msg (may be .rodata — goroutine_exit must NOT free it).
-	// promise_panic_msg sets panicked=2 for heap-allocated msgs that goroutine_exit CAN free.
-	panickedField := recoverBlk.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
-	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 1), panickedField)
-
-	panicMsgField := recoverBlk.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
-	recoverBlk.NewStore(fn.Params[0], panicMsgField)
-
-	// Load jmp_buf from TLS and longjmp
-	jmpBuf := recoverBlk.NewLoad(irtypes.I8Ptr, c.panicJmpBufGlobal)
-	recoverBlk.NewCall(c.funcs["longjmp"], jmpBuf, constant.NewInt(irtypes.I32, 1))
-	recoverBlk.NewUnreachable()
-
-	// checkTestJmpbuf: check if a test trampoline set a jmpbuf for recovery
-	testJmpBuf := checkTestBlk.NewLoad(irtypes.I8Ptr, c.testJmpBufGlobal)
-	hasTestJmpBuf := checkTestBlk.NewICmp(enum.IPredNE, testJmpBuf, constant.NewNull(irtypes.I8Ptr))
-	testRecoverBlk := fn.NewBlock("test_recover")
-	exitBlk := fn.NewBlock("do_exit")
-	checkTestBlk.NewCondBr(hasTestJmpBuf, testRecoverBlk, exitBlk)
-
-	// test_recover: store panic msg for the test runner, longjmp back to trampoline
-	testRecoverBlk.NewStore(fn.Params[0], c.testPanicMsgGlobal)
-	testRecoverBlk.NewCall(c.funcs["longjmp"], testJmpBuf, constant.NewInt(irtypes.I32, 1))
-	testRecoverBlk.NewUnreachable()
-
-	// do_exit: no recovery available — write panic message and exit
-	prefixPtr := exitBlk.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
+	// double_panic: write fatal message and exit(134)
+	dpMsg := constant.NewCharArrayFromString("fatal: panic during panic recovery\n")
+	dpGlobal := c.module.NewGlobalDef(".str.double_panic", dpMsg)
+	dpGlobal.Immutable = true
+	dpGlobal.Linkage = enum.LinkagePrivate
+	dpMsgPtr := doublePanicBlk.NewGetElementPtr(dpGlobal.ContentType, dpGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	exitBlk.NewCall(c.palWrite, stderr, prefixPtr, constant.NewInt(irtypes.I64, 7))
-	msgLen := exitBlk.NewCall(c.funcs["strlen"], fn.Params[0])
-	exitBlk.NewCall(c.palWrite, stderr, fn.Params[0], msgLen)
-	c.emitWriteNewline(exitBlk, stderr)
-	exitBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
-	exitBlk.NewUnreachable()
-	// noreturn already set on promise_panic in declareIntrinsics
+	doublePanicBlk.NewCall(c.palWrite, stderr, dpMsgPtr, constant.NewInt(irtypes.I64, 35))
+	doublePanicBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 134))
+	doublePanicBlk.NewUnreachable()
+
+	// set_panic: store flag=1, msg, type=1 (.rodata), ret void
+	setPanicBlk.NewStore(constant.NewInt(irtypes.I8, 1), c.panicFlagGlobal)
+	setPanicBlk.NewStore(fn.Params[0], c.panicMsgTlsGlobal)
+	setPanicBlk.NewStore(constant.NewInt(irtypes.I8, 1), c.panicTypeTlsGlobal) // 1 = .rodata
+	setPanicBlk.NewRet(nil)
 }
 
 // definePanicMsgBody adds a function body to promise_panic_msg(i8* %s).
 // s points to a promise_string_v.
-// Recovery priority: (1) goroutine recovery via scheduler longjmp, (2) test recovery
-// via test trampoline longjmp, (3) write to stderr and exit.
-// On WASM: always exits (no longjmp recovery).
+// Extracts data/len from the Promise string, allocates a null-terminated C string
+// copy, sets TLS panic flag + stores msg pointer + returns. Double-panic is fatal.
 func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	stderr := constant.NewInt(irtypes.I32, 2)
 
-	// Extract data/len from string value struct (needed by both paths)
-	dataPtr, dataLen := c.extractStringDataLen(entry, fn.Params[0])
+	// Double-panic check: if flag already set → fatal exit
+	flag := entry.NewLoad(irtypes.I8, c.panicFlagGlobal)
+	alreadyPanicking := entry.NewICmp(enum.IPredNE, flag, constant.NewInt(irtypes.I8, 0))
+	doublePanicBlk := fn.NewBlock("double_panic")
+	setPanicBlk := fn.NewBlock("set_panic")
+	entry.NewCondBr(alreadyPanicking, doublePanicBlk, setPanicBlk)
 
-	if c.isWasm {
-		// WASM: all panics write to stderr and exit
-		prefixPtr := entry.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		entry.NewCall(c.palWrite, stderr, prefixPtr, constant.NewInt(irtypes.I64, 7))
-		entry.NewCall(c.palWrite, stderr, dataPtr, dataLen)
-		c.emitWriteNewline(entry, stderr)
-		entry.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
-		entry.NewUnreachable()
-		fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn)
-		return
-	}
-
-	gTy := goroutineStructType()
-
-	// Check if we're in a non-main goroutine that can recover
-	currentG := entry.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
-	hasG := entry.NewICmp(enum.IPredNE, currentG, constant.NewNull(irtypes.I8Ptr))
-
-	checkIdBlk := fn.NewBlock("check_id")
-	checkTestBlk := fn.NewBlock("check_test_jmpbuf")
-
-	entry.NewCondBr(hasG, checkIdBlk, checkTestBlk)
-
-	// checkId: if G.id != 0 (not main goroutine), use longjmp recovery to scheduler
-	gPtr := checkIdBlk.NewBitCast(currentG, irtypes.NewPointer(gTy))
-	idField := checkIdBlk.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldID)))
-	gID := checkIdBlk.NewLoad(irtypes.I64, idField)
-	isMain := checkIdBlk.NewICmp(enum.IPredEQ, gID, constant.NewInt(irtypes.I64, 0))
-
-	recoverBlk := fn.NewBlock("do_recover")
-	checkIdBlk.NewCondBr(isMain, checkTestBlk, recoverBlk)
-
-	// do_recover: set G.panicked=2 (heap msg), G.panic_msg=cstr, longjmp back to scheduler
-	// No stderr output — recovered goroutines are silent.
-	// panicked=2 marks panic_msg as heap-allocated so goroutine_exit can free it (B0225).
-	// (panicked=1 from promise_panic means .rodata C string — must NOT free.)
-	panickedField := recoverBlk.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
-	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 2), panickedField)
-
-	// Create a null-terminated C string copy from Promise string data for G.panic_msg.
-	allocSize := recoverBlk.NewAdd(dataLen, constant.NewInt(irtypes.I64, 1))
-	cstr := recoverBlk.NewCall(c.palAlloc, allocSize)
-	recoverBlk.NewCall(c.funcs["llvm.memcpy"], cstr, dataPtr, dataLen, constant.False)
-	nullPos := recoverBlk.NewGetElementPtr(irtypes.I8, cstr, dataLen)
-	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 0), nullPos)
-
-	panicMsgField := recoverBlk.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
-	recoverBlk.NewStore(cstr, panicMsgField)
-
-	// Load jmp_buf from TLS and longjmp
-	jmpBuf := recoverBlk.NewLoad(irtypes.I8Ptr, c.panicJmpBufGlobal)
-	recoverBlk.NewCall(c.funcs["longjmp"], jmpBuf, constant.NewInt(irtypes.I32, 1))
-	recoverBlk.NewUnreachable()
-
-	// checkTestJmpbuf: check if a test trampoline set a jmpbuf for recovery
-	testJmpBuf := checkTestBlk.NewLoad(irtypes.I8Ptr, c.testJmpBufGlobal)
-	hasTestJmpBuf := checkTestBlk.NewICmp(enum.IPredNE, testJmpBuf, constant.NewNull(irtypes.I8Ptr))
-	testRecoverBlk := fn.NewBlock("test_recover")
-	exitBlk := fn.NewBlock("do_exit")
-	checkTestBlk.NewCondBr(hasTestJmpBuf, testRecoverBlk, exitBlk)
-
-	// test_recover: create C string copy, store for test runner, longjmp back to trampoline
-	testAllocSize := testRecoverBlk.NewAdd(dataLen, constant.NewInt(irtypes.I64, 1))
-	testCstr := testRecoverBlk.NewCall(c.palAlloc, testAllocSize)
-	testRecoverBlk.NewCall(c.funcs["llvm.memcpy"], testCstr, dataPtr, dataLen, constant.False)
-	testNullPos := testRecoverBlk.NewGetElementPtr(irtypes.I8, testCstr, dataLen)
-	testRecoverBlk.NewStore(constant.NewInt(irtypes.I8, 0), testNullPos)
-	testRecoverBlk.NewStore(testCstr, c.testPanicMsgGlobal)
-	testRecoverBlk.NewCall(c.funcs["longjmp"], testJmpBuf, constant.NewInt(irtypes.I32, 1))
-	testRecoverBlk.NewUnreachable()
-
-	// do_exit: no recovery available — write panic message and exit
-	prefixPtr := exitBlk.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
+	// double_panic: write fatal message and exit(134)
+	dpMsg := constant.NewCharArrayFromString("fatal: panic during panic recovery\n")
+	dpGlobal := c.module.NewGlobalDef(".str.double_panic_msg", dpMsg)
+	dpGlobal.Immutable = true
+	dpGlobal.Linkage = enum.LinkagePrivate
+	dpMsgPtr := doublePanicBlk.NewGetElementPtr(dpGlobal.ContentType, dpGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	exitBlk.NewCall(c.palWrite, stderr, prefixPtr, constant.NewInt(irtypes.I64, 7))
-	exitBlk.NewCall(c.palWrite, stderr, dataPtr, dataLen)
-	c.emitWriteNewline(exitBlk, stderr)
-	exitBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
-	exitBlk.NewUnreachable()
+	doublePanicBlk.NewCall(c.palWrite, stderr, dpMsgPtr, constant.NewInt(irtypes.I64, 35))
+	doublePanicBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 134))
+	doublePanicBlk.NewUnreachable()
 
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn)
+	// set_panic: extract string data, create C string copy, store flag+msg+type
+	dataPtr, dataLen := c.extractStringDataLen(setPanicBlk, fn.Params[0])
+
+	allocSize := setPanicBlk.NewAdd(dataLen, constant.NewInt(irtypes.I64, 1))
+	cstr := setPanicBlk.NewCall(c.palAlloc, allocSize)
+	setPanicBlk.NewCall(c.funcs["llvm.memcpy"], cstr, dataPtr, dataLen, constant.False)
+	nullPos := setPanicBlk.NewGetElementPtr(irtypes.I8, cstr, dataLen)
+	setPanicBlk.NewStore(constant.NewInt(irtypes.I8, 0), nullPos)
+
+	setPanicBlk.NewStore(constant.NewInt(irtypes.I8, 1), c.panicFlagGlobal)
+	setPanicBlk.NewStore(cstr, c.panicMsgTlsGlobal)
+	setPanicBlk.NewStore(constant.NewInt(irtypes.I8, 2), c.panicTypeTlsGlobal) // 2 = heap-allocated
+	setPanicBlk.NewRet(nil)
 }
 
 // defineSetMaxProcsBody adds a function body to promise_set_maxprocs(i8* %sret, i8* %n).
@@ -742,12 +669,29 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 	entry := trampoline.NewBlock(".entry")
 
 	if c.isWasm {
-		// WASM: no setjmp recovery — just call the test function directly
+		// WASM: no setjmp recovery — call test function, check TLS panic flag
 		voidFnPtrType := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
 		typedFn := entry.NewBitCast(trampoline.Params[0], voidFnPtrType)
 		entry.NewCall(typedFn)
-		entry.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
-		entry.NewRet(constant.NewNull(irtypes.I8Ptr))
+
+		// B0228: Check TLS panic flag after test function returns
+		wasmFlag := entry.NewLoad(irtypes.I8, c.panicFlagGlobal)
+		wasmPanicked := entry.NewICmp(enum.IPredNE, wasmFlag, constant.NewInt(irtypes.I8, 0))
+		wasmPanicBlk := trampoline.NewBlock("wasm_panic")
+		wasmPassBlk := trampoline.NewBlock("wasm_pass")
+		entry.NewCondBr(wasmPanicked, wasmPanicBlk, wasmPassBlk)
+
+		// Panic detected: store msg, clear flag, signal done, return fail
+		wasmPanicMsg := wasmPanicBlk.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
+		wasmPanicBlk.NewStore(wasmPanicMsg, c.testPanicMsgGlobal)
+		wasmPanicBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)
+		wasmPanicBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal)
+		wasmFail := wasmPanicBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
+		wasmPanicBlk.NewRet(wasmFail)
+
+		// No panic: signal done, return null (pass)
+		wasmPassBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal)
+		wasmPassBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 		return trampoline
 	}
 
@@ -778,12 +722,31 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 	normalBlk.NewCall(typedFn)
 	spAfter := c.emitReadStackPointer(normalBlk)
 
+	// B0228: Check TLS panic flag after test function returns.
+	// With TLS flag propagation, panics set the flag and return through the call
+	// chain rather than longjmp. Check the flag here to detect panics.
+	tlsFlag := normalBlk.NewLoad(irtypes.I8, c.panicFlagGlobal)
+	tlsPanicked := normalBlk.NewICmp(enum.IPredNE, tlsFlag, constant.NewInt(irtypes.I8, 0))
+	tlsPanicBlk := trampoline.NewBlock("tls_panic")
+	checkSpBlk := trampoline.NewBlock("check_sp")
+	normalBlk.NewCondBr(tlsPanicked, tlsPanicBlk, checkSpBlk)
+
+	// TLS panic detected: store msg, clear flag, signal done, return fail
+	tlsPanicMsgVal := tlsPanicBlk.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
+	tlsPanicBlk.NewStore(tlsPanicMsgVal, c.testPanicMsgGlobal)
+	tlsPanicBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)    // clear flag
+	tlsPanicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.panicMsgTlsGlobal) // clear msg
+	tlsPanicBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal)    // signal done
+	tlsPanicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
+	tlsFailInd := tlsPanicBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
+	tlsPanicBlk.NewRet(tlsFailInd)
+
 	if spBefore != nil && spAfter != nil {
 		// Compare stack pointers — any difference indicates stack creep
-		spMatch := normalBlk.NewICmp(enum.IPredEQ, spBefore, spAfter)
+		spMatch := checkSpBlk.NewICmp(enum.IPredEQ, spBefore, spAfter)
 		stackOkBlk := trampoline.NewBlock("stack_ok")
 		stackCreepBlk := trampoline.NewBlock("stack_creep")
-		normalBlk.NewCondBr(spMatch, stackOkBlk, stackCreepBlk)
+		checkSpBlk.NewCondBr(spMatch, stackOkBlk, stackCreepBlk)
 
 		// Stack creep detected: signal done, store diagnostic message, return failure
 		stackCreepBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
@@ -804,9 +767,9 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 		stackOkBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 	} else {
 		// SP check not available for this target: signal done, proceed without check
-		normalBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
-		normalBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
-		normalBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+		checkSpBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
+		checkSpBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
+		checkSpBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 	}
 
 	// Panic recovery path: signal done, clear jmpbuf, return non-null (fail indicator)

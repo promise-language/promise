@@ -2478,7 +2478,7 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	c.block.NewCall(c.palMutexUnlock, mtx)
 	panicMsg := c.makeGlobalString("send on closed channel")
 	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	c.block = sendOkBlock
 
@@ -2544,7 +2544,7 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	c.block.NewCall(c.palMutexUnlock, mtx)
 	panicMsg2 := c.makeGlobalString("send on closed channel")
 	c.block.NewCall(c.funcs["promise_panic"], panicMsg2)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	// write: memcpy value into buffer[tail * elem_size]
 	c.block = writeBlock
@@ -2702,7 +2702,7 @@ func (c *Compiler) genChannelClose(chRaw value.Value, chPtr value.Value, chanTyp
 	c.block.NewCall(c.palMutexUnlock, mtx)
 	panicMsg := c.makeGlobalString("close of closed channel")
 	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	c.block = closeOk
 
@@ -4855,7 +4855,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			// non-failable functions without else or !
 			panicMsg := c.makeGlobalString("unhandled error type")
 			c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-			c.block.NewUnreachable()
+			c.emitPanicReturn()
 		}
 
 		// Match path: continue to bind and run handler body
@@ -5541,7 +5541,7 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 	c.block = panicBlock
 	oobMsg := c.makeGlobalString("array index out of bounds")
 	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	c.block = okBlock
 	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
@@ -5659,7 +5659,7 @@ func (c *Compiler) genStringIndex(e *ast.IndexExpr) value.Value {
 	c.block = panicBlock
 	oobMsg := c.makeGlobalString("string index out of bounds")
 	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	// In bounds: load byte, zero-extend to i32 (char)
 	c.block = okBlock
@@ -5690,7 +5690,7 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 	c.block = panicBlock
 	oobMsg := c.makeGlobalString("index out of bounds")
 	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	// In bounds: load element
 	c.block = okBlock
@@ -6888,7 +6888,7 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		c.block = panicBlock
 		panicMsg := c.makeGlobalString("cast failed: as! type mismatch")
 		c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-		c.block.NewUnreachable()
+		c.emitPanicReturn()
 
 		c.block = okBlock
 		return subject // same value struct, type is verified
@@ -6978,7 +6978,7 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	c.block = panicBlock
 	panicMsg := c.makeGlobalString("unwrap failed: optional is none")
 	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	c.block = okBlock
 	// B0190: If genFieldAccess (B0181) created a dup for the inner string,
@@ -7362,6 +7362,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
+	savedPanicExitBlock := c.panicExitBlock
 	savedGoExprFF := c.goExprFireAndForget
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -7445,7 +7446,15 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.block = bodyBlk
 	c.entryBlock = startBlk
 
+	// B0228: Create panic exit block for the go block coroutine.
+	// When a panic occurs, transfer panic state to G struct and branch to final suspend.
+	goPanicExitBlk := coroFn.NewBlock("go.panic_exit")
+	c.panicExitBlock = goPanicExitBlk
+
 	result := c.genExpr(callExpr)
+
+	// Clear panic exit block after body generation
+	c.panicExitBlock = nil
 
 	if !isVoid && result != nil {
 		// Store result via G.result_ptr (set by caller before enqueue)
@@ -7464,10 +7473,49 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 		c.emitScopeCleanup(0, false)
 	}
 
+	// B0228: After body, check TLS panic flag. If set (panic occurred in a Promise-level
+	// function like assert()), transfer to panic exit. This is needed until T0147 adds
+	// panic checks after every call expression.
+	if c.block != nil && c.block.Term == nil {
+		goBodyFlag := c.block.NewLoad(irtypes.I8, c.panicFlagGlobal)
+		goBodyPanicked := c.block.NewICmp(enum.IPredNE, goBodyFlag, constant.NewInt(irtypes.I8, 0))
+		goBodyOk := coroFn.NewBlock("go.body_ok")
+		c.block.NewCondBr(goBodyPanicked, goPanicExitBlk, goBodyOk)
+		c.block = goBodyOk
+	}
+
 	// Final suspend
 	finalSuspBlk := coroFn.NewBlock("final.suspend")
 	if c.block != nil && c.block.Term == nil {
 		c.block.NewBr(finalSuspBlk)
+	}
+
+	// B0228: Define the go block panic exit block body.
+	// Transfer panic state from TLS to G struct, clear TLS flag, branch to final suspend.
+	{
+		gTy := goroutineStructType()
+		peCurrentG := goPanicExitBlk.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		peGPtr := goPanicExitBlk.NewBitCast(peCurrentG, irtypes.NewPointer(gTy))
+
+		// Load TLS panic type and store in G.panicked
+		pePanicType := goPanicExitBlk.NewLoad(irtypes.I8, c.panicTypeTlsGlobal)
+		pePanickedField := goPanicExitBlk.NewGetElementPtr(gTy, peGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
+		goPanicExitBlk.NewStore(pePanicType, pePanickedField)
+
+		// Load TLS panic msg and store in G.panic_msg
+		pePanicMsg := goPanicExitBlk.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
+		pePanicMsgField := goPanicExitBlk.NewGetElementPtr(gTy, peGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
+		goPanicExitBlk.NewStore(pePanicMsg, pePanicMsgField)
+
+		// Clear TLS panic flag and msg
+		goPanicExitBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)
+		goPanicExitBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.panicMsgTlsGlobal)
+		goPanicExitBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicTypeTlsGlobal)
+
+		// Branch to final suspend (properly ends the coroutine)
+		goPanicExitBlk.NewBr(finalSuspBlk)
 	}
 
 	// Cleanup: free coroutine memory (only reached via destroy path)
@@ -7504,6 +7552,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
+	c.panicExitBlock = savedPanicExitBlock
 	c.goExprFireAndForget = savedGoExprFF
 
 	// 9. Caller: call coroutine ramp → get handle, create G, enqueue
@@ -7865,6 +7914,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
+	savedPanicExitBlock := c.panicExitBlock
 	savedGoExprFF := c.goExprFireAndForget
 	c.goExprFireAndForget = false // reset for inner statements (B0109)
 
@@ -7960,7 +8010,15 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	// --- Body: compile user block ---
 	c.block = bodyBlk
 	c.entryBlock = startBlk // allocas go in startBlk (after coro.begin) to be part of coroutine frame
+
+	// B0228: Create panic exit block for this go block coroutine.
+	goPanicExitBlk2 := coroFn.NewBlock("go.panic_exit")
+	c.panicExitBlock = goPanicExitBlk2
+
 	c.genBlock(block)
+
+	// Clear panic exit block after body generation
+	c.panicExitBlock = nil
 
 	// B0163: Emit cleanup for captured channel drop bindings registered before genBlock.
 	// genBlock only cleans up bindings added within its scope, so we must handle
@@ -7969,11 +8027,43 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 		c.emitScopeCleanup(0, false)
 	}
 
+	// B0228: After body, check TLS panic flag (same as first go block variant).
+	if c.block != nil && c.block.Term == nil {
+		goBodyFlag2 := c.block.NewLoad(irtypes.I8, c.panicFlagGlobal)
+		goBodyPanicked2 := c.block.NewICmp(enum.IPredNE, goBodyFlag2, constant.NewInt(irtypes.I8, 0))
+		goBodyOk2 := coroFn.NewBlock("go.body_ok")
+		c.block.NewCondBr(goBodyPanicked2, goPanicExitBlk2, goBodyOk2)
+		c.block = goBodyOk2
+	}
+
 	// Final suspend: yield back to scheduler so it can see coro.done()=true
 	// before destroying the coroutine frame.
 	finalSuspBlk := coroFn.NewBlock("final.suspend")
 	if c.block != nil && c.block.Term == nil {
 		c.block.NewBr(finalSuspBlk)
+	}
+
+	// B0228: Define the go block panic exit block body (same as first go block variant).
+	{
+		gTy := goroutineStructType()
+		peCurrentG := goPanicExitBlk2.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		peGPtr := goPanicExitBlk2.NewBitCast(peCurrentG, irtypes.NewPointer(gTy))
+
+		pePanicType := goPanicExitBlk2.NewLoad(irtypes.I8, c.panicTypeTlsGlobal)
+		pePanickedField := goPanicExitBlk2.NewGetElementPtr(gTy, peGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
+		goPanicExitBlk2.NewStore(pePanicType, pePanickedField)
+
+		pePanicMsg := goPanicExitBlk2.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
+		pePanicMsgField := goPanicExitBlk2.NewGetElementPtr(gTy, peGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
+		goPanicExitBlk2.NewStore(pePanicMsg, pePanicMsgField)
+
+		goPanicExitBlk2.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)
+		goPanicExitBlk2.NewStore(constant.NewNull(irtypes.I8Ptr), c.panicMsgTlsGlobal)
+		goPanicExitBlk2.NewStore(constant.NewInt(irtypes.I8, 0), c.panicTypeTlsGlobal)
+
+		goPanicExitBlk2.NewBr(finalSuspBlk)
 	}
 
 	// --- Cleanup: free coroutine memory (only reached via destroy path) ---
@@ -8011,6 +8101,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
+	c.panicExitBlock = savedPanicExitBlock
 	c.goExprFireAndForget = savedGoExprFF
 
 	// Caller: call coroutine ramp → get handle, create G, enqueue
@@ -8191,7 +8282,7 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	panicMsg := c.block.NewLoad(irtypes.I8Ptr, panicMsgField)
 	c.block.NewCall(c.palFree, gRaw)
 	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	// loadResultBlk: normal path — load result, free G
 	c.block = loadResultBlk

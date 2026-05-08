@@ -3593,7 +3593,7 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 			c.block = panicBlock
 			oobMsg := c.makeGlobalString("index out of bounds")
 			c.block.NewCall(c.funcs["promise_panic"], oobMsg)
-			c.block.NewUnreachable()
+			c.emitPanicReturn()
 
 			c.block = okBlock
 			dataBase := c.block.NewGetElementPtr(irtypes.I8, cowSlice,
@@ -3634,7 +3634,7 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 			c.block = panicBlock
 			panicMsg := c.makeGlobalString("inc/dec on missing key")
 			c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-			c.block.NewUnreachable()
+			c.emitPanicReturn()
 
 			c.block = okBlock
 			current := c.block.NewExtractValue(optVal, 1)
@@ -5373,7 +5373,7 @@ func (c *Compiler) genArrayIndexAssign(target *ast.IndexExpr, arr *types.Array, 
 	c.block = panicBlock
 	oobMsg := c.makeGlobalString("array index out of bounds")
 	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	c.block = okBlock
 	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
@@ -5459,7 +5459,7 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 	c.block = panicBlock
 	oobMsg := c.makeGlobalString("index out of bounds")
 	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	c.block = okBlock
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, cowSlice,
@@ -5593,7 +5593,7 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 	c.block = panicBlock
 	panicMsg := c.makeGlobalString("compound assignment on missing key")
 	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	c.block = okBlock
 	current := c.block.NewExtractValue(optVal, 1)
@@ -5618,7 +5618,7 @@ func (c *Compiler) genVectorCompoundAssign(slicePtr, idx value.Value, elemType t
 	c.block = panicBlock
 	oobMsg := c.makeGlobalString("index out of bounds")
 	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
-	c.block.NewUnreachable()
+	c.emitPanicReturn()
 
 	c.block = okBlock
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,

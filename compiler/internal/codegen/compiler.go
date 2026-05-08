@@ -275,6 +275,7 @@ type Compiler struct {
 	panicFlagGlobal     *ir.Global // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
 	panicMsgTlsGlobal   *ir.Global // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
 	panicTypeTlsGlobal  *ir.Global // @__promise_panic_type (TLS, i8) — 1=.rodata, 2=heap-allocated
+	panicExitBlock      *ir.Block  // B0228: if set, emitPanicReturn branches here instead of ret (coroutine context)
 	inCoroutine         bool       // true when compiling inside a go block coroutine body
 	goExprFireAndForget bool       // true when go expr result is discarded (no <-task receiver)
 	coroCleanupBlk      *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
@@ -1274,7 +1275,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 func (c *Compiler) declareIntrinsics() {
 	panicFn := c.module.NewFunc("promise_panic",
 		irtypes.Void, ir.NewParam("msg", irtypes.I8Ptr))
-	panicFn.FuncAttrs = append(panicFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
+	panicFn.FuncAttrs = append(panicFn.FuncAttrs, enum.FuncAttrNoUnwind)
 	c.funcs["promise_panic"] = panicFn
 
 	// PAL: emit platform-specific allocator primitives (needed by string/vector funcs below)
@@ -1742,7 +1743,8 @@ func (c *Compiler) dupVector(ptr value.Value, elemSize int64) value.Value {
 	msgPtr := c.block.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	c.block.NewCall(c.funcs["promise_panic"], msgPtr)
-	c.block.NewUnreachable()
+	// OOM: branch to merge with null (panic flag is set, caller will detect)
+	oomBlock.NewBr(mergeBlock)
 
 	// Init: store len (without static flag), cap, memcpy data
 	c.block = initBlock
@@ -1765,6 +1767,7 @@ func (c *Compiler) dupVector(ptr value.Value, elemSize int64) value.Value {
 	return c.block.NewPhi(
 		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entryBlock),
 		ir.NewIncoming(newPtr, initBlock),
+		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), oomBlock),
 	)
 }
 
@@ -1979,7 +1982,7 @@ func (c *Compiler) defineStringNewFunc() {
 	msgPtr := oomBlk.NewGetElementPtr(oomGlobal.ContentType, oomGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	oomBlk.NewCall(c.funcs["promise_panic"], msgPtr)
-	oomBlk.NewUnreachable()
+	oomBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 
 	// init: store fields and copy data
 	typedPtr := initBlk.NewBitCast(rawPtr, irtypes.NewPointer(strInstanceType))
@@ -2049,7 +2052,7 @@ func (c *Compiler) defineStringConcatFunc() {
 	msgPtr := oomBlk.NewGetElementPtr(oomGlobal.ContentType, oomGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	oomBlk.NewCall(c.funcs["promise_panic"], msgPtr)
-	oomBlk.NewUnreachable()
+	oomBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 
 	// init: store header fields and copy both data regions
 	typedNew := initBlk.NewBitCast(rawPtr, irtypes.NewPointer(strInstanceType))
@@ -2590,7 +2593,7 @@ func (c *Compiler) defineStringSplitFunc() {
 	msgPtr := oomBlk.NewGetElementPtr(oomGlobal.ContentType, oomGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	oomBlk.NewCall(c.funcs["promise_panic"], msgPtr)
-	oomBlk.NewUnreachable()
+	oomBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 
 	// init_hdr: store len and cap
 	hdrPtr := initHdr.NewBitCast(rawSlice, irtypes.NewPointer(vectorHeaderType))
@@ -3006,7 +3009,7 @@ func (c *Compiler) defineVectorWithCapacityFunc() {
 	msgPtr := oom.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	oom.NewCall(c.funcs["promise_panic"], msgPtr)
-	oom.NewUnreachable()
+	oom.NewRet(constant.NewNull(irtypes.I8Ptr))
 
 	// Init: store len=0, cap
 	hdrPtr := init.NewBitCast(raw, irtypes.NewPointer(headerType))
@@ -3069,7 +3072,7 @@ func (c *Compiler) defineVectorPushFunc() {
 	msgPtr := oom.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	oom.NewCall(c.funcs["promise_panic"], msgPtr)
-	oom.NewUnreachable()
+	oom.NewRet(constant.NewNull(irtypes.I8Ptr))
 
 	// Update cap: store new capacity in reallocated header
 	newHdrPtr := updateCap.NewBitCast(newPtr, irtypes.NewPointer(headerType))
@@ -3258,7 +3261,7 @@ func (c *Compiler) defineVectorRemoveFunc() {
 	msgPtr := panicBlk.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	panicBlk.NewCall(c.funcs["promise_panic"], msgPtr)
-	panicBlk.NewUnreachable()
+	panicBlk.NewRet(nil) // void return
 
 	// check_shift: compute data base, check if shift needed
 	dataBase := checkShift.NewGetElementPtr(irtypes.I8, sliceParam, headerSizeConst)
@@ -3418,7 +3421,7 @@ func (c *Compiler) defineVectorCOWFunc() {
 	msgPtr := oomBlk.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	oomBlk.NewCall(c.funcs["promise_panic"], msgPtr)
-	oomBlk.NewUnreachable()
+	oomBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 
 	// Store len (without static flag) and cap, then memcpy data
 	newHdrPtr := initBlk.NewBitCast(newPtr, irtypes.NewPointer(headerType))

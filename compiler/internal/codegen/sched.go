@@ -2181,6 +2181,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
+	savedPanicExitBlock := c.panicExitBlock
 	savedGoExprFF := c.goExprFireAndForget
 	c.goExprFireAndForget = false // reset for inner statements (B0109)
 
@@ -2257,6 +2258,14 @@ func (c *Compiler) wrapMainWithScheduler() {
 	// --- Body ---
 	c.block = bodyBlk
 	c.entryBlock = startBlk // allocas go in startBlk (part of coroutine frame)
+
+	// B0228: Create panic exit block for the main coroutine.
+	// When a panic occurs in the main body, emitPanicReturn branches here
+	// instead of doing ret (which would bypass the coroutine framework).
+	// This block writes the panic message to stderr and exits.
+	mainPanicExitBlk := coroFn.NewBlock("main.panic_exit")
+	c.panicExitBlock = mainPanicExitBlk
+
 	if mainIsFailable {
 		// Call the helper function and check the result
 		result := c.block.NewCall(mainBodyFn)
@@ -2265,19 +2274,54 @@ func (c *Compiler) wrapMainWithScheduler() {
 		okBlk := coroFn.NewBlock("main.ok")
 		c.block.NewCondBr(tag, errBlk, okBlk)
 
-		// Error path: panic with message
-		panicStr := constant.NewCharArrayFromString("unhandled error in main\x00")
+		// Error path: terminal — write message to stderr and exit
+		panicStr := constant.NewCharArrayFromString("panic: unhandled error in main\n")
 		panicGlobal := c.module.NewGlobalDef(".str.main_error", panicStr)
 		panicGlobal.Immutable = true
 		panicGlobal.Linkage = enum.LinkagePrivate
 		msgPtr := errBlk.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		errBlk.NewCall(c.funcs["promise_panic"], msgPtr)
+		errBlk.NewCall(c.palWrite, constant.NewInt(irtypes.I32, 2), msgPtr, constant.NewInt(irtypes.I64, 30))
+		errBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
 		errBlk.NewUnreachable()
 
 		c.block = okBlk
 	} else {
 		c.genBlock(c.mainDecl.Body)
+	}
+
+	// Clear panic exit block — main body generation is done
+	c.panicExitBlock = nil
+
+	// B0228: After main body, check TLS panic flag. Panics from Promise-level
+	// functions (assert, panic_msg) set the flag but don't trigger emitPanicReturn
+	// at this level (they just return). Check here before final suspend.
+	if c.block != nil && c.block.Term == nil {
+		mainBodyFlag := c.block.NewLoad(irtypes.I8, c.panicFlagGlobal)
+		mainBodyPanicked := c.block.NewICmp(enum.IPredNE, mainBodyFlag, constant.NewInt(irtypes.I8, 0))
+		mainBodyOk := coroFn.NewBlock("main.body_ok")
+		c.block.NewCondBr(mainBodyPanicked, mainPanicExitBlk, mainBodyOk)
+		c.block = mainBodyOk
+	}
+
+	// B0228: Define the panic exit block body.
+	// Load the panic message from TLS, write "panic: <msg>\n" to stderr, exit(1).
+	{
+		stderr := constant.NewInt(irtypes.I32, 2)
+		pePrefix := constant.NewCharArrayFromString("panic: ")
+		pePrefixGlobal := c.module.NewGlobalDef(".str.panic_exit_prefix", pePrefix)
+		pePrefixGlobal.Immutable = true
+		pePrefixGlobal.Linkage = enum.LinkagePrivate
+		pePrefixPtr := mainPanicExitBlk.NewGetElementPtr(pePrefixGlobal.ContentType, pePrefixGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		mainPanicExitBlk.NewCall(c.palWrite, stderr, pePrefixPtr, constant.NewInt(irtypes.I64, 7))
+
+		peMsgPtr := mainPanicExitBlk.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
+		peMsgLen := mainPanicExitBlk.NewCall(c.funcs["strlen"], peMsgPtr)
+		mainPanicExitBlk.NewCall(c.palWrite, stderr, peMsgPtr, peMsgLen)
+		c.emitWriteNewline(mainPanicExitBlk, stderr)
+		mainPanicExitBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
+		mainPanicExitBlk.NewUnreachable()
 	}
 
 	// Final suspend: yield back to scheduler
@@ -2320,6 +2364,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
+	c.panicExitBlock = savedPanicExitBlock
 	c.goExprFireAndForget = savedGoExprFF
 
 	// Back in @main: call the ramp, create G0, enqueue, run, shutdown
@@ -2524,14 +2569,15 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 	// done: main completed
 	doneBlk.NewRet(nil)
 
-	// deadlock: all goroutines asleep, main not done
-	deadlockMsg := constant.NewCharArrayFromString("all goroutines are asleep - deadlock!\x00")
+	// deadlock: terminal — write message to stderr and exit(2)
+	deadlockMsg := constant.NewCharArrayFromString("fatal: all goroutines are asleep - deadlock!\n")
 	deadlockGlobal := c.module.NewGlobalDef(".str.deadlock", deadlockMsg)
 	deadlockGlobal.Immutable = true
 	deadlockGlobal.Linkage = enum.LinkagePrivate
 	deadlockPtr := deadlockBlk.NewGetElementPtr(deadlockGlobal.ContentType, deadlockGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	deadlockBlk.NewCall(c.funcs["promise_panic"], deadlockPtr)
+	deadlockBlk.NewCall(c.palWrite, constant.NewInt(irtypes.I32, 2), deadlockPtr, constant.NewInt(irtypes.I64, 45))
+	deadlockBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 2))
 	deadlockBlk.NewUnreachable()
 
 	c.funcs["promise_sched_coop_run"] = fn

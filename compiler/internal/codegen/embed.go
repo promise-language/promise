@@ -92,7 +92,12 @@ func (c *Compiler) defineEmbedBytesGetter(fn *ir.Func, entry *ir.Block, embed *s
 	msgPtr := oomBlk.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	oomBlk.NewCall(c.funcs["promise_panic"], msgPtr)
-	oomBlk.NewUnreachable()
+	retType := fn.Sig.RetType
+	if _, isVoid := retType.(*irtypes.VoidType); isVoid {
+		oomBlk.NewRet(nil)
+	} else {
+		oomBlk.NewRet(c.zeroValue(retType))
+	}
 
 	// Init path: set header (len, cap) and copy data
 	headerType := vectorHeaderType()

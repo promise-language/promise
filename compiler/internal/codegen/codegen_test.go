@@ -406,12 +406,13 @@ func TestPanicBody(t *testing.T) {
 	ir := generateIR(t, `
 		main() {}
 	`)
-	// promise_panic is always declared as intrinsic; definePALBodies adds body
+	// B0228: promise_panic now sets TLS flag and returns (no longjmp/exit)
 	assertContains(t, ir, "define void @promise_panic(i8*")
-	assertContains(t, ir, "call i64 @strlen(i8*")
-	assertContains(t, ir, "call i64 @pal_write(i32 2,") // stderr
-	assertContains(t, ir, "call void @pal_exit(i32 1)")
-	assertContains(t, ir, "unreachable")
+	assertContains(t, ir, "store i8 1, i8* @__promise_panic_flag")     // set panic flag
+	assertContains(t, ir, "store i8* %msg, i8** @__promise_panic_msg") // store msg
+	assertContains(t, ir, "store i8 1, i8* @__promise_panic_type")     // type=1 (.rodata)
+	assertContains(t, ir, "fatal: panic during panic recovery")        // double-panic message
+	assertContains(t, ir, "call void @pal_exit(i32 134)")              // double-panic exit
 }
 
 func TestPanicMsgBody(t *testing.T) {
@@ -421,9 +422,12 @@ func TestPanicMsgBody(t *testing.T) {
 	`)
 	assertContains(t, ir, "define void @promise_panic_msg(i8*")
 	assertContains(t, ir, "bitcast i8* %msg to %promise_string_v*")
-	assertContains(t, ir, "call i64 @pal_write(i32 2,") // stderr
-	assertContains(t, ir, "call void @pal_exit(i32 1)")
-	assertContains(t, ir, "unreachable")
+	// B0228: promise_panic_msg now sets TLS flag and returns (no longjmp/exit)
+	assertContains(t, ir, "store i8 1, i8* @__promise_panic_flag") // set panic flag
+	assertContains(t, ir, "store i8* %")                           // store C string msg
+	assertContains(t, ir, "store i8 2, i8* @__promise_panic_type") // type=2 (heap)
+	assertContains(t, ir, "call i8* @pal_alloc(")                  // allocate C string copy
+	assertContains(t, ir, "fatal: panic during panic recovery")    // double-panic message
 }
 
 func TestPALWriteExitDefined(t *testing.T) {
@@ -12705,14 +12709,59 @@ func TestGoroutineExitFreePanicMsg(t *testing.T) {
 	assertContains(t, ir, "do_free_g:")
 }
 
-// B0225: promise_panic_msg sets G.panicked=2 to mark heap-allocated panic_msg.
+// B0228: promise_panic_msg stores type=2 in TLS panic_type to mark heap-allocated msg.
 func TestPanicMsgSetsHeapPanickedFlag(t *testing.T) {
 	ir := generateIR(t, `
 		panic_msg(string msg) `+"`"+`extern("promise_panic_msg");
 		main() { panic_msg("boom"); }
 	`)
-	// promise_panic_msg should store i8 2 (gPanickedHeapMsg) in the panicked field
-	assertContains(t, ir, "store i8 2,")
+	// promise_panic_msg stores i8 2 in @__promise_panic_type (heap-allocated)
+	assertContains(t, ir, "store i8 2, i8* @__promise_panic_type")
+}
+
+// B0228: promise_panic is no longer noreturn — call sites use ret instead of unreachable.
+func TestPanicNotNoreturn(t *testing.T) {
+	ir := generateIR(t, `
+		main() {}
+	`)
+	// promise_panic should NOT have noreturn (other funcs like pal_exit still do)
+	assertNotContains(t, ir, "declare void @promise_panic(i8*) noreturn")
+	// The function body should end with ret void in the set_panic block
+	assertContains(t, ir, "define void @promise_panic(i8*")
+}
+
+// B0228: promise_panic double-panic check aborts with exit code 134.
+func TestPanicDoublePanicAbort(t *testing.T) {
+	ir := generateIR(t, `
+		main() {}
+	`)
+	// Double panic should load flag, compare, and branch to abort path
+	assertContains(t, ir, "load i8, i8* @__promise_panic_flag")
+	assertContains(t, ir, "call void @pal_exit(i32 134)")
+}
+
+// B0228: Category A — OOB panic returns instead of unreachable.
+func TestOOBPanicReturns(t *testing.T) {
+	ir := generateIR(t, `
+		get(int[] v, int i) int { return v[i]; }
+		main() { v := [1]; get(v, 0); }
+	`)
+	// The OOB panic block should call promise_panic then return (not unreachable)
+	assertContains(t, ir, "call void @promise_panic(")
+	// promise_panic declaration should NOT have noreturn (other funcs like pal_exit still do)
+	assertNotContains(t, ir, "declare void @promise_panic(i8*) noreturn")
+}
+
+// B0228: Category B — OOM in vector_push returns null instead of unreachable.
+func TestVectorPushOOMReturnsNull(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			v.push(4);
+		}
+	`)
+	// The OOM path in promise_vector_push should return null
+	assertContains(t, ir, "define i8* @promise_vector_push(")
 }
 
 // --- Named Arguments Tests ---

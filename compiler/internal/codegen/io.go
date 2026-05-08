@@ -154,7 +154,8 @@ func (c *Compiler) definePrintStringBody(fn *ir.Func) {
 }
 
 // emitErrorPanic extracts the message string from an error instance pointer
-// and calls promise_panic with a null-terminated C string copy, then does
+// and calls promise_panic with a null-terminated C string copy, then overwrites
+// panic_type to 2 (heap-allocated) so goroutine_exit frees it, then does
 // panic return (cleanup + return zero).
 // The errInstPtr is an i8* pointing to the error instance struct (field 0 = _variant,
 // field 1 = message string instance pointer).
@@ -182,6 +183,9 @@ func (c *Compiler) emitErrorPanic(errInstPtr value.Value) {
 	c.block.NewStore(constant.NewInt(irtypes.I8, 0), nullPos)
 
 	c.block.NewCall(c.funcs["promise_panic"], cstr)
+	// B0256: promise_panic sets type=1 (.rodata), but this C string is heap-allocated.
+	// Overwrite to type=2 so goroutine_exit frees it.
+	c.block.NewStore(constant.NewInt(irtypes.I8, 2), c.panicTypeTlsGlobal)
 	c.emitPanicReturn()
 }
 

@@ -2328,6 +2328,21 @@ func TestErrorUnwrap(t *testing.T) {
 	assertContains(t, ir, "getelementptr %promise_error_i")
 }
 
+// B0256: emitErrorPanic heap-allocates a C string copy but promise_panic sets
+// type=1 (.rodata). The fix overwrites panic_type to 2 (heap) after the call
+// so goroutine_exit frees it.
+func TestErrorPanicSetsHeapType(t *testing.T) {
+	ir := generateIR(t, `
+		parse!(string s) int { return 0; }
+		main() {
+			x := parse("42")!;
+		}
+	`)
+	// emitErrorPanic calls promise_panic then overwrites type to 2
+	assertContains(t, ir, "call void @promise_panic(")
+	assertContains(t, ir, "store i8 2, i8* @__promise_panic_type")
+}
+
 // T0125: When func()! returns a string, the unwrapped i8* must be tracked
 // as a stmt temp so it gets freed at statement end if not claimed.
 func TestErrorUnwrapStringTemp(t *testing.T) {

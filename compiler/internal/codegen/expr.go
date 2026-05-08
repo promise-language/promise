@@ -4002,9 +4002,10 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 				ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
 				c.block.NewStore(ptr, ptrAlloca)
 				c.block.NewStore(constant.NewInt(irtypes.I1, 1), flagAlloca)
-				c.lastEnumCtorAlloca = ptrAlloca
-				c.lastEnumCtorDropFlag = flagAlloca
-				c.lastEnumCtorDropFunc = dropFunc
+				// B0269: Append to slice so multiple inline constructors are all tracked.
+				c.enumCtorTemps = append(c.enumCtorTemps, enumCtorTemp{
+					alloca: ptrAlloca, dropFlag: flagAlloca, dropFunc: dropFunc,
+				})
 			}
 		}
 	}

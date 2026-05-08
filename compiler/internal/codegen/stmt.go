@@ -292,21 +292,19 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		c.cleanupStmtTemps()
 		c.cleanupHeapTemps()
 		c.cleanupEnvTemps() // T0100
-		// B0267: Drop inline enum constructor temps not consumed by a variable.
-		if c.lastEnumCtorDropFlag != nil && c.lastEnumCtorDropFunc != nil {
-			flag := c.block.NewLoad(irtypes.I1, c.lastEnumCtorDropFlag)
+		// B0267/B0269: Drop all inline enum constructor temps not consumed by a variable.
+		for _, et := range c.enumCtorTemps {
+			flag := c.block.NewLoad(irtypes.I1, et.dropFlag)
 			dropBlk := c.newBlock("enum.ctor.drop")
 			skipBlk := c.newBlock("enum.ctor.skip")
 			c.block.NewCondBr(flag, dropBlk, skipBlk)
 			c.block = dropBlk
-			ptr := c.block.NewLoad(irtypes.I8Ptr, c.lastEnumCtorAlloca)
-			c.block.NewCall(c.lastEnumCtorDropFunc, ptr)
+			ptr := c.block.NewLoad(irtypes.I8Ptr, et.alloca)
+			c.block.NewCall(et.dropFunc, ptr)
 			c.block.NewBr(skipBlk)
 			c.block = skipBlk
 		}
-		c.lastEnumCtorAlloca = nil
-		c.lastEnumCtorDropFlag = nil
-		c.lastEnumCtorDropFunc = nil
+		c.enumCtorTemps = c.enumCtorTemps[:0]
 	}
 }
 
@@ -628,12 +626,12 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
 	c.claimHeapTemp(val)
-	// B0267: Clear enum temp when the variable IS the enum (not a function result).
-	if c.lastEnumCtorDropFlag != nil && extractEnum(resolvedExprType) != nil {
-		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.lastEnumCtorDropFlag)
-		c.lastEnumCtorAlloca = nil
-		c.lastEnumCtorDropFlag = nil
-		c.lastEnumCtorDropFunc = nil
+	// B0267: Clear enum temps when the variable IS the enum (not a function result).
+	if len(c.enumCtorTemps) > 0 && extractEnum(resolvedExprType) != nil {
+		for i := range c.enumCtorTemps {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:0]
 	}
 	// B0222: When storing a structural interface (e.g., Iterator) in a variable,
 	// promote remaining heapTemps to scope bindings. Intermediate iterators in
@@ -769,12 +767,12 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// Without this, iterator chain results (e.g., c.take(3)) assigned via
 	// auto-typed declarations are freed at statement end, causing use-after-free.
 	c.claimHeapTemp(val)
-	// B0267: Clear enum temp when the variable IS the enum (not a function result).
-	if c.lastEnumCtorDropFlag != nil && extractEnum(typ) != nil {
-		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.lastEnumCtorDropFlag)
-		c.lastEnumCtorAlloca = nil
-		c.lastEnumCtorDropFlag = nil
-		c.lastEnumCtorDropFunc = nil
+	// B0267: Clear enum temps when the variable IS the enum (not a function result).
+	if len(c.enumCtorTemps) > 0 && extractEnum(typ) != nil {
+		for i := range c.enumCtorTemps {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:0]
 	}
 	// B0222: When storing a structural interface (e.g., Iterator) in a variable,
 	// promote remaining heapTemps to scope bindings so intermediate iterators in

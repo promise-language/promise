@@ -45,3 +45,11 @@ test_multiple_inline() `test {
   _consume(Container.Items(values: ["a"]));
   _consume(Container.Items(values: ["b"]));
 }
+
+// B0269: Multiple inline constructors as arguments to the same call.
+_consume_two(Container a, Container b) {
+}
+
+test_two_inline_args() `test {
+  _consume_two(Container.Items(values: ["a"]), Container.Items(values: ["b"]));
+}

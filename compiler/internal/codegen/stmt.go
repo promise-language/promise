@@ -877,9 +877,17 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 // Strings are special: they use promise_string_drop (checks literal flag before freeing).
 func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ types.Type) {
 	// T0102: Enum drop — check before extractNamed since enums are *types.Enum, not *types.Named.
-	if enum := extractEnum(typ); enum != nil && enum.HasDrop() {
-		c.maybeRegisterEnumDrop(varName, alloca, typ, enum)
-		return
+	if enum := extractEnum(typ); enum != nil {
+		if enum.HasDrop() {
+			c.maybeRegisterEnumDrop(varName, alloca, typ, enum)
+			return
+		}
+		// B0238: Check for mono-time synthesized drops on generic enum instances
+		// whose TypeParam variant fields resolve to droppable concrete types.
+		if inst, ok := typ.(*types.Instance); ok && monoEnumInstNeedsSynthDrop(inst) {
+			c.maybeRegisterEnumDrop(varName, alloca, typ, enum)
+			return
+		}
 	}
 
 	named := extractNamed(typ)
@@ -1197,7 +1205,11 @@ func (c *Compiler) maybeRegisterEnumDrop(varName string, alloca *ir.InstAlloca, 
 
 	// Resolve the enum drop function name.
 	enumName := enum.Obj().Name()
-	if c.typeSubst != nil {
+	if inst, ok := typ.(*types.Instance); ok {
+		// B0238: typ is already a concrete Instance (e.g., Container[Wrapper]) — use mono name directly.
+		enumName = monoName(inst)
+	} else if c.typeSubst != nil {
+		// Inside a generic body — substitute TypeParams to get the concrete Instance.
 		resolvedTyp := types.Substitute(typ, c.typeSubst)
 		if inst, ok := resolvedTyp.(*types.Instance); ok {
 			enumName = monoName(inst)

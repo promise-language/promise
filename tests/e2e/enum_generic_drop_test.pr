@@ -1,0 +1,37 @@
+// B0238: Generic enum variables with TypeParam-only droppable fields get drop registered
+type Wrapper {
+  string name;
+  int value;
+}
+enum Container[T] {
+  Holding(T item), Empty,
+}
+
+test_generic_enum_typeparam_drop() `test {
+  c := Container[Wrapper].Holding(Wrapper(name: "hello", value: 42));
+}
+
+test_generic_enum_typeparam_drop_fieldless() `test {
+  c := Container[Wrapper].Empty;
+}
+
+test_generic_enum_typeparam_drop_reassign() `test {
+  c := Container[Wrapper].Holding(Wrapper(name: "first", value: 1));
+  c = Container[Wrapper].Holding(Wrapper(name: "second", value: 2));
+  c = Container[Wrapper].Empty;
+}
+
+// Generic enum with string type arg directly
+enum MaybeStr[T] {
+  Just(T val), Nothing,
+}
+
+test_generic_enum_string_typeparam() `test {
+  m := MaybeStr[string].Just("hello");
+}
+
+test_generic_enum_string_reassign() `test {
+  m := MaybeStr[string].Just("hello");
+  m = MaybeStr[string].Just("world");
+  m = MaybeStr[string].Nothing;
+}

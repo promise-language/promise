@@ -10793,6 +10793,24 @@ func TestDropMonoEnumInstSynthDrop(t *testing.T) {
 	assertContains(t, ir, "call void @Resource.drop(")
 }
 
+// B0238: Generic enum variables with TypeParam-only droppable fields must get drop
+// registered at scope exit. maybeRegisterDrop must check monoEnumInstNeedsSynthDrop.
+func TestDropGenericEnumVarWithDroppableTypeParam(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { string name; int value; }
+		enum Container[T] {
+			Holding(T item),
+			Empty,
+		}
+		main() {
+			c := Container[Wrapper].Holding(Wrapper(name: "hello", value: 42));
+		}
+	`)
+	// Container[Wrapper] should get a synthesized drop and it must be called at scope exit
+	assertContains(t, ir, `define void @"Container[Wrapper].drop"`)
+	assertContains(t, ir, `call void @"Container[Wrapper].drop"`)
+}
+
 // Compound assignment on different typed variables exercises namedFromLLVMType branches
 func TestCompoundAssignF64(t *testing.T) {
 	ir := generateIR(t, `

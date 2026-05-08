@@ -2357,6 +2357,25 @@ func TestErrorUnwrapStringTemp(t *testing.T) {
 	assertContains(t, ir, "promise_string_drop")
 }
 
+// B0260: When func()? propagates a string result, the ok-path i8* must be
+// tracked as a stmt temp so it gets freed if not claimed (e.g., by vec.push
+// which dups the string).
+func TestErrorPropagateStringTemp(t *testing.T) {
+	ir := generateIR(t, `
+		make_str!() string { return "hello"; }
+		wrap!(string[] v) string[] {
+			v.push(make_str()?);
+			return v;
+		}
+	`)
+	// Should have string temp tracking for the propagated string result
+	assertContains(t, ir, "error.propagate")
+	assertContains(t, ir, "error.ok")
+	// The decoded string must be tracked as a temp and dropped after push
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "promise_string_drop")
+}
+
 func TestErrorHandler(t *testing.T) {
 	ir := generateIR(t, `
 		parse!(string s) int { return 0; }

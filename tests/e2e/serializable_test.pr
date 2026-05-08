@@ -255,8 +255,7 @@ array_encode_test() `test {
   assert(s.contains("\"small\""), "array encode: tag small");
 }
 
-array_round_trip_test() `test(allow_leaks: true) {
-  // B0260
+array_round_trip_test() `test {
   TaggedItem item1 = TaggedItem(name: "nut", tags: ["hex", "steel"]);
   json.JsonEncoder enc = json.JsonEncoder();
   item1.encode(enc)!;
@@ -398,8 +397,7 @@ int_key_map_round_trip_test() `test {
 
 // ── Mixed array + map in same type ──────────────────────────────────────────
 
-mixed_array_and_map_test() `test(allow_leaks: true) {
-  // B0260
+mixed_array_and_map_test() `test {
   Dashboard d1 = Dashboard(title: "main", labels: ["a", "b"], metrics: map[string, int]());
   d1.metrics["total"] = 42;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -719,8 +717,7 @@ encode_decode_nested_test() `test {
 }
 
 // Round-trip with array fields
-encode_decode_array_field_test() `test(allow_leaks: true) {
-  // B0260
+encode_decode_array_field_test() `test {
   TaggedItem item = TaggedItem(name: "widget", tags: ["red", "small"]);
   string s = json.encode_string[TaggedItem](item)!;
   assert(s.contains("\"tags\":[\"red\",\"small\"]"), "array field enc");
@@ -947,7 +944,7 @@ decode_string_error_test() `test {
 
 // Decode error: missing required field
 decode_string_missing_field_test() `test(allow_leaks: true) {
-  // B0260
+  // B0263: tuple destructure of failable call leaks 1 allocation
   (p, err) := json.decode_string[Point]("\{\"x\":1}");
   // y is required (int, no default) — should still decode with zero value
   // since JSON decode fills missing fields with zero

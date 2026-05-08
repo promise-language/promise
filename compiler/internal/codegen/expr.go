@@ -81,7 +81,26 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 	case *ast.MatchExpr:
 		return c.genMatchExpr(e)
 	case *ast.ErrorPropagateExpr:
-		return c.genErrorPropagateExpr(e)
+		result := c.genErrorPropagateExpr(e)
+		// B0260: Track string temps from error propagation paths.
+		// When func()? returns a string, the propagated ok-path i8* is a
+		// heap-allocated temp that must be freed at statement end if not
+		// claimed (e.g., by push which dups the string). Without this,
+		// synthesized serializable decode methods leak decoded strings.
+		if result != nil && result.Type() == irtypes.I8Ptr {
+			exprType := c.info.Types[e]
+			if c.typeSubst != nil && exprType != nil {
+				exprType = types.Substitute(exprType, c.typeSubst)
+			}
+			if extractNamed(exprType) == types.TypString {
+				if c.optionalFieldString {
+					c.optionalFieldString = false
+				} else {
+					c.trackStringTemp(result)
+				}
+			}
+		}
+		return result
 	case *ast.ErrorUnwrapExpr:
 		result := c.genErrorUnwrapExpr(e)
 		// T0125: Track string temps from failable call unwrap paths.

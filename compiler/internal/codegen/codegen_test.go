@@ -12790,6 +12790,37 @@ func TestPanicCheckGoCallDirect(t *testing.T) {
 	assertContains(t, ir, "go.call_ok")
 }
 
+// T0148: genGoCallExprViaBlock has final panic check before final suspend.
+func TestPanicCheckGoCallViaBlockFinal(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			bar(this) {}
+		}
+		main() {
+			f := Foo();
+			go f.bar();
+		}
+	`)
+	// genGoCallExprViaBlock should emit go.panic_exit block
+	assertContains(t, ir, "go.panic_exit")
+	// The coroutine body should have a final panic flag check (icmp ne + cond br)
+	assertContains(t, ir, "@__promise_panic_flag")
+}
+
+// T0148: genGoBlock has final panic check before final suspend.
+func TestPanicCheckGoBlockFinal(t *testing.T) {
+	ir := generateIR(t, `
+		work() {}
+		main() {
+			go {
+				work();
+			};
+		}
+	`)
+	assertContains(t, ir, "go.panic_exit")
+	assertContains(t, ir, "@__promise_panic_flag")
+}
+
 // B0228: Category B — OOM in vector_push returns null instead of unreachable.
 func TestVectorPushOOMReturnsNull(t *testing.T) {
 	ir := generateIR(t, `

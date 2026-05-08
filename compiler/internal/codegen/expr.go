@@ -7522,8 +7522,12 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 
 	// Final suspend
 	finalSuspBlk := coroFn.NewBlock("final.suspend")
+	// T0148: Final panic check after body + scope cleanup.
+	// Catches panics from drop functions during scope cleanup that per-call checks miss.
 	if c.block != nil && c.block.Term == nil {
-		c.block.NewBr(finalSuspBlk)
+		finalFlag := c.block.NewLoad(irtypes.I8, c.panicFlagGlobal)
+		finalIsPanic := c.block.NewICmp(enum.IPredNE, finalFlag, constant.NewInt(irtypes.I8, 0))
+		c.block.NewCondBr(finalIsPanic, goPanicExitBlk, finalSuspBlk)
 	}
 
 	// B0228: Define the go block panic exit block body.
@@ -8070,8 +8074,12 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	// Final suspend: yield back to scheduler so it can see coro.done()=true
 	// before destroying the coroutine frame.
 	finalSuspBlk := coroFn.NewBlock("final.suspend")
+	// T0148: Final panic check after body + scope cleanup.
+	// Catches panics from drop functions during scope cleanup that per-call checks miss.
 	if c.block != nil && c.block.Term == nil {
-		c.block.NewBr(finalSuspBlk)
+		finalFlag := c.block.NewLoad(irtypes.I8, c.panicFlagGlobal)
+		finalIsPanic := c.block.NewICmp(enum.IPredNE, finalFlag, constant.NewInt(irtypes.I8, 0))
+		c.block.NewCondBr(finalIsPanic, goPanicExitBlk2, finalSuspBlk)
 	}
 
 	// B0228: Define the go block panic exit block body (same as first go block variant).

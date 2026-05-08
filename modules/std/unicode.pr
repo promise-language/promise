@@ -103,8 +103,9 @@ is_nfc(string value) bool `public `doc("Returns true if the string is in NFC for
     last_ccc = cc;
   }
   if maybe {
-    string original = "{value}";
-    return normalize_nfc(value) == original;
+    string original = value + "";
+    string nfc_result = normalize_nfc(value);
+    return nfc_result == original;
   }
   return true;
 }

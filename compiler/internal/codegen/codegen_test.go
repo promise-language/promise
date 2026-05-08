@@ -10804,6 +10804,19 @@ func TestMatchDupStringConsumedViaTuple(t *testing.T) {
 	assertContains(t, ir, "store i1 false")
 }
 
+// B0264: Vector[(string, int)] must drop string elements inside tuples.
+func TestVectorTupleElementStringDrop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			(string, int)[] v = [("hello", 1), ("world", 2)];
+		}
+	`)
+	// The vector drop loop should extract tuple field 0 (string) and call promise_string_drop
+	assertContains(t, ir, "vecdrop.body")
+	assertContains(t, ir, "extractvalue")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

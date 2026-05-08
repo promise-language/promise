@@ -2283,7 +2283,7 @@ func (c *Compiler) emitVectorElementDropLoop(vecPtr value.Value, elemType types.
 	// owner of user-type instances — constructors transfer ownership to push, and
 	// sort temps clear their drop flags when moved back into the vector.
 	if extractNamed(elemType) != types.TypString {
-		if !c.vecElemNeedsEnumDrop(elemType) && !c.vecElemNeedsUserTypeDrop(elemType) {
+		if !c.vecElemNeedsEnumDrop(elemType) && !c.vecElemNeedsUserTypeDrop(elemType) && !c.tupleNeedsDrop(elemType) {
 			return
 		}
 	}
@@ -2400,6 +2400,40 @@ func (c *Compiler) vecElemNeedsUserTypeDrop(elemType types.Type) bool {
 	// Heap user type without any drop — needs pal_free
 	if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
 		return true
+	}
+	return false
+}
+
+// tupleNeedsDrop returns true if a tuple type contains any droppable element
+// (string, vector, channel, user type with drop, enum with drop).
+// B0264: Enables vector element drop loop to clean up tuple elements.
+func (c *Compiler) tupleNeedsDrop(elemType types.Type) bool {
+	tup, ok := elemType.(*types.Tuple)
+	if !ok {
+		return false
+	}
+	for _, e := range tup.Elems() {
+		resolved := e
+		if c.typeSubst != nil {
+			resolved = types.Substitute(resolved, c.typeSubst)
+		}
+		if named := extractNamed(resolved); named != nil {
+			if named == types.TypString || named.HasDrop() || named.NeedsSynthDrop() {
+				return true
+			}
+			if _, isVec := types.AsVector(resolved); isVec {
+				return true
+			}
+			if _, isCh := types.AsChannel(resolved); isCh {
+				return true
+			}
+			if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+				return true
+			}
+		}
+		if extractEnum(resolved) != nil {
+			return true
+		}
 	}
 	return false
 }

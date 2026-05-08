@@ -5995,6 +5995,20 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 		return
 	}
 
+	// Tuple field: extract and drop each droppable element.
+	// B0264: Vector[(string, int)] leaks because tuple elements were never dropped.
+	if tup, ok := typ.(*types.Tuple); ok {
+		for i, e := range tup.Elems() {
+			resolved := e
+			if c.typeSubst != nil {
+				resolved = types.Substitute(resolved, c.typeSubst)
+			}
+			elemVal := c.block.NewExtractValue(fieldVal, uint64(i))
+			c.emitVariantFieldDrop(elemVal, resolved)
+		}
+		return
+	}
+
 	// Enum field: pass pointer to an alloca.
 	// B0212: Also handle mono enum instances where HasDrop is false on the origin
 	// (sema couldn't detect droppability for TypeParam variant fields) but a mono

@@ -362,6 +362,18 @@ func (c *Compiler) genCallArgExpr(expr ast.Expr) value.Value {
 	if c.info.AutoPropagateExprs[expr] {
 		val = c.genAutoPropagateValue(val)
 	}
+	// T0109: When a call expression returning a vector or channel is passed
+	// as an argument to another function, claim the stmtTemp. The callee
+	// takes ownership. Without this, nested calls like f(g()) cause
+	// double-free: g()'s result is tracked as a stmtTemp and freed at
+	// statement end, but also consumed by f().
+	if _, isCall := expr.(*ast.CallExpr); isCall && val != nil {
+		if rt := c.info.Types[expr]; rt != nil {
+			if types.IsVector(rt) || types.IsChannel(rt) {
+				c.claimStringTemp(val)
+			}
+		}
+	}
 	return val
 }
 
@@ -4846,6 +4858,9 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 					dropFunc: dropFn,
 					varName:  tmpName,
 				})
+				// Claim the stmtTemp so it's not also dropped at statement end —
+				// ownership transferred to the scope binding (prevents double-free).
+				c.claimStringTemp(slicePtr)
 			}
 		}
 		c.genForInVector(s, slicePtr, elem)

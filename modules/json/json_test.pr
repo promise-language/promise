@@ -593,7 +593,7 @@ parse_value_empty_array_test() `test {
   }
 }
 
-parse_value_object_test() `test(allow_leaks: true) {
+parse_value_object_test() `test {
   string data = "\{\"a\":1,\"b\":2}";
   JsonValue v = parse_value(data)!;
   match v {
@@ -633,7 +633,7 @@ round_trip_value_test() `test {
   }
 }
 
-nested_value_test() `test(allow_leaks: true) {
+nested_value_test() `test {
   // Nested: object containing array
   string data = "\{\"items\":[1,2],\"ok\":true}";
   JsonValue v = parse_value(data)!;
@@ -714,7 +714,7 @@ format_value_number_test() `test {
   assert(s == "42", "format number");
 }
 
-format_value_empty_array_test() `test(allow_leaks: true) {
+format_value_empty_array_test() `test {
   string s = format_value(JsonValue.Array(JsonValue[]()))!;
   assert(s == "[]", "format empty array");
 }
@@ -734,7 +734,7 @@ format_value_empty_object_test() `test {
   assert(s == "\{}", "format empty object");
 }
 
-round_trip_object_test() `test(allow_leaks: true) {
+round_trip_object_test() `test {
   map[string, JsonValue] f = {
     "x": JsonValue.Number(1.0), "y": JsonValue.Str("two")
   };
@@ -750,7 +750,7 @@ round_trip_object_test() `test(allow_leaks: true) {
   }
 }
 
-deep_nesting_test() `test(allow_leaks: true) {
+deep_nesting_test() `test {
   // array inside object: {"data":[1,true,"x"]}
   string data = "\{\"data\":[1,true,\"x\"]}";
   JsonValue v = parse_value(data)!;
@@ -766,7 +766,7 @@ deep_nesting_test() `test(allow_leaks: true) {
 
 // ── Object field value access tests ─────────────────────────────────────────
 
-object_field_value_access_test() `test(allow_leaks: true) {
+object_field_value_access_test() `test {
   // Verify we can look up values by key after parsing
   string data = "\{\"name\":\"Alice\",\"age\":30,\"active\":true}";
   JsonValue v = parse_value(data)!;
@@ -793,7 +793,7 @@ object_field_value_access_test() `test(allow_leaks: true) {
   }
 }
 
-nested_object_test() `test(allow_leaks: true) {
+nested_object_test() `test {
   // Object containing another object
   string data = "\{\"user\":\{\"name\":\"Bob\",\"score\":42}}";
   JsonValue v = parse_value(data)!;
@@ -817,7 +817,7 @@ nested_object_test() `test(allow_leaks: true) {
   }
 }
 
-round_trip_nested_object_test() `test(allow_leaks: true) {
+round_trip_nested_object_test() `test {
   // Build nested object, format, parse back, verify values
   map[string, JsonValue] inner = {
     "x": JsonValue.Number(1.0)
@@ -839,7 +839,7 @@ round_trip_nested_object_test() `test(allow_leaks: true) {
   }
 }
 
-object_duplicate_key_test() `test(allow_leaks: true) {
+object_duplicate_key_test() `test {
   // JSON with duplicate keys — last value wins (map semantics)
   string data = "\{\"a\":1,\"a\":2}";
   JsonValue v = parse_value(data)!;
@@ -856,7 +856,7 @@ object_duplicate_key_test() `test(allow_leaks: true) {
   }
 }
 
-object_null_value_test() `test(allow_leaks: true) {
+object_null_value_test() `test {
   string data = "\{\"x\":null}";
   JsonValue v = parse_value(data)!;
   match v {
@@ -981,7 +981,7 @@ encode_pretty_empty_array_test() `test {
 
 // ── Mixed structure coverage ────────────────────────────────────────────────
 
-parse_object_in_array_test() `test(allow_leaks: true) {
+parse_object_in_array_test() `test {
   // Array of objects
   JsonValue v = parse_value("[\{\"a\":1},\{\"b\":2}]")!;
   match v {
@@ -1039,7 +1039,7 @@ parse_heterogeneous_array_test() `test {
   }
 }
 
-round_trip_complex_test() `test(allow_leaks: true) {
+round_trip_complex_test() `test {
   // Complex structure: object with array of objects
   string data = "\{\"users\":[\{\"name\":\"A\",\"age\":1},\{\"name\":\"B\",\"age\":2}],\"count\":2}";
   JsonValue v = parse_value(data)!;
@@ -1106,7 +1106,7 @@ parse_value_error_unterminated_array_test() `test {
   assert(err is present, "unterminated array should error");
 }
 
-parse_value_error_unterminated_object_test() `test(allow_leaks: true) {
+parse_value_error_unterminated_object_test() `test {
   (v, err) := parse_value("\{\"a\":1");
   assert(err is present, "unterminated object should error");
 }
@@ -1118,7 +1118,7 @@ parse_value_error_unterminated_string_test() `test {
 
 // ── Whitespace tolerance ────────────────────────────────────────────────────
 
-parse_value_whitespace_object_test() `test(allow_leaks: true) {
+parse_value_whitespace_object_test() `test {
   // Generous whitespace
   string data = "  \{  \"a\"  :  1  ,  \"b\"  :  2  }  ";
   JsonValue v = parse_value(data)!;
@@ -1195,13 +1195,13 @@ is_string_test() `test {
   assert(!JsonValue.Number(0.0).is_string, "number not is_string");
 }
 
-is_array_test() `test(allow_leaks: true) {
+is_array_test() `test {
   assert(JsonValue.Array(JsonValue[]()).is_array, "array is_array");
   assert(!JsonValue.Null.is_array, "null not is_array");
   assert(!JsonValue.Object(map[string, JsonValue]()).is_array, "object not is_array");
 }
 
-is_object_test() `test(allow_leaks: true) {
+is_object_test() `test {
   assert(JsonValue.Object(map[string, JsonValue]()).is_object, "object is_object");
   assert(!JsonValue.Null.is_object, "null not is_object");
   assert(!JsonValue.Array(JsonValue[]()).is_object, "array not is_object");
@@ -1236,7 +1236,7 @@ as_string_test() `test {
   assert(s2 is absent, "as_string absent on number");
 }
 
-as_array_test() `test(allow_leaks: true) {
+as_array_test() `test {
   JsonValue[] items = [JsonValue.Number(1.0), JsonValue.Number(2.0)];
   JsonValue[]? arr = JsonValue.Array(items).as_array();
   assert(arr is present, "as_array present");
@@ -1246,7 +1246,7 @@ as_array_test() `test(allow_leaks: true) {
   assert(arr2 is absent, "as_array absent on null");
 }
 
-as_object_test() `test(allow_leaks: true) {
+as_object_test() `test {
   map[string, JsonValue] fields = {
     "a": JsonValue.Number(1.0)
   };
@@ -1347,7 +1347,7 @@ format_pretty_custom_indent_test() `test {
 
 // Round-trip with methods
 
-round_trip_method_test() `test(allow_leaks: true) {
+round_trip_method_test() `test {
   map[string, JsonValue] fields = {
     "items": JsonValue.Array([JsonValue.Number(1.0), JsonValue.Number(2.0)]),
     "ok": JsonValue.Bool(true),
@@ -1362,7 +1362,7 @@ round_trip_method_test() `test(allow_leaks: true) {
 
 // Chained method calls
 
-chained_access_test() `test(allow_leaks: true) {
+chained_access_test() `test {
   // Build: {"user": {"name": "Alice", "scores": [10, 20]}}
   map[string, JsonValue] user_fields = {
     "name": JsonValue.Str("Alice"),
@@ -1415,13 +1415,13 @@ as_string_empty_test() `test {
   assert(s! == "", "as_string empty value");
 }
 
-as_array_empty_test() `test(allow_leaks: true) {
+as_array_empty_test() `test {
   JsonValue[]? arr = JsonValue.Array(JsonValue[]()).as_array();
   assert(arr is present, "as_array empty present");
   assert(arr!.len == 0, "as_array empty len");
 }
 
-as_object_empty_test() `test(allow_leaks: true) {
+as_object_empty_test() `test {
   map[string, JsonValue]? obj = JsonValue.Object(map[string, JsonValue]()).as_object();
   assert(obj is present, "as_object empty present");
   assert(obj!.len == 0, "as_object empty len");
@@ -1468,7 +1468,7 @@ encode_method_string_test() `test {
   assert(enc.to_string() == "\"hello\\nworld\"", "encode string with escape");
 }
 
-encode_method_nested_test() `test(allow_leaks: true) {
+encode_method_nested_test() `test {
   // {"items":[null,true],"count":2}
   map[string, JsonValue] fields = {
     "items": JsonValue.Array([JsonValue.Null, JsonValue.Bool(true)]),
@@ -1484,7 +1484,7 @@ encode_method_nested_test() `test(allow_leaks: true) {
 
 // ── format_pretty round-trip ─────────────────────────────────────────────────
 
-format_pretty_round_trip_test() `test(allow_leaks: true) {
+format_pretty_round_trip_test() `test {
   map[string, JsonValue] fields = {
     "name": JsonValue.Str("Alice"),
     "scores": JsonValue.Array([JsonValue.Number(10.0), JsonValue.Number(20.0)]),
@@ -1502,7 +1502,7 @@ format_pretty_round_trip_test() `test(allow_leaks: true) {
 
 // ── format for all variant types ─────────────────────────────────────────────
 
-format_method_all_variants_test() `test(allow_leaks: true) {
+format_method_all_variants_test() `test {
   assert(JsonValue.Null.format()! == "null", "format null");
   assert(JsonValue.Bool(true).format()! == "true", "format true");
   assert(JsonValue.Bool(false).format()! == "false", "format false");
@@ -1514,7 +1514,7 @@ format_method_all_variants_test() `test(allow_leaks: true) {
 
 // ── Parsed values with methods ───────────────────────────────────────────────
 
-parsed_value_methods_test() `test(allow_leaks: true) {
+parsed_value_methods_test() `test {
   // Verify methods work on values from parse_value, not just constructed values
   string data = "\{\"name\":\"Bob\",\"age\":30,\"tags\":[\"a\",\"b\"],\"active\":true}";
   JsonValue v = parse_value(data)!;

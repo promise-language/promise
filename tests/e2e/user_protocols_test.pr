@@ -92,7 +92,7 @@ test_user_type_as_map_key_basic() `test {
   }
 }
 
-test_user_type_map_key_overwrite() `test(allow_leaks: true) {
+test_user_type_map_key_overwrite() `test {
   map[Point, int] m = {:};
   m[Point(x: 5, y: 5)] = 1;
   m[Point(x: 5, y: 5)] = 2; // overwrite same key
@@ -111,7 +111,7 @@ test_user_type_map_key_absent() `test {
   }
 }
 
-test_user_type_map_key_len() `test(allow_leaks: true) {
+test_user_type_map_key_len() `test {
   map[Point, bool] m = {:};
   m[Point(x: 0, y: 0)] = true;
   m[Point(x: 1, y: 0)] = true;
@@ -132,7 +132,7 @@ test_user_type_in_set_basic() `test {
   assert(!s.contains(Point(x: 0, y: 0)), "set doesn't have (0,0)");
 }
 
-test_user_type_set_dedup() `test(allow_leaks: true) {
+test_user_type_set_dedup() `test {
   Set[Point] s = Set[Point]();
   s.add(Point(x: 7, y: 8));
   s.add(Point(x: 7, y: 8)); // duplicate
@@ -140,7 +140,7 @@ test_user_type_set_dedup() `test(allow_leaks: true) {
   assert(s.len == 1, "set deduplicates equal points");
 }
 
-test_user_type_set_remove() `test(allow_leaks: true) {
+test_user_type_set_remove() `test {
   Set[Point] s = Set[Point]();
   s.add(Point(x: 1, y: 1));
   s.add(Point(x: 2, y: 2));
@@ -289,7 +289,7 @@ test_pair_as_map_key() `test {
   }
 }
 
-test_pair_in_set() `test(allow_leaks: true) {
+test_pair_in_set() `test {
   Set[Pair] s = Set[Pair]();
   s.add(Pair(first: 10, second: 20));
   s.add(Pair(first: 10, second: 20)); // duplicate

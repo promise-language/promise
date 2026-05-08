@@ -3992,6 +3992,12 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 			idx := c.addCoverageRegion(pos.File, pos.Line, endPos, c.currentCoverageFuncName(), "match.arm")
 			c.emitCoverageIncrement(idx)
 		}
+		// T0109: Save scope depth before binding match pattern. Dup'd bindings
+		// from destructured enum fields (strings, vectors, etc.) are registered
+		// as scope bindings via maybeRegisterDrop. They must be cleaned up when
+		// the arm falls through to match.end (scope cleanup here) or when the
+		// arm exits early via return/break (handled by emitScopeCleanup in those paths).
+		armScopeLen := len(c.scopeBindings)
 		c.bindMatchPattern(arm.Pattern, subject, enum, layout, enumHasDrop, subjectType)
 
 		var armVal value.Value
@@ -4001,6 +4007,12 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 			armVal = c.genBlockValue(arm.Block)
 		}
 		c.claimStringTemp(armVal) // T0073: ownership transfers to match phi
+
+		// T0109: Clean up dup'd match bindings at arm end (fall-through path).
+		if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > armScopeLen {
+			c.emitScopeCleanup(armScopeLen, false)
+		}
+		c.scopeBindings = c.scopeBindings[:armScopeLen]
 
 		armEnd := c.block
 		if c.block.Term == nil {
@@ -4502,15 +4514,11 @@ func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtype
 	c.locals[name] = bindAlloca
 	c.block.NewStore(dupVal, bindAlloca)
 
-	// B0236: Register dup'd binding for scope cleanup ONLY for new dup types
-	// (heap user types, vectors, channels). String dups are NOT registered —
-	// B0237 established that dup'd strings are consumed by their match arm body
-	// (push, return, etc.) and consumers manage lifetime. Adding scope cleanup
-	// for strings would break Map's internal Slot matching which was designed
-	// without cleanup.
-	if named != types.TypString {
-		c.maybeRegisterDrop(name, bindAlloca, resolvedType)
-	}
+	// T0109: Register ALL dup'd bindings for scope cleanup (strings, vectors,
+	// channels, heap types). Match-level scope cleanup at match.end handles
+	// fall-through; return/break scope cleanup handles early exit. The drop
+	// flag is cleared by clearDropFlag(name) when the variable is moved.
+	c.maybeRegisterDrop(name, bindAlloca, resolvedType)
 }
 
 // --- If expressions ---

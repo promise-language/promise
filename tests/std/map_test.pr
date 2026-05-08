@@ -397,7 +397,7 @@ test_map_int_string_no_leak() `test {
   m[3] = "test";
 }
 
-test_map_remove_no_leak() `test(allow_leaks: true) {
+test_map_remove_no_leak() `test {
   // B0235
   // B0232: Removed entries should have their keys/values freed.
   map[string, string] m = {:};
@@ -408,7 +408,7 @@ test_map_remove_no_leak() `test(allow_leaks: true) {
   assert(m.len == 2, "len after remove");
 }
 
-test_map_overwrite_no_leak() `test(allow_leaks: true) {
+test_map_overwrite_no_leak() `test {
   // B0235
   // B0232: Overwriting a value should free the old key/value.
   map[string, string] m = {:};
@@ -439,7 +439,7 @@ test_map_rehash_no_leak() `test {
   assert(m.len == 20, "20 entries after rehash");
 }
 
-test_map_read_after_insert() `test(allow_leaks: true) {
+test_map_read_after_insert() `test {
   // B0235
   // B0232: Reading values after insert should work correctly.
   // The dup-on-destructure ensures returned values are independent copies.
@@ -452,7 +452,7 @@ test_map_read_after_insert() `test(allow_leaks: true) {
   assert(result == "value", "read correct value");
 }
 
-test_map_pop_no_leak() `test(allow_leaks: true) {
+test_map_pop_no_leak() `test {
   // B0235
   // B0232: pop() should return the value and free the key.
   map[string, string] m = {:};

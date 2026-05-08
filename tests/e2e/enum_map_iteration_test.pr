@@ -232,7 +232,7 @@ test_map_in_enum_variant_forin() `test {
   }
 }
 
-test_nested_map_in_enum_variant() `test(allow_leaks: true) {
+test_nested_map_in_enum_variant() `test {
   // {"user": {"name": "Bob", "active": true}}
   map[string, JsonNode] inner = {
     "name": JsonNode.Text(value: "Bob"),

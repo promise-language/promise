@@ -765,7 +765,7 @@ test_process_output_structural_reader() `test(exclude: "wasm32") {
 
 // ── OS info tests ────────────────────────────────────────────────────────────
 
-test_env_contains_path() `test(allow_leaks: true, exclude: "wasm32") {
+test_env_contains_path() `test(exclude: "wasm32") {
   map[string, string] e = env;
   assert(e.contains("PATH"), "env should contain PATH");
   if path_value := e["PATH"] {
@@ -775,12 +775,12 @@ test_env_contains_path() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_env_contains_home() `test(allow_leaks: true, exclude: "wasm32") {
+test_env_contains_home() `test(exclude: "wasm32") {
   map[string, string] e = env;
   assert(e.contains("HOME"), "env should contain HOME");
 }
 
-test_env_values_match_get() `test(allow_leaks: true, exclude: "wasm32") {
+test_env_values_match_get() `test(exclude: "wasm32") {
   // env map values should match get_env_var
   map[string, string] e = env;
   string? path = get_env_var("PATH");
@@ -947,7 +947,7 @@ test_process_output_drop_auto_closes() `test(exclude: "wasm32") {
   p.wait()!;
 }
 
-test_env_reflects_set() `test(allow_leaks: true, exclude: "wasm32") {
+test_env_reflects_set() `test(exclude: "wasm32") {
   // Set a variable, then verify it appears in the env map
   set_env_var("PROMISE_TEST_ENV_MAP", "from_map_test");
   map[string, string] e = env;

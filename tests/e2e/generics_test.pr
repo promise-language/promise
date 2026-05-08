@@ -308,7 +308,7 @@ type Applier[T] {
   }
 }
 
-test_method_on_generic_type_calls_func_with_method_param() `test(allow_leaks: true) {
+test_method_on_generic_type_calls_func_with_method_param() `test {
   a := Applier[int](value: 42);
   string s = a.apply[string](|int x| -> "{x}!");
   assert(s == "42!", "apply[string]");

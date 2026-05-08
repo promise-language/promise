@@ -10589,6 +10589,28 @@ func TestMatchDupMapExcluded(t *testing.T) {
 	}
 }
 
+// T0109: Match destructure of droppable enum registers string dup for scope cleanup.
+// The dup'd string must be dropped at arm end (fall-through) and on early return.
+func TestMatchDupStringScopeCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		enum Slot {
+			Empty,
+			Used(string key, int value),
+		}
+		test() {
+			s := Slot.Used(key: "hello", value: 42);
+			match s {
+				Used(k, v) => { int x = v; },
+				Empty => { },
+			}
+		}
+	`)
+	// String field extracted from droppable enum should be dup'd
+	assertContains(t, ir, "strdup.copy")
+	// T0109: The dup'd string must have a scope cleanup (drop flag + promise_string_drop call)
+	assertContains(t, ir, "promise_string_drop")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

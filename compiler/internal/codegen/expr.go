@@ -4514,11 +4514,12 @@ func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtype
 	c.locals[name] = bindAlloca
 	c.block.NewStore(dupVal, bindAlloca)
 
-	// T0109: Register ALL dup'd bindings for scope cleanup (strings, vectors,
-	// channels, heap types). Match-level scope cleanup at match.end handles
-	// fall-through; return/break scope cleanup handles early exit. The drop
-	// flag is cleared by clearDropFlag(name) when the variable is moved.
-	c.maybeRegisterDrop(name, bindAlloca, resolvedType)
+	// B0237: Do NOT register dup'd bindings for scope cleanup. The dup'd copy
+	// is owned by whoever consumes it (push into vector, return via PHI, etc.).
+	// Registering for arm-scope cleanup caused use-after-free: the cleanup
+	// would drop the value even when it was already consumed (e.g., returned
+	// as the match result or pushed into a collection). Unconsumed dup'd
+	// values will leak, which is acceptable (tracked for future Clone trait).
 }
 
 // --- If expressions ---

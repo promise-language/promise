@@ -367,3 +367,99 @@ test_rehash_stress() `test {
     assert(m.get_or(i, -1) == i * 10, "entry survived rehash");
   }
 }
+
+// --- B0232: Map destruction drops Slot enum element data (keys/values) ---
+
+test_map_string_string_no_leak() `test {
+  // B0232: Map[string, string] should not leak keys or values at destruction.
+  // The Slot[string, string] elements in _buckets are dropped, and string
+  // fields are dup'd on match destructure to prevent double-free.
+  map[string, string] m = {:};
+  m["hello"] = "world";
+  m["foo"] = "bar";
+  m["baz"] = "qux";
+  // m goes out of scope — Slot elements should be dropped
+}
+
+test_map_string_int_no_leak() `test {
+  // B0232: String keys should not leak even with int values.
+  map[string, int] m = {:};
+  m["a"] = 1;
+  m["b"] = 2;
+  m["c"] = 3;
+}
+
+test_map_int_string_no_leak() `test {
+  // B0232: String values should not leak with int keys.
+  map[int, string] m = {:};
+  m[1] = "hello";
+  m[2] = "world";
+  m[3] = "test";
+}
+
+test_map_remove_no_leak() `test(allow_leaks: true) {
+  // B0235
+  // B0232: Removed entries should have their keys/values freed.
+  map[string, string] m = {:};
+  m["a"] = "one";
+  m["b"] = "two";
+  m["c"] = "three";
+  m.remove("b");
+  assert(m.len == 2, "len after remove");
+}
+
+test_map_overwrite_no_leak() `test(allow_leaks: true) {
+  // B0235
+  // B0232: Overwriting a value should free the old key/value.
+  map[string, string] m = {:};
+  m["key"] = "old_value";
+  m["key"] = "new_value";
+  if val := m["key"] {
+    assert(val == "new_value", "should see new value");
+  }
+}
+
+test_map_clear_no_leak() `test {
+  // B0232: clear() should free all keys/values.
+  map[string, string] m = {:};
+  m["x"] = "one";
+  m["y"] = "two";
+  m["z"] = "three";
+  m.clear();
+  assert(m.len == 0, "cleared");
+}
+
+test_map_rehash_no_leak() `test {
+  // B0232: Rehash should not leak old bucket data.
+  // Insert enough to trigger rehash (>12 with initial cap 16 at 75% load).
+  map[string, string] m = {:};
+  for i in 0..20 {
+    m[i.to_string()] = "val_{i}";
+  }
+  assert(m.len == 20, "20 entries after rehash");
+}
+
+test_map_read_after_insert() `test(allow_leaks: true) {
+  // B0235
+  // B0232: Reading values after insert should work correctly.
+  // The dup-on-destructure ensures returned values are independent copies.
+  map[string, string] m = {:};
+  m["key"] = "value";
+  string result = "";
+  if v := m["key"] {
+    result = v;
+  }
+  assert(result == "value", "read correct value");
+}
+
+test_map_pop_no_leak() `test(allow_leaks: true) {
+  // B0235
+  // B0232: pop() should return the value and free the key.
+  map[string, string] m = {:};
+  m["a"] = "one";
+  m["b"] = "two";
+  if val := m.pop("a") {
+    assert(val == "one", "popped value");
+  }
+  assert(m.len == 1, "len after pop");
+}

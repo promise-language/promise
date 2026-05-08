@@ -776,11 +776,12 @@ func (c *Compiler) emitReadStackPointer(block *ir.Block) value.Value {
 
 // defineTestPrintResultBody adds a function body to promise_test_print_result.
 // Params: (i8* %name, i32 %result, i64 %elapsed_ns)
-// result: 0=pass, 1=fail, 2=timeout
-// Writes "PASS (X.XXXs) <name>\n", "FAIL (X.XXXs) <name>\n", or "TIMEOUT (X.XXXs) <name>\n".
+// result: 0=pass, 1=fail, 2=timeout, 3=leak
+// Writes "pass (X.XXXs) <name>\n", "FAIL (X.XXXs) <name>\n", "TIMEOUT (X.XXXs) <name>\n",
+// or "LEAK (X.XXXs) <name>\n".
 func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	// Global constants for prefix/suffix strings
-	passData := constant.NewCharArrayFromString("PASS (")
+	passData := constant.NewCharArrayFromString("pass (")
 	passGlobal := c.module.NewGlobalDef(".str.pass_prefix", passData)
 	passGlobal.Immutable = true
 	passGlobal.Linkage = enum.LinkagePrivate
@@ -795,6 +796,11 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	timeoutGlobal.Immutable = true
 	timeoutGlobal.Linkage = enum.LinkagePrivate
 
+	leakData := constant.NewCharArrayFromString("LEAK (")
+	leakGlobal := c.module.NewGlobalDef(".str.leak_result_prefix", leakData)
+	leakGlobal.Immutable = true
+	leakGlobal.Linkage = enum.LinkagePrivate
+
 	dotData := constant.NewCharArrayFromString(".")
 	dotGlobal := c.module.NewGlobalDef(".str.dot", dotData)
 	dotGlobal.Immutable = true
@@ -807,14 +813,15 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 
 	stdout := constant.NewInt(irtypes.I32, 1)
 	name := fn.Params[0]       // i8*
-	resultCode := fn.Params[1] // i32 (0=pass, 1=fail, 2=timeout)
+	resultCode := fn.Params[1] // i32 (0=pass, 1=fail, 2=timeout, 3=leak)
 	elapsedNs := fn.Params[2]  // i64
 
-	// Branch: 0 = pass, 2 = timeout, else = fail
+	// Branch: 0 = pass, 2 = timeout, 3 = leak, else = fail
 	entry := fn.NewBlock(".entry")
 	failBlock := fn.NewBlock("fail")
 	passBlock := fn.NewBlock("pass")
 	timeoutBlock := fn.NewBlock("timeout")
+	leakBlock := fn.NewBlock("leak")
 	mergeBlock := fn.NewBlock("merge")
 
 	isPass := entry.NewICmp(enum.IPredEQ, resultCode, constant.NewInt(irtypes.I32, 0))
@@ -822,7 +829,11 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	entry.NewCondBr(isPass, passBlock, notPassBlock)
 
 	isTimeout := notPassBlock.NewICmp(enum.IPredEQ, resultCode, constant.NewInt(irtypes.I32, 2))
-	notPassBlock.NewCondBr(isTimeout, timeoutBlock, failBlock)
+	notTimeoutBlock := fn.NewBlock("not_timeout")
+	notPassBlock.NewCondBr(isTimeout, timeoutBlock, notTimeoutBlock)
+
+	isLeak := notTimeoutBlock.NewICmp(enum.IPredEQ, resultCode, constant.NewInt(irtypes.I32, 3))
+	notTimeoutBlock.NewCondBr(isLeak, leakBlock, failBlock)
 
 	// "FAIL (" branch
 	failPtr := failBlock.NewGetElementPtr(failGlobal.ContentType, failGlobal,
@@ -836,7 +847,13 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	timeoutBlock.NewCall(c.palWrite, stdout, timeoutPtr, constant.NewInt(irtypes.I64, 9))
 	timeoutBlock.NewBr(mergeBlock)
 
-	// "PASS (" branch
+	// "LEAK (" branch
+	leakPtr := leakBlock.NewGetElementPtr(leakGlobal.ContentType, leakGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	leakBlock.NewCall(c.palWrite, stdout, leakPtr, constant.NewInt(irtypes.I64, 6))
+	leakBlock.NewBr(mergeBlock)
+
+	// "pass (" branch
 	passPtr := passBlock.NewGetElementPtr(passGlobal.ContentType, passGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	passBlock.NewCall(c.palWrite, stdout, passPtr, constant.NewInt(irtypes.I64, 6))
@@ -889,8 +906,8 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	mergeBlock.NewRet(nil)
 }
 
-// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked, i32 %ignored, i32 %stale).
-// Writes "<passed> passed, <failed> failed[, <skipped> skipped][, <leaked> leaked][, <ignored> ignored]\n" to stdout via pal_write.
+// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked, i32 %timed_out, i32 %ignored, i32 %stale).
+// Writes "<passed> passed, <failed> failed[, <skipped> skipped][, <leaked> leaked][, <timed_out> timed out][, <ignored> allowed leaks][, <stale> stale allow_leaks]\n" to stdout via pal_write.
 func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	// Global constants
 	passedSuffixData := constant.NewCharArrayFromString(" passed, ")
@@ -923,18 +940,24 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	ignoredSuffixGlobal.Immutable = true
 	ignoredSuffixGlobal.Linkage = enum.LinkagePrivate
 
+	timedOutSuffixData := constant.NewCharArrayFromString(" timed out")
+	timedOutSuffixGlobal := c.module.NewGlobalDef(".str.timed_out_suffix", timedOutSuffixData)
+	timedOutSuffixGlobal.Immutable = true
+	timedOutSuffixGlobal.Linkage = enum.LinkagePrivate
+
 	staleSuffixData := constant.NewCharArrayFromString(" stale allow_leaks")
 	staleSuffixGlobal := c.module.NewGlobalDef(".str.stale_suffix", staleSuffixData)
 	staleSuffixGlobal.Immutable = true
 	staleSuffixGlobal.Linkage = enum.LinkagePrivate
 
 	stdout := constant.NewInt(irtypes.I32, 1)
-	passed := fn.Params[0]  // i32
-	failed := fn.Params[1]  // i32
-	skipped := fn.Params[2] // i32
-	leaked := fn.Params[3]  // i32
-	ignored := fn.Params[4] // i32
-	stale := fn.Params[5]   // i32
+	passed := fn.Params[0]   // i32
+	failed := fn.Params[1]   // i32
+	skipped := fn.Params[2]  // i32
+	leaked := fn.Params[3]   // i32
+	timedOut := fn.Params[4] // i32
+	ignored := fn.Params[5]  // i32
+	stale := fn.Params[6]    // i32
 
 	entry := fn.NewBlock(".entry")
 
@@ -1002,11 +1025,31 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	printLeakBlock.NewCall(c.palWrite, stdout, lSuffixPtr, constant.NewInt(irtypes.I64, 7))
 	printLeakBlock.NewBr(afterLeakBlock)
 
+	// Conditionally write ", <timed_out> timed out" if timed_out > 0
+	hasTimedOut := afterLeakBlock.NewICmp(enum.IPredSGT, timedOut, constant.NewInt(irtypes.I32, 0))
+	printTimedOutBlock := fn.NewBlock("print_timed_out")
+	afterTimedOutBlock := fn.NewBlock("after_timed_out")
+	afterLeakBlock.NewCondBr(hasTimedOut, printTimedOutBlock, afterTimedOutBlock)
+
+	// Write ", <timed_out> timed out"
+	commaPtr2b := printTimedOutBlock.NewGetElementPtr(commaPrefixGlobal.ContentType, commaPrefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printTimedOutBlock.NewCall(c.palWrite, stdout, commaPtr2b, constant.NewInt(irtypes.I64, 2))
+	timedOutI64 := printTimedOutBlock.NewSExt(timedOut, irtypes.I64)
+	timedOutStr := printTimedOutBlock.NewCall(c.funcs["promise_int_to_string"], timedOutI64)
+	timedOutDataPtr, timedOutDataLen := c.extractStringDataLenFromInstance(printTimedOutBlock, timedOutStr)
+	printTimedOutBlock.NewCall(c.palWrite, stdout, timedOutDataPtr, timedOutDataLen)
+	printTimedOutBlock.NewCall(c.palFree, timedOutStr)
+	toSuffixPtr := printTimedOutBlock.NewGetElementPtr(timedOutSuffixGlobal.ContentType, timedOutSuffixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printTimedOutBlock.NewCall(c.palWrite, stdout, toSuffixPtr, constant.NewInt(irtypes.I64, 10))
+	printTimedOutBlock.NewBr(afterTimedOutBlock)
+
 	// Conditionally write ", <ignored> ignored" if ignored > 0 (T0067)
-	hasIgnored := afterLeakBlock.NewICmp(enum.IPredSGT, ignored, constant.NewInt(irtypes.I32, 0))
+	hasIgnored := afterTimedOutBlock.NewICmp(enum.IPredSGT, ignored, constant.NewInt(irtypes.I32, 0))
 	printIgnoredBlock := fn.NewBlock("print_ignored")
 	afterIgnoredBlock := fn.NewBlock("after_ignored")
-	afterLeakBlock.NewCondBr(hasIgnored, printIgnoredBlock, afterIgnoredBlock)
+	afterTimedOutBlock.NewCondBr(hasIgnored, printIgnoredBlock, afterIgnoredBlock)
 
 	// Write ", <ignored> ignored"
 	commaPtr3 := printIgnoredBlock.NewGetElementPtr(commaPrefixGlobal.ContentType, commaPrefixGlobal,

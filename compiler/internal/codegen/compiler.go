@@ -722,6 +722,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		ir.NewParam("failed", irtypes.I32),
 		ir.NewParam("skipped", irtypes.I32),
 		ir.NewParam("leaked", irtypes.I32),
+		ir.NewParam("timed_out", irtypes.I32),
 		ir.NewParam("ignored", irtypes.I32),
 		ir.NewParam("stale", irtypes.I32),
 	)
@@ -822,6 +823,8 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	}
 	leakedCountAlloca := entry.NewAlloca(irtypes.I32)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), leakedCountAlloca)
+	timedOutCountAlloca := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), timedOutCountAlloca)
 	ignoredLeaksAlloca := entry.NewAlloca(irtypes.I32)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), ignoredLeaksAlloca)
 
@@ -872,6 +875,16 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		panicIndentGlobal.Immutable = true
 		panicIndentGlobal.Linkage = enum.LinkagePrivate
 	}
+
+	// Shared global for timeout context prefix
+	timeoutIndentData := constant.NewCharArrayFromString("  timeout: exceeded ")
+	timeoutIndentGlobal := c.module.NewGlobalDef(".str.timeout_indent", timeoutIndentData)
+	timeoutIndentGlobal.Immutable = true
+	timeoutIndentGlobal.Linkage = enum.LinkagePrivate
+	timeoutSuffixData := constant.NewCharArrayFromString(" limit\n")
+	timeoutSuffixGlobal := c.module.NewGlobalDef(".str.timeout_suffix", timeoutSuffixData)
+	timeoutSuffixGlobal.Immutable = true
+	timeoutSuffixGlobal.Linkage = enum.LinkagePrivate
 
 	for _, test := range tests {
 		// Skip tests excluded for this target
@@ -941,89 +954,32 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			constant.NewInt(irtypes.I64, 0),
 		)
 
-		// Print result with timing
-		entry.NewCall(testPrintFn, namePtr, result, elapsed)
-
-		// Update counters
-		currentPassed := entry.NewLoad(irtypes.I32, passedAlloca)
-		currentFailed := entry.NewLoad(irtypes.I32, failedAlloca)
-
-		// result == 0 means passed
-		isPass := entry.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 0))
-		passIncr := entry.NewAdd(currentPassed, constant.NewInt(irtypes.I32, 1))
-		failIncr := entry.NewAdd(currentFailed, constant.NewInt(irtypes.I32, 1))
-		newPassed := entry.NewSelect(isPass, passIncr, currentPassed)
-		newFailed := entry.NewSelect(isPass, currentFailed, failIncr)
-		entry.NewStore(newPassed, passedAlloca)
-		entry.NewStore(newFailed, failedAlloca)
-
-		// If failed, print panic context (if any) and store name in failedNames
-		failStoreBlock := mainFn.NewBlock(fmt.Sprintf("store_fail_%s", nameStr))
-		skipStoreBlock := mainFn.NewBlock(fmt.Sprintf("skip_fail_%s", nameStr))
-		isFail := entry.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
-		entry.NewCondBr(isFail, failStoreBlock, skipStoreBlock)
-
-		// Print panic message if one was captured (non-WASM only).
-		// Skip for timeout (result==2) — the test thread is still running,
-		// so reading @__promise_test_panic_msg would be a data race.
-		if !c.isWasm {
-			afterPanicBlk := mainFn.NewBlock(fmt.Sprintf("after_panic_%s", nameStr))
-
-			// Check: result == 2 means timeout → skip panic msg read
-			isTimeout := failStoreBlock.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 2))
-			checkPanicBlk := mainFn.NewBlock(fmt.Sprintf("check_panic_%s", nameStr))
-			failStoreBlock.NewCondBr(isTimeout, afterPanicBlk, checkPanicBlk)
-
-			panicMsg := checkPanicBlk.NewLoad(irtypes.I8Ptr, c.testPanicMsgGlobal)
-			hasPanicMsg := checkPanicBlk.NewICmp(enum.IPredNE, panicMsg, constant.NewNull(irtypes.I8Ptr))
-			printPanicBlk := mainFn.NewBlock(fmt.Sprintf("print_panic_%s", nameStr))
-			checkPanicBlk.NewCondBr(hasPanicMsg, printPanicBlk, afterPanicBlk)
-
-			// Print "  panic: <msg>\n" to stdout
-			stdout := constant.NewInt(irtypes.I32, 1)
-			indentPtr := printPanicBlk.NewGetElementPtr(panicIndentGlobal.ContentType, panicIndentGlobal,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			printPanicBlk.NewCall(c.palWrite, stdout, indentPtr, constant.NewInt(irtypes.I64, 9))
-			msgLen := printPanicBlk.NewCall(c.funcs["strlen"], panicMsg)
-			printPanicBlk.NewCall(c.palWrite, stdout, panicMsg, msgLen)
-			nlPtr := printPanicBlk.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			printPanicBlk.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
-			// Clear the panic message for the next test
-			printPanicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testPanicMsgGlobal)
-			printPanicBlk.NewBr(afterPanicBlk)
-
-			failStoreBlock = afterPanicBlk
+		// === Leak detection: run BEFORE printing so we can compute effective result ===
+		// Skip for timed-out tests (thread still running → racy read)
+		allowLeaks := false
+		if allocCountGlobal != nil {
+			allowLeaks = c.info.TestAllowLeaks[nameStr]
 		}
 
-		// Store the name pointer at failedNames[failedCount], then increment
-		failIdx := failStoreBlock.NewLoad(irtypes.I32, failedCountAlloca)
-		failSlot := failStoreBlock.NewGetElementPtr(failedNamesArrayType, failedNamesAlloca,
-			constant.NewInt(irtypes.I32, 0), failIdx)
-		failStoreBlock.NewStore(namePtr, failSlot)
-		failStoreBlock.NewStore(
-			failStoreBlock.NewAdd(failIdx, constant.NewInt(irtypes.I32, 1)),
-			failedCountAlloca,
-		)
-		failStoreBlock.NewBr(skipStoreBlock)
+		// effectiveResult: 0=pass, 1=fail, 2=timeout, 3=leak
+		// LEAK (3) only when result==0, hasLeak, and !allowLeaks
+		var effectiveResult value.Value
+		var hasLeakPhi value.Value // i1: whether this test leaked (for printing detail)
+		var deltaPhi value.Value   // i64: allocation delta (for printing detail)
 
-		// Leak detection: check alloc count delta after test (T0020)
-		// Skip for timed-out tests (thread still running → racy read)
 		if allocCountGlobal != nil {
-			allowLeaks := c.info.TestAllowLeaks[nameStr]
-
 			leakCheckBlk := mainFn.NewBlock(fmt.Sprintf("leak_check_%s", nameStr))
-			afterLeakBlk := mainFn.NewBlock(fmt.Sprintf("after_leak_%s", nameStr))
+			skipLeakCheckBlk := mainFn.NewBlock(fmt.Sprintf("skip_leak_check_%s", nameStr))
+			afterLeakDetectBlk := mainFn.NewBlock(fmt.Sprintf("after_leak_detect_%s", nameStr))
 
 			// Only check leaks if test didn't timeout (result != 2)
-			isNotTimeout := skipStoreBlock.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 2))
-			skipStoreBlock.NewCondBr(isNotTimeout, leakCheckBlk, afterLeakBlk)
+			isNotTimeout := entry.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 2))
+			entry.NewCondBr(isNotTimeout, leakCheckBlk, skipLeakCheckBlk)
 
 			// Wait for all goroutines to complete cleanup before reading alloc
 			// count. goroutine_exit increments gs_completed after all frees
 			// (coro.destroy + pal_free(G)) and broadcasts gs_drain_cond when
-			// gs_created==gs_completed. This replaces the bounded spin-wait
-			// (B0231/B0234) with a deterministic condvar wait — no timeouts.
+			// gs_created==gs_completed.
 			if !c.isWasm && c.schedGlobal != nil {
 				schedTy := schedStructType()
 				gsCreatedField := leakCheckBlk.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -1031,7 +987,6 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 				gsCompletedField := leakCheckBlk.NewGetElementPtr(schedTy, c.schedGlobal,
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCompleted)))
 
-				// Fast path: check without mutex (common case: no goroutines or already drained)
 				drainDone := mainFn.NewBlock(fmt.Sprintf("drain_done_%s", nameStr))
 				created0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
 				completed0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
@@ -1040,7 +995,6 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 				drainSlow := mainFn.NewBlock(fmt.Sprintf("drain_slow_%s", nameStr))
 				leakCheckBlk.NewCondBr(fastDone, drainDone, drainSlow)
 
-				// Slow path: acquire mutex and condvar wait
 				gdMtxField := drainSlow.NewGetElementPtr(schedTy, c.schedGlobal,
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainMutex)))
 				gdMtx := drainSlow.NewLoad(irtypes.I8Ptr, gdMtxField)
@@ -1052,7 +1006,6 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 				drainLoop := mainFn.NewBlock(fmt.Sprintf("drain_gs_%s", nameStr))
 				drainSlow.NewBr(drainLoop)
 
-				// Loop: check condition, wait if not met
 				created := drainLoop.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
 				completed := drainLoop.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
 				allDone := drainLoop.NewICmp(enum.IPredEQ, created, completed)
@@ -1061,18 +1014,16 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 				drainUnlock := mainFn.NewBlock(fmt.Sprintf("drain_unlock_%s", nameStr))
 				drainLoop.NewCondBr(allDone, drainUnlock, drainWait)
 
-				// Wait on condvar and re-check
 				drainWait.NewCall(c.palCondWait, gdCond, gdMtx)
 				drainWait.NewBr(drainLoop)
 
-				// Unlock and continue
 				drainUnlock.NewCall(c.palMutexUnlock, gdMtx)
 				drainUnlock.NewBr(drainDone)
 
 				leakCheckBlk = drainDone
 			}
 
-			// Read current alloc count
+			// Read current alloc count and compute delta
 			var currentAlloc value.Value
 			if c.isWasm {
 				currentAlloc = leakCheckBlk.NewLoad(irtypes.I64, allocCountGlobal)
@@ -1082,47 +1033,175 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			delta := leakCheckBlk.NewSub(currentAlloc, allocSnapshot)
 			hasLeak := leakCheckBlk.NewICmp(enum.IPredSGT, delta, constant.NewInt(irtypes.I64, 0))
 
-			printLeakBlk := mainFn.NewBlock(fmt.Sprintf("print_leak_%s", nameStr))
-			noLeakBlk := mainFn.NewBlock(fmt.Sprintf("no_leak_%s", nameStr))
-			leakCheckBlk.NewCondBr(hasLeak, printLeakBlk, noLeakBlk)
+			// Compute effective result: upgrade pass→leak when hasLeak && !allowLeaks
+			var effectiveInLeakPath value.Value
+			if allowLeaks {
+				effectiveInLeakPath = result // allow_leaks: keep original result
+			} else {
+				isOrigPass := leakCheckBlk.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 0))
+				shouldUpgrade := leakCheckBlk.NewAnd(isOrigPass, hasLeak)
+				effectiveInLeakPath = leakCheckBlk.NewSelect(shouldUpgrade, constant.NewInt(irtypes.I32, 3), result)
+			}
+			leakCheckBlk.NewBr(afterLeakDetectBlk)
+
+			// Skip path: timeout → no leak check, effectiveResult = result
+			skipLeakCheckBlk.NewBr(afterLeakDetectBlk)
+
+			// Merge: phi nodes for effectiveResult, hasLeak, delta
+			effectiveResult = afterLeakDetectBlk.NewPhi(
+				ir.NewIncoming(effectiveInLeakPath, leakCheckBlk),
+				ir.NewIncoming(result, skipLeakCheckBlk),
+			)
+			hasLeakPhi = afterLeakDetectBlk.NewPhi(
+				ir.NewIncoming(hasLeak, leakCheckBlk),
+				ir.NewIncoming(constant.NewBool(false), skipLeakCheckBlk),
+			)
+			deltaPhi = afterLeakDetectBlk.NewPhi(
+				ir.NewIncoming(delta, leakCheckBlk),
+				ir.NewIncoming(constant.NewInt(irtypes.I64, 0), skipLeakCheckBlk),
+			)
+
+			entry = afterLeakDetectBlk
+		} else {
+			// No alloc tracking: effectiveResult = result, no leak possible
+			effectiveResult = result
+		}
+
+		// === Print result with effective result code ===
+		entry.NewCall(testPrintFn, namePtr, effectiveResult, elapsed)
+
+		// === Print context for FAIL (panic message) ===
+		if !c.isWasm {
+			afterPanicBlk := mainFn.NewBlock(fmt.Sprintf("after_panic_%s", nameStr))
+			isOrigFail := entry.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 1))
+			checkPanicBlk := mainFn.NewBlock(fmt.Sprintf("check_panic_%s", nameStr))
+			entry.NewCondBr(isOrigFail, checkPanicBlk, afterPanicBlk)
+
+			panicMsg := checkPanicBlk.NewLoad(irtypes.I8Ptr, c.testPanicMsgGlobal)
+			hasPanicMsg := checkPanicBlk.NewICmp(enum.IPredNE, panicMsg, constant.NewNull(irtypes.I8Ptr))
+			printPanicBlk := mainFn.NewBlock(fmt.Sprintf("print_panic_%s", nameStr))
+			checkPanicBlk.NewCondBr(hasPanicMsg, printPanicBlk, afterPanicBlk)
+
+			stdout := constant.NewInt(irtypes.I32, 1)
+			indentPtr := printPanicBlk.NewGetElementPtr(panicIndentGlobal.ContentType, panicIndentGlobal,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			printPanicBlk.NewCall(c.palWrite, stdout, indentPtr, constant.NewInt(irtypes.I64, 9))
+			msgLen := printPanicBlk.NewCall(c.funcs["strlen"], panicMsg)
+			printPanicBlk.NewCall(c.palWrite, stdout, panicMsg, msgLen)
+			nlPtr := printPanicBlk.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			printPanicBlk.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
+			printPanicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testPanicMsgGlobal)
+			printPanicBlk.NewBr(afterPanicBlk)
+
+			entry = afterPanicBlk
+		}
+
+		// === Print context for TIMEOUT ===
+		{
+			afterTimeoutCtxBlk := mainFn.NewBlock(fmt.Sprintf("after_timeout_ctx_%s", nameStr))
+			isOrigTimeout := entry.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 2))
+			printTimeoutCtxBlk := mainFn.NewBlock(fmt.Sprintf("print_timeout_ctx_%s", nameStr))
+			entry.NewCondBr(isOrigTimeout, printTimeoutCtxBlk, afterTimeoutCtxBlk)
+
+			// Print "  timeout: exceeded <N>s limit\n"
+			// Compute timeout in seconds from compile-time constant
+			stdout := constant.NewInt(irtypes.I32, 1)
+			toIndentPtr := printTimeoutCtxBlk.NewGetElementPtr(timeoutIndentGlobal.ContentType, timeoutIndentGlobal,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toIndentPtr, constant.NewInt(irtypes.I64, 20))
+			// Convert timeout nanoseconds to seconds for display
+			timeoutSec := printTimeoutCtxBlk.NewSDiv(timeoutConst, constant.NewInt(irtypes.I64, 1_000_000_000))
+			timeoutSecStr := printTimeoutCtxBlk.NewCall(c.funcs["promise_int_to_string"], timeoutSec)
+			secDataPtr, secDataLen := c.extractStringDataLenFromInstance(printTimeoutCtxBlk, timeoutSecStr)
+			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, secDataPtr, secDataLen)
+			printTimeoutCtxBlk.NewCall(c.palFree, timeoutSecStr)
+			toSuffixPtr := printTimeoutCtxBlk.NewGetElementPtr(timeoutSuffixGlobal.ContentType, timeoutSuffixGlobal,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			printTimeoutCtxBlk.NewCall(c.palWrite, stdout, toSuffixPtr, constant.NewInt(irtypes.I64, 7))
+			printTimeoutCtxBlk.NewBr(afterTimeoutCtxBlk)
+
+			entry = afterTimeoutCtxBlk
+		}
+
+		// === Print leak detail and update leak counters ===
+		if allocCountGlobal != nil {
+			printLeakDetailBlk := mainFn.NewBlock(fmt.Sprintf("print_leak_detail_%s", nameStr))
+			noLeakDetailBlk := mainFn.NewBlock(fmt.Sprintf("no_leak_detail_%s", nameStr))
+			afterLeakDetailBlk := mainFn.NewBlock(fmt.Sprintf("after_leak_detail_%s", nameStr))
+
+			entry.NewCondBr(hasLeakPhi, printLeakDetailBlk, noLeakDetailBlk)
 
 			// Print "  leak: <N> allocations not freed\n"
-			c.emitLeakMessage(printLeakBlk, delta, leakPrefixGlobal, leakSuffixGlobal)
+			c.emitLeakMessage(printLeakDetailBlk, deltaPhi, leakPrefixGlobal, leakSuffixGlobal)
 
 			if allowLeaks {
 				// allow_leaks: increment ignored counter (T0067)
-				curIgnored := printLeakBlk.NewLoad(irtypes.I32, ignoredLeaksAlloca)
-				printLeakBlk.NewStore(
-					printLeakBlk.NewAdd(curIgnored, constant.NewInt(irtypes.I32, 1)),
+				curIgnored := printLeakDetailBlk.NewLoad(irtypes.I32, ignoredLeaksAlloca)
+				printLeakDetailBlk.NewStore(
+					printLeakDetailBlk.NewAdd(curIgnored, constant.NewInt(irtypes.I32, 1)),
 					ignoredLeaksAlloca,
 				)
 			} else {
 				// No allow_leaks: increment leaked counter (T0067)
-				curLeaked := printLeakBlk.NewLoad(irtypes.I32, leakedCountAlloca)
-				printLeakBlk.NewStore(
-					printLeakBlk.NewAdd(curLeaked, constant.NewInt(irtypes.I32, 1)),
+				curLeaked := printLeakDetailBlk.NewLoad(irtypes.I32, leakedCountAlloca)
+				printLeakDetailBlk.NewStore(
+					printLeakDetailBlk.NewAdd(curLeaked, constant.NewInt(irtypes.I32, 1)),
 					leakedCountAlloca,
 				)
 			}
-			printLeakBlk.NewBr(afterLeakBlk)
+			printLeakDetailBlk.NewBr(afterLeakDetailBlk)
 
 			if allowLeaks {
 				// allow_leaks but no leak: print stale tag warning (T0067)
-				c.emitStaleAllowLeaksWarning(noLeakBlk, nameStr)
-				// Store name in stale names array
-				staleIdx := noLeakBlk.NewLoad(irtypes.I32, staleCountAlloca)
-				staleSlot := noLeakBlk.NewGetElementPtr(failedNamesArrayType, staleNamesAlloca,
+				c.emitStaleAllowLeaksWarning(noLeakDetailBlk, nameStr)
+				staleIdx := noLeakDetailBlk.NewLoad(irtypes.I32, staleCountAlloca)
+				staleSlot := noLeakDetailBlk.NewGetElementPtr(failedNamesArrayType, staleNamesAlloca,
 					constant.NewInt(irtypes.I32, 0), staleIdx)
-				noLeakBlk.NewStore(namePtr, staleSlot)
-				noLeakBlk.NewStore(
-					noLeakBlk.NewAdd(staleIdx, constant.NewInt(irtypes.I32, 1)),
+				noLeakDetailBlk.NewStore(namePtr, staleSlot)
+				noLeakDetailBlk.NewStore(
+					noLeakDetailBlk.NewAdd(staleIdx, constant.NewInt(irtypes.I32, 1)),
 					staleCountAlloca,
 				)
 			}
-			noLeakBlk.NewBr(afterLeakBlk)
+			noLeakDetailBlk.NewBr(afterLeakDetailBlk)
 
-			skipStoreBlock = afterLeakBlk
+			entry = afterLeakDetailBlk
 		}
+
+		// === Update counters: 4-way based on effectiveResult ===
+		// pass(0) → passed++, fail(1) → failed++, timeout(2) → timedOut++, leak(3) → leaked already incremented above
+		currentPassed := entry.NewLoad(irtypes.I32, passedAlloca)
+		currentFailed := entry.NewLoad(irtypes.I32, failedAlloca)
+		currentTimedOut := entry.NewLoad(irtypes.I32, timedOutCountAlloca)
+
+		isPass := entry.NewICmp(enum.IPredEQ, effectiveResult, constant.NewInt(irtypes.I32, 0))
+		isFail := entry.NewICmp(enum.IPredEQ, effectiveResult, constant.NewInt(irtypes.I32, 1))
+		isTimeout := entry.NewICmp(enum.IPredEQ, effectiveResult, constant.NewInt(irtypes.I32, 2))
+
+		newPassed := entry.NewSelect(isPass, entry.NewAdd(currentPassed, constant.NewInt(irtypes.I32, 1)), currentPassed)
+		newFailed := entry.NewSelect(isFail, entry.NewAdd(currentFailed, constant.NewInt(irtypes.I32, 1)), currentFailed)
+		newTimedOut := entry.NewSelect(isTimeout, entry.NewAdd(currentTimedOut, constant.NewInt(irtypes.I32, 1)), currentTimedOut)
+
+		entry.NewStore(newPassed, passedAlloca)
+		entry.NewStore(newFailed, failedAlloca)
+		entry.NewStore(newTimedOut, timedOutCountAlloca)
+
+		// === Store in failedNames if effectiveResult != 0 ===
+		failStoreBlock := mainFn.NewBlock(fmt.Sprintf("store_fail_%s", nameStr))
+		skipStoreBlock := mainFn.NewBlock(fmt.Sprintf("skip_fail_%s", nameStr))
+		isNonPass := entry.NewICmp(enum.IPredNE, effectiveResult, constant.NewInt(irtypes.I32, 0))
+		entry.NewCondBr(isNonPass, failStoreBlock, skipStoreBlock)
+
+		failIdx := failStoreBlock.NewLoad(irtypes.I32, failedCountAlloca)
+		failSlot := failStoreBlock.NewGetElementPtr(failedNamesArrayType, failedNamesAlloca,
+			constant.NewInt(irtypes.I32, 0), failIdx)
+		failStoreBlock.NewStore(namePtr, failSlot)
+		failStoreBlock.NewStore(
+			failStoreBlock.NewAdd(failIdx, constant.NewInt(irtypes.I32, 1)),
+			failedCountAlloca,
+		)
+		failStoreBlock.NewBr(skipStoreBlock)
 
 		// Continue from skipStoreBlock for the next test
 		entry = skipStoreBlock
@@ -1132,9 +1211,10 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	finalPassed := entry.NewLoad(irtypes.I32, passedAlloca)
 	finalFailed := entry.NewLoad(irtypes.I32, failedAlloca)
 	finalLeaked := entry.NewLoad(irtypes.I32, leakedCountAlloca)
+	finalTimedOut := entry.NewLoad(irtypes.I32, timedOutCountAlloca)
 	finalIgnored := entry.NewLoad(irtypes.I32, ignoredLeaksAlloca)
 	finalStale := entry.NewLoad(irtypes.I32, staleCountAlloca)
-	entry.NewCall(testSummaryFn, finalPassed, finalFailed, constant.NewInt(irtypes.I32, int64(skippedCount)), finalLeaked, finalIgnored, finalStale)
+	entry.NewCall(testSummaryFn, finalPassed, finalFailed, constant.NewInt(irtypes.I32, int64(skippedCount)), finalLeaked, finalTimedOut, finalIgnored, finalStale)
 
 	// Print FAILED: list if any failures
 	failedHeaderData := constant.NewCharArrayFromString("FAILED:\n")
@@ -1151,7 +1231,8 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	staleHeaderGlobal.Linkage = enum.LinkagePrivate
 	stdout := constant.NewInt(irtypes.I32, 1)
 
-	hasFailures := entry.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
+	finalFailedCount := entry.NewLoad(irtypes.I32, failedCountAlloca)
+	hasFailures := entry.NewICmp(enum.IPredSGT, finalFailedCount, constant.NewInt(irtypes.I32, 0))
 	printFailBlock := mainFn.NewBlock("print_failures")
 	checkStaleBlock := mainFn.NewBlock("check_stale")
 	doneBlock := mainFn.NewBlock("done")
@@ -1240,10 +1321,11 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	// Emit coverage data if coverage is enabled (T0030)
 	doneBlock = c.emitCoverageOutput(doneBlock, mainFn)
 
-	// Return 0 if all passed with no leaks, 1 if any failed or leaked (T0067)
+	// Return 0 if all passed, 1 if any failed, leaked, or timed out (T0067)
 	hasFailed := doneBlock.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
 	hasLeakedUntagged := doneBlock.NewICmp(enum.IPredSGT, finalLeaked, constant.NewInt(irtypes.I32, 0))
-	retHasFailures := doneBlock.NewOr(hasFailed, hasLeakedUntagged)
+	hasTimedOut := doneBlock.NewICmp(enum.IPredSGT, finalTimedOut, constant.NewInt(irtypes.I32, 0))
+	retHasFailures := doneBlock.NewOr(hasFailed, doneBlock.NewOr(hasLeakedUntagged, hasTimedOut))
 	retVal := doneBlock.NewSelect(retHasFailures, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
 
 	// On Windows, call ExitProcess to avoid CRT cleanup crashes during

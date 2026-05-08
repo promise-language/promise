@@ -417,7 +417,7 @@ func runStress(files []string, count int, duration time.Duration, cfg testTimeou
 		isTTY = fi.Mode()&os.ModeCharDevice != 0
 	}
 
-	resultRe := regexp.MustCompile(`^(PASS|FAIL|TIMEOUT) \((\d+\.\d+)s\) (.+)$`)
+	resultRe := regexp.MustCompile(`^(pass|FAIL|TIMEOUT|LEAK) \((\d+\.\d+)s\) (.+)$`)
 	start := time.Now()
 	iteration := 0
 	lastProgress := time.Time{}
@@ -532,7 +532,7 @@ func runStress(files []string, count int, duration time.Duration, cfg testTimeou
 					}
 					seen[name] = true
 					switch status {
-					case "PASS":
+					case "pass":
 						st.passes++
 						if v, e := strconv.ParseFloat(timing, 64); e == nil {
 							st.timings = append(st.timings, v)
@@ -541,6 +541,12 @@ func runStress(files []string, count int, duration time.Duration, cfg testTimeou
 						st.fails++
 						st.timeouts++
 						st.lastErr = "timeout"
+					case "LEAK":
+						st.fails++
+						st.lastErr = "memory leak"
+						if v, e := strconv.ParseFloat(timing, 64); e == nil {
+							st.timings = append(st.timings, v)
+						}
 					default: // FAIL
 						st.fails++
 						st.lastErr = "test failed"

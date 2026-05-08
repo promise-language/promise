@@ -6857,15 +6857,17 @@ func TestTestPrintResultBody(t *testing.T) {
 
 	// Function is defined (not just declared)
 	assertContains(t, ir, "define void @promise_test_print_result(i8* %name, i32 %failed, i64 %elapsed_ns)")
-	// 3-way branching: 0=pass, 2=timeout, else=fail
+	// 4-way branching: 0=pass, 2=timeout, 3=leak, else=fail
 	assertContains(t, ir, "icmp eq i32 %failed, 0") // pass check
 	assertContains(t, ir, "icmp eq i32 %failed, 2") // timeout check
+	assertContains(t, ir, "icmp eq i32 %failed, 3") // leak check
 	assertContains(t, ir, "br i1")                  // conditional branches
 	assertContains(t, ir, "br label")               // unconditional branches to merge
-	// PASS/FAIL/TIMEOUT prefix globals
-	assertContains(t, ir, `@.str.pass_prefix = private constant [6 x i8] c"PASS ("`)
+	// pass/FAIL/TIMEOUT/LEAK prefix globals
+	assertContains(t, ir, `@.str.pass_prefix = private constant [6 x i8] c"pass ("`)
 	assertContains(t, ir, `@.str.fail_prefix = private constant [6 x i8] c"FAIL ("`)
 	assertContains(t, ir, `@.str.timeout_prefix = private constant [9 x i8] c"TIMEOUT ("`)
+	assertContains(t, ir, `@.str.leak_result_prefix = private constant [6 x i8] c"LEAK ("`)
 	// Prefix writes
 	assertContains(t, ir, "call i64 @pal_write(i32 1,")
 	assertContains(t, ir, "i64 6)") // PASS/FAIL prefix length
@@ -6894,13 +6896,14 @@ func TestTestSummaryBody(t *testing.T) {
 	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
 
-	// Function is defined (not just declared) — includes leaked, ignored, and stale params (T0020, T0067)
-	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked, i32 %ignored, i32 %stale)")
+	// Function is defined (not just declared) — includes leaked, timed_out, ignored, and stale params (T0020, T0067)
+	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked, i32 %timed_out, i32 %ignored, i32 %stale)")
 	// String suffix globals
 	assertContains(t, ir, `@.str.passed_suffix = private constant [9 x i8] c" passed, "`)
 	assertContains(t, ir, `@.str.failed_suffix = private constant [7 x i8] c" failed"`)
 	assertContains(t, ir, `@.str.skipped_suffix = private constant [8 x i8] c" skipped"`)
 	assertContains(t, ir, `@.str.leaked_suffix = private constant [7 x i8] c" leaked"`)
+	assertContains(t, ir, `@.str.timed_out_suffix = private constant [10 x i8] c" timed out"`)
 	assertContains(t, ir, `@.str.allowed_leaks_suffix = private constant [14 x i8] c" allowed leaks"`)
 	assertContains(t, ir, `@.str.stale_suffix = private constant [18 x i8] c" stale allow_leaks"`)
 	// Converts i32 → i64 for int_to_string
@@ -6964,7 +6967,7 @@ func TestLeakDetectionInTestMain(t *testing.T) {
 
 	// Leak check blocks: snapshot before test, check delta after
 	assertContains(t, ir, "leak_check_myTest")
-	assertContains(t, ir, "print_leak_myTest")
+	assertContains(t, ir, "print_leak_detail_myTest")
 	// Leak message string constants
 	assertContains(t, ir, `c"  leak: "`)
 	assertContains(t, ir, `c" allocations not freed\0A"`)
@@ -6992,12 +6995,12 @@ func TestAllowLeaksDoesNotIncrementLeakedCounter(t *testing.T) {
 
 	// Should have leak check blocks
 	assertContains(t, ir, "leak_check_myTest")
-	assertContains(t, ir, "print_leak_myTest")
+	assertContains(t, ir, "print_leak_detail_myTest")
 	// Should have stale tag warning for allow_leaks
 	assertContains(t, ir, "allow_leaks")
 	assertContains(t, ir, "tag can be removed")
-	// allow_leaks: no_leak block and ignored counter
-	assertContains(t, ir, "no_leak_myTest")
+	// allow_leaks: no_leak_detail block and ignored counter
+	assertContains(t, ir, "no_leak_detail_myTest")
 	// Summary includes ignored parameter (T0067)
 	assertContains(t, ir, "i32 %ignored")
 }
@@ -7086,6 +7089,43 @@ func TestTestTrampolineNoSetjmp(t *testing.T) {
 	// Must contain TLS panic flag check
 	assertContains(t, fn, "__promise_panic_flag")
 	assertContains(t, fn, "panic_detected")
+}
+
+// Test that GenerateTestMain produces 4-way counter logic (pass/fail/timeout/leak)
+// and timeout context printing blocks.
+func TestTestMainFourWayCountersAndTimeoutContext(t *testing.T) {
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+
+	// 4-way counter logic: pass(0), fail(1), timeout(2) checks on effectiveResult
+	assertContains(t, ir, "after_leak_detect_myTest")
+	// Effective result phi merges leak-check path and skip path
+	assertContains(t, ir, "skip_leak_check_myTest")
+	// Timeout counter alloca and update
+	assertContains(t, ir, "after_timeout_ctx_myTest")
+	// Timeout context: prints "  timeout: exceeded " prefix
+	assertContains(t, ir, `c"  timeout: exceeded "`)
+	assertContains(t, ir, `c" limit\0A"`)
+	// FAIL context: panic check only on result==1 (not on timeout/leak)
+	assertContains(t, ir, "check_panic_myTest")
+	// failedNames stores all non-pass results (FAIL, LEAK, TIMEOUT)
+	assertContains(t, ir, "store_fail_myTest")
+	// Exit code includes timedOut in the OR chain
+	assertContains(t, ir, "or i1")
 }
 
 func TestHostTargetTriple(t *testing.T) {

@@ -843,7 +843,7 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
 		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
 	}
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
@@ -858,13 +858,16 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 				summary += fmt.Sprintf(", %s leaked", m[4])
 			}
 			if len(m) > 5 && m[5] != "" {
-				summary += fmt.Sprintf(", %s allowed leaks", m[5])
+				summary += fmt.Sprintf(", %s timed out", m[5])
 			}
 			if len(m) > 6 && m[6] != "" {
-				summary += fmt.Sprintf(", %s stale allow_leaks", m[6])
+				summary += fmt.Sprintf(", %s allowed leaks", m[6])
+			}
+			if len(m) > 7 && m[7] != "" {
+				summary += fmt.Sprintf(", %s stale allow_leaks", m[7])
 			}
 			fmt.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
-		} else if targetSuffix != "" && (strings.HasPrefix(line, "PASS ") || strings.HasPrefix(line, "FAIL ") || strings.HasPrefix(line, "TIMEOUT ")) {
+		} else if targetSuffix != "" && (strings.HasPrefix(line, "pass ") || strings.HasPrefix(line, "FAIL ") || strings.HasPrefix(line, "LEAK ") || strings.HasPrefix(line, "TIMEOUT ")) {
 			fmt.Printf("%s%s\n", line, targetSuffix)
 		} else {
 			fmt.Println(line)
@@ -935,7 +938,7 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 	testOutput, counters := extractCoverageData(fullOutput)
 
 	// Print test output (same formatting as runTestBinary)
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) ignored)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
 	for _, line := range strings.Split(strings.TrimSpace(testOutput), "\n") {
 		if line == "" {
 			continue
@@ -950,7 +953,13 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 				summary += fmt.Sprintf(", %s leaked", m[4])
 			}
 			if len(m) > 5 && m[5] != "" {
-				summary += fmt.Sprintf(", %s ignored", m[5])
+				summary += fmt.Sprintf(", %s timed out", m[5])
+			}
+			if len(m) > 6 && m[6] != "" {
+				summary += fmt.Sprintf(", %s allowed leaks", m[6])
+			}
+			if len(m) > 7 && m[7] != "" {
+				summary += fmt.Sprintf(", %s stale allow_leaks", m[7])
 			}
 			fmt.Printf("%s (%.3fs)\n", summary, elapsed.Seconds())
 		} else {
@@ -1345,10 +1354,12 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 
 	// Print results in file order, streaming as each slot completes.
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
-	failLineRe := regexp.MustCompile(`^(?:FAIL|TIMEOUT) \([\d.]+s\)(?: (.+))?$`)
-	passLineRe := regexp.MustCompile(`^PASS \([\d.]+s\)`)
-	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:|leak:|warning:|fatal:|signal:)`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
+	failLineRe := regexp.MustCompile(`^FAIL \([\d.]+s\)(?: (.+))?$`)
+	leakLineRe := regexp.MustCompile(`^LEAK \([\d.]+s\)(?: (.+))?$`)
+	timeoutLineRe := regexp.MustCompile(`^TIMEOUT \([\d.]+s\)(?: (.+))?$`)
+	passLineRe := regexp.MustCompile(`^pass \([\d.]+s\)`)
+	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:|leak:|warning:|fatal:|signal:|timeout:)`)
 
 	type failureInfo struct {
 		name    string
@@ -1359,6 +1370,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	totalFailed := 0
 	totalSkipped := 0
 	totalLeaked := 0
+	totalTimedOut := 0
 	totalIgnored := 0
 	totalStale := 0
 	totalFiles := 0
@@ -1434,6 +1446,8 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		fileFailed := 0
 		var failDetails []string
 
+		fileLeaked := 0
+		fileTimedOut := 0
 		var summaryMatch []string
 		for i := 0; i < len(lines); i++ {
 			line := lines[i]
@@ -1441,6 +1455,34 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				filePassed++
 			} else if m := failLineRe.FindStringSubmatch(line); m != nil {
 				fileFailed++
+				detail := m[1]
+				for i+1 < len(lines) && panicContextRe.MatchString(lines[i+1]) {
+					i++
+					if detail == "" {
+						detail = strings.TrimSpace(lines[i])
+					} else {
+						detail += "\n" + lines[i]
+					}
+				}
+				if detail != "" {
+					failDetails = append(failDetails, detail)
+				}
+			} else if m := leakLineRe.FindStringSubmatch(line); m != nil {
+				fileLeaked++
+				detail := m[1]
+				for i+1 < len(lines) && panicContextRe.MatchString(lines[i+1]) {
+					i++
+					if detail == "" {
+						detail = strings.TrimSpace(lines[i])
+					} else {
+						detail += "\n" + lines[i]
+					}
+				}
+				if detail != "" {
+					failDetails = append(failDetails, detail)
+				}
+			} else if m := timeoutLineRe.FindStringSubmatch(line); m != nil {
+				fileTimedOut++
 				detail := m[1]
 				for i+1 < len(lines) && panicContextRe.MatchString(lines[i+1]) {
 					i++
@@ -1463,7 +1505,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			// (stack overflow on macOS/Linux, STATUS_ACCESS_VIOLATION on Windows).
 			// If all tests passed and none failed, treat as a pass — the crash is
 			// in the shutdown path, not in user code. B0230.
-			if filePassed > 0 && fileFailed == 0 {
+			if filePassed > 0 && fileFailed == 0 && fileLeaked == 0 && fileTimedOut == 0 {
 				relPath, relErr := filepath.Rel(baseDir, r.file)
 				if relErr != nil {
 					relPath = r.file
@@ -1478,10 +1520,13 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 						totalLeaked += atoi(m[4])
 					}
 					if len(m) > 5 && m[5] != "" {
-						totalIgnored += atoi(m[5])
+						totalTimedOut += atoi(m[5])
 					}
 					if len(m) > 6 && m[6] != "" {
-						totalStale += atoi(m[6])
+						totalIgnored += atoi(m[6])
+					}
+					if len(m) > 7 && m[7] != "" {
+						totalStale += atoi(m[7])
 					}
 				} else {
 					totalPassed += filePassed
@@ -1491,12 +1536,11 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				if filePassed > 1 {
 					testCount = fmt.Sprintf(" (%d tests)", filePassed)
 				}
-				fmt.Printf("PASS (%.3fs) %s%s%s\n", r.elapsed.Seconds(), relPath, testCount, targetSuffix)
+				fmt.Printf("pass (%.3fs) %s%s%s\n", r.elapsed.Seconds(), relPath, testCount, targetSuffix)
 				continue
 			}
 			failedFiles++
 
-			fileLeaked := 0
 			if m := summaryMatch; m != nil {
 				totalPassed += atoi(m[1])
 				totalFailed += atoi(m[2])
@@ -1508,10 +1552,14 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 					fileLeaked = atoi(m[4])
 				}
 				if len(m) > 5 && m[5] != "" {
-					totalIgnored += atoi(m[5])
+					totalTimedOut += atoi(m[5])
+					fileTimedOut = atoi(m[5])
 				}
 				if len(m) > 6 && m[6] != "" {
-					totalStale += atoi(m[6])
+					totalIgnored += atoi(m[6])
+				}
+				if len(m) > 7 && m[7] != "" {
+					totalStale += atoi(m[7])
 				}
 			} else if fileFailed > 0 || filePassed > 0 {
 				totalPassed += filePassed
@@ -1531,11 +1579,14 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				continue
 			}
 
-			totalTests := filePassed + fileFailed
-			if fileFailed == 0 && fileLeaked > 0 {
+			totalTests := filePassed + fileFailed + fileLeaked + fileTimedOut
+			if fileFailed == 0 && fileLeaked > 0 && fileTimedOut == 0 {
 				fmt.Printf("FAIL (%.3fs) %s (%d leaked)%s\n", r.elapsed.Seconds(), relPath, fileLeaked, targetSuffix)
+			} else if fileFailed == 0 && fileTimedOut > 0 && fileLeaked == 0 {
+				fmt.Printf("FAIL (%.3fs) %s (%d timed out)%s\n", r.elapsed.Seconds(), relPath, fileTimedOut, targetSuffix)
 			} else if totalTests > 0 {
-				fmt.Printf("FAIL (%.3fs) %s (%d/%d failed)%s\n", r.elapsed.Seconds(), relPath, fileFailed, totalTests, targetSuffix)
+				failCount := fileFailed + fileLeaked + fileTimedOut
+				fmt.Printf("FAIL (%.3fs) %s (%d/%d failed)%s\n", r.elapsed.Seconds(), relPath, failCount, totalTests, targetSuffix)
 			} else {
 				fmt.Printf("FAIL (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 			}
@@ -1557,7 +1608,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				var errCtx string
 				for _, line := range lines {
 					trimmed := strings.TrimSpace(line)
-					if trimmed == "" || summaryRe.MatchString(line) || passLineRe.MatchString(line) || failLineRe.MatchString(line) {
+					if trimmed == "" || summaryRe.MatchString(line) || passLineRe.MatchString(line) || failLineRe.MatchString(line) || leakLineRe.MatchString(line) || timeoutLineRe.MatchString(line) {
 						continue
 					}
 					errCtx = trimmed
@@ -1583,10 +1634,13 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				totalLeaked += atoi(m[4])
 			}
 			if len(m) > 5 && m[5] != "" {
-				totalIgnored += atoi(m[5])
+				totalTimedOut += atoi(m[5])
 			}
 			if len(m) > 6 && m[6] != "" {
-				totalStale += atoi(m[6])
+				totalIgnored += atoi(m[6])
+			}
+			if len(m) > 7 && m[7] != "" {
+				totalStale += atoi(m[7])
 			}
 		}
 
@@ -1602,9 +1656,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 
 		totalTests := filePassed + fileFailed
 		if totalTests > 1 {
-			fmt.Printf("PASS (%.3fs) %s (%d tests)%s\n", r.elapsed.Seconds(), relPath, totalTests, targetSuffix)
+			fmt.Printf("pass (%.3fs) %s (%d tests)%s\n", r.elapsed.Seconds(), relPath, totalTests, targetSuffix)
 		} else {
-			fmt.Printf("PASS (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
+			fmt.Printf("pass (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 		}
 	}
 
@@ -1622,6 +1676,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 	if totalLeaked > 0 {
 		summary += fmt.Sprintf(", %d leaked", totalLeaked)
+	}
+	if totalTimedOut > 0 {
+		summary += fmt.Sprintf(", %d timed out", totalTimedOut)
 	}
 	if totalIgnored > 0 {
 		summary += fmt.Sprintf(", %d allowed leaks", totalIgnored)
@@ -1680,7 +1737,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	// The B0230 workaround (line ~1466) treats crash-during-shutdown as PASS
 	// when filePassed > 0 && fileFailed == 0, but this also swallows leak-only
 	// exits. Rather than changing that logic, enforce leaks at the final gate.
-	if totalFailed > 0 || failedFiles > 0 || totalLeaked > 0 {
+	if totalFailed > 0 || totalLeaked > 0 || totalTimedOut > 0 || failedFiles > 0 {
 		os.Exit(1)
 	}
 }

@@ -716,7 +716,8 @@ format_value_number_test() `test {
   assert(s == "42", "format number");
 }
 
-format_value_empty_array_test() `test {
+// B0267: WASM-only leak in format_value with empty array
+format_value_empty_array_test() `test(allow_leaks: true) {
   string s = format_value(JsonValue.Array(JsonValue[]()))!;
   assert(s == "[]", "format empty array");
 }

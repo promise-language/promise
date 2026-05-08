@@ -106,24 +106,28 @@ PROMISE_CACHE_DEBUG=1 bin/promise test tests/...         # show cache HIT/MISS/S
 
 Single-file output (verbose — shows every test with timing):
 ```
-PASS (0.001s) test_add
-PASS (0.002s) test_sub
-  leak: 1 allocations not freed                # leak detection (T0020)
+pass (0.001s) test_add
+pass (0.002s) test_sub
+LEAK (0.001s) test_leaky                       # leak detection — LEAK outcome (T0020)
+  leak: 1 allocations not freed                # leak detail on next line
 FAIL (0.003s) test_broken
   panic: assertion failed: expected 3, got 4   # panic context shown under FAIL
 TIMEOUT (0.100s) test_stuck                    # per-test timeout exceeded (T0023)
-PASS (0.001s) test_other                       # subsequent tests still run after panic/timeout
+  timeout: exceeded 60s limit                  # timeout context
+pass (0.001s) test_other                       # subsequent tests still run after panic/timeout
 
-3 passed, 2 failed, 1 leaked (0.423s)
+2 passed, 1 failed, 1 leaked, 1 timed out (0.423s)
 FAILED:
+  test_leaky
   test_broken
   test_stuck
 ```
+Visual hierarchy: `pass` (lowercase) for success, `FAIL`/`LEAK`/`TIMEOUT` (UPPER CASE) for failures. Each failure type has indented context on the next line. Leaked tests are NOT double-counted in passed; timed-out tests are NOT double-counted in failed.
 
 Multi-file output (compact — one line per file):
 ```
-PASS (0.004s) e2e/basics.pr (3 tests)         # passing file with test count
-PASS (0.001s) e2e/hello.pr                    # single-test file (no count)
+pass (0.004s) e2e/basics.pr (3 tests)         # passing file with test count
+pass (0.001s) e2e/hello.pr                    # single-test file (no count)
 FAIL (0.005s) e2e/strings.pr (1/3 failed)     # failing file with ratio
   test_split                                   # failed test name
     panic: assertion failed                    # panic context
@@ -160,7 +164,7 @@ HIGH VARIANCE (1 test):
 
 STABLE: 45 tests across 12 files
 ```
-Stress mode compiles once and re-runs binaries. Stdout and stderr are captured separately — PASS/FAIL lines parsed from stdout, crash context (signal name, exit code, last 20 lines of stderr) from stderr. Stable files are gradually suppressed (run every 2nd/4th/8th iteration). Exit code 1 if any test has failures.
+Stress mode compiles once and re-runs binaries. Stdout and stderr are captured separately — pass/FAIL/LEAK/TIMEOUT lines parsed from stdout, crash context (signal name, exit code, last 20 lines of stderr) from stderr. Stable files are gradually suppressed (run every 2nd/4th/8th iteration). Exit code 1 if any test has failures.
 
 ## Compiler Pipeline
 

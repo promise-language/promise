@@ -1,8 +1,14 @@
 # Promise Programming Language
 
-Promise is a systems-aware, statically-typed programming language with Dart-inspired syntax, Rust-inspired ownership semantics, and a rich type system featuring inheritance, generics, and algebraic error handling.
+Statically-typed language designed for AI-agent efficiency. Explicit ownership (like Rust), goroutine-style concurrency (like Go), algebraic errors, generics, exhaustive pattern matching — zero hidden effects. Native LLVM compilation to Linux, macOS, Windows, and WASM.
 
-The toolchain (compiler + package manager) is a single Go binary called `promise`, uses ANTLR4 for parsing, and targets LLVM IR for code generation.
+**Designed for AI agents.** Every design decision optimizes for an AI generating correct, self-contained programs in one shot. Reading a single `.pr` file tells you exactly what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic.
+
+**Mono-versioned catalog.** Promise eliminates dependency hell entirely. There are no per-package versions, no lockfiles, no version resolution. Instead, the entire ecosystem — compiler, standard library, and all catalog modules — ships as a single atomic release called an **epoch** (e.g., `2026.3`). Every module in an epoch is tested together as a unit. Your project declares which epoch it targets in `promise.toml`, and that's it. An AI agent only needs to know the epoch to generate correct imports — no version guessing, no compatibility reasoning, no `package.json` / `Cargo.toml` / `go.mod` boilerplate.
+
+**Self-contained toolchain.** The compiler is a single Go binary (~61MB release build) that embeds everything: LLVM tools, standard library, catalog modules, and runtime. `promise sync` downloads one file. `promise install` extracts it. No system dependencies beyond a linker. Multiple epochs can coexist side-by-side under `~/.promise/epochs/`.
+
+**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules (`io`, `json`, `os`, `path`, `math`, `strings`, `time`, `http`) are separate compilation units cached as LLVM bitcode for fast incremental builds.
 
 ## Example
 
@@ -156,4 +162,9 @@ See [docs/language-design.md](docs/language-design.md) for the full language spe
 
 ## License
 
-TBD
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.

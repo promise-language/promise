@@ -790,9 +790,12 @@ func (c *Compiler) defineSchedLoopFunc() {
 	afterReleaseBlk := fn.NewBlock("after_release")
 	coroSuspendedBlk.NewCondBr(hasParkMtx, releaseMtxBlk, yieldReenqueueBlk)
 
-	// release_park_mutex: unlock the mutex and clear the field
-	releaseMtxBlk.NewCall(c.palMutexUnlock, parkMtx)
+	// release_park_mutex: clear the field THEN unlock the mutex.
+	// B0249: Must clear park_mutex before unlock to prevent a race where another
+	// thread wakes G, G re-parks (storing a new mutex), and our stale NULL write
+	// overwrites it — causing the next scheduler to treat park as yield.
 	releaseMtxBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pmField)
+	releaseMtxBlk.NewCall(c.palMutexUnlock, parkMtx)
 	releaseMtxBlk.NewBr(afterReleaseBlk)
 
 	// yield_reenqueue: cooperative yield — G has no park_mutex, so it just
@@ -2464,9 +2467,10 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 	hasParkMtx := coroSuspendedBlk.NewICmp(enum.IPredNE, parkMtx, constant.NewNull(irtypes.I8Ptr))
 	coroSuspendedBlk.NewCondBr(hasParkMtx, releaseMtxBlk, yieldReenqueueBlk)
 
-	// release_park_mutex: goroutine parked (on waiter list) — unlock + clear field
-	releaseMtxBlk.NewCall(c.palMutexUnlock, parkMtx)
+	// release_park_mutex: goroutine parked (on waiter list) — clear field THEN unlock.
+	// B0249: Must clear park_mutex before unlock (see sched_loop comment).
 	releaseMtxBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pmField)
+	releaseMtxBlk.NewCall(c.palMutexUnlock, parkMtx)
 	releaseMtxBlk.NewBr(afterReleaseBlk)
 
 	// yield_reenqueue: cooperative yield — re-enqueue G
@@ -2756,7 +2760,7 @@ func (c *Compiler) defineWaiterRemoveFunc() {
 //   5: i8*  g (back-pointer to owning G)
 //   6: i32  case_index
 //   7: i8*  select_mutex (for wake-once protocol; stored here because
-//           the scheduler clears G.park_mutex after unlocking it)
+//           the scheduler clears G.park_mutex before unlocking it)
 
 const swnKindSentinel = 0xFF
 

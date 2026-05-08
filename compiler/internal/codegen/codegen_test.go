@@ -12592,6 +12592,40 @@ func TestSchedulerReleasesParkMutex(t *testing.T) {
 	assertContains(t, ir, "after_release")
 }
 
+func TestSchedulerClearsParkMutexBeforeUnlock(t *testing.T) {
+	// B0249: park_mutex must be cleared BEFORE the mutex unlock to prevent a race
+	// where another thread wakes G, G re-parks with a new mutex, and the stale
+	// NULL write overwrites it — causing double-resume and segfault.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			go { ch.send(42); };
+		}
+	`)
+	// In sched_loop (and sched_coop_run for WASM), the release_park_mutex block
+	// must store null to park_mutex BEFORE calling pal_mutex_unlock.
+	fn := extractFunction(ir, "promise_sched_loop")
+	if fn == "" {
+		t.Fatal("promise_sched_loop not found")
+	}
+	idx := strings.Index(fn, "release_park_mutex:")
+	if idx < 0 {
+		t.Fatal("release_park_mutex block not found in sched_loop")
+	}
+	relBlk := fn[idx:]
+	storeIdx := strings.Index(relBlk, "store i8* null,")
+	unlockIdx := strings.Index(relBlk, "call void @pal_mutex_unlock(")
+	if storeIdx < 0 {
+		t.Fatal("null store not found in release_park_mutex")
+	}
+	if unlockIdx < 0 {
+		t.Fatal("mutex unlock not found in release_park_mutex")
+	}
+	if storeIdx > unlockIdx {
+		t.Error("B0249: park_mutex null store must come BEFORE mutex unlock to prevent race")
+	}
+}
+
 func TestGoroutineExitUsesDoneLock(t *testing.T) {
 	// goroutine_exit acquires sched.done_lock before setting done=1 and
 	// walking done_waiters, ensuring proper synchronization with task receivers.

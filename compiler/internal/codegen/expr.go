@@ -51,6 +51,7 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genUnaryExpr(e)
 	case *ast.CallExpr:
 		result := c.genCallExpr(e)
+		c.emitPanicCheck() // T0147: detect panic flag after every call expression
 		// T0073: Track known-safe string-producing calls (primitive to_string, string methods)
 		if result != nil && result.Type() == irtypes.I8Ptr {
 			if rt := c.info.Types[e]; rt != nil && extractNamed(rt) == types.TypString {
@@ -7191,8 +7192,20 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		callArgs = append(callArgs, coroFn.Params[i])
 	}
 
+	// T0147: Create panic exit block for go-call coroutine.
+	// Transfers panic state from TLS to G struct, clears TLS, branches to final suspend.
+	goPanicExitDC := coroFn.NewBlock("go.panic_exit")
+
 	if !isVoid {
 		result := bodyBlk.NewCall(targetFn, callArgs...)
+
+		// T0147: Check panic flag after call — skip result store if panicked.
+		dcFlag := bodyBlk.NewLoad(irtypes.I8, c.panicFlagGlobal)
+		dcIsPanic := bodyBlk.NewICmp(enum.IPredNE, dcFlag, constant.NewInt(irtypes.I8, 0))
+		dcOkBlk := coroFn.NewBlock("go.call_ok")
+		bodyBlk.NewCondBr(dcIsPanic, goPanicExitDC, dcOkBlk)
+		bodyBlk = dcOkBlk
+
 		// Store result via G.result_ptr (set by caller before enqueue).
 		// For fire-and-forget non-void, result_ptr is null — skip store (B0109).
 		gTy := goroutineStructType()
@@ -7213,12 +7226,42 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		bodyBlk = afterStoreBlk
 	} else {
 		bodyBlk.NewCall(targetFn, callArgs...)
+
+		// T0147: Check panic flag after call.
+		dcFlag := bodyBlk.NewLoad(irtypes.I8, c.panicFlagGlobal)
+		dcIsPanic := bodyBlk.NewICmp(enum.IPredNE, dcFlag, constant.NewInt(irtypes.I8, 0))
+		dcOkBlk := coroFn.NewBlock("go.call_ok")
+		bodyBlk.NewCondBr(dcIsPanic, goPanicExitDC, dcOkBlk)
+		bodyBlk = dcOkBlk
 	}
 
 	// Final suspend: yield back to scheduler so it can see coro.done()=true
 	// before destroying the coroutine frame.
 	finalSuspBlk := coroFn.NewBlock("final.suspend")
 	bodyBlk.NewBr(finalSuspBlk)
+
+	// T0147: Define panic exit block — transfer panic state from TLS to G struct.
+	{
+		gTy := goroutineStructType()
+		peCurrentG := goPanicExitDC.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		peGPtr := goPanicExitDC.NewBitCast(peCurrentG, irtypes.NewPointer(gTy))
+
+		pePanicType := goPanicExitDC.NewLoad(irtypes.I8, c.panicTypeTlsGlobal)
+		pePanickedField := goPanicExitDC.NewGetElementPtr(gTy, peGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
+		goPanicExitDC.NewStore(pePanicType, pePanickedField)
+
+		pePanicMsg := goPanicExitDC.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
+		pePanicMsgField := goPanicExitDC.NewGetElementPtr(gTy, peGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
+		goPanicExitDC.NewStore(pePanicMsg, pePanicMsgField)
+
+		goPanicExitDC.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)
+		goPanicExitDC.NewStore(constant.NewNull(irtypes.I8Ptr), c.panicMsgTlsGlobal)
+		goPanicExitDC.NewStore(constant.NewInt(irtypes.I8, 0), c.panicTypeTlsGlobal)
+
+		goPanicExitDC.NewBr(finalSuspBlk)
+	}
 
 	// Cleanup: free coroutine memory (only reached via destroy path)
 	coroMem := cleanupBlk.NewCall(c.coroFree, coroId, hdl)
@@ -7473,16 +7516,9 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 		c.emitScopeCleanup(0, false)
 	}
 
-	// B0228: After body, check TLS panic flag. If set (panic occurred in a Promise-level
-	// function like assert()), transfer to panic exit. This is needed until T0147 adds
-	// panic checks after every call expression.
-	if c.block != nil && c.block.Term == nil {
-		goBodyFlag := c.block.NewLoad(irtypes.I8, c.panicFlagGlobal)
-		goBodyPanicked := c.block.NewICmp(enum.IPredNE, goBodyFlag, constant.NewInt(irtypes.I8, 0))
-		goBodyOk := coroFn.NewBlock("go.body_ok")
-		c.block.NewCondBr(goBodyPanicked, goPanicExitBlk, goBodyOk)
-		c.block = goBodyOk
-	}
+	// T0147: Per-call panic checks in genExpr now handle panic detection.
+	// The call expression at line above goes through genExpr → case *ast.CallExpr
+	// which calls emitPanicCheck() → emitPanicReturn() → branches to panicExitBlock.
 
 	// Final suspend
 	finalSuspBlk := coroFn.NewBlock("final.suspend")
@@ -8027,14 +8063,9 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 		c.emitScopeCleanup(0, false)
 	}
 
-	// B0228: After body, check TLS panic flag (same as first go block variant).
-	if c.block != nil && c.block.Term == nil {
-		goBodyFlag2 := c.block.NewLoad(irtypes.I8, c.panicFlagGlobal)
-		goBodyPanicked2 := c.block.NewICmp(enum.IPredNE, goBodyFlag2, constant.NewInt(irtypes.I8, 0))
-		goBodyOk2 := coroFn.NewBlock("go.body_ok")
-		c.block.NewCondBr(goBodyPanicked2, goPanicExitBlk2, goBodyOk2)
-		c.block = goBodyOk2
-	}
+	// T0147: Per-call panic checks in genExpr now handle panic detection.
+	// Calls within the block go through genExpr → case *ast.CallExpr
+	// which calls emitPanicCheck() → emitPanicReturn() → branches to panicExitBlock.
 
 	// Final suspend: yield back to scheduler so it can see coro.done()=true
 	// before destroying the coroutine frame.

@@ -12752,6 +12752,44 @@ func TestOOBPanicReturns(t *testing.T) {
 	assertNotContains(t, ir, "declare void @promise_panic(i8*) noreturn")
 }
 
+// T0147: Panic check emitted after every call expression.
+func TestPanicCheckAfterCallExpr(t *testing.T) {
+	ir := generateIR(t, `
+		foo() {}
+		main() { foo(); }
+	`)
+	// After the call to foo(), emitPanicCheck should emit:
+	// - load of __promise_panic_flag
+	// - icmp ne (check if flag is set)
+	// - conditional branch to panic.cleanup / panic.ok
+	assertContains(t, ir, "panic.cleanup")
+	assertContains(t, ir, "panic.ok")
+}
+
+// T0147: Panic check after method call.
+func TestPanicCheckAfterMethodCall(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			int x;
+			bar(this) int { return this.x; }
+		}
+		main() { f := Foo(x: 1); f.bar(); }
+	`)
+	assertContains(t, ir, "panic.cleanup")
+	assertContains(t, ir, "panic.ok")
+}
+
+// T0147: Go-call (direct) coroutine has panic exit block.
+func TestPanicCheckGoCallDirect(t *testing.T) {
+	ir := generateIR(t, `
+		work() {}
+		main() { go work(); }
+	`)
+	// genGoCallExpr should emit go.panic_exit block
+	assertContains(t, ir, "go.panic_exit")
+	assertContains(t, ir, "go.call_ok")
+}
+
 // B0228: Category B — OOM in vector_push returns null instead of unreachable.
 func TestVectorPushOOMReturnsNull(t *testing.T) {
 	ir := generateIR(t, `

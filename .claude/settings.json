@@ -1,4 +1,18 @@
 {
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PROMISE_NO_SHIM=1 bin/promise run tools/guard/guard.pr || exit 2",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "allow": [
       "Edit",
@@ -17,19 +31,7 @@
     "deny": [
       "Read(.tracker/**)",
       "Edit(.tracker/**)",
-      "Write(.tracker/**)",
-      "Bash(git push *)",
-      "Bash(git reset --hard *)",
-      "Bash(curl *)",
-      "Bash(wget *)",
-      "Bash(npm install *)",
-      "Bash(pip install *)",
-      "Bash(cargo install *)",
-      "Bash(go install *)",
-      "Bash(apt install *)",
-      "Bash(apt-get install *)",
-      "Bash(rm -rf *)",
-      "Bash(* --force)"
+      "Write(.tracker/**)"
     ],
     "additionalDirectories": [
       "/tmp",

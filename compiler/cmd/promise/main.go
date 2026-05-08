@@ -383,6 +383,7 @@ func runRun(args []string) {
 
 	// Execute
 	cmd := exec.Command(tmpOutput.Name())
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -4936,6 +4937,7 @@ func runExec(args []string) {
 	} else {
 		cmd = exec.CommandContext(ctx, tmpOutput.Name())
 	}
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

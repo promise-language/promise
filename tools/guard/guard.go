@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -123,14 +124,22 @@ func checkSingle(cmd string) string {
 		return checkRm(args)
 	}
 
+	if program == "cp" || program == "mv" {
+		return checkCopy(program, args)
+	}
+
 	if program == "curl" || program == "wget" {
 		return fmt.Sprintf("blocked: '%s' (unreviewed network access)", program)
+	}
+
+	if program == "go" {
+		return checkGo(args)
 	}
 
 	// Package installers.
 	pkgInstallers := map[string]bool{
 		"npm": true, "pip": true, "pip3": true,
-		"cargo": true, "go": true,
+		"cargo": true,
 		"apt": true, "apt-get": true,
 	}
 	if pkgInstallers[program] && hasSubcommand(args, "install") {
@@ -189,6 +198,63 @@ func findGitSubcommand(tokens []string) string {
 	return ""
 }
 
+// ── go build checks ─────────────────────────────────────────────────────
+
+const goBuildBlockMsg = "blocked: 'go build' for the Promise compiler. " +
+	"Use ./build (Linux/macOS) or .\\build.ps1 (Windows) instead — " +
+	"go build skips resource embedding and produces a broken binary."
+
+func checkGo(tokens []string) string {
+	if len(tokens) < 2 {
+		return ""
+	}
+
+	sub := tokens[1]
+
+	// go install: block package installation.
+	if sub == "install" {
+		return "blocked: 'go install' (unreviewed package installation)"
+	}
+
+	// Only check go build for compiler-building.
+	if sub != "build" {
+		return ""
+	}
+
+	// Walk args looking for -o value and non-flag positional args.
+	skipNext := false
+	for i := 2; i < len(tokens); i++ {
+		if skipNext {
+			skipNext = false
+			// This token is the value of -o — check it.
+			lower := strings.ToLower(tokens[i])
+			if strings.Contains(lower, "promise") {
+				return goBuildBlockMsg
+			}
+			// Block any -o targeting bin/ in the repo — only ./build should write there.
+			if strings.HasPrefix(tokens[i], "bin/") || strings.HasPrefix(tokens[i], "./bin/") {
+				return goBuildBlockMsg
+			}
+			continue
+		}
+		t := tokens[i]
+		if t == "-o" {
+			skipNext = true
+			continue
+		}
+		if strings.HasPrefix(t, "-") {
+			continue
+		}
+		// Non-flag positional arg: check if it references the compiler.
+		lower := strings.ToLower(t)
+		if strings.Contains(lower, "promise") || strings.Contains(lower, "compiler/") {
+			return goBuildBlockMsg
+		}
+	}
+
+	return ""
+}
+
 // ── rm checks ───────────────────────────────────────────────────────────────
 
 func checkRm(tokens []string) string {
@@ -216,6 +282,87 @@ func checkRm(tokens []string) string {
 		return "blocked: 'rm -rf' (recursive force delete)"
 	}
 	return ""
+}
+
+// ── cp/mv checks ────────────────────────────────────────────────────────
+
+// checkCopy validates cp/mv destinations. Allows copies to the repo dir, /tmp, ~/.promise.
+func checkCopy(program string, tokens []string) string {
+	// Collect non-flag arguments (skip program name).
+	// Handle -t/--target-directory which makes the *first* path-arg the destination.
+	var paths []string
+	targetDir := ""
+	skipNext := false
+	for i := 1; i < len(tokens); i++ {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		t := tokens[i]
+		if t == "-t" || t == "--target-directory" {
+			if i+1 < len(tokens) {
+				targetDir = tokens[i+1]
+				skipNext = true
+			}
+		} else if strings.HasPrefix(t, "--target-directory=") {
+			targetDir = strings.TrimPrefix(t, "--target-directory=")
+		} else if !strings.HasPrefix(t, "-") {
+			paths = append(paths, t)
+		}
+	}
+
+	// Determine destination.
+	var dest string
+	if targetDir != "" {
+		dest = targetDir
+	} else if len(paths) >= 2 {
+		dest = paths[len(paths)-1]
+	} else {
+		return "" // can't determine destination, allow
+	}
+
+	if !isAllowedCopyDest(dest) {
+		return fmt.Sprintf("blocked: '%s' to '%s' (destination outside repo, /tmp, ~/.promise)", program, dest)
+	}
+	return ""
+}
+
+// isAllowedCopyDest checks if a destination path is within the repo, /tmp, or ~/.promise.
+func isAllowedCopyDest(dest string) bool {
+	// Expand ~ prefix.
+	home, _ := os.UserHomeDir()
+	if strings.HasPrefix(dest, "~/") {
+		dest = filepath.Join(home, dest[2:])
+	}
+
+	abs, err := filepath.Abs(dest)
+	if err != nil {
+		return false
+	}
+	abs = filepath.Clean(abs)
+
+	// Allow /tmp.
+	if strings.HasPrefix(abs, "/tmp/") || abs == "/tmp" {
+		return true
+	}
+
+	// Allow ~/.promise.
+	promiseDir := filepath.Join(home, ".promise")
+	if strings.HasPrefix(abs, promiseDir+"/") || abs == promiseDir {
+		return true
+	}
+
+	// Allow repo directory (cwd).
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	cwd = filepath.Clean(cwd)
+	if strings.HasPrefix(abs, cwd+"/") || abs == cwd {
+		return true
+	}
+
+	return false
 }
 
 // ── Token helpers ───────────────────────────────────────────────────────────

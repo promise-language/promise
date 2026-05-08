@@ -22,7 +22,7 @@ test_discard_vector_pop() `test {
 
 // Discarded pop() on Vector[string[]] drops inner string vector.
 // Remaining leak is from Vector scope-exit not cascading element drops (B0189).
-test_discard_nested_string_vector_pop() `test(allow_leaks: true) {
+test_discard_nested_string_vector_pop() `test {
   string[][] v = string[][]();
   v.push(["a", "b"]);
   v.push(["c", "d"]);

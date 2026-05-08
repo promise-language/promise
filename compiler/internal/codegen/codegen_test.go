@@ -16702,3 +16702,47 @@ func TestOptionalTypeParamMultipleInstantiations(t *testing.T) {
 	assertContains(t, ir, "{ i1, i64 }")
 	assertContains(t, ir, "{ i1, i8* }")
 }
+
+// B0245: Vector[UserType] drop should emit element drop loop for heap user types.
+func TestVectorUserTypeElementDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo { int x; }
+		main() {
+			Foo[] v = [];
+			v.push(Foo(x: 1));
+		}
+	`)
+	// Should have vector element drop loop (vecdrop.head) for user type elements
+	assertContains(t, ir, "vecdrop.head")
+	assertContains(t, ir, "call void @pal_free(")
+}
+
+// B0245: Debug — check what IR is generated for Vector[Foo] with full std
+func TestVectorUserTypeElementDropWithPush(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo { int x; }
+		test() {
+			Foo[] v = [];
+			v.push(Foo(x: 1));
+			v.push(Foo(x: 2));
+		}
+	`)
+	// Check for element drop loop: vecdrop.head is the loop header
+	if !strings.Contains(ir, "vecdrop.head") {
+		// Print the main function IR for debugging
+		lines := strings.Split(ir, "\n")
+		inFunc := false
+		for _, line := range lines {
+			if strings.Contains(line, "define") && strings.Contains(line, "@test(") {
+				inFunc = true
+			}
+			if inFunc {
+				t.Logf("%s", line)
+				if line == "}" {
+					break
+				}
+			}
+		}
+		t.Errorf("expected vecdrop.head element drop loop for Vector[Foo]")
+	}
+}

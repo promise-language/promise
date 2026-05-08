@@ -24,7 +24,7 @@ test_string_vector_constructor() `test {
   assert(v.contains("hello"), "contains hello");
 }
 
-test_nested_vector_constructor() `test(allow_leaks: true) {
+test_nested_vector_constructor() `test {
   v := int[][]();
   inner1 := int[]();
   inner1.push(1);

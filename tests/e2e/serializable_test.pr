@@ -321,7 +321,7 @@ map_empty_test() `test {
 
 // ── Array of user types ─────────────────────────────────────────────────────
 
-array_of_user_types_test() `test(allow_leaks: true) {
+array_of_user_types_test() `test {
   Route r1 = Route(name: "trail", waypoints: [Point(x: 0, y: 0), Point(x: 10, y: 5), Point(x: 20, y: 10)]);
   json.JsonEncoder enc = json.JsonEncoder();
   r1.encode(enc)!;

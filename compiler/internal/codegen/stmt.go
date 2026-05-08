@@ -924,7 +924,8 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 	// Vector drop: register bindingDropString (same mechanism — i8* alloca + void(i8*) drop).
 	// Vector.drop null-checks and frees the heap buffer. Drop flag semantics match strings:
 	// cleared at all move sites, borrow detection skips drops for container element access.
-	if _, ok := types.AsVector(typ); ok || named == types.TypVector {
+	if elemType, ok := types.AsVector(typ); ok || named == types.TypVector {
+		_ = elemType // B0245: elemType is available when typ is an Instance
 		dropFlag := c.createEntryAlloca(irtypes.I1)
 		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
 		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
@@ -2105,10 +2106,12 @@ func (c *Compiler) emitVectorElementDropLoop(vecPtr value.Value, elemType types.
 	// B0189: String elements are safe to drop (push dups them).
 	// B0212: Enum elements stored by value in vectors — each element is an
 	// independent copy of the enum internal type, so dropping each is safe.
-	// Other droppable types (vectors, channels, user types) are skipped for now
-	// to avoid double-frees when elements are shared (B0189).
+	// B0245: Heap user type elements (non-value, non-copy, non-primitive, non-structural)
+	// are also dropped via pal_free or their drop method. Vector elements are the sole
+	// owner of user-type instances — constructors transfer ownership to push, and
+	// sort temps clear their drop flags when moved back into the vector.
 	if extractNamed(elemType) != types.TypString {
-		if !c.vecElemNeedsEnumDrop(elemType) {
+		if !c.vecElemNeedsEnumDrop(elemType) && !c.vecElemNeedsUserTypeDrop(elemType) {
 			return
 		}
 	}
@@ -2194,6 +2197,37 @@ func (c *Compiler) vecElemNeedsEnumDrop(elemType types.Type) bool {
 		if _, ok := c.funcs[mangledName]; ok {
 			return true
 		}
+	}
+	return false
+}
+
+// vecElemNeedsUserTypeDrop returns true if a vector element type is a heap user type
+// that needs drop or pal_free. Covers: types with explicit/synthesized drops, mono
+// instances with codegen-time drops, and plain heap user types (non-value, non-copy,
+// non-primitive, non-structural) that need pal_free.
+// B0245: Enables vector element drop loop to clean up user-type elements.
+func (c *Compiler) vecElemNeedsUserTypeDrop(elemType types.Type) bool {
+	named := extractNamed(elemType)
+	if named == nil {
+		return false
+	}
+	// Types with explicit or synthesized drop
+	if named.HasDrop() || named.NeedsSynthDrop() {
+		return true
+	}
+	// Mono instance with codegen-time synthesized drop
+	if inst, ok := elemType.(*types.Instance); ok {
+		if n, ok2 := inst.Origin().(*types.Named); ok2 && n.NeedsSynthDrop() {
+			return true
+		}
+		mangledName := mangleMethodName(monoName(inst), "drop", false)
+		if _, ok := c.funcs[mangledName]; ok {
+			return true
+		}
+	}
+	// Heap user type without any drop — needs pal_free
+	if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+		return true
 	}
 	return false
 }

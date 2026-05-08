@@ -339,7 +339,7 @@ test_format_conditional_write() `test {
 }
 
 // Polymorphic in a collection context
-test_polymorphic_in_vector() `test(allow_leaks: true) {
+test_polymorphic_in_vector() `test {
   Shape[] shapes = Vector[Shape]();
   shapes.push(Circle(radius: 1));
   shapes.push(Circle(radius: 2));

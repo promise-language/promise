@@ -1,0 +1,276 @@
+// Tests for T0121: Allow omitting `;` before `}` in all block contexts.
+// Each test verifies that the trailing semicolon is optional before `}`
+// while still requiring `;` between statements within a block.
+// --- Expression statements ---
+test_expression_no_semi() `test {
+  assert(1 + 1 == 2, "expression without semi")
+}
+
+test_expression_with_semi() `test {
+  assert(1 + 1 == 2, "expression with semi");
+}
+
+// --- Variable declarations ---
+
+test_var_decl_no_semi() `test {
+  x := 42
+}
+
+test_var_decl_typed_no_semi() `test {
+  int x = 42
+}
+
+// --- Return statements ---
+
+test_return_no_semi() `test {
+  assert(ret_helper() == 10, "return no semi")
+}
+
+ret_helper() int {
+  return 10
+}
+
+test_return_void_no_semi() `test {
+  void_helper()
+}
+
+void_helper() {
+  return
+}
+
+// --- Assignment ---
+
+test_assignment_no_semi() `test {
+  x := 0;
+  if true {
+    x = 42
+  }
+  assert(x == 42, "assign no semi")
+}
+
+test_compound_assignment_no_semi() `test {
+  x := 10;
+  if true {
+    x += 5
+  }
+  assert(x == 15, "compound assign no semi")
+}
+
+// --- Inc/Dec ---
+
+test_inc_no_semi() `test {
+  x := 0;
+  if true {
+    x++
+  }
+  assert(x == 1, "inc no semi")
+}
+
+test_dec_no_semi() `test {
+  x := 5;
+  if true {
+    x--
+  }
+  assert(x == 4, "dec no semi")
+}
+
+// --- Break / Continue ---
+
+test_break_no_semi() `test {
+  x := 0;
+  for i in 0..10 {
+    if i == 3 {
+      break
+    }
+    x = i;
+  }
+  assert(x == 2, "break no semi")
+}
+
+test_continue_no_semi() `test {
+  sum := 0;
+  for i in 0..5 {
+    if i == 2 {
+      continue
+    }
+    sum += i;
+  }
+  assert(sum == 8, "continue no semi")
+}
+
+// --- If/else blocks ---
+
+test_if_no_semi() `test {
+  x := 0;
+  if true {
+    x = 1
+  }
+  assert(x == 1, "if no semi")
+}
+
+test_if_else_no_semi() `test {
+  x := 0;
+  if false {
+    x = 1
+  } else {
+    x = 2
+  }
+  assert(x == 2, "if-else no semi")
+}
+
+test_if_else_if_no_semi() `test {
+  x := 0;
+  if false {
+    x = 1
+  } else if true {
+    x = 2
+  } else {
+    x = 3
+  }
+  assert(x == 2, "if-else-if no semi")
+}
+
+// --- For blocks ---
+
+test_for_no_semi() `test {
+  sum := 0;
+  for i in 0..3 {
+    sum += i
+  }
+  assert(sum == 3, "for no semi")
+}
+
+// --- While blocks ---
+
+test_while_no_semi() `test {
+  x := 0;
+  while x < 5 {
+    x++
+  }
+  assert(x == 5, "while no semi")
+}
+
+// --- Lambda bodies ---
+
+test_lambda_block_no_semi() `test {
+  f := |int x| -> int {
+    return x * 2
+  };
+  assert(f(3) == 6, "lambda block no semi")
+}
+
+// --- Error handler blocks ---
+
+failable_fn!() int {
+  raise error("oops");
+}
+
+test_error_handler_no_semi() `test {
+  x := failable_fn()? {
+    42
+  };
+  assert(x == 42, "error handler no semi")
+}
+
+// --- Nested blocks ---
+
+test_nested_no_semi() `test {
+  x := 0;
+  if true {
+    if true {
+      x = 42
+    }
+  }
+  assert(x == 42, "nested no semi")
+}
+
+test_deeply_nested() `test {
+  result := 0;
+  for i in 0..3 {
+    if i == 1 {
+      while result < 10 {
+        result++
+      }
+    }
+  }
+  assert(result == 10, "deeply nested no semi")
+}
+
+// --- Raise ---
+
+raiser!() int {
+  raise error("boom")
+}
+
+test_raise_no_semi() `test {
+  x := raiser()? {
+    99
+  };
+  assert(x == 99, "raise no semi")
+}
+
+// --- Destructure var decl ---
+
+make_pair()(int, int) {
+  return (1, 2);
+}
+
+test_destructure_no_semi() `test {
+  (a, b) := make_pair()
+}
+
+// --- Yield (generators) ---
+
+gen_single() stream[int] {
+  yield 42
+}
+
+gen_delegate() stream[int] {
+  yield * gen_single()
+}
+
+test_yield_no_semi() `test {
+  sum := 0;
+  for v in gen_single() {
+    sum += v;
+  }
+  assert(sum == 42, "yield no semi")
+}
+
+test_yield_delegate_no_semi() `test {
+  sum := 0;
+  for v in gen_delegate() {
+    sum += v;
+  }
+  assert(sum == 42, "yield delegate no semi")
+}
+
+// --- Use var decl ---
+
+type Resource {
+  int value;
+  close(~this) {
+  }
+}
+
+test_use_var_no_semi() `test {
+  use r := Resource(value: 7)
+}
+
+// --- Mixed: some with semi, some without ---
+
+test_mixed_style() `test {
+  a := 1;
+  b := 2;
+  c := a + b
+}
+
+test_mixed_in_block() `test {
+  x := 0;
+  if true {
+    x = 1;
+    x = 2;
+    x = 3
+  }
+  assert(x == 3, "mixed in block")
+}

@@ -338,6 +338,12 @@ func (s *BasePromiseParserListener) EnterBlock(ctx *BlockContext) {}
 // ExitBlock is called when production block is exited.
 func (s *BasePromiseParserListener) ExitBlock(ctx *BlockContext) {}
 
+// EnterSemi is called when production semi is entered.
+func (s *BasePromiseParserListener) EnterSemi(ctx *SemiContext) {}
+
+// ExitSemi is called when production semi is exited.
+func (s *BasePromiseParserListener) ExitSemi(ctx *SemiContext) {}
+
 // EnterStatement is called when production statement is entered.
 func (s *BasePromiseParserListener) EnterStatement(ctx *StatementContext) {}
 

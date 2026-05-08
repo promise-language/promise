@@ -1611,7 +1611,8 @@ func TestInvalidSyntax(t *testing.T) {
 		name string
 		code string
 	}{
-		{"missing_semi", `main() { Int x = 1 }`},
+		// "missing_semi" removed: T0121 allows omitting `;` before `}`
+		{"missing_semi_between_stmts", `main() { int x = 1 int y = 2 }`}, // `;` still required between statements
 		{"unclosed_brace", `main() { Int x = 1;`},
 		{"unclosed_paren", `main() { f(1, 2; }`},
 		{"unclosed_bracket", `main() { Int x = a[0; }`},

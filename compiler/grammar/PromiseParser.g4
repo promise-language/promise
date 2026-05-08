@@ -264,6 +264,13 @@ block
     : LBRACE statement* RBRACE
     ;
 
+// Semicolons are required between statements but optional before RBRACE (T0121).
+// The semantic predicate allows the last statement in a block to omit its trailing ';'.
+semi
+    : SEMI
+    | {p.GetTokenStream().LT(1).GetTokenType() == PromiseParserRBRACE}?
+    ;
+
 statement
     : useVarDecl
     | varDecl
@@ -285,17 +292,17 @@ statement
     ;
 
 useVarDecl
-    : USE IDENT WALRUS expression SEMI
+    : USE IDENT WALRUS expression semi
     ;
 
 varDecl
-    : typeRef refMod? bindingName (ASSIGN expression)? SEMI    # typedVarDecl
-    | bindingName WALRUS expression SEMI                       # inferredVarDecl
-    | LPAREN bindingName COMMA bindingName RPAREN WALRUS expression SEMI   # destructureVarDecl
+    : typeRef refMod? bindingName (ASSIGN expression)? semi    # typedVarDecl
+    | bindingName WALRUS expression semi                       # inferredVarDecl
+    | LPAREN bindingName COMMA bindingName RPAREN WALRUS expression semi   # destructureVarDecl
     ;
 
 assignmentStmt
-    : expression assignOp expression SEMI
+    : expression assignOp expression semi
     ;
 
 assignOp
@@ -308,35 +315,35 @@ assignOp
     ;
 
 incDecStmt
-    : expression (PLUSPLUS | MINUSMINUS) SEMI
+    : expression (PLUSPLUS | MINUSMINUS) semi
     ;
 
 returnStmt
-    : RETURN expression? SEMI
+    : RETURN expression? semi
     ;
 
 raiseStmt
-    : RAISE expression SEMI
+    : RAISE expression semi
     ;
 
 breakStmt
-    : BREAK SEMI
+    : BREAK semi
     ;
 
 continueStmt
-    : CONTINUE SEMI
+    : CONTINUE semi
     ;
 
 yieldStmt
-    : YIELD expression SEMI
+    : YIELD expression semi
     ;
 
 yieldDelegateStmt
-    : YIELD STAR expression SEMI
+    : YIELD STAR expression semi
     ;
 
 expressionStmt
-    : expression SEMI
+    : expression semi
     ;
 
 // ============================================================

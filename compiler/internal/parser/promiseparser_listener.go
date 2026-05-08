@@ -166,6 +166,9 @@ type PromiseParserListener interface {
 	// EnterBlock is called when entering the block production.
 	EnterBlock(c *BlockContext)
 
+	// EnterSemi is called when entering the semi production.
+	EnterSemi(c *SemiContext)
+
 	// EnterStatement is called when entering the statement production.
 	EnterStatement(c *StatementContext)
 
@@ -636,6 +639,9 @@ type PromiseParserListener interface {
 
 	// ExitBlock is called when exiting the block production.
 	ExitBlock(c *BlockContext)
+
+	// ExitSemi is called when exiting the semi production.
+	ExitSemi(c *SemiContext)
 
 	// ExitStatement is called when exiting the statement production.
 	ExitStatement(c *StatementContext)

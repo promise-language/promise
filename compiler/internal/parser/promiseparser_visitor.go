@@ -166,6 +166,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#block.
 	VisitBlock(ctx *BlockContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#semi.
+	VisitSemi(ctx *SemiContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#statement.
 	VisitStatement(ctx *StatementContext) interface{}
 

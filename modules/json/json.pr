@@ -395,6 +395,42 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     raise DecodeError(message: "unterminated string", field: "", position: this._pos);
   }
 
+  // Advance past a JSON string without allocating — performance optimization for skip_value.
+  _skip_string_value!(~this) {
+    this._expect('"');
+    while this._pos < this._data.len {
+      char c = this._data[this._pos];
+      if c == '"' {
+        this._advance();
+        return;
+      }
+      if c == '\\' {
+        this._advance();
+        if this._pos >= this._data.len {
+          raise DecodeError(message: "unterminated string escape", field: "", position: this._pos);
+        }
+        char esc = this._data[this._pos];
+        if esc == 'u' {
+          // \uXXXX — skip 4 hex digits
+          this._advance();
+          int h = 0;
+          while h < 4 {
+            if this._pos >= this._data.len {
+              raise DecodeError(message: "unterminated \\u escape", field: "", position: this._pos);
+            }
+            this._advance();
+            h = h + 1;
+          }
+        } else {
+          this._advance();
+        }
+      } else {
+        this._advance();
+      }
+    }
+    raise DecodeError(message: "unterminated string", field: "", position: this._pos);
+  }
+
   _read_number!(~this) f64 {
     this._skip_whitespace();
     int start = this._pos;
@@ -578,7 +614,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     char c = this._data[this._pos];
     match c {
       '"' => {
-        this._read_string_value();
+        this._skip_string_value();
       },
       '{' => {
         this._advance();
@@ -602,7 +638,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
           }
           first = false;
           this._skip_whitespace();
-          this._read_string_value(); // key
+          this._skip_string_value(); // key
           this._expect(':');
           this.skip_value(); // value (recursive)
         }

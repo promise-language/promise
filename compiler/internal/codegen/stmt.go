@@ -319,8 +319,43 @@ func (c *Compiler) genAutoPropagate(expr ast.Expr) {
 	callerResultType := c.currentResultType()
 	c.block.NewRet(c.wrapError(errVal, callerResultType))
 
-	// Ok path: continue (value discarded since this is a statement)
+	// Ok path: drop discarded success value, then continue (B0261).
 	c.block = okBlock
+	if !isVoidResult(calleeResultType) {
+		okVal := c.block.NewExtractValue(result, 1)
+		c.dropDiscardedAutoPropagate(expr, okVal)
+	}
+}
+
+// dropDiscardedAutoPropagate drops a discarded success value from an auto-propagated
+// failable call. Without this, heap-allocated return values (strings, vectors, channels)
+// leak when the caller discards the result. B0261.
+func (c *Compiler) dropDiscardedAutoPropagate(expr ast.Expr, val value.Value) {
+	exprType := c.info.Types[expr]
+	if exprType == nil {
+		return
+	}
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	named := extractNamed(exprType)
+	if named == nil {
+		return
+	}
+	switch {
+	case named == types.TypString:
+		if dropFn := c.funcs["promise_string_drop"]; dropFn != nil {
+			c.block.NewCall(dropFn, val)
+		}
+	case named == types.TypVector || types.IsVector(exprType):
+		if dropFn := c.funcs["Vector.drop"]; dropFn != nil {
+			c.block.NewCall(dropFn, val)
+		}
+	case named == types.TypChannel || types.IsChannel(exprType):
+		if dropFn := c.funcs["Channel.drop"]; dropFn != nil {
+			c.block.NewCall(dropFn, val)
+		}
+	}
 }
 
 // genAutoPropagateValue extracts the ok value from a failable result,

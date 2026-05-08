@@ -234,7 +234,7 @@ decode_whitespace_test() `test {
   assert(v == 42, "whitespace: value is 42");
 }
 
-skip_value_test() `test(allow_leaks: true) {
+skip_value_test() `test {
   // B0261
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":1,\"b\":\{\"nested\":true},\"c\":3}");
   dec.begin_object()!;
@@ -485,7 +485,7 @@ skip_value_array_test() `test {
   assert(b_val == 99, "skip array, got b=99");
 }
 
-skip_value_string_test() `test(allow_leaks: true) {
+skip_value_string_test() `test {
   // B0261
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":\"hello\",\"b\":42}");
   dec.begin_object()!;

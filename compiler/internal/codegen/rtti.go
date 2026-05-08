@@ -731,12 +731,35 @@ func (c *Compiler) emitViewMethodAdapter(
 
 	// Check if we need optional wrapping (T → T?)
 	needsOptWrap := false
+	ifaceResultUnwrapped := ifaceResult
 	if concreteResult != nil && ifaceResult != nil {
-		if _, isOpt := ifaceResult.(*types.Optional); isOpt {
+		if ifaceOpt, isOpt := ifaceResult.(*types.Optional); isOpt {
+			ifaceResultUnwrapped = ifaceOpt.Elem()
 			if !types.Identical(concreteResult, ifaceResult) {
 				needsOptWrap = true
 			}
 		}
+	}
+
+	// Check if we need covariant return coercion (ConcreteType → StructuralInterface)
+	// This must happen before optional/failable wrapping.
+	needsCovariantCoerce := false
+	if concreteResult != nil && ifaceResultUnwrapped != nil {
+		if ifaceRetNamed, ok := ifaceResultUnwrapped.(*types.Named); ok && ifaceRetNamed.IsAbstract() && ifaceRetNamed.IsStructural() {
+			concreteRetUnwrapped := concreteResult
+			if concreteOpt, ok := concreteRetUnwrapped.(*types.Optional); ok {
+				concreteRetUnwrapped = concreteOpt.Elem()
+			}
+			if !types.Identical(concreteRetUnwrapped, ifaceResultUnwrapped) {
+				needsCovariantCoerce = true
+			}
+		}
+	}
+
+	// Apply covariant return coercion first (swap vtable to structural view)
+	var retResult value.Value = result
+	if needsCovariantCoerce {
+		retResult = c.coerceToView(result, concreteResult, ifaceResultUnwrapped)
 	}
 
 	if !concreteCanError && ifaceCanError {
@@ -747,20 +770,20 @@ func (c *Compiler) emitViewMethodAdapter(
 			innerVal = nil
 		} else if needsOptWrap {
 			// T → T?!: wrap T as some(T) first, then as success
-			innerVal = c.wrapSome(result, c.resolveType(concreteResult))
+			innerVal = c.wrapSome(retResult, c.resolveType(concreteResult))
 		} else {
-			innerVal = result
+			innerVal = retResult
 		}
 		retVal := c.wrapSuccessResult(innerVal, ifaceRetType.(*irtypes.StructType))
 		c.block.NewRet(retVal)
 	} else if needsOptWrap {
 		// T → T?: wrap as some(T)
-		optVal := c.wrapSome(result, c.resolveType(concreteResult))
+		optVal := c.wrapSome(retResult, c.resolveType(concreteResult))
 		c.block.NewRet(optVal)
 	} else if concreteResult == nil && !concreteCanError {
 		c.block.NewRet(nil)
 	} else {
-		c.block.NewRet(result)
+		c.block.NewRet(retResult)
 	}
 
 	return fn

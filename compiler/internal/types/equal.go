@@ -443,7 +443,27 @@ func identicalSignaturesWithSelf(concrete, iface *Signature, self, replacement *
 	}
 	// Non-optional concrete return satisfies optional interface return: T matches T?
 	if ifaceOpt, ok := iface.result.(*Optional); ok {
-		return identicalWithSelf(concrete.result, ifaceOpt.Elem(), self, replacement)
+		if identicalWithSelf(concrete.result, ifaceOpt.Elem(), self, replacement) {
+			return true
+		}
+		// Covariant: concrete U satisfies interface T? where U implements structural T
+		if ifaceNamed, ok := ifaceOpt.Elem().(*Named); ok && ifaceNamed.IsAbstract() && ifaceNamed.IsStructural() {
+			concreteRet := concrete.result
+			// Unwrap optional from concrete side too: U? satisfies T? if U implements T
+			if concreteOpt, ok := concreteRet.(*Optional); ok {
+				concreteRet = concreteOpt.Elem()
+			}
+			if Implements(concreteRet, ifaceNamed) {
+				return true
+			}
+		}
+	}
+	// Covariant return: concrete returning U satisfies interface returning T
+	// where T is a structural interface and U implements T
+	if ifaceNamed, ok := iface.result.(*Named); ok && ifaceNamed.IsAbstract() && ifaceNamed.IsStructural() {
+		if Implements(concrete.result, ifaceNamed) {
+			return true
+		}
 	}
 	return false
 }

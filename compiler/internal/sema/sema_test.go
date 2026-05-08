@@ -5750,6 +5750,130 @@ func TestStructuralMultipleExtraOneRequiredFails(t *testing.T) {
 	expectError(t, errs, "cannot assign")
 }
 
+// --- Covariant return types in structural interface satisfaction (T0065) ---
+
+func TestStructuralCovariantReturnType(t *testing.T) {
+	checkOK(t, `
+		type Reader `+"`structural"+` {
+			read(int n) string `+"`abstract;"+`
+		}
+		type Source `+"`structural"+` {
+			open() Reader `+"`abstract;"+`
+		}
+		type FileReader {
+			read(int n) string { return "data"; }
+		}
+		type FileSource {
+			open() FileReader { return FileReader(); }
+		}
+		main() {
+			Source s = FileSource();
+		}
+	`)
+}
+
+func TestStructuralCovariantReturnTypeFailable(t *testing.T) {
+	checkOK(t, `
+		type Reader `+"`structural"+` {
+			read(int n) string `+"`abstract;"+`
+		}
+		type Source `+"`structural"+` {
+			open!(string path) Reader `+"`abstract;"+`
+		}
+		type FileReader {
+			read(int n) string { return "data"; }
+		}
+		type FileSource {
+			open!(string path) FileReader { return FileReader(); }
+		}
+		main() {
+			Source s = FileSource();
+		}
+	`)
+}
+
+func TestStructuralCovariantReturnTypeOptional(t *testing.T) {
+	checkOK(t, `
+		type Reader `+"`structural"+` {
+			read(int n) string `+"`abstract;"+`
+		}
+		type Source `+"`structural"+` {
+			find() Reader? `+"`abstract;"+`
+		}
+		type FileReader {
+			read(int n) string { return "data"; }
+		}
+		type FileSource {
+			find() FileReader { return FileReader(); }
+		}
+		main() {
+			Source s = FileSource();
+		}
+	`)
+}
+
+func TestStructuralCovariantReturnOptionalBoth(t *testing.T) {
+	checkOK(t, `
+		type Reader `+"`structural"+` {
+			read(int n) string `+"`abstract;"+`
+		}
+		type Source `+"`structural"+` {
+			find() Reader? `+"`abstract;"+`
+		}
+		type FileReader {
+			read(int n) string { return "data"; }
+		}
+		type FileSource {
+			find() FileReader? { return FileReader(); }
+		}
+		main() {
+			Source s = FileSource();
+		}
+	`)
+}
+
+func TestStructuralCovariantReturnNonStructuralFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Reader {
+			read(int n) string `+"`abstract;"+`
+		}
+		type Source `+"`structural"+` {
+			open() Reader `+"`abstract;"+`
+		}
+		type FileReader is Reader {
+			read(int n) string { return "data"; }
+		}
+		type FileSource {
+			open() FileReader { return FileReader(); }
+		}
+		main() {
+			Source s = FileSource();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestStructuralCovariantReturnMissingMethodFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Reader `+"`structural"+` {
+			read(int n) string `+"`abstract;"+`
+		}
+		type Source `+"`structural"+` {
+			open() Reader `+"`abstract;"+`
+		}
+		type BadReader {
+			write(int n) string { return "data"; }
+		}
+		type BadSource {
+			open() BadReader { return BadReader(); }
+		}
+		main() {
+			Source s = BadSource();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
 // --- Stage 9: Reserved std name tests ---
 
 func TestReservedStdNameFunc(t *testing.T) {

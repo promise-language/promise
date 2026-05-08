@@ -441,13 +441,13 @@ func TestDocMethodParamDefault(t *testing.T) {
 func TestDocFailableMethod(t *testing.T) {
 	out := docFromSource(t, `
 		type Client `+"`public"+` {
-			fetch(string url) string! `+"`public"+` {
+			fetch!(string url) string `+"`public"+` {
 				return url;
 			}
 		}
 	`, docOpts{publicOnly: true})
 
-	assertContainsDoc(t, out, "fetch(this, string url) string!")
+	assertContainsDoc(t, out, "fetch!(this, string url) string")
 }
 
 // === Combined test: all features ===
@@ -781,12 +781,12 @@ func TestDocSubscriptOps(t *testing.T) {
 
 func TestDocFuncFailable(t *testing.T) {
 	out := docFromSource(t, `
-		parse(string s) int! `+"`public `doc(\"Parses a string to int.\")"+` {
+		parse!(string s) int `+"`public `doc(\"Parses a string to int.\")"+` {
 			return 0;
 		}
 	`, docOpts{publicOnly: true})
 
-	assertContainsDoc(t, out, "parse(string s) int!")
+	assertContainsDoc(t, out, "parse!(string s) int")
 	assertContainsDoc(t, out, "Parses a string to int.")
 }
 
@@ -860,13 +860,13 @@ func TestDocModuleLevelGetterSignaturesMode(t *testing.T) {
 
 func TestDocModuleLevelGetterFailable(t *testing.T) {
 	out := docFromSource(t, `
-		get working_dir string! `+"`public"+` {
+		get working_dir! string `+"`public"+` {
 			return "test";
 		}
 	`, docOpts{publicOnly: true})
 
 	// Should include ! for failable getter
-	assertContainsDoc(t, out, "get working_dir string!")
+	assertContainsDoc(t, out, "get working_dir! string")
 	assertNotContainsDoc(t, out, "working_dir()")
 }
 
@@ -874,14 +874,14 @@ func TestDocMethodGetterFailable(t *testing.T) {
 	out := docFromSource(t, `
 		type Conn `+"`public"+` {
 			int _fd;
-			get status string! `+"`public"+` {
+			get status! string `+"`public"+` {
 				return "ok";
 			}
 		}
 	`, docOpts{publicOnly: true})
 
 	// Should include ! for failable method getter
-	assertContainsDoc(t, out, "get status string!")
+	assertContainsDoc(t, out, "get status! string")
 }
 
 // === Field placement and final annotations ===
@@ -997,12 +997,12 @@ func TestDocMultipleParents(t *testing.T) {
 
 func TestDocVoidFailableFunc(t *testing.T) {
 	out := docFromSource(t, `
-		validate(string input)! `+"`public"+` {
+		validate!(string input) `+"`public"+` {
 			if input.is_empty { raise error(message: "empty"); }
 		}
 	`, docOpts{publicOnly: true})
 
-	assertContainsDoc(t, out, "validate(string input)!")
+	assertContainsDoc(t, out, "validate!(string input)")
 }
 
 // === Float default in exprToString ===

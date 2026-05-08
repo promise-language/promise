@@ -1642,14 +1642,14 @@ func TestFailableNewConstructorCodegen(t *testing.T) {
 	ir := generateIR(t, `
 		type Port {
 			int value;
-			new(~this, int value) void! {
+			new!(~this, int value) void {
 				if value < 1 {
 					raise error(message: "invalid port");
 				}
 				this.value = value;
 			}
 		}
-		main()! {
+		main!() {
 			Port p = Port(value: 80)!;
 		}
 	`)
@@ -1701,17 +1701,17 @@ func TestGenericFactoryCallCodegen(t *testing.T) {
 func TestGenericFailableFactoryPassthrough(t *testing.T) {
 	ir := generateIR(t, `
 		type TryParseable `+"`"+`structural {
-			tryParse(string data)! `+"`"+`abstract `+"`"+`factory;
+			tryParse!(string data) `+"`"+`abstract `+"`"+`factory;
 		}
 		type Strict {
-			tryParse(string data) Strict! `+"`"+`factory {
+			tryParse!(string data) Strict `+"`"+`factory {
 				if data == "bad" {
 					raise error("invalid");
 				}
 				return Strict();
 			}
 		}
-		tryLoad[T: TryParseable](string data) T! {
+		tryLoad![T: TryParseable](string data) T {
 			return T.tryParse(data);
 		}
 		main() {
@@ -2236,7 +2236,7 @@ func TestEnumHeaderData(t *testing.T) {
 
 func TestFailableDeclaration(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		main() { }
 	`)
 	// Return type should be result struct { i1, i64, i8* }
@@ -2245,7 +2245,7 @@ func TestFailableDeclaration(t *testing.T) {
 
 func TestReturnInFailable(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { return 42; }
+		parse!(string s) int { return 42; }
 		main() { }
 	`)
 	// Should wrap value in Ok result: tag=false, value, null error
@@ -2256,7 +2256,7 @@ func TestReturnInFailable(t *testing.T) {
 
 func TestFailableVoidBangShorthand(t *testing.T) {
 	ir := generateIR(t, `
-		fail()! { raise error(message: "oops"); }
+		fail!() { raise error(message: "oops"); }
 		main() { }
 	`)
 	// Should produce void result struct { i1, i8* }
@@ -2265,7 +2265,7 @@ func TestFailableVoidBangShorthand(t *testing.T) {
 
 func TestFailableMain(t *testing.T) {
 	ir := generateIR(t, `
-		main()! {
+		main!() {
 			raise error(message: "boom");
 		}
 	`)
@@ -2277,7 +2277,7 @@ func TestFailableMain(t *testing.T) {
 
 func TestRaiseStmt(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { raise error(message: "parse error"); }
+		parse!(string s) int { raise error(message: "parse error"); }
 		main() { }
 	`)
 	// Should wrap error in Error result: tag=true
@@ -2291,8 +2291,8 @@ func TestRaiseStmt(t *testing.T) {
 
 func TestErrorPropagate(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { return 0; }
-		process() int! {
+		parse!(string s) int { return 0; }
+		process!() int {
 			x := parse("42")?;
 			return x;
 		}
@@ -2307,7 +2307,7 @@ func TestErrorPropagate(t *testing.T) {
 
 func TestErrorUnwrap(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		main() {
 			x := parse("42")!;
 		}
@@ -2328,7 +2328,7 @@ func TestErrorUnwrap(t *testing.T) {
 // as a stmt temp so it gets freed at statement end if not claimed.
 func TestErrorUnwrapStringTemp(t *testing.T) {
 	ir := generateIR(t, `
-		make_str() string! { return "hello"; }
+		make_str!() string { return "hello"; }
 		main() {
 			int n = make_str()!.len;
 		}
@@ -2340,7 +2340,7 @@ func TestErrorUnwrapStringTemp(t *testing.T) {
 
 func TestErrorHandler(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		main() {
 			x := parse("42") ? e { 0; };
 		}
@@ -2353,7 +2353,7 @@ func TestErrorHandler(t *testing.T) {
 
 func TestErrorHandlerDiscard(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		main() {
 			x := parse("42") ? _ { 0; };
 		}
@@ -2364,7 +2364,7 @@ func TestErrorHandlerDiscard(t *testing.T) {
 
 func TestVoidFailable(t *testing.T) {
 	ir := generateIR(t, `
-		validate(string s) void! { return; }
+		validate!(string s) void { return; }
 		main() { }
 	`)
 	// Return type should be { i1, i8* }
@@ -2373,7 +2373,7 @@ func TestVoidFailable(t *testing.T) {
 
 func TestVoidRaise(t *testing.T) {
 	ir := generateIR(t, `
-		validate(string s) void! { raise error(message: "invalid"); }
+		validate!(string s) void { raise error(message: "invalid"); }
 		main() { }
 	`)
 	assertContains(t, ir, "i1 true")
@@ -2384,7 +2384,7 @@ func TestFailableMethod(t *testing.T) {
 	ir := generateIR(t, `
 		type Parser {
 			string input;
-			parse(this) int! {
+			parse!(this) int {
 				return 42;
 			}
 		}
@@ -2395,7 +2395,7 @@ func TestFailableMethod(t *testing.T) {
 
 func TestFailableAutoTerminator(t *testing.T) {
 	ir := generateIR(t, `
-		validate(string s) void! {
+		validate!(string s) void {
 			if true {
 				return;
 			}
@@ -2409,8 +2409,8 @@ func TestFailableAutoTerminator(t *testing.T) {
 
 func TestVoidFailablePropagate(t *testing.T) {
 	ir := generateIR(t, `
-		validate(string s) void! { raise error(message: "invalid"); }
-		process() void! {
+		validate!(string s) void { raise error(message: "invalid"); }
+		process!() void {
 			validate("x")?;
 		}
 		main() { }
@@ -2424,7 +2424,7 @@ func TestVoidFailablePropagate(t *testing.T) {
 
 func TestVoidFailableUnwrap(t *testing.T) {
 	ir := generateIR(t, `
-		validate(string s) void! { raise error(message: "invalid"); }
+		validate!(string s) void { raise error(message: "invalid"); }
 		main() {
 			validate("x")!;
 		}
@@ -2436,7 +2436,7 @@ func TestVoidFailableUnwrap(t *testing.T) {
 
 func TestVoidFailableHandler(t *testing.T) {
 	ir := generateIR(t, `
-		validate(string s) void! { raise error(message: "invalid"); }
+		validate!(string s) void { raise error(message: "invalid"); }
 		main() {
 			validate("x") ? e { };
 		}
@@ -2448,9 +2448,9 @@ func TestVoidFailableHandler(t *testing.T) {
 
 func TestNestedErrorPropagation(t *testing.T) {
 	ir := generateIR(t, `
-		a() int! { return 1; }
-		b() int! { return a()?; }
-		c() int! { return b()?; }
+		a!() int { return 1; }
+		b!() int { return a()?; }
+		c!() int { return b()?; }
 		main() { }
 	`)
 	// Both b and c should have propagation blocks
@@ -2460,7 +2460,7 @@ func TestNestedErrorPropagation(t *testing.T) {
 
 func TestErrorHandlerWithReturn(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		process(string s) int {
 			x := parse(s) ? e { return -1; };
 			return x;
@@ -2474,7 +2474,7 @@ func TestErrorHandlerWithReturn(t *testing.T) {
 
 func TestFailableConditionalRaiseReturn(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! {
+		parse!(string s) int {
 			if s == "" {
 				raise error(message: "empty");
 			}
@@ -2495,8 +2495,8 @@ func TestTypedErrorHandler(t *testing.T) {
 		type IoError is error {
 			int code;
 		}
-		fail() void! { raise IoError(message: "disk full", code: 28); }
-		process() void! {
+		fail!() void { raise IoError(message: "disk full", code: 28); }
+		process!() void {
 			fail() ? e is IoError { };
 		}
 		main() { }
@@ -2513,8 +2513,8 @@ func TestTypedErrorHandlerInFailable(t *testing.T) {
 		type IoError is error {
 			int code;
 		}
-		fail() void! { raise IoError(message: "disk full", code: 28); }
-		process() void! {
+		fail!() void { raise IoError(message: "disk full", code: 28); }
+		process!() void {
 			fail() ? e is IoError { };
 		}
 		main() { }
@@ -2529,8 +2529,8 @@ func TestTypedErrorHandlerNomatchPropagates(t *testing.T) {
 		type IoError is error {
 			int code;
 		}
-		fail() void! { raise IoError(message: "disk full", code: 28); }
-		process() void! {
+		fail!() void { raise IoError(message: "disk full", code: 28); }
+		process!() void {
 			fail() ? e is IoError { };
 		}
 		main() { }
@@ -2545,8 +2545,8 @@ func TestTypedErrorHandlerDiscardBinding(t *testing.T) {
 		type IoError is error {
 			int code;
 		}
-		fail() void! { raise IoError(message: "disk full", code: 28); }
-		process() void! {
+		fail!() void { raise IoError(message: "disk full", code: 28); }
+		process!() void {
 			fail() ? _ is IoError { };
 		}
 		main() { }
@@ -2558,7 +2558,7 @@ func TestTypedErrorHandlerDiscardBinding(t *testing.T) {
 func TestTypedErrorHandlerElse(t *testing.T) {
 	ir := generateIR(t, `
 		type IoError is error { int code; }
-		fail() void! { raise IoError(message: "disk full", code: 28); }
+		fail!() void { raise IoError(message: "disk full", code: 28); }
 		process() {
 			fail() ? e is IoError { } else { };
 		}
@@ -2573,7 +2573,7 @@ func TestTypedErrorHandlerElse(t *testing.T) {
 func TestTypedErrorHandlerElseWithBinding(t *testing.T) {
 	ir := generateIR(t, `
 		type IoError is error { int code; }
-		fail() void! { raise IoError(message: "disk full", code: 28); }
+		fail!() void { raise IoError(message: "disk full", code: 28); }
 		get_msg() string {
 			fail() ? e is IoError { return "io"; } else e { return e.message; };
 			return "";
@@ -2587,7 +2587,7 @@ func TestTypedErrorHandlerElseWithBinding(t *testing.T) {
 func TestTypedErrorHandlerBang(t *testing.T) {
 	ir := generateIR(t, `
 		type IoError is error { int code; }
-		fail() void! { raise IoError(message: "disk full", code: 28); }
+		fail!() void { raise IoError(message: "disk full", code: 28); }
 		process() {
 			fail() ? e is IoError { }!;
 		}
@@ -2602,7 +2602,7 @@ func TestTypedErrorHandlerBang(t *testing.T) {
 
 func TestUntypedErrorHandlerUnchanged(t *testing.T) {
 	ir := generateIR(t, `
-		fail() void! { raise error(message: "oops"); }
+		fail!() void { raise error(message: "oops"); }
 		main() {
 			fail() ? e { };
 		}
@@ -2618,8 +2618,8 @@ func TestErrorHandlerBindingFieldAccess(t *testing.T) {
 		type IoError is error {
 			int code;
 		}
-		fail() void! { raise IoError(message: "disk full", code: 28); }
-		process() int! {
+		fail!() void { raise IoError(message: "disk full", code: 28); }
+		process!() int {
 			fail() ? e is IoError { return e.code; };
 			return 0;
 		}
@@ -2632,7 +2632,7 @@ func TestErrorHandlerBindingFieldAccess(t *testing.T) {
 
 func TestErrorPositionalConstruction(t *testing.T) {
 	ir := generateIR(t, `
-		foo() void! { raise error("oops"); }
+		foo!() void { raise error("oops"); }
 		main() { foo() ? e { }; }
 	`)
 	assertContains(t, ir, "error.handler")
@@ -2641,7 +2641,7 @@ func TestErrorPositionalConstruction(t *testing.T) {
 func TestErrorSubtypePositionalConstruction(t *testing.T) {
 	ir := generateIR(t, `
 		type IoError is error { int code; }
-		foo() void! { raise IoError("disk full", 28); }
+		foo!() void { raise IoError("disk full", 28); }
 		main() { foo() ? e { }; }
 	`)
 	assertContains(t, ir, "error.handler")
@@ -2650,7 +2650,7 @@ func TestErrorSubtypePositionalConstruction(t *testing.T) {
 func TestGenericErrorTypeRaise(t *testing.T) {
 	ir := generateIR(t, `
 		type DataError[T] is error { T data; }
-		foo() void! { raise DataError[int](message: "bad", data: 42); }
+		foo!() void { raise DataError[int](message: "bad", data: 42); }
 		main() { foo() ? e { }; }
 	`)
 	// Should monomorphize DataError[int]
@@ -2660,8 +2660,8 @@ func TestGenericErrorTypeRaise(t *testing.T) {
 
 func TestFailableCallInsideHandler(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { return 0; }
-		foo() int! {
+		parse!(string s) int { return 0; }
+		foo!() int {
 			int v = parse("x") ? e { return parse("0")?; };
 			return v;
 		}
@@ -2674,7 +2674,7 @@ func TestFailableCallInsideHandler(t *testing.T) {
 
 func TestBangUnwrapInsideHandler(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		foo() {
 			parse("x") ? e { int v = parse("0")!; };
 		}
@@ -2687,8 +2687,8 @@ func TestBangUnwrapInsideHandler(t *testing.T) {
 
 func TestNestedErrorHandlers(t *testing.T) {
 	ir := generateIR(t, `
-		a() int! { return 1; }
-		b() int! { return 2; }
+		a!() int { return 1; }
+		b!() int { return 2; }
 		foo() {
 			a() ? e1 {
 				b() ? e2 { };
@@ -2704,8 +2704,8 @@ func TestErrorInheritanceChainTypedHandler(t *testing.T) {
 	ir := generateIR(t, `
 		type AppError is error { int code; }
 		type DbError is AppError { string query; }
-		fail() void! { raise DbError(message: "fail", code: 500, query: "SELECT"); }
-		handler() int! {
+		fail!() void { raise DbError(message: "fail", code: 500, query: "SELECT"); }
+		handler!() int {
 			fail() ? e is AppError { return e.code; };
 			return 0;
 		}
@@ -2717,8 +2717,8 @@ func TestErrorInheritanceChainTypedHandler(t *testing.T) {
 
 func TestAutoPropagate(t *testing.T) {
 	ir := generateIR(t, `
-		fail() void! { raise error(message: "oops"); }
-		process() void! {
+		fail!() void { raise error(message: "oops"); }
+		process!() void {
 			fail();
 		}
 		main() { }
@@ -2734,8 +2734,8 @@ func TestAutoPropagate(t *testing.T) {
 
 func TestAutoPropagate_NonVoid(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
-		process() int! {
+		parse!() int { return 42; }
+		process!() int {
 			parse();
 			return 0;
 		}
@@ -2747,8 +2747,8 @@ func TestAutoPropagate_NonVoid(t *testing.T) {
 
 func TestAutoPropagateInTypedAssignment(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
-		wrapper() int! {
+		parse!() int { return 42; }
+		wrapper!() int {
 			int x = parse();
 			return x;
 		}
@@ -2763,8 +2763,8 @@ func TestAutoPropagateInTypedAssignment(t *testing.T) {
 
 func TestAutoPropagateInInferredAssignment(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
-		wrapper() int! {
+		parse!() int { return 42; }
+		wrapper!() int {
 			x := parse();
 			return x;
 		}
@@ -2776,8 +2776,8 @@ func TestAutoPropagateInInferredAssignment(t *testing.T) {
 
 func TestAutoPropagateMultipleAssignments(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { return 0; }
-		wrapper() int! {
+		parse!(string s) int { return 0; }
+		wrapper!() int {
 			int a = parse("x");
 			int b = parse("y");
 			return a + b;
@@ -2791,9 +2791,9 @@ func TestAutoPropagateMultipleAssignments(t *testing.T) {
 
 func TestAutoPropagateInFuncArg(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		use_value(int x) {}
-		wrapper() void! {
+		wrapper!() void {
 			use_value(parse());
 		}
 		main() { }
@@ -2807,9 +2807,9 @@ func TestAutoPropagateInFuncArg(t *testing.T) {
 
 func TestAutoPropagateInMethodArg(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		type Foo { use_value(int x) {} }
-		wrapper() void! {
+		wrapper!() void {
 			f := Foo();
 			f.use_value(parse());
 		}
@@ -2821,9 +2821,9 @@ func TestAutoPropagateInMethodArg(t *testing.T) {
 
 func TestAutoPropagateInConstructorArg(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		type Foo { int x; }
-		wrapper() void! {
+		wrapper!() void {
 			Foo(x: parse());
 		}
 		main() { }
@@ -2834,10 +2834,10 @@ func TestAutoPropagateInConstructorArg(t *testing.T) {
 
 func TestAutoPropagateMultipleArgs(t *testing.T) {
 	ir := generateIR(t, `
-		parse_a() int! { return 1; }
-		parse_b() int! { return 2; }
+		parse_a!() int { return 1; }
+		parse_b!() int { return 2; }
 		add(int a, int b) int { return a + b; }
-		wrapper() void! {
+		wrapper!() void {
 			add(parse_a(), parse_b());
 		}
 		main() { }
@@ -2849,8 +2849,8 @@ func TestAutoPropagateMultipleArgs(t *testing.T) {
 
 func TestAutoPropagateInAssignStmt(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
-		wrapper() int! {
+		parse!() int { return 42; }
+		wrapper!() int {
 			int x = 0;
 			x = parse();
 			return x;
@@ -2863,12 +2863,12 @@ func TestAutoPropagateInAssignStmt(t *testing.T) {
 
 func TestAutoPropagateInExplicitNewArg(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		type Foo {
 			int v;
 			new(~this, int v) { this.v = v; }
 		}
-		wrapper() void! {
+		wrapper!() void {
 			Foo(v: parse());
 		}
 		main() { }
@@ -2879,12 +2879,12 @@ func TestAutoPropagateInExplicitNewArg(t *testing.T) {
 
 func TestAutoPropagateInValueTypeArg(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		type Vec2 {
 			int x `+"`"+`value;
 			int y `+"`"+`value;
 		}
-		wrapper() void! {
+		wrapper!() void {
 			Vec2(x: parse(), y: 0);
 		}
 		main() { }
@@ -2895,9 +2895,9 @@ func TestAutoPropagateInValueTypeArg(t *testing.T) {
 
 func TestAutoPropagateInEnumVariantArg(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		enum Box { Val(int v) }
-		wrapper() void! {
+		wrapper!() void {
 			Box.Val(v: parse());
 		}
 		main() { }
@@ -2908,8 +2908,8 @@ func TestAutoPropagateInEnumVariantArg(t *testing.T) {
 
 func TestAutoPropagateInVecPushArg(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
-		wrapper() void! {
+		parse!() int { return 42; }
+		wrapper!() void {
 			int[] v = int[]();
 			v.push(parse());
 		}
@@ -2925,7 +2925,7 @@ func TestDropNullSafe(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		make() Resource! { return Resource(id: 1); }
+		make!() Resource { return Resource(id: 1); }
 		main() {
 			Resource r = make() ? e { return; };
 		}
@@ -2938,7 +2938,7 @@ func TestDropNullSafe(t *testing.T) {
 func TestRaiseExtractsInstancePtr(t *testing.T) {
 	ir := generateIR(t, `
 		type IoError is error { int code; }
-		foo() void! { raise IoError(message: "err", code: 1); }
+		foo!() void { raise IoError(message: "err", code: 1); }
 		main() { foo() ? e { }; }
 	`)
 	// Raise on user types should extract instance pointer (i8*) from value struct
@@ -2947,7 +2947,7 @@ func TestRaiseExtractsInstancePtr(t *testing.T) {
 
 func TestHandlerNoBinding(t *testing.T) {
 	ir := generateIR(t, `
-		foo() void! { raise error(message: "oops"); }
+		foo!() void { raise error(message: "oops"); }
 		bar() {
 			foo() ? { };
 		}
@@ -2962,8 +2962,8 @@ func TestTypedHandlerNoMatchPropagation(t *testing.T) {
 	ir := generateIR(t, `
 		type IoError is error { int code; }
 		type ParseError is error { int line; }
-		fail() void! { raise ParseError(message: "parse", line: 1); }
-		handler() void! {
+		fail!() void { raise ParseError(message: "parse", line: 1); }
+		handler!() void {
 			fail() ? e is IoError { };
 		}
 		main() { handler() ? e { }; }
@@ -3326,7 +3326,7 @@ func TestGenericFuncVoid(t *testing.T) {
 
 func TestGenericFuncFailable(t *testing.T) {
 	ir := generateIR(t, `
-		tryIdentity[T](T x) T! {
+		tryIdentity![T](T x) T {
 			return x;
 		}
 		main() {
@@ -3548,7 +3548,7 @@ func TestTupleDestructureSkip(t *testing.T) {
 
 func TestFailableDestructure(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			(val, err) := parse();
 		}
@@ -3564,7 +3564,7 @@ func TestFailableDestructure(t *testing.T) {
 
 func TestFailableDestructureDiscardError(t *testing.T) {
 	ir := generateIR(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			(val, _) := parse();
 		}
@@ -6154,7 +6154,7 @@ func TestStructuralAdapterExtraOptionalParam(t *testing.T) {
 func TestStructuralAdapterNonFailableToFailable(t *testing.T) {
 	ir := generateIR(t, `
 		type Processor `+"`"+`structural {
-			process(int x) int! `+"`"+`abstract;
+			process!(int x) int `+"`"+`abstract;
 		}
 		type Simple {
 			process(int x) int { return x; }
@@ -6289,7 +6289,7 @@ func TestPrimitiveToFailableStructuralView(t *testing.T) {
 	// → adapter wraps result as success
 	ir := generateIR(t, `
 		type Converter `+"`"+`structural {
-			to_string() string! `+"`"+`abstract;
+			to_string!() string `+"`"+`abstract;
 		}
 		convert(Converter c) string { return c.to_string()!; }
 		main() { convert(42); }
@@ -6362,7 +6362,7 @@ func TestReturnThisFailable(t *testing.T) {
 	ir := generateIR(t, `
 		type Widget {
 			int id;
-			clone() Widget! { return this; }
+			clone!() Widget { return this; }
 		}
 		main() {
 			w := Widget(id: 1);
@@ -7241,13 +7241,13 @@ func TestModuleVoidFunc(t *testing.T) {
 func TestModuleFailableFunc(t *testing.T) {
 	ir := generateIRWithModule(t, "parser",
 		`
-		parse(int x) int! `+"`public"+` {
+		parse!(int x) int `+"`public"+` {
 			return x;
 		}
 		`,
 		`
 		use parser "./parser";
-		main()! {
+		main!() {
 			int v = parser.parse(10)?;
 		}
 		`,
@@ -8017,9 +8017,9 @@ func TestUseFailableCloseErrorCapture(t *testing.T) {
 	ir := generateIR(t, `
 		type FRes {
 			int id;
-			close(~this)! { }
+			close!(~this) { }
 		}
-		process()! {
+		process!() {
 			use r := FRes(id: 1);
 			int x = r.id;
 		}
@@ -8037,7 +8037,7 @@ func TestUseNonFailableCloseNoCapture(t *testing.T) {
 			int id;
 			close(~this) { }
 		}
-		process()! {
+		process!() {
 			use r := NRes(id: 1);
 			int x = r.id;
 		}
@@ -8052,9 +8052,9 @@ func TestUseFailableCloseSuppressedOnRaise(t *testing.T) {
 		type EBase is error { string message; }
 		type FRes2 {
 			int id;
-			close(~this)! { }
+			close!(~this) { }
 		}
-		process()! {
+		process!() {
 			use r := FRes2(id: 1);
 			raise EBase(message: "fail");
 		}
@@ -8068,7 +8068,7 @@ func TestUseFailableCloseInNonFailableFunc(t *testing.T) {
 	ir := generateIR(t, `
 		type FRes3 {
 			int id;
-			close(~this)! { }
+			close!(~this) { }
 		}
 		process() {
 			use r := FRes3(id: 1);
@@ -8084,9 +8084,9 @@ func TestSuppressedCloseErrorDropped(t *testing.T) {
 	ir := generateIR(t, `
 		type FRes {
 			int id;
-			close(~this)! { raise error(message: "close err"); }
+			close!(~this) { raise error(message: "close err"); }
 		}
-		process()! {
+		process!() {
 			use r := FRes(id: 1);
 			raise error(message: "body err");
 		}
@@ -8101,7 +8101,7 @@ func TestNonFailableSuppressedCloseErrorDropped(t *testing.T) {
 	ir := generateIR(t, `
 		type FRes {
 			int id;
-			close(~this)! { }
+			close!(~this) { }
 		}
 		process() {
 			use r := FRes(id: 1);
@@ -8116,9 +8116,9 @@ func TestDuplicateCloseErrorDropped(t *testing.T) {
 	ir := generateIR(t, `
 		type FRes {
 			int id;
-			close(~this)! { }
+			close!(~this) { }
 		}
-		process()! {
+		process!() {
 			use a := FRes(id: 1);
 			use b := FRes(id: 2);
 		}
@@ -8130,7 +8130,7 @@ func TestDuplicateCloseErrorDropped(t *testing.T) {
 // T0135: Failable result capture registers error optional for drop
 func TestFailableResultCaptureErrorDrop(t *testing.T) {
 	ir := generateIR(t, `
-		fail()! { raise error(message: "test"); }
+		fail!() { raise error(message: "test"); }
 		test() {
 			(val, err) := fail();
 		}
@@ -8143,11 +8143,11 @@ func TestFailableResultCaptureErrorDrop(t *testing.T) {
 // T0135: Constructor allocation tracked as heap temp for auto-propagation cleanup
 func TestConstructorAllocHeapTemp(t *testing.T) {
 	ir := generateIR(t, `
-		fail(string s) int! {
+		fail!(string s) int {
 			raise error(message: s);
 		}
 		type H { int v; }
-		process()! {
+		process!() {
 			h := H(v: fail("x"));
 		}
 	`)
@@ -8160,12 +8160,12 @@ func TestUseFailableCloseVirtualDispatchCapture(t *testing.T) {
 	ir := generateIR(t, `
 		type Conn {
 			int fd;
-			close()! { }
+			close!() { }
 		}
 		type TcpConn is Conn {
-			close()! { }
+			close!() { }
 		}
-		process()! {
+		process!() {
 			use c := Conn(fd: 3);
 			int x = c.fd;
 		}
@@ -8833,7 +8833,7 @@ func TestDropWithEarlyReturnFailable(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		work() void! {
+		work!() void {
 			r := Resource(id: 42);
 			return;
 		}
@@ -8850,7 +8850,7 @@ func TestDropWithRaise(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		fail() void! {
+		fail!() void {
 			r := Resource(id: 1);
 			raise error(message: "oops");
 		}
@@ -8950,10 +8950,10 @@ func TestUseVarVirtualCloseDispatchFailable(t *testing.T) {
 	ir := generateIR(t, `
 		type Conn {
 			int fd;
-			close()! { }
+			close!() { }
 		}
 		type TcpConn is Conn {
-			close()! { }
+			close!() { }
 		}
 		main() {
 			use c := Conn(fd: 3);
@@ -9221,10 +9221,10 @@ func TestDropErrorPropagateCleansUp(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		risky() int! {
+		risky!() int {
 			return 42;
 		}
-		work() int! {
+		work!() int {
 			r := Resource(id: 1);
 			int val = risky()?;
 			return val + r.id;
@@ -9903,7 +9903,7 @@ func TestConstructorBorrowParamKeepsDropFlag(t *testing.T) {
 // T0086: Raising a local error variable clears its drop flag before scope cleanup
 func TestRaiseLocalErrorClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
-		fail() void! {
+		fail!() void {
 			error e = error("boom");
 			raise e;
 		}
@@ -9932,13 +9932,13 @@ func TestStringTempDropAtStatementEnd(t *testing.T) {
 // T0103: String temp cleanup on error propagation path
 func TestStringTempCleanupOnErrorPath(t *testing.T) {
 	ir := generateIR(t, `
-		fail() int! {
+		fail!() int {
 			raise error(message: "fail");
 		}
 		use_both(string s, int x) int {
 			return x;
 		}
-		work() int! {
+		work!() int {
 			return use_both("hello".to_upper(), fail());
 		}
 		main() {}
@@ -10440,7 +10440,7 @@ func TestSynthDropIncludesErrorTypes(t *testing.T) {
 // T0083/T0091: Caught error instances are dropped after handler blocks
 func TestErrorHandlerDropsInstance(t *testing.T) {
 	ir := generateIR(t, `
-		fail() int! {
+		fail!() int {
 			raise error(message: "boom");
 		}
 		main() {
@@ -10455,7 +10455,7 @@ func TestErrorHandlerDropsInstance(t *testing.T) {
 func TestTypedErrorHandlerDropsInstance(t *testing.T) {
 	ir := generateIR(t, `
 		type IoError is error { int code; }
-		fail() int! {
+		fail!() int {
 			raise IoError(code: 1, message: "io");
 		}
 		main() {
@@ -10484,7 +10484,7 @@ func TestErrorTypeSynthDropIncludesStringFields(t *testing.T) {
 func TestChildErrorTypeSynthDropFreesChildFields(t *testing.T) {
 	ir := generateIR(t, `
 		type NotFoundError is error { string key; }
-		fail() int! {
+		fail!() int {
 			raise NotFoundError(key: "missing", message: "not found");
 		}
 		main() {
@@ -10507,7 +10507,7 @@ func TestChildErrorTypeSynthDropFreesChildFields(t *testing.T) {
 func TestErrorFieldAccessDupsString(t *testing.T) {
 	ir := generateIR(t, `
 		type NotFoundError is error { string key; }
-		fail() string! {
+		fail!() string {
 			raise NotFoundError(key: "missing", message: "not found");
 		}
 		main() {
@@ -12793,7 +12793,7 @@ func TestStringInterpolationUserTypeDirect(t *testing.T) {
 	ir := generateIR(t, `
 		type Foo {
 			int x;
-			format(Writer ~w)! { w.write_string("foo"); }
+			format!(Writer ~w) { w.write_string("foo"); }
 		}
 		main() { Foo f = Foo(x: 1); string s = "{f}"; }
 	`)
@@ -12806,10 +12806,10 @@ func TestStringInterpolationUserTypeDirect(t *testing.T) {
 func TestStringInterpolationUserTypeVtable(t *testing.T) {
 	ir := generateIR(t, `
 		type Shape {
-			format(Writer ~w)! { w.write_string("shape"); }
+			format!(Writer ~w) { w.write_string("shape"); }
 		}
 		type Circle is Shape {
-			format(Writer ~w)! { w.write_string("circle"); }
+			format!(Writer ~w) { w.write_string("circle"); }
 		}
 		main() {
 			Shape s = Circle();
@@ -12826,7 +12826,7 @@ func TestCallFormatToStringBuilderDrop(t *testing.T) {
 	ir := generateIR(t, `
 		type Pt {
 			int x;
-			format(Writer ~w)! { w.write_string("pt"); }
+			format!(Writer ~w) { w.write_string("pt"); }
 		}
 		main() { Pt p = Pt(x: 1); string s = "{p}"; }
 	`)
@@ -13564,7 +13564,7 @@ func TestVariadicMethodIR(t *testing.T) {
 func TestVariadicFailableIR(t *testing.T) {
 	// Variadic + failable function in IR.
 	ir := generateIR(t, `
-		trySum(...int nums) int! {
+		trySum!(...int nums) int {
 			if nums.len == 0 { raise error(message: "empty"); }
 			int total = 0;
 			for n in nums { total += n; }
@@ -13679,10 +13679,10 @@ func TestVariadicVectorHeapTempOnFailableArg(t *testing.T) {
 			for n in nums { total += n; }
 			return total;
 		}
-		parse(string s) int! {
+		parse!(string s) int {
 			raise error(message: s);
 		}
-		foo() int! {
+		foo!() int {
 			return sum(parse("a"), parse("b"));
 		}
 		main() { foo()!; }
@@ -14585,7 +14585,7 @@ func TestMatchBlockIfElseVoidNoPhi(t *testing.T) {
 func TestOptionalRecoveryCodegen(t *testing.T) {
 	// Optional recovery: non-recovering handler wraps result as T?
 	ir := generateIR(t, `
-		fail() int! { raise error(message: "oops"); }
+		fail!() int { raise error(message: "oops"); }
 		main() {
 			x := fail() ? e { print_line("handled"); };
 		}
@@ -14601,7 +14601,7 @@ func TestFailableGetterResultType(t *testing.T) {
 		type MyErr is error { int code; }
 		type Foo {
 			int _val;
-			get value int! {
+			get value! int {
 				if this._val < 0 { raise MyErr(code: 1, message: "neg"); }
 				return this._val;
 			}
@@ -14619,11 +14619,11 @@ func TestFailableGetterVirtualDispatch(t *testing.T) {
 	ir := generateIR(t, `
 		type MyErr is error { int code; }
 		type Base {
-			get value int! `+"`"+`abstract;
+			get value! int `+"`"+`abstract;
 		}
 		type Impl is Base {
 			int _v;
-			get value int! { return this._v; }
+			get value! int { return this._v; }
 		}
 		main() {
 			Base b = Impl(_v: 10);
@@ -14641,7 +14641,7 @@ func TestFailableGetterStringResult(t *testing.T) {
 		type MyErr is error { int code; }
 		type Foo {
 			int _mode;
-			get label string! {
+			get label! string {
 				if this._mode < 0 { raise MyErr(code: 1, message: "bad"); }
 				return "ok";
 			}
@@ -14796,7 +14796,7 @@ func TestOptionalExternSret(t *testing.T) {
 
 func TestFailableExternSret(t *testing.T) {
 	ir := generateIR(t, `
-		get_cwd() string! `+"`"+`extern("promise_get_cwd");
+		get_cwd!() string `+"`"+`extern("promise_get_cwd");
 		main() {
 			string s = get_cwd()!;
 		}
@@ -14929,7 +14929,7 @@ func TestEnumMethodCallsMethod(t *testing.T) {
 func TestEnumMethodFailable(t *testing.T) {
 	ir := generateIR(t, `
 		enum Mode { A, B,
-			check(&this) string! {
+			check!(&this) string {
 				match this {
 					Mode.A => { return "a"; },
 					Mode.B => { return "b"; },
@@ -15559,7 +15559,7 @@ func TestIsGenericTypeOptional(t *testing.T) {
 func TestIsGenericErrorHandler(t *testing.T) {
 	ir := generateIR(t, `
 		type AppError[T] is error { T detail; }
-		do_thing() AppError[int]! {
+		do_thing!() AppError[int] {
 			raise AppError[int](message: "err", detail: 42);
 		}
 		main() {
@@ -15982,7 +15982,7 @@ func TestCoverageEnumMatchArms(t *testing.T) {
 func TestGenericErrorTypeInGenericFuncBody(t *testing.T) {
 	ir := generateIR(t, `
 		type AppError[T] is error { T detail; }
-		make_err[T](T detail) AppError[T]! {
+		make_err![T](T detail) AppError[T] {
 			raise AppError[T](message: "fail", detail: detail);
 		}
 		main() { make_err[int](42) ? e { }; }
@@ -16517,7 +16517,7 @@ func TestInferredOptionalDrop(t *testing.T) {
 func TestUntypedErrorRttiDrop(t *testing.T) {
 	ir := generateIR(t, `
 		type MyError is error { int code; }
-		fail_my() void! { raise MyError(message: "err", code: 42); }
+		fail_my!() void { raise MyError(message: "err", code: 42); }
 		main() {
 			fail_my()? e {
 			};

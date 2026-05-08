@@ -34,7 +34,7 @@ enum Option[T] {
   None
 }
 
-describeShape(Shape &shape) String! {
+describeShape!(Shape &shape) String {
   name := shape is Circle;
   Float a = shape.area();
   if a > 100.0 {

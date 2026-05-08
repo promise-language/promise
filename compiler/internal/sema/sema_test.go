@@ -203,7 +203,7 @@ func TestDeclareFuncDecl(t *testing.T) {
 		},
 		{
 			name: "failable_function",
-			src:  `parse(string s) int! { return 0; }`,
+			src:  `parse!(string s) int { return 0; }`,
 		},
 	}
 	for _, tt := range tests {
@@ -564,7 +564,7 @@ func TestBareReturnInNonVoid(t *testing.T) {
 // --- Error Handling Tests ---
 
 func TestRaiseInFailable(t *testing.T) {
-	checkOK(t, `foo() int! { raise error(message: "oops"); }`)
+	checkOK(t, `foo!() int { raise error(message: "oops"); }`)
 }
 
 func TestRaiseInNonFailable(t *testing.T) {
@@ -574,14 +574,14 @@ func TestRaiseInNonFailable(t *testing.T) {
 
 func TestErrorPropagate(t *testing.T) {
 	checkOK(t, `
-		parse(string s) int! { return 0; }
-		foo() int! { x := parse("42")?; return x; }
+		parse!(string s) int { return 0; }
+		foo!() int { x := parse("42")?; return x; }
 	`)
 }
 
 func TestErrorPropagateInNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		foo() { x := parse("42")?; }
 	`)
 	expectError(t, errs, "outside of failable")
@@ -589,13 +589,13 @@ func TestErrorPropagateInNonFailable(t *testing.T) {
 
 func TestErrorUnwrap(t *testing.T) {
 	checkOK(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		foo() { x := parse("42")!; }
 	`)
 }
 
 func TestRaiseNonErrorType(t *testing.T) {
-	errs := checkErrs(t, `foo() int! { raise 42; }`)
+	errs := checkErrs(t, `foo!() int { raise 42; }`)
 	expectError(t, errs, "raise requires an error type")
 }
 
@@ -604,7 +604,7 @@ func TestRaiseErrorSubtype(t *testing.T) {
 		type IoError is error {
 			int code;
 		}
-		foo() void! { raise IoError(message: "fail", code: 1); }
+		foo!() void { raise IoError(message: "fail", code: 1); }
 	`)
 }
 
@@ -613,8 +613,8 @@ func TestTypedErrorHandler(t *testing.T) {
 		type IoError is error {
 			int code;
 		}
-		foo() void! { raise IoError(message: "fail", code: 1); }
-		bar() int! {
+		foo!() void { raise IoError(message: "fail", code: 1); }
+		bar!() int {
 			foo() ? e is IoError { return e.code; };
 			return 0;
 		}
@@ -623,7 +623,7 @@ func TestTypedErrorHandler(t *testing.T) {
 
 func TestTypedErrorHandlerUndefinedType(t *testing.T) {
 	errs := checkErrs(t, `
-		foo() void! { raise error(message: "oops"); }
+		foo!() void { raise error(message: "oops"); }
 		bar() {
 			foo() ? e is Nope { };
 		}
@@ -634,7 +634,7 @@ func TestTypedErrorHandlerUndefinedType(t *testing.T) {
 func TestTypedErrorHandlerNonErrorType(t *testing.T) {
 	errs := checkErrs(t, `
 		type Foo { int x; }
-		foo() void! { raise error(message: "oops"); }
+		foo!() void { raise error(message: "oops"); }
 		bar() {
 			foo() ? e is Foo { };
 		}
@@ -645,7 +645,7 @@ func TestTypedErrorHandlerNonErrorType(t *testing.T) {
 func TestErrorPropagateOnNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
 		foo() int { return 42; }
-		bar() int! { return foo()?; }
+		bar!() int { return foo()?; }
 	`)
 	expectError(t, errs, "requires a failable expression")
 }
@@ -673,7 +673,7 @@ func TestGenericErrorType(t *testing.T) {
 		type DataError[T] is error {
 			T data;
 		}
-		foo() void! {
+		foo!() void {
 			raise DataError[int](message: "bad data", data: 42);
 		}
 	`)
@@ -684,7 +684,7 @@ func TestGenericErrorTypeStringParam(t *testing.T) {
 		type DataError[T] is error {
 			T data;
 		}
-		foo() void! {
+		foo!() void {
 			raise DataError[string](message: "bad", data: "details");
 		}
 	`)
@@ -695,7 +695,7 @@ func TestGenericErrorTypeInHandler(t *testing.T) {
 		type DataError[T] is error {
 			T data;
 		}
-		foo() void! {
+		foo!() void {
 			raise DataError[int](message: "bad", data: 42);
 		}
 		bar() {
@@ -711,7 +711,7 @@ func TestGenericErrorTypeFieldAccess(t *testing.T) {
 		type DataError[T] is error {
 			T data;
 		}
-		foo() void! {
+		foo!() void {
 			raise DataError[int](message: "bad", data: 42);
 		}
 		bar() string {
@@ -724,7 +724,7 @@ func TestGenericErrorTypeFieldAccess(t *testing.T) {
 func TestRaiseGenericErrorNonErrorBase(t *testing.T) {
 	errs := checkErrs(t, `
 		type Box[T] { T value; }
-		foo() void! { raise Box[int](value: 1); }
+		foo!() void { raise Box[int](value: 1); }
 	`)
 	expectError(t, errs, "raise requires an error type")
 }
@@ -733,7 +733,7 @@ func TestRaiseGenericErrorNonErrorBase(t *testing.T) {
 
 func TestErrorPositionalConstruction(t *testing.T) {
 	checkOK(t, `
-		foo() void! {
+		foo!() void {
 			raise error("oops");
 		}
 	`)
@@ -744,7 +744,7 @@ func TestErrorSubtypePositionalConstruction(t *testing.T) {
 		type IoError is error {
 			int code;
 		}
-		foo() void! {
+		foo!() void {
 			raise IoError("disk full", 28);
 		}
 	`)
@@ -755,7 +755,7 @@ func TestErrorSubtypeMixedConstruction(t *testing.T) {
 		type IoError is error {
 			int code;
 		}
-		foo() void! {
+		foo!() void {
 			raise IoError("disk full", code: 28);
 		}
 	`)
@@ -763,14 +763,14 @@ func TestErrorSubtypeMixedConstruction(t *testing.T) {
 
 func TestErrorConstructionTooManyArgs(t *testing.T) {
 	errs := checkErrs(t, `
-		foo() void! { raise error("a", "b"); }
+		foo!() void { raise error("a", "b"); }
 	`)
 	expectError(t, errs, "expects at most")
 }
 
 func TestErrorConstructionWrongType(t *testing.T) {
 	errs := checkErrs(t, `
-		foo() void! { raise error(42); }
+		foo!() void { raise error(42); }
 	`)
 	expectError(t, errs, "cannot assign int")
 }
@@ -778,7 +778,7 @@ func TestErrorConstructionWrongType(t *testing.T) {
 func TestErrorSubtypeConstructionWrongFieldType(t *testing.T) {
 	errs := checkErrs(t, `
 		type IoError is error { int code; }
-		foo() void! { raise IoError(message: "err", code: "notint"); }
+		foo!() void { raise IoError(message: "err", code: "notint"); }
 	`)
 	expectError(t, errs, "cannot assign string")
 }
@@ -812,9 +812,9 @@ func TestErrorSubtypeCannotHaveDrop(t *testing.T) {
 
 func TestFailableCallInsideUntypedHandler(t *testing.T) {
 	checkOK(t, `
-		parse(string s) int! { return 0; }
-		other() int! { return 1; }
-		foo() int! {
+		parse!(string s) int { return 0; }
+		other!() int { return 1; }
+		foo!() int {
 			int v = parse("x") ? e { return other()?; };
 			return v;
 		}
@@ -824,9 +824,9 @@ func TestFailableCallInsideUntypedHandler(t *testing.T) {
 func TestFailableCallInsideTypedHandler(t *testing.T) {
 	checkOK(t, `
 		type IoError is error { int code; }
-		fail_io() void! { raise IoError(message: "fail", code: 1); }
-		retry() int! { return 0; }
-		foo() int! {
+		fail_io!() void { raise IoError(message: "fail", code: 1); }
+		retry!() int { return 0; }
+		foo!() int {
 			fail_io() ? e is IoError { return retry()?; };
 			return 0;
 		}
@@ -835,7 +835,7 @@ func TestFailableCallInsideTypedHandler(t *testing.T) {
 
 func TestBangUnwrapInsideHandler(t *testing.T) {
 	checkOK(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		foo() {
 			parse("x") ? e { int v = parse("0")!; };
 		}
@@ -845,7 +845,7 @@ func TestBangUnwrapInsideHandler(t *testing.T) {
 func TestFailableCallInsideHandlerOfNonFailable(t *testing.T) {
 	// In a non-failable function, handler body can still use ! (bang unwrap)
 	checkOK(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		foo() {
 			parse("x") ? e { int v = parse("fallback")!; };
 		}
@@ -855,7 +855,7 @@ func TestFailableCallInsideHandlerOfNonFailable(t *testing.T) {
 func TestFailableCallPropagateInsideHandlerOfNonFailable(t *testing.T) {
 	// Cannot use ? (propagate) in non-failable function, even inside handler
 	errs := checkErrs(t, `
-		parse(string s) int! { return 0; }
+		parse!(string s) int { return 0; }
 		foo() {
 			parse("x") ? e { int v = parse("retry")?; };
 		}
@@ -867,8 +867,8 @@ func TestFailableCallPropagateInsideHandlerOfNonFailable(t *testing.T) {
 
 func TestNestedErrorHandlers(t *testing.T) {
 	checkOK(t, `
-		a() int! { return 1; }
-		b() int! { return 2; }
+		a!() int { return 1; }
+		b!() int { return 2; }
 		foo() {
 			int v = a() ? e1 {
 				b() ? e2 { };
@@ -880,9 +880,9 @@ func TestNestedErrorHandlers(t *testing.T) {
 func TestTypedHandlerInsideUntypedHandler(t *testing.T) {
 	checkOK(t, `
 		type IoError is error { int code; }
-		a() void! { raise error(message: "a"); }
-		b() void! { raise IoError(message: "b", code: 1); }
-		foo() void! {
+		a!() void { raise error(message: "a"); }
+		b!() void { raise IoError(message: "b", code: 1); }
+		foo!() void {
 			a() ? e1 {
 				b() ? e2 is IoError { };
 			};
@@ -894,7 +894,7 @@ func TestTypedHandlerInsideUntypedHandler(t *testing.T) {
 
 func TestHandlerWithDiscardBinding(t *testing.T) {
 	checkOK(t, `
-		foo() void! { raise error(message: "oops"); }
+		foo!() void { raise error(message: "oops"); }
 		bar() {
 			foo() ? _ { };
 		}
@@ -904,8 +904,8 @@ func TestHandlerWithDiscardBinding(t *testing.T) {
 func TestTypedHandlerWithDiscardBinding(t *testing.T) {
 	checkOK(t, `
 		type IoError is error { int code; }
-		foo() void! { raise IoError(message: "fail", code: 1); }
-		bar() void! {
+		foo!() void { raise IoError(message: "fail", code: 1); }
+		bar!() void {
 			foo() ? _ is IoError { };
 		}
 	`)
@@ -914,7 +914,7 @@ func TestTypedHandlerWithDiscardBinding(t *testing.T) {
 func TestTypedHandlerInNonFailableRejected(t *testing.T) {
 	errs := checkErrs(t, `
 		type IoError is error { int code; }
-		foo() void! { raise IoError(message: "fail", code: 1); }
+		foo!() void { raise IoError(message: "fail", code: 1); }
 		bar() {
 			foo() ? _ is IoError { };
 		}
@@ -925,7 +925,7 @@ func TestTypedHandlerInNonFailableRejected(t *testing.T) {
 func TestTypedHandlerElseInNonFailable(t *testing.T) {
 	checkOK(t, `
 		type IoError is error { int code; }
-		foo() void! { raise IoError(message: "fail", code: 1); }
+		foo!() void { raise IoError(message: "fail", code: 1); }
 		bar() {
 			foo() ? e is IoError { } else { };
 		}
@@ -935,7 +935,7 @@ func TestTypedHandlerElseInNonFailable(t *testing.T) {
 func TestTypedHandlerElseWithBinding(t *testing.T) {
 	checkOK(t, `
 		type IoError is error { int code; }
-		foo() void! { raise IoError(message: "fail", code: 1); }
+		foo!() void { raise IoError(message: "fail", code: 1); }
 		bar() {
 			foo() ? e is IoError { } else e { };
 		}
@@ -945,7 +945,7 @@ func TestTypedHandlerElseWithBinding(t *testing.T) {
 func TestTypedHandlerBangInNonFailable(t *testing.T) {
 	checkOK(t, `
 		type IoError is error { int code; }
-		foo() void! { raise IoError(message: "fail", code: 1); }
+		foo!() void { raise IoError(message: "fail", code: 1); }
 		bar() {
 			foo() ? e is IoError { }!;
 		}
@@ -954,7 +954,7 @@ func TestTypedHandlerBangInNonFailable(t *testing.T) {
 
 func TestElseOnUntypedHandlerRejected(t *testing.T) {
 	errs := checkErrs(t, `
-		foo() void! { raise error(message: "fail"); }
+		foo!() void { raise error(message: "fail"); }
 		bar() {
 			foo() ? e { } else { };
 		}
@@ -964,7 +964,7 @@ func TestElseOnUntypedHandlerRejected(t *testing.T) {
 
 func TestBangOnUntypedHandlerRejected(t *testing.T) {
 	errs := checkErrs(t, `
-		foo() void! { raise error(message: "fail"); }
+		foo!() void { raise error(message: "fail"); }
 		bar() {
 			foo() ? e { }!;
 		}
@@ -974,7 +974,7 @@ func TestBangOnUntypedHandlerRejected(t *testing.T) {
 
 func TestHandlerNoBinding(t *testing.T) {
 	checkOK(t, `
-		foo() void! { raise error(message: "oops"); }
+		foo!() void { raise error(message: "oops"); }
 		bar() {
 			foo() ? { };
 		}
@@ -983,7 +983,7 @@ func TestHandlerNoBinding(t *testing.T) {
 
 func TestUnhandledFailableCallInNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
-		foo() void! { raise error(message: "oops"); }
+		foo!() void { raise error(message: "oops"); }
 		bar() {
 			foo();
 		}
@@ -993,8 +993,8 @@ func TestUnhandledFailableCallInNonFailable(t *testing.T) {
 
 func TestAutoPropagateFailable(t *testing.T) {
 	checkOK(t, `
-		foo() void! { raise error(message: "oops"); }
-		bar() void! {
+		foo!() void { raise error(message: "oops"); }
+		bar!() void {
 			foo();
 		}
 	`)
@@ -1002,8 +1002,8 @@ func TestAutoPropagateFailable(t *testing.T) {
 
 func TestAutoPropagateFailable_NonVoid(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
-		process() int! {
+		parse!() int { return 42; }
+		process!() int {
 			parse();
 			return 0;
 		}
@@ -1012,7 +1012,7 @@ func TestAutoPropagateFailable_NonVoid(t *testing.T) {
 
 func TestFailableDestructure(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		foo() {
 			(val, err) := parse();
 		}
@@ -1023,7 +1023,7 @@ func TestFailableDestructureInNonFailable(t *testing.T) {
 	// Destructuring a failable result is allowed in non-failable functions
 	// (unlike naked failable calls, destructuring explicitly captures the error)
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		foo() {
 			(val, err) := parse();
 		}
@@ -1034,8 +1034,8 @@ func TestFailableDestructureInNonFailable(t *testing.T) {
 
 func TestAutoPropagateInTypedVarDecl(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
-		wrapper() int! {
+		parse!() int { return 42; }
+		wrapper!() int {
 			int x = parse();
 			return x;
 		}
@@ -1044,8 +1044,8 @@ func TestAutoPropagateInTypedVarDecl(t *testing.T) {
 
 func TestAutoPropagateInInferredVarDecl(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
-		wrapper() int! {
+		parse!() int { return 42; }
+		wrapper!() int {
 			x := parse();
 			return x;
 		}
@@ -1054,7 +1054,7 @@ func TestAutoPropagateInInferredVarDecl(t *testing.T) {
 
 func TestAutoPropagateAssignInNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			int x = parse();
 		}
@@ -1064,7 +1064,7 @@ func TestAutoPropagateAssignInNonFailable(t *testing.T) {
 
 func TestAutoPropagateInferredInNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			x := parse();
 		}
@@ -1074,8 +1074,8 @@ func TestAutoPropagateInferredInNonFailable(t *testing.T) {
 
 func TestAutoPropagateMultipleAssigns(t *testing.T) {
 	checkOK(t, `
-		parse(string s) int! { return 0; }
-		wrapper() int! {
+		parse!(string s) int { return 0; }
+		wrapper!() int {
 			int a = parse("1");
 			int b = parse("2");
 			return a + b;
@@ -1086,8 +1086,8 @@ func TestAutoPropagateMultipleAssigns(t *testing.T) {
 func TestAutoPropagateVoidAssignStmt(t *testing.T) {
 	// Void failable as statement (not assignment) in failable fn — auto-propagates
 	checkOK(t, `
-		validate() void! { raise error(message: "bad"); }
-		wrapper() void! {
+		validate!() void { raise error(message: "bad"); }
+		wrapper!() void {
 			validate();
 		}
 	`)
@@ -1097,9 +1097,9 @@ func TestAutoPropagateVoidAssignStmt(t *testing.T) {
 
 func TestAutoPropagateInFuncArg(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		use_value(int x) {}
-		wrapper() void! {
+		wrapper!() void {
 			use_value(parse());
 		}
 	`)
@@ -1107,9 +1107,9 @@ func TestAutoPropagateInFuncArg(t *testing.T) {
 
 func TestAutoPropagateInMethodArg(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		type Foo { use_value(int x) {} }
-		wrapper() void! {
+		wrapper!() void {
 			f := Foo();
 			f.use_value(parse());
 		}
@@ -1118,9 +1118,9 @@ func TestAutoPropagateInMethodArg(t *testing.T) {
 
 func TestAutoPropagateInConstructorArg(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		type Foo { int x; }
-		wrapper() void! {
+		wrapper!() void {
 			Foo(x: parse());
 		}
 	`)
@@ -1128,7 +1128,7 @@ func TestAutoPropagateInConstructorArg(t *testing.T) {
 
 func TestAutoPropagateInArgNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		use_value(int x) {}
 		main() {
 			use_value(parse());
@@ -1139,7 +1139,7 @@ func TestAutoPropagateInArgNonFailable(t *testing.T) {
 
 func TestAutoPropagateInConstructorArgNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		type Foo { int x; }
 		main() {
 			Foo(x: parse());
@@ -1150,10 +1150,10 @@ func TestAutoPropagateInConstructorArgNonFailable(t *testing.T) {
 
 func TestAutoPropagateMultipleArgs(t *testing.T) {
 	checkOK(t, `
-		parse_a() int! { return 1; }
-		parse_b() int! { return 2; }
+		parse_a!() int { return 1; }
+		parse_b!() int { return 2; }
 		add(int a, int b) int { return a + b; }
-		wrapper() void! {
+		wrapper!() void {
 			add(parse_a(), parse_b());
 		}
 	`)
@@ -1161,9 +1161,9 @@ func TestAutoPropagateMultipleArgs(t *testing.T) {
 
 func TestAutoPropagateVariadicArg(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		sum(...int nums) int { return 0; }
-		wrapper() void! {
+		wrapper!() void {
 			sum(parse(), 10);
 		}
 	`)
@@ -1171,7 +1171,7 @@ func TestAutoPropagateVariadicArg(t *testing.T) {
 
 func TestAutoPropagateVariadicArgNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		sum(...int nums) int { return 0; }
 		main() {
 			sum(parse(), 10);
@@ -1182,8 +1182,8 @@ func TestAutoPropagateVariadicArgNonFailable(t *testing.T) {
 
 func TestAutoPropagateInAssignment(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
-		wrapper() int! {
+		parse!() int { return 42; }
+		wrapper!() int {
 			int x = 0;
 			x = parse();
 			return x;
@@ -1193,7 +1193,7 @@ func TestAutoPropagateInAssignment(t *testing.T) {
 
 func TestAutoPropagateInAssignmentNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			int x = 0;
 			x = parse();
@@ -1204,12 +1204,12 @@ func TestAutoPropagateInAssignmentNonFailable(t *testing.T) {
 
 func TestAutoPropagateInExplicitNewArg(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		type Foo {
 			int v;
 			new(~this, int v) { this.v = v; }
 		}
-		wrapper() void! {
+		wrapper!() void {
 			Foo(v: parse());
 		}
 	`)
@@ -1217,9 +1217,9 @@ func TestAutoPropagateInExplicitNewArg(t *testing.T) {
 
 func TestAutoPropagateInEnumVariantArg(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		enum Box { Val(int v) }
-		wrapper() void! {
+		wrapper!() void {
 			Box.Val(v: parse());
 		}
 	`)
@@ -1227,9 +1227,9 @@ func TestAutoPropagateInEnumVariantArg(t *testing.T) {
 
 func TestAutoPropagateInGenericFuncArg(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		identity[T](T v) T { return v; }
-		wrapper() void! {
+		wrapper!() void {
 			identity[int](parse());
 		}
 	`)
@@ -1237,10 +1237,10 @@ func TestAutoPropagateInGenericFuncArg(t *testing.T) {
 
 func TestAutoPropagateInSuperArg(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		type Base { int v; new(~this, int v) { this.v = v; } }
 		type Child is Base { new(~this, int v) { super(v: v); } }
-		wrapper() void! {
+		wrapper!() void {
 			Child(v: parse());
 		}
 	`)
@@ -1251,7 +1251,7 @@ func TestAutoPropagateInSuperArg(t *testing.T) {
 func TestErrorHandlerRecoveryValue(t *testing.T) {
 	// Handler produces recovery value — OK
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			int x = parse() ? e { 0; };
 		}
@@ -1261,7 +1261,7 @@ func TestErrorHandlerRecoveryValue(t *testing.T) {
 func TestErrorHandlerRecoveryDiverges(t *testing.T) {
 	// Handler diverges with return — OK
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			int x = parse() ? e { return; };
 		}
@@ -1271,8 +1271,8 @@ func TestErrorHandlerRecoveryDiverges(t *testing.T) {
 func TestErrorHandlerRecoveryRaise(t *testing.T) {
 	// Handler diverges with raise — OK
 	checkOK(t, `
-		parse() int! { return 42; }
-		wrapper() int! {
+		parse!() int { return 42; }
+		wrapper!() int {
 			int x = parse() ? e { raise e; };
 			return x;
 		}
@@ -1282,7 +1282,7 @@ func TestErrorHandlerRecoveryRaise(t *testing.T) {
 func TestErrorHandlerNoRecoveryInTypedDecl(t *testing.T) {
 	// Handler doesn't produce value or diverge — ERROR
 	errs := checkErrs(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			int x = parse() ? e { print_line(e.message); };
 		}
@@ -1293,7 +1293,7 @@ func TestErrorHandlerNoRecoveryInTypedDecl(t *testing.T) {
 func TestErrorHandlerNoRecoveryInInferredDecl(t *testing.T) {
 	// Non-recovering handler in inferred decl: x becomes int? (optional)
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			x := parse() ? e { print_line(e.message); };
 		}
@@ -1303,7 +1303,7 @@ func TestErrorHandlerNoRecoveryInInferredDecl(t *testing.T) {
 func TestErrorHandlerNoRecoveryInNonOptionalTypedDecl(t *testing.T) {
 	// Non-recovering handler in non-optional typed decl: error
 	errs := checkErrs(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			int x = parse() ? e { print_line(e.message); };
 		}
@@ -1314,7 +1314,7 @@ func TestErrorHandlerNoRecoveryInNonOptionalTypedDecl(t *testing.T) {
 func TestErrorHandlerNoRecoveryInOptionalTypedDecl(t *testing.T) {
 	// Non-recovering handler in optional typed decl: OK, x becomes int?
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			int? x = parse() ? e { print_line(e.message); };
 		}
@@ -1324,7 +1324,7 @@ func TestErrorHandlerNoRecoveryInOptionalTypedDecl(t *testing.T) {
 func TestErrorHandlerNoRecoveryAsStatement(t *testing.T) {
 	// As expression statement (not assignment) — OK, value is discarded
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			parse() ? e { print_line(e.message); };
 		}
@@ -1334,7 +1334,7 @@ func TestErrorHandlerNoRecoveryAsStatement(t *testing.T) {
 func TestErrorHandlerNoRecoveryVoidFailable(t *testing.T) {
 	// Void failable with handler — OK (no value to recover)
 	checkOK(t, `
-		validate() void! { raise error(message: "bad"); }
+		validate!() void { raise error(message: "bad"); }
 		main() {
 			validate() ? e { print_line(e.message); };
 		}
@@ -1344,7 +1344,7 @@ func TestErrorHandlerNoRecoveryVoidFailable(t *testing.T) {
 func TestErrorHandlerRecoveryOptional(t *testing.T) {
 	// Handler produces none for optional type — OK
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			int? x = parse() ? e { none; };
 		}
@@ -1354,7 +1354,7 @@ func TestErrorHandlerRecoveryOptional(t *testing.T) {
 func TestErrorHandlerRecoveryExpression(t *testing.T) {
 	// Handler produces computed expression — OK
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		main() {
 			int x = parse() ? e { 1 + 2; };
 		}
@@ -1363,7 +1363,7 @@ func TestErrorHandlerRecoveryExpression(t *testing.T) {
 
 func TestFailableDestructureDiscardValue(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		foo() {
 			(_, err) := parse();
 		}
@@ -1372,7 +1372,7 @@ func TestFailableDestructureDiscardValue(t *testing.T) {
 
 func TestFailableDestructureDiscardError(t *testing.T) {
 	checkOK(t, `
-		parse() int! { return 42; }
+		parse!() int { return 42; }
 		foo() {
 			(val, _) := parse();
 		}
@@ -1386,10 +1386,10 @@ func TestMultipleFieldErrorType(t *testing.T) {
 			string detail;
 			bool retryable;
 		}
-		foo() void! {
+		foo!() void {
 			raise DetailedError(message: "failed", code: 503, detail: "service unavailable", retryable: true);
 		}
-		bar() bool! {
+		bar!() bool {
 			foo() ? e is DetailedError { return e.retryable; };
 			return false;
 		}
@@ -1404,10 +1404,10 @@ func TestErrorInheritanceChain(t *testing.T) {
 		type DbError is AppError {
 			string query;
 		}
-		foo() void! {
+		foo!() void {
 			raise DbError(message: "query failed", code: 500, query: "SELECT 1");
 		}
-		bar() int! {
+		bar!() int {
 			foo() ? e is AppError { return e.code; };
 			return 0;
 		}
@@ -1419,10 +1419,10 @@ func TestTypedHandlerWithInheritanceChainDeep(t *testing.T) {
 		type AppError is error { int code; }
 		type DbError is AppError { string query; }
 		type TimeoutError is DbError { int seconds; }
-		foo() void! {
+		foo!() void {
 			raise TimeoutError(message: "timeout", code: 504, query: "SELECT 1", seconds: 30);
 		}
-		bar() int! {
+		bar!() int {
 			foo() ? e is AppError { return e.code; };
 			return 0;
 		}
@@ -1432,31 +1432,31 @@ func TestTypedHandlerWithInheritanceChainDeep(t *testing.T) {
 func TestBangShorthandForVoidFailable(t *testing.T) {
 	// foo()! is shorthand for foo() void!
 	checkOK(t, `
-		foo()! { raise error(message: "oops"); }
+		foo!() { raise error(message: "oops"); }
 	`)
 }
 
 func TestBangShorthandMethodFailable(t *testing.T) {
 	checkOK(t, `
 		type Foo {
-			bar(this)! { raise error(message: "oops"); }
+			bar!(this) { raise error(message: "oops"); }
 		}
 	`)
 }
 
 func TestRaiseStringLiteral(t *testing.T) {
-	errs := checkErrs(t, `foo() void! { raise "oops"; }`)
+	errs := checkErrs(t, `foo!() void { raise "oops"; }`)
 	expectError(t, errs, "raise requires an error type")
 }
 
 func TestRaiseBoolLiteral(t *testing.T) {
-	errs := checkErrs(t, `foo() void! { raise true; }`)
+	errs := checkErrs(t, `foo!() void { raise true; }`)
 	expectError(t, errs, "raise requires an error type")
 }
 
 func TestRaiseVariable(t *testing.T) {
 	checkOK(t, `
-		foo() void! {
+		foo!() void {
 			error e = error(message: "saved");
 			raise e;
 		}
@@ -1469,7 +1469,7 @@ func TestFuncReturningErrorType(t *testing.T) {
 		make_error() error {
 			return error(message: "made");
 		}
-		foo() void! {
+		foo!() void {
 			raise make_error();
 		}
 	`)
@@ -1477,7 +1477,7 @@ func TestFuncReturningErrorType(t *testing.T) {
 
 func TestErrorHandlerAccessMessageField(t *testing.T) {
 	checkOK(t, `
-		foo() void! { raise error(message: "test msg"); }
+		foo!() void { raise error(message: "test msg"); }
 		bar() string {
 			foo() ? e { return e.message; };
 			return "";
@@ -1488,8 +1488,8 @@ func TestErrorHandlerAccessMessageField(t *testing.T) {
 func TestErrorSubtypeAccessBaseMessageField(t *testing.T) {
 	checkOK(t, `
 		type IoError is error { int code; }
-		foo() void! { raise IoError(message: "io fail", code: 1); }
-		bar() string! {
+		foo!() void { raise IoError(message: "io fail", code: 1); }
+		bar!() string {
 			foo() ? e is IoError { return e.message; };
 			return "";
 		}
@@ -1792,8 +1792,8 @@ func TestScopeShadowingMultipleLevels(t *testing.T) {
 
 func TestScopeShadowingErrorHandler(t *testing.T) {
 	errs := checkErrs(t, `
-		fail() int! { return 1; }
-		test() int! {
+		fail!() int { return 1; }
+		test!() int {
 			int e = 0;
 			v := fail() ? e { return 0; };
 			return v;
@@ -2665,14 +2665,14 @@ func TestFailableNewConstructorSema(t *testing.T) {
 	checkOK(t, `
 		type Port {
 			int value;
-			new(~this, int value) void! {
+			new!(~this, int value) void {
 				if value < 1 {
 					raise error(message: "invalid port");
 				}
 				this.value = value;
 			}
 		}
-		test()! {
+		test!() {
 			Port p = Port(value: 80)!;
 		}
 	`)
@@ -3115,7 +3115,7 @@ func TestSelfFailableFactoryGeneric(t *testing.T) {
 		type Validated[T] {
 			T value;
 			new(~this, T v) { this.value = v; }
-			parse(T v) Self! `+"`"+`factory {
+			parse!(T v) Self `+"`"+`factory {
 				return Self(v: v);
 			}
 		}
@@ -3182,7 +3182,7 @@ func TestChildNewMustBeFailableWhenParentIs(t *testing.T) {
 	errs := checkErrs(t, `
 		type Animal {
 			string name;
-			new(~this, string name) void! {
+			new!(~this, string name) void {
 				if name == "" { raise error(message: "empty"); }
 				this.name = name;
 			}
@@ -3203,19 +3203,19 @@ func TestChildNewFailableMatchesParent(t *testing.T) {
 	checkOK(t, `
 		type Animal {
 			string name;
-			new(~this, string name) void! {
+			new!(~this, string name) void {
 				if name == "" { raise error(message: "empty"); }
 				this.name = name;
 			}
 		}
 		type Dog is Animal {
 			string breed;
-			new(~this, string name, string breed) void! {
+			new!(~this, string name, string breed) void {
 				super(name);
 				this.breed = breed;
 			}
 		}
-		test()! {
+		test!() {
 			Dog d = Dog(name: "Rex", breed: "Lab")!;
 		}
 	`)
@@ -4639,7 +4639,7 @@ func TestUnreachableAfterReturn(t *testing.T) {
 
 func TestUnreachableAfterRaise(t *testing.T) {
 	errs := checkErrs(t, `
-		test() int! {
+		test!() int {
 			raise error(message: "oops");
 			int x = 42;
 		}
@@ -5638,7 +5638,7 @@ func TestStructuralExtraRequiredParamFails(t *testing.T) {
 func TestStructuralNonFailableSatisfiesFailable(t *testing.T) {
 	checkOK(t, `
 		type Processor `+"`structural"+` {
-			process(int x) int! `+"`abstract;"+`
+			process!(int x) int `+"`abstract;"+`
 		}
 		type Simple {
 			process(int x) int { return x; }
@@ -5655,7 +5655,7 @@ func TestStructuralFailableDoesNotSatisfyNonFailable(t *testing.T) {
 			process(int x) int `+"`abstract;"+`
 		}
 		type Risky {
-			process(int x) int! { return x; }
+			process!(int x) int { return x; }
 		}
 		main() {
 			Processor p = Risky();
@@ -5810,7 +5810,7 @@ func TestTestFuncWithReturnTypeFails(t *testing.T) {
 }
 
 func TestTestFuncFailableFails(t *testing.T) {
-	errs := checkErrs(t, `myTest() int! `+"`test"+` { return 1; }`)
+	errs := checkErrs(t, `myTest!() int `+"`test"+` { return 1; }`)
 	expectError(t, errs, "must not be failable")
 }
 
@@ -6856,7 +6856,7 @@ func TestDropMethodFailable(t *testing.T) {
 	errs := checkErrs(t, `
 		type File {
 			int fd;
-			drop(~this) void! { raise error(message: "err"); }
+			drop!(~this) void { raise error(message: "err"); }
 		}
 		main() {}
 	`)
@@ -7831,7 +7831,7 @@ func TestIsPresentNarrowingBoolOptional(t *testing.T) {
 func TestIsAbsentNarrowing(t *testing.T) {
 	// is absent with diverging body should narrow x to T after the if
 	checkOK(t, `
-		test() int! {
+		test!() int {
 			int? x = 42;
 			if x is absent {
 				raise error(message: "missing");
@@ -7942,7 +7942,7 @@ func TestNegatedNarrowingNoElse(t *testing.T) {
 func TestNegatedNarrowingPostDivergence(t *testing.T) {
 	// if !x { return; } should narrow x to T after the if
 	checkOK(t, `
-		test() int! {
+		test!() int {
 			int? x = 42;
 			if !x {
 				raise error(message: "missing");
@@ -8129,7 +8129,7 @@ func TestGeneratorYieldInsideLambda(t *testing.T) {
 
 func TestGeneratorFailableError(t *testing.T) {
 	errs := checkErrs(t, `
-		gen() stream[int]! {
+		gen!() stream[int] {
 			yield 1;
 		}
 		main() {}
@@ -8955,10 +8955,10 @@ func TestAbstractFactoryInNonStructuralFails(t *testing.T) {
 func TestAbstractFactoryFailableReturn(t *testing.T) {
 	checkOK(t, `
 		type Parseable `+"`"+`structural {
-			tryParse(string data)! `+"`"+`abstract `+"`"+`factory;
+			tryParse!(string data) `+"`"+`abstract `+"`"+`factory;
 		}
 		type My {
-			tryParse(string data) My! `+"`"+`factory {
+			tryParse!(string data) My `+"`"+`factory {
 				return My();
 			}
 		}
@@ -9035,12 +9035,12 @@ func TestGenericFactoryConstraint(t *testing.T) {
 func TestGenericFactoryFailableConstraint(t *testing.T) {
 	checkOK(t, `
 		type Parseable `+"`"+`structural {
-			tryParse(string data)! `+"`"+`abstract `+"`"+`factory;
+			tryParse!(string data) `+"`"+`abstract `+"`"+`factory;
 		}
 		type My {
 			tryParse(string data) My `+"`"+`factory { return My(); }
 		}
-		load[T: Parseable](string data) T! {
+		load![T: Parseable](string data) T {
 			return T.tryParse(data);
 		}
 		test() {
@@ -9090,17 +9090,17 @@ func TestAbstractFactoryExplicitFailableSelfReturn(t *testing.T) {
 	// Abstract factory with explicit Self! return type should compile
 	checkOK(t, `
 		type TryParseable `+"`"+`structural {
-			tryParse(string data) Self! `+"`"+`abstract `+"`"+`factory;
+			tryParse!(string data) Self `+"`"+`abstract `+"`"+`factory;
 		}
 		type Strict {
-			tryParse(string data) Strict! `+"`"+`factory {
+			tryParse!(string data) Strict `+"`"+`factory {
 				if data == "bad" {
 					raise error("invalid");
 				}
 				return Strict();
 			}
 		}
-		tryLoad[T: TryParseable](string data) T! {
+		tryLoad![T: TryParseable](string data) T {
 			return T.tryParse(data);
 		}
 		test() {
@@ -9406,7 +9406,7 @@ func TestValueTypeFailableNew(t *testing.T) {
 	errs := checkErrs(t, `
 		type Percentage {
 			int value `+"`value"+`;
-			new(~this, int value) int! {
+			new!(~this, int value) int {
 				if value < 0 { return error(0); }
 				this.value = value;
 			}
@@ -9630,7 +9630,7 @@ func TestVariadicBodyUsesVectorMethods(t *testing.T) {
 func TestVariadicFailable(t *testing.T) {
 	// Variadic function that can raise errors.
 	checkOK(t, `
-		trySum(...int nums) int! {
+		trySum!(...int nums) int {
 			if nums.len == 0 { raise error(message: "empty"); }
 			int total = 0;
 			for n in nums { total += n; }
@@ -9646,13 +9646,13 @@ func TestVariadicFailable(t *testing.T) {
 func TestVariadicFailablePropagation(t *testing.T) {
 	// Variadic failable called with ? from another failable function.
 	checkOK(t, `
-		trySum(...int nums) int! {
+		trySum!(...int nums) int {
 			if nums.len == 0 { raise error(message: "empty"); }
 			int total = 0;
 			for n in nums { total += n; }
 			return total;
 		}
-		outer() int! {
+		outer!() int {
 			a := trySum(1, 2)?;
 			b := trySum()?;
 			return a + b;
@@ -10597,7 +10597,7 @@ func TestMethodGenericFailable(t *testing.T) {
 	expectNoErrors(t, checkErrs(t, `
 		type MyErr is error { string message; }
 		type Parser {
-			try_parse[T](T val) T! { return val; }
+			try_parse![T](T val) T { return val; }
 		}
 		main() {
 			p := Parser();
@@ -10656,7 +10656,7 @@ func TestStringInterpFormatTypeOK(t *testing.T) {
 	checkOK(t, `
 		type Foo {
 			int x;
-			format(Writer ~w)! { w.write_string("foo"); }
+			format!(Writer ~w) { w.write_string("foo"); }
 		}
 		test() { Foo f = Foo(x: 1); string s = "{f}"; }
 	`)
@@ -10674,7 +10674,7 @@ func TestStringInterpOptionalFormatType(t *testing.T) {
 	checkOK(t, `
 		type Qux {
 			int v;
-			format(Writer ~w)! { w.write_string("qux"); }
+			format!(Writer ~w) { w.write_string("qux"); }
 		}
 		test() { Qux? q = Qux(v: 1); string s = "{q}"; }
 	`)
@@ -10989,7 +10989,7 @@ func TestFailableGetterOK(t *testing.T) {
 		type MyErr is error { int code; }
 		type Foo {
 			int _val;
-			get value int! {
+			get value! int {
 				if this._val < 0 { raise MyErr(code: 1, message: "neg"); }
 				return this._val;
 			}
@@ -11006,12 +11006,12 @@ func TestFailableGetterPropagate(t *testing.T) {
 		type MyErr is error { int code; }
 		type Foo {
 			int _val;
-			get value int! {
+			get value! int {
 				if this._val < 0 { raise MyErr(code: 1, message: "neg"); }
 				return this._val;
 			}
 		}
-		bar(Foo f) int! {
+		bar!(Foo f) int {
 			return f.value?;
 		}
 	`)
@@ -11022,7 +11022,7 @@ func TestFailableGetterHandler(t *testing.T) {
 		type MyErr is error { int code; }
 		type Foo {
 			int _val;
-			get value int! {
+			get value! int {
 				if this._val < 0 { raise MyErr(code: 1, message: "neg"); }
 				return this._val;
 			}
@@ -11037,11 +11037,11 @@ func TestFailableGetterHandler(t *testing.T) {
 func TestFailableGetterAbstract(t *testing.T) {
 	checkOK(t, `
 		type Base {
-			get value int! `+"`"+`abstract;
+			get value! int `+"`"+`abstract;
 		}
 		type Impl is Base {
 			int _v;
-			get value int! { return this._v; }
+			get value! int { return this._v; }
 		}
 		main() {
 			Base b = Impl(_v: 10);
@@ -11101,7 +11101,7 @@ func TestModuleLevelGetterWithSetterOK(t *testing.T) {
 
 func TestModuleLevelFailableGetterOK(t *testing.T) {
 	checkOK(t, `
-		get safe string! { return "ok"; }
+		get safe! string { return "ok"; }
 		test() { string s = safe!; }
 	`)
 }
@@ -11160,7 +11160,7 @@ func TestModuleLevelGetterMissingReturnError(t *testing.T) {
 
 func TestModuleLevelFailableGetterInNonFailableError(t *testing.T) {
 	errs := checkErrs(t, `
-		get risky string! { return "ok"; }
+		get risky! string { return "ok"; }
 		test() { string s = risky; }
 	`)
 	expectError(t, errs, "failable")
@@ -11168,7 +11168,7 @@ func TestModuleLevelFailableGetterInNonFailableError(t *testing.T) {
 
 func TestModuleLevelFailableGetterHandlerOK(t *testing.T) {
 	checkOK(t, `
-		get risky string! { return "ok"; }
+		get risky! string { return "ok"; }
 		test() {
 			string s = risky ? e { "fallback"; };
 		}
@@ -11320,7 +11320,7 @@ func TestEnumMethodExprBodyOK(t *testing.T) {
 func TestEnumMethodFailableOK(t *testing.T) {
 	checkOK(t, `
 		enum Mode { A, B,
-			validate(&this) string! {
+			validate!(&this) string {
 				match this {
 					Mode.A => { return "a"; },
 					Mode.B => { return "b"; },
@@ -11641,7 +11641,7 @@ func TestIsGenericTypeWrongArity(t *testing.T) {
 func TestGenericErrorHandler(t *testing.T) {
 	checkOK(t, `
 		type AppError[T] is error { T detail; }
-		make_error() AppError[int]! {
+		make_error!() AppError[int] {
 			raise AppError[int](message: "err", detail: 42);
 		}
 		test() {
@@ -11654,7 +11654,7 @@ func TestGenericErrorHandler(t *testing.T) {
 func TestGenericErrorHandlerNotError(t *testing.T) {
 	errs := checkErrs(t, `
 		type Box[T] { T value; }
-		make_error() error! { raise error(message: "err"); }
+		make_error!() error { raise error(message: "err"); }
 		test() {
 			make_error() ? e is Box[int] {
 			}!;
@@ -11918,7 +11918,7 @@ func TestInferGenericFuncConflictingArgs(t *testing.T) {
 
 func TestInferGenericFuncNotEnoughInfo(t *testing.T) {
 	errs := checkErrs(t, `
-		make_default[T]() T! { raise error("no"); }
+		make_default![T]() T { raise error("no"); }
 		test() {
 			make_default();
 		}
@@ -12084,7 +12084,7 @@ func TestEmbedWrongReturnTypeRejected(t *testing.T) {
 
 func TestEmbedFailableRejected(t *testing.T) {
 	errs := checkErrs(t, `
-		get schema string! `+"`embed(\"schema.sql\")"+`;
+		get schema! string `+"`embed(\"schema.sql\")"+`;
 	`)
 	expectError(t, errs, "must not be failable")
 }

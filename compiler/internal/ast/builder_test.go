@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"djabi.dev/go/promise_lang/internal/parser"
@@ -110,7 +111,7 @@ func TestBuildFuncDecl(t *testing.T) {
 		},
 		{
 			name: "error_return",
-			src:  `read(String path) String! { return ""; }`,
+			src:  `read!(String path) String { return ""; }`,
 			check: func(t *testing.T, file *File) {
 				fn := file.Decls[0].(*FuncDecl)
 				assertNotNil(t, fn.ReturnType)
@@ -119,7 +120,7 @@ func TestBuildFuncDecl(t *testing.T) {
 		},
 		{
 			name: "bang_shorthand_void_failable",
-			src:  `fail()! { raise error("boom"); }`,
+			src:  `fail!() { raise error("boom"); }`,
 			check: func(t *testing.T, file *File) {
 				fn := file.Decls[0].(*FuncDecl)
 				assertNotNil(t, fn.ReturnType)
@@ -182,6 +183,71 @@ func TestBuildFuncDecl(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			file := parseAndBuild(t, tt.src)
 			tt.check(t, file)
+		})
+	}
+}
+
+// TestOldFailableSyntaxRejected verifies old failable syntax produces errors.
+func TestOldFailableSyntaxRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		msg  string
+	}{
+		{
+			name: "func_bare_bang",
+			src:  `fail() ! { }`,
+			msg:  "use 'fail!(...)' instead of 'fail(...) !'",
+		},
+		{
+			name: "func_return_type_bang",
+			src:  `read(string path) string! { return ""; }`,
+			msg:  "use 'read!(...)' instead of 'read(...) !'",
+		},
+		{
+			name: "method_return_type_bang",
+			src:  `type Foo { speak(&this) string! { return "hi"; } }`,
+			msg:  "use 'speak!(...)' instead of 'speak(...) !'",
+		},
+		{
+			name: "method_bare_bang",
+			src:  `type Foo { fail(&this)! { } }`,
+			msg:  "use 'fail!(...)' instead of 'fail(...) !'",
+		},
+		{
+			name: "getter_type_bang",
+			src:  `type Foo { get value int! => 42; }`,
+			msg:  "use 'get value! Type' instead of 'get value Type!'",
+		},
+		{
+			name: "top_level_getter_type_bang",
+			src:  `get name string! => "hi";`,
+			msg:  "use 'get name! Type' instead of 'get name Type!'",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := antlr.NewInputStream(tt.src)
+			lexer := parser.NewPromiseLexer(input)
+			lexer.RemoveErrorListeners()
+			stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+			p := parser.NewPromiseParser(stream)
+			p.RemoveErrorListeners()
+			tree := p.CompilationUnit()
+			_, errs := Build("test.pr", tree)
+			if len(errs) == 0 {
+				t.Fatal("expected error for old failable syntax, got none")
+			}
+			found := false
+			for _, err := range errs {
+				if strings.Contains(err.Error(), tt.msg) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected error containing %q, got: %v", tt.msg, errs)
+			}
 		})
 	}
 }

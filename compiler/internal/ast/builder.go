@@ -1,6 +1,8 @@
 package ast
 
 import (
+	"fmt"
+
 	"djabi.dev/go/promise_lang/internal/parser"
 	antlr "github.com/antlr4-go/antlr/v4"
 )
@@ -51,4 +53,8 @@ func (b *Builder) baseFromContext(ctx antlr.ParserRuleContext) nodeBase {
 		pos: b.posFromContext(ctx),
 		end: b.endFromContext(ctx),
 	}
+}
+
+func (b *Builder) errorf(pos Pos, format string, args ...any) {
+	b.errors = append(b.errors, fmt.Errorf("%s: %s", pos, fmt.Sprintf(format, args...)))
 }

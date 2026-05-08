@@ -81,11 +81,20 @@ func (b *Builder) visitTopLevelGetterDecl(ctx *parser.GetterDeclContext) *FuncDe
 		nodeBase: b.baseFromContext(ctx),
 		Name:     ctx.IDENT(1).GetText(),
 		IsGetter: true,
-		ReturnType: &ReturnTypeSpec{
-			nodeBase: b.baseFromContext(ctx),
-			Type:     b.visitTypeRef(ctx.TypeRef()),
-			CanError: ctx.BANG() != nil,
-		},
+	}
+	canError := ctx.BANG() != nil
+	if canError {
+		// Detect old syntax: get name Type! (BANG after typeRef)
+		bangPos := ctx.BANG().GetSymbol().GetStart()
+		typeRefPos := ctx.TypeRef().GetStart().GetStart()
+		if bangPos > typeRefPos {
+			b.errorf(b.posFromContext(ctx), "use 'get %s! Type' instead of 'get %s Type!'", node.Name, node.Name)
+		}
+	}
+	node.ReturnType = &ReturnTypeSpec{
+		nodeBase: b.baseFromContext(ctx),
+		Type:     b.visitTypeRef(ctx.TypeRef()),
+		CanError: canError,
 	}
 	for _, ma := range ctx.AllMetaAnnotation() {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
@@ -193,8 +202,12 @@ func (b *Builder) VisitMethodDecl(ctx *parser.MethodDeclContext) interface{} {
 		}
 		node.ReturnType = rt
 	} else if rt := ctx.ReturnType(); rt != nil {
-		// Old syntax: speak(&this) string! — return type from returnType rule
-		node.ReturnType = rt.Accept(b).(*ReturnTypeSpec)
+		// Old syntax: speak(&this) string! or speak(&this)! — reject with error
+		spec := rt.Accept(b).(*ReturnTypeSpec)
+		if spec.CanError {
+			b.errorf(b.posFromContext(ctx), "use '%s!(...)' instead of '%s(...) !'", node.Name, node.Name)
+		}
+		node.ReturnType = spec
 	}
 	for _, ma := range ctx.AllMetaAnnotation() {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
@@ -215,10 +228,19 @@ func (b *Builder) VisitGetterDecl(ctx *parser.GetterDeclContext) interface{} {
 		Name:     ctx.IDENT(1).GetText(),
 		IsGetter: true,
 	}
+	canError := ctx.BANG() != nil
+	if canError {
+		// Detect old syntax: get name Type! (BANG after typeRef)
+		bangPos := ctx.BANG().GetSymbol().GetStart()
+		typeRefPos := ctx.TypeRef().GetStart().GetStart()
+		if bangPos > typeRefPos {
+			b.errorf(b.posFromContext(ctx), "use 'get %s! Type' instead of 'get %s Type!'", node.Name, node.Name)
+		}
+	}
 	node.ReturnType = &ReturnTypeSpec{
 		nodeBase: b.baseFromContext(ctx),
 		Type:     b.visitTypeRef(ctx.TypeRef()),
-		CanError: ctx.BANG() != nil,
+		CanError: canError,
 	}
 	for _, ma := range ctx.AllMetaAnnotation() {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
@@ -438,8 +460,12 @@ func (b *Builder) VisitFuncDecl(ctx *parser.FuncDeclContext) interface{} {
 		}
 		node.ReturnType = rt
 	} else if rt := ctx.ReturnType(); rt != nil {
-		// Old syntax: foo() int! — return type from returnType rule
-		node.ReturnType = rt.Accept(b).(*ReturnTypeSpec)
+		// Old syntax: foo() int! or foo()! — reject with error
+		spec := rt.Accept(b).(*ReturnTypeSpec)
+		if spec.CanError {
+			b.errorf(b.posFromContext(ctx), "use '%s!(...)' instead of '%s(...) !'", node.Name, node.Name)
+		}
+		node.ReturnType = spec
 	}
 	for _, ma := range ctx.AllMetaAnnotation() {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))

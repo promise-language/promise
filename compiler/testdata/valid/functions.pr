@@ -29,12 +29,12 @@ connect(String host, Int port = 8080, String? auth) {
 }
 
 // Error-returning function
-readFile(String path) String! {
+readFile!(String path) String {
   return "";
 }
 
 // Multiple params with mixed modifiers
-process(Int count, String &label, Float[] ~data, Bool verbose = false) Int! {
+process!(Int count, String &label, Float[] ~data, Bool verbose = false) Int {
   return count;
 }
 

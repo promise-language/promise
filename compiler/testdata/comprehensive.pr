@@ -56,13 +56,13 @@ enum Direction {
 // Error handling: ?, !, ? handler
 // ============================================================
 
-readFile(String path) String! {
+readFile!(String path) String {
   File f = fs.open(path)?;
   String content = f.readAll()?;
   return content;
 }
 
-processFile(String path) String! {
+processFile!(String path) String {
   String content = readFile(path) ? e {
     return "failed: " + e.message();
   };

@@ -698,12 +698,12 @@ func formatMethodSig(m *types.Method, info *sema.Info) string {
 	if m.IsGetter() {
 		b.WriteString("get ")
 		b.WriteString(m.Name())
+		if m.Sig().CanError() {
+			b.WriteByte('!')
+		}
 		if m.Sig().Result() != nil {
 			b.WriteByte(' ')
 			b.WriteString(typeString(m.Sig().Result()))
-		}
-		if m.Sig().CanError() {
-			b.WriteByte('!')
 		}
 		return b.String()
 	}
@@ -713,6 +713,9 @@ func formatMethodSig(m *types.Method, info *sema.Info) string {
 	}
 
 	b.WriteString(m.Name())
+	if m.Sig().CanError() {
+		b.WriteByte('!')
+	}
 	b.WriteByte('(')
 
 	first := true
@@ -758,9 +761,6 @@ func formatMethodSig(m *types.Method, info *sema.Info) string {
 		b.WriteByte(' ')
 		b.WriteString(typeString(m.Sig().Result()))
 	}
-	if m.Sig().CanError() {
-		b.WriteByte('!')
-	}
 
 	// Tags
 	if m.IsAbstract() {
@@ -779,12 +779,12 @@ func formatFuncSig(name string, sig *types.Signature, fn *types.Func, info *sema
 	if fn.IsGetter() {
 		b.WriteString("get ")
 		b.WriteString(name)
+		if sig.CanError() {
+			b.WriteByte('!')
+		}
 		if sig.Result() != nil {
 			b.WriteByte(' ')
 			b.WriteString(typeString(sig.Result()))
-		}
-		if sig.CanError() {
-			b.WriteByte('!')
 		}
 		return b.String()
 	}
@@ -794,6 +794,9 @@ func formatFuncSig(name string, sig *types.Signature, fn *types.Func, info *sema
 	}
 
 	b.WriteString(name)
+	if sig.CanError() {
+		b.WriteByte('!')
+	}
 	if len(sig.TypeParams()) > 0 {
 		b.WriteString(formatTypeParams(sig.TypeParams()))
 	}
@@ -831,9 +834,6 @@ func formatFuncSig(name string, sig *types.Signature, fn *types.Func, info *sema
 	if sig.Result() != nil {
 		b.WriteByte(' ')
 		b.WriteString(typeString(sig.Result()))
-	}
-	if sig.CanError() {
-		b.WriteByte('!')
 	}
 
 	return b.String()

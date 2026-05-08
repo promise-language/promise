@@ -456,14 +456,14 @@ func TestErrorHandling(t *testing.T) {
 		name string
 		code string
 	}{
-		{"propagate", `f() Int! { Int x = g()?; return x; }`},
+		{"propagate", `f!() Int { Int x = g()?; return x; }`},
 		{"unwrap_bang", `f() { Int x = g()!; }`},
-		{"handler_named", `f() Int! { Int x = g() ? e { return 0; }; return x; }`},
-		{"handler_unnamed", `f() Int! { Int x = g() ? { return 0; }; return x; }`},
-		{"handler_discard", `f() Int! { Int x = g() ? _ { return 0; }; return x; }`},
-		{"chained_propagate", `f() Int! { return a()?.b()?.c; }`},
-		{"propagate_in_expr", `f() Int! { return g()? + 1; }`},
-		{"raise", `f() Int! { raise Error("bad"); }`},
+		{"handler_named", `f!() Int { Int x = g() ? e { return 0; }; return x; }`},
+		{"handler_unnamed", `f!() Int { Int x = g() ? { return 0; }; return x; }`},
+		{"handler_discard", `f!() Int { Int x = g() ? _ { return 0; }; return x; }`},
+		{"chained_propagate", `f!() Int { return a()?.b()?.c; }`},
+		{"propagate_in_expr", `f!() Int { return g()? + 1; }`},
+		{"raise", `f!() Int { raise Error("bad"); }`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

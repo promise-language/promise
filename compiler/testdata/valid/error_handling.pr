@@ -1,7 +1,7 @@
 // Error handling: ?, !, ? handler, raise.
 
 // Simple propagation
-readAll(String path) String! {
+readAll!(String path) String {
   File f = open(path)?;
   String data = f.read()?;
   f.close()?;
@@ -38,7 +38,7 @@ safeRead3(String path) String {
 }
 
 // Raise
-validate(Int x) Int! {
+validate!(Int x) Int {
   if x < 0 {
     raise ValidationError("negative");
   }
@@ -49,7 +49,7 @@ validate(Int x) Int! {
 }
 
 // Chained propagation
-processChain() String! {
+processChain!() String {
   String raw = readAll("input.txt")?;
   String parsed = parse(raw)?;
   String result = transform(parsed)?;
@@ -57,7 +57,7 @@ processChain() String! {
 }
 
 // Error handling with postfix precedence
-exprPrecedence() Int! {
+exprPrecedence!() Int {
   // ? binds tighter than +
   Int a = compute()? + 1;
 
@@ -74,7 +74,7 @@ exprPrecedence() Int! {
 }
 
 // Multiple error paths
-multiError() Int! {
+multiError!() Int {
   Int a = computeA() ? {
     return 0;
   };

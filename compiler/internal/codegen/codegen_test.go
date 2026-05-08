@@ -7008,6 +7008,37 @@ func TestTestTrampolineStackCreepDetection(t *testing.T) {
 	assertContains(t, ir, "icmp eq i64")
 }
 
+func TestTestTrampolineNoSetjmp(t *testing.T) {
+	// T0150: test trampoline no longer uses setjmp/longjmp for panic recovery.
+	// Panics are detected via TLS panic flag check after the test function returns.
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+
+	fn := extractFunction(ir, ".test_trampoline")
+	// Must NOT contain setjmp, longjmp, or jmpBuf alloca
+	assertNotContains(t, fn, "setjmp")
+	assertNotContains(t, fn, "longjmp")
+	assertNotContains(t, fn, "alloca [256 x i8]")
+	assertNotContains(t, fn, "__promise_test_jmpbuf")
+	// Must contain TLS panic flag check
+	assertContains(t, fn, "__promise_panic_flag")
+	assertContains(t, fn, "panic_detected")
+}
+
 func TestHostTargetTriple(t *testing.T) {
 	triple := HostTargetTriple()
 	if triple == "" {

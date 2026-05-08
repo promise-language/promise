@@ -25,18 +25,6 @@ func (c *Compiler) emitDebugPrint(blk *ir.Block, msg string) {
 	blk.NewCall(c.palWrite, constant.NewInt(irtypes.I32, 2), ptr, constant.NewInt(irtypes.I64, int64(len(msg))))
 }
 
-// callSetjmp emits a call to setjmp in the given block.
-// On Windows MSVC, __intrinsic_setjmp takes (env, frame_pointer) — this helper
-// passes @llvm.frameaddress(i32 0) as the second arg automatically.
-// On other platforms, setjmp takes just (env).
-func (c *Compiler) callSetjmp(blk *ir.Block, envPtr value.Value) *ir.InstCall {
-	if c.isWindows {
-		frameAddr := blk.NewCall(c.funcs["llvm.frameaddress"], constant.NewInt(irtypes.I32, 0))
-		return blk.NewCall(c.funcs["setjmp"], envPtr, frameAddr)
-	}
-	return blk.NewCall(c.funcs["setjmp"], envPtr)
-}
-
 // defineWindowsUsleep emits a usleep(i32 usec) → i32 wrapper using Win32 Sleep(ms).
 // usleep takes microseconds; Sleep takes milliseconds. Minimum 1ms to avoid busy-spin.
 func (c *Compiler) defineWindowsUsleep() *ir.Func {

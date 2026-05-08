@@ -590,13 +590,14 @@ func (c *Compiler) getOrDeclareFunc(name string, retType irtypes.Type, params ..
 }
 
 // defineTestRunFunc defines a codegen-emitted promise_test_run(i8* %fn, i64 %timeout_ns) → i32.
-// Runs each test in a thread via PAL. On non-WASM targets, the trampoline uses
-// setjmp/longjmp for per-test panic recovery — a panicking test returns 1 (fail)
-// instead of killing the process, allowing subsequent tests to run.
+// Runs each test in a thread via PAL. The trampoline uses TLS panic flag checking
+// for per-test panic recovery — a panicking test sets the flag and returns through
+// the call chain, and the trampoline detects this and returns 1 (fail) instead of
+// killing the process, allowing subsequent tests to run.
 // When timeout_ns > 0, the main thread polls @__promise_test_done with usleep(1ms)
 // instead of blocking on pal_thread_join. If the test doesn't complete within
 // timeout_ns nanoseconds, returns 2 (timeout) without joining.
-// On WASM: panics still terminate the process (no longjmp support), no timeout.
+// On WASM: panics still terminate the process, no timeout.
 func (c *Compiler) defineTestRunFunc() *ir.Func {
 	fn := c.module.NewFunc("promise_test_run", irtypes.I32,
 		ir.NewParam("fn", irtypes.I8Ptr),
@@ -677,89 +678,42 @@ func (c *Compiler) defineTestRunFunc() *ir.Func {
 
 // defineTestTrampoline generates a shared trampoline for test runner threads.
 // Signature: i8*(i8* %fn_ptr) — casts fn_ptr to void()* and calls it.
-// On non-WASM: uses setjmp/longjmp for panic recovery. The trampoline stores a
-// jmp_buf in the TLS @__promise_test_jmpbuf so promise_panic can longjmp back
-// instead of exiting. On panic, returns non-null to indicate failure.
-// After the test function returns normally, verifies that the stack pointer has
-// not drifted (stack creep detection). If it has, stores a diagnostic message
-// in @__promise_test_panic_msg and returns non-null to fail the test.
+// After the test function returns, checks the TLS panic flag to detect panics
+// (panics set the flag and return through the call chain via T0144-T0148).
+// On panic, stores the panic message and returns non-null to indicate failure.
+// On non-WASM targets, also verifies that the stack pointer has not drifted
+// (stack creep detection). If it has, stores a diagnostic message in
+// @__promise_test_panic_msg and returns non-null to fail the test.
 func (c *Compiler) defineTestTrampoline() *ir.Func {
 	trampoline := c.module.NewFunc(".test_trampoline", irtypes.I8Ptr,
 		ir.NewParam("fn_ptr", irtypes.I8Ptr))
 	entry := trampoline.NewBlock(".entry")
 
-	if c.isWasm {
-		// WASM: no setjmp recovery — call test function, check TLS panic flag
-		voidFnPtrType := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
-		typedFn := entry.NewBitCast(trampoline.Params[0], voidFnPtrType)
-		entry.NewCall(typedFn)
-
-		// B0228: Check TLS panic flag after test function returns
-		wasmFlag := entry.NewLoad(irtypes.I8, c.panicFlagGlobal)
-		wasmPanicked := entry.NewICmp(enum.IPredNE, wasmFlag, constant.NewInt(irtypes.I8, 0))
-		wasmPanicBlk := trampoline.NewBlock("wasm_panic")
-		wasmPassBlk := trampoline.NewBlock("wasm_pass")
-		entry.NewCondBr(wasmPanicked, wasmPanicBlk, wasmPassBlk)
-
-		// Panic detected: store msg, clear flag, signal done, return fail
-		wasmPanicMsg := wasmPanicBlk.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
-		wasmPanicBlk.NewStore(wasmPanicMsg, c.testPanicMsgGlobal)
-		wasmPanicBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)
-		wasmPanicBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal)
-		wasmFail := wasmPanicBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
-		wasmPanicBlk.NewRet(wasmFail)
-
-		// No panic: signal done, return null (pass)
-		wasmPassBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal)
-		wasmPassBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
-		return trampoline
-	}
-
-	// Allocate 256-byte jmp_buf on stack (same as sched.go panic recovery)
-	jmpBufType := irtypes.NewArray(256, irtypes.I8)
-	jmpBufAlloca := entry.NewAlloca(jmpBufType)
-	// 16-byte align: required on MSVC x64 (_JUMP_BUFFER stores XMM regs), harmless elsewhere.
-	jmpBufAlloca.Align = 16
-	jmpBufPtr := entry.NewBitCast(jmpBufAlloca, irtypes.I8Ptr)
-
-	// Store jmp_buf pointer in dedicated test TLS so promise_panic can find it
-	entry.NewStore(jmpBufPtr, c.testJmpBufGlobal)
-
-	// setjmp returns 0 on initial call, non-zero on longjmp return
-	setjmpResult := c.callSetjmp(entry, jmpBufPtr)
-	isPanicReturn := entry.NewICmp(enum.IPredNE, setjmpResult, constant.NewInt(irtypes.I32, 0))
-
-	normalBlk := trampoline.NewBlock("normal")
-	panicBlk := trampoline.NewBlock("panic_recovered")
-	entry.NewCondBr(isPanicReturn, panicBlk, normalBlk)
-
-	// Normal path: read SP, call test function, read SP again, check for drift.
-	// Signal done flag before returning (for per-test timeout polling).
+	// Call the test function
 	voidFnPtrType := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
-	typedFn := normalBlk.NewBitCast(trampoline.Params[0], voidFnPtrType)
+	typedFn := entry.NewBitCast(trampoline.Params[0], voidFnPtrType)
 
-	spBefore := c.emitReadStackPointer(normalBlk)
-	normalBlk.NewCall(typedFn)
-	spAfter := c.emitReadStackPointer(normalBlk)
+	spBefore := c.emitReadStackPointer(entry)
+	entry.NewCall(typedFn)
+	spAfter := c.emitReadStackPointer(entry)
 
-	// B0228: Check TLS panic flag after test function returns.
-	// With TLS flag propagation, panics set the flag and return through the call
-	// chain rather than longjmp. Check the flag here to detect panics.
-	tlsFlag := normalBlk.NewLoad(irtypes.I8, c.panicFlagGlobal)
-	tlsPanicked := normalBlk.NewICmp(enum.IPredNE, tlsFlag, constant.NewInt(irtypes.I8, 0))
-	tlsPanicBlk := trampoline.NewBlock("tls_panic")
+	// Check TLS panic flag after test function returns.
+	// With TLS flag propagation (T0144-T0148), panics set the flag and return
+	// through the call chain. Check the flag here to detect panics.
+	panicFlag := entry.NewLoad(irtypes.I8, c.panicFlagGlobal)
+	panicked := entry.NewICmp(enum.IPredNE, panicFlag, constant.NewInt(irtypes.I8, 0))
+	panicBlk := trampoline.NewBlock("panic_detected")
 	checkSpBlk := trampoline.NewBlock("check_sp")
-	normalBlk.NewCondBr(tlsPanicked, tlsPanicBlk, checkSpBlk)
+	entry.NewCondBr(panicked, panicBlk, checkSpBlk)
 
-	// TLS panic detected: store msg, clear flag, signal done, return fail
-	tlsPanicMsgVal := tlsPanicBlk.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
-	tlsPanicBlk.NewStore(tlsPanicMsgVal, c.testPanicMsgGlobal)
-	tlsPanicBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)    // clear flag
-	tlsPanicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.panicMsgTlsGlobal) // clear msg
-	tlsPanicBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal)    // signal done
-	tlsPanicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
-	tlsFailInd := tlsPanicBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
-	tlsPanicBlk.NewRet(tlsFailInd)
+	// Panic detected: store msg, clear TLS state, signal done, return fail
+	panicMsgVal := panicBlk.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
+	panicBlk.NewStore(panicMsgVal, c.testPanicMsgGlobal)
+	panicBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)    // clear flag
+	panicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.panicMsgTlsGlobal) // clear msg
+	panicBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal)    // signal done
+	failInd := panicBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
+	panicBlk.NewRet(failInd)
 
 	if spBefore != nil && spAfter != nil {
 		// Compare stack pointers — any difference indicates stack creep
@@ -777,26 +731,17 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 		creepMsgPtr := stackCreepBlk.NewGetElementPtr(creepMsgGlobal.ContentType, creepMsgGlobal,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 		stackCreepBlk.NewStore(creepMsgPtr, c.testPanicMsgGlobal)
-		stackCreepBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
 		creepFail := stackCreepBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
 		stackCreepBlk.NewRet(creepFail)
 
-		// Stack OK: signal done, clear jmpbuf, return null (pass)
+		// Stack OK: signal done, return null (pass)
 		stackOkBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
-		stackOkBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
 		stackOkBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 	} else {
-		// SP check not available for this target: signal done, proceed without check
+		// SP check not available for this target: signal done, return null (pass)
 		checkSpBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
-		checkSpBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
 		checkSpBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 	}
-
-	// Panic recovery path: signal done, clear jmpbuf, return non-null (fail indicator)
-	panicBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
-	panicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
-	failIndicator := panicBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
-	panicBlk.NewRet(failIndicator)
 
 	return trampoline
 }

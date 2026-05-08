@@ -268,7 +268,6 @@ type Compiler struct {
 	currentPGlobal      *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
 	currentMGlobal      *ir.Global // @__promise_current_m (TLS, i8*) — current M for syscall handoff
 	schedGlobal         *ir.Global // @__promise_sched (global Sched struct)
-	testJmpBufGlobal    *ir.Global // @__promise_test_jmpbuf (TLS, i8*) — setjmp buf for per-test panic recovery
 	testPanicMsgGlobal  *ir.Global // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
 	testDoneGlobal      *ir.Global // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
 	panicFlagGlobal     *ir.Global // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
@@ -1404,48 +1403,6 @@ func (c *Compiler) declareIntrinsics() {
 
 	// LLVM coroutine intrinsics (Phase 5c — M:N scheduler)
 	c.declareCoroIntrinsics()
-
-	// setjmp/longjmp — used for goroutine-level panic recovery.
-	// On WASM: stubs (panic always exits, no longjmp recovery).
-	// On POSIX: _setjmp/_longjmp don't save/restore signal masks (faster).
-	// On Windows MSVC: _setjmp exists but _longjmp does not — use longjmp.
-	if c.isWasm {
-		c.funcs["setjmp"] = c.defineWasmSetjmp()
-		c.funcs["longjmp"] = c.defineWasmLongjmp()
-	} else if c.isWindows {
-		// MSVC x64: use __intrinsic_setjmp(i8* env, i8* frame) returns_twice.
-		// _setjmp is a CRT macro that calls __intrinsic_setjmp — must call directly.
-		// Call sites must pass @llvm.frameaddress(i32 0) as the second arg.
-		setjmpFn := c.module.NewFunc("__intrinsic_setjmp", irtypes.I32,
-			ir.NewParam("env", irtypes.I8Ptr),
-			ir.NewParam("frame", irtypes.I8Ptr))
-		setjmpFn.FuncAttrs = append(setjmpFn.FuncAttrs,
-			enum.FuncAttrNoUnwind, enum.FuncAttrReturnsTwice)
-		c.funcs["setjmp"] = setjmpFn
-
-		// Declare @llvm.frameaddress for use at call sites
-		frameAddr := c.module.NewFunc("llvm.frameaddress.p0i8", irtypes.I8Ptr,
-			ir.NewParam("level", irtypes.I32))
-		frameAddr.FuncAttrs = append(frameAddr.FuncAttrs, enum.FuncAttrNoUnwind)
-		c.funcs["llvm.frameaddress"] = frameAddr
-
-		longjmpFn := c.module.NewFunc("longjmp", irtypes.Void,
-			ir.NewParam("env", irtypes.I8Ptr),
-			ir.NewParam("val", irtypes.I32))
-		longjmpFn.FuncAttrs = append(longjmpFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
-		c.funcs["longjmp"] = longjmpFn
-	} else {
-		setjmpFn := c.module.NewFunc("_setjmp", irtypes.I32,
-			ir.NewParam("env", irtypes.I8Ptr))
-		setjmpFn.FuncAttrs = append(setjmpFn.FuncAttrs, enum.FuncAttrNoUnwind)
-		c.funcs["setjmp"] = setjmpFn
-
-		longjmpFn := c.module.NewFunc("_longjmp", irtypes.Void,
-			ir.NewParam("env", irtypes.I8Ptr),
-			ir.NewParam("val", irtypes.I32))
-		longjmpFn.FuncAttrs = append(longjmpFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
-		c.funcs["longjmp"] = longjmpFn
-	}
 
 	// PAL: emit write/exit early — needed by stack overflow handler below
 	c.palWrite = p.EmitWrite(c.module)

@@ -92,28 +92,6 @@ func (c *Compiler) defineWasmUsleep() *ir.Func {
 	return fn
 }
 
-// defineWasmSetjmp emits a stub _setjmp that always returns 0 (no panic recovery on WASM).
-func (c *Compiler) defineWasmSetjmp() *ir.Func {
-	env := ir.NewParam("env", irtypes.I8Ptr)
-	fn := c.module.NewFunc("_setjmp", irtypes.I32, env)
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock(".entry")
-	entry.NewRet(constant.NewInt(irtypes.I32, 0))
-	return fn
-}
-
-// defineWasmLongjmp emits a stub _longjmp that is unreachable.
-// On WASM, promise_panic always exits — longjmp is never called.
-func (c *Compiler) defineWasmLongjmp() *ir.Func {
-	env := ir.NewParam("env", irtypes.I8Ptr)
-	val := ir.NewParam("val", irtypes.I32)
-	fn := c.module.NewFunc("_longjmp", irtypes.Void, env, val)
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock(".entry")
-	entry.NewUnreachable()
-	return fn
-}
-
 // emitWasmStart creates the @_start WASI entry point.
 // _start calls @main (which has scheduler code). The allocator self-initializes.
 func (c *Compiler) emitWasmStart(mainFn *ir.Func) {

@@ -6158,6 +6158,10 @@ func (c *Compiler) forwardDeclareModuleEnumDrop(enum *types.Enum, enumName, plai
 			if foundEnum != enum {
 				continue
 			}
+			// Fieldless enums don't need a drop — skip forward-declaration.
+			if !foundEnum.NeedsSynthDrop() && !foundEnum.HasDrop() {
+				return nil
+			}
 			// Found the module that owns this enum — declare or find its drop
 			moduleMangledName := mangleModuleMethodName(irName, enumName, "drop", false)
 			if fn, ok := c.funcs[moduleMangledName]; ok {

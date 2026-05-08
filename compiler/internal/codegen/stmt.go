@@ -2459,7 +2459,7 @@ func (c *Compiler) tupleNeedsDrop(elemType types.Type) bool {
 				return true
 			}
 		}
-		if extractEnum(resolved) != nil {
+		if c.vecElemNeedsEnumDrop(resolved) {
 			return true
 		}
 	}

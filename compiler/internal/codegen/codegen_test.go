@@ -10857,6 +10857,20 @@ func TestVectorTupleElementStringDrop(t *testing.T) {
 	assertContains(t, ir, "call void @promise_string_drop")
 }
 
+// B0268: Vector[(int, FieldlessEnum)] must NOT reference an enum drop.
+// Fieldless enums (no variant fields) have no drop function — emitting a call
+// to a non-existent drop causes linker errors (undefined symbol).
+func TestVectorTupleFieldlessEnumNoDrop(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		main() {
+			(int, Color)[] v = [(1, Color.Red), (2, Color.Green)];
+		}
+	`)
+	// Fieldless enum in tuple should NOT generate a Color.drop call or declaration
+	assertNotContains(t, ir, "Color.drop")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

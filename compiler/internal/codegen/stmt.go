@@ -1279,7 +1279,21 @@ func (c *Compiler) emitOptionalDropCall(b scopeBinding) {
 	innerVal := c.block.NewExtractValue(optVal, 1)
 
 	// Dispatch inner drop based on stored type info
-	if b.dropFunc != nil {
+	if b.rttiDrop {
+		// B0243: RTTI-based drop dispatch for Optional[StructuralInterface].
+		// The concrete type is unknown at compile time — dispatch through typeinfo.
+		instance := c.extractInstancePtr(innerVal)
+		nullCheck := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
+		execBlock := c.newBlock("optdrop.rtti")
+		nullSkip := c.newBlock("optdrop.null")
+		c.block.NewCondBr(nullCheck, nullSkip, execBlock)
+
+		c.block = execBlock
+		c.emitStructuralInstanceDrop(instance)
+		c.block.NewBr(nullSkip)
+
+		c.block = nullSkip
+	} else if b.dropFunc != nil {
 		// String, vector, channel: inner is i8*, call drop directly
 		// Also covers user types with resolved direct drop
 		if isContainerType(b.valType) || b.named == types.TypString {
@@ -1352,13 +1366,26 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		// B0211: Heap user type without drop — use pal_free to free the instance.
 		dropFunc = c.palFree
 	case innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType():
-		// B0229: Structural interface (e.g., Iterator[T]) — use iter cleanup when
-		// available (frees env + parent chain + instance), fallback to pal_free.
-		if c.iterCleanup != nil {
-			dropFunc = c.iterCleanup
-		} else {
-			dropFunc = c.palFree
+		// B0229/B0243: Structural interface (e.g., Iterator[T]) — use RTTI-based drop
+		// dispatch. The concrete type is unknown at compile time (could be _FnIter,
+		// Counter, or any user type implementing the interface), so we dispatch through
+		// the typeinfo drop_fn_ptr at runtime.
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+		c.dropFlags[varName] = dropFlag
+		binding := scopeBinding{
+			kind:     bindingDropOptional,
+			alloca:   alloca,
+			named:    innerNamed,
+			valType:  elem,
+			dropFlag: dropFlag,
+			rttiDrop: true,
+			varName:  varName,
 		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[varName] = binding
+		return
 	default:
 		return // inner type not droppable
 	}
@@ -1409,16 +1436,8 @@ func (c *Compiler) maybeRegisterCapturedOptionalStructuralDrop(varName string, a
 		return
 	}
 
-	var dropFunc *ir.Func
-	if c.iterCleanup != nil {
-		dropFunc = c.iterCleanup
-	} else {
-		dropFunc = c.palFree
-	}
-	if dropFunc == nil {
-		return
-	}
-
+	// B0243: Use RTTI-based drop dispatch — the concrete type behind the structural
+	// interface is unknown at compile time.
 	dropFlag := c.createEntryAlloca(irtypes.I1)
 	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
@@ -1430,7 +1449,7 @@ func (c *Compiler) maybeRegisterCapturedOptionalStructuralDrop(varName string, a
 		named:    innerNamed,
 		valType:  elem,
 		dropFlag: dropFlag,
-		dropFunc: dropFunc,
+		rttiDrop: true,
 		varName:  varName,
 	}
 	// Only add to dropBindings (for reassignment drop), NOT scopeBindings (no scope-exit drop).
@@ -1772,6 +1791,45 @@ func (c *Compiler) emitRttiDropDispatch(instance value.Value) {
 	if baseDropFn, ok := c.funcs[baseDropName]; ok {
 		c.block.NewCall(baseDropFn, instance)
 	}
+	c.block.NewBr(doneBlock)
+
+	c.block = doneBlock
+}
+
+// emitStructuralInstanceDrop drops a heap-allocated instance behind a structural interface
+// using RTTI-based dispatch (B0243). Loads the typeinfo drop_fn_ptr from the instance's
+// variant field. If drop_fn is non-null, calls it (the drop function handles pal_free for
+// synthesized/native drops). If drop_fn is null (type has no drop), calls pal_free directly.
+func (c *Compiler) emitStructuralInstanceDrop(instance value.Value) {
+	// Load variant pointer from instance (field 0 = typeinfo ptr)
+	variantPtr := c.loadVariantPtr(instance)
+
+	// Typeinfo layout: { i8* vtable_ptr, i8* drop_fn_ptr, ... }
+	typeinfoType := irtypes.NewStruct(
+		irtypes.I8Ptr, // field 0: vtable_ptr
+		irtypes.I8Ptr, // field 1: drop_fn_ptr
+	)
+	typedPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoType))
+	dropFnField := c.block.NewGetElementPtr(typeinfoType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	dropFn := c.block.NewLoad(irtypes.I8Ptr, dropFnField)
+
+	isNull := c.block.NewICmp(enum.IPredEQ, dropFn, constant.NewNull(irtypes.I8Ptr))
+	callBlock := c.newBlock("struct.drop.call")
+	freeBlock := c.newBlock("struct.drop.free")
+	doneBlock := c.newBlock("struct.drop.done")
+	c.block.NewCondBr(isNull, freeBlock, callBlock)
+
+	// Has drop function: call it (handles pal_free for synth/native drops)
+	c.block = callBlock
+	dropFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
+	typedFn := c.block.NewBitCast(dropFn, irtypes.NewPointer(dropFnType))
+	c.block.NewCall(typedFn, instance)
+	c.block.NewBr(doneBlock)
+
+	// No drop function: just free the instance
+	c.block = freeBlock
+	c.block.NewCall(c.palFree, instance)
 	c.block.NewBr(doneBlock)
 
 	c.block = doneBlock

@@ -16567,6 +16567,41 @@ func TestOptionalStructuralInterfaceDropOnReassign(t *testing.T) {
 	`)
 	// B0229: Optional structural interface should have optdrop block for scope exit.
 	assertContains(t, ir, "optdrop")
+	// B0243: Should use RTTI-based drop dispatch (not __promise_iter_cleanup).
+	// The concrete type behind the interface is unknown at compile time.
+	assertContains(t, ir, "struct.drop")
+}
+
+// B0243: Optional structural interface drop in closure env must use RTTI dispatch,
+// not __promise_iter_cleanup (which assumes _FnIter layout and segfaults on other types).
+func TestOptionalStructuralInterfaceEnvDropRTTI(t *testing.T) {
+	ir := generateIR(t, `
+		type Iter is Iterator[int] {
+			int val;
+			next() int? { return none; }
+		}
+		make_iter() Iterator[int] {
+			return Iter(val: 1);
+		}
+		wrap() () -> int? {
+			Iterator[int]? current = none;
+			return move || -> int? {
+				current = make_iter();
+				if inner := current {
+					return inner.next();
+				}
+				return none;
+			};
+		}
+		main() {
+			() -> int? fn = wrap();
+			fn();
+		}
+	`)
+	// B0243: The env drop function should use RTTI-based dispatch for Optional[Iterator].
+	// It should NOT contain __promise_iter_cleanup for the optional structural field —
+	// that function assumes _FnIter memory layout and crashes on other concrete types.
+	assertContains(t, ir, "optst.rtti")
 }
 
 // B0240: Assigning none to an optional field with a heap user type should

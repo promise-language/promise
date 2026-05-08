@@ -6132,7 +6132,6 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 	if c.selfSubst != nil {
 		typ = types.SubstituteSelf(typ, c.selfSubst.iface, c.selfSubst.concrete)
 	}
-
 	// String/Vector/Channel → call specific drop function (i8* field, drop handles free)
 	named := extractNamed(typ)
 	if named == types.TypString {
@@ -6169,8 +6168,9 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 		return envFieldDrop{envDropUserValue, nil}
 	}
 
-	// B0229: Optional structural interface (e.g., Iterator[T]?) — check has_value,
-	// extract instance ptr from inner value struct, call iter cleanup or pal_free.
+	// B0243: Optional structural interface (e.g., Iterator[T]?) — use RTTI-based drop dispatch.
+	// The concrete type is unknown at compile time, so we can't use __promise_iter_cleanup
+	// (which assumes _FnIter layout). Instead, we dispatch through typeinfo.drop_fn_ptr.
 	if opt, ok := typ.(*types.Optional); ok {
 		elem := opt.Elem()
 		if c.typeSubst != nil {
@@ -6178,11 +6178,7 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 		}
 		innerNamed := extractNamed(elem)
 		if innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType() {
-			dropFn := c.iterCleanup
-			if dropFn == nil {
-				dropFn = c.palFree
-			}
-			return envFieldDrop{envDropOptionalStructural, dropFn}
+			return envFieldDrop{envDropOptionalStructural, nil}
 		}
 	}
 
@@ -6284,18 +6280,46 @@ func (c *Compiler) genEnvDropFunc(lambdaName string, envStructType *irtypes.Stru
 			dropBlk.NewBr(nextBlk)
 
 		case envDropOptionalStructural:
-			// B0229: Optional structural iface {i1 has_value, {i8* vtable, i8* instance}}:
-			// check has_value, extract instance from inner value, null-check, call cleanup.
+			// B0243: Optional structural iface {i1 has_value, {i8* vtable, i8* instance}}:
+			// check has_value, extract instance, RTTI-based drop dispatch.
+			// The concrete type is unknown, so we load drop_fn from typeinfo.
 			hasVal := curBlock.NewExtractValue(fieldVal, 0)
 			innerBlk := dropFn.NewBlock(fmt.Sprintf("optst.inner.%d", blockIdx))
 			curBlock.NewCondBr(hasVal, innerBlk, nextBlk)
 			innerVal := innerBlk.NewExtractValue(fieldVal, 1)
 			instPtr := innerBlk.NewExtractValue(innerVal, 1)
 			isNull := innerBlk.NewICmp(enum.IPredEQ, instPtr, constant.NewNull(irtypes.I8Ptr))
-			cleanupBlk := dropFn.NewBlock(fmt.Sprintf("optst.cleanup.%d", blockIdx))
-			innerBlk.NewCondBr(isNull, nextBlk, cleanupBlk)
-			cleanupBlk.NewCall(act.dropFn, instPtr)
-			cleanupBlk.NewBr(nextBlk)
+			rttiBlk := dropFn.NewBlock(fmt.Sprintf("optst.rtti.%d", blockIdx))
+			innerBlk.NewCondBr(isNull, nextBlk, rttiBlk)
+
+			// Load variant ptr (typeinfo) from instance[0]
+			instStructType := irtypes.NewStruct(irtypes.I8Ptr)
+			typedInst := rttiBlk.NewBitCast(instPtr, irtypes.NewPointer(instStructType))
+			variantField := rttiBlk.NewGetElementPtr(instStructType, typedInst,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			variantPtr := rttiBlk.NewLoad(irtypes.I8Ptr, variantField)
+
+			// Load drop_fn_ptr from typeinfo[1]
+			typeinfoType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+			typedTI := rttiBlk.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoType))
+			dropFnField := rttiBlk.NewGetElementPtr(typeinfoType, typedTI,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+			dropFnRaw := rttiBlk.NewLoad(irtypes.I8Ptr, dropFnField)
+			hasDropFn := rttiBlk.NewICmp(enum.IPredNE, dropFnRaw, constant.NewNull(irtypes.I8Ptr))
+
+			callDropBlk := dropFn.NewBlock(fmt.Sprintf("optst.drop.%d", blockIdx))
+			justFreeBlk := dropFn.NewBlock(fmt.Sprintf("optst.free.%d", blockIdx))
+			rttiBlk.NewCondBr(hasDropFn, callDropBlk, justFreeBlk)
+
+			// Has drop: call it (handles free for synth/native drops)
+			dropFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
+			typedDropFn := callDropBlk.NewBitCast(dropFnRaw, irtypes.NewPointer(dropFnType))
+			callDropBlk.NewCall(typedDropFn, instPtr)
+			callDropBlk.NewBr(nextBlk)
+
+			// No drop: just free the instance
+			justFreeBlk.NewCall(c.palFree, instPtr)
+			justFreeBlk.NewBr(nextBlk)
 		}
 
 		curBlock = nextBlk

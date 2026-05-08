@@ -59,6 +59,30 @@ match_dup_mixed_consume() `test {
   assert(result == "keep", "consumed string");
 }
 
+// Test: dup'd string consumed via tuple (pushed into vector) — drop flag must be cleared.
+// B0242: genTupleLit must clear drop flags for ident elements so that arm-scope
+// cleanup does not free the string that is now owned by the vector element.
+enum KVSlot {
+  KVEntry(string key, int val),
+  KVEmpty,
+}
+
+match_dup_string_consumed_via_tuple() `test {
+  KVSlot[] slots = [KVSlot.KVEntry(key: "x", val: 10), KVSlot.KVEmpty];
+  (string, int)[] result = [];
+  for slot in slots {
+    match slot {
+      KVEntry(k, v) => result.push((k, v)),
+      KVEmpty => {
+      },
+    }
+  }
+  assert(result.len == 1, "result len");
+  (k, v) := result[0];
+  assert(k == "x", "tuple key");
+  assert(v == 10, "tuple val");
+}
+
 // Test: match in a loop — each iteration must clean up unconsumed bindings.
 match_dup_string_in_loop() `test {
   int count = 0;

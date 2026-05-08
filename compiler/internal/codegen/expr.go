@@ -5052,6 +5052,13 @@ func (c *Compiler) genTupleLit(e *ast.TupleLit) value.Value {
 	var agg value.Value = constant.NewZeroInitializer(structType)
 	for i, elem := range e.Elements {
 		agg = c.block.NewInsertValue(agg, c.genExpr(elem), uint64(i))
+		// B0242: Clear drop flags for ident elements consumed by the tuple.
+		// When a dup'd match binding is embedded in a tuple (e.g., (k, v)),
+		// ownership transfers to the tuple — the binding must not be dropped
+		// at arm-scope cleanup. No-op if the ident has no drop flag.
+		if ident, ok := elem.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
 	}
 	return agg
 }

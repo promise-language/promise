@@ -10661,6 +10661,29 @@ func TestMatchDupStringConsumedViaIf(t *testing.T) {
 	assertContains(t, ir, "store i1 false")
 }
 
+// B0242: Dup'd match binding consumed via tuple literal (e.g., vector push).
+// genTupleLit must clear the drop flag for ident elements so arm-scope cleanup
+// doesn't free the string that is now owned by the tuple/vector.
+func TestMatchDupStringConsumedViaTuple(t *testing.T) {
+	ir := generateIR(t, `
+		enum Slot {
+			Empty,
+			Used(string key, int value),
+		}
+		test() (string, int) {
+			s := Slot.Used(key: "hello", value: 42);
+			return match s {
+				Used(k, v) => (k, v),
+				Empty => ("none", 0),
+			};
+		}
+	`)
+	assertContains(t, ir, "strdup.copy")
+	assertContains(t, ir, "k.dropflag")
+	// genTupleLit clears the drop flag when k is consumed by the tuple
+	assertContains(t, ir, "store i1 false")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

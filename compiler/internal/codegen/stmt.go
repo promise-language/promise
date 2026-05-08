@@ -35,6 +35,8 @@ func (c *Compiler) genBlock(block *ast.Block) {
 			break // block already terminated (return, break, etc.)
 		}
 		c.genStmt(stmt)
+		// B0035: NLL early drops — drop variables whose last use was this statement.
+		c.emitEarlyDrops(stmt)
 	}
 	// Emit cleanup calls for scope bindings added in this block (fall-through exit)
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
@@ -1485,6 +1487,56 @@ func (c *Compiler) maybeRegisterCapturedOptionalStructuralDrop(varName string, a
 func (c *Compiler) clearDropFlag(name string) {
 	if flag, ok := c.dropFlags[name]; ok {
 		c.block.NewStore(constant.NewInt(irtypes.I1, 0), flag)
+	}
+}
+
+// emitEarlyDrops checks if any variables should be dropped after the given statement
+// (NLL last-use analysis, B0035). For each variable whose last use is this statement,
+// emits the drop call and clears the drop flag so scope cleanup skips it.
+func (c *Compiler) emitEarlyDrops(stmt ast.Stmt) {
+	if c.block == nil || c.block.Term != nil {
+		return // block already terminated
+	}
+	if c.info.EarlyDrops == nil {
+		return
+	}
+	drops, ok := c.info.EarlyDrops[stmt]
+	if !ok {
+		return
+	}
+	// Process in reverse order to respect LIFO drop ordering:
+	// variables declared later should be dropped first.
+	for i := len(drops) - 1; i >= 0; i-- {
+		varName := drops[i]
+		binding, ok := c.dropBindings[varName]
+		if !ok {
+			continue // no drop binding (copy type, no-drop type, etc.)
+		}
+		// Skip use-bound (close) bindings — close() error handling is tied to scope exit.
+		if binding.kind == bindingClose {
+			continue
+		}
+		// Emit the appropriate drop call (checks drop flag internally).
+		switch binding.kind {
+		case bindingDrop:
+			c.emitDropCall(binding)
+		case bindingDropString:
+			c.emitStringDropCall(binding)
+		case bindingDropEnum:
+			c.emitEnumDropCall(binding)
+		case bindingDropOptional:
+			c.emitOptionalDropCall(binding)
+		case bindingFree:
+			c.emitFreeCall(binding)
+		case bindingFreeEnv:
+			c.emitEnvFree(binding)
+		case bindingGenerator:
+			c.emitGeneratorCleanup(binding)
+		}
+		// Clear the drop flag so scope cleanup skips this variable.
+		// The drop call above already checked the flag — clearing it here
+		// ensures the variable won't be double-dropped at scope exit.
+		c.clearDropFlag(varName)
 	}
 }
 

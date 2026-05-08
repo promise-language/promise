@@ -28,13 +28,16 @@ type Checker struct {
 }
 
 // Check performs ownership analysis on the given file using sema results.
-// Returns any ownership errors found.
+// Returns any ownership errors found. Also populates info.EarlyDrops with
+// NLL last-use analysis results for early drop insertion in codegen (B0035).
 func Check(file *ast.File, info *sema.Info) []error {
 	c := &Checker{
 		file: file,
 		info: info,
 	}
 	c.check()
+	// B0035: Run NLL last-use analysis after ownership check.
+	info.EarlyDrops = AnalyzeLastUses(file, info)
 	return c.errors
 }
 

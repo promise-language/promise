@@ -5958,6 +5958,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedBlockCounter := c.blockCounter
 	savedScopeBindings := c.scopeBindings
 	savedDropFlags := c.dropFlags
+	savedDropBindings := c.dropBindings // B0035: must save/restore for NLL early drops
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedWritebacks := c.lambdaWritebacks
 	savedGoExprFF2 := c.goExprFireAndForget
@@ -6080,6 +6081,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.blockCounter = savedBlockCounter
 	c.scopeBindings = savedScopeBindings
 	c.dropFlags = savedDropFlags
+	c.dropBindings = savedDropBindings // B0035: restore for NLL early drops
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.lambdaWritebacks = savedWritebacks
 	c.goExprFireAndForget = savedGoExprFF2
@@ -7355,6 +7357,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedBlockCounter := c.blockCounter
 	savedScopeBindings := c.scopeBindings
 	savedDropFlags := c.dropFlags
+	savedDropBindings := c.dropBindings // B0035: must save/restore for NLL early drops
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
@@ -7496,6 +7499,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.blockCounter = savedBlockCounter
 	c.scopeBindings = savedScopeBindings
 	c.dropFlags = savedDropFlags
+	c.dropBindings = savedDropBindings // B0035: restore for NLL early drops
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup
@@ -7856,6 +7860,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	savedBlockCounter := c.blockCounter
 	savedScopeBindings := c.scopeBindings
 	savedDropFlags := c.dropFlags
+	savedDropBindings := c.dropBindings // B0035: must save/restore for NLL early drops
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
@@ -8001,6 +8006,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.blockCounter = savedBlockCounter
 	c.scopeBindings = savedScopeBindings
 	c.dropFlags = savedDropFlags
+	c.dropBindings = savedDropBindings // B0035: restore for NLL early drops
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup

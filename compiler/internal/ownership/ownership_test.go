@@ -2629,3 +2629,133 @@ func TestMoveParamBorrowStillValid(t *testing.T) {
 		}
 	`)
 }
+
+// === NLL Last-Use Analysis (B0035) ===
+
+// checkOwnershipWithInfo parses source, runs sema + ownership, and returns
+// both errors and sema.Info (for inspecting EarlyDrops).
+func checkOwnershipWithInfo(t *testing.T, src string) ([]error, *sema.Info) {
+	t.Helper()
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	file, buildErrs := ast.Build("test.pr", tree)
+	if len(buildErrs) > 0 {
+		t.Fatalf("AST build errors: %v", buildErrs)
+	}
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	file.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
+	info, semaErrs := sema.CheckWithModules(file, map[string]*types.Scope{"std": getOwnerStdScope()})
+	if len(semaErrs) > 0 {
+		t.Fatalf("sema errors: %v", semaErrs)
+	}
+	errs := Check(file, info)
+	return errs, info
+}
+
+// hasEarlyDrop checks if any early drop entry contains the given variable name.
+func hasEarlyDrop(info *sema.Info, varName string) bool {
+	for _, names := range info.EarlyDrops {
+		for _, n := range names {
+			if n == varName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestNLLBasicEarlyDrop(t *testing.T) {
+	// Variable used in ExprStmt then not used — should be early-dropped.
+	_, info := checkOwnershipWithInfo(t, `
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			consume(s);
+			int x = 42;
+		}
+	`)
+	if !hasEarlyDrop(info, "s") {
+		t.Error("expected early drop for 's' after consume(s)")
+	}
+}
+
+func TestNLLNoEarlyDropLastStmt(t *testing.T) {
+	// Variable last used in the final statement — no early drop.
+	_, info := checkOwnershipWithInfo(t, `
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			consume(s);
+		}
+	`)
+	if hasEarlyDrop(info, "s") {
+		t.Error("should not early-drop 's' when it's used in the last statement")
+	}
+}
+
+func TestNLLNoEarlyDropNonCopyResult(t *testing.T) {
+	// Variable used in VarDecl with non-copy result — skip (reference retention risk).
+	_, info := checkOwnershipWithInfo(t, `
+		type Wrapper { string value; }
+		wrap(string s) Wrapper { return Wrapper(value: s); }
+		test() {
+			string s = "hello";
+			Wrapper w = wrap(s);
+			int x = 42;
+		}
+	`)
+	if hasEarlyDrop(info, "s") {
+		t.Error("should not early-drop 's' when last use is in VarDecl with non-copy result")
+	}
+}
+
+func TestNLLEarlyDropCopyResult(t *testing.T) {
+	// Variable used in VarDecl with copy result — safe to early-drop.
+	_, info := checkOwnershipWithInfo(t, `
+		get_len(string s) int { return 0; }
+		test() {
+			string s = "hello";
+			int n = get_len(s);
+			int x = 42;
+		}
+	`)
+	if !hasEarlyDrop(info, "s") {
+		t.Error("expected early drop for 's' after VarDecl with copy result")
+	}
+}
+
+func TestNLLStringInterpolation(t *testing.T) {
+	// Variable used in string interpolation — must be detected as a reference.
+	_, info := checkOwnershipWithInfo(t, `
+		test() {
+			string s = "world";
+			string msg = "hello {s}";
+			int x = 42;
+		}
+	`)
+	// s is used in the string interp at stmt 1, which produces a non-copy string.
+	// isSafeForEarlyDrop should return false (VarDecl with non-copy result).
+	if hasEarlyDrop(info, "s") {
+		t.Error("should not early-drop 's' when used in string interpolation stored in non-copy var")
+	}
+}
+
+func TestNLLCompoundAssignment(t *testing.T) {
+	// Variable used in compound assignment — safe to early-drop.
+	_, info := checkOwnershipWithInfo(t, `
+		get_val(string s) int { return 0; }
+		test() {
+			string s = "hello";
+			int x = get_val(s);
+			x += 1;
+		}
+	`)
+	if !hasEarlyDrop(info, "s") {
+		t.Error("expected early drop for 's' after get_val(s)")
+	}
+}

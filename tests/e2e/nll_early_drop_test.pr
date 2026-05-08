@@ -1,0 +1,28 @@
+// Tests for NLL (Non-Lexical Lifetime) early drop behavior (B0035).
+// Verifies that variables are dropped at their last use point, not at scope exit.
+type Tracker {
+  int id;
+
+  drop(~this) {
+    print_line("drop " + this.id.to_string());
+  }
+}
+
+main() `test(expected: "use 1\ndrop 1\nafter\ndrop 2\nid=2\nuse 3\ndrop 3") {
+  // Test 1: Basic early drop — variable dropped after last use (ExprStmt).
+  Tracker t1 = Tracker(id: 1);
+  print_line("use " + t1.id.to_string());
+  // t1's last use is above (ExprStmt) — NLL drops it here, before "after"
+  print_line("after");
+
+  // Test 2: Copy result VarDecl — safe to early-drop.
+  Tracker t2 = Tracker(id: 2);
+  int x = t2.id;
+  // t2's last use is above (VarDecl with copy int result) — NLL drops it here
+  print_line("id=" + x.to_string());
+
+  // Test 3: Variable used in last statement — drop at scope exit (same position).
+  Tracker t3 = Tracker(id: 3);
+  print_line("use " + t3.id.to_string());
+  // t3 is used in the last statement — drop happens at scope exit, right after
+}

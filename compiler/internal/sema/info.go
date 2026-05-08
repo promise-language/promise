@@ -226,6 +226,12 @@ type Info struct {
 	// to their embed metadata. Codegen uses this to generate getter bodies
 	// that return the embedded file contents.
 	Embeds map[*ast.FuncDecl]*EmbedInfo
+
+	// EarlyDrops maps statement AST nodes to variables that should be dropped
+	// immediately after that statement executes, rather than at scope exit.
+	// Populated by NLL last-use analysis in ownership.AnalyzeLastUses (B0035).
+	// Codegen checks this after each statement emission to insert early drops.
+	EarlyDrops map[ast.Stmt][]string
 }
 
 // EmbedKind indicates the target type for an `embed annotation.

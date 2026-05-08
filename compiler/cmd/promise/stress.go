@@ -241,7 +241,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 						relPath:  relPath,
 						binary:   cachedBin,
 						isE2E:    true,
-						expected: strings.TrimRight(meta.ExpectedOutput, "\n"),
+						expected: strings.TrimRight(strings.ReplaceAll(meta.ExpectedOutput, "\r", ""), "\n"),
 						tests:    []string{strings.TrimSuffix(filepath.Base(f), ".pr")},
 					})
 				} else if meta != nil && len(meta.Tests) > 0 {
@@ -301,7 +301,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 				relPath:  relPath,
 				binary:   tmp.Name(),
 				isE2E:    true,
-				expected: strings.TrimRight(info.ExpectOutput, "\n"),
+				expected: strings.TrimRight(strings.ReplaceAll(info.ExpectOutput, "\r", ""), "\n"),
 				tests:    []string{strings.TrimSuffix(filepath.Base(f), ".pr")},
 			})
 		} else if len(info.Tests) > 0 {
@@ -489,7 +489,8 @@ func runStress(files []string, count int, duration time.Duration, cfg testTimeou
 				// panic message and the binary exits non-zero.
 				name := t.tests[0]
 				st := fs.stats[name]
-				combined := strings.TrimRight(stdout+stderr, "\n")
+				// Strip \r for Windows — same normalization as main test runner (T0046).
+				combined := strings.TrimRight(strings.ReplaceAll(stdout+stderr, "\r", ""), "\n")
 				if timedOut {
 					// Timeout counts as failure; don't add timeout duration to timings
 					// as it would inflate CoV (the timeout ceiling is not real variance).

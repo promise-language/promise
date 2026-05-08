@@ -13,7 +13,6 @@ import (
 // Format formats Promise source code into canonical form.
 func Format(src []byte) []byte {
 	tokens := tokenize(string(src))
-	tokens = migrateFailableTokens(tokens) // T0119: move ! from return type to function name
 	tokens = sortUseImports(tokens)
 	return []byte(reformat(tokens))
 }

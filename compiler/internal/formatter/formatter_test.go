@@ -1,7 +1,6 @@
 package formatter
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -683,7 +682,7 @@ func TestFormat(t *testing.T) {
 		},
 		{
 			name:     "failable method with bang",
-			input:    "parse() int! {\n}",
+			input:    "parse!() int {\n}",
 			expected: "parse!() int {\n}\n",
 		},
 		{
@@ -931,7 +930,7 @@ func TestFormat(t *testing.T) {
 		},
 		{
 			name:     "failable return type",
-			input:    "parse() int!{",
+			input:    "parse!() int{",
 			expected: "parse!() int {\n",
 		},
 		{
@@ -1030,73 +1029,5 @@ func TestIdempotent(t *testing.T) {
 		if first != second {
 			t.Errorf("input %d not idempotent:\nfirst:  %q\nsecond: %q", i, first, second)
 		}
-	}
-}
-
-// TestMigrateFailableSyntax verifies that the formatter migrates old-style
-// failable syntax (foo() int!) to new-style (foo!() int).
-func TestMigrateFailableSyntax(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{
-			name:  "function_with_return_type",
-			input: "foo() int! {\n  return 42;\n}\n",
-			want:  "foo!() int {\n  return 42;\n}\n",
-		},
-		{
-			name:  "void_failable",
-			input: "fail() ! {\n  raise error(\"boom\");\n}\n",
-			want:  "fail!() {\n  raise error(\"boom\");\n}\n",
-		},
-		{
-			name:  "method_with_receiver",
-			input: "speak(&this) string! {\n  return \"hi\";\n}\n",
-			want:  "speak!(&this) string {\n  return \"hi\";\n}\n",
-		},
-		{
-			name:  "getter",
-			input: "get value int! {\n  return 42;\n}\n",
-			want:  "get value! int {\n  return 42;\n}\n",
-		},
-		{
-			name:  "generic_function",
-			input: "parse[T](string s) T! `public {\n  return s;\n}\n",
-			want:  "parse![T](string s) T `public {\n  return s;\n}\n",
-		},
-		{
-			name:  "abstract_method",
-			input: "decode_bool(~this) bool! `abstract;\n",
-			want:  "decode_bool!(~this) bool `abstract;\n",
-		},
-		{
-			name:  "expression_bang_unchanged",
-			input: "main() {\n  val := foo()!;\n}\n",
-			want:  "main() {\n  val := foo()!;\n}\n",
-		},
-		{
-			name:  "new_syntax_unchanged",
-			input: "foo!() int {\n  return 42;\n}\n",
-			want:  "foo!() int {\n  return 42;\n}\n",
-		},
-		{
-			name:  "expression_body_failable",
-			input: "foo() int! => 42;\n",
-			want:  "foo!() int => 42;\n",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := string(Format([]byte(tt.input)))
-			// Normalize: compare trimmed lines to ignore trailing whitespace differences
-			gotLines := strings.TrimSpace(got)
-			wantLines := strings.TrimSpace(tt.want)
-			if gotLines != wantLines {
-				t.Errorf("migration failed:\n  input: %q\n  want:  %q\n  got:   %q", tt.input, wantLines, gotLines)
-			}
-		})
 	}
 }

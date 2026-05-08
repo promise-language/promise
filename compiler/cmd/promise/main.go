@@ -5394,6 +5394,11 @@ func runInstall(args []string) {
 	// Copy binary to stub shim location (~/.promise/bin/promise).
 	copyFile(execPath, filepath.Join(stubBinDir, binaryName), 0755)
 
+	// Write shim marker so shimDispatch() knows this is an installed binary (B0251).
+	if err := os.WriteFile(filepath.Join(stubBinDir, ".promise.shim"), []byte("shim\n"), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write shim marker: %v\n", err)
+	}
+
 	// Extract embedded std files.
 	extractEmbedded(embeddedModules, "resources/modules/std", epochStdDest)
 

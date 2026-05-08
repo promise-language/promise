@@ -130,6 +130,21 @@ func TestResolveDesiredEpochDevEpoch(t *testing.T) {
 	}
 }
 
+func TestHasShimMarkerAtPresent(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, ".promise.shim"), []byte("shim\n"), 0644)
+	if !hasShimMarkerAt(dir) {
+		t.Fatal("expected hasShimMarkerAt to return true when marker exists")
+	}
+}
+
+func TestHasShimMarkerAtAbsent(t *testing.T) {
+	dir := t.TempDir()
+	if hasShimMarkerAt(dir) {
+		t.Fatal("expected hasShimMarkerAt to return false when no marker exists")
+	}
+}
+
 func TestDirSize(t *testing.T) {
 	tmp := t.TempDir()
 	// Write two 100-byte files.

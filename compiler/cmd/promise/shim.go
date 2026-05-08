@@ -25,8 +25,12 @@ var shimExcludedCommands = map[string]bool{
 // a different epoch's compiler. Called at the very top of main(), before command
 // parsing. Returns without action when:
 //   - PROMISE_NO_SHIM=1 (prevents infinite recursion)
+//   - no .promise.shim marker file next to binary (B0251: dev builds never shim)
 //   - the command is in shimExcludedCommands
 //   - the desired epoch matches the current binary's epoch
+//
+// Exception: PROMISE_EPOCH set to an absolute path always works (explicit
+// developer override), even without a marker file.
 //
 // On epoch mismatch, execs into the target epoch's binary (Unix: syscall.Exec,
 // Windows: os.StartProcess + wait). Sets PROMISE_NO_SHIM=1 in the child env.
@@ -36,41 +40,51 @@ func shimDispatch() {
 		return
 	}
 
-	// 2. Check for excluded commands (always run on current binary).
+	// 2. Guard: only shim if marker file exists next to this binary (B0251).
+	//    Only installed binaries (~/.promise/bin/promise) get .promise.shim
+	//    from `promise install`. Dev builds and epoch binaries do not.
+	markerPresent := hasShimMarker()
+
+	// 2a. PROMISE_EPOCH as absolute path bypasses the marker check (explicit override).
+	if env := os.Getenv("PROMISE_EPOCH"); env != "" && filepath.IsAbs(env) {
+		if _, err := os.Stat(env); err != nil {
+			fmt.Fprintf(os.Stderr, "error: PROMISE_EPOCH binary not found: %s\n", env)
+			os.Exit(1)
+		}
+		shimExec(env, os.Args, shimEnv())
+		return // unreachable on Unix (shimExec replaces process)
+	}
+
+	// 2b. No marker → not an installed binary; skip shimming entirely.
+	if !markerPresent {
+		return
+	}
+
+	// 3. Check for excluded commands (always run on current binary).
 	if len(os.Args) >= 2 {
 		if shimExcludedCommands[os.Args[1]] {
 			return
 		}
 	}
 
-	// 3. Determine the desired epoch.
+	// 4. Determine the desired epoch.
 	desiredEpoch := resolveDesiredEpoch()
 	if desiredEpoch == "" {
 		return // no epoch could be determined; fall through to normal execution
 	}
 
-	// 3a. PROMISE_EPOCH can be an absolute path to a binary — exec it directly.
-	if filepath.IsAbs(desiredEpoch) {
-		if _, err := os.Stat(desiredEpoch); err != nil {
-			fmt.Fprintf(os.Stderr, "error: PROMISE_EPOCH binary not found: %s\n", desiredEpoch)
-			os.Exit(1)
-		}
-		shimExec(desiredEpoch, os.Args, shimEnv())
-		return // unreachable on Unix (shimExec replaces process)
-	}
-
-	// 4. Determine this binary's epoch.
+	// 5. Determine this binary's epoch.
 	myEpoch, err := module.CompilerEpoch(embeddedCatalog)
 	if err != nil {
 		return // can't determine own epoch; fall through
 	}
 
-	// 5. If same epoch, proceed normally.
+	// 6. If same epoch, proceed normally.
 	if desiredEpoch == myEpoch {
 		return
 	}
 
-	// 6. Find the target epoch's binary.
+	// 7. Find the target epoch's binary.
 	epochDir, err := module.EpochDir(desiredEpoch)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot resolve epoch directory: %v\n", err)
@@ -86,7 +100,7 @@ func shimDispatch() {
 		os.Exit(1)
 	}
 
-	// 7. Exec into the target binary with PROMISE_NO_SHIM=1.
+	// 8. Exec into the target binary with PROMISE_NO_SHIM=1.
 	shimExec(targetBin, os.Args, shimEnv())
 }
 
@@ -115,6 +129,27 @@ func resolveDesiredEpoch() string {
 		return "" // no epoch determinable
 	}
 	return epoch
+}
+
+// hasShimMarkerAt returns true if a .promise.shim marker file exists in binDir.
+func hasShimMarkerAt(binDir string) bool {
+	_, err := os.Stat(filepath.Join(binDir, ".promise.shim"))
+	return err == nil
+}
+
+// hasShimMarker returns true if a .promise.shim marker file exists next to
+// this binary. Only installed binaries (placed by `promise install`) have this
+// marker. Dev builds and epoch binaries do not (B0251).
+func hasShimMarker() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return false
+	}
+	return hasShimMarkerAt(filepath.Dir(exe))
 }
 
 // shimEnv returns the current environment with PROMISE_NO_SHIM=1 added.

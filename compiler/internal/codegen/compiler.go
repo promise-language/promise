@@ -156,6 +156,10 @@ type Compiler struct {
 	// Drop binding tracking: maps variable name to its scope binding (for reassignment drop)
 	dropBindings map[string]scopeBinding
 
+	// B0232: Match dup tracking — binding names created by dupAndTrackMatchBinding
+	// during the current match expression. Reset at match start, used for post-match cleanup.
+	matchDupNames []string
+
 	// T0073: Statement-level temporary tracking for heap-allocated strings.
 	// Tracks string temporaries from subexpressions (e.g., `42.to_string()` in
 	// `assert(42.to_string() == "42")`) and drops them at statement end.
@@ -5136,12 +5140,10 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		// fields are safe. Heap user types are NOT safe — Map.[] returns copies that
 		// share instance pointers, so dropping at destruction would double-free.
 		if elemType, isVec := types.AsVector(fieldType); isVec {
-			c.emitVectorStringElementDropLoop(fieldInstance, elemType)
-			// B0218: TODO — also drop enum elements in vectors (e.g., Slot[K,V] in Map._buckets)
-			// using emitVectorElementDropLoopBody + enumVariantFieldsSafeForDrop guard.
-			// Currently disabled: Map.[] returns copies that share instance pointers with
-			// stored Slot data, so dropping at destruction causes double-free for heap user
-			// type values. Needs deep-copy on Map.[] or borrow tracking to enable safely.
+			// B0232: Drop enum elements with synthesized drops (e.g., Slot[K,V] in Map._buckets).
+			// String fields extracted via match are dup'd (see bindEnumDestructure B0232),
+			// so the originals in the enum data can be safely freed here.
+			c.emitVectorElementDropLoop(fieldInstance, elemType)
 		}
 
 		ownerName := c.resolveMethodOwner(fieldNamed, "drop")

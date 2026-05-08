@@ -3907,14 +3907,34 @@ func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
 			typedPtr := c.block.NewBitCast(subject, irtypes.NewPointer(loadType))
 			subject = c.block.NewLoad(loadType, typedPtr)
 		}
-		return c.genEnumMatch(e, subject, enum, enumLayout)
+		// B0232: Check if this enum instance has a drop (synthesized or explicit).
+		// If so, string fields extracted via match destructuring must be dup'd
+		// to prevent double-frees when the enum element is later dropped
+		// (e.g., Slot[K,V] in Map._buckets).
+		enumHasDrop := c.enumInstanceHasDrop(subjectType, enum)
+		return c.genEnumMatch(e, subject, enum, enumLayout, enumHasDrop, subjectType)
 	}
 
 	return c.genValueMatch(e, subject, subjectType)
 }
 
+// enumInstanceHasDrop returns true if an enum type (possibly monomorphized) has a drop function.
+// Checks both sema-level detection and codegen-time mono synthesized drops.
+func (c *Compiler) enumInstanceHasDrop(subjectType types.Type, enum *types.Enum) bool {
+	if enum.HasDrop() || enum.NeedsSynthDrop() {
+		return true
+	}
+	// Check for codegen-time mono synthesized drop (generic enums with droppable TypeParam fields)
+	if inst, ok := subjectType.(*types.Instance); ok {
+		mangledName := mangleMethodName(monoName(inst), "drop", false)
+		_, ok := c.funcs[mangledName]
+		return ok
+	}
+	return false
+}
+
 // genEnumMatch generates a match expression on an enum value using an LLVM switch instruction.
-func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout) value.Value {
+func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) value.Value {
 	// Extract tag from subject
 	var tag value.Value
 	if layout.MaxVariantDataSize == 0 {
@@ -3929,6 +3949,10 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 	var defaultTarget *ir.Block
 	var cases []*ir.Case
 	var arms []matchArmInfo
+
+	// B0232: Track dup'd match bindings for cleanup after the match
+	savedMatchDupNames := c.matchDupNames
+	c.matchDupNames = nil
 
 	for i, arm := range e.Arms {
 		armBlock := c.newBlock(fmt.Sprintf("match.arm%d", i))
@@ -3968,7 +3992,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 			idx := c.addCoverageRegion(pos.File, pos.Line, endPos, c.currentCoverageFuncName(), "match.arm")
 			c.emitCoverageIncrement(idx)
 		}
-		c.bindMatchPattern(arm.Pattern, subject, enum, layout)
+		c.bindMatchPattern(arm.Pattern, subject, enum, layout, enumHasDrop, subjectType)
 
 		var armVal value.Value
 		if arm.Body != nil {
@@ -3997,7 +4021,19 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 	switchBlock.NewSwitch(tag, defaultTarget, cases...)
 
 	c.block = mergeBlock
-	return buildMatchPhi(mergeBlock, arms)
+	result := buildMatchPhi(mergeBlock, arms)
+
+	// B0232: Emit cleanup for dup'd match bindings after the match.
+	// This runs after each match (every loop iteration in for loops), freeing
+	// unconsumed dup'd strings and resetting flags to prevent double-frees.
+	if len(c.matchDupNames) > 0 && c.block != nil && c.block.Term == nil {
+		for _, name := range c.matchDupNames {
+			c.emitMatchDupCleanup(name)
+		}
+	}
+	c.matchDupNames = savedMatchDupNames
+
+	return result
 }
 
 // matchArmInfo tracks a match arm's result value and final block for PHI construction.
@@ -4190,13 +4226,13 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 }
 
 // bindMatchPattern binds pattern variables from a match arm into the current scope.
-func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subject value.Value, enum *types.Enum, layout *TypeDeclLayout) {
+func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) {
 	switch p := pat.(type) {
 	case *ast.EnumDestructureMatchPattern:
-		c.bindEnumDestructure(p.Bindings, p.Variant, subject, enum, layout)
+		c.bindEnumDestructure(p.Bindings, p.Variant, subject, enum, layout, enumHasDrop, subjectType)
 
 	case *ast.ShortDestructureMatchPattern:
-		c.bindEnumDestructure(p.Bindings, p.Name, subject, enum, layout)
+		c.bindEnumDestructure(p.Bindings, p.Name, subject, enum, layout, enumHasDrop, subjectType)
 
 	case *ast.NameMatchPattern:
 		if p.Name != "_" {
@@ -4215,7 +4251,11 @@ func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subject value.Value, e
 }
 
 // bindEnumDestructure extracts variant data fields and binds them to local variables.
-func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, subject value.Value, enum *types.Enum, layout *TypeDeclLayout) {
+// B0232: When enumHasDrop is true and a field resolves to string, the extracted value
+// is dup'd to prevent double-frees when the enum element is later dropped (e.g., Slot
+// elements in Map._buckets). Dup'd bindings get drop flags and scope bindings for
+// proper cleanup in loops and at scope exit.
+func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) {
 	variant := enum.LookupVariant(variantName)
 	if variant == nil || variant.NumFields() == 0 {
 		return
@@ -4250,10 +4290,124 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 		val := c.block.NewLoad(fieldType, fieldPtr)
 
+		// B0232: Dup string fields from droppable enums to create independent copies.
+		// Without this, match-extracted strings share instance pointers with the enum
+		// data. When the enum element is dropped (e.g., Map._buckets scope exit or
+		// Map destruction), the shared string would be double-freed.
+		if enumHasDrop && c.matchFieldNeedsDup(variant.Fields()[i].Type(), subjectType, enum) {
+			c.dupAndTrackMatchBinding(binding, val, fieldType)
+			continue
+		}
+
 		bindAlloca := c.createEntryAlloca(fieldType)
 		c.block.NewStore(val, bindAlloca)
 		c.locals[binding] = bindAlloca
 	}
+}
+
+// matchFieldNeedsDup returns true if a match-destructured field should be dup'd.
+// Currently only strings — other droppable types (heap user types) lack a dup mechanism.
+// B0232: Must build the substitution from the enum instance's TypeParams (not the owner
+// type's TypeParams) since variant fields reference the enum's own TypeParams.
+func (c *Compiler) matchFieldNeedsDup(fieldType types.Type, subjectType types.Type, enum *types.Enum) bool {
+	// Build substitution from the enum instance's type args → resolves enum's own TypeParams
+	var subst map[*types.TypeParam]types.Type
+	if inst, ok := subjectType.(*types.Instance); ok && enum != nil && len(enum.TypeParams()) > 0 {
+		subst = types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
+	} else if c.typeSubst != nil {
+		subst = c.typeSubst
+	}
+	resolved := fieldType
+	if subst != nil {
+		resolved = types.Substitute(resolved, subst)
+	}
+	return extractNamed(resolved) == types.TypString
+}
+
+// dupAndTrackMatchBinding dups a string value from a match destructure and tracks it
+// for cleanup. On subsequent calls with the same name (loop iterations), frees the
+// previous dup'd value before storing the new one. Does NOT use scope bindings —
+// cleanup is handled by emitMatchDupCleanup called after the match merge block.
+func (c *Compiler) dupAndTrackMatchBinding(name string, val value.Value, llvmType irtypes.Type) {
+	// If we previously dup'd this binding (loop iteration), free old value first
+	if dropFlag, ok := c.dropFlags[name]; ok {
+		flag := c.block.NewLoad(irtypes.I1, dropFlag)
+		freeBlock := c.newBlock("matchdup.free")
+		contBlock := c.newBlock("matchdup.cont")
+		c.block.NewCondBr(flag, freeBlock, contBlock)
+
+		c.block = freeBlock
+		oldAlloca := c.locals[name]
+		oldPtr := c.block.NewLoad(oldAlloca.ElemType, oldAlloca)
+		if dropFn, ok := c.funcs["promise_string_drop"]; ok {
+			c.block.NewCall(dropFn, oldPtr)
+		}
+		c.block.NewBr(contBlock)
+
+		c.block = contBlock
+	}
+
+	// Dup the string to create an independent copy
+	dupVal := c.dupString(val)
+
+	if _, ok := c.dropFlags[name]; !ok {
+		// First encounter: create alloca and drop flag
+		bindAlloca := c.createEntryAlloca(llvmType)
+		c.locals[name] = bindAlloca
+
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		// Initialize flag to 0 in entry block (before any loop iteration)
+		c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+		c.dropFlags[name] = dropFlag
+
+		// Record for post-match cleanup (emitMatchDupCleanup)
+		c.matchDupNames = append(c.matchDupNames, name)
+	}
+
+	// Store dup'd value and mark as needing cleanup
+	c.block.NewStore(dupVal, c.locals[name])
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), c.dropFlags[name])
+}
+
+// emitMatchDupCleanup emits cleanup code for dup'd match bindings after the match
+// merge block. Checks the flag, frees the dup'd string if set, resets the flag.
+// This handles per-iteration cleanup in loops and final cleanup after loops.
+func (c *Compiler) emitMatchDupCleanup(name string) {
+	dropFlag, ok := c.dropFlags[name]
+	if !ok {
+		return
+	}
+	alloca, ok := c.locals[name]
+	if !ok {
+		return
+	}
+	dropFn := c.funcs["promise_string_drop"]
+	if dropFn == nil {
+		return
+	}
+
+	flag := c.block.NewLoad(irtypes.I1, dropFlag)
+	freeBlock := c.newBlock("matchdup.cleanup")
+	skipBlock := c.newBlock("matchdup.done")
+	c.block.NewCondBr(flag, freeBlock, skipBlock)
+
+	c.block = freeBlock
+	ptr := c.block.NewLoad(alloca.ElemType, alloca)
+	nullCheck := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+	execBlock := c.newBlock("matchdup.exec")
+	doneBlock := c.newBlock("matchdup.freed")
+	c.block.NewCondBr(nullCheck, doneBlock, execBlock)
+
+	c.block = execBlock
+	c.block.NewCall(dropFn, ptr)
+	c.block.NewBr(doneBlock)
+
+	c.block = doneBlock
+	// Reset flag to 0 so the next loop iteration doesn't double-free
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
 }
 
 // --- If expressions ---

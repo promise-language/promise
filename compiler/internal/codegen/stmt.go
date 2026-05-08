@@ -5144,6 +5144,11 @@ func (c *Compiler) genMethodIndexAssign(target *ast.IndexExpr, targetType types.
 	}
 
 	c.block.NewCall(fn, instancePtr, keyVal, val)
+	// B0232: Claim string/heap temps for the key — ownership transfers to the []= method.
+	// Without this, temporary keys (e.g., "a".repeat(2)) are freed at statement end
+	// while still stored in the container, causing dangling pointers.
+	c.claimStringTemp(keyVal)
+	c.claimHeapTemp(keyVal)
 }
 
 // genVectorIndexAssign handles vec[i] = val with bounds check.

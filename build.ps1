@@ -41,16 +41,22 @@ try {
 
 # ---- 1. Verify prerequisites ------------------------------------------------
 
+# Refresh PATH from registry so installs from install-prereqs.ps1 are visible
+# even in sessions that haven't been restarted.
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+            [System.Environment]::GetEnvironmentVariable("Path", "User")
+
 Write-Step "Checking prerequisites..."
 
 Assert-Command "go" "Install Go 1.25+ from https://go.dev/dl/"
 
-# LLVM: need opt, llc, lld-link
-$llvmBin = Join-Path $env:ProgramFiles "LLVM\bin"
-if (Test-Path $llvmBin) {
-    # Ensure LLVM is on PATH for this process
-    if ($env:Path -notlike "*$llvmBin*") {
-        $env:Path = "$llvmBin;$env:Path"
+# LLVM: need opt, llc, lld-link — check both system and user-local install paths
+foreach ($candidate in @(
+    (Join-Path $env:ProgramFiles "LLVM\bin"),
+    (Join-Path $env:USERPROFILE "LLVM\bin")
+)) {
+    if ((Test-Path $candidate) -and $env:Path -notlike "*$candidate*") {
+        $env:Path = "$candidate;$env:Path"
     }
 }
 

@@ -3789,7 +3789,7 @@ func findWindowsSDK() (*windowsSDKInfo, error) {
 		// Try vswhere.exe (ships with VS 2017+ and Build Tools)
 		vswhere := filepath.Join(programFilesX86, "Microsoft Visual Studio", "Installer", "vswhere.exe")
 		if _, err := os.Stat(vswhere); err == nil {
-			out, err := exec.Command(vswhere, "-latest", "-property", "installationPath").Output()
+			out, err := exec.Command(vswhere, "-products", "*", "-latest", "-property", "installationPath").Output()
 			if err == nil {
 				vsPath := strings.TrimSpace(string(out))
 				msvcRoot := filepath.Join(vsPath, "VC", "Tools", "MSVC")
@@ -3806,17 +3806,26 @@ func findWindowsSDK() (*windowsSDKInfo, error) {
 		}
 	}
 
-	// Probe common VS paths as fallback
+	// Probe common VS paths as fallback (both Program Files and Program Files (x86))
 	if info.msvcLibDir == "" {
-		for _, edition := range []string{"BuildTools", "Community", "Professional", "Enterprise"} {
-			vsRoot := filepath.Join(programFiles, "Microsoft Visual Studio", "2022", edition, "VC", "Tools", "MSVC")
-			if versions, err := os.ReadDir(vsRoot); err == nil {
-				for i := len(versions) - 1; i >= 0; i-- {
-					dir := filepath.Join(vsRoot, versions[i].Name(), "lib", arch)
-					if containsFile(dir, "libcmt.lib") {
-						info.msvcLibDir = dir
-						break
+		probeDirs := []string{programFiles}
+		if programFilesX86 != programFiles {
+			probeDirs = append(probeDirs, programFilesX86)
+		}
+		for _, pf := range probeDirs {
+			for _, edition := range []string{"BuildTools", "Community", "Professional", "Enterprise"} {
+				vsRoot := filepath.Join(pf, "Microsoft Visual Studio", "2022", edition, "VC", "Tools", "MSVC")
+				if versions, err := os.ReadDir(vsRoot); err == nil {
+					for i := len(versions) - 1; i >= 0; i-- {
+						dir := filepath.Join(vsRoot, versions[i].Name(), "lib", arch)
+						if containsFile(dir, "libcmt.lib") {
+							info.msvcLibDir = dir
+							break
+						}
 					}
+				}
+				if info.msvcLibDir != "" {
+					break
 				}
 			}
 			if info.msvcLibDir != "" {

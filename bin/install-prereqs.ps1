@@ -137,7 +137,7 @@ function Find-WindowsSDK {
         $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
     }
     if (Test-Path $vswhere) {
-        $vsPath = & $vswhere -latest -property installationPath 2>$null
+        $vsPath = & $vswhere -products * -latest -property installationPath 2>$null
         if ($vsPath) {
             $msvcRoot = Join-Path $vsPath "VC\Tools\MSVC"
             if (Test-Path $msvcRoot) {
@@ -153,20 +153,26 @@ function Find-WindowsSDK {
         }
     }
 
-    # Fallback: probe common VS paths
+    # Fallback: probe common VS paths (both Program Files and Program Files (x86))
     if (-not $result.msvc) {
-        $programFiles = if ($env:ProgramFiles) { $env:ProgramFiles } else { "C:\Program Files" }
-        foreach ($edition in @("BuildTools", "Community", "Professional", "Enterprise")) {
-            $msvcRoot = Join-Path $programFiles "Microsoft Visual Studio\2022\$edition\VC\Tools\MSVC"
-            if (Test-Path $msvcRoot) {
-                $versions = Get-ChildItem $msvcRoot -Directory | Sort-Object Name -Descending
-                foreach ($ver in $versions) {
-                    $dir = Join-Path $ver.FullName "lib\$arch"
-                    if (Test-Path (Join-Path $dir "libcmt.lib")) {
-                        $result.msvc = $dir
-                        break
+        $programFilesDirs = @(
+            (if ($env:ProgramFiles) { $env:ProgramFiles } else { "C:\Program Files" }),
+            (if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { "C:\Program Files (x86)" })
+        ) | Select-Object -Unique
+        foreach ($programFiles in $programFilesDirs) {
+            foreach ($edition in @("BuildTools", "Community", "Professional", "Enterprise")) {
+                $msvcRoot = Join-Path $programFiles "Microsoft Visual Studio\2022\$edition\VC\Tools\MSVC"
+                if (Test-Path $msvcRoot) {
+                    $versions = Get-ChildItem $msvcRoot -Directory | Sort-Object Name -Descending
+                    foreach ($ver in $versions) {
+                        $dir = Join-Path $ver.FullName "lib\$arch"
+                        if (Test-Path (Join-Path $dir "libcmt.lib")) {
+                            $result.msvc = $dir
+                            break
+                        }
                     }
                 }
+                if ($result.msvc) { break }
             }
             if ($result.msvc) { break }
         }
@@ -400,7 +406,7 @@ if (-not $needsInstall -and -not $Force) {
         exit 1
     }
     Write-Host "All prerequisites are installed."
-    Write-Host "Run .\build.bat or ./build (from Git Bash) to build."
+    Write-Host "Run .\build.ps1 (PowerShell) or ./build (Git Bash) to build."
     Write-Host ""
     exit 0
 }
@@ -462,7 +468,7 @@ if ($sdk.ucrt -and $sdk.um -and $sdk.msvc) {
 
 Write-Host ""
 if ($allOK) {
-    Write-Host "Done. Run .\build.bat or ./build (from Git Bash) to build."
+    Write-Host "Done. Run .\build.ps1 (PowerShell) or ./build (Git Bash) to build."
 } else {
     Write-Host "Some prerequisites are still missing. See above for details."
     exit 1

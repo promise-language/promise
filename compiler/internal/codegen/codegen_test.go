@@ -16704,6 +16704,42 @@ func TestOptionalStructuralInterfaceEnvDropRTTI(t *testing.T) {
 	assertContains(t, ir, "optst.rtti")
 }
 
+// B0246: If-let unwrap of Optional structural interface should NOT clear the source's
+// drop flag. The unwrapped structural binding doesn't get a drop registered (no concrete
+// type known at compile time), so the source must retain ownership. Its reassignment-time
+// Optional drop (RTTI-based) handles cleanup.
+func TestIfUnwrapOptionalStructuralNoDropFlagClear(t *testing.T) {
+	ir := generateIR(t, `
+		type Iter is Iterator[int] {
+			int val;
+			next() int? { return none; }
+		}
+		make_iter() Iterator[int] {
+			return Iter(val: 1);
+		}
+		wrap() () -> int? {
+			Iterator[int]? current = none;
+			return move || -> int? {
+				current = make_iter();
+				if inner := current {
+					return inner.next();
+				}
+				return none;
+			};
+		}
+		main() {
+			() -> int? fn = wrap();
+			fn();
+			fn();
+		}
+	`)
+	// B0246: The reassignment `current = make_iter()` must trigger the Optional drop
+	// even after an if-let unwrap. The optdrop block should appear in the reassignment path.
+	assertContains(t, ir, "optdrop.check")
+	// RTTI-based drop dispatch for the structural interface inside the Optional.
+	assertContains(t, ir, "struct.drop")
+}
+
 // B0240: Assigning none to an optional field with a heap user type should
 // drop/free the old inner value before storing the new value.
 func TestOptionalFieldReassignDrop(t *testing.T) {

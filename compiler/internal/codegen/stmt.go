@@ -4540,9 +4540,14 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	}
 	if opt, ok := initType.(*types.Optional); ok && c.isOwnedOptionalExpr(s.Init) {
 		c.maybeRegisterDrop(s.Binding, alloca, opt.Elem())
-		// Clear source variable's drop flag to transfer ownership.
-		if ident, ok := s.Init.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
+		// Only transfer ownership (clear source dropflag) if the unwrapped binding
+		// actually got a drop registered. B0246: Structural interfaces don't get drops
+		// via maybeRegisterDrop — the source must retain ownership so its Optional drop
+		// (RTTI-based) handles cleanup on reassignment or scope exit.
+		if _, innerHasDrop := c.dropBindings[s.Binding]; innerHasDrop {
+			if ident, ok := s.Init.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
 		}
 	}
 
@@ -4685,9 +4690,13 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	}
 	if opt, ok := valType.(*types.Optional); ok && c.isOwnedOptionalExpr(s.Value) {
 		c.maybeRegisterDrop(s.Binding, alloca, opt.Elem())
-		// Clear source variable's drop flag to transfer ownership.
-		if ident, ok := s.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
+		// Only transfer ownership if the unwrapped binding got a drop registered.
+		// B0246: Structural interfaces don't get drops via maybeRegisterDrop — the
+		// source must retain ownership for its Optional drop (RTTI-based) to handle cleanup.
+		if _, innerHasDrop := c.dropBindings[s.Binding]; innerHasDrop {
+			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
 		}
 	}
 

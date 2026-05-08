@@ -15,7 +15,7 @@ type Counter is Iterator[int] {
   }
 }
 
-test_flat_map_basic() `test(allow_leaks: true) {
+test_flat_map_basic() `test {
   int[] v = [1, 2, 3];
   int[] result = v.iter().flat_map[int](|int x| -> Iterator[int] {
     return Counter(current: 0, limit: x);
@@ -30,7 +30,7 @@ test_flat_map_basic() `test(allow_leaks: true) {
   assert(result[5] == 2, "r[5]=2");
 }
 
-test_flat_map_empty_inner() `test(allow_leaks: true) {
+test_flat_map_empty_inner() `test {
   int[] v = [0, 0, 0];
   int[] result = v.iter().flat_map[int](|int x| -> Iterator[int] {
     return Counter(current: 0, limit: x);

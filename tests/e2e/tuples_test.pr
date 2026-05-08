@@ -96,3 +96,11 @@ test_divmod() `test {
   assert(q2 == 3, "10 / 3 = 3");
   assert(r2 == 1, "10 % 3 = 1");
 }
+
+// --- tuple to_string (B0254: verify no leak from convertToString temps) ---
+
+test_tuple_interpolation() `test {
+  (int, int) pair = (1, 2);
+  string s = "{pair}";
+  assert(s == "(1, 2)", s);
+}

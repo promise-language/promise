@@ -3588,6 +3588,18 @@ func TestTupleReturn(t *testing.T) {
 	assertContains(t, ir, "ret { i64, i1 }")
 }
 
+func TestTupleInterpolationTracksTemps(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			(int, int) pair = (1, 2);
+			string s = "{pair}";
+		}
+	`)
+	// B0254: convertTupleToString must track per-element convertToString results
+	// as string temps so they get freed. Verify promise_string_drop is emitted.
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
 // --- Part B: Optional tests ---
 
 func TestOptionalNone(t *testing.T) {

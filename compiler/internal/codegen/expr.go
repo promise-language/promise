@@ -365,7 +365,10 @@ func (c *Compiler) convertTupleToString(val value.Value, tup *types.Tuple) value
 			parts = append(parts, c.makeRuntimeString(", "))
 		}
 		elemVal := c.block.NewExtractValue(val, uint64(i))
-		parts = append(parts, c.convertToString(elemVal, elemType))
+		strVal := c.convertToString(elemVal, elemType)
+		// B0254: Track convertToString results as temps to prevent leak.
+		c.trackStringTemp(strVal)
+		parts = append(parts, strVal)
 	}
 	parts = append(parts, c.makeRuntimeString(")"))
 	// Concatenate all parts

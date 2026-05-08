@@ -9635,6 +9635,24 @@ func TestStringFieldAccessDup(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new(")
 }
 
+// B0220: NeedsSynthDrop types (no explicit drop) also get string field dups.
+// HasDrop() is true for NeedsSynthDrop types (set together in sema), so the
+// T0095 dup logic covers both explicit-drop and synthesized-drop types.
+func TestStringFieldAccessDupNeedsSynthDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder {
+			string value;
+		}
+		test() {
+			h := Holder(value: "original");
+			string saved = h.value;
+		}
+	`)
+	// Holder has NeedsSynthDrop (string field, no explicit drop).
+	// Reading h.value should still dup to prevent use-after-free on reassign.
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
 // B0219: Vector field reassignment drops old value before storing new.
 func TestVectorFieldReassignDrop(t *testing.T) {
 	ir := generateIR(t, `

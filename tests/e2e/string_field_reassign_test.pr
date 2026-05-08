@@ -1,0 +1,51 @@
+// B0220: String field read creates a dup on NeedsSynthDrop types,
+// preventing use-after-free when the field is subsequently reassigned.
+type NameHolder {
+  string name;
+}
+
+// Read field into local, then reassign — local must remain valid.
+test_string_field_read_then_reassign() `test {
+  NameHolder h = NameHolder(name: "hello");
+  string saved = h.name;
+  h.name = "world";
+  assert(saved == "hello", "saved must retain original value");
+  assert(h.name == "world", "field must have new value");
+}
+
+// Multiple reassignments with reads in between.
+test_string_field_multiple_reassign() `test {
+  NameHolder h = NameHolder(name: "first");
+  string a = h.name;
+  h.name = "second";
+  string b = h.name;
+  h.name = "third";
+  assert(a == "first", "a");
+  assert(b == "second", "b");
+  assert(h.name == "third", "final");
+}
+
+// Reassign without reading — old value must be dropped (no leak).
+test_string_field_reassign_no_read() `test {
+  NameHolder h = NameHolder(name: "old");
+  h.name = "new";
+  assert(h.name == "new", "reassigned");
+}
+
+// Type with multiple string fields — mixed read/reassign.
+type TwoStrings {
+  string first;
+  string second;
+}
+
+test_two_string_fields_reassign() `test {
+  TwoStrings t = TwoStrings(first: "a", second: "b");
+  string saved_first = t.first;
+  t.first = "c";
+  string saved_second = t.second;
+  t.second = "d";
+  assert(saved_first == "a", "saved_first");
+  assert(saved_second == "b", "saved_second");
+  assert(t.first == "c", "first");
+  assert(t.second == "d", "second");
+}

@@ -1013,12 +1013,11 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			isNotTimeout := skipStoreBlock.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 2))
 			skipStoreBlock.NewCondBr(isNotTimeout, leakCheckBlk, afterLeakBlk)
 
-			// B0234: Spin-wait for all goroutines to complete cleanup before
-			// reading alloc count. goroutine_exit increments gs_completed after
-			// all frees (coro.destroy + pal_free(G)), so gs_created==gs_completed
-			// means all goroutine cleanup is truly done. This replaces the fixed
-			// 100μs yield (B0188) which was insufficient under load and caused
-			// inconsistent leak detection between individual and batch test runs.
+			// Wait for all goroutines to complete cleanup before reading alloc
+			// count. goroutine_exit increments gs_completed after all frees
+			// (coro.destroy + pal_free(G)) and broadcasts gs_drain_cond when
+			// gs_created==gs_completed. This replaces the bounded spin-wait
+			// (B0231/B0234) with a deterministic condvar wait — no timeouts.
 			if !c.isWasm && c.schedGlobal != nil {
 				schedTy := schedStructType()
 				gsCreatedField := leakCheckBlk.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -1026,32 +1025,43 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 				gsCompletedField := leakCheckBlk.NewGetElementPtr(schedTy, c.schedGlobal,
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCompleted)))
 
-				// Counter for bounded spin-wait (max 5000 iterations × 100μs = 500ms)
-				drainCountAlloca := leakCheckBlk.NewAlloca(irtypes.I32)
-				leakCheckBlk.NewStore(constant.NewInt(irtypes.I32, 0), drainCountAlloca)
+				// Fast path: check without mutex (common case: no goroutines or already drained)
+				drainDone := mainFn.NewBlock(fmt.Sprintf("drain_done_%s", nameStr))
+				created0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
+				completed0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
+				fastDone := leakCheckBlk.NewICmp(enum.IPredEQ, created0, completed0)
+
+				drainSlow := mainFn.NewBlock(fmt.Sprintf("drain_slow_%s", nameStr))
+				leakCheckBlk.NewCondBr(fastDone, drainDone, drainSlow)
+
+				// Slow path: acquire mutex and condvar wait
+				gdMtxField := drainSlow.NewGetElementPtr(schedTy, c.schedGlobal,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainMutex)))
+				gdMtx := drainSlow.NewLoad(irtypes.I8Ptr, gdMtxField)
+				gdCondField := drainSlow.NewGetElementPtr(schedTy, c.schedGlobal,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainCond)))
+				gdCond := drainSlow.NewLoad(irtypes.I8Ptr, gdCondField)
+				drainSlow.NewCall(c.palMutexLock, gdMtx)
 
 				drainLoop := mainFn.NewBlock(fmt.Sprintf("drain_gs_%s", nameStr))
-				drainDone := mainFn.NewBlock(fmt.Sprintf("drain_done_%s", nameStr))
-				leakCheckBlk.NewBr(drainLoop)
+				drainSlow.NewBr(drainLoop)
 
+				// Loop: check condition, wait if not met
 				created := drainLoop.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
 				completed := drainLoop.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
 				allDone := drainLoop.NewICmp(enum.IPredEQ, created, completed)
 
-				drainYield := mainFn.NewBlock(fmt.Sprintf("drain_yield_%s", nameStr))
-				drainLoop.NewCondBr(allDone, drainDone, drainYield)
+				drainWait := mainFn.NewBlock(fmt.Sprintf("drain_wait_%s", nameStr))
+				drainUnlock := mainFn.NewBlock(fmt.Sprintf("drain_unlock_%s", nameStr))
+				drainLoop.NewCondBr(allDone, drainUnlock, drainWait)
 
-				// Bounded: check iteration count (max 5000 = ~500ms)
-				curCount := drainYield.NewLoad(irtypes.I32, drainCountAlloca)
-				nextCount := drainYield.NewAdd(curCount, constant.NewInt(irtypes.I32, 1))
-				drainYield.NewStore(nextCount, drainCountAlloca)
-				exceeded := drainYield.NewICmp(enum.IPredSGE, nextCount, constant.NewInt(irtypes.I32, 5000))
-				drainSleep := mainFn.NewBlock(fmt.Sprintf("drain_sleep_%s", nameStr))
-				drainYield.NewCondBr(exceeded, drainDone, drainSleep)
+				// Wait on condvar and re-check
+				drainWait.NewCall(c.palCondWait, gdCond, gdMtx)
+				drainWait.NewBr(drainLoop)
 
-				// Yield 100μs and retry
-				drainSleep.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
-				drainSleep.NewBr(drainLoop)
+				// Unlock and continue
+				drainUnlock.NewCall(c.palMutexUnlock, gdMtx)
+				drainUnlock.NewBr(drainDone)
 
 				leakCheckBlk = drainDone
 			}

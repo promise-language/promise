@@ -6711,9 +6711,9 @@ func TestBatchTestResetsAllocCount(t *testing.T) {
 	assertContains(t, ir, "atomicrmw xchg i64* @__promise_alloc_count, i64 0 monotonic")
 }
 
-// B0188: Batch test leak check inserts usleep before reading alloc count
-// to let scheduler worker threads finish goroutine cleanup.
-func TestBatchTestLeakCheckDrainDelay(t *testing.T) {
+// B0231: Batch test leak check uses condvar wait for goroutine drain
+// (replaces B0188/B0234 spin-wait with deterministic signaling).
+func TestBatchTestLeakCheckDrainCondvar(t *testing.T) {
 	result := compileResult(t, `
 		myTest() `+"`test"+` { }
 	`)
@@ -6730,16 +6730,19 @@ func TestBatchTestLeakCheckDrainDelay(t *testing.T) {
 	}())
 	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
-	// Leak check block should call pal_usleep before reading alloc count
+	// Leak check block should use condvar wait (not spin-wait) for goroutine drain
 	assertContains(t, ir, "leak_check_myTest")
-	assertContains(t, ir, "call i32 @usleep(i32 100)")
+	assertContains(t, ir, "drain_done_myTest")
+	assertContains(t, ir, "drain_slow_myTest")
+	assertContains(t, ir, "drain_gs_myTest")
+	assertContains(t, ir, "drain_wait_myTest")
 }
 
 // B0165: Sched struct includes ready_count field (i32 at end).
 func TestSchedStructHasReadyCount(t *testing.T) {
 	ir := generateIR(t, `main() { }`)
 	// The sched global should have the ready_count i32 as the last field
-	// Full type: { i8*, i8*, i64, i8*, i8*, i32, i8*, i8*, i64, i8, i8, i8*, i8*, i8*, i32, i64, i64, i64, i64, i8*, i32 }
+	// Full type: { i8*, i8*, i64, i8*, i8*, i32, i8*, i8*, i64, i8, i8, i8*, i8*, i8*, i32, i64, i64, i64, i64, i8*, i32, i8*, i8* }
 	assertContains(t, ir, "@__promise_sched = global")
 	// Verify sched_loop is defined (it increments ready_count)
 	assertContains(t, ir, "define i8* @promise_sched_loop(")

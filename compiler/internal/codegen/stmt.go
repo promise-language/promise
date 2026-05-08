@@ -842,6 +842,8 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 	val := c.genExpr(s.Value)
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
+	// B0233: Claim heap temp — ownership transferred to use binding.
+	c.claimHeapTemp(val)
 
 	// Track for scope-exit close() insertion
 	named := extractNamed(typ)
@@ -2443,6 +2445,17 @@ func (c *Compiler) claimHeapTemp(val value.Value) {
 		if instPtr.Type() != irtypes.I8Ptr {
 			if _, isPtr := instPtr.Type().(*irtypes.PointerType); isPtr {
 				instPtr = c.block.NewBitCast(instPtr, irtypes.I8Ptr)
+			} else if innerSt, isStruct := instPtr.Type().(*irtypes.StructType); isStruct && len(innerSt.Fields) >= 2 {
+				// B0233: Handle optional wrapping: {i1, {vtable, instance}} —
+				// field 1 of the optional is a value struct, extract field 1 from it.
+				instPtr = c.block.NewExtractValue(instPtr, 1)
+				if instPtr.Type() != irtypes.I8Ptr {
+					if _, isPtr2 := instPtr.Type().(*irtypes.PointerType); isPtr2 {
+						instPtr = c.block.NewBitCast(instPtr, irtypes.I8Ptr)
+					} else {
+						return
+					}
+				}
 			} else {
 				return
 			}
@@ -2960,6 +2973,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			// B0168: Claim string temp — ownership transferred to field.
 			c.claimStringTemp(val)
+			// B0233: Claim heap temp — ownership transferred to field.
+			c.claimHeapTemp(val)
 		}
 
 	case *ast.IndexExpr:
@@ -2998,6 +3013,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			// B0168: Claim string temp — ownership transferred to container.
 			c.claimStringTemp(val)
+			// B0233: Claim heap temp — ownership transferred to container.
+			c.claimHeapTemp(val)
 		}
 		// Clear drop flag on index key if it's being stored (e.g., map[key] = val).
 		// The map takes ownership of the key pointer.

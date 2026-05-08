@@ -16224,3 +16224,45 @@ func TestTypeIsFieldIndicesB0226(t *testing.T) {
 	assertContains(t, ir, "define i32 @promise_type_is")
 	assertContains(t, ir, "call i32 @promise_type_is")
 }
+
+// B0233: Constructor temps passed to non-~ methods should be freed at statement end.
+// The constructor should NOT claim the heap temp — only downstream consumers should.
+func TestConstructorTempFreedAtStmtEnd(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		check(Point p) bool { return p.x == 0; }
+		main() {
+			check(Point(x: 0, y: 0));
+		}
+	`)
+	// The Point(x: 0, y: 0) temp should be freed at statement end via heap.drop,
+	// NOT claimed by the constructor. The heap.drop block calls pal_free on the
+	// unclaimed temp.
+	assertContains(t, ir, "heap.drop")
+	assertContains(t, ir, "heap.exec")
+}
+
+// B0233: Constructor temps assigned to variables should still be claimed.
+func TestConstructorTempClaimedOnAssign(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		main() {
+			Point p = Point(x: 1, y: 2);
+		}
+	`)
+	// Variable assignment claims the heap temp — heap.claim block should exist.
+	assertContains(t, ir, "heap.claim")
+}
+
+// B0233: Constructor temps passed to vector push should be claimed.
+func TestConstructorTempClaimedOnPush(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		main() {
+			Point[] v = [Point(x: 1, y: 2)];
+			v.push(Point(x: 3, y: 4));
+		}
+	`)
+	// Push claims the heap temp — heap.claim block should exist.
+	assertContains(t, ir, "heap.claim")
+}

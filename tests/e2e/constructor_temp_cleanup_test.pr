@@ -1,0 +1,55 @@
+// B0233: Constructor temps passed to non-~ methods should be freed at statement end.
+// Verifies that heap-allocated constructor temporaries used as function/method arguments
+// (not stored in variables, not passed to ~ params) are properly cleaned up.
+type Point {
+  int x;
+  int y;
+}
+
+check_point(Point p) bool {
+  return p.x == 0 && p.y == 0;
+}
+
+type Wrapper {
+  int id;
+
+  get_id(&this) int {
+    return this.id;
+  }
+}
+
+// Test: constructor temp passed to a free function (borrow)
+test_constructor_temp_free_function() `test {
+  bool result = check_point(Point(x: 0, y: 0));
+  assert(result, "check_point should return true");
+}
+
+// Test: constructor temp passed to a method (borrow)
+test_constructor_temp_method() `test {
+  Wrapper w = Wrapper(id: 42);
+  // The Wrapper(id: 42) is stored in w, but calling get_id is fine.
+  assert(w.get_id() == 42, "get_id should return 42");
+}
+
+// Test: constructor temp used and discarded
+test_constructor_temp_discarded() `test {
+  // Point is created, passed to check, then freed at statement end
+  check_point(Point(x: 1, y: 2));
+  // If this doesn't crash, the temp was properly cleaned up
+  assert(true, "constructor temp discarded without crash");
+}
+
+// Test: constructor temp assigned to variable (should NOT leak or double-free)
+test_constructor_temp_assigned() `test {
+  Point p = Point(x: 5, y: 10);
+  assert(p.x == 5, "x should be 5");
+  assert(p.y == 10, "y should be 10");
+}
+
+// Test: multiple constructor temps in one expression
+test_multiple_constructor_temps() `test {
+  bool r1 = check_point(Point(x: 0, y: 0));
+  bool r2 = check_point(Point(x: 1, y: 1));
+  assert(r1, "first check should be true");
+  assert(!r2, "second check should be false");
+}

@@ -1815,10 +1815,15 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if !skipClear {
 				c.claimStringTemp(v) // B0168: ownership transferred to new() args
 			}
+			// B0233: Claim heap temp — ownership transferred to new() constructor field.
+			c.claimHeapTemp(v)
 			c.claimEnvTemp(v) // T0100: claim env temp for closure args
 		}
-		// T0135: Claim heap temp before calling new() — args evaluated successfully.
-		c.claimHeapTemp(rawPtr)
+		// B0233: Do NOT claim heap temp here. Let downstream consumers claim:
+		// - Variable assignment (stmt.go genAssignment)
+		// - ~ params (call site)
+		// - Container store (push, send, field/index assign)
+		// If nobody claims, cleanupHeapTemps frees the temp at statement end.
 
 		if newMethod != nil {
 			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params())
@@ -1968,6 +1973,8 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				}
 				// B0168: Claim string temp — ownership transferred to constructor field.
 				c.claimStringTemp(val)
+				// B0233: Claim heap temp — ownership transferred to constructor field.
+				c.claimHeapTemp(val)
 				// T0100: Claim env temp — closure env is now owned by the struct field.
 				c.claimEnvTemp(val)
 			}
@@ -1986,6 +1993,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				val = maybeWrapOptional(val, defExpr, f.Name(), fieldIdx)
 				c.block.NewStore(val, fieldPtr)
 				c.claimStringTemp(val) // B0168: ownership transferred to field
+				c.claimHeapTemp(val)   // B0233: ownership transferred to field
 			} else {
 				c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)
 			}
@@ -2009,9 +2017,11 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		}
 	}
 
-	// T0135: Claim the heap temp now that all arguments succeeded.
-	// If we reach this point, no auto-propagation happened.
-	c.claimHeapTemp(rawPtr)
+	// B0233: Do NOT claim heap temp here. Let downstream consumers claim:
+	// - Variable assignment (stmt.go genAssignment)
+	// - ~ params (call site)
+	// - Container store (push, send, field/index assign)
+	// If nobody claims, cleanupHeapTemps frees the temp at statement end.
 
 	// Build value struct: { vtable_ptr, instance_ptr }
 	var vtablePtr value.Value
@@ -2497,6 +2507,8 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	}
 	// B0170: claim string temp — ownership transfers to channel buffer
 	c.claimStringTemp(argVal)
+	// B0233: claim heap temp — ownership transfers to channel buffer
+	c.claimHeapTemp(argVal)
 	argAlloca := c.createEntryAlloca(elemLLVM)
 	c.block.NewStore(argVal, argAlloca)
 	argAsI8 := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
@@ -3364,6 +3376,8 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 			}
 			// B0170: claim string temp — ownership transfers to vector
 			c.claimStringTemp(argVal)
+			// B0233: claim heap temp — ownership transfers to vector
+			c.claimHeapTemp(argVal)
 		}
 		// COW: if static (.rodata), copy to heap first (T0062)
 		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
@@ -4852,6 +4866,8 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 		elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr,
 			constant.NewInt(irtypes.I64, int64(i)))
 		c.block.NewStore(val, elemPtr)
+		// B0233: Claim heap temp — element ownership transferred to vector literal.
+		c.claimHeapTemp(val)
 	}
 
 	return rawPtr // i8*

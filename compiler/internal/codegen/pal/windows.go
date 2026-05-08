@@ -104,7 +104,7 @@ func winThreadFnType() *irtypes.PointerType {
 
 // EmitThreadCreate declares _beginthreadex and defines @pal_thread_create.
 // Uses _beginthreadex (not CreateThread) so the CRT per-thread data is initialized,
-// which is required for __intrinsic_setjmp/longjmp to work on worker threads.
+// which is required for TLS and other CRT features on worker threads.
 // Emits a trampoline that adapts PAL's i8*(i8*) signature to CRT's i32(i8*).
 // Creates thread with explicit 2MB stack size (matching POSIX PAL).
 func (p *WindowsPAL) EmitThreadCreate(module *ir.Module) *ir.Func {

@@ -760,7 +760,7 @@ func TestWindowsThreadCreateUsesBeginthreadex(t *testing.T) {
 	(&WindowsPAL{}).EmitThreadCreate(module)
 	out := module.String()
 
-	// Should declare _beginthreadex (not CreateThread — CRT init required for setjmp)
+	// Should declare _beginthreadex (not CreateThread — CRT init required for TLS)
 	if !strings.Contains(out, "@_beginthreadex") {
 		t.Error("missing _beginthreadex declaration")
 	}

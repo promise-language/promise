@@ -297,6 +297,33 @@ func (c *Compiler) defineSchedulerGlobals() {
 	testDone := c.module.NewGlobal("__promise_test_done", irtypes.I32)
 	testDone.Init = constant.NewInt(irtypes.I32, 0)
 	c.testDoneGlobal = testDone
+
+	// @__promise_panic_flag = [thread_local] global i8 0
+	// Set to 1 when a panic is in flight on this thread.
+	panicFlag := c.module.NewGlobal("__promise_panic_flag", irtypes.I8)
+	panicFlag.Init = constant.NewInt(irtypes.I8, 0)
+	if !c.isWasm {
+		panicFlag.TLSModel = enum.TLSModelGeneric
+	}
+	c.panicFlagGlobal = panicFlag
+
+	// @__promise_panic_msg = [thread_local] global i8* null
+	// Points to the C string panic message for the current panic.
+	panicMsgTls := c.module.NewGlobal("__promise_panic_msg", irtypes.I8Ptr)
+	panicMsgTls.Init = constant.NewNull(irtypes.I8Ptr)
+	if !c.isWasm {
+		panicMsgTls.TLSModel = enum.TLSModelGeneric
+	}
+	c.panicMsgTlsGlobal = panicMsgTls
+
+	// @__promise_panic_type = [thread_local] global i8 0
+	// Indicates the allocation type of the panic message: 1=.rodata, 2=heap-allocated.
+	panicTypeTls := c.module.NewGlobal("__promise_panic_type", irtypes.I8)
+	panicTypeTls.Init = constant.NewInt(irtypes.I8, 0)
+	if !c.isWasm {
+		panicTypeTls.TLSModel = enum.TLSModelGeneric
+	}
+	c.panicTypeTlsGlobal = panicTypeTls
 }
 
 // defineGNewFunc emits @promise_g_new(i8* %coro_handle) → i8*

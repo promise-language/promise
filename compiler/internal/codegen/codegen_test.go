@@ -12019,6 +12019,10 @@ func TestSchedulerGlobals(t *testing.T) {
 	assertContains(t, ir, "thread_local")
 	// Global scheduler singleton
 	assertContains(t, ir, "@__promise_sched")
+	// TLS panic flag globals (T0143)
+	assertContains(t, ir, "@__promise_panic_flag")
+	assertContains(t, ir, "@__promise_panic_msg")
+	assertContains(t, ir, "@__promise_panic_type")
 }
 
 func TestSchedulerFunctionsExist(t *testing.T) {

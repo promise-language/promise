@@ -272,6 +272,9 @@ type Compiler struct {
 	testJmpBufGlobal    *ir.Global // @__promise_test_jmpbuf (TLS, i8*) — setjmp buf for per-test panic recovery
 	testPanicMsgGlobal  *ir.Global // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
 	testDoneGlobal      *ir.Global // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
+	panicFlagGlobal     *ir.Global // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
+	panicMsgTlsGlobal   *ir.Global // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
+	panicTypeTlsGlobal  *ir.Global // @__promise_panic_type (TLS, i8) — 1=.rodata, 2=heap-allocated
 	inCoroutine         bool       // true when compiling inside a go block coroutine body
 	goExprFireAndForget bool       // true when go expr result is discarded (no <-task receiver)
 	coroCleanupBlk      *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)

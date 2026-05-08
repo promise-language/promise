@@ -92,7 +92,7 @@ type HttpClient is Resource
 }
 
 type Parseable `structural `doc("Types that can be constructed from a string representation.") `public {
-    parse(string data) Self! `abstract `factory;
+    parse!(string data) Self `abstract `factory;
 }
 
 enum Result[T] `doc("Outcome of an operation that may fail.") `public {
@@ -187,12 +187,12 @@ The output of `promise doc -public server.pr`:
     without an explicit `is` declaration.
 
         type Parseable `structural {
-            parse(string data) Self! `abstract `factory
+            parse!(string data) Self `abstract `factory
         }
 
     #### Parseable.parse `factory
 
-        parse(string data) Self! `factory
+        parse!(string data) Self `factory
 
     ## Enums
 
@@ -452,7 +452,7 @@ Output:
         get is_connected bool
     }
     type Parseable `structural {
-        parse(string data) Self! `abstract `factory
+        parse!(string data) Self `abstract `factory
     }
     enum Result[T] { Ok(T value), Err(string message) }
     enum HttpMethod `copy { GET, POST, PUT, DELETE, PATCH }

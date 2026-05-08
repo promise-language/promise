@@ -362,8 +362,8 @@ The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the
 | `string` | `string` | Canonical ABI: `(i32 ptr, i32 len)` in linear memory |
 | `list<T>` | `T[]` | Canonical ABI: `(i32 ptr, i32 len)` |
 | `option<T>` | `T?` | Promise optional |
-| `result<T, E>` | failable `T!` | Error type → Promise error |
-| `result<_, E>` | `void!` | Void failable |
+| `result<T, E>` | failable `foo!() T` | Error type → Promise error |
+| `result<_, E>` | `foo!()` | Void failable |
 | `tuple<T1, T2>` | `(T1, T2)` | Promise tuple |
 | `record { ... }` | `type { ... }` | Value type with `` `value `` fields |
 | `variant { ... }` | `enum { ... }` | Promise enum with variant data |
@@ -502,17 +502,17 @@ type Descriptor `public {
     int _handle;
 
     `doc "Get file metadata."
-    stat(this) DescriptorStat! `public {
+    stat!(this) DescriptorStat `public {
         return _wasi_descriptor_stat(this._handle)?;
     }
 
     `doc "Read bytes from the file."
-    read(this, u64 length) u8[]! `public {
+    read!(this, u64 length) u8[] `public {
         return _wasi_descriptor_read(this._handle, length)?;
     }
 
     `doc "Write bytes to the file."
-    write(this, u8[] data) u64! `public {
+    write!(this, u8[] data) u64 `public {
         return _wasi_descriptor_write(this._handle, data)?;
     }
 

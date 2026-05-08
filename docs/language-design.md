@@ -275,7 +275,7 @@ type Connection `public {
   int port;                 // public
   int _retry_count;         // private — hidden from doc, conventionally internal
 
-  connect(~this)! {}        // public method
+  connect!(~this) {} // public method
   _reset_backoff(~this) {}  // private method
 }
 ```
@@ -885,7 +885,7 @@ load[T: Parseable](string data) T {
 Json j = load[Json]("...");
 ```
 
-Abstract factory methods declared without a return type get an **implicit `Self` return**. Failable abstract factories (`tryParse(string data)! \`abstract \`factory;`) get implicit `Self!`. Factory methods must match factory-to-factory: an instance method does not satisfy a factory requirement and vice versa.
+Abstract factory methods declared without a return type get an **implicit `Self` return**. Failable abstract factories (`tryParse!(string data) \`abstract \`factory;`) get implicit `Self` return. Factory methods must match factory-to-factory: an instance method does not satisfy a factory requirement and vice versa.
 
 When a value crosses a type boundary through structural satisfaction (or through a second+ parent), the compiler emits a **view-specific vtable** ordered by the target interface's slot layout. The value struct's vtable pointer is swapped to this view vtable at the coercion point (variable declaration, assignment, function argument, or return statement). For methods with relaxed signature differences, the vtable slot points to an adapter thunk rather than the method directly.
 
@@ -1067,7 +1067,7 @@ enum Shape {
   is_circle(&this) bool => !this.is_flat;
 
   // Failable method
-  validate(&this) string! {
+  validate!(&this) string {
     if this.is_flat { raise error(message: "flat shapes not allowed"); }
     return "ok";
   }
@@ -1249,7 +1249,7 @@ Append `!` to make `new` failable. The caller must handle the error using standa
 type Port {
   int value `final;
 
-  new(int value)! {
+  new!(int value) {
     if value < 1 || value > 65535 {
       raise InvalidArgError(msg: "invalid port number");
     }
@@ -1264,7 +1264,7 @@ Port(value: -1)!       // calls new(value:), raises InvalidArgError
 A failable constructor integrates with standard error handling — auto-propagation in `!` functions, explicit `?` handling, or `!` to assert-and-panic (see Section 7):
 
 ```promise
-serve(int portNum) Server! {
+serve!(int portNum) Server {
   Port p = Port(value: portNum);   // auto-propagates InvalidArgError on failure
   return Server(port: p);
 }
@@ -1293,7 +1293,7 @@ type Color {
     return Self(r: 255, g: 0, b: 0);
   }
 
-  hex(string code) Self! `factory {
+  hex!(string code) Self `factory {
     if code.len != 7 || code[0] != '#' {
       raise ParseError(msg: "invalid hex color");
     }
@@ -1306,7 +1306,7 @@ type Color {
 }
 
 Color c1 = Color.red();
-Color c2 = Color.hex("#FF8800")!;
+Color c2 = Color.hex!("#FF8800");
 ```
 
 Factories can return child types:
@@ -1380,7 +1380,7 @@ This enables validation before parent construction, conditional super calls, and
 type SecureConn is Connection {
   string cert `final;
 
-  new(string rawUrl, string cert)! {
+  new!(string rawUrl, string cert) {
     // Validation before super — no this access, just params + locals
     string normalized = normalizeUrl(rawUrl);
     if !isValid(normalized) {
@@ -1394,7 +1394,7 @@ type SecureConn is Connection {
 
 ```promise
 type Logger is Output {
-  new(string target)! {
+  new!(string target) {
     if target == "stdout" {
       super(stream: stdout);
     } else if target == "stderr" {
@@ -1543,12 +1543,12 @@ type Connection {
 
 ## 7. Error Handling
 
-### 7.1 The `!` Return Convention
+### 7.1 The `!` Failable Convention
 
-Functions that can fail use `!` after the return type. Under the hood, this desugars to a result struct — a pair of `(value, error)`.
+Functions that can fail use `!` after the function name. Under the hood, this desugars to a result struct — a pair of `(value, error)`.
 
 ```promise
-readFile(string &path) string! {
+readFile!(string &path) string {
   // On success:
   return contents;
 
@@ -1557,33 +1557,33 @@ readFile(string &path) string! {
 }
 ```
 
-The `!` suffix on the return type means: "this function returns `(string, Error)`".
+The `!` after the name means: "this function can fail — it returns `(string, Error)`".
 
-For void functions, `!` alone is shorthand for `void!`:
+For void failable functions, just use `!` after the name with no return type:
 
 ```promise
-validate(string input)! {
+validate!(string input) {
   if input.is_empty() { raise error("empty input"); }
 }
 ```
 
 ### 7.2 Calling Failable Functions
 
-In a **failable function** (return type has `!`), a naked call to another failable function **auto-propagates** the error — if the callee fails, the caller immediately returns the error to its own caller. This is the most common case and requires no extra syntax.
+In a **failable function** (name has `!`), a naked call to another failable function **auto-propagates** the error — if the callee fails, the caller immediately returns the error to its own caller. This is the most common case and requires no extra syntax.
 
 Auto-propagation works in **all expression positions** — statements, variable declarations, assignments, and call arguments:
 
 ```promise
-process() string! {
+process!() string {
   string content = readFile("data.txt");    // variable declaration — auto-propagates
   return content.trim();
 }
 
-transform() string! {
+transform!() string {
   return toUpper(readFile("data.txt"));     // call argument — auto-propagates
 }
 
-update() string! {
+update!() string {
   string content = "";
   content = readFile("data.txt");           // assignment — auto-propagates
   return content;
@@ -1614,7 +1614,7 @@ main() {
   };
 
   // Unwrap (panics on error — for prototyping only)
-  string content = readFile("data.txt")!;
+  string content = readFile!("data.txt");
 }
 ```
 
@@ -1647,7 +1647,7 @@ string content = readFile("data.txt") ? e {
 };
 
 // Typed handler — only catches IoError, propagates other errors
-process() string! {
+process!() string {
   string content = readFile("data.txt") ? e is IoError {
     return "fallback for IO error (code: {e.code})";
   };
@@ -1699,7 +1699,7 @@ if err is present {
 | `foo() ? e is T { ... }` | Handle only type `T`, propagate others | `!` function only |
 | `foo() ? e is T { ... } else { ... }` | Handle `T`, else catches rest | Any function |
 | `foo() ? e is T { ... }!` | Handle `T`, panic on non-match | Any function |
-| `foo()!` | Panic on error | Any function |
+| `foo!()` | Panic on error | Any function |
 | `(val, err) := foo()` | Capture raw result | Any function |
 | `opt!` | Panic on none (optional unwrap) | Any function |
 | `opt ? _ { ... }` | Handle none inline (optional handler) | Any function |
@@ -1708,19 +1708,19 @@ if err is present {
 
 ```promise
 // CORRECT — auto-propagation (most common):
-wrapper() string! {
+wrapper!() string {
   string content = readFile("data.txt");  // bare call → auto-propagates error
   return content;
 }
 
 // CORRECT — auto-propagation in call arguments:
-wrapper() string! {
+wrapper!() string {
   return process(readFile("data.txt"));   // bare call as arg → auto-propagates error
 }
 
 // WRONG — panics instead of propagating:
-wrapper() string! {
-  string content = readFile("data.txt")!; // ! → panics on error, does NOT propagate
+wrapper!() string {
+  string content = readFile!("data.txt"); // ! → panics on error, does NOT propagate
   return content;
 }
 ```
@@ -1777,7 +1777,7 @@ fail() ? e is AppError { return e.code; };
 `raise` is used to return an error from a `!`-function. It is **not** an exception — it is sugar for returning the error half of the result struct. The raised value must be an `error` or an error subtype.
 
 ```promise
-divide(f64 a, f64 b) f64! {
+divide!(f64 a, f64 b) f64 {
   if b == 0.0 {
     raise error(message: "division by zero");
   }
@@ -1882,7 +1882,7 @@ type HttpClient `doc("HTTP client with connection pooling and automatic retry.")
   int maxRetries `doc("Maximum number of retry attempts before failing.");
   Duration timeout `doc("Per-request timeout.");
 
-  get(~this, string url `doc("The URL to fetch.")) Response!
+  get!(~this, string url `doc("The URL to fetch.")) Response
       `doc("Perform a GET request. Returns the response or an error.") `instance {
     ...
   }
@@ -2114,7 +2114,7 @@ get args string[] `public `doc("Returns the command-line arguments.") {
   return _os_get_args();
 }
 
-get working_dir string! `public `doc("Returns the current working directory.") {
+get working_dir! string `public `doc("Returns the current working directory.") {
   return _os_get_working_dir();
 }
 ```
@@ -2234,13 +2234,13 @@ Human-readable prose (doc strings, error messages, comments) is not subject to t
 Any parameter can have a **default value** with `= expression`. Parameters whose type uses the `T?` sugar are **optional** — when omitted at the call site, the function receives `none`.
 
 ```promise
-sendEmail(
+sendEmail!(
     string to,                    // required
     string subject,               // required
     string body = "",             // has default — skippable
     string? cc,                   // optional — skippable, receives none
     int priority = 3              // has default — skippable
-) bool! {
+) bool {
   // cc is Option[string] — test with: if cc { ... } (see Section 14.1)
   ...
 }
@@ -2251,7 +2251,7 @@ There is no ordering constraint on required, defaulted, and optional parameters 
 Parameters can carry meta annotations (see Section 8), placed after the parameter name and before any default value:
 
 ```promise
-connect(string host `doc("hostname"), int port `doc("port number") = 8080) Connection! { ... }
+connect!(string host `doc("hostname"), int port `doc("port number") = 8080) Connection { ... }
 ```
 
 **`T?` vs `Option[T]`:** Only the `T?` sugar triggers skippability. If a parameter is declared with `Option[T]` explicitly, it is a required parameter of optional type — the caller must provide it.
@@ -2309,7 +2309,7 @@ Default value expressions are evaluated **at the call site** each time the argum
 
 ```promise
 // VALID defaults:
-connect(string host, int port = 8080) Connection! { ... }
+connect!(string host, int port = 8080) Connection { ... }
 createId(string prefix, string id = Uuid.generate()) Thing { ... }
 
 // INVALID — referencing sibling parameter:
@@ -3173,7 +3173,7 @@ The `_` binding is required to disambiguate from error propagation (`x?`). Optio
 **Interaction with failable functions:** When a failable function returns an optional (`int?!`), `?` and `!` compose naturally. The first operator targets the failable layer, the second targets the optional:
 
 ```promise
-fetch() int?! { ... }
+fetch!() int? { ... }
 
 // Chain: error handler then optional handler
 int result = fetch() ? e { 0; } ? _ { -1; };
@@ -3232,19 +3232,19 @@ The standard library defines a set of structural interfaces for I/O, following t
 
 ```promise
 type Reader `structural {
-  read(~this, u8[] ~buf) int! `abstract `instance;
+  read!(~this, u8[] ~buf) int `abstract `instance;
 }
 
 type Writer `structural {
-  write(~this, u8[] &buf) int! `abstract `instance;
+  write!(~this, u8[] &buf) int `abstract `instance;
 }
 
 type Closer `structural {
-  close(~this)! `abstract `instance;
+  close!(~this) `abstract `instance;
 }
 
 type Seeker `structural {
-  seek(~this, int offset, int whence) int! `abstract `instance;
+  seek!(~this, int offset, int whence) int `abstract `instance;
 }
 ```
 
@@ -3263,12 +3263,12 @@ Because these are `` `structural ``, any type with matching method signatures sa
 type File is ReadWriteCloser {
   int fd;
 
-  open(string path, string mode) File! `type `native;
+  open!(string path, string mode) File `type `native;
 
-  read(~this, u8[] ~buf) int! `instance `native;
-  write(~this, u8[] &buf) int! `instance `native;
-  close(~this)! `instance `native;
-  seek(~this, int offset, int whence) int! `instance `native;
+  read!(~this, u8[] ~buf) int `instance `native;
+  write!(~this, u8[] &buf) int `instance `native;
+  close!(~this) `instance `native;
+  seek!(~this, int offset, int whence) int `instance `native;
 }
 ```
 
@@ -3279,7 +3279,7 @@ type BufferedWriter is Writer {
   Writer inner;
   u8[] buf;
 
-  write(~this, u8[] &data) int! `instance {
+  write!(~this, u8[] &data) int `instance {
     this.buf.push(data);
     if this.buf.len >= 4096 {
       return this.flush()?;
@@ -3287,7 +3287,7 @@ type BufferedWriter is Writer {
     return data.len;
   }
 
-  flush(~this) int! `instance {
+  flush!(~this) int `instance {
     n := this.inner.write(&this.buf)?;
     this.buf = [];
     return n;
@@ -3300,7 +3300,7 @@ type BufferedWriter is Writer {
 A `use` binding ties a resource's lifetime to the enclosing scope. When the scope exits — whether by normal fall-through, `return`, `raise`, `break`, or `continue` — the compiler automatically calls `close()` on the bound variable.
 
 ```promise
-main()! {
+main!() {
   use f := File.open("data.txt", "r")?;
   string data = f.readAll()?;
   // f.close() called automatically here
@@ -3310,7 +3310,7 @@ main()! {
 `use` works in any block scope:
 
 ```promise
-process(string path)! {
+process!(string path) {
   use f := File.open(path, "r")?;
 
   if needsBackup(path) {
@@ -3334,14 +3334,14 @@ process(string path)! {
 
 ```promise
 // In a failable function:
-writeData(string path, u8[] &data)! {
+writeData!(string path, u8[] &data) {
   use f := File.open(path, "w")?;
   f.write(&data)?;
   // If f.close() fails here, the error propagates (no prior error)
 }
 
 // If write fails:
-writeData(string path, u8[] &data)! {
+writeData!(string path, u8[] &data) {
   use f := File.open(path, "w")?;
   f.write(&data)?;  // raises an error
   // f.close() still called, but its error is suppressed — write's error propagates
@@ -3403,7 +3403,7 @@ For variables **not** declared with `use`, normal `drop()` semantics apply — t
 type Connection {
   int socket_fd;
 
-  close(~this)! `instance {
+  close!(~this) `instance {
     syscall.close(this.socket_fd)?;
   }
 
@@ -3413,7 +3413,7 @@ type Connection {
   }
 }
 
-main()! {
+main!() {
   // Explicit scoped lifetime — close() called, errors can propagate
   use conn := Connection.connect("localhost:5432")?;
   conn.query("SELECT 1")?;
@@ -3447,7 +3447,7 @@ Functions are never declared as "async". The runtime is the async engine — any
 ```promise
 // This function does I/O but has a normal signature.
 // The runtime suspends the goroutine during httpGet, not the OS thread.
-fetchUser(int id) User! {
+fetchUser!(int id) User {
   data := httpGet("/users/{id}")?;
   return User.fromJson(data)?;
 }
@@ -3565,7 +3565,7 @@ type TodoList {
   }
 }
 
-loadFromFile(string &path) TodoList! {
+loadFromFile!(string &path) TodoList {
   string content = io.readFile(path);          // auto-propagates on error
   Todo[] items = json.decode[Todo[]](content); // auto-propagates on error
   return TodoList(items: items);
@@ -3621,10 +3621,10 @@ typeConstraint: typeRef ('+' typeRef)*;
 
 typeMember: fieldDecl | methodDecl;
 fieldDecl: typeRef IDENT metaAnnotation* ('=' expression)? ';';
-methodDecl: IDENT '(' params ')' returnType? metaAnnotation* (block | ';');
+methodDecl: IDENT '!'? typeParams? '(' params ')' typeRef? metaAnnotation* (block | ';');
 
-funcDecl: IDENT typeParams? '(' params ')' returnType? metaAnnotation* block;
-returnType: typeRef '!'?;
+funcDecl: IDENT '!'? typeParams? '(' params ')' typeRef? metaAnnotation* block;
+// Old syntax (deprecated): returnType: typeRef '!'? | '!';
 
 // Parameters (definition side)
 params: paramList?;

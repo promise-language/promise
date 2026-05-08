@@ -185,19 +185,19 @@ sum(1, 2, 3);   // 6
 **Critical: `!` = panic. Bare call = auto-propagate.**
 
 ```promise
-// Failable function: return type has !
-read_config(string path) string! {
+// Failable function: ! after name marks it as failable
+read_config!(string path) string {
   string content = io.File.read_content(path);  // bare call: auto-propagates
   return content.trim();
 }
 
 // Auto-propagation works in all expression positions:
-process_config(string path) string! {
+process_config!(string path) string {
   return transform(io.File.read_content(path));  // call argument: auto-propagates
 }
 
-// Void failable function
-validate(string input)! {
+// Void failable function (no return type needed)
+validate!(string input) {
   if input.is_empty { raise error(message: "empty"); }
 }
 
@@ -354,9 +354,9 @@ consume(val);                 // val is moved, cannot use after
 // use binding: auto-calls close()/drop() at scope exit
 type Connection {
   int fd;
-  close(~this)! { /* cleanup */ }
+  close!(~this) { /* cleanup */ }
 }
-process()! {
+process!() {
   use conn := Connection(fd: 42);
   // conn.close() called automatically when conn goes out of scope
 }
@@ -368,7 +368,7 @@ type Resource {
 
 // File I/O: use read_content/write_content one-shot helpers, or open/close manually
 use io;
-main()! {
+main!() {
   // One-shot (preferred for simple reads/writes):
   string content = io.File.read_content("data.txt");
   // Manual open/close for streaming:
@@ -654,7 +654,7 @@ Percentage(value: 120);   // clamped to 100
 type Port {
   int value `final;
 
-  new(int value)! {
+  new!(int value) {
     if value < 1 || value > 65535 {
       raise error(message: "invalid port");
     }
@@ -664,7 +664,7 @@ type Port {
 Port(value: 80)!;         // panics on invalid
 
 // raise — returns error from a ! function (not an exception)
-divide(f64 a, f64 b) f64! {
+divide!(f64 a, f64 b) f64 {
   if b == 0.0 { raise error(message: "division by zero"); }
   return a / b;
 }
@@ -675,7 +675,7 @@ divide(f64 a, f64 b) f64! {
 ```promise
 // Read a file (failable main)
 use io;
-main()! {
+main!() {
   string content = io.File.read_content("input.txt");   // auto-propagates
   print_line(content);
 }
@@ -684,7 +684,7 @@ main()! {
 // Uses Encodable/Decodable structural interfaces
 use json;
 type Config `serializable { string name; int port; }
-main()! {
+main!() {
   // Convenience functions (recommended):
   string s = json.encode_string[Config](Config(name: "app", port: 8080));
   Config c = json.decode_string[Config](s);
@@ -701,7 +701,7 @@ main()! {
 
 // Dynamic JSON (JsonValue tree API)
 use json;
-main()! {
+main!() {
   JsonValue v = json.parse_value("\{\"name\":\"Alice\",\"scores\":[10,20]}");
   if v.is_object {
     string? name = v.get("name")!.as_string();   // "Alice"
@@ -713,14 +713,14 @@ main()! {
 
 // Run a subprocess (variadic — inline args or pre-built string[])
 use os;
-main()! {
+main!() {
   r := os.execute("ls", "-la", "/tmp");
   print_line(r.standard_output);
 }
 
 // File I/O with manual open/close
 use io;
-main()! {
+main!() {
   io.File f = io.File.open("/tmp/data.txt", readonly: true);
   string content = f.read_all();
   f.close();

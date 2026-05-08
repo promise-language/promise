@@ -176,25 +176,25 @@ type Credential `public {
     string value;           // the secret value
 
     // Load from environment variable
-    from_env(string var_name) Credential! `factory `public;
+    from_env!(string var_name) Credential `factory `public;
 
     // Load from a credentials file (~/.promise/credentials.toml)
-    from_store(string name) Credential! `factory `public;
+    from_store!(string name) Credential `factory `public;
 }
 
 type TokenProvider `public `structural {
     // Returns a valid token, refreshing if needed
-    token(~this) string! `abstract `instance;
+    token!(~this) string `abstract `instance;
 }
 
 type StaticToken is TokenProvider `public {
     string _value;
-    token(~this) string! `instance { return this._value; }
+    token!(~this) string `instance { return this._value; }
 }
 
 type EnvToken is TokenProvider `public {
     string _var_name;
-    token(~this) string! `instance {
+    token!(~this) string `instance {
         return os.get_env(this._var_name) ?: {
             raise AuthError(message: "environment variable '{this._var_name}' not set");
         };
@@ -230,7 +230,7 @@ type OAuthProvider is TokenProvider `public {
     string token_url;
     string? refresh_token;
 
-    token(~this) string! `instance;     // auto-refreshes expired tokens
+    token!(~this) string `instance; // auto-refreshes expired tokens
 }
 ```
 
@@ -279,17 +279,17 @@ type ProviderError is AiError `public {
 // silently make a type usable as an LLM provider.
 type Provider `public {
     // Send a completion request and get a response
-    complete(~this, Request &req) Response! `abstract `instance;
+    complete!(~this, Request &req) Response `abstract `instance;
 
     // Stream a completion request token-by-token.
     // Errors are surfaced as StreamEvent.Error — the stream itself is failable
     // only for transport-level failures (connection lost, etc.).
-    stream(~this, Request &req) stream[StreamEvent]! `abstract `instance;
+    stream!(~this, Request &req) stream[StreamEvent] `abstract `instance;
 
     // Generate embeddings for a batch of inputs
-    embed(~this, string[] &inputs, string model) f64[][]! `abstract `instance;
+    embed!(~this, string[] &inputs, string model) f64[][] `abstract `instance;
 
-    close(~this)! `instance;
+    close!(~this) `instance;
 }
 
 // ── Messages ───────────────────────────────────────────────────────────
@@ -458,11 +458,11 @@ type WeatherResponse {
     int humidity;
 }
 
-get_weather(WeatherRequest req) WeatherResponse! {
+get_weather!(WeatherRequest req) WeatherResponse {
     // ... actual weather API call
 }
 
-main()! {
+main!() {
     Tool weather_tool = Tool.create[WeatherRequest, WeatherResponse](
         name: "get_weather",
         description: "Get current weather for a location.",
@@ -514,28 +514,28 @@ type Agent `public {
 
     // Send a message and run the agent loop until completion.
     // Returns the final assistant response text.
-    run(~this, string user_message) string! `public `instance;
+    run!(~this, string user_message) string `public `instance;
 
     // Send a message and run with streaming output.
     // Yields text deltas as they arrive, executes tool calls automatically.
-    run_stream(~this, string user_message) stream[string]! `public `instance;
+    run_stream!(~this, string user_message) stream[string] `public `instance;
 
     // ── Interactive (multi-turn) mode ──────────────────────────────────
 
     // Send a user message and get the next agent turn.
     // Returns the full Turn including tool calls and results.
-    turn(~this, string user_message) Turn! `public `instance;
+    turn!(~this, string user_message) Turn `public `instance;
 
     // Send a user message with streaming.
     // Yields TurnEvents as they happen.
-    turn_stream(~this, string user_message) stream[TurnEvent]! `public `instance;
+    turn_stream!(~this, string user_message) stream[TurnEvent] `public `instance;
 
     // ── Structured output ──────────────────────────────────────────────
 
     // Run the agent and parse the response into a typed value.
     // The model is instructed to respond with JSON matching T's schema.
     // Retries once on parse failure with the error message (self-correction).
-    run_typed[T](~this, string user_message) T! `public `instance;
+    run_typed![T](~this, string user_message) T `public `instance;
 
     // ── History management ─────────────────────────────────────────────
 
@@ -607,7 +607,7 @@ final response. Best for autonomous tasks.
 ```promise
 use ai;
 
-main()! {
+main!() {
     use provider := ai.Anthropic.from_env();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     agent.set_system("You are a helpful assistant.");
@@ -626,12 +626,12 @@ and decide whether to continue. Best for conversational UIs and human-in-the-loo
 use ai;
 use io;
 
-main()! {
+main!() {
     use provider := ai.Anthropic.from_env();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     agent.set_system("You are a coding assistant.");
 
-    while line := io.read_line()! {
+    while line := io.read_line!() {
         Turn turn = agent.turn(line);
 
         if text := turn.text {
@@ -705,33 +705,33 @@ agent.config.tool_filter = |ToolCallEvent evt| -> bool {
 // Anthropic (Claude)
 type Anthropic is Provider `public {
     new(~this, string api_key) `public;
-    from_env() Self! `factory `public;     // reads ANTHROPIC_API_KEY
+    from_env!() Self `factory `public; // reads ANTHROPIC_API_KEY
 
-    complete(~this, Request &req) Response! `public `instance;
-    stream(~this, Request &req) stream[StreamEvent]! `public `instance;
-    embed(~this, string[] &inputs, string model) f64[][]! `public `instance;
-    close(~this)! `public `instance;
+    complete!(~this, Request &req) Response `public `instance;
+    stream!(~this, Request &req) stream[StreamEvent] `public `instance;
+    embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
+    close!(~this) `public `instance;
 }
 
 // OpenAI
 type OpenAI is Provider `public {
     new(~this, string api_key) `public;
-    from_env() Self! `factory `public;     // reads OPENAI_API_KEY
+    from_env!() Self `factory `public; // reads OPENAI_API_KEY
 
-    complete(~this, Request &req) Response! `public `instance;
-    stream(~this, Request &req) stream[StreamEvent]! `public `instance;
-    embed(~this, string[] &inputs, string model) f64[][]! `public `instance;
-    close(~this)! `public `instance;
+    complete!(~this, Request &req) Response `public `instance;
+    stream!(~this, Request &req) stream[StreamEvent] `public `instance;
+    embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
+    close!(~this) `public `instance;
 }
 
 // Generic OpenAI-compatible endpoint (Ollama, vLLM, LiteLLM, etc.)
 type OpenAICompat is Provider `public {
     new(~this, string base_url, string? api_key) `public;
 
-    complete(~this, Request &req) Response! `public `instance;
-    stream(~this, Request &req) stream[StreamEvent]! `public `instance;
-    embed(~this, string[] &inputs, string model) f64[][]! `public `instance;
-    close(~this)! `public `instance;
+    complete!(~this, Request &req) Response `public `instance;
+    stream!(~this, Request &req) stream[StreamEvent] `public `instance;
+    embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
+    close!(~this) `public `instance;
 }
 
 // Provider that routes to different models/providers based on model name prefix.
@@ -744,10 +744,10 @@ type Router is Provider `public {
     // Set the fallback provider for models that match no prefix.
     set_default(~this, Provider ~provider) `public `instance;
 
-    complete(~this, Request &req) Response! `public `instance;
-    stream(~this, Request &req) stream[StreamEvent]! `public `instance;
-    embed(~this, string[] &inputs, string model) f64[][]! `public `instance;
-    close(~this)! `public `instance;
+    complete!(~this, Request &req) Response `public `instance;
+    stream!(~this, Request &req) stream[StreamEvent] `public `instance;
+    embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
+    close!(~this) `public `instance;
 }
 
 // Mock provider for testing — returns canned responses without hitting any API.
@@ -768,10 +768,10 @@ type MockProvider is Provider `public {
     // Number of times complete() has been called.
     get call_count int `public `instance;
 
-    complete(~this, Request &req) Response! `public `instance;
-    stream(~this, Request &req) stream[StreamEvent]! `public `instance;
-    embed(~this, string[] &inputs, string model) f64[][]! `public `instance;
-    close(~this)! `public `instance;
+    complete!(~this, Request &req) Response `public `instance;
+    stream!(~this, Request &req) stream[StreamEvent] `public `instance;
+    embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
+    close!(~this) `public `instance;
 }
 ```
 
@@ -796,10 +796,10 @@ type Session `public {
     // ── Persistence ──────────────────────────────────────────────────
 
     // Save session to a file.
-    save(&this, string path)! `public `instance;
+    save!(&this, string path) `public `instance;
 
     // Load a session from a file.
-    load(string path) Session! `factory `public;
+    load!(string path) Session `factory `public;
 
     // ── History management ───────────────────────────────────────────
 
@@ -837,10 +837,10 @@ For applications that manage multiple users or conversations:
 
 ```promise
 type SessionStore `public `structural {
-    get(~this, string id) Session?! `abstract `instance;
-    save(~this, Session &session)! `abstract `instance;
-    delete(~this, string id)! `abstract `instance;
-    list(~this) string[]! `abstract `instance;           // list session IDs
+    get!(~this, string id) Session? `abstract `instance;
+    save!(~this, Session &session) `abstract `instance;
+    delete!(~this, string id) `abstract `instance;
+    list!(~this) string[] `abstract `instance; // list session IDs
 }
 
 // File-based implementation (one JSON file per session)
@@ -848,20 +848,20 @@ type FileSessionStore is SessionStore `public {
     string _dir;
     new(~this, string dir) `public;
 
-    get(~this, string id) Session?! `public `instance;
-    save(~this, Session &session)! `public `instance;
-    delete(~this, string id)! `public `instance;
-    list(~this) string[]! `public `instance;
+    get!(~this, string id) Session? `public `instance;
+    save!(~this, Session &session) `public `instance;
+    delete!(~this, string id) `public `instance;
+    list!(~this) string[] `public `instance;
 }
 
 // In-memory implementation (for testing / ephemeral use)
 type MemorySessionStore is SessionStore `public {
     new() `public;
 
-    get(~this, string id) Session?! `public `instance;
-    save(~this, Session &session)! `public `instance;
-    delete(~this, string id)! `public `instance;
-    list(~this) string[]! `public `instance;
+    get!(~this, string id) Session? `public `instance;
+    save!(~this, Session &session) `public `instance;
+    delete!(~this, string id) `public `instance;
+    list!(~this) string[] `public `instance;
 }
 ```
 
@@ -871,7 +871,7 @@ type MemorySessionStore is SessionStore `public {
 use ai;
 use io;
 
-main()! {
+main!() {
     // Resume or create session
     session := ai.Session.load("session.json") ? { ai.Session.create() };
 
@@ -883,7 +883,7 @@ main()! {
     agent.set_history(session.history.clone());
 
     // Interactive loop
-    while line := io.read_line()! {
+    while line := io.read_line!() {
         if line == "/quit" { break; }
         if line == "/clear" {
             agent.clear_history();
@@ -963,10 +963,10 @@ type Pipeline `public {
     }
 
     // Run the pipeline: each step's output becomes the next step's input.
-    run(~this, string input) string! `public `instance;
+    run!(~this, string input) string `public `instance;
 
     // Run with streaming — yields events from all steps.
-    run_stream(~this, string input) stream[PipelineEvent]! `public `instance;
+    run_stream!(~this, string input) stream[PipelineEvent] `public `instance;
 }
 
 enum PipelineEvent `public {
@@ -985,7 +985,7 @@ prompts:
 ```promise
 use ai;
 
-main()! {
+main!() {
     use provider := ai.Anthropic.from_env();
 
     // Specialist agents
@@ -1048,29 +1048,29 @@ type McpError is error `public {
 ```promise
 // Transport abstracts the communication channel for MCP protocol messages.
 type Transport `public `structural {
-    send(~this, string message)! `abstract `instance;
-    receive(~this) string! `abstract `instance;
-    close(~this)! `abstract `instance;
+    send!(~this, string message) `abstract `instance;
+    receive!(~this) string `abstract `instance;
+    close!(~this) `abstract `instance;
 }
 
 type StdioTransport is Transport `public {
-    send(~this, string message)! `public `instance;
-    receive(~this) string! `public `instance;
-    close(~this)! `public `instance;
+    send!(~this, string message) `public `instance;
+    receive!(~this) string `public `instance;
+    close!(~this) `public `instance;
 }
 
 type SseTransport is Transport `public {
     string url;
-    send(~this, string message)! `public `instance;
-    receive(~this) string! `public `instance;
-    close(~this)! `public `instance;
+    send!(~this, string message) `public `instance;
+    receive!(~this) string `public `instance;
+    close!(~this) `public `instance;
 }
 
 type HttpTransport is Transport `public {
     string url;
-    send(~this, string message)! `public `instance;
-    receive(~this) string! `public `instance;
-    close(~this)! `public `instance;
+    send!(~this, string message) `public `instance;
+    receive!(~this) string `public `instance;
+    close!(~this) `public `instance;
 }
 ```
 
@@ -1127,13 +1127,13 @@ type Server `public {
     // ── Transport ──────────────────────────────────────────────────────
 
     // Run the server on stdio transport (standard MCP transport).
-    serve_stdio(~this)! `public `instance;
+    serve_stdio!(~this) `public `instance;
 
     // Run the server on SSE transport at the given address.
-    serve_sse(~this, string addr)! `public `instance;
+    serve_sse!(~this, string addr) `public `instance;
 
     // Run the server on streamable HTTP transport.
-    serve_http(~this, string addr)! `public `instance;
+    serve_http!(~this, string addr) `public `instance;
 }
 
 type ServerConfig `public {
@@ -1212,17 +1212,17 @@ type FileInfo {
     int size;
 }
 
-read_file(FileReadRequest req) FileInfo! {
+read_file!(FileReadRequest req) FileInfo {
     string content = io.File.read(req.path);
     return FileInfo(path: req.path, content: content, size: content.len);
 }
 
-write_file(FileWriteRequest req) string! {
+write_file!(FileWriteRequest req) string {
     io.File.write(req.path, req.content);
     return "Written {req.content.len} bytes to {req.path}";
 }
 
-main()! {
+main!() {
     server := mcp.Server(name: "file-server", version: "1.0.0");
 
     // Tools — schemas derived from FileReadRequest / FileWriteRequest types
@@ -1264,39 +1264,39 @@ type Client `public {
     // ── Connection ─────────────────────────────────────────────────────
 
     // Connect to an MCP server via stdio (spawn a subprocess).
-    connect_stdio(string command, string[] args) Client! `factory `public;
+    connect_stdio!(string command, string[] args) Client `factory `public;
 
     // Connect to an MCP server via SSE.
-    connect_sse(string url) Client! `factory `public;
+    connect_sse!(string url) Client `factory `public;
 
     // Connect to an MCP server via streamable HTTP.
-    connect_http(string url) Client! `factory `public;
+    connect_http!(string url) Client `factory `public;
 
     // ── Discovery ──────────────────────────────────────────────────────
 
     // List available tools on the connected server.
-    list_tools(~this) ai.Tool[]! `public `instance;
+    list_tools!(~this) ai.Tool[] `public `instance;
 
     // List available resources.
-    list_resources(~this) Resource[]! `public `instance;
+    list_resources!(~this) Resource[] `public `instance;
 
     // List available prompts.
-    list_prompts(~this) Prompt[]! `public `instance;
+    list_prompts!(~this) Prompt[] `public `instance;
 
     // ── Invocation ─────────────────────────────────────────────────────
 
     // Call a tool by name with JSON arguments.
-    call_tool(~this, string name, string arguments_json) string! `public `instance;
+    call_tool!(~this, string name, string arguments_json) string `public `instance;
 
     // Read a resource by URI.
-    read_resource(~this, string uri) ResourceResponse! `public `instance;
+    read_resource!(~this, string uri) ResourceResponse `public `instance;
 
     // Get a prompt by name with arguments.
-    get_prompt(~this, string name, map[string, string] args) ai.Message[]! `public `instance;
+    get_prompt!(~this, string name, map[string, string] args) ai.Message[] `public `instance;
 
     // ── Lifecycle ──────────────────────────────────────────────────────
 
-    close(~this)! `public `instance;
+    close!(~this) `public `instance;
 }
 ```
 
@@ -1308,7 +1308,7 @@ MCP tools discovered from a server can be directly plugged into an `ai.Agent`:
 use ai;
 use mcp;
 
-main()! {
+main!() {
     // Connect to MCP servers
     use file_server := mcp.Client.connect_stdio("file-server", []);
     use db_server := mcp.Client.connect_stdio("db-server", []);
@@ -1428,13 +1428,13 @@ type Sandbox `public {
     // ── Execution ──────────────────────────────────────────────────────
 
     // Execute a Promise source file in this sandbox.
-    run_file(~this, string path) ExecutionResult! `public `instance;
+    run_file!(~this, string path) ExecutionResult `public `instance;
 
     // Execute inline Promise source code in this sandbox.
-    run_code(~this, string code) ExecutionResult! `public `instance;
+    run_code!(~this, string code) ExecutionResult `public `instance;
 
     // Execute a compiled Promise binary in this sandbox.
-    run_binary(~this, string path, string[] args) ExecutionResult! `public `instance;
+    run_binary!(~this, string path, string[] args) ExecutionResult `public `instance;
 }
 
 type SandboxConfig `public {
@@ -1478,7 +1478,7 @@ imports `io` without `FileRead`/`FileWrite` capability.
 use ai;
 use sandbox;
 
-main()! {
+main!() {
     use provider := ai.Anthropic.from_env();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     agent.set_system("You write Promise code. Return only code, no explanation.");
@@ -1520,7 +1520,7 @@ type MovieRecommendation {
     f64 confidence `doc("Confidence score 0.0 to 1.0.");
 }
 
-main()! {
+main!() {
     use provider := ai.Anthropic.from_env();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
 
@@ -1604,7 +1604,7 @@ $ promise ai schema CreateUserRequest -f user.pr
 use ai;
 use io;
 
-main()! {
+main!() {
     // Load or create session
     session := ai.Session.load("chat.json") ? { ai.Session.create() };
 
@@ -1615,7 +1615,7 @@ main()! {
 
     print_line("Chat (type /quit to exit, /clear to reset)");
 
-    while line := io.read_line()! {
+    while line := io.read_line!() {
         match line.trim() {
             "/quit" => break,
             "/clear" => {
@@ -1652,7 +1652,7 @@ main()! {
 use ai;
 use sandbox;
 
-main()! {
+main!() {
     use provider := ai.Anthropic.from_env();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     agent.set_system(
@@ -1702,7 +1702,7 @@ type InsertRequest `doc("Insert a row into a table.") {
     map[string, string] values `doc("Column-value pairs to insert.");
 }
 
-main()! {
+main!() {
     server := mcp.Server(name: "db-tools", version: "1.0.0");
 
     server.add_tool[QueryRequest, QueryResult](
@@ -1733,7 +1733,7 @@ use ai;
 use mcp;
 use io;
 
-main()! {
+main!() {
     // Connect to multiple MCP servers
     use files := mcp.Client.connect_stdio("file-server", []);
     use db := mcp.Client.connect_stdio("db-server", []);
@@ -1762,7 +1762,7 @@ main()! {
     agent.set_hooks(tracker.as_hooks());
 
     // Interactive session
-    while line := io.read_line()! {
+    while line := io.read_line!() {
         for event in agent.turn_stream(line) {
             match event {
                 ai.TurnEvent.TextDelta(text) => print(text),
@@ -1794,7 +1794,7 @@ test_agent_responds() `test {
     ));
 
     agent := ai.Agent(provider: mock, model: "test");
-    result := agent.run("Hi")!;
+    result := agent.run!("Hi");
 
     assert(result == "Hello!");
     assert(mock.call_count == 1);

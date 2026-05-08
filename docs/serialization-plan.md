@@ -111,7 +111,7 @@ let user = try JSONDecoder().decode(User.self, from: data)
 
 ```promise
 encode(Encoder ~e)!       // writes this value's fields into an encoder
-decode(Decoder ~d) Self!  `factory   // reads fields from a decoder, constructs Self
+decode!(Decoder ~d) Self `factory // reads fields from a decoder, constructs Self
 ```
 
 These methods call into **format-agnostic `Encoder`/`Decoder` interfaces**. Format libraries (JSON, TOML, etc.) provide concrete implementations of these interfaces. The generated methods describe the type's structure (field names, types, optionals) to the encoder/decoder — they never know which format is being used.
@@ -149,24 +149,24 @@ type Encoder `public
           Not structural — implementations must declare `is Encoder` explicitly.") {
 
     // Scalars
-    encode_bool(~this, bool value)!       `abstract;
-    encode_int(~this, int value)!         `abstract;
-    encode_uint(~this, uint value)!       `abstract;
-    encode_f64(~this, f64 value)!         `abstract;
-    encode_string(~this, string value)!   `abstract;
-    encode_none(~this)!                   `abstract;
+    encode_bool!(~this, bool value) `abstract;
+    encode_int!(~this, int value) `abstract;
+    encode_uint!(~this, uint value) `abstract;
+    encode_f64!(~this, f64 value) `abstract;
+    encode_string!(~this, string value) `abstract;
+    encode_none!(~this) `abstract;
 
     // Compound — begin/end delimited
-    begin_object(~this, int field_count)! `abstract;
-    end_object(~this)!                    `abstract;
-    begin_array(~this, int length)!       `abstract;
-    end_array(~this)!                     `abstract;
+    begin_object!(~this, int field_count) `abstract;
+    end_object!(~this) `abstract;
+    begin_array!(~this, int length) `abstract;
+    end_array!(~this) `abstract;
 
     // Field key in an object context
-    encode_key(~this, string name)!       `abstract;
+    encode_key!(~this, string name) `abstract;
 
     // Encode any Encodable value (dispatches to value.encode(~this))
-    encode_value(~this, Encodable value)! `doc("Encodes any Encodable value.") {
+    encode_value!(~this, Encodable value) `doc("Encodes any Encodable value.") {
         value.encode(this);
     }
 }
@@ -176,22 +176,22 @@ type Decoder `public
           Not structural — implementations must declare `is Decoder` explicitly.") {
 
     // Scalars
-    decode_bool(~this) bool!              `abstract;
-    decode_int(~this) int!                `abstract;
-    decode_uint(~this) uint!              `abstract;
-    decode_f64(~this) f64!                `abstract;
-    decode_string(~this) string!          `abstract;
-    decode_none(~this) bool!              `abstract; // returns true if the value is null/none
+    decode_bool!(~this) bool `abstract;
+    decode_int!(~this) int `abstract;
+    decode_uint!(~this) uint `abstract;
+    decode_f64!(~this) f64 `abstract;
+    decode_string!(~this) string `abstract;
+    decode_none!(~this) bool `abstract; // returns true if the value is null/none
 
     // Compound — begin/end delimited
-    begin_object(~this)!                  `abstract;
-    end_object(~this)!                    `abstract;
-    begin_array(~this) int!              `abstract; // returns element count (-1 if unknown)
-    end_array(~this)!                     `abstract;
+    begin_object!(~this) `abstract;
+    end_object!(~this) `abstract;
+    begin_array!(~this) int `abstract; // returns element count (-1 if unknown)
+    end_array!(~this) `abstract;
 
     // Field navigation in object context
-    next_key(~this) string?!              `abstract; // returns next key, none at end
-    skip_value(~this)!                    `abstract; // skip the current value
+    next_key!(~this) string? `abstract; // returns next key, none at end
+    skip_value!(~this) `abstract; // skip the current value
 }
 ```
 
@@ -206,12 +206,12 @@ type Decoder `public
 ```promise
 type Encodable `structural `public
     `doc("Types that can serialize themselves to an Encoder.") {
-    encode(Encoder ~e)! `abstract;
+    encode!(Encoder ~e) `abstract;
 }
 
 type Decodable `structural `public
     `doc("Types that can deserialize themselves from a Decoder.") {
-    decode(Decoder ~d) Self! `factory `abstract;
+    decode!(Decoder ~d) Self `factory `abstract;
 }
 ```
 
@@ -242,48 +242,48 @@ The compiler generates (conceptually):
 
 ```promise
 // Auto-generated encode method
-encode(Encoder ~e)! {
-    e.begin_object(3)!;
+encode!(Encoder ~e) {
+    e.begin_object!(3);
 
-    e.encode_key("user_name")!;
-    e.encode_string(this.name)!;
+    e.encode_key!("user_name");
+    e.encode_string!(this.name);
 
-    e.encode_key("age")!;
-    e.encode_int(this.age)!;
+    e.encode_key!("age");
+    e.encode_int!(this.age);
 
     // email is T? — omitted when none (default behavior)
     if this.email is present {
-        e.encode_key("email")!;
-        e.encode_string(this.email)!;
+        e.encode_key!("email");
+        e.encode_string!(this.email);
     }
 
-    e.encode_key("address")!;
-    this.address.encode(e)!;     // recursive — Address is Encodable
+    e.encode_key!("address");
+    this.address.encode!(e); // recursive — Address is Encodable
 
-    e.end_object()!;
+    e.end_object!();
 }
 
 // Auto-generated decode factory
-decode(Decoder ~d) Self! `factory {
-    d.begin_object()!;
+decode!(Decoder ~d) Self `factory {
+    d.begin_object!();
     string name = "";
     int age = 0;
     string? email = none;
     Address? address = none;
 
-    while key := d.next_key()! {
+    while key := d.next_key!() {
         match key {
             "user_name" => name = d.decode_string()!,
             "age" => age = d.decode_int()!,
             "email" => {
-                if d.decode_none()! { email = none; }
-                else { email = d.decode_string()!; }
+                if d.decode_none!() { email = none; }
+                else { email = d.decode_string!(); }
             },
             "address" => address = Address.decode(d)!,
             _ => d.skip_value()!,          // ignore unknown fields
         }
     }
-    d.end_object()!;
+    d.end_object!();
 
     return Self(
         name: name,
@@ -400,7 +400,7 @@ type Wrapper[T] `serializable {
 }
 ```
 
-The generated `encode` method calls `this.value.encode(~e)!` — which requires `T` to be `Encodable`. The compiler **adds an implicit constraint** `T: Encodable` (for encode) and `T: Decodable` (for decode) on the type parameters of a `serializable` generic type. This is validated at instantiation.
+The generated `encode` method calls `this.value.encode!(~e) ` — which requires `T` to be `Encodable`. The compiler **adds an implicit constraint** `T: Encodable` (for encode) and `T: Decodable` (for decode) on the type parameters of a `serializable` generic type. This is validated at instantiation.
 
 For non-serializable field types, the compiler emits a clear error:
 
@@ -419,13 +419,13 @@ type Timestamp `serializable {
     int nanos;
 
     // Custom: encode as ISO 8601 string instead of {seconds, nanos}
-    encode(Encoder ~e)! {
+    encode!(Encoder ~e) {
         e.encode_string(this.to_iso8601())!;
     }
 
-    decode(Decoder ~d) Self! `factory {
-        string s = d.decode_string()!;
-        return Self.from_iso8601(s)!;
+    decode!(Decoder ~d) Self `factory {
+        string s = d.decode_string!();
+        return Self.from_iso8601!(s);
     }
 }
 ```
@@ -444,18 +444,18 @@ type Product `serializable {
 
 // TOML config uses "title" instead of "product_name" for the same field.
 // Write a standalone function — no need to touch the type or the framework:
-decode_product_from_toml(Decoder ~d) Product! {
-    d.begin_object()!;
+decode_product_from_toml!(Decoder ~d) Product {
+    d.begin_object!();
     string name = "";
     f64 price = 0.0;
-    while key := d.next_key()! {
+    while key := d.next_key!() {
         match key {
             "title" => name = d.decode_string()!,   // TOML-specific key
             "price" => price = d.decode_f64()!,
             _ => d.skip_value()!,
         }
     }
-    d.end_object()!;
+    d.end_object!();
     return Product(name: name, price: price);
 }
 ```
@@ -492,21 +492,21 @@ type JsonDecoder is Decoder {
 encode_string[T: Encodable](T value) string!
     `public `doc("Serializes a value to a JSON string.") {
     JsonEncoder enc = JsonEncoder();
-    value.encode(enc)!;
+    value.encode!(enc);
     return enc.to_string();
 }
 
 decode_string[T: Decodable](string data) T!
     `public `doc("Deserializes a value from a JSON string.") {
     JsonDecoder dec = JsonDecoder(data: data);
-    return T.decode(dec)!;
+    return T.decode!(dec);
 }
 
 // Pretty-printing variant
 encode_string_pretty[T: Encodable](T value, int indent = 2) string!
     `public `doc("Serializes to an indented JSON string.") {
     JsonEncoder enc = JsonEncoder(pretty: true, indent: indent);
-    value.encode(enc)!;
+    value.encode!(enc);
     return enc.to_string();
 }
 ```
@@ -522,15 +522,15 @@ type User `serializable {
     string? email;               // omitted when none (default — no annotation needed)
 }
 
-main()! {
+main!() {
     // Encode
     user := User(name: "Alice", age: 30);
-    string data = json.encode_string(user)!;
+    string data = json.encode_string!(user);
     print_line(data);
     // {"user_name":"Alice","age":30}   (email omitted — it's none)
 
     // Decode
-    User parsed = json.decode_string[User](data)!;
+    User parsed = json.decode_string![User](data);
     print_line(parsed.name);   // Alice
     // parsed.email is none — key was missing, T? defaults to none
 }
@@ -608,15 +608,15 @@ All primitive types need `encode`/`decode` implementations. Since primitives are
 // In modules/std/int.pr
 type int `native {
     // ... existing ...
-    encode(Encoder ~e)! { e.encode_int(this)!; }
-    decode(Decoder ~d) Self! `factory { return d.decode_int()!; }
+    encode!(Encoder ~e) { e.encode_int!(this); }
+    decode!(Decoder ~d) Self `factory { return d.decode_int!(); }
 }
 
 // In modules/std/uint.pr
 type uint `native {
     // ... existing ...
-    encode(Encoder ~e)! { e.encode_uint(this)!; }
-    decode(Decoder ~d) Self! `factory { return d.decode_uint()!; }
+    encode!(Encoder ~e) { e.encode_uint!(this); }
+    decode!(Decoder ~d) Self `factory { return d.decode_uint!(); }
 }
 ```
 
@@ -632,10 +632,10 @@ For example, a field `i8 temperature` generates:
 
 ```promise
 // Encode: widen to int (always safe)
-e.encode_int(this.temperature as int)!;
+e.encode_int!(this.temperature as int);
 
 // Decode: narrow with range check
-int _raw = d.decode_int()!;
+int _raw = d.decode_int!();
 if _raw < -128 || _raw > 127 {
     raise DecodeError(message: "value out of range for i8 field 'temperature'", field: "temperature");
 }
@@ -646,7 +646,7 @@ A field `u64 snowflake_id` generates:
 
 ```promise
 // Encode: direct (uint → encode_uint)
-e.encode_uint(this.snowflake_id as uint)!;
+e.encode_uint!(this.snowflake_id as uint);
 
 // Decode: direct (decode_uint → uint, then narrow if needed)
 this.snowflake_id = d.decode_uint()! as u64;
@@ -660,22 +660,22 @@ Container types (`Vector[T]`, `Map[K,V]`) also need encode/decode:
 // In modules/std/vector.pr (encode for T[])
 type Vector[T] {
     // ... existing ...
-    encode(Encoder ~e)! {
-        e.begin_array(this.len)!;
+    encode!(Encoder ~e) {
+        e.begin_array!(this.len);
         for item in this {
-            item.encode(e)!;
+            item.encode!(e);
         }
-        e.end_array()!;
+        e.end_array!();
     }
 
-    decode(Decoder ~d) Self! `factory {
-        int n = d.begin_array()!;
+    decode!(Decoder ~d) Self `factory {
+        int n = d.begin_array!();
         Self result = Self();
         // If n is known, we could pre-allocate
-        while !d.end_of_array()! {
+        while !d.end_of_array!() {
             result.push(T.decode(d)!);
         }
-        d.end_array()!;
+        d.end_array!();
         return result;
     }
 }
@@ -786,10 +786,10 @@ json_tree := JsonValue.Object({"name": JsonValue.Str("Alice"), ...});
 output := json_tree.format();
 
 // Streaming (direct):
-encoder.begin_object(2)!;
-encoder.encode_key("name")!;
-encoder.encode_string("Alice")!;
-encoder.end_object()!;
+encoder.begin_object!(2);
+encoder.encode_key!("name");
+encoder.encode_string!("Alice");
+encoder.end_object!();
 ```
 
 The streaming model also naturally extends to binary formats (MessagePack, Protobuf) where there is no tree to build.
@@ -807,7 +807,7 @@ Users who need tree manipulation can always use `JsonValue` directly — the str
 `Encodable` and `Decodable` have 1 abstract method each. They **are** structural:
 
 - **Widely satisfied** — every serializable type, every primitive, every container. Requiring `is Encodable` on `int`, `string`, `Vector[T]`, etc. would be noisy.
-- **Accidental satisfaction is harmless** — if a type happens to have `encode(Encoder ~e)!`, it *should* be encodable.
+- **Accidental satisfaction is harmless** — if a type happens to have `encode!(Encoder ~e) `, it *should* be encodable.
 
 ### 7.4 Why AST Synthesis Instead of IR Generation?
 
@@ -828,7 +828,7 @@ The serialization system parallels the existing Format/Parse design:
 |---|---|---|---|---|
 | Interface | `Format` | `Parse` | `Encodable` | `Decodable` |
 | Sink/Source | `Writer` (bytes) | `Reader` (bytes) | `Encoder` (typed events) | `Decoder` (typed events) |
-| Method | `format(Writer ~w)!` | `parse(Reader ~r) Self!` | `encode(Encoder ~e)!` | `decode(Decoder ~d) Self!` |
+| Method | `format!(Writer ~w)` | `parse!(Reader ~r) Self` | `encode!(Encoder ~e)` | `decode!(Decoder ~d) Self` |
 | Method kind | Instance | Factory | Instance | Factory |
 | Auto-generated | No | No | Yes (`` `serializable ``) | Yes (`` `serializable ``) |
 | Format-specific | No (plain text) | No (plain text) | Yes (JSON, TOML, ...) | Yes (JSON, TOML, ...) |

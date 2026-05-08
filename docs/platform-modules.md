@@ -458,51 +458,51 @@ type File `public `doc("A file handle. Satisfies Reader, Writer, and Closer.") {
 
     // ── Factory constructors (short — fundamental) ──────────────────────────
     `doc("Opens an existing file for reading and writing. Fails if not found.")
-    open(string path) Self! `factory `public;
+    open!(string path) Self `factory `public;
 
     `doc("Opens an existing file for reading only. Fails if not found.")
-    read(string path) Self! `factory `public;
+    read!(string path) Self `factory `public;
 
     `doc("Creates a new file or truncates an existing one. Opens for reading and writing.")
-    create(string path) Self! `factory `public;
+    create!(string path) Self `factory `public;
 
     `doc("Opens or creates a file for appending. Read and write, seek position at end.")
-    append(string path) Self! `factory `public;
+    append!(string path) Self `factory `public;
 
     // ── Handle methods (instance — require an open file) ───────────────────
-    read(~this, u8[] ~buf) int! `public;          // satisfies Reader
-    write(~this, u8[] &buf) int! `public;         // satisfies Writer
+    read!(~this, u8[] ~buf) int `public; // satisfies Reader
+    write!(~this, u8[] &buf) int `public; // satisfies Writer
 
     `doc("Closes the file handle. Returns error on failure (double-close returns error, does not panic).")
-    close(~this)! `public;
+    close!(~this) `public;
 
     `doc("Reads all remaining content into a string.")
-    read_all(~this) string! `public;
+    read_all!(~this) string `public;
 
     `doc("Writes a string to the file.")
-    write_string(~this, string s)! `public;
+    write_string!(~this, string s) `public;
 
     `doc("Returns the current byte position.")
-    tell(~this) int! `public;
+    tell!(~this) int `public;
 
     `doc("Seeks to a byte offset from the start.")
-    seek(~this, int offset)! `public;
+    seek!(~this, int offset) `public;
 
     // ── One-shot convenience (global — longer names) ────────────────────────
     `doc("Reads the entire contents of a file as a string. Opens, reads, auto-closes.")
-    read_content(string path) string! `global `public;
+    read_content!(string path) string `global `public;
 
     `doc("Writes content to a file, creating or truncating it. Opens, writes, auto-closes.")
-    write_content(string path, string content)! `global `public;
+    write_content!(string path, string content) `global `public;
 
     `doc("Returns true if the path exists (file, directory, or symlink).")
     exists(string path) bool `global `public;
 
     `doc("Returns the size of the file in bytes.")
-    size(string path) int! `global `public;
+    size!(string path) int `global `public;
 
     `doc("Removes a file. Use Dir.remove for directories.")
-    remove(string path)! `global `public;
+    remove!(string path) `global `public;
 
     drop(~this) { close(~this) ? _ {}; }  // auto-close on scope exit; ignore error
 }
@@ -514,16 +514,16 @@ Usage:
 use io;
 
 // Factory constructors — short, fundamental
-f := File.read("config.json")!;
-string data = f.read_all()!;
+f := File.read!("config.json");
+string data = f.read_all!();
 
 // One-shot — longer, convenience (auto-closes via drop)
-string content = File.read_content("data.txt")!;
-File.write_content("out.txt", result)!;
+string content = File.read_content!("data.txt");
+File.write_content!("out.txt", result);
 
 // Equivalent to read_content (explicit):
-f2 := File.read("data.txt")!;
-string same = f2.read_all()!;
+f2 := File.read!("data.txt");
+string same = f2.read_all!();
 // f2 auto-closed by drop
 ```
 
@@ -534,7 +534,7 @@ auto-close after explicit close is safe.
 
 **Embedded filesystem compatibility**: The instance methods (`read`, `write`, `read_all`,
 `close`) work through structural interfaces (`Reader`, `Writer`, `Closer`). A future `EmbedFS`
-type would have its own factory (`assets.open("path")!`) but return handles satisfying the same
+type would have its own factory (`assets.open!("path") `) but return handles satisfying the same
 interfaces. User code taking `Reader &r` works identically with real and embedded files.
 
 ### `Dir` — directory operations
@@ -547,16 +547,16 @@ not files — conflating them adds noise to `File` and misleads readers about wh
 type Dir `public `doc("Directory operations. All methods are global — no Dir instances needed.") {
 
     `doc("Creates a directory. Parent must exist.")
-    mkdir(string path)! `global `public;
+    mkdir!(string path) `global `public;
 
     `doc("Creates a directory and all missing parent directories.")
-    mkdir_all(string path)! `global `public;
+    mkdir_all!(string path) `global `public;
 
     `doc("Returns the names (not full paths) of entries in a directory.")
-    list(string path) string[]! `global `public;
+    list!(string path) string[] `global `public;
 
     `doc("Removes an empty directory.")
-    remove(string path)! `global `public;
+    remove!(string path) `global `public;
 
     `doc("Returns true if the path is a directory.")
     exists(string path) bool `global `public;
@@ -568,10 +568,10 @@ Usage:
 ```promise
 use io;
 
-Dir.mkdir_all("/tmp/myapp/cache")!;
-string[] entries = Dir.list("/tmp/myapp")!;
+Dir.mkdir_all!("/tmp/myapp/cache");
+string[] entries = Dir.list!("/tmp/myapp");
 if Dir.exists("output/") {
-    Dir.remove("output/old")!;
+    Dir.remove!("output/old");
 }
 ```
 
@@ -588,10 +588,10 @@ normal use) and they are the primary interaction pattern for CLI programs.
 
 ```promise
 `doc("Reads one line from stdin. Returns absent at EOF, raises IoError on read error.")
-read_line() string?! `public;
+read_line!() string? `public;
 
 `doc("Reads all of stdin into a string.")
-read_stdin() string! `public;
+read_stdin!() string `public;
 ```
 
 **`string?!`** — the function can return `present("line")`, `absent` (EOF), or raise `IoError`.
@@ -600,7 +600,7 @@ The `while` loop unwraps the optional automatically:
 ```promise
 use io;
 
-while line := read_line()! {
+while line := read_line!() {
     print_line(line);
 }
 ```
@@ -718,7 +718,7 @@ get_env_var(string name) string? `public
           Returns none if the variable is not defined.
           An empty string is returned when the variable is set but empty.");
 
-get working_dir string! `public
+get working_dir! string `public
     `doc("Returns the absolute path of the current working directory.
           Raises an error if the OS call fails.");
 
@@ -743,7 +743,7 @@ type ProcessResult `public `doc("The result of executing a subprocess.
     string standard_error;
 }
 
-execute(string program, ...string args) ProcessResult! `public
+execute!(string program, ...string args) ProcessResult `public
     `doc("Executes a program with the given arguments and waits for it to complete.
           Accepts arguments inline or as a pre-built string[].
           Returns a ProcessResult containing the exit code and captured standard
@@ -845,7 +845,7 @@ type DateTime `public {
     to_unix() int `public;
 
     format(string layout) string `public;  // strftime-style, or RFC 3339 subset
-    parse(string s, string layout) Self! `factory `public;
+    parse!(string s, string layout) Self `factory `public;
 }
 
 // Timezone-agnostic conversions
@@ -1025,13 +1025,13 @@ First real use of `` `target `` in production code. Platform constants consolida
 
     *Promise layer* (os.pr): `execute()` uses goroutines for concurrent pipe reads:
     ```
-    int pid = _os_spawn(program, args)!;
+    int pid = _os_spawn!(program, args);
     int stdout_fd = _os_spawn_stdout_fd();
     int stderr_fd = _os_spawn_stderr_fd();
     task[string] stderr_task = go _os_read_pipe(stderr_fd);
     string stdout = _os_read_pipe(stdout_fd);
     string stderr = <-stderr_task;
-    int exit_code = _os_wait_pid(pid)!;
+    int exit_code = _os_wait_pid!(pid);
     ```
     Each `pal_read_pipe` call releases the scheduler P via enter/exit_syscall, allowing both goroutines to run concurrently on separate Ms.
 20. **Signal handling** — `on_signal(Signal, () handler)`. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.

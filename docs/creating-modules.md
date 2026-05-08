@@ -289,7 +289,7 @@ type Screen `public `doc("Main terminal handle — owns raw mode and alternate s
   int _width;
 
   // Public factory with doc
-  open(ScreenOptions options = ScreenOptions()) Self! `factory
+  open!(ScreenOptions options = ScreenOptions()) Self `factory
       `doc("Opens the terminal in raw mode with alternate screen buffer.") {
     // ...
   }
@@ -344,7 +344,7 @@ _console_strerror(int code) string {
 Usage in API methods:
 
 ```promise
-open() Self! `factory {
+open!() Self `factory {
   int rc = _console_enter_raw_mode();
   if rc < 0 {
     raise _make_console_error(rc);
@@ -396,7 +396,7 @@ type Screen `public `target(!wasm) `doc("Main terminal handle.") {
 }
 
 // This function is POSIX-only
-suspend(~this)! `target(posix) `doc("Suspend raw mode for subprocess handoff.");
+suspend!(~this) `target(posix) `doc("Suspend raw mode for subprocess handoff.");
 ```
 
 **Rules:**
@@ -614,23 +614,23 @@ scope must be unique. Use default parameters and optional parameters instead:
 
 ```promise
 // WRONG — two functions with same name
-open() Self! `factory;
-open(ScreenOptions options) Self! `factory;
+open!() Self `factory;
+open!(ScreenOptions options) Self `factory;
 
 // RIGHT — single function with default parameter
-open(ScreenOptions options = ScreenOptions()) Self! `factory;
+open!(ScreenOptions options = ScreenOptions()) Self `factory;
 ```
 
 For fundamentally different operations, use distinct names:
 
 ```promise
 // WRONG — overloaded parse
-parse(string data) Config!;
-parse(u8[] bytes) Config!;
+parse!(string data) Config ;
+parse!(u8[] bytes) Config ;
 
 // RIGHT — distinct names
-parse_string(string data) Config!;
-parse_bytes(u8[] bytes) Config!;
+parse_string!(string data) Config ;
+parse_bytes!(u8[] bytes) Config ;
 ```
 
 ### 6.2 No module-level variables
@@ -679,7 +679,7 @@ type Screen `public {
   int _fd;
 
   // Called by `use` binding at scope exit — can propagate errors
-  close(~this)! `doc("Restores terminal state. Called automatically by use binding.") {
+  close!(~this) `doc("Restores terminal state. Called automatically by use binding.") {
     int rc = _console_exit_raw_mode(this._fd);
     if rc < 0 { raise _make_console_error(rc); }
   }

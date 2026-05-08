@@ -910,6 +910,11 @@ func (c *Compiler) genFailableDestructure(s *ast.DestructureVarDecl) {
 		alloca.SetName(c.uniqueLocalName(s.Names[0]))
 		c.block.NewStore(mergedVal, alloca)
 		c.locals[s.Names[0]] = alloca
+		// B0263: Register drop/free for the value variable so heap-allocated
+		// user types are freed at scope exit. Without this, the instance from
+		// the ok path leaks (the error path contributes a null that the
+		// null-check in emitFreeCall safely skips).
+		c.maybeRegisterDrop(s.Names[0], alloca, valType)
 	}
 
 	// B0193: Always register the error optional for drop at scope exit.

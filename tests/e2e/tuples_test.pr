@@ -104,3 +104,30 @@ test_tuple_interpolation() `test {
   string s = "{pair}";
   assert(s == "(1, 2)", s);
 }
+
+// --- failable destructure with heap user type (B0263) ---
+
+type Pt {
+  int x;
+  int y;
+}
+
+make_pt!() Pt {
+  return Pt(x: 10, y: 20);
+}
+
+test_failable_destructure_no_leak() `test {
+  (p, err) := make_pt();
+  assert(err is absent, "no error");
+  assert(p.x == 10, "x");
+  assert(p.y == 20, "y");
+}
+
+fail_pt!() Pt {
+  raise error(message: "fail");
+}
+
+test_failable_destructure_error_path() `test {
+  (p, err) := fail_pt();
+  assert(err is present, "should error");
+}

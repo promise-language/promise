@@ -3611,6 +3611,21 @@ func TestFailableDestructureDiscardError(t *testing.T) {
 	assertContains(t, ir, "%val")
 }
 
+// B0263: Failable destructure value must be freed at scope exit for heap user types.
+func TestFailableDestructureValueFree(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt { int x; int y; }
+		make!() Pt { return Pt(x: 1, y: 2); }
+		main() {
+			(p, err) := make();
+		}
+	`)
+	// The value variable 'p' should get a free binding (heap user type without drop).
+	// emitFreeCall null-checks the instance pointer (safe for the error path's zeroinit).
+	assertContains(t, ir, "free.call")
+	assertContains(t, ir, "free.exec")
+}
+
 func TestTupleMixedTypes(t *testing.T) {
 	ir := generateIR(t, `main() { x := (42, "hello", true); }`)
 	// Should produce { i64, i8*, i1 } struct

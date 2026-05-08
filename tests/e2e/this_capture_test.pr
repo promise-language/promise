@@ -69,6 +69,7 @@ test_this_capture_multiple_fields() `test {
 
 // --- This capture producing string ---
 test_this_capture_string() `test(allow_leaks: true) {
+  // B0259
   p := Pair(x: 10, y: 20);
   () -> string fmt = p.make_formatter();
   assert(fmt() == "(10, 20)", "formatted pair");

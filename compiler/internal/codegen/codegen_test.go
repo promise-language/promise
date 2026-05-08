@@ -17033,3 +17033,33 @@ func TestVectorUserTypeElementDropWithPush(t *testing.T) {
 		t.Errorf("expected vecdrop.head element drop loop for Vector[Foo]")
 	}
 }
+
+// T0109: For-in over a call expression returning a vector registers a scope binding
+// to drop the temporary vector on all exit paths (normal exit, early return).
+func TestForInVectorCallExprScopeBinding(t *testing.T) {
+	ir := generateIR(t, `
+		type Bag {
+			int[] items;
+			to_list() int[] { return this.items; }
+		}
+		main() {
+			b := Bag(items: [1, 2, 3]);
+			for elem in b.to_list() {
+			}
+		}
+	`)
+	// The temp vector from to_list() should have a scope binding with Vector.drop.
+	assertContains(t, ir, "__forin_vec_tmp")
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
+// T0109: Vector-producing call expressions (e.g., split()) are tracked as stmt temps.
+func TestVectorCallExprStmtTempTracking(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int n = "a b c".split(" ").len;
+		}
+	`)
+	// The vector temp from split() should be tracked and dropped.
+	assertContains(t, ir, "call void @Vector.drop(")
+}

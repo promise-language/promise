@@ -53,10 +53,21 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		result := c.genCallExpr(e)
 		c.emitPanicCheck() // T0147: detect panic flag after every call expression
 		// T0073: Track known-safe string-producing calls (primitive to_string, string methods)
+		// T0109: Also track vector-producing calls (e.g., split()) for cleanup.
 		if result != nil && result.Type() == irtypes.I8Ptr {
-			if rt := c.info.Types[e]; rt != nil && extractNamed(rt) == types.TypString {
-				if c.isTrackedStringCall(e) {
-					c.trackStringTemp(result)
+			if rt := c.info.Types[e]; rt != nil {
+				named := extractNamed(rt)
+				if named == types.TypString {
+					if c.isTrackedStringCall(e) {
+						c.trackStringTemp(result)
+					}
+				} else if named == types.TypVector {
+					// T0109: Pass element type so string elements get dropped.
+					if elemType, ok := types.AsVector(rt); ok {
+						c.trackVectorTempWithElemType(result, elemType)
+					} else {
+						c.trackVectorTemp(result)
+					}
 				}
 			}
 		}

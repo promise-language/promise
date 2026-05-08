@@ -2427,8 +2427,21 @@ func (c *Compiler) trackStringTemp(val value.Value) {
 
 // trackVectorTemp registers a vector temporary for cleanup at statement end.
 // B0219: Used for vector field-read dups from droppable types.
+// T0109: Also used for vector-producing calls (e.g., split()) to drop string elements.
 func (c *Compiler) trackVectorTemp(val value.Value) {
 	c.trackTempWithDrop(val, c.funcs["Vector.drop"])
+}
+
+// trackVectorTempWithElemType registers a vector temporary with element type info.
+// When elemType is non-nil and is string, the cleanup will also drop string elements
+// before freeing the vector buffer. Delegates to trackTempWithDrop, then patches elemType.
+func (c *Compiler) trackVectorTempWithElemType(val value.Value, elemType types.Type) {
+	prevLen := len(c.stmtTemps)
+	c.trackTempWithDrop(val, c.funcs["Vector.drop"])
+	// If a new temp was actually added, set its element type.
+	if len(c.stmtTemps) > prevLen {
+		c.stmtTemps[len(c.stmtTemps)-1].elemType = elemType
+	}
 }
 
 // trackChannelTemp registers a channel temporary for cleanup at statement end.
@@ -2532,6 +2545,11 @@ func (c *Compiler) cleanupStmtTemps() {
 		c.block.NewCondBr(isNull, doneBlock, execBlock)
 
 		c.block = execBlock
+		// T0109: For vector temps with string elements, drop string elements
+		// before freeing the vector buffer.
+		if temp.elemType != nil {
+			c.emitVectorStringElementDropLoop(ptr, temp.elemType)
+		}
 		c.block.NewCall(temp.dropFunc, ptr)
 		c.block.NewBr(doneBlock)
 
@@ -3114,6 +3132,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// T0073: Claim string temp — ownership transferred to this variable.
 			// Skip if already claimed above (optional target).
 			if exprType != nil && extractNamed(exprType) == types.TypString {
+				c.claimStringTemp(val)
+			}
+			// T0109: Claim vector/channel temp — ownership transferred to this variable.
+			if exprType != nil && (types.IsVector(exprType) || types.IsChannel(exprType)) {
 				c.claimStringTemp(val)
 			}
 			// B0187: Claim heap temp — ownership transferred to reassigned variable.
@@ -4801,6 +4823,31 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		c.genForInArray(s, arr)
 	} else if elem, ok := types.AsVector(iterableType); ok {
 		slicePtr := c.genExpr(s.Iterable)
+		// T0109: Register a scope binding for temporary vectors returned by call
+		// expressions (e.g., for elem in set.to_vector()). Variable-backed vectors
+		// are dropped by their own scope bindings; only call results are orphaned.
+		// Using a scope binding ensures cleanup on ALL exit paths (normal exit,
+		// early return, break, panic) — not just after the loop.
+		if _, isCall := s.Iterable.(*ast.CallExpr); isCall {
+			if dropFn, ok := c.funcs["Vector.drop"]; ok {
+				tmpName := c.uniqueLocalName("__forin_vec_tmp")
+				tmpAlloca := c.createEntryAlloca(irtypes.I8Ptr)
+				tmpAlloca.SetName(tmpName)
+				c.block.NewStore(slicePtr, tmpAlloca)
+				dropFlag := c.createEntryAlloca(irtypes.I1)
+				dropFlag.SetName(tmpName + ".dropflag")
+				c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+				c.scopeBindings = append(c.scopeBindings, scopeBinding{
+					kind:     bindingDropString, // reuse: same i8* alloca + void(i8*) drop pattern
+					alloca:   tmpAlloca,
+					named:    types.TypVector,
+					valType:  iterableType,
+					dropFlag: dropFlag,
+					dropFunc: dropFn,
+					varName:  tmpName,
+				})
+			}
+		}
 		c.genForInVector(s, slicePtr, elem)
 	} else if key, val, ok := types.AsMap(iterableType); ok {
 		mapPtr := c.genExpr(s.Iterable)

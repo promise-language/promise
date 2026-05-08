@@ -61,7 +61,7 @@ test_set_to_vector() `test {
   assert(v.len == 2, "to_vector len == 2");
 }
 
-test_set_union() `test(allow_leaks: true) {
+test_set_union() `test {
   Set[int] a = Set[int]();
   a.add(1);
   a.add(2);
@@ -75,7 +75,7 @@ test_set_union() `test(allow_leaks: true) {
   assert(u.contains(3), "union contains 3");
 }
 
-test_set_intersect() `test(allow_leaks: true) {
+test_set_intersect() `test {
   Set[int] a = Set[int]();
   a.add(1);
   a.add(2);
@@ -91,7 +91,7 @@ test_set_intersect() `test(allow_leaks: true) {
   assert(!i.contains(1), "intersect !contains 1");
 }
 
-test_set_difference() `test(allow_leaks: true) {
+test_set_difference() `test {
   Set[int] a = Set[int]();
   a.add(1);
   a.add(2);
@@ -106,7 +106,7 @@ test_set_difference() `test(allow_leaks: true) {
   assert(!d.contains(2), "difference !contains 2");
 }
 
-test_set_is_subset() `test(allow_leaks: true) {
+test_set_is_subset() `test {
   Set[int] a = Set[int]();
   a.add(1);
   a.add(2);
@@ -117,7 +117,7 @@ test_set_is_subset() `test(allow_leaks: true) {
   assert(a.is_subset(b), "a is subset of b");
 }
 
-test_set_not_subset() `test(allow_leaks: true) {
+test_set_not_subset() `test {
   Set[int] a = Set[int]();
   a.add(1);
   a.add(2);

@@ -382,6 +382,7 @@ test_named_in_constructor_value() `test {
 }
 
 test_method_chain_named() `test(allow_leaks: true) {
+  // B0258
   Point p = Point(x: 1, y: 2);
   // Call method with named args, then access field
   int result = p.add_point(dx: 10, dy: 20).sum();

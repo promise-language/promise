@@ -92,7 +92,7 @@ test_split_relative() `test {
   assert(parts[2] == "c", "split c");
 }
 
-test_split_empty() `test(allow_leaks: true) {
+test_split_empty() `test {
   assert(path.split("").len == 0, "split empty");
 }
 

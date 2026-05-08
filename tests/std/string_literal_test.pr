@@ -57,7 +57,7 @@ test_literal_concat_with_heap() `test {
   assert(lit.is_literal, "original still literal");
 }
 
-test_literal_methods() `test(allow_leaks: true) {
+test_literal_methods() `test {
   assert("hello".contains("ell"), "contains");
   assert("hello".starts_with("hel"), "starts_with");
   assert("hello".ends_with("llo"), "ends_with");

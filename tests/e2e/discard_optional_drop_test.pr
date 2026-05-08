@@ -38,6 +38,7 @@ type Resource {
   }
 }
 test_discard_user_drop_pop() `test(allow_leaks: true) {
+  // B0257
   Resource[] v = Resource[]();
   v.push(Resource(id: 1));
   v.push(Resource(id: 2));

@@ -235,6 +235,7 @@ decode_whitespace_test() `test {
 }
 
 skip_value_test() `test(allow_leaks: true) {
+  // B0261
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":1,\"b\":\{\"nested\":true},\"c\":3}");
   dec.begin_object()!;
   int c_val = 0;
@@ -485,6 +486,7 @@ skip_value_array_test() `test {
 }
 
 skip_value_string_test() `test(allow_leaks: true) {
+  // B0261
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":\"hello\",\"b\":42}");
   dec.begin_object()!;
   int b_val = 0;

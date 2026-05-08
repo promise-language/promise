@@ -147,18 +147,44 @@ func (c *Compiler) emitTypeInfo(named *types.Named) *ir.Global {
 // resolveTypeInfoDropFn resolves the drop function pointer for a type's typeinfo.
 // Returns a bitcast to i8* of the drop function, or null if no drop exists.
 // B0226: Used to populate the typeinfo drop_fn_ptr field for runtime dispatch.
+// B0247: For explicit user drops (not synthesized), returns a wrapper that calls
+// drop + pal_free, since user drop functions don't free the instance themselves.
 func (c *Compiler) resolveTypeInfoDropFn(ownerName string, named *types.Named) constant.Constant {
 	if named.HasDrop() || named.NeedsSynthDrop() {
 		resolvedOwner := ownerName
-		if named.HasDrop() && !named.NeedsSynthDrop() {
+		explicitDrop := named.HasDrop() && !named.NeedsSynthDrop()
+		if explicitDrop {
 			resolvedOwner = c.resolveMethodOwner(named, "drop")
 		}
 		mangledName := mangleMethodName(resolvedOwner, "drop", false)
 		if fn, ok := c.funcs[mangledName]; ok {
+			if explicitDrop {
+				// B0247: Wrap explicit user drop with pal_free
+				fn = c.getOrCreateDropWrap(mangledName, fn)
+			}
 			return constant.NewBitCast(fn, irtypes.I8Ptr)
 		}
 	}
 	return constant.NewNull(irtypes.I8Ptr)
+}
+
+// getOrCreateDropWrap returns a wrapper function that calls the given drop function
+// and then frees the instance via pal_free. Used for explicit user drops in typeinfo
+// so that RTTI-based drop dispatch handles the full cleanup (B0247).
+// Synthesized drops already include pal_free, so they don't need wrapping.
+func (c *Compiler) getOrCreateDropWrap(dropName string, dropFn *ir.Func) *ir.Func {
+	wrapName := dropName + "$wrap"
+	if existing, ok := c.funcs[wrapName]; ok {
+		return existing
+	}
+	wrapFn := c.module.NewFunc(wrapName, irtypes.Void,
+		ir.NewParam("this", irtypes.I8Ptr))
+	entry := wrapFn.NewBlock(".entry")
+	entry.NewCall(dropFn, wrapFn.Params[0])
+	entry.NewCall(c.palFree, wrapFn.Params[0])
+	entry.NewRet(nil)
+	c.funcs[wrapName] = wrapFn
+	return wrapFn
 }
 
 // emitVtableGlobal creates a vtable global constant for a Named type.
@@ -396,9 +422,13 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 		}
 
 		// Field 1: drop function pointer (B0226)
+		// B0247: Explicit user drops get wrapped with pal_free.
 		dropFnConst := constant.Constant(constant.NewNull(irtypes.I8Ptr))
 		monoDropName := mangleMethodName(name, "drop", false)
 		if fn, ok := c.funcs[monoDropName]; ok {
+			if named.HasDrop() && !named.NeedsSynthDrop() {
+				fn = c.getOrCreateDropWrap(monoDropName, fn)
+			}
 			dropFnConst = constant.NewBitCast(fn, irtypes.I8Ptr)
 		} else {
 			// Fall back to origin type's drop

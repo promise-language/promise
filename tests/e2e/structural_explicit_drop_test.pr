@@ -1,0 +1,36 @@
+// B0247: Types with explicit drop implementing structural interfaces must have
+// their instance memory freed after drop when accessed via RTTI dispatch.
+type Counter is Iterator[int] {
+  int val;
+
+  next() int? {
+    if this.val > 0 {
+      this.val = this.val - 1;
+      return this.val;
+    }
+    return none;
+  }
+
+  drop(~this) {
+    // Explicit drop — does NOT call pal_free internally.
+    // The RTTI dispatch wrapper must call pal_free after this.
+  }
+}
+
+make_counter(int n) Iterator[int] {
+  return Counter(val: n);
+}
+
+// Test optional structural interface with explicit-drop type
+optional_structural_drop() `test {
+  Iterator[int]? it = none;
+  it = make_counter(3);
+  it = none;
+}
+
+// Test scope-exit drop of optional structural interface
+scope_exit_drop() `test {
+  Iterator[int]? it = none;
+  it = make_counter(5);
+  // it goes out of scope — RTTI drop dispatch should free the Counter instance
+}

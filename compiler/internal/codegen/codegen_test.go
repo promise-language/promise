@@ -16642,6 +16642,36 @@ func TestOptionalStructuralInterfaceDropOnReassign(t *testing.T) {
 	assertContains(t, ir, "struct.drop")
 }
 
+// B0247: RTTI drop dispatch for types with explicit user drop must call pal_free
+// after the drop function (user drops don't free the instance themselves).
+// The typeinfo should store a $wrap function that calls drop + pal_free.
+func TestRttiDropExplicitUserDropWrap(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter is Iterator[int] {
+			int val;
+			next() int? {
+				if this.val > 0 {
+					this.val = this.val - 1;
+					return this.val;
+				}
+				return none;
+			}
+			drop(~this) {}
+		}
+		make_counter() Iterator[int] {
+			return Counter(val: 3);
+		}
+		test() {
+			Iterator[int]? it = none;
+			it = make_counter();
+			it = none;
+		}
+	`)
+	// The typeinfo drop_fn_ptr for Counter should point to the $wrap function
+	// which calls Counter.drop then pal_free.
+	assertContains(t, ir, "Counter.drop$wrap")
+}
+
 // B0243: Optional structural interface drop in closure env must use RTTI dispatch,
 // not __promise_iter_cleanup (which assumes _FnIter layout and segfaults on other types).
 func TestOptionalStructuralInterfaceEnvDropRTTI(t *testing.T) {

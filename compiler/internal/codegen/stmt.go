@@ -1742,7 +1742,8 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 	if b.rttiDrop {
 		// B0226: RTTI-based drop dispatch for untyped error catches.
 		// Load the drop function pointer from the error instance's typeinfo (field 1)
-		// and call it. The drop function handles pal_free internally.
+		// and call it. Synthesized drops handle pal_free internally; explicit user drops
+		// use a $wrap function that calls drop + pal_free (B0247).
 		c.emitRttiDropDispatch(instance)
 	} else if b.dropFunc != nil {
 		c.block.NewCall(b.dropFunc, instance)
@@ -1823,8 +1824,9 @@ func (c *Compiler) emitRttiDropDispatch(instance value.Value) {
 
 // emitStructuralInstanceDrop drops a heap-allocated instance behind a structural interface
 // using RTTI-based dispatch (B0243). Loads the typeinfo drop_fn_ptr from the instance's
-// variant field. If drop_fn is non-null, calls it (the drop function handles pal_free for
-// synthesized/native drops). If drop_fn is null (type has no drop), calls pal_free directly.
+// variant field. If drop_fn is non-null, calls it — synthesized drops include pal_free;
+// explicit user drops use a $wrap function that calls drop + pal_free (B0247).
+// If drop_fn is null (type has no drop), calls pal_free directly.
 func (c *Compiler) emitStructuralInstanceDrop(instance value.Value) {
 	// Load variant pointer from instance (field 0 = typeinfo ptr)
 	variantPtr := c.loadVariantPtr(instance)
@@ -1845,7 +1847,8 @@ func (c *Compiler) emitStructuralInstanceDrop(instance value.Value) {
 	doneBlock := c.newBlock("struct.drop.done")
 	c.block.NewCondBr(isNull, freeBlock, callBlock)
 
-	// Has drop function: call it (handles pal_free for synth/native drops)
+	// Has drop function: call it (synth drops include pal_free; explicit user
+	// drops use $wrap which calls drop + pal_free per B0247)
 	c.block = callBlock
 	dropFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
 	typedFn := c.block.NewBitCast(dropFn, irtypes.NewPointer(dropFnType))

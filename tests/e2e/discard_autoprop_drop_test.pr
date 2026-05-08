@@ -1,0 +1,50 @@
+// B0262: Discarded success values from auto-propagated failable calls must be
+// dropped/freed. Tests heap user types, closures, and maps.
+type Gadget {
+  string label;
+  drop(~this) {
+  }
+}
+
+make_gadget!() Gadget {
+  return Gadget(label: "g");
+}
+
+// Wrapper discards failable return — auto-propagation drops user type.
+wrapper_gadget!() {
+  make_gadget();
+}
+
+test_discard_autoprop_user_type() `test {
+  wrapper_gadget()!;
+}
+
+make_closure!()(int) -> int {
+  int x = 10;
+  (int) -> int f = |int y| -> x + y;
+  return f;
+}
+
+// Wrapper discards failable return — auto-propagation frees closure env.
+wrapper_closure!() {
+  make_closure();
+}
+
+test_discard_autoprop_closure() `test {
+  wrapper_closure()!;
+}
+
+make_map!() map[string, int] {
+  map[string, int] m = map[string, int]();
+  m["a"] = 1;
+  return m;
+}
+
+// Wrapper discards failable return — auto-propagation drops map.
+wrapper_map!() {
+  make_map();
+}
+
+test_discard_autoprop_map() `test {
+  wrapper_map()!;
+}

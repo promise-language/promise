@@ -338,6 +338,20 @@ func (c *Compiler) dropDiscardedAutoPropagate(expr ast.Expr, val value.Value) {
 	if c.typeSubst != nil {
 		exprType = types.Substitute(exprType, c.typeSubst)
 	}
+	// B0262: Closures — free env struct via drop-or-free.
+	if _, isSig := exprType.(*types.Signature); isSig {
+		envPtr := c.block.NewExtractValue(val, 1)
+		isNull := c.block.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
+		freeBlock := c.newBlock("autoprop.env.free")
+		skipBlock := c.newBlock("autoprop.env.skip")
+		c.block.NewCondBr(isNull, skipBlock, freeBlock)
+		c.block = freeBlock
+		c.emitEnvDropOrFree(envPtr)
+		c.block.NewBr(skipBlock)
+		c.block = skipBlock
+		return
+	}
+
 	named := extractNamed(exprType)
 	if named == nil {
 		return
@@ -354,6 +368,33 @@ func (c *Compiler) dropDiscardedAutoPropagate(expr ast.Expr, val value.Value) {
 	case named == types.TypChannel || types.IsChannel(exprType):
 		if dropFn := c.funcs["Channel.drop"]; dropFn != nil {
 			c.block.NewCall(dropFn, val)
+		}
+	case named.HasDrop() || named.NeedsSynthDrop():
+		// B0262: Heap user types (including Map, Set) — call drop + free.
+		ownerName := named.Obj().Name()
+		resolvedType := exprType
+		if c.typeSubst != nil {
+			resolvedType = types.Substitute(exprType, c.typeSubst)
+		}
+		if inst, ok := resolvedType.(*types.Instance); ok {
+			ownerName = monoName(inst)
+		} else if named.HasDrop() && !named.NeedsSynthDrop() {
+			ownerName = c.resolveMethodOwner(named, "drop")
+		}
+		mangledName := mangleMethodName(ownerName, "drop", false)
+		if dropFn := c.funcs[mangledName]; dropFn != nil {
+			instance := c.extractInstancePtr(val)
+			nullCheck := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
+			execBlock := c.newBlock("autoprop.drop")
+			skipBlock := c.newBlock("autoprop.drop.skip")
+			c.block.NewCondBr(nullCheck, skipBlock, execBlock)
+			c.block = execBlock
+			c.block.NewCall(dropFn, instance)
+			if !named.NeedsSynthDrop() {
+				c.block.NewCall(c.palFree, instance)
+			}
+			c.block.NewBr(skipBlock)
+			c.block = skipBlock
 		}
 	}
 }

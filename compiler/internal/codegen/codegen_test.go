@@ -16619,6 +16619,39 @@ func TestStringTempNotClaimedForSynthDrop(t *testing.T) {
 	assertContains(t, ir, "promise_string_drop")
 }
 
+// B0262: Discarded auto-propagated failable call returning heap user type should drop+free.
+func TestDropDiscardedAutoPropagateUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			string name;
+			drop(~this) {}
+		}
+		make_foo!() Foo { return Foo(name: "x"); }
+		test!() {
+			make_foo();
+		}
+	`)
+	testFn := extractFunction(ir, "test")
+	assertContains(t, testFn, "autoprop.drop")
+	assertContains(t, testFn, "call void @Foo.drop")
+}
+
+// B0262: Discarded auto-propagated failable call returning closure should free env.
+func TestDropDiscardedAutoPropagateClosureEnv(t *testing.T) {
+	ir := generateIR(t, `
+		make_fn!() (int) -> int {
+			int x = 42;
+			(int) -> int f = |int y| -> x + y;
+			return f;
+		}
+		test!() {
+			make_fn();
+		}
+	`)
+	testFn := extractFunction(ir, "test")
+	assertContains(t, testFn, "autoprop.env.free")
+}
+
 // B0215: If-let unwrap should drop the inner string value at scope exit.
 func TestIfUnwrapStringDrop(t *testing.T) {
 	ir := generateIR(t, `

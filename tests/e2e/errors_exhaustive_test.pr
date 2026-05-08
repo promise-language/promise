@@ -57,11 +57,11 @@ type TimeoutError is DbError {
 }
 
 // Raise leaf type, catch as mid-level parent
-fail_timeout() void! {
+fail_timeout!() void {
   raise TimeoutError(message: "query timeout", status: 504, query: "SELECT 1", seconds: 30);
 }
 
-catch_as_app_error() int! {
+catch_as_app_error!() int {
   fail_timeout()? e is AppError {
     return e.status;
   };
@@ -74,7 +74,7 @@ test_catch_deep_as_parent() `test {
 }
 
 // Raise leaf type, catch as mid-level DbError
-catch_as_db_error() string! {
+catch_as_db_error!() string {
   fail_timeout()? e is DbError {
     return e.query;
   };
@@ -87,7 +87,7 @@ test_catch_deep_as_mid_parent() `test {
 }
 
 // Raise leaf type, catch as exact type
-catch_as_timeout() int! {
+catch_as_timeout!() int {
   fail_timeout()? e is TimeoutError {
     return e.seconds;
   };
@@ -120,12 +120,12 @@ type NetworkError is error {
   string host;
 }
 
-fail_network() void! {
+fail_network!() void {
   raise NetworkError(message: "conn refused", host: "localhost");
 }
 
 // Typed handler for IoError won't match NetworkError, propagates in failable fn
-try_catch_wrong_type() void! {
+try_catch_wrong_type!() void {
   fail_network()? e is IoError {
     return;
   };
@@ -159,7 +159,7 @@ test_propagated_error_retains_message() `test {
 // Section 4: Failable calls inside error handlers
 // ============================================================
 
-parse_num(string s) int! {
+parse_num!(string s) int {
   if s == "1" {
     return 1;
   }
@@ -173,7 +173,7 @@ parse_num(string s) int! {
 }
 
 // Failable call in handler body, propagated with ?
-retry_on_error() int! {
+retry_on_error!() int {
   int v = parse_num("bad")? e {
     return parse_num("99")?;
   };
@@ -214,7 +214,7 @@ test_nested_handlers_double_fallback() `test {
 }
 
 // Failable call in handler that itself fails, propagating out
-all_fail() int! {
+all_fail!() int {
   int v = parse_num("bad")? e {
     return parse_num("also_bad")?;
   };
@@ -244,16 +244,16 @@ type AuthError is error {
   string user;
 }
 
-fail_auth() void! {
+fail_auth!() void {
   raise AuthError(message: "unauthorized", user: "admin");
 }
 
-fail_validation() void! {
+fail_validation!() void {
   raise ValidationError(message: "invalid email", field: "email");
 }
 
 // Sequential calls with different typed handlers
-process_auth() string! {
+process_auth!() string {
   fail_auth()? e is AuthError {
     return "auth:" + e.user;
   };
@@ -265,7 +265,7 @@ test_sequential_typed_handler_auth() `test {
   assert(r == "auth:admin", "typed handler catches AuthError");
 }
 
-process_validation() string! {
+process_validation!() string {
   fail_validation()? e is ValidationError {
     return "field:" + e.field;
   };
@@ -287,25 +287,25 @@ type HttpError is error {
   bool retryable;
 }
 
-fail_http() void! {
+fail_http!() void {
   raise HttpError(message: "server error", status: 503, url: "/api/data", retryable: true);
 }
 
-get_http_status() int! {
+get_http_status!() int {
   fail_http()? e is HttpError {
     return e.status;
   };
   return 0;
 }
 
-get_http_url() string! {
+get_http_url!() string {
   fail_http()? e is HttpError {
     return e.url;
   };
   return "";
 }
 
-get_http_retryable() bool! {
+get_http_retryable!() bool {
   fail_http()? e is HttpError {
     return e.retryable;
   };
@@ -324,7 +324,7 @@ test_multi_field_error_retryable() `test {
   assert(get_http_retryable()!, "HttpError retryable is true");
 }
 
-get_http_message() string! {
+get_http_message!() string {
   fail_http()? e is HttpError {
     return e.message;
   };
@@ -349,7 +349,7 @@ test_error_as_value() `test {
   assert(e.message == "constructed", "error constructed as regular value");
 }
 
-make_and_raise(string msg) void! {
+make_and_raise!(string msg) void {
   error e = make_error(msg);
   raise e;
 }
@@ -370,11 +370,11 @@ test_raise_stored_error() `test {
 // Section 8: Void failable with error handler
 // ============================================================
 
-void_fail() void! {
+void_fail!() void {
   raise error(message: "void failed");
 }
 
-void_success() void! {
+void_success!() void {
   // no raise
 }
 
@@ -398,16 +398,16 @@ test_void_failable_handler_on_success() `test {
 // Section 9: Error propagation through multiple function layers
 // ============================================================
 
-layer4() int! {
+layer4!() int {
   raise error(message: "layer4 error");
 }
-layer3() int! {
+layer3!() int {
   return layer4()?;
 }
-layer2() int! {
+layer2!() int {
   return layer3()?;
 }
-layer1() int! {
+layer1!() int {
   return layer2()?;
 }
 
@@ -435,12 +435,12 @@ type SpecificError is BaseAppError {
   string detail;
 }
 
-fail_specific() void! {
+fail_specific!() void {
   raise SpecificError(message: "specific", severity: 3, detail: "details here");
 }
 
 // Handler for parent type catches child
-catch_as_base() int! {
+catch_as_base!() int {
   fail_specific()? e is BaseAppError {
     return e.severity;
   };
@@ -453,7 +453,7 @@ test_parent_handler_catches_child() `test {
 }
 
 // Handler for exact child type
-catch_as_specific() string! {
+catch_as_specific!() string {
   fail_specific()? e is SpecificError {
     return e.detail;
   };
@@ -477,7 +477,7 @@ test_discard_binding_untyped() `test {
   assert(caught, "discard binding untyped handler works");
 }
 
-discard_binding_typed_helper() bool! {
+discard_binding_typed_helper!() bool {
   fail_specific()? _ is BaseAppError {
     return true;
   };
@@ -501,7 +501,7 @@ test_no_binding_handler() `test {
 // Section 12: Error in conditional flow
 // ============================================================
 
-conditional_fail(bool should_fail) int! {
+conditional_fail!(bool should_fail) int {
   if should_fail {
     raise error(message: "conditional failure");
   }
@@ -534,7 +534,7 @@ type GenericError[T] is error {
 
 // --- Raise and catch with int ---
 
-fail_generic_int() void! {
+fail_generic_int!() void {
   raise GenericError[int](message: "int error", val: 42);
 }
 
@@ -552,7 +552,7 @@ test_generic_error_int_message() `test {
 
 // --- Raise and catch with string ---
 
-fail_generic_string() void! {
+fail_generic_string!() void {
   raise GenericError[string](message: "string error", val: "payload");
 }
 
@@ -570,7 +570,7 @@ test_generic_error_string_message() `test {
 
 // --- Raise and catch with bool ---
 
-fail_generic_bool() void! {
+fail_generic_bool!() void {
   raise GenericError[bool](message: "bool error", val: true);
 }
 
@@ -588,7 +588,7 @@ test_generic_error_bool_message() `test {
 
 // --- Propagation of generic errors ---
 
-propagate_generic_int() int! {
+propagate_generic_int!() int {
   fail_generic_int()?;
   return 0;
 }
@@ -607,7 +607,7 @@ test_generic_error_propagation() `test {
 
 // --- Multiple generic error instantiations in same function ---
 
-fail_either(bool use_int) void! {
+fail_either!(bool use_int) void {
   if use_int {
     raise GenericError[int](message: "int path", val: 1);
   }
@@ -645,7 +645,7 @@ type Point {
   int y;
 }
 
-fail_generic_point() void! {
+fail_generic_point!() void {
   raise GenericError[Point](message: "point error", val: Point(x: 10, y: 20));
 }
 

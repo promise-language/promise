@@ -70,7 +70,7 @@ _io_strerror(int code) string {
 
 // ── Stdin functions ──────────────────────────────────────────────────────────
 
-read_line() string?! `public `doc("Reads one line from stdin. Returns absent at EOF, raises IoError on error. Strips trailing newline.") {
+read_line!() string? `public `doc("Reads one line from stdin. Returns absent at EOF, raises IoError on error. Strips trailing newline.") {
   string line = _io_file_read_line(0);
   int rc = _io_errno();
   if rc == _io_eof_sentinel() {
@@ -82,7 +82,7 @@ read_line() string?! `public `doc("Reads one line from stdin. Returns absent at 
   return line;
 }
 
-read_stdin() string! `public `doc("Reads all of stdin into a string.") {
+read_stdin!() string `public `doc("Reads all of stdin into a string.") {
   string data = _io_file_read_all(0);
   int rc = _io_errno();
   if rc != 0 {
@@ -98,7 +98,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
 
   // ── Factory constructors ─────────────────────────────────────────────
 
-  open(string path, bool readonly = false) Self! `factory `public `doc("Opens an existing file. Pass readonly: true for read-only access.") {
+  open!(string path, bool readonly = false) Self `factory `public `doc("Opens an existing file. Pass readonly: true for read-only access.") {
     int mode = 0;
     if readonly {
       mode = 1;
@@ -110,7 +110,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     return File(_fd: fd);
   }
 
-  create(string path) Self! `factory `public `doc("Creates or truncates a file for reading and writing.") {
+  create!(string path) Self `factory `public `doc("Creates or truncates a file for reading and writing.") {
     int fd = _io_file_open(path, 2);
     if fd < 0 {
       raise _make_io_error(fd);
@@ -118,7 +118,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     return File(_fd: fd);
   }
 
-  append(string path) Self! `factory `public `doc("Opens or creates a file for appending.") {
+  append!(string path) Self `factory `public `doc("Opens or creates a file for appending.") {
     int fd = _io_file_open(path, 3);
     if fd < 0 {
       raise _make_io_error(fd);
@@ -128,7 +128,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
 
   // ── Handle methods ───────────────────────────────────────────────────
 
-  close(~this)! `public `doc("Closes the file handle. Returns error on double-close.") {
+  close!(~this) `public `doc("Closes the file handle. Returns error on double-close.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
     }
@@ -139,7 +139,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     }
   }
 
-  read_all(~this) string! `public `doc("Reads all remaining content into a string.") {
+  read_all!(~this) string `public `doc("Reads all remaining content into a string.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
     }
@@ -153,7 +153,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     return data;
   }
 
-  write_string(~this, string s)! `public `doc("Writes a string to the file.") {
+  write_string!(~this, string s) `public `doc("Writes a string to the file.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
     }
@@ -163,7 +163,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     }
   }
 
-  get position int! `public `doc("Returns the current byte position in the file.") {
+  get position! int `public `doc("Returns the current byte position in the file.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
     }
@@ -174,7 +174,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     return pos;
   }
 
-  seek(~this, int offset)! `public `doc("Seeks to a byte offset from the start of the file.") {
+  seek!(~this, int offset) `public `doc("Seeks to a byte offset from the start of the file.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
     }
@@ -186,7 +186,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
 
   // ── Byte-level I/O (Reader/Writer interface) ──────────────────────────
 
-  read(~this, u8[]~buf) int! `public `doc("Reads up to buf.len bytes into buf. Returns bytes read (0 = EOF). Satisfies Reader.") {
+  read!(~this, u8[]~buf) int `public `doc("Reads up to buf.len bytes into buf. Returns bytes read (0 = EOF). Satisfies Reader.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
     }
@@ -197,7 +197,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     return n;
   }
 
-  write(~this, u8[]~buf) int! `public `doc("Writes bytes from buf to the file. Returns bytes written. Satisfies Writer.") {
+  write!(~this, u8[]~buf) int `public `doc("Writes bytes from buf to the file. Returns bytes written. Satisfies Writer.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
     }
@@ -208,12 +208,12 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     return written;
   }
 
-  write_line(~this, string s)! `public `doc("Writes a string followed by the platform line separator.") {
+  write_line!(~this, string s) `public `doc("Writes a string followed by the platform line separator.") {
     this.write_string(s);
     this.write_string(Platform.line_separator);
   }
 
-  read_line(~this) string?! `public `doc("Reads one line from the file. Returns absent at EOF. Strips trailing newline.") {
+  read_line!(~this) string? `public `doc("Reads one line from the file. Returns absent at EOF. Strips trailing newline.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
     }
@@ -230,14 +230,14 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
 
   // ── One-shot convenience (global) ────────────────────────────────────
 
-  read_content(string path) string! `global `public `doc("Reads entire file contents as a string.") {
+  read_content!(string path) string `global `public `doc("Reads entire file contents as a string.") {
     File f = File.open(path, readonly: true);
     string data = f.read_all();
     f.close();
     return data;
   }
 
-  write_content(string path, string content)! `global `public `doc("Writes content to a file, creating or truncating it.") {
+  write_content!(string path, string content) `global `public `doc("Writes content to a file, creating or truncating it.") {
     File f = File.create(path);
     f.write_string(content);
     f.close();
@@ -245,7 +245,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
 
   exists(string path) bool `global `public `doc("Returns true if the path exists.") => _io_file_exists(path) == 1;
 
-  size(string path) int! `global `public `doc("Returns the size of a file in bytes.") {
+  size!(string path) int `global `public `doc("Returns the size of a file in bytes.") {
     int s = _io_file_stat_size(path);
     if s < 0 {
       raise _make_io_error(s);
@@ -253,7 +253,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     return s;
   }
 
-  remove(string path)! `global `public `doc("Removes a file.") {
+  remove!(string path) `global `public `doc("Removes a file.") {
     int rc = _io_file_remove(path);
     if rc < 0 {
       raise _make_io_error(rc);
@@ -271,14 +271,14 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
 // ── Dir type ─────────────────────────────────────────────────────────────────
 
 type Dir `public `doc("Directory operations. All methods are global.") {
-  make(string path)! `global `public `doc("Creates a directory. Parent must exist.") {
+  make!(string path) `global `public `doc("Creates a directory. Parent must exist.") {
     int rc = _io_file_mkdir(path);
     if rc < 0 {
       raise _make_io_error(rc);
     }
   }
 
-  make_all(string path)! `global `public `doc("Creates a directory and all missing parent directories.") {
+  make_all!(string path) `global `public `doc("Creates a directory and all missing parent directories.") {
     // _io_dir_exists / _io_file_mkdir consume their string arg, so we must
     // pass distinct string values for each call (strings are move types).
     if path.len == 0 {
@@ -314,7 +314,7 @@ type Dir `public `doc("Directory operations. All methods are global.") {
     }
   }
 
-  list(string path) string[]! `global `public `doc("Returns the names of entries in a directory, excluding '.' and '..'.") {
+  list!(string path) string[] `global `public `doc("Returns the names of entries in a directory, excluding '.' and '..'.") {
     int handle = _io_dir_open(path);
     if handle < 0 {
       raise _make_io_error(handle);
@@ -338,7 +338,7 @@ type Dir `public `doc("Directory operations. All methods are global.") {
     return result;
   }
 
-  remove(string path)! `global `public `doc("Removes an empty directory.") {
+  remove!(string path) `global `public `doc("Removes an empty directory.") {
     int rc = _io_dir_remove(path);
     if rc < 0 {
       raise _make_io_error(rc);
@@ -363,7 +363,7 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
     this._end = 0;
   }
 
-  read(~this, u8[]~buf) int! `public `doc("Reads up to buf.len bytes. Returns bytes read (0 = EOF). Satisfies Reader.") {
+  read!(~this, u8[]~buf) int `public `doc("Reads up to buf.len bytes. Returns bytes read (0 = EOF). Satisfies Reader.") {
     if buf.len == 0 {
       return 0;
     }
@@ -387,7 +387,7 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
     return n;
   }
 
-  read_line(~this) string?! `public `doc("Reads one line from the buffer. Returns absent at EOF. Strips trailing newline.") {
+  read_line!(~this) string? `public `doc("Reads one line from the buffer. Returns absent at EOF. Strips trailing newline.") {
     u8[] line = u8[]();
     while true {
       // Refill if buffer exhausted
@@ -416,7 +416,7 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
     return string.from_bytes(line);
   }
 
-  read_byte(~this) u8?! `public `doc("Reads a single byte. Returns absent at EOF.") {
+  read_byte!(~this) u8? `public `doc("Reads a single byte. Returns absent at EOF.") {
     if this._pos >= this._end {
       this._end = this._file.read(this._buf)!;
       this._pos = 0;
@@ -429,7 +429,7 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
     return b;
   }
 
-  close(~this)! `public `doc("Closes the underlying file.") {
+  close!(~this) `public `doc("Closes the underlying file.") {
     this._file.close();
   }
 
@@ -451,7 +451,7 @@ type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batc
     this._len = 0;
   }
 
-  write(~this, u8[]~buf) int! `public `doc("Writes bytes through the buffer. Returns bytes written. Satisfies Writer.") {
+  write!(~this, u8[]~buf) int `public `doc("Writes bytes through the buffer. Returns bytes written. Satisfies Writer.") {
     int total = 0;
     while total < buf.len {
       // Copy to internal buffer
@@ -468,17 +468,17 @@ type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batc
     return total;
   }
 
-  write_string(~this, string s)! `public `doc("Writes a string through the buffer.") {
+  write_string!(~this, string s) `public `doc("Writes a string through the buffer.") {
     u8[] bytes = s.bytes();
     this.write(bytes);
   }
 
-  write_line(~this, string s)! `public `doc("Writes a string followed by the platform line separator through the buffer.") {
+  write_line!(~this, string s) `public `doc("Writes a string followed by the platform line separator through the buffer.") {
     this.write_string(s);
     this.write_string(Platform.line_separator);
   }
 
-  flush(~this)! `public `doc("Flushes buffered data to the underlying file.") {
+  flush!(~this) `public `doc("Flushes buffered data to the underlying file.") {
     if this._len > 0 {
       u8[] data = this._buf[0:this._len];
       this._file.write(data)!;
@@ -486,7 +486,7 @@ type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batc
     }
   }
 
-  close(~this)! `public `doc("Flushes remaining data and closes the underlying file.") {
+  close!(~this) `public `doc("Flushes remaining data and closes the underlying file.") {
     this.flush();
     this._file.close();
   }

@@ -26,7 +26,7 @@ type uint `native `public {
   get max uint `public `global => ~0u;
   get min uint `public `global => 0u;
 
-  parse(Reader ~r) uint! `factory `public {
+  parse!(Reader ~r) uint `factory `public {
     uint result = 0u;
     bool has_digit = false;
 
@@ -56,13 +56,13 @@ type uint `native `public {
   to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
     return _uint_format(this as! uint, base, prefix, width, fill);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this uint to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this uint to an Encoder.") {
     e.encode_uint(this);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a uint from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a uint from a Decoder.") {
     return d.decode_uint();
   }
 }
@@ -94,7 +94,7 @@ type u8 `native `public {
   get max u8 `public `global => 255u8;
   get min u8 `public `global => 0u8;
 
-  parse(Reader ~r) u8! `factory `public {
+  parse!(Reader ~r) u8 `factory `public {
     uint v = uint.parse(r);
     if v > 255u {
       raise error(message: "value out of u8 range");
@@ -105,13 +105,13 @@ type u8 `native `public {
   to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
     return _uint_format(this as! uint, base, prefix, width, fill);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this value to an Encoder.") {
     e.encode_uint(this as! uint);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a value from a Decoder.") {
     uint v = d.decode_uint();
     if v > 255u {
       raise DecodeError(message: "value out of range for u8", field: "");
@@ -147,7 +147,7 @@ type u16 `native `public {
   get max u16 `public `global => 65535u16;
   get min u16 `public `global => 0u16;
 
-  parse(Reader ~r) u16! `factory `public {
+  parse!(Reader ~r) u16 `factory `public {
     uint v = uint.parse(r);
     if v > 65535u {
       raise error(message: "value out of u16 range");
@@ -158,13 +158,13 @@ type u16 `native `public {
   to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
     return _uint_format(this as! uint, base, prefix, width, fill);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this value to an Encoder.") {
     e.encode_uint(this as! uint);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a value from a Decoder.") {
     uint v = d.decode_uint();
     if v > 65535u {
       raise DecodeError(message: "value out of range for u16", field: "");
@@ -200,7 +200,7 @@ type u32 `native `public {
   get max u32 `public `global => 4294967295u32;
   get min u32 `public `global => 0u32;
 
-  parse(Reader ~r) u32! `factory `public {
+  parse!(Reader ~r) u32 `factory `public {
     uint v = uint.parse(r);
     if v > 4294967295u {
       raise error(message: "value out of u32 range");
@@ -211,13 +211,13 @@ type u32 `native `public {
   to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
     return _uint_format(this as! uint, base, prefix, width, fill);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this value to an Encoder.") {
     e.encode_uint(this as! uint);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a value from a Decoder.") {
     uint v = d.decode_uint();
     if v > 4294967295u {
       raise DecodeError(message: "value out of range for u32", field: "");
@@ -253,7 +253,7 @@ type u64 `native `public {
   get max u64 `public `global => ~0u64;
   get min u64 `public `global => 0u64;
 
-  parse(Reader ~r) u64! `factory `public {
+  parse!(Reader ~r) u64 `factory `public {
     uint v = uint.parse(r);
     return v as! u64;
   }
@@ -261,13 +261,13 @@ type u64 `native `public {
   to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
     return _uint_format(this as! uint, base, prefix, width, fill);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this value to an Encoder.") {
     e.encode_uint(this as! uint);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a value from a Decoder.") {
     uint v = d.decode_uint();
     return v as! u64;
   }

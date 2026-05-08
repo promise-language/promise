@@ -84,19 +84,24 @@ fieldDecl
     ;
 
 methodDecl
-    : methodName typeParams? LPAREN params RPAREN returnType? metaAnnotation* (memberBody | SEMI)
+    : methodName BANG typeParams? LPAREN params RPAREN typeRef? metaAnnotation* (memberBody | SEMI)
+    | methodName typeParams? LPAREN params RPAREN returnType? metaAnnotation* (memberBody | SEMI)
     ;
 
-// Getter: `get <name> <type> <annotations>? (<body> | ;)`
+// Getter: `get <name>! <type> <annotations>? (<body> | ;)` (new syntax)
+//         `get <name> <type>! <annotations>? (<body> | ;)` (old syntax, deprecated)
 // `get` is contextual — lexed as IDENT, validated in AST builder.
 getterDecl
-    : IDENT IDENT typeRef BANG? metaAnnotation* (memberBody | SEMI)
+    : IDENT IDENT BANG typeRef metaAnnotation* (memberBody | SEMI)
+    | IDENT IDENT typeRef BANG? metaAnnotation* (memberBody | SEMI)
     ;
 
-// Setter: `set <name>(<type> <param>) <annotations>? (<body> | ;)`
+// Setter: `set <name>!(<type> <param>) <annotations>? (<body> | ;)` (new: failable setter)
+//         `set <name>(<type> <param>) <annotations>? (<body> | ;)` (non-failable setter)
 // `set` is contextual — lexed as IDENT, validated in AST builder.
 setterDecl
-    : IDENT IDENT LPAREN typeRef IDENT RPAREN metaAnnotation* (memberBody | SEMI)
+    : IDENT IDENT BANG LPAREN typeRef IDENT RPAREN metaAnnotation* (memberBody | SEMI)
+    | IDENT IDENT LPAREN typeRef IDENT RPAREN metaAnnotation* (memberBody | SEMI)
     ;
 
 // Shared body for methods, getters, setters: block or expression body.
@@ -124,8 +129,10 @@ methodName
 // Enum Declarations
 // ============================================================
 
+// The predicate on the variant loop prevents IDENT followed by BANG (a failable
+// method declaration) from being consumed as an enum variant.
 enumDecl
-    : ENUM IDENT typeParams? metaAnnotation* LBRACE enumVariant (COMMA enumVariant)* COMMA? enumMember* RBRACE
+    : ENUM IDENT typeParams? metaAnnotation* LBRACE enumVariant ({p.GetTokenStream().LT(3).GetTokenType() != PromiseParserBANG}? COMMA enumVariant)* COMMA? enumMember* RBRACE
     ;
 
 enumVariant
@@ -146,7 +153,8 @@ enumMember
 // ============================================================
 
 funcDecl
-    : IDENT typeParams? LPAREN params RPAREN returnType? metaAnnotation* (memberBody | SEMI)
+    : IDENT BANG typeParams? LPAREN params RPAREN typeRef? metaAnnotation* (memberBody | SEMI)
+    | IDENT typeParams? LPAREN params RPAREN returnType? metaAnnotation* (memberBody | SEMI)
     ;
 
 returnType

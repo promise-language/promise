@@ -64,7 +64,7 @@ type Vector[T] `native `public {
 
   get is_empty bool => this.len == 0;
 
-  format(Writer ~w)! `public `doc("Writes a human-readable representation like [1, 2, 3] to the writer.") {
+  format!(Writer ~w) `public `doc("Writes a human-readable representation like [1, 2, 3] to the writer.") {
     w.write_string("[");
     int i = 0;
     while i < this.len {

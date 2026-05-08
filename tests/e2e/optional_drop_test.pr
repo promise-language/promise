@@ -86,7 +86,7 @@ test_inline_optional_unwrap_concat() `test {
 
 // B0190: Ensure optionalFieldString flag doesn't leak across statements.
 // A field access on one statement must not suppress temp tracking on the next.
-make_string() string! {
+make_string!() string {
   return "hello" + " world";
 }
 

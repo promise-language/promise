@@ -21,7 +21,7 @@ type Set[T: Hashable + Equal] `public {
     return this._map.contains(elem);
   }
 
-  format(Writer ~w)! `public `doc("Writes a human-readable representation to the writer.") {
+  format!(Writer ~w) `public `doc("Writes a human-readable representation to the writer.") {
     w.write_string("\{");
     T[] items = this._map.keys();
     int i = 0;

@@ -73,7 +73,7 @@ type Pair[A, B] `public {
 
 // --- Public failable function ---
 
-safe_divide(int a, int b) int! `public {
+safe_divide!(int a, int b) int `public {
   if b == 0 {
     raise error(message: "division by zero");
   }
@@ -100,7 +100,7 @@ wrap[T](T x) T[] `public {
   return result;
 }
 
-safe_identity[T](T x) T! `public {
+safe_identity![T](T x) T `public {
   return x;
 }
 

@@ -1489,15 +1489,15 @@ type DetailedIoError is IoError2 {
   string device;
 }
 
-fail_io2() void! {
+fail_io2!() void {
   raise IoError2(message: "disk full", code: 28);
 }
 
-fail_parse2() void! {
+fail_parse2!() void {
   raise ParseError2(message: "unexpected token", line: 10, col: 5);
 }
 
-fail_detailed_io() void! {
+fail_detailed_io!() void {
   raise DetailedIoError(message: "read error", code: 5, device: "/dev/sda");
 }
 

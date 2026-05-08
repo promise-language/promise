@@ -196,7 +196,7 @@ test_string_to_format_structural() `test {
 // --- Structural interface parameter with void failable method ---
 
 type Logger `structural {
-  log(string msg)! `abstract;
+  log!(string msg) `abstract;
 }
 
 type LogSink {
@@ -249,7 +249,7 @@ type Animal {
   to_string() string {
     return this.sound;
   }
-  format(Writer ~w)! {
+  format!(Writer ~w) {
     w.write_string(this.sound);
   }
 }
@@ -298,7 +298,7 @@ type Color {
   to_string() string {
     return "rgb({this.r},{this.g},{this.b})";
   }
-  format(Writer ~w)! {
+  format!(Writer ~w) {
     w.write_string("rgb(");
     this.r.format(w);
     w.write_string(",");

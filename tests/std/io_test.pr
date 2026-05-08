@@ -27,12 +27,12 @@ test_write_line_empty() `test {
 type TestCloser {
   bool closed;
 
-  close(~this)! {
+  close!(~this) {
     this.closed = true;
   }
 }
 
-_do_close(Closer ~c)! {
+_do_close!(Closer ~c) {
   c.close();
 }
 
@@ -45,7 +45,7 @@ test_closer_structural() `test {
 // --- Closer error propagation ---
 
 type FailCloser {
-  close(~this)! {
+  close!(~this) {
     raise error(message: "close failed");
   }
 }
@@ -65,15 +65,15 @@ test_closer_error() `test {
 
 // --- Writer structural interface ---
 
-_write_through_writer(Writer ~w, string s) int! {
+_write_through_writer!(Writer ~w, string s) int {
   return w.write_string(s);
 }
 
-_write_line_through_writer(Writer ~w, string s)! {
+_write_line_through_writer!(Writer ~w, string s) {
   w.write_line(s);
 }
 
-_write_bytes_through_writer(Writer ~w, u8[]~data) int! {
+_write_bytes_through_writer!(Writer ~w, u8[]~data) int {
   return w.write(data);
 }
 
@@ -101,7 +101,7 @@ test_writer_structural_write_bytes() `test {
 
 // --- Reader structural interface ---
 
-_read_through_reader(Reader ~r, u8[]~buf) int! {
+_read_through_reader!(Reader ~r, u8[]~buf) int {
   return r.read(buf);
 }
 

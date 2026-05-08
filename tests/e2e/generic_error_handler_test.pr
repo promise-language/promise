@@ -3,11 +3,11 @@ type AppError[T] is error {
   T detail;
 }
 
-make_int_error() AppError[int]! {
+make_int_error!() AppError[int] {
   raise AppError[int](message: "int error", detail: 42);
 }
 
-make_string_error() AppError[string]! {
+make_string_error!() AppError[string] {
   raise AppError[string](message: "string error", detail: "oops");
 }
 

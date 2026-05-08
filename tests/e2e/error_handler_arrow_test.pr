@@ -4,14 +4,14 @@ type ParseError is error {
   int code;
 }
 
-parse(int n) int! {
+parse!(int n) int {
   if n < 0 {
     raise ParseError(code: 1, message: "negative");
   }
   return n * 2;
 }
 
-get_label(int n) string! {
+get_label!(int n) string {
   if n < 0 {
     raise error(message: "bad");
   }
@@ -78,7 +78,7 @@ test_arrow_discard_binding() `test {
 // Section 4: Arrow typed handler
 // ============================================================
 
-relay_typed(int n) int! {
+relay_typed!(int n) int {
   int v = parse(n)? e is ParseError => e.code;
   return v;
 }
@@ -111,7 +111,7 @@ test_arrow_optional_success() `test {
 // Section 6: Arrow in auto-propagation context
 // ============================================================
 
-double_parse(int n) int! {
+double_parse!(int n) int {
   int a = parse(n)? e => 0;
   int b = parse(n); // auto-propagates
   return a + b;
@@ -149,7 +149,7 @@ test_arrow_chain() `test {
 
 type Sensor {
   int _raw;
-  get value int! {
+  get value! int {
     if this._raw < 0 {
       raise error(message: "negative");
     }

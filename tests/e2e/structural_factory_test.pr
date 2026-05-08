@@ -32,12 +32,12 @@ test_generic_factory() `test {
 // --- Failable abstract factory ---
 
 type TryParseable `structural {
-  tryParse(string data)! `abstract `factory;
+  tryParse!(string data) `abstract `factory;
 }
 
 type Strict {
   int n;
-  tryParse(string data) Strict! `factory {
+  tryParse!(string data) Strict `factory {
     if data == "bad" {
       raise error("invalid");
     }
@@ -60,7 +60,7 @@ test_failable_factory_error() `test {
 
 // --- Generic failable factory ---
 
-tryLoad[T: TryParseable](string data) T! {
+tryLoad![T: TryParseable](string data) T {
   return T.tryParse(data);
 }
 

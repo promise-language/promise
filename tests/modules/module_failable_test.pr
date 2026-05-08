@@ -28,7 +28,7 @@ test_failable_result_capture_error() `test {
   }
 }
 
-propagate_divide() int! {
+propagate_divide!() int {
   return mathlib.safe_divide(100, 0);
 }
 

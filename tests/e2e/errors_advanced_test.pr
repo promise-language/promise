@@ -1,6 +1,6 @@
 // Advanced error handling tests: propagation chains, bang unwrap, failable functions.
 // --- basic raise and propagate ---
-parse_int(string s) int! {
+parse_int!(string s) int {
   if s == "42" {
     return 42;
   }
@@ -20,16 +20,16 @@ test_propagate_success() `test {
 
 // --- propagation chain: 3 levels deep ---
 
-level3() int! {
+level3!() int {
   raise error(message: "deep error");
 }
 
-level2() int! {
+level2!() int {
   int v = level3()?;
   return v + 1;
 }
 
-level1() int! {
+level1!() int {
   int v = level2()?;
   return v + 1;
 }
@@ -48,7 +48,7 @@ test_propagation_chain() `test {
 
 // --- multiple failable calls ---
 
-add_parsed(string a, string b) int! {
+add_parsed!(string a, string b) int {
   int x = parse_int(a)?;
   int y = parse_int(b)?;
   return x + y;
@@ -97,7 +97,7 @@ test_bang_unwrap_success() `test {
 
 // --- conditional error handling ---
 
-safe_get(int[] arr, int idx) int! {
+safe_get!(int[] arr, int idx) int {
   if idx < 0 {
     raise error(message: "negative index");
   }
@@ -147,7 +147,7 @@ test_failable_returning_negative() `test {
 
 // --- propagation in loop ---
 
-parse_and_sum(string[] inputs) int! {
+parse_and_sum!(string[] inputs) int {
   int sum = 0;
   for s in inputs {
     int v = parse_int(s)?;
@@ -194,11 +194,11 @@ type IoError is error {
   int code;
 }
 
-fail_io() void! {
+fail_io!() void {
   raise IoError(message: "disk full", code: 28);
 }
 
-get_io_error_code() int! {
+get_io_error_code!() int {
   fail_io()? e is IoError {
     return e.code;
   };
@@ -216,11 +216,11 @@ type ParseError is error {
   int line;
 }
 
-fail_parse() void! {
+fail_parse!() void {
   raise ParseError(message: "syntax error", line: 42);
 }
 
-try_typed_propagation() bool! {
+try_typed_propagation!() bool {
   // IoError handler won't match ParseError, should propagate
   fail_parse()? e is IoError {
     return false;
@@ -237,7 +237,7 @@ test_typed_handler_propagates_nonmatch() `test {
 
 // --- typed handler in failable function propagates ---
 
-try_io_in_failable() void! {
+try_io_in_failable!() void {
   fail_parse()? e is IoError {
     return;
   };

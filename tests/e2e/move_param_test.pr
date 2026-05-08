@@ -81,7 +81,7 @@ test_move_and_return() `test {
 // Section 5: Move param in failable function
 // =============================================================================
 
-failable_consume(~string s) int! {
+failable_consume!(~string s) int {
   if s == "bad" {
     raise error(message: "bad input");
   }

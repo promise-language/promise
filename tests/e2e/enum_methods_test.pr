@@ -262,7 +262,7 @@ test_enum_expression_body() `test {
 enum Config {
   Debug, Release,
 
-  validate(&this) string! {
+  validate!(&this) string {
     match this {
       Config.Debug => {
         return "debug-mode";
@@ -397,7 +397,7 @@ test_enum_method_default_param() `test {
 enum Source {
   Valid, Invalid,
 
-  load(&this) string! {
+  load!(&this) string {
     match this {
       Source.Valid => {
         return "data";

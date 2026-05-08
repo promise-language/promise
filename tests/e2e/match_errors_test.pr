@@ -6,7 +6,7 @@ type IoError is error {
   int code;
 }
 
-parse_int(string s) int! {
+parse_int!(string s) int {
   if s == "42" {
     return 42;
   }
@@ -22,7 +22,7 @@ parse_int(string s) int! {
   raise error(message: "bad: " + s);
 }
 
-get_value(int key) string! {
+get_value!(int key) string {
   if key == 1 {
     return "one";
   }
@@ -32,7 +32,7 @@ get_value(int key) string! {
   raise error(message: "unknown key");
 }
 
-classify_code(int code) string! {
+classify_code!(int code) string {
   if code < 0 {
     raise error(message: "negative code");
   }
@@ -48,7 +48,7 @@ enum Status {
   Ok, Warn, Err,
 }
 
-status_for_code(int code) Status! {
+status_for_code!(int code) Status {
   if code < 0 {
     raise error(message: "negative");
   }
@@ -186,7 +186,7 @@ test_match_arm_handler_wildcard() `test {
 // Section 5: raise inside match arm (block form)
 // ============================================================
 
-match_with_raise(int code) string! {
+match_with_raise!(int code) string {
   return match code {
     0 => "ok",
     1 => {
@@ -235,7 +235,7 @@ enum Op {
   Add, Sub, Div,
 }
 
-compute(Op op, int a, int b) int! {
+compute!(Op op, int a, int b) int {
   return match op {
     Op.Add => a + b,
     Op.Sub => a - b,
@@ -331,7 +331,7 @@ test_match_result_optional_success() `test {
 // Section 9: Auto-propagation chain through match-returning function
 // ============================================================
 
-classify_and_parse(string input) string! {
+classify_and_parse!(string input) string {
   int code = parse_int(input);
   return classify_code(code);
 }
@@ -359,7 +359,7 @@ test_chain_parse_fail() `test {
 // Section 10: Match on enum from failable function
 // ============================================================
 
-describe_status(int code) string! {
+describe_status!(int code) string {
   Status s = status_for_code(code);
   return match s {
     Status.Ok => "all good",
@@ -396,7 +396,7 @@ test_status_negative() `test {
 // Section 11: Nested auto-prop then match on result
 // ============================================================
 
-nested_match_errors(int outer_sel, int inner_val) string! {
+nested_match_errors!(int outer_sel, int inner_val) string {
   if outer_sel == 1 {
     int parsed = parse_int("{inner_val}");
     return match parsed {
@@ -448,14 +448,14 @@ enum Shape {
   Rect(int width, int height),
 }
 
-validate_circle(int radius) int! {
+validate_circle!(int radius) int {
   if radius <= 0 {
     raise error(message: "invalid radius");
   }
   return radius * radius * 3;
 }
 
-validate_rect(int width, int height) int! {
+validate_rect!(int width, int height) int {
   if width <= 0 {
     raise error(message: "invalid width");
   }

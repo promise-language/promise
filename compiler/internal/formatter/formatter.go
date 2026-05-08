@@ -13,6 +13,7 @@ import (
 // Format formats Promise source code into canonical form.
 func Format(src []byte) []byte {
 	tokens := tokenize(string(src))
+	tokens = migrateFailableTokens(tokens) // T0119: move ! from return type to function name
 	tokens = sortUseImports(tokens)
 	return []byte(reformat(tokens))
 }
@@ -1310,12 +1311,16 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 		if isUnaryPrefixOp(p) && !isValue(f.prevPrev) {
 			return false
 		}
+		// Postfix ! before ( — no space: foo!(), name!() (failable call/declaration)
+		if p == tkBang && isValue(f.prevPrev) {
+			return false
+		}
 		return true
 	}
 
-	// No space before [ if preceded by ident/)/] (indexing, generics)
+	// No space before [ if preceded by ident/)/]/!/string (indexing, generics, failable generics)
 	if c == tkLBracket {
-		if p == tkIdent || p == tkRParen || p == tkRBracket || p == tkGT || p == tkQuestion || p == tkString {
+		if p == tkIdent || p == tkRParen || p == tkRBracket || p == tkGT || p == tkQuestion || p == tkString || p == tkBang {
 			return false
 		}
 		return true

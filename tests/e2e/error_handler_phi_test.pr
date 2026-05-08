@@ -1,6 +1,6 @@
 // Tests for failable ? handler phi node merge
 // These test value-producing handlers WITHOUT return, exercising the phi path.
-parse(string s) int! {
+parse!(string s) int {
   if s == "1" {
     return 1;
   }
@@ -21,7 +21,7 @@ test_handler_int_success() `test {
   assert(v == 1, "int success path");
 }
 
-get_name() string! {
+get_name!() string {
   raise error(message: "no name");
 }
 
@@ -32,7 +32,7 @@ test_handler_string_recovery() `test {
   assert(s == "anonymous", "string handler recovery");
 }
 
-get_ok_name() string! {
+get_ok_name!() string {
   return "Alice";
 }
 
@@ -45,7 +45,7 @@ test_handler_string_success() `test {
 
 // Method call with ? handler (specific scenario in bug report)
 type Parser {
-  parse(&this, string s) int! {
+  parse!(&this, string s) int {
     if s == "ok" {
       return 100;
     }
@@ -75,7 +75,7 @@ type Result {
 }
 
 type Factory {
-  make(&this, bool fail) Result! {
+  make!(&this, bool fail) Result {
     if fail {
       raise error(message: "failed");
     }
@@ -109,7 +109,7 @@ test_handler_expression() `test {
 }
 
 // Void failable with handler (no phi needed, but verify no crash)
-void_fail()! {
+void_fail!() {
   raise error(message: "void fail");
 }
 
@@ -122,7 +122,7 @@ test_void_handler() `test {
 }
 
 // Bool failable with handler
-get_flag() bool! {
+get_flag!() bool {
   raise error(message: "no flag");
 }
 
@@ -133,7 +133,7 @@ test_handler_bool_recovery() `test {
   assert(v == false, "bool handler recovery");
 }
 
-get_flag_ok() bool! {
+get_flag_ok!() bool {
   return true;
 }
 
@@ -160,7 +160,7 @@ test_handler_in_loop() `test {
 }
 
 // Nested handlers
-get_int() int! {
+get_int!() int {
   raise error(message: "fail");
 }
 
@@ -200,11 +200,11 @@ test_multiple_handlers_same_func() `test {
 }
 
 // Handler on optional-returning failable
-get_opt() int?! {
+get_opt!() int? {
   raise error(message: "no opt");
 }
 
-get_opt_ok() int?! {
+get_opt_ok!() int? {
   return 42;
 }
 

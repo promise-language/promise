@@ -41,7 +41,7 @@ test_extra_default_param() `test {
 // --- Non-failable satisfies failable ---
 
 type Processor `structural {
-  process(int x) int! `abstract;
+  process!(int x) int `abstract;
 }
 
 type Doubler {
@@ -81,7 +81,7 @@ test_non_optional_return() `test {
 // --- Combined: extra optional param + non-failable→failable ---
 
 type Parser `structural {
-  parse(string input) int! `abstract;
+  parse!(string input) int `abstract;
 }
 
 type SimpleParser {

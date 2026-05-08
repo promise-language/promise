@@ -4,7 +4,7 @@
 // In a failable function (main()!), bare calls auto-propagate errors.
 // Use ? for recovery, ! for panic (prototyping only).
 // Failable function: returns int on success, error on failure.
-parse_port(string s) int! {
+parse_port!(string s) int {
   if s == "80" {
     return 80;
   }
@@ -18,7 +18,7 @@ parse_port(string s) int! {
 }
 
 // Failable void function — can fail but returns no value on success.
-validate(string input)! {
+validate!(string input) {
   if input.len == 0 {
     raise error(message: "input must not be empty");
   }
@@ -26,7 +26,7 @@ validate(string input)! {
 
 // Failable function that calls another failable function.
 // Bare calls auto-propagate: if parse_port fails, connect fails too.
-connect(string host, string port_str) string! {
+connect!(string host, string port_str) string {
   validate(host); // auto-propagates on empty host
   int port = parse_port(port_str); // auto-propagates on invalid port
   return "{host}:{port}";

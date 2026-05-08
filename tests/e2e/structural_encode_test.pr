@@ -17,7 +17,7 @@ type Tag `serializable {
 
 type ManualEncode {
   int value;
-  encode(Encoder ~e)! {
+  encode!(Encoder ~e) {
     e.encode_int(this.value * 2);
   }
 }
@@ -25,7 +25,7 @@ type ManualEncode {
 type Vec2 {
   int x `value;
   int y `value;
-  encode(Encoder ~e)! {
+  encode!(Encoder ~e) {
     e.begin_object(2);
     e.encode_key("x");
     e.encode_int(this.x);
@@ -243,7 +243,7 @@ generic_constraint_serializable() `test {
 
 // ── Decodable via generic constraint ────────────────────────────────────────
 
-round_trip_via_generic[T: Encodable + Decodable](T val) T! {
+round_trip_via_generic![T: Encodable + Decodable](T val) T {
   json.JsonEncoder enc = json.JsonEncoder();
   val.encode(enc);
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());

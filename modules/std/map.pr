@@ -250,7 +250,7 @@ type Map[K: Hashable + Equal, V] `public {
     this._count = 0;
   }
 
-  format(Writer ~w)! `public `doc("Writes a human-readable representation to the writer.") {
+  format!(Writer ~w) `public `doc("Writes a human-readable representation to the writer.") {
     w.write_string("\{");
     bool first = true;
     int i = 0;

@@ -1,7 +1,7 @@
 // std/parse.pr — Parse, Scanner, scan
 // (Reader moved to io.pr — the core I/O interfaces file)
 type Parse `structural `public `doc("Structural interface for types that can parse themselves from a Reader.") {
-  parse(Reader ~r) Self! `factory `abstract `doc("Parses an instance of Self from a byte reader.");
+  parse!(Reader ~r) Self `factory `abstract `doc("Parses an instance of Self from a byte reader.");
 }
 
 type Scanner `public `doc("Wraps a string for byte-by-byte reading. Satisfies Reader.") {
@@ -37,7 +37,7 @@ type Scanner `public `doc("Wraps a string for byte-by-byte reading. Satisfies Re
   get position int `public `doc("Current byte offset in the src string.") => this.pos;
 }
 
-scan[T: Parse](string s) T! `public `doc("Parses a value of type T from a string.") {
+scan![T: Parse](string s) T `public `doc("Parses a value of type T from a string.") {
   Scanner r = Scanner(s: s);
   return T.parse(r);
 }

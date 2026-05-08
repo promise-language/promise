@@ -121,7 +121,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
 
   // ── Encoder interface implementation ──
 
-  encode_bool(~this, bool value)! `public {
+  encode_bool!(~this, bool value) `public {
     this._write_comma();
     if value {
       this._buf.write_string("true")? {
@@ -132,36 +132,36 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     }
   }
 
-  encode_int(~this, int value)! `public {
+  encode_int!(~this, int value) `public {
     this._write_comma();
     this._buf.write_string(value.to_string())? {
     };
   }
 
-  encode_uint(~this, uint value)! `public {
+  encode_uint!(~this, uint value) `public {
     this._write_comma();
     this._buf.write_string(value.to_string())? {
     };
   }
 
-  encode_f64(~this, f64 value)! `public {
+  encode_f64!(~this, f64 value) `public {
     this._write_comma();
     this._buf.write_string(value.to_string())? {
     };
   }
 
-  encode_string(~this, string value)! `public {
+  encode_string!(~this, string value) `public {
     this._write_comma();
     this._write_escaped_string(value);
   }
 
-  encode_none(~this)! `public {
+  encode_none!(~this) `public {
     this._write_comma();
     this._buf.write_string("null")? {
     };
   }
 
-  begin_object(~this, int field_count)! `public {
+  begin_object!(~this, int field_count) `public {
     this._write_comma();
     this._buf.write_string("\{")? {
     };
@@ -169,7 +169,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     this._stack.push(_JsonState.Empty);
   }
 
-  end_object(~this)! `public {
+  end_object!(~this) `public {
     this._depth = this._depth - 1;
     if this._stack.len > 0 {
       _JsonState top = this._stack[this._stack.len - 1];
@@ -190,7 +190,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     };
   }
 
-  begin_array(~this, int length)! `public {
+  begin_array!(~this, int length) `public {
     this._write_comma();
     this._buf.write_string("[")? {
     };
@@ -198,7 +198,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     this._stack.push(_JsonState.Empty);
   }
 
-  end_array(~this)! `public {
+  end_array!(~this) `public {
     this._depth = this._depth - 1;
     if this._stack.len > 0 {
       _JsonState top = this._stack[this._stack.len - 1];
@@ -219,7 +219,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     };
   }
 
-  encode_key(~this, string name)! `public {
+  encode_key!(~this, string name) `public {
     if this._stack.len > 0 {
       _JsonState top = this._stack[this._stack.len - 1];
       match top {
@@ -283,7 +283,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     }
   }
 
-  _peek(~this) char! {
+  _peek!(~this) char {
     this._skip_whitespace();
     if this._pos >= this._data.len {
       raise DecodeError(message: "unexpected end of JSON input", field: "", position: this._pos);
@@ -295,7 +295,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     this._pos = this._pos + 1;
   }
 
-  _expect(~this, char expected)! {
+  _expect!(~this, char expected) {
     char c = this._peek()!;
     if c != expected {
       raise DecodeError(message: "unexpected character in JSON", field: "", position: this._pos);
@@ -303,7 +303,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     this._advance();
   }
 
-  _read_string_value(~this) string! {
+  _read_string_value!(~this) string {
     this._expect('"');
     Builder buf = Builder();
     while this._pos < this._data.len {
@@ -395,7 +395,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     raise DecodeError(message: "unterminated string", field: "", position: this._pos);
   }
 
-  _read_number(~this) f64! {
+  _read_number!(~this) f64 {
     this._skip_whitespace();
     int start = this._pos;
     bool is_float = false;
@@ -470,7 +470,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
 
   // ── Decoder interface implementation ──
 
-  decode_bool(~this) bool! `public {
+  decode_bool!(~this) bool `public {
     this._skip_whitespace();
     if this._pos + 4 <= this._data.len && this._data[this._pos:this._pos + 4] == "true" {
       this._pos = this._pos + 4;
@@ -483,12 +483,12 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     raise DecodeError(message: "expected 'true' or 'false'", field: "", position: this._pos);
   }
 
-  decode_int(~this) int! `public {
+  decode_int!(~this) int `public {
     f64 v = this._read_number();
     return v as! int;
   }
 
-  decode_uint(~this) uint! `public {
+  decode_uint!(~this) uint `public {
     f64 v = this._read_number();
     if v < 0.0 {
       raise DecodeError(message: "expected unsigned integer, got negative value", field: "", position: this._pos);
@@ -496,15 +496,15 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     return v as! uint;
   }
 
-  decode_f64(~this) f64! `public {
+  decode_f64!(~this) f64 `public {
     return this._read_number();
   }
 
-  decode_string(~this) string! `public {
+  decode_string!(~this) string `public {
     return this._read_string_value();
   }
 
-  decode_none(~this) bool! `public {
+  decode_none!(~this) bool `public {
     this._skip_whitespace();
     if this._pos + 4 <= this._data.len && this._data[this._pos:this._pos + 4] == "null" {
       this._pos = this._pos + 4;
@@ -513,28 +513,28 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     return false;
   }
 
-  begin_object(~this)! `public {
+  begin_object!(~this) `public {
     this._expect('{');
   }
 
-  end_object(~this)! `public {
+  end_object!(~this) `public {
     this._skip_whitespace();
     // May have trailing comma consumed by next_key returning none
     this._expect('}');
   }
 
-  begin_array(~this) int! `public {
+  begin_array!(~this) int `public {
     this._expect('[');
     // JSON arrays don't declare their length
     return -1;
   }
 
-  end_array(~this)! `public {
+  end_array!(~this) `public {
     this._skip_whitespace();
     this._expect(']');
   }
 
-  has_next_element(~this) bool! `public {
+  has_next_element!(~this) bool `public {
     this._skip_whitespace();
     if this._pos >= this._data.len {
       return false;
@@ -549,7 +549,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     return true;
   }
 
-  next_key(~this) string?! `public {
+  next_key!(~this) string? `public {
     this._skip_whitespace();
     if this._pos >= this._data.len {
       return none;
@@ -570,7 +570,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     return key;
   }
 
-  skip_value(~this)! `public {
+  skip_value!(~this) `public {
     this._skip_whitespace();
     if this._pos >= this._data.len {
       raise DecodeError(message: "unexpected end of input while skipping value", field: "", position: this._pos);
@@ -650,18 +650,18 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
 
 // ── Convenience functions ───────────────────────────────────────────────────
 
-encode_string[T: Encodable](T value) string! `public `doc("Serializes a value to a JSON string") {
+encode_string![T: Encodable](T value) string `public `doc("Serializes a value to a JSON string") {
   JsonEncoder enc = JsonEncoder();
   value.encode(enc);
   return enc.to_string();
 }
 
-decode_string[T: Decodable](string data) T! `public `doc("Deserializes a value from a JSON string") {
+decode_string![T: Decodable](string data) T `public `doc("Deserializes a value from a JSON string") {
   JsonDecoder dec = JsonDecoder(data: data);
   return T.decode(dec);
 }
 
-encode_string_pretty[T: Encodable](T value, int indent = 2) string! `public `doc("Serializes a value to a pretty-printed JSON string") {
+encode_string_pretty![T: Encodable](T value, int indent = 2) string `public `doc("Serializes a value to a pretty-printed JSON string") {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: indent);
   value.encode(enc);
   return enc.to_string();
@@ -831,7 +831,7 @@ enum JsonValue `public `doc("Tree-based JSON representation for dynamic/untyped 
 
   // ── Encoding/formatting methods ──
 
-  encode(&this, Encoder ~e)! `public `doc("Writes this JsonValue tree to an Encoder.") {
+  encode!(&this, Encoder ~e) `public `doc("Writes this JsonValue tree to an Encoder.") {
     match this {
       JsonValue.Null => e.encode_none(),
       JsonValue.Bool(b) => e.encode_bool(b),
@@ -855,13 +855,13 @@ enum JsonValue `public `doc("Tree-based JSON representation for dynamic/untyped 
     }
   }
 
-  format(&this) string! `public `doc("Formats this JsonValue tree as a compact JSON string.") {
+  format!(&this) string `public `doc("Formats this JsonValue tree as a compact JSON string.") {
     JsonEncoder enc = JsonEncoder();
     this.encode(enc);
     return enc.to_string();
   }
 
-  format_pretty(&this, int indent = 2) string! `public `doc("Formats this JsonValue tree as a pretty-printed JSON string.") {
+  format_pretty!(&this, int indent = 2) string `public `doc("Formats this JsonValue tree as a pretty-printed JSON string.") {
     JsonEncoder enc = JsonEncoder(pretty: true, indent: indent);
     this.encode(enc);
     return enc.to_string();
@@ -869,28 +869,28 @@ enum JsonValue `public `doc("Tree-based JSON representation for dynamic/untyped 
 }
 
 // Encode a JsonValue tree to an Encoder. Delegates to JsonValue.encode().
-encode_value(JsonValue v, Encoder ~e)! `public `doc("Writes a JsonValue tree to an Encoder.") {
+encode_value!(JsonValue v, Encoder ~e) `public `doc("Writes a JsonValue tree to an Encoder.") {
   v.encode(e);
 }
 
 // Parse a JSON string into a JsonValue tree.
-parse_value(string input) JsonValue! `public `doc("Parses a JSON string into a JsonValue tree.") {
+parse_value!(string input) JsonValue `public `doc("Parses a JSON string into a JsonValue tree.") {
   JsonDecoder dec = JsonDecoder(data: input);
   return _parse_json_value(dec);
 }
 
 // Format a JsonValue tree as a JSON string. Delegates to JsonValue.format().
-format_value(JsonValue v) string! `public `doc("Formats a JsonValue tree as a JSON string.") {
+format_value!(JsonValue v) string `public `doc("Formats a JsonValue tree as a JSON string.") {
   return v.format();
 }
 
 // Format a JsonValue tree as a pretty-printed JSON string. Delegates to JsonValue.format_pretty().
-format_value_pretty(JsonValue v, int indent = 2) string! `public `doc("Formats a JsonValue tree as a pretty-printed JSON string.") {
+format_value_pretty!(JsonValue v, int indent = 2) string `public `doc("Formats a JsonValue tree as a pretty-printed JSON string.") {
   return v.format_pretty(indent: indent);
 }
 
 // Internal: parse a single JSON value from a JsonDecoder, using internal methods.
-_parse_json_value(JsonDecoder ~dec) JsonValue! {
+_parse_json_value!(JsonDecoder ~dec) JsonValue {
   dec._skip_whitespace();
   if dec._pos >= dec._data.len {
     raise DecodeError(message: "unexpected end of input", field: "", position: dec._pos);
@@ -925,7 +925,7 @@ _parse_json_value(JsonDecoder ~dec) JsonValue! {
   return JsonValue.Number(num);
 }
 
-_parse_json_array(JsonDecoder ~dec) JsonValue! {
+_parse_json_array!(JsonDecoder ~dec) JsonValue {
   dec._advance(); // skip [
   JsonValue[] items = JsonValue[]();
   bool done = false;
@@ -959,7 +959,7 @@ _parse_json_array(JsonDecoder ~dec) JsonValue! {
   return JsonValue.Array(items);
 }
 
-_parse_json_object(JsonDecoder ~dec) JsonValue! {
+_parse_json_object!(JsonDecoder ~dec) JsonValue {
   dec._advance(); // skip {
   map[string, JsonValue] fields = map[string, JsonValue]();
   bool done = false;

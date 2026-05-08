@@ -112,6 +112,10 @@ func (b *Builder) visitTopLevelSetterDecl(ctx *parser.SetterDeclContext) *FuncDe
 			Name:     ctx.IDENT(2).GetText(),
 		}},
 	}
+	// New syntax: set name!(Type param) — failable setter
+	if ctx.BANG() != nil {
+		node.ReturnType = &ReturnTypeSpec{nodeBase: b.baseFromContext(ctx), CanError: true}
+	}
 	for _, ma := range ctx.AllMetaAnnotation() {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
 	}
@@ -181,7 +185,15 @@ func (b *Builder) VisitMethodDecl(ctx *parser.MethodDeclContext) interface{} {
 		node.TypeParams = b.visitTypeParams(tp)
 	}
 	node.Receiver, node.Params = b.visitParams(ctx.Params())
-	if rt := ctx.ReturnType(); rt != nil {
+	if ctx.BANG() != nil {
+		// New syntax: speak!(&this) string — BANG after name, return type from typeRef
+		rt := &ReturnTypeSpec{nodeBase: b.baseFromContext(ctx), CanError: true}
+		if tr := ctx.TypeRef(); tr != nil {
+			rt.Type = b.visitTypeRef(tr)
+		}
+		node.ReturnType = rt
+	} else if rt := ctx.ReturnType(); rt != nil {
+		// Old syntax: speak(&this) string! — return type from returnType rule
 		node.ReturnType = rt.Accept(b).(*ReturnTypeSpec)
 	}
 	for _, ma := range ctx.AllMetaAnnotation() {
@@ -231,6 +243,10 @@ func (b *Builder) VisitSetterDecl(ctx *parser.SetterDeclContext) interface{} {
 			Type:     b.visitTypeRef(ctx.TypeRef()),
 			Name:     ctx.IDENT(2).GetText(),
 		}},
+	}
+	// New syntax: set name!(Type param) — failable setter
+	if ctx.BANG() != nil {
+		node.ReturnType = &ReturnTypeSpec{nodeBase: b.baseFromContext(ctx), CanError: true}
 	}
 	for _, ma := range ctx.AllMetaAnnotation() {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
@@ -414,7 +430,15 @@ func (b *Builder) VisitFuncDecl(ctx *parser.FuncDeclContext) interface{} {
 		node.TypeParams = b.visitTypeParams(tp)
 	}
 	_, node.Params = b.visitParams(ctx.Params())
-	if rt := ctx.ReturnType(); rt != nil {
+	if ctx.BANG() != nil {
+		// New syntax: foo!() int — BANG after name, return type from typeRef
+		rt := &ReturnTypeSpec{nodeBase: b.baseFromContext(ctx), CanError: true}
+		if tr := ctx.TypeRef(); tr != nil {
+			rt.Type = b.visitTypeRef(tr)
+		}
+		node.ReturnType = rt
+	} else if rt := ctx.ReturnType(); rt != nil {
+		// Old syntax: foo() int! — return type from returnType rule
 		node.ReturnType = rt.Accept(b).(*ReturnTypeSpec)
 	}
 	for _, ma := range ctx.AllMetaAnnotation() {

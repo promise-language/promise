@@ -26,7 +26,7 @@ type int `native `public {
   get max int `public `global => 9223372036854775807;
   get min int `public `global => -9223372036854775807 - 1;
 
-  parse(Reader ~r) int! `factory `public {
+  parse!(Reader ~r) int `factory `public {
     int result = 0;
     bool negative = false;
     bool started = false;
@@ -65,13 +65,13 @@ type int `native `public {
   to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
     return _int_format(this as! int, base, prefix, width, fill);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this int to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this int to an Encoder.") {
     e.encode_int(this);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes an int from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes an int from a Decoder.") {
     return d.decode_int();
   }
 }
@@ -103,7 +103,7 @@ type i8 `native `public {
   get max i8 `public `global => 127i8;
   get min i8 `public `global => -128i8;
 
-  parse(Reader ~r) i8! `factory `public {
+  parse!(Reader ~r) i8 `factory `public {
     int v = int.parse(r);
     if v < -128 || v > 127 {
       raise error(message: "value out of i8 range");
@@ -114,13 +114,13 @@ type i8 `native `public {
   to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
     return _int_format(this as! int, base, prefix, width, fill);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this value to an Encoder.") {
     e.encode_int(this as! int);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a value from a Decoder.") {
     int v = d.decode_int();
     if v < -128 || v > 127 {
       raise DecodeError(message: "value out of range for i8", field: "");
@@ -156,7 +156,7 @@ type i16 `native `public {
   get max i16 `public `global => 32767i16;
   get min i16 `public `global => -32768i16;
 
-  parse(Reader ~r) i16! `factory `public {
+  parse!(Reader ~r) i16 `factory `public {
     int v = int.parse(r);
     if v < -32768 || v > 32767 {
       raise error(message: "value out of i16 range");
@@ -167,13 +167,13 @@ type i16 `native `public {
   to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
     return _int_format(this as! int, base, prefix, width, fill);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this value to an Encoder.") {
     e.encode_int(this as! int);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a value from a Decoder.") {
     int v = d.decode_int();
     if v < -32768 || v > 32767 {
       raise DecodeError(message: "value out of range for i16", field: "");
@@ -209,7 +209,7 @@ type i32 `native `public {
   get max i32 `public `global => 2147483647i32;
   get min i32 `public `global => -2147483648i32;
 
-  parse(Reader ~r) i32! `factory `public {
+  parse!(Reader ~r) i32 `factory `public {
     int v = int.parse(r);
     if v < -2147483648 || v > 2147483647 {
       raise error(message: "value out of i32 range");
@@ -220,13 +220,13 @@ type i32 `native `public {
   to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
     return _int_format(this as! int, base, prefix, width, fill);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this value to an Encoder.") {
     e.encode_int(this as! int);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a value from a Decoder.") {
     int v = d.decode_int();
     if v < -2147483648 || v > 2147483647 {
       raise DecodeError(message: "value out of range for i32", field: "");
@@ -262,7 +262,7 @@ type i64 `native `public {
   get max i64 `public `global => 9223372036854775807i64;
   get min i64 `public `global => -9223372036854775807i64 - 1i64;
 
-  parse(Reader ~r) i64! `factory `public {
+  parse!(Reader ~r) i64 `factory `public {
     int v = int.parse(r);
     return v as! i64;
   }
@@ -270,13 +270,13 @@ type i64 `native `public {
   to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
     return _int_format(this as! int, base, prefix, width, fill);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this value to an Encoder.") {
     e.encode_int(this as! int);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a value from a Decoder.") {
     int v = d.decode_int();
     return v as! i64;
   }

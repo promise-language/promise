@@ -9,14 +9,14 @@ type ParseError is error {
 type Sensor {
   int _raw;
 
-  get value int! {
+  get value! int {
     if this._raw < 0 {
       raise ParseError(code: 1, message: "negative reading");
     }
     return this._raw;
   }
 
-  get label string! {
+  get label! string {
     if this._raw < 0 {
       raise error(message: "no label for negative");
     }
@@ -29,7 +29,7 @@ type Sensor {
     return "other";
   }
 
-  get is_valid bool! {
+  get is_valid! bool {
     if this._raw < 0 {
       raise error(message: "cannot validate negative");
     }
@@ -142,7 +142,7 @@ test_getter_typed_handler() `test {
 // Section 4: Auto-propagation of failable getter
 // ============================================================
 
-read_sensor(Sensor s) int! {
+read_sensor!(Sensor s) int {
   int v = s.value;
   return v * 2;
 }
@@ -163,7 +163,7 @@ test_getter_auto_prop_fail() `test {
   assert(caught, "auto-propagated getter failure caught");
 }
 
-read_label(Sensor s) string! {
+read_label!(Sensor s) string {
   string l = s.label;
   return "label: " + l;
 }
@@ -246,7 +246,7 @@ test_getter_diverge_return_success() `test {
 // Section 7: Handler with divergence (re-raise)
 // ============================================================
 
-reraise_getter(Sensor s) int! {
+reraise_getter!(Sensor s) int {
   int v = s.value? e {
     raise e;
   };
@@ -274,7 +274,7 @@ type ConfigError is error {
 type Config {
   int _mode;
 
-  get mode int! {
+  get mode! int {
     if this._mode == -1 {
       raise ConfigError(key: "mode", message: "missing mode");
     }
@@ -348,23 +348,23 @@ test_getter_typed_bang_match() `test {
 // ============================================================
 
 type Source {
-  get data int! `abstract;
+  get data! int `abstract;
 }
 
 type GoodSource is Source {
   int _val;
-  get data int! {
+  get data! int {
     return this._val;
   }
 }
 
 type BadSource is Source {
-  get data int! {
+  get data! int {
     raise error(message: "no data");
   }
 }
 
-read_source(Source src) int! {
+read_source!(Source src) int {
   return src.data;
 }
 
@@ -435,7 +435,7 @@ test_match_getter_via_temp_error() `test {
 // Section 11: Failable getter in chain
 // ============================================================
 
-classify_reading(Sensor s) string! {
+classify_reading!(Sensor s) string {
   int v = s.value;
   if v == 0 {
     return "zero";
@@ -481,7 +481,7 @@ test_multiple_getters_success() `test {
   assert(b, "multi getter: is_valid");
 }
 
-describe_sensor(Sensor s) string! {
+describe_sensor!(Sensor s) string {
   int v = s.value;
   string l = s.label;
   return "{l}={v}";

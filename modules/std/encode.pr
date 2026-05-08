@@ -8,52 +8,52 @@ type DecodeError is error `public `doc("Error raised when decoding fails.") {
 
 type Encoder `public `doc("Format-agnostic encoding interface. Implementations must declare `is Encoder`.") {
   // Scalars
-  encode_bool(~this, bool value)! `abstract;
-  encode_int(~this, int value)! `abstract;
-  encode_uint(~this, uint value)! `abstract;
-  encode_f64(~this, f64 value)! `abstract;
-  encode_string(~this, string value)! `abstract;
-  encode_none(~this)! `abstract;
+  encode_bool!(~this, bool value) `abstract;
+  encode_int!(~this, int value) `abstract;
+  encode_uint!(~this, uint value) `abstract;
+  encode_f64!(~this, f64 value) `abstract;
+  encode_string!(~this, string value) `abstract;
+  encode_none!(~this) `abstract;
 
   // Compound — begin/end delimited
-  begin_object(~this, int field_count)! `abstract;
-  end_object(~this)! `abstract;
-  begin_array(~this, int length)! `abstract;
-  end_array(~this)! `abstract;
+  begin_object!(~this, int field_count) `abstract;
+  end_object!(~this) `abstract;
+  begin_array!(~this, int length) `abstract;
+  end_array!(~this) `abstract;
 
   // Field key in an object context
-  encode_key(~this, string name)! `abstract;
+  encode_key!(~this, string name) `abstract;
 }
 
 type Decoder `public `doc("Format-agnostic decoding interface. Implementations must declare `is Decoder`.") {
   // Scalars
-  decode_bool(~this) bool! `abstract;
-  decode_int(~this) int! `abstract;
-  decode_uint(~this) uint! `abstract;
-  decode_f64(~this) f64! `abstract;
-  decode_string(~this) string! `abstract;
-  decode_none(~this) bool! `abstract `doc("Returns true if the next value is null/none, consuming it. Returns false without consuming if non-null.");
+  decode_bool!(~this) bool `abstract;
+  decode_int!(~this) int `abstract;
+  decode_uint!(~this) uint `abstract;
+  decode_f64!(~this) f64 `abstract;
+  decode_string!(~this) string `abstract;
+  decode_none!(~this) bool `abstract `doc("Returns true if the next value is null/none, consuming it. Returns false without consuming if non-null.");
 
   // Compound — begin/end delimited
-  begin_object(~this)! `abstract;
-  end_object(~this)! `abstract;
-  begin_array(~this) int! `abstract `doc("Begins an array. Returns element count (-1 if unknown).");
-  end_array(~this)! `abstract;
+  begin_object!(~this) `abstract;
+  end_object!(~this) `abstract;
+  begin_array!(~this) int `abstract `doc("Begins an array. Returns element count (-1 if unknown).");
+  end_array!(~this) `abstract;
 
   // Field navigation in object context
-  next_key(~this) string?! `abstract `doc("Returns next key in object, or none at end.");
-  skip_value(~this)! `abstract `doc("Skips the current value (including nested objects/arrays).");
+  next_key!(~this) string? `abstract `doc("Returns next key in object, or none at end.");
+  skip_value!(~this) `abstract `doc("Skips the current value (including nested objects/arrays).");
 
   // Array element iteration
-  has_next_element(~this) bool! `abstract `doc("Returns true if there are more elements in the current array. Handles comma skipping.");
+  has_next_element!(~this) bool `abstract `doc("Returns true if there are more elements in the current array. Handles comma skipping.");
 }
 
 // ── Encodable/Decodable structural interfaces (1 method each — widely satisfied) ──
 
 type Encodable `structural `public `doc("Types that can serialize themselves to an Encoder.") {
-  encode(Encoder ~e)! `abstract;
+  encode!(Encoder ~e) `abstract;
 }
 
 type Decodable `structural `public `doc("Types that can deserialize themselves from a Decoder.") {
-  decode(Decoder ~d) Self! `factory `abstract;
+  decode!(Decoder ~d) Self `factory `abstract;
 }

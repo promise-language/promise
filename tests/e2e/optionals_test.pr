@@ -447,11 +447,11 @@ optional_handler_diverge() `test {
 
 // --- Double unwrap: failable returning optional ---
 
-get_value() int?! {
+get_value!() int? {
   return 42;
 }
 
-get_none() int?! {
+get_none!() int? {
   return none;
 }
 

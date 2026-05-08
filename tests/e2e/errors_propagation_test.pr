@@ -2,7 +2,7 @@
 // ============================================================
 // Section 1: Auto-propagation in failable functions
 // ============================================================
-parse_int(string s) int! {
+parse_int!(string s) int {
   if s == "42" {
     return 42;
   }
@@ -12,16 +12,16 @@ parse_int(string s) int! {
   raise error(message: "bad: " + s);
 }
 
-void_fail() void! {
+void_fail!() void {
   raise error(message: "void failed");
 }
 
-void_ok() void! {
+void_ok!() void {
   // does not raise
 }
 
 // Naked failable call in failable function auto-propagates
-auto_prop_void() void! {
+auto_prop_void!() void {
   void_fail();
 }
 
@@ -37,7 +37,7 @@ test_auto_propagate_void() `test {
 }
 
 // Auto-propagation with non-void result (discarded)
-auto_prop_nonvoid() void! {
+auto_prop_nonvoid!() void {
   parse_int("bad");
 }
 
@@ -53,7 +53,7 @@ test_auto_propagate_nonvoid() `test {
 }
 
 // Auto-propagation on success continues normally
-auto_prop_success() int! {
+auto_prop_success!() int {
   void_ok();
   return 42;
 }
@@ -64,7 +64,7 @@ test_auto_propagate_success() `test {
 }
 
 // Multiple auto-propagation calls in sequence
-multi_auto_prop() void! {
+multi_auto_prop!() void {
   void_ok();
   void_ok();
   void_ok();
@@ -88,7 +88,7 @@ test_auto_propagate_preserves_message() `test {
 }
 
 // Auto-propagation in loop
-loop_auto_prop(int n) void! {
+loop_auto_prop!(int n) void {
   int i = 0;
   while i < n {
     void_ok();
@@ -167,7 +167,7 @@ type IoError is error {
   int code;
 }
 
-fail_io() int! {
+fail_io!() int {
   raise IoError(message: "disk full", code: 28);
 }
 
@@ -179,7 +179,7 @@ type ParseError is error {
   int line;
 }
 
-fail_parse() void! {
+fail_parse!() void {
   raise ParseError(message: "syntax error", line: 42);
 }
 
@@ -257,7 +257,7 @@ test_typed_handler_match_recovery() `test {
 }
 
 // else in failable function (propagation still works too)
-typed_handler_else_in_failable() string! {
+typed_handler_else_in_failable!() string {
   fail_parse()? e is IoError {
     return "io";
   } else e {
@@ -325,11 +325,11 @@ test_result_capture_conditional() `test {
 // Section 7: Bang shorthand (! as void!)
 // ============================================================
 
-bang_void()! {
+bang_void!() {
   raise error(message: "bang");
 }
 
-bang_ok()! {
+bang_ok!() {
   // does not raise
 }
 

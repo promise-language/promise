@@ -109,7 +109,7 @@ type CustomEncode `serializable {
   int value;
 
   // User-provided encode overrides the generated one.
-  encode(Encoder ~e)! {
+  encode!(Encoder ~e) {
     e.encode_string("custom:" + this.value.to_string());
   }
 }

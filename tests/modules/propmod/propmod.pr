@@ -14,12 +14,12 @@ get answer int `public `doc("Returns the answer.") {
 }
 
 // Failable getter — returns string! (success case).
-get safe_value string! `public `doc("Returns a value or raises.") {
+get safe_value! string `public `doc("Returns a value or raises.") {
   return "safe";
 }
 
 // Failable getter that always raises.
-get risky_value string! `public `doc("Always raises an error.") {
+get risky_value! string `public `doc("Always raises an error.") {
   raise PropError(code: 42, message: "risky error");
 }
 

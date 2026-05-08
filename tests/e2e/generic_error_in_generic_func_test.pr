@@ -5,7 +5,7 @@ type AppError[T] is error {
   T detail;
 }
 
-make_error[T](T detail) AppError[T]! {
+make_error![T](T detail) AppError[T] {
   raise AppError[T](message: "app error", detail: detail);
 }
 

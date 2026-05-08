@@ -186,13 +186,13 @@ type string `native `public {
   get is_empty bool => this.len == 0;
   get is_literal bool `native `doc("Returns true if this string is a compile-time literal stored in .rodata (not heap-allocated).");
   to_string() string `public => this;
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this);
   }
-  encode(Encoder ~e)! `public `doc("Encodes this string to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this string to an Encoder.") {
     e.encode_string(this);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a string from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a string from a Decoder.") {
     return d.decode_string();
   }
 }

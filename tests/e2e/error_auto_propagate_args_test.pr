@@ -1,5 +1,5 @@
 // Tests for auto-propagation of failable calls used as function/method/constructor arguments.
-parse_int(string s) int! {
+parse_int!(string s) int {
   if s == "42" {
     return 42;
   }
@@ -9,7 +9,7 @@ parse_int(string s) int! {
   raise error(message: "bad: " + s);
 }
 
-get_string(bool fail) string! {
+get_string!(bool fail) string {
   if fail {
     raise error(message: "no string");
   }
@@ -24,7 +24,7 @@ use_int(int x) int {
   return x;
 }
 
-auto_prop_func_arg() int! {
+auto_prop_func_arg!() int {
   return use_int(parse_int("42"));
 }
 
@@ -33,7 +33,7 @@ test_func_arg_success() `test {
   assert(r == 42, "failable arg to function succeeds");
 }
 
-auto_prop_func_arg_fail() int! {
+auto_prop_func_arg_fail!() int {
   return use_int(parse_int("bad"));
 }
 
@@ -58,7 +58,7 @@ type Wrapper {
   }
 }
 
-auto_prop_method_arg() int! {
+auto_prop_method_arg!() int {
   w := Wrapper();
   return w.use_int(parse_int("42"));
 }
@@ -68,7 +68,7 @@ test_method_arg_success() `test {
   assert(r == 42, "failable arg to method succeeds");
 }
 
-auto_prop_method_arg_fail() int! {
+auto_prop_method_arg_fail!() int {
   w := Wrapper();
   return w.use_int(parse_int("bad"));
 }
@@ -92,7 +92,7 @@ type Holder {
   int value;
 }
 
-auto_prop_ctor_arg() int! {
+auto_prop_ctor_arg!() int {
   h := Holder(value: parse_int("42"));
   return h.value;
 }
@@ -102,7 +102,7 @@ test_ctor_arg_success() `test {
   assert(r == 42, "failable arg to constructor succeeds");
 }
 
-auto_prop_ctor_arg_fail() int! {
+auto_prop_ctor_arg_fail!() int {
   h := Holder(value: parse_int("bad"));
   return h.value;
 }
@@ -126,7 +126,7 @@ add(int a, int b) int {
   return a + b;
 }
 
-auto_prop_multi_args() int! {
+auto_prop_multi_args!() int {
   return add(parse_int("42"), parse_int("7"));
 }
 
@@ -136,7 +136,7 @@ test_multi_args_success() `test {
 }
 
 // First arg fails
-auto_prop_multi_first_fail() int! {
+auto_prop_multi_first_fail!() int {
   return add(parse_int("bad"), parse_int("7"));
 }
 
@@ -152,7 +152,7 @@ test_multi_first_fail() `test {
 }
 
 // Second arg fails
-auto_prop_multi_second_fail() int! {
+auto_prop_multi_second_fail!() int {
   return add(parse_int("42"), parse_int("bad"));
 }
 
@@ -175,7 +175,7 @@ use_string(string s) string {
   return s;
 }
 
-auto_prop_string_arg() string! {
+auto_prop_string_arg!() string {
   return use_string(get_string(false));
 }
 
@@ -184,7 +184,7 @@ test_string_arg_success() `test {
   assert(r == "hello", "failable string arg succeeds");
 }
 
-auto_prop_string_arg_fail() string! {
+auto_prop_string_arg_fail!() string {
   return use_string(get_string(true));
 }
 
@@ -207,7 +207,7 @@ combine(int a, int b, int c) int {
   return a + b + c;
 }
 
-auto_prop_mixed_args() int! {
+auto_prop_mixed_args!() int {
   return combine(1, parse_int("42"), 100);
 }
 
@@ -224,7 +224,7 @@ double(int x) int {
   return x * 2;
 }
 
-auto_prop_nested() int! {
+auto_prop_nested!() int {
   return double(use_int(parse_int("7")));
 }
 
@@ -261,7 +261,7 @@ sum(...int nums) int {
   return total;
 }
 
-auto_prop_variadic() int! {
+auto_prop_variadic!() int {
   return sum(parse_int("42"), parse_int("7"));
 }
 
@@ -270,7 +270,7 @@ test_variadic_args_success() `test {
   assert(r == 49, "failable variadic args: 42 + 7");
 }
 
-auto_prop_variadic_fail() int! {
+auto_prop_variadic_fail!() int {
   return sum(parse_int("42"), parse_int("bad"));
 }
 
@@ -285,7 +285,7 @@ test_variadic_arg_fail() `test {
   assert(try_variadic_fail(), "failable variadic arg propagates error");
 }
 
-auto_prop_variadic_mixed() int! {
+auto_prop_variadic_mixed!() int {
   return sum(10, parse_int("42"), 100);
 }
 
@@ -298,7 +298,7 @@ test_variadic_mixed() `test {
 // Section 10: Failable call in assignment (not declaration)
 // ============================================================
 
-auto_prop_assign() int! {
+auto_prop_assign!() int {
   int x = 0;
   x = parse_int("42");
   return x;
@@ -309,7 +309,7 @@ test_assign_success() `test {
   assert(r == 42, "failable call in assignment succeeds");
 }
 
-auto_prop_assign_fail() int! {
+auto_prop_assign_fail!() int {
   int x = 0;
   x = parse_int("bad");
   return x;
@@ -342,7 +342,7 @@ type Clamped {
   }
 }
 
-auto_prop_explicit_new() int! {
+auto_prop_explicit_new!() int {
   c := Clamped(v: parse_int("42"));
   return c.value;
 }
@@ -352,7 +352,7 @@ test_explicit_new_arg_success() `test {
   assert(r == 42, "failable arg to explicit new() succeeds");
 }
 
-auto_prop_explicit_new_fail() int! {
+auto_prop_explicit_new_fail!() int {
   c := Clamped(v: parse_int("bad"));
   return c.value;
 }
@@ -377,7 +377,7 @@ type Vec2 {
   int y `value;
 }
 
-auto_prop_value_type() int! {
+auto_prop_value_type!() int {
   v := Vec2(x: parse_int("42"), y: parse_int("7"));
   return v.x + v.y;
 }
@@ -387,7 +387,7 @@ test_value_type_arg_success() `test {
   assert(r == 49, "failable args to value type: 42 + 7");
 }
 
-auto_prop_value_type_fail() int! {
+auto_prop_value_type_fail!() int {
   v := Vec2(x: parse_int("bad"), y: parse_int("7"));
   return v.x + v.y;
 }
@@ -417,7 +417,7 @@ type Circle is Shape {
   }
 }
 
-auto_prop_virtual(Shape s) int! {
+auto_prop_virtual!(Shape s) int {
   return s.accepts(parse_int("7"));
 }
 
@@ -436,7 +436,7 @@ enum Result {
   Err(string msg),
 }
 
-auto_prop_enum_variant() Result! {
+auto_prop_enum_variant!() Result {
   return Result.Ok(value: parse_int("42"));
 }
 
@@ -448,7 +448,7 @@ test_enum_variant_arg_success() `test {
   }
 }
 
-auto_prop_enum_variant_fail() Result! {
+auto_prop_enum_variant_fail!() Result {
   return Result.Ok(value: parse_int("bad"));
 }
 
@@ -471,7 +471,7 @@ identity[T](T v) T {
   return v;
 }
 
-auto_prop_generic_func() int! {
+auto_prop_generic_func!() int {
   return identity[int](parse_int("42"));
 }
 
@@ -484,7 +484,7 @@ test_generic_func_arg() `test {
 // Section 16: Vector push
 // ============================================================
 
-auto_prop_vec_push() int! {
+auto_prop_vec_push!() int {
   int[] nums = int[]();
   nums.push(parse_int("42"));
   return nums[0];
@@ -495,7 +495,7 @@ test_vec_push_arg() `test {
   assert(r == 42, "failable arg to vec.push");
 }
 
-auto_prop_vec_push_fail() int! {
+auto_prop_vec_push_fail!() int {
   int[] nums = int[]();
   nums.push(parse_int("bad"));
   return nums[0];
@@ -516,7 +516,7 @@ test_vec_push_arg_fail() `test {
 // Section 17: Single variadic element (different path from multi)
 // ============================================================
 
-auto_prop_single_variadic() int! {
+auto_prop_single_variadic!() int {
   return sum(parse_int("42"));
 }
 
@@ -525,7 +525,7 @@ test_single_variadic_success() `test {
   assert(r == 42, "single failable variadic arg");
 }
 
-auto_prop_single_variadic_fail() int! {
+auto_prop_single_variadic_fail!() int {
   return sum(parse_int("bad"));
 }
 
@@ -544,14 +544,14 @@ test_single_variadic_fail() `test {
 // Section 18: Failable arg to outer failable function (both propagate)
 // ============================================================
 
-outer_failable(int x) int! {
+outer_failable!(int x) int {
   if x > 100 {
     raise error(message: "too big");
   }
   return x;
 }
 
-both_failable() int! {
+both_failable!() int {
   return outer_failable(parse_int("42"));
 }
 
@@ -560,7 +560,7 @@ test_both_failable_success() `test {
   assert(r == 42, "failable arg to failable function, both succeed");
 }
 
-both_failable_inner_fails() int! {
+both_failable_inner_fails!() int {
   return outer_failable(parse_int("bad"));
 }
 
@@ -583,7 +583,7 @@ type AppError is error {
   int code;
 }
 
-get_code() int! {
+get_code!() int {
   raise AppError(code: 99, message: "app error");
 }
 
@@ -591,7 +591,7 @@ use_code(int c) int {
   return c;
 }
 
-auto_prop_custom_error() int! {
+auto_prop_custom_error!() int {
   return use_code(get_code());
 }
 
@@ -615,7 +615,7 @@ type Tracked {
   }
 }
 
-auto_prop_with_scope_cleanup() int! {
+auto_prop_with_scope_cleanup!() int {
   Tracked t = Tracked(id: 1);
   // t is in scope; if parse_int fails, scope cleanup must drop t
   return use_int(parse_int("bad"));
@@ -646,7 +646,7 @@ type Child is Base {
   }
 }
 
-auto_prop_super() int! {
+auto_prop_super!() int {
   c := Child(v: parse_int("42"));
   return c.value;
 }
@@ -656,7 +656,7 @@ test_super_arg_success() `test {
   assert(r == 42, "failable arg to super() call succeeds");
 }
 
-auto_prop_super_fail() int! {
+auto_prop_super_fail!() int {
   c := Child(v: parse_int("bad"));
   return c.value;
 }

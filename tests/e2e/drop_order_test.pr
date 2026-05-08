@@ -134,7 +134,7 @@ test_if_branch_drop() `test {
 
 // --- Error propagation drops ---
 
-might_fail(bool fail) int! {
+might_fail!(bool fail) int {
   a := Resource(name: "failable_local");
   if fail {
     raise error("fail");
@@ -142,7 +142,7 @@ might_fail(bool fail) int! {
   return 42;
 }
 
-failing_caller() int! {
+failing_caller!() int {
   b := Resource(name: "caller_local");
   c := might_fail(true)?;
   return c;

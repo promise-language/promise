@@ -41,7 +41,7 @@ type f32 `native `public {
     return exp != 255u32;
   }
 
-  parse(Reader ~r) f32! `factory `public {
+  parse!(Reader ~r) f32 `factory `public {
     f64 v = f64.parse(r);
     return v as! f32;
   }
@@ -49,13 +49,13 @@ type f32 `native `public {
   to_string(int? precision, bool scientific = false) string `public `doc("Converts to string. Optional precision (decimal places) and scientific notation.") {
     return _f64_format(this as! f64, precision, scientific);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this value to an Encoder.") {
     e.encode_f64(this as! f64);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a value from a Decoder.") {
     f64 v = d.decode_f64();
     return v as! f32;
   }
@@ -103,7 +103,7 @@ type f64 `native `public {
     return exp != 2047u;
   }
 
-  parse(Reader ~r) f64! `factory `public {
+  parse!(Reader ~r) f64 `factory `public {
     f64 result = 0.0;
     bool negative = false;
     bool started = false;
@@ -249,13 +249,13 @@ type f64 `native `public {
   to_string(int? precision, bool scientific = false) string `public `doc("Converts to string. Optional precision (decimal places) and scientific notation.") {
     return _f64_format(this, precision, scientific);
   }
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this f64 to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this f64 to an Encoder.") {
     e.encode_f64(this);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes an f64 from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes an f64 from a Decoder.") {
     return d.decode_f64();
   }
 }

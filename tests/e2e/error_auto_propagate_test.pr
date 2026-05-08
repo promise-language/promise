@@ -3,7 +3,7 @@ type IoError is error {
   int code;
 }
 
-parse_int(string s) int! {
+parse_int!(string s) int {
   if s == "42" {
     return 42;
   }
@@ -16,22 +16,22 @@ parse_int(string s) int! {
   raise error(message: "bad: " + s);
 }
 
-get_string(bool fail) string! {
+get_string!(bool fail) string {
   if fail {
     raise error(message: "no string");
   }
   return "hello";
 }
 
-always_fail() int! {
+always_fail!() int {
   raise IoError(code: 42, message: "always fails");
 }
 
-void_fail() void! {
+void_fail!() void {
   raise error(message: "void failed");
 }
 
-void_ok() void! {
+void_ok!() void {
   // does not raise
 }
 
@@ -39,7 +39,7 @@ void_ok() void! {
 // Section 1: Auto-propagation in typed variable declarations
 // ============================================================
 
-auto_prop_typed() int! {
+auto_prop_typed!() int {
   int x = parse_int("42");
   return x;
 }
@@ -49,7 +49,7 @@ test_auto_prop_typed_success() `test {
   assert(r == 42, "auto-prop typed var decl success");
 }
 
-auto_prop_typed_fail() int! {
+auto_prop_typed_fail!() int {
   int x = parse_int("bad");
   return x;
 }
@@ -69,7 +69,7 @@ test_auto_prop_typed_fail() `test {
 // Section 2: Auto-propagation in inferred variable declarations
 // ============================================================
 
-auto_prop_inferred() int! {
+auto_prop_inferred!() int {
   x := parse_int("42");
   return x;
 }
@@ -79,7 +79,7 @@ test_auto_prop_inferred_success() `test {
   assert(r == 42, "auto-prop inferred var decl success");
 }
 
-auto_prop_inferred_fail() string! {
+auto_prop_inferred_fail!() string {
   s := get_string(true);
   return s;
 }
@@ -99,7 +99,7 @@ test_auto_prop_inferred_fail() `test {
 // Section 3: Multiple auto-propagations in sequence
 // ============================================================
 
-multi_auto_prop() int! {
+multi_auto_prop!() int {
   int a = parse_int("42");
   int b = parse_int("7");
   return a + b;
@@ -111,7 +111,7 @@ test_multi_auto_prop_success() `test {
 }
 
 // First call fails — second should not execute
-multi_auto_prop_first_fails() int! {
+multi_auto_prop_first_fails!() int {
   int a = parse_int("bad");
   int b = parse_int("42");
   return a + b;
@@ -130,7 +130,7 @@ test_multi_auto_prop_first_fails() `test {
 }
 
 // First call succeeds, second fails
-multi_auto_prop_second_fails() int! {
+multi_auto_prop_second_fails!() int {
   int a = parse_int("42");
   int b = parse_int("bad");
   return a + b;
@@ -152,7 +152,7 @@ test_multi_auto_prop_second_fails() `test {
 // Section 4: Auto-propagation with string type
 // ============================================================
 
-auto_prop_string() string! {
+auto_prop_string!() string {
   string s = get_string(false);
   return s;
 }
@@ -162,7 +162,7 @@ test_auto_prop_string_success() `test {
   assert(r == "hello", "auto-prop string success");
 }
 
-auto_prop_string_fail() string! {
+auto_prop_string_fail!() string {
   string s = get_string(true);
   return s;
 }
@@ -182,7 +182,7 @@ test_auto_prop_string_fail() `test {
 // Section 5: Auto-propagation preserves custom error types
 // ============================================================
 
-auto_prop_custom_error() int! {
+auto_prop_custom_error!() int {
   int x = always_fail();
   return x;
 }
@@ -199,7 +199,7 @@ test_auto_prop_preserves_custom_error() `test {
 // Section 6: Auto-propagation mixed with explicit handlers
 // ============================================================
 
-mixed_handling() int! {
+mixed_handling!() int {
   // Auto-propagate first call
   int a = parse_int("42");
   // Explicit handler on second call
@@ -218,7 +218,7 @@ test_mixed_handling() `test {
 // Section 7: Auto-propagation with void failable as statement
 // ============================================================
 
-auto_prop_void_stmt() int! {
+auto_prop_void_stmt!() int {
   void_ok();
   int x = parse_int("42");
   return x;
@@ -229,7 +229,7 @@ test_auto_prop_void_stmt_success() `test {
   assert(r == 42, "void auto-prop as stmt then assignment");
 }
 
-auto_prop_void_then_fail() int! {
+auto_prop_void_then_fail!() int {
   void_fail();
   return 99;
 }
@@ -394,7 +394,7 @@ test_handler_diverge_return_success() `test {
 // Section 11: Error handler with divergence (raise/re-raise)
 // ============================================================
 
-reraise_handler() int! {
+reraise_handler!() int {
   int v = parse_int("bad")? e {
     raise e;
   };
@@ -414,7 +414,7 @@ test_handler_reraise() `test {
 // Section 12: Auto-propagation in loops
 // ============================================================
 
-sum_parsed(int n) int! {
+sum_parsed!(int n) int {
   int sum = 0;
   int i = 0;
   while i < n {
@@ -445,14 +445,14 @@ type Resource {
   }
 }
 
-make_resource(int id) Resource! {
+make_resource!(int id) Resource {
   if id < 0 {
     raise error(message: "bad id");
   }
   return Resource(id: id);
 }
 
-auto_prop_with_drop() int! {
+auto_prop_with_drop!() int {
   Resource r = make_resource(1)!;
   int v = parse_int("42");
   return v;
@@ -463,7 +463,7 @@ test_auto_prop_with_drop_success() `test {
   assert(r == 42, "auto-prop works alongside droppable resources");
 }
 
-auto_prop_with_drop_fails() int! {
+auto_prop_with_drop_fails!() int {
   Resource r = make_resource(1)!;
   int v = parse_int("bad");
   return v;
@@ -481,17 +481,17 @@ test_auto_prop_with_drop_fails() `test {
 // Section 14: Nested function auto-propagation chain
 // ============================================================
 
-inner() int! {
+inner!() int {
   int x = parse_int("bad");
   return x;
 }
 
-middle() int! {
+middle!() int {
   int y = inner();
   return y;
 }
 
-outer() int! {
+outer!() int {
   int z = middle();
   return z;
 }
@@ -514,7 +514,7 @@ type Point {
   int y;
 }
 
-make_point(bool fail) Point! {
+make_point!(bool fail) Point {
   if fail {
     raise error(message: "no point");
   }
@@ -541,7 +541,7 @@ test_handler_success_user_type() `test {
 // Section 16: Typed error handler with else clause
 // ============================================================
 
-fail_with_io(bool use_io) int! {
+fail_with_io!(bool use_io) int {
   if use_io {
     raise IoError(code: 42, message: "io fail");
   }
@@ -567,7 +567,7 @@ test_typed_handler_else_nomatch() `test {
   assert(v == -1, "typed handler didn't match, else caught");
 }
 
-always_succeed() int! {
+always_succeed!() int {
   return 99;
 }
 

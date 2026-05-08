@@ -168,7 +168,7 @@ type ParseErr is error {
 }
 
 type Parser {
-  try_parse[T](T val) T! {
+  try_parse![T](T val) T {
     return val;
   }
 }

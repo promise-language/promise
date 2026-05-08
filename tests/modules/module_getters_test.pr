@@ -33,7 +33,7 @@ test_failable_getter_raises() `test {
 }
 
 // Test failable getter with auto-propagation in failable function.
-_check_risky() string! {
+_check_risky!() string {
   string val = propmod.risky_value;
   return val;
 }

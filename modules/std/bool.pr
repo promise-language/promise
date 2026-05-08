@@ -7,7 +7,7 @@ type bool `native `public {
   !() bool `native;
   get hash int `native;
 
-  parse(Reader ~r) bool! `factory `public {
+  parse!(Reader ~r) bool `factory `public {
     if b1 := r.read_byte() {
       int c1 = b1 as! int;
       if c1 == 116 {
@@ -44,13 +44,13 @@ type bool `native `public {
   }
 
   to_string() string `public => "{this}";
-  format(Writer ~w)! `public {
+  format!(Writer ~w) `public {
     w.write_string(this.to_string());
   }
-  encode(Encoder ~e)! `public `doc("Encodes this bool to an Encoder.") {
+  encode!(Encoder ~e) `public `doc("Encodes this bool to an Encoder.") {
     e.encode_bool(this);
   }
-  decode(Decoder ~d) Self! `factory `public `doc("Decodes a bool from a Decoder.") {
+  decode!(Decoder ~d) Self `factory `public `doc("Decodes a bool from a Decoder.") {
     return d.decode_bool();
   }
 }

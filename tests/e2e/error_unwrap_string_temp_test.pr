@@ -2,12 +2,12 @@
 // When func()! returns a string, the unwrapped string is a heap temp that
 // must be freed at statement end if not claimed by a variable.
 // Helper: returns a heap-allocated string (concat forces heap alloc)
-make_greeting(string name) string! {
+make_greeting!(string name) string {
   return "hello " + name;
 }
 
 // Helper: always succeeds with a heap string
-make_upper() string! {
+make_upper!() string {
   return "hello".to_upper();
 }
 

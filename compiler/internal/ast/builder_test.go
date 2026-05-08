@@ -128,6 +128,38 @@ func TestBuildFuncDecl(t *testing.T) {
 			},
 		},
 		{
+			name: "new_syntax_failable_with_return",
+			src:  `read!(String path) String { return ""; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertEqual(t, fn.Name, "read")
+				assertNotNil(t, fn.ReturnType)
+				assertTrue(t, fn.ReturnType.CanError)
+				assertNotNil(t, fn.ReturnType.Type)
+			},
+		},
+		{
+			name: "new_syntax_void_failable",
+			src:  `fail!() { raise error("boom"); }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertNotNil(t, fn.ReturnType)
+				assertTrue(t, fn.ReturnType.CanError)
+				assertNil(t, fn.ReturnType.Type)
+			},
+		},
+		{
+			name: "new_syntax_generic_failable",
+			src:  `parse![T](String s) T { return s; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertLen(t, fn.TypeParams, 1)
+				assertEqual(t, fn.TypeParams[0].Name, "T")
+				assertNotNil(t, fn.ReturnType)
+				assertTrue(t, fn.ReturnType.CanError)
+			},
+		},
+		{
 			name: "generics",
 			src:  `identity[T](T val) T { return val; }`,
 			check: func(t *testing.T, file *File) {

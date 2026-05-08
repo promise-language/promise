@@ -108,7 +108,7 @@ enum SafeBox[T] {
   Present(T value),
   Missing,
 
-  get_value(&this) T! {
+  get_value!(&this) T {
     match this {
       Present(v) => {
         return v;

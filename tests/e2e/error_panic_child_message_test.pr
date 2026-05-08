@@ -3,7 +3,7 @@ type AppError is error {
   int code;
 }
 
-fail_with_child_error()! {
+fail_with_child_error!() {
   raise AppError(message: "app failure", code: 42);
 }
 

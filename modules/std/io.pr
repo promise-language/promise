@@ -5,7 +5,7 @@
 // Reader is the byte-oriented input structural interface.
 // Go-style: caller pre-sizes buf, reader overwrites buf[0..n-1], returns n.
 type Reader `structural `public `doc("Byte-oriented input interface. Caller pre-sizes buf, reader fills buf[0..n-1] and returns n. Returns 0 at EOF.") {
-  read(~this, u8[]~buf) int! `abstract `doc("Reads up to buf.len bytes into buf. Returns the number of bytes read (0 = EOF).");
+  read!(~this, u8[]~buf) int `abstract `doc("Reads up to buf.len bytes into buf. Returns the number of bytes read (0 = EOF).");
 
   read_byte(~this) u8? `doc("Reads a single byte. Returns absent at EOF. Default: allocates a 1-byte buffer and calls read().") {
     u8[] buf = Vector[u8].filled(0u8, 1);
@@ -20,12 +20,12 @@ type Reader `structural `public `doc("Byte-oriented input interface. Caller pre-
 // Writer is the byte-oriented output structural interface.
 // Concrete types implement write() to accept raw bytes.
 type Writer `structural `public `doc("Byte-oriented output interface. Writes raw bytes from buf and returns the number of bytes written.") {
-  write(~this, u8[]~buf) int! `abstract `doc("Writes bytes from buf. Returns the number of bytes written.");
-  write_string(~this, string s) int! `doc("Writes a string as bytes. Default: converts to bytes and calls write().") {
+  write!(~this, u8[]~buf) int `abstract `doc("Writes bytes from buf. Returns the number of bytes written.");
+  write_string!(~this, string s) int `doc("Writes a string as bytes. Default: converts to bytes and calls write().") {
     u8[] b = s.bytes();
     return this.write(b);
   }
-  write_line(~this, string s)! `doc("Writes a string followed by the platform line separator.") {
+  write_line!(~this, string s) `doc("Writes a string followed by the platform line separator.") {
     this.write_string(s);
     this.write_string(Platform.line_separator);
   }
@@ -33,7 +33,7 @@ type Writer `structural `public `doc("Byte-oriented output interface. Writes raw
 
 // Closer is the structural interface for resources that need cleanup.
 type Closer `structural `public `doc("Structural interface for resources that need cleanup. Implement `close(~this)!` to satisfy.") {
-  close(~this)! `abstract `doc("Releases the underlying resource.");
+  close!(~this) `abstract `doc("Releases the underlying resource.");
 }
 
 // ── Console output ──────────────────────────────────────────────────────────

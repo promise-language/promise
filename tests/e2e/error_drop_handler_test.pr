@@ -3,12 +3,12 @@
 type FailClose {
   int id;
 
-  close(~this) void! {
+  close!(~this) void {
     raise error(message: "close err");
   }
 }
 
-raise_with_close() void! {
+raise_with_close!() void {
   use r := FailClose(id: 1);
   raise error(message: "body err");
 }
@@ -31,7 +31,7 @@ test_non_failable_suppressed_close_dropped() `test {
   assert(result == 42, "non-failable returns value");
 }
 
-multi_close() void! {
+multi_close!() void {
   use a := FailClose(id: 1);
   use b := FailClose(id: 2);
 }
@@ -46,7 +46,7 @@ test_duplicate_close_error_dropped() `test {
 
 // --- Result capture error optional dropping ---
 
-make_err(string s) int! {
+make_err!(string s) int {
   raise error(message: "err: " + s);
 }
 
@@ -75,7 +75,7 @@ type Holder {
   int value;
 }
 
-auto_prop_ctor() int! {
+auto_prop_ctor!() int {
   h := Holder(value: make_err("ctor"));
   return h.value;
 }
@@ -99,6 +99,6 @@ test_result_capture_discard_error_ok_path() `test {
   assert(val == 42, "value on ok path");
 }
 
-try_succeed(int n) int! {
+try_succeed!(int n) int {
   return n;
 }

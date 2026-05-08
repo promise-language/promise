@@ -91,7 +91,7 @@ testVariadicComputedPassThrough() `test {
 
 // --- Failable variadic ---
 
-tryFirst(...int nums) int! {
+tryFirst!(...int nums) int {
   if nums.len == 0 {
     raise error(message: "empty");
   }

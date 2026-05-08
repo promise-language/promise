@@ -316,10 +316,10 @@ test_method_on_generic_type_calls_func_with_method_param() `test {
 
 // --- Failable variant ---
 
-try_id[T](T val) T! {
+try_id![T](T val) T {
   return val;
 }
-try_wrap_id[T](T val) T! {
+try_wrap_id![T](T val) T {
   return try_id[T](val);
 }
 

@@ -166,7 +166,7 @@ type Validated[T] {
     this.value = v;
   }
 
-  parse(T v) Self! `factory {
+  parse!(T v) Self `factory {
     return Self(v: v);
   }
 }

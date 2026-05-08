@@ -7,7 +7,7 @@ type CloseError is error {
 type OkResource {
   int id;
 
-  close(~this) void! {
+  close!(~this) void {
     // success — no error
   }
 }
@@ -16,14 +16,14 @@ type OkResource {
 type FailResource {
   int id;
 
-  close(~this) void! {
+  close!(~this) void {
     raise CloseError(message: "close failed", code: 42);
   }
 }
 
 // --- Normal exit: failable close error propagates ---
 
-close_propagates() int! {
+close_propagates!() int {
   use r := FailResource(id: 1);
   return r.id;
 }
@@ -38,7 +38,7 @@ test_close_error_propagates() `test {
 
 // --- Normal exit: successful close does not interfere ---
 
-close_ok() int! {
+close_ok!() int {
   use r := OkResource(id: 42);
   return r.id;
 }
@@ -50,7 +50,7 @@ test_close_ok_returns_value() `test {
 
 // --- Raise path: close error suppressed, original error preserved ---
 
-raise_with_failable_close() int! {
+raise_with_failable_close!() int {
   use r := FailResource(id: 1);
   raise CloseError(message: "body error", code: 99);
 }
@@ -65,11 +65,11 @@ test_raise_suppresses_close_error() `test {
 
 // --- Error propagation path: close error suppressed ---
 
-inner_fail() void! {
+inner_fail!() void {
   raise CloseError(message: "inner error", code: 77);
 }
 
-propagate_with_failable_close() void! {
+propagate_with_failable_close!() void {
   use r := FailResource(id: 1);
   inner_fail()?;
 }
@@ -96,7 +96,7 @@ test_non_failable_suppresses_close() `test {
 
 // --- Multiple use bindings: first close error wins ---
 
-multiple_failable_close() void! {
+multiple_failable_close!() void {
   use a := FailResource(id: 1);
   use b := FailResource(id: 2);
   // Normal exit — both close() called in reverse order (b then a).
@@ -113,7 +113,7 @@ test_multiple_close_first_error_wins() `test {
 
 // --- Block scope: close error propagates from nested block ---
 
-close_error_in_block() void! {
+close_error_in_block!() void {
   if true {
     use r := FailResource(id: 1);
     // r.close() called at block exit, error propagates
@@ -130,7 +130,7 @@ test_close_error_in_nested_block() `test {
 
 // --- Void failable function: close error propagates ---
 
-void_failable_close() void! {
+void_failable_close!() void {
   use r := FailResource(id: 1);
 }
 

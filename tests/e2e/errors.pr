@@ -1,11 +1,11 @@
-safe_div(int a, int b) int! {
+safe_div!(int a, int b) int {
   if b == 0 {
     raise error(message: "division by zero");
   }
   return a / b;
 }
 
-compute() int! {
+compute!() int {
   // Propagate with ?
   int x = safe_div(10, 2)?;
   int y = safe_div(20, 4)?;

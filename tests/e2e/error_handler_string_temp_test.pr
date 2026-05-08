@@ -2,12 +2,12 @@
 // When func()! returns a string and a handler is used (? e { ... }),
 // the Ok path string must be tracked as a temp for cleanup at statement end.
 // Helper: returns a heap-allocated string (concat forces heap alloc)
-make_greeting(string name) string! {
+make_greeting!(string name) string {
   return "hello " + name;
 }
 
 // Helper: always fails
-make_fail() string! {
+make_fail!() string {
   raise error("fail");
 }
 

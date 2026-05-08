@@ -502,7 +502,7 @@ test_process_wait_twice() `test(exclude: "wasm32") {
   assert(code2 == 0, "second wait should return 0");
 }
 
-_spawn_and_drop()! {
+_spawn_and_drop!() {
   Process p = Process.spawn("true");
   // p goes out of scope here, drop should close fds and reap zombie
 }
@@ -672,7 +672,7 @@ test_process_empty_output() `test(exclude: "wasm32") {
   assert(out.len == 0, "true produces no output");
 }
 
-_drop_process_input(Process ~p)! {
+_drop_process_input!(Process ~p) {
   ProcessInput stdin = p.take_standard_input();
   stdin.write_string("auto-close");
   // stdin goes out of scope without explicit close — drop should handle it
@@ -729,11 +729,11 @@ test_process_stdout_and_stderr_concurrent() `test(exclude: "wasm32") {
   assert(err.trim() == "err", "stderr should contain err");
 }
 
-_write_to_writer(Writer ~w)! {
+_write_to_writer!(Writer ~w) {
   w.write_string("structural")!;
 }
 
-_read_from_reader(Reader ~r) string! {
+_read_from_reader!(Reader ~r) string {
   u8[] buf = u8[].filled(0u8, 4096);
   int n = r.read(buf)!;
   return string.from_bytes(buf[0:n]);
@@ -935,7 +935,7 @@ test_process_output_read_after_close() `test(exclude: "wasm32") {
   p.wait()!;
 }
 
-_drop_process_output(Process ~p)! {
+_drop_process_output!(Process ~p) {
   ProcessOutput stdout = p.take_standard_output();
   // stdout goes out of scope without explicit close — drop should handle it
 }

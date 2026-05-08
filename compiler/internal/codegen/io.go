@@ -185,6 +185,26 @@ func (c *Compiler) emitErrorPanic(errInstPtr value.Value) {
 	c.emitPanicReturn()
 }
 
+// emitPanicCheck emits a TLS panic flag check after a call expression (T0146).
+// Loads the panic flag, branches to a cleanup block if set (panic in flight),
+// and sets c.block to the continuation block for normal execution.
+// The cleanup block calls emitPanicReturn() to perform scope cleanup and return.
+func (c *Compiler) emitPanicCheck() {
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	flag := c.block.NewLoad(irtypes.I8, c.panicFlagGlobal)
+	isPanic := c.block.NewICmp(enum.IPredNE, flag, constant.NewInt(irtypes.I8, 0))
+	panicCleanup := c.newBlock("panic.cleanup")
+	panicOk := c.newBlock("panic.ok")
+	c.block.NewCondBr(isPanic, panicCleanup, panicOk)
+
+	c.block = panicCleanup
+	c.emitPanicReturn()
+
+	c.block = panicOk
+}
+
 // emitPanicReturn emits cleanup and return-zero after a direct panic call site
 // in user function codegen (Category A). Cleans up statement temps, heap temps,
 // and scope bindings, then returns the zero value for the current function's

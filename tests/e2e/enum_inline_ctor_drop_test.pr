@@ -1,0 +1,47 @@
+// B0267: Inline enum constructors with heap-allocated variant data must be dropped
+// at statement end when passed directly as function arguments (not stored in variables).
+enum Container {
+  Items(string[] values),
+  Empty,
+}
+
+_consume(Container c) {
+}
+
+_consume_fail!(Container c) string {
+  return "ok";
+}
+
+// Inline enum constructor as non-failable function argument.
+test_inline_nonfailable() `test {
+  _consume(Container.Items(values: ["a", "b"]));
+}
+
+// Inline enum constructor as failable function argument with ! unwrap.
+test_inline_failable_unwrap() `test {
+  string s = _consume_fail(Container.Items(values: ["x"]))!;
+  assert(s == "ok", "failable result");
+}
+
+// Variable assignment — no leak (variable's drop handles cleanup).
+test_variable_assignment() `test {
+  Container c = Container.Items(values: ["y"]);
+  _consume(c);
+}
+
+// Inferred variable assignment.
+test_inferred_assignment() `test {
+  c := Container.Items(values: ["z"]);
+  _consume(c);
+}
+
+// Empty vector variant — must still be cleaned up.
+test_inline_empty_vec() `test {
+  _consume(Container.Items(values: string[]()));
+}
+
+// Multiple inline constructors in separate statements.
+test_multiple_inline() `test {
+  _consume(Container.Items(values: ["a"]));
+  _consume(Container.Items(values: ["b"]));
+}

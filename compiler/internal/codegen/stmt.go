@@ -292,6 +292,21 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		c.cleanupStmtTemps()
 		c.cleanupHeapTemps()
 		c.cleanupEnvTemps() // T0100
+		// B0267: Drop inline enum constructor temps not consumed by a variable.
+		if c.lastEnumCtorDropFlag != nil && c.lastEnumCtorDropFunc != nil {
+			flag := c.block.NewLoad(irtypes.I1, c.lastEnumCtorDropFlag)
+			dropBlk := c.newBlock("enum.ctor.drop")
+			skipBlk := c.newBlock("enum.ctor.skip")
+			c.block.NewCondBr(flag, dropBlk, skipBlk)
+			c.block = dropBlk
+			ptr := c.block.NewLoad(irtypes.I8Ptr, c.lastEnumCtorAlloca)
+			c.block.NewCall(c.lastEnumCtorDropFunc, ptr)
+			c.block.NewBr(skipBlk)
+			c.block = skipBlk
+		}
+		c.lastEnumCtorAlloca = nil
+		c.lastEnumCtorDropFlag = nil
+		c.lastEnumCtorDropFunc = nil
 	}
 }
 
@@ -613,6 +628,13 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
 	c.claimHeapTemp(val)
+	// B0267: Clear enum temp when the variable IS the enum (not a function result).
+	if c.lastEnumCtorDropFlag != nil && extractEnum(resolvedExprType) != nil {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.lastEnumCtorDropFlag)
+		c.lastEnumCtorAlloca = nil
+		c.lastEnumCtorDropFlag = nil
+		c.lastEnumCtorDropFunc = nil
+	}
 	// B0222: When storing a structural interface (e.g., Iterator) in a variable,
 	// promote remaining heapTemps to scope bindings. Intermediate iterators in
 	// generic combinator chains must survive until scope exit, not be freed at
@@ -747,6 +769,13 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// Without this, iterator chain results (e.g., c.take(3)) assigned via
 	// auto-typed declarations are freed at statement end, causing use-after-free.
 	c.claimHeapTemp(val)
+	// B0267: Clear enum temp when the variable IS the enum (not a function result).
+	if c.lastEnumCtorDropFlag != nil && extractEnum(typ) != nil {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.lastEnumCtorDropFlag)
+		c.lastEnumCtorAlloca = nil
+		c.lastEnumCtorDropFlag = nil
+		c.lastEnumCtorDropFunc = nil
+	}
 	// B0222: When storing a structural interface (e.g., Iterator) in a variable,
 	// promote remaining heapTemps to scope bindings so intermediate iterators in
 	// generic combinator chains survive until scope exit.
@@ -963,7 +992,6 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 	c.locals[s.Name] = alloca
 	// B0233: Claim heap temp — ownership transferred to use binding.
 	c.claimHeapTemp(val)
-
 	// Track for scope-exit close() insertion
 	named := extractNamed(typ)
 	var closeMethod *types.Method

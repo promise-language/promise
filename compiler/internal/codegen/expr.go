@@ -3977,6 +3977,38 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 		}
 	}
 
+	// B0267: Track the enum alloca for cleanup at statement end. Uses entry-block
+	// allocas so the tracking dominates all uses regardless of branch structure.
+	if dataType != nil && c.entryBlock != nil && c.tempTrackingEnabled {
+		enumType := c.info.Types[member.Target]
+		if c.typeSubst != nil {
+			enumType = types.Substitute(enumType, c.typeSubst)
+		}
+		var enumName string
+		if inst, ok := enumType.(*types.Instance); ok {
+			enumName = monoName(inst)
+		} else if en, ok := enumType.(*types.Enum); ok {
+			enumName = en.Obj().Name()
+		}
+		if enumName != "" {
+			mangledDrop := mangleMethodName(enumName, "drop", false)
+			if dropFunc, ok := c.funcs[mangledDrop]; ok {
+				// Create entry-block allocas for the pointer and drop flag.
+				ptrAlloca := c.createEntryAlloca(irtypes.I8Ptr)
+				flagAlloca := c.createEntryAlloca(irtypes.I1)
+				c.entryBlock.NewStore(constant.NewNull(irtypes.I8Ptr), ptrAlloca)
+				c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), flagAlloca)
+				// Store the bitcast of the enum alloca and set the flag.
+				ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
+				c.block.NewStore(ptr, ptrAlloca)
+				c.block.NewStore(constant.NewInt(irtypes.I1, 1), flagAlloca)
+				c.lastEnumCtorAlloca = ptrAlloca
+				c.lastEnumCtorDropFlag = flagAlloca
+				c.lastEnumCtorDropFunc = dropFunc
+			}
+		}
+	}
+
 	return c.block.NewLoad(internalType, alloca)
 }
 

@@ -181,6 +181,13 @@ type Compiler struct {
 	envTemps   []envTemp
 	envTempMap map[value.Value]int // env i8* → index in envTemps (-1 = claimed)
 
+	// B0267: Inline enum constructor temp tracking. Entry-block allocas store the
+	// enum pointer (bitcast to i8*) and a drop flag. Set by genEnumVariantCallLayout,
+	// cleared by variable assignment, cleaned up at statement end.
+	lastEnumCtorAlloca   *ir.InstAlloca // entry-block i8* alloca (stores bitcast of enum alloca)
+	lastEnumCtorDropFlag *ir.InstAlloca // entry-block i1 alloca
+	lastEnumCtorDropFunc *ir.Func
+
 	// PAL (Platform Abstraction Layer) function references
 	palWrite   *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
 	palExit    *ir.Func // @pal_exit(i32 code) → void [noreturn]
@@ -3987,6 +3994,9 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.scopeBindings = nil // T0085: reset scope bindings for each new function
 	c.loopScopeDepth = 0
 	c.blockCounter = 0
+	c.lastEnumCtorAlloca = nil // B0267: prevent cross-function alloca leak
+	c.lastEnumCtorDropFlag = nil
+	c.lastEnumCtorDropFunc = nil
 
 	entry := fn.NewBlock(".entry")
 	c.block = entry
@@ -4457,6 +4467,9 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 		c.canError = sig.CanError()
 		c.currentRetType = sig.Result()
 		c.blockCounter = 0
+		c.lastEnumCtorAlloca = nil // B0267
+		c.lastEnumCtorDropFlag = nil
+		c.lastEnumCtorDropFunc = nil
 
 		// Bind parameters to local allocas
 		for i, p := range fn.Params {
@@ -4631,6 +4644,9 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			c.canError = m.Sig().CanError()
 			c.currentRetType = m.Sig().Result()
 			c.blockCounter = 0
+			c.lastEnumCtorAlloca = nil // B0267
+			c.lastEnumCtorDropFlag = nil
+			c.lastEnumCtorDropFunc = nil
 
 			// Bind 'this' and parameters
 			c.mutRefPtrs = nil
@@ -5131,6 +5147,9 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.scopeBindings = nil
 	c.loopScopeDepth = 0
 	c.blockCounter = 0
+	c.lastEnumCtorAlloca = nil // B0267: prevent cross-function alloca leak
+	c.lastEnumCtorDropFlag = nil
+	c.lastEnumCtorDropFunc = nil
 	c.canError = m.Sig().CanError()
 	c.currentRetType = m.Sig().Result()
 	savedNamed := c.currentNamed

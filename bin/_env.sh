@@ -23,4 +23,10 @@ PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
 # wasmtime (installed by install-prereqs.sh --wasm)
 PATH="$HOME/.wasmtime/bin:$PATH"
 
+# Disable epoch shim dispatch in development. Build scripts always use the
+# locally built bin/promise, not the installed epoch binary. Without this,
+# shimDispatch() may redirect to an outdated installed binary, silently
+# bypassing recent codegen fixes (B0239).
+export PROMISE_NO_SHIM=1
+
 export PATH

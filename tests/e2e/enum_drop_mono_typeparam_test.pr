@@ -1,0 +1,38 @@
+// B0238: Generic enums with TypeParam-only droppable fields get scope-exit drop.
+// Verifies that Container[Wrapper] properly drops its Wrapper field (no memory leak).
+type Wrapper {
+  string name;
+  int value;
+}
+enum Container[T] {
+  Holding(T item),
+  Empty,
+}
+enum Wrap[T] {
+  Some(T val),
+  None,
+}
+enum Maybe[T] {
+  Just(T val),
+  Nothing,
+}
+
+test_generic_enum_drop_holding() `test {
+  c := Container[Wrapper].Holding(Wrapper(name: "hello", value: 42));
+  assert(true, "no leak");
+}
+
+test_generic_enum_drop_empty() `test {
+  c := Container[Wrapper].Empty;
+  assert(true, "no leak");
+}
+
+test_generic_enum_drop_string() `test {
+  w := Wrap[string].Some("hello world");
+  assert(true, "no leak");
+}
+
+test_generic_enum_nested() `test {
+  m := Maybe[Wrapper].Just(Wrapper(name: "nested", value: 99));
+  assert(true, "no leak");
+}

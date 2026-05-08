@@ -3876,6 +3876,10 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// Claim heap temp: user type instances stored into enum variant data
+			// transfer ownership to the enum. Without this, the heap temp cleanup
+			// would free the instance, leaving a dangling pointer in the enum.
+			c.claimHeapTemp(val)
 		}
 	}
 
@@ -3950,10 +3954,6 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 	var cases []*ir.Case
 	var arms []matchArmInfo
 
-	// B0232: Track dup'd match bindings for cleanup after the match
-	savedMatchDupNames := c.matchDupNames
-	c.matchDupNames = nil
-
 	for i, arm := range e.Arms {
 		armBlock := c.newBlock(fmt.Sprintf("match.arm%d", i))
 
@@ -4021,19 +4021,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 	switchBlock.NewSwitch(tag, defaultTarget, cases...)
 
 	c.block = mergeBlock
-	result := buildMatchPhi(mergeBlock, arms)
-
-	// B0232: Emit cleanup for dup'd match bindings after the match.
-	// This runs after each match (every loop iteration in for loops), freeing
-	// unconsumed dup'd strings and resetting flags to prevent double-frees.
-	if len(c.matchDupNames) > 0 && c.block != nil && c.block.Term == nil {
-		for _, name := range c.matchDupNames {
-			c.emitMatchDupCleanup(name)
-		}
-	}
-	c.matchDupNames = savedMatchDupNames
-
-	return result
+	return buildMatchPhi(mergeBlock, arms)
 }
 
 // matchArmInfo tracks a match arm's result value and final block for PHI construction.
@@ -4295,7 +4283,7 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		// data. When the enum element is dropped (e.g., Map._buckets scope exit or
 		// Map destruction), the shared string would be double-freed.
 		if enumHasDrop && c.matchFieldNeedsDup(variant.Fields()[i].Type(), subjectType, enum) {
-			c.dupAndTrackMatchBinding(binding, val, fieldType)
+			c.dupMatchBinding(binding, val, fieldType)
 			continue
 		}
 
@@ -4324,90 +4312,17 @@ func (c *Compiler) matchFieldNeedsDup(fieldType types.Type, subjectType types.Ty
 	return extractNamed(resolved) == types.TypString
 }
 
-// dupAndTrackMatchBinding dups a string value from a match destructure and tracks it
-// for cleanup. On subsequent calls with the same name (loop iterations), frees the
-// previous dup'd value before storing the new one. Does NOT use scope bindings —
-// cleanup is handled by emitMatchDupCleanup called after the match merge block.
-func (c *Compiler) dupAndTrackMatchBinding(name string, val value.Value, llvmType irtypes.Type) {
-	// If we previously dup'd this binding (loop iteration), free old value first
-	if dropFlag, ok := c.dropFlags[name]; ok {
-		flag := c.block.NewLoad(irtypes.I1, dropFlag)
-		freeBlock := c.newBlock("matchdup.free")
-		contBlock := c.newBlock("matchdup.cont")
-		c.block.NewCondBr(flag, freeBlock, contBlock)
-
-		c.block = freeBlock
-		oldAlloca := c.locals[name]
-		oldPtr := c.block.NewLoad(oldAlloca.ElemType, oldAlloca)
-		if dropFn, ok := c.funcs["promise_string_drop"]; ok {
-			c.block.NewCall(dropFn, oldPtr)
-		}
-		c.block.NewBr(contBlock)
-
-		c.block = contBlock
-	}
-
-	// Dup the string to create an independent copy
+// dupMatchBinding dups a string value from a match destructure to create an
+// independent copy that won't be invalidated when the enum is dropped.
+// B0232: Prevents double-frees when match-extracted strings share instance
+// pointers with enum data (e.g., Slot elements in Map._buckets).
+// B0237: The dup'd copy is owned by whoever consumes it (push, return via PHI, etc.).
+// No post-match cleanup — consumers manage the string's lifetime.
+func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtypes.Type) {
 	dupVal := c.dupString(val)
-
-	if _, ok := c.dropFlags[name]; !ok {
-		// First encounter: create alloca and drop flag
-		bindAlloca := c.createEntryAlloca(llvmType)
-		c.locals[name] = bindAlloca
-
-		dropFlag := c.createEntryAlloca(irtypes.I1)
-		// Initialize flag to 0 in entry block (before any loop iteration)
-		c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
-		c.dropFlags[name] = dropFlag
-
-		// Record for post-match cleanup (emitMatchDupCleanup)
-		c.matchDupNames = append(c.matchDupNames, name)
-	}
-
-	// Store dup'd value and mark as needing cleanup
-	c.block.NewStore(dupVal, c.locals[name])
-	c.block.NewStore(constant.NewInt(irtypes.I1, 1), c.dropFlags[name])
-}
-
-// emitMatchDupCleanup emits cleanup code for dup'd match bindings after the match
-// merge block. Checks the flag, frees the dup'd string if set, resets the flag.
-// This handles per-iteration cleanup in loops and final cleanup after loops.
-func (c *Compiler) emitMatchDupCleanup(name string) {
-	dropFlag, ok := c.dropFlags[name]
-	if !ok {
-		return
-	}
-	alloca, ok := c.locals[name]
-	if !ok {
-		return
-	}
-	dropFn := c.funcs["promise_string_drop"]
-	if dropFn == nil {
-		return
-	}
-
-	flag := c.block.NewLoad(irtypes.I1, dropFlag)
-	freeBlock := c.newBlock("matchdup.cleanup")
-	skipBlock := c.newBlock("matchdup.done")
-	c.block.NewCondBr(flag, freeBlock, skipBlock)
-
-	c.block = freeBlock
-	ptr := c.block.NewLoad(alloca.ElemType, alloca)
-	nullCheck := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
-	execBlock := c.newBlock("matchdup.exec")
-	doneBlock := c.newBlock("matchdup.freed")
-	c.block.NewCondBr(nullCheck, doneBlock, execBlock)
-
-	c.block = execBlock
-	c.block.NewCall(dropFn, ptr)
-	c.block.NewBr(doneBlock)
-
-	c.block = doneBlock
-	// Reset flag to 0 so the next loop iteration doesn't double-free
-	c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
-	c.block.NewBr(skipBlock)
-
-	c.block = skipBlock
+	bindAlloca := c.createEntryAlloca(llvmType)
+	c.locals[name] = bindAlloca
+	c.block.NewStore(dupVal, bindAlloca)
 }
 
 // --- If expressions ---
@@ -5554,6 +5469,12 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 			keyVal := c.genExpr(entry.Key)
 			valVal := c.genExpr(entry.Value)
 			c.block.NewCall(setFn, instancePtr, keyVal, valVal)
+			// Claim heap temps: user type instances passed as map values
+			// transfer ownership to the map. Without this, the heap temp
+			// cleanup would free the instance, leaving a dangling pointer
+			// in the map's Slot enum data.
+			c.claimHeapTemp(valVal)
+			c.claimHeapTemp(keyVal)
 		}
 	}
 

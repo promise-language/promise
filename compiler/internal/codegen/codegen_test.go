@@ -16266,3 +16266,28 @@ func TestConstructorTempClaimedOnPush(t *testing.T) {
 	// Push claims the heap temp — heap.claim block should exist.
 	assertContains(t, ir, "heap.claim")
 }
+
+// B0237: Constructor temps stored into enum variant data should be claimed.
+func TestConstructorTempClaimedInEnumVariant(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { int x; }
+		enum Slot { Empty, Used(Wrapper value) }
+		main() {
+			Slot s = Slot.Used(value: Wrapper(x: 42));
+		}
+	`)
+	// Enum variant construction claims the heap temp.
+	assertContains(t, ir, "heap.claim")
+}
+
+// B0237: Constructor temps passed as map literal values should be claimed.
+func TestConstructorTempClaimedInMapLiteral(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		main() {
+			map[string, Point] m = { "a": Point(x: 1, y: 2) };
+		}
+	`)
+	// Map literal initialization claims the heap temp.
+	assertContains(t, ir, "heap.claim")
+}

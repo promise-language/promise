@@ -156,10 +156,6 @@ type Compiler struct {
 	// Drop binding tracking: maps variable name to its scope binding (for reassignment drop)
 	dropBindings map[string]scopeBinding
 
-	// B0232: Match dup tracking — binding names created by dupAndTrackMatchBinding
-	// during the current match expression. Reset at match start, used for post-match cleanup.
-	matchDupNames []string
-
 	// T0073: Statement-level temporary tracking for heap-allocated strings.
 	// Tracks string temporaries from subexpressions (e.g., `42.to_string()` in
 	// `assert(42.to_string() == "42")`) and drops them at statement end.

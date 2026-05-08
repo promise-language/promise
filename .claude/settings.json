@@ -10,6 +10,26 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "go run $(git rev-parse --show-toplevel)/tools/guard/guard.go || exit 2",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "go run $(git rev-parse --show-toplevel)/tools/guard/guard.go || exit 2",
+            "timeout": 10
+          }
+        ]
       }
     ]
   },

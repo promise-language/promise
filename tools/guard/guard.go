@@ -1,7 +1,11 @@
-// guard.go — Claude Code PreToolUse hook for blocking dangerous Bash commands.
+// guard.go — Claude Code PreToolUse hook for blocking dangerous operations.
 //
-// Reads hook JSON from stdin, checks the command against a set of dangerous
-// patterns, and outputs a JSON allow/deny decision to stdout.
+// Handles three tool types:
+//   - Bash: blocks dangerous shell commands (git push, rm -rf, etc.)
+//   - Edit: blocks forbidden patterns in file edits (e.g., allow_leaks in .pr files)
+//   - Write: blocks forbidden patterns in file writes
+//
+// Edit/Write gates are defined in tools/gates/edit_gates.json.
 //
 // Usage (via hook config):
 //
@@ -16,13 +20,24 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 )
 
 // hookInput is the JSON structure Claude Code sends to PreToolUse hooks.
+// Fields vary by tool type — we decode all possible fields and detect the tool.
 type hookInput struct {
+	ToolName  string `json:"tool_name"`
 	ToolInput struct {
+		// Bash
 		Command string `json:"command"`
+		// Edit
+		FilePath  string `json:"file_path"`
+		OldString string `json:"old_string"`
+		NewString string `json:"new_string"`
+		// Write
+		Content string `json:"content"`
 	} `json:"tool_input"`
 }
 
@@ -37,6 +52,18 @@ type hookDecision struct {
 	PermissionDecisionReason string `json:"permissionDecisionReason"`
 }
 
+// editGate defines a pattern-based gate for Edit/Write operations.
+type editGate struct {
+	ID      string `json:"id"`
+	Pattern string `json:"pattern"`
+	Files   string `json:"files"`
+	Reason  string `json:"reason"`
+}
+
+type editGatesConfig struct {
+	Gates []editGate `json:"gates"`
+}
+
 func main() {
 	var input hookInput
 	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
@@ -44,17 +71,62 @@ func main() {
 		return
 	}
 
-	command := input.ToolInput.Command
-	if command == "" {
-		printDeny("guard: could not extract command from hook input")
-		return
-	}
+	// Detect tool type and dispatch.
+	switch detectTool(input) {
+	case "bash":
+		if input.ToolInput.Command == "" {
+			printDeny("guard: could not extract command from hook input")
+			return
+		}
+		if reason := checkAll(input.ToolInput.Command); reason != "" {
+			printDeny(reason)
+		} else {
+			fmt.Println("{}")
+		}
 
-	if reason := checkAll(command); reason != "" {
-		printDeny(reason)
-	} else {
+	case "edit":
+		if reason := checkEditGates(input.ToolInput.FilePath, input.ToolInput.NewString); reason != "" {
+			printDeny(reason)
+		} else {
+			fmt.Println("{}")
+		}
+
+	case "write":
+		if reason := checkEditGates(input.ToolInput.FilePath, input.ToolInput.Content); reason != "" {
+			printDeny(reason)
+		} else {
+			fmt.Println("{}")
+		}
+
+	default:
+		// Unknown tool type — allow (don't block what we don't understand).
 		fmt.Println("{}")
 	}
+}
+
+// detectTool determines the tool type from the input fields.
+func detectTool(input hookInput) string {
+	// Prefer explicit tool_name if present.
+	switch strings.ToLower(input.ToolName) {
+	case "bash":
+		return "bash"
+	case "edit":
+		return "edit"
+	case "write":
+		return "write"
+	}
+
+	// Fall back to field-based detection.
+	if input.ToolInput.Command != "" {
+		return "bash"
+	}
+	if input.ToolInput.OldString != "" || input.ToolInput.NewString != "" {
+		return "edit"
+	}
+	if input.ToolInput.Content != "" && input.ToolInput.FilePath != "" {
+		return "write"
+	}
+	return "unknown"
 }
 
 func printDeny(reason string) {
@@ -68,7 +140,89 @@ func printDeny(reason string) {
 	json.NewEncoder(os.Stdout).Encode(out)
 }
 
-// ── Command splitting ───────────────────────────────────────────────────────
+// ── Edit/Write gate checking ────────────────────────────────────────────────
+
+// loadEditGates loads gate definitions from tools/gates/edit_gates.json.
+// Searches relative to the git repo root (walks up from cwd).
+func loadEditGates() ([]editGate, error) {
+	root, err := findRepoRoot()
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(root, "tools", "gates", "edit_gates.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var config editGatesConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+	return config.Gates, nil
+}
+
+// findRepoRoot walks up from cwd looking for a .git directory.
+func findRepoRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("not inside a git repository")
+		}
+		dir = parent
+	}
+}
+
+// checkEditGates checks file content against all edit gates.
+// Returns the first deny reason, or "".
+func checkEditGates(filePath, content string) string {
+	if filePath == "" || content == "" {
+		return ""
+	}
+
+	gates, err := loadEditGates()
+	if err != nil {
+		// Fail-closed: if we can't load gates, block with explanation.
+		return fmt.Sprintf("guard: failed to load edit gates: %v", err)
+	}
+
+	fileName := filepath.Base(filePath)
+
+	for _, gate := range gates {
+		if !matchGlob(gate.Files, fileName) {
+			continue
+		}
+		matched, err := regexp.MatchString(gate.Pattern, content)
+		if err != nil {
+			return fmt.Sprintf("guard: invalid regex in gate %q: %v", gate.ID, err)
+		}
+		if matched {
+			return fmt.Sprintf("edit gate %q: %s", gate.ID, gate.Reason)
+		}
+	}
+	return ""
+}
+
+// matchGlob checks if a filename matches a glob pattern.
+// Supports "*" (match all) and "*.ext" patterns.
+func matchGlob(pattern, name string) bool {
+	if pattern == "*" {
+		return true
+	}
+	matched, err := filepath.Match(pattern, name)
+	if err != nil {
+		return false
+	}
+	return matched
+}
+
+// ── Bash command splitting ──────────────────────────────────────────────────
 
 // splitCommands splits a command string on shell operators (&&, ||, ;, |).
 func splitCommands(cmd string) []string {
@@ -304,8 +458,8 @@ func checkCopy(program string, tokens []string) string {
 				targetDir = tokens[i+1]
 				skipNext = true
 			}
-		} else if strings.HasPrefix(t, "--target-directory=") {
-			targetDir = strings.TrimPrefix(t, "--target-directory=")
+		} else if after, ok := strings.CutPrefix(t, "--target-directory="); ok {
+			targetDir = after
 		} else if !strings.HasPrefix(t, "-") {
 			paths = append(paths, t)
 		}
@@ -393,12 +547,7 @@ func stripWrappers(tokens []string) []string {
 }
 
 func hasSubcommand(tokens []string, sub string) bool {
-	for _, t := range tokens[1:] {
-		if t == sub {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(tokens[1:], sub)
 }
 
 func stripQuotes(s string) string {

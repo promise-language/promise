@@ -1,0 +1,22 @@
+{
+  "gates": [
+    {
+      "id": "no-allow-leaks",
+      "pattern": "allow_leaks\\s*:\\s*true",
+      "files": "*.pr",
+      "reason": "Adding allow_leaks:true is prohibited. Fix the leak or file a bug."
+    },
+    {
+      "id": "no-skip-verify",
+      "pattern": "--no-verify",
+      "files": "*",
+      "reason": "Skipping git hooks is prohibited."
+    },
+    {
+      "id": "no-force-push-in-scripts",
+      "pattern": "push\\s+--force",
+      "files": "*.sh",
+      "reason": "Force push in scripts is prohibited."
+    }
+  ]
+}

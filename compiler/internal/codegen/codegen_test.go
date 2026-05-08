@@ -16419,6 +16419,25 @@ func TestConstructorTempClaimedInEnumVariant(t *testing.T) {
 	assertContains(t, ir, "heap.claim")
 }
 
+// B0229: Optional structural interface variables should register drop for reassignment.
+func TestOptionalStructuralInterfaceDropOnReassign(t *testing.T) {
+	ir := generateIR(t, `
+		type Iter is Iterator[int] {
+			int val;
+			next() int? { return none; }
+		}
+		make_iter() Iterator[int] {
+			return Iter(val: 1);
+		}
+		main() {
+			Iterator[int]? current = none;
+			current = make_iter();
+		}
+	`)
+	// B0229: Optional structural interface should have optdrop block for scope exit.
+	assertContains(t, ir, "optdrop")
+}
+
 // B0237: Constructor temps passed as map literal values should be claimed.
 func TestConstructorTempClaimedInMapLiteral(t *testing.T) {
 	ir := generateIR(t, `

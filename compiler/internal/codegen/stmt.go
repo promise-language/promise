@@ -1339,6 +1339,14 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() && !isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural():
 		// B0211: Heap user type without drop — use pal_free to free the instance.
 		dropFunc = c.palFree
+	case innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType():
+		// B0229: Structural interface (e.g., Iterator[T]) — use iter cleanup when
+		// available (frees env + parent chain + instance), fallback to pal_free.
+		if c.iterCleanup != nil {
+			dropFunc = c.iterCleanup
+		} else {
+			dropFunc = c.palFree
+		}
 	default:
 		return // inner type not droppable
 	}
@@ -1362,6 +1370,58 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		varName:  varName,
 	}
 	c.scopeBindings = append(c.scopeBindings, binding)
+	c.dropBindings[varName] = binding
+}
+
+// maybeRegisterCapturedOptionalStructuralDrop registers a reassignment-only drop binding
+// for captured optional structural interface variables (B0229). Unlike maybeRegisterOptionalDrop,
+// this does NOT add to scopeBindings — the env drop function handles final cleanup at env
+// deallocation, and scope-exit drop would free a value that's been written back to the env.
+func (c *Compiler) maybeRegisterCapturedOptionalStructuralDrop(varName string, alloca *ir.InstAlloca, typ types.Type) {
+	if _, exists := c.dropBindings[varName]; exists {
+		return
+	}
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	opt, ok := typ.(*types.Optional)
+	if !ok {
+		return
+	}
+	elem := opt.Elem()
+	if c.typeSubst != nil {
+		elem = types.Substitute(elem, c.typeSubst)
+	}
+	innerNamed := extractNamed(elem)
+	if innerNamed == nil || !innerNamed.IsStructural() || innerNamed.IsValueType() {
+		return
+	}
+
+	var dropFunc *ir.Func
+	if c.iterCleanup != nil {
+		dropFunc = c.iterCleanup
+	} else {
+		dropFunc = c.palFree
+	}
+	if dropFunc == nil {
+		return
+	}
+
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.dropFlags[varName] = dropFlag
+
+	binding := scopeBinding{
+		kind:     bindingDropOptional,
+		alloca:   alloca,
+		named:    innerNamed,
+		valType:  elem,
+		dropFlag: dropFlag,
+		dropFunc: dropFunc,
+		varName:  varName,
+	}
+	// Only add to dropBindings (for reassignment drop), NOT scopeBindings (no scope-exit drop).
 	c.dropBindings[varName] = binding
 }
 

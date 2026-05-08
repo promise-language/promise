@@ -5897,6 +5897,11 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 				if !isDroppableContainerOrString(cv.Obj.Type()) {
 					c.maybeRegisterDrop(cv.Obj.Name(), alloca, cv.Obj.Type())
 				}
+				// B0229: Register reassignment-only drop for captured optional structural
+				// interfaces (e.g., Iterator[R]? in flat_map). Only added to dropBindings,
+				// NOT scopeBindings — the env drop function handles final cleanup, and
+				// scope-exit drop would free a value that's been written back to the env.
+				c.maybeRegisterCapturedOptionalStructuralDrop(cv.Obj.Name(), alloca, cv.Obj.Type())
 			}
 		}
 	}
@@ -5983,11 +5988,12 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 type envDropAction int
 
 const (
-	envDropNone          envDropAction = iota
-	envDropCallFn                      // call dropFn(i8*) — string, vector, channel (handles free internally)
-	envDropClosureEnv                  // extract env from closure {i8*,i8*}, env-drop-or-free
-	envDropUserValue                   // extract inst from value {i8*,i8*}, pal_free — heap user type without drop
-	envDropUserValueDrop               // extract inst from value {i8*,i8*}, call drop + pal_free
+	envDropNone               envDropAction = iota
+	envDropCallFn                           // call dropFn(i8*) — string, vector, channel (handles free internally)
+	envDropClosureEnv                       // extract env from closure {i8*,i8*}, env-drop-or-free
+	envDropUserValue                        // extract inst from value {i8*,i8*}, pal_free — heap user type without drop
+	envDropUserValueDrop                    // extract inst from value {i8*,i8*}, call drop + pal_free
+	envDropOptionalStructural               // B0229: optional structural iface — check has_value, extract inst, cleanup
 )
 
 type envFieldDrop struct {
@@ -6040,6 +6046,23 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 			}
 		}
 		return envFieldDrop{envDropUserValue, nil}
+	}
+
+	// B0229: Optional structural interface (e.g., Iterator[T]?) — check has_value,
+	// extract instance ptr from inner value struct, call iter cleanup or pal_free.
+	if opt, ok := typ.(*types.Optional); ok {
+		elem := opt.Elem()
+		if c.typeSubst != nil {
+			elem = types.Substitute(elem, c.typeSubst)
+		}
+		innerNamed := extractNamed(elem)
+		if innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType() {
+			dropFn := c.iterCleanup
+			if dropFn == nil {
+				dropFn = c.palFree
+			}
+			return envFieldDrop{envDropOptionalStructural, dropFn}
+		}
 	}
 
 	return envFieldDrop{envDropNone, nil}
@@ -6138,6 +6161,20 @@ func (c *Compiler) genEnvDropFunc(lambdaName string, envStructType *irtypes.Stru
 			dropBlk.NewCall(act.dropFn, instPtr)
 			dropBlk.NewCall(c.palFree, instPtr)
 			dropBlk.NewBr(nextBlk)
+
+		case envDropOptionalStructural:
+			// B0229: Optional structural iface {i1 has_value, {i8* vtable, i8* instance}}:
+			// check has_value, extract instance from inner value, null-check, call cleanup.
+			hasVal := curBlock.NewExtractValue(fieldVal, 0)
+			innerBlk := dropFn.NewBlock(fmt.Sprintf("optst.inner.%d", blockIdx))
+			curBlock.NewCondBr(hasVal, innerBlk, nextBlk)
+			innerVal := innerBlk.NewExtractValue(fieldVal, 1)
+			instPtr := innerBlk.NewExtractValue(innerVal, 1)
+			isNull := innerBlk.NewICmp(enum.IPredEQ, instPtr, constant.NewNull(irtypes.I8Ptr))
+			cleanupBlk := dropFn.NewBlock(fmt.Sprintf("optst.cleanup.%d", blockIdx))
+			innerBlk.NewCondBr(isNull, nextBlk, cleanupBlk)
+			cleanupBlk.NewCall(act.dropFn, instPtr)
+			cleanupBlk.NewBr(nextBlk)
 		}
 
 		curBlock = nextBlk

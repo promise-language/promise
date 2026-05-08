@@ -2692,6 +2692,45 @@ func (c *Compiler) emitHeapTempCleanupForErrorPath() {
 	}
 }
 
+// trackChainIntermediateReceiver tracks a method chain intermediate receiver for
+// cleanup at statement end (B0258). When the receiver of a method call is itself
+// a call expression result (e.g., p.add_point(dx: 10, dy: 20).sum()), the
+// intermediate heap-allocated value would leak without explicit tracking.
+// receiverVal is the full value struct (for claiming existing constructor heapTemps).
+// instancePtr is the extracted instance pointer (field 1 of receiverVal).
+func (c *Compiler) trackChainIntermediateReceiver(memberTarget ast.Expr, receiverVal value.Value, instancePtr value.Value, named *types.Named, targetType types.Type) {
+	if !c.tempTrackingEnabled || c.block == nil || c.block.Term != nil {
+		return
+	}
+	// Only track when receiver is a call expression (chain intermediate)
+	if _, isCall := memberTarget.(*ast.CallExpr); !isCall {
+		return
+	}
+	// Skip types already handled by other tracking systems
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return
+	}
+	if isContainerType(targetType) || named == types.TypString {
+		return
+	}
+	// Bitcast typed instance pointer to i8* for heap temp tracking
+	trackedPtr := instancePtr
+	if trackedPtr.Type() != irtypes.I8Ptr {
+		if _, isPtr := trackedPtr.Type().(*irtypes.PointerType); isPtr {
+			trackedPtr = c.block.NewBitCast(trackedPtr, irtypes.I8Ptr)
+		} else {
+			return
+		}
+	}
+	dropFunc := c.resolveDropFuncForTemp(named, targetType)
+	if dropFunc != nil {
+		// Claim any existing heapTemp for this receiver (e.g., from constructor
+		// allocation tracking at T0135) to prevent double-free.
+		c.claimHeapTemp(receiverVal)
+		c.trackHeapTemp(trackedPtr, dropFunc)
+	}
+}
+
 // trackHeapTemp registers a heap-allocated droppable instance for cleanup at
 // statement end (T0088). The instance pointer and drop function are stored so
 // unclaimed temps can be dropped at statement end.

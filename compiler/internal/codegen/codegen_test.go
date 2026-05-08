@@ -17096,3 +17096,24 @@ func TestVectorCallExprStmtTempTracking(t *testing.T) {
 	// The vector temp from split() should be tracked and dropped.
 	assertContains(t, ir, "call void @Vector.drop(")
 }
+
+// B0258: Method chain intermediate heap-allocated values must be tracked as
+// heap temps and freed at statement end.
+func TestMethodChainIntermediateTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y;
+			sum(&this) int { return this.x + this.y; }
+			add_point(&this, int dx, int dy) Point {
+				return Point(x: this.x + dx, y: this.y + dy);
+			}
+		}
+		test() {
+			Point p = Point(x: 1, y: 2);
+			int result = p.add_point(dx: 10, dy: 20).sum();
+		}
+	`)
+	// The intermediate Point from add_point() should be tracked as a heap temp
+	// and freed at statement end via the heap.drop cleanup path.
+	assertContains(t, ir, "heap.drop")
+	assertContains(t, ir, "call void @pal_free(")
+}

@@ -1613,7 +1613,10 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 		} else if named.IsValueType() {
 			args = append(args, c.valueTypeReceiverPtr(target, targetType))
 		} else {
-			args = append(args, c.extractInstancePtr(target))
+			instancePtr := c.extractInstancePtr(target)
+			args = append(args, instancePtr)
+			// B0258: Track method chain intermediate for cleanup at statement end.
+			c.trackChainIntermediateReceiver(member.Target, target, instancePtr, named, targetType)
 		}
 	}
 
@@ -3019,7 +3022,10 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		} else if named.IsValueType() {
 			args = append(args, c.valueTypeReceiverPtr(target, targetType))
 		} else {
-			args = append(args, c.extractInstancePtr(target))
+			instancePtr := c.extractInstancePtr(target)
+			args = append(args, instancePtr)
+			// B0258: Track method chain intermediate for cleanup at statement end.
+			c.trackChainIntermediateReceiver(member.Target, target, instancePtr, named, targetType)
 		}
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
@@ -3191,7 +3197,10 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	} else if named.IsValueType() {
 		args = append(args, c.valueTypeReceiverPtr(target, targetType))
 	} else {
-		args = append(args, c.extractInstancePtr(target))
+		instancePtr := c.extractInstancePtr(target)
+		args = append(args, instancePtr)
+		// B0258: Track getter chain intermediate for cleanup at statement end.
+		c.trackChainIntermediateReceiver(e.Target, target, instancePtr, named, targetType)
 	}
 
 	return c.block.NewCall(fn, args...)
@@ -3213,6 +3222,8 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 	} else {
 		vtableRaw = c.extractVtablePtr(receiverVal)
 		instance = c.extractInstancePtr(receiverVal)
+		// B0258: Track getter chain intermediate for cleanup at statement end.
+		c.trackChainIntermediateReceiver(e.Target, receiverVal, instance, named, targetType)
 	}
 
 	slotIndex := named.VirtualMethodIndex(e.Field, false) // getter, not setter
@@ -3279,6 +3290,8 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	} else {
 		vtableRaw = c.extractVtablePtr(receiverVal)
 		instance = c.extractInstancePtr(receiverVal)
+		// B0258: Track method chain intermediate for cleanup at statement end.
+		c.trackChainIntermediateReceiver(member.Target, receiverVal, instance, named, targetType)
 	}
 
 	// 3. Index into vtable — use the STATIC type's slot layout

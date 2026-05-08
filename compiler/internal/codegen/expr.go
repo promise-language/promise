@@ -5999,7 +5999,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.heapTempMap = make(map[value.Value]int) // T0088
 	c.envTemps = nil                          // T0100
 	c.envTempMap = make(map[value.Value]int)  // T0100
-	c.tempTrackingEnabled = false             // T0073
+	c.tempTrackingEnabled = true              // B0259: enable temp tracking in lambda bodies
 	c.loopScopeDepth = 0
 	c.lambdaWritebacks = nil
 
@@ -6060,6 +6060,14 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	} else if e.ExprBody != nil {
 		val := c.genExpr(e.ExprBody)
 		if val != nil && c.block.Term == nil {
+			// B0259: Clean up string/heap/env temps from the expression.
+			// Claim the return value first so it's not freed.
+			c.claimStringTemp(val)
+			c.claimHeapTemp(val)
+			c.claimEnvTemp(val)
+			c.cleanupStmtTemps()
+			c.cleanupHeapTemps()
+			c.cleanupEnvTemps()
 			// Clean up capture bindings before returning
 			if len(c.scopeBindings) > 0 {
 				cap := c.emitScopeCleanup(0, false)

@@ -35,6 +35,11 @@ type Pair {
       return "(" + this.x.to_string() + ", " + this.y.to_string() + ")";
     };
   }
+
+  // Expression-body variant for B0259 coverage
+  make_formatter_expr()() -> string {
+    return move || -> "(" + this.x.to_string() + ", " + this.y.to_string() + ")";
+  }
 }
 
 // --- Basic this capture returns field value ---
@@ -68,11 +73,17 @@ test_this_capture_multiple_fields() `test {
 }
 
 // --- This capture producing string ---
-test_this_capture_string() `test(allow_leaks: true) {
-  // B0259
+test_this_capture_string() `test {
   p := Pair(x: 10, y: 20);
   () -> string fmt = p.make_formatter();
   assert(fmt() == "(10, 20)", "formatted pair");
+}
+
+// --- Expression-body lambda with string concat (B0259) ---
+test_this_capture_string_expr_body() `test {
+  p := Pair(x: 10, y: 20);
+  () -> string fmt = p.make_formatter_expr();
+  assert(fmt() == "(10, 20)", "expression-body formatted pair");
 }
 
 // --- Different instances produce different closures ---

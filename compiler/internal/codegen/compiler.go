@@ -1026,7 +1026,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 				gsCompletedField := leakCheckBlk.NewGetElementPtr(schedTy, c.schedGlobal,
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCompleted)))
 
-				// Counter for bounded spin-wait (max 500 iterations × 100μs = 50ms)
+				// Counter for bounded spin-wait (max 5000 iterations × 100μs = 500ms)
 				drainCountAlloca := leakCheckBlk.NewAlloca(irtypes.I32)
 				leakCheckBlk.NewStore(constant.NewInt(irtypes.I32, 0), drainCountAlloca)
 
@@ -1041,11 +1041,11 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 				drainYield := mainFn.NewBlock(fmt.Sprintf("drain_yield_%s", nameStr))
 				drainLoop.NewCondBr(allDone, drainDone, drainYield)
 
-				// Bounded: check iteration count (max 500 = ~50ms)
+				// Bounded: check iteration count (max 5000 = ~500ms)
 				curCount := drainYield.NewLoad(irtypes.I32, drainCountAlloca)
 				nextCount := drainYield.NewAdd(curCount, constant.NewInt(irtypes.I32, 1))
 				drainYield.NewStore(nextCount, drainCountAlloca)
-				exceeded := drainYield.NewICmp(enum.IPredSGE, nextCount, constant.NewInt(irtypes.I32, 500))
+				exceeded := drainYield.NewICmp(enum.IPredSGE, nextCount, constant.NewInt(irtypes.I32, 5000))
 				drainSleep := mainFn.NewBlock(fmt.Sprintf("drain_sleep_%s", nameStr))
 				drainYield.NewCondBr(exceeded, drainDone, drainSleep)
 

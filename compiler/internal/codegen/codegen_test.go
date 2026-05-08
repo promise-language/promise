@@ -13091,6 +13091,25 @@ func TestValueTypeOperatorDispatch(t *testing.T) {
 	assertContains(t, ir, `call %promise_Vec2_v @"Vec2.+"(`)
 }
 
+// B0224: Operator methods on generic value types must use the mono name.
+func TestGenericValueTypeOperatorDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Pair[T: Equal] {
+			T a `+"`value"+`;
+			T b `+"`value"+`;
+			==(Pair[T] other) bool => this.a == other.a && this.b == other.b;
+			!=(Pair[T] other) bool => !(this == other);
+		}
+		main() {
+			p := Pair[int](a: 1, b: 2);
+			q := Pair[int](a: 1, b: 2);
+			bool r = p == q;
+		}
+	`)
+	// Operator dispatches to mono name Pair[int].==
+	assertContains(t, ir, `@"Pair[int].=="`)
+}
+
 func TestValueTypeOptional(t *testing.T) {
 	ir := generateIR(t, `
 		type Point {

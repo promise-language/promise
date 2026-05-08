@@ -792,6 +792,7 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	}
 
 	// Direct dispatch: call the concrete type's operator method.
+	// Use resolveTypeName to get mono name for generic instances (e.g., "Pair[int]").
 	ownerName := c.resolveMethodOwner(named, op)
 	var mangledName string
 	if ownerName != named.Obj().Name() {
@@ -799,13 +800,15 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 		// was synthesized under the concrete type's name — use that, not the parent's.
 		// (Mirrors the same logic in genMethodCall for structural inheritance.)
 		if structParent := c.findStructuralOwner(named, op); structParent != nil {
+			concreteName := c.resolveTypeName(leftType)
 			c.ensureDefaultMethodsSynthesized(named, structParent)
-			mangledName = mangleMethodName(named.Obj().Name(), op, false)
+			mangledName = mangleMethodName(concreteName, op, false)
 		} else {
-			mangledName = mangleMethodName(ownerName, op, false)
+			monoOwner := c.resolveMonoParentName(named, leftType, ownerName)
+			mangledName = mangleMethodName(monoOwner, op, false)
 		}
 	} else {
-		mangledName = mangleMethodName(ownerName, op, false)
+		mangledName = mangleMethodName(c.resolveTypeName(leftType), op, false)
 	}
 	fn, ok := c.funcs[mangledName]
 	if !ok {

@@ -4436,7 +4436,7 @@ func TestStringInterpolationF64(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_concat")
 }
 
-// convertToString: string passthrough in interpolation
+// convertToString: string in interpolation (B0248: copies via concat with empty)
 func TestStringInterpolationStringVar(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -4444,7 +4444,19 @@ func TestStringInterpolationStringVar(t *testing.T) {
 			string msg = "hello {name}";
 		}
 	`)
-	// No conversion call needed — string is passed directly to concat
+	// B0248: String is copied (concat with empty), then concatenated with other parts
+	assertContains(t, ir, "call i8* @promise_string_concat")
+}
+
+// B0248: single-string interpolation ("{s}") must copy via concat, not alias
+func TestStringInterpolationStringOnly(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string s = "hello";
+			string copy = "{s}";
+		}
+	`)
+	// Must produce a concat call (copy), not pass through the original value
 	assertContains(t, ir, "call i8* @promise_string_concat")
 }
 

@@ -2881,25 +2881,9 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 
 // isTrackedStringCall returns true if the call expression produces a NEW
 // heap-allocated string (T0073, T0099, T0123). Tracks ALL calls returning
-// string type, with a narrow exclusion list for known borrows.
-// The only known borrow: string.to_string() returns `this`.
-func (c *Compiler) isTrackedStringCall(e *ast.CallExpr) bool {
-	// T0123: Track all string-returning calls by default. Only exclude known
-	// borrows where the return value aliases an existing string (not a fresh alloc).
-	member, ok := e.Callee.(*ast.MemberExpr)
-	if !ok {
-		// Free function calls returning string always produce fresh allocations
-		return true
-	}
-	targetType := c.info.Types[member.Target]
-	if c.typeSubst != nil {
-		targetType = types.Substitute(targetType, c.typeSubst)
-	}
-	named := extractNamed(targetType)
-	// string.to_string() returns `this` (borrow, not a fresh allocation)
-	if named == types.TypString && member.Field == "to_string" {
-		return false
-	}
+// string type. After B0248, string.to_string() also allocates (via concat
+// with empty string), so there are no known borrows left to exclude.
+func (c *Compiler) isTrackedStringCall(_ *ast.CallExpr) bool {
 	return true
 }
 

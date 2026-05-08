@@ -1,0 +1,66 @@
+// B0248: string.to_string() and string interpolation must return independent
+// copies, not aliases to the original string. Without the copy, both the
+// original and the "copy" point to the same heap memory, causing double-free
+// at scope exit.
+test_to_string_copies_heap_string() `test {
+  string s = "hello" + " world";
+  string copy = s.to_string();
+  assert(copy == "hello world", "copy value");
+  assert(s == "hello world", "original value");
+}
+
+test_interpolation_copies_heap_string() `test {
+  string s = "hello" + " world";
+  string copy = "{s}";
+  assert(copy == "hello world", "copy value");
+  assert(s == "hello world", "original value");
+}
+
+test_interpolation_multipart_with_string() `test {
+  string name = "wor" + "ld";
+  string result = "hello {name}!";
+  assert(result == "hello world!", "result value");
+  assert(name == "world", "name preserved");
+}
+
+test_to_string_on_literal() `test {
+  string s = "hello";
+  string copy = s.to_string();
+  assert(copy == "hello", "copy of literal");
+}
+
+test_interpolation_of_literal() `test {
+  string s = "hello";
+  string copy = "{s}";
+  assert(copy == "hello", "interpolation of literal");
+}
+
+// Edge case: empty heap string
+test_to_string_empty_string() `test {
+  string s = "" + "";
+  string copy = s.to_string();
+  assert(copy == "", "empty copy");
+  assert(s == "", "empty original");
+}
+
+// Edge case: interpolation with multiple string variables
+test_interpolation_multiple_strings() `test {
+  string a = "hel" + "lo";
+  string b = "wor" + "ld";
+  string result = "{a} {b}";
+  assert(result == "hello world", "multi-string interp");
+  assert(a == "hello", "a preserved");
+  assert(b == "world", "b preserved");
+}
+
+// Edge case: to_string in a loop (repeated copy)
+test_to_string_in_loop() `test {
+  string s = "loop" + "test";
+  int i = 0;
+  while i < 5 {
+    string copy = s.to_string();
+    assert(copy == "looptest", "loop copy");
+    i = i + 1;
+  }
+  assert(s == "looptest", "original after loop");
+}

@@ -287,12 +287,9 @@ func (c *Compiler) genInterpolatedString(e *ast.StringLit) value.Value {
 			// Evaluate expression and convert to string
 			val := c.genExpr(p.Expr)
 			strVal := c.convertToString(val, c.info.Types[p.Expr])
-			// B0168: Track convertToString results (new heap strings for non-string types).
-			// String-typed values return val as-is (no new allocation), so only track
-			// when convertToString produced a different SSA value.
-			if strVal != val {
-				c.trackStringTemp(strVal)
-			}
+			// B0168: Track convertToString results as temps (all types now allocate,
+			// including strings after B0248 copy fix).
+			c.trackStringTemp(strVal)
 			parts = append(parts, strVal)
 		}
 	}
@@ -428,7 +425,10 @@ func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value 
 	}
 	switch named {
 	case types.TypString:
-		return val // already a string
+		// B0248: Must copy the string to avoid aliasing the original.
+		// Without this, "{s}" returns the same pointer as s, causing double-free.
+		emptyStr := c.makeRuntimeString("")
+		return c.block.NewCall(c.funcs["promise_string_concat"], val, emptyStr)
 	case types.TypInt, types.TypI64:
 		return c.block.NewCall(c.funcs["promise_int_to_string"], val)
 	case types.TypI32:

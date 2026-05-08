@@ -1676,7 +1676,11 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		fmt.Printf("\ntotal: %.1f%% (%d/%d blocks)\n", totalPct, totalCovered, totalBlocks)
 	}
 
-	if totalFailed > 0 || failedFiles > 0 {
+	// T0109: Leak-only failures must also produce non-zero exit code.
+	// The B0230 workaround (line ~1466) treats crash-during-shutdown as PASS
+	// when filePassed > 0 && fileFailed == 0, but this also swallows leak-only
+	// exits. Rather than changing that logic, enforce leaks at the final gate.
+	if totalFailed > 0 || failedFiles > 0 || totalLeaked > 0 {
 		os.Exit(1)
 	}
 }

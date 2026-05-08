@@ -4055,7 +4055,15 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 		}
 		c.claimStringTemp(armVal) // T0073: ownership transfers to match phi
 
-		// T0109: Clean up dup'd match bindings at arm end (fall-through path).
+		// B0242: Clear drop flags for dup'd bindings consumed by the arm result.
+		// When the arm body returns a dup'd binding's value (directly or via a
+		// block's last expression), the value's ownership transfers to the match
+		// PHI. The arm-scope cleanup must NOT drop it (use-after-free).
+		// clearDropFlag is a no-op if the name has no drop flag.
+		c.clearMatchArmResultDropFlags(*arm)
+
+		// T0109/B0242: Clean up dup'd match bindings at arm end (fall-through path).
+		// Only bindings whose drop flag is still true (not consumed) are dropped.
 		if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > armScopeLen {
 			c.emitScopeCleanup(armScopeLen, false)
 		}
@@ -4148,6 +4156,55 @@ func buildMatchPhi(mergeBlock *ir.Block, arms []matchArmInfo) value.Value {
 		return mergeBlock.NewPhi(incomings...)
 	}
 	return nil
+}
+
+// clearMatchArmResultDropFlags clears drop flags for identifiers that appear as
+// the arm's result expression. This prevents use-after-free when a dup'd match
+// binding is consumed by the match PHI — the arm-scope cleanup must skip it.
+// B0242: Walks into if/match sub-expressions to handle conditional returns like
+// `if cond { v } else { "other" }` where v is a dup'd binding.
+func (c *Compiler) clearMatchArmResultDropFlags(arm ast.MatchArm) {
+	if arm.Body != nil {
+		c.clearResultDropFlags(arm.Body)
+	} else if arm.Block != nil {
+		c.clearBlockResultDropFlags(arm.Block)
+	}
+}
+
+// clearResultDropFlags recursively clears drop flags for identifiers in an
+// expression that will be consumed as a scope result (match arm, if branch, etc.).
+func (c *Compiler) clearResultDropFlags(expr ast.Expr) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		c.clearDropFlag(e.Name)
+	case *ast.IfExpr:
+		// Both branches may produce a result
+		c.clearBlockResultDropFlags(e.Then)
+		if e.Else != nil {
+			c.clearBlockResultDropFlags(e.Else)
+		}
+	case *ast.MatchExpr:
+		// Each arm may produce a result
+		for _, arm := range e.Arms {
+			c.clearMatchArmResultDropFlags(*arm)
+		}
+	}
+	// For other expression types (calls, binary ops, etc.), the consumption
+	// happens at inner call sites which already clear drop flags.
+}
+
+// clearBlockResultDropFlags clears drop flags for identifiers in the last
+// statement of a block (the block's result value).
+func (c *Compiler) clearBlockResultDropFlags(block *ast.Block) {
+	if block == nil || len(block.Stmts) == 0 {
+		return
+	}
+	if es, ok := block.Stmts[len(block.Stmts)-1].(*ast.ExprStmt); ok {
+		c.clearResultDropFlags(es.Expr)
+	}
 }
 
 // genValueMatch generates a match expression on a non-enum value using comparison chains.
@@ -4561,12 +4618,13 @@ func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtype
 	c.locals[name] = bindAlloca
 	c.block.NewStore(dupVal, bindAlloca)
 
-	// B0237: Do NOT register dup'd bindings for scope cleanup. The dup'd copy
-	// is owned by whoever consumes it (push into vector, return via PHI, etc.).
-	// Registering for arm-scope cleanup caused use-after-free: the cleanup
-	// would drop the value even when it was already consumed (e.g., returned
-	// as the match result or pushed into a collection). Unconsumed dup'd
-	// values will leak, which is acceptable (tracked for future Clone trait).
+	// B0242: Register dup'd bindings for scope cleanup with a drop flag.
+	// The drop flag starts true; clearDropFlag sets it to false at move sites
+	// (PHI return, push, consuming function call). At arm-scope cleanup
+	// (genEnumMatch lines ~4011-4015), unconsumed bindings (flag still true)
+	// are dropped, while consumed bindings (flag cleared) are skipped.
+	// This fixes the B0237 regression where unconsumed dup'd bindings leaked.
+	c.maybeRegisterDrop(name, bindAlloca, resolvedType)
 }
 
 // --- If expressions ---

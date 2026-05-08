@@ -1,0 +1,77 @@
+// B0242: Match dup'd bindings must be cleaned up at arm-scope exit when not consumed.
+// The drop flag mechanism allows consumed bindings (returned via PHI, pushed into
+// collections) to skip cleanup, while unconsumed bindings (only borrowed) are dropped.
+enum StringHolder {
+  Holding(string value),
+  Empty,
+}
+
+enum PairHolder {
+  Pair(string first, string second),
+  None,
+}
+
+// Test: dup'd string that is only borrowed (not consumed) — should be dropped at arm exit.
+match_dup_string_borrow_only() `test {
+  h := StringHolder.Holding("hello");
+  match h {
+    Holding(v) => {
+      // v is borrowed by == comparison, not consumed
+      assert(v == "hello", "borrowed string value");
+    },
+    Empty => {
+      assert(false, "unreachable");
+    },
+  }
+}
+
+// Test: multiple dup'd strings in same arm, all borrowed — all should be cleaned up.
+match_dup_multiple_strings_borrow() `test {
+  h := PairHolder.Pair(first: "aaa", second: "bbb");
+  match h {
+    Pair(a, b) => {
+      assert(a == "aaa", "first string");
+      assert(b == "bbb", "second string");
+    },
+    None => {
+      assert(false, "unreachable");
+    },
+  }
+}
+
+// Test: dup'd string consumed (returned from match) — should NOT be double-freed.
+match_dup_string_consumed() `test {
+  h := StringHolder.Holding("world");
+  string result = match h {
+    Holding(v) => v,
+    Empty => "none",
+  };
+  assert(result == "world", "consumed string");
+}
+
+// Test: one dup'd string consumed, one not — mixed cleanup.
+match_dup_mixed_consume() `test {
+  h := PairHolder.Pair(first: "keep", second: "drop");
+  string result = match h {
+    Pair(a, b) => a,
+    None => "none",
+  };
+  assert(result == "keep", "consumed string");
+}
+
+// Test: match in a loop — each iteration must clean up unconsumed bindings.
+match_dup_string_in_loop() `test {
+  int count = 0;
+  for i in 0..5 {
+    h := StringHolder.Holding("iter");
+    match h {
+      Holding(v) => {
+        assert(v == "iter", "loop string");
+        count = count + 1;
+      },
+      Empty => {
+      },
+    }
+  }
+  assert(count == 5, "all iterations");
+}

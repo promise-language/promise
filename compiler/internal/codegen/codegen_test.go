@@ -10592,9 +10592,10 @@ func TestMatchDupMapExcluded(t *testing.T) {
 	}
 }
 
-// B0237: Match destructure of droppable enum dups string fields but does NOT
-// register them for arm-scope cleanup. The dup'd copy is owned by whoever
-// consumes it (PHI, push, etc.). Registering for cleanup caused use-after-free.
+// B0237/B0242: Match destructure of droppable enum dups string fields and
+// registers them for arm-scope cleanup with a drop flag. The drop flag is
+// cleared at move sites (PHI, push, etc.), so consumed bindings are not
+// double-freed. Unconsumed bindings are dropped at arm-scope exit.
 func TestMatchDupStringScopeCleanup(t *testing.T) {
 	ir := generateIR(t, `
 		enum Slot {
@@ -10611,8 +10612,53 @@ func TestMatchDupStringScopeCleanup(t *testing.T) {
 	`)
 	// String field extracted from droppable enum should be dup'd
 	assertContains(t, ir, "strdup.copy")
-	// B0237: Dup'd string must NOT have arm-scope drop cleanup (no drop flag for k)
-	assertNotContains(t, ir, "drop.flag.k")
+	// B0242: Dup'd string has a drop flag for arm-scope cleanup (unconsumed → dropped)
+	assertContains(t, ir, "k.dropflag")
+}
+
+// B0242: Dup'd match binding consumed as arm result — drop flag must be cleared.
+// Without clearDropFlag, arm-scope cleanup would drop the value, causing
+// use-after-free on the match PHI result.
+func TestMatchDupStringConsumedByPHI(t *testing.T) {
+	ir := generateIR(t, `
+		enum Slot {
+			Empty,
+			Used(string key, int value),
+		}
+		test() string {
+			s := Slot.Used(key: "hello", value: 42);
+			return match s {
+				Used(k, v) => k,
+				Empty => "none",
+			};
+		}
+	`)
+	assertContains(t, ir, "strdup.copy")
+	assertContains(t, ir, "k.dropflag")
+	// The drop flag must be cleared (store i1 false) before arm-scope cleanup
+	assertContains(t, ir, "store i1 false")
+}
+
+// B0242: Dup'd match binding consumed via if-expression arm result.
+// clearResultDropFlags must recurse into IfExpr branches.
+func TestMatchDupStringConsumedViaIf(t *testing.T) {
+	ir := generateIR(t, `
+		enum Slot {
+			Empty,
+			Used(string key, int value),
+		}
+		test() string {
+			s := Slot.Used(key: "hello", value: 42);
+			return match s {
+				Used(k, v) => if v > 0 { k } else { "neg" },
+				Empty => "none",
+			};
+		}
+	`)
+	assertContains(t, ir, "strdup.copy")
+	assertContains(t, ir, "k.dropflag")
+	// clearResultDropFlags walks into IfExpr and clears k's drop flag
+	assertContains(t, ir, "store i1 false")
 }
 
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)

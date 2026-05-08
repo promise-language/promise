@@ -628,44 +628,49 @@ main() { /* inside */ Int x = 0; // end
 	}
 }
 
-// TestIsFullFile verifies the detection heuristic for full files vs expressions.
-func TestIsFullFile(t *testing.T) {
-	full := []struct {
+// TestTryParseSourceString verifies that tryParseSourceString correctly identifies
+// complete Promise files (with a main function) vs expressions that need wrapping.
+func TestTryParseSourceString(t *testing.T) {
+	hasMain := []struct {
 		name string
 		code string
 	}{
 		{"main_function", `main() { print_line("hi"); }`},
-		{"main_with_helper", `add(int a, int b) int { return a + b; } main() { print_line(add(1, 2)); }`},
-		{"type_decl", `type Foo { int x; } main() { Foo f = Foo(x: 1); }`},
-		{"enum_decl", `enum Dir { N, S } main() { Dir d = Dir.N; }`},
-		{"use_statement", `use io "std/io"; main() { io.print_line("hi"); }`},
-		{"use_only", `use io "std/io";`},
-		{"type_only", `type Point { int x; int y; }`},
-		{"enum_only", `enum Color { Red, Green, Blue }`},
+		{"main_failable", `main!() { print_line("hi"); }`},
+		{"main_failable_spaced", "main ! () { print_line(\"hi\"); }"},
+		{"main_with_helper", `add(int a, int b) int { return a + b; } main() { print_line("x"); }`},
+		{"type_and_main", `type Foo { int x; } main() { f := Foo(x: 1); }`},
+		{"enum_and_main", `enum Dir { N, S } main() { d := Dir.N; }`},
 	}
-	for _, tc := range full {
-		t.Run("full/"+tc.name, func(t *testing.T) {
-			if !isFullFile(tc.code) {
-				t.Errorf("expected isFullFile=true for: %s", tc.code)
+	for _, tc := range hasMain {
+		t.Run("hasMain/"+tc.name, func(t *testing.T) {
+			_, ok := tryParseSourceString(tc.code)
+			if !ok {
+				t.Errorf("expected tryParseSourceString to succeed for: %s", tc.code)
 			}
 		})
 	}
 
-	expr := []struct {
+	noMain := []struct {
 		name string
 		code string
 	}{
 		{"bare_call", `print_line(42)`},
 		{"bare_print_line", `print_line("hello")`},
+		{"string_with_main", `print_line("main")`},
 		{"assignment", `x := 10; print_line(x)`},
 		{"multi_statement", `x := 10; y := 20; print_line(x + y)`},
 		{"if_statement", `if true { print_line(1); }`},
 		{"for_loop", `for i in 0..10 { print_line(i); }`},
+		{"type_only", `type Point { int x; int y; }`},
+		{"enum_only", `enum Color { Red, Green, Blue }`},
+		{"helper_only", `add(int a, int b) int { return a + b; }`},
 	}
-	for _, tc := range expr {
-		t.Run("expr/"+tc.name, func(t *testing.T) {
-			if isFullFile(tc.code) {
-				t.Errorf("expected isFullFile=false for: %s", tc.code)
+	for _, tc := range noMain {
+		t.Run("noMain/"+tc.name, func(t *testing.T) {
+			_, ok := tryParseSourceString(tc.code)
+			if ok {
+				t.Errorf("expected tryParseSourceString to fail (no main) for: %s", tc.code)
 			}
 		})
 	}
@@ -695,7 +700,7 @@ func TestExecWrapCode(t *testing.T) {
 			if !strings.HasSuffix(source, ";") && !strings.HasSuffix(source, "}") {
 				source += ";"
 			}
-			wrapped := "main() ! {\n" + source + "\n}"
+			wrapped := "main!() {\n" + source + "\n}"
 			errs := parseString(wrapped)
 			if errs != 0 {
 				t.Errorf("wrapped code has parse errors: %s", wrapped)

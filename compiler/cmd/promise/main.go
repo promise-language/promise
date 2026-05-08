@@ -4782,6 +4782,7 @@ type errorListener struct {
 	filename string
 	source   string // non-empty for inline mode: show source context
 	wrapped  bool   // if true, adjust line numbers by -1
+	silent   bool   // if true, count errors but suppress output
 	errors   int
 }
 
@@ -4792,19 +4793,21 @@ func (l *errorListener) SyntaxError(
 	msg string,
 	_ antlr.RecognitionException,
 ) {
-	if l.source != "" {
-		lines := strings.Split(l.source, "\n")
-		displayLine := line
-		if l.wrapped {
-			displayLine--
-		}
-		fmt.Fprintf(os.Stderr, "%d:%d: %s\n", displayLine, column, msg)
-		printErrorContext(lines, line-1, column)
-	} else {
-		fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", l.filename, line, column, msg)
-		lines := readFileLines(l.filename)
-		if lines != nil {
+	if !l.silent {
+		if l.source != "" {
+			lines := strings.Split(l.source, "\n")
+			displayLine := line
+			if l.wrapped {
+				displayLine--
+			}
+			fmt.Fprintf(os.Stderr, "%d:%d: %s\n", displayLine, column, msg)
 			printErrorContext(lines, line-1, column)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", l.filename, line, column, msg)
+			lines := readFileLines(l.filename)
+			if lines != nil {
+				printErrorContext(lines, line-1, column)
+			}
 		}
 	}
 	l.errors++
@@ -4860,18 +4863,19 @@ func runExec(args []string) {
 		os.Exit(1)
 	}
 
-	// Wrap in main() if needed
+	// Try parsing as-is first; if that fails, wrap in main!() and retry.
 	wrapped := false
-	if !isFullFile(source) {
-		if !strings.HasSuffix(source, ";") && !strings.HasSuffix(source, "}") {
-			source += ";"
+	file, ok := tryParseSourceString(source)
+	if !ok {
+		wrappedSource := source
+		if !strings.HasSuffix(wrappedSource, ";") && !strings.HasSuffix(wrappedSource, "}") {
+			wrappedSource += ";"
 		}
-		source = "main() ! {\n" + source + "\n}"
+		wrappedSource = "main!() {\n" + wrappedSource + "\n}"
 		wrapped = true
+		source = wrappedSource
+		file = parseSourceString(source, wrapped)
 	}
-
-	// Parse from string with inline error formatting
-	file := parseSourceString(source, wrapped)
 
 	// Inject std as a glob import so all std symbols are available
 	file = injectStdImport(file)
@@ -4947,18 +4951,42 @@ func runExec(args []string) {
 	}
 }
 
-// isFullFile returns true if source looks like a complete Promise file
-// with top-level declarations, false if it's just expressions/statements.
-func isFullFile(source string) bool {
-	if strings.Contains(source, "main(") {
-		return true
+// tryParseSourceString attempts to parse source as a complete Promise file.
+// Returns the parsed file and true if parsing succeeds AND a main function exists.
+// Returns nil and false otherwise (parse errors or no main function).
+func tryParseSourceString(source string) (*ast.File, bool) {
+	input := antlr.NewInputStream(source)
+
+	el := &errorListener{source: source, silent: true}
+
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	lexer.AddErrorListener(el)
+
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	p.AddErrorListener(el)
+
+	tree := p.CompilationUnit()
+
+	if el.errors > 0 {
+		return nil, false
 	}
-	trimmed := strings.TrimSpace(source)
-	if strings.HasPrefix(trimmed, "type ") || strings.HasPrefix(trimmed, "enum ") ||
-		strings.HasPrefix(trimmed, "use ") {
-		return true
+
+	file, errs := ast.Build("", tree)
+	if len(errs) > 0 {
+		return nil, false
 	}
-	return false
+
+	// Check that the file has a main function — without one, the code
+	// needs to be wrapped in main!().
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name == "main" {
+			return file, true
+		}
+	}
+	return nil, false
 }
 
 // parseSourceString parses Promise source code from a string.

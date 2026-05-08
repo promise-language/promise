@@ -1675,11 +1675,13 @@ func (c *Compiler) defineGoroutineExitFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
 	entry.NewStore(constant.NewInt(irtypes.I8, gStatusDead), statusField)
 
-	// Increment gs_completed counter (atomic — called from multiple Ms)
+	// Compute gs_completed field pointer (used at end of function, after all frees).
+	// B0234: gs_completed is incremented at the end of goroutine_exit (not the
+	// beginning) so that the test harness can spin-wait on gs_created==gs_completed
+	// to know all goroutine cleanup (coro.destroy + pal_free(G)) is truly done.
 	schedTyLocal := schedStructType()
 	gsCompletedField := entry.NewGetElementPtr(schedTyLocal, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCompleted)))
-	c.emitAtomicAdd(entry, gsCompletedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 
 	// Pre-load fields we need after unlocking done_lock.
 	// For task[T] goroutines, the receiver may free the G struct as soon as
@@ -1807,7 +1809,9 @@ func (c *Compiler) defineGoroutineExitFunc() {
 
 	freeG.NewCondBr(isTask, skipFree, doFree)
 
-	// skipFree: task[T] — caller will free G when they receive the result
+	// skipFree: task[T] — caller will free G when they receive the result.
+	// Increment gs_completed after all cleanup (B0234).
+	c.emitAtomicAdd(skipFree, gsCompletedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 	skipFree.NewRet(nil)
 
 	// doFree: free panic_msg if heap-allocated (panicked==2, B0225) then free G.
@@ -1822,6 +1826,8 @@ func (c *Compiler) defineGoroutineExitFunc() {
 	freePanicMsgBlk.NewBr(doFreeG)
 
 	doFreeG.NewCall(c.palFree, gParam)
+	// Increment gs_completed after all cleanup including pal_free(G) (B0234).
+	c.emitAtomicAdd(doFreeG, gsCompletedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 	doFreeG.NewRet(nil)
 
 	c.funcs["promise_goroutine_exit"] = fn

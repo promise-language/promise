@@ -311,6 +311,7 @@ func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
 	obj := c.lookup(e.Name)
 	if obj == nil {
 		c.errorf(e.Pos(), "undefined: %s", e.Name)
+		c.suggestForUndefinedIdent(e.Pos(), e.Name)
 		return nil
 	}
 	// Module objects are valid as member-access targets (mod.func()),
@@ -1933,6 +1934,7 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 			}
 			if !isEnumVariant {
 				c.errorf(p.Pos(), "undefined type: %s", p.Name)
+				c.suggestForUndefinedType(p.Pos(), p.Name)
 			}
 		}
 	case *ast.DestructureIsPattern:
@@ -2002,6 +2004,7 @@ func (c *Checker) checkDestructureIsPattern(p *ast.DestructureIsPattern, subject
 	obj := c.lookup(p.TypeName)
 	if obj == nil {
 		c.errorf(p.Pos(), "undefined type: %s", p.TypeName)
+		c.suggestForUndefinedType(p.Pos(), p.TypeName)
 		return
 	}
 	tn, ok := obj.(*types.TypeName)
@@ -2067,6 +2070,9 @@ func (c *Checker) checkOptionalUnwrapExpr(e *ast.OptionalUnwrapExpr) types.Type 
 	inner := c.checkExpr(e.Expr)
 	if c.info.FailableExprs[e.Expr] {
 		c.errorf(e.Pos(), "use ?! to panic on failable error (! is for optional unwrap)")
+		if c.curFunc != nil && c.curFunc.CanError() {
+			c.hintf(e.Pos(), "in a failable function, bare call() auto-propagates errors — no operator needed")
+		}
 	}
 	if opt, ok := inner.(*types.Optional); ok {
 		return opt.Elem()
@@ -2131,6 +2137,7 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 			obj := c.lookup(e.TypeName)
 			if obj == nil {
 				c.errorf(e.Pos(), "undefined type: %s", e.TypeName)
+				c.suggestForUndefinedType(e.Pos(), e.TypeName)
 			} else if tn, ok := obj.(*types.TypeName); ok && tn.Type() != nil {
 				if named, ok := tn.Type().(*types.Named); ok {
 					if !named.InheritsFrom(types.TypError) {
@@ -2262,6 +2269,7 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 		obj := c.lookup(p.Enum)
 		if obj == nil {
 			c.errorf(p.Pos(), "undefined: %s", p.Enum)
+			c.suggestForUndefinedIdent(p.Pos(), p.Enum)
 			return
 		}
 		tn, ok := obj.(*types.TypeName)
@@ -2288,6 +2296,7 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 		obj := c.lookup(p.Enum)
 		if obj == nil {
 			c.errorf(p.Pos(), "undefined: %s", p.Enum)
+			c.suggestForUndefinedIdent(p.Pos(), p.Enum)
 			return
 		}
 		tn, ok := obj.(*types.TypeName)
@@ -2307,6 +2316,7 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 		obj := c.lookup(p.TypeName)
 		if obj == nil {
 			c.errorf(p.Pos(), "undefined type: %s", p.TypeName)
+			c.suggestForUndefinedType(p.Pos(), p.TypeName)
 		}
 
 	case *ast.ShortDestructureMatchPattern:
@@ -2335,6 +2345,7 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 		obj := c.lookup(p.Name)
 		if obj == nil {
 			c.errorf(p.Pos(), "undefined: %s", p.Name)
+			c.suggestForUndefinedIdent(p.Pos(), p.Name)
 		}
 
 	case *ast.LiteralMatchPattern:

@@ -127,6 +127,7 @@ func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
 	obj := c.lookup(r.Name)
 	if obj == nil {
 		c.errorf(r.Pos(), "undefined type: %s", r.Name)
+		c.suggestForUndefinedType(r.Pos(), r.Name)
 		return nil
 	}
 
@@ -197,6 +198,7 @@ func (c *Checker) resolveQualifiedType(r *ast.QualifiedTypeRef) types.Type {
 		}
 	} else {
 		c.errorf(r.Pos(), "undefined module: %s", r.Module)
+		c.suggestForUndefinedModule(r.Pos(), r.Module)
 		return nil
 	}
 

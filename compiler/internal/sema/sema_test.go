@@ -12721,3 +12721,144 @@ func TestLifetimeOnMethod(t *testing.T) {
 		}
 	`)
 }
+
+// --- "Did you mean?" suggestion tests (T0116) ---
+
+func TestSuggestTypoIdent(t *testing.T) {
+	errs := checkErrs(t, `
+		test() { pritn_line("hello"); }
+	`)
+	expectError(t, errs, "undefined: pritn_line")
+	expectError(t, errs, "hint: did you mean print_line?")
+}
+
+func TestSuggestTypoType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { int x; }
+		test() { Fooo y; }
+	`)
+	expectError(t, errs, "undefined type: Fooo")
+	expectError(t, errs, "hint: did you mean Foo?")
+}
+
+func TestSuggestCatalogTypeFile(t *testing.T) {
+	errs := checkErrs(t, `
+		test() { File x; }
+	`)
+	expectError(t, errs, "undefined type: File")
+	expectError(t, errs, "hint: File is defined in module io")
+}
+
+func TestSuggestCatalogTypeDir(t *testing.T) {
+	errs := checkErrs(t, `
+		test() { Dir x; }
+	`)
+	expectError(t, errs, "undefined type: Dir")
+	expectError(t, errs, "hint: Dir is defined in module io")
+}
+
+func TestSuggestCatalogTypeJsonValue(t *testing.T) {
+	errs := checkErrs(t, `
+		test() { JsonValue x; }
+	`)
+	expectError(t, errs, "undefined type: JsonValue")
+	expectError(t, errs, "hint: JsonValue is defined in module json")
+}
+
+func TestSuggestCatalogIdentFile(t *testing.T) {
+	// Using a catalog type name as an identifier (e.g., Dir.exists)
+	errs := checkErrs(t, `
+		test() { x := File; }
+	`)
+	expectError(t, errs, "undefined: File")
+	expectError(t, errs, "hint: File is defined in module io")
+}
+
+func TestSuggestBangOnFailableInFailableFunc(t *testing.T) {
+	errs := checkErrs(t, `
+		parse!(string s) int { return 0; }
+		foo!() { x := parse("42")!; }
+	`)
+	expectError(t, errs, "use ?! to panic on failable error")
+	expectError(t, errs, "hint: in a failable function, bare call() auto-propagates")
+}
+
+func TestSuggestBangOnFailableInNonFailableFunc(t *testing.T) {
+	errs := checkErrs(t, `
+		parse!(string s) int { return 0; }
+		foo() { x := parse("42")!; }
+	`)
+	expectError(t, errs, "use ?! to panic on failable error")
+	// No auto-propagation hint for non-failable functions
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "auto-propagates") {
+			t.Errorf("unexpected auto-propagation hint in non-failable function: %s", e)
+		}
+	}
+}
+
+func TestSuggestUndefinedTypeInResolve(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { Strig x; }
+	`)
+	expectError(t, errs, "undefined type: Strig")
+	expectError(t, errs, "hint: did you mean string?")
+}
+
+func TestNoSuggestionForCompletelyWrongName(t *testing.T) {
+	errs := checkErrs(t, `
+		test() { xyzzy_completely_wrong(); }
+	`)
+	expectError(t, errs, "undefined: xyzzy_completely_wrong")
+	// No hint should be emitted for names with no close match
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "hint:") {
+			t.Errorf("unexpected hint for completely wrong name: %s", e)
+		}
+	}
+}
+
+func TestNoSuggestionForSingleCharName(t *testing.T) {
+	errs := checkErrs(t, `
+		test() { z; }
+	`)
+	expectError(t, errs, "undefined: z")
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "hint:") {
+			t.Errorf("unexpected hint for single-char name: %s", e)
+		}
+	}
+}
+
+func TestSuggestTypoVariable(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			my_value := 42;
+			x := my_valu;
+		}
+	`)
+	expectError(t, errs, "undefined: my_valu")
+	expectError(t, errs, "hint: did you mean my_value?")
+}
+
+func TestLevenshteinBasic(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"", "", 0},
+		{"a", "", 1},
+		{"", "b", 1},
+		{"abc", "abc", 0},
+		{"abc", "abd", 1},
+		{"abc", "abcd", 1},
+		{"kitten", "sitting", 3},
+		{"print_line", "pritn_line", 2},
+	}
+	for _, tt := range tests {
+		got := levenshtein(tt.a, tt.b)
+		if got != tt.want {
+			t.Errorf("levenshtein(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}

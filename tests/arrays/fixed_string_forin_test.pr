@@ -1,0 +1,58 @@
+// B0279: for-in over fixed-size array of strings must dup elements
+// to prevent aliased copies (double-free / use-after-free).
+test_forin_array_string_read_only() `test {
+  // When elem is read but not moved, the dup'd string must be freed per iteration
+  string[3] arr = ["alpha", "beta", "gamma"];
+  int total = 0;
+  for elem in arr {
+    total = total + elem.len;
+  }
+  assert(total == 14, "total length"); // 5 + 4 + 5
+}
+
+test_forin_array_string_move_to_vector() `test {
+  string[3] arr = ["hello", "world", "test"];
+  string[] result = string[]();
+  for elem in arr {
+    result.push(elem);
+  }
+  assert(result.len == 3, "result length");
+  assert(result[0] == "hello", "first");
+  assert(result[1] == "world", "second");
+  assert(result[2] == "test", "third");
+}
+
+test_forin_array_string_with_index() `test {
+  string[2] arr = ["a", "b"];
+  string[] result = string[]();
+  for i, elem in arr {
+    result.push(elem);
+  }
+  assert(result.len == 2, "result length");
+  assert(result[0] == "a", "first");
+  assert(result[1] == "b", "second");
+}
+
+test_forin_array_string_break() `test {
+  string[3] arr = ["first", "second", "third"];
+  string found = "";
+  for elem in arr {
+    if elem == "second" {
+      found = elem;
+      break;
+    }
+  }
+  assert(found == "second", "found second");
+}
+
+test_forin_array_string_continue() `test {
+  string[3] arr = ["skip", "keep", "skip"];
+  int kept = 0;
+  for elem in arr {
+    if elem == "skip" {
+      continue;
+    }
+    kept = kept + 1;
+  }
+  assert(kept == 1, "kept count");
+}

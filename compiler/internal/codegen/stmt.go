@@ -6426,6 +6426,15 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 	elemAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.locals[s.Binding] = elemAlloca
 
+	// B0279: For string elements, register a drop binding so dup'd strings are
+	// freed when the loop variable is not moved. The flag starts at 0 (no value
+	// to drop before the first iteration).
+	dupStrings := s.Binding != "_" && extractNamed(arr.Elem()) == types.TypString
+	if dupStrings {
+		c.maybeRegisterDrop(s.Binding, elemAlloca, arr.Elem())
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.dropFlags[s.Binding])
+	}
+
 	// Index variable if present
 	if s.Index != "" {
 		indexAlloca := c.block.NewAlloca(irtypes.I64)
@@ -6456,11 +6465,35 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
+
+	// B0279: Drop previous iteration's dup'd string if not moved, then dup new.
+	if dupStrings {
+		dropFlag := c.dropFlags[s.Binding]
+		flag := c.block.NewLoad(irtypes.I1, dropFlag)
+		dropBlk := c.newBlock("forin.str.drop")
+		loadBlk := c.newBlock("forin.str.load")
+		c.block.NewCondBr(flag, dropBlk, loadBlk)
+
+		c.block = dropBlk
+		oldVal := c.block.NewLoad(irtypes.I8Ptr, elemAlloca)
+		c.block.NewCall(c.funcs["promise_string_drop"], oldVal)
+		c.block.NewBr(loadBlk)
+
+		c.block = loadBlk
+	}
+
 	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
 	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
 		constant.NewInt(irtypes.I32, 0), curCounter)
-	elem := c.block.NewLoad(elemLLVM, elemPtr)
-	c.block.NewStore(elem, elemAlloca)
+	var elem value.Value = c.block.NewLoad(elemLLVM, elemPtr)
+
+	if dupStrings {
+		elem = c.dupString(elem)
+		c.block.NewStore(elem, elemAlloca)
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), c.dropFlags[s.Binding])
+	} else {
+		c.block.NewStore(elem, elemAlloca)
+	}
 
 	c.genBlock(s.Body)
 	if c.block.Term == nil {

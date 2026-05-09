@@ -3922,6 +3922,25 @@ func TestForInVectorStringDup(t *testing.T) {
 	assertContains(t, ir, "call void @promise_string_drop(")
 }
 
+// B0279: for-in over fixed-size array of strings must dup elements to prevent aliasing.
+func TestForInArrayStringDup(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			string[2] arr = ["a", "b"];
+			for elem in arr {
+			}
+		}
+	`)
+	// String elements are dup'd via promise_string_new
+	assertContains(t, ir, "strdup.copy")
+	// Drop flag for binding
+	assertContains(t, ir, "elem.dropflag")
+	// Per-iteration drop of previous dup'd string
+	assertContains(t, ir, "forin.str.drop")
+	// Scope drop via promise_string_drop
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
 // --- Part E: Lambda tests ---
 
 func TestLambdaExpr(t *testing.T) {

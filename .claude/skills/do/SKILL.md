@@ -32,7 +32,29 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - For Promise code: follow the implementation philosophy — prefer Promise over IR, full English words in APIs, getters for side-effect-free parameterless access, `doc` annotations on `public` declarations.
    - If the change is non-trivial, briefly state the plan before starting.
 
-6. **Implement.**
+6. **Evaluate feasibility.**
+   After planning, determine whether the item can actually be implemented right now. There are three possible outcomes:
+
+   **A) Blocked** — the item depends on work that hasn't been done yet:
+   - Identify the blocking item. If one doesn't exist in the tracker, create it with `mcp__tracker__create`.
+   - Set `blocked_by` on the current item to reference the blocker(s) using `mcp__tracker__update`.
+   - Add a note to the current item explaining the dependency and why it can't proceed now.
+   - Add the `needs-attention` tag to the current item (append to existing tags) so the user knows to review it.
+   - Set the item status back to `open` (blocking is computed from `blocked_by`, not from status).
+   - Call `mcp__tracker__heartbeat` with `status: "done"`.
+   - **Stop here.** Do not proceed to implementation.
+
+   **B) Not feasible** — the item cannot be done as specified (wrong assumptions, contradictory requirements, out of scope, etc.):
+   - Set the item status to `wontfix` using `mcp__tracker__update`.
+   - Provide a clear `summary` explaining why it's not feasible and what would need to change.
+   - Add a note with the detailed reasoning.
+   - Add the `needs-attention` tag to the current item (append to existing tags) so the user knows to review it.
+   - Call `mcp__tracker__heartbeat` with `status: "done"`.
+   - **Stop here.** Do not proceed to implementation.
+
+   **C) Feasible** — proceed to step 7.
+
+7. **Implement.**
    - Update your tracker status: call `mcp__tracker__heartbeat` with `status: "implementing"` (keep the same agent, item_id, item_title).
    - Make the code changes. Keep changes minimal and focused — don't refactor, add features, or clean up code beyond what's needed.
    - For compiler changes: update both the implementation and any affected LLVM IR patterns.
@@ -45,20 +67,20 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
      - **Resource waste**: Unnecessary allocations in hot paths, O(n) operations that should be O(1), repeated work that could be cached.
    - If you spot any of these, file immediately with `mcp__tracker__create` at **critical** priority — don't wait until the end of the task. These bugs compound silently.
 
-7. **Write tests.**
+8. **Write tests.**
    - Every behavioral change needs tests. Write them alongside the implementation, not as an afterthought.
    - **Go tests**: `generateIR()` + `assertContains` for codegen, `checkErrs()` + `expectError` for sema, `ownerOK()` / `ownerErrs()` for ownership.
    - **Promise tests**: batch tests (`` `test `` + `assert()`) unless testing exact output. Co-locate `*_test.pr` with source for modules; use `tests/` for cross-cutting e2e tests.
    - Cover the fix/feature, edge cases, and error paths.
 
-8. **Verify.**
+9. **Verify.**
    - Run the specific new tests first to confirm they pass.
    - Then run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) to confirm nothing else broke.
    - If verify fails, fix the issues and re-run until green.
    - **Memory leak check (ZERO TOLERANCE)**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). **The repo has 0 leaks. Any leak in the output is a regression caused by your changes.** Do NOT treat any leak as preexisting — there are none. Fix all leaks before proceeding. Changes that introduce memory leaks will not be pushed.
    - **No `allow_leaks: true` tags — ever.** The repo has 0 `allow_leaks` tags. Never add `allow_leaks: true` to any test. If a test leaks, fix the leak. There are no exceptions.
 
-9. **Review, test, and commit.**
+10. **Review, test, and commit.**
    - Run `/review` to check your changes for correctness and convention compliance.
    - Run `/coverage` scoped to the changed code to verify test coverage is adequate.
    - Run `bin/verify.sh --local --wasm` to confirm everything passes.

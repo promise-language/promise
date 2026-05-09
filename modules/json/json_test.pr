@@ -1548,6 +1548,55 @@ parsed_value_methods_test() `test {
   assert(missing is absent, "parsed: missing key absent");
 }
 
+// B0253: Nested get() on parsed JSON must not double-free.
+// parse_value creates heap-allocated map/vector data inside JsonValue enums.
+// get() matches on the borrowed enum and returns a cloned value — without proper
+// deep-clone in match destructure (B0244) and vector-index return (f9576dc),
+// the returned JsonValue shares heap pointers with the original, causing double-free.
+parsed_nested_get_test() `test {
+  string data = "\{\"outer\":\{\"inner\":\{\"key\":\"deep\"\}\}\}";
+  JsonValue root = parse_value(data)!;
+  if outer := root.get("outer") {
+    assert(outer.is_object, "B0253: outer is object");
+    if inner := outer.get("inner") {
+      assert(inner.is_object, "B0253: inner is object");
+      if v := inner.get("key") {
+        assert(v.as_string()! == "deep", "B0253: deeply nested string");
+      }
+    }
+  }
+}
+
+// B0253: Multiple get() calls on same parsed object must not corrupt data.
+parsed_multiple_get_same_object_test() `test {
+  string data = "\{\"a\":\{\"x\":1},\"b\":\{\"y\":2}}";
+  JsonValue root = parse_value(data)!;
+  // Call get() multiple times on the same parsed object
+  if a := root.get("a") {
+    assert(a.is_object, "B0253: a is object");
+  }
+  if b := root.get("b") {
+    assert(b.is_object, "B0253: b is object");
+  }
+  // Original object should still be intact after multiple gets
+  if a2 := root.get("a") {
+    assert(a2.is_object, "B0253: a still object after second get");
+  }
+}
+
+// B0253: get() + as_string() chain on parsed JSON (original bug report scenario).
+parsed_get_as_string_chain_test() `test {
+  string data = "\{\"tool_input\":\{\"command\":\"hello\"\}\}";
+  JsonValue root = parse_value(data)!;
+  if tool_input := root.get("tool_input") {
+    if cmd := tool_input.get("command") {
+      if s := cmd.as_string() {
+        assert(s == "hello", "B0253: chained get + as_string");
+      }
+    }
+  }
+}
+
 // B0281: Enum ctor temps in map literals must be claimed.
 // Without the fix, creating a map with enum values using separate variables
 // caused a use-after-free (stack overflow) because the enum ctor temp was

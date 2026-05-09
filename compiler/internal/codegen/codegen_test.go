@@ -10926,6 +10926,36 @@ func TestMatchDupStringConsumedByPHI(t *testing.T) {
 	assertContains(t, ir, "store i1 false")
 }
 
+// B0253: Match on borrowed enum with clone-able enum field must deep-clone.
+// This is the pattern underlying JsonValue.get(&this): match on &this loads a
+// shallow copy of the enum value. Extracted enum fields (like JsonValue from
+// Slot.Used inside Map.[]) must be cloned, not shallow-copied, so the returned
+// value is independent of the original map storage.
+func TestMatchDupCloneableEnumFieldOnBorrow(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum Inner `clone {\n"+
+		"  Text(string data),\n"+
+		"  Empty,\n"+
+		"}\n"+
+		"enum Outer {\n"+
+		"  Wrapped(Inner value),\n"+
+		"  None,\n"+
+		"  get_inner(&this) Inner? {\n"+
+		"    match this {\n"+
+		"      Outer.Wrapped(v) => { return v; },\n"+
+		"      _ => { return none; },\n"+
+		"    }\n"+
+		"  }\n"+
+		"}\n"+
+		"test() {\n"+
+		"  o := Outer.Wrapped(value: Inner.Text(data: \"hello\"));\n"+
+		"  r := o.get_inner();\n"+
+		"}\n")
+	// Inner enum field extracted from droppable Outer must be cloned via clone method
+	assertContains(t, ir, "Inner.clone")
+	assertContains(t, ir, "enum.clone.tmp")
+}
+
 // Temp enum receiver from a CallExpr should be dropped after a borrow method call.
 // When movedDroppable causes enumCtorTemps to skip tracking, the method call
 // path must explicitly drop the temp to prevent leaking the enum's heap data.

@@ -10748,8 +10748,10 @@ func TestMatchDupChannel(t *testing.T) {
 	assertContains(t, ir, "chdup.inc")
 }
 
-// B0236/B0244: Map is not shallow-dup'd (unsafe), but IS cloned via Map.clone().
-func TestMatchDupMapCloned(t *testing.T) {
+// B0284: Map with non-cloneable value types (enum with drops but no `clone`)
+// must NOT be cloned via Map.clone() — the clone would be shallow, causing
+// double-free when both original and clone drop shared enum heap data.
+func TestMatchDupMapNotClonedNonCloneableValues(t *testing.T) {
 	ir := generateIR(t, `
 		enum JsonNode {
 			Null,
@@ -10768,8 +10770,68 @@ func TestMatchDupMapCloned(t *testing.T) {
 	if strings.Contains(ir, "heapdup.copy") {
 		t.Error("Map should not be heap-dup'd (vector of droppable enum elements)")
 	}
-	// B0244: Map field is now cloned via Map.clone() instead of being left as shallow copy
-	assertContains(t, ir, "Map[string, JsonNode].clone")
+	// B0284: Map.clone() must NOT be CALLED — JsonNode has drops but no clone method,
+	// so the clone would shallow-copy JsonNode values (shared heap pointers → double-free).
+	// Note: the function definition exists from monomorphization; check for call sites only.
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.Contains(line, "Map[string, JsonNode].clone") && strings.Contains(line, "= call") {
+			t.Error("Map with non-cloneable values should not call Map.clone()")
+		}
+	}
+}
+
+// B0284: Map with safely cloneable value types (primitives, strings) CAN be
+// cloned via Map.clone() — the clone's internal match-dup handles these types.
+func TestMatchDupMapClonedSafeValues(t *testing.T) {
+	ir := generateIR(t, `
+		enum Holder {
+			Data(map[string, int] fields),
+			Empty,
+		}
+		test() {
+			map[string, int] m = {"a": 1, "b": 2};
+			h := Holder.Data(fields: m);
+			match h {
+				Data(f) => { int x = f.len; },
+				Empty => { },
+			}
+		}
+	`)
+	// Map[string, int] — both type args are safe (string dup'd, int is primitive)
+	assertContains(t, ir, "Map[string, int].clone")
+}
+
+// B0284: Map with cloneable enum values CAN be cloned — the enum has `clone`
+// so the clone's internal match-dup will deep-copy via enum clone.
+func TestMatchDupMapClonedWithCloneableEnumValues(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum Status `clone {\n"+
+		"  Active(string label),\n"+
+		"  Inactive,\n"+
+		"}\n"+
+		"enum Holder {\n"+
+		"  Data(map[string, Status] fields),\n"+
+		"  Empty,\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, Status] m = {\"a\": Status.Active(label: \"on\")};\n"+
+		"  h := Holder.Data(fields: m);\n"+
+		"  match h {\n"+
+		"    Data(f) => { int x = f.len; },\n"+
+		"    Empty => { },\n"+
+		"  }\n"+
+		"}\n")
+	// Map[string, Status] — Status is `clone so match-dup can handle it
+	found := false
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.Contains(line, "Map[string, Status].clone") && strings.Contains(line, "= call") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Map with cloneable enum values should be cloned via Map.clone()")
+	}
 }
 
 // B0244: Match destructure of droppable enum clones enum-typed fields via clone().

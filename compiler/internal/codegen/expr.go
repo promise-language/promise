@@ -4606,15 +4606,67 @@ func (c *Compiler) typeNeedsMatchDup(resolved types.Type) bool {
 	return c.namedHasCloneFunc(named, resolved)
 }
 
-// namedHasCloneFunc returns true if a named type has a clone() function available in c.funcs.
-// B0244: Used to check if a heap user type can be deep-copied via clone when shallow-dup is unsafe.
+// namedHasCloneFunc returns true if a named type has a clone() function available in c.funcs
+// AND (for generic instances) all type arguments can be safely handled by the clone's
+// internal match-dup. B0284: Without the type-arg check, clone-based dup for containers
+// like Map[K, V] produces a shallow copy when V has drops but no clone — both the original
+// and clone share heap pointers, causing double-free on drop.
 func (c *Compiler) namedHasCloneFunc(named *types.Named, resolved types.Type) bool {
 	ownerName := c.resolveMethodOwner(named, "clone")
 	if inst, ok := resolved.(*types.Instance); ok {
 		ownerName = monoName(inst)
 	}
 	_, exists := c.funcs[mangleMethodName(ownerName, "clone", false)]
-	return exists
+	if !exists {
+		return false
+	}
+	// B0284: For generic instances, verify all type arguments can be safely
+	// handled by the clone's internal match-dup. Container clone methods (Map, Set)
+	// iterate elements via match destructure — if any element type has drops but
+	// can't be match-dup'd, the clone will be shallow for that type.
+	if inst, ok := resolved.(*types.Instance); ok {
+		for _, arg := range inst.TypeArgs() {
+			if c.typeSubst != nil {
+				arg = types.Substitute(arg, c.typeSubst)
+			}
+			if !c.typeArgSafeForCloneDup(arg) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// typeArgSafeForCloneDup returns true if a type argument is safe within a
+// clone that uses match-dup to copy elements. Safe means either the type
+// doesn't need dropping (bitwise copy is fine) or it can be independently
+// dup'd by the match-dup mechanism. B0284.
+func (c *Compiler) typeArgSafeForCloneDup(t types.Type) bool {
+	if named := extractNamed(t); named != nil {
+		// Copy, value, primitive, structural — no drops, bitwise copy is fine
+		if named.IsCopy() || named.IsValueType() || isPrimitiveScalar(named) || named.IsStructural() {
+			return true
+		}
+		// Heap type with drops — safe only if match-dup can handle it
+		return c.typeNeedsMatchDup(t)
+	}
+	if enum := extractEnum(t); enum != nil {
+		// Enum without drops — safe
+		if !enum.HasDrop() && !enum.NeedsSynthDrop() {
+			// Also check mono synth drops for generic enum instances
+			if inst, ok := t.(*types.Instance); ok {
+				mangledName := mangleMethodName(monoName(inst), "drop", false)
+				if _, ok := c.funcs[mangledName]; ok {
+					return c.typeNeedsMatchDup(t)
+				}
+			}
+			return true
+		}
+		// Enum with drops — safe only if match-dup can handle it
+		return c.typeNeedsMatchDup(t)
+	}
+	// Raw types (int, bool, etc.) — safe
+	return true
 }
 
 // enumCloneFuncName returns the mangled LLVM function name for an enum's clone method.

@@ -30,6 +30,28 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "go run $(git rev-parse --show-toplevel)/tools/hooks/skill_heartbeat.go || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "go run $(git rev-parse --show-toplevel)/tools/hooks/skill_heartbeat.go || true",
+            "timeout": 10
+          }
+        ]
       }
     ]
   },

@@ -1076,3 +1076,40 @@ func TestDocEnumPublicFiltering(t *testing.T) {
 	assertContainsDoc(t, out, "### PublicEnum")
 	assertNotContainsDoc(t, out, "PrivateEnum")
 }
+
+func TestDocUsageContainsModules(t *testing.T) {
+	var buf bytes.Buffer
+	printDocUsage(&buf)
+	out := buf.String()
+
+	// Must contain usage line
+	if !strings.Contains(out, "usage: promise doc") {
+		t.Errorf("expected usage line, got:\n%s", out)
+	}
+
+	// Must list options
+	if !strings.Contains(out, "-public") {
+		t.Errorf("expected -public option, got:\n%s", out)
+	}
+	if !strings.Contains(out, "-signatures") {
+		t.Errorf("expected -signatures option, got:\n%s", out)
+	}
+
+	// Must list available modules (from embedded catalog)
+	if len(embeddedCatalog) > 0 {
+		if !strings.Contains(out, "Available modules:") {
+			t.Errorf("expected 'Available modules:' section, got:\n%s", out)
+		}
+		// Check a few known modules
+		for _, mod := range []string{"std", "io", "json", "os", "path"} {
+			if !strings.Contains(out, mod) {
+				t.Errorf("expected module %q in output, got:\n%s", mod, out)
+			}
+		}
+	}
+
+	// Must contain examples
+	if !strings.Contains(out, "Examples:") {
+		t.Errorf("expected 'Examples:' section, got:\n%s", out)
+	}
+}

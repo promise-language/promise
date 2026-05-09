@@ -43,13 +43,16 @@ func runDoc(args []string) {
 			}
 			i++
 			outputFile = args[i]
+		case "--help", "-help", "-h":
+			printDocUsage(os.Stderr)
+			os.Exit(0)
 		default:
 			remaining = append(remaining, args[i])
 		}
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise doc [options] <file.pr | module-name>")
+		printDocUsage(os.Stderr)
 		os.Exit(1)
 	}
 
@@ -76,6 +79,51 @@ func runDoc(args []string) {
 
 	// Module documentation: look up in catalog or as a local directory
 	runDocModule(w, target, opts)
+}
+
+// printDocUsage prints enhanced usage for `promise doc`, including available modules.
+func printDocUsage(w io.Writer) {
+	fmt.Fprintln(w, "Generate markdown documentation from `doc annotations.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "usage: promise doc [options] <file.pr | module-name>")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Options:")
+	fmt.Fprintln(w, "  -public       Show only exported symbols (default)")
+	fmt.Fprintln(w, "  -all          Show all symbols including private")
+	fmt.Fprintln(w, "  -signatures   Compact mode — signatures only, no doc text")
+	fmt.Fprintln(w, "  -o <path>     Write output to file instead of stdout")
+	fmt.Fprintln(w)
+
+	// Dynamically list available catalog modules.
+	if len(embeddedCatalog) > 0 {
+		cat, err := module.ParseCatalog(embeddedCatalog)
+		if err == nil && len(cat.Modules) > 0 {
+			// Collect and sort module names for stable output.
+			names := make([]string, 0, len(cat.Modules))
+			for name := range cat.Modules {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+
+			fmt.Fprintln(w, "Available modules:")
+			for _, name := range names {
+				entry := cat.Modules[name]
+				if entry.Description != "" {
+					fmt.Fprintf(w, "  %-12s %s\n", name, entry.Description)
+				} else {
+					fmt.Fprintf(w, "  %s\n", name)
+				}
+			}
+			fmt.Fprintln(w)
+		}
+	}
+
+	fmt.Fprintln(w, "Examples:")
+	fmt.Fprintln(w, "  promise doc io              Document the io module")
+	fmt.Fprintln(w, "  promise doc std              Document the standard library")
+	fmt.Fprintln(w, "  promise doc file.pr          Document a single file")
+	fmt.Fprintln(w, "  promise doc -signatures std  Compact signatures only")
+	fmt.Fprintln(w, "  promise doc -all -o out.md io")
 }
 
 // docFrontend runs parse + inject std + DeclareAndDefine (no Check/Verify/Ownership).

@@ -3,8 +3,8 @@ package main
 import "fmt"
 
 func printHelp() {
-	fmt.Print(`Promise — statically-typed language with Dart-like syntax and Rust-like ownership.
-Compiler: promise build file.pr | Run: promise run file.pr
+	fmt.Print(`Promise — statically-typed language with Go-like concurency and Rust-like ownership.
+Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 'print_line("hi")'
 
 === Quick Start ===
 
@@ -47,11 +47,11 @@ Compiler: promise build file.pr | Run: promise run file.pr
 
 === Key Differences from Familiar Languages ===
 
-  Failable functions:  name!() marks a function that can fail (returns T!).
+  Failable functions:  name!() marks a function that can fail.
   Error handling:      bare call = auto-propagate in ! functions.
                        call()?^ = explicit propagate (like Rust's ?).
                        call()?! = panic on error (prototyping only).
-                       call()? e { fallback; } = recover with handler.
+                       call()? e { fallback } = recover with handler.
   Ownership:           string and user types are move-by-default.
                        &x borrows immutably, ~x moves ownership.
                        No &/~ at call sites — compiler auto-borrows.
@@ -60,7 +60,7 @@ Compiler: promise build file.pr | Run: promise run file.pr
   String interpolation: "hello {name}" (braces, not $).
   Mutability:          ~this for mutating methods. Variables immutable by default.
   Modules:             use io; / use json; for catalog modules.
-                       std is auto-imported (print_line, Vector, Map, etc.).
+                       std is auto-imported (print_line, Channel, Map, etc.).
 
 === Available Modules ===
 
@@ -79,6 +79,6 @@ Compiler: promise build file.pr | Run: promise run file.pr
   promise build file.pr   Compile to executable
   promise run file.pr     Compile and run
   promise test file.pr    Run tests
-  promise exec '<code>'   Run inline code (failable main, ? works)
+  promise exec '<code>'   Run inline code (failable main, ?^ works)
 `)
 }

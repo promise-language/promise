@@ -50,6 +50,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Usage: promise <command> [options] [file.pr]
 
 Commands:
+  help      Show language overview and quick-start guide
   build     Compile a Promise source file to an executable
   run       Compile and run a Promise source file
   test      Discover and run test functions
@@ -141,9 +142,13 @@ func main() {
 
 	cmd := os.Args[1]
 
-	// --version flag (before legacy dispatch).
+	// --version / --help flags (before legacy dispatch).
 	if cmd == "--version" {
 		printVersion()
+		return
+	}
+	if cmd == "--help" || cmd == "-help" {
+		printHelp()
 		return
 	}
 
@@ -156,6 +161,9 @@ func main() {
 	switch cmd {
 	case "version":
 		printVersion()
+		return
+	case "help":
+		printHelp()
 		return
 	case "build":
 		runBuild(os.Args[2:])

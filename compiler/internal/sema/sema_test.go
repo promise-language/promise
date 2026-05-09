@@ -642,12 +642,29 @@ func TestTypedErrorHandlerNonErrorType(t *testing.T) {
 	expectError(t, errs, "does not inherit from error")
 }
 
-func TestErrorPropagateOnNonFailable(t *testing.T) {
+// B0271: ^ has lower precedence than arithmetic — detect and give targeted hint
+func TestErrorPropagatePrecedenceHint(t *testing.T) {
+	errs := checkErrs(t, `
+		parse!(string s) int { return 0; }
+		foo!() int { return 1 + parse("x")^; }
+	`)
+	// Should get the precedence-specific hint
+	expectError(t, errs, "lower precedence than arithmetic")
+}
+
+// Non-failable without failable sub-expression: generic error, no hint
+func TestErrorPropagateOnNonFailableNoHint(t *testing.T) {
 	errs := checkErrs(t, `
 		foo() int { return 42; }
 		bar!() int { return foo()^; }
 	`)
 	expectError(t, errs, "requires a failable expression")
+	// Should NOT have the precedence hint
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "lower precedence") {
+			t.Error("should not have precedence hint for non-failable call")
+		}
+	}
 }
 
 func TestErrorUnwrapOnNonFailable(t *testing.T) {

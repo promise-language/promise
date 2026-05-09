@@ -2045,10 +2045,28 @@ func (c *Checker) checkErrorPropagateExpr(e *ast.ErrorPropagateExpr) types.Type 
 		c.errorf(e.Pos(), "error propagation (^) used outside of failable function")
 	}
 	if !c.info.FailableExprs[e.Expr] {
-		c.errorf(e.Pos(), "error propagation (^) requires a failable expression")
+		// B0271: Check if the inner expression contains a failable sub-expression.
+		// This happens when ^ (lower precedence than arithmetic) is applied to
+		// `a + f()^` which parses as `(a + f())^`. Provide a targeted hint.
+		if c.exprContainsFailable(e.Expr) {
+			c.errorf(e.Pos(), "error propagation (^) requires a failable expression; ^ has lower precedence than arithmetic operators — parenthesize the failable call: (call()^), or remove ^ (auto-propagation still applies)")
+		} else {
+			c.errorf(e.Pos(), "error propagation (^) requires a failable expression")
+		}
 	}
 	// The inner expression's type is the success type (error is propagated)
 	return inner
+}
+
+// exprContainsFailable checks if any sub-expression within expr is failable.
+// Used to detect precedence-related misuse of ^ (B0271).
+func (c *Checker) exprContainsFailable(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.BinaryExpr:
+		return c.info.FailableExprs[e.Left] || c.info.FailableExprs[e.Right] ||
+			c.exprContainsFailable(e.Left) || c.exprContainsFailable(e.Right)
+	}
+	return false
 }
 
 func (c *Checker) checkErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) types.Type {

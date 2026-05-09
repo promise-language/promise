@@ -14,7 +14,7 @@ parse_int!(string s) int {
 }
 
 test_propagate_success() `test {
-  int r = parse_int("42")!;
+  int r = parse_int("42")?!;
   assert(r == 42, "parse_int 42 succeeds");
 }
 
@@ -25,12 +25,12 @@ level3!() int {
 }
 
 level2!() int {
-  int v = level3()^;
+  int v = level3()?^;
   return v + 1;
 }
 
 level1!() int {
-  int v = level2()^;
+  int v = level2()?^;
   return v + 1;
 }
 
@@ -49,18 +49,18 @@ test_propagation_chain() `test {
 // --- multiple failable calls ---
 
 add_parsed!(string a, string b) int {
-  int x = parse_int(a)^;
-  int y = parse_int(b)^;
+  int x = parse_int(a)?^;
+  int y = parse_int(b)?^;
   return x + y;
 }
 
 test_multiple_failable_success() `test {
-  int r = add_parsed("42", "0")!;
+  int r = add_parsed("42", "0")?!;
   assert(r == 42, "42 + 0 = 42");
 }
 
 test_multiple_failable_negative() `test {
-  int r = add_parsed("42", "-1")!;
+  int r = add_parsed("42", "-1")?!;
   assert(r == 41, "42 + (-1) = 41");
 }
 
@@ -91,7 +91,7 @@ test_second_failable_fails() `test {
 // --- bang unwrap on success ---
 
 test_bang_unwrap_success() `test {
-  int r = parse_int("0")!;
+  int r = parse_int("0")?!;
   assert(r == 0, "bang unwrap on success gives 0");
 }
 
@@ -109,7 +109,7 @@ safe_get!(int[] arr, int idx) int {
 
 test_safe_get_valid() `test {
   int[] nums = [10, 20, 30];
-  int v = safe_get(nums, 1)!;
+  int v = safe_get(nums, 1)?!;
   assert(v == 20, "safe_get at index 1 returns 20");
 }
 
@@ -134,14 +134,14 @@ test_safe_get_out_of_bounds() `test {
 // --- failable returning zero ---
 
 test_failable_returning_zero() `test {
-  int r = parse_int("0")!;
+  int r = parse_int("0")?!;
   assert(r == 0, "failable can return 0 (not confused with error)");
 }
 
 // --- failable returning negative ---
 
 test_failable_returning_negative() `test {
-  int r = parse_int("-1")!;
+  int r = parse_int("-1")?!;
   assert(r == -1, "failable can return -1");
 }
 
@@ -150,7 +150,7 @@ test_failable_returning_negative() `test {
 parse_and_sum!(string[] inputs) int {
   int sum = 0;
   for s in inputs {
-    int v = parse_int(s)^;
+    int v = parse_int(s)?^;
     sum += v;
   }
   return sum;
@@ -158,7 +158,7 @@ parse_and_sum!(string[] inputs) int {
 
 test_propagation_in_loop_success() `test {
   string[] inputs = ["42", "0", "-1"];
-  int r = parse_and_sum(inputs)!;
+  int r = parse_and_sum(inputs)?!;
   assert(r == 41, "42 + 0 + (-1) = 41");
 }
 
@@ -206,7 +206,7 @@ get_io_error_code!() int {
 }
 
 test_typed_handler_catches() `test {
-  int code = get_io_error_code()!;
+  int code = get_io_error_code()?!;
   assert(code == 28, "typed handler catches IoError and accesses code");
 }
 
@@ -231,7 +231,7 @@ try_typed_propagation!() bool {
 test_typed_handler_propagates_nonmatch() `test {
   // try_typed_propagation is failable, nomatch propagates
   // Can't easily test panic in e2e, but we can test matching path
-  int code = get_io_error_code()!;
+  int code = get_io_error_code()?!;
   assert(code == 28, "typed handler match path works");
 }
 

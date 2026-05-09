@@ -12,7 +12,7 @@ main() `test(expected: """--- Expression Lambda ---
 doubled: 10
 
 --- Block Lambda ---
-(2+3)^2 = 25
+(2+3)?^2 = 25
 
 --- Capture ---
 offset 100: 142
@@ -38,7 +38,7 @@ add1 then double: 12""") {
     int sum = a + b;
     return sum * sum;
   };
-  print_line("(2+3)^2 = {sum_squared(2, 3)}");
+  print_line("(2+3)?^2 = {sum_squared(2, 3)}");
 
   // --- Capture ---
   print_line("");

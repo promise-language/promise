@@ -4,30 +4,30 @@
 use io;
 
 _write_and_read_1() string {
-  io.File.write_content("/tmp/pr_sc_task1", "task data")!;
-  string data = io.File.read_content("/tmp/pr_sc_task1")!;
-  io.File.remove("/tmp/pr_sc_task1")!;
+  io.File.write_content("/tmp/pr_sc_task1", "task data")?!;
+  string data = io.File.read_content("/tmp/pr_sc_task1")?!;
+  io.File.remove("/tmp/pr_sc_task1")?!;
   return data;
 }
 
 _write_and_read_2a() string {
-  io.File.write_content("/tmp/pr_sc_task2a", "alpha")!;
-  string data = io.File.read_content("/tmp/pr_sc_task2a")!;
-  io.File.remove("/tmp/pr_sc_task2a")!;
+  io.File.write_content("/tmp/pr_sc_task2a", "alpha")?!;
+  string data = io.File.read_content("/tmp/pr_sc_task2a")?!;
+  io.File.remove("/tmp/pr_sc_task2a")?!;
   return data;
 }
 
 _write_and_read_2b() string {
-  io.File.write_content("/tmp/pr_sc_task2b", "beta")!;
-  string data = io.File.read_content("/tmp/pr_sc_task2b")!;
-  io.File.remove("/tmp/pr_sc_task2b")!;
+  io.File.write_content("/tmp/pr_sc_task2b", "beta")?!;
+  string data = io.File.read_content("/tmp/pr_sc_task2b")?!;
+  io.File.remove("/tmp/pr_sc_task2b")?!;
   return data;
 }
 
 _write_and_read_2c() string {
-  io.File.write_content("/tmp/pr_sc_task2c", "gamma")!;
-  string data = io.File.read_content("/tmp/pr_sc_task2c")!;
-  io.File.remove("/tmp/pr_sc_task2c")!;
+  io.File.write_content("/tmp/pr_sc_task2c", "gamma")?!;
+  string data = io.File.read_content("/tmp/pr_sc_task2c")?!;
+  io.File.remove("/tmp/pr_sc_task2c")?!;
   return data;
 }
 

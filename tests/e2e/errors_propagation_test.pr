@@ -59,7 +59,7 @@ auto_prop_success!() int {
 }
 
 test_auto_propagate_success() `test {
-  int r = auto_prop_success()!;
+  int r = auto_prop_success()?!;
   assert(r == 42, "auto-propagate success continues");
 }
 
@@ -71,7 +71,7 @@ multi_auto_prop!() void {
 }
 
 test_multi_auto_propagate() `test {
-  multi_auto_prop()!;
+  multi_auto_prop()?!;
 }
 
 // Auto-propagation preserves error message
@@ -267,7 +267,7 @@ typed_handler_else_in_failable!() string {
 }
 
 test_typed_handler_else_in_failable() `test {
-  string r = typed_handler_else_in_failable()!;
+  string r = typed_handler_else_in_failable()?!;
   assert(r == "syntax error", "else in failable function works");
 }
 

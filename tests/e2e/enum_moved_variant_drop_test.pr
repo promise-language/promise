@@ -61,7 +61,7 @@ test_nested_format() `test {
     "nested": json.JsonValue.Object(fields: inner),
   };
   json.JsonValue result = json.JsonValue.Object(fields: output);
-  string s = result.format()!;
+  string s = result.format()?!;
   assert(s.contains("nested"), "format contains nested");
   assert(s.contains("key"), "format contains key");
 }

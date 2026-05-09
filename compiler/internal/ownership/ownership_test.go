@@ -1299,10 +1299,17 @@ func TestErrorPropagateOnMovedVar(t *testing.T) {
 	expectOwnerError(t, c.errors, "use of moved variable 's'")
 }
 
-func TestErrorUnwrapOnMovedVar(t *testing.T) {
+func TestErrorPanicOnMovedVar(t *testing.T) {
 	c := newUnitChecker()
 	ident := movedIdent(c, "s")
-	c.checkExpr(&ast.ErrorUnwrapExpr{Expr: ident})
+	c.checkExpr(&ast.ErrorPanicExpr{Expr: ident})
+	expectOwnerError(t, c.errors, "use of moved variable 's'")
+}
+
+func TestOptionalUnwrapOnMovedVar(t *testing.T) {
+	c := newUnitChecker()
+	ident := movedIdent(c, "s")
+	c.checkExpr(&ast.OptionalUnwrapExpr{Expr: ident})
 	expectOwnerError(t, c.errors, "use of moved variable 's'")
 }
 

@@ -45,7 +45,7 @@ auto_prop_typed!() int {
 }
 
 test_auto_prop_typed_success() `test {
-  int r = auto_prop_typed()!;
+  int r = auto_prop_typed()?!;
   assert(r == 42, "auto-prop typed var decl success");
 }
 
@@ -75,7 +75,7 @@ auto_prop_inferred!() int {
 }
 
 test_auto_prop_inferred_success() `test {
-  int r = auto_prop_inferred()!;
+  int r = auto_prop_inferred()?!;
   assert(r == 42, "auto-prop inferred var decl success");
 }
 
@@ -106,7 +106,7 @@ multi_auto_prop!() int {
 }
 
 test_multi_auto_prop_success() `test {
-  int r = multi_auto_prop()!;
+  int r = multi_auto_prop()?!;
   assert(r == 49, "multiple auto-prop success: 42 + 7");
 }
 
@@ -158,7 +158,7 @@ auto_prop_string!() string {
 }
 
 test_auto_prop_string_success() `test {
-  string r = auto_prop_string()!;
+  string r = auto_prop_string()?!;
   assert(r == "hello", "auto-prop string success");
 }
 
@@ -210,7 +210,7 @@ mixed_handling!() int {
 }
 
 test_mixed_handling() `test {
-  int r = mixed_handling()!;
+  int r = mixed_handling()?!;
   assert(r == 142, "auto-prop + explicit handler: 42 + 100");
 }
 
@@ -225,7 +225,7 @@ auto_prop_void_stmt!() int {
 }
 
 test_auto_prop_void_stmt_success() `test {
-  int r = auto_prop_void_stmt()!;
+  int r = auto_prop_void_stmt()?!;
   assert(r == 42, "void auto-prop as stmt then assignment");
 }
 
@@ -453,18 +453,18 @@ make_resource!(int id) Resource {
 }
 
 auto_prop_with_drop!() int {
-  Resource r = make_resource(1)!;
+  Resource r = make_resource(1)?!;
   int v = parse_int("42");
   return v;
 }
 
 test_auto_prop_with_drop_success() `test {
-  int r = auto_prop_with_drop()!;
+  int r = auto_prop_with_drop()?!;
   assert(r == 42, "auto-prop works alongside droppable resources");
 }
 
 auto_prop_with_drop_fails!() int {
-  Resource r = make_resource(1)!;
+  Resource r = make_resource(1)?!;
   int v = parse_int("bad");
   return v;
 }

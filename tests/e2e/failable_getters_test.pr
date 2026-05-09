@@ -43,31 +43,31 @@ type Sensor {
 
 test_getter_bang_success() `test {
   Sensor s = Sensor(_raw: 42);
-  int v = s.value!;
+  int v = s.value?!;
   assert(v == 42, "bang unwrap getter success");
 }
 
 test_getter_bang_zero() `test {
   Sensor s = Sensor(_raw: 0);
-  int v = s.value!;
+  int v = s.value?!;
   assert(v == 0, "bang unwrap getter zero");
 }
 
 test_getter_string_bang() `test {
   Sensor s = Sensor(_raw: 1);
-  string l = s.label!;
+  string l = s.label?!;
   assert(l == "one", "bang unwrap string getter");
 }
 
 test_getter_bool_bang() `test {
   Sensor s = Sensor(_raw: 5);
-  bool b = s.is_valid!;
+  bool b = s.is_valid?!;
   assert(b, "bang unwrap bool getter");
 }
 
 test_getter_bool_bang_false() `test {
   Sensor s = Sensor(_raw: 0);
-  bool b = s.is_valid!;
+  bool b = s.is_valid?!;
   assert(!b, "bang unwrap bool getter false");
 }
 
@@ -149,7 +149,7 @@ read_sensor!(Sensor s) int {
 
 test_getter_auto_prop_success() `test {
   Sensor s = Sensor(_raw: 21);
-  int r = read_sensor(s)!;
+  int r = read_sensor(s)?!;
   assert(r == 42, "auto-propagation of getter success");
 }
 
@@ -170,7 +170,7 @@ read_label!(Sensor s) string {
 
 test_getter_auto_prop_string() `test {
   Sensor s = Sensor(_raw: 0);
-  string r = read_label(s)!;
+  string r = read_label(s)?!;
   assert(r == "label: zero", "auto-propagation of string getter");
 }
 
@@ -370,7 +370,7 @@ read_source!(Source src) int {
 
 test_virtual_getter_success() `test {
   Source s = GoodSource(_val: 77);
-  int v = read_source(s)!;
+  int v = read_source(s)?!;
   assert(v == 77, "virtual getter dispatch success");
 }
 
@@ -398,7 +398,7 @@ test_virtual_getter_handler() `test {
 
 test_match_getter_bang() `test {
   Sensor s = Sensor(_raw: 0);
-  string r = match s.label! {
+  string r = match s.label?! {
     "zero" => "got zero",
     _ => "other",
   };
@@ -448,13 +448,13 @@ classify_reading!(Sensor s) string {
 
 test_getter_chain_success() `test {
   Sensor s = Sensor(_raw: 50);
-  string r = classify_reading(s)!;
+  string r = classify_reading(s)?!;
   assert(r == "normal", "getter chain classify normal");
 }
 
 test_getter_chain_high() `test {
   Sensor s = Sensor(_raw: 200);
-  string r = classify_reading(s)!;
+  string r = classify_reading(s)?!;
   assert(r == "high", "getter chain classify high");
 }
 
@@ -473,9 +473,9 @@ test_getter_chain_fail() `test {
 
 test_multiple_getters_success() `test {
   Sensor s = Sensor(_raw: 1);
-  int v = s.value!;
-  string l = s.label!;
-  bool b = s.is_valid!;
+  int v = s.value?!;
+  string l = s.label?!;
+  bool b = s.is_valid?!;
   assert(v == 1, "multi getter: value");
   assert(l == "one", "multi getter: label");
   assert(b, "multi getter: is_valid");
@@ -489,7 +489,7 @@ describe_sensor!(Sensor s) string {
 
 test_multiple_getters_auto_prop() `test {
   Sensor s = Sensor(_raw: 0);
-  string r = describe_sensor(s)!;
+  string r = describe_sensor(s)?!;
   assert(r == "zero=0", "multiple getters auto-prop");
 }
 

@@ -47,7 +47,8 @@ precedence() {
 
   // Postfix error ops
   Int unwrapped = result!;
-  Int propagated = result^;
+  Int propagated = result?^;
+  Int panicked = result?!;
 
   // Member access
   Int len = str.length();
@@ -66,7 +67,7 @@ precedence() {
   Int named = add(a: 1, b: 2);
 
   // Mixed precedence: postfix binds tightest
-  Int x = getResult()! + 1;
+  Int x = getResult()?! + 1;
   Float y = vec?.length() + 1.0;
   Int z = arr[0] * 2 + 1;
 

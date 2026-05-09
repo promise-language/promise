@@ -64,7 +64,7 @@ status_for_code!(int code) Status {
 // ============================================================
 
 test_match_subject_bang_42() `test {
-  string r = match parse_int("42")! {
+  string r = match parse_int("42")?! {
     42 => "got 42",
     _ => "other",
   };
@@ -72,7 +72,7 @@ test_match_subject_bang_42() `test {
 }
 
 test_match_subject_bang_zero() `test {
-  string r = match parse_int("0")! {
+  string r = match parse_int("0")?! {
     0 => "zero",
     42 => "42",
     _ => "other",
@@ -115,7 +115,7 @@ test_match_subject_handler_error() `test {
 test_match_arm_bang_success() `test {
   int selector = 1;
   int r = match selector {
-    1 => parse_int("42")!,
+    1 => parse_int("42")?!,
     _ => 0,
   };
   assert(r == 42, "bang in match arm success");
@@ -125,7 +125,7 @@ test_match_arm_bang_second() `test {
   int selector = 2;
   int r = match selector {
     1 => 99,
-    2 => parse_int("0")!,
+    2 => parse_int("0")?!,
     _ => 0,
   };
   assert(r == 0, "bang in second match arm");
@@ -200,7 +200,7 @@ match_with_raise!(int code) string {
 }
 
 test_match_raise_success() `test {
-  string r = match_with_raise(0)!;
+  string r = match_with_raise(0)?!;
   assert(r == "ok", "match raise: success path");
 }
 
@@ -223,7 +223,7 @@ test_match_raise_custom() `test {
 }
 
 test_match_raise_wildcard() `test {
-  string r = match_with_raise(99)!;
+  string r = match_with_raise(99)?!;
   assert(r == "unknown", "match wildcard, no raise");
 }
 
@@ -249,17 +249,17 @@ compute!(Op op, int a, int b) int {
 }
 
 test_compute_add() `test {
-  int r = compute(Op.Add, 10, 3)!;
+  int r = compute(Op.Add, 10, 3)?!;
   assert(r == 13, "enum match add");
 }
 
 test_compute_sub() `test {
-  int r = compute(Op.Sub, 10, 3)!;
+  int r = compute(Op.Sub, 10, 3)?!;
   assert(r == 7, "enum match sub");
 }
 
 test_compute_div_ok() `test {
-  int r = compute(Op.Div, 10, 2)!;
+  int r = compute(Op.Div, 10, 2)?!;
   assert(r == 5, "enum match div ok");
 }
 
@@ -277,12 +277,12 @@ test_compute_div_zero() `test {
 // ============================================================
 
 test_get_value_one() `test {
-  string r = get_value(1)!;
+  string r = get_value(1)?!;
   assert(r == "one", "get_value(1)");
 }
 
 test_get_value_two() `test {
-  string r = get_value(2)!;
+  string r = get_value(2)?!;
   assert(r == "two", "get_value(2)");
 }
 
@@ -337,12 +337,12 @@ classify_and_parse!(string input) string {
 }
 
 test_chain_ok() `test {
-  string r = classify_and_parse("0")!;
+  string r = classify_and_parse("0")?!;
   assert(r == "ok", "chain: parse -> classify -> ok");
 }
 
 test_chain_unknown() `test {
-  string r = classify_and_parse("7")!;
+  string r = classify_and_parse("7")?!;
   assert(r == "unknown", "chain: parse -> classify -> unknown");
 }
 
@@ -369,17 +369,17 @@ describe_status!(int code) string {
 }
 
 test_status_ok() `test {
-  string r = describe_status(0)!;
+  string r = describe_status(0)?!;
   assert(r == "all good", "status ok");
 }
 
 test_status_warn() `test {
-  string r = describe_status(1)!;
+  string r = describe_status(1)?!;
   assert(r == "warning", "status warn");
 }
 
 test_status_err() `test {
-  string r = describe_status(5)!;
+  string r = describe_status(5)?!;
   assert(r == "error", "status err");
 }
 
@@ -412,17 +412,17 @@ nested_match_errors!(int outer_sel, int inner_val) string {
 }
 
 test_nested_outer1_inner42() `test {
-  string r = nested_match_errors(1, 42)!;
+  string r = nested_match_errors(1, 42)?!;
   assert(r == "found 42", "nested: outer=1, inner=42");
 }
 
 test_nested_outer1_inner0() `test {
-  string r = nested_match_errors(1, 0)!;
+  string r = nested_match_errors(1, 0)?!;
   assert(r == "other", "nested: outer=1, inner=0");
 }
 
 test_nested_outer2_success() `test {
-  string r = nested_match_errors(2, 0)!;
+  string r = nested_match_errors(2, 0)?!;
   assert(r == "parsed: 0", "nested: outer=2, success");
 }
 
@@ -435,7 +435,7 @@ test_nested_outer2_fail() `test {
 }
 
 test_nested_default() `test {
-  string r = nested_match_errors(99, 0)!;
+  string r = nested_match_errors(99, 0)?!;
   assert(r == "default", "nested default");
 }
 
@@ -466,12 +466,12 @@ validate_rect!(int width, int height) int {
 }
 
 test_circle_ok() `test {
-  int a = validate_circle(5)!;
+  int a = validate_circle(5)?!;
   assert(a == 75, "circle 5*5*3");
 }
 
 test_rect_ok() `test {
-  int a = validate_rect(4, 6)!;
+  int a = validate_rect(4, 6)?!;
   assert(a == 24, "rect 4*6");
 }
 
@@ -506,8 +506,8 @@ test_rect_invalid_height() `test {
 test_shape_dispatch_circle() `test {
   Shape s = Shape.Circle(5);
   int r = match s {
-    Shape.Circle(rad) => validate_circle(rad)!,
-    Shape.Rect(w, h) => validate_rect(w, h)!,
+    Shape.Circle(rad) => validate_circle(rad)?!,
+    Shape.Rect(w, h) => validate_rect(w, h)?!,
   };
   assert(r == 75, "shape dispatch circle");
 }
@@ -515,8 +515,8 @@ test_shape_dispatch_circle() `test {
 test_shape_dispatch_rect() `test {
   Shape s = Shape.Rect(3, 4);
   int r = match s {
-    Shape.Circle(rad) => validate_circle(rad)!,
-    Shape.Rect(w, h) => validate_rect(w, h)!,
+    Shape.Circle(rad) => validate_circle(rad)?!,
+    Shape.Rect(w, h) => validate_rect(w, h)?!,
   };
   assert(r == 12, "shape dispatch rect");
 }
@@ -553,7 +553,7 @@ test_mixed_strategies() `test {
   // Bang unwrap
   sel = 2;
   int r2 = match sel {
-    2 => parse_int("42")!,
+    2 => parse_int("42")?!,
     _ => 0,
   };
   assert(r2 == 42, "bang unwrap in arm");

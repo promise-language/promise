@@ -265,6 +265,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#selectDefault.
 	VisitSelectDefault(ctx *SelectDefaultContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#optionalUnwrapExpr.
+	VisitOptionalUnwrapExpr(ctx *OptionalUnwrapExprContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#sliceTypeExpr.
 	VisitSliceTypeExpr(ctx *SliceTypeExprContext) interface{}
 
@@ -279,6 +282,9 @@ type PromiseParserVisitor interface {
 
 	// Visit a parse tree produced by PromiseParser#bitwiseNotExpr.
 	VisitBitwiseNotExpr(ctx *BitwiseNotExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#errorPanicExpr.
+	VisitErrorPanicExpr(ctx *ErrorPanicExprContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#primaryExpr.
 	VisitPrimaryExpr(ctx *PrimaryExprContext) interface{}
@@ -333,9 +339,6 @@ type PromiseParserVisitor interface {
 
 	// Visit a parse tree produced by PromiseParser#optionalChainExpr.
 	VisitOptionalChainExpr(ctx *OptionalChainExprContext) interface{}
-
-	// Visit a parse tree produced by PromiseParser#errorUnwrapExpr.
-	VisitErrorUnwrapExpr(ctx *ErrorUnwrapExprContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#unaryNotExpr.
 	VisitUnaryNotExpr(ctx *UnaryNotExprContext) interface{}

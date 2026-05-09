@@ -141,8 +141,8 @@ func TestExpressionPrecedence(t *testing.T) {
 		name string
 		code string
 	}{
-		{"postfix_bang_plus", `main() { Int x = f()! + 1; }`},
-		{"postfix_caret_plus", `main() { Int x = f()^ + 1; }`},
+		{"postfix_panic_plus", `main() { Int x = f()?! + 1; }`},
+		{"postfix_propagate_plus", `main() { Int x = f()?^ + 1; }`},
 		{"optional_chain_plus", `main() { Float x = a?.b + 1.0; }`},
 		{"member_call_chain", `main() { x.y().z.w(); }`},
 		{"nested_index", `main() { Int x = a[b[0]]; }`},
@@ -155,7 +155,7 @@ func TestExpressionPrecedence(t *testing.T) {
 		{"as_bang", `main() { Foo x = a as! Foo; }`},
 		{"error_handler", `main() { Int x = f() ? e { return 0; }; }`},
 		{"error_handler_discard", `main() { Int x = f() ? _ { return 0; }; }`},
-		{"mixed_postfix", `main() { x.foo()!.bar()?.baz; }`},
+		{"mixed_postfix", `main() { x.foo()?!.bar()?.baz; }`},
 		{"nested_call", `main() { f(g(h())); }`},
 		{"index_call", `main() { f()[0].bar(); }`},
 		{"inclusive_range", `main() { for x in 0..=10 {} }`},
@@ -456,13 +456,13 @@ func TestErrorHandling(t *testing.T) {
 		name string
 		code string
 	}{
-		{"propagate", `f!() Int { Int x = g()^; return x; }`},
-		{"unwrap_bang", `f() { Int x = g()!; }`},
+		{"propagate", `f!() Int { Int x = g()?^; return x; }`},
+		{"panic_bang", `f() { Int x = g()?!; }`},
 		{"handler_named", `f!() Int { Int x = g() ? e { return 0; }; return x; }`},
 		{"handler_unnamed", `f!() Int { Int x = g() ? { return 0; }; return x; }`},
 		{"handler_discard", `f!() Int { Int x = g() ? _ { return 0; }; return x; }`},
 		{"chained_propagate", `f!() Int { return a()?.b()?.c; }`},
-		{"propagate_in_expr", `f!() Int { return g()^ + 1; }`},
+		{"propagate_in_expr", `f!() Int { return g()?^ + 1; }`},
 		{"raise", `f!() Int { raise Error("bad"); }`},
 	}
 	for _, tc := range cases {

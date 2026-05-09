@@ -324,7 +324,7 @@ try_wrap_id![T](T val) T {
 }
 
 test_failable_generic_calls_generic() `test {
-  int r = try_wrap_id[int](42)!;
+  int r = try_wrap_id[int](42)?!;
   assert(r == 42, "failable wrap");
 }
 

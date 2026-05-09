@@ -8,59 +8,59 @@ rapid_cycle ok""", exclude: "wasm32") {
   // Test 1: 8 goroutines each doing write+read+remove
   channel[int] done = channel[int](capacity: 8);
   go {
-    io.File.write_content("/tmp/pr_sc_str_0", "s0")!;
-    string d = io.File.read_content("/tmp/pr_sc_str_0")!;
+    io.File.write_content("/tmp/pr_sc_str_0", "s0")?!;
+    string d = io.File.read_content("/tmp/pr_sc_str_0")?!;
     assert(d == "s0", "stress 0");
-    io.File.remove("/tmp/pr_sc_str_0")!;
+    io.File.remove("/tmp/pr_sc_str_0")?!;
     done.send(0);
   };
   go {
-    io.File.write_content("/tmp/pr_sc_str_1", "s1")!;
-    string d = io.File.read_content("/tmp/pr_sc_str_1")!;
+    io.File.write_content("/tmp/pr_sc_str_1", "s1")?!;
+    string d = io.File.read_content("/tmp/pr_sc_str_1")?!;
     assert(d == "s1", "stress 1");
-    io.File.remove("/tmp/pr_sc_str_1")!;
+    io.File.remove("/tmp/pr_sc_str_1")?!;
     done.send(1);
   };
   go {
-    io.File.write_content("/tmp/pr_sc_str_2", "s2")!;
-    string d = io.File.read_content("/tmp/pr_sc_str_2")!;
+    io.File.write_content("/tmp/pr_sc_str_2", "s2")?!;
+    string d = io.File.read_content("/tmp/pr_sc_str_2")?!;
     assert(d == "s2", "stress 2");
-    io.File.remove("/tmp/pr_sc_str_2")!;
+    io.File.remove("/tmp/pr_sc_str_2")?!;
     done.send(2);
   };
   go {
-    io.File.write_content("/tmp/pr_sc_str_3", "s3")!;
-    string d = io.File.read_content("/tmp/pr_sc_str_3")!;
+    io.File.write_content("/tmp/pr_sc_str_3", "s3")?!;
+    string d = io.File.read_content("/tmp/pr_sc_str_3")?!;
     assert(d == "s3", "stress 3");
-    io.File.remove("/tmp/pr_sc_str_3")!;
+    io.File.remove("/tmp/pr_sc_str_3")?!;
     done.send(3);
   };
   go {
-    io.File.write_content("/tmp/pr_sc_str_4", "s4")!;
-    string d = io.File.read_content("/tmp/pr_sc_str_4")!;
+    io.File.write_content("/tmp/pr_sc_str_4", "s4")?!;
+    string d = io.File.read_content("/tmp/pr_sc_str_4")?!;
     assert(d == "s4", "stress 4");
-    io.File.remove("/tmp/pr_sc_str_4")!;
+    io.File.remove("/tmp/pr_sc_str_4")?!;
     done.send(4);
   };
   go {
-    io.File.write_content("/tmp/pr_sc_str_5", "s5")!;
-    string d = io.File.read_content("/tmp/pr_sc_str_5")!;
+    io.File.write_content("/tmp/pr_sc_str_5", "s5")?!;
+    string d = io.File.read_content("/tmp/pr_sc_str_5")?!;
     assert(d == "s5", "stress 5");
-    io.File.remove("/tmp/pr_sc_str_5")!;
+    io.File.remove("/tmp/pr_sc_str_5")?!;
     done.send(5);
   };
   go {
-    io.File.write_content("/tmp/pr_sc_str_6", "s6")!;
-    string d = io.File.read_content("/tmp/pr_sc_str_6")!;
+    io.File.write_content("/tmp/pr_sc_str_6", "s6")?!;
+    string d = io.File.read_content("/tmp/pr_sc_str_6")?!;
     assert(d == "s6", "stress 6");
-    io.File.remove("/tmp/pr_sc_str_6")!;
+    io.File.remove("/tmp/pr_sc_str_6")?!;
     done.send(6);
   };
   go {
-    io.File.write_content("/tmp/pr_sc_str_7", "s7")!;
-    string d = io.File.read_content("/tmp/pr_sc_str_7")!;
+    io.File.write_content("/tmp/pr_sc_str_7", "s7")?!;
+    string d = io.File.read_content("/tmp/pr_sc_str_7")?!;
     assert(d == "s7", "stress 7");
-    io.File.remove("/tmp/pr_sc_str_7")!;
+    io.File.remove("/tmp/pr_sc_str_7")?!;
     done.send(7);
   };
   for _ in 0..8 {
@@ -72,30 +72,30 @@ rapid_cycle ok""", exclude: "wasm32") {
   channel[int] ch2 = channel[int](capacity: 1);
   go {
     // 5 write+read+remove cycles using distinct literal paths
-    io.File.write_content("/tmp/pr_sc_rapid_0", "c0")!;
-    string d0 = io.File.read_content("/tmp/pr_sc_rapid_0")!;
+    io.File.write_content("/tmp/pr_sc_rapid_0", "c0")?!;
+    string d0 = io.File.read_content("/tmp/pr_sc_rapid_0")?!;
     assert(d0 == "c0", "rapid 0");
-    io.File.remove("/tmp/pr_sc_rapid_0")!;
+    io.File.remove("/tmp/pr_sc_rapid_0")?!;
 
-    io.File.write_content("/tmp/pr_sc_rapid_1", "c1")!;
-    string d1 = io.File.read_content("/tmp/pr_sc_rapid_1")!;
+    io.File.write_content("/tmp/pr_sc_rapid_1", "c1")?!;
+    string d1 = io.File.read_content("/tmp/pr_sc_rapid_1")?!;
     assert(d1 == "c1", "rapid 1");
-    io.File.remove("/tmp/pr_sc_rapid_1")!;
+    io.File.remove("/tmp/pr_sc_rapid_1")?!;
 
-    io.File.write_content("/tmp/pr_sc_rapid_2", "c2")!;
-    string d2 = io.File.read_content("/tmp/pr_sc_rapid_2")!;
+    io.File.write_content("/tmp/pr_sc_rapid_2", "c2")?!;
+    string d2 = io.File.read_content("/tmp/pr_sc_rapid_2")?!;
     assert(d2 == "c2", "rapid 2");
-    io.File.remove("/tmp/pr_sc_rapid_2")!;
+    io.File.remove("/tmp/pr_sc_rapid_2")?!;
 
-    io.File.write_content("/tmp/pr_sc_rapid_3", "c3")!;
-    string d3 = io.File.read_content("/tmp/pr_sc_rapid_3")!;
+    io.File.write_content("/tmp/pr_sc_rapid_3", "c3")?!;
+    string d3 = io.File.read_content("/tmp/pr_sc_rapid_3")?!;
     assert(d3 == "c3", "rapid 3");
-    io.File.remove("/tmp/pr_sc_rapid_3")!;
+    io.File.remove("/tmp/pr_sc_rapid_3")?!;
 
-    io.File.write_content("/tmp/pr_sc_rapid_4", "c4")!;
-    string d4 = io.File.read_content("/tmp/pr_sc_rapid_4")!;
+    io.File.write_content("/tmp/pr_sc_rapid_4", "c4")?!;
+    string d4 = io.File.read_content("/tmp/pr_sc_rapid_4")?!;
     assert(d4 == "c4", "rapid 4");
-    io.File.remove("/tmp/pr_sc_rapid_4")!;
+    io.File.remove("/tmp/pr_sc_rapid_4")?!;
 
     ch2.send(5);
   };

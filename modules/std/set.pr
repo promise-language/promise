@@ -51,7 +51,7 @@ type Set[T: Hashable + Equal] `public {
 
   to_string() string `public `doc("Returns a human-readable string representation.") {
     Builder b = Builder();
-    this.format(b)!;
+    this.format(b)?!;
     return b.to_string();
   }
 

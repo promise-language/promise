@@ -44,11 +44,11 @@ test_qualified_generic_wrap_inferred() `test {
 }
 
 test_qualified_generic_failable_explicit() `test {
-  int r = mathlib.safe_identity[int](99)!;
+  int r = mathlib.safe_identity[int](99)?!;
   assert(r == 99, "failable explicit");
 }
 
 test_qualified_generic_failable_inferred() `test {
-  int r = mathlib.safe_identity(99)!;
+  int r = mathlib.safe_identity(99)?!;
   assert(r == 99, "failable inferred");
 }

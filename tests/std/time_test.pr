@@ -130,7 +130,7 @@ test_duration_to_string_boundaries() `test {
 
 test_duration_format() `test {
   Builder b = Builder();
-  Duration.from_millis(42).format(b)!;
+  Duration.from_millis(42).format(b)?!;
   assert(b.to_string() == "42ms", "format 42ms");
 }
 

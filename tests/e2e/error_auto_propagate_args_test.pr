@@ -29,7 +29,7 @@ auto_prop_func_arg!() int {
 }
 
 test_func_arg_success() `test {
-  int r = auto_prop_func_arg()!;
+  int r = auto_prop_func_arg()?!;
   assert(r == 42, "failable arg to function succeeds");
 }
 
@@ -64,7 +64,7 @@ auto_prop_method_arg!() int {
 }
 
 test_method_arg_success() `test {
-  int r = auto_prop_method_arg()!;
+  int r = auto_prop_method_arg()?!;
   assert(r == 42, "failable arg to method succeeds");
 }
 
@@ -98,7 +98,7 @@ auto_prop_ctor_arg!() int {
 }
 
 test_ctor_arg_success() `test {
-  int r = auto_prop_ctor_arg()!;
+  int r = auto_prop_ctor_arg()?!;
   assert(r == 42, "failable arg to constructor succeeds");
 }
 
@@ -131,7 +131,7 @@ auto_prop_multi_args!() int {
 }
 
 test_multi_args_success() `test {
-  int r = auto_prop_multi_args()!;
+  int r = auto_prop_multi_args()?!;
   assert(r == 49, "multiple failable args succeed: 42 + 7");
 }
 
@@ -180,7 +180,7 @@ auto_prop_string_arg!() string {
 }
 
 test_string_arg_success() `test {
-  string r = auto_prop_string_arg()!;
+  string r = auto_prop_string_arg()?!;
   assert(r == "hello", "failable string arg succeeds");
 }
 
@@ -212,7 +212,7 @@ auto_prop_mixed_args!() int {
 }
 
 test_mixed_args_success() `test {
-  int r = auto_prop_mixed_args()!;
+  int r = auto_prop_mixed_args()?!;
   assert(r == 143, "mixed failable/literal args: 1 + 42 + 100");
 }
 
@@ -229,7 +229,7 @@ auto_prop_nested!() int {
 }
 
 test_nested_failable_arg() `test {
-  int r = auto_prop_nested()!;
+  int r = auto_prop_nested()?!;
   assert(r == 14, "nested calls with failable arg: double(use_int(7))");
 }
 
@@ -245,7 +245,7 @@ test_explicit_handler_on_arg() `test {
 }
 
 test_explicit_unwrap_on_arg() `test {
-  int r = use_int(parse_int("42")!);
+  int r = use_int(parse_int("42")?!);
   assert(r == 42, "explicit ! unwrap on failable arg works");
 }
 
@@ -266,7 +266,7 @@ auto_prop_variadic!() int {
 }
 
 test_variadic_args_success() `test {
-  int r = auto_prop_variadic()!;
+  int r = auto_prop_variadic()?!;
   assert(r == 49, "failable variadic args: 42 + 7");
 }
 
@@ -290,7 +290,7 @@ auto_prop_variadic_mixed!() int {
 }
 
 test_variadic_mixed() `test {
-  int r = auto_prop_variadic_mixed()!;
+  int r = auto_prop_variadic_mixed()?!;
   assert(r == 152, "mixed variadic: 10 + 42 + 100");
 }
 
@@ -305,7 +305,7 @@ auto_prop_assign!() int {
 }
 
 test_assign_success() `test {
-  int r = auto_prop_assign()!;
+  int r = auto_prop_assign()?!;
   assert(r == 42, "failable call in assignment succeeds");
 }
 
@@ -348,7 +348,7 @@ auto_prop_explicit_new!() int {
 }
 
 test_explicit_new_arg_success() `test {
-  int r = auto_prop_explicit_new()!;
+  int r = auto_prop_explicit_new()?!;
   assert(r == 42, "failable arg to explicit new() succeeds");
 }
 
@@ -383,7 +383,7 @@ auto_prop_value_type!() int {
 }
 
 test_value_type_arg_success() `test {
-  int r = auto_prop_value_type()!;
+  int r = auto_prop_value_type()?!;
   assert(r == 49, "failable args to value type: 42 + 7");
 }
 
@@ -423,7 +423,7 @@ auto_prop_virtual!(Shape s) int {
 
 test_virtual_method_arg() `test {
   Circle c = Circle();
-  int r = auto_prop_virtual(c)!;
+  int r = auto_prop_virtual(c)?!;
   assert(r == 14, "failable arg through virtual dispatch");
 }
 
@@ -441,7 +441,7 @@ auto_prop_enum_variant!() Result {
 }
 
 test_enum_variant_arg_success() `test {
-  Result r = auto_prop_enum_variant()!;
+  Result r = auto_prop_enum_variant()?!;
   match r {
     Result.Ok(v) => assert(v == 42, "failable arg to enum variant"),
     Result.Err(m) => assert(false, "unexpected error"),
@@ -476,7 +476,7 @@ auto_prop_generic_func!() int {
 }
 
 test_generic_func_arg() `test {
-  int r = auto_prop_generic_func()!;
+  int r = auto_prop_generic_func()?!;
   assert(r == 42, "failable arg to generic function");
 }
 
@@ -491,7 +491,7 @@ auto_prop_vec_push!() int {
 }
 
 test_vec_push_arg() `test {
-  int r = auto_prop_vec_push()!;
+  int r = auto_prop_vec_push()?!;
   assert(r == 42, "failable arg to vec.push");
 }
 
@@ -521,7 +521,7 @@ auto_prop_single_variadic!() int {
 }
 
 test_single_variadic_success() `test {
-  int r = auto_prop_single_variadic()!;
+  int r = auto_prop_single_variadic()?!;
   assert(r == 42, "single failable variadic arg");
 }
 
@@ -556,7 +556,7 @@ both_failable!() int {
 }
 
 test_both_failable_success() `test {
-  int r = both_failable()!;
+  int r = both_failable()?!;
   assert(r == 42, "failable arg to failable function, both succeed");
 }
 
@@ -652,7 +652,7 @@ auto_prop_super!() int {
 }
 
 test_super_arg_success() `test {
-  int r = auto_prop_super()!;
+  int r = auto_prop_super()?!;
   assert(r == 42, "failable arg to super() call succeeds");
 }
 

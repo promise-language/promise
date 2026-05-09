@@ -111,8 +111,10 @@ func (c *Compiler) isOwnedOptionalExpr(expr ast.Expr) bool {
 		return true // local variable — ownership transferred via clearDropFlag
 	case *ast.CallExpr:
 		return true // function call returns owned value
-	case *ast.ErrorUnwrapExpr:
-		return true // failable unwrap (!) of a call/expression returns owned value
+	case *ast.ErrorPanicExpr:
+		return true // failable panic (?!) of a call/expression returns owned value
+	case *ast.OptionalUnwrapExpr:
+		return true // optional unwrap (!) of an expression returns owned value
 	case *ast.MemberExpr:
 		// Field access on a droppable type — parent's drop handles the field.
 		targetType := c.info.Types[e.Target]
@@ -1287,7 +1289,10 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 	innerRHS := rhs
 	for {
 		switch e := innerRHS.(type) {
-		case *ast.ErrorUnwrapExpr:
+		case *ast.ErrorPanicExpr:
+			innerRHS = e.Expr
+			continue
+		case *ast.OptionalUnwrapExpr:
 			innerRHS = e.Expr
 			continue
 		case *ast.ErrorPropagateExpr:

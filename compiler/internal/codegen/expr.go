@@ -101,18 +101,31 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 			}
 		}
 		return result
-	case *ast.ErrorUnwrapExpr:
-		result := c.genErrorUnwrapExpr(e)
-		// T0125: Track string temps from failable call unwrap paths.
-		// When func()! returns a string, the unwrapped i8* is a heap-allocated
+	case *ast.ErrorPanicExpr:
+		result := c.genErrorPanicExpr(e)
+		// T0125: Track string temps from failable call panic paths.
+		// When func()?! returns a string, the unwrapped i8* is a heap-allocated
 		// temp that must be freed at statement end if not claimed by a variable.
-		// T0111: Only track when the unwrapped type is actually string — not all
-		// i8* values are strings (vectors, channels also use i8*). For optional
-		// unwraps, check the inner type; for error unwraps, check the result type.
+		if result != nil && result.Type() == irtypes.I8Ptr {
+			exprType := c.info.Types[e]
+			if c.typeSubst != nil && exprType != nil {
+				exprType = types.Substitute(exprType, c.typeSubst)
+			}
+			if extractNamed(exprType) == types.TypString {
+				if c.optionalFieldString {
+					c.optionalFieldString = false
+				} else {
+					c.trackStringTemp(result)
+				}
+			}
+		}
+		return result
+	case *ast.OptionalUnwrapExpr:
+		result := c.genOptionalForceUnwrap(e.Expr)
+		// T0125: Track string temps from optional unwrap paths.
 		// B0190: Skip tracking when the unwrapped string comes from a field on a
 		// droppable type (signaled by optionalFieldString). The owner's drop
-		// handles the string's lifetime — tracking would free it as a temp while
-		// the owner still holds it.
+		// handles the string's lifetime.
 		if result != nil && result.Type() == irtypes.I8Ptr {
 			exprType := c.info.Types[e]
 			if c.typeSubst != nil && exprType != nil {
@@ -126,7 +139,7 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					// drop binding owns the inner string. Don't track as a
 					// statement temp — that would cause a double-free at scope exit.
 					_, isIdentSource := e.Expr.(*ast.IdentExpr)
-					if !(c.info.OptionalUnwraps[e] && isIdentSource) {
+					if !isIdentSource {
 						c.trackStringTemp(result)
 					}
 				}
@@ -3230,7 +3243,10 @@ func isFreshEnumExpr(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.CallExpr:
 		return true
-	case *ast.ErrorUnwrapExpr:
+	case *ast.ErrorPanicExpr:
+		// Panic unwrap of a call result (e.g., at(0)?!) produces a fresh value.
+		return isFreshEnumExpr(e.Expr)
+	case *ast.OptionalUnwrapExpr:
 		// Unwrap of a call result (e.g., at(0)!) produces a fresh value.
 		// Unwrap of a variable (e.g., opt_var!) references existing data.
 		return isFreshEnumExpr(e.Expr)
@@ -5048,15 +5064,9 @@ func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value 
 	return nil
 }
 
-// genErrorUnwrapExpr generates the `expr!` operator.
+// genErrorPanicExpr generates the `expr?!` operator.
 // Evaluates the inner failable call, panics on error, or extracts the Ok value.
-// Also handles optional unwrap: T? ! → T, panic on none.
-func (c *Compiler) genErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) value.Value {
-	// Optional unwrap: T? ! → extract T, panic on none
-	if c.info.OptionalUnwraps[e] {
-		return c.genOptionalForceUnwrap(e.Expr)
-	}
-
+func (c *Compiler) genErrorPanicExpr(e *ast.ErrorPanicExpr) value.Value {
 	result := c.genExpr(e.Expr)
 	resultType := result.Type().(*irtypes.StructType)
 
@@ -7533,8 +7543,8 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 // would otherwise try to drop the same inner value. Only called at assignment
 // sites (genTypedVarDecl, genInferredVarDecl, genAssignStmt).
 func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
-	unwrap, ok := expr.(*ast.ErrorUnwrapExpr)
-	if !ok || !c.info.OptionalUnwraps[unwrap] {
+	unwrap, ok := expr.(*ast.OptionalUnwrapExpr)
+	if !ok {
 		return
 	}
 	ident, ok := unwrap.Expr.(*ast.IdentExpr)
@@ -8266,7 +8276,9 @@ func collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca)
 			walkExpr(e.Expr)
 		case *ast.ErrorPropagateExpr:
 			walkExpr(e.Expr)
-		case *ast.ErrorUnwrapExpr:
+		case *ast.ErrorPanicExpr:
+			walkExpr(e.Expr)
+		case *ast.OptionalUnwrapExpr:
 			walkExpr(e.Expr)
 		case *ast.ErrorHandlerExpr:
 			walkExpr(e.Expr)

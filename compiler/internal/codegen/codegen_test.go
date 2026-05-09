@@ -1654,7 +1654,7 @@ func TestFailableNewConstructorCodegen(t *testing.T) {
 			}
 		}
 		main!() {
-			Port p = Port(value: 80)!;
+			Port p = Port(value: 80)?!;
 		}
 	`)
 	// Failable new returns a result type { i1, i8* }
@@ -1719,7 +1719,7 @@ func TestGenericFailableFactoryPassthrough(t *testing.T) {
 			return T.tryParse(data);
 		}
 		main() {
-			Strict s = tryLoad[Strict]("ok")!;
+			Strict s = tryLoad[Strict]("ok")?!;
 		}
 	`)
 	// Monomorphized tryLoad[Strict] should call Strict.tryParse directly
@@ -2297,7 +2297,7 @@ func TestErrorPropagate(t *testing.T) {
 	ir := generateIR(t, `
 		parse!(string s) int { return 0; }
 		process!() int {
-			x := parse("42")^;
+			x := parse("42")?^;
 			return x;
 		}
 		main() { }
@@ -2313,7 +2313,7 @@ func TestErrorUnwrap(t *testing.T) {
 	ir := generateIR(t, `
 		parse!(string s) int { return 0; }
 		main() {
-			x := parse("42")!;
+			x := parse("42")?!;
 		}
 	`)
 	// Should have panic and ok blocks
@@ -2335,7 +2335,7 @@ func TestErrorPanicSetsHeapType(t *testing.T) {
 	ir := generateIR(t, `
 		parse!(string s) int { return 0; }
 		main() {
-			x := parse("42")!;
+			x := parse("42")?!;
 		}
 	`)
 	// emitErrorPanic calls promise_panic then overwrites type to 2
@@ -2343,13 +2343,13 @@ func TestErrorPanicSetsHeapType(t *testing.T) {
 	assertContains(t, ir, "store i8 2, i8* @__promise_panic_type")
 }
 
-// T0125: When func()! returns a string, the unwrapped i8* must be tracked
+// T0125: When func()?! returns a string, the unwrapped i8* must be tracked
 // as a stmt temp so it gets freed at statement end if not claimed.
 func TestErrorUnwrapStringTemp(t *testing.T) {
 	ir := generateIR(t, `
 		make_str!() string { return "hello"; }
 		main() {
-			int n = make_str()!.len;
+			int n = make_str()?!.len;
 		}
 	`)
 	// Should have string temp tracking: store to alloca + drop flag
@@ -2357,14 +2357,14 @@ func TestErrorUnwrapStringTemp(t *testing.T) {
 	assertContains(t, ir, "promise_string_drop")
 }
 
-// B0260: When func()^ propagates a string result, the ok-path i8* must be
+// B0260: When func()?^ propagates a string result, the ok-path i8* must be
 // tracked as a stmt temp so it gets freed if not claimed (e.g., by vec.push
 // which dups the string).
 func TestErrorPropagateStringTemp(t *testing.T) {
 	ir := generateIR(t, `
 		make_str!() string { return "hello"; }
 		wrap!(string[] v) string[] {
-			v.push(make_str()^);
+			v.push(make_str()?^);
 			return v;
 		}
 	`)
@@ -2449,7 +2449,7 @@ func TestVoidFailablePropagate(t *testing.T) {
 	ir := generateIR(t, `
 		validate!(string s) void { raise error(message: "invalid"); }
 		process!() void {
-			validate("x")^;
+			validate("x")?^;
 		}
 		main() { }
 	`)
@@ -2464,7 +2464,7 @@ func TestVoidFailableUnwrap(t *testing.T) {
 	ir := generateIR(t, `
 		validate!(string s) void { raise error(message: "invalid"); }
 		main() {
-			validate("x")!;
+			validate("x")?!;
 		}
 	`)
 	assertContains(t, ir, "error.panic")
@@ -2487,8 +2487,8 @@ func TestVoidFailableHandler(t *testing.T) {
 func TestNestedErrorPropagation(t *testing.T) {
 	ir := generateIR(t, `
 		a!() int { return 1; }
-		b!() int { return a()^; }
-		c!() int { return b()^; }
+		b!() int { return a()?^; }
+		c!() int { return b()?^; }
 		main() { }
 	`)
 	// Both b and c should have propagation blocks
@@ -2700,7 +2700,7 @@ func TestFailableCallInsideHandler(t *testing.T) {
 	ir := generateIR(t, `
 		parse!(string s) int { return 0; }
 		foo!() int {
-			int v = parse("x") ? e { return parse("0")^; };
+			int v = parse("x") ? e { return parse("0")?^; };
 			return v;
 		}
 		main() { foo() ? e { }; }
@@ -2714,7 +2714,7 @@ func TestBangUnwrapInsideHandler(t *testing.T) {
 	ir := generateIR(t, `
 		parse!(string s) int { return 0; }
 		foo() {
-			parse("x") ? e { int v = parse("0")!; };
+			parse("x") ? e { int v = parse("0")?!; };
 		}
 		main() { }
 	`)
@@ -3368,7 +3368,7 @@ func TestGenericFuncFailable(t *testing.T) {
 			return x;
 		}
 		main() {
-			int v = tryIdentity[int](42)!;
+			int v = tryIdentity[int](42)?!;
 		}
 	`)
 	assertContains(t, ir, "define { i1, i64, i8* } @\"tryIdentity[int]\"")
@@ -6406,7 +6406,7 @@ func TestPrimitiveToFailableStructuralView(t *testing.T) {
 		type Converter `+"`"+`structural {
 			to_string!() string `+"`"+`abstract;
 		}
-		convert(Converter c) string { return c.to_string()!; }
+		convert(Converter c) string { return c.to_string()?!; }
 		main() { convert(42); }
 	`)
 	assertContains(t, ir, "@promise_vtable_int_as_Converter")
@@ -6481,7 +6481,7 @@ func TestReturnThisFailable(t *testing.T) {
 		}
 		main() {
 			w := Widget(id: 1);
-			Widget w2 = w.clone()!;
+			Widget w2 = w.clone()?!;
 		}
 	`)
 	// Result type is { i1, { i8*, i8* }, i8* } (ok flag, value struct, error ptr)
@@ -7434,7 +7434,7 @@ func TestModuleFailableFunc(t *testing.T) {
 		`
 		use parser "./parser";
 		main!() {
-			int v = parser.parse(10)^;
+			int v = parser.parse(10)?^;
 		}
 		`,
 	)
@@ -9412,7 +9412,7 @@ func TestDropErrorPropagateCleansUp(t *testing.T) {
 		}
 		work!() int {
 			r := Resource(id: 1);
-			int val = risky()^;
+			int val = risky()?^;
 			return val + r.id;
 		}
 		main() { }
@@ -13482,7 +13482,7 @@ func TestBuilderToStringTracked(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			Builder b = Builder();
-			b.write_string("hello")!;
+			b.write_string("hello")?!;
 			assert(b.to_string() == "hello", "ok");
 		}
 	`)
@@ -14213,7 +14213,7 @@ func TestVariadicFailableIR(t *testing.T) {
 			return total;
 		}
 		main() {
-			x := trySum(1, 2, 3)!;
+			x := trySum(1, 2, 3)?!;
 		}
 	`)
 	// Failable returns {i1, i64, i8*} (error flag + result + error ptr)
@@ -14327,7 +14327,7 @@ func TestVariadicVectorHeapTempOnFailableArg(t *testing.T) {
 		foo!() int {
 			return sum(parse("a"), parse("b"));
 		}
-		main() { foo()!; }
+		main() { foo()?!; }
 	`)
 	// The variadic vector should be tracked as a heap temp (pal_alloc + store to alloca)
 	// and freed on the error propagation path (err.heap.drop block calls pal_free)
@@ -15250,7 +15250,7 @@ func TestFailableGetterResultType(t *testing.T) {
 		}
 		main() {
 			Foo f = Foo(_val: 42);
-			int v = f.value!;
+			int v = f.value?!;
 		}
 	`)
 	// Failable getter should return result type {i1, i64, i8*}
@@ -15269,7 +15269,7 @@ func TestFailableGetterVirtualDispatch(t *testing.T) {
 		}
 		main() {
 			Base b = Impl(_v: 10);
-			int v = b.value!;
+			int v = b.value?!;
 		}
 	`)
 	// Abstract failable getter should use vtable dispatch
@@ -15290,7 +15290,7 @@ func TestFailableGetterStringResult(t *testing.T) {
 		}
 		main() {
 			Foo f = Foo(_mode: 1);
-			string s = f.label!;
+			string s = f.label?!;
 		}
 	`)
 	// Failable getter returning string should have result type in signature
@@ -15437,7 +15437,7 @@ func TestFailableExternSret(t *testing.T) {
 	ir := generateIR(t, `
 		get_cwd!() string `+"`"+`extern("promise_get_cwd");
 		main() {
-			string s = get_cwd()!;
+			string s = get_cwd()?!;
 		}
 	`)
 	// Failable extern uses sret with {i1, T, i8*} struct
@@ -15575,7 +15575,7 @@ func TestEnumMethodFailable(t *testing.T) {
 				}
 			}
 		}
-		main() { string s = Mode.A.check()!; }
+		main() { string s = Mode.A.check()?!; }
 	`)
 	// Failable method returns result struct
 	assertContains(t, ir, "@Mode.check(i8* %this)")

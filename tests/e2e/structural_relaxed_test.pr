@@ -52,7 +52,7 @@ type Doubler {
 
 test_non_failable_satisfies_failable() `test {
   Processor p = Doubler();
-  int result = p.process(5)!;
+  int result = p.process(5)?!;
   assert(result == 10, "non-failable through failable interface");
 }
 
@@ -95,7 +95,7 @@ type SimpleParser {
 
 test_combined_adapter() `test {
   Parser p = SimpleParser();
-  int result = p.parse("hello")!;
+  int result = p.parse("hello")?!;
   assert(result == 5, "combined adapter: extra param + failable");
 }
 

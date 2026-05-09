@@ -90,7 +90,7 @@ failable_consume!(~string s) int {
 
 test_move_param_failable_success() `test {
   string s = "hello";
-  int len = failable_consume(s)!;
+  int len = failable_consume(s)?!;
   assert(len == 5, "failable move success");
 }
 

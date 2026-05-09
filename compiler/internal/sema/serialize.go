@@ -400,7 +400,7 @@ func (c *Checker) synthesizeDecodeMethod(named *types.Named, d *ast.TypeDecl) *a
 				localName := "_ff_" + f.Name() + "_" + sf.Name()
 				localExpr := ident(localName)
 				if c.fieldNeedsUnwrap(sf) {
-					innerArgs = append(innerArgs, &ast.Arg{Name: sf.Name(), Value: &ast.ErrorUnwrapExpr{Expr: localExpr}})
+					innerArgs = append(innerArgs, &ast.Arg{Name: sf.Name(), Value: &ast.OptionalUnwrapExpr{Expr: localExpr}})
 				} else {
 					innerArgs = append(innerArgs, &ast.Arg{Name: sf.Name(), Value: localExpr})
 				}
@@ -413,7 +413,7 @@ func (c *Checker) synthesizeDecodeMethod(named *types.Named, d *ast.TypeDecl) *a
 		}
 		localExpr := ident("_f_" + f.Name())
 		if c.fieldNeedsUnwrap(f) {
-			args = append(args, &ast.Arg{Name: f.Name(), Value: &ast.ErrorUnwrapExpr{Expr: localExpr}})
+			args = append(args, &ast.Arg{Name: f.Name(), Value: &ast.OptionalUnwrapExpr{Expr: localExpr}})
 		} else {
 			args = append(args, &ast.Arg{Name: f.Name(), Value: localExpr})
 		}
@@ -590,7 +590,7 @@ func (c *Checker) buildDecodeFieldMatchChain(entries []decodeField) ast.Stmt {
 
 			var indexExpr ast.Expr
 			if keyType == types.TypString {
-				indexExpr = &ast.ErrorUnwrapExpr{Expr: ident(mkVar)}
+				indexExpr = &ast.OptionalUnwrapExpr{Expr: ident(mkVar)}
 			} else {
 				keyTypeName := ""
 				if n, ok := keyType.(*types.Named); ok {
@@ -603,7 +603,7 @@ func (c *Checker) buildDecodeFieldMatchChain(entries []decodeField) ast.Stmt {
 							Target: ident("scan"),
 							Index:  ident(keyTypeName),
 						},
-						Args: []*ast.Arg{{Value: &ast.ErrorUnwrapExpr{Expr: ident(mkVar)}}},
+						Args: []*ast.Arg{{Value: &ast.OptionalUnwrapExpr{Expr: ident(mkVar)}}},
 					}),
 				})
 				indexExpr = ident(parsedKeyVar)
@@ -1122,7 +1122,7 @@ func (c *Checker) buildVariantDecodeBody(enumName string, v *types.Variant) []as
 			localExpr = &ast.IdentExpr{Name: localName}
 			args = append(args, &ast.Arg{
 				Name:  f.Name(),
-				Value: &ast.ErrorUnwrapExpr{Expr: localExpr},
+				Value: &ast.OptionalUnwrapExpr{Expr: localExpr},
 			})
 		} else {
 			args = append(args, &ast.Arg{Name: f.Name(), Value: localExpr})

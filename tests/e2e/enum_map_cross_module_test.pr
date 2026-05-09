@@ -22,7 +22,7 @@ test_lookup_cross_module_enum_map() `test {
   };
   json.JsonValue v = m["x"]!;
   json.JsonEncoder enc = json.JsonEncoder();
-  json.encode_value(v, enc)!;
+  json.encode_value(v, enc)?!;
   assert(enc.to_string() == "\"hello\"", "encoded str");
 }
 
@@ -52,7 +52,7 @@ test_forin_values_cross_module() `test {
   for k, v in m {
     assert(k == "s", "key");
     json.JsonEncoder enc = json.JsonEncoder();
-    json.encode_value(v, enc)!;
+    json.encode_value(v, enc)?!;
     assert(enc.to_string() == "\"world\"", "value");
   }
 }
@@ -72,6 +72,6 @@ test_get_or_cross_module() `test {
   };
   json.JsonValue v = m.get_or("missing", json.JsonValue.Null);
   json.JsonEncoder enc = json.JsonEncoder();
-  json.encode_value(v, enc)!;
+  json.encode_value(v, enc)?!;
   assert(enc.to_string() == "null", "get_or default");
 }

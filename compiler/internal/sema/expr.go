@@ -263,8 +263,11 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	case *ast.ErrorPropagateExpr:
 		typ = c.checkErrorPropagateExpr(e)
 
-	case *ast.ErrorUnwrapExpr:
-		typ = c.checkErrorUnwrapExpr(e)
+	case *ast.ErrorPanicExpr:
+		typ = c.checkErrorPanicExpr(e)
+
+	case *ast.OptionalUnwrapExpr:
+		typ = c.checkOptionalUnwrapExpr(e)
 
 	case *ast.ErrorHandlerExpr:
 		typ = c.checkErrorHandlerExpr(e)
@@ -2042,44 +2045,33 @@ func (c *Checker) checkCastExpr(e *ast.CastExpr) types.Type {
 func (c *Checker) checkErrorPropagateExpr(e *ast.ErrorPropagateExpr) types.Type {
 	inner := c.checkExpr(e.Expr)
 	if c.curFunc == nil || !c.curFunc.CanError() {
-		c.errorf(e.Pos(), "error propagation (^) used outside of failable function")
+		c.errorf(e.Pos(), "error propagation (?^) used outside of failable function")
 	}
 	if !c.info.FailableExprs[e.Expr] {
-		// B0271: Check if the inner expression contains a failable sub-expression.
-		// This happens when ^ (lower precedence than arithmetic) is applied to
-		// `a + f()^` which parses as `(a + f())^`. Provide a targeted hint.
-		if c.exprContainsFailable(e.Expr) {
-			c.errorf(e.Pos(), "error propagation (^) requires a failable expression; ^ has lower precedence than arithmetic operators — parenthesize the failable call: (call()^), or remove ^ (auto-propagation still applies)")
-		} else {
-			c.errorf(e.Pos(), "error propagation (^) requires a failable expression")
-		}
+		c.errorf(e.Pos(), "error propagation (?^) requires a failable expression")
 	}
 	// The inner expression's type is the success type (error is propagated)
 	return inner
 }
 
-// exprContainsFailable checks if any sub-expression within expr is failable.
-// Used to detect precedence-related misuse of ^ (B0271).
-func (c *Checker) exprContainsFailable(expr ast.Expr) bool {
-	switch e := expr.(type) {
-	case *ast.BinaryExpr:
-		return c.info.FailableExprs[e.Left] || c.info.FailableExprs[e.Right] ||
-			c.exprContainsFailable(e.Left) || c.exprContainsFailable(e.Right)
-	}
-	return false
-}
-
-func (c *Checker) checkErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) types.Type {
+func (c *Checker) checkErrorPanicExpr(e *ast.ErrorPanicExpr) types.Type {
 	inner := c.checkExpr(e.Expr)
 	if !c.info.FailableExprs[e.Expr] {
-		// Not failable — check if it's an optional (T? ! → T, panic on none)
-		if opt, ok := inner.(*types.Optional); ok {
-			c.info.OptionalUnwraps[e] = true
-			return opt.Elem()
-		}
-		c.errorf(e.Pos(), "unwrap (!) requires a failable or optional expression")
+		c.errorf(e.Pos(), "error panic (?!) requires a failable expression")
 	}
-	// Unwrap panics on error, returns success type
+	// Panic on error, returns success type
+	return inner
+}
+
+func (c *Checker) checkOptionalUnwrapExpr(e *ast.OptionalUnwrapExpr) types.Type {
+	inner := c.checkExpr(e.Expr)
+	if c.info.FailableExprs[e.Expr] {
+		c.errorf(e.Pos(), "use ?! to panic on failable error (! is for optional unwrap)")
+	}
+	if opt, ok := inner.(*types.Optional); ok {
+		return opt.Elem()
+	}
+	c.errorf(e.Pos(), "unwrap (!) requires an optional expression")
 	return inner
 }
 

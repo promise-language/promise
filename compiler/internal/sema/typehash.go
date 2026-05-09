@@ -490,8 +490,11 @@ func hExpr(h hash.Hash, e ast.Expr) {
 	case *ast.ErrorPropagateExpr:
 		wb(h, 11)
 		hExpr(h, ex.Expr)
-	case *ast.ErrorUnwrapExpr:
+	case *ast.ErrorPanicExpr:
 		wb(h, 12)
+		hExpr(h, ex.Expr)
+	case *ast.OptionalUnwrapExpr:
+		wb(h, 20)
 		hExpr(h, ex.Expr)
 	case *ast.ErrorHandlerExpr:
 		wb(h, 13)

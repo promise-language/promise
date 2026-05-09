@@ -162,10 +162,6 @@ type Info struct {
 	// Codegen emits the same tag-check + early-return as explicit `?`.
 	AutoPropagateExprs map[ast.Expr]bool
 
-	// OptionalUnwraps records ErrorUnwrapExpr nodes that are optional unwraps
-	// (T? ! → T, panic on none) rather than error unwraps (T! ! → T, panic on error).
-	OptionalUnwraps map[ast.Expr]bool
-
 	// OptionalHandlers records ErrorHandlerExpr nodes that are optional handlers
 	// (T? ? { recovery } → T) rather than error handlers.
 	OptionalHandlers map[ast.Expr]bool

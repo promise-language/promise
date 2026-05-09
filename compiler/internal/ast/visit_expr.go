@@ -302,8 +302,15 @@ func (b *Builder) VisitErrorPropagateExpr(ctx *parser.ErrorPropagateExprContext)
 	}
 }
 
-func (b *Builder) VisitErrorUnwrapExpr(ctx *parser.ErrorUnwrapExprContext) interface{} {
-	return &ErrorUnwrapExpr{
+func (b *Builder) VisitErrorPanicExpr(ctx *parser.ErrorPanicExprContext) interface{} {
+	return &ErrorPanicExpr{
+		nodeBase: b.baseFromContext(ctx),
+		Expr:     b.visitExpr(ctx.Expression()),
+	}
+}
+
+func (b *Builder) VisitOptionalUnwrapExpr(ctx *parser.OptionalUnwrapExprContext) interface{} {
+	return &OptionalUnwrapExpr{
 		nodeBase: b.baseFromContext(ctx),
 		Expr:     b.visitExpr(ctx.Expression()),
 	}

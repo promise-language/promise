@@ -93,6 +93,6 @@ make_string!() string {
 test_field_access_then_failable_unwrap() `test {
   Wrapper w = Wrapper(opt_name: "abc");
   string? maybe = w.opt_name;
-  string val = make_string()!;
+  string val = make_string()?!;
   assert(val == "hello world", "failable unwrap after field access");
 }

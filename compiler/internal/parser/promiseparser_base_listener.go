@@ -536,6 +536,12 @@ func (s *BasePromiseParserListener) EnterSelectDefault(ctx *SelectDefaultContext
 // ExitSelectDefault is called when production selectDefault is exited.
 func (s *BasePromiseParserListener) ExitSelectDefault(ctx *SelectDefaultContext) {}
 
+// EnterOptionalUnwrapExpr is called when production optionalUnwrapExpr is entered.
+func (s *BasePromiseParserListener) EnterOptionalUnwrapExpr(ctx *OptionalUnwrapExprContext) {}
+
+// ExitOptionalUnwrapExpr is called when production optionalUnwrapExpr is exited.
+func (s *BasePromiseParserListener) ExitOptionalUnwrapExpr(ctx *OptionalUnwrapExprContext) {}
+
 // EnterSliceTypeExpr is called when production sliceTypeExpr is entered.
 func (s *BasePromiseParserListener) EnterSliceTypeExpr(ctx *SliceTypeExprContext) {}
 
@@ -565,6 +571,12 @@ func (s *BasePromiseParserListener) EnterBitwiseNotExpr(ctx *BitwiseNotExprConte
 
 // ExitBitwiseNotExpr is called when production bitwiseNotExpr is exited.
 func (s *BasePromiseParserListener) ExitBitwiseNotExpr(ctx *BitwiseNotExprContext) {}
+
+// EnterErrorPanicExpr is called when production errorPanicExpr is entered.
+func (s *BasePromiseParserListener) EnterErrorPanicExpr(ctx *ErrorPanicExprContext) {}
+
+// ExitErrorPanicExpr is called when production errorPanicExpr is exited.
+func (s *BasePromiseParserListener) ExitErrorPanicExpr(ctx *ErrorPanicExprContext) {}
 
 // EnterPrimaryExpr is called when production primaryExpr is entered.
 func (s *BasePromiseParserListener) EnterPrimaryExpr(ctx *PrimaryExprContext) {}
@@ -673,12 +685,6 @@ func (s *BasePromiseParserListener) EnterOptionalChainExpr(ctx *OptionalChainExp
 
 // ExitOptionalChainExpr is called when production optionalChainExpr is exited.
 func (s *BasePromiseParserListener) ExitOptionalChainExpr(ctx *OptionalChainExprContext) {}
-
-// EnterErrorUnwrapExpr is called when production errorUnwrapExpr is entered.
-func (s *BasePromiseParserListener) EnterErrorUnwrapExpr(ctx *ErrorUnwrapExprContext) {}
-
-// ExitErrorUnwrapExpr is called when production errorUnwrapExpr is exited.
-func (s *BasePromiseParserListener) ExitErrorUnwrapExpr(ctx *ErrorUnwrapExprContext) {}
 
 // EnterUnaryNotExpr is called when production unaryNotExpr is entered.
 func (s *BasePromiseParserListener) EnterUnaryNotExpr(ctx *UnaryNotExprContext) {}

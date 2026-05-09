@@ -275,9 +275,9 @@ enum Config {
 }
 
 test_enum_failable_method() `test {
-  result := Config.Debug.validate()!;
+  result := Config.Debug.validate()?!;
   assert(result == "debug-mode", "Debug.validate");
-  result2 := Config.Release.validate()!;
+  result2 := Config.Release.validate()?!;
   assert(result2 == "release-mode", "Release.validate");
 }
 

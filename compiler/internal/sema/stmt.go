@@ -1322,7 +1322,9 @@ func isConstructorCallExpr(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.ErrorPropagateExpr:
 		return isConstructorCallExpr(e.Expr)
-	case *ast.ErrorUnwrapExpr:
+	case *ast.ErrorPanicExpr:
+		return isConstructorCallExpr(e.Expr)
+	case *ast.OptionalUnwrapExpr:
 		return isConstructorCallExpr(e.Expr)
 	}
 	call, ok := expr.(*ast.CallExpr)

@@ -23,106 +23,106 @@ make_io_error_test() `test {
 
 file_create_exists_remove() `test(exclude: "wasm32") {
   if File.exists("/tmp/pr_iot_cer") {
-    File.remove("/tmp/pr_iot_cer")!;
+    File.remove("/tmp/pr_iot_cer")?!;
   }
-  File f = File.create("/tmp/pr_iot_cer")!;
-  f.close()!;
+  File f = File.create("/tmp/pr_iot_cer")?!;
+  f.close()?!;
   assert(File.exists("/tmp/pr_iot_cer"), "file exists after create");
-  File.remove("/tmp/pr_iot_cer")!;
+  File.remove("/tmp/pr_iot_cer")?!;
   assert(!File.exists("/tmp/pr_iot_cer"), "file gone after remove");
 }
 
 // ── File.write_string / File.read_all ────────────────────────────────────────
 
 file_write_read() `test(exclude: "wasm32") {
-  File fw = File.create("/tmp/pr_iot_wr")!;
-  fw.write_string("hello world")!;
-  fw.close()!;
-  File fr = File.open("/tmp/pr_iot_wr", readonly: true)!;
-  string data = fr.read_all()!;
-  fr.close()!;
+  File fw = File.create("/tmp/pr_iot_wr")?!;
+  fw.write_string("hello world")?!;
+  fw.close()?!;
+  File fr = File.open("/tmp/pr_iot_wr", readonly: true)?!;
+  string data = fr.read_all()?!;
+  fr.close()?!;
   assert(data == "hello world", "read back what was written");
-  File.remove("/tmp/pr_iot_wr")!;
+  File.remove("/tmp/pr_iot_wr")?!;
 }
 
 // ── File.read_content / File.write_content ───────────────────────────────────
 
 file_content_oneshot() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_rwc", "one-shot")!;
-  string d = File.read_content("/tmp/pr_iot_rwc")!;
+  File.write_content("/tmp/pr_iot_rwc", "one-shot")?!;
+  string d = File.read_content("/tmp/pr_iot_rwc")?!;
   assert(d == "one-shot", "read_content matches write_content");
-  File.remove("/tmp/pr_iot_rwc")!;
+  File.remove("/tmp/pr_iot_rwc")?!;
 }
 
 // ── File.size ────────────────────────────────────────────────────────────────
 
 file_size_test() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_sz", "12345")!;
-  int sz = File.size("/tmp/pr_iot_sz")!;
+  File.write_content("/tmp/pr_iot_sz", "12345")?!;
+  int sz = File.size("/tmp/pr_iot_sz")?!;
   assert(sz == 5, "size matches content length");
-  File.remove("/tmp/pr_iot_sz")!;
+  File.remove("/tmp/pr_iot_sz")?!;
 }
 
 // ── File.position / File.seek ────────────────────────────────────────────────
 
 file_seek_test() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_seek", "abcdef")!;
-  File f = File.open("/tmp/pr_iot_seek")!;
-  int pos0 = f.position!;
+  File.write_content("/tmp/pr_iot_seek", "abcdef")?!;
+  File f = File.open("/tmp/pr_iot_seek")?!;
+  int pos0 = f.position?!;
   assert(pos0 == 0, "initial position is 0");
-  f.seek(3)!;
-  int pos3 = f.position!;
+  f.seek(3)?!;
+  int pos3 = f.position?!;
   assert(pos3 == 3, "position after seek");
-  string rest = f.read_all()!;
+  string rest = f.read_all()?!;
   assert(rest == "def", "read after seek");
-  f.close()!;
-  File.remove("/tmp/pr_iot_seek")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_seek")?!;
 }
 
 // ── File.append ──────────────────────────────────────────────────────────────
 
 file_append_test() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_app", "first")!;
-  File fa = File.append("/tmp/pr_iot_app")!;
-  fa.write_string(" second")!;
-  fa.close()!;
-  string d = File.read_content("/tmp/pr_iot_app")!;
+  File.write_content("/tmp/pr_iot_app", "first")?!;
+  File fa = File.append("/tmp/pr_iot_app")?!;
+  fa.write_string(" second")?!;
+  fa.close()?!;
+  string d = File.read_content("/tmp/pr_iot_app")?!;
   assert(d == "first second", "append adds to existing content");
-  File.remove("/tmp/pr_iot_app")!;
+  File.remove("/tmp/pr_iot_app")?!;
 }
 
 // ── File.create truncates ────────────────────────────────────────────────────
 
 file_truncate_test() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_trunc", "long content here")!;
-  File.write_content("/tmp/pr_iot_trunc", "short")!;
-  string d = File.read_content("/tmp/pr_iot_trunc")!;
+  File.write_content("/tmp/pr_iot_trunc", "long content here")?!;
+  File.write_content("/tmp/pr_iot_trunc", "short")?!;
+  string d = File.read_content("/tmp/pr_iot_trunc")?!;
   assert(d == "short", "write_content truncates");
-  File.remove("/tmp/pr_iot_trunc")!;
+  File.remove("/tmp/pr_iot_trunc")?!;
 }
 
 // ── Multiple writes ──────────────────────────────────────────────────────────
 
 file_multi_write() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_multi")!;
-  f.write_string("aaa")!;
-  f.write_string("bbb")!;
-  f.write_string("ccc")!;
-  f.close()!;
-  string d = File.read_content("/tmp/pr_iot_multi")!;
+  File f = File.create("/tmp/pr_iot_multi")?!;
+  f.write_string("aaa")?!;
+  f.write_string("bbb")?!;
+  f.write_string("ccc")?!;
+  f.close()?!;
+  string d = File.read_content("/tmp/pr_iot_multi")?!;
   assert(d == "aaabbbccc", "multiple writes concatenate");
-  File.remove("/tmp/pr_iot_multi")!;
+  File.remove("/tmp/pr_iot_multi")?!;
 }
 
 // ── Empty file ───────────────────────────────────────────────────────────────
 
 file_empty_test() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_empty", "")!;
-  string d = File.read_content("/tmp/pr_iot_empty")!;
+  File.write_content("/tmp/pr_iot_empty", "")?!;
+  string d = File.read_content("/tmp/pr_iot_empty")?!;
   assert(d == "", "empty file reads as empty string");
-  int sz = File.size("/tmp/pr_iot_empty")!;
+  int sz = File.size("/tmp/pr_iot_empty")?!;
   assert(sz == 0, "empty file has size 0");
-  File.remove("/tmp/pr_iot_empty")!;
+  File.remove("/tmp/pr_iot_empty")?!;
 }
 
 // ── Error: open nonexistent ──────────────────────────────────────────────────
@@ -156,32 +156,32 @@ file_remove_nonexistent() `test(exclude: "wasm32") {
 // ── Error: double close ──────────────────────────────────────────────────────
 
 file_double_close() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_dblc")!;
-  f.close()!;
+  File f = File.create("/tmp/pr_iot_dblc")?!;
+  f.close()?!;
   bool caught = false;
   f.close()? e {
     caught = true;
   };
   assert(caught, "double close raises error");
-  File.remove("/tmp/pr_iot_dblc")!;
+  File.remove("/tmp/pr_iot_dblc")?!;
 }
 
 // ── Dir operations ───────────────────────────────────────────────────────────
 
 dir_make_exists_remove() `test(exclude: "wasm32") {
   if Dir.exists("/tmp/pr_iot_dir") {
-    Dir.remove("/tmp/pr_iot_dir")!;
+    Dir.remove("/tmp/pr_iot_dir")?!;
   }
-  Dir.make("/tmp/pr_iot_dir")!;
+  Dir.make("/tmp/pr_iot_dir")?!;
   assert(Dir.exists("/tmp/pr_iot_dir"), "dir exists after make");
-  Dir.remove("/tmp/pr_iot_dir")!;
+  Dir.remove("/tmp/pr_iot_dir")?!;
   assert(!Dir.exists("/tmp/pr_iot_dir"), "dir gone after remove");
 }
 
 dir_exists_on_file() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_df", "x")!;
+  File.write_content("/tmp/pr_iot_df", "x")?!;
   assert(!Dir.exists("/tmp/pr_iot_df"), "Dir.exists returns false for a file");
-  File.remove("/tmp/pr_iot_df")!;
+  File.remove("/tmp/pr_iot_df")?!;
 }
 
 // ── Dir.make_all ─────────────────────────────────────────────────────────────
@@ -189,34 +189,34 @@ dir_exists_on_file() `test(exclude: "wasm32") {
 dir_make_all_nested() `test(exclude: "wasm32") {
   // Clean up first
   if Dir.exists("/tmp/pr_iot_mkall/a/b") {
-    Dir.remove("/tmp/pr_iot_mkall/a/b")!;
+    Dir.remove("/tmp/pr_iot_mkall/a/b")?!;
   }
   if Dir.exists("/tmp/pr_iot_mkall/a") {
-    Dir.remove("/tmp/pr_iot_mkall/a")!;
+    Dir.remove("/tmp/pr_iot_mkall/a")?!;
   }
   if Dir.exists("/tmp/pr_iot_mkall") {
-    Dir.remove("/tmp/pr_iot_mkall")!;
+    Dir.remove("/tmp/pr_iot_mkall")?!;
   }
 
-  Dir.make_all("/tmp/pr_iot_mkall/a/b")!;
+  Dir.make_all("/tmp/pr_iot_mkall/a/b")?!;
   assert(Dir.exists("/tmp/pr_iot_mkall"), "top dir exists");
   assert(Dir.exists("/tmp/pr_iot_mkall/a"), "middle dir exists");
   assert(Dir.exists("/tmp/pr_iot_mkall/a/b"), "leaf dir exists");
 
   // Clean up
-  Dir.remove("/tmp/pr_iot_mkall/a/b")!;
-  Dir.remove("/tmp/pr_iot_mkall/a")!;
-  Dir.remove("/tmp/pr_iot_mkall")!;
+  Dir.remove("/tmp/pr_iot_mkall/a/b")?!;
+  Dir.remove("/tmp/pr_iot_mkall/a")?!;
+  Dir.remove("/tmp/pr_iot_mkall")?!;
 }
 
 dir_make_all_existing() `test(exclude: "wasm32") {
   if !Dir.exists("/tmp/pr_iot_mkall2") {
-    Dir.make("/tmp/pr_iot_mkall2")!;
+    Dir.make("/tmp/pr_iot_mkall2")?!;
   }
   // Should not error on existing directory
-  Dir.make_all("/tmp/pr_iot_mkall2")!;
+  Dir.make_all("/tmp/pr_iot_mkall2")?!;
   assert(Dir.exists("/tmp/pr_iot_mkall2"), "still exists after make_all on existing");
-  Dir.remove("/tmp/pr_iot_mkall2")!;
+  Dir.remove("/tmp/pr_iot_mkall2")?!;
 }
 
 // ── Dir.list ─────────────────────────────────────────────────────────────────
@@ -224,11 +224,11 @@ dir_make_all_existing() `test(exclude: "wasm32") {
 // B0184: dir_list_basic crashes on macOS — commented out until fixed.
 // dir_list_basic() `test(exclude: "wasm32") {
 //   if !Dir.exists("/tmp/pr_iot_list") {
-//     Dir.make("/tmp/pr_iot_list")!;
+//     Dir.make("/tmp/pr_iot_list")?!;
 //   }
-//   File.write_content("/tmp/pr_iot_list/aaa.txt", "a")!;
-//   File.write_content("/tmp/pr_iot_list/bbb.txt", "b")!;
-//   string[] entries = Dir.list("/tmp/pr_iot_list")!;
+//   File.write_content("/tmp/pr_iot_list/aaa.txt", "a")?!;
+//   File.write_content("/tmp/pr_iot_list/bbb.txt", "b")?!;
+//   string[] entries = Dir.list("/tmp/pr_iot_list")?!;
 //   assert(entries.len >= 2, "at least 2 entries");
 //   bool found_a = false;
 //   bool found_b = false;
@@ -246,19 +246,19 @@ dir_make_all_existing() `test(exclude: "wasm32") {
 //     assert(entries[i] != "..", "no dotdot entry");
 //     i += 1;
 //   }
-//   File.remove("/tmp/pr_iot_list/aaa.txt")!;
-//   File.remove("/tmp/pr_iot_list/bbb.txt")!;
-//   Dir.remove("/tmp/pr_iot_list")!;
+//   File.remove("/tmp/pr_iot_list/aaa.txt")?!;
+//   File.remove("/tmp/pr_iot_list/bbb.txt")?!;
+//   Dir.remove("/tmp/pr_iot_list")?!;
 // }
 
 // B0184: dir_list_empty crashes on macOS — commented out until fixed.
 // dir_list_empty() `test(exclude: "wasm32") {
 //   if !Dir.exists("/tmp/pr_iot_list_e") {
-//     Dir.make("/tmp/pr_iot_list_e")!;
+//     Dir.make("/tmp/pr_iot_list_e")?!;
 //   }
-//   string[] entries = Dir.list("/tmp/pr_iot_list_e")!;
+//   string[] entries = Dir.list("/tmp/pr_iot_list_e")?!;
 //   assert(entries.len == 0, "empty dir has no entries");
-//   Dir.remove("/tmp/pr_iot_list_e")!;
+//   Dir.remove("/tmp/pr_iot_list_e")?!;
 // }
 
 dir_list_nonexistent() `test(exclude: "wasm32") {
@@ -272,8 +272,8 @@ dir_list_nonexistent() `test(exclude: "wasm32") {
 // ── read_line (via file fd) ──────────────────────────────────────────────────
 
 read_line_from_file() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_readline", "line1\nline2\nline3")!;
-  File f = File.open("/tmp/pr_iot_readline", readonly: true)!;
+  File.write_content("/tmp/pr_iot_readline", "line1\nline2\nline3")?!;
+  File f = File.open("/tmp/pr_iot_readline", readonly: true)?!;
 
   string line1 = _io_file_read_line(f._fd);
   int rc1 = _io_errno();
@@ -295,13 +295,13 @@ read_line_from_file() `test(exclude: "wasm32") {
   int rc4 = _io_errno();
   assert(rc4 == _io_eof_sentinel(), "EOF sentinel after last line");
 
-  f.close()!;
-  File.remove("/tmp/pr_iot_readline")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_readline")?!;
 }
 
 read_line_crlf() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_rlcrlf", "hello\r\nworld\r\n")!;
-  File f = File.open("/tmp/pr_iot_rlcrlf", readonly: true)!;
+  File.write_content("/tmp/pr_iot_rlcrlf", "hello\r\nworld\r\n")?!;
+  File f = File.open("/tmp/pr_iot_rlcrlf", readonly: true)?!;
 
   string line1 = _io_file_read_line(f._fd);
   int rc1 = _io_errno();
@@ -313,13 +313,13 @@ read_line_crlf() `test(exclude: "wasm32") {
   assert(rc2 == 0, "no error on crlf line2");
   assert(line2 == "world", "crlf line2 stripped");
 
-  f.close()!;
-  File.remove("/tmp/pr_iot_rlcrlf")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_rlcrlf")?!;
 }
 
 read_line_empty_lines() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_rlempty", "\n\nhello\n\n")!;
-  File f = File.open("/tmp/pr_iot_rlempty", readonly: true)!;
+  File.write_content("/tmp/pr_iot_rlempty", "\n\nhello\n\n")?!;
+  File f = File.open("/tmp/pr_iot_rlempty", readonly: true)?!;
 
   string l1 = _io_file_read_line(f._fd);
   assert(_io_errno() == 0, "e1");
@@ -340,17 +340,17 @@ read_line_empty_lines() `test(exclude: "wasm32") {
   string l5 = _io_file_read_line(f._fd);
   assert(_io_errno() == _io_eof_sentinel(), "EOF after trailing newline");
 
-  f.close()!;
-  File.remove("/tmp/pr_iot_rlempty")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_rlempty")?!;
 }
 
 read_line_empty_file() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_rlef", "")!;
-  File f = File.open("/tmp/pr_iot_rlef", readonly: true)!;
+  File.write_content("/tmp/pr_iot_rlef", "")?!;
+  File f = File.open("/tmp/pr_iot_rlef", readonly: true)?!;
   string line = _io_file_read_line(f._fd);
   assert(_io_errno() == _io_eof_sentinel(), "EOF on empty file");
-  f.close()!;
-  File.remove("/tmp/pr_iot_rlef")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_rlef")?!;
 }
 
 read_line_long_line() `test(exclude: "wasm32") {
@@ -361,26 +361,26 @@ read_line_long_line() `test(exclude: "wasm32") {
     long = long + "x";
     i += 1;
   }
-  File.write_content("/tmp/pr_iot_rllong", long + "\n")!;
-  File f = File.open("/tmp/pr_iot_rllong", readonly: true)!;
+  File.write_content("/tmp/pr_iot_rllong", long + "\n")?!;
+  File f = File.open("/tmp/pr_iot_rllong", readonly: true)?!;
   string line = _io_file_read_line(f._fd);
   assert(_io_errno() == 0, "no error on long line");
   assert(line.len == 400, "long line length preserved");
-  f.close()!;
-  File.remove("/tmp/pr_iot_rllong")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_rllong")?!;
 }
 
 read_line_single_no_newline() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_rlsingle", "onlythis")!;
-  File f = File.open("/tmp/pr_iot_rlsingle", readonly: true)!;
+  File.write_content("/tmp/pr_iot_rlsingle", "onlythis")?!;
+  File f = File.open("/tmp/pr_iot_rlsingle", readonly: true)?!;
   string line = _io_file_read_line(f._fd);
   assert(_io_errno() == 0, "no error");
   assert(line == "onlythis", "single line no trailing newline");
   // Next read should be EOF
   _io_file_read_line(f._fd);
   assert(_io_errno() == _io_eof_sentinel(), "EOF after single line");
-  f.close()!;
-  File.remove("/tmp/pr_iot_rlsingle")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_rlsingle")?!;
 }
 
 // ── Edge cases: opening directories ──────────────────────────────────────────
@@ -397,14 +397,14 @@ file_open_directory() `test(exclude: "wasm32") {
 file_create_on_directory_path() `test(exclude: "wasm32") {
   // File.create on an existing directory path should fail
   if !Dir.exists("/tmp/pr_iot_cdir") {
-    Dir.make("/tmp/pr_iot_cdir")!;
+    Dir.make("/tmp/pr_iot_cdir")?!;
   }
   bool caught = false;
   File.create("/tmp/pr_iot_cdir")? e {
     caught = true;
   };
   assert(caught, "create on existing directory raises error");
-  Dir.remove("/tmp/pr_iot_cdir")!;
+  Dir.remove("/tmp/pr_iot_cdir")?!;
 }
 
 // ── Edge cases: File.exists vs Dir.exists ────────────────────────────────────
@@ -431,63 +431,63 @@ dir_exists_nonexistent() `test(exclude: "wasm32") {
 // ── Edge cases: write to readonly, read after close ──────────────────────────
 
 file_write_readonly() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_wro", "data")!;
-  File f = File.open("/tmp/pr_iot_wro", readonly: true)!;
+  File.write_content("/tmp/pr_iot_wro", "data")?!;
+  File f = File.open("/tmp/pr_iot_wro", readonly: true)?!;
   bool caught = false;
   f.write_string("fail")? e {
     caught = true;
   };
   assert(caught, "writing to readonly file raises error");
-  f.close()!;
-  File.remove("/tmp/pr_iot_wro")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_wro")?!;
 }
 
 file_read_after_close() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_rac", "data")!;
-  File f = File.open("/tmp/pr_iot_rac")!;
-  f.close()!;
+  File.write_content("/tmp/pr_iot_rac", "data")?!;
+  File f = File.open("/tmp/pr_iot_rac")?!;
+  f.close()?!;
   bool caught = false;
   f.read_all()? e {
     caught = true;
   };
   assert(caught, "reading after close raises error");
-  File.remove("/tmp/pr_iot_rac")!;
+  File.remove("/tmp/pr_iot_rac")?!;
 }
 
 file_write_after_close() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_wac")!;
-  f.close()!;
+  File f = File.create("/tmp/pr_iot_wac")?!;
+  f.close()?!;
   bool caught = false;
   f.write_string("fail")? e {
     caught = true;
   };
   assert(caught, "writing after close raises error");
-  File.remove("/tmp/pr_iot_wac")!;
+  File.remove("/tmp/pr_iot_wac")?!;
 }
 
 file_seek_after_close() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_sac", "data")!;
-  File f = File.open("/tmp/pr_iot_sac")!;
-  f.close()!;
+  File.write_content("/tmp/pr_iot_sac", "data")?!;
+  File f = File.open("/tmp/pr_iot_sac")?!;
+  f.close()?!;
   bool caught = false;
   f.seek(0)? e {
     caught = true;
   };
   assert(caught, "seeking after close raises error");
-  File.remove("/tmp/pr_iot_sac")!;
+  File.remove("/tmp/pr_iot_sac")?!;
 }
 
 file_position_after_close() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_pac", "data")!;
-  File f = File.open("/tmp/pr_iot_pac")!;
-  f.close()!;
+  File.write_content("/tmp/pr_iot_pac", "data")?!;
+  File f = File.open("/tmp/pr_iot_pac")?!;
+  f.close()?!;
   bool caught = false;
   int p = f.position? e {
     caught = true;
     0;
   };
   assert(caught, "position after close raises error");
-  File.remove("/tmp/pr_iot_pac")!;
+  File.remove("/tmp/pr_iot_pac")?!;
 }
 
 // ── Edge cases: File.remove / Dir.remove wrong type ──────────────────────────
@@ -495,44 +495,44 @@ file_position_after_close() `test(exclude: "wasm32") {
 file_remove_directory() `test(exclude: "wasm32") {
   // File.remove on a directory should fail (use Dir.remove for directories)
   if !Dir.exists("/tmp/pr_iot_frd") {
-    Dir.make("/tmp/pr_iot_frd")!;
+    Dir.make("/tmp/pr_iot_frd")?!;
   }
   bool caught = false;
   File.remove("/tmp/pr_iot_frd")? e {
     caught = true;
   };
   assert(caught, "File.remove on directory raises error");
-  Dir.remove("/tmp/pr_iot_frd")!;
+  Dir.remove("/tmp/pr_iot_frd")?!;
 }
 
 dir_remove_file() `test(exclude: "wasm32") {
   // Dir.remove on a file should fail
-  File.write_content("/tmp/pr_iot_drf", "x")!;
+  File.write_content("/tmp/pr_iot_drf", "x")?!;
   bool caught = false;
   Dir.remove("/tmp/pr_iot_drf")? e {
     caught = true;
   };
   assert(caught, "Dir.remove on file raises error");
-  File.remove("/tmp/pr_iot_drf")!;
+  File.remove("/tmp/pr_iot_drf")?!;
 }
 
 dir_remove_nonempty() `test(exclude: "wasm32") {
   // Dir.remove on a non-empty directory should fail
-  Dir.make_all("/tmp/pr_iot_drne/sub")!;
+  Dir.make_all("/tmp/pr_iot_drne/sub")?!;
   bool caught = false;
   Dir.remove("/tmp/pr_iot_drne")? e {
     caught = true;
   };
   assert(caught, "removing non-empty dir raises error");
-  Dir.remove("/tmp/pr_iot_drne/sub")!;
-  Dir.remove("/tmp/pr_iot_drne")!;
+  Dir.remove("/tmp/pr_iot_drne/sub")?!;
+  Dir.remove("/tmp/pr_iot_drne")?!;
 }
 
 // ── Edge cases: Dir.make duplicate ───────────────────────────────────────────
 
 dir_make_duplicate() `test(exclude: "wasm32") {
   if !Dir.exists("/tmp/pr_iot_ddup") {
-    Dir.make("/tmp/pr_iot_ddup")!;
+    Dir.make("/tmp/pr_iot_ddup")?!;
   }
   // Dir.make (not make_all) on existing directory should fail with EEXIST
   bool caught = false;
@@ -540,36 +540,36 @@ dir_make_duplicate() `test(exclude: "wasm32") {
     caught = true;
   };
   assert(caught, "Dir.make on existing dir raises error");
-  Dir.remove("/tmp/pr_iot_ddup")!;
+  Dir.remove("/tmp/pr_iot_ddup")?!;
 }
 
 // ── Edge cases: Dir.make_all ─────────────────────────────────────────────────
 
 dir_make_all_single_component() `test(exclude: "wasm32") {
   if Dir.exists("/tmp/pr_iot_mksc") {
-    Dir.remove("/tmp/pr_iot_mksc")!;
+    Dir.remove("/tmp/pr_iot_mksc")?!;
   }
-  Dir.make_all("/tmp/pr_iot_mksc")!;
+  Dir.make_all("/tmp/pr_iot_mksc")?!;
   assert(Dir.exists("/tmp/pr_iot_mksc"), "single component created");
-  Dir.remove("/tmp/pr_iot_mksc")!;
+  Dir.remove("/tmp/pr_iot_mksc")?!;
 }
 
 dir_make_all_trailing_slash() `test(exclude: "wasm32") {
   if Dir.exists("/tmp/pr_iot_mkts/sub") {
-    Dir.remove("/tmp/pr_iot_mkts/sub")!;
+    Dir.remove("/tmp/pr_iot_mkts/sub")?!;
   }
   if Dir.exists("/tmp/pr_iot_mkts") {
-    Dir.remove("/tmp/pr_iot_mkts")!;
+    Dir.remove("/tmp/pr_iot_mkts")?!;
   }
-  Dir.make_all("/tmp/pr_iot_mkts/sub/")!;
+  Dir.make_all("/tmp/pr_iot_mkts/sub/")?!;
   assert(Dir.exists("/tmp/pr_iot_mkts/sub"), "dir with trailing slash created");
-  Dir.remove("/tmp/pr_iot_mkts/sub")!;
-  Dir.remove("/tmp/pr_iot_mkts")!;
+  Dir.remove("/tmp/pr_iot_mkts/sub")?!;
+  Dir.remove("/tmp/pr_iot_mkts")?!;
 }
 
 dir_make_all_empty_string() `test(exclude: "wasm32") {
   // Empty string should be a no-op
-  Dir.make_all("")!;
+  Dir.make_all("")?!;
 }
 
 // B0184: All Dir.list tests crash on macOS — commented out until fixed.
@@ -594,15 +594,15 @@ file_binary_content() `test(exclude: "wasm32") {
   // because write uses the Promise string length, not strlen.
   string data = "abc\0def";
   assert(data.len == 7, "string with null byte has correct len");
-  File.write_content("/tmp/pr_iot_bin", data[0:data.len])!;
-  int sz = File.size("/tmp/pr_iot_bin")!;
+  File.write_content("/tmp/pr_iot_bin", data[0:data.len])?!;
+  int sz = File.size("/tmp/pr_iot_bin")?!;
   // write_string uses the Promise string length internally, so it writes
   // all 7 bytes including the embedded \0.
   assert(sz == 7, "file size includes null byte");
-  string back = File.read_content("/tmp/pr_iot_bin")!;
+  string back = File.read_content("/tmp/pr_iot_bin")?!;
   assert(back.len == 7, "read back preserves null byte");
   assert(back == data, "binary round-trip");
-  File.remove("/tmp/pr_iot_bin")!;
+  File.remove("/tmp/pr_iot_bin")?!;
 }
 
 // ── Edge cases: IoError fields ───────────────────────────────────────────────
@@ -628,77 +628,77 @@ io_error_open_root() `test(exclude: "wasm32") {
 // ── Edge cases: write empty string ───────────────────────────────────────────
 
 file_write_empty_string() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_wes")!;
-  f.write_string("")!;
-  f.write_string("hello")!;
-  f.write_string("")!;
-  f.close()!;
-  string d = File.read_content("/tmp/pr_iot_wes")!;
+  File f = File.create("/tmp/pr_iot_wes")?!;
+  f.write_string("")?!;
+  f.write_string("hello")?!;
+  f.write_string("")?!;
+  f.close()?!;
+  string d = File.read_content("/tmp/pr_iot_wes")?!;
   assert(d == "hello", "empty writes are no-ops");
-  File.remove("/tmp/pr_iot_wes")!;
+  File.remove("/tmp/pr_iot_wes")?!;
 }
 
 // ── File.read / File.write (byte-level) ──────────────────────────────────────
 
 file_write_read_bytes() `test(exclude: "wasm32") {
-  File fw = File.create("/tmp/pr_iot_wrb")!;
+  File fw = File.create("/tmp/pr_iot_wrb")?!;
   u8[] data = u8[]();
   data.push(72u8); // H
   data.push(105u8); // i
-  int written = fw.write(data)!;
+  int written = fw.write(data)?!;
   assert(written == 2, "wrote 2 bytes");
-  fw.close()!;
+  fw.close()?!;
 
-  File fr = File.open("/tmp/pr_iot_wrb", readonly: true)!;
+  File fr = File.open("/tmp/pr_iot_wrb", readonly: true)?!;
   u8[] buf = Vector[u8].filled(0u8, 10);
-  int n = fr.read(buf)!;
+  int n = fr.read(buf)?!;
   assert(n == 2, "read 2 bytes");
   assert(buf[0] as! int == 72, "first byte is H");
   assert(buf[1] as! int == 105, "second byte is i");
-  fr.close()!;
-  File.remove("/tmp/pr_iot_wrb")!;
+  fr.close()?!;
+  File.remove("/tmp/pr_iot_wrb")?!;
 }
 
 file_read_method() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_rby", "abc")!;
-  File f = File.open("/tmp/pr_iot_rby", readonly: true)!;
+  File.write_content("/tmp/pr_iot_rby", "abc")?!;
+  File f = File.open("/tmp/pr_iot_rby", readonly: true)?!;
   u8[] buf = Vector[u8].filled(0u8, 10);
-  int n = f.read(buf)!;
+  int n = f.read(buf)?!;
   assert(n == 3, "read returns 3 bytes");
   assert(buf[0] as! int == 97, "a");
   assert(buf[1] as! int == 98, "b");
   assert(buf[2] as! int == 99, "c");
-  f.close()!;
-  File.remove("/tmp/pr_iot_rby")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_rby")?!;
 }
 
 file_read_eof() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_reof", "x")!;
-  File f = File.open("/tmp/pr_iot_reof", readonly: true)!;
+  File.write_content("/tmp/pr_iot_reof", "x")?!;
+  File f = File.open("/tmp/pr_iot_reof", readonly: true)?!;
   u8[] buf = Vector[u8].filled(0u8, 10);
-  int n1 = f.read(buf)!;
+  int n1 = f.read(buf)?!;
   assert(n1 == 1, "first read got 1 byte");
-  int n2 = f.read(buf)!;
+  int n2 = f.read(buf)?!;
   assert(n2 == 0, "second read returns 0 (EOF)");
-  f.close()!;
-  File.remove("/tmp/pr_iot_reof")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_reof")?!;
 }
 
 file_read_after_close_bytes() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_racb")!;
-  f.close()!;
+  File f = File.create("/tmp/pr_iot_racb")?!;
+  f.close()?!;
   bool caught = false;
   u8[] buf = Vector[u8].filled(0u8, 4);
   f.read(buf)? e {
     caught = true;
   };
   assert(caught, "byte read after close raises error");
-  File.remove("/tmp/pr_iot_racb")!;
+  File.remove("/tmp/pr_iot_racb")?!;
 }
 
 file_write_after_close_bytes() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_wacb")!;
-  f.close()!;
+  File f = File.create("/tmp/pr_iot_wacb")?!;
+  f.close()?!;
   bool caught = false;
   u8[] buf = u8[]();
   buf.push(65u8);
@@ -706,139 +706,139 @@ file_write_after_close_bytes() `test(exclude: "wasm32") {
     caught = true;
   };
   assert(caught, "byte write after close raises error");
-  File.remove("/tmp/pr_iot_wacb")!;
+  File.remove("/tmp/pr_iot_wacb")?!;
 }
 
 // ── File.read_line (instance method) ─────────────────────────────────────────
 
 file_read_line_method() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_frl", "alpha\nbeta\ngamma")!;
-  File f = File.open("/tmp/pr_iot_frl", readonly: true)!;
-  if v := f.read_line()! {
+  File.write_content("/tmp/pr_iot_frl", "alpha\nbeta\ngamma")?!;
+  File f = File.open("/tmp/pr_iot_frl", readonly: true)?!;
+  if v := f.read_line()?! {
     assert(v == "alpha", "line1");
   } else {
     assert(false, "line1 present");
   }
-  if v := f.read_line()! {
+  if v := f.read_line()?! {
     assert(v == "beta", "line2");
   } else {
     assert(false, "line2 present");
   }
-  if v := f.read_line()! {
+  if v := f.read_line()?! {
     assert(v == "gamma", "line3");
   } else {
     assert(false, "line3 present");
   }
-  if _ := f.read_line()! {
+  if _ := f.read_line()?! {
     assert(false, "should be EOF");
   }
-  f.close()!;
-  File.remove("/tmp/pr_iot_frl")!;
+  f.close()?!;
+  File.remove("/tmp/pr_iot_frl")?!;
 }
 
 // ── BufferedReader ───────────────────────────────────────────────────────────
 
 buffered_reader_basic() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_br", "hello world")!;
-  File f = File.open("/tmp/pr_iot_br", readonly: true)!;
+  File.write_content("/tmp/pr_iot_br", "hello world")?!;
+  File f = File.open("/tmp/pr_iot_br", readonly: true)?!;
   BufferedReader r = BufferedReader(f, buf_size: 4);
   u8[] buf = Vector[u8].filled(0u8, 5);
-  int n1 = r.read(buf)!;
+  int n1 = r.read(buf)?!;
   // Buffer is 4 bytes, so first read fills internal buf (4 bytes), copies up to 4
   assert(n1 == 4, "first buffered read");
   assert(buf[0] as! int == 104, "h");
   assert(buf[1] as! int == 101, "e");
-  int n2 = r.read(buf)!;
+  int n2 = r.read(buf)?!;
   assert(n2 > 0, "second read returns data");
-  r.close()!;
-  File.remove("/tmp/pr_iot_br")!;
+  r.close()?!;
+  File.remove("/tmp/pr_iot_br")?!;
 }
 
 buffered_reader_read_line() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_brl", "one\ntwo\nthree")!;
-  File f = File.open("/tmp/pr_iot_brl", readonly: true)!;
+  File.write_content("/tmp/pr_iot_brl", "one\ntwo\nthree")?!;
+  File f = File.open("/tmp/pr_iot_brl", readonly: true)?!;
   BufferedReader r = BufferedReader(f, buf_size: 8);
-  if v := r.read_line()! {
+  if v := r.read_line()?! {
     assert(v == "one", "line1");
   } else {
     assert(false, "line1 present");
   }
-  if v := r.read_line()! {
+  if v := r.read_line()?! {
     assert(v == "two", "line2");
   } else {
     assert(false, "line2 present");
   }
-  if v := r.read_line()! {
+  if v := r.read_line()?! {
     assert(v == "three", "line3");
   } else {
     assert(false, "line3 present");
   }
-  if _ := r.read_line()! {
+  if _ := r.read_line()?! {
     assert(false, "should be EOF");
   }
-  r.close()!;
-  File.remove("/tmp/pr_iot_brl")!;
+  r.close()?!;
+  File.remove("/tmp/pr_iot_brl")?!;
 }
 
 buffered_reader_read_line_crlf() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_brlc", "aa\r\nbb\r\n")!;
-  File f = File.open("/tmp/pr_iot_brlc", readonly: true)!;
+  File.write_content("/tmp/pr_iot_brlc", "aa\r\nbb\r\n")?!;
+  File f = File.open("/tmp/pr_iot_brlc", readonly: true)?!;
   BufferedReader r = BufferedReader(f, buf_size: 4);
-  if v := r.read_line()! {
+  if v := r.read_line()?! {
     assert(v == "aa", "crlf line1");
   } else {
     assert(false, "line1 present");
   }
-  if v := r.read_line()! {
+  if v := r.read_line()?! {
     assert(v == "bb", "crlf line2");
   } else {
     assert(false, "line2 present");
   }
-  if _ := r.read_line()! {
+  if _ := r.read_line()?! {
     assert(false, "should be EOF after crlf");
   }
-  r.close()!;
-  File.remove("/tmp/pr_iot_brlc")!;
+  r.close()?!;
+  File.remove("/tmp/pr_iot_brlc")?!;
 }
 
 buffered_reader_read_byte() `test(exclude: "wasm32") {
-  File.write_content("/tmp/pr_iot_brb", "AB")!;
-  File f = File.open("/tmp/pr_iot_brb", readonly: true)!;
+  File.write_content("/tmp/pr_iot_brb", "AB")?!;
+  File f = File.open("/tmp/pr_iot_brb", readonly: true)?!;
   BufferedReader r = BufferedReader(f);
-  if b := r.read_byte()! {
+  if b := r.read_byte()?! {
     assert(b as! int == 65, "A");
   } else {
     assert(false, "byte1 present");
   }
-  if b := r.read_byte()! {
+  if b := r.read_byte()?! {
     assert(b as! int == 66, "B");
   } else {
     assert(false, "byte2 present");
   }
-  if _ := r.read_byte()! {
+  if _ := r.read_byte()?! {
     assert(false, "should be EOF");
   }
-  r.close()!;
-  File.remove("/tmp/pr_iot_brb")!;
+  r.close()?!;
+  File.remove("/tmp/pr_iot_brb")?!;
 }
 
 // ── BufferedWriter ───────────────────────────────────────────────────────────
 
 buffered_writer_basic() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_bw")!;
+  File f = File.create("/tmp/pr_iot_bw")?!;
   BufferedWriter w = BufferedWriter(f, buf_size: 8);
   u8[] data = u8[]();
   data.push(72u8); // H
   data.push(105u8); // i
-  w.write(data)!;
-  w.close()!;
-  string content = File.read_content("/tmp/pr_iot_bw")!;
+  w.write(data)?!;
+  w.close()?!;
+  string content = File.read_content("/tmp/pr_iot_bw")?!;
   assert(content == "Hi", "buffered write round-trip");
-  File.remove("/tmp/pr_iot_bw")!;
+  File.remove("/tmp/pr_iot_bw")?!;
 }
 
 buffered_writer_flush() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_bwf")!;
+  File f = File.create("/tmp/pr_iot_bwf")?!;
   BufferedWriter w = BufferedWriter(f, buf_size: 4);
   // Write more than buffer size to trigger auto-flush
   u8[] data = u8[]();
@@ -847,47 +847,47 @@ buffered_writer_flush() `test(exclude: "wasm32") {
     data.push(65u8); // A
     i += 1;
   }
-  w.write(data)!;
-  w.close()!;
-  string content = File.read_content("/tmp/pr_iot_bwf")!;
+  w.write(data)?!;
+  w.close()?!;
+  string content = File.read_content("/tmp/pr_iot_bwf")?!;
   assert(content.len == 10, "all bytes flushed");
-  File.remove("/tmp/pr_iot_bwf")!;
+  File.remove("/tmp/pr_iot_bwf")?!;
 }
 
 buffered_writer_write_string() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_bws")!;
+  File f = File.create("/tmp/pr_iot_bws")?!;
   BufferedWriter w = BufferedWriter(f, buf_size: 16);
-  w.write_string("hello ")!;
-  w.write_string("world")!;
-  w.close()!;
-  string content = File.read_content("/tmp/pr_iot_bws")!;
+  w.write_string("hello ")?!;
+  w.write_string("world")?!;
+  w.close()?!;
+  string content = File.read_content("/tmp/pr_iot_bws")?!;
   assert(content == "hello world", "write_string through buffer");
-  File.remove("/tmp/pr_iot_bws")!;
+  File.remove("/tmp/pr_iot_bws")?!;
 }
 
 // ── File.write_line ──────────────────────────────────────────────────────────
 
 file_write_line() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_fwl")!;
-  f.write_line("hello")!;
-  f.write_line("world")!;
-  f.close()!;
-  string content = File.read_content("/tmp/pr_iot_fwl")!;
+  File f = File.create("/tmp/pr_iot_fwl")?!;
+  f.write_line("hello")?!;
+  f.write_line("world")?!;
+  f.close()?!;
+  string content = File.read_content("/tmp/pr_iot_fwl")?!;
   string sep = Platform.line_separator;
   assert(content == "hello" + sep + "world" + sep, "file write_line");
-  File.remove("/tmp/pr_iot_fwl")!;
+  File.remove("/tmp/pr_iot_fwl")?!;
 }
 
 // ── BufferedWriter.write_line ────────────────────────────────────────────────
 
 buffered_writer_write_line() `test(exclude: "wasm32") {
-  File f = File.create("/tmp/pr_iot_bwl")!;
+  File f = File.create("/tmp/pr_iot_bwl")?!;
   BufferedWriter w = BufferedWriter(f, buf_size: 16);
-  w.write_line("alpha")!;
-  w.write_line("beta")!;
-  w.close()!;
-  string content = File.read_content("/tmp/pr_iot_bwl")!;
+  w.write_line("alpha")?!;
+  w.write_line("beta")?!;
+  w.close()?!;
+  string content = File.read_content("/tmp/pr_iot_bwl")?!;
   string sep = Platform.line_separator;
   assert(content == "alpha" + sep + "beta" + sep, "buffered write_line");
-  File.remove("/tmp/pr_iot_bwl")!;
+  File.remove("/tmp/pr_iot_bwl")?!;
 }

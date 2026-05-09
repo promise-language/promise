@@ -19,7 +19,7 @@ test_inline_nonfailable() `test {
 
 // Inline enum constructor as failable function argument with ! unwrap.
 test_inline_failable_unwrap() `test {
-  string s = _consume_fail(Container.Items(values: ["x"]))!;
+  string s = _consume_fail(Container.Items(values: ["x"]))?!;
   assert(s == "ok", "failable result");
 }
 

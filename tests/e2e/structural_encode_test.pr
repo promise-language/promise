@@ -113,35 +113,35 @@ serializable_with_key_as_encodable() `test {
 assign_int_to_encodable() `test {
   Encodable e = 42;
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   assert(enc.to_string() == "42", "assign int to Encodable");
 }
 
 assign_string_to_encodable() `test {
   Encodable e = "hello";
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   assert(enc.to_string() == "\"hello\"", "assign string to Encodable");
 }
 
 assign_bool_to_encodable() `test {
   Encodable e = true;
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   assert(enc.to_string() == "true", "assign bool to Encodable");
 }
 
 assign_f64_to_encodable() `test {
   Encodable e = 2.5;
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   assert(enc.to_string() == "2.5", "assign f64 to Encodable");
 }
 
 assign_char_to_encodable() `test {
   Encodable e = 'A';
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   assert(enc.to_string() == "\"A\"", "assign char to Encodable");
 }
 
@@ -149,7 +149,7 @@ assign_var_to_encodable() `test {
   int x = 99;
   Encodable e = x;
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   assert(enc.to_string() == "99", "assign int var to Encodable");
 }
 
@@ -157,7 +157,7 @@ assign_serializable_to_encodable() `test {
   Widget w = Widget(name: "nut", count: 5);
   Encodable e = w;
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"name\":\"nut\""), "assign serializable to Encodable");
 }
@@ -251,17 +251,17 @@ round_trip_via_generic![T: Encodable + Decodable](T val) T {
 }
 
 generic_round_trip_int() `test {
-  int v = round_trip_via_generic[int](42)!;
+  int v = round_trip_via_generic[int](42)?!;
   assert(v == 42, "generic round trip: int");
 }
 
 generic_round_trip_string() `test {
-  string v = round_trip_via_generic[string]("hello")!;
+  string v = round_trip_via_generic[string]("hello")?!;
   assert(v == "hello", "generic round trip: string");
 }
 
 generic_round_trip_bool() `test {
-  bool v = round_trip_via_generic[bool](true)!;
+  bool v = round_trip_via_generic[bool](true)?!;
   assert(v == true, "generic round trip: bool");
 }
 
@@ -269,12 +269,12 @@ generic_round_trip_bool() `test {
 
 encode_pair(Encodable a, Encodable b) string {
   json.JsonEncoder enc = json.JsonEncoder();
-  enc.begin_array(2)!;
+  enc.begin_array(2)?!;
   a.encode(enc)? {
   };
   b.encode(enc)? {
   };
-  enc.end_array()!;
+  enc.end_array()?!;
   return enc.to_string();
 }
 
@@ -306,7 +306,7 @@ value_type_as_encodable_var() `test {
   Vec2 v = Vec2(x: 5, y: 6);
   Encodable e = v;
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"x\":5"), "value type var: x");
   assert(s.contains("\"y\":6"), "value type var: y");
@@ -338,7 +338,7 @@ value_type_serializable_as_encodable_var() `test {
   Dims d = Dims(w: 1920, h: 1080);
   Encodable e = d;
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"w\":1920"), "vt serializable var: w");
   assert(s.contains("\"h\":1080"), "vt serializable var: h");

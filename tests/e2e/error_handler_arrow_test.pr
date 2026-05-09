@@ -84,12 +84,12 @@ relay_typed!(int n) int {
 }
 
 test_arrow_typed_match() `test {
-  int v = relay_typed(-1)!;
+  int v = relay_typed(-1)?!;
   assert(v == 1, "arrow typed handler match");
 }
 
 test_arrow_typed_success() `test {
-  int v = relay_typed(5)!;
+  int v = relay_typed(5)?!;
   assert(v == 10, "arrow typed handler success");
 }
 
@@ -118,7 +118,7 @@ double_parse!(int n) int {
 }
 
 test_arrow_with_auto_prop() `test {
-  int v = double_parse(5)!;
+  int v = double_parse(5)?!;
   assert(v == 20, "arrow coexists with auto-propagation");
 }
 

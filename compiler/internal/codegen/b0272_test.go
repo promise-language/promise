@@ -27,7 +27,7 @@ func TestB0272FailableUnwrapStructuralDrop(t *testing.T) {
 		}
 		test!() {
 			FailableDataSource s = FailableMemDataSource();
-			Readable r = s.open_source("world")!;
+			Readable r = s.open_source("world")?!;
 		}
 	`)
 	fn := extractFunction(ir, "test")

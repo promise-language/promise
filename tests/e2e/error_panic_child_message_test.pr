@@ -8,5 +8,5 @@ fail_with_child_error!() {
 }
 
 main() `test(expected: "panic: app failure") {
-  fail_with_child_error()!;
+  fail_with_child_error()?!;
 }

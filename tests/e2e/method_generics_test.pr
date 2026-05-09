@@ -175,7 +175,7 @@ type Parser {
 
 test_failable_generic_method() `test {
   p := Parser();
-  int result = p.try_parse[int](42)!;
+  int result = p.try_parse[int](42)?!;
   assert(result == 42, "failable generic method");
 }
 

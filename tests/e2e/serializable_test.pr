@@ -119,7 +119,7 @@ type CustomEncode `serializable {
 encode_point_test() `test {
   Point p = Point(x: 3, y: 4);
   json.JsonEncoder enc = json.JsonEncoder();
-  p.encode(enc)!;
+  p.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"x\":3"), "has x:3");
   assert(s.contains("\"y\":4"), "has y:4");
@@ -128,9 +128,9 @@ encode_point_test() `test {
 decode_point_test() `test {
   Point p1 = Point(x: 10, y: 20);
   json.JsonEncoder enc = json.JsonEncoder();
-  p1.encode(enc)!;
+  p1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Point p2 = Point.decode(dec)!;
+  Point p2 = Point.decode(dec)?!;
   assert(p2.x == 10, "decoded x");
   assert(p2.y == 20, "decoded y");
 }
@@ -138,9 +138,9 @@ decode_point_test() `test {
 round_trip_point_test() `test {
   Point p1 = Point(x: 42, y: 99);
   json.JsonEncoder enc = json.JsonEncoder();
-  p1.encode(enc)!;
+  p1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Point p2 = Point.decode(dec)!;
+  Point p2 = Point.decode(dec)?!;
   assert(p2.x == p1.x, "round trip x");
   assert(p2.y == p1.y, "round trip y");
 }
@@ -150,7 +150,7 @@ round_trip_point_test() `test {
 mixed_fields_encode_test() `test {
   MixedFields m = MixedFields(label: "test", count: 5, score: 3.14, active: true);
   json.JsonEncoder enc = json.JsonEncoder();
-  m.encode(enc)!;
+  m.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"label\":\"test\""), "mixed: label");
   assert(s.contains("\"count\":5"), "mixed: count");
@@ -161,9 +161,9 @@ mixed_fields_encode_test() `test {
 mixed_fields_round_trip_test() `test {
   MixedFields m1 = MixedFields(label: "hello", count: 0, score: 2.5, active: false);
   json.JsonEncoder enc = json.JsonEncoder();
-  m1.encode(enc)!;
+  m1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  MixedFields m2 = MixedFields.decode(dec)!;
+  MixedFields m2 = MixedFields.decode(dec)?!;
   assert(m2.label == "hello", "rt label");
   assert(m2.count == 0, "rt count zero");
   assert(m2.score == 2.5, "rt score");
@@ -175,7 +175,7 @@ mixed_fields_round_trip_test() `test {
 nested_encode_test() `test {
   Person p = Person(name: "Alice", age: 30, address: Address(street: "123 Main", city: "NYC"));
   json.JsonEncoder enc = json.JsonEncoder();
-  p.encode(enc)!;
+  p.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"name\":\"Alice\""), "nested encode: name");
   assert(s.contains("\"age\":30"), "nested encode: age");
@@ -186,9 +186,9 @@ nested_encode_test() `test {
 nested_decode_test() `test {
   Person p1 = Person(name: "Bob", age: 25, address: Address(street: "456 Oak", city: "LA"));
   json.JsonEncoder enc = json.JsonEncoder();
-  p1.encode(enc)!;
+  p1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Person p2 = Person.decode(dec)!;
+  Person p2 = Person.decode(dec)?!;
   assert(p2.name == "Bob", "nested decode: name");
   assert(p2.age == 25, "nested decode: age");
   assert(p2.address.street == "456 Oak", "nested decode: street");
@@ -198,9 +198,9 @@ nested_decode_test() `test {
 nested_round_trip_test() `test {
   Person p1 = Person(name: "Carol", age: 40, address: Address(street: "789 Elm", city: "SF"));
   json.JsonEncoder enc = json.JsonEncoder();
-  p1.encode(enc)!;
+  p1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Person p2 = Person.decode(dec)!;
+  Person p2 = Person.decode(dec)?!;
   assert(p2.name == p1.name, "nested rt: name");
   assert(p2.age == p1.age, "nested rt: age");
   assert(p2.address.street == "789 Elm", "nested rt: street");
@@ -211,9 +211,9 @@ deep_nested_round_trip_test() `test {
   // 3 levels: uses Address → reuses existing types, but tests depth
   Person p1 = Person(name: "Deep", age: 1, address: Address(street: "A St", city: "B"));
   json.JsonEncoder enc = json.JsonEncoder();
-  p1.encode(enc)!;
+  p1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Person p2 = Person.decode(dec)!;
+  Person p2 = Person.decode(dec)?!;
   assert(p2.address.street == "A St", "deep nested: street");
   assert(p2.address.city == "B", "deep nested: city");
 }
@@ -221,12 +221,12 @@ deep_nested_round_trip_test() `test {
 nested_with_key_test() `test {
   Located l1 = Located(name: "X", pos: Point(x: 3, y: 4));
   json.JsonEncoder enc = json.JsonEncoder();
-  l1.encode(enc)!;
+  l1.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"position\":"), "nested key: uses wire name");
   assert(!s.contains("\"pos\":"), "nested key: no raw name");
   json.JsonDecoder dec = json.JsonDecoder(data: s);
-  Located l2 = Located.decode(dec)!;
+  Located l2 = Located.decode(dec)?!;
   assert(l2.pos.x == 3, "nested key decode: x");
   assert(l2.pos.y == 4, "nested key decode: y");
 }
@@ -234,9 +234,9 @@ nested_with_key_test() `test {
 multiple_nested_fields_test() `test {
   Rect r1 = Rect(origin: Point(x: 0, y: 0), size: Point(x: 100, y: 50));
   json.JsonEncoder enc = json.JsonEncoder();
-  r1.encode(enc)!;
+  r1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Rect r2 = Rect.decode(dec)!;
+  Rect r2 = Rect.decode(dec)?!;
   assert(r2.origin.x == 0, "multi nested: origin x");
   assert(r2.origin.y == 0, "multi nested: origin y");
   assert(r2.size.x == 100, "multi nested: size x");
@@ -248,7 +248,7 @@ multiple_nested_fields_test() `test {
 array_encode_test() `test {
   TaggedItem item = TaggedItem(name: "bolt", tags: ["metal", "small", "round"]);
   json.JsonEncoder enc = json.JsonEncoder();
-  item.encode(enc)!;
+  item.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"name\":\"bolt\""), "array encode: name");
   assert(s.contains("\"metal\""), "array encode: tag metal");
@@ -258,9 +258,9 @@ array_encode_test() `test {
 array_round_trip_test() `test {
   TaggedItem item1 = TaggedItem(name: "nut", tags: ["hex", "steel"]);
   json.JsonEncoder enc = json.JsonEncoder();
-  item1.encode(enc)!;
+  item1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  TaggedItem item2 = TaggedItem.decode(dec)!;
+  TaggedItem item2 = TaggedItem.decode(dec)?!;
   assert(item2.name == "nut", "array rt: name");
   assert(item2.tags.len == 2, "array rt: count");
   assert(item2.tags[0] == "hex", "array rt: 0");
@@ -270,18 +270,18 @@ array_round_trip_test() `test {
 array_empty_test() `test {
   TaggedItem item1 = TaggedItem(name: "bare", tags: string[]());
   json.JsonEncoder enc = json.JsonEncoder();
-  item1.encode(enc)!;
+  item1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  TaggedItem item2 = TaggedItem.decode(dec)!;
+  TaggedItem item2 = TaggedItem.decode(dec)?!;
   assert(item2.tags.len == 0, "array empty: no tags");
 }
 
 int_array_round_trip_test() `test {
   Scores s1 = Scores(label: "test", values: [10, 20, 30]);
   json.JsonEncoder enc = json.JsonEncoder();
-  s1.encode(enc)!;
+  s1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Scores s2 = Scores.decode(dec)!;
+  Scores s2 = Scores.decode(dec)?!;
   assert(s2.values.len == 3, "int array: count");
   assert(s2.values[0] == 10, "int array: 0");
   assert(s2.values[2] == 30, "int array: 2");
@@ -294,7 +294,7 @@ map_encode_test() `test {
   cfg.settings["color"] = "blue";
   cfg.settings["mode"] = "dark";
   json.JsonEncoder enc = json.JsonEncoder();
-  cfg.encode(enc)!;
+  cfg.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"title\":\"app\""), "map encode: title");
   assert(s.contains("\"color\":\"blue\""), "map encode: color");
@@ -304,18 +304,18 @@ map_round_trip_test() `test {
   Config cfg1 = Config(title: "web", settings: map[string, string]());
   cfg1.settings["port"] = "8080";
   json.JsonEncoder enc = json.JsonEncoder();
-  cfg1.encode(enc)!;
+  cfg1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Config cfg2 = Config.decode(dec)!;
+  Config cfg2 = Config.decode(dec)?!;
   assert(cfg2.title == "web", "map rt: title");
 }
 
 map_empty_test() `test {
   Config cfg1 = Config(title: "empty", settings: map[string, string]());
   json.JsonEncoder enc = json.JsonEncoder();
-  cfg1.encode(enc)!;
+  cfg1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Config cfg2 = Config.decode(dec)!;
+  Config cfg2 = Config.decode(dec)?!;
   assert(cfg2.title == "empty", "map empty: title");
 }
 
@@ -324,9 +324,9 @@ map_empty_test() `test {
 array_of_user_types_test() `test {
   Route r1 = Route(name: "trail", waypoints: [Point(x: 0, y: 0), Point(x: 10, y: 5), Point(x: 20, y: 10)]);
   json.JsonEncoder enc = json.JsonEncoder();
-  r1.encode(enc)!;
+  r1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Route r2 = Route.decode(dec)!;
+  Route r2 = Route.decode(dec)?!;
   assert(r2.name == "trail", "user type array: name");
   assert(r2.waypoints.len == 3, "user type array: count");
   assert(r2.waypoints[1].x == 10, "user type array: pt 2 x");
@@ -336,9 +336,9 @@ array_of_user_types_test() `test {
 f64_array_test() `test {
   Measurements m1 = Measurements(values: [1.5, 2.5, 3.5]);
   json.JsonEncoder enc = json.JsonEncoder();
-  m1.encode(enc)!;
+  m1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Measurements m2 = Measurements.decode(dec)!;
+  Measurements m2 = Measurements.decode(dec)?!;
   assert(m2.values.len == 3, "f64 array: count");
   assert(m2.values[0] == 1.5, "f64 array: 0");
 }
@@ -346,9 +346,9 @@ f64_array_test() `test {
 bool_array_test() `test {
   Flags f1 = Flags(bits: [true, false, true]);
   json.JsonEncoder enc = json.JsonEncoder();
-  f1.encode(enc)!;
+  f1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Flags f2 = Flags.decode(dec)!;
+  Flags f2 = Flags.decode(dec)?!;
   assert(f2.bits.len == 3, "bool array: count");
   assert(f2.bits[0] == true, "bool array: 0");
   assert(f2.bits[1] == false, "bool array: 1");
@@ -357,9 +357,9 @@ bool_array_test() `test {
 single_element_array_test() `test {
   Flags f1 = Flags(bits: [true]);
   json.JsonEncoder enc = json.JsonEncoder();
-  f1.encode(enc)!;
+  f1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Flags f2 = Flags.decode(dec)!;
+  Flags f2 = Flags.decode(dec)?!;
   assert(f2.bits.len == 1, "single elem: count");
 }
 
@@ -370,7 +370,7 @@ map_string_int_test() `test {
   c1.counts["views"] = 100;
   c1.counts["clicks"] = 5;
   json.JsonEncoder enc = json.JsonEncoder();
-  c1.encode(enc)!;
+  c1.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"views\":100"), "map int: views");
 }
@@ -381,7 +381,7 @@ int_key_map_encode_test() `test {
   IntKeyMap m = IntKeyMap(data: map[int, string]());
   m.data[42] = "answer";
   json.JsonEncoder enc = json.JsonEncoder();
-  m.encode(enc)!;
+  m.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"answer\""), "int key encode: has value");
 }
@@ -390,9 +390,9 @@ int_key_map_round_trip_test() `test {
   IntKeyMap m1 = IntKeyMap(data: map[int, string]());
   m1.data[100] = "hundred";
   json.JsonEncoder enc = json.JsonEncoder();
-  m1.encode(enc)!;
+  m1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  IntKeyMap m2 = IntKeyMap.decode(dec)!;
+  IntKeyMap m2 = IntKeyMap.decode(dec)?!;
 }
 
 // ── Mixed array + map in same type ──────────────────────────────────────────
@@ -401,9 +401,9 @@ mixed_array_and_map_test() `test {
   Dashboard d1 = Dashboard(title: "main", labels: ["a", "b"], metrics: map[string, int]());
   d1.metrics["total"] = 42;
   json.JsonEncoder enc = json.JsonEncoder();
-  d1.encode(enc)!;
+  d1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Dashboard d2 = Dashboard.decode(dec)!;
+  Dashboard d2 = Dashboard.decode(dec)?!;
   assert(d2.title == "main", "mixed: title");
   assert(d2.labels.len == 2, "mixed: labels count");
   assert(d2.labels[0] == "a", "mixed: label 0");
@@ -414,7 +414,7 @@ mixed_array_and_map_test() `test {
 generic_wrapper_int_test() `test {
   GoodWrapper[int] w = GoodWrapper[int](value: 42, label: "answer");
   json.JsonEncoder enc = json.JsonEncoder();
-  w.encode(enc)!;
+  w.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"value\":42"), "generic int: value");
   assert(s.contains("\"label\":\"answer\""), "generic int: label");
@@ -423,7 +423,7 @@ generic_wrapper_int_test() `test {
 generic_wrapper_string_test() `test {
   GoodWrapper[string] w = GoodWrapper[string](value: "hello", label: "greet");
   json.JsonEncoder enc = json.JsonEncoder();
-  w.encode(enc)!;
+  w.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"value\":\"hello\""), "generic string: value");
 }
@@ -431,9 +431,9 @@ generic_wrapper_string_test() `test {
 generic_wrapper_round_trip_test() `test {
   GoodWrapper[int] w1 = GoodWrapper[int](value: 99, label: "test");
   json.JsonEncoder enc = json.JsonEncoder();
-  w1.encode(enc)!;
+  w1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  GoodWrapper[int] w2 = GoodWrapper[int].decode(dec)!;
+  GoodWrapper[int] w2 = GoodWrapper[int].decode(dec)?!;
   assert(w2.value == 99, "generic rt: value");
   assert(w2.label == "test", "generic rt: label");
 }
@@ -441,7 +441,7 @@ generic_wrapper_round_trip_test() `test {
 skip_wrapper_test() `test {
   SkipWrapper[int] w = SkipWrapper[int](value: 42, label: "test");
   json.JsonEncoder enc = json.JsonEncoder();
-  w.encode(enc)!;
+  w.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"label\":\"test\""), "skip wrapper: label");
   assert(!s.contains("\"value\""), "skip wrapper: value skipped");
@@ -450,9 +450,9 @@ skip_wrapper_test() `test {
 generic_wrapper_user_type_test() `test {
   GoodWrapper[Point] w1 = GoodWrapper[Point](value: Point(x: 1, y: 2), label: "pt");
   json.JsonEncoder enc = json.JsonEncoder();
-  w1.encode(enc)!;
+  w1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  GoodWrapper[Point] w2 = GoodWrapper[Point].decode(dec)!;
+  GoodWrapper[Point] w2 = GoodWrapper[Point].decode(dec)?!;
   assert(w2.value.x == 1, "generic user type: x");
   assert(w2.value.y == 2, "generic user type: y");
   assert(w2.label == "pt", "generic user type: label");
@@ -461,18 +461,18 @@ generic_wrapper_user_type_test() `test {
 generic_wrapper_bool_test() `test {
   GoodWrapper[bool] w1 = GoodWrapper[bool](value: true, label: "flag");
   json.JsonEncoder enc = json.JsonEncoder();
-  w1.encode(enc)!;
+  w1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  GoodWrapper[bool] w2 = GoodWrapper[bool].decode(dec)!;
+  GoodWrapper[bool] w2 = GoodWrapper[bool].decode(dec)?!;
   assert(w2.value == true, "generic bool: value");
 }
 
 generic_wrapper_f64_test() `test {
   GoodWrapper[f64] w1 = GoodWrapper[f64](value: 3.14, label: "pi");
   json.JsonEncoder enc = json.JsonEncoder();
-  w1.encode(enc)!;
+  w1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  GoodWrapper[f64] w2 = GoodWrapper[f64].decode(dec)!;
+  GoodWrapper[f64] w2 = GoodWrapper[f64].decode(dec)?!;
   assert(w2.value == 3.14, "generic f64: value");
 }
 
@@ -481,7 +481,7 @@ generic_wrapper_f64_test() `test {
 key_annotation_test() `test {
   User u = User(name: "Alice", age: 30, _internal: "secret");
   json.JsonEncoder enc = json.JsonEncoder();
-  u.encode(enc)!;
+  u.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"user_name\":"), "key: has user_name");
   assert(!s.contains("\"name\":"), "key: no raw name");
@@ -490,7 +490,7 @@ key_annotation_test() `test {
 skip_annotation_test() `test {
   User u = User(name: "Bob", age: 25, _internal: "hidden");
   json.JsonEncoder enc = json.JsonEncoder();
-  u.encode(enc)!;
+  u.encode(enc)?!;
   string s = enc.to_string();
   assert(!s.contains("internal"), "skip: no internal field");
   assert(!s.contains("hidden"), "skip: no hidden value");
@@ -499,7 +499,7 @@ skip_annotation_test() `test {
 optional_omit_none_test() `test {
   User u = User(name: "Carol", age: 28, _internal: "x");
   json.JsonEncoder enc = json.JsonEncoder();
-  u.encode(enc)!;
+  u.encode(enc)?!;
   string s = enc.to_string();
   assert(!s.contains("email"), "optional none: email omitted");
 }
@@ -507,7 +507,7 @@ optional_omit_none_test() `test {
 optional_present_test() `test {
   User u = User(name: "Dave", age: 35, email: "d@test.com", _internal: "x");
   json.JsonEncoder enc = json.JsonEncoder();
-  u.encode(enc)!;
+  u.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"email\":\"d@test.com\""), "optional present: email included");
 }
@@ -515,7 +515,7 @@ optional_present_test() `test {
 include_none_test() `test {
   WithIncludeNone w = WithIncludeNone(name: "test");
   json.JsonEncoder enc = json.JsonEncoder();
-  w.encode(enc)!;
+  w.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"tag\":null"), "include_none: tag is null");
 }
@@ -523,7 +523,7 @@ include_none_test() `test {
 include_none_present_test() `test {
   WithIncludeNone w = WithIncludeNone(name: "test", tag: "hello");
   json.JsonEncoder enc = json.JsonEncoder();
-  w.encode(enc)!;
+  w.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"tag\":\"hello\""), "include_none present: tag has value");
 }
@@ -533,7 +533,7 @@ include_none_present_test() `test {
 multiple_optionals_none_test() `test {
   WithOptionals w = WithOptionals(name: "test");
   json.JsonEncoder enc = json.JsonEncoder();
-  w.encode(enc)!;
+  w.encode(enc)?!;
   string s = enc.to_string();
   assert(!s.contains("bio"), "multi opt: bio omitted");
   assert(!s.contains("level"), "multi opt: level omitted");
@@ -542,7 +542,7 @@ multiple_optionals_none_test() `test {
 multiple_optionals_some_test() `test {
   WithOptionals w = WithOptionals(name: "test", bio: "hello", level: 5);
   json.JsonEncoder enc = json.JsonEncoder();
-  w.encode(enc)!;
+  w.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"bio\":\"hello\""), "multi opt: bio present");
   assert(s.contains("\"level\":5"), "multi opt: level present");
@@ -551,9 +551,9 @@ multiple_optionals_some_test() `test {
 multiple_optionals_round_trip_test() `test {
   WithOptionals w1 = WithOptionals(name: "test", level: 3);
   json.JsonEncoder enc = json.JsonEncoder();
-  w1.encode(enc)!;
+  w1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  WithOptionals w2 = WithOptionals.decode(dec)!;
+  WithOptionals w2 = WithOptionals.decode(dec)?!;
   assert(w2.name == "test", "multi opt rt: name");
   assert(w2.bio is absent, "multi opt rt: bio absent");
   assert(w2.level is present, "multi opt rt: level present");
@@ -564,9 +564,9 @@ multiple_optionals_round_trip_test() `test {
 decode_optional_present_test() `test {
   User u1 = User(name: "Eve", age: 40, email: "eve@test.com", _internal: "s");
   json.JsonEncoder enc = json.JsonEncoder();
-  u1.encode(enc)!;
+  u1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  User u2 = User.decode(dec)!;
+  User u2 = User.decode(dec)?!;
   assert(u2.name == "Eve", "decode opt present: name");
   assert(u2.age == 40, "decode opt present: age");
   assert(u2.email is present, "decode opt present: email exists");
@@ -575,9 +575,9 @@ decode_optional_present_test() `test {
 decode_optional_missing_test() `test {
   User u1 = User(name: "Frank", age: 50, _internal: "s");
   json.JsonEncoder enc = json.JsonEncoder();
-  u1.encode(enc)!;
+  u1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  User u2 = User.decode(dec)!;
+  User u2 = User.decode(dec)?!;
   assert(u2.name == "Frank", "decode opt missing: name");
   assert(u2.age == 50, "decode opt missing: age");
   assert(u2.email is absent, "decode opt missing: email absent");
@@ -588,9 +588,9 @@ decode_optional_missing_test() `test {
 string_escape_round_trip_test() `test {
   MixedFields m1 = MixedFields(label: "has \"quotes\" and\nnewlines", count: 1, score: 0.0, active: true);
   json.JsonEncoder enc = json.JsonEncoder();
-  m1.encode(enc)!;
+  m1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  MixedFields m2 = MixedFields.decode(dec)!;
+  MixedFields m2 = MixedFields.decode(dec)?!;
   assert(m2.label == "has \"quotes\" and\nnewlines", "escape rt: label preserved");
 }
 
@@ -599,9 +599,9 @@ string_escape_round_trip_test() `test {
 zero_values_test() `test {
   MixedFields m1 = MixedFields(label: "", count: 0, score: 0.0, active: false);
   json.JsonEncoder enc = json.JsonEncoder();
-  m1.encode(enc)!;
+  m1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  MixedFields m2 = MixedFields.decode(dec)!;
+  MixedFields m2 = MixedFields.decode(dec)?!;
   assert(m2.label == "", "zero: empty string");
   assert(m2.count == 0, "zero: count");
   assert(m2.active == false, "zero: bool false");
@@ -610,9 +610,9 @@ zero_values_test() `test {
 negative_values_test() `test {
   Point p1 = Point(x: -42, y: -1);
   json.JsonEncoder enc = json.JsonEncoder();
-  p1.encode(enc)!;
+  p1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Point p2 = Point.decode(dec)!;
+  Point p2 = Point.decode(dec)?!;
   assert(p2.x == -42, "negative: x");
   assert(p2.y == -1, "negative: y");
 }
@@ -620,9 +620,9 @@ negative_values_test() `test {
 large_values_test() `test {
   Point p1 = Point(x: 1000000, y: -999999);
   json.JsonEncoder enc = json.JsonEncoder();
-  p1.encode(enc)!;
+  p1.encode(enc)?!;
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  Point p2 = Point.decode(dec)!;
+  Point p2 = Point.decode(dec)?!;
   assert(p2.x == 1000000, "large: x");
   assert(p2.y == -999999, "large: y");
 }
@@ -632,7 +632,7 @@ large_values_test() `test {
 custom_encode_test() `test {
   CustomEncode c = CustomEncode(value: 42);
   json.JsonEncoder enc = json.JsonEncoder();
-  c.encode(enc)!;
+  c.encode(enc)?!;
   string s = enc.to_string();
   assert(s == "\"custom:42\"", "custom encode: " + s);
 }
@@ -642,10 +642,10 @@ custom_encode_test() `test {
 decode_with_key_test() `test {
   User u1 = User(name: "Grace", age: 28, _internal: "x");
   json.JsonEncoder enc = json.JsonEncoder();
-  u1.encode(enc)!;
+  u1.encode(enc)?!;
   // The encoded JSON uses "user_name" not "name" — decode must match.
   json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-  User u2 = User.decode(dec)!;
+  User u2 = User.decode(dec)?!;
   assert(u2.name == "Grace", "decode key: name via user_name");
   assert(u2.age == 28, "decode key: age");
 }
@@ -653,22 +653,22 @@ decode_with_key_test() `test {
 // ── Module-qualified generic convenience functions (T0005) ──────────────────
 
 encode_string_point_test() `test {
-  string s = json.encode_string[Point](Point(x: 1, y: 2))!;
+  string s = json.encode_string[Point](Point(x: 1, y: 2))?!;
   assert(s.contains("\"x\":1"), "encode_string point x");
   assert(s.contains("\"y\":2"), "encode_string point y");
 }
 
 decode_string_point_test() `test {
   string data = "\{\"x\":10,\"y\":20}";
-  Point p = json.decode_string[Point](data)!;
+  Point p = json.decode_string[Point](data)?!;
   assert(p.x == 10, "decode_string point x");
   assert(p.y == 20, "decode_string point y");
 }
 
 encode_decode_round_trip_test() `test {
   MixedFields orig = MixedFields(label: "test", count: 42, score: 3.14, active: true);
-  string s = json.encode_string[MixedFields](orig)!;
-  MixedFields copy = json.decode_string[MixedFields](s)!;
+  string s = json.encode_string[MixedFields](orig)?!;
+  MixedFields copy = json.decode_string[MixedFields](s)?!;
   assert(copy.label == "test", "round trip label");
   assert(copy.count == 42, "round trip count");
   assert(copy.score > 3.13 && copy.score < 3.15, "round trip score");
@@ -676,7 +676,7 @@ encode_decode_round_trip_test() `test {
 }
 
 encode_string_pretty_test() `test {
-  string s = json.encode_string_pretty[Point](Point(x: 1, y: 2))!;
+  string s = json.encode_string_pretty[Point](Point(x: 1, y: 2))?!;
   assert(s.contains("\n"), "pretty has newlines");
   assert(s.contains("  \"x\""), "pretty has indented key");
 }
@@ -685,8 +685,8 @@ encode_string_pretty_test() `test {
 encode_decode_optionals_test() `test {
   // present optional
   WithOptionals w1 = WithOptionals(name: "Alice", bio: "hi", level: 5);
-  string s1 = json.encode_string[WithOptionals](w1)!;
-  WithOptionals c1 = json.decode_string[WithOptionals](s1)!;
+  string s1 = json.encode_string[WithOptionals](w1)?!;
+  WithOptionals c1 = json.decode_string[WithOptionals](s1)?!;
   assert(c1.name == "Alice", "opt rt: name");
   assert(c1.bio is present, "opt rt: bio present");
   if b := c1.bio {
@@ -696,8 +696,8 @@ encode_decode_optionals_test() `test {
 
   // absent optionals
   WithOptionals w2 = WithOptionals(name: "Bob");
-  string s2 = json.encode_string[WithOptionals](w2)!;
-  WithOptionals c2 = json.decode_string[WithOptionals](s2)!;
+  string s2 = json.encode_string[WithOptionals](w2)?!;
+  WithOptionals c2 = json.decode_string[WithOptionals](s2)?!;
   assert(c2.name == "Bob", "opt rt absent: name");
   assert(c2.bio is absent, "opt rt absent: bio");
   assert(c2.level is absent, "opt rt absent: level");
@@ -706,10 +706,10 @@ encode_decode_optionals_test() `test {
 // Round-trip with nested serializable type
 encode_decode_nested_test() `test {
   Person p = Person(name: "Eve", age: 25, address: Address(street: "123 Main", city: "NYC"));
-  string s = json.encode_string[Person](p)!;
+  string s = json.encode_string[Person](p)?!;
   assert(s.contains("\"name\":\"Eve\""), "nested enc: name");
   assert(s.contains("\"street\":\"123 Main\""), "nested enc: street");
-  Person p2 = json.decode_string[Person](s)!;
+  Person p2 = json.decode_string[Person](s)?!;
   assert(p2.name == "Eve", "nested dec: name");
   assert(p2.age == 25, "nested dec: age");
   assert(p2.address.street == "123 Main", "nested dec: street");
@@ -719,9 +719,9 @@ encode_decode_nested_test() `test {
 // Round-trip with array fields
 encode_decode_array_field_test() `test {
   TaggedItem item = TaggedItem(name: "widget", tags: ["red", "small"]);
-  string s = json.encode_string[TaggedItem](item)!;
+  string s = json.encode_string[TaggedItem](item)?!;
   assert(s.contains("\"tags\":[\"red\",\"small\"]"), "array field enc");
-  TaggedItem item2 = json.decode_string[TaggedItem](s)!;
+  TaggedItem item2 = json.decode_string[TaggedItem](s)?!;
   assert(item2.name == "widget", "array field dec: name");
   assert(item2.tags.len == 2, "array field dec: tags len");
   assert(item2.tags[0] == "red", "array field dec: tag 0");
@@ -731,10 +731,10 @@ encode_decode_array_field_test() `test {
 // Round-trip with key remapping
 encode_decode_key_remap_test() `test {
   User u = User(name: "Grace", age: 28, _internal: "x");
-  string s = json.encode_string[User](u)!;
+  string s = json.encode_string[User](u)?!;
   assert(s.contains("\"user_name\":\"Grace\""), "key remap enc: user_name");
   assert(!s.contains("\"name\""), "key remap enc: no bare name key");
-  User u2 = json.decode_string[User](s)!;
+  User u2 = json.decode_string[User](s)?!;
   assert(u2.name == "Grace", "key remap dec: name");
   assert(u2.age == 28, "key remap dec: age");
 }
@@ -742,10 +742,10 @@ encode_decode_key_remap_test() `test {
 // Pretty encode round-trip (pretty output is valid JSON)
 encode_string_pretty_round_trip_test() `test {
   Person p = Person(name: "Zoe", age: 30, address: Address(street: "456 Oak", city: "LA"));
-  string pretty = json.encode_string_pretty[Person](p)!;
+  string pretty = json.encode_string_pretty[Person](p)?!;
   assert(pretty.contains("\n"), "pretty rt: has newlines");
   // Pretty output should be parseable back
-  Person p2 = json.decode_string[Person](pretty)!;
+  Person p2 = json.decode_string[Person](pretty)?!;
   assert(p2.name == "Zoe", "pretty rt: name");
   assert(p2.address.city == "LA", "pretty rt: city");
 }
@@ -800,7 +800,7 @@ type FlatWithSkip `serializable {
 
 flatten_encode_test() `test {
   FlatDoc doc = FlatDoc(title: "Hello", meta: Metadata(author: "Alice", version: 2));
-  string s = json.encode_string[FlatDoc](doc)!;
+  string s = json.encode_string[FlatDoc](doc)?!;
   assert(s.contains("\"title\":\"Hello\""), "flatten enc: title");
   assert(s.contains("\"author\":\"Alice\""), "flatten enc: author inlined");
   assert(s.contains("\"version\":2"), "flatten enc: version inlined");
@@ -810,7 +810,7 @@ flatten_encode_test() `test {
 flatten_decode_test() `test {
   // Decode from flat JSON — keys are at the top level
   string data = "\{\"title\":\"Doc\",\"author\":\"Bob\",\"version\":3}";
-  FlatDoc doc = json.decode_string[FlatDoc](data)!;
+  FlatDoc doc = json.decode_string[FlatDoc](data)?!;
   assert(doc.title == "Doc", "flatten dec: title");
   assert(doc.meta.author == "Bob", "flatten dec: author");
   assert(doc.meta.version == 3, "flatten dec: version");
@@ -818,8 +818,8 @@ flatten_decode_test() `test {
 
 flatten_round_trip_test() `test {
   FlatDoc doc1 = FlatDoc(title: "RT", meta: Metadata(author: "Carol", version: 1));
-  string s = json.encode_string[FlatDoc](doc1)!;
-  FlatDoc doc2 = json.decode_string[FlatDoc](s)!;
+  string s = json.encode_string[FlatDoc](doc1)?!;
+  FlatDoc doc2 = json.decode_string[FlatDoc](s)?!;
   assert(doc2.title == "RT", "flatten rt: title");
   assert(doc2.meta.author == "Carol", "flatten rt: author");
   assert(doc2.meta.version == 1, "flatten rt: version");
@@ -827,14 +827,14 @@ flatten_round_trip_test() `test {
 
 flatten_with_optional_sibling_test() `test {
   Location loc1 = Location(name: "Park", position: Coords(lat: 37.7749, lon: -122.4194), description: "Nice park");
-  string s = json.encode_string[Location](loc1)!;
+  string s = json.encode_string[Location](loc1)?!;
   assert(s.contains("\"name\":\"Park\""), "flatten opt: name");
   assert(s.contains("\"lat\":"), "flatten opt: lat inlined");
   assert(s.contains("\"lon\":"), "flatten opt: lon inlined");
   assert(s.contains("\"description\":\"Nice park\""), "flatten opt: description");
   assert(!s.contains("\"position\""), "flatten opt: no wrapper key");
 
-  Location loc2 = json.decode_string[Location](s)!;
+  Location loc2 = json.decode_string[Location](s)?!;
   assert(loc2.name == "Park", "flatten opt dec: name");
   assert(loc2.position.lat > 37.77, "flatten opt dec: lat");
   assert(loc2.description is present, "flatten opt dec: description present");
@@ -843,13 +843,13 @@ flatten_with_optional_sibling_test() `test {
 flatten_with_optional_subfields_test() `test {
   // Inner type has optional fields
   WithOptionalFields w1 = WithOptionalFields(label: "test", inner: WithOptionals(name: "Alice", bio: "hi", level: 5));
-  string s = json.encode_string[WithOptionalFields](w1)!;
+  string s = json.encode_string[WithOptionalFields](w1)?!;
   assert(s.contains("\"label\":\"test\""), "flatten opt sub: label");
   assert(s.contains("\"name\":\"Alice\""), "flatten opt sub: name inlined");
   assert(s.contains("\"bio\":\"hi\""), "flatten opt sub: bio inlined");
   assert(s.contains("\"level\":5"), "flatten opt sub: level inlined");
 
-  WithOptionalFields w2 = json.decode_string[WithOptionalFields](s)!;
+  WithOptionalFields w2 = json.decode_string[WithOptionalFields](s)?!;
   assert(w2.label == "test", "flatten opt sub dec: label");
   assert(w2.inner.name == "Alice", "flatten opt sub dec: name");
   assert(w2.inner.bio is present, "flatten opt sub dec: bio present");
@@ -859,11 +859,11 @@ flatten_with_optional_subfields_test() `test {
 flatten_with_absent_optional_subfields_test() `test {
   // Inner optional fields absent — should omit from JSON
   WithOptionalFields w1 = WithOptionalFields(label: "minimal", inner: WithOptionals(name: "Bob"));
-  string s = json.encode_string[WithOptionalFields](w1)!;
+  string s = json.encode_string[WithOptionalFields](w1)?!;
   assert(!s.contains("\"bio\""), "flatten absent: bio omitted");
   assert(!s.contains("\"level\""), "flatten absent: level omitted");
 
-  WithOptionalFields w2 = json.decode_string[WithOptionalFields](s)!;
+  WithOptionalFields w2 = json.decode_string[WithOptionalFields](s)?!;
   assert(w2.inner.name == "Bob", "flatten absent dec: name");
   assert(w2.inner.bio is absent, "flatten absent dec: bio absent");
   assert(w2.inner.level is absent, "flatten absent dec: level absent");
@@ -871,14 +871,14 @@ flatten_with_absent_optional_subfields_test() `test {
 
 flatten_with_key_annotation_test() `test {
   FlatKeyed fk1 = FlatKeyed(id: 42, details: KeyedInner(first_name: "John", last_name: "Doe"));
-  string s = json.encode_string[FlatKeyed](fk1)!;
+  string s = json.encode_string[FlatKeyed](fk1)?!;
   assert(s.contains("\"id\":42"), "flatten key: id");
   assert(s.contains("\"firstName\":\"John\""), "flatten key: firstName (remapped)");
   assert(s.contains("\"lastName\":\"Doe\""), "flatten key: lastName (remapped)");
   assert(!s.contains("\"first_name\""), "flatten key: no raw name");
   assert(!s.contains("\"details\""), "flatten key: no wrapper");
 
-  FlatKeyed fk2 = json.decode_string[FlatKeyed](s)!;
+  FlatKeyed fk2 = json.decode_string[FlatKeyed](s)?!;
   assert(fk2.id == 42, "flatten key dec: id");
   assert(fk2.details.first_name == "John", "flatten key dec: first_name");
   assert(fk2.details.last_name == "Doe", "flatten key dec: last_name");
@@ -886,14 +886,14 @@ flatten_with_key_annotation_test() `test {
 
 flatten_with_skip_subfield_test() `test {
   FlatWithSkip fw1 = FlatWithSkip(code: 200, info: SkipInner(visible: "ok", hidden: "secret"));
-  string s = json.encode_string[FlatWithSkip](fw1)!;
+  string s = json.encode_string[FlatWithSkip](fw1)?!;
   assert(s.contains("\"code\":200"), "flatten skip: code");
   assert(s.contains("\"visible\":\"ok\""), "flatten skip: visible inlined");
   assert(!s.contains("\"hidden\""), "flatten skip: hidden skipped");
   assert(!s.contains("\"secret\""), "flatten skip: hidden value absent");
   assert(!s.contains("\"info\""), "flatten skip: no wrapper");
 
-  FlatWithSkip fw2 = json.decode_string[FlatWithSkip](s)!;
+  FlatWithSkip fw2 = json.decode_string[FlatWithSkip](s)?!;
   assert(fw2.code == 200, "flatten skip dec: code");
   assert(fw2.info.visible == "ok", "flatten skip dec: visible");
   assert(fw2.info.hidden == "", "flatten skip dec: hidden default");
@@ -919,7 +919,7 @@ flatten_multiple_test() `test {
   MultiFlat mf1 = MultiFlat(name: "box",
   size: Dimensions(width: 100, height: 50),
   style: Style(color: "red", bold: true));
-  string s = json.encode_string[MultiFlat](mf1)!;
+  string s = json.encode_string[MultiFlat](mf1)?!;
   assert(s.contains("\"name\":\"box\""), "multi flatten: name");
   assert(s.contains("\"width\":100"), "multi flatten: width inlined");
   assert(s.contains("\"height\":50"), "multi flatten: height inlined");
@@ -928,7 +928,7 @@ flatten_multiple_test() `test {
   assert(!s.contains("\"size\""), "multi flatten: no size wrapper");
   assert(!s.contains("\"style\""), "multi flatten: no style wrapper");
 
-  MultiFlat mf2 = json.decode_string[MultiFlat](s)!;
+  MultiFlat mf2 = json.decode_string[MultiFlat](s)?!;
   assert(mf2.name == "box", "multi flatten dec: name");
   assert(mf2.size.width == 100, "multi flatten dec: width");
   assert(mf2.size.height == 50, "multi flatten dec: height");

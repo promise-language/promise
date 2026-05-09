@@ -13,13 +13,13 @@ error_handling ok""", exclude: "wasm32") {
   // Test 1: open, write_string, close, open, read_all, close
   channel[string] ch1 = channel[string](capacity: 1);
   go {
-    io.File f = io.File.create("/tmp/pr_sc_ops1")!;
-    f.write_string("goroutine wrote this")!;
-    f.close()!;
-    io.File f2 = io.File.open("/tmp/pr_sc_ops1", readonly: true)!;
-    string data = f2.read_all()!;
-    f2.close()!;
-    io.File.remove("/tmp/pr_sc_ops1")!;
+    io.File f = io.File.create("/tmp/pr_sc_ops1")?!;
+    f.write_string("goroutine wrote this")?!;
+    f.close()?!;
+    io.File f2 = io.File.open("/tmp/pr_sc_ops1", readonly: true)?!;
+    string data = f2.read_all()?!;
+    f2.close()?!;
+    io.File.remove("/tmp/pr_sc_ops1")?!;
     ch1.send(data);
   };
   r1 := <-ch1;
@@ -31,9 +31,9 @@ error_handling ok""", exclude: "wasm32") {
   // Test 2: write_content + read_content from goroutine
   channel[string] ch2 = channel[string](capacity: 1);
   go {
-    io.File.write_content("/tmp/pr_sc_ops2", "content ops")!;
-    string d = io.File.read_content("/tmp/pr_sc_ops2")!;
-    io.File.remove("/tmp/pr_sc_ops2")!;
+    io.File.write_content("/tmp/pr_sc_ops2", "content ops")?!;
+    string d = io.File.read_content("/tmp/pr_sc_ops2")?!;
+    io.File.remove("/tmp/pr_sc_ops2")?!;
     ch2.send(d);
   };
   r2 := <-ch2;
@@ -45,12 +45,12 @@ error_handling ok""", exclude: "wasm32") {
   // Test 3: seek from goroutine
   channel[string] ch3 = channel[string](capacity: 1);
   go {
-    io.File.write_content("/tmp/pr_sc_ops3", "abcdefgh")!;
-    io.File f = io.File.open("/tmp/pr_sc_ops3")!;
-    f.seek(4)!;
-    string rest = f.read_all()!;
-    f.close()!;
-    io.File.remove("/tmp/pr_sc_ops3")!;
+    io.File.write_content("/tmp/pr_sc_ops3", "abcdefgh")?!;
+    io.File f = io.File.open("/tmp/pr_sc_ops3")?!;
+    f.seek(4)?!;
+    string rest = f.read_all()?!;
+    f.close()?!;
+    io.File.remove("/tmp/pr_sc_ops3")?!;
     ch3.send(rest);
   };
   r3 := <-ch3;
@@ -62,9 +62,9 @@ error_handling ok""", exclude: "wasm32") {
   // Test 4: stat_size from goroutine
   channel[int] ch4 = channel[int](capacity: 1);
   go {
-    io.File.write_content("/tmp/pr_sc_ops4", "12345678")!;
-    int sz = io.File.size("/tmp/pr_sc_ops4")!;
-    io.File.remove("/tmp/pr_sc_ops4")!;
+    io.File.write_content("/tmp/pr_sc_ops4", "12345678")?!;
+    int sz = io.File.size("/tmp/pr_sc_ops4")?!;
+    io.File.remove("/tmp/pr_sc_ops4")?!;
     ch4.send(sz);
   };
   r4 := <-ch4;
@@ -76,9 +76,9 @@ error_handling ok""", exclude: "wasm32") {
   // Test 5: exists from goroutine
   channel[int] ch5 = channel[int](capacity: 1);
   go {
-    io.File.write_content("/tmp/pr_sc_ops5", "x")!;
+    io.File.write_content("/tmp/pr_sc_ops5", "x")?!;
     bool e1 = io.File.exists("/tmp/pr_sc_ops5");
-    io.File.remove("/tmp/pr_sc_ops5")!;
+    io.File.remove("/tmp/pr_sc_ops5")?!;
     bool e2 = io.File.exists("/tmp/pr_sc_ops5");
     int result = 0;
     if e1 {
@@ -99,11 +99,11 @@ error_handling ok""", exclude: "wasm32") {
   channel[int] ch6 = channel[int](capacity: 1);
   go {
     if io.Dir.exists("/tmp/pr_sc_ops6_dir") {
-      io.Dir.remove("/tmp/pr_sc_ops6_dir")!;
+      io.Dir.remove("/tmp/pr_sc_ops6_dir")?!;
     }
-    io.Dir.make("/tmp/pr_sc_ops6_dir")!;
+    io.Dir.make("/tmp/pr_sc_ops6_dir")?!;
     bool de1 = io.Dir.exists("/tmp/pr_sc_ops6_dir");
-    io.Dir.remove("/tmp/pr_sc_ops6_dir")!;
+    io.Dir.remove("/tmp/pr_sc_ops6_dir")?!;
     bool de2 = io.Dir.exists("/tmp/pr_sc_ops6_dir");
     int result = 0;
     if de1 {

@@ -2,103 +2,103 @@
 // ── Encoder tests ───────────────────────────────────────────────────────────
 encode_int_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_int(42)!;
+  enc.encode_int(42)?!;
   assert(enc.to_string() == "42", "encode int");
 }
 
 encode_negative_int_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_int(-7)!;
+  enc.encode_int(-7)?!;
   assert(enc.to_string() == "-7", "encode negative int");
 }
 
 encode_uint_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_uint(100u)!;
+  enc.encode_uint(100u)?!;
   assert(enc.to_string() == "100", "encode uint");
 }
 
 encode_f64_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_f64(3.14)!;
+  enc.encode_f64(3.14)?!;
   string s = enc.to_string();
   assert(s.starts_with("3.14"), "encode f64: {s}");
 }
 
 encode_bool_true_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_bool(true)!;
+  enc.encode_bool(true)?!;
   assert(enc.to_string() == "true", "encode true");
 }
 
 encode_bool_false_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_bool(false)!;
+  enc.encode_bool(false)?!;
   assert(enc.to_string() == "false", "encode false");
 }
 
 encode_string_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_string("hello")!;
+  enc.encode_string("hello")?!;
   assert(enc.to_string() == "\"hello\"", "encode string");
 }
 
 encode_string_escapes_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_string("a\"b\\c\nd")!;
+  enc.encode_string("a\"b\\c\nd")?!;
   assert(enc.to_string() == "\"a\\\"b\\\\c\\nd\"", "encode string escapes");
 }
 
 encode_none_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_none()!;
+  enc.encode_none()?!;
   assert(enc.to_string() == "null", "encode none");
 }
 
 encode_empty_object_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.begin_object(0)!;
-  enc.end_object()!;
+  enc.begin_object(0)?!;
+  enc.end_object()?!;
   assert(enc.to_string() == "\{}", "encode empty object");
 }
 
 encode_object_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.begin_object(2)!;
-  enc.encode_key("name")!;
-  enc.encode_string("Alice")!;
-  enc.encode_key("age")!;
-  enc.encode_int(30)!;
-  enc.end_object()!;
+  enc.begin_object(2)?!;
+  enc.encode_key("name")?!;
+  enc.encode_string("Alice")?!;
+  enc.encode_key("age")?!;
+  enc.encode_int(30)?!;
+  enc.end_object()?!;
   assert(enc.to_string() == "\{\"name\":\"Alice\",\"age\":30}", "encode object");
 }
 
 encode_empty_array_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.begin_array(0)!;
-  enc.end_array()!;
+  enc.begin_array(0)?!;
+  enc.end_array()?!;
   assert(enc.to_string() == "[]", "encode empty array");
 }
 
 encode_array_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.begin_array(3)!;
-  enc.encode_int(1)!;
-  enc.encode_int(2)!;
-  enc.encode_int(3)!;
-  enc.end_array()!;
+  enc.begin_array(3)?!;
+  enc.encode_int(1)?!;
+  enc.encode_int(2)?!;
+  enc.encode_int(3)?!;
+  enc.end_array()?!;
   assert(enc.to_string() == "[1,2,3]", "encode array");
 }
 
 encode_nested_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.begin_object(1)!;
-  enc.encode_key("items")!;
-  enc.begin_array(2)!;
-  enc.encode_string("a")!;
-  enc.encode_string("b")!;
-  enc.end_array()!;
-  enc.end_object()!;
+  enc.begin_object(1)?!;
+  enc.encode_key("items")?!;
+  enc.begin_array(2)?!;
+  enc.encode_string("a")?!;
+  enc.encode_string("b")?!;
+  enc.end_array()?!;
+  enc.end_object()?!;
   assert(enc.to_string() == "\{\"items\":[\"a\",\"b\"]}", "encode nested");
 }
 
@@ -106,116 +106,116 @@ encode_nested_test() `test {
 
 decode_int_test() `test {
   JsonDecoder dec = JsonDecoder(data: "42");
-  int v = dec.decode_int()!;
+  int v = dec.decode_int()?!;
   assert(v == 42, "decode int");
 }
 
 decode_negative_int_test() `test {
   JsonDecoder dec = JsonDecoder(data: "-7");
-  int v = dec.decode_int()!;
+  int v = dec.decode_int()?!;
   assert(v == -7, "decode negative int");
 }
 
 decode_uint_test() `test {
   JsonDecoder dec = JsonDecoder(data: "100");
-  uint v = dec.decode_uint()!;
+  uint v = dec.decode_uint()?!;
   assert(v == 100u, "decode uint");
 }
 
 decode_f64_test() `test {
   JsonDecoder dec = JsonDecoder(data: "3.14");
-  f64 v = dec.decode_f64()!;
+  f64 v = dec.decode_f64()?!;
   assert(v > 3.13 && v < 3.15, "decode f64");
 }
 
 decode_bool_true_test() `test {
   JsonDecoder dec = JsonDecoder(data: "true");
-  bool v = dec.decode_bool()!;
+  bool v = dec.decode_bool()?!;
   assert(v == true, "decode true");
 }
 
 decode_bool_false_test() `test {
   JsonDecoder dec = JsonDecoder(data: "false");
-  bool v = dec.decode_bool()!;
+  bool v = dec.decode_bool()?!;
   assert(v == false, "decode false");
 }
 
 decode_string_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"hello\"");
-  string v = dec.decode_string()!;
+  string v = dec.decode_string()?!;
   assert(v == "hello", "decode string");
 }
 
 decode_string_escapes_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"a\\\"b\\\\c\\nd\"");
-  string v = dec.decode_string()!;
+  string v = dec.decode_string()?!;
   assert(v == "a\"b\\c\nd", "decode string escapes");
 }
 
 decode_none_test() `test {
   JsonDecoder dec = JsonDecoder(data: "null");
-  bool is_null = dec.decode_none()!;
+  bool is_null = dec.decode_none()?!;
   assert(is_null, "decode none");
 }
 
 decode_none_not_null_test() `test {
   JsonDecoder dec = JsonDecoder(data: "42");
-  bool is_null = dec.decode_none()!;
+  bool is_null = dec.decode_none()?!;
   assert(!is_null, "decode none returns false for non-null");
-  int v = dec.decode_int()!;
+  int v = dec.decode_int()?!;
   assert(v == 42, "can still read value after decode_none returns false");
 }
 
 decode_object_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\{\"name\":\"Alice\",\"age\":30}");
-  dec.begin_object()!;
+  dec.begin_object()?!;
   string name = "";
   int age = 0;
   for {
-    string? k = dec.next_key()!;
+    string? k = dec.next_key()?!;
     if k is absent {
       break;
     }
     string key = k ?: "";
     if key == "name" {
-      name = dec.decode_string()!;
+      name = dec.decode_string()?!;
     } else if key == "age" {
-      age = dec.decode_int()!;
+      age = dec.decode_int()?!;
     } else {
-      dec.skip_value()!;
+      dec.skip_value()?!;
     }
   }
-  dec.end_object()!;
+  dec.end_object()?!;
   assert(name == "Alice", "decode object name");
   assert(age == 30, "decode object age");
 }
 
 decode_empty_object_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\{}");
-  dec.begin_object()!;
-  string? key = dec.next_key()!;
+  dec.begin_object()?!;
+  string? key = dec.next_key()?!;
   assert(key is absent, "empty object has no keys");
-  dec.end_object()!;
+  dec.end_object()?!;
 }
 
 decode_array_test() `test {
   // Test array via a wrapping object
   JsonDecoder dec = JsonDecoder(data: "[10,20,30]");
-  dec.begin_array()!;
+  dec.begin_array()?!;
   // Read first element
-  int a = dec.decode_int()!;
+  int a = dec.decode_int()?!;
   // Manually skip comma and read second
   dec._skip_whitespace();
   if dec._pos < dec._data.len && dec._data[dec._pos] == ',' {
     dec._pos = dec._pos + 1;
   }
-  int b = dec.decode_int()!;
+  int b = dec.decode_int()?!;
   dec._skip_whitespace();
   if dec._pos < dec._data.len && dec._data[dec._pos] == ',' {
     dec._pos = dec._pos + 1;
   }
-  int c = dec.decode_int()!;
-  dec.end_array()!;
+  int c = dec.decode_int()?!;
+  dec.end_array()?!;
   assert(a == 10, "decode array[0]");
   assert(b == 20, "decode array[1]");
   assert(c == 30, "decode array[2]");
@@ -223,128 +223,128 @@ decode_array_test() `test {
 
 decode_empty_array_test() `test {
   JsonDecoder dec = JsonDecoder(data: "[]");
-  dec.begin_array()!;
-  dec.end_array()!;
+  dec.begin_array()?!;
+  dec.end_array()?!;
 }
 
 decode_whitespace_test() `test {
   // Test that decoder handles whitespace around scalar values
   JsonDecoder dec = JsonDecoder(data: "  42  ");
-  int v = dec.decode_int()!;
+  int v = dec.decode_int()?!;
   assert(v == 42, "whitespace: value is 42");
 }
 
 skip_value_test() `test {
   // B0261
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":1,\"b\":\{\"nested\":true},\"c\":3}");
-  dec.begin_object()!;
+  dec.begin_object()?!;
   int c_val = 0;
   for {
-    string? k = dec.next_key()!;
+    string? k = dec.next_key()?!;
     if k is absent {
       break;
     }
     string key = k ?: "";
     if key == "c" {
-      c_val = dec.decode_int()!;
+      c_val = dec.decode_int()?!;
     } else {
-      dec.skip_value()!;
+      dec.skip_value()?!;
     }
   }
-  dec.end_object()!;
+  dec.end_object()?!;
   assert(c_val == 3, "skip_value: got c=3");
 }
 
 // ── Round-trip via Encodable/Decodable on primitives ────────────────────────
 
 round_trip_int_test() `test {
-  string s = encode_string[int](42)!;
+  string s = encode_string[int](42)?!;
   assert(s == "42", "round trip int encode");
-  int v = decode_string[int](s)!;
+  int v = decode_string[int](s)?!;
   assert(v == 42, "round trip int decode");
 }
 
 round_trip_bool_test() `test {
-  string s = encode_string[bool](true)!;
+  string s = encode_string[bool](true)?!;
   assert(s == "true", "round trip bool encode");
-  bool v = decode_string[bool](s)!;
+  bool v = decode_string[bool](s)?!;
   assert(v == true, "round trip bool decode");
 }
 
 round_trip_string_test() `test {
-  string s = encode_string[string]("hello world")!;
+  string s = encode_string[string]("hello world")?!;
   assert(s == "\"hello world\"", "round trip string encode");
-  string v = decode_string[string](s)!;
+  string v = decode_string[string](s)?!;
   assert(v == "hello world", "round trip string decode");
 }
 
 round_trip_f64_test() `test {
-  string s = encode_string[f64](2.5)!;
-  f64 v = decode_string[f64](s)!;
+  string s = encode_string[f64](2.5)?!;
+  f64 v = decode_string[f64](s)?!;
   assert(v == 2.5, "round trip f64");
 }
 
 // ── Round-trip: sized integer types ──────────────────────────────────────────
 
 round_trip_uint_test() `test {
-  string s = encode_string[uint](999u)!;
+  string s = encode_string[uint](999u)?!;
   assert(s == "999", "round trip uint encode");
-  uint v = decode_string[uint](s)!;
+  uint v = decode_string[uint](s)?!;
   assert(v == 999u, "round trip uint decode");
 }
 
 round_trip_i8_test() `test {
   JsonEncoder enc = JsonEncoder();
   i8 val = 42i8;
-  val.encode(enc)!;
+  val.encode(enc)?!;
   assert(enc.to_string() == "42", "i8 encode");
 
   JsonDecoder dec = JsonDecoder(data: "42");
-  i8 v = i8.decode(dec)!;
+  i8 v = i8.decode(dec)?!;
   assert(v == 42i8, "i8 decode");
 }
 
 round_trip_i32_test() `test {
   JsonEncoder enc = JsonEncoder();
   i32 val = -1000i32;
-  val.encode(enc)!;
+  val.encode(enc)?!;
   assert(enc.to_string() == "-1000", "i32 encode");
 
   JsonDecoder dec = JsonDecoder(data: "-1000");
-  i32 v = i32.decode(dec)!;
+  i32 v = i32.decode(dec)?!;
   assert(v == -1000i32, "i32 decode");
 }
 
 round_trip_u8_test() `test {
   JsonEncoder enc = JsonEncoder();
   u8 val = 200u8;
-  val.encode(enc)!;
+  val.encode(enc)?!;
   assert(enc.to_string() == "200", "u8 encode");
 
   JsonDecoder dec = JsonDecoder(data: "200");
-  u8 v = u8.decode(dec)!;
+  u8 v = u8.decode(dec)?!;
   assert(v == 200u8, "u8 decode");
 }
 
 round_trip_f32_test() `test {
   JsonEncoder enc = JsonEncoder();
   f32 val = 1.5f32;
-  val.encode(enc)!;
+  val.encode(enc)?!;
   assert(enc.to_string() == "1.5", "f32 encode");
 
   JsonDecoder dec = JsonDecoder(data: "1.5");
-  f32 v = f32.decode(dec)!;
+  f32 v = f32.decode(dec)?!;
   assert(v == 1.5f32, "f32 decode");
 }
 
 round_trip_char_test() `test {
   JsonEncoder enc = JsonEncoder();
   char val = 'A';
-  val.encode(enc)!;
+  val.encode(enc)?!;
   assert(enc.to_string() == "\"A\"", "char encode");
 
   JsonDecoder dec = JsonDecoder(data: "\"A\"");
-  char v = char.decode(dec)!;
+  char v = char.decode(dec)?!;
   assert(v == 'A', "char decode");
 }
 
@@ -378,40 +378,40 @@ decode_u16_overflow_test() `test {
 
 encode_empty_string_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_string("")!;
+  enc.encode_string("")?!;
   assert(enc.to_string() == "\"\"", "encode empty string");
 }
 
 encode_zero_int_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_int(0)!;
+  enc.encode_int(0)?!;
   assert(enc.to_string() == "0", "encode zero int");
 }
 
 encode_negative_f64_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_f64(-2.5)!;
+  enc.encode_f64(-2.5)?!;
   assert(enc.to_string() == "-2.5", "encode negative f64");
 }
 
 encode_mixed_array_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.begin_array(3)!;
-  enc.encode_int(1)!;
-  enc.encode_string("two")!;
-  enc.encode_bool(true)!;
-  enc.end_array()!;
+  enc.begin_array(3)?!;
+  enc.encode_int(1)?!;
+  enc.encode_string("two")?!;
+  enc.encode_bool(true)?!;
+  enc.end_array()?!;
   assert(enc.to_string() == "[1,\"two\",true]", "encode mixed array");
 }
 
 encode_object_with_null_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.begin_object(2)!;
-  enc.encode_key("a")!;
-  enc.encode_int(1)!;
-  enc.encode_key("b")!;
-  enc.encode_none()!;
-  enc.end_object()!;
+  enc.begin_object(2)?!;
+  enc.encode_key("a")?!;
+  enc.encode_int(1)?!;
+  enc.encode_key("b")?!;
+  enc.encode_none()?!;
+  enc.end_object()?!;
   assert(enc.to_string() == "\{\"a\":1,\"b\":null}", "encode object with null");
 }
 
@@ -419,90 +419,90 @@ encode_object_with_null_test() `test {
 
 decode_empty_string_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"\"");
-  string v = dec.decode_string()!;
+  string v = dec.decode_string()?!;
   assert(v == "", "decode empty string");
 }
 
 decode_negative_f64_test() `test {
   JsonDecoder dec = JsonDecoder(data: "-2.5");
-  f64 v = dec.decode_f64()!;
+  f64 v = dec.decode_f64()?!;
   assert(v == -2.5, "decode negative f64");
 }
 
 decode_scientific_notation_test() `test {
   JsonDecoder dec = JsonDecoder(data: "1.5e2");
-  f64 v = dec.decode_f64()!;
+  f64 v = dec.decode_f64()?!;
   assert(v == 150.0, "decode 1.5e2");
 }
 
 decode_zero_test() `test {
   JsonDecoder dec = JsonDecoder(data: "0");
-  int v = dec.decode_int()!;
+  int v = dec.decode_int()?!;
   assert(v == 0, "decode zero");
 }
 
 decode_object_with_null_value_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\{\"x\":null,\"y\":1}");
-  dec.begin_object()!;
+  dec.begin_object()?!;
   bool x_is_null = false;
   int y_val = 0;
   for {
-    string? k = dec.next_key()!;
+    string? k = dec.next_key()?!;
     if k is absent {
       break;
     }
     string key = k ?: "";
     if key == "x" {
-      x_is_null = dec.decode_none()!;
+      x_is_null = dec.decode_none()?!;
     } else if key == "y" {
-      y_val = dec.decode_int()!;
+      y_val = dec.decode_int()?!;
     } else {
-      dec.skip_value()!;
+      dec.skip_value()?!;
     }
   }
-  dec.end_object()!;
+  dec.end_object()?!;
   assert(x_is_null, "null value detected");
   assert(y_val == 1, "value after null");
 }
 
 skip_value_array_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":[1,2,3],\"b\":99}");
-  dec.begin_object()!;
+  dec.begin_object()?!;
   int b_val = 0;
   for {
-    string? k = dec.next_key()!;
+    string? k = dec.next_key()?!;
     if k is absent {
       break;
     }
     string key = k ?: "";
     if key == "b" {
-      b_val = dec.decode_int()!;
+      b_val = dec.decode_int()?!;
     } else {
-      dec.skip_value()!;
+      dec.skip_value()?!;
     }
   }
-  dec.end_object()!;
+  dec.end_object()?!;
   assert(b_val == 99, "skip array, got b=99");
 }
 
 skip_value_string_test() `test {
   // B0261
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":\"hello\",\"b\":42}");
-  dec.begin_object()!;
+  dec.begin_object()?!;
   int b_val = 0;
   for {
-    string? k = dec.next_key()!;
+    string? k = dec.next_key()?!;
     if k is absent {
       break;
     }
     string key = k ?: "";
     if key == "b" {
-      b_val = dec.decode_int()!;
+      b_val = dec.decode_int()?!;
     } else {
-      dec.skip_value()!;
+      dec.skip_value()?!;
     }
   }
-  dec.end_object()!;
+  dec.end_object()?!;
   assert(b_val == 42, "skip string, got b=42");
 }
 
@@ -510,10 +510,10 @@ skip_value_string_test() `test {
 
 encode_pretty_object_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
-  enc.begin_object(1)!;
-  enc.encode_key("x")!;
-  enc.encode_int(1)!;
-  enc.end_object()!;
+  enc.begin_object(1)?!;
+  enc.encode_key("x")?!;
+  enc.encode_int(1)?!;
+  enc.end_object()?!;
   string result = enc.to_string();
   // Should contain newlines and indentation
   assert(result.contains("\n"), "pretty has newlines");
@@ -548,7 +548,7 @@ decode_error_position_test() `test {
 // ── JsonValue tests ─────────────────────────────────────────────────────────
 
 parse_value_null_test() `test {
-  JsonValue v = parse_value("null")!;
+  JsonValue v = parse_value("null")?!;
   match v {
     JsonValue.Null => assert(true, "null"),
     _ => assert(false, "expected null"),
@@ -556,7 +556,7 @@ parse_value_null_test() `test {
 }
 
 parse_value_bool_test() `test {
-  JsonValue v = parse_value("true")!;
+  JsonValue v = parse_value("true")?!;
   match v {
     JsonValue.Bool(b) => assert(b == true, "true"),
     _ => assert(false, "expected bool"),
@@ -564,7 +564,7 @@ parse_value_bool_test() `test {
 }
 
 parse_value_number_test() `test {
-  JsonValue v = parse_value("42")!;
+  JsonValue v = parse_value("42")?!;
   match v {
     JsonValue.Number(n) => assert(n == 42.0, "number"),
     _ => assert(false, "expected number"),
@@ -572,7 +572,7 @@ parse_value_number_test() `test {
 }
 
 parse_value_string_test() `test {
-  JsonValue v = parse_value("\"hello\"")!;
+  JsonValue v = parse_value("\"hello\"")?!;
   match v {
     JsonValue.Str(s) => assert(s == "hello", "string"),
     _ => assert(false, "expected string"),
@@ -580,7 +580,7 @@ parse_value_string_test() `test {
 }
 
 parse_value_array_test() `test {
-  JsonValue v = parse_value("[1,2,3]")!;
+  JsonValue v = parse_value("[1,2,3]")?!;
   match v {
     JsonValue.Array(items) => assert(items.len == 3, "array len"),
     _ => assert(false, "expected array"),
@@ -588,7 +588,7 @@ parse_value_array_test() `test {
 }
 
 parse_value_empty_array_test() `test {
-  JsonValue v = parse_value("[]")!;
+  JsonValue v = parse_value("[]")?!;
   match v {
     JsonValue.Array(items) => assert(items.len == 0, "empty array"),
     _ => assert(false, "expected array"),
@@ -597,7 +597,7 @@ parse_value_empty_array_test() `test {
 
 parse_value_object_test() `test {
   string data = "\{\"a\":1,\"b\":2}";
-  JsonValue v = parse_value(data)!;
+  JsonValue v = parse_value(data)?!;
   match v {
     JsonValue.Object(fields) => assert(fields.len == 2, "object keys"),
     _ => assert(false, "expected object"),
@@ -605,30 +605,30 @@ parse_value_object_test() `test {
 }
 
 format_value_null_test() `test {
-  string s = format_value(JsonValue.Null)!;
+  string s = format_value(JsonValue.Null)?!;
   assert(s == "null", "format null");
 }
 
 format_value_bool_test() `test {
-  string s = format_value(JsonValue.Bool(true))!;
+  string s = format_value(JsonValue.Bool(true))?!;
   assert(s == "true", "format true");
 }
 
 format_value_string_test() `test {
-  string s = format_value(JsonValue.Str("hello"))!;
+  string s = format_value(JsonValue.Str("hello"))?!;
   assert(s == "\"hello\"", "format string");
 }
 
 format_value_array_test() `test {
   JsonValue arr = JsonValue.Array([JsonValue.Number(1.0), JsonValue.Number(2.0)]);
-  string s = format_value(arr)!;
+  string s = format_value(arr)?!;
   assert(s == "[1,2]", "format array");
 }
 
 round_trip_value_test() `test {
   JsonValue arr = JsonValue.Array([JsonValue.Bool(true), JsonValue.Str("x")]);
-  string s = format_value(arr)!;
-  JsonValue v = parse_value(s)!;
+  string s = format_value(arr)?!;
+  JsonValue v = parse_value(s)?!;
   match v {
     JsonValue.Array(items) => assert(items.len == 2, "rt array"),
     _ => assert(false, "expected array"),
@@ -638,7 +638,7 @@ round_trip_value_test() `test {
 nested_value_test() `test {
   // Nested: object containing array
   string data = "\{\"items\":[1,2],\"ok\":true}";
-  JsonValue v = parse_value(data)!;
+  JsonValue v = parse_value(data)?!;
   match v {
     JsonValue.Object(fields) => {
       assert(fields.len == 2, "nested: keys");
@@ -649,7 +649,7 @@ nested_value_test() `test {
 }
 
 parse_value_false_test() `test {
-  JsonValue v = parse_value("false")!;
+  JsonValue v = parse_value("false")?!;
   match v {
     JsonValue.Bool(b) => assert(b == false, "false"),
     _ => assert(false, "expected bool"),
@@ -657,7 +657,7 @@ parse_value_false_test() `test {
 }
 
 parse_value_negative_number_test() `test {
-  JsonValue v = parse_value("-7")!;
+  JsonValue v = parse_value("-7")?!;
   match v {
     JsonValue.Number(n) => assert(n == -7.0, "negative"),
     _ => assert(false, "expected number"),
@@ -665,7 +665,7 @@ parse_value_negative_number_test() `test {
 }
 
 parse_value_float_test() `test {
-  JsonValue v = parse_value("3.14")!;
+  JsonValue v = parse_value("3.14")?!;
   match v {
     JsonValue.Number(n) => assert(n > 3.13 && n < 3.15, "float"),
     _ => assert(false, "expected number"),
@@ -673,7 +673,7 @@ parse_value_float_test() `test {
 }
 
 parse_value_string_escapes_test() `test {
-  JsonValue v = parse_value("\"a\\nb\"")!;
+  JsonValue v = parse_value("\"a\\nb\"")?!;
   match v {
     JsonValue.Str(s) => assert(s == "a\nb", "escape"),
     _ => assert(false, "expected string"),
@@ -681,7 +681,7 @@ parse_value_string_escapes_test() `test {
 }
 
 parse_value_whitespace_test() `test {
-  JsonValue v = parse_value("  42  ")!;
+  JsonValue v = parse_value("  42  ")?!;
   match v {
     JsonValue.Number(n) => assert(n == 42.0, "whitespace"),
     _ => assert(false, "expected number"),
@@ -689,7 +689,7 @@ parse_value_whitespace_test() `test {
 }
 
 parse_value_nested_arrays_test() `test {
-  JsonValue v = parse_value("[[1,2],[3]]")!;
+  JsonValue v = parse_value("[[1,2],[3]]")?!;
   match v {
     JsonValue.Array(items) => {
       assert(items.len == 2, "outer len");
@@ -699,7 +699,7 @@ parse_value_nested_arrays_test() `test {
 }
 
 parse_value_empty_object_test() `test {
-  JsonValue v = parse_value("\{}")!;
+  JsonValue v = parse_value("\{}")?!;
   match v {
     JsonValue.Object(fields) => assert(fields.len == 0, "empty obj"),
     _ => assert(false, "expected object"),
@@ -707,17 +707,17 @@ parse_value_empty_object_test() `test {
 }
 
 format_value_false_test() `test {
-  string s = format_value(JsonValue.Bool(false))!;
+  string s = format_value(JsonValue.Bool(false))?!;
   assert(s == "false", "format false");
 }
 
 format_value_number_test() `test {
-  string s = format_value(JsonValue.Number(42.0))!;
+  string s = format_value(JsonValue.Number(42.0))?!;
   assert(s == "42", "format number");
 }
 
 format_value_empty_array_test() `test {
-  string s = format_value(JsonValue.Array(JsonValue[]()))!;
+  string s = format_value(JsonValue.Array(JsonValue[]()))?!;
   assert(s == "[]", "format empty array");
 }
 
@@ -726,13 +726,13 @@ format_value_object_test() `test {
     "a": JsonValue.Number(1.0)
   };
   JsonValue obj = JsonValue.Object(f);
-  string s = format_value(obj)!;
+  string s = format_value(obj)?!;
   assert(s.contains("\"a\":1"), "format object");
 }
 
 format_value_empty_object_test() `test {
   JsonValue obj = JsonValue.Object(map[string, JsonValue]());
-  string s = format_value(obj)!;
+  string s = format_value(obj)?!;
   assert(s == "\{}", "format empty object");
 }
 
@@ -741,8 +741,8 @@ round_trip_object_test() `test {
     "x": JsonValue.Number(1.0), "y": JsonValue.Str("two")
   };
   JsonValue obj = JsonValue.Object(f);
-  string s = format_value(obj)!;
-  JsonValue v = parse_value(s)!;
+  string s = format_value(obj)?!;
+  JsonValue v = parse_value(s)?!;
   match v {
     JsonValue.Object(fields) => {
       assert(fields.len == 2, "rt obj keys");
@@ -755,9 +755,9 @@ round_trip_object_test() `test {
 deep_nesting_test() `test {
   // array inside object: {"data":[1,true,"x"]}
   string data = "\{\"data\":[1,true,\"x\"]}";
-  JsonValue v = parse_value(data)!;
-  string s = format_value(v)!;
-  JsonValue v2 = parse_value(s)!;
+  JsonValue v = parse_value(data)?!;
+  string s = format_value(v)?!;
+  JsonValue v2 = parse_value(s)?!;
   match v2 {
     JsonValue.Object(fields) => {
       assert(fields.contains("data"), "deep: has data key");
@@ -771,7 +771,7 @@ deep_nesting_test() `test {
 object_field_value_access_test() `test {
   // Verify we can look up values by key after parsing
   string data = "\{\"name\":\"Alice\",\"age\":30,\"active\":true}";
-  JsonValue v = parse_value(data)!;
+  JsonValue v = parse_value(data)?!;
   match v {
     JsonValue.Object(fields) => {
       assert(fields.len == 3, "field count");
@@ -798,7 +798,7 @@ object_field_value_access_test() `test {
 nested_object_test() `test {
   // Object containing another object
   string data = "\{\"user\":\{\"name\":\"Bob\",\"score\":42}}";
-  JsonValue v = parse_value(data)!;
+  JsonValue v = parse_value(data)?!;
   match v {
     JsonValue.Object(outer) => {
       assert(outer.len == 1, "outer fields");
@@ -829,8 +829,8 @@ round_trip_nested_object_test() `test {
     "flat": JsonValue.Str("hello"),
   };
   JsonValue obj = JsonValue.Object(outer);
-  string s = format_value(obj)!;
-  JsonValue parsed = parse_value(s)!;
+  string s = format_value(obj)?!;
+  JsonValue parsed = parse_value(s)?!;
   match parsed {
     JsonValue.Object(fields) => {
       assert(fields.len == 2, "rt nested: field count");
@@ -844,7 +844,7 @@ round_trip_nested_object_test() `test {
 object_duplicate_key_test() `test {
   // JSON with duplicate keys — last value wins (map semantics)
   string data = "\{\"a\":1,\"a\":2}";
-  JsonValue v = parse_value(data)!;
+  JsonValue v = parse_value(data)?!;
   match v {
     JsonValue.Object(fields) => {
       assert(fields.len == 1, "duplicate key: single entry");
@@ -860,7 +860,7 @@ object_duplicate_key_test() `test {
 
 object_null_value_test() `test {
   string data = "\{\"x\":null}";
-  JsonValue v = parse_value(data)!;
+  JsonValue v = parse_value(data)?!;
   match v {
     JsonValue.Object(fields) => {
       JsonValue val = fields["x"]!;
@@ -877,13 +877,13 @@ object_null_value_test() `test {
 
 encode_string_tab_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_string("a\tb")!;
+  enc.encode_string("a\tb")?!;
   assert(enc.to_string() == "\"a\\tb\"", "encode tab");
 }
 
 encode_string_cr_test() `test {
   JsonEncoder enc = JsonEncoder();
-  enc.encode_string("a\rb")!;
+  enc.encode_string("a\rb")?!;
   assert(enc.to_string() == "\"a\\rb\"", "encode cr");
 }
 
@@ -891,38 +891,38 @@ encode_string_control_char_test() `test {
   // Control char below 0x20: should be \u00XX
   char nul = 0 as! char;
   JsonEncoder enc = JsonEncoder();
-  enc.encode_string(nul.to_string())!;
+  enc.encode_string(nul.to_string())?!;
   assert(enc.to_string() == "\"\\u0000\"", "encode control char");
 }
 
 decode_string_tab_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"a\\tb\"");
-  string v = dec.decode_string()!;
+  string v = dec.decode_string()?!;
   assert(v == "a\tb", "decode tab");
 }
 
 decode_string_cr_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"a\\rb\"");
-  string v = dec.decode_string()!;
+  string v = dec.decode_string()?!;
   assert(v == "a\rb", "decode cr");
 }
 
 decode_string_slash_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"a\\/b\"");
-  string v = dec.decode_string()!;
+  string v = dec.decode_string()?!;
   assert(v == "a/b", "decode escaped slash");
 }
 
 decode_string_unicode_escape_test() `test {
   // \u0041 = 'A'
   JsonDecoder dec = JsonDecoder(data: "\"\\u0041\"");
-  string v = dec.decode_string()!;
+  string v = dec.decode_string()?!;
   assert(v == "A", "decode unicode escape");
 }
 
 decode_string_backspace_formfeed_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"\\b\\f\"");
-  string v = dec.decode_string()!;
+  string v = dec.decode_string()?!;
   assert(v.len == 2, "decode backspace+formfeed length");
 }
 
@@ -930,10 +930,10 @@ decode_string_backspace_formfeed_test() `test {
 
 encode_pretty_array_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
-  enc.begin_array(2)!;
-  enc.encode_int(1)!;
-  enc.encode_int(2)!;
-  enc.end_array()!;
+  enc.begin_array(2)?!;
+  enc.encode_int(1)?!;
+  enc.encode_int(2)?!;
+  enc.end_array()?!;
   string result = enc.to_string();
   assert(result.contains("\n"), "pretty array has newlines");
   assert(result.contains("  1"), "pretty array has indented element");
@@ -941,12 +941,12 @@ encode_pretty_array_test() `test {
 
 encode_pretty_nested_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
-  enc.begin_object(1)!;
-  enc.encode_key("items")!;
-  enc.begin_array(1)!;
-  enc.encode_int(42)!;
-  enc.end_array()!;
-  enc.end_object()!;
+  enc.begin_object(1)?!;
+  enc.encode_key("items")?!;
+  enc.begin_array(1)?!;
+  enc.encode_int(42)?!;
+  enc.end_array()?!;
+  enc.end_object()?!;
   string result = enc.to_string();
   assert(result.contains("\"items\": ["), "pretty nested: key with colon space");
   assert(result.contains("    42"), "pretty nested: double-indented value");
@@ -957,15 +957,15 @@ format_value_pretty_test() `test {
     "key": JsonValue.Bool(true)
   };
   JsonValue obj = JsonValue.Object(f);
-  string s = format_value_pretty(obj)!;
+  string s = format_value_pretty(obj)?!;
   assert(s.contains("\n"), "format_value_pretty has newlines");
   assert(s.contains("  \"key\""), "format_value_pretty has indented key");
 }
 
 encode_pretty_empty_object_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true);
-  enc.begin_object(0)!;
-  enc.end_object()!;
+  enc.begin_object(0)?!;
+  enc.end_object()?!;
   string s = enc.to_string();
   assert(s.contains("\{}"), "pretty empty object contains braces");
   // No indented content inside
@@ -974,8 +974,8 @@ encode_pretty_empty_object_test() `test {
 
 encode_pretty_empty_array_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true);
-  enc.begin_array(0)!;
-  enc.end_array()!;
+  enc.begin_array(0)?!;
+  enc.end_array()?!;
   string s = enc.to_string();
   assert(s.contains("[]"), "pretty empty array contains brackets");
   assert(!s.contains("  "), "pretty empty array no indented content");
@@ -985,7 +985,7 @@ encode_pretty_empty_array_test() `test {
 
 parse_object_in_array_test() `test {
   // Array of objects
-  JsonValue v = parse_value("[\{\"a\":1},\{\"b\":2}]")!;
+  JsonValue v = parse_value("[\{\"a\":1},\{\"b\":2}]")?!;
   match v {
     JsonValue.Array(items) => {
       assert(items.len == 2, "array of objects: len");
@@ -1008,7 +1008,7 @@ parse_object_in_array_test() `test {
 
 parse_heterogeneous_array_test() `test {
   // Array with all JSON types
-  JsonValue v = parse_value("[null,true,42,\"str\",[],\{}]")!;
+  JsonValue v = parse_value("[null,true,42,\"str\",[],\{}]")?!;
   match v {
     JsonValue.Array(items) => {
       assert(items.len == 6, "heterogeneous: 6 items");
@@ -1044,9 +1044,9 @@ parse_heterogeneous_array_test() `test {
 round_trip_complex_test() `test {
   // Complex structure: object with array of objects
   string data = "\{\"users\":[\{\"name\":\"A\",\"age\":1},\{\"name\":\"B\",\"age\":2}],\"count\":2}";
-  JsonValue v = parse_value(data)!;
-  string s = format_value(v)!;
-  JsonValue v2 = parse_value(s)!;
+  JsonValue v = parse_value(data)?!;
+  string s = format_value(v)?!;
+  JsonValue v2 = parse_value(s)?!;
   match v2 {
     JsonValue.Object(fields) => {
       assert(fields.len == 2, "complex rt: field count");
@@ -1066,17 +1066,17 @@ round_trip_complex_test() `test {
 
 decode_array_has_next_element_test() `test {
   JsonDecoder dec = JsonDecoder(data: "[10,20,30]");
-  dec.begin_array()!;
+  dec.begin_array()?!;
   int[] vals = int[]();
   for {
-    bool more = dec.has_next_element()!;
+    bool more = dec.has_next_element()?!;
     if !more {
       break;
     }
-    int v = dec.decode_int()!;
+    int v = dec.decode_int()?!;
     vals.push(v);
   }
-  dec.end_array()!;
+  dec.end_array()?!;
   assert(vals.len == 3, "has_next: count");
   assert(vals[0] == 10, "has_next: [0]");
   assert(vals[1] == 20, "has_next: [1]");
@@ -1085,10 +1085,10 @@ decode_array_has_next_element_test() `test {
 
 decode_array_has_next_empty_test() `test {
   JsonDecoder dec = JsonDecoder(data: "[]");
-  dec.begin_array()!;
-  bool more = dec.has_next_element()!;
+  dec.begin_array()?!;
+  bool more = dec.has_next_element()?!;
   assert(!more, "has_next empty: no elements");
-  dec.end_array()!;
+  dec.end_array()?!;
 }
 
 // ── parse_value error cases ─────────────────────────────────────────────────
@@ -1123,7 +1123,7 @@ parse_value_error_unterminated_string_test() `test {
 parse_value_whitespace_object_test() `test {
   // Generous whitespace
   string data = "  \{  \"a\"  :  1  ,  \"b\"  :  2  }  ";
-  JsonValue v = parse_value(data)!;
+  JsonValue v = parse_value(data)?!;
   match v {
     JsonValue.Object(fields) => assert(fields.len == 2, "whitespace obj: 2 fields"),
     _ => assert(false, "expected object"),
@@ -1131,7 +1131,7 @@ parse_value_whitespace_object_test() `test {
 }
 
 parse_value_whitespace_array_test() `test {
-  JsonValue v = parse_value("  [  1  ,  2  ,  3  ]  ")!;
+  JsonValue v = parse_value("  [  1  ,  2  ,  3  ]  ")?!;
   match v {
     JsonValue.Array(items) => assert(items.len == 3, "whitespace array: 3 items"),
     _ => assert(false, "expected array"),
@@ -1141,7 +1141,7 @@ parse_value_whitespace_array_test() `test {
 // ── Number edge cases ───────────────────────────────────────────────────────
 
 parse_value_zero_test() `test {
-  JsonValue v = parse_value("0")!;
+  JsonValue v = parse_value("0")?!;
   match v {
     JsonValue.Number(n) => assert(n == 0.0, "zero"),
     _ => assert(false, "expected number"),
@@ -1149,7 +1149,7 @@ parse_value_zero_test() `test {
 }
 
 parse_value_exponent_test() `test {
-  JsonValue v = parse_value("1e3")!;
+  JsonValue v = parse_value("1e3")?!;
   match v {
     JsonValue.Number(n) => assert(n == 1000.0, "1e3"),
     _ => assert(false, "expected number"),
@@ -1157,7 +1157,7 @@ parse_value_exponent_test() `test {
 }
 
 parse_value_negative_exponent_test() `test {
-  JsonValue v = parse_value("1e-2")!;
+  JsonValue v = parse_value("1e-2")?!;
   match v {
     JsonValue.Number(n) => assert(n > 0.009 && n < 0.011, "1e-2"),
     _ => assert(false, "expected number"),
@@ -1165,7 +1165,7 @@ parse_value_negative_exponent_test() `test {
 }
 
 format_value_number_negative_test() `test {
-  string s = format_value(JsonValue.Number(-3.5))!;
+  string s = format_value(JsonValue.Number(-3.5))?!;
   assert(s == "-3.5", "format negative float");
 }
 
@@ -1309,13 +1309,13 @@ at_method_test() `test {
 encode_method_test() `test {
   JsonValue v = JsonValue.Array([JsonValue.Number(1.0), JsonValue.Bool(true)]);
   JsonEncoder enc = JsonEncoder();
-  v.encode(enc)!;
+  v.encode(enc)?!;
   assert(enc.to_string() == "[1,true]", "encode method");
 }
 
 format_method_test() `test {
   JsonValue v = JsonValue.Str("hello");
-  string s = v.format()!;
+  string s = v.format()?!;
   assert(s == "\"hello\"", "format method");
 }
 
@@ -1324,7 +1324,7 @@ format_method_object_test() `test {
     "x": JsonValue.Number(1.0)
   };
   JsonValue obj = JsonValue.Object(fields);
-  string s = obj.format()!;
+  string s = obj.format()?!;
   assert(s.contains("\"x\":1"), "format object method");
 }
 
@@ -1333,7 +1333,7 @@ format_pretty_method_test() `test {
     "key": JsonValue.Bool(true)
   };
   JsonValue obj = JsonValue.Object(fields);
-  string s = obj.format_pretty()!;
+  string s = obj.format_pretty()?!;
   assert(s.contains("\n"), "format_pretty has newlines");
   assert(s.contains("  \"key\""), "format_pretty has indented key");
 }
@@ -1343,7 +1343,7 @@ format_pretty_custom_indent_test() `test {
     "a": JsonValue.Number(1.0)
   };
   JsonValue obj = JsonValue.Object(fields);
-  string s = obj.format_pretty(indent: 4)!;
+  string s = obj.format_pretty(indent: 4)?!;
   assert(s.contains("    \"a\""), "format_pretty 4-space indent");
 }
 
@@ -1355,8 +1355,8 @@ round_trip_method_test() `test {
     "ok": JsonValue.Bool(true),
   };
   JsonValue obj = JsonValue.Object(fields);
-  string s = obj.format()!;
-  JsonValue parsed = parse_value(s)!;
+  string s = obj.format()?!;
+  JsonValue parsed = parse_value(s)?!;
   assert(parsed.is_object, "round trip is object");
   assert(parsed.get("ok") is present, "round trip has ok");
   assert(parsed.get("items") is present, "round trip has items");
@@ -1447,26 +1447,26 @@ at_empty_array_test() `test {
 
 encode_method_null_test() `test {
   JsonEncoder enc = JsonEncoder();
-  JsonValue.Null.encode(enc)!;
+  JsonValue.Null.encode(enc)?!;
   assert(enc.to_string() == "null", "encode null");
 }
 
 encode_method_bool_test() `test {
   JsonEncoder enc = JsonEncoder();
-  JsonValue.Bool(false).encode(enc)!;
+  JsonValue.Bool(false).encode(enc)?!;
   assert(enc.to_string() == "false", "encode false");
 }
 
 encode_method_number_test() `test {
   JsonEncoder enc = JsonEncoder();
-  JsonValue.Number(-3.14).encode(enc)!;
+  JsonValue.Number(-3.14).encode(enc)?!;
   string s = enc.to_string();
   assert(s.starts_with("-3.14"), "encode negative number");
 }
 
 encode_method_string_test() `test {
   JsonEncoder enc = JsonEncoder();
-  JsonValue.Str("hello\nworld").encode(enc)!;
+  JsonValue.Str("hello\nworld").encode(enc)?!;
   assert(enc.to_string() == "\"hello\\nworld\"", "encode string with escape");
 }
 
@@ -1478,7 +1478,7 @@ encode_method_nested_test() `test {
   };
   JsonValue obj = JsonValue.Object(fields);
   JsonEncoder enc = JsonEncoder();
-  obj.encode(enc)!;
+  obj.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"items\":[null,true]"), "encode nested array in object");
   assert(s.contains("\"count\":2"), "encode nested number in object");
@@ -1492,9 +1492,9 @@ format_pretty_round_trip_test() `test {
     "scores": JsonValue.Array([JsonValue.Number(10.0), JsonValue.Number(20.0)]),
   };
   JsonValue obj = JsonValue.Object(fields);
-  string pretty = obj.format_pretty()!;
+  string pretty = obj.format_pretty()?!;
   // Pretty output should still be valid JSON that parses back
-  JsonValue parsed = parse_value(pretty)!;
+  JsonValue parsed = parse_value(pretty)?!;
   assert(parsed.is_object, "pretty rt: is object");
   assert(parsed.get("name") is present, "pretty rt: has name");
   assert(parsed.get("scores") is present, "pretty rt: has scores");
@@ -1505,13 +1505,13 @@ format_pretty_round_trip_test() `test {
 // ── format for all variant types ─────────────────────────────────────────────
 
 format_method_all_variants_test() `test {
-  assert(JsonValue.Null.format()! == "null", "format null");
-  assert(JsonValue.Bool(true).format()! == "true", "format true");
-  assert(JsonValue.Bool(false).format()! == "false", "format false");
-  assert(JsonValue.Number(42.0).format()! == "42", "format number");
-  assert(JsonValue.Str("hi").format()! == "\"hi\"", "format string");
-  assert(JsonValue.Array(JsonValue[]()).format()! == "[]", "format empty array");
-  assert(JsonValue.Object(map[string, JsonValue]()).format()! == "\{}", "format empty object");
+  assert(JsonValue.Null.format()?! == "null", "format null");
+  assert(JsonValue.Bool(true).format()?! == "true", "format true");
+  assert(JsonValue.Bool(false).format()?! == "false", "format false");
+  assert(JsonValue.Number(42.0).format()?! == "42", "format number");
+  assert(JsonValue.Str("hi").format()?! == "\"hi\"", "format string");
+  assert(JsonValue.Array(JsonValue[]()).format()?! == "[]", "format empty array");
+  assert(JsonValue.Object(map[string, JsonValue]()).format()?! == "\{}", "format empty object");
 }
 
 // ── Parsed values with methods ───────────────────────────────────────────────
@@ -1519,7 +1519,7 @@ format_method_all_variants_test() `test {
 parsed_value_methods_test() `test {
   // Verify methods work on values from parse_value, not just constructed values
   string data = "\{\"name\":\"Bob\",\"age\":30,\"tags\":[\"a\",\"b\"],\"active\":true}";
-  JsonValue v = parse_value(data)!;
+  JsonValue v = parse_value(data)?!;
   assert(v.is_object, "parsed: is_object");
   assert(!v.is_array, "parsed: not is_array");
 
@@ -1555,7 +1555,7 @@ parsed_value_methods_test() `test {
 // the returned JsonValue shares heap pointers with the original, causing double-free.
 parsed_nested_get_test() `test {
   string data = "\{\"outer\":\{\"inner\":\{\"key\":\"deep\"\}\}\}";
-  JsonValue root = parse_value(data)!;
+  JsonValue root = parse_value(data)?!;
   if outer := root.get("outer") {
     assert(outer.is_object, "B0253: outer is object");
     if inner := outer.get("inner") {
@@ -1570,7 +1570,7 @@ parsed_nested_get_test() `test {
 // B0253: Multiple get() calls on same parsed object must not corrupt data.
 parsed_multiple_get_same_object_test() `test {
   string data = "\{\"a\":\{\"x\":1},\"b\":\{\"y\":2}}";
-  JsonValue root = parse_value(data)!;
+  JsonValue root = parse_value(data)?!;
   // Call get() multiple times on the same parsed object
   if a := root.get("a") {
     assert(a.is_object, "B0253: a is object");
@@ -1587,7 +1587,7 @@ parsed_multiple_get_same_object_test() `test {
 // B0253: get() + as_string() chain on parsed JSON (original bug report scenario).
 parsed_get_as_string_chain_test() `test {
   string data = "\{\"tool_input\":\{\"command\":\"hello\"\}\}";
-  JsonValue root = parse_value(data)!;
+  JsonValue root = parse_value(data)?!;
   if tool_input := root.get("tool_input") {
     if cmd := tool_input.get("command") {
       if s := cmd.as_string() {
@@ -1609,8 +1609,8 @@ enum_ctor_temp_in_map_literal_test() `test {
     "nested": JsonValue.Object(inner)
   };
   JsonValue obj = JsonValue.Object(outer);
-  string s = format_value(obj)!;
-  JsonValue parsed = parse_value(s)!;
+  string s = format_value(obj)?!;
+  JsonValue parsed = parse_value(s)?!;
   assert(parsed.is_object, "round trip nested object");
 }
 
@@ -1618,7 +1618,7 @@ enum_ctor_temp_in_map_literal_test() `test {
 enum_ctor_temp_in_vector_literal_test() `test {
   JsonValue[] items = [JsonValue.Str("a"), JsonValue.Number(1.0), JsonValue.Bool(true)];
   JsonValue arr = JsonValue.Array(items);
-  string s = format_value(arr)!;
+  string s = format_value(arr)?!;
   assert(s.contains("\"a\""), "vector with enum values");
 }
 
@@ -1630,7 +1630,7 @@ enum_ctor_temp_in_vector_literal_test() `test {
 repeated_parse_match_get_test() `test {
   int i = 0;
   while i < 50 {
-    JsonValue v = parse_value("\{\"k\":\"v\",\"n\":42}")!;
+    JsonValue v = parse_value("\{\"k\":\"v\",\"n\":42}")?!;
     match v {
       JsonValue.Object(fields) => {
         assert(fields.len == 2, "B0283: fields len");
@@ -1651,7 +1651,7 @@ repeated_parse_match_get_test() `test {
 repeated_nested_parse_test() `test {
   int i = 0;
   while i < 30 {
-    JsonValue v = parse_value("\{\"a\":\{\"b\":\{\"c\":\"deep\"}}}")!;
+    JsonValue v = parse_value("\{\"a\":\{\"b\":\{\"c\":\"deep\"}}}")?!;
     if a := v.get("a") {
       if b := a.get("b") {
         if c := b.get("c") {

@@ -46,7 +46,7 @@ type Strict {
 }
 
 test_failable_factory_success() `test {
-  Strict s = Strict.tryParse("good")!;
+  Strict s = Strict.tryParse("good")?!;
   assert(s.n == 42, "failable factory success");
 }
 
@@ -65,7 +65,7 @@ tryLoad![T: TryParseable](string data) T {
 }
 
 test_generic_failable_factory() `test {
-  Strict s = tryLoad[Strict]("ok")!;
+  Strict s = tryLoad[Strict]("ok")?!;
   assert(s.n == 42, "generic failable factory");
 }
 
@@ -159,6 +159,6 @@ type SafeParser {
 }
 
 test_nonfailable_satisfies_failable_factory() `test {
-  SafeParser s = tryLoad[SafeParser]("x")!;
+  SafeParser s = tryLoad[SafeParser]("x")?!;
   assert(s.n == 99, "non-failable factory satisfies failable interface");
 }

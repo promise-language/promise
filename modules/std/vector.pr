@@ -80,7 +80,7 @@ type Vector[T] `native `public {
 
   to_string() string `public `doc("Returns a human-readable string representation like [1, 2, 3].") {
     Builder b = Builder();
-    this.format(b)!;
+    this.format(b)?!;
     return b.to_string();
   }
 

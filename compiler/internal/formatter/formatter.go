@@ -864,8 +864,8 @@ func (f *formatter) emitToken() {
 			f.spacedAfterRBrace = true
 		} else if next.kind == tkSemi || next.kind == tkComma || next.kind == tkRParen {
 			// no newline
-		} else if next.kind == tkQuestion || next.kind == tkBang || next.kind == tkCaret {
-			// }? or }! or }^ — postfix, no space
+		} else if next.kind == tkQuestion || next.kind == tkBang {
+			// }? or }! — postfix, no space
 		} else if next.kind == tkDot || next.kind == tkQuestionDot {
 			// }.method() chain
 		} else {
@@ -1032,19 +1032,7 @@ func (f *formatter) emitRegular(tok token) {
 		f.lineHasContent = true
 	} else {
 		// Inline — determine spacing
-		// Special case: ^ is both binary XOR and postfix propagation.
-		// Disambiguate by looking at the next token: if ^ is followed by
-		// a non-expression token (;, ), }, ,, etc.), it's postfix propagation.
-		caretPostfix := false
-		if tok.kind == tkCaret && isValue(f.prev) {
-			next := f.peek()
-			if !isExprStartToken(next.kind) {
-				caretPostfix = true
-			}
-		}
-		if caretPostfix {
-			// postfix ^: no space before
-		} else if f.needsSpace(f.prev, tok) {
+		if f.needsSpace(f.prev, tok) {
 			f.write(" ")
 		}
 		f.write(tok.text)
@@ -1331,7 +1319,7 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 
 	// No space before [ if preceded by ident/)/]/!/string (indexing, generics, failable generics)
 	if c == tkLBracket {
-		if p == tkIdent || p == tkRParen || p == tkRBracket || p == tkGT || p == tkQuestion || p == tkString || p == tkBang || p == tkCaret {
+		if p == tkIdent || p == tkRParen || p == tkRBracket || p == tkGT || p == tkQuestion || p == tkString || p == tkBang {
 			return false
 		}
 		return true
@@ -1347,6 +1335,10 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 		return false
 	}
 	if c == tkBang && isValue(prev) {
+		return false
+	}
+	// ?! and ?^ (error panic/propagate): no space between ? and !/^
+	if (c == tkBang || c == tkCaret) && p == tkQuestion {
 		return false
 	}
 
@@ -1469,8 +1461,8 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 		return true
 	}
 
-	// After ? or ! or ^ (postfix) before ident
-	if (p == tkQuestion || p == tkBang || p == tkCaret) && isWord(cur) {
+	// After ? or ! (postfix) before ident
+	if (p == tkQuestion || p == tkBang) && isWord(cur) {
 		return true
 	}
 
@@ -1517,7 +1509,7 @@ func isValue(tok token) bool {
 	case tkInt, tkFloat, tkString, tkChar,
 		tkRParen, tkRBracket, tkRBrace,
 		tkPlusPlus, tkMinusMinus,
-		tkUnderscore, tkQuestion, tkBang, tkCaret:
+		tkUnderscore, tkQuestion, tkBang:
 		return true
 	}
 	return false
@@ -1536,19 +1528,6 @@ func isControlKeyword(text string) bool {
 	switch text {
 	case "if", "for", "while", "match", "select", "go", "else", "unsafe",
 		"return", "raise", "yield", "in":
-		return true
-	}
-	return false
-}
-
-// isExprStartToken returns true if the token kind can begin an expression.
-// Used to disambiguate ^ as postfix propagation vs binary XOR.
-func isExprStartToken(k tokenKind) bool {
-	switch k {
-	case tkIdent, tkInt, tkFloat, tkString, tkChar,
-		tkLParen, tkLBracket,
-		tkMinus, tkBang, tkTilde, tkLArrow,
-		tkUnderscore:
 		return true
 	}
 	return false

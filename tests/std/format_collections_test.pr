@@ -35,7 +35,7 @@ test_vector_format_interface() `test {
   int[] v = [1, 2, 3];
   // Verify Vector satisfies Format by passing to print_line
   Builder b = Builder();
-  v.format(b)!;
+  v.format(b)?!;
   assert(b.to_string() == "[1, 2, 3]", "vector direct format");
 }
 
@@ -63,7 +63,7 @@ test_map_format_interface() `test {
   map[string, int] m = map[string, int]();
   m["k"] = 7;
   Builder b = Builder();
-  m.format(b)!;
+  m.format(b)?!;
   assert(b.to_string() == "\{k: 7}", "map direct format");
 }
 
@@ -99,7 +99,7 @@ test_vector_satisfies_format() `test {
   int[] v = [1, 2];
   Format f = v;
   Builder b = Builder();
-  f.format(b)!;
+  f.format(b)?!;
   assert(b.to_string() == "[1, 2]", "vector as Format");
 }
 
@@ -108,6 +108,6 @@ test_map_satisfies_format() `test {
   m["a"] = 1;
   Format f = m;
   Builder b = Builder();
-  f.format(b)!;
+  f.format(b)?!;
   assert(b.to_string() == "\{a: 1}", "map as Format");
 }

@@ -14,8 +14,8 @@ test_lambda_block() `test {
     int sum = x + y;
     return sum * sum;
   };
-  assert(f(2, 3) == 25, "(2+3)^2 = 25");
-  assert(f(0, 0) == 0, "(0+0)^2 = 0");
+  assert(f(2, 3) == 25, "(2+3)?^2 = 25");
+  assert(f(0, 0) == 0, "(0+0)?^2 = 0");
 }
 
 // --- lambda capturing one variable ---

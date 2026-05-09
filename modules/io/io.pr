@@ -369,7 +369,7 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
     }
     // Refill internal buffer if empty
     if this._pos >= this._end {
-      this._end = this._file.read(this._buf)!;
+      this._end = this._file.read(this._buf)?!;
       this._pos = 0;
       if this._end == 0 {
         return 0;
@@ -392,7 +392,7 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
     while true {
       // Refill if buffer exhausted
       if this._pos >= this._end {
-        this._end = this._file.read(this._buf)!;
+        this._end = this._file.read(this._buf)?!;
         this._pos = 0;
         if this._end == 0 {
           if line.len == 0 {
@@ -418,7 +418,7 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
 
   read_byte!(~this) u8? `public `doc("Reads a single byte. Returns absent at EOF.") {
     if this._pos >= this._end {
-      this._end = this._file.read(this._buf)!;
+      this._end = this._file.read(this._buf)?!;
       this._pos = 0;
       if this._end == 0 {
         return none;
@@ -462,7 +462,7 @@ type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batc
       }
       // Flush if internal buffer is full
       if this._len >= this._buf.len {
-        this.flush()!;
+        this.flush()?!;
       }
     }
     return total;
@@ -481,7 +481,7 @@ type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batc
   flush!(~this) `public `doc("Flushes buffered data to the underlying file.") {
     if this._len > 0 {
       u8[] data = this._buf[0:this._len];
-      this._file.write(data)!;
+      this._file.write(data)?!;
       this._len = 0;
     }
   }

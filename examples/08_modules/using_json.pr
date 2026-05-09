@@ -26,11 +26,11 @@ decoded user: Alice, age 30""") {
 
   // Encode a serializable type to a JSON string.
   p := Point(x: 1, y: 2);
-  string point_json = json.encode_string[Point](p)!;
+  string point_json = json.encode_string[Point](p)?!;
   print_line("point json: {point_json}");
 
   u := User(name: "Alice", age: 30);
-  string user_json = json.encode_string[User](u)!;
+  string user_json = json.encode_string[User](u)?!;
   print_line("user json: {user_json}");
 
   // --- Decode ---
@@ -38,9 +38,9 @@ decoded user: Alice, age 30""") {
   print_line("--- Decode ---");
 
   // Decode a JSON string back to a typed value.
-  Point p2 = json.decode_string[Point](point_json)!;
+  Point p2 = json.decode_string[Point](point_json)?!;
   print_line("decoded point: ({p2.x}, {p2.y})");
 
-  User u2 = json.decode_string[User](user_json)!;
+  User u2 = json.decode_string[User](user_json)?!;
   print_line("decoded user: {u2.name}, age {u2.age}");
 }

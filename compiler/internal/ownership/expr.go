@@ -64,7 +64,10 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 	case *ast.ErrorPropagateExpr:
 		c.checkExpr(e.Expr)
 
-	case *ast.ErrorUnwrapExpr:
+	case *ast.ErrorPanicExpr:
+		c.checkExpr(e.Expr)
+
+	case *ast.OptionalUnwrapExpr:
 		c.checkExpr(e.Expr)
 
 	case *ast.ErrorHandlerExpr:

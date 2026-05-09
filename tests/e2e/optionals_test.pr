@@ -456,13 +456,13 @@ get_none!() int? {
 }
 
 double_unwrap_error_then_optional() `test {
-  int? val = get_value()!;
+  int? val = get_value()?!;
   int y = val!;
   assert(y == 42, "double unwrap: error then optional");
 }
 
 double_unwrap_failable_optional_handler() `test {
-  int? val = get_none()!;
+  int? val = get_none()?!;
   int y = val? _ {
     -1;
   };

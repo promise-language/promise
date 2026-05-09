@@ -432,7 +432,10 @@ func (a *lastUseAnalyzer) exprReferencesVar(expr ast.Expr, name string) bool {
 	case *ast.ErrorPropagateExpr:
 		return a.exprReferencesVar(e.Expr, name)
 
-	case *ast.ErrorUnwrapExpr:
+	case *ast.ErrorPanicExpr:
+		return a.exprReferencesVar(e.Expr, name)
+
+	case *ast.OptionalUnwrapExpr:
 		return a.exprReferencesVar(e.Expr, name)
 
 	case *ast.ErrorHandlerExpr:

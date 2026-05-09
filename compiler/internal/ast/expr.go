@@ -102,7 +102,7 @@ type CastExpr struct {
 
 func (*CastExpr) exprTag() {}
 
-// ErrorPropagateExpr represents error propagation: expr?
+// ErrorPropagateExpr represents explicit error propagation: expr?^
 type ErrorPropagateExpr struct {
 	nodeBase
 	Expr Expr
@@ -110,13 +110,21 @@ type ErrorPropagateExpr struct {
 
 func (*ErrorPropagateExpr) exprTag() {}
 
-// ErrorUnwrapExpr represents forced unwrap: expr!
-type ErrorUnwrapExpr struct {
+// ErrorPanicExpr represents error panic/forced unwrap of failable: expr?!
+type ErrorPanicExpr struct {
 	nodeBase
 	Expr Expr
 }
 
-func (*ErrorUnwrapExpr) exprTag() {}
+func (*ErrorPanicExpr) exprTag() {}
+
+// OptionalUnwrapExpr represents optional force-unwrap: expr!
+type OptionalUnwrapExpr struct {
+	nodeBase
+	Expr Expr
+}
+
+func (*OptionalUnwrapExpr) exprTag() {}
 
 // ErrorHandlerExpr represents an error handler: expr ? binding { body }
 // With optional type filter: expr ? binding is TypeName { body }

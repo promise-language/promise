@@ -351,6 +351,10 @@ func (v *BasePromiseParserVisitor) VisitSelectDefault(ctx *SelectDefaultContext)
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitOptionalUnwrapExpr(ctx *OptionalUnwrapExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitSliceTypeExpr(ctx *SliceTypeExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }
@@ -368,6 +372,10 @@ func (v *BasePromiseParserVisitor) VisitAdditiveExpr(ctx *AdditiveExprContext) i
 }
 
 func (v *BasePromiseParserVisitor) VisitBitwiseNotExpr(ctx *BitwiseNotExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitErrorPanicExpr(ctx *ErrorPanicExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -440,10 +448,6 @@ func (v *BasePromiseParserVisitor) VisitIndexExpr(ctx *IndexExprContext) interfa
 }
 
 func (v *BasePromiseParserVisitor) VisitOptionalChainExpr(ctx *OptionalChainExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BasePromiseParserVisitor) VisitErrorUnwrapExpr(ctx *ErrorUnwrapExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 

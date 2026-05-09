@@ -296,7 +296,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
   }
 
   _expect!(~this, char expected) {
-    char c = this._peek()!;
+    char c = this._peek()?!;
     if c != expected {
       raise DecodeError(message: "unexpected character in JSON", field: "", position: this._pos);
     }

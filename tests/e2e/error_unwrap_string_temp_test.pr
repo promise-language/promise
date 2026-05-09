@@ -1,5 +1,5 @@
 // T0125: Tests for string temp tracking from failable call unwrap paths.
-// When func()! returns a string, the unwrapped string is a heap temp that
+// When func()?! returns a string, the unwrapped string is a heap temp that
 // must be freed at statement end if not claimed by a variable.
 // Helper: returns a heap-allocated string (concat forces heap alloc)
 make_greeting!(string name) string {
@@ -13,13 +13,13 @@ make_upper!() string {
 
 // Pattern 1: unwrap result used as temp for .len getter
 test_unwrap_string_temp_len() `test {
-  int n = make_greeting("world")!.len;
+  int n = make_greeting("world")?!.len;
   assert(n == 11, "unwrap string temp len");
 }
 
 // Pattern 2: unwrap result used as temp for string method
 test_unwrap_string_temp_method() `test {
-  string s = make_upper()!.to_lower();
+  string s = make_upper()?!.to_lower();
   assert(s == "hello", "unwrap string temp method chain");
 }
 
@@ -29,26 +29,26 @@ check_len(string & s) int {
 }
 
 test_unwrap_string_temp_as_arg() `test {
-  int n = check_len(make_greeting("test")!);
+  int n = check_len(make_greeting("test")?!);
   assert(n == 10, "unwrap string temp as arg");
 }
 
 // Pattern 4: unwrap result stored in variable (claimed, not leaked)
 test_unwrap_string_temp_stored() `test {
-  string s = make_greeting("alice")!;
+  string s = make_greeting("alice")?!;
   assert(s.len == 11, "unwrap string stored in var");
 }
 
 // Pattern 5: unwrap result discarded (statement context)
 test_unwrap_string_temp_discard() `test {
-  make_greeting("discard")!;
+  make_greeting("discard")?!;
 }
 
 // Pattern 6: unwrap in a loop (repeated temps)
 test_unwrap_string_temp_loop() `test {
   int total = 0;
   for i in 0..5 {
-    total += make_greeting("x")!.len;
+    total += make_greeting("x")?!.len;
   }
   assert(total == 35, "unwrap string temp loop");
 }

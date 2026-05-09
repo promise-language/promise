@@ -9,7 +9,7 @@ type Reader `structural `public `doc("Byte-oriented input interface. Caller pre-
 
   read_byte(~this) u8? `doc("Reads a single byte. Returns absent at EOF. Default: allocates a 1-byte buffer and calls read().") {
     u8[] buf = Vector[u8].filled(0u8, 1);
-    int n = this.read(buf)!;
+    int n = this.read(buf)?!;
     if n == 0 {
       return none;
     }
@@ -32,7 +32,7 @@ type Writer `structural `public `doc("Byte-oriented output interface. Writes raw
 }
 
 // Closer is the structural interface for resources that need cleanup.
-type Closer `structural `public `doc("Structural interface for resources that need cleanup. Implement `close(~this)!` to satisfy.") {
+type Closer `structural `public `doc("Structural interface for resources that need cleanup. Implement `close(~this)?!` to satisfy.") {
   close!(~this) `abstract `doc("Releases the underlying resource.");
 }
 

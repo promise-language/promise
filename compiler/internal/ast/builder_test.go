@@ -745,7 +745,7 @@ func TestBuildExpressions(t *testing.T) {
 		},
 		{
 			name: "error_propagate",
-			src:  `f() { x := getValue()^; }`,
+			src:  `f() { x := getValue()?^; }`,
 			check: func(t *testing.T, file *File) {
 				fn := file.Decls[0].(*FuncDecl)
 				vd := fn.Body.Stmts[0].(*InferredVarDecl)
@@ -753,12 +753,21 @@ func TestBuildExpressions(t *testing.T) {
 			},
 		},
 		{
-			name: "error_unwrap",
+			name: "error_panic",
+			src:  `f() { x := getValue()?!; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				_ = vd.Value.(*ErrorPanicExpr)
+			},
+		},
+		{
+			name: "optional_unwrap",
 			src:  `f() { x := getValue()!; }`,
 			check: func(t *testing.T, file *File) {
 				fn := file.Decls[0].(*FuncDecl)
 				vd := fn.Body.Stmts[0].(*InferredVarDecl)
-				_ = vd.Value.(*ErrorUnwrapExpr)
+				_ = vd.Value.(*OptionalUnwrapExpr)
 			},
 		},
 		{
@@ -2096,14 +2105,14 @@ func TestBuildErrorHandling(t *testing.T) {
 			},
 		},
 		{
-			name: "propagate_then_unwrap",
-			src:  `f() { x := a()^; y := b()!; }`,
+			name: "propagate_then_panic",
+			src:  `f() { x := a()?^; y := b()?!; }`,
 			check: func(t *testing.T, file *File) {
 				fn := file.Decls[0].(*FuncDecl)
 				vd1 := fn.Body.Stmts[0].(*InferredVarDecl)
 				_ = vd1.Value.(*ErrorPropagateExpr)
 				vd2 := fn.Body.Stmts[1].(*InferredVarDecl)
-				_ = vd2.Value.(*ErrorUnwrapExpr)
+				_ = vd2.Value.(*ErrorPanicExpr)
 			},
 		},
 	}
@@ -2230,11 +2239,11 @@ func TestBuildComplexPrograms(t *testing.T) {
 		},
 		{
 			name: "complex_expression",
-			src:  `f() { x := a.b(c + d, e: f).g[0]^; }`,
+			src:  `f() { x := a.b(c + d, e: f).g[0]?^; }`,
 			check: func(t *testing.T, file *File) {
 				fn := file.Decls[0].(*FuncDecl)
 				vd := fn.Body.Stmts[0].(*InferredVarDecl)
-				// x := a.b(c + d, e: f).g[0]^
+				// x := a.b(c + d, e: f).g[0]?^
 				ep := vd.Value.(*ErrorPropagateExpr)
 				idx := ep.Expr.(*IndexExpr)
 				mg := idx.Target.(*MemberExpr)

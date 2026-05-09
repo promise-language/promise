@@ -20,7 +20,7 @@ test_regular_function() `test {
 
 // Test failable getter with ! unwrap (success case).
 test_failable_getter_success() `test {
-  string val = propmod.safe_value!;
+  string val = propmod.safe_value?!;
   assert(val == "safe", "safe_value should return 'safe'");
 }
 

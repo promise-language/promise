@@ -172,12 +172,12 @@ type Validated[T] {
 }
 
 test_self_failable_factory_generic() `test {
-  v := Validated[int].parse(v: 42)!;
+  v := Validated[int].parse(v: 42)?!;
   assert(v.value == 42, "failable factory ok");
 }
 
 test_self_failable_factory_generic_string() `test {
-  v := Validated[string].parse(v: "ok")!;
+  v := Validated[string].parse(v: "ok")?!;
   assert(v.value == "ok", "failable factory string");
 }
 

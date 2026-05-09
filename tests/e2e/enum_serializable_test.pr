@@ -21,25 +21,25 @@ type Task `serializable {
 
 encode_color_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Color.Red.encode(enc)!;
+  Color.Red.encode(enc)?!;
   assert(enc.to_string() == "\"Red\"", "encode Red");
 }
 
 encode_all_variants_test() `test {
   json.JsonEncoder e1 = json.JsonEncoder();
-  Color.Green.encode(e1)!;
+  Color.Green.encode(e1)?!;
   assert(e1.to_string() == "\"Green\"", "encode Green");
 
   json.JsonEncoder e2 = json.JsonEncoder();
-  Color.Blue.encode(e2)!;
+  Color.Blue.encode(e2)?!;
   assert(e2.to_string() == "\"Blue\"", "encode Blue");
 }
 
 decode_color_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\"Green\"");
-  Color c = Color.decode(dec)!;
+  Color c = Color.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  c.encode(enc)!;
+  c.encode(enc)?!;
   assert(enc.to_string() == "\"Green\"", "decode Green");
 }
 
@@ -55,7 +55,7 @@ round_trip_all_priorities_test() `test {
   int i = 0;
   for p in all {
     json.JsonEncoder enc = json.JsonEncoder();
-    p.encode(enc)!;
+    p.encode(enc)?!;
     assert(enc.to_string() == expected[i], "encode priority");
     i = i + 1;
   }
@@ -66,7 +66,7 @@ round_trip_all_priorities_test() `test {
 encode_task_with_enum_test() `test {
   Task t = Task(name: "Fix bug", priority: Priority.High);
   json.JsonEncoder enc = json.JsonEncoder();
-  t.encode(enc)!;
+  t.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"name\":\"Fix bug\""), "task name");
   assert(s.contains("\"priority\":\"High\""), "task priority");
@@ -74,10 +74,10 @@ encode_task_with_enum_test() `test {
 
 decode_task_with_enum_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"Deploy\",\"priority\":\"Low\"}");
-  Task t = Task.decode(dec)!;
+  Task t = Task.decode(dec)?!;
   assert(t.name == "Deploy", "decoded name");
   json.JsonEncoder enc = json.JsonEncoder();
-  t.priority.encode(enc)!;
+  t.priority.encode(enc)?!;
   assert(enc.to_string() == "\"Low\"", "decoded priority");
 }
 
@@ -86,14 +86,14 @@ decode_task_with_enum_test() `test {
 round_trip_task_test() `test {
   Task t = Task(name: "Ship", priority: Priority.Medium);
   json.JsonEncoder enc = json.JsonEncoder();
-  t.encode(enc)!;
+  t.encode(enc)?!;
   string s = enc.to_string();
   json.JsonDecoder dec = json.JsonDecoder(data: s);
-  Task t2 = Task.decode(dec)!;
+  Task t2 = Task.decode(dec)?!;
   assert(t2.name == "Ship", "rt task name");
   // Verify priority round-trips
   json.JsonEncoder enc2 = json.JsonEncoder();
-  t2.priority.encode(enc2)!;
+  t2.priority.encode(enc2)?!;
   assert(enc2.to_string() == "\"Medium\"", "rt task priority");
 }
 
@@ -105,15 +105,15 @@ enum Singleton `serializable `copy {
 
 encode_singleton_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Singleton.Only.encode(enc)!;
+  Singleton.Only.encode(enc)?!;
   assert(enc.to_string() == "\"Only\"", "encode singleton");
 }
 
 decode_singleton_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\"Only\"");
-  Singleton s = Singleton.decode(dec)!;
+  Singleton s = Singleton.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  s.encode(enc)!;
+  s.encode(enc)?!;
   assert(enc.to_string() == "\"Only\"", "decode singleton");
 }
 
@@ -127,7 +127,7 @@ type Config `serializable {
 optional_enum_field_present_test() `test {
   Config c = Config(name: "prod", level: Priority.High);
   json.JsonEncoder enc = json.JsonEncoder();
-  c.encode(enc)!;
+  c.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"level\":\"High\""), "optional enum present");
 }
@@ -135,7 +135,7 @@ optional_enum_field_present_test() `test {
 optional_enum_field_absent_test() `test {
   Config c = Config(name: "dev");
   json.JsonEncoder enc = json.JsonEncoder();
-  c.encode(enc)!;
+  c.encode(enc)?!;
   string s = enc.to_string();
   assert(!s.contains("level"), "optional enum absent: no level key");
   assert(s.contains("\"name\":\"dev\""), "optional enum absent: has name");
@@ -150,20 +150,20 @@ type Schedule `serializable {
 enum_vector_field_encode_test() `test {
   Schedule s = Schedule(priorities: [Priority.Low, Priority.High, Priority.Medium]);
   json.JsonEncoder enc = json.JsonEncoder();
-  s.encode(enc)!;
+  s.encode(enc)?!;
   string result = enc.to_string();
   assert(result.contains("[\"Low\",\"High\",\"Medium\"]"), "enum vector encode: {result}");
 }
 
 enum_vector_field_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"priorities\":[\"High\",\"Low\"]}");
-  Schedule s = Schedule.decode(dec)!;
+  Schedule s = Schedule.decode(dec)?!;
   assert(s.priorities.len == 2, "enum vector decode: len");
   json.JsonEncoder e1 = json.JsonEncoder();
-  s.priorities[0].encode(e1)!;
+  s.priorities[0].encode(e1)?!;
   assert(e1.to_string() == "\"High\"", "enum vector decode: [0]");
   json.JsonEncoder e2 = json.JsonEncoder();
-  s.priorities[1].encode(e2)!;
+  s.priorities[1].encode(e2)?!;
   assert(e2.to_string() == "\"Low\"", "enum vector decode: [1]");
 }
 
@@ -171,13 +171,13 @@ enum_vector_field_decode_test() `test {
 
 optional_enum_decode_present_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"prod\",\"level\":\"High\"}");
-  Config c = Config.decode(dec)!;
+  Config c = Config.decode(dec)?!;
   assert(c.name == "prod", "opt enum decode: name");
   // level should be present
   json.JsonEncoder enc = json.JsonEncoder();
   Priority? lv = c.level;
   if l := lv {
-    l.encode(enc)!;
+    l.encode(enc)?!;
     assert(enc.to_string() == "\"High\"", "opt enum decode: level");
   } else {
     assert(false, "expected level present");
@@ -186,7 +186,7 @@ optional_enum_decode_present_test() `test {
 
 optional_enum_decode_null_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"dev\",\"level\":null}");
-  Config c = Config.decode(dec)!;
+  Config c = Config.decode(dec)?!;
   assert(c.name == "dev", "opt enum decode null: name");
   assert(c.level is absent, "opt enum decode null: level absent");
 }
@@ -194,7 +194,7 @@ optional_enum_decode_null_test() `test {
 optional_enum_decode_missing_test() `test {
   // Key not present at all — should default to none
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"test\"}");
-  Config c = Config.decode(dec)!;
+  Config c = Config.decode(dec)?!;
   assert(c.name == "test", "opt enum decode missing: name");
   assert(c.level is absent, "opt enum decode missing: level absent");
 }
@@ -225,7 +225,7 @@ type Event `serializable {
 multiple_enum_fields_encode_test() `test {
   Event e = Event(title: "Launch", color: Color.Blue, priority: Priority.High);
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"color\":\"Blue\""), "multi enum: color");
   assert(s.contains("\"priority\":\"High\""), "multi enum: priority");
@@ -234,13 +234,13 @@ multiple_enum_fields_encode_test() `test {
 
 multiple_enum_fields_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"title\":\"Test\",\"color\":\"Red\",\"priority\":\"Low\"}");
-  Event e = Event.decode(dec)!;
+  Event e = Event.decode(dec)?!;
   assert(e.title == "Test", "multi enum decode: title");
   json.JsonEncoder ec = json.JsonEncoder();
-  e.color.encode(ec)!;
+  e.color.encode(ec)?!;
   assert(ec.to_string() == "\"Red\"", "multi enum decode: color");
   json.JsonEncoder ep = json.JsonEncoder();
-  e.priority.encode(ep)!;
+  e.priority.encode(ep)?!;
   assert(ep.to_string() == "\"Low\"", "multi enum decode: priority");
 }
 
@@ -249,10 +249,10 @@ multiple_enum_fields_decode_test() `test {
 decode_extra_keys_test() `test {
   // Extra keys should be silently skipped
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"x\",\"unknown\":true,\"priority\":\"Low\",\"extra\":[1,2]}");
-  Task t = Task.decode(dec)!;
+  Task t = Task.decode(dec)?!;
   assert(t.name == "x", "extra keys: name");
   json.JsonEncoder enc = json.JsonEncoder();
-  t.priority.encode(enc)!;
+  t.priority.encode(enc)?!;
   assert(enc.to_string() == "\"Low\"", "extra keys: priority");
 }
 
@@ -266,7 +266,7 @@ type Notification `serializable {
 include_none_present_test() `test {
   Notification n = Notification(text: "hi", urgency: Priority.High);
   json.JsonEncoder enc = json.JsonEncoder();
-  n.encode(enc)!;
+  n.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"urgency\":\"High\""), "include_none present");
 }
@@ -274,7 +274,7 @@ include_none_present_test() `test {
 include_none_absent_test() `test {
   Notification n = Notification(text: "hi");
   json.JsonEncoder enc = json.JsonEncoder();
-  n.encode(enc)!;
+  n.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"urgency\":null"), "include_none absent: null");
 }
@@ -291,13 +291,13 @@ enum Shape `serializable `copy {
 
 data_enum_encode_circle_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Shape.Circle(1.5).encode(enc)!;
+  Shape.Circle(1.5).encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Circle\",\"radius\":1.5}", "encode Circle");
 }
 
 data_enum_encode_rect_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Shape.Rect(3.0, 4.0).encode(enc)!;
+  Shape.Rect(3.0, 4.0).encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"type\":\"Rect\""), "encode Rect: type");
   assert(s.contains("\"w\":3"), "encode Rect: w");
@@ -306,7 +306,7 @@ data_enum_encode_rect_test() `test {
 
 data_enum_encode_fieldless_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Shape.Point.encode(enc)!;
+  Shape.Point.encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Point\"}", "encode Point");
 }
 
@@ -314,17 +314,17 @@ data_enum_encode_fieldless_test() `test {
 
 data_enum_decode_circle_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Circle\",\"radius\":2.5}");
-  Shape s = Shape.decode(dec)!;
+  Shape s = Shape.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  s.encode(enc)!;
+  s.encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Circle\",\"radius\":2.5}", "decode Circle rt");
 }
 
 data_enum_decode_rect_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Rect\",\"w\":10,\"h\":20}");
-  Shape s = Shape.decode(dec)!;
+  Shape s = Shape.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  s.encode(enc)!;
+  s.encode(enc)?!;
   string result = enc.to_string();
   assert(result.contains("\"type\":\"Rect\""), "decode Rect: type");
   assert(result.contains("\"w\":10"), "decode Rect: w");
@@ -333,9 +333,9 @@ data_enum_decode_rect_test() `test {
 
 data_enum_decode_fieldless_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Point\"}");
-  Shape s = Shape.decode(dec)!;
+  Shape s = Shape.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  s.encode(enc)!;
+  s.encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Point\"}", "decode Point rt");
 }
 
@@ -364,9 +364,9 @@ data_enum_decode_wrong_first_key_test() `test {
 
 data_enum_decode_extra_keys_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Circle\",\"radius\":1.0,\"extra\":true}");
-  Shape s = Shape.decode(dec)!;
+  Shape s = Shape.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  s.encode(enc)!;
+  s.encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Circle\",\"radius\":1}", "extra keys skipped");
 }
 
@@ -380,13 +380,13 @@ enum Message `serializable {
 
 data_enum_string_field_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Message.Text("hello").encode(enc)!;
+  Message.Text("hello").encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Text\",\"content\":\"hello\"}", "Text encode");
 }
 
 data_enum_multi_field_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Message.Image("pic.png", 800, 600).encode(enc)!;
+  Message.Image("pic.png", 800, 600).encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"type\":\"Image\""), "Image: type");
   assert(s.contains("\"url\":\"pic.png\""), "Image: url");
@@ -396,17 +396,17 @@ data_enum_multi_field_test() `test {
 
 data_enum_decode_string_field_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Text\",\"content\":\"world\"}");
-  Message m = Message.decode(dec)!;
+  Message m = Message.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  m.encode(enc)!;
+  m.encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Text\",\"content\":\"world\"}", "Text decode rt");
 }
 
 data_enum_decode_multi_field_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Image\",\"url\":\"x.jpg\",\"width\":100,\"height\":200}");
-  Message m = Message.decode(dec)!;
+  Message m = Message.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  m.encode(enc)!;
+  m.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"url\":\"x.jpg\""), "Image decode: url");
   assert(s.contains("\"width\":100"), "Image decode: width");
@@ -414,9 +414,9 @@ data_enum_decode_multi_field_test() `test {
 
 data_enum_decode_ping_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Ping\"}");
-  Message m = Message.decode(dec)!;
+  Message m = Message.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  m.encode(enc)!;
+  m.encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Ping\"}", "Ping decode rt");
 }
 
@@ -430,7 +430,7 @@ type Envelope `serializable {
 data_enum_in_type_encode_test() `test {
   Envelope e = Envelope(sender: "alice", payload: Message.Text("hi"));
   json.JsonEncoder enc = json.JsonEncoder();
-  e.encode(enc)!;
+  e.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"sender\":\"alice\""), "envelope: sender");
   assert(s.contains("\"payload\":\{\"type\":\"Text\",\"content\":\"hi\"}"), "envelope: payload");
@@ -438,10 +438,10 @@ data_enum_in_type_encode_test() `test {
 
 data_enum_in_type_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"sender\":\"bob\",\"payload\":\{\"type\":\"Ping\"}}");
-  Envelope e = Envelope.decode(dec)!;
+  Envelope e = Envelope.decode(dec)?!;
   assert(e.sender == "bob", "envelope decode: sender");
   json.JsonEncoder enc = json.JsonEncoder();
-  e.payload.encode(enc)!;
+  e.payload.encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Ping\"}", "envelope decode: payload");
 }
 
@@ -454,15 +454,15 @@ enum Toggle `serializable `copy {
 
 data_enum_bool_field_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Toggle.On(true).encode(enc)!;
+  Toggle.On(true).encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"On\",\"active\":true}", "bool field encode");
 }
 
 data_enum_bool_field_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"On\",\"active\":false}");
-  Toggle t = Toggle.decode(dec)!;
+  Toggle t = Toggle.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  t.encode(enc)!;
+  t.encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"On\",\"active\":false}", "bool field decode");
 }
 
@@ -475,13 +475,13 @@ enum Result `serializable {
 
 data_enum_int_field_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Result.Ok(200).encode(enc)!;
+  Result.Ok(200).encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Ok\",\"code\":200}", "int field");
 }
 
 data_enum_mixed_field_types_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Result.Err(404, "not found").encode(enc)!;
+  Result.Err(404, "not found").encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"type\":\"Err\""), "mixed: type");
   assert(s.contains("\"code\":404"), "mixed: code");
@@ -490,9 +490,9 @@ data_enum_mixed_field_types_test() `test {
 
 data_enum_mixed_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Err\",\"code\":500,\"reason\":\"internal\"}");
-  Result r = Result.decode(dec)!;
+  Result r = Result.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  r.encode(enc)!;
+  r.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\"code\":500"), "mixed decode: code");
   assert(s.contains("\"reason\":\"internal\""), "mixed decode: reason");
@@ -502,9 +502,9 @@ data_enum_mixed_decode_test() `test {
 
 data_enum_decode_off_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Off\"}");
-  Toggle t = Toggle.decode(dec)!;
+  Toggle t = Toggle.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  t.encode(enc)!;
+  t.encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Off\"}", "Off decode rt");
 }
 
@@ -513,9 +513,9 @@ data_enum_decode_off_test() `test {
 data_enum_decode_missing_field_test() `test {
   // Circle without radius key — radius should default to 0.0
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Circle\"}");
-  Shape s = Shape.decode(dec)!;
+  Shape s = Shape.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  s.encode(enc)!;
+  s.encode(enc)?!;
   assert(enc.to_string() == "\{\"type\":\"Circle\",\"radius\":0}", "missing field: zero default");
 }
 
@@ -532,7 +532,7 @@ type Gallery `serializable {
 data_enum_vector_encode_test() `test {
   Gallery g = Gallery(shapes: [Shape.Point, Shape.Circle(1.0)]);
   json.JsonEncoder enc = json.JsonEncoder();
-  g.encode(enc)!;
+  g.encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\{\"type\":\"Point\"}"), "vector data enum: Point");
   assert(s.contains("\{\"type\":\"Circle\""), "vector data enum: Circle");
@@ -540,13 +540,13 @@ data_enum_vector_encode_test() `test {
 
 data_enum_vector_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"shapes\":[\{\"type\":\"Point\"},\{\"type\":\"Circle\",\"radius\":3}]}");
-  Gallery g = Gallery.decode(dec)!;
+  Gallery g = Gallery.decode(dec)?!;
   assert(g.shapes.len == 2, "vector data enum decode: len");
   json.JsonEncoder e1 = json.JsonEncoder();
-  g.shapes[0].encode(e1)!;
+  g.shapes[0].encode(e1)?!;
   assert(e1.to_string() == "\{\"type\":\"Point\"}", "vector data enum decode: [0]");
   json.JsonEncoder e2 = json.JsonEncoder();
-  g.shapes[1].encode(e2)!;
+  g.shapes[1].encode(e2)?!;
   assert(e2.to_string() == "\{\"type\":\"Circle\",\"radius\":3}", "vector data enum decode: [1]");
 }
 
@@ -554,16 +554,16 @@ data_enum_vector_decode_test() `test {
 
 data_enum_string_escapes_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  Message.Text("hello\nworld").encode(enc)!;
+  Message.Text("hello\nworld").encode(enc)?!;
   string s = enc.to_string();
   assert(s.contains("\\n"), "string escapes: newline escaped");
 }
 
 data_enum_string_escapes_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Text\",\"content\":\"a\\tb\"}");
-  Message m = Message.decode(dec)!;
+  Message m = Message.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  m.encode(enc)!;
+  m.encode(enc)?!;
   assert(enc.to_string().contains("\\t"), "string escapes decode: tab preserved");
 }
 
@@ -577,29 +577,29 @@ enum InputEvent `serializable(tag: "kind") {
 
 custom_tag_encode_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  InputEvent.Click(10, 20).encode(enc)!;
+  InputEvent.Click(10, 20).encode(enc)?!;
   assert(enc.to_string() == "\{\"kind\":\"Click\",\"x\":10,\"y\":20}", "custom tag encode Click");
 }
 
 custom_tag_encode_fieldless_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
-  InputEvent.Scroll.encode(enc)!;
+  InputEvent.Scroll.encode(enc)?!;
   assert(enc.to_string() == "\{\"kind\":\"Scroll\"}", "custom tag encode Scroll");
 }
 
 custom_tag_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"kind\":\"KeyPress\",\"key\":\"Enter\"}");
-  InputEvent ev = InputEvent.decode(dec)!;
+  InputEvent ev = InputEvent.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  ev.encode(enc)!;
+  ev.encode(enc)?!;
   assert(enc.to_string() == "\{\"kind\":\"KeyPress\",\"key\":\"Enter\"}", "custom tag decode KeyPress");
 }
 
 custom_tag_decode_fieldless_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"kind\":\"Scroll\"}");
-  InputEvent ev = InputEvent.decode(dec)!;
+  InputEvent ev = InputEvent.decode(dec)?!;
   json.JsonEncoder enc = json.JsonEncoder();
-  ev.encode(enc)!;
+  ev.encode(enc)?!;
   assert(enc.to_string() == "\{\"kind\":\"Scroll\"}", "custom tag decode Scroll");
 }
 
@@ -608,11 +608,11 @@ custom_tag_roundtrip_test() `test {
   int i = 0;
   for ev in events {
     json.JsonEncoder enc = json.JsonEncoder();
-    ev.encode(enc)!;
+    ev.encode(enc)?!;
     json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
-    InputEvent decoded = InputEvent.decode(dec)!;
+    InputEvent decoded = InputEvent.decode(dec)?!;
     json.JsonEncoder enc2 = json.JsonEncoder();
-    decoded.encode(enc2)!;
+    decoded.encode(enc2)?!;
     assert(enc.to_string() == enc2.to_string(), "custom tag roundtrip " + i.to_string());
     i = i + 1;
   }

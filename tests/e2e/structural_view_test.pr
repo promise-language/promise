@@ -168,7 +168,7 @@ test_primitive_in_loop() `test {
   assert(result == "012", "primitives boxed in loop");
 }
 
-// --- Structural interface with failable method (Format uses format(Writer ~w)!) ---
+// --- Structural interface with failable method (Format uses format(Writer ~w)?!) ---
 
 format_to_string(Format f) string {
   Builder b = Builder();
@@ -207,8 +207,8 @@ type LogSink {
 }
 
 run_logger(Logger ~l) {
-  l.log("hello")!;
-  l.log("world")!;
+  l.log("hello")?!;
+  l.log("world")?!;
 }
 
 test_user_type_void_failable_structural() `test {

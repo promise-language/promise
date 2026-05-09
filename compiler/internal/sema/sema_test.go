@@ -575,23 +575,31 @@ func TestRaiseInNonFailable(t *testing.T) {
 func TestErrorPropagate(t *testing.T) {
 	checkOK(t, `
 		parse!(string s) int { return 0; }
-		foo!() int { x := parse("42")^; return x; }
+		foo!() int { x := parse("42")?^; return x; }
 	`)
 }
 
 func TestErrorPropagateInNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
 		parse!(string s) int { return 0; }
-		foo() { x := parse("42")^; }
+		foo() { x := parse("42")?^; }
 	`)
 	expectError(t, errs, "outside of failable")
 }
 
-func TestErrorUnwrap(t *testing.T) {
+func TestErrorPanic(t *testing.T) {
 	checkOK(t, `
+		parse!(string s) int { return 0; }
+		foo() { x := parse("42")?!; }
+	`)
+}
+
+func TestErrorPanicOnFailable(t *testing.T) {
+	errs := checkErrs(t, `
 		parse!(string s) int { return 0; }
 		foo() { x := parse("42")!; }
 	`)
+	expectError(t, errs, "use ?! to panic on failable error")
 }
 
 func TestRaiseNonErrorType(t *testing.T) {
@@ -642,37 +650,20 @@ func TestTypedErrorHandlerNonErrorType(t *testing.T) {
 	expectError(t, errs, "does not inherit from error")
 }
 
-// B0271: ^ has lower precedence than arithmetic — detect and give targeted hint
-func TestErrorPropagatePrecedenceHint(t *testing.T) {
-	errs := checkErrs(t, `
-		parse!(string s) int { return 0; }
-		foo!() int { return 1 + parse("x")^; }
-	`)
-	// Should get the precedence-specific hint
-	expectError(t, errs, "lower precedence than arithmetic")
-}
-
-// Non-failable without failable sub-expression: generic error, no hint
-func TestErrorPropagateOnNonFailableNoHint(t *testing.T) {
+func TestErrorPropagateOnNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
 		foo() int { return 42; }
-		bar!() int { return foo()^; }
+		bar!() int { return foo()?^; }
 	`)
 	expectError(t, errs, "requires a failable expression")
-	// Should NOT have the precedence hint
-	for _, e := range errs {
-		if strings.Contains(e.Error(), "lower precedence") {
-			t.Error("should not have precedence hint for non-failable call")
-		}
-	}
 }
 
-func TestErrorUnwrapOnNonFailable(t *testing.T) {
+func TestOptionalUnwrapOnNonOptional(t *testing.T) {
 	errs := checkErrs(t, `
 		foo() int { return 42; }
 		bar() { int x = foo()!; }
 	`)
-	expectError(t, errs, "requires a failable or optional expression")
+	expectError(t, errs, "unwrap (!) requires an optional expression")
 }
 
 func TestErrorHandlerOnNonFailable(t *testing.T) {
@@ -832,7 +823,7 @@ func TestFailableCallInsideUntypedHandler(t *testing.T) {
 		parse!(string s) int { return 0; }
 		other!() int { return 1; }
 		foo!() int {
-			int v = parse("x") ? e { return other()^; };
+			int v = parse("x") ? e { return other()?^; };
 			return v;
 		}
 	`)
@@ -844,37 +835,37 @@ func TestFailableCallInsideTypedHandler(t *testing.T) {
 		fail_io!() void { raise IoError(message: "fail", code: 1); }
 		retry!() int { return 0; }
 		foo!() int {
-			fail_io() ? e is IoError { return retry()^; };
+			fail_io() ? e is IoError { return retry()?^; };
 			return 0;
 		}
 	`)
 }
 
-func TestBangUnwrapInsideHandler(t *testing.T) {
+func TestPanicUnwrapInsideHandler(t *testing.T) {
 	checkOK(t, `
 		parse!(string s) int { return 0; }
 		foo() {
-			parse("x") ? e { int v = parse("0")!; };
+			parse("x") ? e { int v = parse("0")?!; };
 		}
 	`)
 }
 
 func TestFailableCallInsideHandlerOfNonFailable(t *testing.T) {
-	// In a non-failable function, handler body can still use ! (bang unwrap)
+	// In a non-failable function, handler body can still use ?! (error panic)
 	checkOK(t, `
 		parse!(string s) int { return 0; }
 		foo() {
-			parse("x") ? e { int v = parse("fallback")!; };
+			parse("x") ? e { int v = parse("fallback")?!; };
 		}
 	`)
 }
 
 func TestFailableCallPropagateInsideHandlerOfNonFailable(t *testing.T) {
-	// Cannot use ^ (propagate) in non-failable function, even inside handler
+	// Cannot use ?^ (propagate) in non-failable function, even inside handler
 	errs := checkErrs(t, `
 		parse!(string s) int { return 0; }
 		foo() {
-			parse("x") ? e { int v = parse("retry")^; };
+			parse("x") ? e { int v = parse("retry")?^; };
 		}
 	`)
 	expectError(t, errs, "outside of failable")
@@ -2690,7 +2681,7 @@ func TestFailableNewConstructorSema(t *testing.T) {
 			}
 		}
 		test!() {
-			Port p = Port(value: 80)!;
+			Port p = Port(value: 80)?!;
 		}
 	`)
 }
@@ -3137,7 +3128,7 @@ func TestSelfFailableFactoryGeneric(t *testing.T) {
 			}
 		}
 		test() {
-			Validated[int] v = Validated[int].parse(v: 42)!;
+			Validated[int] v = Validated[int].parse(v: 42)?!;
 		}
 	`)
 }
@@ -3233,7 +3224,7 @@ func TestChildNewFailableMatchesParent(t *testing.T) {
 			}
 		}
 		test!() {
-			Dog d = Dog(name: "Rex", breed: "Lab")!;
+			Dog d = Dog(name: "Rex", breed: "Lab")?!;
 		}
 	`)
 }
@@ -8305,7 +8296,7 @@ func TestOptionalForceUnwrap(t *testing.T) {
 
 func TestOptionalForceUnwrapError(t *testing.T) {
 	errs := checkErrs(t, "test() { int x = 42; int y = x!; }")
-	expectError(t, errs, "unwrap (!) requires a failable or optional expression")
+	expectError(t, errs, "unwrap (!) requires an optional expression")
 }
 
 func TestOptionalHandler(t *testing.T) {
@@ -9283,7 +9274,7 @@ func TestAbstractFactoryFailableReturn(t *testing.T) {
 			}
 		}
 		test() {
-			My m = My.tryParse("hello")!;
+			My m = My.tryParse("hello")?!;
 		}
 	`)
 }
@@ -9364,7 +9355,7 @@ func TestGenericFactoryFailableConstraint(t *testing.T) {
 			return T.tryParse(data);
 		}
 		test() {
-			My m = load[My]("hello")!;
+			My m = load[My]("hello")?!;
 		}
 	`)
 }
@@ -9424,7 +9415,7 @@ func TestAbstractFactoryExplicitFailableSelfReturn(t *testing.T) {
 			return T.tryParse(data);
 		}
 		test() {
-			Strict s = tryLoad[Strict]("ok")!;
+			Strict s = tryLoad[Strict]("ok")?!;
 		}
 	`)
 }
@@ -9957,8 +9948,8 @@ func TestVariadicFailable(t *testing.T) {
 			return total;
 		}
 		main() {
-			x := trySum(1, 2, 3)!;
-			y := trySum()!;
+			x := trySum(1, 2, 3)?!;
+			y := trySum()?!;
 		}
 	`)
 }
@@ -9973,11 +9964,11 @@ func TestVariadicFailablePropagation(t *testing.T) {
 			return total;
 		}
 		outer!() int {
-			a := trySum(1, 2)^;
-			b := trySum()^;
+			a := trySum(1, 2)?^;
+			b := trySum()?^;
 			return a + b;
 		}
-		main() { outer()!; }
+		main() { outer()?!; }
 	`)
 }
 
@@ -10921,7 +10912,7 @@ func TestMethodGenericFailable(t *testing.T) {
 		}
 		main() {
 			p := Parser();
-			int x = p.try_parse[int](42)!;
+			int x = p.try_parse[int](42)?!;
 		}
 	`))
 }
@@ -11316,7 +11307,7 @@ func TestFailableGetterOK(t *testing.T) {
 		}
 		main() {
 			Foo f = Foo(_val: 42);
-			int v = f.value!;
+			int v = f.value?!;
 		}
 	`)
 }
@@ -11332,7 +11323,7 @@ func TestFailableGetterPropagate(t *testing.T) {
 			}
 		}
 		bar!(Foo f) int {
-			return f.value^;
+			return f.value?^;
 		}
 	`)
 }
@@ -11365,7 +11356,7 @@ func TestFailableGetterAbstract(t *testing.T) {
 		}
 		main() {
 			Base b = Impl(_v: 10);
-			int v = b.value!;
+			int v = b.value?!;
 		}
 	`)
 }
@@ -11378,7 +11369,7 @@ func TestNonFailableGetterBangError(t *testing.T) {
 		}
 		main() {
 			Foo f = Foo(_val: 1);
-			int v = f.value!;
+			int v = f.value?!;
 		}
 	`)
 	expectError(t, errs, "failable")
@@ -11422,7 +11413,7 @@ func TestModuleLevelGetterWithSetterOK(t *testing.T) {
 func TestModuleLevelFailableGetterOK(t *testing.T) {
 	checkOK(t, `
 		get safe! string { return "ok"; }
-		test() { string s = safe!; }
+		test() { string s = safe?!; }
 	`)
 }
 
@@ -11647,7 +11638,7 @@ func TestEnumMethodFailableOK(t *testing.T) {
 				}
 			}
 		}
-		test() { string s = Mode.A.validate()!; }
+		test() { string s = Mode.A.validate()?!; }
 	`)
 }
 

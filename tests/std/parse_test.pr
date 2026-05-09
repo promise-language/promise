@@ -1,32 +1,32 @@
 // Tests for Parse interface: int.parse, bool.parse, uint.parse, f64.parse, Vector.filled
 test_int_parse() `test {
   Scanner r1 = Scanner(s: "42");
-  int v1 = int.parse(r1)!;
+  int v1 = int.parse(r1)?!;
   assert(v1 == 42, "parse 42");
 
   Scanner r2 = Scanner(s: "-17");
-  int v2 = int.parse(r2)!;
+  int v2 = int.parse(r2)?!;
   assert(v2 == -17, "parse -17");
 
   Scanner r3 = Scanner(s: "0");
-  int v3 = int.parse(r3)!;
+  int v3 = int.parse(r3)?!;
   assert(v3 == 0, "parse 0");
 }
 
 test_int_parse_stops_at_non_digit() `test {
   Scanner r = Scanner(s: "123abc");
-  int v = int.parse(r)!;
+  int v = int.parse(r)?!;
   assert(v == 123, "parse 123 from 123abc");
   assert(r.rest() == "bc", "remaining bc");
 }
 
 test_bool_parse() `test {
   Scanner r1 = Scanner(s: "true");
-  bool v1 = bool.parse(r1)!;
+  bool v1 = bool.parse(r1)?!;
   assert(v1, "parse true");
 
   Scanner r2 = Scanner(s: "false");
-  bool v2 = bool.parse(r2)!;
+  bool v2 = bool.parse(r2)?!;
   assert(!v2, "parse false");
 }
 
@@ -77,16 +77,16 @@ test_bool_parse_partial() `test {
 }
 
 test_scan_int() `test {
-  int v = scan[int]("99")!;
+  int v = scan[int]("99")?!;
   assert(v == 99, "scan int");
 }
 
 test_sequential_parse() `test {
   Scanner r = Scanner(s: "12 34");
-  int a = int.parse(r)!;
+  int a = int.parse(r)?!;
   assert(a == 12, "first int");
   // int.parse already consumed the space (first non-digit)
-  int b = int.parse(r)!;
+  int b = int.parse(r)?!;
   assert(b == 34, "second int");
 }
 
@@ -94,13 +94,13 @@ test_sequential_parse() `test {
 
 test_uint_parse() `test {
   Scanner r = Scanner(s: "42");
-  uint v = uint.parse(r)!;
+  uint v = uint.parse(r)?!;
   assert((v as! int) == 42, "parse 42");
 }
 
 test_uint_parse_large() `test {
   Scanner r = Scanner(s: "1000000");
-  uint v = uint.parse(r)!;
+  uint v = uint.parse(r)?!;
   assert((v as! int) == 1000000, "parse 1000000");
 }
 
@@ -124,84 +124,84 @@ test_uint_parse_non_digit() `test {
 
 test_uint_parse_stops_at_non_digit() `test {
   Scanner r = Scanner(s: "123abc");
-  uint v = uint.parse(r)!;
+  uint v = uint.parse(r)?!;
   assert((v as! int) == 123, "parse 123 from 123abc");
   assert(r.rest() == "bc", "remaining bc");
 }
 
 test_uint_parse_zero() `test {
-  uint v = scan[uint]("0")!;
+  uint v = scan[uint]("0")?!;
   assert((v as! int) == 0, "parse 0");
 }
 
 test_scan_uint() `test {
-  uint v = scan[uint]("255")!;
+  uint v = scan[uint]("255")?!;
   assert((v as! int) == 255, "scan uint");
 }
 
 test_scan_bool() `test {
-  bool v1 = scan[bool]("true")!;
+  bool v1 = scan[bool]("true")?!;
   assert(v1, "scan true");
-  bool v2 = scan[bool]("false")!;
+  bool v2 = scan[bool]("false")?!;
   assert(!v2, "scan false");
 }
 
 // --- f64.parse ---
 
 test_f64_parse_integer() `test {
-  f64 v = scan[f64]("42")!;
+  f64 v = scan[f64]("42")?!;
   assert(v == 42.0, "parse 42");
 }
 
 test_f64_parse_decimal() `test {
-  f64 v = scan[f64]("3.14")!;
+  f64 v = scan[f64]("3.14")?!;
   // Check with tolerance (floating point)
   assert(v > 3.13 && v < 3.15, "parse 3.14");
 }
 
 test_f64_parse_negative() `test {
-  f64 v = scan[f64]("-2.5")!;
+  f64 v = scan[f64]("-2.5")?!;
   assert(v == -2.5, "parse -2.5");
 }
 
 test_f64_parse_zero() `test {
-  f64 v = scan[f64]("0")!;
+  f64 v = scan[f64]("0")?!;
   assert(v == 0.0, "parse 0");
 }
 
 test_f64_parse_zero_point() `test {
-  f64 v = scan[f64]("0.0")!;
+  f64 v = scan[f64]("0.0")?!;
   assert(v == 0.0, "parse 0.0");
 }
 
 test_f64_parse_scientific() `test {
-  f64 v = scan[f64]("1e3")!;
+  f64 v = scan[f64]("1e3")?!;
   assert(v == 1000.0, "parse 1e3");
 }
 
 test_f64_parse_scientific_negative_exp() `test {
-  f64 v = scan[f64]("5e-2")!;
+  f64 v = scan[f64]("5e-2")?!;
   assert(v > 0.049 && v < 0.051, "parse 5e-2");
 }
 
 test_f64_parse_scientific_plus() `test {
-  f64 v = scan[f64]("2.5e+2")!;
+  f64 v = scan[f64]("2.5e+2")?!;
   assert(v == 250.0, "parse 2.5e+2");
 }
 
 test_f64_parse_capital_e() `test {
-  f64 v = scan[f64]("1E3")!;
+  f64 v = scan[f64]("1E3")?!;
   assert(v == 1000.0, "parse 1E3");
 }
 
 test_f64_parse_negative_scientific() `test {
-  f64 v = scan[f64]("-1.5e2")!;
+  f64 v = scan[f64]("-1.5e2")?!;
   assert(v == -150.0, "parse -1.5e2");
 }
 
 test_f64_parse_stops_at_non_digit() `test {
   Scanner r = Scanner(s: "3.14abc");
-  f64 v = f64.parse(r)!;
+  f64 v = f64.parse(r)?!;
   assert(v > 3.13 && v < 3.15, "parse 3.14 from 3.14abc");
   assert(r.rest() == "bc", "remaining bc");
 }
@@ -230,22 +230,22 @@ test_f64_parse_minus_only() `test {
 }
 
 test_f64_parse_leading_dot() `test {
-  f64 v = scan[f64](".5")!;
+  f64 v = scan[f64](".5")?!;
   assert(v == 0.5, "parse .5 as 0.5");
 }
 
 test_f64_parse_negative_integer() `test {
-  f64 v = scan[f64]("-42")!;
+  f64 v = scan[f64]("-42")?!;
   assert(v == -42.0, "parse -42");
 }
 
 test_f64_parse_trailing_dot() `test {
-  f64 v = scan[f64]("1.")!;
+  f64 v = scan[f64]("1.")?!;
   assert(v == 1.0, "parse 1.");
 }
 
 test_f64_parse_negative_zero() `test {
-  f64 v = scan[f64]("-0.0")!;
+  f64 v = scan[f64]("-0.0")?!;
   // -0.0 == 0.0 in IEEE 754
   assert(v == 0.0, "parse -0.0");
 }
@@ -268,17 +268,17 @@ test_vector_filled_empty() `test {
 // --- char.parse ---
 
 test_char_parse() `test {
-  char c = scan[char]("A")!;
+  char c = scan[char]("A")?!;
   assert(c == 'A', "parse A");
 }
 
 test_char_parse_digit() `test {
-  char c = scan[char]("7")!;
+  char c = scan[char]("7")?!;
   assert(c == '7', "parse 7");
 }
 
 test_char_parse_space() `test {
-  char c = scan[char](" ")!;
+  char c = scan[char](" ")?!;
   assert(c == ' ', "parse space");
 }
 
@@ -297,26 +297,26 @@ test_char_parse_empty() `test {
 
 test_char_parse_from_scanner() `test {
   Scanner r = Scanner(s: "AB");
-  char c1 = char.parse(r)!;
+  char c1 = char.parse(r)?!;
   assert(c1 == 'A', "first char");
-  char c2 = char.parse(r)!;
+  char c2 = char.parse(r)?!;
   assert(c2 == 'B', "second char");
 }
 
 // --- f32.parse ---
 
 test_f32_parse_integer() `test {
-  f32 v = scan[f32]("42")!;
+  f32 v = scan[f32]("42")?!;
   assert(v == 42.0f32, "parse 42");
 }
 
 test_f32_parse_decimal() `test {
-  f32 v = scan[f32]("3.14")!;
+  f32 v = scan[f32]("3.14")?!;
   assert(v > 3.13f32 && v < 3.15f32, "parse 3.14");
 }
 
 test_f32_parse_negative() `test {
-  f32 v = scan[f32]("-2.5")!;
+  f32 v = scan[f32]("-2.5")?!;
   assert(v == -2.5f32, "parse -2.5");
 }
 
@@ -341,22 +341,22 @@ test_f32_parse_non_numeric() `test {
 // --- i8.parse ---
 
 test_i8_parse() `test {
-  i8 v = scan[i8]("42")!;
+  i8 v = scan[i8]("42")?!;
   assert(v == 42i8, "parse 42");
 }
 
 test_i8_parse_negative() `test {
-  i8 v = scan[i8]("-17")!;
+  i8 v = scan[i8]("-17")?!;
   assert(v == -17i8, "parse -17");
 }
 
 test_i8_parse_max() `test {
-  i8 v = scan[i8]("127")!;
+  i8 v = scan[i8]("127")?!;
   assert(v == 127i8, "parse 127");
 }
 
 test_i8_parse_min() `test {
-  i8 v = scan[i8]("-128")!;
+  i8 v = scan[i8]("-128")?!;
   assert(v == -128i8, "parse -128");
 }
 
@@ -386,12 +386,12 @@ test_i8_parse_empty() `test {
 // --- i16.parse ---
 
 test_i16_parse() `test {
-  i16 v = scan[i16]("1234")!;
+  i16 v = scan[i16]("1234")?!;
   assert(v == 1234i16, "parse 1234");
 }
 
 test_i16_parse_negative() `test {
-  i16 v = scan[i16]("-5000")!;
+  i16 v = scan[i16]("-5000")?!;
   assert(v == -5000i16, "parse -5000");
 }
 
@@ -411,12 +411,12 @@ test_i16_parse_overflow() `test {
 // --- i32.parse ---
 
 test_i32_parse() `test {
-  i32 v = scan[i32]("100000")!;
+  i32 v = scan[i32]("100000")?!;
   assert(v == 100000i32, "parse 100000");
 }
 
 test_i32_parse_negative() `test {
-  i32 v = scan[i32]("-100000")!;
+  i32 v = scan[i32]("-100000")?!;
   assert(v == -100000i32, "parse -100000");
 }
 
@@ -436,12 +436,12 @@ test_i32_parse_overflow() `test {
 // --- i64.parse ---
 
 test_i64_parse() `test {
-  i64 v = scan[i64]("123456789")!;
+  i64 v = scan[i64]("123456789")?!;
   assert(v == 123456789i64, "parse 123456789");
 }
 
 test_i64_parse_negative() `test {
-  i64 v = scan[i64]("-99")!;
+  i64 v = scan[i64]("-99")?!;
   assert(v == -99i64, "parse -99");
 }
 
@@ -461,7 +461,7 @@ test_i64_parse_empty() `test {
 // --- u8.parse ---
 
 test_u8_parse() `test {
-  u8 v = scan[u8]("200")!;
+  u8 v = scan[u8]("200")?!;
   assert(v == 200u8, "parse 200");
 }
 
@@ -486,7 +486,7 @@ test_u8_parse_empty() `test {
 // --- u16.parse ---
 
 test_u16_parse() `test {
-  u16 v = scan[u16]("50000")!;
+  u16 v = scan[u16]("50000")?!;
   assert(v == 50000u16, "parse 50000");
 }
 
@@ -506,7 +506,7 @@ test_u16_parse_overflow() `test {
 // --- u32.parse ---
 
 test_u32_parse() `test {
-  u32 v = scan[u32]("3000000000")!;
+  u32 v = scan[u32]("3000000000")?!;
   assert(v == 3000000000u32, "parse 3000000000");
 }
 
@@ -526,7 +526,7 @@ test_u32_parse_overflow() `test {
 // --- u64.parse ---
 
 test_u64_parse() `test {
-  u64 v = scan[u64]("123456789")!;
+  u64 v = scan[u64]("123456789")?!;
   assert(v == 123456789u64, "parse 123456789");
 }
 

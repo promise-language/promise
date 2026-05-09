@@ -321,8 +321,13 @@ func (p *printer) printExpr(e Expr) {
 		p.indent++
 		p.printExpr(n.Expr)
 		p.indent--
-	case *ErrorUnwrapExpr:
-		p.line("ErrorUnwrap")
+	case *ErrorPanicExpr:
+		p.line("ErrorPanic")
+		p.indent++
+		p.printExpr(n.Expr)
+		p.indent--
+	case *OptionalUnwrapExpr:
+		p.line("OptionalUnwrap")
 		p.indent++
 		p.printExpr(n.Expr)
 		p.indent--

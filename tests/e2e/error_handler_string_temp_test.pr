@@ -1,5 +1,5 @@
 // B0185: Tests for string temp tracking from error handler expressions.
-// When func()! returns a string and a handler is used (? e { ... }),
+// When func()?! returns a string and a handler is used (? e { ... }),
 // the Ok path string must be tracked as a temp for cleanup at statement end.
 // Helper: returns a heap-allocated string (concat forces heap alloc)
 make_greeting!(string name) string {

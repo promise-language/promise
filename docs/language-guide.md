@@ -182,7 +182,7 @@ sum(1, 2, 3);   // 6
 
 ## Error Handling
 
-**Critical: `!` = panic. Bare call = auto-propagate.**
+**Critical: `?!` = panic on error. `!` = optional unwrap. Bare call = auto-propagate.**
 
 ```promise
 // Failable function: ! after name marks it as failable
@@ -204,7 +204,7 @@ validate!(string input) {
 // Handling errors
 main() {
   // Panic on error (ONLY for prototyping)
-  string data = read_config("app.cfg")!;
+  string data = read_config("app.cfg")?!;
 
   // Handle with recovery value
   string data = read_config("app.cfg") ? {
@@ -229,12 +229,12 @@ main() {
 | `foo()` | Auto-propagate error | In `!` functions only |
 | `bar(foo())` | Auto-propagate error from argument | In `!` functions only |
 | `x = foo()` | Auto-propagate error from assignment | In `!` functions only |
-| `foo()^` | Explicit propagate (same as bare call) | In `!` functions only |
-| `foo()!` | **Panic** on error | Anywhere |
+| `foo()?^` | Explicit propagate (same as bare call) | In `!` functions only |
+| `foo()?!` | **Panic** on error | Anywhere |
 | `foo() ? e { ... }` | Handle error | Anywhere |
 | `foo() ? e is T { ... }` | Handle typed error | Anywhere |
 
-**Rule: In a failable (`!`) function, just call failable functions bare — errors auto-propagate. Use `^` for explicit self-documenting propagation. Never use `!` to propagate; `!` always means panic.**
+**Rule: In a failable (`!`) function, just call failable functions bare — errors auto-propagate. Use `?^` for explicit self-documenting propagation. `?!` always means panic.**
 
 ## Optionals
 
@@ -784,7 +784,7 @@ get name string `embed("f.txt");  // compile-time file embed
 
 ## Common Mistakes
 
-1. **Using `!` to propagate** — `!` always panics. Use bare call for propagation in `!` functions.
+1. **Using `!` on failable calls** — `!` is for optional unwrap only. Use `?!` to panic on failable errors, or use bare call for propagation in `!` functions.
 2. **`&`/`~` at call site** — Don't write `func(&val)` or `func(~val)`. Just write `func(val)` — the compiler auto-borrows based on the parameter declaration.
 3. **Forgetting named args** — constructors require `Type(field: value)`, not positional.
 4. **Moving strings twice** — strings are not `Copy`. Use `&s` parameter to borrow, or read into separate variables.

@@ -36,7 +36,7 @@ generic error: not found: email""") {
   // --- Typed Handler ---
   print_line("--- Typed Handler ---");
 
-  string val = lookup("name")!;
+  string val = lookup("name")?!;
   print_line("found: {val}");
 
   // --- Catch Specific Type ---

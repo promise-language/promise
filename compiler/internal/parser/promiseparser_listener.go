@@ -265,6 +265,9 @@ type PromiseParserListener interface {
 	// EnterSelectDefault is called when entering the selectDefault production.
 	EnterSelectDefault(c *SelectDefaultContext)
 
+	// EnterOptionalUnwrapExpr is called when entering the optionalUnwrapExpr production.
+	EnterOptionalUnwrapExpr(c *OptionalUnwrapExprContext)
+
 	// EnterSliceTypeExpr is called when entering the sliceTypeExpr production.
 	EnterSliceTypeExpr(c *SliceTypeExprContext)
 
@@ -279,6 +282,9 @@ type PromiseParserListener interface {
 
 	// EnterBitwiseNotExpr is called when entering the bitwiseNotExpr production.
 	EnterBitwiseNotExpr(c *BitwiseNotExprContext)
+
+	// EnterErrorPanicExpr is called when entering the errorPanicExpr production.
+	EnterErrorPanicExpr(c *ErrorPanicExprContext)
 
 	// EnterPrimaryExpr is called when entering the primaryExpr production.
 	EnterPrimaryExpr(c *PrimaryExprContext)
@@ -333,9 +339,6 @@ type PromiseParserListener interface {
 
 	// EnterOptionalChainExpr is called when entering the optionalChainExpr production.
 	EnterOptionalChainExpr(c *OptionalChainExprContext)
-
-	// EnterErrorUnwrapExpr is called when entering the errorUnwrapExpr production.
-	EnterErrorUnwrapExpr(c *ErrorUnwrapExprContext)
 
 	// EnterUnaryNotExpr is called when entering the unaryNotExpr production.
 	EnterUnaryNotExpr(c *UnaryNotExprContext)
@@ -739,6 +742,9 @@ type PromiseParserListener interface {
 	// ExitSelectDefault is called when exiting the selectDefault production.
 	ExitSelectDefault(c *SelectDefaultContext)
 
+	// ExitOptionalUnwrapExpr is called when exiting the optionalUnwrapExpr production.
+	ExitOptionalUnwrapExpr(c *OptionalUnwrapExprContext)
+
 	// ExitSliceTypeExpr is called when exiting the sliceTypeExpr production.
 	ExitSliceTypeExpr(c *SliceTypeExprContext)
 
@@ -753,6 +759,9 @@ type PromiseParserListener interface {
 
 	// ExitBitwiseNotExpr is called when exiting the bitwiseNotExpr production.
 	ExitBitwiseNotExpr(c *BitwiseNotExprContext)
+
+	// ExitErrorPanicExpr is called when exiting the errorPanicExpr production.
+	ExitErrorPanicExpr(c *ErrorPanicExprContext)
 
 	// ExitPrimaryExpr is called when exiting the primaryExpr production.
 	ExitPrimaryExpr(c *PrimaryExprContext)
@@ -807,9 +816,6 @@ type PromiseParserListener interface {
 
 	// ExitOptionalChainExpr is called when exiting the optionalChainExpr production.
 	ExitOptionalChainExpr(c *OptionalChainExprContext)
-
-	// ExitErrorUnwrapExpr is called when exiting the errorUnwrapExpr production.
-	ExitErrorUnwrapExpr(c *ErrorUnwrapExprContext)
 
 	// ExitUnaryNotExpr is called when exiting the unaryNotExpr production.
 	ExitUnaryNotExpr(c *UnaryNotExprContext)

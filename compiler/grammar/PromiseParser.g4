@@ -436,7 +436,9 @@ expression
     | expression LBRACKET expression? COLON expression? RBRACKET  # sliceExpr
     | expression LBRACKET RBRACKET                               # sliceTypeExpr
     | expression QUESTION bindingName? (IS IDENT typeArgs?)? (block (ELSE bindingName? block | BANG)? | FAT_ARROW expression)  # errorHandlerExpr
-    | expression BANG                                          # errorUnwrapExpr
+    | expression QUESTION BANG                                 # errorPanicExpr
+    | expression QUESTION CARET                                # errorPropagateExpr
+    | expression BANG                                          # optionalUnwrapExpr
 
     // Precedence 2: Unary prefix
     | MINUS expression                                         # unaryNegExpr
@@ -455,9 +457,6 @@ expression
 
     // Precedence 6: Bitwise
     | expression (AMP | CARET | PIPE) expression               # bitwiseExpr
-
-    // Precedence 6b: Error propagation (below bitwise so ^ resolves as XOR when followed by expression)
-    | expression CARET                                         # errorPropagateExpr
 
     // Precedence 7: Range
     | expression DOTDOT expression                             # exclusiveRangeExpr

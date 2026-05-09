@@ -1,7 +1,7 @@
 // Failable functions and error handling in Promise.
 //
 // A function returning T! can either succeed with T or fail with an error.
-// In a failable function (main()!), bare calls auto-propagate errors.
+// In a failable function (main()?!), bare calls auto-propagate errors.
 // Use ? for recovery, ! for panic (prototyping only).
 // Failable function: returns int on success, error on failure.
 parse_port!(string s) int {
@@ -48,7 +48,7 @@ caught: invalid port: abc""") {
   print_line("--- Success Path ---");
 
   // ! after a call panics on error (only for prototyping).
-  int port = parse_port("443")!;
+  int port = parse_port("443")?!;
   print_line("parsed port: {port}");
 
   // --- Error Recovery ---
@@ -71,7 +71,7 @@ caught: invalid port: abc""") {
   print_line("--- Auto-Propagation ---");
 
   // connect() is failable and calls parse_port() bare — errors propagate.
-  string addr = connect("example.com", "80")!;
+  string addr = connect("example.com", "80")?!;
   print_line("connected: {addr}");
 
   // --- Error Info ---

@@ -1,7 +1,7 @@
 use mathlib "./mathlib";
 
 test_failable_ok() `test {
-  int result = mathlib.safe_divide(10, 2)!;
+  int result = mathlib.safe_divide(10, 2)?!;
   assert(result == 5, "10 / 2 == 5");
 }
 

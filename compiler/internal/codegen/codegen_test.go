@@ -17430,3 +17430,90 @@ func TestEnumCtorTempClaimedInVectorLiteral(t *testing.T) {
 	`)
 	assertNotContains(t, ir, "enum.ctor.drop")
 }
+
+// B0288: is-present on method call returning T? with droppable enum inner type
+// must emit a conditional drop for the temporary.
+func TestIsPresentDropsTempOptionalEnum(t *testing.T) {
+	ir := generateIR(t, `
+		enum Val { Txt(string s), Num(int n) }
+		type Box {
+			Val? item;
+			get_item(&this) Val? {
+				return this.item;
+			}
+		}
+		main() {
+			Box b = Box(item: Val.Txt(s: "hello"));
+			bool ok = b.get_item() is present;
+		}
+	`)
+	// The method call returns a temporary Val? — the enum data must be dropped.
+	assertContains(t, ir, "is.temp.drop")
+	assertContains(t, ir, "is.temp.skip")
+}
+
+// B0288: is-present on ident expression must NOT emit temp drop
+// (the variable's scope binding handles cleanup).
+func TestIsPresentIdentNoTempDrop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? s = "hello";
+			bool ok = s is present;
+		}
+	`)
+	assertNotContains(t, ir, "is.temp.drop")
+}
+
+// B0288: is-present on field access must NOT emit temp drop
+// (the parent object owns the field data).
+func TestIsPresentFieldNoTempDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder {
+			string? value;
+		}
+		main() {
+			Holder h = Holder(value: "hello");
+			bool ok = h.value is present;
+		}
+	`)
+	assertNotContains(t, ir, "is.temp.drop")
+}
+
+// B0288: is-present on method call returning string? must emit temp drop.
+func TestIsPresentDropsTempOptionalString(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			string? name;
+			get_name(&this) string? {
+				return this.name;
+			}
+		}
+		main() {
+			Box b = Box(name: "hello");
+			bool ok = b.get_name() is present;
+		}
+	`)
+	assertContains(t, ir, "is.temp.drop")
+	assertContains(t, ir, "promise_string_drop")
+}
+
+// B0287: Optional unwrap on ident source must NOT track the unwrapped string
+// as a statement temp (the optional's scope-exit drop handles it).
+func TestOptionalUnwrapIdentNoStringTemp(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? s = "hello";
+			bool eq = s! == "hello";
+		}
+	`)
+	// The s! result should not be tracked as a string temp.
+	// If it were tracked, there would be a promise_string_drop call for the temp
+	// AND the optional's scope drop — double-free.
+	// Count promise_string_drop calls: should be only from scope cleanup, not temp tracking.
+	testFn := extractFunction(ir, "main")
+	count := strings.Count(testFn, "promise_string_drop")
+	// Expect at most 1 drop (the optional's scope-exit drop).
+	if count > 1 {
+		t.Fatalf("expected at most 1 promise_string_drop call, got %d\n%s", count, testFn)
+	}
+}

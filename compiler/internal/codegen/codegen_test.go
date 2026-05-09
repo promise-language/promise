@@ -17662,6 +17662,26 @@ func TestCloneVectorChannelDupsElements(t *testing.T) {
 	assertContains(t, ir, "chdup.inc")
 }
 
+// B0276: dupHeapValueFields must deep-clone vector fields with droppable elements.
+// When a heap type without clone() has a string[] field and is dup'd via
+// dupHeapValue (e.g., as a vector element during clone), the string[] field
+// must be deep-cloned, not shallow-copied.
+func TestDupHeapValueFieldsDeepClonesVectorStrings(t *testing.T) {
+	ir := generateIR(t, `
+		type Container {
+			string[] names;
+			int id;
+		}
+		test() {
+			v := [Container(names: ["a", "b"], id: 1)];
+			v2 := v.clone();
+		}
+	`)
+	// Vector[Container].clone() → emitVectorElementCloneLoop → cloneHeapElement
+	// → dupHeapValue → dupHeapValueFields → should deep-clone the string[] field.
+	assertContains(t, ir, "vecdup_str.head")
+}
+
 // B0281: Enum ctor temps used as map literal values must be claimed.
 // Without the fix, the enum temp is dropped at statement end, double-freeing
 // inner data (both the temp and the map's Slot share the same pointers).

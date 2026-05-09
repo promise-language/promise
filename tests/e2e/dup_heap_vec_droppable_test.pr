@@ -1,0 +1,54 @@
+// B0276: dupHeapValueFields must deep-clone vector fields with droppable elements.
+// Without the fix, dupVector does a shallow memcpy so string/heap elements are
+// shared between original and dup — causing double-free when both are dropped.
+type Container {
+  string[] names;
+  int id;
+}
+
+// Test: clone a vector of heap types with string[] fields.
+// Vector[Container].clone() → cloneHeapElement → dupHeapValue → dupHeapValueFields.
+// The string[] field must be deep-cloned so original and clone are independent.
+clone_vec_of_heap_with_string_vec() `test {
+  v := [Container(names: ["alice", "bob"], id: 1), Container(names: ["carol"], id: 2)];
+  v2 := v.clone();
+  assert(v2.len == 2, "clone len");
+  assert(v2[0].names.len == 2, "first names len");
+  assert(v2[0].names[0] == "alice", "first name 0");
+  assert(v2[0].names[1] == "bob", "first name 1");
+  assert(v2[0].id == 1, "first id");
+  assert(v2[1].names.len == 1, "second names len");
+  assert(v2[1].names[0] == "carol", "second name 0");
+  assert(v2[1].id == 2, "second id");
+}
+
+// Test: mutate clone to verify independence from original.
+clone_vec_independence() `test {
+  v := [Container(names: ["x", "y"], id: 10)];
+  v2 := v.clone();
+  v2[0].names.push("z");
+  // Original must be unaffected
+  assert(v[0].names.len == 2, "original len unchanged");
+  assert(v2[0].names.len == 3, "clone len updated");
+  assert(v2[0].names[2] == "z", "clone has new element");
+}
+
+// Test: nested heap types — Container with Inner[] field.
+type Inner {
+  string label;
+  int value;
+}
+
+type Outer {
+  Inner[] items;
+  string tag;
+}
+
+clone_vec_of_nested_heap() `test {
+  v := [Outer(items: [Inner(label: "a", value: 1)], tag: "first")];
+  v2 := v.clone();
+  assert(v2[0].items.len == 1, "nested len");
+  assert(v2[0].items[0].label == "a", "nested label");
+  assert(v2[0].items[0].value == 1, "nested value");
+  assert(v2[0].tag == "first", "tag");
+}

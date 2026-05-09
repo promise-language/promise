@@ -1957,6 +1957,9 @@ func (c *Compiler) dupHeapValueFields(named *types.Named, resolvedType types.Typ
 			elemLLVM := c.resolveType(elemType)
 			elemSize := int64(c.typeSize(elemLLVM))
 			dup := c.dupVector(fieldVal, elemSize)
+			// B0276: Deep-clone droppable elements (strings, heap types, etc.)
+			// to prevent double-free when both original and dup are dropped.
+			c.emitVectorElementCloneLoop(dup, elemType)
 			c.block.NewStore(dup, fieldPtr)
 		} else if _, isChan := types.AsChannel(fType); isChan || fNamed == types.TypChannel {
 			dup := c.dupChannel(fieldVal)

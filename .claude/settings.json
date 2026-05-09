@@ -68,7 +68,8 @@
       "mcp__tracker__get",
       "mcp__tracker__search",
       "mcp__tracker__heartbeat",
-      "mcp__tracker__agents"
+      "mcp__tracker__agents",
+      "mcp__tracker__get_attachment"
     ],
     "deny": [
       "Read(.tracker/**)",

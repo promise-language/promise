@@ -25,7 +25,7 @@
 - [distribution.md](distribution.md) — Self-contained binaries for Linux/macOS, multi-epoch toolchain management.
 - [windows-support.md](windows-support.md) — Native MSVC ABI, Windows SDK, self-contained compiler binary.
 - [wasm-bindings.md](wasm-bindings.md) — WIT/WebIDL ingestion for safe WASM host bindings.
-- [wasm-size-optimization.md](wasm-size-optimization.md) — WASM binary size tracking and regression prevention.
+- [size-optimization.md](size-optimization.md) — Binary size tracking and regression prevention across all targets.
 
 ## Infrastructure
 

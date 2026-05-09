@@ -6242,6 +6242,15 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	elemAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.locals[s.Binding] = elemAlloca
 
+	// B0277: For string elements, register a drop binding so dup'd strings are
+	// freed when the loop variable is not moved. The flag starts at 0 (no value
+	// to drop before the first iteration).
+	dupStrings := s.Binding != "_" && extractNamed(elemType) == types.TypString
+	if dupStrings {
+		c.maybeRegisterDrop(s.Binding, elemAlloca, elemType)
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.dropFlags[s.Binding])
+	}
+
 	// Index variable if present
 	if s.Index != "" {
 		indexAlloca := c.block.NewAlloca(irtypes.I64)
@@ -6272,13 +6281,37 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
+
+	// B0277: Drop previous iteration's dup'd string if not moved, then dup new.
+	if dupStrings {
+		dropFlag := c.dropFlags[s.Binding]
+		flag := c.block.NewLoad(irtypes.I1, dropFlag)
+		dropBlk := c.newBlock("forin.str.drop")
+		loadBlk := c.newBlock("forin.str.load")
+		c.block.NewCondBr(flag, dropBlk, loadBlk)
+
+		c.block = dropBlk
+		oldVal := c.block.NewLoad(irtypes.I8Ptr, elemAlloca)
+		c.block.NewCall(c.funcs["promise_string_drop"], oldVal)
+		c.block.NewBr(loadBlk)
+
+		c.block = loadBlk
+	}
+
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
 		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, curCounter)
-	elem := c.block.NewLoad(elemLLVM, elemPtr)
-	c.block.NewStore(elem, elemAlloca)
+	var elemVal value.Value = c.block.NewLoad(elemLLVM, elemPtr)
+
+	if dupStrings {
+		elemVal = c.dupString(elemVal)
+		c.block.NewStore(elemVal, elemAlloca)
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), c.dropFlags[s.Binding])
+	} else {
+		c.block.NewStore(elemVal, elemAlloca)
+	}
 
 	c.genBlock(s.Body)
 	if c.block.Term == nil {

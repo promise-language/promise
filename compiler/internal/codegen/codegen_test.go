@@ -3903,6 +3903,25 @@ func TestMapForInStringKeyElementDrop(t *testing.T) {
 	assertContains(t, ir, "vecdrop.body")
 }
 
+// B0277: for-in over Vector[string] must dup elements to prevent aliasing.
+func TestForInVectorStringDup(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			string[] v = ["a", "b"];
+			for elem in v {
+			}
+		}
+	`)
+	// String elements are dup'd via promise_string_new
+	assertContains(t, ir, "strdup.copy")
+	// Drop flag for binding
+	assertContains(t, ir, "elem.dropflag")
+	// Per-iteration drop of previous dup'd string
+	assertContains(t, ir, "forin.str.drop")
+	// Scope drop via promise_string_drop
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
 // --- Part E: Lambda tests ---
 
 func TestLambdaExpr(t *testing.T) {

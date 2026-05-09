@@ -1,0 +1,70 @@
+// B0277: for-in over Vector[string] must dup elements to prevent
+// use-after-free when the intermediate vector is dropped.
+test_forin_vector_string_move_to_set() `test {
+  map[string, bool] m = map[string, bool]();
+  m["hello"] = true;
+  m["world"] = true;
+  string[] items = m.keys();
+  Set[string] s = Set[string]();
+  for elem in items {
+    s.add(elem);
+  }
+  // items is dropped here — dup'd strings in the set must be independent
+  assert(s.contains("hello"), "set must contain hello");
+  assert(s.contains("world"), "set must contain world");
+}
+
+test_forin_vector_string_read_only() `test {
+  // When elem is read but not moved, the dup'd string must be freed per iteration
+  string[] v = ["alpha", "beta", "gamma"];
+  int total = 0;
+  for elem in v {
+    total = total + elem.len;
+  }
+  assert(total == 14, "total length"); // 5 + 4 + 5
+}
+
+test_forin_vector_string_with_index() `test {
+  string[] v = ["a", "b", "c"];
+  string[] result = string[]();
+  for i, elem in v {
+    result.push(elem);
+  }
+  assert(result.len == 3, "result length");
+  assert(result[0] == "a", "first");
+  assert(result[1] == "b", "second");
+  assert(result[2] == "c", "third");
+}
+
+test_forin_vector_string_break() `test {
+  string[] v = ["first", "second", "third"];
+  string found = "";
+  for elem in v {
+    if elem == "second" {
+      found = elem;
+      break;
+    }
+  }
+  assert(found == "second", "found second");
+}
+
+test_forin_vector_string_empty() `test {
+  string[] v = string[]();
+  int count = 0;
+  for elem in v {
+    count = count + 1;
+  }
+  assert(count == 0, "empty vector");
+}
+
+test_forin_vector_string_keys_to_vector() `test {
+  // The exact reproduction case from B0277
+  map[string, bool] m = map[string, bool]();
+  m["hello"] = true;
+  string[] items = m.keys();
+  Set[string] s = Set[string]();
+  for elem in items {
+    s.add(elem);
+  }
+  assert(s.contains("hello"), "crash here without fix — use after free");
+}

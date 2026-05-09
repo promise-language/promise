@@ -46,10 +46,22 @@ type FailableMemDataSource {
   }
 }
 
-// Failable covariant return compiles (B0272: runtime leaks in failable path tracked separately)
-test_failable_covariant_compiles() `test {
+// B0272: Failable covariant return through vtable dispatch must not leak.
+// The returned MemReadable instance (with string field) should be properly
+// dropped via RTTI-based dispatch when the structural interface variable exits scope.
+test_failable_covariant_vtable_dispatch() `test {
   FailableDataSource s = FailableMemDataSource();
-  assert(true, "failable covariant return compiles");
+  Readable r = s.open_source("hello")!;
+  assert(r.read_data(0) == "hello", "failable covariant vtable dispatch works");
+}
+
+// B0272: Error handler path (? {}) with covariant structural return.
+test_failable_covariant_error_handler() `test {
+  FailableDataSource s = FailableMemDataSource();
+  Readable r = s.open_source("world")? {
+    MemReadable(data: "fallback")
+  };
+  assert(r.read_data(0) == "world", "failable covariant error handler works");
 }
 
 // Non-failable concrete satisfies failable interface with covariant return

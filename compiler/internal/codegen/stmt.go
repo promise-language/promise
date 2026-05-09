@@ -1239,7 +1239,24 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 	// allocation (e.g., vec.iter(), iter.map(f)). Other RHS expressions — identifiers
 	// (borrow from existing variable), literals (value types, no heap alloc), member
 	// access (borrow) — should NOT get a free binding.
-	if _, isCall := rhs.(*ast.CallExpr); !isCall {
+	// B0272: Unwrap error-handling wrappers (!, ^, ? {}) to find the inner call expression.
+	// Without this, failable structural interface returns leak their backing instance.
+	innerRHS := rhs
+	for {
+		switch e := innerRHS.(type) {
+		case *ast.ErrorUnwrapExpr:
+			innerRHS = e.Expr
+			continue
+		case *ast.ErrorPropagateExpr:
+			innerRHS = e.Expr
+			continue
+		case *ast.ErrorHandlerExpr:
+			innerRHS = e.Expr
+			continue
+		}
+		break
+	}
+	if _, isCall := innerRHS.(*ast.CallExpr); !isCall {
 		return
 	}
 	// Must be a struct alloca ({i8* vtable, i8* instance}) to extract instance ptr.
@@ -1252,14 +1269,26 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
 	c.dropFlags[varName] = dropFlag
 
+	// B0272: Use RTTI-based drop dispatch when there's no specific cleanup function,
+	// or when the claimed dropFunc is just pal_free (generic heap free that doesn't
+	// drop instance fields like strings). Iterator cleanup functions (e.g.,
+	// __promise_iter_cleanup) ARE proper cleanup — they handle _FnIter instances
+	// that don't have RTTI layout. pal_free-claimed instances DO have RTTI layout
+	// (they're standard user type instances from constructors).
+	claimedDrop := c.lastClaimedDropFunc
+	useRTTI := claimedDrop == nil || claimedDrop == c.palFree
+	if useRTTI {
+		claimedDrop = nil // don't use pal_free directly — RTTI dispatch handles it
+	}
 	binding := scopeBinding{
 		kind:     bindingFree,
 		alloca:   alloca,
 		named:    named,
 		valType:  typ,
 		dropFlag: dropFlag,
-		dropFunc: c.lastClaimedDropFunc, // T0127: use iter cleanup when available
+		dropFunc: claimedDrop, // T0127: use iter cleanup when available
 		varName:  varName,
+		rttiDrop: useRTTI, // B0272: RTTI-based drop for instances with standard layout
 	}
 	c.scopeBindings = append(c.scopeBindings, binding)
 	c.dropBindings[varName] = binding
@@ -2499,6 +2528,12 @@ func (c *Compiler) emitFreeCall(b scopeBinding) {
 		// interface variables from iterator chains). The cleanup function frees nested
 		// allocations (closure env) and the instance itself.
 		c.block.NewCall(b.dropFunc, instance)
+	} else if b.rttiDrop {
+		// B0272: Structural interface variables whose backing instance has RTTI layout.
+		// Use RTTI-based drop dispatch to properly clean up all fields (e.g., string
+		// fields) before freeing — raw pal_free would leak nested allocations.
+		// Only set for bindings where the instance has standard RTTI (not _FnIter etc.).
+		c.emitStructuralInstanceDrop(instance)
 	} else {
 		c.block.NewCall(c.palFree, instance)
 	}

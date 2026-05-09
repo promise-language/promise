@@ -310,6 +310,70 @@ func runEmitIR(args []string) {
 	fmt.Print(result.Module.String())
 }
 
+// mainFuncRe matches a top-level main() function declaration in Promise source.
+// Matches: main() { ... }, main() Type { ... }, main() ! { ... }
+// Avoids matching: comments, strings, or nested/indented declarations.
+var mainFuncRe = regexp.MustCompile(`(?m)^main\s*\(`)
+
+// discoverMainFile finds the entry point .pr file for a project directory.
+// Discovery rules (in order):
+//  1. promise.toml "main" field → use that file
+//  2. Scan .pr files in directory for main() → use if exactly one
+//  3. Multiple main() files → error listing them
+//  4. No main() files → error
+func discoverMainFile(dir string) (string, error) {
+	// Rule 1: check promise.toml for explicit main field
+	mainField, err := module.FindProjectMain(dir)
+	if err != nil {
+		return "", err
+	}
+	if mainField != "" {
+		path := filepath.Join(dir, mainField)
+		if _, err := os.Stat(path); err != nil {
+			return "", fmt.Errorf("error: main file %q (from promise.toml) not found", mainField)
+		}
+		return path, nil
+	}
+
+	// Rule 2-4: scan .pr files for main() function
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("error: cannot read directory %s: %w", dir, err)
+	}
+
+	var candidates []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".pr") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		if mainFuncRe.Match(data) {
+			candidates = append(candidates, e.Name())
+		}
+	}
+
+	switch len(candidates) {
+	case 1:
+		return filepath.Join(dir, candidates[0]), nil
+	case 0:
+		return "", fmt.Errorf("error: no main() function found in project\nhint: add a main() function or specify a file: promise build file.pr")
+	default:
+		var b strings.Builder
+		b.WriteString("error: multiple files contain main() — specify which to use:")
+		for _, f := range candidates {
+			b.WriteString("\n  ")
+			b.WriteString(f)
+		}
+		b.WriteString("\nhint: add 'main = \"")
+		b.WriteString(candidates[0])
+		b.WriteString("\"' to promise.toml")
+		return "", fmt.Errorf("%s", b.String())
+	}
+}
+
 // runBuild compiles a .pr file to an executable.
 func runBuild(args []string) {
 	filename, outputFile, _ := buildToFile(args)
@@ -347,9 +411,21 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 		os.Exit(1)
 	}
 
+	// Auto-discover main file: no arg → CWD, directory arg → that dir (T0115)
 	if filename == "" {
-		fmt.Fprintln(os.Stderr, "usage: promise build [-o output] [--target triple] [--debug|--release] <file.pr>")
-		os.Exit(1)
+		discovered, err := discoverMainFile(".")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		filename = discovered
+	} else if info, err := os.Stat(filename); err == nil && info.IsDir() {
+		discovered, err := discoverMainFile(filename)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		filename = discovered
 	}
 
 	if target == "" {
@@ -383,11 +459,6 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 
 // runRun compiles and immediately runs a .pr file.
 func runRun(args []string) {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise run <file.pr>")
-		os.Exit(1)
-	}
-
 	// Build to a temp file
 	ext := binaryExtension(codegen.HostTargetTriple())
 	tmpOutput, err := os.CreateTemp("", "promise-run-*"+ext)
@@ -398,7 +469,7 @@ func runRun(args []string) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	// Reuse build logic
+	// Reuse build logic — discovery happens inside buildToFile (T0115)
 	buildArgs := []string{"-o", tmpOutput.Name()}
 	buildArgs = append(buildArgs, args...)
 	buildToFile(buildArgs)

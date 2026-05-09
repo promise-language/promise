@@ -136,6 +136,40 @@ func stripQuotes(s string) string {
 	return s
 }
 
+// FindProjectMain looks for a promise.toml in dir and returns the value of the
+// "main" field under [module], if present. Returns "" if no promise.toml exists
+// or if it has no "main" field. Unlike ParseConfig, does not require [module] name.
+func FindProjectMain(dir string) (string, error) {
+	path := filepath.Join(dir, "promise.toml")
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	defer f.Close()
+
+	var section string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = line[1 : len(line)-1]
+			continue
+		}
+		if section == "module" {
+			if key, val, err := parseTOMLLine(line); err == nil && key == "main" {
+				return val, nil
+			}
+		}
+	}
+	return "", scanner.Err()
+}
+
 // IsCatalogImport returns true if the use declaration is a catalog import (no path).
 func IsCatalogImport(path string) bool {
 	return path == ""

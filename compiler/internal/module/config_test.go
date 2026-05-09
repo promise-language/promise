@@ -387,3 +387,59 @@ epoch = "2026.3"
 		t.Errorf("Require[baz/qux] = %q, want %q", got, "hash2")
 	}
 }
+
+func TestFindProjectMainWithField(t *testing.T) {
+	dir := t.TempDir()
+	content := "[module]\nname = \"myapp\"\nmain = \"src/app.pr\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := FindProjectMain(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "src/app.pr" {
+		t.Errorf("FindProjectMain = %q, want %q", got, "src/app.pr")
+	}
+}
+
+func TestFindProjectMainNoField(t *testing.T) {
+	dir := t.TempDir()
+	content := "[module]\nname = \"myapp\"\nepoch = \"2026.3\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := FindProjectMain(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("FindProjectMain = %q, want empty", got)
+	}
+}
+
+func TestFindProjectMainNoToml(t *testing.T) {
+	dir := t.TempDir()
+	got, err := FindProjectMain(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Errorf("FindProjectMain = %q, want empty", got)
+	}
+}
+
+func TestFindProjectMainWithoutName(t *testing.T) {
+	dir := t.TempDir()
+	content := "[module]\nmain = \"app.pr\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := FindProjectMain(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "app.pr" {
+		t.Errorf("FindProjectMain = %q, want %q", got, "app.pr")
+	}
+}

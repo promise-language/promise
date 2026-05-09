@@ -1162,7 +1162,7 @@ Wired into `compileAndLinkSeparate()` in `main.go`: lookup → cache hit skips `
 Remaining work:
 - **Garbage collection**: LRU eviction by access time, max size limit, or `promise clean --build-cache` manual purge
 - **Transitive dependency invalidation**: If module B's source changes, module A (which imports B) retains its cached `.o` because `BuildCacheKey(A.ImplHash, compiler, target)` only hashes A's own sources. Fix: include the `InterfaceHash` of each direct dependency in A's cache key. Currently this is a latent issue (stale hits require changing a dependency's public API without changing the consuming module).
-- **`BuildCacheKey` cleanup**: The `allModulePaths []string` parameter is now always `nil` at all call sites. The dead parameter should be removed from the function signature.
+- ~~**`BuildCacheKey` cleanup**~~ — **Done (T0182).** Removed the dead `allModulePaths []string` parameter.
 - ~~**Module cache entries not deduplicated**~~ — **Fixed.** Generic free-function/method-instance ownership corrected; module IR is now stable. Module cache key is purely source-derived (`implHash + compiler + target`) with no IR text hash. One cache entry per module version across all callers.
 
 **Per-instance `.o` caching (implemented):**
@@ -1194,7 +1194,7 @@ Each generic type/function instantiation gets its own cached compiled artifact (
 - **Detection**: `isModuleTestFile()` walks up the directory tree to find the nearest `promise.toml`, identifying module test files. Non-module `_test.pr` files (e.g., in `tests/`) use existing `compileFrontend` unchanged.
 - **Compilation**: `compileModuleTestFrontend(modDir)` collects all `.pr` files (impl + tests) via `CollectModuleSources(modDir, true)`, which walks subdirectories recursively and excludes nested modules (subdirs with their own `promise.toml`). All files are merged into a single AST, then sema + ownership run on the combined unit.
 - **Self-import detection**: If a test file contains `use <moduleName>;`, a clear error is emitted.
-- **Test binary caching**: Compiled test binaries are cached in the build cache (`~/.promise/cache/build/`). Cache key = `BuildCacheKey(HashModuleSources(modDir, true), compiler, target, nil)`. Second runs skip compilation entirely.
+- **Test binary caching**: Compiled test binaries are cached in the build cache (`~/.promise/cache/build/`). Cache key = `BuildCacheKey(HashModuleSources(modDir, true), compiler, target, depHashes)`. Second runs skip compilation entirely.
 - **Multi-file dedup**: `runTestFiles` and `compileTargets` (stress mode) track which modules have already been tested, avoiding duplicate results when multiple `_test.pr` files from the same module are discovered.
 - **File discovery**: `discoverTestFiles()` uses `isInModuleTree()` to correctly handle test files in subdirectories of module roots.
 

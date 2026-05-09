@@ -764,7 +764,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 	// imported local modules invalidate the consuming module's cached binary.
 	depHashes := scanModuleLocalDeps(modDir)
 
-	cacheKey := module.BuildCacheKey(implHashWithTimeout, compilerHash, target, nil, depHashes)
+	cacheKey := module.BuildCacheKey(implHashWithTimeout, compilerHash, target, depHashes)
 	cacheDir, _ := module.BuildCacheDir()
 
 	cacheDebug := os.Getenv("PROMISE_CACHE_DEBUG") != ""

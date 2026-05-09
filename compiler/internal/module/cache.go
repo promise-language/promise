@@ -271,17 +271,11 @@ func hashString(s string) string {
 // which is a conservative proxy for InterfaceHash — any source change in a
 // dependency invalidates the consumer's cache. Catalog module dependencies are
 // already covered by compilerHash (they're embedded in the binary).
-func BuildCacheKey(implHash, compilerHash, target string, allModulePaths []string, depHashes []string) string {
+func BuildCacheKey(implHash, compilerHash, target string, depHashes []string) string {
 	h := fnv.New128a()
 	fmt.Fprintf(h, "impl:%s\n", implHash)
 	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
 	fmt.Fprintf(h, "target:%s\n", target)
-	sorted := make([]string, len(allModulePaths))
-	copy(sorted, allModulePaths)
-	sort.Strings(sorted)
-	for _, p := range sorted {
-		fmt.Fprintf(h, "mod:%s\n", p)
-	}
 	sortedDeps := make([]string, len(depHashes))
 	copy(sortedDeps, depHashes)
 	sort.Strings(sortedDeps)

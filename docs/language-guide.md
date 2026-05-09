@@ -251,13 +251,9 @@ process!() string {
   return read_config("app.cfg");    // error auto-propagates to caller
 }
 
-// WRONG: missing ; in recovery block (it's a statement in a block, needs ;)
+// Both are valid — trailing ; is optional on the last expression in a block
 string data = read_config("cfg") ? { "default" };
-
-// RIGHT: recovery expression needs ; inside the block
-string data = read_config("cfg") ? {
-  "default";
-};
+string data = read_config("cfg") ? { "default"; };
 ```
 
 ## Optionals
@@ -320,8 +316,8 @@ while item := iter.next() { }  // unwrap binding (loop while non-none)
 
 // While-unwrap with re-borrowing: the condition's borrow expires before the body,
 // so the body can freely call methods on the same object.
-while key := decoder.next_key()! {
-  string val = decoder.read_string()!;  // re-borrows decoder — OK
+while key := decoder.next_key()?! {
+  string val = decoder.read_string()?!;  // re-borrows decoder — OK
 }
 
 // Match (must be exhaustive, commas between arms)
@@ -696,7 +692,7 @@ type Port {
     this.value = value;
   }
 }
-Port(value: 80)!;         // panics on invalid
+Port(value: 80)?!;        // panics on invalid
 
 // raise — returns error from a ! function (not an exception)
 divide!(f64 a, f64 b) f64 {
@@ -728,10 +724,10 @@ main!() {
 
   // Manual encoder/decoder (for streaming or custom formatting):
   json.JsonEncoder enc = json.JsonEncoder();
-  Config(name: "app", port: 8080).encode(enc)!;
+  Config(name: "app", port: 8080).encode(enc)?!;
   string s2 = enc.to_string();
   json.JsonDecoder dec = json.JsonDecoder(data: s2);
-  Config c2 = Config.decode(dec)!;
+  Config c2 = Config.decode(dec)?!;
 }
 
 // Dynamic JSON (JsonValue tree API)
@@ -841,6 +837,6 @@ promise doc                  # list all available modules
 9. **Fixed arrays vs vectors** — `int[3]` is a fixed-size array (value type, stack). `u8[]` is a vector (heap, growable). Don't confuse them.
 10. **Tuple destructuring** — Use `(a, b) := expr;` not `a, b := expr;`. Tuples need parentheses.
 11. **Module type prefix** — Types always need the module prefix: `io.File.open(...)` not `File.open(...)`. Free functions don't: `read_line()` works after `use io;`.
-12. **`;` in blocks** — All statements need `;`, including the last expression before `}`. Recovery blocks too: `? { "default"; }` not `? { "default" }`.
+12. **`;` in blocks** — All statements need `;`. The trailing `;` on the last expression before `}` is optional: both `? { "default" }` and `? { "default"; }` work.
 13. **`?!` in failable functions** — `?!` always **panics**, even inside a `!` function. For propagation, just use bare call (or `?^` for self-documenting propagation).
 14. **API discovery** — Use `promise doc <module>` to explore module APIs instead of guessing. `promise doc std` for the standard library.

@@ -17143,6 +17143,35 @@ func TestConstructorTempClaimedInMapLiteral(t *testing.T) {
 	assertContains(t, ir, "heap.claim")
 }
 
+// B0280: Map literal values with drop flags must have flags cleared after []=.
+// Without this, moved values are double-dropped at scope exit (use-after-free).
+func TestMapLitClearsDropFlagOnEnumValue(t *testing.T) {
+	ir := generateIR(t, `
+		enum Wrapper { Val(string s); }
+		main() {
+			Wrapper w = Wrapper.Val(s: "hello");
+			map[string, Wrapper] m = { "key": w };
+		}
+	`)
+	// After the []= call, w's drop flag must be cleared (store i1 false)
+	assertContains(t, ir, "w.dropflag")
+	// The []= call should be followed by clearing w's drop flag
+	assertContains(t, ir, "store i1 false, i1* %w.dropflag")
+}
+
+// B0280: Map literal with identifier key must clear key's drop flag too.
+func TestMapLitClearsDropFlagOnKey(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string k = "mykey";
+			map[string, int] m = { k: 42 };
+		}
+	`)
+	// k is a string variable with a drop flag — it should be cleared
+	assertContains(t, ir, "k.dropflag")
+	assertContains(t, ir, "store i1 false, i1* %k.dropflag")
+}
+
 // B0210: Optional[TypeParam] field with none value should not cause mono layout mismatch.
 // The mono layout computes the correct LLVM type for the optional field, but the none
 // value was generated using an unsubstituted TypeParam, producing a type mismatch.

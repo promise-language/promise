@@ -1,0 +1,62 @@
+// B0280: Map literal values must have drop flags cleared after []=.
+// Without this fix, moved enum/string/type values are double-dropped.
+enum Animal {
+  Cat(string name),
+  Dog(string name, int age),
+  Fish,
+}
+
+type Resource {
+  string label;
+  drop(~this) {
+  }
+}
+
+// B0280: Enum variable moved into map literal must not be double-dropped.
+test_enum_value_moved_into_map() `test {
+  Animal a = Animal.Cat(name: "Luna");
+  map[string, Animal] m = {
+    "pet": a
+  };
+  assert(m.len == 1, "map has 1 entry");
+}
+
+// B0280: Multiple enum values in a single map literal.
+test_multiple_enum_values() `test {
+  Animal cat = Animal.Cat(name: "Luna");
+  Animal dog = Animal.Dog(name: "Rex", age: 5);
+  map[string, Animal] m = {
+    "cat": cat, "dog": dog
+  };
+  assert(m.len == 2, "map has 2 entries");
+}
+
+// B0280: String variable used as map key must not be double-dropped.
+test_string_key_moved_into_map() `test {
+  string key = "hello";
+  map[string, int] m = {
+    key: 42
+  };
+  assert(m.len == 1, "map has 1 entry");
+}
+
+// B0280: Nested map via enum variant (the original crash scenario).
+test_nested_enum_map() `test {
+  map[string, Animal] inner = {
+    "x": Animal.Fish
+  };
+  map[string, Animal] outer = {
+    "y": Animal.Cat(name: "Mia")
+  };
+  assert(inner.len == 1, "inner has 1 entry");
+  assert(outer.len == 1, "outer has 1 entry");
+}
+
+// B0280: Heap user type variable moved into map literal.
+test_user_type_value_moved_into_map() `test {
+  Resource r = Resource(label: "db");
+  map[string, Resource] m = {
+    "res": r
+  };
+  assert(m.len == 1, "map has 1 entry");
+}

@@ -5956,6 +5956,16 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 			keyVal := c.genExpr(entry.Key)
 			valVal := c.genExpr(entry.Value)
 			c.block.NewCall(setFn, instancePtr, keyVal, valVal)
+			// B0280: Clear drop flags for values moved into the map via []=.
+			// The []= method takes ~K key and ~V value (move semantics), so
+			// ownership transfers to the map. Without this, the caller's
+			// scope-exit cleanup double-drops the value (use-after-free).
+			if ident, ok := entry.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+			if ident, ok := entry.Key.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
 			// Claim heap temps: user type instances passed as map values
 			// transfer ownership to the map. Without this, the heap temp
 			// cleanup would free the instance, leaving a dangling pointer

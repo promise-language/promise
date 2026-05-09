@@ -2440,11 +2440,19 @@ func (c *Compiler) emitVectorStringDupLoop(vecPtr value.Value, elemType types.Ty
 // emitVectorElementCloneLoop iterates a cloned vector's elements and deep-clones
 // each non-copy element so the cloned vector owns independent copies. B0275.
 // Handles: strings (dupString), channels (dupChannel), nested vectors (dupVector +
-// recursive clone), and heap user types (clone method or dupHeapValue fallback).
+// recursive clone), heap user types (clone method or dupHeapValue fallback),
+// and enum types with clone methods (B0244).
 func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types.Type) {
 	named := extractNamed(elemType)
+	// B0244: Check for enum types with clone — not caught by extractNamed.
+	isCloneableEnum := false
 	if named == nil {
-		return // primitive/copy type — shallow memcpy is correct
+		if enum := extractEnum(elemType); enum != nil {
+			_, isCloneableEnum = c.funcs[c.enumCloneFuncName(enum, elemType)]
+		}
+		if !isCloneableEnum {
+			return // primitive/copy type — shallow memcpy is correct
+		}
 	}
 
 	// String: delegate to existing string dup loop
@@ -2456,11 +2464,11 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	// Determine if element type needs cloning
 	_, isCh := types.AsChannel(elemType)
 	innerElem, isVec := types.AsVector(elemType)
-	isChannel := isCh || named == types.TypChannel
-	isVector := isVec || named == types.TypVector
-	isHeapUser := !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
+	isChannel := !isCloneableEnum && (isCh || named == types.TypChannel)
+	isVector := !isCloneableEnum && (isVec || named == types.TypVector)
+	isHeapUser := !isCloneableEnum && named != nil && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
 
-	if !isChannel && !isVector && !isHeapUser {
+	if !isChannel && !isVector && !isHeapUser && !isCloneableEnum {
 		return // value/copy type — shallow memcpy is correct
 	}
 
@@ -2495,7 +2503,10 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	elemVal := c.block.NewLoad(elemLLVM, elemPtr)
 
 	var cloned value.Value
-	if isChannel {
+	if isCloneableEnum {
+		// B0244: Enum with clone — deep-copy via clone method.
+		cloned, _ = c.cloneEnumValue(elemVal, elemType)
+	} else if isChannel {
 		cloned = c.dupChannel(elemVal)
 	} else if isVector {
 		if isVec {

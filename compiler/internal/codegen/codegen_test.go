@@ -10748,9 +10748,8 @@ func TestMatchDupChannel(t *testing.T) {
 	assertContains(t, ir, "chdup.inc")
 }
 
-// B0236: Map (complex type with vector of droppable enum elements) should NOT
-// be heap-dup'd — shallow copy doesn't replicate the deep ownership structure.
-func TestMatchDupMapExcluded(t *testing.T) {
+// B0236/B0244: Map is not shallow-dup'd (unsafe), but IS cloned via Map.clone().
+func TestMatchDupMapCloned(t *testing.T) {
 	ir := generateIR(t, `
 		enum JsonNode {
 			Null,
@@ -10769,6 +10768,31 @@ func TestMatchDupMapExcluded(t *testing.T) {
 	if strings.Contains(ir, "heapdup.copy") {
 		t.Error("Map should not be heap-dup'd (vector of droppable enum elements)")
 	}
+	// B0244: Map field is now cloned via Map.clone() instead of being left as shallow copy
+	assertContains(t, ir, "Map[string, JsonNode].clone")
+}
+
+// B0244: Match destructure of droppable enum clones enum-typed fields via clone().
+func TestMatchDupEnumClone(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum Inner `clone {\n"+
+		"  Value(string data),\n"+
+		"  Empty,\n"+
+		"}\n"+
+		"enum Outer {\n"+
+		"  Holding(Inner item),\n"+
+		"  Nothing,\n"+
+		"}\n"+
+		"test() {\n"+
+		"  o := Outer.Holding(item: Inner.Value(data: \"hello\"));\n"+
+		"  match o {\n"+
+		"    Holding(i) => { },\n"+
+		"    Nothing => { },\n"+
+		"  }\n"+
+		"}\n")
+	// Enum field extracted from droppable enum should be cloned via clone method
+	assertContains(t, ir, "Inner.clone")
+	assertContains(t, ir, "enum.clone.tmp")
 }
 
 // B0237/B0242: Match destructure of droppable enum dups string fields and

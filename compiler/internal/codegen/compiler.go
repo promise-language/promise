@@ -5009,6 +5009,16 @@ func (c *Compiler) declareModuleEnumMethods(file *ast.File, moduleName string) {
 
 			mangledName := mangleModuleMethodName(moduleName, ed.Name, md.Name, md.IsSetter)
 
+			// B0244: Skip if already forward-declared (cross-module clone forward-declare)
+			if fn, exists := c.funcs[mangledName]; exists {
+				c.moduleOwnedFuncs[mangledName] = moduleName
+				plainName := mangleMethodName(ed.Name, md.Name, md.IsSetter)
+				if _, exists := c.funcs[plainName]; !exists {
+					c.funcs[plainName] = fn
+				}
+				continue
+			}
+
 			var params []*ir.Param
 			if m.Sig().Recv() != nil {
 				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
@@ -6169,6 +6179,53 @@ func (c *Compiler) forwardDeclareModuleEnumDrop(enum *types.Enum, enumName, plai
 			}
 			// Forward-declare with module ownership so IR splitting works correctly
 			fn := c.module.NewFunc(moduleMangledName, irtypes.Void,
+				ir.NewParam("this", irtypes.I8Ptr))
+			c.funcs[moduleMangledName] = fn
+			c.funcs[plainMangledName] = fn
+			c.moduleOwnedFuncs[moduleMangledName] = irName
+			return fn
+		}
+	}
+	return nil
+}
+
+// forwardDeclareModuleEnumClone searches module infos for the enum's owning module
+// and forward-declares its clone function. Returns the declared function, or nil
+// if not found. B0244: Fixes cross-module compilation order where Map[K,V].clone()
+// in std needs JsonValue.clone from json, but json isn't compiled yet.
+func (c *Compiler) forwardDeclareModuleEnumClone(enum *types.Enum, plainMangledName string, resolvedType types.Type) *ir.Func {
+	enumName := enum.Obj().Name()
+	savedInfo := c.info
+	defer func() { c.info = savedInfo }()
+
+	for _, modInfo := range c.moduleInfos {
+		c.info = modInfo.SemaInfo
+		irName := modInfo.EffectiveIRPrefix()
+		for _, decl := range modInfo.File.Decls {
+			ed, ok := decl.(*ast.EnumDecl)
+			if !ok || ed.Name != enumName {
+				continue
+			}
+			if modInfo.SemaInfo.FilteredDecls[decl] {
+				continue
+			}
+			foundEnum := c.lookupEnumType(ed.Name)
+			if foundEnum != enum {
+				continue
+			}
+			if !foundEnum.IsClone() {
+				return nil
+			}
+			// Found the module — check if already declared with module prefix
+			moduleMangledName := mangleModuleMethodName(irName, enumName, "clone", false)
+			if fn, ok := c.funcs[moduleMangledName]; ok {
+				c.funcs[plainMangledName] = fn
+				return fn
+			}
+			// Resolve the return type (enum value struct)
+			retType := c.resolveType(resolvedType)
+			// Forward-declare with module ownership
+			fn := c.module.NewFunc(moduleMangledName, retType,
 				ir.NewParam("this", irtypes.I8Ptr))
 			c.funcs[moduleMangledName] = fn
 			c.funcs[plainMangledName] = fn

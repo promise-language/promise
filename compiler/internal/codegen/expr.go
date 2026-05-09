@@ -4543,11 +4543,21 @@ func (c *Compiler) matchFieldNeedsDup(fieldType types.Type, subjectType types.Ty
 // - Channels (dupChannel increments refcount)
 // - Vectors (dupVector shallow-copies buffer — safe because vector drop only frees buffer)
 // - Heap user types WITHOUT explicit drops that only have safely-duppable fields
+// - Enum types with a clone() method (B0244: deep-clone via synthesized/explicit clone)
 // NOT safe: types with explicit drops (Map, Set, custom drop) — their drop logic
-// cannot be replicated by memcpy. These need a proper Clone trait (future work).
+// cannot be replicated by memcpy, unless they have a clone() method.
 func (c *Compiler) typeNeedsMatchDup(resolved types.Type) bool {
 	named := extractNamed(resolved)
 	if named == nil {
+		// B0244: Check for enum types — clone if clone method exists in c.funcs
+		// or if the enum is marked `clone (function may not be declared yet due
+		// to cross-module compilation order — forward-declared lazily in cloneEnumValue).
+		if enum := extractEnum(resolved); enum != nil {
+			if _, exists := c.funcs[c.enumCloneFuncName(enum, resolved)]; exists {
+				return true
+			}
+			return enum.IsClone()
+		}
 		return false
 	}
 	if named == types.TypString {
@@ -4567,11 +4577,37 @@ func (c *Compiler) typeNeedsMatchDup(resolved types.Type) bool {
 	//   have no drops (otherwise element data is shared → double-free). ✗ for droppable.
 	// - Other heap type fields → recursive check needed.
 	// Types with explicit (non-synthesized) drops have custom cleanup logic that
-	// memcpy cannot replicate → never safe.
+	// memcpy cannot replicate — but CAN be deep-copied if they have a clone() method.
 	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
 		return false
 	}
-	return c.heapTypeSafeToDup(named, resolved, nil)
+	if c.heapTypeSafeToDup(named, resolved, nil) {
+		return true
+	}
+	// B0244: Not safe to shallow-dup, but has clone() → can deep-copy via clone.
+	// This handles types like Map, Set, and user types with complex drops.
+	return c.namedHasCloneFunc(named, resolved)
+}
+
+// namedHasCloneFunc returns true if a named type has a clone() function available in c.funcs.
+// B0244: Used to check if a heap user type can be deep-copied via clone when shallow-dup is unsafe.
+func (c *Compiler) namedHasCloneFunc(named *types.Named, resolved types.Type) bool {
+	ownerName := c.resolveMethodOwner(named, "clone")
+	if inst, ok := resolved.(*types.Instance); ok {
+		ownerName = monoName(inst)
+	}
+	_, exists := c.funcs[mangleMethodName(ownerName, "clone", false)]
+	return exists
+}
+
+// enumCloneFuncName returns the mangled LLVM function name for an enum's clone method.
+// B0244: Used to check if a clone function exists for enum match-dup and vector clone.
+func (c *Compiler) enumCloneFuncName(enum *types.Enum, resolved types.Type) string {
+	ownerName := enum.Obj().Name()
+	if inst, ok := resolved.(*types.Instance); ok {
+		ownerName = monoName(inst)
+	}
+	return mangleMethodName(ownerName, "clone", false)
 }
 
 // heapTypeSafeToDup returns true if a heap user type can be safely dup'd via
@@ -4706,12 +4742,23 @@ func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtype
 			elemLLVM := c.resolveType(elemType)
 			elemSize := int64(c.typeSize(elemLLVM))
 			dupVal = c.dupVector(val, elemSize)
+			// B0244: Deep-clone vector elements when they're droppable (enum, heap types).
+			// Without this, the dup'd vector shares element heap pointers with the original.
+			resolvedElem := elemType
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+			}
+			c.emitVectorElementCloneLoop(dupVal, resolvedElem)
 		}
 	} else if isChan || named == types.TypChannel {
 		dupVal = c.dupChannel(val)
+	} else if cloned, ok := c.cloneEnumValue(val, resolvedType); ok {
+		// B0244: Enum with clone — deep-copy via clone method.
+		dupVal = cloned
 	} else {
-		// B0236: Heap user type — allocate new instance, memcpy, dup droppable sub-fields
-		dupVal = c.dupHeapValue(val, resolvedType)
+		// B0236/B0244: Heap user type — try clone() first (handles types with complex drops
+		// like Map, Set), fall back to shallow dup (alloc + memcpy + field dup).
+		dupVal = c.cloneHeapElement(val, resolvedType, named)
 	}
 
 	bindAlloca := c.createEntryAlloca(llvmType)
@@ -4725,6 +4772,37 @@ func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtype
 	// are dropped, while consumed bindings (flag cleared) are skipped.
 	// This fixes the B0237 regression where unconsumed dup'd bindings leaked.
 	c.maybeRegisterDrop(name, bindAlloca, resolvedType)
+}
+
+// cloneEnumValue calls an enum's clone() method to deep-copy a value.
+// B0244: Used in match destructure dup and vector element clone to create
+// independent copies of enum values that would otherwise share heap pointers.
+// Returns (cloned value, true) if the enum has a clone function, (nil, false) otherwise.
+func (c *Compiler) cloneEnumValue(val value.Value, resolvedType types.Type) (value.Value, bool) {
+	enum := extractEnum(resolvedType)
+	if enum == nil {
+		return nil, false
+	}
+	cloneFnName := c.enumCloneFuncName(enum, resolvedType)
+	cloneFn, ok := c.funcs[cloneFnName]
+	if !ok {
+		// B0244: Forward-declare clone from module that owns this enum.
+		// Cross-module compilation order may cause the clone function to not be
+		// declared yet (e.g., std compiles Map[string, JsonValue].clone before
+		// the json module declares JsonValue.clone).
+		cloneFn = c.forwardDeclareModuleEnumClone(enum, cloneFnName, resolvedType)
+		if cloneFn == nil {
+			return nil, false
+		}
+	}
+	// Store the enum value to a temp alloca and pass pointer as i8*
+	// (enum method receiver convention: this is i8* pointing to enum value struct).
+	alloca := c.createEntryAlloca(val.Type())
+	alloca.SetName(c.uniqueLocalName("enum.clone.tmp"))
+	c.block.NewStore(val, alloca)
+	ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
+	result := c.block.NewCall(cloneFn, ptr)
+	return result, true
 }
 
 // --- If expressions ---

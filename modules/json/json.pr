@@ -705,7 +705,7 @@ encode_string_pretty![T: Encodable](T value, int indent = 2) string `public `doc
 
 // ── JsonValue — tree-based JSON representation ──────────────────────────────
 
-enum JsonValue `public `doc("Tree-based JSON representation for dynamic/untyped JSON manipulation.") {
+enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/untyped JSON manipulation.") {
   Null,
   Bool(bool value),
   Number(f64 value),

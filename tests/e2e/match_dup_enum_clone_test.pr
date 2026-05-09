@@ -1,0 +1,111 @@
+// B0244: Match destructure must deep-clone enum-typed fields (via clone())
+// and map-typed fields to prevent double-free / use-after-free.
+enum Inner `clone {
+  Text(string data),
+  Number(int value),
+  Empty,
+}
+
+enum Outer {
+  Holding(Inner item),
+  Pair(Inner a, Inner b),
+  Nothing,
+}
+
+// Test: extract a cloneable enum from a droppable enum via match.
+// Without the clone fix, the Inner enum data would share heap pointers
+// with the Outer enum data, causing a double-free on scope exit.
+match_dup_enum_clone_basic() `test {
+  o := Outer.Holding(item: Inner.Text(data: "hello"));
+  match o {
+    Holding(i) => {
+      match i {
+        Text(d) => assert(d == "hello", "inner text data"),
+        _ => assert(false, "expected Text"),
+      }
+    },
+    _ => assert(false, "expected Holding"),
+  }
+}
+
+// Test: extract multiple cloneable enum fields from a single variant.
+match_dup_enum_clone_multiple_fields() `test {
+  o := Outer.Pair(a: Inner.Text(data: "first"), b: Inner.Number(value: 42));
+  match o {
+    Pair(x, y) => {
+      match x {
+        Text(d) => assert(d == "first", "first field"),
+        _ => assert(false, "expected Text"),
+      }
+      match y {
+        Number(v) => assert(v == 42, "second field"),
+        _ => assert(false, "expected Number"),
+      }
+    },
+    _ => assert(false, "expected Pair"),
+  }
+}
+
+// Test: extract a cloneable enum and use it after the original is dropped.
+match_dup_enum_clone_survives_drop() `test {
+  Inner result = Inner.Empty;
+  Outer o = Outer.Holding(item: Inner.Text(data: "survive"));
+  match o {
+    Holding(i) => {
+      result = i;
+    },
+    _ => {
+    },
+  }
+  // o has been matched — result must be an independent clone
+  match result {
+    Text(d) => assert(d == "survive", "survived drop"),
+    _ => assert(false, "expected Text"),
+  }
+}
+
+// Test: map field extraction via match (Map has clone()).
+enum MapHolder {
+  Data(map[string, int] fields),
+  None,
+}
+
+match_dup_map_clone() `test {
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
+  h := MapHolder.Data(fields: m);
+  match h {
+    Data(f) => {
+      assert(f.len == 2, "map len");
+      assert(f.contains("a"), "map contains a");
+      assert(f.contains("b"), "map contains b");
+    },
+    None => assert(false, "expected Data"),
+  }
+}
+
+// Test: vector of cloneable enums extracted via match.
+enum VecEnumHolder {
+  Items(Inner[] list),
+  Empty,
+}
+
+match_dup_vector_of_enums() `test {
+  Inner[] items = [Inner.Text(data: "x"), Inner.Number(value: 7)];
+  h := VecEnumHolder.Items(list: items);
+  match h {
+    Items(v) => {
+      assert(v.len == 2, "vector len");
+      match v[0] {
+        Text(d) => assert(d == "x", "vec elem 0"),
+        _ => assert(false, "expected Text"),
+      }
+      match v[1] {
+        Number(n) => assert(n == 7, "vec elem 1"),
+        _ => assert(false, "expected Number"),
+      }
+    },
+    Empty => assert(false, "expected Items"),
+  }
+}

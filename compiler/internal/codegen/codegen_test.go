@@ -17404,3 +17404,29 @@ func TestCloneVectorChannelDupsElements(t *testing.T) {
 	assertContains(t, ir, "vecclone.head")
 	assertContains(t, ir, "chdup.inc")
 }
+
+// B0281: Enum ctor temps used as map literal values must be claimed.
+// Without the fix, the enum temp is dropped at statement end, double-freeing
+// inner data (both the temp and the map's Slot share the same pointers).
+func TestEnumCtorTempClaimedInMapLiteral(t *testing.T) {
+	ir := generateIR(t, `
+		enum Val { Txt(string s), Num(int n) }
+		main() {
+			map[string, Val] m = { "a": Val.Txt(s: "hello") };
+		}
+	`)
+	// The enum ctor temp drop flag should be cleared (stored i1 false) BEFORE
+	// statement-end cleanup. No enum.ctor.drop block should fire for this temp.
+	assertNotContains(t, ir, "enum.ctor.drop")
+}
+
+// B0281: Enum ctor temps used as vector literal elements must be claimed.
+func TestEnumCtorTempClaimedInVectorLiteral(t *testing.T) {
+	ir := generateIR(t, `
+		enum Val { Txt(string s), Num(int n) }
+		main() {
+			Val[] v = [Val.Txt(s: "hello"), Val.Num(n: 42)];
+		}
+	`)
+	assertNotContains(t, ir, "enum.ctor.drop")
+}

@@ -1547,3 +1547,28 @@ parsed_value_methods_test() `test {
   JsonValue? missing = v.get("nope");
   assert(missing is absent, "parsed: missing key absent");
 }
+
+// B0281: Enum ctor temps in map literals must be claimed.
+// Without the fix, creating a map with enum values using separate variables
+// caused a use-after-free (stack overflow) because the enum ctor temp was
+// dropped at statement end while the map's Slot still held the same pointers.
+enum_ctor_temp_in_map_literal_test() `test {
+  map[string, JsonValue] inner = {
+    "x": JsonValue.Number(1.0)
+  };
+  map[string, JsonValue] outer = {
+    "nested": JsonValue.Object(inner)
+  };
+  JsonValue obj = JsonValue.Object(outer);
+  string s = format_value(obj)!;
+  JsonValue parsed = parse_value(s)!;
+  assert(parsed.is_object, "round trip nested object");
+}
+
+// B0281: Enum ctor temps in vector literals must be claimed.
+enum_ctor_temp_in_vector_literal_test() `test {
+  JsonValue[] items = [JsonValue.Str("a"), JsonValue.Number(1.0), JsonValue.Bool(true)];
+  JsonValue arr = JsonValue.Array(items);
+  string s = format_value(arr)!;
+  assert(s.contains("\"a\""), "vector with enum values");
+}

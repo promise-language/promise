@@ -5418,12 +5418,22 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 
 	for i, elemExpr := range e.Elements {
+		savedEnumTemps := len(c.enumCtorTemps)
 		val := c.genCallArgExpr(elemExpr)
 		elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr,
 			constant.NewInt(irtypes.I64, int64(i)))
 		c.block.NewStore(val, elemPtr)
 		// B0233: Claim heap temp — element ownership transferred to vector literal.
 		c.claimHeapTemp(val)
+		// B0281: Clear enum ctor temps created during this element's evaluation.
+		// Same issue as map literals: the enum value is stored by LLVM value,
+		// so both the temp alloca and the vector slot share inner pointers.
+		// Only clear temps added since savedEnumTemps to avoid clobbering
+		// temps from outer expressions.
+		for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
 	}
 
 	return rawPtr // i8*
@@ -5953,6 +5963,7 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 		}
 		instancePtr := c.extractInstancePtr(mapVal)
 		for _, entry := range e.Entries {
+			savedEnumTemps := len(c.enumCtorTemps)
 			keyVal := c.genExpr(entry.Key)
 			valVal := c.genExpr(entry.Value)
 			c.block.NewCall(setFn, instancePtr, keyVal, valVal)
@@ -5972,6 +5983,18 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 			// in the map's Slot enum data.
 			c.claimHeapTemp(valVal)
 			c.claimHeapTemp(keyVal)
+			// B0281: Clear enum ctor temps created during this entry's evaluation.
+			// Map.[]= copies the enum value by LLVM value into the map's Slot.
+			// Both the temp alloca and the Slot share the same inner pointers
+			// (string ptrs, map instance ptrs, etc.). If the temp is dropped
+			// at statement end, it frees data the map still references →
+			// use-after-free / stack overflow on cleanup.
+			// Only clear temps added since savedEnumTemps to avoid clobbering
+			// temps from outer expressions (e.g., prior function arguments).
+			for i := savedEnumTemps; i < len(c.enumCtorTemps); i++ {
+				c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
+			}
+			c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
 		}
 	}
 

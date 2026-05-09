@@ -3305,7 +3305,21 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 		c.trackChainIntermediateReceiver(e.Target, target, instancePtr, named, targetType)
 	}
 
-	return c.block.NewCall(fn, args...)
+	result := c.block.NewCall(fn, args...)
+	// B0290: Track string results from getter calls for cleanup at statement end.
+	// Getters on types with drop emit a dup of string fields (T0095/T0110),
+	// creating a heap-allocated clone. Without tracking, the clone leaks when
+	// used as a chain intermediate (e.g., x.name.len).
+	if c.tempTrackingEnabled && result.Type() == irtypes.I8Ptr {
+		retType := getter.Sig().Result()
+		if c.typeSubst != nil && retType != nil {
+			retType = types.Substitute(retType, c.typeSubst)
+		}
+		if retType != nil && extractNamed(retType) == types.TypString {
+			c.trackStringTemp(result)
+		}
+	}
+	return result
 }
 
 // genVirtualGetterCall emits an indirect getter call through the vtable.
@@ -3363,7 +3377,18 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 	funcType := irtypes.NewFunc(retType, paramTypes...)
 	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 
-	return c.block.NewCall(fnTyped, instance)
+	result := c.block.NewCall(fnTyped, instance)
+	// B0290: Track string results from virtual getter calls (same as direct path).
+	if c.tempTrackingEnabled && result.Type() == irtypes.I8Ptr {
+		retType := getter.Sig().Result()
+		if c.typeSubst != nil && retType != nil {
+			retType = types.Substitute(retType, c.typeSubst)
+		}
+		if retType != nil && extractNamed(retType) == types.TypString {
+			c.trackStringTemp(result)
+		}
+	}
+	return result
 }
 
 // genVirtualMethodCall emits an indirect call through the vtable.

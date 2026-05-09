@@ -10786,13 +10786,20 @@ func TestMatchDupMapNotClonedNonCloneableValues(t *testing.T) {
 			}
 		}
 	`)
-	if strings.Contains(ir, "heapdup.copy") {
-		t.Error("Map should not be heap-dup'd (vector of droppable enum elements)")
-	}
-	// B0284: Map.clone() must NOT be CALLED — JsonNode has drops but no clone method,
-	// so the clone would shallow-copy JsonNode values (shared heap pointers → double-free).
-	// Note: the function definition exists from monomorphization; check for call sites only.
+	// Check that the test function itself does not heap-dup the Map.
+	// The "heapdup.copy" block may legitimately appear in other monomorphized
+	// functions (e.g., EmbeddedFiles.files vector clone), so only check inside @test.
+	inTestFunc := false
 	for _, line := range strings.Split(ir, "\n") {
+		if strings.HasPrefix(line, "define ") {
+			inTestFunc = strings.Contains(line, "@test(")
+		}
+		if inTestFunc && strings.Contains(line, "heapdup.copy") {
+			t.Error("Map should not be heap-dup'd in test function (vector of droppable enum elements)")
+		}
+		// B0284: Map.clone() must NOT be CALLED — JsonNode has drops but no clone method,
+		// so the clone would shallow-copy JsonNode values (shared heap pointers → double-free).
+		// Note: the function definition exists from monomorphization; check for call sites only.
 		if strings.Contains(line, "Map[string, JsonNode].clone") && strings.Contains(line, "= call") {
 			t.Error("Map with non-cloneable values should not call Map.clone()")
 		}
@@ -16372,6 +16379,53 @@ func TestEmbedBytesGetterDrop(t *testing.T) {
 	assertContains(t, ir, "@Vector.drop")
 	// The drop flag must NOT be cleared to false immediately after being set to true.
 	assertNotContains(t, ir, "store i1 true, i1* %d.dropflag\n\tstore i1 false, i1* %d.dropflag")
+}
+
+// T0031: Directory embed getter constructs EmbeddedFiles value
+func TestEmbedDirGetter(t *testing.T) {
+	file, info := parseWithStd(t, `
+		get assets EmbeddedFiles `+"`embed(\"static/...\")"+`;
+		main() {
+			EmbeddedFiles fs = assets;
+		}
+	`)
+	// Manually populate embed data (normally done by ResolveEmbeds)
+	for _, embed := range info.Embeds {
+		embed.Kind = sema.EmbedDir
+		embed.Data = []byte("body{}hello")
+		embed.DirEntries = []sema.EmbedDirEntry{
+			{Path: "index.html", Name: "index.html", Size: 5, Offset: 5},
+			{Path: "style.css", Name: "style.css", Size: 6, Offset: 0},
+		}
+	}
+	result := Compile(file, info, "")
+	ir := result.Module.String()
+	// Should contain allocations and string_new for file paths
+	assertContains(t, ir, "@pal_alloc")
+	assertContains(t, ir, "@promise_string_new")
+	// Should contain the data blob
+	assertContains(t, ir, "body{}hello")
+	// Should return user value type {i8*, i8*}
+	assertContains(t, ir, "define { i8*, i8* } @assets()")
+}
+
+func TestEmbedDirGetterEmpty(t *testing.T) {
+	file, info := parseWithStd(t, `
+		get assets EmbeddedFiles `+"`embed(\"empty/...\")"+`;
+		main() {
+			EmbeddedFiles fs = assets;
+		}
+	`)
+	for _, embed := range info.Embeds {
+		embed.Kind = sema.EmbedDir
+		embed.Data = []byte{}
+		embed.DirEntries = nil
+	}
+	result := Compile(file, info, "")
+	ir := result.Module.String()
+	// Even empty dir should produce valid IR with allocations
+	assertContains(t, ir, "define { i8*, i8* } @assets()")
+	assertContains(t, ir, "@pal_alloc")
 }
 
 // --- Coverage instrumentation tests (T0030) ---

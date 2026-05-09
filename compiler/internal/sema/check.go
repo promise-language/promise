@@ -664,6 +664,8 @@ func (c *Checker) populateUniverseTypes() {
 	populate("Range", &types.TypRange)
 	populate("Iterator", &types.TypIter)
 	populate("Stream", &types.TypStream)
+	populate("EmbeddedFile", &types.TypEmbeddedFile)
+	populate("EmbeddedFiles", &types.TypEmbeddedFiles)
 
 	if isStd {
 		c.isUniverseProvider = true

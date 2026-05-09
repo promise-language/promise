@@ -236,14 +236,26 @@ type EmbedKind int
 const (
 	EmbedString EmbedKind = iota // embed as string
 	EmbedBytes                   // embed as u8[]
+	EmbedDir                     // embed as EmbeddedFiles (directory tree, T0031)
 )
+
+// EmbedDirEntry records metadata for a single file or directory within an embedded
+// directory tree (EmbedDir kind). Populated by ResolveEmbeds.
+type EmbedDirEntry struct {
+	Path   string // relative path within the embedded directory
+	Name   string // base name of the file
+	Size   int64  // file size in bytes (0 for directories)
+	IsDir  bool   // true if this entry is a directory
+	Offset int64  // byte offset into EmbedInfo.Data
+}
 
 // EmbedInfo records metadata for a module-level getter with an `embed annotation.
 type EmbedInfo struct {
-	Path     string    // raw relative path from the annotation
-	Kind     EmbedKind // target type (string or u8[])
-	Compress bool      // `embed("path", compress: true)
-	Data     []byte    // populated after sema by ResolveEmbeds
+	Path       string          // raw relative path from the annotation
+	Kind       EmbedKind       // target type (string, u8[], or EmbeddedFiles)
+	Compress   bool            // `embed("path", compress: true)
+	Data       []byte          // populated after sema by ResolveEmbeds
+	DirEntries []EmbedDirEntry // populated for EmbedDir kind by ResolveEmbeds (T0031)
 }
 
 // NarrowedVar records a single variable narrowing (T? → T).

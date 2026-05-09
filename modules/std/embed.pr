@@ -1,0 +1,54 @@
+// std/embed.pr — Types for compile-time directory embedding via `embed("dir/...")
+type EmbeddedFile `public `doc("Metadata for a single file in an embedded directory tree.") {
+  string _name;
+  string _path;
+  int _size;
+  bool _is_dir;
+
+  get name string `public `doc("The base name of the file.") => this._name;
+  get path string `public `doc("The relative path within the embedded directory.") => this._path;
+  get size int `public `doc("The size of the file in bytes.") => this._size;
+  get is_directory bool `public `doc("Whether this entry is a directory.") => this._is_dir;
+}
+
+type EmbeddedFiles `public `doc("A collection of compile-time embedded files from a directory tree. Created by the `embed annotation with a directory path ending in '...'.") {
+  EmbeddedFile[] _entries;
+  u8[] _data;
+  int[] _offsets;
+  int[] _sizes;
+
+  get files EmbeddedFile[] `public `doc("All files and directories in the embedded tree.") => this._entries.clone();
+
+  get len int `public `doc("The number of entries in the collection.") => this._entries.len;
+
+  contains(this, string path) bool `public `doc("Returns true if the given path exists in the collection.") {
+    for entry in this._entries {
+      if entry.path == path {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  read!(this, string path) string `public `doc("Read the contents of an embedded file as a UTF-8 string. Raises an error if the path is not found.") {
+    int i = 0;
+    for entry in this._entries {
+      if entry.path == path {
+        return string.from_bytes(this._data[this._offsets[i]:this._offsets[i] + this._sizes[i]]);
+      }
+      i = i + 1;
+    }
+    raise error(message: "embedded file not found: " + path);
+  }
+
+  read_bytes!(this, string path) u8[] `public `doc("Read the contents of an embedded file as raw bytes. Raises an error if the path is not found.") {
+    int i = 0;
+    for entry in this._entries {
+      if entry.path == path {
+        return this._data[this._offsets[i]:this._offsets[i] + this._sizes[i]];
+      }
+      i = i + 1;
+    }
+    raise error(message: "embedded file not found: " + path);
+  }
+}

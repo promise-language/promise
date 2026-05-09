@@ -35,11 +35,13 @@ var (
 // populateUniverseTypes() hook after std's declare pass, providing identity
 // for compiler features (error handling, for-in, range operators, map sugar).
 var (
-	TypError  *Named // error — base error type for failable functions
-	TypIter   *Named // Iterator[T] — synchronous iterator interface
-	TypStream *Named // Stream[T] — asynchronous iterator interface
-	TypMap    *Named // Map[K, V] — map container type
-	TypRange  *Named // Range[T] — generic range from .. and ..= operators
+	TypError         *Named // error — base error type for failable functions
+	TypIter          *Named // Iterator[T] — synchronous iterator interface
+	TypStream        *Named // Stream[T] — asynchronous iterator interface
+	TypMap           *Named // Map[K, V] — map container type
+	TypRange         *Named // Range[T] — generic range from .. and ..= operators
+	TypEmbeddedFile  *Named // EmbeddedFile — metadata for a single embedded file (T0031)
+	TypEmbeddedFiles *Named // EmbeddedFiles — collection of embedded directory files (T0031)
 )
 
 func init() {

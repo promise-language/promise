@@ -2,6 +2,7 @@ package sema
 
 import (
 	"path/filepath"
+	"strings"
 	"time"
 
 	"djabi.dev/go/promise_lang/internal/ast"
@@ -1123,15 +1124,30 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 		} else if sig != nil {
 			// Determine embed kind from return type
 			retType := sig.Result()
+			isDirPath := strings.HasSuffix(embedPath, "...")
 			var kind EmbedKind
 			valid := true
 			switch {
+			case isEmbeddedFilesType(retType):
+				kind = EmbedDir
+				if !isDirPath {
+					c.errorf(d.Pos(), "`embed getter '%s' with EmbeddedFiles return type requires a directory path ending with '...' (e.g., `embed(\"dir/...\"))", d.Name)
+					valid = false
+				}
 			case types.Identical(retType, types.TypString):
 				kind = EmbedString
+				if isDirPath {
+					c.errorf(d.Pos(), "`embed getter '%s' returning string cannot use directory path ending with '...'; use EmbeddedFiles return type", d.Name)
+					valid = false
+				}
 			case isU8Vector(retType):
 				kind = EmbedBytes
+				if isDirPath {
+					c.errorf(d.Pos(), "`embed getter '%s' returning u8[] cannot use directory path ending with '...'; use EmbeddedFiles return type", d.Name)
+					valid = false
+				}
 			default:
-				c.errorf(d.Pos(), "`embed getter '%s' must return string or u8[], got %s", d.Name, retType)
+				c.errorf(d.Pos(), "`embed getter '%s' must return string, u8[], or EmbeddedFiles, got %s", d.Name, retType)
 				valid = false
 			}
 			if valid {
@@ -1146,6 +1162,17 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 			}
 		}
 	}
+}
+
+// isEmbeddedFilesType returns true if typ is the EmbeddedFiles type (T0031).
+func isEmbeddedFilesType(typ types.Type) bool {
+	if types.TypEmbeddedFiles == nil {
+		return false
+	}
+	if named, ok := typ.(*types.Named); ok {
+		return named == types.TypEmbeddedFiles
+	}
+	return false
 }
 
 // isU8Vector returns true if typ is Vector[u8] (i.e., u8[]).

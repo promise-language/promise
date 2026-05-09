@@ -1,0 +1,62 @@
+// T0031: Directory embedding e2e tests
+get assets EmbeddedFiles `embed("embed_test_fixtures/...");
+
+test_embed_dir_len() `test {
+  EmbeddedFiles fs = assets;
+  // 3 files + 1 directory = 4 entries
+  assert(fs.len == 4, "expected 4 entries, got " + fs.len.to_string());
+}
+
+test_embed_dir_contains() `test {
+  EmbeddedFiles fs = assets;
+  assert(fs.contains("hello.txt"), "should contain hello.txt");
+  assert(fs.contains("css/style.css"), "should contain css/style.css");
+  assert(fs.contains("data.bin"), "should contain data.bin");
+  assert(fs.contains("css"), "should contain css directory");
+  assert(!fs.contains("nonexistent.txt"), "should not contain nonexistent.txt");
+}
+
+test_embed_dir_read() `test {
+  EmbeddedFiles fs = assets;
+  string content = fs.read("hello.txt")?!;
+  assert(content == "Hello, embedded world!", "read hello.txt");
+}
+
+test_embed_dir_read_nested() `test {
+  EmbeddedFiles fs = assets;
+  string css = fs.read("css/style.css")?!;
+  assert(css.len == 19, "css length: got " + css.len.to_string());
+  assert(css.starts_with("body"), "css starts with body");
+}
+
+test_embed_dir_read_bytes() `test {
+  EmbeddedFiles fs = assets;
+  u8[] data = fs.read_bytes("data.bin")?!;
+  assert(data.len == 6, "expected 6 bytes, got " + data.len.to_string());
+}
+
+test_embed_dir_read_not_found() `test {
+  EmbeddedFiles fs = assets;
+  (content, err) := fs.read("nonexistent.txt");
+  assert(err is present, "should raise error for missing file");
+}
+
+test_embed_dir_files() `test {
+  EmbeddedFiles fs = assets;
+  EmbeddedFile[] files = fs.files;
+  assert(files.len == 4, "expected 4 files, got " + files.len.to_string());
+
+  // Files are sorted by path: css, css/style.css, data.bin, hello.txt
+  assert(files[0].path == "css", "file 0 path");
+  assert(files[0].is_directory, "css should be directory");
+  assert(files[0].size == 0, "directory size should be 0");
+
+  assert(files[1].path == "css/style.css", "file 1 path");
+  assert(files[1].name == "style.css", "file 1 name");
+  assert(!files[1].is_directory, "css/style.css should not be directory");
+  assert(files[1].size == 19, "style.css size: got " + files[1].size.to_string());
+
+  assert(files[2].path == "data.bin", "file 2 path");
+  assert(files[3].path == "hello.txt", "file 3 path");
+  assert(files[3].size == 22, "hello.txt size: got " + files[3].size.to_string());
+}

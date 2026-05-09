@@ -12390,7 +12390,7 @@ func TestEmbedWrongReturnTypeRejected(t *testing.T) {
 	errs := checkErrs(t, `
 		get count int `+"`embed(\"data.txt\")"+`;
 	`)
-	expectError(t, errs, "must return string or u8[]")
+	expectError(t, errs, "must return string, u8[], or EmbeddedFiles")
 }
 
 func TestEmbedFailableRejected(t *testing.T) {
@@ -12431,7 +12431,7 @@ func TestEmbedOnWrongNamedTypeRejected(t *testing.T) {
 		type Foo { int x; }
 		get data Foo `+"`embed(\"data.txt\")"+`;
 	`)
-	expectError(t, errs, "must return string or u8[]")
+	expectError(t, errs, "must return string, u8[], or EmbeddedFiles")
 }
 
 func TestResolveEmbedsFileNotFound(t *testing.T) {
@@ -12517,6 +12517,129 @@ func TestResolveEmbedsNilMap(t *testing.T) {
 	errs := ResolveEmbeds(info, "/tmp")
 	if len(errs) != 0 {
 		t.Errorf("expected no errors for empty embeds, got %v", errs)
+	}
+}
+
+// === Directory embedding (T0031) ===
+
+func TestEmbedDirAcceptsEmbeddedFilesType(t *testing.T) {
+	info := checkOK(t, `
+		get assets EmbeddedFiles `+"`embed(\"testdata/...\")"+`;
+	`)
+	if len(info.Embeds) != 1 {
+		t.Fatalf("expected 1 embed, got %d", len(info.Embeds))
+	}
+	for _, embed := range info.Embeds {
+		if embed.Kind != EmbedDir {
+			t.Errorf("expected EmbedDir kind, got %d", embed.Kind)
+		}
+		if embed.Path != "testdata/..." {
+			t.Errorf("expected path 'testdata/...', got %q", embed.Path)
+		}
+	}
+}
+
+func TestEmbedDirRequiresDotDotDotSuffix(t *testing.T) {
+	errs := checkErrs(t, `
+		get assets EmbeddedFiles `+"`embed(\"testdata\")"+`;
+	`)
+	expectError(t, errs, "requires a directory path ending with '...'")
+}
+
+func TestEmbedStringRejectsDotDotDot(t *testing.T) {
+	errs := checkErrs(t, `
+		get data string `+"`embed(\"testdata/...\")"+`;
+	`)
+	expectError(t, errs, "cannot use directory path ending with '...'")
+}
+
+func TestEmbedBytesRejectsDotDotDot(t *testing.T) {
+	errs := checkErrs(t, `
+		get data u8[] `+"`embed(\"testdata/...\")"+`;
+	`)
+	expectError(t, errs, "cannot use directory path ending with '...'")
+}
+
+func TestResolveEmbedsDirSuccess(t *testing.T) {
+	// Create temp directory structure
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "static", "css"), 0755)
+	os.WriteFile(filepath.Join(dir, "static", "index.html"), []byte("<html>hello</html>"), 0644)
+	os.WriteFile(filepath.Join(dir, "static", "css", "style.css"), []byte("body{}"), 0644)
+
+	info := checkOK(t, `
+		get assets EmbeddedFiles `+"`embed(\"static/...\")"+`;
+	`)
+	errs := ResolveEmbeds(info, dir)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	for _, embed := range info.Embeds {
+		if embed.Kind != EmbedDir {
+			t.Fatalf("expected EmbedDir kind")
+		}
+		if len(embed.DirEntries) != 3 {
+			t.Fatalf("expected 3 dir entries (1 dir + 2 files), got %d", len(embed.DirEntries))
+		}
+		// Entries sorted by path: css, css/style.css, index.html
+		if embed.DirEntries[0].Path != "css" || !embed.DirEntries[0].IsDir {
+			t.Errorf("entry 0: expected dir 'css', got %q (isDir=%v)", embed.DirEntries[0].Path, embed.DirEntries[0].IsDir)
+		}
+		if embed.DirEntries[1].Path != "css/style.css" || embed.DirEntries[1].IsDir {
+			t.Errorf("entry 1: expected file 'css/style.css', got %q", embed.DirEntries[1].Path)
+		}
+		if embed.DirEntries[2].Path != "index.html" || embed.DirEntries[2].IsDir {
+			t.Errorf("entry 2: expected file 'index.html', got %q", embed.DirEntries[2].Path)
+		}
+		// Check data blob
+		expectedData := "body{}<html>hello</html>"
+		if string(embed.Data) != expectedData {
+			t.Errorf("data blob: expected %q, got %q", expectedData, string(embed.Data))
+		}
+	}
+}
+
+func TestResolveEmbedsDirNotFound(t *testing.T) {
+	info := checkOK(t, `
+		get assets EmbeddedFiles `+"`embed(\"nonexistent/...\")"+`;
+	`)
+	errs := ResolveEmbeds(info, "/tmp/promise_test_no_such_dir")
+	if len(errs) == 0 {
+		t.Fatal("expected error for missing directory")
+	}
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "cannot access embedded directory") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'cannot access embedded directory' error, got: %v", errs)
+	}
+}
+
+func TestResolveEmbedsDirSkipsHiddenFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "data", ".hidden"), 0755)
+	os.WriteFile(filepath.Join(dir, "data", "visible.txt"), []byte("ok"), 0644)
+	os.WriteFile(filepath.Join(dir, "data", ".hidden", "secret.txt"), []byte("no"), 0644)
+	os.WriteFile(filepath.Join(dir, "data", ".dotfile"), []byte("no"), 0644)
+
+	info := checkOK(t, `
+		get assets EmbeddedFiles `+"`embed(\"data/...\")"+`;
+	`)
+	errs := ResolveEmbeds(info, dir)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	for _, embed := range info.Embeds {
+		if len(embed.DirEntries) != 1 {
+			t.Fatalf("expected 1 entry (hidden files skipped), got %d", len(embed.DirEntries))
+		}
+		if embed.DirEntries[0].Path != "visible.txt" {
+			t.Errorf("expected 'visible.txt', got %q", embed.DirEntries[0].Path)
+		}
 	}
 }
 

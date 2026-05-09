@@ -17302,3 +17302,33 @@ func TestCloneStringVectorDupsElements(t *testing.T) {
 	assertContains(t, ir, "vecdup_str.head")
 	assertContains(t, ir, "promise_string_new")
 }
+
+// B0275: Vector.clone() must deep-clone heap user type elements.
+func TestCloneVectorHeapTypeCallsClone(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo `+"`"+`clone {
+			string name;
+		}
+		test() {
+			v := [Foo(name: "a")];
+			v2 := v.clone();
+		}
+	`)
+	// Should have the clone loop calling Foo.clone
+	assertContains(t, ir, "vecclone.head")
+	assertContains(t, ir, "Foo.clone")
+}
+
+// B0275: Vector.clone() must dup channel elements (refcount increment).
+func TestCloneVectorChannelDupsElements(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			ch := channel[int](1);
+			v := [ch];
+			v2 := v.clone();
+		}
+	`)
+	// Should have the clone loop with channel dup (atomic refcount increment)
+	assertContains(t, ir, "vecclone.head")
+	assertContains(t, ir, "chdup.inc")
+}

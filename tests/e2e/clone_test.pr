@@ -206,4 +206,52 @@ test_clone_generic_copy_elem() `test {
   assert(b2.label == "num", "label");
 }
 
+// --- B0275: Vector.clone() of heap user types ---
+
+type Item `clone {
+  string name;
+  int count;
+}
+
+test_vector_clone_heap_type() `test {
+  Item[] v = [Item(name: "a", count: 1), Item(name: "b", count: 2)];
+  Item[] v2 = v.clone();
+  assert(v2.len == 2, "len");
+  assert(v2[0].name == "a", "0.name");
+  assert(v2[0].count == 1, "0.count");
+  assert(v2[1].name == "b", "1.name");
+  assert(v2[1].count == 2, "1.count");
+}
+
+test_vector_clone_heap_type_independence() `test {
+  Item[] v = [Item(name: "x", count: 10)];
+  Item[] v2 = v.clone();
+  // Both should have the same values
+  assert(v[0].name == "x", "orig name");
+  assert(v2[0].name == "x", "clone name");
+  // Push to clone shouldn't affect original
+  v2.push(Item(name: "y", count: 20));
+  assert(v.len == 1, "orig len unchanged");
+  assert(v2.len == 2, "clone len grew");
+}
+
+// Custom clone that doubles count — verifies clone() is actually called per element
+type Doubler {
+  int value;
+
+  clone() Self `public {
+    return Doubler(value: this.value * 2);
+  }
+}
+
+test_vector_clone_calls_element_clone() `test {
+  Doubler[] v = [Doubler(value: 3), Doubler(value: 5)];
+  Doubler[] v2 = v.clone();
+  assert(v2[0].value == 6, "element 0 cloned via clone()");
+  assert(v2[1].value == 10, "element 1 cloned via clone()");
+  // Original should be unchanged
+  assert(v[0].value == 3, "orig 0");
+  assert(v[1].value == 5, "orig 1");
+}
+
 // Cloneable structural interface is auto-imported from std/clone.pr

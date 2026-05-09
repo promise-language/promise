@@ -2437,6 +2437,107 @@ func (c *Compiler) emitVectorStringDupLoop(vecPtr value.Value, elemType types.Ty
 	c.block = loopDone
 }
 
+// emitVectorElementCloneLoop iterates a cloned vector's elements and deep-clones
+// each non-copy element so the cloned vector owns independent copies. B0275.
+// Handles: strings (dupString), channels (dupChannel), nested vectors (dupVector +
+// recursive clone), and heap user types (clone method or dupHeapValue fallback).
+func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types.Type) {
+	named := extractNamed(elemType)
+	if named == nil {
+		return // primitive/copy type — shallow memcpy is correct
+	}
+
+	// String: delegate to existing string dup loop
+	if named == types.TypString {
+		c.emitVectorStringDupLoop(vecPtr, elemType)
+		return
+	}
+
+	// Determine if element type needs cloning
+	_, isCh := types.AsChannel(elemType)
+	innerElem, isVec := types.AsVector(elemType)
+	isChannel := isCh || named == types.TypChannel
+	isVector := isVec || named == types.TypVector
+	isHeapUser := !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
+
+	if !isChannel && !isVector && !isHeapUser {
+		return // value/copy type — shallow memcpy is correct
+	}
+
+	// Emit loop: for i = 0; i < len; i++ { elements[i] = clone(elements[i]); }
+	elemLLVM := c.resolveType(elemType)
+
+	headerType := vectorHeaderType()
+	headerPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
+	length := loadVectorLen(c.block, headerPtr)
+
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, vecPtr,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+
+	loopHead := c.newBlock("vecclone.head")
+	loopBody := c.newBlock("vecclone.body")
+	loopDone := c.newBlock("vecclone.done")
+
+	idxAlloca := c.createEntryAlloca(irtypes.I64)
+	idxAlloca.SetName(c.uniqueLocalName("vecclone.idx"))
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), idxAlloca)
+	c.block.NewBr(loopHead)
+
+	c.block = loopHead
+	idx := c.block.NewLoad(irtypes.I64, idxAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, idx, length)
+	c.block.NewCondBr(cond, loopBody, loopDone)
+
+	c.block = loopBody
+	idx2 := c.block.NewLoad(irtypes.I64, idxAlloca)
+	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx2)
+	elemVal := c.block.NewLoad(elemLLVM, elemPtr)
+
+	var cloned value.Value
+	if isChannel {
+		cloned = c.dupChannel(elemVal)
+	} else if isVector {
+		if isVec {
+			innerLLVM := c.resolveType(innerElem)
+			innerSize := int64(c.typeSize(innerLLVM))
+			cloned = c.dupVector(elemVal, innerSize)
+			// Recursively clone inner vector's elements
+			c.emitVectorElementCloneLoop(cloned, innerElem)
+		} else {
+			cloned = c.dupVector(elemVal, 0)
+		}
+	} else {
+		// Heap user type: try clone() method, fall back to dupHeapValue
+		cloned = c.cloneHeapElement(elemVal, elemType, named)
+	}
+	c.block.NewStore(cloned, elemPtr)
+
+	nextIdx := c.block.NewAdd(idx2, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(nextIdx, idxAlloca)
+	c.block.NewBr(loopHead)
+
+	c.block = loopDone
+}
+
+// cloneHeapElement clones a single heap user type element by calling its clone()
+// method if available, otherwise falling back to dupHeapValue. B0275.
+func (c *Compiler) cloneHeapElement(elemVal value.Value, elemType types.Type, named *types.Named) value.Value {
+	// Resolve clone method name
+	ownerName := c.resolveMethodOwner(named, "clone")
+	if inst, ok := elemType.(*types.Instance); ok {
+		ownerName = monoName(inst)
+	}
+	mangledName := mangleMethodName(ownerName, "clone", false)
+	if cloneFn, ok := c.funcs[mangledName]; ok {
+		instance := c.extractInstancePtr(elemVal)
+		return c.block.NewCall(cloneFn, instance)
+	}
+
+	// No clone method — fall back to dupHeapValue (alloc + memcpy + sub-field dup)
+	return c.dupHeapValue(elemVal, elemType)
+}
+
 // emitVectorStringElementDropLoop is a string-only version of emitVectorElementDropLoop.
 // Used for Map for-in temporary vectors where values are shared copies — only strings
 // are safe to drop (they are dup'd, making each copy independent). B0212.

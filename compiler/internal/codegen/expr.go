@@ -3538,16 +3538,14 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		return c.block.NewTrunc(result, irtypes.I1)
 
 	case "clone":
-		// Deep-copy the vector: shallow memcpy of header+elements, then dup string elements.
+		// Deep-copy the vector: shallow memcpy of header+elements, then deep-clone
+		// non-copy elements so the cloned vector owns independent copies. B0275.
 		resolvedElem := elemType
 		if c.typeSubst != nil {
 			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
 		}
 		result := c.dupVector(slicePtr, elemSize)
-		// For string elements, dup each string in the new vector so each copy is independent.
-		if extractNamed(resolvedElem) == types.TypString {
-			c.emitVectorStringDupLoop(result, resolvedElem)
-		}
+		c.emitVectorElementCloneLoop(result, resolvedElem)
 		return result
 
 	case "remove":

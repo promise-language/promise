@@ -1,6 +1,9 @@
 package ownership
 
 import (
+	"sort"
+	"strings"
+
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/types"
 )
@@ -241,7 +244,8 @@ func (c *Checker) checkAssignTarget(target ast.Expr) {
 	}
 }
 
-// checkReturnRefSafety validates that returned references don't point to locals.
+// checkReturnRefSafety validates that returned references don't point to locals
+// and enforces lifetime constraints (B0033).
 func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
 	if c.curSig == nil || c.curSig.Result() == nil {
 		return
@@ -249,14 +253,123 @@ func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
 	if !isRefType(c.curSig.Result()) {
 		return
 	}
-	ident, ok := s.Value.(*ast.IdentExpr)
-	if !ok {
+
+	origin := resolveReturnOrigin(s.Value)
+	if origin == "" {
+		return // can't determine origin (complex expression)
+	}
+
+	// Existing check: can't return reference to local variable.
+	if c.params != nil && !c.params[origin] {
+		c.errorf(s.Pos(), "cannot return reference to local variable '%s'", origin)
 		return
 	}
-	// A variable is local if it's not a parameter of the current function.
-	if c.params != nil && !c.params[ident.Name] {
-		c.errorf(s.Pos(), "cannot return reference to local variable '%s'", ident.Name)
+
+	// If explicit lifetime declared on return type, validate the origin matches.
+	if lt := c.curSig.ResultLifetime(); lt != "" {
+		c.checkExplicitLifetimeReturn(s, origin, lt)
+		return
 	}
+
+	// Elision rule 3: &this/~this receiver — always OK.
+	if origin == "this" {
+		return
+	}
+
+	// Elision rule 2: exactly one ref param — always OK.
+	if c.countRefParams() == 1 {
+		return
+	}
+
+	// Rule 4: multiple ref params, no explicit annotation — record for ambiguity check.
+	if c.returnOrigins == nil {
+		c.returnOrigins = make(map[string]ast.Pos)
+	}
+	if _, exists := c.returnOrigins[origin]; !exists {
+		c.returnOrigins[origin] = s.Pos()
+	}
+}
+
+// resolveReturnOrigin walks an expression to find the root variable name.
+// Returns "" if the expression is too complex to track.
+func resolveReturnOrigin(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Name
+	case *ast.MemberExpr:
+		return resolveReturnOrigin(e.Target)
+	}
+	return ""
+}
+
+// countRefParams counts the number of reference parameters in the current signature
+// (excluding the receiver). Move params (Ref()==RefMut, T0087) are excluded since
+// they take ownership — the moved value is destroyed at function exit.
+func (c *Checker) countRefParams() int {
+	if c.curSig == nil {
+		return 0
+	}
+	count := 0
+	for _, p := range c.curSig.Params() {
+		kind := paramBorrowKind(p)
+		if kind == BorrowNone {
+			continue
+		}
+		// T0087: ~ on regular params means move, not borrow.
+		if p.Ref() == types.RefMut {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+// checkExplicitLifetimeReturn validates that the returned value borrows from
+// a parameter whose lifetime matches the declared return lifetime.
+func (c *Checker) checkExplicitLifetimeReturn(s *ast.ReturnStmt, origin string, resultLifetime string) {
+	// Find the parameter and check its lifetime.
+	if c.curSig == nil {
+		return
+	}
+	// Check receiver.
+	if origin == "this" && c.curSig.Recv() != nil {
+		// &this receiver implicitly satisfies any return lifetime.
+		return
+	}
+	for _, p := range c.curSig.Params() {
+		if p.Name() == origin {
+			paramLt := p.Lifetime()
+			if paramLt == "" {
+				// Param has no explicit lifetime — doesn't match any declared lifetime.
+				c.errorf(s.Pos(), "returned reference borrows from parameter '%s' which has no `lifetime annotation", origin)
+				return
+			}
+			if paramLt != resultLifetime {
+				c.errorf(s.Pos(), "returned reference borrows from parameter '%s' (lifetime '%s') but return type declares lifetime '%s'", origin, paramLt, resultLifetime)
+			}
+			return
+		}
+	}
+}
+
+// checkReturnAmbiguity is called after checking the entire function body.
+// If the function returns a reference type, has multiple ref params, no explicit
+// lifetime, and the body returns from more than one distinct parameter, it's ambiguous.
+func (c *Checker) checkReturnAmbiguity() {
+	if len(c.returnOrigins) <= 1 {
+		return
+	}
+	// Collect the parameter names for the error message (sorted for determinism).
+	var names []string
+	var firstPos ast.Pos
+	for name, pos := range c.returnOrigins {
+		names = append(names, "'"+name+"'")
+		if firstPos.Line == 0 || pos.Line < firstPos.Line {
+			firstPos = pos
+		}
+	}
+	sort.Strings(names)
+	c.errorf(firstPos, "ambiguous return reference: function returns references from multiple parameters (%s); add `lifetime annotations to disambiguate", strings.Join(names, ", "))
 }
 
 // --- Control flow statements ---

@@ -2915,3 +2915,82 @@ func TestNLLBorrowExpiredReassigned(t *testing.T) {
 		}
 	`)
 }
+
+// === Lifetime annotations (B0033) ===
+
+func TestLifetimeElisionSingleRefParam(t *testing.T) {
+	// Elision rule 2: exactly one ref param — its lifetime covers the return.
+	ownerOK(t, `
+		first(string &a) string& { return a; }
+	`)
+}
+
+func TestLifetimeElisionThisReceiver(t *testing.T) {
+	// Elision rule 3: &this receiver — always OK.
+	ownerOK(t, `
+		type Holder {
+			string name;
+			get_name(&this) string& { return this.name; }
+		}
+	`)
+}
+
+func TestLifetimeAmbiguousMultiRefReturn(t *testing.T) {
+	// Rule 4: two ref params, conditional return from both — ambiguous without annotation.
+	errs := ownerErrs(t, `
+		pick(string &a, string &b) string& {
+			if true { return a; }
+			return b;
+		}
+	`)
+	expectOwnerError(t, errs, "ambiguous return reference")
+}
+
+func TestLifetimeUnambiguousMultiRefReturn(t *testing.T) {
+	// Rule 4: two ref params but always returns the same one — unambiguous.
+	ownerOK(t, `
+		first_of(string &a, string &b) string& {
+			return a;
+		}
+	`)
+}
+
+func TestLifetimeExplicitSameLifetime(t *testing.T) {
+	// Explicit: both params share the same lifetime, return either — OK.
+	ownerOK(t, `
+		longest(string &a `+"`"+`lifetime(x), string &b `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) {
+			if true { return a; }
+			return b;
+		}
+	`)
+}
+
+func TestLifetimeExplicitMismatch(t *testing.T) {
+	// Explicit: return borrows from param with different lifetime than declared.
+	errs := ownerErrs(t, `
+		pick(string &a `+"`"+`lifetime(x), string &b `+"`"+`lifetime(y)) string& `+"`"+`lifetime(x) {
+			return b;
+		}
+	`)
+	expectOwnerError(t, errs, "returned reference borrows from parameter 'b' (lifetime 'y') but return type declares lifetime 'x'")
+}
+
+func TestLifetimeExplicitCorrect(t *testing.T) {
+	// Explicit: return borrows from param with matching lifetime — OK.
+	ownerOK(t, `
+		pick(string &a `+"`"+`lifetime(x), string &b `+"`"+`lifetime(y)) string& `+"`"+`lifetime(x) {
+			return a;
+		}
+	`)
+}
+
+func TestLifetimeReturnLocalStillErrors(t *testing.T) {
+	// Returning a local variable as a reference is still an error (preserved behavior).
+	errs := ownerErrs(t, `
+		bad() string& {
+			string s = "hello";
+			return s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return reference to local variable 's'")
+}

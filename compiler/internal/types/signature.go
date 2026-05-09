@@ -11,6 +11,7 @@ type Param struct {
 	defaultExpr interface{} // AST expression for the default value (ast.Expr, stored as interface{} to avoid import cycle)
 	doc         string      // `doc meta annotation
 	isVariadic  bool        // true for ...T params (receives T[])
+	lifetime    string      // `lifetime(name) meta annotation — explicit lifetime group
 }
 
 // NewParam creates a new parameter.
@@ -42,13 +43,20 @@ func (p *Param) SetDoc(s string) { p.doc = s }
 // SetVariadic marks this parameter as variadic (...T).
 func (p *Param) SetVariadic(v bool) { p.isVariadic = v }
 
+// Lifetime returns the explicit lifetime name from a `lifetime annotation, or "".
+func (p *Param) Lifetime() string { return p.lifetime }
+
+// SetLifetime sets the explicit lifetime name from a `lifetime annotation.
+func (p *Param) SetLifetime(s string) { p.lifetime = s }
+
 // Signature represents a function type: (params) -> result.
 type Signature struct {
-	recv       *Param       // receiver (nil for free functions)
-	params     []*Param     // positional parameters
-	result     Type         // return type (nil means void)
-	canError   bool         // true if function returns T! (can raise errors)
-	typeParams []*TypeParam // nil for non-generic functions
+	recv           *Param       // receiver (nil for free functions)
+	params         []*Param     // positional parameters
+	result         Type         // return type (nil means void)
+	canError       bool         // true if function returns T! (can raise errors)
+	typeParams     []*TypeParam // nil for non-generic functions
+	resultLifetime string       // `lifetime(name) on function — lifetime of the return reference
 }
 
 // NewSignature creates a new function signature.
@@ -76,6 +84,12 @@ func (s *Signature) IsVariadic() bool {
 
 // SetTypeParams sets the type parameters for a generic function signature.
 func (s *Signature) SetTypeParams(tps []*TypeParam) { s.typeParams = tps }
+
+// ResultLifetime returns the explicit lifetime name for the return type, or "".
+func (s *Signature) ResultLifetime() string { return s.resultLifetime }
+
+// SetResultLifetime sets the explicit lifetime name for the return type.
+func (s *Signature) SetResultLifetime(l string) { s.resultLifetime = l }
 
 func (s *Signature) String() string {
 	var b strings.Builder

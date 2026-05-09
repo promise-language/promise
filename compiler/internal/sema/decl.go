@@ -758,6 +758,7 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 			c.info.ParamDefaults[params[i]] = p.Default
 		}
 		params[i].SetDoc(extractDoc(p.Annotations))
+		params[i].SetLifetime(extractLifetime(p.Annotations))
 		c.validateMetas(p.Annotations, TargetParam)
 	}
 	c.validateVariadicParams(md.Params, params, "method '"+md.Name+"'")
@@ -787,6 +788,11 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 	if len(methodTParams) > 0 {
 		sig.SetTypeParams(methodTParams)
 	}
+	resultLifetime := extractLifetime(md.Annotations)
+	if resultLifetime != "" {
+		sig.SetResultLifetime(resultLifetime)
+	}
+	c.validateLifetimes(sig, md.Annotations, md.Params)
 	return sig
 }
 
@@ -944,6 +950,7 @@ func (c *Checker) resolveEnumMethodSignature(enum *types.Enum, md *ast.MethodDec
 			c.info.ParamDefaults[params[i]] = p.Default
 		}
 		params[i].SetDoc(extractDoc(p.Annotations))
+		params[i].SetLifetime(extractLifetime(p.Annotations))
 		c.validateMetas(p.Annotations, TargetParam)
 	}
 	c.validateVariadicParams(md.Params, params, "method '"+md.Name+"'")
@@ -961,7 +968,13 @@ func (c *Checker) resolveEnumMethodSignature(enum *types.Enum, md *ast.MethodDec
 		canError = md.ReturnType.CanError
 	}
 
-	return types.NewSignature(recv, params, result, canError)
+	sig := types.NewSignature(recv, params, result, canError)
+	resultLifetime := extractLifetime(md.Annotations)
+	if resultLifetime != "" {
+		sig.SetResultLifetime(resultLifetime)
+	}
+	c.validateLifetimes(sig, md.Annotations, md.Params)
+	return sig
 }
 
 func (c *Checker) defineFunc(d *ast.FuncDecl) {
@@ -1168,6 +1181,7 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 			c.info.ParamDefaults[params[i]] = p.Default
 		}
 		params[i].SetDoc(extractDoc(p.Annotations))
+		params[i].SetLifetime(extractLifetime(p.Annotations))
 		c.validateMetas(p.Annotations, TargetParam)
 	}
 	c.validateVariadicParams(d.Params, params, "function '"+d.Name+"'")
@@ -1185,7 +1199,13 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 		canError = d.ReturnType.CanError
 	}
 
-	return types.NewSignature(nil, params, result, canError)
+	sig := types.NewSignature(nil, params, result, canError)
+	resultLifetime := extractLifetime(d.Annotations)
+	if resultLifetime != "" {
+		sig.SetResultLifetime(resultLifetime)
+	}
+	c.validateLifetimes(sig, d.Annotations, d.Params)
+	return sig
 }
 
 // resolveTypeParamConstraints resolves constraints for type parameters.

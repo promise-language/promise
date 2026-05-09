@@ -18,6 +18,7 @@ const (
 	TargetEnum
 	TargetParam
 	TargetVariant
+	TargetReturn
 )
 
 func targetLabel(t MetaTarget) string {
@@ -36,6 +37,8 @@ func targetLabel(t MetaTarget) string {
 		return "parameter"
 	case TargetVariant:
 		return "variant"
+	case TargetReturn:
+		return "return type"
 	default:
 		return "declaration"
 	}
@@ -74,6 +77,7 @@ var builtinMetas = map[string][]MetaTarget{
 	"factory":      {TargetMethod},
 	"embed":        {TargetFunc},
 	"wasm_import":  {TargetFunc},
+	"lifetime":     {TargetParam, TargetFunc, TargetMethod},
 }
 
 // validateMetas checks that all meta annotations on a declaration are valid:
@@ -132,6 +136,116 @@ func extractDoc(annotations []*ast.MetaAnnotation) string {
 		return ""
 	}
 	return ""
+}
+
+// extractLifetime returns the lifetime name from a `lifetime(name) annotation, or "".
+// The parameter must be a single identifier (not a string literal).
+func extractLifetime(annotations []*ast.MetaAnnotation) string {
+	for _, ann := range annotations {
+		if ann.Name != "lifetime" {
+			continue
+		}
+		if len(ann.Params) == 1 {
+			if ident, ok := ann.Params[0].Value.(*ast.IdentExpr); ok {
+				return ident.Name
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+// isRefParam returns true if a parameter is a reference parameter,
+// either via explicit Ref modifier (&/~) or via reference type (SharedRef/MutRef).
+func isRefParam(p *types.Param) bool {
+	if p.Ref() == types.RefShared || p.Ref() == types.RefMut {
+		return true
+	}
+	switch p.Type().(type) {
+	case *types.SharedRef, *types.MutRef:
+		return true
+	}
+	return false
+}
+
+// isRefResultType returns true if a type is a reference type.
+func isRefResultType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.(type) {
+	case *types.SharedRef, *types.MutRef:
+		return true
+	}
+	return false
+}
+
+// validateLifetimes validates `lifetime annotations on parameters and the function/method.
+// It checks:
+// - `lifetime on a param requires the param to be a reference type
+// - `lifetime on a function/method requires a reference return type
+// - The return lifetime name must match a declared parameter lifetime
+// - `lifetime must have exactly one identifier parameter
+func (c *Checker) validateLifetimes(sig *types.Signature, funcAnnotations []*ast.MetaAnnotation, astParams []*ast.Param) {
+	// Validate `lifetime annotation format on parameters
+	for i, p := range astParams {
+		for _, ann := range p.Annotations {
+			if ann.Name != "lifetime" {
+				continue
+			}
+			// Check format: must have exactly one positional identifier parameter
+			if len(ann.Params) != 1 || ann.Params[0].Name != "" {
+				c.errorf(ann.Pos(), "`lifetime requires exactly one identifier parameter, e.g. `lifetime(a)")
+				continue
+			}
+			if _, ok := ann.Params[0].Value.(*ast.IdentExpr); !ok {
+				c.errorf(ann.Pos(), "`lifetime parameter must be an identifier, e.g. `lifetime(a)")
+				continue
+			}
+			// Check that the param is a reference type
+			if i < len(sig.Params()) && !isRefParam(sig.Params()[i]) {
+				c.errorf(ann.Pos(), "`lifetime can only be applied to reference parameters")
+			}
+		}
+	}
+
+	// Validate `lifetime on the function/method (refers to return type)
+	for _, ann := range funcAnnotations {
+		if ann.Name != "lifetime" {
+			continue
+		}
+		// Check format
+		if len(ann.Params) != 1 || ann.Params[0].Name != "" {
+			c.errorf(ann.Pos(), "`lifetime requires exactly one identifier parameter, e.g. `lifetime(a)")
+			continue
+		}
+		if _, ok := ann.Params[0].Value.(*ast.IdentExpr); !ok {
+			c.errorf(ann.Pos(), "`lifetime parameter must be an identifier, e.g. `lifetime(a)")
+			continue
+		}
+
+		// Check that return type is a reference
+		if !isRefResultType(sig.Result()) {
+			c.errorf(ann.Pos(), "`lifetime on function refers to return type but return type is not a reference")
+			continue
+		}
+
+		// Check that the lifetime name matches a parameter lifetime
+		lt := sig.ResultLifetime()
+		if lt == "" {
+			continue
+		}
+		found := false
+		for _, p := range sig.Params() {
+			if p.Lifetime() == lt {
+				found = true
+				break
+			}
+		}
+		if !found {
+			c.errorf(ann.Pos(), "unknown lifetime '%s'; no parameter declares this lifetime", lt)
+		}
+	}
 }
 
 // extractDeprecated returns the deprecation message from a `deprecated annotation.

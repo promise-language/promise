@@ -12446,3 +12446,82 @@ func TestResolveEmbedsNilMap(t *testing.T) {
 		t.Errorf("expected no errors for empty embeds, got %v", errs)
 	}
 }
+
+// === Lifetime annotations (B0033) ===
+
+func TestLifetimeAnnotationOnRefParam(t *testing.T) {
+	// Valid: `lifetime on a reference parameter.
+	checkOK(t, `
+		first(string &a `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) { return a; }
+	`)
+}
+
+func TestLifetimeAnnotationOnNonRefParam(t *testing.T) {
+	// Error: `lifetime on a non-reference parameter.
+	errs := checkErrs(t, `
+		bad(string a `+"`"+`lifetime(x)) string { return a; }
+	`)
+	expectError(t, errs, "`lifetime can only be applied to reference parameters")
+}
+
+func TestLifetimeAnnotationOnNonRefReturn(t *testing.T) {
+	// Error: `lifetime on function but return type is not a reference.
+	errs := checkErrs(t, `
+		bad(string &a `+"`"+`lifetime(x)) string `+"`"+`lifetime(x) { return "hi"; }
+	`)
+	expectError(t, errs, "return type is not a reference")
+}
+
+func TestLifetimeUnknownName(t *testing.T) {
+	// Error: return lifetime name doesn't match any parameter lifetime.
+	errs := checkErrs(t, `
+		bad(string &a `+"`"+`lifetime(x)) string& `+"`"+`lifetime(y) { return a; }
+	`)
+	expectError(t, errs, "unknown lifetime 'y'")
+}
+
+func TestLifetimeMultipleParams(t *testing.T) {
+	// Valid: multiple params with different lifetimes.
+	checkOK(t, `
+		pick(string &a `+"`"+`lifetime(x), string &b `+"`"+`lifetime(y)) string& `+"`"+`lifetime(x) { return a; }
+	`)
+}
+
+func TestLifetimeSameOnBothParams(t *testing.T) {
+	// Valid: same lifetime on both params (longest pattern).
+	checkOK(t, `
+		longest(string &a `+"`"+`lifetime(x), string &b `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) {
+			if true { return a; }
+			return b;
+		}
+	`)
+}
+
+func TestLifetimeWrongParamCount(t *testing.T) {
+	// Error: `lifetime with no parameters.
+	errs := checkErrs(t, `
+		bad(string &a `+"`"+`lifetime) string& { return a; }
+	`)
+	expectError(t, errs, "`lifetime requires exactly one identifier parameter")
+}
+
+func TestLifetimeStringParam(t *testing.T) {
+	// Error: `lifetime with a string literal instead of identifier.
+	errs := checkErrs(t, `
+		bad(string &a `+"`"+`lifetime("x")) string& { return a; }
+	`)
+	expectError(t, errs, "`lifetime parameter must be an identifier")
+}
+
+func TestLifetimeOnMethod(t *testing.T) {
+	// Valid: `lifetime on a method with explicit annotations.
+	checkOK(t, `
+		type Pair {
+			string first;
+			string second;
+			pick(&this, string &other `+"`"+`lifetime(x)) string& `+"`"+`lifetime(x) {
+				return other;
+			}
+		}
+	`)
+}

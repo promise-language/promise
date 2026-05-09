@@ -30,6 +30,10 @@ type Checker struct {
 	// last use is that statement. After processing such a statement, borrows
 	// held by those variables are expired.
 	refLastUses map[ast.Stmt][]string
+
+	// Lifetime analysis (B0033): tracks which parameter names appear as return
+	// origins across the function body, for ambiguity detection (rule 4).
+	returnOrigins map[string]ast.Pos
 }
 
 // Check performs ownership analysis on the given file using sema results.
@@ -85,6 +89,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedDeclOrder := c.declOrder
 	savedNextOrder := c.nextOrder
 	savedVarTypes := c.varTypes
+	savedReturnOrigins := c.returnOrigins
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
@@ -94,6 +99,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.declOrder = make(map[string]int)
 	c.nextOrder = 0
 	c.varTypes = make(map[string]types.Type)
+	c.returnOrigins = nil
 
 	for _, p := range sig.Params() {
 		if p.Name() != "" && p.Name() != "_" {
@@ -105,6 +111,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 
 	c.checkBlock(d.Body)
 	c.checkDropOrderSafety()
+	c.checkReturnAmbiguity()
 
 	c.state = savedState
 	c.borrows = savedBorrows
@@ -113,6 +120,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.curSig = savedSig
 	c.declOrder = savedDeclOrder
 	c.nextOrder = savedNextOrder
+	c.returnOrigins = savedReturnOrigins
 	c.varTypes = savedVarTypes
 }
 
@@ -189,6 +197,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedDeclOrder := c.declOrder
 	savedNextOrder := c.nextOrder
 	savedVarTypes := c.varTypes
+	savedReturnOrigins := c.returnOrigins
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
@@ -198,6 +207,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.declOrder = make(map[string]int)
 	c.nextOrder = 0
 	c.varTypes = make(map[string]types.Type)
+	c.returnOrigins = nil
 
 	if m.Sig().Recv() != nil {
 		c.state["this"] = Owned
@@ -216,6 +226,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 
 	c.checkBlock(md.Body)
 	c.checkDropOrderSafety()
+	c.checkReturnAmbiguity()
 
 	c.state = savedState
 	c.borrows = savedBorrows
@@ -225,6 +236,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.declOrder = savedDeclOrder
 	c.nextOrder = savedNextOrder
 	c.varTypes = savedVarTypes
+	c.returnOrigins = savedReturnOrigins
 }
 
 // lookupFileScope finds an object in the file-level scope.

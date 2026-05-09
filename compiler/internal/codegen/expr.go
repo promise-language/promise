@@ -4576,7 +4576,9 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		// Without this, match-extracted values share instance pointers with the enum
 		// data. When the enum element is dropped (e.g., Map._buckets scope exit or
 		// Map destruction), the shared value would be double-freed.
-		if enumHasDrop && c.matchFieldNeedsDup(variant.Fields()[i].Type(), subjectType, enum) {
+		// B0285: Skip dup inside enum clone methods — the synthesized body explicitly
+		// calls .clone() on non-copy fields, so match-dup would double-clone.
+		if enumHasDrop && !c.suppressMatchDup && c.matchFieldNeedsDup(variant.Fields()[i].Type(), subjectType, enum) {
 			resolved := c.resolveMatchFieldType(variant.Fields()[i].Type(), subjectType, enum)
 			c.dupMatchBinding(binding, val, fieldType, resolved)
 			continue

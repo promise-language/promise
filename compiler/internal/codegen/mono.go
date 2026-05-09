@@ -2040,8 +2040,12 @@ func (c *Compiler) defineMonoEnumMethods(file *ast.File, instances []*types.Inst
 
 			c.typeSubst = subst
 			c.monoCtx = &monoContext{inst: inst, origin: enum, name: name}
+			// B0285: Suppress match-dup inside enum clone methods
+			if md.Name == "clone" {
+				c.suppressMatchDup = true
+			}
 			func() {
-				defer func() { c.typeSubst = nil; c.monoCtx = nil }()
+				defer func() { c.typeSubst = nil; c.monoCtx = nil; c.suppressMatchDup = false }()
 				if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
 					c.defineGeneratorMethod(md, m, fn, elemType, nil)
 				} else {

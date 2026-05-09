@@ -1,0 +1,97 @@
+// B0285: Synthesized enum clone must not double-clone fields when match-dup is active.
+// The synthesized clone body uses `match this` to destructure variant fields, then
+// explicitly calls .clone() on non-copy fields. Without the match-dup suppression fix,
+// the match destructure ALSO clones fields (because the enum has drop), causing:
+// - Double work and leaked intermediate clones
+// - Exponential recursion depth for recursive types → stack overflow
+// Basic test: clone a `clone enum with a string field.
+enum Token `clone {
+  Word(string text),
+  Number(int value),
+  Empty,
+}
+
+test_enum_clone_string_field() `test {
+  t := Token.Word(text: "hello");
+  Token t2 = t.clone();
+  match t2 {
+    Word(d) => assert(d == "hello", "cloned text"),
+    _ => assert(false, "expected Word"),
+  }
+}
+
+test_enum_clone_int_field() `test {
+  t := Token.Number(value: 42);
+  Token t2 = t.clone();
+  match t2 {
+    Number(v) => assert(v == 42, "cloned value"),
+    _ => assert(false, "expected Number"),
+  }
+}
+
+test_enum_clone_fieldless() `test {
+  t := Token.Empty;
+  Token t2 = t.clone();
+  match t2 {
+    Word(d) => assert(false, "expected Empty"),
+    Number(v) => assert(false, "expected Empty"),
+    Empty => {
+    },
+  }
+}
+
+// Both original and clone are independent — no double-free.
+test_enum_clone_independence() `test {
+  t := Token.Word(text: "original");
+  Token t2 = t.clone();
+  // Both should be valid and independent
+  match t {
+    Word(d) => assert(d == "original", "original intact"),
+    _ => assert(false, "expected Word"),
+  }
+  match t2 {
+    Word(d) => assert(d == "original", "clone intact"),
+    _ => assert(false, "expected Word"),
+  }
+}
+
+// Enum with vector field — clone should deep-copy the vector.
+enum Container `clone {
+  Items(string[] data),
+  Empty,
+}
+
+test_enum_clone_vector_field() `test {
+  Container c = Container.Items(data: ["a", "b", "c"]);
+  Container c2 = c.clone();
+  match c2 {
+    Items(d) => {
+      assert(d.len == 3, "cloned vector length");
+      assert(d[0] == "a", "elem 0");
+      assert(d[1] == "b", "elem 1");
+      assert(d[2] == "c", "elem 2");
+    },
+    _ => assert(false, "expected Items"),
+  }
+}
+
+// Enum with map field — clone should deep-copy the map.
+enum Config `clone {
+  Settings(map[string, int] values),
+  Default,
+}
+
+test_enum_clone_map_field() `test {
+  Config c = Config.Settings(values: {
+    "x": 1, "y": 2
+  });
+  Config c2 = c.clone();
+  match c2 {
+    Settings(v) => {
+      assert(v.len == 2, "cloned map length");
+      assert(v.contains("x"), "contains x");
+      assert(v.contains("y"), "contains y");
+    },
+    _ => assert(false, "expected Settings"),
+  }
+}

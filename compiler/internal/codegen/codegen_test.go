@@ -10879,6 +10879,44 @@ func TestMatchDupEnumClone(t *testing.T) {
 	assertContains(t, ir, "enum.clone.tmp")
 }
 
+// B0285: Synthesized enum clone method must NOT double-clone fields.
+// The match inside clone() destructures variant fields, and without suppression
+// the match-dup mechanism also clones them — causing double work and leaked
+// intermediate clones. For recursive types this causes stack overflow.
+func TestEnumCloneNoDoubleClone(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum Token `clone {\n"+
+		"  Word(string text),\n"+
+		"  Empty,\n"+
+		"}\n"+
+		"test() {\n"+
+		"  t := Token.Word(text: \"hello\");\n"+
+		"  Token t2 = t.clone();\n"+
+		"}\n")
+	// Inside Token.clone(), the match destructure should NOT dup the string field —
+	// the synthesized body explicitly calls .clone() on it. With match-dup suppressed,
+	// there should be exactly 1 strdup block label (from the explicit .clone() call).
+	// Without suppression, there would be 2 (match-dup + explicit clone).
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	strdupBlocks := 0
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, "Token.clone") {
+			inClone = true
+		} else if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		// Count distinct strdup.copy block labels (not references)
+		trimmed := strings.TrimSpace(line)
+		if inClone && strings.HasPrefix(trimmed, "strdup.copy.") && strings.HasSuffix(trimmed, ":") {
+			strdupBlocks++
+		}
+	}
+	if strdupBlocks != 1 {
+		t.Errorf("B0285: Token.clone() body should have exactly 1 strdup block (from explicit .clone()), got %d", strdupBlocks)
+	}
+}
+
 // B0237/B0242: Match destructure of droppable enum dups string fields and
 // registers them for arm-scope cleanup with a drop flag. The drop flag is
 // cleared at move sites (PHI, push, etc.), so consumed bindings are not

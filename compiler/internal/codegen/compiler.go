@@ -181,6 +181,13 @@ type Compiler struct {
 	envTemps   []envTemp
 	envTempMap map[value.Value]int // env i8* → index in envTemps (-1 = claimed)
 
+	// B0285: Suppress match-dup during enum clone method compilation.
+	// The synthesized clone body uses `match this` to destructure variant fields,
+	// then explicitly calls .clone() on non-copy fields. Without suppression,
+	// match-dup also clones fields (because the enum has drop), causing double-clone
+	// and leaked intermediates. For recursive types this causes stack overflow.
+	suppressMatchDup bool
+
 	// B0267/B0269: Inline enum constructor temp tracking. Entry-block allocas store
 	// the enum pointer (bitcast to i8*) and a drop flag. Set by genEnumVariantCallLayout,
 	// cleared by variable assignment, cleaned up at statement end. Supports multiple
@@ -4974,7 +4981,12 @@ func (c *Compiler) defineEnumMethods(file *ast.File) {
 				continue
 			}
 
+			// B0285: Suppress match-dup inside enum clone methods
+			if md.Name == "clone" {
+				c.suppressMatchDup = true
+			}
 			c.defineMethodFunc(md, m, fn)
+			c.suppressMatchDup = false
 		}
 	}
 }
@@ -5092,7 +5104,12 @@ func (c *Compiler) defineModuleEnumMethods(file *ast.File, moduleName string) {
 				continue
 			}
 
+			// B0285: Suppress match-dup inside enum clone methods
+			if md.Name == "clone" {
+				c.suppressMatchDup = true
+			}
 			c.defineMethodFunc(md, m, fn)
+			c.suppressMatchDup = false
 		}
 	}
 }

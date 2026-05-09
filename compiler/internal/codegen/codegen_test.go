@@ -11371,6 +11371,54 @@ func TestEnumCtorTempSkippedWhenMovedDroppable(t *testing.T) {
 	assertNotContains(t, ir, "enum.ctor.drop")
 }
 
+// B0286: Non-ident expressions (e.g., function calls) returning droppable values
+// must also skip B0267 enum ctor temp tracking — the enum owns the returned
+// resources, and temp-dropping would free them under a shared by-value copy.
+func TestEnumCtorTempSkippedForNonIdentDroppableArg(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			string name;
+			drop(~this) { }
+		}
+		enum Holder {
+			Has(Resource r),
+			Empty,
+		}
+		make_resource() Resource {
+			return Resource(name: "test");
+		}
+		consume(Holder h) { }
+		main() {
+			consume(Holder.Has(r: make_resource()));
+		}
+	`)
+	assertContains(t, ir, "define void @Holder.drop")
+	assertNotContains(t, ir, "enum.ctor.drop")
+}
+
+// B0286: Enum variant with a non-ident arg of a synth-drop type (contains
+// string field) should also skip B0267 temp tracking.
+func TestEnumCtorTempSkippedForNonIdentSynthDropArg(t *testing.T) {
+	ir := generateIR(t, `
+		type Info {
+			string label;
+		}
+		enum Wrapper {
+			Wrap(Info data),
+			None,
+		}
+		make_info() Info {
+			return Info(label: "hello");
+		}
+		consume(Wrapper w) { }
+		main() {
+			consume(Wrapper.Wrap(data: make_info()));
+		}
+	`)
+	assertContains(t, ir, "define void @Wrapper.drop")
+	assertNotContains(t, ir, "enum.ctor.drop")
+}
+
 // Compound assignment on different typed variables exercises namedFromLLVMType branches
 func TestCompoundAssignF64(t *testing.T) {
 	ir := generateIR(t, `

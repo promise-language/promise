@@ -1,0 +1,84 @@
+// B0286: When a non-ident expression (e.g., function call) returns a droppable
+// value and it's stored into an enum variant, the enum ctor temp must NOT be
+// tracked for B0267 statement-end cleanup. The enum owns the returned resources;
+// temp-dropping would free resources shared with any by-value copy.
+type Resource {
+  string name;
+  drop(~this) {
+  }
+}
+
+enum Holder {
+  Has(Resource r),
+  Empty,
+}
+
+make_resource(string name) Resource {
+  return Resource(name: name);
+}
+
+consume(Holder h) Holder {
+  return h;
+}
+
+// Basic case: function call returning a droppable type as enum variant arg.
+test_nonident_droppable_enum_arg() `test {
+  Holder h = consume(Holder.Has(r: make_resource("test")));
+  match h {
+    Holder.Has(r) => {
+      assert(r.name == "test", "name matches");
+    },
+    _ => {
+      assert(false, "unexpected variant");
+    },
+  }
+}
+
+// Type with synth-drop (string field, no explicit drop) as enum variant arg.
+type Info {
+  string label;
+}
+
+enum Wrapper {
+  Wrap(Info data),
+  None,
+}
+
+make_info(string label) Info {
+  return Info(label: label);
+}
+
+test_nonident_synthdrop_enum_arg() `test {
+  Wrapper w = Wrapper.Wrap(data: make_info("hello"));
+  match w {
+    Wrapper.Wrap(data) => {
+      assert(data.label == "hello", "label matches");
+    },
+    _ => {
+      assert(false, "unexpected variant");
+    },
+  }
+}
+
+// Vector as enum variant arg from function call.
+make_names() string[] {
+  return["alice", "bob"];
+}
+
+enum Container {
+  Items(string[] names),
+  Empty,
+}
+
+test_nonident_vector_enum_arg() `test {
+  Container c = Container.Items(names: make_names());
+  match c {
+    Container.Items(names) => {
+      assert(names.len == 2, "len");
+      assert(names[0] == "alice", "first");
+    },
+    _ => {
+      assert(false, "unexpected variant");
+    },
+  }
+}

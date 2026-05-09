@@ -64,6 +64,43 @@ func isDroppableContainerOrString(typ types.Type) bool {
 	return false
 }
 
+// argTypeIsDroppable returns true if a type would cause resource cleanup when
+// dropped. Used to detect non-ident enum variant args that transfer ownership
+// of droppable resources into the enum (B0286).
+func argTypeIsDroppable(typ types.Type) bool {
+	switch t := typ.(type) {
+	case *types.Named:
+		if t == types.TypString || t == types.TypVector || t == types.TypChannel {
+			return true
+		}
+		if t.HasDrop() || t.NeedsSynthDrop() {
+			return true
+		}
+		// Heap user types need pal_free even without explicit drop.
+		return !t.IsValueType() && !t.IsStructural() && !isPrimitiveScalar(t)
+	case *types.Enum:
+		return t.HasDrop() || t.NeedsSynthDrop()
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			if n == types.TypVector || n == types.TypChannel {
+				return true
+			}
+			if n.HasDrop() || n.NeedsSynthDrop() {
+				return true
+			}
+			return !n.IsValueType() && !n.IsStructural() && !isPrimitiveScalar(n)
+		}
+		if e, ok := t.Origin().(*types.Enum); ok {
+			return e.HasDrop() || e.NeedsSynthDrop()
+		}
+	case *types.Optional:
+		return argTypeIsDroppable(t.Elem())
+	case *types.Signature:
+		return true // closure env struct needs freeing
+	}
+	return false
+}
+
 // isOwnedOptionalExpr returns true if the expression produces a uniquely owned
 // optional value — meaning the unwrapped inner value can safely be dropped by
 // the if-let/while-let binding. Returns false for MemberExpr/IndexExpr on

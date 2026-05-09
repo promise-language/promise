@@ -4058,6 +4058,28 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 					movedDroppable = true
 				}
 				c.clearDropFlag(ident.Name)
+			} else if !movedDroppable {
+				// B0286: Function/method calls returning droppable values
+				// transfer ownership to the enum variant. Skip B0267 temp
+				// tracking to prevent double-free when the enum is passed by
+				// value to a function that stores it (e.g., Map.[]=).
+				// Only applies to real function calls (Signature callee), not
+				// type constructors (Named/Instance callee) — constructors
+				// need B0267 as the only cleanup path.
+				if ce, isCall := arg.Value.(*ast.CallExpr); isCall {
+					if calleeType := c.info.Types[ce.Callee]; calleeType != nil {
+						if _, isSig := calleeType.(*types.Signature); isSig {
+							if argType := c.info.Types[arg.Value]; argType != nil {
+								if c.typeSubst != nil {
+									argType = types.Substitute(argType, c.typeSubst)
+								}
+								if argTypeIsDroppable(argType) {
+									movedDroppable = true
+								}
+							}
+						}
+					}
+				}
 			}
 			// B0278: Claim string temp: string method results (e.g., to_upper())
 			// stored into enum variant data transfer ownership to the enum.

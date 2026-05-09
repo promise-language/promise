@@ -293,7 +293,14 @@ func BuildCacheKey(implHash, compilerHash, target string, allModulePaths []strin
 // Two instances with the same key are guaranteed to produce identical LLVM IR.
 // Changes to unrelated declarations in the same file do NOT change typeDeclHash
 // and therefore do NOT invalidate the cached .o file.
-func InstanceCacheKey(irPrefix, monoName, typeDeclHash, compilerHash, target string) string {
+//
+// moduleContext is an optional sorted list of module IR prefixes present in the
+// build. B0244: Cross-module enum clone/drop forward-declarations produce different
+// IR when the same type appears in a module vs the main file (e.g., Map[string, JsonValue]
+// references __mod_json_JsonValue.clone in cross-module builds but JsonValue.clone in
+// module-internal tests). Including moduleContext ensures these contexts get separate
+// cache entries.
+func InstanceCacheKey(irPrefix, monoName, typeDeclHash, compilerHash, target string, moduleContext []string) string {
 	h := fnv.New128a()
 	fmt.Fprintf(h, "instance\n")
 	fmt.Fprintf(h, "prefix:%s\n", irPrefix)
@@ -301,6 +308,9 @@ func InstanceCacheKey(irPrefix, monoName, typeDeclHash, compilerHash, target str
 	fmt.Fprintf(h, "decl:%s\n", typeDeclHash)
 	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
 	fmt.Fprintf(h, "target:%s\n", target)
+	for _, mc := range moduleContext {
+		fmt.Fprintf(h, "modctx:%s\n", mc)
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 

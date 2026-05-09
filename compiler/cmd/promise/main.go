@@ -1975,20 +1975,6 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	compilerHash := module.CompilerHash()
 	modInfos := result.ModuleInfos()
 
-	// Precompute cache keys for each module (keyed by IR prefix — matches SplitModuleIRs keys).
-	// allModPaths is intentionally NOT included: the contentCacheKey (computed below) already
-	// hashes the IR text, which fully captures what is compiled. Including allModPaths would
-	// produce a different base key for every distinct import set that happens to include the
-	// same module, causing duplicate cache entries for identical IR.
-	modCacheKeys := make(map[string]string) // IR prefix → cache key
-	if cacheDir != "" && modInfos != nil {
-		for _, mi := range modInfos {
-			if mi.ImplHash != "" {
-				modCacheKeys[mi.EffectiveIRPrefix()] = module.BuildCacheKey(mi.ImplHash, compilerHash, target, nil)
-			}
-		}
-	}
-
 	// compileModule compiles one IR text to bitcode (LTO path) or object (Windows).
 	compileModule := func(irText, prefix string) string {
 		if useLTO {
@@ -2016,13 +2002,15 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		go func(name, irText string) {
 			defer wg.Done()
 
-			// The module cache key is purely source-derived (implHash + compiler + target).
-			// Generic free-function monomorphizations are now instance-owned (declareMonoFuncs),
-			// so the module IR contains only stable non-generic function bodies and the IR
-			// text is identical for the same module version regardless of caller.
+			// B0244: Module IR can vary across compilation contexts due to cross-module
+			// enum clone/drop forward-declarations (e.g., Map[K,V] methods reference
+			// __mod_json_JsonValue.clone in cross-module builds but JsonValue.clone in
+			// module-internal tests). Hash the IR text to capture these differences.
 			contentCacheKey := ""
-			if baseKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
-				contentCacheKey = baseKey
+			if cacheDir != "" {
+				h := fnv.New128a()
+				h.Write([]byte(irText))
+				contentCacheKey = hex.EncodeToString(h.Sum(nil))
 			}
 
 			// Try cache lookup
@@ -2173,6 +2161,16 @@ func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[s
 	if os.Getenv("PROMISE_NO_INSTANCE_CACHE") != "" {
 		return nil
 	}
+	// B0244: Build a sorted list of module IR prefixes to include in instance
+	// cache keys. This ensures cross-module vs module-internal compilations
+	// of the same instance type get separate cache entries.
+	var moduleContext []string
+	if mainInfo.ModuleInfos != nil {
+		for _, mi := range mainInfo.ModuleInfos {
+			moduleContext = append(moduleContext, mi.EffectiveIRPrefix())
+		}
+		sort.Strings(moduleContext)
+	}
 	instances := codegen.CollectMonoInstances(mainInfo)
 	result := make(map[string]*module.CacheMeta, len(instances))
 	for _, inst := range instances {
@@ -2190,7 +2188,7 @@ func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[s
 		if typeDeclHash == "" {
 			continue // not cacheable
 		}
-		key := module.InstanceCacheKey(irPrefix, mName, typeDeclHash, compilerHash, target)
+		key := module.InstanceCacheKey(irPrefix, mName, typeDeclHash, compilerHash, target, moduleContext)
 		result[mName] = &module.CacheMeta{
 			Kind:         module.CacheKindInstance,
 			Name:         mName,

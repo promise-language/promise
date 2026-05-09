@@ -6724,14 +6724,13 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 
 	// B0214: Drop the temporary keys and values vectors after the loop.
 	// keys() and values() return freshly heap-allocated vectors that must be freed.
-	// B0212: Only drop STRING elements here. The values vector contains bitwise copies
-	// of the Map's values (shared pointers), so dropping enum/droppable elements would
-	// cause double-frees when the Map itself is later dropped. Strings are safe because
-	// they are dup'd on push, making each copy independent.
+	// B0244: values() match-destructures Slot.Used(_, v), which deep-clones all
+	// droppable values (strings dup'd, enums cloned, heap types cloned). The values
+	// vector contains independent copies, so all element types must be dropped.
 	vectorDropFn := c.funcs["Vector.drop"]
-	c.emitVectorStringElementDropLoop(keysVec, keyType)
+	c.emitVectorElementDropLoop(keysVec, keyType)
 	c.block.NewCall(vectorDropFn, keysVec)
-	c.emitVectorStringElementDropLoop(valsVec, valType)
+	c.emitVectorElementDropLoop(valsVec, valType)
 	c.block.NewCall(vectorDropFn, valsVec)
 }
 

@@ -140,7 +140,7 @@ promise_lang/
 ├── docs/
 │   ├── language-design.md       # Full language specification
 │   ├── archive/stages.md        # Compiler implementation roadmap (archived)
-│   └── c-binding-architecture.md
+│   └── binding-architecture.md
 └── README.md
 ```
 

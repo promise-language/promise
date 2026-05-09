@@ -52,7 +52,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-architecture.md](../runtime-architecture.md) |
 | Operator dispatch | `[]`, `[]=`, `[:]`, `[:]=` as method-dispatched operators | Done | [subscript-slice-operators.md](subscript-slice-operators.md) |
 | Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Done | [standard-library.md](../standard-library.md#naming-conventions) |
-| C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [c-binding-architecture.md](../c-binding-architecture.md) |
+| C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [binding-architecture.md](../binding-architecture.md) |
 | Self-contained binary | Embed gzip-compressed LLVM tools via `go:embed` for release builds | Done (Phase 7f). Linux x86_64: fully static (musl). macOS arm64+amd64: embedded LLVM, requires Xcode CLT for SDK. | [runtime-architecture.md](../runtime-architecture.md), [distribution.md](../distribution.md#4-macos-notes) |
 | Distribution | Release binaries, install script, GitHub Actions CI/release workflows | Planned | [distribution.md](../distribution.md) |
 | Windows support | Native MSVC ABI, Win32 PAL threading, lld-link, Windows SDK discovery | Phase W1 done (code). W2 pending (testing on Windows). | [windows-support.md](../windows-support.md) |

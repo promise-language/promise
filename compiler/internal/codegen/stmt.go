@@ -4191,6 +4191,33 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		}
 	}
 
+	// Clone return value if it's a droppable enum loaded from a vector index.
+	// Scope cleanup drops the dup'd vector (freeing its buffer and all elements) —
+	// the shallow enum copy returned by vec[i] would reference freed data.
+	// Analogous to the B0189 string dup above.
+	if s.Value != nil && val != nil && !needsDup {
+		if idx, ok := s.Value.(*ast.IndexExpr); ok {
+			idxTargetType := c.info.Types[idx.Target]
+			if c.typeSubst != nil {
+				idxTargetType = types.Substitute(idxTargetType, c.typeSubst)
+			}
+			if elemType, isVec := types.AsVector(idxTargetType); isVec {
+				resolvedElem := elemType
+				if c.typeSubst != nil {
+					resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+				}
+				if enum := extractEnum(resolvedElem); enum != nil {
+					if c.enumInstanceHasDrop(resolvedElem, enum) {
+						if cloned, ok := c.cloneEnumValue(val, resolvedElem); ok {
+							val = cloned
+							needsDup = true // preserve drop flag for source vector
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Clear drop flag for returned variable (it's being moved out, not dropped).
 	// B0205: When the return value was dup'd (B0189), the original variable must
 	// still be dropped at scope exit — the caller receives the dup, not the original.

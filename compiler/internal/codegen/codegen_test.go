@@ -10904,6 +10904,66 @@ func TestMatchDupStringConsumedByPHI(t *testing.T) {
 	assertContains(t, ir, "store i1 false")
 }
 
+// Temp enum receiver from a CallExpr should be dropped after a borrow method call.
+// When movedDroppable causes enumCtorTemps to skip tracking, the method call
+// path must explicitly drop the temp to prevent leaking the enum's heap data.
+func TestEnumTempMethodReceiverDrop(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum Inner `clone {\n"+
+		"  Text(string data),\n"+
+		"  Number(f64 value),\n"+
+		"}\n"+
+		"enum Holder {\n"+
+		"  Items(Inner[] list),\n"+
+		"  Nothing,\n"+
+		"  extract(&this) Inner[]? {\n"+
+		"    match this {\n"+
+		"      Holder.Items(items) => { return items; },\n"+
+		"      _ => { return none; },\n"+
+		"    }\n"+
+		"  }\n"+
+		"}\n"+
+		"test() {\n"+
+		"  Inner[] items = [Inner.Number(value: 1.0)];\n"+
+		"  Inner[]? arr = Holder.Items(list: items).extract();\n"+
+		"}\n")
+	// The temp enum receiver should be dropped after the method call
+	assertContains(t, ir, "Holder.drop")
+}
+
+// Return of a droppable enum from a dup'd vector index must clone the value.
+// Without cloning, scope cleanup drops the dup'd vector (and its elements),
+// leaving the returned shallow enum copy with dangling heap pointers.
+func TestReturnEnumFromVectorIndexClone(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum Inner `clone {\n"+
+		"  Text(string data),\n"+
+		"  Number(f64 value),\n"+
+		"}\n"+
+		"enum Holder {\n"+
+		"  Items(Inner[] list),\n"+
+		"  Nothing,\n"+
+		"  at(&this, int index) Inner? {\n"+
+		"    match this {\n"+
+		"      Holder.Items(items) => {\n"+
+		"        if index >= 0 && index < items.len {\n"+
+		"          return items[index];\n"+
+		"        }\n"+
+		"        return none;\n"+
+		"      },\n"+
+		"      _ => { return none; },\n"+
+		"    }\n"+
+		"  }\n"+
+		"}\n"+
+		"test() {\n"+
+		"  Inner[] items = [Inner.Text(data: \"hello\")];\n"+
+		"  h := Holder.Items(list: items);\n"+
+		"  Inner? val = h.at(0);\n"+
+		"}\n")
+	// The returned enum value must be cloned via Inner.clone
+	assertContains(t, ir, "Inner.clone")
+}
+
 // B0242: Dup'd match binding consumed via if-expression arm result.
 // clearResultDropFlags must recurse into IfExpr branches.
 func TestMatchDupStringConsumedViaIf(t *testing.T) {

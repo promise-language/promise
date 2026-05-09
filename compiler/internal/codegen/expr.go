@@ -3098,8 +3098,11 @@ func (c *Compiler) genEnumGetterAccess(e *ast.MemberExpr, targetType types.Type,
 	}
 
 	// Pass the enum value as receiver
+	prevEnumTemps := len(c.enumCtorTemps)
 	target := c.genExpr(e.Target)
+	enumCtorTracked := len(c.enumCtorTemps) > prevEnumTemps
 	var ptr value.Value
+	var tempEnumPtr value.Value
 	// `this` inside an enum method is already i8* pointing to the enum alloca — pass directly.
 	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
 		ptr = target
@@ -3108,9 +3111,26 @@ func (c *Compiler) genEnumGetterAccess(e *ast.MemberExpr, targetType types.Type,
 		alloca.SetName(c.uniqueLocalName("enum.getter"))
 		c.block.NewStore(target, alloca)
 		ptr = c.block.NewBitCast(alloca, irtypes.I8Ptr)
+		if isFreshEnumExpr(e.Target) && !enumCtorTracked {
+			tempEnumPtr = ptr
+		}
 	}
 
-	return c.block.NewCall(fn, ptr), true
+	result := c.block.NewCall(fn, ptr)
+
+	// Drop temp enum receiver if it was a fresh temporary not tracked by enumCtorTemps.
+	if tempEnumPtr != nil && c.enumInstanceHasDrop(targetType, enum) {
+		dropName := mangleMethodName(enumName, "drop", false)
+		if dropFn, ok := c.funcs[dropName]; ok {
+			c.block.NewCall(dropFn, tempEnumPtr)
+		} else if c.moduleInfos != nil {
+			if dropFn := c.forwardDeclareModuleEnumDrop(enum, enumName, dropName); dropFn != nil {
+				c.block.NewCall(dropFn, tempEnumPtr)
+			}
+		}
+	}
+
+	return result, true
 }
 
 // genEnumMethodCall generates a method call on an enum value.
@@ -3154,8 +3174,12 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 	}
 
 	var args []value.Value
+	var tempEnumPtr value.Value // non-nil when receiver needs post-call drop
 	if method.Sig().Recv() != nil {
+		// Track whether the enumCtorTemps mechanism captures this constructor.
+		prevEnumTemps := len(c.enumCtorTemps)
 		target := c.genExpr(member.Target)
+		enumCtorTracked := len(c.enumCtorTemps) > prevEnumTemps
 		// `this` inside an enum method is already i8* pointing to the enum alloca — pass directly.
 		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
 			args = append(args, target)
@@ -3167,6 +3191,12 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 			c.block.NewStore(target, alloca)
 			ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
 			args = append(args, ptr)
+			// Track for post-call drop if target produces a fresh value not already
+			// tracked by enumCtorTemps. IdentExpr targets share heap data with
+			// their binding's alloca — dropping the shallow copy would double-free.
+			if isFreshEnumExpr(member.Target) && !enumCtorTracked {
+				tempEnumPtr = ptr
+			}
 		}
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
@@ -3175,7 +3205,38 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
+
+	// Drop temp enum receiver if it was a fresh temporary not tracked by
+	// the enumCtorTemps mechanism. When movedDroppable caused enumCtorTemps
+	// to skip tracking (B0252), the borrow method's receiver still needs cleanup.
+	if tempEnumPtr != nil && c.enumInstanceHasDrop(targetType, enum) {
+		dropName := mangleMethodName(enumName, "drop", false)
+		if dropFn, ok := c.funcs[dropName]; ok {
+			c.block.NewCall(dropFn, tempEnumPtr)
+		} else if c.moduleInfos != nil {
+			if dropFn := c.forwardDeclareModuleEnumDrop(enum, enumName, dropName); dropFn != nil {
+				c.block.NewCall(dropFn, tempEnumPtr)
+			}
+		}
+	}
+
 	return result, true
+}
+
+// isFreshEnumExpr returns true if the expression produces a fresh enum value
+// (not a reference to an existing variable). Fresh values need post-call drop
+// when used as a temporary method/getter receiver.
+func isFreshEnumExpr(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		return true
+	case *ast.ErrorUnwrapExpr:
+		// Unwrap of a call result (e.g., at(0)!) produces a fresh value.
+		// Unwrap of a variable (e.g., opt_var!) references existing data.
+		return isFreshEnumExpr(e.Expr)
+	default:
+		return false
+	}
 }
 
 // genGetterCall emits a call to a getter method (zero args beyond receiver).

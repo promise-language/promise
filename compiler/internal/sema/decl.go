@@ -856,7 +856,11 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 		if enum.IsCopy() {
 			c.warnf(d.Pos(), "`clone is redundant on `copy enum %s", d.Name)
 		}
-		// Enum clone body synthesis deferred — requires match over variants (future task)
+		if lookupOwnEnumMethod(enum, "clone") == nil {
+			md := c.synthesizeEnumCloneMethod(enum, d)
+			d.Methods = append(d.Methods, md)
+			c.defineEnumMethod(enum, md, d.Name)
+		}
 	}
 	if c.hasAnnotation(d.Annotations, "public") {
 		enum.SetExported(true)

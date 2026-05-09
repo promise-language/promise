@@ -1,6 +1,8 @@
 package sema
 
 import (
+	"fmt"
+
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/types"
 )
@@ -223,5 +225,133 @@ func (c *Checker) synthesizeCloneMethod(named *types.Named, _ *ast.TypeDecl) *as
 			{Name: "public"},
 		},
 		Body: &ast.Block{Stmts: stmts},
+	}
+}
+
+// synthesizeEnumCloneMethod builds an AST MethodDecl for clone() EnumName on an enum.
+// Self doesn't resolve in enum method context, so the return type uses the concrete name.
+// Generates a match over all variants, cloning each variant's fields:
+//
+//	clone() EnumName `public {
+//	    match this {
+//	        EnumName.Variant1 => { return EnumName.Variant1; },
+//	        EnumName.Variant2(a, b) => {
+//	            T _c_a = a.clone(); // B0278: explicit local to avoid codegen crash
+//	            return EnumName.Variant2(a: _c_a, b: b);
+//	        },
+//	    }
+//	}
+func (c *Checker) synthesizeEnumCloneMethod(enum *types.Enum, d *ast.EnumDecl) *ast.MethodDecl {
+	enumName := d.Name
+
+	var arms []*ast.MatchArm
+	for _, v := range enum.Variants() {
+		if v.NumFields() == 0 {
+			// Fieldless: Enum.Variant => { return Enum.Variant; }
+			arms = append(arms, &ast.MatchArm{
+				Pattern: &ast.EnumVariantMatchPattern{Enum: enumName, Variant: v.Name()},
+				Block: &ast.Block{Stmts: []ast.Stmt{
+					&ast.ReturnStmt{Value: memberExpr(ident(enumName), v.Name())},
+				}},
+			})
+			continue
+		}
+
+		// Variant with fields — destructure and clone each field.
+		var stmts []ast.Stmt
+		bindings := make([]string, v.NumFields())
+		var args []*ast.Arg
+
+		for i, f := range v.Fields() {
+			bindName := "_v_" + f.Name()
+			if f.Name() == "" {
+				bindName = fmt.Sprintf("_v_%d", i)
+			}
+			bindings[i] = bindName
+			fieldType := f.Type()
+
+			// Optional non-copy: if-let unwrap + clone
+			if opt, isOpt := fieldType.(*types.Optional); isOpt && !isCopyField(opt.Elem()) {
+				localName := "_clone_" + bindName
+				stmts = append(stmts, &ast.TypedVarDecl{
+					Type:  typeToTypeRef(opt),
+					Name:  localName,
+					Value: &ast.NoneLit{},
+				})
+				stmts = append(stmts, &ast.IfStmt{
+					Binding: "_u",
+					Init:    ident(bindName),
+					Body: &ast.Block{
+						Stmts: []ast.Stmt{
+							&ast.AssignStmt{
+								Target: ident(localName),
+								Op:     ast.OpAssign,
+								Value:  callMember(ident("_u"), "clone"),
+							},
+						},
+					},
+				})
+				args = append(args, &ast.Arg{Name: f.Name(), Value: ident(localName)})
+				continue
+			}
+
+			// Copy: pass directly
+			if isCopyField(fieldType) {
+				args = append(args, &ast.Arg{Name: f.Name(), Value: ident(bindName)})
+				continue
+			}
+
+			// Non-copy: clone into local var (B0278: inline method call in enum ctor
+			// arg inside match arm block causes segfault, so use explicit local).
+			localName := "_c_" + bindName
+			stmts = append(stmts, &ast.TypedVarDecl{
+				Type:  typeToTypeRef(fieldType),
+				Name:  localName,
+				Value: callMember(ident(bindName), "clone"),
+			})
+			args = append(args, &ast.Arg{Name: f.Name(), Value: ident(localName)})
+		}
+
+		stmts = append(stmts, &ast.ReturnStmt{
+			Value: &ast.CallExpr{
+				Callee: memberExpr(ident(enumName), v.Name()),
+				Args:   args,
+			},
+		})
+
+		arms = append(arms, &ast.MatchArm{
+			Pattern: &ast.EnumDestructureMatchPattern{Enum: enumName, Variant: v.Name(), Bindings: bindings},
+			Block:   &ast.Block{Stmts: stmts},
+		})
+	}
+
+	body := &ast.Block{Stmts: []ast.Stmt{
+		makeExprStmt(&ast.MatchExpr{
+			Subject: &ast.ThisExpr{},
+			Arms:    arms,
+		}),
+	}}
+
+	// Build return type: EnumName (or EnumName[T, U] for generic enums).
+	// Self doesn't resolve in enum method context, so use the concrete name.
+	var retType ast.TypeRef
+	if len(enum.TypeParams()) > 0 {
+		var typeArgs []ast.TypeRef
+		for _, tp := range enum.TypeParams() {
+			typeArgs = append(typeArgs, &ast.NamedTypeRef{Name: tp.Obj().Name()})
+		}
+		retType = &ast.NamedTypeRef{Name: enumName, TypeArgs: typeArgs}
+	} else {
+		retType = &ast.NamedTypeRef{Name: enumName}
+	}
+
+	return &ast.MethodDecl{
+		Name:       "clone",
+		Receiver:   &ast.ReceiverParam{RefMod: ast.RefNone},
+		ReturnType: &ast.ReturnTypeSpec{Type: retType},
+		Annotations: []*ast.MetaAnnotation{
+			{Name: "public"},
+		},
+		Body: body,
 	}
 }

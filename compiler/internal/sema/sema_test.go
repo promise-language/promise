@@ -5130,6 +5130,88 @@ func TestCloneGenericType(t *testing.T) {
 	`)
 }
 
+func TestCloneEnumFieldless(t *testing.T) {
+	checkOK(t, `
+		enum Color `+"`clone"+` {
+			Red,
+			Green,
+			Blue,
+		}
+		main() { c := Color.Red; c2 := c.clone(); }
+	`)
+}
+
+func TestCloneEnumWithFields(t *testing.T) {
+	checkOK(t, `
+		type Inner `+"`clone"+` {
+			string s;
+		}
+		enum Shape `+"`clone"+` {
+			Circle(f64 radius),
+			Rect(f64 w, f64 h),
+			Labeled(string name, Inner data),
+		}
+		main() {
+			s := Shape.Labeled(name: "x", data: Inner(s: "y"));
+			s2 := s.clone();
+		}
+	`)
+}
+
+func TestCloneEnumMixed(t *testing.T) {
+	checkOK(t, `
+		enum Expr `+"`clone"+` {
+			None,
+			Lit(int value),
+			Add(string left, string right),
+		}
+		main() {
+			e := Expr.Add(left: "a", right: "b");
+			e2 := e.clone();
+		}
+	`)
+}
+
+func TestCloneEnumGeneric(t *testing.T) {
+	checkOK(t, `
+		enum Result[T, E] `+"`clone"+` {
+			Ok(T value),
+			Err(E error),
+		}
+		main() {
+			r := Result[int, string].Ok(value: 42);
+			r2 := r.clone();
+		}
+	`)
+}
+
+func TestCloneEnumOptionalNonCopyField(t *testing.T) {
+	checkOK(t, `
+		enum Msg `+"`clone"+` {
+			Empty,
+			Text(string? body),
+		}
+		main() {
+			m := Msg.Text(body: "hi");
+			m2 := m.clone();
+		}
+	`)
+}
+
+func TestCloneEnumExplicitMethodTakesPrecedence(t *testing.T) {
+	checkOK(t, `
+		enum Dir `+"`clone"+` {
+			North,
+			South,
+
+			clone() Dir {
+				return Dir.North;
+			}
+		}
+		main() { d := Dir.South; d2 := d.clone(); }
+	`)
+}
+
 // === Doc extraction ===
 
 func TestDocOnType(t *testing.T) {

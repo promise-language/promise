@@ -418,4 +418,115 @@ test_clone_type_with_set_field() `test {
   assert(g2.members.contains(2), "has 2");
 }
 
+// --- Enum clone (T0173) ---
+
+enum Color `clone {
+  Red,
+  Green,
+  Blue,
+}
+
+test_clone_enum_fieldless() `test {
+  c := Color.Red;
+  c2 := c.clone();
+  match c2 {
+    Color.Red => {
+    },
+    _ => assert(false, "expected Red"),
+  }
+}
+
+test_clone_enum_all_variants() `test {
+  Color[] colors = [Color.Red, Color.Green, Color.Blue];
+  int i = 0;
+  for color in colors {
+    c2 := color.clone();
+    match c2 {
+      Color.Red => assert(i == 0, "Red at 0"),
+      Color.Green => assert(i == 1, "Green at 1"),
+      Color.Blue => assert(i == 2, "Blue at 2"),
+    }
+    i = i + 1;
+  }
+}
+
+enum Expr `clone {
+  Lit(int value),
+  Add(string left, string right),
+  None,
+}
+
+test_clone_enum_with_copy_fields() `test {
+  e := Expr.Lit(value: 42);
+  e2 := e.clone();
+  match e2 {
+    Expr.Lit(v) => assert(v == 42, "lit value"),
+    _ => assert(false, "expected Lit"),
+  }
+}
+
+test_clone_enum_with_string_fields() `test {
+  e := Expr.Add(left: "a", right: "b");
+  e2 := e.clone();
+  match e2 {
+    Expr.Add(l, r) => {
+      assert(l == "a", "left");
+      assert(r == "b", "right");
+    },
+    _ => assert(false, "expected Add"),
+  }
+}
+
+test_clone_enum_fieldless_variant() `test {
+  e := Expr.None;
+  e2 := e.clone();
+  match e2 {
+    Expr.None => {
+    },
+    _ => assert(false, "expected None"),
+  }
+}
+
+// Enum with nested cloneable type fields
+type Tag `clone {
+  string label;
+}
+
+enum Entry `clone {
+  Empty,
+  Tagged(Tag tag, int id),
+}
+
+test_clone_enum_nested_cloneable() `test {
+  e := Entry.Tagged(tag: Tag(label: "x"), id: 7);
+  e2 := e.clone();
+  match e2 {
+    Entry.Tagged(t, i) => {
+      assert(t.label == "x", "tag label");
+      assert(i == 7, "id");
+    },
+    _ => assert(false, "expected Tagged"),
+  }
+}
+
+// Explicit enum clone method takes precedence
+enum Dir `clone {
+  North,
+  South,
+
+  clone() Dir {
+    return Dir.North;
+  }
+}
+
+test_clone_enum_explicit() `test {
+  d := Dir.South;
+  d2 := d.clone();
+  match d2 {
+    Dir.North => {
+    },
+    _ => assert(false, "explicit clone always returns North"),
+  }
+}
+
 // Cloneable structural interface is auto-imported from std/clone.pr

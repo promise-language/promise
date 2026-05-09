@@ -10834,6 +10834,28 @@ func TestMatchDupMapClonedWithCloneableEnumValues(t *testing.T) {
 	}
 }
 
+// B0284: Map with fieldless enum values (no drops) CAN be cloned — bitwise copy
+// is safe for enums with no heap data, so typeArgSafeForCloneDup returns true.
+func TestMatchDupMapClonedFieldlessEnumValues(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue, }
+		enum Holder {
+			Data(map[string, Color] fields),
+			Empty,
+		}
+		test() {
+			map[string, Color] m = {"a": Color.Red};
+			h := Holder.Data(fields: m);
+			match h {
+				Data(f) => { int x = f.len; },
+				Empty => { },
+			}
+		}
+	`)
+	// Map[string, Color] — Color has no drops, bitwise copy is safe
+	assertContains(t, ir, "Map[string, Color].clone")
+}
+
 // B0244: Match destructure of droppable enum clones enum-typed fields via clone().
 func TestMatchDupEnumClone(t *testing.T) {
 	ir := generateIR(t, ""+

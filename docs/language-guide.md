@@ -236,6 +236,30 @@ main() {
 
 **Rule: In a failable (`!`) function, just call failable functions bare — errors auto-propagate. Use `?^` for explicit self-documenting propagation. `?!` always means panic.**
 
+**What NOT to do:**
+```promise
+// WRONG: there are no failable types — only failable functions
+int! x = 5;                    // compile error: ! goes on function name, not type
+
+// WRONG: ?! always panics, even in failable functions (does NOT propagate)
+process!() string {
+  return read_config("app.cfg")?!;  // panics instead of propagating — just use bare call
+}
+
+// RIGHT: bare call auto-propagates in failable functions
+process!() string {
+  return read_config("app.cfg");    // error auto-propagates to caller
+}
+
+// WRONG: missing ; in recovery block (it's a statement in a block, needs ;)
+string data = read_config("cfg") ? { "default" };
+
+// RIGHT: recovery expression needs ; inside the block
+string data = read_config("cfg") ? {
+  "default";
+};
+```
+
 ## Optionals
 
 ```promise
@@ -531,6 +555,12 @@ select {
 
 ## Modules
 
+**`std` is auto-imported** — no `use` needed for `print_line`, `Builder`, `Vector`, `Map`, `assert`, etc.
+
+**Catalog modules** require `use` and have different access rules:
+- **Types** always need the module prefix: `io.File`, `io.Dir`, `json.JsonValue`
+- **Free functions** work without prefix after `use`: `read_line()`, `path.join(...)` are both valid
+
 ```promise
 // Import a catalog module
 use io;
@@ -541,12 +571,16 @@ use json;
 // Import with alias
 use json as j;
 
-// Usage
-string content = io.File.read_content("data.txt")!;    // panic on error
-string dir = path.parent("/usr/local/bin");
-os.set_env_var("KEY", "value");
+// Types need module prefix — ALWAYS
+io.File f = io.File.open("data.txt", readonly: true);
+io.Dir.make("/tmp/out");           // not Dir.make(...)
+json.JsonValue v = json.parse_value(data);
 
-// Available modules:
+// Free functions work after use
+string line = read_line();          // io.read_line — prefix optional
+string p = path.join("/usr", "bin"); // path functions
+
+// Available modules (use `promise doc <module>` to explore):
 // io      — File, Dir, BufferedReader/Writer, read_line (stdin)
 // path    — join, parent, file_name, extension, stem, normalize
 // os      — env vars, working_dir, execute (variadic), exit_process
@@ -782,6 +816,18 @@ type Printable `structural { ... } // auto-satisfied by matching methods
 get name string `embed("f.txt");  // compile-time file embed
 ```
 
+## Discovery Commands
+
+```sh
+promise doc std              # browse the auto-imported standard library
+promise doc io               # browse the io module (File, Dir, etc.)
+promise doc json             # browse the json module
+promise doc <module>         # any catalog module
+promise doc file.pr          # documentation for a source file
+promise -help                # quick start guide with examples
+promise doc                  # list all available modules
+```
+
 ## Common Mistakes
 
 1. **Using `!` on failable calls** — `!` is for optional unwrap only. Use `?!` to panic on failable errors, or use bare call for propagation in `!` functions.
@@ -794,3 +840,7 @@ get name string `embed("f.txt");  // compile-time file embed
 8. **Optional handler spacing** — Error handler: `expr ? e { ... }` (space before `?`). Optional handler: `expr? _ { ... }` (no space before `?`).
 9. **Fixed arrays vs vectors** — `int[3]` is a fixed-size array (value type, stack). `u8[]` is a vector (heap, growable). Don't confuse them.
 10. **Tuple destructuring** — Use `(a, b) := expr;` not `a, b := expr;`. Tuples need parentheses.
+11. **Module type prefix** — Types always need the module prefix: `io.File.open(...)` not `File.open(...)`. Free functions don't: `read_line()` works after `use io;`.
+12. **`;` in blocks** — All statements need `;`, including the last expression before `}`. Recovery blocks too: `? { "default"; }` not `? { "default" }`.
+13. **`?!` in failable functions** — `?!` always **panics**, even inside a `!` function. For propagation, just use bare call (or `?^` for self-documenting propagation).
+14. **API discovery** — Use `promise doc <module>` to explore module APIs instead of guessing. `promise doc std` for the standard library.

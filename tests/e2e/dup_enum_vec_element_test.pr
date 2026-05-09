@@ -1,0 +1,49 @@
+// B0290: Verify that dupHeapValue correctly deep-clones vector-of-enum fields
+// when the enum has droppable variant data but no clone method.
+// Without the fix, the dup'd type shares Slot data pointers with the original,
+// causing double-free on drop.
+enum Slot {
+  Empty,
+  Used(string key, string value),
+}
+
+type Container {
+  Slot[] buckets;
+
+  drop(~this) {
+  }
+}
+
+// Clone a vector of Container — triggers dupHeapValue for each Container element,
+// which must deep-dup the Slot[] field including its droppable enum elements.
+clone_container_vec() `test {
+  Container[] v = [Container(buckets: [Slot.Used(key: "hello", value: "world"), Slot.Empty]),
+  Container(buckets: [Slot.Used(key: "foo", value: "bar")]),
+  ];
+  Container[] v2 = v.clone();
+  // Both vectors should be independently owned — no double-free on drop.
+  assert(v.len == 2, "original len");
+  assert(v2.len == 2, "clone len");
+}
+
+// Single Container clone via vector path — simplest case.
+clone_single_container() `test {
+  Container[] v = [Container(buckets: [Slot.Used(key: "a", value: "b")])];
+  Container[] v2 = v.clone();
+  assert(v2.len == 1, "single clone len");
+}
+
+// Empty variant data — no dup needed, should not crash.
+clone_container_empty_slots() `test {
+  Container[] v = [Container(buckets: [Slot.Empty, Slot.Empty])];
+  Container[] v2 = v.clone();
+  assert(v2.len == 1, "empty slots clone len");
+}
+
+// Mixed variants — some with data, some without.
+clone_container_mixed_slots() `test {
+  Container[] v = [Container(buckets: [Slot.Empty, Slot.Used(key: "x", value: "y"), Slot.Empty]),
+  ];
+  Container[] v2 = v.clone();
+  assert(v2.len == 1, "mixed slots clone len");
+}

@@ -2513,16 +2513,21 @@ func (c *Compiler) emitVectorStringDupLoop(vecPtr value.Value, elemType types.Ty
 // each non-copy element so the cloned vector owns independent copies. B0275.
 // Handles: strings (dupString), channels (dupChannel), nested vectors (dupVector +
 // recursive clone), heap user types (clone method or dupHeapValue fallback),
-// and enum types with clone methods (B0244).
+// enum types with clone methods (B0244), and droppable enums without clone (B0290).
 func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types.Type) {
 	named := extractNamed(elemType)
 	// B0244: Check for enum types with clone — not caught by extractNamed.
+	// B0290: Also detect droppable enums without clone (e.g., Slot[K,V] in Map).
 	isCloneableEnum := false
+	isDupableEnum := false
 	if named == nil {
 		if enum := extractEnum(elemType); enum != nil {
 			_, isCloneableEnum = c.funcs[c.enumCloneFuncName(enum, elemType)]
+			if !isCloneableEnum {
+				isDupableEnum = c.vecElemNeedsEnumDrop(elemType)
+			}
 		}
-		if !isCloneableEnum {
+		if !isCloneableEnum && !isDupableEnum {
 			return // primitive/copy type — shallow memcpy is correct
 		}
 	}
@@ -2536,11 +2541,11 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	// Determine if element type needs cloning
 	_, isCh := types.AsChannel(elemType)
 	innerElem, isVec := types.AsVector(elemType)
-	isChannel := !isCloneableEnum && (isCh || named == types.TypChannel)
-	isVector := !isCloneableEnum && (isVec || named == types.TypVector)
-	isHeapUser := !isCloneableEnum && named != nil && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
+	isChannel := !isCloneableEnum && !isDupableEnum && (isCh || named == types.TypChannel)
+	isVector := !isCloneableEnum && !isDupableEnum && (isVec || named == types.TypVector)
+	isHeapUser := !isCloneableEnum && !isDupableEnum && named != nil && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
 
-	if !isChannel && !isVector && !isHeapUser && !isCloneableEnum {
+	if !isChannel && !isVector && !isHeapUser && !isCloneableEnum && !isDupableEnum {
 		return // value/copy type — shallow memcpy is correct
 	}
 
@@ -2572,29 +2577,35 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	c.block = loopBody
 	idx2 := c.block.NewLoad(irtypes.I64, idxAlloca)
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx2)
-	elemVal := c.block.NewLoad(elemLLVM, elemPtr)
 
-	var cloned value.Value
-	if isCloneableEnum {
-		// B0244: Enum with clone — deep-copy via clone method.
-		cloned, _ = c.cloneEnumValue(elemVal, elemType)
-	} else if isChannel {
-		cloned = c.dupChannel(elemVal)
-	} else if isVector {
-		if isVec {
-			innerLLVM := c.resolveType(innerElem)
-			innerSize := int64(c.typeSize(innerLLVM))
-			cloned = c.dupVector(elemVal, innerSize)
-			// Recursively clone inner vector's elements
-			c.emitVectorElementCloneLoop(cloned, innerElem)
-		} else {
-			cloned = c.dupVector(elemVal, 0)
-		}
+	if isDupableEnum {
+		// B0290: Droppable enum without clone — dup variant fields in place.
+		c.dupEnumElementInPlace(elemPtr, elemType)
 	} else {
-		// Heap user type: try clone() method, fall back to dupHeapValue
-		cloned = c.cloneHeapElement(elemVal, elemType, named)
+		elemVal := c.block.NewLoad(elemLLVM, elemPtr)
+
+		var cloned value.Value
+		if isCloneableEnum {
+			// B0244: Enum with clone — deep-copy via clone method.
+			cloned, _ = c.cloneEnumValue(elemVal, elemType)
+		} else if isChannel {
+			cloned = c.dupChannel(elemVal)
+		} else if isVector {
+			if isVec {
+				innerLLVM := c.resolveType(innerElem)
+				innerSize := int64(c.typeSize(innerLLVM))
+				cloned = c.dupVector(elemVal, innerSize)
+				// Recursively clone inner vector's elements
+				c.emitVectorElementCloneLoop(cloned, innerElem)
+			} else {
+				cloned = c.dupVector(elemVal, 0)
+			}
+		} else {
+			// Heap user type: try clone() method, fall back to dupHeapValue
+			cloned = c.cloneHeapElement(elemVal, elemType, named)
+		}
+		c.block.NewStore(cloned, elemPtr)
 	}
-	c.block.NewStore(cloned, elemPtr)
 
 	nextIdx := c.block.NewAdd(idx2, constant.NewInt(irtypes.I64, 1))
 	c.block.NewStore(nextIdx, idxAlloca)

@@ -188,6 +188,10 @@ type Compiler struct {
 	// and leaked intermediates. For recursive types this causes stack overflow.
 	suppressMatchDup bool
 
+	// B0290: Tracks enums currently being processed by dupEnumElementInPlace
+	// to detect recursive types and prevent infinite codegen.
+	enumDupInProgress map[*types.Enum]bool
+
 	// B0267/B0269: Inline enum constructor temp tracking. Entry-block allocas store
 	// the enum pointer (bitcast to i8*) and a drop flag. Set by genEnumVariantCallLayout,
 	// cleared by variable assignment, cleaned up at statement end. Supports multiple
@@ -1969,6 +1973,173 @@ func (c *Compiler) dupHeapValueFields(named *types.Named, resolvedType types.Typ
 			dup := c.dupHeapValue(fieldVal, fType)
 			c.block.NewStore(dup, fieldPtr)
 		}
+	}
+}
+
+// dupEnumElementInPlace modifies an already-memcpy'd enum element in place,
+// duping any droppable variant fields so the copy owns independent data.
+// B0290: Used for vector-of-enum elements during dupHeapValue when the enum
+// has droppable variant data but no clone method (e.g., Slot[K,V] in Map).
+// Uses c.enumDupInProgress to detect recursive types and prevent infinite codegen.
+func (c *Compiler) dupEnumElementInPlace(elemPtr value.Value, elemType types.Type) {
+	enum := extractEnum(elemType)
+	if enum == nil {
+		return
+	}
+
+	// Cycle detection: recursive types (e.g., JsonValue containing Vector[JsonValue])
+	// would cause infinite codegen. Track which enums are being processed and skip
+	// if we encounter one already in progress — the shallow memcpy from dupVector
+	// is sufficient for the recursive level since the outer level handles depth-1 dup.
+	if c.enumDupInProgress == nil {
+		c.enumDupInProgress = make(map[*types.Enum]bool)
+	}
+	if c.enumDupInProgress[enum] {
+		return // cycle detected — shallow copy from dupVector is sufficient
+	}
+	c.enumDupInProgress[enum] = true
+	defer func() { delete(c.enumDupInProgress, enum) }()
+
+	layout := c.lookupEnumLayout(elemType)
+	if layout == nil {
+		return
+	}
+
+	internalType, ok := layout.EnumInternalType.(*irtypes.StructType)
+	if !ok {
+		return // fieldless enum — nothing to dup
+	}
+
+	// Build substitution for generic instances
+	var subst map[*types.TypeParam]types.Type
+	if inst, ok := elemType.(*types.Instance); ok {
+		subst = types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
+	}
+
+	// elemPtr points to the enum internal type {i32 tag, [N x i8] data}
+	typedPtr := c.block.NewBitCast(elemPtr, irtypes.NewPointer(internalType))
+
+	// Load tag (index 0)
+	tagPtr := c.block.NewGetElementPtr(internalType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	tag := c.block.NewLoad(irtypes.I32, tagPtr)
+
+	// Data area pointer (index 1)
+	dataPtr := c.block.NewGetElementPtr(internalType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+
+	// Collect variants that need dup
+	type variantDup struct {
+		tag      int
+		name     string
+		variant  *types.Variant
+		dataType *irtypes.StructType
+	}
+	var duppableVariants []variantDup
+	for _, v := range enum.Variants() {
+		if v.NumFields() == 0 {
+			continue
+		}
+		dt := layout.VariantDataTypes[v.Name()]
+		if dt == nil {
+			continue
+		}
+		hasDroppable := false
+		for _, f := range v.Fields() {
+			fType := f.Type()
+			if subst != nil {
+				fType = types.Substitute(fType, subst)
+			}
+			if c.variantFieldNeedsDrop(fType) {
+				hasDroppable = true
+				break
+			}
+		}
+		if hasDroppable {
+			duppableVariants = append(duppableVariants, variantDup{
+				tag:      layout.VariantTag[v.Name()],
+				name:     v.Name(),
+				variant:  v,
+				dataType: dt,
+			})
+		}
+	}
+
+	if len(duppableVariants) == 0 {
+		return
+	}
+
+	switchBlock := c.block
+	doneBlock := c.newBlock("enumdup.done")
+	var cases []*ir.Case
+	for _, vd := range duppableVariants {
+		varBlock := c.newBlock(fmt.Sprintf("enumdup.%s", vd.name))
+		cases = append(cases, &ir.Case{X: constant.NewInt(irtypes.I32, int64(vd.tag)), Target: varBlock})
+
+		c.block = varBlock
+		typedDataPtr := c.block.NewBitCast(dataPtr, irtypes.NewPointer(vd.dataType))
+
+		for i, f := range vd.variant.Fields() {
+			fType := f.Type()
+			if subst != nil {
+				fType = types.Substitute(fType, subst)
+			}
+			if !c.variantFieldNeedsDrop(fType) {
+				continue
+			}
+			fieldPtr := c.block.NewGetElementPtr(vd.dataType, typedDataPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+			fieldVal := c.block.NewLoad(vd.dataType.Fields[i], fieldPtr)
+
+			c.emitVariantFieldDup(fieldVal, fieldPtr, fType)
+		}
+		c.block.NewBr(doneBlock)
+	}
+	switchBlock.NewSwitch(tag, doneBlock, cases...)
+
+	c.block = doneBlock
+}
+
+// emitVariantFieldDup dups a single variant field value (string, vector, channel,
+// or heap user type) and stores the duped copy back to fieldPtr.
+// B0290: Mirrors emitVariantFieldDrop but performs dup instead of drop.
+func (c *Compiler) emitVariantFieldDup(fieldVal value.Value, fieldPtr value.Value, typ types.Type) {
+	named := extractNamed(typ)
+	if named != nil {
+		if named == types.TypString {
+			dup := c.dupString(fieldVal)
+			c.block.NewStore(dup, fieldPtr)
+			return
+		}
+		if elemType, isVec := types.AsVector(typ); isVec {
+			elemLLVM := c.resolveType(elemType)
+			elemSize := int64(c.typeSize(elemLLVM))
+			dup := c.dupVector(fieldVal, elemSize)
+			c.emitVectorElementCloneLoop(dup, elemType)
+			c.block.NewStore(dup, fieldPtr)
+			return
+		}
+		if _, isCh := types.AsChannel(typ); isCh || named == types.TypChannel {
+			dup := c.dupChannel(fieldVal)
+			c.block.NewStore(dup, fieldPtr)
+			return
+		}
+		if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+			// Use cloneHeapElement to try clone() first (a named function that handles
+			// recursive types safely), falling back to dupHeapValue only for non-recursive
+			// types without clone. This prevents infinite codegen for recursive types
+			// like Map[K, JsonValue] where JsonValue.Object contains Map[K, JsonValue].
+			dup := c.cloneHeapElement(fieldVal, typ, named)
+			c.block.NewStore(dup, fieldPtr)
+			return
+		}
+		return
+	}
+
+	// Nested enum field: dup in place
+	if extractEnum(typ) != nil {
+		c.dupEnumElementInPlace(fieldPtr, typ)
+		return
 	}
 }
 

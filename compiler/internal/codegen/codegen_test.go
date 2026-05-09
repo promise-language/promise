@@ -17909,3 +17909,28 @@ func TestOptionalUnwrapIdentNoStringTemp(t *testing.T) {
 		t.Fatalf("expected at most 1 promise_string_drop call, got %d\n%s", count, testFn)
 	}
 }
+
+// B0290: When a heap type with a vector of droppable enums is dup'd via
+// dupHeapValue → dupHeapValueFields → emitVectorElementCloneLoop, enum elements
+// without clone methods should be dup'd in place (switch on tag, dup droppable fields).
+func TestDupEnumElementInPlaceForVectorOfEnum(t *testing.T) {
+	ir := generateIR(t, `
+		enum Slot {
+			Empty,
+			Used(string key, string value),
+		}
+		type Container {
+			Slot[] buckets;
+			drop(~this) {}
+		}
+		test() {
+			Container[] v = [Container(buckets: [Slot.Used(key: "a", value: "b")])];
+			Container[] v2 = v.clone();
+		}
+	`)
+	// Vector[Container].clone() → emitVectorElementCloneLoop → cloneHeapElement →
+	// dupHeapValue → dupHeapValueFields → for Slot[] field → dupVector +
+	// emitVectorElementCloneLoop → dupEnumElementInPlace for Slot elements.
+	assertContains(t, ir, "enumdup.Used")
+	assertContains(t, ir, "enumdup.done")
+}

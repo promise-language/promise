@@ -1,0 +1,92 @@
+// B0278: Returning an enum constructor from a match arm block when the constructor
+// argument is an inline method call (e.g., to_upper()) caused a segfault. The string
+// method result was tracked as a stmtTemp but not claimed when stored into the enum
+// variant, leading to double-free at statement end.
+enum Animal {
+  Dog(string name),
+  Cat(string name),
+
+  shout() Animal {
+    match this {
+      Animal.Dog(n) => {
+        return Animal.Dog(name: n.to_upper());
+      },
+      Animal.Cat(n) => {
+        return Animal.Cat(name: n.to_lower());
+      },
+    }
+  }
+}
+
+// Basic repro: return enum constructor with method call arg from match arm.
+test_method_call_arg_in_match_return() `test {
+  Animal a = Animal.Dog(name: "rex");
+  Animal b = a.shout();
+  match b {
+    Animal.Dog(n) => {
+      assert(n == "REX", msg: "expected REX");
+    },
+    Animal.Cat(_) => {
+      assert(false, msg: "unexpected Cat");
+    },
+  }
+}
+
+test_method_call_arg_in_match_return_cat() `test {
+  Animal a = Animal.Cat(name: "WHISKERS");
+  Animal b = a.shout();
+  match b {
+    Animal.Cat(n) => {
+      assert(n == "whiskers", msg: "expected whiskers");
+    },
+    Animal.Dog(_) => {
+      assert(false, msg: "unexpected Dog");
+    },
+  }
+}
+
+// Chained method calls as enum constructor arg.
+enum Wrapper {
+  Val(string data),
+
+  transform() Wrapper {
+    match this {
+      Wrapper.Val(d) => {
+        return Wrapper.Val(data: d.to_upper().to_lower());
+      },
+    }
+  }
+}
+
+test_chained_method_call_arg() `test {
+  Wrapper w = Wrapper.Val(data: "Hello");
+  Wrapper w2 = w.transform();
+  match w2 {
+    Wrapper.Val(d) => {
+      assert(d == "hello", msg: "expected hello");
+    },
+  }
+}
+
+// String concatenation as enum constructor arg in match arm.
+enum Message {
+  Text(string body),
+
+  prefix(string p) Message {
+    match this {
+      Message.Text(b) => {
+        return Message.Text(body: p + b);
+      },
+    }
+  }
+}
+
+test_string_concat_arg() `test {
+  Message m = Message.Text(body: "world");
+  Message m2 = m.prefix(p: "hello ");
+  match m2 {
+    Message.Text(b) => {
+      assert(b == "hello world", msg: "expected hello world");
+    },
+  }
+}

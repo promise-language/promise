@@ -3984,10 +3984,16 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// B0278: Claim string temp: string method results (e.g., to_upper())
+			// stored into enum variant data transfer ownership to the enum.
+			// Without this, the stmtTemp cleanup drops the string at statement
+			// end even though it's now owned by the enum variant.
+			c.claimStringTemp(val)
 			// Claim heap temp: user type instances stored into enum variant data
 			// transfer ownership to the enum. Without this, the heap temp cleanup
 			// would free the instance, leaving a dangling pointer in the enum.
 			c.claimHeapTemp(val)
+			c.claimEnvTemp(val) // B0278: claim env temp for closure args in enum variants
 		}
 	}
 

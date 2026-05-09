@@ -63,6 +63,9 @@ resources:
 	@rm -rf $(TESTDATA_STD)
 	@mkdir -p $(TESTDATA_STD)
 	@cp ../modules/std/*.pr $(TESTDATA_STD)/
+	@rm -rf $(RESOURCES)/examples
+	@cp -r ../examples $(RESOURCES)/examples
+	@rm -f $(RESOURCES)/examples/README.md
 	@(cd .. && find modules/ catalog.toml -type f | sort | xargs sha256sum) > $(RESOURCES)/.sources.sha256
 
 musl-crt:

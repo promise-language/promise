@@ -75,6 +75,7 @@ Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 
 
   promise help            This output
   promise guide           Full language reference (~800 lines, pipe into LLM context)
+  promise examples        Browse and run example programs
   promise doc <module>    API docs for a module (e.g., promise doc io, promise doc std.vector)
   promise version         Compiler version
   promise build file.pr   Compile to executable

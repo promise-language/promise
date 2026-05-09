@@ -47,6 +47,9 @@ var embeddedSourcesChecksum []byte
 //go:embed resources/language-guide.md
 var embeddedGuide []byte
 
+//go:embed all:resources/examples
+var embeddedExamples embed.FS
+
 // Runtime is fully codegen-emitted LLVM IR — no embedded C files needed.
 
 func usage() {
@@ -55,6 +58,7 @@ func usage() {
 Commands:
   help      Show language overview and quick-start guide
   guide     Print full language reference (for agents and users)
+  examples  Browse and run example programs
   build     Compile a Promise source file to an executable
   run       Compile and run a Promise source file
   test      Discover and run test functions
@@ -171,6 +175,9 @@ func main() {
 		return
 	case "guide":
 		runGuide(os.Args[2:])
+		return
+	case "examples":
+		runExamples(os.Args[2:])
 		return
 	case "build":
 		runBuild(os.Args[2:])

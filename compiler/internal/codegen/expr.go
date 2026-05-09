@@ -7175,14 +7175,52 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	var result value.Value
 	result = c.block.NewExtractValue(optVal, 1)
 
-	// T0111: Clear drop flag on force unwrap of optional identifier.
-	// After `val = opt!`, the inner value is extracted — the optional's drop
-	// binding should NOT also free it. Clear the flag to prevent double-free.
-	if ident, ok := expr.(*ast.IdentExpr); ok {
-		c.clearDropFlag(ident.Name)
+	// T0111: Do NOT clear the drop flag here. The optional still owns the inner
+	// value and will free it at scope exit via its drop binding. For temporary
+	// access (opt!.len), this is correct — the inner stays alive until scope exit.
+	// For assignment (val = opt!), the assignment site neutralizes the optional
+	// by setting its present flag to false (see genTypedVarDecl/genInferredVarDecl).
+
+	// Track the unwrapped string as a statement temp when the source is NOT an
+	// identifier (e.g., method call returning string?). For ident sources, the
+	// optional's own drop handles the inner string. For non-ident sources (call
+	// results), the string? temporary has no scope drop → the extracted string
+	// must be tracked and freed at statement end.
+	if _, isIdent := expr.(*ast.IdentExpr); !isIdent && c.tempTrackingEnabled {
+		if result.Type().Equal(irtypes.I8Ptr) {
+			c.trackStringTemp(result)
+		}
 	}
 
 	return result
+}
+
+// neutralizeForceUnwrapSource sets the present flag to false in the source
+// optional's alloca when a force-unwrap result is consumed by an assignment.
+// T0111: Prevents double-free when both the new variable and the source optional
+// would otherwise try to drop the same inner value. Only called at assignment
+// sites (genTypedVarDecl, genInferredVarDecl, genAssignStmt).
+func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
+	unwrap, ok := expr.(*ast.ErrorUnwrapExpr)
+	if !ok || !c.info.OptionalUnwraps[unwrap] {
+		return
+	}
+	ident, ok := unwrap.Expr.(*ast.IdentExpr)
+	if !ok {
+		return
+	}
+	alloca, ok := c.locals[ident.Name]
+	if !ok {
+		return
+	}
+	optType, ok := alloca.ElemType.(*irtypes.StructType)
+	if !ok || len(optType.Fields) < 2 {
+		return
+	}
+	// Set present flag (field 0) to false — optional drop will skip inner free.
+	flagPtr := c.block.NewGetElementPtr(optType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), flagPtr)
 }
 
 // emitScalarCast emits LLVM IR for a primitive scalar type conversion.

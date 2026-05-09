@@ -670,6 +670,9 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if opt, ok := dropType.(*types.Optional); ok {
 		c.maybeRegisterOptionalDrop(s.Name, alloca, opt)
 	}
+	// T0111: When RHS is opt!, neutralize the source optional (set present=false)
+	// so its drop doesn't double-free the inner value now owned by this variable.
+	c.neutralizeForceUnwrapSource(s.Value)
 	// T0127: Register bindingFree for structural interface variables owning a heap allocation.
 	c.maybeRegisterStructuralFree(s.Name, alloca, dropType, s.Value)
 	// Clear drop flag when RHS is a borrow (container element, field access).
@@ -793,6 +796,9 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if opt, ok := typ.(*types.Optional); ok {
 		c.maybeRegisterOptionalDrop(s.Name, alloca, opt)
 	}
+	// T0111: When RHS is opt!, neutralize the source optional (set present=false)
+	// so its drop doesn't double-free the inner value now owned by this variable.
+	c.neutralizeForceUnwrapSource(s.Value)
 	// T0127: Register bindingFree for structural interface variables owning a heap allocation.
 	c.maybeRegisterStructuralFree(s.Name, alloca, typ, s.Value)
 	// Clear drop flag when RHS is a borrow (container element, field access).
@@ -1469,9 +1475,15 @@ func (c *Compiler) emitOptionalDropCall(b scopeBinding) {
 
 		c.block = nullSkip
 	} else if b.dropFunc != nil {
-		// String, vector, channel: inner is i8*, call drop directly
-		// Also covers user types with resolved direct drop
-		if isContainerType(b.valType) || b.named == types.TypString {
+		// Enum inner type: store to temp alloca, bitcast to i8*, call drop.
+		if extractEnum(b.valType) != nil {
+			enumLLVM := c.resolveType(b.valType)
+			tmpAlloca := c.createEntryAlloca(enumLLVM)
+			c.block.NewStore(innerVal, tmpAlloca)
+			ptr := c.block.NewBitCast(tmpAlloca, irtypes.I8Ptr)
+			c.block.NewCall(b.dropFunc, ptr)
+		} else if isContainerType(b.valType) || b.named == types.TypString {
+			// String, vector, channel: inner is i8*, call drop directly
 			c.block.NewCall(b.dropFunc, innerVal)
 		} else {
 			// User type: inner is value struct {vtable, instance}, extract instance ptr
@@ -1540,6 +1552,24 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() && !isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural():
 		// B0211: Heap user type without drop — use pal_free to free the instance.
 		dropFunc = c.palFree
+	case innerNamed == nil && func() bool {
+		// Droppable enum inner type: look up the enum drop function.
+		enum := extractEnum(elem)
+		if enum == nil {
+			return false
+		}
+		enumName := enum.Obj().Name()
+		if inst, ok := elem.(*types.Instance); ok {
+			enumName = monoName(inst)
+		}
+		mangledName := mangleMethodName(enumName, "drop", false)
+		if fn, ok := c.funcs[mangledName]; ok {
+			dropFunc = fn
+			return true
+		}
+		return false
+	}():
+		// dropFunc already set by the closure above
 	case innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType():
 		// B0229/B0243: Structural interface (e.g., Iterator[T]) — use RTTI-based drop
 		// dispatch. The concrete type is unknown at compile time (could be _FnIter,

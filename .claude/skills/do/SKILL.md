@@ -1,6 +1,6 @@
 ---
 name: do
-description: Implement the given tasks or fix the given bug. Once implemented or fixed follow /review /coverage /commit skills
+description: Implement the given tasks or fix the given bug. Once implemented or fixed follow /review /coverage then verify, rebase, commit, and mark done.
 ---
 
 Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS references a tracker ID (e.g., `B0042`, `T0015`), fetch it with `mcp__tracker__get` first. If $ARGUMENTS is a natural-language description, use it directly.
@@ -58,7 +58,14 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - **Memory leak check (ZERO TOLERANCE)**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). **The repo has 0 leaks. Any leak in the output is a regression caused by your changes.** Do NOT treat any leak as preexisting — there are none. Fix all leaks before proceeding. Changes that introduce memory leaks will not be pushed.
    - **No `allow_leaks: true` tags — ever.** The repo has 0 `allow_leaks` tags. Never add `allow_leaks: true` to any test. If a test leaks, fix the leak. There are no exceptions.
 
-9. **Chain to /review, /coverage, /commit.**
-   - Run `/review` to check your own changes for correctness, missed edge cases, and convention compliance.
+9. **Review, test, and commit.**
+   - Run `/review` to check your changes for correctness and convention compliance.
    - Run `/coverage` scoped to the changed code to verify test coverage is adequate.
-   - Run `/commit` to verify, commit, sync, and push.
+   - Run `bin/verify.sh --local --wasm` to confirm everything passes.
+   - Fetch and rebase: `git fetch origin && git rebase origin/master`.
+   - If there are rebase conflicts, resolve them.
+   - Run `bin/verify.sh --local --wasm` again to confirm the rebase didn't introduce issues. (No-op rebuilds complete in ~3s.)
+   - Stage and commit with a concise message including the item ID.
+   - **Do NOT push.** The orchestrator handles pushing after independent verification.
+   - Mark the task as done: call `mcp__tracker__update` with `status: "done"` and a `summary`.
+   - Call `mcp__tracker__heartbeat` with `status: "done"`.

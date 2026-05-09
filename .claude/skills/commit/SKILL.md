@@ -1,9 +1,9 @@
 ---
 name: commit
-description: Verify, commit, and sync changes. Updates docs and tracker, files bugs for any issues noticed, runs full verification before and after rebase.
+description: Verify, rebase, and commit changes. Updates docs and tracker, files bugs for any issues noticed, runs full verification before and after rebase. Does NOT push.
 ---
 
-Verify, commit, and sync the current changes with remote.
+Verify, rebase, and commit the current changes. **Does NOT push** — the orchestrator handles pushing after independent verification.
 
 ## Tracker status
 

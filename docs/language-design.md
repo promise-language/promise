@@ -1261,7 +1261,7 @@ Port(value: 80)!       // calls new(value:), validates, OK
 Port(value: -1)!       // calls new(value:), raises InvalidArgError
 ```
 
-A failable constructor integrates with standard error handling — auto-propagation in `!` functions, explicit `?` handling, or `!` to assert-and-panic (see Section 7):
+A failable constructor integrates with standard error handling — auto-propagation in `!` functions, explicit `^` propagation, `?` handling, or `!` to assert-and-panic (see Section 7):
 
 ```promise
 serve!(int portNum) Server {
@@ -1592,13 +1592,13 @@ update!() string {
 
 When a failable call appears as a call argument, the compiler evaluates the argument, checks the error tag, propagates on failure, and passes the success value to the outer call. Multiple failable arguments are evaluated left-to-right; if any fails, the error propagates immediately and subsequent arguments are not evaluated.
 
-The explicit `?` suffix is allowed for self-documentation but has the same effect:
+The explicit `^` suffix is allowed for self-documentation but has the same effect:
 
 ```promise
-  string content = readFile("data.txt")?;   // same as above — explicit propagation
+  string content = readFile("data.txt")^;   // same as above — explicit propagation
 ```
 
-In a **non-failable function**, calling a failable function without handling is a **compile-time error** — there is nowhere to propagate to. The caller must handle the error with `?` or unwrap with `!`:
+In a **non-failable function**, calling a failable function without handling is a **compile-time error** — there is nowhere to propagate to. The caller must handle the error with `? e { ... }` or unwrap with `!`:
 
 ```promise
 main() {
@@ -1693,7 +1693,7 @@ if err is present {
 | `foo()` | Auto-propagate error | `!` function only |
 | `bar(foo())` | Auto-propagate error from argument | `!` function only |
 | `x = foo()` | Auto-propagate error from assignment | `!` function only |
-| `foo()?` | Explicit propagate (same as naked) | `!` function only |
+| `foo()^` | Explicit propagate (same as bare call) | `!` function only |
 | `foo() ? e { ... }` | Handle any error, bind to `e` | Any function |
 | `foo() ? { ... }` | Handle any error, discard value | Any function |
 | `foo() ? e is T { ... }` | Handle only type `T`, propagate others | `!` function only |
@@ -1725,7 +1725,7 @@ wrapper!() string {
 }
 ```
 
-**Note:** `!` and `? _ { }` also work on `T?` optionals (see Section 14). When the inner expression is failable, these target the error layer; when optional, the optional layer. Auto-propagation does not cross lambda boundaries. Inside a non-`!` lambda, failable calls must be handled explicitly with `?` or `!`.
+**Note:** `!` and `? _ { }` also work on `T?` optionals (see Section 14). When the inner expression is failable, these target the error layer; when optional, the optional layer. Auto-propagation does not cross lambda boundaries. Inside a non-`!` lambda, failable calls must be handled explicitly with `^`, `?`, or `!`.
 
 ### 7.3 Error Types
 
@@ -1760,7 +1760,7 @@ type DataError[T] is error {
 **Restrictions:**
 - Error types **cannot** have `drop()` methods. Error values are passed as raw pointers through the result struct and are not tracked for cleanup. Allowing `drop()` would silently leak resources.
 - The `raise` statement validates at compile time that the raised value inherits from `error`.
-- Error operators (`?`, `!`, `? handler`) validate at compile time that the inner expression is a failable call.
+- Error operators (`^`, `!`, `? handler`) validate at compile time that the inner expression is a failable call.
 
 Error inheritance chains work with typed handlers — a handler for a parent type catches all child types:
 
@@ -3282,13 +3282,13 @@ type BufferedWriter is Writer {
   write!(~this, u8[] &data) int `instance {
     this.buf.push(data);
     if this.buf.len >= 4096 {
-      return this.flush()?;
+      return this.flush()^;
     }
     return data.len;
   }
 
   flush!(~this) int `instance {
-    n := this.inner.write(&this.buf)?;
+    n := this.inner.write(&this.buf)^;
     this.buf = [];
     return n;
   }
@@ -3301,8 +3301,8 @@ A `use` binding ties a resource's lifetime to the enclosing scope. When the scop
 
 ```promise
 main!() {
-  use f := File.open("data.txt", "r")?;
-  string data = f.readAll()?;
+  use f := File.open("data.txt", "r")^;
+  string data = f.readAll()^;
   // f.close() called automatically here
 }
 ```
@@ -3311,11 +3311,11 @@ main!() {
 
 ```promise
 process!(string path) {
-  use f := File.open(path, "r")?;
+  use f := File.open(path, "r")^;
 
   if needsBackup(path) {
-    use backup := File.open(path + ".bak", "w")?;
-    copyTo(f, backup)?;
+    use backup := File.open(path + ".bak", "w")^;
+    copyTo(f, backup)^;
     // backup.close() called here
   }
 
@@ -3335,15 +3335,15 @@ process!(string path) {
 ```promise
 // In a failable function:
 writeData!(string path, u8[] &data) {
-  use f := File.open(path, "w")?;
-  f.write(&data)?;
+  use f := File.open(path, "w")^;
+  f.write(&data)^;
   // If f.close() fails here, the error propagates (no prior error)
 }
 
 // If write fails:
 writeData!(string path, u8[] &data) {
-  use f := File.open(path, "w")?;
-  f.write(&data)?;  // raises an error
+  use f := File.open(path, "w")^;
+  f.write(&data)^;  // raises an error
   // f.close() still called, but its error is suppressed — write's error propagates
 }
 ```
@@ -3404,7 +3404,7 @@ type Connection {
   int socket_fd;
 
   close!(~this) `instance {
-    syscall.close(this.socket_fd)?;
+    syscall.close(this.socket_fd)^;
   }
 
   drop(~this) `instance {
@@ -3415,13 +3415,13 @@ type Connection {
 
 main!() {
   // Explicit scoped lifetime — close() called, errors can propagate
-  use conn := Connection.connect("localhost:5432")?;
-  conn.query("SELECT 1")?;
+  use conn := Connection.connect("localhost:5432")^;
+  conn.query("SELECT 1")^;
   // conn.close() called here — error propagates if function is !
 
   // Without use — drop() called at scope exit, errors suppressed
-  conn2 := Connection.connect("localhost:5432")?;
-  conn2.query("SELECT 1")?;
+  conn2 := Connection.connect("localhost:5432")^;
+  conn2.query("SELECT 1")^;
   // conn2.drop() called here — best-effort cleanup
 }
 ```
@@ -3448,12 +3448,12 @@ Functions are never declared as "async". The runtime is the async engine — any
 // This function does I/O but has a normal signature.
 // The runtime suspends the goroutine during httpGet, not the OS thread.
 fetchUser!(int id) User {
-  data := httpGet("/users/{id}")?;
-  return User.fromJson(data)?;
+  data := httpGet("/users/{id}")^;
+  return User.fromJson(data)^;
 }
 
 // Callers just call it normally:
-user := fetchUser(42)?;
+user := fetchUser(42)^;
 ```
 
 ### 17.2 Explicit Concurrency with `go`

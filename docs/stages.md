@@ -73,7 +73,7 @@ ANTLR4 lexer and parser grammars covering the full language surface.
 - Numeric literals with hex/octal/binary/underscore support and typed suffixes (`u8`, `i32`, `f64`, etc.)
 - String interpolation (`{expr}`), raw strings, triple-quoted multiline strings
 - Type declarations with inheritance (`is`), enums/ADTs, generics
-- Pattern matching, error handling (`?`, `!`, error handlers)
+- Pattern matching, error handling (`^`, `?`, `!`, error handlers)
 - Concurrency (`go`, `<-`), generators (`yield`, `yield*`)
 - Meta annotations (backtick syntax)
 - 31 test fixtures (16 valid, 15 invalid)
@@ -298,7 +298,7 @@ Enum type codegen: tagged unions, fieldless enums, variant constructors, pattern
 
 ## Stage 8e — Error Handling (Done)
 
-Error handling codegen: failable function declarations, raise statements, error propagation (`?`), forced unwrap (`!`), error handler expressions, typed error handlers.
+Error handling codegen: failable function declarations, raise statements, error propagation (`^`), forced unwrap (`!`), error handler expressions, typed error handlers.
 
 **Files:** Updates to `codegen/compiler.go`, `codegen/expr.go`, `codegen/stmt.go`, `codegen/types.go`, `sema/expr.go`, `sema/stmt.go`, `sema/info.go`, `sema/meta.go`, `sema/decl.go`, `types/named.go`, `grammar/PromiseParser.g4`, `ast/expr.go`, `ast/visit_expr.go`, `modules/std/error.pr`; 17 error handling tests + 46 sema tests + 12 codegen tests + 40 e2e tests
 
@@ -308,18 +308,18 @@ Error handling codegen: failable function declarations, raise statements, error 
 - **Failable declarations**: Functions/methods with `CanError()` return the result struct. `declareFuncs`/`declareTypeMethods` wrap return type with `computeResultType`.
 - **Return wrapping**: `genReturnStmt` wraps the value in an Ok result (`{ false, val, null }`) when inside a failable function.
 - **Raise statement**: `genRaiseStmt` wraps the error in an Error result (`{ true, zero, errVal }`) and returns. Validates raised value inherits from `error` at compile time.
-- **Error propagation** (`?`): `genErrorPropagateExpr` checks the tag via `condBr`. Error path extracts the `i8*` error, re-wraps in caller's result type, early-returns. Ok path extracts the value.
+- **Error propagation** (`^`): `genErrorPropagateExpr` checks the tag via `condBr`. Error path extracts the `i8*` error, re-wraps in caller's result type, early-returns. Ok path extracts the value.
 - **Forced unwrap** (`!`): `genErrorUnwrapExpr` panics on error via `promise_panic(i8*)` + `unreachable`. Ok path extracts the value.
 - **Untyped error handler** (`? e { body }`): `genErrorHandlerExpr` branches to handler block, reconstructs error value struct `{vtable_ptr, instance_ptr}` for the binding, generates body, merges with phi node.
 - **Typed error handler** (`? e is IoError { body }`): RTTI check via `promise_type_is` on the error instance's `_variant` pointer. Match path: reconstruct typed value struct, generate body. No-match path: propagate error (in failable functions) or panic (in non-failable functions).
-- **Failable validation**: `FailableExprs` map in sema `Info` records call expressions with failable signatures. Error operators (`?`, `!`, `? handler`) validate at compile time that their inner expression is failable.
+- **Failable validation**: `FailableExprs` map in sema `Info` records call expressions with failable signatures. Error operators (`^`, `!`, `? handler`) validate at compile time that their inner expression is failable.
 - **Error type restrictions**: Error types cannot have `drop()` methods (error values are not tracked for cleanup; allowing drop would silently leak resources). Generic error types (`type DataError[T] is error { T data; }`) are supported.
 - **Auto-terminator**: Failable functions without explicit terminator return an Ok-wrapped zero value.
 - **`genBlockValue` helper**: Generates a block and returns the last expression's value without double-generating. Used by `genErrorHandlerExpr` and `genIfExpr`.
 - **Failable syntax**: `!` goes after the function name: `foo!() int` (failable with return type), `foo!()` (void failable). Grammar accepts both new syntax (`IDENT BANG typeParams? LPAREN...`) and old syntax (`returnType: typeRef BANG? | BANG`) for backward compatibility. The formatter auto-migrates old to new.
 - **Failable main**: `main!()` compiles main's body into a separate helper function `__promise_main_body` with the correct result struct return type. The coroutine calls it and converts errors to panics (`"unhandled error in main"`, exit code 1). Direct channel/select ops in failable main use thread-blocking mode (not coroutine parking) — failable main is intended for I/O error handling, not concurrency.
-- **Scope**: Failable functions/methods, raise, `?` propagation, `!` unwrap, `? binding { body }` handlers, `? e is T { body }` typed handlers, void failables, generic error types.
-- **Auto-propagation**: Naked failable calls in failable functions auto-propagate — codegen emits tag-check + early-return (same as explicit `?`). Works in all expression positions: expression statements, variable declarations, assignments, and call arguments (including variadic elements). In non-failable functions, naked failable calls are a compile error: `"failable call must be handled with '?', '!', or an error handler"`. Tracked via `AutoPropagateExprs` map in sema `Info`.
+- **Scope**: Failable functions/methods, raise, `^` propagation, `!` unwrap, `? binding { body }` handlers, `? e is T { body }` typed handlers, void failables, generic error types.
+- **Auto-propagation**: Naked failable calls in failable functions auto-propagate — codegen emits tag-check + early-return (same as explicit `^`). Works in all expression positions: expression statements, variable declarations, assignments, and call arguments (including variadic elements). In non-failable functions, naked failable calls are a compile error: `"failable call must be handled with '?', '!', or an error handler"`. Tracked via `AutoPropagateExprs` map in sema `Info`.
 - **Typed handler exhaustiveness**: Typed error handlers (`? e is T { }`) in non-failable functions require explicit handling of non-matching errors. Three options: `else` clause (`? e is T { } else { }`), `!` suffix (`? e is T { }!` — panics on nomatch), or making the function failable (propagates nomatch). In failable functions, unhandled nomatch auto-propagates. `else` supports optional binding: `? e is T { } else e { }`. `reconstructErrorValue` helper extracts vtable+instance from raw `i8*` error pointer.
 - **Failable result capture**: `(val, err) := failableCall()` destructures a failable result into the success value and `error?` optional. Error path reconstructs error value struct from instance pointer; ok path yields absent optional. Tracked via `FailableDestructures` map in sema `Info`.
 - **Deferred**: Failable extern functions (C ABI for errors). If-unwrap/while-unwrap completed in Stage 8h. Full type expressions in `is` patterns (generics, arrays, module-qualified — see Stage 8k deferred).
@@ -716,7 +716,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - **Per-test panic recovery** (non-WASM): setjmp/longjmp in test trampoline — a panicking test prints `FAIL` with panic context and continues to the next test, instead of killing the process. Uses TLS `@__promise_test_jmpbuf`. The scheduler does NOT use setjmp/longjmp — goroutine panics propagate via TLS panic flag (T0143-T0149) and reach final suspend normally. On WASM, panics still terminate (no longjmp support).
 - **Compact multi-file output**: `promise test <dir>` prints one line per file (`PASS (time) file.pr (N tests)` or `FAIL (time) file.pr (M/N failed)` with indented failure details). Single-file runs remain verbose (every test with timing). End-of-run `FAILED:` summary includes panic/error context for AI-agent tail-friendliness.
 - `promise ast <file.pr>` — print the AST
-- `promise exec <code>` — execute inline code (auto-wraps in failable `main() !` if needed, so `?` works without explicit error handling)
+- `promise exec <code>` — execute inline code (auto-wraps in failable `main() !` if needed, so `^` propagation and auto-propagation work without explicit error handling)
 - `promise install` — install compiler + std + runtime to `~/.promise/`
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames

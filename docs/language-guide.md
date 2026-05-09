@@ -229,11 +229,12 @@ main() {
 | `foo()` | Auto-propagate error | In `!` functions only |
 | `bar(foo())` | Auto-propagate error from argument | In `!` functions only |
 | `x = foo()` | Auto-propagate error from assignment | In `!` functions only |
+| `foo()^` | Explicit propagate (same as bare call) | In `!` functions only |
 | `foo()!` | **Panic** on error | Anywhere |
 | `foo() ? e { ... }` | Handle error | Anywhere |
 | `foo() ? e is T { ... }` | Handle typed error | Anywhere |
 
-**Rule: In a failable (`!`) function, just call failable functions bare — errors auto-propagate. This works in variable declarations, assignments, and call arguments. Never use `!` to propagate; `!` always means panic.**
+**Rule: In a failable (`!`) function, just call failable functions bare — errors auto-propagate. Use `^` for explicit self-documenting propagation. Never use `!` to propagate; `!` always means panic.**
 
 ## Optionals
 

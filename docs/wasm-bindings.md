@@ -503,17 +503,17 @@ type Descriptor `public {
 
     `doc "Get file metadata."
     stat!(this) DescriptorStat `public {
-        return _wasi_descriptor_stat(this._handle)?;
+        return _wasi_descriptor_stat(this._handle)^;
     }
 
     `doc "Read bytes from the file."
     read!(this, u64 length) u8[] `public {
-        return _wasi_descriptor_read(this._handle, length)?;
+        return _wasi_descriptor_read(this._handle, length)^;
     }
 
     `doc "Write bytes to the file."
     write!(this, u8[] data) u64 `public {
-        return _wasi_descriptor_write(this._handle, data)?;
+        return _wasi_descriptor_write(this._handle, data)^;
     }
 
     drop(~this) {
@@ -545,8 +545,8 @@ Promise's ownership checker prevents use-after-drop:
 use wasi;
 
 main() {
-    fd := open("/tmp/hello.txt")?;
-    data := fd.read(1024)?;    // ok: fd is borrowed
+    fd := open("/tmp/hello.txt")^;
+    data := fd.read(1024)^;    // ok: fd is borrowed
     consume(~fd);               // fd moved to consume()
     fd.read(1024);              // ERROR: use of moved variable 'fd'
 }
@@ -612,14 +612,14 @@ use wasi;
 
 main() {
     // Filesystem
-    fd := Descriptor.open("/tmp/hello.txt", OpenFlags.read_only())?;
-    content := fd.read(4096)?;
+    fd := Descriptor.open("/tmp/hello.txt", OpenFlags.read_only())^;
+    content := fd.read(4096)^;
 
     // Clocks
     now := monotonic_clock();
 
     // Environment
-    home := environment_get("HOME")?;
+    home := environment_get("HOME")^;
 
     // Random
     bytes := random_bytes(32);
@@ -807,7 +807,7 @@ The binding modules (`wasi`, `web`) are **user-facing Promise-level abstractions
 ```
 ┌──────────────────────────────────────┐
 │  User Code                           │
-│  use wasi; fd.read(1024)?;           │
+│  use wasi; fd.read(1024)^;           │
 ├──────────────────────────────────────┤
 │  Binding Modules (Promise)           │
 │  wasi.pr: Descriptor.read() wrapper  │

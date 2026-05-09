@@ -8,7 +8,7 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 **Primary goal**: Promise is designed for AI-agent efficiency — making it easy for LLMs to generate correct, self-contained programs in one shot or use them as tools. Every design decision should optimize for:
 - **Self-contained readability**: Looking at a single source file should be enough to understand with certainty what it does. Avoid hidden effects, implicit behaviors, and action-at-a-distance.
-- **Explicit over implicit**: Prefer explicit types, explicit error handling (`?`/`!`), explicit ownership (`~`/`&`), explicit mutability. No surprising defaults.
+- **Explicit over implicit**: Prefer explicit types, explicit error handling (`^`/`?`/`!`), explicit ownership (`~`/`&`), explicit mutability. No surprising defaults.
 - **Minimal context needed**: An AI agent should be able to generate a correct Promise program without needing to understand a large framework or ecosystem. The standard library should be small, orthogonal, and predictable.
 - **One obvious way**: Avoid multiple equivalent ways to do the same thing. Reduce ambiguity in both syntax and semantics so code generation is deterministic.
 

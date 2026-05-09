@@ -69,7 +69,7 @@ Promise uses a two-tier naming scheme. Casing tells the reader whether a type is
 | `int`, `i8`..`i64`, `uint`, `u8`..`u64`, `f32`, `f64` | LLVM scalar integers/floats |
 | `bool`, `char` | LLVM scalar `i1` / `i32` |
 | `string` | Has literal syntax `"..."`, interpolation `{}` |
-| `error` | Base type for `?`/`!`/`raise` error system |
+| `error` | Base type for `^`/`?`/`!`/`raise` error system |
 
 **PascalCase — all other types.** Structural interfaces, user-defined types, stdlib types. Some PascalCase types have **syntactic sugar** — a lowercase shorthand the compiler resolves:
 
@@ -131,7 +131,7 @@ type TimeoutError is DbError is AppError is error { }
 **What was implemented**:
 - `checkRaiseStmt` (stmt.go): validates raised expression inherits from `error` via `InheritsFrom()`
 - `checkErrorHandlerExpr` (expr.go): binds `e` to specific error subtype in typed handlers (`? e is IoError { }`), validates exhaustiveness in non-failable contexts, supports else clauses with optional binding
-- Three operators: `?` (propagate), `!` (unwrap/panic), `? e { }` / `? e is T { }` (typed handler)
+- Three operators: `^` (propagate), `!` (unwrap/panic), `? e { }` / `? e is T { }` (typed handler)
 - Generic error types: `type GenericError[T] is error { T val; }`
 - Result capture: `(val, err) := failable_call()`
 - Error types cannot have `drop` methods (enforced in decl.go)

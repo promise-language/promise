@@ -33,7 +33,7 @@
 - Closing `}` on own line at the construct's indent level.
 - `} else {` stays on same line (no newline between `}` and `else`).
 - `}` followed by `.method()` stays on same line (chaining).
-- `}` followed by `?`, `!`, `)`, `,`, `;` stays on same line (postfix/delimiters).
+- `}` followed by `^`, `?`, `!`, `)`, `,`, `;` stays on same line (postfix/delimiters).
 - Blank lines between top-level declarations are preserved from source (up to 1 blank line).
 - No blank lines immediately after `{` or before `}`.
 
@@ -54,7 +54,7 @@
 - No space around `.` and `?.` (member access).
 - No space around `..` and `..=` (range operators).
 - `++` and `--` (postfix): no space before.
-- `?` and `!` after value-producing tokens (postfix): no space — `x?`, `result!`.
+- `^` and `!` after value-producing tokens (postfix): no space — `x^`, `result!`.
 
 ### 2.4 Semicolons & Newlines
 

@@ -39,7 +39,7 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - For Promise/stdlib changes: run `./build` to re-embed updated modules.
    - Never work around compiler/language bugs — if you hit a limitation, file it with `mcp__tracker__create` and stop.
    - **Proactively check for critical systemic issues** in code you touch or read during implementation. These are silent bugs that won't show up as test failures:
-     - **Memory leaks** (PRIORITY — active leak-reduction phase, baseline ~2170 leaks): Does every heap-allocating type (`native` types using `pal_alloc`, types with pointer fields) have a `drop()` method or get auto-synthesized drop? Are all allocations reachable by the cleanup path? When touching any code, look for opportunities to fix leaks — even if unrelated to the current task, file bugs for any leaks discovered.
+     - **Memory leaks** (ZERO TOLERANCE — the repo has 0 leaks and 0 `allow_leaks` tags): Does every heap-allocating type (`native` types using `pal_alloc`, types with pointer fields) have a `drop()` method or get auto-synthesized drop? Are all allocations reachable by the cleanup path? **Any change that introduces even a single memory leak is blocked from being pushed.** There are NO preexisting leaks — every leak you see is a regression caused by your changes. Fix it before proceeding. Never add `allow_leaks: true` to any test.
      - **Missing cleanup**: Are `use` bindings properly closed? Are scope bindings registered for all droppable values?
      - **Concurrency bugs**: Lock ordering violations, missing mutex protection, park/wake races, channel close races.
      - **Resource waste**: Unnecessary allocations in hot paths, O(n) operations that should be O(1), repeated work that could be cached.
@@ -55,8 +55,8 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - Run the specific new tests first to confirm they pass.
    - Then run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) to confirm nothing else broke.
    - If verify fails, fix the issues and re-run until green.
-   - **Memory leak tracking**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). Record the total leak count. Compare against the baseline (~2170 leaks). If your changes increased leaks, investigate and fix before proceeding. If your changes reduced leaks, note the improvement. We are in an active leak-reduction phase — all changes should aim to minimize memory leaks.
-   - **No new `allow_leaks: true` tags.** Never add `allow_leaks: true` to tests — it masks leaks and prevents detection of regressions. If a test leaks, fix the leak or file a bug. The only allowed change to `allow_leaks` tags is **removing** them (when a test no longer leaks).
+   - **Memory leak check (ZERO TOLERANCE)**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). **The repo has 0 leaks. Any leak in the output is a regression caused by your changes.** Do NOT treat any leak as preexisting — there are none. Fix all leaks before proceeding. Changes that introduce memory leaks will not be pushed.
+   - **No `allow_leaks: true` tags — ever.** The repo has 0 `allow_leaks` tags. Never add `allow_leaks: true` to any test. If a test leaks, fix the leak. There are no exceptions.
 
 9. **Chain to /review, /coverage, /commit.**
    - Run `/review` to check your own changes for correctness, missed edge cases, and convention compliance.

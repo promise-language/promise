@@ -374,7 +374,7 @@ The standard library (`modules/std/`, 37 files) is auto-imported via `use std as
 
   Both styles support a `timeout` annotation parameter for per-test timeout control: `` `test(timeout: "5s") `` or `` `test(expected: "...", timeout: "2s") ``. Duration uses Go syntax (`500ms`, `2s`, `1m`). Tests without a timeout annotation use the CLI `-timeout` default (60s). The CLI also supports `-timeout-scale`, `-timeout-min`, `-timeout-max` to modify all timeouts uniformly.
 
-  **Memory leak enforcement** (T0067): Tests that leak memory (alloc count delta > 0) cause test failure. Tests with known leaks can be tagged `` `test(allow_leaks: true) `` to suppress the failure while still reporting the leak. The test summary shows `N allowed leaks` for allow_leaks tests that leaked, `N stale allow_leaks` for tagged tests that did NOT leak (stale tags), and lists stale tests under a `STALE ALLOW_LEAKS:` section at the end. The goal is to progressively remove all `allow_leaks` tags as leak sources are fixed (T0066, T0094).
+  **Memory leak enforcement** (T0067): Tests that leak memory (alloc count delta > 0) cause test failure. **ZERO TOLERANCE POLICY: The repo has 0 leaks and 0 `allow_leaks` tags. Any leak is a regression. Never add `allow_leaks: true` to any test. Never treat any leak as preexisting. Changes that introduce memory leaks will not be pushed.**
 
 - **Co-locate tests with source files.** Place `*_test.pr` files alongside the `.pr` files they test (not in a separate `tests/` tree). This makes tests easier to find and maintains context. The `tests/` directory is for cross-cutting integration and e2e tests that don't belong to a specific module or file.
 

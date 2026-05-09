@@ -37,7 +37,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - For every type in the scoped code: if it heap-allocates (native, contains `pal_alloc`, or has droppable fields), verify there's a test that confirms cleanup happens. If no test exists and no drop path exists, file a **critical** bug for the leak.
    - For concurrency code: verify there's a stress test. If missing, file a task.
    - Coverage percentages can be misleading — 100% line coverage doesn't mean resources are properly managed. Think about *what invariants* are tested, not just *which lines* are hit.
-   - **Memory leak focus** (active leak-reduction phase, baseline ~2170 leaks): Pay special attention to leak counts in test output. Every test file reports leaked allocations. Catalog which tests leak and what types are likely responsible. File bugs for any leak sources identified. When writing new tests, verify they don't introduce additional leaks.
+   - **Memory leak focus** (ZERO TOLERANCE — the repo has 0 leaks): Pay special attention to leak counts in test output. **Any leak is a regression — there are NO preexisting leaks.** Do NOT treat any leak as preexisting. Fix all leaks before proceeding. Never add `allow_leaks: true` to any test. Changes that introduce memory leaks will not be pushed.
 
 6. **Write missing tests.**
    - **Go tests**: Follow existing patterns — `generateIR()` + `assertContains` for codegen, `checkErrs()` + `expectError` for sema, `ownerOK()` / `ownerErrs()` for ownership.

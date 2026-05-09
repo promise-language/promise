@@ -44,10 +44,10 @@ Inspect the implementation of item $ARGUMENTS. You are providing an independent 
      - Conventions: full English words in APIs (with approved abbreviations), getters for side-effect-free parameterless access, `` `doc `` annotations on `` `public `` declarations.
      - No hidden effects, implicit behaviors, or action-at-a-distance.
      - No workarounds for compiler/language bugs (should be filed as tracker bugs instead).
-   - **Memory management** (PRIORITY — active leak-reduction phase):
+   - **Memory management** (ZERO TOLERANCE — the repo has 0 leaks):
      - Every heap-allocating type must have a `drop()` path.
-     - No new `allow_leaks: true` tags in tests.
-     - Check if changes introduce or fix memory leaks.
+     - No `allow_leaks: true` tags — ever. The repo has 0 such tags.
+     - **Any change that introduces even a single memory leak is blocked from being pushed.** There are NO preexisting leaks — every leak is a regression.
    - **Concurrency safety:** shared mutable state mutex-protected, channel operations follow park mutex protocol, address-ordered lock discipline.
    - Are there bugs, race conditions, or edge cases missed?
 

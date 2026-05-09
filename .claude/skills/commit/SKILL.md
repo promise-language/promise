@@ -20,8 +20,8 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
 3. **Pre-commit verification.**
    - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) from the repo root.
    - If it fails, fix the issues and re-run until it passes. Do not proceed until green.
-   - **Memory leak tracking**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). Record the total leak count. Compare against the baseline (~2170 leaks). If your changes increased the leak count, investigate and fix the regression before proceeding. If your changes reduced the leak count, note the improvement in the commit message.
-   - **No new `allow_leaks: true` tags.** Check `git diff` for any added `allow_leaks: true` — this is a blocking issue. Adding `allow_leaks` masks leaks and prevents regression detection. If a test leaks, fix the leak or file a bug. The only allowed change to `allow_leaks` tags is **removing** them.
+   - **Memory leak check (ZERO TOLERANCE)**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). **The repo has 0 leaks. Any leak in the output is a regression caused by your changes.** Do NOT treat any leak as preexisting — there are none. Fix all leaks before proceeding. Changes that introduce memory leaks will not be pushed.
+   - **No `allow_leaks: true` tags — ever.** Check `git diff` for any added `allow_leaks: true` — this is a blocking issue. The repo has 0 `allow_leaks` tags. Never add them. If a test leaks, fix the leak. There are no exceptions.
 
 4. **Commit.**
    - Stage the relevant files (avoid `git add -A`; be specific).
@@ -35,7 +35,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
 6. **Post-rebase verification.**
    - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) again to confirm nothing broke during rebase.
    - If it fails, fix and re-run.
-   - **Memory leak check**: Verify the leak count hasn't increased compared to pre-rebase. If rebase introduced new leaks (from upstream changes), note them but don't block the commit — file a bug instead.
+   - **Memory leak check**: Verify the leak count is still 0 after rebase. Any leaks are a regression — fix before pushing.
 
 7. **Update tracker.**
    - Update any related tracker entries (`mcp__tracker__update`) — mark bugs/tasks as done.

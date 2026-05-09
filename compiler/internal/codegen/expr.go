@@ -3976,11 +3976,16 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	c.block.NewStore(constant.NewInt(irtypes.I32, int64(tag)), tagPtr)
 
+	// B0252: Track whether any field value was moved from a variable with a
+	// drop binding. If so, the enum now owns heap resources via the moved
+	// variable, and the temp must NOT be dropped at statement end — when the
+	// enum is passed by value to a function that stores it (e.g., Map.[]=),
+	// the temp drop would free resources shared with the stored copy.
+	movedDroppable := false
 	if dataType != nil && len(e.Args) > 0 {
 		dataPtr := c.block.NewGetElementPtr(internalType, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		typedDataPtr := c.block.NewBitCast(dataPtr, irtypes.NewPointer(dataType))
-
 		for i, arg := range e.Args {
 			val := c.genCallArgExpr(arg.Value)
 			fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
@@ -3988,6 +3993,9 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 			c.block.NewStore(val, fieldPtr)
 			// Clear drop flag: field value is moved into the enum variant
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
+					movedDroppable = true
+				}
 				c.clearDropFlag(ident.Name)
 			}
 			// B0278: Claim string temp: string method results (e.g., to_upper())
@@ -4005,7 +4013,10 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 
 	// B0267: Track the enum alloca for cleanup at statement end. Uses entry-block
 	// allocas so the tracking dominates all uses regardless of branch structure.
-	if dataType != nil && c.entryBlock != nil && c.tempTrackingEnabled {
+	// B0252: Skip tracking when a variable with a drop binding was moved into the
+	// variant data — the enum now owns those resources, and dropping the temp would
+	// free resources shared with any by-value copy (e.g., stored in a Map Slot).
+	if dataType != nil && !movedDroppable && c.entryBlock != nil && c.tempTrackingEnabled {
 		enumType := c.info.Types[member.Target]
 		if c.typeSubst != nil {
 			enumType = types.Substitute(enumType, c.typeSubst)

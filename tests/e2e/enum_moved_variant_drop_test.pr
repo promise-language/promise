@@ -1,0 +1,67 @@
+// B0252: When a variable with a drop binding is moved into an enum variant,
+// and that enum value is passed by value to a function that stores it (e.g., Map.[]=),
+// the enum ctor temp must NOT be dropped — the stored copy shares heap pointers.
+use json;
+
+// Nested JsonValue.Object via map — the original crash scenario.
+test_nested_json_object() `test {
+  map[string, json.JsonValue] inner = {
+    "a": json.JsonValue.Null,
+  };
+  map[string, json.JsonValue] output = {
+    "x": json.JsonValue.Object(fields: inner),
+  };
+  json.JsonValue result = json.JsonValue.Object(fields: output);
+  assert(result.is_object, "result is object");
+}
+
+// Nested with string variant data inside the inner map.
+test_nested_json_with_strings() `test {
+  map[string, json.JsonValue] inner = {
+    "key": json.JsonValue.Str(value: "value"),
+  };
+  map[string, json.JsonValue] output = {
+    "name": json.JsonValue.Str(value: "Alice"),
+    "nested": json.JsonValue.Object(fields: inner),
+  };
+  json.JsonValue result = json.JsonValue.Object(fields: output);
+  assert(result.is_object, "result is object");
+}
+
+// Triple nesting — Object inside Object inside Object.
+test_triple_nested() `test {
+  map[string, json.JsonValue] deepest = {
+    "z": json.JsonValue.Number(value: 42.0),
+  };
+  map[string, json.JsonValue] middle = {
+    "deep": json.JsonValue.Object(fields: deepest),
+  };
+  map[string, json.JsonValue] outer = {
+    "mid": json.JsonValue.Object(fields: middle),
+  };
+  json.JsonValue result = json.JsonValue.Object(fields: outer);
+  assert(result.is_object, "result is object");
+}
+
+// Array variant with moved vector.
+test_array_variant_moved_vec() `test {
+  json.JsonValue[] items = [json.JsonValue.Null,
+  json.JsonValue.Bool(value: true),
+  ];
+  json.JsonValue arr = json.JsonValue.Array(items: items);
+  assert(arr.is_array, "is array");
+}
+
+// Object variant used in format (reads through the data without crash).
+test_nested_format() `test {
+  map[string, json.JsonValue] inner = {
+    "key": json.JsonValue.Str(value: "value"),
+  };
+  map[string, json.JsonValue] output = {
+    "nested": json.JsonValue.Object(fields: inner),
+  };
+  json.JsonValue result = json.JsonValue.Object(fields: output);
+  string s = result.format()!;
+  assert(s.contains("nested"), "format contains nested");
+  assert(s.contains("key"), "format contains key");
+}

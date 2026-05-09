@@ -11114,6 +11114,32 @@ func TestDropGenericEnumVarWithDroppableTypeParam(t *testing.T) {
 	assertContains(t, ir, `call void @"Container[Wrapper].drop"`)
 }
 
+// B0252: When a variable with a drop binding is moved into an enum variant,
+// the enum ctor temp must NOT be tracked for statement-end cleanup — the stored
+// copy (e.g., in a Map Slot) shares heap pointers with the temp.
+func TestEnumCtorTempSkippedWhenMovedDroppable(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			string name;
+			drop(~this) { }
+		}
+		enum Holder {
+			Has(Resource r),
+			Empty,
+		}
+		consume(Holder h) { }
+		main() {
+			r := Resource(name: "test");
+			consume(Holder.Has(r));
+		}
+	`)
+	// The enum should still have a synthesized drop
+	assertContains(t, ir, "define void @Holder.drop")
+	// But the enum ctor temp should NOT generate statement-end cleanup —
+	// the moved Resource means ownership transferred, no enum.ctor.drop block
+	assertNotContains(t, ir, "enum.ctor.drop")
+}
+
 // Compound assignment on different typed variables exercises namedFromLLVMType branches
 func TestCompoundAssignF64(t *testing.T) {
 	ir := generateIR(t, `

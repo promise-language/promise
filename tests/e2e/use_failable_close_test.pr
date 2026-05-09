@@ -71,7 +71,7 @@ inner_fail!() void {
 
 propagate_with_failable_close!() void {
   use r := FailResource(id: 1);
-  inner_fail()?;
+  inner_fail()^;
 }
 
 test_propagate_suppresses_close_error() `test {

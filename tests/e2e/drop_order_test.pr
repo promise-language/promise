@@ -144,7 +144,7 @@ might_fail!(bool fail) int {
 
 failing_caller!() int {
   b := Resource(name: "caller_local");
-  c := might_fail(true)?;
+  c := might_fail(true)^;
   return c;
 }
 

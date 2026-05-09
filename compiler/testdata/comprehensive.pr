@@ -57,8 +57,8 @@ enum Direction {
 // ============================================================
 
 readFile!(String path) String {
-  File f = fs.open(path)?;
-  String content = f.readAll()?;
+  File f = fs.open(path)^;
+  String content = f.readAll()^;
   return content;
 }
 
@@ -416,9 +416,9 @@ numericExamples() {
 // ============================================================
 
 precedenceExamples() {
-  // Postfix ? and ! bind tighter than binary operators
+  // Postfix ^ and ! bind tighter than binary operators
   Int a = getResult()! + 1;
-  Int b = getResult()? + 1;
+  Int b = getResult()^ + 1;
 
   // Optional chaining binds tighter than arithmetic
   Float len = vec?.length() + 1.0;

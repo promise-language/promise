@@ -4764,7 +4764,7 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 
 // --- Error handling expressions ---
 
-// genErrorPropagateExpr generates the `expr?` operator.
+// genErrorPropagateExpr generates the `expr^` operator.
 // Evaluates the inner failable call, checks the tag, propagates the error
 // to the caller on error, or extracts the Ok value on success.
 func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value {

@@ -172,10 +172,10 @@ parse_num!(string s) int {
   raise error(message: "not a number: " + s);
 }
 
-// Failable call in handler body, propagated with ?
+// Failable call in handler body, propagated with ^
 retry_on_error!() int {
   int v = parse_num("bad")? e {
-    return parse_num("99")?;
+    return parse_num("99")^;
   };
   return v;
 }
@@ -216,7 +216,7 @@ test_nested_handlers_double_fallback() `test {
 // Failable call in handler that itself fails, propagating out
 all_fail!() int {
   int v = parse_num("bad")? e {
-    return parse_num("also_bad")?;
+    return parse_num("also_bad")^;
   };
   return v;
 }
@@ -402,13 +402,13 @@ layer4!() int {
   raise error(message: "layer4 error");
 }
 layer3!() int {
-  return layer4()?;
+  return layer4()^;
 }
 layer2!() int {
-  return layer3()?;
+  return layer3()^;
 }
 layer1!() int {
-  return layer2()?;
+  return layer2()^;
 }
 
 catch_layer1() string {
@@ -589,7 +589,7 @@ test_generic_error_bool_message() `test {
 // --- Propagation of generic errors ---
 
 propagate_generic_int!() int {
-  fail_generic_int()?;
+  fail_generic_int()^;
   return 0;
 }
 

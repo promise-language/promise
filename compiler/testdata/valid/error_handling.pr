@@ -2,9 +2,9 @@
 
 // Simple propagation
 readAll!(String path) String {
-  File f = open(path)?;
-  String data = f.read()?;
-  f.close()?;
+  File f = open(path)^;
+  String data = f.read()^;
+  f.close()^;
   return data;
 }
 
@@ -50,25 +50,25 @@ validate!(Int x) Int {
 
 // Chained propagation
 processChain!() String {
-  String raw = readAll("input.txt")?;
-  String parsed = parse(raw)?;
-  String result = transform(parsed)?;
+  String raw = readAll("input.txt")^;
+  String parsed = parse(raw)^;
+  String result = transform(parsed)^;
   return result;
 }
 
 // Error handling with postfix precedence
 exprPrecedence!() Int {
-  // ? binds tighter than +
-  Int a = compute()? + 1;
+  // ^ binds tighter than +
+  Int a = compute()^ + 1;
 
   // ! binds tighter than *
   Int b = compute()! * 2;
 
   // Optional chain + propagate
-  Int c = obj?.method()?;
+  Int c = obj?.method()^;
 
   // Chained calls with propagation
-  Int d = a.b()?.c()!.d()?;
+  Int d = a.b()?.c()!.d()^;
 
   return a + b;
 }
@@ -81,6 +81,6 @@ multiError!() Int {
   Int b = computeB() ? e {
     raise WrappedError(e);
   };
-  Int c = computeC()?;
+  Int c = computeC()^;
   return a + b + c;
 }

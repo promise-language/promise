@@ -575,14 +575,14 @@ func TestRaiseInNonFailable(t *testing.T) {
 func TestErrorPropagate(t *testing.T) {
 	checkOK(t, `
 		parse!(string s) int { return 0; }
-		foo!() int { x := parse("42")?; return x; }
+		foo!() int { x := parse("42")^; return x; }
 	`)
 }
 
 func TestErrorPropagateInNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
 		parse!(string s) int { return 0; }
-		foo() { x := parse("42")?; }
+		foo() { x := parse("42")^; }
 	`)
 	expectError(t, errs, "outside of failable")
 }
@@ -645,7 +645,7 @@ func TestTypedErrorHandlerNonErrorType(t *testing.T) {
 func TestErrorPropagateOnNonFailable(t *testing.T) {
 	errs := checkErrs(t, `
 		foo() int { return 42; }
-		bar!() int { return foo()?; }
+		bar!() int { return foo()^; }
 	`)
 	expectError(t, errs, "requires a failable expression")
 }
@@ -815,7 +815,7 @@ func TestFailableCallInsideUntypedHandler(t *testing.T) {
 		parse!(string s) int { return 0; }
 		other!() int { return 1; }
 		foo!() int {
-			int v = parse("x") ? e { return other()?; };
+			int v = parse("x") ? e { return other()^; };
 			return v;
 		}
 	`)
@@ -827,7 +827,7 @@ func TestFailableCallInsideTypedHandler(t *testing.T) {
 		fail_io!() void { raise IoError(message: "fail", code: 1); }
 		retry!() int { return 0; }
 		foo!() int {
-			fail_io() ? e is IoError { return retry()?; };
+			fail_io() ? e is IoError { return retry()^; };
 			return 0;
 		}
 	`)
@@ -853,11 +853,11 @@ func TestFailableCallInsideHandlerOfNonFailable(t *testing.T) {
 }
 
 func TestFailableCallPropagateInsideHandlerOfNonFailable(t *testing.T) {
-	// Cannot use ? (propagate) in non-failable function, even inside handler
+	// Cannot use ^ (propagate) in non-failable function, even inside handler
 	errs := checkErrs(t, `
 		parse!(string s) int { return 0; }
 		foo() {
-			parse("x") ? e { int v = parse("retry")?; };
+			parse("x") ? e { int v = parse("retry")^; };
 		}
 	`)
 	expectError(t, errs, "outside of failable")
@@ -9653,8 +9653,8 @@ func TestVariadicFailablePropagation(t *testing.T) {
 			return total;
 		}
 		outer!() int {
-			a := trySum(1, 2)?;
-			b := trySum()?;
+			a := trySum(1, 2)^;
+			b := trySum()^;
 			return a + b;
 		}
 		main() { outer()!; }
@@ -11012,7 +11012,7 @@ func TestFailableGetterPropagate(t *testing.T) {
 			}
 		}
 		bar!(Foo f) int {
-			return f.value?;
+			return f.value^;
 		}
 	`)
 }

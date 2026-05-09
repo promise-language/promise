@@ -47,7 +47,7 @@ precedence() {
 
   // Postfix error ops
   Int unwrapped = result!;
-  Int propagated = result?;
+  Int propagated = result^;
 
   // Member access
   Int len = str.length();

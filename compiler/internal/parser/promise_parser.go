@@ -546,16 +546,16 @@ func promiseparserParserInit() {
 		944, 5, 80, 0, 0, 944, 948, 5, 58, 0, 0, 945, 947, 3, 82, 41, 0, 946, 945,
 		1, 0, 0, 0, 947, 950, 1, 0, 0, 0, 948, 946, 1, 0, 0, 0, 948, 949, 1, 0,
 		0, 0, 949, 127, 1, 0, 0, 0, 950, 948, 1, 0, 0, 0, 951, 952, 6, 64, -1,
-		0, 952, 953, 5, 64, 0, 0, 953, 963, 3, 128, 64, 18, 954, 955, 5, 68, 0,
-		0, 955, 963, 3, 128, 64, 17, 956, 957, 5, 70, 0, 0, 957, 963, 3, 128, 64,
-		16, 958, 959, 5, 61, 0, 0, 959, 960, 5, 64, 0, 0, 960, 963, 3, 128, 64,
-		15, 961, 963, 3, 130, 65, 0, 962, 951, 1, 0, 0, 0, 962, 954, 1, 0, 0, 0,
+		0, 952, 953, 5, 64, 0, 0, 953, 963, 3, 128, 64, 19, 954, 955, 5, 68, 0,
+		0, 955, 963, 3, 128, 64, 18, 956, 957, 5, 70, 0, 0, 957, 963, 3, 128, 64,
+		17, 958, 959, 5, 61, 0, 0, 959, 960, 5, 64, 0, 0, 960, 963, 3, 128, 64,
+		16, 961, 963, 3, 130, 65, 0, 962, 951, 1, 0, 0, 0, 962, 954, 1, 0, 0, 0,
 		962, 956, 1, 0, 0, 0, 962, 958, 1, 0, 0, 0, 962, 961, 1, 0, 0, 0, 963,
-		1073, 1, 0, 0, 0, 964, 965, 10, 14, 0, 0, 965, 966, 7, 5, 0, 0, 966, 1072,
-		3, 128, 64, 15, 967, 968, 10, 13, 0, 0, 968, 969, 7, 6, 0, 0, 969, 1072,
-		3, 128, 64, 14, 970, 971, 10, 12, 0, 0, 971, 972, 7, 7, 0, 0, 972, 1072,
-		3, 128, 64, 13, 973, 974, 10, 11, 0, 0, 974, 975, 7, 8, 0, 0, 975, 1072,
-		3, 128, 64, 12, 976, 977, 10, 10, 0, 0, 977, 978, 5, 27, 0, 0, 978, 1072,
+		1073, 1, 0, 0, 0, 964, 965, 10, 15, 0, 0, 965, 966, 7, 5, 0, 0, 966, 1072,
+		3, 128, 64, 16, 967, 968, 10, 14, 0, 0, 968, 969, 7, 6, 0, 0, 969, 1072,
+		3, 128, 64, 15, 970, 971, 10, 13, 0, 0, 971, 972, 7, 7, 0, 0, 972, 1072,
+		3, 128, 64, 14, 973, 974, 10, 12, 0, 0, 974, 975, 7, 8, 0, 0, 975, 1072,
+		3, 128, 64, 13, 976, 977, 10, 10, 0, 0, 977, 978, 5, 27, 0, 0, 978, 1072,
 		3, 128, 64, 11, 979, 980, 10, 9, 0, 0, 980, 981, 5, 26, 0, 0, 981, 1072,
 		3, 128, 64, 10, 982, 983, 10, 8, 0, 0, 983, 984, 7, 9, 0, 0, 984, 1072,
 		3, 128, 64, 9, 985, 986, 10, 5, 0, 0, 986, 987, 7, 10, 0, 0, 987, 1072,
@@ -586,8 +586,8 @@ func promiseparserParserInit() {
 		1046, 1, 0, 0, 0, 1052, 1051, 1, 0, 0, 0, 1052, 1053, 1, 0, 0, 0, 1053,
 		1057, 1, 0, 0, 0, 1054, 1055, 5, 31, 0, 0, 1055, 1057, 3, 128, 64, 0, 1056,
 		1045, 1, 0, 0, 0, 1056, 1054, 1, 0, 0, 0, 1057, 1072, 1, 0, 0, 0, 1058,
-		1059, 10, 20, 0, 0, 1059, 1072, 5, 72, 0, 0, 1060, 1061, 10, 19, 0, 0,
-		1061, 1072, 5, 68, 0, 0, 1062, 1063, 10, 7, 0, 0, 1063, 1064, 5, 3, 0,
+		1059, 10, 20, 0, 0, 1059, 1072, 5, 68, 0, 0, 1060, 1061, 10, 11, 0, 0,
+		1061, 1072, 5, 71, 0, 0, 1062, 1063, 10, 7, 0, 0, 1063, 1064, 5, 3, 0,
 		0, 1064, 1072, 3, 148, 74, 0, 1065, 1066, 10, 6, 0, 0, 1066, 1068, 5, 4,
 		0, 0, 1067, 1069, 5, 68, 0, 0, 1068, 1067, 1, 0, 0, 0, 1068, 1069, 1, 0,
 		0, 0, 1069, 1070, 1, 0, 0, 0, 1070, 1072, 3, 70, 35, 0, 1071, 964, 1, 0,
@@ -17784,8 +17784,8 @@ func (s *ErrorPropagateExprContext) Expression() IExpressionContext {
 	return t.(IExpressionContext)
 }
 
-func (s *ErrorPropagateExprContext) QUESTION() antlr.TerminalNode {
-	return s.GetToken(PromiseParserQUESTION, 0)
+func (s *ErrorPropagateExprContext) CARET() antlr.TerminalNode {
+	return s.GetToken(PromiseParserCARET, 0)
 }
 
 func (s *ErrorPropagateExprContext) EnterRule(listener antlr.ParseTreeListener) {
@@ -19448,7 +19448,7 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 		}
 		{
 			p.SetState(953)
-			p.expression(18)
+			p.expression(19)
 		}
 
 	case PromiseParserBANG:
@@ -19465,7 +19465,7 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 		}
 		{
 			p.SetState(955)
-			p.expression(17)
+			p.expression(18)
 		}
 
 	case PromiseParserTILDE:
@@ -19482,7 +19482,7 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 		}
 		{
 			p.SetState(957)
-			p.expression(16)
+			p.expression(17)
 		}
 
 	case PromiseParserLT:
@@ -19507,7 +19507,7 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 		}
 		{
 			p.SetState(960)
-			p.expression(15)
+			p.expression(16)
 		}
 
 	case PromiseParserIF, PromiseParserMATCH, PromiseParserGO, PromiseParserUNSAFE, PromiseParserMOVE, PromiseParserNONE, PromiseParserTRUE, PromiseParserFALSE, PromiseParserTHIS, PromiseParserOR, PromiseParserPIPE, PromiseParserLBRACE, PromiseParserLPAREN, PromiseParserLBRACKET, PromiseParserFLOAT_LITERAL, PromiseParserINT_LITERAL, PromiseParserTRIPLE_STRING, PromiseParserRAW_STRING, PromiseParserSTRING_OPEN, PromiseParserCHAR_LITERAL, PromiseParserIDENT:
@@ -19551,8 +19551,8 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				p.PushNewRecursionContext(localctx, _startState, PromiseParserRULE_expression)
 				p.SetState(964)
 
-				if !(p.Precpred(p.GetParserRuleContext(), 14)) {
-					p.SetError(antlr.NewFailedPredicateException(p, "p.Precpred(p.GetParserRuleContext(), 14)", ""))
+				if !(p.Precpred(p.GetParserRuleContext(), 15)) {
+					p.SetError(antlr.NewFailedPredicateException(p, "p.Precpred(p.GetParserRuleContext(), 15)", ""))
 					goto errorExit
 				}
 				{
@@ -19568,7 +19568,7 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				}
 				{
 					p.SetState(966)
-					p.expression(15)
+					p.expression(16)
 				}
 
 			case 2:
@@ -19576,8 +19576,8 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				p.PushNewRecursionContext(localctx, _startState, PromiseParserRULE_expression)
 				p.SetState(967)
 
-				if !(p.Precpred(p.GetParserRuleContext(), 13)) {
-					p.SetError(antlr.NewFailedPredicateException(p, "p.Precpred(p.GetParserRuleContext(), 13)", ""))
+				if !(p.Precpred(p.GetParserRuleContext(), 14)) {
+					p.SetError(antlr.NewFailedPredicateException(p, "p.Precpred(p.GetParserRuleContext(), 14)", ""))
 					goto errorExit
 				}
 				{
@@ -19593,7 +19593,7 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				}
 				{
 					p.SetState(969)
-					p.expression(14)
+					p.expression(15)
 				}
 
 			case 3:
@@ -19601,8 +19601,8 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				p.PushNewRecursionContext(localctx, _startState, PromiseParserRULE_expression)
 				p.SetState(970)
 
-				if !(p.Precpred(p.GetParserRuleContext(), 12)) {
-					p.SetError(antlr.NewFailedPredicateException(p, "p.Precpred(p.GetParserRuleContext(), 12)", ""))
+				if !(p.Precpred(p.GetParserRuleContext(), 13)) {
+					p.SetError(antlr.NewFailedPredicateException(p, "p.Precpred(p.GetParserRuleContext(), 13)", ""))
 					goto errorExit
 				}
 				{
@@ -19618,7 +19618,7 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				}
 				{
 					p.SetState(972)
-					p.expression(13)
+					p.expression(14)
 				}
 
 			case 4:
@@ -19626,8 +19626,8 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				p.PushNewRecursionContext(localctx, _startState, PromiseParserRULE_expression)
 				p.SetState(973)
 
-				if !(p.Precpred(p.GetParserRuleContext(), 11)) {
-					p.SetError(antlr.NewFailedPredicateException(p, "p.Precpred(p.GetParserRuleContext(), 11)", ""))
+				if !(p.Precpred(p.GetParserRuleContext(), 12)) {
+					p.SetError(antlr.NewFailedPredicateException(p, "p.Precpred(p.GetParserRuleContext(), 12)", ""))
 					goto errorExit
 				}
 				{
@@ -19643,7 +19643,7 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				}
 				{
 					p.SetState(975)
-					p.expression(12)
+					p.expression(13)
 				}
 
 			case 5:
@@ -20184,7 +20184,7 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				}
 
 			case 19:
-				localctx = NewErrorPropagateExprContext(p, NewExpressionContext(p, _parentctx, _parentState))
+				localctx = NewErrorUnwrapExprContext(p, NewExpressionContext(p, _parentctx, _parentState))
 				p.PushNewRecursionContext(localctx, _startState, PromiseParserRULE_expression)
 				p.SetState(1058)
 
@@ -20194,7 +20194,7 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				}
 				{
 					p.SetState(1059)
-					p.Match(PromiseParserQUESTION)
+					p.Match(PromiseParserBANG)
 					if p.HasError() {
 						// Recognition error - abort rule
 						goto errorExit
@@ -20202,17 +20202,17 @@ func (p *PromiseParser) expression(_p int) (localctx IExpressionContext) {
 				}
 
 			case 20:
-				localctx = NewErrorUnwrapExprContext(p, NewExpressionContext(p, _parentctx, _parentState))
+				localctx = NewErrorPropagateExprContext(p, NewExpressionContext(p, _parentctx, _parentState))
 				p.PushNewRecursionContext(localctx, _startState, PromiseParserRULE_expression)
 				p.SetState(1060)
 
-				if !(p.Precpred(p.GetParserRuleContext(), 19)) {
-					p.SetError(antlr.NewFailedPredicateException(p, "p.Precpred(p.GetParserRuleContext(), 19)", ""))
+				if !(p.Precpred(p.GetParserRuleContext(), 11)) {
+					p.SetError(antlr.NewFailedPredicateException(p, "p.Precpred(p.GetParserRuleContext(), 11)", ""))
 					goto errorExit
 				}
 				{
 					p.SetState(1061)
-					p.Match(PromiseParserBANG)
+					p.Match(PromiseParserCARET)
 					if p.HasError() {
 						// Recognition error - abort rule
 						goto errorExit
@@ -25474,16 +25474,16 @@ func (p *PromiseParser) Semi_Sempred(localctx antlr.RuleContext, predIndex int) 
 func (p *PromiseParser) Expression_Sempred(localctx antlr.RuleContext, predIndex int) bool {
 	switch predIndex {
 	case 8:
-		return p.Precpred(p.GetParserRuleContext(), 14)
+		return p.Precpred(p.GetParserRuleContext(), 15)
 
 	case 9:
-		return p.Precpred(p.GetParserRuleContext(), 13)
+		return p.Precpred(p.GetParserRuleContext(), 14)
 
 	case 10:
-		return p.Precpred(p.GetParserRuleContext(), 12)
+		return p.Precpred(p.GetParserRuleContext(), 13)
 
 	case 11:
-		return p.Precpred(p.GetParserRuleContext(), 11)
+		return p.Precpred(p.GetParserRuleContext(), 12)
 
 	case 12:
 		return p.Precpred(p.GetParserRuleContext(), 10)
@@ -25531,7 +25531,7 @@ func (p *PromiseParser) Expression_Sempred(localctx antlr.RuleContext, predIndex
 		return p.Precpred(p.GetParserRuleContext(), 20)
 
 	case 27:
-		return p.Precpred(p.GetParserRuleContext(), 19)
+		return p.Precpred(p.GetParserRuleContext(), 11)
 
 	case 28:
 		return p.Precpred(p.GetParserRuleContext(), 7)

@@ -2042,10 +2042,10 @@ func (c *Checker) checkCastExpr(e *ast.CastExpr) types.Type {
 func (c *Checker) checkErrorPropagateExpr(e *ast.ErrorPropagateExpr) types.Type {
 	inner := c.checkExpr(e.Expr)
 	if c.curFunc == nil || !c.curFunc.CanError() {
-		c.errorf(e.Pos(), "error propagation (?) used outside of failable function")
+		c.errorf(e.Pos(), "error propagation (^) used outside of failable function")
 	}
 	if !c.info.FailableExprs[e.Expr] {
-		c.errorf(e.Pos(), "error propagation (?) requires a failable expression")
+		c.errorf(e.Pos(), "error propagation (^) requires a failable expression")
 	}
 	// The inner expression's type is the success type (error is propagated)
 	return inner

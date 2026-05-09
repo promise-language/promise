@@ -2297,7 +2297,7 @@ func TestErrorPropagate(t *testing.T) {
 	ir := generateIR(t, `
 		parse!(string s) int { return 0; }
 		process!() int {
-			x := parse("42")?;
+			x := parse("42")^;
 			return x;
 		}
 		main() { }
@@ -2357,14 +2357,14 @@ func TestErrorUnwrapStringTemp(t *testing.T) {
 	assertContains(t, ir, "promise_string_drop")
 }
 
-// B0260: When func()? propagates a string result, the ok-path i8* must be
+// B0260: When func()^ propagates a string result, the ok-path i8* must be
 // tracked as a stmt temp so it gets freed if not claimed (e.g., by vec.push
 // which dups the string).
 func TestErrorPropagateStringTemp(t *testing.T) {
 	ir := generateIR(t, `
 		make_str!() string { return "hello"; }
 		wrap!(string[] v) string[] {
-			v.push(make_str()?);
+			v.push(make_str()^);
 			return v;
 		}
 	`)
@@ -2449,7 +2449,7 @@ func TestVoidFailablePropagate(t *testing.T) {
 	ir := generateIR(t, `
 		validate!(string s) void { raise error(message: "invalid"); }
 		process!() void {
-			validate("x")?;
+			validate("x")^;
 		}
 		main() { }
 	`)
@@ -2487,8 +2487,8 @@ func TestVoidFailableHandler(t *testing.T) {
 func TestNestedErrorPropagation(t *testing.T) {
 	ir := generateIR(t, `
 		a!() int { return 1; }
-		b!() int { return a()?; }
-		c!() int { return b()?; }
+		b!() int { return a()^; }
+		c!() int { return b()^; }
 		main() { }
 	`)
 	// Both b and c should have propagation blocks
@@ -2700,7 +2700,7 @@ func TestFailableCallInsideHandler(t *testing.T) {
 	ir := generateIR(t, `
 		parse!(string s) int { return 0; }
 		foo!() int {
-			int v = parse("x") ? e { return parse("0")?; };
+			int v = parse("x") ? e { return parse("0")^; };
 			return v;
 		}
 		main() { foo() ? e { }; }
@@ -7396,7 +7396,7 @@ func TestModuleFailableFunc(t *testing.T) {
 		`
 		use parser "./parser";
 		main!() {
-			int v = parser.parse(10)?;
+			int v = parser.parse(10)^;
 		}
 		`,
 	)
@@ -9374,7 +9374,7 @@ func TestDropErrorPropagateCleansUp(t *testing.T) {
 		}
 		work!() int {
 			r := Resource(id: 1);
-			int val = risky()?;
+			int val = risky()^;
 			return val + r.id;
 		}
 		main() { }

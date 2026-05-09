@@ -852,7 +852,7 @@ func (c *Checker) synthesizeEnumEncodeMethod(enum *types.Enum, d *ast.EnumDecl) 
 // synthesizeEnumDecodeMethod builds:
 //
 //	decode(Decoder ~d) EnumName! `factory `public {
-//	  string _tag = d.decode_string()?;
+//	  string _tag = d.decode_string()^;
 //	  if _tag == "Variant1" { return EnumName.Variant1; }
 //	  else if _tag == "Variant2" { return EnumName.Variant2; }
 //	  ...
@@ -862,7 +862,7 @@ func (c *Checker) synthesizeEnumDecodeMethod(enum *types.Enum, d *ast.EnumDecl) 
 	enumName := d.Name
 	var stmts []ast.Stmt
 
-	// string _tag = d.decode_string()?;
+	// string _tag = d.decode_string()^;
 	stmts = append(stmts, &ast.TypedVarDecl{
 		Type:  &ast.NamedTypeRef{Name: "string"},
 		Name:  "_tag",
@@ -996,15 +996,15 @@ func (c *Checker) synthesizeDataEnumEncodeMethod(enum *types.Enum, d *ast.EnumDe
 // The discriminator key (tagName, default "type") MUST appear first in the JSON object.
 //
 //	decode(Decoder ~d) EnumName! `factory `public {
-//	  d.begin_object()?;
-//	  string? _dk = d.next_key()?;
+//	  d.begin_object()^;
+//	  string? _dk = d.next_key()^;
 //	  if _dk is absent { raise DecodeError(...); }
 //	  if _dk != "type" { raise DecodeError(...); }  // _dk narrowed to string
-//	  string _tag = d.decode_string()?;
+//	  string _tag = d.decode_string()^;
 //	  if _tag == "Circle" {
 //	    f64 _f_radius = 0.0;
 //	    for { ... key matching ... }
-//	    d.end_object()?;
+//	    d.end_object()^;
 //	    return EnumName.Circle(radius: _f_radius);
 //	  } else if ...
 //	  else { raise DecodeError(...); }
@@ -1013,10 +1013,10 @@ func (c *Checker) synthesizeDataEnumDecodeMethod(enum *types.Enum, d *ast.EnumDe
 	enumName := d.Name
 	var stmts []ast.Stmt
 
-	// d.begin_object()?;
+	// d.begin_object()^;
 	stmts = append(stmts, makeExprStmt(callMember(ident("d"), "begin_object")))
 
-	// string? _dk = d.next_key()?;
+	// string? _dk = d.next_key()^;
 	stmts = append(stmts, &ast.TypedVarDecl{
 		Type: &ast.OptionalTypeRef{Inner: &ast.NamedTypeRef{Name: "string"}},
 		Name: "_dk", Value: propagate(callMember(ident("d"), "next_key")),
@@ -1040,7 +1040,7 @@ func (c *Checker) synthesizeDataEnumDecodeMethod(enum *types.Enum, d *ast.EnumDe
 		}},
 	})
 
-	// string _tag = d.decode_string()?;
+	// string _tag = d.decode_string()^;
 	stmts = append(stmts, &ast.TypedVarDecl{
 		Type: &ast.NamedTypeRef{Name: "string"}, Name: "_tag",
 		Value: propagate(callMember(ident("d"), "decode_string")),
@@ -1109,7 +1109,7 @@ func (c *Checker) buildVariantDecodeBody(enumName string, v *types.Variant) []as
 	// Key-matching loop
 	stmts = append(stmts, c.buildVarFieldKeyMatchLoop(v))
 
-	// d.end_object()?;
+	// d.end_object()^;
 	stmts = append(stmts, makeExprStmt(callMember(ident("d"), "end_object")))
 
 	// return EnumName.Variant(field1: _f_field1, ...);

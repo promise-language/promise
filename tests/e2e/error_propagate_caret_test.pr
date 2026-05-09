@@ -1,0 +1,107 @@
+// Tests for explicit ^ error propagation syntax (T0118).
+type ParseError is error {
+  int code;
+}
+
+_parse_int!(string s) int {
+  if s == "bad" {
+    raise ParseError(message: "parse error", code: 1)
+  }
+  return 42;
+}
+
+_void_fail!() void {
+  raise error(message: "void fail");
+}
+
+// Helper functions for propagation tests
+_propagate_assign!() int {
+  int v = _parse_int("ok")^;
+  return v;
+}
+
+_propagate_return!() int {
+  return _parse_int("ok")^;
+}
+
+_propagate_error!() int {
+  return _parse_int("bad")^;
+}
+
+_propagate_void!() void {
+  _void_fail()^;
+}
+
+_level2!() int {
+  return _parse_int("bad")^;
+}
+_level1!() int {
+  return _level2()^;
+}
+
+_propagate_inside_handler!() int {
+  int v = _parse_int("bad")? e {
+    return _parse_int("ok")^;
+  };
+  return v;
+}
+
+_add_parsed!(string a, string b) int {
+  int x = _parse_int(a)^;
+  int y = _parse_int(b)^;
+  return x + y;
+}
+
+// Basic propagation in assignment
+test_propagate_assign() `test {
+  assert(_propagate_assign()! == 42, "propagate assign");
+}
+
+// Propagation in return
+test_propagate_return() `test {
+  assert(_propagate_return()! == 42, "propagate return");
+}
+
+// Propagation of error (error path)
+test_propagate_error() `test {
+  _propagate_error()? e {
+    assert(e.message == "parse error", "propagated error message");
+    return;
+  };
+  assert(false, "should not reach here");
+}
+
+// Propagation as statement (void)
+test_propagate_void() `test {
+  _propagate_void()? e {
+    assert(e.message == "void fail", "propagated void error message");
+    return;
+  };
+  assert(false, "should not reach here");
+}
+
+// Nested propagation
+test_nested_propagate() `test {
+  _level1()? e {
+    assert(e.message == "parse error", "nested propagated error");
+    return;
+  };
+  assert(false, "should not reach here");
+}
+
+// Propagation with XOR still working (^ is both postfix and binary)
+test_xor_still_works() `test {
+  assert((12 ^ 10) == 6, "12 ^ 10 == 6");
+  assert((0xFF ^ 0xFF) == 0, "x ^ x == 0");
+  assert((0 ^ 42) == 42, "0 ^ x == x");
+}
+
+// Propagation inside error handler body
+test_propagate_inside_handler() `test {
+  assert(_propagate_inside_handler()! == 42, "propagate inside handler");
+}
+
+// Multiple propagations in same function
+test_multiple_propagations() `test {
+  assert(_add_parsed("ok", "ok")! == 84, "multiple propagations");
+}

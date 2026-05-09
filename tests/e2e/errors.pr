@@ -6,9 +6,9 @@ safe_div!(int a, int b) int {
 }
 
 compute!() int {
-  // Propagate with ?
-  int x = safe_div(10, 2)?;
-  int y = safe_div(20, 4)?;
+  // Propagate with ^
+  int x = safe_div(10, 2)^;
+  int y = safe_div(20, 4)^;
   return x + y;
 }
 

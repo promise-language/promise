@@ -3115,13 +3115,14 @@ func (c *Compiler) cleanupEnvTemps() {
 
 // maybeTrackIterTemp tracks the instance pointer from a method call result
 // when the result type is a structural interface (T0088). At statement end,
-// unclaimed temps are cleaned up using __promise_iter_cleanup which frees
-// both the closure env and the instance.
+// unclaimed temps are cleaned up. Iterator/Stream types use __promise_iter_cleanup
+// (handles _FnIter parent chain + closure env). Other structural types use
+// __promise_structural_drop (B0270: RTTI-based drop for arbitrary concrete types).
 func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 	if result == nil || c.block == nil || c.block.Term != nil {
 		return
 	}
-	if !c.tempTrackingEnabled || c.iterCleanup == nil {
+	if !c.tempTrackingEnabled {
 		return
 	}
 	// Check if the result type is a structural interface (e.g., Iterator[T])
@@ -3141,7 +3142,15 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 		return
 	}
 	instancePtr := c.block.NewExtractValue(result, 1)
-	c.trackHeapTemp(instancePtr, c.iterCleanup)
+	// Iterator[T] and Stream[T] use iterCleanup (handles _FnIter parent chain).
+	// Other structural types use structuralDrop (B0270: RTTI-based, works for any type).
+	_, isIter := types.AsIterator(resultType)
+	_, isStream := types.AsStream(resultType)
+	if (isIter || isStream) && c.iterCleanup != nil {
+		c.trackHeapTemp(instancePtr, c.iterCleanup)
+	} else if c.structuralDrop != nil {
+		c.trackHeapTemp(instancePtr, c.structuralDrop)
+	}
 }
 
 // isTrackedStringCall returns true if the call expression produces a NEW

@@ -756,10 +756,19 @@ func (c *Compiler) emitViewMethodAdapter(
 		}
 	}
 
-	// Apply covariant return coercion first (swap vtable to structural view)
+	// Apply covariant return coercion (swap vtable to structural view).
+	// When both concrete and interface are failable, we must extract the inner value
+	// from the failable result, coerce it, then rebuild the failable tuple.
 	var retResult value.Value = result
 	if needsCovariantCoerce {
-		retResult = c.coerceToView(result, concreteResult, ifaceResultUnwrapped)
+		if concreteCanError && ifaceCanError {
+			// Both failable: extract inner value {i8*, i8*} from {i1, {i8*, i8*}, i8*}
+			innerVal := c.block.NewExtractValue(result, 1)
+			coerced := c.coerceToView(innerVal, concreteResult, ifaceResultUnwrapped)
+			retResult = c.block.NewInsertValue(result, coerced, 1)
+		} else {
+			retResult = c.coerceToView(result, concreteResult, ifaceResultUnwrapped)
+		}
 	}
 
 	if !concreteCanError && ifaceCanError {

@@ -303,10 +303,11 @@ type Compiler struct {
 	// noinline wrappers around coro.resume/done/destroy — used by generator consumers
 	// to hide the pattern from LLVM's coro-elide pass (which incorrectly stack-allocates
 	// generator frames when it sees ramp+resume+done+destroy in the same function).
-	genResume   *ir.Func // @__promise_gen_resume(i8*) → void [noinline]
-	genDone     *ir.Func // @__promise_gen_done(i8*) → i1 [noinline]
-	genDestroy  *ir.Func // @__promise_gen_destroy(i8*) → void [noinline]
-	iterCleanup *ir.Func // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
+	genResume      *ir.Func // @__promise_gen_resume(i8*) → void [noinline]
+	genDone        *ir.Func // @__promise_gen_done(i8*) → i1 [noinline]
+	genDestroy     *ir.Func // @__promise_gen_destroy(i8*) → void [noinline]
+	iterCleanup    *ir.Func // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
+	structuralDrop *ir.Func // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
 
 	// Target triple and platform flags
 	target      string // LLVM target triple
@@ -7061,5 +7062,47 @@ func (c *Compiler) declareCoroIntrinsics() {
 
 		freeInstBlk.NewCall(c.palFree, c.iterCleanup.Params[0])
 		freeInstBlk.NewRet(nil)
+	}
+
+	// B0270: Generic RTTI-based drop for structural interface instances.
+	// Unlike __promise_iter_cleanup which assumes _FnIter layout, this function
+	// works for ANY concrete type behind a structural interface by dispatching
+	// through the typeinfo drop_fn_ptr (field 1 of the variant/typeinfo struct).
+	// Instance layout: { typeinfo_ptr*, ... }
+	// Typeinfo layout: { i8* vtable_ptr, i8* drop_fn_ptr, ... }
+	c.structuralDrop = c.module.NewFunc("__promise_structural_drop", irtypes.Void,
+		ir.NewParam("inst", irtypes.I8Ptr))
+	{
+		entry := c.structuralDrop.NewBlock(".entry")
+		inst := c.structuralDrop.Params[0]
+
+		// Load variant/typeinfo pointer from instance field 0
+		instanceType := irtypes.NewStruct(irtypes.I8Ptr) // { typeinfo_ptr* }
+		typedInst := entry.NewBitCast(inst, irtypes.NewPointer(instanceType))
+		variantField := entry.NewGetElementPtr(instanceType, typedInst,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		variantPtr := entry.NewLoad(irtypes.I8Ptr, variantField)
+
+		// Load drop_fn_ptr from typeinfo field 1
+		typeinfoType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr) // { vtable, drop_fn }
+		typedInfo := entry.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoType))
+		dropFnField := entry.NewGetElementPtr(typeinfoType, typedInfo,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		dropFn := entry.NewLoad(irtypes.I8Ptr, dropFnField)
+
+		isNull := entry.NewICmp(enum.IPredEQ, dropFn, constant.NewNull(irtypes.I8Ptr))
+		callBlk := c.structuralDrop.NewBlock("drop.call")
+		freeBlk := c.structuralDrop.NewBlock("drop.free")
+		entry.NewCondBr(isNull, freeBlk, callBlk)
+
+		// Has drop: call it (synth drops include pal_free; $wrap calls drop + pal_free)
+		dropFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
+		typedFn := callBlk.NewBitCast(dropFn, irtypes.NewPointer(dropFnType))
+		callBlk.NewCall(typedFn, inst)
+		callBlk.NewRet(nil)
+
+		// No drop: just free the instance
+		freeBlk.NewCall(c.palFree, inst)
+		freeBlk.NewRet(nil)
 	}
 }

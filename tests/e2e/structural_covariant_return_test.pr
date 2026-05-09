@@ -1,11 +1,6 @@
 // Tests for covariant return types in structural interface satisfaction (T0065).
 // A concrete method returning ConcreteType should satisfy a structural interface
 // method returning StructuralInterface if ConcreteType satisfies StructuralInterface.
-//
-// Note: Tests that call through vtable dispatch returning structural interfaces
-// are blocked by B0270 (cleanup stack overflow). The sema-level acceptance is
-// verified by the fact that these assignments compile. Runtime dispatch tests
-// will be added once B0270 is fixed.
 type Readable `structural {
   read_data(int n) string `abstract;
 }
@@ -27,15 +22,20 @@ type MemDataSource {
   }
 }
 
-// Verify covariant return assignment compiles (sema acceptance)
-test_covariant_assignment_compiles() `test {
+// Basic covariant return: call through structural interface, get concrete return
+test_basic_covariant_return() `test {
   DataSource s = MemDataSource();
-  // Direct structural satisfaction still works at runtime
-  Readable r = MemReadable(data: "hello");
-  assert(r.read_data(0) == "hello", "direct structural assignment works");
+  Readable r = s.open_source("hello");
+  assert(r.read_data(0) == "hello", "covariant return via structural interface");
 }
 
-// Failable version compiles
+// Direct structural satisfaction still works
+test_direct_structural_assignment() `test {
+  Readable r = MemReadable(data: "direct");
+  assert(r.read_data(0) == "direct", "direct structural assignment works");
+}
+
+// Failable version
 type FailableDataSource `structural {
   open_source!(string name) Readable `abstract;
 }
@@ -46,6 +46,7 @@ type FailableMemDataSource {
   }
 }
 
+// Failable covariant return compiles (B0272: runtime leaks in failable path tracked separately)
 test_failable_covariant_compiles() `test {
   FailableDataSource s = FailableMemDataSource();
   assert(true, "failable covariant return compiles");
@@ -58,7 +59,8 @@ type SafeMemDataSource {
   }
 }
 
+// B0272: failable structural returns leak — compile-only test until fixed
 test_nonfailable_failable_covariant_compiles() `test {
   FailableDataSource s = SafeMemDataSource();
-  assert(true, "non-failable satisfies failable with covariant return");
+  assert(true, "non-failable satisfies failable with covariant return compiles");
 }

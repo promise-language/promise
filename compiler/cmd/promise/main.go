@@ -5613,6 +5613,83 @@ func runInit() {
 		os.Exit(1)
 	}
 	fmt.Printf("Created promise.toml (module: %s, epoch: %s)\n", name, defaultEpoch)
+
+	// Generate main.pr if it doesn't exist
+	if _, err := os.Stat("main.pr"); err != nil {
+		mainContent := `use io;
+use os;
+
+main!() {
+    print_line("Hello from Promise!");
+
+    // Module-qualified access, auto-propagated errors (!), string interpolation
+    cwd := os.working_dir;
+    print_line("Working directory: {cwd}");
+
+    // Failable call with ? catch — returns fallback on error
+    names := io.Dir.list(cwd);
+    print_line("Files: {names.len}");
+
+    safe := io.Dir.list("/nonexistent") ? { string[](); };
+    print_line("Safe: {safe.len} items");
+}
+`
+		if err := os.WriteFile("main.pr", []byte(mainContent), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing main.pr: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Created main.pr")
+	}
+
+	// Generate CLAUDE.md if it doesn't exist
+	if _, err := os.Stat("CLAUDE.md"); err != nil {
+		claudeContent := `# ` + name + `
+
+Promise project. Use ` + "`promise guide`" + ` for the full language reference.
+
+## Quick Start
+
+` + "```" + `bash
+promise run main.pr         # build and run
+promise build main.pr       # build only
+promise test file_test.pr   # run tests
+promise exec 'print_line("hi")'  # run a one-liner
+promise doc <module>        # show module API docs
+` + "```" + `
+
+## Error Handling
+
+` + "```" + `
+main!() { ... }             # failable main — errors auto-propagate
+result := do_thing()!;      # explicit propagation — raise error to caller
+result := do_thing()?;      # catch — result is error if it failed
+value := try_thing() ? { fallback(); };  # catch with recovery block
+` + "```" + `
+
+## Module Rules
+
+- Import with ` + "`use io;`" + ` — access as ` + "`io.File`" + `, ` + "`io.Dir`" + ` (always module-qualified)
+- Standard library (` + "`std`" + `) is auto-imported — ` + "`print_line`" + `, ` + "`Vector`" + `, ` + "`Map`" + `, etc. need no prefix
+
+## Available Modules
+
+| Module | Purpose | Docs |
+|--------|---------|------|
+| ` + "`io`" + ` | File I/O, buffered readers/writers, directories | ` + "`promise doc io`" + ` |
+| ` + "`os`" + ` | Environment, process execution, signals | ` + "`promise doc os`" + ` |
+| ` + "`json`" + ` | JSON encode/decode, JsonValue | ` + "`promise doc json`" + ` |
+| ` + "`path`" + ` | Path joining, dir/base/ext extraction | ` + "`promise doc path`" + ` |
+| ` + "`math`" + ` | Extended math functions | ` + "`promise doc math`" + ` |
+| ` + "`strings`" + ` | Extended string utilities | ` + "`promise doc strings`" + ` |
+| ` + "`time`" + ` | Extended time utilities | ` + "`promise doc time`" + ` |
+| ` + "`http`" + ` | HTTP client | ` + "`promise doc http`" + ` |
+`
+		if err := os.WriteFile("CLAUDE.md", []byte(claudeContent), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing CLAUDE.md: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Created CLAUDE.md")
+	}
 }
 
 func runInstall(args []string) {

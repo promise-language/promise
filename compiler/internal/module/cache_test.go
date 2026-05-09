@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"djabi.dev/go/promise_lang/internal/types"
@@ -283,39 +284,65 @@ func TestHashModuleInterfaceEnumWithTypeParams(t *testing.T) {
 }
 
 func TestBuildCacheKey(t *testing.T) {
-	key1 := BuildCacheKey("impl1", "compiler1", "x86_64", []string{"./a", "./b"})
+	key1 := BuildCacheKey("impl1", "compiler1", "x86_64", []string{"./a", "./b"}, nil)
 	if key1 == "" {
 		t.Fatal("expected non-empty cache key")
 	}
 
 	// Same inputs should produce same key
-	key2 := BuildCacheKey("impl1", "compiler1", "x86_64", []string{"./a", "./b"})
+	key2 := BuildCacheKey("impl1", "compiler1", "x86_64", []string{"./a", "./b"}, nil)
 	if key1 != key2 {
 		t.Error("same inputs should produce same cache key")
 	}
 
 	// Module path order should not matter (sorted internally)
-	key3 := BuildCacheKey("impl1", "compiler1", "x86_64", []string{"./b", "./a"})
+	key3 := BuildCacheKey("impl1", "compiler1", "x86_64", []string{"./b", "./a"}, nil)
 	if key1 != key3 {
 		t.Error("module path order should not affect cache key")
 	}
 
 	// Different impl hash should change key
-	key4 := BuildCacheKey("impl2", "compiler1", "x86_64", []string{"./a", "./b"})
+	key4 := BuildCacheKey("impl2", "compiler1", "x86_64", []string{"./a", "./b"}, nil)
 	if key1 == key4 {
 		t.Error("different impl hash should produce different cache key")
 	}
 
 	// Different compiler should change key
-	key5 := BuildCacheKey("impl1", "compiler2", "x86_64", []string{"./a", "./b"})
+	key5 := BuildCacheKey("impl1", "compiler2", "x86_64", []string{"./a", "./b"}, nil)
 	if key1 == key5 {
 		t.Error("different compiler hash should produce different cache key")
 	}
 
 	// Different target should change key
-	key6 := BuildCacheKey("impl1", "compiler1", "wasm32", []string{"./a", "./b"})
+	key6 := BuildCacheKey("impl1", "compiler1", "wasm32", []string{"./a", "./b"}, nil)
 	if key1 == key6 {
 		t.Error("different target should produce different cache key")
+	}
+
+	// T0181: Dep hashes affect cache key
+	key7 := BuildCacheKey("impl1", "compiler1", "x86_64", []string{"./a", "./b"}, []string{"./dep1:hash1"})
+	if key1 == key7 {
+		t.Error("adding dep hashes should produce different cache key")
+	}
+
+	// Different dep hash should change key
+	key8 := BuildCacheKey("impl1", "compiler1", "x86_64", []string{"./a", "./b"}, []string{"./dep1:hash2"})
+	if key7 == key8 {
+		t.Error("different dep hash should produce different cache key")
+	}
+
+	// Dep hash order should not matter (sorted internally)
+	key9 := BuildCacheKey("impl1", "compiler1", "x86_64", nil, []string{"./dep2:h2", "./dep1:h1"})
+	key10 := BuildCacheKey("impl1", "compiler1", "x86_64", nil, []string{"./dep1:h1", "./dep2:h2"})
+	if key9 != key10 {
+		t.Error("dep hash order should not affect cache key")
+	}
+
+	// Nil vs empty dep hashes should produce same key
+	key11 := BuildCacheKey("impl1", "compiler1", "x86_64", nil, nil)
+	key12 := BuildCacheKey("impl1", "compiler1", "x86_64", nil, []string{})
+	if key11 != key12 {
+		t.Error("nil and empty dep hashes should produce same cache key")
 	}
 }
 
@@ -380,6 +407,31 @@ func TestBuildCacheRoundTrip(t *testing.T) {
 	subdir := filepath.Join(cacheDir, cacheKey[:2])
 	if _, err := os.Stat(subdir); err != nil {
 		t.Errorf("expected two-level subdir %s to exist", subdir)
+	}
+}
+
+func TestFormatCacheKeyInputs(t *testing.T) {
+	inputs := []CacheKeyInput{
+		{Label: "impl", Value: "abcdef1234567890abcdef1234567890"},
+		{Label: "compiler", Value: "1111222233334444"},
+		{Label: "target", Value: "x86_64"},
+		{Label: "dep ./mymod", Value: "aaaabbbbccccddddeeee"},
+	}
+	out := FormatCacheKeyInputs("test-name", "finalkey123", inputs)
+	if !strings.Contains(out, "[cache DEBUG] test-name") {
+		t.Error("expected header with name")
+	}
+	if !strings.Contains(out, "impl: abcdef1234567890") {
+		t.Error("expected truncated impl hash")
+	}
+	if !strings.Contains(out, "target: x86_64") {
+		t.Error("expected target (not truncated, shorter than 16)")
+	}
+	if !strings.Contains(out, "dep ./mymod: aaaabbbbccccdddd") {
+		t.Error("expected truncated dep hash")
+	}
+	if !strings.Contains(out, "key: finalkey123") {
+		t.Error("expected final key")
 	}
 }
 

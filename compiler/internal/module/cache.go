@@ -262,10 +262,16 @@ func hashString(s string) string {
 
 // BuildCacheKey combines a module's source hash with its build context to produce
 // a cache key. The build context includes the compiler binary hash, target triple,
-// and sorted list of all module paths in the build. This ensures a module's cached
-// .o is only reused when compiled in the exact same context (same co-modules,
-// same compiler, same target).
-func BuildCacheKey(implHash, compilerHash, target string, allModulePaths []string) string {
+// sorted list of all module paths in the build, and dependency hashes. This ensures
+// a module's cached artifact is only reused when compiled in the exact same context
+// (same co-modules, same compiler, same target, same dependency state).
+//
+// depHashes is a list of "name:hash" strings identifying each direct dependency's
+// content. Typically the hash is the dependency's ImplHash (source content hash),
+// which is a conservative proxy for InterfaceHash — any source change in a
+// dependency invalidates the consumer's cache. Catalog module dependencies are
+// already covered by compilerHash (they're embedded in the binary).
+func BuildCacheKey(implHash, compilerHash, target string, allModulePaths []string, depHashes []string) string {
 	h := fnv.New128a()
 	fmt.Fprintf(h, "impl:%s\n", implHash)
 	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
@@ -276,7 +282,37 @@ func BuildCacheKey(implHash, compilerHash, target string, allModulePaths []strin
 	for _, p := range sorted {
 		fmt.Fprintf(h, "mod:%s\n", p)
 	}
+	sortedDeps := make([]string, len(depHashes))
+	copy(sortedDeps, depHashes)
+	sort.Strings(sortedDeps)
+	for _, d := range sortedDeps {
+		fmt.Fprintf(h, "dep:%s\n", d)
+	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// CacheKeyInput represents a single input that was hashed into a cache key.
+// Used for debug logging when PROMISE_CACHE_DEBUG is set.
+type CacheKeyInput struct {
+	Label string // e.g., "impl", "compiler", "target", "dep ./mymod"
+	Value string // the hash or value that was hashed
+}
+
+// FormatCacheKeyInputs formats a list of cache key inputs for debug logging.
+// Returns a multi-line string showing each input label and its value (truncated
+// to 16 hex chars for readability).
+func FormatCacheKeyInputs(name, cacheKey string, inputs []CacheKeyInput) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[cache DEBUG] %s\n", name)
+	for _, inp := range inputs {
+		v := inp.Value
+		if len(v) > 16 {
+			v = v[:16]
+		}
+		fmt.Fprintf(&b, "  %s: %s\n", inp.Label, v)
+	}
+	fmt.Fprintf(&b, "  key: %s", cacheKey)
+	return b.String()
 }
 
 // InstanceCacheKey produces a cache key for a single generic type instantiation.

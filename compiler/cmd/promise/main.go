@@ -663,6 +663,11 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 		if cacheable {
 			fmt.Fprintf(os.Stderr, "[cache MISS] %s key=%s compiler=%s std=%s target=%s\n",
 				filepath.Base(filename), cacheKey[:16], module.CompilerHash()[:16], cachedStdHash()[:16], target)
+			if os.Getenv("PROMISE_CACHE_DEBUG") == "verbose" {
+				inputs := computeTestFileCacheInputs(filename, target, cfg)
+				fmt.Fprintln(os.Stderr, module.FormatCacheKeyInputs(
+					"test-file "+filepath.Base(filename), cacheKey, inputs))
+			}
 		} else {
 			fmt.Fprintf(os.Stderr, "[cache SKIP] %s (not cacheable)\n", filepath.Base(filename))
 		}
@@ -754,13 +759,43 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 	th := fnv.New128a()
 	fmt.Fprintf(th, "%s\n%s", implHash, cfg.cacheString())
 	implHashWithTimeout := hex.EncodeToString(th.Sum(nil))
-	cacheKey := module.BuildCacheKey(implHashWithTimeout, compilerHash, target, nil)
+
+	// T0181: Include dependency hashes in cache key so that changes to
+	// imported local modules invalidate the consuming module's cached binary.
+	depHashes := scanModuleLocalDeps(modDir)
+
+	cacheKey := module.BuildCacheKey(implHashWithTimeout, compilerHash, target, nil, depHashes)
 	cacheDir, _ := module.BuildCacheDir()
+
+	cacheDebug := os.Getenv("PROMISE_CACHE_DEBUG") != ""
 
 	if cacheDir != "" {
 		if cachedBin := module.LookupTestBinaryCache(cacheDir, cacheKey); cachedBin != "" {
+			if cacheDebug {
+				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(modDir), cacheKey[:16])
+			}
 			runTestBinary(cachedBin, cfg.defaultTimeout, start, targetTriple)
 			return
+		}
+	}
+
+	if cacheDebug {
+		fmt.Fprintf(os.Stderr, "[cache MISS] %s key=%s compiler=%s target=%s deps=%d\n",
+			filepath.Base(modDir), cacheKey[:16], compilerHash[:16], target, len(depHashes))
+		if os.Getenv("PROMISE_CACHE_DEBUG") == "verbose" {
+			inputs := []module.CacheKeyInput{
+				{Label: "impl", Value: implHashWithTimeout},
+				{Label: "compiler", Value: compilerHash},
+				{Label: "target", Value: target},
+			}
+			for _, dh := range depHashes {
+				parts := strings.SplitN(dh, ":", 2)
+				if len(parts) == 2 {
+					inputs = append(inputs, module.CacheKeyInput{Label: "dep " + parts[0], Value: parts[1]})
+				}
+			}
+			fmt.Fprintln(os.Stderr, module.FormatCacheKeyInputs(
+				"module-test "+filepath.Base(modDir), cacheKey, inputs))
 		}
 	}
 
@@ -4121,6 +4156,101 @@ func computeTestFileCacheKey(filename, target string, cfg testTimeoutConfig) (st
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), true
+}
+
+// computeTestFileCacheInputs returns the list of inputs used in a test file's
+// cache key computation for debug logging. Mirrors the logic in
+// computeTestFileCacheKey without computing the key itself.
+func computeTestFileCacheInputs(filename, target string, cfg testTimeoutConfig) []module.CacheKeyInput {
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return nil
+	}
+
+	fh := fnv.New128a()
+	fh.Write(content)
+	fileHash := hex.EncodeToString(fh.Sum(nil))
+
+	inputs := []module.CacheKeyInput{
+		{Label: "file", Value: fileHash},
+		{Label: "compiler", Value: module.CompilerHash()},
+		{Label: "std", Value: cachedStdHash()},
+		{Label: "target", Value: target},
+		{Label: "timeout", Value: cfg.cacheString()},
+	}
+
+	abs, _ := filepath.Abs(filename)
+	dir := filepath.Dir(abs)
+
+	embedRe := regexp.MustCompile("`embed\\(\"([^\"]+)\"")
+	for _, m := range embedRe.FindAllSubmatch(content, -1) {
+		embedPath := string(m[1])
+		absEmbed := filepath.Join(dir, embedPath)
+		if embedContent, err := os.ReadFile(absEmbed); err == nil {
+			eh := fnv.New128a()
+			eh.Write(embedContent)
+			inputs = append(inputs, module.CacheKeyInput{
+				Label: "embed " + embedPath, Value: hex.EncodeToString(eh.Sum(nil)),
+			})
+		}
+	}
+
+	useRe := regexp.MustCompile(`use\s+[\w_]+\s+"([^"]+)"`)
+	for _, m := range useRe.FindAllSubmatch(content, -1) {
+		path := string(m[1])
+		if strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") {
+			modPath := filepath.Join(dir, path)
+			if modHash, err := module.HashModuleSources(modPath, false); err == nil {
+				inputs = append(inputs, module.CacheKeyInput{
+					Label: "dep " + path, Value: modHash,
+				})
+			}
+		}
+	}
+
+	return inputs
+}
+
+// scanModuleLocalDeps scans all non-test .pr files in modDir for local module
+// dependencies (use statements with relative paths). Returns a sorted list of
+// "path:implhash" strings suitable for passing as depHashes to BuildCacheKey.
+// Errors are silently ignored — the caller will get a cache miss and recompile.
+func scanModuleLocalDeps(modDir string) []string {
+	files, err := module.CollectModuleSources(modDir, false) // non-test sources only
+	if err != nil {
+		return nil
+	}
+
+	useRe := regexp.MustCompile(`use\s+[\w_]+\s+"([^"]+)"`)
+	seen := map[string]bool{}
+	var depHashes []string
+
+	for _, path := range files {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		matches := useRe.FindAllSubmatch(content, -1)
+		for _, m := range matches {
+			depPath := string(m[1])
+			if !strings.HasPrefix(depPath, "./") && !strings.HasPrefix(depPath, "../") {
+				continue // skip non-local (remote) imports
+			}
+			if seen[depPath] {
+				continue
+			}
+			seen[depPath] = true
+			absDepDir := filepath.Join(modDir, depPath)
+			depHash, err := module.HashModuleSources(absDepDir, false)
+			if err != nil {
+				continue
+			}
+			depHashes = append(depHashes, depPath+":"+depHash)
+		}
+	}
+
+	sort.Strings(depHashes)
+	return depHashes
 }
 
 // isModuleTestFile checks whether filename is a *_test.pr file inside a module

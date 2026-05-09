@@ -3391,8 +3391,8 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 
 // isTrackedStringCall returns true if the call expression produces a NEW
 // heap-allocated string (T0073, T0099, T0123). Tracks ALL calls returning
-// string type. After B0248, string.to_string() also allocates (via concat
-// with empty string), so there are no known borrows left to exclude.
+// string type. After B0255, string.to_string() allocates via clone(),
+// so there are no known borrows left to exclude.
 func (c *Compiler) isTrackedStringCall(_ *ast.CallExpr) bool {
 	return true
 }

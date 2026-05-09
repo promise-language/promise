@@ -122,7 +122,13 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 				if c.optionalFieldString {
 					c.optionalFieldString = false
 				} else {
-					c.trackStringTemp(result)
+					// B0287: For optional unwrap on ident source, the optional's
+					// drop binding owns the inner string. Don't track as a
+					// statement temp — that would cause a double-free at scope exit.
+					_, isIdentSource := e.Expr.(*ast.IdentExpr)
+					if !(c.info.OptionalUnwraps[e] && isIdentSource) {
+						c.trackStringTemp(result)
+					}
 				}
 			}
 		}
@@ -6749,14 +6755,25 @@ func (c *Compiler) genIsExpr(e *ast.IsExpr) value.Value {
 
 func (c *Compiler) genIsIdentPattern(expr ast.Expr, p *ast.IdentIsPattern) value.Value {
 	// Optional: x is present / x is absent
-	if p.Name == "present" {
+	if p.Name == "present" || p.Name == "absent" {
 		optVal := c.genExpr(expr)
-		return c.block.NewExtractValue(optVal, 0) // i1 flag field
-	}
-	if p.Name == "absent" {
-		optVal := c.genExpr(expr)
-		flag := c.block.NewExtractValue(optVal, 0)
-		return c.block.NewXor(flag, constant.NewInt(irtypes.I1, 1)) // negate
+		flag := c.block.NewExtractValue(optVal, 0) // i1 flag field
+
+		// B0288: Drop temporary optional data for call-like expressions.
+		// When a method/function call returns T? with droppable inner T
+		// (enum, string, vector), the data portion leaks unless dropped.
+		// Only drop for expressions that produce fresh temporaries (calls,
+		// optional chains). Field/index/ident expressions share ownership
+		// with the parent variable — dropping would double-free.
+		switch expr.(type) {
+		case *ast.CallExpr, *ast.OptionalChainExpr, *ast.ErrorHandlerExpr:
+			c.dropTempOptionalInner(expr, optVal, flag)
+		}
+
+		if p.Name == "absent" {
+			return c.block.NewXor(flag, constant.NewInt(irtypes.I1, 1))
+		}
+		return flag
 	}
 
 	// Check if the subject is an optional type — unwrap before checking inner type
@@ -6784,6 +6801,104 @@ func (c *Compiler) genIsIdentPattern(expr ast.Expr, p *ast.IdentIsPattern) value
 
 	// Named type check via RTTI
 	return c.genIsNamedType(expr, p.Name)
+}
+
+// dropTempOptionalInner drops the inner value of a temporary optional struct.
+// B0288: When `expr is present/absent` evaluates a non-ident expression (e.g., method call)
+// returning T?, the data portion of the {i1, T} struct is abandoned. If T is a droppable
+// type (enum with heap data, string, vector), the inner value must be conditionally dropped
+// (only when the flag indicates presence) to prevent leaks.
+func (c *Compiler) dropTempOptionalInner(expr ast.Expr, optVal value.Value, flag value.Value) {
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	exprType := c.info.Types[expr]
+	if exprType == nil {
+		return
+	}
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	opt, ok := exprType.(*types.Optional)
+	if !ok {
+		return
+	}
+	elem := opt.Elem()
+	if c.typeSubst != nil {
+		elem = types.Substitute(elem, c.typeSubst)
+	}
+
+	// Determine what kind of drop is needed.
+	innerEnum := extractEnum(elem)
+	innerNamed := extractNamed(elem)
+
+	if innerEnum != nil {
+		// Enum with droppable variants — call the synthesized enum drop function.
+		if !c.enumInstanceHasDrop(elem, innerEnum) {
+			return
+		}
+		enumName := innerEnum.Obj().Name()
+		if inst, ok := elem.(*types.Instance); ok {
+			enumName = monoName(inst)
+		} else if c.typeSubst != nil {
+			resolved := types.Substitute(elem, c.typeSubst)
+			if inst, ok := resolved.(*types.Instance); ok {
+				enumName = monoName(inst)
+			}
+		}
+		mangledName := mangleMethodName(enumName, "drop", false)
+		dropFunc, exists := c.funcs[mangledName]
+		if !exists || dropFunc == nil {
+			return
+		}
+
+		innerVal := c.block.NewExtractValue(optVal, 1)
+		alloca := c.createEntryAlloca(innerVal.Type())
+		c.block.NewStore(innerVal, alloca)
+
+		dropBlock := c.newBlock("is.temp.drop")
+		skipBlock := c.newBlock("is.temp.skip")
+		c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+		c.block = dropBlock
+		ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
+		c.block.NewCall(dropFunc, ptr)
+		c.block.NewBr(skipBlock)
+
+		c.block = skipBlock
+	} else if innerNamed == types.TypString {
+		// String — call promise_string_drop.
+		innerVal := c.block.NewExtractValue(optVal, 1)
+		dropBlock := c.newBlock("is.temp.drop")
+		skipBlock := c.newBlock("is.temp.skip")
+		c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+		c.block = dropBlock
+		c.block.NewCall(c.funcs["promise_string_drop"], innerVal)
+		c.block.NewBr(skipBlock)
+
+		c.block = skipBlock
+	} else if innerNamed != nil {
+		// Vector or channel — call their drop.
+		var dropFunc *ir.Func
+		if _, isVec := types.AsVector(elem); isVec || innerNamed == types.TypVector {
+			dropFunc = c.funcs["Vector.drop"]
+		} else if _, isCh := types.AsChannel(elem); isCh || innerNamed == types.TypChannel {
+			dropFunc = c.funcs["Channel.drop"]
+		}
+		if dropFunc != nil {
+			innerVal := c.block.NewExtractValue(optVal, 1)
+			dropBlock := c.newBlock("is.temp.drop")
+			skipBlock := c.newBlock("is.temp.skip")
+			c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+			c.block = dropBlock
+			c.block.NewCall(dropFunc, innerVal)
+			c.block.NewBr(skipBlock)
+
+			c.block = skipBlock
+		}
+	}
 }
 
 // genIsOptionalType generates code for `optExpr is TypeName` where optExpr has type T?.

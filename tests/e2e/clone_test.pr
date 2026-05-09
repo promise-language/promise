@@ -254,4 +254,168 @@ test_vector_clone_calls_element_clone() `test {
   assert(v[1].value == 5, "orig 1");
 }
 
+// --- Map clone (T0172) ---
+
+test_map_clone_int_keys() `test {
+  map[int, int] m = map[int, int]();
+  m[1] = 10;
+  m[2] = 20;
+  m[3] = 30;
+  map[int, int] m2 = m.clone();
+  assert(m2.len == 3, "len");
+  assert(m2.get_or(1, 0) == 10, "key 1");
+  assert(m2.get_or(2, 0) == 20, "key 2");
+  assert(m2.get_or(3, 0) == 30, "key 3");
+}
+
+test_map_clone_string_keys() `test {
+  map[string, int] m = map[string, int]();
+  m["a"] = 1;
+  m["b"] = 2;
+  map[string, int] m2 = m.clone();
+  assert(m2.len == 2, "len");
+  assert(m2.get_or("a", 0) == 1, "key a");
+  assert(m2.get_or("b", 0) == 2, "key b");
+}
+
+test_map_clone_string_values() `test {
+  map[int, string] m = map[int, string]();
+  m[1] = "hello";
+  m[2] = "world";
+  map[int, string] m2 = m.clone();
+  assert(m2.len == 2, "len");
+  assert(m2.get_or(1, "") == "hello", "val 1");
+  assert(m2.get_or(2, "") == "world", "val 2");
+}
+
+test_map_clone_empty() `test {
+  map[int, int] m = map[int, int]();
+  map[int, int] m2 = m.clone();
+  assert(m2.len == 0, "empty clone len");
+  assert(m2.is_empty, "empty clone is_empty");
+}
+
+test_map_clone_independence() `test {
+  map[string, int] m = map[string, int]();
+  m["x"] = 42;
+  map[string, int] m2 = m.clone();
+  m2["y"] = 99;
+  assert(m.len == 1, "original len unchanged");
+  assert(m2.len == 2, "clone has new entry");
+  assert(!m.contains("y"), "original lacks new key");
+  assert(m2.contains("y"), "clone has new key");
+}
+
+// --- Set clone (T0172) ---
+
+test_set_clone_int() `test {
+  Set[int] s = Set[int]();
+  s.add(1);
+  s.add(2);
+  s.add(3);
+  Set[int] s2 = s.clone();
+  assert(s2.len == 3, "len");
+  assert(s2.contains(1), "has 1");
+  assert(s2.contains(2), "has 2");
+  assert(s2.contains(3), "has 3");
+}
+
+test_set_clone_string() `test {
+  Set[string] s = Set[string]();
+  s.add("hello");
+  s.add("world");
+  Set[string] s2 = s.clone();
+  assert(s2.len == 2, "len");
+  assert(s2.contains("hello"), "has hello");
+  assert(s2.contains("world"), "has world");
+}
+
+test_set_clone_empty() `test {
+  Set[int] s = Set[int]();
+  Set[int] s2 = s.clone();
+  assert(s2.len == 0, "empty clone len");
+  assert(s2.is_empty, "empty clone is_empty");
+}
+
+test_set_clone_independence() `test {
+  Set[int] s = Set[int]();
+  s.add(10);
+  Set[int] s2 = s.clone();
+  s2.add(20);
+  assert(s.len == 1, "original len unchanged");
+  assert(s2.len == 2, "clone has new elem");
+  assert(!s.contains(20), "original lacks new elem");
+  assert(s2.contains(20), "clone has new elem");
+}
+
+test_map_clone_string_keys_and_values() `test {
+  map[string, string] m = map[string, string]();
+  m["greeting"] = "hello";
+  m["farewell"] = "goodbye";
+  map[string, string] m2 = m.clone();
+  assert(m2.len == 2, "len");
+  assert(m2.get_or("greeting", "") == "hello", "greeting");
+  assert(m2.get_or("farewell", "") == "goodbye", "farewell");
+}
+
+test_map_clone_after_remove() `test {
+  map[int, int] m = map[int, int]();
+  m[1] = 10;
+  m[2] = 20;
+  m[3] = 30;
+  m.remove(2);
+  map[int, int] m2 = m.clone();
+  assert(m2.len == 2, "len after remove");
+  assert(m2.get_or(1, 0) == 10, "key 1");
+  assert(m2.get_or(3, 0) == 30, "key 3");
+  assert(!m2.contains(2), "removed key absent");
+}
+
+test_set_clone_after_remove() `test {
+  Set[int] s = Set[int]();
+  s.add(1);
+  s.add(2);
+  s.add(3);
+  s.remove(2);
+  Set[int] s2 = s.clone();
+  assert(s2.len == 2, "len after remove");
+  assert(s2.contains(1), "has 1");
+  assert(!s2.contains(2), "removed absent");
+  assert(s2.contains(3), "has 3");
+}
+
+// --- Clone annotation with Map/Set fields (T0172) ---
+
+type Registry `clone {
+  string name;
+  map[string, int] scores;
+}
+
+test_clone_type_with_map_field() `test {
+  Registry r = Registry(name: "test", scores: map[string, int]());
+  r.scores["alice"] = 95;
+  r.scores["bob"] = 87;
+  Registry r2 = r.clone();
+  assert(r2.name == "test", "name");
+  assert(r2.scores.len == 2, "scores len");
+  assert(r2.scores.get_or("alice", 0) == 95, "alice score");
+  assert(r2.scores.get_or("bob", 0) == 87, "bob score");
+}
+
+type Group `clone {
+  string label;
+  Set[int] members;
+}
+
+test_clone_type_with_set_field() `test {
+  Group g = Group(label: "team", members: Set[int]());
+  g.members.add(1);
+  g.members.add(2);
+  Group g2 = g.clone();
+  assert(g2.label == "team", "label");
+  assert(g2.members.len == 2, "members len");
+  assert(g2.members.contains(1), "has 1");
+  assert(g2.members.contains(2), "has 2");
+}
+
 // Cloneable structural interface is auto-imported from std/clone.pr

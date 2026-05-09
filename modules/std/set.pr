@@ -9,6 +9,20 @@ type Set[T: Hashable + Equal] `public {
   get len int => this._map.len;
   get is_empty bool => this._map.is_empty;
 
+  clone() Self `public `doc("Returns a deep copy of this set.") {
+    Set[T] result = Set[T]();
+    for slot in this._map._buckets {
+      match slot {
+        Slot.Used(k, _) => {
+          result.add(k);
+        },
+        _ => {
+        },
+      }
+    }
+    return result;
+  }
+
   add(~T elem) {
     this._map[elem] = true;
   }

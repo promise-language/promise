@@ -20,6 +20,20 @@ type Map[K: Hashable + Equal, V] `public {
   get len int => this._count;
   get is_empty bool => this._count == 0;
 
+  clone() Self `public `doc("Returns a deep copy of this map.") {
+    Map[K, V] result = Map[K, V]();
+    for slot in this._buckets {
+      match slot {
+        Slot.Used(k, v) => {
+          result[k] = v;
+        },
+        _ => {
+        },
+      }
+    }
+    return result;
+  }
+
   [](K key) V? {
     int cap = this._buckets.len;
     int h = key.hash % cap;

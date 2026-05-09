@@ -55,6 +55,7 @@ TESTDATA_STD  := internal/testutil/testdata/std
 resources:
 	@mkdir -p $(RESOURCES)
 	@cp ../catalog.toml $(RESOURCES)/catalog.toml
+	@cp ../docs/language-guide.md $(RESOURCES)/language-guide.md
 	@rm -rf $(RESOURCES)/modules
 	@mkdir -p $(RESOURCES)/modules
 	@touch $(RESOURCES)/modules/.keep

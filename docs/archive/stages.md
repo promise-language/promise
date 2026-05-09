@@ -1,6 +1,6 @@
 # Compiler Stages
 
-Implementation stages for the Promise compiler pipeline. For language design, see [language-design.md](language-design.md).
+Implementation stages for the Promise compiler pipeline. For language design, see [language-design.md](../language-design.md).
 
 ## Overview
 
@@ -45,21 +45,21 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 
 | Area | Description | Status | Design Doc |
 |------|-------------|--------|------------|
-| Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-4) | [runtime-architecture.md](runtime-architecture.md) |
-| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3). Windows W1 done (threading + linker). Phase D PAL done (12 sync file I/O functions). Phase E PAL: OS getenv/getcwd/execute/setenv/unsetenv/chdir done. Streaming process PAL: spawn_streaming/kill done. OS info PAL: get_environ/get_user_info/get_hostname done. Signal PAL: signal_init/signal_register done. | [runtime-architecture.md](runtime-architecture.md), [windows-support.md](windows-support.md), [platform-modules.md](platform-modules.md) |
-| 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-architecture.md](runtime-architecture.md) |
-| Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-architecture.md](runtime-architecture.md) |
-| M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-architecture.md](runtime-architecture.md) |
+| Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-4) | [runtime-architecture.md](../runtime-architecture.md) |
+| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3). Windows W1 done (threading + linker). Phase D PAL done (12 sync file I/O functions). Phase E PAL: OS getenv/getcwd/execute/setenv/unsetenv/chdir done. Streaming process PAL: spawn_streaming/kill done. OS info PAL: get_environ/get_user_info/get_hostname done. Signal PAL: signal_init/signal_register done. | [runtime-architecture.md](../runtime-architecture.md), [windows-support.md](../windows-support.md), [platform-modules.md](../platform-modules.md) |
+| 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-architecture.md](../runtime-architecture.md) |
+| Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-architecture.md](../runtime-architecture.md) |
+| M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-architecture.md](../runtime-architecture.md) |
 | Operator dispatch | `[]`, `[]=`, `[:]`, `[:]=` as method-dispatched operators | Done | [subscript-slice-operators.md](subscript-slice-operators.md) |
-| Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Done | [standard-library.md](standard-library.md#naming-conventions) |
-| C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [c-binding-architecture.md](c-binding-architecture.md) |
-| Self-contained binary | Embed gzip-compressed LLVM tools via `go:embed` for release builds | Done (Phase 7f). Linux x86_64: fully static (musl). macOS arm64+amd64: embedded LLVM, requires Xcode CLT for SDK. | [runtime-architecture.md](runtime-architecture.md), [distribution.md](distribution.md#4-macos-notes) |
-| Distribution | Release binaries, install script, GitHub Actions CI/release workflows | Planned | [distribution.md](distribution.md) |
-| Windows support | Native MSVC ABI, Win32 PAL threading, lld-link, Windows SDK discovery | Phase W1 done (code). W2 pending (testing on Windows). | [windows-support.md](windows-support.md) |
+| Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Done | [standard-library.md](../standard-library.md#naming-conventions) |
+| C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [c-binding-architecture.md](../c-binding-architecture.md) |
+| Self-contained binary | Embed gzip-compressed LLVM tools via `go:embed` for release builds | Done (Phase 7f). Linux x86_64: fully static (musl). macOS arm64+amd64: embedded LLVM, requires Xcode CLT for SDK. | [runtime-architecture.md](../runtime-architecture.md), [distribution.md](../distribution.md#4-macos-notes) |
+| Distribution | Release binaries, install script, GitHub Actions CI/release workflows | Planned | [distribution.md](../distribution.md) |
+| Windows support | Native MSVC ABI, Win32 PAL threading, lld-link, Windows SDK discovery | Phase W1 done (code). W2 pending (testing on Windows). | [windows-support.md](../windows-support.md) |
 | Yield generators | `stream[T]` functions with `yield`, LLVM presplit coroutines, `for-in` consumption | Done | — |
-| Structural interfaces | Relaxed matching (extra optional/default params, non-failable→failable, T→T?), adapter thunks, abstract factory methods with implicit Self, generic factory patterns (`T.parse(data)`) | Done | [language-design.md](language-design.md#structural-interface-satisfaction) |
-| Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Phase 1 done (single-file doc, `-public`/`-all`/`-signatures`/`-o` flags, param/variant doc propagation, `DeclareAndDefine` early-exit sema) | [documentation-proposal.md](documentation-proposal.md) |
-| Resource embedding | `` `embed(path) `` annotation on module-level getters: compile-time file/directory embedding as `string`, `u8[]`, or `EmbeddedFiles` | Planned (T0012) | [language-design.md](language-design.md#86-resource-embedding-embed) |
+| Structural interfaces | Relaxed matching (extra optional/default params, non-failable→failable, T→T?), adapter thunks, abstract factory methods with implicit Self, generic factory patterns (`T.parse(data)`) | Done | [language-design.md](../language-design.md#structural-interface-satisfaction) |
+| Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Phase 1 done (single-file doc, `-public`/`-all`/`-signatures`/`-o` flags, param/variant doc propagation, `DeclareAndDefine` early-exit sema) | [documentation-proposal.md](../documentation-proposal.md) |
+| Resource embedding | `` `embed(path) `` annotation on module-level getters: compile-time file/directory embedding as `string`, `u8[]`, or `EmbeddedFiles` | Planned (T0012) | [language-design.md](../language-design.md#86-resource-embedding-embed) |
 
 ---
 
@@ -633,7 +633,7 @@ Compile-time declaration filtering via `` `target(cond) `` annotations. Allows p
 
 ## Stage 9 — Module System (Phase 3 Done + Identity Redesign)
 
-Module resolution and dependency management. See [module-system.md](module-system.md) for the full design.
+Module resolution and dependency management. See [module-system.md](../module-system.md) for the full design.
 
 **Phase 1 — Module Boundaries & Local Imports (done):**
 
@@ -855,9 +855,9 @@ IO reactor work is phased to minimize risk and enable incremental progress. File
 
 | Phase | Work | Design Doc | Priority |
 |-------|------|-----------|----------|
-| ~~**6a**~~ | ~~**Syscall handoff** — `enter_syscall`/`exit_syscall` in scheduler. Detaches P from M during blocking file IO so other goroutines can run. No reactor needed. Go-style `entersyscall`/`exitsyscall`.~~ | [runtime-architecture.md](runtime-architecture.md), [platform-modules.md](platform-modules.md) | ~~Done~~ |
-| **6b** | **Network reactor** — Global reactor (kqueue on macOS, epoll on Linux, IOCP on Windows). Single poller instance, thread-safe. Sysmon calls `reactor_poll(0)` every tick; idle Ms call `reactor_poll(block)`. Known reactor struct (not opaque `i8*`). | [runtime-architecture.md](runtime-architecture.md) | High |
-| **6c** | **`modules/net`** — TCP/UDP sockets, listeners, DNS. Goroutine-transparent via reactor (no function coloring). | [platform-modules.md](platform-modules.md), [standard-library.md](standard-library.md) | High |
+| ~~**6a**~~ | ~~**Syscall handoff** — `enter_syscall`/`exit_syscall` in scheduler. Detaches P from M during blocking file IO so other goroutines can run. No reactor needed. Go-style `entersyscall`/`exitsyscall`.~~ | [runtime-architecture.md](../runtime-architecture.md), [platform-modules.md](../platform-modules.md) | ~~Done~~ |
+| **6b** | **Network reactor** — Global reactor (kqueue on macOS, epoll on Linux, IOCP on Windows). Single poller instance, thread-safe. Sysmon calls `reactor_poll(0)` every tick; idle Ms call `reactor_poll(block)`. Known reactor struct (not opaque `i8*`). | [runtime-architecture.md](../runtime-architecture.md) | High |
+| **6c** | **`modules/net`** — TCP/UDP sockets, listeners, DNS. Goroutine-transparent via reactor (no function coloring). | [platform-modules.md](../platform-modules.md), [standard-library.md](../standard-library.md) | High |
 | **6d** | **io_uring** (Linux, optional) — Truly async file + network IO. Probe at init (`io_uring_setup` → ENOSYS = fallback to epoll). Optimization, not required. | — | Low |
 
 **Key design decisions:**
@@ -898,7 +898,7 @@ Tests: 1776 pass, 0 fail, 25 skip on `wasm32-wasi` (1801 native pass)
 
 ## Naming Convention Migration (Done)
 
-All non-scalar types now use PascalCase canonical names in the universe, stdlib, codegen, sema, ownership, and tests. Lowercase forms (`map[K,V]`, `channel[T]`, `task[T]`, `iter[T]`, `stream[T]`) are syntactic sugar resolved by the compiler. `Range[T]` is generic (no lowercase alias). See [standard-library.md](standard-library.md#naming-conventions).
+All non-scalar types now use PascalCase canonical names in the universe, stdlib, codegen, sema, ownership, and tests. Lowercase forms (`map[K,V]`, `channel[T]`, `task[T]`, `iter[T]`, `stream[T]`) are syntactic sugar resolved by the compiler. `Range[T]` is generic (no lowercase alias). See [standard-library.md](../standard-library.md#naming-conventions).
 
 ---
 

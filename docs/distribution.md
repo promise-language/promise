@@ -172,7 +172,7 @@ COPY promise-linux-amd64 /usr/local/bin/promise
 RUN promise install
 ```
 
-`promise doctor` (planned — see `docs/stages.md`) can be used in CI to verify the environment before running builds or tests:
+`promise doctor` (planned — T0174) can be used in CI to verify the environment before running builds or tests:
 
 ```yaml
 - run: promise doctor --json   # exits non-zero if any required component is missing

@@ -1,6 +1,6 @@
 # Module System — Global Catalog with Mono-Versioning
 
-> **Status: Implemented.** All three phases are done (Phase 1: local modules + visibility; Phase 2: transitive deps + diamond dedup; Phase 3: remote git fetch + `promise pin`). This document is the authoritative design reference. See `docs/stages.md` Stage 9 for implementation status details.
+> **Status: Implemented.** All three phases are done (Phase 1: local modules + visibility; Phase 2: transitive deps + diamond dedup; Phase 3: remote git fetch + `promise pin`). This document is the authoritative design reference. See `docs/archive/stages.md` Stage 9 for implementation details.
 
 This document describes the module system model: a **mono-versioned global catalog** where every module exists at exactly one version per catalog release, and all modules are guaranteed to work together.
 

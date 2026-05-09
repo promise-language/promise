@@ -324,7 +324,7 @@ The standard library (`modules/std/`, 37 files) is auto-imported via `use std as
 ## Important Files
 
 - `compiler/grammar/PromiseParser.g4` — grammar is the language spec
-- `docs/stages.md` — implementation roadmap and architecture notes (bugs/tasks/deferred items are tracked in the `tracker` MCP server)
+- `docs/archive/stages.md` — implementation roadmap and architecture notes (archived; all open items migrated to the `tracker` MCP server)
 - `docs/language-design.md` — full language design proposal (types, ownership, errors, generics, modules)
 - `docs/standard-library.md` — stdlib design: module inventory, PAL extensions, implementation phases, testing strategy
 - `compiler/internal/codegen/compiler.go` — codegen entry, type layouts, scope cleanup
@@ -391,7 +391,7 @@ The standard library (`modules/std/`, 37 files) is auto-imported via `use std as
 - **Querying:** Use `mcp__tracker__list` to filter by type, status, priority, or tag. Use `mcp__tracker__search` for free-text search.
 - **Updating:** Use `mcp__tracker__update` to change status (`open` → `in_progress` → `done`/`wontfix`), add notes, or update priority.
 - **Reference in code:** Use tracker IDs in code comments (e.g., `// B0030: workaround for optional user type in constructor`) and commit messages.
-- **`docs/stages.md`** remains the implementation roadmap and architecture reference. It may reference tracker IDs but is not the source of truth for bug/task status — the tracker is.
+- **`docs/archive/stages.md`** is the archived implementation roadmap. All open bugs/tasks/deferred items have been migrated to the `tracker` MCP server, which is the sole source of truth for status.
 
 ## Conventions
 

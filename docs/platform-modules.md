@@ -105,7 +105,7 @@ documentation.
 
 ## 2. `\`target(cond)` — Compile-Time Platform Filtering (Done)
 
-Implemented in Stage 8q. See `docs/stages.md` for implementation details.
+Implemented in Stage 8q. See `docs/archive/stages.md` for implementation details.
 
 ### The feature
 

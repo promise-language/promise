@@ -139,7 +139,7 @@ promise_lang/
 ├── runtime/                     # C runtime (strings, maps, print, panic)
 ├── docs/
 │   ├── language-design.md       # Full language specification
-│   ├── stages.md                # Compiler implementation roadmap
+│   ├── archive/stages.md        # Compiler implementation roadmap (archived)
 │   └── c-binding-architecture.md
 └── README.md
 ```

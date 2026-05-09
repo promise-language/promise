@@ -7007,10 +7007,27 @@ func (c *Compiler) dropTempOptionalInner(expr ast.Expr, optVal value.Value, flag
 	} else if innerNamed != nil {
 		// Vector or channel — call their drop.
 		var dropFunc *ir.Func
+		var isContainer bool
 		if _, isVec := types.AsVector(elem); isVec || innerNamed == types.TypVector {
 			dropFunc = c.funcs["Vector.drop"]
+			isContainer = true
 		} else if _, isCh := types.AsChannel(elem); isCh || innerNamed == types.TypChannel {
 			dropFunc = c.funcs["Channel.drop"]
+			isContainer = true
+		} else if innerNamed.HasDrop() || innerNamed.NeedsSynthDrop() {
+			// B0288: User type with explicit drop() or synthesized drop.
+			ownerName := innerNamed.Obj().Name()
+			resolvedElem := elem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(elem, c.typeSubst)
+			}
+			if inst, ok := resolvedElem.(*types.Instance); ok {
+				ownerName = monoName(inst)
+			} else if innerNamed.HasDrop() && !innerNamed.NeedsSynthDrop() {
+				ownerName = c.resolveMethodOwner(innerNamed, "drop")
+			}
+			mangledName := mangleMethodName(ownerName, "drop", false)
+			dropFunc = c.funcs[mangledName]
 		}
 		if dropFunc != nil {
 			innerVal := c.block.NewExtractValue(optVal, 1)
@@ -7019,7 +7036,26 @@ func (c *Compiler) dropTempOptionalInner(expr ast.Expr, optVal value.Value, flag
 			c.block.NewCondBr(flag, dropBlock, skipBlock)
 
 			c.block = dropBlock
-			c.block.NewCall(dropFunc, innerVal)
+			if isContainer {
+				c.block.NewCall(dropFunc, innerVal)
+			} else {
+				// User type: inner is value struct {vtable, instance} — extract instance ptr.
+				instance := c.extractInstancePtr(innerVal)
+				nullCheck := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
+				execBlock := c.newBlock("is.temp.exec")
+				nullSkip := c.newBlock("is.temp.null")
+				c.block.NewCondBr(nullCheck, nullSkip, execBlock)
+
+				c.block = execBlock
+				c.block.NewCall(dropFunc, instance)
+				// B0159: Free the instance struct after drop() completes.
+				if !innerNamed.NeedsSynthDrop() {
+					c.block.NewCall(c.palFree, instance)
+				}
+				c.block.NewBr(nullSkip)
+
+				c.block = nullSkip
+			}
 			c.block.NewBr(skipBlock)
 
 			c.block = skipBlock

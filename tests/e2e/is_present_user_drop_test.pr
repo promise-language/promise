@@ -1,0 +1,48 @@
+// B0288: When `method() is present` evaluates a method returning UserType?
+// where UserType has drop(~this), the inner value must be dropped to prevent
+// memory leaks. Tests both `is present` and `is absent` patterns.
+type Handle {
+  int id;
+  drop(~this) {
+  }
+}
+
+type Factory {
+  find(int id) Handle? {
+    if id > 0 {
+      return Handle(id: id);
+    }
+    return none;
+  }
+}
+
+// Method returning user type with drop — is present (present case).
+test_is_present_user_drop_present() `test {
+  f := Factory();
+  assert(f.find(1) is present, "should be present");
+}
+
+// Method returning user type with drop — is present (absent case).
+test_is_present_user_drop_absent() `test {
+  f := Factory();
+  assert(f.find(0) is absent, "should be absent");
+}
+
+// Multiple is-present checks in a loop — leak would accumulate.
+test_is_present_user_drop_loop() `test {
+  f := Factory();
+  int count = 0;
+  for i in 1..=10 {
+    if f.find(i) is present {
+      count = count + 1;
+    }
+  }
+  assert(count == 10, "all positive ids present");
+}
+
+// is absent with user type drop.
+test_is_absent_user_drop() `test {
+  f := Factory();
+  assert(f.find(-1) is absent, "negative id absent");
+  assert(!(f.find(5) is absent), "positive id not absent");
+}

@@ -17774,6 +17774,32 @@ func TestIsPresentDropsTempOptionalString(t *testing.T) {
 	assertContains(t, ir, "promise_string_drop")
 }
 
+// B0288: is-present on method call returning UserType? with drop() must emit
+// temp drop (extract instance ptr, null-check, call drop, free).
+func TestIsPresentDropsTempOptionalUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type Handle {
+			int id;
+			drop(~this) {}
+		}
+		type Factory {
+			find(&this, int id) Handle? {
+				if id > 0 {
+					return Handle(id: id);
+				}
+				return none;
+			}
+		}
+		main() {
+			Factory f = Factory();
+			bool ok = f.find(1) is present;
+		}
+	`)
+	assertContains(t, ir, "is.temp.drop")
+	assertContains(t, ir, "is.temp.exec")
+	assertContains(t, ir, "Handle.drop")
+}
+
 // B0287: Optional unwrap on ident source must NOT track the unwrapped string
 // as a statement temp (the optional's scope-exit drop handles it).
 func TestOptionalUnwrapIdentNoStringTemp(t *testing.T) {

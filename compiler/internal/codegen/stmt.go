@@ -2571,6 +2571,20 @@ func (c *Compiler) cloneHeapElement(elemVal value.Value, elemType types.Type, na
 	}
 	mangledName := mangleMethodName(ownerName, "clone", false)
 	if cloneFn, ok := c.funcs[mangledName]; ok {
+		// B0289: For generic instances, verify all type arguments can be safely
+		// handled by the clone's internal match-dup. Container clone methods (Map, Set)
+		// iterate elements via match destructure — if any type argument can't be
+		// safely match-dup'd, the clone would be shallow → fall back to dupHeapValue.
+		if inst, ok := elemType.(*types.Instance); ok {
+			for _, arg := range inst.TypeArgs() {
+				if c.typeSubst != nil {
+					arg = types.Substitute(arg, c.typeSubst)
+				}
+				if !c.typeArgSafeForCloneDup(arg) {
+					return c.dupHeapValue(elemVal, elemType)
+				}
+			}
+		}
 		instance := c.extractInstancePtr(elemVal)
 		return c.block.NewCall(cloneFn, instance)
 	}

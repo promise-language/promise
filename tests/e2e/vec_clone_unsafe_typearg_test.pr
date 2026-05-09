@@ -1,0 +1,41 @@
+// B0289: Vector element clone loop must check type-arg safety before calling
+// container clone(). cloneHeapElement now validates type args (like namedHasCloneFunc
+// does for match-dup), falling back to dupHeapValue when args are unsafe.
+// Vector of maps with safe value types — clone should work via Map.clone().
+test_vec_map_clone_safe_int_values() `test {
+  map[string, int][] maps = [ {
+    "a":1, "b":2
+  }
+  ];
+  map[string, int][] maps2 = maps.clone();
+  assert(maps2.len == 1, "cloned vec len");
+  assert(maps2[0].len == 2, "cloned map len");
+}
+
+// Vector of maps with string values — clone should work via Map.clone().
+test_vec_map_clone_safe_string_values() `test {
+  map[string, string][] maps = [ {
+    "x":"hello"
+  }
+  ];
+  map[string, string][] maps2 = maps.clone();
+  assert(maps2.len == 1, "cloned vec len");
+  assert(maps2[0].len == 1, "cloned map len");
+}
+
+// Multiple maps in vector — all should be independently cloned.
+test_vec_map_clone_multiple() `test {
+  map[string, int][] maps = [ {
+    "a":1
+  }, {
+    "b":2
+  }, {
+    "c":3
+  }
+  ];
+  map[string, int][] maps2 = maps.clone();
+  assert(maps2.len == 3, "cloned vec len");
+  assert(maps2[0].len == 1, "map 0 len");
+  assert(maps2[1].len == 1, "map 1 len");
+  assert(maps2[2].len == 1, "map 2 len");
+}

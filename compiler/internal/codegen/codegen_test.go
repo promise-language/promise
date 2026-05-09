@@ -17682,6 +17682,47 @@ func TestDupHeapValueFieldsDeepClonesVectorStrings(t *testing.T) {
 	assertContains(t, ir, "vecdup_str.head")
 }
 
+// B0289: emitVectorElementCloneLoop → cloneHeapElement must check type-arg safety
+// before calling clone(). When vector elements are Map[string, NonCloneableEnum],
+// Map.clone() would shallow-copy the enum values → double-free. The fix falls
+// back to dupHeapValue instead.
+func TestVectorCloneLoopSkipsUnsafeMapClone(t *testing.T) {
+	ir := generateIR(t, `
+		enum JsonNode {
+			Null,
+			Text(string value),
+			Dict(map[string, JsonNode] fields),
+		}
+		test() {
+			map[string, JsonNode][] maps = [{"k": JsonNode.Text(value: "v")}];
+			map[string, JsonNode][] maps2 = maps.clone();
+		}
+	`)
+	// Vector[Map[string, JsonNode]].clone() → emitVectorElementCloneLoop →
+	// cloneHeapElement → should NOT call Map.clone() because JsonNode has drops
+	// but no `clone` (typeArgSafeForCloneDup returns false).
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.Contains(line, "Map[string, JsonNode].clone") && strings.Contains(line, "= call") {
+			t.Error("B0289: cloneHeapElement should not call Map.clone() for non-cloneable type args")
+		}
+	}
+	// Should use dupHeapValue (alloc + memcpy) instead
+	assertContains(t, ir, "heapdup.copy")
+}
+
+// B0289: When vector elements are Map[string, int] (safe type args),
+// cloneHeapElement should still call Map.clone().
+func TestVectorCloneLoopCallsSafeMapClone(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			map[string, int][] maps = [{"a": 1}];
+			map[string, int][] maps2 = maps.clone();
+		}
+	`)
+	// Map[string, int] — both type args are safe, clone should be called.
+	assertContains(t, ir, "Map[string, int].clone")
+}
+
 // B0281: Enum ctor temps used as map literal values must be claimed.
 // Without the fix, the enum temp is dropped at statement end, double-freeing
 // inner data (both the temp and the map's Slot share the same pointers).

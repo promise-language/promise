@@ -43,6 +43,7 @@ type Enum struct {
 	variants       []*Variant
 	methods        []*Method
 	isCopy         bool   // `copy meta — bitwise copy on assignment
+	isClone        bool   // `clone meta — auto-generate clone() Self method
 	isSerializable bool   // `serializable meta — auto-generate encode/decode
 	serializeTag   string // `serializable(tag: "kind") — custom discriminator key (default "type")
 	exported       bool   // `public meta — visible to other modules
@@ -66,6 +67,8 @@ func (e *Enum) Methods() []*Method       { return e.methods }
 func (e *Enum) Underlying() Type         { return e }
 func (e *Enum) IsCopy() bool             { return e.isCopy }
 func (e *Enum) SetCopy(v bool)           { e.isCopy = v }
+func (e *Enum) IsClone() bool            { return e.isClone }
+func (e *Enum) SetClone(v bool)          { e.isClone = v }
 func (e *Enum) IsSerializable() bool     { return e.isSerializable }
 func (e *Enum) SetSerializable(v bool)   { e.isSerializable = v }
 func (e *Enum) SerializeTag() string     { return e.serializeTag }

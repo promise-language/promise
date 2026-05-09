@@ -17251,3 +17251,54 @@ func TestMethodChainIntermediateTracked(t *testing.T) {
 	assertContains(t, ir, "heap.drop")
 	assertContains(t, ir, "call void @pal_free(")
 }
+
+// === Clone annotation (T0154) ===
+
+func TestCloneSynthesizesCloneMethod(t *testing.T) {
+	ir := generateIR(t, `
+		type Doc `+"`clone"+` {
+			string title;
+			int pages;
+		}
+		test() {
+			d := Doc(title: "hi", pages: 1);
+			d2 := d.clone();
+		}
+	`)
+	// The synthesized clone method should exist and call promise_string_new (dupString)
+	assertContains(t, ir, "Doc.clone")
+}
+
+func TestCloneStringNativeMethod(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			s := "hello";
+			s2 := s.clone();
+		}
+	`)
+	// string.clone() calls promise_string_new (dupString)
+	assertContains(t, ir, "promise_string_new")
+}
+
+func TestCloneVectorNativeMethod(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			v := [1, 2, 3];
+			v2 := v.clone();
+		}
+	`)
+	// Vector.clone() calls pal_alloc (dupVector)
+	assertContains(t, ir, "pal_alloc")
+}
+
+func TestCloneStringVectorDupsElements(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			v := ["a", "b"];
+			v2 := v.clone();
+		}
+	`)
+	// String vector clone should have the string dup loop
+	assertContains(t, ir, "vecdup_str.head")
+	assertContains(t, ir, "promise_string_new")
+}

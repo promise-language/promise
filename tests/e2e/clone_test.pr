@@ -1,0 +1,209 @@
+// Tests for `clone meta annotation (T0154)
+// --- Basic clone with string + int fields ---
+type Document `clone {
+  string title;
+  int pages;
+}
+
+test_clone_basic() `test {
+  d := Document(title: "Hello", pages: 42);
+  d2 := d.clone();
+  assert(d2.title == "Hello", "clone preserves title");
+  assert(d2.pages == 42, "clone preserves pages");
+}
+
+test_clone_independence() `test {
+  // Cloned string fields must be independent — modifying one shouldn't affect the other.
+  d := Document(title: "Original", pages: 10);
+  d2 := d.clone();
+  // Verify they have the same values
+  assert(d.title == "Original", "original title");
+  assert(d2.title == "Original", "cloned title");
+  assert(d.pages == 10, "original pages");
+  assert(d2.pages == 10, "cloned pages");
+}
+
+// --- Clone with vector fields ---
+
+type Library `clone {
+  string name;
+  string[] books;
+}
+
+test_clone_vector_field() `test {
+  lib := Library(name: "Main", books: ["A", "B", "C"]);
+  lib2 := lib.clone();
+  assert(lib2.name == "Main", "name");
+  assert(lib2.books.len == 3, "books len");
+  assert(lib2.books[0] == "A", "book 0");
+  assert(lib2.books[1] == "B", "book 1");
+  assert(lib2.books[2] == "C", "book 2");
+}
+
+// --- Clone with only copy fields ---
+
+type Point `clone {
+  int x;
+  int y;
+}
+
+test_clone_copy_fields() `test {
+  p := Point(x: 3, y: 4);
+  p2 := p.clone();
+  assert(p2.x == 3, "x");
+  assert(p2.y == 4, "y");
+}
+
+// --- Clone with mixed copy + non-copy fields ---
+
+type Config `clone {
+  string label;
+  int value;
+  bool active;
+}
+
+test_clone_mixed_fields() `test {
+  c := Config(label: "test", value: 99, active: true);
+  c2 := c.clone();
+  assert(c2.label == "test", "label");
+  assert(c2.value == 99, "value");
+  assert(c2.active, "active");
+}
+
+// --- Clone with nested cloneable types ---
+
+type Wrapper `clone {
+  Document doc;
+}
+
+test_clone_nested() `test {
+  w := Wrapper(doc: Document(title: "Nested", pages: 5));
+  w2 := w.clone();
+  assert(w2.doc.title == "Nested", "nested title");
+  assert(w2.doc.pages == 5, "nested pages");
+}
+
+// --- Explicit clone() method takes precedence ---
+
+type Custom {
+  int x;
+
+  clone() Self `public {
+    return Custom(x: this.x * 2);
+  }
+}
+
+test_explicit_clone() `test {
+  c := Custom(x: 5);
+  c2 := c.clone();
+  assert(c2.x == 10, "explicit clone doubles x");
+}
+
+// --- String clone directly ---
+
+test_string_clone() `test {
+  s := "hello world";
+  s2 := s.clone();
+  assert(s2 == "hello world", "string clone eq");
+  assert(s2.len == 11, "string clone len");
+}
+
+test_empty_string_clone() `test {
+  s := "";
+  s2 := s.clone();
+  assert(s2 == "", "empty string clone");
+  assert(s2.len == 0, "empty string clone len");
+}
+
+// --- Vector clone ---
+
+test_int_vector_clone() `test {
+  v := [10, 20, 30];
+  v2 := v.clone();
+  assert(v2.len == 3, "len");
+  assert(v2[0] == 10, "0");
+  assert(v2[1] == 20, "1");
+  assert(v2[2] == 30, "2");
+}
+
+test_string_vector_clone() `test {
+  v := ["hello", "world"];
+  v2 := v.clone();
+  assert(v2.len == 2, "len");
+  assert(v2[0] == "hello", "0");
+  assert(v2[1] == "world", "1");
+}
+
+test_empty_vector_clone() `test {
+  int[] v = [];
+  v2 := v.clone();
+  assert(v2.len == 0, "empty vector clone len");
+}
+
+// --- Clone with optional string field ---
+
+type OptDoc `clone {
+  string? subtitle;
+  string title;
+}
+
+test_clone_optional_some() `test {
+  d := OptDoc(subtitle: "Sub", title: "Main");
+  d2 := d.clone();
+  assert(d2.title == "Main", "title");
+  if s := d2.subtitle {
+    assert(s == "Sub", "subtitle value");
+  } else {
+    assert(false, "subtitle should be some");
+  }
+}
+
+test_clone_optional_none() `test {
+  d := OptDoc(subtitle: none, title: "Main");
+  d2 := d.clone();
+  assert(d2.title == "Main", "title");
+  if _ := d2.subtitle {
+    assert(false, "subtitle should be none");
+  }
+}
+
+// --- string.to_string() uses clone (B0255 fix) ---
+
+test_to_string_clone() `test {
+  s := "test";
+  s2 := s.to_string();
+  assert(s2 == "test", "to_string returns equal string");
+}
+
+// --- Clone with inherited fields ---
+
+type Base `clone {
+  string name;
+}
+
+type Child is Base `clone {
+  int age;
+}
+
+test_clone_inherited_fields() `test {
+  c := Child(name: "Alice", age: 30);
+  c2 := c.clone();
+  assert(c2.name == "Alice", "inherited name");
+  assert(c2.age == 30, "own age");
+}
+
+// --- Generic type with clone ---
+
+type Box[T] `clone {
+  T value;
+  string label;
+}
+
+test_clone_generic_copy_elem() `test {
+  b := Box[int](value: 42, label: "num");
+  b2 := b.clone();
+  assert(b2.value == 42, "value");
+  assert(b2.label == "num", "label");
+}
+
+// Cloneable structural interface is auto-imported from std/clone.pr

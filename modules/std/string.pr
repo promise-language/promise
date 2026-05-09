@@ -185,7 +185,8 @@ type string `native `public {
   get hash int `native;
   get is_empty bool => this.len == 0;
   get is_literal bool `native `doc("Returns true if this string is a compile-time literal stored in .rodata (not heap-allocated).");
-  to_string() string `public => this + ""; // B0255: hack — forces copy because returning `this` directly doesn't dup
+  clone() string `native `public `doc("Returns an owned deep copy of this string.");
+  to_string() string `public => this.clone(); // B0255 fixed: proper deep copy via clone
   format!(Writer ~w) `public {
     w.write_string(this);
   }

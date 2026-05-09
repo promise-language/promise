@@ -1,0 +1,4 @@
+// std/clone.pr — Structural cloneability interface
+type Cloneable `structural `public `doc("Types that can produce an owned deep copy of themselves via clone().") {
+  clone() Self `abstract;
+}

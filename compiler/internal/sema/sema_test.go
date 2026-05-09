@@ -5033,6 +5033,103 @@ func TestCopyEnumOK(t *testing.T) {
 	`)
 }
 
+// === Clone annotation (T0154) ===
+
+func TestCloneBasicStringField(t *testing.T) {
+	checkOK(t, `
+		type Doc `+"`clone"+` {
+			string title;
+			int pages;
+		}
+		main() { d := Doc(title: "hi", pages: 1); d2 := d.clone(); }
+	`)
+}
+
+func TestCloneCopyFieldsOnly(t *testing.T) {
+	checkOK(t, `
+		type Point `+"`clone"+` {
+			int x;
+			int y;
+		}
+		main() { p := Point(x: 1, y: 2); p2 := p.clone(); }
+	`)
+}
+
+func TestCloneNonCloneableFieldError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner {
+			string s;
+		}
+		type Outer `+"`clone"+` {
+			Inner val;
+		}
+	`)
+	expectError(t, errs, "not cloneable")
+}
+
+func TestCloneExplicitMethodTakesPrecedence(t *testing.T) {
+	checkOK(t, `
+		type Foo `+"`clone"+` {
+			int x;
+			clone() Self {
+				return Foo(x: this.x * 2);
+			}
+		}
+		main() { f := Foo(x: 1); f2 := f.clone(); }
+	`)
+}
+
+func TestCloneOnStructuralError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bad `+"`clone `structural"+` {
+			clone() Self `+"`abstract"+`;
+		}
+	`)
+	expectError(t, errs, "cannot be applied to structural type")
+}
+
+func TestCloneNestedCloneable(t *testing.T) {
+	checkOK(t, `
+		type Inner `+"`clone"+` {
+			string s;
+		}
+		type Outer `+"`clone"+` {
+			Inner val;
+			int n;
+		}
+		main() { o := Outer(val: Inner(s: "hi"), n: 1); o2 := o.clone(); }
+	`)
+}
+
+func TestCloneWithVectorField(t *testing.T) {
+	checkOK(t, `
+		type Lib `+"`clone"+` {
+			string[] books;
+		}
+		main() { lib := Lib(books: ["a", "b"]); lib2 := lib.clone(); }
+	`)
+}
+
+func TestCloneWithOptionalStringField(t *testing.T) {
+	checkOK(t, `
+		type Opt `+"`clone"+` {
+			string? label;
+			int x;
+		}
+		main() { o := Opt(label: "hi", x: 1); o2 := o.clone(); }
+	`)
+}
+
+func TestCloneGenericType(t *testing.T) {
+	checkOK(t, `
+		type Box[T] `+"`clone"+` {
+			T value;
+			string label;
+		}
+		main() { b := Box[int](value: 1, label: "x"); b2 := b.clone(); }
+	`)
+}
+
 // === Doc extraction ===
 
 func TestDocOnType(t *testing.T) {

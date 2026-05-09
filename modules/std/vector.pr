@@ -4,6 +4,7 @@ type Vector[T] `native `public {
 
   new(int capacity = 16) `native;
   drop(~this) `native;
+  clone() Self `native `public `doc("Returns a deep copy of this vector. Elements are shallow-copied; string elements are duplicated.");
 
   // Factory: creates a Vector filled with `count` copies of `value`.
   filled(T value, int count) Self `factory `public {

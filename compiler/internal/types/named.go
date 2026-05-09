@@ -17,6 +17,7 @@ type Named struct {
 	fields         []*Field
 	methods        []*Method
 	isCopy         bool   // `copy meta — bitwise copy on assignment
+	isClone        bool   // `clone meta — auto-generate clone() Self method
 	hasDrop        bool   // type has a validated drop(~this) method or needs synthesized drop
 	needsSynthDrop bool   // compiler should synthesize a drop method (no explicit drop)
 	hasNew         bool   // type has a validated new() constructor method
@@ -43,6 +44,8 @@ func (n *Named) Methods() []*Method       { return n.methods }
 func (n *Named) Underlying() Type         { return n }
 func (n *Named) IsCopy() bool             { return n.isCopy }
 func (n *Named) SetCopy(v bool)           { n.isCopy = v }
+func (n *Named) IsClone() bool            { return n.isClone }
+func (n *Named) SetClone(v bool)          { n.isClone = v }
 func (n *Named) HasDrop() bool            { return n.hasDrop }
 func (n *Named) SetHasDrop(v bool)        { n.hasDrop = v }
 func (n *Named) NeedsSynthDrop() bool     { return n.needsSynthDrop }
@@ -111,6 +114,7 @@ func (n *Named) ResetMembers() {
 	n.hasDrop = false
 	n.hasNew = false
 	n.isCopy = false
+	n.isClone = false
 	n.structural = false
 	n.isValueType = false
 	n.isSerializable = false

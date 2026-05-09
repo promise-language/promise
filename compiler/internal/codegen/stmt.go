@@ -2392,6 +2392,51 @@ func (c *Compiler) emitVectorElementDropLoopBody(vecPtr value.Value, elemType ty
 	c.block = loopDone
 }
 
+// emitVectorStringDupLoop iterates a vector's string elements and replaces each with
+// a deep copy (dupString). Used by Vector.clone() to ensure the cloned vector owns
+// independent copies of all string elements. T0154.
+func (c *Compiler) emitVectorStringDupLoop(vecPtr value.Value, elemType types.Type) {
+	elemLLVM := c.resolveType(elemType)
+
+	// Load vector length (masked — clears static flag bit 63)
+	headerType := vectorHeaderType()
+	headerPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
+	length := loadVectorLen(c.block, headerPtr)
+
+	// Data starts at offset vectorHeaderSize (16 bytes after buffer start)
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, vecPtr,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+
+	// Loop: for i = 0; i < len; i++ { elements[i] = dupString(elements[i]); }
+	loopHead := c.newBlock("vecdup_str.head")
+	loopBody := c.newBlock("vecdup_str.body")
+	loopDone := c.newBlock("vecdup_str.done")
+
+	idxAlloca := c.createEntryAlloca(irtypes.I64)
+	idxAlloca.SetName(c.uniqueLocalName("vecdup_str.idx"))
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), idxAlloca)
+	c.block.NewBr(loopHead)
+
+	c.block = loopHead
+	idx := c.block.NewLoad(irtypes.I64, idxAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, idx, length)
+	c.block.NewCondBr(cond, loopBody, loopDone)
+
+	c.block = loopBody
+	idx2 := c.block.NewLoad(irtypes.I64, idxAlloca)
+	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx2)
+	elemVal := c.block.NewLoad(elemLLVM, elemPtr)
+	duped := c.dupString(elemVal)
+	c.block.NewStore(duped, elemPtr)
+
+	nextIdx := c.block.NewAdd(idx2, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(nextIdx, idxAlloca)
+	c.block.NewBr(loopHead)
+
+	c.block = loopDone
+}
+
 // emitVectorStringElementDropLoop is a string-only version of emitVectorElementDropLoop.
 // Used for Map for-in temporary vectors where values are shared copies — only strings
 // are safe to drop (they are dup'd, making each copy independent). B0212.

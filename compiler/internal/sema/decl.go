@@ -366,6 +366,22 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	named.SetDoc(extractDoc(d.Annotations))
 	named.SetDeprecated(extractDeprecated(d.Annotations))
 
+	// Process `clone: set flag and synthesize clone() Self method if not user-defined.
+	// Validation of field cloneability is deferred to validateCloneTypes() after all types are defined.
+	if c.hasAnnotation(d.Annotations, "clone") {
+		named.SetClone(true)
+		if named.IsCopy() {
+			c.warnf(d.Pos(), "`clone is redundant on `copy type %s", d.Name)
+		}
+		if named.IsStructural() {
+			c.errorf(d.Pos(), "`clone cannot be applied to structural type %s", d.Name)
+		} else if lookupOwnMethod(named, "clone") == nil {
+			md := c.synthesizeCloneMethod(named, d)
+			d.Methods = append(d.Methods, md)
+			c.defineMethod(named, md, d.Name)
+		}
+	}
+
 	// Process `serializable: extract field annotations, synthesize encode/decode methods.
 	if c.hasAnnotation(d.Annotations, "serializable") {
 		c.processSerializableType(named, d)
@@ -828,6 +844,13 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 	if c.hasAnnotation(d.Annotations, "copy") {
 		enum.SetCopy(true)
 		c.validateCopyEnum(enum, d)
+	}
+	if c.hasAnnotation(d.Annotations, "clone") {
+		enum.SetClone(true)
+		if enum.IsCopy() {
+			c.warnf(d.Pos(), "`clone is redundant on `copy enum %s", d.Name)
+		}
+		// Enum clone body synthesis deferred — requires match over variants (future task)
 	}
 	if c.hasAnnotation(d.Annotations, "public") {
 		enum.SetExported(true)

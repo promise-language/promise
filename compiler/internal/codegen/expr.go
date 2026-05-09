@@ -3537,6 +3537,19 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 			slicePtr, argPtr, constant.NewInt(irtypes.I64, elemSize), eqFn)
 		return c.block.NewTrunc(result, irtypes.I1)
 
+	case "clone":
+		// Deep-copy the vector: shallow memcpy of header+elements, then dup string elements.
+		resolvedElem := elemType
+		if c.typeSubst != nil {
+			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+		}
+		result := c.dupVector(slicePtr, elemSize)
+		// For string elements, dup each string in the new vector so each copy is independent.
+		if extractNamed(resolvedElem) == types.TypString {
+			c.emitVectorStringDupLoop(result, resolvedElem)
+		}
+		return result
+
 	case "remove":
 		idx := c.genCallArgExpr(e.Args[0].Value)
 		// COW: if static (.rodata), copy to heap first (T0062)
@@ -3826,6 +3839,9 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 	case "byte_at":
 		argVal := c.genCallArgExpr(e.Args[0].Value)
 		return c.genStringByteAt(strPtr, argVal), true
+
+	case "clone":
+		return c.dupString(strPtr), true
 
 	default:
 		return nil, false

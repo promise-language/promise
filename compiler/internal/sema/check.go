@@ -115,6 +115,7 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 	c.populateUniverseTypes()    // Populate non-native universe type pointers (TypError, TypMap, etc.)
 	c.define(file)               // Pass 2: resolve types, populate type structures
 	c.propagateDrops(file)       // B0158: auto-synthesize drop for types with droppable fields
+	c.validateCloneTypes(file)   // T0154: validate `clone field types (after all types defined)
 	c.validateConstructors(file) // Validate: constructor inheritance (after all types defined)
 	c.validateBuiltins()         // Validate: .pr files declare all required operators/methods/fields
 	c.check(file)                // Pass 3: type-check function/method bodies
@@ -183,6 +184,7 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 	c.populateUniverseTypes()    // Populate non-native universe type pointers (TypError, TypMap, etc.)
 	c.define(file)               // Pass 2: resolve types, populate type structures
 	c.propagateDrops(file)       // B0158: auto-synthesize drop for types with droppable fields
+	c.validateCloneTypes(file)   // T0154: validate `clone field types (after all types defined)
 	c.validateConstructors(file) // Validate: constructor inheritance
 
 	return c.info, c.errors

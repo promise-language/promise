@@ -52,6 +52,7 @@ var builtinMetas = map[string][]MetaTarget{
 	"abstract":     {TargetMethod},
 	"native":       {TargetMethod, TargetType},
 	"copy":         {TargetType, TargetEnum},
+	"clone":        {TargetType, TargetEnum},
 	"structural":   {TargetType},
 	"doc":          {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum, TargetParam, TargetVariant},
 	"deprecated":   {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum, TargetParam, TargetVariant},

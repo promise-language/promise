@@ -1621,3 +1621,44 @@ enum_ctor_temp_in_vector_literal_test() `test {
   string s = format_value(arr)!;
   assert(s.contains("\"a\""), "vector with enum values");
 }
+
+// B0283: Repeated parse→match→get in a single binary must not corrupt the heap.
+// The original crash was heap corruption (segfault at 0x0) after ~80 tests in
+// single-file mode. Root cause: double-clone in synthesized enum clone methods
+// (B0285) leaked intermediate allocations, corrupting heap metadata over time.
+// This test exercises the accumulation pattern with many iterations.
+repeated_parse_match_get_test() `test {
+  int i = 0;
+  while i < 50 {
+    JsonValue v = parse_value("\{\"k\":\"v\",\"n\":42}")!;
+    match v {
+      JsonValue.Object(fields) => {
+        assert(fields.len == 2, "B0283: fields len");
+      },
+      _ => assert(false, "B0283: expected object"),
+    }
+    if val := v.get("k") {
+      assert(val.as_string()! == "v", "B0283: get string");
+    }
+    if num := v.get("n") {
+      assert(num.as_number()! == 42.0, "B0283: get number");
+    }
+    i = i + 1;
+  }
+}
+
+// B0283: Repeated nested object parse→get chains must not leak or double-free.
+repeated_nested_parse_test() `test {
+  int i = 0;
+  while i < 30 {
+    JsonValue v = parse_value("\{\"a\":\{\"b\":\{\"c\":\"deep\"}}}")!;
+    if a := v.get("a") {
+      if b := a.get("b") {
+        if c := b.get("c") {
+          assert(c.as_string()! == "deep", "B0283: nested chain");
+        }
+      }
+    }
+    i = i + 1;
+  }
+}

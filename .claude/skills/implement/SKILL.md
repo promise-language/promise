@@ -3,7 +3,7 @@ name: implement
 description: Implement the plan produced by /plan. Makes code changes, writes tests, and verifies the build passes.
 ---
 
-Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS references a tracker ID (e.g., `B0042`, `T0015`), fetch it with `mcp__tracker__get` first. A plan should already exist from a prior `/plan` step — read the task notes to find it.
+Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS references a tracker ID (e.g., `B0042`, `T0015`), fetch it with `mcp__tracker__get` first and read the `plan` field for the implementation plan.
 
 ## Steps
 

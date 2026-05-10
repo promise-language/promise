@@ -16,7 +16,7 @@ Understand the problem described in $ARGUMENTS and produce a concrete implementa
    - Identify which files need to change and what the change is. Prefer the simplest approach that solves the problem.
    - For compiler changes: determine which pipeline stage(s) are involved (sema pass number, codegen phase, ownership rule, etc.).
    - For Promise code: follow the implementation philosophy -- prefer Promise over IR, full English words in APIs, getters for side-effect-free parameterless access, `doc` annotations on `public` declarations.
-   - State the plan clearly as a note on the tracker item.
+   - Save the plan by calling `mcp__tracker__update` with `plan: <markdown>` to store it on the item.
 
 3. **Evaluate feasibility.**
    Determine whether the item can actually be implemented right now. Three outcomes:

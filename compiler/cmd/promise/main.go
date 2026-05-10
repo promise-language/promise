@@ -495,6 +495,7 @@ type testTimeoutConfig struct {
 	scale          float64       // -timeout-scale (default 1.0)
 	min            time.Duration // -timeout-min (0 = no minimum)
 	max            time.Duration // -timeout-max (0 = no maximum)
+	compileTimeout time.Duration // -compile-timeout (default 10m) — backstop for hung compilation
 }
 
 // cacheString returns a stable string representation of the timeout config
@@ -556,11 +557,12 @@ func runTest(args []string) {
 	var timeoutMin time.Duration // 0 = no minimum
 	var timeoutMax time.Duration // 0 = no maximum
 	var stressMode bool
-	var stressCount int              // 0 = unlimited
-	var stressDuration time.Duration // 0 = unlimited
-	var targetTriple string          // empty = host target
-	var outputFile string            // stress report output file
-	var coverageMode bool            // T0030: coverage instrumentation
+	var stressCount int                // 0 = unlimited
+	var stressDuration time.Duration   // 0 = unlimited
+	var targetTriple string            // empty = host target
+	var outputFile string              // stress report output file
+	var coverageMode bool              // T0030: coverage instrumentation
+	compileTimeout := 10 * time.Minute // -compile-timeout (backstop for hung compilation)
 	var remaining []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-timeout" && i+1 < len(args) {
@@ -623,6 +625,14 @@ func runTest(args []string) {
 		} else if args[i] == "-output" && i+1 < len(args) {
 			outputFile = args[i+1]
 			i++
+		} else if args[i] == "-compile-timeout" && i+1 < len(args) {
+			d, err := parseTimeoutArg(args[i+1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			compileTimeout = d
+			i++
 		} else if args[i] == "-coverage" {
 			coverageMode = true
 		} else {
@@ -631,7 +641,7 @@ func runTest(args []string) {
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] <file.pr | dir | dir/...> ...")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-compile-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
 
@@ -667,6 +677,7 @@ func runTest(args []string) {
 		scale:          timeoutScale,
 		min:            timeoutMin,
 		max:            timeoutMax,
+		compileTimeout: compileTimeout,
 	}
 
 	if stressMode {
@@ -1448,11 +1459,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 
 			r := &results[idx]
 			fileStart := time.Now()
-			// The subprocess handles per-test timeouts internally.
-			// The parent context is a generous backstop that must account
-			// for compilation time (which can exceed the per-test timeout
-			// under parallel load or cross-compilation to WASM).
-			parentTimeout := computeParentTimeout(cfg.defaultTimeout, targetTriple)
+			// The parent context is a backstop for hung compilations, not
+			// a test timeout. Per-test timeouts are handled by the subprocess.
+			parentTimeout := computeParentTimeout(cfg, targetTriple)
 			ctx, cancel := context.WithTimeout(context.Background(), parentTimeout)
 			defer cancel()
 			testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", cfg.defaultTimeout.Seconds())}
@@ -1565,10 +1574,10 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		}
 
 		if r.timedOut {
-			fmt.Printf("FAIL (%.3fs) %s (timeout)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
+			fmt.Printf("FAIL (%.3fs) %s (compilation timeout)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 			failedFiles++
 			totalFailed++
-			failures = append(failures, failureInfo{name: relPath + " (timeout)"})
+			failures = append(failures, failureInfo{name: relPath + " (compilation timeout)"})
 			continue
 		}
 
@@ -2008,19 +2017,19 @@ func atoi(s string) int {
 }
 
 // computeParentTimeout returns the backstop timeout for a subprocess that compiles
-// and runs a single test file. WASM cross-compilation is significantly slower than
-// native, so it uses a higher minimum (5 min vs 2 min) to avoid flaky timeouts on
-// heavy files under parallel load (B0108).
-func computeParentTimeout(perTestTimeout time.Duration, target string) time.Duration {
-	parentTimeout := perTestTimeout * 10
-	minTimeout := 2 * time.Minute
-	if isWasmTarget(target) {
-		minTimeout = 5 * time.Minute
+// and runs a single test file. This is a safety net for hung compilations (opt/llc
+// stuck forever), NOT a test timeout — per-test timeouts handle slow tests. The
+// default is 10 minutes (-compile-timeout flag). WASM cross-compilation uses a
+// higher minimum (15 min) since it's significantly slower (B0108).
+func computeParentTimeout(cfg testTimeoutConfig, target string) time.Duration {
+	backstop := cfg.compileTimeout
+	if backstop == 0 {
+		backstop = 10 * time.Minute
 	}
-	if parentTimeout < minTimeout {
-		parentTimeout = minTimeout
+	if isWasmTarget(target) && backstop < 15*time.Minute {
+		backstop = 15 * time.Minute
 	}
-	return parentTimeout
+	return backstop
 }
 
 // parseTimeoutArg parses a timeout string as a Go duration ("60s", "2m") or plain seconds ("60").

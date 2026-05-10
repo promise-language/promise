@@ -95,53 +95,36 @@ func TestComputeTestFileCacheKeyIncludesTimeout(t *testing.T) {
 }
 
 func TestComputeParentTimeout(t *testing.T) {
-	tests := []struct {
-		name        string
-		perTest     time.Duration
-		target      string
-		wantAtLeast time.Duration
-	}{
-		{
-			name:        "native default timeout",
-			perTest:     60 * time.Second,
-			target:      "x86_64-unknown-linux-gnu",
-			wantAtLeast: 600 * time.Second, // 60s * 10
-		},
-		{
-			name:        "native small timeout uses 2min minimum",
-			perTest:     10 * time.Second,
-			target:      "x86_64-unknown-linux-gnu",
-			wantAtLeast: 2 * time.Minute,
-		},
-		{
-			name:        "wasm small timeout uses 5min minimum",
-			perTest:     10 * time.Second,
-			target:      "wasm32-wasi",
-			wantAtLeast: 5 * time.Minute,
-		},
-		{
-			name:        "wasm large timeout uses multiplier",
-			perTest:     60 * time.Second,
-			target:      "wasm32-wasi",
-			wantAtLeast: 600 * time.Second, // 60s * 10
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := computeParentTimeout(tt.perTest, tt.target)
-			if got < tt.wantAtLeast {
-				t.Errorf("computeParentTimeout(%v, %q) = %v, want at least %v",
-					tt.perTest, tt.target, got, tt.wantAtLeast)
-			}
-		})
+	// Default compile timeout: 10 minutes for native, 15 minutes for WASM.
+	defaultCfg := testTimeoutConfig{defaultTimeout: 60 * time.Second, compileTimeout: 10 * time.Minute}
+
+	nativeTimeout := computeParentTimeout(defaultCfg, "x86_64-unknown-linux-gnu")
+	if nativeTimeout != 10*time.Minute {
+		t.Errorf("native backstop = %v, want 10m", nativeTimeout)
 	}
 
-	// Verify WASM minimum is strictly greater than native minimum
-	// when per-test timeout is small (the B0108 scenario).
-	nativeTimeout := computeParentTimeout(10*time.Second, "x86_64-unknown-linux-gnu")
-	wasmTimeout := computeParentTimeout(10*time.Second, "wasm32-wasi")
+	wasmTimeout := computeParentTimeout(defaultCfg, "wasm32-wasi")
+	if wasmTimeout != 15*time.Minute {
+		t.Errorf("wasm backstop = %v, want 15m", wasmTimeout)
+	}
+
+	// Custom compile timeout respected for native.
+	customCfg := testTimeoutConfig{compileTimeout: 5 * time.Minute}
+	customTimeout := computeParentTimeout(customCfg, "x86_64-unknown-linux-gnu")
+	if customTimeout != 5*time.Minute {
+		t.Errorf("custom backstop = %v, want 5m", customTimeout)
+	}
+
+	// WASM minimum (15m) overrides a smaller custom compile timeout.
+	smallCfg := testTimeoutConfig{compileTimeout: 3 * time.Minute}
+	wasmSmall := computeParentTimeout(smallCfg, "wasm32-wasi")
+	if wasmSmall != 15*time.Minute {
+		t.Errorf("wasm backstop with small custom = %v, want 15m", wasmSmall)
+	}
+
+	// WASM timeout is strictly greater than native for default config.
 	if wasmTimeout <= nativeTimeout {
-		t.Errorf("WASM parent timeout (%v) should exceed native (%v) for small per-test timeout",
+		t.Errorf("WASM parent timeout (%v) should exceed native (%v) for default config",
 			wasmTimeout, nativeTimeout)
 	}
 }

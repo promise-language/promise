@@ -88,16 +88,17 @@ func RunVerify(root string, args []string) error {
 	}
 
 	// 6. Go tests
+	var failures []string
 	fmt.Println("Running go tests...")
 	if err := RunGoTests(root); err != nil {
-		return fmt.Errorf("go tests: %w", err)
+		failures = append(failures, "go tests")
 	}
 
 	// 7. Promise tests (host)
 	fmt.Println("\nRunning promise tests (host)...")
 	hostStart := time.Now()
 	if err := RunPromiseTests(root, ""); err != nil {
-		return fmt.Errorf("promise tests (host): %w", err)
+		failures = append(failures, "promise tests (host)")
 	}
 	hostElapsed := time.Since(hostStart)
 
@@ -110,12 +111,12 @@ func RunVerify(root string, args []string) error {
 		fmt.Println("\nRunning promise tests (wasm32-wasi)...")
 		wasmStart := time.Now()
 		if err := RunPromiseTests(root, "wasm32-wasi"); err != nil {
-			return fmt.Errorf("promise tests (wasm32-wasi): %w", err)
+			failures = append(failures, "promise tests (wasm32-wasi)")
 		}
 		wasmElapsed = time.Since(wasmStart)
 	}
 
-	// 9. Summary
+	// 9. Summary — always printed, even on failure.
 	elapsed := time.Since(start)
 	mins := int(elapsed.Minutes())
 	secs := int(elapsed.Seconds()) % 60
@@ -126,14 +127,27 @@ func RunVerify(root string, args []string) error {
 	fmt.Println("  Verify Summary")
 	fmt.Println("----------------------------------------------------")
 	fmt.Printf("  Host target:  %s\n", hostTarget)
-	fmt.Printf("  Host tests:   passed (%s)\n", hostElapsed.Round(time.Millisecond))
+	if slices.Contains(failures, "promise tests (host)") || slices.Contains(failures, "go tests") {
+		fmt.Printf("  Host tests:   FAILED (%s)\n", hostElapsed.Round(time.Millisecond))
+	} else {
+		fmt.Printf("  Host tests:   passed (%s)\n", hostElapsed.Round(time.Millisecond))
+	}
 	if wasm {
-		fmt.Printf("  WASM tests:   passed (%s)\n", wasmElapsed.Round(time.Millisecond))
+		if slices.Contains(failures, "promise tests (wasm32-wasi)") {
+			fmt.Printf("  WASM tests:   FAILED (%s)\n", wasmElapsed.Round(time.Millisecond))
+		} else {
+			fmt.Printf("  WASM tests:   passed (%s)\n", wasmElapsed.Round(time.Millisecond))
+		}
 	}
 	fmt.Printf("  Total time:   %dm%02ds\n", mins, secs)
 	fmt.Println("====================================================")
-	fmt.Println("✅ OK to Commit")
 
+	if len(failures) > 0 {
+		fmt.Printf("FAILED: %s\n", strings.Join(failures, ", "))
+		return fmt.Errorf("%s failed", strings.Join(failures, ", "))
+	}
+
+	fmt.Println("OK to commit")
 	return nil
 }
 

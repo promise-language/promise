@@ -476,12 +476,13 @@ func runRun(args []string) {
 
 	// Execute
 	cmd := exec.Command(tmpOutput.Name())
+	isolateProcessGroup(cmd)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
+			os.Exit(sanitizeExitCode(exitErr.ExitCode()))
 		}
 		fmt.Fprintf(os.Stderr, "error running: %v\n", err)
 		os.Exit(1)
@@ -957,6 +958,7 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 	} else {
 		cmd = exec.CommandContext(ctx, binaryPath)
 	}
+	isolateProcessGroup(cmd)
 	output, runErr := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 
@@ -1004,7 +1006,7 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
+			os.Exit(sanitizeExitCode(exitErr.ExitCode()))
 		}
 		fmt.Fprintf(os.Stderr, "error running tests: %v\n", runErr)
 		os.Exit(1)
@@ -1052,6 +1054,7 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 	} else {
 		cmd = exec.CommandContext(ctx, binaryPath)
 	}
+	isolateProcessGroup(cmd)
 	output, runErr := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 
@@ -1102,7 +1105,7 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
+			os.Exit(sanitizeExitCode(exitErr.ExitCode()))
 		}
 		fmt.Fprintf(os.Stderr, "error running tests: %v\n", runErr)
 		os.Exit(1)
@@ -1264,6 +1267,7 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 	} else {
 		cmd = exec.CommandContext(ctx, binaryPath)
 	}
+	isolateProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 
@@ -2856,6 +2860,7 @@ func findLLVMTool(name string) (string, error) {
 // from the cache dir. Uses LD_LIBRARY_PATH on Linux, DYLD_LIBRARY_PATH on macOS.
 func runLLVMCmd(toolPath string, args ...string) *exec.Cmd {
 	cmd := exec.Command(toolPath, args...)
+	detachFromConsole(cmd)
 	// If the tool is in the embedded cache, ensure the library path includes that dir
 	// so it can find libLLVM alongside it.
 	toolDir := filepath.Dir(toolPath)
@@ -3565,6 +3570,7 @@ func linkDarwin(bcOrObjFile, target, outputFile string) {
 		linkCmd = runLLVMCmd(linkerPath, linkArgs...)
 	} else {
 		linkCmd = exec.Command(linkerPath, linkArgs...)
+		detachFromConsole(linkCmd)
 	}
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
@@ -3722,6 +3728,7 @@ func linkDarwinMulti(objFiles []string, target, outputFile string) {
 		linkCmd = runLLVMCmd(linkerPath, linkArgs...)
 	} else {
 		linkCmd = exec.Command(linkerPath, linkArgs...)
+		detachFromConsole(linkCmd)
 	}
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
@@ -4057,6 +4064,7 @@ func compileAndLinkClang(llFile, target, outputFile string) {
 	clang := findClang()
 	checkClangVersion(clang)
 	linkCmd := exec.Command(clang, linkArgs...)
+	detachFromConsole(linkCmd)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking (clang): %v\n", err)
@@ -5228,6 +5236,7 @@ func runExec(args []string) {
 	} else {
 		cmd = exec.CommandContext(ctx, tmpOutput.Name())
 	}
+	isolateProcessGroup(cmd)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -5237,7 +5246,7 @@ func runExec(args []string) {
 			os.Exit(1)
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
+			os.Exit(sanitizeExitCode(exitErr.ExitCode()))
 		}
 		fmt.Fprintf(os.Stderr, "error running: %v\n", err)
 		os.Exit(1)

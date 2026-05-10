@@ -11426,6 +11426,50 @@ func TestEnumCtorTempSkippedForNonIdentSynthDropArg(t *testing.T) {
 	assertNotContains(t, ir, "enum.ctor.drop")
 }
 
+// B0293: Enum variable reassignment must clear enumCtorTemps to prevent double-drop.
+// Without the fix, the enum ctor temp drop fires at statement end AND the variable's
+// scope-exit drop fires, causing use-after-free on the variant's heap data.
+func TestEnumCtorTempClearedOnReassign(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { string name; int value; }
+		enum Container[T] { Holding(T item), Empty, }
+		test() {
+			c := Container[Wrapper].Holding(Wrapper(name: "first", value: 1));
+			c = Container[Wrapper].Holding(Wrapper(name: "second", value: 2));
+		}
+	`)
+	// The reassignment path should NOT have enum.ctor.drop blocks —
+	// ownership transferred to the variable, ctor temps must be cleared.
+	assertNotContains(t, ir, "enum.ctor.drop")
+}
+
+// B0293: CastExpr as! on optional must neutralize source to prevent double-free.
+func TestAsBangOptionalNeutralizesSource(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		test() {
+			Point? p = Point(x: 8, y: 9);
+			Point q = p as! Point;
+		}
+	`)
+	// After as! unwrap into q, the optional p's present flag must be set to false.
+	// This prevents both p's optional drop and q's drop from freeing the same instance.
+	assertContains(t, ir, "store i1 false")
+}
+
+// B0293: Optional handler (p? _ { fallback }) must neutralize source.
+func TestOptionalHandlerNeutralizesSource(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		test() {
+			Point? p = Point(x: 5, y: 6);
+			Point q = p? _ { Point(x: 0, y: 0); };
+		}
+	`)
+	// After handler unwrap into q, the optional p's present flag should be set to false.
+	assertContains(t, ir, "store i1 false")
+}
+
 // Compound assignment on different typed variables exercises namedFromLLVMType branches
 func TestCompoundAssignF64(t *testing.T) {
 	ir := generateIR(t, `

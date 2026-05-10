@@ -3634,6 +3634,15 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.claimHeapTemp(val)
 			// Claim env temp — ownership transferred to reassigned variable.
 			c.claimEnvTemp(val)
+			// B0293: Clear enum ctor temps — ownership transferred to reassigned variable.
+			// Without this, the ctor temp drop fires at statement end and double-frees
+			// variant data that the variable now owns (segfault on scope exit).
+			if len(c.enumCtorTemps) > 0 && extractEnum(exprType) != nil {
+				for i := range c.enumCtorTemps {
+					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[i].dropFlag)
+				}
+				c.enumCtorTemps = c.enumCtorTemps[:0]
+			}
 			return
 		}
 		// Compound assignment: load current value, apply operator, store result

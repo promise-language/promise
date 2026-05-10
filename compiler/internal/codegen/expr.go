@@ -7568,11 +7568,29 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 // would otherwise try to drop the same inner value. Only called at assignment
 // sites (genTypedVarDecl, genInferredVarDecl, genAssignStmt).
 func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
-	unwrap, ok := expr.(*ast.OptionalUnwrapExpr)
-	if !ok {
+	// Extract the source identifier from opt!, opt as! T, or opt? _ { fallback }.
+	var inner ast.Expr
+	switch e := expr.(type) {
+	case *ast.OptionalUnwrapExpr:
+		inner = e.Expr
+	case *ast.CastExpr:
+		// B0293: as! on optionals also force-unwraps — must neutralize source.
+		// Only applies to optional→concrete casts, not inheritance downcasts.
+		if e.Force {
+			if _, isOpt := c.info.Types[e.Expr].(*types.Optional); isOpt {
+				inner = e.Expr
+			}
+		}
+	case *ast.ErrorHandlerExpr:
+		// B0293: optional handler (p? _ { fallback }) also extracts inner value.
+		if _, isOpt := c.info.Types[e.Expr].(*types.Optional); isOpt {
+			inner = e.Expr
+		}
+	}
+	if inner == nil {
 		return
 	}
-	ident, ok := unwrap.Expr.(*ast.IdentExpr)
+	ident, ok := inner.(*ast.IdentExpr)
 	if !ok {
 		return
 	}

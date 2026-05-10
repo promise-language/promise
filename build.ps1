@@ -143,6 +143,16 @@ $ModulesDir = Join-Path $Root "modules"
 if (-not (Test-Path $Resources)) { New-Item -ItemType Directory -Path $Resources | Out-Null }
 Copy-Item (Join-Path $Root "catalog.toml") (Join-Path $Resources "catalog.toml") -Force
 
+# language-guide.md
+Copy-Item (Join-Path $Root "docs\language-guide.md") (Join-Path $Resources "language-guide.md") -Force
+
+# examples/ -- clean copy
+$resourceExamples = Join-Path $Resources "examples"
+if (Test-Path $resourceExamples) { Remove-Item $resourceExamples -Recurse -Force }
+Copy-Item (Join-Path $Root "examples") $resourceExamples -Recurse
+$exReadme = Join-Path $resourceExamples "README.md"
+if (Test-Path $exReadme) { Remove-Item $exReadme -Force }
+
 # modules/ -- clean copy
 $resourceModules = Join-Path $Resources "modules"
 if (Test-Path $resourceModules) { Remove-Item $resourceModules -Recurse -Force }

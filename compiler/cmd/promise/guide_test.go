@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -14,12 +15,27 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatal(err)
 	}
 	os.Stdout = w
+
+	// Read concurrently to avoid deadlock when output exceeds pipe buffer.
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		data, err := io.ReadAll(r)
+		ch <- result{data, err}
+	}()
+
 	fn()
 	w.Close()
 	os.Stdout = old
-	buf := make([]byte, 256*1024)
-	n, _ := r.Read(buf)
-	return string(buf[:n])
+
+	res := <-ch
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	return string(res.data)
 }
 
 func TestRunGuideDefault(t *testing.T) {

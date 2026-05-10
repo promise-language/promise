@@ -125,6 +125,7 @@ func guideVersion() string {
 // (e.g., "error-handling" matches "## Error Handling").
 func extractSection(guide, name string) string {
 	slug := sectionSlug(name)
+	guide = strings.ReplaceAll(guide, "\r\n", "\n")
 	lines := strings.Split(guide, "\n")
 
 	start := -1
@@ -170,6 +171,7 @@ func sectionSlug(s string) string {
 func listSections() []string {
 	var sections []string
 	for _, line := range strings.Split(string(embeddedGuide), "\n") {
+		line = strings.TrimRight(line, "\r")
 		if strings.HasPrefix(line, "## ") {
 			sections = append(sections, strings.TrimPrefix(line, "## "))
 		}

@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Understand the problem and produce an implementation plan. Signals the transition from planning to implementing.
+description: Understand the problem and produce an implementation plan. Evaluates feasibility and sets task status accordingly.
 ---
 
 Understand the problem described in $ARGUMENTS and produce a concrete implementation plan. If $ARGUMENTS references a tracker ID (e.g., `B0042`, `T0015`), fetch it with `mcp__tracker__get` first.
@@ -16,7 +16,7 @@ Understand the problem described in $ARGUMENTS and produce a concrete implementa
    - Identify which files need to change and what the change is. Prefer the simplest approach that solves the problem.
    - For compiler changes: determine which pipeline stage(s) are involved (sema pass number, codegen phase, ownership rule, etc.).
    - For Promise code: follow the implementation philosophy -- prefer Promise over IR, full English words in APIs, getters for side-effect-free parameterless access, `doc` annotations on `public` declarations.
-   - State the plan clearly before returning.
+   - State the plan clearly as a note on the tracker item.
 
 3. **Evaluate feasibility.**
    Determine whether the item can actually be implemented right now. Three outcomes:
@@ -27,13 +27,13 @@ Understand the problem described in $ARGUMENTS and produce a concrete implementa
    - Add a note explaining the dependency.
    - Add the `needs-attention` tag (append to existing tags) so the user knows to review it.
    - Set the item status back to `open`.
-   - **Stop here.**
 
    **B) Not feasible** -- cannot be done as specified:
    - Set the item status to `wontfix` using `mcp__tracker__update`.
    - Provide a clear `summary` explaining why.
    - Add a note with the detailed reasoning.
    - Add the `needs-attention` tag (append to existing tags) so the user knows to review it.
-   - **Stop here.**
 
-   **C) Feasible** -- return the plan. Implementation begins after this skill exits.
+   **C) Feasible** -- state the plan clearly as a note on the tracker item.
+
+   In all cases, the orchestrator evaluates the task status after this skill exits and determines the next step.

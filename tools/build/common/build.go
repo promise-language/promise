@@ -16,6 +16,7 @@ import (
 func RunBuild(root string, args []string) error {
 	start := time.Now()
 	release := slices.Contains(args, "--release")
+	generate := slices.Contains(args, "--generate")
 
 	compilerDir := filepath.Join(root, "compiler")
 	binDir := filepath.Join(root, "bin")
@@ -27,9 +28,9 @@ func RunBuild(root string, args []string) error {
 	fmt.Println("Setting up git hooks...")
 	RunSilent("git", "-C", root, "config", "core.hooksPath", ".githooks")
 
-	// 2. Generate parser
-	fmt.Println("Generating parser...")
-	if err := GenerateParser(root); err != nil {
+	// 2. Generate parser (skip if up to date, unless --generate is passed)
+	fmt.Println("Checking parser...")
+	if err := GenerateParser(root, generate); err != nil {
 		return fmt.Errorf("generate parser: %w", err)
 	}
 
@@ -55,9 +56,12 @@ func RunBuild(root string, args []string) error {
 	}
 	fmt.Printf("  LLVM %d: opt=%s lld=%s\n", llvm.Version, llvm.OptPath, llvm.LLDPath)
 
-	// 6. Release: bundle LLVM tools
+	// 6. Release: bundle LLVM tools (Linux/macOS only — Windows has no embed support yet)
 	buildTags := ""
 	if release {
+		if IsWindows() {
+			return fmt.Errorf("--release builds are not supported on Windows (no LLVM embedding support)")
+		}
 		fmt.Println("Bundling LLVM tools for release...")
 		if err := BundleLLVM(root, llvm); err != nil {
 			return fmt.Errorf("bundle LLVM: %w", err)

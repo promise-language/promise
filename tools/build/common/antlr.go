@@ -53,15 +53,21 @@ func DownloadAntlr(root string) error {
 }
 
 // GenerateParser runs ANTLR to generate the Go lexer and parser from the grammar files.
-// This is a no-op equivalent — always regenerates (like make generate).
-func GenerateParser(root string) error {
+// If force is false, skips generation when parser output already exists and is up to date.
+func GenerateParser(root string, force bool) error {
+	grammarDir := filepath.Join(root, "compiler", "grammar")
+	parserPkg := filepath.Join(root, "compiler", "internal", "parser")
+
+	if !force && parserUpToDate(grammarDir, parserPkg) {
+		fmt.Println("  Parser up to date (use --generate to force)")
+		return nil
+	}
+
 	if err := DownloadAntlr(root); err != nil {
 		return err
 	}
 
 	jar := AntlrJarPath(root)
-	grammarDir := filepath.Join(root, "compiler", "grammar")
-	parserPkg := filepath.Join(root, "compiler", "internal", "parser")
 
 	if err := os.MkdirAll(parserPkg, 0o755); err != nil {
 		return fmt.Errorf("mkdir parser: %w", err)
@@ -91,4 +97,31 @@ func GenerateParser(root string) error {
 	}
 
 	return nil
+}
+
+// parserUpToDate returns true if the generated parser files exist and are
+// newer than the grammar source files (.g4).
+func parserUpToDate(grammarDir, parserPkg string) bool {
+	// Check that the key output file exists.
+	parserFile := filepath.Join(parserPkg, "promise_parser.go")
+	parserInfo, err := os.Stat(parserFile)
+	if err != nil {
+		return false
+	}
+
+	// Find the newest grammar file.
+	g4s, err := filepath.Glob(filepath.Join(grammarDir, "*.g4"))
+	if err != nil || len(g4s) == 0 {
+		return false
+	}
+	for _, g4 := range g4s {
+		info, err := os.Stat(g4)
+		if err != nil {
+			return false
+		}
+		if info.ModTime().After(parserInfo.ModTime()) {
+			return false // grammar is newer than parser output
+		}
+	}
+	return true
 }

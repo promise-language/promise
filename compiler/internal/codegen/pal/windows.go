@@ -1790,19 +1790,135 @@ func (p *WindowsPAL) EmitKill(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// EmitGetEnviron stub (not yet implemented on Windows).
+// EmitGetEnviron defines @pal_get_environ using UCRT __p__environ().
+// Signature: @pal_get_environ() → i8** (null-terminated array of "KEY=VALUE" strings)
+// UCRT __p__environ() returns a pointer to the _environ variable (i8***),
+// so we load through it to get the actual i8** array.
 func (p *WindowsPAL) EmitGetEnviron(module *ir.Module) *ir.Func {
-	return emitStubGetEnviron(module)
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	i8PtrPtrPtrType := irtypes.NewPointer(i8PtrPtrType)
+
+	// __p__environ() → i8*** (pointer to _environ)
+	pEnvironFn := getOrDeclareFunc(module, "__p__environ", i8PtrPtrPtrType)
+
+	fn := module.NewFunc("pal_get_environ", i8PtrPtrType)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	// __p__environ() returns &_environ (i8***), load to get _environ (i8**)
+	environPtr := entry.NewCall(pEnvironFn)
+	environ := entry.NewLoad(i8PtrPtrType, environPtr)
+	entry.NewRet(environ)
+	return fn
 }
 
-// EmitGetUserInfo stub (not yet implemented on Windows).
+// EmitGetUserInfo defines @pal_get_user_info using Win32 GetUserNameA and
+// GetEnvironmentVariableA for the home directory.
+// Signature: @pal_get_user_info(i8** out_name, i8** out_dir, i32* out_uid, i32* out_gid) → i32
+// Returns 0 on success. uid/gid are always 0 on Windows (no Unix uid concept).
 func (p *WindowsPAL) EmitGetUserInfo(module *ir.Module) *ir.Func {
-	return emitStubGetUserInfo(module)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	zero32 := constant.NewInt(irtypes.I32, 0)
+
+	// Win32: BOOL GetUserNameA(LPSTR lpBuffer, LPDWORD pcbBuffer)
+	// advapi32.dll — but linked via import lib
+	getUserNameFn := getOrDeclareFunc(module, "GetUserNameA", irtypes.I32,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("size", i32PtrType))
+
+	// UCRT: DWORD GetEnvironmentVariableA(LPCSTR name, LPSTR buf, DWORD size)
+	getEnvVarFn := getOrDeclareFunc(module, "GetEnvironmentVariableA", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("size", irtypes.I32))
+
+	// malloc for username and home dir buffers (caller doesn't free — static-ish)
+	mallocFn := getOrDeclareFunc(module, "malloc", irtypes.I8Ptr,
+		ir.NewParam("size", irtypes.I64))
+
+	fn := module.NewFunc("pal_get_user_info", irtypes.I32,
+		ir.NewParam("out_name", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_dir", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_uid", i32PtrType),
+		ir.NewParam("out_gid", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+
+	// uid = 0, gid = 0 (no Unix uid/gid on Windows)
+	entry.NewStore(zero32, fn.Params[2])
+	entry.NewStore(zero32, fn.Params[3])
+
+	// Get username: alloca 256 bytes, call GetUserNameA
+	nameBuf := entry.NewCall(mallocFn, constant.NewInt(irtypes.I64, 256))
+	nameSizeAlloca := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 256), nameSizeAlloca)
+	nameOk := entry.NewCall(getUserNameFn, nameBuf, nameSizeAlloca)
+	isNameErr := entry.NewICmp(enum.IPredEQ, nameOk, zero32)
+	nameOkBlk := fn.NewBlock(".name_ok")
+	nameErrBlk := fn.NewBlock(".name_err")
+	entry.NewCondBr(isNameErr, nameErrBlk, nameOkBlk)
+
+	// Name error: null-terminate buffer at position 0 (empty string)
+	nameErrBlk.NewStore(constant.NewInt(irtypes.I8, 0), nameBuf)
+	nameErrBlk.NewBr(nameOkBlk)
+
+	// Store username buffer pointer (GetUserNameA null-terminates on success,
+	// we null-terminated at 0 on error)
+	nameOkBlk.NewStore(nameBuf, fn.Params[0])
+
+	// Get home dir: GetEnvironmentVariableA("USERPROFILE", buf, 260)
+	userprofileStr := module.NewGlobalDef(".str.userprofile", constant.NewCharArrayFromString("USERPROFILE\x00"))
+	userprofileStr.Linkage = enum.LinkagePrivate
+	userprofilePtr := nameOkBlk.NewGetElementPtr(irtypes.NewArray(12, irtypes.I8), userprofileStr,
+		constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I64, 0))
+	dirBuf := nameOkBlk.NewCall(mallocFn, constant.NewInt(irtypes.I64, 260))
+	dirLen := nameOkBlk.NewCall(getEnvVarFn, userprofilePtr, dirBuf, constant.NewInt(irtypes.I32, 260))
+	isDirErr := nameOkBlk.NewICmp(enum.IPredEQ, dirLen, zero32)
+	dirOkBlk := fn.NewBlock(".dir_ok")
+	dirErrBlk := fn.NewBlock(".dir_err")
+	nameOkBlk.NewCondBr(isDirErr, dirErrBlk, dirOkBlk)
+
+	// Dir error: null-terminate buffer at 0 (empty string)
+	dirErrBlk.NewStore(constant.NewInt(irtypes.I8, 0), dirBuf)
+	dirErrBlk.NewBr(dirOkBlk)
+
+	// Store home dir buffer pointer
+	dirOkBlk.NewStore(dirBuf, fn.Params[1])
+	dirOkBlk.NewRet(zero32)
+
+	return fn
 }
 
-// EmitGetHostname stub (not yet implemented on Windows).
+// EmitGetHostname defines @pal_get_hostname using Win32 GetComputerNameA.
+// Signature: @pal_get_hostname(i8* buf, i64 len) → i8* (buf on success, null on error)
 func (p *WindowsPAL) EmitGetHostname(module *ir.Module) *ir.Func {
-	return emitStubGetHostname(module)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+
+	// Win32: BOOL GetComputerNameA(LPSTR lpBuffer, LPDWORD nSize)
+	getComputerNameFn := getOrDeclareFunc(module, "GetComputerNameA", irtypes.I32,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("size", i32PtrType))
+
+	fn := module.NewFunc("pal_get_hostname", irtypes.I8Ptr,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	// Truncate i64 len to i32 for Windows API
+	len32 := entry.NewTrunc(fn.Params[1], irtypes.I32)
+	sizeAlloca := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(len32, sizeAlloca)
+
+	ret := entry.NewCall(getComputerNameFn, fn.Params[0], sizeAlloca)
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".error")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	errBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+	okBlk.NewRet(fn.Params[0])
+	return fn
 }
 
 // EmitSignalInit defines @pal_signal_init using UCRT _pipe + SetConsoleCtrlHandler.

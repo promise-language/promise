@@ -4014,6 +4014,7 @@ func buildWindowsLinkArgs(target string, objFiles []string, outputFile string) [
 		"libvcruntime.lib",
 		"libcmt.lib",
 		"kernel32.lib",
+		"advapi32.lib",
 	}
 	args = append(args, objFiles...)
 	return args

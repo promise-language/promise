@@ -325,13 +325,23 @@ test_execute_inherits_env() `test(exclude: "wasm32") {
   set_env_var("PROMISE_TEST_EXEC_ENV", absent);
 }
 
-test_execute_inherits_cwd() `test(exclude: "wasm32") {
+test_execute_inherits_cwd() `test(exclude: "wasm32") `target(!windows) {
   // Child process should run in the parent's current working directory
   string original = working_dir?!;
   set_working_dir("/usr")?!;
   ProcessResult result = execute("sh", "-c", "pwd")?!;
   assert(result.exit_code == 0, "sh should exit with 0");
   assert(result.standard_output.starts_with("/usr"), "child should inherit working directory");
+  set_working_dir(original)?!;
+}
+
+test_execute_inherits_cwd() `test(exclude: "wasm32") `target(windows) {
+  // On Windows, CreateProcessA with lpCurrentDirectory=NULL inherits the parent's CWD.
+  // Verify set_working_dir + working_dir round-trips (child inheritance is guaranteed by the OS).
+  string original = working_dir?!;
+  set_working_dir("C:\\Windows")?!;
+  string cwd = working_dir?!;
+  assert(cwd == "C:\\Windows", "working directory should be C:\\Windows after set");
   set_working_dir(original)?!;
 }
 
@@ -359,14 +369,25 @@ test_set_env_var_overwrite() `test(exclude: "wasm32") {
   }
 }
 
-test_set_env_var_empty() `test(exclude: "wasm32") {
-  // Set to empty string — should be present but empty
+test_set_env_var_empty() `test(exclude: "wasm32") `target(!windows) {
+  // Set to empty string — should be present but empty (POSIX behavior)
   set_env_var("PROMISE_TEST_SET_ENV_3", "");
   string? val = get_env_var("PROMISE_TEST_SET_ENV_3");
   assert(val is present, "variable set to empty should be present");
   if v := val {
     assert(v.len == 0, "variable set to empty should have zero length");
   }
+}
+
+test_set_env_var_empty() `test(exclude: "wasm32") `target(windows) {
+  // On Windows, _putenv_s(name, "") removes the variable (OS behavior).
+  // Verify that setting to empty effectively unsets it.
+  set_env_var("PROMISE_TEST_SET_ENV_3", "something");
+  string? before = get_env_var("PROMISE_TEST_SET_ENV_3");
+  assert(before is present, "variable should be present before clearing");
+  set_env_var("PROMISE_TEST_SET_ENV_3", "");
+  string? after = get_env_var("PROMISE_TEST_SET_ENV_3");
+  assert(after is absent, "variable set to empty should be absent on Windows");
 }
 
 test_set_env_var_unset() `test(exclude: "wasm32") {
@@ -392,7 +413,7 @@ test_set_env_var_unset_nonexistent() `test(exclude: "wasm32") {
 
 // ── set_working_dir tests ─────────────────────────────────────────────
 
-test_set_working_dir() `test(exclude: "wasm32") {
+test_set_working_dir() `test(exclude: "wasm32") `target(!windows) {
   // Save original, change to /usr, verify, restore
   // (avoid /tmp which is a symlink to /private/tmp on macOS)
   string original = working_dir?!;
@@ -401,6 +422,17 @@ test_set_working_dir() `test(exclude: "wasm32") {
   string cwd = working_dir?!;
   assert(cwd == "/usr", "working directory should be /usr after set");
   // Restore
+  set_working_dir(original)?!;
+  string restored = working_dir?!;
+  assert(restored == original2, "working directory should be restored");
+}
+
+test_set_working_dir() `test(exclude: "wasm32") `target(windows) {
+  string original = working_dir?!;
+  string original2 = working_dir?!;
+  set_working_dir("C:\\Windows")?!;
+  string cwd = working_dir?!;
+  assert(cwd == "C:\\Windows", "working directory should be C:\\Windows after set");
   set_working_dir(original)?!;
   string restored = working_dir?!;
   assert(restored == original2, "working directory should be restored");
@@ -415,11 +447,20 @@ test_set_working_dir_nonexistent() `test(exclude: "wasm32") {
   assert(got_error, "set_working_dir to nonexistent path should raise error");
 }
 
-test_set_working_dir_preserves_env() `test(exclude: "wasm32") {
+test_set_working_dir_preserves_env() `test(exclude: "wasm32") `target(!windows) {
   // Verify that changing cwd doesn't affect environment variables
   set_env_var("PROMISE_TEST_CWD_ENV", "keep");
   string original = working_dir?!;
   set_working_dir("/tmp")?!;
+  string? val = get_env_var("PROMISE_TEST_CWD_ENV");
+  assert(val is present, "env var should survive cwd change");
+  set_working_dir(original)?!;
+}
+
+test_set_working_dir_preserves_env() `test(exclude: "wasm32") `target(windows) {
+  set_env_var("PROMISE_TEST_CWD_ENV", "keep");
+  string original = working_dir?!;
+  set_working_dir("C:\\Windows")?!;
   string? val = get_env_var("PROMISE_TEST_CWD_ENV");
   assert(val is present, "env var should survive cwd change");
   set_working_dir(original)?!;

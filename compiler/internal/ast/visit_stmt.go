@@ -61,6 +61,9 @@ func (b *Builder) VisitStatement(ctx *parser.StatementContext) interface{} {
 			Expr:     c.Accept(b).(Expr),
 		}
 	}
+	if c := ctx.Block(); c != nil {
+		return b.visitBlock(c)
+	}
 	if c := ctx.IncDecStmt(); c != nil {
 		return c.Accept(b)
 	}

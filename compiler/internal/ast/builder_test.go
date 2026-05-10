@@ -839,6 +839,17 @@ func TestBuildExpressions(t *testing.T) {
 				_ = es.Expr.(*UnsafeExpr)
 			},
 		},
+		{
+			name: "nested_block",
+			src:  `f() { x := 1; { x = 2; } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertLen(t, fn.Body.Stmts, 2)
+				_ = fn.Body.Stmts[0].(*InferredVarDecl)
+				blk := fn.Body.Stmts[1].(*Block)
+				assertLen(t, blk.Stmts, 1)
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

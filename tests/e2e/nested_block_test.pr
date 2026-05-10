@@ -1,0 +1,67 @@
+// B0296: nested blocks as statements
+test_nested_block_basic() `test {
+  x := 1;
+  {
+    y := x + 1;
+    assert(y == 2, "y == 2");
+  }
+  assert(x == 1, "x == 1");
+}
+
+test_nested_block_typed_var() `test {
+  a := "hello";
+  {
+    string b = a;
+    assert(b == "hello", "b == hello");
+  }
+}
+
+test_nested_block_scoping() `test {
+  x := 10;
+  {
+    x = 20;
+  }
+  assert(x == 20, "x == 20");
+}
+
+test_nested_block_multiple() `test {
+  x := 0;
+  {
+    x = x + 1;
+  }
+  {
+    x = x + 10;
+  }
+  assert(x == 11, "x == 11");
+}
+
+test_nested_block_deep() `test {
+  x := 1;
+  {
+    {
+      {
+        x = 42;
+      }
+    }
+  }
+  assert(x == 42, "x == 42");
+}
+
+test_nested_block_with_control_flow() `test {
+  result := 0;
+  for i in 0..3 {
+    {
+      result = result + i;
+    }
+  }
+  assert(result == 3, "result == 3");
+}
+
+test_nested_block_drop() `test {
+  x := "outer";
+  {
+    y := "inner";
+    assert(y == "inner", "y == inner");
+  }
+  assert(x == "outer", "x == outer");
+}

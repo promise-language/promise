@@ -286,6 +286,7 @@ statement
     | selectStmt                                               // block-terminated, no ;
     | matchExpr                                                // block-terminated, no ;
     | unsafeBlock                                              // block-terminated, no ;
+    | block                                                    // block-terminated, no ;
     | incDecStmt
     | assignmentStmt
     | expressionStmt

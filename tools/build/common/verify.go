@@ -132,7 +132,7 @@ func RunVerify(root string, args []string) error {
 	}
 	fmt.Printf("  Total time:   %dm%02ds\n", mins, secs)
 	fmt.Println("====================================================")
-	fmt.Println("OK to Commit")
+	fmt.Println("✅ OK to Commit")
 
 	return nil
 }

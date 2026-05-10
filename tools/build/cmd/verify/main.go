@@ -18,7 +18,7 @@ func main() {
 	}
 	if err := common.RunVerify(root, os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "----------------------------------------------------\n")
-		fmt.Fprintf(os.Stderr, "Verify FAILED: not safe to commit\n")
+		fmt.Fprintf(os.Stderr, "❌ Verify FAILED: not safe to commit\n")
 		fmt.Fprintf(os.Stderr, "----------------------------------------------------\n")
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

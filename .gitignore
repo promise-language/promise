@@ -32,3 +32,22 @@ compiler/grammar/.antlr/PromiseParser.tokens
 .runner-*
 .runner.*
 
+# Build tools (Go binaries compiled by ./make)
+bin/build
+bin/build.exe
+bin/coverage
+bin/coverage.exe
+bin/format
+bin/format.exe
+bin/prereqs
+bin/prereqs.exe
+bin/setup
+bin/setup.exe
+bin/stress
+bin/stress.exe
+bin/test
+bin/test.exe
+bin/verify
+bin/verify.exe
+bin/vet
+bin/vet.exe

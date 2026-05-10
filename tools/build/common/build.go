@@ -25,8 +25,7 @@ func RunBuild(root string, args []string) error {
 	}
 
 	// 1. Git hooks
-	fmt.Println("Setting up git hooks...")
-	RunSilent("git", "-C", root, "config", "core.hooksPath", ".githooks")
+	RunSetup(root)
 
 	// 2. Generate parser (skip if up to date, unless --generate is passed)
 	fmt.Println("Checking parser...")

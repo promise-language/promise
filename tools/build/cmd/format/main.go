@@ -11,6 +11,13 @@ var sourceHash = "dev"
 
 func main() {
 	common.CheckStale(sourceHash)
-	fmt.Println("format: not yet implemented")
-	os.Exit(1)
+	root, err := common.FindRoot()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if err := common.RunFormat(root, os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 }

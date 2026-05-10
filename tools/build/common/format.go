@@ -1,8 +1,11 @@
 package common
 
 import (
+	"bytes"
 	"fmt"
+	"go/format"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,12 +17,11 @@ import (
 func RunFormat(root string, args []string) error {
 	start := time.Now()
 
-	compilerDir := filepath.Join(root, "compiler")
 	promiseBin := filepath.Join(root, "bin", BinaryName())
 
 	// 1. Format Go code
 	fmt.Println("Formatting Go...")
-	if err := RunIn(compilerDir, "gofmt", "-w", "."); err != nil {
+	if err := FormatGo(root); err != nil {
 		return fmt.Errorf("gofmt: %w", err)
 	}
 
@@ -97,9 +99,56 @@ func FormatPromiseFiles(root, promiseBin string) error {
 	return RunIn(root, promiseBin, fmtArgs...)
 }
 
-// FormatGo runs gofmt on the compiler directory.
+// FormatGo formats all Go files under compiler/ using go/format.Source().
+// On Windows, it preserves original line endings to avoid spurious diffs
+// when git is configured with core.autocrlf=true.
 func FormatGo(root string) error {
-	return RunIn(filepath.Join(root, "compiler"), "gofmt", "-w", ".")
+	compilerDir := filepath.Join(root, "compiler")
+	return filepath.WalkDir(compilerDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == "vendor" || name == ".git" || strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".go") {
+			return nil
+		}
+
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		// Normalize CRLF→LF before formatting so comparison is line-ending-agnostic.
+		hasCRLF := bytes.Contains(src, []byte("\r\n"))
+		srcLF := bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
+
+		out, err := format.Source(srcLF)
+		if err != nil {
+			// Skip files that don't parse (e.g., generated code with build tags)
+			return nil
+		}
+
+		if bytes.Equal(out, srcLF) {
+			return nil // already formatted
+		}
+
+		// If original had CRLF, restore CRLF in output so git doesn't see a diff.
+		if hasCRLF {
+			out = bytes.ReplaceAll(out, []byte("\n"), []byte("\r\n"))
+		}
+
+		perm := os.FileMode(0644)
+		if fi, e := os.Stat(path); e == nil {
+			perm = fi.Mode().Perm()
+		}
+		return os.WriteFile(path, out, perm)
+	})
 }
 
 // EmbedFormattedResources re-embeds resources after formatting so the next

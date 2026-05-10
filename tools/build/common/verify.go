@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 // RunVerify orchestrates the full pre-commit verification pipeline:
@@ -135,12 +137,13 @@ func RunVerify(root string, args []string) error {
 	return nil
 }
 
-// acquireVerifyLock creates a file-based lock to serialize concurrent verify runs.
+// acquireVerifyLock acquires an OS-level file lock to serialize concurrent
+// verify runs. The lock is automatically released by the OS if the process
+// dies, so there is no risk of orphaned locks.
 // Returns an unlock function that must be deferred.
 func acquireVerifyLock() (func(), error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		// Can't get home dir — skip locking
 		return func() {}, nil
 	}
 
@@ -148,32 +151,21 @@ func acquireVerifyLock() (func(), error) {
 	os.MkdirAll(lockDir, 0o755)
 	lockPath := filepath.Join(lockDir, "verify.lock")
 
-	// Try to create the lock file exclusively
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	fl := flock.New(lockPath)
+
+	// Try non-blocking first to detect contention.
+	locked, err := fl.TryLock()
 	if err != nil {
-		if os.IsExist(err) {
-			fmt.Println("Waiting for another verify run to finish...")
-			// Poll until the lock is released
-			for {
-				time.Sleep(500 * time.Millisecond)
-				f, err = os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-				if err == nil {
-					break
-				}
-				if !os.IsExist(err) {
-					return nil, err
-				}
-			}
-		} else {
-			return nil, err
+		return nil, fmt.Errorf("acquire lock: %w", err)
+	}
+	if !locked {
+		fmt.Println("Waiting for another verify run to finish...")
+		if err := fl.Lock(); err != nil {
+			return nil, fmt.Errorf("acquire lock: %w", err)
 		}
 	}
 
-	// Write PID for diagnostics
-	fmt.Fprintf(f, "%d\n", os.Getpid())
-	f.Close()
-
 	return func() {
-		os.Remove(lockPath)
+		fl.Unlock()
 	}, nil
 }

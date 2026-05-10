@@ -14,43 +14,36 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 ## Build & Test Commands
 
-**IMPORTANT: Always use `./build` (Linux/macOS) or `.\build.ps1` (Windows) from the repo root to build the compiler. NEVER run `go build` directly — it skips resource embedding and produces a broken binary. The output is `bin/promise` (Linux/macOS) or `bin/promise.exe` (Windows).**
+**IMPORTANT: Always use `bin/build` (or `./build` legacy) to build the compiler. NEVER run `go build` directly — it skips resource embedding and produces a broken binary. The output is `bin/promise` (Linux/macOS) or `bin/promise.exe` (Windows).**
 
 **IMPORTANT: Never commit, push, or create PRs unless the user explicitly asks you to.** Wait for an explicit instruction like "commit", "push", or "create a PR" before performing any git write operations.
 
-**IMPORTANT: Always run `bin/verify.sh --local --wasm` before committing changes.** This formats Go and Promise code, runs `go vet`, and executes the full test suite (including WASM target). The `--local` flag uses a local cache directory to avoid polluting `~/.promise`. Do not commit if verify fails.
+**IMPORTANT: Always run `bin/verify.sh --local --wasm` (or `bin/verify --local --wasm`) before committing changes.** This formats Go and Promise code, runs `go vet`, and executes the full test suite (including WASM target). The `--local` flag uses a local cache directory to avoid polluting `~/.promise`. Do not commit if verify fails.
 
-**Setup (once per clone):** `bin/setup.sh` — enables git hooks and local dev environment. Also runs automatically on `./build`.
-
-```bash
-# From repo root (Linux/macOS):
-./build                    # generate parser + embed resources + build → bin/promise
-bin/test.sh                # build + run all tests (go + promise)
-bin/test.sh go             # Go unit tests only
-bin/test.sh promise        # Promise tests only
-bin/test.sh --wasm         # include wasm32-wasi target
-bin/test.sh --clean        # clear caches first
-bin/verify.sh              # format + vet + all tests (pre-commit check)
-bin/verify.sh --wasm       # include wasm target
-```
-
-```powershell
-# From repo root (Windows PowerShell):
-.\build.ps1                # embed resources + build → bin\promise.exe
-.\build.ps1 -Generate      # also regenerate ANTLR parser (requires Java)
-# Prerequisites: powershell -ExecutionPolicy Bypass -File bin\install-prereqs.ps1
-```
-
-The following `make` targets run from `compiler/` and also output to `bin/promise`:
+**Bootstrap (once per clone):** `./make` — compiles all Go build tools to `bin/`. Then `bin/setup` enables git hooks. See `docs/build-tools.md` for the full architecture.
 
 ```bash
-make                  # download ANTLR4 JAR, generate parser, embed resources, build binary
-make release          # release build: embed LLVM tools (~61-71MB self-contained binary)
-make test             # run all Go tests (go test ./...)
-make generate         # regenerate ANTLR4 parser from grammar
-make resources        # copy modules/ into embedded resources
-make clean            # remove generated code and binary
+# Bootstrap (first time or after tools/ source changes):
+./make                     # compile all build tools to bin/
+
+# From repo root (all platforms):
+bin/build                  # generate parser + embed resources + build → bin/promise
+bin/build --release        # release build with embedded LLVM tools
+bin/test                   # build + run all tests (go + promise)
+bin/test go                # Go unit tests only
+bin/test promise           # Promise tests only
+bin/test --wasm            # include wasm32-wasi target
+bin/test --clean           # clear caches first
+bin/verify --local --wasm  # format + vet + all tests (pre-commit check)
+bin/format                 # format Go + Promise code
+bin/vet                    # go vet (excluding generated parser)
+bin/coverage               # Go + Promise test coverage
+bin/stress                 # stress test for flaky detection
+bin/prereqs                # check build prerequisites
+bin/setup                  # configure git hooks
 ```
+
+Legacy shell scripts (`./build`, `bin/verify.sh`, `bin/test.sh`, etc.) still work but are deprecated in favor of the Go tools above.
 
 Go tests run from `compiler/`:
 

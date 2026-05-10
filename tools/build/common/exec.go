@@ -55,6 +55,17 @@ func RunSilent(name string, args ...string) error {
 	return nil
 }
 
+// RunOutputCombined executes a command capturing both stdout and stderr.
+// Use for commands like "java -version" that write to stderr.
+func RunOutputCombined(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return strings.TrimSpace(string(out)), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // RunOutputQuiet executes a command capturing stdout and discarding stderr.
 // Use for probing commands where stderr noise is expected.
 func RunOutputQuiet(name string, args ...string) (string, error) {

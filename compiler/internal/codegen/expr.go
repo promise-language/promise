@@ -1864,6 +1864,8 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 					c.clearDropFlag(ident.Name)
 				}
+				// B0301: Neutralize source optional for opt! args in new() constructors.
+				c.neutralizeForceUnwrapSource(arg.Value)
 			}
 			// B0211: Don't claim string temp when the constructor will strdup
 			// (skipClear=true: borrow string on type with drop/synth-drop).
@@ -2038,6 +2040,8 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				} else {
 					// Expression result: claim temp, store directly
 					c.block.NewStore(val, fieldPtr)
+					// B0301: Neutralize source optional for opt! on string fields.
+					c.neutralizeForceUnwrapSource(arg.Value)
 					// For optional strings, claim the pre-wrap value (the raw i8* temp)
 					if isOptionalString {
 						c.claimStringTemp(preWrapVal)
@@ -2051,6 +2055,10 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 					c.clearDropFlag(ident.Name)
 				}
+				// B0301: When arg is opt! (force-unwrap), neutralize the source optional's
+				// present flag so its scope cleanup won't double-free the inner value
+				// that now lives in the constructor field.
+				c.neutralizeForceUnwrapSource(arg.Value)
 				// B0168: Claim string temp — ownership transferred to constructor field.
 				c.claimStringTemp(val)
 				// B0233: Claim heap temp — ownership transferred to constructor field.
@@ -2209,6 +2217,8 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// B0301: Neutralize source optional for opt! args.
+			c.neutralizeForceUnwrapSource(arg.Value)
 		}
 		newMethod := named.LookupMethod("new")
 		if newMethod != nil {
@@ -2291,6 +2301,8 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		}
+		// B0301: Neutralize source optional for opt! args in value-type constructors.
+		c.neutralizeForceUnwrapSource(arg.Value)
 	}
 
 	// Initialize omitted fields: evaluate default expression if present, otherwise zero-init

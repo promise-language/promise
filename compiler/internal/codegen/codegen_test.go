@@ -5699,6 +5699,25 @@ func TestOptionalForceUnwrapAsBang(t *testing.T) {
 	assertContains(t, ir, "promise_panic")
 }
 
+// B0301: Optional force-unwrap used as a constructor argument must neutralize
+// the source optional's present flag to prevent double-free.
+func TestOptionalForceUnwrapConstructorArg(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner { int x; }
+		type Outer { Inner inner; }
+		main() {
+			Inner? opt = Inner(x: 1);
+			Outer o = Outer(inner: opt!);
+		}
+	`)
+	// After unwrap.ok, the source optional's present flag (field 0) must be
+	// set to false. Look for "store i1 false" targeting the optional's GEP
+	// at field 0 after the unwrap block.
+	assertContains(t, ir, "unwrap.ok")
+	// The constructor should store the unwrapped value into the Outer instance
+	assertContains(t, ir, "store { i8*, i8* }")
+}
+
 func TestFieldShadowing(t *testing.T) {
 	ir := generateIR(t, `
 		type Base { int x; int y; }

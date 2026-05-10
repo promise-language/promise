@@ -14,11 +14,11 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 ## Build & Test Commands
 
-**IMPORTANT: Always use `bin/build` (or `./build` legacy) to build the compiler. NEVER run `go build` directly — it skips resource embedding and produces a broken binary. The output is `bin/promise` (Linux/macOS) or `bin/promise.exe` (Windows).**
+**IMPORTANT: Always use `bin/build` to build the compiler. NEVER run `go build` directly — it skips resource embedding and produces a broken binary. The output is `bin/promise` (Linux/macOS) or `bin/promise.exe` (Windows).**
 
 **IMPORTANT: Never commit, push, or create PRs unless the user explicitly asks you to.** Wait for an explicit instruction like "commit", "push", or "create a PR" before performing any git write operations.
 
-**IMPORTANT: Always run `bin/verify.sh --local --wasm` (or `bin/verify --local --wasm`) before committing changes.** This formats Go and Promise code, runs `go vet`, and executes the full test suite (including WASM target). The `--local` flag uses a local cache directory to avoid polluting `~/.promise`. Do not commit if verify fails.
+**IMPORTANT: Always run `bin/verify --local --wasm` before committing changes.** This formats Go and Promise code, runs `go vet`, and executes the full test suite (including WASM target). The `--local` flag uses a local cache directory to avoid polluting `~/.promise`. Do not commit if verify fails.
 
 **Bootstrap (once per clone):** `./make` — compiles all Go build tools to `bin/`. Then `bin/setup` enables git hooks. See `docs/build-tools.md` for the full architecture.
 
@@ -43,7 +43,7 @@ bin/prereqs                # check build prerequisites
 bin/setup                  # configure git hooks
 ```
 
-Legacy shell scripts (`./build`, `bin/verify.sh`, `bin/test.sh`, etc.) still work but are deprecated in favor of the Go tools above.
+The `compiler/Makefile` still exists for ANTLR generation and resource embedding targets used by `bin/build` internally.
 
 Go tests run from `compiler/`:
 
@@ -87,9 +87,9 @@ bin/promise test -timeout 10s -stress 50 tests/...       # per-run timeout + str
 bin/promise test -coverage file.pr                       # single-file coverage report
 bin/promise test -coverage tests/e2e/...                 # multi-file coverage (aggregated)
 bin/promise test -coverage tests/... modules/...         # coverage across multiple targets
-bin/coverage.sh                                          # Go + Promise coverage for all
-bin/coverage.sh go ./internal/codegen/                   # Go coverage for a specific package
-bin/coverage.sh promise tests/std/                       # Promise coverage for a directory
+bin/coverage                                             # Go + Promise coverage for all
+bin/coverage go ./internal/codegen/                      # Go coverage for a specific package
+bin/coverage promise tests/std/                          # Promise coverage for a directory
 
 # Cache diagnostics
 PROMISE_CACHE_DEBUG=1 bin/promise test tests/...         # show cache HIT/MISS/SKIP on stderr
@@ -165,7 +165,7 @@ Stress mode compiles once and re-runs binaries. Stdout and stderr are captured s
 .pr source → ANTLR4 (grammar/) → AST (ast/) → Sema 4-pass (sema/) → Ownership (ownership/) → LLVM IR (codegen/) → opt+lld(LTO) → binary
 ```
 
-On Linux/macOS/WASM: `opt -O1` (coroutine lowering + optimization) → `.bc` (LLVM bitcode) → linker with `--lto-O1` (`--lto-O2` for WASM). LTO performs whole-program inlining and DCE across all modules at link time. On Windows: `opt -O1` → `llc -filetype=obj` → `lld-link` (LTO not yet wired up for MSVC). On other platforms (or `PROMISE_USE_CLANG=1`): `clang -O1`. Requires LLVM 22+. Release builds (`./build --release`) embed gzip-compressed LLVM tools in the binary (~61-71MB), extracted lazily to `~/.promise/cache/llvm/<platform>/`. Platform-specific embed files (`llvm_linux_amd64.go`, `llvm_darwin_arm64.go`, `llvm_darwin_amd64.go`) select the correct tools. On macOS, extracted Mach-O binaries are patched with `install_name_tool` (rpath + dylib references) and re-signed with `codesign`.
+On Linux/macOS/WASM: `opt -O1` (coroutine lowering + optimization) → `.bc` (LLVM bitcode) → linker with `--lto-O1` (`--lto-O2` for WASM). LTO performs whole-program inlining and DCE across all modules at link time. On Windows: `opt -O1` → `llc -filetype=obj` → `lld-link` (LTO not yet wired up for MSVC). On other platforms (or `PROMISE_USE_CLANG=1`): `clang -O1`. Requires LLVM 22+. Release builds (`bin/build --release`) embed gzip-compressed LLVM tools in the binary (~61-71MB), extracted lazily to `~/.promise/cache/llvm/<platform>/`. Platform-specific embed files (`llvm_linux_amd64.go`, `llvm_darwin_arm64.go`, `llvm_darwin_amd64.go`) select the correct tools. On macOS, extracted Mach-O binaries are patched with `install_name_tool` (rpath + dylib references) and re-signed with `codesign`.
 
 Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse → sema (with auto-injected `use std as _`) → ownership.
 
@@ -395,4 +395,4 @@ The standard library (`modules/std/`, 37 files) is auto-imported via `use std as
 - `mangleMethodName(owner, name, failable)` produces LLVM function names like `TypeName.method`
 - Move sites must call `clearDropFlag(name)` — there are 8 call variant sites in expr.go plus assignment sites in stmt.go
 - All tests must pass after changes. Significant changes need accompanying tests.
-- When updating `modules/std/*.pr`, run `./build` — it automatically embeds the updated stdlib. The `stdAll` mini-stdlib in test files is auto-populated from the embedded std via `go:embed` — no manual update needed.
+- When updating `modules/std/*.pr`, run `bin/build` — it automatically embeds the updated stdlib. The `stdAll` mini-stdlib in test files is auto-populated from the embedded std via `go:embed` — no manual update needed.

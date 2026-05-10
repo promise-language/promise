@@ -23,7 +23,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
      - Single file: `bin/promise test -coverage tests/e2e/foo_test.pr`
      - Directory: `bin/promise test -coverage tests/e2e/...`
      - Multiple targets: `bin/promise test -coverage tests/std/... modules/...`
-   - Or use `bin/coverage.sh promise <target>` for a formatted report.
+   - Or use `bin/coverage promise <target>` for a formatted report.
    - Note: coverage instruments function/method entries, if/else branches, while/for/loop bodies, and enum match arms. Only user code is instrumented — std/modules, test functions, and `main()` are skipped.
    - Note: files containing only test functions (no non-test code) will show no coverage data. This is expected — coverage measures how well tests exercise non-test code.
 

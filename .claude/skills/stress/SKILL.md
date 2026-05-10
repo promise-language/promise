@@ -1,19 +1,19 @@
 ---
 name: stress
-description: Run bin/stress.sh 1000 (or the number given as arguments) and compare the flaky tests agains the currently logged flaky bugs. Consider the host target. When you see flaky bugs that no longer reprodice, close them. If you see new unfiled bugs file them
+description: Run bin/stress 1000 (or the number given as arguments) and compare the flaky tests agains the currently logged flaky bugs. Consider the host target. When you see flaky bugs that no longer reproduce, close them. If you see new unfiled bugs file them
 ---
 
 Run stress tests to detect flaky tests, then reconcile results against the bug tracker.
 
 ## Inputs
 
-- `$ARGUMENTS` — optional iteration count or duration passed to `bin/stress.sh` (e.g., `1000`, `500`, `30s`). Defaults to `1000` if omitted.
+- `$ARGUMENTS` — optional iteration count or duration passed to `bin/stress` (e.g., `1000`, `500`, `30s`). Defaults to `1000` if omitted.
 
 ## Steps
 
 ### 1. Run stress tests
 
-- Execute `TERM=xterm bin/stress.sh $ARGUMENTS` (or `TERM=xterm bin/stress.sh 1000` if no arguments given).
+- Execute `TERM=xterm bin/stress $ARGUMENTS` (or `TERM=xterm bin/stress 1000` if no arguments given).
 - This builds the compiler, then runs `bin/promise test -timeout 15s -stress <N> tests/... modules/...`.
 - Let it run to completion. The output ends with a structured report.
 

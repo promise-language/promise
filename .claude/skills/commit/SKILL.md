@@ -15,10 +15,10 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - If the changes affect documented behavior, update relevant docs (`docs/`, CLAUDE.md, module `doc` annotations).
 
 2. **Build.**
-   - Run `./build` (Linux/macOS) or `.\build.ps1` (Windows) to ensure the binary is up-to-date with any source or module changes. Never run `go build` directly.
+   - Run `bin/build` to ensure the binary is up-to-date with any source or module changes. Never run `go build` directly.
 
 3. **Pre-commit verification.**
-   - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) from the repo root.
+   - Run `bin/verify --local --wasm` from the repo root.
    - If it fails, fix the issues and re-run until it passes. Do not proceed until green.
    - **Memory leak check (ZERO TOLERANCE)**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). **The repo has 0 leaks. Any leak in the output is a regression caused by your changes.** Do NOT treat any leak as preexisting — there are none. Fix all leaks before proceeding. Changes that introduce memory leaks will not be pushed.
    - **No `allow_leaks: true` tags — ever.** Check `git diff` for any added `allow_leaks: true` — this is a blocking issue. The repo has 0 `allow_leaks` tags. Never add them. If a test leaks, fix the leak. There are no exceptions.
@@ -33,7 +33,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - If there are conflicts, resolve them carefully and continue the rebase.
 
 6. **Post-rebase verification.**
-   - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) again to confirm nothing broke during rebase.
+   - Run `bin/verify --local --wasm` again to confirm nothing broke during rebase.
    - If it fails, fix and re-run.
    - **Memory leak check**: Verify the leak count is still 0 after rebase. Any leaks are a regression — fix before pushing.
 

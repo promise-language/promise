@@ -11470,6 +11470,29 @@ func TestOptionalHandlerNeutralizesSource(t *testing.T) {
 	assertContains(t, ir, "store i1 false")
 }
 
+// B0299: Inline optional string field unwrap must not track the string as a
+// statement-end temp. The owner's drop handles the string's lifetime.
+// Without this fix, statement-end cleanup frees the original string from
+// the field, then Wrapper.drop frees it again → double-free.
+func TestOptionalFieldStringInlineUnwrapNoTempTrack(t *testing.T) {
+	res := compileResult(t, `
+		type Wrapper { string? opt_name; }
+		test() {
+			Wrapper w = Wrapper(opt_name: "hello");
+			assert(w.opt_name! == "hello", "ok");
+		}
+	`)
+	ir := res.Module.String()
+	// Extract just the test function's IR
+	fnStart := strings.Index(ir, "define void @test()")
+	fnEnd := strings.Index(ir[fnStart:], "\n}\n")
+	testIR := ir[fnStart : fnStart+fnEnd+3]
+	// The inline unwrap must NOT generate a strdup/string_new call —
+	// no dup is needed for inline access, and the string must not be
+	// tracked as a temp (optionalFieldString flag suppresses tracking).
+	assertNotContains(t, testIR, "promise_string_new")
+}
+
 // Compound assignment on different typed variables exercises namedFromLLVMType branches
 func TestCompoundAssignF64(t *testing.T) {
 	ir := generateIR(t, `

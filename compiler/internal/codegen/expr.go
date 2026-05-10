@@ -7553,7 +7553,10 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	// optional's own drop handles the inner string. For non-ident sources (call
 	// results), the string? temporary has no scope drop → the extracted string
 	// must be tracked and freed at statement end.
-	if _, isIdent := expr.(*ast.IdentExpr); !isIdent && c.tempTrackingEnabled {
+	// B0299: Skip when optionalFieldString is set — the field comes from a
+	// droppable type whose drop handles the string's lifetime. Tracking it
+	// as a temp would cause double-free (statement-end + owner drop).
+	if _, isIdent := expr.(*ast.IdentExpr); !isIdent && c.tempTrackingEnabled && !c.optionalFieldString {
 		if result.Type().Equal(irtypes.I8Ptr) {
 			c.trackStringTemp(result)
 		}

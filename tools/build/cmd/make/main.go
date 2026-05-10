@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/p5e-ia/promise-lang/tools/build/common"
@@ -54,6 +56,27 @@ func main() {
 		return
 	}
 
+	// Quick up-to-date check (skip with --force)
+	force := slices.Contains(os.Args[1:], "--force")
+	hashFile := filepath.Join(binDir, ".tools.hash")
+	if !force {
+		if stored, err := os.ReadFile(hashFile); err == nil {
+			if strings.TrimSpace(string(stored)) == hash {
+				allExist := true
+				for _, name := range tools {
+					if !common.Exists(filepath.Join(binDir, name+common.ExeSuffix())) {
+						allExist = false
+						break
+					}
+				}
+				if allExist {
+					fmt.Printf("Tools up to date (%d tools, hash: %s..)\n", len(tools), hash[:12])
+					return
+				}
+			}
+		}
+	}
+
 	fmt.Printf("Building %d tools (hash: %s..)\n", len(tools), hash[:12])
 
 	ldflags := fmt.Sprintf("-s -w -X main.sourceHash=%s", hash)
@@ -83,5 +106,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\n%d/%d tools failed (%s)\n", failed, len(tools), elapsed.Round(time.Millisecond))
 		os.Exit(1)
 	}
+
+	// Write hash sidecar for up-to-date check
+	os.WriteFile(hashFile, []byte(hash+"\n"), 0o644)
+
 	fmt.Printf("\n%d tools built (%s)\n", len(tools), elapsed.Round(time.Millisecond))
 }

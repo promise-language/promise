@@ -14,6 +14,7 @@ bin/promise.exe
 bin/promise.exe~
 bin/.promise.hash
 bin/.promise.buildinfo
+bin/.tools.hash
 compiler/grammar/.antlr/PromiseLexer.interp
 compiler/grammar/.antlr/PromiseLexer.java
 compiler/grammar/.antlr/PromiseLexer.tokens

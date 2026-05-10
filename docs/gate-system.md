@@ -10,7 +10,7 @@ The Promise compiler uses a four-class gate system to prevent quality regression
 |-------|------|---------|-------------------|----------|
 | 1 | **Edit gates** | <1s | PreToolUse hook on Edit/Write | Block `allow_leaks: true` in `.pr` files |
 | 2 | **Commit gates** | 2-5 min | After verify, before commit | Leak count must not increase, test count must not decrease |
-| 3 | **Periodic gates** | 10-60 min | Scheduled by tracker | Stress tests, coverage analysis, binary size, agent learning cost |
+| 3 | **Periodic gates** | 10-60 min | Scheduled by tracker | Stress tests, coverage analysis, compilation time, binary size, agent learning cost |
 | 4 | **Platform gates** | 5-30 min | After commit, dispatched by tracker | Verify on Windows, verify on Linux |
 
 ## Architecture

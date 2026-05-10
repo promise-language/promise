@@ -70,7 +70,10 @@ func runFmt(args []string) {
 
 		out := formatter.Format(src)
 
-		if bytes.Equal(out, src) {
+		// Compare against CRLF-normalized source so Windows checkouts
+		// (core.autocrlf=true) don't cause spurious rewrites.
+		srcNorm := bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
+		if bytes.Equal(out, srcNorm) {
 			continue // already formatted
 		}
 

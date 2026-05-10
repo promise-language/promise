@@ -5,13 +5,17 @@
 package formatter
 
 import (
+	"bytes"
 	"sort"
 	"strings"
 	"unicode/utf8"
 )
 
 // Format formats Promise source code into canonical form.
+// Line endings are always normalized to LF (\n).
 func Format(src []byte) []byte {
+	// Normalize CRLF → LF so output is identical regardless of platform.
+	src = bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
 	tokens := tokenize(string(src))
 	tokens = sortUseImports(tokens)
 	return []byte(reformat(tokens))

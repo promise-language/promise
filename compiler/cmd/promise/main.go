@@ -23,6 +23,7 @@ import (
 	"github.com/antlr4-go/antlr/v4"
 
 	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/ast/astcache"
 	"djabi.dev/go/promise_lang/internal/codegen"
 	"djabi.dev/go/promise_lang/internal/module"
 	"djabi.dev/go/promise_lang/internal/ownership"
@@ -66,10 +67,11 @@ func timeSubPhase(name string, elapsed time.Duration, extra string) {
 
 // moduleTimings aggregates timing data collected during module loading (T0215).
 type moduleTimings struct {
-	parseTime time.Duration
-	semaTime  time.Duration
-	files     int
-	timings   sema.SemaTimings
+	parseTime   time.Duration
+	semaTime    time.Duration
+	files       int
+	timings     sema.SemaTimings
+	parseCached bool // T0214: true if std AST was loaded from cache
 }
 
 //go:embed resources/catalog.toml
@@ -4261,8 +4263,11 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	timePhase("sema", time.Since(tSema), "")
 	if timePhases {
 		if modTiming != nil {
-			timeSubPhase("mod parse", modTiming.parseTime,
-				fmt.Sprintf("(%d files)", modTiming.files))
+			parseExtra := fmt.Sprintf("(%d files)", modTiming.files)
+			if modTiming.parseCached {
+				parseExtra += " (cached)"
+			}
+			timeSubPhase("mod parse", modTiming.parseTime, parseExtra)
 			mt := modTiming.timings
 			timeSubPhase("mod sema", modTiming.semaTime,
 				fmt.Sprintf("(declare: %dms, define: %dms, check: %dms, verify: %dms)",
@@ -4638,6 +4643,8 @@ type moduleLoader struct {
 	modFiles int
 	// modTimings accumulates per-pass sema timings across all modules (T0215).
 	modTimings sema.SemaTimings
+	// modParseCached is true if the std module AST was loaded from cache (T0214).
+	modParseCached bool
 }
 
 // loadModuleScopes scans use declarations for local module paths, loads each
@@ -4744,10 +4751,11 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 		return nil, nil, nil, nil
 	}
 	mt := &moduleTimings{
-		parseTime: loader.modParseTime,
-		semaTime:  loader.modSemaTime,
-		files:     loader.modFiles,
-		timings:   loader.modTimings,
+		parseTime:   loader.modParseTime,
+		semaTime:    loader.modSemaTime,
+		files:       loader.modFiles,
+		timings:     loader.modTimings,
+		parseCached: loader.modParseCached,
 	}
 	return scopes, loader.allModInfos, loader.depOrder, mt
 }
@@ -4832,20 +4840,44 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		return nil, err
 	}
 
-	var modFileList []*ast.File
-	for _, f := range srcFiles {
-		tParse := time.Now()
-		modFileList = append(modFileList, parseSourceFile(f))
-		ml.modParseTime += time.Since(tParse)
+	// T0214: Binary AST cache for std module — skip ANTLR4 parsing on cache hit.
+	var merged *ast.File
+	astCacheHit := false
+	astCacheDir := ""
+	astCacheKey := ""
+	if modCfg.Name == "std" {
+		home, homeErr := module.PromiseHome()
+		if homeErr == nil {
+			astCacheDir = filepath.Join(home, "cache", "astcache")
+			astCacheKey = astcache.Key(module.CompilerHash())
+			tParse := time.Now()
+			cached, _ := astcache.Load(astCacheDir, astCacheKey)
+			if cached != nil {
+				merged = cached
+				astCacheHit = true
+				ml.modParseCached = true
+				ml.modParseTime += time.Since(tParse)
+				ml.modFiles += len(srcFiles)
+			}
+		}
 	}
-	ml.modFiles += len(srcFiles)
 
-	if len(modFileList) == 0 {
-		return nil, fmt.Errorf("module '%s' contains no .pr files", modPath)
+	if !astCacheHit {
+		var modFileList []*ast.File
+		for _, f := range srcFiles {
+			tParse := time.Now()
+			modFileList = append(modFileList, parseSourceFile(f))
+			ml.modParseTime += time.Since(tParse)
+		}
+		ml.modFiles += len(srcFiles)
+
+		if len(modFileList) == 0 {
+			return nil, fmt.Errorf("module '%s' contains no .pr files", modPath)
+		}
+
+		// Merge module files into a single AST
+		merged = mergeModuleFiles(modFileList)
 	}
-
-	// Merge module files into a single AST, then inject std import
-	merged := mergeModuleFiles(modFileList)
 	// Don't inject std into the std module itself
 	if modCfg.Name != "std" {
 		merged = injectStdImport(merged)
@@ -4869,6 +4901,11 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	ml.modTimings.Verify += semaInfo.Timings.Verify
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
+	}
+
+	// T0214: Save AST cache for std on cache miss (after sema succeeds).
+	if modCfg.Name == "std" && !astCacheHit && astCacheDir != "" {
+		astcache.Save(astCacheDir, astCacheKey, merged)
 	}
 
 	// Resolve embed annotations for module implementation files (B0145)
@@ -5364,8 +5401,11 @@ func runExec(args []string) {
 	timePhase("sema", time.Since(tSema), "")
 	if timePhases {
 		if modTiming != nil {
-			timeSubPhase("mod parse", modTiming.parseTime,
-				fmt.Sprintf("(%d files)", modTiming.files))
+			parseExtra := fmt.Sprintf("(%d files)", modTiming.files)
+			if modTiming.parseCached {
+				parseExtra += " (cached)"
+			}
+			timeSubPhase("mod parse", modTiming.parseTime, parseExtra)
 			mt := modTiming.timings
 			timeSubPhase("mod sema", modTiming.semaTime,
 				fmt.Sprintf("(declare: %dms, define: %dms, check: %dms, verify: %dms)",

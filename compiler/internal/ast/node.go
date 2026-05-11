@@ -50,3 +50,10 @@ type nodeBase struct {
 
 func (n nodeBase) Pos() Pos { return n.pos }
 func (n nodeBase) End() Pos { return n.end }
+
+// SetPosEnd sets the position and end of a node.
+// Exported for use by the astcache package.
+func (n *nodeBase) SetPosEnd(pos, end Pos) {
+	n.pos = pos
+	n.end = end
+}

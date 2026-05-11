@@ -1644,33 +1644,32 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		if r.cmdErr != nil {
 			// Test binaries may crash during scheduler shutdown after all tests pass
 			// (stack overflow on macOS/Linux, STATUS_ACCESS_VIOLATION on Windows).
-			// If all tests passed and none failed, treat as a pass — the crash is
+			// If all tests passed, none failed, AND the summary line was printed
+			// (meaning the test harness completed), treat as a pass — the crash is
 			// in the shutdown path, not in user code. B0230.
-			if filePassed > 0 && fileFailed == 0 && fileLeaked == 0 && fileTimedOut == 0 {
+			// Without a summary line, the subprocess crashed mid-test (B0300).
+			if filePassed > 0 && fileFailed == 0 && fileLeaked == 0 && fileTimedOut == 0 && summaryMatch != nil {
 				relPath, relErr := filepath.Rel(baseDir, r.file)
 				if relErr != nil {
 					relPath = r.file
 				}
-				if m := summaryMatch; m != nil {
-					totalPassed += atoi(m[1])
-					totalFailed += atoi(m[2])
-					if m[3] != "" {
-						totalSkipped += atoi(m[3])
-					}
-					if len(m) > 4 && m[4] != "" {
-						totalLeaked += atoi(m[4])
-					}
-					if len(m) > 5 && m[5] != "" {
-						totalTimedOut += atoi(m[5])
-					}
-					if len(m) > 6 && m[6] != "" {
-						totalIgnored += atoi(m[6])
-					}
-					if len(m) > 7 && m[7] != "" {
-						totalStale += atoi(m[7])
-					}
-				} else {
-					totalPassed += filePassed
+				m := summaryMatch
+				totalPassed += atoi(m[1])
+				totalFailed += atoi(m[2])
+				if m[3] != "" {
+					totalSkipped += atoi(m[3])
+				}
+				if len(m) > 4 && m[4] != "" {
+					totalLeaked += atoi(m[4])
+				}
+				if len(m) > 5 && m[5] != "" {
+					totalTimedOut += atoi(m[5])
+				}
+				if len(m) > 6 && m[6] != "" {
+					totalIgnored += atoi(m[6])
+				}
+				if len(m) > 7 && m[7] != "" {
+					totalStale += atoi(m[7])
 				}
 				totalFiles++
 				testCount := ""
@@ -1681,6 +1680,17 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				continue
 			}
 			failedFiles++
+
+			// B0300: subprocess crashed before printing summary — report as crash.
+			if summaryMatch == nil && filePassed > 0 && fileFailed == 0 && fileLeaked == 0 && fileTimedOut == 0 {
+				totalPassed += filePassed
+				totalFailed++
+				errCtx := r.cmdErr.Error()
+				fmt.Printf("FAIL (%.3fs) %s (crashed after %d tests)%s\n", r.elapsed.Seconds(), relPath, filePassed, targetSuffix)
+				fmt.Printf("  process crashed: %s\n", errCtx)
+				failures = append(failures, failureInfo{name: relPath + " (crashed)", context: errCtx})
+				continue
+			}
 
 			if m := summaryMatch; m != nil {
 				totalPassed += atoi(m[1])

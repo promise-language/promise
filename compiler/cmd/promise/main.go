@@ -752,6 +752,11 @@ func runTest(args []string) {
 // runTestFile runs test functions from a single .pr file.
 // targetTriple overrides the compilation target (empty = host).
 func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, coverageMode bool) {
+	// T0213: Disable instance caching for test runs to match batch mode behavior.
+	// Batch subprocesses set this env var; setting it here too ensures individual
+	// runs produce identical binaries (no stale instance .bc from build cache).
+	os.Setenv("PROMISE_NO_INSTANCE_CACHE", "1")
+
 	start := time.Now()
 	// For cache-hit paths where we can't compute per-test timeouts,
 	// use the CLI default as the process-level timeout.
@@ -1003,8 +1008,7 @@ func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile
 	}
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
-		CachedInstances: lookupCachedInstances(info, target),
-		DebugFree:       true, // tests always use debug mode
+		DebugFree: true, // tests always use debug mode
 	})
 	result.GenerateTestMain(info.Tests, testTimeouts)
 	timePhase("codegen", time.Since(tCodegen), "")
@@ -1098,7 +1102,6 @@ func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple
 		target = codegen.HostTargetTriple()
 	}
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
-		CachedInstances: lookupCachedInstances(info, target),
 		CoverageEnabled: true,
 		DebugFree:       true, // tests always use debug mode
 	})
@@ -1401,8 +1404,7 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	// Codegen with normal main (no GenerateTestMain)
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
-		CachedInstances: lookupCachedInstances(info, target),
-		DebugFree:       true, // tests always use debug mode
+		DebugFree: true, // tests always use debug mode
 	})
 	timePhase("codegen", time.Since(tCodegen), "")
 
@@ -1451,6 +1453,14 @@ func firstLines(s string, n int) string {
 // runTestFiles runs tests from a list of .pr files, printing per-file results
 // and a combined summary at the end. Tests are compiled and run concurrently
 // up to the parallel limit. Results are printed in file order.
+//
+// T0213: Batch vs individual test run differences. Each file runs as a separate
+// subprocess (process-isolated), so tests don't share global state or memory
+// layout. Remaining differences after T0213 fixes:
+//   - Process timeout: batch uses computeParentTimeout (10min backstop);
+//     individual uses sum-of-per-test-timeouts + 30s. Both are safety nets only.
+//   - Parallelism: batch runs multiple files concurrently (resource contention
+//     possible under heavy load); individual runs one file at a time.
 func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, parallel int, coverageMode bool) {
 	unlock := module.LockBuildDirShared()
 	defer unlock()
@@ -1551,6 +1561,12 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			}
 			if coverageMode {
 				testArgs = append(testArgs, "-coverage")
+			}
+			if timePhases {
+				testArgs = append(testArgs, "--time-phases")
+			}
+			if cfg.compileTimeout != 10*time.Minute {
+				testArgs = append(testArgs, "-compile-timeout", cfg.compileTimeout.String())
 			}
 			testArgs = append(testArgs, r.file)
 			cmd := exec.CommandContext(ctx, selfExe, testArgs...)

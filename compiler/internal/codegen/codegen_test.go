@@ -16981,6 +16981,33 @@ func TestOptionalForceUnwrapIndexAssignValue(t *testing.T) {
 	assertContains(t, ir, "store i1 false")
 }
 
+// B0312: Force unwrap in ident reassignment neutralizes source optional.
+func TestOptionalForceUnwrapIdentReassign(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? opt = "hello";
+			string x = "";
+			x = opt!;
+		}
+	`)
+	// B0312: present flag must be set to false after ident reassign (neutralize source)
+	assertContains(t, ir, "store i1 false")
+}
+
+// B0312: Force unwrap in member assignment neutralizes source optional.
+func TestOptionalForceUnwrapMemberAssign(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { string val; }
+		main() {
+			string? opt = "hello";
+			h := Holder(val: "");
+			h.val = opt!;
+		}
+	`)
+	// B0312: present flag must be set to false after member assign (neutralize source)
+	assertContains(t, ir, "store i1 false")
+}
+
 // T0111: Optional local with vector inner type gets scope-exit drop
 func TestOptionalLocalVectorDrop(t *testing.T) {
 	ir := generateIR(t, `

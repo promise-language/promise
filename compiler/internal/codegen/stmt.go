@@ -3554,6 +3554,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					if rhsIdent, ok := s.Value.(*ast.IdentExpr); ok {
 						c.clearDropFlag(rhsIdent.Name)
 					}
+					// B0312: When RHS is opt!, neutralize the source optional so its
+					// drop doesn't double-free the inner value now owned by the setter.
+					c.neutralizeForceUnwrapSource(s.Value)
 				}
 				return
 			}
@@ -3565,6 +3568,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				if ident, ok := s.Value.(*ast.IdentExpr); ok {
 					c.clearDropFlag(ident.Name)
 				}
+				// B0312: When RHS is opt!, neutralize the source optional so its
+				// drop doesn't double-free the inner value now owned by the MutRef target.
+				c.neutralizeForceUnwrapSource(s.Value)
 				return
 			}
 			// Compound assignment on MutRef param
@@ -3665,6 +3671,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				}
 				c.enumCtorTemps = c.enumCtorTemps[:0]
 			}
+			// B0312: When RHS is opt!, neutralize the source optional so its
+			// drop doesn't double-free the inner value now owned by this variable.
+			c.neutralizeForceUnwrapSource(s.Value)
 			return
 		}
 		// Compound assignment: load current value, apply operator, store result
@@ -3681,6 +3690,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					if rhsIdent, ok := s.Value.(*ast.IdentExpr); ok {
 						c.clearDropFlag(rhsIdent.Name)
 					}
+					// B0312: When RHS is opt!, neutralize the source optional so its
+					// drop doesn't double-free the inner value now owned by this setter.
+					c.neutralizeForceUnwrapSource(s.Value)
 				}
 				break
 			}
@@ -3731,6 +3743,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					// Expression result: store directly, claim temp
 					c.genMemberAssign(target, s.Op, val)
 					c.claimStringTemp(val)
+					// B0312: When RHS is opt!, neutralize the source optional so its
+					// drop doesn't double-free the inner value now owned by this field.
+					c.neutralizeForceUnwrapSource(s.Value)
 				}
 				break
 			}
@@ -3745,6 +3760,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.claimStringTemp(val)
 			// B0233: Claim heap temp — ownership transferred to field.
 			c.claimHeapTemp(val)
+			// B0312: When RHS is opt!, neutralize the source optional so its
+			// drop doesn't double-free the inner value now owned by this field.
+			c.neutralizeForceUnwrapSource(s.Value)
 		}
 
 	case *ast.IndexExpr:
@@ -3771,6 +3789,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				if extractNamed(resolvedElem) == types.TypString {
 					dupVal := c.dupString(val)
 					c.genIndexAssign(target, s.Op, dupVal)
+					// Note: do NOT neutralize opt! source here — dupString creates an
+					// independent copy for the vector, so the original stays owned by
+					// the source optional (whose drop frees it at scope exit).
 					break
 				}
 			}
@@ -3806,6 +3827,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// B0312: When RHS is opt!, neutralize the source optional so its
+			// drop doesn't double-free the inner value now owned by the slice target.
+			c.neutralizeForceUnwrapSource(s.Value)
 		}
 
 	default:

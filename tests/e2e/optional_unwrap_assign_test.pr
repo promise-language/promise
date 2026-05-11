@@ -1,0 +1,68 @@
+// B0312: OptionalUnwrapExpr (!) must neutralize source in ident reassign,
+// member assign, and slice assign contexts. Without neutralization, the source
+// optional's drop at scope exit double-frees the inner value.
+test_ident_reassign_optional_unwrap() `test {
+  string? opt = "a".repeat(10);
+  string x = "";
+  x = opt!;
+  // Force memory reuse to expose use-after-free.
+  i := 0;
+  while i < 1000 {
+    _ := "garbage".repeat(5);
+    i = i + 1;
+  }
+  assert(x == "aaaaaaaaaa", "reassigned value should match");
+}
+
+type Holder {
+  string val;
+}
+
+test_member_assign_optional_unwrap() `test {
+  string? opt = "hello".repeat(3);
+  h := Holder(val: "");
+  h.val = opt!;
+  // Force memory reuse.
+  i := 0;
+  while i < 1000 {
+    _ := "garbage".repeat(5);
+    i = i + 1;
+  }
+  assert(h.val == "hellohellohello", "field value should match");
+}
+
+// B0312: Member assign on droppable type (T0095 string-dup early-exit path).
+type DroppableHolder {
+  string val;
+  drop(~this) {
+  }
+}
+
+test_member_assign_droppable_owner_optional_unwrap() `test {
+  string? opt = "world".repeat(3);
+  h := DroppableHolder(val: "");
+  h.val = opt!;
+  // Force memory reuse.
+  i := 0;
+  while i < 1000 {
+    _ := "garbage".repeat(5);
+    i = i + 1;
+  }
+  assert(h.val == "worldworldworld", "droppable owner field value should match");
+}
+
+// B0312: Vector[string] index assign with opt! (B0195 string-dup early-exit path).
+test_vector_string_index_assign_optional_unwrap() `test {
+  string? opt = "test".repeat(4);
+  string[] v = ["a", "b", "c"];
+  v[0] = opt!;
+  // Force memory reuse.
+  i := 0;
+  while i < 1000 {
+    _ := "garbage".repeat(5);
+    i = i + 1;
+  }
+  assert(v[0] == "testtesttesttest", "vector element should match unwrapped value");
+}
+
+// Slice assign test omitted — vector [:]=  has a pre-existing leak (B0313).

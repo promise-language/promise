@@ -1,6 +1,8 @@
 package ast
 
 import (
+	"strings"
+
 	"djabi.dev/go/promise_lang/internal/parser"
 	antlr "github.com/antlr4-go/antlr/v4"
 )
@@ -635,17 +637,40 @@ func (b *Builder) VisitArg(ctx *parser.ArgContext) interface{} {
 	return node
 }
 
+// interpErrorListener detects syntax errors during interpolation expression re-parsing.
+type interpErrorListener struct {
+	antlr.DefaultErrorListener
+	hasErrors bool
+}
+
+func (l *interpErrorListener) SyntaxError(
+	_ antlr.Recognizer, _ interface{}, _, _ int, _ string, _ antlr.RecognitionException,
+) {
+	l.hasErrors = true
+}
+
 // parseInterpolationExpr re-lexes/re-parses the text between {} in a string interpolation.
 // outerLine and outerCol are the position of the expression text in the original source file,
 // used to offset the re-parsed AST node positions.
 func (b *Builder) parseInterpolationExpr(text string, outerLine, outerCol int) Expr {
+	if strings.TrimSpace(text) == "" {
+		return nil // empty interpolation — sema reports the error
+	}
 	input := antlr.NewInputStream(text)
 	lexer := parser.NewPromiseLexer(input)
+	el := &interpErrorListener{}
 	lexer.RemoveErrorListeners()
+	lexer.AddErrorListener(el)
 	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
 	p := parser.NewPromiseParser(stream)
 	p.RemoveErrorListeners()
+	p.AddErrorListener(el)
 	tree := p.Expression()
+	if el.hasErrors || stream.LT(1).GetTokenType() != antlr.TokenEOF {
+		pos := Pos{File: b.filename, Line: outerLine, Column: outerCol}
+		b.errorf(pos, "invalid expression in string interpolation")
+		return nil
+	}
 	result := tree.Accept(b)
 	if expr, ok := result.(Expr); ok {
 		offsetExprPositions(expr, outerLine-1, outerCol)

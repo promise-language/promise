@@ -2375,3 +2375,69 @@ func assertLen[T any](t *testing.T, slice []T, want int) {
 		t.Errorf("got len %d, want %d", len(slice), want)
 	}
 }
+
+// TestBuildInvalidInterpolation verifies that invalid expressions inside string
+// interpolation are rejected with errors (B0311).
+func TestBuildInvalidInterpolation(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		msg  string
+	}{
+		{
+			name: "escaped_quotes_in_interpolation",
+			src:  `main() { string s = "{\"a\":\"b\"}"; }`,
+			msg:  "invalid expression in string interpolation",
+		},
+		{
+			name: "unconsumed_tokens",
+			src:  `main() { string s = "{1 2}"; }`,
+			msg:  "invalid expression in string interpolation",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := antlr.NewInputStream(tt.src)
+			lexer := parser.NewPromiseLexer(input)
+			lexer.RemoveErrorListeners()
+			stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+			p := parser.NewPromiseParser(stream)
+			p.RemoveErrorListeners()
+			tree := p.CompilationUnit()
+			_, errs := Build("test.pr", tree)
+			if len(errs) == 0 {
+				t.Fatal("expected error for invalid interpolation, got none")
+			}
+			found := false
+			for _, err := range errs {
+				if strings.Contains(err.Error(), tt.msg) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected error containing %q, got: %v", tt.msg, errs)
+			}
+		})
+	}
+}
+
+// TestBuildEmptyInterpolationStillWorks verifies that truly empty {} interpolation
+// still passes AST building (the error is reported by sema, not the AST builder).
+func TestBuildEmptyInterpolationStillWorks(t *testing.T) {
+	src := `main() { string s = "hello {} world"; }`
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	_, errs := Build("test.pr", tree)
+	// Empty {} should not produce an AST build error — sema handles it
+	for _, err := range errs {
+		if strings.Contains(err.Error(), "invalid expression in string interpolation") {
+			t.Errorf("empty {} should not produce AST build error, got: %v", err)
+		}
+	}
+}

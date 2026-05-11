@@ -927,7 +927,14 @@ func (d *decoder) file() *ast.File {
 }
 
 // Decode deserializes an AST File from binary data (no header).
-func Decode(data []byte) (*ast.File, error) {
+func Decode(data []byte) (result *ast.File, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+			err = fmt.Errorf("astcache decode panic: %v", r)
+		}
+	}()
+
 	d := &decoder{data: data}
 
 	// Read string table

@@ -90,12 +90,20 @@ func Save(cacheDir, key string, f *ast.File) {
 	data = append(data, header[:]...)
 	data = append(data, payload...)
 
-	// Atomic write: temp file + rename
-	tmp := cachePath(cacheDir, key) + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// Atomic write: unique temp file + rename
+	target := cachePath(cacheDir, key)
+	tmp, err := os.CreateTemp(cacheDir, "std-*.tmp")
+	if err != nil {
 		return
 	}
-	os.Rename(tmp, cachePath(cacheDir, key))
+	tmpName := tmp.Name()
+	_, writeErr := tmp.Write(data)
+	tmp.Close()
+	if writeErr != nil {
+		os.Remove(tmpName)
+		return
+	}
+	os.Rename(tmpName, target)
 }
 
 // Remove deletes the cache entry for a key.

@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/parser"
+	"djabi.dev/go/promise_lang/internal/testutil"
+	antlr "github.com/antlr4-go/antlr/v4"
 )
 
 // TestRoundTripSimple tests encode/decode of a simple AST.
@@ -297,4 +300,50 @@ func wrapStmtInFile(s ast.Stmt) *ast.File {
 	f := &ast.File{Decls: []ast.Decl{fd}}
 	f.SetPosEnd(ast.Pos{File: "test.pr", Line: 1, Column: 0}, ast.Pos{File: "test.pr", Line: 1, Column: 20})
 	return f
+}
+
+// parseString parses Promise source into an AST File using ANTLR4.
+func parseString(t *testing.T, filename, src string) *ast.File {
+	t.Helper()
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	file, errs := ast.Build(filename, tree)
+	if len(errs) > 0 {
+		t.Fatalf("parse errors in %s: %v", filename, errs)
+	}
+	return file
+}
+
+// TestRoundTripRealStd parses the actual embedded std module source,
+// encodes it, decodes it, and verifies the round-trip produces identical bytes.
+func TestRoundTripRealStd(t *testing.T) {
+	src := testutil.LoadStdFiles()
+	original := parseString(t, "std.pr", src)
+
+	encoded := Encode(original)
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	reencoded := Encode(decoded)
+	if !bytes.Equal(encoded, reencoded) {
+		// Find first difference for debugging
+		minLen := len(encoded)
+		if len(reencoded) < minLen {
+			minLen = len(reencoded)
+		}
+		for i := 0; i < minLen; i++ {
+			if encoded[i] != reencoded[i] {
+				t.Fatalf("round-trip mismatch at byte %d: encoded=0x%02x, re-encoded=0x%02x (encoded %d bytes, re-encoded %d bytes)",
+					i, encoded[i], reencoded[i], len(encoded), len(reencoded))
+			}
+		}
+		t.Fatalf("round-trip length mismatch: encoded %d bytes, re-encoded %d bytes", len(encoded), len(reencoded))
+	}
 }

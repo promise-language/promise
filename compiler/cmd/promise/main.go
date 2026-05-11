@@ -35,6 +35,22 @@ import (
 // builds, "<epoch>" for release builds. Falls back to embedded catalog epoch.
 var version string
 
+// timePhases enables per-phase compilation timing output on stderr (--time-phases).
+var timePhases bool
+
+// timePhase prints a single phase timing line to stderr if --time-phases is active.
+func timePhase(name string, elapsed time.Duration, extra string) {
+	if !timePhases {
+		return
+	}
+	ms := elapsed.Milliseconds()
+	if extra != "" {
+		fmt.Fprintf(os.Stderr, "[time] %-11s %5dms %s\n", name+":", ms, extra)
+	} else {
+		fmt.Fprintf(os.Stderr, "[time] %-11s %5dms\n", name+":", ms)
+	}
+}
+
 //go:embed resources/catalog.toml
 var embeddedCatalog []byte
 
@@ -401,6 +417,8 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 			debugMode = true
 		case "--release":
 			releaseMode = true
+		case "--time-phases":
+			timePhases = true
 		default:
 			filename = args[i]
 		}
@@ -447,13 +465,25 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 	// Use --release for production builds with platform-default free behavior.
 	debugFree := !releaseMode
 
+	var compileStart time.Time
+	if timePhases {
+		compileStart = time.Now()
+	}
+
 	file, info := compileFrontend(filename)
+
+	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
 		CachedInstances: lookupCachedInstances(info, target),
 		DebugFree:       debugFree,
 	})
+	timePhase("codegen", time.Since(tCodegen), "")
 
 	compileAndLink(result, outputFile, target, filename)
+
+	if timePhases {
+		timePhase("total", time.Since(compileStart), "")
+	}
 	return filename, outputFile, target
 }
 
@@ -635,13 +665,15 @@ func runTest(args []string) {
 			i++
 		} else if args[i] == "-coverage" {
 			coverageMode = true
+		} else if args[i] == "--time-phases" {
+			timePhases = true
 		} else {
 			remaining = append(remaining, args[i])
 		}
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-compile-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] <file.pr | dir | dir/...> ...")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-compile-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] [--time-phases] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
 
@@ -777,11 +809,16 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 			fmt.Fprintf(os.Stderr, "[cache SKIP] %s (not cacheable)\n", filepath.Base(filename))
 		}
 	}
+	var compileStart time.Time
+	if timePhases {
+		compileStart = time.Now()
+	}
+
 	file, info := compileFrontendForTarget(filename, targetTriple)
 
 	if info.HasExpectOutput {
 		e2eTimeout := computeE2ETimeout(info, cfg)
-		runE2ETest(file, info, filename, e2eTimeout, start, targetTriple, cacheDir, cacheKey)
+		runE2ETest(file, info, filename, e2eTimeout, start, targetTriple, cacheDir, cacheKey, compileStart)
 		return
 	}
 
@@ -792,6 +829,10 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 
 	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 	binaryPath := compileTestBinary(file, info, targetTriple, filename, testTimeouts)
+
+	if timePhases {
+		timePhase("total", time.Since(compileStart), "")
+	}
 
 	// Save to cache.
 	if cacheDir != "" {
@@ -937,11 +978,13 @@ func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
+	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
 		CachedInstances: lookupCachedInstances(info, target),
 		DebugFree:       true, // tests always use debug mode
 	})
 	result.GenerateTestMain(info.Tests, testTimeouts)
+	timePhase("codegen", time.Since(tCodegen), "")
 
 	ext := binaryExtension(target)
 	tmpOutput, err := os.CreateTemp("", "promise-test-*"+ext)
@@ -1314,7 +1357,7 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 // runE2ETest compiles an E2E test binary, saves it to the cache, and runs it.
 func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	timeout time.Duration, start time.Time, targetTriple string,
-	cacheDir, cacheKey string) {
+	cacheDir, cacheKey string, compileStart time.Time) {
 
 	target := targetTriple
 	if target == "" {
@@ -1333,10 +1376,12 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	}
 
 	// Codegen with normal main (no GenerateTestMain)
+	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
 		CachedInstances: lookupCachedInstances(info, target),
 		DebugFree:       true, // tests always use debug mode
 	})
+	timePhase("codegen", time.Since(tCodegen), "")
 
 	ext := binaryExtension(target)
 	tmpOutput, err := os.CreateTemp("", "promise-e2e-*"+ext)
@@ -1348,6 +1393,10 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	defer os.Remove(tmpOutput.Name())
 
 	compileAndLink(result, tmpOutput.Name(), target, filename)
+
+	if timePhases && !compileStart.IsZero() {
+		timePhase("total", time.Since(compileStart), "")
+	}
 
 	// Save to cache
 	if cacheDir != "" {
@@ -2135,6 +2184,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	}
 
 	// Compile main IR (always recompiled — main changes with every build).
+	tOpt := time.Now()
 	mainObj := compileModule(mainIR, "promise-main")
 	defer os.Remove(mainObj)
 
@@ -2270,6 +2320,9 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	}
 	instWg.Wait()
 
+	optExtra := fmt.Sprintf("(%d modules, %d instances)", len(moduleIRs), len(instObjs))
+	timePhase("opt", time.Since(tOpt), optExtra)
+
 	for _, iobj := range instObjs {
 		if !iobj.cached {
 			defer os.Remove(iobj.objFile)
@@ -2286,6 +2339,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	}
 
 	// Link all files together (LTO linkers handle cross-module optimization)
+	tLink := time.Now()
 	if isDarwinTarget(target) {
 		linkDarwinMulti(objFiles, target, outputFile)
 	} else if isWasmTarget(target) {
@@ -2295,6 +2349,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	} else {
 		linkLinuxMulti(objFiles, target, outputFile)
 	}
+	timePhase("link", time.Since(tLink), "")
 }
 
 // buildInstCacheMetas builds a map from mono instance name (e.g., "Vector[int]")
@@ -3495,12 +3550,14 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	bcFile.Close()
 	defer os.Remove(bcFile.Name())
 
+	tOpt := time.Now()
 	optCmd := runLLVMCmd(optPath, "-O1", llFile, "-o", bcFile.Name())
 	optCmd.Stderr = os.Stderr
 	if err := optCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error running opt: %v\n", err)
 		os.Exit(1)
 	}
+	timePhase("opt", time.Since(tOpt), "")
 
 	if isWindowsTarget(target) {
 		// Windows: llc → lld-link (LTO not yet wired up for MSVC COFF)
@@ -3519,6 +3576,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 		objFile.Close()
 		defer os.Remove(objFile.Name())
 
+		tLink := time.Now()
 		llcArgs := []string{"-mtriple=" + target, "-filetype=obj", bcFile.Name(), "-o", objFile.Name()}
 		llcCmd := runLLVMCmd(llcPath, llcArgs...)
 		llcCmd.Stderr = os.Stderr
@@ -3527,10 +3585,12 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 			os.Exit(1)
 		}
 		linkWindows(objFile.Name(), target, outputFile)
+		timePhase("link", time.Since(tLink), "")
 		return
 	}
 
 	// Step 2: Link with LTO — linker performs cross-module inlining and DCE on bitcode.
+	tLink := time.Now()
 	if isDarwinTarget(target) {
 		linkDarwin(bcFile.Name(), target, outputFile)
 	} else if isWasmTarget(target) {
@@ -3538,6 +3598,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	} else {
 		linkLinux(bcFile.Name(), target, outputFile)
 	}
+	timePhase("link", time.Since(tLink), "")
 }
 
 // linkDarwin runs ld64.lld for macOS Mach-O linking.
@@ -4083,6 +4144,7 @@ func compileAndLinkClang(llFile, target, outputFile string) {
 	}
 	clang := findClang()
 	checkClangVersion(clang)
+	tOptLink := time.Now()
 	linkCmd := exec.Command(clang, linkArgs...)
 	detachFromConsole(linkCmd)
 	linkCmd.Stderr = os.Stderr
@@ -4090,6 +4152,7 @@ func compileAndLinkClang(llFile, target, outputFile string) {
 		fmt.Fprintf(os.Stderr, "error linking (clang): %v\n", err)
 		os.Exit(1)
 	}
+	timePhase("opt+link", time.Since(tOptLink), "(clang)")
 }
 
 // --- Frontend pipeline ---
@@ -4137,7 +4200,10 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 // compileFrontendForTarget runs the full frontend pipeline: parse → merge std → sema → ownership.
 // triple is the LLVM target triple used for `target(cond)` filtering (empty = host target).
 func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
+	tParse := time.Now()
 	file := parseSourceFile(filename)
+	timePhase("parse", time.Since(tParse), "")
+
 	// Resolve the effective target for `target(cond)` filtering.
 	// Use the host triple when none is specified so platform-conditional functions
 	// (e.g. `sep() string `target(windows)`) compile correctly without --target.
@@ -4150,6 +4216,8 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	// Inject std as a glob import so all std symbols are available without explicit `use std;`
 	file = injectStdImport(file)
 
+	tSema := time.Now()
+
 	// Load local modules from use declarations
 	moduleScopes, modInfos, depOrder := loadModuleScopes(filename, file, target)
 
@@ -4159,6 +4227,7 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 		info.ModuleOrder = depOrder
 	}
 	if len(errs) > 0 {
+		timePhase("sema", time.Since(tSema), "")
 		printFileErrors(filename, errs)
 		os.Exit(1)
 	}
@@ -4166,12 +4235,15 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	// Resolve embed annotations: read files, validate contents
 	absFilename, _ := filepath.Abs(filename)
 	embedErrs := sema.ResolveEmbeds(info, filepath.Dir(absFilename))
+	timePhase("sema", time.Since(tSema), "")
 	if len(embedErrs) > 0 {
 		printFileErrors(filename, embedErrs)
 		os.Exit(1)
 	}
 
+	tOwner := time.Now()
 	ownerErrs := ownership.Check(file, info)
+	timePhase("ownership", time.Since(tOwner), "")
 	if len(ownerErrs) > 0 {
 		printFileErrors(filename, ownerErrs)
 		os.Exit(1)
@@ -5152,6 +5224,8 @@ func runExec(args []string) {
 		} else if (args[i] == "-target" || args[i] == "--target") && i+1 < len(args) {
 			target = args[i+1]
 			i++
+		} else if args[i] == "--time-phases" {
+			timePhases = true
 		} else {
 			remaining = append(remaining, args[i])
 		}
@@ -5183,7 +5257,13 @@ func runExec(args []string) {
 		os.Exit(1)
 	}
 
+	var compileStart time.Time
+	if timePhases {
+		compileStart = time.Now()
+	}
+
 	// Try parsing as-is first; if that fails, wrap in main!() and retry.
+	tParse := time.Now()
 	wrapped := false
 	file, ok := tryParseSourceString(source)
 	if !ok {
@@ -5196,9 +5276,12 @@ func runExec(args []string) {
 		source = wrappedSource
 		file = parseSourceString(source, wrapped)
 	}
+	timePhase("parse", time.Since(tParse), "")
 
 	// Inject std as a glob import so all std symbols are available
 	file = injectStdImport(file)
+
+	tSema := time.Now()
 
 	// Load local modules from use declarations
 	filterTriple := target
@@ -5214,13 +5297,16 @@ func runExec(args []string) {
 		info.ModuleInfos = modInfos
 		info.ModuleOrder = depOrder
 	}
+	timePhase("sema", time.Since(tSema), "")
 	if len(errs) > 0 {
 		printInlineErrors(source, errs, wrapped)
 		os.Exit(1)
 	}
 
 	// Ownership analysis
+	tOwner := time.Now()
 	ownerErrs := ownership.Check(file, info)
+	timePhase("ownership", time.Since(tOwner), "")
 	if len(ownerErrs) > 0 {
 		printInlineErrors(source, ownerErrs, wrapped)
 		os.Exit(1)
@@ -5230,10 +5316,12 @@ func runExec(args []string) {
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
+	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
 		CachedInstances: lookupCachedInstances(info, target),
 		DebugFree:       true, // exec uses debug mode
 	})
+	timePhase("codegen", time.Since(tCodegen), "")
 
 	// Compile and link to temp binary
 	ext := binaryExtension(target)
@@ -5246,6 +5334,10 @@ func runExec(args []string) {
 	defer os.Remove(tmpOutput.Name())
 
 	compileAndLink(result, tmpOutput.Name(), target, "")
+
+	if timePhases {
+		timePhase("total", time.Since(compileStart), "")
+	}
 
 	// Execute with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

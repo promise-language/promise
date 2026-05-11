@@ -32,7 +32,7 @@ func docFromSource(t *testing.T, source string, opts docOpts) string {
 
 	// Inject std as a glob import and load module scopes
 	file = injectStdImport(file)
-	moduleScopes, _, _ := loadModuleScopes("test.pr", file, sema.HostTargetInfo())
+	moduleScopes, _, _, _ := loadModuleScopes("test.pr", file, sema.HostTargetInfo())
 
 	// Run DeclareAndDefine with module scopes
 	info, errs := sema.DeclareAndDefineWithModules(file, moduleScopes)

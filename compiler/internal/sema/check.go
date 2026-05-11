@@ -1,6 +1,8 @@
 package sema
 
 import (
+	"time"
+
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/types"
 )
@@ -110,15 +112,27 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 	c.info.ScopeOrder = append(c.info.ScopeOrder, c.fileScope)
 	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
 
-	c.declare(file)              // Pass 1: collect all declarations
-	c.populateUniverseTypes()    // Populate non-native universe type pointers (TypError, TypMap, etc.)
+	tPass := time.Now()
+	c.declare(file) // Pass 1: collect all declarations
+	c.info.Timings.Declare = time.Since(tPass)
+
+	c.populateUniverseTypes() // Populate non-native universe type pointers (TypError, TypMap, etc.)
+
+	tPass = time.Now()
 	c.define(file)               // Pass 2: resolve types, populate type structures
 	c.propagateDrops(file)       // B0158: auto-synthesize drop for types with droppable fields
 	c.validateCloneTypes(file)   // T0154: validate `clone field types (after all types defined)
 	c.validateConstructors(file) // Validate: constructor inheritance (after all types defined)
 	c.validateBuiltins()         // Validate: .pr files declare all required operators/methods/fields
-	c.check(file)                // Pass 3: type-check function/method bodies
-	c.checkMissingReturn(file)   // Pass 4: verify non-void functions return
+	c.info.Timings.Define = time.Since(tPass)
+
+	tPass = time.Now()
+	c.check(file) // Pass 3: type-check function/method bodies
+	c.info.Timings.Check = time.Since(tPass)
+
+	tPass = time.Now()
+	c.checkMissingReturn(file) // Pass 4: verify non-void functions return
+	c.info.Timings.Verify = time.Since(tPass)
 
 	return c.info, c.errors
 }

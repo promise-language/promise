@@ -1,9 +1,19 @@
 package sema
 
 import (
+	"time"
+
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/types"
 )
+
+// SemaTimings records per-pass durations within a single sema run.
+type SemaTimings struct {
+	Declare time.Duration
+	Define  time.Duration
+	Check   time.Duration
+	Verify  time.Duration
+}
 
 // FuncInstance records a concrete instantiation of a generic function.
 type FuncInstance struct {
@@ -228,6 +238,10 @@ type Info struct {
 	// Populated by NLL last-use analysis in ownership.AnalyzeLastUses (B0035).
 	// Codegen checks this after each statement emission to insert early drops.
 	EarlyDrops map[ast.Stmt][]string
+
+	// Timings records per-pass durations within CheckWithTarget (T0215).
+	// Always populated; negligible overhead (~100ns for 4 time.Now calls).
+	Timings SemaTimings
 }
 
 // EmbedKind indicates the target type for an `embed annotation.

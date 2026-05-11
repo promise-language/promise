@@ -51,6 +51,27 @@ func timePhase(name string, elapsed time.Duration, extra string) {
 	}
 }
 
+// timeSubPhase prints an indented sub-phase timing line (T0215).
+func timeSubPhase(name string, elapsed time.Duration, extra string) {
+	if !timePhases {
+		return
+	}
+	ms := elapsed.Milliseconds()
+	if extra != "" {
+		fmt.Fprintf(os.Stderr, "[time]   %-13s %5dms  %s\n", name+":", ms, extra)
+	} else {
+		fmt.Fprintf(os.Stderr, "[time]   %-13s %5dms\n", name+":", ms)
+	}
+}
+
+// moduleTimings aggregates timing data collected during module loading (T0215).
+type moduleTimings struct {
+	parseTime time.Duration
+	semaTime  time.Duration
+	files     int
+	timings   sema.SemaTimings
+}
+
 //go:embed resources/catalog.toml
 var embeddedCatalog []byte
 
@@ -4219,9 +4240,11 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	tSema := time.Now()
 
 	// Load local modules from use declarations
-	moduleScopes, modInfos, depOrder := loadModuleScopes(filename, file, target)
+	moduleScopes, modInfos, depOrder, modTiming := loadModuleScopes(filename, file, target)
 
+	tUserSema := time.Now()
 	info, errs := sema.CheckWithTarget(file, moduleScopes, target)
+	userSemaDur := time.Since(tUserSema)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos
 		info.ModuleOrder = depOrder
@@ -4236,6 +4259,22 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	absFilename, _ := filepath.Abs(filename)
 	embedErrs := sema.ResolveEmbeds(info, filepath.Dir(absFilename))
 	timePhase("sema", time.Since(tSema), "")
+	if timePhases {
+		if modTiming != nil {
+			timeSubPhase("mod parse", modTiming.parseTime,
+				fmt.Sprintf("(%d files)", modTiming.files))
+			mt := modTiming.timings
+			timeSubPhase("mod sema", modTiming.semaTime,
+				fmt.Sprintf("(declare: %dms, define: %dms, check: %dms, verify: %dms)",
+					mt.Declare.Milliseconds(), mt.Define.Milliseconds(),
+					mt.Check.Milliseconds(), mt.Verify.Milliseconds()))
+		}
+		ut := info.Timings
+		timeSubPhase("user sema", userSemaDur,
+			fmt.Sprintf("(declare: %dms, define: %dms, check: %dms, verify: %dms)",
+				ut.Declare.Milliseconds(), ut.Define.Milliseconds(),
+				ut.Check.Milliseconds(), ut.Verify.Milliseconds()))
+	}
 	if len(embedErrs) > 0 {
 		printFileErrors(filename, embedErrs)
 		os.Exit(1)
@@ -4524,7 +4563,7 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 	merged = injectStdImport(merged)
 
 	// Load module dependencies (the module's own `use` declarations)
-	moduleScopes, modInfos, depOrder := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, target)
+	moduleScopes, modInfos, depOrder, _ := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, target)
 
 	info, errs := sema.CheckWithTarget(merged, moduleScopes, target)
 	if modInfos != nil {
@@ -4591,14 +4630,22 @@ type moduleLoader struct {
 	catalogLoaded map[string]*sema.ModuleInfo
 	// target is the build target for `target(cond)` filtering in sema.
 	target sema.TargetInfo
+	// modParseTime accumulates parse time across all modules (T0215).
+	modParseTime time.Duration
+	// modSemaTime accumulates sema time across all modules (T0215).
+	modSemaTime time.Duration
+	// modFiles counts total .pr files parsed across all modules (T0215).
+	modFiles int
+	// modTimings accumulates per-pass sema timings across all modules (T0215).
+	modTimings sema.SemaTimings
 }
 
 // loadModuleScopes scans use declarations for local module paths, loads each
 // module (parse + sema), and returns scopes for sema + ModuleInfos for codegen.
 // Modules are loaded recursively: if module A imports module B, B is loaded first.
-func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (map[string]*types.Scope, map[string]*sema.ModuleInfo, []string) {
+func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (map[string]*types.Scope, map[string]*sema.ModuleInfo, []string, *moduleTimings) {
 	if len(file.Uses) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	// Find project root (directory containing promise.toml).
@@ -4694,9 +4741,15 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 	}
 
 	if len(scopes) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	return scopes, loader.allModInfos, loader.depOrder
+	mt := &moduleTimings{
+		parseTime: loader.modParseTime,
+		semaTime:  loader.modSemaTime,
+		files:     loader.modFiles,
+		timings:   loader.modTimings,
+	}
+	return scopes, loader.allModInfos, loader.depOrder, mt
 }
 
 // load recursively loads a local module and all its dependencies.
@@ -4781,8 +4834,11 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 
 	var modFileList []*ast.File
 	for _, f := range srcFiles {
+		tParse := time.Now()
 		modFileList = append(modFileList, parseSourceFile(f))
+		ml.modParseTime += time.Since(tParse)
 	}
+	ml.modFiles += len(srcFiles)
 
 	if len(modFileList) == 0 {
 		return nil, fmt.Errorf("module '%s' contains no .pr files", modPath)
@@ -4804,7 +4860,13 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	// Run sema on the module with its dependency scopes.
 	var semaInfo *sema.Info
 	var errs []error
+	tModSema := time.Now()
 	semaInfo, errs = sema.CheckWithTarget(merged, depScopes, ml.target)
+	ml.modSemaTime += time.Since(tModSema)
+	ml.modTimings.Declare += semaInfo.Timings.Declare
+	ml.modTimings.Define += semaInfo.Timings.Define
+	ml.modTimings.Check += semaInfo.Timings.Check
+	ml.modTimings.Verify += semaInfo.Timings.Verify
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
 	}
@@ -5289,15 +5351,33 @@ func runExec(args []string) {
 		filterTriple = codegen.HostTargetTriple()
 	}
 	targetInfo := sema.ParseTargetInfo(filterTriple)
-	moduleScopes, modInfos, depOrder := loadModuleScopes("<exec>", file, targetInfo)
+	moduleScopes, modInfos, depOrder, modTiming := loadModuleScopes("<exec>", file, targetInfo)
 
 	// Semantic analysis
+	tUserSema := time.Now()
 	info, errs := sema.CheckWithTarget(file, moduleScopes, targetInfo)
+	userSemaDur := time.Since(tUserSema)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos
 		info.ModuleOrder = depOrder
 	}
 	timePhase("sema", time.Since(tSema), "")
+	if timePhases {
+		if modTiming != nil {
+			timeSubPhase("mod parse", modTiming.parseTime,
+				fmt.Sprintf("(%d files)", modTiming.files))
+			mt := modTiming.timings
+			timeSubPhase("mod sema", modTiming.semaTime,
+				fmt.Sprintf("(declare: %dms, define: %dms, check: %dms, verify: %dms)",
+					mt.Declare.Milliseconds(), mt.Define.Milliseconds(),
+					mt.Check.Milliseconds(), mt.Verify.Milliseconds()))
+		}
+		ut := info.Timings
+		timeSubPhase("user sema", userSemaDur,
+			fmt.Sprintf("(declare: %dms, define: %dms, check: %dms, verify: %dms)",
+				ut.Declare.Milliseconds(), ut.Define.Milliseconds(),
+				ut.Check.Milliseconds(), ut.Verify.Milliseconds()))
+	}
 	if len(errs) > 0 {
 		printInlineErrors(source, errs, wrapped)
 		os.Exit(1)

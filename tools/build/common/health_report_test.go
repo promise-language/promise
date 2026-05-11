@@ -28,13 +28,13 @@ FAILED:
 
 	// pass file with suffix
 	r := results[0]
-	if r.File != "e2e/basics.pr" || r.Outcome != "pass" || r.Elapsed != "0.004s" {
+	if r.File != "e2e/basics.pr" || r.Outcome != "pass" || r.Elapsed != 0.004 {
 		t.Errorf("result[0] = %+v", r)
 	}
 
 	// pass file without suffix
 	r = results[1]
-	if r.File != "e2e/hello.pr" || r.Outcome != "pass" || r.Elapsed != "0.001s" {
+	if r.File != "e2e/hello.pr" || r.Outcome != "pass" || r.Elapsed != 0.001 {
 		t.Errorf("result[1] = %+v", r)
 	}
 
@@ -49,7 +49,7 @@ FAILED:
 
 	// compilation error
 	r = results[3]
-	if r.File != "broken.pr" || r.Outcome != "FAIL" || r.Elapsed != "0.000s" {
+	if r.File != "broken.pr" || r.Outcome != "FAIL" || r.Elapsed != 0.0 {
 		t.Errorf("result[3] = %+v", r)
 	}
 	if r.Context != "broken.pr:5:3: type Foo has no field 'bar'" {
@@ -76,12 +76,12 @@ TIMEOUT (0.100s) test_stuck
 	}
 
 	r := results[0]
-	if r.Test != "test_add" || r.Outcome != "pass" || r.Elapsed != "0.001s" {
+	if r.Test != "test_add" || r.Outcome != "pass" || r.Elapsed != 0.001 {
 		t.Errorf("result[0] = %+v", r)
 	}
 
 	r = results[1]
-	if r.Test != "test_sub" || r.Outcome != "pass" || r.Elapsed != "0.002s" {
+	if r.Test != "test_sub" || r.Outcome != "pass" || r.Elapsed != 0.002 {
 		t.Errorf("result[1] = %+v", r)
 	}
 

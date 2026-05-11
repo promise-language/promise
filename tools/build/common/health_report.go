@@ -4,21 +4,30 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
+// parseElapsed converts a duration string like "0.004s" to seconds as float64.
+func parseElapsed(s string) float64 {
+	s = strings.TrimSuffix(s, "s")
+	f, _ := strconv.ParseFloat(s, 64)
+	return f
+}
+
 type testResult struct {
-	File    string `json:"file"`
-	Test    string `json:"test"`
-	Outcome string `json:"outcome"`
-	Elapsed string `json:"elapsed"`
-	Context string `json:"context,omitempty"`
+	File    string  `json:"file"`
+	Test    string  `json:"test"`
+	Outcome string  `json:"outcome"`
+	Elapsed float64 `json:"elapsed"`
+	Context string  `json:"context,omitempty"`
 }
 
 type testReport struct {
@@ -143,7 +152,7 @@ func parseTestOutput(output string) []testResult {
 					results = append(results, testResult{
 						File:    file,
 						Outcome: outcome,
-						Elapsed: elapsed,
+						Elapsed: parseElapsed(elapsed),
 					})
 					currentFile = ""
 					currentOutcome = ""
@@ -163,7 +172,7 @@ func parseTestOutput(output string) []testResult {
 						results = append(results, testResult{
 							File:    file,
 							Outcome: outcome,
-							Elapsed: elapsed,
+							Elapsed: parseElapsed(elapsed),
 							Context: strings.Join(ctx, "\n"),
 						})
 						currentFile = ""
@@ -176,7 +185,7 @@ func parseTestOutput(output string) []testResult {
 				r := testResult{
 					Test:    name,
 					Outcome: outcome,
-					Elapsed: elapsed,
+					Elapsed: parseElapsed(elapsed),
 				}
 				// Collect indented context lines.
 				var ctx []string
@@ -273,9 +282,10 @@ func postReport(trackerURL string, report testReport) {
 		fmt.Fprintf(os.Stderr, "health: POST %s: %v\n", url, err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		fmt.Fprintf(os.Stderr, "health: POST %s: status %d\n", url, resp.StatusCode)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		fmt.Fprintf(os.Stderr, "health: POST %s: status %d: %s\n", url, resp.StatusCode, bytes.TrimSpace(respBody))
 	}
 }

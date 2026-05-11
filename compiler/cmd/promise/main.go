@@ -752,11 +752,6 @@ func runTest(args []string) {
 // runTestFile runs test functions from a single .pr file.
 // targetTriple overrides the compilation target (empty = host).
 func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, coverageMode bool) {
-	// T0213: Disable instance caching for test runs to match batch mode behavior.
-	// Batch subprocesses set this env var; setting it here too ensures individual
-	// runs produce identical binaries (no stale instance .bc from build cache).
-	os.Setenv("PROMISE_NO_INSTANCE_CACHE", "1")
-
 	start := time.Now()
 	// For cache-hit paths where we can't compute per-test timeouts,
 	// use the CLI default as the process-level timeout.
@@ -1570,7 +1565,6 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			}
 			testArgs = append(testArgs, r.file)
 			cmd := exec.CommandContext(ctx, selfExe, testArgs...)
-			cmd.Env = append(os.Environ(), "PROMISE_NO_INSTANCE_CACHE=1")
 			setupProcessGroupKill(cmd)
 			output, cmdErr := cmd.CombinedOutput()
 
@@ -2409,14 +2403,6 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 // whose origin type has no hash (e.g., native/universe types) are omitted.
 func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[string]*module.CacheMeta {
 	if mainInfo == nil {
-		return nil
-	}
-	// Disabled in parallel test children: each child compiles a different
-	// subset of test files, producing instance .bc with different vtable slot
-	// contents. Keeping disabled as a conservative precaution.
-	// Note: string constants are now LinkagePrivate (B0005 fix), so the
-	// original @.str.N cross-reference issue is resolved.
-	if os.Getenv("PROMISE_NO_INSTANCE_CACHE") != "" {
 		return nil
 	}
 	// B0244: Build a sorted list of module IR prefixes to include in instance

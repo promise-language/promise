@@ -12,6 +12,8 @@ import (
 	"github.com/gofrs/flock"
 )
 
+var errInterrupted = fmt.Errorf("interrupted by Ctrl+C")
+
 // RunVerify orchestrates the full pre-commit verification pipeline:
 // format → build → vet → test. All steps are internal calls (no subprocess).
 // Flags: --local (use .promise-home), --wasm (include wasm target), --clean (clear caches).
@@ -56,6 +58,9 @@ func RunVerify(root string, args []string) error {
 	if err := FormatGo(root); err != nil {
 		return fmt.Errorf("format go: %w", err)
 	}
+	if Interrupted() {
+		return errInterrupted
+	}
 
 	// 2. Format Promise (if binary exists from a prior build)
 	if Exists(promiseBin) {
@@ -65,17 +70,26 @@ func RunVerify(root string, args []string) error {
 		}
 		fmt.Println()
 	}
+	if Interrupted() {
+		return errInterrupted
+	}
 
 	// 3. Build
 	fmt.Println("Building compiler...")
 	if err := RunBuild(root, nil); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
+	if Interrupted() {
+		return errInterrupted
+	}
 
 	// 4. Vet
 	fmt.Println("Vetting go...")
 	if err := RunVet(root); err != nil {
 		return fmt.Errorf("vet: %w", err)
+	}
+	if Interrupted() {
+		return errInterrupted
 	}
 
 	// 5. Clear caches if requested
@@ -93,6 +107,9 @@ func RunVerify(root string, args []string) error {
 	if err := RunGoTests(root); err != nil {
 		failures = append(failures, "go tests")
 	}
+	if Interrupted() {
+		return errInterrupted
+	}
 
 	// 7. Promise tests (host)
 	fmt.Println("\nRunning promise tests (host)...")
@@ -101,6 +118,9 @@ func RunVerify(root string, args []string) error {
 		failures = append(failures, "promise tests (host)")
 	}
 	hostElapsed := time.Since(hostStart)
+	if Interrupted() {
+		return errInterrupted
+	}
 
 	// 8. Promise tests (wasm)
 	var wasmElapsed time.Duration

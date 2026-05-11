@@ -497,7 +497,7 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
-		CachedInstances: lookupCachedInstances(info, target),
+		CachedInstances: lookupCachedInstances(info, target, buildModeStr(releaseMode)),
 		DebugFree:       debugFree,
 	})
 	timePhase("codegen", time.Since(tCodegen), "")
@@ -2174,11 +2174,11 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFil
 	}
 }
 
-// compileAndLinkSeparate compiles each module to its own bitcode file, then links
-// them together using link-time optimization (LTO). Windows still uses the opt+llc
-// object pipeline (no LTO) as lld-link LTO support is not yet wired up.
-// Uses content-hash caching: if a module's source hasn't changed, its cached bitcode
-// is reused.
+// compileAndLinkSeparate compiles each module to its own .bc/.o file, then links
+// them together. Release mode uses LTO (--lto-O1); debug mode uses the object
+// pipeline (llc → .o → linker with --gc-sections / -dead_strip). Windows uses
+// opt+llc object pipeline (no LTO). Uses content-hash caching: if a module's
+// source hasn't changed, its cached output is reused.
 func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, sourceFile string, releaseMode bool) {
 	mainIR, moduleIRs := result.SplitModuleIRs()
 
@@ -2309,7 +2309,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	// Cache keys are derived from the type declaration hash, making them stable across
 	// unrelated source changes.
 	instIRs := result.InstanceIRs()
-	instMetas := buildInstCacheMetas(result.SemaInfo(), compilerHash, target)
+	instMetas := buildInstCacheMetas(result.SemaInfo(), compilerHash, target, buildModeStr(releaseMode))
 
 	type instObj struct {
 		name    string
@@ -2401,7 +2401,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 // buildInstCacheMetas builds a map from mono instance name (e.g., "Vector[int]")
 // to a CacheMeta containing the stable cache key and debug metadata. Instances
 // whose origin type has no hash (e.g., native/universe types) are omitted.
-func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[string]*module.CacheMeta {
+func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target, buildMode string) map[string]*module.CacheMeta {
 	if mainInfo == nil {
 		return nil
 	}
@@ -2432,7 +2432,7 @@ func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[s
 		if typeDeclHash == "" {
 			continue // not cacheable
 		}
-		key := module.InstanceCacheKey(irPrefix, mName, typeDeclHash, compilerHash, target, "debug", moduleContext)
+		key := module.InstanceCacheKey(irPrefix, mName, typeDeclHash, compilerHash, target, buildMode, moduleContext)
 		result[mName] = &module.CacheMeta{
 			Kind:         module.CacheKindInstance,
 			Name:         mName,
@@ -2442,6 +2442,14 @@ func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[s
 		}
 	}
 	return result
+}
+
+// buildModeStr returns "release" or "debug" for use in cache keys.
+func buildModeStr(releaseMode bool) string {
+	if releaseMode {
+		return "release"
+	}
+	return "debug"
 }
 
 // findDeclHashInInfo looks up the type decl hash for a TypeName.
@@ -2466,7 +2474,7 @@ func findDeclHashInInfo(tn *types.TypeName, mainInfo *sema.Info) (string, string
 // cached .bc file and can be skipped during codegen. Returns a map of
 // mono instance name → true for each cached instance. Returns nil when
 // instance caching doesn't apply (no modules, clang pipeline, no cache dir).
-func lookupCachedInstances(info *sema.Info, target string) map[string]bool {
+func lookupCachedInstances(info *sema.Info, target, buildMode string) map[string]bool {
 	// Instance caching only applies to the separate compilation (LTO) path.
 	if len(info.ModuleInfos) == 0 || useClangPipeline(target) {
 		return nil
@@ -2475,7 +2483,7 @@ func lookupCachedInstances(info *sema.Info, target string) map[string]bool {
 	if cacheDir == "" {
 		return nil
 	}
-	metas := buildInstCacheMetas(info, module.CompilerHash(), target)
+	metas := buildInstCacheMetas(info, module.CompilerHash(), target, buildMode)
 	if len(metas) == 0 {
 		return nil
 	}
@@ -3715,6 +3723,9 @@ func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) {
 	}
 
 	linkArgs := buildDarwinLinkArgs(target, fileToLink, outputFile)
+	if !useLTO {
+		linkArgs = append([]string{"-dead_strip"}, linkArgs...) // DCE for non-LTO object files
+	}
 	var linkCmd *exec.Cmd
 	if isLLD {
 		if useLTO {
@@ -3879,6 +3890,9 @@ func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO bool) 
 	}
 	linkArgs = append(linkArgs, objFiles...)
 	linkArgs = append(linkArgs, "-lSystem")
+	if !useLTO {
+		linkArgs = append([]string{"-dead_strip"}, linkArgs...) // DCE for non-LTO object files
+	}
 
 	var linkCmd *exec.Cmd
 	if isLLD {
@@ -5501,7 +5515,7 @@ func runExec(args []string) {
 	}
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
-		CachedInstances: lookupCachedInstances(info, target),
+		CachedInstances: lookupCachedInstances(info, target, "debug"),
 		DebugFree:       true, // exec uses debug mode
 	})
 	timePhase("codegen", time.Since(tCodegen), "")

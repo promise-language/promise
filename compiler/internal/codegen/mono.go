@@ -1296,11 +1296,6 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			continue
 		}
 		name := monoName(inst)
-		// Skip non-demanded instance methods during module compilation.
-		// Layouts and declarations are kept; only bodies are skipped. (T0207)
-		if c.demandedMonoInstances != nil && !c.demandedMonoInstances[name] {
-			continue
-		}
 		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
 		mergeParentSubst(named, subst)
 
@@ -1677,10 +1672,6 @@ func (c *Compiler) defineMonoSynthesizedDefaults(file *ast.File, instances []*ty
 			continue
 		}
 		name := monoName(inst)
-		// Skip non-demanded instance defaults during module compilation. (T0207)
-		if c.demandedMonoInstances != nil && !c.demandedMonoInstances[name] {
-			continue
-		}
 		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
 		mergeParentSubst(named, subst)
 
@@ -1918,82 +1909,6 @@ func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, 
 	return result
 }
 
-// computeDemandedInstances returns the set of mono instance keys that are
-// transitively reachable from the extras list (user code demand + cross-module
-// references). Instances NOT in this set are module-internal and their method
-// bodies can be skipped during definition to reduce IR size. (T0207)
-func computeDemandedInstances(extra []*types.Instance, modFile *ast.File, modInfo *sema.ModuleInfo, spiralInstances map[string]bool) map[string]bool {
-	modTypeNames := make(map[string]bool)
-	for _, decl := range modFile.Decls {
-		switch d := decl.(type) {
-		case *ast.TypeDecl:
-			modTypeNames[d.Name] = true
-		case *ast.EnumDecl:
-			modTypeNames[d.Name] = true
-		}
-	}
-
-	seen := map[string]bool{}
-	var result []*types.Instance
-
-	for _, inst := range extra {
-		originName := instanceOriginTypeName(inst)
-		if originName == "" || !modTypeNames[originName] {
-			continue
-		}
-		key := monoName(inst)
-		if !seen[key] {
-			seen[key] = true
-			result = append(result, inst)
-		}
-	}
-
-	unresolvedInsts := collectUnresolvedInstances(modInfo.SemaInfo)
-	for i := 0; i < len(result); i++ {
-		inst := result[i]
-		instKey := monoName(inst)
-		if spiralInstances[instKey] {
-			continue
-		}
-		switch origin := inst.Origin().(type) {
-		case *types.Named:
-			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
-			for _, f := range origin.AllFields() {
-				ft := types.Substitute(f.Type(), subst)
-				discoverInstances(ft, &result, seen)
-			}
-			for _, pr := range origin.Parents() {
-				if len(pr.TypeArgs) > 0 {
-					resolvedArgs := make([]types.Type, len(pr.TypeArgs))
-					for j, ta := range pr.TypeArgs {
-						resolvedArgs[j] = types.Substitute(ta, subst)
-					}
-					parentInst := types.NewInstance(pr.Named, resolvedArgs)
-					if !types.ContainsTypeParam(parentInst) {
-						discoverInstances(parentInst, &result, seen)
-					}
-				}
-			}
-			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances)
-			}
-		case *types.Enum:
-			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
-			for _, v := range origin.Variants() {
-				for _, f := range v.Fields() {
-					ft := types.Substitute(f.Type(), subst)
-					discoverInstances(ft, &result, seen)
-				}
-			}
-			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances)
-			}
-		}
-	}
-
-	return seen
-}
-
 func (c *Compiler) findTypeDecl(file *ast.File, name string) *ast.TypeDecl {
 	for _, decl := range file.Decls {
 		if td, ok := decl.(*ast.TypeDecl); ok && td.Name == name {
@@ -2098,10 +2013,6 @@ func (c *Compiler) defineMonoEnumMethods(file *ast.File, instances []*types.Inst
 			continue
 		}
 		name := monoName(inst)
-		// Skip non-demanded instance methods during module compilation. (T0207)
-		if c.demandedMonoInstances != nil && !c.demandedMonoInstances[name] {
-			continue
-		}
 		subst := types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
 
 		ed := c.findEnumDecl(file, enum.Obj().Name())

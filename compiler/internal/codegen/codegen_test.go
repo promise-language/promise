@@ -18146,68 +18146,11 @@ func TestVectorPushDupsDroppableElement(t *testing.T) {
 	assertContains(t, ir, "vecdup.copy")
 }
 
-// TestFrontendDCEHelloWorld verifies that frontend DCE eliminates unused
-// monomorphized method bodies for a simple program (T0207).
-func TestFrontendDCEHelloWorld(t *testing.T) {
-	ir := generateIR(t, `main() { print_line("hello"); }`)
-
-	// The main entry point must exist
-	assertContains(t, ir, "define i32 @main(")
-
-	// Unused generic instances should NOT have method bodies defined.
-	// _FnIter is the iterator adapter — a hello-world program doesn't iterate.
-	assertNotContains(t, ir, "define void @_FnIter__int.drop(")
-
-	// Count defined functions — DCE should keep the count well under 800.
-	defineCount := strings.Count(ir, "define ")
-	if defineCount > 800 {
-		t.Errorf("frontend DCE regression: hello world has %d defined functions (want < 800)", defineCount)
-	}
-}
-
-// TestFrontendDCENoUnusedIterators verifies that iterator adapter instances
-// are not defined when the program doesn't iterate (T0207).
-func TestFrontendDCENoUnusedIterators(t *testing.T) {
-	ir := generateIR(t, `
-		main() {
-			int[] v = [1, 2, 3];
-			v.push(4);
-		}
-	`)
-
-	// _FnIter[int] should be absent — we don't iterate, only push
-	assertNotContains(t, ir, "define void @_FnIter__int.drop(")
-	assertNotContains(t, ir, "define %_FnIter__int_v @_FnIter__int.next(")
-}
-
-// TestFrontendDCEModuleGenericDemand verifies that module-level DCE
-// only defines method bodies for instances demanded by user code (T0207).
-func TestFrontendDCEModuleGenericDemand(t *testing.T) {
-	ir := generateIRWithModule(t, "mylib",
-		`type Box[T] `+"`public"+` {
-			T value;
-
-			get_value() T `+"`public"+` {
-				return this.value;
-			}
-		}`,
-		`
-		use mylib "./mylib";
-		main() {
-			b := mylib.Box[int](value: 42);
-		}
-		`,
-	)
-
-	// Box[int] layout should exist (needed for construction)
-	assertContains(t, ir, "Box[int]")
-}
-
-// TestFrontendDCECrossModulePropagation verifies that instances of types
-// from module B created inside module A are propagated to B (T0207).
-// Map[string, int] works even though Slot[string, int] (a generic enum
-// in std) is only reachable through Map's fields.
-func TestFrontendDCECrossModulePropagation(t *testing.T) {
+// TestCrossModulePropagation verifies that instances of types from module B
+// created inside module A are propagated to B. Map[string, int] works even
+// though Slot[string, int] (a generic enum in std) is only reachable through
+// Map's fields.
+func TestCrossModulePropagation(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			m := {"a": 1};

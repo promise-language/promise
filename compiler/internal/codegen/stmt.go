@@ -3785,6 +3785,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.claimStringTemp(val)
 			// B0233: Claim heap temp — ownership transferred to container.
 			c.claimHeapTemp(val)
+			// B0309: When RHS is opt!, neutralize the source optional so its
+			// drop doesn't double-free the inner value now owned by the container.
+			c.neutralizeForceUnwrapSource(s.Value)
 		}
 		// Clear drop flag on index key if it's being stored (e.g., map[key] = val).
 		// The map takes ownership of the key pointer.
@@ -3792,6 +3795,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if ident, ok := target.Index.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// B0309: When opt! is used as a map key, neutralize the source
+			// optional so its drop doesn't double-free the unwrapped key.
+			c.neutralizeForceUnwrapSource(target.Index)
 		}
 
 	case *ast.SliceExpr:

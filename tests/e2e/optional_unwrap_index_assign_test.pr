@@ -1,0 +1,55 @@
+// B0309: OptionalUnwrapExpr (!) must neutralize source in index-assignment context.
+// When opt! is used as a map key or value in map[opt!] = val, the []= method
+// takes ownership — the source optional's present flag must be cleared so its
+// drop doesn't double-free the unwrapped value.
+test_map_optional_unwrap_key() `test {
+  string? key = "a".repeat(10);
+  map[string, int] m = {:};
+  m[key!] = 42;
+  // Force memory reuse to expose use-after-free.
+  i := 0;
+  while i < 1000 {
+    _ := "garbage".repeat(5);
+    i = i + 1;
+  }
+  if val := m["aaaaaaaaaa"] {
+    assert(val == 42, "map lookup should find value");
+  } else {
+    assert(false, "key should exist in map after unwrap assign");
+  }
+}
+
+test_map_optional_unwrap_value() `test {
+  string? val = "hello".repeat(3);
+  map[int, string] m = {:};
+  m[1] = val!;
+  // Force memory reuse.
+  i := 0;
+  while i < 1000 {
+    _ := "garbage".repeat(5);
+    i = i + 1;
+  }
+  if v := m[1] {
+    assert(v == "hellohellohello", "map value should match");
+  } else {
+    assert(false, "key 1 should exist in map");
+  }
+}
+
+test_map_optional_unwrap_both() `test {
+  string? ko = "key".repeat(4);
+  string? vo = "val".repeat(4);
+  map[string, string] m = {:};
+  m[ko!] = vo!;
+  // Force memory reuse.
+  i := 0;
+  while i < 1000 {
+    _ := "garbage".repeat(5);
+    i = i + 1;
+  }
+  if v := m["keykeykeykey"] {
+    assert(v == "valvalvalval", "both key and value should match");
+  } else {
+    assert(false, "key should exist in map");
+  }
+}

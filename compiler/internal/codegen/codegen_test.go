@@ -16952,6 +16952,35 @@ func TestOptionalForceUnwrapClearsDropFlag(t *testing.T) {
 	assertContains(t, ir, "store i1 false")
 }
 
+// B0309: Force unwrap in index-assignment key position neutralizes source optional.
+func TestOptionalForceUnwrapIndexAssignKey(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? key = "hello";
+			map[string, int] m = {:};
+			m[key!] = 42;
+		}
+	`)
+	// The []=  call should exist (mangled as Map[string, int].[]=)
+	assertContains(t, ir, `.[]="`)
+	// B0309: present flag must be set to false after index assign (neutralize source)
+	assertContains(t, ir, "store i1 false")
+}
+
+// B0309: Force unwrap in index-assignment value position neutralizes source optional.
+func TestOptionalForceUnwrapIndexAssignValue(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? val = "hello";
+			map[int, string] m = {:};
+			m[1] = val!;
+		}
+	`)
+	assertContains(t, ir, `.[]="`)
+	// B0309: present flag must be set to false after index assign (neutralize source)
+	assertContains(t, ir, "store i1 false")
+}
+
 // T0111: Optional local with vector inner type gets scope-exit drop
 func TestOptionalLocalVectorDrop(t *testing.T) {
 	ir := generateIR(t, `

@@ -69,7 +69,13 @@
       "mcp__tracker__search",
       "mcp__tracker__heartbeat",
       "mcp__tracker__agents",
-      "mcp__tracker__get_attachment"
+      "mcp__tracker__get_attachment",
+      "mcp__tracker__is_blocked",
+      "mcp__tracker__test_health_check",
+      "mcp__tracker__test_health_flaky",
+      "mcp__tracker__test_health_history",
+      "mcp__tracker__test_health_report",
+      "mcp__tracker__test_health_summary"
     ],
     "deny": [
       "Read(.tracker/**)",

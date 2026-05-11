@@ -1,7 +1,9 @@
 package common
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -41,6 +43,21 @@ func RunOutputIn(dir string, name string, args ...string) (string, error) {
 		return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// RunTee executes a command in the given directory, streaming stdout to
+// os.Stdout in real-time while also capturing and returning it as a string.
+// Stderr remains connected to os.Stderr.
+func RunTee(dir, name string, args ...string) (string, error) {
+	var buf bytes.Buffer
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = io.MultiWriter(os.Stdout, &buf)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return strings.TrimSpace(buf.String()), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(buf.String()), nil
 }
 
 // RunSilent executes a command discarding stdout/stderr. Returns error on failure.

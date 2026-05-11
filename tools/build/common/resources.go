@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -97,8 +98,12 @@ func EmbedMuslCRT(root string) error {
 	if !IsLinux() {
 		return nil
 	}
-	src := "/usr/lib/x86_64-linux-musl"
-	dst := filepath.Join(root, "compiler", "cmd", "promise", "resources", "crt", "x86_64-linux-musl")
+	muslArch := "x86_64-linux-musl"
+	if runtime.GOARCH == "arm64" {
+		muslArch = "aarch64-linux-musl"
+	}
+	src := "/usr/lib/" + muslArch
+	dst := filepath.Join(root, "compiler", "cmd", "promise", "resources", "crt", muslArch)
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return err
 	}

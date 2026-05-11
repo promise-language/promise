@@ -6139,6 +6139,9 @@ func runInstall(args []string) {
 	// Extract embedded musl CRT (if available).
 	if hasEmbeddedMuslCRT {
 		arch := "x86_64-linux-musl"
+		if runtime.GOARCH == "arm64" {
+			arch = "aarch64-linux-musl"
+		}
 		crtDest := filepath.Join(epochLibDir, "crt", arch)
 		if err := os.MkdirAll(crtDest, 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", crtDest, err)

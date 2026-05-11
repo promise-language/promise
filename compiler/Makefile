@@ -7,9 +7,10 @@ BINARY        := ../bin/promise
 RESOURCES     := cmd/promise/resources
 UNAME         := $(shell uname -s)
 
-# musl CRT paths (Linux only)
-MUSL_CRT_SRC  := /usr/lib/x86_64-linux-musl
-MUSL_CRT_DST  := $(RESOURCES)/crt/x86_64-linux-musl
+# musl CRT paths (Linux only, architecture-aware)
+MUSL_ARCH     := $(shell [ "$$(uname -m)" = "aarch64" ] && echo aarch64-linux-musl || echo x86_64-linux-musl)
+MUSL_CRT_SRC  := /usr/lib/$(MUSL_ARCH)
+MUSL_CRT_DST  := $(RESOURCES)/crt/$(MUSL_ARCH)
 
 # LLVM tool bundling (release builds only)
 LLVM_DST      := $(RESOURCES)/llvm/linux-amd64

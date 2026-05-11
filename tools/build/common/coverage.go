@@ -60,7 +60,7 @@ func RunCoverage(root string, args []string) error {
 	// Promise coverage
 	if suite == "promise" || suite == "all" {
 		for _, target := range promiseTargets {
-			if err := runPromiseCoverage(promiseBin, target); err != nil {
+			if err := runPromiseCoverage(root, promiseBin, target); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: promise coverage %s: %v\n", target, err)
 			}
 		}
@@ -91,7 +91,7 @@ func runGoCoverage(compilerDir, pkg string) error {
 	return RunIn(compilerDir, "go", "tool", "cover", "-func="+covFile)
 }
 
-func runPromiseCoverage(promiseBin, target string) error {
+func runPromiseCoverage(root, promiseBin, target string) error {
 	fmt.Printf("=== Promise Coverage: %s ===\n\n", target)
-	return Run(promiseBin, "test", "-coverage", "-timeout", "30", target)
+	return RunIn(root, promiseBin, "test", "-coverage", "-timeout", "30", target)
 }

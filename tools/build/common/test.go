@@ -65,7 +65,7 @@ func RunTest(root string, args []string) error {
 	// Promise tests
 	if suite == "promise" || suite == "all" {
 		fmt.Println("\nRunning promise tests (host)...")
-		if err := Run(promiseBin, "test", "-timeout", "10", "tests/...", "modules/...", "examples/..."); err != nil {
+		if err := RunIn(root, promiseBin, "test", "-timeout", "10", "tests/...", "modules/...", "examples/..."); err != nil {
 			return fmt.Errorf("promise tests (host): %w", err)
 		}
 
@@ -74,7 +74,7 @@ func RunTest(root string, args []string) error {
 				return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
 			}
 			fmt.Println("\nRunning promise tests (wasm32-wasi)...")
-			if err := Run(promiseBin, "test", "-timeout", "10", "-target", "wasm32-wasi",
+			if err := RunIn(root, promiseBin, "test", "-timeout", "10", "-target", "wasm32-wasi",
 				"tests/...", "modules/...", "examples/..."); err != nil {
 				return fmt.Errorf("promise tests (wasm32-wasi): %w", err)
 			}
@@ -99,6 +99,6 @@ func RunPromiseTests(root, target string) error {
 	if target != "" {
 		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...")
 	}
-	return Run(promiseBin, args...)
+	return RunIn(root, promiseBin, args...)
 }
 

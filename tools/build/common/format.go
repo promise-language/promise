@@ -36,7 +36,7 @@ func RunFormat(root string, args []string) error {
 		}
 		if len(prFiles) > 0 {
 			fmtArgs := append([]string{"format"}, prFiles...)
-			if err := Run(promiseBin, fmtArgs...); err != nil {
+			if err := RunIn(root, promiseBin, fmtArgs...); err != nil {
 				return fmt.Errorf("promise format: %w", err)
 			}
 		}

@@ -27,5 +27,5 @@ func RunStress(root string, args []string) error {
 	testArgs = append(testArgs, "tests/...", "modules/...")
 
 	fmt.Println("Running stress tests (Ctrl+C to stop)...")
-	return Run(promiseBin, testArgs...)
+	return RunIn(root, promiseBin, testArgs...)
 }

@@ -33,7 +33,7 @@ func RunVerify(root string, args []string) error {
 	}
 
 	// Acquire global lock to serialize concurrent verify runs
-	unlock, err := acquireVerifyLock()
+	unlock, err := acquireVerifyLock(root)
 	if err != nil {
 		return fmt.Errorf("acquire verify lock: %w", err)
 	}
@@ -175,7 +175,7 @@ func RunVerify(root string, args []string) error {
 // verify runs. The lock is automatically released by the OS if the process
 // dies, so there is no risk of orphaned locks.
 // Returns an unlock function that must be deferred.
-func acquireVerifyLock() (func(), error) {
+func acquireVerifyLock(root string) (func(), error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return func() {}, nil
@@ -185,6 +185,10 @@ func acquireVerifyLock() (func(), error) {
 	os.MkdirAll(lockDir, 0o755)
 	lockPath := filepath.Join(lockDir, "verify.lock")
 
+	return acquireVerifyLockIn(lockPath, root)
+}
+
+func acquireVerifyLockIn(lockPath, root string) (func(), error) {
 	fl := flock.New(lockPath)
 
 	// Try non-blocking first to detect contention.
@@ -193,13 +197,24 @@ func acquireVerifyLock() (func(), error) {
 		return nil, fmt.Errorf("acquire lock: %w", err)
 	}
 	if !locked {
-		fmt.Println("Waiting for another verify run to finish...")
+		// Read the lock holder's repo directory before blocking.
+		msg := "Waiting for another verify run to finish..."
+		if data, err := os.ReadFile(lockPath); err == nil {
+			if dir := strings.TrimSpace(string(data)); dir != "" {
+				msg = fmt.Sprintf("Waiting for verify run in %s to finish...", dir)
+			}
+		}
+		fmt.Println(msg)
 		if err := fl.Lock(); err != nil {
 			return nil, fmt.Errorf("acquire lock: %w", err)
 		}
 	}
 
+	// Record our repo directory for other waiters.
+	os.WriteFile(lockPath, []byte(root+"\n"), 0o644)
+
 	return func() {
+		os.WriteFile(lockPath, nil, 0o644)
 		fl.Unlock()
 	}, nil
 }

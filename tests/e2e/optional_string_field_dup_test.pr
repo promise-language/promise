@@ -1,0 +1,72 @@
+// B0310: Dup inner string when reading Optional[string] field from droppable types.
+// Without the fix, both the field owner's drop and the local variable's optional
+// drop free the same string pointer, causing double-free.
+type Holder {
+  string? val;
+  drop(~this) {
+  }
+}
+
+type HolderAuto {
+  string? val;
+  string name;
+}
+
+// Read string? field into typed local variable
+test_typed_var_decl() `test {
+  Holder h = Holder(val: "hello" + " world");
+  string? v = h.val;
+  assert(v is present, "should be present");
+  assert(v! == "hello world", "typed var decl value");
+}
+
+// Read string? field into inferred local variable
+test_inferred_var_decl() `test {
+  Holder h = Holder(val: "hello" + " world");
+  v := h.val;
+  assert(v is present, "should be present");
+  assert(v! == "hello world", "inferred var decl value");
+}
+
+// Read absent string? field (no inner string to dup)
+test_absent_field() `test {
+  Holder h = Holder();
+  string? v = h.val;
+  assert(v is absent, "should be absent");
+}
+
+// Return string? field from function — dup must survive scope cleanup
+get_holder_val(Holder h) string? {
+  return h.val;
+}
+
+test_return_optional_string_field() `test {
+  Holder h = Holder(val: "returned" + " value");
+  string? result = get_holder_val(h);
+  assert(result is present, "return: should be present");
+  assert(result! == "returned value", "return: value correct");
+}
+
+// Return absent string? field
+test_return_absent_field() `test {
+  Holder h = Holder();
+  string? result = get_holder_val(h);
+  assert(result is absent, "return absent: should be absent");
+}
+
+// Auto-synthesized drop (no explicit drop method)
+test_auto_drop_type() `test {
+  HolderAuto h = HolderAuto(val: "auto" + " drop", name: "test");
+  string? v = h.val;
+  assert(v is present, "auto drop: should be present");
+  assert(v! == "auto drop", "auto drop: value correct");
+}
+
+// Multiple reads of the same field (each should get its own dup)
+test_multiple_reads() `test {
+  Holder h = Holder(val: "multi" + " read");
+  string? v1 = h.val;
+  string? v2 = h.val;
+  assert(v1! == "multi read", "read 1");
+  assert(v2! == "multi read", "read 2");
+}

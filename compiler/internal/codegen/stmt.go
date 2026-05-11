@@ -4339,6 +4339,13 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		c.claimHeapTemp(val)
 		c.claimEnvTemp(val)
 	}
+	// B0310: Claim dup'd inner string for Optional[string] return values.
+	// Without this, cleanupStmtTemps would free the dup while it's still
+	// embedded in the return value's optional struct.
+	if c.optionalStringDup != nil {
+		c.claimStringTemp(c.optionalStringDup)
+		c.optionalStringDup = nil
+	}
 	if c.block != nil && c.block.Term == nil {
 		c.cleanupStmtTemps()
 		c.cleanupHeapTemps()

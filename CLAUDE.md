@@ -152,9 +152,7 @@ FLAKY (2 tests):
       |   panic: stack overflow at 0x7fff...
       |   goroutine 42 [running]:
 
-HIGH VARIANCE (1 test):
-  concurrency/test_channel_basic.pr
-    test_buffered_recv             50/50 (100%)  avg: 5.2ms  σ: 8.4ms  CoV: 1.62
+HIGH VARIANCE: 1 test (no failures, timing noise only)
 
 STABLE: 45 tests across 12 files
 ```

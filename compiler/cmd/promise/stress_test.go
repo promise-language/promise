@@ -828,3 +828,113 @@ func TestCommonDir_NoCommonPrefix(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// buildStressReport
+// ---------------------------------------------------------------------------
+
+func makeFileStatsWithPath(path string, tests ...testStats) *fileStats {
+	stats := make(map[string]*testStats)
+	var order []string
+	for i := range tests {
+		tests[i].file = path
+		stats[tests[i].name] = &tests[i]
+		order = append(order, tests[i].name)
+	}
+	return &fileStats{path: path, stats: stats, testOrder: order, interval: 1}
+}
+
+func TestBuildStressReport_AllStable(t *testing.T) {
+	files := []*fileStats{
+		makeFileStatsWithPath("e2e/foo.pr",
+			testStats{name: "test_a", passes: 10},
+			testStats{name: "test_b", passes: 10},
+		),
+	}
+	report := buildStressReport(50, 30*1e9, files, 2, "linux-x86_64")
+	if !strings.Contains(report, "ALL STABLE: 2 tests") {
+		t.Errorf("expected ALL STABLE line, got:\n%s", report)
+	}
+	if strings.Contains(report, "FLAKY") {
+		t.Errorf("unexpected FLAKY section:\n%s", report)
+	}
+	if strings.Contains(report, "HIGH VARIANCE") {
+		t.Errorf("unexpected HIGH VARIANCE section:\n%s", report)
+	}
+}
+
+func TestBuildStressReport_HighVarianceSummary(t *testing.T) {
+	// isHighVariance requires: total >= 5, mean > 0.005s, cov > 1.0
+	// Use timings with a spike: 4 × 0.001s + 1 × 0.1s → mean≈0.021, high CoV
+	files := []*fileStats{
+		makeFileStatsWithPath("concurrency/a.pr",
+			testStats{name: "test_noisy", passes: 5, timings: []float64{0.001, 0.001, 0.001, 0.001, 0.1}},
+		),
+	}
+	report := buildStressReport(50, 30*1e9, files, 1, "linux-x86_64")
+
+	// Must show HIGH VARIANCE summary line with count
+	if !strings.Contains(report, "HIGH VARIANCE: 1 test") {
+		t.Errorf("expected HIGH VARIANCE summary line, got:\n%s", report)
+	}
+	// Must note no failures
+	if !strings.Contains(report, "no failures") {
+		t.Errorf("expected 'no failures' in HIGH VARIANCE line, got:\n%s", report)
+	}
+	// Must NOT list individual test details
+	if strings.Contains(report, "test_noisy") {
+		t.Errorf("high-variance tests should not be listed individually, got:\n%s", report)
+	}
+	// Must NOT show FLAKY or ALL STABLE
+	if strings.Contains(report, "FLAKY") {
+		t.Errorf("unexpected FLAKY section:\n%s", report)
+	}
+	if strings.Contains(report, "ALL STABLE") {
+		t.Errorf("unexpected ALL STABLE line:\n%s", report)
+	}
+}
+
+func TestBuildStressReport_FlakyTests(t *testing.T) {
+	files := []*fileStats{
+		makeFileStatsWithPath("e2e/bar.pr",
+			testStats{name: "test_flaky", passes: 8, fails: 2},
+		),
+	}
+	report := buildStressReport(10, 5*1e9, files, 1, "linux-x86_64")
+
+	if !strings.Contains(report, "FLAKY (1 tests)") {
+		t.Errorf("expected FLAKY header, got:\n%s", report)
+	}
+	// Flaky tests must still be listed individually
+	if !strings.Contains(report, "test_flaky") {
+		t.Errorf("flaky test name should appear in report, got:\n%s", report)
+	}
+	if strings.Contains(report, "ALL STABLE") {
+		t.Errorf("unexpected ALL STABLE line:\n%s", report)
+	}
+}
+
+func TestBuildStressReport_FlakyAndHighVariance(t *testing.T) {
+	files := []*fileStats{
+		makeFileStatsWithPath("e2e/baz.pr",
+			testStats{name: "test_broken", passes: 7, fails: 3},
+			testStats{name: "test_noisy", passes: 5, timings: []float64{0.001, 0.001, 0.001, 0.001, 0.1}},
+		),
+	}
+	report := buildStressReport(20, 10*1e9, files, 2, "linux-x86_64")
+
+	// Both sections must appear
+	if !strings.Contains(report, "FLAKY") {
+		t.Errorf("expected FLAKY section, got:\n%s", report)
+	}
+	if !strings.Contains(report, "HIGH VARIANCE: 1 test") {
+		t.Errorf("expected HIGH VARIANCE summary, got:\n%s", report)
+	}
+	// Flaky test listed, high-variance test not listed
+	if !strings.Contains(report, "test_broken") {
+		t.Errorf("flaky test should appear, got:\n%s", report)
+	}
+	if strings.Contains(report, "test_noisy") {
+		t.Errorf("high-variance test should not be listed individually, got:\n%s", report)
+	}
+}

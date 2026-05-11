@@ -715,8 +715,7 @@ func buildStressReport(iterations int, elapsed time.Duration, files []*fileStats
 	}
 
 	if len(highVar) > 0 {
-		fmt.Fprintf(&b, "HIGH VARIANCE (%d tests):\n", len(highVar))
-		writeTestGroupDetailed(&b, highVar)
+		fmt.Fprintf(&b, "HIGH VARIANCE: %d tests (no failures, timing noise only)\n", len(highVar))
 		fmt.Fprintln(&b)
 	}
 

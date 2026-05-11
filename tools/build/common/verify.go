@@ -112,9 +112,12 @@ func RunVerify(root string, args []string) error {
 	}
 
 	// 7. Promise tests (host)
+	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 	fmt.Println("\nRunning promise tests (host)...")
 	hostStart := time.Now()
-	if err := RunPromiseTests(root, ""); err != nil {
+	hostOutput, hostErr := RunPromiseTests(root, "")
+	ReportTestHealth(root, hostTarget, hostOutput)
+	if hostErr != nil {
 		failures = append(failures, "promise tests (host)")
 	}
 	hostElapsed := time.Since(hostStart)
@@ -130,7 +133,9 @@ func RunVerify(root string, args []string) error {
 		}
 		fmt.Println("\nRunning promise tests (wasm32-wasi)...")
 		wasmStart := time.Now()
-		if err := RunPromiseTests(root, "wasm32-wasi"); err != nil {
+		wasmOutput, wasmErr := RunPromiseTests(root, "wasm32-wasi")
+		ReportTestHealth(root, "wasm32-wasi", wasmOutput)
+		if wasmErr != nil {
 			failures = append(failures, "promise tests (wasm32-wasi)")
 		}
 		wasmElapsed = time.Since(wasmStart)
@@ -140,7 +145,6 @@ func RunVerify(root string, args []string) error {
 	elapsed := time.Since(start)
 	mins := int(elapsed.Minutes())
 	secs := int(elapsed.Seconds()) % 60
-	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
 	fmt.Println()
 	fmt.Println("====================================================")

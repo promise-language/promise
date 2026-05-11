@@ -3,7 +3,9 @@ package common
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -64,8 +66,12 @@ func RunTest(root string, args []string) error {
 
 	// Promise tests
 	if suite == "promise" || suite == "all" {
+		hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
+
 		fmt.Println("\nRunning promise tests (host)...")
-		if err := RunIn(root, promiseBin, "test", "-timeout", "10", "tests/...", "modules/...", "examples/..."); err != nil {
+		output, err := RunPromiseTests(root, "")
+		ReportTestHealth(root, hostTarget, output)
+		if err != nil {
 			return fmt.Errorf("promise tests (host): %w", err)
 		}
 
@@ -74,8 +80,9 @@ func RunTest(root string, args []string) error {
 				return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
 			}
 			fmt.Println("\nRunning promise tests (wasm32-wasi)...")
-			if err := RunIn(root, promiseBin, "test", "-timeout", "10", "-target", "wasm32-wasi",
-				"tests/...", "modules/...", "examples/..."); err != nil {
+			output, err = RunPromiseTests(root, "wasm32-wasi")
+			ReportTestHealth(root, "wasm32-wasi", output)
+			if err != nil {
 				return fmt.Errorf("promise tests (wasm32-wasi): %w", err)
 			}
 		}
@@ -93,12 +100,13 @@ func RunGoTests(root string) error {
 }
 
 // RunPromiseTests runs Promise tests for the given target (empty = host).
-func RunPromiseTests(root, target string) error {
+// Returns captured stdout (even on failure) and any error.
+func RunPromiseTests(root, target string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
 	args := []string{"test", "-timeout", "10", "tests/...", "modules/...", "examples/..."}
 	if target != "" {
 		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...")
 	}
-	return RunIn(root, promiseBin, args...)
+	return RunTee(root, promiseBin, args...)
 }
 

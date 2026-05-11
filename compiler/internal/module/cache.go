@@ -271,11 +271,12 @@ func hashString(s string) string {
 // which is a conservative proxy for InterfaceHash — any source change in a
 // dependency invalidates the consumer's cache. Catalog module dependencies are
 // already covered by compilerHash (they're embedded in the binary).
-func BuildCacheKey(implHash, compilerHash, target string, depHashes []string) string {
+func BuildCacheKey(implHash, compilerHash, target, buildMode string, depHashes []string) string {
 	h := fnv.New128a()
 	fmt.Fprintf(h, "impl:%s\n", implHash)
 	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
 	fmt.Fprintf(h, "target:%s\n", target)
+	fmt.Fprintf(h, "mode:%s\n", buildMode)
 	sortedDeps := make([]string, len(depHashes))
 	copy(sortedDeps, depHashes)
 	sort.Strings(sortedDeps)
@@ -330,7 +331,7 @@ func FormatCacheKeyInputs(name, cacheKey string, inputs []CacheKeyInput) string 
 // references __mod_json_JsonValue.clone in cross-module builds but JsonValue.clone in
 // module-internal tests). Including moduleContext ensures these contexts get separate
 // cache entries.
-func InstanceCacheKey(irPrefix, monoName, typeDeclHash, compilerHash, target string, moduleContext []string) string {
+func InstanceCacheKey(irPrefix, monoName, typeDeclHash, compilerHash, target, buildMode string, moduleContext []string) string {
 	h := fnv.New128a()
 	fmt.Fprintf(h, "instance\n")
 	fmt.Fprintf(h, "prefix:%s\n", irPrefix)
@@ -338,6 +339,7 @@ func InstanceCacheKey(irPrefix, monoName, typeDeclHash, compilerHash, target str
 	fmt.Fprintf(h, "decl:%s\n", typeDeclHash)
 	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
 	fmt.Fprintf(h, "target:%s\n", target)
+	fmt.Fprintf(h, "mode:%s\n", buildMode)
 	for _, mc := range moduleContext {
 		fmt.Fprintf(h, "modctx:%s\n", mc)
 	}

@@ -204,7 +204,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 			result := codegen.Compile(file, info, target)
 			testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 			result.GenerateTestMain(info.Tests, testTimeouts)
-			compileAndLink(result, tmp.Name(), target, f)
+			compileAndLink(result, tmp.Name(), target, f, false)
 			tempFiles = append(tempFiles, tmp.Name())
 			var testNames []string
 			for _, t := range info.Tests {
@@ -281,7 +281,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 				continue
 			}
 			result := codegen.Compile(file, info, target)
-			compileAndLink(result, tmp.Name(), target, f)
+			compileAndLink(result, tmp.Name(), target, f, false)
 			tempFiles = append(tempFiles, tmp.Name())
 
 			// Save to cache.
@@ -308,7 +308,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 			result := codegen.Compile(file, info, target)
 			testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 			result.GenerateTestMain(info.Tests, testTimeouts)
-			compileAndLink(result, tmp.Name(), target, f)
+			compileAndLink(result, tmp.Name(), target, f, false)
 			tempFiles = append(tempFiles, tmp.Name())
 
 			var testNames []string

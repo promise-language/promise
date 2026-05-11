@@ -502,7 +502,7 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 	})
 	timePhase("codegen", time.Since(tCodegen), "")
 
-	compileAndLink(result, outputFile, target, filename)
+	compileAndLink(result, outputFile, target, filename, releaseMode)
 
 	if timePhases {
 		timePhase("total", time.Since(compileStart), "")
@@ -938,7 +938,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 	// imported local modules invalidate the consuming module's cached binary.
 	depHashes := scanModuleLocalDeps(modDir)
 
-	cacheKey := module.BuildCacheKey(implHashWithTimeout, compilerHash, target, depHashes)
+	cacheKey := module.BuildCacheKey(implHashWithTimeout, compilerHash, target, "debug", depHashes)
 	cacheDir, _ := module.BuildCacheDir()
 
 	cacheDebug := os.Getenv("PROMISE_CACHE_DEBUG") != ""
@@ -1020,7 +1020,7 @@ func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile
 		os.Exit(1)
 	}
 	tmpOutput.Close()
-	compileAndLink(result, tmpOutput.Name(), target, sourceFile)
+	compileAndLink(result, tmpOutput.Name(), target, sourceFile, false) // tests always use debug mode
 	return tmpOutput.Name()
 }
 
@@ -1114,7 +1114,7 @@ func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple
 		os.Exit(1)
 	}
 	tmpOutput.Close()
-	compileAndLink(result, tmpOutput.Name(), target, sourceFile)
+	compileAndLink(result, tmpOutput.Name(), target, sourceFile, false) // tests always use debug mode
 	return tmpOutput.Name(), result.CoverageRegions
 }
 
@@ -1417,7 +1417,7 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name(), target, filename)
+	compileAndLink(result, tmpOutput.Name(), target, filename, false) // tests always use debug mode
 
 	if timePhases && !compileStart.IsZero() {
 		timePhase("total", time.Since(compileStart), "")
@@ -2146,7 +2146,7 @@ func parseTimeoutArg(s string) (time.Duration, error) {
 // compileAndLink writes the IR to a temp file and links it into the output binary.
 // On Linux, macOS, and WASM, uses opt + llc + linker pipeline (Phase 7a/7b/7c).
 // On other platforms (or with PROMISE_USE_CLANG=1), uses clang as driver.
-func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFile string) {
+func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFile string, releaseMode bool) {
 	// Dump generated LLVM IR to a file for debugging/inspection.
 	// Usage: PROMISE_DUMP_IR=/tmp/out.ll promise build foo.pr
 	if envDump := os.Getenv("PROMISE_DUMP_IR"); envDump != "" {
@@ -2155,7 +2155,7 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFil
 
 	// Separate compilation: split IR into main + per-module .ll files
 	if result.HasModules() && !useClangPipeline(target) {
-		compileAndLinkSeparate(result, outputFile, target, sourceFile)
+		compileAndLinkSeparate(result, outputFile, target, sourceFile, releaseMode)
 		return
 	}
 
@@ -2176,7 +2176,7 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFil
 	if useClangPipeline(target) {
 		compileAndLinkClang(llFile.Name(), target, outputFile)
 	} else {
-		compileAndLinkLLVM(llFile.Name(), target, outputFile)
+		compileAndLinkLLVM(llFile.Name(), target, outputFile, releaseMode)
 	}
 }
 
@@ -2185,7 +2185,7 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFil
 // object pipeline (no LTO) as lld-link LTO support is not yet wired up.
 // Uses content-hash caching: if a module's source hasn't changed, its cached bitcode
 // is reused.
-func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, sourceFile string) {
+func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, sourceFile string, releaseMode bool) {
 	mainIR, moduleIRs := result.SplitModuleIRs()
 
 	optPath, err := findLLVMTool("opt")
@@ -2195,9 +2195,15 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	}
 	checkLLVMToolVersion(optPath)
 
-	useLTO := !isWindowsTarget(target)
+	// Release: LTO pipeline (opt -O1 → .bc → linker --lto-O1).
+	// Debug: object pipeline (opt -O1 → .bc → llc → .o → linker --gc-sections).
+	// WASM: always LTO (--lto-O2 needed to fold math intrinsics like sin/cos).
+	// Windows: always object pipeline (LTO not wired up for MSVC).
+	// Note: opt -O1 in both modes until B0314 (alloca domination) is fixed to enable -O0.
+	useLTO := (releaseMode || isWasmTarget(target)) && !isWindowsTarget(target)
+	optLevel := "-O1"
 
-	// Windows needs llc for the non-LTO object pipeline.
+	// Debug mode and Windows need llc for the object pipeline.
 	var llcPath string
 	if !useLTO {
 		llcPath, err = findLLVMTool("llc")
@@ -2214,12 +2220,12 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	compilerHash := module.CompilerHash()
 	modInfos := result.ModuleInfos()
 
-	// compileModule compiles one IR text to bitcode (LTO path) or object (Windows).
+	// compileModule compiles one IR text to bitcode (LTO) or object (debug/Windows).
 	compileModule := func(irText, prefix string) string {
 		if useLTO {
-			return compileLLToBC(irText, prefix, optPath)
+			return compileLLToBC(irText, prefix, optPath, optLevel)
 		}
-		return compileLLToObj(irText, prefix, target, optPath, llcPath)
+		return compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel)
 	}
 
 	// Compile main IR (always recompiled — main changes with every build).
@@ -2250,6 +2256,12 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 			if cacheDir != "" {
 				h := fnv.New128a()
 				h.Write([]byte(irText))
+				// Include build mode so debug (.o) and release (.bc) get separate entries.
+				if useLTO {
+					fmt.Fprint(h, "\nmode:release")
+				} else {
+					fmt.Fprint(h, "\nmode:debug")
+				}
 				contentCacheKey = hex.EncodeToString(h.Sum(nil))
 			}
 
@@ -2377,16 +2389,17 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		objFiles = append(objFiles, iobj.objFile)
 	}
 
-	// Link all files together (LTO linkers handle cross-module optimization)
+	// Link all files together (release: LTO linkers handle cross-module optimization;
+	// debug: plain linking with --gc-sections for DCE)
 	tLink := time.Now()
 	if isDarwinTarget(target) {
-		linkDarwinMulti(objFiles, target, outputFile)
+		linkDarwinMulti(objFiles, target, outputFile, useLTO)
 	} else if isWasmTarget(target) {
-		linkWasmMulti(objFiles, target, outputFile)
+		linkWasmMulti(objFiles, target, outputFile, useLTO)
 	} else if isWindowsTarget(target) {
 		linkWindowsMulti(objFiles, target, outputFile)
 	} else {
-		linkLinuxMulti(objFiles, target, outputFile)
+		linkLinuxMulti(objFiles, target, outputFile, useLTO)
 	}
 	timePhase("link", time.Since(tLink), "")
 }
@@ -2433,7 +2446,7 @@ func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[s
 		if typeDeclHash == "" {
 			continue // not cacheable
 		}
-		key := module.InstanceCacheKey(irPrefix, mName, typeDeclHash, compilerHash, target, moduleContext)
+		key := module.InstanceCacheKey(irPrefix, mName, typeDeclHash, compilerHash, target, "debug", moduleContext)
 		result[mName] = &module.CacheMeta{
 			Kind:         module.CacheKindInstance,
 			Name:         mName,
@@ -2493,7 +2506,7 @@ func lookupCachedInstances(info *sema.Info, target string) map[string]bool {
 }
 
 // compileLLToObj compiles LLVM IR text to an object file via opt + llc.
-func compileLLToObj(irText, prefix, target, optPath, llcPath string) string {
+func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) string {
 	llFile, err := os.CreateTemp("", prefix+"-*.ll")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -2506,7 +2519,6 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath string) string {
 	llFile.Close()
 	defer os.Remove(llFile.Name())
 
-	// opt -O1
 	bcFile, err := os.CreateTemp("", prefix+"-*.bc")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -2515,7 +2527,7 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath string) string {
 	bcFile.Close()
 	defer os.Remove(bcFile.Name())
 
-	optCmd := runLLVMCmd(optPath, "-O1", llFile.Name(), "-o", bcFile.Name())
+	optCmd := runLLVMCmd(optPath, optLevel, llFile.Name(), "-o", bcFile.Name())
 	optCmd.Stderr = os.Stderr
 	if err := optCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error running opt on %s: %v\n", prefix, err)
@@ -2534,7 +2546,7 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath string) string {
 	if isWasmTarget(target) {
 		llcArgs = append(llcArgs, "-mattr=+bulk-memory,+mutable-globals,+sign-ext")
 	} else {
-		llcArgs = append(llcArgs, "-function-sections", "-relocation-model=pic")
+		llcArgs = append(llcArgs, "-function-sections", "-data-sections", "-relocation-model=pic")
 	}
 	llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
 
@@ -2550,7 +2562,7 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath string) string {
 
 // compileLLToBC compiles LLVM IR text to LLVM bitcode via opt.
 // The bitcode is passed to LTO-capable linkers (ld.lld/wasm-ld/ld64.lld with --lto-O1).
-func compileLLToBC(irText, prefix, optPath string) string {
+func compileLLToBC(irText, prefix, optPath, optLevel string) string {
 	llFile, err := os.CreateTemp("", prefix+"-*.ll")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -2570,7 +2582,7 @@ func compileLLToBC(irText, prefix, optPath string) string {
 	}
 	bcFile.Close()
 
-	optCmd := runLLVMCmd(optPath, "-O1", llFile.Name(), "-o", bcFile.Name())
+	optCmd := runLLVMCmd(optPath, optLevel, llFile.Name(), "-o", bcFile.Name())
 	optCmd.Stderr = os.Stderr
 	if err := optCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error running opt on %s: %v\n", prefix, err)
@@ -3384,7 +3396,7 @@ func emulationMode(target string) string {
 }
 
 // buildLinuxLinkArgs builds the ld.lld argument list for dynamic glibc ELF linking.
-func buildLinuxLinkArgs(target, objFile, outputFile string) []string {
+func buildLinuxLinkArgs(target, objFile, outputFile string, useLTO bool) []string {
 	crt, err := findCRT(target)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -3396,7 +3408,13 @@ func buildLinuxLinkArgs(target, objFile, outputFile string) []string {
 		"--hash-style=gnu",
 		"--build-id",
 		"--eh-frame-hdr",
-		"--lto-O1", // LTO: cross-module inlining and DCE
+	}
+	if useLTO {
+		args = append(args, "--lto-O1") // LTO: cross-module inlining and DCE
+	} else {
+		args = append(args, "--gc-sections") // DCE for non-LTO object files
+	}
+	args = append(args,
 		"-m", emulationMode(target),
 		"-pie",
 		"-dynamic-linker", dynamicLinker(target),
@@ -3405,7 +3423,7 @@ func buildLinuxLinkArgs(target, objFile, outputFile string) []string {
 		crt.scrt1,
 		crt.crti,
 		crt.crtbeginS,
-	}
+	)
 
 	// Library search paths
 	for _, dir := range crt.libDirs {
@@ -3553,26 +3571,35 @@ func findMuslCRT(target string) (string, error) {
 }
 
 // buildMuslLinkArgs builds the ld.lld argument list for static musl linking.
-func buildMuslLinkArgs(target, objFile, outputFile, crtDir string) []string {
-	return []string{
+func buildMuslLinkArgs(target, objFile, outputFile, crtDir string, useLTO bool) []string {
+	args := []string{
 		"-m", emulationMode(target),
 		"-static",
 		"--build-id",
 		"--eh-frame-hdr",
-		"--lto-O1", // LTO: cross-module inlining and DCE (replaces --gc-sections for bitcode inputs)
+	}
+	if useLTO {
+		args = append(args, "--lto-O1") // LTO: cross-module inlining and DCE
+	} else {
+		args = append(args, "--gc-sections") // DCE for non-LTO object files
+	}
+	args = append(args,
 		"-o", outputFile,
 		filepath.Join(crtDir, "crt1.o"),
 		filepath.Join(crtDir, "crti.o"),
 		objFile,
 		filepath.Join(crtDir, "libc.a"),
 		filepath.Join(crtDir, "crtn.o"),
-	}
+	)
+	return args
 }
 
 // compileAndLinkLLVM runs the opt + linker pipeline.
-// Non-Windows: opt -O1 → .bc → linker with --lto-O1 (LTO handles cross-module DCE/inlining).
-// Windows: opt -O1 → .bc → llc → .o → lld-link (LTO not wired up for MSVC yet).
-func compileAndLinkLLVM(llFile, target, outputFile string) {
+// Release: opt -O1 → .bc → linker with --lto-O1 (LTO handles cross-module DCE/inlining).
+// Debug: opt -O1 → .bc → llc → .o → linker with --gc-sections (no LTO).
+// Windows: always opt → .bc → llc → .o → lld-link (LTO not wired up for MSVC yet).
+// Note: opt -O1 in both modes until B0314 (alloca domination) is fixed to enable -O0.
+func compileAndLinkLLVM(llFile, target, outputFile string, releaseMode bool) {
 	optPath, err := findLLVMTool("opt")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -3580,7 +3607,10 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	}
 	checkLLVMToolVersion(optPath)
 
-	// Step 1: opt -O1 (coroutine lowering + optimization → bitcode)
+	useLTO := (releaseMode || isWasmTarget(target)) && !isWindowsTarget(target)
+	optLevel := "-O1" // B0314: -O0 blocked by alloca domination issue
+
+	// Step 1: opt (coroutine lowering + optimization → bitcode)
 	bcFile, err := os.CreateTemp("", "promise-*.bc")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -3590,7 +3620,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	defer os.Remove(bcFile.Name())
 
 	tOpt := time.Now()
-	optCmd := runLLVMCmd(optPath, "-O1", llFile, "-o", bcFile.Name())
+	optCmd := runLLVMCmd(optPath, optLevel, llFile, "-o", bcFile.Name())
 	optCmd.Stderr = os.Stderr
 	if err := optCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error running opt: %v\n", err)
@@ -3598,8 +3628,8 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	}
 	timePhase("opt", time.Since(tOpt), "")
 
-	if isWindowsTarget(target) {
-		// Windows: llc → lld-link (LTO not yet wired up for MSVC COFF)
+	if !useLTO {
+		// Debug / Windows: llc → .o → linker (no LTO)
 		llcPath, err := findLLVMTool("llc")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -3615,35 +3645,51 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 		objFile.Close()
 		defer os.Remove(objFile.Name())
 
-		tLink := time.Now()
-		llcArgs := []string{"-mtriple=" + target, "-filetype=obj", bcFile.Name(), "-o", objFile.Name()}
+		llcArgs := []string{"-mtriple=" + target, "-filetype=obj"}
+		if isWasmTarget(target) {
+			llcArgs = append(llcArgs, "-mattr=+bulk-memory,+mutable-globals,+sign-ext")
+		} else if !isWindowsTarget(target) {
+			llcArgs = append(llcArgs, "-function-sections", "-data-sections", "-relocation-model=pic")
+		}
+		llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
+
 		llcCmd := runLLVMCmd(llcPath, llcArgs...)
 		llcCmd.Stderr = os.Stderr
 		if err := llcCmd.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "error running llc: %v\n", err)
 			os.Exit(1)
 		}
-		linkWindows(objFile.Name(), target, outputFile)
+
+		tLink := time.Now()
+		if isWindowsTarget(target) {
+			linkWindows(objFile.Name(), target, outputFile)
+		} else if isDarwinTarget(target) {
+			linkDarwin(objFile.Name(), target, outputFile, false)
+		} else if isWasmTarget(target) {
+			linkWasm(objFile.Name(), target, outputFile, false)
+		} else {
+			linkLinux(objFile.Name(), target, outputFile, false)
+		}
 		timePhase("link", time.Since(tLink), "")
 		return
 	}
 
-	// Step 2: Link with LTO — linker performs cross-module inlining and DCE on bitcode.
+	// Release: Link with LTO — linker performs cross-module inlining and DCE on bitcode.
 	tLink := time.Now()
 	if isDarwinTarget(target) {
-		linkDarwin(bcFile.Name(), target, outputFile)
+		linkDarwin(bcFile.Name(), target, outputFile, true)
 	} else if isWasmTarget(target) {
-		linkWasm(bcFile.Name(), target, outputFile)
+		linkWasm(bcFile.Name(), target, outputFile, true)
 	} else {
-		linkLinux(bcFile.Name(), target, outputFile)
+		linkLinux(bcFile.Name(), target, outputFile, true)
 	}
 	timePhase("link", time.Since(tLink), "")
 }
 
 // linkDarwin runs ld64.lld for macOS Mach-O linking.
 // Accepts LLVM bitcode (.bc) or native object (.o) as input.
-// Uses --lto-O1 for LTO. The !isLLD path is only reachable via PROMISE_LD override.
-func linkDarwin(bcOrObjFile, target, outputFile string) {
+// Uses --lto-O1 for LTO when useLTO is true. The !isLLD path is only reachable via PROMISE_LD override.
+func linkDarwin(bcOrObjFile, target, outputFile string, useLTO bool) {
 	linkerPath, isLLD, err := findDarwinLinker()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -3685,7 +3731,9 @@ func linkDarwin(bcOrObjFile, target, outputFile string) {
 	linkArgs := buildDarwinLinkArgs(target, fileToLink, outputFile)
 	var linkCmd *exec.Cmd
 	if isLLD {
-		linkArgs = append([]string{"--lto-O1"}, linkArgs...)
+		if useLTO {
+			linkArgs = append([]string{"--lto-O1"}, linkArgs...)
+		}
 		linkCmd = runLLVMCmd(linkerPath, linkArgs...)
 	} else {
 		linkCmd = exec.Command(linkerPath, linkArgs...)
@@ -3703,8 +3751,8 @@ func linkDarwin(bcOrObjFile, target, outputFile string) {
 }
 
 // linkWasm runs wasm-ld for WebAssembly linking (single .o file).
-func linkWasm(objFile, target, outputFile string) {
-	linkWasmMulti([]string{objFile}, target, outputFile)
+func linkWasm(objFile, target, outputFile string, useLTO bool) {
+	linkWasmMulti([]string{objFile}, target, outputFile, useLTO)
 }
 
 // ensureWasmAllocObj extracts the embedded WASM allocator object to cache.
@@ -3738,7 +3786,7 @@ func ensureWasmAllocObj() (string, error) {
 }
 
 // linkWasmMulti links multiple .o files for WebAssembly.
-func linkWasmMulti(objFiles []string, target, outputFile string) {
+func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) {
 	lldPath, err := findLLVMTool("wasm-ld")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -3746,7 +3794,7 @@ func linkWasmMulti(objFiles []string, target, outputFile string) {
 	}
 	checkLLVMToolVersion(lldPath)
 
-	linkArgs := buildWasmLinkArgs(objFiles, target, outputFile)
+	linkArgs := buildWasmLinkArgs(objFiles, target, outputFile, useLTO)
 	linkCmd := runLLVMCmd(lldPath, linkArgs...)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
@@ -3758,19 +3806,24 @@ func linkWasmMulti(objFiles []string, target, outputFile string) {
 // buildWasmLinkArgs builds the wasm-ld argument list for WASM linking.
 // Links user code with the embedded free-list allocator (wasm_alloc.o).
 // For wasm32-web: exports _initialize and memory instead of _start.
-func buildWasmLinkArgs(objFiles []string, target, outputFile string) []string {
+func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool) []string {
 	allocObj, err := ensureWasmAllocObj()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	isWeb := strings.Contains(target, "web")
-	args := []string{
-		"--lto-O2", // O2 needed to fold math intrinsics (e.g. sin(0.0)) across module boundaries
+	var args []string
+	if useLTO {
+		args = []string{"--lto-O2"} // O2 needed to fold math intrinsics across module boundaries
+	} else {
+		args = []string{"--gc-sections"} // DCE for non-LTO object files
+	}
+	args = append(args,
 		"--no-entry",
 		"--allow-undefined", // WASI/JS imports resolved at runtime
 		"-o", outputFile,
-	}
+	)
 	if isWeb {
 		args = append(args, "--export=_initialize", "--export-memory")
 	} else {
@@ -3782,7 +3835,7 @@ func buildWasmLinkArgs(objFiles []string, target, outputFile string) []string {
 }
 
 // linkLinux runs ld.lld for Linux ELF linking (glibc or musl).
-func linkLinux(objFile, target, outputFile string) {
+func linkLinux(objFile, target, outputFile string, useLTO bool) {
 	lldPath, err := findLLVMTool("ld.lld")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -3797,9 +3850,9 @@ func linkLinux(objFile, target, outputFile string) {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		linkArgs = buildMuslLinkArgs(target, objFile, outputFile, crtDir)
+		linkArgs = buildMuslLinkArgs(target, objFile, outputFile, crtDir, useLTO)
 	} else {
-		linkArgs = buildLinuxLinkArgs(target, objFile, outputFile)
+		linkArgs = buildLinuxLinkArgs(target, objFile, outputFile, useLTO)
 	}
 	linkCmd := runLLVMCmd(lldPath, linkArgs...)
 	linkCmd.Stderr = os.Stderr
@@ -3809,8 +3862,8 @@ func linkLinux(objFile, target, outputFile string) {
 	}
 }
 
-// linkDarwinMulti links multiple .o files on macOS.
-func linkDarwinMulti(objFiles []string, target, outputFile string) {
+// linkDarwinMulti links multiple .o/.bc files on macOS.
+func linkDarwinMulti(objFiles []string, target, outputFile string, useLTO bool) {
 	linkerPath, isLLD, err := findDarwinLinker()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -3843,7 +3896,9 @@ func linkDarwinMulti(objFiles []string, target, outputFile string) {
 
 	var linkCmd *exec.Cmd
 	if isLLD {
-		linkArgs = append([]string{"--lto-O1"}, linkArgs...)
+		if useLTO {
+			linkArgs = append([]string{"--lto-O1"}, linkArgs...)
+		}
 		linkCmd = runLLVMCmd(linkerPath, linkArgs...)
 	} else {
 		linkCmd = exec.Command(linkerPath, linkArgs...)
@@ -3860,14 +3915,19 @@ func linkDarwinMulti(objFiles []string, target, outputFile string) {
 	}
 }
 
-// linkLinuxMulti links multiple .o files on Linux (glibc or musl).
-func linkLinuxMulti(objFiles []string, target, outputFile string) {
+// linkLinuxMulti links multiple .o/.bc files on Linux (glibc or musl).
+func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO bool) {
 	lldPath, err := findLLVMTool("ld.lld")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	checkLLVMToolVersion(lldPath)
+
+	ltoOrGC := "--gc-sections"
+	if useLTO {
+		ltoOrGC = "--lto-O1"
+	}
 
 	var linkArgs []string
 	if strings.Contains(target, "linux-musl") {
@@ -3881,7 +3941,7 @@ func linkLinuxMulti(objFiles []string, target, outputFile string) {
 			"-static",
 			"--build-id",
 			"--eh-frame-hdr",
-			"--lto-O1", // LTO: cross-module inlining and DCE
+			ltoOrGC,
 			"-o", outputFile,
 			filepath.Join(crtDir, "crt1.o"),
 			filepath.Join(crtDir, "crti.o"),
@@ -3902,7 +3962,7 @@ func linkLinuxMulti(objFiles []string, target, outputFile string) {
 			"--hash-style=gnu",
 			"--build-id",
 			"--eh-frame-hdr",
-			"--lto-O1", // LTO: cross-module inlining and DCE
+			ltoOrGC,
 			"-m", emulationMode(target),
 			"-pie",
 			"-dynamic-linker", dynamicLinker(target),
@@ -4354,6 +4414,7 @@ func computeTestFileCacheKey(filename, target string, cfg testTimeoutConfig) (st
 	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
 	fmt.Fprintf(h, "std:%s\n", sHash)
 	fmt.Fprintf(h, "target:%s\n", target)
+	fmt.Fprintf(h, "mode:debug\n") // tests always use debug mode (T0205)
 	fmt.Fprintf(h, "%s\n", cfg.cacheString())
 
 	abs, _ := filepath.Abs(filename)
@@ -5469,7 +5530,7 @@ func runExec(args []string) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name(), target, "")
+	compileAndLink(result, tmpOutput.Name(), target, "", false) // exec always uses debug mode
 
 	if timePhases {
 		timePhase("total", time.Since(compileStart), "")

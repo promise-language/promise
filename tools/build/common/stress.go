@@ -2,7 +2,6 @@ package common
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -11,14 +10,10 @@ import (
 func RunStress(root string, args []string) error {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
 
-	// Use local cache (same as verify --local)
-	promiseHome := filepath.Join(root, ".promise-home")
-	tmpDir := filepath.Join(promiseHome, "tmp")
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+	// Always use local cache for stress tests
+	if err := SetupLocalCache(root); err != nil {
 		return err
 	}
-	os.Setenv("PROMISE_HOME", promiseHome)
-	os.Setenv("TMPDIR", tmpDir)
 
 	// Build first
 	fmt.Println("Building compiler...")

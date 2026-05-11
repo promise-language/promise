@@ -16,18 +16,19 @@ var errInterrupted = fmt.Errorf("interrupted by Ctrl+C")
 
 // RunVerify orchestrates the full pre-commit verification pipeline:
 // format → build → vet → test. All steps are internal calls (no subprocess).
-// Flags: --local (use .promise-home), --wasm (include wasm target), --clean (clear caches).
+// Flags: --shared (use ~/.promise), --wasm (include wasm target), --clean (clear caches).
+// Default cache is local (.promise-home/); --local is accepted for clarity.
 func RunVerify(root string, args []string) error {
-	local := slices.Contains(args, "--local")
+	shared := slices.Contains(args, "--shared")
 	wasm := slices.Contains(args, "--wasm")
 	clean := slices.Contains(args, "--clean")
 
 	// Validate args
 	for _, arg := range args {
 		switch arg {
-		case "--local", "--wasm", "--clean":
+		case "--local", "--shared", "--wasm", "--clean":
 		default:
-			return fmt.Errorf("usage: bin/verify [--local] [--wasm] [--clean]")
+			return fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--clean]")
 		}
 	}
 
@@ -38,16 +39,15 @@ func RunVerify(root string, args []string) error {
 	}
 	defer unlock()
 
-	// Set up local environment if requested
-	if local {
+	// Default to local cache; --shared opts into ~/.promise
+	if !shared {
 		promiseHome := filepath.Join(root, ".promise-home")
-		tmpDir := filepath.Join(promiseHome, "tmp")
 		if clean {
-			os.RemoveAll(tmpDir)
+			os.RemoveAll(filepath.Join(promiseHome, "tmp"))
 		}
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("PROMISE_HOME", promiseHome)
-		os.Setenv("TMPDIR", tmpDir)
+		if err := SetupLocalCache(root); err != nil {
+			return fmt.Errorf("setup local cache: %w", err)
+		}
 	}
 
 	start := time.Now()

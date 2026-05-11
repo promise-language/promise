@@ -15,10 +15,31 @@ import (
 // RunBuild executes the full compiler build pipeline.
 // This is the main implementation — called by bin/build and internally
 // by other tools (e.g., verify, test) without spawning a subprocess.
+// Flags: --release, --generate, --shared (use ~/.promise), --local (default, no-op).
 func RunBuild(root string, args []string) error {
 	start := time.Now()
 	release := slices.Contains(args, "--release")
 	generate := slices.Contains(args, "--generate")
+
+	// Validate flags (--local/--shared accepted for CLI consistency)
+	for _, arg := range args {
+		switch arg {
+		case "--release", "--generate", "--local", "--shared":
+		default:
+			return fmt.Errorf("usage: bin/build [--release] [--generate] [--shared]")
+		}
+	}
+
+	// Default to local cache when called as CLI (args != nil).
+	// When called internally by verify/test (args == nil), caller handles cache.
+	if args != nil {
+		shared := slices.Contains(args, "--shared")
+		if !shared {
+			if err := SetupLocalCache(root); err != nil {
+				return fmt.Errorf("setup local cache: %w", err)
+			}
+		}
+	}
 
 	compilerDir := filepath.Join(root, "compiler")
 	binDir := filepath.Join(root, "bin")

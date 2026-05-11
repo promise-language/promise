@@ -18,7 +18,7 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 **IMPORTANT: Never commit, push, or create PRs unless the user explicitly asks you to.** Wait for an explicit instruction like "commit", "push", or "create a PR" before performing any git write operations.
 
-**IMPORTANT: Always run `bin/verify --local --wasm` before committing changes.** This formats Go and Promise code, runs `go vet`, and executes the full test suite (including WASM target). The `--local` flag uses a local cache directory to avoid polluting `~/.promise`. Do not commit if verify fails.
+**IMPORTANT: Always run `bin/verify --wasm` before committing changes.** This formats Go and Promise code, runs `go vet`, and executes the full test suite (including WASM target). Build tools default to a local cache directory (`.promise-home/`); use `--shared` to opt into the shared `~/.promise` cache. Do not commit if verify fails.
 
 **Bootstrap (once per clone):** `./make` — compiles all Go build tools to `bin/`. Then `bin/setup` enables git hooks. See `docs/build-tools.md` for the full architecture.
 
@@ -34,7 +34,8 @@ bin/test go                # Go unit tests only
 bin/test promise           # Promise tests only
 bin/test --wasm            # include wasm32-wasi target
 bin/test --clean           # clear caches first
-bin/verify --local --wasm  # format + vet + all tests (pre-commit check)
+bin/verify --wasm          # format + vet + all tests (pre-commit check)
+bin/verify --shared --wasm # same but using shared ~/.promise cache
 bin/format                 # format Go + Promise code
 bin/vet                    # go vet (excluding generated parser)
 bin/coverage               # Go + Promise test coverage

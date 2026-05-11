@@ -5347,11 +5347,11 @@ func injectStdImport(file *ast.File) *ast.File {
 
 type errorListener struct {
 	antlr.DefaultErrorListener
-	filename string
-	source   string // non-empty for inline mode: show source context
-	wrapped  bool   // if true, adjust line numbers by -1
-	silent   bool   // if true, count errors but suppress output
-	errors   int
+	filename   string
+	source     string // non-empty for inline mode: show source context
+	wrapOffset int    // lines injected before user code (main!() wrapper + extracted uses)
+	silent     bool   // if true, count errors but suppress output
+	errors     int
 }
 
 func (l *errorListener) SyntaxError(
@@ -5364,10 +5364,7 @@ func (l *errorListener) SyntaxError(
 	if !l.silent {
 		if l.source != "" {
 			lines := strings.Split(l.source, "\n")
-			displayLine := line
-			if l.wrapped {
-				displayLine--
-			}
+			displayLine := line - l.wrapOffset
 			fmt.Fprintf(os.Stderr, "%d:%d: %s\n", displayLine, column, msg)
 			printErrorContext(lines, line-1, column)
 		} else {
@@ -5382,6 +5379,37 @@ func (l *errorListener) SyntaxError(
 }
 
 // --- Inline execution ---
+
+// extractUseDecls splits leading use declarations from the remaining source.
+// Returns (useDecls, remainder) where useDecls contains all leading "use ...;"
+// lines joined by newlines, and remainder is the rest of the source.
+func extractUseDecls(source string) (string, string) {
+	var uses []string
+	rest := source
+	for {
+		trimmed := strings.TrimLeft(rest, " \t\n\r")
+		if !strings.HasPrefix(trimmed, "use ") {
+			break
+		}
+		idx := strings.Index(trimmed, ";")
+		if idx < 0 {
+			break
+		}
+		decl := trimmed[:idx+1]
+		// Skip use-var bindings (use x := expr;) — those are statements, not imports.
+		if strings.Contains(decl, ":=") {
+			break
+		}
+		uses = append(uses, strings.TrimSpace(decl))
+		// Advance rest past what we consumed (leading whitespace + use decl).
+		consumed := len(rest) - len(trimmed) + idx + 1
+		rest = rest[consumed:]
+	}
+	if len(uses) == 0 {
+		return "", source
+	}
+	return strings.Join(uses, "\n"), strings.TrimSpace(rest)
+}
 
 // runExec executes inline Promise code from CLI arguments or stdin.
 func runExec(args []string) {
@@ -5440,17 +5468,22 @@ func runExec(args []string) {
 
 	// Try parsing as-is first; if that fails, wrap in main!() and retry.
 	tParse := time.Now()
-	wrapped := false
+	wrapOffset := 0
 	file, ok := tryParseSourceString(source)
 	if !ok {
-		wrappedSource := source
+		// Extract leading use declarations so they stay at file scope.
+		usePrefix, body := extractUseDecls(source)
+		wrappedSource := body
 		if !strings.HasSuffix(wrappedSource, ";") && !strings.HasSuffix(wrappedSource, "}") {
 			wrappedSource += ";"
 		}
 		wrappedSource = "main!() {\n" + wrappedSource + "\n}"
-		wrapped = true
+		if usePrefix != "" {
+			wrappedSource = usePrefix + "\n" + wrappedSource
+		}
+		wrapOffset = 1 // for the main!() { line
 		source = wrappedSource
-		file = parseSourceString(source, wrapped)
+		file = parseSourceString(source, wrapOffset)
 	}
 	timePhase("parse", time.Since(tParse), "")
 
@@ -5496,7 +5529,7 @@ func runExec(args []string) {
 				ut.Check.Milliseconds(), ut.Verify.Milliseconds()))
 	}
 	if len(errs) > 0 {
-		printInlineErrors(source, errs, wrapped)
+		printInlineErrors(source, errs, wrapOffset)
 		os.Exit(1)
 	}
 
@@ -5505,7 +5538,7 @@ func runExec(args []string) {
 	ownerErrs := ownership.Check(file, info)
 	timePhase("ownership", time.Since(tOwner), "")
 	if len(ownerErrs) > 0 {
-		printInlineErrors(source, ownerErrs, wrapped)
+		printInlineErrors(source, ownerErrs, wrapOffset)
 		os.Exit(1)
 	}
 
@@ -5602,10 +5635,10 @@ func tryParseSourceString(source string) (*ast.File, bool) {
 
 // parseSourceString parses Promise source code from a string.
 // Uses inline error formatting with source context display.
-func parseSourceString(source string, wrapped bool) *ast.File {
+func parseSourceString(source string, wrapOffset int) *ast.File {
 	input := antlr.NewInputStream(source)
 
-	el := &errorListener{source: source, wrapped: wrapped}
+	el := &errorListener{source: source, wrapOffset: wrapOffset}
 
 	lexer := parser.NewPromiseLexer(input)
 	lexer.RemoveErrorListeners()
@@ -5624,19 +5657,16 @@ func parseSourceString(source string, wrapped bool) *ast.File {
 
 	file, errs := ast.Build("", tree)
 	if len(errs) > 0 {
-		printInlineErrors(source, errs, wrapped)
+		printInlineErrors(source, errs, wrapOffset)
 		os.Exit(1)
 	}
 	return file
 }
 
 // printInlineErrors formats errors with source context for inline execution.
-func printInlineErrors(source string, errs []error, wrapped bool) {
+func printInlineErrors(source string, errs []error, wrapOffset int) {
 	lines := strings.Split(source, "\n")
-	lineOffset := 0
-	if wrapped {
-		lineOffset = 1
-	}
+	lineOffset := wrapOffset
 
 	for _, e := range errs {
 		var pos ast.Pos

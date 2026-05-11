@@ -709,6 +709,62 @@ func TestExecWrapCode(t *testing.T) {
 	}
 }
 
+func TestExtractUseDecls(t *testing.T) {
+	cases := []struct {
+		name     string
+		source   string
+		wantUses string
+		wantBody string
+	}{
+		{"no_uses", `print_line(42)`, "", `print_line(42)`},
+		{"single_use", `use math; print_line(42)`, "use math;", `print_line(42)`},
+		{"use_with_alias", `use math as m; print_line(42)`, "use math as m;", `print_line(42)`},
+		{"multiple_uses", "use math;\nuse json;\nprint_line(42)", "use math;\nuse json;", `print_line(42)`},
+		{"use_var_binding", `use x := 5; print_line(x)`, "", `use x := 5; print_line(x)`},
+		{"use_no_semicolon", `use math`, "", `use math`},
+		{"use_only", `use math;`, "use math;", ""},
+		{"use_with_leading_whitespace", "  use math; code", "use math;", "code"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotUses, gotBody := extractUseDecls(tc.source)
+			if gotUses != tc.wantUses {
+				t.Errorf("uses: got %q, want %q", gotUses, tc.wantUses)
+			}
+			if gotBody != tc.wantBody {
+				t.Errorf("body: got %q, want %q", gotBody, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestExecWrapCodeWithUseDecls(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+	}{
+		{"use_and_call", `use math; print_line(math.lerp(0.0, 10.0, 0.5).to_string());`},
+		{"use_alias_and_call", `use math as m; print_line(m.lerp(0.0, 10.0, 0.5).to_string());`},
+		{"multi_use", "use math;\nuse json;\nprint_line(math.lerp(0.0, 10.0, 0.5).to_string());"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			usePrefix, body := extractUseDecls(tc.source)
+			if !strings.HasSuffix(body, ";") && !strings.HasSuffix(body, "}") {
+				body += ";"
+			}
+			wrapped := "main!() {\n" + body + "\n}"
+			if usePrefix != "" {
+				wrapped = usePrefix + "\n" + wrapped
+			}
+			errs := parseString(wrapped)
+			if errs != 0 {
+				t.Errorf("wrapped code has parse errors: %s", wrapped)
+			}
+		})
+	}
+}
+
 // --- Module loading integration tests ---
 
 // testModuleLoader creates a moduleLoader for use in tests.

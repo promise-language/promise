@@ -18074,3 +18074,18 @@ func TestDupEnumElementInPlaceForVectorOfEnum(t *testing.T) {
 	assertContains(t, ir, "enumdup.Used")
 	assertContains(t, ir, "enumdup.done")
 }
+
+// B0302: Pushing a vector into a vector-of-vectors must dup the inner vector
+// to ensure exclusive ownership. Without dup, filled() creates aliased pointers
+// that cause double-free on the outer vector's element-level drop.
+func TestVectorPushDupsDroppableElement(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[][] v = [];
+			int[] inner = [1, 2, 3];
+			v.push(inner);
+		}
+	`)
+	// The push should dup the inner vector (vecdup.copy block from dupVector)
+	assertContains(t, ir, "vecdup.copy")
+}

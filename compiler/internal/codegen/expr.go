@@ -3575,6 +3575,11 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		// Each vector must independently own its string elements so that the element
 		// drop loop in Vector.drop doesn't cause double-frees when strings are shared
 		// between vectors (e.g., normalize() where parts[i] is pushed into result).
+		// B0302: Extended to all droppable element types (vectors, channels, heap user
+		// types). Without duplication, pushing the same value multiple times (e.g., in
+		// Vector.filled) creates aliased pointers — the element-level drop on the outer
+		// vector frees the same data N times (double/triple-free). Duplication ensures
+		// each element is independently owned, matching the B0189 string pattern.
 		resolvedElem := elemType
 		if c.typeSubst != nil {
 			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
@@ -3584,9 +3589,56 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 			// Don't clear source drop flag — source retains its string.
 			// Don't claim string temp — original temp is freed normally by cleanup.
 		} else {
-			// Clear drop flag: element is moved into the vector
+			// B0302: When the source is an ident with a drop flag AND the element
+			// type is droppable, use a runtime check: if the flag is still true this
+			// is the first push (move semantics — clear flag). If false, the variable
+			// was already consumed (e.g., in a prior loop iteration of Vector.filled)
+			// — dup the element to avoid aliased pointers that cause double-free.
+			// For idents WITHOUT a drop flag (function params), always dup droppable
+			// types. For non-ident sources (call results), use normal move semantics.
+			dupped := false
 			if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
-				c.clearDropFlag(ident.Name)
+				if flagAlloca, hasFlag := c.dropFlags[ident.Name]; hasFlag {
+					if c.pushElemNeedsDup(resolvedElem) {
+						// Runtime branch: flag=true → first use (move), flag=false → dup
+						flag := c.block.NewLoad(irtypes.I1, flagAlloca)
+						moveBlock := c.newBlock("push.move")
+						dupBlock := c.newBlock("push.dup")
+						mergeBlock := c.newBlock("push.merge")
+						c.block.NewCondBr(flag, moveBlock, dupBlock)
+
+						c.block = moveBlock
+						moveEnd := c.block
+						c.block.NewBr(mergeBlock)
+
+						// Generate dup INSIDE the dup block so the allocation only
+						// happens when the value was already consumed.
+						c.block = dupBlock
+						dupVal := c.maybeDupPushElement(argVal, resolvedElem)
+						dupEnd := c.block
+						c.block.NewBr(mergeBlock)
+
+						c.block = mergeBlock
+						argVal = c.block.NewPhi(
+							ir.NewIncoming(argVal, moveEnd),
+							ir.NewIncoming(dupVal, dupEnd),
+						)
+						dupped = true
+					}
+					c.clearDropFlag(ident.Name)
+				} else {
+					// No drop flag (function parameter): always dup droppable types.
+					if dupVal := c.maybeDupPushElement(argVal, resolvedElem); dupVal != nil {
+						argVal = dupVal
+						dupped = true
+					}
+				}
+			}
+			if !dupped {
+				// Non-ident or non-droppable: clear drop flag as before
+				if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
+					c.clearDropFlag(ident.Name)
+				}
 			}
 			// B0170: claim string temp — ownership transfers to vector
 			c.claimStringTemp(argVal)
@@ -3697,6 +3749,77 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 	default:
 		panic(fmt.Sprintf("codegen: unknown vector method %s", method))
 	}
+}
+
+// pushElemNeedsDup returns true if the element type is a non-string droppable type
+// that would need duplication on push (to prevent aliased pointers). B0302.
+func (c *Compiler) pushElemNeedsDup(resolvedElem types.Type) bool {
+	named := extractNamed(resolvedElem)
+	if named == nil {
+		if en := extractEnum(resolvedElem); en != nil {
+			if _, ok := c.funcs[c.enumCloneFuncName(en, resolvedElem)]; ok {
+				return true
+			}
+			return c.vecElemNeedsEnumDrop(resolvedElem)
+		}
+		return false
+	}
+	if _, isVec := types.AsVector(resolvedElem); isVec || named == types.TypVector {
+		return true
+	}
+	if _, isCh := types.AsChannel(resolvedElem); isCh || named == types.TypChannel {
+		return true
+	}
+	return !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
+}
+
+// maybeDupPushElement checks if a vector element type is a non-string droppable
+// type that needs duplication on push. Returns the duplicated value, or nil if
+// no duplication is needed (primitive/Copy/string types). B0302.
+func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Type) value.Value {
+	named := extractNamed(resolvedElem)
+
+	// Check for droppable enum types (B0244/B0290 pattern)
+	if named == nil {
+		if en := extractEnum(resolvedElem); en != nil {
+			if _, ok := c.funcs[c.enumCloneFuncName(en, resolvedElem)]; ok {
+				cloned, _ := c.cloneEnumValue(argVal, resolvedElem)
+				return cloned
+			}
+			if c.vecElemNeedsEnumDrop(resolvedElem) {
+				// Droppable enum without clone — dup variant fields via alloca round-trip
+				alloca := c.createEntryAlloca(argVal.Type())
+				c.block.NewStore(argVal, alloca)
+				c.dupEnumElementInPlace(alloca, resolvedElem)
+				return c.block.NewLoad(argVal.Type(), alloca)
+			}
+		}
+		return nil // primitive/Copy
+	}
+
+	// Vector element: shallow dup + recursive element clone
+	if innerElem, isVec := types.AsVector(resolvedElem); isVec {
+		innerLLVM := c.resolveType(innerElem)
+		innerSize := int64(c.typeSize(innerLLVM))
+		dup := c.dupVector(argVal, innerSize)
+		c.emitVectorElementCloneLoop(dup, innerElem)
+		return dup
+	}
+	if named == types.TypVector {
+		return c.dupVector(argVal, 0)
+	}
+
+	// Channel element: dup (increment ref count)
+	if _, isCh := types.AsChannel(resolvedElem); isCh || named == types.TypChannel {
+		return c.dupChannel(argVal)
+	}
+
+	// Heap user type with drop: clone via clone method or dupHeapValue fallback
+	if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+		return c.cloneHeapElement(argVal, resolvedElem, named)
+	}
+
+	return nil // value/Copy type — no dup needed
 }
 
 // storeBackSlicePtr stores the new vector pointer back into the variable that holds the vector.

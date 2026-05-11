@@ -27,7 +27,7 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
 
 3. **Verify.**
    - Run the specific new tests first to confirm they pass.
-   - Then run `bin/verify --local --wasm` to confirm nothing else broke.
+   - Then run `bin/verify --wasm` to confirm nothing else broke.
    - If verify fails, fix the issues and re-run until green.
    - **Memory leak check (ZERO TOLERANCE)**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). **The repo has 0 leaks. Any leak in the output is a regression caused by your changes.** Do NOT treat any leak as preexisting — there are none. Fix all leaks before proceeding. Changes that introduce memory leaks will not be pushed.
    - **No `allow_leaks: true` tags — ever.** The repo has 0 `allow_leaks` tags. Never add `allow_leaks: true` to any test. If a test leaks, fix the leak. There are no exceptions.

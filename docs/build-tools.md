@@ -7,7 +7,7 @@ This document describes the Promise compiler's build tooling system. All build t
 ```bash
 ./make        # compile all tools to bin/
 bin/build                       # build the compiler
-bin/verify --local --wasm       # full pre-commit check
+bin/verify --wasm               # full pre-commit check
 ```
 
 The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries into `bin/`. Each binary embeds a hash of the `tools/` source files and refuses to run if the source has changed, prompting you to re-run `./make`.
@@ -17,7 +17,7 @@ The only prerequisite is Go 1.25+. Running `./make` compiles all tool binaries i
 | Binary | Purpose |
 |--------|---------|
 | `bin/build` | Build the compiler binary (`bin/promise`). Handles ANTLR parser generation, resource embedding, LLVM detection, and Go compilation. |
-| `bin/verify` | Pre-commit verification: format, vet, build, and test. Supports `--local`, `--wasm`, `--clean`. |
+| `bin/verify` | Pre-commit verification: format, vet, build, and test. Supports `--shared`, `--wasm`, `--clean`. |
 | `bin/test` | Run test suites. Modes: `go`, `promise`, `all`. Supports `--wasm`, `--clean`. |
 | `bin/format` | Format Go code (`gofmt`) and Promise code (`promise format`). |
 | `bin/vet` | Run `go vet` on compiler packages (excluding generated parser). |
@@ -141,7 +141,8 @@ The verify tool orchestrates the full pre-commit check:
 
 ### Flags
 
-- `--local` — use `.promise-home/` in the repo instead of `~/.promise` (avoids polluting user home)
+- `--local` — use `.promise-home/` in the repo instead of `~/.promise` (default; avoids polluting user home)
+- `--shared` — use `~/.promise` shared cache instead of the local `.promise-home/`
 - `--wasm` — include wasm32-wasi target tests (requires `wasmtime`)
 - `--clean` — clear Go and Promise test caches before running
 

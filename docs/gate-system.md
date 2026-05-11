@@ -191,7 +191,7 @@ The tracker knows each agent's OS and idle status, dispatching to the right targ
 1. Agent commits on macOS, `/commit` skill notifies tracker: "commit `abc123` ready for platform verification"
 2. Tracker creates platform gate runs for each required platform
 3. Tracker dispatches to idle agents on target platforms:
-   - Linux agent: `git pull && bin/verify.sh --local`
+   - Linux agent: `git pull && bin/verify`
    - Windows agent: `git pull && bin\verify.ps1`
 4. Agent runner executes command, returns stdout/stderr to tracker
 5. Tracker parses result, updates gate status

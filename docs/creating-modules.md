@@ -532,7 +532,7 @@ All tests must pass. Check for leaks in the output.
 ### 5.2 Run the full test suite
 
 ```bash
-bin/verify.sh --local --wasm
+bin/verify --wasm
 ```
 
 This runs:
@@ -589,7 +589,7 @@ Update `docs/standard-library.md` with the new module:
 Before committing:
 
 - [ ] All module tests pass (`bin/promise test modules/<name>/`)
-- [ ] Full verify passes (`bin/verify.sh --local --wasm`)
+- [ ] Full verify passes (`bin/verify --wasm`)
 - [ ] WASM target compiles (even if most APIs are excluded via `\`target`)
 - [ ] Stress tests show no flakiness (`bin/promise test -stress 100 modules/<name>/`)
 - [ ] Coverage is adequate (`bin/promise test -coverage modules/<name>/`)

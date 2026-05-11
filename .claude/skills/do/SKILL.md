@@ -40,7 +40,7 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
 
 6. **Verify.**
    - Run the specific new tests first to confirm they pass.
-   - Then run `bin/verify --local --wasm` to confirm nothing else broke.
+   - Then run `bin/verify --wasm` to confirm nothing else broke.
    - If verify fails, fix the issues and re-run until green.
    - **Memory leak check (ZERO TOLERANCE)**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). **The repo has 0 leaks. Any leak in the output is a regression caused by your changes.** Do NOT treat any leak as preexisting — there are none. Fix all leaks before proceeding. Changes that introduce memory leaks will not be pushed.
    - **No `allow_leaks: true` tags — ever.** The repo has 0 `allow_leaks` tags. Never add `allow_leaks: true` to any test. If a test leaks, fix the leak. There are no exceptions.
@@ -48,10 +48,10 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
 7. **Review, test, and commit.**
    - Run `/review` to check your changes for correctness and convention compliance.
    - Run `/coverage` scoped to the changed code to verify test coverage is adequate.
-   - Run `bin/verify --local --wasm` to confirm everything passes.
+   - Run `bin/verify --wasm` to confirm everything passes.
    - Fetch and rebase: `git fetch origin && git rebase origin/master`.
    - If there are rebase conflicts, resolve them.
-   - Run `bin/verify --local --wasm` again to confirm the rebase didn't introduce issues. (No-op rebuilds complete in ~3s.)
+   - Run `bin/verify --wasm` again to confirm the rebase didn't introduce issues. (No-op rebuilds complete in ~3s.)
    - Stage and commit with a concise message including the item ID.
    - **Do NOT push.** The orchestrator handles pushing after independent verification.
    - Mark the task as done: call `mcp__tracker__update` with `status: "done"` and a `summary`.

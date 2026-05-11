@@ -31,7 +31,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - Every behavioral change needs a test. Prefer batch tests (`` `test ``) over snapshot tests.
    - For Go changes: check that `codegen_test.go`, `sema_test.go`, or `ownership_test.go` cover the change.
    - For Promise changes: check for corresponding `*_test.pr` files.
-   - Run `bin/verify --local --wasm` to confirm everything passes.
+   - Run `bin/verify --wasm` to confirm everything passes.
    - **Memory leak check (ZERO TOLERANCE)**: After verify completes, check the output for leak counts. **The repo has 0 leaks. Any leak in the output is a regression caused by the changes under review.** Do NOT treat any leak as preexisting — there are none. Flag any leaks as a blocking issue. Changes that introduce memory leaks will not be pushed.
 
 4. **Check conventions.**

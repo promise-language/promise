@@ -203,3 +203,54 @@ func TestBashRecurse(t *testing.T) {
 		t.Error("expected sh -c echo hello to be allowed")
 	}
 }
+
+func TestCheckStaleAllowsMake(t *testing.T) {
+	// Simulate stale binary by setting sourceHash to a known-bad value.
+	old := sourceHash
+	sourceHash = "stale-hash-for-test"
+	defer func() { sourceHash = old }()
+
+	makeInput := hookInput{ToolName: "Bash"}
+	makeInput.ToolInput.Command = "./make"
+	if reason := checkStale(makeInput); reason != "" {
+		t.Errorf("expected ./make to be allowed when stale, got: %s", reason)
+	}
+
+	makeExeInput := hookInput{ToolName: "Bash"}
+	makeExeInput.ToolInput.Command = "./make.exe"
+	if reason := checkStale(makeExeInput); reason != "" {
+		t.Errorf("expected ./make.exe to be allowed when stale, got: %s", reason)
+	}
+
+	makeArgsInput := hookInput{ToolName: "Bash"}
+	makeArgsInput.ToolInput.Command = "./make --force"
+	if reason := checkStale(makeArgsInput); reason != "" {
+		t.Errorf("expected './make --force' to be allowed when stale, got: %s", reason)
+	}
+
+	otherInput := hookInput{ToolName: "Bash"}
+	otherInput.ToolInput.Command = "git status"
+	if reason := checkStale(otherInput); reason == "" {
+		t.Error("expected non-make command to be blocked when stale")
+	}
+
+	editInput := hookInput{ToolName: "Edit"}
+	editInput.ToolInput.FilePath = "/tmp/foo.go"
+	editInput.ToolInput.NewString = "hello"
+	if reason := checkStale(editInput); reason == "" {
+		t.Error("expected edit to be blocked when stale")
+	}
+}
+
+func TestCheckStaleDevHash(t *testing.T) {
+	// sourceHash == "dev" means running via go run — skip stale check.
+	old := sourceHash
+	sourceHash = "dev"
+	defer func() { sourceHash = old }()
+
+	input := hookInput{ToolName: "Bash"}
+	input.ToolInput.Command = "git status"
+	if reason := checkStale(input); reason != "" {
+		t.Errorf("expected dev hash to skip stale check, got: %s", reason)
+	}
+}

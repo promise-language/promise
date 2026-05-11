@@ -69,11 +69,16 @@ type editGatesConfig struct {
 }
 
 func main() {
-	common.CheckStale(sourceHash)
-
 	var input hookInput
 	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
 		printDeny("guard: failed to parse hook input: " + err.Error())
+		return
+	}
+
+	// Stale check: block most operations when tools source has changed,
+	// but always allow ./make so the agent can rebuild.
+	if reason := checkStale(input); reason != "" {
+		printDeny(reason)
 		return
 	}
 
@@ -108,6 +113,36 @@ func main() {
 		// Unknown tool type — allow (don't block what we don't understand).
 		fmt.Println("{}")
 	}
+}
+
+// checkStale returns a deny reason if the guard binary is stale and the
+// command is not ./make (which must always be allowed so the agent can rebuild).
+func checkStale(input hookInput) string {
+	if sourceHash == "dev" {
+		return ""
+	}
+	root, err := common.FindRoot()
+	if err != nil {
+		return ""
+	}
+	currentHash, err := common.ToolsSourceHash(root)
+	if err != nil {
+		return ""
+	}
+	if sourceHash == currentHash {
+		return ""
+	}
+
+	// Stale — allow ./make and ./make.exe through so the agent can rebuild.
+	if detectTool(input) == "bash" {
+		cmd := strings.TrimSpace(input.ToolInput.Command)
+		if cmd == "./make" || cmd == "./make.exe" ||
+			strings.HasPrefix(cmd, "./make ") || strings.HasPrefix(cmd, "./make.exe ") {
+			return ""
+		}
+	}
+
+	return "guard binary is stale — run ./make to rebuild tools before continuing"
 }
 
 // detectTool determines the tool type from the input fields.
@@ -361,7 +396,7 @@ func findGitSubcommand(tokens []string) string {
 // ── go build checks ─────────────────────────────────────────────────────
 
 const goBuildBlockMsg = "blocked: 'go build' for the Promise compiler. " +
-	"Use ./build (Linux/macOS) or .\\build.ps1 (Windows) instead — " +
+	"Use bin/build (Linux/macOS) or bin\\build.exe (Windows) instead — " +
 	"go build skips resource embedding and produces a broken binary."
 
 func checkGo(tokens []string) string {

@@ -1015,7 +1015,7 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 	}
 
 	sig, ok := calleeType.(*types.Signature)
-	if !ok {
+	if !ok || sig == nil {
 		c.errorf(e.Pos(), "cannot call non-function type %s", calleeType)
 		return nil
 	}
@@ -1464,7 +1464,7 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 		}
 	}
 	// Generic function instantiation: func[Arg]
-	if sig, ok := target.(*types.Signature); ok {
+	if sig, ok := target.(*types.Signature); ok && sig != nil {
 		if len(sig.TypeParams()) > 0 {
 			return c.instantiateGenericFunc(e, sig)
 		}

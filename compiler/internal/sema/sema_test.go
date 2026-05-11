@@ -301,6 +301,22 @@ func TestResolveUndefinedType(t *testing.T) {
 	expectError(t, errs, "undefined type: Unknown")
 }
 
+func TestCallFuncWithUnresolvedParamType(t *testing.T) {
+	errs := checkErrs(t, `
+		f(option[int] a) {}
+		main() { f(1); }
+	`)
+	expectError(t, errs, "undefined type: option")
+}
+
+func TestIndexFuncWithUnresolvedParamType(t *testing.T) {
+	errs := checkErrs(t, `
+		f(option[int] a) {}
+		main() { f[int]; }
+	`)
+	expectError(t, errs, "undefined type: option")
+}
+
 func TestResolveGenericInstantiation(t *testing.T) {
 	checkOK(t, `
 		type Box[T] { T value; }

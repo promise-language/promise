@@ -1,12 +1,10 @@
 #!/bin/sh
-# Reject commits that include compiled binaries.
-
-BLOCKED_FILES="compiler/promise bin/promise"
-
-for f in $BLOCKED_FILES; do
-    if git diff --cached --name-only | grep -qx "$f"; then
-        echo "ERROR: staged file '$f' is a compiled binary — remove it from the commit."
-        echo "  git reset HEAD $f"
-        exit 1
-    fi
-done
+# Trampoline: delegates to the Go-based pre-commit tool.
+# All hook logic lives in bin/precommit (compiled by ./make).
+root="$(git rev-parse --show-toplevel)"
+hook="$root/bin/precommit"
+if [ ! -x "$hook" ]; then
+    echo "pre-commit: bin/precommit not found — run ./make first" >&2
+    exit 1
+fi
+exec "$hook" "$@"

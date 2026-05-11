@@ -65,3 +65,6 @@ bin/vet.exe~
 bin/guard
 bin/guard.exe
 bin/guard.exe~
+bin/precommit
+bin/precommit.exe
+bin/precommit.exe~

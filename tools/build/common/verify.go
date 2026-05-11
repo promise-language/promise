@@ -171,7 +171,7 @@ func RunVerify(root string, args []string) error {
 		return fmt.Errorf("%s failed", strings.Join(failures, ", "))
 	}
 
-	fmt.Println("OK to commit")
+	fmt.Println("✅ OK to commit")
 	return nil
 }
 

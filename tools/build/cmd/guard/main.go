@@ -1,15 +1,15 @@
-// guard.go — Claude Code PreToolUse hook for blocking dangerous operations.
+// Command guard is a Claude Code PreToolUse hook that blocks dangerous operations.
 //
-// Handles three tool types:
+// It handles three tool types:
 //   - Bash: blocks dangerous shell commands (git push, rm -rf, etc.)
 //   - Edit: blocks forbidden patterns in file edits (e.g., allow_leaks in .pr files)
 //   - Write: blocks forbidden patterns in file writes
 //
 // Edit/Write gates are defined in tools/gates/edit_gates.json.
 //
-// Usage (via hook config):
+// Compiled by ./make into bin/guard. Invoked via hook config:
 //
-//	"command": "go run tools/guard/guard.go || exit 2"
+//	"command": "$(git rev-parse --show-toplevel)/bin/guard || exit 2"
 //
 // The || exit 2 provides fail-closed behavior: if the guard crashes,
 // exit 2 tells the hook system to block the command.
@@ -23,7 +23,11 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/p5e-ia/promise-lang/tools/build/common"
 )
+
+var sourceHash = "dev"
 
 // hookInput is the JSON structure Claude Code sends to PreToolUse hooks.
 // Fields vary by tool type — we decode all possible fields and detect the tool.
@@ -65,6 +69,8 @@ type editGatesConfig struct {
 }
 
 func main() {
+	common.CheckStale(sourceHash)
+
 	var input hookInput
 	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
 		printDeny("guard: failed to parse hook input: " + err.Error())

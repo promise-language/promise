@@ -62,3 +62,6 @@ bin/verify.exe~
 bin/vet
 bin/vet.exe
 bin/vet.exe~
+bin/guard
+bin/guard.exe
+bin/guard.exe~

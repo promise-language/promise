@@ -13789,6 +13789,21 @@ func TestSliceAssignVector(t *testing.T) {
 	assertContains(t, ir, `call void @"Vector[int].[:]=`)
 }
 
+func TestSliceAssignVectorDropsSourceBacking(t *testing.T) {
+	// B0313: After slice assign, the source vector's backing array must be freed
+	// via Vector.drop before clearing its drop flag.
+	ir := generateIR(t, `
+		main() {
+			string[] src = ["hello"];
+			string[] v = ["a", "b", "c"];
+			v[0:1] = src;
+		}
+	`)
+	assertContains(t, ir, `call void @"Vector[string].[:]=`)
+	// B0313: Vector.drop must follow the [:]=  call (shallow free of src backing).
+	assertContainsMatch(t, ir, `(?s)Vector\[string\]\.\[:\]=.*?call void @Vector\.drop`)
+}
+
 func TestUserDefinedIndexOperator(t *testing.T) {
 	// User-defined type with [] operator method
 	ir := generateIR(t, `

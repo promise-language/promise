@@ -3825,6 +3825,21 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 		c.genSliceAssign(target, val)
 		if s.Op == ast.OpAssign {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				// B0313: Free the source vector's backing array before
+				// clearing the drop flag. The [:]=  method borrows elements
+				// (creating raw pointer aliases in the target), so we must
+				// skip individual element drops to avoid double-free. But
+				// the backing array is a separate allocation that leaks if
+				// we only clear the drop flag.
+				rhsType := c.info.Types[s.Value]
+				if c.typeSubst != nil {
+					rhsType = types.Substitute(rhsType, c.typeSubst)
+				}
+				if _, isVec := types.AsVector(rhsType); isVec {
+					alloca := c.locals[ident.Name]
+					srcPtr := c.block.NewLoad(irtypes.I8Ptr, alloca)
+					c.block.NewCall(c.funcs["Vector.drop"], srcPtr)
+				}
 				c.clearDropFlag(ident.Name)
 			}
 			// B0312: When RHS is opt!, neutralize the source optional so its

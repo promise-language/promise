@@ -68,3 +68,6 @@ bin/guard.exe~
 bin/precommit
 bin/precommit.exe
 bin/precommit.exe~
+bin/commitgate
+bin/commitgate.exe
+bin/commitgate.exe~

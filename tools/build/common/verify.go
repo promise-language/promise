@@ -126,6 +126,7 @@ func RunVerify(root string, args []string) error {
 	}
 
 	// 8. Promise tests (wasm)
+	var wasmOutput string
 	var wasmElapsed time.Duration
 	if wasm {
 		if Which("wasmtime") == "" {
@@ -133,7 +134,8 @@ func RunVerify(root string, args []string) error {
 		}
 		fmt.Println("\nRunning promise tests (wasm32-wasi)...")
 		wasmStart := time.Now()
-		wasmOutput, wasmErr := RunPromiseTests(root, "wasm32-wasi")
+		var wasmErr error
+		wasmOutput, wasmErr = RunPromiseTests(root, "wasm32-wasi")
 		ReportTestHealth(root, "wasm32-wasi", wasmOutput)
 		if wasmErr != nil {
 			failures = append(failures, "promise tests (wasm32-wasi)")
@@ -169,6 +171,25 @@ func RunVerify(root string, args []string) error {
 	if len(failures) > 0 {
 		fmt.Printf("FAILED: %s\n", strings.Join(failures, ", "))
 		return fmt.Errorf("%s failed", strings.Join(failures, ", "))
+	}
+
+	// 10. Write verify summary sidecar for commit gate.
+	verifySummary := &VerifySummary{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Targets:   make(map[string]TargetSummary),
+	}
+	if s := ParseTestSummaryLine(hostOutput); s != nil {
+		s.ElapsedMs = float64(hostElapsed.Milliseconds())
+		verifySummary.Targets[hostTarget] = *s
+	}
+	if wasm {
+		if s := ParseTestSummaryLine(wasmOutput); s != nil {
+			s.ElapsedMs = float64(wasmElapsed.Milliseconds())
+			verifySummary.Targets["wasm32-wasi"] = *s
+		}
+	}
+	if err := WriteVerifySummary(root, verifySummary); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write verify summary: %v\n", err)
 	}
 
 	fmt.Println("✅ OK to commit")

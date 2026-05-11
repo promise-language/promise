@@ -219,6 +219,10 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					if extractNamed(exprType) == types.TypString && !isRefType(exprType) {
 						c.dupStringFieldAccess = true
 					}
+					// B0310: Also set dup flag for Optional[string] fields.
+					if opt, ok := exprType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
+						c.dupStringFieldAccess = true
+					}
 					// B0219: Signal genFieldAccess to dup vector/channel fields for block results.
 					if (types.IsVector(exprType) || types.IsChannel(exprType)) && !isRefType(exprType) {
 						c.dupContainerFieldAccess = true
@@ -566,6 +570,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if extractNamed(resolvedExprType) == types.TypString && !isRefType(resolvedExprType) {
 		c.dupStringFieldAccess = true
 	}
+	// B0310: Also set dup flag for Optional[string] fields.
+	if opt, ok := resolvedExprType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
+		c.dupStringFieldAccess = true
+	}
 	// B0219: Signal genFieldAccess to dup vector/channel fields from droppable types.
 	if (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType)) && !isRefType(resolvedExprType) {
 		c.dupContainerFieldAccess = true
@@ -588,6 +596,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 				c.claimStringTemp(val)
 			}
 		}
+	}
+	// B0310: Claim dup'd inner string for Optional[string] field access.
+	if c.optionalStringDup != nil {
+		c.claimStringTemp(c.optionalStringDup)
+		c.optionalStringDup = nil
 	}
 
 	// Wrap value in Optional if declared type is Optional but expr is not
@@ -760,6 +773,10 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if extractNamed(typ) == types.TypString && !isRefType(typ) {
 		c.dupStringFieldAccess = true
 	}
+	// B0310: Also set dup flag for Optional[string] fields.
+	if opt, ok := typ.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
+		c.dupStringFieldAccess = true
+	}
 	// B0219: Signal genFieldAccess to dup vector/channel fields from droppable types.
 	if (types.IsVector(typ) || types.IsChannel(typ)) && !isRefType(typ) {
 		c.dupContainerFieldAccess = true
@@ -800,6 +817,11 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// T0073: Claim string temp — ownership transferred to this variable.
 	if extractNamed(typ) == types.TypString {
 		c.claimStringTemp(val)
+	}
+	// B0310: Claim dup'd inner string for Optional[string] field access.
+	if c.optionalStringDup != nil {
+		c.claimStringTemp(c.optionalStringDup)
+		c.optionalStringDup = nil
 	}
 	// B0219: Claim vector/channel temp — ownership transferred to this variable.
 	if types.IsVector(typ) || types.IsChannel(typ) {
@@ -4231,6 +4253,10 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		// field — the caller needs an independent copy.
 		// B0179: Skip for borrow return types — borrows don't own the value.
 		if extractNamed(retType) == types.TypString && !isRefType(retType) {
+			c.dupStringFieldAccess = true
+		}
+		// B0310: Also set dup flag for Optional[string] return values.
+		if opt, ok := retType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
 			c.dupStringFieldAccess = true
 		}
 		// B0219: Signal genFieldAccess to dup vector/channel fields for return values.

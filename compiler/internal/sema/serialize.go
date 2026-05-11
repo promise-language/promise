@@ -590,7 +590,9 @@ func (c *Checker) buildDecodeFieldMatchChain(entries []decodeField) ast.Stmt {
 
 			var indexExpr ast.Expr
 			if keyType == types.TypString {
-				indexExpr = &ast.OptionalUnwrapExpr{Expr: ident(mkVar)}
+				// Use elvis (?:) instead of unwrap (!) to properly clear the
+				// optional's drop flag — prevents use-after-free (B0306).
+				indexExpr = &ast.BinaryExpr{Left: ident(mkVar), Op: ast.BinElvis, Right: strLit("")}
 			} else {
 				keyTypeName := ""
 				if n, ok := keyType.(*types.Named); ok {

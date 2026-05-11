@@ -75,11 +75,10 @@ test_filled_factory_zero_count() `test {
   assert(v.len == 0, "empty");
 }
 
-// B0307: Vector[Vector[T]].filled() double-frees the value parameter.
-// test_nested_filled_factory() `test {
-//   inner := int[].filled(value: 1, count: 3);
-//   v := int[][].filled(value: inner, count: 2);
-//   assert(v.len == 2, "outer len = 2");
-//   assert(v[0].len == 3, "inner len = 3");
-//   assert(v[0][0] == 1, "inner value = 1");
-// }
+test_nested_filled_factory() `test {
+  inner := int[].filled(value: 1, count: 3);
+  v := int[][].filled(value: inner, count: 2);
+  assert(v.len == 2, "outer len = 2");
+  assert(v[0].len == 3, "inner len = 3");
+  assert(v[0][0] == 1, "inner value = 1");
+}

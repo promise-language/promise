@@ -2231,39 +2231,504 @@ func (p *WindowsPAL) EmitStackOverflowThreadInit(module *ir.Module) *ir.Func {
 	return emitStubStackOverflowThreadInit(module)
 }
 
-// Windows socket stubs — return -ENOSYS (T0069).
-// Real Winsock2 implementation deferred to a follow-up task.
+// --- Windows Winsock2 socket primitives (T0069) ---
+//
+// Windows sockets use Winsock2 (ws2_32.lib). Key differences from POSIX:
+//   - SOCKET type is UINT_PTR (i64 on x64), not int
+//   - INVALID_SOCKET = ~0 (all bits set), SOCKET_ERROR = -1
+//   - Errors via WSAGetLastError(), not errno
+//   - closesocket() instead of close()
+//   - ioctlsocket(FIONBIO) instead of fcntl(O_NONBLOCK)
+//   - send/recv take int (i32) length, not size_t (i64)
+//   - WSAStartup() required before any Winsock call
+
+// getOrDeclareWSAGetLastError returns the WSAGetLastError function.
+// Signature: () → i32
+func (p *WindowsPAL) getOrDeclareWSAGetLastError(module *ir.Module) *ir.Func {
+	return getOrDeclareFunc(module, "WSAGetLastError", irtypes.I32)
+}
+
+// emitNegWSAErrorReturnI32 emits a block that calls WSAGetLastError() and returns -error (i32).
+func (p *WindowsPAL) emitNegWSAErrorReturnI32(errBlk *ir.Block, wsaErrFn *ir.Func) {
+	errCode := errBlk.NewCall(wsaErrFn)
+	neg := errBlk.NewSub(constant.NewInt(irtypes.I32, 0), errCode)
+	errBlk.NewRet(neg)
+}
+
+// emitNegWSAErrorReturnI64 emits a block that calls WSAGetLastError() and returns -error as i64.
+func (p *WindowsPAL) emitNegWSAErrorReturnI64(errBlk *ir.Block, wsaErrFn *ir.Func) {
+	errCode := errBlk.NewCall(wsaErrFn)
+	ext := errBlk.NewSExt(errCode, irtypes.I64)
+	neg := errBlk.NewSub(constant.NewInt(irtypes.I64, 0), ext)
+	errBlk.NewRet(neg)
+}
+
+// emitWSAEnsureInit emits a call to a lazily-created WSAStartup guard function.
+// The guard uses a global flag to call WSAStartup(MAKEWORD(2,2)) at most once.
+// WSAStartup is itself thread-safe and idempotent, so a simple flag check suffices.
+func (p *WindowsPAL) emitWSAEnsureInit(module *ir.Module, block *ir.Block) {
+	initFn := lookupFunc(module, "__pal_wsa_ensure_init")
+	if initFn != nil {
+		block.NewCall(initFn)
+		return
+	}
+
+	// Declare WSAStartup(i32 wVersionRequested, i8* lpWSAData) → i32
+	wsaStartup := getOrDeclareFunc(module, "WSAStartup", irtypes.I32,
+		ir.NewParam("wVersionRequested", irtypes.I32),
+		ir.NewParam("lpWSAData", irtypes.I8Ptr))
+
+	// Global flag: 0 = not initialized, 1 = initialized
+	wsaInitDone := module.NewGlobalDef("__wsa_init_done", constant.NewInt(irtypes.I32, 0))
+	wsaInitDone.Immutable = false
+
+	// Global buffer for WSADATA struct (512 bytes, more than enough for any arch)
+	wsaDataType := irtypes.NewArray(512, irtypes.I8)
+	wsaDataGlobal := module.NewGlobalDef("__wsa_data", constant.NewZeroInitializer(wsaDataType))
+	wsaDataGlobal.Immutable = false
+
+	initFn = module.NewFunc("__pal_wsa_ensure_init", irtypes.Void)
+	initFn.FuncAttrs = append(initFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := initFn.NewBlock(".entry")
+
+	done := entry.NewLoad(irtypes.I32, wsaInitDone)
+	needInit := entry.NewICmp(enum.IPredEQ, done, constant.NewInt(irtypes.I32, 0))
+	doInitBlk := initFn.NewBlock(".do_init")
+	doneBlk := initFn.NewBlock(".done")
+	entry.NewCondBr(needInit, doInitBlk, doneBlk)
+
+	// WSAStartup(0x0202, &__wsa_data)
+	wsaDataPtr := doInitBlk.NewBitCast(wsaDataGlobal, irtypes.I8Ptr)
+	doInitBlk.NewCall(wsaStartup, constant.NewInt(irtypes.I32, 0x0202), wsaDataPtr)
+	doInitBlk.NewStore(constant.NewInt(irtypes.I32, 1), wsaInitDone)
+	doInitBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+
+	block.NewCall(initFn)
+}
+
+// EmitSocketCreate declares Winsock2 @socket and defines @pal_socket_create.
+// Winsock socket() returns SOCKET (i64); we truncate to i32 on success.
+// Signature: @pal_socket_create(i32 domain, i32 type, i32 protocol) → i32 (fd or -WSAError)
 func (p *WindowsPAL) EmitSocketCreate(module *ir.Module) *ir.Func {
-	return emitStubSocketCreate(module)
+	// Winsock: SOCKET socket(int af, int type, int protocol) — returns i64 on x64
+	socketFn := getOrDeclareFunc(module, "socket", irtypes.I64,
+		ir.NewParam("af", irtypes.I32),
+		ir.NewParam("type", irtypes.I32),
+		ir.NewParam("protocol", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_create", irtypes.I32,
+		ir.NewParam("domain", irtypes.I32),
+		ir.NewParam("typ", irtypes.I32),
+		ir.NewParam("protocol", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	p.emitWSAEnsureInit(module, entry)
+
+	ret := entry.NewCall(socketFn, fn.Params[0], fn.Params[1], fn.Params[2])
+	// INVALID_SOCKET = ~0 (0xFFFFFFFFFFFFFFFF)
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I64, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	// Truncate SOCKET (i64) to i32 — safe for typical handle values
+	truncated := okBlk.NewTrunc(ret, irtypes.I32)
+	okBlk.NewRet(truncated)
+	return fn
 }
-func (p *WindowsPAL) EmitSocketBind(module *ir.Module) *ir.Func { return emitStubSocketBind(module) }
+
+// EmitSocketBind declares Winsock2 @bind and defines @pal_socket_bind.
+// Signature: @pal_socket_bind(i32 fd, i8* addr, i32 addrlen) → i32 (0 or -WSAError)
+func (p *WindowsPAL) EmitSocketBind(module *ir.Module) *ir.Func {
+	bindFn := getOrDeclareFunc(module, "bind", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("namelen", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_bind", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	ret := entry.NewCall(bindFn, sock, fn.Params[1], fn.Params[2])
+
+	// SOCKET_ERROR = -1
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitSocketListen declares Winsock2 @listen and defines @pal_socket_listen.
+// Signature: @pal_socket_listen(i32 fd, i32 backlog) → i32 (0 or -WSAError)
 func (p *WindowsPAL) EmitSocketListen(module *ir.Module) *ir.Func {
-	return emitStubSocketListen(module)
+	listenFn := getOrDeclareFunc(module, "listen", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("backlog", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_listen", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("backlog", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	ret := entry.NewCall(listenFn, sock, fn.Params[1])
+
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
 }
+
+// EmitSocketAccept declares Winsock2 @accept and defines @pal_socket_accept.
+// Winsock accept() returns SOCKET (i64); we truncate to i32 on success.
+// Signature: @pal_socket_accept(i32 fd, i8* addr, i32* addrlen) → i32 (fd or -WSAError)
 func (p *WindowsPAL) EmitSocketAccept(module *ir.Module) *ir.Func {
-	return emitStubSocketAccept(module)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	acceptFn := getOrDeclareFunc(module, "accept", irtypes.I64,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", i32PtrType))
+
+	fn := module.NewFunc("pal_socket_accept", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	ret := entry.NewCall(acceptFn, sock, fn.Params[1], fn.Params[2])
+
+	// INVALID_SOCKET = ~0
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I64, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	truncated := okBlk.NewTrunc(ret, irtypes.I32)
+	okBlk.NewRet(truncated)
+	return fn
 }
+
+// EmitSocketConnect declares Winsock2 @connect and defines @pal_socket_connect.
+// Signature: @pal_socket_connect(i32 fd, i8* addr, i32 addrlen) → i32 (0 or -WSAError)
 func (p *WindowsPAL) EmitSocketConnect(module *ir.Module) *ir.Func {
-	return emitStubSocketConnect(module)
+	connectFn := getOrDeclareFunc(module, "connect", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("namelen", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_connect", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	ret := entry.NewCall(connectFn, sock, fn.Params[1], fn.Params[2])
+
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
 }
-func (p *WindowsPAL) EmitSocketSend(module *ir.Module) *ir.Func  { return emitStubSocketSend(module) }
-func (p *WindowsPAL) EmitSocketRecv(module *ir.Module) *ir.Func  { return emitStubSocketRecv(module) }
-func (p *WindowsPAL) EmitSocketClose(module *ir.Module) *ir.Func { return emitStubSocketClose(module) }
+
+// EmitSocketSend declares Winsock2 @send and defines @pal_socket_send.
+// Winsock send() takes int (i32) length and returns int; PAL uses i64 for both.
+// Signature: @pal_socket_send(i32 fd, i8* buf, i64 len, i32 flags) → i64 (bytes or -WSAError)
+func (p *WindowsPAL) EmitSocketSend(module *ir.Module) *ir.Func {
+	// Winsock: int send(SOCKET s, const char* buf, int len, int flags)
+	sendFn := getOrDeclareFunc(module, "send", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I32),
+		ir.NewParam("flags", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_send", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("flags", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	// Truncate i64 len to i32 for Winsock send()
+	len32 := entry.NewTrunc(fn.Params[2], irtypes.I32)
+	ret := entry.NewCall(sendFn, sock, fn.Params[1], len32, fn.Params[3])
+
+	// SOCKET_ERROR = -1
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI64(errBlk, p.getOrDeclareWSAGetLastError(module))
+	// Sign-extend i32 result to i64
+	result := okBlk.NewSExt(ret, irtypes.I64)
+	okBlk.NewRet(result)
+	return fn
+}
+
+// EmitSocketRecv declares Winsock2 @recv and defines @pal_socket_recv.
+// Winsock recv() takes int (i32) length and returns int; PAL uses i64 for both.
+// Signature: @pal_socket_recv(i32 fd, i8* buf, i64 len, i32 flags) → i64 (bytes or -WSAError)
+func (p *WindowsPAL) EmitSocketRecv(module *ir.Module) *ir.Func {
+	// Winsock: int recv(SOCKET s, char* buf, int len, int flags)
+	recvFn := getOrDeclareFunc(module, "recv", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I32),
+		ir.NewParam("flags", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_recv", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("flags", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	len32 := entry.NewTrunc(fn.Params[2], irtypes.I32)
+	ret := entry.NewCall(recvFn, sock, fn.Params[1], len32, fn.Params[3])
+
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI64(errBlk, p.getOrDeclareWSAGetLastError(module))
+	result := okBlk.NewSExt(ret, irtypes.I64)
+	okBlk.NewRet(result)
+	return fn
+}
+
+// EmitSocketClose declares Winsock2 @closesocket and defines @pal_socket_close.
+// Signature: @pal_socket_close(i32 fd) → i32 (0 or -WSAError)
+func (p *WindowsPAL) EmitSocketClose(module *ir.Module) *ir.Func {
+	// Winsock: int closesocket(SOCKET s)
+	closesocketFn := getOrDeclareFunc(module, "closesocket", irtypes.I32,
+		ir.NewParam("s", irtypes.I64))
+
+	fn := module.NewFunc("pal_socket_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	ret := entry.NewCall(closesocketFn, sock)
+
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitSocketSetOpt declares Winsock2 @setsockopt and defines @pal_socket_setopt.
+// Signature: @pal_socket_setopt(i32 fd, i32 level, i32 opt, i8* val, i32 len) → i32 (0 or -WSAError)
 func (p *WindowsPAL) EmitSocketSetOpt(module *ir.Module) *ir.Func {
-	return emitStubSocketSetOpt(module)
+	setsockoptFn := getOrDeclareFunc(module, "setsockopt", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("level", irtypes.I32),
+		ir.NewParam("optname", irtypes.I32),
+		ir.NewParam("optval", irtypes.I8Ptr),
+		ir.NewParam("optlen", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_setopt", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("level", irtypes.I32),
+		ir.NewParam("opt", irtypes.I32),
+		ir.NewParam("val", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	ret := entry.NewCall(setsockoptFn, sock, fn.Params[1], fn.Params[2], fn.Params[3], fn.Params[4])
+
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
 }
+
+// EmitSocketShutdown declares Winsock2 @shutdown and defines @pal_socket_shutdown.
+// Signature: @pal_socket_shutdown(i32 fd, i32 how) → i32 (0 or -WSAError)
 func (p *WindowsPAL) EmitSocketShutdown(module *ir.Module) *ir.Func {
-	return emitStubSocketShutdown(module)
+	shutdownFn := getOrDeclareFunc(module, "shutdown", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("how", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_shutdown", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("how", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	ret := entry.NewCall(shutdownFn, sock, fn.Params[1])
+
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
 }
+
+// EmitSocketSetNonBlock defines @pal_socket_set_nonblock using ioctlsocket(FIONBIO).
+// Signature: @pal_socket_set_nonblock(i32 fd) → i32 (0 or -WSAError)
 func (p *WindowsPAL) EmitSocketSetNonBlock(module *ir.Module) *ir.Func {
-	return emitStubSocketSetNonBlock(module)
+	// Winsock: int ioctlsocket(SOCKET s, long cmd, u_long* argp)
+	// On Windows x64, long is still 32-bit (LLP64 model)
+	ioctlsocketFn := getOrDeclareFunc(module, "ioctlsocket", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("cmd", irtypes.I32),
+		ir.NewParam("argp", irtypes.NewPointer(irtypes.I32)))
+
+	fn := module.NewFunc("pal_socket_set_nonblock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+
+	// Stack-allocate u_long flag = 1 (enable non-blocking)
+	flag := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 1), flag)
+
+	// FIONBIO = 0x8004667e — bit 31 set, so use signed i32 representation
+	// 0x8004667e as signed i32 = -2147195266
+	fionbioConst := constant.NewInt(irtypes.I32, -2147195266)
+	ret := entry.NewCall(ioctlsocketFn, sock, fionbioConst, flag)
+
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
 }
+
+// EmitSocketGetError defines @pal_socket_get_error using getsockopt(SOL_SOCKET, SO_ERROR).
+// Windows constants: SOL_SOCKET = 0xFFFF, SO_ERROR = 0x1007 (same as macOS).
+// Signature: @pal_socket_get_error(i32 fd) → i32 (errno value, 0 = no error, or -WSAError on failure)
 func (p *WindowsPAL) EmitSocketGetError(module *ir.Module) *ir.Func {
-	return emitStubSocketGetError(module)
+	getsockoptFn := getOrDeclareFunc(module, "getsockopt", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("level", irtypes.I32),
+		ir.NewParam("optname", irtypes.I32),
+		ir.NewParam("optval", irtypes.I8Ptr),
+		ir.NewParam("optlen", irtypes.NewPointer(irtypes.I32)))
+
+	// Windows: SOL_SOCKET = 0xFFFF, SO_ERROR = 0x1007
+	const solSocket = 0xFFFF
+	const soError = 0x1007
+
+	fn := module.NewFunc("pal_socket_get_error", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+
+	// Stack-allocate i32 for error value and i32 for optlen
+	errVal := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), errVal)
+	optLen := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 4), optLen) // sizeof(int)
+
+	errValPtr := entry.NewBitCast(errVal, irtypes.I8Ptr)
+	ret := entry.NewCall(getsockoptFn, sock,
+		constant.NewInt(irtypes.I32, solSocket),
+		constant.NewInt(irtypes.I32, soError),
+		errValPtr, optLen)
+
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	result := okBlk.NewLoad(irtypes.I32, errVal)
+	okBlk.NewRet(result)
+	return fn
 }
-func (p *WindowsPAL) EmitGetAddrInfo(module *ir.Module) *ir.Func { return emitStubGetAddrInfo(module) }
+
+// EmitGetAddrInfo declares Winsock2 @getaddrinfo and defines @pal_getaddrinfo.
+// Signature: @pal_getaddrinfo(i8* host, i8* port, i8* hints, i8** result) → i32 (0 or EAI_* error)
+func (p *WindowsPAL) EmitGetAddrInfo(module *ir.Module) *ir.Func {
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	getaddrinfoFn := getOrDeclareFunc(module, "getaddrinfo", irtypes.I32,
+		ir.NewParam("node", irtypes.I8Ptr),
+		ir.NewParam("service", irtypes.I8Ptr),
+		ir.NewParam("hints", irtypes.I8Ptr),
+		ir.NewParam("res", i8PtrPtrType))
+
+	fn := module.NewFunc("pal_getaddrinfo", irtypes.I32,
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("port", irtypes.I8Ptr),
+		ir.NewParam("hints", irtypes.I8Ptr),
+		ir.NewParam("result", i8PtrPtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	p.emitWSAEnsureInit(module, entry)
+
+	ret := entry.NewCall(getaddrinfoFn, fn.Params[0], fn.Params[1], fn.Params[2], fn.Params[3])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitFreeAddrInfo declares Winsock2 @freeaddrinfo and defines @pal_freeaddrinfo.
+// Signature: @pal_freeaddrinfo(i8* result) → void
 func (p *WindowsPAL) EmitFreeAddrInfo(module *ir.Module) *ir.Func {
-	return emitStubFreeAddrInfo(module)
+	freeaddrinfoFn := getOrDeclareFunc(module, "freeaddrinfo", irtypes.Void,
+		ir.NewParam("res", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_freeaddrinfo", irtypes.Void,
+		ir.NewParam("result", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewCall(freeaddrinfoFn, fn.Params[0])
+	entry.NewRet(nil)
+	return fn
 }
 
 // EmitGetCwd declares UCRT @_getcwd and defines @pal_getcwd.

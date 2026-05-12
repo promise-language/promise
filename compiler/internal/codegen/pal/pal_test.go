@@ -3130,7 +3130,208 @@ func TestSocketCreateWindows(t *testing.T) {
 	if fn.Name() != "pal_socket_create" {
 		t.Errorf("expected pal_socket_create, got %s", fn.Name())
 	}
-	assertContains(t, out, "ret i32 -38", "Windows stub returns -ENOSYS")
+	assertContains(t, out, "declare i64 @socket(i32", "Winsock socket() returns SOCKET (i64)")
+	assertContains(t, out, "define i32 @pal_socket_create(i32 %domain, i32 %typ, i32 %protocol)", "definition")
+	assertContains(t, out, "call i64 @socket(", "calls socket() returning i64")
+	assertContains(t, out, "icmp eq i64", "checks INVALID_SOCKET")
+	assertContains(t, out, "trunc i64", "truncates SOCKET to i32")
+	assertContains(t, out, "@WSAGetLastError()", "calls WSAGetLastError on error")
+	assertContains(t, out, "@__pal_wsa_ensure_init()", "calls WSA init")
+}
+
+func TestSocketBindWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitSocketBind(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_bind" {
+		t.Errorf("expected pal_socket_bind, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_socket_bind(i32 %fd, i8* %addr, i32 %addrlen)", "definition")
+	assertContains(t, out, "zext i32", "zero-extends fd to SOCKET")
+	assertContains(t, out, "call i32 @bind(i64", "calls bind() with SOCKET param")
+	assertContains(t, out, "@WSAGetLastError()", "calls WSAGetLastError on error")
+}
+
+func TestSocketListenWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitSocketListen(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_listen" {
+		t.Errorf("expected pal_socket_listen, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_socket_listen(i32 %fd, i32 %backlog)", "definition")
+	assertContains(t, out, "call i32 @listen(i64", "calls listen() with SOCKET param")
+}
+
+func TestSocketAcceptWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitSocketAccept(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_accept" {
+		t.Errorf("expected pal_socket_accept, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_socket_accept(i32 %fd, i8* %addr, i32* %addrlen)", "definition")
+	assertContains(t, out, "call i64 @accept(i64", "calls accept() returning SOCKET")
+	assertContains(t, out, "trunc i64", "truncates SOCKET to i32")
+}
+
+func TestSocketConnectWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitSocketConnect(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_connect" {
+		t.Errorf("expected pal_socket_connect, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_socket_connect(i32 %fd, i8* %addr, i32 %addrlen)", "definition")
+	assertContains(t, out, "call i32 @connect(i64", "calls connect() with SOCKET param")
+}
+
+func TestSocketSendRecvWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	sendFn := p.EmitSocketSend(module)
+	recvFn := p.EmitSocketRecv(module)
+	out := module.String()
+
+	if sendFn.Name() != "pal_socket_send" {
+		t.Errorf("expected pal_socket_send, got %s", sendFn.Name())
+	}
+	if recvFn.Name() != "pal_socket_recv" {
+		t.Errorf("expected pal_socket_recv, got %s", recvFn.Name())
+	}
+	// Winsock send/recv take i32 len (not i64 like POSIX)
+	assertContains(t, out, "define i64 @pal_socket_send(i32 %fd, i8* %buf, i64 %len, i32 %flags)", "send definition")
+	assertContains(t, out, "define i64 @pal_socket_recv(i32 %fd, i8* %buf, i64 %len, i32 %flags)", "recv definition")
+	assertContains(t, out, "trunc i64 %len to i32", "truncates len for Winsock")
+	assertContains(t, out, "sext i32", "sign-extends i32 result to i64")
+}
+
+func TestSocketCloseWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitSocketClose(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_close" {
+		t.Errorf("expected pal_socket_close, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_socket_close(i32 %fd)", "definition")
+	assertContains(t, out, "call i32 @closesocket(i64", "calls closesocket() not close()")
+}
+
+func TestSocketSetOptWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitSocketSetOpt(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_setopt" {
+		t.Errorf("expected pal_socket_setopt, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_socket_setopt(i32 %fd, i32 %level, i32 %opt, i8* %val, i32 %len)", "definition")
+	assertContains(t, out, "call i32 @setsockopt(i64", "calls setsockopt() with SOCKET param")
+}
+
+func TestSocketShutdownWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitSocketShutdown(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_shutdown" {
+		t.Errorf("expected pal_socket_shutdown, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_socket_shutdown(i32 %fd, i32 %how)", "definition")
+	assertContains(t, out, "call i32 @shutdown(i64", "calls shutdown() with SOCKET param")
+}
+
+func TestSocketSetNonBlockWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitSocketSetNonBlock(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_set_nonblock" {
+		t.Errorf("expected pal_socket_set_nonblock, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_socket_set_nonblock(i32 %fd)", "definition")
+	assertContains(t, out, "@ioctlsocket(", "calls ioctlsocket not fcntl")
+	// FIONBIO = 0x8004667e = -2147195266 as signed i32
+	assertContains(t, out, "-2147195266", "FIONBIO constant")
+}
+
+func TestSocketGetErrorWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitSocketGetError(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_get_error" {
+		t.Errorf("expected pal_socket_get_error, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_socket_get_error(i32 %fd)", "definition")
+	assertContains(t, out, "@getsockopt(i64", "calls getsockopt with SOCKET param")
+	// Windows SOL_SOCKET = 0xFFFF (LLVM renders as unsigned hex)
+	assertContains(t, out, "u0xFFFF", "SOL_SOCKET constant")
+	// Windows SO_ERROR = 0x1007 = 4103
+	assertContains(t, out, "i32 4103", "SO_ERROR constant")
+}
+
+func TestGetAddrInfoWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitGetAddrInfo(module)
+	out := module.String()
+
+	if fn.Name() != "pal_getaddrinfo" {
+		t.Errorf("expected pal_getaddrinfo, got %s", fn.Name())
+	}
+	assertContains(t, out, "@getaddrinfo(", "getaddrinfo declaration")
+	assertContains(t, out, "define i32 @pal_getaddrinfo(i8* %host, i8* %port, i8* %hints, i8** %result)", "definition")
+	assertContains(t, out, "@__pal_wsa_ensure_init()", "calls WSA init")
+}
+
+func TestFreeAddrInfoWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitFreeAddrInfo(module)
+	out := module.String()
+
+	if fn.Name() != "pal_freeaddrinfo" {
+		t.Errorf("expected pal_freeaddrinfo, got %s", fn.Name())
+	}
+	assertContains(t, out, "@freeaddrinfo(", "freeaddrinfo declaration")
+	assertContains(t, out, "define void @pal_freeaddrinfo(i8* %result)", "definition")
+}
+
+func TestWSAEnsureInitWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	// EmitSocketCreate triggers WSA init helper creation
+	p.EmitSocketCreate(module)
+	out := module.String()
+
+	assertContains(t, out, "define void @__pal_wsa_ensure_init()", "init function defined")
+	assertContains(t, out, "@WSAStartup(", "calls WSAStartup")
+	assertContains(t, out, "i32 514", "MAKEWORD(2,2) = 0x0202 = 514")
+	assertContains(t, out, "@__wsa_init_done", "uses init flag global")
+	assertContains(t, out, "@__wsa_data", "uses WSADATA buffer global")
+
+	// Second call on same module reuses the existing init function (covers early-return path)
+	p.EmitGetAddrInfo(module)
+	out2 := module.String()
+	// Should have exactly one definition of __pal_wsa_ensure_init, not two
+	if count := strings.Count(out2, "define void @__pal_wsa_ensure_init"); count != 1 {
+		t.Errorf("expected exactly 1 definition of __pal_wsa_ensure_init, got %d", count)
+	}
 }
 
 func TestSocketBindPosix(t *testing.T) {

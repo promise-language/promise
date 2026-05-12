@@ -3580,3 +3580,150 @@ func TestSocketStubsWasm(t *testing.T) {
 	assertContains(t, out, "ret i32 -38", "i32 stubs return -ENOSYS")
 	assertContains(t, out, "ret i64 -38", "i64 stubs return -ENOSYS")
 }
+
+// --- Reactor PAL tests (T0070) ---
+
+func TestReactorCreatePosixMacOS(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{target: "aarch64-apple-darwin"}
+	fn := p.EmitReactorCreate(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_create" {
+		t.Errorf("expected pal_reactor_create, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_create()", "definition")
+	assertContains(t, out, "@kqueue()", "calls kqueue on macOS")
+	assertContains(t, out, "icmp slt i32", "error check")
+}
+
+func TestReactorCreatePosixLinux(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{target: "x86_64-unknown-linux-gnu"}
+	fn := p.EmitReactorCreate(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_create" {
+		t.Errorf("expected pal_reactor_create, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_create()", "definition")
+	assertContains(t, out, "@epoll_create1(i32 0)", "calls epoll_create1 on Linux")
+}
+
+func TestReactorAddPosixMacOS(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{target: "aarch64-apple-darwin"}
+	fn := p.EmitReactorAdd(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_add" {
+		t.Errorf("expected pal_reactor_add, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_add(i32 %rfd, i32 %fd, i8* %userdata)", "definition")
+	assertContains(t, out, "@kevent(", "calls kevent on macOS")
+	// EVFILT_READ = -1, EVFILT_WRITE = -2
+	assertContains(t, out, "i16 -1", "EVFILT_READ filter")
+	assertContains(t, out, "i16 -2", "EVFILT_WRITE filter")
+}
+
+func TestReactorAddPosixLinux(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{target: "x86_64-unknown-linux-gnu"}
+	fn := p.EmitReactorAdd(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_add" {
+		t.Errorf("expected pal_reactor_add, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_add(i32 %rfd, i32 %fd, i8* %userdata)", "definition")
+	assertContains(t, out, "@epoll_ctl(", "calls epoll_ctl on Linux")
+}
+
+func TestReactorRemovePosixMacOS(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{target: "aarch64-apple-darwin"}
+	fn := p.EmitReactorRemove(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_remove" {
+		t.Errorf("expected pal_reactor_remove, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_remove(i32 %rfd, i32 %fd)", "definition")
+	assertContains(t, out, "@kevent(", "calls kevent on macOS")
+}
+
+func TestReactorRemovePosixLinux(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{target: "x86_64-unknown-linux-gnu"}
+	fn := p.EmitReactorRemove(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_remove" {
+		t.Errorf("expected pal_reactor_remove, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_remove(i32 %rfd, i32 %fd)", "definition")
+	assertContains(t, out, "@epoll_ctl(", "calls epoll_ctl on Linux")
+}
+
+func TestReactorPollPosix(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		target  string
+		syscall string
+	}{
+		{"macOS", "aarch64-apple-darwin", "@kevent("},
+		{"Linux", "x86_64-unknown-linux-gnu", "@epoll_wait("},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(&PosixPAL{target: tc.target})
+			p := &PosixPAL{target: tc.target}
+			fn := p.EmitReactorPoll(module)
+			out := module.String()
+
+			if fn.Name() != "pal_reactor_poll" {
+				t.Errorf("expected pal_reactor_poll, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_reactor_poll(i32 %rfd, i8* %events_buf, i32 %max_events, i32 %timeout_ms)", "definition")
+			assertContains(t, out, tc.syscall, "platform-specific poll syscall")
+		})
+	}
+}
+
+func TestReactorClosePosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitReactorClose(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_close" {
+		t.Errorf("expected pal_reactor_close, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_close(i32 %rfd)", "definition")
+	assertContains(t, out, "@close(", "calls close")
+}
+
+func TestReactorStubsWasm(t *testing.T) {
+	module := ir.NewModule()
+	p := &WasmPAL{}
+
+	fns := []struct {
+		name string
+		emit func(*ir.Module) *ir.Func
+	}{
+		{"pal_reactor_create", p.EmitReactorCreate},
+		{"pal_reactor_add", p.EmitReactorAdd},
+		{"pal_reactor_remove", p.EmitReactorRemove},
+		{"pal_reactor_poll", p.EmitReactorPoll},
+		{"pal_reactor_close", p.EmitReactorClose},
+	}
+
+	for _, tc := range fns {
+		fn := tc.emit(module)
+		if fn.Name() != tc.name {
+			t.Errorf("expected %s, got %s", tc.name, fn.Name())
+		}
+	}
+
+	out := module.String()
+	assertContains(t, out, "ret i32 -38", "stubs return -ENOSYS")
+}

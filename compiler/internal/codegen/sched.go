@@ -146,6 +146,9 @@ const (
 	schedFieldReadyCount       = 20 // i32  worker threads that completed init (B0165)
 	schedFieldGsDrainMutex     = 21 // i8*  mutex for goroutine drain signaling
 	schedFieldGsDrainCond      = 22 // i8*  cond var for goroutine drain signaling
+	schedFieldReactorFd        = 23 // i32  epoll/kqueue fd (-1 if no reactor)
+	schedFieldReactorThread    = 24 // i8*  reactor poller thread handle (null if no reactor)
+	schedFieldReactorLock      = 25 // i8*  mutex protecting PollDesc table (null if no reactor)
 )
 
 // schedStructType returns the LLVM struct type for the global scheduler.
@@ -174,6 +177,9 @@ func schedStructType() *irtypes.StructType {
 		irtypes.I32,   // ready_count (B0165: worker threads that completed init)
 		irtypes.I8Ptr, // gs_drain_mutex
 		irtypes.I8Ptr, // gs_drain_cond
+		irtypes.I32,   // reactor_fd (T0070: epoll/kqueue fd, -1 if no reactor)
+		irtypes.I8Ptr, // reactor_thread (T0070: poller thread handle)
+		irtypes.I8Ptr, // reactor_lock (T0070: mutex for PollDesc table)
 	)
 }
 
@@ -456,6 +462,11 @@ func (c *Compiler) defineSchedInitFunc() {
 	gdCondField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainCond)))
 	entry.NewStore(gdCond, gdCondField)
+
+	// Init reactor_fd = -1 (no reactor by default, T0070)
+	reactorFdField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReactorFd)))
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), reactorFdField)
 
 	// Store num_p and max_p
 	numPField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -1952,13 +1963,41 @@ func (c *Compiler) defineSchedShutdownFunc() {
 	sysmonHandle := doneBlk.NewLoad(irtypes.I8Ptr, sysmonField)
 	doneBlk.NewCall(c.palThreadJoin, sysmonHandle)
 
-	// Sysmon is now joined — safe to destroy per-M resources and free P array
+	// Join reactor thread if present (T0070) — it checks shutdown flag every 10ms
+	reactorThField := doneBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReactorThread)))
+	reactorTh := doneBlk.NewLoad(irtypes.I8Ptr, reactorThField)
+	hasReactor := doneBlk.NewICmp(enum.IPredNE, reactorTh, constant.NewNull(irtypes.I8Ptr))
+	joinReactorBlk := fn.NewBlock("join_reactor")
+	afterReactorBlk := fn.NewBlock("after_reactor")
+	doneBlk.NewCondBr(hasReactor, joinReactorBlk, afterReactorBlk)
+
+	joinReactorBlk.NewCall(c.palThreadJoin, reactorTh)
+	// Close reactor fd via pal_reactor_close if emitted
+	reactorFdField := joinReactorBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReactorFd)))
+	reactorFd := joinReactorBlk.NewLoad(irtypes.I32, reactorFdField)
+	if c.palReactorClose != nil {
+		joinReactorBlk.NewCall(c.palReactorClose, reactorFd)
+	}
+	// Destroy reactor lock if present
+	reactorLockField := joinReactorBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReactorLock)))
+	reactorLock := joinReactorBlk.NewLoad(irtypes.I8Ptr, reactorLockField)
+	reactorLockNonNull := joinReactorBlk.NewICmp(enum.IPredNE, reactorLock, constant.NewNull(irtypes.I8Ptr))
+	destroyReactorLockBlk := fn.NewBlock("destroy_reactor_lock")
+	joinReactorBlk.NewCondBr(reactorLockNonNull, destroyReactorLockBlk, afterReactorBlk)
+
+	destroyReactorLockBlk.NewCall(c.palMutexDestroy, reactorLock)
+	destroyReactorLockBlk.NewBr(afterReactorBlk)
+
+	// Sysmon and reactor are now joined — safe to destroy per-M resources and free P array
 	cleanupLoop := fn.NewBlock("cleanup_loop")
 	cleanupBody := fn.NewBlock("cleanup_body")
 	freeBlk := fn.NewBlock("free_ps")
 
-	doneBlk.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
-	doneBlk.NewBr(cleanupLoop)
+	afterReactorBlk.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
+	afterReactorBlk.NewBr(cleanupLoop)
 
 	cVal := cleanupLoop.NewLoad(irtypes.I32, iAlloca)
 	cleanupCond := cleanupLoop.NewICmp(enum.IPredSLT, cVal, maxP)

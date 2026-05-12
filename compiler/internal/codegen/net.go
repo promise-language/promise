@@ -72,6 +72,16 @@ func (c *Compiler) defineNetPALBodies() {
 	c.palGetAddrInfo = p.EmitGetAddrInfo(c.module)
 	c.palFreeAddrInfo = p.EmitFreeAddrInfo(c.module)
 
+	// Lazily emit reactor PAL functions (T0070)
+	c.palReactorCreate = p.EmitReactorCreate(c.module)
+	c.palReactorAdd = p.EmitReactorAdd(c.module)
+	c.palReactorRemove = p.EmitReactorRemove(c.module)
+	c.palReactorPoll = p.EmitReactorPoll(c.module)
+	c.palReactorClose = p.EmitReactorClose(c.module)
+
+	// Emit reactor infrastructure (T0070)
+	c.defineNetpollFuncs()
+
 	// Bridge net module externs to PAL socket functions.
 	// These will be populated as modules/net/net.pr adds native extern declarations.
 }

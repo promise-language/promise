@@ -284,6 +284,13 @@ type Compiler struct {
 	palGetAddrInfo       *ir.Func // @pal_getaddrinfo(i8* host, i8* port, i8* hints, i8** result) → i32
 	palFreeAddrInfo      *ir.Func // @pal_freeaddrinfo(i8* result) → void
 
+	// PAL IO reactor primitives (T0070)
+	palReactorCreate *ir.Func // @pal_reactor_create() → i32
+	palReactorAdd    *ir.Func // @pal_reactor_add(i32 rfd, i32 fd, i8* userdata) → i32
+	palReactorRemove *ir.Func // @pal_reactor_remove(i32 rfd, i32 fd) → i32
+	palReactorPoll   *ir.Func // @pal_reactor_poll(i32 rfd, i8* events_buf, i32 max_events, i32 timeout_ms) → i32
+	palReactorClose  *ir.Func // @pal_reactor_close(i32 rfd) → i32
+
 	// Signal pipe globals (NOT TLS — shared across all threads)
 	signalPipeRdFd *ir.Global // @__promise_signal_pipe_rd (i32)
 

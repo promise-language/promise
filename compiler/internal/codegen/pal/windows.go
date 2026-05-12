@@ -2750,3 +2750,16 @@ func (p *WindowsPAL) EmitGetCwd(module *ir.Module) *ir.Func {
 	entry.NewRet(result)
 	return fn
 }
+
+// Windows reactor stubs — IOCP implementation deferred (T0070).
+func (p *WindowsPAL) EmitReactorCreate(module *ir.Module) *ir.Func {
+	return emitStubReactorCreate(module)
+}
+func (p *WindowsPAL) EmitReactorAdd(module *ir.Module) *ir.Func { return emitStubReactorAdd(module) }
+func (p *WindowsPAL) EmitReactorRemove(module *ir.Module) *ir.Func {
+	return emitStubReactorRemove(module)
+}
+func (p *WindowsPAL) EmitReactorPoll(module *ir.Module) *ir.Func { return emitStubReactorPoll(module) }
+func (p *WindowsPAL) EmitReactorClose(module *ir.Module) *ir.Func {
+	return emitStubReactorClose(module)
+}

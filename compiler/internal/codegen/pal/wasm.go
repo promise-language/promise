@@ -351,3 +351,10 @@ func (p *WasmPAL) EmitSocketGetError(module *ir.Module) *ir.Func {
 }
 func (p *WasmPAL) EmitGetAddrInfo(module *ir.Module) *ir.Func  { return emitStubGetAddrInfo(module) }
 func (p *WasmPAL) EmitFreeAddrInfo(module *ir.Module) *ir.Func { return emitStubFreeAddrInfo(module) }
+
+// WASM reactor stubs — no reactor support (T0070).
+func (p *WasmPAL) EmitReactorCreate(module *ir.Module) *ir.Func { return emitStubReactorCreate(module) }
+func (p *WasmPAL) EmitReactorAdd(module *ir.Module) *ir.Func    { return emitStubReactorAdd(module) }
+func (p *WasmPAL) EmitReactorRemove(module *ir.Module) *ir.Func { return emitStubReactorRemove(module) }
+func (p *WasmPAL) EmitReactorPoll(module *ir.Module) *ir.Func   { return emitStubReactorPoll(module) }
+func (p *WasmPAL) EmitReactorClose(module *ir.Module) *ir.Func  { return emitStubReactorClose(module) }

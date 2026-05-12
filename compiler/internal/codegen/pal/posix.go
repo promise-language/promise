@@ -2287,3 +2287,533 @@ func (p *PosixPAL) EmitFreeAddrInfo(module *ir.Module) *ir.Func {
 	entry.NewRet(nil)
 	return fn
 }
+
+// --- POSIX IO reactor primitives (T0070) ---
+//
+// PollEvent output struct layout (16 bytes, filled by pal_reactor_poll):
+//   { i8* userdata, i32 events, i32 _pad }
+// events: 1=readable, 2=writable, 4=error/hangup
+//
+// macOS uses kqueue; Linux uses epoll.
+
+// epollEventStructType returns the LLVM struct for Linux's struct epoll_event.
+// C: struct epoll_event { u32 events; epoll_data_t data; } __attribute__((packed))
+// Packed layout: <{ i32, i64 }> = 12 bytes. data holds a pointer via ptrtoint/inttoptr.
+func epollEventStructType() *irtypes.StructType {
+	ty := irtypes.NewStruct(irtypes.I32, irtypes.I64)
+	ty.Packed = true
+	return ty
+}
+
+// EmitReactorCreate defines @pal_reactor_create() → i32 (fd or -errno).
+// macOS: kqueue(). Linux: epoll_create1(0).
+func (p *PosixPAL) EmitReactorCreate(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_create", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	var ret *ir.InstCall
+	if p.isMacOS() {
+		kqueueFn := getOrDeclareFunc(module, "kqueue", irtypes.I32)
+		ret = entry.NewCall(kqueueFn)
+	} else {
+		epollCreate1Fn := getOrDeclareFunc(module, "epoll_create1", irtypes.I32,
+			ir.NewParam("flags", irtypes.I32))
+		ret = entry.NewCall(epollCreate1Fn, constant.NewInt(irtypes.I32, 0))
+	}
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitReactorAdd defines @pal_reactor_add(i32 rfd, i32 fd, i8* userdata) → i32 (0 or -errno).
+// Registers fd for edge-triggered read+write monitoring.
+// macOS: kevent() with EVFILT_READ + EVFILT_WRITE, EV_ADD|EV_CLEAR.
+// Linux: epoll_ctl(EPOLL_CTL_ADD, EPOLLIN|EPOLLOUT|EPOLLET).
+func (p *PosixPAL) EmitReactorAdd(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_add", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32),
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("userdata", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	if p.isMacOS() {
+		p.emitKqueueAdd(module, fn, entry)
+	} else {
+		p.emitEpollAdd(module, fn, entry)
+	}
+
+	return fn
+}
+
+// emitKqueueAdd emits the body for pal_reactor_add on macOS using kevent().
+// Registers two filters: EVFILT_READ (-1) and EVFILT_WRITE (-2) with EV_ADD|EV_CLEAR.
+func (p *PosixPAL) emitKqueueAdd(module *ir.Module, fn *ir.Func, entry *ir.Block) {
+	// struct kevent { uintptr_t ident; i16 filter; u16 flags; u32 fflags; intptr_t data; void* udata; }
+	// On macOS arm64: {i64, i16, i16, i32, i64, i8*} = 32 bytes
+	keventType := irtypes.NewStruct(
+		irtypes.I64,   // ident (fd as uintptr)
+		irtypes.I16,   // filter
+		irtypes.I16,   // flags
+		irtypes.I32,   // fflags
+		irtypes.I64,   // data
+		irtypes.I8Ptr, // udata
+	)
+
+	// declare i32 @kevent(i32 kq, struct kevent* changelist, i32 nchanges,
+	//                      struct kevent* eventlist, i32 nevents,
+	//                      i8* timeout) — timeout as i8* (struct timespec* or null)
+	keventFn := getOrDeclareFunc(module, "kevent", irtypes.I32,
+		ir.NewParam("kq", irtypes.I32),
+		ir.NewParam("changelist", irtypes.NewPointer(keventType)),
+		ir.NewParam("nchanges", irtypes.I32),
+		ir.NewParam("eventlist", irtypes.NewPointer(keventType)),
+		ir.NewParam("nevents", irtypes.I32),
+		ir.NewParam("timeout", irtypes.I8Ptr))
+
+	// Stack-allocate 2 kevent structs for changelist
+	changes := entry.NewAlloca(irtypes.NewArray(2, keventType))
+
+	// Zero-extend fd from i32 to i64 for ident field
+	fdI64 := entry.NewZExt(fn.Params[1], irtypes.I64)
+
+	// EV_ADD=1, EV_CLEAR=4 → flags = 0x0005
+	evFlags := constant.NewInt(irtypes.I16, 0x0005)
+
+	// Event 0: EVFILT_READ = -1 (0xFFFF as i16)
+	ev0 := entry.NewGetElementPtr(irtypes.NewArray(2, keventType), changes,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	ev0Ident := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	entry.NewStore(fdI64, ev0Ident)
+	ev0Filter := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	entry.NewStore(constant.NewInt(irtypes.I16, -1), ev0Filter) // EVFILT_READ = -1
+	ev0Flags := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	entry.NewStore(evFlags, ev0Flags)
+	ev0Fflags := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 3))
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), ev0Fflags)
+	ev0Data := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 4))
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), ev0Data)
+	ev0Udata := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 5))
+	entry.NewStore(fn.Params[2], ev0Udata) // userdata
+
+	// Event 1: EVFILT_WRITE = -2 (0xFFFE as i16)
+	ev1 := entry.NewGetElementPtr(irtypes.NewArray(2, keventType), changes,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	ev1Ident := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	entry.NewStore(fdI64, ev1Ident)
+	ev1Filter := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	entry.NewStore(constant.NewInt(irtypes.I16, -2), ev1Filter) // EVFILT_WRITE = -2
+	ev1Flags := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	entry.NewStore(evFlags, ev1Flags)
+	ev1Fflags := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 3))
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), ev1Fflags)
+	ev1Data := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 4))
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), ev1Data)
+	ev1Udata := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 5))
+	entry.NewStore(fn.Params[2], ev1Udata) // userdata
+
+	// kevent(rfd, changes, 2, null, 0, null) — submit changes, no wait
+	ret := entry.NewCall(keventFn, fn.Params[0], ev0,
+		constant.NewInt(irtypes.I32, 2),
+		constant.NewNull(irtypes.NewPointer(keventType)),
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewNull(irtypes.I8Ptr))
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+}
+
+// emitEpollAdd emits the body for pal_reactor_add on Linux using epoll_ctl().
+func (p *PosixPAL) emitEpollAdd(module *ir.Module, fn *ir.Func, entry *ir.Block) {
+	// struct epoll_event { u32 events; epoll_data_t data; } __attribute__((packed))
+	// epoll_data_t is a union (8 bytes) — we use the ptr field via ptrtoint/inttoptr.
+	// Packed layout: {i32 events, i64 data} = 12 bytes (no padding between fields).
+	epollEventType := epollEventStructType()
+
+	epollCtlFn := getOrDeclareFunc(module, "epoll_ctl", irtypes.I32,
+		ir.NewParam("epfd", irtypes.I32),
+		ir.NewParam("op", irtypes.I32),
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("event", irtypes.NewPointer(epollEventType)))
+
+	// Stack-allocate epoll_event
+	ev := entry.NewAlloca(epollEventType)
+
+	// EPOLLIN=1, EPOLLOUT=4, EPOLLET=0x80000000 → events = 0x80000005
+	evEvents := entry.NewGetElementPtr(epollEventType, ev,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	entry.NewStore(constant.NewInt(irtypes.I32, 0x80000005), evEvents) // EPOLLIN|EPOLLOUT|EPOLLET
+
+	// data = ptrtoint(userdata)
+	evData := entry.NewGetElementPtr(epollEventType, ev,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	dataI64 := entry.NewPtrToInt(fn.Params[2], irtypes.I64)
+	entry.NewStore(dataI64, evData)
+
+	// EPOLL_CTL_ADD = 1
+	ret := entry.NewCall(epollCtlFn, fn.Params[0],
+		constant.NewInt(irtypes.I32, 1), // EPOLL_CTL_ADD
+		fn.Params[1], ev)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+}
+
+// EmitReactorRemove defines @pal_reactor_remove(i32 rfd, i32 fd) → i32 (0 or -errno).
+// macOS: kevent() with EV_DELETE for both filters. Linux: epoll_ctl(EPOLL_CTL_DEL).
+func (p *PosixPAL) EmitReactorRemove(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_remove", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32),
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	if p.isMacOS() {
+		p.emitKqueueRemove(module, fn, entry)
+	} else {
+		p.emitEpollRemove(module, fn, entry)
+	}
+
+	return fn
+}
+
+func (p *PosixPAL) emitKqueueRemove(module *ir.Module, fn *ir.Func, entry *ir.Block) {
+	keventType := irtypes.NewStruct(irtypes.I64, irtypes.I16, irtypes.I16, irtypes.I32, irtypes.I64, irtypes.I8Ptr)
+	keventFn := getOrDeclareFunc(module, "kevent", irtypes.I32,
+		ir.NewParam("kq", irtypes.I32),
+		ir.NewParam("changelist", irtypes.NewPointer(keventType)),
+		ir.NewParam("nchanges", irtypes.I32),
+		ir.NewParam("eventlist", irtypes.NewPointer(keventType)),
+		ir.NewParam("nevents", irtypes.I32),
+		ir.NewParam("timeout", irtypes.I8Ptr))
+
+	changes := entry.NewAlloca(irtypes.NewArray(2, keventType))
+	fdI64 := entry.NewZExt(fn.Params[1], irtypes.I64)
+
+	// EV_DELETE = 2
+	evFlags := constant.NewInt(irtypes.I16, 0x0002)
+
+	// Delete EVFILT_READ
+	ev0 := entry.NewGetElementPtr(irtypes.NewArray(2, keventType), changes,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	ev0Ident := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	entry.NewStore(fdI64, ev0Ident)
+	ev0Filter := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	entry.NewStore(constant.NewInt(irtypes.I16, -1), ev0Filter)
+	ev0Flags := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	entry.NewStore(evFlags, ev0Flags)
+	ev0Fflags := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 3))
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), ev0Fflags)
+	ev0Data := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 4))
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), ev0Data)
+	ev0Udata := entry.NewGetElementPtr(keventType, ev0, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 5))
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), ev0Udata)
+
+	// Delete EVFILT_WRITE
+	ev1 := entry.NewGetElementPtr(irtypes.NewArray(2, keventType), changes,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	ev1Ident := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	entry.NewStore(fdI64, ev1Ident)
+	ev1Filter := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	entry.NewStore(constant.NewInt(irtypes.I16, -2), ev1Filter)
+	ev1Flags := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	entry.NewStore(evFlags, ev1Flags)
+	ev1Fflags := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 3))
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), ev1Fflags)
+	ev1Data := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 4))
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), ev1Data)
+	ev1Udata := entry.NewGetElementPtr(keventType, ev1, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 5))
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), ev1Udata)
+
+	ret := entry.NewCall(keventFn, fn.Params[0], ev0,
+		constant.NewInt(irtypes.I32, 2),
+		constant.NewNull(irtypes.NewPointer(keventType)),
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewNull(irtypes.I8Ptr))
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+}
+
+func (p *PosixPAL) emitEpollRemove(module *ir.Module, fn *ir.Func, entry *ir.Block) {
+	epollEventType := epollEventStructType()
+	epollCtlFn := getOrDeclareFunc(module, "epoll_ctl", irtypes.I32,
+		ir.NewParam("epfd", irtypes.I32),
+		ir.NewParam("op", irtypes.I32),
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("event", irtypes.NewPointer(epollEventType)))
+
+	// EPOLL_CTL_DEL = 2. Event pointer can be null for DEL on modern kernels,
+	// but older kernels require non-null — pass a dummy.
+	dummy := entry.NewAlloca(epollEventType)
+	ret := entry.NewCall(epollCtlFn, fn.Params[0],
+		constant.NewInt(irtypes.I32, 2), // EPOLL_CTL_DEL
+		fn.Params[1], dummy)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+}
+
+// EmitReactorPoll defines @pal_reactor_poll(i32 rfd, i8* events_buf, i32 max_events, i32 timeout_ms) → i32.
+// Fills events_buf with PollEvent structs {i8* userdata, i32 events, i32 _pad}.
+// Returns number of events, or -errno on error.
+func (p *PosixPAL) EmitReactorPoll(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_poll", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32),
+		ir.NewParam("events_buf", irtypes.I8Ptr),
+		ir.NewParam("max_events", irtypes.I32),
+		ir.NewParam("timeout_ms", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	if p.isMacOS() {
+		p.emitKqueuePoll(module, fn, entry)
+	} else {
+		p.emitEpollPoll(module, fn, entry)
+	}
+
+	return fn
+}
+
+// PollEvent output struct: {i8* userdata, i32 events, i32 _pad} = 16 bytes
+func pollEventType() *irtypes.StructType {
+	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32, irtypes.I32)
+}
+
+func (p *PosixPAL) emitKqueuePoll(module *ir.Module, fn *ir.Func, entry *ir.Block) {
+	keventType := irtypes.NewStruct(irtypes.I64, irtypes.I16, irtypes.I16, irtypes.I32, irtypes.I64, irtypes.I8Ptr)
+	keventFn := getOrDeclareFunc(module, "kevent", irtypes.I32,
+		ir.NewParam("kq", irtypes.I32),
+		ir.NewParam("changelist", irtypes.NewPointer(keventType)),
+		ir.NewParam("nchanges", irtypes.I32),
+		ir.NewParam("eventlist", irtypes.NewPointer(keventType)),
+		ir.NewParam("nevents", irtypes.I32),
+		ir.NewParam("timeout", irtypes.I8Ptr))
+
+	palAlloc := lookupFunc(module, "pal_alloc")
+
+	// struct timespec { i64 tv_sec; i64 tv_nsec; }
+	timespecType := irtypes.NewStruct(irtypes.I64, irtypes.I64)
+
+	// Allocate kevent array on heap: max_events * sizeof(kevent)
+	keventSize := constant.NewInt(irtypes.I64, 32) // sizeof(kevent) = 32
+	maxI64 := entry.NewZExt(fn.Params[2], irtypes.I64)
+	bufSize := entry.NewMul(maxI64, keventSize)
+	rawBuf := entry.NewCall(palAlloc, bufSize)
+	keventBuf := entry.NewBitCast(rawBuf, irtypes.NewPointer(keventType))
+
+	// Build timespec from timeout_ms: sec = ms/1000, nsec = (ms%1000)*1000000
+	ts := entry.NewAlloca(timespecType)
+	msI64 := entry.NewSExt(fn.Params[3], irtypes.I64)
+	sec := entry.NewSDiv(msI64, constant.NewInt(irtypes.I64, 1000))
+	rem := entry.NewSRem(msI64, constant.NewInt(irtypes.I64, 1000))
+	nsec := entry.NewMul(rem, constant.NewInt(irtypes.I64, 1000000))
+	tsSec := entry.NewGetElementPtr(timespecType, ts, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	entry.NewStore(sec, tsSec)
+	tsNsec := entry.NewGetElementPtr(timespecType, ts, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	entry.NewStore(nsec, tsNsec)
+	tsPtr := entry.NewBitCast(ts, irtypes.I8Ptr)
+
+	// kevent(rfd, null, 0, keventBuf, max_events, &ts)
+	count := entry.NewCall(keventFn, fn.Params[0],
+		constant.NewNull(irtypes.NewPointer(keventType)),
+		constant.NewInt(irtypes.I32, 0),
+		keventBuf, fn.Params[2], tsPtr)
+
+	isErr := entry.NewICmp(enum.IPredSLT, count, constant.NewInt(irtypes.I32, 0))
+	errBlk := fn.NewBlock(".err")
+	convertBlk := fn.NewBlock(".convert")
+	entry.NewCondBr(isErr, errBlk, convertBlk)
+
+	// Error path: free kevent buffer, return -errno
+	palFree := lookupFunc(module, "pal_free")
+	errBlk.NewCall(palFree, rawBuf)
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+
+	// Convert kevent results to PollEvent format
+	peType := pollEventType()
+	outBuf := convertBlk.NewBitCast(fn.Params[1], irtypes.NewPointer(peType))
+
+	// Loop: for i = 0; i < count; i++
+	loopCond := fn.NewBlock(".loop_cond")
+	loopBody := fn.NewBlock(".loop_body")
+	loopEnd := fn.NewBlock(".loop_end")
+	convertBlk.NewBr(loopCond)
+
+	// PHI for loop counter
+	i := loopCond.NewPhi(ir.NewIncoming(constant.NewInt(irtypes.I32, 0), convertBlk))
+	cmp := loopCond.NewICmp(enum.IPredSLT, i, count)
+	loopCond.NewCondBr(cmp, loopBody, loopEnd)
+
+	// Read kevent[i]
+	kev := loopBody.NewGetElementPtr(keventType, keventBuf, i)
+	// Read filter (field 1) to determine read vs write
+	filterPtr := loopBody.NewGetElementPtr(keventType, kev, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	filter := loopBody.NewLoad(irtypes.I16, filterPtr)
+	// Read flags (field 2) to check EV_EOF/EV_ERROR
+	flagsPtr := loopBody.NewGetElementPtr(keventType, kev, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	flags := loopBody.NewLoad(irtypes.I16, flagsPtr)
+	// Read udata (field 5)
+	udataPtr := loopBody.NewGetElementPtr(keventType, kev, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 5))
+	udata := loopBody.NewLoad(irtypes.I8Ptr, udataPtr)
+
+	// Map filter to events: EVFILT_READ(-1) → 1, EVFILT_WRITE(-2) → 2
+	isRead := loopBody.NewICmp(enum.IPredEQ, filter, constant.NewInt(irtypes.I16, -1))
+	events := loopBody.NewSelect(isRead, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 2))
+	// EV_EOF = 0x8000 → add error flag (4)
+	flags32 := loopBody.NewZExt(flags, irtypes.I32)
+	hasEof := loopBody.NewAnd(flags32, constant.NewInt(irtypes.I32, 0x8000))
+	isEof := loopBody.NewICmp(enum.IPredNE, hasEof, constant.NewInt(irtypes.I32, 0))
+	errFlag := loopBody.NewSelect(isEof, constant.NewInt(irtypes.I32, 4), constant.NewInt(irtypes.I32, 0))
+	eventsWithErr := loopBody.NewOr(events, errFlag)
+
+	// Write PollEvent[i]
+	pe := loopBody.NewGetElementPtr(peType, outBuf, i)
+	peUserdata := loopBody.NewGetElementPtr(peType, pe, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	loopBody.NewStore(udata, peUserdata)
+	peEvents := loopBody.NewGetElementPtr(peType, pe, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	loopBody.NewStore(eventsWithErr, peEvents)
+	pePad := loopBody.NewGetElementPtr(peType, pe, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	loopBody.NewStore(constant.NewInt(irtypes.I32, 0), pePad)
+
+	// i++
+	iNext := loopBody.NewAdd(i, constant.NewInt(irtypes.I32, 1))
+	i.Incs = append(i.Incs, ir.NewIncoming(iNext, loopBody))
+	loopBody.NewBr(loopCond)
+
+	// Free kevent buffer, return count
+	loopEnd.NewCall(palFree, rawBuf)
+	loopEnd.NewRet(count)
+}
+
+func (p *PosixPAL) emitEpollPoll(module *ir.Module, fn *ir.Func, entry *ir.Block) {
+	epollEventType := epollEventStructType()
+	epollWaitFn := getOrDeclareFunc(module, "epoll_wait", irtypes.I32,
+		ir.NewParam("epfd", irtypes.I32),
+		ir.NewParam("events", irtypes.NewPointer(epollEventType)),
+		ir.NewParam("maxevents", irtypes.I32),
+		ir.NewParam("timeout", irtypes.I32))
+
+	palAlloc := lookupFunc(module, "pal_alloc")
+
+	// Allocate epoll_event array: max_events * 12 bytes (packed struct)
+	evSize := constant.NewInt(irtypes.I64, 12) // sizeof(struct epoll_event) = 12 (packed)
+	maxI64 := entry.NewZExt(fn.Params[2], irtypes.I64)
+	bufSize := entry.NewMul(maxI64, evSize)
+	rawBuf := entry.NewCall(palAlloc, bufSize)
+	epollBuf := entry.NewBitCast(rawBuf, irtypes.NewPointer(epollEventType))
+
+	// epoll_wait(rfd, epollBuf, max_events, timeout_ms)
+	count := entry.NewCall(epollWaitFn, fn.Params[0], epollBuf, fn.Params[2], fn.Params[3])
+
+	isErr := entry.NewICmp(enum.IPredSLT, count, constant.NewInt(irtypes.I32, 0))
+	errBlk := fn.NewBlock(".err")
+	convertBlk := fn.NewBlock(".convert")
+	entry.NewCondBr(isErr, errBlk, convertBlk)
+
+	palFree := lookupFunc(module, "pal_free")
+	errBlk.NewCall(palFree, rawBuf)
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+
+	// Convert epoll_event to PollEvent
+	peType := pollEventType()
+	outBuf := convertBlk.NewBitCast(fn.Params[1], irtypes.NewPointer(peType))
+
+	loopCond := fn.NewBlock(".loop_cond")
+	loopBody := fn.NewBlock(".loop_body")
+	loopEnd := fn.NewBlock(".loop_end")
+	convertBlk.NewBr(loopCond)
+
+	i := loopCond.NewPhi(ir.NewIncoming(constant.NewInt(irtypes.I32, 0), convertBlk))
+	cmp := loopCond.NewICmp(enum.IPredSLT, i, count)
+	loopCond.NewCondBr(cmp, loopBody, loopEnd)
+
+	// Read epoll_event[i] — packed struct <{ i32 events, i64 data }>
+	eev := loopBody.NewGetElementPtr(epollEventType, epollBuf, i)
+	eevEventsPtr := loopBody.NewGetElementPtr(epollEventType, eev, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	eevEvents := loopBody.NewLoad(irtypes.I32, eevEventsPtr)
+	// data is field 1 (i64), convert back to pointer via inttoptr
+	eevDataPtr := loopBody.NewGetElementPtr(epollEventType, eev, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	eevDataI64 := loopBody.NewLoad(irtypes.I64, eevDataPtr)
+	eevData := loopBody.NewIntToPtr(eevDataI64, irtypes.I8Ptr)
+
+	// Map epoll events to PollEvent events:
+	// EPOLLIN=1 → 1(readable), EPOLLOUT=4 → 2(writable), EPOLLERR=8|EPOLLHUP=16 → 4(error)
+	hasIn := loopBody.NewAnd(eevEvents, constant.NewInt(irtypes.I32, 1))   // EPOLLIN
+	hasOut := loopBody.NewAnd(eevEvents, constant.NewInt(irtypes.I32, 4))  // EPOLLOUT
+	hasErr := loopBody.NewAnd(eevEvents, constant.NewInt(irtypes.I32, 24)) // EPOLLERR|EPOLLHUP
+
+	isIn := loopBody.NewICmp(enum.IPredNE, hasIn, constant.NewInt(irtypes.I32, 0))
+	readBit := loopBody.NewSelect(isIn, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+	isOut := loopBody.NewICmp(enum.IPredNE, hasOut, constant.NewInt(irtypes.I32, 0))
+	writeBit := loopBody.NewSelect(isOut, constant.NewInt(irtypes.I32, 2), constant.NewInt(irtypes.I32, 0))
+	isE := loopBody.NewICmp(enum.IPredNE, hasErr, constant.NewInt(irtypes.I32, 0))
+	errBit := loopBody.NewSelect(isE, constant.NewInt(irtypes.I32, 4), constant.NewInt(irtypes.I32, 0))
+	events := loopBody.NewOr(readBit, writeBit)
+	eventsAll := loopBody.NewOr(events, errBit)
+
+	// Write PollEvent[i]
+	pe := loopBody.NewGetElementPtr(peType, outBuf, i)
+	peUserdata := loopBody.NewGetElementPtr(peType, pe, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	loopBody.NewStore(eevData, peUserdata)
+	peEvents := loopBody.NewGetElementPtr(peType, pe, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	loopBody.NewStore(eventsAll, peEvents)
+	pePad := loopBody.NewGetElementPtr(peType, pe, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	loopBody.NewStore(constant.NewInt(irtypes.I32, 0), pePad)
+
+	iNext := loopBody.NewAdd(i, constant.NewInt(irtypes.I32, 1))
+	i.Incs = append(i.Incs, ir.NewIncoming(iNext, loopBody))
+	loopBody.NewBr(loopCond)
+
+	loopEnd.NewCall(palFree, rawBuf)
+	loopEnd.NewRet(count)
+}
+
+// EmitReactorClose defines @pal_reactor_close(i32 rfd) → i32 (0 or -errno).
+// Closes the reactor fd (epoll/kqueue fd).
+func (p *PosixPAL) EmitReactorClose(module *ir.Module) *ir.Func {
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+
+	fn := module.NewFunc("pal_reactor_close", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(closeFn, fn.Params[0])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}

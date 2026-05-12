@@ -184,6 +184,21 @@ type PAL interface {
 	EmitGetAddrInfo(module *ir.Module) *ir.Func
 	// EmitFreeAddrInfo defines @pal_freeaddrinfo(i8* result) → void
 	EmitFreeAddrInfo(module *ir.Module) *ir.Func
+
+	// IO reactor primitives (T0070)
+	// EmitReactorCreate defines @pal_reactor_create() → i32 (fd or -errno)
+	EmitReactorCreate(module *ir.Module) *ir.Func
+	// EmitReactorAdd defines @pal_reactor_add(i32 rfd, i32 fd, i8* userdata) → i32 (0 or -errno)
+	// Registers fd for edge-triggered read+write monitoring.
+	EmitReactorAdd(module *ir.Module) *ir.Func
+	// EmitReactorRemove defines @pal_reactor_remove(i32 rfd, i32 fd) → i32 (0 or -errno)
+	EmitReactorRemove(module *ir.Module) *ir.Func
+	// EmitReactorPoll defines @pal_reactor_poll(i32 rfd, i8* events_buf, i32 max_events, i32 timeout_ms) → i32 (count or -errno)
+	// Writes PollEvent structs {i8* userdata, i32 events, i32 _pad} to events_buf.
+	// events: 1=readable, 2=writable, 4=error/hangup.
+	EmitReactorPoll(module *ir.Module) *ir.Func
+	// EmitReactorClose defines @pal_reactor_close(i32 rfd) → i32 (0 or -errno)
+	EmitReactorClose(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -1086,5 +1101,57 @@ func emitStubFreeAddrInfo(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(nil)
+	return fn
+}
+
+// --- Stub IO reactor implementations (used by WASM and Windows PALs, T0070) ---
+
+func emitStubReactorCreate(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_create", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubReactorAdd(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_add", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32),
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("userdata", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubReactorRemove(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_remove", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32),
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubReactorPoll(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_poll", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32),
+		ir.NewParam("events_buf", irtypes.I8Ptr),
+		ir.NewParam("max_events", irtypes.I32),
+		ir.NewParam("timeout_ms", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubReactorClose(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_close", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
 	return fn
 }

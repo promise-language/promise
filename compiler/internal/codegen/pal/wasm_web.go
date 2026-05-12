@@ -161,3 +161,16 @@ func (p *WasmWebPAL) EmitGetAddrInfo(module *ir.Module) *ir.Func { return emitSt
 func (p *WasmWebPAL) EmitFreeAddrInfo(module *ir.Module) *ir.Func {
 	return emitStubFreeAddrInfo(module)
 }
+
+// WasmWeb reactor stubs — no reactor support (T0070).
+func (p *WasmWebPAL) EmitReactorCreate(module *ir.Module) *ir.Func {
+	return emitStubReactorCreate(module)
+}
+func (p *WasmWebPAL) EmitReactorAdd(module *ir.Module) *ir.Func { return emitStubReactorAdd(module) }
+func (p *WasmWebPAL) EmitReactorRemove(module *ir.Module) *ir.Func {
+	return emitStubReactorRemove(module)
+}
+func (p *WasmWebPAL) EmitReactorPoll(module *ir.Module) *ir.Func { return emitStubReactorPoll(module) }
+func (p *WasmWebPAL) EmitReactorClose(module *ir.Module) *ir.Func {
+	return emitStubReactorClose(module)
+}

@@ -3181,3 +3181,14 @@ func (p *WindowsPAL) EmitReactorClose(module *ir.Module) *ir.Func {
 	doneBlk.NewRet(constant.NewInt(irtypes.I32, 0))
 	return fn
 }
+
+// Windows high-level socket address stubs — networking not yet wired (T0071).
+func (p *WindowsPAL) EmitSocketBindAddr(module *ir.Module) *ir.Func {
+	return emitStubSocketBindAddr(module)
+}
+func (p *WindowsPAL) EmitSocketConnectAddr(module *ir.Module) *ir.Func {
+	return emitStubSocketConnectAddr(module)
+}
+func (p *WindowsPAL) EmitSocketAcceptAddr(module *ir.Module) *ir.Func {
+	return emitStubSocketAcceptAddr(module)
+}

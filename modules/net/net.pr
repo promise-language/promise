@@ -1,0 +1,263 @@
+// net module — TCP networking with reactor-based non-blocking I/O (T0071).
+// Requires: use net;
+//
+// Uses the M:N scheduler's IO reactor for goroutine parking: when a socket
+// would block (EAGAIN), the goroutine suspends via coro.suspend and is woken
+// by the reactor poller thread when the fd becomes ready.
+// ── Extern PAL wrappers (codegen provides LLVM IR bodies) ────────────────────
+// Socket operations return -errno on failure.
+_net_socket_create(int domain, int typ, int protocol) int `extern("promise_net_socket_create");
+_net_socket_bind_addr(int fd, string host, int port) int `extern("promise_net_socket_bind_addr");
+_net_socket_listen(int fd, int backlog) int `extern("promise_net_socket_listen");
+_net_socket_accept_addr(int fd) int `extern("promise_net_socket_accept_addr");
+_net_socket_connect_addr(int fd, string host, int port) int `extern("promise_net_socket_connect_addr");
+_net_socket_close(int fd) int `extern("promise_net_socket_close");
+_net_socket_send(int fd, u8[]~data) int `extern("promise_net_socket_send");
+_net_socket_recv(int fd, u8[]~buf) int `extern("promise_net_socket_recv");
+_net_socket_shutdown(int fd, int how) int `extern("promise_net_socket_shutdown");
+_net_socket_get_error(int fd) int `extern("promise_net_socket_get_error");
+
+// Reactor integration — netpoll_open/close are regular bridge calls,
+// netpoll_wait_read/write are intercepted at codegen and replaced with
+// inline coro.suspend (T0232).
+_net_netpoll_open(int fd) int `extern("promise_net_netpoll_open");
+_net_netpoll_close(int pd) `extern("promise_net_netpoll_close");
+_net_netpoll_wait_read(int pd) `extern("promise_netpoll_wait_read");
+_net_netpoll_wait_write(int pd) `extern("promise_netpoll_wait_write");
+
+// ── Platform-specific errno constants ────────────────────────────────────────
+
+_eagain() int `target(macos) {
+  return 35;
+}
+_eagain() int `target(linux) {
+  return 11;
+}
+_eagain() int `target(wasm) {
+  return 11;
+}
+_eagain() int `target(windows) {
+  return 11;
+}
+_einprogress() int `target(macos) {
+  return 36;
+}
+_einprogress() int `target(linux) {
+  return 115;
+}
+_einprogress() int `target(wasm) {
+  return 115;
+}
+_einprogress() int `target(windows) {
+  return 115;
+}
+
+// ── Error type ──────────────────────────────────────────────────────────────
+
+type NetError is error `public `doc("A network I/O error with an errno code.") {
+  int code;
+}
+
+_make_net_error(int rc) NetError {
+  int c = 0 - rc;
+  return NetError(code: c, message: _net_strerror(c));
+}
+
+_net_strerror(int code) string {
+  return match code {
+    9 => "bad file descriptor",
+    13 => "permission denied",
+    22 => "invalid argument",
+    98 => "address already in use", // Linux EADDRINUSE
+    48 => "address already in use", // macOS EADDRINUSE
+    99 => "cannot assign requested address", // Linux EADDRNOTAVAIL
+    49 => "cannot assign requested address", // macOS EADDRNOTAVAIL
+    111 => "connection refused", // Linux ECONNREFUSED
+    61 => "connection refused", // macOS ECONNREFUSED
+    104 => "connection reset by peer", // Linux ECONNRESET
+    54 => "connection reset by peer", // macOS ECONNRESET
+    110 => "connection timed out", // Linux ETIMEDOUT
+    60 => "connection timed out", // macOS ETIMEDOUT
+    32 => "broken pipe",
+    _ => "network error (errno {code})",
+  };
+}
+
+// ── AF/SOCK constants ────────────────────────────────────────────────────────
+
+_af_inet() int {
+  return 2;
+}
+
+_sock_stream() int {
+  return 1;
+}
+
+// ── TcpListener ──────────────────────────────────────────────────────────────
+
+type TcpListener `public `doc("A TCP listener socket. Binds to an address and accepts incoming connections. Auto-closes on drop.") {
+  int _fd;
+  int _pd; // PollDesc pointer (as int) for reactor integration
+
+  bind!(string host, int port) Self `factory `public `doc("Creates a TCP listener bound to the given host and port. Host must be an IPv4 address (e.g. \"0.0.0.0\" or \"127.0.0.1\").") {
+    // Create socket
+    int fd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+    if fd < 0 {
+      raise _make_net_error(fd);
+    }
+    // Bind (sets SO_REUSEADDR internally)
+    int rc = _net_socket_bind_addr(fd, host, port);
+    if rc < 0 {
+      _net_socket_close(fd);
+      raise _make_net_error(rc);
+    }
+    // Listen with default backlog
+    rc = _net_socket_listen(fd, 128);
+    if rc < 0 {
+      _net_socket_close(fd);
+      raise _make_net_error(rc);
+    }
+    // Register with reactor for non-blocking accept
+    int pd = _net_netpoll_open(fd);
+    return TcpListener(_fd: fd, _pd: pd);
+  }
+
+  accept!(~this) TcpStream `public `doc("Accepts a new TCP connection. Blocks the goroutine (via reactor) until a connection arrives.") {
+    while true {
+      int fd = _net_socket_accept_addr(this._fd);
+      if fd >= 0 {
+        int pd = _net_netpoll_open(fd);
+        return TcpStream(_fd: fd, _pd: pd);
+      }
+      int err = 0 - fd;
+      if err == _eagain() {
+        _net_netpoll_wait_read(this._pd);
+        continue;
+      }
+      raise _make_net_error(fd);
+    }
+    // Unreachable — loop always returns or raises.
+    raise NetError(code: 0, message: "unreachable");
+  }
+
+  close!(~this) `public `doc("Closes the listener. Raises NetError on failure.") {
+    if this._fd < 0 {
+      raise NetError(code: 9, message: "bad file descriptor");
+    }
+    _net_netpoll_close(this._pd);
+    int rc = _net_socket_close(this._fd);
+    this._fd = -1;
+    this._pd = 0;
+    if rc < 0 {
+      raise _make_net_error(rc);
+    }
+  }
+
+  drop(~this) {
+    if this._fd >= 0 {
+      _net_netpoll_close(this._pd);
+      _net_socket_close(this._fd);
+    }
+  }
+}
+
+// ─ TcpStream ──────────────────────────────────────────────────────────────
+
+type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read/write with reactor-based goroutine parking. Auto-closes on drop.") {
+  int _fd;
+  int _pd; // PollDesc pointer (as int) for reactor integration
+
+  connect!(string host, int port) Self `factory `public `doc("Connects to a TCP server at the given host and port. Host must be an IPv4 address. Blocks the goroutine until the connection is established.") {
+    int fd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+    if fd < 0 {
+      raise _make_net_error(fd);
+    }
+    // Register with reactor BEFORE connect (fd is set non-blocking by netpoll_open)
+    int pd = _net_netpoll_open(fd);
+    int rc = _net_socket_connect_addr(fd, host, port);
+    if rc < 0 {
+      int err = 0 - rc;
+      if err == _einprogress() {
+        // Non-blocking connect in progress — wait for writable, then check SO_ERROR
+        _net_netpoll_wait_write(pd);
+        int sock_err = _net_socket_get_error(fd);
+        if sock_err != 0 {
+          _net_netpoll_close(pd);
+          _net_socket_close(fd);
+          raise NetError(code: sock_err, message: _net_strerror(sock_err));
+        }
+      } else {
+        _net_netpoll_close(pd);
+        _net_socket_close(fd);
+        raise _make_net_error(rc);
+      }
+    }
+    return TcpStream(_fd: fd, _pd: pd);
+  }
+
+  read!(~this, u8[]~buf) int `public `doc("Reads bytes into buf. Returns the number of bytes read (0 at EOF). Blocks the goroutine until data is available.") {
+    while true {
+      int n = _net_socket_recv(this._fd, buf);
+      if n >= 0 {
+        return n;
+      }
+      int err = 0 - n;
+      if err == _eagain() {
+        _net_netpoll_wait_read(this._pd);
+        continue;
+      }
+      raise _make_net_error(n);
+    }
+    raise NetError(code: 0, message: "unreachable");
+  }
+
+  write!(~this, u8[]~data) int `public `doc("Writes bytes from data. Returns the number of bytes written. Blocks the goroutine until the socket is writable.") {
+    while true {
+      int n = _net_socket_send(this._fd, data);
+      if n >= 0 {
+        return n;
+      }
+      int err = 0 - n;
+      if err == _eagain() {
+        _net_netpoll_wait_write(this._pd);
+        continue;
+      }
+      raise _make_net_error(n);
+    }
+    raise NetError(code: 0, message: "unreachable");
+  }
+
+  close!(~this) `public `doc("Closes the stream. Raises NetError on failure.") {
+    if this._fd < 0 {
+      raise NetError(code: 9, message: "bad file descriptor");
+    }
+    _net_netpoll_close(this._pd);
+    int rc = _net_socket_close(this._fd);
+    this._fd = -1;
+    this._pd = 0;
+    if rc < 0 {
+      raise _make_net_error(rc);
+    }
+  }
+
+  shutdown!(~this, bool read = false, bool write = false) `public `doc("Shuts down part of the connection. Pass read: true and/or write: true.") {
+    int how = 0;
+    if read && write {
+      how = 2; // SHUT_RDWR
+    } else if write {
+      how = 1; // SHUT_WR
+    }
+    // how == 0 is SHUT_RD
+    int rc = _net_socket_shutdown(this._fd, how);
+    if rc < 0 {
+      raise _make_net_error(rc);
+    }
+  }
+
+  drop(~this) {
+    if this._fd >= 0 {
+      _net_netpoll_close(this._pd);
+      _net_socket_close(this._fd);
+    }
+  }
+}

@@ -295,6 +295,7 @@ The standard library (`modules/std/`, 37 files) is auto-imported via `use std as
 | `strings` | `modules/strings/strings.pr` | Extended string utilities |
 | `os` | `modules/os/os.pr` | OS interaction, environment, one-shot `execute`, streaming `Process`/`ProcessInput`/`ProcessOutput`, OS info (user/group/hostname/pid), signal handling (`Signal` enum, `setup_signal_handling`, `receive_signal`) |
 | `time` | `modules/time/time.pr` | Extended time utilities |
+| `net` | `modules/net/net.pr` | TCP networking: `TcpListener` (bind/accept/close), `TcpStream` (connect/read/write/close/shutdown), `NetError`, reactor-based non-blocking I/O |
 | `http` | `modules/http/http.pr` | HTTP client (in progress) |
 
 ## Test Suite

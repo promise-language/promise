@@ -1,0 +1,41 @@
+// ── TcpListener tests ────────────────────────────────────────────────────────
+test_listener_bind_auto_drop() `test(exclude: "wasm32") {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+}
+
+test_listener_bind_and_close() `test(exclude: "wasm32") {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+  listener.close()?!;
+}
+
+_try_bind_invalid!() bool {
+  TcpListener listener = TcpListener.bind("not_an_ip", 0)?^;
+  listener.close()?^;
+  return false;
+}
+
+test_listener_bind_invalid_address() `test(exclude: "wasm32") {
+  bool ok = _try_bind_invalid()? e {
+    return; // bind failed as expected
+  };
+  assert(false, "bind should have failed for invalid address");
+}
+
+// ── Low-level tests ─────────────────────────────────────────────────────────
+
+test_raw_socket_create_close() `test(exclude: "wasm32") {
+  int fd = _net_socket_create(2, 1, 0);
+  assert(fd >= 0, "socket created");
+  int rc = _net_socket_close(fd);
+  assert(rc >= 0, "socket closed");
+}
+
+test_netpoll_open_close() `test(exclude: "wasm32") {
+  int fd = _net_socket_create(2, 1, 0);
+  assert(fd >= 0, "socket created");
+  int pd = _net_netpoll_open(fd);
+  assert(pd != 0, "netpoll opened");
+  _net_netpoll_close(pd);
+  int rc = _net_socket_close(fd);
+  assert(rc >= 0, "socket closed");
+}

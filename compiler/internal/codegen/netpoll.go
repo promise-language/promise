@@ -390,6 +390,17 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	c.funcs["promise_netpoll_loop"] = fn
 }
 
+// extractI64FromIntArg extracts the raw i64 from an int argument value.
+// argVal may be a raw i64 (e.g. field access on a heap type) or a full
+// value struct {i8*, T_i*, i64} (e.g. local variable load). Returns i64.
+func (c *Compiler) extractI64FromIntArg(argVal value.Value) value.Value {
+	if _, ok := argVal.Type().(*irtypes.IntType); ok {
+		return argVal // already raw i64
+	}
+	// Value struct — raw i64 is at field index 2
+	return c.block.NewExtractValue(argVal, 2)
+}
+
 // --- Inline codegen for netpoll wait operations (T0232) ---
 //
 // These functions emit IR directly into the current function's block stream,

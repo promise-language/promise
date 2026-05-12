@@ -2132,6 +2132,14 @@ func (c *Compiler) wrapMainWithScheduler() {
 		entry.NewCall(c.funcs["promise_sched_init"], numCPUs)
 	}
 
+	// Initialize IO reactor if the net module is imported (T0071).
+	// Must run after sched_init so the scheduler globals are available.
+	if c.needsNetpoll {
+		if initFn, ok := c.funcs["promise_netpoll_init"]; ok {
+			entry.NewCall(initFn)
+		}
+	}
+
 	// Create coroutine for user main — compile body inline with inCoroutine=true
 	// so that channel ops in main() use coroutine parking instead of thread-blocking.
 	coroFn := c.module.NewFunc(".goroutine.main", irtypes.I8Ptr)

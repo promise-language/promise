@@ -358,3 +358,14 @@ func (p *WasmPAL) EmitReactorAdd(module *ir.Module) *ir.Func    { return emitStu
 func (p *WasmPAL) EmitReactorRemove(module *ir.Module) *ir.Func { return emitStubReactorRemove(module) }
 func (p *WasmPAL) EmitReactorPoll(module *ir.Module) *ir.Func   { return emitStubReactorPoll(module) }
 func (p *WasmPAL) EmitReactorClose(module *ir.Module) *ir.Func  { return emitStubReactorClose(module) }
+
+// WASM high-level socket address stubs — no networking (T0071).
+func (p *WasmPAL) EmitSocketBindAddr(module *ir.Module) *ir.Func {
+	return emitStubSocketBindAddr(module)
+}
+func (p *WasmPAL) EmitSocketConnectAddr(module *ir.Module) *ir.Func {
+	return emitStubSocketConnectAddr(module)
+}
+func (p *WasmPAL) EmitSocketAcceptAddr(module *ir.Module) *ir.Func {
+	return emitStubSocketAcceptAddr(module)
+}

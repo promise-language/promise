@@ -7,6 +7,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 )
 
 // PosixPAL implements PAL for POSIX systems (macOS, Linux) using libc write/exit.
@@ -2286,6 +2287,212 @@ func (p *PosixPAL) EmitFreeAddrInfo(module *ir.Module) *ir.Func {
 	entry.NewCall(freeaddrinfoFn, fn.Params[0])
 	entry.NewRet(nil)
 	return fn
+}
+
+// --- POSIX high-level socket address operations (T0071) ---
+//
+// These functions construct sockaddr_in internally via inet_pton, avoiding complex
+// C struct construction in the codegen bridge. Host must be null-terminated IPv4 string.
+
+// EmitSocketBindAddr defines @pal_socket_bind_addr(i32 fd, i8* host, i32 port) → i32.
+// Parses host via inet_pton, constructs sockaddr_in, sets SO_REUSEADDR, calls bind.
+func (p *PosixPAL) EmitSocketBindAddr(module *ir.Module) *ir.Func {
+	inetPtonFn := getOrDeclareFunc(module, "inet_pton", irtypes.I32,
+		ir.NewParam("af", irtypes.I32),
+		ir.NewParam("src", irtypes.I8Ptr),
+		ir.NewParam("dst", irtypes.I8Ptr))
+	setsockoptFn := getOrDeclareFunc(module, "setsockopt", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("level", irtypes.I32),
+		ir.NewParam("optname", irtypes.I32),
+		ir.NewParam("optval", irtypes.I8Ptr),
+		ir.NewParam("optlen", irtypes.I32))
+	bindFn := getOrDeclareFunc(module, "bind", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	var solSocket, soReuseAddr int64
+	if p.isMacOS() {
+		solSocket = 0xFFFF
+		soReuseAddr = 0x0004
+	} else {
+		solSocket = 1
+		soReuseAddr = 2
+	}
+
+	fn := module.NewFunc("pal_socket_bind_addr", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("port", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Allocate sockaddr_in (16 bytes) on stack, zero-initialize
+	saddrArr := irtypes.NewArray(16, irtypes.I8)
+	saddr := entry.NewAlloca(saddrArr)
+	saddrPtr := entry.NewBitCast(saddr, irtypes.I8Ptr)
+	entry.NewCall(memsetFn, saddrPtr, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, 16))
+
+	// Set sin_family = AF_INET (2)
+	p.emitStoreSockaddrFamily(entry, saddrPtr)
+
+	// Set sin_port = htons(port) at offset 2
+	portI16 := entry.NewTrunc(fn.Params[2], irtypes.I16)
+	netPort := emitHtons(entry, portI16)
+	portPtr := entry.NewBitCast(
+		entry.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 2)),
+		irtypes.NewPointer(irtypes.I16))
+	entry.NewStore(netPort, portPtr)
+
+	// Set sin_addr via inet_pton(AF_INET, host, &saddr[4])
+	addrDst := entry.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 4))
+	inetRet := entry.NewCall(inetPtonFn, constant.NewInt(irtypes.I32, 2), fn.Params[1], addrDst)
+	isOk := entry.NewICmp(enum.IPredEQ, inetRet, constant.NewInt(irtypes.I32, 1))
+	bindBlk := fn.NewBlock(".bind")
+	errInvalBlk := fn.NewBlock(".err_inval")
+	entry.NewCondBr(isOk, bindBlk, errInvalBlk)
+
+	// Invalid address → return -EINVAL (22 on both platforms)
+	errInvalBlk.NewRet(constant.NewInt(irtypes.I32, -22))
+
+	// Set SO_REUSEADDR
+	oneAlloca := bindBlk.NewAlloca(irtypes.I32)
+	bindBlk.NewStore(constant.NewInt(irtypes.I32, 1), oneAlloca)
+	onePtr := bindBlk.NewBitCast(oneAlloca, irtypes.I8Ptr)
+	bindBlk.NewCall(setsockoptFn, fn.Params[0],
+		constant.NewInt(irtypes.I32, solSocket),
+		constant.NewInt(irtypes.I32, soReuseAddr),
+		onePtr, constant.NewInt(irtypes.I32, 4))
+
+	// bind(fd, &sockaddr, 16)
+	bindRet := bindBlk.NewCall(bindFn, fn.Params[0], saddrPtr, constant.NewInt(irtypes.I32, 16))
+	isErr := bindBlk.NewICmp(enum.IPredSLT, bindRet, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	bindBlk.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitSocketConnectAddr defines @pal_socket_connect_addr(i32 fd, i8* host, i32 port) → i32.
+// Parses host via inet_pton, constructs sockaddr_in, calls connect.
+// Returns 0 on success, -EINPROGRESS for non-blocking sockets, or -errno on error.
+func (p *PosixPAL) EmitSocketConnectAddr(module *ir.Module) *ir.Func {
+	inetPtonFn := getOrDeclareFunc(module, "inet_pton", irtypes.I32,
+		ir.NewParam("af", irtypes.I32),
+		ir.NewParam("src", irtypes.I8Ptr),
+		ir.NewParam("dst", irtypes.I8Ptr))
+	connectFn := getOrDeclareFunc(module, "connect", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	fn := module.NewFunc("pal_socket_connect_addr", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("port", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Allocate and zero sockaddr_in (16 bytes)
+	saddrArr := irtypes.NewArray(16, irtypes.I8)
+	saddr := entry.NewAlloca(saddrArr)
+	saddrPtr := entry.NewBitCast(saddr, irtypes.I8Ptr)
+	entry.NewCall(memsetFn, saddrPtr, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, 16))
+
+	// sin_family = AF_INET
+	p.emitStoreSockaddrFamily(entry, saddrPtr)
+
+	// sin_port = htons(port) at offset 2
+	portI16 := entry.NewTrunc(fn.Params[2], irtypes.I16)
+	netPort := emitHtons(entry, portI16)
+	portPtr := entry.NewBitCast(
+		entry.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 2)),
+		irtypes.NewPointer(irtypes.I16))
+	entry.NewStore(netPort, portPtr)
+
+	// inet_pton(AF_INET, host, &saddr[4])
+	addrDst := entry.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 4))
+	inetRet := entry.NewCall(inetPtonFn, constant.NewInt(irtypes.I32, 2), fn.Params[1], addrDst)
+	isOk := entry.NewICmp(enum.IPredEQ, inetRet, constant.NewInt(irtypes.I32, 1))
+	connBlk := fn.NewBlock(".connect")
+	errInvalBlk := fn.NewBlock(".err_inval")
+	entry.NewCondBr(isOk, connBlk, errInvalBlk)
+
+	errInvalBlk.NewRet(constant.NewInt(irtypes.I32, -22)) // -EINVAL
+
+	// connect(fd, &sockaddr, 16)
+	connRet := connBlk.NewCall(connectFn, fn.Params[0], saddrPtr, constant.NewInt(irtypes.I32, 16))
+	isErr := connBlk.NewICmp(enum.IPredSLT, connRet, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	connBlk.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitSocketAcceptAddr defines @pal_socket_accept_addr(i32 listen_fd) → i32.
+// Calls accept(fd, NULL, NULL) — no address extraction needed.
+func (p *PosixPAL) EmitSocketAcceptAddr(module *ir.Module) *ir.Func {
+	acceptFn := getOrDeclareFunc(module, "accept", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.NewPointer(irtypes.I32)))
+
+	fn := module.NewFunc("pal_socket_accept_addr", irtypes.I32,
+		ir.NewParam("listen_fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	ret := entry.NewCall(acceptFn, fn.Params[0],
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.NewPointer(irtypes.I32)))
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// emitStoreSockaddrFamily stores AF_INET (2) into the sin_family field of a sockaddr_in.
+// macOS: sin_len=16 at offset 0 (i8), sin_family at offset 1 (i8).
+// Linux: sin_family at offset 0 (i16).
+func (p *PosixPAL) emitStoreSockaddrFamily(block *ir.Block, saddrPtr value.Value) {
+	if p.isMacOS() {
+		// macOS BSD-style: sin_len (i8) at offset 0, sin_family (i8) at offset 1
+		block.NewStore(constant.NewInt(irtypes.I8, 16), saddrPtr) // sin_len = sizeof(sockaddr_in)
+		famPtr := block.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 1))
+		block.NewStore(constant.NewInt(irtypes.I8, 2), famPtr) // AF_INET
+	} else {
+		// Linux: sin_family (i16) at offset 0
+		famPtr := block.NewBitCast(saddrPtr, irtypes.NewPointer(irtypes.I16))
+		block.NewStore(constant.NewInt(irtypes.I16, 2), famPtr) // AF_INET
+	}
+}
+
+// emitHtons emits byte-swap for 16-bit port (little-endian → network byte order).
+func emitHtons(block *ir.Block, port value.Value) value.Value {
+	hi := block.NewLShr(port, constant.NewInt(irtypes.I16, 8))
+	lo := block.NewAnd(port, constant.NewInt(irtypes.I16, 0xFF))
+	loShifted := block.NewShl(lo, constant.NewInt(irtypes.I16, 8))
+	return block.NewOr(hi, loShifted)
 }
 
 // --- POSIX IO reactor primitives (T0070) ---

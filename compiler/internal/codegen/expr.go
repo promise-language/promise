@@ -1335,13 +1335,15 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	if isExtern {
 		ext := c.externs[ident.Name]
 		// Intercept netpoll wait operations — emit inline coro.suspend (T0232)
+		// The PollDesc pointer is stored as a Promise int. argVals[0] may be
+		// a raw i64 (field access) or a value struct {i8*, T_i*, i64} (local var).
 		if ext.CName == "promise_netpoll_wait_read" {
-			c.genNetpollWaitRead(argVals[0])
+			c.genNetpollWaitRead(c.extractI64FromIntArg(argVals[0]))
 			c.clearVariadicStaticFlags(variadicPTs)
 			return nil
 		}
 		if ext.CName == "promise_netpoll_wait_write" {
-			c.genNetpollWaitWrite(argVals[0])
+			c.genNetpollWaitWrite(c.extractI64FromIntArg(argVals[0]))
 			c.clearVariadicStaticFlags(variadicPTs)
 			return nil
 		}

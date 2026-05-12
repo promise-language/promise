@@ -174,3 +174,14 @@ func (p *WasmWebPAL) EmitReactorPoll(module *ir.Module) *ir.Func { return emitSt
 func (p *WasmWebPAL) EmitReactorClose(module *ir.Module) *ir.Func {
 	return emitStubReactorClose(module)
 }
+
+// WasmWeb high-level socket address stubs — no networking (T0071).
+func (p *WasmWebPAL) EmitSocketBindAddr(module *ir.Module) *ir.Func {
+	return emitStubSocketBindAddr(module)
+}
+func (p *WasmWebPAL) EmitSocketConnectAddr(module *ir.Module) *ir.Func {
+	return emitStubSocketConnectAddr(module)
+}
+func (p *WasmWebPAL) EmitSocketAcceptAddr(module *ir.Module) *ir.Func {
+	return emitStubSocketAcceptAddr(module)
+}

@@ -291,6 +291,11 @@ type Compiler struct {
 	palReactorPoll   *ir.Func // @pal_reactor_poll(i32 rfd, i8* events_buf, i32 max_events, i32 timeout_ms) → i32
 	palReactorClose  *ir.Func // @pal_reactor_close(i32 rfd) → i32
 
+	// PAL high-level socket address operations (T0071)
+	palSocketBindAddr    *ir.Func // @pal_socket_bind_addr(i32 fd, i8* host, i32 port) → i32
+	palSocketConnectAddr *ir.Func // @pal_socket_connect_addr(i32 fd, i8* host, i32 port) → i32
+	palSocketAcceptAddr  *ir.Func // @pal_socket_accept_addr(i32 listen_fd) → i32
+
 	// Signal pipe globals (NOT TLS — shared across all threads)
 	signalPipeRdFd *ir.Global // @__promise_signal_pipe_rd (i32)
 
@@ -344,11 +349,12 @@ type Compiler struct {
 	structuralDrop *ir.Func // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
 
 	// Target triple and platform flags
-	target      string // LLVM target triple
-	isWasm      bool   // true if targeting wasm32
-	isWindows   bool   // true if targeting windows-msvc
-	debugFree   bool   // poison-fill freed memory for UAF detection (debug builds)
-	nextDebugID int    // counter for emitDebugPrint global names
+	target       string // LLVM target triple
+	isWasm       bool   // true if targeting wasm32
+	isWindows    bool   // true if targeting windows-msvc
+	debugFree    bool   // poison-fill freed memory for UAF detection (debug builds)
+	needsNetpoll bool   // true if net module imported — netpoll_init needed at startup (T0071)
+	nextDebugID  int    // counter for emitDebugPrint global names
 
 	// Global constants for print/panic functions
 	newlineGlobal     *ir.Global // "\n" (1 byte)
@@ -840,6 +846,17 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		spinYield.NewBr(spinHeader)
 
 		entry = spinDone
+	}
+
+	// Initialize IO reactor if the net module is imported (T0071).
+	// Must be after sched_init and before alloc count reset.
+	// The reactor thread allocates an event buffer and sigaltstack on startup —
+	// sleep briefly to let those allocations complete before the reset.
+	if c.needsNetpoll {
+		if initFn, ok := c.funcs["promise_netpoll_init"]; ok {
+			entry.NewCall(initFn)
+			entry.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 1000)) // 1ms for reactor thread init
+		}
 	}
 
 	// B0165: Reset alloc count to 0 after scheduler init so scheduler

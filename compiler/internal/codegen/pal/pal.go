@@ -199,6 +199,19 @@ type PAL interface {
 	EmitReactorPoll(module *ir.Module) *ir.Func
 	// EmitReactorClose defines @pal_reactor_close(i32 rfd) → i32 (0 or -errno)
 	EmitReactorClose(module *ir.Module) *ir.Func
+
+	// High-level socket address operations (T0071)
+	// These construct sockaddr_in internally via inet_pton, avoiding complex C struct
+	// construction in the codegen bridge. Host must be a null-terminated IPv4 address string.
+	// EmitSocketBindAddr defines @pal_socket_bind_addr(i32 fd, i8* host, i32 port) → i32 (0 or -errno)
+	// Parses host via inet_pton, constructs sockaddr_in, sets SO_REUSEADDR, calls bind.
+	EmitSocketBindAddr(module *ir.Module) *ir.Func
+	// EmitSocketConnectAddr defines @pal_socket_connect_addr(i32 fd, i8* host, i32 port) → i32 (0 or -errno/-EINPROGRESS)
+	// Parses host via inet_pton, constructs sockaddr_in, calls connect.
+	EmitSocketConnectAddr(module *ir.Module) *ir.Func
+	// EmitSocketAcceptAddr defines @pal_socket_accept_addr(i32 listen_fd) → i32 (fd or -errno)
+	// Calls accept with NULL addr (no address extraction needed).
+	EmitSocketAcceptAddr(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -1150,6 +1163,39 @@ func emitStubReactorPoll(module *ir.Module) *ir.Func {
 func emitStubReactorClose(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_reactor_close", irtypes.I32,
 		ir.NewParam("rfd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+// --- Stub high-level socket address implementations (T0071) ---
+
+func emitStubSocketBindAddr(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_bind_addr", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("port", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketConnectAddr(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_connect_addr", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("port", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketAcceptAddr(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_accept_addr", irtypes.I32,
+		ir.NewParam("listen_fd", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))

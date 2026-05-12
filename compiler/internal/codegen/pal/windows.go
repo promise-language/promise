@@ -2751,15 +2751,433 @@ func (p *WindowsPAL) EmitGetCwd(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// Windows reactor stubs — IOCP implementation deferred (T0070).
+// --- Windows IO reactor using WSAPoll (T0070) ---
+//
+// Windows doesn't have epoll/kqueue. WSAPoll provides readiness-based polling
+// similar to POSIX poll(). Since WSAPoll operates on an array of WSAPOLLFD
+// structs (no reactor fd), we maintain global arrays of monitored sockets and
+// their associated userdata pointers. The "reactor fd" (rfd) parameter is
+// ignored on Windows — all state lives in globals.
+//
+// WSAPOLLFD layout on Windows x64: {SOCKET fd (i64), SHORT events (i16), SHORT revents (i16)}
+// ABI size: 16 bytes (8-byte aligned due to SOCKET).
+//
+// Thread safety: a mutex protects all global state. The poller thread holds the
+// lock during WSAPoll (10ms timeout), which briefly blocks add/remove operations.
+
+const reactorMaxFds = 1024
+
+// wsaPollFdType returns {i64, i16, i16} — WSAPOLLFD on Windows x64.
+func wsaPollFdType() *irtypes.StructType {
+	return irtypes.NewStruct(irtypes.I64, irtypes.I16, irtypes.I16)
+}
+
+// getOrCreateReactorGlobals lazily creates the global arrays used by the Windows reactor.
+func getOrCreateReactorGlobals(module *ir.Module) (pollfds, userdata, count, lock *ir.Global) {
+	for _, g := range module.Globals {
+		switch g.Name() {
+		case "__reactor_pollfds":
+			pollfds = g
+		case "__reactor_userdata":
+			userdata = g
+		case "__reactor_count":
+			count = g
+		case "__reactor_lock":
+			lock = g
+		}
+	}
+	if pollfds != nil {
+		return
+	}
+
+	pfdArrayType := irtypes.NewArray(reactorMaxFds, wsaPollFdType())
+	pollfds = module.NewGlobalDef("__reactor_pollfds", constant.NewZeroInitializer(pfdArrayType))
+	pollfds.Immutable = false
+
+	udArrayType := irtypes.NewArray(reactorMaxFds, irtypes.I8Ptr)
+	userdata = module.NewGlobalDef("__reactor_userdata", constant.NewZeroInitializer(udArrayType))
+	userdata.Immutable = false
+
+	count = module.NewGlobalDef("__reactor_count", constant.NewInt(irtypes.I32, 0))
+	count.Immutable = false
+
+	lock = module.NewGlobalDef("__reactor_lock", constant.NewNull(irtypes.I8Ptr))
+	lock.Immutable = false
+
+	return
+}
+
+// EmitReactorCreate defines @pal_reactor_create() → i32 (0 on success, -error on failure).
+// Initializes the global reactor state: creates a mutex and resets the fd count.
 func (p *WindowsPAL) EmitReactorCreate(module *ir.Module) *ir.Func {
-	return emitStubReactorCreate(module)
+	fn := module.NewFunc("pal_reactor_create", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	_, _, countG, lockG := getOrCreateReactorGlobals(module)
+
+	// Ensure Winsock is initialized (WSAPoll requires it)
+	p.emitWSAEnsureInit(module, entry)
+
+	// Create mutex for reactor state protection
+	mutexInit := getOrDeclareFunc(module, "pal_mutex_init", irtypes.I8Ptr)
+	lock := entry.NewCall(mutexInit)
+	entry.NewStore(lock, lockG)
+
+	// Reset count
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), countG)
+
+	// Return 0 — dummy reactor fd (unused on Windows)
+	entry.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
 }
-func (p *WindowsPAL) EmitReactorAdd(module *ir.Module) *ir.Func { return emitStubReactorAdd(module) }
+
+// EmitReactorAdd defines @pal_reactor_add(i32 rfd, i32 fd, i8* userdata) → i32 (0 or -error).
+// Adds a socket to the global WSAPOLLFD array for POLLRDNORM|POLLWRNORM monitoring.
+func (p *WindowsPAL) EmitReactorAdd(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_add", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32),
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("userdata", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	pfdG, udG, countG, lockG := getOrCreateReactorGlobals(module)
+	pfdType := wsaPollFdType()
+	pfdArrayType := irtypes.NewArray(reactorMaxFds, pfdType)
+	udArrayType := irtypes.NewArray(reactorMaxFds, irtypes.I8Ptr)
+
+	// Lock
+	mutexLock := getOrDeclareFunc(module, "pal_mutex_lock", irtypes.Void,
+		ir.NewParam("m", irtypes.I8Ptr))
+	mutexUnlock := getOrDeclareFunc(module, "pal_mutex_unlock", irtypes.Void,
+		ir.NewParam("m", irtypes.I8Ptr))
+	lock := entry.NewLoad(irtypes.I8Ptr, lockG)
+	entry.NewCall(mutexLock, lock)
+
+	// Check capacity
+	count := entry.NewLoad(irtypes.I32, countG)
+	isFull := entry.NewICmp(enum.IPredSGE, count, constant.NewInt(irtypes.I32, reactorMaxFds))
+	fullBlk := fn.NewBlock(".full")
+	okBlk := fn.NewBlock(".ok")
+	entry.NewCondBr(isFull, fullBlk, okBlk)
+
+	// Full — unlock and return error
+	fullBlk.NewCall(mutexUnlock, lock)
+	fullBlk.NewRet(constant.NewInt(irtypes.I32, -12)) // -ENOMEM
+
+	// Store WSAPOLLFD at pollfds[count]
+	pfdPtr := okBlk.NewGetElementPtr(pfdArrayType, pfdG,
+		constant.NewInt(irtypes.I32, 0), count)
+	// fd field (i64)
+	fdField := okBlk.NewGetElementPtr(pfdType, pfdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	fdI64 := okBlk.NewZExt(fn.Params[1], irtypes.I64)
+	okBlk.NewStore(fdI64, fdField)
+	// events field: POLLRDNORM(0x0100) | POLLWRNORM(0x0010) = 0x0110
+	evField := okBlk.NewGetElementPtr(pfdType, pfdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	okBlk.NewStore(constant.NewInt(irtypes.I16, 0x0110), evField)
+	// revents = 0
+	revField := okBlk.NewGetElementPtr(pfdType, pfdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	okBlk.NewStore(constant.NewInt(irtypes.I16, 0), revField)
+
+	// Store userdata at userdata[count]
+	udPtr := okBlk.NewGetElementPtr(udArrayType, udG,
+		constant.NewInt(irtypes.I32, 0), count)
+	okBlk.NewStore(fn.Params[2], udPtr)
+
+	// count++
+	newCount := okBlk.NewAdd(count, constant.NewInt(irtypes.I32, 1))
+	okBlk.NewStore(newCount, countG)
+
+	// Unlock and return 0
+	okBlk.NewCall(mutexUnlock, lock)
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitReactorRemove defines @pal_reactor_remove(i32 rfd, i32 fd) → i32 (0 or -error).
+// Finds fd in the global array by linear scan, swaps with the last entry, and decrements count.
 func (p *WindowsPAL) EmitReactorRemove(module *ir.Module) *ir.Func {
-	return emitStubReactorRemove(module)
+	fn := module.NewFunc("pal_reactor_remove", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32),
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	pfdG, udG, countG, lockG := getOrCreateReactorGlobals(module)
+	pfdType := wsaPollFdType()
+	pfdArrayType := irtypes.NewArray(reactorMaxFds, pfdType)
+	udArrayType := irtypes.NewArray(reactorMaxFds, irtypes.I8Ptr)
+
+	mutexLock := getOrDeclareFunc(module, "pal_mutex_lock", irtypes.Void,
+		ir.NewParam("m", irtypes.I8Ptr))
+	mutexUnlock := getOrDeclareFunc(module, "pal_mutex_unlock", irtypes.Void,
+		ir.NewParam("m", irtypes.I8Ptr))
+
+	lock := entry.NewLoad(irtypes.I8Ptr, lockG)
+	entry.NewCall(mutexLock, lock)
+
+	count := entry.NewLoad(irtypes.I32, countG)
+	fdI64 := entry.NewZExt(fn.Params[1], irtypes.I64)
+
+	// Linear scan: for i = 0; i < count; i++
+	loopCond := fn.NewBlock(".loop_cond")
+	loopBody := fn.NewBlock(".loop_body")
+	found := fn.NewBlock(".found")
+	notFound := fn.NewBlock(".not_found")
+	doSwap := fn.NewBlock(".do_swap")
+	decCount := fn.NewBlock(".dec_count")
+	done := fn.NewBlock(".done")
+
+	entry.NewBr(loopCond)
+
+	i := loopCond.NewPhi(ir.NewIncoming(constant.NewInt(irtypes.I32, 0), entry))
+	cmp := loopCond.NewICmp(enum.IPredSLT, i, count)
+	loopCond.NewCondBr(cmp, loopBody, notFound)
+
+	// Load pollfds[i].fd and compare
+	pfdI := loopBody.NewGetElementPtr(pfdArrayType, pfdG,
+		constant.NewInt(irtypes.I32, 0), i)
+	fdFieldI := loopBody.NewGetElementPtr(pfdType, pfdI,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	curFd := loopBody.NewLoad(irtypes.I64, fdFieldI)
+	isMatch := loopBody.NewICmp(enum.IPredEQ, curFd, fdI64)
+	iNext := loopBody.NewAdd(i, constant.NewInt(irtypes.I32, 1))
+	i.Incs = append(i.Incs, ir.NewIncoming(iNext, loopBody))
+	loopBody.NewCondBr(isMatch, found, loopCond)
+
+	// Found at index i — swap with last if needed
+	lastIdx := found.NewSub(count, constant.NewInt(irtypes.I32, 1))
+	isLast := found.NewICmp(enum.IPredEQ, i, lastIdx)
+	found.NewCondBr(isLast, decCount, doSwap)
+
+	// Copy pollfds[last] → pollfds[i]
+	pfdLast := doSwap.NewGetElementPtr(pfdArrayType, pfdG,
+		constant.NewInt(irtypes.I32, 0), lastIdx)
+	// Copy fd
+	lastFdPtr := doSwap.NewGetElementPtr(pfdType, pfdLast,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	lastFd := doSwap.NewLoad(irtypes.I64, lastFdPtr)
+	pfdICopy := doSwap.NewGetElementPtr(pfdArrayType, pfdG,
+		constant.NewInt(irtypes.I32, 0), i)
+	fdFieldICopy := doSwap.NewGetElementPtr(pfdType, pfdICopy,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	doSwap.NewStore(lastFd, fdFieldICopy)
+	// Copy events
+	lastEvPtr := doSwap.NewGetElementPtr(pfdType, pfdLast,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	lastEv := doSwap.NewLoad(irtypes.I16, lastEvPtr)
+	evFieldICopy := doSwap.NewGetElementPtr(pfdType, pfdICopy,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	doSwap.NewStore(lastEv, evFieldICopy)
+	// Copy revents
+	lastRevPtr := doSwap.NewGetElementPtr(pfdType, pfdLast,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	lastRev := doSwap.NewLoad(irtypes.I16, lastRevPtr)
+	revFieldICopy := doSwap.NewGetElementPtr(pfdType, pfdICopy,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	doSwap.NewStore(lastRev, revFieldICopy)
+	// Copy userdata[last] → userdata[i]
+	udLast := doSwap.NewGetElementPtr(udArrayType, udG,
+		constant.NewInt(irtypes.I32, 0), lastIdx)
+	lastUd := doSwap.NewLoad(irtypes.I8Ptr, udLast)
+	udICopy := doSwap.NewGetElementPtr(udArrayType, udG,
+		constant.NewInt(irtypes.I32, 0), i)
+	doSwap.NewStore(lastUd, udICopy)
+	doSwap.NewBr(decCount)
+
+	// Decrement count
+	decCount.NewStore(lastIdx, countG)
+	decCount.NewBr(done)
+
+	// Not found — nothing to do
+	notFound.NewBr(done)
+
+	// Unlock and return 0
+	done.NewCall(mutexUnlock, lock)
+	done.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
 }
-func (p *WindowsPAL) EmitReactorPoll(module *ir.Module) *ir.Func { return emitStubReactorPoll(module) }
+
+// EmitReactorPoll defines @pal_reactor_poll(i32 rfd, i8* events_buf, i32 max_events, i32 timeout_ms) → i32.
+// Calls WSAPoll on the global WSAPOLLFD array under lock, then converts results to PollEvent format.
+func (p *WindowsPAL) EmitReactorPoll(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_reactor_poll", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32),
+		ir.NewParam("events_buf", irtypes.I8Ptr),
+		ir.NewParam("max_events", irtypes.I32),
+		ir.NewParam("timeout_ms", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	pfdG, udG, countG, lockG := getOrCreateReactorGlobals(module)
+	pfdType := wsaPollFdType()
+	pfdArrayType := irtypes.NewArray(reactorMaxFds, pfdType)
+	udArrayType := irtypes.NewArray(reactorMaxFds, irtypes.I8Ptr)
+	peType := pollEventType() // {i8*, i32, i32}
+
+	mutexLock := getOrDeclareFunc(module, "pal_mutex_lock", irtypes.Void,
+		ir.NewParam("m", irtypes.I8Ptr))
+	mutexUnlock := getOrDeclareFunc(module, "pal_mutex_unlock", irtypes.Void,
+		ir.NewParam("m", irtypes.I8Ptr))
+
+	// WSAPoll(LPWSAPOLLFD fdArray, ULONG fds, INT timeout) → i32
+	wsaPollFn := getOrDeclareFunc(module, "WSAPoll", irtypes.I32,
+		ir.NewParam("fdArray", irtypes.I8Ptr),
+		ir.NewParam("fds", irtypes.I32),
+		ir.NewParam("timeout", irtypes.I32))
+	wsaErrFn := p.getOrDeclareWSAGetLastError(module)
+
+	// Lock
+	lock := entry.NewLoad(irtypes.I8Ptr, lockG)
+	entry.NewCall(mutexLock, lock)
+
+	// Load count — if 0, unlock and return 0
+	pollCount := entry.NewLoad(irtypes.I32, countG)
+	isEmpty := entry.NewICmp(enum.IPredEQ, pollCount, constant.NewInt(irtypes.I32, 0))
+	emptyBlk := fn.NewBlock(".empty")
+	doPollBlk := fn.NewBlock(".do_poll")
+	entry.NewCondBr(isEmpty, emptyBlk, doPollBlk)
+
+	emptyBlk.NewCall(mutexUnlock, lock)
+	emptyBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+
+	// Call WSAPoll on the global array
+	arrPtr := doPollBlk.NewGetElementPtr(pfdArrayType, pfdG,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	arrI8Ptr := doPollBlk.NewBitCast(arrPtr, irtypes.I8Ptr)
+	result := doPollBlk.NewCall(wsaPollFn, arrI8Ptr, pollCount, fn.Params[3])
+
+	// Check for error (SOCKET_ERROR = -1)
+	isErr := doPollBlk.NewICmp(enum.IPredSLT, result, constant.NewInt(irtypes.I32, 0))
+	pollErrBlk := fn.NewBlock(".poll_err")
+	pollOkBlk := fn.NewBlock(".poll_ok")
+	doPollBlk.NewCondBr(isErr, pollErrBlk, pollOkBlk)
+
+	// Error path: unlock, return -WSAGetLastError()
+	pollErrBlk.NewCall(mutexUnlock, lock)
+	p.emitNegWSAErrorReturnI32(pollErrBlk, wsaErrFn)
+
+	// Check if any events returned
+	noEvents := pollOkBlk.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 0))
+	noEvBlk := fn.NewBlock(".no_events")
+	convertBlk := fn.NewBlock(".convert")
+	pollOkBlk.NewCondBr(noEvents, noEvBlk, convertBlk)
+
+	noEvBlk.NewCall(mutexUnlock, lock)
+	noEvBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+
+	// Convert WSAPOLLFD revents → PollEvent format
+	outBuf := convertBlk.NewBitCast(fn.Params[1], irtypes.NewPointer(peType))
+	cvtCond := fn.NewBlock(".cvt_cond")
+	convertBlk.NewBr(cvtCond)
+	cvtBody := fn.NewBlock(".cvt_body")
+	cvtWrite := fn.NewBlock(".cvt_write")
+	cvtSkip := fn.NewBlock(".cvt_skip")
+	cvtInc := fn.NewBlock(".cvt_inc")
+	doneBlk := fn.NewBlock(".done")
+
+	// PHI counters: j scans pollfds, outIdx tracks output position
+	j := cvtCond.NewPhi(ir.NewIncoming(constant.NewInt(irtypes.I32, 0), convertBlk))
+	outIdx := cvtCond.NewPhi(ir.NewIncoming(constant.NewInt(irtypes.I32, 0), convertBlk))
+	cmpJ := cvtCond.NewICmp(enum.IPredSLT, j, pollCount)
+	cmpOut := cvtCond.NewICmp(enum.IPredSLT, outIdx, fn.Params[2])
+	both := cvtCond.NewAnd(cmpJ, cmpOut)
+	cvtCond.NewCondBr(both, cvtBody, doneBlk)
+
+	// Load revents for pollfds[j]
+	pfdJ := cvtBody.NewGetElementPtr(pfdArrayType, pfdG,
+		constant.NewInt(irtypes.I32, 0), j)
+	revPtr := cvtBody.NewGetElementPtr(pfdType, pfdJ,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	revents := cvtBody.NewLoad(irtypes.I16, revPtr)
+	rev32 := cvtBody.NewZExt(revents, irtypes.I32)
+	hasEvent := cvtBody.NewICmp(enum.IPredNE, rev32, constant.NewInt(irtypes.I32, 0))
+	cvtBody.NewCondBr(hasEvent, cvtWrite, cvtSkip)
+
+	// Map Windows poll events to PollEvent events:
+	// POLLRDNORM(0x0100)|POLLRDBAND(0x0200) → readable(1)
+	// POLLWRNORM(0x0010) → writable(2)
+	// POLLERR(0x0001)|POLLHUP(0x0002)|POLLNVAL(0x0004) → error(4)
+	hasRd := cvtWrite.NewAnd(rev32, constant.NewInt(irtypes.I32, 0x0300))
+	isRd := cvtWrite.NewICmp(enum.IPredNE, hasRd, constant.NewInt(irtypes.I32, 0))
+	rdBit := cvtWrite.NewSelect(isRd, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+
+	hasWr := cvtWrite.NewAnd(rev32, constant.NewInt(irtypes.I32, 0x0010))
+	isWr := cvtWrite.NewICmp(enum.IPredNE, hasWr, constant.NewInt(irtypes.I32, 0))
+	wrBit := cvtWrite.NewSelect(isWr, constant.NewInt(irtypes.I32, 2), constant.NewInt(irtypes.I32, 0))
+
+	hasEr := cvtWrite.NewAnd(rev32, constant.NewInt(irtypes.I32, 0x0007))
+	isEr := cvtWrite.NewICmp(enum.IPredNE, hasEr, constant.NewInt(irtypes.I32, 0))
+	erBit := cvtWrite.NewSelect(isEr, constant.NewInt(irtypes.I32, 4), constant.NewInt(irtypes.I32, 0))
+
+	events := cvtWrite.NewOr(rdBit, wrBit)
+	eventsAll := cvtWrite.NewOr(events, erBit)
+
+	// Load userdata[j]
+	udJ := cvtWrite.NewGetElementPtr(udArrayType, udG,
+		constant.NewInt(irtypes.I32, 0), j)
+	ud := cvtWrite.NewLoad(irtypes.I8Ptr, udJ)
+
+	// Write PollEvent[outIdx]
+	pe := cvtWrite.NewGetElementPtr(peType, outBuf, outIdx)
+	peUd := cvtWrite.NewGetElementPtr(peType, pe,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	cvtWrite.NewStore(ud, peUd)
+	peEv := cvtWrite.NewGetElementPtr(peType, pe,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	cvtWrite.NewStore(eventsAll, peEv)
+	pePad := cvtWrite.NewGetElementPtr(peType, pe,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	cvtWrite.NewStore(constant.NewInt(irtypes.I32, 0), pePad)
+
+	outIdxInc := cvtWrite.NewAdd(outIdx, constant.NewInt(irtypes.I32, 1))
+	cvtWrite.NewBr(cvtInc)
+
+	cvtSkip.NewBr(cvtInc)
+
+	// Merge outIdx: incremented if event written, unchanged if skipped
+	outIdxNext := cvtInc.NewPhi(
+		ir.NewIncoming(outIdxInc, cvtWrite),
+		ir.NewIncoming(outIdx, cvtSkip))
+	jNext := cvtInc.NewAdd(j, constant.NewInt(irtypes.I32, 1))
+	j.Incs = append(j.Incs, ir.NewIncoming(jNext, cvtInc))
+	outIdx.Incs = append(outIdx.Incs, ir.NewIncoming(outIdxNext, cvtInc))
+	cvtInc.NewBr(cvtCond)
+
+	// Done: unlock and return outIdx
+	doneBlk.NewCall(mutexUnlock, lock)
+	doneBlk.NewRet(outIdx)
+	return fn
+}
+
+// EmitReactorClose defines @pal_reactor_close(i32 rfd) → i32 (0 on success).
+// Destroys the reactor mutex and resets the fd count.
 func (p *WindowsPAL) EmitReactorClose(module *ir.Module) *ir.Func {
-	return emitStubReactorClose(module)
+	fn := module.NewFunc("pal_reactor_close", irtypes.I32,
+		ir.NewParam("rfd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	_, _, countG, lockG := getOrCreateReactorGlobals(module)
+
+	mutexDestroy := getOrDeclareFunc(module, "pal_mutex_destroy", irtypes.Void,
+		ir.NewParam("m", irtypes.I8Ptr))
+
+	lock := entry.NewLoad(irtypes.I8Ptr, lockG)
+	isNull := entry.NewICmp(enum.IPredEQ, lock, constant.NewNull(irtypes.I8Ptr))
+	destroyBlk := fn.NewBlock(".destroy")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(isNull, doneBlk, destroyBlk)
+
+	destroyBlk.NewCall(mutexDestroy, lock)
+	destroyBlk.NewStore(constant.NewNull(irtypes.I8Ptr), lockG)
+	destroyBlk.NewStore(constant.NewInt(irtypes.I32, 0), countG)
+	destroyBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
 }

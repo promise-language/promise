@@ -3727,3 +3727,116 @@ func TestReactorStubsWasm(t *testing.T) {
 	out := module.String()
 	assertContains(t, out, "ret i32 -38", "stubs return -ENOSYS")
 }
+
+// --- Windows reactor tests (T0070) ---
+
+func newWindowsModuleWithDeps() *ir.Module {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	p.EmitAlloc(module)
+	p.EmitFree(module)
+	p.EmitMutexInit(module)
+	p.EmitMutexLock(module)
+	p.EmitMutexUnlock(module)
+	p.EmitMutexDestroy(module)
+	return module
+}
+
+func TestReactorCreateWindows(t *testing.T) {
+	module := newWindowsModuleWithDeps()
+	p := &WindowsPAL{}
+	fn := p.EmitReactorCreate(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_create" {
+		t.Errorf("expected pal_reactor_create, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_create()", "definition")
+	assertContains(t, out, "@pal_mutex_init()", "creates mutex")
+	assertContains(t, out, "@__reactor_lock", "uses reactor lock global")
+	assertContains(t, out, "@__reactor_count", "uses reactor count global")
+	assertContains(t, out, "ret i32 0", "returns 0 on success")
+}
+
+func TestReactorAddWindows(t *testing.T) {
+	module := newWindowsModuleWithDeps()
+	p := &WindowsPAL{}
+	fn := p.EmitReactorAdd(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_add" {
+		t.Errorf("expected pal_reactor_add, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_add(i32 %rfd, i32 %fd, i8* %userdata)", "definition")
+	assertContains(t, out, "@pal_mutex_lock(", "locks mutex")
+	assertContains(t, out, "@pal_mutex_unlock(", "unlocks mutex")
+	assertContains(t, out, "@__reactor_pollfds", "stores in pollfds array")
+	assertContains(t, out, "@__reactor_userdata", "stores in userdata array")
+	// POLLRDNORM|POLLWRNORM = 0x0110 = 272
+	assertContains(t, out, "i16 272", "sets POLLRDNORM|POLLWRNORM events")
+}
+
+func TestReactorRemoveWindows(t *testing.T) {
+	module := newWindowsModuleWithDeps()
+	p := &WindowsPAL{}
+	fn := p.EmitReactorRemove(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_remove" {
+		t.Errorf("expected pal_reactor_remove, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_remove(i32 %rfd, i32 %fd)", "definition")
+	assertContains(t, out, "@pal_mutex_lock(", "locks mutex")
+	assertContains(t, out, "@pal_mutex_unlock(", "unlocks mutex")
+	assertContains(t, out, "icmp eq i64", "compares fd values")
+}
+
+func TestReactorPollWindows(t *testing.T) {
+	module := newWindowsModuleWithDeps()
+	p := &WindowsPAL{}
+	fn := p.EmitReactorPoll(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_poll" {
+		t.Errorf("expected pal_reactor_poll, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_poll(i32 %rfd, i8* %events_buf, i32 %max_events, i32 %timeout_ms)", "definition")
+	assertContains(t, out, "@WSAPoll(", "calls WSAPoll")
+	assertContains(t, out, "@WSAGetLastError()", "calls WSAGetLastError on error")
+	assertContains(t, out, "@pal_mutex_lock(", "locks mutex")
+	assertContains(t, out, "@pal_mutex_unlock(", "unlocks mutex")
+}
+
+func TestReactorCloseWindows(t *testing.T) {
+	module := newWindowsModuleWithDeps()
+	p := &WindowsPAL{}
+	fn := p.EmitReactorClose(module)
+	out := module.String()
+
+	if fn.Name() != "pal_reactor_close" {
+		t.Errorf("expected pal_reactor_close, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_reactor_close(i32 %rfd)", "definition")
+	assertContains(t, out, "@pal_mutex_destroy(", "destroys mutex")
+	assertContains(t, out, "@__reactor_lock", "accesses reactor lock")
+}
+
+func TestReactorGlobalsReusedWindows(t *testing.T) {
+	// Exercises the "globals already exist" early-return path in getOrCreateReactorGlobals.
+	module := newWindowsModuleWithDeps()
+	p := &WindowsPAL{}
+	p.EmitReactorCreate(module)
+	p.EmitReactorAdd(module) // second call reuses existing globals
+	out := module.String()
+
+	// Verify only one set of globals exists (not duplicated)
+	count := strings.Count(out, "@__reactor_pollfds")
+	if count < 2 {
+		t.Error("expected @__reactor_pollfds to be referenced in both create and add")
+	}
+	// Verify globals are defined exactly once (global def appears once)
+	defCount := strings.Count(out, "__reactor_pollfds = global")
+	if defCount != 1 {
+		t.Errorf("expected exactly 1 __reactor_pollfds definition, got %d", defCount)
+	}
+}

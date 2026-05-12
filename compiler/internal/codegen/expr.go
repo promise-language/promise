@@ -1333,7 +1333,19 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 
 	// Extern function — pack args into value structs, call, unpack return
 	if isExtern {
-		result := c.genExternCall(c.externs[ident.Name], argVals, argTypes)
+		ext := c.externs[ident.Name]
+		// Intercept netpoll wait operations — emit inline coro.suspend (T0232)
+		if ext.CName == "promise_netpoll_wait_read" {
+			c.genNetpollWaitRead(argVals[0])
+			c.clearVariadicStaticFlags(variadicPTs)
+			return nil
+		}
+		if ext.CName == "promise_netpoll_wait_write" {
+			c.genNetpollWaitWrite(argVals[0])
+			c.clearVariadicStaticFlags(variadicPTs)
+			return nil
+		}
+		result := c.genExternCall(ext, argVals, argTypes)
 		c.clearVariadicStaticFlags(variadicPTs)
 		return result
 	}

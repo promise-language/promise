@@ -5,6 +5,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 )
 
 // --- IO reactor (netpoll) integration with M:N scheduler (T0070) ---
@@ -30,6 +31,7 @@ const (
 	pdFieldReadG  = 2 // i8* — G waiting for read readiness
 	pdFieldWriteG = 3 // i8* — G waiting for write readiness
 	pdFieldLock   = 4 // i8* — per-PollDesc mutex
+	pdFieldCond   = 5 // i8* — condition variable (for thread-blocking fallback)
 
 	// PollEvent field indices (output from pal_reactor_poll)
 	peFieldUserdata = 0 // i8* — opaque pointer (PollDesc*)
@@ -53,6 +55,7 @@ func pollDescStructType() *irtypes.StructType {
 		irtypes.I8Ptr, // read_g
 		irtypes.I8Ptr, // write_g
 		irtypes.I8Ptr, // lock
+		irtypes.I8Ptr, // cond (for thread-blocking fallback, T0232)
 	)
 }
 
@@ -166,6 +169,11 @@ func (c *Compiler) defineNetpollOpenFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldLock)))
 	entry.NewStore(pdLock, lockField)
 
+	pdCond := entry.NewCall(c.palCondInit)
+	condField := entry.NewGetElementPtr(pdTy, pdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
+	entry.NewStore(pdCond, condField)
+
 	// Register with reactor: pal_reactor_add(reactor_fd, fd, pd_ptr)
 	rfdField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReactorFd)))
@@ -231,9 +239,13 @@ func (c *Compiler) defineNetpollCloseFunc() {
 	wakeWriteBlk.NewCall(c.funcs["promise_sched_enqueue"], writeG)
 	wakeWriteBlk.NewBr(cleanupBlk)
 
-	// Unlock, destroy mutex, free PollDesc
+	// Unlock, destroy mutex + cond, free PollDesc
 	cleanupBlk.NewCall(c.palMutexUnlock, lock)
 	cleanupBlk.NewCall(c.palMutexDestroy, lock)
+	condField := cleanupBlk.NewGetElementPtr(pdTy, pdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
+	cond := cleanupBlk.NewLoad(irtypes.I8Ptr, condField)
+	cleanupBlk.NewCall(c.palCondDestroy, cond)
 	cleanupBlk.NewCall(c.palFree, pdParam)
 	cleanupBlk.NewRet(nil)
 
@@ -333,9 +345,13 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	shouldWakeRead := checkRead.NewAnd(hasRead, readGNonNull)
 	checkRead.NewCondBr(shouldWakeRead, wakeRead, checkWrite)
 
-	// wakeRead: clear read_g, enqueue G
+	// wakeRead: clear read_g, enqueue G, signal cond (for thread-blocking waiters)
 	wakeRead.NewStore(constant.NewNull(irtypes.I8Ptr), readGField)
 	wakeRead.NewCall(c.funcs["promise_sched_enqueue"], readG)
+	pdCondFieldR := wakeRead.NewGetElementPtr(pdTy, pdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
+	pdCondR := wakeRead.NewLoad(irtypes.I8Ptr, pdCondFieldR)
+	wakeRead.NewCall(c.palCondSignal, pdCondR)
 	wakeRead.NewBr(checkWrite)
 
 	// checkWrite: check if writable (events & 2) or error
@@ -349,9 +365,13 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	shouldWakeWrite := checkWrite.NewAnd(hasWrite, writeGNonNull)
 	checkWrite.NewCondBr(shouldWakeWrite, wakeWrite, eventNext)
 
-	// wakeWrite: clear write_g, enqueue G
+	// wakeWrite: clear write_g, enqueue G, signal cond
 	wakeWrite.NewStore(constant.NewNull(irtypes.I8Ptr), writeGField)
 	wakeWrite.NewCall(c.funcs["promise_sched_enqueue"], writeG)
+	pdCondFieldW := wakeWrite.NewGetElementPtr(pdTy, pdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
+	pdCondW := wakeWrite.NewLoad(irtypes.I8Ptr, pdCondFieldW)
+	wakeWrite.NewCall(c.palCondSignal, pdCondW)
 	wakeWrite.NewBr(eventNext)
 
 	// eventNext: unlock PollDesc, increment i
@@ -368,4 +388,75 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	exitBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 
 	c.funcs["promise_netpoll_loop"] = fn
+}
+
+// --- Inline codegen for netpoll wait operations (T0232) ---
+//
+// These functions emit IR directly into the current function's block stream,
+// exactly like genChannelSend/genChannelRecv. They MUST be called from within
+// a function being compiled (c.fn, c.block are set), not from defineXXXFunc.
+//
+// In goroutine mode (c.inCoroutine): emit coro.suspend with park mutex protocol.
+// In thread-blocking mode: emit cond_wait on the PollDesc's condition variable.
+
+// genNetpollWaitRead emits inline code to park the current goroutine until
+// the PollDesc's fd is readable. pdArg is the PollDesc pointer as a Promise int.
+func (c *Compiler) genNetpollWaitRead(pdArg value.Value) {
+	c.genNetpollWait(pdArg, pdFieldReadG, "netpoll.wait_read")
+}
+
+// genNetpollWaitWrite emits inline code to park the current goroutine until
+// the PollDesc's fd is writable. pdArg is the PollDesc pointer as a Promise int.
+func (c *Compiler) genNetpollWaitWrite(pdArg value.Value) {
+	c.genNetpollWait(pdArg, pdFieldWriteG, "netpoll.wait_write")
+}
+
+// genNetpollWait is the shared implementation for wait_read and wait_write.
+// gField is pdFieldReadG or pdFieldWriteG.
+func (c *Compiler) genNetpollWait(pdArg value.Value, gField int, prefix string) {
+	pdTy := pollDescStructType()
+	gTy := goroutineStructType()
+
+	// pdArg is a Promise int (i64) holding the PollDesc pointer. Convert to i8*.
+	pdRaw := c.block.NewIntToPtr(pdArg, irtypes.I8Ptr)
+	pdPtr := c.block.NewBitCast(pdRaw, irtypes.NewPointer(pdTy))
+
+	// Load pd.lock
+	lockField := c.block.NewGetElementPtr(pdTy, pdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldLock)))
+	lock := c.block.NewLoad(irtypes.I8Ptr, lockField)
+
+	// Lock PollDesc
+	c.block.NewCall(c.palMutexLock, lock)
+
+	// Store current G in pd.read_g or pd.write_g
+	currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+	waitGField := c.block.NewGetElementPtr(pdTy, pdPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gField)))
+	c.block.NewStore(currentG, waitGField)
+
+	// Set G.park_mutex = pd.lock (park mutex protocol — scheduler unlocks after suspend)
+	gPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
+	parkMutexField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+	c.block.NewStore(lock, parkMutexField)
+
+	if c.inCoroutine {
+		// Goroutine mode: coro.suspend — reactor thread wakes us by enqueuing G
+		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+		resumeBlk := c.newBlock(prefix + ".resume")
+		c.block.NewSwitch(suspResult, c.coroSuspendBlk,
+			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
+			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
+
+		// On resume: fd is ready. Scheduler already unlocked pd.lock via G.park_mutex.
+		c.block = resumeBlk
+	} else {
+		// Thread-blocking mode: cond_wait on PollDesc's cond var
+		condField := c.block.NewGetElementPtr(pdTy, pdPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
+		cond := c.block.NewLoad(irtypes.I8Ptr, condField)
+		c.block.NewCall(c.palCondWait, cond, lock)
+		c.block.NewCall(c.palMutexUnlock, lock)
+	}
 }

@@ -3091,3 +3091,291 @@ func TestEmitGetHostnamePosix(t *testing.T) {
 	// Success: returns buf
 	assertContains(t, out, "ret i8* %buf", "returns buf on success")
 }
+
+// --- Socket PAL tests (T0069) ---
+
+func TestSocketCreatePosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitSocketCreate(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_create" {
+		t.Errorf("expected pal_socket_create, got %s", fn.Name())
+	}
+	assertContains(t, out, "@socket(i32", "socket declaration")
+	assertContains(t, out, "define i32 @pal_socket_create(i32 %domain, i32 %typ, i32 %protocol)", "definition")
+	assertContains(t, out, "call i32 @socket(", "calls socket()")
+	assertContains(t, out, "icmp slt i32", "error check")
+}
+
+func TestSocketCreateWasm(t *testing.T) {
+	module := ir.NewModule()
+	p := &WasmPAL{}
+	fn := p.EmitSocketCreate(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_create" {
+		t.Errorf("expected pal_socket_create, got %s", fn.Name())
+	}
+	assertContains(t, out, "ret i32 -38", "WASM stub returns -ENOSYS")
+}
+
+func TestSocketCreateWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitSocketCreate(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_create" {
+		t.Errorf("expected pal_socket_create, got %s", fn.Name())
+	}
+	assertContains(t, out, "ret i32 -38", "Windows stub returns -ENOSYS")
+}
+
+func TestSocketBindPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitSocketBind(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_bind" {
+		t.Errorf("expected pal_socket_bind, got %s", fn.Name())
+	}
+	assertContains(t, out, "@bind(i32", "bind declaration")
+	assertContains(t, out, "define i32 @pal_socket_bind(i32 %fd, i8* %addr, i32 %addrlen)", "definition")
+	assertContains(t, out, "call i32 @bind(", "calls bind()")
+}
+
+func TestSocketListenPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitSocketListen(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_listen" {
+		t.Errorf("expected pal_socket_listen, got %s", fn.Name())
+	}
+	assertContains(t, out, "@listen(i32", "listen declaration")
+	assertContains(t, out, "define i32 @pal_socket_listen(i32 %fd, i32 %backlog)", "definition")
+}
+
+func TestSocketAcceptPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitSocketAccept(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_accept" {
+		t.Errorf("expected pal_socket_accept, got %s", fn.Name())
+	}
+	assertContains(t, out, "@accept(i32", "accept declaration")
+	assertContains(t, out, "define i32 @pal_socket_accept(i32 %fd, i8* %addr, i32* %addrlen)", "definition")
+}
+
+func TestSocketConnectPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitSocketConnect(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_connect" {
+		t.Errorf("expected pal_socket_connect, got %s", fn.Name())
+	}
+	assertContains(t, out, "@connect(i32", "connect declaration")
+	assertContains(t, out, "define i32 @pal_socket_connect(i32 %fd, i8* %addr, i32 %addrlen)", "definition")
+}
+
+func TestSocketSendRecvPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	sendFn := p.EmitSocketSend(module)
+	recvFn := p.EmitSocketRecv(module)
+	out := module.String()
+
+	if sendFn.Name() != "pal_socket_send" {
+		t.Errorf("expected pal_socket_send, got %s", sendFn.Name())
+	}
+	if recvFn.Name() != "pal_socket_recv" {
+		t.Errorf("expected pal_socket_recv, got %s", recvFn.Name())
+	}
+	assertContains(t, out, "@send(i32", "send declaration")
+	assertContains(t, out, "@recv(i32", "recv declaration")
+	assertContains(t, out, "define i64 @pal_socket_send(i32 %fd, i8* %buf, i64 %len, i32 %flags)", "send definition")
+	assertContains(t, out, "define i64 @pal_socket_recv(i32 %fd, i8* %buf, i64 %len, i32 %flags)", "recv definition")
+}
+
+func TestSocketClosePosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitSocketClose(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_close" {
+		t.Errorf("expected pal_socket_close, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_socket_close(i32 %fd)", "definition")
+	assertContains(t, out, "call i32 @close(", "calls close()")
+}
+
+func TestSocketSetOptPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitSocketSetOpt(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_setopt" {
+		t.Errorf("expected pal_socket_setopt, got %s", fn.Name())
+	}
+	assertContains(t, out, "@setsockopt(i32", "setsockopt declaration")
+	assertContains(t, out, "define i32 @pal_socket_setopt(i32 %fd, i32 %level, i32 %opt, i8* %val, i32 %len)", "definition")
+}
+
+func TestSocketShutdownPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitSocketShutdown(module)
+	out := module.String()
+
+	if fn.Name() != "pal_socket_shutdown" {
+		t.Errorf("expected pal_socket_shutdown, got %s", fn.Name())
+	}
+	assertContains(t, out, "@shutdown(i32", "shutdown declaration")
+	assertContains(t, out, "define i32 @pal_socket_shutdown(i32 %fd, i32 %how)", "definition")
+}
+
+func TestSocketSetNonBlockPosix(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target string
+		oNB    string // O_NONBLOCK value in or instruction
+	}{
+		{"macOS", "aarch64-apple-darwin", "or i32 %"},   // or i32 %flags, 4
+		{"Linux", "x86_64-unknown-linux-gnu", ", 2048"}, // or i32 %flags, 2048
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			p := &PosixPAL{target: tc.target}
+			fn := p.EmitSocketSetNonBlock(module)
+			out := module.String()
+
+			if fn.Name() != "pal_socket_set_nonblock" {
+				t.Errorf("expected pal_socket_set_nonblock, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_socket_set_nonblock(i32 %fd)", "definition")
+			assertContains(t, out, "@fcntl(", "fcntl declaration")
+			// F_GETFL = 3
+			assertContains(t, out, "i32 3)", "F_GETFL constant")
+			// F_SETFL = 4
+			assertContains(t, out, "i32 4,", "F_SETFL constant")
+			// O_NONBLOCK platform-specific (in or instruction)
+			assertContains(t, out, tc.oNB, "O_NONBLOCK constant")
+		})
+	}
+}
+
+func TestSocketGetErrorPosix(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		target    string
+		solSocket string
+		soError   string
+	}{
+		{"macOS", "aarch64-apple-darwin", "u0xFFFF", "i32 4103"},
+		{"Linux", "x86_64-unknown-linux-gnu", "i32 1,", "i32 4,"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			p := &PosixPAL{target: tc.target}
+			fn := p.EmitSocketGetError(module)
+			out := module.String()
+
+			if fn.Name() != "pal_socket_get_error" {
+				t.Errorf("expected pal_socket_get_error, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_socket_get_error(i32 %fd)", "definition")
+			assertContains(t, out, "@getsockopt(", "getsockopt declaration")
+			assertContains(t, out, tc.solSocket, "SOL_SOCKET constant")
+			assertContains(t, out, tc.soError, "SO_ERROR constant")
+		})
+	}
+}
+
+func TestGetAddrInfoPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitGetAddrInfo(module)
+	out := module.String()
+
+	if fn.Name() != "pal_getaddrinfo" {
+		t.Errorf("expected pal_getaddrinfo, got %s", fn.Name())
+	}
+	assertContains(t, out, "@getaddrinfo(", "getaddrinfo declaration")
+	assertContains(t, out, "define i32 @pal_getaddrinfo(i8* %host, i8* %port, i8* %hints, i8** %result)", "definition")
+}
+
+func TestFreeAddrInfoPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	fn := p.EmitFreeAddrInfo(module)
+	out := module.String()
+
+	if fn.Name() != "pal_freeaddrinfo" {
+		t.Errorf("expected pal_freeaddrinfo, got %s", fn.Name())
+	}
+	assertContains(t, out, "@freeaddrinfo(", "freeaddrinfo declaration")
+	assertContains(t, out, "define void @pal_freeaddrinfo(i8* %result)", "definition")
+}
+
+func TestSocketStubsWasm(t *testing.T) {
+	// Verify all socket stubs return -ENOSYS on WASM
+	module := ir.NewModule()
+	p := &WasmPAL{}
+
+	fns := []struct {
+		name string
+		emit func(*ir.Module) *ir.Func
+	}{
+		{"pal_socket_create", p.EmitSocketCreate},
+		{"pal_socket_bind", p.EmitSocketBind},
+		{"pal_socket_listen", p.EmitSocketListen},
+		{"pal_socket_accept", p.EmitSocketAccept},
+		{"pal_socket_connect", p.EmitSocketConnect},
+		{"pal_socket_close", p.EmitSocketClose},
+		{"pal_socket_setopt", p.EmitSocketSetOpt},
+		{"pal_socket_shutdown", p.EmitSocketShutdown},
+		{"pal_socket_set_nonblock", p.EmitSocketSetNonBlock},
+		{"pal_socket_get_error", p.EmitSocketGetError},
+	}
+
+	for _, tc := range fns {
+		fn := tc.emit(module)
+		if fn.Name() != tc.name {
+			t.Errorf("expected %s, got %s", tc.name, fn.Name())
+		}
+	}
+
+	// i64 return stubs
+	sendFn := p.EmitSocketSend(module)
+	if sendFn.Name() != "pal_socket_send" {
+		t.Errorf("expected pal_socket_send, got %s", sendFn.Name())
+	}
+	recvFn := p.EmitSocketRecv(module)
+	if recvFn.Name() != "pal_socket_recv" {
+		t.Errorf("expected pal_socket_recv, got %s", recvFn.Name())
+	}
+
+	// getaddrinfo/freeaddrinfo
+	gaiFn := p.EmitGetAddrInfo(module)
+	if gaiFn.Name() != "pal_getaddrinfo" {
+		t.Errorf("expected pal_getaddrinfo, got %s", gaiFn.Name())
+	}
+	faiFn := p.EmitFreeAddrInfo(module)
+	if faiFn.Name() != "pal_freeaddrinfo" {
+		t.Errorf("expected pal_freeaddrinfo, got %s", faiFn.Name())
+	}
+
+	out := module.String()
+	assertContains(t, out, "ret i32 -38", "i32 stubs return -ENOSYS")
+	assertContains(t, out, "ret i64 -38", "i64 stubs return -ENOSYS")
+}

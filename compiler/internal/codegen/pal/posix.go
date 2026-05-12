@@ -1891,3 +1891,399 @@ func (p *PosixPAL) emitDarwinStackOverflowInit(
 
 	entry.NewRet(nil)
 }
+
+// --- POSIX socket primitives (T0069) ---
+
+// EmitSocketCreate declares libc @socket and defines @pal_socket_create.
+// Signature: @pal_socket_create(i32 domain, i32 type, i32 protocol) → i32 (fd or -errno)
+func (p *PosixPAL) EmitSocketCreate(module *ir.Module) *ir.Func {
+	socketFn := getOrDeclareFunc(module, "socket", irtypes.I32,
+		ir.NewParam("domain", irtypes.I32),
+		ir.NewParam("type", irtypes.I32),
+		ir.NewParam("protocol", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_create", irtypes.I32,
+		ir.NewParam("domain", irtypes.I32),
+		ir.NewParam("typ", irtypes.I32),
+		ir.NewParam("protocol", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(socketFn, fn.Params[0], fn.Params[1], fn.Params[2])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitSocketBind declares libc @bind and defines @pal_socket_bind.
+// Signature: @pal_socket_bind(i32 fd, i8* addr, i32 addrlen) → i32 (0 or -errno)
+func (p *PosixPAL) EmitSocketBind(module *ir.Module) *ir.Func {
+	bindFn := getOrDeclareFunc(module, "bind", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_bind", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(bindFn, fn.Params[0], fn.Params[1], fn.Params[2])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitSocketListen declares libc @listen and defines @pal_socket_listen.
+// Signature: @pal_socket_listen(i32 fd, i32 backlog) → i32 (0 or -errno)
+func (p *PosixPAL) EmitSocketListen(module *ir.Module) *ir.Func {
+	listenFn := getOrDeclareFunc(module, "listen", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("backlog", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_listen", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("backlog", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(listenFn, fn.Params[0], fn.Params[1])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitSocketAccept declares libc @accept and defines @pal_socket_accept.
+// Signature: @pal_socket_accept(i32 fd, i8* addr, i32* addrlen) → i32 (fd or -errno)
+func (p *PosixPAL) EmitSocketAccept(module *ir.Module) *ir.Func {
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	acceptFn := getOrDeclareFunc(module, "accept", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", i32PtrType))
+
+	fn := module.NewFunc("pal_socket_accept", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(acceptFn, fn.Params[0], fn.Params[1], fn.Params[2])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitSocketConnect declares libc @connect and defines @pal_socket_connect.
+// Signature: @pal_socket_connect(i32 fd, i8* addr, i32 addrlen) → i32 (0 or -errno)
+func (p *PosixPAL) EmitSocketConnect(module *ir.Module) *ir.Func {
+	connectFn := getOrDeclareFunc(module, "connect", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_connect", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(connectFn, fn.Params[0], fn.Params[1], fn.Params[2])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitSocketSend declares libc @send and defines @pal_socket_send.
+// Signature: @pal_socket_send(i32 fd, i8* buf, i64 len, i32 flags) → i64 (bytes or -errno)
+func (p *PosixPAL) EmitSocketSend(module *ir.Module) *ir.Func {
+	sendFn := getOrDeclareFunc(module, "send", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("flags", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_send", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("flags", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(sendFn, fn.Params[0], fn.Params[1], fn.Params[2], fn.Params[3])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I64, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI64(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitSocketRecv declares libc @recv and defines @pal_socket_recv.
+// Signature: @pal_socket_recv(i32 fd, i8* buf, i64 len, i32 flags) → i64 (bytes or -errno)
+func (p *PosixPAL) EmitSocketRecv(module *ir.Module) *ir.Func {
+	recvFn := getOrDeclareFunc(module, "recv", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("flags", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_recv", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("flags", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(recvFn, fn.Params[0], fn.Params[1], fn.Params[2], fn.Params[3])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I64, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI64(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitSocketClose declares libc @close (reuses existing declaration) and defines @pal_socket_close.
+// Signature: @pal_socket_close(i32 fd) → i32 (0 or -errno)
+func (p *PosixPAL) EmitSocketClose(module *ir.Module) *ir.Func {
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(closeFn, fn.Params[0])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitSocketSetOpt declares libc @setsockopt and defines @pal_socket_setopt.
+// Signature: @pal_socket_setopt(i32 fd, i32 level, i32 opt, i8* val, i32 len) → i32 (0 or -errno)
+func (p *PosixPAL) EmitSocketSetOpt(module *ir.Module) *ir.Func {
+	setsockoptFn := getOrDeclareFunc(module, "setsockopt", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("level", irtypes.I32),
+		ir.NewParam("optname", irtypes.I32),
+		ir.NewParam("optval", irtypes.I8Ptr),
+		ir.NewParam("optlen", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_setopt", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("level", irtypes.I32),
+		ir.NewParam("opt", irtypes.I32),
+		ir.NewParam("val", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(setsockoptFn, fn.Params[0], fn.Params[1], fn.Params[2], fn.Params[3], fn.Params[4])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitSocketShutdown declares libc @shutdown and defines @pal_socket_shutdown.
+// Signature: @pal_socket_shutdown(i32 fd, i32 how) → i32 (0 or -errno)
+func (p *PosixPAL) EmitSocketShutdown(module *ir.Module) *ir.Func {
+	shutdownFn := getOrDeclareFunc(module, "shutdown", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("how", irtypes.I32))
+
+	fn := module.NewFunc("pal_socket_shutdown", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("how", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(shutdownFn, fn.Params[0], fn.Params[1])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitSocketSetNonBlock defines @pal_socket_set_nonblock using fcntl.
+// Does fcntl(fd, F_GETFL) | O_NONBLOCK, then fcntl(fd, F_SETFL, flags).
+// Signature: @pal_socket_set_nonblock(i32 fd) → i32 (0 or -errno)
+func (p *PosixPAL) EmitSocketSetNonBlock(module *ir.Module) *ir.Func {
+	// fcntl is variadic: int fcntl(int fd, int cmd, ...)
+	fcntlFn := getOrDeclareFunc(module, "fcntl", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("cmd", irtypes.I32))
+	fcntlFn.Sig.Variadic = true
+
+	// Platform-specific constants
+	var fGetFL, fSetFL, oNonBlock int64
+	fGetFL = 3 // F_GETFL (same on macOS and Linux)
+	fSetFL = 4 // F_SETFL (same on macOS and Linux)
+	if p.isMacOS() {
+		oNonBlock = 0x4 // O_NONBLOCK on macOS
+	} else {
+		oNonBlock = 0x800 // O_NONBLOCK on Linux
+	}
+
+	fn := module.NewFunc("pal_socket_set_nonblock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// flags = fcntl(fd, F_GETFL)
+	flags := entry.NewCall(fcntlFn, fn.Params[0], constant.NewInt(irtypes.I32, fGetFL))
+	isErr1 := entry.NewICmp(enum.IPredSLT, flags, constant.NewInt(irtypes.I32, 0))
+	getOkBlk := fn.NewBlock(".get_ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr1, errBlk, getOkBlk)
+
+	// flags |= O_NONBLOCK
+	newFlags := getOkBlk.NewOr(flags, constant.NewInt(irtypes.I32, oNonBlock))
+	// fcntl(fd, F_SETFL, newFlags)
+	ret := getOkBlk.NewCall(fcntlFn, fn.Params[0], constant.NewInt(irtypes.I32, fSetFL), newFlags)
+	isErr2 := getOkBlk.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk2 := fn.NewBlock(".err2")
+	getOkBlk.NewCondBr(isErr2, errBlk2, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	p.emitNegErrnoReturnI32(errBlk2, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitSocketGetError defines @pal_socket_get_error using getsockopt(SO_ERROR).
+// Signature: @pal_socket_get_error(i32 fd) → i32 (errno value, 0 = no error, or -errno on failure)
+func (p *PosixPAL) EmitSocketGetError(module *ir.Module) *ir.Func {
+	getsockoptFn := getOrDeclareFunc(module, "getsockopt", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("level", irtypes.I32),
+		ir.NewParam("optname", irtypes.I32),
+		ir.NewParam("optval", irtypes.I8Ptr),
+		ir.NewParam("optlen", irtypes.NewPointer(irtypes.I32)))
+
+	// Platform-specific constants
+	var solSocket, soError int64
+	if p.isMacOS() {
+		solSocket = 0xFFFF // SOL_SOCKET on macOS
+		soError = 0x1007   // SO_ERROR on macOS
+	} else {
+		solSocket = 1 // SOL_SOCKET on Linux
+		soError = 4   // SO_ERROR on Linux
+	}
+
+	fn := module.NewFunc("pal_socket_get_error", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Stack-allocate i32 for error value and i32 for optlen
+	errVal := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), errVal)
+	optLen := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 4), optLen) // sizeof(int)
+
+	errValPtr := entry.NewBitCast(errVal, irtypes.I8Ptr)
+	ret := entry.NewCall(getsockoptFn, fn.Params[0],
+		constant.NewInt(irtypes.I32, solSocket),
+		constant.NewInt(irtypes.I32, soError),
+		errValPtr, optLen)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	// Return the socket error value
+	result := okBlk.NewLoad(irtypes.I32, errVal)
+	okBlk.NewRet(result)
+	return fn
+}
+
+// EmitGetAddrInfo declares libc @getaddrinfo and defines @pal_getaddrinfo.
+// Signature: @pal_getaddrinfo(i8* host, i8* port, i8* hints, i8** result) → i32 (0 or EAI_* error)
+func (p *PosixPAL) EmitGetAddrInfo(module *ir.Module) *ir.Func {
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	getaddrinfoFn := getOrDeclareFunc(module, "getaddrinfo", irtypes.I32,
+		ir.NewParam("node", irtypes.I8Ptr),
+		ir.NewParam("service", irtypes.I8Ptr),
+		ir.NewParam("hints", irtypes.I8Ptr),
+		ir.NewParam("res", i8PtrPtrType))
+
+	fn := module.NewFunc("pal_getaddrinfo", irtypes.I32,
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("port", irtypes.I8Ptr),
+		ir.NewParam("hints", irtypes.I8Ptr),
+		ir.NewParam("result", i8PtrPtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(getaddrinfoFn, fn.Params[0], fn.Params[1], fn.Params[2], fn.Params[3])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitFreeAddrInfo declares libc @freeaddrinfo and defines @pal_freeaddrinfo.
+// Signature: @pal_freeaddrinfo(i8* result) → void
+func (p *PosixPAL) EmitFreeAddrInfo(module *ir.Module) *ir.Func {
+	freeaddrinfoFn := getOrDeclareFunc(module, "freeaddrinfo", irtypes.Void,
+		ir.NewParam("res", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_freeaddrinfo", irtypes.Void,
+		ir.NewParam("result", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewCall(freeaddrinfoFn, fn.Params[0])
+	entry.NewRet(nil)
+	return fn
+}

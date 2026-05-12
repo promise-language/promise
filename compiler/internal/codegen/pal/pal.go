@@ -154,6 +154,36 @@ type PAL interface {
 	// Sets up a per-thread alternate signal stack via sigaltstack.
 	// Called at the start of each worker thread (sched_loop entry).
 	EmitStackOverflowThreadInit(module *ir.Module) *ir.Func
+
+	// Socket primitives (Networking, T0069)
+	// EmitSocketCreate defines @pal_socket_create(i32 domain, i32 type, i32 protocol) → i32 (fd or -errno)
+	EmitSocketCreate(module *ir.Module) *ir.Func
+	// EmitSocketBind defines @pal_socket_bind(i32 fd, i8* addr, i32 addrlen) → i32 (0 or -errno)
+	EmitSocketBind(module *ir.Module) *ir.Func
+	// EmitSocketListen defines @pal_socket_listen(i32 fd, i32 backlog) → i32 (0 or -errno)
+	EmitSocketListen(module *ir.Module) *ir.Func
+	// EmitSocketAccept defines @pal_socket_accept(i32 fd, i8* addr, i32* addrlen) → i32 (fd or -errno)
+	EmitSocketAccept(module *ir.Module) *ir.Func
+	// EmitSocketConnect defines @pal_socket_connect(i32 fd, i8* addr, i32 addrlen) → i32 (0 or -errno)
+	EmitSocketConnect(module *ir.Module) *ir.Func
+	// EmitSocketSend defines @pal_socket_send(i32 fd, i8* buf, i64 len, i32 flags) → i64 (bytes or -errno)
+	EmitSocketSend(module *ir.Module) *ir.Func
+	// EmitSocketRecv defines @pal_socket_recv(i32 fd, i8* buf, i64 len, i32 flags) → i64 (bytes or -errno)
+	EmitSocketRecv(module *ir.Module) *ir.Func
+	// EmitSocketClose defines @pal_socket_close(i32 fd) → i32 (0 or -errno)
+	EmitSocketClose(module *ir.Module) *ir.Func
+	// EmitSocketSetOpt defines @pal_socket_setopt(i32 fd, i32 level, i32 opt, i8* val, i32 len) → i32 (0 or -errno)
+	EmitSocketSetOpt(module *ir.Module) *ir.Func
+	// EmitSocketShutdown defines @pal_socket_shutdown(i32 fd, i32 how) → i32 (0 or -errno)
+	EmitSocketShutdown(module *ir.Module) *ir.Func
+	// EmitSocketSetNonBlock defines @pal_socket_set_nonblock(i32 fd) → i32 (0 or -errno)
+	EmitSocketSetNonBlock(module *ir.Module) *ir.Func
+	// EmitSocketGetError defines @pal_socket_get_error(i32 fd) → i32 (errno value, 0 = no error)
+	EmitSocketGetError(module *ir.Module) *ir.Func
+	// EmitGetAddrInfo defines @pal_getaddrinfo(i8* host, i8* port, i8* hints, i8** result) → i32 (0 or EAI_*)
+	EmitGetAddrInfo(module *ir.Module) *ir.Func
+	// EmitFreeAddrInfo defines @pal_freeaddrinfo(i8* result) → void
+	EmitFreeAddrInfo(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -900,5 +930,161 @@ func emitStubGetCwd(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
+	return fn
+}
+
+// --- Stub socket implementations (used by WASM and Windows PALs, T0069) ---
+
+// ENOSYS = 38 on Linux; used as generic "not implemented" for socket stubs.
+const enosys = 38
+
+func emitStubSocketCreate(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_create", irtypes.I32,
+		ir.NewParam("domain", irtypes.I32),
+		ir.NewParam("typ", irtypes.I32),
+		ir.NewParam("protocol", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketBind(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_bind", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketListen(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_listen", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("backlog", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketAccept(module *ir.Module) *ir.Func {
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	fn := module.NewFunc("pal_socket_accept", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketConnect(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_connect", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketSend(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_send", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("flags", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I64, -enosys))
+	return fn
+}
+
+func emitStubSocketRecv(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_recv", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("flags", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I64, -enosys))
+	return fn
+}
+
+func emitStubSocketClose(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketSetOpt(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_setopt", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("level", irtypes.I32),
+		ir.NewParam("opt", irtypes.I32),
+		ir.NewParam("val", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketShutdown(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_shutdown", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("how", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketSetNonBlock(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_set_nonblock", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketGetError(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_get_error", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubGetAddrInfo(module *ir.Module) *ir.Func {
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	fn := module.NewFunc("pal_getaddrinfo", irtypes.I32,
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("port", irtypes.I8Ptr),
+		ir.NewParam("hints", irtypes.I8Ptr),
+		ir.NewParam("result", i8PtrPtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubFreeAddrInfo(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_freeaddrinfo", irtypes.Void,
+		ir.NewParam("result", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(nil)
 	return fn
 }

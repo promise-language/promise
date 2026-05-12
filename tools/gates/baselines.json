@@ -1,9 +1,66 @@
 {
+  "darwin-arm64": {
+    "host_leak_count": {
+      "value": 0,
+      "direction": "down",
+      "updated": "2026-04-06"
+    },
+    "host_test_count": {
+      "value": 3636,
+      "direction": "up",
+      "updated": "2026-04-07"
+    },
+    "host_test_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-04-06"
+    },
+    "wasm_leak_count": {
+      "value": 0,
+      "direction": "down",
+      "updated": "2026-04-06"
+    },
+    "wasm_test_count": {
+      "value": 3383,
+      "direction": "up",
+      "updated": "2026-04-06"
+    },
+    "wasm_test_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-04-06"
+    }
+  },
   "linux-amd64": {
-    "host_leak_count": { "value": 0, "direction": "down", "updated": "2026-04-06" },
-    "host_test_count": { "value": 3636, "direction": "up", "updated": "2026-04-06" },
-    "host_test_failures": { "value": 0, "direction": "exact", "updated": "2026-04-06" },
-    "wasm_test_count": { "value": 3383, "direction": "up", "updated": "2026-04-06" },
-    "wasm_test_failures": { "value": 0, "direction": "exact", "updated": "2026-04-06" }
+    "host_leak_count": {
+      "value": 0,
+      "direction": "down",
+      "updated": "2026-04-06"
+    },
+    "host_test_count": {
+      "value": 3636,
+      "direction": "up",
+      "updated": "2026-04-06"
+    },
+    "host_test_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-04-06"
+    },
+    "wasm_leak_count": {
+      "value": 0,
+      "direction": "down",
+      "updated": "2026-04-06"
+    },
+    "wasm_test_count": {
+      "value": 3383,
+      "direction": "up",
+      "updated": "2026-04-06"
+    },
+    "wasm_test_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-04-06"
+    }
   }
 }

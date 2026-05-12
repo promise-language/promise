@@ -2231,6 +2231,41 @@ func (p *WindowsPAL) EmitStackOverflowThreadInit(module *ir.Module) *ir.Func {
 	return emitStubStackOverflowThreadInit(module)
 }
 
+// Windows socket stubs — return -ENOSYS (T0069).
+// Real Winsock2 implementation deferred to a follow-up task.
+func (p *WindowsPAL) EmitSocketCreate(module *ir.Module) *ir.Func {
+	return emitStubSocketCreate(module)
+}
+func (p *WindowsPAL) EmitSocketBind(module *ir.Module) *ir.Func { return emitStubSocketBind(module) }
+func (p *WindowsPAL) EmitSocketListen(module *ir.Module) *ir.Func {
+	return emitStubSocketListen(module)
+}
+func (p *WindowsPAL) EmitSocketAccept(module *ir.Module) *ir.Func {
+	return emitStubSocketAccept(module)
+}
+func (p *WindowsPAL) EmitSocketConnect(module *ir.Module) *ir.Func {
+	return emitStubSocketConnect(module)
+}
+func (p *WindowsPAL) EmitSocketSend(module *ir.Module) *ir.Func  { return emitStubSocketSend(module) }
+func (p *WindowsPAL) EmitSocketRecv(module *ir.Module) *ir.Func  { return emitStubSocketRecv(module) }
+func (p *WindowsPAL) EmitSocketClose(module *ir.Module) *ir.Func { return emitStubSocketClose(module) }
+func (p *WindowsPAL) EmitSocketSetOpt(module *ir.Module) *ir.Func {
+	return emitStubSocketSetOpt(module)
+}
+func (p *WindowsPAL) EmitSocketShutdown(module *ir.Module) *ir.Func {
+	return emitStubSocketShutdown(module)
+}
+func (p *WindowsPAL) EmitSocketSetNonBlock(module *ir.Module) *ir.Func {
+	return emitStubSocketSetNonBlock(module)
+}
+func (p *WindowsPAL) EmitSocketGetError(module *ir.Module) *ir.Func {
+	return emitStubSocketGetError(module)
+}
+func (p *WindowsPAL) EmitGetAddrInfo(module *ir.Module) *ir.Func { return emitStubGetAddrInfo(module) }
+func (p *WindowsPAL) EmitFreeAddrInfo(module *ir.Module) *ir.Func {
+	return emitStubFreeAddrInfo(module)
+}
+
 // EmitGetCwd declares UCRT @_getcwd and defines @pal_getcwd.
 // Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 func (p *WindowsPAL) EmitGetCwd(module *ir.Module) *ir.Func {

@@ -268,6 +268,22 @@ type Compiler struct {
 	palStackOverflowInit       *ir.Func // @pal_stack_overflow_init() → void
 	palStackOverflowThreadInit *ir.Func // @pal_stack_overflow_thread_init() → void
 
+	// PAL socket primitives (T0069)
+	palSocketCreate      *ir.Func // @pal_socket_create(i32 domain, i32 type, i32 protocol) → i32
+	palSocketBind        *ir.Func // @pal_socket_bind(i32 fd, i8* addr, i32 addrlen) → i32
+	palSocketListen      *ir.Func // @pal_socket_listen(i32 fd, i32 backlog) → i32
+	palSocketAccept      *ir.Func // @pal_socket_accept(i32 fd, i8* addr, i32* addrlen) → i32
+	palSocketConnect     *ir.Func // @pal_socket_connect(i32 fd, i8* addr, i32 addrlen) → i32
+	palSocketSend        *ir.Func // @pal_socket_send(i32 fd, i8* buf, i64 len, i32 flags) → i64
+	palSocketRecv        *ir.Func // @pal_socket_recv(i32 fd, i8* buf, i64 len, i32 flags) → i64
+	palSocketClose       *ir.Func // @pal_socket_close(i32 fd) → i32
+	palSocketSetOpt      *ir.Func // @pal_socket_setopt(i32 fd, i32 level, i32 opt, i8* val, i32 len) → i32
+	palSocketShutdown    *ir.Func // @pal_socket_shutdown(i32 fd, i32 how) → i32
+	palSocketSetNonBlock *ir.Func // @pal_socket_set_nonblock(i32 fd) → i32
+	palSocketGetError    *ir.Func // @pal_socket_get_error(i32 fd) → i32
+	palGetAddrInfo       *ir.Func // @pal_getaddrinfo(i8* host, i8* port, i8* hints, i8** result) → i32
+	palFreeAddrInfo      *ir.Func // @pal_freeaddrinfo(i8* result) → void
+
 	// Signal pipe globals (NOT TLS — shared across all threads)
 	signalPipeRdFd *ir.Global // @__promise_signal_pipe_rd (i32)
 
@@ -697,6 +713,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineF32ToStringBridge() // bridge promise_f32_to_string → Promise _f32_to_str
 	c.defineFileIOBodies()      // bridge io module externs → PAL file I/O functions
 	c.defineOSBodies()          // bridge os module externs → PAL OS functions
+	c.defineNetPALBodies()      // bridge net module externs → PAL socket functions (T0069)
 
 	c.defineTypeMethods(file)
 	c.defineEnumMethods(file)
@@ -1582,6 +1599,11 @@ func (c *Compiler) declareIntrinsics() {
 	c.palGetHostname = p.EmitGetHostname(c.module)
 	c.palSignalInit = p.EmitSignalInit(c.module)
 	c.palSignalRegister = p.EmitSignalRegister(c.module)
+
+	// PAL socket primitives (T0069) are NOT emitted here — they are emitted
+	// lazily in defineNetPALBodies() only when the net module is imported.
+	// This avoids libc name collisions (connect, shutdown, send, recv, bind,
+	// listen, accept) with user-defined Promise functions.
 
 	// WASM: emit __multi3 (128-bit multiply) — LLVM may lower 64-bit multiply
 	// chains into __multi3 calls, which wasm32 doesn't natively provide.

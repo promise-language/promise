@@ -329,3 +329,25 @@ func (p *WasmPAL) EmitCondSignal(module *ir.Module) *ir.Func    { return emitStu
 func (p *WasmPAL) EmitCondBroadcast(module *ir.Module) *ir.Func { return emitStubCondBroadcast(module) }
 func (p *WasmPAL) EmitCondDestroy(module *ir.Module) *ir.Func   { return emitStubCondDestroy(module) }
 func (p *WasmPAL) EmitNumCPUs(module *ir.Module) *ir.Func       { return emitStubNumCPUs(module) }
+
+// WASM socket stubs — no networking support (T0069).
+func (p *WasmPAL) EmitSocketCreate(module *ir.Module) *ir.Func  { return emitStubSocketCreate(module) }
+func (p *WasmPAL) EmitSocketBind(module *ir.Module) *ir.Func    { return emitStubSocketBind(module) }
+func (p *WasmPAL) EmitSocketListen(module *ir.Module) *ir.Func  { return emitStubSocketListen(module) }
+func (p *WasmPAL) EmitSocketAccept(module *ir.Module) *ir.Func  { return emitStubSocketAccept(module) }
+func (p *WasmPAL) EmitSocketConnect(module *ir.Module) *ir.Func { return emitStubSocketConnect(module) }
+func (p *WasmPAL) EmitSocketSend(module *ir.Module) *ir.Func    { return emitStubSocketSend(module) }
+func (p *WasmPAL) EmitSocketRecv(module *ir.Module) *ir.Func    { return emitStubSocketRecv(module) }
+func (p *WasmPAL) EmitSocketClose(module *ir.Module) *ir.Func   { return emitStubSocketClose(module) }
+func (p *WasmPAL) EmitSocketSetOpt(module *ir.Module) *ir.Func  { return emitStubSocketSetOpt(module) }
+func (p *WasmPAL) EmitSocketShutdown(module *ir.Module) *ir.Func {
+	return emitStubSocketShutdown(module)
+}
+func (p *WasmPAL) EmitSocketSetNonBlock(module *ir.Module) *ir.Func {
+	return emitStubSocketSetNonBlock(module)
+}
+func (p *WasmPAL) EmitSocketGetError(module *ir.Module) *ir.Func {
+	return emitStubSocketGetError(module)
+}
+func (p *WasmPAL) EmitGetAddrInfo(module *ir.Module) *ir.Func  { return emitStubGetAddrInfo(module) }
+func (p *WasmPAL) EmitFreeAddrInfo(module *ir.Module) *ir.Func { return emitStubFreeAddrInfo(module) }

@@ -3,7 +3,7 @@ name: review
 description: Meticulous code review of recent changes. Checks correctness, tests, conventions, and files bugs for any issues found.
 ---
 
-Review the most recent changes in this project. If $ARGUMENTS is provided, treat it as a file path, directory, commit range, or PR number to scope the review.
+Review the most recent changes in this project. If $ARGUMENTS is provided, it may be a tracker ID (e.g., `B0042`, `T0015`) — fetch it with `mcp__tracker__get` to determine scope — or a direct target: a Go package path (e.g., `./internal/codegen/`), a Promise test directory (e.g., `tests/e2e/`), or a specific source file to focus on. 
 
 ## Tracker status
 

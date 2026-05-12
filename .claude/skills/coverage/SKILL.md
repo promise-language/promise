@@ -3,7 +3,7 @@ name: coverage
 description: Analyze test coverage for a Go package or Promise module, identify gaps, write missing tests, and file bugs for issues found.
 ---
 
-Analyze test coverage and fill gaps. If $ARGUMENTS is provided, treat it as a Go package path (e.g., `./internal/codegen/`), a Promise test directory (e.g., `tests/e2e/`), or a specific source file to focus on.
+Analyze test coverage and fill gaps. If $ARGUMENTS is provided, it may be a tracker ID (e.g., `B0042`, `T0015`) — fetch it with `mcp__tracker__get` to determine scope — or a direct target: a Go package path (e.g., `./internal/codegen/`), a Promise test directory (e.g., `tests/e2e/`), or a specific source file to focus on.
 
 ## Tracker status
 

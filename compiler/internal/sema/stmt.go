@@ -244,7 +244,7 @@ func (c *Checker) checkVarDeclFailable(expr ast.Expr) {
 	if c.curFunc != nil && c.curFunc.CanError() {
 		c.info.AutoPropagateExprs[expr] = true
 	} else {
-		c.errorf(expr.Pos(), "failable call must be handled with '^', '!', or an error handler")
+		c.errorf(expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
 	}
 }
 
@@ -655,12 +655,12 @@ func (c *Checker) checkExprStmtFailable(s *ast.ExprStmt) {
 	if !c.info.FailableExprs[s.Expr] {
 		return
 	}
-	// The expression is a failable call used as a statement (no ^, !, or handler).
+	// The expression is a failable call used as a statement (no ?^, ?!, or handler).
 	if c.curFunc != nil && c.curFunc.CanError() {
 		// Auto-propagate: codegen will emit tag-check + early return.
 		c.info.AutoPropagateExprs[s.Expr] = true
 	} else {
-		c.errorf(s.Expr.Pos(), "failable call must be handled with '^', '!', or an error handler")
+		c.errorf(s.Expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
 	}
 }
 

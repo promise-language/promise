@@ -4304,6 +4304,11 @@ func parseSourceFile(filename string) *ast.File {
 		os.Exit(1)
 	}
 	source := strings.ReplaceAll(string(data), "\r\n", "\n")
+	return parseSource(filename, source)
+}
+
+// parseSource parses already-read, CRLF-normalized source into an AST File.
+func parseSource(filename, source string) *ast.File {
 	input := antlr.NewInputStream(source)
 
 	lexer := parser.NewPromiseLexer(input)
@@ -4342,7 +4347,27 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 // triple is the LLVM target triple used for `target(cond)` filtering (empty = host target).
 func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	tParse := time.Now()
-	file := parseSourceFile(filename)
+	var file *ast.File
+	// T0244: AST cache for user files.
+	data, readErr := os.ReadFile(filename)
+	if readErr != nil {
+		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", filename, readErr)
+		os.Exit(1)
+	}
+	source := strings.ReplaceAll(string(data), "\r\n", "\n")
+	if home, homeErr := module.PromiseHome(); homeErr == nil {
+		cacheDir := filepath.Join(home, "cache", "astcache")
+		contentHash := astcache.ContentHash([]string{filename}, [][]byte{[]byte(source)})
+		key := astcache.Key(module.CompilerHash(), contentHash)
+		if cached, _ := astcache.Load(cacheDir, key); cached != nil {
+			file = cached
+		} else {
+			file = parseSource(filename, source)
+			astcache.Save(cacheDir, key, file)
+		}
+	} else {
+		file = parseSource(filename, source)
+	}
 	timePhase("parse", time.Since(tParse), "")
 
 	// Resolve the effective target for `target(cond)` filtering.
@@ -4959,29 +4984,55 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		return nil, err
 	}
 
-	// T0214: Binary AST cache for std module — skip ANTLR4 parsing on cache hit.
+	// T0244: Binary AST cache for all modules — skip ANTLR4 parsing on cache hit.
 	var merged *ast.File
 	astCacheHit := false
 	astCacheDir := ""
 	astCacheKey := ""
-	if modCfg.Name == "std" {
-		home, homeErr := module.PromiseHome()
-		if homeErr == nil {
-			astCacheDir = filepath.Join(home, "cache", "astcache")
-			astCacheKey = astcache.Key(module.CompilerHash())
-			tParse := time.Now()
-			cached, _ := astcache.Load(astCacheDir, astCacheKey)
-			if cached != nil {
-				merged = cached
-				astCacheHit = true
-				ml.modParseCached = true
-				ml.modParseTime += time.Since(tParse)
-				ml.modFiles += len(srcFiles)
+	home, homeErr := module.PromiseHome()
+	if homeErr == nil {
+		astCacheDir = filepath.Join(home, "cache", "astcache")
+		// Read all files for content hashing
+		fileContents := make([][]byte, len(srcFiles))
+		for i, f := range srcFiles {
+			data, readErr := os.ReadFile(f)
+			if readErr != nil {
+				return nil, fmt.Errorf("error reading %s: %w", f, readErr)
 			}
+			fileContents[i] = []byte(strings.ReplaceAll(string(data), "\r\n", "\n"))
+		}
+		contentHash := astcache.ContentHash(srcFiles, fileContents)
+		astCacheKey = astcache.Key(module.CompilerHash(), contentHash)
+		tParse := time.Now()
+		cached, _ := astcache.Load(astCacheDir, astCacheKey)
+		if cached != nil {
+			merged = cached
+			astCacheHit = true
+			ml.modParseCached = true
+			ml.modParseTime += time.Since(tParse)
+			ml.modFiles += len(srcFiles)
+		} else {
+			// Cache miss — parse from already-read contents
+			modFileList := make([]*ast.File, 0, len(srcFiles))
+			for i, f := range srcFiles {
+				tParse2 := time.Now()
+				modFileList = append(modFileList, parseSource(f, string(fileContents[i])))
+				ml.modParseTime += time.Since(tParse2)
+			}
+			ml.modFiles += len(srcFiles)
+
+			if len(modFileList) == 0 {
+				return nil, fmt.Errorf("module '%s' contains no .pr files", modPath)
+			}
+			merged = mergeModuleFiles(modFileList)
+			// T0244: Save AST cache on cache miss — before injectStdImport
+			// so the cached AST doesn't include the injected `use std as _`.
+			astcache.Save(astCacheDir, astCacheKey, merged)
 		}
 	}
 
-	if !astCacheHit {
+	if !astCacheHit && merged == nil {
+		// Fallback when PromiseHome is unavailable — parse without caching
 		var modFileList []*ast.File
 		for _, f := range srcFiles {
 			tParse := time.Now()
@@ -4993,8 +5044,6 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		if len(modFileList) == 0 {
 			return nil, fmt.Errorf("module '%s' contains no .pr files", modPath)
 		}
-
-		// Merge module files into a single AST
 		merged = mergeModuleFiles(modFileList)
 	}
 	// Don't inject std into the std module itself
@@ -5020,11 +5069,6 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	ml.modTimings.Verify += semaInfo.Timings.Verify
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
-	}
-
-	// T0214: Save AST cache for std on cache miss (after sema succeeds).
-	if modCfg.Name == "std" && !astCacheHit && astCacheDir != "" {
-		astcache.Save(astCacheDir, astCacheKey, merged)
 	}
 
 	// Resolve embed annotations for module implementation files (B0145)

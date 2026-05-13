@@ -2,6 +2,8 @@ package astcache
 
 import (
 	"bytes"
+	"encoding/binary"
+	"os"
 	"testing"
 
 	"djabi.dev/go/promise_lang/internal/ast"
@@ -212,7 +214,7 @@ func TestRoundTripStringInterp(t *testing.T) {
 // TestCacheHeaderValidation tests cache file header checks.
 func TestCacheHeaderValidation(t *testing.T) {
 	dir := t.TempDir()
-	key := Key("test-compiler-hash")
+	key := Key("test-compiler-hash", "test-content-hash")
 
 	f := &ast.File{}
 	f.SetPosEnd(ast.Pos{}, ast.Pos{})
@@ -227,16 +229,156 @@ func TestCacheHeaderValidation(t *testing.T) {
 		t.Fatal("expected cache hit, got miss")
 	}
 
-	// Wrong key should miss
-	loaded, _ = Load(dir, Key("wrong-hash"))
+	// Wrong compiler hash should miss
+	loaded, _ = Load(dir, Key("wrong-hash", "test-content-hash"))
 	if loaded != nil {
-		t.Fatal("expected cache miss for wrong key")
+		t.Fatal("expected cache miss for wrong compiler hash")
+	}
+
+	// Wrong content hash should miss
+	loaded, _ = Load(dir, Key("test-compiler-hash", "wrong-content"))
+	if loaded != nil {
+		t.Fatal("expected cache miss for wrong content hash")
 	}
 
 	// Missing dir should miss
 	loaded, _ = Load("/nonexistent/path", key)
 	if loaded != nil {
 		t.Fatal("expected cache miss for missing dir")
+	}
+}
+
+// TestContentHash tests content hash determinism and sensitivity.
+func TestContentHash(t *testing.T) {
+	files := []string{"a.pr", "b.pr"}
+	contents := [][]byte{[]byte("hello"), []byte("world")}
+
+	h1 := ContentHash(files, contents)
+	h2 := ContentHash(files, contents)
+	if h1 != h2 {
+		t.Fatalf("ContentHash not deterministic: %s != %s", h1, h2)
+	}
+
+	// Different content → different hash
+	h3 := ContentHash(files, [][]byte{[]byte("hello"), []byte("changed")})
+	if h1 == h3 {
+		t.Fatal("ContentHash should differ for different content")
+	}
+
+	// Different filenames → different hash (rename invalidation)
+	h4 := ContentHash([]string{"a.pr", "c.pr"}, contents)
+	if h1 == h4 {
+		t.Fatal("ContentHash should differ for different filenames")
+	}
+
+	// Single file
+	h5 := ContentHash([]string{"x.pr"}, [][]byte{[]byte("data")})
+	if h5 == "" {
+		t.Fatal("ContentHash should not be empty")
+	}
+}
+
+// TestCacheDir verifies the cache directory path.
+func TestCacheDir(t *testing.T) {
+	got := CacheDir("/home/user/.promise/cache/build")
+	want := "/home/user/.promise/cache/astcache"
+	if got != want {
+		t.Fatalf("CacheDir = %q, want %q", got, want)
+	}
+}
+
+// TestRemove verifies cache entry removal.
+func TestRemove(t *testing.T) {
+	dir := t.TempDir()
+	key := Key("compiler", "content")
+	f := &ast.File{}
+	f.SetPosEnd(ast.Pos{}, ast.Pos{})
+
+	Save(dir, key, f)
+	// Verify it exists
+	loaded, _ := Load(dir, key)
+	if loaded == nil {
+		t.Fatal("expected cache hit after Save")
+	}
+
+	Remove(dir, key)
+	loaded, _ = Load(dir, key)
+	if loaded != nil {
+		t.Fatal("expected cache miss after Remove")
+	}
+
+	// Remove of non-existent key is a no-op
+	Remove(dir, Key("nonexistent", "key"))
+}
+
+// TestLoadCorruptData tests Load with various corrupt inputs.
+func TestLoadCorruptData(t *testing.T) {
+	dir := t.TempDir()
+	key := Key("compiler", "content")
+	path := cachePath(dir, key)
+
+	// Truncated data (less than header size)
+	os.WriteFile(path, []byte("short"), 0o644)
+	loaded, _ := Load(dir, key)
+	if loaded != nil {
+		t.Fatal("expected miss for truncated data")
+	}
+
+	// Bad magic
+	bad := make([]byte, headerSize+10)
+	copy(bad[:4], "XXXX")
+	os.WriteFile(path, bad, 0o644)
+	loaded, _ = Load(dir, key)
+	if loaded != nil {
+		t.Fatal("expected miss for bad magic")
+	}
+
+	// Bad version (correct magic, wrong version)
+	copy(bad[:4], magic)
+	binary.LittleEndian.PutUint32(bad[4:8], 99)
+	os.WriteFile(path, bad, 0o644)
+	loaded, _ = Load(dir, key)
+	if loaded != nil {
+		t.Fatal("expected miss for bad version")
+	}
+
+	// Correct header but corrupt payload (triggers Decode error + Remove)
+	binary.LittleEndian.PutUint32(bad[4:8], formatVersion)
+	kh := keyToHash(key)
+	copy(bad[8:24], kh[:])
+	// payload is garbage bytes → Decode should fail
+	os.WriteFile(path, bad, 0o644)
+	loaded, _ = Load(dir, key)
+	if loaded != nil {
+		t.Fatal("expected miss for corrupt payload")
+	}
+	// File should be removed after corrupt decode
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("expected corrupt cache file to be removed")
+	}
+}
+
+// TestKeyToHashFallback tests keyToHash with a non-hex key string.
+func TestKeyToHashFallback(t *testing.T) {
+	// Valid hex key (normal path)
+	validKey := Key("a", "b")
+	h1 := keyToHash(validKey)
+	h2 := keyToHash(validKey)
+	if h1 != h2 {
+		t.Fatal("keyToHash should be deterministic for valid hex")
+	}
+
+	// Non-hex key triggers fallback
+	h3 := keyToHash("not-a-hex-string!!!")
+	h4 := keyToHash("not-a-hex-string!!!")
+	if h3 != h4 {
+		t.Fatal("keyToHash fallback should be deterministic")
+	}
+
+	// Different non-hex keys produce different hashes
+	h5 := keyToHash("another-non-hex")
+	if h3 == h5 {
+		t.Fatal("keyToHash fallback should differ for different inputs")
 	}
 }
 

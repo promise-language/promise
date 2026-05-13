@@ -18,11 +18,27 @@ const (
 	cacheSubdir   = "astcache"
 )
 
-// Key computes the cache key from a compiler hash.
-func Key(compilerHash string) string {
+// Key computes the cache key from a compiler hash and content hash.
+func Key(compilerHash, contentHash string) string {
 	h := fnv.New128a()
-	h.Write([]byte("astcache:v1:"))
+	h.Write([]byte("astcache:v2:"))
 	h.Write([]byte(compilerHash))
+	h.Write([]byte(":"))
+	h.Write([]byte(contentHash))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// ContentHash computes a deterministic hash of file names and their contents.
+// Filenames are included so that renames invalidate the cache. Contents should
+// already be CRLF-normalized before calling.
+func ContentHash(filenames []string, contents [][]byte) string {
+	h := fnv.New128a()
+	for i, name := range filenames {
+		h.Write([]byte(name))
+		h.Write([]byte{0})
+		h.Write(contents[i])
+		h.Write([]byte{0})
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -33,7 +49,7 @@ func CacheDir(buildCacheRoot string) string {
 
 // cachePath returns the full path for a cache entry.
 func cachePath(cacheDir, key string) string {
-	return filepath.Join(cacheDir, "std-"+key+".bin")
+	return filepath.Join(cacheDir, key+".bin")
 }
 
 // Load attempts to load a cached AST file. Returns nil, nil on cache miss.
@@ -92,7 +108,7 @@ func Save(cacheDir, key string, f *ast.File) {
 
 	// Atomic write: unique temp file + rename
 	target := cachePath(cacheDir, key)
-	tmp, err := os.CreateTemp(cacheDir, "std-*.tmp")
+	tmp, err := os.CreateTemp(cacheDir, "ast-*.tmp")
 	if err != nil {
 		return
 	}

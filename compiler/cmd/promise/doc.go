@@ -128,27 +128,42 @@ func printDocUsage(w io.Writer) {
 }
 
 // docModuleFrontend parses all module source files, merges them into a single AST,
-// and runs DeclareAndDefine once. For std, it uses the binary AST cache to skip
-// ANTLR parsing entirely. For other modules, it injects `use std as _` and loads
-// module scopes once. This avoids per-file re-parsing and module scope loading (B0329).
+// and runs DeclareAndDefine once. Uses the binary AST cache (T0244) to skip
+// ANTLR parsing entirely on cache hit. For non-std modules, injects `use std as _`
+// and loads module scopes once. This avoids per-file re-parsing and module scope loading (B0329).
 func docModuleFrontend(modName, modDir string, sourceFiles []string) (*ast.File, *sema.Info) {
 	var merged *ast.File
 
-	// For std, try the binary AST cache first (avoids all ANTLR parsing).
-	var astCacheDir, astCacheKey string
-	if modName == "std" {
-		home, homeErr := module.PromiseHome()
-		if homeErr == nil {
-			astCacheDir = filepath.Join(home, "cache", "astcache")
-			astCacheKey = astcache.Key(module.CompilerHash())
-			if cached, _ := astcache.Load(astCacheDir, astCacheKey); cached != nil {
-				merged = cached
+	// T0244: Binary AST cache for all modules — skip ANTLR parsing on cache hit.
+	home, homeErr := module.PromiseHome()
+	if homeErr == nil {
+		astCacheDir := filepath.Join(home, "cache", "astcache")
+		// Read all files for content hashing
+		fileContents := make([][]byte, len(sourceFiles))
+		for i, sf := range sourceFiles {
+			data, err := os.ReadFile(sf)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error reading %s: %v\n", sf, err)
+				os.Exit(1)
 			}
+			fileContents[i] = []byte(strings.ReplaceAll(string(data), "\r\n", "\n"))
+		}
+		contentHash := astcache.ContentHash(sourceFiles, fileContents)
+		astCacheKey := astcache.Key(module.CompilerHash(), contentHash)
+		if cached, _ := astcache.Load(astCacheDir, astCacheKey); cached != nil {
+			merged = cached
+		} else {
+			files := make([]*ast.File, 0, len(sourceFiles))
+			for i, sf := range sourceFiles {
+				files = append(files, parseSource(sf, string(fileContents[i])))
+			}
+			merged = mergeModuleFiles(files)
+			// Save before injectStdImport so cached AST doesn't include the injected import.
+			astcache.Save(astCacheDir, astCacheKey, merged)
 		}
 	}
 
-	// If no cache hit, parse all files and merge.
-	astCacheMiss := merged == nil
+	// Fallback when PromiseHome is unavailable
 	if merged == nil {
 		files := make([]*ast.File, 0, len(sourceFiles))
 		for _, sf := range sourceFiles {
@@ -172,11 +187,6 @@ func docModuleFrontend(modName, modDir string, sourceFiles []string) (*ast.File,
 	if len(errs) > 0 {
 		printFileErrors(modDir, errs)
 		os.Exit(1)
-	}
-
-	// Save to AST cache after sema succeeds (matches ml.load behavior).
-	if astCacheMiss && modName == "std" && astCacheDir != "" {
-		astcache.Save(astCacheDir, astCacheKey, merged)
 	}
 
 	return merged, info

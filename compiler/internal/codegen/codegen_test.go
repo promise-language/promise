@@ -2020,6 +2020,28 @@ func TestEnumMatchNameBinding(t *testing.T) {
 	assertContains(t, ir, "alloca i32")
 }
 
+// B0328: Bare variant names in match-as-expression on enum subject must resolve
+// to EnumVariantMatchPattern, not NameMatchPattern (catch-all binding).
+func TestEnumMatchBareVariantNames(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		test() int {
+			Color c = Color.Green;
+			return match c {
+				Red => 1,
+				Green => 2,
+				Blue => 3,
+			};
+		}
+		main() { }
+	`)
+	// Must produce a switch with case labels (not an empty switch)
+	assertContains(t, ir, "switch i32")
+	assertContains(t, ir, "i32 0, label %match.arm0")
+	assertContains(t, ir, "i32 1, label %match.arm1")
+	assertContains(t, ir, "i32 2, label %match.arm2")
+}
+
 func TestEnumMatchBlock(t *testing.T) {
 	ir := generateIR(t, `
 		enum Color { Red, Green, Blue }

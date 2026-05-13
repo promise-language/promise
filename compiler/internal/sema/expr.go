@@ -2219,6 +2219,23 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 	for _, arm := range e.Arms {
 		c.openScope(arm, "match-arm")
 		c.checkMatchPattern(arm.Pattern, subjectType)
+		// B0328: Resolve bare variant names to enum variant patterns.
+		// The parser creates NameMatchPattern for bare identifiers like "Red".
+		// When matching on an enum subject, if the name matches a variant,
+		// rewrite to EnumVariantMatchPattern so codegen emits a proper switch
+		// case (not a catch-all default).
+		if np, ok := arm.Pattern.(*ast.NameMatchPattern); ok && subjectType != nil {
+			if enum := extractEnum(subjectType); enum != nil {
+				if enum.LookupVariant(np.Name) != nil {
+					evp := &ast.EnumVariantMatchPattern{
+						Enum:    enum.Obj().Name(),
+						Variant: np.Name,
+					}
+					evp.SetPosEnd(np.Pos(), np.End())
+					arm.Pattern = evp
+				}
+			}
+		}
 		c.insertPatternBindings(arm.Pattern, subjectType)
 
 		if arm.Guard != nil {

@@ -1,0 +1,86 @@
+// B0328: Bare variant names in match-as-expression on enum subject.
+enum Color {
+  Red, Green, Blue,
+
+  code(&this) int {
+    return match this {
+      Red => 1,
+      Green => 2,
+      Blue => 3,
+    };
+  }
+}
+
+// Fieldless enum: bare variant names in match expression
+test_fieldless_bare_variants() `test {
+  Color r = Color.Red;
+  Color g = Color.Green;
+  Color b = Color.Blue;
+  assert(r.code() == 1, "Red");
+  assert(g.code() == 2, "Green");
+  assert(b.code() == 3, "Blue");
+}
+
+// Mixed qualified and bare variant names
+test_mixed_qualified_and_bare() `test {
+  Color c = Color.Green;
+  int result = match c {
+    Color.Red => 10,
+    Green => 20,
+    Blue => 30,
+  };
+  assert(result == 20, "mixed");
+}
+
+enum Shape {
+  Circle(f64 radius),
+  Rect(f64 w, f64 h),
+  Point,
+
+  // Data-carrying enum: bare variant name without destructure
+  get is_point bool {
+    return match this {
+      Point => true,
+      _ => false,
+    };
+  }
+}
+
+// Data enum: bare fieldless variant mixed with wildcard
+test_data_enum_bare_variant() `test {
+  Shape p = Shape.Point;
+  Shape c = Shape.Circle(3.14);
+  assert(p.is_point, "point");
+  assert(!c.is_point, "circle");
+}
+
+// Standalone bare variant match (not inside enum method)
+test_standalone_bare_match() `test {
+  Color c = Color.Blue;
+  string s = match c {
+    Red => "r",
+    Green => "g",
+    Blue => "b",
+  };
+  assert(s == "b", "standalone");
+}
+
+// Generic enum with bare variant name (tests extractEnum *types.Instance path)
+enum Option[T] {
+  Some(T value),
+  None,
+
+  get is_none bool {
+    return match this {
+      None => true,
+      _ => false,
+    };
+  }
+}
+
+test_generic_enum_bare_variant() `test {
+  Option[int] a = Option[int].Some(42);
+  Option[int] b = Option[int].None;
+  assert(!a.is_none, "Some is not none");
+  assert(b.is_none, "None is none");
+}

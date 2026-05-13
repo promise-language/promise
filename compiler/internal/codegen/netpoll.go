@@ -15,7 +15,7 @@ import (
 // goroutines to the global run queue and wakes idle Ms.
 //
 // PollDesc struct (per-FD state):
-//   { i32 fd, i32 _pad, i8* read_g, i8* write_g, i8* lock }
+//   { i32 fd, i32 _pad, i8* read_g, i8* write_g, i8* lock, i8* cond }
 //
 // PollEvent struct (filled by pal_reactor_poll):
 //   { i8* userdata, i32 events, i32 _pad }
@@ -46,11 +46,10 @@ const (
 	// Max events per poll call
 	maxPollEvents = 64
 
-	// Sentinel value stored in pd.read_g/write_g to indicate thread-blocking
-	// (cond_wait) mode. The reactor checks: if G == sentinel → signal cond only
-	// (no enqueue); if G is a real pointer → enqueue only (coro.suspend mode).
-	// This prevents double-wake (B0321) where the reactor both enqueues and
-	// cond_signals, causing the goroutine to re-execute from the beginning.
+	// Sentinel value stored in pd.read_g/pd.write_g for thread-blocking waiters.
+	// The reactor checks for this value: sentinel → signal cond only (no enqueue).
+	// Real G pointer → enqueue on run queue. Value 1 is safe because no valid
+	// heap pointer is at address 0x1.
 	netpollCondWaiterSentinel = 1
 )
 
@@ -81,6 +80,13 @@ func (c *Compiler) defineNetpollFuncs() {
 	if c.isWasm {
 		return // No reactor on WASM
 	}
+
+	// Batch lock (B0324): the reactor holds this lock while processing events.
+	// Close acquires it after pal_reactor_del to ensure the current event batch
+	// is fully processed before freeing the PollDesc — prevents use-after-free
+	// on stale event buffer pointers.
+	c.netpollBatchLock = c.module.NewGlobalDef("__netpoll_batch_lock", constant.NewNull(irtypes.I8Ptr))
+
 	// Define loop first (init references it)
 	c.defineNetpollLoopFunc()
 	c.defineNetpollInitFunc()
@@ -118,6 +124,10 @@ func (c *Compiler) defineNetpollInitFunc() {
 	lockField := okBlk.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReactorLock)))
 	okBlk.NewStore(lock, lockField)
+
+	// Initialize batch lock — held by reactor during event processing (B0324)
+	batchLock := okBlk.NewCall(c.palMutexInit)
+	okBlk.NewStore(batchLock, c.netpollBatchLock)
 
 	// Start poller thread
 	loopFn := c.funcs["promise_netpoll_loop"]
@@ -229,22 +239,23 @@ func (c *Compiler) defineNetpollCloseFunc() {
 	checkWriteBlk := fn.NewBlock(".check_write")
 	entry.NewCondBr(hasReadG, wakeReadBlk, checkWriteBlk)
 
-	// B0321: check if waiter is sentinel (cond_wait mode) or real G (coroutine mode)
+	// Check sentinel vs real G (B0324)
 	wakeReadBlk.NewStore(constant.NewNull(irtypes.I8Ptr), readGField)
-	sentinelCloseR := wakeReadBlk.NewIntToPtr(constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
-	isCondR := wakeReadBlk.NewICmp(enum.IPredEQ, readG, sentinelCloseR)
-	wakeReadCondBlk := fn.NewBlock(".wake_read_cond")
-	wakeReadEnqBlk := fn.NewBlock(".wake_read_enq")
-	wakeReadBlk.NewCondBr(isCondR, wakeReadCondBlk, wakeReadEnqBlk)
+	closeSentinelR := wakeReadBlk.NewIntToPtr(
+		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
+	closeIsSentinelR := wakeReadBlk.NewICmp(enum.IPredEQ, readG, closeSentinelR)
+	closeEnqueueR := fn.NewBlock(".wake_read.enqueue")
+	closeCondR := fn.NewBlock(".wake_read.cond")
+	wakeReadBlk.NewCondBr(closeIsSentinelR, closeCondR, closeEnqueueR)
 
-	condFieldR := wakeReadCondBlk.NewGetElementPtr(pdTy, pdPtr,
+	closeEnqueueR.NewCall(c.funcs["promise_sched_enqueue"], readG)
+	closeEnqueueR.NewBr(closeCondR)
+
+	condFieldR := closeCondR.NewGetElementPtr(pdTy, pdPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
-	condR := wakeReadCondBlk.NewLoad(irtypes.I8Ptr, condFieldR)
-	wakeReadCondBlk.NewCall(c.palCondSignal, condR)
-	wakeReadCondBlk.NewBr(checkWriteBlk)
-
-	wakeReadEnqBlk.NewCall(c.funcs["promise_sched_enqueue"], readG)
-	wakeReadEnqBlk.NewBr(checkWriteBlk)
+	condR := closeCondR.NewLoad(irtypes.I8Ptr, condFieldR)
+	closeCondR.NewCall(c.palCondSignal, condR)
+	closeCondR.NewBr(checkWriteBlk)
 
 	// Wake write_g if waiting
 	writeGField := checkWriteBlk.NewGetElementPtr(pdTy, pdPtr,
@@ -255,52 +266,43 @@ func (c *Compiler) defineNetpollCloseFunc() {
 	cleanupBlk := fn.NewBlock(".cleanup")
 	checkWriteBlk.NewCondBr(hasWriteG, wakeWriteBlk, cleanupBlk)
 
+	// Check sentinel vs real G (B0324)
 	wakeWriteBlk.NewStore(constant.NewNull(irtypes.I8Ptr), writeGField)
-	sentinelCloseW := wakeWriteBlk.NewIntToPtr(constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
-	isCondW := wakeWriteBlk.NewICmp(enum.IPredEQ, writeG, sentinelCloseW)
-	wakeWriteCondBlk := fn.NewBlock(".wake_write_cond")
-	wakeWriteEnqBlk := fn.NewBlock(".wake_write_enq")
-	wakeWriteBlk.NewCondBr(isCondW, wakeWriteCondBlk, wakeWriteEnqBlk)
+	closeSentinelW := wakeWriteBlk.NewIntToPtr(
+		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
+	closeIsSentinelW := wakeWriteBlk.NewICmp(enum.IPredEQ, writeG, closeSentinelW)
+	closeEnqueueW := fn.NewBlock(".wake_write.enqueue")
+	closeCondW := fn.NewBlock(".wake_write.cond")
+	wakeWriteBlk.NewCondBr(closeIsSentinelW, closeCondW, closeEnqueueW)
 
-	condFieldW := wakeWriteCondBlk.NewGetElementPtr(pdTy, pdPtr,
+	closeEnqueueW.NewCall(c.funcs["promise_sched_enqueue"], writeG)
+	closeEnqueueW.NewBr(closeCondW)
+
+	condFieldW := closeCondW.NewGetElementPtr(pdTy, pdPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
-	condW := wakeWriteCondBlk.NewLoad(irtypes.I8Ptr, condFieldW)
-	wakeWriteCondBlk.NewCall(c.palCondSignal, condW)
-	wakeWriteCondBlk.NewBr(cleanupBlk)
+	condW := closeCondW.NewLoad(irtypes.I8Ptr, condFieldW)
+	closeCondW.NewCall(c.palCondSignal, condW)
+	closeCondW.NewBr(cleanupBlk)
 
-	wakeWriteEnqBlk.NewCall(c.funcs["promise_sched_enqueue"], writeG)
-	wakeWriteEnqBlk.NewBr(cleanupBlk)
-
-	// Mark pd as closed by setting fd = -1 (B0321: reactor checks this after locking)
-	closedFdField := cleanupBlk.NewGetElementPtr(pdTy, pdPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldFd)))
-	cleanupBlk.NewStore(constant.NewInt(irtypes.I32, -1), closedFdField)
-
+	// Mark closed (fd = -1) so reactor skips stale events (B0324)
+	cleanupBlk.NewStore(constant.NewInt(irtypes.I32, -1), fdField)
 	cleanupBlk.NewCall(c.palMutexUnlock, lock)
 
-	// Acquire reactor lock to ensure no concurrent reactor iteration is accessing this pd.
-	// The reactor holds reactor_lock while processing events, so after we acquire it,
-	// any in-flight event processing has completed and won't touch this pd again.
-	reactorLockField := cleanupBlk.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReactorLock)))
-	reactorLock := cleanupBlk.NewLoad(irtypes.I8Ptr, reactorLockField)
-	reactorLockNonNull := cleanupBlk.NewICmp(enum.IPredNE, reactorLock, constant.NewNull(irtypes.I8Ptr))
-	syncBlk := fn.NewBlock(".sync_reactor")
-	freeBlk := fn.NewBlock(".free_pd")
-	cleanupBlk.NewCondBr(reactorLockNonNull, syncBlk, freeBlk)
+	// Synchronize with reactor: acquire batch lock to ensure the current event
+	// batch is fully processed. After this, no stale references to this PD
+	// remain (pal_reactor_del prevents future batches; fd==-1 skips current).
+	batchLockVal := cleanupBlk.NewLoad(irtypes.I8Ptr, c.netpollBatchLock)
+	cleanupBlk.NewCall(c.palMutexLock, batchLockVal)
+	cleanupBlk.NewCall(c.palMutexUnlock, batchLockVal)
 
-	syncBlk.NewCall(c.palMutexLock, reactorLock)
-	syncBlk.NewCall(c.palMutexUnlock, reactorLock)
-	syncBlk.NewBr(freeBlk)
-
-	// Now safe to destroy and free
-	freeBlk.NewCall(c.palMutexDestroy, lock)
-	condField := freeBlk.NewGetElementPtr(pdTy, pdPtr,
+	// Now safe to destroy and free — no concurrent access possible
+	cleanupBlk.NewCall(c.palMutexDestroy, lock)
+	condField := cleanupBlk.NewGetElementPtr(pdTy, pdPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
-	cond := freeBlk.NewLoad(irtypes.I8Ptr, condField)
-	freeBlk.NewCall(c.palCondDestroy, cond)
-	freeBlk.NewCall(c.palFree, pdParam)
-	freeBlk.NewRet(nil)
+	condVal := cleanupBlk.NewLoad(irtypes.I8Ptr, condField)
+	cleanupBlk.NewCall(c.palCondDestroy, condVal)
+	cleanupBlk.NewCall(c.palFree, pdParam)
+	cleanupBlk.NewRet(nil)
 
 	c.funcs["promise_netpoll_close"] = fn
 }
@@ -354,13 +356,9 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	hasEvents := processEvents.NewICmp(enum.IPredSGT, count, constant.NewInt(irtypes.I32, 0))
 	processEvents.NewCondBr(hasEvents, eventLoop, loop)
 
-	// eventLoop: acquire reactor lock, iterate events
-	// Holding reactor_lock while processing ensures netpoll_close can synchronize
-	// by acquiring the same lock before freeing PollDescs (B0321).
-	reactorLockFieldLoop := eventLoop.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReactorLock)))
-	reactorLockLoop := eventLoop.NewLoad(irtypes.I8Ptr, reactorLockFieldLoop)
-	eventLoop.NewCall(c.palMutexLock, reactorLockLoop)
+	// eventLoop: lock batch lock, iterate events
+	batchLock := eventLoop.NewLoad(irtypes.I8Ptr, c.netpollBatchLock)
+	eventLoop.NewCall(c.palMutexLock, batchLock)
 	eventLoop.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
 	eventLoop.NewBr(eventBody)
 
@@ -392,50 +390,49 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	pdLock := checkRead.NewLoad(irtypes.I8Ptr, pdLockField)
 	checkRead.NewCall(c.palMutexLock, pdLock)
 
-	// B0321: Check if pd was closed (fd == -1) — skip if so
+	// Skip closed PollDescs — fd set to -1 by netpoll_close (B0324)
 	pdFdField := checkRead.NewGetElementPtr(pdTy, pdPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldFd)))
 	pdFdVal := checkRead.NewLoad(irtypes.I32, pdFdField)
-	pdClosed := checkRead.NewICmp(enum.IPredEQ, pdFdVal, constant.NewInt(irtypes.I32, -1))
-	pdClosedSkip := fn.NewBlock("pd_closed_skip")
-	pdOk := fn.NewBlock("pd_ok")
-	checkRead.NewCondBr(pdClosed, pdClosedSkip, pdOk)
+	isClosed := checkRead.NewICmp(enum.IPredEQ, pdFdVal, constant.NewInt(irtypes.I32, -1))
+	closedSkip := fn.NewBlock("closed_skip")
+	processRead := fn.NewBlock("process_read")
+	checkRead.NewCondBr(isClosed, closedSkip, processRead)
 
-	pdClosedSkip.NewCall(c.palMutexUnlock, pdLock)
-	pdClosedSkip.NewBr(eventNext)
+	closedSkip.NewCall(c.palMutexUnlock, pdLock)
+	closedSkip.NewBr(eventNext)
 
 	// Check if readable (events & 1) or error (events & 4)
-	readOrErr := pdOk.NewAnd(events, constant.NewInt(irtypes.I32, pollEventRead|pollEventError))
-	hasRead := pdOk.NewICmp(enum.IPredNE, readOrErr, constant.NewInt(irtypes.I32, 0))
+	readOrErr := processRead.NewAnd(events, constant.NewInt(irtypes.I32, pollEventRead|pollEventError))
+	hasRead := processRead.NewICmp(enum.IPredNE, readOrErr, constant.NewInt(irtypes.I32, 0))
 
 	// Load read_g
-	readGField := pdOk.NewGetElementPtr(pdTy, pdPtr,
+	readGField := processRead.NewGetElementPtr(pdTy, pdPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldReadG)))
-	readG := pdOk.NewLoad(irtypes.I8Ptr, readGField)
-	readGNonNull := pdOk.NewICmp(enum.IPredNE, readG, constant.NewNull(irtypes.I8Ptr))
-	shouldWakeRead := pdOk.NewAnd(hasRead, readGNonNull)
-	pdOk.NewCondBr(shouldWakeRead, wakeRead, checkWrite)
+	readG := processRead.NewLoad(irtypes.I8Ptr, readGField)
+	readGNonNull := processRead.NewICmp(enum.IPredNE, readG, constant.NewNull(irtypes.I8Ptr))
+	shouldWakeRead := processRead.NewAnd(hasRead, readGNonNull)
+	processRead.NewCondBr(shouldWakeRead, wakeRead, checkWrite)
 
-	// wakeRead: clear read_g, then dispatch based on waiter type (B0321).
-	// Sentinel (i8*)1 → cond_signal only (thread-blocking waiter).
-	// Real G pointer → enqueue only (coroutine waiter).
+	// wakeRead: clear read_g, check sentinel vs real G (B0324)
 	wakeRead.NewStore(constant.NewNull(irtypes.I8Ptr), readGField)
-	sentinelR := wakeRead.NewIntToPtr(constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
-	isCondWaiterR := wakeRead.NewICmp(enum.IPredEQ, readG, sentinelR)
-	wakeReadCond := fn.NewBlock("wake_read_cond")
-	wakeReadEnq := fn.NewBlock("wake_read_enq")
-	wakeRead.NewCondBr(isCondWaiterR, wakeReadCond, wakeReadEnq)
+	sentinelR := wakeRead.NewIntToPtr(
+		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
+	isSentinelR := wakeRead.NewICmp(enum.IPredEQ, readG, sentinelR)
+	wakeReadEnqueue := fn.NewBlock("wake_read.enqueue")
+	wakeReadCond := fn.NewBlock("wake_read.cond")
+	wakeRead.NewCondBr(isSentinelR, wakeReadCond, wakeReadEnqueue)
 
-	// Thread-blocking: signal cond only
+	// Real G: enqueue on run queue
+	wakeReadEnqueue.NewCall(c.funcs["promise_sched_enqueue"], readG)
+	wakeReadEnqueue.NewBr(wakeReadCond)
+
+	// Signal cond var (wakes thread-blocking waiters; no-op if none waiting)
 	pdCondFieldR := wakeReadCond.NewGetElementPtr(pdTy, pdPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
 	pdCondR := wakeReadCond.NewLoad(irtypes.I8Ptr, pdCondFieldR)
 	wakeReadCond.NewCall(c.palCondSignal, pdCondR)
 	wakeReadCond.NewBr(checkWrite)
-
-	// Coroutine: enqueue G only
-	wakeReadEnq.NewCall(c.funcs["promise_sched_enqueue"], readG)
-	wakeReadEnq.NewBr(checkWrite)
 
 	// checkWrite: check if writable (events & 2) or error
 	writeOrErr := checkWrite.NewAnd(events, constant.NewInt(irtypes.I32, pollEventWrite|pollEventError))
@@ -448,24 +445,25 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	shouldWakeWrite := checkWrite.NewAnd(hasWrite, writeGNonNull)
 	checkWrite.NewCondBr(shouldWakeWrite, wakeWrite, eventNext)
 
-	// wakeWrite: clear write_g, dispatch based on waiter type (B0321)
+	// wakeWrite: clear write_g, check sentinel vs real G (B0324)
 	wakeWrite.NewStore(constant.NewNull(irtypes.I8Ptr), writeGField)
-	sentinelW := wakeWrite.NewIntToPtr(constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
-	isCondWaiterW := wakeWrite.NewICmp(enum.IPredEQ, writeG, sentinelW)
-	wakeWriteCond := fn.NewBlock("wake_write_cond")
-	wakeWriteEnq := fn.NewBlock("wake_write_enq")
-	wakeWrite.NewCondBr(isCondWaiterW, wakeWriteCond, wakeWriteEnq)
+	sentinelW := wakeWrite.NewIntToPtr(
+		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
+	isSentinelW := wakeWrite.NewICmp(enum.IPredEQ, writeG, sentinelW)
+	wakeWriteEnqueue := fn.NewBlock("wake_write.enqueue")
+	wakeWriteCond := fn.NewBlock("wake_write.cond")
+	wakeWrite.NewCondBr(isSentinelW, wakeWriteCond, wakeWriteEnqueue)
 
-	// Thread-blocking: signal cond only
+	// Real G: enqueue on run queue
+	wakeWriteEnqueue.NewCall(c.funcs["promise_sched_enqueue"], writeG)
+	wakeWriteEnqueue.NewBr(wakeWriteCond)
+
+	// Signal cond var (wakes thread-blocking waiters; no-op if none waiting)
 	pdCondFieldW := wakeWriteCond.NewGetElementPtr(pdTy, pdPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
 	pdCondW := wakeWriteCond.NewLoad(irtypes.I8Ptr, pdCondFieldW)
 	wakeWriteCond.NewCall(c.palCondSignal, pdCondW)
 	wakeWriteCond.NewBr(eventNext)
-
-	// Coroutine: enqueue G only
-	wakeWriteEnq.NewCall(c.funcs["promise_sched_enqueue"], writeG)
-	wakeWriteEnq.NewBr(eventNext)
 
 	// eventNext: unlock PollDesc, increment i
 	eventNext.NewCall(c.palMutexUnlock, pdLock)
@@ -473,8 +471,8 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	eventNext.NewStore(iNext, iAlloca)
 	eventNext.NewBr(eventBody)
 
-	// eventDone: release reactor lock, back to main loop
-	eventDone.NewCall(c.palMutexUnlock, reactorLockLoop)
+	// eventDone: unlock batch lock, loop back (B0324)
+	eventDone.NewCall(c.palMutexUnlock, batchLock)
 	eventDone.NewBr(loop)
 
 	// exit: free event buffer, return
@@ -558,17 +556,19 @@ func (c *Compiler) genNetpollWait(pdArg value.Value, gField int, prefix string) 
 		// On resume: fd is ready. Scheduler already unlocked pd.lock via G.park_mutex.
 		c.block = resumeBlk
 	} else {
-		// Thread-blocking mode: store sentinel (not real G) — reactor only signals
-		// cond var, does NOT enqueue (B0321: prevents goroutine re-execution).
-		sentinel := c.block.NewIntToPtr(constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
+		// Thread-blocking mode: store sentinel (not real G) — reactor signals
+		// cond var instead of enqueuing (B0324).
+		sentinel := c.block.NewIntToPtr(
+			constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
 		c.block.NewStore(sentinel, waitGField)
 
+		// cond_wait on PollDesc's cond var
 		condField := c.block.NewGetElementPtr(pdTy, pdPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pdFieldCond)))
 		cond := c.block.NewLoad(irtypes.I8Ptr, condField)
 		c.block.NewCall(c.palCondWait, cond, lock)
 
-		// Clear the sentinel after wake and unlock
+		// Clear sentinel after wake and unlock
 		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), waitGField)
 		c.block.NewCall(c.palMutexUnlock, lock)
 	}

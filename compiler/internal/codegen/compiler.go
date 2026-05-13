@@ -349,12 +349,13 @@ type Compiler struct {
 	structuralDrop *ir.Func // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
 
 	// Target triple and platform flags
-	target       string // LLVM target triple
-	isWasm       bool   // true if targeting wasm32
-	isWindows    bool   // true if targeting windows-msvc
-	debugFree    bool   // poison-fill freed memory for UAF detection (debug builds)
-	needsNetpoll bool   // true if net module imported — netpoll_init needed at startup (T0071)
-	nextDebugID  int    // counter for emitDebugPrint global names
+	target           string     // LLVM target triple
+	isWasm           bool       // true if targeting wasm32
+	isWindows        bool       // true if targeting windows-msvc
+	debugFree        bool       // poison-fill freed memory for UAF detection (debug builds)
+	needsNetpoll     bool       // true if net module imported — netpoll_init needed at startup (T0071)
+	netpollBatchLock *ir.Global // @__netpoll_batch_lock — held by reactor during event processing; close waits on it (B0324)
+	nextDebugID      int        // counter for emitDebugPrint global names
 
 	// Global constants for print/panic functions
 	newlineGlobal     *ir.Global // "\n" (1 byte)

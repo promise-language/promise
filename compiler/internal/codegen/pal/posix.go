@@ -2540,9 +2540,9 @@ func (p *PosixPAL) EmitReactorCreate(module *ir.Module) *ir.Func {
 }
 
 // EmitReactorAdd defines @pal_reactor_add(i32 rfd, i32 fd, i8* userdata) → i32 (0 or -errno).
-// Registers fd for edge-triggered read+write monitoring.
-// macOS: kevent() with EVFILT_READ + EVFILT_WRITE, EV_ADD|EV_CLEAR.
-// Linux: epoll_ctl(EPOLL_CTL_ADD, EPOLLIN|EPOLLOUT|EPOLLET).
+// Registers fd for level-triggered read+write monitoring (B0324).
+// macOS: kevent() with EVFILT_READ + EVFILT_WRITE, EV_ADD.
+// Linux: epoll_ctl(EPOLL_CTL_ADD, EPOLLIN|EPOLLOUT).
 func (p *PosixPAL) EmitReactorAdd(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_reactor_add", irtypes.I32,
 		ir.NewParam("rfd", irtypes.I32),
@@ -2561,7 +2561,8 @@ func (p *PosixPAL) EmitReactorAdd(module *ir.Module) *ir.Func {
 }
 
 // emitKqueueAdd emits the body for pal_reactor_add on macOS using kevent().
-// Registers two filters: EVFILT_READ (-1) and EVFILT_WRITE (-2) with EV_ADD|EV_CLEAR.
+// Registers two filters: EVFILT_READ (-1) and EVFILT_WRITE (-2) with EV_ADD.
+// Level-triggered (no EV_CLEAR) ensures events re-fire until consumed (B0324).
 func (p *PosixPAL) emitKqueueAdd(module *ir.Module, fn *ir.Func, entry *ir.Block) {
 	// struct kevent { uintptr_t ident; i16 filter; u16 flags; u32 fflags; intptr_t data; void* udata; }
 	// On macOS arm64: {i64, i16, i16, i32, i64, i8*} = 32 bytes
@@ -2591,8 +2592,8 @@ func (p *PosixPAL) emitKqueueAdd(module *ir.Module, fn *ir.Func, entry *ir.Block
 	// Zero-extend fd from i32 to i64 for ident field
 	fdI64 := entry.NewZExt(fn.Params[1], irtypes.I64)
 
-	// EV_ADD=1, EV_CLEAR=4 → flags = 0x0005
-	evFlags := constant.NewInt(irtypes.I16, 0x0005)
+	// EV_ADD=1 — level-triggered (no EV_CLEAR) to prevent event loss (B0324)
+	evFlags := constant.NewInt(irtypes.I16, 0x0001)
 
 	// Event 0: EVFILT_READ = -1 (0xFFFF as i16)
 	ev0 := entry.NewGetElementPtr(irtypes.NewArray(2, keventType), changes,
@@ -2658,10 +2659,10 @@ func (p *PosixPAL) emitEpollAdd(module *ir.Module, fn *ir.Func, entry *ir.Block)
 	// Stack-allocate epoll_event
 	ev := entry.NewAlloca(epollEventType)
 
-	// EPOLLIN=1, EPOLLOUT=4, EPOLLET=0x80000000 → events = 0x80000005
+	// EPOLLIN=1, EPOLLOUT=4 — level-triggered (no EPOLLET) to prevent event loss (B0324)
 	evEvents := entry.NewGetElementPtr(epollEventType, ev,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	entry.NewStore(constant.NewInt(irtypes.I32, 0x80000005), evEvents) // EPOLLIN|EPOLLOUT|EPOLLET
+	entry.NewStore(constant.NewInt(irtypes.I32, 0x00000005), evEvents) // EPOLLIN|EPOLLOUT
 
 	// data = ptrtoint(userdata)
 	evData := entry.NewGetElementPtr(epollEventType, ev,

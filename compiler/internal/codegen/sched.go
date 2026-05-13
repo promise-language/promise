@@ -1996,8 +1996,23 @@ func (c *Compiler) defineSchedShutdownFunc() {
 	cleanupBody := fn.NewBlock("cleanup_body")
 	freeBlk := fn.NewBlock("free_ps")
 
-	afterReactorBlk.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
-	afterReactorBlk.NewBr(cleanupLoop)
+	if c.netpollBatchLock != nil {
+		// Destroy batch lock if initialized — null when reactor init failed (B0324)
+		batchLockVal := afterReactorBlk.NewLoad(irtypes.I8Ptr, c.netpollBatchLock)
+		hasBatchLock := afterReactorBlk.NewICmp(enum.IPredNE, batchLockVal, constant.NewNull(irtypes.I8Ptr))
+		destroyBatchBlk := fn.NewBlock("destroy_batch_lock")
+		afterBatchBlk := fn.NewBlock("after_batch_lock")
+		afterReactorBlk.NewCondBr(hasBatchLock, destroyBatchBlk, afterBatchBlk)
+
+		destroyBatchBlk.NewCall(c.palMutexDestroy, batchLockVal)
+		destroyBatchBlk.NewBr(afterBatchBlk)
+
+		afterBatchBlk.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
+		afterBatchBlk.NewBr(cleanupLoop)
+	} else {
+		afterReactorBlk.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
+		afterReactorBlk.NewBr(cleanupLoop)
+	}
 
 	cVal := cleanupLoop.NewLoad(irtypes.I32, iAlloca)
 	cleanupCond := cleanupLoop.NewICmp(enum.IPredSLT, cVal, maxP)

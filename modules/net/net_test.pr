@@ -39,3 +39,29 @@ test_netpoll_open_close() `test(exclude: "wasm32") {
   int rc = _net_socket_close(fd);
   assert(rc >= 0, "socket closed");
 }
+
+// Tests that multiple PollDescs can be opened and closed without leaks.
+// Exercises the batch lock protocol (B0324) under sequential close.
+test_netpoll_multiple_open_close() `test(exclude: "wasm32") {
+  int i = 0;
+  while i < 5 {
+    int fd = _net_socket_create(2, 1, 0);
+    assert(fd >= 0, "socket created");
+    int pd = _net_netpoll_open(fd);
+    assert(pd != 0, "netpoll opened");
+    _net_netpoll_close(pd);
+    int rc = _net_socket_close(fd);
+    assert(rc >= 0, "socket closed");
+    i = i + 1;
+  }
+}
+
+// Tests TcpListener drop-without-close frees PollDesc (B0324 batch lock).
+test_listener_drop_multiple() `test(exclude: "wasm32") {
+  int i = 0;
+  while i < 3 {
+    TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+    // Intentionally dropped without close — drop() should free PD
+    i = i + 1;
+  }
+}

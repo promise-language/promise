@@ -509,6 +509,19 @@ func (c *Compiler) genCallArgExpr(expr ast.Expr) value.Value {
 	return val
 }
 
+// genExprAutoPropagate evaluates an expression and, if it is a failable
+// call registered for auto-propagation, unwraps the result (propagating
+// the error on failure). Used for sub-expression targets (field access,
+// method receivers, index targets) where the failable tuple must be
+// unwrapped before use. B0323.
+func (c *Compiler) genExprAutoPropagate(expr ast.Expr) value.Value {
+	val := c.genExpr(expr)
+	if c.info.AutoPropagateExprs[expr] {
+		val = c.genAutoPropagateValue(val)
+	}
+	return val
+}
+
 // --- Variable declarations ---
 
 func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {

@@ -1071,6 +1071,10 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	if target == nil {
 		return nil
 	}
+	// B0323: Register auto-propagation for failable call targets in member access.
+	// Without this, codegen receives the raw failable tuple {i1, value, error}
+	// instead of the unwrapped value, causing invalid IR.
+	c.checkVarDeclFailable(e.Target)
 	// Unwrap references — member access transparently delegates to inner type
 	if ref, ok := target.(*types.MutRef); ok {
 		target = ref.Elem()
@@ -1433,6 +1437,8 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 	if target == nil {
 		return nil
 	}
+	// B0323: Register auto-propagation for failable call targets in index access.
+	c.checkVarDeclFailable(e.Target)
 
 	// Generic instantiation: Type[Arg] or func[Arg] in expression context.
 	// Only treat [index] as type argument when the target is a type name
@@ -1578,6 +1584,8 @@ func (c *Checker) checkSliceExpr(e *ast.SliceExpr) types.Type {
 	if target == nil {
 		return nil
 	}
+	// B0323: Register auto-propagation for failable call targets in slice access.
+	c.checkVarDeclFailable(e.Target)
 
 	// Method dispatch: look up [:] on Named/Instance types
 	var named *types.Named

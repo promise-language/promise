@@ -1651,7 +1651,7 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	// Generate receiver
 	var args []value.Value
 	if method.Sig().Recv() != nil {
-		target := c.genExpr(member.Target)
+		target := c.genExprAutoPropagate(member.Target) // B0323
 		// T0130: Defer receiver claim — only claim if method produces a new iterator
 		// (combinator). Terminal operations (count, collect, find) don't capture the
 		// receiver, so the heap temp should be freed at statement end.
@@ -2399,11 +2399,11 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	if e.Field == "bits" {
 		named := extractNamed(targetType)
 		if named == types.TypF64 {
-			target := c.genExpr(e.Target)
+			target := c.genExprAutoPropagate(e.Target) // B0323
 			return c.block.NewBitCast(target, irtypes.I64)
 		}
 		if named == types.TypF32 {
-			target := c.genExpr(e.Target)
+			target := c.genExprAutoPropagate(e.Target) // B0323
 			return c.block.NewBitCast(target, irtypes.I32)
 		}
 	}
@@ -2507,7 +2507,7 @@ func (c *Compiler) genChannelConstructor(e *ast.CallExpr, inst *types.Instance) 
 
 // genChannelMethodCall dispatches native method calls on channel[T].
 func (c *Compiler) genChannelMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
-	chRaw := c.genExpr(member.Target)
+	chRaw := c.genExprAutoPropagate(member.Target) // B0323
 	chanType := channelStructType()
 	chPtr := c.block.NewBitCast(chRaw, irtypes.NewPointer(chanType))
 	elemLLVM := c.resolveType(elemType)
@@ -2820,7 +2820,7 @@ func (c *Compiler) genChannelClose(chRaw value.Value, chPtr value.Value, chanTyp
 
 // genVectorLen loads the length from a vector/array header (masking off bit 63 static flag).
 func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
-	slicePtr := c.genExpr(e.Target)
+	slicePtr := c.genExprAutoPropagate(e.Target) // B0323
 	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
 	return loadVectorLen(c.block, headerPtr)
@@ -2832,7 +2832,7 @@ func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
 // All primitive hashes use the Promise-implemented _fnv1a_hash function.
 // String hash uses a codegen-emitted LLVM IR function (__promise_hash_string).
 func (c *Compiler) genNativeHashGetter(e *ast.MemberExpr, named *types.Named) (value.Value, bool) {
-	target := c.genExpr(e.Target)
+	target := c.genExprAutoPropagate(e.Target) // B0323
 	hashFn := c.funcs["_fnv1a_hash"]
 	switch named {
 	case types.TypInt, types.TypI64, types.TypUint, types.TypU64:
@@ -2896,7 +2896,7 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		if !ok {
 			panic(fmt.Sprintf("codegen: field %s not in value layout for %s", field.Name(), typ))
 		}
-		targetVal := c.genExpr(e.Target)
+		targetVal := c.genExprAutoPropagate(e.Target) // B0323
 		// `this` in value type methods is an i8* pointing to value struct
 		if _, isThis := e.Target.(*ast.ThisExpr); isThis {
 			valuePtrType := irtypes.NewPointer(layout.Value.LLVMType)
@@ -2914,7 +2914,7 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
 	}
 
-	targetVal := c.genExpr(e.Target)
+	targetVal := c.genExprAutoPropagate(e.Target) // B0323
 	// `this` in methods is already an i8* instance pointer, not a value struct
 	var instance value.Value
 	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
@@ -3069,7 +3069,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 
 	var args []value.Value
 	if method.Sig().Recv() != nil {
-		target := c.genExpr(member.Target)
+		target := c.genExprAutoPropagate(member.Target) // B0323
 		// T0130: Defer receiver claim — only claim if method produces a new iterator.
 		c.pendingReceiverClaim = target
 		// Container types (Vector, Map, string) are already i8* pointers — pass directly.
@@ -3138,7 +3138,7 @@ func (c *Compiler) genEnumGetterAccess(e *ast.MemberExpr, targetType types.Type,
 
 	// Pass the enum value as receiver
 	prevEnumTemps := len(c.enumCtorTemps)
-	target := c.genExpr(e.Target)
+	target := c.genExprAutoPropagate(e.Target) // B0323
 	enumCtorTracked := len(c.enumCtorTemps) > prevEnumTemps
 	var ptr value.Value
 	var tempEnumPtr value.Value
@@ -3217,7 +3217,7 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 	if method.Sig().Recv() != nil {
 		// Track whether the enumCtorTemps mechanism captures this constructor.
 		prevEnumTemps := len(c.enumCtorTemps)
-		target := c.genExpr(member.Target)
+		target := c.genExprAutoPropagate(member.Target) // B0323
 		enumCtorTracked := len(c.enumCtorTemps) > prevEnumTemps
 		// `this` inside an enum method is already i8* pointing to the enum alloca — pass directly.
 		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
@@ -3315,7 +3315,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	}
 
 	var args []value.Value
-	target := c.genExpr(e.Target)
+	target := c.genExprAutoPropagate(e.Target) // B0323
 	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
 		args = append(args, target)
 	} else if isContainerType(targetType) {
@@ -3350,7 +3350,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 
 // genVirtualGetterCall emits an indirect getter call through the vtable.
 func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, getter *types.Method, targetType types.Type) value.Value {
-	receiverVal := c.genExpr(e.Target)
+	receiverVal := c.genExprAutoPropagate(e.Target) // B0323
 
 	var vtableRaw, instance value.Value
 	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
@@ -3424,7 +3424,7 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	named *types.Named, method *types.Method, targetType types.Type) value.Value {
 
 	// 1. Evaluate receiver
-	receiverVal := c.genExpr(member.Target)
+	receiverVal := c.genExprAutoPropagate(member.Target) // B0323
 	// T0130: Defer receiver claim — only claim if method produces a new iterator.
 	c.pendingReceiverClaim = receiverVal
 
@@ -3577,7 +3577,7 @@ func (c *Compiler) resolveTypeParam(tp *types.TypeParam) types.Type {
 }
 
 func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
-	slicePtr := c.genExpr(member.Target)
+	slicePtr := c.genExprAutoPropagate(member.Target) // B0323
 	elemLLVM := c.resolveType(elemType)
 	elemSize := int64(c.typeSize(elemLLVM))
 
@@ -4063,7 +4063,7 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		return c.genStringFromBytes(e), true
 	}
 
-	strPtr := c.genExpr(member.Target)
+	strPtr := c.genExprAutoPropagate(member.Target) // B0323
 
 	switch method {
 	case "trim":
@@ -4126,7 +4126,7 @@ func (c *Compiler) genStringFromBytes(e *ast.CallExpr) value.Value {
 // genStringLen loads the length field from a string instance struct.
 // String instance layout: { i8* _variant, i64 len, [0 x i8] data }
 func (c *Compiler) genStringLen(e *ast.MemberExpr) value.Value {
-	strPtr := c.genExpr(e.Target)
+	strPtr := c.genExprAutoPropagate(e.Target) // B0323
 	instType := strInstanceType()
 	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
 	return loadStringLen(c.block, typedPtr, instType)
@@ -4135,7 +4135,7 @@ func (c *Compiler) genStringLen(e *ast.MemberExpr) value.Value {
 // genStringIsLiteral checks the sign bit of the string length field.
 // Literal strings (in .rodata) have bit 63 set; heap strings do not.
 func (c *Compiler) genStringIsLiteral(e *ast.MemberExpr) value.Value {
-	strPtr := c.genExpr(e.Target)
+	strPtr := c.genExprAutoPropagate(e.Target) // B0323
 	instType := strInstanceType()
 	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
 	rawLen := loadStringLenRaw(c.block, typedPtr, instType)
@@ -5945,7 +5945,7 @@ func (c *Compiler) genSliceExpr(e *ast.SliceExpr) value.Value {
 		panic(fmt.Sprintf("codegen: no [:] method on type %s", named))
 	}
 
-	target := c.genExpr(e.Target)
+	target := c.genExprAutoPropagate(e.Target) // B0323
 
 	// Generate optional int arguments for low and high bounds
 	optIntType := irtypes.NewStruct(irtypes.I1, irtypes.I64)
@@ -6039,7 +6039,7 @@ func (c *Compiler) genArrayBasePtr(target ast.Expr, arr *types.Array) value.Valu
 	if memberExpr, ok := target.(*ast.MemberExpr); ok {
 		return c.genFieldPtr(memberExpr)
 	}
-	arrVal := c.genExpr(target)
+	arrVal := c.genExprAutoPropagate(target) // B0323
 	elemLLVM := c.resolveType(arr.Elem())
 	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
 	tmp := c.block.NewAlloca(arrType)
@@ -6140,7 +6140,7 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 		panic(fmt.Sprintf("codegen: undeclared [] method %s", mangledName))
 	}
 
-	target := c.genExpr(e.Target)
+	target := c.genExprAutoPropagate(e.Target) // B0323
 	keyVal := c.genExpr(e.Index)
 
 	// Extract instance pointer: container types (Vector, Map) are already i8*,
@@ -6163,7 +6163,7 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 // not character indexing. UTF-8 decoding is handled separately by for-in loops.
 // String instance layout: { i8* _variant, i64 len, [0 x i8] data }
 func (c *Compiler) genStringIndex(e *ast.IndexExpr) value.Value {
-	strPtr := c.genExpr(e.Target)
+	strPtr := c.genExprAutoPropagate(e.Target) // B0323
 	idx := c.genExpr(e.Index)
 
 	instType := strInstanceType()
@@ -6195,7 +6195,7 @@ func (c *Compiler) genStringIndex(e *ast.IndexExpr) value.Value {
 }
 
 func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.Value {
-	slicePtr := c.genExpr(e.Target)
+	slicePtr := c.genExprAutoPropagate(e.Target) // B0323
 	idx := c.genExpr(e.Index)
 	elemLLVM := c.resolveType(elemType)
 

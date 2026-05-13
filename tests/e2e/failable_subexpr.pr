@@ -1,0 +1,153 @@
+// B0323: Failable call results used as sub-expressions (field access, method
+// call, index, slice, property access) must be auto-propagated correctly.
+type Pair {
+  int x `value;
+  int y `value;
+
+  sum(&this) int {
+    return this.x + this.y;
+  }
+}
+
+make_pair!() Pair {
+  return Pair(x: 10, y: 20);
+}
+
+make_vec!() int[] {
+  return[100, 200, 300];
+}
+
+make_string!() string {
+  return "  hello  ";
+}
+
+make_int!() int {
+  return 42;
+}
+
+// --- Field access on failable call result (value type — no B0325 leak) ---
+
+field_access_bang() `test {
+  assert(make_pair()?!.x == 10, "field x via ?!");
+  assert(make_pair()?!.y == 20, "field y via ?!");
+}
+
+// --- Method call on failable call result ---
+
+method_call_bang() `test {
+  assert(make_pair()?!.sum() == 30, "method sum via ?!");
+}
+
+// --- Index access on failable call result ---
+
+index_access_bang() `test {
+  int[] v = make_vec()?!;
+  assert(v[0] == 100, "index 0");
+  assert(v[1] == 200, "index 1");
+  assert(v[2] == 300, "index 2");
+}
+
+// --- String method on failable call result ---
+
+string_method_bang() `test {
+  assert(make_string()?!.trim() == "hello", "trim via ?!");
+}
+
+// --- Property access on failable call result ---
+
+len_access_bang() `test {
+  int[] v = make_vec()?!;
+  assert(v.len == 3, "vec len");
+  string s = make_string()?!;
+  assert(s.len == 9, "string len");
+}
+
+// --- Primitive method on failable call result ---
+
+primitive_method_bang() `test {
+  assert(make_int()?!.to_string() == "42", "int to_string via ?!");
+}
+
+// --- Chained access (value type — no B0325 leak) ---
+
+chained_access_bang() `test {
+  assert(make_pair()?!.x.to_string() == "10", "chained field to_string");
+  assert(make_pair()?!.sum().to_string() == "30", "chained method to_string");
+}
+
+// --- Slice on failable call result ---
+
+slice_access_bang() `test {
+  int[] v = make_vec()?!;
+  int[] sub = v[0:2];
+  assert(sub.len == 2, "slice len");
+  assert(sub[0] == 100, "slice 0");
+  assert(sub[1] == 200, "slice 1");
+}
+
+// --- Auto-propagation in failable wrapper functions (the core B0323 fix) ---
+// These functions are failable (!), so calling another failable function
+// without ?/? triggers auto-propagation. The codegen must unwrap the failable
+// tuple at each sub-expression target site.
+
+_test_field_auto_prop!() int {
+  return make_pair().x;
+}
+
+_test_method_auto_prop!() int {
+  return make_pair().sum();
+}
+
+// Direct index on failable result (exercises genVectorIndex auto-propagate).
+// make_vec() returns a vector literal (.rodata), so no leak on the temporary.
+_test_index_auto_prop!() int {
+  return make_vec()[1];
+}
+
+// Direct len on failable result (exercises genVectorLen auto-propagate).
+_test_len_auto_prop!() int {
+  return make_vec().len;
+}
+
+_test_trim_auto_prop!() string {
+  return make_string().trim();
+}
+
+_test_chained_auto_prop!() string {
+  return make_pair().x.to_string();
+}
+
+// Direct string index on failable result (exercises genStringIndex auto-propagate).
+// make_string() returns a string literal (.rodata), so no leak on the temporary.
+_test_string_index_auto_prop!() char {
+  return make_string()[0];
+}
+
+// Direct slice on failable result (exercises genSliceExpr auto-propagate).
+_test_slice_auto_prop!() int {
+  return make_vec()[0:2].len;
+}
+
+auto_propagation() `test {
+  assert(_test_field_auto_prop()?! == 10, "auto-prop field");
+  assert(_test_method_auto_prop()?! == 30, "auto-prop method");
+  assert(_test_index_auto_prop()?! == 200, "auto-prop index");
+  assert(_test_len_auto_prop()?! == 3, "auto-prop len");
+  assert(_test_trim_auto_prop()?! == "hello", "auto-prop trim");
+  assert(_test_chained_auto_prop()?! == "10", "auto-prop chained");
+  assert(_test_string_index_auto_prop()?! == ' ', "auto-prop string index");
+  assert(_test_slice_auto_prop()?! == 2, "auto-prop slice");
+}
+
+// --- Error propagation still works ---
+
+always_fail!() Pair {
+  raise error(message: "oops");
+}
+
+error_propagation() `test {
+  Pair p = always_fail()? e {
+    assert(e.message == "oops", "error message");
+    return;
+  };
+}

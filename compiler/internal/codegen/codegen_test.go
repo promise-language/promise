@@ -2957,6 +2957,69 @@ func TestAutoPropagateInVecPushArg(t *testing.T) {
 	assertContains(t, ir, "auto.ok")
 }
 
+// B0323: Failable call result used as field access target must be unwrapped.
+func TestAutoPropagateInFieldAccess(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo { int x; }
+		bar!() Foo { return Foo(x: 42); }
+		wrapper!() int {
+			return bar().x;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// B0323: Failable call result used as method call receiver must be unwrapped.
+func TestAutoPropagateInMethodReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			int x;
+			get_x(&this) int { return this.x; }
+		}
+		bar!() Foo { return Foo(x: 42); }
+		wrapper!() int {
+			return bar().get_x();
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// B0323: Failable call result used as index target must be unwrapped.
+func TestAutoPropagateInIndexTarget(t *testing.T) {
+	ir := generateIR(t, `
+		bar!() int[] { return [1, 2, 3]; }
+		wrapper!() int {
+			return bar()[0];
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// B0323: Failable call result used as generic method call receiver must be unwrapped.
+func TestAutoPropagateInGenericMethodReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T val;
+			cast[U](&this, U default_val) U {
+				return default_val;
+			}
+		}
+		make_box!() Box[int] { return Box[int](val: 42); }
+		wrapper!() string {
+			return make_box().cast[string]("hello");
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
 func TestDropNullSafe(t *testing.T) {
 	ir := generateIR(t, `
 		type Resource {

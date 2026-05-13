@@ -182,8 +182,7 @@ type ProcessOutput `public `doc("Read end of a subprocess stdout or stderr pipe.
       if n == 0 {
         break;
       }
-      b.write_string(string.from_bytes(buf[0:n]))? {
-      };
+      b.write_string(string.from_bytes(buf[0:n]));
     }
     return b.to_string();
   }

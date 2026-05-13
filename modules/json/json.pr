@@ -35,11 +35,9 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
       _JsonState top = this._stack[this._stack.len - 1];
       match top {
         _JsonState.HasItems => {
-          this._buf.write_string(",")? {
-          };
+          this._buf.write_string(",");
           if this._pretty {
-            this._buf.write_string("\n")? {
-            };
+            this._buf.write_string("\n");
             this._write_indent();
           }
         },
@@ -50,8 +48,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
         _JsonState.Empty => {
           this._stack[this._stack.len - 1] = _JsonState.HasItems;
           if this._pretty {
-            this._buf.write_string("\n")? {
-            };
+            this._buf.write_string("\n");
             this._write_indent();
           }
         },
@@ -63,60 +60,48 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     int i = 0;
     int total = this._depth * this._indent;
     while i < total {
-      this._buf.write_string(" ")? {
-      };
+      this._buf.write_string(" ");
       i = i + 1;
     }
   }
 
   _write_escaped_string(~this, string s) {
-    this._buf.write_string("\"")? {
-    };
+    this._buf.write_string("\"");
     int i = 0;
     while i < s.len {
       char c = s[i];
       match c {
         '"' => {
-          this._buf.write_string("\\\"")? {
-          };
+          this._buf.write_string("\\\"");
         },
         '\\' => {
-          this._buf.write_string("\\\\")? {
-          };
+          this._buf.write_string("\\\\");
         },
         '\n' => {
-          this._buf.write_string("\\n")? {
-          };
+          this._buf.write_string("\\n");
         },
         '\r' => {
-          this._buf.write_string("\\r")? {
-          };
+          this._buf.write_string("\\r");
         },
         '\t' => {
-          this._buf.write_string("\\t")? {
-          };
+          this._buf.write_string("\\t");
         },
         _ => {
           int code = c as! int;
           if code < 32 {
-            this._buf.write_string("\\u00")? {
-            };
+            this._buf.write_string("\\u00");
             int hi = code / 16;
             int lo = code % 16;
-            this._buf.write_string(_hex_digit(hi))? {
-            };
-            this._buf.write_string(_hex_digit(lo))? {
-            };
+            this._buf.write_string(_hex_digit(hi));
+            this._buf.write_string(_hex_digit(lo));
           } else {
-            this._buf.write_string(c.to_string())? {
-            };
+            this._buf.write_string(c.to_string());
           }
         },
       }
       i = i + 1;
     }
-    this._buf.write_string("\"")? {
-    };
+    this._buf.write_string("\"");
   }
 
   // ── Encoder interface implementation ──
@@ -124,30 +109,25 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
   encode_bool!(~this, bool value) `public {
     this._write_comma();
     if value {
-      this._buf.write_string("true")? {
-      };
+      this._buf.write_string("true");
     } else {
-      this._buf.write_string("false")? {
-      };
+      this._buf.write_string("false");
     }
   }
 
   encode_int!(~this, int value) `public {
     this._write_comma();
-    this._buf.write_string(value.to_string())? {
-    };
+    this._buf.write_string(value.to_string());
   }
 
   encode_uint!(~this, uint value) `public {
     this._write_comma();
-    this._buf.write_string(value.to_string())? {
-    };
+    this._buf.write_string(value.to_string());
   }
 
   encode_f64!(~this, f64 value) `public {
     this._write_comma();
-    this._buf.write_string(value.to_string())? {
-    };
+    this._buf.write_string(value.to_string());
   }
 
   encode_string!(~this, string value) `public {
@@ -157,14 +137,12 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
 
   encode_none!(~this) `public {
     this._write_comma();
-    this._buf.write_string("null")? {
-    };
+    this._buf.write_string("null");
   }
 
   begin_object!(~this, int field_count) `public {
     this._write_comma();
-    this._buf.write_string("\{")? {
-    };
+    this._buf.write_string("\{");
     this._depth = this._depth + 1;
     this._stack.push(_JsonState.Empty);
   }
@@ -176,8 +154,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
       match top {
         _JsonState.HasItems => {
           if this._pretty {
-            this._buf.write_string("\n")? {
-            };
+            this._buf.write_string("\n");
             this._write_indent();
           }
         },
@@ -186,14 +163,12 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
       }
       this._stack.pop();
     }
-    this._buf.write_string("}")? {
-    };
+    this._buf.write_string("}");
   }
 
   begin_array!(~this, int length) `public {
     this._write_comma();
-    this._buf.write_string("[")? {
-    };
+    this._buf.write_string("[");
     this._depth = this._depth + 1;
     this._stack.push(_JsonState.Empty);
   }
@@ -205,8 +180,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
       match top {
         _JsonState.HasItems => {
           if this._pretty {
-            this._buf.write_string("\n")? {
-            };
+            this._buf.write_string("\n");
             this._write_indent();
           }
         },
@@ -215,8 +189,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
       }
       this._stack.pop();
     }
-    this._buf.write_string("]")? {
-    };
+    this._buf.write_string("]");
   }
 
   encode_key!(~this, string name) `public {
@@ -224,19 +197,16 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
       _JsonState top = this._stack[this._stack.len - 1];
       match top {
         _JsonState.HasItems => {
-          this._buf.write_string(",")? {
-          };
+          this._buf.write_string(",");
           if this._pretty {
-            this._buf.write_string("\n")? {
-            };
+            this._buf.write_string("\n");
             this._write_indent();
           }
         },
         _JsonState.Empty => {
           this._stack[this._stack.len - 1] = _JsonState.HasItems;
           if this._pretty {
-            this._buf.write_string("\n")? {
-            };
+            this._buf.write_string("\n");
             this._write_indent();
           }
         },
@@ -246,11 +216,9 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     }
     this._write_escaped_string(name);
     if this._pretty {
-      this._buf.write_string(": ")? {
-      };
+      this._buf.write_string(": ");
     } else {
-      this._buf.write_string(":")? {
-      };
+      this._buf.write_string(":");
     }
     // Mark that next value should not insert comma
     if this._stack.len > 0 {
@@ -320,45 +288,37 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
         char esc = this._data[this._pos];
         match esc {
           '"' => {
-            buf.write_string("\"")? {
-            };
+            buf.write_string("\"");
             this._advance();
           },
           '\\' => {
-            buf.write_string("\\")? {
-            };
+            buf.write_string("\\");
             this._advance();
           },
           '/' => {
-            buf.write_string("/")? {
-            };
+            buf.write_string("/");
             this._advance();
           },
           'n' => {
-            buf.write_string("\n")? {
-            };
+            buf.write_string("\n");
             this._advance();
           },
           'r' => {
-            buf.write_string("\r")? {
-            };
+            buf.write_string("\r");
             this._advance();
           },
           't' => {
-            buf.write_string("\t")? {
-            };
+            buf.write_string("\t");
             this._advance();
           },
           'b' => {
             char bs = 8 as! char;
-            buf.write_string(bs.to_string())? {
-            };
+            buf.write_string(bs.to_string());
             this._advance();
           },
           'f' => {
             char ff = 12 as! char;
-            buf.write_string(ff.to_string())? {
-            };
+            buf.write_string(ff.to_string());
             this._advance();
           },
           'u' => {
@@ -379,16 +339,14 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
               h = h + 1;
             }
             char uc = code as! char;
-            buf.write_string(uc.to_string())? {
-            };
+            buf.write_string(uc.to_string());
           },
           _ => {
             raise DecodeError(message: "unknown escape sequence in JSON string", field: "", position: this._pos);
           },
         }
       } else {
-        buf.write_string(c.to_string())? {
-        };
+        buf.write_string(c.to_string());
         this._advance();
       }
     }

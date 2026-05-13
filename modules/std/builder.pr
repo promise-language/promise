@@ -5,7 +5,7 @@ type Builder `public `doc("Byte-buffer string builder. Satisfies Writer.") {
     this.buf = Vector[u8](capacity: capacity);
   }
 
-  write!(~this, u8[]~data) int `doc("Appends raw bytes. Satisfies Writer.") {
+  write(~this, u8[]~data) int `doc("Appends raw bytes. Satisfies Writer.") {
     int i = 0;
     while i < data.len {
       this.buf.push(data[i]);
@@ -14,12 +14,12 @@ type Builder `public `doc("Byte-buffer string builder. Satisfies Writer.") {
     return data.len;
   }
 
-  write_line!(~this, string s) `doc("Writes a string followed by the platform line separator.") {
+  write_line(~this, string s) `doc("Writes a string followed by the platform line separator.") {
     this.write_string(s);
     this.write_string(Platform.line_separator);
   }
 
-  write_string!(~this, string s) int `doc("Appends a string as bytes.") {
+  write_string(~this, string s) int `doc("Appends a string as bytes.") {
     u8[] b = s.bytes();
     int i = 0;
     while i < b.len {

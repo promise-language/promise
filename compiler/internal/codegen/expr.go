@@ -674,44 +674,29 @@ func (c *Compiler) callFormatMethod(receiver, writerVal, originalVal value.Value
 }
 
 // getInterpBuilderWriterVtable returns the Writer vtable global for Builder,
-// creating it lazily on first use. The vtable maps Writer's virtual methods
-// (write, write_string) to Builder's implementations.
+// creating it lazily on first use. Delegates to getOrEmitViewVtable so that
+// non-failable Builder methods are wrapped in $view_adapt thunks that match
+// the failable Writer interface ABI.
 func (c *Compiler) getInterpBuilderWriterVtable() *ir.Global {
 	if c.interpBuilderWriterVtable != nil {
 		return c.interpBuilderWriterVtable
 	}
 
-	// Look up Writer to determine vtable slot ordering
+	builderNamed := c.lookupNamedType("Builder")
+	if builderNamed == nil {
+		panic("codegen: Builder type not found for interpolation vtable")
+	}
 	writerNamed := c.lookupNamedType("Writer")
 	if writerNamed == nil {
-		panic("codegen: Writer type not found for interpolation")
+		panic("codegen: Writer type not found for interpolation vtable")
 	}
 
-	// Ensure default methods from Writer are synthesized for Builder
-	builderNamed := c.lookupNamedType("Builder")
-	if builderNamed != nil {
-		c.ensureDefaultMethodsSynthesized(builderNamed, writerNamed)
-	}
-
-	methods := writerNamed.AllVirtualMethods()
-
-	// Build vtable entries mapping Writer methods → Builder implementations
-	var entries []constant.Constant
-	for _, m := range methods {
-		mangledName := mangleMethodName("Builder", m.Name(), m.IsSetter())
-		fn, ok := c.funcs[mangledName]
-		if !ok {
-			panic(fmt.Sprintf("codegen: Builder.%s not found for Writer vtable", m.Name()))
-		}
-		entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
-	}
-
-	arrayType := irtypes.NewArray(uint64(len(entries)), irtypes.I8Ptr)
-	init := constant.NewArray(arrayType, entries...)
-	global := c.module.NewGlobalDef("__interp_builder_writer_vtable", init)
-	global.Immutable = true
-	c.interpBuilderWriterVtable = global
-	return global
+	// getOrEmitViewVtable correctly handles non-failable → failable adaptation
+	// via $view_adapt wrappers, so the vtable entries have the right ABI for
+	// callers dispatching through the Writer interface.
+	vt := c.getOrEmitViewVtable(builderNamed, writerNamed, builderNamed)
+	c.interpBuilderWriterVtable = vt
+	return vt
 }
 
 // hasInterpolation checks if a string literal contains any interpolation parts.

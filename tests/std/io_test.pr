@@ -2,22 +2,22 @@
 // --- Writer.write_line ---
 test_write_line() `test {
   Builder b = Builder();
-  b.write_line("hello")?!;
+  b.write_line("hello");
   string sep = Platform.line_separator;
   assert(b.to_string() == "hello" + sep, "write_line appends platform line separator");
 }
 
 test_write_line_multiple() `test {
   Builder b = Builder();
-  b.write_line("first")?!;
-  b.write_line("second")?!;
+  b.write_line("first");
+  b.write_line("second");
   string sep = Platform.line_separator;
   assert(b.to_string() == "first" + sep + "second" + sep, "multiple write_lines");
 }
 
 test_write_line_empty() `test {
   Builder b = Builder();
-  b.write_line("")?!;
+  b.write_line("");
   string sep = Platform.line_separator;
   assert(b.to_string() == sep, "write_line empty string");
 }

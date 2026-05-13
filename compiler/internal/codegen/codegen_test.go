@@ -13697,8 +13697,8 @@ func TestStringInterpolationUserTypeVtable(t *testing.T) {
 			string x = "{s}";
 		}
 	`)
-	// Virtual dispatch: should have vtable load + indirect call, not direct Shape.format
-	assertContains(t, ir, "__interp_builder_writer_vtable")
+	// Virtual dispatch: should use the Builder-as-Writer view vtable (with $view_adapt wrappers)
+	assertContains(t, ir, "promise_vtable_Builder_as_Writer")
 	assertContains(t, ir, "interp.format.ok")
 }
 
@@ -13721,7 +13721,7 @@ func TestBuilderToStringTracked(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			Builder b = Builder();
-			b.write_string("hello")?!;
+			b.write_string("hello");
 			assert(b.to_string() == "hello", "ok");
 		}
 	`)

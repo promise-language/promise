@@ -53,7 +53,6 @@ print_line(Format f) `public `doc("Prints a formatted value followed by a newlin
   Builder b = Builder();
   f.format(b)? {
   };
-  b.write_string(Platform.line_separator)? {
-  };
+  b.write_string(Platform.line_separator);
   _print_string(b.to_string());
 }

@@ -11,13 +11,6 @@ import (
 	"time"
 )
 
-// VerifySummary holds structured test results written by verify as a sidecar
-// file. The commit gate reads this to compare against baselines.
-type VerifySummary struct {
-	Timestamp string                   `json:"timestamp"`
-	Targets   map[string]TargetSummary `json:"targets"`
-}
-
 // TargetSummary holds test counts for a single target (e.g., host or wasm).
 type TargetSummary struct {
 	Passed    int     `json:"passed"`
@@ -62,43 +55,52 @@ func ParseTestSummaryLine(output string) *TargetSummary {
 	return nil
 }
 
-const verifySummaryFile = "last-verify.json"
-
-// verifySummaryPath returns the path to the verify summary sidecar file.
-func verifySummaryPath(root string) string {
-	return filepath.Join(root, ".promise-home", verifySummaryFile)
+// GateValues holds flat named metric values written by verify as a sidecar file.
+// Keys are metric names (e.g. "host_test_count"); values are float64.
+// The commit gate reads this directly — no translation layer.
+type GateValues struct {
+	Timestamp string             `json:"timestamp"`
+	Platform  string             `json:"platform"`
+	Values    map[string]float64 `json:"values"`
 }
 
-// WriteVerifySummary writes the verify summary sidecar to .promise-home/.
-func WriteVerifySummary(root string, summary *VerifySummary) error {
-	path := verifySummaryPath(root)
-	data, err := json.MarshalIndent(summary, "", "  ")
+const gateValuesFile = "gate-values.json"
+
+// gateValuesPath returns the path to the gate values sidecar file.
+func gateValuesPath(root string) string {
+	return filepath.Join(root, ".promise-home", gateValuesFile)
+}
+
+// WriteGateValues writes the gate values sidecar to .promise-home/.
+func WriteGateValues(root string, gv *GateValues) error {
+	path := gateValuesPath(root)
+	data, err := json.MarshalIndent(gv, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal verify summary: %w", err)
+		return fmt.Errorf("marshal gate values: %w", err)
 	}
 	data = append(data, '\n')
 	return os.WriteFile(path, data, 0o644)
 }
 
-// ReadVerifySummary reads the verify summary sidecar. Returns an error if the
-// file is missing or stale (older than maxAge).
-func ReadVerifySummary(root string, maxAge time.Duration) (*VerifySummary, error) {
-	path := verifySummaryPath(root)
+// ReadGateValues reads the gate values sidecar. Returns an error if the file
+// is missing or stale (older than maxAge).
+func ReadGateValues(root string, maxAge time.Duration) (*GateValues, error) {
+	path := gateValuesPath(root)
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("no verify summary found — run bin/verify first")
+		return nil, fmt.Errorf("no gate values found — run bin/verify first")
 	}
 	if maxAge > 0 && time.Since(info.ModTime()) > maxAge {
-		return nil, fmt.Errorf("verify summary is stale (%s old) — run bin/verify again",
+		return nil, fmt.Errorf("gate values are stale (%s old) — run bin/verify again",
 			time.Since(info.ModTime()).Round(time.Second))
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read verify summary: %w", err)
+		return nil, fmt.Errorf("read gate values: %w", err)
 	}
-	var summary VerifySummary
-	if err := json.Unmarshal(data, &summary); err != nil {
-		return nil, fmt.Errorf("parse verify summary: %w", err)
+	var gv GateValues
+	if err := json.Unmarshal(data, &gv); err != nil {
+		return nil, fmt.Errorf("parse gate values: %w", err)
 	}
-	return &summary, nil
+	return &gv, nil
 }

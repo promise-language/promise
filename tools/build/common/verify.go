@@ -173,23 +173,26 @@ func RunVerify(root string, args []string) error {
 		return fmt.Errorf("%s failed", strings.Join(failures, ", "))
 	}
 
-	// 10. Write verify summary sidecar for commit gate.
-	verifySummary := &VerifySummary{
+	// 10. Write gate values sidecar for commit gate.
+	gv := &GateValues{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Targets:   make(map[string]TargetSummary),
+		Platform:  hostTarget,
+		Values:    make(map[string]float64),
 	}
 	if s := ParseTestSummaryLine(hostOutput); s != nil {
-		s.ElapsedMs = float64(hostElapsed.Milliseconds())
-		verifySummary.Targets[hostTarget] = *s
+		gv.Values["host_test_count"] = float64(s.Passed)
+		gv.Values["host_leak_count"] = float64(s.Leaked)
+		gv.Values["host_test_failures"] = float64(s.Failed)
 	}
 	if wasm {
 		if s := ParseTestSummaryLine(wasmOutput); s != nil {
-			s.ElapsedMs = float64(wasmElapsed.Milliseconds())
-			verifySummary.Targets["wasm32-wasi"] = *s
+			gv.Values["wasm_test_count"] = float64(s.Passed)
+			gv.Values["wasm_leak_count"] = float64(s.Leaked)
+			gv.Values["wasm_test_failures"] = float64(s.Failed)
 		}
 	}
-	if err := WriteVerifySummary(root, verifySummary); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write verify summary: %v\n", err)
+	if err := WriteGateValues(root, gv); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
 	fmt.Println("✅ OK to commit")

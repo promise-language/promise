@@ -97,31 +97,57 @@ Edit and commit gates run locally (fast, synchronous). Periodic and platform gat
 
 **Purpose:** Enforce that quality metrics only improve over time. Block commits that regress.
 
-**Mechanism:** A Go program `tools/gates/commit_gate.go` (cross-platform) runs after `bin/verify.sh` and before `git commit`. It parses verify output, compares against baselines stored in the repo, and blocks on regression.
+**Mechanism:** `bin/verify` writes a flat `gate-values.json` sidecar to `.promise-home/`. The commit gate (`tools/build/common/commitgate.go`) reads gate values directly by name and compares against baselines. No translation layer -- metric names in gate values match metric names in baselines.
+
+### Gate Values
+
+After a successful `bin/verify`, a sidecar file `.promise-home/gate-values.json` is written:
+
+```json
+{
+  "timestamp": "2026-04-11T12:00:00Z",
+  "platform": "darwin-arm64",
+  "values": {
+    "host_test_count": 3656,
+    "host_leak_count": 0,
+    "host_test_failures": 0,
+    "wasm_test_count": 3397,
+    "wasm_test_failures": 0
+  }
+}
+```
+
+Gate values are a flat `map[string]float64`. Adding a new metric requires only writing a new key in `verify.go` -- no mapping code needed.
 
 ### Baselines
 
 Baselines live in `tools/gates/baselines.json` committed to the repo. This avoids the race condition where an agent updates a remote baseline before pushing the code -- other agents would trip the gate on stale code. Baselines travel with the code.
+
+Each baseline entry has one of three states:
+
+| State | Fields | Behavior |
+|-------|--------|----------|
+| **Enforced** | `direction` + `value` + `updated` | Ratchet-checked against gate values |
+| **Pending** | `direction` only (no `value`) | Value auto-populated from next gate values run |
+| **Informational** | `type: "informational"` | Tracked but not enforced; user adds `direction` to promote |
 
 **Per-platform baselines** (WASM has more skipped tests, Windows excludes some tests, etc.):
 
 ```json
 {
   "darwin-arm64": {
-    "host_test_count": { "value": 3211, "direction": "up", "updated": "2026-03-29" },
-    "host_leak_count": { "value": 1872, "direction": "down", "updated": "2026-03-29" },
-    "host_test_failures": { "value": 0, "direction": "exact", "updated": "2026-03-29" }
-  },
-  "wasm32-wasi": {
-    "wasm_test_count": { "value": 2954, "direction": "up", "updated": "2026-03-29" },
-    "wasm_test_failures": { "value": 0, "direction": "exact", "updated": "2026-03-29" }
-  },
-  "windows-amd64": {
-    "host_test_count": { "value": 3100, "direction": "up", "updated": "2026-03-29" },
-    "host_test_failures": { "value": 0, "direction": "exact", "updated": "2026-03-29" }
+    "host_test_count": { "value": 3656, "direction": "up", "updated": "2026-04-11" },
+    "host_leak_count": { "value": 0, "direction": "down", "updated": "2026-04-06" },
+    "host_test_failures": { "value": 0, "direction": "exact", "updated": "2026-04-06" },
+    "wasm_test_count": { "value": 3397, "direction": "up", "updated": "2026-04-11" },
+    "wasm_test_failures": { "value": 0, "direction": "exact", "updated": "2026-04-06" },
+    "coverage": { "direction": "up" },
+    "binary_size": { "type": "informational" }
   }
 }
 ```
+
+The `coverage` entry above is **Pending** (has direction but no value -- will be auto-populated). The `binary_size` entry is **Informational** (tracked but not enforced).
 
 **Ratchet directions:**
 - `up`: value can only increase (more tests = better)
@@ -129,19 +155,23 @@ Baselines live in `tools/gates/baselines.json` committed to the repo. This avoid
 - `exact`: value must match exactly (zero failures)
 
 **How it works:**
-1. Parses verify output (regex on summary line: `N passed, N failed, N leaked`)
+1. Reads `.promise-home/gate-values.json` (must be <10 min old)
 2. Reads `tools/gates/baselines.json` for current platform
-3. Compares each metric against its ratchet direction
-4. If regression: prints clear message, exits non-zero (commit blocked)
-5. If improvement: updates `baselines.json` in-place, stages it with the commit
-6. Queries tracker for active exceptions (gate ID + tracker bug ID + expiry)
+3. Auto-registers unknown gate values as **Informational** entries
+4. Auto-populates **Pending** entries with the current value
+5. Ratchet-checks **Enforced** entries against gate values
+6. If regression: prints clear message, exits non-zero (commit blocked)
+7. If improvement: updates `baselines.json` in-place, stages it with the commit
+8. Queries tracker for active exceptions (gate ID + tracker bug ID + expiry)
 
-**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version.
+**Defense-in-depth:** The `.githooks/pre-commit` hook runs a lightweight check that `baselines.json` values only improve vs. the committed version. Informational and Pending entries are skipped.
 
 **Key files:**
-- `tools/gates/commit_gate.go` -- cross-platform ratchet enforcement
+- `tools/build/common/verify_summary.go` -- `GateValues` type + IO, `ParseTestSummaryLine`
+- `tools/build/common/commitgate.go` -- `Baseline` struct (3-state), ratchet enforcement
+- `tools/build/common/verify.go` -- writes `gate-values.json` after verify
+- `tools/build/common/precommit.go` -- defense-in-depth baseline check
 - `tools/gates/baselines.json` -- per-platform baseline state
-- `.githooks/pre-commit` -- defense-in-depth baseline check
 - `.claude/skills/commit/SKILL.md` -- workflow integration
 
 ---

@@ -1,6 +1,11 @@
 package common
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 func TestParseTestSummaryLine_Basic(t *testing.T) {
 	output := "3634 passed, 0 failed (354 files, 1.075s)"
@@ -105,5 +110,65 @@ func TestParseTestSummaryLine_Empty(t *testing.T) {
 	s := ParseTestSummaryLine("")
 	if s != nil {
 		t.Errorf("expected nil, got %+v", s)
+	}
+}
+
+func TestWriteReadGateValues(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+
+	gv := &GateValues{
+		Timestamp: "2026-04-11T12:00:00Z",
+		Platform:  "darwin-arm64",
+		Values: map[string]float64{
+			"host_test_count": 3656,
+			"host_leak_count": 0,
+		},
+	}
+	if err := WriteGateValues(root, gv); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := ReadGateValues(root, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.Platform != "darwin-arm64" {
+		t.Errorf("platform = %q, want darwin-arm64", got.Platform)
+	}
+	if got.Values["host_test_count"] != 3656 {
+		t.Errorf("host_test_count = %v, want 3656", got.Values["host_test_count"])
+	}
+}
+
+func TestReadGateValues_Missing(t *testing.T) {
+	root := t.TempDir()
+	_, err := ReadGateValues(root, 5*time.Minute)
+	if err == nil {
+		t.Fatal("expected error for missing gate values, got nil")
+	}
+}
+
+func TestReadGateValues_Stale(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+
+	gv := &GateValues{
+		Timestamp: "2020-01-01T00:00:00Z",
+		Platform:  "linux-amd64",
+		Values:    map[string]float64{},
+	}
+	if err := WriteGateValues(root, gv); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Set mtime to 20 minutes ago.
+	path := filepath.Join(root, ".promise-home", gateValuesFile)
+	old := time.Now().Add(-20 * time.Minute)
+	os.Chtimes(path, old, old)
+
+	_, err := ReadGateValues(root, 10*time.Minute)
+	if err == nil {
+		t.Fatal("expected stale error, got nil")
 	}
 }

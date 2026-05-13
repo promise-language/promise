@@ -84,14 +84,22 @@ func validateBaselinesDiff(root string) error {
 			continue
 		}
 		for metric, headBl := range headMetrics {
+			// Only validate Enforced entries (Direction != "" and Value != nil in HEAD).
+			if headBl.Direction == "" || headBl.Value == nil {
+				continue
+			}
 			stagedBl, ok := stagedMetrics[metric]
 			if !ok {
 				regressions = append(regressions, fmt.Sprintf("  %s/%s: metric removed", platform, metric))
 				continue
 			}
-			if !checkRatchet(headBl.Direction, headBl.Value, stagedBl.Value) {
-				regressions = append(regressions, fmt.Sprintf("  %s/%s: %d → %d (%s)",
-					platform, metric, headBl.Value, stagedBl.Value, ratchetVerb(headBl.Direction)))
+			stagedVal := float64(0)
+			if stagedBl.Value != nil {
+				stagedVal = *stagedBl.Value
+			}
+			if !checkRatchet(headBl.Direction, *headBl.Value, stagedVal) {
+				regressions = append(regressions, fmt.Sprintf("  %s/%s: %v → %v (%s)",
+					platform, metric, *headBl.Value, stagedVal, ratchetVerb(headBl.Direction)))
 			}
 		}
 	}

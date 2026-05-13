@@ -10,12 +10,15 @@ import (
 	"time"
 )
 
-// Baseline represents a single ratcheted metric with its current value and
-// the direction it is allowed to move.
+// Baseline represents a single ratcheted metric. Three states:
+//   - Enforced: Direction != "" && Value != nil — ratchet-checked
+//   - Pending:  Direction != "" && Value == nil — value auto-populated on next run
+//   - Informational: Type == "informational" — tracked but not enforced
 type Baseline struct {
-	Value     int    `json:"value"`
-	Direction string `json:"direction"` // "up", "down", "exact"
-	Updated   string `json:"updated"`   // YYYY-MM-DD
+	Value     *float64 `json:"value,omitempty"`     // nil = not yet set (Pending)
+	Direction string   `json:"direction,omitempty"` // "up", "down", "exact"; absent = Informational
+	Updated   string   `json:"updated,omitempty"`   // YYYY-MM-DD
+	Type      string   `json:"type,omitempty"`      // "informational" for auto-created entries
 }
 
 // Baselines maps platform → metric name → baseline.
@@ -48,47 +51,8 @@ func SaveBaselines(root string, b Baselines) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// metricMapping defines how verify summary fields map to baseline metric names.
-type metricMapping struct {
-	metric string // baseline metric name
-	value  func(host, wasm *TargetSummary) (int, bool)
-}
-
-var metricMappings = []metricMapping{
-	{"host_test_count", func(h, _ *TargetSummary) (int, bool) {
-		if h == nil {
-			return 0, false
-		}
-		return h.Passed, true
-	}},
-	{"host_leak_count", func(h, _ *TargetSummary) (int, bool) {
-		if h == nil {
-			return 0, false
-		}
-		return h.Leaked, true
-	}},
-	{"host_test_failures", func(h, _ *TargetSummary) (int, bool) {
-		if h == nil {
-			return 0, false
-		}
-		return h.Failed, true
-	}},
-	{"wasm_test_count", func(_, w *TargetSummary) (int, bool) {
-		if w == nil {
-			return 0, false
-		}
-		return w.Passed, true
-	}},
-	{"wasm_test_failures", func(_, w *TargetSummary) (int, bool) {
-		if w == nil {
-			return 0, false
-		}
-		return w.Failed, true
-	}},
-}
-
 // checkRatchet returns true if the new value satisfies the ratchet direction.
-func checkRatchet(direction string, baseline, actual int) bool {
+func checkRatchet(direction string, baseline, actual float64) bool {
 	switch direction {
 	case "up":
 		return actual >= baseline
@@ -115,11 +79,11 @@ func ratchetVerb(direction string) string {
 	}
 }
 
-// CheckCommitGate reads the last verify summary and compares against baselines.
+// CheckCommitGate reads gate values and compares against baselines.
 // Returns nil if all metrics pass. Updates baselines.json on improvements.
 func CheckCommitGate(root string) error {
-	// 1. Read verify summary.
-	summary, err := ReadVerifySummary(root, 10*time.Minute)
+	// 1. Read gate values.
+	gv, err := ReadGateValues(root, 10*time.Minute)
 	if err != nil {
 		return err
 	}
@@ -135,30 +99,32 @@ func CheckCommitGate(root string) error {
 
 	platformBaselines, ok := baselines[platform]
 	if !ok {
-		fmt.Printf("commit gate: no baselines for platform %s — skipping\n", platform)
-		return nil
+		platformBaselines = make(map[string]Baseline)
+		baselines[platform] = platformBaselines
 	}
 
-	// 4. Find host and wasm summaries.
-	var hostSummary, wasmSummary *TargetSummary
-	if s, ok := summary.Targets[platform]; ok {
-		hostSummary = &s
-	}
-	if s, ok := summary.Targets["wasm32-wasi"]; ok {
-		wasmSummary = &s
+	// 4. Auto-register unknown gate values as informational.
+	changed := false
+	for key := range gv.Values {
+		if _, exists := platformBaselines[key]; !exists {
+			platformBaselines[key] = Baseline{Type: "informational"}
+			fmt.Printf("commit gate: new metric %q = %v — added as informational (set direction to enforce)\n",
+				key, gv.Values[key])
+			changed = true
+		}
 	}
 
 	// 5. Check each metric.
 	type regression struct {
 		metric    string
-		baseline  int
-		actual    int
+		baseline  float64
+		actual    float64
 		direction string
 	}
 	type improvement struct {
 		metric   string
-		baseline int
-		actual   int
+		baseline float64
+		actual   float64
 	}
 
 	var regressions []regression
@@ -174,32 +140,45 @@ func CheckCommitGate(root string) error {
 
 	for _, name := range metricNames {
 		bl := platformBaselines[name]
-		// Find the mapping for this metric.
-		var actual int
-		var found bool
-		for _, m := range metricMappings {
-			if m.metric == name {
-				actual, found = m.value(hostSummary, wasmSummary)
-				break
-			}
+
+		// Informational — skip.
+		if bl.Type == "informational" {
+			continue
 		}
+
+		// Look up the actual value from gate values.
+		actual, found := gv.Values[name]
 		if !found {
 			continue
 		}
 
-		if !checkRatchet(bl.Direction, bl.Value, actual) {
-			regressions = append(regressions, regression{
-				metric:    name,
-				baseline:  bl.Value,
-				actual:    actual,
-				direction: bl.Direction,
-			})
-		} else if actual != bl.Value {
-			improvements = append(improvements, improvement{
-				metric:   name,
-				baseline: bl.Value,
-				actual:   actual,
-			})
+		// Pending — auto-populate value.
+		if bl.Direction != "" && bl.Value == nil {
+			val := actual
+			bl.Value = &val
+			bl.Updated = today
+			platformBaselines[name] = bl
+			fmt.Printf("commit gate: pending metric %q populated: %v\n", name, actual)
+			changed = true
+			continue
+		}
+
+		// Enforced — ratchet check.
+		if bl.Value != nil {
+			if !checkRatchet(bl.Direction, *bl.Value, actual) {
+				regressions = append(regressions, regression{
+					metric:    name,
+					baseline:  *bl.Value,
+					actual:    actual,
+					direction: bl.Direction,
+				})
+			} else if actual != *bl.Value {
+				improvements = append(improvements, improvement{
+					metric:   name,
+					baseline: *bl.Value,
+					actual:   actual,
+				})
+			}
 		}
 	}
 
@@ -207,7 +186,7 @@ func CheckCommitGate(root string) error {
 	if len(regressions) > 0 {
 		fmt.Println("COMMIT GATE FAILED — quality regression detected:")
 		for _, r := range regressions {
-			fmt.Printf("  %s: %d → %d (%s, baseline: %d)\n",
+			fmt.Printf("  %s: %v → %v (%s, baseline: %v)\n",
 				r.metric, r.baseline, r.actual, ratchetVerb(r.direction), r.baseline)
 		}
 		return fmt.Errorf("%d metric(s) regressed", len(regressions))
@@ -217,12 +196,17 @@ func CheckCommitGate(root string) error {
 	if len(improvements) > 0 {
 		fmt.Println("commit gate: baselines improved:")
 		for _, imp := range improvements {
-			fmt.Printf("  %s: %d → %d\n", imp.metric, imp.baseline, imp.actual)
+			fmt.Printf("  %s: %v → %v\n", imp.metric, imp.baseline, imp.actual)
 			bl := platformBaselines[imp.metric]
-			bl.Value = imp.actual
+			val := imp.actual
+			bl.Value = &val
 			bl.Updated = today
 			platformBaselines[imp.metric] = bl
 		}
+		changed = true
+	}
+
+	if changed {
 		baselines[platform] = platformBaselines
 		if err := SaveBaselines(root, baselines); err != nil {
 			return fmt.Errorf("update baselines: %w", err)

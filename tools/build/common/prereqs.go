@@ -18,25 +18,25 @@ func RunPrereqs(root string, args []string) error {
 	// Go
 	if path := Which("go"); path != "" {
 		ver, _ := RunOutputQuiet("go", "version")
-		fmt.Printf("  go:       %s\n", ver)
+		fmt.Printf("✅ go:       %s\n", ver)
 	} else {
-		fmt.Println("  go:       NOT FOUND — install Go 1.25+ from https://go.dev/dl/")
+		fmt.Println("❌ go:       NOT FOUND — install Go 1.25+ from https://go.dev/dl/")
 		ok = false
 	}
 
 	// Java (for ANTLR) — java -version writes to stderr
 	if path := Which("java"); path != "" {
 		ver, _ := RunOutputCombined("java", "-version")
-		fmt.Printf("  java:     %s\n", firstLine(ver))
+		fmt.Printf("✅ java:     %s\n", firstLine(ver))
 	} else {
-		fmt.Println("  java:     NOT FOUND — install Java 11+ (for ANTLR parser generation)")
+		fmt.Println("❌ java:     NOT FOUND — install Java 11+ (for ANTLR parser generation)")
 		ok = false
 	}
 
 	// LLVM
 	llvm, err := FindLLVM()
 	if err != nil {
-		fmt.Printf("  llvm:     NOT FOUND — %v\n", err)
+		fmt.Printf("❌ llvm:     NOT FOUND — %v\n", err)
 		ok = false
 		switch runtime.GOOS {
 		case "darwin":
@@ -47,16 +47,16 @@ func RunPrereqs(root string, args []string) error {
 			fmt.Println("            Install: download from https://github.com/llvm/llvm-project/releases")
 		}
 	} else {
-		fmt.Printf("  llvm:     %d (opt: %s)\n", llvm.Version, llvm.OptPath)
-		fmt.Printf("  lld:      %s\n", llvm.LLDPath)
+		fmt.Printf("✅ llvm:     %d (opt: %s)\n", llvm.Version, llvm.OptPath)
+		fmt.Printf("✅ lld:      %s\n", llvm.LLDPath)
 	}
 
 	// musl (Linux only)
 	if IsLinux() {
 		if Exists("/usr/lib/x86_64-linux-musl/libc.a") {
-			fmt.Println("  musl:     installed")
+			fmt.Println("✅ musl:     installed")
 		} else {
-			fmt.Println("  musl:     NOT FOUND — install: sudo apt-get install musl-dev")
+			fmt.Println("❌ musl:     NOT FOUND — install: sudo apt-get install musl-dev")
 			ok = false
 		}
 	}
@@ -64,16 +64,24 @@ func RunPrereqs(root string, args []string) error {
 	// wasmtime (optional)
 	if path := Which("wasmtime"); path != "" {
 		ver, _ := RunOutputQuiet("wasmtime", "--version")
-		fmt.Printf("  wasmtime: %s\n", ver)
+		fmt.Printf("✅ wasmtime: %s\n", ver)
 	} else {
-		fmt.Println("  wasmtime: NOT FOUND (optional, for --target wasm32-wasi)")
+		fmt.Println("❌ wasmtime: NOT FOUND (optional, for --target wasm32-wasi)")
+		switch runtime.GOOS {
+		case "windows":
+			fmt.Println("            Install: winget install BytecodeAlliance.Wasmtime")
+		case "darwin":
+			fmt.Println("            Install: brew install wasmtime")
+		default:
+			fmt.Println("            Install: curl https://wasmtime.dev/install.sh -sSf | bash")
+		}
 	}
 
 	fmt.Println()
 	if ok {
-		fmt.Println("All prerequisites installed.")
+		fmt.Println("All required prerequisites installed.")
 	} else {
-		fmt.Println("Some prerequisites are missing. See above for install instructions.")
+		fmt.Println("Some required prerequisites are missing — see install instructions above.")
 	}
 	return nil
 }

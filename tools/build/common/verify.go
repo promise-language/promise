@@ -130,7 +130,7 @@ func RunVerify(root string, args []string) error {
 	var wasmElapsed time.Duration
 	if wasm {
 		if Which("wasmtime") == "" {
-			return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
+			return fmt.Errorf("wasmtime not found — install from https://wasmtime.dev/ or: winget install BytecodeAlliance.Wasmtime")
 		}
 		fmt.Println("\nRunning promise tests (wasm32-wasi)...")
 		wasmStart := time.Now()

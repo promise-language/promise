@@ -110,5 +110,8 @@ func main() {
 	// Write hash sidecar for up-to-date check
 	os.WriteFile(hashFile, []byte(hash+"\n"), 0o644)
 
+	// Invalidate gate values — tools changed, prior verify results are stale
+	common.InvalidateGateValues(root)
+
 	fmt.Printf("\n%d tools built (%s)\n", len(tools), elapsed.Round(time.Millisecond))
 }

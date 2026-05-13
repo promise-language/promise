@@ -140,6 +140,9 @@ func RunBuild(root string, args []string) error {
 	infoFile := filepath.Join(binDir, ".promise.buildinfo")
 	os.WriteFile(infoFile, []byte(version+"\n"), 0o644)
 
+	// 12. Invalidate gate values — compiler changed, prior verify results are stale
+	InvalidateGateValues(root)
+
 	elapsed := time.Since(start).Round(time.Millisecond)
 	if info, err := os.Stat(binaryPath); err == nil {
 		size := float64(info.Size()) / (1024 * 1024)

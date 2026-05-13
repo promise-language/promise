@@ -96,6 +96,16 @@ func ExtractFailedSection(output string) string {
 	return ""
 }
 
+// InvalidateGateValues deletes the gate values sidecar file if it exists.
+// Called by context-changing commands (build, make) to prevent stale gate
+// values from letting a commit gate pass after code/tools changed.
+func InvalidateGateValues(root string) {
+	path := gateValuesPath(root)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", gateValuesFile, err)
+	}
+}
+
 // ReadGateValues reads the gate values sidecar. Returns an error if the file
 // is missing or stale (older than maxAge).
 func ReadGateValues(root string, maxAge time.Duration) (*GateValues, error) {

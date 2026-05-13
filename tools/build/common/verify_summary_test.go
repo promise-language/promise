@@ -206,6 +206,77 @@ func TestReadGateValues_Missing(t *testing.T) {
 	}
 }
 
+func TestInvalidateGateValues(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+
+	// Write gate values, then invalidate — file should be gone.
+	gv := &GateValues{
+		Timestamp: "2026-04-11T12:00:00Z",
+		Platform:  "darwin-arm64",
+		Values:    map[string]float64{"host_test_count": 100},
+	}
+	if err := WriteGateValues(root, gv); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	InvalidateGateValues(root)
+	_, err := ReadGateValues(root, 0)
+	if err == nil {
+		t.Fatal("expected error after invalidation, got nil")
+	}
+}
+
+func TestInvalidateGateValues_Missing(t *testing.T) {
+	// Invalidating when no file exists should not panic or error.
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+	InvalidateGateValues(root) // should be a no-op
+}
+
+func TestInvalidateGateValues_PermissionError(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".promise-home")
+	os.MkdirAll(dir, 0o755)
+
+	// Write a gate values file, then make directory read-only so Remove fails
+	// with a permission error (not IsNotExist).
+	gv := &GateValues{
+		Timestamp: "2026-04-11T12:00:00Z",
+		Platform:  "darwin-arm64",
+		Values:    map[string]float64{"x": 1},
+	}
+	if err := WriteGateValues(root, gv); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	os.Chmod(dir, 0o555) // read+exec only — Remove will fail
+	defer os.Chmod(dir, 0o755)
+
+	// Should not panic; prints warning to stderr.
+	InvalidateGateValues(root)
+
+	// File should still exist since removal was denied.
+	path := filepath.Join(dir, gateValuesFile)
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("file should still exist after failed removal: %v", err)
+	}
+}
+
+func TestReadGateValues_MalformedJSON(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)
+
+	path := filepath.Join(root, ".promise-home", gateValuesFile)
+	os.WriteFile(path, []byte("not json"), 0o644)
+
+	_, err := ReadGateValues(root, 0)
+	if err == nil {
+		t.Fatal("expected error for malformed JSON, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse gate values") {
+		t.Errorf("expected 'parse gate values' in error, got: %v", err)
+	}
+}
+
 func TestReadGateValues_Stale(t *testing.T) {
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, ".promise-home"), 0o755)

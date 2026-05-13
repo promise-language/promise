@@ -3,6 +3,7 @@ package common
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -110,6 +111,62 @@ func TestParseTestSummaryLine_Empty(t *testing.T) {
 	s := ParseTestSummaryLine("")
 	if s != nil {
 		t.Errorf("expected nil, got %+v", s)
+	}
+}
+
+func TestExtractFailedSection_MultiFile(t *testing.T) {
+	output := `pass (0.001s) e2e/basics.pr (3 tests)
+FAIL (0.005s) e2e/strings.pr (1/3 failed)
+  test_split
+    panic: assertion failed
+
+568 passed, 2 failed (117 files, 30.810s)
+FAILED:
+  e2e/strings.pr: test_split
+    panic: assertion failed
+  broken.pr (compilation error)
+    broken.pr:5:3: type Foo has no field 'bar'`
+
+	got := ExtractFailedSection(output)
+	if !strings.Contains(got, "e2e/strings.pr: test_split") {
+		t.Errorf("expected test_split in section, got:\n%s", got)
+	}
+	if !strings.Contains(got, "broken.pr (compilation error)") {
+		t.Errorf("expected broken.pr in section, got:\n%s", got)
+	}
+	// Must not include the "FAILED:" header line itself.
+	if strings.HasPrefix(got, "FAILED:") {
+		t.Errorf("section should not start with FAILED:, got:\n%s", got)
+	}
+}
+
+func TestExtractFailedSection_SingleFile(t *testing.T) {
+	output := `pass (0.001s) test_add
+FAIL (0.003s) test_broken
+  panic: assertion failed
+
+2 passed, 1 failed (0.423s)
+FAILED:
+  test_broken`
+
+	got := ExtractFailedSection(output)
+	if !strings.Contains(got, "test_broken") {
+		t.Errorf("expected test_broken, got:\n%s", got)
+	}
+}
+
+func TestExtractFailedSection_NoFailures(t *testing.T) {
+	output := "3 passed, 0 failed (0.010s)"
+	got := ExtractFailedSection(output)
+	if got != "" {
+		t.Errorf("expected empty string, got: %q", got)
+	}
+}
+
+func TestExtractFailedSection_Empty(t *testing.T) {
+	got := ExtractFailedSection("")
+	if got != "" {
+		t.Errorf("expected empty string for empty input, got: %q", got)
 	}
 }
 

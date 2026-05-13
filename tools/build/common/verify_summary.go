@@ -82,6 +82,20 @@ func WriteGateValues(root string, gv *GateValues) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
+// ExtractFailedSection extracts the individual failure lines from captured
+// promise test output. It finds the "FAILED:" header line and returns everything
+// that follows it (preserving indentation). Returns empty string if not found.
+func ExtractFailedSection(output string) string {
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "FAILED:" {
+			rest := strings.Join(lines[i+1:], "\n")
+			return strings.TrimRight(rest, "\n")
+		}
+	}
+	return ""
+}
+
 // ReadGateValues reads the gate values sidecar. Returns an error if the file
 // is missing or stale (older than maxAge).
 func ReadGateValues(root string, maxAge time.Duration) (*GateValues, error) {

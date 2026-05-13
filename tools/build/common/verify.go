@@ -169,6 +169,30 @@ func RunVerify(root string, args []string) error {
 	fmt.Println("====================================================")
 
 	if len(failures) > 0 {
+		// Consolidated per-test failure detail — host first, WASM second.
+		// This re-states the FAILED: section from each target's output so that
+		// agents tail-reading the last ~40 lines see all failures, not just the
+		// final target's output.
+		type failureSection struct{ label, section string }
+		var sections []failureSection
+		if s := ExtractFailedSection(hostOutput); s != "" {
+			sections = append(sections, failureSection{hostTarget, s})
+		}
+		if wasm {
+			if s := ExtractFailedSection(wasmOutput); s != "" {
+				sections = append(sections, failureSection{"wasm32-wasi", s})
+			}
+		}
+		if len(sections) > 0 {
+			fmt.Println("----------------------------------------------------")
+			fmt.Println("  Failed Tests")
+			for _, fs := range sections {
+				fmt.Println("----------------------------------------------------")
+				fmt.Printf("[%s]\n", fs.label)
+				fmt.Println(fs.section)
+			}
+		}
+
 		fmt.Printf("FAILED: %s\n", strings.Join(failures, ", "))
 		return fmt.Errorf("%s failed", strings.Join(failures, ", "))
 	}

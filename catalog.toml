@@ -35,3 +35,6 @@ description = "TCP networking: TcpListener, TcpStream with reactor-based non-blo
 
 [modules.console]
 description = "Terminal UI: raw mode, cell buffer, styled text, input events, cursor control (planned)"
+
+[modules.toml]
+description = "TOML 1.0.0 encoding and decoding: TomlEncoder, TomlDecoder, encode_string, decode_string, parse_value (planned)"

@@ -75,7 +75,6 @@ func runGateTest(root string, args []string) error {
 	// Run host tests — tee to stderr so stdout is clean for JSON.
 	fmt.Fprintf(os.Stderr, "Running promise tests (%s)...\n", hostTarget)
 	hostOutput, hostErr := RunPromiseTestsCapture(root, "")
-	ReportTestHealth(root, hostTarget, hostOutput)
 
 	// Run wasm tests if requested.
 	var wasmOutput string
@@ -83,7 +82,6 @@ func runGateTest(root string, args []string) error {
 	if wasm {
 		fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-wasi)...\n")
 		wasmOutput, wasmErr = RunPromiseTestsCapture(root, "wasm32-wasi")
-		ReportTestHealth(root, "wasm32-wasi", wasmOutput)
 	}
 
 	// Collect gate values.
@@ -171,7 +169,6 @@ func runGateWasmTests(root string, args []string) error {
 	// Run wasm tests only — tee to stderr so stdout is clean for JSON.
 	fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-wasi)...\n")
 	wasmOutput, wasmErr := RunPromiseTestsCapture(root, "wasm32-wasi")
-	ReportTestHealth(root, "wasm32-wasi", wasmOutput)
 
 	// Collect gate values.
 	gv := &GateValues{

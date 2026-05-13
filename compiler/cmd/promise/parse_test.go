@@ -10,6 +10,7 @@ import (
 
 	"github.com/antlr4-go/antlr/v4"
 
+	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/module"
 	"djabi.dev/go/promise_lang/internal/parser"
 	"djabi.dev/go/promise_lang/internal/sema"
@@ -627,6 +628,46 @@ main() { /* inside */ Int x = 0; // end
 				t.Errorf("expected 0 errors, got %d for: %s", errs, tc.code)
 			}
 		})
+	}
+}
+
+// TestParseSourceFileNormalizesCRLF verifies that parseSourceFile normalizes
+// CRLF line endings to LF before lexing, so that triple-quoted and raw string
+// literals have consistent content regardless of how git checked the file out
+// (CRLF on Windows vs LF elsewhere). Regression test for B0339.
+func TestParseSourceFileNormalizesCRLF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "crlf.pr")
+	// Source with CRLF line endings containing a triple-quoted multiline string.
+	source := "f() {\r\n  s := \"\"\"\r\nline one\r\nline two\r\n\"\"\";\r\n}\r\n"
+	if err := os.WriteFile(path, []byte(source), 0644); err != nil {
+		t.Fatal(err)
+	}
+	file := parseSourceFile(path)
+	if len(file.Decls) != 1 {
+		t.Fatalf("expected 1 decl, got %d", len(file.Decls))
+	}
+	fn, ok := file.Decls[0].(*ast.FuncDecl)
+	if !ok {
+		t.Fatalf("expected FuncDecl, got %T", file.Decls[0])
+	}
+	if fn.Body == nil || len(fn.Body.Stmts) != 1 {
+		t.Fatalf("expected 1 stmt in func body")
+	}
+	decl, ok := fn.Body.Stmts[0].(*ast.InferredVarDecl)
+	if !ok {
+		t.Fatalf("expected InferredVarDecl, got %T", fn.Body.Stmts[0])
+	}
+	sl, ok := decl.Value.(*ast.StringLit)
+	if !ok {
+		t.Fatalf("expected StringLit, got %T", decl.Value)
+	}
+	if strings.Contains(sl.Raw, "\r") {
+		t.Errorf("StringLit.Raw contains \\r after parse: %q", sl.Raw)
+	}
+	want := "\"\"\"\nline one\nline two\n\"\"\""
+	if sl.Raw != want {
+		t.Errorf("StringLit.Raw = %q, want %q", sl.Raw, want)
 	}
 }
 

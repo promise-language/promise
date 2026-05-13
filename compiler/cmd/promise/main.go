@@ -4294,12 +4294,17 @@ func compileAndLinkClang(llFile, target, outputFile string) {
 // --- Frontend pipeline ---
 
 // parseFile parses a .pr file and returns the AST.
+// Source bytes are normalized to LF line endings before lexing so that
+// triple-quoted and raw string literals have consistent content regardless
+// of how git checked the file out (CRLF on Windows vs LF elsewhere).
 func parseSourceFile(filename string) *ast.File {
-	input, err := antlr.NewFileStream(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", filename, err)
 		os.Exit(1)
 	}
+	source := strings.ReplaceAll(string(data), "\r\n", "\n")
+	input := antlr.NewInputStream(source)
 
 	lexer := parser.NewPromiseLexer(input)
 	lexer.RemoveErrorListeners()

@@ -52,7 +52,11 @@ Proposal → Setup → Implement → Validate → Ship
 
 Before writing code, write a design document. The proposal establishes the API contract
 that implementation must satisfy. Place it inside the module directory from the start
-(`modules/<name>/proposal.md`) — see [Phase 2](#3-phase-2-set-up-the-module) for setup.
+(`modules/<name>/plan.md`) — see [Phase 2](#3-phase-2-set-up-the-module) for setup.
+
+Saving the document as `plan.md` is important: `promise doc <name>` automatically surfaces
+`plan.md` when a module has no public declarations yet, making planned modules
+self-documenting from day one.
 
 ### What to include
 
@@ -104,11 +108,16 @@ This proves the API won't need breaking changes when these are added.
 
 ### Where to put the proposal
 
-Place the proposal inside the module directory: `modules/<name>/proposal.md`. This keeps
+Place the proposal inside the module directory: `modules/<name>/plan.md`. This keeps
 the design doc co-located with the code it describes, even before any code exists. Create
 the module directory and `promise.toml` first (see Phase 2), then add the proposal there.
 
-For example: `modules/console/proposal.md`.
+For example: `modules/console/plan.md`.
+
+The filename `plan.md` is the standard — `promise doc <name>` automatically surfaces it
+when a module has no public declarations yet. This means a planned module directory with
+only `promise.toml` and `plan.md` produces useful output from `promise doc` without any
+implementation.
 
 ### Review checklist
 
@@ -138,7 +147,7 @@ mkdir modules/<name>
 ```
 
 This can happen during Phase 1 — create the directory early so the proposal lives here
-from the start (`modules/<name>/proposal.md`).
+from the start (`modules/<name>/plan.md`).
 
 ### 3.2 Create `promise.toml`
 
@@ -710,7 +719,7 @@ This ensures catalog modules are self-contained and have no circular dependency 
 ```
 modules/<name>/
   promise.toml          # [module] name = "<name>"
-  proposal.md           # API proposal (design doc)
+  plan.md               # API proposal (design doc) — surfaced by `promise doc` before implementation
   <name>.pr             # implementation
   <name>_test.pr        # tests (compiled into module, access private symbols)
 ```

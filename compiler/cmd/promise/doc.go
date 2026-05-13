@@ -237,7 +237,13 @@ func runDocModule(w io.Writer, name string, opts docOpts) {
 		}
 	}
 
-	// Find all .pr source files (excluding test files)
+	runDocModuleInDir(w, name, modDir, opts)
+}
+
+// runDocModuleInDir generates documentation for a module given its resolved directory.
+// Separated from runDocModule for testability (avoids catalog lookup and os.Exit).
+func runDocModuleInDir(w io.Writer, name, modDir string, opts docOpts) {
+	// Find all .pr source files (excluding test files), and scan for plan.md / readme.md.
 	entries, err := os.ReadDir(modDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot read module directory: %v\n", err)
@@ -245,24 +251,32 @@ func runDocModule(w io.Writer, name string, opts docOpts) {
 	}
 
 	var sourceFiles []string
+	var planFile, readmeFile string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
+		}
+		lower := strings.ToLower(e.Name())
+		switch lower {
+		case "plan.md":
+			planFile = filepath.Join(modDir, e.Name())
+		case "readme.md":
+			readmeFile = filepath.Join(modDir, e.Name())
 		}
 		if strings.HasSuffix(e.Name(), ".pr") && !strings.HasSuffix(e.Name(), "_test.pr") {
 			sourceFiles = append(sourceFiles, filepath.Join(modDir, e.Name()))
 		}
 	}
 
+	// Module heading
+	fmt.Fprintf(w, "# %s\n", name)
+
 	if len(sourceFiles) == 0 {
-		fmt.Fprintf(w, "# %s\n\nNo public declarations.\n", name)
+		emitModuleFallbackDoc(w, name, readmeFile, planFile)
 		return
 	}
 
 	sort.Strings(sourceFiles)
-
-	// Module heading
-	fmt.Fprintf(w, "# %s\n", name)
 
 	// Parse all module files and merge into a single AST, then run sema once.
 	// This avoids re-parsing/re-loading module scopes per file (B0329).
@@ -329,6 +343,12 @@ func runDocModule(w io.Writer, name string, opts docOpts) {
 		}
 	}
 
+	// If no public declarations, fall back to plan/readme if available.
+	if len(allTypes) == 0 && len(allEnums) == 0 && len(allFuncs) == 0 {
+		emitModuleFallbackDoc(w, name, readmeFile, planFile)
+		return
+	}
+
 	// Emit grouped sections
 	if len(allTypes) > 0 {
 		if !opts.sigOnly {
@@ -360,6 +380,37 @@ func runDocModule(w io.Writer, name string, opts docOpts) {
 		for _, e := range allFuncs {
 			fmt.Fprintln(w)
 			emitFunc(w, e.decl, e.fn, e.info, opts)
+		}
+	}
+}
+
+// emitModuleFallbackDoc prints plan.md and/or readme.md content when a module has no
+// public declarations. Readme is shown first (general context), then plan (API spec).
+// If neither file exists, prints a helpful "planned but not implemented" message.
+func emitModuleFallbackDoc(w io.Writer, name, readmeFile, planFile string) {
+	if readmeFile == "" && planFile == "" {
+		fmt.Fprintf(w, "\n> Module `%s` is planned but not yet implemented.\n", name)
+		return
+	}
+	if readmeFile != "" {
+		if data, err := os.ReadFile(readmeFile); err == nil {
+			fmt.Fprintln(w)
+			fmt.Fprint(w, string(data))
+			if !strings.HasSuffix(string(data), "\n") {
+				fmt.Fprintln(w)
+			}
+		}
+	}
+	if planFile != "" {
+		if data, err := os.ReadFile(planFile); err == nil {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "> **Planned module** — this module is not yet implemented.")
+			fmt.Fprintln(w, "> The design document below describes the planned API.")
+			fmt.Fprintln(w)
+			fmt.Fprint(w, string(data))
+			if !strings.HasSuffix(string(data), "\n") {
+				fmt.Fprintln(w)
+			}
 		}
 	}
 }

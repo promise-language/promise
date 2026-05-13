@@ -31,7 +31,7 @@ description = "Time and duration operations (placeholder — pending native PAL 
 [modules.net]
 description = "TCP networking: TcpListener, TcpStream with reactor-based non-blocking I/O"
 
-# Planned modules — not yet implemented, proposal in modules/<name>/proposal.md
+# Planned modules — not yet implemented, design in modules/<name>/plan.md
 
 [modules.console]
 description = "Terminal UI: raw mode, cell buffer, styled text, input events, cursor control (planned)"

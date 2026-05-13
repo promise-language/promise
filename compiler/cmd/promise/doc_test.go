@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1075,6 +1077,153 @@ func TestDocEnumPublicFiltering(t *testing.T) {
 
 	assertContainsDoc(t, out, "### PublicEnum")
 	assertNotContainsDoc(t, out, "PrivateEnum")
+}
+
+// === Planned module fallback (plan.md / readme.md) ===
+
+// docFromModuleDir calls runDocModuleInDir with a pre-populated temp directory
+// and returns the output as a string.
+func docFromModuleDir(t *testing.T, files map[string]string, opts docOpts) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+	var buf bytes.Buffer
+	runDocModuleInDir(&buf, "testmod", dir, opts)
+	return buf.String()
+}
+
+func TestDocModulePlanOnly(t *testing.T) {
+	out := docFromModuleDir(t, map[string]string{
+		"plan.md": "# testmod Plan\n\nThis is the design document.\n",
+	}, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "# testmod")
+	assertContainsDoc(t, out, "Planned module")
+	assertContainsDoc(t, out, "# testmod Plan")
+	assertContainsDoc(t, out, "This is the design document.")
+}
+
+func TestDocModuleReadmeOnly(t *testing.T) {
+	out := docFromModuleDir(t, map[string]string{
+		"readme.md": "# testmod\n\nGeneral overview.\n",
+	}, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "# testmod")
+	assertContainsDoc(t, out, "General overview.")
+	// No "Planned module" callout when only readme (no plan)
+	assertNotContainsDoc(t, out, "Planned module")
+}
+
+func TestDocModuleBothPlanAndReadme(t *testing.T) {
+	out := docFromModuleDir(t, map[string]string{
+		"readme.md": "# Readme\n\nOverview text.\n",
+		"plan.md":   "# Plan\n\nAPI design.\n",
+	}, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "# testmod")
+	assertContainsDoc(t, out, "Overview text.")
+	assertContainsDoc(t, out, "Planned module")
+	assertContainsDoc(t, out, "API design.")
+	// Readme should appear before plan
+	readmeIdx := strings.Index(out, "Overview text.")
+	planIdx := strings.Index(out, "API design.")
+	if readmeIdx >= planIdx {
+		t.Errorf("expected readme content before plan content\ngot:\n%s", out)
+	}
+}
+
+func TestDocModuleEmptyNoMarkdown(t *testing.T) {
+	out := docFromModuleDir(t, map[string]string{}, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "# testmod")
+	// Should produce a non-empty helpful message, not blank
+	assertContainsDoc(t, out, "planned but not yet implemented")
+}
+
+func TestDocModuleSourceButNoPubDecls(t *testing.T) {
+	out := docFromModuleDir(t, map[string]string{
+		"testmod.pr": "type _Private { int x; }\n",
+		"plan.md":    "# testmod Plan\n\nDesign notes.\n",
+	}, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "# testmod")
+	assertContainsDoc(t, out, "Planned module")
+	assertContainsDoc(t, out, "Design notes.")
+	// Private type should NOT appear in public-only output
+	assertNotContainsDoc(t, out, "_Private")
+}
+
+func TestDocModuleReadmeCaseInsensitive(t *testing.T) {
+	out := docFromModuleDir(t, map[string]string{
+		"README.md": "# Readme uppercase\n\nContent here.\n",
+	}, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "Content here.")
+}
+
+func TestDocModuleFallbackNoTrailingNewline(t *testing.T) {
+	// plan.md without trailing newline — exercises the HasSuffix branch in planFile path.
+	out := docFromModuleDir(t, map[string]string{
+		"plan.md": "No trailing newline here",
+	}, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "No trailing newline here")
+	assertContainsDoc(t, out, "Planned module")
+}
+
+func TestDocModuleReadmeNoTrailingNewline(t *testing.T) {
+	// readme.md without trailing newline — exercises the HasSuffix branch in readmeFile path.
+	out := docFromModuleDir(t, map[string]string{
+		"readme.md": "No trailing newline in readme",
+	}, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "No trailing newline in readme")
+}
+
+func TestDocModuleInDirWithPublicDecls(t *testing.T) {
+	// Module dir with a .pr file that has public declarations — exercises the full
+	// type/enum/func collection and emit path in runDocModuleInDir.
+	out := docFromModuleDir(t, map[string]string{
+		"testmod.pr": `
+type Widget ` + "`public `doc(\"A UI widget.\")" + ` { int id ` + "`public" + `; }
+enum Color ` + "`public" + ` { Red, Green, Blue, }
+draw(int x, int y) ` + "`public `doc(\"Draws at position.\")" + ` {}
+`,
+	}, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "# testmod")
+	assertContainsDoc(t, out, "## Types")
+	assertContainsDoc(t, out, "### Widget")
+	assertContainsDoc(t, out, "A UI widget.")
+	assertContainsDoc(t, out, "## Enums")
+	assertContainsDoc(t, out, "### Color")
+	assertContainsDoc(t, out, "## Functions")
+	assertContainsDoc(t, out, "### draw")
+	assertContainsDoc(t, out, "Draws at position.")
+	// Should NOT show the fallback message
+	assertNotContainsDoc(t, out, "planned but not yet implemented")
+	assertNotContainsDoc(t, out, "Planned module")
+}
+
+func TestDocModuleInDirSubdirsIgnored(t *testing.T) {
+	// Subdirectories in the module dir should not be treated as source files.
+	dir := t.TempDir()
+	// Create a subdirectory — it should be silently skipped
+	if err := os.MkdirAll(filepath.Join(dir, "internal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plan.md"), []byte("# Plan\nContent.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	runDocModuleInDir(&buf, "testmod", dir, docOpts{publicOnly: true})
+	out := buf.String()
+	assertContainsDoc(t, out, "# testmod")
+	assertContainsDoc(t, out, "Content.")
 }
 
 func TestDocUsageContainsModules(t *testing.T) {

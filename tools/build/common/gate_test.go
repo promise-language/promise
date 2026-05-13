@@ -38,14 +38,26 @@ func TestRunGate_TestBadFlag(t *testing.T) {
 	}
 }
 
-// TestRunGate_WasmTestsBadFlag verifies that unrecognized flags are rejected for wasm-tests.
+// TestRunGate_WasmTestsBadFlag verifies that unrecognized flags are rejected for wasm-test.
 func TestRunGate_WasmTestsBadFlag(t *testing.T) {
-	err := RunGate("", []string{"wasm-tests", "--bogus"})
+	err := RunGate("", []string{"wasm-test", "--bogus"})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 	if !strings.Contains(err.Error(), "usage") {
 		t.Errorf("error %q does not contain 'usage'", err.Error())
+	}
+}
+
+// TestRunGate_OldWasmTestsNameRejected verifies that the old plural "wasm-tests" subcommand
+// is no longer recognized — renamed to "wasm-test" by T0245.
+func TestRunGate_OldWasmTestsNameRejected(t *testing.T) {
+	err := RunGate("", []string{"wasm-tests"})
+	if err == nil {
+		t.Fatal("expected error for removed subcommand wasm-tests, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown subcommand") {
+		t.Errorf("error %q does not contain 'unknown subcommand'", err.Error())
 	}
 }
 

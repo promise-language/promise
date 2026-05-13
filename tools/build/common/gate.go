@@ -17,12 +17,12 @@ import (
 // gate values to stdout; progress messages go to stderr.
 func RunGate(root string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-tests  run only WASM target tests and output JSON gate values\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values")
+		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values")
 	}
 	switch args[0] {
 	case "test":
 		return runGateTest(root, args[1:])
-	case "wasm-tests":
+	case "wasm-test":
 		return runGateWasmTests(root, args[1:])
 	case "go-test":
 		return runGateGoTest(root, args[1:])
@@ -31,7 +31,7 @@ func RunGate(root string, args []string) error {
 	case "coverage":
 		return runGateCoverage(root, args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, wasm-tests, go-test, stress, coverage", args[0])
+		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, wasm-test, go-test, stress, coverage", args[0])
 	}
 }
 
@@ -140,7 +140,7 @@ func runGateWasmTests(root string, args []string) error {
 		switch arg {
 		case "--shared", "--local":
 		default:
-			return fmt.Errorf("usage: bin/gate wasm-tests [--shared]")
+			return fmt.Errorf("usage: bin/gate wasm-test [--shared]")
 		}
 	}
 
@@ -191,7 +191,7 @@ func runGateWasmTests(root string, args []string) error {
 	wasmEntries := ParseTestEntries("wasm32-wasi", wasmOutput)
 
 	// Output GateOutput JSON to stdout (machine-readable).
-	out := &GateOutput{Metrics: gv.Values, Tests: wasmEntries, Complete: "wasm-tests"}
+	out := &GateOutput{Metrics: gv.Values, Tests: wasmEntries, Complete: "wasm-test"}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal gate values: %w", err)

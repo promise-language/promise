@@ -238,6 +238,7 @@ func runGateGoTest(root string, args []string) error {
 	output, testErr := RunTeeStderr(compilerDir, "go", "test", "-v", "-count=1", "./...")
 
 	passed, failed := ParseGoTestOutput(output)
+	goTests := ParseGoTestEntries(hostTarget, output)
 
 	gv := &GateValues{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -252,7 +253,7 @@ func runGateGoTest(root string, args []string) error {
 	}
 
 	// Output GateOutput JSON to stdout (machine-readable).
-	out := &GateOutput{Metrics: gv.Values, Complete: "go-tests"}
+	out := &GateOutput{Metrics: gv.Values, Tests: goTests, Complete: "go-tests"}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal gate values: %w", err)
@@ -411,6 +412,81 @@ func ParseGoTestOutput(output string) (passed, failed int) {
 		}
 	}
 	return
+}
+
+var goTestResultRe = regexp.MustCompile(`^--- (PASS|FAIL): (\S+) \((\d+\.\d+)s\)`)
+var goTestPkgRe = regexp.MustCompile(`^(ok|FAIL)\s+(\S+)\s+`)
+
+// ParseGoTestEntries extracts per-test GateTestEntry records from `go test -v` output.
+func ParseGoTestEntries(target, output string) []GateTestEntry {
+	lines := strings.Split(output, "\n")
+	var result []GateTestEntry
+	var pending []GateTestEntry
+	var contextLines []string
+	collectingContext := false
+
+	for _, line := range lines {
+		// Package summary line — flush pending entries with package path.
+		if m := goTestPkgRe.FindStringSubmatch(line); m != nil {
+			if collectingContext && len(pending) > 0 {
+				pending[len(pending)-1].Context = strings.Join(contextLines, "\n")
+				collectingContext = false
+				contextLines = nil
+			}
+			pkg := m[2]
+			for i := range pending {
+				pending[i].File = pkg
+			}
+			result = append(result, pending...)
+			pending = pending[:0]
+			continue
+		}
+
+		// Test result line.
+		if m := goTestResultRe.FindStringSubmatch(line); m != nil {
+			if collectingContext && len(pending) > 0 {
+				pending[len(pending)-1].Context = strings.Join(contextLines, "\n")
+				collectingContext = false
+				contextLines = nil
+			}
+			outcome := m[1]
+			if outcome == "PASS" {
+				outcome = "pass"
+			}
+			elapsed, _ := strconv.ParseFloat(m[3], 64)
+			pending = append(pending, GateTestEntry{
+				Target:  target,
+				Test:    m[2],
+				Outcome: outcome,
+				Elapsed: elapsed,
+			})
+			if m[1] == "FAIL" {
+				collectingContext = true
+				contextLines = nil
+			}
+			continue
+		}
+
+		// Collect indented context lines for failures.
+		if collectingContext {
+			if strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "    ") {
+				contextLines = append(contextLines, strings.TrimSpace(line))
+			} else {
+				if len(pending) > 0 {
+					pending[len(pending)-1].Context = strings.Join(contextLines, "\n")
+				}
+				collectingContext = false
+				contextLines = nil
+			}
+		}
+	}
+
+	// Flush remaining pending entries.
+	if collectingContext && len(pending) > 0 {
+		pending[len(pending)-1].Context = strings.Join(contextLines, "\n")
+	}
+	result = append(result, pending...)
+	return result
 }
 
 var stressIterRe = regexp.MustCompile(`(\d+) iterations over`)

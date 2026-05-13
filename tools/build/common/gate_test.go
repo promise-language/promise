@@ -122,6 +122,151 @@ func TestParseGoTestOutput_Empty(t *testing.T) {
 	}
 }
 
+func TestParseGoTestEntries_MixedResults(t *testing.T) {
+	output := `=== RUN   TestFoo
+--- PASS: TestFoo (0.001s)
+=== RUN   TestBar
+--- FAIL: TestBar (0.003s)
+    bar_test.go:42: expected 1, got 2
+    bar_test.go:43: extra context
+FAIL
+FAIL	github.com/user/pkg/bar	0.010s
+=== RUN   TestBaz
+--- PASS: TestBaz (0.002s)
+ok  	github.com/user/pkg/foo	0.005s`
+	entries := ParseGoTestEntries("linux-amd64", output)
+	if len(entries) != 3 {
+		t.Fatalf("len(entries) = %d, want 3", len(entries))
+	}
+	// Entry 0: TestFoo pass in bar package
+	if entries[0].Test != "TestFoo" || entries[0].Outcome != "pass" || entries[0].File != "github.com/user/pkg/bar" {
+		t.Errorf("entry 0: %+v", entries[0])
+	}
+	if entries[0].Target != "linux-amd64" {
+		t.Errorf("entry 0 target = %q", entries[0].Target)
+	}
+	if entries[0].Elapsed != 0.001 {
+		t.Errorf("entry 0 elapsed = %v", entries[0].Elapsed)
+	}
+	// Entry 1: TestBar fail with context
+	if entries[1].Test != "TestBar" || entries[1].Outcome != "FAIL" {
+		t.Errorf("entry 1: %+v", entries[1])
+	}
+	if !strings.Contains(entries[1].Context, "expected 1, got 2") {
+		t.Errorf("entry 1 context = %q", entries[1].Context)
+	}
+	if !strings.Contains(entries[1].Context, "extra context") {
+		t.Errorf("entry 1 missing second context line: %q", entries[1].Context)
+	}
+	// Entry 2: TestBaz pass in foo package
+	if entries[2].Test != "TestBaz" || entries[2].Outcome != "pass" || entries[2].File != "github.com/user/pkg/foo" {
+		t.Errorf("entry 2: %+v", entries[2])
+	}
+}
+
+func TestParseGoTestEntries_AllPass(t *testing.T) {
+	output := `--- PASS: TestA (0.00s)
+ok  	example.com/pkg1	0.05s
+--- PASS: TestB (0.01s)
+ok  	example.com/pkg2	0.06s`
+	entries := ParseGoTestEntries("linux-amd64", output)
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2", len(entries))
+	}
+	if entries[0].File != "example.com/pkg1" || entries[1].File != "example.com/pkg2" {
+		t.Errorf("packages: %q, %q", entries[0].File, entries[1].File)
+	}
+	for i, e := range entries {
+		if e.Outcome != "pass" {
+			t.Errorf("entry %d outcome = %q", i, e.Outcome)
+		}
+	}
+}
+
+func TestParseGoTestEntries_Empty(t *testing.T) {
+	entries := ParseGoTestEntries("linux-amd64", "")
+	if len(entries) != 0 {
+		t.Errorf("len = %d, want 0", len(entries))
+	}
+}
+
+func TestParseGoTestEntries_Subtests(t *testing.T) {
+	output := `--- PASS: TestFoo (0.00s)
+--- PASS: TestFoo/sub1 (0.00s)
+--- PASS: TestFoo/sub2 (0.00s)
+ok  	example.com/pkg	0.01s`
+	entries := ParseGoTestEntries("linux-amd64", output)
+	if len(entries) != 3 {
+		t.Fatalf("len = %d, want 3", len(entries))
+	}
+	if entries[1].Test != "TestFoo/sub1" || entries[2].Test != "TestFoo/sub2" {
+		t.Errorf("subtest names: %q, %q", entries[1].Test, entries[2].Test)
+	}
+}
+
+func TestParseGoTestEntries_ContextTerminatedByPackage(t *testing.T) {
+	// Package summary directly follows context (no bare FAIL line).
+	output := `--- FAIL: TestY (0.01s)
+    y_test.go:5: boom
+FAIL	example.com/pkg	0.02s`
+	entries := ParseGoTestEntries("linux-amd64", output)
+	if len(entries) != 1 {
+		t.Fatalf("len = %d, want 1", len(entries))
+	}
+	if !strings.Contains(entries[0].Context, "boom") {
+		t.Errorf("context = %q", entries[0].Context)
+	}
+	if entries[0].File != "example.com/pkg" {
+		t.Errorf("file = %q", entries[0].File)
+	}
+}
+
+func TestParseGoTestEntries_ContextTerminatedByNextTest(t *testing.T) {
+	// A new --- PASS/FAIL line arrives while collectingContext is still true.
+	output := `--- FAIL: TestA (0.01s)
+    a_test.go:1: err
+--- PASS: TestB (0.02s)
+ok  	example.com/pkg	0.03s`
+	entries := ParseGoTestEntries("linux-amd64", output)
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	if !strings.Contains(entries[0].Context, "err") {
+		t.Errorf("entry 0 context = %q", entries[0].Context)
+	}
+	if entries[1].Context != "" {
+		t.Errorf("entry 1 should have no context: %q", entries[1].Context)
+	}
+}
+
+func TestParseGoTestEntries_EOFWhileCollectingContext(t *testing.T) {
+	// EOF reached while still collecting context (no package summary at all).
+	output := `--- FAIL: TestZ (0.01s)
+    z_test.go:9: dangling context`
+	entries := ParseGoTestEntries("linux-amd64", output)
+	if len(entries) != 1 {
+		t.Fatalf("len = %d, want 1", len(entries))
+	}
+	if !strings.Contains(entries[0].Context, "dangling context") {
+		t.Errorf("context = %q", entries[0].Context)
+	}
+}
+
+func TestParseGoTestEntries_FailContext(t *testing.T) {
+	output := `--- FAIL: TestX (0.01s)
+    x_test.go:10: line1
+    x_test.go:11: line2
+FAIL
+FAIL	example.com/pkg	0.02s`
+	entries := ParseGoTestEntries("linux-amd64", output)
+	if len(entries) != 1 {
+		t.Fatalf("len = %d, want 1", len(entries))
+	}
+	if !strings.Contains(entries[0].Context, "line1") || !strings.Contains(entries[0].Context, "line2") {
+		t.Errorf("context = %q", entries[0].Context)
+	}
+}
+
 // TestParseStressOutput verifies parsing of stress test report.
 func TestParseStressOutput(t *testing.T) {
 	output := `=== Stress Test Report ===

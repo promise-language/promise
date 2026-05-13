@@ -1,0 +1,38 @@
+use net;
+
+main() `test(expected: "echo ok", exclude: "wasm32") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 19950)?!;
+
+  // Client goroutine: connect, send "hi", read echo reply
+  go {
+    net.TcpStream client = net.TcpStream.connect("127.0.0.1", 19950)?!;
+    u8[] msg = u8[].filled(0, 2);
+    msg[0] = 104; // 'h'
+    msg[1] = 105; // 'i'
+    client.write(msg)?!;
+    u8[] buf = u8[].filled(0, 64);
+    int n = client.read(buf)?!;
+    assert(n == 2, "client got 2 bytes back");
+    assert(buf[0] == 104, "echoed h");
+    assert(buf[1] == 105, "echoed i");
+    client.close()?!;
+  };
+
+  // Server: accept, read, echo back
+  net.TcpStream server = listener.accept()?!;
+  u8[] buf = u8[].filled(0, 64);
+  int n = server.read(buf)?!;
+  u8[] reply = u8[].filled(0, n);
+  int i = 0;
+  while i < n {
+    reply[i] = buf[i];
+    i = i + 1;
+  }
+  server.write(reply)?!;
+  server.close()?!;
+  listener.close()?!;
+
+  // Wait for client goroutine to finish
+  sleep(Duration.from_millis(50));
+  print_line("echo ok");
+}

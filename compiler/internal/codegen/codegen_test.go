@@ -1080,6 +1080,18 @@ func TestStringEmpty(t *testing.T) {
 	assertContains(t, ir, "i64 0)")
 }
 
+func TestTripleQuotedStringLiteral(t *testing.T) {
+	ir := generateIR(t, "main() { s := \"\"\"\nhello world\n\"\"\"; }")
+	assertContains(t, ir, `c"\0Ahello world\0A"`)
+	assertContains(t, ir, "private constant { i8*, i64, [13 x i8] }")
+}
+
+func TestRawStringLiteral(t *testing.T) {
+	ir := generateIR(t, `main() { s := r"hello\nworld"; }`)
+	assertContains(t, ir, `c"hello\5Cnworld"`)
+	assertContains(t, ir, "private constant { i8*, i64, [12 x i8] }")
+}
+
 func TestStringEscapeBrace(t *testing.T) {
 	ir := generateIR(t, `main() { s := "a\{b"; }`)
 	// \{ should resolve to literal {

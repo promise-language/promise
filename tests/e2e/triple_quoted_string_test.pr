@@ -1,0 +1,43 @@
+triple_quoted_basic() `test {
+  string text = """hello""";
+  assert(text.len == 5, "triple quoted len");
+  assert(text == "hello", "triple quoted content");
+}
+
+triple_quoted_multiline() `test {
+  string text = """
+line one
+line two
+""";
+  assert(text.starts_with("\n"), "starts with newline");
+  assert(text.contains("line one"), "contains line one");
+  assert(text.contains("line two"), "contains line two");
+}
+
+triple_quoted_preserves_quotes() `test {
+  string text = """say "hello" here""";
+  assert(text.contains("\"hello\""), "contains quoted word");
+  assert(text.len == 16, "len with quotes");
+}
+
+raw_string_basic() `test {
+  string text = r"hello world";
+  assert(text.len == 11, "raw string len");
+  assert(text == "hello world", "raw string content");
+}
+
+raw_string_preserves_backslash() `test {
+  string text = r"hello\nworld";
+  assert(text.len == 12, "raw string backslash len");
+  assert(text.contains("\\"), "raw string contains backslash");
+}
+
+raw_string_empty() `test {
+  string text = r"";
+  assert(text.len == 0, "raw empty len");
+}
+
+triple_quoted_empty() `test {
+  string text = """""";
+  assert(text.len == 0, "triple empty len");
+}

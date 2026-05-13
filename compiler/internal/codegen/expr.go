@@ -301,12 +301,23 @@ func (c *Compiler) genStringLit(e *ast.StringLit) value.Value {
 // genStaticString handles strings with no interpolation — compile-time constant path.
 func (c *Compiler) genStaticString(e *ast.StringLit) value.Value {
 	var buf strings.Builder
-	for _, part := range e.Parts {
-		switch p := part.(type) {
-		case ast.StringText:
-			buf.WriteString(p.Text)
-		case ast.StringEscape:
-			buf.WriteString(resolveEscape(p.Sequence))
+	switch e.Kind {
+	case ast.StringTriple:
+		if len(e.Raw) >= 6 {
+			buf.WriteString(e.Raw[3 : len(e.Raw)-3])
+		}
+	case ast.StringRaw:
+		if len(e.Raw) >= 3 {
+			buf.WriteString(e.Raw[2 : len(e.Raw)-1])
+		}
+	default:
+		for _, part := range e.Parts {
+			switch p := part.(type) {
+			case ast.StringText:
+				buf.WriteString(p.Text)
+			case ast.StringEscape:
+				buf.WriteString(resolveEscape(p.Sequence))
+			}
 		}
 	}
 	return c.makeRuntimeString(buf.String())

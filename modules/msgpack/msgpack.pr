@@ -1,0 +1,3 @@
+// msgpack module — MessagePack binary encoding and decoding.
+// Requires: use msgpack;
+// See plan.md for the API proposal. Implementation tracked in T0028.

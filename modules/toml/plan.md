@@ -45,7 +45,7 @@ Analogues in other ecosystems:
 ```
 use toml;
 
-type Server `public {
+type Server `serializable {
   string host;
   int port;
   bool tls;
@@ -204,7 +204,7 @@ parse_value(string input) TomlValue! `public
 ### 6.1 Round-trip a typed config
 
 ```
-type Config `public {
+type Config `serializable {
   string name;
   int workers;
   string[] hosts;

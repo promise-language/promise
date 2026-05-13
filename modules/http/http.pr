@@ -1,4 +1,378 @@
-// http module — HTTP client and server.
-// Planned: get, post, Request, Response, Server, Handler.
-// Requires native socket support and the io module.
-// Currently a placeholder — functions will be added as networking lands.
+// http module — HTTP/1.1 client (T0072).
+// Built on top of modules/net/ (TcpStream) and modules/json/ (encode/decode).
+// v1: HTTP only (no TLS), Connection: close, eager response reading.
+use json;
+use net;
+
+// ── Error type ─────────────────��───────────────────��────────────────────────
+
+type HttpError is error `public `doc("HTTP error with an optional status code.") {
+  int code;
+}
+
+// ── Method enum ─────────────────────────────────────────────────────────────
+
+enum Method `public `doc("HTTP request method.") {
+  Get,
+  Post,
+  Put,
+  Delete,
+  Patch,
+  Head,
+  Options,
+}
+
+// ── Request ───────────────���─────────────────────────────────────────────────
+
+type Request `public `doc("An HTTP request.") {
+  Method method;
+  string url;
+  map[string, string] headers;
+  string body;
+
+  new_get(string url) Self `factory `public `doc("Create a GET request.") {
+    return Request(method: Method.Get, url: url, headers: map[string, string](), body: "");
+  }
+
+  new_post(string url, string body) Self `factory `public `doc("Create a POST request with a text body.") {
+    map[string, string] h = map[string, string]();
+    h["Content-Type"] = "text/plain";
+    return Request(method: Method.Post, url: url, headers: h, body: body);
+  }
+
+  set_header(~this, string key, string value) `public `doc("Set a header on the request.") {
+    this.headers[key] = value;
+  }
+
+  send!(~this) Response `public `doc("Send the request and return the response.") {
+    _Url parsed = _parse_url(this.url)?^;
+    net.TcpStream stream = net.TcpStream.connect(parsed.host, parsed.port)?^;
+
+    // Build HTTP/1.1 request
+    Builder buf = Builder();
+    buf.write_string(_method_to_string(this.method));
+    buf.write_string(" ");
+    buf.write_string(parsed.path);
+    buf.write_string(" HTTP/1.1\r\n");
+    buf.write_string("Host: ");
+    buf.write_string(parsed.host);
+    if parsed.port != 80 {
+      buf.write_string(":");
+      buf.write_string(parsed.port.to_string());
+    }
+    buf.write_string("\r\n");
+    buf.write_string("Connection: close\r\n");
+    if this.body.len > 0 {
+      buf.write_string("Content-Length: ");
+      buf.write_string(this.body.len.to_string());
+      buf.write_string("\r\n");
+    }
+    for key, value in this.headers {
+      buf.write_string(key);
+      buf.write_string(": ");
+      buf.write_string(value);
+      buf.write_string("\r\n");
+    }
+    buf.write_string("\r\n");
+    if this.body.len > 0 {
+      buf.write_string(this.body);
+    }
+
+    // Send request
+    u8[] req_data = buf.to_string().bytes();
+    _write_all(stream, req_data)?^;
+
+    // Read entire response (Connection: close — server closes after response)
+    u8[] raw = u8[]();
+    u8[] read_buf = u8[].filled(0, 4096);
+    bool reading = true;
+    while reading {
+      int n = stream.read(read_buf)?^;
+      if n == 0 {
+        reading = false;
+      } else {
+        int i = 0;
+        while i < n {
+          raw.push(read_buf[i]);
+          i = i + 1;
+        }
+      }
+    }
+
+    // Find header/body boundary (\r\n\r\n = bytes 13,10,13,10)
+    int sep = -1;
+    int scan = 0;
+    while scan + 3 < raw.len {
+      if raw[scan] == 13 && raw[scan + 1] == 10 && raw[scan + 2] == 13 && raw[scan + 3] == 10 {
+        sep = scan;
+        break;
+      }
+      scan = scan + 1;
+    }
+    if sep < 0 {
+      raise HttpError(code: 0, message: "malformed HTTP response: missing header terminator");
+    }
+
+    string header_text = string.from_bytes(raw[0:sep]);
+    u8[] body_data = raw[sep + 4:raw.len];
+
+    // Parse status and headers (single use of header_text)
+    _ParsedResponse pr = _parse_response(header_text)?^;
+
+    // Decode chunked transfer encoding if needed
+    bool chunked = false;
+    for k, v in pr.headers {
+      if k == "transfer-encoding" && v.contains("chunked") {
+        chunked = true;
+      }
+    }
+    if chunked {
+      body_data = _decode_chunked(body_data);
+    }
+
+    string body_str = string.from_bytes(body_data);
+    return Response(status: pr.status, headers: pr.headers.clone(), _body: body_str);
+  }
+}
+
+// ── Response ───────────────��───────────────────────────────���────────────────
+
+type Response `public `doc("An HTTP response.") {
+  int status;
+  map[string, string] headers;
+  string _body;
+
+  get status_code int `public `doc("The response status code.") => this.status;
+
+  get response_headers map[string, string] `public `doc("The response headers (keys are lowercase).") => this.headers;
+
+  get body string `public `doc("The response body as a string.") => this._body;
+
+  get body_bytes u8[] `public `doc("The response body as raw bytes.") => this._body.bytes();
+
+  json![T: Decodable](~this) T `public `doc("Decode the response body from JSON into a typed value.") {
+    return json.decode_string[T](this._body)?^;
+  }
+
+  get is_success bool `public `doc("True if the status code indicates success (2xx).") => this.status >= 200 && this.status < 300;
+}
+
+// ── Convenience functions ─────────��─────────────────────────────────────────
+
+http_get!(string url) Response `public `doc("Perform an HTTP GET request.") {
+  Request req = Request.new_get(url);
+  return req.send()?^;
+}
+
+http_post!(string url, string body, map[string, string] headers) Response `public `doc("Perform an HTTP POST request with a string body.") {
+  Request req = Request.new_post(url, body);
+  // B0343: for-in map values passed to method calls cause segfault.
+  // keys()+index also produces corrupted strings (clone temporaries freed prematurely).
+  // This function is currently broken for non-empty headers maps.
+  for key, value in headers {
+    req.set_header(key, value);
+  }
+  return req.send()?^;
+}
+
+http_post_json![T: Encodable](string url, T data) Response `public `doc("Perform an HTTP POST request with a JSON-encoded body.") {
+  string json_body = json.encode_string[T](data)?^;
+  map[string, string] h = map[string, string]();
+  h["Content-Type"] = "application/json";
+  return http_post(url, json_body, h)?^;
+}
+
+// ── Internal types ────────────────���─────────────────────────────────────────
+
+type _Url {
+  string host;
+  int port;
+  string path;
+}
+
+type _ParsedResponse {
+  int status;
+  map[string, string] headers;
+}
+
+// ── Internal helpers ─────────────���──────────────────────────────────────────
+
+_parse_url!(string url) _Url {
+  if !url.starts_with("http://") {
+    raise HttpError(code: 0, message: "unsupported URL scheme (only http:// supported)");
+  }
+  string rest = url[7:];
+
+  // Split host+port from path at first '/'
+  string host_part = "";
+  string path_val = "/";
+  if slash := rest.index_of("/") {
+    host_part = rest[0:slash];
+    path_val = rest[slash:];
+  } else {
+    host_part = rest;
+  }
+
+  // Split host from port at ':'
+  string host_val = "";
+  int port_val = 80;
+  if colon := host_part.index_of(":") {
+    host_val = host_part[0:colon];
+    port_val = _parse_decimal(host_part[colon + 1:]);
+  } else {
+    host_val = host_part;
+  }
+
+  if host_val.len == 0 {
+    raise HttpError(code: 0, message: "empty host in URL");
+  }
+
+  return _Url(host: host_val, port: port_val, path: path_val);
+}
+
+_method_to_string(Method m) string {
+  return match m {
+    Method.Get => "GET",
+    Method.Post => "POST",
+    Method.Put => "PUT",
+    Method.Delete => "DELETE",
+    Method.Patch => "PATCH",
+    Method.Head => "HEAD",
+    Method.Options => "OPTIONS",
+  };
+}
+
+_write_all!(net.TcpStream ~stream, u8[]~data) {
+  int n = stream.write(data)?^;
+  int offset = n;
+  while offset < data.len {
+    // Build a new buffer with remaining bytes (partial write path — rare)
+    u8[] remaining = u8[]();
+    int k = offset;
+    while k < data.len {
+      remaining.push(data[k]);
+      k = k + 1;
+    }
+    n = stream.write(remaining)?^;
+    offset = offset + n;
+  }
+}
+
+_parse_response!(string header_text) _ParsedResponse {
+  string[] lines = header_text.split("\r\n");
+
+  if lines.len == 0 {
+    raise HttpError(code: 0, message: "empty HTTP response");
+  }
+
+  // Parse status code from first line: "HTTP/1.1 200 OK"
+  int status = _parse_status_code(lines[0])?^;
+
+  // Parse headers (lowercase keys)
+  map[string, string] hdrs = map[string, string]();
+  int i = 1;
+  while i < lines.len {
+    if colon := lines[i].index_of(":") {
+      if colon > 0 {
+        string key = lines[i][0:colon].trim().to_lower();
+        string value = lines[i][colon + 1:].trim();
+        hdrs[key] = value;
+      }
+    }
+    i = i + 1;
+  }
+
+  return _ParsedResponse(status: status, headers: hdrs);
+}
+
+_parse_status_code!(string line) int {
+  if sp := line.index_of(" ") {
+    string after = line[sp + 1:];
+    if sp2 := after.index_of(" ") {
+      return _parse_decimal(after[0:sp2]);
+    }
+    return _parse_decimal(after);
+  }
+  raise HttpError(code: 0, message: "malformed HTTP status line");
+}
+
+_decode_chunked(u8[] data) u8[] {
+  u8[] result = u8[]();
+  int pos = 0;
+  while pos < data.len {
+    // Find \r\n (inline to avoid moving data)
+    int line_end = -1;
+    int s = pos;
+    while s + 1 < data.len {
+      if data[s] == 13 && data[s + 1] == 10 {
+        line_end = s;
+        break;
+      }
+      s = s + 1;
+    }
+    if line_end < 0 {
+      break;
+    }
+
+    // Build hex size string from bytes (no slicing on ~data)
+    Builder hex_buf = Builder();
+    int h = pos;
+    while h < line_end {
+      hex_buf.write_string((data[h] as! char).to_string());
+      h = h + 1;
+    }
+    string size_str = hex_buf.to_string().trim();
+
+    // Strip chunk extensions after ';'
+    if semi := size_str.index_of(";") {
+      size_str = size_str[0:semi].trim();
+    }
+    if size_str.len == 0 {
+      break;
+    }
+    int chunk_size = _parse_hex(size_str);
+    if chunk_size == 0 {
+      break;
+    }
+
+    // Copy chunk data
+    int data_start = line_end + 2;
+    int j = 0;
+    while j < chunk_size && data_start + j < data.len {
+      result.push(data[data_start + j]);
+      j = j + 1;
+    }
+    pos = data_start + chunk_size + 2;
+  }
+  return result;
+}
+
+_parse_decimal(string s) int {
+  int result = 0;
+  int i = 0;
+  while i < s.len {
+    char c = s[i];
+    if c >= '0' && c <= '9' {
+      result = result * 10 + ((c as! int) - 48);
+    }
+    i = i + 1;
+  }
+  return result;
+}
+
+_parse_hex(string s) int {
+  int result = 0;
+  int i = 0;
+  while i < s.len {
+    char c = s[i];
+    if c >= '0' && c <= '9' {
+      result = result * 16 + ((c as! int) - 48);
+    } else if c >= 'a' && c <= 'f' {
+      result = result * 16 + ((c as! int) - 87);
+    } else if c >= 'A' && c <= 'F' {
+      result = result * 16 + ((c as! int) - 55);
+    }
+    i = i + 1;
+  }
+  return result;
+}

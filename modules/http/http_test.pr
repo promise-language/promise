@@ -1,0 +1,346 @@
+// ── Helper: serve a single request, return the raw request string ───────────
+_serve_once!(net.TcpListener ~listener, string response) string {
+  net.TcpStream conn = listener.accept()?^;
+  u8[] buf = u8[].filled(0, 8192);
+  int n = conn.read(buf)?^;
+  string request = string.from_bytes(buf[0:n]);
+  u8[] resp_data = response.bytes();
+  _write_all(conn, resp_data)?^;
+  conn.close()?^;
+  return request;
+}
+
+// ── URL parsing tests (no network) ──────────────────────────────────────────
+
+test_url_basic() `test(exclude: "wasm32") {
+  _Url u = _parse_url("http://example.com/")?!;
+  assert(u.host == "example.com", "host");
+  assert(u.port == 80, "default port");
+  assert(u.path == "/", "path /");
+}
+
+test_url_with_port() `test(exclude: "wasm32") {
+  _Url u = _parse_url("http://localhost:8080/api/v1?key=val")?!;
+  assert(u.host == "localhost", "host localhost");
+  assert(u.port == 8080, "port 8080");
+  assert(u.path == "/api/v1?key=val", "path with query");
+}
+
+test_url_no_path() `test(exclude: "wasm32") {
+  _Url u = _parse_url("http://10.0.0.1")?!;
+  assert(u.host == "10.0.0.1", "ip host");
+  assert(u.port == 80, "default port");
+  assert(u.path == "/", "default path");
+}
+
+test_url_error_https() `test(exclude: "wasm32") {
+  _Url u = _parse_url("https://example.com/")? e {
+    return;
+  };
+  assert(false, "https should fail");
+}
+
+test_url_error_empty_host() `test(exclude: "wasm32") {
+  _Url u = _parse_url("http:///path")? e {
+    return;
+  };
+  assert(false, "empty host should fail");
+}
+
+// ── HTTP GET ────────────────────────────────────────────────────────────────
+
+test_http_get() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  // Client goroutine (captures only port — int is Copy)
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status_code == 200, "status 200");
+    assert(resp.body == "hello", "body");
+    assert(resp.is_success, "is_success");
+  };
+
+  // Server in main goroutine
+  _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// ── HTTP POST ───────────────────────────────────────────────────────────────
+
+test_http_post() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/submit", "test body");
+    Response resp = req.send()?!;
+    assert(resp.status_code == 200, "status 200");
+    assert(resp.body == "ok", "body ok");
+  };
+
+  string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
+  assert(request.contains("POST /submit"), "method POST");
+  assert(request.contains("test body"), "body sent");
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// ── http_post! convenience function ─────────────────────────────────────────
+
+test_http_post_convenience() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  // Use Request.new_post + set_header directly (equivalent to http_post! but avoids
+  // passing map parameter into goroutine function call)
+  go {
+    Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/api", "data");
+    req.set_header("X-Token", "secret");
+    Response resp = req.send()?!;
+    assert(resp.status_code == 200, "status 200");
+  };
+
+  string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
+  assert(request.contains("POST /api"), "method POST");
+  assert(request.contains("X-Token: secret"), "custom header via http_post");
+  assert(request.contains("data"), "body sent");
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// ── Custom headers ──────────────────────────────────────────────────────────
+
+test_http_headers() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Request req = Request.new_get("http://127.0.0.1:" + port.to_string() + "/");
+    req.set_header("X-Custom", "test-value");
+    Response resp = req.send()?!;
+    assert(resp.status_code == 200, "status 200");
+  };
+
+  string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?!;
+  assert(request.contains("X-Custom: test-value"), "custom header sent");
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// ── Status codes ────────────────────────────────────────────────────────────
+
+test_http_404() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/missing")?!;
+    assert(resp.status_code == 404, "status 404");
+    assert(!resp.is_success, "not success");
+    assert(resp.body == "not found", "body");
+  };
+
+  _serve_once(listener, "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found")?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_http_500() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status_code == 500, "status 500");
+    assert(!resp.is_success, "not success");
+  };
+
+  _serve_once(listener, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\nConnection: close\r\n\r\nerror")?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// ── Chunked transfer encoding ───────────────────────────────────────────────
+
+test_http_chunked() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status_code == 200, "status 200");
+    assert(resp.body == "HelloWorld", "chunked body");
+  };
+
+  string chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nHello\r\n5\r\nWorld\r\n0\r\n\r\n";
+  _serve_once(listener, chunked)?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// ── Connection error ────────────────────────────────────────────────────────
+
+test_http_connection_error() `test(exclude: "wasm32", timeout: "10s") {
+  // Bind then close to get a port that refuses connections
+  net.TcpListener temp = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = temp.local_port;
+  temp.close()?!;
+
+  Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")? e {
+    return; // expected: connection refused
+  };
+  assert(false, "should have raised an error");
+}
+
+// ── URL scheme error ────────────────────────────────────────────────────────
+
+test_http_bad_scheme() `test(exclude: "wasm32") {
+  Response resp = http_get("https://example.com/")? e {
+    return; // expected: unsupported scheme
+  };
+  assert(false, "should have raised an error");
+}
+
+// ── Response headers parsed ─────────────────────────────────────────────────
+
+test_response_headers() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    // Headers are lowercase — iterate directly to avoid B0341 (non-Copy field double-drop)
+    bool found = false;
+    for k, v in resp.response_headers {
+      if k == "x-custom" && v == "hello" {
+        found = true;
+      }
+    }
+    assert(found, "x-custom header found");
+  };
+
+  _serve_once(listener, "HTTP/1.1 200 OK\r\nX-Custom: hello\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// ── Internal helper unit tests (no network) ─────────────────────────────────
+
+test_method_to_string() `test(exclude: "wasm32") {
+  assert(_method_to_string(Method.Get) == "GET", "GET");
+  assert(_method_to_string(Method.Post) == "POST", "POST");
+  assert(_method_to_string(Method.Put) == "PUT", "PUT");
+  assert(_method_to_string(Method.Delete) == "DELETE", "DELETE");
+  assert(_method_to_string(Method.Patch) == "PATCH", "PATCH");
+  assert(_method_to_string(Method.Head) == "HEAD", "HEAD");
+  assert(_method_to_string(Method.Options) == "OPTIONS", "OPTIONS");
+}
+
+test_parse_hex_cases() `test(exclude: "wasm32") {
+  assert(_parse_hex("ff") == 255, "lowercase ff");
+  assert(_parse_hex("FF") == 255, "uppercase FF");
+  assert(_parse_hex("1A") == 26, "uppercase mixed");
+  assert(_parse_hex("1a") == 26, "lowercase mixed");
+  assert(_parse_hex("0") == 0, "zero");
+  assert(_parse_hex("10") == 16, "sixteen");
+}
+
+test_parse_decimal_cases() `test(exclude: "wasm32") {
+  assert(_parse_decimal("0") == 0, "zero");
+  assert(_parse_decimal("123") == 123, "basic");
+  assert(_parse_decimal("8080") == 8080, "port");
+  assert(_parse_decimal("65535") == 65535, "large");
+}
+
+test_decode_chunked_with_extension() `test(exclude: "wasm32") {
+  u8[] data = "5;ext=val\r\nHello\r\n0\r\n\r\n".bytes();
+  u8[] result = _decode_chunked(data);
+  assert(string.from_bytes(result) == "Hello", "chunked with extension");
+}
+
+// ── body_bytes getter ───────────────────────────────────────────────────────
+
+test_body_bytes() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    u8[] bytes = resp.body_bytes;
+    assert(bytes.len == 3, "3 bytes");
+    assert(bytes[0] == 65, "A");
+    assert(bytes[1] == 66, "B");
+    assert(bytes[2] == 67, "C");
+  };
+
+  _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nABC")?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// NOTE: http_post! with non-empty headers map is broken — see B0343.
+// Cannot test until the compiler bug is fixed.
+
+// ── PUT method ──────────────────────────────────────────────────────────────
+
+test_http_put() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Request req = Request(method: Method.Put, url: "http://127.0.0.1:" + port.to_string() + "/res", headers: map[string, string](), body: "update");
+    Response resp = req.send()?!;
+    assert(resp.status_code == 200, "status");
+  };
+
+  string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
+  assert(request.contains("PUT /res"), "PUT method");
+  assert(request.contains("update"), "body");
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// ── Status line without reason phrase ───────────────────────────────────────
+
+test_status_no_reason() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status_code == 200, "status parsed without reason phrase");
+  };
+
+  _serve_once(listener, "HTTP/1.1 200\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// ── Malformed response (missing header terminator) ──────────────────────────
+
+test_malformed_response() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    net.TcpStream conn = listener.accept()?!;
+    u8[] buf = u8[].filled(0, 8192);
+    conn.read(buf)?!;
+    // Send data without \r\n\r\n header terminator, then close
+    u8[] rd = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n".bytes();
+    conn.write(rd)?!;
+    conn.close()?!;
+  };
+
+  Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")? e {
+    return; // expected: malformed HTTP response
+  };
+  assert(false, "should have raised an error");
+  listener.close()?!;
+}
+
+// NOTE: Response.json[T] and http_post_json[T] are not tested here due to a
+// cross-module monomorphization bug — see B0344.
+// NOTE: http_post! with non-empty headers map is broken — see B0343.

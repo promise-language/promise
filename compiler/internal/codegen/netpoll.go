@@ -338,6 +338,10 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	eventBufSize := constant.NewInt(irtypes.I64, int64(maxPollEvents*16)) // 16 bytes per PollEvent
 	eventBuf := entry.NewCall(c.palAlloc, eventBufSize)
 	iAlloca := entry.NewAlloca(irtypes.I32)
+	// Track whether any goroutines were woken during event processing.
+	// Prevents spinning when WSAPoll returns spurious events (e.g., POLLWRNORM
+	// on listening sockets on Windows) that don't correspond to waiting goroutines.
+	wokenAlloca := entry.NewAlloca(irtypes.I32)
 	entry.NewBr(loop)
 
 	// loop: check shutdown, then poll
@@ -362,6 +366,7 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	batchLock := eventLoop.NewLoad(irtypes.I8Ptr, c.netpollBatchLock)
 	eventLoop.NewCall(c.palMutexLock, batchLock)
 	eventLoop.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
+	eventLoop.NewStore(constant.NewInt(irtypes.I32, 0), wokenAlloca)
 	eventLoop.NewBr(eventBody)
 
 	// eventBody: check loop condition
@@ -417,6 +422,8 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	processRead.NewCondBr(shouldWakeRead, wakeRead, checkWrite)
 
 	// wakeRead: clear read_g, check sentinel vs real G (B0324)
+	wokenVal := wakeRead.NewLoad(irtypes.I32, wokenAlloca)
+	wakeRead.NewStore(wakeRead.NewAdd(wokenVal, constant.NewInt(irtypes.I32, 1)), wokenAlloca)
 	wakeRead.NewStore(constant.NewNull(irtypes.I8Ptr), readGField)
 	sentinelR := wakeRead.NewIntToPtr(
 		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
@@ -448,6 +455,8 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	checkWrite.NewCondBr(shouldWakeWrite, wakeWrite, eventNext)
 
 	// wakeWrite: clear write_g, check sentinel vs real G (B0324)
+	wokenValW := wakeWrite.NewLoad(irtypes.I32, wokenAlloca)
+	wakeWrite.NewStore(wakeWrite.NewAdd(wokenValW, constant.NewInt(irtypes.I32, 1)), wokenAlloca)
 	wakeWrite.NewStore(constant.NewNull(irtypes.I8Ptr), writeGField)
 	sentinelW := wakeWrite.NewIntToPtr(
 		constant.NewInt(irtypes.I64, netpollCondWaiterSentinel), irtypes.I8Ptr)
@@ -473,9 +482,18 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	eventNext.NewStore(iNext, iAlloca)
 	eventNext.NewBr(eventBody)
 
-	// eventDone: unlock batch lock, loop back (B0324)
+	// eventDone: unlock batch lock (B0324), check if any goroutines were woken.
+	// If no goroutines were woken, sleep 1ms to prevent spinning on spurious
+	// poll events (e.g., WSAPoll returning POLLWRNORM for listening sockets
+	// on Windows with no waiting goroutines).
 	eventDone.NewCall(c.palMutexUnlock, batchLock)
-	eventDone.NewBr(loop)
+	wokenFinal := eventDone.NewLoad(irtypes.I32, wokenAlloca)
+	noneWoken := eventDone.NewICmp(enum.IPredEQ, wokenFinal, constant.NewInt(irtypes.I32, 0))
+	spuriousBlk := fn.NewBlock("spurious_sleep")
+	eventDone.NewCondBr(noneWoken, spuriousBlk, loop)
+
+	spuriousBlk.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 1000)) // 1ms
+	spuriousBlk.NewBr(loop)
 
 	// exit: free event buffer, return
 	exitBlk.NewCall(c.palFree, eventBuf)

@@ -38,6 +38,17 @@ func TestRunGate_TestBadFlag(t *testing.T) {
 	}
 }
 
+// TestRunGate_WasmTestsBadFlag verifies that unrecognized flags are rejected for wasm-tests.
+func TestRunGate_WasmTestsBadFlag(t *testing.T) {
+	err := RunGate("", []string{"wasm-tests", "--bogus"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "usage") {
+		t.Errorf("error %q does not contain 'usage'", err.Error())
+	}
+}
+
 // TestRunGate_GoTestBadFlag verifies that unrecognized flags are rejected.
 func TestRunGate_GoTestBadFlag(t *testing.T) {
 	err := RunGate("", []string{"go-test", "--bogus"})

@@ -355,7 +355,7 @@ func TestFunctionDeclaration(t *testing.T) {
 		}
 		main() { }
 	`)
-	assertContains(t, ir, "define i64 @add(i64 %a, i64 %b)")
+	assertContains(t, ir, "define i64 @__user.add(i64 %a, i64 %b)")
 	assertContains(t, ir, "add i64")
 	assertContains(t, ir, "ret i64")
 }
@@ -365,7 +365,7 @@ func TestFunctionCall(t *testing.T) {
 		double(int x) int { return x * 2; }
 		main() { y := double(21); }
 	`)
-	assertContains(t, ir, "call i64 @double(i64")
+	assertContains(t, ir, "call i64 @__user.double(i64")
 }
 
 func TestVoidFunction(t *testing.T) {
@@ -373,8 +373,8 @@ func TestVoidFunction(t *testing.T) {
 		noop() { }
 		main() { noop(); }
 	`)
-	assertContains(t, ir, "define void @noop()")
-	assertContains(t, ir, "call void @noop()")
+	assertContains(t, ir, "define void @__user.noop()")
+	assertContains(t, ir, "call void @__user.noop()")
 }
 
 // --- Extern print (struct-based ABI) ---
@@ -588,8 +588,8 @@ func TestFibonacci(t *testing.T) {
 		}
 		main() { x := fib(10); }
 	`)
-	assertContains(t, ir, "define i64 @fib(i64 %n)")
-	assertContains(t, ir, "call i64 @fib")
+	assertContains(t, ir, "define i64 @__user.fib(i64 %n)")
+	assertContains(t, ir, "call i64 @__user.fib")
 	assertContains(t, ir, "add i64")
 	assertContains(t, ir, "icmp sle")
 }
@@ -2201,7 +2201,7 @@ func TestEnumAsFunctionParam(t *testing.T) {
 		main() { }
 	`)
 	// Enum param should use i32 (fieldless enum internal type)
-	assertContains(t, ir, "define i1 @is_red(i32 %c)")
+	assertContains(t, ir, "define i1 @__user.is_red(i32 %c)")
 	// Param should be alloca'd as i32
 	assertContains(t, ir, "alloca i32")
 	assertContains(t, ir, "switch i32")
@@ -2216,7 +2216,7 @@ func TestEnumAsFunctionReturn(t *testing.T) {
 		main() { }
 	`)
 	// Enum return should use i32
-	assertContains(t, ir, "define i32 @get_green()")
+	assertContains(t, ir, "define i32 @__user.get_green()")
 	assertContains(t, ir, "ret i32 1")
 }
 
@@ -2278,7 +2278,7 @@ func TestFailableDeclaration(t *testing.T) {
 		main() { }
 	`)
 	// Return type should be result struct { i1, i64, i8* }
-	assertContains(t, ir, "define { i1, i64, i8* } @parse(i8* %s)")
+	assertContains(t, ir, "define { i1, i64, i8* } @__user.parse(i8* %s)")
 }
 
 func TestReturnInFailable(t *testing.T) {
@@ -2298,7 +2298,7 @@ func TestFailableVoidBangShorthand(t *testing.T) {
 		main() { }
 	`)
 	// Should produce void result struct { i1, i8* }
-	assertContains(t, ir, "define { i1, i8* } @fail()")
+	assertContains(t, ir, "define { i1, i8* } @__user.fail()")
 }
 
 func TestFailableMain(t *testing.T) {
@@ -2440,7 +2440,7 @@ func TestVoidFailable(t *testing.T) {
 		main() { }
 	`)
 	// Return type should be { i1, i8* }
-	assertContains(t, ir, "define { i1, i8* } @validate(i8* %s)")
+	assertContains(t, ir, "define { i1, i8* } @__user.validate(i8* %s)")
 }
 
 func TestVoidRaise(t *testing.T) {
@@ -3677,7 +3677,7 @@ func TestGenericTypeAsParam(t *testing.T) {
 			int v = unbox(b);
 		}
 	`)
-	assertContains(t, ir, "define i64 @unbox")
+	assertContains(t, ir, "define i64 @__user.unbox")
 	assertContains(t, ir, "load i64")
 }
 
@@ -3778,7 +3778,7 @@ func TestTupleReturn(t *testing.T) {
 		pair() (int, bool) { return (42, true); }
 		main() { (a, b) := pair(); }
 	`)
-	assertContains(t, ir, "define { i64, i1 } @pair()")
+	assertContains(t, ir, "define { i64, i1 } @__user.pair()")
 	assertContains(t, ir, "ret { i64, i1 }")
 }
 
@@ -4376,7 +4376,7 @@ func TestVoidFunctionTypeParam(t *testing.T) {
 			apply(|int x| { });
 		}
 	`)
-	assertContains(t, ir, "define void @apply")
+	assertContains(t, ir, "define void @__user.apply")
 	assertContains(t, ir, "extractvalue { i8*, i8* }")
 }
 
@@ -4391,7 +4391,7 @@ func TestFunctionTypeReturnFunction(t *testing.T) {
 		}
 	`)
 	// Should return a fat pointer
-	assertContains(t, ir, "define { i8*, i8* } @make_adder")
+	assertContains(t, ir, "define { i8*, i8* } @__user.make_adder")
 	// Main should do indirect call on the result
 	assertContains(t, ir, "extractvalue { i8*, i8* }")
 }
@@ -6689,8 +6689,8 @@ func TestOptionalParamWrapping(t *testing.T) {
 		}
 	`)
 	// The call to foo(4) should pass {i1, i64} not bare i64
-	assertContains(t, ir, "call i64 @foo({ i1, i64 }")
-	assertNotContains(t, ir, "call i64 @foo(i64 ")
+	assertContains(t, ir, "call i64 @__user.foo({ i1, i64 }")
+	assertNotContains(t, ir, "call i64 @__user.foo(i64 ")
 }
 
 func TestOptionalParamOmittedNoneZeroinit(t *testing.T) {
@@ -6704,8 +6704,8 @@ func TestOptionalParamOmittedNoneZeroinit(t *testing.T) {
 		}
 	`)
 	// Omitted optional param should pass {i1, i64} zeroinitializer, not bare i1 false
-	assertContains(t, ir, "call i64 @foo({ i1, i64 }")
-	assertNotContains(t, ir, "call i64 @foo(i1 ")
+	assertContains(t, ir, "call i64 @__user.foo({ i1, i64 }")
+	assertNotContains(t, ir, "call i64 @__user.foo(i1 ")
 }
 
 func TestOptionalParamWrappingMethodCall(t *testing.T) {
@@ -6843,13 +6843,13 @@ func compileResultWithStd(t *testing.T, stdSrc, userSrc string) *CompileResult {
 }
 
 func TestStdFuncMangledName(t *testing.T) {
-	// After module-based refactor: helper() is user code → IR name is @helper
+	// After module-based refactor: helper() is user code → IR name is @__user.helper
 	ir := generateIRWithStd(t,
 		`helper() int { return 42; }`,
 		`main() { x := helper(); }`,
 	)
-	assertContains(t, ir, "define i64 @helper")
-	assertContains(t, ir, "call i64 @helper")
+	assertContains(t, ir, "define i64 @__user.helper")
+	assertContains(t, ir, "call i64 @__user.helper")
 }
 
 func TestStdUserNameCollision(t *testing.T) {
@@ -6861,8 +6861,8 @@ func TestStdUserNameCollision(t *testing.T) {
 		main() { x := helper_extra(); }
 		`,
 	)
-	assertContains(t, ir, "define i64 @helper_extra")
-	assertContains(t, ir, "call i64 @helper_extra()")
+	assertContains(t, ir, "define i64 @__user.helper_extra")
+	assertContains(t, ir, "call i64 @__user.helper_extra()")
 }
 
 func TestStdCallViaStdPrefix(t *testing.T) {
@@ -7376,12 +7376,12 @@ func TestStdExternDedupWithUserExtern(t *testing.T) {
 }
 
 func TestStdFuncUnshadowed(t *testing.T) {
-	// After module-based refactor: helper is user code → plain @helper name
+	// After module-based refactor: helper is user code �� @__user.helper name (B0319)
 	ir := generateIRWithStd(t,
 		`helper() int { return 42; }`,
 		`main() { x := helper(); }`,
 	)
-	assertContains(t, ir, "call i64 @helper")
+	assertContains(t, ir, "call i64 @__user.helper")
 }
 
 // --- Cross-Module Codegen Tests ---
@@ -7503,11 +7503,25 @@ func TestModuleCallDoesNotCollideWithUser(t *testing.T) {
 		`,
 	)
 	// Both functions exist with different names
-	assertContains(t, ir, "define i64 @compute")
+	assertContains(t, ir, "define i64 @__user.compute")
 	assertContains(t, ir, "define i64 @__mod_mylib_compute")
-	// User call goes to @compute, module call to @__mod_mylib_compute
-	assertContains(t, ir, "call i64 @compute()")
+	// User call goes to @__user.compute, module call to @__mod_mylib_compute
+	assertContains(t, ir, "call i64 @__user.compute()")
 	assertContains(t, ir, "call i64 @__mod_mylib_compute()")
+}
+
+// B0319: User functions get __user. prefix to prevent PAL/libc name collisions.
+// A user function named "write" must not collide with libc write().
+func TestUserFuncNameNoLibcCollision(t *testing.T) {
+	ir := generateIR(t, `
+		write(int x) int { return x; }
+		main() { write(42); }
+	`)
+	// User function gets __user. prefix — structurally prevents libc collision
+	assertContains(t, ir, "define i64 @__user.write")
+	assertContains(t, ir, "call i64 @__user.write")
+	// libc write should still be declared separately (via PAL)
+	assertContains(t, ir, "declare i64 @write(")
 }
 
 func TestModuleTypeConstructor(t *testing.T) {
@@ -8280,7 +8294,7 @@ func TestUseVarDeclWithReturn(t *testing.T) {
 	`)
 	// close() should appear before the return instruction in make_resource
 	assertContains(t, ir, "call void @Resource.close")
-	assertContains(t, ir, "define i64 @make_resource")
+	assertContains(t, ir, "define i64 @__user.make_resource")
 }
 
 func TestUseVarDeclInNestedBlock(t *testing.T) {
@@ -8705,7 +8719,7 @@ func TestDropWithReturn(t *testing.T) {
 		}
 	`)
 	assertContains(t, ir, "call void @Resource.drop")
-	assertContains(t, ir, "define i64 @make")
+	assertContains(t, ir, "define i64 @__user.make")
 }
 
 // Mixed use + drop bindings both fire
@@ -9227,7 +9241,7 @@ func TestDropParameterNotFlagged(t *testing.T) {
 			int x = passthrough(Resource(id: 1));
 		}
 	`)
-	assertContains(t, ir, "define i64 @passthrough")
+	assertContains(t, ir, "define i64 @__user.passthrough")
 	// The function should not create a drop flag for its parameter
 	// (it doesn't own the alloca, the caller does the drop flag management)
 }
@@ -9584,7 +9598,7 @@ func TestDropErrorPropagateCleansUp(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "call void @Resource.drop")
-	assertContains(t, ir, "define { i1, i64, i8* } @work")
+	assertContains(t, ir, "define { i1, i64, i8* } @__user.work")
 }
 
 // Reassignment of droppable variable emits drop on old value
@@ -10097,7 +10111,7 @@ func TestConstructorDupBorrowedString(t *testing.T) {
 		main() { }
 	`)
 	// Inside wrap(), s has no drop flag (non-~ param), so constructor should dup
-	assertContains(t, ir, "define { i8*, i8* } @wrap(i8* %s)")
+	assertContains(t, ir, "define { i8*, i8* } @__user.wrap(i8* %s)")
 	// The wrap function body should contain a dup call (promise_string_new)
 	// because s is a borrowed param without a drop flag
 	assertContains(t, ir, "call i8* @promise_string_new(")
@@ -10121,7 +10135,7 @@ func TestStringBorrowFieldNoDup(t *testing.T) {
 		}
 	`)
 	// The test function should NOT contain a string dup — the param is a borrow.
-	testFn := extractFunction(ir, "test")
+	testFn := extractFunction(ir, "__user.test")
 	assertNotContains(t, testFn, "call i8* @promise_string_new(")
 }
 
@@ -10530,7 +10544,7 @@ func TestStringTempStructuralParamReturn(t *testing.T) {
 	`)
 	// The return value of display(42) should be tracked as a string temp
 	// and freed at statement end via promise_string_drop.
-	assertContains(t, ir, "call i8* @display")
+	assertContains(t, ir, "call i8* @__user.display")
 	assertContains(t, ir, "tmp.drop")
 	assertContains(t, ir, "call void @promise_string_drop")
 }
@@ -10547,7 +10561,7 @@ func TestStringTempFreeFunctionCall(t *testing.T) {
 		main() {}
 	`)
 	// The return value of make_greeting() should be tracked and freed
-	assertContains(t, ir, "call i8* @make_greeting")
+	assertContains(t, ir, "call i8* @__user.make_greeting")
 	assertContains(t, ir, "tmp.drop")
 	assertContains(t, ir, "call void @promise_string_drop")
 }
@@ -10565,7 +10579,7 @@ func TestStringTempFreeFunctionCallClaimed(t *testing.T) {
 		main() {}
 	`)
 	// The call result should be tracked but claimed on assignment
-	assertContains(t, ir, "call i8* @make_label")
+	assertContains(t, ir, "call i8* @__user.make_label")
 	// Drop flag is cleared (claimed) so no free at stmt end for this temp
 	assertContains(t, ir, "store i1 false")
 }
@@ -11650,7 +11664,7 @@ func TestOptionalFieldStringInlineUnwrapNoTempTrack(t *testing.T) {
 	`)
 	ir := res.Module.String()
 	// Extract just the test function's IR
-	fnStart := strings.Index(ir, "define void @test()")
+	fnStart := strings.Index(ir, "define void @__user.test()")
 	fnEnd := strings.Index(ir[fnStart:], "\n}\n")
 	testIR := ir[fnStart : fnStart+fnEnd+3]
 	// The inline unwrap must NOT generate a strdup/string_new call —
@@ -12370,7 +12384,7 @@ func TestGoExprBasicFunction(t *testing.T) {
 	// Result buffer allocated for non-void task
 	assertContains(t, ir, "@pal_alloc")
 	// Coroutine calls target function
-	assertContains(t, ir, "call i64 @compute")
+	assertContains(t, ir, "call i64 @__user.compute")
 }
 
 func TestGoExprWithArgs(t *testing.T) {
@@ -12388,7 +12402,7 @@ func TestGoExprWithArgs(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_g_new(")
 	assertContains(t, ir, "call void @promise_sched_enqueue(")
 	// The coroutine should call the target function
-	assertContains(t, ir, "call i64 @double")
+	assertContains(t, ir, "call i64 @__user.double")
 }
 
 func TestGoExprVoidFunction(t *testing.T) {
@@ -12402,7 +12416,7 @@ func TestGoExprVoidFunction(t *testing.T) {
 	assertContains(t, ir, ".goroutine.")
 	assertContains(t, ir, "presplitcoroutine")
 	// Coroutine calls void function
-	assertContains(t, ir, "call void @doWork")
+	assertContains(t, ir, "call void @__user.doWork")
 	// G struct created and enqueued
 	assertContains(t, ir, "call i8* @promise_g_new(")
 	assertContains(t, ir, "call void @promise_sched_enqueue(")
@@ -13617,7 +13631,7 @@ func TestNamedArgsFunctionCallCodegen(t *testing.T) {
 		}
 	`)
 	assertContains(t, ir, "call")
-	assertContains(t, ir, "@add")
+	assertContains(t, ir, "@__user.add")
 }
 
 func TestNamedArgsMethodCallCodegen(t *testing.T) {
@@ -13641,7 +13655,7 @@ func TestNamedArgsMixedPositionalNamedCodegen(t *testing.T) {
 			r := calc(1, c: 3, b: 2);
 		}
 	`)
-	assertContains(t, ir, "@calc")
+	assertContains(t, ir, "@__user.calc")
 }
 
 // --- Optional interpolation tests ---
@@ -14407,7 +14421,7 @@ func TestVariadicFunctionIR(t *testing.T) {
 		}
 	`)
 	// The function should take i8* (Vector) as its parameter
-	assertContains(t, ir, "define i64 @sum(i8* %nums)")
+	assertContains(t, ir, "define i64 @__user.sum(i8* %nums)")
 }
 
 func TestVariadicEmptyCall(t *testing.T) {
@@ -14420,7 +14434,7 @@ func TestVariadicEmptyCall(t *testing.T) {
 		}
 	`)
 	// Should generate a call with an empty vector
-	assertContains(t, ir, "call i64 @count(i8*")
+	assertContains(t, ir, "call i64 @__user.count(i8*")
 }
 
 func TestVariadicWithFixedParams(t *testing.T) {
@@ -14433,7 +14447,7 @@ func TestVariadicWithFixedParams(t *testing.T) {
 		}
 	`)
 	// Function takes (i8* sep, i8* items) — both are i8* (string and Vector)
-	assertContains(t, ir, "define i8* @join(i8* %sep, i8* %items)")
+	assertContains(t, ir, "define i8* @__user.join(i8* %sep, i8* %items)")
 }
 
 func TestVariadicPassVectorDirectly(t *testing.T) {
@@ -14449,7 +14463,7 @@ func TestVariadicPassVectorDirectly(t *testing.T) {
 		}
 	`)
 	// Should pass vector directly, not wrap in another vector
-	assertContains(t, ir, "call i64 @sum(i8*")
+	assertContains(t, ir, "call i64 @__user.sum(i8*")
 }
 
 func TestVariadicMethodIR(t *testing.T) {
@@ -14486,7 +14500,7 @@ func TestVariadicFailableIR(t *testing.T) {
 		}
 	`)
 	// Failable returns {i1, i64, i8*} (error flag + result + error ptr)
-	assertContains(t, ir, "define { i1, i64, i8* } @trySum(i8* %nums)")
+	assertContains(t, ir, "define { i1, i64, i8* } @__user.trySum(i8* %nums)")
 }
 
 func TestVariadicNestedCallIR(t *testing.T) {
@@ -14504,9 +14518,9 @@ func TestVariadicNestedCallIR(t *testing.T) {
 			doubleSum(1, 2, 3);
 		}
 	`)
-	assertContains(t, ir, "define i64 @doubleSum(i8* %nums)")
+	assertContains(t, ir, "define i64 @__user.doubleSum(i8* %nums)")
 	// Inner call passes nums directly (T[] → T[])
-	assertContains(t, ir, "call i64 @sum(i8*")
+	assertContains(t, ir, "call i64 @__user.sum(i8*")
 }
 
 func TestVariadicMultipleArgsArrayLit(t *testing.T) {
@@ -14522,7 +14536,7 @@ func TestVariadicMultipleArgsArrayLit(t *testing.T) {
 		}
 	`)
 	// Should see Vector_int creation with elements pushed
-	assertContains(t, ir, "call i64 @sum(i8*")
+	assertContains(t, ir, "call i64 @__user.sum(i8*")
 }
 
 func TestVariadicParamDropAtScopeExit(t *testing.T) {
@@ -15723,9 +15737,9 @@ func TestModuleLevelGetterCodegen(t *testing.T) {
 		main() { int v = answer; }
 	`)
 	// Getter should generate a zero-arg function returning i64
-	assertContains(t, ir, "define i64 @answer()")
+	assertContains(t, ir, "define i64 @__user.answer()")
 	// Usage should call the getter (no args)
-	assertContains(t, ir, "call i64 @answer()")
+	assertContains(t, ir, "call i64 @__user.answer()")
 }
 
 func TestModuleLevelSetterCodegen(t *testing.T) {
@@ -15735,9 +15749,9 @@ func TestModuleLevelSetterCodegen(t *testing.T) {
 		main() { counter = 42; }
 	`)
 	// Setter stored as counter$set, takes one i64 param
-	assertContains(t, ir, "define void @counter$set(i64")
+	assertContains(t, ir, "define void @__user.counter$set(i64")
 	// Assignment should call the setter
-	assertContains(t, ir, "call void @counter$set(i64")
+	assertContains(t, ir, "call void @__user.counter$set(i64")
 }
 
 func TestModuleLevelCompoundAssignCodegen(t *testing.T) {
@@ -15747,8 +15761,8 @@ func TestModuleLevelCompoundAssignCodegen(t *testing.T) {
 		main() { counter += 5; }
 	`)
 	// Should call getter then setter
-	assertContains(t, ir, "call i64 @counter()")
-	assertContains(t, ir, "call void @counter$set(i64")
+	assertContains(t, ir, "call i64 @__user.counter()")
+	assertContains(t, ir, "call void @__user.counter$set(i64")
 }
 
 func TestModuleLevelGetterDistinctFromSetter(t *testing.T) {
@@ -15761,8 +15775,8 @@ func TestModuleLevelGetterDistinctFromSetter(t *testing.T) {
 		}
 	`)
 	// Getter and setter should be distinct LLVM functions
-	assertContains(t, ir, "define i64 @val()")
-	assertContains(t, ir, "define void @val$set(i64")
+	assertContains(t, ir, "define i64 @__user.val()")
+	assertContains(t, ir, "define void @__user.val$set(i64")
 }
 
 func TestEnumMethodDecl(t *testing.T) {
@@ -16563,7 +16577,7 @@ func TestEmbedStringGetter(t *testing.T) {
 	}
 	result := Compile(file, info, "")
 	ir := result.Module.String()
-	assertContains(t, ir, "@schema()")
+	assertContains(t, ir, "@__user.schema()")
 	assertContains(t, ir, "CREATE TABLE foo;")
 	assertContains(t, ir, "@promise_string_new")
 }
@@ -16582,7 +16596,7 @@ func TestEmbedBytesGetter(t *testing.T) {
 	}
 	result := Compile(file, info, "")
 	ir := result.Module.String()
-	assertContains(t, ir, "define i8* @data()")
+	assertContains(t, ir, "define i8* @__user.data()")
 	assertContains(t, ir, "@pal_alloc")
 	assertContains(t, ir, "@llvm.memcpy")
 }
@@ -16600,7 +16614,7 @@ func TestEmbedEmptyFile(t *testing.T) {
 	}
 	result := Compile(file, info, "")
 	ir := result.Module.String()
-	assertContains(t, ir, "@empty()")
+	assertContains(t, ir, "@__user.empty()")
 	assertContains(t, ir, "@promise_string_new")
 }
 
@@ -16668,7 +16682,7 @@ func TestEmbedDirGetter(t *testing.T) {
 	// Should contain the data blob
 	assertContains(t, ir, "body{}hello")
 	// Should return user value type {i8*, i8*}
-	assertContains(t, ir, "define { i8*, i8* } @assets()")
+	assertContains(t, ir, "define { i8*, i8* } @__user.assets()")
 }
 
 func TestEmbedDirGetterEmpty(t *testing.T) {
@@ -16686,7 +16700,7 @@ func TestEmbedDirGetterEmpty(t *testing.T) {
 	result := Compile(file, info, "")
 	ir := result.Module.String()
 	// Even empty dir should produce valid IR with allocations
-	assertContains(t, ir, "define { i8*, i8* } @assets()")
+	assertContains(t, ir, "define { i8*, i8* } @__user.assets()")
 	assertContains(t, ir, "@pal_alloc")
 }
 
@@ -17297,7 +17311,7 @@ func TestNoDropDiscardedOptionalIntPop(t *testing.T) {
 			v.pop();
 		}
 	`)
-	testFn := extractFunction(ir, "test")
+	testFn := extractFunction(ir, "__user.test")
 	if strings.Contains(testFn, "discard.drop") {
 		t.Fatalf("expected test function to NOT contain discard.drop\ngot:\n%s", testFn)
 	}
@@ -17378,7 +17392,7 @@ func TestNoDropDiscardedMethodReturnHeapType(t *testing.T) {
 			make_pt();
 		}
 	`)
-	testFn := extractFunction(ir, "test")
+	testFn := extractFunction(ir, "__user.test")
 	if strings.Contains(testFn, "discard.heap.free") {
 		t.Fatalf("expected test function to NOT contain discard.heap.free for method return\ngot:\n%s", testFn)
 	}
@@ -17433,7 +17447,7 @@ func TestDropDiscardedAutoPropagateUserType(t *testing.T) {
 			make_foo();
 		}
 	`)
-	testFn := extractFunction(ir, "test")
+	testFn := extractFunction(ir, "__user.test")
 	assertContains(t, testFn, "autoprop.drop")
 	assertContains(t, testFn, "call void @Foo.drop")
 }
@@ -17450,7 +17464,7 @@ func TestDropDiscardedAutoPropagateClosureEnv(t *testing.T) {
 			make_fn();
 		}
 	`)
-	testFn := extractFunction(ir, "test")
+	testFn := extractFunction(ir, "__user.test")
 	assertContains(t, testFn, "autoprop.env.free")
 }
 

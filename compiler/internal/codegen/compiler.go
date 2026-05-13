@@ -4168,7 +4168,16 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 			}
 		}
 
-		fn := c.module.NewFunc(scopeName, retType, params...)
+		// User functions (except main) get a __user. prefix in LLVM IR to prevent
+		// collisions with PAL/libc extern symbols (B0319). The dot in __user. is
+		// invalid in C identifiers, structurally preventing any libc collision.
+		// The c.funcs map key remains the Promise-level name for internal lookups.
+		llvmName := scopeName
+		if fd.Name != "main" {
+			llvmName = "__user." + scopeName
+		}
+
+		fn := c.module.NewFunc(llvmName, retType, params...)
 		c.funcs[scopeName] = fn
 	}
 }

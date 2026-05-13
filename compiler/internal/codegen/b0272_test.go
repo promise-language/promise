@@ -30,9 +30,9 @@ func TestB0272FailableUnwrapStructuralDrop(t *testing.T) {
 			Readable r = s.open_source("world")?!;
 		}
 	`)
-	fn := extractFunction(ir, "test")
+	fn := extractFunction(ir, "__user.test")
 	if fn == "" {
-		t.Fatal("could not find @test function")
+		t.Fatal("could not find @__user.test function")
 	}
 	// RTTI-based structural drop must be emitted for variable r
 	assertContains(t, fn, "struct.drop")
@@ -60,9 +60,9 @@ func TestB0272FailableHandlerStructuralDrop(t *testing.T) {
 			Readable r = s.open_source("world") ? { MemReadable(data: "fallback") };
 		}
 	`)
-	fn := extractFunction(ir, "test")
+	fn := extractFunction(ir, "__user.test")
 	if fn == "" {
-		t.Fatal("could not find @test function")
+		t.Fatal("could not find @__user.test function")
 	}
 	// RTTI-based structural drop must be emitted even with ? {} handler wrapper
 	assertContains(t, fn, "struct.drop")

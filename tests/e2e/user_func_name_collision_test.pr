@@ -1,0 +1,57 @@
+// B0319: User-defined functions must not collide with PAL/libc names.
+// A user function named "write", "read", "close", etc. should compile
+// and run correctly despite PAL declaring libc externs with the same names.
+use net;
+
+write(int x) int {
+  return x * 2;
+}
+
+read(int x) int {
+  return x + 1;
+}
+
+close(int x) int {
+  return x - 1;
+}
+
+// Original reported scenario: user `connect` with net module imported.
+// Net module's socket PAL declares libc @connect as an extern.
+connect(int x) int {
+  return x + 100;
+}
+
+send(int x) int {
+  return x + 200;
+}
+
+recv(int x) int {
+  return x + 300;
+}
+
+test_user_write() `test {
+  assert(write(21) == 42, "write");
+}
+
+test_user_read() `test {
+  assert(read(9) == 10, "read");
+}
+
+test_user_close() `test {
+  assert(close(5) == 4, "close");
+}
+
+test_user_func_composition() `test {
+  assert(write(read(close(10))) == 20, "composition");
+}
+
+test_user_connect_with_net_import() `test {
+  assert(connect(1) == 101, "connect");
+  assert(send(1) == 201, "send");
+  assert(recv(1) == 301, "recv");
+}
+
+test_user_socket_funcs_via_other_user_func() `test {
+  // Verify user→user calls still route correctly after __user. prefix.
+  assert(connect(send(recv(0))) == 600, "chained");
+}

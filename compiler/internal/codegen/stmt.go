@@ -3133,18 +3133,34 @@ func (c *Compiler) emitHeapTempCleanupForErrorPath() {
 	}
 }
 
-// trackChainIntermediateReceiver tracks a method chain intermediate receiver for
-// cleanup at statement end (B0258). When the receiver of a method call is itself
-// a call expression result (e.g., p.add_point(dx: 10, dy: 20).sum()), the
-// intermediate heap-allocated value would leak without explicit tracking.
+// isHeapTempProducer returns true if expr produces a new unowned heap instance
+// that must be tracked for cleanup (call results, error unwrap, auto-propagation).
+// B0325: Expanded from CallExpr-only to cover ErrorPanicExpr, ErrorPropagateExpr,
+// and auto-propagated expressions.
+func (c *Compiler) isHeapTempProducer(expr ast.Expr) bool {
+	switch expr.(type) {
+	case *ast.CallExpr, *ast.ErrorPanicExpr, *ast.ErrorPropagateExpr:
+		return true
+	}
+	return c.info.AutoPropagateExprs[expr]
+}
+
+// trackChainIntermediateReceiver tracks a method chain or field access intermediate
+// receiver for cleanup at statement end (B0258, B0325). When the receiver of a
+// method call or field access is itself a temporary (call result, error unwrap,
+// auto-propagation), the intermediate heap-allocated value would leak without
+// explicit tracking.
 // receiverVal is the full value struct (for claiming existing constructor heapTemps).
 // instancePtr is the extracted instance pointer (field 1 of receiverVal).
 func (c *Compiler) trackChainIntermediateReceiver(memberTarget ast.Expr, receiverVal value.Value, instancePtr value.Value, named *types.Named, targetType types.Type) {
 	if !c.tempTrackingEnabled || c.block == nil || c.block.Term != nil {
 		return
 	}
-	// Only track when receiver is a call expression (chain intermediate)
-	if _, isCall := memberTarget.(*ast.CallExpr); !isCall {
+	// Only track when receiver is a temporary producer (B0325)
+	if !c.isHeapTempProducer(memberTarget) {
+		return
+	}
+	if named == nil {
 		return
 	}
 	// Skip types already handled by other tracking systems

@@ -17964,6 +17964,62 @@ func TestMethodChainIntermediateTracked(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free(")
 }
 
+// B0325: Field access on a call result must track the intermediate heap instance.
+func TestFieldAccessOnCallResultTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Pair { int x; int y; }
+		make_pair() Pair { return Pair(x: 10, y: 20); }
+		test() {
+			int v = make_pair().x;
+		}
+	`)
+	assertContains(t, ir, "heap.drop")
+	assertContains(t, ir, "call void @pal_free(")
+}
+
+// B0325: Field access on a ?! unwrap result must track the intermediate heap instance.
+func TestFieldAccessOnErrorPanicResultTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Pair { int x; int y; }
+		make_pair!() Pair { return Pair(x: 10, y: 20); }
+		test!() {
+			int v = make_pair()?!.x;
+		}
+	`)
+	assertContains(t, ir, "heap.drop")
+	assertContains(t, ir, "call void @pal_free(")
+}
+
+// B0325: Method call on a ?! unwrap result must track the intermediate heap instance.
+func TestMethodCallOnErrorPanicResultTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Pair { int x; int y;
+			sum(&this) int { return this.x + this.y; }
+		}
+		make_pair!() Pair { return Pair(x: 10, y: 20); }
+		test!() {
+			int v = make_pair()?!.sum();
+		}
+	`)
+	assertContains(t, ir, "heap.drop")
+	assertContains(t, ir, "call void @pal_free(")
+}
+
+// B0325: Field access on a type with explicit drop must use the $wrap function
+// (drop + pal_free), not just the raw drop function.
+func TestFieldAccessExplicitDropUsesWrap(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource { int id; drop(~this) {} }
+		make_resource!() Resource { return Resource(id: 42); }
+		test!() {
+			int v = make_resource()?!.id;
+		}
+	`)
+	assertContains(t, ir, "heap.drop")
+	// Must use the $wrap function that calls drop + pal_free
+	assertContains(t, ir, "Resource.drop$wrap")
+}
+
 // === Clone annotation (T0154) ===
 
 func TestCloneSynthesizesCloneMethod(t *testing.T) {

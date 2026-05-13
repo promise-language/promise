@@ -1,0 +1,84 @@
+// B0325: Field access and method calls on temporary heap user types must not leak.
+// When a function returns a heap user type and the result is used directly as a
+// field access or method call target (not stored in a variable), the temporary
+// instance must be freed at statement end.
+type Pair {
+  int x;
+  int y;
+}
+
+type PairWithMethod {
+  int x;
+  int y;
+  sum(&this) int {
+    return this.x + this.y;
+  }
+}
+
+make_pair() Pair {
+  return Pair(x: 10, y: 20);
+}
+make_pair_failable!() Pair {
+  return Pair(x: 10, y: 20);
+}
+make_pwm_failable!() PairWithMethod {
+  return PairWithMethod(x: 10, y: 20);
+}
+
+// B0325: field access on plain call result
+test_field_access_on_call() `test {
+  assert(make_pair().x == 10, "x");
+  assert(make_pair().y == 20, "y");
+}
+
+// B0325: field access on ?! unwrap result
+test_field_access_on_error_panic() `test {
+  assert(make_pair_failable()?!.x == 10, "x");
+  assert(make_pair_failable()?!.y == 20, "y");
+}
+
+// B0325: method call on ?! unwrap result
+test_method_on_error_panic() `test {
+  assert(make_pwm_failable()?!.sum() == 30, "sum");
+}
+
+// B0325: field access used in arithmetic expression
+test_field_access_in_expression() `test {
+  int sum = make_pair().x + make_pair().y;
+  assert(sum == 30, "sum");
+}
+
+// B0325: field access on ?^ (error propagate) result
+propagate_field_access!() int {
+  return make_pair_failable()?^.x;
+}
+test_field_access_on_error_propagate() `test {
+  assert(propagate_field_access()?! == 10, "propagate x");
+}
+
+// B0325: field access on auto-propagated call result
+make_pair_auto!() int {
+  return make_pair_failable().x;
+}
+test_field_access_auto_propagate() `test {
+  assert(make_pair_auto()?! == 10, "auto");
+}
+
+// B0325: type with drop — drop must be called, not just pal_free
+type Resource {
+  int id;
+  drop(~this) {
+  }
+}
+make_resource!() Resource {
+  return Resource(id: 42);
+}
+test_field_access_with_drop() `test {
+  assert(make_resource()?!.id == 42, "drop type");
+}
+
+// B0325: constructor as field access target (T0135 interaction)
+test_constructor_field_access() `test {
+  assert(Pair(x: 5, y: 15).x == 5, "ctor x");
+  assert(Pair(x: 5, y: 15).y == 15, "ctor y");
+}

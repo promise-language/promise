@@ -2152,14 +2152,21 @@ func (c *Compiler) resolveDropFuncForTemp(named *types.Named, typ types.Type) *i
 		if c.typeSubst != nil {
 			resolvedTyp = types.Substitute(typ, c.typeSubst)
 		}
+		explicitDrop := !named.NeedsSynthDrop()
 		ownerName := named.Obj().Name()
 		if inst, ok := resolvedTyp.(*types.Instance); ok {
 			ownerName = monoName(inst)
-		} else if !named.NeedsSynthDrop() {
+		} else if explicitDrop {
 			ownerName = c.resolveMethodOwner(named, "drop")
 		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		if fn, ok := c.funcs[mangledName]; ok {
+			// B0325: Explicit user drops don't include pal_free — wrap with $wrap
+			// so the cleanup path frees the instance after calling drop.
+			// Synthesized drops already include pal_free.
+			if explicitDrop {
+				return c.getOrCreateDropWrap(mangledName, fn)
+			}
 			return fn
 		}
 	}
@@ -2921,6 +2928,10 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		instance = targetVal
 	} else {
 		instance = c.extractInstancePtr(targetVal)
+		// B0325: Track heap instance when target is a temporary (call result,
+		// error unwrap). Without this, field access on temporaries like
+		// make_pair().x or make_pair()?!.x leaks the instance.
+		c.trackChainIntermediateReceiver(e.Target, targetVal, instance, extractNamed(typ), typ)
 	}
 	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
 

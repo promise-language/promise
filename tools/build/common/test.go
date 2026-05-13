@@ -110,3 +110,14 @@ func RunPromiseTests(root, target string) (string, error) {
 	return RunTee(root, promiseBin, args...)
 }
 
+// RunPromiseTestsCapture is like RunPromiseTests but tees test output to stderr
+// instead of stdout, keeping stdout clean for structured output (e.g. JSON).
+func RunPromiseTestsCapture(root, target string) (string, error) {
+	promiseBin := filepath.Join(root, "bin", BinaryName())
+	args := []string{"test", "-timeout", "10", "tests/...", "modules/...", "examples/..."}
+	if target != "" {
+		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...")
+	}
+	return RunTeeStderr(root, promiseBin, args...)
+}
+

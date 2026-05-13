@@ -38,7 +38,7 @@ _eagain() int `target(wasm) {
   return 11;
 }
 _eagain() int `target(windows) {
-  return 11;
+  return 10035; // WSAEWOULDBLOCK
 }
 _einprogress() int `target(macos) {
   return 36;
@@ -50,7 +50,7 @@ _einprogress() int `target(wasm) {
   return 115;
 }
 _einprogress() int `target(windows) {
-  return 115;
+  return 10035; // WSAEWOULDBLOCK (Windows uses this for non-blocking connect in progress)
 }
 
 // ── Error type ──────────────────────────────────────────────────────────────
@@ -80,6 +80,14 @@ _net_strerror(int code) string {
     110 => "connection timed out", // Linux ETIMEDOUT
     60 => "connection timed out", // macOS ETIMEDOUT
     32 => "broken pipe",
+    10013 => "permission denied", // WSAEACCES
+    10022 => "invalid argument", // WSAEINVAL
+    10038 => "bad file descriptor", // WSAENOTSOCK
+    10048 => "address already in use", // WSAEADDRINUSE
+    10049 => "cannot assign requested address", // WSAEADDRNOTAVAIL
+    10054 => "connection reset by peer", // WSAECONNRESET
+    10060 => "connection timed out", // WSAETIMEDOUT
+    10061 => "connection refused", // WSAECONNREFUSED
     _ => "network error (errno {code})",
   };
 }

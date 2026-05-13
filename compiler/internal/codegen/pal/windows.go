@@ -3035,7 +3035,12 @@ func (p *WindowsPAL) EmitReactorPoll(module *ir.Module) *ir.Func {
 	lock := entry.NewLoad(irtypes.I8Ptr, lockG)
 	entry.NewCall(mutexLock, lock)
 
-	// Load count — if 0, unlock and return 0
+	// Load count — if 0, unlock, sleep for timeout, and return 0.
+	// WSAPoll requires at least 1 fd, so we can't call it with an empty set.
+	// Sleep matches POSIX epoll_wait/kqueue behavior which respects the timeout
+	// even with an empty interest set, preventing the reactor from spinning.
+	winSleepFn := getOrDeclareFunc(module, "Sleep", irtypes.Void,
+		ir.NewParam("dwMilliseconds", irtypes.I32))
 	pollCount := entry.NewLoad(irtypes.I32, countG)
 	isEmpty := entry.NewICmp(enum.IPredEQ, pollCount, constant.NewInt(irtypes.I32, 0))
 	emptyBlk := fn.NewBlock(".empty")
@@ -3043,6 +3048,7 @@ func (p *WindowsPAL) EmitReactorPoll(module *ir.Module) *ir.Func {
 	entry.NewCondBr(isEmpty, emptyBlk, doPollBlk)
 
 	emptyBlk.NewCall(mutexUnlock, lock)
+	emptyBlk.NewCall(winSleepFn, fn.Params[3]) // sleep for timeout_ms
 	emptyBlk.NewRet(constant.NewInt(irtypes.I32, 0))
 
 	// Call WSAPoll on the global array
@@ -3182,13 +3188,183 @@ func (p *WindowsPAL) EmitReactorClose(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// Windows high-level socket address stubs — networking not yet wired (T0071).
+// EmitSocketBindAddr defines @pal_socket_bind_addr(i32 fd, i8* host, i32 port) → i32.
+// Parses host via inet_pton, constructs sockaddr_in, sets SO_REUSEADDR, calls bind.
 func (p *WindowsPAL) EmitSocketBindAddr(module *ir.Module) *ir.Func {
-	return emitStubSocketBindAddr(module)
+	inetPtonFn := getOrDeclareFunc(module, "inet_pton", irtypes.I32,
+		ir.NewParam("af", irtypes.I32),
+		ir.NewParam("src", irtypes.I8Ptr),
+		ir.NewParam("dst", irtypes.I8Ptr))
+	setsockoptFn := getOrDeclareFunc(module, "setsockopt", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("level", irtypes.I32),
+		ir.NewParam("optname", irtypes.I32),
+		ir.NewParam("optval", irtypes.I8Ptr),
+		ir.NewParam("optlen", irtypes.I32))
+	bindFn := getOrDeclareFunc(module, "bind", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("namelen", irtypes.I32))
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	// Windows: SOL_SOCKET=0xFFFF, SO_REUSEADDR=0x0004
+	var solSocket, soReuseAddr int64
+	solSocket = 0xFFFF
+	soReuseAddr = 0x0004
+
+	fn := module.NewFunc("pal_socket_bind_addr", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("port", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Allocate sockaddr_in (16 bytes) on stack, zero-initialize
+	saddrArr := irtypes.NewArray(16, irtypes.I8)
+	saddr := entry.NewAlloca(saddrArr)
+	saddrPtr := entry.NewBitCast(saddr, irtypes.I8Ptr)
+	entry.NewCall(memsetFn, saddrPtr, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, 16))
+
+	// Set sin_family = AF_INET (2) — Windows uses i16 at offset 0 (same as Linux)
+	famPtr := entry.NewBitCast(saddrPtr, irtypes.NewPointer(irtypes.I16))
+	entry.NewStore(constant.NewInt(irtypes.I16, 2), famPtr)
+
+	// Set sin_port = htons(port) at offset 2
+	portI16 := entry.NewTrunc(fn.Params[2], irtypes.I16)
+	netPort := emitHtons(entry, portI16)
+	portPtr := entry.NewBitCast(
+		entry.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 2)),
+		irtypes.NewPointer(irtypes.I16))
+	entry.NewStore(netPort, portPtr)
+
+	// Set sin_addr via inet_pton(AF_INET, host, &saddr[4])
+	addrDst := entry.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 4))
+	inetRet := entry.NewCall(inetPtonFn, constant.NewInt(irtypes.I32, 2), fn.Params[1], addrDst)
+	isOk := entry.NewICmp(enum.IPredEQ, inetRet, constant.NewInt(irtypes.I32, 1))
+	bindBlk := fn.NewBlock(".bind")
+	errInvalBlk := fn.NewBlock(".err_inval")
+	entry.NewCondBr(isOk, bindBlk, errInvalBlk)
+
+	// Invalid address → return -EINVAL (22)
+	errInvalBlk.NewRet(constant.NewInt(irtypes.I32, -22))
+
+	// Set SO_REUSEADDR
+	oneAlloca := bindBlk.NewAlloca(irtypes.I32)
+	bindBlk.NewStore(constant.NewInt(irtypes.I32, 1), oneAlloca)
+	onePtr := bindBlk.NewBitCast(oneAlloca, irtypes.I8Ptr)
+	sock := bindBlk.NewZExt(fn.Params[0], irtypes.I64)
+	bindBlk.NewCall(setsockoptFn, sock,
+		constant.NewInt(irtypes.I32, solSocket),
+		constant.NewInt(irtypes.I32, soReuseAddr),
+		onePtr, constant.NewInt(irtypes.I32, 4))
+
+	// bind(fd, &sockaddr, 16)
+	bindRet := bindBlk.NewCall(bindFn, sock, saddrPtr, constant.NewInt(irtypes.I32, 16))
+	isErr := bindBlk.NewICmp(enum.IPredEQ, bindRet, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	bindBlk.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
 }
+
+// EmitSocketConnectAddr defines @pal_socket_connect_addr(i32 fd, i8* host, i32 port) → i32.
+// Parses host via inet_pton, constructs sockaddr_in, calls connect.
+// Returns 0 on success, -WSAError on error.
 func (p *WindowsPAL) EmitSocketConnectAddr(module *ir.Module) *ir.Func {
-	return emitStubSocketConnectAddr(module)
+	inetPtonFn := getOrDeclareFunc(module, "inet_pton", irtypes.I32,
+		ir.NewParam("af", irtypes.I32),
+		ir.NewParam("src", irtypes.I8Ptr),
+		ir.NewParam("dst", irtypes.I8Ptr))
+	connectFn := getOrDeclareFunc(module, "connect", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("namelen", irtypes.I32))
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	fn := module.NewFunc("pal_socket_connect_addr", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("host", irtypes.I8Ptr),
+		ir.NewParam("port", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Allocate and zero sockaddr_in (16 bytes)
+	saddrArr := irtypes.NewArray(16, irtypes.I8)
+	saddr := entry.NewAlloca(saddrArr)
+	saddrPtr := entry.NewBitCast(saddr, irtypes.I8Ptr)
+	entry.NewCall(memsetFn, saddrPtr, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, 16))
+
+	// sin_family = AF_INET (i16 at offset 0)
+	famPtr := entry.NewBitCast(saddrPtr, irtypes.NewPointer(irtypes.I16))
+	entry.NewStore(constant.NewInt(irtypes.I16, 2), famPtr)
+
+	// sin_port = htons(port) at offset 2
+	portI16 := entry.NewTrunc(fn.Params[2], irtypes.I16)
+	netPort := emitHtons(entry, portI16)
+	portPtr := entry.NewBitCast(
+		entry.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 2)),
+		irtypes.NewPointer(irtypes.I16))
+	entry.NewStore(netPort, portPtr)
+
+	// inet_pton(AF_INET, host, &saddr[4])
+	addrDst := entry.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 4))
+	inetRet := entry.NewCall(inetPtonFn, constant.NewInt(irtypes.I32, 2), fn.Params[1], addrDst)
+	isOk := entry.NewICmp(enum.IPredEQ, inetRet, constant.NewInt(irtypes.I32, 1))
+	connBlk := fn.NewBlock(".connect")
+	errInvalBlk := fn.NewBlock(".err_inval")
+	entry.NewCondBr(isOk, connBlk, errInvalBlk)
+
+	errInvalBlk.NewRet(constant.NewInt(irtypes.I32, -22)) // -EINVAL
+
+	// connect(fd, &sockaddr, 16)
+	sock := connBlk.NewZExt(fn.Params[0], irtypes.I64)
+	connRet := connBlk.NewCall(connectFn, sock, saddrPtr, constant.NewInt(irtypes.I32, 16))
+	isErr := connBlk.NewICmp(enum.IPredEQ, connRet, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	connBlk.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
 }
+
+// EmitSocketAcceptAddr defines @pal_socket_accept_addr(i32 listen_fd) → i32.
+// Calls accept(fd, NULL, NULL) — no address extraction needed.
 func (p *WindowsPAL) EmitSocketAcceptAddr(module *ir.Module) *ir.Func {
-	return emitStubSocketAcceptAddr(module)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	acceptFn := getOrDeclareFunc(module, "accept", irtypes.I64,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", i32PtrType))
+
+	fn := module.NewFunc("pal_socket_accept_addr", irtypes.I32,
+		ir.NewParam("listen_fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+	ret := entry.NewCall(acceptFn, sock,
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(i32PtrType))
+
+	// INVALID_SOCKET = ~0 (0xFFFFFFFFFFFFFFFF)
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I64, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+	truncated := okBlk.NewTrunc(ret, irtypes.I32)
+	okBlk.NewRet(truncated)
+	return fn
 }

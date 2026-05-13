@@ -1,7 +1,6 @@
 package common
 
 import (
-	"os"
 	"testing"
 )
 
@@ -207,71 +206,6 @@ some non-indented noise
 	if results[0].Test != "test_split" {
 		t.Errorf("result[0].Test = %q", results[0].Test)
 	}
-}
-
-func TestFindTrackerURLEnvVar(t *testing.T) {
-	t.Setenv("PROMISE_TRACKER_URL", "http://localhost:9000")
-	url := findTrackerURL("/nonexistent")
-	if url != "http://localhost:9000" {
-		t.Errorf("expected http://localhost:9000, got %q", url)
-	}
-}
-
-func TestFindTrackerURLEnvVarTrailingSlash(t *testing.T) {
-	t.Setenv("PROMISE_TRACKER_URL", "http://localhost:9000/")
-	url := findTrackerURL("/nonexistent")
-	if url != "http://localhost:9000" {
-		t.Errorf("expected http://localhost:9000, got %q", url)
-	}
-}
-
-func TestFindTrackerURLMcpJson(t *testing.T) {
-	t.Setenv("PROMISE_TRACKER_URL", "")
-	dir := t.TempDir()
-	mcpJSON := `{"mcpServers":{"tracker":{"type":"http","url":"http://192.168.1.7:9121/mcp"}}}`
-	if err := writeFile(dir+"/.mcp.json", mcpJSON); err != nil {
-		t.Fatal(err)
-	}
-	url := findTrackerURL(dir)
-	if url != "http://192.168.1.7:9121" {
-		t.Errorf("expected http://192.168.1.7:9121, got %q", url)
-	}
-}
-
-func TestFindTrackerURLBadJSON(t *testing.T) {
-	t.Setenv("PROMISE_TRACKER_URL", "")
-	dir := t.TempDir()
-	if err := writeFile(dir+"/.mcp.json", "not json"); err != nil {
-		t.Fatal(err)
-	}
-	url := findTrackerURL(dir)
-	if url != "" {
-		t.Errorf("expected empty, got %q", url)
-	}
-}
-
-func TestFindTrackerURLMissingTrackerKey(t *testing.T) {
-	t.Setenv("PROMISE_TRACKER_URL", "")
-	dir := t.TempDir()
-	if err := writeFile(dir+"/.mcp.json", `{"mcpServers":{}}`); err != nil {
-		t.Fatal(err)
-	}
-	url := findTrackerURL(dir)
-	if url != "" {
-		t.Errorf("expected empty, got %q", url)
-	}
-}
-
-func TestFindTrackerURLNone(t *testing.T) {
-	t.Setenv("PROMISE_TRACKER_URL", "")
-	url := findTrackerURL(t.TempDir())
-	if url != "" {
-		t.Errorf("expected empty, got %q", url)
-	}
-}
-
-func writeFile(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 func TestParseTestEntries_TargetPropagation(t *testing.T) {

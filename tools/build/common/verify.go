@@ -116,7 +116,6 @@ func RunVerify(root string, args []string) error {
 	fmt.Println("\nRunning promise tests (host)...")
 	hostStart := time.Now()
 	hostOutput, hostErr := RunPromiseTests(root, "")
-	ReportTestHealth(root, hostTarget, hostOutput)
 	if hostErr != nil {
 		failures = append(failures, "promise tests (host)")
 	}
@@ -136,7 +135,6 @@ func RunVerify(root string, args []string) error {
 		wasmStart := time.Now()
 		var wasmErr error
 		wasmOutput, wasmErr = RunPromiseTests(root, "wasm32-wasi")
-		ReportTestHealth(root, "wasm32-wasi", wasmOutput)
 		if wasmErr != nil {
 			failures = append(failures, "promise tests (wasm32-wasi)")
 		}

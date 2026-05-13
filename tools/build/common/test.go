@@ -3,9 +3,7 @@ package common
 import (
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"slices"
-	"strings"
 	"time"
 )
 
@@ -66,11 +64,8 @@ func RunTest(root string, args []string) error {
 
 	// Promise tests
 	if suite == "promise" || suite == "all" {
-		hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
-
 		fmt.Println("\nRunning promise tests (host)...")
-		output, err := RunPromiseTests(root, "")
-		ReportTestHealth(root, hostTarget, output)
+		_, err := RunPromiseTests(root, "")
 		if err != nil {
 			return fmt.Errorf("promise tests (host): %w", err)
 		}
@@ -80,8 +75,7 @@ func RunTest(root string, args []string) error {
 				return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
 			}
 			fmt.Println("\nRunning promise tests (wasm32-wasi)...")
-			output, err = RunPromiseTests(root, "wasm32-wasi")
-			ReportTestHealth(root, "wasm32-wasi", output)
+			_, err = RunPromiseTests(root, "wasm32-wasi")
 			if err != nil {
 				return fmt.Errorf("promise tests (wasm32-wasi): %w", err)
 			}
@@ -120,4 +114,3 @@ func RunPromiseTestsCapture(root, target string) (string, error) {
 	}
 	return RunTeeStderr(root, promiseBin, args...)
 }
-

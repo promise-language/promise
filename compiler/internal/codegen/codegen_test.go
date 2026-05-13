@@ -3020,6 +3020,50 @@ func TestAutoPropagateInGenericMethodReceiver(t *testing.T) {
 	assertContains(t, ir, "auto.ok")
 }
 
+// B0322: Failable call used as string method receiver must auto-propagate.
+func TestAutoPropagateMethodChainReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		get_name!() string { return "hello"; }
+		wrapper!() string {
+			string s = get_name().trim();
+			return s;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// B0322: Auto-propagate on vector .len access.
+func TestAutoPropagateVectorLen(t *testing.T) {
+	ir := generateIR(t, `
+		make_vec!() int[] { return [1, 2]; }
+		wrapper!() int {
+			return make_vec().len;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// B0322: Auto-propagate on getter call.
+func TestAutoPropagateGetterReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type Cnt {
+			int n;
+			get doubled int { return this.n * 2; }
+		}
+		make_cnt!() Cnt { return Cnt(n: 3); }
+		wrapper!() int {
+			return make_cnt().doubled;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
 func TestDropNullSafe(t *testing.T) {
 	ir := generateIR(t, `
 		type Resource {

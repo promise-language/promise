@@ -603,6 +603,15 @@ func TestErrorPropagateInNonFailable(t *testing.T) {
 	expectError(t, errs, "outside of failable")
 }
 
+// B0322: Failable call as method receiver in non-failable function must error.
+func TestFailableMethodChainInNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		get_name!() string { return "hi"; }
+		foo() { string s = get_name().trim(); }
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
 func TestErrorPanic(t *testing.T) {
 	checkOK(t, `
 		parse!(string s) int { return 0; }

@@ -486,6 +486,17 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 	return nil
 }
 
+// genReceiverExpr generates an expression used as a method receiver or member access target.
+// If the expression is a failable call registered for auto-propagation (B0322),
+// it extracts the success value (propagating the error on failure).
+func (c *Compiler) genReceiverExpr(expr ast.Expr) value.Value {
+	val := c.genExpr(expr)
+	if c.info.AutoPropagateExprs[expr] {
+		val = c.genAutoPropagateValue(val)
+	}
+	return val
+}
+
 // genCallArgExpr generates an expression used as a call argument.
 // If the expression is a failable call registered for auto-propagation,
 // it extracts the success value (propagating the error on failure).

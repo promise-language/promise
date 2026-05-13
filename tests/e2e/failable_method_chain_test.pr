@@ -1,0 +1,260 @@
+// B0322: Failable call as method/member receiver must auto-propagate errors.
+get_greeting!() string {
+  return "  hello world  ";
+}
+
+fail_greeting!() string {
+  raise error(message: "no greeting");
+}
+
+// Auto-propagate failable receiver, then call method on success value.
+test_failable_string_trim() `test {
+  string s = try_trim()? e {
+    "fallback"
+  };
+  assert(s == "hello world", "trim on failable receiver");
+}
+
+try_trim!() string {
+  return get_greeting().trim();
+}
+
+// Failable receiver that raises — error propagates, method never called.
+test_failable_string_trim_error() `test {
+  string s = try_trim_fail()? e {
+    "caught"
+  };
+  assert(s == "caught", "error propagated");
+}
+
+try_trim_fail!() string {
+  return fail_greeting().trim();
+}
+
+// Chain: failable receiver → multiple non-failable methods.
+test_failable_chain_multiple() `test {
+  string s = try_chain()? e {
+    "err"
+  };
+  assert(s == "HELLO WORLD", "chained methods");
+}
+
+try_chain!() string {
+  return get_greeting().trim().to_upper();
+}
+
+// Access .len on failable receiver.
+test_failable_member_access() `test {
+  int n = try_len()? e {
+    -1
+  };
+  assert(n == 15, "len on failable receiver");
+}
+
+try_len!() int {
+  return get_greeting().len;
+}
+
+// --- Vector operations on failable receiver ---
+
+make_vec!() int[] {
+  return[10, 20, 30];
+}
+
+fail_vec!() int[] {
+  raise error(message: "no vec");
+}
+
+// genVectorLen: .len on failable vector receiver.
+test_failable_vector_len() `test {
+  int n = try_vec_len()? e {
+    -1
+  };
+  assert(n == 3, "vec len on failable receiver");
+}
+
+try_vec_len!() int {
+  return make_vec().len;
+}
+
+// genVectorMethodCall: .contains() on failable vector receiver.
+test_failable_vector_method() `test {
+  bool found = try_vec_contains()? e {
+    false
+  };
+  assert(found, "vec contains on failable receiver");
+}
+
+try_vec_contains!() bool {
+  return make_vec().contains(20);
+}
+
+// genVectorLen: error propagation path for vector.
+test_failable_vector_len_error() `test {
+  int n = try_fail_vec_len()? e {
+    -1
+  };
+  assert(n == -1, "vec len error propagates");
+}
+
+try_fail_vec_len!() int {
+  return fail_vec().len;
+}
+
+// --- Field access on failable receiver ---
+
+type Point {
+  int x `value;
+  int y `value;
+}
+
+make_point!() Point {
+  return Point(x: 42, y: 99);
+}
+
+fail_point!() Point {
+  raise error(message: "no point");
+}
+
+// genFieldAccess (value type): field on failable value type.
+test_failable_value_field() `test {
+  int x = try_point_x()? e {
+    -1
+  };
+  assert(x == 42, "value type field on failable receiver");
+}
+
+try_point_x!() int {
+  return make_point().x;
+}
+
+test_failable_value_field_error() `test {
+  int x = try_fail_point_x()? e {
+    -1
+  };
+  assert(x == -1, "value type field error propagates");
+}
+
+try_fail_point_x!() int {
+  return fail_point().x;
+}
+
+// --- Heap type field + method on failable receiver ---
+
+type Box {
+  int val;
+
+  doubled(&this) int {
+    return this.val * 2;
+  }
+}
+
+make_box!() Box {
+  return Box(val: 7);
+}
+
+// genFieldAccess (heap type): field on failable heap type.
+// B0327: temporary heap receiver leaks — use variable to avoid pre-existing bug.
+test_failable_heap_field() `test {
+  int v = try_box_val()? e {
+    -1
+  };
+  assert(v == 7, "heap type field on failable receiver");
+}
+
+try_box_val!() int {
+  Box b = make_box();
+  return b.val;
+}
+
+// genMethodCall: regular method on failable receiver.
+// B0327: temporary heap receiver leaks — use variable.
+test_failable_method_call() `test {
+  int d = try_doubled()? e {
+    -1
+  };
+  assert(d == 14, "method call on failable receiver");
+}
+
+try_doubled!() int {
+  Box b = make_box();
+  return b.doubled();
+}
+
+// --- Getter on failable receiver ---
+
+type Counter {
+  int count;
+
+  get double int {
+    return this.count * 2;
+  }
+}
+
+make_counter!() Counter {
+  return Counter(count: 5);
+}
+
+// genGetterCall: getter on failable receiver.
+test_failable_getter() `test {
+  int d = try_counter_double()? e {
+    -1
+  };
+  assert(d == 10, "getter on failable receiver");
+}
+
+try_counter_double!() int {
+  return make_counter().double;
+}
+
+// --- Enum method on failable receiver ---
+
+enum Color {
+  Red, Green, Blue,
+
+  code(&this) int {
+    match this {
+      Color.Red => {
+        return 1;
+      },
+      Color.Green => {
+        return 2;
+      },
+      Color.Blue => {
+        return 3;
+      },
+    }
+  }
+}
+
+make_color!() Color {
+  return Color.Green;
+}
+
+// genEnumMethodCall: method on failable enum receiver.
+// B0328: temporary enum receiver produces wrong result — use variable.
+test_failable_enum_method() `test {
+  int c = try_color_code()? e {
+    -1
+  };
+  assert(c == 2, "enum method on failable receiver");
+}
+
+try_color_code!() int {
+  Color cl = make_color();
+  return cl.code();
+}
+
+// --- String .is_literal on failable receiver ---
+
+// genStringIsLiteral: .is_literal on failable string receiver.
+test_failable_string_is_literal() `test {
+  bool lit = try_is_literal()? e {
+    false
+  };
+  assert(lit, "is_literal on failable receiver");
+}
+
+try_is_literal!() bool {
+  return get_greeting().is_literal;
+}

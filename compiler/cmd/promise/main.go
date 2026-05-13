@@ -276,7 +276,11 @@ func main() {
 			runLegacy(os.Args[1:])
 			return
 		}
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
+		display := cmd
+		if len(display) > 50 {
+			display = display[:50] + "..."
+		}
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n", display)
 		usage()
 		os.Exit(1)
 	}
@@ -319,9 +323,18 @@ func runLegacy(args []string) {
 			os.Exit(1)
 		}
 		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		lexEl := &errorListener{filename: filename}
+		lexer.AddErrorListener(lexEl)
 		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
 		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		parseEl := &errorListener{filename: filename}
+		p.AddErrorListener(parseEl)
 		tree := p.CompilationUnit()
+		if lexEl.errors+parseEl.errors > 0 {
+			os.Exit(1)
+		}
 		fmt.Println(tree.ToStringTree(nil, p))
 	}
 }
@@ -5363,16 +5376,24 @@ func (l *errorListener) SyntaxError(
 	_ antlr.RecognitionException,
 ) {
 	if !l.silent {
-		if l.source != "" {
-			lines := strings.Split(l.source, "\n")
-			displayLine := line - l.wrapOffset
-			fmt.Fprintf(os.Stderr, "%d:%d: %s\n", displayLine, column, msg)
-			printErrorContext(lines, line-1, column)
-		} else {
-			fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", l.filename, line, column, msg)
-			lines := readFileLines(l.filename)
-			if lines != nil {
+		if l.errors < 13 {
+			if l.source != "" {
+				lines := strings.Split(l.source, "\n")
+				displayLine := line - l.wrapOffset
+				fmt.Fprintf(os.Stderr, "%d:%d: %s\n", displayLine, column, msg)
 				printErrorContext(lines, line-1, column)
+			} else {
+				fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", l.filename, line, column, msg)
+				lines := readFileLines(l.filename)
+				if lines != nil {
+					printErrorContext(lines, line-1, column)
+				}
+			}
+		} else if l.errors == 13 {
+			if l.filename != "" {
+				fmt.Fprintf(os.Stderr, "%s: too many errors, suppressing remaining\n", l.filename)
+			} else {
+				fmt.Fprintln(os.Stderr, "too many errors, suppressing remaining")
 			}
 		}
 	}

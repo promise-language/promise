@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1770,4 +1772,99 @@ epoch = "2026.3"
 	if len(loader.warnings) != 0 {
 		t.Errorf("expected no warnings for matching epochs, got: %v", loader.warnings)
 	}
+}
+
+// captureStderr captures os.Stderr output produced by fn.
+// Not safe to run in parallel with other tests that write to os.Stderr.
+func captureStderr(fn func()) string {
+	r, w, err := os.Pipe()
+	if err != nil {
+		panic(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r) //nolint:errcheck
+	r.Close()
+	return buf.String()
+}
+
+// TestErrorListenerCap verifies that errorListener caps output at 13 errors
+// and always increments the error count regardless of the cap.
+func TestErrorListenerCap(t *testing.T) {
+	// Invoke SyntaxError N times on a listener with no real file (readFileLines
+	// returns nil for a nonexistent file, so no context lines are attempted).
+	invoke := func(l *errorListener, n int) {
+		for i := 0; i < n; i++ {
+			l.SyntaxError(nil, nil, 1, i, "syntax error", nil)
+		}
+	}
+
+	t.Run("counts-all-errors-beyond-cap", func(t *testing.T) {
+		l := &errorListener{filename: "nonexistent.pr"}
+		captureStderr(func() { invoke(l, 20) })
+		if l.errors != 20 {
+			t.Errorf("errors: got %d, want 20", l.errors)
+		}
+	})
+
+	t.Run("output-capped-at-13", func(t *testing.T) {
+		l := &errorListener{filename: "nonexistent.pr"}
+		out := captureStderr(func() { invoke(l, 20) })
+		// Each of the first 13 errors emits one "nonexistent.pr:..." line.
+		// Error 14 (l.errors==13 at that point) emits the suppression notice.
+		// Errors 15-20 produce no output.
+		lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+		// 13 error lines + 1 suppression line = 14 non-empty lines
+		if len(lines) != 14 {
+			t.Errorf("stderr line count: got %d, want 14\noutput:\n%s", len(lines), out)
+		}
+		if !strings.Contains(out, "too many errors, suppressing remaining") {
+			t.Errorf("expected suppression notice in output, got:\n%s", out)
+		}
+	})
+
+	t.Run("no-suppression-when-exactly-13-errors", func(t *testing.T) {
+		l := &errorListener{filename: "nonexistent.pr"}
+		out := captureStderr(func() { invoke(l, 13) })
+		// Exactly 13 errors: all printed, no suppression notice (14th call never happens)
+		if strings.Contains(out, "too many errors") {
+			t.Errorf("unexpected suppression notice for exactly 13 errors:\n%s", out)
+		}
+		if l.errors != 13 {
+			t.Errorf("errors: got %d, want 13", l.errors)
+		}
+	})
+
+	t.Run("silent-suppresses-all-output", func(t *testing.T) {
+		l := &errorListener{filename: "nonexistent.pr", silent: true}
+		out := captureStderr(func() { invoke(l, 20) })
+		if out != "" {
+			t.Errorf("silent mode: expected no output, got %q", out)
+		}
+		if l.errors != 20 {
+			t.Errorf("errors: got %d, want 20", l.errors)
+		}
+	})
+
+	t.Run("suppression-notice-no-filename-prefix", func(t *testing.T) {
+		// Inline exec mode: source set, filename empty.
+		// The suppression notice should not have a bare ":" prefix.
+		l := &errorListener{source: "x := @"}
+		out := captureStderr(func() { invoke(l, 15) })
+		if strings.Contains(out, "too many errors") {
+			// Must not start with ": too many" (empty filename prefix)
+			if strings.Contains(out, ": too many errors") && !strings.Contains(out, "nonexistent") {
+				// Check no leading colon on its own line
+				for _, line := range strings.Split(out, "\n") {
+					if strings.HasPrefix(line, ": too many") {
+						t.Errorf("suppression notice has empty filename prefix: %q", line)
+					}
+				}
+			}
+		}
+	})
 }

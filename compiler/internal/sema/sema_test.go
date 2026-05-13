@@ -11577,12 +11577,29 @@ func TestEnumMethodNativeError(t *testing.T) {
 
 func TestEnumMethodFactory(t *testing.T) {
 	// Enum factory methods are supported (needed for serializable decode).
-	checkOK(t, `
+	info := checkOK(t, `
 		enum Color { Red,
 			make() Color `+"`"+`factory { return Color.Red; }
+			describe(&this) string { return "color"; }
 		}
 		test() {}
 	`)
+	scope := info.Scopes[findFile(t, info)]
+	enum := scope.Lookup("Color").(*types.TypeName).Type().(*types.Enum)
+	m := enum.LookupMethod("make")
+	if m == nil {
+		t.Fatal("expected method 'make' on enum Color")
+	}
+	if !m.IsFactory() {
+		t.Error("expected make() to have IsFactory() == true")
+	}
+	d := enum.LookupMethod("describe")
+	if d == nil {
+		t.Fatal("expected method 'describe' on enum Color")
+	}
+	if d.IsFactory() {
+		t.Error("expected describe() to have IsFactory() == false")
+	}
 }
 
 func TestEnumMethodMissingReturn(t *testing.T) {

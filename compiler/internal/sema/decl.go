@@ -911,6 +911,7 @@ func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumNam
 	m := types.NewMethod(tpos(md.Pos()), md.Name, sig, placement, false, false)
 	m.SetGetter(md.IsGetter)
 	m.SetSetter(md.IsSetter)
+	m.SetFactory(isFactory)
 	if c.hasAnnotation(md.Annotations, "public") {
 		m.SetExported(true)
 	}

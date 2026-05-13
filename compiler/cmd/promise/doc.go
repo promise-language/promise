@@ -1058,6 +1058,33 @@ func isMemberPublic(name string, exported bool) bool {
 	return !strings.HasPrefix(name, "_")
 }
 
+// methodSortPriority returns a sort priority for documentation ordering:
+// 0 = factory methods, 1 = drop/close, 2 = everything else.
+func methodSortPriority(m *types.Method) int {
+	if m.IsFactory() {
+		return 0
+	}
+	if m.Name() == "drop" || m.Name() == "close" {
+		return 1
+	}
+	return 2
+}
+
+func sortMethodsForDoc(methods []*types.Method) {
+	sort.SliceStable(methods, func(i, j int) bool {
+		pi, pj := methodSortPriority(methods[i]), methodSortPriority(methods[j])
+		if pi != pj {
+			return pi < pj
+		}
+		// Within the "remaining" group, sort alphabetically
+		if pi == 2 {
+			return methods[i].Name() < methods[j].Name()
+		}
+		// Factory and drop/close groups preserve declaration order (stable sort)
+		return false
+	})
+}
+
 func collectMethods(named *types.Named, opts docOpts) []*types.Method {
 	// For structural interfaces, show all methods (they define the interface contract)
 	if named.IsStructural() {
@@ -1085,6 +1112,7 @@ func collectMethods(named *types.Named, opts docOpts) []*types.Method {
 		}
 	}
 
+	sortMethodsForDoc(result)
 	return result
 }
 
@@ -1096,6 +1124,7 @@ func collectEnumMethods(enum *types.Enum, opts docOpts) []*types.Method {
 		}
 		result = append(result, m)
 	}
+	sortMethodsForDoc(result)
 	return result
 }
 

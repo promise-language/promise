@@ -1226,6 +1226,192 @@ func TestDocModuleInDirSubdirsIgnored(t *testing.T) {
 	assertContainsDoc(t, out, "Content.")
 }
 
+// === Member ordering (T0243) ===
+
+func TestDocMemberOrdering(t *testing.T) {
+	out := docFromSource(t, `
+		type Widget `+"`public"+` {
+			int id `+"`public"+`;
+			string name `+"`public"+`;
+
+			create() Widget `+"`public `factory"+` {
+				return Widget(id: 0, name: "w");
+			}
+			drop(~this) `+"`public"+` {}
+			get alpha int `+"`public"+` { return 0; }
+			beta() string `+"`public"+` { return "b"; }
+			zebra() int `+"`public"+` { return 0; }
+		}
+	`, docOpts{publicOnly: true})
+
+	// Find the summary block for Widget
+	widgetIdx := strings.Index(out, "type Widget {")
+	if widgetIdx == -1 {
+		t.Fatalf("expected type Widget summary block\ngot:\n%s", out)
+	}
+	closingIdx := strings.Index(out[widgetIdx:], "    }")
+	if closingIdx == -1 {
+		t.Fatalf("expected closing brace\ngot:\n%s", out)
+	}
+	summary := out[widgetIdx : widgetIdx+closingIdx]
+
+	// Factory should come before drop, drop before alpha/beta/zebra
+	createIdx := strings.Index(summary, "create(")
+	dropIdx := strings.Index(summary, "drop(")
+	alphaIdx := strings.Index(summary, "alpha")
+	betaIdx := strings.Index(summary, "beta(")
+	zebraIdx := strings.Index(summary, "zebra(")
+
+	if createIdx == -1 || dropIdx == -1 || alphaIdx == -1 || betaIdx == -1 || zebraIdx == -1 {
+		t.Fatalf("missing expected methods in summary\ngot:\n%s", summary)
+	}
+
+	// Order: factory < drop < alphabetical remaining
+	if createIdx >= dropIdx {
+		t.Errorf("factory create() should come before drop()\ngot:\n%s", summary)
+	}
+	if dropIdx >= alphaIdx {
+		t.Errorf("drop() should come before alpha\ngot:\n%s", summary)
+	}
+	if alphaIdx >= betaIdx {
+		t.Errorf("alpha should come before beta()\ngot:\n%s", summary)
+	}
+	if betaIdx >= zebraIdx {
+		t.Errorf("beta() should come before zebra()\ngot:\n%s", summary)
+	}
+}
+
+func TestDocEnumMemberOrdering(t *testing.T) {
+	out := docFromSource(t, `
+		enum Direction `+"`public"+` {
+			North, South, East, West,
+
+			create() Direction `+"`public `factory `doc(\"Creates default.\")"+` {
+				return Direction.North;
+			}
+			zebra() int `+"`public `doc(\"Zebra method.\")"+` { return 0; }
+			alpha() int `+"`public `doc(\"Alpha method.\")"+` { return 0; }
+		}
+	`, docOpts{publicOnly: true})
+
+	// Enum method sections appear as #### headings; check their order
+	createIdx := strings.Index(out, "#### Direction.create")
+	alphaIdx := strings.Index(out, "#### Direction.alpha")
+	zebraIdx := strings.Index(out, "#### Direction.zebra")
+
+	if createIdx == -1 || alphaIdx == -1 || zebraIdx == -1 {
+		t.Fatalf("missing expected method sections\ngot:\n%s", out)
+	}
+
+	// Factory first, then alphabetical
+	if createIdx >= alphaIdx {
+		t.Errorf("factory create should come before alpha\ngot:\n%s", out)
+	}
+	if alphaIdx >= zebraIdx {
+		t.Errorf("alpha should come before zebra\ngot:\n%s", out)
+	}
+}
+
+func TestDocGetterSetterAdjacent(t *testing.T) {
+	out := docFromSource(t, `
+		type Config `+"`public"+` {
+			int _value;
+			get value int `+"`public"+` { return this._value; }
+			set value(int v) `+"`public"+` { this._value = v; }
+			alpha() int `+"`public"+` { return 0; }
+			zebra() int `+"`public"+` { return 0; }
+		}
+	`, docOpts{publicOnly: true})
+
+	configIdx := strings.Index(out, "type Config {")
+	if configIdx == -1 {
+		t.Fatalf("expected type Config summary block\ngot:\n%s", out)
+	}
+	closingIdx := strings.Index(out[configIdx:], "    }")
+	if closingIdx == -1 {
+		t.Fatalf("expected closing brace\ngot:\n%s", out)
+	}
+	summary := out[configIdx : configIdx+closingIdx]
+
+	alphaIdx := strings.Index(summary, "alpha(")
+	valueGetIdx := strings.Index(summary, "get value")
+	valueSetIdx := strings.Index(summary, "set value")
+	zebraIdx := strings.Index(summary, "zebra(")
+
+	if alphaIdx == -1 || valueGetIdx == -1 || valueSetIdx == -1 || zebraIdx == -1 {
+		t.Fatalf("missing expected methods in summary\ngot:\n%s", summary)
+	}
+
+	// alpha < value getter/setter < zebra (alphabetical)
+	if alphaIdx >= valueGetIdx {
+		t.Errorf("alpha() should come before get value\ngot:\n%s", summary)
+	}
+	// getter and setter adjacent (both named "value", stable sort keeps declaration order)
+	if valueGetIdx >= valueSetIdx {
+		t.Errorf("get value should come before set value\ngot:\n%s", summary)
+	}
+	if valueSetIdx >= zebraIdx {
+		t.Errorf("set value should come before zebra()\ngot:\n%s", summary)
+	}
+}
+
+func TestDocMemberOrderingMultipleFactoriesAndDropClose(t *testing.T) {
+	out := docFromSource(t, `
+		type Resource `+"`public"+` {
+			int id `+"`public"+`;
+
+			make_a() Resource `+"`public `factory"+` {
+				return Resource(id: 1);
+			}
+			make_b() Resource `+"`public `factory"+` {
+				return Resource(id: 2);
+			}
+			drop(~this) `+"`public"+` {}
+			close(~this) `+"`public"+` {}
+			zebra() int `+"`public"+` { return 0; }
+			alpha() int `+"`public"+` { return 0; }
+		}
+	`, docOpts{publicOnly: true})
+
+	resIdx := strings.Index(out, "type Resource {")
+	if resIdx == -1 {
+		t.Fatalf("expected type Resource summary block\ngot:\n%s", out)
+	}
+	closingIdx := strings.Index(out[resIdx:], "    }")
+	if closingIdx == -1 {
+		t.Fatalf("expected closing brace\ngot:\n%s", out)
+	}
+	summary := out[resIdx : resIdx+closingIdx]
+
+	makeAIdx := strings.Index(summary, "make_a(")
+	makeBIdx := strings.Index(summary, "make_b(")
+	dropIdx := strings.Index(summary, "drop(")
+	closeIdx := strings.Index(summary, "close(")
+	alphaIdx := strings.Index(summary, "alpha(")
+	zebraIdx := strings.Index(summary, "zebra(")
+
+	if makeAIdx == -1 || makeBIdx == -1 || dropIdx == -1 || closeIdx == -1 || alphaIdx == -1 || zebraIdx == -1 {
+		t.Fatalf("missing expected methods in summary\ngot:\n%s", summary)
+	}
+
+	// Factories first (declaration order preserved), then drop/close (declaration order), then alphabetical
+	if makeAIdx >= makeBIdx {
+		t.Errorf("make_a() should come before make_b() (declaration order)\ngot:\n%s", summary)
+	}
+	if makeBIdx >= dropIdx {
+		t.Errorf("make_b() should come before drop()\ngot:\n%s", summary)
+	}
+	if dropIdx >= closeIdx {
+		t.Errorf("drop() should come before close() (declaration order)\ngot:\n%s", summary)
+	}
+	if closeIdx >= alphaIdx {
+		t.Errorf("close() should come before alpha()\ngot:\n%s", summary)
+	}
+	if alphaIdx >= zebraIdx {
+		t.Errorf("alpha() should come before zebra()\ngot:\n%s", summary)
+	}
+}
+
 func TestDocUsageContainsModules(t *testing.T) {
 	var buf bytes.Buffer
 	printDocUsage(&buf)

@@ -6989,6 +6989,9 @@ func TestBatchTestLeakCheckDrainCondvar(t *testing.T) {
 	assertContains(t, ir, "drain_slow_myTest")
 	assertContains(t, ir, "drain_gs_myTest")
 	assertContains(t, ir, "drain_wait_myTest")
+	// B0320: fast-path gs_completed read should use Acquire ordering
+	// (pairs with Release on gs_completed increment in goroutine_exit)
+	assertContains(t, ir, "i64 0 acquire")
 }
 
 // B0165: Sched struct includes ready_count field (i32 at end).
@@ -13403,6 +13406,20 @@ func TestGoroutineExitFreePanicMsg(t *testing.T) {
 	// goroutine_exit should have free_panic_msg and do_free_g blocks
 	assertContains(t, ir, "free_panic_msg:")
 	assertContains(t, ir, "do_free_g:")
+}
+
+// B0320: goroutine_exit uses Release ordering on gs_completed increment so
+// that alloc_count decrements are visible to any Acquire reader (drain fast path).
+func TestGoroutineExitGsCompletedRelease(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	fn := extractFunction(ir, "promise_goroutine_exit")
+	// Both gs_completed increment sites (skip_free and do_free_g) should use release
+	assertContains(t, fn, "atomicrmw add i64*")
+	assertContains(t, fn, "release")
+	// Should NOT use monotonic for gs_completed increments
+	// (other atomics in the function like gs_drain may still be monotonic)
 }
 
 // B0228: promise_panic_msg stores type=2 in TLS panic_type to mark heap-allocated msg.

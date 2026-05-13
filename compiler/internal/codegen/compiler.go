@@ -1056,7 +1056,10 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 
 				drainDone := mainFn.NewBlock(fmt.Sprintf("drain_done_%s", nameStr))
 				created0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
-				completed0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
+				// B0320: Acquire ordering pairs with Release on gs_completed
+				// increment in goroutine_exit, ensuring alloc_count decrements
+				// are visible when the fast path observes drain complete.
+				completed0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
 				fastDone := leakCheckBlk.NewICmp(enum.IPredEQ, created0, completed0)
 
 				drainSlow := mainFn.NewBlock(fmt.Sprintf("drain_slow_%s", nameStr))

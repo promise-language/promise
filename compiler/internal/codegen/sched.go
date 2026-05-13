@@ -196,6 +196,19 @@ func (c *Compiler) emitAtomicAdd(blk *ir.Block, ptr value.Value, val value.Value
 	return blk.NewAtomicRMW(enum.AtomicOpAdd, ptr, val, enum.AtomicOrderingMonotonic)
 }
 
+// emitAtomicAddRelease is like emitAtomicAdd but uses Release ordering on
+// non-WASM targets. The Release barrier ensures all prior stores (e.g.
+// alloc_count decrements) are visible to any thread that does an Acquire
+// load of the same variable. Used for gs_completed increments (B0320).
+func (c *Compiler) emitAtomicAddRelease(blk *ir.Block, ptr value.Value, val value.Value, typ *irtypes.IntType) value.Value {
+	if c.isWasm {
+		old := blk.NewLoad(typ, ptr)
+		blk.NewStore(blk.NewAdd(old, val), ptr)
+		return old
+	}
+	return blk.NewAtomicRMW(enum.AtomicOpAdd, ptr, val, enum.AtomicOrderingRelease)
+}
+
 // emitGsDrainSignal emits a check-and-broadcast for goroutine drain: if
 // gs_created == gs_completed, broadcast the gs_drain condvar. Returns the
 // continuation block. Used at both gs_completed increment sites in goroutine_exit.
@@ -1833,7 +1846,12 @@ func (c *Compiler) defineGoroutineExitFunc() {
 
 	// skipFree: task[T] — caller will free G when they receive the result.
 	// Increment gs_completed after all cleanup (B0234).
-	c.emitAtomicAdd(skipFree, gsCompletedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+	// B0320: Use Release ordering so that all prior stores (alloc_count
+	// decrements from pal_free) are visible to any Acquire reader of
+	// gs_completed — prevents false-positive LEAK in the drain fast path
+	// on ARM64 (weak memory model allows store reordering across variables
+	// with Monotonic ordering).
+	c.emitAtomicAddRelease(skipFree, gsCompletedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 	// Signal goroutine drain condvar if all goroutines are done.
 	skipFreeCont := c.emitGsDrainSignal(fn, skipFree, gsCompletedField, "task")
 	skipFreeCont.NewRet(nil)
@@ -1851,7 +1869,8 @@ func (c *Compiler) defineGoroutineExitFunc() {
 
 	doFreeG.NewCall(c.palFree, gParam)
 	// Increment gs_completed after all cleanup including pal_free(G) (B0234).
-	c.emitAtomicAdd(doFreeG, gsCompletedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+	// B0320: Release ordering — see skipFree comment above.
+	c.emitAtomicAddRelease(doFreeG, gsCompletedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 	// Signal goroutine drain condvar if all goroutines are done.
 	doFreeGCont := c.emitGsDrainSignal(fn, doFreeG, gsCompletedField, "free")
 	doFreeGCont.NewRet(nil)

@@ -816,9 +816,11 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(filename), cacheKey[:16])
 			}
 			meta := module.LoadTestBinaryMeta(cacheDir, cacheKey)
-			// Scale process timeout by test count so batch files with many
-			// tests don't hit the backstop during normal execution.
-			if meta != nil && len(meta.Tests) > 1 {
+			// Use saved process timeout if available; fall back to
+			// scaling by test count for older cache entries.
+			if meta != nil && meta.ProcessTimeoutNs > 0 {
+				timeout = time.Duration(meta.ProcessTimeoutNs)
+			} else if meta != nil && len(meta.Tests) > 1 {
 				timeout = cfg.defaultTimeout*time.Duration(len(meta.Tests)) + 30*time.Second
 			}
 			if meta != nil && meta.E2E {
@@ -870,7 +872,16 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 		timePhase("total", time.Since(compileStart), "")
 	}
 
-	// Save to cache.
+	defer os.Remove(binaryPath)
+	// Process-level timeout: sum of all per-test timeouts + 30s buffer.
+	// Per-test timeouts are enforced in-binary; this is just a backstop.
+	var totalNs int64
+	for _, ns := range testTimeouts {
+		totalNs += ns
+	}
+	processTimeout := time.Duration(totalNs) + 30*time.Second
+
+	// Save to cache (includes process timeout for cache-hit path).
 	if cacheDir != "" {
 		module.SaveTestBinaryCache(cacheDir, cacheKey, binaryPath)
 		var testNames []string
@@ -882,22 +893,15 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 			}
 		}
 		module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.CacheMeta{
-			Kind:         module.CacheKindBinary,
-			Name:         filename,
-			CacheKey:     cacheKey,
-			Tests:        testNames,
-			TestExcludes: testExcludes,
+			Kind:             module.CacheKindBinary,
+			Name:             filename,
+			CacheKey:         cacheKey,
+			Tests:            testNames,
+			TestExcludes:     testExcludes,
+			ProcessTimeoutNs: processTimeout.Nanoseconds(),
 		})
 	}
 
-	defer os.Remove(binaryPath)
-	// Process-level timeout: sum of all per-test timeouts + 30s buffer.
-	// Per-test timeouts are enforced in-binary; this is just a backstop.
-	var totalNs int64
-	for _, ns := range testTimeouts {
-		totalNs += ns
-	}
-	processTimeout := time.Duration(totalNs) + 30*time.Second
 	runTestBinary(binaryPath, processTimeout, start, targetTriple)
 }
 
@@ -956,7 +960,13 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 			if cacheDebug {
 				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(modDir), cacheKey[:16])
 			}
-			runTestBinary(cachedBin, cfg.defaultTimeout, start, targetTriple)
+			timeout := cfg.defaultTimeout
+			if meta := module.LoadTestBinaryMeta(cacheDir, cacheKey); meta != nil && meta.ProcessTimeoutNs > 0 {
+				timeout = time.Duration(meta.ProcessTimeoutNs)
+			} else if meta != nil && len(meta.Tests) > 1 {
+				timeout = cfg.defaultTimeout*time.Duration(len(meta.Tests)) + 30*time.Second
+			}
+			runTestBinary(cachedBin, timeout, start, targetTriple)
 			return
 		}
 	}
@@ -992,11 +1002,6 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 	binaryPath := compileTestBinary(file, info, targetTriple, modDir, testTimeouts)
 
-	// Save compiled binary to cache.
-	if cacheDir != "" {
-		module.SaveTestBinaryCache(cacheDir, cacheKey, binaryPath)
-	}
-
 	defer os.Remove(binaryPath)
 	// Process-level timeout: sum of per-test timeouts + 30s buffer.
 	var totalNs int64
@@ -1004,6 +1009,23 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 		totalNs += ns
 	}
 	processTimeout := time.Duration(totalNs) + 30*time.Second
+
+	// Save compiled binary to cache (includes process timeout for cache-hit path).
+	if cacheDir != "" {
+		module.SaveTestBinaryCache(cacheDir, cacheKey, binaryPath)
+		var names []string
+		for _, t := range info.Tests {
+			names = append(names, t.Name())
+		}
+		module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.CacheMeta{
+			Kind:             module.CacheKindBinary,
+			Name:             modDir,
+			CacheKey:         cacheKey,
+			Tests:            names,
+			ProcessTimeoutNs: processTimeout.Nanoseconds(),
+		})
+	}
+
 	runTestBinary(binaryPath, processTimeout, start, targetTriple)
 }
 
@@ -1435,12 +1457,13 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	if cacheDir != "" {
 		module.SaveTestBinaryCache(cacheDir, cacheKey, tmpOutput.Name())
 		module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.CacheMeta{
-			Kind:           module.CacheKindBinary,
-			Name:           filename,
-			CacheKey:       cacheKey,
-			E2E:            true,
-			ExpectedOutput: info.ExpectOutput,
-			ExcludeTargets: info.ExcludeTargets,
+			Kind:             module.CacheKindBinary,
+			Name:             filename,
+			CacheKey:         cacheKey,
+			E2E:              true,
+			ExpectedOutput:   info.ExpectOutput,
+			ExcludeTargets:   info.ExcludeTargets,
+			ProcessTimeoutNs: (timeout + 30*time.Second).Nanoseconds(),
 		})
 	}
 

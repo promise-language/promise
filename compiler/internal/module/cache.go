@@ -51,11 +51,12 @@ type CacheMeta struct {
 	IRPrefix     string `json:"ir_prefix,omitempty"`
 
 	// CacheKindBinary-specific
-	E2E            bool                `json:"e2e,omitempty"`
-	ExpectedOutput string              `json:"expected_output,omitempty"`
-	ExcludeTargets []string            `json:"exclude_targets,omitempty"`
-	Tests          []string            `json:"tests,omitempty"`
-	TestExcludes   map[string][]string `json:"test_excludes,omitempty"`
+	E2E              bool                `json:"e2e,omitempty"`
+	ExpectedOutput   string              `json:"expected_output,omitempty"`
+	ExcludeTargets   []string            `json:"exclude_targets,omitempty"`
+	Tests            []string            `json:"tests,omitempty"`
+	TestExcludes     map[string][]string `json:"test_excludes,omitempty"`
+	ProcessTimeoutNs int64               `json:"process_timeout_ns,omitempty"` // sum of per-test timeouts + buffer
 }
 
 // saveCacheMeta atomically writes meta as JSON to path.

@@ -219,7 +219,7 @@ func (c *Compiler) emitGsDrainSignal(fn *ir.Func, blk *ir.Block, gsCompletedFiel
 	gsCreatedField := blk.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCreated)))
 
-	created := blk.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
+	created := blk.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
 	completed := blk.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
 	allDone := blk.NewICmp(enum.IPredEQ, created, completed)
 
@@ -410,11 +410,12 @@ func (c *Compiler) defineGNewFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
 	entry.NewStore(constant.NewNull(irtypes.I8Ptr), panicMsgField)
 
-	// Increment gs_created counter (atomic — called from multiple Ms)
+	// Increment gs_created counter (Release — pairs with Acquire read in
+	// emitGsDrainSignal so ARM64 drain checks see the latest count; B0315)
 	schedTyLocal := schedStructType()
 	gsCreatedField := entry.NewGetElementPtr(schedTyLocal, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCreated)))
-	c.emitAtomicAdd(entry, gsCreatedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+	c.emitAtomicAddRelease(entry, gsCreatedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 
 	entry.NewRet(rawPtr)
 

@@ -6998,8 +6998,8 @@ func TestBatchTestResetsAllocCount(t *testing.T) {
 	assertContains(t, ir, "atomicrmw xchg i64* @__promise_alloc_count, i64 0 monotonic")
 }
 
-// B0231: Batch test leak check uses condvar wait for goroutine drain
-// (replaces B0188/B0234 spin-wait with deterministic signaling).
+// B0231/B0315: Batch test leak check uses spin-wait for goroutine drain
+// (condvar approach had a lost-wakeup race on ARM64).
 func TestBatchTestLeakCheckDrainCondvar(t *testing.T) {
 	result := compileResult(t, `
 		myTest() `+"`test"+` { }
@@ -7017,14 +7017,17 @@ func TestBatchTestLeakCheckDrainCondvar(t *testing.T) {
 	}())
 	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
-	// Leak check block should use condvar wait (not spin-wait) for goroutine drain
+	// B0315: Drain check uses spin-wait with periodic wake_m nudge
 	assertContains(t, ir, "leak_check_myTest")
 	assertContains(t, ir, "drain_done_myTest")
 	assertContains(t, ir, "drain_slow_myTest")
 	assertContains(t, ir, "drain_gs_myTest")
 	assertContains(t, ir, "drain_wait_myTest")
-	// B0320: fast-path gs_completed read should use Acquire ordering
-	// (pairs with Release on gs_completed increment in goroutine_exit)
+	assertContains(t, ir, "drain_nudge_myTest")
+	assertContains(t, ir, "drain_sleep_myTest")
+	// B0315: wake_m nudge to prevent lost-wakeup race
+	assertContains(t, ir, "call void @promise_sched_wake_m()")
+	// B0320: both fast-path and slow-path reads should use Acquire ordering
 	assertContains(t, ir, "i64 0 acquire")
 }
 

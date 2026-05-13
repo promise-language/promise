@@ -1056,40 +1056,52 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCompleted)))
 
 				drainDone := mainFn.NewBlock(fmt.Sprintf("drain_done_%s", nameStr))
-				created0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
 				// B0320: Acquire ordering pairs with Release on gs_completed
 				// increment in goroutine_exit, ensuring alloc_count decrements
 				// are visible when the fast path observes drain complete.
+				created0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
 				completed0 := leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
 				fastDone := leakCheckBlk.NewICmp(enum.IPredEQ, created0, completed0)
 
+				// B0315: Spin-wait with usleep instead of condvar wait. The
+				// condvar-based approach had a lost-wakeup race on ARM64 where
+				// the last goroutine's broadcast could fire before the main
+				// thread entered cond_wait, causing an indefinite hang.
 				drainSlow := mainFn.NewBlock(fmt.Sprintf("drain_slow_%s", nameStr))
 				leakCheckBlk.NewCondBr(fastDone, drainDone, drainSlow)
 
-				gdMtxField := drainSlow.NewGetElementPtr(schedTy, c.schedGlobal,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainMutex)))
-				gdMtx := drainSlow.NewLoad(irtypes.I8Ptr, gdMtxField)
-				gdCondField := drainSlow.NewGetElementPtr(schedTy, c.schedGlobal,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainCond)))
-				gdCond := drainSlow.NewLoad(irtypes.I8Ptr, gdCondField)
-				drainSlow.NewCall(c.palMutexLock, gdMtx)
-
 				drainLoop := mainFn.NewBlock(fmt.Sprintf("drain_gs_%s", nameStr))
+				// B0315: Counter for periodic wake_m nudge to prevent lost-wakeup
+				// race where an M parks after find_runnable returns null but before
+				// a newly enqueued goroutine's wake_m call finds idle Ms.
+				counterAlloca := drainSlow.NewAlloca(irtypes.I32)
+				drainSlow.NewStore(constant.NewInt(irtypes.I32, 0), counterAlloca)
 				drainSlow.NewBr(drainLoop)
 
-				created := drainLoop.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
-				completed := drainLoop.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
+				created := drainLoop.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
+				completed := drainLoop.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
 				allDone := drainLoop.NewICmp(enum.IPredEQ, created, completed)
 
 				drainWait := mainFn.NewBlock(fmt.Sprintf("drain_wait_%s", nameStr))
-				drainUnlock := mainFn.NewBlock(fmt.Sprintf("drain_unlock_%s", nameStr))
-				drainLoop.NewCondBr(allDone, drainUnlock, drainWait)
+				drainLoop.NewCondBr(allDone, drainDone, drainWait)
 
-				drainWait.NewCall(c.palCondWait, gdCond, gdMtx)
-				drainWait.NewBr(drainLoop)
+				// Increment counter; every 100 iterations (~10ms) nudge idle Ms
+				cnt := drainWait.NewLoad(irtypes.I32, counterAlloca)
+				nextCnt := drainWait.NewAdd(cnt, constant.NewInt(irtypes.I32, 1))
+				drainWait.NewStore(nextCnt, counterAlloca)
+				shouldNudge := drainWait.NewICmp(enum.IPredEQ, nextCnt, constant.NewInt(irtypes.I32, 100))
 
-				drainUnlock.NewCall(c.palMutexUnlock, gdMtx)
-				drainUnlock.NewBr(drainDone)
+				drainNudge := mainFn.NewBlock(fmt.Sprintf("drain_nudge_%s", nameStr))
+				drainSleep := mainFn.NewBlock(fmt.Sprintf("drain_sleep_%s", nameStr))
+				drainWait.NewCondBr(shouldNudge, drainNudge, drainSleep)
+
+				// Reset counter and wake an idle M so it picks up queued goroutines
+				drainNudge.NewStore(constant.NewInt(irtypes.I32, 0), counterAlloca)
+				drainNudge.NewCall(c.funcs["promise_sched_wake_m"])
+				drainNudge.NewBr(drainSleep)
+
+				drainSleep.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100)) // 100μs
+				drainSleep.NewBr(drainLoop)
 
 				leakCheckBlk = drainDone
 			}

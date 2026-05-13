@@ -341,6 +341,26 @@ test_malformed_response() `test(exclude: "wasm32", timeout: "10s") {
   listener.close()?!;
 }
 
+// ── http_post! convenience function (empty headers — B0343 blocks non-empty) ─
+
+test_http_post_function() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    map[string, string] h = map[string, string]();
+    Response resp = http_post("http://127.0.0.1:" + port.to_string() + "/api", "payload", h)?!;
+    assert(resp.status_code == 200, "status 200");
+    assert(resp.body == "ok", "body");
+  };
+
+  string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
+  assert(request.contains("POST /api"), "POST method");
+  assert(request.contains("payload"), "body sent");
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
 // NOTE: Response.json[T] and http_post_json[T] are not tested here due to a
 // cross-module monomorphization bug — see B0344.
 // NOTE: http_post! with non-empty headers map is broken — see B0343.

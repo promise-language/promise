@@ -1,0 +1,305 @@
+// ── Test handlers ───────────────────────────────────────────────────────────
+type _OkHandler {
+  string response_body;
+
+  handle!(~this, ServerRequest request) ServerResponse {
+    return ServerResponse.ok(this.response_body);
+  }
+}
+
+type _EchoHandler {
+  string prefix;
+
+  handle!(~this, ServerRequest request) ServerResponse {
+    return ServerResponse.ok(this.prefix + request.request_body);
+  }
+}
+
+type _ErrorHandler {
+  string error_message;
+
+  handle!(~this, ServerRequest request) ServerResponse {
+    raise HttpError(code: 0, message: this.error_message);
+  }
+}
+
+type _HeaderEchoHandler {
+  string echo_header;
+
+  handle!(~this, ServerRequest request) ServerResponse {
+    ServerResponse resp = ServerResponse.ok(request.request_path);
+    if h := request.header(this.echo_header) {
+      resp.set_header("X-Echo", h);
+    }
+    return resp;
+  }
+}
+
+type _NotFoundHandler {
+  string message;
+
+  handle!(~this, ServerRequest request) ServerResponse {
+    return ServerResponse.not_found();
+  }
+}
+
+// ── Unit tests (no network) ─────────────────────────────────────────────────
+
+test_server_string_to_method() `test(exclude: "wasm32") {
+  assert(_method_to_string(_string_to_method("GET")?!) == "GET", "GET");
+  assert(_method_to_string(_string_to_method("POST")?!) == "POST", "POST");
+  assert(_method_to_string(_string_to_method("PUT")?!) == "PUT", "PUT");
+  assert(_method_to_string(_string_to_method("DELETE")?!) == "DELETE", "DELETE");
+  assert(_method_to_string(_string_to_method("PATCH")?!) == "PATCH", "PATCH");
+  assert(_method_to_string(_string_to_method("HEAD")?!) == "HEAD", "HEAD");
+  assert(_method_to_string(_string_to_method("OPTIONS")?!) == "OPTIONS", "OPTIONS");
+}
+
+test_server_string_to_method_error() `test(exclude: "wasm32") {
+  Method m = _string_to_method("INVALID")? e {
+    return;
+  };
+  assert(false, "should have raised");
+}
+
+test_server_status_text() `test(exclude: "wasm32") {
+  assert(_status_text(200) == "OK", "200");
+  assert(_status_text(201) == "Created", "201");
+  assert(_status_text(204) == "No Content", "204");
+  assert(_status_text(301) == "Moved Permanently", "301");
+  assert(_status_text(302) == "Found", "302");
+  assert(_status_text(304) == "Not Modified", "304");
+  assert(_status_text(400) == "Bad Request", "400");
+  assert(_status_text(401) == "Unauthorized", "401");
+  assert(_status_text(403) == "Forbidden", "403");
+  assert(_status_text(404) == "Not Found", "404");
+  assert(_status_text(405) == "Method Not Allowed", "405");
+  assert(_status_text(500) == "Internal Server Error", "500");
+  assert(_status_text(502) == "Bad Gateway", "502");
+  assert(_status_text(503) == "Service Unavailable", "503");
+  assert(_status_text(999) == "Unknown", "unknown");
+}
+
+test_server_request_parse() `test(exclude: "wasm32") {
+  ServerRequest req = _parse_request("GET /hello?name=world HTTP/1.1\r\nHost: localhost\r\nX-Test: foo", "")?!;
+  assert(_method_to_string(req.request_method) == "GET", "method GET");
+  assert(req.request_path == "/hello", "path");
+  assert(req.query_string == "name=world", "query");
+  assert(req.request_body == "", "empty body");
+  if h := req.header("host") {
+    assert(h == "localhost", "host header");
+  } else {
+    assert(false, "host header missing");
+  }
+  if h := req.header("x-test") {
+    assert(h == "foo", "x-test header");
+  } else {
+    assert(false, "x-test header missing");
+  }
+  if h := req.header("nonexistent") {
+    assert(false, "nonexistent header should be none");
+  }
+}
+
+test_server_request_parse_post() `test(exclude: "wasm32") {
+  ServerRequest req = _parse_request("POST /api HTTP/1.1\r\nContent-Length: 4", "data")?!;
+  assert(_method_to_string(req.request_method) == "POST", "method POST");
+  assert(req.request_path == "/api", "path");
+  assert(req.query_string == "", "no query");
+  assert(req.request_body == "data", "body");
+}
+
+test_server_response_serialize() `test(exclude: "wasm32") {
+  ServerResponse resp = ServerResponse.ok("hello");
+  string s = _serialize_response(resp);
+  assert(s.contains("HTTP/1.1 200 OK"), "status line");
+  assert(s.contains("Content-Length: 5"), "content length");
+  assert(s.contains("Connection: close"), "connection close");
+  assert(s.ends_with("\r\n\r\nhello"), "body after blank line");
+}
+
+test_server_response_factories() `test(exclude: "wasm32") {
+  ServerResponse ok_resp = ServerResponse.ok("hi");
+  assert(ok_resp.status == 200, "ok status");
+  assert(ok_resp.body == "hi", "ok body");
+
+  ServerResponse nf = ServerResponse.not_found();
+  assert(nf.status == 404, "not_found status");
+  assert(nf.body == "Not Found", "not_found body");
+
+  ServerResponse ie = ServerResponse.internal_error("oops");
+  assert(ie.status == 500, "internal_error status");
+  assert(ie.body == "oops", "internal_error body");
+
+  ServerResponse custom = ServerResponse.with_status(201, "created");
+  assert(custom.status == 201, "custom status");
+  assert(custom.body == "created", "custom body");
+}
+
+test_server_set_header() `test(exclude: "wasm32") {
+  ServerResponse resp = ServerResponse.ok("test");
+  resp.set_header("X-Custom", "value");
+  string s = _serialize_response(resp);
+  assert(s.contains("X-Custom: value"), "custom header in serialized response");
+}
+
+// ── Round-trip tests (network) ──────────────────────────────────────────────
+
+test_server_basic() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status_code == 200, "status 200");
+    assert(resp.body == "hello server", "body");
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  _OkHandler handler = _OkHandler(response_body: "hello server");
+  _handle_one(conn, handler)?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_server_post() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/submit", "request body");
+    Response resp = req.send()?!;
+    assert(resp.status_code == 200, "status 200");
+    assert(resp.body == "request body", "echoed body");
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  _EchoHandler handler = _EchoHandler(prefix: "");
+  _handle_one(conn, handler)?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_server_headers() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Request req = Request.new_get("http://127.0.0.1:" + port.to_string() + "/path");
+    req.set_header("X-Test", "hello");
+    Response resp = req.send()?!;
+    assert(resp.status_code == 200, "status 200");
+    assert(resp.body == "/path", "path echoed");
+    bool found = false;
+    for k, v in resp.response_headers {
+      if k == "x-echo" && v == "hello" {
+        found = true;
+      }
+    }
+    assert(found, "x-echo header");
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  _HeaderEchoHandler handler = _HeaderEchoHandler(echo_header: "x-test");
+  _handle_one(conn, handler)?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_server_error_handling() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status_code == 500, "status 500");
+    assert(resp.body == "handler error", "error message in body");
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  _ErrorHandler handler = _ErrorHandler(error_message: "handler error");
+  _handle_one(conn, handler)?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_server_not_found() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/missing")?!;
+    assert(resp.status_code == 404, "status 404");
+    assert(resp.body == "Not Found", "not found body");
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  _NotFoundHandler handler = _NotFoundHandler(message: "");
+  _handle_one(conn, handler)?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_server_bind_and_port() `test(exclude: "wasm32", timeout: "10s") {
+  Server server = Server.bind("127.0.0.1", 0)?!;
+  assert(server.address == "127.0.0.1", "address");
+  assert(server.port > 0, "port assigned");
+  server.close()?!;
+}
+
+// ── Error path tests ───────────────────────────────────────────────────────
+
+test_parse_request_malformed_no_space() `test(exclude: "wasm32") {
+  ServerRequest req = _parse_request("GETHTTP", "")? e {
+    assert(e.message.contains("malformed"), "malformed error");
+    return;
+  };
+  assert(false, "should have raised");
+}
+
+test_parse_request_malformed_no_version() `test(exclude: "wasm32") {
+  ServerRequest req = _parse_request("GET /path", "")? e {
+    assert(e.message.contains("malformed"), "malformed error");
+    return;
+  };
+  assert(false, "should have raised");
+}
+
+test_read_request_early_close() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    net.TcpStream conn = net.TcpStream.connect("127.0.0.1", port)?!;
+    conn.close()?!;
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  ServerRequest req = _read_request(conn)? e {
+    assert(e.message.contains("connection closed"), "early close error");
+    listener.close()?!;
+    return;
+  };
+  assert(false, "should have raised error");
+}
+
+// ── Large body test (exercises multi-read path in _read_request) ───────────
+
+test_server_large_body() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    string large_body = "X".repeat(8000);
+    Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/big", large_body);
+    Response resp = req.send()?!;
+    assert(resp.status_code == 200, "status 200");
+    assert(resp.body.len == 8000, "echoed large body length");
+  };
+
+  net.TcpStream conn = listener.accept()?!;
+  _EchoHandler handler = _EchoHandler(prefix: "");
+  _handle_one(conn, handler)?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}

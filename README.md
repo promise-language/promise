@@ -124,7 +124,6 @@ Copies the binary to `~/.promise/bin/` and extracts the embedded standard librar
 promise_lang/
 ├── compiler/                    # Go compiler (single binary)
 │   ├── go.mod
-│   ├── Makefile
 │   ├── cmd/promise/             # CLI entry point (build, run, exec, install)
 │   ├── grammar/                 # ANTLR4 lexer/parser grammars
 │   ├── internal/

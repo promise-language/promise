@@ -44,7 +44,7 @@ bin/prereqs                # check build prerequisites
 bin/setup                  # configure git hooks
 ```
 
-The `compiler/Makefile` still exists for ANTLR generation and resource embedding targets used by `bin/build` internally.
+All build steps (ANTLR generation, resource embedding, compilation) are handled by `bin/build` directly — there is no `compiler/Makefile`.
 
 Go tests run from `compiler/`:
 

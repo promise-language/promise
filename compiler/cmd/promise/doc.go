@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/ast/astcache"
 	"djabi.dev/go/promise_lang/internal/module"
 	"djabi.dev/go/promise_lang/internal/sema"
 	"djabi.dev/go/promise_lang/internal/types"
@@ -126,6 +127,61 @@ func printDocUsage(w io.Writer) {
 	fmt.Fprintln(w, "  promise doc -all -o out.md io")
 }
 
+// docModuleFrontend parses all module source files, merges them into a single AST,
+// and runs DeclareAndDefine once. For std, it uses the binary AST cache to skip
+// ANTLR parsing entirely. For other modules, it injects `use std as _` and loads
+// module scopes once. This avoids per-file re-parsing and module scope loading (B0329).
+func docModuleFrontend(modName, modDir string, sourceFiles []string) (*ast.File, *sema.Info) {
+	var merged *ast.File
+
+	// For std, try the binary AST cache first (avoids all ANTLR parsing).
+	var astCacheDir, astCacheKey string
+	if modName == "std" {
+		home, homeErr := module.PromiseHome()
+		if homeErr == nil {
+			astCacheDir = filepath.Join(home, "cache", "astcache")
+			astCacheKey = astcache.Key(module.CompilerHash())
+			if cached, _ := astcache.Load(astCacheDir, astCacheKey); cached != nil {
+				merged = cached
+			}
+		}
+	}
+
+	// If no cache hit, parse all files and merge.
+	astCacheMiss := merged == nil
+	if merged == nil {
+		files := make([]*ast.File, 0, len(sourceFiles))
+		for _, sf := range sourceFiles {
+			files = append(files, parseSourceFile(sf))
+		}
+		merged = mergeModuleFiles(files)
+	}
+
+	// Non-std modules need std imported; std is self-contained.
+	if modName != "std" {
+		merged = injectStdImport(merged)
+	}
+
+	target := sema.HostTargetInfo()
+	var moduleScopes map[string]*types.Scope
+	if len(merged.Uses) > 0 {
+		moduleScopes, _, _, _ = loadModuleScopes(filepath.Join(modDir, "_.pr"), merged, target)
+	}
+
+	info, errs := sema.DeclareAndDefineWithTarget(merged, moduleScopes, target)
+	if len(errs) > 0 {
+		printFileErrors(modDir, errs)
+		os.Exit(1)
+	}
+
+	// Save to AST cache after sema succeeds (matches ml.load behavior).
+	if astCacheMiss && modName == "std" && astCacheDir != "" {
+		astcache.Save(astCacheDir, astCacheKey, merged)
+	}
+
+	return merged, info
+}
+
 // docFrontend runs parse + inject std + DeclareAndDefine (no Check/Verify/Ownership).
 func docFrontend(filename string) (*ast.File, *sema.Info) {
 	file := parseSourceFile(filename)
@@ -208,7 +264,15 @@ func runDocModule(w io.Writer, name string, opts docOpts) {
 	// Module heading
 	fmt.Fprintf(w, "# %s\n", name)
 
-	// Collect declarations from all files
+	// Parse all module files and merge into a single AST, then run sema once.
+	// This avoids re-parsing/re-loading module scopes per file (B0329).
+	merged, info := docModuleFrontend(name, modDir, sourceFiles)
+	fileScope := info.Scopes[merged]
+	if fileScope == nil {
+		return
+	}
+
+	// Collect declarations from the merged file
 	type typeEntry struct {
 		decl  *ast.TypeDecl
 		named *types.Named
@@ -230,46 +294,38 @@ func runDocModule(w io.Writer, name string, opts docOpts) {
 	var allEnums []enumEntry
 	var allFuncs []funcEntry
 
-	for _, sf := range sourceFiles {
-		file, info := docFrontend(sf)
-		fileScope := info.Scopes[file]
-		if fileScope == nil {
-			continue
-		}
-
-		for _, decl := range file.Decls {
-			switch d := decl.(type) {
-			case *ast.TypeDecl:
-				named := lookupNamed(d.Name, fileScope, info)
-				if named == nil {
-					continue
-				}
-				if opts.publicOnly && !named.IsExported() {
-					continue
-				}
-				allTypes = append(allTypes, typeEntry{d, named, info, fileScope})
-			case *ast.EnumDecl:
-				enum := lookupEnum(d.Name, fileScope)
-				if enum == nil {
-					continue
-				}
-				if opts.publicOnly && !enum.IsExported() {
-					continue
-				}
-				allEnums = append(allEnums, enumEntry{d, enum, info})
-			case *ast.FuncDecl:
-				fn := lookupFuncDecl(d, fileScope)
-				if fn == nil {
-					continue
-				}
-				if fn.IsTest() || d.Name == "main" {
-					continue
-				}
-				if opts.publicOnly && !fn.IsExported() {
-					continue
-				}
-				allFuncs = append(allFuncs, funcEntry{d, fn, info})
+	for _, decl := range merged.Decls {
+		switch d := decl.(type) {
+		case *ast.TypeDecl:
+			named := lookupNamed(d.Name, fileScope, info)
+			if named == nil {
+				continue
 			}
+			if opts.publicOnly && !named.IsExported() {
+				continue
+			}
+			allTypes = append(allTypes, typeEntry{d, named, info, fileScope})
+		case *ast.EnumDecl:
+			enum := lookupEnum(d.Name, fileScope)
+			if enum == nil {
+				continue
+			}
+			if opts.publicOnly && !enum.IsExported() {
+				continue
+			}
+			allEnums = append(allEnums, enumEntry{d, enum, info})
+		case *ast.FuncDecl:
+			fn := lookupFuncDecl(d, fileScope)
+			if fn == nil {
+				continue
+			}
+			if fn.IsTest() || d.Name == "main" {
+				continue
+			}
+			if opts.publicOnly && !fn.IsExported() {
+				continue
+			}
+			allFuncs = append(allFuncs, funcEntry{d, fn, info})
 		}
 	}
 

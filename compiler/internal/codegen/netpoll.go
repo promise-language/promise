@@ -330,6 +330,7 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	entry := fn.NewBlock(".entry")
 	loop := fn.NewBlock("loop")
 	processEvents := fn.NewBlock("process_events")
+	noEvents := fn.NewBlock("no_events")
 	eventLoop := fn.NewBlock("event_loop")
 	eventBody := fn.NewBlock("event_body")
 	checkRead := fn.NewBlock("check_read")
@@ -356,7 +357,11 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	isShutdown := loop.NewICmp(enum.IPredNE, shutdownVal, constant.NewInt(irtypes.I8, 0))
 	loop.NewCondBr(isShutdown, exitBlk, processEvents)
 
-	// processEvents: call pal_reactor_poll
+	// processEvents: lock batch lock, then poll (B0335 — atomic poll+process
+	// prevents use-after-free when netpoll_close frees a PollDesc between
+	// pal_reactor_poll returning and the reactor processing events)
+	batchLock := processEvents.NewLoad(irtypes.I8Ptr, c.netpollBatchLock)
+	processEvents.NewCall(c.palMutexLock, batchLock)
 	rfdField := processEvents.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReactorFd)))
 	rfd := processEvents.NewLoad(irtypes.I32, rfdField)
@@ -365,11 +370,15 @@ func (c *Compiler) defineNetpollLoopFunc() {
 		constant.NewInt(irtypes.I32, 10)) // 10ms timeout
 
 	hasEvents := processEvents.NewICmp(enum.IPredSGT, count, constant.NewInt(irtypes.I32, 0))
-	processEvents.NewCondBr(hasEvents, eventLoop, loop)
+	processEvents.NewCondBr(hasEvents, eventLoop, noEvents)
 
-	// eventLoop: lock batch lock, iterate events
-	batchLock := eventLoop.NewLoad(irtypes.I8Ptr, c.netpollBatchLock)
-	eventLoop.NewCall(c.palMutexLock, batchLock)
+	// noEvents: unlock batch lock, yield briefly to prevent starving
+	// netpoll_close waiters (reactor would otherwise re-lock immediately), then loop
+	noEvents.NewCall(c.palMutexUnlock, batchLock)
+	noEvents.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100)) // 100μs
+	noEvents.NewBr(loop)
+
+	// eventLoop: iterate events (batch lock held from processEvents)
 	eventLoop.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
 	eventLoop.NewStore(constant.NewInt(irtypes.I32, 0), wokenAlloca)
 	eventLoop.NewBr(eventBody)

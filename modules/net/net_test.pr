@@ -69,10 +69,10 @@ test_listener_drop_multiple() `test(exclude: "wasm32") {
 }
 
 // ── TcpStream tests ─────────────────────────────────────────────────────────
-// Consolidated into a single test to avoid flaky cross-test reactor allocation
-// contamination (B0334). Server side uses raw blocking sockets; sequential flow.
-test_stream_operations() `test(exclude: "wasm32") {
-  // ── Connect and close ──
+// Server side uses raw blocking sockets; sequential flow — no goroutines
+// needed because kernel buffers handle connect backlog and data.
+
+test_stream_connect_and_close() `test(exclude: "wasm32") {
   int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
   assert(sfd >= 0, "server socket");
   assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
@@ -86,17 +86,18 @@ test_stream_operations() `test(exclude: "wasm32") {
   assert(afd >= 0, "accept");
   _net_socket_close(afd);
   _net_socket_close(sfd);
+}
 
-  // ── Write from client, read on server ──
-  sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
-  assert(sfd >= 0, "server socket 2");
-  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind 2");
-  assert(_net_socket_listen(sfd, 128) == 0, "listen 2");
-  port = _net_socket_getsockname(sfd);
+test_stream_write() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
 
-  client = TcpStream.connect("127.0.0.1", port)?!;
-  afd = _net_socket_accept_addr(sfd);
-  assert(afd >= 0, "accept 2");
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
 
   u8[] data = "Hi".bytes();
   int written = client.write(data)?!;
@@ -111,63 +112,143 @@ test_stream_operations() `test(exclude: "wasm32") {
 
   _net_socket_close(afd);
   _net_socket_close(sfd);
+}
 
-  // ── Read from server, write from server ──
-  sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
-  assert(sfd >= 0, "server socket 3");
-  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind 3");
-  assert(_net_socket_listen(sfd, 128) == 0, "listen 3");
-  port = _net_socket_getsockname(sfd);
+test_stream_read() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
 
-  client = TcpStream.connect("127.0.0.1", port)?!;
-  afd = _net_socket_accept_addr(sfd);
-  assert(afd >= 0, "accept 3");
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
 
-  u8[] sdata = "Ok".bytes();
-  int sent = _net_socket_send(afd, sdata);
+  u8[] data = "Ok".bytes();
+  int sent = _net_socket_send(afd, data);
   assert(sent == 2, "server sent 2 bytes");
   _net_socket_close(afd);
 
-  buf = u8[].filled(0, 64);
-  n = client.read(buf)?!;
+  u8[] buf = u8[].filled(0, 64);
+  int n = client.read(buf)?!;
   assert(n == 2, "client read 2 bytes");
   assert(buf[0] == 79, "byte O");
   assert(buf[1] == 107, "byte k");
 
   client.close()?!;
   _net_socket_close(sfd);
+}
 
-  // ── Shutdown write ──
-  sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
-  assert(sfd >= 0, "server socket 4");
-  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind 4");
-  assert(_net_socket_listen(sfd, 128) == 0, "listen 4");
-  port = _net_socket_getsockname(sfd);
+test_stream_shutdown_write() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
 
-  client = TcpStream.connect("127.0.0.1", port)?!;
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
   client.shutdown(write: true)?!;
 
-  afd = _net_socket_accept_addr(sfd);
-  assert(afd >= 0, "accept 4");
-  buf = u8[].filled(0, 64);
-  n = _net_socket_recv(afd, buf);
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+  u8[] buf = u8[].filled(0, 64);
+  int n = _net_socket_recv(afd, buf);
   assert(n == 0, "read EOF after shutdown");
 
   _net_socket_close(afd);
   client.close()?!;
   _net_socket_close(sfd);
+}
 
-  // ── Drop without close ──
-  sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
-  assert(sfd >= 0, "server socket 5");
-  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind 5");
-  assert(_net_socket_listen(sfd, 128) == 0, "listen 5");
-  port = _net_socket_getsockname(sfd);
+test_stream_shutdown_read() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
 
-  client = TcpStream.connect("127.0.0.1", port)?!;
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  client.shutdown(read: true)?!;
+
+  // After SHUT_RD, client can still write
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  u8[] data = "Hi".bytes();
+  int written = client.write(data)?!;
+  assert(written == 2, "wrote after shutdown read");
+
+  u8[] buf = u8[].filled(0, 64);
+  int n = _net_socket_recv(afd, buf);
+  assert(n == 2, "server received data");
+
+  _net_socket_close(afd);
+  client.close()?!;
+  _net_socket_close(sfd);
+}
+
+test_stream_shutdown_both() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
+
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  client.shutdown(read: true, write: true)?!;
+
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+  u8[] buf = u8[].filled(0, 64);
+  int n = _net_socket_recv(afd, buf);
+  assert(n == 0, "server read EOF after full shutdown");
+
+  _net_socket_close(afd);
+  client.close()?!;
+  _net_socket_close(sfd);
+}
+
+test_listener_accept() `test(exclude: "wasm32") {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  // Connect with raw blocking socket — kernel queues it in the backlog
+  int cfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(cfd >= 0, "client socket");
+  int rc = _net_socket_connect_addr(cfd, "127.0.0.1", port);
+  assert(rc == 0, "connect");
+
+  // Accept should find the pending connection
+  TcpStream stream = listener.accept()?!;
+
+  // Verify data flows through the accepted stream
+  u8[] msg = "ab".bytes();
+  int sent = _net_socket_send(cfd, msg);
+  assert(sent == 2, "raw client sent");
+
+  u8[] buf = u8[].filled(0, 64);
+  int n = stream.read(buf)?!;
+  assert(n == 2, "accepted stream read");
+  assert(buf[0] == 97, "byte a");
+  assert(buf[1] == 98, "byte b");
+
+  stream.close()?!;
+  _net_socket_close(cfd);
+  listener.close()?!;
+}
+
+test_stream_drop_without_close() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
+
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
   // Drop without close — drop() should clean up fd + reactor
 
-  afd = _net_socket_accept_addr(sfd);
+  int afd = _net_socket_accept_addr(sfd);
   if afd >= 0 {
     _net_socket_close(afd);
   }

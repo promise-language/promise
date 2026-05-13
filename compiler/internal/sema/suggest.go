@@ -49,6 +49,9 @@ var catalogFuncs = map[string]string{
 	"execute":      "os",
 }
 
+// knownCatalogModules lists all known catalog module names for import suggestions.
+var knownCatalogModules = []string{"io", "json", "os", "path", "math", "strings", "time", "http"}
+
 // suggestForUndefinedIdent emits hints after an "undefined: X" error.
 // Checks catalog types/funcs first, then tries Levenshtein on scope names.
 func (c *Checker) suggestForUndefinedIdent(pos ast.Pos, name string) {
@@ -61,6 +64,16 @@ func (c *Checker) suggestForUndefinedIdent(pos ast.Pos, name string) {
 	if mod, ok := catalogFuncs[name]; ok {
 		c.hintf(pos, "%s is defined in module %s — add `use %s;` and use `%s.%s()`", name, mod, mod, mod, name)
 		return
+	}
+	// Check if it's a known catalog module name (e.g. io, json, os)
+	for _, mod := range knownCatalogModules {
+		if name == mod {
+			c.hintf(pos, "did you mean to add: `use %s;`?", mod)
+			if suggestion := c.suggestName(name, nil); suggestion != "" {
+				c.hintf(pos, "did you mean %s?", suggestion)
+			}
+			return
+		}
 	}
 	// Try Levenshtein on all names in scope
 	if suggestion := c.suggestName(name, nil); suggestion != "" {
@@ -83,8 +96,7 @@ func (c *Checker) suggestForUndefinedType(pos ast.Pos, name string) {
 // suggestForUndefinedModule emits hints after an "undefined module: X" error.
 func (c *Checker) suggestForUndefinedModule(pos ast.Pos, name string) {
 	// Check if it's a known catalog module name
-	knownModules := []string{"io", "json", "os", "path", "math", "strings", "time", "http"}
-	for _, mod := range knownModules {
+	for _, mod := range knownCatalogModules {
 		if name == mod {
 			c.hintf(pos, "add `use %s;` at the top of the file to import the %s module", mod, mod)
 			return
@@ -92,7 +104,7 @@ func (c *Checker) suggestForUndefinedModule(pos ast.Pos, name string) {
 	}
 	// Try Levenshtein against imported module names and known catalog names
 	candidates := c.collectModuleNames()
-	candidates = append(candidates, knownModules...)
+	candidates = append(candidates, knownCatalogModules...)
 	if suggestion := closestMatch(name, candidates); suggestion != "" {
 		c.hintf(pos, "did you mean %s?", suggestion)
 	}

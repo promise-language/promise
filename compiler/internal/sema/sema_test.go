@@ -12816,6 +12816,69 @@ func TestSuggestCatalogIdentFile(t *testing.T) {
 	expectError(t, errs, "hint: File is defined in module io")
 }
 
+func TestSuggestCatalogModuleIdentIo(t *testing.T) {
+	errs := checkErrs(t, `
+		test() { x := io; }
+	`)
+	expectError(t, errs, "undefined: io")
+	expectError(t, errs, "hint: did you mean to add: `use io;`?")
+}
+
+func TestSuggestCatalogModuleIdentJson(t *testing.T) {
+	errs := checkErrs(t, `
+		test() { x := json; }
+	`)
+	expectError(t, errs, "undefined: json")
+	expectError(t, errs, "hint: did you mean to add: `use json;`?")
+}
+
+func TestSuggestCatalogModuleIdentOs(t *testing.T) {
+	errs := checkErrs(t, `
+		test() { x := os; }
+	`)
+	expectError(t, errs, "undefined: os")
+	expectError(t, errs, "hint: did you mean to add: `use os;`?")
+}
+
+func TestSuggestCatalogFuncIdentReadLine(t *testing.T) {
+	// catalogFuncs branch: referencing a catalog function without importing its module
+	errs := checkErrs(t, `
+		test() { read_line(); }
+	`)
+	expectError(t, errs, "undefined: read_line")
+	expectError(t, errs, "hint: read_line is defined in module io")
+}
+
+func TestSuggestUndefinedModuleKnown(t *testing.T) {
+	// suggestForUndefinedModule: module-qualified type reference with unimported catalog module
+	errs := checkErrs(t, `
+		type Foo { io.File file; }
+	`)
+	expectError(t, errs, "undefined module: io")
+	expectError(t, errs, "hint: add `use io;`")
+}
+
+func TestSuggestUndefinedModuleTypo(t *testing.T) {
+	// suggestForUndefinedModule Levenshtein path: typo in module name suggests closest catalog module
+	errs := checkErrs(t, `
+		type Foo { jso.Value field; }
+	`)
+	expectError(t, errs, "undefined module: jso")
+	expectError(t, errs, "hint: did you mean json?")
+}
+
+func TestSuggestUndefinedModuleTypoWithImport(t *testing.T) {
+	// suggestForUndefinedModule with an imported named module in scope: collectModuleNames
+	// returns the imported module name, which is used as a Levenshtein candidate.
+	fakeScope := makeModuleScope(t, nil)
+	_, errs := checkWithModules(t, `
+		use mymod;
+		type Foo { mymodd.Thing field; }
+	`, map[string]*types.Scope{"mymod": fakeScope})
+	expectError(t, errs, "undefined module: mymodd")
+	expectError(t, errs, "hint: did you mean mymod?")
+}
+
 func TestSuggestBangOnFailableInFailableFunc(t *testing.T) {
 	errs := checkErrs(t, `
 		parse!(string s) int { return 0; }

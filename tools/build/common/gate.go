@@ -110,8 +110,15 @@ func runGateTest(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	// Output flat JSON to stdout (machine-readable).
-	data, err := json.MarshalIndent(gv.Values, "", "  ")
+	// Build per-test entries for the gate output.
+	entries := ParseTestEntries(hostTarget, hostOutput)
+	if wasm {
+		entries = append(entries, ParseTestEntries("wasm32-wasi", wasmOutput)...)
+	}
+
+	// Output GateOutput JSON to stdout (machine-readable).
+	out := &GateOutput{Metrics: gv.Values, Tests: entries, Complete: "promise-tests"}
+	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal gate values: %w", err)
 	}
@@ -140,7 +147,7 @@ func runGateWasmTests(root string, args []string) error {
 	}
 
 	if Which("wasmtime") == "" {
-		return fmt.Errorf("wasmtime not found \u2014 install with: bin/prereqs --wasm")
+		return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
 	}
 
 	if !shared {
@@ -183,8 +190,12 @@ func runGateWasmTests(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	// Output flat JSON to stdout (machine-readable).
-	data, err := json.MarshalIndent(gv.Values, "", "  ")
+	// Build per-test entries for the gate output.
+	wasmEntries := ParseTestEntries("wasm32-wasi", wasmOutput)
+
+	// Output GateOutput JSON to stdout (machine-readable).
+	out := &GateOutput{Metrics: gv.Values, Tests: wasmEntries, Complete: "wasm-tests"}
+	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal gate values: %w", err)
 	}
@@ -243,7 +254,9 @@ func runGateGoTest(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	data, err := json.MarshalIndent(gv.Values, "", "  ")
+	// Output GateOutput JSON to stdout (machine-readable).
+	out := &GateOutput{Metrics: gv.Values, Complete: "go-tests"}
+	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal gate values: %w", err)
 	}
@@ -299,7 +312,9 @@ func runGateStress(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	data, err := json.MarshalIndent(gv.Values, "", "  ")
+	// Output GateOutput JSON to stdout (machine-readable).
+	out := &GateOutput{Metrics: gv.Values}
+	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal gate values: %w", err)
 	}
@@ -373,7 +388,9 @@ func runGateCoverage(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	data, err := json.MarshalIndent(gv.Values, "", "  ")
+	// Output GateOutput JSON to stdout (machine-readable).
+	out := &GateOutput{Metrics: gv.Values}
+	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal gate values: %w", err)
 	}

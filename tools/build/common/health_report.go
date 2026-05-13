@@ -90,6 +90,24 @@ func ReportTestHealth(root, target, output string) {
 	postReport(trackerURL, report)
 }
 
+// ParseTestEntries parses promise test output into GateTestEntry values.
+// target is the platform string (e.g. "linux-amd64", "wasm32-wasi").
+func ParseTestEntries(target, output string) []GateTestEntry {
+	raw := parseTestOutput(output)
+	entries := make([]GateTestEntry, 0, len(raw))
+	for _, r := range raw {
+		entries = append(entries, GateTestEntry{
+			Target:  target,
+			File:    r.File,
+			Test:    r.Test,
+			Outcome: r.Outcome,
+			Elapsed: r.Elapsed,
+			Context: r.Context,
+		})
+	}
+	return entries
+}
+
 // checkGitPreconditions returns (clean, pushed).
 func checkGitPreconditions(root string) (bool, bool) {
 	// Check dirty worktree.

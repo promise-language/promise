@@ -1,6 +1,7 @@
 package common
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -298,5 +299,63 @@ func TestReadGateValues_Stale(t *testing.T) {
 	_, err := ReadGateValues(root, 10*time.Minute)
 	if err == nil {
 		t.Fatal("expected stale error, got nil")
+	}
+}
+
+func TestGateOutputRoundTrip(t *testing.T) {
+	out := &GateOutput{
+		Metrics: map[string]float64{
+			"host_test_count":    3656,
+			"host_test_failures": 0,
+		},
+		Tests: []GateTestEntry{
+			{Target: "linux-amd64", File: "tests/e2e/basics.pr", Outcome: "pass", Elapsed: 0.004},
+			{Target: "linux-amd64", File: "tests/e2e/strings.pr", Test: "test_split", Outcome: "FAIL", Elapsed: 0.005, Context: "panic: assertion failed"},
+		},
+		Complete: "promise-tests",
+	}
+
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got GateOutput
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got.Complete != "promise-tests" {
+		t.Errorf("Complete = %q, want promise-tests", got.Complete)
+	}
+	if got.Metrics["host_test_count"] != 3656 {
+		t.Errorf("metrics[host_test_count] = %v, want 3656", got.Metrics["host_test_count"])
+	}
+	if len(got.Tests) != 2 {
+		t.Fatalf("len(Tests) = %d, want 2", len(got.Tests))
+	}
+	if got.Tests[0].Target != "linux-amd64" || got.Tests[0].Outcome != "pass" {
+		t.Errorf("Tests[0] = %+v", got.Tests[0])
+	}
+	if got.Tests[1].Test != "test_split" || got.Tests[1].Context != "panic: assertion failed" {
+		t.Errorf("Tests[1] = %+v", got.Tests[1])
+	}
+}
+
+func TestGateOutputOmitEmpty(t *testing.T) {
+	// Tests and Complete should be omitted when empty/zero.
+	out := &GateOutput{
+		Metrics: map[string]float64{"stress_iterations": 100},
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(data)
+	if strings.Contains(s, "tests") {
+		t.Errorf("expected 'tests' to be omitted, got: %s", s)
+	}
+	if strings.Contains(s, "complete") {
+		t.Errorf("expected 'complete' to be omitted, got: %s", s)
 	}
 }

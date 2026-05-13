@@ -273,3 +273,152 @@ func TestFindTrackerURLNone(t *testing.T) {
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
+
+func TestParseTestEntries_TargetPropagation(t *testing.T) {
+	output := `pass (0.004s) e2e/basics.pr (3 tests)
+FAIL (0.005s) e2e/strings.pr (1/3 failed)
+  test_split
+    panic: assertion failed
+
+568 passed, 1 failed (117 files, 30.810s)`
+
+	entries := ParseTestEntries("linux-amd64", output)
+
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d: %+v", len(entries), entries)
+	}
+	for _, e := range entries {
+		if e.Target != "linux-amd64" {
+			t.Errorf("Target = %q, want linux-amd64", e.Target)
+		}
+	}
+	if entries[0].File != "e2e/basics.pr" || entries[0].Outcome != "pass" {
+		t.Errorf("entries[0] = %+v", entries[0])
+	}
+	if entries[1].File != "e2e/strings.pr" || entries[1].Test != "test_split" || entries[1].Outcome != "FAIL" {
+		t.Errorf("entries[1] = %+v", entries[1])
+	}
+}
+
+func TestParseTestEntries_WasmTarget(t *testing.T) {
+	output := `pass (1.200s) tests/e2e/hello.pr [wasm32-wasi]
+
+1 passed, 0 failed (1 files, 1.200s)`
+
+	entries := ParseTestEntries("wasm32-wasi", output)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Target != "wasm32-wasi" {
+		t.Errorf("Target = %q, want wasm32-wasi", entries[0].Target)
+	}
+	if entries[0].File != "tests/e2e/hello.pr" {
+		t.Errorf("File = %q, want tests/e2e/hello.pr", entries[0].File)
+	}
+}
+
+func TestParseTestEntries_Empty(t *testing.T) {
+	entries := ParseTestEntries("linux-amd64", "")
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries, got %d", len(entries))
+	}
+}
+
+func TestParseTestEntries_ContextPreserved(t *testing.T) {
+	output := `FAIL (0.003s) test_broken
+  panic: assertion failed: expected 3, got 4
+
+0 passed, 1 failed (0.003s)`
+
+	entries := ParseTestEntries("linux-amd64", output)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Context != "panic: assertion failed: expected 3, got 4" {
+		t.Errorf("Context = %q", entries[0].Context)
+	}
+	if entries[0].Elapsed != 0.003 {
+		t.Errorf("Elapsed = %v, want 0.003", entries[0].Elapsed)
+	}
+}
+
+func TestParseTestEntries_LeakOutcome(t *testing.T) {
+	output := `LEAK (0.003s) tests/std/vector_test.pr (1/4 leaked)
+  test_vector_push
+    leak: 2 allocations not freed
+
+1 passed, 0 failed, 1 leaked (2 files, 0.004s)`
+
+	entries := ParseTestEntries("linux-amd64", output)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.Target != "linux-amd64" {
+		t.Errorf("Target = %q, want linux-amd64", e.Target)
+	}
+	if e.Outcome != "LEAK" {
+		t.Errorf("Outcome = %q, want LEAK", e.Outcome)
+	}
+	if e.File != "tests/std/vector_test.pr" {
+		t.Errorf("File = %q, want tests/std/vector_test.pr", e.File)
+	}
+	if e.Test != "test_vector_push" {
+		t.Errorf("Test = %q, want test_vector_push", e.Test)
+	}
+	if e.Context != "leak: 2 allocations not freed" {
+		t.Errorf("Context = %q", e.Context)
+	}
+}
+
+func TestParseTestEntries_TimeoutOutcome(t *testing.T) {
+	output := `TIMEOUT (0.100s) test_stuck
+  timeout: exceeded 60s limit
+
+0 passed, 0 failed, 0 leaked, 1 timed out (0.100s)`
+
+	entries := ParseTestEntries("linux-amd64", output)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.Outcome != "TIMEOUT" {
+		t.Errorf("Outcome = %q, want TIMEOUT", e.Outcome)
+	}
+	if e.Test != "test_stuck" {
+		t.Errorf("Test = %q, want test_stuck", e.Test)
+	}
+	if e.Context != "timeout: exceeded 60s limit" {
+		t.Errorf("Context = %q", e.Context)
+	}
+}
+
+func TestParseTestEntries_CompilationError(t *testing.T) {
+	output := `FAIL (0.000s) broken.pr (compilation error)
+  broken.pr:5:3: type Foo has no field 'bar'
+
+0 passed, 1 failed (1 files, 0.000s)`
+
+	entries := ParseTestEntries("linux-amd64", output)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.Outcome != "FAIL" {
+		t.Errorf("Outcome = %q, want FAIL", e.Outcome)
+	}
+	if e.File != "broken.pr" {
+		t.Errorf("File = %q, want broken.pr", e.File)
+	}
+	if e.Test != "" {
+		t.Errorf("Test should be empty for compilation error, got %q", e.Test)
+	}
+	if e.Context != "broken.pr:5:3: type Foo has no field 'bar'" {
+		t.Errorf("Context = %q", e.Context)
+	}
+}

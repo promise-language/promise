@@ -64,6 +64,24 @@ type GateValues struct {
 	Values    map[string]float64 `json:"values"`
 }
 
+// GateTestEntry holds the result of a single test run within a gate.
+type GateTestEntry struct {
+	Target  string  `json:"target"`
+	File    string  `json:"file,omitempty"`
+	Test    string  `json:"test,omitempty"`
+	Outcome string  `json:"outcome"`  // "pass", "FAIL", "TIMEOUT", "LEAK"
+	Elapsed float64 `json:"elapsed"`  // seconds
+	Context string  `json:"context,omitempty"`
+}
+
+// GateOutput is the JSON envelope written to stdout by gate subcommands.
+// The tracker reads this to ingest per-test health data.
+type GateOutput struct {
+	Metrics  map[string]float64 `json:"metrics"`
+	Tests    []GateTestEntry    `json:"tests,omitempty"`
+	Complete string             `json:"complete,omitempty"`
+}
+
 const gateValuesFile = "gate-values.json"
 
 // gateValuesPath returns the path to the gate values sidecar file.

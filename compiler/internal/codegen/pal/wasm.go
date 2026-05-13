@@ -369,3 +369,6 @@ func (p *WasmPAL) EmitSocketConnectAddr(module *ir.Module) *ir.Func {
 func (p *WasmPAL) EmitSocketAcceptAddr(module *ir.Module) *ir.Func {
 	return emitStubSocketAcceptAddr(module)
 }
+func (p *WasmPAL) EmitSocketGetLocalPort(module *ir.Module) *ir.Func {
+	return emitStubSocketGetLocalPort(module)
+}

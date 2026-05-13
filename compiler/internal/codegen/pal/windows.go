@@ -3368,3 +3368,56 @@ func (p *WindowsPAL) EmitSocketAcceptAddr(module *ir.Module) *ir.Func {
 	okBlk.NewRet(truncated)
 	return fn
 }
+
+// EmitSocketGetLocalPort defines @pal_socket_get_local_port(i32 fd) → i32.
+// Calls getsockname, extracts sin_port from sockaddr_in at offset 2, ntohs, returns as i32.
+// Returns port in host byte order on success, or -WSAError on failure.
+func (p *WindowsPAL) EmitSocketGetLocalPort(module *ir.Module) *ir.Func {
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	getsocknameFn := getOrDeclareFunc(module, "getsockname", irtypes.I32,
+		ir.NewParam("s", irtypes.I64),
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("namelen", i32PtrType))
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	fn := module.NewFunc("pal_socket_get_local_port", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	sock := entry.NewZExt(fn.Params[0], irtypes.I64)
+
+	// Allocate sockaddr_in (16 bytes) on stack, zero-initialize
+	saddrArr := irtypes.NewArray(16, irtypes.I8)
+	saddr := entry.NewAlloca(saddrArr)
+	saddrPtr := entry.NewBitCast(saddr, irtypes.I8Ptr)
+	entry.NewCall(memsetFn, saddrPtr, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, 16))
+
+	// Allocate namelen = 16
+	nameLen := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 16), nameLen)
+
+	// getsockname(s, &sockaddr, &namelen)
+	ret := entry.NewCall(getsocknameFn, sock, saddrPtr, nameLen)
+	isErr := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegWSAErrorReturnI32(errBlk, p.getOrDeclareWSAGetLastError(module))
+
+	// Extract sin_port at offset 2 (i16 in network byte order)
+	portPtr := okBlk.NewBitCast(
+		okBlk.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 2)),
+		irtypes.NewPointer(irtypes.I16))
+	netPort := okBlk.NewLoad(irtypes.I16, portPtr)
+	// ntohs (same as htons — byte swap)
+	hostPort := emitHtons(okBlk, netPort)
+	// Zero-extend i16 → i32
+	result := okBlk.NewZExt(hostPort, irtypes.I32)
+	okBlk.NewRet(result)
+	return fn
+}

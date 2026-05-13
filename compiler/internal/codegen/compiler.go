@@ -292,9 +292,10 @@ type Compiler struct {
 	palReactorClose  *ir.Func // @pal_reactor_close(i32 rfd) → i32
 
 	// PAL high-level socket address operations (T0071)
-	palSocketBindAddr    *ir.Func // @pal_socket_bind_addr(i32 fd, i8* host, i32 port) → i32
-	palSocketConnectAddr *ir.Func // @pal_socket_connect_addr(i32 fd, i8* host, i32 port) → i32
-	palSocketAcceptAddr  *ir.Func // @pal_socket_accept_addr(i32 listen_fd) → i32
+	palSocketBindAddr     *ir.Func // @pal_socket_bind_addr(i32 fd, i8* host, i32 port) → i32
+	palSocketConnectAddr  *ir.Func // @pal_socket_connect_addr(i32 fd, i8* host, i32 port) → i32
+	palSocketAcceptAddr   *ir.Func // @pal_socket_accept_addr(i32 listen_fd) → i32
+	palSocketGetLocalPort *ir.Func // @pal_socket_get_local_port(i32 fd) → i32
 
 	// Signal pipe globals (NOT TLS — shared across all threads)
 	signalPipeRdFd *ir.Global // @__promise_signal_pipe_rd (i32)

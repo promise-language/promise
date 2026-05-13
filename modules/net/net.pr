@@ -16,6 +16,7 @@ _net_socket_send(int fd, u8[]~data) int `extern("promise_net_socket_send");
 _net_socket_recv(int fd, u8[]~buf) int `extern("promise_net_socket_recv");
 _net_socket_shutdown(int fd, int how) int `extern("promise_net_socket_shutdown");
 _net_socket_get_error(int fd) int `extern("promise_net_socket_get_error");
+_net_socket_getsockname(int fd) int `extern("promise_net_socket_getsockname");
 
 // Reactor integration — netpoll_open/close are regular bridge calls,
 // netpoll_wait_read/write are intercepted at codegen and replaced with
@@ -151,6 +152,10 @@ type TcpListener `public `doc("A TCP listener socket. Binds to an address and ac
     }
     // Unreachable — loop always returns or raises.
     raise NetError(code: 0, message: "unreachable");
+  }
+
+  get local_port int `public `doc("Returns the port number this listener is bound to. Useful after binding to port 0 (dynamic allocation).") {
+    return _net_socket_getsockname(this._fd);
   }
 
   close!(~this) `public `doc("Closes the listener. Raises NetError on failure.") {

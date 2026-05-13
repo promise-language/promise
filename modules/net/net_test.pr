@@ -1,4 +1,37 @@
+// ── Low-level tests ─────────────────────────────────────────────────────────
+test_raw_socket_create_close() `test(exclude: "wasm32") {
+  int fd = _net_socket_create(2, 1, 0);
+  assert(fd >= 0, "socket created");
+  int rc = _net_socket_close(fd);
+  assert(rc >= 0, "socket closed");
+}
+
+test_netpoll_open_close() `test(exclude: "wasm32") {
+  int fd = _net_socket_create(2, 1, 0);
+  assert(fd >= 0, "socket created");
+  int pd = _net_netpoll_open(fd);
+  assert(pd != 0, "netpoll opened");
+  _net_netpoll_close(pd);
+  int rc = _net_socket_close(fd);
+  assert(rc >= 0, "socket closed");
+}
+
+test_netpoll_multiple_open_close() `test(exclude: "wasm32") {
+  int i = 0;
+  while i < 5 {
+    int fd = _net_socket_create(2, 1, 0);
+    assert(fd >= 0, "socket created");
+    int pd = _net_netpoll_open(fd);
+    assert(pd != 0, "netpoll opened");
+    _net_netpoll_close(pd);
+    int rc = _net_socket_close(fd);
+    assert(rc >= 0, "socket closed");
+    i = i + 1;
+  }
+}
+
 // ── TcpListener tests ────────────────────────────────────────────────────────
+
 test_listener_bind_auto_drop() `test(exclude: "wasm32") {
   TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
 }
@@ -21,47 +54,138 @@ test_listener_bind_invalid_address() `test(exclude: "wasm32") {
   assert(false, "bind should have failed for invalid address");
 }
 
-// ── Low-level tests ─────────────────────────────────────────────────────────
-
-test_raw_socket_create_close() `test(exclude: "wasm32") {
-  int fd = _net_socket_create(2, 1, 0);
-  assert(fd >= 0, "socket created");
-  int rc = _net_socket_close(fd);
-  assert(rc >= 0, "socket closed");
+test_listener_local_port() `test(exclude: "wasm32") {
+  TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+  assert(port > 0, "local_port should be positive");
+  assert(port < 65536, "local_port should be valid");
 }
 
-test_netpoll_open_close() `test(exclude: "wasm32") {
-  int fd = _net_socket_create(2, 1, 0);
-  assert(fd >= 0, "socket created");
-  int pd = _net_netpoll_open(fd);
-  assert(pd != 0, "netpoll opened");
-  _net_netpoll_close(pd);
-  int rc = _net_socket_close(fd);
-  assert(rc >= 0, "socket closed");
-}
-
-// Tests that multiple PollDescs can be opened and closed without leaks.
-// Exercises the batch lock protocol (B0324) under sequential close.
-test_netpoll_multiple_open_close() `test(exclude: "wasm32") {
-  int i = 0;
-  while i < 5 {
-    int fd = _net_socket_create(2, 1, 0);
-    assert(fd >= 0, "socket created");
-    int pd = _net_netpoll_open(fd);
-    assert(pd != 0, "netpoll opened");
-    _net_netpoll_close(pd);
-    int rc = _net_socket_close(fd);
-    assert(rc >= 0, "socket closed");
-    i = i + 1;
-  }
-}
-
-// Tests TcpListener drop-without-close frees PollDesc (B0324 batch lock).
 test_listener_drop_multiple() `test(exclude: "wasm32") {
   int i = 0;
   while i < 3 {
     TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
-    // Intentionally dropped without close — drop() should free PD
     i = i + 1;
   }
+}
+
+// ── TcpStream tests ─────────────────────────────────────────────────────────
+// Placed LAST because TcpStream.connect triggers a deferred reactor allocation
+// that leaks 1 alloc into the next test (cross-test contamination, B0334).
+// Server side uses raw blocking sockets. All tests are sequential — no
+// goroutines needed because kernel buffers handle connect backlog and data.
+
+test_stream_connect_and_close() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
+
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  client.close()?!;
+
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_stream_write() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
+
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+
+  // Accept so both sides are established
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  // Write data from client
+  u8[] data = "Hi".bytes();
+  int written = client.write(data)?!;
+  assert(written == 2, "wrote 2 bytes");
+  client.close()?!;
+
+  // Read on server side
+  u8[] buf = u8[].filled(0, 64);
+  int n = _net_socket_recv(afd, buf);
+  assert(n == 2, "server read 2 bytes");
+  assert(buf[0] == 72, "byte H");
+  assert(buf[1] == 105, "byte i");
+
+  _net_socket_close(afd);
+  _net_socket_close(sfd);
+}
+
+test_stream_read() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
+
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+
+  // Accept so both sides are established
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+
+  // Write data from server side, then close server fd
+  u8[] data = "Ok".bytes();
+  int sent = _net_socket_send(afd, data);
+  assert(sent == 2, "server sent 2 bytes");
+  _net_socket_close(afd);
+
+  // Client reads (data already in kernel buffer)
+  u8[] buf = u8[].filled(0, 64);
+  int n = client.read(buf)?!;
+  assert(n == 2, "client read 2 bytes");
+  assert(buf[0] == 79, "byte O");
+  assert(buf[1] == 107, "byte k");
+
+  client.close()?!;
+  _net_socket_close(sfd);
+}
+
+test_stream_shutdown_write() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
+
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  client.shutdown(write: true)?!;
+
+  // Server reads EOF
+  int afd = _net_socket_accept_addr(sfd);
+  assert(afd >= 0, "accept");
+  u8[] buf = u8[].filled(0, 64);
+  int n = _net_socket_recv(afd, buf);
+  assert(n == 0, "read EOF after shutdown");
+
+  _net_socket_close(afd);
+  client.close()?!;
+  _net_socket_close(sfd);
+}
+
+test_stream_drop_without_close() `test(exclude: "wasm32") {
+  int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
+  assert(sfd >= 0, "server socket");
+  assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
+  assert(_net_socket_listen(sfd, 128) == 0, "listen");
+  int port = _net_socket_getsockname(sfd);
+
+  TcpStream client = TcpStream.connect("127.0.0.1", port)?!;
+  // Drop without close — drop() should clean up fd + reactor
+
+  int afd = _net_socket_accept_addr(sfd);
+  if afd >= 0 {
+    _net_socket_close(afd);
+  }
+  _net_socket_close(sfd);
 }

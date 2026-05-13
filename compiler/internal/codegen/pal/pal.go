@@ -212,6 +212,9 @@ type PAL interface {
 	// EmitSocketAcceptAddr defines @pal_socket_accept_addr(i32 listen_fd) → i32 (fd or -errno)
 	// Calls accept with NULL addr (no address extraction needed).
 	EmitSocketAcceptAddr(module *ir.Module) *ir.Func
+	// EmitSocketGetLocalPort defines @pal_socket_get_local_port(i32 fd) → i32 (port or -errno)
+	// Calls getsockname, extracts port from sockaddr_in, returns in host byte order.
+	EmitSocketGetLocalPort(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -1196,6 +1199,15 @@ func emitStubSocketConnectAddr(module *ir.Module) *ir.Func {
 func emitStubSocketAcceptAddr(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_socket_accept_addr", irtypes.I32,
 		ir.NewParam("listen_fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+func emitStubSocketGetLocalPort(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_socket_get_local_port", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))

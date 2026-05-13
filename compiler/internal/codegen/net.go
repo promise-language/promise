@@ -37,6 +37,7 @@ func (c *Compiler) defineNetPALBodies() {
 		"promise_net_socket_recv",
 		"promise_net_socket_shutdown",
 		"promise_net_socket_get_error",
+		"promise_net_socket_getsockname",
 		"promise_net_socket_set_nonblock",
 		"promise_net_netpoll_open",
 		"promise_net_netpoll_close",
@@ -67,6 +68,7 @@ func (c *Compiler) defineNetPALBodies() {
 	c.palSocketShutdown = p.EmitSocketShutdown(c.module)
 	c.palSocketSetNonBlock = p.EmitSocketSetNonBlock(c.module)
 	c.palSocketGetError = p.EmitSocketGetError(c.module)
+	c.palSocketGetLocalPort = p.EmitSocketGetLocalPort(c.module)
 	c.palGetAddrInfo = p.EmitGetAddrInfo(c.module)
 	c.palFreeAddrInfo = p.EmitFreeAddrInfo(c.module)
 
@@ -120,6 +122,9 @@ func (c *Compiler) defineNetPALBodies() {
 	}
 	if fn, ok := irFuncByName["promise_net_socket_get_error"]; ok {
 		c.defineNetSocketGetErrorBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_net_socket_getsockname"]; ok {
+		c.defineNetSocketGetSockNameBody(fn)
 	}
 	if fn, ok := irFuncByName["promise_net_socket_set_nonblock"]; ok {
 		c.defineNetSocketSetNonBlockBody(fn)
@@ -315,6 +320,23 @@ func (c *Compiler) defineNetSocketGetErrorBody(fn *ir.Func) {
 	errno := entry.NewCall(c.palSocketGetError, fdI32)
 	errnoI64 := entry.NewSExt(errno, irtypes.I64)
 	c.storeIntResult(entry, sret, errnoI64)
+	entry.NewRet(nil)
+}
+
+// defineNetSocketGetSockNameBody: void @promise_net_socket_getsockname(i8* sret, i8* fd)
+// Calls pal_socket_get_local_port(fd) → i32 (port or -errno), returns as Promise int.
+func (c *Compiler) defineNetSocketGetSockNameBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	fdRaw := c.extractRawInt(entry, fn.Params[1])
+	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
+
+	c.emitEnterSyscall(entry)
+	port := entry.NewCall(c.palSocketGetLocalPort, fdI32)
+	c.emitExitSyscall(entry)
+	portI64 := entry.NewSExt(port, irtypes.I64)
+	c.storeIntResult(entry, sret, portI64)
 	entry.NewRet(nil)
 }
 

@@ -2471,6 +2471,56 @@ func (p *PosixPAL) EmitSocketAcceptAddr(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitSocketGetLocalPort defines @pal_socket_get_local_port(i32 fd) → i32.
+// Calls getsockname, extracts sin_port from sockaddr_in at offset 2, ntohs, returns as i32.
+// Returns port in host byte order on success, or -errno on failure.
+func (p *PosixPAL) EmitSocketGetLocalPort(module *ir.Module) *ir.Func {
+	getsocknameFn := getOrDeclareFunc(module, "getsockname", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("addr", irtypes.I8Ptr),
+		ir.NewParam("addrlen", irtypes.NewPointer(irtypes.I32)))
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	fn := module.NewFunc("pal_socket_get_local_port", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Allocate sockaddr_in (16 bytes) on stack, zero-initialize
+	saddrArr := irtypes.NewArray(16, irtypes.I8)
+	saddr := entry.NewAlloca(saddrArr)
+	saddrPtr := entry.NewBitCast(saddr, irtypes.I8Ptr)
+	entry.NewCall(memsetFn, saddrPtr, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, 16))
+
+	// Allocate addrlen = 16
+	addrLen := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 16), addrLen)
+
+	// getsockname(fd, &sockaddr, &addrlen)
+	ret := entry.NewCall(getsocknameFn, fn.Params[0], saddrPtr, addrLen)
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+
+	// Extract sin_port at offset 2 (i16 in network byte order)
+	portPtr := okBlk.NewBitCast(
+		okBlk.NewGetElementPtr(irtypes.I8, saddrPtr, constant.NewInt(irtypes.I64, 2)),
+		irtypes.NewPointer(irtypes.I16))
+	netPort := okBlk.NewLoad(irtypes.I16, portPtr)
+	// ntohs (same as htons — byte swap)
+	hostPort := emitHtons(okBlk, netPort)
+	// Zero-extend i16 → i32
+	result := okBlk.NewZExt(hostPort, irtypes.I32)
+	okBlk.NewRet(result)
+	return fn
+}
+
 // emitStoreSockaddrFamily stores AF_INET (2) into the sin_family field of a sockaddr_in.
 // macOS: sin_len=16 at offset 0 (i8), sin_family at offset 1 (i8).
 // Linux: sin_family at offset 0 (i16).

@@ -75,7 +75,10 @@
       "mcp__tracker__test_health_flaky",
       "mcp__tracker__test_health_history",
       "mcp__tracker__test_health_report",
-      "mcp__tracker__test_health_summary"
+      "mcp__tracker__test_health_summary",
+      "mcp__tracker__gate_list",
+      "mcp__tracker__gate_results",
+      "mcp__tracker__gate_run"
     ],
     "deny": [
       "Read(.tracker/**)",

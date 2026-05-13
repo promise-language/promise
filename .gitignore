@@ -70,3 +70,6 @@ bin/precommit.exe~
 bin/commitgate
 bin/commitgate.exe
 bin/commitgate.exe~
+bin/gate
+bin/gate.exe
+bin/gate.exe~

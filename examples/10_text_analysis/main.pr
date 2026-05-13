@@ -17,7 +17,7 @@ clean_word!(string raw) string {
   Builder b = Builder();
   for c in raw.to_lower().chars() {
     if is_alpha(c) {
-      b.write_string("{c}")?^;
+      b.write_string("{c}");
     }
   }
   return b.to_string();

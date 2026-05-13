@@ -2875,16 +2875,18 @@ func (p *PosixPAL) emitKqueuePoll(module *ir.Module, fn *ir.Func, entry *ir.Bloc
 		ir.NewParam("nevents", irtypes.I32),
 		ir.NewParam("timeout", irtypes.I8Ptr))
 
-	palAlloc := lookupFunc(module, "pal_alloc")
-
 	// struct timespec { i64 tv_sec; i64 tv_nsec; }
 	timespecType := irtypes.NewStruct(irtypes.I64, irtypes.I64)
 
-	// Allocate kevent array on heap: max_events * sizeof(kevent)
+	// Stack-allocate kevent array: max_events * sizeof(kevent).
+	// Uses alloca instead of palAlloc so the buffer is not tracked by the
+	// alloc counter — avoids false leak reports when the reactor thread's
+	// poll overlaps a test's leak-detection window (B0326).
 	keventSize := constant.NewInt(irtypes.I64, 32) // sizeof(kevent) = 32
 	maxI64 := entry.NewZExt(fn.Params[2], irtypes.I64)
 	bufSize := entry.NewMul(maxI64, keventSize)
-	rawBuf := entry.NewCall(palAlloc, bufSize)
+	rawBuf := entry.NewAlloca(irtypes.I8)
+	rawBuf.NElems = bufSize
 	keventBuf := entry.NewBitCast(rawBuf, irtypes.NewPointer(keventType))
 
 	// Build timespec from timeout_ms: sec = ms/1000, nsec = (ms%1000)*1000000
@@ -2910,9 +2912,7 @@ func (p *PosixPAL) emitKqueuePoll(module *ir.Module, fn *ir.Func, entry *ir.Bloc
 	convertBlk := fn.NewBlock(".convert")
 	entry.NewCondBr(isErr, errBlk, convertBlk)
 
-	// Error path: free kevent buffer, return -errno
-	palFree := lookupFunc(module, "pal_free")
-	errBlk.NewCall(palFree, rawBuf)
+	// Error path: return -errno (kevent buffer is stack-allocated, no free needed)
 	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
 
 	// Convert kevent results to PollEvent format
@@ -2966,8 +2966,7 @@ func (p *PosixPAL) emitKqueuePoll(module *ir.Module, fn *ir.Func, entry *ir.Bloc
 	i.Incs = append(i.Incs, ir.NewIncoming(iNext, loopBody))
 	loopBody.NewBr(loopCond)
 
-	// Free kevent buffer, return count
-	loopEnd.NewCall(palFree, rawBuf)
+	// Return count (kevent buffer is stack-allocated, no free needed)
 	loopEnd.NewRet(count)
 }
 
@@ -2979,13 +2978,13 @@ func (p *PosixPAL) emitEpollPoll(module *ir.Module, fn *ir.Func, entry *ir.Block
 		ir.NewParam("maxevents", irtypes.I32),
 		ir.NewParam("timeout", irtypes.I32))
 
-	palAlloc := lookupFunc(module, "pal_alloc")
-
-	// Allocate epoll_event array: max_events * 12 bytes (packed struct)
+	// Stack-allocate epoll_event array: max_events * 12 bytes (packed struct).
+	// Uses alloca instead of palAlloc — same rationale as kqueue path (B0326).
 	evSize := constant.NewInt(irtypes.I64, 12) // sizeof(struct epoll_event) = 12 (packed)
 	maxI64 := entry.NewZExt(fn.Params[2], irtypes.I64)
 	bufSize := entry.NewMul(maxI64, evSize)
-	rawBuf := entry.NewCall(palAlloc, bufSize)
+	rawBuf := entry.NewAlloca(irtypes.I8)
+	rawBuf.NElems = bufSize
 	epollBuf := entry.NewBitCast(rawBuf, irtypes.NewPointer(epollEventType))
 
 	// epoll_wait(rfd, epollBuf, max_events, timeout_ms)
@@ -2996,8 +2995,6 @@ func (p *PosixPAL) emitEpollPoll(module *ir.Module, fn *ir.Func, entry *ir.Block
 	convertBlk := fn.NewBlock(".convert")
 	entry.NewCondBr(isErr, errBlk, convertBlk)
 
-	palFree := lookupFunc(module, "pal_free")
-	errBlk.NewCall(palFree, rawBuf)
 	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
 
 	// Convert epoll_event to PollEvent
@@ -3050,7 +3047,6 @@ func (p *PosixPAL) emitEpollPoll(module *ir.Module, fn *ir.Func, entry *ir.Block
 	i.Incs = append(i.Incs, ir.NewIncoming(iNext, loopBody))
 	loopBody.NewBr(loopCond)
 
-	loopEnd.NewCall(palFree, rawBuf)
 	loopEnd.NewRet(count)
 }
 

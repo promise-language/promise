@@ -3685,6 +3685,12 @@ func TestReactorPollPosix(t *testing.T) {
 			}
 			assertContains(t, out, "define i32 @pal_reactor_poll(i32 %rfd, i8* %events_buf, i32 %max_events, i32 %timeout_ms)", "definition")
 			assertContains(t, out, tc.syscall, "platform-specific poll syscall")
+			// B0326: verify syscall buffer is stack-allocated (alloca), not heap-allocated (pal_alloc).
+			// Heap allocation would be tracked by the alloc counter and race with per-test leak detection.
+			assertContains(t, out, "alloca i8,", "syscall buffer uses stack alloca (B0326)")
+			if strings.Contains(out, "call noalias i8* @pal_alloc(") {
+				t.Error("B0326: pal_reactor_poll must not heap-allocate syscall buffer — use alloca instead")
+			}
 		})
 	}
 }

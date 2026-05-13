@@ -852,12 +852,12 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 
 	// Initialize IO reactor if the net module is imported (T0071).
 	// Must be after sched_init and before alloc count reset.
-	// The reactor thread allocates an event buffer and sigaltstack on startup —
-	// sleep briefly to let those allocations complete before the reset.
+	// Event buffer is pre-allocated in netpoll_init and passed to the reactor
+	// thread, so no sleep needed (B0326). The reactor thread does not call
+	// pal_stack_overflow_thread_init (unlike scheduler worker threads).
 	if c.needsNetpoll {
 		if initFn, ok := c.funcs["promise_netpoll_init"]; ok {
 			entry.NewCall(initFn)
-			entry.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 1000)) // 1ms for reactor thread init
 		}
 	}
 

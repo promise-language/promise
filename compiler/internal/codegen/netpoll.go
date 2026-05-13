@@ -129,10 +129,16 @@ func (c *Compiler) defineNetpollInitFunc() {
 	batchLock := okBlk.NewCall(c.palMutexInit)
 	okBlk.NewStore(batchLock, c.netpollBatchLock)
 
-	// Start poller thread
+	// Pre-allocate event buffer on the main thread so the allocation is
+	// counted before the alloc-count reset — avoids a race where the reactor
+	// thread's palAlloc lands inside a test's leak-detection window (B0326).
+	eventBufSize := constant.NewInt(irtypes.I64, int64(maxPollEvents*16)) // 16 bytes per PollEvent
+	eventBuf := okBlk.NewCall(c.palAlloc, eventBufSize)
+
+	// Start poller thread, passing the pre-allocated event buffer as arg
 	loopFn := c.funcs["promise_netpoll_loop"]
 	loopFnPtr := okBlk.NewBitCast(loopFn, irtypes.I8Ptr)
-	handle := okBlk.NewCall(c.palThreadCreate, loopFnPtr, constant.NewNull(irtypes.I8Ptr))
+	handle := okBlk.NewCall(c.palThreadCreate, loopFnPtr, eventBuf)
 
 	// Store thread handle
 	thField := okBlk.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -334,9 +340,8 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	eventDone := fn.NewBlock("event_done")
 	exitBlk := fn.NewBlock("exit")
 
-	// Heap-allocate event buffer (lives for the duration of the thread)
-	eventBufSize := constant.NewInt(irtypes.I64, int64(maxPollEvents*16)) // 16 bytes per PollEvent
-	eventBuf := entry.NewCall(c.palAlloc, eventBufSize)
+	// Use pre-allocated event buffer passed via arg (B0326)
+	eventBuf := argParam
 	iAlloca := entry.NewAlloca(irtypes.I32)
 	// Track whether any goroutines were woken during event processing.
 	// Prevents spinning when WSAPoll returns spurious events (e.g., POLLWRNORM

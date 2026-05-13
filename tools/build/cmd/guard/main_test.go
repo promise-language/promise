@@ -228,6 +228,18 @@ func TestCheckStaleAllowsMake(t *testing.T) {
 		t.Errorf("expected './make --force' to be allowed when stale, got: %s", reason)
 	}
 
+	makeCmdInput := hookInput{ToolName: "Bash"}
+	makeCmdInput.ToolInput.Command = `.\make.cmd`
+	if reason := checkStale(makeCmdInput); reason != "" {
+		t.Errorf(`expected .\\make.cmd to be allowed when stale, got: %s`, reason)
+	}
+
+	makeCmdArgsInput := hookInput{ToolName: "Bash"}
+	makeCmdArgsInput.ToolInput.Command = `.\make.cmd --force`
+	if reason := checkStale(makeCmdArgsInput); reason != "" {
+		t.Errorf(`expected '.\\make.cmd --force' to be allowed when stale, got: %s`, reason)
+	}
+
 	otherInput := hookInput{ToolName: "Bash"}
 	otherInput.ToolInput.Command = "git status"
 	if reason := checkStale(otherInput); reason == "" {

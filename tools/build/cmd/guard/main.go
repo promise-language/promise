@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -133,16 +134,21 @@ func checkStale(input hookInput) string {
 		return ""
 	}
 
-	// Stale — allow ./make and ./make.exe through so the agent can rebuild.
+	// Stale — allow ./make, ./make.exe, and .\make.cmd through so the agent can rebuild.
 	if detectTool(input) == "bash" {
 		cmd := strings.TrimSpace(input.ToolInput.Command)
-		if cmd == "./make" || cmd == "./make.exe" ||
-			strings.HasPrefix(cmd, "./make ") || strings.HasPrefix(cmd, "./make.exe ") {
+		if cmd == "./make" || cmd == "./make.exe" || cmd == ".\\make.cmd" ||
+			strings.HasPrefix(cmd, "./make ") || strings.HasPrefix(cmd, "./make.exe ") ||
+			strings.HasPrefix(cmd, ".\\make.cmd ") {
 			return ""
 		}
 	}
 
-	return "guard binary is stale — run ./make to rebuild tools before continuing"
+	makeCmd := "./make"
+	if runtime.GOOS == "windows" {
+		makeCmd = ".\\make.cmd"
+	}
+	return "guard binary is stale — run " + makeCmd + " to rebuild tools before continuing"
 }
 
 // detectTool determines the tool type from the input fields.

@@ -1,5 +1,14 @@
 {
   "darwin-arm64": {
+    "go_coverage_pct": {
+      "direction": "up"
+    },
+    "go_test_count": {
+      "direction": "up"
+    },
+    "go_test_failures": {
+      "direction": "exact"
+    },
     "host_leak_count": {
       "value": 0,
       "direction": "down",
@@ -14,6 +23,12 @@
       "value": 0,
       "direction": "exact",
       "updated": "2026-04-06"
+    },
+    "promise_coverage_pct": {
+      "direction": "up"
+    },
+    "stress_flaky_count": {
+      "direction": "down"
     },
     "wasm_leak_count": {
       "value": 0,
@@ -32,6 +47,15 @@
     }
   },
   "linux-amd64": {
+    "go_coverage_pct": {
+      "direction": "up"
+    },
+    "go_test_count": {
+      "direction": "up"
+    },
+    "go_test_failures": {
+      "direction": "exact"
+    },
     "host_leak_count": {
       "value": 0,
       "direction": "down",
@@ -46,6 +70,12 @@
       "value": 0,
       "direction": "exact",
       "updated": "2026-04-06"
+    },
+    "promise_coverage_pct": {
+      "direction": "up"
+    },
+    "stress_flaky_count": {
+      "direction": "down"
     },
     "wasm_leak_count": {
       "value": 0,

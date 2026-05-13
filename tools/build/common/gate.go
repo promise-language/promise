@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,13 +17,19 @@ import (
 // gate values to stdout; progress messages go to stderr.
 func RunGate(root string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test   run tests and output JSON gate values")
+		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test       run Promise tests and output JSON gate values\n  go-test    run Go tests and output JSON gate values\n  stress     run stress tests and output JSON gate values\n  coverage   run coverage analysis and output JSON gate values")
 	}
 	switch args[0] {
 	case "test":
 		return runGateTest(root, args[1:])
+	case "go-test":
+		return runGateGoTest(root, args[1:])
+	case "stress":
+		return runGateStress(root, args[1:])
+	case "coverage":
+		return runGateCoverage(root, args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q\nSubcommands: test", args[0])
+		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, go-test, stress, coverage", args[0])
 	}
 }
 
@@ -113,4 +122,232 @@ func runGateTest(root string, args []string) error {
 		return fmt.Errorf("promise tests (wasm32-wasi) failed")
 	}
 	return nil
+}
+
+// runGateGoTest runs Go unit tests and writes structured JSON gate values to stdout.
+func runGateGoTest(root string, args []string) error {
+	shared := slices.Contains(args, "--shared")
+
+	for _, arg := range args {
+		switch arg {
+		case "--shared", "--local":
+		default:
+			return fmt.Errorf("usage: bin/gate go-test [--shared]")
+		}
+	}
+
+	if !shared {
+		if err := SetupLocalCache(root); err != nil {
+			return fmt.Errorf("setup local cache: %w", err)
+		}
+	}
+
+	// Build compiler first (stdout→stderr).
+	savedStdout := os.Stdout
+	os.Stdout = os.Stderr
+	buildErr := RunBuild(root, nil)
+	os.Stdout = savedStdout
+	if buildErr != nil {
+		return fmt.Errorf("build: %w", buildErr)
+	}
+
+	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
+	compilerDir := filepath.Join(root, "compiler")
+
+	fmt.Fprintf(os.Stderr, "Running go tests...\n")
+	output, testErr := RunTeeStderr(compilerDir, "go", "test", "-v", "-count=1", "./...")
+
+	passed, failed := ParseGoTestOutput(output)
+
+	gv := &GateValues{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Platform:  hostTarget,
+		Values:    make(map[string]float64),
+	}
+	gv.Values["go_test_count"] = float64(passed)
+	gv.Values["go_test_failures"] = float64(failed)
+
+	if err := WriteGateValues(root, gv); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
+	}
+
+	data, err := json.MarshalIndent(gv.Values, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal gate values: %w", err)
+	}
+	fmt.Println(string(data))
+
+	if testErr != nil {
+		return fmt.Errorf("go tests failed")
+	}
+	return nil
+}
+
+// runGateStress runs stress tests and writes structured JSON gate values to stdout.
+func runGateStress(root string, args []string) error {
+	iterations := "100"
+	for _, arg := range args {
+		if _, err := strconv.Atoi(arg); err == nil {
+			iterations = arg
+		} else {
+			return fmt.Errorf("usage: bin/gate stress [iterations]")
+		}
+	}
+
+	if err := SetupLocalCache(root); err != nil {
+		return fmt.Errorf("setup local cache: %w", err)
+	}
+
+	// Build compiler first (stdout→stderr).
+	savedStdout := os.Stdout
+	os.Stdout = os.Stderr
+	buildErr := RunBuild(root, nil)
+	os.Stdout = savedStdout
+	if buildErr != nil {
+		return fmt.Errorf("build: %w", buildErr)
+	}
+
+	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
+	promiseBin := filepath.Join(root, "bin", BinaryName())
+
+	fmt.Fprintf(os.Stderr, "Running stress tests (%s iterations)...\n", iterations)
+	output, testErr := RunTeeStderr(root, promiseBin, "test", "-timeout", "15s", "-stress", iterations, "tests/...", "modules/...")
+
+	iters, flakyCount := ParseStressOutput(output)
+
+	gv := &GateValues{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Platform:  hostTarget,
+		Values:    make(map[string]float64),
+	}
+	gv.Values["stress_iterations"] = float64(iters)
+	gv.Values["stress_flaky_count"] = float64(flakyCount)
+
+	if err := WriteGateValues(root, gv); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
+	}
+
+	data, err := json.MarshalIndent(gv.Values, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal gate values: %w", err)
+	}
+	fmt.Println(string(data))
+
+	if testErr != nil {
+		return fmt.Errorf("stress tests failed")
+	}
+	return nil
+}
+
+// runGateCoverage runs Go and Promise coverage analysis and writes structured JSON gate values.
+func runGateCoverage(root string, args []string) error {
+	shared := slices.Contains(args, "--shared")
+
+	for _, arg := range args {
+		switch arg {
+		case "--shared", "--local":
+		default:
+			return fmt.Errorf("usage: bin/gate coverage [--shared]")
+		}
+	}
+
+	if !shared {
+		if err := SetupLocalCache(root); err != nil {
+			return fmt.Errorf("setup local cache: %w", err)
+		}
+	}
+
+	// Build compiler first (stdout→stderr).
+	savedStdout := os.Stdout
+	os.Stdout = os.Stderr
+	buildErr := RunBuild(root, nil)
+	os.Stdout = savedStdout
+	if buildErr != nil {
+		return fmt.Errorf("build: %w", buildErr)
+	}
+
+	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
+	compilerDir := filepath.Join(root, "compiler")
+	promiseBin := filepath.Join(root, "bin", BinaryName())
+
+	// Go coverage
+	fmt.Fprintf(os.Stderr, "Running Go coverage...\n")
+	covFile := filepath.Join(os.TempDir(), "promise_gate_cov.out")
+	defer os.Remove(covFile)
+
+	var goCovPct float64
+	_, goTestErr := RunTeeStderr(compilerDir, "go", "test", "-coverprofile="+covFile, "-count=1", "./...")
+	if goTestErr == nil && Exists(covFile) {
+		coverOutput, coverErr := RunOutputIn(compilerDir, "go", "tool", "cover", "-func="+covFile)
+		if coverErr == nil {
+			goCovPct = ParseCoverageTotal(coverOutput)
+		}
+	}
+
+	// Promise coverage
+	fmt.Fprintf(os.Stderr, "Running Promise coverage...\n")
+	promiseOutput, _ := RunTeeStderr(root, promiseBin, "test", "-coverage", "-timeout", "30", "tests/...", "modules/...")
+	promiseCovPct := ParseCoverageTotal(promiseOutput)
+
+	gv := &GateValues{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Platform:  hostTarget,
+		Values:    make(map[string]float64),
+	}
+	gv.Values["go_coverage_pct"] = goCovPct
+	gv.Values["promise_coverage_pct"] = promiseCovPct
+
+	if err := WriteGateValues(root, gv); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
+	}
+
+	data, err := json.MarshalIndent(gv.Values, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal gate values: %w", err)
+	}
+	fmt.Println(string(data))
+
+	return nil
+}
+
+// --- Parser helpers ---
+
+var goTestPassRe = regexp.MustCompile(`^--- PASS:`)
+var goTestFailRe = regexp.MustCompile(`^--- FAIL:`)
+
+// ParseGoTestOutput counts passed and failed tests from `go test -v` output.
+func ParseGoTestOutput(output string) (passed, failed int) {
+	for _, line := range strings.Split(output, "\n") {
+		if goTestPassRe.MatchString(line) {
+			passed++
+		} else if goTestFailRe.MatchString(line) {
+			failed++
+		}
+	}
+	return
+}
+
+var stressIterRe = regexp.MustCompile(`(\d+) iterations over`)
+var stressFlakyRe = regexp.MustCompile(`FLAKY \((\d+) tests?\):`)
+
+// ParseStressOutput extracts iteration count and flaky test count from stress output.
+func ParseStressOutput(output string) (iterations, flakyCount int) {
+	if m := stressIterRe.FindStringSubmatch(output); m != nil {
+		iterations, _ = strconv.Atoi(m[1])
+	}
+	if m := stressFlakyRe.FindStringSubmatch(output); m != nil {
+		flakyCount, _ = strconv.Atoi(m[1])
+	}
+	return
+}
+
+var coverageTotalRe = regexp.MustCompile(`total:.*?(\d+\.\d+)%`)
+
+// ParseCoverageTotal extracts the total coverage percentage from Go or Promise coverage output.
+func ParseCoverageTotal(output string) float64 {
+	if m := coverageTotalRe.FindStringSubmatch(output); m != nil {
+		pct, _ := strconv.ParseFloat(m[1], 64)
+		return pct
+	}
+	return 0
 }

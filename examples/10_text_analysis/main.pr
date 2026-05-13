@@ -1,0 +1,114 @@
+// Text analysis tool.
+//
+// Reads a hardcoded passage, counts word frequencies, and reports
+// statistics: total words, unique words, average word length, and
+// the top most-frequent words.
+//
+// Run:   promise run examples/10_text_analysis
+// Build: promise build examples/10_text_analysis
+// Returns true if c is a lowercase ASCII letter.
+is_alpha(char c) bool {
+  return c >= 'a' && c <= 'z';
+}
+
+// Strips non-alphabetic characters and returns the lowercase word.
+// "fox," -> "fox", "don't" -> "dont", "" -> ""
+clean_word!(string raw) string {
+  Builder b = Builder();
+  for c in raw.to_lower().chars() {
+    if is_alpha(c) {
+      b.write_string("{c}")?^;
+    }
+  }
+  return b.to_string();
+}
+
+main!() {
+  // A short passage from Sherlock Holmes (public domain).
+  string text = "It is a capital mistake to theorize before one has data. " + "Insensibly one begins to twist facts to suit theories, " + "instead of theories to suit facts. Data is the foundation " + "of all good reasoning. Without data you are forced to make " + "guesses, and guesses lead to errors. The world is full of " + "obvious things which nobody by any chance ever observes.";
+
+  // Normalize whitespace: replace newlines with spaces, then split.
+  string[] raw = text.replace("\n", " ").split(" ");
+
+  // Clean each token and keep non-empty words.
+  string[] words = [];
+  for token in raw {
+    string w = clean_word(token);
+    if w.len > 0 {
+      words.push(w);
+    }
+  }
+
+  // Save word count before the for-in loop consumes the vector.
+  int word_count = words.len;
+
+  // Single pass: count frequencies and accumulate total chars.
+  int total_chars = 0;
+  map[string, int] freq = map[string, int]();
+  for word in words {
+    total_chars += word.len;
+    int prev = freq.get_or(word.clone(), 0);
+    freq[word] = prev + 1;
+  }
+
+  // Print summary statistics.
+  print_line("=== Text Analysis ===");
+  print_line("Total words  : {word_count}");
+  print_line("Unique words : {freq.len}");
+  int avg_len = 0;
+  if word_count > 0 {
+    avg_len = total_chars / word_count;
+  }
+  print_line("Avg word len : {avg_len} chars");
+
+  // Collect top-5 words via a single pass over freq.
+  // We maintain two parallel arrays (word, count) of at most 5 entries,
+  // replacing the minimum whenever we see a higher-count word.
+  string[] top_words = [];
+  int[] top_counts = [];
+  for k, v in freq {
+    if top_words.len < 5 {
+      top_words.push(k);
+      top_counts.push(v);
+    } else {
+      // Find the slot with the lowest count.
+      int min_idx = 0;
+      int i = 1;
+      while i < 5 {
+        if top_counts[i] < top_counts[min_idx] {
+          min_idx = i;
+        }
+        i += 1;
+      }
+      // Replace if the current word is more frequent.
+      if v > top_counts[min_idx] {
+        top_words[min_idx] = k;
+        top_counts[min_idx] = v;
+      }
+    }
+  }
+
+  // Print top words in descending order: repeatedly select the max.
+  int n = top_words.len;
+  print_line("");
+  print_line("Top {n} words by frequency:");
+  int rank = 1;
+  while rank <= n {
+    int best_idx = 0;
+    int best_cnt = top_counts[0];
+    int i = 1;
+    while i < n {
+      if top_counts[i] > best_cnt {
+        best_cnt = top_counts[i];
+        best_idx = i;
+      }
+      i += 1;
+    }
+    if best_cnt <= 0 {
+      break;
+    }
+    print_line("  {rank}. \"{top_words[best_idx]}\" — {top_counts[best_idx]}x");
+    top_counts[best_idx] = 0;
+    rank += 1;
+  }
+}

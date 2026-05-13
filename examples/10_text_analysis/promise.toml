@@ -1,0 +1,3 @@
+[module]
+name = "text_analysis"
+main = "main.pr"

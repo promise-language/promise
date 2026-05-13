@@ -8,14 +8,14 @@ import (
 func TestParseCatalogEmpty(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 `)
 	cat, err := ParseCatalog(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cat.Epoch != "2026.3" {
-		t.Errorf("expected epoch 2026.3, got %s", cat.Epoch)
+	if cat.Epoch != "2026.0" {
+		t.Errorf("expected epoch 2026.0, got %s", cat.Epoch)
 	}
 	if len(cat.Modules) != 0 {
 		t.Errorf("expected 0 modules, got %d", len(cat.Modules))
@@ -25,7 +25,7 @@ epoch = "2026.3"
 func TestParseCatalogBasic(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.json]
 url = "https://github.com/promise-lang/json"
@@ -36,8 +36,8 @@ description = "JSON parsing and serialization"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cat.Epoch != "2026.3" {
-		t.Errorf("expected epoch 2026.3, got %s", cat.Epoch)
+	if cat.Epoch != "2026.0" {
+		t.Errorf("expected epoch 2026.0, got %s", cat.Epoch)
 	}
 	if len(cat.Modules) != 1 {
 		t.Fatalf("expected 1 module, got %d", len(cat.Modules))
@@ -63,7 +63,7 @@ description = "JSON parsing and serialization"
 func TestParseCatalogMultiple(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.json]
 url = "https://github.com/promise-lang/json"
@@ -98,7 +98,7 @@ commit = "7c8d9e0"
 func TestParseCatalogCommitWithoutURL(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.json]
 commit = "a1b2c3d"
@@ -115,7 +115,7 @@ commit = "a1b2c3d"
 func TestParseCatalogURLWithoutCommit(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.json]
 url = "https://github.com/promise-lang/json"
@@ -132,7 +132,7 @@ url = "https://github.com/promise-lang/json"
 func TestParseCatalogEmbedded(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.io]
 description = "Console and file I/O"
@@ -162,7 +162,7 @@ description = "Numeric functions and constants"
 func TestParseCatalogMixed(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.io]
 description = "Console and file I/O"
@@ -201,7 +201,7 @@ func TestCatalogEntryIsEmbedded(t *testing.T) {
 func TestCatalogLookup(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.json]
 url = "https://github.com/promise-lang/json"
@@ -237,7 +237,7 @@ func TestParseCatalogComments(t *testing.T) {
 	data := []byte(`
 # This is a comment
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 # JSON module
 [modules.json]
@@ -257,7 +257,7 @@ commit = "a1b2c3d"
 func TestParseCatalogUnknownKeys(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 future_key = "ignored"
 
 [modules.json]
@@ -277,7 +277,7 @@ future_field = "also ignored"
 func TestParseCatalogEmptyModuleName(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.]
 url = "https://github.com/promise-lang/json"
@@ -295,7 +295,7 @@ commit = "a1b2c3d"
 func TestParseCatalogInvalidSectionHeader(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.json
 url = "https://github.com/promise-lang/json"
@@ -312,7 +312,7 @@ url = "https://github.com/promise-lang/json"
 func TestParseCatalogInvalidKeyValueLine(t *testing.T) {
 	data := []byte(`
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.json]
 this is not valid toml

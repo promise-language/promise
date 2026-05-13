@@ -86,7 +86,7 @@ Uses `PinResolve()` (via `git ls-remote`) to resolve refs. Writes full 40-char S
 
 ### Step 6: Epoch mismatch warnings [DONE]
 
-When loading a module, compares its `epoch` field against the project's `epoch`. Emits a warning if they differ: `warning: module "foo" has epoch 2025.1, but project uses epoch 2026.3`. Warnings are collected in `moduleLoader.warnings` and printed to stderr after all modules are loaded.
+When loading a module, compares its `epoch` field against the project's `epoch`. Emits a warning if they differ: `warning: module "foo" has epoch 2025.1, but project uses epoch 2026.0`. Warnings are collected in `moduleLoader.warnings` and printed to stderr after all modules are loaded.
 
 ### Step 7: `promise clean --global` [DONE]
 

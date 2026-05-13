@@ -224,7 +224,7 @@ The output is a complete catalog module directory:
 
 ```
 modules/wasi/
-    promise.toml          # [module] name = "wasi", epoch = "2026.3"
+    promise.toml          # [module] name = "wasi", epoch = "2026.0"
     wasi.pr               # all types + extern declarations + public API
     wasi_test.pr           # tests for the bindings
 ```
@@ -583,7 +583,7 @@ Module structure:
 
 ```
 promise-wasi/
-    promise.toml              # [module] name = "wasi", epoch = "2026.3"
+    promise.toml              # [module] name = "wasi", epoch = "2026.0"
     wasi.pr                   # all WASI types + functions
     wasi_test.pr              # tests
 ```
@@ -641,7 +641,7 @@ Module structure:
 
 ```
 promise-web/
-    promise.toml              # [module] name = "web", epoch = "2026.3"
+    promise.toml              # [module] name = "web", epoch = "2026.0"
     web.pr                    # all Web API types + functions
     web_test.pr               # tests (run via headless browser)
 ```

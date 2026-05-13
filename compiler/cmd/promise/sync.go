@@ -58,7 +58,7 @@ type ghAsset struct {
 // Usage:
 //
 //	promise sync              latest stable epoch (latest non-prerelease tagged release)
-//	promise sync 2026.3       specific stable epoch
+//	promise sync 2026.0       specific stable epoch
 //	promise sync next         latest pre-release build
 func runSync(args []string) {
 	target := ""

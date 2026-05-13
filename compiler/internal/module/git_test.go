@@ -37,7 +37,7 @@ func createTestRepo(t *testing.T, name string) (bareRepo, commitHash string) {
 	run(workDir, "git", "config", "user.name", "Test")
 
 	// Write promise.toml
-	toml := "[module]\nname = \"" + name + "\"\nepoch = \"2026.3\"\n"
+	toml := "[module]\nname = \"" + name + "\"\nepoch = \"2026.0\"\n"
 	os.WriteFile(filepath.Join(workDir, "promise.toml"), []byte(toml), 0644)
 
 	// Write a .pr file
@@ -249,7 +249,7 @@ func TestResolveRemoteModuleTwoCommits(t *testing.T) {
 	run(workDir, "git", "config", "user.email", "test@test.com")
 	run(workDir, "git", "config", "user.name", "Test")
 
-	os.WriteFile(filepath.Join(workDir, "promise.toml"), []byte("[module]\nname = \"twocommit\"\nepoch = \"2026.3\"\n"), 0644)
+	os.WriteFile(filepath.Join(workDir, "promise.toml"), []byte("[module]\nname = \"twocommit\"\nepoch = \"2026.0\"\n"), 0644)
 	os.WriteFile(filepath.Join(workDir, "v1.pr"), []byte("v1() int `public { return 1; }\n"), 0644)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "v1")
@@ -328,7 +328,7 @@ func TestPinResolveTag(t *testing.T) {
 	run(workDir, "git", "init", "--initial-branch=main")
 	run(workDir, "git", "config", "user.email", "test@test.com")
 	run(workDir, "git", "config", "user.name", "Test")
-	os.WriteFile(filepath.Join(workDir, "promise.toml"), []byte("[module]\nname = \"tagged\"\nepoch = \"2026.3\"\n"), 0644)
+	os.WriteFile(filepath.Join(workDir, "promise.toml"), []byte("[module]\nname = \"tagged\"\nepoch = \"2026.0\"\n"), 0644)
 	os.WriteFile(filepath.Join(workDir, "tagged.pr"), []byte("hello() int `public { return 1; }\n"), 0644)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "v1")

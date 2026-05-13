@@ -20,7 +20,7 @@ func ParseEpoch(root string) (string, error) {
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, "epoch") {
-			// epoch = "2026.3"
+			// epoch = "2026.0"
 			parts := strings.SplitN(line, "=", 2)
 			if len(parts) == 2 {
 				val := strings.TrimSpace(parts[1])

@@ -66,7 +66,7 @@ func TestResolveDesiredEpochFromActive(t *testing.T) {
 	t.Setenv("PROMISE_HOME", tmp)
 
 	// Write active epoch file.
-	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.3\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.0\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -77,8 +77,8 @@ func TestResolveDesiredEpochFromActive(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	epoch := resolveDesiredEpoch()
-	if epoch != "2026.3" {
-		t.Fatalf("expected 2026.3, got %s", epoch)
+	if epoch != "2026.0" {
+		t.Fatalf("expected 2026.0, got %s", epoch)
 	}
 }
 
@@ -161,7 +161,7 @@ func TestDirSize(t *testing.T) {
 func TestPrintVersionWithLdflags(t *testing.T) {
 	// When version is set via -ldflags, printVersion uses it.
 	old := version
-	version = "2026.3-abc1234"
+	version = "2026.0-abc1234"
 	defer func() { version = old }()
 
 	// Capture stdout.
@@ -175,8 +175,8 @@ func TestPrintVersionWithLdflags(t *testing.T) {
 	var buf [256]byte
 	n, _ := r.Read(buf[:])
 	output := string(buf[:n])
-	if output != "promise version 2026.3-abc1234\n" {
-		t.Fatalf("expected 'promise version 2026.3-abc1234\\n', got %q", output)
+	if output != "promise version 2026.0-abc1234\n" {
+		t.Fatalf("expected 'promise version 2026.0-abc1234\\n', got %q", output)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 
 func TestCompilerEpoch(t *testing.T) {
 	data := []byte(`[catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 [modules.std]
 description = "Standard library"
@@ -17,8 +17,8 @@ description = "Standard library"
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if epoch != "2026.3" {
-		t.Fatalf("expected 2026.3, got %s", epoch)
+	if epoch != "2026.0" {
+		t.Fatalf("expected 2026.0, got %s", epoch)
 	}
 }
 
@@ -42,11 +42,11 @@ func TestEpochDir(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
 
-	dir, err := EpochDir("2026.3")
+	dir, err := EpochDir("2026.0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := filepath.Join(tmp, "epochs", "2026.3")
+	want := filepath.Join(tmp, "epochs", "2026.0")
 	if dir != want {
 		t.Fatalf("expected %s, got %s", want, dir)
 	}
@@ -56,15 +56,15 @@ func TestActiveEpochFromFile(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)
 
-	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.3\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.0\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	epoch, err := ActiveEpoch()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if epoch != "2026.3" {
-		t.Fatalf("expected 2026.3, got %s", epoch)
+	if epoch != "2026.0" {
+		t.Fatalf("expected 2026.0, got %s", epoch)
 	}
 }
 
@@ -73,7 +73,7 @@ func TestActiveEpochFallback(t *testing.T) {
 	t.Setenv("PROMISE_HOME", tmp)
 
 	// Create two epoch dirs — should pick the lexicographically last.
-	for _, name := range []string{"2026.2", "2026.3"} {
+	for _, name := range []string{"2026.0", "2026.2"} {
 		if err := os.MkdirAll(filepath.Join(tmp, "epochs", name), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -82,8 +82,8 @@ func TestActiveEpochFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if epoch != "2026.3" {
-		t.Fatalf("expected 2026.3, got %s", epoch)
+	if epoch != "2026.2" {
+		t.Fatalf("expected 2026.2, got %s", epoch)
 	}
 }
 
@@ -128,7 +128,7 @@ func TestInstalledEpochs(t *testing.T) {
 
 	// Create some epoch dirs and a non-dir file.
 	epochsDir := filepath.Join(tmp, "epochs")
-	os.MkdirAll(filepath.Join(epochsDir, "2026.3"), 0755)
+	os.MkdirAll(filepath.Join(epochsDir, "2026.0"), 0755)
 	os.MkdirAll(filepath.Join(epochsDir, "dev"), 0755)
 	os.WriteFile(filepath.Join(epochsDir, "ignored-file"), []byte("x"), 0644)
 
@@ -139,8 +139,8 @@ func TestInstalledEpochs(t *testing.T) {
 	if len(epochs) != 2 {
 		t.Fatalf("expected 2 epochs, got %v", epochs)
 	}
-	// Sorted: "2026.3" < "dev"
-	if epochs[0] != "2026.3" || epochs[1] != "dev" {
+	// Sorted: "2026.0" < "dev"
+	if epochs[0] != "2026.0" || epochs[1] != "dev" {
 		t.Fatalf("unexpected order: %v", epochs)
 	}
 }

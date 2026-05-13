@@ -746,7 +746,7 @@ $ promise doctor
 Promise doctor — checking your environment
 
 [✓] Promise installation
-    Version: epoch 2026.3 (linux-amd64)
+    Version: epoch 2026.0 (linux-amd64)
     Home:    ~/.promise/
     Binary:  ~/.promise/bin/promise
     Stdlib:  ~/.promise/lib/std/ (48 files)

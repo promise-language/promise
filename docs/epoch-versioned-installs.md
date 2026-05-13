@@ -2,7 +2,7 @@
 
 ## Context
 
-Promise uses a mono-versioned catalog system where each "epoch" (e.g., `2026.3`) is an atomic release of the entire platform: compiler + standard library + catalog modules + LLVM tools. The compiler binary is self-contained (~61MB), embedding everything via `go:embed`.
+Promise uses a mono-versioned catalog system where each "epoch" (e.g., `2026.0`) is an atomic release of the entire platform: compiler + standard library + catalog modules + LLVM tools. The compiler binary is self-contained (~61MB), embedding everything via `go:embed`.
 
 Currently, `promise install` creates a single flat installation at `~/.promise/`. There is no way to have multiple epochs installed simultaneously. Projects pin `epoch` in `promise.toml`, but epoch mismatches produce warnings, not dispatch to the correct compiler.
 
@@ -21,7 +21,7 @@ This plan implements the multi-epoch layout already designed in `docs/module-sys
 ```
 ~/.promise/
   bin/promise               # stub (copy of binary, becomes shim in Phase 2)
-  active                    # single line: "2026.3" (the default epoch)
+  active                    # single line: "2026.0" (the default epoch)
   epochs/
     dev/                    # local dev builds (via ./build + bin/install.sh)
       bin/promise
@@ -32,7 +32,7 @@ This plan implements the multi-epoch layout already designed in `docs/module-sys
       cache/
         build/
         modules/
-    2026.3/                 # release epoch (via promise sync or promise install)
+    2026.0/                 # release epoch (via promise sync or promise install)
       bin/promise           # compiler binary for this epoch
       bin/llvm/             # extracted LLVM tools (release builds)
       lib/std/              # extracted standard library
@@ -87,7 +87,7 @@ No changes needed — the existing "sibling of binary" search (`filepath.Dir(os.
 
 ### Verification
 - `promise install` produces the epoch layout
-- `~/.promise/epochs/2026.3/bin/promise build file.pr` works
+- `~/.promise/epochs/2026.0/bin/promise build file.pr` works
 - `~/.promise/bin/promise build file.pr` works (stub = same binary)
 - All existing tests pass unchanged
 
@@ -159,7 +159,7 @@ When no `promise.toml` is found, falls through to `ActiveEpoch()`. This preserve
 
 ```
 promise sync                  # latest stable epoch (tagged release)
-promise sync 2026.3           # specific stable epoch
+promise sync 2026.0           # specific stable epoch
 promise sync next             # latest pre-release build (next branch)
 ```
 
@@ -167,11 +167,11 @@ promise sync next             # latest pre-release build (next branch)
 
 | Channel | What it is | Who uses it | Mutability |
 |---------|-----------|-------------|------------|
-| **Stable** (`promise sync` / `promise sync 2026.3`) | Tagged GitHub release (`epoch-2026.3`). Immutable — same binary forever. | Platform users, CI, production. | Never changes once tagged. |
+| **Stable** (`promise sync` / `promise sync 2026.0`) | Tagged GitHub release (`epoch-2026.0`). Immutable — same binary forever. | Platform users, CI, production. | Never changes once tagged. |
 | **Next** (`promise sync next`) | Latest build from the `next` branch. Pre-release GitHub release tagged `epoch-next`. | Module authors testing against upcoming epoch. Early adopters. | Updated on every push to `next`. Re-running `promise sync next` gets the latest build. |
 | **Dev** (`bin/install.sh`) | Local build installed into `epochs/dev/`. | People working on the compiler itself. | Changes with every `bin/install.sh` run. |
 
-**Coexistence**: All three channels install into `epochs/` with the same layout. Dev builds go to `epochs/dev/`, next to `epochs/next/`, stable to `epochs/2026.3/`. Quick iteration with `./build && bin/promise ...` also works without installing — the repo-local binary uses a shared cache fallback.
+**Coexistence**: All three channels install into `epochs/` with the same layout. Dev builds go to `epochs/dev/`, next to `epochs/next/`, stable to `epochs/2026.0/`. Quick iteration with `./build && bin/promise ...` also works without installing — the repo-local binary uses a shared cache fallback.
 
 **Lifecycle of an epoch**:
 ```
@@ -182,7 +182,7 @@ When `2026.4` is tagged, `promise sync next` starts tracking the *next* upcoming
 
 ### Version discovery
 
-Use GitHub Releases API once the repository is published. The URL pattern will be `GET https://api.github.com/repos/<org>/<repo>/releases`, filtering by `epoch-*` tag prefix. Parse tag `epoch-2026.3` to get epoch string. For `next`, look for the release tagged `epoch-next` (pre-release flag set).
+Use GitHub Releases API once the repository is published. The URL pattern will be `GET https://api.github.com/repos/<org>/<repo>/releases`, filtering by `epoch-*` tag prefix. Parse tag `epoch-2026.0` to get epoch string. For `next`, look for the release tagged `epoch-next` (pre-release flag set).
 
 The release repository URL should be configurable — stored in the embedded catalog or a separate config — so it can point to the actual repo once created, or to corporate mirrors.
 
@@ -195,7 +195,7 @@ The release repository URL should be configurable — stored in the embedded cat
 5. Verify SHA256 checksum
 6. `chmod +x` the downloaded binary
 7. Run `<downloaded-binary> install` → Phase 1 logic installs into `epochs/<epoch>/`
-8. Print success: `epoch 2026.3 installed. Active epoch: 2026.3`
+8. Print success: `epoch 2026.0 installed. Active epoch: 2026.0`
 
 ### Progress
 
@@ -206,12 +206,12 @@ Print download progress to stderr: `downloading promise-darwin-arm64... 45.2/61.
 - Network failure → "cannot reach GitHub releases. Check your connection."
 - Unknown epoch → "epoch 2026.1 is not available. Run `promise sync` for latest."
 - Checksum mismatch → "checksum verification failed — download may be corrupted"
-- Platform not available → "no binary available for linux-arm64 in epoch 2026.3"
+- Platform not available → "no binary available for linux-arm64 in epoch 2026.0"
 
 ### Verification
-- `promise sync 2026.3` downloads and installs into `epochs/2026.3/`
+- `promise sync 2026.0` downloads and installs into `epochs/2026.0/`
 - `promise epochs` shows it
-- `promise sync 2026.3` again → "already installed"
+- `promise sync 2026.0` again → "already installed"
 
 ---
 
@@ -240,7 +240,7 @@ The developer escape hatch. Values:
 | Value | Effect |
 |-------|--------|
 | `dev` | Force dispatch to the dev epoch |
-| `2026.3` | Force dispatch to that epoch |
+| `2026.0` | Force dispatch to that epoch |
 | `/path/to/bin/promise` | Exec that specific binary directly |
 
 ### Developer scenarios
@@ -250,8 +250,8 @@ The developer escape hatch. Values:
 | Working on the compiler (quick iteration) | `./build && bin/promise test tests/...` — direct invocation, no shim, uses shared cache |
 | Installing dev build for project testing | `bin/install.sh` → installs into `epochs/dev/`, sets active to `dev` |
 | Testing dev build against epoch-pinned project | `cd ~/myproject && PROMISE_EPOCH=dev promise build main.pr` |
-| Switching back to released epoch | `promise use 2026.3` → changes active epoch |
-| Restoring official release after dev override | `promise sync 2026.3` → re-downloads the release binary |
+| Switching back to released epoch | `promise use 2026.0` → changes active epoch |
+| Restoring official release after dev override | `promise sync 2026.0` → re-downloads the release binary |
 | Module author testing against next epoch | `promise sync next && promise use next` → uses pre-release compiler |
 | Multiple projects, different epochs | No action needed — shim reads each project's `promise.toml` epoch |
 
@@ -264,7 +264,7 @@ The developer escape hatch. Values:
     2026.2/bin/promise      # old stable (still installed for legacy project)
     2026.3/bin/promise      # current stable
     next/bin/promise        # pre-release (updated by `promise sync next`)
-  active                    # "dev" or "2026.3" (default for scripts without promise.toml)
+  active                    # "dev" or "2026.0" (default for scripts without promise.toml)
 ```
 
 A developer can:
@@ -309,7 +309,7 @@ For repo-local `bin/promise` (quick iteration without install), the compiler fal
 
 ```
   2026.2    67 MB   (12 MB cache)
-* 2026.3    67 MB   (45 MB cache)   (active)
+* 2026.0    67 MB   (45 MB cache)   (active)
 
 2 epochs, 134 MB + 57 MB cache
 ```

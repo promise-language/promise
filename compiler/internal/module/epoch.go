@@ -9,7 +9,7 @@ import (
 )
 
 // CompilerEpoch parses the embedded catalog.toml bytes and returns the epoch
-// string (e.g., "2026.3"). Returns an error if the catalog cannot be parsed
+// string (e.g., "2026.0"). Returns an error if the catalog cannot be parsed
 // or has no epoch field.
 func CompilerEpoch(catalogData []byte) (string, error) {
 	cat, err := ParseCatalog(catalogData)
@@ -68,7 +68,7 @@ func WriteActiveEpoch(epoch string) error {
 }
 
 // InstalledEpochs returns a sorted list of epoch names found under
-// <PromiseHome>/epochs/. Each entry is a directory name (e.g., "2026.3", "dev").
+// <PromiseHome>/epochs/. Each entry is a directory name (e.g., "2026.0", "dev").
 func InstalledEpochs() ([]string, error) {
 	home, err := PromiseHome()
 	if err != nil {

@@ -11,7 +11,7 @@ import (
 // Config represents the parsed contents of a promise.toml file.
 type Config struct {
 	Name    string            // module name
-	Epoch   string            // catalog epoch, e.g. "2026.3"
+	Epoch   string            // catalog epoch, e.g. "2026.0"
 	Require map[string]string // remote URL → commit hash
 	Replace map[string]string // URL or catalog name → local path
 	Dir     string            // directory containing promise.toml

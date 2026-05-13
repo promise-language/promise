@@ -37,6 +37,7 @@ func (c *Compiler) defineNetPALBodies() {
 		"promise_net_socket_recv",
 		"promise_net_socket_shutdown",
 		"promise_net_socket_get_error",
+		"promise_net_socket_set_nonblock",
 		"promise_net_netpoll_open",
 		"promise_net_netpoll_close",
 	}
@@ -119,6 +120,9 @@ func (c *Compiler) defineNetPALBodies() {
 	}
 	if fn, ok := irFuncByName["promise_net_socket_get_error"]; ok {
 		c.defineNetSocketGetErrorBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_net_socket_set_nonblock"]; ok {
+		c.defineNetSocketSetNonBlockBody(fn)
 	}
 	// Netpoll bridge functions require reactor support — skip on WASM.
 	// On WASM, these externs remain bodyless declarations (linker DCEs them
@@ -311,6 +315,24 @@ func (c *Compiler) defineNetSocketGetErrorBody(fn *ir.Func) {
 	errno := entry.NewCall(c.palSocketGetError, fdI32)
 	errnoI64 := entry.NewSExt(errno, irtypes.I64)
 	c.storeIntResult(entry, sret, errnoI64)
+	entry.NewRet(nil)
+}
+
+// defineNetSocketSetNonBlockBody: void @promise_net_socket_set_nonblock(i8* sret, i8* fd)
+// Sets fd non-blocking via fcntl. Returns 0 on success or -errno on failure.
+// Called explicitly before netpoll_open so the socket is in the right state
+// (e.g. "connecting" after connect()) when registered with epoll, ensuring
+// EPOLLET fires the correct edge transitions (B0322).
+func (c *Compiler) defineNetSocketSetNonBlockBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	fdRaw := c.extractRawInt(entry, fn.Params[1])
+	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
+
+	rc := entry.NewCall(c.palSocketSetNonBlock, fdI32)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, sret, rcI64)
 	entry.NewRet(nil)
 }
 

@@ -25,7 +25,7 @@ func (e *CatalogEntry) IsEmbedded() bool {
 
 // Catalog is the parsed representation of the embedded catalog.toml.
 type Catalog struct {
-	Epoch   string                   // catalog epoch (e.g., "2026.3")
+	Epoch   string                   // catalog epoch (e.g., "2026.0")
 	Modules map[string]*CatalogEntry // name → entry
 }
 
@@ -45,7 +45,7 @@ func (c *Catalog) Lookup(name string) *CatalogEntry {
 // Format:
 //
 //	[catalog]
-//	epoch = "2026.3"
+//	epoch = "2026.0"
 //
 //	[modules.io]
 //	description = "Console and file I/O"

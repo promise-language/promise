@@ -156,8 +156,10 @@ func (c *Compiler) defineNetpollOpenFunc() {
 
 	entry := fn.NewBlock(".entry")
 
-	// Set fd non-blocking
-	entry.NewCall(c.palSocketSetNonBlock, fdParam)
+	// NOTE: caller is responsible for setting fd non-blocking before calling
+	// netpoll_open. This ensures the fd is already in its correct pre-registration
+	// state (e.g. "connecting" for connect(), not "writable from new socket") so
+	// EPOLLET fires the correct edge transition.
 
 	// Allocate PollDesc
 	pdSize := constant.NewInt(irtypes.I64, int64(c.typeSize(pdTy)))

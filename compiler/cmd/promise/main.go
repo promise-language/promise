@@ -115,7 +115,7 @@ Commands:
   sync      Download and install a compiler epoch from GitHub releases
   epochs    List installed epochs
   remove    Remove an installed epoch
-  use       Set the active epoch (e.g., promise use 2026.3)
+  use       Set the active epoch (e.g., promise use 2026.0)
   version   Print compiler version
 
 Options (build):
@@ -150,7 +150,7 @@ Test discovery:
 
 Sync:
   promise sync                    Download latest stable epoch
-  promise sync 2026.3             Download specific epoch
+  promise sync 2026.0             Download specific epoch
   promise sync next               Download latest pre-release build
 
 Inline execution:
@@ -5962,7 +5962,7 @@ func runPin(args []string) {
 }
 
 func runInit() {
-	const defaultEpoch = "2026.3"
+	const defaultEpoch = "2026.0"
 
 	if _, err := os.Stat("promise.toml"); err == nil {
 		fmt.Fprintln(os.Stderr, "promise.toml already exists")

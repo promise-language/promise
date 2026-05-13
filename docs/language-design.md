@@ -180,7 +180,7 @@ Every module has a `promise.toml` at its root (TOML format). A minimal module fi
 ```toml
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 ```
 
 The `epoch` field declares which catalog version this module targets — it determines which catalog modules and standard library APIs are available. It also acts as a compatibility signal: when a remote module's epoch differs from the consuming project's, the compiler warns that catalog APIs may differ.
@@ -190,7 +190,7 @@ The `epoch` field declares which catalog version this module targets — it dete
 ```toml
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/acme/parser" = "a1b2c3d4e5f6"   # URL = commit hash (or tag)

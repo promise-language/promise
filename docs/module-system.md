@@ -98,7 +98,7 @@ The catalog manifest maps module names to their source locations:
 
 ```toml
 [catalog]
-epoch = "2026.3"
+epoch = "2026.0"
 
 # Embedded modules — source lives in modules/<name>/ in the compiler repo.
 # No url or commit needed; embedded in the compiler binary via go:embed.
@@ -151,10 +151,10 @@ An **epoch** is a tagged release of the catalog. It is a single identifier (not 
 Epoch names follow the format `YYYY.N` where `YYYY` is the year and `N` is a sequential release number within that year:
 
 ```
-2026.1    — first stable release of 2026
-2026.2    — second release (may include breaking changes)
-2026.3    — third release
-2027.1    — first release of 2027
+2026.0    — first release of 2026
+2026.1    — second release of 2026
+2026.2    — third release
+2027.0    — first release of 2027
 ```
 
 ### 4.2 Epoch Guarantees
@@ -371,7 +371,7 @@ Every module (including your project) has a `promise.toml` file at its root. The
 ```toml
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 ```
 
 That's a complete project manifest. The `epoch` key pins the catalog version. The `name` key names the module (used as the default alias when other modules import it).
@@ -381,7 +381,7 @@ For a module that will be submitted to the catalog:
 ```toml
 [module]
 name = "json"
-epoch = "2026.3"
+epoch = "2026.0"
 ```
 
 The module name must be a valid Promise identifier. It must be unique within the catalog.
@@ -397,7 +397,7 @@ Catalog modules need no version declaration — the epoch handles it. Local modu
 ```toml
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/someone/promise-parser" = "a1b2c3d4e5f6"
@@ -436,7 +436,7 @@ Unchanged from the existing design. Flat layout, no required `src/`:
 
 ```
 myapp/
-  promise.toml          # [module] name = "myapp", epoch = "2026.3"
+  promise.toml          # [module] name = "myapp", epoch = "2026.0"
   main.pr               # entry point
   helpers.pr            # source file
   helpers_test.pr       # test file (compiled as part of module during `promise test`)
@@ -523,7 +523,7 @@ The `promise sync` command updates the compiler and catalog to a specific epoch:
 
 ```bash
 promise sync                 # sync to latest stable epoch
-promise sync 2026.3          # sync to a specific epoch
+promise sync 2026.0          # sync to a specific epoch
 promise sync next            # sync to the upcoming epoch (for testing)
 ```
 
@@ -548,7 +548,7 @@ The current `promise install` creates `~/.promise/bin/` and `~/.promise/lib/std/
       bin/promise           # compiler binary for this epoch
       lib/std/              # standard library source (embedded in binary, extracted here)
       catalog.toml          # catalog manifest
-    2026.3/
+    2026.0/
       ...
   cache/
     modules/                # all git-fetched modules (catalog + remote), keyed by normalized URL
@@ -673,7 +673,7 @@ A remote module is a git repository with a `promise.toml` at the root:
 
 ```
 promise-parser/
-  promise.toml          # [module] name = "parser", epoch = "2026.3"
+  promise.toml          # [module] name = "parser", epoch = "2026.0"
   parser.pr
   lexer.pr
   tests/
@@ -685,7 +685,7 @@ Its `promise.toml`:
 ```toml
 [module]
 name = "parser"
-epoch = "2026.3"
+epoch = "2026.0"
 ```
 
 The `epoch` key declares which catalog epoch this module is built against. This means:
@@ -711,7 +711,7 @@ main() {
 # promise.toml
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/someone/promise-parser" = "a1b2c3d"
@@ -732,7 +732,7 @@ Remote modules can depend on:
 - **Other remote modules** — via `use other "url"` with their own `[require]` pins
 - **Local modules** — via `use lib "./subdir"`
 
-**Epoch compatibility:** When a remote module declares `epoch = "2026.3"` and your project uses `epoch = "2026.3"`, catalog dependencies align perfectly. If the epochs differ, the compiler emits a warning:
+**Epoch compatibility:** When a remote module declares `epoch = "2026.0"` and your project uses `epoch = "2026.0"`, catalog dependencies align perfectly. If the epochs differ, the compiler emits a warning:
 
 ```
 warning: remote module 'parser' targets epoch 2026.2, project targets 2026.3
@@ -838,7 +838,7 @@ When developing a remote module alongside a project that uses it, you don't want
 ```toml
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/someone/promise-parser" = "a1b2c3d"
@@ -854,7 +854,7 @@ The `[replace]` section redirects a module to a local directory during developme
 ```toml
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [replace]
 json = "../my-json-fork"
@@ -1108,7 +1108,7 @@ curl -sSf https://promise-lang.dev/install.sh | sh
 
 # Verify installation
 promise version
-# promise 2026.3 (epoch 2026.3, linux-amd64)
+# promise 2026.0 (epoch 2026.0, linux-amd64)
 ```
 
 No `promise sync` needed on first install — the binary IS the epoch. The catalog manifest is embedded, the std library is embedded, LLVM tools are embedded. One download, fully offline-capable for catalog modules (fetched lazily on first use).
@@ -1147,7 +1147,7 @@ promise init
 # Creates promise.toml:
 #   [module]
 #   name = "myapp"
-#   epoch = "2026.3"
+#   epoch = "2026.0"
 ```
 
 #### Writing code with catalog modules
@@ -1166,7 +1166,7 @@ main()! {
 
 ```bash
 promise build
-# 1. Reads promise.toml → epoch 2026.3
+# 1. Reads promise.toml → epoch 2026.0
 # 2. Scans source → needs json, http from catalog
 # 3. Looks up json, http in embedded catalog.toml → gets URLs + commits
 # 4. Fetches json repo at pinned commit (or uses cached checkout)
@@ -1249,7 +1249,7 @@ promise init
 # Edit promise.toml:
 #   [module]
 #   name = "csv"
-#   epoch = "2026.3"
+#   epoch = "2026.0"
 ```
 
 ```promise

@@ -5,7 +5,7 @@
 #   curl -sSf https://promise-lang.dev/install.sh | sh
 #
 # Remote install (pinned epoch):
-#   curl -sSf https://promise-lang.dev/install.sh | sh -s -- --epoch 2026.3
+#   curl -sSf https://promise-lang.dev/install.sh | sh -s -- --epoch 2026.0
 #
 # Local install (from this repo, after building locally):
 #   bin/install.sh

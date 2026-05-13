@@ -62,7 +62,7 @@ func TestPlatformBinaryName(t *testing.T) {
 
 func TestFindAssets(t *testing.T) {
 	release := &ghRelease{
-		TagName: "epoch-2026.3",
+		TagName: "epoch-2026.0",
 		Assets: []ghAsset{
 			{Name: "promise-linux-amd64", BrowserDownloadURL: "https://example.com/promise-linux-amd64"},
 			{Name: "promise-darwin-arm64", BrowserDownloadURL: "https://example.com/promise-darwin-arm64"},
@@ -84,7 +84,7 @@ func TestFindAssets(t *testing.T) {
 
 func TestFindAssetsMissing(t *testing.T) {
 	release := &ghRelease{
-		TagName: "epoch-2026.3",
+		TagName: "epoch-2026.0",
 		Assets: []ghAsset{
 			{Name: "promise-linux-amd64", BrowserDownloadURL: "https://example.com/promise-linux-amd64"},
 		},
@@ -98,7 +98,7 @@ func TestFindAssetsMissing(t *testing.T) {
 
 func TestFindAssetsNoSHA(t *testing.T) {
 	release := &ghRelease{
-		TagName: "epoch-2026.3",
+		TagName: "epoch-2026.0",
 		Assets: []ghAsset{
 			{Name: "promise-linux-amd64", BrowserDownloadURL: "https://example.com/promise-linux-amd64"},
 		},
@@ -188,7 +188,7 @@ func TestIsEpochInstalled(t *testing.T) {
 	t.Setenv("PROMISE_HOME", tmp)
 
 	// Not installed.
-	if isEpochInstalled("2026.3") {
+	if isEpochInstalled("2026.0") {
 		t.Fatal("expected epoch not to be installed")
 	}
 
@@ -197,11 +197,11 @@ func TestIsEpochInstalled(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		binaryName = "promise.exe"
 	}
-	binDir := filepath.Join(tmp, "epochs", "2026.3", "bin")
+	binDir := filepath.Join(tmp, "epochs", "2026.0", "bin")
 	os.MkdirAll(binDir, 0755)
 	os.WriteFile(filepath.Join(binDir, binaryName), []byte("fake"), 0755)
 
-	if !isEpochInstalled("2026.3") {
+	if !isEpochInstalled("2026.0") {
 		t.Fatal("expected epoch to be installed")
 	}
 }
@@ -209,7 +209,7 @@ func TestIsEpochInstalled(t *testing.T) {
 func TestFetchReleasesIntegration(t *testing.T) {
 	// Mock GitHub API server.
 	releases := []ghRelease{
-		{TagName: "epoch-2026.3", Prerelease: false, Draft: false, Assets: []ghAsset{
+		{TagName: "epoch-2026.0", Prerelease: false, Draft: false, Assets: []ghAsset{
 			{Name: "promise-linux-amd64", BrowserDownloadURL: "https://example.com/a"},
 		}},
 		{TagName: "epoch-2026.2", Prerelease: false, Draft: false},
@@ -242,24 +242,24 @@ func TestFetchReleasesIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("findLatestStableRelease: %v", err)
 	}
-	if epoch != "2026.3" {
-		t.Fatalf("expected epoch 2026.3, got %s", epoch)
+	if epoch != "2026.2" {
+		t.Fatalf("expected epoch 2026.2, got %s", epoch)
 	}
-	if latest.TagName != "epoch-2026.3" {
-		t.Fatalf("expected tag epoch-2026.3, got %s", latest.TagName)
+	if latest.TagName != "epoch-2026.2" {
+		t.Fatalf("expected tag epoch-2026.2, got %s", latest.TagName)
 	}
 }
 
 func TestFindSpecificRelease(t *testing.T) {
 	release := ghRelease{
-		TagName: "epoch-2026.3",
+		TagName: "epoch-2026.0",
 		Assets: []ghAsset{
 			{Name: "promise-linux-amd64", BrowserDownloadURL: "https://example.com/a"},
 		},
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/releases/tags/epoch-2026.3" {
+		if r.URL.Path == "/releases/tags/epoch-2026.0" {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(release)
 		} else if r.URL.Path == "/releases/tags/epoch-9999.9" {
@@ -273,12 +273,12 @@ func TestFindSpecificRelease(t *testing.T) {
 	cfg := syncConfig{apiBase: srv.URL}
 
 	// Found.
-	r, err := findSpecificRelease(cfg, "2026.3")
+	r, err := findSpecificRelease(cfg, "2026.0")
 	if err != nil {
 		t.Fatalf("findSpecificRelease: %v", err)
 	}
-	if r.TagName != "epoch-2026.3" {
-		t.Fatalf("expected epoch-2026.3, got %s", r.TagName)
+	if r.TagName != "epoch-2026.0" {
+		t.Fatalf("expected epoch-2026.0, got %s", r.TagName)
 	}
 
 	// Not found.
@@ -293,7 +293,7 @@ func TestFindSpecificRelease(t *testing.T) {
 
 func TestFindNextReleaseNotFound(t *testing.T) {
 	releases := []ghRelease{
-		{TagName: "epoch-2026.3", Prerelease: false, Draft: false},
+		{TagName: "epoch-2026.0", Prerelease: false, Draft: false},
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -12,7 +12,7 @@ func TestParseConfig(t *testing.T) {
 	content := `
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/someone/parser" = "a1b2c3d"
@@ -33,8 +33,8 @@ epoch = "2026.3"
 	if cfg.Name != "myapp" {
 		t.Errorf("Name = %q, want %q", cfg.Name, "myapp")
 	}
-	if cfg.Epoch != "2026.3" {
-		t.Errorf("Epoch = %q, want %q", cfg.Epoch, "2026.3")
+	if cfg.Epoch != "2026.0" {
+		t.Errorf("Epoch = %q, want %q", cfg.Epoch, "2026.0")
 	}
 	if cfg.Require["github.com/someone/parser"] != "a1b2c3d" {
 		t.Errorf("Require[parser] = %q, want %q", cfg.Require["github.com/someone/parser"], "a1b2c3d")
@@ -53,7 +53,7 @@ func TestParseConfigMinimal(t *testing.T) {
 	content := `
 [module]
 name = "hello"
-epoch = "2026.3"
+epoch = "2026.0"
 `
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestParseConfigMissingName(t *testing.T) {
 	path := filepath.Join(dir, "promise.toml")
 	content := `
 [module]
-epoch = "2026.3"
+epoch = "2026.0"
 `
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestFindConfig(t *testing.T) {
 	content := `
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 `
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"), []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestParseConfigUnknownKeys(t *testing.T) {
 	content := `
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 future_key = "ignored"
 
 [future_section]
@@ -237,7 +237,7 @@ whatever = "also ignored"
 func TestSetRequireNewSection(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "promise.toml")
-	content := "[module]\nname = \"myapp\"\nepoch = \"2026.3\"\n"
+	content := "[module]\nname = \"myapp\"\nepoch = \"2026.0\"\n"
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestSetRequireExistingSection(t *testing.T) {
 	path := filepath.Join(dir, "promise.toml")
 	content := `[module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/foo/bar" = "old_hash"
@@ -287,7 +287,7 @@ func TestSetRequireAppendToExisting(t *testing.T) {
 	path := filepath.Join(dir, "promise.toml")
 	content := `[module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/foo/bar" = "hash1"
@@ -317,7 +317,7 @@ func TestSetRequireNormalizedMatch(t *testing.T) {
 	path := filepath.Join(dir, "promise.toml")
 	content := `[module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "https://github.com/foo/bar.git" = "old_hash"
@@ -358,7 +358,7 @@ func TestSetRequirePreservesComments(t *testing.T) {
 	path := filepath.Join(dir, "promise.toml")
 	content := `[module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 
 # My dependencies
 [require]
@@ -405,7 +405,7 @@ func TestFindProjectMainWithField(t *testing.T) {
 
 func TestFindProjectMainNoField(t *testing.T) {
 	dir := t.TempDir()
-	content := "[module]\nname = \"myapp\"\nepoch = \"2026.3\"\n"
+	content := "[module]\nname = \"myapp\"\nepoch = \"2026.0\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "promise.toml"), []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}

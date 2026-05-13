@@ -821,7 +821,7 @@ func TestLoadLocalModuleBasic(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projectDir, "promise.toml"), []byte(`
 [module]
 name = "testproj"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -830,7 +830,7 @@ epoch = "2026.3"
 	if err := os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
 [module]
 name = "mymod"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -879,7 +879,7 @@ func TestLoadLocalModuleMultipleFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projectDir, "promise.toml"), []byte(`
 [module]
 name = "testproj"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -887,7 +887,7 @@ epoch = "2026.3"
 	if err := os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
 [module]
 name = "mylib"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -964,7 +964,7 @@ func TestLoadLocalModuleNoPrFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
 [module]
 name = "empty"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -989,7 +989,7 @@ func TestLoadLocalModuleSemaErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
 [module]
 name = "badmod"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1020,14 +1020,14 @@ func TestLoadLocalModuleWithStdTypes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projectDir, "promise.toml"), []byte(`
 [module]
 name = "testproj"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
 [module]
 name = "mymod"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1071,10 +1071,10 @@ func TestLoadModuleTransitive(t *testing.T) {
 	}
 
 	for _, item := range []struct{ path, content string }{
-		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
-		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"moda\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"},
+		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"moda\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modA, "lib.pr"), "helper() int `public { return 42; }\n"},
-		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"modb\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"modb\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modB, "lib.pr"), "use moda \"./moda\";\nwrap() int `public { return moda.helper(); }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
@@ -1132,12 +1132,12 @@ func TestLoadModuleDiamond(t *testing.T) {
 	}
 
 	for _, item := range []struct{ path, content string }{
-		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
-		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"a\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"},
+		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"a\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modA, "lib.pr"), "base() int `public { return 1; }\n"},
-		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"b\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"b\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modB, "lib.pr"), "use a \"./a\";\nfrom_b() int `public { return a.base(); }\n"},
-		{filepath.Join(modC, "promise.toml"), "[module]\nname = \"c\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modC, "promise.toml"), "[module]\nname = \"c\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modC, "lib.pr"), "use a \"./a\";\nfrom_c() int `public { return a.base(); }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
@@ -1195,10 +1195,10 @@ func TestLoadModuleCircular(t *testing.T) {
 	}
 
 	for _, item := range []struct{ path, content string }{
-		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
-		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"x\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"},
+		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"x\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modA, "lib.pr"), "use y \"./y\";\nfx() int `public { return 1; }\n"},
-		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"y\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"y\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modB, "lib.pr"), "use x \"./x\";\nfy() int `public { return 1; }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
@@ -1226,12 +1226,12 @@ func TestLoadModuleCircularThreeModules(t *testing.T) {
 	}
 
 	for _, item := range []struct{ path, content string }{
-		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
-		{filepath.Join(projectDir, "a", "promise.toml"), "[module]\nname = \"a\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"},
+		{filepath.Join(projectDir, "a", "promise.toml"), "[module]\nname = \"a\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(projectDir, "a", "lib.pr"), "use b \"./b\";\nfa() int `public { return 1; }\n"},
-		{filepath.Join(projectDir, "b", "promise.toml"), "[module]\nname = \"b\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "b", "promise.toml"), "[module]\nname = \"b\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(projectDir, "b", "lib.pr"), "use c \"./c\";\nfb() int `public { return 2; }\n"},
-		{filepath.Join(projectDir, "c", "promise.toml"), "[module]\nname = \"c\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "c", "promise.toml"), "[module]\nname = \"c\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(projectDir, "c", "lib.pr"), "use a \"./a\";\nfc() int `public { return 3; }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
@@ -1264,8 +1264,8 @@ func TestLoadModuleCanonicalName(t *testing.T) {
 	}
 
 	for _, item := range []struct{ path, content string }{
-		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
-		{filepath.Join(modDir, "promise.toml"), "[module]\nname = \"my_canonical\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"},
+		{filepath.Join(modDir, "promise.toml"), "[module]\nname = \"my_canonical\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modDir, "lib.pr"), "greet() int `public { return 1; }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
@@ -1306,11 +1306,11 @@ func TestLoadModuleSameNameDifferentPaths(t *testing.T) {
 	}
 
 	for _, item := range []struct{ path, content string }{
-		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"},
 		// Both modules claim the same name "parser" — but they have different paths
-		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"parser\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"parser\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modA, "lib.pr"), "fa() int `public { return 1; }\n"},
-		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"parser\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"parser\"\nepoch = \"2026.0\"\n"},
 		{filepath.Join(modB, "lib.pr"), "fb() int `public { return 2; }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
@@ -1354,7 +1354,7 @@ func TestLoadRemoteModuleReplace(t *testing.T) {
 	os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
 [module]
 name = "parser"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644)
 	os.WriteFile(filepath.Join(modDir, "parser.pr"), []byte(`
 parse(int x) int `+"`"+`public {
@@ -1365,7 +1365,7 @@ parse(int x) int `+"`"+`public {
 	// Root project config with [replace]
 	cfg := &module.Config{
 		Name:    "myproject",
-		Epoch:   "2026.3",
+		Epoch:   "2026.0",
 		Dir:     projectDir,
 		Require: map[string]string{},
 		Replace: map[string]string{
@@ -1416,7 +1416,7 @@ func TestLoadRemoteModuleReplaceSchemeVariant(t *testing.T) {
 	os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
 [module]
 name = "parser"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644)
 	os.WriteFile(filepath.Join(modDir, "parser.pr"), []byte(`
 parse(int x) int `+"`"+`public { return x; }
@@ -1425,7 +1425,7 @@ parse(int x) int `+"`"+`public { return x; }
 	// Replace key uses bare URL, import uses https://
 	cfg := &module.Config{
 		Name:    "myproject",
-		Epoch:   "2026.3",
+		Epoch:   "2026.0",
 		Dir:     projectDir,
 		Require: map[string]string{},
 		Replace: map[string]string{
@@ -1451,7 +1451,7 @@ func TestLoadRemoteModuleNoPinError(t *testing.T) {
 
 	cfg := &module.Config{
 		Name:    "myproject",
-		Epoch:   "2026.3",
+		Epoch:   "2026.0",
 		Dir:     projectDir,
 		Require: map[string]string{}, // no pins
 		Replace: map[string]string{},
@@ -1490,7 +1490,7 @@ func TestLoadRemoteModuleNilConfig(t *testing.T) {
 func TestIsTopLevelPin(t *testing.T) {
 	cfg := &module.Config{
 		Name:  "myproject",
-		Epoch: "2026.3",
+		Epoch: "2026.0",
 		Require: map[string]string{
 			"github.com/someone/parser":            "abc123",
 			"https://github.com/someone/utils.git": "def456",
@@ -1533,7 +1533,7 @@ func TestLoadRemoteModulePinConflict(t *testing.T) {
 	os.WriteFile(filepath.Join(modA, "promise.toml"), []byte(`
 [module]
 name = "mod_a"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/shared/lib" = "aaaaaaa"
@@ -1548,7 +1548,7 @@ a_func() int `+"`"+`public { return 1; }
 	os.WriteFile(filepath.Join(modB, "promise.toml"), []byte(`
 [module]
 name = "mod_b"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/shared/lib" = "bbbbbbb"
@@ -1560,7 +1560,7 @@ b_func() int `+"`"+`public { return 2; }
 	// Root project uses both via [replace]
 	cfg := &module.Config{
 		Name:    "myproject",
-		Epoch:   "2026.3",
+		Epoch:   "2026.0",
 		Dir:     projectDir,
 		Require: map[string]string{},
 		Replace: map[string]string{
@@ -1604,7 +1604,7 @@ func TestLoadRemoteModulePinConflictTopLevelOverride(t *testing.T) {
 	os.WriteFile(filepath.Join(modA, "promise.toml"), []byte(`
 [module]
 name = "mod_a"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/shared/lib" = "aaaaaaa"
@@ -1619,7 +1619,7 @@ a_func() int `+"`"+`public { return 1; }
 	os.WriteFile(filepath.Join(modB, "promise.toml"), []byte(`
 [module]
 name = "mod_b"
-epoch = "2026.3"
+epoch = "2026.0"
 
 [require]
 "github.com/shared/lib" = "bbbbbbb"
@@ -1631,7 +1631,7 @@ b_func() int `+"`"+`public { return 2; }
 	// Root project explicitly pins shared/lib — this should override both
 	cfg := &module.Config{
 		Name:  "myproject",
-		Epoch: "2026.3",
+		Epoch: "2026.0",
 		Dir:   projectDir,
 		Require: map[string]string{
 			"github.com/shared/lib": "ccccccc",
@@ -1706,7 +1706,7 @@ func TestEpochMismatchWarning(t *testing.T) {
 	os.WriteFile(filepath.Join(projectDir, "promise.toml"), []byte(`
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644)
 
 	os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
@@ -1732,7 +1732,7 @@ epoch = "2025.1"
 		t.Fatal("expected epoch mismatch warning, got none")
 	}
 	w := loader.warnings[0]
-	if !strings.Contains(w, "epoch") || !strings.Contains(w, "2025.1") || !strings.Contains(w, "2026.3") {
+	if !strings.Contains(w, "epoch") || !strings.Contains(w, "2025.1") || !strings.Contains(w, "2026.0") {
 		t.Errorf("unexpected warning: %q", w)
 	}
 }
@@ -1747,13 +1747,13 @@ func TestEpochMatchNoWarning(t *testing.T) {
 	os.WriteFile(filepath.Join(projectDir, "promise.toml"), []byte(`
 [module]
 name = "myapp"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644)
 
 	os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
 [module]
 name = "mymod"
-epoch = "2026.3"
+epoch = "2026.0"
 `), 0644)
 
 	os.WriteFile(filepath.Join(modDir, "lib.pr"), []byte("greet() string `public { return \"hello\"; }\n"), 0644)

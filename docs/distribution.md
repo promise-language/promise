@@ -35,7 +35,7 @@ This downloads `scripts/install.sh` from the CDN (backed by the GitHub release f
 To install a specific epoch:
 
 ```sh
-curl -sSf https://promise-lang.dev/install.sh | sh -s -- --epoch 2026.3
+curl -sSf https://promise-lang.dev/install.sh | sh -s -- --epoch 2026.0
 ```
 
 ### 2.2 Direct download
@@ -160,7 +160,7 @@ The standard install script works in CI:
 # GitHub Actions example
 - name: Install Promise
   run: |
-    curl -sSf https://promise-lang.dev/install.sh | sh -s -- --epoch 2026.3
+    curl -sSf https://promise-lang.dev/install.sh | sh -s -- --epoch 2026.0
     echo "$HOME/.promise/bin" >> $GITHUB_PATH
 ```
 
@@ -195,7 +195,7 @@ github.com/promise-lang/promise
 | `main` | Main development branch. All PRs target main. |
 | `next` | Pre-release staging. Used to validate the next epoch before cutting. |
 
-Tags follow the format `epoch-YYYY.N` (e.g., `epoch-2026.3`). A tag on main is a release. Nothing else triggers a release.
+Tags follow the format `epoch-YYYY.N` (e.g., `epoch-2026.0`). A tag on main is a release. Nothing else triggers a release.
 
 ### 7.2 CI Workflow
 
@@ -436,8 +436,8 @@ When the codebase is ready for a new epoch:
 bin/verify.sh
 
 # 2. Tag the commit
-git tag epoch-2026.3
-git push origin epoch-2026.3
+git tag epoch-2026.0
+git push origin epoch-2026.0
 ```
 
 That's it. The tag push triggers the release workflow, which builds all platform binaries and creates the GitHub Release automatically. No manual binary uploads, no manual SHA256 computation.

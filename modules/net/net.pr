@@ -20,6 +20,7 @@ _net_socket_get_error(int fd) int `extern("promise_net_socket_get_error");
 // Reactor integration — netpoll_open/close are regular bridge calls,
 // netpoll_wait_read/write are intercepted at codegen and replaced with
 // inline coro.suspend (T0232).
+_net_socket_set_nonblock(int fd) int `extern("promise_net_socket_set_nonblock");
 _net_netpoll_open(int fd) int `extern("promise_net_netpoll_open");
 _net_netpoll_close(int pd) `extern("promise_net_netpoll_close");
 _net_netpoll_wait_read(int pd) `extern("promise_netpoll_wait_read");
@@ -117,7 +118,10 @@ type TcpListener `public `doc("A TCP listener socket. Binds to an address and ac
       _net_socket_close(fd);
       raise _make_net_error(rc);
     }
-    // Register with reactor for non-blocking accept
+    // Set non-blocking, then register with reactor for non-blocking accept.
+    // non-blocking must be set BEFORE netpoll_open so EPOLLET sees the correct
+    // initial state when the fd is added to epoll (B0322).
+    _net_socket_set_nonblock(fd);
     int pd = _net_netpoll_open(fd);
     return TcpListener(_fd: fd, _pd: pd);
   }
@@ -126,6 +130,7 @@ type TcpListener `public `doc("A TCP listener socket. Binds to an address and ac
     while true {
       int fd = _net_socket_accept_addr(this._fd);
       if fd >= 0 {
+        _net_socket_set_nonblock(fd);
         int pd = _net_netpoll_open(fd);
         return TcpStream(_fd: fd, _pd: pd);
       }
@@ -172,13 +177,22 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
     if fd < 0 {
       raise _make_net_error(fd);
     }
-    // Register with reactor BEFORE connect (fd is set non-blocking by netpoll_open)
-    int pd = _net_netpoll_open(fd);
+    // Set non-blocking BEFORE connect so connect() returns EINPROGRESS.
+    // Register with epoll AFTER connect so the fd is in "connecting" (not writable)
+    // state at registration time — EPOLLET then fires correctly when the connection
+    // completes. Registering before connect would cause a spurious initial EPOLLOUT
+    // (fresh socket is writable) that EPOLLET consumes, and fast loopback connections
+    // may never produce a second edge transition, leaving the goroutine parked forever
+    // (B0322).
+    _net_socket_set_nonblock(fd);
     int rc = _net_socket_connect_addr(fd, host, port);
     if rc < 0 {
       int err = 0 - rc;
       if err == _einprogress() {
-        // Non-blocking connect in progress — wait for writable, then check SO_ERROR
+        // Non-blocking connect in progress — register with reactor, wait for writable,
+        // then check SO_ERROR. Reactor registered here (after connect) so EPOLLET sees
+        // the "connecting → connected" transition.
+        int pd = _net_netpoll_open(fd);
         _net_netpoll_wait_write(pd);
         int sock_err = _net_socket_get_error(fd);
         if sock_err != 0 {
@@ -186,12 +200,14 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
           _net_socket_close(fd);
           raise NetError(code: sock_err, message: _net_strerror(sock_err));
         }
+        return TcpStream(_fd: fd, _pd: pd);
       } else {
-        _net_netpoll_close(pd);
         _net_socket_close(fd);
         raise _make_net_error(rc);
       }
     }
+    // Immediate connect (non-blocking socket connected synchronously — rare).
+    int pd = _net_netpoll_open(fd);
     return TcpStream(_fd: fd, _pd: pd);
   }
 

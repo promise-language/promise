@@ -367,7 +367,7 @@ func (c *Compiler) defineNetpollLoopFunc() {
 	rfd := processEvents.NewLoad(irtypes.I32, rfdField)
 	count := processEvents.NewCall(c.palReactorPoll, rfd, eventBuf,
 		constant.NewInt(irtypes.I32, maxPollEvents),
-		constant.NewInt(irtypes.I32, 10)) // 10ms timeout
+		constant.NewInt(irtypes.I32, 1)) // 1ms timeout (was 10ms — reduces batch_lock hold time for netpoll_close, B0340)
 
 	hasEvents := processEvents.NewICmp(enum.IPredSGT, count, constant.NewInt(irtypes.I32, 0))
 	processEvents.NewCondBr(hasEvents, eventLoop, noEvents)

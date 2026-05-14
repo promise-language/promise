@@ -68,6 +68,37 @@ test_listener_drop_multiple() `test(exclude: "wasm32") {
   }
 }
 
+// Regression test for B0340: 10 sequential open/close cycles stress the
+// batch_lock acquire path in netpoll_close. With the old 10ms reactor timeout,
+// this could time out under heavy load (lock starvation). With 1ms it is fast.
+test_netpoll_close_batch_lock_stress() `test(exclude: "wasm32") {
+  int i = 0;
+  while i < 10 {
+    int fd = _net_socket_create(2, 1, 0);
+    assert(fd >= 0, "socket created");
+    int pd = _net_netpoll_open(fd);
+    assert(pd != 0, "netpoll opened");
+    _net_netpoll_close(pd);
+    int rc = _net_socket_close(fd);
+    assert(rc >= 0, "socket closed");
+    i = i + 1;
+  }
+}
+
+// Verify _eagain() returns a valid positive errno value on the current platform.
+// Linux=11 (EAGAIN), macOS=35, Windows=10035 (WSAEWOULDBLOCK).
+test_eagain_is_valid_errno() `test(exclude: "wasm32") {
+  int e = _eagain();
+  assert(e > 0, "eagain is positive");
+}
+
+// Verify _net_strerror returns a human-readable message for known and unknown errno values.
+test_net_strerror_known_and_unknown() `test(exclude: "wasm32") {
+  assert(_net_strerror(9) == "bad file descriptor", "EBADF");
+  assert(_net_strerror(32) == "broken pipe", "EPIPE");
+  assert(_net_strerror(999999) == "network error (errno 999999)", "unknown errno");
+}
+
 // ── TcpStream tests ─────────────────────────────────────────────────────────
 // Server side uses raw blocking sockets; sequential flow — no goroutines
 // needed because kernel buffers handle connect backlog and data.

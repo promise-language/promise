@@ -146,6 +146,12 @@ func (c *Checker) checkIdentUse(e *ast.IdentExpr) {
 // non-copy variable tracked in the current state. Also checks that the
 // variable is not actively borrowed.
 func (c *Checker) tryMove(expr ast.Expr) {
+	// B0341: check field reads from droppable owners before ident handling.
+	if member, ok := expr.(*ast.MemberExpr); ok {
+		c.checkFieldMoveOwnership(member)
+		return
+	}
+
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
 		return
@@ -494,6 +500,134 @@ func (c *Checker) registerPatternBindings(pat ast.MatchPattern) {
 	case *ast.ExpressionMatchPattern:
 		c.checkExpr(p.Expr)
 	}
+}
+
+// --- Field move ownership (B0341) ---
+
+// extractNamedType unwraps Instance/SharedRef/MutRef to get the underlying *types.Named.
+func extractNamedType(typ types.Type) *types.Named {
+	switch t := typ.(type) {
+	case *types.Named:
+		return t
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			return n
+		}
+	case *types.SharedRef:
+		return extractNamedType(t.Elem())
+	case *types.MutRef:
+		return extractNamedType(t.Elem())
+	}
+	return nil
+}
+
+// isAutoDupType returns true for types that codegen auto-dups on field read:
+// string, Vector[T]/T[], Channel[T]/channel[T], and Optional wrapping any of these.
+func isAutoDupType(typ types.Type) bool {
+	if n := extractNamedType(typ); n != nil && n == types.TypString {
+		return true
+	}
+	if types.IsVector(typ) {
+		return true
+	}
+	if types.IsChannel(typ) {
+		return true
+	}
+	if opt, ok := typ.(*types.Optional); ok {
+		return isAutoDupType(opt.Elem())
+	}
+	return false
+}
+
+// isDroppableOwner returns true if the type has drop semantics (explicit or synthesized).
+// extractNamedType handles Named, Instance, SharedRef, MutRef; the Enum case
+// covers enums directly (extractNamedType does not unwrap Enum).
+func isDroppableOwner(typ types.Type) bool {
+	if n := extractNamedType(typ); n != nil {
+		return n.HasDrop() || n.NeedsSynthDrop()
+	}
+	if e, ok := typ.(*types.Enum); ok {
+		return e.HasDrop() || e.NeedsSynthDrop()
+	}
+	return false
+}
+
+// isDroppableType reports whether a type has drop semantics (explicit or synthesized).
+// For Optional types, checks the wrapped element recursively.
+func isDroppableType(typ types.Type) bool {
+	switch t := typ.(type) {
+	case *types.Named:
+		return t.HasDrop() || t.NeedsSynthDrop()
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			return n.HasDrop() || n.NeedsSynthDrop()
+		}
+	case *types.Enum:
+		return t.HasDrop() || t.NeedsSynthDrop()
+	case *types.Optional:
+		return isDroppableType(t.Elem())
+	}
+	return false
+}
+
+// isValueTarget returns true when the root of a MemberExpr chain is a
+// variable (owned value). Returns false for type names (Enum.Variant),
+// module references (json.JsonValue.Null), and other non-value targets.
+func (c *Checker) isValueTarget(e *ast.MemberExpr) bool {
+	target := e.Target
+	for {
+		if me, ok := target.(*ast.MemberExpr); ok {
+			target = me.Target
+		} else {
+			break
+		}
+	}
+	if ident, ok := target.(*ast.IdentExpr); ok {
+		if obj := c.info.Objects[ident]; obj != nil {
+			_, isVar := obj.(*types.Var)
+			return isVar
+		}
+	}
+	return false
+}
+
+// checkFieldMoveOwnership rejects reading a droppable, non-auto-dup field from
+// a droppable owner in an ownership-transfer context (B0341). The user must
+// call .clone() to create an independent copy.
+func (c *Checker) checkFieldMoveOwnership(e *ast.MemberExpr) {
+	// Skip enum variant constructors (Enum.Variant), module references
+	// (json.JsonValue.Null), etc. — only field reads from owned values matter.
+	if !c.isValueTarget(e) {
+		return
+	}
+	fieldType := c.info.Types[e]
+	if fieldType == nil {
+		return
+	}
+	if isCopyType(fieldType) {
+		return
+	}
+	if types.ContainsTypeParam(fieldType) {
+		return
+	}
+	ownerType := c.info.Types[e.Target]
+	if ownerType == nil {
+		return
+	}
+	if !isDroppableOwner(ownerType) {
+		return
+	}
+	if isAutoDupType(fieldType) {
+		return
+	}
+	// Only error if the field type itself is droppable — non-droppable
+	// non-Copy types (fieldless enums, etc.) have value semantics and
+	// are safe to shallow-copy without causing double-free.
+	if !isDroppableType(fieldType) {
+		return
+	}
+	c.errorf(e.Pos(), "cannot move field '%s' out of '%s' — use .clone() to create an independent copy",
+		e.Field, ownerType)
 }
 
 // --- Lambda expressions ---

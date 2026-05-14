@@ -1479,11 +1479,11 @@ func TestOwnershipGetterSetterSameName(t *testing.T) {
 	// Ownership checker must resolve getter and setter bodies independently.
 	ownerOK(t, `
 		type Box {
-			Box _inner;
-			get inner Box { return this._inner; }
-			set inner(Box v) { this._inner = v; }
+			string _inner;
+			get inner string { return this._inner; }
+			set inner(string v) { this._inner = v; }
 		}
-		test(Box b, Box v) {
+		test(Box b, string v) {
 			b.inner = v;
 		}
 	`)
@@ -3000,4 +3000,204 @@ func TestLifetimeReturnLocalStillErrors(t *testing.T) {
 		}
 	`)
 	expectOwnerError(t, errs, "cannot return reference to local variable 's'")
+}
+
+// === B0341: Field move from droppable owner ===
+
+func TestFieldMoveMapFromDroppableError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { map[string, string] headers; }
+		type Outer { map[string, string] headers; }
+		test() {
+			Inner inner = Inner(headers: map[string, string]());
+			Outer outer = Outer(headers: inner.headers);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'headers'")
+}
+
+func TestFieldMoveSetFromDroppableError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Wrapper { Set[int] items; }
+		test() {
+			Wrapper w = Wrapper(items: Set[int]());
+			Set[int] s = w.items;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'items'")
+}
+
+func TestFieldMoveUserTypeWithDropError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		type Owner { Resource r; }
+		test() {
+			Owner o = Owner(r: Resource(id: 1));
+			Resource r2 = o.r;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'r'")
+}
+
+func TestFieldMoveStringFromDroppableOK(t *testing.T) {
+	ownerOK(t, `
+		type Inner { string name; }
+		test() {
+			Inner inner = Inner(name: "hello");
+			string s = inner.name;
+		}
+	`)
+}
+
+func TestFieldMoveVectorFromDroppableOK(t *testing.T) {
+	ownerOK(t, `
+		type Inner { int[] items; }
+		test() {
+			Inner inner = Inner(items: [1, 2, 3]);
+			int[] v = inner.items;
+		}
+	`)
+}
+
+func TestFieldMoveChannelFromDroppableOK(t *testing.T) {
+	ownerOK(t, `
+		type Inner { channel[int] ch; }
+		test() {
+			Inner inner = Inner(ch: channel[int]());
+			channel[int] c = inner.ch;
+		}
+	`)
+}
+
+func TestFieldMoveCopyFieldOK(t *testing.T) {
+	ownerOK(t, `
+		type Inner { int x; string name; }
+		test() {
+			Inner inner = Inner(x: 42, name: "hi");
+			int v = inner.x;
+		}
+	`)
+}
+
+func TestFieldMoveNonDroppableOwnerOK(t *testing.T) {
+	// Owner has only Copy fields → no synth drop → field read is safe.
+	ownerOK(t, `
+		type Pair { int x; int y; }
+		test() {
+			Pair p = Pair(x: 1, y: 2);
+			int v = p.x;
+		}
+	`)
+}
+
+func TestFieldMoveReturnError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { map[string, string] headers; }
+		extract(Inner inner) map[string, string] {
+			return inner.headers;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'headers'")
+}
+
+func TestFieldMoveNestedCopyFieldOK(t *testing.T) {
+	ownerOK(t, `
+		type Inner { int id; string name; }
+		type Outer { Inner inner; }
+		test() {
+			Outer o = Outer(inner: Inner(id: 1, name: "x"));
+			int v = o.inner.id;
+		}
+	`)
+}
+
+func TestFieldMoveOptionalMapError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Wrapper { map[string, string]? headers; }
+		test() {
+			Wrapper w = Wrapper(headers: map[string, string]());
+			map[string, string]? h = w.headers;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'headers'")
+}
+
+func TestFieldMoveOptionalStringOK(t *testing.T) {
+	ownerOK(t, `
+		type Wrapper { string? name; }
+		test() {
+			Wrapper w = Wrapper(name: "hello");
+			string? s = w.name;
+		}
+	`)
+}
+
+func TestFieldMoveCloneCallOK(t *testing.T) {
+	// .clone() returns an owned copy — tryMove sees the CallExpr result,
+	// not the MemberExpr, so no error.
+	ownerOK(t, `
+		type Inner { map[string, string] headers; }
+		type Outer { map[string, string] headers; }
+		test() {
+			Inner inner = Inner(headers: map[string, string]());
+			Outer outer = Outer(headers: inner.headers.clone());
+		}
+	`)
+}
+
+func TestFieldMoveForInIterableOK(t *testing.T) {
+	// For-in borrows the iterable — reading a droppable field for iteration
+	// is safe and must not trigger the field-move check.
+	ownerOK(t, `
+		type Holder { map[string, string] data; }
+		test() {
+			Holder h = Holder(data: map[string, string]());
+			for k, v in h.data {}
+		}
+	`)
+}
+
+func TestFieldMoveNonDroppableOwnerNonCopyFieldOK(t *testing.T) {
+	// Owner has no drop (only contains a fieldless enum, which is non-droppable).
+	// The enum field is non-Copy (no `copy annotation), but the owner isn't
+	// droppable so the field read is safe — exercises the !isDroppableOwner return.
+	ownerOK(t, `
+		enum Color { Red; Green; Blue; }
+		type Wrapper { Color c; }
+		test() {
+			Wrapper w = Wrapper(c: Color.Red);
+			Color c = w.c;
+		}
+	`)
+}
+
+func TestFieldMoveNonDroppableFieldTypeOK(t *testing.T) {
+	// Owner IS droppable (has string field → synth drop), but the accessed
+	// field is a fieldless enum — non-Copy, non-auto-dup, but NOT droppable.
+	// Exercises the !isDroppableType return in checkFieldMoveOwnership.
+	ownerOK(t, `
+		enum Color { Red; Green; Blue; }
+		type Tagged { string name; Color tag; }
+		test() {
+			Tagged t = Tagged(name: "x", tag: Color.Red);
+			Color c = t.tag;
+		}
+	`)
+}
+
+func TestFieldMoveEnumWithDropFieldError(t *testing.T) {
+	// Field type is an enum that has synth-drop (variant contains a map).
+	// Owner is droppable. Exercises the isDroppableType Enum branch.
+	errs := ownerErrs(t, `
+		enum Payload { Data(map[string, string] m); Empty; }
+		type Container { Payload p; }
+		test() {
+			Container c = Container(p: Payload.Data(m: map[string, string]()));
+			Payload p2 = c.p;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'p'")
 }

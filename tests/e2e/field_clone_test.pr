@@ -1,0 +1,44 @@
+// B0341: Reading non-Copy, non-auto-dup fields from droppable owners requires .clone().
+// This test verifies that cloned fields produce independent copies.
+type Inner {
+  map[string, string] headers;
+}
+
+type Outer {
+  map[string, string] headers;
+}
+
+test_clone_map_field() `test {
+  map[string, string] h = map[string, string]();
+  h["a"] = "b";
+  Inner inner = Inner(headers: h);
+  // inner.headers requires .clone() — ownership checker rejects bare field read
+  Outer outer = Outer(headers: inner.headers.clone());
+  assert(outer.headers.len == 1, "outer has 1 entry");
+  assert(outer.headers.contains("a"), "outer has key a");
+  // Mutate the clone — original must be unaffected
+  outer.headers["c"] = "d";
+  assert(inner.headers.len == 1, "inner still has 1 entry after clone mutation");
+}
+
+test_clone_string_field_no_clone_needed() `test {
+  // Strings are auto-dup'd in codegen — no .clone() required.
+  Inner2 inner = Inner2(name: "hello");
+  string s = inner.name;
+  assert(s == "hello", "string field read works without clone");
+}
+
+type Inner2 {
+  string name;
+}
+
+test_clone_vector_field_no_clone_needed() `test {
+  // Vectors are auto-dup'd in codegen — no .clone() required.
+  VecHolder holder = VecHolder(items: [1, 2, 3]);
+  int[] v = holder.items;
+  assert(v.len == 3, "vector field read works without clone");
+}
+
+type VecHolder {
+  int[] items;
+}

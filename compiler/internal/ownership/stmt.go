@@ -445,7 +445,11 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 
 func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	c.checkExpr(s.Iterable)
-	c.tryMove(s.Iterable)
+	// For-in borrows the iterable for iteration — field reads are not
+	// consumed, so skip the field-move check for MemberExpr (B0341).
+	if _, isMember := s.Iterable.(*ast.MemberExpr); !isMember {
+		c.tryMove(s.Iterable)
+	}
 	// Expire call-scoped borrows from the iterable expression so the loop
 	// body can re-borrow the same variables.
 	if c.borrows != nil {

@@ -23,9 +23,24 @@ clean_word!(string raw) string {
   return b.to_string();
 }
 
-main!() {
+main!() `test(expected: """=== Text Analysis ===
+Total words  : 61
+Unique words : 44
+Avg word len : 4 chars
+
+Top 5 words by frequency:
+  1. "to" — 6x
+  2. "of" — 3x
+  3. "is" — 3x
+  4. "data" — 3x
+  5. "guesses" — 2x""") {
   // A short passage from Sherlock Holmes (public domain).
-  string text = "It is a capital mistake to theorize before one has data. " + "Insensibly one begins to twist facts to suit theories, " + "instead of theories to suit facts. Data is the foundation " + "of all good reasoning. Without data you are forced to make " + "guesses, and guesses lead to errors. The world is full of " + "obvious things which nobody by any chance ever observes.";
+  string text = """It is a capital mistake to theorize before one has data.
+Insensibly one begins to twist facts to suit theories,
+instead of theories to suit facts. Data is the foundation
+of all good reasoning. Without data you are forced to make
+guesses, and guesses lead to errors. The world is full of
+obvious things which nobody by any chance ever observes.""";
 
   // Normalize whitespace: replace newlines with spaces, then split.
   string[] raw = text.replace("\n", " ").split(" ");

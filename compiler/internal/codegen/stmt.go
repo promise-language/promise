@@ -6261,6 +6261,26 @@ func (c *Compiler) genMethodIndexAssign(target *ast.IndexExpr, targetType types.
 	targetVal := c.genExpr(target.Target)
 	keyVal := c.genExpr(target.Index)
 
+	// B0343: Map []= takes ~K key (move). Handle string key ownership so the
+	// map holds an independent copy. If the key source has a drop flag, clear
+	// it (ownership transferred). If no drop flag (borrow param), dup so the
+	// map doesn't hold a pointer that the caller will free.
+	if keyType, _, isMap := types.AsMap(targetType); isMap {
+		resolvedKey := keyType
+		if c.typeSubst != nil {
+			resolvedKey = types.Substitute(resolvedKey, c.typeSubst)
+		}
+		if extractNamed(resolvedKey) == types.TypString {
+			if ident, ok := target.Index.(*ast.IdentExpr); ok {
+				if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
+					c.clearDropFlag(ident.Name)
+				} else {
+					keyVal = c.dupString(keyVal)
+				}
+			}
+		}
+	}
+
 	var instancePtr value.Value
 	if isContainerType(targetType) {
 		instancePtr = targetVal
@@ -7068,6 +7088,16 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 
 	twoBindings := s.Index != "" // for k, v in map
 
+	// B0343: Determine which bindings need string dup to prevent double-free.
+	// keys()/values() return vectors with cloned strings. Without dup, the
+	// iteration variable shares the heap pointer with the vector element.
+	// emitVectorElementDropLoop would double-free strings that were moved.
+	isKeyStr := extractNamed(keyType) == types.TypString
+	isValStr := extractNamed(valType) == types.TypString
+	var dupKeyStr, dupValStr bool
+	var keyDropName, valDropName string
+	var keyStrAlloca, valStrAlloca *ir.InstAlloca
+
 	if twoBindings {
 		// Separate key and value allocas
 		keyAlloca := c.createEntryAlloca(keyLLVM)
@@ -7077,12 +7107,44 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 		valAlloca := c.createEntryAlloca(valLLVM)
 		valAlloca.SetName(c.uniqueLocalName(s.Binding))
 		c.locals[s.Binding] = valAlloca
+
+		// B0343: Register drop bindings for string keys/values.
+		dupKeyStr = s.Index != "_" && isKeyStr
+		dupValStr = s.Binding != "_" && isValStr
+		if dupKeyStr {
+			keyDropName = s.Index
+			keyStrAlloca = keyAlloca
+			c.maybeRegisterDrop(keyDropName, keyStrAlloca, keyType)
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.dropFlags[keyDropName])
+		}
+		if dupValStr {
+			valDropName = s.Binding
+			valStrAlloca = valAlloca
+			c.maybeRegisterDrop(valDropName, valStrAlloca, valType)
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.dropFlags[valDropName])
+		}
 	} else {
 		// Single binding: (K, V) tuple
 		tupleType := irtypes.NewStruct(keyLLVM, valLLVM)
 		bindingAlloca := c.createEntryAlloca(tupleType)
 		bindingAlloca.SetName(c.uniqueLocalName(s.Binding))
 		c.locals[s.Binding] = bindingAlloca
+
+		// B0343: Hidden allocas for string lifecycle tracking in single-binding case.
+		dupKeyStr = isKeyStr
+		dupValStr = isValStr
+		if dupKeyStr {
+			keyDropName = "__forin_key"
+			keyStrAlloca = c.createEntryAlloca(keyLLVM)
+			c.maybeRegisterDrop(keyDropName, keyStrAlloca, keyType)
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.dropFlags[keyDropName])
+		}
+		if dupValStr {
+			valDropName = "__forin_val"
+			valStrAlloca = c.createEntryAlloca(valLLVM)
+			c.maybeRegisterDrop(valDropName, valStrAlloca, valType)
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.dropFlags[valDropName])
+		}
 	}
 
 	headerBlock := c.newBlock("forin.header")
@@ -7107,6 +7169,33 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
+
+	// B0343: Drop previous iteration's dup'd strings if not moved.
+	if dupKeyStr {
+		dropFlag := c.dropFlags[keyDropName]
+		flag := c.block.NewLoad(irtypes.I1, dropFlag)
+		dropBlk := c.newBlock("forin.key.drop")
+		afterBlk := c.newBlock("forin.key.after")
+		c.block.NewCondBr(flag, dropBlk, afterBlk)
+		c.block = dropBlk
+		oldKey := c.block.NewLoad(irtypes.I8Ptr, keyStrAlloca)
+		c.block.NewCall(c.funcs["promise_string_drop"], oldKey)
+		c.block.NewBr(afterBlk)
+		c.block = afterBlk
+	}
+	if dupValStr {
+		dropFlag := c.dropFlags[valDropName]
+		flag := c.block.NewLoad(irtypes.I1, dropFlag)
+		dropBlk := c.newBlock("forin.val.drop")
+		afterBlk := c.newBlock("forin.val.after")
+		c.block.NewCondBr(flag, dropBlk, afterBlk)
+		c.block = dropBlk
+		oldVal := c.block.NewLoad(irtypes.I8Ptr, valStrAlloca)
+		c.block.NewCall(c.funcs["promise_string_drop"], oldVal)
+		c.block.NewBr(afterBlk)
+		c.block = afterBlk
+	}
+
 	idx := c.block.NewLoad(irtypes.I64, counterAlloca)
 
 	// Load key from keys vector
@@ -7114,14 +7203,22 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	keyDataPtr := c.block.NewBitCast(keyDataBase, irtypes.NewPointer(keyLLVM))
 	keyElemPtr := c.block.NewGetElementPtr(keyLLVM, keyDataPtr, idx)
-	key := c.block.NewLoad(keyLLVM, keyElemPtr)
+	var key value.Value = c.block.NewLoad(keyLLVM, keyElemPtr)
 
 	// Load value from values vector
 	valDataBase := c.block.NewGetElementPtr(irtypes.I8, valsVec,
 		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	valDataPtr := c.block.NewBitCast(valDataBase, irtypes.NewPointer(valLLVM))
 	valElemPtr := c.block.NewGetElementPtr(valLLVM, valDataPtr, idx)
-	val := c.block.NewLoad(valLLVM, valElemPtr)
+	var val value.Value = c.block.NewLoad(valLLVM, valElemPtr)
+
+	// B0343: Dup strings for independent ownership.
+	if dupKeyStr {
+		key = c.dupString(key)
+	}
+	if dupValStr {
+		val = c.dupString(val)
+	}
 
 	if twoBindings {
 		// Store key and value to separate allocas
@@ -7134,6 +7231,21 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 		tuple = c.block.NewInsertValue(tuple, key, 0)
 		tuple = c.block.NewInsertValue(tuple, val, 1)
 		c.block.NewStore(tuple, c.locals[s.Binding])
+		// B0343: Store to hidden tracking allocas.
+		if dupKeyStr {
+			c.block.NewStore(key, keyStrAlloca)
+		}
+		if dupValStr {
+			c.block.NewStore(val, valStrAlloca)
+		}
+	}
+
+	// B0343: Set drop flags for dup'd strings.
+	if dupKeyStr {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), c.dropFlags[keyDropName])
+	}
+	if dupValStr {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), c.dropFlags[valDropName])
 	}
 
 	c.genBlock(s.Body)

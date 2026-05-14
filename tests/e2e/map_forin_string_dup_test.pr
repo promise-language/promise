@@ -1,0 +1,157 @@
+// B0343: for-in map iteration must dup string keys/values to prevent
+// double-free when iteration variables are passed to method calls.
+type Holder {
+  map[string, string] data;
+
+  drop(~this) {
+  }
+
+  set(~this, string k, string v) {
+    this.data[k] = v;
+  }
+
+  get(this, string key) string? {
+    return this.data[key];
+  }
+}
+
+// Reproduction case: pass iterated key/value to method, read back.
+test_forin_map_method_pass() `test {
+  map[string, string] init = {:};
+  Holder h = Holder(data: init);
+  map[string, string] m = {:};
+  m["hello"] = "world";
+  m["foo"] = "bar";
+
+  for key, value in m {
+    h.set(key, value);
+  }
+
+  assert(h.data.len == 2, "len == 2");
+  if v := h.get("hello") {
+    assert(v == "world", "hello == world");
+  } else {
+    assert(false, "hello not found");
+  }
+  if v := h.get("foo") {
+    assert(v == "bar", "foo == bar");
+  } else {
+    assert(false, "foo not found");
+  }
+}
+
+// Direct map-to-map copy via for-in.
+test_forin_map_copy() `test {
+  map[string, string] src = {:};
+  src["a"] = "1";
+  src["b"] = "2";
+
+  map[string, string] dst = {:};
+  for k, v in src {
+    dst[k] = v;
+  }
+
+  assert(dst.len == 2, "dst len == 2");
+  if v := dst["a"] {
+    assert(v == "1", "a == 1");
+  } else {
+    assert(false, "a not found");
+  }
+  if v := dst["b"] {
+    assert(v == "2", "b == 2");
+  } else {
+    assert(false, "b not found");
+  }
+}
+
+// Read-only iteration (no move) must still work.
+test_forin_map_readonly() `test {
+  map[string, string] m = {:};
+  m["x"] = "y";
+
+  int count = 0;
+  for key, value in m {
+    assert(key == "x", "key == x");
+    assert(value == "y", "value == y");
+    count = count + 1;
+  }
+  assert(count == 1, "count == 1");
+}
+
+// Empty map must not crash.
+test_forin_map_empty() `test {
+  map[string, string] m = {:};
+  for k, v in m {
+    assert(false, "should not enter");
+  }
+}
+
+// Underscore bindings: for _, v in map.
+test_forin_map_underscore_key() `test {
+  map[string, string] m = {:};
+  m["a"] = "hello";
+
+  string[] vals = string[]();
+  for _, v in m {
+    vals.push(v);
+  }
+  assert(vals.len == 1, "vals len == 1");
+  assert(vals[0] == "hello", "vals[0] == hello");
+}
+
+// Underscore bindings: for k, _ in map.
+test_forin_map_underscore_value() `test {
+  map[string, string] m = {:};
+  m["key1"] = "val1";
+
+  string[] keys = string[]();
+  for k, _ in m {
+    keys.push(k);
+  }
+  assert(keys.len == 1, "keys len == 1");
+  assert(keys[0] == "key1", "keys[0] == key1");
+}
+
+// Single-binding tuple form: for entry in map (exercises hidden tracking allocas).
+test_forin_map_tuple_binding() `test {
+  map[string, string] m = {:};
+  m["a"] = "x";
+  m["b"] = "y";
+
+  int count = 0;
+  for entry in m {
+    count = count + 1;
+  }
+  assert(count == 2, "count == 2");
+}
+
+// Multiple iterations: verify no corruption across iterations.
+test_forin_map_multi_entry() `test {
+  map[string, string] init = {:};
+  Holder h = Holder(data: init);
+  map[string, string] m = {:};
+  m["k1"] = "v1";
+  m["k2"] = "v2";
+  m["k3"] = "v3";
+
+  for key, value in m {
+    h.set(key, value);
+  }
+
+  assert(h.data.len == 3, "len == 3");
+  if v := h.get("k1") {
+    assert(v == "v1", "k1 == v1");
+  } else {
+    assert(false, "k1 not found");
+  }
+  if v := h.get("k2") {
+    assert(v == "v2", "k2 == v2");
+  } else {
+    assert(false, "k2 not found");
+  }
+  if v := h.get("k3") {
+    assert(v == "v3", "k3 == v3");
+  } else {
+    assert(false, "k3 not found");
+  }
+}

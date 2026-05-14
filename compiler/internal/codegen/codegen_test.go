@@ -18666,3 +18666,57 @@ func TestCrossModuleGenericMethodCallsGenericFuncMultipleInstances(t *testing.T)
 	assertContains(t, ir, `@"Box[int].unwrap[int]"`)
 	assertContains(t, ir, `@"Box[string].unwrap[string]"`)
 }
+
+// B0343: for-in over map[string, string] must dup key/value strings to prevent
+// double-free when iteration variables are passed to methods.
+func TestForInMapStringDup(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			map[string, string] m = map[string, string]();
+			for k, v in m {
+			}
+		}
+	`)
+	// Key and value strings are dup'd via promise_string_new
+	assertContains(t, ir, "strdup.copy")
+	// Drop flags for key and value bindings
+	assertContains(t, ir, "k.dropflag")
+	assertContains(t, ir, "v.dropflag")
+	// Per-iteration conditional drops
+	assertContains(t, ir, "forin.key.drop")
+	assertContains(t, ir, "forin.val.drop")
+}
+
+// B0343: Map []= with borrow-string key must dup so the map owns the key.
+func TestMapIndexAssignDupBorrowKey(t *testing.T) {
+	ir := generateIR(t, `
+		type Sink {
+			map[string, string] m;
+			put(~this, string k, string v) {
+				this.m[k] = v;
+			}
+		}
+		test() {
+			Sink s = Sink(m: map[string, string]());
+			s.put("a", "b");
+		}
+	`)
+	// The key "k" (borrow param, no drop flag) must be dup'd at the []= site
+	assertContains(t, ir, "strdup.copy")
+}
+
+// B0343: Map []= with owned-string key (has drop flag) clears the flag.
+func TestMapIndexAssignClearKeyDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			map[string, string] m = map[string, string]();
+			for k, v in m {
+				map[string, string] dst = map[string, string]();
+				dst[k] = v;
+			}
+		}
+	`)
+	// Key k has a drop flag from B0343; dst[k] = v clears it
+	assertContains(t, ir, "k.dropflag")
+	assertContains(t, ir, "forin.key.drop")
+}

@@ -508,6 +508,16 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 
 	file, info := compileFrontend(filename)
 
+	// Check for main() function — must exist for build/run (not test).
+	if !hasMainFunc(info) {
+		fmt.Fprintf(os.Stderr, "error: program has no main() function\n\n"+
+			"A runnable program requires a main() function as its entry point:\n\n"+
+			"  main() {\n"+
+			"    // your code here\n"+
+			"  }\n")
+		os.Exit(1)
+	}
+
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
 		CachedInstances: lookupCachedInstances(info, target, buildModeStr(releaseMode)),
@@ -521,6 +531,19 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 		timePhase("total", time.Since(compileStart), "")
 	}
 	return filename, outputFile, target
+}
+
+// hasMainFunc checks whether the sema info contains a main() function in the file scope.
+func hasMainFunc(info *sema.Info) bool {
+	if len(info.ScopeOrder) == 0 {
+		return false
+	}
+	obj := info.ScopeOrder[0].Lookup("main")
+	if obj == nil {
+		return false
+	}
+	_, isFunc := obj.(*types.Func)
+	return isFunc
 }
 
 // runRun compiles and immediately runs a .pr file.

@@ -8185,6 +8185,17 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 		}
 	}
 
+	// B0354: Collect droppable non-channel captures for ownership transfer.
+	capturedDroppablesVB := make(map[string]types.Type)
+	for _, name := range captureNames {
+		if _, isChannel := capturedChanTypesVB[name]; isChannel {
+			continue
+		}
+		if binding, ok := c.dropBindings[name]; ok {
+			capturedDroppablesVB[name] = binding.valType
+		}
+	}
+
 	// 4. Create coroutine function with captured values as parameters
 	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
 	c.goCounter++
@@ -8267,6 +8278,14 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 		if chanValType, ok := capturedChanTypesVB[name]; ok {
 			alloca := c.locals[name]
 			c.maybeRegisterDrop(name, alloca, chanValType)
+		}
+	}
+
+	// B0354: Register drop bindings for non-channel droppable captures.
+	for _, name := range captureNames {
+		if valType, ok := capturedDroppablesVB[name]; ok {
+			alloca := c.locals[name]
+			c.maybeRegisterDrop(name, alloca, valType)
 		}
 	}
 
@@ -8399,6 +8418,11 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.coroSuspendBlk = savedCoroSuspend
 	c.panicExitBlock = savedPanicExitBlock
 	c.goExprFireAndForget = savedGoExprFF
+
+	// B0354: Clear outer drop flags for captured droppable non-channel variables.
+	for name := range capturedDroppablesVB {
+		c.clearDropFlag(name)
+	}
 
 	// 9. Caller: call coroutine ramp → get handle, create G, enqueue
 	handle := c.block.NewCall(coroFn, captureVals...)
@@ -8736,6 +8760,19 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 		}
 	}
 
+	// B0354: Collect droppable non-channel captures for ownership transfer.
+	// Strings, vectors, heap user types with drop, etc. — the goroutine takes
+	// ownership; the outer scope's drop flag is cleared after spawn.
+	capturedDroppables := make(map[string]types.Type)
+	for _, name := range captureNames {
+		if _, isChannel := capturedChanTypes[name]; isChannel {
+			continue
+		}
+		if binding, ok := c.dropBindings[name]; ok {
+			capturedDroppables[name] = binding.valType
+		}
+	}
+
 	// Create coroutine function with captured values as parameters
 	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
 	c.goCounter++
@@ -8822,6 +8859,15 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 		if chanValType, ok := capturedChanTypes[name]; ok {
 			alloca := c.locals[name]
 			c.maybeRegisterDrop(name, alloca, chanValType)
+		}
+	}
+
+	// B0354: Register drop bindings for non-channel droppable captures.
+	// Goroutine assumes ownership; outer drop flag is cleared after spawn.
+	for _, name := range captureNames {
+		if valType, ok := capturedDroppables[name]; ok {
+			alloca := c.locals[name]
+			c.maybeRegisterDrop(name, alloca, valType)
 		}
 	}
 
@@ -8949,6 +8995,12 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.coroSuspendBlk = savedCoroSuspend
 	c.panicExitBlock = savedPanicExitBlock
 	c.goExprFireAndForget = savedGoExprFF
+
+	// B0354: Clear outer drop flags for captured droppable non-channel variables.
+	// Ownership has been transferred to the goroutine.
+	for name := range capturedDroppables {
+		c.clearDropFlag(name)
+	}
 
 	// Caller: call coroutine ramp → get handle, create G, enqueue
 	handle := c.block.NewCall(coroFn, captureVals...)

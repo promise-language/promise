@@ -389,7 +389,12 @@ func (e *encoder) stmt(s ast.Stmt) {
 			e.str(c.Binding)
 			e.stmts(c.Body)
 		}
-		e.stmts(n.Default)
+		if n.Default != nil {
+			e.u8(1)
+			e.stmts(n.Default)
+		} else {
+			e.u8(0)
+		}
 	}
 }
 

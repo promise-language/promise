@@ -383,6 +383,73 @@ func TestKeyToHashFallback(t *testing.T) {
 	}
 }
 
+// TestRoundTripSelectEmptyDefault verifies that a select with an empty default
+// body (Default = []Stmt{}) survives encode/decode as non-nil (B0352).
+func TestRoundTripSelectEmptyDefault(t *testing.T) {
+	pos := ast.Pos{File: "test.pr", Line: 1, Column: 0}
+	end := ast.Pos{File: "test.pr", Line: 5, Column: 0}
+
+	sel := &ast.SelectStmt{
+		Cases:   []*ast.SelectCase{},
+		Default: []ast.Stmt{},
+	}
+	sel.SetPosEnd(pos, end)
+
+	f := wrapStmtInFile(sel)
+	encoded := Encode(f)
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	// Extract the SelectStmt from decoded
+	fd := decoded.Decls[0].(*ast.FuncDecl)
+	got := fd.Body.Stmts[0].(*ast.SelectStmt)
+	if got.Default == nil {
+		t.Fatal("expected non-nil Default for empty default body, got nil")
+	}
+	if len(got.Default) != 0 {
+		t.Fatalf("expected empty Default slice, got %d stmts", len(got.Default))
+	}
+
+	// Verify byte-level round-trip
+	reencoded := Encode(decoded)
+	if !bytes.Equal(encoded, reencoded) {
+		t.Fatal("round-trip mismatch for select with empty default")
+	}
+}
+
+// TestRoundTripSelectNoDefault verifies that a select with no default clause
+// (Default = nil) survives encode/decode as nil (B0352).
+func TestRoundTripSelectNoDefault(t *testing.T) {
+	pos := ast.Pos{File: "test.pr", Line: 1, Column: 0}
+	end := ast.Pos{File: "test.pr", Line: 5, Column: 0}
+
+	sel := &ast.SelectStmt{
+		Cases:   []*ast.SelectCase{},
+		Default: nil,
+	}
+	sel.SetPosEnd(pos, end)
+
+	f := wrapStmtInFile(sel)
+	encoded := Encode(f)
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	fd := decoded.Decls[0].(*ast.FuncDecl)
+	got := fd.Body.Stmts[0].(*ast.SelectStmt)
+	if got.Default != nil {
+		t.Fatalf("expected nil Default for no default clause, got %d stmts", len(got.Default))
+	}
+
+	reencoded := Encode(decoded)
+	if !bytes.Equal(encoded, reencoded) {
+		t.Fatal("round-trip mismatch for select with no default")
+	}
+}
+
 // --- helpers ---
 
 func makeIdent(name string) *ast.IdentExpr {

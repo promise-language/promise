@@ -486,7 +486,12 @@ func (d *decoder) stmt() ast.Stmt {
 			c.Body = d.stmts()
 			n.Cases[i] = c
 		}
-		n.Default = d.stmts()
+		if d.u8() == 1 {
+			n.Default = d.stmts()
+			if n.Default == nil {
+				n.Default = []ast.Stmt{}
+			}
+		}
 		return n
 	default:
 		d.err = fmt.Errorf("unknown stmt tag %d at offset %d", tag, d.off-1)

@@ -3966,6 +3966,23 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					break
 				}
 			}
+			// B0350: Map[K,string] index assign from borrow param — dup value
+			// so the map owns an independent copy. Borrow params have no drop
+			// flag, so clearDropFlag below is a no-op and the caller still frees
+			// the original → double-free without this dup.
+			if _, valType, isMap := types.AsMap(idxTargetType); isMap {
+				resolvedVal := valType
+				if c.typeSubst != nil {
+					resolvedVal = types.Substitute(resolvedVal, c.typeSubst)
+				}
+				if extractNamed(resolvedVal) == types.TypString {
+					if ident, ok := s.Value.(*ast.IdentExpr); ok {
+						if _, hasFlag := c.dropFlags[ident.Name]; !hasFlag {
+							val = c.dupString(val)
+						}
+					}
+				}
+			}
 		}
 		c.genIndexAssign(target, s.Op, val)
 		// Clear drop flag on RHS if it's being moved via simple assign

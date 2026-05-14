@@ -9562,6 +9562,43 @@ func TestVectorStringIndexAssignDropsOld(t *testing.T) {
 	assertContains(t, ir, "call void @promise_string_drop")
 }
 
+// B0350: Map[K,string] index assign from borrow param dups value
+func TestMapStringIndexAssignBorrowParamDup(t *testing.T) {
+	ir := generateIR(t, `
+		store(map[string, string] m, string key, string value) {
+			m[key] = value;
+		}
+		main() {
+			map[string, string] m = {:};
+			store(m, "k", "v");
+		}
+	`)
+	// The borrow param 'value' should be duped before storing in map
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
+// B0350: Owned local string assigned to map should NOT produce extra dup —
+// clearDropFlag transfers ownership, so no dup is needed.
+func TestMapStringIndexAssignOwnedNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		make_val() string { return "hello"; }
+		store_owned(map[string, string] m) {
+			string v = make_val();
+			m["k"] = v;
+		}
+		main() {
+			map[string, string] m = {:};
+			store_owned(m);
+		}
+	`)
+	// v is an owned local (has drop flag) — clearDropFlag transfers ownership.
+	// B0350 dup must NOT fire for owned locals.
+	fnIR := extractFunction(ir, "store_owned")
+	if strings.Contains(fnIR, "call i8* @promise_string_new") {
+		t.Error("owned local string should not be duped in map index assign")
+	}
+}
+
 // B0235: Map overwrite should drop old Slot enum element.
 func TestMapOverwriteDropsOldSlot(t *testing.T) {
 	ir := generateIR(t, `

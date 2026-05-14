@@ -1,0 +1,73 @@
+// B0350: Map[K,string] index assign from borrow param must dup to avoid double-free.
+type Sink {
+  map[string, string] m;
+
+  drop(~this) {
+  }
+
+  set(~this, string key, string value) {
+    this.m[key] = value;
+  }
+
+  get(this, string key) string? {
+    return this.m[key];
+  }
+}
+
+test_borrow_param_into_map() `test {
+  map[string, string] init = {:};
+  sink := Sink(m: init);
+  sink.set("a", "hello");
+  sink.set("b", "world");
+
+  if v := sink.get("a") {
+    assert(v == "hello", "a == hello");
+  } else {
+    assert(false, "a not found");
+  }
+  if v := sink.get("b") {
+    assert(v == "world", "b == world");
+  } else {
+    assert(false, "b not found");
+  }
+}
+
+test_borrow_param_overwrite() `test {
+  map[string, string] init = {:};
+  sink := Sink(m: init);
+  sink.set("key", "first");
+  sink.set("key", "second");
+
+  if v := sink.get("key") {
+    assert(v == "second", "overwrite");
+  } else {
+    assert(false, "key not found");
+  }
+}
+
+test_borrow_from_variable() `test {
+  map[string, string] init = {:};
+  sink := Sink(m: init);
+  string val = "from_var";
+  sink.set("k", val);
+
+  if v := sink.get("k") {
+    assert(v == "from_var", "from variable");
+  } else {
+    assert(false, "k not found");
+  }
+}
+
+// B0350: Heap-allocated string (not a literal) stored via borrow param
+// must not double-free. Tests the dup path with a non-rodata string.
+test_heap_string_borrow_into_map() `test {
+  string val = "he" + "llo";
+  map[string, string] init = {:};
+  sink := Sink(m: init);
+  sink.set("k", val);
+  if v := sink.get("k") {
+    assert(v == "hello", "heap string stored");
+  } else {
+    assert(false, "k not found");
+  }
+}

@@ -4462,6 +4462,20 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		return
 	}
 
+	// B0353: Goroutine return: bare return means "exit this goroutine".
+	// Branch to the coroutine's final suspend block instead of emitting
+	// ret void (the coroutine function returns ptr, not void).
+	if c.coroutineReturnBlock != nil {
+		c.emitLambdaWritebacks()
+		if len(c.scopeBindings) > 0 {
+			c.emitScopeCleanup(0, false)
+		}
+		if c.block != nil && c.block.Term == nil {
+			c.block.NewBr(c.coroutineReturnBlock)
+		}
+		return
+	}
+
 	// Write back move-captured variables to env struct before returning
 	c.emitLambdaWritebacks()
 

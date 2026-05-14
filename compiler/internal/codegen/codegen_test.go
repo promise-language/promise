@@ -16524,6 +16524,26 @@ func TestGoBlockCoroutineInitSuspend(t *testing.T) {
 	assertContains(t, goFunc, "coro.init.suspend:")
 }
 
+// B0353: return in error handler inside go block should branch to final.suspend,
+// not emit ret void (the coroutine function returns ptr).
+func TestGoBlockReturnInErrorHandler(t *testing.T) {
+	ir := generateIR(t, `
+		fail!() int { raise error(message: "fail"); }
+		main() {
+			go {
+				x := fail()? e { return; };
+			};
+		}
+	`)
+	goFunc := extractFunc(ir, ".goroutine.0")
+	if goFunc == "" {
+		t.Fatal("expected .goroutine.0 function in IR")
+	}
+	// Should branch to final.suspend instead of ret void
+	assertContains(t, goFunc, "br label %final.suspend")
+	assertNotContains(t, goFunc, "ret void")
+}
+
 // B0007: Verify select statement allocas are in entry block.
 func TestSelectAllocaInEntryBlock(t *testing.T) {
 	ir := generateIR(t, `

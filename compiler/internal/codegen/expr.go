@@ -5471,8 +5471,9 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		// Wrap handler value in its block (before its br to merge).
 		var handlerOptVal value.Value = noneVal
 		handlerReachesMerge := false
+		// B0353: Only consider handler as reaching merge if its br targets mergeBlock.
 		if handlerEnd.Term != nil {
-			if _, isBr := handlerEnd.Term.(*ir.TermBr); isBr {
+			if br, isBr := handlerEnd.Term.(*ir.TermBr); isBr && br.Target == mergeBlock {
 				handlerReachesMerge = true
 				if handlerVal != nil {
 					if _, isVoid := handlerVal.Type().(*irtypes.VoidType); !isVoid {
@@ -5550,7 +5551,9 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	// okVal defined in okBlock doesn't dominate mergeBlock when handler also
 	// reaches mergeBlock. Use a phi with a zero default from the handler path.
 	if okVal != nil && handlerEnd.Term != nil {
-		if _, isBr := handlerEnd.Term.(*ir.TermBr); isBr {
+		// B0353: Only add handler PHI entry if it actually branches to mergeBlock.
+		// A return inside the handler (e.g., goroutine return) may branch elsewhere.
+		if br, isBr := handlerEnd.Term.(*ir.TermBr); isBr && br.Target == mergeBlock {
 			zeroVal := c.zeroValue(okVal.Type())
 			incomings := []*ir.Incoming{
 				{X: okVal, Pred: okEnd},
@@ -8222,6 +8225,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
 	savedPanicExitBlock := c.panicExitBlock
+	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	savedGoExprFF := c.goExprFireAndForget
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -8417,6 +8421,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
 	c.panicExitBlock = savedPanicExitBlock
+	c.coroutineReturnBlock = savedCoroutineReturnBlock
 	c.goExprFireAndForget = savedGoExprFF
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
@@ -8799,6 +8804,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
 	savedPanicExitBlock := c.panicExitBlock
+	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	savedGoExprFF := c.goExprFireAndForget
 	c.goExprFireAndForget = false // reset for inner statements (B0109)
 
@@ -8885,6 +8891,9 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	// Create doneBlk early so intermediate coro.suspend switches can reference it.
 	// Instructions are added after the body is compiled.
 	doneBlk := coroFn.NewBlock("coro.done")
+	// B0353: Create finalSuspBlk early so return statements inside the body
+	// can branch here. Instructions are added after the body is compiled.
+	finalSuspBlk := coroFn.NewBlock("final.suspend")
 
 	initSuspBlk.NewSwitch(initResult, suspendBlk,
 		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
@@ -8907,11 +8916,13 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	// B0228: Create panic exit block for this go block coroutine.
 	goPanicExitBlk2 := coroFn.NewBlock("go.panic_exit")
 	c.panicExitBlock = goPanicExitBlk2
+	c.coroutineReturnBlock = finalSuspBlk // B0353
 
 	c.genBlock(block)
 
-	// Clear panic exit block after body generation
+	// Clear panic exit block and coroutine return block after body generation
 	c.panicExitBlock = nil
+	c.coroutineReturnBlock = nil
 
 	// B0163: Emit cleanup for captured channel drop bindings registered before genBlock.
 	// genBlock only cleans up bindings added within its scope, so we must handle
@@ -8926,7 +8937,6 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 
 	// Final suspend: yield back to scheduler so it can see coro.done()=true
 	// before destroying the coroutine frame.
-	finalSuspBlk := coroFn.NewBlock("final.suspend")
 	// T0148: Final panic check after body + scope cleanup.
 	// Catches panics from drop functions during scope cleanup that per-call checks miss.
 	if c.block != nil && c.block.Term == nil {
@@ -8994,6 +9004,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
 	c.panicExitBlock = savedPanicExitBlock
+	c.coroutineReturnBlock = savedCoroutineReturnBlock
 	c.goExprFireAndForget = savedGoExprFF
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.

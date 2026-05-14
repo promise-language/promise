@@ -1,0 +1,55 @@
+// B0353: return inside error handler in go block should exit the goroutine
+// cleanly, not produce an LLVM verification error.
+fail_always!() int {
+  raise error(message: "expected failure");
+}
+
+// Basic: return in error handler exits the goroutine.
+test_go_block_return_in_error_handler() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  go {
+    x := fail_always()? e {
+      ch.send(42);
+      return;
+    };
+    // Should not reach here
+    ch.send(0);
+  };
+  if v := <-ch {
+    assert(v == 42, "error handler return sent 42");
+  }
+}
+
+// Return in error handler with captured variables that need cleanup.
+test_go_block_return_in_error_handler_with_captures() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  msg := "hello";
+  go {
+    x := fail_always()? e {
+      ch.send(msg.len);
+      return;
+    };
+    ch.send(0);
+  };
+  if v := <-ch {
+    assert(v == 5, "captured string length is 5");
+  }
+}
+
+// Return in nested block inside error handler.
+test_go_block_return_in_error_handler_nested() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  go {
+    x := fail_always()? e {
+      if true {
+        ch.send(99);
+        return;
+      }
+      ch.send(0);
+    };
+    ch.send(0);
+  };
+  if v := <-ch {
+    assert(v == 99, "nested return sent 99");
+  }
+}

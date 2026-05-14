@@ -308,3 +308,66 @@ test_server_large_body() `test(exclude: "wasm32", timeout: "10s") {
   listener.close()?!;
   sleep(Duration.from_millis(100));
 }
+
+// ── Serve + shutdown tests ─────────────────────────────────────────────────
+
+test_server_serve() `test(exclude: "wasm32", timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[channel[bool]] stop_ch = channel[channel[bool]](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    channel[bool] stop_ref = server._stop;
+    stop_ch.send(stop_ref);
+    _OkHandler handler = _OkHandler(response_body: "served");
+    server.serve(handler)?!;
+  };
+
+  if port := <-port_ch {
+    if stop := <-stop_ch {
+      sleep(Duration.from_millis(100));
+
+      // Send a real request through serve
+      Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+      assert(resp.status_code == 200, "status 200");
+      assert(resp.body == "served", "body from serve");
+
+      // Shut down: signal + wake accept
+      stop.send(true);
+      net.TcpStream c = net.TcpStream.connect("127.0.0.1", port)?!;
+      c.close()?!;
+      sleep(Duration.from_millis(200));
+    }
+  }
+}
+
+test_server_serve_error_handler() `test(exclude: "wasm32", timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[channel[bool]] stop_ch = channel[channel[bool]](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    channel[bool] stop_ref = server._stop;
+    stop_ch.send(stop_ref);
+    _ErrorHandler handler = _ErrorHandler(error_message: "serve error");
+    server.serve(handler)?!;
+  };
+
+  if port := <-port_ch {
+    if stop := <-stop_ch {
+      sleep(Duration.from_millis(100));
+
+      // Handler raises — serve should return 500 and continue
+      Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+      assert(resp.status_code == 500, "status 500");
+      assert(resp.body == "serve error", "error body");
+
+      stop.send(true);
+      net.TcpStream c = net.TcpStream.connect("127.0.0.1", port)?!;
+      c.close()?!;
+      sleep(Duration.from_millis(200));
+    }
+  }
+}

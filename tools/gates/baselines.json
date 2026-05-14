@@ -92,5 +92,16 @@
       "direction": "exact",
       "updated": "2026-04-06"
     }
+  },
+  "windows-amd64": {
+    "host_leak_count": {
+      "type": "informational"
+    },
+    "host_test_count": {
+      "type": "informational"
+    },
+    "host_test_failures": {
+      "type": "informational"
+    }
   }
 }

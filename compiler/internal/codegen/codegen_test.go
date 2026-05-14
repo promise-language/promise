@@ -7520,8 +7520,13 @@ func TestUserFuncNameNoLibcCollision(t *testing.T) {
 	// User function gets __user. prefix — structurally prevents libc collision
 	assertContains(t, ir, "define i64 @__user.write")
 	assertContains(t, ir, "call i64 @__user.write")
-	// libc write should still be declared separately (via PAL)
-	assertContains(t, ir, "declare i64 @write(")
+	// libc write should still be declared separately (via PAL).
+	// PAL uses POSIX write() on Unix and _write() on Windows (MSVCRT).
+	if runtime.GOOS == "windows" {
+		assertContains(t, ir, "declare i32 @_write(")
+	} else {
+		assertContains(t, ir, "declare i64 @write(")
+	}
 }
 
 func TestModuleTypeConstructor(t *testing.T) {

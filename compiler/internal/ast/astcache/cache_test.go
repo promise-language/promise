@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"djabi.dev/go/promise_lang/internal/ast"
@@ -280,8 +281,8 @@ func TestContentHash(t *testing.T) {
 
 // TestCacheDir verifies the cache directory path.
 func TestCacheDir(t *testing.T) {
-	got := CacheDir("/home/user/.promise/cache/build")
-	want := "/home/user/.promise/cache/astcache"
+	got := CacheDir(filepath.Join("/home/user/.promise/cache", "build"))
+	want := filepath.Join("/home/user/.promise/cache", "astcache")
 	if got != want {
 		t.Fatalf("CacheDir = %q, want %q", got, want)
 	}

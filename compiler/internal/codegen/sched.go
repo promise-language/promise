@@ -144,11 +144,9 @@ const (
 	schedFieldSteals           = 18 // i64  total work steals
 	schedFieldSysmonHandle     = 19 // i8*  sysmon thread handle (for joining at shutdown)
 	schedFieldReadyCount       = 20 // i32  worker threads that completed init (B0165)
-	schedFieldGsDrainMutex     = 21 // i8*  mutex for goroutine drain signaling
-	schedFieldGsDrainCond      = 22 // i8*  cond var for goroutine drain signaling
-	schedFieldReactorFd        = 23 // i32  epoll/kqueue fd (-1 if no reactor)
-	schedFieldReactorThread    = 24 // i8*  reactor poller thread handle (null if no reactor)
-	schedFieldReactorLock      = 25 // i8*  mutex protecting PollDesc table (null if no reactor)
+	schedFieldReactorFd        = 21 // i32  epoll/kqueue fd (-1 if no reactor)
+	schedFieldReactorThread    = 22 // i8*  reactor poller thread handle (null if no reactor)
+	schedFieldReactorLock      = 23 // i8*  mutex protecting PollDesc table (null if no reactor)
 )
 
 // schedStructType returns the LLVM struct type for the global scheduler.
@@ -175,8 +173,6 @@ func schedStructType() *irtypes.StructType {
 		irtypes.I64,   // steals
 		irtypes.I8Ptr, // sysmon_handle
 		irtypes.I32,   // ready_count (B0165: worker threads that completed init)
-		irtypes.I8Ptr, // gs_drain_mutex
-		irtypes.I8Ptr, // gs_drain_cond
 		irtypes.I32,   // reactor_fd (T0070: epoll/kqueue fd, -1 if no reactor)
 		irtypes.I8Ptr, // reactor_thread (T0070: poller thread handle)
 		irtypes.I8Ptr, // reactor_lock (T0070: mutex for PollDesc table)
@@ -207,40 +203,6 @@ func (c *Compiler) emitAtomicAddRelease(blk *ir.Block, ptr value.Value, val valu
 		return old
 	}
 	return blk.NewAtomicRMW(enum.AtomicOpAdd, ptr, val, enum.AtomicOrderingRelease)
-}
-
-// emitGsDrainSignal emits a check-and-broadcast for goroutine drain: if
-// gs_created == gs_completed, broadcast the gs_drain condvar. Returns the
-// continuation block. Used at both gs_completed increment sites in goroutine_exit.
-// suffix disambiguates block names when called multiple times in the same function.
-func (c *Compiler) emitGsDrainSignal(fn *ir.Func, blk *ir.Block, gsCompletedField value.Value, suffix string) *ir.Block {
-	schedTy := schedStructType()
-
-	gsCreatedField := blk.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCreated)))
-
-	created := blk.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingAcquire)
-	completed := blk.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
-	allDone := blk.NewICmp(enum.IPredEQ, created, completed)
-
-	broadcastBlk := fn.NewBlock("gs_drain_broadcast_" + suffix)
-	contBlk := fn.NewBlock("gs_drain_cont_" + suffix)
-	blk.NewCondBr(allDone, broadcastBlk, contBlk)
-
-	// Broadcast: lock mutex, broadcast cond, unlock mutex
-	gdMtxField := broadcastBlk.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainMutex)))
-	gdMtx := broadcastBlk.NewLoad(irtypes.I8Ptr, gdMtxField)
-	gdCondField := broadcastBlk.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainCond)))
-	gdCond := broadcastBlk.NewLoad(irtypes.I8Ptr, gdCondField)
-
-	broadcastBlk.NewCall(c.palMutexLock, gdMtx)
-	broadcastBlk.NewCall(c.palCondBroadcast, gdCond)
-	broadcastBlk.NewCall(c.palMutexUnlock, gdMtx)
-	broadcastBlk.NewBr(contBlk)
-
-	return contBlk
 }
 
 // defineSchedulerGlobals defines the thread-local current-G pointer and the
@@ -411,7 +373,7 @@ func (c *Compiler) defineGNewFunc() {
 	entry.NewStore(constant.NewNull(irtypes.I8Ptr), panicMsgField)
 
 	// Increment gs_created counter (Release — pairs with Acquire read in
-	// emitGsDrainSignal so ARM64 drain checks see the latest count; B0315)
+	// the drain spin-wait loop so ARM64 drain checks see the latest count; B0315)
 	schedTyLocal := schedStructType()
 	gsCreatedField := entry.NewGetElementPtr(schedTyLocal, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCreated)))
@@ -465,17 +427,6 @@ func (c *Compiler) defineSchedInitFunc() {
 	doneLockField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
 	entry.NewStore(doneLock, doneLockField)
-
-	// Init gs_drain mutex + cond (goroutine drain signaling for test harness)
-	gdMutex := entry.NewCall(c.palMutexInit)
-	gdMutexField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainMutex)))
-	entry.NewStore(gdMutex, gdMutexField)
-
-	gdCond := entry.NewCall(c.palCondInit)
-	gdCondField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainCond)))
-	entry.NewStore(gdCond, gdCondField)
 
 	// Init reactor_fd = -1 (no reactor by default, T0070)
 	reactorFdField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -1853,9 +1804,7 @@ func (c *Compiler) defineGoroutineExitFunc() {
 	// on ARM64 (weak memory model allows store reordering across variables
 	// with Monotonic ordering).
 	c.emitAtomicAddRelease(skipFree, gsCompletedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
-	// Signal goroutine drain condvar if all goroutines are done.
-	skipFreeCont := c.emitGsDrainSignal(fn, skipFree, gsCompletedField, "task")
-	skipFreeCont.NewRet(nil)
+	skipFree.NewRet(nil)
 
 	// doFree: free panic_msg if heap-allocated (panicked==2) then free G.
 	// panicked=1 (promise_panic) means C string that may be .rodata — don't free.
@@ -1872,9 +1821,7 @@ func (c *Compiler) defineGoroutineExitFunc() {
 	// Increment gs_completed after all cleanup including pal_free(G) (B0234).
 	// B0320: Release ordering — see skipFree comment above.
 	c.emitAtomicAddRelease(doFreeG, gsCompletedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
-	// Signal goroutine drain condvar if all goroutines are done.
-	doFreeGCont := c.emitGsDrainSignal(fn, doFreeG, gsCompletedField, "free")
-	doFreeGCont.NewRet(nil)
+	doFreeG.NewRet(nil)
 
 	c.funcs["promise_goroutine_exit"] = fn
 }
@@ -2099,16 +2046,6 @@ func (c *Compiler) defineSchedShutdownFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
 	doneLock := freeBlk.NewLoad(irtypes.I8Ptr, doneLockField)
 	freeBlk.NewCall(c.palMutexDestroy, doneLock)
-
-	gdMutexField := freeBlk.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainMutex)))
-	gdMutex := freeBlk.NewLoad(irtypes.I8Ptr, gdMutexField)
-	freeBlk.NewCall(c.palMutexDestroy, gdMutex)
-
-	gdCondField := freeBlk.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsDrainCond)))
-	gdCond := freeBlk.NewLoad(irtypes.I8Ptr, gdCondField)
-	freeBlk.NewCall(c.palCondDestroy, gdCond)
 
 	// Free P array (each P contains its M inline via pointer)
 	freeBlk.NewCall(c.palFree, psRaw)

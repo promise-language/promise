@@ -7000,7 +7000,7 @@ func TestBatchTestResetsAllocCount(t *testing.T) {
 
 // B0231/B0315: Batch test leak check uses spin-wait for goroutine drain
 // (condvar approach had a lost-wakeup race on ARM64).
-func TestBatchTestLeakCheckDrainCondvar(t *testing.T) {
+func TestBatchTestLeakCheckDrainSpinWait(t *testing.T) {
 	result := compileResult(t, `
 		myTest() `+"`test"+` { }
 	`)
@@ -7034,8 +7034,8 @@ func TestBatchTestLeakCheckDrainCondvar(t *testing.T) {
 // B0165: Sched struct includes ready_count field (i32 at end).
 func TestSchedStructHasReadyCount(t *testing.T) {
 	ir := generateIR(t, `main() { }`)
-	// The sched global should have the ready_count i32 as the last field
-	// Full type: { i8*, i8*, i64, i8*, i8*, i32, i8*, i8*, i64, i8, i8, i8*, i8*, i8*, i32, i64, i64, i64, i64, i8*, i32, i8*, i8* }
+	// The sched global should include the ready_count i32 field
+	// Full type: { i8*, i8*, i64, i8*, i8*, i32, i8*, i8*, i64, i8, i8, i8*, i8*, i8*, i32, i64, i64, i64, i64, i8*, i32, i32, i8*, i8* }
 	assertContains(t, ir, "@__promise_sched = global")
 	// Verify sched_loop is defined (it increments ready_count)
 	assertContains(t, ir, "define i8* @promise_sched_loop(")
@@ -13518,7 +13518,7 @@ func TestGoroutineExitGsCompletedRelease(t *testing.T) {
 	assertContains(t, fn, "atomicrmw add i64*")
 	assertContains(t, fn, "release")
 	// Should NOT use monotonic for gs_completed increments
-	// (other atomics in the function like gs_drain may still be monotonic)
+	// (other atomics in the function may still be monotonic)
 }
 
 // B0228: promise_panic_msg stores type=2 in TLS panic_type to mark heap-allocated msg.

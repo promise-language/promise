@@ -1046,8 +1046,8 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 
 			// Wait for all goroutines to complete cleanup before reading alloc
 			// count. goroutine_exit increments gs_completed after all frees
-			// (coro.destroy + pal_free(G)) and broadcasts gs_drain_cond when
-			// gs_created==gs_completed.
+			// (coro.destroy + pal_free(G)); the drain spin-wait loop checks
+			// gs_created == gs_completed.
 			if !c.isWasm && c.schedGlobal != nil {
 				schedTy := schedStructType()
 				gsCreatedField := leakCheckBlk.NewGetElementPtr(schedTy, c.schedGlobal,

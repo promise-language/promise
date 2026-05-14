@@ -4503,6 +4503,29 @@ func (c *Compiler) compileModules() {
 		}
 	}
 
+	// B0344: Include unresolved func/method instances from user code (c.info)
+	// for cross-module resolution. collectMonoFuncInstances/collectMonoMethodInstances
+	// only return concrete instances; unresolved ones (containing TypeParams) are
+	// excluded. For module-internal tests where the module source is merged into the
+	// main file, these unresolved instances (e.g., decode_string[T] from a generic
+	// method body) must be accumulated so crossResolveAccumulatedInstances can resolve
+	// them using concrete instances (e.g., Response.json[int] from user code).
+	for _, fi := range c.info.FuncInstances {
+		if funcInstanceContainsTypeParam(fi) {
+			mainMonoFuncInstances = append(mainMonoFuncInstances, fi)
+		}
+	}
+	for _, mi := range c.info.MethodInstances {
+		if methodInstanceContainsTypeParam(mi) {
+			mainMonoMethodInstances = append(mainMonoMethodInstances, mi)
+		}
+	}
+
+	// B0344: Resolve unresolved cross-module instances. When module A's generic
+	// method calls module B's generic function, the FuncInstance from A's sema
+	// contains TypeParams that can be resolved by concrete method/func instances.
+	crossResolveAccumulatedInstances(&mainMonoFuncInstances, &mainMonoMethodInstances)
+
 	// Use topological order if available, otherwise fall back to map iteration.
 	if len(c.info.ModuleOrder) > 0 {
 		for _, key := range c.info.ModuleOrder {

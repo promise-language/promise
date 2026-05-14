@@ -361,6 +361,55 @@ test_http_post_function() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-// NOTE: Response.json[T] and http_post_json[T] are not tested here due to a
-// cross-module monomorphization bug — see B0344.
+// ── Response.json[T] (B0344: cross-module generic method→function) ─────────
+
+test_response_json_int() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status_code == 200, "status");
+    int val = resp.json[int]()?!;
+    assert(val == 42, "json int");
+  };
+
+  _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n42")?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_response_json_string() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status_code == 200, "status");
+    string val = resp.json[string]()?!;
+    assert(val == "hello", "json string");
+  };
+
+  _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n\"hello\"")?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_response_json_bool() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    assert(resp.status_code == 200, "status");
+    bool val = resp.json[bool]()?!;
+    assert(val, "json bool");
+  };
+
+  _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntrue")?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// NOTE: http_post_json![T] cannot be tested — B0343 blocks map iteration in headers.
 // NOTE: http_post! with non-empty headers map is broken — see B0343.

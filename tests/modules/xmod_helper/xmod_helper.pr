@@ -1,0 +1,12 @@
+transform[T](T val) T `public {
+  return val;
+}
+
+double_vec[T](T[] items) T[] `public {
+  T[] result = T[]();
+  for item in items {
+    result.push(item);
+    result.push(item);
+  }
+  return result;
+}

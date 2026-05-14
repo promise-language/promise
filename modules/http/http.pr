@@ -226,8 +226,6 @@ type ServerResponse `public `doc("An HTTP response to send to the client.") {
   set_header(~this, string key, string value) `public `doc("Set a response header.") {
     this.headers[key] = value;
   }
-
-  // json[T] deferred — B0344 blocks cross-module generic method→function calls
 }
 
 type Server `public `doc("An HTTP/1.1 server that accepts and handles requests serially.") {

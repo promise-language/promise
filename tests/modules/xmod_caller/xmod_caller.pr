@@ -1,0 +1,17 @@
+use xmod_helper "./xmod_helper";
+
+type Wrapper[V] `public {
+  V _value;
+
+  get value V `public {
+    return this._value;
+  }
+
+  transformed[T](T extra) T `public {
+    return xmod_helper.transform[T](extra);
+  }
+
+  doubled_vec[T](T[] items) T[] `public {
+    return xmod_helper.double_vec[T](items);
+  }
+}

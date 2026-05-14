@@ -712,6 +712,77 @@ func crossResolveFuncMethodInstances(info *sema.Info, funcInstances *[]*sema.Fun
 	}
 }
 
+// crossResolveAccumulatedInstances resolves unresolved FuncInstances and
+// MethodInstances in the accumulated cross-module extras using concrete
+// instances from the same lists (B0344). This handles the case where
+// module A's generic method calls module B's generic function — the
+// FuncInstance from A's sema contains TypeParams that can be resolved
+// by concrete method/func instances from user code or other modules.
+func crossResolveAccumulatedInstances(funcInstances *[]*sema.FuncInstance, methodInstances *[]*sema.MethodInstance) {
+	// Collect unresolved instances from the passed lists
+	var unresolvedFuncs []*sema.FuncInstance
+	for _, fi := range *funcInstances {
+		if funcInstanceContainsTypeParam(fi) {
+			unresolvedFuncs = append(unresolvedFuncs, fi)
+		}
+	}
+	var unresolvedMethods []*sema.MethodInstance
+	for _, mi := range *methodInstances {
+		if methodInstanceContainsTypeParam(mi) {
+			unresolvedMethods = append(unresolvedMethods, mi)
+		}
+	}
+
+	if len(unresolvedFuncs) == 0 && len(unresolvedMethods) == 0 {
+		return
+	}
+
+	// Build seen sets from concrete instances
+	funcSeen := make(map[string]bool, len(*funcInstances))
+	for _, fi := range *funcInstances {
+		if !funcInstanceContainsTypeParam(fi) {
+			funcSeen[monoFuncName(fi)] = true
+		}
+	}
+	methodSeen := make(map[string]bool, len(*methodInstances))
+	for _, mi := range *methodInstances {
+		if !methodInstanceContainsTypeParam(mi) {
+			methodSeen[monoMethodInstanceName(mi)] = true
+		}
+	}
+
+	// Cross-resolve using index-based iteration to process new discoveries.
+	funcIdx := 0
+	methodIdx := 0
+	for funcIdx < len(*funcInstances) || methodIdx < len(*methodInstances) {
+		for funcIdx < len(*funcInstances) {
+			fi := (*funcInstances)[funcIdx]
+			funcIdx++
+			if funcInstanceContainsTypeParam(fi) {
+				continue
+			}
+			sig := fi.Func.Type().(*types.Signature)
+			subst := types.BuildSubstMap(sig.TypeParams(), fi.TypeArgs)
+			if len(subst) > 0 {
+				resolveUnresolvedMethodInstances(unresolvedMethods, subst, methodInstances, methodSeen)
+				resolveUnresolvedFuncInstances(unresolvedFuncs, subst, funcInstances, funcSeen)
+			}
+		}
+		for methodIdx < len(*methodInstances) {
+			mi := (*methodInstances)[methodIdx]
+			methodIdx++
+			if methodInstanceContainsTypeParam(mi) {
+				continue
+			}
+			subst := buildMethodInstanceSubst(mi)
+			if len(subst) > 0 {
+				resolveUnresolvedFuncInstances(unresolvedFuncs, subst, funcInstances, funcSeen)
+				resolveUnresolvedMethodInstances(unresolvedMethods, subst, methodInstances, methodSeen)
+			}
+		}
+	}
+}
+
 // collectMonoFuncInstances deduplicates generic function instances by mangled name.
 // Also resolves unresolved instances: when a generic function body calls another
 // generic function using the outer function's type parameter (e.g., identity[T]

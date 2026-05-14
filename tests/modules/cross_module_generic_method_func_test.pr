@@ -1,0 +1,26 @@
+// B0344: Cross-module generic method calling another module's generic function.
+// Tests that monomorphization correctly resolves generic function instances
+// referenced from generic method bodies across module boundaries.
+use xmod_caller "./xmod_caller";
+
+test_cross_module_generic_method_int() `test {
+  w := xmod_caller.Wrapper[string](_value: "hello");
+  int result = w.transformed[int](42);
+  assert(result == 42, "transformed int");
+}
+
+test_cross_module_generic_method_string() `test {
+  w := xmod_caller.Wrapper[int](_value: 1);
+  string result = w.transformed[string]("world");
+  assert(result == "world", "transformed string");
+}
+
+test_cross_module_generic_method_vec() `test {
+  w := xmod_caller.Wrapper[int](_value: 0);
+  int[] result = w.doubled_vec[int]([1, 2]);
+  assert(result.len == 4, "doubled len");
+  assert(result[0] == 1, "doubled[0]");
+  assert(result[1] == 1, "doubled[1]");
+  assert(result[2] == 2, "doubled[2]");
+  assert(result[3] == 2, "doubled[3]");
+}

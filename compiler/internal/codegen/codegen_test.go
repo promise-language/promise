@@ -18489,3 +18489,143 @@ func TestCrossModulePropagation(t *testing.T) {
 	// Map layout must exist
 	assertContains(t, ir, "Map[string, int]")
 }
+
+// generateIRWithDependentModules parses mod1, then mod2 (which can import mod1),
+// then user code (which can import both). Used for cross-module dependency tests.
+func generateIRWithDependentModules(t *testing.T,
+	mod1Name, mod1Src, mod2Name, mod2Src, userSrc string) string {
+	t.Helper()
+
+	mod1Info, mod1Scope := parseModuleSource(t, mod1Name, mod1Src)
+	stdModInfo, stdScope := getCodegenStdModInfo()
+
+	// Parse mod2 with mod1 in scope
+	mod1Key := "./" + mod1Name
+	mod2Input := antlr.NewInputStream(mod2Src)
+	mod2Lexer := parser.NewPromiseLexer(mod2Input)
+	mod2Lexer.RemoveErrorListeners()
+	mod2Stream := antlr.NewCommonTokenStream(mod2Lexer, antlr.TokenDefaultChannel)
+	mod2P := parser.NewPromiseParser(mod2Stream)
+	mod2P.RemoveErrorListeners()
+	mod2Tree := mod2P.CompilationUnit()
+	mod2File, errs := ast.Build("module.pr", mod2Tree)
+	if len(errs) > 0 {
+		t.Fatalf("mod2 AST build errors: %v", errs)
+	}
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	mod2File.Uses = append([]*ast.UseDecl{stdUse}, mod2File.Uses...)
+	mod2Info2, semaErrs := sema.CheckWithModules(mod2File, map[string]*types.Scope{
+		"std":   stdScope,
+		mod1Key: mod1Scope,
+	})
+	if len(semaErrs) > 0 {
+		t.Fatalf("mod2 sema errors: %v", semaErrs)
+	}
+	mod2Scope := sema.ExportedScope(mod2Info2, mod2File)
+	mod2Key := "./" + mod2Name
+	mod2Info := &sema.ModuleInfo{
+		Name:           mod2Name,
+		CanonicalName:  mod2Name,
+		GlobalIdentity: mod2Key,
+		IRPrefix:       mod2Name,
+		Path:           mod2Key,
+		File:           mod2File,
+		SemaInfo:       mod2Info2,
+	}
+
+	// Parse user code
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, errs2 := ast.Build("test.pr", userTree)
+	if len(errs2) > 0 {
+		t.Fatalf("user AST build errors: %v", errs2)
+	}
+	userFile.Uses = append([]*ast.UseDecl{{Alias: "_", CatalogName: "std"}}, userFile.Uses...)
+
+	userInfo, userSemaErrs := sema.CheckWithModules(userFile, map[string]*types.Scope{
+		"std":   stdScope,
+		mod1Key: mod1Scope,
+		mod2Key: mod2Scope,
+	})
+	if len(userSemaErrs) > 0 {
+		t.Fatalf("user sema errors: %v", userSemaErrs)
+	}
+
+	userInfo.ModuleInfos = map[string]*sema.ModuleInfo{
+		"std":   stdModInfo,
+		mod1Key: mod1Info,
+		mod2Key: mod2Info,
+	}
+	userInfo.ModuleOrder = []string{"std", mod1Key, mod2Key}
+
+	result := Compile(userFile, userInfo, "")
+	return result.Module.String()
+}
+
+// TestCrossModuleGenericMethodCallsGenericFunc verifies B0344: when a generic
+// method in module B calls a generic function in module A, the func instance
+// (which contains TypeParams in B's sema) gets resolved via the concrete method
+// instance from user code.
+func TestCrossModuleGenericMethodCallsGenericFunc(t *testing.T) {
+	ir := generateIRWithDependentModules(t,
+		"helper",
+		`transform[T](T val) T `+"`public"+` { return val; }`,
+		"caller",
+		`use helper "./helper";
+		type Wrapper[V] `+"`public"+` {
+			V _value;
+			apply[T](this, T extra) T `+"`public"+` {
+				return helper.transform[T](extra);
+			}
+		}`,
+		`
+		use caller "./caller";
+		main() {
+			caller.Wrapper[string] w = caller.Wrapper[string](_value: "hi");
+			int result = w.apply[int](42);
+		}
+		`,
+	)
+
+	// The mono func instance transform[int] must be defined
+	assertContains(t, ir, `define i64 @"transform[int]"`)
+	// The mono method apply[int] must be defined for Wrapper[string]
+	assertContains(t, ir, `@"Wrapper[string].apply[int]"`)
+}
+
+// TestCrossModuleGenericMethodCallsGenericFuncMultipleInstances verifies that
+// cross-module resolution handles multiple concrete instantiations (B0344).
+func TestCrossModuleGenericMethodCallsGenericFuncMultipleInstances(t *testing.T) {
+	ir := generateIRWithDependentModules(t,
+		"conv",
+		`identity[T](T val) T `+"`public"+` { return val; }`,
+		"box",
+		`use conv "./conv";
+		type Box[V] `+"`public"+` {
+			V _data;
+			unwrap[T](this, T fallback) T `+"`public"+` {
+				return conv.identity[T](fallback);
+			}
+		}`,
+		`
+		use box "./box";
+		main() {
+			box.Box[int] b1 = box.Box[int](_data: 1);
+			int r1 = b1.unwrap[int](10);
+			box.Box[string] b2 = box.Box[string](_data: "x");
+			string r2 = b2.unwrap[string]("y");
+		}
+		`,
+	)
+
+	// Both concrete instantiations must exist
+	assertContains(t, ir, `define i64 @"identity[int]"`)
+	assertContains(t, ir, `@"identity[string]"`)
+	assertContains(t, ir, `@"Box[int].unwrap[int]"`)
+	assertContains(t, ir, `@"Box[string].unwrap[string]"`)
+}

@@ -1,0 +1,47 @@
+// B0347: Returning `this.m[key]` from a method must dup the inner string so the
+// caller owns it. Without the dup, the returned Optional[string]'s inner pointer
+// borrows into the map's value buffer, causing use-after-free when the map drops.
+type Bag {
+  map[string, string] m;
+  drop(~this) {
+  }
+
+  get_value(string key) string? {
+    return this.m[key];
+  }
+}
+
+// Typed `string? r = ...` decl form — caller's optional drop frees the dup.
+test_typed_var_decl() `test {
+  Bag b = Bag(m: map[string, string]());
+  b.m["hello"] = "world" + "!";
+  string? r = b.get_value("hello");
+  assert(r is present, "should be present");
+  assert(r! == "world!", "value correct");
+}
+
+// Inferred var decl form.
+test_inferred_var_decl() `test {
+  Bag b = Bag(m: map[string, string]());
+  b.m["foo"] = "bar" + "baz";
+  r := b.get_value("foo");
+  assert(r is present, "should be present");
+  assert(r! == "barbaz", "value correct");
+}
+
+// if-let unwrap — CallExpr init registers a string drop on v.
+test_if_let_unwrap() `test {
+  Bag b = Bag(m: map[string, string]());
+  b.m["k"] = "value".to_lower();
+  if v := b.get_value("k") {
+    assert(v == "value", "value correct");
+  }
+}
+
+// Missing key: present=false path skips the dup (dupString null-checks).
+test_absent_key() `test {
+  Bag b = Bag(m: map[string, string]());
+  b.m["a"] = "b".to_upper();
+  string? r = b.get_value("missing");
+  assert(r is absent, "should be absent");
+}

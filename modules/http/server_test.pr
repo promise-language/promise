@@ -180,9 +180,11 @@ test_server_post() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-// B0347: skipped on macOS — `header(~this, key)` returns a borrowed string
-// from `this.headers[key]`; the map is freed when `~this` ends, leaving the
-// returned pointer dangling. Crashes on macOS; passes on Linux by chance.
+// B0347: partially fixed — the Bag[K,string].[] return site now dups the
+// inner string. However, downstream patterns where the caller passes the
+// unwrapped string to another `~this` method that stores it into a container
+// still double-free. That case is tracked separately; this test is excluded
+// on macOS until the follow-up lands.
 test_server_headers() `test(exclude: "wasm32, macosx", timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;

@@ -13930,6 +13930,41 @@ func TestIndexAssignMethodDispatchMap(t *testing.T) {
 	assertContains(t, ir, `call void @"Map[string, int].[]="(`)
 }
 
+// B0347: Returning `this.v[i]` where `v: Vector[string]` via a method must
+// dup the inner string so the caller owns it. The return-site sets
+// `dupStringFieldAccess` for Optional[string] returns; `genMethodIndex`
+// consumes it when the target is a container, producing a `promise_string_new`
+// call inside the method body.
+func TestContainerStringIndexReturnDupsInnerString(t *testing.T) {
+	ir := generateIR(t, `
+		type Bag {
+			string[] v;
+			drop(~this) {}
+			get_value(int i) string? {
+				return this.v[i];
+			}
+		}
+		main() {
+			Bag b = Bag(v: string[]());
+			b.v.push("value");
+			string? r = b.get_value(0);
+		}
+	`)
+	bodyStart := `define { i1, i8* } @Bag.get_value(`
+	idx := strings.Index(ir, bodyStart)
+	if idx < 0 {
+		t.Fatalf("Bag.get_value definition not found in IR")
+	}
+	bodyEnd := strings.Index(ir[idx:], "\n}\n")
+	if bodyEnd < 0 {
+		t.Fatalf("could not find end of Bag.get_value body")
+	}
+	body := ir[idx : idx+bodyEnd]
+	if !strings.Contains(body, "promise_string_new") {
+		t.Errorf("expected promise_string_new in Bag.get_value body (dup of inner string); got:\n%s", body)
+	}
+}
+
 func TestIndexNativeDispatchVector(t *testing.T) {
 	// Vector [] still uses native path (genVectorIndex)
 	ir := generateIR(t, `

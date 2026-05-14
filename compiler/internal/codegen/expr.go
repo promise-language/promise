@@ -6178,7 +6178,32 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 		instancePtr = c.extractInstancePtr(target)
 	}
 
-	return c.block.NewCall(fn, instancePtr, keyVal)
+	result := c.block.NewCall(fn, instancePtr, keyVal)
+
+	// B0347: Dup borrowed string when `[]` on a Vector-shaped container returns
+	// `Optional[string]` that points into the container's buffer. Without the
+	// dup, the caller's unwrapped string and the element alias the same heap
+	// allocation, causing double-free at scope exit. Guarded by
+	// `c.dupStringFieldAccess` (set by the return site and typed var decls) so
+	// temporary uses (comparisons, function args) don't dup. Map is not covered
+	// here (see B0350) — enabling the dup for Map regressed existing tests that
+	// rely on aliased map-value storage.
+	if c.dupStringFieldAccess && c.tempTrackingEnabled && isContainerType(targetType) {
+		resultType := c.info.Types[e]
+		if c.typeSubst != nil {
+			resultType = types.Substitute(resultType, c.typeSubst)
+		}
+		if opt, ok := resultType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
+			c.dupStringFieldAccess = false // consume the flag
+			innerStr := c.block.NewExtractValue(result, 1)
+			dup := c.dupString(innerStr)
+			c.trackStringTemp(dup)
+			c.optionalStringDup = dup
+			return c.block.NewInsertValue(result, dup, 1)
+		}
+	}
+
+	return result
 }
 
 // genStringIndex implements string byte indexing: s[i] returns the byte at position i

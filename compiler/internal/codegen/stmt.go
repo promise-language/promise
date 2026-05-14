@@ -543,7 +543,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			return
 		}
 		lt := c.resolveType(declType)
-		alloca := c.block.NewAlloca(lt)
+		alloca := c.createEntryAlloca(lt)
 		alloca.SetName(c.uniqueLocalName(s.Name))
 		c.block.NewStore(constant.NewZeroInitializer(lt), alloca)
 		c.locals[s.Name] = alloca
@@ -574,7 +574,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			lt = c.resolveType(exprType)
 		}
 	}
-	alloca := c.block.NewAlloca(lt)
+	alloca := c.createEntryAlloca(lt)
 	alloca.SetName(c.uniqueLocalName(s.Name))
 
 	// Set targetType for contextual type resolution (NoneLit needs Optional(T))
@@ -790,7 +790,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 		typ = types.Substitute(typ, c.typeSubst)
 	}
 	lt := c.resolveType(typ)
-	alloca := c.block.NewAlloca(lt)
+	alloca := c.createEntryAlloca(lt)
 	alloca.SetName(c.uniqueLocalName(s.Name))
 	// T0095: Signal genFieldAccess to dup string fields from droppable types.
 	// B0179: Skip for borrow types — borrows don't own the value.
@@ -942,7 +942,7 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 			continue
 		}
 		elemType := c.resolveType(tup.Elems()[i])
-		alloca := c.block.NewAlloca(elemType)
+		alloca := c.createEntryAlloca(elemType)
 		alloca.SetName(c.uniqueLocalName(name))
 		c.block.NewStore(c.block.NewExtractValue(tupleVal, uint64(i)), alloca)
 		c.locals[name] = alloca
@@ -1024,7 +1024,7 @@ func (c *Compiler) genFailableDestructure(s *ast.DestructureVarDecl) {
 
 	// Now emit stores (after all PHIs)
 	if mergedVal != nil {
-		alloca := c.block.NewAlloca(llValType)
+		alloca := c.createEntryAlloca(llValType)
 		alloca.SetName(c.uniqueLocalName(s.Names[0]))
 		c.block.NewStore(mergedVal, alloca)
 		c.locals[s.Names[0]] = alloca
@@ -1037,7 +1037,7 @@ func (c *Compiler) genFailableDestructure(s *ast.DestructureVarDecl) {
 
 	// B0193: Always register the error optional for drop at scope exit.
 	errVarName := s.Names[1]
-	errAlloca := c.block.NewAlloca(errOptType)
+	errAlloca := c.createEntryAlloca(errOptType)
 	errAlloca.SetName(c.uniqueLocalName(errVarName))
 	c.block.NewStore(mergedErr, errAlloca)
 
@@ -1074,7 +1074,7 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 		typ = types.Substitute(typ, c.typeSubst)
 	}
 	lt := c.resolveType(typ)
-	alloca := c.block.NewAlloca(lt)
+	alloca := c.createEntryAlloca(lt)
 	alloca.SetName(c.uniqueLocalName(s.Name))
 	val := c.genExpr(s.Value)
 	c.block.NewStore(val, alloca)
@@ -3663,7 +3663,7 @@ func (c *Compiler) maybeRegisterEnvFree(varName string, alloca *ir.InstAlloca, t
 	if _, ok := typ.(*types.Signature); !ok {
 		return
 	}
-	dropFlag := c.block.NewAlloca(irtypes.I1)
+	dropFlag := c.createEntryAlloca(irtypes.I1)
 	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
 	c.dropFlags[varName] = dropFlag
@@ -5910,13 +5910,13 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt, elemType types.Type) {
 		ltPred = enum.IPredULT
 	}
 
-	counterAlloca := c.block.NewAlloca(elemLLVM)
+	counterAlloca := c.createEntryAlloca(elemLLVM)
 	counterAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.block.NewStore(start, counterAlloca)
 	c.locals[s.Binding] = counterAlloca
 
 	if s.Index != "" {
-		indexAlloca := c.block.NewAlloca(irtypes.I64)
+		indexAlloca := c.createEntryAlloca(irtypes.I64)
 		indexAlloca.SetName(c.uniqueLocalName(s.Index))
 		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
 		c.locals[s.Index] = indexAlloca
@@ -5981,7 +5981,7 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 	if s.InitValue != nil {
 		typ := c.info.Types[s.InitValue]
 		lt := c.resolveType(typ)
-		alloca := c.block.NewAlloca(lt)
+		alloca := c.createEntryAlloca(lt)
 		alloca.SetName(c.uniqueLocalName(s.InitName))
 		val := c.genExpr(s.InitValue)
 		c.block.NewStore(val, alloca)
@@ -6644,11 +6644,11 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	length := loadVectorLen(c.block, headerPtr)
 
 	// Counter alloca
-	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	counterAlloca := c.createEntryAlloca(irtypes.I64)
 	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
 
 	// Element binding alloca
-	elemAlloca := c.block.NewAlloca(elemLLVM)
+	elemAlloca := c.createEntryAlloca(elemLLVM)
 	elemAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.locals[s.Binding] = elemAlloca
 
@@ -6663,7 +6663,7 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 
 	// Index variable if present
 	if s.Index != "" {
-		indexAlloca := c.block.NewAlloca(irtypes.I64)
+		indexAlloca := c.createEntryAlloca(irtypes.I64)
 		indexAlloca.SetName(c.uniqueLocalName(s.Index))
 		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
 		c.locals[s.Index] = indexAlloca
@@ -6760,11 +6760,11 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 	length := constant.NewInt(irtypes.I64, arr.Size())
 
 	// Counter alloca
-	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	counterAlloca := c.createEntryAlloca(irtypes.I64)
 	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
 
 	// Element binding alloca
-	elemAlloca := c.block.NewAlloca(elemLLVM)
+	elemAlloca := c.createEntryAlloca(elemLLVM)
 	elemAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.locals[s.Binding] = elemAlloca
 
@@ -6779,7 +6779,7 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 
 	// Index variable if present
 	if s.Index != "" {
-		indexAlloca := c.block.NewAlloca(irtypes.I64)
+		indexAlloca := c.createEntryAlloca(irtypes.I64)
 		indexAlloca.SetName(c.uniqueLocalName(s.Index))
 		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
 		c.locals[s.Index] = indexAlloca
@@ -6876,7 +6876,7 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	chPtr := c.block.NewBitCast(chRaw, irtypes.NewPointer(chanType))
 
 	// Element binding alloca
-	elemAlloca := c.block.NewAlloca(elemLLVM)
+	elemAlloca := c.createEntryAlloca(elemLLVM)
 	elemAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.locals[s.Binding] = elemAlloca
 
@@ -7063,24 +7063,24 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 	length := loadVectorLen(c.block, headerPtr)
 
 	// Counter alloca
-	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	counterAlloca := c.createEntryAlloca(irtypes.I64)
 	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
 
 	twoBindings := s.Index != "" // for k, v in map
 
 	if twoBindings {
 		// Separate key and value allocas
-		keyAlloca := c.block.NewAlloca(keyLLVM)
+		keyAlloca := c.createEntryAlloca(keyLLVM)
 		keyAlloca.SetName(c.uniqueLocalName(s.Index))
 		c.locals[s.Index] = keyAlloca
 
-		valAlloca := c.block.NewAlloca(valLLVM)
+		valAlloca := c.createEntryAlloca(valLLVM)
 		valAlloca.SetName(c.uniqueLocalName(s.Binding))
 		c.locals[s.Binding] = valAlloca
 	} else {
 		// Single binding: (K, V) tuple
 		tupleType := irtypes.NewStruct(keyLLVM, valLLVM)
-		bindingAlloca := c.block.NewAlloca(tupleType)
+		bindingAlloca := c.createEntryAlloca(tupleType)
 		bindingAlloca.SetName(c.uniqueLocalName(s.Binding))
 		c.locals[s.Binding] = bindingAlloca
 	}
@@ -7170,12 +7170,12 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 
 func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 	// Alloca for byte position
-	posAlloca := c.block.NewAlloca(irtypes.I64)
+	posAlloca := c.createEntryAlloca(irtypes.I64)
 	c.block.NewStore(constant.NewInt(irtypes.I64, 0), posAlloca)
 
 	// Index variable if present
 	if s.Index != "" {
-		indexAlloca := c.block.NewAlloca(irtypes.I64)
+		indexAlloca := c.createEntryAlloca(irtypes.I64)
 		indexAlloca.SetName(c.uniqueLocalName(s.Index))
 		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
 		c.locals[s.Index] = indexAlloca
@@ -7202,7 +7202,7 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
-	alloca := c.block.NewAlloca(irtypes.I32)
+	alloca := c.createEntryAlloca(irtypes.I32)
 	alloca.SetName(c.uniqueLocalName(s.Binding))
 	c.block.NewStore(cp, alloca)
 	c.locals[s.Binding] = alloca
@@ -7554,7 +7554,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		)
 
 		if ci.binding != "_" {
-			alloca := c.block.NewAlloca(optType)
+			alloca := c.createEntryAlloca(optType)
 			alloca.SetName(c.uniqueLocalName(ci.binding))
 			c.block.NewStore(recvPhi, alloca)
 			c.locals[ci.binding] = alloca
@@ -7658,7 +7658,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		// 4. For each case: alloca SWN, init, enqueue on channel's waiter list
 		swnAllocas := make([]value.Value, nCases)
 		for i, ci := range caseInfos {
-			swn := c.block.NewAlloca(swnTy)
+			swn := c.createEntryAlloca(swnTy)
 			swnAllocas[i] = swn
 
 			// Initialize SWN fields. Fields 0,2,3 are padding (set to null).

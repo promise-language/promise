@@ -886,7 +886,7 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 		if paramIdx < len(fn.Params) {
 			if st, ok := fn.Params[paramIdx].Typ.(*irtypes.StructType); ok {
 				if _, rightIsPtr := right.Type().(*irtypes.PointerType); rightIsPtr {
-					alloca := c.block.NewAlloca(st)
+					alloca := c.createEntryAlloca(st)
 					vtableField := c.block.NewGetElementPtr(st, alloca,
 						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 					c.block.NewStore(constant.NewNull(irtypes.I8Ptr), vtableField)
@@ -2219,7 +2219,7 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 
 	// If the type has an explicit new() constructor, alloca + store + call new() + load
 	if named != nil && named.HasNew() {
-		alloca := c.block.NewAlloca(valueStructType)
+		alloca := c.createEntryAlloca(valueStructType)
 		c.block.NewStore(val, alloca)
 
 		// Zero-init all user fields
@@ -4244,7 +4244,7 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 	dataType := layout.VariantDataTypes[member.Field]
 
 	internalType := layout.EnumInternalType.(*irtypes.StructType)
-	alloca := c.block.NewAlloca(internalType)
+	alloca := c.createEntryAlloca(internalType)
 
 	tagPtr := c.block.NewGetElementPtr(internalType, alloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -5354,14 +5354,14 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			savedElseScope := len(c.scopeBindings)
 			if e.ElseBinding != "" && e.ElseBinding != "_" {
 				elseValStruct := c.reconstructErrorValue(errVal)
-				alloca := c.block.NewAlloca(userValueType())
+				alloca := c.createEntryAlloca(userValueType())
 				alloca.SetName(c.uniqueLocalName(e.ElseBinding))
 				c.block.NewStore(elseValStruct, alloca)
 				c.locals[e.ElseBinding] = alloca
 				c.registerErrorDrop(e.ElseBinding, alloca, types.TypError)
 			} else {
 				// No else binding — temporary for drop
-				alloca := c.block.NewAlloca(userValueType())
+				alloca := c.createEntryAlloca(userValueType())
 				alloca.SetName(c.uniqueLocalName("_else_err_tmp"))
 				elseValStruct := c.reconstructErrorValue(errVal)
 				c.block.NewStore(elseValStruct, alloca)
@@ -5419,14 +5419,14 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 
 	if e.Binding != "" && e.Binding != "_" {
 		valStruct := c.reconstructErrorValue(errVal)
-		alloca := c.block.NewAlloca(userValueType())
+		alloca := c.createEntryAlloca(userValueType())
 		alloca.SetName(c.uniqueLocalName(e.Binding))
 		c.block.NewStore(valStruct, alloca)
 		c.locals[e.Binding] = alloca
 		c.registerErrorDrop(e.Binding, alloca, errorDropType)
 	} else {
 		// No binding — create a temporary alloca so drop machinery can free it.
-		alloca := c.block.NewAlloca(userValueType())
+		alloca := c.createEntryAlloca(userValueType())
 		alloca.SetName(c.uniqueLocalName("_err_tmp"))
 		valStruct := c.reconstructErrorValue(errVal)
 		c.block.NewStore(valStruct, alloca)
@@ -5941,7 +5941,7 @@ func (c *Compiler) genFixedArrayLit(e *ast.ArrayLit, arr *types.Array) value.Val
 	elemLLVM := c.resolveType(arr.Elem())
 	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
 
-	tmp := c.block.NewAlloca(arrType)
+	tmp := c.createEntryAlloca(arrType)
 	for i, elemExpr := range e.Elements {
 		val := c.genCallArgExpr(elemExpr)
 		ptr := c.block.NewGetElementPtr(arrType, tmp,
@@ -6065,7 +6065,7 @@ func (c *Compiler) genArrayBasePtr(target ast.Expr, arr *types.Array) value.Valu
 	arrVal := c.genExprAutoPropagate(target) // B0323
 	elemLLVM := c.resolveType(arr.Elem())
 	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
-	tmp := c.block.NewAlloca(arrType)
+	tmp := c.createEntryAlloca(arrType)
 	c.block.NewStore(arrVal, tmp)
 	return tmp
 }

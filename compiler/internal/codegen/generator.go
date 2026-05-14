@@ -177,15 +177,20 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.coroCleanupBlk = cleanupBlk
 	c.coroSuspendBlk = doneBlk
 
-	// Initial suspend: ramp returns handle immediately, body runs on first resume
-	initSusp := startBlk.NewCall(c.coroSuspend, constant.None, constant.False)
-	startBlk.NewSwitch(initSusp, doneBlk,
+	// Initial suspend — in a separate block so that createEntryAlloca can
+	// append allocas to startBlk BEFORE the suspend point. coro-split needs
+	// allocas to precede coro.suspend to properly spill them to the frame.
+	initSuspBlk := coroFn.NewBlock("coro.init.suspend")
+	startBlk.NewBr(initSuspBlk)
+
+	initSusp := initSuspBlk.NewCall(c.coroSuspend, constant.None, constant.False)
+	initSuspBlk.NewSwitch(initSusp, doneBlk,
 		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
 		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
 
 	// 4. Compile user body — runs on first resume
 	c.block = bodyBlk
-	c.entryBlock = bodyBlk
+	c.entryBlock = startBlk
 	c.genBlock(body)
 
 	// If body falls through (no more yields), branch to final suspend
@@ -288,11 +293,11 @@ func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemT
 	yieldSlot := c.block.NewExtractValue(genVal, 1)
 
 	// Store into allocas for cleanup (break/return can destroy)
-	handleAlloca := c.block.NewAlloca(irtypes.I8Ptr)
+	handleAlloca := c.createEntryAlloca(irtypes.I8Ptr)
 	handleAlloca.SetName(c.uniqueLocalName("gen.handle"))
 	c.block.NewStore(handle, handleAlloca)
 
-	slotAlloca := c.block.NewAlloca(irtypes.I8Ptr)
+	slotAlloca := c.createEntryAlloca(irtypes.I8Ptr)
 	slotAlloca.SetName(c.uniqueLocalName("gen.slot"))
 	c.block.NewStore(yieldSlot, slotAlloca)
 
@@ -304,13 +309,13 @@ func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemT
 	})
 
 	// Bind loop variable
-	elemAlloca := c.block.NewAlloca(elemLLVM)
+	elemAlloca := c.createEntryAlloca(elemLLVM)
 	elemAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.locals[s.Binding] = elemAlloca
 
 	// Optional index variable
 	if s.Index != "" {
-		indexAlloca := c.block.NewAlloca(irtypes.I64)
+		indexAlloca := c.createEntryAlloca(irtypes.I64)
 		indexAlloca.SetName(c.uniqueLocalName(s.Index))
 		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
 		c.locals[s.Index] = indexAlloca
@@ -453,11 +458,11 @@ func (c *Compiler) genYieldDelegateGenerator(genVal value.Value, elemType types.
 	handle := c.block.NewExtractValue(genVal, 0)
 	yieldSlot := c.block.NewExtractValue(genVal, 1)
 
-	handleAlloca := c.block.NewAlloca(irtypes.I8Ptr)
+	handleAlloca := c.createEntryAlloca(irtypes.I8Ptr)
 	handleAlloca.SetName(c.uniqueLocalName("yieldstar.handle"))
 	c.block.NewStore(handle, handleAlloca)
 
-	slotAlloca := c.block.NewAlloca(irtypes.I8Ptr)
+	slotAlloca := c.createEntryAlloca(irtypes.I8Ptr)
 	slotAlloca.SetName(c.uniqueLocalName("yieldstar.slot"))
 	c.block.NewStore(yieldSlot, slotAlloca)
 
@@ -527,7 +532,7 @@ func (c *Compiler) genYieldDelegateRange(expr ast.Expr, elemType types.Type, ite
 		ltPred = enum.IPredULT
 	}
 
-	counterAlloca := c.block.NewAlloca(elemLLVM)
+	counterAlloca := c.createEntryAlloca(elemLLVM)
 	c.block.NewStore(start, counterAlloca)
 
 	headerBlk := c.newBlock("yieldstar.range.header")
@@ -569,7 +574,7 @@ func (c *Compiler) genYieldDelegateArray(expr ast.Expr, arr *types.Array) {
 	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
 	length := constant.NewInt(irtypes.I64, arr.Size())
 
-	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	counterAlloca := c.createEntryAlloca(irtypes.I64)
 	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
 
 	headerBlk := c.newBlock("yieldstar.arr.header")
@@ -609,7 +614,7 @@ func (c *Compiler) genYieldDelegateVector(vecPtr value.Value, elemType types.Typ
 	headerPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
 	length := loadVectorLen(c.block, headerPtr)
 
-	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	counterAlloca := c.createEntryAlloca(irtypes.I64)
 	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
 
 	headerBlk := c.newBlock("yieldstar.vec.header")
@@ -645,7 +650,7 @@ func (c *Compiler) genYieldDelegateVector(vecPtr value.Value, elemType types.Typ
 
 // genYieldDelegateString yields all chars from a string.
 func (c *Compiler) genYieldDelegateString(strPtr value.Value) {
-	posAlloca := c.block.NewAlloca(irtypes.I64)
+	posAlloca := c.createEntryAlloca(irtypes.I64)
 	c.block.NewStore(constant.NewInt(irtypes.I64, 0), posAlloca)
 
 	headerBlk := c.newBlock("yieldstar.str.header")

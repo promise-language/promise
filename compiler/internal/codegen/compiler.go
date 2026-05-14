@@ -6450,7 +6450,7 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			dropFn = c.forwardDeclareModuleEnumDrop(enum, enumName, mangledName)
 		}
 		if dropFn != nil {
-			alloca := c.block.NewAlloca(fieldVal.Type())
+			alloca := c.createEntryAlloca(fieldVal.Type())
 			c.block.NewStore(fieldVal, alloca)
 			ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
 			c.block.NewCall(dropFn, ptr)

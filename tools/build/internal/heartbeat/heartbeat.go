@@ -1,24 +1,13 @@
-// skill_heartbeat.go — Claude Code hook for automatic agent heartbeat updates.
+// Package heartbeat implements the Skill-tool heartbeat hook logic.
 //
-// Handles both PreToolUse and PostToolUse events for the Skill tool:
-//   - PreToolUse: detects which skill is starting and sends a heartbeat with
-//     the mapped status (e.g., /do → "planning", /review → "reviewing").
-//   - PostToolUse: detects when a "final" skill completes, sets the agent to
-//     "idle", and cleans up items tagged "processing" that were assigned to
-//     this agent (removes the tag and clears assigned_to).
-//
-// Usage (via hook config):
-//
-//	"command": "go run \"$CLAUDE_PROJECT_DIR/tools/hooks/skill_heartbeat.go\" || true"
-//
-// $CLAUDE_PROJECT_DIR is set by Claude Code in every Skill hook env, so
-// the hook is immune to shell cwd drift (B0349).
-package main
+// Originally lived in tools/hooks/skill_heartbeat.go and was invoked via
+// `go run` on every Skill PreToolUse/PostToolUse. It now compiles into
+// bin/guard (T0252) so hooks no longer pay the per-invocation go-run cost.
+package heartbeat
 
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -28,31 +17,27 @@ import (
 	"time"
 )
 
-// hookInput is the JSON structure Claude Code sends to tool-use hooks.
-type hookInput struct {
-	HookEventName string `json:"hook_event_name"`
-	CWD           string `json:"cwd"`
-	ToolInput     struct {
-		Skill string `json:"skill"`
-		Args  string `json:"args"`
-	} `json:"tool_input"`
+// Input is the subset of Claude Code hook JSON the heartbeat cares about.
+type Input struct {
+	HookEventName string
+	CWD           string
+	Skill         string
+	Args          string
 }
 
-// mcpConfig mirrors the .mcp.json structure.
 type mcpConfig struct {
 	MCPServers map[string]struct {
 		URL string `json:"url"`
 	} `json:"mcpServers"`
 }
 
-// trackerItem is a minimal representation of an item from the tracker API.
 type trackerItem struct {
 	ID         string   `json:"id"`
 	AssignedTo string   `json:"assigned_to"`
 	Tags       []string `json:"tags"`
 }
 
-// skillStatus maps skill names to heartbeat status on PreToolUse (skill start).
+// skillStatus maps skill names to heartbeat status on PreToolUse.
 var skillStatus = map[string]string{
 	"do":       "planning",
 	"plan":     "planning",
@@ -63,8 +48,8 @@ var skillStatus = map[string]string{
 	"stress":   "stress-testing",
 }
 
-// postSkillStatus maps skill names to heartbeat status on PostToolUse (skill exit).
-// Only listed if the skill triggers a phase transition on completion.
+// postSkillStatus maps skill names to heartbeat status on PostToolUse
+// (only entries that trigger a phase transition on completion).
 var postSkillStatus = map[string]string{
 	"plan": "implementing",
 }
@@ -79,36 +64,30 @@ var finalSkills = map[string]bool{
 
 var itemIDRe = regexp.MustCompile(`[TBD]\d{4,}`)
 
-func main() {
-	var input hookInput
-	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
-		// Can't parse input — exit silently (non-blocking).
-		os.Exit(0)
+// Run performs the heartbeat POST for the given hook input. All failures
+// are silently swallowed — heartbeats are best-effort and must never block
+// the Skill invocation.
+func Run(in Input) {
+	if in.Skill == "" {
+		return
 	}
-
-	skill := input.ToolInput.Skill
-	if skill == "" {
-		os.Exit(0)
-	}
-
-	status, known := skillStatus[skill]
+	status, known := skillStatus[in.Skill]
 	if !known {
-		os.Exit(0)
+		return
 	}
 
-	trackerURL := findTrackerURL(input.CWD)
+	trackerURL := findTrackerURL(in.CWD)
 	if trackerURL == "" {
-		os.Exit(0)
+		return
 	}
 
-	agentName := filepath.Base(input.CWD)
+	agentName := filepath.Base(in.CWD)
 	hostName, _ := os.Hostname()
-
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	switch input.HookEventName {
+	switch in.HookEventName {
 	case "PreToolUse":
-		itemID := extractItemID(input.ToolInput.Args)
+		itemID := itemIDRe.FindString(in.Args)
 		title := ""
 		if itemID != "" {
 			title = fetchItemTitle(client, trackerURL, itemID)
@@ -116,25 +95,19 @@ func main() {
 		sendHeartbeat(client, trackerURL, agentName, hostName, status, itemID, title)
 
 	case "PostToolUse":
-		if finalSkills[skill] {
+		if finalSkills[in.Skill] {
 			sendHeartbeat(client, trackerURL, agentName, hostName, "idle", "", "")
 			cleanupProcessingItems(client, trackerURL, agentName)
-		} else if postStatus, ok := postSkillStatus[skill]; ok {
+		} else if postStatus, ok := postSkillStatus[in.Skill]; ok {
 			sendHeartbeat(client, trackerURL, agentName, hostName, postStatus, "", "")
 		}
 	}
-
-	// Output empty JSON — no hook decision needed (allow everything).
-	fmt.Println("{}")
 }
 
-// findTrackerURL locates .mcp.json starting from cwd and walking up to the
-// git root, then extracts the tracker server URL.
 func findTrackerURL(cwd string) string {
 	dir := cwd
 	for {
-		mcpPath := filepath.Join(dir, ".mcp.json")
-		data, err := os.ReadFile(mcpPath)
+		data, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
 		if err == nil {
 			var cfg mcpConfig
 			if json.Unmarshal(data, &cfg) == nil {
@@ -145,16 +118,10 @@ func findTrackerURL(cwd string) string {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			break
+			return ""
 		}
 		dir = parent
 	}
-	return ""
-}
-
-func extractItemID(args string) string {
-	match := itemIDRe.FindString(args)
-	return match
 }
 
 func fetchItemTitle(client *http.Client, baseURL, itemID string) string {
@@ -184,7 +151,6 @@ func sendHeartbeat(client *http.Client, baseURL, agent, host, status, itemID, it
 	if itemTitle != "" {
 		payload["item_title"] = itemTitle
 	}
-
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", baseURL+"/api/agents/heartbeat", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -195,7 +161,6 @@ func sendHeartbeat(client *http.Client, baseURL, agent, host, status, itemID, it
 }
 
 func cleanupProcessingItems(client *http.Client, baseURL, agentName string) {
-	// List items tagged "processing".
 	resp, err := client.Get(baseURL + "/api/items?tag=processing")
 	if err != nil || resp.StatusCode != 200 {
 		return
@@ -206,17 +171,14 @@ func cleanupProcessingItems(client *http.Client, baseURL, agentName string) {
 	if err != nil {
 		return
 	}
-
 	var items []trackerItem
 	if err := json.Unmarshal(data, &items); err != nil {
 		return
 	}
-
 	for _, item := range items {
 		if item.AssignedTo != agentName {
 			continue
 		}
-		// Remove "processing" tag, clear assigned_to.
 		newTags := make([]string, 0, len(item.Tags))
 		for _, t := range item.Tags {
 			if t != "processing" {

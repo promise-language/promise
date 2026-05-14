@@ -31,6 +31,7 @@ import (
 	"strings"
 
 	"github.com/p5e-ia/promise-lang/tools/build/common"
+	"github.com/p5e-ia/promise-lang/tools/build/internal/heartbeat"
 )
 
 var sourceHash = "dev"
@@ -38,8 +39,10 @@ var sourceHash = "dev"
 // hookInput is the JSON structure Claude Code sends to PreToolUse hooks.
 // Fields vary by tool type — we decode all possible fields and detect the tool.
 type hookInput struct {
-	ToolName  string `json:"tool_name"`
-	ToolInput struct {
+	HookEventName string `json:"hook_event_name"`
+	CWD           string `json:"cwd"`
+	ToolName      string `json:"tool_name"`
+	ToolInput     struct {
 		// Bash
 		Command string `json:"command"`
 		// Edit
@@ -48,6 +51,9 @@ type hookInput struct {
 		NewString string `json:"new_string"`
 		// Write
 		Content string `json:"content"`
+		// Skill
+		Skill string `json:"skill"`
+		Args  string `json:"args"`
 	} `json:"tool_input"`
 }
 
@@ -81,6 +87,22 @@ func main() {
 		return
 	}
 
+	tool := detectTool(input)
+
+	// Skill hook: heartbeat logic. Heartbeats are best-effort and never
+	// block Skill invocation, so skip the stale check entirely — the
+	// corresponding settings.json entry uses `|| true` anyway.
+	if tool == "skill" {
+		heartbeat.Run(heartbeat.Input{
+			HookEventName: input.HookEventName,
+			CWD:           input.CWD,
+			Skill:         input.ToolInput.Skill,
+			Args:          input.ToolInput.Args,
+		})
+		fmt.Println("{}")
+		return
+	}
+
 	// Stale check: block most operations when tools source has changed,
 	// but always allow ./make so the agent can rebuild.
 	if reason := checkStale(input); reason != "" {
@@ -89,7 +111,7 @@ func main() {
 	}
 
 	// Detect tool type and dispatch.
-	switch detectTool(input) {
+	switch tool {
 	case "bash":
 		if input.ToolInput.Command == "" {
 			printDeny("guard: could not extract command from hook input")
@@ -166,9 +188,14 @@ func detectTool(input hookInput) string {
 		return "edit"
 	case "write":
 		return "write"
+	case "skill":
+		return "skill"
 	}
 
 	// Fall back to field-based detection.
+	if input.ToolInput.Skill != "" {
+		return "skill"
+	}
 	if input.ToolInput.Command != "" {
 		return "bash"
 	}

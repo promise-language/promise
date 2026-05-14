@@ -155,7 +155,7 @@ Concurrent verify runs from different worktrees are serialized via a file lock (
 The meta-builder (`./make`) computes an FNV hash of all `.go` and `go.mod` files under `tools/` and injects it into each binary at compile time via `-X main.sourceHash=<hash>`. When a tool binary runs, it recomputes the hash and compares. If they differ, the binary prints:
 
 ```
-tools source has changed — run: ./make
+tools source has changed — run: ./make (or /abs/path/to/repo/make)
 ```
 
 and exits with code 1. This ensures you never accidentally use a stale tool after editing the build system.

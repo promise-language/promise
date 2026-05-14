@@ -3,6 +3,7 @@ package common
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // CheckStale compares the compiled-in source hash against the current source
@@ -25,9 +26,11 @@ func CheckStale(compiledHash string) {
 	}
 	if compiledHash != currentHash {
 		if IsWindows() {
-			fmt.Fprintf(os.Stderr, "tools source has changed — run: .\\make.cmd\n")
+			abs := filepath.Join(root, "make.cmd")
+			fmt.Fprintf(os.Stderr, "tools source has changed — run: .\\make.cmd (or %s)\n", abs)
 		} else {
-			fmt.Fprintf(os.Stderr, "tools source has changed — run: ./make\n")
+			abs := filepath.Join(root, "make")
+			fmt.Fprintf(os.Stderr, "tools source has changed — run: ./make (or %s)\n", abs)
 		}
 		os.Exit(1)
 	}

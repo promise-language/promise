@@ -221,45 +221,55 @@ dir_make_all_existing() `test(exclude: "wasm32") {
 
 // ── Dir.list ─────────────────────────────────────────────────────────────────
 
-// B0184: dir_list_basic crashes on macOS — commented out until fixed.
-// dir_list_basic() `test(exclude: "wasm32") {
-//   if !Dir.exists("/tmp/pr_iot_list") {
-//     Dir.make("/tmp/pr_iot_list")?!;
-//   }
-//   File.write_content("/tmp/pr_iot_list/aaa.txt", "a")?!;
-//   File.write_content("/tmp/pr_iot_list/bbb.txt", "b")?!;
-//   string[] entries = Dir.list("/tmp/pr_iot_list")?!;
-//   assert(entries.len >= 2, "at least 2 entries");
-//   bool found_a = false;
-//   bool found_b = false;
-//   int i = 0;
-//   while i < entries.len {
-//     if entries[i] == "aaa.txt" { found_a = true; }
-//     if entries[i] == "bbb.txt" { found_b = true; }
-//     i += 1;
-//   }
-//   assert(found_a, "aaa.txt in listing");
-//   assert(found_b, "bbb.txt in listing");
-//   i = 0;
-//   while i < entries.len {
-//     assert(entries[i] != ".", "no dot entry");
-//     assert(entries[i] != "..", "no dotdot entry");
-//     i += 1;
-//   }
-//   File.remove("/tmp/pr_iot_list/aaa.txt")?!;
-//   File.remove("/tmp/pr_iot_list/bbb.txt")?!;
-//   Dir.remove("/tmp/pr_iot_list")?!;
-// }
+dir_list_basic() `test(exclude: "wasm32") {
+  // Clean up any leftovers from a previous run.
+  if Dir.exists("/tmp/pr_iot_list") {
+    File.remove("/tmp/pr_iot_list/aaa.txt")? e {
+    };
+    File.remove("/tmp/pr_iot_list/bbb.txt")? e {
+    };
+    Dir.remove("/tmp/pr_iot_list")?!;
+  }
+  Dir.make("/tmp/pr_iot_list")?!;
+  File.write_content("/tmp/pr_iot_list/aaa.txt", "a")?!;
+  File.write_content("/tmp/pr_iot_list/bbb.txt", "b")?!;
+  string[] entries = Dir.list("/tmp/pr_iot_list")?!;
+  assert(entries.len == 2, "exactly 2 entries");
+  bool found_a = false;
+  bool found_b = false;
+  int i = 0;
+  while i < entries.len {
+    if entries[i] == "aaa.txt" {
+      found_a = true;
+    }
+    if entries[i] == "bbb.txt" {
+      found_b = true;
+    }
+    i += 1;
+  }
+  assert(found_a, "aaa.txt in listing");
+  assert(found_b, "bbb.txt in listing");
+  i = 0;
+  while i < entries.len {
+    assert(entries[i] != ".", "no dot entry");
+    assert(entries[i] != "..", "no dotdot entry");
+    i += 1;
+  }
+  File.remove("/tmp/pr_iot_list/aaa.txt")?!;
+  File.remove("/tmp/pr_iot_list/bbb.txt")?!;
+  Dir.remove("/tmp/pr_iot_list")?!;
+}
 
-// B0184: dir_list_empty crashes on macOS — commented out until fixed.
-// dir_list_empty() `test(exclude: "wasm32") {
-//   if !Dir.exists("/tmp/pr_iot_list_e") {
-//     Dir.make("/tmp/pr_iot_list_e")?!;
-//   }
-//   string[] entries = Dir.list("/tmp/pr_iot_list_e")?!;
-//   assert(entries.len == 0, "empty dir has no entries");
-//   Dir.remove("/tmp/pr_iot_list_e")?!;
-// }
+dir_list_empty() `test(exclude: "wasm32") {
+  // Clean up any leftovers from a previous run, then start fresh.
+  if Dir.exists("/tmp/pr_iot_list_e") {
+    Dir.remove("/tmp/pr_iot_list_e")?!;
+  }
+  Dir.make("/tmp/pr_iot_list_e")?!;
+  string[] entries = Dir.list("/tmp/pr_iot_list_e")?!;
+  assert(entries.len == 0, "empty dir has no entries");
+  Dir.remove("/tmp/pr_iot_list_e")?!;
+}
 
 dir_list_nonexistent() `test(exclude: "wasm32") {
   bool caught = false;
@@ -572,9 +582,51 @@ dir_make_all_empty_string() `test(exclude: "wasm32") {
   Dir.make_all("")?!;
 }
 
-// B0184: All Dir.list tests crash on macOS — commented out until fixed.
-// dir_list_on_file() `test(exclude: "wasm32") { ... }
-// dir_list_mixed() `test(exclude: "wasm32") { ... }
+dir_list_on_file() `test(exclude: "wasm32") {
+  // Dir.list on a regular file should raise an error (ENOTDIR).
+  File.write_content("/tmp/pr_iot_dlof", "x")?!;
+  bool caught = false;
+  Dir.list("/tmp/pr_iot_dlof")? e {
+    caught = true;
+  };
+  assert(caught, "Dir.list on a file raises error");
+  File.remove("/tmp/pr_iot_dlof")?!;
+}
+
+dir_list_mixed() `test(exclude: "wasm32") {
+  // List a directory containing one file and one subdirectory.
+  if Dir.exists("/tmp/pr_iot_dlmix") {
+    File.remove("/tmp/pr_iot_dlmix/file.txt")? e {
+    };
+    Dir.remove("/tmp/pr_iot_dlmix/sub")? e {
+    };
+    Dir.remove("/tmp/pr_iot_dlmix")?!;
+  }
+  Dir.make("/tmp/pr_iot_dlmix")?!;
+  File.write_content("/tmp/pr_iot_dlmix/file.txt", "x")?!;
+  Dir.make("/tmp/pr_iot_dlmix/sub")?!;
+  string[] entries = Dir.list("/tmp/pr_iot_dlmix")?!;
+  assert(entries.len == 2, "two entries (file + subdir)");
+  bool found_file = false;
+  bool found_sub = false;
+  int i = 0;
+  while i < entries.len {
+    if entries[i] == "file.txt" {
+      found_file = true;
+    }
+    if entries[i] == "sub" {
+      found_sub = true;
+    }
+    assert(entries[i] != ".", "no dot entry");
+    assert(entries[i] != "..", "no dotdot entry");
+    i += 1;
+  }
+  assert(found_file, "file.txt in listing");
+  assert(found_sub, "sub in listing");
+  File.remove("/tmp/pr_iot_dlmix/file.txt")?!;
+  Dir.remove("/tmp/pr_iot_dlmix/sub")?!;
+  Dir.remove("/tmp/pr_iot_dlmix")?!;
+}
 
 // ── Edge cases: File.size ────────────────────────────────────────────────────
 

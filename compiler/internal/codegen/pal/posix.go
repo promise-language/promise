@@ -743,7 +743,9 @@ func (p *PosixPAL) EmitDirNextName(module *ir.Module) *ir.Func {
 
 	errnoLocFn := p.getOrDeclareErrnoLocFn(module)
 
-	// d_name byte offset within struct dirent: macOS=21, Linux=19
+	// d_name byte offset within struct dirent:
+	// macOS (Darwin 64-bit): ino_t(8) + d_seekoff(8) + d_reclen(2) + d_namlen(2) + d_type(1) = 21
+	// Linux: ino_t(8) + off_t(8) + d_reclen(2) + d_type(1) = 19
 	dNameOffset := int64(19) // Linux
 	if p.isMacOS() {
 		dNameOffset = 21

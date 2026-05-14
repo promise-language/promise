@@ -1107,6 +1107,137 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 
 // --- drop binding ---
 
+// isTypeDroppable returns true if maybeRegisterDrop would register a drop binding
+// for a variable of this type. Used by the return-alias check (B0345) to decide
+// whether a return value could alias a droppable argument.
+func isTypeDroppable(typ types.Type) bool {
+	if enum := extractEnum(typ); enum != nil {
+		if enum.HasDrop() {
+			return true
+		}
+		if inst, ok := typ.(*types.Instance); ok && monoEnumInstNeedsSynthDrop(inst) {
+			return true
+		}
+		return false
+	}
+	named := extractNamed(typ)
+	if named == nil {
+		return false
+	}
+	if named == types.TypString {
+		return true
+	}
+	if _, ok := types.AsVector(typ); ok || named == types.TypVector {
+		return true
+	}
+	if _, ok := types.AsChannel(typ); ok || named == types.TypChannel {
+		return true
+	}
+	if isContainerType(typ) {
+		return false
+	}
+	if named.HasDrop() || named.NeedsSynthDrop() {
+		return true
+	}
+	if inst, ok := typ.(*types.Instance); ok && monoInstNeedsSynthDrop(inst) {
+		return true
+	}
+	if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+		return true
+	}
+	return false
+}
+
+// emitReturnAliasCheck generates runtime pointer comparisons between a function call's
+// return value and its non-Copy ident arguments. If the return pointer aliases an
+// argument, the argument's drop flag is cleared to prevent double-free (B0345).
+//
+// Without this check, identity(v) where v is a heap string causes SIGABRT:
+// the caller has drop flags for both v and the return value s, but they point
+// to the same memory — both get freed at scope exit.
+func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value) {
+	if result == nil || sig == nil {
+		return
+	}
+	retType := sig.Result()
+	if retType == nil {
+		return
+	}
+	// Only check for non-Copy return types that could alias.
+	if !isTypeDroppable(retType) {
+		return
+	}
+	// Skip failable returns — the raw result is {i1, value, err_ptr}, not the value itself.
+	if sig.CanError() {
+		return
+	}
+
+	params := sig.Params()
+	for i, arg := range args {
+		if i >= len(argVals) || i >= len(params) {
+			break
+		}
+		// Skip ~, &, and variadic params — ~ already clears flag, & is a borrow,
+		// variadic has separate handling.
+		p := params[i]
+		if p.Ref() == types.RefMut || p.IsVariadic() {
+			continue
+		}
+		if _, isSR := p.Type().(*types.SharedRef); isSR {
+			continue
+		}
+		if !isTypeDroppable(p.Type()) {
+			continue
+		}
+
+		ident, ok := arg.Value.(*ast.IdentExpr)
+		if !ok {
+			continue
+		}
+		dropFlag, ok := c.dropFlags[ident.Name]
+		if !ok {
+			continue
+		}
+
+		// Extract instance pointers for comparison.
+		retPtr := extractAliasPtr(c, result)
+		argPtr := extractAliasPtr(c, argVals[i])
+		if retPtr == nil || argPtr == nil {
+			continue
+		}
+
+		// Generate: if retPtr == argPtr { clear dropFlag }
+		same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
+		clearBlock := c.newBlock("alias.clear")
+		skipBlock := c.newBlock("alias.skip")
+		c.block.NewCondBr(same, clearBlock, skipBlock)
+		c.block = clearBlock
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+		c.block.NewBr(skipBlock)
+		c.block = skipBlock
+	}
+}
+
+// extractAliasPtr returns the instance pointer from a value for aliasing comparison.
+// For i8* values (string, vector, channel): returns the value directly.
+// For value structs {i8*, i8*}: extracts field 1 (the instance pointer).
+func extractAliasPtr(c *Compiler, v value.Value) value.Value {
+	if v == nil {
+		return nil
+	}
+	// i8* values: string instance ptr, vector header ptr, channel ptr
+	if v.Type() == irtypes.I8Ptr {
+		return v
+	}
+	// Value structs {i8*, i8*}: extract instance pointer (field 1)
+	if st, ok := v.Type().(*irtypes.StructType); ok && len(st.Fields) == 2 {
+		if st.Fields[0] == irtypes.I8Ptr && st.Fields[1] == irtypes.I8Ptr {
+			return c.block.NewExtractValue(v, 1)
+		}
+	}
+	return nil
+}
+
 // maybeRegisterDrop checks if a variable's type has a drop() method and, if so,
 // registers a drop binding: allocates a drop flag (i1, initially true), resolves
 // the drop function, and appends a scopeBinding.

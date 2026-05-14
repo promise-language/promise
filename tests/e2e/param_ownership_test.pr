@@ -1,0 +1,161 @@
+// B0345: Tests for non-Copy value ownership transfer through function parameters.
+// When a non-Copy value is passed to a function (non-& param), ownership transfers
+// to the callee. The caller clears its drop flag; the callee drops at scope exit.
+// --- String identity: return same heap string → no double-free ---
+string_identity(string s) string {
+  return s;
+}
+
+test_string_identity() `test {
+  string v = "A".to_lower(); // heap-allocated string
+  string r = string_identity(v);
+  assert(r == "a", "string identity");
+}
+
+// --- String consume: callee drops param → no leak ---
+
+string_consume(string s) {
+  // s is dropped at scope exit by callee
+}
+
+test_string_consume() `test {
+  string v = "hello".to_lower();
+  string_consume(v);
+}
+
+// --- Vector identity: return same heap vector → no double-free ---
+
+vec_identity(int[] v) int[] {
+  return v;
+}
+
+test_vector_identity() `test {
+  int[] v = [1, 2, 3];
+  v.push(4); // ensure heap-allocated (not .rodata)
+  int[] r = vec_identity(v);
+  assert(r.len == 4, "vector identity len");
+}
+
+// --- Vector consume: callee drops param → no leak ---
+
+vec_consume(int[] v) {
+  // v is dropped at scope exit by callee
+}
+
+test_vector_consume() `test {
+  int[] v = [10, 20];
+  v.push(30); // ensure heap-allocated
+  vec_consume(v);
+}
+
+// --- User type with drop: identity → no double-free ---
+
+type Resource {
+  int id;
+  drop(~this) {
+  }
+}
+
+resource_identity(Resource r) Resource {
+  return r;
+}
+
+test_resource_identity() `test {
+  Resource r = resource_identity(Resource(id: 42));
+  assert(r.id == 42, "resource identity");
+}
+
+// --- User type with drop: consume → no leak ---
+
+resource_consume(Resource r) {
+  // r is dropped at scope exit by callee
+}
+
+test_resource_consume() `test {
+  resource_consume(Resource(id: 99));
+}
+
+// --- Chained calls: pass through multiple functions ---
+
+string_passthrough_a(string s) string {
+  return string_passthrough_b(s);
+}
+
+string_passthrough_b(string s) string {
+  return s;
+}
+
+test_chained_passthrough() `test {
+  string v = "HELLO".to_lower();
+  string r = string_passthrough_a(v);
+  assert(r == "hello", "chained passthrough");
+}
+
+// --- Multiple non-Copy params ---
+
+pick_first(string a, string b) string {
+  return a;
+  // b is dropped at scope exit
+}
+
+test_multiple_params() `test {
+  string a = "X".to_lower();
+  string b = "Y".to_lower();
+  string r = pick_first(a, b);
+  assert(r == "x", "pick first");
+}
+
+// --- Method call returning a non-Copy param (exercises genMethodCall alias check) ---
+
+type Echo {
+  int unused;
+  echo(string s) string {
+    return s;
+  }
+}
+
+test_method_identity() `test {
+  Echo e = Echo(unused: 0);
+  string v = "HI".to_lower();
+  string r = e.echo(v);
+  assert(r == "hi", "method identity");
+}
+
+// --- Virtual method call returning a non-Copy param (exercises genVirtualMethodCall) ---
+
+type Base {
+  int id;
+  transform(string s) string {
+    return s;
+  }
+}
+
+type Derived is Base {
+  transform(string s) string {
+    return s;
+  }
+}
+
+test_virtual_method_identity() `test {
+  Base b = Derived(id: 1);
+  string v = "VM".to_lower();
+  string r = b.transform(v);
+  assert(r == "vm", "virtual identity");
+}
+
+// --- Enum method call returning a non-Copy param (exercises genEnumMethodCall) ---
+
+enum Wrap {
+  A, B,
+
+  passthrough(&this, string s) string {
+    return s;
+  }
+}
+
+test_enum_method_identity() `test {
+  Wrap w = Wrap.A;
+  string v = "EN".to_lower();
+  string r = w.passthrough(v);
+  assert(r == "en", "enum identity");
+}

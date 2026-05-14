@@ -9234,16 +9234,59 @@ func TestDropParameterNotFlagged(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		passthrough(Resource r) int {
-			return r.id;
+		passthrough(Resource zres) int {
+			return zres.id;
 		}
 		main() {
 			int x = passthrough(Resource(id: 1));
 		}
 	`)
 	assertContains(t, ir, "define i64 @__user.passthrough")
-	// The function should not create a drop flag for its parameter
-	// (it doesn't own the alloca, the caller does the drop flag management)
+	// The callee does NOT create a drop flag for non-~ params.
+	// The caller retains ownership and drops at scope exit.
+	assertNotContains(t, ir, "zres.dropflag")
+}
+
+func TestReturnAliasCheck(t *testing.T) {
+	// B0345: When a function returns a non-Copy value that was passed as a
+	// non-~ argument, the return pointer may alias the argument. The caller
+	// generates a post-call comparison to clear the argument's drop flag
+	// if the return aliases it, preventing double-free.
+	t.Run("string_identity", func(t *testing.T) {
+		ir := generateIR(t, `
+			identity(string zparam) string {
+				return zparam;
+			}
+			main() {
+				string v = "A".to_lower();
+				string r = identity(v);
+			}
+		`)
+		// Callee should NOT have a drop flag for its non-~ string param
+		assertNotContains(t, ir, "zparam.dropflag")
+		// Caller must emit alias check (icmp eq + conditional flag clear)
+		assertContains(t, ir, "alias.clear")
+		assertContains(t, ir, "alias.skip")
+	})
+	t.Run("droppable_user_type", func(t *testing.T) {
+		ir := generateIR(t, `
+			type Resource {
+				int id;
+				drop(~this) { }
+			}
+			identity(Resource zparam) Resource {
+				return zparam;
+			}
+			main() {
+				Resource v = Resource(id: 1);
+				Resource w = identity(v);
+			}
+		`)
+		// Callee should NOT have a drop flag for its non-~ param
+		assertNotContains(t, ir, "zparam.dropflag")
+		// Caller must emit alias check
+		assertContains(t, ir, "alias.clear")
+	})
 }
 
 // --- Alignment bug fix test ---

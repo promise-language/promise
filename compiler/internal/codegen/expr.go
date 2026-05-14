@@ -1355,12 +1355,18 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	}
 
 	// Coerce arguments when crossing type boundaries
+	origArgVals := argVals // B0345: save pre-coercion values for alias check
 	if calleeSig != nil {
 		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params())
 	}
 
 	result := c.block.NewCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
+
+	// B0345: If the return value aliases an argument, clear the argument's drop flag
+	// to prevent double-free. E.g., identity(v) returns v's pointer — without this,
+	// both v and the return value would be dropped at scope exit.
+	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals)
 
 	// T0092: Track string return values from functions with structural interface
 	// parameters. When a function takes a structural interface param and returns
@@ -1449,12 +1455,14 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 	}
 
 	// Coerce arguments using the callee's signature from sema
+	origArgVals := argVals // B0345
 	if calleeSig != nil {
 		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params())
 	}
 
 	result := c.block.NewCall(fn, argVals...)
 	c.clearVariadicStaticFlags(variadicPTs)
+	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals) // B0345
 	return result
 }
 
@@ -1670,11 +1678,13 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 
 	// Generate arguments
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
+	origArgVals := argVals // B0345: save pre-coercion values
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
+	c.emitReturnAliasCheck(result, method.Sig(), e.Args, origArgVals) // B0345
 	return result
 }
 
@@ -3100,11 +3110,13 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		}
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
+	origArgVals := argVals // B0345
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
+	c.emitReturnAliasCheck(result, method.Sig(), e.Args, origArgVals) // B0345
 	return result
 }
 
@@ -3246,11 +3258,13 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 		}
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
+	origArgVals := argVals // B0345
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
+	c.emitReturnAliasCheck(result, method.Sig(), e.Args, origArgVals) // B0345
 
 	// Drop temp enum receiver if it was a fresh temporary not tracked by
 	// the enumCtorTemps mechanism. When movedDroppable caused enumCtorTemps
@@ -3509,10 +3523,12 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 		args = append(args, instance)
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
+	origArgVals := argVals // B0345
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 	result := c.block.NewCall(fnTyped, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
+	c.emitReturnAliasCheck(result, method.Sig(), e.Args, origArgVals) // B0345
 	return result
 }
 

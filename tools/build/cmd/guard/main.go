@@ -9,7 +9,12 @@
 //
 // Compiled by ./make into bin/guard. Invoked via hook config:
 //
-//	"command": "$(git rev-parse --show-toplevel)/bin/guard || exit 2"
+//	"command": "\"$CLAUDE_PROJECT_DIR/bin/guard\" || exit 2"
+//
+// $CLAUDE_PROJECT_DIR is set by Claude Code in every PreToolUse hook env,
+// so the hook is immune to shell cwd drift (B0349). On a fresh clone
+// bin/guard doesn't exist yet, so the hook fails closed and the user
+// must run ./make once from a terminal (outside Claude Code) to bootstrap.
 //
 // The || exit 2 provides fail-closed behavior: if the guard crashes,
 // exit 2 tells the hook system to block the command.
@@ -208,8 +213,35 @@ func loadEditGates() ([]editGate, error) {
 	return config.Gates, nil
 }
 
-// findRepoRoot walks up from cwd looking for a .git directory.
+// findRepoRoot locates the repo root by walking up from the guard binary's
+// own location (not cwd), so Edit/Write gate loading keeps working even when
+// the agent's shell cwd has drifted outside the git worktree (B0349).
+//
+// The guard binary lives at <root>/bin/guard, so we start from its resolved
+// path and walk up until we find a .git entry. Falls back to walking up from
+// cwd if os.Executable() isn't available (shouldn't happen on any supported
+// platform, but stay defensive).
 func findRepoRoot() (string, error) {
+	exe, err := os.Executable()
+	if err == nil {
+		// Resolve symlinks so `go run` or a symlinked bin/ still works.
+		if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			exe = resolved
+		}
+		dir := filepath.Dir(exe)
+		for {
+			if _, statErr := os.Stat(filepath.Join(dir, ".git")); statErr == nil {
+				return dir, nil
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+
+	// Fallback: walk up from cwd.
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", err

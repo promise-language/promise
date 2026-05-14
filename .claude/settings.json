@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(git rev-parse --show-toplevel)/bin/guard || exit 2",
+            "command": "\"$CLAUDE_PROJECT_DIR/bin/guard\" || exit 2",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(git rev-parse --show-toplevel)/bin/guard || exit 2",
+            "command": "\"$CLAUDE_PROJECT_DIR/bin/guard\" || exit 2",
             "timeout": 10
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(git rev-parse --show-toplevel)/bin/guard || exit 2",
+            "command": "\"$CLAUDE_PROJECT_DIR/bin/guard\" || exit 2",
             "timeout": 10
           }
         ]
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run $(git rev-parse --show-toplevel)/tools/hooks/skill_heartbeat.go || true",
+            "command": "go run \"$CLAUDE_PROJECT_DIR/tools/hooks/skill_heartbeat.go\" || true",
             "timeout": 10
           }
         ]
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "go run $(git rev-parse --show-toplevel)/tools/hooks/skill_heartbeat.go || true",
+            "command": "go run \"$CLAUDE_PROJECT_DIR/tools/hooks/skill_heartbeat.go\" || true",
             "timeout": 10
           }
         ]

@@ -9,7 +9,10 @@
 //
 // Usage (via hook config):
 //
-//	"command": "go run $(git rev-parse --show-toplevel)/tools/hooks/skill_heartbeat.go || true"
+//	"command": "go run \"$CLAUDE_PROJECT_DIR/tools/hooks/skill_heartbeat.go\" || true"
+//
+// $CLAUDE_PROJECT_DIR is set by Claude Code in every Skill hook env, so
+// the hook is immune to shell cwd drift (B0349).
 package main
 
 import (

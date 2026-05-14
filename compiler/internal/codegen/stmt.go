@@ -1190,15 +1190,6 @@ func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature
 			continue
 		}
 
-		ident, ok := arg.Value.(*ast.IdentExpr)
-		if !ok {
-			continue
-		}
-		dropFlag, ok := c.dropFlags[ident.Name]
-		if !ok {
-			continue
-		}
-
 		// Extract instance pointers for comparison.
 		retPtr := extractAliasPtr(c, result)
 		argPtr := extractAliasPtr(c, argVals[i])
@@ -1206,15 +1197,39 @@ func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature
 			continue
 		}
 
-		// Generate: if retPtr == argPtr { clear dropFlag }
-		same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
-		clearBlock := c.newBlock("alias.clear")
-		skipBlock := c.newBlock("alias.skip")
-		c.block.NewCondBr(same, clearBlock, skipBlock)
-		c.block = clearBlock
-		c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
-		c.block.NewBr(skipBlock)
-		c.block = skipBlock
+		ident, isIdent := arg.Value.(*ast.IdentExpr)
+		if isIdent {
+			dropFlag, ok := c.dropFlags[ident.Name]
+			if !ok {
+				continue
+			}
+
+			// Generate: if retPtr == argPtr { clear dropFlag }
+			same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
+			clearBlock := c.newBlock("alias.clear")
+			skipBlock := c.newBlock("alias.skip")
+			c.block.NewCondBr(same, clearBlock, skipBlock)
+			c.block = clearBlock
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+			c.block.NewBr(skipBlock)
+			c.block = skipBlock
+			continue
+		}
+
+		// B0359: Non-ident args (e.g., vector literals) may be tracked as heap temps.
+		// If the return value aliases such an arg, clear the heap temp's drop flag
+		// to prevent use-after-free (the caller will own the value via the return).
+		if htIdx, ok := c.heapTempMap[argVals[i]]; ok {
+			ht := c.heapTemps[htIdx]
+			same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
+			clearBlock := c.newBlock("alias.ht.clear")
+			skipBlock := c.newBlock("alias.ht.skip")
+			c.block.NewCondBr(same, clearBlock, skipBlock)
+			c.block = clearBlock
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), ht.dropFlag)
+			c.block.NewBr(skipBlock)
+			c.block = skipBlock
+		}
 	}
 }
 

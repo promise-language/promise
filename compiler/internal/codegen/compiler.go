@@ -259,6 +259,8 @@ type Compiler struct {
 	palReadPipe                *ir.Func // @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
 	palWaitPid                 *ir.Func // @pal_wait_pid(i32 pid) → i32
 	palSpawnStreaming          *ir.Func // @pal_spawn_streaming(..., i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+	palSpawnEnv                *ir.Func // @pal_spawn_env(i8* program, i8** argv, i8** envp, i8* cwd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+	palSpawnStreamingEnv       *ir.Func // @pal_spawn_streaming_env(..., i8** envp, i8* cwd, ...) → i32
 	palKill                    *ir.Func // @pal_kill(i32 pid, i32 signal) → i32
 	palGetEnviron              *ir.Func // @pal_get_environ() → i8**
 	palGetUserInfo             *ir.Func // @pal_get_user_info(i8** out_name, i8** out_dir, i32* out_uid, i32* out_gid) → i32
@@ -1635,6 +1637,8 @@ func (c *Compiler) declareIntrinsics() {
 	c.palReadPipe = p.EmitReadPipe(c.module)
 	c.palWaitPid = p.EmitWaitPid(c.module)
 	c.palSpawnStreaming = p.EmitSpawnStreaming(c.module)
+	c.palSpawnEnv = p.EmitSpawnEnv(c.module)
+	c.palSpawnStreamingEnv = p.EmitSpawnStreamingEnv(c.module)
 	c.palKill = p.EmitKill(c.module)
 	c.palGetEnviron = p.EmitGetEnviron(c.module)
 	c.palGetUserInfo = p.EmitGetUserInfo(c.module)

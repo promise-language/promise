@@ -20,6 +20,6 @@ echo output: hello from promise""") {
   print_line("--- Execute ---");
 
   // Run a command and capture its output.
-  os.ProcessResult r = os.execute("echo", "hello from promise")?!;
+  os.ProcessResult r = os.execute("echo", ["hello from promise"])?!;
   print_line("echo output: {r.standard_output.trim()}");
 }

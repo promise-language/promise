@@ -951,8 +951,10 @@ func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toN
 
 // coerceCallArgs applies optional wrapping (T→T?) and view coercion to each
 // argument whose type differs from the parameter type.
+// args is the AST argument list (may be nil); used to clear drop flags when
+// wrapping droppable values into optionals (B0358).
 // Returns a new slice (or the original if no coercion was needed).
-func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, params []*types.Param) []value.Value {
+func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, params []*types.Param, args []*ast.Arg) []value.Value {
 	n := len(params)
 	if n > len(argVals) {
 		n = len(argVals)
@@ -979,6 +981,17 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 					// none → T?: produce zeroinitializer
 					v = c.zeroValue(lt)
 				} else if st, ok := lt.(*irtypes.StructType); ok {
+					// B0358: The value is moving into the optional — transfer
+					// ownership so the caller doesn't double-drop at scope exit.
+					if args != nil && i < len(args) {
+						if ident, ok := args[i].Value.(*ast.IdentExpr); ok {
+							if argTypeIsDroppable(argType) {
+								c.clearDropFlag(ident.Name)
+							}
+						}
+						c.claimStringTemp(v)
+						c.claimHeapTemp(v)
+					}
 					// T → T?: wrap as some
 					v = c.wrapOptional(v, st)
 				}

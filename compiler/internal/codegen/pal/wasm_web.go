@@ -95,6 +95,12 @@ func (p *WasmWebPAL) EmitWaitPid(module *ir.Module) *ir.Func     { return emitSt
 func (p *WasmWebPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	return emitStubSpawnStreaming(module)
 }
+func (p *WasmWebPAL) EmitSpawnEnv(module *ir.Module) *ir.Func {
+	return emitStubSpawnEnv(module)
+}
+func (p *WasmWebPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
+	return emitStubSpawnStreamingEnv(module)
+}
 func (p *WasmWebPAL) EmitKill(module *ir.Module) *ir.Func        { return emitStubKill(module) }
 func (p *WasmWebPAL) EmitGetEnviron(module *ir.Module) *ir.Func  { return emitStubGetEnviron(module) }
 func (p *WasmWebPAL) EmitGetUserInfo(module *ir.Module) *ir.Func { return emitStubGetUserInfo(module) }

@@ -41,11 +41,21 @@ _os_read_pipe(int fd) string `extern("promise_os_read_pipe");
 // Waits for a child process to exit. Returns exit code or raises error.
 _os_wait_pid!(int pid) int `extern("promise_os_wait_pid");
 
-// ── Streaming process externs ────────────────────────────────────────────────
+// ── Streaming process externs ──────────��─────────────────────────────────────
 
 // Spawns a child process with piped stdin/stdout/stderr. Returns pid or raises error.
 // Caches all 3 pipe fds in TLS — retrieve with _os_spawn_stdin_fd/_os_spawn_stdout_fd/_os_spawn_stderr_fd.
 _os_spawn_streaming!(string program, string[] args) int `extern("promise_os_spawn_streaming");
+
+// ── Environment/cwd-aware spawn externs ─────────────────────────────────────
+
+// Like _os_spawn but with optional envp and cwd.
+// env_entries is a string[] of "KEY=VALUE" entries. has_env: 1=use env_entries, 0=inherit.
+// cwd is a string path. has_cwd: 1=use cwd, 0=inherit.
+_os_spawn_env!(string program, string[] args, string[] env_entries, int has_env, string cwd, int has_cwd) int `extern("promise_os_spawn_env");
+
+// Like _os_spawn_streaming but with optional envp and cwd.
+_os_spawn_streaming_env!(string program, string[] args, string[] env_entries, int has_env, string cwd, int has_cwd) int `extern("promise_os_spawn_streaming_env");
 
 // Returns cached stdin pipe write fd from the last _os_spawn_streaming call.
 _os_spawn_stdin_fd() int `extern("promise_os_spawn_stdin_fd");
@@ -216,8 +226,24 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
   int _exit_code;
   bool _waited;
 
-  spawn!(string program, ...string args) Self `factory `public `doc("Spawns a subprocess with piped stdin, stdout, and stderr. The child process inherits the parent environment and working directory. The program is searched using the system PATH. Returns a Process handle for interacting with the child. Raises an error if the process cannot be started.") {
-    int pid = _os_spawn_streaming(program, args);
+  spawn!(string program, string[] args, map[string, string]? environment, string? working_directory) Self `factory `public `doc("Spawns a subprocess with piped stdin, stdout, and stderr. By default the child inherits the parent environment and working directory. Pass environment to override the child environment (the map replaces the inherited environment entirely). Pass working_directory to run the child in a specific directory. The program is searched using the system PATH. Returns a Process handle for interacting with the child. Raises an error if the process cannot be started.") {
+    string[] env_entries = [];
+    int has_env = 0;
+    if env_map := environment {
+      has_env = 1;
+      for key in env_map.keys() {
+        if v := env_map[key] {
+          env_entries.push(key + "=" + v);
+        }
+      }
+    }
+    string cwd = "";
+    int has_cwd = 0;
+    if dir := working_directory {
+      has_cwd = 1;
+      cwd = dir;
+    }
+    int pid = _os_spawn_streaming_env(program, args, env_entries, has_env, cwd, has_cwd);
     int stdin_fd = _os_spawn_stdin_fd();
     int stdout_fd = _os_spawn_stdout_fd();
     int stderr_fd = _os_spawn_stderr_fd();
@@ -333,8 +359,24 @@ set_working_dir!(string path) `public `doc("Changes the current working director
   _os_set_working_dir(path);
 }
 
-execute!(string program, ...string args) ProcessResult `public `doc("Executes a program with the given arguments and waits for it to complete. Returns a ProcessResult containing the exit code and captured standard output and standard error. Raises an error if the process could not be started. The program is searched using the system PATH. If the program is not found, the child process exits with code 127. Accepts arguments inline (execute(\"ls\", \"-la\", \"/tmp\")) or as a pre-built string[] (execute(\"ls\", args)). Stdout and stderr are read concurrently via goroutines, so large output on either stream will not deadlock.") {
-  int pid = _os_spawn(program, args);
+execute!(string program, string[] args, map[string, string]? environment, string? working_directory) ProcessResult `public `doc("Executes a program with the given arguments and waits for it to complete. Returns a ProcessResult containing the exit code and captured standard output and standard error. Raises an error if the process could not be started. The program is searched using the system PATH. If the program is not found, the child process exits with code 127. Pass environment to override the child environment (replaces inherited environment entirely). Pass working_directory to run the child in a specific directory. Stdout and stderr are read concurrently via goroutines, so large output on either stream will not deadlock.") {
+  string[] env_entries = [];
+  int has_env = 0;
+  if env_map := environment {
+    has_env = 1;
+    for key in env_map.keys() {
+      if v := env_map[key] {
+        env_entries.push(key + "=" + v);
+      }
+    }
+  }
+  string cwd = "";
+  int has_cwd = 0;
+  if dir := working_directory {
+    has_cwd = 1;
+    cwd = dir;
+  }
+  int pid = _os_spawn_env(program, args, env_entries, has_env, cwd, has_cwd);
   int stdout_fd = _os_spawn_stdout_fd();
   int stderr_fd = _os_spawn_stderr_fd();
 

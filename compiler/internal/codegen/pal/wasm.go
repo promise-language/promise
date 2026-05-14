@@ -298,6 +298,12 @@ func (p *WasmPAL) EmitWaitPid(module *ir.Module) *ir.Func     { return emitStubW
 func (p *WasmPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	return emitStubSpawnStreaming(module)
 }
+func (p *WasmPAL) EmitSpawnEnv(module *ir.Module) *ir.Func {
+	return emitStubSpawnEnv(module)
+}
+func (p *WasmPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
+	return emitStubSpawnStreamingEnv(module)
+}
 func (p *WasmPAL) EmitKill(module *ir.Module) *ir.Func        { return emitStubKill(module) }
 func (p *WasmPAL) EmitGetEnviron(module *ir.Module) *ir.Func  { return emitStubGetEnviron(module) }
 func (p *WasmPAL) EmitGetUserInfo(module *ir.Module) *ir.Func { return emitStubGetUserInfo(module) }

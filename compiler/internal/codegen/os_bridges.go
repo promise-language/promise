@@ -65,6 +65,12 @@ func (c *Compiler) defineOSBodies() {
 	if fn, ok := irFuncByName["promise_os_spawn_streaming"]; ok {
 		c.defineSpawnStreamingBody(fn)
 	}
+	if fn, ok := irFuncByName["promise_os_spawn_env"]; ok {
+		c.defineSpawnEnvBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_spawn_streaming_env"]; ok {
+		c.defineSpawnStreamingEnvBody(fn)
+	}
 	if fn, ok := irFuncByName["promise_os_spawn_stdin_fd"]; ok {
 		c.defineSpawnStdinFdBody(fn)
 	}
@@ -1177,4 +1183,489 @@ func (c *Compiler) defineGetPidBody(fn *ir.Func) {
 	pidI64 := entry.NewSExt(pid, irtypes.I64)
 	c.storeIntResult(entry, sret, pidI64)
 	entry.NewRet(nil)
+}
+
+// ── Spawn with env/cwd bridges ──────────────────────────────────────────────
+
+// defineSpawnEnvBody: void @promise_os_spawn_env(i8* sret, i8* program, i8* args_vec, i8* env_entries_vec, i8* has_env_int, i8* cwd_str, i8* has_cwd_int)
+// Like defineSpawnBody but with optional envp and cwd parameters.
+// env_entries_vec is a string[] of "KEY=VALUE" entries. has_env is int (0=inherit, 1=use env_entries).
+// cwd_str is a string path. has_cwd is int (0=inherit, 1=use cwd).
+// Calls pal_spawn_env, caches stdout/stderr fds in TLS globals, returns int! (pid).
+func (c *Compiler) defineSpawnEnvBody(fn *ir.Func) {
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	ptrSize := constant.NewInt(irtypes.I64, int64(c.ptrSize()))
+	headerSize := constant.NewInt(irtypes.I64, vectorHeaderSize)
+	vectorHdrType := vectorHeaderType()
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	programParam := fn.Params[1]
+	argsParam := fn.Params[2]       // string[] vector pointer (i8*)
+	envEntriesParam := fn.Params[3] // string[] vector pointer (i8*)
+	hasEnvParam := fn.Params[4]     // int value (0=inherit, 1=use env_entries)
+	cwdParam := fn.Params[5]        // string value pointer (i8*)
+	hasCwdParam := fn.Params[6]     // int value (0=inherit, 1=use cwd)
+
+	// Compute failable result type: {i1, intValueType, i8*} for int!
+	innerType := c.resolveType(types.TypInt)
+	resultType := computeResultType(innerType)
+
+	// Allocate storage for envp and cwd C pointers (use allocas to avoid complex phi merges)
+	envpAlloca := entry.NewAlloca(i8PtrPtrType)
+	envpRawAlloca := entry.NewAlloca(irtypes.I8Ptr) // for freeing the envp array
+	cwdCStrAlloca := entry.NewAlloca(irtypes.I8Ptr)
+	envCountAlloca := entry.NewAlloca(irtypes.I64) // for freeing env C strings
+	entry.NewStore(constant.NewNull(i8PtrPtrType), envpAlloca)
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), envpRawAlloca)
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), cwdCStrAlloca)
+	entry.NewStore(zero64, envCountAlloca)
+
+	// Convert program string to C string
+	programCStr := c.stringToCStr(entry, programParam)
+
+	// Load vector length from header (masked — bit 63 is static flag)
+	hdrPtr := entry.NewBitCast(argsParam, irtypes.NewPointer(vectorHdrType))
+	argsCount := loadVectorLen(entry, hdrPtr)
+
+	// Allocate argv array: (1 + argsCount + 1) * ptrSize
+	totalSlots := entry.NewAdd(argsCount, constant.NewInt(irtypes.I64, 2))
+	argvSize := entry.NewMul(totalSlots, ptrSize)
+	argvRaw := entry.NewCall(c.palAlloc, argvSize)
+	argv := entry.NewBitCast(argvRaw, i8PtrPtrType)
+
+	// argv[0] = program C string
+	argv0Ptr := entry.NewGetElementPtr(irtypes.I8Ptr, argv, zero64)
+	entry.NewStore(programCStr, argv0Ptr)
+
+	// Loop: convert each vector element to C string and store in argv
+	hasArgs := entry.NewICmp(enum.IPredSGT, argsCount, zero64)
+	loopHdr := fn.NewBlock(".argv_loop_hdr")
+	loopDone := fn.NewBlock(".argv_loop_done")
+	entry.NewCondBr(hasArgs, loopHdr, loopDone)
+
+	loopBody := fn.NewBlock(".argv_loop_body")
+	iPhi := loopHdr.NewPhi(ir.NewIncoming(zero64, entry))
+	cond := loopHdr.NewICmp(enum.IPredSLT, iPhi, argsCount)
+	loopHdr.NewCondBr(cond, loopBody, loopDone)
+
+	elemOff := loopBody.NewMul(iPhi, ptrSize)
+	elemOff2 := loopBody.NewAdd(headerSize, elemOff)
+	elemPtr := loopBody.NewGetElementPtr(irtypes.I8, argsParam, elemOff2)
+	elemPtrTyped := loopBody.NewBitCast(elemPtr, irtypes.NewPointer(irtypes.I8Ptr))
+	strInst := loopBody.NewLoad(irtypes.I8Ptr, elemPtrTyped)
+	argCStr := c.stringInstanceToCStr(loopBody, strInst)
+
+	argIdx := loopBody.NewAdd(iPhi, one64)
+	argvSlotPtr := loopBody.NewGetElementPtr(irtypes.I8Ptr, argv, argIdx)
+	loopBody.NewStore(argCStr, argvSlotPtr)
+
+	iNext := loopBody.NewAdd(iPhi, one64)
+	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, loopBody))
+	loopBody.NewBr(loopHdr)
+
+	// Null terminator at argv[argsCount + 1]
+	nullIdx := loopDone.NewAdd(argsCount, one64)
+	nullSlotPtr := loopDone.NewGetElementPtr(irtypes.I8Ptr, argv, nullIdx)
+	loopDone.NewStore(constant.NewNull(irtypes.I8Ptr), nullSlotPtr)
+
+	// --- Build envp (if has_env != 0) ---
+	hasEnvRaw := c.extractRawInt(loopDone, hasEnvParam)
+	hasEnvBool := loopDone.NewICmp(enum.IPredNE, hasEnvRaw, zero64)
+	buildEnvBlk := fn.NewBlock(".build_env")
+	buildCwdBlk := fn.NewBlock(".build_cwd")
+	loopDone.NewCondBr(hasEnvBool, buildEnvBlk, buildCwdBlk)
+
+	// Build envp from env_entries vector
+	envHdrPtr := buildEnvBlk.NewBitCast(envEntriesParam, irtypes.NewPointer(vectorHdrType))
+	envCount := loadVectorLen(buildEnvBlk, envHdrPtr)
+	buildEnvBlk.NewStore(envCount, envCountAlloca)
+	envpSlots := buildEnvBlk.NewAdd(envCount, one64) // +1 for null terminator
+	envpSize := buildEnvBlk.NewMul(envpSlots, ptrSize)
+	envpRaw := buildEnvBlk.NewCall(c.palAlloc, envpSize)
+	envp := buildEnvBlk.NewBitCast(envpRaw, i8PtrPtrType)
+	buildEnvBlk.NewStore(envp, envpAlloca)
+	buildEnvBlk.NewStore(envpRaw, envpRawAlloca)
+
+	// Loop: convert env entries to C strings
+	hasEnvEntries := buildEnvBlk.NewICmp(enum.IPredSGT, envCount, zero64)
+	envLoopHdr := fn.NewBlock(".env_loop_hdr")
+	envLoopDone := fn.NewBlock(".env_loop_done")
+	buildEnvBlk.NewCondBr(hasEnvEntries, envLoopHdr, envLoopDone)
+
+	envLoopBody := fn.NewBlock(".env_loop_body")
+	envIPhi := envLoopHdr.NewPhi(ir.NewIncoming(zero64, buildEnvBlk))
+	envCond := envLoopHdr.NewICmp(enum.IPredSLT, envIPhi, envCount)
+	envLoopHdr.NewCondBr(envCond, envLoopBody, envLoopDone)
+
+	envElemOff := envLoopBody.NewMul(envIPhi, ptrSize)
+	envElemOff2 := envLoopBody.NewAdd(headerSize, envElemOff)
+	envElemPtr := envLoopBody.NewGetElementPtr(irtypes.I8, envEntriesParam, envElemOff2)
+	envElemPtrTyped := envLoopBody.NewBitCast(envElemPtr, irtypes.NewPointer(irtypes.I8Ptr))
+	envStrInst := envLoopBody.NewLoad(irtypes.I8Ptr, envElemPtrTyped)
+	envCStr := c.stringInstanceToCStr(envLoopBody, envStrInst)
+	envSlotPtr := envLoopBody.NewGetElementPtr(irtypes.I8Ptr, envp, envIPhi)
+	envLoopBody.NewStore(envCStr, envSlotPtr)
+
+	envINext := envLoopBody.NewAdd(envIPhi, one64)
+	envIPhi.Incs = append(envIPhi.Incs, ir.NewIncoming(envINext, envLoopBody))
+	envLoopBody.NewBr(envLoopHdr)
+
+	// Null terminator for envp
+	envNullSlotPtr := envLoopDone.NewGetElementPtr(irtypes.I8Ptr, envp, envCount)
+	envLoopDone.NewStore(constant.NewNull(irtypes.I8Ptr), envNullSlotPtr)
+	envLoopDone.NewBr(buildCwdBlk)
+
+	// --- Build cwd (if has_cwd != 0) ---
+	hasCwdRaw := c.extractRawInt(buildCwdBlk, hasCwdParam)
+	hasCwdBool := buildCwdBlk.NewICmp(enum.IPredNE, hasCwdRaw, zero64)
+	buildCwdYes := fn.NewBlock(".build_cwd_yes")
+	spawnBlk := fn.NewBlock(".spawn")
+	buildCwdBlk.NewCondBr(hasCwdBool, buildCwdYes, spawnBlk)
+
+	cwdCStr := c.stringToCStr(buildCwdYes, cwdParam)
+	buildCwdYes.NewStore(cwdCStr, cwdCStrAlloca)
+	buildCwdYes.NewBr(spawnBlk)
+
+	// --- Spawn ---
+	outStdoutFd := spawnBlk.NewAlloca(irtypes.I32)
+	outStderrFd := spawnBlk.NewAlloca(irtypes.I32)
+	finalEnvp := spawnBlk.NewLoad(i8PtrPtrType, envpAlloca)
+	finalCwd := spawnBlk.NewLoad(irtypes.I8Ptr, cwdCStrAlloca)
+
+	c.emitEnterSyscall(spawnBlk)
+	spawnPid := spawnBlk.NewCall(c.palSpawnEnv, programCStr, argv, finalEnvp, finalCwd, outStdoutFd, outStderrFd)
+	c.emitExitSyscall(spawnBlk)
+
+	// Cache fds in TLS globals
+	stdoutFd := spawnBlk.NewLoad(irtypes.I32, outStdoutFd)
+	stderrFd := spawnBlk.NewLoad(irtypes.I32, outStderrFd)
+	spawnBlk.NewStore(stdoutFd, c.spawnStdoutFd)
+	spawnBlk.NewStore(stderrFd, c.spawnStderrFd)
+
+	// --- Free env C strings (if envp was built) ---
+	finalEnvp2 := spawnBlk.NewLoad(i8PtrPtrType, envpAlloca)
+	envpIsNull := spawnBlk.NewICmp(enum.IPredEQ, finalEnvp2, constant.NewNull(i8PtrPtrType))
+	freeEnvBlk := fn.NewBlock(".free_env")
+	freeArgvBlk := fn.NewBlock(".free_argv")
+	spawnBlk.NewCondBr(envpIsNull, freeArgvBlk, freeEnvBlk)
+
+	// Free envp C strings loop
+	savedEnvCount := freeEnvBlk.NewLoad(irtypes.I64, envCountAlloca)
+	hasEnvFree := freeEnvBlk.NewICmp(enum.IPredSGT, savedEnvCount, zero64)
+	envFreeLoopHdr := fn.NewBlock(".env_free_loop_hdr")
+	envFreeDone := fn.NewBlock(".env_free_done")
+	freeEnvBlk.NewCondBr(hasEnvFree, envFreeLoopHdr, envFreeDone)
+
+	envFreeLoopBody := fn.NewBlock(".env_free_loop_body")
+	envJPhi := envFreeLoopHdr.NewPhi(ir.NewIncoming(zero64, freeEnvBlk))
+	envFreeCond := envFreeLoopHdr.NewICmp(enum.IPredSLT, envJPhi, savedEnvCount)
+	envFreeLoopHdr.NewCondBr(envFreeCond, envFreeLoopBody, envFreeDone)
+
+	envFreeSlotPtr := envFreeLoopBody.NewGetElementPtr(irtypes.I8Ptr, finalEnvp2, envJPhi)
+	envFreeStr := envFreeLoopBody.NewLoad(irtypes.I8Ptr, envFreeSlotPtr)
+	envFreeLoopBody.NewCall(c.palFree, envFreeStr)
+	envJNext := envFreeLoopBody.NewAdd(envJPhi, one64)
+	envJPhi.Incs = append(envJPhi.Incs, ir.NewIncoming(envJNext, envFreeLoopBody))
+	envFreeLoopBody.NewBr(envFreeLoopHdr)
+
+	// Free the envp array itself
+	savedEnvpRaw := envFreeDone.NewLoad(irtypes.I8Ptr, envpRawAlloca)
+	envFreeDone.NewCall(c.palFree, savedEnvpRaw)
+	envFreeDone.NewBr(freeArgvBlk)
+
+	// --- Free cwd C string (if built) ---
+	finalCwd2 := freeArgvBlk.NewLoad(irtypes.I8Ptr, cwdCStrAlloca)
+	cwdIsNull := freeArgvBlk.NewICmp(enum.IPredEQ, finalCwd2, constant.NewNull(irtypes.I8Ptr))
+	freeCwdBlk := fn.NewBlock(".free_cwd")
+	freeArgsBlk := fn.NewBlock(".free_args")
+	freeArgvBlk.NewCondBr(cwdIsNull, freeArgsBlk, freeCwdBlk)
+
+	freeCwdBlk.NewCall(c.palFree, finalCwd2)
+	freeCwdBlk.NewBr(freeArgsBlk)
+
+	// --- Free argv C strings: argv[1..argsCount] ---
+	hasFreeArgs := freeArgsBlk.NewICmp(enum.IPredSGT, argsCount, zero64)
+	freeLoopHdr := fn.NewBlock(".free_loop_hdr")
+	freeDone := fn.NewBlock(".free_done")
+	freeArgsBlk.NewCondBr(hasFreeArgs, freeLoopHdr, freeDone)
+
+	freeLoopBody := fn.NewBlock(".free_loop_body")
+	jPhi := freeLoopHdr.NewPhi(ir.NewIncoming(zero64, freeArgsBlk))
+	freeCond := freeLoopHdr.NewICmp(enum.IPredSLT, jPhi, argsCount)
+	freeLoopHdr.NewCondBr(freeCond, freeLoopBody, freeDone)
+
+	freeIdx := freeLoopBody.NewAdd(jPhi, one64)
+	freeSlotPtr := freeLoopBody.NewGetElementPtr(irtypes.I8Ptr, argv, freeIdx)
+	freeStr := freeLoopBody.NewLoad(irtypes.I8Ptr, freeSlotPtr)
+	freeLoopBody.NewCall(c.palFree, freeStr)
+	jNext := freeLoopBody.NewAdd(jPhi, one64)
+	jPhi.Incs = append(jPhi.Incs, ir.NewIncoming(jNext, freeLoopBody))
+	freeLoopBody.NewBr(freeLoopHdr)
+
+	// Free program C string and argv array
+	freeDone.NewCall(c.palFree, programCStr)
+	freeDone.NewCall(c.palFree, argvRaw)
+
+	// Check result: -1 means error
+	isErr := freeDone.NewICmp(enum.IPredSLT, spawnPid, zero32)
+	successBlk := fn.NewBlock(".success")
+	errorBlk := fn.NewBlock(".error")
+	freeDone.NewCondBr(isErr, errorBlk, successBlk)
+
+	// Success: store pid as i64 failable success
+	pidI64 := successBlk.NewSExt(spawnPid, irtypes.I64)
+	c.storeFailableSuccess(successBlk, sret, pidI64, resultType)
+	successBlk.NewRet(nil)
+
+	// Error: construct error, store failable error
+	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to spawn process")
+	c.storeFailableError(errorBlk, sret, errInst, resultType)
+	errorBlk.NewRet(nil)
+}
+
+// defineSpawnStreamingEnvBody: void @promise_os_spawn_streaming_env(i8* sret, i8* program, i8* args_vec, i8* env_entries_vec, i8* has_env_int, i8* cwd_str, i8* has_cwd_int)
+// Like defineSpawnStreamingBody but with optional envp and cwd parameters.
+// env_entries_vec is a string[] of "KEY=VALUE" entries. has_env is int (0=inherit, 1=use env_entries).
+// cwd_str is a string path. has_cwd is int (0=inherit, 1=use cwd).
+// Calls pal_spawn_streaming_env, caches all 3 pipe fds in TLS globals, returns int! (pid).
+func (c *Compiler) defineSpawnStreamingEnvBody(fn *ir.Func) {
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	ptrSize := constant.NewInt(irtypes.I64, int64(c.ptrSize()))
+	headerSize := constant.NewInt(irtypes.I64, vectorHeaderSize)
+	vectorHdrType := vectorHeaderType()
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	programParam := fn.Params[1]
+	argsParam := fn.Params[2]       // string[] vector pointer (i8*)
+	envEntriesParam := fn.Params[3] // string[] vector pointer (i8*)
+	hasEnvParam := fn.Params[4]     // int value (0=inherit, 1=use env_entries)
+	cwdParam := fn.Params[5]        // string value pointer (i8*)
+	hasCwdParam := fn.Params[6]     // int value (0=inherit, 1=use cwd)
+
+	// Compute failable result type: {i1, intValueType, i8*} for int!
+	innerType := c.resolveType(types.TypInt)
+	resultType := computeResultType(innerType)
+
+	// Allocate storage for envp and cwd C pointers (use allocas to avoid complex phi merges)
+	envpAlloca := entry.NewAlloca(i8PtrPtrType)
+	envpRawAlloca := entry.NewAlloca(irtypes.I8Ptr) // for freeing the envp array
+	cwdCStrAlloca := entry.NewAlloca(irtypes.I8Ptr)
+	envCountAlloca := entry.NewAlloca(irtypes.I64) // for freeing env C strings
+	entry.NewStore(constant.NewNull(i8PtrPtrType), envpAlloca)
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), envpRawAlloca)
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), cwdCStrAlloca)
+	entry.NewStore(zero64, envCountAlloca)
+
+	// Convert program string to C string
+	programCStr := c.stringToCStr(entry, programParam)
+
+	// Load vector length from header (masked — bit 63 is static flag)
+	hdrPtr := entry.NewBitCast(argsParam, irtypes.NewPointer(vectorHdrType))
+	argsCount := loadVectorLen(entry, hdrPtr)
+
+	// Allocate argv array: (1 + argsCount + 1) * ptrSize
+	totalSlots := entry.NewAdd(argsCount, constant.NewInt(irtypes.I64, 2))
+	argvSize := entry.NewMul(totalSlots, ptrSize)
+	argvRaw := entry.NewCall(c.palAlloc, argvSize)
+	argv := entry.NewBitCast(argvRaw, i8PtrPtrType)
+
+	// argv[0] = program C string
+	argv0Ptr := entry.NewGetElementPtr(irtypes.I8Ptr, argv, zero64)
+	entry.NewStore(programCStr, argv0Ptr)
+
+	// Loop: convert each vector element to C string and store in argv
+	hasArgs := entry.NewICmp(enum.IPredSGT, argsCount, zero64)
+	loopHdr := fn.NewBlock(".argv_loop_hdr")
+	loopDone := fn.NewBlock(".argv_loop_done")
+	entry.NewCondBr(hasArgs, loopHdr, loopDone)
+
+	loopBody := fn.NewBlock(".argv_loop_body")
+	iPhi := loopHdr.NewPhi(ir.NewIncoming(zero64, entry))
+	cond := loopHdr.NewICmp(enum.IPredSLT, iPhi, argsCount)
+	loopHdr.NewCondBr(cond, loopBody, loopDone)
+
+	elemOff := loopBody.NewMul(iPhi, ptrSize)
+	elemOff2 := loopBody.NewAdd(headerSize, elemOff)
+	elemPtr := loopBody.NewGetElementPtr(irtypes.I8, argsParam, elemOff2)
+	elemPtrTyped := loopBody.NewBitCast(elemPtr, irtypes.NewPointer(irtypes.I8Ptr))
+	strInst := loopBody.NewLoad(irtypes.I8Ptr, elemPtrTyped)
+	argCStr := c.stringInstanceToCStr(loopBody, strInst)
+
+	argIdx := loopBody.NewAdd(iPhi, one64)
+	argvSlotPtr := loopBody.NewGetElementPtr(irtypes.I8Ptr, argv, argIdx)
+	loopBody.NewStore(argCStr, argvSlotPtr)
+
+	iNext := loopBody.NewAdd(iPhi, one64)
+	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, loopBody))
+	loopBody.NewBr(loopHdr)
+
+	// Null terminator at argv[argsCount + 1]
+	nullIdx := loopDone.NewAdd(argsCount, one64)
+	nullSlotPtr := loopDone.NewGetElementPtr(irtypes.I8Ptr, argv, nullIdx)
+	loopDone.NewStore(constant.NewNull(irtypes.I8Ptr), nullSlotPtr)
+
+	// --- Build envp (if has_env != 0) ---
+	hasEnvRaw := c.extractRawInt(loopDone, hasEnvParam)
+	hasEnvBool := loopDone.NewICmp(enum.IPredNE, hasEnvRaw, zero64)
+	buildEnvBlk := fn.NewBlock(".build_env")
+	buildCwdBlk := fn.NewBlock(".build_cwd")
+	loopDone.NewCondBr(hasEnvBool, buildEnvBlk, buildCwdBlk)
+
+	// Build envp from env_entries vector
+	envHdrPtr := buildEnvBlk.NewBitCast(envEntriesParam, irtypes.NewPointer(vectorHdrType))
+	envCount := loadVectorLen(buildEnvBlk, envHdrPtr)
+	buildEnvBlk.NewStore(envCount, envCountAlloca)
+	envpSlots := buildEnvBlk.NewAdd(envCount, one64) // +1 for null terminator
+	envpSize := buildEnvBlk.NewMul(envpSlots, ptrSize)
+	envpRaw := buildEnvBlk.NewCall(c.palAlloc, envpSize)
+	envp := buildEnvBlk.NewBitCast(envpRaw, i8PtrPtrType)
+	buildEnvBlk.NewStore(envp, envpAlloca)
+	buildEnvBlk.NewStore(envpRaw, envpRawAlloca)
+
+	// Loop: convert env entries to C strings
+	hasEnvEntries := buildEnvBlk.NewICmp(enum.IPredSGT, envCount, zero64)
+	envLoopHdr := fn.NewBlock(".env_loop_hdr")
+	envLoopDone := fn.NewBlock(".env_loop_done")
+	buildEnvBlk.NewCondBr(hasEnvEntries, envLoopHdr, envLoopDone)
+
+	envLoopBody := fn.NewBlock(".env_loop_body")
+	envIPhi := envLoopHdr.NewPhi(ir.NewIncoming(zero64, buildEnvBlk))
+	envCond := envLoopHdr.NewICmp(enum.IPredSLT, envIPhi, envCount)
+	envLoopHdr.NewCondBr(envCond, envLoopBody, envLoopDone)
+
+	envElemOff := envLoopBody.NewMul(envIPhi, ptrSize)
+	envElemOff2 := envLoopBody.NewAdd(headerSize, envElemOff)
+	envElemPtr := envLoopBody.NewGetElementPtr(irtypes.I8, envEntriesParam, envElemOff2)
+	envElemPtrTyped := envLoopBody.NewBitCast(envElemPtr, irtypes.NewPointer(irtypes.I8Ptr))
+	envStrInst := envLoopBody.NewLoad(irtypes.I8Ptr, envElemPtrTyped)
+	envCStr := c.stringInstanceToCStr(envLoopBody, envStrInst)
+	envSlotPtr := envLoopBody.NewGetElementPtr(irtypes.I8Ptr, envp, envIPhi)
+	envLoopBody.NewStore(envCStr, envSlotPtr)
+
+	envINext := envLoopBody.NewAdd(envIPhi, one64)
+	envIPhi.Incs = append(envIPhi.Incs, ir.NewIncoming(envINext, envLoopBody))
+	envLoopBody.NewBr(envLoopHdr)
+
+	// Null terminator for envp
+	envNullSlotPtr := envLoopDone.NewGetElementPtr(irtypes.I8Ptr, envp, envCount)
+	envLoopDone.NewStore(constant.NewNull(irtypes.I8Ptr), envNullSlotPtr)
+	envLoopDone.NewBr(buildCwdBlk)
+
+	// --- Build cwd (if has_cwd != 0) ---
+	hasCwdRaw := c.extractRawInt(buildCwdBlk, hasCwdParam)
+	hasCwdBool := buildCwdBlk.NewICmp(enum.IPredNE, hasCwdRaw, zero64)
+	buildCwdYes := fn.NewBlock(".build_cwd_yes")
+	spawnBlk := fn.NewBlock(".spawn")
+	buildCwdBlk.NewCondBr(hasCwdBool, buildCwdYes, spawnBlk)
+
+	cwdCStr := c.stringToCStr(buildCwdYes, cwdParam)
+	buildCwdYes.NewStore(cwdCStr, cwdCStrAlloca)
+	buildCwdYes.NewBr(spawnBlk)
+
+	// --- Spawn ---
+	outStdinFd := spawnBlk.NewAlloca(irtypes.I32)
+	outStdoutFd := spawnBlk.NewAlloca(irtypes.I32)
+	outStderrFd := spawnBlk.NewAlloca(irtypes.I32)
+	finalEnvp := spawnBlk.NewLoad(i8PtrPtrType, envpAlloca)
+	finalCwd := spawnBlk.NewLoad(irtypes.I8Ptr, cwdCStrAlloca)
+
+	c.emitEnterSyscall(spawnBlk)
+	spawnPid := spawnBlk.NewCall(c.palSpawnStreamingEnv, programCStr, argv, finalEnvp, finalCwd, outStdinFd, outStdoutFd, outStderrFd)
+	c.emitExitSyscall(spawnBlk)
+
+	// Cache all 3 fds in TLS globals
+	stdinFd := spawnBlk.NewLoad(irtypes.I32, outStdinFd)
+	stdoutFd := spawnBlk.NewLoad(irtypes.I32, outStdoutFd)
+	stderrFd := spawnBlk.NewLoad(irtypes.I32, outStderrFd)
+	spawnBlk.NewStore(stdinFd, c.spawnStdinFd)
+	spawnBlk.NewStore(stdoutFd, c.spawnStdoutFd)
+	spawnBlk.NewStore(stderrFd, c.spawnStderrFd)
+
+	// --- Free env C strings (if envp was built) ---
+	finalEnvp2 := spawnBlk.NewLoad(i8PtrPtrType, envpAlloca)
+	envpIsNull := spawnBlk.NewICmp(enum.IPredEQ, finalEnvp2, constant.NewNull(i8PtrPtrType))
+	freeEnvBlk := fn.NewBlock(".free_env")
+	freeArgvBlk := fn.NewBlock(".free_argv")
+	spawnBlk.NewCondBr(envpIsNull, freeArgvBlk, freeEnvBlk)
+
+	// Free envp C strings loop
+	savedEnvCount := freeEnvBlk.NewLoad(irtypes.I64, envCountAlloca)
+	hasEnvFree := freeEnvBlk.NewICmp(enum.IPredSGT, savedEnvCount, zero64)
+	envFreeLoopHdr := fn.NewBlock(".env_free_loop_hdr")
+	envFreeDone := fn.NewBlock(".env_free_done")
+	freeEnvBlk.NewCondBr(hasEnvFree, envFreeLoopHdr, envFreeDone)
+
+	envFreeLoopBody := fn.NewBlock(".env_free_loop_body")
+	envJPhi := envFreeLoopHdr.NewPhi(ir.NewIncoming(zero64, freeEnvBlk))
+	envFreeCond := envFreeLoopHdr.NewICmp(enum.IPredSLT, envJPhi, savedEnvCount)
+	envFreeLoopHdr.NewCondBr(envFreeCond, envFreeLoopBody, envFreeDone)
+
+	envFreeSlotPtr := envFreeLoopBody.NewGetElementPtr(irtypes.I8Ptr, finalEnvp2, envJPhi)
+	envFreeStr := envFreeLoopBody.NewLoad(irtypes.I8Ptr, envFreeSlotPtr)
+	envFreeLoopBody.NewCall(c.palFree, envFreeStr)
+	envJNext := envFreeLoopBody.NewAdd(envJPhi, one64)
+	envJPhi.Incs = append(envJPhi.Incs, ir.NewIncoming(envJNext, envFreeLoopBody))
+	envFreeLoopBody.NewBr(envFreeLoopHdr)
+
+	// Free the envp array itself
+	savedEnvpRaw := envFreeDone.NewLoad(irtypes.I8Ptr, envpRawAlloca)
+	envFreeDone.NewCall(c.palFree, savedEnvpRaw)
+	envFreeDone.NewBr(freeArgvBlk)
+
+	// --- Free cwd C string (if built) ---
+	finalCwd2 := freeArgvBlk.NewLoad(irtypes.I8Ptr, cwdCStrAlloca)
+	cwdIsNull := freeArgvBlk.NewICmp(enum.IPredEQ, finalCwd2, constant.NewNull(irtypes.I8Ptr))
+	freeCwdBlk := fn.NewBlock(".free_cwd")
+	freeArgsBlk := fn.NewBlock(".free_args")
+	freeArgvBlk.NewCondBr(cwdIsNull, freeArgsBlk, freeCwdBlk)
+
+	freeCwdBlk.NewCall(c.palFree, finalCwd2)
+	freeCwdBlk.NewBr(freeArgsBlk)
+
+	// --- Free argv C strings: argv[1..argsCount] ---
+	hasFreeArgs := freeArgsBlk.NewICmp(enum.IPredSGT, argsCount, zero64)
+	freeLoopHdr := fn.NewBlock(".free_loop_hdr")
+	freeDone := fn.NewBlock(".free_done")
+	freeArgsBlk.NewCondBr(hasFreeArgs, freeLoopHdr, freeDone)
+
+	freeLoopBody := fn.NewBlock(".free_loop_body")
+	jPhi := freeLoopHdr.NewPhi(ir.NewIncoming(zero64, freeArgsBlk))
+	freeCond := freeLoopHdr.NewICmp(enum.IPredSLT, jPhi, argsCount)
+	freeLoopHdr.NewCondBr(freeCond, freeLoopBody, freeDone)
+
+	freeIdx := freeLoopBody.NewAdd(jPhi, one64)
+	freeSlotPtr := freeLoopBody.NewGetElementPtr(irtypes.I8Ptr, argv, freeIdx)
+	freeStr := freeLoopBody.NewLoad(irtypes.I8Ptr, freeSlotPtr)
+	freeLoopBody.NewCall(c.palFree, freeStr)
+	jNext := freeLoopBody.NewAdd(jPhi, one64)
+	jPhi.Incs = append(jPhi.Incs, ir.NewIncoming(jNext, freeLoopBody))
+	freeLoopBody.NewBr(freeLoopHdr)
+
+	// Free program C string and argv array
+	freeDone.NewCall(c.palFree, programCStr)
+	freeDone.NewCall(c.palFree, argvRaw)
+
+	// Check result: -1 means error
+	isErr := freeDone.NewICmp(enum.IPredSLT, spawnPid, zero32)
+	successBlk := fn.NewBlock(".success")
+	errorBlk := fn.NewBlock(".error")
+	freeDone.NewCondBr(isErr, errorBlk, successBlk)
+
+	// Success: store pid as i64 failable success
+	pidI64 := successBlk.NewSExt(spawnPid, irtypes.I64)
+	c.storeFailableSuccess(successBlk, sret, pidI64, resultType)
+	successBlk.NewRet(nil)
+
+	// Error: construct error, store failable error
+	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to spawn process")
+	c.storeFailableError(errorBlk, sret, errInst, resultType)
+	errorBlk.NewRet(nil)
 }

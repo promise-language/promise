@@ -1790,6 +1790,13 @@ func (p *WindowsPAL) EmitKill(module *ir.Module) *ir.Func {
 	return fn
 }
 
+func (p *WindowsPAL) EmitSpawnEnv(module *ir.Module) *ir.Func {
+	return emitStubSpawnEnv(module)
+}
+func (p *WindowsPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
+	return emitStubSpawnStreamingEnv(module)
+}
+
 // EmitGetEnviron defines @pal_get_environ using UCRT __p__environ().
 // Signature: @pal_get_environ() → i8** (null-terminated array of "KEY=VALUE" strings)
 // UCRT __p__environ() returns a pointer to the _environ variable (i8***),

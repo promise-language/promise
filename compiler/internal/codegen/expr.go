@@ -1357,7 +1357,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	// Coerce arguments when crossing type boundaries
 	origArgVals := argVals // B0345: save pre-coercion values for alias check
 	if calleeSig != nil {
-		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params())
+		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args)
 	}
 
 	result := c.block.NewCall(fn, argVals...)
@@ -1457,7 +1457,7 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 	// Coerce arguments using the callee's signature from sema
 	origArgVals := argVals // B0345
 	if calleeSig != nil {
-		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params())
+		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args)
 	}
 
 	result := c.block.NewCall(fn, argVals...)
@@ -1519,7 +1519,7 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 	// Coerce arguments when crossing type boundaries
 	if callee := c.lookupFunc(ident.Name); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
-			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
 		}
 	}
 
@@ -1557,7 +1557,7 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 	// Coerce arguments when crossing type boundaries.
 	if callee := c.lookupFunc(inferred.FuncName); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
-			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
 		}
 	}
 
@@ -1598,7 +1598,7 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 	// Coerce arguments when crossing type boundaries
 	if callee := c.lookupFunc(funcName); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
-			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
 		}
 	}
 
@@ -1679,7 +1679,7 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	// Generate arguments
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	origArgVals := argVals // B0345: save pre-coercion values
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args)
 	args = append(args, argVals...)
 
 	result := c.block.NewCall(fn, args...)
@@ -1723,7 +1723,7 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 		}
 		newMethod := parent.LookupMethod("new")
 		if newMethod != nil {
-			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params())
+			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args)
 		}
 		args := append([]value.Value{thisPtr}, argVals...)
 		result := c.block.NewCall(fn, args...)
@@ -1904,7 +1904,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		// If nobody claims, cleanupHeapTemps frees the temp at statement end.
 
 		if newMethod != nil {
-			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params())
+			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args)
 		}
 		args := append([]value.Value{typedPtr}, argVals...)
 		newResult := c.block.NewCall(fn, args...)
@@ -2249,7 +2249,7 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		}
 		newMethod := named.LookupMethod("new")
 		if newMethod != nil {
-			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params())
+			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args)
 		}
 		thisPtr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
 		args := append([]value.Value{thisPtr}, argVals...)
@@ -3111,7 +3111,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	origArgVals := argVals // B0345
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args)
 	args = append(args, argVals...)
 
 	result := c.block.NewCall(fn, args...)
@@ -3259,7 +3259,7 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	origArgVals := argVals // B0345
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args)
 	args = append(args, argVals...)
 
 	result := c.block.NewCall(fn, args...)
@@ -3524,7 +3524,7 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	origArgVals := argVals // B0345
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args)
 	args = append(args, argVals...)
 	result := c.block.NewCall(fnTyped, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
@@ -5750,20 +5750,15 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	rawPtr := c.block.NewCall(c.palAlloc,
 		constant.NewInt(irtypes.I64, totalSize))
 
-	// B0201: Track the vector allocation as a heap temp so that if a failable
-	// element evaluation triggers error auto-propagation, the vector is freed.
-	// Only track when at least one element has auto-propagation, to avoid
-	// interfering with normal vector lifecycle in non-failable contexts.
-	hasFailableElem := false
-	for _, elemExpr := range e.Elements {
-		if c.info.AutoPropagateExprs[elemExpr] {
-			hasFailableElem = true
-			break
-		}
-	}
-	if hasFailableElem {
-		c.trackHeapTemp(rawPtr, c.palFree)
-	}
+	// B0201/B0359: Track the vector allocation as a heap temp. This serves two
+	// purposes: (1) if a failable element evaluation triggers error auto-propagation,
+	// the vector is freed (B0201); (2) when a vector literal is passed directly as
+	// a non-variadic function argument (e.g., foo(["hello"])), the caller frees the
+	// buffer at statement end via cleanupHeapTemps (B0359). Variable assignments
+	// claim the temp via claimHeapTemp, preventing double-free. This code only
+	// runs on the heap path — static (.rodata) vectors return earlier via
+	// genStaticVectorLit and are never tracked.
+	c.trackHeapTemp(rawPtr, c.palFree)
 
 	// Store len and cap via header GEP
 	headerType := vectorHeaderType()

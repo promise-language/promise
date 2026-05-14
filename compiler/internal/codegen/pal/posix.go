@@ -1199,6 +1199,328 @@ func (p *PosixPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitSpawnEnv defines @pal_spawn_env: like EmitSpawn but with optional envp and cwd.
+// Signature: @pal_spawn_env(i8* program, i8** argv, i8** envp, i8* cwd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+// envp: null-terminated i8** for environment (NULL = inherit). cwd: C string path (NULL = inherit).
+func (p *PosixPAL) EmitSpawnEnv(module *ir.Module) *ir.Func {
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+
+	pipeFn := getOrDeclareFunc(module, "pipe", irtypes.I32,
+		ir.NewParam("fds", i32PtrType))
+	forkFn := getOrDeclareFunc(module, "fork", irtypes.I32)
+	dup2Fn := getOrDeclareFunc(module, "dup2", irtypes.I32,
+		ir.NewParam("oldfd", irtypes.I32),
+		ir.NewParam("newfd", irtypes.I32))
+	execvpFn := getOrDeclareFunc(module, "execvp", irtypes.I32,
+		ir.NewParam("file", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType))
+	exitFn := getOrDeclareFunc(module, "_exit", irtypes.Void,
+		ir.NewParam("status", irtypes.I32))
+	addFuncAttr(exitFn, enum.FuncAttrNoReturn)
+	chdirFn := getOrDeclareFunc(module, "chdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	environGlobal := getOrCreateEnvironGlobal(module)
+
+	fn := module.NewFunc("pal_spawn_env", irtypes.I32,
+		ir.NewParam("program", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType),
+		ir.NewParam("envp", i8PtrPtrType),
+		ir.NewParam("cwd", irtypes.I8Ptr),
+		ir.NewParam("out_stdout_fd", i32PtrType),
+		ir.NewParam("out_stderr_fd", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	one32 := constant.NewInt(irtypes.I32, 1)
+	two32 := constant.NewInt(irtypes.I32, 2)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
+	storeErrorFds := func(blk *ir.Block) {
+		blk.NewStore(negOne32, fn.Params[4])
+		blk.NewStore(negOne32, fn.Params[5])
+	}
+
+	entry := fn.NewBlock(".entry")
+
+	stdoutFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	stderrFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	stdoutFdsPtr := entry.NewBitCast(stdoutFds, i32PtrType)
+	stderrFdsPtr := entry.NewBitCast(stderrFds, i32PtrType)
+
+	pipeRet1 := entry.NewCall(pipeFn, stdoutFdsPtr)
+	isPipeErr1 := entry.NewICmp(enum.IPredSLT, pipeRet1, zero32)
+	pipeOk1 := fn.NewBlock(".pipe_ok1")
+	pipe1ErrBlk := fn.NewBlock(".pipe1_err")
+	entry.NewCondBr(isPipeErr1, pipe1ErrBlk, pipeOk1)
+
+	storeErrorFds(pipe1ErrBlk)
+	pipe1ErrBlk.NewRet(negOne32)
+
+	pipeRet2 := pipeOk1.NewCall(pipeFn, stderrFdsPtr)
+	isPipeErr2 := pipeOk1.NewICmp(enum.IPredSLT, pipeRet2, zero32)
+	pipeOk2 := fn.NewBlock(".pipe_ok2")
+	pipe2ErrBlk := fn.NewBlock(".pipe2_err")
+	pipeOk1.NewCondBr(isPipeErr2, pipe2ErrBlk, pipeOk2)
+
+	stdoutRdPtrErr := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, zero32)
+	stdoutWrPtrErr := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, one32)
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdoutRdPtrErr))
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdoutWrPtrErr))
+	storeErrorFds(pipe2ErrBlk)
+	pipe2ErrBlk.NewRet(negOne32)
+
+	stdoutReadFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, zero32)
+	stdoutWriteFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, one32)
+	stderrReadFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stderrFds, zero32, zero32)
+	stderrWriteFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stderrFds, zero32, one32)
+	stdoutReadFd := pipeOk2.NewLoad(irtypes.I32, stdoutReadFdPtr)
+	stdoutWriteFd := pipeOk2.NewLoad(irtypes.I32, stdoutWriteFdPtr)
+	stderrReadFd := pipeOk2.NewLoad(irtypes.I32, stderrReadFdPtr)
+	stderrWriteFd := pipeOk2.NewLoad(irtypes.I32, stderrWriteFdPtr)
+
+	pid := pipeOk2.NewCall(forkFn)
+	isChild := pipeOk2.NewICmp(enum.IPredEQ, pid, zero32)
+	childBlk := fn.NewBlock(".child")
+	checkForkErr := fn.NewBlock(".check_fork_err")
+	pipeOk2.NewCondBr(isChild, childBlk, checkForkErr)
+
+	isForkErr := checkForkErr.NewICmp(enum.IPredSLT, pid, zero32)
+	parentBlk := fn.NewBlock(".parent")
+	forkErrBlk := fn.NewBlock(".fork_err")
+	checkForkErr.NewCondBr(isForkErr, forkErrBlk, parentBlk)
+
+	// --- Child process ---
+	childBlk.NewCall(closeFn, stdoutReadFd)
+	childBlk.NewCall(closeFn, stderrReadFd)
+	childBlk.NewCall(dup2Fn, stdoutWriteFd, one32)
+	childBlk.NewCall(dup2Fn, stderrWriteFd, two32)
+	childBlk.NewCall(closeFn, stdoutWriteFd)
+	childBlk.NewCall(closeFn, stderrWriteFd)
+
+	// If cwd != NULL, chdir
+	cwdIsNull := childBlk.NewICmp(enum.IPredEQ, fn.Params[3], constant.NewNull(irtypes.I8Ptr))
+	childChdirBlk := fn.NewBlock(".child_chdir")
+	childEnvBlk := fn.NewBlock(".child_env")
+	childBlk.NewCondBr(cwdIsNull, childEnvBlk, childChdirBlk)
+
+	chdirRet := childChdirBlk.NewCall(chdirFn, fn.Params[3])
+	chdirFailed := childChdirBlk.NewICmp(enum.IPredSLT, chdirRet, zero32)
+	childChdirErr := fn.NewBlock(".child_chdir_err")
+	childChdirBlk.NewCondBr(chdirFailed, childChdirErr, childEnvBlk)
+	childChdirErr.NewCall(exitFn, constant.NewInt(irtypes.I32, 127))
+	childChdirErr.NewUnreachable()
+
+	// If envp != NULL, set environ
+	envpIsNull := childEnvBlk.NewICmp(enum.IPredEQ, fn.Params[2], constant.NewNull(i8PtrPtrType))
+	childExecBlk := fn.NewBlock(".child_exec")
+	childSetEnv := fn.NewBlock(".child_set_env")
+	childEnvBlk.NewCondBr(envpIsNull, childExecBlk, childSetEnv)
+
+	childSetEnv.NewStore(fn.Params[2], environGlobal)
+	childSetEnv.NewBr(childExecBlk)
+
+	// exec
+	childExecBlk.NewCall(execvpFn, fn.Params[0], fn.Params[1])
+	childExecBlk.NewCall(exitFn, constant.NewInt(irtypes.I32, 127))
+	childExecBlk.NewUnreachable()
+
+	// --- Fork error ---
+	forkErrBlk.NewCall(closeFn, stdoutReadFd)
+	forkErrBlk.NewCall(closeFn, stdoutWriteFd)
+	forkErrBlk.NewCall(closeFn, stderrReadFd)
+	forkErrBlk.NewCall(closeFn, stderrWriteFd)
+	storeErrorFds(forkErrBlk)
+	forkErrBlk.NewRet(negOne32)
+
+	// --- Parent ---
+	parentBlk.NewCall(closeFn, stdoutWriteFd)
+	parentBlk.NewCall(closeFn, stderrWriteFd)
+	parentBlk.NewStore(stdoutReadFd, fn.Params[4])
+	parentBlk.NewStore(stderrReadFd, fn.Params[5])
+	parentBlk.NewRet(pid)
+
+	return fn
+}
+
+// EmitSpawnStreamingEnv defines @pal_spawn_streaming_env: like EmitSpawnStreaming but with optional envp and cwd.
+// Signature: @pal_spawn_streaming_env(i8* program, i8** argv, i8** envp, i8* cwd, i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+// envp: null-terminated i8** for environment (NULL = inherit). cwd: C string path (NULL = inherit).
+func (p *PosixPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+
+	pipeFn := getOrDeclareFunc(module, "pipe", irtypes.I32, ir.NewParam("fds", i32PtrType))
+	forkFn := getOrDeclareFunc(module, "fork", irtypes.I32)
+	dup2Fn := getOrDeclareFunc(module, "dup2", irtypes.I32, ir.NewParam("oldfd", irtypes.I32), ir.NewParam("newfd", irtypes.I32))
+	execvpFn := getOrDeclareFunc(module, "execvp", irtypes.I32, ir.NewParam("file", irtypes.I8Ptr), ir.NewParam("argv", i8PtrPtrType))
+	exitFn := getOrDeclareFunc(module, "_exit", irtypes.Void, ir.NewParam("status", irtypes.I32))
+	addFuncAttr(exitFn, enum.FuncAttrNoReturn)
+	chdirFn := getOrDeclareFunc(module, "chdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	environGlobal := getOrCreateEnvironGlobal(module)
+
+	fn := module.NewFunc("pal_spawn_streaming_env", irtypes.I32,
+		ir.NewParam("program", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType),
+		ir.NewParam("envp", i8PtrPtrType),
+		ir.NewParam("cwd", irtypes.I8Ptr),
+		ir.NewParam("out_stdin_fd", i32PtrType),
+		ir.NewParam("out_stdout_fd", i32PtrType),
+		ir.NewParam("out_stderr_fd", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	one32 := constant.NewInt(irtypes.I32, 1)
+	two32 := constant.NewInt(irtypes.I32, 2)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
+	storeErrorFds := func(blk *ir.Block) {
+		blk.NewStore(negOne32, fn.Params[4])
+		blk.NewStore(negOne32, fn.Params[5])
+		blk.NewStore(negOne32, fn.Params[6])
+	}
+
+	entry := fn.NewBlock(".entry")
+
+	stdinFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	stdoutFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	stderrFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	stdinFdsPtr := entry.NewBitCast(stdinFds, i32PtrType)
+	stdoutFdsPtr := entry.NewBitCast(stdoutFds, i32PtrType)
+	stderrFdsPtr := entry.NewBitCast(stderrFds, i32PtrType)
+
+	// pipe(stdin_fds)
+	pipeRet0 := entry.NewCall(pipeFn, stdinFdsPtr)
+	isPipeErr0 := entry.NewICmp(enum.IPredSLT, pipeRet0, zero32)
+	pipeOk0 := fn.NewBlock(".pipe_ok0")
+	pipe0ErrBlk := fn.NewBlock(".pipe0_err")
+	entry.NewCondBr(isPipeErr0, pipe0ErrBlk, pipeOk0)
+	storeErrorFds(pipe0ErrBlk)
+	pipe0ErrBlk.NewRet(negOne32)
+
+	// pipe(stdout_fds)
+	pipeRet1 := pipeOk0.NewCall(pipeFn, stdoutFdsPtr)
+	isPipeErr1 := pipeOk0.NewICmp(enum.IPredSLT, pipeRet1, zero32)
+	pipeOk1 := fn.NewBlock(".pipe_ok1")
+	pipe1ErrBlk := fn.NewBlock(".pipe1_err")
+	pipeOk0.NewCondBr(isPipeErr1, pipe1ErrBlk, pipeOk1)
+
+	stdinRdPtrErr1 := pipe1ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, zero32)
+	stdinWrPtrErr1 := pipe1ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, one32)
+	pipe1ErrBlk.NewCall(closeFn, pipe1ErrBlk.NewLoad(irtypes.I32, stdinRdPtrErr1))
+	pipe1ErrBlk.NewCall(closeFn, pipe1ErrBlk.NewLoad(irtypes.I32, stdinWrPtrErr1))
+	storeErrorFds(pipe1ErrBlk)
+	pipe1ErrBlk.NewRet(negOne32)
+
+	// pipe(stderr_fds)
+	pipeRet2 := pipeOk1.NewCall(pipeFn, stderrFdsPtr)
+	isPipeErr2 := pipeOk1.NewICmp(enum.IPredSLT, pipeRet2, zero32)
+	pipeOk2 := fn.NewBlock(".pipe_ok2")
+	pipe2ErrBlk := fn.NewBlock(".pipe2_err")
+	pipeOk1.NewCondBr(isPipeErr2, pipe2ErrBlk, pipeOk2)
+
+	stdinRdPtrErr2 := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, zero32)
+	stdinWrPtrErr2 := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, one32)
+	stdoutRdPtrErr2 := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, zero32)
+	stdoutWrPtrErr2 := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, one32)
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdinRdPtrErr2))
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdinWrPtrErr2))
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdoutRdPtrErr2))
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdoutWrPtrErr2))
+	storeErrorFds(pipe2ErrBlk)
+	pipe2ErrBlk.NewRet(negOne32)
+
+	// Load all pipe fds
+	stdinReadFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, zero32)
+	stdinWriteFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, one32)
+	stdoutReadFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, zero32)
+	stdoutWriteFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, one32)
+	stderrReadFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stderrFds, zero32, zero32)
+	stderrWriteFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stderrFds, zero32, one32)
+	stdinReadFd := pipeOk2.NewLoad(irtypes.I32, stdinReadFdPtr)
+	stdinWriteFd := pipeOk2.NewLoad(irtypes.I32, stdinWriteFdPtr)
+	stdoutReadFd := pipeOk2.NewLoad(irtypes.I32, stdoutReadFdPtr)
+	stdoutWriteFd := pipeOk2.NewLoad(irtypes.I32, stdoutWriteFdPtr)
+	stderrReadFd := pipeOk2.NewLoad(irtypes.I32, stderrReadFdPtr)
+	stderrWriteFd := pipeOk2.NewLoad(irtypes.I32, stderrWriteFdPtr)
+
+	pid := pipeOk2.NewCall(forkFn)
+	isChild := pipeOk2.NewICmp(enum.IPredEQ, pid, zero32)
+	childBlk := fn.NewBlock(".child")
+	checkForkErr := fn.NewBlock(".check_fork_err")
+	pipeOk2.NewCondBr(isChild, childBlk, checkForkErr)
+
+	isForkErr := checkForkErr.NewICmp(enum.IPredSLT, pid, zero32)
+	parentBlk := fn.NewBlock(".parent")
+	forkErrBlk := fn.NewBlock(".fork_err")
+	checkForkErr.NewCondBr(isForkErr, forkErrBlk, parentBlk)
+
+	// --- Child ---
+	childBlk.NewCall(closeFn, stdinWriteFd)
+	childBlk.NewCall(closeFn, stdoutReadFd)
+	childBlk.NewCall(closeFn, stderrReadFd)
+	childBlk.NewCall(dup2Fn, stdinReadFd, zero32)
+	childBlk.NewCall(dup2Fn, stdoutWriteFd, one32)
+	childBlk.NewCall(dup2Fn, stderrWriteFd, two32)
+	childBlk.NewCall(closeFn, stdinReadFd)
+	childBlk.NewCall(closeFn, stdoutWriteFd)
+	childBlk.NewCall(closeFn, stderrWriteFd)
+
+	// If cwd != NULL, chdir
+	cwdIsNull := childBlk.NewICmp(enum.IPredEQ, fn.Params[3], constant.NewNull(irtypes.I8Ptr))
+	childChdirBlk := fn.NewBlock(".child_chdir")
+	childEnvBlk := fn.NewBlock(".child_env")
+	childBlk.NewCondBr(cwdIsNull, childEnvBlk, childChdirBlk)
+
+	chdirRet := childChdirBlk.NewCall(chdirFn, fn.Params[3])
+	chdirFailed := childChdirBlk.NewICmp(enum.IPredSLT, chdirRet, zero32)
+	childChdirErr := fn.NewBlock(".child_chdir_err")
+	childChdirBlk.NewCondBr(chdirFailed, childChdirErr, childEnvBlk)
+	childChdirErr.NewCall(exitFn, constant.NewInt(irtypes.I32, 127))
+	childChdirErr.NewUnreachable()
+
+	// If envp != NULL, set environ
+	envpIsNull := childEnvBlk.NewICmp(enum.IPredEQ, fn.Params[2], constant.NewNull(i8PtrPtrType))
+	childExecBlk := fn.NewBlock(".child_exec")
+	childSetEnv := fn.NewBlock(".child_set_env")
+	childEnvBlk.NewCondBr(envpIsNull, childExecBlk, childSetEnv)
+
+	childSetEnv.NewStore(fn.Params[2], environGlobal)
+	childSetEnv.NewBr(childExecBlk)
+
+	childExecBlk.NewCall(execvpFn, fn.Params[0], fn.Params[1])
+	childExecBlk.NewCall(exitFn, constant.NewInt(irtypes.I32, 127))
+	childExecBlk.NewUnreachable()
+
+	// --- Fork error ---
+	forkErrBlk.NewCall(closeFn, stdinReadFd)
+	forkErrBlk.NewCall(closeFn, stdinWriteFd)
+	forkErrBlk.NewCall(closeFn, stdoutReadFd)
+	forkErrBlk.NewCall(closeFn, stdoutWriteFd)
+	forkErrBlk.NewCall(closeFn, stderrReadFd)
+	forkErrBlk.NewCall(closeFn, stderrWriteFd)
+	storeErrorFds(forkErrBlk)
+	forkErrBlk.NewRet(negOne32)
+
+	// --- Parent ---
+	parentBlk.NewCall(closeFn, stdinReadFd)
+	parentBlk.NewCall(closeFn, stdoutWriteFd)
+	parentBlk.NewCall(closeFn, stderrWriteFd)
+	parentBlk.NewStore(stdinWriteFd, fn.Params[4])
+	parentBlk.NewStore(stdoutReadFd, fn.Params[5])
+	parentBlk.NewStore(stderrReadFd, fn.Params[6])
+	parentBlk.NewRet(pid)
+
+	return fn
+}
+
 // EmitKill defines @pal_kill using POSIX kill(2).
 // Signature: @pal_kill(i32 pid, i32 signal) → i32
 // Returns 0 on success, -1 on error.
@@ -1310,14 +1632,25 @@ func (p *PosixPAL) EmitGetCwd(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// getOrCreateEnvironGlobal returns the @environ external global, creating it if needed.
+func getOrCreateEnvironGlobal(module *ir.Module) *ir.Global {
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	for _, g := range module.Globals {
+		if g.Name() == "environ" {
+			return g
+		}
+	}
+	g := module.NewGlobal("environ", i8PtrPtrType)
+	g.Linkage = enum.LinkageExternal
+	return g
+}
+
 // EmitGetEnviron defines @pal_get_environ: returns pointer to the C environ global.
 // Signature: @pal_get_environ() → i8** (null-terminated array of "KEY=VALUE" strings)
 func (p *PosixPAL) EmitGetEnviron(module *ir.Module) *ir.Func {
 	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
 
-	// @environ = external global i8**
-	environGlobal := module.NewGlobal("environ", i8PtrPtrType)
-	environGlobal.Linkage = enum.LinkageExternal
+	environGlobal := getOrCreateEnvironGlobal(module)
 
 	fn := module.NewFunc("pal_get_environ", i8PtrPtrType)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)

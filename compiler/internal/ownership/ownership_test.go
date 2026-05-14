@@ -3201,3 +3201,95 @@ func TestFieldMoveEnumWithDropFieldError(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot move field 'p'")
 }
+
+// === B0351: field move from function-return temporaries ===
+
+func TestFieldMoveFromCallResultError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { map[string, string] headers; }
+		make_inner() Inner { return Inner(headers: map[string, string]()); }
+		test() {
+			map[string, string] h = make_inner().headers;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'headers'")
+}
+
+func TestFieldMoveFromCallResultNestedError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { map[string, string] headers; }
+		type Outer { Inner inner; }
+		make_outer() Outer { return Outer(inner: Inner(headers: map[string, string]())); }
+		test() {
+			map[string, string] h = make_outer().inner.headers;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'headers'")
+}
+
+func TestFieldMoveFromCallResultCloneOK(t *testing.T) {
+	ownerOK(t, `
+		type Inner { map[string, string] headers; }
+		make_inner() Inner { return Inner(headers: map[string, string]()); }
+		test() {
+			map[string, string] h = make_inner().headers.clone();
+		}
+	`)
+}
+
+func TestFieldMoveFromCallResultCopyFieldOK(t *testing.T) {
+	ownerOK(t, `
+		type Inner { int id; map[string, string] headers; }
+		make_inner() Inner { return Inner(id: 1, headers: map[string, string]()); }
+		test() {
+			int id = make_inner().id;
+		}
+	`)
+}
+
+func TestFieldMoveFromCallResultNonDroppableOwnerOK(t *testing.T) {
+	ownerOK(t, `
+		type Pair { int x; int y; }
+		make_pair() Pair { return Pair(x: 1, y: 2); }
+		test() {
+			int x = make_pair().x;
+		}
+	`)
+}
+
+func TestFieldMoveFromCallResultConstructorArgError(t *testing.T) {
+	// Exact reproduction case from B0351 — constructor arg context.
+	errs := ownerErrs(t, `
+		type Inner { map[string, string] headers; }
+		type Outer { map[string, string] headers; }
+		make_inner() Inner { return Inner(headers: map[string, string]()); }
+		test() {
+			Outer o = Outer(headers: make_inner().headers);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'headers'")
+}
+
+func TestFieldMoveFromCallResultAutoDupFieldOK(t *testing.T) {
+	// String fields are auto-dup — accessing from call result should be OK.
+	ownerOK(t, `
+		type Inner { string name; map[string, string] headers; }
+		make_inner() Inner { return Inner(name: "foo", headers: map[string, string]()); }
+		test() {
+			string n = make_inner().name;
+		}
+	`)
+}
+
+func TestFieldMoveFromCallResultReturnError(t *testing.T) {
+	// Returning a droppable field from a call result — same double-drop risk.
+	errs := ownerErrs(t, `
+		type Inner { map[string, string] headers; }
+		make_inner() Inner { return Inner(headers: map[string, string]()); }
+		get_headers() map[string, string] {
+			return make_inner().headers;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'headers'")
+}

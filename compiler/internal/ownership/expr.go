@@ -571,8 +571,9 @@ func isDroppableType(typ types.Type) bool {
 }
 
 // isValueTarget returns true when the root of a MemberExpr chain is a
-// variable (owned value). Returns false for type names (Enum.Variant),
-// module references (json.JsonValue.Null), and other non-value targets.
+// variable (owned value) or a function call (owned temporary). Returns
+// false for type names (Enum.Variant), module references
+// (json.JsonValue.Null), and other non-value targets.
 func (c *Checker) isValueTarget(e *ast.MemberExpr) bool {
 	target := e.Target
 	for {
@@ -581,6 +582,11 @@ func (c *Checker) isValueTarget(e *ast.MemberExpr) bool {
 		} else {
 			break
 		}
+	}
+	// Function calls return owned temporaries — field reads from them
+	// have the same double-drop risk as field reads from variables (B0351).
+	if _, ok := target.(*ast.CallExpr); ok {
+		return true
 	}
 	if ident, ok := target.(*ast.IdentExpr); ok {
 		if obj := c.info.Objects[ident]; obj != nil {

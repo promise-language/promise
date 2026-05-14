@@ -3980,6 +3980,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 						if _, hasFlag := c.dropFlags[ident.Name]; !hasFlag {
 							val = c.dupString(val)
 						}
+					} else if isStringBorrowExpr(s.Value) {
+						// B0355: non-ident borrow expr (field access, container element) as map value —
+						// the source still owns the pointer; dup so map holds an independent copy.
+						val = c.dupString(val)
 					}
 				}
 			}
@@ -6291,6 +6295,10 @@ func (c *Compiler) genMethodIndexAssign(target *ast.IndexExpr, targetType types.
 				} else {
 					keyVal = c.dupString(keyVal)
 				}
+			} else if isStringBorrowExpr(target.Index) {
+				// B0355: non-ident borrow expr (field access, container element) as map key —
+				// the source still owns the pointer; dup so map holds an independent copy.
+				keyVal = c.dupString(keyVal)
 			}
 		}
 	}

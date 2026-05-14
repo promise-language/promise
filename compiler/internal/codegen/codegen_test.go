@@ -18740,3 +18740,31 @@ func TestMapIndexAssignClearKeyDropFlag(t *testing.T) {
 	assertContains(t, ir, "k.dropflag")
 	assertContains(t, ir, "forin.key.drop")
 }
+
+// B0355: MemberExpr (field access) used as map key must be dup'd — the struct
+// still owns the pointer, so the map needs an independent copy.
+func TestMapIndexAssignDupBorrowKeyMemberExpr(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		test() {
+			Row r = Row(name: "hello");
+			map[string, int] m = map[string, int]();
+			m[r.name] = 1;
+		}
+	`)
+	assertContains(t, ir, "strdup.copy")
+}
+
+// B0355: MemberExpr (field access) used as map value must be dup'd — the struct
+// still owns the pointer, so the map needs an independent copy.
+func TestMapIndexAssignDupBorrowValueMemberExpr(t *testing.T) {
+	ir := generateIR(t, `
+		type Row { string name; }
+		test() {
+			Row r = Row(name: "world");
+			map[string, string] m = map[string, string]();
+			m["k"] = r.name;
+		}
+	`)
+	assertContains(t, ir, "strdup.copy")
+}

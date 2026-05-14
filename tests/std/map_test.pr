@@ -1,5 +1,10 @@
 // Test map[K, V] operations: insert, lookup, contains, remove, keys, values, iteration
 //
+// B0355: top-level Row type for member-expr key/value dup tests.
+type MapTestRow {
+  string name;
+}
+
 test_literal_and_lookup() `test {
   map[string, int] m = {
     "a": 1, "b": 2, "c": 3
@@ -462,4 +467,34 @@ test_map_pop_no_leak() `test {
     assert(val == "one", "popped value");
   }
   assert(m.len == 1, "len after pop");
+}
+
+test_map_member_expr_key_no_double_free() `test {
+  // B0355: MemberExpr key — struct still owns string, map must hold independent copy.
+  MapTestRow r = MapTestRow(name: "hello");
+  map[string, int] m = {:};
+  m[r.name] = 42;
+  assert(m.len == 1, "len after insert");
+  if v := m["hello"] {
+    assert(v == 42, "lookup by literal");
+  } else {
+    assert(false, "key not found");
+  }
+  // r.name still valid — no double-free
+  assert(r.name == "hello", "original unchanged");
+}
+
+test_map_member_expr_value_no_double_free() `test {
+  // B0355: MemberExpr value — struct still owns string, map must hold independent copy.
+  MapTestRow r = MapTestRow(name: "world");
+  map[string, string] m = {:};
+  m["k"] = r.name;
+  assert(m.len == 1, "len after insert");
+  if v := m["k"] {
+    assert(v == "world", "lookup value");
+  } else {
+    assert(false, "key not found");
+  }
+  // r.name still valid — no double-free
+  assert(r.name == "world", "original unchanged");
 }

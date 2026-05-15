@@ -75,6 +75,7 @@ func (p *WasmWebPAL) EmitFileSeek(module *ir.Module) *ir.Func  { return emitStub
 func (p *WasmWebPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
 	return emitStubFileStatSize(module)
 }
+func (p *WasmWebPAL) EmitFileStat(module *ir.Module) *ir.Func    { return emitStubFileStat(module) }
 func (p *WasmWebPAL) EmitFileRemove(module *ir.Module) *ir.Func  { return emitStubFileRemove(module) }
 func (p *WasmWebPAL) EmitFileExists(module *ir.Module) *ir.Func  { return emitStubFileExists(module) }
 func (p *WasmWebPAL) EmitFileMkdir(module *ir.Module) *ir.Func   { return emitStubFileMkdir(module) }

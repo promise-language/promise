@@ -588,6 +588,83 @@ func (p *WindowsPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitFileStat defines @pal_file_stat using _stat64 (D0012).
+// Windows: no lstat (follow flag ignored), uid/gid always 0, timestamps in seconds.
+func (p *WindowsPAL) EmitFileStat(module *ir.Module) *ir.Func {
+	// declare i32 @_stat64(i8* path, i8* buf)
+	stat64Fn := getOrDeclareFunc(module, "_stat64", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("buf", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_file_stat", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("out", irtypes.NewPointer(irtypes.I64)),
+		ir.NewParam("follow", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	path := fn.Params[0]
+	out := fn.Params[1]
+
+	entry := fn.NewBlock(".entry")
+
+	// Stack-allocate buffer for struct __stat64 (64 bytes, 16-byte aligned)
+	bufArray := irtypes.NewArray(64, irtypes.I8)
+	buf := entry.NewAlloca(bufArray)
+	buf.Align = 16
+	bufPtr := entry.NewBitCast(buf, irtypes.I8Ptr)
+
+	rc := entry.NewCall(stat64Fn, path, bufPtr)
+	isErr := entry.NewICmp(enum.IPredSLT, rc, constant.NewInt(irtypes.I32, 0))
+	extractBlk := fn.NewBlock(".extract")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, extractBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoFn(module))
+
+	// Windows struct __stat64 offsets:
+	// st_mode: offset 6, i16; st_size: offset 24, i64
+	// st_atime: offset 32, i64 (seconds); st_mtime: offset 40; st_ctime: offset 48
+	storeI64 := func(idx int64, val value.Value) {
+		ptr := extractBlk.NewGetElementPtr(irtypes.I64, out, constant.NewInt(irtypes.I64, idx))
+		extractBlk.NewStore(val, ptr)
+	}
+	loadI64 := func(off int64) value.Value {
+		ptr := extractBlk.NewGetElementPtr(irtypes.I8, bufPtr, constant.NewInt(irtypes.I64, off))
+		t := extractBlk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I64))
+		return extractBlk.NewLoad(irtypes.I64, t)
+	}
+	loadI16Zext := func(off int64) value.Value {
+		ptr := extractBlk.NewGetElementPtr(irtypes.I8, bufPtr, constant.NewInt(irtypes.I64, off))
+		t := extractBlk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I16))
+		v := extractBlk.NewLoad(irtypes.I16, t)
+		return extractBlk.NewZExt(v, irtypes.I64)
+	}
+	secToNs := func(off int64) value.Value {
+		sec := loadI64(off)
+		return extractBlk.NewMul(sec, constant.NewInt(irtypes.I64, 1_000_000_000))
+	}
+
+	rawMode := loadI16Zext(6)
+
+	storeI64(0, loadI64(24))                                                      // size
+	storeI64(1, extractBlk.NewAnd(rawMode, constant.NewInt(irtypes.I64, 0o7777))) // mode perms
+	storeI64(2, constant.NewInt(irtypes.I64, 0))                                  // uid (N/A)
+	storeI64(3, constant.NewInt(irtypes.I64, 0))                                  // gid (N/A)
+	storeI64(4, secToNs(40))                                                      // mtime_ns
+	storeI64(5, secToNs(32))                                                      // atime_ns
+	storeI64(6, secToNs(48))                                                      // ctime_ns
+	// file_type from st_mode
+	modeType := extractBlk.NewAnd(rawMode, constant.NewInt(irtypes.I64, 0xF000))
+	isReg := extractBlk.NewICmp(enum.IPredEQ, modeType, constant.NewInt(irtypes.I64, 0x8000))
+	isDir := extractBlk.NewICmp(enum.IPredEQ, modeType, constant.NewInt(irtypes.I64, 0x4000))
+	ft := extractBlk.NewSelect(isDir, constant.NewInt(irtypes.I64, 2), constant.NewInt(irtypes.I64, 4))
+	ft = extractBlk.NewSelect(isReg, constant.NewInt(irtypes.I64, 1), ft)
+	storeI64(7, ft)
+
+	extractBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
 // EmitFileRemove declares UCRT @_unlink and defines @pal_file_remove.
 func (p *WindowsPAL) EmitFileRemove(module *ir.Module) *ir.Func {
 	ucrtUnlink := getOrDeclareFunc(module, "_unlink", irtypes.I32,

@@ -562,6 +562,144 @@ func (p *PosixPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitFileStat defines @pal_file_stat using stat/lstat with platform-specific
+// struct stat byte offsets (D0012). Writes 8 normalized i64 values to out[0..7].
+func (p *PosixPAL) EmitFileStat(module *ir.Module) *ir.Func {
+	statFn := getOrDeclareFunc(module, "stat", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("buf", irtypes.I8Ptr))
+	lstatFn := getOrDeclareFunc(module, "lstat", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("buf", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_file_stat", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("out", irtypes.NewPointer(irtypes.I64)),
+		ir.NewParam("follow", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	path := fn.Params[0]
+	out := fn.Params[1]
+	follow := fn.Params[2]
+
+	entry := fn.NewBlock(".entry")
+
+	// Stack-allocate stat buffer (256 bytes, 16-byte aligned for struct stat)
+	bufArray := irtypes.NewArray(256, irtypes.I8)
+	buf := entry.NewAlloca(bufArray)
+	buf.Align = 16
+	bufPtr := entry.NewBitCast(buf, irtypes.I8Ptr)
+
+	// Branch on follow flag: follow!=0 → stat, follow==0 → lstat
+	isFollow := entry.NewICmp(enum.IPredNE, follow, constant.NewInt(irtypes.I32, 0))
+	callStatBlk := fn.NewBlock(".call_stat")
+	callLstatBlk := fn.NewBlock(".call_lstat")
+	entry.NewCondBr(isFollow, callStatBlk, callLstatBlk)
+
+	rc1 := callStatBlk.NewCall(statFn, path, bufPtr)
+	mergeBlk := fn.NewBlock(".merge")
+	callStatBlk.NewBr(mergeBlk)
+
+	rc2 := callLstatBlk.NewCall(lstatFn, path, bufPtr)
+	callLstatBlk.NewBr(mergeBlk)
+
+	// Merge results via phi
+	rc := mergeBlk.NewPhi(ir.NewIncoming(rc1, callStatBlk), ir.NewIncoming(rc2, callLstatBlk))
+	isErr := mergeBlk.NewICmp(enum.IPredSLT, rc, constant.NewInt(irtypes.I32, 0))
+	extractBlk := fn.NewBlock(".extract")
+	errBlk := fn.NewBlock(".err")
+	mergeBlk.NewCondBr(isErr, errBlk, extractBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+
+	// Platform-specific struct stat byte offsets
+	var modeOff int64
+	var modeIs16 bool
+	var uidOff, gidOff, sizeOff int64
+	var atimeOff, mtimeOff, ctimeOff int64
+	var birthtimeOff int64
+	var hasBirthtime bool
+
+	if p.isMacOS() {
+		modeOff, modeIs16 = 4, true
+		uidOff, gidOff = 16, 20
+		sizeOff = 96
+		atimeOff, mtimeOff, ctimeOff = 32, 48, 64
+		birthtimeOff, hasBirthtime = 80, true
+	} else {
+		modeOff, modeIs16 = 24, false
+		uidOff, gidOff = 28, 32
+		sizeOff = 48
+		atimeOff, mtimeOff, ctimeOff = 72, 88, 104
+		birthtimeOff, hasBirthtime = 0, false
+	}
+
+	// Load raw st_mode (used for permission bits + file type)
+	var rawMode value.Value
+	if modeIs16 {
+		modePtr := extractBlk.NewGetElementPtr(irtypes.I8, bufPtr, constant.NewInt(irtypes.I64, modeOff))
+		modeTyped := extractBlk.NewBitCast(modePtr, irtypes.NewPointer(irtypes.I16))
+		mode16 := extractBlk.NewLoad(irtypes.I16, modeTyped)
+		rawMode = extractBlk.NewZExt(mode16, irtypes.I64)
+	} else {
+		modePtr := extractBlk.NewGetElementPtr(irtypes.I8, bufPtr, constant.NewInt(irtypes.I64, modeOff))
+		modeTyped := extractBlk.NewBitCast(modePtr, irtypes.NewPointer(irtypes.I32))
+		mode32 := extractBlk.NewLoad(irtypes.I32, modeTyped)
+		rawMode = extractBlk.NewZExt(mode32, irtypes.I64)
+	}
+
+	storeI64 := func(idx int64, val value.Value) {
+		ptr := extractBlk.NewGetElementPtr(irtypes.I64, out, constant.NewInt(irtypes.I64, idx))
+		extractBlk.NewStore(val, ptr)
+	}
+	loadI64 := func(off int64) value.Value {
+		ptr := extractBlk.NewGetElementPtr(irtypes.I8, bufPtr, constant.NewInt(irtypes.I64, off))
+		t := extractBlk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I64))
+		return extractBlk.NewLoad(irtypes.I64, t)
+	}
+	loadI32Zext := func(off int64) value.Value {
+		ptr := extractBlk.NewGetElementPtr(irtypes.I8, bufPtr, constant.NewInt(irtypes.I64, off))
+		t := extractBlk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I32))
+		v := extractBlk.NewLoad(irtypes.I32, t)
+		return extractBlk.NewZExt(v, irtypes.I64)
+	}
+	loadTimespecNs := func(off int64) value.Value {
+		sec := loadI64(off)
+		nsec := loadI64(off + 8)
+		secNs := extractBlk.NewMul(sec, constant.NewInt(irtypes.I64, 1_000_000_000))
+		return extractBlk.NewAdd(secNs, nsec)
+	}
+
+	// out[0] = size
+	storeI64(0, loadI64(sizeOff))
+	// out[1] = mode & 0o7777 (permission bits)
+	storeI64(1, extractBlk.NewAnd(rawMode, constant.NewInt(irtypes.I64, 0o7777)))
+	// out[2] = uid, out[3] = gid
+	storeI64(2, loadI32Zext(uidOff))
+	storeI64(3, loadI32Zext(gidOff))
+	// out[4] = mtime_ns, out[5] = atime_ns
+	storeI64(4, loadTimespecNs(mtimeOff))
+	storeI64(5, loadTimespecNs(atimeOff))
+	// out[6] = ctime_ns (birthtime on macOS, ctime on Linux)
+	if hasBirthtime {
+		storeI64(6, loadTimespecNs(birthtimeOff))
+	} else {
+		storeI64(6, loadTimespecNs(ctimeOff))
+	}
+	// out[7] = file_type: (st_mode & 0xF000) → 1=reg, 2=dir, 3=lnk, 4=other
+	modeType := extractBlk.NewAnd(rawMode, constant.NewInt(irtypes.I64, 0xF000))
+	isReg := extractBlk.NewICmp(enum.IPredEQ, modeType, constant.NewInt(irtypes.I64, 0x8000))
+	isDir := extractBlk.NewICmp(enum.IPredEQ, modeType, constant.NewInt(irtypes.I64, 0x4000))
+	isLnk := extractBlk.NewICmp(enum.IPredEQ, modeType, constant.NewInt(irtypes.I64, 0xA000))
+	ft := extractBlk.NewSelect(isLnk, constant.NewInt(irtypes.I64, 3), constant.NewInt(irtypes.I64, 4))
+	ft = extractBlk.NewSelect(isDir, constant.NewInt(irtypes.I64, 2), ft)
+	ft = extractBlk.NewSelect(isReg, constant.NewInt(irtypes.I64, 1), ft)
+	storeI64(7, ft)
+
+	extractBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
 // EmitFileRemove declares libc @unlink and defines @pal_file_remove.
 func (p *PosixPAL) EmitFileRemove(module *ir.Module) *ir.Func {
 	unlinkFn := getOrDeclareFunc(module, "unlink", irtypes.I32,

@@ -250,6 +250,7 @@ type Compiler struct {
 	palDirNextName             *ir.Func // @pal_dir_next_name(i8* handle) → i8*
 	palDirClose                *ir.Func // @pal_dir_close(i8* handle) → void
 	palErrno                   *ir.Func // @pal_errno() → i32
+	palFileStat                *ir.Func // @pal_file_stat(i8* path, i64* out, i32 follow) → i32
 	palGetEnv                  *ir.Func // @pal_getenv(i8* name) → i8* (value or null)
 	palGetCwd                  *ir.Func // @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 	palSetEnv                  *ir.Func // @pal_setenv(i8* name, i8* value) → i32
@@ -1625,6 +1626,7 @@ func (c *Compiler) declareIntrinsics() {
 	c.palDirRemove = p.EmitDirRemove(c.module)
 	c.palDirExists = p.EmitDirExists(c.module)
 	c.palErrno = p.EmitErrno(c.module)
+	c.palFileStat = p.EmitFileStat(c.module)
 	c.palDirOpen = p.EmitDirOpen(c.module)
 	c.palDirNextName = p.EmitDirNextName(c.module)
 	c.palDirClose = p.EmitDirClose(c.module)

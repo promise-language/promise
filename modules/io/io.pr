@@ -24,6 +24,8 @@ _io_file_write(int fd, u8[]~buf) int `extern("promise_io_file_write");
 _io_dir_open(string path) int `extern("promise_io_dir_open");
 _io_dir_next_name(int handle) string `extern("promise_io_dir_next_name");
 _io_dir_close_handle(int handle) int `extern("promise_io_dir_close_handle");
+// file stat bridge: fills [8 x i64] via stat/lstat, returns one field by index (D0012)
+_io_file_stat_field(string path, int field_index, int follow) int `extern("promise_io_file_stat_field");
 
 // EOF sentinel value used by the read_line bridge to signal end-of-file.
 // Set in errno by the codegen bridge. Value 0x7FFF0001 — above all real POSIX errno values.
@@ -258,6 +260,25 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     if rc < 0 {
       raise _make_io_error(rc);
     }
+  }
+
+  metadata!(string path, bool follow_symlinks = true) Metadata `global `public `doc("Returns file system metadata for a path.") {
+    int follow = 0;
+    if follow_symlinks {
+      follow = 1;
+    }
+    int s = _io_file_stat_field(path[0:path.len], 0, follow);
+    if s < 0 {
+      raise _make_io_error(s);
+    }
+    int m = _io_file_stat_field(path[0:path.len], 1, follow);
+    int u = _io_file_stat_field(path[0:path.len], 2, follow);
+    int g = _io_file_stat_field(path[0:path.len], 3, follow);
+    int mt = _io_file_stat_field(path[0:path.len], 4, follow);
+    int at = _io_file_stat_field(path[0:path.len], 5, follow);
+    int ct = _io_file_stat_field(path[0:path.len], 6, follow);
+    int ft = _io_file_stat_field(path, 7, follow);
+    return Metadata(size: s, mode: m, uid: u, gid: g, modified: mt, accessed: at, created: ct, _file_type: ft);
   }
 
   // ── Auto-close on scope exit ─────────────────────────────────────────
@@ -497,5 +518,43 @@ type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batc
     if this._len > 0 {
       _io_file_write(this._file._fd, this._buf[0:this._len]);
     }
+  }
+}
+
+// ── Metadata type (D0012) ───────────────────────────────────────────────────
+
+type Metadata `public `doc("File system metadata for a path. Use File.metadata() to query.") {
+  int size `value `public `doc("File size in bytes.");
+  int mode `value `public `doc("Permission bits (lower 12 bits of st_mode).");
+  int uid `value `public `doc("Owner user ID.");
+  int gid `value `public `doc("Owner group ID.");
+  int modified `value `public `doc("Last modification time in nanoseconds since Unix epoch.");
+  int accessed `value `public `doc("Last access time in nanoseconds since Unix epoch.");
+  int created `value `public `doc("Creation time in nanoseconds since Unix epoch (birthtime on macOS, ctime on Linux).");
+  int _file_type `value;
+
+  get is_file bool `public `doc("True if this is a regular file.") => this._file_type == 1;
+  get is_directory bool `public `doc("True if this is a directory.") => this._file_type == 2;
+  get is_symlink bool `public `doc("True if this is a symbolic link.") => this._file_type == 3;
+  get is_readable bool `public `doc("True if any read permission bit is set.") => (this.mode & 292) != 0;
+  get is_writable bool `public `doc("True if any write permission bit is set.") => (this.mode & 146) != 0;
+  get is_executable bool `public `doc("True if any execute permission bit is set.") => (this.mode & 73) != 0;
+
+  to_string() string `public `doc("Returns a human-readable summary of the metadata.") {
+    string kind = "other";
+    if this.is_file {
+      kind = "file";
+    }
+    if this.is_directory {
+      kind = "directory";
+    }
+    if this.is_symlink {
+      kind = "symlink";
+    }
+    return "Metadata(kind: {kind}, size: {this.size}, mode: {this.mode})";
+  }
+
+  format!(Writer ~w) `public `doc("Formats metadata into a Writer.") {
+    w.write_string(this.to_string());
   }
 }

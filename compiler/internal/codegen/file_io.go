@@ -78,6 +78,9 @@ func (c *Compiler) defineFileIOBodies() {
 	if fn, ok := irFuncByName["promise_io_file_write"]; ok {
 		c.defineFileWriteBody(fn)
 	}
+	if fn, ok := irFuncByName["promise_io_file_stat_field"]; ok {
+		c.defineFileStatFieldBody(fn)
+	}
 }
 
 // ── Syscall handoff helpers ──────────────────────────────────────────────────
@@ -745,6 +748,55 @@ func (c *Compiler) defineFileReadBody(fn *ir.Func) {
 	// Return bytes read as Promise int (negative = -errno)
 	c.storeIntResult(entry, sret, n)
 	entry.NewRet(nil)
+}
+
+// defineFileStatFieldBody: void @promise_io_file_stat_field(i8* sret, i8* path, i8* field_index, i8* follow)
+// Calls pal_file_stat to fill an [8 x i64] buffer, returns the field at field_index.
+// Returns negative error code on stat failure (D0012).
+func (c *Compiler) defineFileStatFieldBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	pathParam := fn.Params[1]
+	fieldIdxParam := fn.Params[2]
+	followParam := fn.Params[3]
+
+	// Convert Promise string path to null-terminated C string
+	cstr := c.stringToCStr(entry, pathParam)
+
+	// Extract field_index and follow as raw ints
+	fieldIdx := c.extractRawInt(entry, fieldIdxParam)
+	followRaw := c.extractRawInt(entry, followParam)
+	followI32 := entry.NewTrunc(followRaw, irtypes.I32)
+
+	// Stack-alloca [8 x i64] for stat output
+	bufType := irtypes.NewArray(8, irtypes.I64)
+	buf := entry.NewAlloca(bufType)
+	bufPtr := entry.NewBitCast(buf, irtypes.NewPointer(irtypes.I64))
+
+	// Call PAL: i32 @pal_file_stat(i8* path, i64* out, i32 follow)
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palFileStat, cstr, bufPtr, followI32)
+	c.emitExitSyscall(entry)
+
+	// Free temporary C string
+	entry.NewCall(c.palFree, cstr)
+
+	// Check for error (rc < 0)
+	isErr := entry.NewICmp(enum.IPredSLT, rc, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	// Error: return sign-extended rc as Promise int
+	rcI64 := errBlk.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(errBlk, sret, rcI64)
+	errBlk.NewRet(nil)
+
+	// Success: load out[field_index] and return as Promise int
+	elemPtr := okBlk.NewGetElementPtr(irtypes.I64, bufPtr, fieldIdx)
+	val := okBlk.NewLoad(irtypes.I64, elemPtr)
+	c.storeIntResult(okBlk, sret, val)
+	okBlk.NewRet(nil)
 }
 
 // defineFileWriteBody: void @promise_io_file_write(i8* sret, i8* fd, i8* buf)

@@ -943,3 +943,105 @@ buffered_writer_write_line() `test(exclude: "wasm32") {
   assert(content == "alpha" + sep + "beta" + sep, "buffered write_line");
   File.remove("/tmp/pr_iot_bwl")?!;
 }
+
+// ── File.metadata (D0012) ───────────────────────────────────────────────────
+
+metadata_file() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_mdf", "hello")?!;
+  Metadata m = File.metadata("/tmp/pr_iot_mdf")?!;
+  assert(m.size == 5, "metadata size");
+  assert(m.is_file, "metadata is_file");
+  assert(!m.is_directory, "metadata not directory");
+  assert(!m.is_symlink, "metadata not symlink");
+  File.remove("/tmp/pr_iot_mdf")?!;
+}
+
+metadata_directory() `test(exclude: "wasm32") {
+  if !Dir.exists("/tmp/pr_iot_mdd") {
+    Dir.make("/tmp/pr_iot_mdd")?!;
+  }
+  Metadata m = File.metadata("/tmp/pr_iot_mdd")?!;
+  assert(m.is_directory, "metadata is_directory");
+  assert(!m.is_file, "metadata not file");
+  Dir.remove("/tmp/pr_iot_mdd")?!;
+}
+
+_metadata_raises(string path) bool {
+  File.metadata(path)? e {
+    return true;
+  };
+  return false;
+}
+
+metadata_not_found() `test(exclude: "wasm32") {
+  assert(_metadata_raises("/tmp/pr_iot_nonexistent_xyz_999"), "metadata raises on missing path");
+}
+
+metadata_size() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_mds", "0123456789")?!;
+  Metadata m = File.metadata("/tmp/pr_iot_mds")?!;
+  assert(m.size == 10, "metadata size exact");
+  File.remove("/tmp/pr_iot_mds")?!;
+}
+
+metadata_mode() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_mdm", "x")?!;
+  Metadata m = File.metadata("/tmp/pr_iot_mdm")?!;
+  assert(m.is_readable, "metadata is_readable");
+  File.remove("/tmp/pr_iot_mdm")?!;
+}
+
+metadata_timestamps() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_mdt", "t")?!;
+  Metadata m = File.metadata("/tmp/pr_iot_mdt")?!;
+  assert(m.modified > 0, "metadata modified > 0");
+  assert(m.accessed > 0, "metadata accessed > 0");
+  File.remove("/tmp/pr_iot_mdt")?!;
+}
+
+metadata_value_type() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_mdv", "v")?!;
+  Metadata m = File.metadata("/tmp/pr_iot_mdv")?!;
+  // Value types are copyable — test copy semantics
+  Metadata m2 = m;
+  assert(m2.size == m.size, "metadata value copy");
+  assert(m2.is_file == m.is_file, "metadata value copy is_file");
+  File.remove("/tmp/pr_iot_mdv")?!;
+}
+
+metadata_to_string() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_mts", "s")?!;
+  Metadata m = File.metadata("/tmp/pr_iot_mts")?!;
+  string s = m.to_string();
+  assert(s.contains("file"), "to_string contains kind");
+  assert(s.contains("size:"), "to_string contains size");
+  File.remove("/tmp/pr_iot_mts")?!;
+}
+
+metadata_is_writable() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_mdw", "w")?!;
+  Metadata m = File.metadata("/tmp/pr_iot_mdw")?!;
+  assert(m.is_writable, "created file is writable");
+  File.remove("/tmp/pr_iot_mdw")?!;
+}
+
+metadata_is_executable() `test(exclude: "wasm32") {
+  // /bin/sh is universally executable on POSIX systems
+  Metadata m = File.metadata("/bin/sh")?!;
+  assert(m.is_executable, "/bin/sh is executable");
+  // A regular file we create should NOT be executable
+  File.write_content("/tmp/pr_iot_mde", "e")?!;
+  Metadata m2 = File.metadata("/tmp/pr_iot_mde")?!;
+  assert(!m2.is_executable, "created file is not executable");
+  File.remove("/tmp/pr_iot_mde")?!;
+}
+
+metadata_format() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_mdfmt", "f")?!;
+  Metadata m = File.metadata("/tmp/pr_iot_mdfmt")?!;
+  // String interpolation invokes format!(Writer ~w)
+  string s = "{m}";
+  assert(s.contains("file"), "format contains kind");
+  assert(s.contains("size:"), "format contains size");
+  File.remove("/tmp/pr_iot_mdfmt")?!;
+}

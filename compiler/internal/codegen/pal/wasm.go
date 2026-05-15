@@ -276,6 +276,7 @@ func (p *WasmPAL) EmitFileWrite(module *ir.Module) *ir.Func    { return emitStub
 func (p *WasmPAL) EmitFileClose(module *ir.Module) *ir.Func    { return emitStubFileClose(module) }
 func (p *WasmPAL) EmitFileSeek(module *ir.Module) *ir.Func     { return emitStubFileSeek(module) }
 func (p *WasmPAL) EmitFileStatSize(module *ir.Module) *ir.Func { return emitStubFileStatSize(module) }
+func (p *WasmPAL) EmitFileStat(module *ir.Module) *ir.Func     { return emitStubFileStat(module) }
 func (p *WasmPAL) EmitFileRemove(module *ir.Module) *ir.Func   { return emitStubFileRemove(module) }
 func (p *WasmPAL) EmitFileExists(module *ir.Module) *ir.Func   { return emitStubFileExists(module) }
 func (p *WasmPAL) EmitFileMkdir(module *ir.Module) *ir.Func    { return emitStubFileMkdir(module) }

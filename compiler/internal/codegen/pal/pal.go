@@ -221,6 +221,13 @@ type PAL interface {
 	// EmitSocketGetLocalPort defines @pal_socket_get_local_port(i32 fd) → i32 (port or -errno)
 	// Calls getsockname, extracts port from sockaddr_in, returns in host byte order.
 	EmitSocketGetLocalPort(module *ir.Module) *ir.Func
+
+	// File metadata (D0012)
+	// EmitFileStat defines @pal_file_stat(i8* path, i64* out, i32 follow) → i32 (0 or -errno)
+	// Calls stat (follow=1) or lstat (follow=0), writes 8 normalized i64 values to out[0..7]:
+	//   out[0]=size, out[1]=mode&07777, out[2]=uid, out[3]=gid,
+	//   out[4]=mtime_ns, out[5]=atime_ns, out[6]=ctime_ns, out[7]=file_type(1/2/3/4)
+	EmitFileStat(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -1257,5 +1264,19 @@ func emitStubSocketGetLocalPort(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, -enosys))
+	return fn
+}
+
+// --- Stub file metadata implementation (D0012) ---
+
+// emitStubFileStat returns -1 (no stat support).
+func emitStubFileStat(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_stat", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("out", irtypes.NewPointer(irtypes.I64)),
+		ir.NewParam("follow", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
 	return fn
 }

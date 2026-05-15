@@ -1690,6 +1690,59 @@ func TestFileStatSizeOrderIndependent(t *testing.T) {
 	})
 }
 
+func TestFileStatPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitErrno(module)
+	fn := p.EmitFileStat(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_stat" {
+		t.Errorf("expected pal_file_stat, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_file_stat(i8* %path, i64* %out, i32 %follow)", "definition")
+	assertContains(t, out, "@stat(", "calls stat")
+	assertContains(t, out, "@lstat(", "calls lstat")
+	// Branches on follow flag
+	assertContains(t, out, "icmp ne i32 %follow", "branches on follow flag")
+	// Errno on failure
+	assertContains(t, out, "__errno_location", "reads errno on failure")
+	// Extracts fields from struct stat (GEP into i8* buffer)
+	assertContains(t, out, "getelementptr i8, i8*", "extracts struct stat fields")
+	// Permission bits mask: 0o7777 = 4095
+	assertContains(t, out, "and i64", "masks permission bits")
+	// File type detection: select-chain for reg/dir/lnk/other
+	assertContains(t, out, "select i1", "file type select chain")
+}
+
+func TestFileStatWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	p.EmitErrno(module)
+	fn := p.EmitFileStat(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_stat" {
+		t.Errorf("expected pal_file_stat, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i32 @pal_file_stat(", "definition")
+	assertContains(t, out, "@_stat64(", "calls _stat64")
+}
+
+func TestFileStatWasm(t *testing.T) {
+	module := ir.NewModule()
+	p := &WasmPAL{}
+	fn := p.EmitFileStat(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_stat" {
+		t.Errorf("expected pal_file_stat, got %s", fn.Name())
+	}
+	// Stub returns -1
+	assertContains(t, out, "ret i32 -1", "stub returns -1")
+	_ = out
+}
+
 func TestFileRemoveAllPlatforms(t *testing.T) {
 	pals := []struct {
 		name string
@@ -1912,6 +1965,7 @@ func TestForTargetFileIOInterface(t *testing.T) {
 			p.EmitFileClose(module)
 			p.EmitFileSeek(module)
 			p.EmitFileStatSize(module)
+			p.EmitFileStat(module)
 			p.EmitFileRemove(module)
 			p.EmitFileExists(module)
 			p.EmitFileMkdir(module)

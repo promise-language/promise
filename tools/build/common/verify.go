@@ -30,7 +30,7 @@ func RunVerify(root string, args []string) error {
 		switch arg {
 		case "-local", "-shared", "-wasm", "-clean", "-push":
 		default:
-			return fmt.Errorf("usage: bin/verify [-shared] [-wasm] [-clean] [-push]")
+			return fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--clean] [--push]")
 		}
 	}
 

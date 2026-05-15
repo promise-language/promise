@@ -3,10 +3,14 @@ package common
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -63,6 +67,82 @@ func checkRatchet(direction string, baseline, actual float64) bool {
 	default:
 		return true
 	}
+}
+
+// trackerHTTPClient is the HTTP client used to query tracker REST endpoints.
+var trackerHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
+// trackerURLOverride lets tests inject a tracker base URL without a .mcp.json file.
+var trackerURLOverride = ""
+
+// findTrackerURL returns the tracker base URL (with `/mcp` suffix stripped) by
+// reading `.mcp.json` at the given root. Returns "" if the file is missing or
+// does not declare a tracker server. Tests may set trackerURLOverride to bypass.
+func findTrackerURL(root string) string {
+	if trackerURLOverride != "" {
+		return trackerURLOverride
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".mcp.json"))
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			URL string `json:"url"`
+		} `json:"mcpServers"`
+	}
+	if json.Unmarshal(data, &cfg) != nil {
+		return ""
+	}
+	srv, ok := cfg.MCPServers["tracker"]
+	if !ok || srv.URL == "" {
+		return ""
+	}
+	return strings.TrimSuffix(srv.URL, "/mcp")
+}
+
+// queryGateExceptions fetches active (non-expired) exceptions for a (gate, metric)
+// pair. Returns nil on any error (fail-closed: tracker unreachable means no
+// exceptions, so regressions still fail the gate).
+func queryGateExceptions(trackerURL, gate, metric string) []GateException {
+	if trackerURL == "" {
+		return nil
+	}
+	q := url.Values{}
+	q.Set("gate", gate)
+	q.Set("metric", metric)
+	q.Set("include_expired", "false")
+	resp, err := trackerHTTPClient.Get(trackerURL + "/api/gate-exceptions?" + q.Encode())
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	var out []GateException
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return nil
+	}
+	return out
+}
+
+// matchExceptionPlatform returns true if the exception's platform field matches
+// the current OS. The "*" wildcard matches any platform.
+func matchExceptionPlatform(exceptionPlatform, currentOS string) bool {
+	return exceptionPlatform == "*" || exceptionPlatform == currentOS
+}
+
+// findMatchingException returns the first non-expired exception whose platform
+// matches currentOS, or nil if none is found.
+func findMatchingException(exceptions []GateException, currentOS string) *GateException {
+	for i := range exceptions {
+		if matchExceptionPlatform(exceptions[i].Platform, currentOS) {
+			return &exceptions[i]
+		}
+	}
+	return nil
 }
 
 // ratchetVerb returns a human-readable description of the ratchet direction.
@@ -182,17 +262,52 @@ func CheckCommitGate(root string) error {
 		}
 	}
 
-	// 6. Report regressions.
+	// 6. Consult tracker gate-exceptions, splitting regressions into excepted
+	// (covered by an active exception) and hardFailures (must fail the gate).
+	type exceptedRegression struct {
+		regression
+		exception GateException
+	}
+	var hardFailures []regression
+	var excepted []exceptedRegression
 	if len(regressions) > 0 {
-		fmt.Println("COMMIT GATE FAILED — quality regression detected:")
+		trackerURL := findTrackerURL(root)
 		for _, r := range regressions {
+			excs := queryGateExceptions(trackerURL, "commitgate", r.metric)
+			if match := findMatchingException(excs, runtime.GOOS); match != nil {
+				excepted = append(excepted, exceptedRegression{regression: r, exception: *match})
+			} else {
+				hardFailures = append(hardFailures, r)
+			}
+		}
+	}
+
+	// 7. Report excepted regressions (non-fatal warnings).
+	for _, e := range excepted {
+		ref := e.exception.BugID
+		if ref == "" {
+			ref = "no-bug"
+		}
+		reason := e.exception.Reason
+		if reason == "" {
+			reason = "no reason given"
+		}
+		fmt.Printf("commit gate: excepted regression (%s: %s):\n", ref, reason)
+		fmt.Printf("  %s: %v → %v (%s, baseline: %v)\n",
+			e.metric, e.baseline, e.actual, ratchetVerb(e.direction), e.baseline)
+	}
+
+	// 8. Report hard failures.
+	if len(hardFailures) > 0 {
+		fmt.Println("COMMIT GATE FAILED — quality regression detected:")
+		for _, r := range hardFailures {
 			fmt.Printf("  %s: %v → %v (%s, baseline: %v)\n",
 				r.metric, r.baseline, r.actual, ratchetVerb(r.direction), r.baseline)
 		}
-		return fmt.Errorf("%d metric(s) regressed", len(regressions))
+		return fmt.Errorf("%d metric(s) regressed", len(hardFailures))
 	}
 
-	// 7. Report and apply improvements.
+	// 9. Report and apply improvements.
 	if len(improvements) > 0 {
 		fmt.Println("commit gate: baselines improved:")
 		for _, imp := range improvements {
@@ -212,7 +327,7 @@ func CheckCommitGate(root string) error {
 			return fmt.Errorf("update baselines: %w", err)
 		}
 		fmt.Printf("commit gate: updated %s — stage tools/gates/baselines.json with your commit\n", baselinesFile)
-	} else {
+	} else if len(excepted) == 0 {
 		fmt.Println("commit gate: all metrics match baselines — OK")
 	}
 

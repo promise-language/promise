@@ -2,6 +2,8 @@ package common
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -328,6 +330,250 @@ func TestCheckCommitGate_UnknownValueAutoRegistered(t *testing.T) {
 	}
 	if bl.Type != "informational" {
 		t.Errorf("type = %q, want informational", bl.Type)
+	}
+}
+
+// startExceptionServer spins up an httptest server that returns the supplied
+// exceptions on /api/gate-exceptions. Cleanup resets trackerURLOverride.
+func startExceptionServer(t *testing.T, exceptions []GateException) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/gate-exceptions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(exceptions)
+	}))
+	prev := trackerURLOverride
+	trackerURLOverride = srv.URL
+	t.Cleanup(func() {
+		trackerURLOverride = prev
+		srv.Close()
+	})
+	return srv
+}
+
+func TestMatchExceptionPlatform(t *testing.T) {
+	cases := []struct {
+		excPlatform string
+		currentOS   string
+		want        bool
+	}{
+		{"darwin", "darwin", true},
+		{"linux", "darwin", false},
+		{"*", "darwin", true},
+		{"*", "linux", true},
+		{"", "darwin", false},
+	}
+	for _, c := range cases {
+		got := matchExceptionPlatform(c.excPlatform, c.currentOS)
+		if got != c.want {
+			t.Errorf("matchExceptionPlatform(%q, %q) = %v, want %v",
+				c.excPlatform, c.currentOS, got, c.want)
+		}
+	}
+}
+
+func TestCheckCommitGate_ExceptionGranted(t *testing.T) {
+	p := testPlatform()
+	startExceptionServer(t, []GateException{{
+		Gate:     "commitgate",
+		Metric:   "host_test_count",
+		Platform: runtime.GOOS,
+		BugID:    "B0123",
+		Reason:   "known regression",
+	}})
+	baselines := Baselines{
+		p: {"host_test_count": {Value: fp(100), Direction: "up", Updated: "2026-04-06"}},
+	}
+	gv := &GateValues{Values: map[string]float64{"host_test_count": 95}}
+	root := setupGateTest(t, baselines, gv)
+
+	if err := CheckCommitGate(root); err != nil {
+		t.Fatalf("expected nil error (regression excepted), got: %v", err)
+	}
+}
+
+func TestCheckCommitGate_ExceptionPlatformWildcard(t *testing.T) {
+	p := testPlatform()
+	startExceptionServer(t, []GateException{{
+		Gate:     "commitgate",
+		Metric:   "host_test_count",
+		Platform: "*",
+		BugID:    "B0124",
+		Reason:   "wildcard exception",
+	}})
+	baselines := Baselines{
+		p: {"host_test_count": {Value: fp(100), Direction: "up", Updated: "2026-04-06"}},
+	}
+	gv := &GateValues{Values: map[string]float64{"host_test_count": 90}}
+	root := setupGateTest(t, baselines, gv)
+
+	if err := CheckCommitGate(root); err != nil {
+		t.Fatalf("expected nil error (wildcard exception), got: %v", err)
+	}
+}
+
+func TestCheckCommitGate_ExceptionPlatformMismatch(t *testing.T) {
+	p := testPlatform()
+	otherOS := "linux"
+	if runtime.GOOS == "linux" {
+		otherOS = "darwin"
+	}
+	startExceptionServer(t, []GateException{{
+		Gate:     "commitgate",
+		Metric:   "host_test_count",
+		Platform: otherOS,
+		BugID:    "B0125",
+		Reason:   "wrong-platform exception",
+	}})
+	baselines := Baselines{
+		p: {"host_test_count": {Value: fp(100), Direction: "up", Updated: "2026-04-06"}},
+	}
+	gv := &GateValues{Values: map[string]float64{"host_test_count": 95}}
+	root := setupGateTest(t, baselines, gv)
+
+	if err := CheckCommitGate(root); err == nil {
+		t.Fatal("expected error (platform mismatch should NOT except), got nil")
+	}
+}
+
+func TestCheckCommitGate_TrackerUnreachable(t *testing.T) {
+	prev := trackerURLOverride
+	trackerURLOverride = ""
+	t.Cleanup(func() { trackerURLOverride = prev })
+
+	p := testPlatform()
+	baselines := Baselines{
+		p: {"host_test_count": {Value: fp(100), Direction: "up", Updated: "2026-04-06"}},
+	}
+	gv := &GateValues{Values: map[string]float64{"host_test_count": 95}}
+	root := setupGateTest(t, baselines, gv)
+
+	if err := CheckCommitGate(root); err == nil {
+		t.Fatal("expected error (no exceptions available), got nil")
+	}
+}
+
+func TestCheckCommitGate_ExceptionMixedWithHardFailure(t *testing.T) {
+	p := testPlatform()
+	// Server returns an exception only when queried for host_leak_count;
+	// for any other metric it returns an empty list.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		metric := r.URL.Query().Get("metric")
+		if metric == "host_leak_count" {
+			_ = json.NewEncoder(w).Encode([]GateException{{
+				Gate:     "commitgate",
+				Metric:   "host_leak_count",
+				Platform: runtime.GOOS,
+				BugID:    "B0126",
+				Reason:   "leak exception",
+			}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]GateException{})
+	}))
+	t.Cleanup(srv.Close)
+	prev := trackerURLOverride
+	trackerURLOverride = srv.URL
+	t.Cleanup(func() { trackerURLOverride = prev })
+
+	baselines := Baselines{
+		p: {
+			"host_leak_count": {Value: fp(0), Direction: "down", Updated: "2026-04-06"},
+			"host_test_count": {Value: fp(100), Direction: "up", Updated: "2026-04-06"},
+		},
+	}
+	gv := &GateValues{Values: map[string]float64{
+		"host_leak_count": 3,
+		"host_test_count": 80,
+	}}
+	root := setupGateTest(t, baselines, gv)
+
+	if err := CheckCommitGate(root); err == nil {
+		t.Fatal("expected error (one hard failure remains), got nil")
+	}
+}
+
+func TestFindTrackerURL_FromMcpJson(t *testing.T) {
+	prev := trackerURLOverride
+	trackerURLOverride = ""
+	t.Cleanup(func() { trackerURLOverride = prev })
+
+	root := t.TempDir()
+	mcp := `{"mcpServers":{"tracker":{"type":"http","url":"http://example.test:9121/mcp"}}}`
+	os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(mcp), 0o644)
+
+	got := findTrackerURL(root)
+	if got != "http://example.test:9121" {
+		t.Errorf("findTrackerURL = %q, want %q", got, "http://example.test:9121")
+	}
+}
+
+func TestFindTrackerURL_Missing(t *testing.T) {
+	prev := trackerURLOverride
+	trackerURLOverride = ""
+	t.Cleanup(func() { trackerURLOverride = prev })
+
+	if got := findTrackerURL(t.TempDir()); got != "" {
+		t.Errorf("findTrackerURL with no .mcp.json = %q, want empty", got)
+	}
+}
+
+func TestFindTrackerURL_MalformedJson(t *testing.T) {
+	prev := trackerURLOverride
+	trackerURLOverride = ""
+	t.Cleanup(func() { trackerURLOverride = prev })
+
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, ".mcp.json"), []byte("{not json"), 0o644)
+	if got := findTrackerURL(root); got != "" {
+		t.Errorf("findTrackerURL with malformed json = %q, want empty", got)
+	}
+}
+
+func TestFindTrackerURL_NoTrackerEntry(t *testing.T) {
+	prev := trackerURLOverride
+	trackerURLOverride = ""
+	t.Cleanup(func() { trackerURLOverride = prev })
+
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, ".mcp.json"),
+		[]byte(`{"mcpServers":{"other":{"url":"http://x/mcp"}}}`), 0o644)
+	if got := findTrackerURL(root); got != "" {
+		t.Errorf("findTrackerURL without tracker entry = %q, want empty", got)
+	}
+}
+
+func TestQueryGateExceptions_Non200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	if got := queryGateExceptions(srv.URL, "commitgate", "any"); got != nil {
+		t.Errorf("queryGateExceptions on 500 = %v, want nil", got)
+	}
+}
+
+func TestQueryGateExceptions_MalformedJson(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("not json"))
+	}))
+	t.Cleanup(srv.Close)
+	if got := queryGateExceptions(srv.URL, "commitgate", "any"); got != nil {
+		t.Errorf("queryGateExceptions on malformed json = %v, want nil", got)
+	}
+}
+
+func TestQueryGateExceptions_TransportError(t *testing.T) {
+	// Closed server URL → connection refused → http.Get returns error.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	srv.Close()
+	if got := queryGateExceptions(srv.URL, "commitgate", "any"); got != nil {
+		t.Errorf("queryGateExceptions on transport error = %v, want nil", got)
 	}
 }
 

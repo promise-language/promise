@@ -16,19 +16,20 @@ var errInterrupted = fmt.Errorf("interrupted by Ctrl+C")
 
 // RunVerify orchestrates the full pre-commit verification pipeline:
 // format → build → vet → test. All steps are internal calls (no subprocess).
-// Flags: --shared (use ~/.promise), --wasm (include wasm target), --clean (clear caches).
+// Flags: --shared (use ~/.promise), --wasm (include wasm target), --clean (clear caches), --push (git push on success).
 // Default cache is local (.promise-home/); --local is accepted for clarity.
 func RunVerify(root string, args []string) error {
 	shared := slices.Contains(args, "--shared")
 	wasm := slices.Contains(args, "--wasm")
 	clean := slices.Contains(args, "--clean")
+	push := slices.Contains(args, "--push")
 
 	// Validate args
 	for _, arg := range args {
 		switch arg {
-		case "--local", "--shared", "--wasm", "--clean":
+		case "--local", "--shared", "--wasm", "--clean", "--push":
 		default:
-			return fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--clean]")
+			return fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--clean] [--push]")
 		}
 	}
 
@@ -215,6 +216,13 @@ func RunVerify(root string, args []string) error {
 	}
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
+	}
+
+	if push {
+		fmt.Println("Pushing to remote...")
+		if err := RunIn(root, "git", "push"); err != nil {
+			return err
+		}
 	}
 
 	fmt.Println("✅ OK to commit")

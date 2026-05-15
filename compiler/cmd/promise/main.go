@@ -3430,25 +3430,102 @@ type macOSSDKInfo struct {
 	sdkVersion string // SDK version from xcrun --show-sdk-version (e.g. "15.2")
 }
 
-// findMacOSSDK discovers the macOS SDK sysroot via xcrun.
-func findMacOSSDK() (*macOSSDKInfo, error) {
-	sysroot, err := exec.Command("xcrun", "--show-sdk-path").Output()
+// bundledLibSystemTBD is a minimal hand-crafted TAPI TBD v4 stub describing
+// /usr/lib/libSystem.B.dylib with only the symbols Promise programs reference.
+// This allows linking without Xcode Command Line Tools installed. The TBD tells
+// the linker these symbols exist; at runtime dyld resolves them from the real
+// system dylib. Symbol list derived from PAL source audit + nm -u on compiled
+// binaries. (T0178)
+const bundledLibSystemTBD = `--- !tapi-tbd
+tbd-version:     4
+targets:         [ x86_64-macos, arm64-macos ]
+install-name:    '/usr/lib/libSystem.B.dylib'
+current-version: 1000
+exports:
+  - targets:     [ x86_64-macos, arm64-macos ]
+    symbols:     [ _malloc, _free, _realloc, _malloc_size, _memset, _memcpy,
+                   _memcmp, _strlen, _write, _read, _exit, __exit,
+                   _pthread_create, _pthread_join, _pthread_attr_init,
+                   _pthread_attr_destroy, _pthread_attr_setstacksize,
+                   _pthread_attr_setguardsize, _pthread_mutex_init,
+                   _pthread_mutex_lock, _pthread_mutex_unlock,
+                   _pthread_mutex_destroy, _pthread_cond_init,
+                   _pthread_cond_wait, _pthread_cond_signal,
+                   _pthread_cond_broadcast, _pthread_cond_destroy,
+                   _open, _close, _lseek, _unlink, _access, _mkdir, _rmdir,
+                   _fcntl, _opendir, _closedir, _readdir,
+                   _fork, _execvp, _dup2, _pipe, _waitpid, _kill, _getpid,
+                   _socket, _bind, _listen, _accept, _connect, _send, _recv,
+                   _shutdown, _getsockname, _getsockopt, _setsockopt,
+                   _getaddrinfo, _freeaddrinfo, _inet_pton,
+                   _signal, _sigaction, _sigaltstack,
+                   _getenv, _setenv, _unsetenv, _environ,
+                   _getcwd, _chdir, _getuid, _getpwuid, _gethostname,
+                   _sysconf, _kqueue, _kevent, _nanosleep, _usleep,
+                   _sin, _cos, _exp, _log, _pow, _sqrt, _fabs, _floor,
+                   _ceil, _round, ___error, __tlv_bootstrap,
+                   dyld_stub_binder ]
+...
+`
+
+// ensureBundledSDK writes the bundled libSystem TBD stub to the Promise cache
+// directory and returns an SDK info pointing to it. Used as fallback when
+// xcrun is unavailable (no Xcode CLT installed). (T0178)
+func ensureBundledSDK() (*macOSSDKInfo, error) {
+	home, err := module.PromiseHome()
 	if err != nil {
-		return nil, fmt.Errorf("macOS SDK not found: xcrun --show-sdk-path failed\n  install Xcode CommandLineTools: xcode-select --install")
-	}
-	sysrootPath := strings.TrimSpace(string(sysroot))
-	if sysrootPath == "" {
-		return nil, fmt.Errorf("macOS SDK not found: xcrun returned empty path\n  install Xcode CommandLineTools: xcode-select --install")
-	}
-	if _, err := os.Stat(sysrootPath); err != nil {
-		return nil, fmt.Errorf("macOS SDK path does not exist: %s\n  install Xcode CommandLineTools: xcode-select --install", sysrootPath)
+		return nil, fmt.Errorf("cannot determine Promise home: %w", err)
 	}
 
-	info := &macOSSDKInfo{sysroot: sysrootPath}
-	if sdkVer, err := exec.Command("xcrun", "--show-sdk-version").Output(); err == nil {
-		info.sdkVersion = strings.TrimSpace(string(sdkVer))
+	sdkDir := filepath.Join(home, "cache", "sdk", "macos")
+	libDir := filepath.Join(sdkDir, "usr", "lib")
+	tbdPath := filepath.Join(libDir, "libSystem.B.tbd")
+	symlinkPath := filepath.Join(libDir, "libSystem.tbd")
+
+	// Create directory structure.
+	if err := os.MkdirAll(libDir, 0755); err != nil {
+		return nil, fmt.Errorf("cannot create bundled SDK directory: %w", err)
 	}
-	return info, nil
+
+	// Write TBD file (skip if already exists with correct size).
+	content := []byte(bundledLibSystemTBD)
+	if info, err := os.Stat(tbdPath); err != nil || info.Size() != int64(len(content)) {
+		if err := os.WriteFile(tbdPath, content, 0644); err != nil {
+			return nil, fmt.Errorf("cannot write bundled libSystem.tbd: %w", err)
+		}
+	}
+
+	// Create symlink libSystem.tbd → libSystem.B.tbd (ld64.lld resolves -lSystem
+	// to libSystem.tbd in the sysroot).
+	if _, err := os.Lstat(symlinkPath); err != nil {
+		if err := os.Symlink("libSystem.B.tbd", symlinkPath); err != nil {
+			return nil, fmt.Errorf("cannot create libSystem.tbd symlink: %w", err)
+		}
+	}
+
+	return &macOSSDKInfo{sysroot: sdkDir}, nil
+}
+
+// findMacOSSDK discovers the macOS SDK sysroot. First tries xcrun (fast path
+// when Xcode CLT is installed), then falls back to bundled libSystem TBD
+// stubs so linking works without any external SDK. (T0178)
+func findMacOSSDK() (*macOSSDKInfo, error) {
+	// 1. Try xcrun (fast path — CLT installed).
+	if sysroot, err := exec.Command("xcrun", "--show-sdk-path").Output(); err == nil {
+		sysrootPath := strings.TrimSpace(string(sysroot))
+		if sysrootPath != "" {
+			if _, err := os.Stat(sysrootPath); err == nil {
+				info := &macOSSDKInfo{sysroot: sysrootPath}
+				if sdkVer, err := exec.Command("xcrun", "--show-sdk-version").Output(); err == nil {
+					info.sdkVersion = strings.TrimSpace(string(sdkVer))
+				}
+				return info, nil
+			}
+		}
+	}
+
+	// 2. Fall back to bundled SDK stubs.
+	return ensureBundledSDK()
 }
 
 // darwinTripleInfo holds parsed components of a macOS target triple.

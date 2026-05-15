@@ -1,0 +1,4 @@
+// Size canary: minimal runtime. Just print_line — measures base WASM overhead.
+main() {
+  print_line("hello");
+}

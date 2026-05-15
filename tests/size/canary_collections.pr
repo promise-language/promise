@@ -1,0 +1,16 @@
+// Size canary: collections. Measures vector, map, and generics monomorphization cost.
+main() {
+  int[] nums = [1, 2, 3, 4, 5];
+  nums.push(6);
+  int sum = 0;
+  for n in nums {
+    sum += n;
+  }
+
+  map[string, int] scores = {
+    "alice": 95, "bob": 87
+  };
+  scores["charlie"] = 92;
+
+  print_line("{sum} {scores.len}");
+}

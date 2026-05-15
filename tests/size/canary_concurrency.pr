@@ -1,0 +1,16 @@
+// Size canary: concurrency. Measures scheduler and channel inclusion cost.
+main() {
+  ch := channel[int](capacity: 5);
+  go {
+    for i in 0..5 {
+      ch.send(i);
+    }
+    ch.close();
+  };
+
+  int sum = 0;
+  for val in ch {
+    sum += val;
+  }
+  print_line("{sum}");
+}

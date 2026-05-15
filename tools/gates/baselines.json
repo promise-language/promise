@@ -44,6 +44,24 @@
       "value": 0,
       "direction": "exact",
       "updated": "2026-04-06"
+    },
+    "wasm_size_minimal": {
+      "direction": "down"
+    },
+    "wasm_size_strings": {
+      "direction": "down"
+    },
+    "wasm_size_collections": {
+      "direction": "down"
+    },
+    "wasm_size_concurrency": {
+      "direction": "down"
+    },
+    "wasm_size_full": {
+      "direction": "down"
+    },
+    "wasm_size_total": {
+      "direction": "down"
     }
   },
   "linux-amd64": {
@@ -91,6 +109,24 @@
       "value": 0,
       "direction": "exact",
       "updated": "2026-04-06"
+    },
+    "wasm_size_minimal": {
+      "direction": "down"
+    },
+    "wasm_size_strings": {
+      "direction": "down"
+    },
+    "wasm_size_collections": {
+      "direction": "down"
+    },
+    "wasm_size_concurrency": {
+      "direction": "down"
+    },
+    "wasm_size_full": {
+      "direction": "down"
+    },
+    "wasm_size_total": {
+      "direction": "down"
     }
   },
   "windows-amd64": {
@@ -110,6 +146,24 @@
       "type": "informational"
     },
     "wasm_test_failures": {
+      "type": "informational"
+    },
+    "wasm_size_minimal": {
+      "type": "informational"
+    },
+    "wasm_size_strings": {
+      "type": "informational"
+    },
+    "wasm_size_collections": {
+      "type": "informational"
+    },
+    "wasm_size_concurrency": {
+      "type": "informational"
+    },
+    "wasm_size_full": {
+      "type": "informational"
+    },
+    "wasm_size_total": {
       "type": "informational"
     }
   }

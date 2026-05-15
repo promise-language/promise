@@ -1,0 +1,10 @@
+// Size canary: string operations. Measures string stdlib inclusion cost.
+main() {
+  s := "hello world";
+  parts := s.split(" ");
+  upper := parts[0].to_upper();
+  has := s.contains("world");
+  replaced := s.replace("hello", "hi");
+  trimmed := "  padded  ".trim();
+  print_line("{upper} {has} {replaced} {trimmed}");
+}

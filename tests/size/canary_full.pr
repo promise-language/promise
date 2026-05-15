@@ -1,0 +1,35 @@
+// Size canary: broad stdlib usage. Exercises strings, math, formatting, collections,
+// and iteration — worst-case size without concurrency (vector + channel combo
+// triggers B0261 on WASM).
+main() {
+  // Strings
+  s := "hello world";
+  parts := s.split(" ");
+  upper := parts[0].to_upper();
+
+  // Collections
+  int[] nums = [10, 3, 7, 1, 5];
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
+  m["c"] = 3;
+
+  // Math
+  x := max(10, 20);
+  y := min(5, 3);
+  z := abs(-7);
+
+  // Formatting
+  b := Builder();
+  b.write_string("result: ");
+  b.write_string("{x},{y},{z}");
+  result := b.to_string();
+
+  // Range and iteration
+  int sum = 0;
+  for n in nums {
+    sum += n;
+  }
+
+  print_line("{result} sum={sum} upper={upper} parts={parts.len} map={m.len}");
+}

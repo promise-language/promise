@@ -83,6 +83,17 @@ func TestRunGate_StressBadFlag(t *testing.T) {
 	}
 }
 
+// TestRunGate_WasmSizeBadFlag verifies that unrecognized flags are rejected for wasm-size.
+func TestRunGate_WasmSizeBadFlag(t *testing.T) {
+	err := RunGate("", []string{"wasm-size", "--bogus"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "usage") {
+		t.Errorf("error %q does not contain 'usage'", err.Error())
+	}
+}
+
 // TestRunGate_CoverageBadFlag verifies that unrecognized flags are rejected.
 func TestRunGate_CoverageBadFlag(t *testing.T) {
 	err := RunGate("", []string{"coverage", "--bogus"})

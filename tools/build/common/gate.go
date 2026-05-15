@@ -38,20 +38,21 @@ func RunGate(root string, args []string) error {
 // runGateTest runs Promise tests and writes structured JSON gate values to stdout.
 // Test progress is written to stderr so stdout is clean JSON.
 func runGateTest(root string, args []string) error {
-	wasm := slices.Contains(args, "--wasm")
-	shared := slices.Contains(args, "--shared")
+	args = NormalizeArgs(args)
+	wasm := slices.Contains(args, "-wasm")
+	shared := slices.Contains(args, "-shared")
 
 	for _, arg := range args {
 		switch arg {
-		case "--wasm", "--shared", "--local":
+		case "-wasm", "-shared", "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate test [--wasm] [--shared]")
+			return fmt.Errorf("usage: bin/gate test [-wasm] [-shared]")
 		}
 	}
 
 	// Fail fast on missing wasmtime before running any tests.
 	if wasm && Which("wasmtime") == "" {
-		return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
+		return fmt.Errorf("wasmtime not found — install with: bin/prereqs -wasm")
 	}
 
 	if !shared {
@@ -134,18 +135,19 @@ func runGateTest(root string, args []string) error {
 // runGateWasmTests runs only WASM target tests and writes structured JSON gate values to stdout.
 // Unlike "test --wasm", this does not run host-target tests.
 func runGateWasmTests(root string, args []string) error {
-	shared := slices.Contains(args, "--shared")
+	args = NormalizeArgs(args)
+	shared := slices.Contains(args, "-shared")
 
 	for _, arg := range args {
 		switch arg {
-		case "--shared", "--local":
+		case "-shared", "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate wasm-test [--shared]")
+			return fmt.Errorf("usage: bin/gate wasm-test [-shared]")
 		}
 	}
 
 	if Which("wasmtime") == "" {
-		return fmt.Errorf("wasmtime not found — install with: bin/prereqs --wasm")
+		return fmt.Errorf("wasmtime not found — install with: bin/prereqs -wasm")
 	}
 
 	if !shared {
@@ -206,13 +208,14 @@ func runGateWasmTests(root string, args []string) error {
 
 // runGateGoTest runs Go unit tests and writes structured JSON gate values to stdout.
 func runGateGoTest(root string, args []string) error {
-	shared := slices.Contains(args, "--shared")
+	args = NormalizeArgs(args)
+	shared := slices.Contains(args, "-shared")
 
 	for _, arg := range args {
 		switch arg {
-		case "--shared", "--local":
+		case "-shared", "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate go-test [--shared]")
+			return fmt.Errorf("usage: bin/gate go-test [-shared]")
 		}
 	}
 
@@ -326,13 +329,14 @@ func runGateStress(root string, args []string) error {
 
 // runGateCoverage runs Go and Promise coverage analysis and writes structured JSON gate values.
 func runGateCoverage(root string, args []string) error {
-	shared := slices.Contains(args, "--shared")
+	args = NormalizeArgs(args)
+	shared := slices.Contains(args, "-shared")
 
 	for _, arg := range args {
 		switch arg {
-		case "--shared", "--local":
+		case "-shared", "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate coverage [--shared]")
+			return fmt.Errorf("usage: bin/gate coverage [-shared]")
 		}
 	}
 

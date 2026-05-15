@@ -44,7 +44,7 @@ func runDoc(args []string) {
 			}
 			i++
 			outputFile = args[i]
-		case "--help", "-help", "-h":
+		case "-help", "-h":
 			printDocUsage(os.Stderr)
 			os.Exit(0)
 		default:

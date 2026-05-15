@@ -9,28 +9,29 @@ import (
 
 // RunTest builds the compiler and runs test suites.
 // Modes: "go" (Go unit tests), "promise" (Promise tests), "all" (default).
-// Flags: --shared (use ~/.promise), --wasm (include wasm32-wasi), --clean (clear caches first).
-// Default cache is local (.promise-home/); --local is accepted for clarity.
+// Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi), -clean (clear caches first).
+// Default cache is local (.promise-home/); -local is accepted for clarity.
 func RunTest(root string, args []string) error {
 	start := time.Now()
+	args = NormalizeArgs(args)
 
 	suite := "all"
-	shared := slices.Contains(args, "--shared")
-	wasm := slices.Contains(args, "--wasm")
-	clean := slices.Contains(args, "--clean")
+	shared := slices.Contains(args, "-shared")
+	wasm := slices.Contains(args, "-wasm")
+	clean := slices.Contains(args, "-clean")
 
 	for _, arg := range args {
 		switch arg {
 		case "go", "promise", "all":
 			suite = arg
-		case "--local", "--shared", "--wasm", "--clean":
+		case "-local", "-shared", "-wasm", "-clean":
 			// already handled
 		default:
-			return fmt.Errorf("usage: bin/test [go|promise|all] [--shared] [--wasm] [--clean]")
+			return fmt.Errorf("usage: bin/test [go|promise|all] [-shared] [-wasm] [-clean]")
 		}
 	}
 
-	// Default to local cache; --shared opts into ~/.promise
+	// Default to local cache; -shared opts into ~/.promise
 	if !shared {
 		if err := SetupLocalCache(root); err != nil {
 			return fmt.Errorf("setup local cache: %w", err)

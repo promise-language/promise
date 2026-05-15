@@ -18,16 +18,16 @@ func runFmt(args []string) {
 
 	for _, arg := range args {
 		switch arg {
-		case "--check":
+		case "-check":
 			check = true
-		case "--diff":
+		case "-diff":
 			showDiff = true
 		default:
 			files = append(files, arg)
 		}
 	}
 
-	// --check and --diff are read-only modes
+	// -check and -diff are read-only modes
 	if check || showDiff {
 		writeInPlace = false
 	}

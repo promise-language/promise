@@ -56,8 +56,9 @@ func main() {
 		return
 	}
 
-	// Quick up-to-date check (skip with --force)
-	force := slices.Contains(os.Args[1:], "--force")
+	// Quick up-to-date check (skip with -force)
+	args := common.NormalizeArgs(os.Args[1:])
+	force := slices.Contains(args, "-force")
 	hashFile := filepath.Join(binDir, ".tools.hash")
 	if !force {
 		if stored, err := os.ReadFile(hashFile); err == nil {

@@ -26,14 +26,14 @@ func runExamples(args []string) {
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--help", "-help":
+		case "-help":
 			showHelp = true
-		case "--dir":
+		case "-dir":
 			showDir = true
-		case "--run":
+		case "-run":
 			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "error: --run requires an example name")
-				fmt.Fprintln(os.Stderr, "usage: promise examples --run <name>")
+				fmt.Fprintln(os.Stderr, "error: -run requires an example name")
+				fmt.Fprintln(os.Stderr, "usage: promise examples -run <name>")
 				os.Exit(1)
 			}
 			i++
@@ -197,7 +197,7 @@ func listExamples() {
 		}
 	}
 
-	fmt.Printf("\nUse 'promise examples <name>' to view source, 'promise examples --run <name>' to run.\n")
+	fmt.Printf("\nUse 'promise examples <name>' to view source, 'promise examples -run <name>' to run.\n")
 }
 
 // categoryDisplayName converts "01_basics" to "Basics", "07_concurrency" to "Concurrency", etc.
@@ -387,19 +387,19 @@ Browse and run example programs.
 Commands:
   promise examples              List all examples with descriptions
   promise examples <name>       Print the source of an example
-  promise examples --run <name> Run an example directly
-  promise examples --dir        Print path to extracted examples directory
+  promise examples -run <name>  Run an example directly
+  promise examples -dir         Print path to extracted examples directory
 
 Options:
-  --run <name>   Run an example program
-  --dir          Print extracted examples directory path
-  --help         Show this help
+  -run <name>    Run an example program
+  -dir           Print extracted examples directory path
+  -help          Show this help
 
 Examples:
   promise examples                       List all available examples
   promise examples hello                 View the hello world example
-  promise examples --run hello           Run the hello world example
-  promise examples --run channels        Run the channels concurrency example
-  promise examples --dir                 Get path for file-based access
+  promise examples -run hello            Run the hello world example
+  promise examples -run channels         Run the channels concurrency example
+  promise examples -dir                  Get path for file-based access
 `)
 }

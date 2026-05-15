@@ -188,13 +188,13 @@ func TestParseRunArgs(t *testing.T) {
 		},
 		{
 			name:         "target flag consumed before filename",
-			args:         []string{"--target", "wasm32-wasi", "main.pr"},
+			args:         []string{"-target", "wasm32-wasi", "main.pr"},
 			wantFilename: "main.pr",
 			wantTarget:   "wasm32-wasi",
 		},
 		{
 			name:            "release flag",
-			args:            []string{"--release", "main.pr"},
+			args:            []string{"-release", "main.pr"},
 			wantFilename:    "main.pr",
 			wantReleaseMode: true,
 		},
@@ -205,7 +205,7 @@ func TestParseRunArgs(t *testing.T) {
 		},
 		{
 			name:         "flags interleaved with filename",
-			args:         []string{"main.pr", "--target", "x86_64-unknown-linux-gnu"},
+			args:         []string{"main.pr", "-target", "x86_64-unknown-linux-gnu"},
 			wantFilename: "main.pr",
 			wantTarget:   "x86_64-unknown-linux-gnu",
 		},

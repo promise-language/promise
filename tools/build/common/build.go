@@ -15,25 +15,26 @@ import (
 // RunBuild executes the full compiler build pipeline.
 // This is the main implementation — called by bin/build and internally
 // by other tools (e.g., verify, test) without spawning a subprocess.
-// Flags: --release, --generate, --shared (use ~/.promise), --local (default, no-op).
+// Flags: -release, -generate, -shared (use ~/.promise), -local (default, no-op).
 func RunBuild(root string, args []string) error {
 	start := time.Now()
-	release := slices.Contains(args, "--release")
-	generate := slices.Contains(args, "--generate")
+	args = NormalizeArgs(args)
+	release := slices.Contains(args, "-release")
+	generate := slices.Contains(args, "-generate")
 
-	// Validate flags (--local/--shared accepted for CLI consistency)
+	// Validate flags (-local/-shared accepted for CLI consistency)
 	for _, arg := range args {
 		switch arg {
-		case "--release", "--generate", "--local", "--shared":
+		case "-release", "-generate", "-local", "-shared":
 		default:
-			return fmt.Errorf("usage: bin/build [--release] [--generate] [--shared]")
+			return fmt.Errorf("usage: bin/build [-release] [-generate] [-shared]")
 		}
 	}
 
 	// Default to local cache when called as CLI (args != nil).
 	// When called internally by verify/test (args == nil), caller handles cache.
 	if args != nil {
-		shared := slices.Contains(args, "--shared")
+		shared := slices.Contains(args, "-shared")
 		if !shared {
 			if err := SetupLocalCache(root); err != nil {
 				return fmt.Errorf("setup local cache: %w", err)
@@ -96,7 +97,7 @@ func RunBuild(root string, args []string) error {
 	buildTags := ""
 	if release {
 		if IsWindows() {
-			return fmt.Errorf("--release builds are not supported on Windows (no LLVM embedding support)")
+			return fmt.Errorf("-release builds are not supported on Windows (no LLVM embedding support)")
 		}
 		fmt.Println("Bundling LLVM tools for release...")
 		if err := BundleLLVM(root, llvm); err != nil {

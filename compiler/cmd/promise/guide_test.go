@@ -59,7 +59,7 @@ func TestRunGuideDefault(t *testing.T) {
 
 func TestRunGuideSection(t *testing.T) {
 	output := captureStdout(t, func() {
-		runGuide([]string{"--section", "basics"})
+		runGuide([]string{"-section", "basics"})
 	})
 
 	if !strings.Contains(output, "## Basics") {
@@ -73,7 +73,7 @@ func TestRunGuideSection(t *testing.T) {
 
 func TestRunGuideSectionHyphenated(t *testing.T) {
 	output := captureStdout(t, func() {
-		runGuide([]string{"--section", "error-handling"})
+		runGuide([]string{"-section", "error-handling"})
 	})
 
 	if !strings.Contains(output, "## Error Handling") {
@@ -83,13 +83,13 @@ func TestRunGuideSectionHyphenated(t *testing.T) {
 
 func TestRunGuideHelp(t *testing.T) {
 	output := captureStdout(t, func() {
-		runGuide([]string{"--help"})
+		runGuide([]string{"-help"})
 	})
 
 	for _, want := range []string{
-		"--section",
-		"--path",
-		"--install",
+		"-section",
+		"-path",
+		"-install",
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("guide help missing %q", want)

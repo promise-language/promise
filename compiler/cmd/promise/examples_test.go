@@ -58,12 +58,12 @@ func TestRunExamplesViewSource(t *testing.T) {
 
 func TestRunExamplesHelp(t *testing.T) {
 	output := captureStdout(t, func() {
-		runExamples([]string{"--help"})
+		runExamples([]string{"-help"})
 	})
 
 	for _, want := range []string{
-		"--run",
-		"--dir",
+		"-run",
+		"-dir",
 		"promise examples",
 	} {
 		if !strings.Contains(output, want) {

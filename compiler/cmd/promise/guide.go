@@ -15,16 +15,16 @@ func runGuide(args []string) {
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--help", "-help":
+		case "-help":
 			showHelp = true
-		case "--path":
+		case "-path":
 			showPath = true
-		case "--install":
+		case "-install":
 			install = true
-		case "--section":
+		case "-section":
 			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "error: --section requires a section name")
-				fmt.Fprintln(os.Stderr, "usage: promise guide --section <name>")
+				fmt.Fprintln(os.Stderr, "error: -section requires a section name")
+				fmt.Fprintln(os.Stderr, "usage: promise guide -section <name>")
 				fmt.Fprintln(os.Stderr, "\nAvailable sections:")
 				printSectionList()
 				os.Exit(1)
@@ -182,7 +182,7 @@ func listSections() []string {
 func printSectionList() {
 	for _, s := range listSections() {
 		slug := sectionSlug(s)
-		fmt.Fprintf(os.Stderr, "  %-30s  (--section %s)\n", s, slug)
+		fmt.Fprintf(os.Stderr, "  %-30s  (-section %s)\n", s, slug)
 	}
 }
 
@@ -192,15 +192,15 @@ func printGuideUsage() {
 Print the Promise language reference guide.
 
 Options:
-  --section <name>   Print a single section (e.g., --section error-handling)
-  --path             Print path to installed guide file
-  --install          Extract guide to ~/.promise/docs/
-  --help             Show this help
+  -section <name>    Print a single section (e.g., -section error-handling)
+  -path              Print path to installed guide file
+  -install           Extract guide to ~/.promise/docs/
+  -help              Show this help
 
 Examples:
   promise guide                          Full guide to stdout
-  promise guide --section basics         Just the Basics section
-  promise guide --section error-handling Error handling reference
-  promise guide --path                   Path for file-based access
+  promise guide -section basics          Just the Basics section
+  promise guide -section error-handling  Error handling reference
+  promise guide -path                    Path for file-based access
 `)
 }

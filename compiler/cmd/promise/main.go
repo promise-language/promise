@@ -32,6 +32,31 @@ import (
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
+// normalizeArgs canonicalizes CLI flag arguments so that both -/-- prefixes
+// resolve identically, and =/: value separators are accepted alongside spaces.
+// See NormalizeArgs in tools/build/common/args.go for the canonical implementation.
+func normalizeArgs(args []string) []string {
+	if args == nil {
+		return nil
+	}
+	var result []string
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
+			result = append(result, arg)
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			arg = "-" + arg[2:]
+		}
+		if idx := strings.IndexAny(arg[1:], "=:"); idx >= 0 {
+			result = append(result, arg[:idx+1], arg[idx+2:])
+		} else {
+			result = append(result, arg)
+		}
+	}
+	return result
+}
+
 // version is set at build time via -ldflags. Format: "<epoch>-<gitsha7>" for dev
 // builds, "<epoch>" for release builds. Falls back to embedded catalog epoch.
 var version string
@@ -110,7 +135,7 @@ Commands:
   pin       Pin a remote module to a specific commit
   catalog   Catalog operations (list)
   format    Format Promise source files
-  clean     Remove build cache (--global also clears module cache)
+  clean     Remove build cache (-global also clears module cache)
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
   sync      Download and install a compiler epoch from GitHub releases
   epochs    List installed epochs
@@ -120,8 +145,8 @@ Commands:
 
 Options (build):
   -o <output>   Output file name (default: input file without extension)
-  --debug       Debug build (default) — poison-fills freed memory for UAF detection
-  --release     Release build — platform-default free behavior, no debug overhead
+  -debug        Debug build (default) — poison-fills freed memory for UAF detection
+  -release      Release build — platform-default free behavior, no debug overhead
 
 Options (doc):
   -public         Show only public symbols (default)
@@ -130,8 +155,8 @@ Options (doc):
   -o <output>     Write output to file instead of stdout
 
 Options (format):
-  --check       Check formatting without writing (exit 1 if unformatted)
-  --diff        Show diff of changes without writing
+  -check        Check formatting without writing (exit 1 if unformatted)
+  -diff         Show diff of changes without writing
 
 Options (test):
   -timeout <duration>   Per-test timeout (default: 60s)
@@ -187,14 +212,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Normalize all args: --flag → -flag, -flag=val → ["-flag", "val"].
+	os.Args = append(os.Args[:1], normalizeArgs(os.Args[1:])...)
 	cmd := os.Args[1]
 
-	// --version / --help flags (before legacy dispatch).
-	if cmd == "--version" {
+	// -version / -help flags (before legacy dispatch).
+	if cmd == "-version" {
 		printVersion()
 		return
 	}
-	if cmd == "--help" || cmd == "-help" {
+	if cmd == "-help" {
 		printHelp()
 		return
 	}
@@ -235,7 +262,7 @@ func main() {
 			len(info.Types), len(info.Objects), len(info.Scopes))
 	case "emit-ir":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: promise emit-ir [--target triple] <file.pr>")
+			fmt.Fprintln(os.Stderr, "usage: promise emit-ir [-target triple] <file.pr>")
 			os.Exit(1)
 		}
 		runEmitIR(os.Args[2:])
@@ -344,7 +371,7 @@ func runEmitIR(args []string) {
 	var filename, target string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "-target", "--target":
+		case "-target":
 			if i+1 < len(args) {
 				target = args[i+1]
 				i++
@@ -354,7 +381,7 @@ func runEmitIR(args []string) {
 		}
 	}
 	if filename == "" {
-		fmt.Fprintln(os.Stderr, "usage: promise emit-ir [--target triple] <file.pr>")
+		fmt.Fprintln(os.Stderr, "usage: promise emit-ir [-target triple] <file.pr>")
 		os.Exit(1)
 	}
 	file, info := compileFrontend(filename)
@@ -444,16 +471,16 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 				outputFile = args[i+1]
 				i++
 			}
-		case "-target", "--target":
+		case "-target":
 			if i+1 < len(args) {
 				target = args[i+1]
 				i++
 			}
-		case "--debug":
+		case "-debug":
 			debugMode = true
-		case "--release":
+		case "-release":
 			releaseMode = true
-		case "--time-phases":
+		case "-time-phases":
 			timePhases = true
 		default:
 			filename = args[i]
@@ -461,7 +488,7 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 	}
 
 	if debugMode && releaseMode {
-		fmt.Fprintln(os.Stderr, "error: --debug and --release are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "error: -debug and -release are mutually exclusive")
 		os.Exit(1)
 	}
 
@@ -498,7 +525,7 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 	}
 
 	// Default to debug mode (poison-fill freed memory for UAF detection).
-	// Use --release for production builds with platform-default free behavior.
+	// Use -release for production builds with platform-default free behavior.
 	debugFree := !releaseMode
 
 	var compileStart time.Time
@@ -557,15 +584,15 @@ func parseRunArgs(args []string) (filename, target string, releaseMode bool) {
 			if i+1 < len(args) {
 				i++
 			}
-		case "-target", "--target":
+		case "-target":
 			if i+1 < len(args) {
 				target = args[i+1]
 				i++
 			}
-		case "--release":
+		case "-release":
 			releaseMode = true
-		case "--debug", "--time-phases":
-			// no-op for cache key: --debug is default; --time-phases doesn't affect output
+		case "-debug", "-time-phases":
+			// no-op for cache key: -debug is default; -time-phases doesn't affect output
 		default:
 			filename = args[i]
 		}
@@ -798,7 +825,7 @@ func runTest(args []string) {
 			}
 			parallel = n
 			i++
-		} else if (args[i] == "-target" || args[i] == "--target") && i+1 < len(args) {
+		} else if args[i] == "-target" && i+1 < len(args) {
 			targetTriple = args[i+1]
 			i++
 		} else if args[i] == "-stress" {
@@ -828,7 +855,7 @@ func runTest(args []string) {
 			i++
 		} else if args[i] == "-coverage" {
 			coverageMode = true
-		} else if args[i] == "--time-phases" {
+		} else if args[i] == "-time-phases" {
 			timePhases = true
 		} else {
 			remaining = append(remaining, args[i])
@@ -836,7 +863,7 @@ func runTest(args []string) {
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-compile-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] [--time-phases] <file.pr | dir | dir/...> ...")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-compile-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] [-time-phases] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
 
@@ -1715,13 +1742,13 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				testArgs = append(testArgs, "-timeout-max", cfg.max.String())
 			}
 			if targetTriple != "" {
-				testArgs = append(testArgs, "--target", targetTriple)
+				testArgs = append(testArgs, "-target", targetTriple)
 			}
 			if coverageMode {
 				testArgs = append(testArgs, "-coverage")
 			}
 			if timePhases {
-				testArgs = append(testArgs, "--time-phases")
+				testArgs = append(testArgs, "-time-phases")
 			}
 			if cfg.compileTimeout != 10*time.Minute {
 				testArgs = append(testArgs, "-compile-timeout", cfg.compileTimeout.String())
@@ -5883,10 +5910,10 @@ func runExec(args []string) {
 			}
 			timeout = d
 			i++
-		} else if (args[i] == "-target" || args[i] == "--target") && i+1 < len(args) {
+		} else if args[i] == "-target" && i+1 < len(args) {
 			target = args[i+1]
 			i++
-		} else if args[i] == "--time-phases" {
+		} else if args[i] == "-time-phases" {
 			timePhases = true
 		} else {
 			remaining = append(remaining, args[i])
@@ -6309,19 +6336,19 @@ func runClean(args []string) {
 	epochs := false
 	for _, a := range args {
 		switch a {
-		case "--global":
+		case "-global":
 			global = true
-		case "--epochs":
+		case "-epochs":
 			epochs = true
 		default:
-			fmt.Fprintf(os.Stderr, "usage: promise clean [--global] [--epochs]\n")
+			fmt.Fprintf(os.Stderr, "usage: promise clean [-global] [-epochs]\n")
 			os.Exit(1)
 		}
 	}
 
-	// --epochs is an alias for `promise remove --all-except-active`.
+	// -epochs is an alias for `promise remove -all-except-active`.
 	if epochs {
-		runRemove([]string{"--all-except-active"})
+		runRemove([]string{"-all-except-active"})
 	}
 
 	// Serialize with concurrent test/build operations.
@@ -6502,13 +6529,13 @@ value := try_thing() ? { fallback(); };  # catch with recovery block
 }
 
 func runInstall(args []string) {
-	// Parse --dev flag: install into epochs/dev/ instead of epochs/<epoch>/
+	// Parse -dev flag: install into epochs/dev/ instead of epochs/<epoch>/
 	devMode := false
 	for _, arg := range args {
-		if arg == "--dev" {
+		if arg == "-dev" {
 			devMode = true
 		} else {
-			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise install [--dev]\n", arg)
+			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise install [-dev]\n", arg)
 			os.Exit(1)
 		}
 	}
@@ -6731,13 +6758,13 @@ func runRemove(args []string) {
 	var targets []string
 	for _, arg := range args {
 		switch arg {
-		case "--force":
+		case "-force":
 			force = true
-		case "--all-except-active":
+		case "-all-except-active":
 			allExceptActive = true
 		default:
 			if strings.HasPrefix(arg, "-") {
-				fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise remove <epoch> [--force]\n       promise remove --all-except-active\n", arg)
+				fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise remove <epoch> [-force]\n       promise remove -all-except-active\n", arg)
 				os.Exit(1)
 			}
 			targets = append(targets, arg)
@@ -6745,7 +6772,7 @@ func runRemove(args []string) {
 	}
 
 	if !allExceptActive && len(targets) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: promise remove <epoch> [--force]\n       promise remove --all-except-active")
+		fmt.Fprintln(os.Stderr, "usage: promise remove <epoch> [-force]\n       promise remove -all-except-active")
 		os.Exit(1)
 	}
 
@@ -6771,7 +6798,7 @@ func runRemove(args []string) {
 
 	for _, epoch := range targets {
 		if epoch == active && !force {
-			fmt.Fprintf(os.Stderr, "error: %q is the active epoch. Use --force to remove it.\n", epoch)
+			fmt.Fprintf(os.Stderr, "error: %q is the active epoch. Use -force to remove it.\n", epoch)
 			os.Exit(1)
 		}
 		epochDir, err := module.EpochDir(epoch)

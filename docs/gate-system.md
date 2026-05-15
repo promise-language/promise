@@ -222,7 +222,7 @@ The tracker knows each agent's OS and idle status, dispatching to the right targ
 2. Tracker creates platform gate runs for each required platform
 3. Tracker dispatches to idle agents on target platforms:
    - Linux agent: `git pull && bin/verify`
-   - Windows agent: `git pull && bin\verify.ps1`
+   - Windows agent: `git pull && bin\verify.exe --wasm`
 4. Agent runner executes command, returns stdout/stderr to tracker
 5. Tracker parses result, updates gate status
 6. If failure: tracker creates a bug, tags with `gate,platform,<platform>`

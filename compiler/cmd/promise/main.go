@@ -5767,6 +5767,108 @@ func extractUseDecls(source string) (string, string) {
 	return strings.Join(uses, "\n"), strings.TrimSpace(rest)
 }
 
+// findLeadingUseBindings walks tokens from the start, collecting every IDENT
+// that appears inside a leading `use ... ;` declaration. Stops at the first
+// non-USE token. Matches extractUseDecls' leading-only semantics so that names
+// bound via `use math;`, `use math as m;`, `use x "./x";`, etc. are all captured.
+func findLeadingUseBindings(tokens []antlr.Token) map[string]bool {
+	bindings := make(map[string]bool)
+	i := 0
+	for i < len(tokens) && tokens[i].GetTokenType() == parser.PromiseLexerUSE {
+		i++ // past USE
+		for i < len(tokens) && tokens[i].GetTokenType() != parser.PromiseLexerSEMI {
+			if tokens[i].GetTokenType() == parser.PromiseLexerIDENT {
+				bindings[tokens[i].GetText()] = true
+			}
+			i++
+		}
+		if i < len(tokens) { // past SEMI
+			i++
+		}
+	}
+	return bindings
+}
+
+// findCatalogRefs scans tokens for `IDENT .` patterns (not preceded by `.`)
+// where IDENT matches a catalog module name. Returns the set of referenced
+// catalog module names. Excludes std (auto-imported elsewhere) and non-embedded
+// entries (avoids silent network fetches during exec).
+func findCatalogRefs(tokens []antlr.Token, catalog *module.Catalog) map[string]bool {
+	if catalog == nil {
+		return nil
+	}
+	valid := make(map[string]bool)
+	for name, entry := range catalog.Modules {
+		if name == "std" || !entry.IsEmbedded() {
+			continue
+		}
+		valid[name] = true
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+	refs := make(map[string]bool)
+	for i := 0; i+1 < len(tokens); i++ {
+		if tokens[i].GetTokenType() != parser.PromiseLexerIDENT {
+			continue
+		}
+		if tokens[i+1].GetTokenType() != parser.PromiseLexerDOT {
+			continue
+		}
+		if i > 0 && tokens[i-1].GetTokenType() == parser.PromiseLexerDOT {
+			continue
+		}
+		if valid[tokens[i].GetText()] {
+			refs[tokens[i].GetText()] = true
+		}
+	}
+	return refs
+}
+
+// autoInjectCatalogUses prepends `use <name>;` declarations for each catalog
+// module referenced via `name.X` member access but not already explicitly
+// imported. No-op when the catalog is unavailable or nothing is missing.
+// Token-level detection runs on the raw source before parsing, so it works
+// regardless of whether the snippet parses as a full file or needs `main!()`
+// wrapping. Known limitation: refs inside string interpolations (`"{io.x}"`)
+// are not detected — the user must add an explicit `use` in that case.
+func autoInjectCatalogUses(source string) string {
+	if len(embeddedCatalog) == 0 {
+		return source
+	}
+	cat, err := module.ParseCatalog(embeddedCatalog)
+	if err != nil || cat == nil {
+		return source
+	}
+	input := antlr.NewInputStream(source)
+	lex := parser.NewPromiseLexer(input)
+	lex.RemoveErrorListeners()
+	tokens := lex.GetAllTokens()
+	refs := findCatalogRefs(tokens, cat)
+	if len(refs) == 0 {
+		return source
+	}
+	bound := findLeadingUseBindings(tokens)
+	var missing []string
+	for name := range refs {
+		if !bound[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return source
+	}
+	sort.Strings(missing)
+	var b strings.Builder
+	for _, name := range missing {
+		b.WriteString("use ")
+		b.WriteString(name)
+		b.WriteString(";\n")
+	}
+	b.WriteString(source)
+	return b.String()
+}
+
 // runExec executes inline Promise code from CLI arguments or stdin.
 func runExec(args []string) {
 	timeout := 60 * time.Second
@@ -5816,6 +5918,9 @@ func runExec(args []string) {
 		fmt.Fprintln(os.Stderr, "error: no code provided")
 		os.Exit(1)
 	}
+
+	// Auto-inject `use <name>;` for referenced catalog modules (T0221).
+	source = autoInjectCatalogUses(source)
 
 	var compileStart time.Time
 	if timePhases {

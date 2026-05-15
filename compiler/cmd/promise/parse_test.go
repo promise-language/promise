@@ -781,6 +781,45 @@ func TestExtractUseDecls(t *testing.T) {
 	}
 }
 
+// TestAutoInjectCatalogUses verifies that references to catalog modules
+// (via `name.X` member access) trigger automatic injection of `use <name>;`
+// declarations, and that existing explicit `use` declarations are respected.
+// T0221.
+func TestAutoInjectCatalogUses(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string // prefix that must appear at start; empty = no injection
+	}{
+		{"no_refs", `print_line(42)`, ""},
+		{"bare_ident_no_dot", `print_line(io)`, ""},
+		{"member_access", `print_line(io.File.read_content("x"))`, "use io;\n"},
+		{"already_explicit", `use io; print_line(io.File.read_content("x"))`, ""},
+		{"alias_covers", `use io as x; print_line(x.File.read_content("x"))`, ""},
+		{"multiple_modules", `os.execute("ls"); io.File.read_content("x")`, "use io;\nuse os;\n"},
+		{"mixed_explicit_and_injected", `use os; io.File.read_content("x"); os.execute("ls")`, "use io;\n"},
+		{"nested_member_skipped", `x.io.foo`, ""},
+		{"std_ignored", `std.x`, ""},
+		{"string_interp_undetected", `"hello {io.x}"`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := autoInjectCatalogUses(tc.source)
+			if tc.want == "" {
+				if got != tc.source {
+					t.Errorf("expected no injection, got %q", got)
+				}
+				return
+			}
+			// Exact match: injection is a pure prefix, no other mutation.
+			// This also catches duplicate-injection regressions.
+			if got != tc.want+tc.source {
+				t.Errorf("got %q, want %q", got, tc.want+tc.source)
+			}
+		})
+	}
+}
+
 func TestExecWrapCodeWithUseDecls(t *testing.T) {
 	cases := []struct {
 		name   string

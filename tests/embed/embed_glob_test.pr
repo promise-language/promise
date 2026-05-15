@@ -1,0 +1,46 @@
+// T0032: Glob pattern embedding e2e tests
+get text_files EmbeddedFiles `embed("glob_fixtures/*.txt");
+
+test_embed_glob_len() `test {
+  EmbeddedFiles fs = text_files;
+  // *.txt matches alpha.txt and beta.txt (not gamma.md)
+  assert(fs.len == 2, "expected 2 files, got " + fs.len.to_string());
+}
+
+test_embed_glob_contains() `test {
+  EmbeddedFiles fs = text_files;
+  assert(fs.contains("glob_fixtures/alpha.txt"), "should contain alpha.txt");
+  assert(fs.contains("glob_fixtures/beta.txt"), "should contain beta.txt");
+  assert(!fs.contains("glob_fixtures/gamma.md"), "should not contain gamma.md");
+}
+
+test_embed_glob_read() `test {
+  EmbeddedFiles fs = text_files;
+  string alpha = fs.read("glob_fixtures/alpha.txt")?!;
+  assert(alpha == "alpha content", "read alpha.txt: got " + alpha);
+
+  string beta = fs.read("glob_fixtures/beta.txt")?!;
+  assert(beta == "beta content", "read beta.txt: got " + beta);
+}
+
+test_embed_glob_files() `test {
+  EmbeddedFiles fs = text_files;
+  EmbeddedFile[] files = fs.files;
+  assert(files.len == 2, "expected 2 files");
+
+  // Files are sorted by path
+  assert(files[0].path == "glob_fixtures/alpha.txt", "file 0 path");
+  assert(files[0].name == "alpha.txt", "file 0 name");
+  assert(!files[0].is_directory, "alpha.txt is not a directory");
+  assert(files[0].size == 13, "alpha.txt size: got " + files[0].size.to_string());
+
+  assert(files[1].path == "glob_fixtures/beta.txt", "file 1 path");
+  assert(files[1].name == "beta.txt", "file 1 name");
+  assert(files[1].size == 12, "beta.txt size: got " + files[1].size.to_string());
+}
+
+test_embed_glob_read_not_found() `test {
+  EmbeddedFiles fs = text_files;
+  (content, err) := fs.read("nonexistent.txt");
+  assert(err is present, "should raise error for missing file");
+}

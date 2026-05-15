@@ -1126,13 +1126,14 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 			// Determine embed kind from return type
 			retType := sig.Result()
 			isDirPath := strings.HasSuffix(embedPath, "...")
+			isGlob := !isDirPath && isGlobPattern(embedPath)
 			var kind EmbedKind
 			valid := true
 			switch {
 			case isEmbeddedFilesType(retType):
 				kind = EmbedDir
-				if !isDirPath {
-					c.errorf(d.Pos(), "`embed getter '%s' with EmbeddedFiles return type requires a directory path ending with '...' (e.g., `embed(\"dir/...\"))", d.Name)
+				if !isDirPath && !isGlob {
+					c.errorf(d.Pos(), "`embed getter '%s' with EmbeddedFiles return type requires a directory path ending with '...' or a glob pattern (e.g., `embed(\"dir/...\") or `embed(\"*.txt\"))", d.Name)
 					valid = false
 				}
 			case types.Identical(retType, types.TypString):
@@ -1141,10 +1142,18 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 					c.errorf(d.Pos(), "`embed getter '%s' returning string cannot use directory path ending with '...'; use EmbeddedFiles return type", d.Name)
 					valid = false
 				}
+				if isGlob {
+					c.errorf(d.Pos(), "`embed getter '%s' returning string cannot use glob pattern; use EmbeddedFiles return type", d.Name)
+					valid = false
+				}
 			case isU8Vector(retType):
 				kind = EmbedBytes
 				if isDirPath {
 					c.errorf(d.Pos(), "`embed getter '%s' returning u8[] cannot use directory path ending with '...'; use EmbeddedFiles return type", d.Name)
+					valid = false
+				}
+				if isGlob {
+					c.errorf(d.Pos(), "`embed getter '%s' returning u8[] cannot use glob pattern; use EmbeddedFiles return type", d.Name)
 					valid = false
 				}
 			default:

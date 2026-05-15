@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -775,6 +776,189 @@ func HashDir(dir, suffix string) (string, error) {
 		h.Write(data)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// IsGlobPattern returns true if path contains glob metacharacters (*, ?, [).
+func IsGlobPattern(path string) bool {
+	return strings.ContainsAny(path, "*?[")
+}
+
+// embedAnnotationRe matches `embed("...") annotations in Promise source.
+var embedAnnotationRe = regexp.MustCompile("`embed\\(\"([^\"]+)\"")
+
+// HashEmbedFiles scans source content for `embed("...") annotations, resolves
+// the referenced files relative to dir, and returns a sorted list of "path:hash"
+// entries. Handles single files, directory trees (... suffix), and glob patterns.
+// Returns (entries, ok). If ok is false, a referenced file could not be read.
+func HashEmbedFiles(content []byte, dir string) ([]string, bool) {
+	matches := embedAnnotationRe.FindAllSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil, true
+	}
+
+	var hashes []string
+	for _, m := range matches {
+		embedPath := string(m[1])
+		entries, ok := hashEmbedPath(embedPath, dir)
+		if !ok {
+			return nil, false
+		}
+		hashes = append(hashes, entries...)
+	}
+
+	sort.Strings(hashes)
+	return hashes, true
+}
+
+// HashEmbedFilesForInputs is like HashEmbedFiles but returns CacheKeyInput entries
+// for debug logging. Silently skips unreadable files.
+func HashEmbedFilesForInputs(content []byte, dir string) []CacheKeyInput {
+	matches := embedAnnotationRe.FindAllSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	var inputs []CacheKeyInput
+	for _, m := range matches {
+		embedPath := string(m[1])
+		entries, ok := hashEmbedPath(embedPath, dir)
+		if !ok {
+			continue
+		}
+		for _, e := range entries {
+			if idx := strings.IndexByte(e, ':'); idx >= 0 {
+				inputs = append(inputs, CacheKeyInput{
+					Label: "embed " + e[:idx], Value: e[idx+1:],
+				})
+			}
+		}
+	}
+
+	return inputs
+}
+
+// HashModuleEmbeds scans all .pr files in a module for `embed annotations,
+// resolves and hashes all referenced files, and returns a combined FNV-128a hash.
+// Returns empty string if no embeds are found. When includeTests is true,
+// *_test.pr files are also scanned for embed annotations.
+func HashModuleEmbeds(modDir string, includeTests bool) string {
+	files, err := CollectModuleSources(modDir, includeTests)
+	if err != nil {
+		return ""
+	}
+
+	var allHashes []string
+	for _, path := range files {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		fileDir := filepath.Dir(path)
+		entries, ok := HashEmbedFiles(content, fileDir)
+		if !ok {
+			return ""
+		}
+		allHashes = append(allHashes, entries...)
+	}
+
+	if len(allHashes) == 0 {
+		return ""
+	}
+
+	sort.Strings(allHashes)
+	h := fnv.New128a()
+	for _, entry := range allHashes {
+		fmt.Fprintf(h, "embed:%s\n", entry)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// hashEmbedPath resolves a single embed path and returns "relpath:hash" entries.
+func hashEmbedPath(embedPath, dir string) ([]string, bool) {
+	if strings.HasSuffix(embedPath, "...") {
+		return hashEmbedDir(embedPath, dir)
+	}
+	if IsGlobPattern(embedPath) {
+		return hashEmbedGlob(embedPath, dir)
+	}
+	absPath := filepath.Join(dir, embedPath)
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, false
+	}
+	fh := fnv.New128a()
+	fh.Write(data)
+	return []string{embedPath + ":" + hex.EncodeToString(fh.Sum(nil))}, true
+}
+
+// hashEmbedDir hashes all files in a directory tree (embed path ending with ...).
+func hashEmbedDir(embedPath, dir string) ([]string, bool) {
+	dirPath := strings.TrimSuffix(embedPath, "...")
+	dirPath = strings.TrimRight(dirPath, "/")
+	if dirPath == "" {
+		dirPath = "."
+	}
+	absDir := filepath.Join(dir, dirPath)
+
+	var hashes []string
+	err := filepath.WalkDir(absDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != absDir && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), ".") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relPath, _ := filepath.Rel(dir, path)
+		relPath = filepath.ToSlash(relPath)
+		fh := fnv.New128a()
+		fh.Write(data)
+		hashes = append(hashes, relPath+":"+hex.EncodeToString(fh.Sum(nil)))
+		return nil
+	})
+	if err != nil {
+		return nil, false
+	}
+	return hashes, true
+}
+
+// hashEmbedGlob hashes all files matching a glob pattern.
+func hashEmbedGlob(embedPath, dir string) ([]string, bool) {
+	matches, err := filepath.Glob(filepath.Join(dir, embedPath))
+	if err != nil {
+		return nil, false
+	}
+	sort.Strings(matches)
+
+	var hashes []string
+	for _, path := range matches {
+		fi, err := os.Stat(path)
+		if err != nil || fi.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(filepath.Base(path), ".") {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, false
+		}
+		relPath, _ := filepath.Rel(dir, path)
+		relPath = filepath.ToSlash(relPath)
+		fh := fnv.New128a()
+		fh.Write(data)
+		hashes = append(hashes, relPath+":"+hex.EncodeToString(fh.Sum(nil)))
+	}
+	return hashes, true
 }
 
 // TestBinaryMetaPath returns the sidecar metadata path for a cached test binary.

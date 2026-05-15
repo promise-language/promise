@@ -24,7 +24,13 @@ func ResolveEmbeds(info *Info, sourceDir string) []error {
 	for fd, embed := range info.Embeds {
 		switch embed.Kind {
 		case EmbedDir:
-			if err := resolveEmbedDir(embed, sourceDir); err != nil {
+			var err error
+			if strings.HasSuffix(embed.Path, "...") {
+				err = resolveEmbedDir(embed, sourceDir)
+			} else {
+				err = resolveEmbedGlob(embed, sourceDir)
+			}
+			if err != nil {
 				errs = append(errs, fmtEmbedError(fd, "%v", err))
 			}
 		default:
@@ -162,6 +168,91 @@ func resolveEmbedDir(embed *EmbedInfo, sourceDir string) error {
 	embed.Data = blob
 	embed.DirEntries = dirEntries
 	return nil
+}
+
+// resolveEmbedGlob expands a glob pattern and populates EmbedInfo with
+// concatenated file data and per-entry metadata (T0032).
+func resolveEmbedGlob(embed *EmbedInfo, sourceDir string) error {
+	pattern := filepath.Join(sourceDir, embed.Path)
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("invalid glob pattern %q: %v", embed.Path, err)
+	}
+
+	if len(matches) == 0 {
+		return fmt.Errorf("embed glob pattern %q matched no files", embed.Path)
+	}
+
+	sort.Strings(matches)
+
+	type fileEntry struct {
+		relPath string
+		name    string
+		size    int64
+		data    []byte
+	}
+
+	var entries []fileEntry
+	for _, path := range matches {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("cannot stat %q: %v", path, err)
+		}
+		if fi.IsDir() {
+			continue
+		}
+		name := filepath.Base(path)
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			relPath, _ := filepath.Rel(sourceDir, path)
+			return fmt.Errorf("cannot read %q: %v", relPath, err)
+		}
+
+		relPath, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			relPath = name
+		}
+		relPath = filepath.ToSlash(relPath)
+
+		entries = append(entries, fileEntry{
+			relPath: relPath,
+			name:    name,
+			size:    fi.Size(),
+			data:    data,
+		})
+	}
+
+	if len(entries) == 0 {
+		return fmt.Errorf("embed glob pattern %q matched no regular files", embed.Path)
+	}
+
+	// Build DirEntries + concatenated Data (same format as directory embeds)
+	var blob []byte
+	dirEntries := make([]EmbedDirEntry, len(entries))
+	for i, e := range entries {
+		offset := int64(len(blob))
+		blob = append(blob, e.data...)
+		dirEntries[i] = EmbedDirEntry{
+			Path:   e.relPath,
+			Name:   e.name,
+			Size:   e.size,
+			IsDir:  false,
+			Offset: offset,
+		}
+	}
+
+	embed.Data = blob
+	embed.DirEntries = dirEntries
+	return nil
+}
+
+// isGlobPattern returns true if path contains glob metacharacters (*, ?, [).
+func isGlobPattern(path string) bool {
+	return strings.ContainsAny(path, "*?[")
 }
 
 func fmtEmbedError(fd *ast.FuncDecl, format string, args ...any) error {

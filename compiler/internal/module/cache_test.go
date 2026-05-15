@@ -1052,3 +1052,310 @@ func TestInstanceCacheKeyAllDistinct(t *testing.T) {
 		}
 	}
 }
+
+// === Embed hash functions (T0032) ===
+
+func TestIsGlobPattern(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"templates/*.html", true},
+		{"data/[abc].txt", true},
+		{"logs/app?.log", true},
+		{"plain/file.txt", false},
+		{"dir/sub/file.pr", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		got := IsGlobPattern(tc.path)
+		if got != tc.want {
+			t.Errorf("IsGlobPattern(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestHashEmbedFilesSingleFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "data.json"), []byte(`{"key":"val"}`), 0644)
+
+	content := []byte("get config string `embed(\"data.json\");")
+	entries, ok := HashEmbedFiles(content, dir)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if !strings.HasPrefix(entries[0], "data.json:") {
+		t.Errorf("expected entry to start with 'data.json:', got %q", entries[0])
+	}
+}
+
+func TestHashEmbedFilesNoAnnotations(t *testing.T) {
+	content := []byte("get name string { return \"hello\"; }")
+	entries, ok := HashEmbedFiles(content, t.TempDir())
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if entries != nil {
+		t.Errorf("expected nil entries for no annotations, got %v", entries)
+	}
+}
+
+func TestHashEmbedFilesMissingFile(t *testing.T) {
+	content := []byte("get config string `embed(\"missing.txt\");")
+	_, ok := HashEmbedFiles(content, t.TempDir())
+	if ok {
+		t.Error("expected ok=false for missing file")
+	}
+}
+
+func TestHashEmbedFilesDeterministic(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("aaa"), 0644)
+
+	content := []byte("get a string `embed(\"a.txt\");")
+	e1, _ := HashEmbedFiles(content, dir)
+	e2, _ := HashEmbedFiles(content, dir)
+	if len(e1) != len(e2) {
+		t.Fatal("different lengths")
+	}
+	for i := range e1 {
+		if e1[i] != e2[i] {
+			t.Errorf("entry %d differs: %q vs %q", i, e1[i], e2[i])
+		}
+	}
+}
+
+func TestHashEmbedFilesContentChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.txt")
+	os.WriteFile(path, []byte("v1"), 0644)
+
+	content := []byte("get d string `embed(\"data.txt\");")
+	e1, _ := HashEmbedFiles(content, dir)
+
+	os.WriteFile(path, []byte("v2"), 0644)
+	e2, _ := HashEmbedFiles(content, dir)
+
+	if len(e1) != 1 || len(e2) != 1 {
+		t.Fatal("expected 1 entry each")
+	}
+	if e1[0] == e2[0] {
+		t.Error("hash should change when file content changes")
+	}
+}
+
+func TestHashEmbedFilesMultipleAnnotations(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("aaa"), 0644)
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("bbb"), 0644)
+
+	content := []byte("get a string `embed(\"a.txt\");\nget b string `embed(\"b.txt\");")
+	entries, ok := HashEmbedFiles(content, dir)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	// Sorted order
+	if !strings.HasPrefix(entries[0], "a.txt:") {
+		t.Errorf("first entry should be a.txt, got %q", entries[0])
+	}
+	if !strings.HasPrefix(entries[1], "b.txt:") {
+		t.Errorf("second entry should be b.txt, got %q", entries[1])
+	}
+}
+
+func TestHashEmbedFilesGlob(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "data"), 0755)
+	os.WriteFile(filepath.Join(dir, "data", "a.txt"), []byte("aaa"), 0644)
+	os.WriteFile(filepath.Join(dir, "data", "b.txt"), []byte("bbb"), 0644)
+	os.WriteFile(filepath.Join(dir, "data", "c.csv"), []byte("ccc"), 0644)
+
+	content := []byte("get files EmbeddedFiles `embed(\"data/*.txt\");")
+	entries, ok := HashEmbedFiles(content, dir)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries (only .txt), got %d", len(entries))
+	}
+}
+
+func TestHashEmbedFilesDir(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "assets")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "x.txt"), []byte("xxx"), 0644)
+	os.WriteFile(filepath.Join(sub, "y.txt"), []byte("yyy"), 0644)
+
+	content := []byte("get assets EmbeddedFiles `embed(\"assets/...\");")
+	entries, ok := HashEmbedFiles(content, dir)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+}
+
+func TestHashEmbedFilesForInputsSingleFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "data.json"), []byte(`{"k":"v"}`), 0644)
+
+	content := []byte("get config string `embed(\"data.json\");")
+	inputs := HashEmbedFilesForInputs(content, dir)
+	if len(inputs) != 1 {
+		t.Fatalf("expected 1 input, got %d", len(inputs))
+	}
+	if inputs[0].Label != "embed data.json" {
+		t.Errorf("expected label 'embed data.json', got %q", inputs[0].Label)
+	}
+	if inputs[0].Value == "" {
+		t.Error("expected non-empty hash value")
+	}
+}
+
+func TestHashEmbedFilesForInputsNoAnnotations(t *testing.T) {
+	content := []byte("get name string { return \"hello\"; }")
+	inputs := HashEmbedFilesForInputs(content, t.TempDir())
+	if inputs != nil {
+		t.Errorf("expected nil for no annotations, got %v", inputs)
+	}
+}
+
+func TestHashEmbedFilesForInputsMissing(t *testing.T) {
+	content := []byte("get config string `embed(\"missing.txt\");")
+	inputs := HashEmbedFilesForInputs(content, t.TempDir())
+	if len(inputs) != 0 {
+		t.Errorf("expected 0 inputs for missing file (silently skipped), got %d", len(inputs))
+	}
+}
+
+func TestHashModuleEmbedsNoEmbeds(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.pr"), []byte("main() { println(\"hi\"); }"), 0644)
+
+	h := HashModuleEmbeds(dir, false)
+	if h != "" {
+		t.Errorf("expected empty hash for no embeds, got %q", h)
+	}
+}
+
+func TestHashModuleEmbedsWithEmbed(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "mod.pr"), []byte("get data string `embed(\"data.txt\");"), 0644)
+	os.WriteFile(filepath.Join(dir, "data.txt"), []byte("hello"), 0644)
+
+	h := HashModuleEmbeds(dir, false)
+	if h == "" {
+		t.Fatal("expected non-empty hash")
+	}
+
+	// Changing embedded file changes hash
+	os.WriteFile(filepath.Join(dir, "data.txt"), []byte("world"), 0644)
+	h2 := HashModuleEmbeds(dir, false)
+	if h2 == "" {
+		t.Fatal("expected non-empty hash")
+	}
+	if h == h2 {
+		t.Error("hash should change when embedded file content changes")
+	}
+}
+
+func TestHashModuleEmbedsExcludesTestFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "mod.pr"), []byte("main() {}"), 0644)
+	os.WriteFile(filepath.Join(dir, "mod_test.pr"), []byte("get data string `embed(\"data.txt\");"), 0644)
+	os.WriteFile(filepath.Join(dir, "data.txt"), []byte("test data"), 0644)
+
+	h := HashModuleEmbeds(dir, false)
+	if h != "" {
+		t.Errorf("expected empty hash (test file embeds excluded), got %q", h)
+	}
+
+	// With includeTests=true, test file embeds are included
+	h2 := HashModuleEmbeds(dir, true)
+	if h2 == "" {
+		t.Error("expected non-empty hash with includeTests=true")
+	}
+}
+
+func TestHashModuleEmbedsBadDir(t *testing.T) {
+	h := HashModuleEmbeds("/nonexistent/dir", false)
+	if h != "" {
+		t.Errorf("expected empty hash for bad dir, got %q", h)
+	}
+}
+
+func TestHashEmbedDirSkipsHiddenFiles(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "assets")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "visible.txt"), []byte("ok"), 0644)
+	os.WriteFile(filepath.Join(sub, ".hidden.txt"), []byte("no"), 0644)
+
+	content := []byte("get a EmbeddedFiles `embed(\"assets/...\");")
+	entries, ok := HashEmbedFiles(content, dir)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry (hidden skipped), got %d", len(entries))
+	}
+	if !strings.HasPrefix(entries[0], "assets/visible.txt:") {
+		t.Errorf("expected visible.txt entry, got %q", entries[0])
+	}
+}
+
+func TestHashEmbedDirSkipsHiddenDirs(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "assets")
+	hidden := filepath.Join(sub, ".git")
+	os.MkdirAll(hidden, 0755)
+	os.WriteFile(filepath.Join(sub, "ok.txt"), []byte("ok"), 0644)
+	os.WriteFile(filepath.Join(hidden, "secret"), []byte("no"), 0644)
+
+	content := []byte("get a EmbeddedFiles `embed(\"assets/...\");")
+	entries, ok := HashEmbedFiles(content, dir)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry (hidden dir skipped), got %d", len(entries))
+	}
+}
+
+func TestHashEmbedGlobSkipsHiddenFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0644)
+	os.WriteFile(filepath.Join(dir, ".hidden.txt"), []byte("h"), 0644)
+
+	content := []byte("get a EmbeddedFiles `embed(\"*.txt\");")
+	entries, ok := HashEmbedFiles(content, dir)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry (hidden skipped), got %d", len(entries))
+	}
+}
+
+func TestHashEmbedGlobSkipsDirs(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("f"), 0644)
+	os.MkdirAll(filepath.Join(dir, "subdir.txt"), 0755) // dir named like a file
+
+	content := []byte("get a EmbeddedFiles `embed(\"*.txt\");")
+	entries, ok := HashEmbedFiles(content, dir)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry (dir skipped), got %d", len(entries))
+	}
+}

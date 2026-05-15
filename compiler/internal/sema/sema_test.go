@@ -12685,6 +12685,144 @@ func TestResolveEmbedsDirSkipsHiddenFiles(t *testing.T) {
 	}
 }
 
+// === Glob pattern embedding (T0032) ===
+
+func TestEmbedGlobAcceptsEmbeddedFiles(t *testing.T) {
+	info := checkOK(t, `
+		get templates EmbeddedFiles `+"`embed(\"templates/*.html\")"+`;
+	`)
+	if len(info.Embeds) != 1 {
+		t.Fatalf("expected 1 embed, got %d", len(info.Embeds))
+	}
+	for _, e := range info.Embeds {
+		if e.Kind != EmbedDir {
+			t.Errorf("expected EmbedDir kind for glob, got %d", e.Kind)
+		}
+	}
+}
+
+func TestEmbedGlobRejectsString(t *testing.T) {
+	errs := checkErrs(t, `
+		get templates string `+"`embed(\"templates/*.html\")"+`;
+	`)
+	expectError(t, errs, "cannot use glob pattern")
+}
+
+func TestEmbedGlobRejectsBytes(t *testing.T) {
+	errs := checkErrs(t, `
+		get templates u8[] `+"`embed(\"data/*.bin\")"+`;
+	`)
+	expectError(t, errs, "cannot use glob pattern")
+}
+
+func TestEmbedGlobQuestionMark(t *testing.T) {
+	info := checkOK(t, `
+		get logs EmbeddedFiles `+"`embed(\"logs/app?.log\")"+`;
+	`)
+	if len(info.Embeds) != 1 {
+		t.Fatalf("expected 1 embed, got %d", len(info.Embeds))
+	}
+	for _, e := range info.Embeds {
+		if e.Kind != EmbedDir {
+			t.Errorf("expected EmbedDir kind for glob, got %d", e.Kind)
+		}
+	}
+}
+
+func TestEmbedGlobBracket(t *testing.T) {
+	info := checkOK(t, `
+		get data EmbeddedFiles `+"`embed(\"data/[abc].txt\")"+`;
+	`)
+	for _, e := range info.Embeds {
+		if e.Kind != EmbedDir {
+			t.Errorf("expected EmbedDir kind for glob, got %d", e.Kind)
+		}
+	}
+}
+
+func TestEmbedGlobEmbeddedFilesRequiresGlobOrDir(t *testing.T) {
+	errs := checkErrs(t, `
+		get assets EmbeddedFiles `+"`embed(\"single_file.txt\")"+`;
+	`)
+	expectError(t, errs, "requires a directory path ending with '...' or a glob pattern")
+}
+
+func TestResolveEmbedsGlobSuccess(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "templates"), 0755)
+	os.WriteFile(filepath.Join(dir, "templates", "a.html"), []byte("<a>"), 0644)
+	os.WriteFile(filepath.Join(dir, "templates", "b.html"), []byte("<b>"), 0644)
+	os.WriteFile(filepath.Join(dir, "templates", "style.css"), []byte("body{}"), 0644)
+
+	info := checkOK(t, `
+		get pages EmbeddedFiles `+"`embed(\"templates/*.html\")"+`;
+	`)
+	errs := ResolveEmbeds(info, dir)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	for _, embed := range info.Embeds {
+		if len(embed.DirEntries) != 2 {
+			t.Fatalf("expected 2 entries (only .html), got %d", len(embed.DirEntries))
+		}
+		if embed.DirEntries[0].Path != "templates/a.html" {
+			t.Errorf("entry 0: expected 'templates/a.html', got %q", embed.DirEntries[0].Path)
+		}
+		if embed.DirEntries[1].Path != "templates/b.html" {
+			t.Errorf("entry 1: expected 'templates/b.html', got %q", embed.DirEntries[1].Path)
+		}
+		expectedData := "<a><b>"
+		if string(embed.Data) != expectedData {
+			t.Errorf("data blob: expected %q, got %q", expectedData, string(embed.Data))
+		}
+	}
+}
+
+func TestResolveEmbedsGlobNoMatches(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "empty"), 0755)
+
+	info := checkOK(t, `
+		get files EmbeddedFiles `+"`embed(\"empty/*.txt\")"+`;
+	`)
+	errs := ResolveEmbeds(info, dir)
+	if len(errs) == 0 {
+		t.Fatal("expected error for no matches")
+	}
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "matched no files") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'matched no files' error, got: %v", errs)
+	}
+}
+
+func TestResolveEmbedsGlobSkipsHiddenFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("ok"), 0644)
+	os.WriteFile(filepath.Join(dir, ".hidden.txt"), []byte("no"), 0644)
+
+	info := checkOK(t, `
+		get files EmbeddedFiles `+"`embed(\"*.txt\")"+`;
+	`)
+	errs := ResolveEmbeds(info, dir)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	for _, embed := range info.Embeds {
+		if len(embed.DirEntries) != 1 {
+			t.Fatalf("expected 1 entry (hidden files skipped), got %d", len(embed.DirEntries))
+		}
+		if embed.DirEntries[0].Path != "visible.txt" {
+			t.Errorf("expected 'visible.txt', got %q", embed.DirEntries[0].Path)
+		}
+	}
+}
+
 // === Lifetime annotations (B0033) ===
 
 func TestLifetimeAnnotationOnRefParam(t *testing.T) {

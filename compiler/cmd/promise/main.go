@@ -1093,6 +1093,13 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 		fmt.Fprintf(os.Stderr, "error hashing module sources: %v\n", err)
 		os.Exit(1)
 	}
+	// Include embedded file contents so data file changes invalidate the
+	// test binary cache (T0032).
+	if embedHash := module.HashModuleEmbeds(modDir, true); embedHash != "" {
+		eh := fnv.New128a()
+		fmt.Fprintf(eh, "%s\n%s", implHash, embedHash)
+		implHash = hex.EncodeToString(eh.Sum(nil))
+	}
 	compilerHash := module.CompilerHash()
 	// Include timeout config in the cache key since per-test timeouts are
 	// baked into the test binary at compile time (B0132).
@@ -4722,25 +4729,13 @@ func computeTestFileCacheKey(filename, target string, cfg testTimeoutConfig) (st
 	// Hash embedded file contents — if any `embed("path") annotation references
 	// an external file, its content must be part of the cache key so that changes
 	// to embedded files invalidate the cache even when the .pr source is unchanged.
-	embedRe := regexp.MustCompile("`embed\\(\"([^\"]+)\"")
-	embedMatches := embedRe.FindAllSubmatch(content, -1)
-	if len(embedMatches) > 0 {
-		var embedHashes []string
-		for _, m := range embedMatches {
-			embedPath := string(m[1])
-			absEmbed := filepath.Join(dir, embedPath)
-			embedContent, err := os.ReadFile(absEmbed)
-			if err != nil {
-				return "", false // embedded file not readable — don't cache
-			}
-			eh := fnv.New128a()
-			eh.Write(embedContent)
-			embedHashes = append(embedHashes, embedPath+":"+hex.EncodeToString(eh.Sum(nil)))
-		}
-		sort.Strings(embedHashes)
-		for _, eh := range embedHashes {
-			fmt.Fprintf(h, "embed:%s\n", eh)
-		}
+	// Handles single files, directory trees (...), and glob patterns (T0032).
+	embedHashes, embedOK := module.HashEmbedFiles(content, dir)
+	if !embedOK {
+		return "", false
+	}
+	for _, eh := range embedHashes {
+		fmt.Fprintf(h, "embed:%s\n", eh)
 	}
 
 	// Hash local module dependencies from sourced use declarations.
@@ -4795,18 +4790,7 @@ func computeTestFileCacheInputs(filename, target string, cfg testTimeoutConfig) 
 	abs, _ := filepath.Abs(filename)
 	dir := filepath.Dir(abs)
 
-	embedRe := regexp.MustCompile("`embed\\(\"([^\"]+)\"")
-	for _, m := range embedRe.FindAllSubmatch(content, -1) {
-		embedPath := string(m[1])
-		absEmbed := filepath.Join(dir, embedPath)
-		if embedContent, err := os.ReadFile(absEmbed); err == nil {
-			eh := fnv.New128a()
-			eh.Write(embedContent)
-			inputs = append(inputs, module.CacheKeyInput{
-				Label: "embed " + embedPath, Value: hex.EncodeToString(eh.Sum(nil)),
-			})
-		}
-	}
+	inputs = append(inputs, module.HashEmbedFilesForInputs(content, dir)...)
 
 	useRe := regexp.MustCompile(`use\s+[\w_]+\s+"([^"]+)"`)
 	for _, m := range useRe.FindAllSubmatch(content, -1) {
@@ -4857,25 +4841,13 @@ func computeRunBinaryCacheKey(filename, target string, releaseMode bool) (string
 	// Hash embedded file contents — if any `embed("path") annotation references
 	// an external file, its content must be part of the cache key so that changes
 	// to embedded files invalidate the cache even when the .pr source is unchanged.
-	embedRe := regexp.MustCompile("`embed\\(\"([^\"]+)\"")
-	embedMatches := embedRe.FindAllSubmatch(content, -1)
-	if len(embedMatches) > 0 {
-		var embedHashes []string
-		for _, m := range embedMatches {
-			embedPath := string(m[1])
-			absEmbed := filepath.Join(dir, embedPath)
-			embedContent, err := os.ReadFile(absEmbed)
-			if err != nil {
-				return "", false // embedded file not readable — don't cache
-			}
-			eh := fnv.New128a()
-			eh.Write(embedContent)
-			embedHashes = append(embedHashes, embedPath+":"+hex.EncodeToString(eh.Sum(nil)))
-		}
-		sort.Strings(embedHashes)
-		for _, eh := range embedHashes {
-			fmt.Fprintf(h, "embed:%s\n", eh)
-		}
+	// Handles single files, directory trees (...), and glob patterns (T0032).
+	embedHashes, embedOK := module.HashEmbedFiles(content, dir)
+	if !embedOK {
+		return "", false
+	}
+	for _, eh := range embedHashes {
+		fmt.Fprintf(h, "embed:%s\n", eh)
 	}
 
 	// Hash local module dependencies from sourced use declarations.
@@ -4930,18 +4902,7 @@ func computeRunBinaryCacheInputs(filename, target string, releaseMode bool) []mo
 	abs, _ := filepath.Abs(filename)
 	dir := filepath.Dir(abs)
 
-	embedRe := regexp.MustCompile("`embed\\(\"([^\"]+)\"")
-	for _, m := range embedRe.FindAllSubmatch(content, -1) {
-		embedPath := string(m[1])
-		absEmbed := filepath.Join(dir, embedPath)
-		if embedContent, err := os.ReadFile(absEmbed); err == nil {
-			eh := fnv.New128a()
-			eh.Write(embedContent)
-			inputs = append(inputs, module.CacheKeyInput{
-				Label: "embed " + embedPath, Value: hex.EncodeToString(eh.Sum(nil)),
-			})
-		}
-	}
+	inputs = append(inputs, module.HashEmbedFilesForInputs(content, dir)...)
 
 	useRe := regexp.MustCompile(`use\s+[\w_]+\s+"([^"]+)"`)
 	for _, m := range useRe.FindAllSubmatch(content, -1) {
@@ -5448,6 +5409,13 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	implHash, err := module.HashModuleSources(absDir, false)
 	if err != nil {
 		return nil, fmt.Errorf("cannot hash module sources: %w", err)
+	}
+	// Include embedded file contents in impl hash so data file changes
+	// invalidate the module cache (T0032).
+	if embedHash := module.HashModuleEmbeds(absDir, false); embedHash != "" {
+		eh := fnv.New128a()
+		fmt.Fprintf(eh, "%s\n%s", implHash, embedHash)
+		implHash = hex.EncodeToString(eh.Sum(nil))
 	}
 
 	mi := &sema.ModuleInfo{

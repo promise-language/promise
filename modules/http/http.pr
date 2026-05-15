@@ -287,9 +287,6 @@ http_get!(string url) Response `public `doc("Perform an HTTP GET request.") {
 
 http_post!(string url, string body, map[string, string] headers) Response `public `doc("Perform an HTTP POST request with a string body.") {
   Request req = Request.new_post(url, body);
-  // B0343: for-in map values passed to method calls cause segfault.
-  // keys()+index also produces corrupted strings (clone temporaries freed prematurely).
-  // This function is currently broken for non-empty headers maps.
   for key, value in headers {
     req.set_header(key, value);
   }

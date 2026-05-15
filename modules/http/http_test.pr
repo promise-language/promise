@@ -280,9 +280,6 @@ test_body_bytes() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-// NOTE: http_post! with non-empty headers map is broken — see B0343.
-// Cannot test until the compiler bug is fixed.
-
 // ── PUT method ──────────────────────────────────────────────────────────────
 
 test_http_put() `test(exclude: "wasm32", timeout: "10s") {
@@ -341,7 +338,7 @@ test_malformed_response() `test(exclude: "wasm32", timeout: "10s") {
   listener.close()?!;
 }
 
-// ── http_post! convenience function (empty headers — B0343 blocks non-empty) ─
+// ── http_post! convenience function (empty headers) ────────────────────────
 
 test_http_post_function() `test(exclude: "wasm32", timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
@@ -411,5 +408,79 @@ test_response_json_bool() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-// NOTE: http_post_json![T] cannot be tested — B0343 blocks map iteration in headers.
-// NOTE: http_post! with non-empty headers map is broken — see B0343.
+// ── http_post! with non-empty headers map ──────────────────────────────────
+
+test_http_post_with_headers() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    map[string, string] h = map[string, string]();
+    h["X-Token"] = "abc";
+    h["X-User"] = "alice";
+    Response resp = http_post("http://127.0.0.1:" + port.to_string() + "/api", "payload", h)?!;
+    assert(resp.status_code == 200, "status 200");
+    assert(resp.body == "ok", "body ok");
+  };
+
+  string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
+  assert(request.contains("POST /api"), "POST method");
+  assert(request.contains("X-Token: abc"), "X-Token header sent");
+  assert(request.contains("X-User: alice"), "X-User header sent");
+  assert(request.contains("payload"), "body sent");
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+// ── http_post_json![T] (B0343 + B0344 chain) ───────────────────────────────
+
+test_http_post_json_int() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_post_json[int]("http://127.0.0.1:" + port.to_string() + "/api", 42)?!;
+    assert(resp.status_code == 200, "status 200");
+  };
+
+  string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
+  assert(request.contains("POST /api"), "POST method");
+  assert(request.contains("Content-Type: application/json"), "JSON content type");
+  assert(request.contains("42"), "int body");
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_http_post_json_string() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_post_json[string]("http://127.0.0.1:" + port.to_string() + "/api", "hello")?!;
+    assert(resp.status_code == 200, "status 200");
+  };
+
+  string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
+  assert(request.contains("POST /api"), "POST method");
+  assert(request.contains("Content-Type: application/json"), "JSON content type");
+  assert(request.contains("\"hello\""), "JSON-quoted string body");
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_http_post_json_bool() `test(exclude: "wasm32", timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_post_json[bool]("http://127.0.0.1:" + port.to_string() + "/api", true)?!;
+    assert(resp.status_code == 200, "status 200");
+  };
+
+  string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
+  assert(request.contains("POST /api"), "POST method");
+  assert(request.contains("Content-Type: application/json"), "JSON content type");
+  assert(request.contains("true"), "bool body");
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}

@@ -546,9 +546,98 @@ func hasMainFunc(info *sema.Info) bool {
 	return isFunc
 }
 
-// runRun compiles and immediately runs a .pr file.
+// parseRunArgs extracts the filename, target triple, and releaseMode from
+// `promise run` arguments using the same last-wins semantics as buildToFile,
+// so the cache key aligns with what actually gets compiled.
+func parseRunArgs(args []string) (filename, target string, releaseMode bool) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-o":
+			// Consume the arg value so it isn't misread as the filename.
+			if i+1 < len(args) {
+				i++
+			}
+		case "-target", "--target":
+			if i+1 < len(args) {
+				target = args[i+1]
+				i++
+			}
+		case "--release":
+			releaseMode = true
+		case "--debug", "--time-phases":
+			// no-op for cache key: --debug is default; --time-phases doesn't affect output
+		default:
+			filename = args[i]
+		}
+	}
+	return
+}
+
+// runRun compiles and immediately runs a .pr file. The compiled binary is
+// cached (keyed by source + compiler + std + target + mode + embeds + local
+// deps) under ~/.promise/cache/build/, so repeat runs on the same source skip
+// compilation entirely (T0152).
 func runRun(args []string) {
-	// Build to a temp file
+	// Parse args locally to compute the cache key before invoking buildToFile.
+	// buildToFile reparses the same args on cache miss; that's cheap.
+	filename, target, releaseMode := parseRunArgs(args)
+
+	// Resolve the target binary to what buildToFile would actually compile so the
+	// cache key matches across invocations (T0115 auto-discovery).
+	if filename == "" {
+		if discovered, err := discoverMainFile("."); err == nil {
+			filename = discovered
+		}
+	} else if info, err := os.Stat(filename); err == nil && info.IsDir() {
+		if discovered, err := discoverMainFile(filename); err == nil {
+			filename = discovered
+		}
+	}
+
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
+
+	// Shared lock so promise clean can't wipe the cache mid-lookup.
+	unlock := module.LockBuildDirShared()
+	defer unlock()
+
+	var cacheKey string
+	var cacheable bool
+	var cacheDir string
+	if filename != "" {
+		cacheKey, cacheable = computeRunBinaryCacheKey(filename, target, releaseMode)
+		if cacheable {
+			cacheDir, _ = module.BuildCacheDir()
+		}
+	}
+
+	// Cache hit — exec directly, no compile.
+	if cacheDir != "" {
+		if cachedBin := module.LookupTestBinaryCache(cacheDir, cacheKey); cachedBin != "" {
+			if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(filename), cacheKey[:16])
+			}
+			execRunBinary(cachedBin)
+			return
+		}
+	}
+
+	if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
+		if cacheable {
+			fmt.Fprintf(os.Stderr, "[cache MISS] %s key=%s compiler=%s std=%s target=%s\n",
+				filepath.Base(filename), cacheKey[:16], module.CompilerHash()[:16], cachedStdHash()[:16], target)
+			if os.Getenv("PROMISE_CACHE_DEBUG") == "verbose" {
+				inputs := computeRunBinaryCacheInputs(filename, target, releaseMode)
+				fmt.Fprintln(os.Stderr, module.FormatCacheKeyInputs(
+					"run-binary "+filepath.Base(filename), cacheKey, inputs))
+			}
+		} else if filename != "" {
+			fmt.Fprintf(os.Stderr, "[cache SKIP] %s (not cacheable)\n", filepath.Base(filename))
+		}
+	}
+
+	// Cache miss — compile to a temp file.
 	ext := binaryExtension(codegen.HostTargetTriple())
 	tmpOutput, err := os.CreateTemp("", "promise-run-*"+ext)
 	if err != nil {
@@ -558,13 +647,28 @@ func runRun(args []string) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	// Reuse build logic — discovery happens inside buildToFile (T0115)
 	buildArgs := []string{"-o", tmpOutput.Name()}
 	buildArgs = append(buildArgs, args...)
 	buildToFile(buildArgs)
 
-	// Execute
-	cmd := exec.Command(tmpOutput.Name())
+	// Save the compiled binary to the cache for future runs.
+	if cacheDir != "" {
+		if err := module.SaveTestBinaryCache(cacheDir, cacheKey, tmpOutput.Name()); err == nil {
+			module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.CacheMeta{
+				Kind:     module.CacheKindBinary,
+				Name:     filename,
+				CacheKey: cacheKey,
+			})
+		}
+	}
+
+	execRunBinary(tmpOutput.Name())
+}
+
+// execRunBinary runs the given binary with the current process's stdio wired
+// through, and exits with the child's exit code on failure.
+func execRunBinary(path string) {
+	cmd := exec.Command(path)
 	isolateProcessGroup(cmd)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -4581,6 +4685,141 @@ func computeTestFileCacheInputs(filename, target string, cfg testTimeoutConfig) 
 		{Label: "std", Value: cachedStdHash()},
 		{Label: "target", Value: target},
 		{Label: "timeout", Value: cfg.cacheString()},
+	}
+
+	abs, _ := filepath.Abs(filename)
+	dir := filepath.Dir(abs)
+
+	embedRe := regexp.MustCompile("`embed\\(\"([^\"]+)\"")
+	for _, m := range embedRe.FindAllSubmatch(content, -1) {
+		embedPath := string(m[1])
+		absEmbed := filepath.Join(dir, embedPath)
+		if embedContent, err := os.ReadFile(absEmbed); err == nil {
+			eh := fnv.New128a()
+			eh.Write(embedContent)
+			inputs = append(inputs, module.CacheKeyInput{
+				Label: "embed " + embedPath, Value: hex.EncodeToString(eh.Sum(nil)),
+			})
+		}
+	}
+
+	useRe := regexp.MustCompile(`use\s+[\w_]+\s+"([^"]+)"`)
+	for _, m := range useRe.FindAllSubmatch(content, -1) {
+		path := string(m[1])
+		if strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") {
+			modPath := filepath.Join(dir, path)
+			if modHash, err := module.HashModuleSources(modPath, false); err == nil {
+				inputs = append(inputs, module.CacheKeyInput{
+					Label: "dep " + path, Value: modHash,
+				})
+			}
+		}
+	}
+
+	return inputs
+}
+
+// computeRunBinaryCacheKey computes a cache key for a `promise run` invocation.
+// Returns the key and true if cacheable, or ("", false) if not (e.g., the source
+// references remote modules or embedded files can't be read).
+// The key covers: source content, compiler binary, std library, target triple,
+// build mode (debug/release), embedded file contents, and local module deps.
+func computeRunBinaryCacheKey(filename, target string, releaseMode bool) (string, bool) {
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return "", false
+	}
+
+	fh := fnv.New128a()
+	fh.Write(content)
+	fileHash := hex.EncodeToString(fh.Sum(nil))
+	compilerHash := module.CompilerHash()
+	sHash := cachedStdHash()
+	if sHash == "" {
+		return "", false
+	}
+
+	h := fnv.New128a()
+	fmt.Fprintf(h, "run-binary:%s\n", fileHash)
+	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
+	fmt.Fprintf(h, "std:%s\n", sHash)
+	fmt.Fprintf(h, "target:%s\n", target)
+	fmt.Fprintf(h, "mode:%s\n", buildModeStr(releaseMode))
+
+	abs, _ := filepath.Abs(filename)
+	dir := filepath.Dir(abs)
+
+	// Hash embedded file contents — if any `embed("path") annotation references
+	// an external file, its content must be part of the cache key so that changes
+	// to embedded files invalidate the cache even when the .pr source is unchanged.
+	embedRe := regexp.MustCompile("`embed\\(\"([^\"]+)\"")
+	embedMatches := embedRe.FindAllSubmatch(content, -1)
+	if len(embedMatches) > 0 {
+		var embedHashes []string
+		for _, m := range embedMatches {
+			embedPath := string(m[1])
+			absEmbed := filepath.Join(dir, embedPath)
+			embedContent, err := os.ReadFile(absEmbed)
+			if err != nil {
+				return "", false // embedded file not readable — don't cache
+			}
+			eh := fnv.New128a()
+			eh.Write(embedContent)
+			embedHashes = append(embedHashes, embedPath+":"+hex.EncodeToString(eh.Sum(nil)))
+		}
+		sort.Strings(embedHashes)
+		for _, eh := range embedHashes {
+			fmt.Fprintf(h, "embed:%s\n", eh)
+		}
+	}
+
+	// Hash local module dependencies from sourced use declarations.
+	useRe := regexp.MustCompile(`use\s+[\w_]+\s+"([^"]+)"`)
+	matches := useRe.FindAllSubmatch(content, -1)
+	if len(matches) > 0 {
+		var modHashes []string
+		for _, m := range matches {
+			path := string(m[1])
+			if strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") {
+				modPath := filepath.Join(dir, path)
+				modHash, err := module.HashModuleSources(modPath, false)
+				if err != nil {
+					return "", false
+				}
+				modHashes = append(modHashes, path+":"+modHash)
+			} else {
+				// Remote import — don't cache
+				return "", false
+			}
+		}
+		sort.Strings(modHashes)
+		for _, mh := range modHashes {
+			fmt.Fprintf(h, "mod:%s\n", mh)
+		}
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), true
+}
+
+// computeRunBinaryCacheInputs returns the list of inputs used in a run binary's
+// cache key computation for debug logging. Mirrors the logic in
+// computeRunBinaryCacheKey without computing the key itself.
+func computeRunBinaryCacheInputs(filename, target string, releaseMode bool) []module.CacheKeyInput {
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return nil
+	}
+
+	fh := fnv.New128a()
+	fh.Write(content)
+	fileHash := hex.EncodeToString(fh.Sum(nil))
+
+	inputs := []module.CacheKeyInput{
+		{Label: "file", Value: fileHash},
+		{Label: "compiler", Value: module.CompilerHash()},
+		{Label: "std", Value: cachedStdHash()},
+		{Label: "target", Value: target},
+		{Label: "mode", Value: buildModeStr(releaseMode)},
 	}
 
 	abs, _ := filepath.Abs(filename)

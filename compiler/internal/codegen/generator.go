@@ -87,6 +87,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	savedGenSuspend := c.generatorSuspend
 	savedGenFinalSuspend := c.generatorFinalSuspend
 	savedNamed := c.currentNamed
+	savedLocalNameCount := c.localNameCount // T0261
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -239,6 +240,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.generatorSuspend = savedGenSuspend
 	c.generatorFinalSuspend = savedGenFinalSuspend
 	c.currentNamed = savedNamed
+	c.localNameCount = savedLocalNameCount // T0261
 
 	// 7. Build factory body for original function:
 	//    allocate yield slot, call coroutine ramp, return {handle, slot}

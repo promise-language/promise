@@ -18768,3 +18768,20 @@ func TestMapIndexAssignDupBorrowValueMemberExpr(t *testing.T) {
 	`)
 	assertContains(t, ir, "strdup.copy")
 }
+
+// T0261: Verify that vector drop + go block produces unique local names
+// (no duplicate vecdrop.idx allocas).
+func TestGoBlockVectorDropUniqueNames(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[] items = ["a", "b"];
+			ch := channel[int](capacity: 1);
+			go { ch.send(1); ch.close(); };
+			int? v = <-ch;
+			print_line("{items.len}");
+		}
+	`)
+	// If codegen succeeds, localNameCount was properly saved/restored.
+	// The IR should contain the vector drop loop.
+	assertContains(t, ir, "vecdrop.idx")
+}

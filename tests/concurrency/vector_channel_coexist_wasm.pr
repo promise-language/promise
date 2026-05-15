@@ -1,0 +1,12 @@
+// T0261: Snapshot test for WASM — vector drop + goroutine in same function
+// must produce unique local names (no duplicate vecdrop.idx).
+main() `test(expected: "3 done") {
+  int[] nums = [1, 2, 3];
+  ch := channel[int](capacity: 1);
+  go {
+    ch.send(42);
+    ch.close();
+  };
+  int? received = <-ch;
+  print_line("{nums.len} done");
+}

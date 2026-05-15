@@ -6561,6 +6561,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedEnvTemps := c.envTemps                // T0100
 	savedEnvTempMap := c.envTempMap            // T0100
 	savedTempTracking := c.tempTrackingEnabled // T0073
+	savedLocalNameCount := c.localNameCount    // T0261
 	c.goExprFireAndForget = false              // reset for inner statements (B0109)
 
 	// Generate lambda body with fresh scope state
@@ -6692,6 +6693,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.envTemps = savedEnvTemps                // T0100
 	c.envTempMap = savedEnvTempMap            // T0100
 	c.tempTrackingEnabled = savedTempTracking // T0073
+	c.localNameCount = savedLocalNameCount    // T0261
 
 	// T0100: Track env temp for non-variable lambdas. If this lambda is
 	// assigned to a variable, maybeRegisterEnvFree handles cleanup and the
@@ -8222,6 +8224,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedPanicExitBlock := c.panicExitBlock
 	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	savedGoExprFF := c.goExprFireAndForget
+	savedLocalNameCount := c.localNameCount // T0261
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
@@ -8418,6 +8421,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.panicExitBlock = savedPanicExitBlock
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
 	c.goExprFireAndForget = savedGoExprFF
+	c.localNameCount = savedLocalNameCount // T0261
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
 	for name := range capturedDroppablesVB {
@@ -8801,7 +8805,8 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	savedPanicExitBlock := c.panicExitBlock
 	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	savedGoExprFF := c.goExprFireAndForget
-	c.goExprFireAndForget = false // reset for inner statements (B0109)
+	savedLocalNameCount := c.localNameCount // T0261
+	c.goExprFireAndForget = false           // reset for inner statements (B0109)
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -9001,6 +9006,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.panicExitBlock = savedPanicExitBlock
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
 	c.goExprFireAndForget = savedGoExprFF
+	c.localNameCount = savedLocalNameCount // T0261
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
 	// Ownership has been transferred to the goroutine.

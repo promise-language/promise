@@ -3453,6 +3453,7 @@ exports:
                    _pthread_cond_wait, _pthread_cond_signal,
                    _pthread_cond_broadcast, _pthread_cond_destroy,
                    _open, _close, _lseek, _unlink, _access, _mkdir, _rmdir,
+                   _stat, _lstat,
                    _fcntl, _opendir, _closedir, _readdir,
                    _fork, _execvp, _dup2, _pipe, _waitpid, _kill, _getpid,
                    _socket, _bind, _listen, _accept, _connect, _send, _recv,

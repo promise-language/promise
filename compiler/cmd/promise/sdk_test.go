@@ -28,6 +28,7 @@ func TestBundledLibSystemTBDContent(t *testing.T) {
 		"_malloc", "_free", "_realloc", // memory
 		"_pthread_create", "_pthread_join", // threading
 		"_write", "_read", "_exit", // I/O
+		"_stat", "_lstat", // file metadata
 		"_socket", "_bind", "_listen", // networking
 		"_kqueue", "_kevent", // macOS events
 		"_sin", "_cos", "_sqrt", // math

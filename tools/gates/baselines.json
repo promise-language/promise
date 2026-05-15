@@ -102,6 +102,15 @@
     },
     "host_test_failures": {
       "type": "informational"
+    },
+    "wasm_leak_count": {
+      "type": "informational"
+    },
+    "wasm_test_count": {
+      "type": "informational"
+    },
+    "wasm_test_failures": {
+      "type": "informational"
     }
   }
 }

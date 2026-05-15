@@ -2456,6 +2456,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 				} else {
 					fmt.Fprint(h, "\nmode:debug")
 				}
+				fmt.Fprintf(h, "\ntarget:%s", target)
 				contentCacheKey = hex.EncodeToString(h.Sum(nil))
 			}
 
@@ -2739,7 +2740,7 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) s
 	llcArgs := []string{"-mtriple=" + target, "-filetype=obj"}
 	if isWasmTarget(target) {
 		llcArgs = append(llcArgs, "-mattr=+bulk-memory,+mutable-globals,+sign-ext")
-	} else {
+	} else if !isWindowsTarget(target) {
 		llcArgs = append(llcArgs, "-function-sections", "-data-sections", "-relocation-model=pic")
 	}
 	llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())

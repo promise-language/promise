@@ -7,7 +7,7 @@ type Vec2 {
   int x `value;
   int y `value;
 
-  add(&this, Vec2 & other) Vec2 {
+  add(&this, Vec2 &other) Vec2 {
     return Vec2(x: this.x + other.x, y: this.y + other.y);
   }
 

@@ -10,7 +10,7 @@ type Document {
 }
 
 // Shared borrow — reads but does not consume.
-print_doc(Document & doc) {
+print_doc(Document &doc) {
   print_line("  title: {doc.title}");
   print_line("  content: {doc.content}");
 }

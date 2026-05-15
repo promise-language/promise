@@ -13,7 +13,7 @@ type Scanner `public `doc("Wraps a string for byte-by-byte reading. Satisfies Re
     this.pos = 0;
   }
 
-  read(~this, u8[]~buf) int `doc("Reads bytes from the src string into buf. Satisfies Reader.") {
+  read(~this, u8[] ~buf) int `doc("Reads bytes from the src string into buf. Satisfies Reader.") {
     int count = 0;
     while this.pos < this.src.len && count < buf.len {
       buf[count] = this.src.byte_at(this.pos);

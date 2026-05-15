@@ -61,10 +61,10 @@ _os_spawn_streaming_env!(string program, string[] args, string[] env_entries, in
 _os_spawn_stdin_fd() int `extern("promise_os_spawn_stdin_fd");
 
 // Reads up to buf.len bytes from a pipe fd. Returns bytes read (0=EOF, negative=error).
-_os_pipe_read_bytes(int fd, u8[]~buf) int `extern("promise_os_pipe_read_bytes");
+_os_pipe_read_bytes(int fd, u8[] ~buf) int `extern("promise_os_pipe_read_bytes");
 
 // Writes bytes from buf to a pipe fd. Returns bytes written (negative=error).
-_os_pipe_write_bytes(int fd, u8[]~buf) int `extern("promise_os_pipe_write_bytes");
+_os_pipe_write_bytes(int fd, u8[] ~buf) int `extern("promise_os_pipe_write_bytes");
 
 // Closes a pipe fd. Returns 0 on success, negative on error.
 _os_pipe_close(int fd) int `extern("promise_os_pipe_close");
@@ -101,7 +101,7 @@ _os_signal_init() int `extern("promise_os_signal_init");
 _os_signal_register(int signum) int `extern("promise_os_signal_register");
 
 // Reads from signal pipe into buf. Returns bytes read (blocking).
-_os_signal_read(u8[]~buf) int `extern("promise_os_signal_read");
+_os_signal_read(u8[] ~buf) int `extern("promise_os_signal_read");
 
 // Sends an arbitrary signal to a process. Returns 0 on success, -1 on error.
 _os_send_signal(int pid, int signum) int `extern("promise_os_send_signal");
@@ -128,7 +128,7 @@ type ProcessResult `public `doc("The result of executing a subprocess. Contains 
 type ProcessInput `public `doc("Write end of a subprocess stdin pipe. Satisfies the Writer structural interface. Auto-closes on drop.") {
   int _fd;
 
-  write!(~this, u8[]~buf) int `public `doc("Writes bytes from buf to the subprocess stdin pipe. Returns the number of bytes written. Raises an error on I/O failure.") {
+  write!(~this, u8[] ~buf) int `public `doc("Writes bytes from buf to the subprocess stdin pipe. Returns the number of bytes written. Raises an error on I/O failure.") {
     if this._fd < 0 {
       raise OsError(code: 9, message: "pipe already closed");
     }
@@ -173,7 +173,7 @@ type ProcessInput `public `doc("Write end of a subprocess stdin pipe. Satisfies 
 type ProcessOutput `public `doc("Read end of a subprocess stdout or stderr pipe. Satisfies the Reader structural interface. Auto-closes on drop.") {
   int _fd;
 
-  read!(~this, u8[]~buf) int `public `doc("Reads up to buf.len bytes from the pipe. Returns the number of bytes read, or 0 at EOF. Raises an error on I/O failure.") {
+  read!(~this, u8[] ~buf) int `public `doc("Reads up to buf.len bytes from the pipe. Returns the number of bytes read, or 0 at EOF. Raises an error on I/O failure.") {
     if this._fd < 0 {
       return 0;
     }

@@ -137,7 +137,7 @@ is_nfd(string value) bool `public `doc("Returns true if the string is in NFD for
 
 // --- Internal: UTF-8 encoding ---
 
-_is_ascii(string & s) bool {
+_is_ascii(string &s) bool {
   int i = 0;
   while i < s.len {
     if s.byte_at(i) > 127u8 {
@@ -158,7 +158,7 @@ _encode_codepoints(int[] cps) string {
   return string.from_bytes(buf);
 }
 
-_encode_utf8(u8[]~buf, int cp) {
+_encode_utf8(u8[] ~buf, int cp) {
   if cp < 128 {
     buf.push(cp as! u8);
   } else if cp < 2048 {
@@ -177,7 +177,7 @@ _encode_utf8(u8[]~buf, int cp) {
 }
 
 // Decode one UTF-8 codepoint from string at byte position pos.
-_decode_one(string & s, int pos) int {
+_decode_one(string &s, int pos) int {
   int b0 = s.byte_at(pos) as! int;
   if b0 < 128 {
     return b0;
@@ -273,7 +273,7 @@ _decompose_string(string s, i32[] ccc_cp, i32[] ccc_val, i32[] decomp_cp, i32[] 
 }
 
 // Recursively decompose a codepoint, appending results to output.
-_full_decompose(int cp, i32[] decomp_cp, i32[] decomp_off, i32[] decomp_data, int[]~output) {
+_full_decompose(int cp, i32[] decomp_cp, i32[] decomp_off, i32[] decomp_data, int[] ~output) {
   // Hangul syllable decomposition (algorithmic)
   if cp >= _hangul_sbase() && cp < _hangul_sbase() + _hangul_scount() {
     int s_index = cp - _hangul_sbase();
@@ -303,7 +303,7 @@ _full_decompose(int cp, i32[] decomp_cp, i32[] decomp_off, i32[] decomp_data, in
 }
 
 // Canonical Ordering Algorithm: bubble-sort combining marks by CCC.
-_canonical_order(int[]~cps, i32[] ccc_cp, i32[] ccc_val) {
+_canonical_order(int[] ~cps, i32[] ccc_cp, i32[] ccc_val) {
   int i = 1;
   while i < cps.len {
     int cc_prev = _lookup_ccc(cps[i - 1], ccc_cp, ccc_val);

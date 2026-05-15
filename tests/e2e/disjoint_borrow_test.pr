@@ -24,7 +24,7 @@ type TwoCounters {
 
 // --- Helper functions ---
 
-get_ref(string & s) string & {
+get_ref(string &s) string & {
   return s;
 }
 
@@ -32,8 +32,8 @@ get_ref(string & s) string & {
 
 disjoint_shared_borrows() `test {
   p := Pair(a: "hello", b: "world");
-  string & ra = get_ref(p.a);
-  string & rb = get_ref(p.b);
+  string &ra = get_ref(p.a);
+  string &rb = get_ref(p.b);
   assert(true, "disjoint shared borrows compiled and ran");
 }
 

@@ -12,8 +12,8 @@ _net_socket_listen(int fd, int backlog) int `extern("promise_net_socket_listen")
 _net_socket_accept_addr(int fd) int `extern("promise_net_socket_accept_addr");
 _net_socket_connect_addr(int fd, string host, int port) int `extern("promise_net_socket_connect_addr");
 _net_socket_close(int fd) int `extern("promise_net_socket_close");
-_net_socket_send(int fd, u8[]~data) int `extern("promise_net_socket_send");
-_net_socket_recv(int fd, u8[]~buf) int `extern("promise_net_socket_recv");
+_net_socket_send(int fd, u8[] ~data) int `extern("promise_net_socket_send");
+_net_socket_recv(int fd, u8[] ~buf) int `extern("promise_net_socket_recv");
 _net_socket_shutdown(int fd, int how) int `extern("promise_net_socket_shutdown");
 _net_socket_get_error(int fd) int `extern("promise_net_socket_get_error");
 _net_socket_getsockname(int fd) int `extern("promise_net_socket_getsockname");
@@ -224,7 +224,7 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
     return TcpStream(_fd: fd, _pd: pd);
   }
 
-  read!(~this, u8[]~buf) int `public `doc("Reads bytes into buf. Returns the number of bytes read (0 at EOF). Blocks the goroutine until data is available.") {
+  read!(~this, u8[] ~buf) int `public `doc("Reads bytes into buf. Returns the number of bytes read (0 at EOF). Blocks the goroutine until data is available.") {
     while true {
       int n = _net_socket_recv(this._fd, buf);
       if n >= 0 {
@@ -240,7 +240,7 @@ type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read
     raise NetError(code: 0, message: "unreachable");
   }
 
-  write!(~this, u8[]~data) int `public `doc("Writes bytes from data. Returns the number of bytes written. Blocks the goroutine until the socket is writable.") {
+  write!(~this, u8[] ~data) int `public `doc("Writes bytes from data. Returns the number of bytes written. Blocks the goroutine until the socket is writable.") {
     while true {
       int n = _net_socket_send(this._fd, data);
       if n >= 0 {

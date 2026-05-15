@@ -3,7 +3,7 @@
 // T[] is the vector type. Vectors grow dynamically and are heap-allocated.
 // Literal syntax: [1, 2, 3]. Access via indexing [] and slicing [:].
 // Helper to print an int vector.
-print_vec(int[] & v) {
+print_vec(int[] &v) {
   print("[");
   for i in 0..v.len {
     if i > 0 {

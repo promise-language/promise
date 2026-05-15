@@ -73,7 +73,7 @@ _write_line_through_writer!(Writer ~w, string s) {
   w.write_line(s);
 }
 
-_write_bytes_through_writer!(Writer ~w, u8[]~data) int {
+_write_bytes_through_writer!(Writer ~w, u8[] ~data) int {
   return w.write(data);
 }
 
@@ -101,7 +101,7 @@ test_writer_structural_write_bytes() `test {
 
 // --- Reader structural interface ---
 
-_read_through_reader!(Reader ~r, u8[]~buf) int {
+_read_through_reader!(Reader ~r, u8[] ~buf) int {
   return r.read(buf);
 }
 
@@ -156,13 +156,13 @@ test_reader_structural_read_byte() `test {
 
 // --- MutRef indexing regression (vector indexing through ~ parameter) ---
 
-_fill_buf(u8[]~buf) {
+_fill_buf(u8[] ~buf) {
   buf[0] = 65u8;
   buf[1] = 66u8;
   buf[2] = 67u8;
 }
 
-_check_buf(u8[]~buf) bool {
+_check_buf(u8[] ~buf) bool {
   return buf[0] == 65u8 && buf[1] == 66u8 && buf[2] == 67u8;
 }
 
@@ -182,17 +182,17 @@ test_mutref_vector_index_read() `test {
 
 // --- B0149: MutRef vector push with reallocation ---
 
-_push_one(int[]~output) {
+_push_one(int[] ~output) {
   output.push(42);
 }
 
-_push_three(int[]~output) {
+_push_three(int[] ~output) {
   output.push(1);
   output.push(2);
   output.push(3);
 }
 
-_conditional_push(int cp, int[]~output) {
+_conditional_push(int cp, int[] ~output) {
   if cp >= 100 {
     output.push(1);
     output.push(2);
@@ -205,7 +205,7 @@ _conditional_push(int cp, int[]~output) {
   }
 }
 
-_nested_push(int[]~output) {
+_nested_push(int[] ~output) {
   // Calls another function with the same MutRef param (forwarding)
   _push_one(output);
   _push_one(output);

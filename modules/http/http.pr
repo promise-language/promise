@@ -360,7 +360,7 @@ _method_to_string(Method m) string {
   };
 }
 
-_write_all!(net.TcpStream ~stream, u8[]~data) {
+_write_all!(net.TcpStream ~stream, u8[] ~data) {
   int n = stream.write(data)?^;
   int offset = n;
   while offset < data.len {

@@ -95,6 +95,75 @@ func TestFormat(t *testing.T) {
 			input:    "int x = ~bits;",
 			expected: "int x = ~bits;\n",
 		},
+		// Borrow modifier &: no space after & when it's a type modifier (B0295)
+		{
+			name:     "borrow modifier named type",
+			input:    "f(String & s) {}",
+			expected: "f(String &s) {\n}\n",
+		},
+		{
+			name:     "borrow modifier primitive type",
+			input:    "f(int & x) {}",
+			expected: "f(int &x) {\n}\n",
+		},
+		{
+			name:     "borrow modifier string type",
+			input:    "f(string & s) {}",
+			expected: "f(string &s) {\n}\n",
+		},
+		{
+			name:     "borrow modifier after array type",
+			input:    "f(int[] & buf) {}",
+			expected: "f(int[] &buf) {\n}\n",
+		},
+		{
+			name:     "borrow modifier after generic type",
+			input:    "f(Map[string, int] & m) {}",
+			expected: "f(Map[string, int] &m) {\n}\n",
+		},
+		// Move modifier ~: space before ~, no space after (B0295)
+		{
+			name:     "move modifier after array type",
+			input:    "f(int[] ~ buf) {}",
+			expected: "f(int[] ~buf) {\n}\n",
+		},
+		{
+			name:     "move modifier after generic type",
+			input:    "f(Map[string, int] ~ m) {}",
+			expected: "f(Map[string, int] ~m) {\n}\n",
+		},
+		{
+			name:     "move modifier after named type",
+			input:    "f(Document ~ doc) {}",
+			expected: "f(Document ~doc) {\n}\n",
+		},
+		{
+			name:     "move modifier after primitive type",
+			input:    "f(string ~ s) {}",
+			expected: "f(string ~s) {\n}\n",
+		},
+		{
+			name:     "move modifier variable declaration",
+			input:    "Document ~ d = x;",
+			expected: "Document ~d = x;\n",
+		},
+		// Borrow modifier & in variable declarations (B0295)
+		{
+			name:     "borrow modifier variable declaration",
+			input:    "String & r = s;",
+			expected: "String &r = s;\n",
+		},
+		// Binary & must still get spaces (B0295 non-regression)
+		{
+			name:     "binary AND lowercase",
+			input:    "x := a & b;",
+			expected: "x := a & b;\n",
+		},
+		{
+			name:     "binary AND with mask",
+			input:    "x := count & mask;",
+			expected: "x := count & mask;\n",
+		},
 		{
 			name:     "receive operator",
 			input:    "x := <- ch;",
@@ -109,6 +178,11 @@ func TestFormat(t *testing.T) {
 			name:     "postfix bang",
 			input:    "result ! ;",
 			expected: "result!;\n",
+		},
+		{
+			name:     "error caret propagation",
+			input:    "result ?^ ;",
+			expected: "result?^;\n",
 		},
 		{
 			name:     "arrow type",
@@ -314,6 +388,16 @@ func TestFormat(t *testing.T) {
 			name:     "as expression",
 			input:    "x as int",
 			expected: "x as int\n",
+		},
+		{
+			name:     "int literal before word",
+			input:    "x := 42 as int;",
+			expected: "x := 42 as int;\n",
+		},
+		{
+			name:     "char literal before word",
+			input:    "x := 'a' as int;",
+			expected: "x := 'a' as int;\n",
 		},
 		{
 			name:     "return statement",
@@ -1021,6 +1105,13 @@ func TestIdempotent(t *testing.T) {
 		"string s = \"{x /* } */ + y}\";\n",
 		"string s = \"{\"\"\"hello\"\"\"}\";\n",
 		"string s = \"{r\"path\\\\end\"}\";\n",
+		// B0295: borrow/move modifier idempotency
+		"f(String &s) {\n}\n",
+		"f(int[] &buf) {\n}\n",
+		"f(Map[string, int] &m) {\n}\n",
+		"f(int[] ~buf) {\n}\n",
+		"f(Document ~doc) {\n}\n",
+		"String &r = s;\n",
 	}
 
 	for i, input := range inputs {

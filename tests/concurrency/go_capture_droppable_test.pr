@@ -54,7 +54,7 @@ type Payload {
   int value;
 }
 
-read_payload(string name, int value, channel[int]~ch) {
+read_payload(string name, int value, channel[int] ~ch) {
   assert(name.len == 5, "payload name");
   assert(value == 99, "payload value");
   ch.send(1);
@@ -75,7 +75,7 @@ test_user_type_fields_captured() `test(exclude: "wasm32") {
 type Greeter {
   string prefix;
 
-  greet(this, string ~name, channel[int]~ch) {
+  greet(this, string ~name, channel[int] ~ch) {
     int n = this.prefix.len + name.len;
     ch.send(n);
   }

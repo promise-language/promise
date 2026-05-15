@@ -1368,8 +1368,11 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 	}
 	// & as binary AND: space around when preceded by a value
 	// e.g., `a & b`, `c & !d`
+	// Exception: & as borrow modifier (TypeRef &name) — no space after &.
 	if p == tkAmp && isValue(f.prevPrev) {
-		return true
+		if !(c == tkIdent && isBorrowModifierContext(f.prevPrev)) {
+			return true
+		}
 	}
 	if c == tkAmp && isValue(prev) {
 		return true
@@ -1444,6 +1447,12 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 
 	// After ) before ident, literal, {
 	if p == tkRParen && (isWord(cur) || c == tkString || c == tkInt || c == tkFloat || c == tkLBrace) {
+		return true
+	}
+
+	// After ] before borrow/move modifier ~: space needed (e.g., int[] ~buf, Map[K,V] ~m)
+	// Note: ] & is already handled above by (c==tkAmp && isValue(prev))
+	if p == tkRBracket && c == tkTilde {
 		return true
 	}
 
@@ -1532,6 +1541,29 @@ func isControlKeyword(text string) bool {
 	switch text {
 	case "if", "for", "while", "match", "select", "go", "else", "unsafe",
 		"return", "raise", "yield", "in":
+		return true
+	}
+	return false
+}
+
+// isBorrowModifierContext reports whether tok looks like the end of a type ref,
+// meaning & or ~ that follows it is a borrow/move modifier, not a binary operator.
+func isBorrowModifierContext(tok token) bool {
+	if tok.kind == tkIdent {
+		// PascalCase identifiers are type names (e.g. String, Document, Echo)
+		if len(tok.text) > 0 && tok.text[0] >= 'A' && tok.text[0] <= 'Z' {
+			return true
+		}
+		// Primitive type keywords
+		switch tok.text {
+		case "int", "uint", "i8", "i16", "i32", "i64",
+			"u8", "u16", "u32", "u64", "f32", "f64",
+			"bool", "char", "string":
+			return true
+		}
+	}
+	// ] ends array/generic type expressions: int[], Map[K,V]
+	if tok.kind == tkRBracket {
 		return true
 	}
 	return false

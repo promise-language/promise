@@ -18,8 +18,8 @@ _io_errno() int `extern("promise_io_errno");
 // read_line bridge: reads one line from fd, sets errno to _io_eof_sentinel() on EOF
 _io_file_read_line(int fd) string `extern("promise_io_file_read_line");
 // byte-level read/write: operate directly on u8[] vectors
-_io_file_read(int fd, u8[]~buf) int `extern("promise_io_file_read");
-_io_file_write(int fd, u8[]~buf) int `extern("promise_io_file_write");
+_io_file_read(int fd, u8[] ~buf) int `extern("promise_io_file_read");
+_io_file_write(int fd, u8[] ~buf) int `extern("promise_io_file_write");
 // dir listing bridge: open → iterate → close
 _io_dir_open(string path) int `extern("promise_io_dir_open");
 _io_dir_next_name(int handle) string `extern("promise_io_dir_next_name");
@@ -188,7 +188,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
 
   // ── Byte-level I/O (Reader/Writer interface) ──────────────────────────
 
-  read!(~this, u8[]~buf) int `public `doc("Reads up to buf.len bytes into buf. Returns bytes read (0 = EOF). Satisfies Reader.") {
+  read!(~this, u8[] ~buf) int `public `doc("Reads up to buf.len bytes into buf. Returns bytes read (0 = EOF). Satisfies Reader.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
     }
@@ -199,7 +199,7 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     return n;
   }
 
-  write!(~this, u8[]~buf) int `public `doc("Writes bytes from buf to the file. Returns bytes written. Satisfies Writer.") {
+  write!(~this, u8[] ~buf) int `public `doc("Writes bytes from buf to the file. Returns bytes written. Satisfies Writer.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
     }
@@ -384,7 +384,7 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
     this._end = 0;
   }
 
-  read!(~this, u8[]~buf) int `public `doc("Reads up to buf.len bytes. Returns bytes read (0 = EOF). Satisfies Reader.") {
+  read!(~this, u8[] ~buf) int `public `doc("Reads up to buf.len bytes. Returns bytes read (0 = EOF). Satisfies Reader.") {
     if buf.len == 0 {
       return 0;
     }
@@ -472,7 +472,7 @@ type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batc
     this._len = 0;
   }
 
-  write!(~this, u8[]~buf) int `public `doc("Writes bytes through the buffer. Returns bytes written. Satisfies Writer.") {
+  write!(~this, u8[] ~buf) int `public `doc("Writes bytes through the buffer. Returns bytes written. Satisfies Writer.") {
     int total = 0;
     while total < buf.len {
       // Copy to internal buffer

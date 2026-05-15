@@ -6,11 +6,11 @@ type Box {
 
 // --- Helper functions ---
 
-get_ref(string & s) string & {
+get_ref(string &s) string & {
   return s;
 }
 
-read_ref(string & s) int {
+read_ref(string &s) int {
   return 0;
 }
 
@@ -22,7 +22,7 @@ consume(string s) {
 borrow_expires_when_ref_unused() `test {
   // Borrower r is never used after declaration — borrow expires immediately.
   string s = "hello";
-  string & r = get_ref(s);
+  string &r = get_ref(s);
   // With NLL narrowing, r's borrow expires here (last use was declaration).
   // So consume(s) is allowed — no active borrow on s.
   consume(s);
@@ -32,7 +32,7 @@ borrow_expires_when_ref_unused() `test {
 borrow_expires_after_last_read() `test {
   // Borrower r is used once, then the borrow expires.
   string s = "hello";
-  string & r = get_ref(s);
+  string &r = get_ref(s);
   int n = read_ref(r);
   // r's last use was read_ref(r). Borrow expires after that.
   consume(s);
@@ -42,7 +42,7 @@ borrow_expires_after_last_read() `test {
 borrow_expires_before_reassign() `test {
   // Borrower r is not used after the origin is reassigned.
   string s = "hello";
-  string & r = get_ref(s);
+  string &r = get_ref(s);
   // r's last use is at declaration. Borrow expires.
   s = "world";
   assert(s == "world", "origin reassigned after borrow expired");
@@ -51,7 +51,7 @@ borrow_expires_before_reassign() `test {
 borrow_expires_in_control_flow() `test {
   // Borrower r used only inside an if block — borrow expires after the if.
   string s = "hello";
-  string & r = get_ref(s);
+  string &r = get_ref(s);
   if true {
     int n = read_ref(r);
   }
@@ -63,10 +63,10 @@ borrow_expires_in_control_flow() `test {
 sequential_borrows_with_narrowing() `test {
   // Two sequential borrows on the same variable, each expiring at last use.
   string s = "hello";
-  string & r1 = get_ref(s);
+  string &r1 = get_ref(s);
   int n1 = read_ref(r1);
   // r1's borrow expired. Now we can create a new borrow.
-  string & r2 = get_ref(s);
+  string &r2 = get_ref(s);
   int n2 = read_ref(r2);
   // r2's borrow expired. Now we can move.
   consume(s);

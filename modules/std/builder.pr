@@ -5,7 +5,7 @@ type Builder `public `doc("Byte-buffer string builder. Satisfies Writer.") {
     this.buf = Vector[u8](capacity: capacity);
   }
 
-  write(~this, u8[]~data) int `doc("Appends raw bytes. Satisfies Writer.") {
+  write(~this, u8[] ~data) int `doc("Appends raw bytes. Satisfies Writer.") {
     int i = 0;
     while i < data.len {
       this.buf.push(data[i]);

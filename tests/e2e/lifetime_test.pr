@@ -1,12 +1,12 @@
 // Tests for explicit lifetime annotations (B0033).
 // Elision rule 2: single ref param — lifetime is unambiguous.
-get_first(string & s) string & {
+get_first(string &s) string & {
   return s;
 }
 
 single_ref_elision() `test {
   string s = "hello";
-  string & r = get_first(s);
+  string &r = get_first(s);
   assert(r.len == 5, "single ref elision: len");
 }
 
@@ -21,12 +21,12 @@ type Named {
 
 this_receiver_elision() `test {
   Named n = Named(name: "world");
-  string & r = n.get_name();
+  string &r = n.get_name();
   assert(r.len == 5, "this receiver elision: len");
 }
 
 // Explicit lifetime: longest pattern — both params share the same lifetime.
-longest(string & a `lifetime(x), string & b `lifetime(x)) string & `lifetime(x) {
+longest(string &a `lifetime(x), string &b `lifetime(x)) string & `lifetime(x) {
   if a.len > b.len {
     return a;
   }
@@ -36,18 +36,18 @@ longest(string & a `lifetime(x), string & b `lifetime(x)) string & `lifetime(x) 
 explicit_same_lifetime() `test {
   string a = "short";
   string b = "longer string";
-  string & r = longest(a, b);
+  string &r = longest(a, b);
   assert(r.len == 13, "explicit same lifetime: longest");
 }
 
 // Explicit lifetime: distinct lifetimes, pick one.
-pick_first(string & a `lifetime(x), string & b `lifetime(y)) string & `lifetime(x) {
+pick_first(string &a `lifetime(x), string &b `lifetime(y)) string & `lifetime(x) {
   return a;
 }
 
 explicit_distinct_lifetimes() `test {
   string a = "first";
   string b = "second";
-  string & r = pick_first(a, b);
+  string &r = pick_first(a, b);
   assert(r.len == 5, "explicit distinct lifetimes: pick first");
 }

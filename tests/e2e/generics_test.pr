@@ -198,7 +198,7 @@ type Echo {
   }
 }
 
-invoke_echo[T](Echo & e, T val) T {
+invoke_echo[T](Echo &e, T val) T {
   return e.echo[T](val);
 }
 
@@ -217,7 +217,7 @@ type Foo {
 }
 
 type Bar {
-  delegate[T](Foo & f, T val) T {
+  delegate[T](Foo &f, T val) T {
     return f.echo_val[T](val);
   }
 }
@@ -372,7 +372,7 @@ test_multiple_inner_generic_calls() `test {
 // --- Cross-resolution: method calls both func and method ---
 
 type Combiner {
-  run[T](Echo & e, T val) T {
+  run[T](Echo &e, T val) T {
     T a = helper_func[T](val);
     return e.echo[T](a);
   }

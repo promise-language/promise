@@ -1,0 +1,474 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"djabi.dev/go/promise_lang/internal/module"
+)
+
+type doctorStatus int
+
+const (
+	doctorOK   doctorStatus = iota // [✓]
+	doctorWarn                     // [!]
+	doctorErr                      // [✗]
+)
+
+func (s doctorStatus) String() string {
+	switch s {
+	case doctorOK:
+		return "ok"
+	case doctorWarn:
+		return "warning"
+	default:
+		return "error"
+	}
+}
+
+type doctorCheck struct {
+	Name     string   `json:"name"`
+	Status   string   `json:"status"`
+	Required bool     `json:"required"`
+	Summary  string   `json:"summary"`
+	Details  []string `json:"details,omitempty"`
+	Fix      string   `json:"fix,omitempty"`
+}
+
+type doctorReport struct {
+	Checks   []doctorCheck `json:"checks"`
+	Errors   int           `json:"errors"`
+	Warnings int           `json:"warnings"`
+}
+
+type doctorFlags struct {
+	jsonOutput bool
+	fix        bool
+	network    bool
+}
+
+func runDoctor(args []string) {
+	var flags doctorFlags
+	for _, arg := range args {
+		switch arg {
+		case "-json":
+			flags.jsonOutput = true
+		case "-fix":
+			flags.fix = true
+		case "-network":
+			flags.network = true
+		}
+	}
+
+	checks := []doctorCheck{
+		doctorCheckInstallation(),
+		doctorCheckLLVM(),
+	}
+	if runtime.GOOS == "linux" {
+		checks = append(checks, doctorCheckMuslCRT())
+	}
+	checks = append(checks,
+		doctorCheckBuildCache(),
+		doctorCheckModuleCache(flags.network),
+		doctorCheckPromiseHome(),
+		doctorCheckJava(),
+	)
+	if runtime.GOOS == "darwin" {
+		checks = append(checks, doctorCheckXcodeCLT())
+	}
+	checks = append(checks, doctorCheckPath())
+
+	var report doctorReport
+	report.Checks = checks
+	var requiredErrors int
+	for _, c := range checks {
+		switch c.Status {
+		case "error":
+			report.Errors++
+			if c.Required {
+				requiredErrors++
+			}
+		case "warning":
+			report.Warnings++
+		}
+	}
+
+	if flags.jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(report)
+	} else {
+		printDoctorReport(report, flags)
+	}
+
+	if requiredErrors > 0 {
+		os.Exit(1)
+	}
+}
+
+func printDoctorReport(report doctorReport, flags doctorFlags) {
+	fmt.Println("Promise doctor — checking your environment")
+	fmt.Println()
+
+	for _, c := range report.Checks {
+		var icon string
+		switch c.Status {
+		case "ok":
+			icon = "[✓]"
+		case "warning":
+			icon = "[!]"
+		default:
+			icon = "[✗]"
+		}
+		fmt.Printf("%s %s\n", icon, c.Name)
+		if c.Summary != "" {
+			fmt.Printf("    %s\n", c.Summary)
+		}
+		for _, d := range c.Details {
+			fmt.Printf("    %s\n", d)
+		}
+		if flags.fix && c.Fix != "" {
+			fmt.Printf("    Fix: %s\n", c.Fix)
+		}
+		fmt.Println()
+	}
+
+	// Summary line
+	if report.Errors == 0 && report.Warnings == 0 {
+		fmt.Println("No issues found.")
+	} else {
+		var parts []string
+		if report.Errors > 0 {
+			parts = append(parts, fmt.Sprintf("%d error(s)", report.Errors))
+		}
+		if report.Warnings > 0 {
+			parts = append(parts, fmt.Sprintf("%d warning(s)", report.Warnings))
+		}
+		fmt.Println(strings.Join(parts, ", "))
+	}
+}
+
+func makeDoctorCheck(name string, status doctorStatus, required bool) doctorCheck {
+	return doctorCheck{
+		Name:     name,
+		Status:   status.String(),
+		Required: required,
+	}
+}
+
+func doctorCheckInstallation() doctorCheck {
+	c := makeDoctorCheck("Promise installation", doctorOK, true)
+
+	// Version
+	v := version
+	if v == "" {
+		if epoch, err := module.CompilerEpoch(embeddedCatalog); err == nil {
+			v = epoch
+		} else {
+			v = "unknown"
+		}
+	}
+	c.Summary = fmt.Sprintf("Version: %s (%s-%s)", v, runtime.GOOS, runtime.GOARCH)
+
+	// Executable path
+	if execPath, err := os.Executable(); err == nil {
+		c.Details = append(c.Details, "Binary: "+execPath)
+	}
+
+	// Home directory
+	if home, err := module.PromiseHome(); err == nil {
+		c.Details = append(c.Details, "Home: "+home)
+	}
+
+	// Embedded stdlib file count
+	if entries, err := embeddedModules.ReadDir("resources/modules/std"); err == nil {
+		c.Details = append(c.Details, fmt.Sprintf("Embedded stdlib: %d files", len(entries)))
+	} else {
+		c.Status = doctorErr.String()
+		c.Summary = "Embedded stdlib not found — binary may be corrupted"
+		c.Fix = "Rebuild with bin/build"
+	}
+
+	return c
+}
+
+func doctorCheckLLVM() doctorCheck {
+	c := makeDoctorCheck("LLVM toolchain", doctorOK, true)
+
+	// Determine required tools for this platform
+	type toolInfo struct {
+		name  string
+		label string
+	}
+	tools := []toolInfo{
+		{"opt", "opt"},
+		{"llc", "llc"},
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		tools = append(tools, toolInfo{"ld64.lld", "linker"})
+	case "windows":
+		tools = append(tools, toolInfo{"lld-link", "linker"})
+	default:
+		tools = append(tools, toolInfo{"ld.lld", "linker"})
+	}
+
+	if hasEmbeddedLLVM {
+		c.Details = append(c.Details, "Source: embedded")
+	} else {
+		c.Details = append(c.Details, "Source: system PATH")
+	}
+
+	var missing []string
+	for _, tool := range tools {
+		path, err := findLLVMTool(tool.name)
+		if err != nil {
+			missing = append(missing, tool.name)
+			continue
+		}
+		v := llvmToolVersion(path)
+		if v > 0 {
+			c.Details = append(c.Details, fmt.Sprintf("%s: %s (LLVM %d)", tool.label, path, v))
+			if v < minLLVMMajor {
+				c.Status = doctorErr.String()
+				c.Summary = fmt.Sprintf("%s version %d is too old (minimum: %d)", tool.name, v, minLLVMMajor)
+				c.Fix = fmt.Sprintf("Install LLVM %d+", minLLVMMajor)
+			}
+		} else {
+			c.Details = append(c.Details, fmt.Sprintf("%s: %s", tool.label, path))
+		}
+	}
+
+	if len(missing) > 0 {
+		c.Status = doctorErr.String()
+		c.Summary = "Missing LLVM tools: " + strings.Join(missing, ", ")
+		if runtime.GOOS == "darwin" {
+			c.Fix = fmt.Sprintf("brew install llvm lld (LLVM %d+)", minLLVMMajor)
+		} else {
+			c.Fix = fmt.Sprintf("Install LLVM %d+ or use a release build with embedded LLVM", minLLVMMajor)
+		}
+	} else if c.Status == doctorOK.String() {
+		c.Summary = "All tools found"
+	}
+
+	return c
+}
+
+func doctorCheckMuslCRT() doctorCheck {
+	c := makeDoctorCheck("musl CRT (Linux static linking)", doctorOK, true)
+
+	target := "x86_64-unknown-linux-musl"
+	if runtime.GOARCH == "arm64" {
+		target = "aarch64-unknown-linux-musl"
+	}
+
+	if hasEmbeddedMuslCRT {
+		c.Details = append(c.Details, "Source: embedded")
+	} else {
+		c.Details = append(c.Details, "Source: system")
+	}
+
+	dir, err := findMuslCRT(target)
+	if err != nil {
+		c.Status = doctorErr.String()
+		c.Summary = "musl CRT objects not found"
+		c.Fix = "Use a release build with embedded CRT, or install musl-tools"
+		return c
+	}
+
+	c.Details = append(c.Details, "Path: "+dir)
+	if muslCRTComplete(dir) {
+		c.Summary = "All CRT objects found"
+	} else {
+		c.Status = doctorErr.String()
+		c.Summary = "Incomplete musl CRT files in " + dir
+		c.Fix = "Delete the cache directory and rebuild to re-extract CRT files"
+	}
+
+	return c
+}
+
+func doctorCheckBuildCache() doctorCheck {
+	c := makeDoctorCheck("Build cache", doctorOK, false)
+
+	dir, err := module.BuildCacheDir()
+	if err != nil {
+		c.Status = doctorWarn.String()
+		c.Summary = "Cannot access build cache"
+		c.Details = append(c.Details, err.Error())
+		c.Fix = "Check PROMISE_HOME permissions"
+		return c
+	}
+
+	c.Details = append(c.Details, "Path: "+dir)
+
+	var entryCount int
+	var totalSize int64
+	const maxWalk = 10000
+	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			entryCount++
+			if info, err := d.Info(); err == nil {
+				totalSize += info.Size()
+			}
+		}
+		if entryCount >= maxWalk {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+
+	sizeMB := float64(totalSize) / (1024 * 1024)
+	suffix := ""
+	if entryCount >= maxWalk {
+		suffix = "+"
+	}
+	c.Summary = fmt.Sprintf("%d%s entries, %.1f MB", entryCount, suffix, sizeMB)
+
+	return c
+}
+
+func doctorCheckModuleCache(network bool) doctorCheck {
+	c := makeDoctorCheck("Module cache", doctorOK, false)
+
+	home, err := module.PromiseHome()
+	if err != nil {
+		c.Status = doctorWarn.String()
+		c.Summary = "Cannot determine Promise home"
+		c.Fix = "Set PROMISE_HOME or ensure ~/.promise/ is accessible"
+		return c
+	}
+
+	modCacheDir := filepath.Join(home, "cache", "modules")
+	c.Details = append(c.Details, "Path: "+modCacheDir)
+
+	if info, err := os.Stat(modCacheDir); err != nil {
+		c.Summary = "Module cache directory does not exist (will be created on first use)"
+	} else if !info.IsDir() {
+		c.Status = doctorErr.String()
+		c.Summary = "Module cache path exists but is not a directory"
+	} else {
+		c.Summary = "Module cache directory exists"
+	}
+
+	if network {
+		// Simple git host reachability check
+		cmd := exec.Command("git", "ls-remote", "--exit-code", "https://github.com")
+		if err := cmd.Run(); err != nil {
+			c.Details = append(c.Details, "Network: git host unreachable")
+			if c.Status == doctorOK.String() {
+				c.Status = doctorWarn.String()
+			}
+		} else {
+			c.Details = append(c.Details, "Network: git host reachable")
+		}
+	}
+
+	return c
+}
+
+func doctorCheckPromiseHome() doctorCheck {
+	c := makeDoctorCheck("PROMISE_HOME", doctorOK, false)
+
+	envVal := os.Getenv("PROMISE_HOME")
+	if envVal != "" {
+		c.Summary = "Set to: " + envVal
+		if info, err := os.Stat(envVal); err != nil {
+			c.Status = doctorWarn.String()
+			c.Details = append(c.Details, "Directory does not exist")
+			c.Fix = "Create the directory or unset PROMISE_HOME to use the default (~/.promise/)"
+		} else if !info.IsDir() {
+			c.Status = doctorErr.String()
+			c.Details = append(c.Details, "Path exists but is not a directory")
+			c.Fix = "Set PROMISE_HOME to a valid directory path"
+		}
+	} else {
+		home, _ := module.PromiseHome()
+		c.Summary = "Using default: " + home
+	}
+
+	return c
+}
+
+func doctorCheckJava() doctorCheck {
+	c := makeDoctorCheck("Java (optional — compiler development only)", doctorOK, false)
+
+	path, err := exec.LookPath("java")
+	if err != nil {
+		c.Status = doctorWarn.String()
+		c.Summary = "Not found on PATH"
+		c.Fix = "Install Java 11+ for ANTLR parser generation (only needed for compiler development)"
+		return c
+	}
+
+	c.Summary = "Found: " + path
+
+	// Try to get version
+	cmd := exec.Command(path, "-version")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) > 0 {
+			c.Details = append(c.Details, lines[0])
+		}
+	}
+
+	return c
+}
+
+func doctorCheckXcodeCLT() doctorCheck {
+	c := makeDoctorCheck("Xcode Command Line Tools", doctorOK, true)
+
+	cmd := exec.Command("xcode-select", "-p")
+	out, err := cmd.Output()
+	if err != nil {
+		c.Status = doctorErr.String()
+		c.Summary = "Not installed"
+		c.Fix = "xcode-select --install"
+		return c
+	}
+
+	path := strings.TrimSpace(string(out))
+	c.Summary = "Installed: " + path
+
+	return c
+}
+
+func doctorCheckPath() doctorCheck {
+	c := makeDoctorCheck("PATH", doctorOK, false)
+
+	execPath, err := os.Executable()
+	if err != nil {
+		c.Status = doctorWarn.String()
+		c.Summary = "Cannot determine executable path"
+		return c
+	}
+
+	execDir := filepath.Dir(execPath)
+	pathEnv := os.Getenv("PATH")
+	pathDirs := filepath.SplitList(pathEnv)
+
+	for _, dir := range pathDirs {
+		if dir == execDir {
+			c.Summary = "promise binary directory is on PATH"
+			c.Details = append(c.Details, execDir)
+			return c
+		}
+	}
+
+	c.Status = doctorWarn.String()
+	c.Summary = "promise binary directory is not on PATH"
+	c.Details = append(c.Details, "Binary at: "+execPath)
+	c.Fix = fmt.Sprintf("Add %s to your PATH", execDir)
+
+	return c
+}

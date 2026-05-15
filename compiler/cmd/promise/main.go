@@ -297,6 +297,9 @@ func main() {
 		runUse(os.Args[2:])
 	case "remove":
 		runRemove(os.Args[2:])
+	case "doctor":
+		runDoctor(os.Args[2:])
+		return
 	default:
 		// Try treating as a filename for backwards compatibility
 		if strings.HasSuffix(cmd, ".pr") {

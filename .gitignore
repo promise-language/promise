@@ -73,3 +73,6 @@ bin/commitgate.exe~
 bin/gate
 bin/gate.exe
 bin/gate.exe~
+bin/audit-exceptions
+bin/audit-exceptions.exe
+bin/audit-exceptions.exe~

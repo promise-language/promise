@@ -44,3 +44,6 @@ description = "YAML 1.2 encoding and decoding: YamlEncoder, YamlDecoder, encode_
 
 [modules.msgpack]
 description = "MessagePack binary encoding and decoding: MsgpackEncoder, MsgpackDecoder, encode_bytes, decode_bytes, parse_value (planned)"
+
+[modules.markdown]
+description = "CommonMark 0.31 + GFM parsing and rendering: Document (with Document.parse factory), Block, Inline, Builder (planned)"

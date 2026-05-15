@@ -1,0 +1,5 @@
+// markdown — CommonMark 0.31 + GFM (tables, task lists, strikethrough) parser and renderer.
+//
+// Primary API: Document (with Document.parse factory), Block, Inline, Builder.
+// See modules/markdown/plan.md for the full design and API surface.
+// Requires: use markdown;

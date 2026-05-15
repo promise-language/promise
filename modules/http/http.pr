@@ -241,7 +241,7 @@ type Server `public `doc("An HTTP/1.1 server that accepts and handles requests s
     return Server(_listener: listener, _address: address, _port: actual_port, _stop: channel[bool](capacity: 1));
   }
 
-  create_shutdown_handle(~this) ServerShutdownHandle `public `doc("Create a shutdown handle. Must be called before serve. The handle can be sent to another goroutine to stop the server.") {
+  create_shutdown_handle(&this) ServerShutdownHandle `public `doc("Create a shutdown handle. Must be called before serve. The handle can be sent to another goroutine to stop the server.") {
     channel[bool] stop_ref = this._stop;
     return ServerShutdownHandle(_address: this._address[0:],
     _port: this._port,

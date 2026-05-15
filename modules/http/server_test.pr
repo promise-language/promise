@@ -371,3 +371,53 @@ test_server_serve_error_handler() `test(exclude: "wasm32", timeout: "10s") {
     }
   }
 }
+
+test_server_shutdown_handle() `test(exclude: "wasm32", timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle handle = server.create_shutdown_handle();
+    handle_ch.send(handle);
+    _OkHandler h = _OkHandler(response_body: "served");
+    server.serve(h)?!;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      sleep(Duration.from_millis(100));
+      Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+      assert(resp.status_code == 200, "status 200");
+      assert(resp.body == "served", "body");
+      handle.shutdown()?!;
+      sleep(Duration.from_millis(200));
+    }
+  }
+}
+
+test_server_shutdown_handle_error_handler() `test(exclude: "wasm32", timeout: "10s") {
+  channel[int] port_ch = channel[int](capacity: 1);
+  channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
+
+  go {
+    Server server = Server.bind("127.0.0.1", 0)?!;
+    port_ch.send(server.port);
+    ServerShutdownHandle handle = server.create_shutdown_handle();
+    handle_ch.send(handle);
+    _ErrorHandler h = _ErrorHandler(error_message: "serve error");
+    server.serve(h)?!;
+  };
+
+  if port := <-port_ch {
+    if handle := <-handle_ch {
+      sleep(Duration.from_millis(100));
+      Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+      assert(resp.status_code == 500, "status 500");
+      assert(resp.body == "serve error", "error body");
+      handle.shutdown()?!;
+      sleep(Duration.from_millis(200));
+    }
+  }
+}

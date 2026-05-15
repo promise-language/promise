@@ -196,7 +196,8 @@ func TestDoctorCheckPromiseHomeNotDir(t *testing.T) {
 }
 
 func TestDoctorCheckPathNotOnPath(t *testing.T) {
-	t.Setenv("PATH", "/usr/bin:/bin")
+	sep := string(os.PathListSeparator)
+	t.Setenv("PATH", "/usr/bin"+sep+"/bin")
 	c := doctorCheckPath()
 	if c.Status != "warning" {
 		t.Errorf("expected warning when binary dir not on PATH, got %s", c.Status)
@@ -282,13 +283,31 @@ func TestDoctorCheckPathOnPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	execDir := filepath.Dir(execPath)
-	t.Setenv("PATH", execDir+":/usr/bin:/bin")
+	sep := string(os.PathListSeparator)
+	t.Setenv("PATH", execDir+sep+"/usr/bin"+sep+"/bin")
 	c := doctorCheckPath()
 	if c.Status != "ok" {
 		t.Errorf("expected ok when binary dir is on PATH, got %s", c.Status)
 	}
 	if !strings.Contains(c.Summary, "is on PATH") {
 		t.Error("expected 'is on PATH' in summary")
+	}
+}
+
+func TestDoctorCheckPathOnPathCaseInsensitive(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("case-insensitive PATH match is Windows-only")
+	}
+	execPath, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	execDir := filepath.Dir(execPath)
+	sep := string(os.PathListSeparator)
+	t.Setenv("PATH", strings.ToUpper(execDir)+sep+"/usr/bin"+sep+"/bin")
+	c := doctorCheckPath()
+	if c.Status != "ok" {
+		t.Errorf("expected ok when PATH entry differs only in case, got %s", c.Status)
 	}
 }
 

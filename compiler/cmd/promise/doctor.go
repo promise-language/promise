@@ -453,12 +453,18 @@ func doctorCheckPath() doctorCheck {
 		return c
 	}
 
-	execDir := filepath.Dir(execPath)
+	execDir := filepath.Clean(filepath.Dir(execPath))
 	pathEnv := os.Getenv("PATH")
 	pathDirs := filepath.SplitList(pathEnv)
+	caseInsensitive := runtime.GOOS == "windows"
 
 	for _, dir := range pathDirs {
-		if dir == execDir {
+		dir = filepath.Clean(dir)
+		match := dir == execDir
+		if !match && caseInsensitive {
+			match = strings.EqualFold(dir, execDir)
+		}
+		if match {
 			c.Summary = "promise binary directory is on PATH"
 			c.Details = append(c.Details, execDir)
 			return c

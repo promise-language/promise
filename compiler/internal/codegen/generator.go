@@ -88,6 +88,8 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	savedGenFinalSuspend := c.generatorFinalSuspend
 	savedNamed := c.currentNamed
 	savedLocalNameCount := c.localNameCount // T0261
+	savedPanicExitBlock := c.panicExitBlock
+	savedCoroutineReturnBlock := c.coroutineReturnBlock
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -101,6 +103,8 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.loopScopeDepth = 0
 	c.inCoroutine = false
 	c.inGenerator = true
+	c.panicExitBlock = nil
+	c.coroutineReturnBlock = nil
 	if ownerNamed != nil {
 		c.currentNamed = ownerNamed
 	}
@@ -241,6 +245,8 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.generatorFinalSuspend = savedGenFinalSuspend
 	c.currentNamed = savedNamed
 	c.localNameCount = savedLocalNameCount // T0261
+	c.panicExitBlock = savedPanicExitBlock
+	c.coroutineReturnBlock = savedCoroutineReturnBlock
 
 	// 7. Build factory body for original function:
 	//    allocate yield slot, call coroutine ramp, return {handle, slot}

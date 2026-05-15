@@ -6972,6 +6972,51 @@ func TestGenerateTestMainReservesGID0(t *testing.T) {
 	assertContains(t, ir, "atomicrmw add i64*")
 }
 
+// T0262: WASM batch tests compile test bodies as coroutines and run them
+// through the cooperative scheduler instead of spawning threads.
+func TestGenerateTestMainWasmCoopScheduler(t *testing.T) {
+	src := `myTest() ` + "`test" + ` { }`
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	file, errs := ast.Build("test.pr", tree)
+	if len(errs) > 0 {
+		t.Fatalf("AST build errors: %v", errs)
+	}
+
+	stdModInfo, stdScope := getCodegenStdModInfo()
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	file.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
+
+	ti := sema.ParseTargetInfo("wasm32-wasi")
+	info, semaErrs := sema.CheckWithTarget(file, map[string]*types.Scope{"std": stdScope}, ti)
+	if len(semaErrs) > 0 {
+		t.Fatalf("sema errors: %v", semaErrs)
+	}
+	info.ModuleInfos = map[string]*sema.ModuleInfo{"std": stdModInfo}
+	info.ModuleOrder = []string{"std"}
+	result := Compile(file, info, "wasm32-wasi")
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+
+	// WASM: should init scheduler with 1 P
+	assertContains(t, ir, "call void @promise_sched_init(i32 1)")
+	// WASM: should compile test as coroutine
+	assertContains(t, ir, "define i8* @.test_coro.myTest()")
+	// WASM: coroutine has presplitcoroutine attribute
+	assertContainsMatch(t, ir, `@\.test_coro\.myTest\(\).*presplitcoroutine`)
+	// WASM: should run through cooperative scheduler
+	assertContains(t, ir, "call void @promise_sched_coop_run()")
+	// WASM: should NOT use thread-based promise_test_run
+	assertNotContains(t, ir, "call i32 @promise_test_run(")
+	// WASM: should NOT bump goroutine counter past 0 (test G needs id=0)
+	// The sched_init call is followed by alloc count reset, not atomicrmw add
+}
+
 // B0165: Batch test main waits for worker threads to finish init, then resets
 // alloc count to 0 so scheduler allocations don't leak into per-test counts.
 func TestBatchTestResetsAllocCount(t *testing.T) {

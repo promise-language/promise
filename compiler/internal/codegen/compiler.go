@@ -332,6 +332,10 @@ type Compiler struct {
 	// Main function AST — saved so wrapMainWithScheduler can compile it inline
 	mainDecl *ast.FuncDecl
 
+	// T0262: Test function ASTs — saved so WASM batch tests can compile bodies
+	// as coroutines in GenerateTestMain for cooperative scheduling.
+	testDecls map[string]*ast.FuncDecl
+
 	// Go expression counter for unique trampoline function names
 	goCounter int
 
@@ -818,9 +822,13 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	// Initialize the M:N scheduler so goroutines spawned by test functions
 	// get picked up by worker Ms. Without this, `go` blocks in batch tests
 	// enqueue Gs that never get scheduled → deadlock (B0042).
-	// WASM is excluded: cooperative scheduler can't run goroutines from
-	// non-coroutine batch test functions (no sched_coop_run call site).
-	if !c.isWasm {
+	if c.isWasm {
+		// T0262: Initialize cooperative scheduler with 1 P (single-threaded WASM).
+		// No thread creation (sched_init returns early on WASM), no spin-wait.
+		// Don't bump goroutine_counter — test G needs id=0 so goroutine_exit
+		// sets sched.main_done, allowing sched_coop_run to exit.
+		entry.NewCall(c.funcs["promise_sched_init"], constant.NewInt(irtypes.I32, 1))
+	} else {
 		numCPUs := entry.NewCall(c.palNumCPUs)
 		entry.NewCall(c.funcs["promise_sched_init"], numCPUs)
 
@@ -940,13 +948,10 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), staleCountAlloca)
 
 	// Shared global for panic context prefix (used by all tests)
-	var panicIndentGlobal *ir.Global
-	if !c.isWasm {
-		panicIndentData := constant.NewCharArrayFromString("  panic: ")
-		panicIndentGlobal = c.module.NewGlobalDef(".str.panic_indent", panicIndentData)
-		panicIndentGlobal.Immutable = true
-		panicIndentGlobal.Linkage = enum.LinkagePrivate
-	}
+	panicIndentData := constant.NewCharArrayFromString("  panic: ")
+	panicIndentGlobal := c.module.NewGlobalDef(".str.panic_indent", panicIndentData)
+	panicIndentGlobal.Immutable = true
+	panicIndentGlobal.Linkage = enum.LinkagePrivate
 
 	// Shared global for timeout context prefix
 	timeoutIndentData := constant.NewCharArrayFromString("  timeout: exceeded ")
@@ -973,23 +978,30 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			}
 		}
 
-		// Look up the IR function — tests are always user code
-		testFn := c.funcs[test.Name()]
-		if testFn == nil {
-			continue
+		nameStr := test.Name()
+
+		// Look up the test — on WASM, use saved FuncDecl; on native, use compiled IR function
+		var testFn *ir.Func
+		var testFd *ast.FuncDecl
+		if c.isWasm {
+			testFd = c.testDecls[nameStr]
+			if testFd == nil {
+				continue
+			}
+		} else {
+			testFn = c.funcs[nameStr]
+			if testFn == nil {
+				continue
+			}
 		}
 
 		// Create global string constant for the test name
-		nameStr := test.Name()
 		nameGlobal := c.module.NewGlobalDef(
 			fmt.Sprintf(".test_name_%s", nameStr),
 			constant.NewCharArrayFromString(nameStr+"\x00"),
 		)
 		nameGlobal.Immutable = true
 		nameGlobal.Linkage = enum.LinkagePrivate
-
-		// Bitcast test function to i8* for promise_test_run
-		fnPtr := entry.NewBitCast(testFn, irtypes.I8Ptr)
 
 		// Look up per-test timeout (0 = no per-test timeout)
 		var timeoutNs int64
@@ -1011,8 +1023,41 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		// Time the test: t0 = nanotime()
 		t0 := entry.NewCall(nanotimeFn)
 
-		// Call promise_test_run(fn, timeout_ns) -> i32 (0=pass, 1=fail, 2=timeout)
-		result := entry.NewCall(testRunFn, fnPtr, timeoutConst)
+		// Execute the test
+		var result value.Value
+		if c.isWasm {
+			// T0262: Compile test body as coroutine and run through cooperative scheduler.
+			// This ensures channel ops use coro.suspend (not pal_cond_wait which deadlocks
+			// on single-threaded WASM) and goroutines spawned by the test are scheduled.
+			coroFn := c.compileTestCoroutine(nameStr, testFd)
+
+			// Reset scheduler state for this test
+			schedTy := schedStructType()
+			mainDoneField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDone)))
+			entry.NewStore(constant.NewInt(irtypes.I8, 0), mainDoneField)
+			counterField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGoroutineCounter)))
+			entry.NewStore(constant.NewInt(irtypes.I64, 0), counterField)
+
+			// Clear test panic msg from previous test
+			entry.NewStore(constant.NewNull(irtypes.I8Ptr), c.testPanicMsgGlobal)
+
+			// Create G0, enqueue, run cooperative scheduler
+			handle := entry.NewCall(coroFn)
+			g0 := entry.NewCall(c.funcs["promise_g_new"], handle)
+			entry.NewCall(c.funcs["promise_sched_enqueue"], g0)
+			entry.NewCall(c.funcs["promise_sched_coop_run"])
+
+			// Determine result from panic msg: null=pass(0), non-null=fail(1)
+			panicMsg := entry.NewLoad(irtypes.I8Ptr, c.testPanicMsgGlobal)
+			hasPanic := entry.NewICmp(enum.IPredNE, panicMsg, constant.NewNull(irtypes.I8Ptr))
+			result = entry.NewSelect(hasPanic, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+		} else {
+			// Native: run test in a thread via promise_test_run
+			fnPtr := entry.NewBitCast(testFn, irtypes.I8Ptr)
+			result = entry.NewCall(testRunFn, fnPtr, timeoutConst)
+		}
 
 		// t1 = nanotime(); elapsed = t1 - t0
 		t1 := entry.NewCall(nanotimeFn)
@@ -1158,7 +1203,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		entry.NewCall(testPrintFn, namePtr, effectiveResult, elapsed)
 
 		// === Print context for FAIL (panic message) ===
-		if !c.isWasm {
+		{
 			afterPanicBlk := mainFn.NewBlock(fmt.Sprintf("after_panic_%s", nameStr))
 			isOrigFail := entry.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 1))
 			checkPanicBlk := mainFn.NewBlock(fmt.Sprintf("check_panic_%s", nameStr))
@@ -1437,6 +1482,186 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			c.emitWasmStart(mainFn)
 		}
 	}
+}
+
+// compileTestCoroutine compiles a test function body as a coroutine for WASM
+// cooperative scheduling (T0262). Returns the coroutine ramp function.
+//
+// This mirrors the main() coroutine pattern in sched.go (wrapMainWithScheduler)
+// and the go-block coroutine pattern in expr.go. The test body is compiled with
+// inCoroutine=true so channel ops use coro.suspend + waiter-list parking instead
+// of thread-blocking pal_cond_wait.
+func (c *Compiler) compileTestCoroutine(nameStr string, fd *ast.FuncDecl) *ir.Func {
+	coroFn := c.module.NewFunc(fmt.Sprintf(".test_coro.%s", nameStr), irtypes.I8Ptr)
+	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
+
+	// Save compiler state
+	saved := c.saveState()
+	savedInCoroutine := c.inCoroutine
+	savedCoroCleanup := c.coroCleanupBlk
+	savedCoroSuspend := c.coroSuspendBlk
+	savedPanicExitBlock := c.panicExitBlock
+	savedGoExprFF := c.goExprFireAndForget
+	savedCoroutineReturnBlock := c.coroutineReturnBlock
+	c.goExprFireAndForget = false
+
+	// Reset state for coroutine compilation
+	c.fn = coroFn
+	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
+	c.blockCounter = 0
+	c.canError = false
+	c.currentRetType = nil
+	c.scopeBindings = nil
+	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.dropBindings = make(map[string]scopeBinding)
+	c.stmtTemps = nil
+	c.stmtTempMap = make(map[value.Value]int)
+	c.heapTemps = nil
+	c.heapTempMap = make(map[value.Value]int)
+	c.envTemps = nil
+	c.envTempMap = make(map[value.Value]int)
+	c.tempTrackingEnabled = true
+	c.loopScopeDepth = 0
+	c.inCoroutine = true
+
+	// --- Coroutine preamble ---
+	coroEntry := coroFn.NewBlock(".entry")
+	c.block = coroEntry
+
+	coroId := coroEntry.NewCall(c.coroId,
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr))
+
+	need := coroEntry.NewCall(c.coroAlloc, coroId)
+	allocBlk := coroFn.NewBlock("coro.alloc")
+	startBlk := coroFn.NewBlock("coro.start")
+	coroEntry.NewCondBr(need, allocBlk, startBlk)
+
+	coroSizeVal := allocBlk.NewCall(c.coroSize)
+	// WASM: coro.size returns i32, pal_alloc takes i64
+	coroSizeArg := allocBlk.NewZExt(coroSizeVal, irtypes.I64)
+	mem := allocBlk.NewCall(c.palAlloc, coroSizeArg)
+	allocBlk.NewBr(startBlk)
+
+	phiMem := startBlk.NewPhi(
+		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), coroEntry),
+		ir.NewIncoming(mem, allocBlk))
+	hdl := startBlk.NewCall(c.coroBegin, coroId, phiMem)
+
+	// Initial suspend — in a separate block so createEntryAlloca can append
+	// allocas to startBlk BEFORE the suspend point (coro-split needs allocas
+	// to precede coro.suspend to properly spill them to the frame).
+	initSuspBlk := coroFn.NewBlock("coro.init.suspend")
+	startBlk.NewBr(initSuspBlk)
+
+	initResult := initSuspBlk.NewCall(c.coroSuspend, constant.None, constant.False)
+
+	suspendBlk := coroFn.NewBlock("coro.suspend")
+	bodyBlk := coroFn.NewBlock("body")
+	cleanupBlk := coroFn.NewBlock("cleanup")
+	doneBlk := coroFn.NewBlock("coro.done")
+	finalSuspBlk := coroFn.NewBlock("final.suspend")
+
+	initSuspBlk.NewSwitch(initResult, suspendBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
+
+	suspendBlk.NewRet(hdl)
+
+	// Set cleanup and suspend blocks for mid-body coro.suspend switches
+	c.coroCleanupBlk = cleanupBlk
+	c.coroSuspendBlk = doneBlk
+
+	// --- Body ---
+	c.block = bodyBlk
+	c.entryBlock = startBlk // allocas go in startBlk (part of coroutine frame)
+
+	// Create panic exit block for this test coroutine
+	testPanicExitBlk := coroFn.NewBlock("test.panic_exit")
+	c.panicExitBlock = testPanicExitBlk
+	c.coroutineReturnBlock = finalSuspBlk
+
+	c.genBlock(fd.Body)
+
+	// Clear panic exit and coroutine return blocks after body generation
+	c.panicExitBlock = nil
+	c.coroutineReturnBlock = nil
+
+	// Emit scope cleanup for any bindings registered before genBlock (e.g. channels)
+	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > 0 {
+		c.emitScopeCleanup(0, false)
+	}
+
+	// T0148: Final panic check after body + scope cleanup
+	if c.block != nil && c.block.Term == nil {
+		finalFlag := c.block.NewLoad(irtypes.I8, c.panicFlagGlobal)
+		finalIsPanic := c.block.NewICmp(enum.IPredNE, finalFlag, constant.NewInt(irtypes.I8, 0))
+		c.block.NewCondBr(finalIsPanic, testPanicExitBlk, finalSuspBlk)
+	}
+
+	// --- Panic exit block ---
+	// Copy panic msg to __promise_test_panic_msg (for batch test main to read result),
+	// copy panic info to G struct (for goroutine_exit to handle correctly),
+	// clear TLS state, then branch to final suspend.
+	{
+		// Copy to test panic msg global
+		pePanicMsg := testPanicExitBlk.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
+		testPanicExitBlk.NewStore(pePanicMsg, c.testPanicMsgGlobal)
+
+		// Copy to G struct
+		gTy := goroutineStructType()
+		peCurrentG := testPanicExitBlk.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		peGPtr := testPanicExitBlk.NewBitCast(peCurrentG, irtypes.NewPointer(gTy))
+
+		pePanicType := testPanicExitBlk.NewLoad(irtypes.I8, c.panicTypeTlsGlobal)
+		pePanickedField := testPanicExitBlk.NewGetElementPtr(gTy, peGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
+		testPanicExitBlk.NewStore(pePanicType, pePanickedField)
+
+		pePanicMsgField := testPanicExitBlk.NewGetElementPtr(gTy, peGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
+		testPanicExitBlk.NewStore(pePanicMsg, pePanicMsgField)
+
+		// Clear TLS
+		testPanicExitBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)
+		testPanicExitBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.panicMsgTlsGlobal)
+		testPanicExitBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicTypeTlsGlobal)
+
+		testPanicExitBlk.NewBr(finalSuspBlk)
+	}
+
+	// --- Cleanup: free coroutine memory (only reached via destroy path) ---
+	coroMem := cleanupBlk.NewCall(c.coroFree, coroId, hdl)
+	needFree := cleanupBlk.NewICmp(enum.IPredNE, coroMem, constant.NewNull(irtypes.I8Ptr))
+	freeBlk := coroFn.NewBlock("coro.free")
+	cleanupBlk.NewCondBr(needFree, freeBlk, doneBlk)
+
+	freeBlk.NewCall(c.palFree, coroMem)
+	freeBlk.NewBr(doneBlk)
+
+	// Done: single coro.end
+	doneBlk.NewCall(c.coroEnd, hdl, constant.False, constant.None)
+	doneBlk.NewRet(hdl)
+
+	// Final suspend switch
+	finalResult := finalSuspBlk.NewCall(c.coroSuspend, constant.None, constant.True)
+	finalSuspBlk.NewSwitch(finalResult, doneBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), doneBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
+
+	// --- Restore compiler state ---
+	c.restoreState(saved)
+	c.inCoroutine = savedInCoroutine
+	c.coroCleanupBlk = savedCoroCleanup
+	c.coroSuspendBlk = savedCoroSuspend
+	c.panicExitBlock = savedPanicExitBlock
+	c.goExprFireAndForget = savedGoExprFF
+	c.coroutineReturnBlock = savedCoroutineReturnBlock
+
+	return coroFn
 }
 
 // declareIntrinsics declares compiler-intrinsic runtime functions (not user-declared externs).
@@ -4192,6 +4417,21 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 // defineFuncs generates function bodies for all FuncDecl nodes with bodies (pass 2).
 // Generic functions (with TypeParams) are skipped — handled by defineMonoFuncs.
 func (c *Compiler) defineFuncs(file *ast.File) {
+	// T0262: Build set of test function names for WASM coroutine compilation.
+	// On WASM, test function bodies are compiled as coroutines in GenerateTestMain
+	// (with inCoroutine=true) so channel ops use cooperative scheduling instead of
+	// thread-blocking pal_cond_wait which deadlocks on single-threaded WASM.
+	var wasmTestFuncs map[string]bool
+	if c.isWasm && len(c.info.Tests) > 0 {
+		wasmTestFuncs = make(map[string]bool, len(c.info.Tests))
+		for _, t := range c.info.Tests {
+			wasmTestFuncs[t.Name()] = true
+		}
+		if c.testDecls == nil {
+			c.testDecls = make(map[string]*ast.FuncDecl, len(c.info.Tests))
+		}
+	}
+
 	for _, decl := range file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
 		if !ok {
@@ -4213,6 +4453,12 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 		}
 		if len(fd.TypeParams) > 0 {
 			continue // generic — handled by monomorphization
+		}
+		// T0262: On WASM, skip test function body compilation — bodies are compiled
+		// as coroutines in GenerateTestMain for cooperative scheduling.
+		if wasmTestFuncs != nil && wasmTestFuncs[fd.Name] {
+			c.testDecls[fd.Name] = fd
+			continue
 		}
 		// Skip main — its body is compiled inline inside .goroutine.main
 		// by wrapMainWithScheduler (with inCoroutine=true for proper channel ops).
@@ -6040,9 +6286,13 @@ func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
 	savedBlock := c.block
 	savedFn := c.fn
 	savedEntry := c.entryBlock // B0189: save for createEntryAlloca in element drop loops
+	savedPanicExit := c.panicExitBlock
+	savedCoroReturn := c.coroutineReturnBlock
 	c.block = entry
 	c.fn = fn            // T0101: ensure c.newBlock() creates blocks in the drop function
 	c.entryBlock = entry // B0189: element drop loops use createEntryAlloca
+	c.panicExitBlock = nil
+	c.coroutineReturnBlock = nil
 
 	// Set up method context for emitFieldDrops (needs locals["this"])
 	savedLocals := c.locals
@@ -6062,6 +6312,8 @@ func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
 	c.block = savedBlock
 	c.fn = savedFn
 	c.entryBlock = savedEntry
+	c.panicExitBlock = savedPanicExit
+	c.coroutineReturnBlock = savedCoroReturn
 }
 
 // declareSynthesizedEnumDrops declares drop function stubs for non-generic enums
@@ -6202,9 +6454,13 @@ func (c *Compiler) defineSynthesizedEnumDropBody(fn *ir.Func, enum *types.Enum, 
 	savedBlock := c.block
 	savedFn := c.fn
 	savedEntry := c.entryBlock // B0189: save for createEntryAlloca in element drop loops
+	savedPanicExit := c.panicExitBlock
+	savedCoroReturn := c.coroutineReturnBlock
 	c.block = entry
 	c.fn = fn            // B0189: ensure c.newBlock() creates blocks in the drop function
 	c.entryBlock = entry // B0189: element drop loops use createEntryAlloca
+	c.panicExitBlock = nil
+	c.coroutineReturnBlock = nil
 
 	// this = i8* pointer to the alloca storing the enum internal type
 	typedPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(internalType))
@@ -6289,6 +6545,8 @@ func (c *Compiler) defineSynthesizedEnumDropBody(fn *ir.Func, enum *types.Enum, 
 	c.block = savedBlock
 	c.fn = savedFn
 	c.entryBlock = savedEntry
+	c.panicExitBlock = savedPanicExit
+	c.coroutineReturnBlock = savedCoroReturn
 }
 
 // variantFieldNeedsDrop returns true if an enum variant field type needs cleanup.
@@ -6883,61 +7141,70 @@ func findMonoParentName(named *types.Named, ownerName string, subst map[*types.T
 // compilerState captures the mutable compiler fields that defineMethodFunc overwrites.
 // Used to save/restore state when synthesizing default methods during another function's codegen.
 type compilerState struct {
-	fn                  *ir.Func
-	block               *ir.Block
-	entryBlock          *ir.Block
-	locals              map[string]*ir.InstAlloca
-	localNameCount      map[string]int
-	dropFlags           map[string]*ir.InstAlloca
-	dropBindings        map[string]scopeBinding
-	blockCounter        int
-	canError            bool
-	currentRetType      types.Type
-	currentNamed        *types.Named
-	scopeBindings       []scopeBinding
-	loopScopeDepth      int
-	selfSubst           *selfSubstInfo
-	targetType          types.Type
-	typeSubst           map[*types.TypeParam]types.Type
-	monoCtx             *monoContext
-	lambdaWritebacks    []lambdaWriteback
-	stmtTemps           []stmtTemp
-	stmtTempMap         map[value.Value]int
-	heapTemps           []heapTemp
-	heapTempMap         map[value.Value]int
-	envTemps            []envTemp
-	envTempMap          map[value.Value]int
-	tempTrackingEnabled bool
+	fn                   *ir.Func
+	block                *ir.Block
+	entryBlock           *ir.Block
+	locals               map[string]*ir.InstAlloca
+	localNameCount       map[string]int
+	dropFlags            map[string]*ir.InstAlloca
+	dropBindings         map[string]scopeBinding
+	blockCounter         int
+	canError             bool
+	currentRetType       types.Type
+	currentNamed         *types.Named
+	scopeBindings        []scopeBinding
+	loopScopeDepth       int
+	selfSubst            *selfSubstInfo
+	targetType           types.Type
+	typeSubst            map[*types.TypeParam]types.Type
+	monoCtx              *monoContext
+	lambdaWritebacks     []lambdaWriteback
+	stmtTemps            []stmtTemp
+	stmtTempMap          map[value.Value]int
+	heapTemps            []heapTemp
+	heapTempMap          map[value.Value]int
+	envTemps             []envTemp
+	envTempMap           map[value.Value]int
+	tempTrackingEnabled  bool
+	panicExitBlock       *ir.Block // T0262: prevent cross-function block references
+	coroutineReturnBlock *ir.Block // T0262: prevent cross-function block references
 }
 
 func (c *Compiler) saveState() compilerState {
-	return compilerState{
-		fn:                  c.fn,
-		block:               c.block,
-		entryBlock:          c.entryBlock,
-		locals:              c.locals,
-		localNameCount:      c.localNameCount,
-		dropFlags:           c.dropFlags,
-		dropBindings:        c.dropBindings,
-		blockCounter:        c.blockCounter,
-		canError:            c.canError,
-		currentRetType:      c.currentRetType,
-		currentNamed:        c.currentNamed,
-		scopeBindings:       c.scopeBindings,
-		loopScopeDepth:      c.loopScopeDepth,
-		selfSubst:           c.selfSubst,
-		targetType:          c.targetType,
-		typeSubst:           c.typeSubst,
-		monoCtx:             c.monoCtx,
-		lambdaWritebacks:    c.lambdaWritebacks,
-		stmtTemps:           c.stmtTemps,
-		stmtTempMap:         c.stmtTempMap,
-		heapTemps:           c.heapTemps,
-		heapTempMap:         c.heapTempMap,
-		envTemps:            c.envTemps,
-		envTempMap:          c.envTempMap,
-		tempTrackingEnabled: c.tempTrackingEnabled,
+	s := compilerState{
+		fn:                   c.fn,
+		block:                c.block,
+		entryBlock:           c.entryBlock,
+		locals:               c.locals,
+		localNameCount:       c.localNameCount,
+		dropFlags:            c.dropFlags,
+		dropBindings:         c.dropBindings,
+		blockCounter:         c.blockCounter,
+		canError:             c.canError,
+		currentRetType:       c.currentRetType,
+		currentNamed:         c.currentNamed,
+		scopeBindings:        c.scopeBindings,
+		loopScopeDepth:       c.loopScopeDepth,
+		selfSubst:            c.selfSubst,
+		targetType:           c.targetType,
+		typeSubst:            c.typeSubst,
+		monoCtx:              c.monoCtx,
+		lambdaWritebacks:     c.lambdaWritebacks,
+		stmtTemps:            c.stmtTemps,
+		stmtTempMap:          c.stmtTempMap,
+		heapTemps:            c.heapTemps,
+		heapTempMap:          c.heapTempMap,
+		envTemps:             c.envTemps,
+		envTempMap:           c.envTempMap,
+		tempTrackingEnabled:  c.tempTrackingEnabled,
+		panicExitBlock:       c.panicExitBlock,
+		coroutineReturnBlock: c.coroutineReturnBlock,
 	}
+	// T0262: clear coroutine-specific blocks to prevent cross-function references
+	// when saveState is used before switching c.fn to a different LLVM function.
+	c.panicExitBlock = nil
+	c.coroutineReturnBlock = nil
+	return s
 }
 
 func (c *Compiler) restoreState(s compilerState) {
@@ -6966,6 +7233,8 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.typeSubst = s.typeSubst
 	c.monoCtx = s.monoCtx
 	c.lambdaWritebacks = s.lambdaWritebacks
+	c.panicExitBlock = s.panicExitBlock
+	c.coroutineReturnBlock = s.coroutineReturnBlock
 }
 
 // findTypeDeclAnyFile searches for a TypeDecl by name in c.file first,

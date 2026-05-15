@@ -3,7 +3,7 @@
 // so promise_panic treated it as a main-goroutine panic and exited the process
 // instead of recovering via the scheduler.
 // Fire-and-forget goroutine panic should be silently recovered.
-test_goroutine_panic_fire_forget() `test(exclude: "wasm32") {
+test_goroutine_panic_fire_forget() `test {
   go {
     assert(false, "boom ff");
   };
@@ -18,7 +18,7 @@ test_goroutine_panic_fire_forget() `test(exclude: "wasm32") {
 }
 
 // Goroutine that sends to channel then panics: receiver should still get the value.
-test_goroutine_panic_after_send() `test(exclude: "wasm32") {
+test_goroutine_panic_after_send() `test {
   ch := channel[int](capacity: 2);
   go {
     ch.send(42);
@@ -31,7 +31,7 @@ test_goroutine_panic_after_send() `test(exclude: "wasm32") {
 }
 
 // Multiple goroutines: one panics, others succeed.
-test_goroutine_panic_one_of_many() `test(exclude: "wasm32") {
+test_goroutine_panic_one_of_many() `test {
   ch := channel[int](capacity: 4);
   go {
     ch.send(1);

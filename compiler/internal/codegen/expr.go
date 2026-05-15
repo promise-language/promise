@@ -6554,15 +6554,19 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedWritebacks := c.lambdaWritebacks
 	savedGoExprFF2 := c.goExprFireAndForget
-	savedStmtTemps := c.stmtTemps              // T0073
-	savedStmtTempMap := c.stmtTempMap          // T0073
-	savedHeapTemps := c.heapTemps              // T0088
-	savedHeapTempMap := c.heapTempMap          // T0088
-	savedEnvTemps := c.envTemps                // T0100
-	savedEnvTempMap := c.envTempMap            // T0100
-	savedTempTracking := c.tempTrackingEnabled // T0073
-	savedLocalNameCount := c.localNameCount    // T0261
-	c.goExprFireAndForget = false              // reset for inner statements (B0109)
+	savedStmtTemps := c.stmtTemps                       // T0073
+	savedStmtTempMap := c.stmtTempMap                   // T0073
+	savedHeapTemps := c.heapTemps                       // T0088
+	savedHeapTempMap := c.heapTempMap                   // T0088
+	savedEnvTemps := c.envTemps                         // T0100
+	savedEnvTempMap := c.envTempMap                     // T0100
+	savedTempTracking := c.tempTrackingEnabled          // T0073
+	savedLocalNameCount := c.localNameCount             // T0261
+	savedPanicExitBlock := c.panicExitBlock             // T0262: clear in lambda (separate function)
+	savedCoroutineReturnBlock := c.coroutineReturnBlock // T0262: clear in lambda (separate function)
+	c.goExprFireAndForget = false                       // reset for inner statements (B0109)
+	c.panicExitBlock = nil                              // T0262: lambda is a separate function
+	c.coroutineReturnBlock = nil                        // T0262: lambda is a separate function
 
 	// Generate lambda body with fresh scope state
 	c.fn = fn
@@ -6686,14 +6690,16 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.lambdaWritebacks = savedWritebacks
 	c.goExprFireAndForget = savedGoExprFF2
-	c.stmtTemps = savedStmtTemps              // T0073
-	c.stmtTempMap = savedStmtTempMap          // T0073
-	c.heapTemps = savedHeapTemps              // T0088
-	c.heapTempMap = savedHeapTempMap          // T0088
-	c.envTemps = savedEnvTemps                // T0100
-	c.envTempMap = savedEnvTempMap            // T0100
-	c.tempTrackingEnabled = savedTempTracking // T0073
-	c.localNameCount = savedLocalNameCount    // T0261
+	c.stmtTemps = savedStmtTemps                       // T0073
+	c.stmtTempMap = savedStmtTempMap                   // T0073
+	c.heapTemps = savedHeapTemps                       // T0088
+	c.heapTempMap = savedHeapTempMap                   // T0088
+	c.envTemps = savedEnvTemps                         // T0100
+	c.envTempMap = savedEnvTempMap                     // T0100
+	c.tempTrackingEnabled = savedTempTracking          // T0073
+	c.localNameCount = savedLocalNameCount             // T0261
+	c.panicExitBlock = savedPanicExitBlock             // T0262
+	c.coroutineReturnBlock = savedCoroutineReturnBlock // T0262
 
 	// T0100: Track env temp for non-variable lambdas. If this lambda is
 	// assigned to a variable, maybeRegisterEnvFree handles cleanup and the

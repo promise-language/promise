@@ -117,3 +117,42 @@ test_mutex_multiple_in_scope() `test {
   }
   // Both mutexes dropped at scope exit
 }
+
+// User-defined type tests — T0272
+type MutexPoint {
+  int x;
+  int y;
+}
+
+test_mutex_user_type() `test {
+  m := Mutex[MutexPoint](MutexPoint(x: 10, y: 20));
+  use guard := m.lock();
+  assert(guard.borrow.x == 10, "user type x");
+  assert(guard.borrow.y == 20, "user type y");
+}
+
+// Mutex with user type that has explicit drop — T0272
+type MutexDroppable {
+  int val;
+  drop(~this) {
+  }
+}
+
+test_mutex_user_type_with_drop() `test {
+  m := Mutex[MutexDroppable](MutexDroppable(val: 99));
+  use guard := m.lock();
+  assert(guard.borrow.val == 99, "droppable user type val");
+}
+
+// Mutex with user type that has synth drop (string field)
+type MutexNamed {
+  string name;
+  int id;
+}
+
+test_mutex_user_type_synth_drop() `test {
+  m := Mutex[MutexNamed](MutexNamed(name: "hello", id: 5));
+  use guard := m.lock();
+  assert(guard.borrow.name == "hello", "synth drop name");
+  assert(guard.borrow.id == 5, "synth drop id");
+}

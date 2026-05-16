@@ -2319,6 +2319,11 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		if dropFn, ok := c.funcs[mangledName]; ok {
 			blk.NewCall(dropFn, instancePtr)
 		}
+		// Free the instance after explicit drop (user drop doesn't include deallocation;
+		// synthesized drops already call pal_free internally)
+		if !named.IsValueType() && !named.NeedsSynthDrop() {
+			blk.NewCall(c.palFree, instancePtr)
+		}
 	case named != nil && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural():
 		// Heap user type without drop — free the instance pointer
 		valField := blk.NewGetElementPtr(structTy, typedPtr,

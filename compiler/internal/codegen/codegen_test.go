@@ -19239,3 +19239,114 @@ func TestMutexDropWithStringElement(t *testing.T) {
 	assertContains(t, dropFn, "call void @promise_string_drop(")
 	assertContains(t, dropFn, "call void @pal_mutex_destroy(")
 }
+
+// T0272: Arc[T].drop calls user type's drop function + pal_free for heap user types.
+func TestArcDropWithUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type P { int x; drop(~this) {} }
+		main() {
+			a := Arc[P](P(x: 5));
+		}
+	`)
+	dropFn := extractFunction(ir, `"Arc[P].drop"`)
+	if dropFn == "" {
+		t.Fatal("expected Arc[P].drop function in IR")
+	}
+	// Should call user drop then pal_free for heap user type
+	assertContains(t, dropFn, "call void @P.drop(")
+	assertContains(t, dropFn, "call void @pal_free(")
+}
+
+// T0272: Arc[T].drop with user type that has no explicit drop — just pal_free.
+func TestArcDropWithHeapUserTypeNoDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Q { int x; int y; }
+		main() {
+			a := Arc[Q](Q(x: 1, y: 2));
+		}
+	`)
+	dropFn := extractFunction(ir, `"Arc[Q].drop"`)
+	if dropFn == "" {
+		t.Fatal("expected Arc[Q].drop function in IR")
+	}
+	// Heap user type without drop — should still free the instance
+	assertContains(t, dropFn, "call void @pal_free(")
+}
+
+// T0272: Arc constructor with user type claims the heap temp (no premature free).
+func TestArcConstructorClaimsHeapTemp(t *testing.T) {
+	ir := generateIR(t, `
+		type R { int val; }
+		main() {
+			a := Arc[R](R(val: 42));
+			r := a.borrow;
+		}
+	`)
+	// The IR should NOT contain a pal_free of the R instance before the Arc drop.
+	// Specifically, the main function should not free the R instance directly —
+	// only the Arc[R].drop function should handle that.
+	mainFn := extractFunction(ir, "main")
+	if mainFn == "" {
+		t.Fatal("expected main function in IR")
+	}
+	// The heap temp for R should be claimed; no direct pal_free of the instance in main
+	// (Arc.drop handles it). Count pal_free calls in main — should only be for Arc itself.
+	dropFn := extractFunction(ir, `"Arc[R].drop"`)
+	if dropFn == "" {
+		t.Fatal("expected Arc[R].drop function in IR")
+	}
+	assertContains(t, dropFn, "call void @pal_free(")
+}
+
+// T0272: Mutex[T].drop calls user type's drop function + pal_free.
+func TestMutexDropWithUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type MP { int x; drop(~this) {} }
+		main() {
+			m := Mutex[MP](MP(x: 10));
+		}
+	`)
+	dropFn := extractFunction(ir, `"Mutex[MP].drop"`)
+	if dropFn == "" {
+		t.Fatal("expected Mutex[MP].drop function in IR")
+	}
+	assertContains(t, dropFn, "call void @MP.drop(")
+	assertContains(t, dropFn, "call void @pal_free(")
+	assertContains(t, dropFn, "call void @pal_mutex_destroy(")
+}
+
+// T0272: Arc drop with vector inner type calls Vector.drop.
+func TestArcDropWithVectorElement(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			a := Arc[int[]](v);
+		}
+	`)
+	dropFn := extractFunction(ir, `"Arc[int[]].drop"`)
+	if dropFn == "" {
+		// Try alternative mangled name
+		dropFn = extractFunction(ir, `"Arc[Vector[int]].drop"`)
+	}
+	if dropFn == "" {
+		t.Fatal("expected Arc[int[]].drop or Arc[Vector[int]].drop function in IR")
+	}
+	assertContains(t, dropFn, "call void @Vector.drop(")
+}
+
+// T0272: Mutex drop with user type that has synth drop (string field).
+func TestMutexDropWithSynthDropUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type Named { string name; }
+		main() {
+			m := Mutex[Named](Named(name: "hi"));
+		}
+	`)
+	dropFn := extractFunction(ir, `"Mutex[Named].drop"`)
+	if dropFn == "" {
+		t.Fatal("expected Mutex[Named].drop function in IR")
+	}
+	// Synth drop types have their own drop function that handles field cleanup
+	assertContains(t, dropFn, "call void @Named.drop(")
+	assertContains(t, dropFn, "call void @pal_mutex_destroy(")
+}

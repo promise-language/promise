@@ -65,3 +65,58 @@ arc_clone_cross_goroutine() `test {
   r := <-ch;
   assert(r! == 123, "clone cross-goroutine");
 }
+
+// User-defined type tests — T0272
+type ArcPoint {
+  int x;
+}
+
+arc_borrow_user_type() `test {
+  a := Arc[ArcPoint](ArcPoint(x: 5));
+  assert(a.borrow.x == 5, "user type borrow");
+}
+
+type ArcPair {
+  int x;
+  int y;
+}
+
+arc_borrow_user_type_two_fields() `test {
+  a := Arc[ArcPair](ArcPair(x: 3, y: 7));
+  assert(a.borrow.x == 3, "field x");
+  assert(a.borrow.y == 7, "field y");
+}
+
+type ArcDroppable {
+  int val;
+  drop(~this) {
+  }
+}
+
+arc_borrow_user_type_with_drop() `test {
+  a := Arc[ArcDroppable](ArcDroppable(val: 99));
+  assert(a.borrow.val == 99, "droppable borrow");
+  b := a.clone();
+  assert(b.borrow.val == 99, "droppable clone borrow");
+}
+
+type ArcWithString {
+  string name;
+  int id;
+}
+
+arc_borrow_user_type_synth_drop() `test {
+  a := Arc[ArcWithString](ArcWithString(name: "test", id: 7));
+  assert(a.borrow.name == "test", "synth drop name");
+  assert(a.borrow.id == 7, "synth drop id");
+}
+
+// Arc[int[]] — vector inner drop path
+arc_vector_element() `test {
+  v := [10, 20, 30];
+  a := Arc[int[]](v);
+  int[] borrowed = a.borrow;
+  assert(borrowed.len == 3, "vector len");
+  assert(borrowed[0] == 10, "vector[0]");
+  assert(borrowed[2] == 30, "vector[2]");
+}

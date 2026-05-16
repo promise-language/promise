@@ -47,6 +47,10 @@ type Enum struct {
 	isSerializable bool   // `serializable meta — auto-generate encode/decode
 	serializeTag   string // `serializable(tag: "kind") — custom discriminator key (default "type")
 	exported       bool   // `public meta — visible to other modules
+	isSendable     bool   // `sendable meta — values may be moved across goroutine boundaries
+	isSharable     bool   // `sharable meta — &T references may be shared across goroutines
+	notSendable    bool   // `not_sendable meta — opt-out of auto-derivation
+	notSharable    bool   // `not_sharable meta — opt-out of auto-derivation
 	doc            string // `doc meta — documentation string
 	deprecated     string // `deprecated meta — empty means not deprecated
 	hasDrop        bool   // true if any variant has fields needing cleanup (T0102)
@@ -83,6 +87,14 @@ func (e *Enum) HasDrop() bool            { return e.hasDrop }
 func (e *Enum) SetHasDrop(v bool)        { e.hasDrop = v }
 func (e *Enum) NeedsSynthDrop() bool     { return e.needsSynthDrop }
 func (e *Enum) SetNeedsSynthDrop(v bool) { e.needsSynthDrop = v }
+func (e *Enum) IsSendable() bool         { return e.isSendable }
+func (e *Enum) SetSendable(v bool)       { e.isSendable = v }
+func (e *Enum) IsSharable() bool         { return e.isSharable }
+func (e *Enum) SetSharable(v bool)       { e.isSharable = v }
+func (e *Enum) IsNotSendable() bool      { return e.notSendable }
+func (e *Enum) SetNotSendable(v bool)    { e.notSendable = v }
+func (e *Enum) IsNotSharable() bool      { return e.notSharable }
+func (e *Enum) SetNotSharable(v bool)    { e.notSharable = v }
 
 func (e *Enum) String() string {
 	return e.obj.Name()

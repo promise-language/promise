@@ -78,6 +78,10 @@ var builtinMetas = map[string][]MetaTarget{
 	"embed":        {TargetFunc},
 	"wasm_import":  {TargetFunc},
 	"lifetime":     {TargetParam, TargetFunc, TargetMethod},
+	"sendable":     {TargetType, TargetEnum},
+	"sharable":     {TargetType, TargetEnum},
+	"not_sendable": {TargetType, TargetEnum},
+	"not_sharable": {TargetType, TargetEnum},
 }
 
 // validateMetas checks that all meta annotations on a declaration are valid:

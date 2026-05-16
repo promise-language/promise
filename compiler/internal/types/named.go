@@ -25,6 +25,10 @@ type Named struct {
 	exported       bool   // `public meta — visible to other modules
 	isValueType    bool   // all fields are `value placement — pass by value, no heap alloc
 	isSerializable bool   // `serializable meta — auto-generate encode/decode methods
+	isSendable     bool   // `sendable meta — values may be moved across goroutine boundaries
+	isSharable     bool   // `sharable meta — &T references may be shared across goroutines
+	notSendable    bool   // `not_sendable meta — opt-out of auto-derivation
+	notSharable    bool   // `not_sharable meta — opt-out of auto-derivation
 	doc            string // `doc meta — documentation string
 	deprecated     string // `deprecated meta — empty means not deprecated
 }
@@ -58,6 +62,14 @@ func (n *Named) IsValueType() bool        { return n.isValueType }
 func (n *Named) SetIsValueType(v bool)    { n.isValueType = v }
 func (n *Named) IsSerializable() bool     { return n.isSerializable }
 func (n *Named) SetSerializable(v bool)   { n.isSerializable = v }
+func (n *Named) IsSendable() bool         { return n.isSendable }
+func (n *Named) SetSendable(v bool)       { n.isSendable = v }
+func (n *Named) IsSharable() bool         { return n.isSharable }
+func (n *Named) SetSharable(v bool)       { n.isSharable = v }
+func (n *Named) IsNotSendable() bool      { return n.notSendable }
+func (n *Named) SetNotSendable(v bool)    { n.notSendable = v }
+func (n *Named) IsNotSharable() bool      { return n.notSharable }
+func (n *Named) SetNotSharable(v bool)    { n.notSharable = v }
 func (n *Named) IsExported() bool         { return n.exported }
 func (n *Named) SetExported(v bool)       { n.exported = v }
 func (n *Named) Doc() string              { return n.doc }

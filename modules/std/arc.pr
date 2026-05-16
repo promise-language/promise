@@ -1,5 +1,5 @@
 // std/arc.pr — Atomic reference counting for safe cross-goroutine sharing (T0155)
-type Arc[T] `native `public {
+type Arc[T] `native `public `sendable `sharable {
   new(T value) `native `doc("Create a new Arc wrapping the given value with refcount 1.");
   get borrow T `native `doc("Get a shared reference to the inner value.");
   clone() Self `native `public `doc("Clone this Arc, atomically incrementing the reference count.");

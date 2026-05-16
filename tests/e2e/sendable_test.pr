@@ -1,0 +1,160 @@
+// Tests for `sendable / `sharable meta annotations (T0158)
+// --- Basic sendable types ---
+type Point `sendable `sharable {
+  int x;
+  int y;
+}
+
+test_sendable_type_basic() `test {
+  p := Point(x: 1, y: 2);
+  assert(p.x == 1, "sendable type works");
+  assert(p.y == 2, "sendable type works");
+}
+
+// --- Auto-derived sendable (all-primitive fields) ---
+type AutoSendable {
+  int a;
+  bool b;
+  f64 c;
+}
+
+test_auto_sendable_construction() `test {
+  a := AutoSendable(a: 42, b: true, c: 3.14);
+  assert(a.a == 42, "auto-derived sendable works");
+  assert(a.b == true, "auto-derived sendable bool");
+}
+
+// --- Sendable enum ---
+enum Color `sendable {
+  Red,
+  Green,
+  Blue,
+}
+
+test_sendable_enum() `test {
+  c := Color.Red;
+  match c {
+    Red => assert(true, "sendable enum works"),
+    _ => assert(false, "wrong variant"),
+  }
+}
+
+// --- not_sendable opt-out ---
+type Opaque `not_sendable {
+  int x;
+}
+
+test_not_sendable_opt_out() `test {
+  o := Opaque(x: 1);
+  assert(o.x == 1, "not_sendable type works locally");
+}
+
+// --- Sendable types compose ---
+type Wrapper `sendable {
+  Point p;
+  int count;
+}
+
+test_sendable_nested() `test {
+  w := Wrapper(p: Point(x: 1, y: 2), count: 3);
+  assert(w.p.x == 1, "nested sendable");
+  assert(w.count == 3, "nested sendable count");
+}
+
+// --- not_sharable opt-out ---
+type Interior `not_sharable {
+  int val;
+}
+
+test_not_sharable_type() `test {
+  i := Interior(val: 99);
+  assert(i.val == 99, "not_sharable type works locally");
+}
+
+// --- Sendable with optional field ---
+type MaybeInt `sendable {
+  int? value;
+}
+
+test_sendable_optional_field() `test {
+  m := MaybeInt(value: 42);
+  assert(m.value! == 42, "sendable with optional");
+  m2 := MaybeInt(value: none);
+  if val := m2.value {
+    assert(false, "should be none");
+  }
+}
+
+// --- Sendable through channels ---
+test_sendable_through_channel() `test {
+  ch := channel[Point]();
+  t := go {
+    ch.send(Point(x: 10, y: 20));
+  };
+  p := (<-ch)!;
+  assert(p.x == 10, "point x through channel");
+  assert(p.y == 20, "point y through channel");
+  <-t;
+}
+
+// --- Sendable captured in go block ---
+test_sendable_capture_in_go() `test {
+  p := Point(x: 5, y: 7);
+  ch := channel[int]();
+  t := go {
+    ch.send(p.x + p.y);
+  };
+  result := (<-ch)!;
+  assert(result == 12, "sendable capture sum");
+  <-t;
+}
+
+// --- Enum through channel ---
+test_sendable_enum_through_channel() `test {
+  ch := channel[Color]();
+  t := go {
+    ch.send(Color.Green);
+  };
+  c := (<-ch)!;
+  match c {
+    Green => assert(true, "got Green"),
+    _ => assert(false, "wrong color"),
+  }
+  <-t;
+}
+
+// --- Nested sendable through channel ---
+test_nested_sendable_through_channel() `test {
+  ch := channel[Wrapper]();
+  t := go {
+    ch.send(Wrapper(p: Point(x: 3, y: 4), count: 1));
+  };
+  w := (<-ch)!;
+  assert(w.p.x == 3, "nested sendable x");
+  assert(w.p.y == 4, "nested sendable y");
+  assert(w.count == 1, "nested sendable count");
+  <-t;
+}
+
+// --- Auto-derived sendable through channel ---
+test_auto_sendable_through_channel() `test {
+  ch := channel[AutoSendable]();
+  t := go {
+    ch.send(AutoSendable(a: 100, b: false, c: 2.71));
+  };
+  a := (<-ch)!;
+  assert(a.a == 100, "auto sendable a");
+  assert(a.b == false, "auto sendable b");
+  <-t;
+}
+
+// --- Sendable with optional through channel ---
+test_optional_sendable_through_channel() `test {
+  ch := channel[MaybeInt]();
+  t := go {
+    ch.send(MaybeInt(value: 99));
+  };
+  m := (<-ch)!;
+  assert(m.value! == 99, "optional through channel");
+  <-t;
+}

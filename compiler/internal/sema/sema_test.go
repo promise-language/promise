@@ -13167,3 +13167,822 @@ func TestArcConstructorWrongType(t *testing.T) {
 	`)
 	expectError(t, errs, "cannot assign string")
 }
+
+// === Sendable / Sharable annotations (T0158) ===
+
+func TestSendableAutoDerive(t *testing.T) {
+	checkOK(t, `
+		type Point `+"`sendable"+` {
+			int x;
+			int y;
+		}
+	`)
+}
+
+func TestSendableNonSendableField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		type Bad `+"`sendable"+` {
+			Holder h;
+		}
+	`)
+	expectError(t, errs, "non-sendable type Holder")
+}
+
+func TestSharableAutoDerive(t *testing.T) {
+	checkOK(t, `
+		type Point `+"`sharable"+` {
+			int x;
+			int y;
+		}
+	`)
+}
+
+func TestSharableNonSharableField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sharable"+` {
+			int x;
+		}
+		type Bad `+"`sharable"+` {
+			Holder h;
+		}
+	`)
+	expectError(t, errs, "non-sharable type Holder")
+}
+
+func TestNotSendableOptOut(t *testing.T) {
+	checkOK(t, `
+		type Opaque `+"`not_sendable"+` {
+			int x;
+		}
+	`)
+}
+
+func TestNotSharableOptOut(t *testing.T) {
+	checkOK(t, `
+		type Opaque `+"`not_sharable"+` {
+			int x;
+		}
+	`)
+}
+
+func TestSendableContradictory(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bad `+"`sendable `not_sendable"+` {
+			int x;
+		}
+	`)
+	expectError(t, errs, "contradictory")
+}
+
+func TestSharableContradictory(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bad `+"`sharable `not_sharable"+` {
+			int x;
+		}
+	`)
+	expectError(t, errs, "contradictory")
+}
+
+func TestSendableEnum(t *testing.T) {
+	checkOK(t, `
+		enum Color `+"`sendable"+` { Red, Green, Blue }
+	`)
+}
+
+func TestSendableEnumNonSendableField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		enum Bad `+"`sendable"+` { A(Holder), B }
+	`)
+	expectError(t, errs, "non-sendable type Holder")
+}
+
+func TestSignatureNotSendable(t *testing.T) {
+	errs := checkErrs(t, `
+		type Callback `+"`sendable"+` {
+			() -> void fn;
+		}
+	`)
+	expectError(t, errs, "non-sendable type")
+}
+
+func TestChannelNonSendableElement(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			channel[Holder] ch;
+		}
+	`)
+	expectError(t, errs, "not sendable")
+}
+
+func TestArcNonSharableElement(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sharable"+` {
+			int x;
+		}
+		test() {
+			a := Arc[Holder](Holder(x: 1));
+		}
+	`)
+	expectError(t, errs, "not sharable")
+}
+
+func TestArcNonSendableElement(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			a := Arc[Holder](Holder(x: 1));
+		}
+	`)
+	expectError(t, errs, "not sendable")
+}
+
+func TestGoBlockNonSendableCapture(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				h.x;
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockSendableCapture(t *testing.T) {
+	checkOK(t, `
+		test() {
+			x := 42;
+			t := go {
+				x + 1;
+			};
+		}
+	`)
+}
+
+func TestGoExprNonSendableArg(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		process(Holder h) int {
+			return h.x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go process(h);
+		}
+	`)
+	expectError(t, errs, "non-sendable argument")
+}
+
+func TestSendableWithOptionalField(t *testing.T) {
+	// Optional of sendable type is sendable
+	checkOK(t, `
+		type Holder `+"`sendable"+` {
+			int? value;
+		}
+	`)
+}
+
+func TestSendableWithOptionalNonSendableField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`not_sendable"+` {
+			int x;
+		}
+		type Holder `+"`sendable"+` {
+			Inner? value;
+		}
+	`)
+	expectError(t, errs, "non-sendable type")
+}
+
+// --- Coverage: isSendableType / isSharableType type branches ---
+
+func TestSendableWithVectorField(t *testing.T) {
+	// Instance type branch — Vector[int] is sendable (all-sendable element type)
+	checkOK(t, `
+		type Holder `+"`sendable"+` {
+			int[] items;
+		}
+	`)
+}
+
+func TestSendableWithNonSendableVectorField(t *testing.T) {
+	// Instance type branch — Vector[NonSendable] is not sendable
+	errs := checkErrs(t, `
+		type Inner `+"`not_sendable"+` {
+			int x;
+		}
+		type Holder `+"`sendable"+` {
+			Inner[] items;
+		}
+	`)
+	expectError(t, errs, "non-sendable type")
+}
+
+func TestSendableWithTupleField(t *testing.T) {
+	// Tuple type branch
+	checkOK(t, `
+		type Holder `+"`sendable"+` {
+			(int, bool) pair;
+		}
+	`)
+}
+
+func TestSendableWithNonSendableTupleField(t *testing.T) {
+	// Tuple with non-sendable element
+	errs := checkErrs(t, `
+		type Inner `+"`not_sendable"+` {
+			int x;
+		}
+		type Holder `+"`sendable"+` {
+			(int, Inner) pair;
+		}
+	`)
+	expectError(t, errs, "non-sendable type")
+}
+
+func TestSendableWithArrayField(t *testing.T) {
+	// Array type branch
+	checkOK(t, `
+		type Holder `+"`sendable"+` {
+			int[3] arr;
+		}
+	`)
+}
+
+func TestSendableWithNonSendableArrayField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`not_sendable"+` {
+			int x;
+		}
+		type Holder `+"`sendable"+` {
+			Inner[2] arr;
+		}
+	`)
+	expectError(t, errs, "non-sendable type")
+}
+
+func TestSendableWithEnumField(t *testing.T) {
+	// Enum type branch — auto-derived sendable enum as field
+	checkOK(t, `
+		enum Status { Active, Inactive }
+		type Holder `+"`sendable"+` {
+			Status s;
+		}
+	`)
+}
+
+func TestSendableWithNonSendableEnumField(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Status `+"`not_sendable"+` { Active, Inactive }
+		type Holder `+"`sendable"+` {
+			Status s;
+		}
+	`)
+	expectError(t, errs, "non-sendable type")
+}
+
+func TestSendableEnumWithEnumVariantField(t *testing.T) {
+	// Enum auto-derivation with variant fields that are themselves enums
+	checkOK(t, `
+		enum Inner { A, B }
+		enum Outer `+"`sendable"+` { X(Inner), Y }
+	`)
+}
+
+func TestSharableWithVectorField(t *testing.T) {
+	// Instance branch of isSharableType
+	checkOK(t, `
+		type Holder `+"`sharable"+` {
+			int[] items;
+		}
+	`)
+}
+
+func TestSharableWithNonSharableVectorField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`not_sharable"+` {
+			int x;
+		}
+		type Holder `+"`sharable"+` {
+			Inner[] items;
+		}
+	`)
+	expectError(t, errs, "non-sharable type")
+}
+
+func TestSharableWithTupleField(t *testing.T) {
+	checkOK(t, `
+		type Holder `+"`sharable"+` {
+			(int, string) pair;
+		}
+	`)
+}
+
+func TestSharableWithNonSharableTupleField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`not_sharable"+` {
+			int x;
+		}
+		type Holder `+"`sharable"+` {
+			(Inner, int) pair;
+		}
+	`)
+	expectError(t, errs, "non-sharable type")
+}
+
+func TestSharableWithArrayField(t *testing.T) {
+	checkOK(t, `
+		type Holder `+"`sharable"+` {
+			bool[4] flags;
+		}
+	`)
+}
+
+func TestSharableWithOptionalField(t *testing.T) {
+	checkOK(t, `
+		type Holder `+"`sharable"+` {
+			int? value;
+		}
+	`)
+}
+
+func TestSharableWithOptionalNonSharableField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`not_sharable"+` {
+			int x;
+		}
+		type Holder `+"`sharable"+` {
+			Inner? value;
+		}
+	`)
+	expectError(t, errs, "non-sharable type")
+}
+
+func TestSharableEnumAutoDerive(t *testing.T) {
+	checkOK(t, `
+		enum Color `+"`sharable"+` { Red, Green, Blue }
+	`)
+}
+
+func TestSharableEnumNonSharableField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`not_sharable"+` {
+			int x;
+		}
+		enum Bad `+"`sharable"+` { A(Inner), B }
+	`)
+	expectError(t, errs, "non-sharable type")
+}
+
+func TestSharableEnumContradictory(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Bad `+"`sharable `not_sharable"+` { A, B }
+	`)
+	expectError(t, errs, "contradictory")
+}
+
+func TestSendableEnumContradictory(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Bad `+"`sendable `not_sendable"+` { A, B }
+	`)
+	expectError(t, errs, "contradictory")
+}
+
+func TestSignatureNotSharable(t *testing.T) {
+	errs := checkErrs(t, `
+		type Callback `+"`sharable"+` {
+			() -> void fn;
+		}
+	`)
+	expectError(t, errs, "non-sharable type")
+}
+
+// --- Coverage: checkGoBlockSendable walker branches ---
+
+func TestGoBlockCaptureInBinaryExpr(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				1 + h.x;
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInCallExpr(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		process(int x) int { return x; }
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				process(h.x);
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInIfStmt(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				if h.x > 0 {
+					h.x;
+				}
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInWhileLoop(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				while h.x > 0 {
+					break;
+				}
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInForInLoop(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			items := [1, 2, 3];
+			t := go {
+				for i in items {
+					h.x;
+				}
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInAssignment(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				var y int = h.x;
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInReturnStmt(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				return h.x;
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInIndexExpr(t *testing.T) {
+	checkOK(t, `
+		test() {
+			items := [10, 20, 30];
+			idx := 1;
+			t := go {
+				items[idx];
+			};
+		}
+	`)
+}
+
+func TestGoBlockLocalVarNotChecked(t *testing.T) {
+	// Variables declared inside the go block should NOT trigger sendable checks
+	checkOK(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			t := go {
+				h := Holder(x: 1);
+				h.x;
+			};
+		}
+	`)
+}
+
+func TestGoBlockCaptureInMatchExpr(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				match h.x {
+					1 => 10,
+					_ => 20,
+				};
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInStringInterp(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				"value: ${h.x}";
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+// --- Coverage: Channel/Arc with valid element types ---
+
+func TestChannelSendableElement(t *testing.T) {
+	checkOK(t, `
+		test() {
+			ch := channel[int]();
+		}
+	`)
+}
+
+func TestArcSendableAndSharableElement(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[int](42);
+		}
+	`)
+}
+
+func TestSharableWithEnumField(t *testing.T) {
+	// Exercises the *types.Enum branch of isSharableType
+	checkOK(t, `
+		enum Status { Active, Inactive }
+		type Holder `+"`sharable"+` {
+			Status s;
+		}
+	`)
+}
+
+func TestSharableWithNonSharableEnumField(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Status `+"`not_sharable"+` { Active, Inactive }
+		type Holder `+"`sharable"+` {
+			Status s;
+		}
+	`)
+	expectError(t, errs, "non-sharable type")
+}
+
+func TestSharableWithNonSharableArrayField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`not_sharable"+` {
+			int x;
+		}
+		type Holder `+"`sharable"+` {
+			Inner[2] arr;
+		}
+	`)
+	expectError(t, errs, "non-sharable type")
+}
+
+func TestGoBlockCaptureInIfElse(t *testing.T) {
+	// Exercises walkElse branch
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				if true {
+					1;
+				} else {
+					h.x;
+				}
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInElseIf(t *testing.T) {
+	// Exercises walkElse IfStmt branch
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				if false {
+					1;
+				} else if h.x > 0 {
+					2;
+				}
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInUnaryExpr(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				-h.x;
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInInferredVarDecl(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				y := h.x;
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInParenExpr(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				(h.x);
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInCastExpr(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				h.x as f64;
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInSliceExpr(t *testing.T) {
+	checkOK(t, `
+		test() {
+			items := [10, 20, 30];
+			t := go {
+				items[0:2];
+			};
+		}
+	`)
+}
+
+func TestGoBlockCaptureInIncDec(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				h.x++;
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInIfExpr(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				var r int = if h.x > 0 { 1; } else { 0; };
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInArrayLit(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				[h.x, 2, 3];
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInInfiniteLoop(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				for {
+					h.x;
+					break;
+				}
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}
+
+func TestGoBlockCaptureInTupleLit(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		test() {
+			h := Holder(x: 1);
+			t := go {
+				(h.x, 2);
+			};
+		}
+	`)
+	expectError(t, errs, "non-sendable variable")
+}

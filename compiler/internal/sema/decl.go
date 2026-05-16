@@ -388,6 +388,21 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		c.processSerializableType(named, d)
 	}
 
+	// Process `sendable / `sharable / `not_sendable / `not_sharable: set flags.
+	// Validation is deferred to validateSendableTypes() after all types are defined.
+	if c.hasAnnotation(d.Annotations, "sendable") {
+		named.SetSendable(true)
+	}
+	if c.hasAnnotation(d.Annotations, "sharable") {
+		named.SetSharable(true)
+	}
+	if c.hasAnnotation(d.Annotations, "not_sendable") {
+		named.SetNotSendable(true)
+	}
+	if c.hasAnnotation(d.Annotations, "not_sharable") {
+		named.SetNotSharable(true)
+	}
+
 	// Detect and validate value types (all fields are `value placement).
 	// Must run after field/meta processing, before drop/new validation.
 	c.detectValueType(named, d)
@@ -871,6 +886,21 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 
 	if c.hasAnnotation(d.Annotations, "serializable") {
 		c.processSerializableEnum(enum, d)
+	}
+
+	// Process `sendable / `sharable / `not_sendable / `not_sharable: set flags.
+	// Validation is deferred to validateSendableTypes() after all types are defined.
+	if c.hasAnnotation(d.Annotations, "sendable") {
+		enum.SetSendable(true)
+	}
+	if c.hasAnnotation(d.Annotations, "sharable") {
+		enum.SetSharable(true)
+	}
+	if c.hasAnnotation(d.Annotations, "not_sendable") {
+		enum.SetNotSendable(true)
+	}
+	if c.hasAnnotation(d.Annotations, "not_sharable") {
+		enum.SetNotSharable(true)
 	}
 }
 

@@ -1678,6 +1678,7 @@ func (c *Checker) instantiateFromIndex(e *ast.IndexExpr, origin types.Type, tpar
 	}
 
 	c.validateConstraints(e.Pos(), origin, typeArgs)
+	c.validateSendableInstance(e.Pos(), origin, typeArgs)
 	inst := types.NewInstance(origin, typeArgs)
 	c.recordInstance(inst)
 	return inst
@@ -2660,6 +2661,8 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 	var innerType types.Type
 	if e.Expr != nil {
 		innerType = c.checkExpr(e.Expr)
+		// Expression form: check argument types are sendable
+		c.checkGoExprSendable(e.Expr)
 	} else if e.Block != nil {
 		c.openScope(e.Block, "go")
 		c.checkBlock(e.Block)
@@ -2670,6 +2673,8 @@ func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
 				innerType = c.info.Types[es.Expr]
 			}
 		}
+		// Block form: check captured variables are sendable
+		c.checkGoBlockSendable(e)
 	}
 	if innerType == nil {
 		innerType = types.TypVoid

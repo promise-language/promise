@@ -700,3 +700,125 @@ func TestFindProjectMainWithoutName(t *testing.T) {
 		t.Errorf("FindProjectMain = %q, want %q", got, "app.pr")
 	}
 }
+
+func TestParseConfigNamedRequireSHA256(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.archive]
+url = "https://example.com/mod-v1.0.tar.gz"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := cfg.NamedRequire["archive"]
+	if a == nil {
+		t.Fatal("NamedRequire[archive] is nil")
+	}
+	if a.URL != "https://example.com/mod-v1.0.tar.gz" {
+		t.Errorf("archive URL = %q", a.URL)
+	}
+	if a.Commit != "" {
+		t.Errorf("archive Commit = %q, want empty", a.Commit)
+	}
+	if a.SHA256 != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Errorf("archive SHA256 = %q", a.SHA256)
+	}
+}
+
+func TestParseConfigNamedRequireSHA256AndCommitConflict(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.bad]
+url = "https://github.com/alice/parser"
+commit = "a1b2c3d"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseConfig(path)
+	if err == nil {
+		t.Fatal("expected error for commit+sha256 conflict")
+	}
+	if !strings.Contains(err.Error(), "cannot have both") {
+		t.Errorf("error = %q, want to contain 'cannot have both'", err.Error())
+	}
+}
+
+func TestParseConfigNamedRequireSHA256InvalidHex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	tests := []struct {
+		name   string
+		sha256 string
+	}{
+		{"too short", "abcdef"},
+		{"uppercase", "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"},
+		{"non-hex", "g3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+		{"too long", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855aa"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.bad]
+url = "https://example.com/mod.tar.gz"
+sha256 = "` + tt.sha256 + `"
+`
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ParseConfig(path)
+			if err == nil {
+				t.Fatal("expected error for invalid sha256")
+			}
+			if !strings.Contains(err.Error(), "invalid 'sha256'") {
+				t.Errorf("error = %q, want to contain \"invalid 'sha256'\"", err.Error())
+			}
+		})
+	}
+}
+
+func TestParseConfigNamedRequireURLOnlyNoCommitNoSHA256(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.bad]
+url = "https://example.com/mod.tar.gz"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseConfig(path)
+	if err == nil {
+		t.Fatal("expected error for url without commit or sha256")
+	}
+	if !strings.Contains(err.Error(), "missing 'commit'") {
+		t.Errorf("error = %q, want to contain \"missing 'commit'\"", err.Error())
+	}
+}

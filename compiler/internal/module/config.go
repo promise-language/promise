@@ -5,14 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
 // RequireEntry describes a named dependency in [require.NAME] sections.
 type RequireEntry struct {
-	URL    string // git URL for the module
-	Commit string // pinned commit hash
+	URL    string // git URL or archive URL
+	Commit string // pinned commit hash (git only)
+	SHA256 string // optional content hash (non-git sources)
 }
+
+// sha256Hex matches exactly 64 lowercase hex characters.
+var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // Config represents the parsed contents of a promise.toml file.
 type Config struct {
@@ -112,6 +117,8 @@ func ParseConfig(path string) (*Config, error) {
 				namedReqEntry.URL = val
 			case "commit":
 				namedReqEntry.Commit = val
+			case "sha256":
+				namedReqEntry.SHA256 = val
 			}
 		case section == "module":
 			switch key {
@@ -139,16 +146,25 @@ func ParseConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: missing [module] name", path)
 	}
 
-	// Validate named require entries: url and commit must both be present.
+	// Validate named require entries.
 	for name, entry := range cfg.NamedRequire {
-		if entry.URL == "" && entry.Commit == "" {
+		if entry.URL == "" && entry.Commit == "" && entry.SHA256 == "" {
 			return nil, fmt.Errorf("%s: [require.%s] missing 'url' and 'commit'", path, name)
 		}
-		if entry.URL != "" && entry.Commit == "" {
-			return nil, fmt.Errorf("%s: [require.%s] has 'url' but missing 'commit'", path, name)
+		if entry.URL == "" {
+			return nil, fmt.Errorf("%s: [require.%s] missing 'url'", path, name)
 		}
-		if entry.URL == "" && entry.Commit != "" {
-			return nil, fmt.Errorf("%s: [require.%s] has 'commit' but missing 'url'", path, name)
+		// sha256 and commit are mutually exclusive — git sources use commit SHA
+		// for integrity; sha256 is for non-git sources (tarballs, archives).
+		if entry.Commit != "" && entry.SHA256 != "" {
+			return nil, fmt.Errorf("%s: [require.%s] cannot have both 'commit' and 'sha256' — use 'commit' for git sources, 'sha256' for non-git sources", path, name)
+		}
+		if entry.Commit == "" && entry.SHA256 == "" {
+			return nil, fmt.Errorf("%s: [require.%s] has 'url' but missing 'commit' (or 'sha256' for non-git sources)", path, name)
+		}
+		// Validate sha256 hex format.
+		if entry.SHA256 != "" && !sha256Hex.MatchString(entry.SHA256) {
+			return nil, fmt.Errorf("%s: [require.%s] invalid 'sha256': must be exactly 64 lowercase hex characters", path, name)
 		}
 	}
 

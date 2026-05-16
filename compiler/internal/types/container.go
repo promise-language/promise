@@ -104,6 +104,26 @@ func AsArc(t Type) (elem Type, ok bool) {
 	return nil, false
 }
 
+// NewWeak creates a Weak type as Instance{TypWeak, [elem]}.
+func NewWeak(elem Type) *Instance {
+	return NewInstance(TypWeak, []Type{elem})
+}
+
+// IsWeak reports whether t is a Weak instance (Instance{TypWeak, _}).
+func IsWeak(t Type) bool {
+	inst, ok := t.(*Instance)
+	return ok && inst.origin == TypWeak
+}
+
+// AsWeak extracts the element type from a Weak instance.
+// Returns (elem, true) for Weak instances, (nil, false) otherwise.
+func AsWeak(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypWeak {
+		return inst.typeArgs[0], true
+	}
+	return nil, false
+}
+
 // NewMutex creates a Mutex type as Instance{TypMutex, [elem]}.
 func NewMutex(elem Type) *Instance {
 	return NewInstance(TypMutex, []Type{elem})

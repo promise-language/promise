@@ -2187,10 +2187,12 @@ func (c *Compiler) getOrCreateArcDrop(elemType types.Type) *ir.Func {
 }
 
 // defineArcDropBody generates the body of an Arc[T] drop function.
-// Null-checks, atomically decrements refcount, drops inner T when refcount reaches 0, frees allocation.
+// Null-checks, atomically decrements strong_count. When strong_count reaches 0:
+// drops inner T, then decrements weak_count. When weak_count reaches 0: frees allocation.
+// T0157: Two-stage deallocation — strong_count controls T lifetime, weak_count controls allocation.
 func (c *Compiler) defineArcDropBody(fn *ir.Func, elemType types.Type) {
 	elemLLVM := c.resolveType(elemType)
-	arcStructTy := irtypes.NewStruct(irtypes.I64, elemLLVM)
+	arcStructTy := arcStructType(elemLLVM)
 	thisParam := fn.Params[0]
 
 	entry := fn.NewBlock(".entry")
@@ -2201,17 +2203,26 @@ func (c *Compiler) defineArcDropBody(fn *ir.Func, elemType types.Type) {
 	doneBlk := fn.NewBlock("done")
 	entry.NewCondBr(isNull, doneBlk, decrcBlk)
 
-	// Atomically decrement refcount
+	// Atomically decrement strong_count
 	typedPtr := decrcBlk.NewBitCast(thisParam, irtypes.NewPointer(arcStructTy))
 	rcField := decrcBlk.NewGetElementPtr(arcStructTy, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldStrong))
 	oldRC := c.emitAtomicAdd(decrcBlk, rcField, constant.NewInt(irtypes.I64, -1), irtypes.I64)
 	wasOne := decrcBlk.NewICmp(enum.IPredEQ, oldRC, constant.NewInt(irtypes.I64, 1))
-	freeBlk := fn.NewBlock("free")
-	decrcBlk.NewCondBr(wasOne, freeBlk, doneBlk)
+	dropBlk := fn.NewBlock("drop_value")
+	decrcBlk.NewCondBr(wasOne, dropBlk, doneBlk)
 
-	// Drop inner T value if needed, then free
-	c.emitArcInnerDrop(freeBlk, typedPtr, arcStructTy, elemType)
+	// Drop inner T value, then decrement weak_count
+	c.emitArcInnerDrop(dropBlk, typedPtr, arcStructTy, elemType)
+	// Decrement weak_count (the +1 that represents all strong refs)
+	wcField := dropBlk.NewGetElementPtr(arcStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
+	oldWC := c.emitAtomicAdd(dropBlk, wcField, constant.NewInt(irtypes.I64, -1), irtypes.I64)
+	wcWasOne := dropBlk.NewICmp(enum.IPredEQ, oldWC, constant.NewInt(irtypes.I64, 1))
+	freeBlk := fn.NewBlock("free")
+	dropBlk.NewCondBr(wcWasOne, freeBlk, doneBlk)
+
+	// Free allocation only when both strong and weak counts are zero
 	freeBlk.NewCall(c.palFree, thisParam)
 	freeBlk.NewBr(doneBlk)
 
@@ -2220,47 +2231,64 @@ func (c *Compiler) defineArcDropBody(fn *ir.Func, elemType types.Type) {
 
 // emitArcInnerDrop emits the type-specific drop logic for the value stored inside an Arc.
 // T0155: handles primitives (no-op), strings, vectors, channels, nested arcs, and user types.
+// T0157: delegates to emitInnerDrop with arcFieldValue index.
 func (c *Compiler) emitArcInnerDrop(blk *ir.Block, typedPtr value.Value, arcStructTy *irtypes.StructType, elemType types.Type) {
+	c.emitInnerDrop(blk, typedPtr, arcStructTy, elemType, arcFieldValue)
+}
+
+// emitInnerDrop emits type-specific drop logic for a value at the given field index
+// in a container struct. Used by both Arc and Mutex drop bodies.
+func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *irtypes.StructType, elemType types.Type, fieldIdx int) {
 	named := extractNamed(elemType)
+	fi := constant.NewInt(irtypes.I32, int64(fieldIdx))
 
 	switch {
 	case named != nil && isPrimitiveScalar(named):
 		// Copy type — no inner drop needed
 		return
 	case named == types.TypString:
-		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
 		strVal := blk.NewLoad(irtypes.I8Ptr, valField)
 		if dropFn, ok := c.funcs["promise_string_drop"]; ok {
 			blk.NewCall(dropFn, strVal)
 		}
 	case named != nil && (types.IsVector(elemType) || named == types.TypVector):
-		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
 		vecVal := blk.NewLoad(irtypes.I8Ptr, valField)
 		if dropFn, ok := c.funcs["Vector.drop"]; ok {
 			blk.NewCall(dropFn, vecVal)
 		}
 	case named != nil && (types.IsChannel(elemType) || named == types.TypChannel):
-		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
 		chVal := blk.NewLoad(irtypes.I8Ptr, valField)
 		if dropFn, ok := c.funcs["Channel.drop"]; ok {
 			blk.NewCall(dropFn, chVal)
 		}
 	case named != nil && (types.IsArc(elemType) || named == types.TypArc):
 		// Nested Arc: load i8* and call the inner Arc's drop
-		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
 		innerArc := blk.NewLoad(irtypes.I8Ptr, valField)
 		if innerElem, ok := types.AsArc(elemType); ok {
 			innerDropFn := c.getOrCreateArcDrop(innerElem)
 			blk.NewCall(innerDropFn, innerArc)
 		}
+	case named != nil && (types.IsWeak(elemType) || named == types.TypWeak):
+		// T0157: Nested Weak: load i8* and call the inner Weak's drop
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
+		innerWeak := blk.NewLoad(irtypes.I8Ptr, valField)
+		if innerElem, ok := types.AsWeak(elemType); ok {
+			innerDropFn := c.getOrCreateWeakDrop(innerElem)
+			blk.NewCall(innerDropFn, innerWeak)
+		}
 	case named != nil && (types.IsMutex(elemType) || named == types.TypMutex):
 		// T0156: Mutex inner drop — resolve element type and get per-instantiation drop
-		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
 		innerMutex := blk.NewLoad(irtypes.I8Ptr, valField)
 		if mutexElem, ok := types.AsMutex(elemType); ok {
 			innerDropFn := c.getOrCreateMutexDrop(mutexElem)
@@ -2268,16 +2296,16 @@ func (c *Compiler) emitArcInnerDrop(blk *ir.Block, typedPtr value.Value, arcStru
 		}
 	case named != nil && (types.IsMutexGuard(elemType) || named == types.TypMutexGuard):
 		// T0156: MutexGuard inner drop
-		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
 		innerGuard := blk.NewLoad(irtypes.I8Ptr, valField)
 		if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
 			blk.NewCall(dropFn, innerGuard)
 		}
 	case named != nil && (named.HasDrop() || named.NeedsSynthDrop()):
 		// User type with explicit or synthesized drop
-		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
 		// User types stored as {i8* vtable, i8* instance} — extract instance ptr
 		valStruct := blk.NewLoad(userValueType(), valField)
 		instancePtr := blk.NewExtractValue(valStruct, 1)
@@ -2293,8 +2321,8 @@ func (c *Compiler) emitArcInnerDrop(blk *ir.Block, typedPtr value.Value, arcStru
 		}
 	case named != nil && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural():
 		// Heap user type without drop — free the instance pointer
-		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
 		valStruct := blk.NewLoad(userValueType(), valField)
 		instancePtr := blk.NewExtractValue(valStruct, 1)
 		blk.NewCall(c.palFree, instancePtr)
@@ -2322,6 +2350,91 @@ func (c *Compiler) dupArc(ptr value.Value) value.Value {
 		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entryBlock),
 		ir.NewIncoming(ptr, incBlock),
 	)
+}
+
+// dupWeak duplicates a Weak reference (i8* → i8*) by atomically incrementing
+// the weak reference count. T0157: Used to prevent use-after-free when a Weak field
+// is read from a type with drop.
+func (c *Compiler) dupWeak(ptr value.Value, elemType types.Type) value.Value {
+	entryBlock := c.block
+	nullCheck := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+	incBlock := c.newBlock("weakdup.inc")
+	mergeBlock := c.newBlock("weakdup.merge")
+	entryBlock.NewCondBr(nullCheck, mergeBlock, incBlock)
+
+	c.block = incBlock
+	// Weak_count is at offset 1 (i64) — need GEP through Arc struct
+	elemLLVM := c.resolveType(elemType)
+	arcStructTy := arcStructType(elemLLVM)
+	typedPtr := incBlock.NewBitCast(ptr, irtypes.NewPointer(arcStructTy))
+	wcField := incBlock.NewGetElementPtr(arcStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
+	c.emitAtomicAdd(c.block, wcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+	incBlock.NewBr(mergeBlock)
+
+	c.block = mergeBlock
+	return c.block.NewPhi(
+		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entryBlock),
+		ir.NewIncoming(ptr, incBlock),
+	)
+}
+
+// --- Weak[T] codegen (T0157) ---
+
+// getOrCreateWeakDrop lazily creates a per-element-type drop function for Weak[T].
+// T0157: Weak[T] references. The drop function atomically decrements weak_count.
+// When weak_count reaches zero, frees the allocation (T already dropped by last Arc).
+func (c *Compiler) getOrCreateWeakDrop(elemType types.Type) *ir.Func {
+	elemName := typeArgStr(elemType)
+	funcName := "Weak[" + elemName + "].drop"
+
+	if fn, ok := c.funcs[funcName]; ok {
+		if len(fn.Blocks) > 0 {
+			return fn // already defined
+		}
+		c.defineWeakDropBody(fn, elemType)
+		return fn
+	}
+
+	thisParam := ir.NewParam("this", irtypes.I8Ptr)
+	fn := c.module.NewFunc(funcName, irtypes.Void, thisParam)
+
+	c.defineWeakDropBody(fn, elemType)
+
+	c.funcs[funcName] = fn
+	return fn
+}
+
+// defineWeakDropBody generates the body of a Weak[T] drop function.
+// Null-checks, atomically decrements weak_count. When weak_count reaches 0, frees allocation.
+// T0157: Weak drop does NOT drop T — that's Arc's responsibility when strong_count reaches 0.
+func (c *Compiler) defineWeakDropBody(fn *ir.Func, elemType types.Type) {
+	elemLLVM := c.resolveType(elemType)
+	arcStructTy := arcStructType(elemLLVM)
+	thisParam := fn.Params[0]
+
+	entry := fn.NewBlock(".entry")
+
+	// Null check
+	isNull := entry.NewICmp(enum.IPredEQ, thisParam, constant.NewNull(irtypes.I8Ptr))
+	decrcBlk := fn.NewBlock("decwc")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isNull, doneBlk, decrcBlk)
+
+	// Atomically decrement weak_count
+	typedPtr := decrcBlk.NewBitCast(thisParam, irtypes.NewPointer(arcStructTy))
+	wcField := decrcBlk.NewGetElementPtr(arcStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
+	oldWC := c.emitAtomicAdd(decrcBlk, wcField, constant.NewInt(irtypes.I64, -1), irtypes.I64)
+	wasOne := decrcBlk.NewICmp(enum.IPredEQ, oldWC, constant.NewInt(irtypes.I64, 1))
+	freeBlk := fn.NewBlock("free")
+	decrcBlk.NewCondBr(wasOne, freeBlk, doneBlk)
+
+	// Free allocation (T already dropped by last Arc)
+	freeBlk.NewCall(c.palFree, thisParam)
+	freeBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
 }
 
 // --- Mutex[T] / MutexGuard[T] codegen (T0156) ---
@@ -2418,8 +2531,8 @@ func (c *Compiler) defineMutexDropBody(fn *ir.Func, elemType types.Type) {
 
 	typedPtr := dropBlk.NewBitCast(thisParam, irtypes.NewPointer(mutexStructTy))
 
-	// Drop inner T value (reuse the Arc inner drop logic — same field-1 pattern)
-	c.emitArcInnerDrop(dropBlk, typedPtr, mutexStructTy, elemType)
+	// Drop inner T value — Mutex has value at field 1
+	c.emitInnerDrop(dropBlk, typedPtr, mutexStructTy, elemType, 1)
 
 	// Destroy PAL mutex (field 0)
 	handleField := dropBlk.NewGetElementPtr(mutexStructTy, typedPtr,

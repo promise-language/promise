@@ -1418,7 +1418,7 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			// Arc[T] has its own drop logic (T0155) — skip here; body is generated
 			// lazily by getOrCreateArcDrop when the drop function is first needed.
 			if isNativeDrop {
-				if named == types.TypArc || named == types.TypMutex || named == types.TypMutexGuard {
+				if named == types.TypArc || named == types.TypWeak || named == types.TypMutex || named == types.TypMutexGuard {
 					continue
 				}
 				c.defineFnIterDrop(fn, inst)

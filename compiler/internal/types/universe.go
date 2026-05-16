@@ -31,6 +31,7 @@ var (
 	TypArc        *Named // Arc[T] — atomic reference counting
 	TypMutex      *Named // Mutex[T] — mutual exclusion lock wrapping a value
 	TypMutexGuard *Named // MutexGuard[T] — RAII guard for Mutex[T]
+	TypWeak       *Named // Weak[T] — weak reference to Arc[T]-managed data
 )
 
 // Non-native stdlib types — NOT in the Universe scope. These are regular types
@@ -94,6 +95,7 @@ func init() {
 	TypArc = defGeneric("Arc", "T")
 	TypMutex = defGeneric("Mutex", "T")
 	TypMutexGuard = defGeneric("MutexGuard", "T")
+	TypWeak = defGeneric("Weak", "T")
 
 	// Lowercase sugar aliases for native generic types
 	defAlias := func(alias string, target *Named) {

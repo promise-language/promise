@@ -1,0 +1,162 @@
+// T0157: Weak[T] — weak references to Arc[T]-managed data.
+weak_downgrade_upgrade() `test {
+  a := Arc[int](42);
+  w := a.downgrade();
+  // Upgrade while Arc still alive — should succeed
+  if upgraded := w.upgrade() {
+    assert(upgraded.borrow == 42, "upgraded value");
+  } else {
+    assert(false, "upgrade should succeed");
+  }
+}
+
+weak_upgrade_same_value() `test {
+  a := Arc[int](99);
+  w := a.downgrade();
+  b := a.clone();
+  // Upgrade succeeds since strong refs still alive
+  if upgraded := w.upgrade() {
+    assert(upgraded.borrow == 99, "upgraded from weak");
+  } else {
+    assert(false, "upgrade should succeed");
+  }
+}
+
+weak_clone() `test {
+  a := Arc[int](7);
+  w1 := a.downgrade();
+  w2 := w1.clone();
+  // Both should be able to upgrade
+  if u1 := w1.upgrade() {
+    assert(u1.borrow == 7, "w1 upgrade");
+  } else {
+    assert(false, "w1 should upgrade");
+  }
+  if u2 := w2.upgrade() {
+    assert(u2.borrow == 7, "w2 upgrade");
+  } else {
+    assert(false, "w2 should upgrade");
+  }
+}
+
+weak_multiple_downgrades() `test {
+  a := Arc[int](10);
+  w1 := a.downgrade();
+  w2 := a.downgrade();
+  w3 := a.downgrade();
+  // All weaks should upgrade while Arc alive
+  if u1 := w1.upgrade() {
+    assert(u1.borrow == 10, "w1");
+  } else {
+    assert(false, "w1 should upgrade");
+  }
+  if u2 := w2.upgrade() {
+    assert(u2.borrow == 10, "w2");
+  } else {
+    assert(false, "w2 should upgrade");
+  }
+  if u3 := w3.upgrade() {
+    assert(u3.borrow == 10, "w3");
+  } else {
+    assert(false, "w3 should upgrade");
+  }
+}
+
+weak_string() `test {
+  a := Arc[string]("hello");
+  w := a.downgrade();
+  if upgraded := w.upgrade() {
+    assert(upgraded.borrow == "hello", "string weak upgrade");
+  } else {
+    assert(false, "should upgrade");
+  }
+}
+
+weak_bool() `test {
+  a := Arc[bool](true);
+  w := a.downgrade();
+  if upgraded := w.upgrade() {
+    assert(upgraded.borrow == true, "bool weak upgrade");
+  } else {
+    assert(false, "should upgrade");
+  }
+}
+
+// Helper: returns a Weak after the Arc goes out of scope (strong_count → 0).
+make_orphan_weak() Weak[int] {
+  a := Arc[int](42);
+  return a.downgrade();
+  // Arc 'a' drops at function exit: strong_count 1→0, T dropped, weak_count 2→1.
+  // Allocation survives because weak_count > 0.
+}
+
+// T0157: upgrade must return none when all Arcs have been dropped.
+weak_upgrade_after_drop() `test {
+  w := make_orphan_weak();
+  // strong_count is 0 — upgrade should return none
+  if _ := w.upgrade() {
+    assert(false, "upgrade should return none after all Arcs dropped");
+  }
+  // If we reach here, upgrade correctly returned none.
+  // w drops at scope exit: weak_count 1→0, allocation freed.
+}
+
+weak_cross_goroutine() `test(timeout: "5s") {
+  a := Arc[int](42);
+  w := a.downgrade();
+  ch := channel[int]();
+  go {
+    if upgraded := w.upgrade() {
+      ch.send(upgraded.borrow);
+    } else {
+      ch.send(-1);
+    }
+  };
+  r := <-ch;
+  assert(r! == 42, "cross-goroutine weak upgrade");
+}
+
+// T0157: Cloned weak ref can independently upgrade.
+weak_clone_independent() `test {
+  a := Arc[int](55);
+  w1 := a.downgrade();
+  w2 := w1.clone();
+  // Both w1 and w2 can upgrade independently
+  if u1 := w1.upgrade() {
+    assert(u1.borrow == 55, "w1 upgrades");
+  } else {
+    assert(false, "w1 should upgrade");
+  }
+  if u2 := w2.upgrade() {
+    assert(u2.borrow == 55, "w2 upgrades");
+  } else {
+    assert(false, "w2 should upgrade");
+  }
+}
+
+// T0157: Arc[UserType].borrow is broken (T0272) — skipping user type weak test.
+
+// T0157: Multiple goroutines racing to upgrade the same Weak.
+weak_concurrent_upgrade() `test(timeout: "5s") {
+  a := Arc[int](100);
+  w := a.downgrade();
+  ch := channel[int]();
+  int i = 0;
+  while i < 4 {
+    wc := w.clone();
+    go {
+      if upgraded := wc.upgrade() {
+        ch.send(upgraded.borrow);
+      } else {
+        ch.send(-1);
+      }
+    };
+    i = i + 1;
+  }
+  int j = 0;
+  while j < 4 {
+    r := <-ch;
+    assert(r! == 100, "concurrent upgrade");
+    j = j + 1;
+  }
+}

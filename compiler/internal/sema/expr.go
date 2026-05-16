@@ -924,6 +924,11 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 		return inst
 	}
 
+	if origin == types.TypWeak {
+		c.errorf(e.Pos(), "Weak cannot be constructed directly; use Arc.downgrade()")
+		return inst
+	}
+
 	subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 	if subst == nil {
 		subst = make(map[*types.TypeParam]types.Type)

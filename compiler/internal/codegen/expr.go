@@ -2558,8 +2558,21 @@ func (c *Compiler) genChannelConstructor(e *ast.CallExpr, inst *types.Instance) 
 		constant.NewInt(irtypes.I64, elemSize))
 }
 
-// genArcConstructor generates Arc[T](value) — allocates {refcount, T}, stores refcount=1 and the value.
-// T0155: Arc[T] atomic reference counting.
+// arcStructType returns the LLVM struct type for Arc[T]: {i64 strong_count, i64 weak_count, T value}.
+// T0157: Arc layout includes weak_count for Weak[T] support.
+func arcStructType(elemLLVM irtypes.Type) *irtypes.StructType {
+	return irtypes.NewStruct(irtypes.I64, irtypes.I64, elemLLVM)
+}
+
+// Arc struct field indices — T0157: weak_count added at field 1, value shifted to field 2.
+const (
+	arcFieldStrong = 0 // i64 strong_count
+	arcFieldWeak   = 1 // i64 weak_count
+	arcFieldValue  = 2 // T value
+)
+
+// genArcConstructor generates Arc[T](value) — allocates {strong_count, weak_count, T}, stores counts=1 and the value.
+// T0155: Arc[T] atomic reference counting. T0157: weak_count added.
 func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) value.Value {
 	elemType := inst.TypeArgs()[0]
 	if c.typeSubst != nil {
@@ -2568,23 +2581,28 @@ func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) valu
 	elemLLVM := c.resolveType(elemType)
 	elemSize := c.typeSize(elemLLVM)
 
-	// Allocate: 8 bytes refcount + sizeof(T)
-	totalSize := 8 + elemSize
+	// Allocate: 8 bytes strong_count + 8 bytes weak_count + sizeof(T)
+	totalSize := 16 + elemSize
 	arcPtr := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, int64(totalSize)))
 
 	// Bitcast to typed struct pointer for GEP
-	arcStructTy := irtypes.NewStruct(irtypes.I64, elemLLVM)
+	arcStructTy := arcStructType(elemLLVM)
 	typedPtr := c.block.NewBitCast(arcPtr, irtypes.NewPointer(arcStructTy))
 
-	// Store refcount = 1
+	// Store strong_count = 1
 	rcField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldStrong))
 	c.block.NewStore(constant.NewInt(irtypes.I64, 1), rcField)
+
+	// Store weak_count = 1 (the +1 represents all strong refs collectively)
+	wcField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
+	c.block.NewStore(constant.NewInt(irtypes.I64, 1), wcField)
 
 	// Generate and store value (moved into the Arc)
 	val := c.genCallArgExpr(e.Args[0].Value)
 	valField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldValue))
 	c.block.NewStore(val, valField)
 
 	return arcPtr
@@ -2609,20 +2627,20 @@ func (c *Compiler) genChannelMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 }
 
 // genArcBorrow generates the Arc .borrow getter — loads and returns the inner T value.
-// The Arc layout is { i64 refcount, T value }. We GEP to field 1 and load the value.
-// T0155: Arc[T] atomic reference counting.
+// The Arc layout is { i64 strong_count, i64 weak_count, T value }. We GEP to field 2 and load the value.
+// T0155: Arc[T] atomic reference counting. T0157: weak_count shifted value to field 2.
 func (c *Compiler) genArcBorrow(e *ast.MemberExpr, elemType types.Type) value.Value {
 	arcRaw := c.genExprAutoPropagate(e.Target) // B0323
 	elemLLVM := c.resolveType(elemType)
-	arcStructTy := irtypes.NewStruct(irtypes.I64, elemLLVM)
+	arcStructTy := arcStructType(elemLLVM)
 	typedPtr := c.block.NewBitCast(arcRaw, irtypes.NewPointer(arcStructTy))
 	valField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldValue))
 	return c.block.NewLoad(elemLLVM, valField)
 }
 
 // genArcMethodCall dispatches native method calls on Arc[T].
-// T0155: Arc[T] atomic reference counting.
+// T0155: Arc[T] atomic reference counting. T0157: downgrade added.
 func (c *Compiler) genArcMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
 	if c.typeSubst != nil {
 		elemType = types.Substitute(elemType, c.typeSubst)
@@ -2631,13 +2649,138 @@ func (c *Compiler) genArcMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ele
 
 	switch method {
 	case "clone":
-		// Atomically increment refcount and return the same pointer
+		// Atomically increment strong_count and return the same pointer
 		rcPtr := c.block.NewBitCast(arcRaw, irtypes.NewPointer(irtypes.I64))
 		c.emitAtomicAdd(c.block, rcPtr, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 		return arcRaw
+	case "downgrade":
+		// T0157: Atomically increment weak_count, return same pointer as Weak[T]
+		return c.genArcDowngrade(arcRaw, elemType)
 	default:
 		panic(fmt.Sprintf("codegen: unknown arc method %q", method))
 	}
+}
+
+// genArcDowngrade generates Arc.downgrade() — increments weak_count and returns the pointer as Weak[T].
+// T0157: Weak[T] references.
+func (c *Compiler) genArcDowngrade(arcRaw value.Value, elemType types.Type) value.Value {
+	elemLLVM := c.resolveType(elemType)
+	arcStructTy := arcStructType(elemLLVM)
+	typedPtr := c.block.NewBitCast(arcRaw, irtypes.NewPointer(arcStructTy))
+	wcField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
+	c.emitAtomicAdd(c.block, wcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+	return arcRaw
+}
+
+// --- Weak[T] codegen (T0157) ---
+
+// genWeakMethodCall dispatches native method calls on Weak[T].
+// T0157: Weak[T] references — upgrade and clone.
+func (c *Compiler) genWeakMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	weakRaw := c.genExprAutoPropagate(member.Target) // B0323
+
+	switch method {
+	case "clone":
+		// Atomically increment weak_count and return the same pointer
+		elemLLVM := c.resolveType(elemType)
+		arcStructTy := arcStructType(elemLLVM)
+		typedPtr := c.block.NewBitCast(weakRaw, irtypes.NewPointer(arcStructTy))
+		wcField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
+		c.emitAtomicAdd(c.block, wcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+		return weakRaw
+	case "upgrade":
+		// CAS loop: atomically try to increment strong_count if > 0
+		return c.genWeakUpgrade(weakRaw, elemType)
+	default:
+		panic(fmt.Sprintf("codegen: unknown weak method %q", method))
+	}
+}
+
+// genWeakUpgrade generates Weak.upgrade() — CAS loop on strong_count, returns Arc[T]?.
+// T0157: Returns {i1, i8*} optional — Some(arc_ptr) if strong_count > 0, none otherwise.
+func (c *Compiler) genWeakUpgrade(weakRaw value.Value, elemType types.Type) value.Value {
+	elemLLVM := c.resolveType(elemType)
+	arcStructTy := arcStructType(elemLLVM)
+	optType := irtypes.NewStruct(irtypes.I1, irtypes.I8Ptr)
+
+	typedPtr := c.block.NewBitCast(weakRaw, irtypes.NewPointer(arcStructTy))
+	scField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldStrong))
+
+	if c.isWasm {
+		// WASM: single-threaded, no atomics needed — simple load+compare+store
+		old := c.block.NewLoad(irtypes.I64, scField)
+		isZero := c.block.NewICmp(enum.IPredEQ, old, constant.NewInt(irtypes.I64, 0))
+		noneBlk := c.newBlock("weak.upgrade.none")
+		someBlk := c.newBlock("weak.upgrade.some")
+		mergeBlk := c.newBlock("weak.upgrade.merge")
+		c.block.NewCondBr(isZero, noneBlk, someBlk)
+
+		c.block = noneBlk
+		noneVal := constant.NewZeroInitializer(optType)
+		noneBlk.NewBr(mergeBlk)
+
+		c.block = someBlk
+		newRC := someBlk.NewAdd(old, constant.NewInt(irtypes.I64, 1))
+		someBlk.NewStore(newRC, scField)
+		someVal := c.wrapOptional(weakRaw, optType)
+		someBlk.NewBr(mergeBlk)
+
+		c.block = mergeBlk
+		return mergeBlk.NewPhi(
+			ir.NewIncoming(noneVal, noneBlk),
+			ir.NewIncoming(someVal, someBlk),
+		)
+	}
+
+	// Native: CAS loop for thread safety
+	//   loop:
+	//     old = load atomic i64* strong_count acquire
+	//     if old == 0: goto none
+	//     new = old + 1
+	//     {prev, ok} = cmpxchg i64* strong_count, old, new acq_rel monotonic
+	//     if !ok: goto loop
+	//     goto some
+	loopBlk := c.newBlock("weak.upgrade.loop")
+	noneBlk := c.newBlock("weak.upgrade.none")
+	someBlk := c.newBlock("weak.upgrade.some")
+	mergeBlk := c.newBlock("weak.upgrade.merge")
+	c.block.NewBr(loopBlk)
+
+	c.block = loopBlk
+	old := loopBlk.NewLoad(irtypes.I64, scField)
+	old.Atomic = true
+	old.Ordering = enum.AtomicOrderingAcquire
+	old.Align = 8 // LLVM requires explicit alignment for atomic load
+	isZero := loopBlk.NewICmp(enum.IPredEQ, old, constant.NewInt(irtypes.I64, 0))
+	casBlk := c.newBlock("weak.upgrade.cas")
+	loopBlk.NewCondBr(isZero, noneBlk, casBlk)
+
+	c.block = casBlk
+	newRC := casBlk.NewAdd(old, constant.NewInt(irtypes.I64, 1))
+	casResult := casBlk.NewCmpXchg(scField, old, newRC, enum.AtomicOrderingAcquireRelease, enum.AtomicOrderingMonotonic)
+	casResult.Weak = false
+	ok := casBlk.NewExtractValue(casResult, 1)
+	casBlk.NewCondBr(ok, someBlk, loopBlk)
+
+	c.block = noneBlk
+	noneVal := constant.NewZeroInitializer(optType)
+	noneBlk.NewBr(mergeBlk)
+
+	c.block = someBlk
+	someVal := c.wrapOptional(weakRaw, optType)
+	someBlk.NewBr(mergeBlk)
+
+	c.block = mergeBlk
+	return mergeBlk.NewPhi(
+		ir.NewIncoming(noneVal, noneBlk),
+		ir.NewIncoming(someVal, someBlk),
+	)
 }
 
 // --- Mutex[T] / MutexGuard[T] codegen (T0156) ---
@@ -2778,6 +2921,10 @@ func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignO
 	} else if arcElem, ok := types.AsArc(elemType); ok {
 		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
 		dropFn := c.getOrCreateArcDrop(arcElem)
+		c.block.NewCall(dropFn, oldVal)
+	} else if weakElem, ok := types.AsWeak(elemType); ok {
+		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
+		dropFn := c.getOrCreateWeakDrop(weakElem)
 		c.block.NewCall(dropFn, oldVal)
 	}
 
@@ -3251,6 +3398,16 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 					resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
 				}
 				c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
+				return dup
+			}
+			if weakElem, ok := types.AsWeak(fType); ok {
+				c.dupContainerFieldAccess = false // consume the flag
+				resolvedWeakElem := weakElem
+				if c.typeSubst != nil {
+					resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
+				}
+				dup := c.dupWeak(val, resolvedWeakElem)
+				c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
 				return dup
 			}
 		}
@@ -3839,13 +3996,23 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 		}
 	}
 
-	// Arc methods: clone
+	// Arc methods: clone, downgrade
 	if elem, ok := types.AsArc(unwrapped); ok {
 		return c.genArcMethodCall(e, member, elem, methodName), true
 	}
 	if named == types.TypArc {
 		if elem := c.resolveTypeParam(types.TypArc.TypeParams()[0]); elem != nil {
 			return c.genArcMethodCall(e, member, elem, methodName), true
+		}
+	}
+
+	// Weak methods: upgrade, clone (T0157)
+	if elem, ok := types.AsWeak(unwrapped); ok {
+		return c.genWeakMethodCall(e, member, elem, methodName), true
+	}
+	if named == types.TypWeak {
+		if elem := c.resolveTypeParam(types.TypWeak.TypeParams()[0]); elem != nil {
+			return c.genWeakMethodCall(e, member, elem, methodName), true
 		}
 	}
 

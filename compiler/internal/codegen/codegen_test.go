@@ -18942,8 +18942,8 @@ func TestArcConstructorAllocAndRefcount(t *testing.T) {
 			a := Arc[int](42);
 		}
 	`)
-	// Should allocate 16 bytes (i64 refcount + i64 value)
-	assertContains(t, ir, "call i8* @pal_alloc(i64 16)")
+	// Should allocate 24 bytes (i64 strong_count + i64 weak_count + i64 value) — T0157
+	assertContains(t, ir, "call i8* @pal_alloc(i64 24)")
 	// Should store refcount = 1
 	assertContains(t, ir, "store i64 1")
 	// Should store the value 42
@@ -19004,8 +19004,117 @@ func TestArcBorrowLoadsValue(t *testing.T) {
 			int x = a.borrow;
 		}
 	`)
-	// Borrow GEPs into the {i64, T} struct at field 1
-	assertContains(t, ir, "getelementptr { i64, i64 }")
+	// Borrow GEPs into the {i64, i64, T} struct at field 2 (T0157: value shifted to field 2)
+	assertContains(t, ir, "getelementptr { i64, i64, i64 }")
+}
+
+// T0157: Weak[T] — downgrade creates weak ref, upgrade uses cmpxchg.
+func TestWeakDowngradeUpgrade(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+			w := a.downgrade();
+		}
+	`)
+	// Downgrade should atomically increment weak_count
+	assertContains(t, ir, "%w.dropflag")
+	// Should produce Weak drop function
+	assertContains(t, ir, `@"Weak[int].drop"`)
+}
+
+// T0157: Weak[T] drop function has correct structure: null check, atomic decrement weak_count.
+func TestWeakDropFunctionBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+			w := a.downgrade();
+		}
+	`)
+	// Weak drop should null-check and decrement weak_count
+	assertContains(t, ir, "define void @\"Weak[int].drop\"")
+	assertContains(t, ir, "decwc:")
+	assertContains(t, ir, "free:")
+}
+
+// T0157: Arc[T] drop now has two-stage deallocation with weak_count.
+func TestArcDropTwoStageDeallocation(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+		}
+	`)
+	// Arc drop should have drop_value block (drops T + decrements weak_count)
+	assertContains(t, ir, "drop_value:")
+}
+
+// T0157: Weak[T].clone() atomically increments weak_count.
+func TestWeakCloneIR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+			w := a.downgrade();
+			w2 := w.clone();
+		}
+	`)
+	// Both w and w2 should have drop flags
+	assertContains(t, ir, "%w.dropflag")
+	assertContains(t, ir, "%w2.dropflag")
+	// Both should call Weak[int].drop at scope exit
+	assertContains(t, ir, `call void @"Weak[int].drop"(`)
+}
+
+// T0157: Weak[T].upgrade() uses CAS loop on strong_count for thread safety.
+func TestWeakUpgradeCASLoop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+			w := a.downgrade();
+			if upgraded := w.upgrade() {
+				int x = upgraded.borrow;
+			}
+		}
+	`)
+	// Upgrade should produce CAS loop blocks (numeric suffix varies)
+	assertContainsMatch(t, ir, `weak\.upgrade\.loop\.\d+:`)
+	assertContainsMatch(t, ir, `weak\.upgrade\.none\.\d+:`)
+	assertContainsMatch(t, ir, `weak\.upgrade\.some\.\d+:`)
+	// Should use cmpxchg for atomic upgrade
+	assertContains(t, ir, "cmpxchg")
+}
+
+// T0157: dupArc — reading an Arc[T] field from a droppable type increments strong refcount.
+func TestDupArcFieldFromDroppable(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder {
+			Arc[int] a;
+			drop(~this) {}
+		}
+		main() {
+			h := Holder(a: Arc[int](42));
+			Arc[int] copy = h.a;
+		}
+	`)
+	// Should produce arcdup block for refcount increment (numeric suffix varies)
+	assertContainsMatch(t, ir, `arcdup\.inc\.\d+:`)
+	assertContainsMatch(t, ir, `arcdup\.merge\.\d+:`)
+}
+
+// T0157: dupWeak — reading a Weak[T] field from a droppable type increments weak refcount.
+func TestDupWeakFieldFromDroppable(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder {
+			Weak[int] w;
+			drop(~this) {}
+		}
+		main() {
+			a := Arc[int](42);
+			h := Holder(w: a.downgrade());
+			Weak[int] copy = h.w;
+		}
+	`)
+	// Should produce weakdup block for weak_count increment (numeric suffix varies)
+	assertContainsMatch(t, ir, `weakdup\.inc\.\d+:`)
+	assertContainsMatch(t, ir, `weakdup\.merge\.\d+:`)
 }
 
 // T0156: Mutex[T] constructor allocates {i8* pal_handle, T value} and inits mutex.

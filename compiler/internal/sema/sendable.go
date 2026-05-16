@@ -57,8 +57,8 @@ func isSendableType(typ types.Type, visited map[types.Type]bool) bool {
 		return true
 	case *types.Instance:
 		origin := t.Origin()
-		// Channel, Arc, Task are inherently sendable (internal synchronization)
-		if origin == types.TypChannel || origin == types.TypArc || origin == types.TypTask {
+		// Channel, Arc, Weak, Task are inherently sendable (internal synchronization)
+		if origin == types.TypChannel || origin == types.TypArc || origin == types.TypWeak || origin == types.TypTask {
 			return true
 		}
 		// Containers: sendable iff element types are sendable
@@ -144,8 +144,8 @@ func isSharableType(typ types.Type, visited map[types.Type]bool) bool {
 		return true
 	case *types.Instance:
 		origin := t.Origin()
-		// Channel, Arc are inherently sharable (internal synchronization)
-		if origin == types.TypChannel || origin == types.TypArc {
+		// Channel, Arc, Weak are inherently sharable (internal synchronization)
+		if origin == types.TypChannel || origin == types.TypArc || origin == types.TypWeak {
 			return true
 		}
 		// Task handles are sharable (read-only handle)
@@ -444,6 +444,14 @@ func (c *Checker) validateSendableInstance(pos ast.Pos, origin types.Type, typeA
 		}
 		if !isSharableType(elemType, make(map[types.Type]bool)) {
 			c.errorf(pos, "Arc element type %s is not sharable", elemType)
+		}
+	} else if named == types.TypWeak {
+		// T0157: Weak[T] has same constraints as Arc[T] — T must be sendable and sharable
+		if !isSendableType(elemType, make(map[types.Type]bool)) {
+			c.errorf(pos, "Weak element type %s is not sendable", elemType)
+		}
+		if !isSharableType(elemType, make(map[types.Type]bool)) {
+			c.errorf(pos, "Weak element type %s is not sharable", elemType)
 		}
 	}
 }

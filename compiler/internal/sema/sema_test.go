@@ -13766,6 +13766,24 @@ func TestArcSendableAndSharableElement(t *testing.T) {
 	`)
 }
 
+// T0157: Weak cannot be constructed directly.
+func TestWeakCannotConstructDirectly(t *testing.T) {
+	errs := checkErrs(t, `test() { w := Weak[int](); }`)
+	expectError(t, errs, "Weak cannot be constructed directly")
+}
+
+// T0157: Weak element type must be sendable and sharable.
+func TestWeakNonSendableElement(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder `+"`not_sendable"+` {
+			int x;
+		}
+		foo(Weak[Holder] w) {}
+		test() {}
+	`)
+	expectError(t, errs, "not sendable")
+}
+
 func TestSharableWithEnumField(t *testing.T) {
 	// Exercises the *types.Enum branch of isSharableType
 	checkOK(t, `

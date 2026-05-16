@@ -1,0 +1,627 @@
+package main
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// testCatalogTOML is a minimal catalog fixture for testing.
+const testCatalogTOML = `[catalog]
+epoch = "2026.0"
+
+[modules.json]
+url = "https://github.com/promise-lang/json"
+commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+description = "JSON parsing and serialization"
+
+[modules.io]
+description = "Console and file I/O"
+
+[modules.strings]
+url = "https://github.com/promise-lang/strings"
+commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+description = "Extended string utilities"
+`
+
+// withCatalog temporarily sets embeddedCatalog for the duration of fn.
+func withCatalog(data []byte, fn func()) {
+	saved := embeddedCatalog
+	embeddedCatalog = data
+	defer func() { embeddedCatalog = saved }()
+	fn()
+}
+
+// --- runSearch tests ---
+
+func TestSearchMatchByName(t *testing.T) {
+	withCatalog([]byte(testCatalogTOML), func() {
+		out := captureStdout(t, func() {
+			captureStderr(func() {
+				runSearch([]string{"json"})
+			})
+		})
+		if !strings.Contains(out, "json") {
+			t.Errorf("expected output to contain 'json', got: %s", out)
+		}
+		if !strings.Contains(out, "1 matching") {
+			t.Errorf("expected '1 matching' in output, got: %s", out)
+		}
+	})
+}
+
+func TestSearchMatchByDescription(t *testing.T) {
+	withCatalog([]byte(testCatalogTOML), func() {
+		out := captureStdout(t, func() {
+			captureStderr(func() {
+				runSearch([]string{"parsing"})
+			})
+		})
+		if !strings.Contains(out, "json") {
+			t.Errorf("expected output to contain 'json' (matched by description), got: %s", out)
+		}
+	})
+}
+
+func TestSearchMultipleMatches(t *testing.T) {
+	withCatalog([]byte(testCatalogTOML), func() {
+		out := captureStdout(t, func() {
+			captureStderr(func() {
+				runSearch([]string{"string"})
+			})
+		})
+		// "strings" module should match by name, "json" should not
+		if !strings.Contains(out, "strings") {
+			t.Errorf("expected output to contain 'strings', got: %s", out)
+		}
+	})
+}
+
+func TestSearchNoMatch(t *testing.T) {
+	withCatalog([]byte(testCatalogTOML), func() {
+		stderr := captureStderr(func() {
+			captureStdout(t, func() {
+				runSearch([]string{"nonexistent"})
+			})
+		})
+		if !strings.Contains(stderr, "No modules matching") {
+			t.Errorf("expected 'No modules matching' on stderr, got: %s", stderr)
+		}
+	})
+}
+
+func TestSearchEmptyCatalog(t *testing.T) {
+	// When embeddedCatalog is nil, runSearch calls os.Exit(1).
+	// Test via subprocess.
+	if os.Getenv("TEST_SEARCH_EMPTY_CATALOG") == "1" {
+		withCatalog(nil, func() {
+			runSearch([]string{"json"})
+		})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestSearchEmptyCatalog")
+	cmd.Env = append(os.Environ(), "TEST_SEARCH_EMPTY_CATALOG=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(string(out), "no catalog available") {
+		t.Errorf("expected 'no catalog available' in output, got: %s", string(out))
+	}
+}
+
+// --- runAdd tests ---
+
+func TestAddEmbeddedModule(t *testing.T) {
+	dir := t.TempDir()
+	orig, _ := os.Getwd()
+	defer os.Chdir(orig)
+	os.Chdir(dir)
+
+	// Create a promise.toml so runAdd doesn't fail on missing config
+	os.WriteFile(filepath.Join(dir, "promise.toml"), []byte("[module]\nname = \"test\"\nepoch = \"2026.0\"\n"), 0644)
+
+	withCatalog([]byte(testCatalogTOML), func() {
+		out := captureStdout(t, func() {
+			captureStderr(func() {
+				runAdd([]string{"io"})
+			})
+		})
+		if !strings.Contains(out, "is built-in") {
+			t.Errorf("expected 'is built-in' for embedded module, got: %s", out)
+		}
+	})
+
+	// promise.toml should be unchanged (no require added)
+	content, _ := os.ReadFile(filepath.Join(dir, "promise.toml"))
+	if strings.Contains(string(content), "[require]") {
+		t.Error("promise.toml should not have [require] for built-in module")
+	}
+}
+
+func TestAddNoPromiseToml(t *testing.T) {
+	// runAdd calls os.Exit(1) when no promise.toml. Test via subprocess.
+	if os.Getenv("TEST_ADD_NO_TOML") == "1" {
+		dir := t.TempDir()
+		os.Chdir(dir)
+		withCatalog([]byte(testCatalogTOML), func() {
+			runAdd([]string{"json"})
+		})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestAddNoPromiseToml")
+	cmd.Env = append(os.Environ(), "TEST_ADD_NO_TOML=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(string(out), "no promise.toml") {
+		t.Errorf("expected 'no promise.toml' in output, got: %s", string(out))
+	}
+}
+
+func TestAddCatalogResolvesToURL(t *testing.T) {
+	// Create a local bare git repo to act as the "remote"
+	bareDir := t.TempDir()
+	workDir := t.TempDir()
+	projDir := t.TempDir()
+
+	// Init bare repo
+	run := func(dir, name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
+		}
+	}
+
+	run(bareDir, "git", "init", "--bare", ".")
+	run(workDir, "git", "clone", bareDir, ".")
+	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "promise.toml"), []byte("[module]\nname = \"mymod\"\n"), 0644)
+	run(workDir, "git", "add", ".")
+	run(workDir, "git", "commit", "-m", "init")
+	run(workDir, "git", "push", "origin", "HEAD")
+
+	// Get the HEAD commit hash
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	hashBytes, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	expectedHash := strings.TrimSpace(string(hashBytes))
+
+	// Create catalog pointing to local bare repo
+	catalogTOML := `[catalog]
+epoch = "2026.0"
+
+[modules.mymod]
+url = "` + bareDir + `"
+commit = "` + expectedHash + `"
+description = "Test module"
+`
+
+	// Set up project dir
+	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte("[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"), 0644)
+
+	orig, _ := os.Getwd()
+	defer os.Chdir(orig)
+	os.Chdir(projDir)
+
+	withCatalog([]byte(catalogTOML), func() {
+		out := captureStdout(t, func() {
+			captureStderr(func() {
+				runAdd([]string{"mymod"})
+			})
+		})
+		if !strings.Contains(out, "Added") {
+			t.Errorf("expected 'Added' in output, got: %s", out)
+		}
+		if !strings.Contains(out, expectedHash[:12]) {
+			t.Errorf("expected commit hash prefix %s in output, got: %s", expectedHash[:12], out)
+		}
+	})
+
+	// Verify promise.toml was updated
+	content, _ := os.ReadFile(filepath.Join(projDir, "promise.toml"))
+	if !strings.Contains(string(content), bareDir) {
+		t.Errorf("promise.toml should contain URL %s, got: %s", bareDir, string(content))
+	}
+	if !strings.Contains(string(content), expectedHash) {
+		t.Errorf("promise.toml should contain commit hash, got: %s", string(content))
+	}
+}
+
+// --- runUpdate tests ---
+
+func TestUpdateNoEntries(t *testing.T) {
+	dir := t.TempDir()
+	orig, _ := os.Getwd()
+	defer os.Chdir(orig)
+	os.Chdir(dir)
+
+	os.WriteFile(filepath.Join(dir, "promise.toml"), []byte("[module]\nname = \"test\"\nepoch = \"2026.0\"\n"), 0644)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() {
+			runUpdate(nil)
+		})
+	})
+	if !strings.Contains(out, "No [require] entries") {
+		t.Errorf("expected 'No [require] entries', got: %s", out)
+	}
+}
+
+func TestUpdateSkipsSHA256Only(t *testing.T) {
+	dir := t.TempDir()
+	orig, _ := os.Getwd()
+	defer os.Chdir(orig)
+	os.Chdir(dir)
+
+	// Create promise.toml with a SHA256-only named require (no commit field)
+	toml := `[module]
+name = "test"
+epoch = "2026.0"
+
+[require.archive]
+url = "https://example.com/archive.tar.gz"
+sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+`
+	os.WriteFile(filepath.Join(dir, "promise.toml"), []byte(toml), 0644)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() {
+			runUpdate(nil)
+		})
+	})
+	if !strings.Contains(out, "skipped (non-git source)") {
+		t.Errorf("expected 'skipped (non-git source)' for SHA256-only entry, got: %s", out)
+	}
+}
+
+func TestUpdateNotFound(t *testing.T) {
+	// runUpdate calls os.Exit(1) when target not found. Test via subprocess.
+	if os.Getenv("TEST_UPDATE_NOT_FOUND") == "1" {
+		dir := t.TempDir()
+		os.Chdir(dir)
+		os.WriteFile(filepath.Join(dir, "promise.toml"), []byte("[module]\nname = \"test\"\nepoch = \"2026.0\"\n"), 0644)
+		runUpdate([]string{"nonexistent"})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestUpdateNotFound")
+	cmd.Env = append(os.Environ(), "TEST_UPDATE_NOT_FOUND=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(string(out), "no [require] entry matching") {
+		t.Errorf("expected 'no [require] entry matching' in output, got: %s", string(out))
+	}
+}
+
+func TestUpdateURLKeyedEntry(t *testing.T) {
+	// Create a local bare git repo with two commits
+	bareDir := t.TempDir()
+	workDir := t.TempDir()
+	projDir := t.TempDir()
+
+	run := func(dir, name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
+		}
+	}
+
+	run(bareDir, "git", "init", "--bare", ".")
+	run(workDir, "git", "clone", bareDir, ".")
+	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v1"), 0644)
+	run(workDir, "git", "add", ".")
+	run(workDir, "git", "commit", "-m", "first")
+	run(workDir, "git", "push", "origin", "HEAD")
+
+	// Get first commit hash
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	firstHash, _ := cmd.Output()
+	oldHash := strings.TrimSpace(string(firstHash))
+
+	// Make a second commit
+	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v2"), 0644)
+	run(workDir, "git", "add", ".")
+	run(workDir, "git", "commit", "-m", "second")
+	run(workDir, "git", "push", "origin", "HEAD")
+
+	cmd = exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	newHash, _ := cmd.Output()
+	headHash := strings.TrimSpace(string(newHash))
+
+	// Create promise.toml with URL-keyed require pinned to old commit
+	toml := "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n\n[require]\n\"" + bareDir + "\" = \"" + oldHash + "\"\n"
+	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte(toml), 0644)
+
+	orig, _ := os.Getwd()
+	defer os.Chdir(orig)
+	os.Chdir(projDir)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() {
+			runUpdate(nil)
+		})
+	})
+	if !strings.Contains(out, headHash[:12]) {
+		t.Errorf("expected new hash %s in output, got: %s", headHash[:12], out)
+	}
+	if !strings.Contains(out, "Updated 1 of 1") {
+		t.Errorf("expected 'Updated 1 of 1', got: %s", out)
+	}
+
+	// Verify promise.toml was updated
+	content, _ := os.ReadFile(filepath.Join(projDir, "promise.toml"))
+	if !strings.Contains(string(content), headHash) {
+		t.Errorf("promise.toml should contain new hash %s, got: %s", headHash, string(content))
+	}
+}
+
+func TestUpdateSpecificTarget(t *testing.T) {
+	// Test updating a specific URL-keyed entry by URL
+	bareDir := t.TempDir()
+	workDir := t.TempDir()
+	projDir := t.TempDir()
+
+	run := func(dir, name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
+		}
+	}
+
+	run(bareDir, "git", "init", "--bare", ".")
+	run(workDir, "git", "clone", bareDir, ".")
+	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("content"), 0644)
+	run(workDir, "git", "add", ".")
+	run(workDir, "git", "commit", "-m", "init")
+	run(workDir, "git", "push", "origin", "HEAD")
+
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	hashBytes, _ := cmd.Output()
+	headHash := strings.TrimSpace(string(hashBytes))
+
+	// Pin to HEAD already — should report "already up to date"
+	toml := "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n\n[require]\n\"" + bareDir + "\" = \"" + headHash + "\"\n"
+	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte(toml), 0644)
+
+	orig, _ := os.Getwd()
+	defer os.Chdir(orig)
+	os.Chdir(projDir)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() {
+			runUpdate([]string{bareDir})
+		})
+	})
+	if !strings.Contains(out, "already up to date") {
+		t.Errorf("expected 'already up to date', got: %s", out)
+	}
+}
+
+func TestAddWithCustomRef(t *testing.T) {
+	// Test the len(args)==2 path with a custom ref
+	bareDir := t.TempDir()
+	workDir := t.TempDir()
+	projDir := t.TempDir()
+
+	run := func(dir, name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
+		}
+	}
+
+	run(bareDir, "git", "init", "--bare", ".")
+	run(workDir, "git", "clone", bareDir, ".")
+	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v1"), 0644)
+	run(workDir, "git", "add", ".")
+	run(workDir, "git", "commit", "-m", "first")
+	run(workDir, "git", "tag", "v1.0")
+	run(workDir, "git", "push", "origin", "HEAD", "--tags")
+
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	hashBytes, _ := cmd.Output()
+	expectedHash := strings.TrimSpace(string(hashBytes))
+
+	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte("[module]\nname = \"proj\"\nepoch = \"2026.0\"\n"), 0644)
+
+	orig, _ := os.Getwd()
+	defer os.Chdir(orig)
+	os.Chdir(projDir)
+
+	withCatalog(nil, func() {
+		out := captureStdout(t, func() {
+			captureStderr(func() {
+				runAdd([]string{bareDir, "v1.0"})
+			})
+		})
+		if !strings.Contains(out, "Added") {
+			t.Errorf("expected 'Added' in output, got: %s", out)
+		}
+		if !strings.Contains(out, expectedHash[:12]) {
+			t.Errorf("expected hash %s in output, got: %s", expectedHash[:12], out)
+		}
+	})
+
+	// Verify promise.toml
+	content, _ := os.ReadFile(filepath.Join(projDir, "promise.toml"))
+	if !strings.Contains(string(content), expectedHash) {
+		t.Errorf("promise.toml should contain commit hash, got: %s", string(content))
+	}
+}
+
+func TestSearchUsageError(t *testing.T) {
+	// runSearch with wrong number of args calls os.Exit(1)
+	if os.Getenv("TEST_SEARCH_USAGE") == "1" {
+		runSearch(nil)
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestSearchUsageError")
+	cmd.Env = append(os.Environ(), "TEST_SEARCH_USAGE=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(string(out), "usage: promise search") {
+		t.Errorf("expected usage message, got: %s", string(out))
+	}
+}
+
+func TestUpdateNamedEntry(t *testing.T) {
+	// Test updating a [require.NAME] entry when HEAD has moved forward
+	bareDir := t.TempDir()
+	workDir := t.TempDir()
+	projDir := t.TempDir()
+
+	run := func(dir, name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
+		}
+	}
+
+	run(bareDir, "git", "init", "--bare", ".")
+	run(workDir, "git", "clone", bareDir, ".")
+	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v1"), 0644)
+	run(workDir, "git", "add", ".")
+	run(workDir, "git", "commit", "-m", "first")
+	run(workDir, "git", "push", "origin", "HEAD")
+
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	firstHash, _ := cmd.Output()
+	oldHash := strings.TrimSpace(string(firstHash))
+
+	// Make a second commit
+	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v2"), 0644)
+	run(workDir, "git", "add", ".")
+	run(workDir, "git", "commit", "-m", "second")
+	run(workDir, "git", "push", "origin", "HEAD")
+
+	cmd = exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	newHash, _ := cmd.Output()
+	headHash := strings.TrimSpace(string(newHash))
+
+	// Create promise.toml with [require.mymod] pinned to old commit
+	toml := "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n\n[require.mymod]\nurl = \"" + bareDir + "\"\ncommit = \"" + oldHash + "\"\n"
+	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte(toml), 0644)
+
+	orig, _ := os.Getwd()
+	defer os.Chdir(orig)
+	os.Chdir(projDir)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() {
+			runUpdate(nil)
+		})
+	})
+	if !strings.Contains(out, headHash[:12]) {
+		t.Errorf("expected new hash %s in output, got: %s", headHash[:12], out)
+	}
+	if !strings.Contains(out, "Updated 1 of 1") {
+		t.Errorf("expected 'Updated 1 of 1', got: %s", out)
+	}
+
+	// Verify promise.toml was updated
+	content, _ := os.ReadFile(filepath.Join(projDir, "promise.toml"))
+	if !strings.Contains(string(content), headHash) {
+		t.Errorf("promise.toml should contain new hash %s, got: %s", headHash, string(content))
+	}
+}
+
+func TestUpdateAlreadyCurrent(t *testing.T) {
+	// Create a local bare git repo
+	bareDir := t.TempDir()
+	workDir := t.TempDir()
+	projDir := t.TempDir()
+
+	run := func(dir, name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
+		}
+	}
+
+	run(bareDir, "git", "init", "--bare", ".")
+	run(workDir, "git", "clone", bareDir, ".")
+	run(workDir, "git", "config", "user.email", "test@test.com")
+	run(workDir, "git", "config", "user.name", "Test")
+	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("hello"), 0644)
+	run(workDir, "git", "add", ".")
+	run(workDir, "git", "commit", "-m", "init")
+	run(workDir, "git", "push", "origin", "HEAD")
+
+	// Get HEAD hash
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	hashBytes, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	headHash := strings.TrimSpace(string(hashBytes))
+
+	// Create promise.toml already pinned to HEAD
+	toml := "[module]\nname = \"proj\"\nepoch = \"2026.0\"\n\n[require]\n\"" + bareDir + "\" = \"" + headHash + "\"\n"
+	os.WriteFile(filepath.Join(projDir, "promise.toml"), []byte(toml), 0644)
+
+	orig, _ := os.Getwd()
+	defer os.Chdir(orig)
+	os.Chdir(projDir)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() {
+			runUpdate(nil)
+		})
+	})
+	if !strings.Contains(out, "already up to date") {
+		t.Errorf("expected 'already up to date', got: %s", out)
+	}
+	if !strings.Contains(out, "Updated 0 of 1") {
+		t.Errorf("expected 'Updated 0 of 1', got: %s", out)
+	}
+}

@@ -6550,22 +6550,23 @@ func runAdd(args []string) {
 		os.Exit(1)
 	}
 
-	// Check catalog
-	cat, err := module.ParseCatalog(embeddedCatalog)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid catalog: %v\n", err)
-		os.Exit(1)
-	}
-
+	// Check catalog (skip if no embedded catalog — treat argument as raw URL)
 	url := nameOrURL
 	label := nameOrURL
-	if entry := cat.Lookup(nameOrURL); entry != nil {
-		if entry.IsEmbedded() {
-			fmt.Printf("module '%s' is built-in — use it with: use %s;\n", nameOrURL, nameOrURL)
-			return
+	if len(embeddedCatalog) > 0 {
+		cat, err := module.ParseCatalog(embeddedCatalog)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid catalog: %v\n", err)
+			os.Exit(1)
 		}
-		url = entry.URL
-		label = fmt.Sprintf("%s (%s)", nameOrURL, url)
+		if entry := cat.Lookup(nameOrURL); entry != nil {
+			if entry.IsEmbedded() {
+				fmt.Printf("module '%s' is built-in — use it with: use %s;\n", nameOrURL, nameOrURL)
+				return
+			}
+			url = entry.URL
+			label = fmt.Sprintf("%s (%s)", nameOrURL, url)
+		}
 	}
 
 	// Resolve ref to full commit hash
@@ -6596,6 +6597,10 @@ func runSearch(args []string) {
 
 	keyword := strings.ToLower(args[0])
 
+	if len(embeddedCatalog) == 0 {
+		fmt.Fprintln(os.Stderr, "error: no catalog available")
+		os.Exit(1)
+	}
 	cat, err := module.ParseCatalog(embeddedCatalog)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: invalid catalog: %v\n", err)
@@ -6728,6 +6733,11 @@ func runUpdate(args []string) {
 
 	updated := 0
 	for _, e := range entries {
+		// Skip SHA256-only (non-git) entries — PinResolve requires a git URL
+		if e.named && e.currentCommit == "" {
+			fmt.Printf("  %s: skipped (non-git source)\n", e.label)
+			continue
+		}
 		fmt.Fprintf(os.Stderr, "Checking %s...\n", e.label)
 		newCommit, err := module.PinResolve(e.url, "HEAD")
 		if err != nil {

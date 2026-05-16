@@ -306,6 +306,8 @@ func main() {
 		runUse(os.Args[2:])
 	case "remove":
 		runRemove(os.Args[2:])
+	case "bind":
+		runBind(os.Args[2:])
 	case "doctor":
 		runDoctor(os.Args[2:])
 		return

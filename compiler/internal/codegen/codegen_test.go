@@ -7278,6 +7278,58 @@ func TestNoAllowLeaksIncrementsLeakedCounter(t *testing.T) {
 	assertNotContains(t, ir, "tag can be removed")
 }
 
+// T0275: Batch test main frees heap-allocated panic messages to prevent leak.
+// Verifies: testPanicTypeGlobal declared, free_panic_msg block generated,
+// and leak delta adjustment discounts the panic msg allocation.
+func TestPanicMsgFreedInTestMain(t *testing.T) {
+	src := `myTest() ` + "`test" + ` { }`
+	result := compileResult(t, src)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(src)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+
+	// T0275: __promise_test_panic_type global declared (non-TLS i8)
+	assertContains(t, ir, "@__promise_test_panic_type = global i8 0")
+	// T0275: free_panic_msg block conditionally frees heap panic msgs
+	assertContains(t, ir, "free_panic_msg_myTest:")
+	assertContains(t, ir, "after_free_panic_myTest:")
+	// T0275: Leak delta adjustment — select discounts heap panic from delta
+	assertContains(t, ir, "icmp eq i8")
+}
+
+// T0275: Test trampoline copies panic type to test harness global.
+func TestTrampolineCopiesPanicType(t *testing.T) {
+	src := `myTest() ` + "`test" + ` { }`
+	result := compileResult(t, src)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(src)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+
+	// The trampoline stores panic type to the non-TLS test global (load from TLS, store to non-TLS)
+	assertContains(t, ir, "load i8, i8* @__promise_panic_type")
+	assertContains(t, ir, "store i8 1, i8* @__promise_test_panic_type")
+}
+
 func TestTestTrampolineStackCreepDetection(t *testing.T) {
 	// The test trampoline should read the stack pointer before and after the test
 	// function call, and fail the test if the SP has changed (stack creep).

@@ -318,6 +318,7 @@ type Compiler struct {
 	currentMGlobal       *ir.Global // @__promise_current_m (TLS, i8*) — current M for syscall handoff
 	schedGlobal          *ir.Global // @__promise_sched (global Sched struct)
 	testPanicMsgGlobal   *ir.Global // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
+	testPanicTypeGlobal  *ir.Global // @__promise_test_panic_type (non-TLS, i8) — 0=none, 1=rodata, 2=heap (T0275)
 	testDoneGlobal       *ir.Global // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
 	panicFlagGlobal      *ir.Global // @__promise_panic_flag (TLS, i8) — 1 = panic in flight
 	panicMsgTlsGlobal    *ir.Global // @__promise_panic_msg (TLS, i8*) — C string pointer to panic message
@@ -1013,6 +1014,11 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		}
 		timeoutConst := constant.NewInt(irtypes.I64, timeoutNs)
 
+		// T0275: Reset panic type before each test to prevent stale type=2 from
+		// a previous timed-out test from adjusting the leak delta incorrectly.
+		// (WASM also resets inside its scheduler-reset block below.)
+		entry.NewStore(constant.NewInt(irtypes.I8, 0), c.testPanicTypeGlobal)
+
 		// Snapshot alloc count before test for leak detection (T0020)
 		var allocSnapshot value.Value
 		if allocCountGlobal != nil {
@@ -1043,8 +1049,9 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGoroutineCounter)))
 			entry.NewStore(constant.NewInt(irtypes.I64, 0), counterField)
 
-			// Clear test panic msg from previous test
+			// Clear test panic msg/type from previous test
 			entry.NewStore(constant.NewNull(irtypes.I8Ptr), c.testPanicMsgGlobal)
+			entry.NewStore(constant.NewInt(irtypes.I8, 0), c.testPanicTypeGlobal)
 
 			// Create G0, enqueue, run cooperative scheduler
 			handle := entry.NewCall(coroFn)
@@ -1165,7 +1172,14 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			} else {
 				currentAlloc = leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCountGlobal, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
 			}
-			delta := leakCheckBlk.NewSub(currentAlloc, allocSnapshot)
+			rawDelta := leakCheckBlk.NewSub(currentAlloc, allocSnapshot)
+			// T0275: Discount heap-allocated panic msg from leak delta.
+			// The msg is freed later in the print path, but the alloc count
+			// was already captured. Adjustment prevents false LEAK for panics.
+			panicType := leakCheckBlk.NewLoad(irtypes.I8, c.testPanicTypeGlobal)
+			isHeapPanic := leakCheckBlk.NewICmp(enum.IPredEQ, panicType, constant.NewInt(irtypes.I8, 2))
+			panicAdj := leakCheckBlk.NewSelect(isHeapPanic, constant.NewInt(irtypes.I64, 1), constant.NewInt(irtypes.I64, 0))
+			delta := leakCheckBlk.NewSub(rawDelta, panicAdj)
 			hasLeak := leakCheckBlk.NewICmp(enum.IPredSGT, delta, constant.NewInt(irtypes.I64, 0))
 
 			// Compute effective result: upgrade pass→leak when hasLeak && !allowLeaks
@@ -1226,8 +1240,21 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			nlPtr := printPanicBlk.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 			printPanicBlk.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
-			printPanicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testPanicMsgGlobal)
-			printPanicBlk.NewBr(afterPanicBlk)
+
+			// T0275: Free heap-allocated panic msg (type==2), skip for rodata (type==1)
+			panicType := printPanicBlk.NewLoad(irtypes.I8, c.testPanicTypeGlobal)
+			isHeap := printPanicBlk.NewICmp(enum.IPredEQ, panicType, constant.NewInt(irtypes.I8, 2))
+			freePanicBlk := mainFn.NewBlock(fmt.Sprintf("free_panic_msg_%s", nameStr))
+			afterFreeBlk := mainFn.NewBlock(fmt.Sprintf("after_free_panic_%s", nameStr))
+			printPanicBlk.NewCondBr(isHeap, freePanicBlk, afterFreeBlk)
+
+			freePanicBlk.NewCall(c.palFree, panicMsg)
+			freePanicBlk.NewBr(afterFreeBlk)
+
+			// Clear both globals after handling
+			afterFreeBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testPanicMsgGlobal)
+			afterFreeBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.testPanicTypeGlobal)
+			afterFreeBlk.NewBr(afterPanicBlk)
 
 			entry = afterPanicBlk
 		}
@@ -1606,27 +1633,28 @@ func (c *Compiler) compileTestCoroutine(nameStr string, fd *ast.FuncDecl) *ir.Fu
 	}
 
 	// --- Panic exit block ---
-	// Copy panic msg to __promise_test_panic_msg (for batch test main to read result),
-	// copy panic info to G struct (for goroutine_exit to handle correctly),
+	// Copy panic msg+type to test harness globals (for batch test main to read/free),
+	// clear G struct panic fields (so goroutine_exit doesn't double-free — T0275),
 	// clear TLS state, then branch to final suspend.
 	{
-		// Copy to test panic msg global
+		// Copy msg and type to test harness globals
 		pePanicMsg := testPanicExitBlk.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
 		testPanicExitBlk.NewStore(pePanicMsg, c.testPanicMsgGlobal)
+		pePanicType := testPanicExitBlk.NewLoad(irtypes.I8, c.panicTypeTlsGlobal)
+		testPanicExitBlk.NewStore(pePanicType, c.testPanicTypeGlobal)
 
-		// Copy to G struct
+		// Clear G struct so goroutine_exit doesn't free (test harness owns the msg now)
 		gTy := goroutineStructType()
 		peCurrentG := testPanicExitBlk.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
 		peGPtr := testPanicExitBlk.NewBitCast(peCurrentG, irtypes.NewPointer(gTy))
 
-		pePanicType := testPanicExitBlk.NewLoad(irtypes.I8, c.panicTypeTlsGlobal)
 		pePanickedField := testPanicExitBlk.NewGetElementPtr(gTy, peGPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
-		testPanicExitBlk.NewStore(pePanicType, pePanickedField)
+		testPanicExitBlk.NewStore(constant.NewInt(irtypes.I8, 0), pePanickedField)
 
 		pePanicMsgField := testPanicExitBlk.NewGetElementPtr(gTy, peGPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
-		testPanicExitBlk.NewStore(pePanicMsg, pePanicMsgField)
+		testPanicExitBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pePanicMsgField)
 
 		// Clear TLS
 		testPanicExitBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)

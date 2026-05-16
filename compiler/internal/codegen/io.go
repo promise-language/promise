@@ -710,11 +710,14 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 	checkSpBlk := trampoline.NewBlock("check_sp")
 	entry.NewCondBr(panicked, panicBlk, checkSpBlk)
 
-	// Panic detected: store msg, clear TLS state, signal done, return fail
+	// Panic detected: store msg+type to test harness globals, clear TLS state, signal done, return fail
 	panicMsgVal := panicBlk.NewLoad(irtypes.I8Ptr, c.panicMsgTlsGlobal)
 	panicBlk.NewStore(panicMsgVal, c.testPanicMsgGlobal)
+	panicTypeVal := panicBlk.NewLoad(irtypes.I8, c.panicTypeTlsGlobal)
+	panicBlk.NewStore(panicTypeVal, c.testPanicTypeGlobal)                  // T0275: for free decision
 	panicBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicFlagGlobal)    // clear flag
 	panicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.panicMsgTlsGlobal) // clear msg
+	panicBlk.NewStore(constant.NewInt(irtypes.I8, 0), c.panicTypeTlsGlobal) // clear type
 	panicBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal)    // signal done
 	failInd := panicBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
 	panicBlk.NewRet(failInd)
@@ -735,6 +738,7 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 		creepMsgPtr := stackCreepBlk.NewGetElementPtr(creepMsgGlobal.ContentType, creepMsgGlobal,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 		stackCreepBlk.NewStore(creepMsgPtr, c.testPanicMsgGlobal)
+		stackCreepBlk.NewStore(constant.NewInt(irtypes.I8, 1), c.testPanicTypeGlobal) // T0275: rodata, don't free
 		creepFail := stackCreepBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
 		stackCreepBlk.NewRet(creepFail)
 

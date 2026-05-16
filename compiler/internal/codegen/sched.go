@@ -248,6 +248,13 @@ func (c *Compiler) defineSchedulerGlobals() {
 	testPanicMsg.Init = constant.NewNull(irtypes.I8Ptr)
 	c.testPanicMsgGlobal = testPanicMsg
 
+	// @__promise_test_panic_type = global i8 0 (non-TLS)
+	// Mirrors __promise_panic_type (TLS) for the test harness: 0=none, 1=rodata, 2=heap.
+	// The batch test main uses this to decide whether to pal_free the panic msg (T0275).
+	testPanicType := c.module.NewGlobal("__promise_test_panic_type", irtypes.I8)
+	testPanicType.Init = constant.NewInt(irtypes.I8, 0)
+	c.testPanicTypeGlobal = testPanicType
+
 	// @__promise_test_done = global i32 0 (non-TLS)
 	// Set atomically to 1 by the test trampoline when the test completes
 	// (both normal return and panic recovery). The main thread polls this

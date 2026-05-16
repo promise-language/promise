@@ -1,0 +1,71 @@
+// T0270: MutexGuard borrow setter must drop old value for all droppable T types.
+type Counter {
+  int[] data;
+  drop(~this) {
+  }
+}
+
+test_borrow_set_droppable_user_type() `test {
+  m := Mutex[Counter](Counter(data: [1, 2, 3]));
+  use guard := m.lock();
+  guard.borrow = Counter(data: [4, 5, 6]);
+  assert(guard.borrow.data[0] == 4, "should be 4");
+}
+
+test_borrow_set_string() `test {
+  m := Mutex[string]("hello");
+  use guard := m.lock();
+  guard.borrow = "world";
+  assert(guard.borrow == "world", "should be world");
+}
+
+test_borrow_set_vector() `test {
+  m := Mutex[int[]]([1, 2, 3]);
+  use guard := m.lock();
+  guard.borrow = [4, 5, 6];
+  assert(guard.borrow.len == 3, "len should be 3");
+  assert(guard.borrow[0] == 4, "first element should be 4");
+}
+
+test_borrow_set_arc() `test {
+  a1 := Arc[int](10);
+  m := Mutex[Arc[int]](a1.clone());
+  use guard := m.lock();
+  a2 := Arc[int](20);
+  guard.borrow = a2.clone();
+  assert(guard.borrow.borrow == 20, "should be 20");
+}
+
+// Synthesized drop: user type with droppable fields but no explicit drop()
+type Wrapper {
+  string name;
+  int[] values;
+}
+
+test_borrow_set_synth_drop() `test {
+  m := Mutex[Wrapper](Wrapper(name: "old", values: [1, 2]));
+  use guard := m.lock();
+  guard.borrow = Wrapper(name: "new", values: [3, 4, 5]);
+  assert(guard.borrow.name == "new", "name should be new");
+  assert(guard.borrow.values.len == 3, "values len should be 3");
+}
+
+test_borrow_set_channel() `test {
+  ch1 := channel[int](1);
+  m := Mutex[channel[int]](ch1);
+  use guard := m.lock();
+  ch2 := channel[int](2);
+  guard.borrow = ch2;
+}
+
+test_borrow_set_compound_assign() `test {
+  m := Mutex[int](10);
+  use guard := m.lock();
+  guard.borrow += 5;
+  assert(guard.borrow == 15, "should be 15");
+  guard.borrow *= 2;
+  assert(guard.borrow == 30, "should be 30");
+}
+
+// T0274: Mutex[Weak[T]] causes stack overflow at runtime (pre-existing).
+// test_borrow_set_weak skipped until T0274 is fixed.

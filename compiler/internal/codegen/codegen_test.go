@@ -19204,6 +19204,32 @@ func TestMutexGuardBorrowSetter(t *testing.T) {
 	assertContains(t, ir, "store i64 99")
 }
 
+// T0270: Borrow setter must drop old value for droppable T via emitInnerDrop.
+func TestMutexGuardBorrowSetterDropsOldValue(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[string]("hello");
+			use guard := m.lock();
+			guard.borrow = "world";
+		}
+	`)
+	// emitInnerDrop should call promise_string_drop on the old value before storing new
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
+// T0270: Borrow setter compound assignment (guard.borrow += val).
+func TestMutexGuardBorrowSetterCompoundAssign(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](10);
+			use guard := m.lock();
+			guard.borrow += 5;
+		}
+	`)
+	// Compound assignment loads current value and adds
+	assertContains(t, ir, "add i64")
+}
+
 // T0156: MutexGuard close/drop functions unlock and free.
 func TestMutexGuardCloseUnlocksAndFrees(t *testing.T) {
 	ir := generateIR(t, `

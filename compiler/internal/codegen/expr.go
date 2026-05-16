@@ -2903,32 +2903,8 @@ func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignO
 		val = c.genCompoundOp(op, current, val)
 	}
 
-	// Drop old value if T is droppable
-	named := extractNamed(elemType)
-	if named == types.TypString {
-		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
-		if dropFn, ok := c.funcs["promise_string_drop"]; ok {
-			c.block.NewCall(dropFn, oldVal)
-		}
-	} else if types.IsVector(elemType) || named == types.TypVector {
-		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
-		if dropFn, ok := c.funcs["Vector.drop"]; ok {
-			c.block.NewCall(dropFn, oldVal)
-		}
-	} else if types.IsChannel(elemType) || named == types.TypChannel {
-		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
-		if dropFn, ok := c.funcs["Channel.drop"]; ok {
-			c.block.NewCall(dropFn, oldVal)
-		}
-	} else if arcElem, ok := types.AsArc(elemType); ok {
-		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
-		dropFn := c.getOrCreateArcDrop(arcElem)
-		c.block.NewCall(dropFn, oldVal)
-	} else if weakElem, ok := types.AsWeak(elemType); ok {
-		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
-		dropFn := c.getOrCreateWeakDrop(weakElem)
-		c.block.NewCall(dropFn, oldVal)
-	}
+	// Drop old value if T is droppable (T0270)
+	c.emitInnerDrop(c.block, mutexPtr, mutexStructTy, elemType, 1)
 
 	c.block.NewStore(val, valField)
 }

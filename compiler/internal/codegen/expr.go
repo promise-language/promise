@@ -1228,6 +1228,10 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 			if origin == types.TypChannel {
 				return c.genChannelConstructor(e, inst)
 			}
+			// Arc constructor: Arc[T](value)
+			if origin == types.TypArc {
+				return c.genArcConstructor(e, inst)
+			}
 			return c.genConstructorCallMono(e, calleeType)
 		}
 	}
@@ -2390,6 +2394,24 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 		}
 	}
 
+	// Arc .borrow getter — returns the inner T value by loading from the Arc allocation.
+	// T0155: Arc[T] atomic reference counting.
+	if e.Field == "borrow" {
+		if elem, ok := types.AsArc(targetType); ok {
+			resolvedElem := elem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(elem, c.typeSubst)
+			}
+			return c.genArcBorrow(e, resolvedElem)
+		}
+		named := extractNamed(targetType)
+		if named == types.TypArc {
+			if tp := c.resolveTypeParam(types.TypArc.TypeParams()[0]); tp != nil {
+				return c.genArcBorrow(e, tp)
+			}
+		}
+	}
+
 	// String .is_literal property — checks sign bit of length field
 	if e.Field == "is_literal" {
 		named := extractNamed(targetType)
@@ -2518,6 +2540,38 @@ func (c *Compiler) genChannelConstructor(e *ast.CallExpr, inst *types.Instance) 
 		constant.NewInt(irtypes.I64, elemSize))
 }
 
+// genArcConstructor generates Arc[T](value) — allocates {refcount, T}, stores refcount=1 and the value.
+// T0155: Arc[T] atomic reference counting.
+func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) value.Value {
+	elemType := inst.TypeArgs()[0]
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	elemLLVM := c.resolveType(elemType)
+	elemSize := c.typeSize(elemLLVM)
+
+	// Allocate: 8 bytes refcount + sizeof(T)
+	totalSize := 8 + elemSize
+	arcPtr := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, int64(totalSize)))
+
+	// Bitcast to typed struct pointer for GEP
+	arcStructTy := irtypes.NewStruct(irtypes.I64, elemLLVM)
+	typedPtr := c.block.NewBitCast(arcPtr, irtypes.NewPointer(arcStructTy))
+
+	// Store refcount = 1
+	rcField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(constant.NewInt(irtypes.I64, 1), rcField)
+
+	// Generate and store value (moved into the Arc)
+	val := c.genCallArgExpr(e.Args[0].Value)
+	valField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	c.block.NewStore(val, valField)
+
+	return arcPtr
+}
+
 // genChannelMethodCall dispatches native method calls on channel[T].
 func (c *Compiler) genChannelMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
 	chRaw := c.genExprAutoPropagate(member.Target) // B0323
@@ -2533,6 +2587,38 @@ func (c *Compiler) genChannelMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 		return c.genChannelClose(chRaw, chPtr, chanType)
 	default:
 		panic(fmt.Sprintf("codegen: unknown channel method %q", method))
+	}
+}
+
+// genArcBorrow generates the Arc .borrow getter — loads and returns the inner T value.
+// The Arc layout is { i64 refcount, T value }. We GEP to field 1 and load the value.
+// T0155: Arc[T] atomic reference counting.
+func (c *Compiler) genArcBorrow(e *ast.MemberExpr, elemType types.Type) value.Value {
+	arcRaw := c.genExprAutoPropagate(e.Target) // B0323
+	elemLLVM := c.resolveType(elemType)
+	arcStructTy := irtypes.NewStruct(irtypes.I64, elemLLVM)
+	typedPtr := c.block.NewBitCast(arcRaw, irtypes.NewPointer(arcStructTy))
+	valField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	return c.block.NewLoad(elemLLVM, valField)
+}
+
+// genArcMethodCall dispatches native method calls on Arc[T].
+// T0155: Arc[T] atomic reference counting.
+func (c *Compiler) genArcMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	arcRaw := c.genExprAutoPropagate(member.Target) // B0323
+
+	switch method {
+	case "clone":
+		// Atomically increment refcount and return the same pointer
+		rcPtr := c.block.NewBitCast(arcRaw, irtypes.NewPointer(irtypes.I64))
+		c.emitAtomicAdd(c.block, rcPtr, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+		return arcRaw
+	default:
+		panic(fmt.Sprintf("codegen: unknown arc method %q", method))
 	}
 }
 
@@ -2993,6 +3079,16 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 				c.dupContainerFieldAccess = false // consume the flag
 				dup := c.dupChannel(val)
 				c.trackChannelTemp(dup)
+				return dup
+			}
+			if arcElem, ok := types.AsArc(fType); ok {
+				c.dupContainerFieldAccess = false // consume the flag
+				dup := c.dupArc(val)
+				resolvedArcElem := arcElem
+				if c.typeSubst != nil {
+					resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+				}
+				c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
 				return dup
 			}
 		}
@@ -3552,7 +3648,7 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 	// Check if the method is native — only native methods are handled here.
 	// Non-native methods fall through to the regular user method path.
 	named := extractNamed(targetType)
-	if named == types.TypVector || named == types.TypString || named == types.TypChannel {
+	if named == types.TypVector || named == types.TypString || named == types.TypChannel || named == types.TypArc {
 		m := named.LookupMethod(methodName)
 		if m == nil || !m.IsNative() {
 			return nil, false // fall through to regular method dispatch
@@ -3577,6 +3673,16 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 	if named == types.TypChannel {
 		if elem := c.resolveTypeParam(types.TypChannel.TypeParams()[0]); elem != nil {
 			return c.genChannelMethodCall(e, member, elem, methodName), true
+		}
+	}
+
+	// Arc methods: clone
+	if elem, ok := types.AsArc(unwrapped); ok {
+		return c.genArcMethodCall(e, member, elem, methodName), true
+	}
+	if named == types.TypArc {
+		if elem := c.resolveTypeParam(types.TypArc.TypeParams()[0]); elem != nil {
+			return c.genArcMethodCall(e, member, elem, methodName), true
 		}
 	}
 

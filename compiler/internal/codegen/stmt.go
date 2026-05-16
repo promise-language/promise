@@ -61,6 +61,9 @@ func isDroppableContainerOrString(typ types.Type) bool {
 	if _, ok := types.AsChannel(typ); ok || named == types.TypChannel {
 		return true
 	}
+	if _, ok := types.AsArc(typ); ok || named == types.TypArc {
+		return true
+	}
 	return false
 }
 
@@ -136,7 +139,7 @@ func (c *Compiler) isOwnedOptionalExpr(expr ast.Expr) bool {
 // genFieldAccess dups the value (T0095/B0219), so the result is an owned copy.
 func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
 	isString := extractNamed(dropType) == types.TypString
-	isVecOrChan := types.IsVector(dropType) || types.IsChannel(dropType)
+	isVecOrChan := types.IsVector(dropType) || types.IsChannel(dropType) || types.IsArc(dropType)
 	if !isString && !isVecOrChan {
 		return false
 	}
@@ -223,8 +226,8 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					if opt, ok := exprType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
 						c.dupStringFieldAccess = true
 					}
-					// B0219: Signal genFieldAccess to dup vector/channel fields for block results.
-					if (types.IsVector(exprType) || types.IsChannel(exprType)) && !isRefType(exprType) {
+					// B0219: Signal genFieldAccess to dup vector/channel/arc fields for block results.
+					if (types.IsVector(exprType) || types.IsChannel(exprType) || types.IsArc(exprType)) && !isRefType(exprType) {
 						c.dupContainerFieldAccess = true
 					}
 					result = c.genExpr(es.Expr)
@@ -430,6 +433,11 @@ func (c *Compiler) dropDiscardedAutoPropagate(expr ast.Expr, val value.Value) {
 		if dropFn := c.funcs["Channel.drop"]; dropFn != nil {
 			c.block.NewCall(dropFn, val)
 		}
+	case types.IsArc(exprType) || named == types.TypArc:
+		if elemType, ok := types.AsArc(exprType); ok {
+			dropFn := c.getOrCreateArcDrop(elemType)
+			c.block.NewCall(dropFn, val)
+		}
 	case named.HasDrop() || named.NeedsSynthDrop():
 		// B0262: Heap user types (including Map, Set) — call drop + free.
 		ownerName := named.Obj().Name()
@@ -522,7 +530,7 @@ func (c *Compiler) genCallArgExpr(expr ast.Expr) value.Value {
 	// statement end, but also consumed by f().
 	if _, isCall := expr.(*ast.CallExpr); isCall && val != nil {
 		if rt := c.info.Types[expr]; rt != nil {
-			if types.IsVector(rt) || types.IsChannel(rt) {
+			if types.IsVector(rt) || types.IsChannel(rt) || types.IsArc(rt) {
 				c.claimStringTemp(val)
 			}
 		}
@@ -608,8 +616,8 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if opt, ok := resolvedExprType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
 		c.dupStringFieldAccess = true
 	}
-	// B0219: Signal genFieldAccess to dup vector/channel fields from droppable types.
-	if (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType)) && !isRefType(resolvedExprType) {
+	// B0219: Signal genFieldAccess to dup vector/channel/arc fields from droppable types.
+	if (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType) || types.IsArc(resolvedExprType)) && !isRefType(resolvedExprType) {
 		c.dupContainerFieldAccess = true
 	}
 	val := c.genExpr(s.Value)
@@ -706,8 +714,8 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if resolvedExprType != nil && extractNamed(resolvedExprType) == types.TypString {
 		c.claimStringTemp(val)
 	}
-	// B0219: Claim vector/channel temp — ownership transferred to this variable.
-	if resolvedExprType != nil && (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType)) {
+	// B0219: Claim vector/channel/arc temp — ownership transferred to this variable.
+	if resolvedExprType != nil && (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType) || types.IsArc(resolvedExprType)) {
 		c.claimStringTemp(val)
 	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
@@ -811,8 +819,8 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if opt, ok := typ.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
 		c.dupStringFieldAccess = true
 	}
-	// B0219: Signal genFieldAccess to dup vector/channel fields from droppable types.
-	if (types.IsVector(typ) || types.IsChannel(typ)) && !isRefType(typ) {
+	// B0219: Signal genFieldAccess to dup vector/channel/arc fields from droppable types.
+	if (types.IsVector(typ) || types.IsChannel(typ) || types.IsArc(typ)) && !isRefType(typ) {
 		c.dupContainerFieldAccess = true
 	}
 	val := c.genExpr(s.Value)
@@ -857,8 +865,8 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 		c.claimStringTemp(c.optionalStringDup)
 		c.optionalStringDup = nil
 	}
-	// B0219: Claim vector/channel temp — ownership transferred to this variable.
-	if types.IsVector(typ) || types.IsChannel(typ) {
+	// B0219: Claim vector/channel/arc temp — ownership transferred to this variable.
+	if types.IsVector(typ) || types.IsChannel(typ) || types.IsArc(typ) {
 		c.claimStringTemp(val)
 	}
 	// B0175: Claim heap temp — ownership transferred to this variable.
@@ -1143,6 +1151,9 @@ func isTypeDroppable(typ types.Type) bool {
 	if _, ok := types.AsChannel(typ); ok || named == types.TypChannel {
 		return true
 	}
+	if _, ok := types.AsArc(typ); ok || named == types.TypArc {
+		return true
+	}
 	if isContainerType(typ) {
 		return false
 	}
@@ -1361,6 +1372,40 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		c.scopeBindings = append(c.scopeBindings, binding)
 		c.dropBindings[varName] = binding
 		return
+	}
+
+	// Arc drop (T0155): same i8* alloca + void(i8*) drop pattern as string/vector/channel.
+	// Arc.drop atomically decrements the refcount and frees when it reaches zero.
+	if elemType, ok := types.AsArc(typ); ok || named == types.TypArc {
+		resolvedElem := elemType
+		if resolvedElem == nil && named == types.TypArc && c.typeSubst != nil {
+			if tp := types.TypArc.TypeParams(); len(tp) > 0 {
+				resolvedElem = c.typeSubst[tp[0]]
+			}
+		}
+		if c.typeSubst != nil && resolvedElem != nil {
+			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+		}
+		if resolvedElem != nil {
+			dropFlag := c.createEntryAlloca(irtypes.I1)
+			dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+			c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+			c.dropFlags[varName] = dropFlag
+
+			dropFunc := c.getOrCreateArcDrop(resolvedElem)
+			binding := scopeBinding{
+				kind:     bindingDropString, // reuse: same i8* alloca + void(i8*) drop pattern
+				alloca:   alloca,
+				named:    named,
+				valType:  typ,
+				dropFlag: dropFlag,
+				dropFunc: dropFunc,
+				varName:  varName,
+			}
+			c.scopeBindings = append(c.scopeBindings, binding)
+			c.dropBindings[varName] = binding
+			return
+		}
 	}
 
 	// Remaining container types without drop support skip.
@@ -1779,6 +1824,15 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		dropFunc = c.funcs["Vector.drop"]
 	case innerNamed != nil && (func() bool { _, ok := types.AsChannel(elem); return ok }() || innerNamed == types.TypChannel):
 		dropFunc = c.funcs["Channel.drop"]
+	case innerNamed != nil && (func() bool { _, ok := types.AsArc(elem); return ok }() || innerNamed == types.TypArc):
+		// T0155: Arc inner drop — resolve element type and get per-instantiation drop
+		if arcElem, ok := types.AsArc(elem); ok {
+			resolvedArcElem := arcElem
+			if c.typeSubst != nil {
+				resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+			}
+			dropFunc = c.getOrCreateArcDrop(resolvedArcElem)
+		}
 	case innerNamed != nil && (innerNamed.HasDrop() || innerNamed.NeedsSynthDrop()):
 		// User type with explicit or synthesized drop
 		ownerName := innerNamed.Obj().Name()
@@ -2375,6 +2429,16 @@ func (c *Compiler) dropDiscardedOptional(expr ast.Expr, result value.Value) {
 	case innerNamed != nil && (func() bool { _, ok := types.AsChannel(elem); return ok }() || innerNamed == types.TypChannel):
 		dropFunc = c.funcs["Channel.drop"]
 		isContainer = true
+	case innerNamed != nil && (func() bool { _, ok := types.AsArc(elem); return ok }() || innerNamed == types.TypArc):
+		// T0155: Arc inner drop
+		if arcElem, ok := types.AsArc(elem); ok {
+			resolvedArcElem := arcElem
+			if c.typeSubst != nil {
+				resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+			}
+			dropFunc = c.getOrCreateArcDrop(resolvedArcElem)
+		}
+		isContainer = true
 	case innerNamed != nil && (innerNamed.HasDrop() || innerNamed.NeedsSynthDrop()):
 		ownerName := innerNamed.Obj().Name()
 		resolvedElem := elem
@@ -2743,11 +2807,13 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 	// Determine if element type needs cloning
 	_, isCh := types.AsChannel(elemType)
 	innerElem, isVec := types.AsVector(elemType)
+	_, isArc := types.AsArc(elemType)
 	isChannel := !isCloneableEnum && !isDupableEnum && (isCh || named == types.TypChannel)
 	isVector := !isCloneableEnum && !isDupableEnum && (isVec || named == types.TypVector)
+	isArcType := !isCloneableEnum && !isDupableEnum && (isArc || named == types.TypArc)
 	isHeapUser := !isCloneableEnum && !isDupableEnum && named != nil && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
 
-	if !isChannel && !isVector && !isHeapUser && !isCloneableEnum && !isDupableEnum {
+	if !isChannel && !isVector && !isArcType && !isHeapUser && !isCloneableEnum && !isDupableEnum {
 		return // value/copy type — shallow memcpy is correct
 	}
 
@@ -2792,6 +2858,8 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 			cloned, _ = c.cloneEnumValue(elemVal, elemType)
 		} else if isChannel {
 			cloned = c.dupChannel(elemVal)
+		} else if isArcType {
+			cloned = c.dupArc(elemVal)
 		} else if isVector {
 			if isVec {
 				innerLLVM := c.resolveType(innerElem)
@@ -2936,6 +3004,9 @@ func (c *Compiler) tupleNeedsDrop(elemType types.Type) bool {
 				return true
 			}
 			if _, isCh := types.AsChannel(resolved); isCh {
+				return true
+			}
+			if _, isArc := types.AsArc(resolved); isArc {
 				return true
 			}
 			if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
@@ -3848,8 +3919,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if exprType != nil && extractNamed(exprType) == types.TypString {
 				c.claimStringTemp(val)
 			}
-			// T0109: Claim vector/channel temp — ownership transferred to this variable.
-			if exprType != nil && (types.IsVector(exprType) || types.IsChannel(exprType)) {
+			// T0109: Claim vector/channel/arc temp — ownership transferred to this variable.
+			if exprType != nil && (types.IsVector(exprType) || types.IsChannel(exprType) || types.IsArc(exprType)) {
 				c.claimStringTemp(val)
 			}
 			// B0187: Claim heap temp — ownership transferred to reassigned variable.
@@ -4150,6 +4221,23 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 						c.block.NewBr(mergeBlock)
 						c.block = mergeBlock
 					}
+				}
+				// T0155: Arc: call per-instantiation Arc drop (handles null + refcount).
+				if arcElem, isArc := types.AsArc(fieldType); isArc {
+					resolvedArcElem := arcElem
+					if c.typeSubst != nil {
+						resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+					}
+					dropFunc := c.getOrCreateArcDrop(resolvedArcElem)
+					oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
+					isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
+					dropBlock := c.newBlock("field.arcdrop")
+					mergeBlock := c.newBlock("field.arcdrop.done")
+					c.block.NewCondBr(isSame, mergeBlock, dropBlock)
+					c.block = dropBlock
+					c.block.NewCall(dropFunc, oldVal)
+					c.block.NewBr(mergeBlock)
+					c.block = mergeBlock
 				}
 				// B0240: Optional fields: drop old inner value before reassignment.
 				// When overwriting an optional field (e.g., p.location = none), the old
@@ -4535,8 +4623,8 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		if opt, ok := retType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
 			c.dupStringFieldAccess = true
 		}
-		// B0219: Signal genFieldAccess to dup vector/channel fields for return values.
-		if (types.IsVector(retType) || types.IsChannel(retType)) && !isRefType(retType) {
+		// B0219: Signal genFieldAccess to dup vector/channel/arc fields for return values.
+		if (types.IsVector(retType) || types.IsChannel(retType) || types.IsArc(retType)) && !isRefType(retType) {
 			c.dupContainerFieldAccess = true
 		}
 		val = c.genExpr(s.Value)

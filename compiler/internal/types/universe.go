@@ -28,6 +28,7 @@ var (
 	TypTask    *Named // Task[T] — concurrency handle from go expressions
 	TypChannel *Named // Channel[T] — channel type
 	TypVector  *Named // Vector[T] — dynamic array
+	TypArc     *Named // Arc[T] — atomic reference counting
 )
 
 // Non-native stdlib types — NOT in the Universe scope. These are regular types
@@ -88,6 +89,7 @@ func init() {
 	TypTask = defGeneric("Task", "T")
 	TypChannel = defGeneric("Channel", "T")
 	TypVector = defGeneric("Vector", "T")
+	TypArc = defGeneric("Arc", "T")
 
 	// Lowercase sugar aliases for native generic types
 	defAlias := func(alias string, target *Named) {

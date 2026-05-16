@@ -18934,3 +18934,76 @@ func TestGoBlockVectorDropUniqueNames(t *testing.T) {
 	// The IR should contain the vector drop loop.
 	assertContains(t, ir, "vecdrop.idx")
 }
+
+// T0155: Arc[T] constructor allocates {i64, T} and stores refcount=1.
+func TestArcConstructorAllocAndRefcount(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+		}
+	`)
+	// Should allocate 16 bytes (i64 refcount + i64 value)
+	assertContains(t, ir, "call i8* @pal_alloc(i64 16)")
+	// Should store refcount = 1
+	assertContains(t, ir, "store i64 1")
+	// Should store the value 42
+	assertContains(t, ir, "store i64 42")
+}
+
+// T0155: Arc[T] scope cleanup uses drop flag and calls Arc[int].drop.
+func TestArcDropFlagAndCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+		}
+	`)
+	assertContains(t, ir, "%a.dropflag")
+	assertContains(t, ir, `call void @"Arc[int].drop"(`)
+}
+
+// T0155: Arc[T].drop function has correct structure: null check, atomic decrement, free.
+func TestArcDropFunctionBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+		}
+	`)
+	dropFn := extractFunction(ir, `"Arc[int].drop"`)
+	if dropFn == "" {
+		t.Fatal("expected Arc[int].drop function in IR")
+	}
+	// Null check
+	assertContains(t, dropFn, "icmp eq")
+	assertContains(t, dropFn, "null")
+	// Atomic refcount decrement
+	assertContains(t, dropFn, "i64 -1")
+	// Free on last reference
+	assertContains(t, dropFn, "call void @pal_free(")
+}
+
+// T0155: Arc[T].clone atomically increments refcount.
+func TestArcCloneAtomicIncrement(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+			b := a.clone();
+		}
+	`)
+	// Clone should atomically add 1 to refcount
+	assertContains(t, ir, "i64 1")
+	// Both a and b should have drop flags
+	assertContains(t, ir, "%a.dropflag")
+	assertContains(t, ir, "%b.dropflag")
+}
+
+// T0155: Arc[T] borrow getter loads value from allocation.
+func TestArcBorrowLoadsValue(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+			int x = a.borrow;
+		}
+	`)
+	// Borrow GEPs into the {i64, T} struct at field 1
+	assertContains(t, ir, "getelementptr { i64, i64 }")
+}

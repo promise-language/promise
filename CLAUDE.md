@@ -235,7 +235,7 @@ Entry point: `cmd/promise/main.go` â†’ `compileFrontend()` orchestrates parse â†
 - **Sysmon**: Background thread sets `G.preempt=1` every 10ms; yield checks at loop back-edges call `coro.suspend`.
 - **Stack overflow detection** (B0010): Guard page via `pthread_attr_setguardsize(4096)` on each M's 2MB stack. macOS uses `sigaction(SA_ONSTACK)` + per-thread `sigaltstack(64KB)` for reliable delivery, prints "fatal: stack overflow". Linux uses `sigaction(SA_SIGINFO | SA_ONSTACK)` + per-thread `sigaltstack(64KB)` with libc-aware struct layouts (glibc 152-byte vs musl 40-byte sigaction), reads `si_addr` from `siginfo_t` and prints "fatal: segmentation fault at 0x\<hex\>" with the fault address (B0128). Handler registered at startup (`pal_stack_overflow_init`); per-thread alt stack set up at `sched_loop` entry (`pal_stack_overflow_thread_init`).
 
-**Standard library**: 38 `.pr` files in `modules/std/` compiled as a regular embedded catalog module and auto-imported into every file via `use std as _`. Catalog modules (`modules/io/`, `modules/path/`, `modules/math/`, `modules/strings/`, `modules/os/`, `modules/time/`, `modules/http/`) are separate compilation units with their own `promise.toml`. Runtime is codegen-emitted LLVM IR (no C runtime). See `docs/standard-library.md` for the full module inventory, PAL extensions, and implementation phases.
+**Standard library**: 40 `.pr` files in `modules/std/` compiled as a regular embedded catalog module and auto-imported into every file via `use std as _`. Catalog modules (`modules/io/`, `modules/path/`, `modules/math/`, `modules/strings/`, `modules/os/`, `modules/time/`, `modules/http/`) are separate compilation units with their own `promise.toml`. Runtime is codegen-emitted LLVM IR (no C runtime). See `docs/standard-library.md` for the full module inventory, PAL extensions, and implementation phases.
 
 ## Test Patterns
 
@@ -263,7 +263,7 @@ Methods must be declared inside the type body (for types) or after variants (for
 
 ## Standard Library & Catalog Modules
 
-The standard library (`modules/std/`, 37 files) is auto-imported via `use std as _` into every file. Catalog modules (`modules/<name>/`) are separate compilation units imported explicitly with `use <name>;`.
+The standard library (`modules/std/`, 40 files) is auto-imported via `use std as _` into every file. Catalog modules (`modules/<name>/`) are separate compilation units imported explicitly with `use <name>;`.
 
 **Standard library** (`modules/std/`):
 
@@ -278,7 +278,7 @@ The standard library (`modules/std/`, 37 files) is auto-imported via `use std as
 | Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG |
 | Sorting | `sort.pr` | `sort(T[])` for `Ordered` types |
 | Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr`, `clone.pr` | `Equal`, `Ordered`, `Hashable`, `Cloneable` structural types |
-| Concurrency | `channel.pr`, `task.pr`, `runtime.pr` | `Channel[T]`/`channel[T]` send/close, `Task[T]`/`task[T]` handle, scheduler stats |
+| Concurrency | `channel.pr`, `task.pr`, `runtime.pr`, `arc.pr` | `Channel[T]`/`channel[T]` send/close, `Task[T]`/`task[T]` handle, `Arc[T]` atomic ref-counted sharing, scheduler stats |
 | Time | `time.pr` | `Duration` (value type), `Instant`, `sleep()` |
 | Serialization | `encode.pr` | `Encoder`/`Decoder` (non-structural), `Encodable`/`Decodable` (structural), `DecodeError` |
 | Geometry | `geometry.pr` | `Point[T]`, `Size[T]`, `Rect[T]` generic value types for 2D coordinates, sizes, rectangles |

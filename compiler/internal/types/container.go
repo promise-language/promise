@@ -84,6 +84,26 @@ func AsArray(t Type) (elem Type, size int64, ok bool) {
 	return nil, 0, false
 }
 
+// NewArc creates an Arc type as Instance{TypArc, [elem]}.
+func NewArc(elem Type) *Instance {
+	return NewInstance(TypArc, []Type{elem})
+}
+
+// IsArc reports whether t is an Arc instance (Instance{TypArc, _}).
+func IsArc(t Type) bool {
+	inst, ok := t.(*Instance)
+	return ok && inst.origin == TypArc
+}
+
+// AsArc extracts the element type from an Arc instance.
+// Returns (elem, true) for Arc instances, (nil, false) otherwise.
+func AsArc(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypArc {
+		return inst.typeArgs[0], true
+	}
+	return nil, false
+}
+
 // IsChannel reports whether t is a channel instance (Instance{TypChannel, _}).
 func IsChannel(t Type) bool {
 	inst, ok := t.(*Instance)

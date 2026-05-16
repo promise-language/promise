@@ -1415,7 +1415,12 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			}
 
 			// Native drop: synthesize body that frees closure env + instance (T0088).
+			// Arc[T] has its own drop logic (T0155) — skip here; body is generated
+			// lazily by getOrCreateArcDrop when the drop function is first needed.
 			if isNativeDrop {
+				if named == types.TypArc {
+					continue
+				}
 				c.defineFnIterDrop(fn, inst)
 				continue
 			}

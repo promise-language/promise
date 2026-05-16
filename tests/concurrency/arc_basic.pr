@@ -1,0 +1,67 @@
+// Arc[T] basic tests — T0155
+arc_new_borrow_int() `test {
+  a := Arc[int](42);
+  assert(a.borrow == 42, "int borrow");
+}
+
+arc_new_borrow_string() `test {
+  a := Arc[string]("hello");
+  assert(a.borrow == "hello", "string borrow");
+}
+
+arc_new_borrow_bool() `test {
+  a := Arc[bool](true);
+  assert(a.borrow == true, "bool borrow");
+}
+
+arc_new_borrow_f64() `test {
+  a := Arc[f64](3.14);
+  assert(a.borrow == 3.14, "f64 borrow");
+}
+
+arc_clone_shares_value() `test {
+  a := Arc[int](100);
+  b := a.clone();
+  assert(a.borrow == 100, "original after clone");
+  assert(b.borrow == 100, "clone value");
+}
+
+arc_clone_string() `test {
+  a := Arc[string]("shared");
+  b := a.clone();
+  assert(a.borrow == "shared", "original string");
+  assert(b.borrow == "shared", "cloned string");
+}
+
+arc_multiple_clones() `test {
+  a := Arc[int](7);
+  b := a.clone();
+  c := a.clone();
+  d := b.clone();
+  assert(a.borrow == 7, "a");
+  assert(b.borrow == 7, "b");
+  assert(c.borrow == 7, "c");
+  assert(d.borrow == 7, "d");
+}
+
+arc_cross_goroutine() `test {
+  a := Arc[int](42);
+  ch := channel[int]();
+  go {
+    ch.send(a.borrow);
+  };
+  r := <-ch;
+  assert(r! == 42, "cross-goroutine value");
+}
+
+arc_clone_cross_goroutine() `test {
+  a := Arc[int](123);
+  ch := channel[int]();
+  b := a.clone();
+  go {
+    ch.send(b.borrow);
+  };
+  assert(a.borrow == 123, "original intact");
+  r := <-ch;
+  assert(r! == 123, "clone cross-goroutine");
+}

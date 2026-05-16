@@ -2158,6 +2158,153 @@ func (c *Compiler) dupChannel(ptr value.Value) value.Value {
 	)
 }
 
+// getOrCreateArcDrop lazily creates a per-element-type drop function for Arc[T].
+// T0155: Arc[T] atomic reference counting.
+// The drop function atomically decrements the refcount. When it reaches zero,
+// drops the inner T value (if T needs dropping) then frees the allocation.
+func (c *Compiler) getOrCreateArcDrop(elemType types.Type) *ir.Func {
+	elemName := typeArgStr(elemType)
+	funcName := "Arc[" + elemName + "].drop"
+
+	if fn, ok := c.funcs[funcName]; ok {
+		if len(fn.Blocks) > 0 {
+			return fn // already defined
+		}
+		// Stub declared by declareMonoMethods — fill body below
+		c.defineArcDropBody(fn, elemType)
+		return fn
+	}
+
+	thisParam := ir.NewParam("this", irtypes.I8Ptr)
+	fn := c.module.NewFunc(funcName, irtypes.Void, thisParam)
+
+	c.defineArcDropBody(fn, elemType)
+
+	c.funcs[funcName] = fn
+	return fn
+}
+
+// defineArcDropBody generates the body of an Arc[T] drop function.
+// Null-checks, atomically decrements refcount, drops inner T when refcount reaches 0, frees allocation.
+func (c *Compiler) defineArcDropBody(fn *ir.Func, elemType types.Type) {
+	elemLLVM := c.resolveType(elemType)
+	arcStructTy := irtypes.NewStruct(irtypes.I64, elemLLVM)
+	thisParam := fn.Params[0]
+
+	entry := fn.NewBlock(".entry")
+
+	// Null check: zero-initialized values (from error handler fallthrough) may be null
+	isNull := entry.NewICmp(enum.IPredEQ, thisParam, constant.NewNull(irtypes.I8Ptr))
+	decrcBlk := fn.NewBlock("decrc")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isNull, doneBlk, decrcBlk)
+
+	// Atomically decrement refcount
+	typedPtr := decrcBlk.NewBitCast(thisParam, irtypes.NewPointer(arcStructTy))
+	rcField := decrcBlk.NewGetElementPtr(arcStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	oldRC := c.emitAtomicAdd(decrcBlk, rcField, constant.NewInt(irtypes.I64, -1), irtypes.I64)
+	wasOne := decrcBlk.NewICmp(enum.IPredEQ, oldRC, constant.NewInt(irtypes.I64, 1))
+	freeBlk := fn.NewBlock("free")
+	decrcBlk.NewCondBr(wasOne, freeBlk, doneBlk)
+
+	// Drop inner T value if needed, then free
+	c.emitArcInnerDrop(freeBlk, typedPtr, arcStructTy, elemType)
+	freeBlk.NewCall(c.palFree, thisParam)
+	freeBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+}
+
+// emitArcInnerDrop emits the type-specific drop logic for the value stored inside an Arc.
+// T0155: handles primitives (no-op), strings, vectors, channels, nested arcs, and user types.
+func (c *Compiler) emitArcInnerDrop(blk *ir.Block, typedPtr value.Value, arcStructTy *irtypes.StructType, elemType types.Type) {
+	named := extractNamed(elemType)
+
+	switch {
+	case named != nil && isPrimitiveScalar(named):
+		// Copy type — no inner drop needed
+		return
+	case named == types.TypString:
+		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		strVal := blk.NewLoad(irtypes.I8Ptr, valField)
+		if dropFn, ok := c.funcs["promise_string_drop"]; ok {
+			blk.NewCall(dropFn, strVal)
+		}
+	case named != nil && (types.IsVector(elemType) || named == types.TypVector):
+		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		vecVal := blk.NewLoad(irtypes.I8Ptr, valField)
+		if dropFn, ok := c.funcs["Vector.drop"]; ok {
+			blk.NewCall(dropFn, vecVal)
+		}
+	case named != nil && (types.IsChannel(elemType) || named == types.TypChannel):
+		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		chVal := blk.NewLoad(irtypes.I8Ptr, valField)
+		if dropFn, ok := c.funcs["Channel.drop"]; ok {
+			blk.NewCall(dropFn, chVal)
+		}
+	case named != nil && (types.IsArc(elemType) || named == types.TypArc):
+		// Nested Arc: load i8* and call the inner Arc's drop
+		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		innerArc := blk.NewLoad(irtypes.I8Ptr, valField)
+		if innerElem, ok := types.AsArc(elemType); ok {
+			innerDropFn := c.getOrCreateArcDrop(innerElem)
+			blk.NewCall(innerDropFn, innerArc)
+		}
+	case named != nil && (named.HasDrop() || named.NeedsSynthDrop()):
+		// User type with explicit or synthesized drop
+		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		// User types stored as {i8* vtable, i8* instance} — extract instance ptr
+		valStruct := blk.NewLoad(userValueType(), valField)
+		instancePtr := blk.NewExtractValue(valStruct, 1)
+		ownerName := named.Obj().Name()
+		if inst, ok := elemType.(*types.Instance); ok {
+			ownerName = monoName(inst)
+		} else if named.HasDrop() && !named.NeedsSynthDrop() {
+			ownerName = c.resolveMethodOwner(named, "drop")
+		}
+		mangledName := mangleMethodName(ownerName, "drop", false)
+		if dropFn, ok := c.funcs[mangledName]; ok {
+			blk.NewCall(dropFn, instancePtr)
+		}
+	case named != nil && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural():
+		// Heap user type without drop — free the instance pointer
+		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		valStruct := blk.NewLoad(userValueType(), valField)
+		instancePtr := blk.NewExtractValue(valStruct, 1)
+		blk.NewCall(c.palFree, instancePtr)
+	}
+}
+
+// dupArc duplicates an Arc reference (i8* → i8*) by atomically incrementing
+// the reference count. T0155: Used to prevent use-after-free when an Arc field
+// is read from a type with drop.
+func (c *Compiler) dupArc(ptr value.Value) value.Value {
+	entryBlock := c.block
+	nullCheck := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+	incBlock := c.newBlock("arcdup.inc")
+	mergeBlock := c.newBlock("arcdup.merge")
+	entryBlock.NewCondBr(nullCheck, mergeBlock, incBlock)
+
+	c.block = incBlock
+	// Refcount is at offset 0 (i64)
+	rcPtr := c.block.NewBitCast(ptr, irtypes.NewPointer(irtypes.I64))
+	c.emitAtomicAdd(c.block, rcPtr, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+	incBlock.NewBr(mergeBlock)
+
+	c.block = mergeBlock
+	return c.block.NewPhi(
+		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entryBlock),
+		ir.NewIncoming(ptr, incBlock),
+	)
+}
+
 // dupHeapValue duplicates a heap user type value struct by allocating a new
 // instance, memcpy'ing the original, and dup'ing any droppable sub-fields.
 // B0236: Used for match destructure of droppable enums where extracted heap

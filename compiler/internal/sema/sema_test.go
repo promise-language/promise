@@ -13131,3 +13131,39 @@ func TestLevenshteinBasic(t *testing.T) {
 		}
 	}
 }
+
+// T0155: Arc[T] constructor requires exactly 1 argument.
+func TestArcConstructorOneArg(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[int](42);
+		}
+	`)
+}
+
+func TestArcConstructorNoArgs(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			a := Arc[int]();
+		}
+	`)
+	expectError(t, errs, "expects exactly 1 argument")
+}
+
+func TestArcConstructorTooManyArgs(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			a := Arc[int](1, 2);
+		}
+	`)
+	expectError(t, errs, "expects exactly 1 argument")
+}
+
+func TestArcConstructorWrongType(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			a := Arc[int]("hello");
+		}
+	`)
+	expectError(t, errs, "cannot assign string")
+}

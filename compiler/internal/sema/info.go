@@ -79,6 +79,12 @@ func (mi *ModuleInfo) EffectiveIRPrefix() string {
 	return mi.Name
 }
 
+// GeneratorInfo records metadata about a generator function/method.
+type GeneratorInfo struct {
+	ElemType types.Type // T from stream[T]
+	CanError bool       // true if the generator is failable (has ! in signature)
+}
+
 // Info holds the results of semantic analysis.
 // All maps use AST nodes as keys — the AST itself is not modified.
 type Info struct {
@@ -193,9 +199,10 @@ type Info struct {
 	ForInKinds map[*ast.ForInStmt]ForInKind
 
 	// GeneratorFuncs maps generator function/method declarations to their
-	// element type T. A function is a generator if its return type is
-	// stream[T] and its body contains at least one yield statement.
-	GeneratorFuncs map[ast.Node]types.Type
+	// generator info (element type T and failable flag). A function is a
+	// generator if its return type is stream[T] and its body contains at
+	// least one yield statement.
+	GeneratorFuncs map[ast.Node]*GeneratorInfo
 
 	// ModuleInfos maps module keys (catalog name or source path) to the
 	// full module compilation result. Used by codegen to inline module

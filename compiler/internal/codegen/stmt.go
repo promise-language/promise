@@ -364,7 +364,7 @@ func (c *Compiler) genAutoPropagate(expr ast.Expr) {
 	okBlock := c.newBlock("auto.ok")
 	c.block.NewCondBr(tag, propagateBlock, okBlock)
 
-	// Error path: cleanup stmt temps + scope bindings, extract error, wrap in caller's result type, early return
+	// Error path: cleanup stmt temps + scope bindings, extract error, propagate
 	c.block = propagateBlock
 	c.emitStmtTempCleanupForErrorPath() // T0103: free string temps before returning
 	c.emitHeapTempCleanupForErrorPath() // T0103: free heap temps before returning
@@ -372,8 +372,13 @@ func (c *Compiler) genAutoPropagate(expr ast.Expr) {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
-	callerResultType := c.currentResultType()
-	c.block.NewRet(c.wrapError(errVal, callerResultType))
+	if c.inGenerator && c.generatorCanError {
+		// B0023: store error to generator error_slot and branch to final suspend
+		c.emitGeneratorError(errVal)
+	} else {
+		callerResultType := c.currentResultType()
+		c.block.NewRet(c.wrapError(errVal, callerResultType))
+	}
 
 	// Ok path: drop discarded success value, then continue (B0261).
 	c.block = okBlock
@@ -467,7 +472,7 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 	okBlock := c.newBlock("auto.ok")
 	c.block.NewCondBr(tag, propagateBlock, okBlock)
 
-	// Error path: cleanup stmt temps + scope bindings, extract error, wrap in caller's result type, early return
+	// Error path: cleanup stmt temps + scope bindings, extract error, propagate
 	c.block = propagateBlock
 	c.emitStmtTempCleanupForErrorPath() // T0103: free string temps before returning
 	c.emitHeapTempCleanupForErrorPath() // T0103: free heap temps before returning
@@ -475,8 +480,13 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
-	callerResultType := c.currentResultType()
-	c.block.NewRet(c.wrapError(errVal, callerResultType))
+	if c.inGenerator && c.generatorCanError {
+		// B0023: store error to generator error_slot and branch to final suspend
+		c.emitGeneratorError(errVal)
+	} else {
+		callerResultType := c.currentResultType()
+		c.block.NewRet(c.wrapError(errVal, callerResultType))
+	}
 
 	// Ok path: extract the success value
 	c.block = okBlock
@@ -4779,8 +4789,13 @@ func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 	if st, ok := errVal.Type().(*irtypes.StructType); ok && len(st.Fields) == 2 {
 		errVal = c.block.NewExtractValue(errVal, 1)
 	}
-	resultType := c.currentResultType()
-	c.block.NewRet(c.wrapError(errVal, resultType))
+	if c.inGenerator && c.generatorCanError {
+		// B0023: store error to generator error_slot and branch to final suspend
+		c.emitGeneratorError(errVal)
+	} else {
+		resultType := c.currentResultType()
+		c.block.NewRet(c.wrapError(errVal, resultType))
+	}
 }
 
 // --- If statement ---

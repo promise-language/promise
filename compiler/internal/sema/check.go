@@ -92,7 +92,7 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 			OptionalHandlers:         make(map[ast.Expr]bool),
 			FailableDestructures:     make(map[*ast.DestructureVarDecl]bool),
 			ForInKinds:               make(map[*ast.ForInStmt]ForInKind),
-			GeneratorFuncs:           make(map[ast.Node]types.Type),
+			GeneratorFuncs:           make(map[ast.Node]*GeneratorInfo),
 			FilteredDecls:            make(map[ast.Decl]bool),
 			DeclHashes:               make(map[*types.TypeName]string),
 			InferredTypeArgs:         make(map[*ast.CallExpr]*InferredCall),
@@ -174,7 +174,7 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 			OptionalHandlers:         make(map[ast.Expr]bool),
 			FailableDestructures:     make(map[*ast.DestructureVarDecl]bool),
 			ForInKinds:               make(map[*ast.ForInStmt]ForInKind),
-			GeneratorFuncs:           make(map[ast.Node]types.Type),
+			GeneratorFuncs:           make(map[ast.Node]*GeneratorInfo),
 			FilteredDecls:            make(map[ast.Decl]bool),
 			DeclHashes:               make(map[*types.TypeName]string),
 			InferredTypeArgs:         make(map[*ast.CallExpr]*InferredCall),
@@ -330,10 +330,6 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 		}
 	}
 
-	if c.inGenerator && sig.CanError() {
-		c.errorf(d.Pos(), "generator functions cannot be failable")
-	}
-
 	c.openScope(d.Body, "func:"+d.Name)
 
 	// Bind parameters into scope
@@ -349,7 +345,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 
 	// Record generator function if yields were found
 	if c.inGenerator && c.yieldFound {
-		c.info.GeneratorFuncs[d] = c.generatorElemType
+		c.info.GeneratorFuncs[d] = &GeneratorInfo{ElemType: c.generatorElemType, CanError: sig.CanError()}
 	} else if c.inGenerator && !c.yieldFound {
 		c.errorf(d.Pos(), "function %s returns stream[%s] but contains no yield statements", d.Name, c.generatorElemType)
 	}
@@ -470,10 +466,6 @@ func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.
 		}
 	}
 
-	if c.inGenerator && m.Sig().CanError() {
-		c.errorf(md.Pos(), "generator methods cannot be failable")
-	}
-
 	// For generic methods, open type param scope so body can reference method-level type params
 	if len(m.Sig().TypeParams()) > 0 {
 		c.openScope(md, "methodtypeparams:"+typeName+"."+md.Name)
@@ -502,7 +494,7 @@ func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.
 
 	// Record generator method if yields were found
 	if c.inGenerator && c.yieldFound {
-		c.info.GeneratorFuncs[md] = c.generatorElemType
+		c.info.GeneratorFuncs[md] = &GeneratorInfo{ElemType: c.generatorElemType, CanError: m.Sig().CanError()}
 	} else if c.inGenerator && !c.yieldFound {
 		c.errorf(md.Pos(), "method %s returns stream[%s] but contains no yield statements", md.Name, c.generatorElemType)
 	}

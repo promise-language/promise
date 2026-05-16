@@ -1,0 +1,297 @@
+// B0023: Failable generator tests
+// --- Helpers ---
+type TestError is error {
+  string detail;
+}
+
+// A failable generator that yields values then errors mid-stream.
+mid_stream_error!(int count) stream[int] {
+  int i = 0;
+  while i < count {
+    yield i;
+    i = i + 1;
+  }
+  raise TestError(message: "mid-stream", detail: "after yielding");
+}
+
+// A failable generator that completes normally (no errors).
+normal_failable!(int n) stream[int] {
+  int i = 0;
+  while i < n {
+    yield i * 10;
+    i = i + 1;
+  }
+}
+
+// Always succeeds.
+ok_value!() int {
+  return 42;
+}
+
+// A failable generator that uses ?^ to propagate from a failable call.
+propagate_gen!() stream[int] {
+  int v = ok_value()?^;
+  yield v;
+}
+
+// A failable helper that always fails.
+fail_helper!() int {
+  raise error(message: "helper failed");
+}
+
+// A failable generator where ?^ fails before first yield.
+propagate_fail_gen!() stream[int] {
+  int v = fail_helper()?^;
+  yield v; // never reached
+}
+
+// A failable generator that errors before yielding.
+// Uses a conditional to keep the yield reachable for generator classification.
+early_error!(bool should_fail) stream[int] {
+  if should_fail {
+    raise TestError(message: "early", detail: "before any yield");
+  }
+  yield 0;
+}
+
+// A failable generator that delegates to a failable sub-generator via yield*.
+delegate_failable!(int n) stream[int] {
+  yield * normal_failable(n)?^;
+}
+
+// A failable generator that delegates to a sub-generator that errors mid-stream.
+delegate_error!(int count) stream[int] {
+  yield * mid_stream_error(count)?^;
+}
+
+// A failable generator method on a type.
+type Source {
+  int limit;
+
+  items!() stream[int] {
+    int i = 0;
+    while i < this.limit {
+      yield i;
+      i = i + 1;
+    }
+  }
+
+  failing_items!() stream[int] {
+    yield 100;
+    raise TestError(message: "method error", detail: "from Source");
+  }
+}
+
+// Failable generator that iterates another failable generator internally
+// and re-yields (tests for-in inside failable generator error propagation).
+transform_failable!(int count) stream[int] {
+  for x in mid_stream_error(count)?^ {
+    yield x * 100;
+  }
+}
+
+// Failable generator that iterates a normal-completing failable generator.
+transform_normal!(int n) stream[int] {
+  for x in normal_failable(n)?^ {
+    yield x + 1;
+  }
+}
+
+// Helper: return first value from failable generator, breaking early.
+first_value!(int n) int {
+  for x in normal_failable(n)?^ {
+    return x;
+  }
+  return -1;
+}
+
+// --- Wrapper functions that call failable generators and catch errors ---
+
+collect_normal!(int n) int[] {
+  int[] results = [];
+  for x in normal_failable(n)?^ {
+    results.push(x);
+  }
+  return results;
+}
+
+collect_propagate!() int[] {
+  int[] results = [];
+  for x in propagate_gen()?^ {
+    results.push(x);
+  }
+  return results;
+}
+
+try_mid_stream!(int count) int[] {
+  int[] results = [];
+  for x in mid_stream_error(count)?^ {
+    results.push(x);
+  }
+  return results;
+}
+
+// --- Tests ---
+
+test_failable_generator_normal_completion() `test {
+  int[] results = collect_normal(3)?!;
+  assert(results.len == 3, "should have 3 elements");
+  assert(results[0] == 0, "first element");
+  assert(results[1] == 10, "second element");
+  assert(results[2] == 20, "third element");
+}
+
+test_failable_generator_empty() `test {
+  int[] results = collect_normal(0)?!;
+  assert(results.len == 0, "empty generator");
+}
+
+test_failable_generator_single_yield() `test {
+  int[] results = collect_normal(1)?!;
+  assert(results.len == 1, "single yield");
+  assert(results[0] == 0, "first element is 0");
+}
+
+test_failable_generator_propagate_success() `test {
+  int[] results = collect_propagate()?!;
+  assert(results.len == 1, "one element from propagate");
+  assert(results[0] == 42, "value from ok_value");
+}
+
+test_failable_generator_early_error() `test {
+  // Error before first yield — factory catches it
+  bool caught = false;
+  early_error(true)? e {
+    caught = true;
+  };
+  assert(caught, "early error should be caught");
+}
+
+test_failable_generator_propagate_failure() `test {
+  // ?^ inside generator body — failure propagates through factory
+  bool caught = false;
+  propagate_fail_gen()? e {
+    caught = true;
+  };
+  assert(caught, "propagated failure should be caught");
+}
+
+test_failable_generator_mid_stream_error() `test {
+  // Error mid-stream — for-in propagates to caller
+  bool caught = false;
+  try_mid_stream(3)? e {
+    caught = true;
+  };
+  assert(caught, "mid-stream error should be caught");
+}
+
+test_failable_generator_break() `test {
+  // Break from for-in over failable generator — cleanup must free resources.
+  int count = 0;
+  for x in normal_failable(10)?! {
+    if x >= 20 {
+      break;
+    }
+    count++;
+  }
+  assert(count == 2, "break after 0 and 10");
+}
+
+test_failable_generator_return() `test {
+  // Return from inside for-in over failable generator — tests emitGeneratorCleanup.
+  int result = first_value(5)?!;
+  assert(result == 0, "first value should be 0");
+}
+
+test_failable_generator_method() `test {
+  // Failable generator as a method on a type.
+  Source src = Source(limit: 3);
+  int[] results = [];
+  for x in src.items()?! {
+    results.push(x);
+  }
+  assert(results.len == 3, "method generator should yield 3");
+  assert(results[0] == 0, "method gen[0]");
+  assert(results[1] == 1, "method gen[1]");
+  assert(results[2] == 2, "method gen[2]");
+}
+
+// Wrapper that iterates a Source's failing_items and propagates error.
+collect_failing_items!(Source src) int[] {
+  int[] results = [];
+  for x in src.failing_items()?^ {
+    results.push(x);
+  }
+  return results;
+}
+
+test_failable_generator_method_error() `test {
+  // Failable generator method that errors mid-stream.
+  Source src = Source(limit: 0);
+  bool caught = false;
+  collect_failing_items(src)? e {
+    caught = true;
+  };
+  assert(caught, "method generator error should be caught");
+}
+
+test_yield_delegate_failable_normal() `test {
+  // yield* from failable sub-generator — normal completion.
+  int[] results = [];
+  for x in delegate_failable(3)?! {
+    results.push(x);
+  }
+  assert(results.len == 3, "delegate should yield 3");
+  assert(results[0] == 0, "delegate[0]");
+  assert(results[1] == 10, "delegate[1]");
+  assert(results[2] == 20, "delegate[2]");
+}
+
+// Wrapper that iterates delegate_error and propagates errors.
+collect_delegate_error!(int count) int[] {
+  int[] results = [];
+  for x in delegate_error(count)?^ {
+    results.push(x);
+  }
+  return results;
+}
+
+test_yield_delegate_failable_error() `test {
+  // yield* from failable sub-generator — error propagation.
+  bool caught = false;
+  collect_delegate_error(2)? e {
+    caught = true;
+  };
+  assert(caught, "delegated error should propagate");
+}
+
+// Wrapper that iterates transform_failable and propagates errors.
+collect_transform!(int count) int[] {
+  int[] results = [];
+  for x in transform_failable(count)?^ {
+    results.push(x);
+  }
+  return results;
+}
+
+test_failable_forin_inside_failable_generator() `test {
+  // Failable for-in inside failable generator — error propagates from inner
+  // for-in through the outer generator to the consumer.
+  bool caught = false;
+  collect_transform(2)? e {
+    caught = true;
+  };
+  assert(caught, "nested failable error should propagate");
+}
+
+test_failable_forin_inside_failable_generator_normal() `test {
+  // Failable for-in inside failable generator — normal path (no errors).
+  int[] results = [];
+  for x in transform_normal(3)?! {
+    results.push(x);
+  }
+  assert(results.len == 3, "transform_normal should yield 3");
+  assert(results[0] == 1, "0*10 + 1 = 1");
+  assert(results[1] == 11, "1*10 + 1 = 11");
+  assert(results[2] == 21, "2*10 + 1 = 21");
+}

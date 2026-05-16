@@ -1424,8 +1424,8 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			c.monoCtx = &monoContext{inst: inst, origin: named, name: name}
 			func() {
 				defer func() { c.typeSubst = nil; c.monoCtx = nil }()
-				if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
-					c.defineGeneratorMethod(md, m, fn, elemType, named)
+				if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
+					c.defineGeneratorMethod(md, m, fn, genInfo.ElemType, named)
 				} else {
 					c.defineMethodFunc(md, m, fn, named)
 				}
@@ -1875,8 +1875,8 @@ func (c *Compiler) defineMonoFuncs(file *ast.File, funcInsts []*sema.FuncInstanc
 		c.typeSubst = subst
 		func() {
 			defer func() { c.typeSubst = nil }()
-			if elemType := c.info.GeneratorFuncs[fd]; elemType != nil {
-				c.defineGeneratorFunc(fd, fn, elemType)
+			if genInfo := c.info.GeneratorFuncs[fd]; genInfo != nil {
+				c.defineGeneratorFunc(fd, fn, genInfo.ElemType)
 			} else {
 				c.defineFunc(fd, fn)
 			}
@@ -2056,14 +2056,19 @@ func (c *Compiler) declareMonoEnumMethods(file *ast.File, instances []*types.Ins
 			}
 
 			retType := irtypes.Type(irtypes.Void)
-			if c.info.GeneratorFuncs[md] != nil {
-				retType = generatorValueType()
+			genInfo := c.info.GeneratorFuncs[md]
+			if genInfo != nil {
+				if genInfo.CanError {
+					retType = computeResultType(failableGeneratorValueType())
+				} else {
+					retType = generatorValueType()
+				}
 			} else if m.Sig().Result() != nil {
 				retType = c.resolveType(m.Sig().Result())
 			}
 			c.typeSubst = nil
 
-			if m.Sig().CanError() && c.info.GeneratorFuncs[md] == nil {
+			if m.Sig().CanError() && genInfo == nil {
 				retType = computeResultType(retType)
 			}
 
@@ -2130,8 +2135,8 @@ func (c *Compiler) defineMonoEnumMethods(file *ast.File, instances []*types.Inst
 			}
 			func() {
 				defer func() { c.typeSubst = nil; c.monoCtx = nil; c.suppressMatchDup = false }()
-				if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
-					c.defineGeneratorMethod(md, m, fn, elemType, nil)
+				if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
+					c.defineGeneratorMethod(md, m, fn, genInfo.ElemType, nil)
 				} else {
 					c.defineMethodFunc(md, m, fn)
 				}

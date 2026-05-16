@@ -341,7 +341,9 @@ type Compiler struct {
 
 	// Generator state
 	inGenerator           bool        // true when compiling inside a generator coroutine body
+	generatorCanError     bool        // true when the generator body can propagate errors (B0023)
 	generatorYieldSlot    value.Value // yield_slot parameter (i8*) of current generator coro
+	generatorErrorSlot    value.Value // error_slot alloca (i8*) for failable generators (B0023)
 	generatorCoroId       value.Value // coro.id token for current generator
 	generatorCleanup      *ir.Block   // cleanup block for current generator
 	generatorSuspend      *ir.Block   // suspend block for current generator (ramp exit)
@@ -433,8 +435,9 @@ type scopeBinding struct {
 	monoSynthDrop   bool           // B0202: mono-time synthesized drop (skip post-drop pal_free)
 	rttiDrop        bool           // B0226: dispatch drop via RTTI typeinfo drop_fn_ptr
 	// Generator cleanup
-	generatorHandle *ir.InstAlloca // coro handle alloca (for destroy)
-	generatorSlot   *ir.InstAlloca // yield slot alloca (for free)
+	generatorHandle    *ir.InstAlloca // coro handle alloca (for destroy)
+	generatorSlot      *ir.InstAlloca // yield slot alloca (for free)
+	generatorErrorSlot *ir.InstAlloca // error slot alloca (for free, failable generators only, B0023)
 }
 
 // stmtTemp tracks a heap-allocated string/vector/channel temporary from a subexpression (T0073).
@@ -4376,13 +4379,17 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 		}
 
 		retType := irtypes.Type(irtypes.Void)
-		if c.info.GeneratorFuncs[fd] != nil {
-			// Generator functions return {i8*, i8*} (handle + yield slot)
-			retType = generatorValueType()
+		genInfo := c.info.GeneratorFuncs[fd]
+		if genInfo != nil {
+			if genInfo.CanError {
+				retType = computeResultType(failableGeneratorValueType())
+			} else {
+				retType = generatorValueType()
+			}
 		} else if sig.Result() != nil {
 			retType = c.resolveType(sig.Result())
 		}
-		if sig.CanError() && c.info.GeneratorFuncs[fd] == nil {
+		if sig.CanError() && genInfo == nil {
 			retType = computeResultType(retType)
 		}
 
@@ -4476,8 +4483,8 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 			continue
 		}
 		// Generator functions get special compilation
-		if elemType := c.info.GeneratorFuncs[fd]; elemType != nil {
-			c.defineGeneratorFunc(fd, fn, elemType)
+		if genInfo := c.info.GeneratorFuncs[fd]; genInfo != nil {
+			c.defineGeneratorFunc(fd, fn, genInfo.ElemType)
 			continue
 		}
 		c.defineFunc(fd, fn)
@@ -4932,12 +4939,17 @@ func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
 		}
 
 		retType := irtypes.Type(irtypes.Void)
-		if c.info.GeneratorFuncs[fd] != nil {
-			retType = generatorValueType()
+		genInfo := c.info.GeneratorFuncs[fd]
+		if genInfo != nil {
+			if genInfo.CanError {
+				retType = computeResultType(failableGeneratorValueType())
+			} else {
+				retType = generatorValueType()
+			}
 		} else if sig.Result() != nil {
 			retType = c.resolveType(sig.Result())
 		}
-		if sig.CanError() && c.info.GeneratorFuncs[fd] == nil {
+		if sig.CanError() && genInfo == nil {
 			retType = computeResultType(retType)
 		}
 
@@ -5120,12 +5132,17 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 			}
 
 			retType := irtypes.Type(irtypes.Void)
-			if c.info.GeneratorFuncs[md] != nil {
-				retType = generatorValueType()
+			genInfo := c.info.GeneratorFuncs[md]
+			if genInfo != nil {
+				if genInfo.CanError {
+					retType = computeResultType(failableGeneratorValueType())
+				} else {
+					retType = generatorValueType()
+				}
 			} else if m.Sig().Result() != nil {
 				retType = c.resolveType(m.Sig().Result())
 			}
-			if m.Sig().CanError() && c.info.GeneratorFuncs[md] == nil {
+			if m.Sig().CanError() && genInfo == nil {
 				retType = computeResultType(retType)
 			}
 
@@ -5180,8 +5197,8 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			c.currentNamed = named
 
 			// Route generator methods to the generator codegen path
-			if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
-				c.defineGeneratorMethod(md, m, fn, elemType, named)
+			if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
+				c.defineGeneratorMethod(md, m, fn, genInfo.ElemType, named)
 				c.currentNamed = nil
 				continue
 			}
@@ -5375,10 +5392,17 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 			}
 
 			retType := irtypes.Type(irtypes.Void)
-			if m.Sig().Result() != nil {
+			genInfo := c.info.GeneratorFuncs[md]
+			if genInfo != nil {
+				if genInfo.CanError {
+					retType = computeResultType(failableGeneratorValueType())
+				} else {
+					retType = generatorValueType()
+				}
+			} else if m.Sig().Result() != nil {
 				retType = c.resolveType(m.Sig().Result())
 			}
-			if m.Sig().CanError() {
+			if m.Sig().CanError() && genInfo == nil {
 				retType = computeResultType(retType)
 			}
 
@@ -5426,8 +5450,8 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 			}
 
 			// Route generator methods to the generator codegen path
-			if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
-				c.defineGeneratorMethod(md, m, fn, elemType, named)
+			if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
+				c.defineGeneratorMethod(md, m, fn, genInfo.ElemType, named)
 				continue
 			}
 			c.defineMethodFunc(md, m, fn, named)
@@ -5475,12 +5499,17 @@ func (c *Compiler) declareEnumMethods(file *ast.File) {
 			}
 
 			retType := irtypes.Type(irtypes.Void)
-			if c.info.GeneratorFuncs[md] != nil {
-				retType = generatorValueType()
+			genInfo := c.info.GeneratorFuncs[md]
+			if genInfo != nil {
+				if genInfo.CanError {
+					retType = computeResultType(failableGeneratorValueType())
+				} else {
+					retType = generatorValueType()
+				}
 			} else if m.Sig().Result() != nil {
 				retType = c.resolveType(m.Sig().Result())
 			}
-			if m.Sig().CanError() && c.info.GeneratorFuncs[md] == nil {
+			if m.Sig().CanError() && genInfo == nil {
 				retType = computeResultType(retType)
 			}
 
@@ -5525,8 +5554,8 @@ func (c *Compiler) defineEnumMethods(file *ast.File) {
 			}
 
 			// Route generator methods to the generator codegen path
-			if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
-				c.defineGeneratorMethod(md, m, fn, elemType, nil)
+			if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
+				c.defineGeneratorMethod(md, m, fn, genInfo.ElemType, nil)
 				continue
 			}
 
@@ -5589,12 +5618,17 @@ func (c *Compiler) declareModuleEnumMethods(file *ast.File, moduleName string) {
 			}
 
 			retType := irtypes.Type(irtypes.Void)
-			if c.info.GeneratorFuncs[md] != nil {
-				retType = generatorValueType()
+			genInfo := c.info.GeneratorFuncs[md]
+			if genInfo != nil {
+				if genInfo.CanError {
+					retType = computeResultType(failableGeneratorValueType())
+				} else {
+					retType = generatorValueType()
+				}
 			} else if m.Sig().Result() != nil {
 				retType = c.resolveType(m.Sig().Result())
 			}
-			if m.Sig().CanError() && c.info.GeneratorFuncs[md] == nil {
+			if m.Sig().CanError() && genInfo == nil {
 				retType = computeResultType(retType)
 			}
 
@@ -5648,8 +5682,8 @@ func (c *Compiler) defineModuleEnumMethods(file *ast.File, moduleName string) {
 			}
 
 			// Route generator methods to the generator codegen path
-			if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
-				c.defineGeneratorMethod(md, m, fn, elemType, nil)
+			if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
+				c.defineGeneratorMethod(md, m, fn, genInfo.ElemType, nil)
 				continue
 			}
 

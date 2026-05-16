@@ -5242,7 +5242,7 @@ func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value 
 	okBlock := c.newBlock("error.ok")
 	c.block.NewCondBr(tag, propagateBlock, okBlock)
 
-	// Error path: cleanup stmt temps + scope bindings, extract error, wrap in caller's result type, early return
+	// Error path: cleanup stmt temps + scope bindings, extract error, propagate
 	c.block = propagateBlock
 	c.emitStmtTempCleanupForErrorPath() // T0103: free string temps before returning
 	c.emitHeapTempCleanupForErrorPath() // T0103: free heap temps before returning
@@ -5250,8 +5250,13 @@ func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value 
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
-	callerResultType := c.currentResultType()
-	c.block.NewRet(c.wrapError(errVal, callerResultType))
+	if c.inGenerator && c.generatorCanError {
+		// B0023: store error to generator error_slot and branch to final suspend
+		c.emitGeneratorError(errVal)
+	} else {
+		callerResultType := c.currentResultType()
+		c.block.NewRet(c.wrapError(errVal, callerResultType))
+	}
 
 	// Ok path: extract value
 	c.block = okBlock
@@ -5380,12 +5385,17 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		} else if e.PanicOnNomatch {
 			// Explicit ! suffix: panic on non-matching error
 			c.emitErrorPanic(errVal)
-		} else if c.canError {
+		} else if c.canError || (c.inGenerator && c.generatorCanError) {
 			if len(c.scopeBindings) > 0 {
 				c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 			}
-			callerResultType := c.currentResultType()
-			c.block.NewRet(c.wrapError(errVal, callerResultType))
+			if c.inGenerator && c.generatorCanError {
+				// B0023: store error to generator error_slot and branch to final suspend
+				c.emitGeneratorError(errVal)
+			} else {
+				callerResultType := c.currentResultType()
+				c.block.NewRet(c.wrapError(errVal, callerResultType))
+			}
 		} else {
 			// Should not be reached — sema rejects typed handlers in
 			// non-failable functions without else or !

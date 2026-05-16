@@ -13,10 +13,16 @@ import (
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
-// generatorValueType returns the struct type used for all generator values: {i8*, i8*}.
+// generatorValueType returns the struct type used for non-failable generator values: {i8*, i8*}.
 // Field 0 is the coroutine handle, field 1 is the yield slot pointer.
 func generatorValueType() *irtypes.StructType {
 	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+}
+
+// failableGeneratorValueType returns the struct type used for failable generator values: {i8*, i8*, i8*}.
+// Field 0 is the coroutine handle, field 1 is the yield slot pointer, field 2 is the error slot pointer.
+func failableGeneratorValueType() *irtypes.StructType {
+	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr)
 }
 
 // defineGeneratorFunc compiles a top-level generator function.
@@ -47,8 +53,9 @@ func (c *Compiler) defineGeneratorMethod(md *ast.MethodDecl, m *types.Method, fn
 // If sig.Recv() is non-nil, the coroutine gets a `this` (i8*) first param.
 func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, body *ast.Block, elemType types.Type, ownerNamed *types.Named) {
 	elemLLVM := c.resolveType(elemType)
+	isFailable := sig.CanError()
 
-	// 1. Create coroutine function: [this +] params + i8* yield_slot → i8*
+	// 1. Create coroutine function: [this +] params + i8* yield_slot [+ i8* error_slot] → i8*
 	coroName := fmt.Sprintf(".generator.%d", c.generatorCounter)
 	c.generatorCounter++
 
@@ -60,6 +67,9 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 		coroParams = append(coroParams, ir.NewParam(p.Name(), c.resolveType(p.Type())))
 	}
 	coroParams = append(coroParams, ir.NewParam("yield_slot", irtypes.I8Ptr))
+	if isFailable {
+		coroParams = append(coroParams, ir.NewParam("error_slot", irtypes.I8Ptr))
+	}
 
 	coroFn := c.module.NewFunc(coroName, irtypes.I8Ptr, coroParams...)
 	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
@@ -81,7 +91,9 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
 	savedInGenerator := c.inGenerator
+	savedGenCanError := c.generatorCanError
 	savedYieldSlot := c.generatorYieldSlot
+	savedGenErrorSlot := c.generatorErrorSlot
 	savedGenCoroId := c.generatorCoroId
 	savedGenCleanup := c.generatorCleanup
 	savedGenSuspend := c.generatorSuspend
@@ -95,7 +107,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.blockCounter = 0
-	c.canError = false
+	c.canError = false // keep false — error path handled via generatorCanError
 	c.currentRetType = nil
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
@@ -103,14 +115,19 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.loopScopeDepth = 0
 	c.inCoroutine = false
 	c.inGenerator = true
+	c.generatorCanError = isFailable
+	c.generatorErrorSlot = nil
 	c.panicExitBlock = nil
 	c.coroutineReturnBlock = nil
 	if ownerNamed != nil {
 		c.currentNamed = ownerNamed
 	}
 
-	// Yield slot is the last parameter
+	// Yield slot is the second-to-last (or last for non-failable) parameter
 	yieldSlotParam := coroFn.Params[len(coroFn.Params)-1]
+	if isFailable {
+		yieldSlotParam = coroFn.Params[len(coroFn.Params)-2]
+	}
 
 	// 3. Build coroutine preamble with initial suspend
 	entry := coroFn.NewBlock(".entry")
@@ -146,6 +163,15 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	yieldSlotAlloca.SetName(c.uniqueLocalName("yield_slot.addr"))
 	startBlk.NewStore(yieldSlotParam, yieldSlotAlloca)
 	c.generatorYieldSlot = yieldSlotAlloca
+
+	// B0023: Store error_slot into alloca for failable generators
+	if isFailable {
+		errorSlotParam := coroFn.Params[len(coroFn.Params)-1]
+		errorSlotAlloca := startBlk.NewAlloca(irtypes.I8Ptr)
+		errorSlotAlloca.SetName(c.uniqueLocalName("error_slot.addr"))
+		startBlk.NewStore(errorSlotParam, errorSlotAlloca)
+		c.generatorErrorSlot = errorSlotAlloca
+	}
 
 	// Bind params into allocas (after coro.begin → part of frame)
 	paramIdx := 0
@@ -238,7 +264,9 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
 	c.inGenerator = savedInGenerator
+	c.generatorCanError = savedGenCanError
 	c.generatorYieldSlot = savedYieldSlot
+	c.generatorErrorSlot = savedGenErrorSlot
 	c.generatorCoroId = savedGenCoroId
 	c.generatorCleanup = savedGenCleanup
 	c.generatorSuspend = savedGenSuspend
@@ -248,8 +276,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.panicExitBlock = savedPanicExitBlock
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
 
-	// 7. Build factory body for original function:
-	//    allocate yield slot, call coroutine ramp, return {handle, slot}
+	// 7. Build factory body for original function
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
@@ -265,18 +292,66 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	slotSize := constant.NewInt(irtypes.I64, int64(c.typeSize(elemLLVM)))
 	slot := c.block.NewCall(c.palAlloc, slotSize)
 
-	// Call coroutine ramp with original params + yield_slot
-	var rampArgs []value.Value
-	for _, p := range fn.Params {
-		rampArgs = append(rampArgs, p)
-	}
-	rampArgs = append(rampArgs, slot)
-	handle := c.block.NewCall(coroFn, rampArgs...)
+	if isFailable {
+		// B0023: Failable generator factory with eager start
+		// Allocate error slot: sizeof(i8*)
+		ptrSize := int64(8)
+		if c.isWasm {
+			ptrSize = 4
+		}
+		errSlot := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, ptrSize))
+		// Initialize error_slot to null (no error)
+		errSlotTyped := c.block.NewBitCast(errSlot, irtypes.NewPointer(irtypes.I8Ptr))
+		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), errSlotTyped)
 
-	// Build return value: {handle, slot}
-	genVal := c.block.NewInsertValue(constant.NewUndef(generatorValueType()), handle, 0)
-	genVal2 := c.block.NewInsertValue(genVal, slot, 1)
-	c.block.NewRet(genVal2)
+		// Call coroutine ramp with original params + yield_slot + error_slot
+		var rampArgs []value.Value
+		for _, p := range fn.Params {
+			rampArgs = append(rampArgs, p)
+		}
+		rampArgs = append(rampArgs, slot)
+		rampArgs = append(rampArgs, errSlot)
+		handle := c.block.NewCall(coroFn, rampArgs...)
+
+		// Eager start: resume coroutine to run body to first yield or error
+		c.block.NewCall(c.genResume, handle)
+
+		// Check error_slot — non-null means error before first yield
+		errPtr := c.block.NewLoad(irtypes.I8Ptr, errSlotTyped)
+		isErr := c.block.NewICmp(enum.IPredNE, errPtr, constant.NewNull(irtypes.I8Ptr))
+
+		errBlk := c.newBlock("gen.factory.error")
+		okBlk := c.newBlock("gen.factory.ok")
+		c.block.NewCondBr(isErr, errBlk, okBlk)
+
+		// Error path: destroy coroutine, free slots, return error
+		c.block = errBlk
+		c.block.NewCall(c.genDestroy, handle)
+		c.block.NewCall(c.palFree, slot)
+		c.block.NewCall(c.palFree, errSlot)
+		factoryResultType := fn.Sig.RetType.(*irtypes.StructType)
+		c.block.NewRet(c.wrapError(errPtr, factoryResultType))
+
+		// OK path: return wrapOk({handle, slot, error_slot})
+		c.block = okBlk
+		genVal := c.block.NewInsertValue(constant.NewUndef(failableGeneratorValueType()), handle, 0)
+		genVal2 := c.block.NewInsertValue(genVal, slot, 1)
+		genVal3 := c.block.NewInsertValue(genVal2, errSlot, 2)
+		c.block.NewRet(c.wrapOk(genVal3, fn.Sig.RetType.(*irtypes.StructType)))
+	} else {
+		// Non-failable generator factory (existing behavior)
+		var rampArgs []value.Value
+		for _, p := range fn.Params {
+			rampArgs = append(rampArgs, p)
+		}
+		rampArgs = append(rampArgs, slot)
+		handle := c.block.NewCall(coroFn, rampArgs...)
+
+		// Build return value: {handle, slot}
+		genVal := c.block.NewInsertValue(constant.NewUndef(generatorValueType()), handle, 0)
+		genVal2 := c.block.NewInsertValue(genVal, slot, 1)
+		c.block.NewRet(genVal2)
+	}
 }
 
 // genYieldStmt generates code for a yield statement inside a generator coroutine.
@@ -286,15 +361,26 @@ func (c *Compiler) genYieldStmt(s *ast.YieldStmt) {
 	c.emitYieldValue(val)
 }
 
-// genForInGenerator generates a for-in loop over a generator value {handle, slot}.
+// genForInGenerator generates a for-in loop over a generator value {handle, slot}
+// or failable generator value {handle, slot, error_slot}.
 //
-// Protocol (with initial suspend):
+// Non-failable protocol (with initial suspend):
 //
 //	factory() → ramp returns handle immediately (body not started)
 //	resume(handle) → body runs to first yield (stores value) or final suspend
 //	loop: if done → exit; load value; body; resume; goto loop
+//
+// Failable protocol (eager start — factory already resumed):
+//
+//	factory!() → ramp + resume; error_slot checked; returns {handle, slot, error_slot}
+//	loop: if done → exit; load value; body; resume; if error → propagate; goto loop
+//	exit: check error_slot → propagate or normal cleanup
 func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemType types.Type) {
 	elemLLVM := c.resolveType(elemType)
+
+	// Detect failable generator by struct field count (3 = failable, 2 = non-failable)
+	genStruct := genVal.Type().(*irtypes.StructType)
+	isFailable := len(genStruct.Fields) == 3
 
 	// Extract handle and yield_slot from generator value struct
 	handle := c.block.NewExtractValue(genVal, 0)
@@ -309,12 +395,25 @@ func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemT
 	slotAlloca.SetName(c.uniqueLocalName("gen.slot"))
 	c.block.NewStore(yieldSlot, slotAlloca)
 
+	// B0023: For failable generators, also store error_slot
+	var errSlotAlloca *ir.InstAlloca
+	if isFailable {
+		errSlot := c.block.NewExtractValue(genVal, 2)
+		errSlotAlloca = c.createEntryAlloca(irtypes.I8Ptr)
+		errSlotAlloca.SetName(c.uniqueLocalName("gen.errslot"))
+		c.block.NewStore(errSlot, errSlotAlloca)
+	}
+
 	// Register generator scope binding for cleanup on break/return
-	c.scopeBindings = append(c.scopeBindings, scopeBinding{
+	binding := scopeBinding{
 		kind:            bindingGenerator,
 		generatorHandle: handleAlloca,
 		generatorSlot:   slotAlloca,
-	})
+	}
+	if isFailable {
+		binding.generatorErrorSlot = errSlotAlloca
+	}
+	c.scopeBindings = append(c.scopeBindings, binding)
 
 	// Bind loop variable
 	elemAlloca := c.createEntryAlloca(elemLLVM)
@@ -334,10 +433,16 @@ func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemT
 	resumeBlk := c.newBlock("gen.resume")
 	exitBlk := c.newBlock("gen.exit")
 
-	// Initial resume: start the generator body (runs to first yield or final suspend)
-	initHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
-	c.block.NewCall(c.genResume, initHandle)
-	c.block.NewBr(checkBlk)
+	if isFailable {
+		// B0023: Failable generator — factory already did the initial resume (eager start).
+		// Go directly to the done check.
+		c.block.NewBr(checkBlk)
+	} else {
+		// Non-failable: initial resume starts the generator body
+		initHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
+		c.block.NewCall(c.genResume, initHandle)
+		c.block.NewBr(checkBlk)
+	}
 
 	// Check: is generator done? (use noinline wrapper to prevent coro-elide)
 	c.block = checkBlk
@@ -366,7 +471,7 @@ func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemT
 		c.block.NewBr(resumeBlk)
 	}
 
-	// Resume: update index, resume coroutine, then go back to check
+	// Resume: update index, resume coroutine, then check for error (failable) or done
 	c.block = resumeBlk
 	if s.Index != "" {
 		idxAlloca := c.locals[s.Index]
@@ -382,22 +487,71 @@ func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemT
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopScopeDepth
 
-	// Exit: destroy coroutine + free yield slot (use noinline wrapper)
+	// Exit: destroy coroutine + free slots
 	c.block = exitBlk
-	exitHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
-	c.block.NewCall(c.genDestroy, exitHandle)
-	exitSlot := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
-	c.block.NewCall(c.palFree, exitSlot)
 
-	// Null out handle so scope binding cleanup is a no-op
-	c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
-
-	// Remove the generator scope binding (it's been cleaned up)
+	// Remove the generator scope binding (compile-time only — must happen
+	// exactly once, before any condBr that splits into error/clean paths).
 	c.scopeBindings = c.scopeBindings[:len(c.scopeBindings)-1]
+
+	if isFailable {
+		// B0023: Check error_slot — non-null means iteration error.
+		// Error causes done=true via final.suspend, so we reach exit naturally.
+		errSlotPtr := c.block.NewLoad(irtypes.I8Ptr, errSlotAlloca)
+		errSlotTyped := c.block.NewBitCast(errSlotPtr, irtypes.NewPointer(irtypes.I8Ptr))
+		errPtr := c.block.NewLoad(irtypes.I8Ptr, errSlotTyped)
+		isErr := c.block.NewICmp(enum.IPredNE, errPtr, constant.NewNull(irtypes.I8Ptr))
+
+		errBlk := c.newBlock("gen.forin.error")
+		cleanBlk := c.newBlock("gen.forin.clean")
+		c.block.NewCondBr(isErr, errBlk, cleanBlk)
+
+		// Error path: destroy coro, free slots, propagate error to caller
+		c.block = errBlk
+		errHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
+		c.block.NewCall(c.genDestroy, errHandle)
+		errYieldSlot := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
+		c.block.NewCall(c.palFree, errYieldSlot)
+		c.block.NewCall(c.palFree, errSlotPtr)
+		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
+		// Propagate error to enclosing failable function/generator
+		if c.inGenerator && c.generatorCanError {
+			if len(c.scopeBindings) > 0 {
+				c.emitScopeCleanup(0, true)
+			}
+			c.emitGeneratorError(errPtr)
+		} else if c.canError {
+			if len(c.scopeBindings) > 0 {
+				c.emitScopeCleanup(0, true)
+			}
+			callerResultType := c.currentResultType()
+			c.block.NewRet(c.wrapError(errPtr, callerResultType))
+		} else {
+			// Non-failable consumer — panic with the error
+			c.emitErrorPanic(errPtr)
+		}
+
+		// Normal cleanup path (no error)
+		c.block = cleanBlk
+		exitHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
+		c.block.NewCall(c.genDestroy, exitHandle)
+		exitSlot := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
+		c.block.NewCall(c.palFree, exitSlot)
+		exitErrSlot := c.block.NewLoad(irtypes.I8Ptr, errSlotAlloca)
+		c.block.NewCall(c.palFree, exitErrSlot)
+		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
+	} else {
+		exitHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
+		c.block.NewCall(c.genDestroy, exitHandle)
+		exitSlot := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
+		c.block.NewCall(c.palFree, exitSlot)
+		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
+	}
 }
 
 // emitGeneratorCleanup emits cleanup for a generator scope binding.
-// Checks if handle is non-null; if so, destroys coroutine and frees yield slot.
+// Checks if handle is non-null; if so, destroys coroutine and frees yield slot
+// (and error slot for failable generators).
 func (c *Compiler) emitGeneratorCleanup(b scopeBinding) {
 	handle := c.block.NewLoad(irtypes.I8Ptr, b.generatorHandle)
 	isNull := c.block.NewICmp(enum.IPredEQ, handle, constant.NewNull(irtypes.I8Ptr))
@@ -410,9 +564,25 @@ func (c *Compiler) emitGeneratorCleanup(b scopeBinding) {
 	c.block.NewCall(c.genDestroy, handle)
 	slot := c.block.NewLoad(irtypes.I8Ptr, b.generatorSlot)
 	c.block.NewCall(c.palFree, slot)
+	// B0023: Free error_slot for failable generators
+	if b.generatorErrorSlot != nil {
+		errSlot := c.block.NewLoad(irtypes.I8Ptr, b.generatorErrorSlot)
+		c.block.NewCall(c.palFree, errSlot)
+	}
 	c.block.NewBr(skipBlk)
 
 	c.block = skipBlk
+}
+
+// emitGeneratorError stores an error into the generator's error slot and branches
+// to the final suspend point. Used by ?^, raise, and auto-propagation inside
+// failable generator bodies. The consumer (factory or for-in) detects the error
+// by reading the error_slot after resume.
+func (c *Compiler) emitGeneratorError(errVal value.Value) {
+	errSlotAddr := c.block.NewLoad(irtypes.I8Ptr, c.generatorErrorSlot.(*ir.InstAlloca))
+	errSlotTyped := c.block.NewBitCast(errSlotAddr, irtypes.NewPointer(irtypes.I8Ptr))
+	c.block.NewStore(errVal, errSlotTyped)
+	c.block.NewBr(c.generatorFinalSuspend)
 }
 
 // emitYieldValue stores a value into the generator's yield slot and suspends.
@@ -460,8 +630,14 @@ func (c *Compiler) genYieldDelegateStmt(s *ast.YieldDelegateStmt) {
 }
 
 // genYieldDelegateGenerator yields all values from a sub-generator (stream[T]).
+// For failable sub-generators (3-field struct), errors are propagated to the
+// outer generator's error_slot.
 func (c *Compiler) genYieldDelegateGenerator(genVal value.Value, elemType types.Type) {
 	elemLLVM := c.resolveType(elemType)
+
+	// Detect failable sub-generator by struct field count
+	genStruct := genVal.Type().(*irtypes.StructType)
+	isFailable := len(genStruct.Fields) == 3
 
 	handle := c.block.NewExtractValue(genVal, 0)
 	yieldSlot := c.block.NewExtractValue(genVal, 1)
@@ -474,15 +650,33 @@ func (c *Compiler) genYieldDelegateGenerator(genVal value.Value, elemType types.
 	slotAlloca.SetName(c.uniqueLocalName("yieldstar.slot"))
 	c.block.NewStore(yieldSlot, slotAlloca)
 
+	// B0023: For failable sub-generators, store error_slot
+	var errSlotAlloca *ir.InstAlloca
+	if isFailable {
+		errSlot := c.block.NewExtractValue(genVal, 2)
+		errSlotAlloca = c.createEntryAlloca(irtypes.I8Ptr)
+		errSlotAlloca.SetName(c.uniqueLocalName("yieldstar.errslot"))
+		c.block.NewStore(errSlot, errSlotAlloca)
+	}
+
 	// Register sub-generator for cleanup if our generator is destroyed mid-yield*
-	c.scopeBindings = append(c.scopeBindings, scopeBinding{
+	binding := scopeBinding{
 		kind:            bindingGenerator,
 		generatorHandle: handleAlloca,
 		generatorSlot:   slotAlloca,
-	})
+	}
+	if isFailable {
+		binding.generatorErrorSlot = errSlotAlloca
+	}
+	c.scopeBindings = append(c.scopeBindings, binding)
 
-	// Initial resume: start the sub-generator body
-	c.block.NewCall(c.genResume, handle)
+	if isFailable {
+		// B0023: Failable sub-generator — factory already did the initial resume
+		// (eager start). Go directly to done check.
+	} else {
+		// Initial resume: start the sub-generator body
+		c.block.NewCall(c.genResume, handle)
+	}
 
 	checkBlk := c.newBlock("yieldstar.check")
 	yieldBlk := c.newBlock("yieldstar.yield")
@@ -508,16 +702,64 @@ func (c *Compiler) genYieldDelegateGenerator(genVal value.Value, elemType types.
 	c.block.NewCall(c.genResume, rHandle)
 	c.block.NewBr(checkBlk)
 
-	// Exit: destroy sub-generator + free slot
+	// Exit: destroy sub-generator + free slots
 	c.block = exitBlk
-	exitHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
-	c.block.NewCall(c.genDestroy, exitHandle)
-	exitSlot := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
-	c.block.NewCall(c.palFree, exitSlot)
-	c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
 
-	// Remove scope binding (cleaned up inline)
+	// Remove scope binding (compile-time only — must happen exactly once,
+	// before any condBr that splits into error/clean paths).
 	c.scopeBindings = c.scopeBindings[:len(c.scopeBindings)-1]
+
+	if isFailable {
+		// B0023: Check sub-generator error_slot — propagate to outer generator
+		subErrSlotPtr := c.block.NewLoad(irtypes.I8Ptr, errSlotAlloca)
+		subErrSlotTyped := c.block.NewBitCast(subErrSlotPtr, irtypes.NewPointer(irtypes.I8Ptr))
+		subErrPtr := c.block.NewLoad(irtypes.I8Ptr, subErrSlotTyped)
+		isErr := c.block.NewICmp(enum.IPredNE, subErrPtr, constant.NewNull(irtypes.I8Ptr))
+
+		errBlk := c.newBlock("yieldstar.error")
+		cleanBlk := c.newBlock("yieldstar.clean")
+		c.block.NewCondBr(isErr, errBlk, cleanBlk)
+
+		// Error: destroy sub-generator, free slots, propagate to outer
+		c.block = errBlk
+		errH := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
+		c.block.NewCall(c.genDestroy, errH)
+		errS := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
+		c.block.NewCall(c.palFree, errS)
+		c.block.NewCall(c.palFree, subErrSlotPtr)
+		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
+		// Propagate to outer generator or failable function
+		if c.inGenerator && c.generatorCanError {
+			if len(c.scopeBindings) > 0 {
+				c.emitScopeCleanup(0, true)
+			}
+			c.emitGeneratorError(subErrPtr)
+		} else if c.canError {
+			if len(c.scopeBindings) > 0 {
+				c.emitScopeCleanup(0, true)
+			}
+			callerResultType := c.currentResultType()
+			c.block.NewRet(c.wrapError(subErrPtr, callerResultType))
+		} else {
+			c.emitErrorPanic(subErrPtr)
+		}
+
+		// Normal cleanup
+		c.block = cleanBlk
+		cleanH := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
+		c.block.NewCall(c.genDestroy, cleanH)
+		cleanS := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
+		c.block.NewCall(c.palFree, cleanS)
+		cleanE := c.block.NewLoad(irtypes.I8Ptr, errSlotAlloca)
+		c.block.NewCall(c.palFree, cleanE)
+		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
+	} else {
+		exitHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
+		c.block.NewCall(c.genDestroy, exitHandle)
+		exitSlot := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
+		c.block.NewCall(c.palFree, exitSlot)
+		c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
+	}
 }
 
 // genYieldDelegateRange yields all values from a Range.

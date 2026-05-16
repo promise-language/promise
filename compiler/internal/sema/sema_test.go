@@ -8463,14 +8463,40 @@ func TestGeneratorYieldInsideLambda(t *testing.T) {
 	expectError(t, errs, "yield inside lambda/closure is not allowed")
 }
 
-func TestGeneratorFailableError(t *testing.T) {
-	errs := checkErrs(t, `
+func TestGeneratorFailableAccepted(t *testing.T) {
+	// B0023: Failable generators are now accepted
+	checkOK(t, `
 		gen!() stream[int] {
 			yield 1;
 		}
 		main() {}
 	`)
-	expectError(t, errs, "generator functions cannot be failable")
+}
+
+func TestGeneratorFailableMethodAccepted(t *testing.T) {
+	// B0023: Failable generator methods are now accepted
+	checkOK(t, `
+		type Src {
+			int x;
+			items!() stream[int] {
+				yield this.x;
+			}
+		}
+		main() {}
+	`)
+}
+
+func TestGeneratorNonFailableRaiseRejected(t *testing.T) {
+	// ?^ inside a non-failable generator should still be rejected
+	errs := checkErrs(t, `
+		helper!() int { raise error("boom"); }
+		gen() stream[int] {
+			x := helper()?^;
+			yield x;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "outside of failable function")
 }
 
 func TestGeneratorMissingReturnOK(t *testing.T) {

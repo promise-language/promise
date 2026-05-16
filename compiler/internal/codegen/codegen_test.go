@@ -14333,6 +14333,110 @@ func TestYieldDelegateString(t *testing.T) {
 	assertContains(t, ir, "promise_string_next_char")
 }
 
+// --- Failable Generator Tests (B0023) ---
+
+func TestFailableGeneratorFactoryReturnsFailable(t *testing.T) {
+	ir := generateIR(t, `
+		gen!() stream[int] {
+			yield 1;
+		}
+		main() {}
+	`)
+	// Factory should return failable result containing {i8*, i8*, i8*}
+	assertContains(t, ir, "insertvalue { i8*, i8*, i8* }")
+	// Should allocate both yield slot and error slot
+	assertContains(t, ir, "@pal_alloc")
+	// Should have eager-start resume in factory
+	assertContains(t, ir, "gen.factory.error")
+	assertContains(t, ir, "gen.factory.ok")
+}
+
+func TestFailableGeneratorCoroutineHasErrorSlot(t *testing.T) {
+	ir := generateIR(t, `
+		gen!() stream[int] {
+			yield 1;
+		}
+		main() {}
+	`)
+	// Coroutine should have error_slot parameter and alloca
+	assertContains(t, ir, "error_slot.addr")
+}
+
+func TestFailableGeneratorErrorPropagation(t *testing.T) {
+	ir := generateIR(t, `
+		helper!() int { raise error("boom"); }
+		gen!() stream[int] {
+			x := helper()?^;
+			yield x;
+		}
+		main() {}
+	`)
+	// Error propagation in generator should store to error_slot (not ret wrapError)
+	assertContains(t, ir, "error_slot.addr")
+	// Should have final.suspend for error exit
+	assertContains(t, ir, "final.suspend")
+}
+
+func TestFailableGeneratorRaise(t *testing.T) {
+	ir := generateIR(t, `
+		gen!() stream[int] {
+			yield 1;
+			raise error("mid-stream error");
+		}
+		main() {}
+	`)
+	// raise inside failable generator should store to error_slot
+	assertContains(t, ir, "error_slot.addr")
+	assertContains(t, ir, "final.suspend")
+}
+
+func TestFailableGeneratorYieldDelegateFailable(t *testing.T) {
+	ir := generateIR(t, `
+		sub!() stream[int] { yield 1; }
+		outer!() stream[int] { yield* sub()?^; }
+		main() {}
+	`)
+	// yield* from failable sub-generator should have error_slot handling
+	assertContains(t, ir, "yieldstar.errslot")
+	assertContains(t, ir, "yieldstar.error")
+	assertContains(t, ir, "yieldstar.clean")
+}
+
+func TestFailableGeneratorForInInsideGenerator(t *testing.T) {
+	ir := generateIR(t, `
+		helper!() int { raise error("boom"); }
+		inner!() stream[int] { x := helper()?^; yield x; }
+		outer!() stream[int] {
+			for v in inner()?^ {
+				yield v;
+			}
+		}
+		main() {}
+	`)
+	// For-in over failable generator inside failable generator should
+	// propagate via emitGeneratorError (store to outer's error_slot)
+	assertContains(t, ir, "gen.forin.error")
+	assertContains(t, ir, "gen.forin.clean")
+	assertContains(t, ir, "error_slot.addr")
+}
+
+func TestFailableGeneratorBreakCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		gen!() stream[int] { yield 1; yield 2; }
+		consume!() int {
+			for x in gen()?^ {
+				return x;
+			}
+			return 0;
+		}
+		main() {}
+	`)
+	// Return from inside for-in over failable generator should emit
+	// generator cleanup (gen.cleanup block)
+	assertContains(t, ir, "gen.cleanup")
+	assertContains(t, ir, "gen.cleanup.skip")
+}
+
 func TestMultiParamGenericType(t *testing.T) {
 	ir := generateIR(t, `
 		type Pair[A, B] {

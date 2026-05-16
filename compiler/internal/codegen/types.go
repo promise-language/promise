@@ -166,6 +166,12 @@ func isOpaqueContainerType(typ types.Type) bool {
 	if _, ok := types.AsArc(typ); ok || named == types.TypArc {
 		return true
 	}
+	if _, ok := types.AsMutex(typ); ok || named == types.TypMutex {
+		return true
+	}
+	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
+		return true
+	}
 	return false
 }
 
@@ -183,6 +189,12 @@ func isContainerType(typ types.Type) bool {
 		return true
 	}
 	if _, ok := types.AsArc(typ); ok || named == types.TypArc {
+		return true
+	}
+	if _, ok := types.AsMutex(typ); ok || named == types.TypMutex {
+		return true
+	}
+	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
 		return true
 	}
 	if named == types.TypString {
@@ -260,7 +272,8 @@ func llvmTypeForEnumFieldFromPromise(typ types.Type, ptrSize int, enumLayouts ma
 	// Native container/handle types (Vector, Channel, Task) are opaque i8* pointers.
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
 		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&
-			n != types.TypVector && n != types.TypChannel && n != types.TypTask && n != types.TypArc {
+			n != types.TypVector && n != types.TypChannel && n != types.TypTask && n != types.TypArc &&
+			n != types.TypMutex && n != types.TypMutexGuard {
 			return userValueType() // {i8*, i8*}
 		}
 	}
@@ -352,7 +365,8 @@ func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDecl
 	}
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
 		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&
-			n != types.TypVector && n != types.TypChannel && n != types.TypTask && n != types.TypArc {
+			n != types.TypVector && n != types.TypChannel && n != types.TypTask && n != types.TypArc &&
+			n != types.TypMutex && n != types.TypMutexGuard {
 			// Value types have a wider value struct with embedded fields
 			if n.IsValueType() {
 				if layout, ok := allLayouts[n]; ok {
@@ -418,7 +432,7 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		}
 		// Vector/task instances → opaque pointer (native type)
 		if origin, ok := inst.Origin().(*types.Named); ok {
-			if origin == types.TypVector || origin == types.TypTask || origin == types.TypChannel || origin == types.TypArc {
+			if origin == types.TypVector || origin == types.TypTask || origin == types.TypChannel || origin == types.TypArc || origin == types.TypMutex || origin == types.TypMutexGuard {
 				return irtypes.I8Ptr
 			}
 			// Instance wrapping Named user type → value struct

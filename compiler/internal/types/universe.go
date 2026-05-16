@@ -25,10 +25,12 @@ var (
 	TypNone   *Named
 
 	// Generic native types (in Universe scope)
-	TypTask    *Named // Task[T] — concurrency handle from go expressions
-	TypChannel *Named // Channel[T] — channel type
-	TypVector  *Named // Vector[T] — dynamic array
-	TypArc     *Named // Arc[T] — atomic reference counting
+	TypTask       *Named // Task[T] — concurrency handle from go expressions
+	TypChannel    *Named // Channel[T] — channel type
+	TypVector     *Named // Vector[T] — dynamic array
+	TypArc        *Named // Arc[T] — atomic reference counting
+	TypMutex      *Named // Mutex[T] — mutual exclusion lock wrapping a value
+	TypMutexGuard *Named // MutexGuard[T] — RAII guard for Mutex[T]
 )
 
 // Non-native stdlib types — NOT in the Universe scope. These are regular types
@@ -90,6 +92,8 @@ func init() {
 	TypChannel = defGeneric("Channel", "T")
 	TypVector = defGeneric("Vector", "T")
 	TypArc = defGeneric("Arc", "T")
+	TypMutex = defGeneric("Mutex", "T")
+	TypMutexGuard = defGeneric("MutexGuard", "T")
 
 	// Lowercase sugar aliases for native generic types
 	defAlias := func(alias string, target *Named) {

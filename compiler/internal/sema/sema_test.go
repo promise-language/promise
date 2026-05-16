@@ -13986,3 +13986,49 @@ func TestGoBlockCaptureInTupleLit(t *testing.T) {
 	`)
 	expectError(t, errs, "non-sendable variable")
 }
+
+// T0156: Mutex[T] constructor requires exactly 1 argument.
+func TestMutexConstructorOneArg(t *testing.T) {
+	checkOK(t, `
+		test() {
+			m := Mutex[int](42);
+		}
+	`)
+}
+
+func TestMutexConstructorNoArgs(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			m := Mutex[int]();
+		}
+	`)
+	expectError(t, errs, "expects exactly 1 argument")
+}
+
+func TestMutexConstructorTooManyArgs(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			m := Mutex[int](1, 2);
+		}
+	`)
+	expectError(t, errs, "expects exactly 1 argument")
+}
+
+func TestMutexConstructorWrongType(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			m := Mutex[int]("hello");
+		}
+	`)
+	expectError(t, errs, "cannot assign string")
+}
+
+// T0156: MutexGuard cannot be constructed directly.
+func TestMutexGuardDirectConstruction(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			g := MutexGuard[int]();
+		}
+	`)
+	expectError(t, errs, "cannot be constructed directly")
+}

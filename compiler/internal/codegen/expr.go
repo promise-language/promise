@@ -1232,6 +1232,10 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 			if origin == types.TypArc {
 				return c.genArcConstructor(e, inst)
 			}
+			// Mutex constructor: Mutex[T](value)
+			if origin == types.TypMutex {
+				return c.genMutexConstructor(e, inst)
+			}
 			return c.genConstructorCallMono(e, calleeType)
 		}
 	}
@@ -2410,6 +2414,20 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 				return c.genArcBorrow(e, tp)
 			}
 		}
+		// MutexGuard .borrow getter — loads T through the guard's mutex pointer.
+		// T0156: MutexGuard[T] interior mutability.
+		if elem, ok := types.AsMutexGuard(targetType); ok {
+			resolvedElem := elem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(elem, c.typeSubst)
+			}
+			return c.genMutexGuardBorrow(e, resolvedElem)
+		}
+		if named == types.TypMutexGuard {
+			if tp := c.resolveTypeParam(types.TypMutexGuard.TypeParams()[0]); tp != nil {
+				return c.genMutexGuardBorrow(e, tp)
+			}
+		}
 	}
 
 	// String .is_literal property — checks sign bit of length field
@@ -2620,6 +2638,150 @@ func (c *Compiler) genArcMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ele
 	default:
 		panic(fmt.Sprintf("codegen: unknown arc method %q", method))
 	}
+}
+
+// --- Mutex[T] / MutexGuard[T] codegen (T0156) ---
+
+// genMutexConstructor generates Mutex[T](value) — allocates {pal_handle, T}, inits mutex, stores value.
+func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) value.Value {
+	elemType := inst.TypeArgs()[0]
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	elemLLVM := c.resolveType(elemType)
+	elemSize := c.typeSize(elemLLVM)
+
+	// Allocate: 8 bytes (mutex handle ptr) + sizeof(T)
+	totalSize := 8 + elemSize
+	mutexPtr := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, int64(totalSize)))
+
+	// Bitcast to typed struct pointer for GEP
+	mutexStructTy := irtypes.NewStruct(irtypes.I8Ptr, elemLLVM)
+	typedPtr := c.block.NewBitCast(mutexPtr, irtypes.NewPointer(mutexStructTy))
+
+	// Init PAL mutex and store handle at field 0
+	mutexHandle := c.block.NewCall(c.palMutexInit)
+	handleField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(mutexHandle, handleField)
+
+	// Generate and store value (moved into the Mutex)
+	val := c.genCallArgExpr(e.Args[0].Value)
+	valField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	c.block.NewStore(val, valField)
+
+	return mutexPtr
+}
+
+// genMutexMethodCall dispatches native method calls on Mutex[T].
+func (c *Compiler) genMutexMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	mutexRaw := c.genExprAutoPropagate(member.Target)
+
+	switch method {
+	case "lock":
+		return c.genMutexLock(mutexRaw, elemType)
+	default:
+		panic(fmt.Sprintf("codegen: unknown mutex method %q", method))
+	}
+}
+
+// genMutexLock generates Mutex.lock() — acquires the PAL mutex, returns a MutexGuard.
+// Guard layout: {i8* mutex_alloc_ptr}.
+func (c *Compiler) genMutexLock(mutexRaw value.Value, elemType types.Type) value.Value {
+	elemLLVM := c.resolveType(elemType)
+
+	// Load PAL mutex handle from Mutex field 0 and lock
+	mutexStructTy := irtypes.NewStruct(irtypes.I8Ptr, elemLLVM)
+	typedPtr := c.block.NewBitCast(mutexRaw, irtypes.NewPointer(mutexStructTy))
+	handleField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	handle := c.block.NewLoad(irtypes.I8Ptr, handleField)
+	c.block.NewCall(c.palMutexLock, handle)
+
+	// Allocate guard: {i8*} — pointer back to the Mutex allocation
+	guardPtr := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, 8))
+	guardStructTy := irtypes.NewStruct(irtypes.I8Ptr)
+	guardTypedPtr := c.block.NewBitCast(guardPtr, irtypes.NewPointer(guardStructTy))
+	mutexField := c.block.NewGetElementPtr(guardStructTy, guardTypedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(mutexRaw, mutexField)
+
+	return guardPtr
+}
+
+// genMutexGuardBorrow generates the MutexGuard .borrow getter — loads T from the Mutex through the guard.
+// Guard layout: {i8* mutex_alloc_ptr}. Mutex layout: {i8* pal_handle, T value}.
+func (c *Compiler) genMutexGuardBorrow(e *ast.MemberExpr, elemType types.Type) value.Value {
+	guardRaw := c.genExprAutoPropagate(e.Target)
+	elemLLVM := c.resolveType(elemType)
+
+	// Load mutex_alloc_ptr from guard (field 0)
+	guardStructTy := irtypes.NewStruct(irtypes.I8Ptr)
+	guardPtr := c.block.NewBitCast(guardRaw, irtypes.NewPointer(guardStructTy))
+	mutexPtrField := c.block.NewGetElementPtr(guardStructTy, guardPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	mutexRaw := c.block.NewLoad(irtypes.I8Ptr, mutexPtrField)
+
+	// Load T from Mutex field 1
+	mutexStructTy := irtypes.NewStruct(irtypes.I8Ptr, elemLLVM)
+	mutexPtr := c.block.NewBitCast(mutexRaw, irtypes.NewPointer(mutexStructTy))
+	valField := c.block.NewGetElementPtr(mutexStructTy, mutexPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	return c.block.NewLoad(elemLLVM, valField)
+}
+
+// genMutexGuardBorrowSet generates the MutexGuard .borrow setter — stores T into the Mutex through the guard.
+// Handles compound assignment (+=, -=, etc.) by reading the current value first.
+func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignOp, val value.Value, elemType types.Type) {
+	guardRaw := c.genExpr(target.Target)
+	elemLLVM := c.resolveType(elemType)
+
+	// Navigate to the value field: guard → mutex_alloc_ptr → Mutex.value
+	guardStructTy := irtypes.NewStruct(irtypes.I8Ptr)
+	guardPtr := c.block.NewBitCast(guardRaw, irtypes.NewPointer(guardStructTy))
+	mutexPtrField := c.block.NewGetElementPtr(guardStructTy, guardPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	mutexRaw := c.block.NewLoad(irtypes.I8Ptr, mutexPtrField)
+
+	mutexStructTy := irtypes.NewStruct(irtypes.I8Ptr, elemLLVM)
+	mutexPtr := c.block.NewBitCast(mutexRaw, irtypes.NewPointer(mutexStructTy))
+	valField := c.block.NewGetElementPtr(mutexStructTy, mutexPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+
+	// Handle compound assignment
+	if op != ast.OpAssign {
+		current := c.block.NewLoad(elemLLVM, valField)
+		val = c.genCompoundOp(op, current, val)
+	}
+
+	// Drop old value if T is droppable
+	named := extractNamed(elemType)
+	if named == types.TypString {
+		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
+		if dropFn, ok := c.funcs["promise_string_drop"]; ok {
+			c.block.NewCall(dropFn, oldVal)
+		}
+	} else if types.IsVector(elemType) || named == types.TypVector {
+		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
+		if dropFn, ok := c.funcs["Vector.drop"]; ok {
+			c.block.NewCall(dropFn, oldVal)
+		}
+	} else if types.IsChannel(elemType) || named == types.TypChannel {
+		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
+		if dropFn, ok := c.funcs["Channel.drop"]; ok {
+			c.block.NewCall(dropFn, oldVal)
+		}
+	} else if arcElem, ok := types.AsArc(elemType); ok {
+		oldVal := c.block.NewLoad(irtypes.I8Ptr, valField)
+		dropFn := c.getOrCreateArcDrop(arcElem)
+		c.block.NewCall(dropFn, oldVal)
+	}
+
+	c.block.NewStore(val, valField)
 }
 
 // genChannelSend generates code for ch.send(value).
@@ -3648,7 +3810,8 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 	// Check if the method is native — only native methods are handled here.
 	// Non-native methods fall through to the regular user method path.
 	named := extractNamed(targetType)
-	if named == types.TypVector || named == types.TypString || named == types.TypChannel || named == types.TypArc {
+	if named == types.TypVector || named == types.TypString || named == types.TypChannel || named == types.TypArc ||
+		named == types.TypMutex || named == types.TypMutexGuard {
 		m := named.LookupMethod(methodName)
 		if m == nil || !m.IsNative() {
 			return nil, false // fall through to regular method dispatch
@@ -3683,6 +3846,16 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 	if named == types.TypArc {
 		if elem := c.resolveTypeParam(types.TypArc.TypeParams()[0]); elem != nil {
 			return c.genArcMethodCall(e, member, elem, methodName), true
+		}
+	}
+
+	// Mutex methods: lock
+	if elem, ok := types.AsMutex(unwrapped); ok {
+		return c.genMutexMethodCall(e, member, elem, methodName), true
+	}
+	if named == types.TypMutex {
+		if elem := c.resolveTypeParam(types.TypMutex.TypeParams()[0]); elem != nil {
+			return c.genMutexMethodCall(e, member, elem, methodName), true
 		}
 	}
 

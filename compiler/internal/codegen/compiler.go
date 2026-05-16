@@ -1766,7 +1766,9 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineVectorContainsFunc()
 	c.defineVectorRemoveFunc()
 	c.defineVectorDropFunc()
-	c.defineChannelDropFunc() // B0163: channel scope-exit drop
+	c.defineChannelDropFunc()     // B0163: channel scope-exit drop
+	c.defineMutexGuardCloseFunc() // T0156: MutexGuard close (unlock + free)
+	c.defineMutexGuardDropFunc()  // T0156: MutexGuard drop (unlock + free)
 	c.defineVectorCOWFunc()
 
 	// String trim/split/case/repeat (codegen-emitted LLVM IR)
@@ -2255,6 +2257,23 @@ func (c *Compiler) emitArcInnerDrop(blk *ir.Block, typedPtr value.Value, arcStru
 			innerDropFn := c.getOrCreateArcDrop(innerElem)
 			blk.NewCall(innerDropFn, innerArc)
 		}
+	case named != nil && (types.IsMutex(elemType) || named == types.TypMutex):
+		// T0156: Mutex inner drop — resolve element type and get per-instantiation drop
+		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		innerMutex := blk.NewLoad(irtypes.I8Ptr, valField)
+		if mutexElem, ok := types.AsMutex(elemType); ok {
+			innerDropFn := c.getOrCreateMutexDrop(mutexElem)
+			blk.NewCall(innerDropFn, innerMutex)
+		}
+	case named != nil && (types.IsMutexGuard(elemType) || named == types.TypMutexGuard):
+		// T0156: MutexGuard inner drop
+		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		innerGuard := blk.NewLoad(irtypes.I8Ptr, valField)
+		if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
+			blk.NewCall(dropFn, innerGuard)
+		}
 	case named != nil && (named.HasDrop() || named.NeedsSynthDrop()):
 		// User type with explicit or synthesized drop
 		valField := blk.NewGetElementPtr(arcStructTy, typedPtr,
@@ -2303,6 +2322,116 @@ func (c *Compiler) dupArc(ptr value.Value) value.Value {
 		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entryBlock),
 		ir.NewIncoming(ptr, incBlock),
 	)
+}
+
+// --- Mutex[T] / MutexGuard[T] codegen (T0156) ---
+
+// defineMutexGuardCloseFunc defines MutexGuard.close(i8* this) -> void.
+// Unlocks the mutex and frees the guard allocation. Used by `use` bindings.
+func (c *Compiler) defineMutexGuardCloseFunc() {
+	thisParam := ir.NewParam("this", irtypes.I8Ptr)
+	fn := c.module.NewFunc("MutexGuard.close", irtypes.Void, thisParam)
+	c.defineMutexGuardUnlockFreeBody(fn)
+	c.funcs["MutexGuard.close"] = fn
+}
+
+// defineMutexGuardDropFunc defines MutexGuard.drop(i8* this) -> void.
+// Same behavior as close: unlocks the mutex and frees the guard allocation.
+func (c *Compiler) defineMutexGuardDropFunc() {
+	thisParam := ir.NewParam("this", irtypes.I8Ptr)
+	fn := c.module.NewFunc("MutexGuard.drop", irtypes.Void, thisParam)
+	c.defineMutexGuardUnlockFreeBody(fn)
+	c.funcs["MutexGuard.drop"] = fn
+}
+
+// defineMutexGuardUnlockFreeBody generates the body for MutexGuard close/drop:
+// null-check, load mutex pointer from guard, unlock PAL mutex, free guard.
+// Guard layout: {i8* mutex_alloc_ptr}. Mutex layout starts with {i8* pal_handle, ...}.
+func (c *Compiler) defineMutexGuardUnlockFreeBody(fn *ir.Func) {
+	thisParam := fn.Params[0]
+	entry := fn.NewBlock(".entry")
+
+	// Null check
+	isNull := entry.NewICmp(enum.IPredEQ, thisParam, constant.NewNull(irtypes.I8Ptr))
+	unlockBlk := fn.NewBlock("unlock")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isNull, doneBlk, unlockBlk)
+
+	// Load mutex_alloc_ptr from guard (field 0)
+	guardStructTy := irtypes.NewStruct(irtypes.I8Ptr)
+	guardPtr := unlockBlk.NewBitCast(thisParam, irtypes.NewPointer(guardStructTy))
+	mutexField := unlockBlk.NewGetElementPtr(guardStructTy, guardPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	mutexRaw := unlockBlk.NewLoad(irtypes.I8Ptr, mutexField)
+
+	// Load PAL mutex handle from Mutex allocation field 0 (offset 0 = i8*)
+	mutexHandlePtr := unlockBlk.NewBitCast(mutexRaw, irtypes.NewPointer(irtypes.I8Ptr))
+	mutexHandle := unlockBlk.NewLoad(irtypes.I8Ptr, mutexHandlePtr)
+
+	// Unlock
+	unlockBlk.NewCall(c.palMutexUnlock, mutexHandle)
+
+	// Free guard allocation
+	unlockBlk.NewCall(c.palFree, thisParam)
+	unlockBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+}
+
+// getOrCreateMutexDrop returns or creates the per-element-type Mutex[T].drop function.
+// Mutex layout: {i8* pal_handle, T value}. Drops inner T, destroys PAL mutex, frees.
+func (c *Compiler) getOrCreateMutexDrop(elemType types.Type) *ir.Func {
+	elemName := typeArgStr(elemType)
+	funcName := "Mutex[" + elemName + "].drop"
+
+	if fn, ok := c.funcs[funcName]; ok {
+		if len(fn.Blocks) > 0 {
+			return fn
+		}
+		c.defineMutexDropBody(fn, elemType)
+		return fn
+	}
+
+	thisParam := ir.NewParam("this", irtypes.I8Ptr)
+	fn := c.module.NewFunc(funcName, irtypes.Void, thisParam)
+
+	c.defineMutexDropBody(fn, elemType)
+
+	c.funcs[funcName] = fn
+	return fn
+}
+
+// defineMutexDropBody generates the Mutex[T].drop body:
+// null-check, drop inner T, destroy PAL mutex, free allocation.
+func (c *Compiler) defineMutexDropBody(fn *ir.Func, elemType types.Type) {
+	elemLLVM := c.resolveType(elemType)
+	mutexStructTy := irtypes.NewStruct(irtypes.I8Ptr, elemLLVM)
+	thisParam := fn.Params[0]
+
+	entry := fn.NewBlock(".entry")
+
+	// Null check
+	isNull := entry.NewICmp(enum.IPredEQ, thisParam, constant.NewNull(irtypes.I8Ptr))
+	dropBlk := fn.NewBlock("drop")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isNull, doneBlk, dropBlk)
+
+	typedPtr := dropBlk.NewBitCast(thisParam, irtypes.NewPointer(mutexStructTy))
+
+	// Drop inner T value (reuse the Arc inner drop logic — same field-1 pattern)
+	c.emitArcInnerDrop(dropBlk, typedPtr, mutexStructTy, elemType)
+
+	// Destroy PAL mutex (field 0)
+	handleField := dropBlk.NewGetElementPtr(mutexStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	handle := dropBlk.NewLoad(irtypes.I8Ptr, handleField)
+	dropBlk.NewCall(c.palMutexDestroy, handle)
+
+	// Free allocation
+	dropBlk.NewCall(c.palFree, thisParam)
+	dropBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
 }
 
 // dupHeapValue duplicates a heap user type value struct by allocating a new
@@ -6112,6 +6241,25 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		// promise_string_drop has internal null check + literal flag check.
 		if fieldNamed == types.TypString {
 			if dropFn, ok := c.funcs["promise_string_drop"]; ok {
+				c.block.NewCall(dropFn, fieldInstance)
+			}
+			continue
+		}
+
+		// T0156: Mutex fields — per-instantiation drop (like Arc).
+		if mutexElem, ok := types.AsMutex(fieldType); ok {
+			resolvedElem := mutexElem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(mutexElem, c.typeSubst)
+			}
+			dropFn := c.getOrCreateMutexDrop(resolvedElem)
+			c.block.NewCall(dropFn, fieldInstance)
+			continue
+		}
+
+		// T0156: MutexGuard fields — T-independent drop.
+		if types.IsMutexGuard(fieldType) || fieldNamed == types.TypMutexGuard {
+			if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
 				c.block.NewCall(dropFn, fieldInstance)
 			}
 			continue

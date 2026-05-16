@@ -1418,7 +1418,7 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			// Arc[T] has its own drop logic (T0155) — skip here; body is generated
 			// lazily by getOrCreateArcDrop when the drop function is first needed.
 			if isNativeDrop {
-				if named == types.TypArc {
+				if named == types.TypArc || named == types.TypMutex || named == types.TypMutexGuard {
 					continue
 				}
 				c.defineFnIterDrop(fn, inst)
@@ -1488,7 +1488,8 @@ func monoInstNeedsSynthDrop(inst *types.Instance) bool {
 		if fNamed == nil {
 			continue
 		}
-		if fNamed == types.TypString || fNamed == types.TypVector || fNamed == types.TypChannel {
+		if fNamed == types.TypString || fNamed == types.TypVector || fNamed == types.TypChannel ||
+			fNamed == types.TypMutex || fNamed == types.TypMutexGuard {
 			return true
 		}
 		if fNamed.HasDrop() {
@@ -1527,7 +1528,8 @@ func monoEnumInstNeedsSynthDrop(inst *types.Instance) bool {
 			ft := types.Substitute(fType, subst)
 			// Check resolved type for droppability
 			if fNamed := extractNamed(ft); fNamed != nil {
-				if fNamed == types.TypString || fNamed == types.TypVector || fNamed == types.TypChannel {
+				if fNamed == types.TypString || fNamed == types.TypVector || fNamed == types.TypChannel ||
+					fNamed == types.TypMutex || fNamed == types.TypMutexGuard {
 					return true
 				}
 				if fNamed.HasDrop() {

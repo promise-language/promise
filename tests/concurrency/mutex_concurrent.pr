@@ -1,0 +1,54 @@
+// Mutex[T] concurrent tests — T0156
+mutex_concurrent_increment() `test {
+  shared := Arc[Mutex[int]](Mutex[int](0));
+  done := channel[bool]();
+  n := 10;
+  i := 0;
+  while i < n {
+    c := shared.clone();
+    go {
+      j := 0;
+      while j < 100 {
+        use guard := c.borrow.lock();
+        guard.borrow += 1;
+        j += 1;
+      }
+      done.send(true);
+    };
+    i += 1;
+  }
+  i = 0;
+  while i < n {
+    <-done;
+    i += 1;
+  }
+  use guard := shared.borrow.lock();
+  assert(guard.borrow == 1000, "10 goroutines * 100 increments = 1000");
+}
+
+mutex_protect_shared_state() `test {
+  shared := Arc[Mutex[int]](Mutex[int](42));
+  ch := channel[int]();
+  c := shared.clone();
+  go {
+    use guard := c.borrow.lock();
+    v := guard.borrow;
+    ch.send(v);
+  };
+  r := <-ch;
+  assert(r! == 42, "goroutine read protected value");
+}
+
+mutex_write_from_goroutine() `test {
+  shared := Arc[Mutex[int]](Mutex[int](0));
+  done := channel[bool]();
+  c := shared.clone();
+  go {
+    use guard := c.borrow.lock();
+    guard.borrow = 99;
+    done.send(true);
+  };
+  <-done;
+  use guard := shared.borrow.lock();
+  assert(guard.borrow == 99, "goroutine wrote 99");
+}

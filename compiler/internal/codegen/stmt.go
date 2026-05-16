@@ -64,6 +64,12 @@ func isDroppableContainerOrString(typ types.Type) bool {
 	if _, ok := types.AsArc(typ); ok || named == types.TypArc {
 		return true
 	}
+	if _, ok := types.AsMutex(typ); ok || named == types.TypMutex {
+		return true
+	}
+	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
+		return true
+	}
 	return false
 }
 
@@ -139,7 +145,7 @@ func (c *Compiler) isOwnedOptionalExpr(expr ast.Expr) bool {
 // genFieldAccess dups the value (T0095/B0219), so the result is an owned copy.
 func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
 	isString := extractNamed(dropType) == types.TypString
-	isVecOrChan := types.IsVector(dropType) || types.IsChannel(dropType) || types.IsArc(dropType)
+	isVecOrChan := types.IsVector(dropType) || types.IsChannel(dropType) || types.IsArc(dropType) || types.IsMutex(dropType) || types.IsMutexGuard(dropType)
 	if !isString && !isVecOrChan {
 		return false
 	}
@@ -436,6 +442,15 @@ func (c *Compiler) dropDiscardedAutoPropagate(expr ast.Expr, val value.Value) {
 	case types.IsArc(exprType) || named == types.TypArc:
 		if elemType, ok := types.AsArc(exprType); ok {
 			dropFn := c.getOrCreateArcDrop(elemType)
+			c.block.NewCall(dropFn, val)
+		}
+	case types.IsMutex(exprType) || named == types.TypMutex:
+		if elemType, ok := types.AsMutex(exprType); ok {
+			dropFn := c.getOrCreateMutexDrop(elemType)
+			c.block.NewCall(dropFn, val)
+		}
+	case types.IsMutexGuard(exprType) || named == types.TypMutexGuard:
+		if dropFn := c.funcs["MutexGuard.drop"]; dropFn != nil {
 			c.block.NewCall(dropFn, val)
 		}
 	case named.HasDrop() || named.NeedsSynthDrop():
@@ -1154,6 +1169,12 @@ func isTypeDroppable(typ types.Type) bool {
 	if _, ok := types.AsArc(typ); ok || named == types.TypArc {
 		return true
 	}
+	if _, ok := types.AsMutex(typ); ok || named == types.TypMutex {
+		return true
+	}
+	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
+		return true
+	}
 	if isContainerType(typ) {
 		return false
 	}
@@ -1406,6 +1427,61 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 			c.dropBindings[varName] = binding
 			return
 		}
+	}
+
+	// Mutex drop (T0156): per-instantiation drop (drops inner T, destroys PAL mutex, frees).
+	if elemType, ok := types.AsMutex(typ); ok || named == types.TypMutex {
+		resolvedElem := elemType
+		if resolvedElem == nil && named == types.TypMutex && c.typeSubst != nil {
+			if tp := types.TypMutex.TypeParams(); len(tp) > 0 {
+				resolvedElem = c.typeSubst[tp[0]]
+			}
+		}
+		if c.typeSubst != nil && resolvedElem != nil {
+			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+		}
+		if resolvedElem != nil {
+			dropFlag := c.createEntryAlloca(irtypes.I1)
+			dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+			c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+			c.dropFlags[varName] = dropFlag
+
+			dropFunc := c.getOrCreateMutexDrop(resolvedElem)
+			binding := scopeBinding{
+				kind:     bindingDropString,
+				alloca:   alloca,
+				named:    named,
+				valType:  typ,
+				dropFlag: dropFlag,
+				dropFunc: dropFunc,
+				varName:  varName,
+			}
+			c.scopeBindings = append(c.scopeBindings, binding)
+			c.dropBindings[varName] = binding
+			return
+		}
+	}
+
+	// MutexGuard drop (T0156): T-independent drop (unlock + free guard).
+	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+		c.dropFlags[varName] = dropFlag
+
+		dropFunc := c.funcs["MutexGuard.drop"]
+		binding := scopeBinding{
+			kind:     bindingDropString,
+			alloca:   alloca,
+			named:    named,
+			valType:  typ,
+			dropFlag: dropFlag,
+			dropFunc: dropFunc,
+			varName:  varName,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[varName] = binding
+		return
 	}
 
 	// Remaining container types without drop support skip.
@@ -1833,6 +1909,18 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 			}
 			dropFunc = c.getOrCreateArcDrop(resolvedArcElem)
 		}
+	case innerNamed != nil && (func() bool { _, ok := types.AsMutex(elem); return ok }() || innerNamed == types.TypMutex):
+		// T0156: Mutex inner drop — per-instantiation
+		if mutexElem, ok := types.AsMutex(elem); ok {
+			resolvedElem := mutexElem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(mutexElem, c.typeSubst)
+			}
+			dropFunc = c.getOrCreateMutexDrop(resolvedElem)
+		}
+	case innerNamed != nil && (func() bool { _, ok := types.AsMutexGuard(elem); return ok }() || innerNamed == types.TypMutexGuard):
+		// T0156: MutexGuard inner drop — T-independent
+		dropFunc = c.funcs["MutexGuard.drop"]
 	case innerNamed != nil && (innerNamed.HasDrop() || innerNamed.NeedsSynthDrop()):
 		// User type with explicit or synthesized drop
 		ownerName := innerNamed.Obj().Name()
@@ -2075,9 +2163,15 @@ func (c *Compiler) emitCloseCall(b scopeBinding, cap *closeErrCapture) {
 
 	var result value.Value
 	if b.closeFunc != nil {
-		// Direct dispatch — extract instance pointer and call
-		instance := c.extractInstancePtr(val)
-		result = c.block.NewCall(b.closeFunc, instance)
+		// Direct dispatch — extract instance pointer and call.
+		// T0156: Container types (e.g. MutexGuard) are opaque i8* — pass directly.
+		var receiver value.Value
+		if isContainerType(b.valType) {
+			receiver = val
+		} else {
+			receiver = c.extractInstancePtr(val)
+		}
+		result = c.block.NewCall(b.closeFunc, receiver)
 	} else if b.named != nil {
 		// Virtual dispatch through vtable
 		vtableRaw := c.extractVtablePtr(val)
@@ -2438,6 +2532,20 @@ func (c *Compiler) dropDiscardedOptional(expr ast.Expr, result value.Value) {
 			}
 			dropFunc = c.getOrCreateArcDrop(resolvedArcElem)
 		}
+		isContainer = true
+	case innerNamed != nil && (func() bool { _, ok := types.AsMutex(elem); return ok }() || innerNamed == types.TypMutex):
+		// T0156: Mutex inner drop
+		if mutexElem, ok := types.AsMutex(elem); ok {
+			resolvedElem := mutexElem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(mutexElem, c.typeSubst)
+			}
+			dropFunc = c.getOrCreateMutexDrop(resolvedElem)
+		}
+		isContainer = true
+	case innerNamed != nil && (func() bool { _, ok := types.AsMutexGuard(elem); return ok }() || innerNamed == types.TypMutexGuard):
+		// T0156: MutexGuard inner drop
+		dropFunc = c.funcs["MutexGuard.drop"]
 		isContainer = true
 	case innerNamed != nil && (innerNamed.HasDrop() || innerNamed.NeedsSynthDrop()):
 		ownerName := innerNamed.Obj().Name()
@@ -4150,6 +4258,27 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
+
+	// T0156: MutexGuard.borrow setter — intercept before generic setter lookup.
+	// Container types are opaque i8* and need custom setter codegen.
+	if target.Field == "borrow" {
+		if elem, ok := types.AsMutexGuard(targetType); ok {
+			resolvedElem := elem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(elem, c.typeSubst)
+			}
+			c.genMutexGuardBorrowSet(target, op, val, resolvedElem)
+			return
+		}
+		guardNamed := extractNamed(targetType)
+		if guardNamed == types.TypMutexGuard {
+			if tp := c.resolveTypeParam(types.TypMutexGuard.TypeParams()[0]); tp != nil {
+				c.genMutexGuardBorrowSet(target, op, val, tp)
+				return
+			}
+		}
+	}
+
 	named := extractNamed(targetType)
 	if named != nil {
 		if setter := named.LookupSetter(target.Field); setter != nil {
@@ -4238,6 +4367,37 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 					c.block.NewCall(dropFunc, oldVal)
 					c.block.NewBr(mergeBlock)
 					c.block = mergeBlock
+				}
+				// T0156: Mutex field reassignment drop.
+				if mutexElem, isMutex := types.AsMutex(fieldType); isMutex {
+					resolvedElem := mutexElem
+					if c.typeSubst != nil {
+						resolvedElem = types.Substitute(mutexElem, c.typeSubst)
+					}
+					dropFunc := c.getOrCreateMutexDrop(resolvedElem)
+					oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
+					isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
+					dropBlock := c.newBlock("field.mutexdrop")
+					mergeBlock := c.newBlock("field.mutexdrop.done")
+					c.block.NewCondBr(isSame, mergeBlock, dropBlock)
+					c.block = dropBlock
+					c.block.NewCall(dropFunc, oldVal)
+					c.block.NewBr(mergeBlock)
+					c.block = mergeBlock
+				}
+				// T0156: MutexGuard field reassignment drop.
+				if types.IsMutexGuard(fieldType) {
+					if dropFunc := c.funcs["MutexGuard.drop"]; dropFunc != nil {
+						oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
+						isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
+						dropBlock := c.newBlock("field.guardrop")
+						mergeBlock := c.newBlock("field.guardrop.done")
+						c.block.NewCondBr(isSame, mergeBlock, dropBlock)
+						c.block = dropBlock
+						c.block.NewCall(dropFunc, oldVal)
+						c.block.NewBr(mergeBlock)
+						c.block = mergeBlock
+					}
 				}
 				// B0240: Optional fields: drop old inner value before reassignment.
 				// When overwriting an optional field (e.g., p.location = none), the old

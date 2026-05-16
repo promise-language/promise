@@ -104,6 +104,46 @@ func AsArc(t Type) (elem Type, ok bool) {
 	return nil, false
 }
 
+// NewMutex creates a Mutex type as Instance{TypMutex, [elem]}.
+func NewMutex(elem Type) *Instance {
+	return NewInstance(TypMutex, []Type{elem})
+}
+
+// IsMutex reports whether t is a Mutex instance (Instance{TypMutex, _}).
+func IsMutex(t Type) bool {
+	inst, ok := t.(*Instance)
+	return ok && inst.origin == TypMutex
+}
+
+// AsMutex extracts the element type from a Mutex instance.
+// Returns (elem, true) for Mutex instances, (nil, false) otherwise.
+func AsMutex(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypMutex {
+		return inst.typeArgs[0], true
+	}
+	return nil, false
+}
+
+// NewMutexGuard creates a MutexGuard type as Instance{TypMutexGuard, [elem]}.
+func NewMutexGuard(elem Type) *Instance {
+	return NewInstance(TypMutexGuard, []Type{elem})
+}
+
+// IsMutexGuard reports whether t is a MutexGuard instance (Instance{TypMutexGuard, _}).
+func IsMutexGuard(t Type) bool {
+	inst, ok := t.(*Instance)
+	return ok && inst.origin == TypMutexGuard
+}
+
+// AsMutexGuard extracts the element type from a MutexGuard instance.
+// Returns (elem, true) for MutexGuard instances, (nil, false) otherwise.
+func AsMutexGuard(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypMutexGuard {
+		return inst.typeArgs[0], true
+	}
+	return nil, false
+}
+
 // IsChannel reports whether t is a channel instance (Instance{TypChannel, _}).
 func IsChannel(t Type) bool {
 	inst, ok := t.(*Instance)

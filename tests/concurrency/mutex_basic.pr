@@ -1,0 +1,119 @@
+// Mutex[T] basic tests — T0156
+test_mutex_create_and_read() `test {
+  m := Mutex[int](42);
+  use guard := m.lock();
+  assert(guard.borrow == 42, "borrow should be 42");
+}
+
+test_mutex_write_and_read() `test {
+  m := Mutex[int](0);
+  use guard := m.lock();
+  guard.borrow = 10;
+  assert(guard.borrow == 10, "borrow should be 10 after write");
+}
+
+test_mutex_compound_assign() `test {
+  m := Mutex[int](5);
+  use guard := m.lock();
+  guard.borrow += 3;
+  assert(guard.borrow == 8, "5 + 3 = 8");
+  guard.borrow -= 2;
+  assert(guard.borrow == 6, "8 - 2 = 6");
+  guard.borrow *= 4;
+  assert(guard.borrow == 24, "6 * 4 = 24");
+}
+
+test_mutex_multiple_lock_unlock() `test {
+  m := Mutex[int](0);
+  {
+    use guard := m.lock();
+    guard.borrow = 1;
+  }
+  {
+    use guard := m.lock();
+    assert(guard.borrow == 1, "should be 1 after first lock");
+    guard.borrow = 2;
+  }
+  {
+    use guard := m.lock();
+    assert(guard.borrow == 2, "should be 2 after second lock");
+  }
+}
+
+test_mutex_drop_without_use() `test {
+  m := Mutex[int](100);
+  guard := m.lock();
+  assert(guard.borrow == 100, "borrow should be 100");
+  guard.borrow = 200;
+  assert(guard.borrow == 200, "borrow should be 200 after write");
+  // guard is dropped at scope exit — automatically unlocks
+}
+
+test_mutex_bool() `test {
+  m := Mutex[bool](false);
+  use guard := m.lock();
+  assert(guard.borrow == false, "should be false");
+  guard.borrow = true;
+  assert(guard.borrow == true, "should be true after write");
+}
+
+test_mutex_f64() `test {
+  m := Mutex[f64](3.14);
+  use guard := m.lock();
+  assert(guard.borrow == 3.14, "should be 3.14");
+  guard.borrow = 2.718;
+  assert(guard.borrow == 2.718, "should be 2.718 after write");
+}
+
+test_mutex_string() `test {
+  m := Mutex[string]("hello");
+  use guard := m.lock();
+  assert(guard.borrow == "hello", "should be hello");
+  guard.borrow = "world";
+  assert(guard.borrow == "world", "should be world after write");
+}
+
+test_mutex_string_multiple_writes() `test {
+  m := Mutex[string]("a");
+  {
+    use guard := m.lock();
+    guard.borrow = "b";
+    guard.borrow = "c";
+    guard.borrow = "d";
+  }
+  use guard := m.lock();
+  assert(guard.borrow == "d", "should be d after multiple writes");
+}
+
+// Mutex with vector inner type — exercises Mutex.drop calling Vector.drop
+test_mutex_vector_inner() `test {
+  v := [1, 2, 3];
+  m := Mutex[int[]](v);
+  {
+    use guard := m.lock();
+    int[] r = guard.borrow;
+    assert(r.len == 3, "vector should have 3 elements");
+  }
+  // m dropped at scope exit — must drop inner vector without leak
+}
+
+// Mutex with string inner type — exercises Mutex.drop calling promise_string_drop
+test_mutex_string_drop() `test {
+  m := Mutex[string]("owned string");
+  use guard := m.lock();
+  assert(guard.borrow == "owned string", "should read inner string");
+  // guard + m both dropped — no leak
+}
+
+// Multiple Mutex variables in same scope — all get drop flags
+test_mutex_multiple_in_scope() `test {
+  m1 := Mutex[int](1);
+  m2 := Mutex[int](2);
+  {
+    use g1 := m1.lock();
+    use g2 := m2.lock();
+    assert(g1.borrow == 1, "m1 should be 1");
+    assert(g2.borrow == 2, "m2 should be 2");
+  }
+  // Both mutexes dropped at scope exit
+}

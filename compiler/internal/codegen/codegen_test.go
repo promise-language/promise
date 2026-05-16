@@ -19007,3 +19007,126 @@ func TestArcBorrowLoadsValue(t *testing.T) {
 	// Borrow GEPs into the {i64, T} struct at field 1
 	assertContains(t, ir, "getelementptr { i64, i64 }")
 }
+
+// T0156: Mutex[T] constructor allocates {i8* pal_handle, T value} and inits mutex.
+func TestMutexConstructorAllocAndInit(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](42);
+		}
+	`)
+	// Should allocate 16 bytes (i8* mutex handle + i64 value)
+	assertContains(t, ir, "call i8* @pal_alloc(i64 16)")
+	// Should init the PAL mutex
+	assertContains(t, ir, "call i8* @pal_mutex_init()")
+	// Should store the value 42
+	assertContains(t, ir, "store i64 42")
+}
+
+// T0156: Mutex[T] scope cleanup uses drop flag and calls Mutex[int].drop.
+func TestMutexDropFlagAndCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](42);
+		}
+	`)
+	assertContains(t, ir, "%m.dropflag")
+	assertContains(t, ir, `call void @"Mutex[int].drop"(`)
+}
+
+// T0156: Mutex[T].drop function has correct structure: null check, destroy PAL mutex, free.
+func TestMutexDropFunctionBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](42);
+		}
+	`)
+	dropFn := extractFunction(ir, `"Mutex[int].drop"`)
+	if dropFn == "" {
+		t.Fatal("expected Mutex[int].drop function in IR")
+	}
+	// Null check
+	assertContains(t, dropFn, "icmp eq")
+	assertContains(t, dropFn, "null")
+	// PAL mutex destroy
+	assertContains(t, dropFn, "call void @pal_mutex_destroy(")
+	// Free allocation
+	assertContains(t, dropFn, "call void @pal_free(")
+}
+
+// T0156: Mutex.lock() acquires the PAL mutex and allocates a guard.
+func TestMutexLockAcquiresAndAllocatesGuard(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](0);
+			use guard := m.lock();
+		}
+	`)
+	// Should lock the PAL mutex
+	assertContains(t, ir, "call void @pal_mutex_lock(")
+	// Should allocate 8 bytes for the guard
+	assertContains(t, ir, "call i8* @pal_alloc(i64 8)")
+}
+
+// T0156: MutexGuard.borrow getter loads T through the guard's mutex pointer.
+func TestMutexGuardBorrowGetter(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](42);
+			use guard := m.lock();
+			int x = guard.borrow;
+		}
+	`)
+	// Borrow navigates guard → mutex → value via GEPs on {i8*} and {i8*, i64}
+	assertContains(t, ir, "getelementptr { i8* }, { i8* }*")
+	assertContains(t, ir, "getelementptr { i8*, i64 }, { i8*, i64 }*")
+}
+
+// T0156: MutexGuard.borrow setter stores T through the guard's mutex pointer.
+func TestMutexGuardBorrowSetter(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](0);
+			use guard := m.lock();
+			guard.borrow = 99;
+		}
+	`)
+	// Should store 99 through the guard→mutex→value path
+	assertContains(t, ir, "store i64 99")
+}
+
+// T0156: MutexGuard close/drop functions unlock and free.
+func TestMutexGuardCloseUnlocksAndFrees(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](0);
+			use guard := m.lock();
+		}
+	`)
+	closeFn := extractFunction(ir, "MutexGuard.close")
+	if closeFn == "" {
+		t.Fatal("expected MutexGuard.close function in IR")
+	}
+	// Null check
+	assertContains(t, closeFn, "icmp eq")
+	// Unlock
+	assertContains(t, closeFn, "call void @pal_mutex_unlock(")
+	// Free guard
+	assertContains(t, closeFn, "call void @pal_free(")
+}
+
+// T0156: Mutex[string].drop calls promise_string_drop on inner value.
+func TestMutexDropWithStringElement(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[string]("hello");
+		}
+	`)
+	dropFn := extractFunction(ir, `"Mutex[string].drop"`)
+	if dropFn == "" {
+		t.Fatal("expected Mutex[string].drop function in IR")
+	}
+	// Should drop the inner string before destroying the mutex
+	assertContains(t, dropFn, "call void @promise_string_drop(")
+	assertContains(t, dropFn, "call void @pal_mutex_destroy(")
+}

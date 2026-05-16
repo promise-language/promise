@@ -1,0 +1,13 @@
+// std/mutex.pr — Mutual exclusion for safe interior mutability (T0156)
+type Mutex[T] `native `public {
+  new(T value) `native `doc("Create a new Mutex wrapping the given value.");
+  lock() MutexGuard[T] `native `doc("Lock this mutex and return a guard. Blocks until the lock is acquired.");
+  drop(~this) `native `doc("Drop this mutex, destroying the underlying lock and dropping the inner value.");
+}
+
+type MutexGuard[T] `native `public {
+  get borrow T `native `doc("Get the guarded value.");
+  set borrow(T value) `native `doc("Set the guarded value.");
+  close(~this) `native `doc("Unlock the mutex and release this guard.");
+  drop(~this) `native `doc("Drop this guard, unlocking the mutex if still held.");
+}

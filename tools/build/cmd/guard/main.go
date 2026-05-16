@@ -171,6 +171,15 @@ func checkStale(input hookInput) string {
 		}
 	}
 
+	// Stale — allow Edit/Write through. Edit gates are loaded from disk
+	// at runtime (tools/gates/edit_gates.json), so the stale binary's gate
+	// enforcement is still correct. Blocking these creates a deadlock when
+	// the agent needs to fix a compilation error in tools code (T0276).
+	if tool := detectTool(input); tool == "edit" || tool == "write" {
+		fmt.Fprintf(os.Stderr, "guard: stale binary — edit/write gates still enforced (run ./make to rebuild)\n")
+		return ""
+	}
+
 	makeCmd := "./make"
 	if runtime.GOOS == "windows" {
 		makeCmd = ".\\make.cmd"

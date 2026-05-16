@@ -246,11 +246,99 @@ func TestCheckStaleAllowsMake(t *testing.T) {
 		t.Error("expected non-make command to be blocked when stale")
 	}
 
+	// Edit/Write are allowed when stale — gates are loaded from disk at
+	// runtime, so the stale binary's enforcement is still correct (T0276).
 	editInput := hookInput{ToolName: "Edit"}
 	editInput.ToolInput.FilePath = "/tmp/foo.go"
 	editInput.ToolInput.NewString = "hello"
-	if reason := checkStale(editInput); reason == "" {
-		t.Error("expected edit to be blocked when stale")
+	if reason := checkStale(editInput); reason != "" {
+		t.Errorf("expected edit to be allowed when stale, got: %s", reason)
+	}
+
+	writeInput := hookInput{ToolName: "Write"}
+	writeInput.ToolInput.FilePath = "/tmp/bar.go"
+	writeInput.ToolInput.Content = "package main"
+	if reason := checkStale(writeInput); reason != "" {
+		t.Errorf("expected write to be allowed when stale, got: %s", reason)
+	}
+}
+
+func TestDetectTool(t *testing.T) {
+	tests := []struct {
+		name  string
+		input hookInput
+		want  string
+	}{
+		// Explicit ToolName paths.
+		{"bash by name", hookInput{ToolName: "Bash"}, "bash"},
+		{"edit by name", hookInput{ToolName: "Edit"}, "edit"},
+		{"write by name", hookInput{ToolName: "Write"}, "write"},
+		{"skill by name", hookInput{ToolName: "Skill"}, "skill"},
+
+		// Field-based fallback paths.
+		{"bash by field", func() hookInput {
+			h := hookInput{}
+			h.ToolInput.Command = "ls"
+			return h
+		}(), "bash"},
+		{"edit by field", func() hookInput {
+			h := hookInput{}
+			h.ToolInput.NewString = "x"
+			return h
+		}(), "edit"},
+		{"edit by old_string", func() hookInput {
+			h := hookInput{}
+			h.ToolInput.OldString = "x"
+			return h
+		}(), "edit"},
+		{"write by field", func() hookInput {
+			h := hookInput{}
+			h.ToolInput.FilePath = "/tmp/f"
+			h.ToolInput.Content = "data"
+			return h
+		}(), "write"},
+		{"skill by field", func() hookInput {
+			h := hookInput{}
+			h.ToolInput.Skill = "commit"
+			return h
+		}(), "skill"},
+		{"unknown", hookInput{}, "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := detectTool(tt.input); got != tt.want {
+				t.Errorf("detectTool() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckStaleFieldBasedDetection(t *testing.T) {
+	// Verify Edit/Write are allowed when stale even via field-based detection
+	// (no explicit ToolName).
+	old := sourceHash
+	sourceHash = "stale-hash-for-test"
+	defer func() { sourceHash = old }()
+
+	editInput := hookInput{}
+	editInput.ToolInput.FilePath = "/tmp/foo.go"
+	editInput.ToolInput.OldString = "old"
+	editInput.ToolInput.NewString = "new"
+	if reason := checkStale(editInput); reason != "" {
+		t.Errorf("expected field-detected edit to be allowed when stale, got: %s", reason)
+	}
+
+	writeInput := hookInput{}
+	writeInput.ToolInput.FilePath = "/tmp/bar.go"
+	writeInput.ToolInput.Content = "package main"
+	if reason := checkStale(writeInput); reason != "" {
+		t.Errorf("expected field-detected write to be allowed when stale, got: %s", reason)
+	}
+
+	// Unknown tool should still be blocked.
+	unknownInput := hookInput{ToolName: "Read"}
+	if reason := checkStale(unknownInput); reason == "" {
+		t.Error("expected unknown tool to be blocked when stale")
 	}
 }
 
@@ -264,5 +352,105 @@ func TestCheckStaleDevHash(t *testing.T) {
 	input.ToolInput.Command = "git status"
 	if reason := checkStale(input); reason != "" {
 		t.Errorf("expected dev hash to skip stale check, got: %s", reason)
+	}
+}
+
+func TestMatchGlob(t *testing.T) {
+	tests := []struct {
+		pattern, name string
+		want          bool
+	}{
+		{"*", "anything.txt", true},
+		{"*.pr", "test.pr", true},
+		{"*.pr", "test.go", false},
+		{"*.go", "main.go", true},
+		{"*.go", "main.pr", false},
+		{"[invalid", "foo", false}, // invalid glob pattern
+	}
+	for _, tt := range tests {
+		if got := matchGlob(tt.pattern, tt.name); got != tt.want {
+			t.Errorf("matchGlob(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestCheckGo(t *testing.T) {
+	tests := []struct {
+		name    string
+		tokens  []string
+		blocked bool
+	}{
+		{"go test", []string{"go", "test", "./..."}, false},
+		{"go run", []string{"go", "run", "main.go"}, false},
+		{"go install", []string{"go", "install", "github.com/x"}, true},
+		{"go build promise", []string{"go", "build", "-o", "bin/promise", "./cmd/promise"}, true},
+		{"go build bin/", []string{"go", "build", "-o", "bin/foo"}, true},
+		{"go build ./bin/", []string{"go", "build", "-o", "./bin/foo"}, true},
+		{"go build compiler/", []string{"go", "build", "./compiler/"}, true},
+		{"go build other", []string{"go", "build", "-o", "/tmp/myapp", "./myapp"}, false},
+		{"go alone", []string{"go"}, false},
+		{"go build flags only", []string{"go", "build", "-v", "-race"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := checkGo(tt.tokens)
+			if tt.blocked && reason == "" {
+				t.Error("expected blocked")
+			}
+			if !tt.blocked && reason != "" {
+				t.Errorf("unexpected block: %s", reason)
+			}
+		})
+	}
+}
+
+func TestCheckCopy(t *testing.T) {
+	tests := []struct {
+		name    string
+		program string
+		tokens  []string
+		blocked bool
+	}{
+		{"cp to /tmp", "cp", []string{"cp", "a.txt", "/tmp/a.txt"}, false},
+		{"cp to outside", "cp", []string{"cp", "a.txt", "/etc/a.txt"}, true},
+		{"mv to /tmp", "mv", []string{"mv", "a.txt", "/tmp/a.txt"}, false},
+		{"mv to outside", "mv", []string{"mv", "a.txt", "/usr/local/a.txt"}, true},
+		{"cp no dest", "cp", []string{"cp", "a.txt"}, false},
+		{"cp flags only", "cp", []string{"cp", "-r", "a/"}, false},
+		{"cp with -t /tmp", "cp", []string{"cp", "-t", "/tmp", "a.txt"}, false},
+		{"cp with -t outside", "cp", []string{"cp", "-t", "/etc", "a.txt"}, true},
+		{"cp with --target-directory=", "cp", []string{"cp", "--target-directory=/tmp", "a.txt"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := checkCopy(tt.program, tt.tokens)
+			if tt.blocked && reason == "" {
+				t.Error("expected blocked")
+			}
+			if !tt.blocked && reason != "" {
+				t.Errorf("unexpected block: %s", reason)
+			}
+		})
+	}
+}
+
+func TestIsAllowedCopyDest(t *testing.T) {
+	tests := []struct {
+		dest string
+		want bool
+	}{
+		{"/tmp", true},
+		{"/tmp/foo", true},
+		{"/etc/passwd", false},
+		{"~/.promise", true},
+		{"~/.promise/cache", true},
+		{"~/Desktop/foo", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dest, func(t *testing.T) {
+			if got := isAllowedCopyDest(tt.dest); got != tt.want {
+				t.Errorf("isAllowedCopyDest(%q) = %v, want %v", tt.dest, got, tt.want)
+			}
+		})
 	}
 }

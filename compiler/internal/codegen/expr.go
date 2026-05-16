@@ -2602,6 +2602,13 @@ func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) valu
 	// Generate and store value (moved into the Arc)
 	val := c.genCallArgExpr(e.Args[0].Value)
 	c.claimHeapTemp(val)
+	// T0273: Clear drop flag — value is moved into Arc, caller must not double-drop.
+	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+	c.neutralizeForceUnwrapSource(e.Args[0].Value)
+	c.claimStringTemp(val)
+	c.claimEnvTemp(val)
 	valField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldValue))
 	c.block.NewStore(val, valField)
@@ -2812,6 +2819,13 @@ func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) va
 	// Generate and store value (moved into the Mutex)
 	val := c.genCallArgExpr(e.Args[0].Value)
 	c.claimHeapTemp(val)
+	// T0273: Clear drop flag — value is moved into Mutex, caller must not double-drop.
+	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+	c.neutralizeForceUnwrapSource(e.Args[0].Value)
+	c.claimStringTemp(val)
+	c.claimEnvTemp(val)
 	valField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	c.block.NewStore(val, valField)

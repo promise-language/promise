@@ -19324,6 +19324,30 @@ func TestArcConstructorClaimsHeapTemp(t *testing.T) {
 	assertContains(t, dropFn, "call void @pal_free(")
 }
 
+// T0273: Arc[Arc[T]] clears drop flag on inner variable to prevent double-drop.
+func TestArcConstructorClearsDropFlagOnIdent(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			inner := Arc[int](42);
+			outer := Arc[Arc[int]](inner);
+		}
+	`)
+	// The goroutine body should clear inner's drop flag after moving it into Arc.
+	// "store i1 false" is the drop flag clear pattern.
+	assertContains(t, ir, "store i1 false")
+}
+
+// T0273: Mutex[T] constructor clears drop flag on moved variable.
+func TestMutexConstructorClearsDropFlagOnIdent(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](10);
+			m := Mutex[Arc[int]](a);
+		}
+	`)
+	assertContains(t, ir, "store i1 false")
+}
+
 // T0272: Mutex[T].drop calls user type's drop function + pal_free.
 func TestMutexDropWithUserType(t *testing.T) {
 	ir := generateIR(t, `

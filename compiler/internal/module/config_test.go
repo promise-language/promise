@@ -822,3 +822,203 @@ url = "https://example.com/mod.tar.gz"
 		t.Errorf("error = %q, want to contain \"missing 'commit'\"", err.Error())
 	}
 }
+
+func TestSetNamedRequireCommitUpdate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.parser]
+url = "https://github.com/alice/parser"
+commit = "oldcommithash"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetNamedRequireCommit(path, "parser", "newcommithash"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.NamedRequire["parser"]
+	if p == nil {
+		t.Fatal("NamedRequire[parser] is nil")
+	}
+	if p.Commit != "newcommithash" {
+		t.Errorf("parser Commit = %q, want %q", p.Commit, "newcommithash")
+	}
+	if p.URL != "https://github.com/alice/parser" {
+		t.Errorf("parser URL = %q, want %q (should be preserved)", p.URL, "https://github.com/alice/parser")
+	}
+}
+
+func TestSetNamedRequireCommitPreservesOther(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.0"
+
+# A comment about dependencies
+[require.parser]
+url = "https://github.com/alice/parser"
+commit = "oldhash"
+
+[require.utils]
+url = "https://github.com/bob/utils"
+commit = "keepme"
+
+[replace]
+"https://github.com/alice/parser" = "../local-parser"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetNamedRequireCommit(path, "parser", "newhash"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// parser should be updated
+	p := cfg.NamedRequire["parser"]
+	if p == nil {
+		t.Fatal("NamedRequire[parser] is nil")
+	}
+	if p.Commit != "newhash" {
+		t.Errorf("parser Commit = %q, want %q", p.Commit, "newhash")
+	}
+
+	// utils should be untouched
+	u := cfg.NamedRequire["utils"]
+	if u == nil {
+		t.Fatal("NamedRequire[utils] is nil")
+	}
+	if u.Commit != "keepme" {
+		t.Errorf("utils Commit = %q, want %q (should be preserved)", u.Commit, "keepme")
+	}
+
+	// replace should be untouched
+	if cfg.Replace["https://github.com/alice/parser"] != "../local-parser" {
+		t.Error("Replace section was modified")
+	}
+}
+
+func TestSetNamedRequireCommitReadError(t *testing.T) {
+	err := SetNamedRequireCommit("/nonexistent/path/promise.toml", "parser", "abc123")
+	if err == nil {
+		t.Fatal("expected error for nonexistent file, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot read") {
+		t.Errorf("error = %q, want it to contain 'cannot read'", err.Error())
+	}
+}
+
+func TestSetNamedRequireCommitInsertMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	// Section exists with url but no commit line, followed by another section.
+	content := `[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.parser]
+url = "https://github.com/alice/parser"
+
+[require.utils]
+url = "https://github.com/bob/utils"
+commit = "utilshash"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetNamedRequireCommit(path, "parser", "newhash"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.NamedRequire["parser"]
+	if p == nil {
+		t.Fatal("NamedRequire[parser] is nil after insert")
+	}
+	if p.Commit != "newhash" {
+		t.Errorf("parser Commit = %q, want %q", p.Commit, "newhash")
+	}
+	// utils should be untouched
+	u := cfg.NamedRequire["utils"]
+	if u == nil {
+		t.Fatal("NamedRequire[utils] is nil")
+	}
+	if u.Commit != "utilshash" {
+		t.Errorf("utils Commit = %q, want %q", u.Commit, "utilshash")
+	}
+}
+
+func TestSetNamedRequireCommitInsertMissingLastSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	// Section at end of file with url but no commit line.
+	content := `[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.parser]
+url = "https://github.com/alice/parser"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetNamedRequireCommit(path, "parser", "newhash"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.NamedRequire["parser"]
+	if p == nil {
+		t.Fatal("NamedRequire[parser] is nil after insert")
+	}
+	if p.Commit != "newhash" {
+		t.Errorf("parser Commit = %q, want %q", p.Commit, "newhash")
+	}
+	if p.URL != "https://github.com/alice/parser" {
+		t.Errorf("parser URL = %q, want preserved", p.URL)
+	}
+}
+
+func TestSetNamedRequireCommitNotFound(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.0"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := SetNamedRequireCommit(path, "nonexistent", "abc123")
+	if err == nil {
+		t.Fatal("expected error for missing section, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want it to contain 'not found'", err.Error())
+	}
+}

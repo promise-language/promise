@@ -83,5 +83,8 @@ Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 
   promise run file.pr     Compile and run
   promise test file.pr    Run tests
   promise exec '<code>'   Run inline code (failable main, ?^ works)
+  promise add <name>      Add a dependency (catalog name or git URL)
+  promise search <keyword>  Search the catalog for modules
+  promise update [name]   Update dependencies to latest commits
 `)
 }

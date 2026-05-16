@@ -132,6 +132,9 @@ Commands:
   ast       Print the AST
   exec      Execute inline Promise code (auto-wraps in failable main)
   init      Initialize a new Promise project (creates promise.toml)
+  add       Add a dependency by catalog name or git URL
+  search    Search the catalog for modules by keyword
+  update    Update dependency commits to latest (all or one)
   pin       Pin a remote module to a specific commit
   catalog   Catalog operations (list)
   format    Format Promise source files
@@ -285,6 +288,12 @@ func main() {
 		runClean(os.Args[2:])
 	case "pin":
 		runPin(os.Args[2:])
+	case "add":
+		runAdd(os.Args[2:])
+	case "search":
+		runSearch(os.Args[2:])
+	case "update":
+		runUpdate(os.Args[2:])
 	case "install":
 		runInstall(os.Args[2:])
 	case "sync":
@@ -6506,6 +6515,252 @@ func runPin(args []string) {
 	}
 
 	fmt.Printf("Pinned %s → %s\n", url, commitHash[:12])
+}
+
+// runAdd implements the `promise add <name-or-url> [ref]` subcommand.
+// If the first argument matches a catalog name, resolves to its URL.
+// Otherwise treats it as a raw git URL. Writes to promise.toml.
+func runAdd(args []string) {
+	if len(args) < 1 || len(args) > 2 {
+		fmt.Fprintln(os.Stderr, "usage: promise add <name-or-url> [ref]")
+		fmt.Fprintln(os.Stderr, "  name: catalog module name (e.g., json) or git URL")
+		fmt.Fprintln(os.Stderr, "  ref:  tag, branch, commit hash, or HEAD (default: HEAD)")
+		os.Exit(1)
+	}
+
+	nameOrURL := args[0]
+	ref := "HEAD"
+	if len(args) == 2 {
+		ref = args[1]
+	}
+
+	// Find promise.toml
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg, err := module.FindConfig(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if cfg == nil {
+		fmt.Fprintln(os.Stderr, "error: no promise.toml found (run 'promise init' first)")
+		os.Exit(1)
+	}
+
+	// Check catalog
+	cat, err := module.ParseCatalog(embeddedCatalog)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid catalog: %v\n", err)
+		os.Exit(1)
+	}
+
+	url := nameOrURL
+	label := nameOrURL
+	if entry := cat.Lookup(nameOrURL); entry != nil {
+		if entry.IsEmbedded() {
+			fmt.Printf("module '%s' is built-in — use it with: use %s;\n", nameOrURL, nameOrURL)
+			return
+		}
+		url = entry.URL
+		label = fmt.Sprintf("%s (%s)", nameOrURL, url)
+	}
+
+	// Resolve ref to full commit hash
+	fmt.Fprintf(os.Stderr, "Resolving %s @ %s...\n", label, ref)
+	commitHash, err := module.PinResolve(url, ref)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Write to promise.toml
+	tomlPath := filepath.Join(cfg.Dir, "promise.toml")
+	if err := module.SetRequire(tomlPath, url, commitHash); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Added %s → %s\n", label, commitHash[:12])
+}
+
+// runSearch implements the `promise search <keyword>` subcommand.
+// Searches the embedded catalog by module name and description.
+func runSearch(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: promise search <keyword>")
+		os.Exit(1)
+	}
+
+	keyword := strings.ToLower(args[0])
+
+	cat, err := module.ParseCatalog(embeddedCatalog)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid catalog: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Collect matches
+	type match struct {
+		name  string
+		entry *module.CatalogEntry
+	}
+	var matches []match
+	for name, entry := range cat.Modules {
+		if strings.Contains(strings.ToLower(name), keyword) ||
+			strings.Contains(strings.ToLower(entry.Description), keyword) {
+			matches = append(matches, match{name, entry})
+		}
+	}
+
+	if len(matches) == 0 {
+		fmt.Fprintf(os.Stderr, "No modules matching '%s'\n", args[0])
+		return
+	}
+
+	// Sort alphabetically
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].name < matches[j].name
+	})
+
+	for _, m := range matches {
+		source := "embedded"
+		if !m.entry.IsEmbedded() {
+			source = m.entry.URL
+		}
+		fmt.Printf("  %-12s %s\n", m.name, source)
+		if m.entry.Description != "" {
+			fmt.Printf("  %-12s %s\n", "", m.entry.Description)
+		}
+	}
+
+	fmt.Printf("\n%d matching modules\n", len(matches))
+}
+
+// runUpdate implements the `promise update [name|url]` subcommand.
+// Re-resolves the latest commit for require entries and updates promise.toml.
+func runUpdate(args []string) {
+	if len(args) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: promise update [name|url]")
+		fmt.Fprintln(os.Stderr, "  With no arguments, updates all [require] entries.")
+		fmt.Fprintln(os.Stderr, "  With a name or URL, updates only that entry.")
+		os.Exit(1)
+	}
+
+	// Find promise.toml
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg, err := module.FindConfig(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if cfg == nil {
+		fmt.Fprintln(os.Stderr, "error: no promise.toml found (run 'promise init' first)")
+		os.Exit(1)
+	}
+
+	tomlPath := filepath.Join(cfg.Dir, "promise.toml")
+
+	// Build list of entries to update
+	type updateEntry struct {
+		label         string // display label
+		url           string // git URL
+		currentCommit string // current pinned commit
+		named         bool   // true if [require.NAME] entry
+		name          string // NAME for named entries
+	}
+	var entries []updateEntry
+
+	if len(args) == 1 {
+		target := args[0]
+		found := false
+
+		// Check URL-keyed entries
+		normalizedTarget := module.NormalizeURL(target)
+		for url, commit := range cfg.Require {
+			if module.NormalizeURL(url) == normalizedTarget || url == target {
+				entries = append(entries, updateEntry{url, url, commit, false, ""})
+				found = true
+				break
+			}
+		}
+
+		// Check named entries
+		if !found {
+			for name, entry := range cfg.NamedRequire {
+				if name == target || module.NormalizeURL(entry.URL) == normalizedTarget {
+					entries = append(entries, updateEntry{name, entry.URL, entry.Commit, true, name})
+					found = true
+					break
+				}
+			}
+		}
+
+		if !found {
+			fmt.Fprintf(os.Stderr, "error: no [require] entry matching '%s'\n", target)
+			os.Exit(1)
+		}
+	} else {
+		// Update all
+		for url, commit := range cfg.Require {
+			entries = append(entries, updateEntry{url, url, commit, false, ""})
+		}
+		for name, entry := range cfg.NamedRequire {
+			entries = append(entries, updateEntry{name, entry.URL, entry.Commit, true, name})
+		}
+	}
+
+	if len(entries) == 0 {
+		fmt.Println("No [require] entries to update.")
+		return
+	}
+
+	// Sort for stable output
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].label < entries[j].label
+	})
+
+	updated := 0
+	for _, e := range entries {
+		fmt.Fprintf(os.Stderr, "Checking %s...\n", e.label)
+		newCommit, err := module.PinResolve(e.url, "HEAD")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %s: error: %v\n", e.label, err)
+			continue
+		}
+
+		if newCommit == e.currentCommit {
+			fmt.Printf("  %s: already up to date\n", e.label)
+			continue
+		}
+
+		if e.named {
+			if err := module.SetNamedRequireCommit(tomlPath, e.name, newCommit); err != nil {
+				fmt.Fprintf(os.Stderr, "  %s: error: %v\n", e.label, err)
+				continue
+			}
+		} else {
+			if err := module.SetRequire(tomlPath, e.url, newCommit); err != nil {
+				fmt.Fprintf(os.Stderr, "  %s: error: %v\n", e.label, err)
+				continue
+			}
+		}
+
+		oldShort := e.currentCommit
+		if len(oldShort) > 12 {
+			oldShort = oldShort[:12]
+		}
+		fmt.Printf("  %s: %s → %s\n", e.label, oldShort, newCommit[:12])
+		updated++
+	}
+
+	fmt.Printf("\nUpdated %d of %d dependencies\n", updated, len(entries))
 }
 
 func runInit() {

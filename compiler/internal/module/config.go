@@ -327,6 +327,64 @@ func SetRequire(path, url, commitHash string) error {
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
 }
 
+// SetNamedRequireCommit updates the commit field in a [require.NAME] section
+// of the promise.toml file at path. Returns an error if the section doesn't exist.
+func SetNamedRequireCommit(path, name, commitHash string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", path, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	sectionHeader := fmt.Sprintf("[require.%s]", name)
+
+	// Find the [require.NAME] section
+	sectionStart := -1
+	sectionEnd := -1
+	commitLine := -1
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == sectionHeader {
+			sectionStart = i
+			continue
+		}
+		if sectionStart >= 0 && sectionEnd < 0 {
+			if strings.HasPrefix(trimmed, "[") {
+				sectionEnd = i
+				break
+			}
+			if key, _, err := parseTOMLLine(trimmed); err == nil && key == "commit" {
+				commitLine = i
+			}
+		}
+	}
+
+	if sectionStart < 0 {
+		return fmt.Errorf("%s: section [require.%s] not found", path, name)
+	}
+
+	if commitLine >= 0 {
+		lines[commitLine] = fmt.Sprintf("commit = %q", commitHash)
+	} else {
+		// No commit line found — append after last key in section
+		insertAt := len(lines)
+		if sectionEnd >= 0 {
+			insertAt = sectionEnd
+		}
+		for j := insertAt - 1; j > sectionStart; j-- {
+			if strings.TrimSpace(lines[j]) != "" {
+				insertAt = j + 1
+				break
+			}
+		}
+		newLine := fmt.Sprintf("commit = %q", commitHash)
+		lines = append(lines[:insertAt], append([]string{newLine}, lines[insertAt:]...)...)
+	}
+
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+}
+
 // IsLocalPath returns true if the location string refers to a local module.
 func IsLocalPath(location string) bool {
 	if strings.HasPrefix(location, "./") || strings.HasPrefix(location, "../") {

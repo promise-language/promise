@@ -7196,6 +7196,27 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 			return envFieldDrop{envDropCallFn, fn}
 		}
 	}
+	// Arc/Weak/Mutex/MutexGuard → call per-element-type drop function (i8* field, same pattern as string/vector/channel)
+	if elemType, ok := types.AsArc(typ); ok || (named != nil && named == types.TypArc) {
+		if ok {
+			return envFieldDrop{envDropCallFn, c.getOrCreateArcDrop(elemType)}
+		}
+	}
+	if elemType, ok := types.AsWeak(typ); ok || (named != nil && named == types.TypWeak) {
+		if ok {
+			return envFieldDrop{envDropCallFn, c.getOrCreateWeakDrop(elemType)}
+		}
+	}
+	if elemType, ok := types.AsMutex(typ); ok || (named != nil && named == types.TypMutex) {
+		if ok {
+			return envFieldDrop{envDropCallFn, c.getOrCreateMutexDrop(elemType)}
+		}
+	}
+	if _, ok := types.AsMutexGuard(typ); ok || (named != nil && named == types.TypMutexGuard) {
+		if fn := c.funcs["MutexGuard.drop"]; fn != nil {
+			return envFieldDrop{envDropCallFn, fn}
+		}
+	}
 
 	// Closure (Signature) → free inner env
 	if _, ok := typ.(*types.Signature); ok {

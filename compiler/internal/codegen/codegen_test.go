@@ -19376,3 +19376,64 @@ func TestMutexDropWithSynthDropUserType(t *testing.T) {
 	assertContains(t, dropFn, "call void @Named.drop(")
 	assertContains(t, dropFn, "call void @pal_mutex_destroy(")
 }
+
+// T0271: Lambda capturing Arc[T] uses envDropCallFn (i8* + drop fn), not envDropUserValueDrop.
+func TestLambdaEnvDropArcCapture(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+			f := move || -> int { return a.borrow; };
+			f();
+		}
+	`)
+	// The env drop function should call Arc[int].drop on the i8* field,
+	// not extract a {i8*, i8*} value struct (which would be type confusion).
+	assertContains(t, ir, `call void @"Arc[int].drop"(`)
+}
+
+// T0271: Lambda capturing Weak[T] uses envDropCallFn.
+func TestLambdaEnvDropWeakCapture(t *testing.T) {
+	ir := generateIR(t, `
+		check(Weak[int] w) bool {
+			if upgraded := w.upgrade() {
+				return true;
+			}
+			return false;
+		}
+		main() {
+			a := Arc[int](42);
+			w := a.downgrade();
+			f := move || -> bool { return check(w.clone()); };
+			f();
+		}
+	`)
+	assertContains(t, ir, `call void @"Weak[int].drop"(`)
+}
+
+// T0271: Lambda capturing Mutex[T] uses envDropCallFn.
+func TestLambdaEnvDropMutexCapture(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](10);
+			f := move || -> int {
+				use g := m.lock();
+				return g.borrow;
+			};
+			f();
+		}
+	`)
+	assertContains(t, ir, `call void @"Mutex[int].drop"(`)
+}
+
+// T0271: Lambda capturing MutexGuard uses envDropCallFn with MutexGuard.drop.
+func TestLambdaEnvDropMutexGuardCapture(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](10);
+			use g := m.lock();
+			f := move || -> int { return g.borrow; };
+			f();
+		}
+	`)
+	assertContains(t, ir, "call void @MutexGuard.drop(")
+}

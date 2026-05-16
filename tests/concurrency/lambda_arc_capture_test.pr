@@ -1,0 +1,64 @@
+// T0271: Lambda env drop correctly handles Arc/Weak/Mutex captures.
+// These types are i8* pointers that need envDropCallFn, not envDropUserValueDrop.
+lambda_captures_arc() `test {
+  a := Arc[int](42);
+  f := move || -> int {
+    return a.borrow;
+  };
+  result := f();
+  assert(result == 42, "arc capture value");
+}
+
+lambda_captures_arc_clone_before() `test {
+  a := Arc[int](10);
+  b := a.clone();
+  f := move || -> int {
+    return a.borrow;
+  };
+  result := f();
+  assert(result == 10, "arc capture after clone");
+  assert(b.borrow == 10, "clone still valid");
+}
+
+lambda_captures_weak() `test {
+  a := Arc[int](99);
+  w := a.downgrade();
+  f := move || -> bool {
+    if upgraded := w.upgrade() {
+      return upgraded.borrow == 99;
+    }
+    return false;
+  };
+  result := f();
+  assert(result, "weak upgrade in lambda");
+}
+
+lambda_captures_mutex() `test {
+  m := Mutex[int](7);
+  f := move || -> int {
+    use g := m.lock();
+    return g.borrow;
+  };
+  result := f();
+  assert(result == 7, "mutex capture value");
+}
+
+lambda_captures_arc_and_weak() `test {
+  a := Arc[int](55);
+  w := a.downgrade();
+  f := move || -> bool {
+    if upgraded := w.upgrade() {
+      return upgraded.borrow == a.borrow;
+    }
+    return false;
+  };
+  result := f();
+  assert(result, "arc and weak in same lambda");
+}
+
+lambda_captures_arc_drop_only() `test {
+  a := Arc[int](100);
+  f := move || {
+  };
+  f();
+}

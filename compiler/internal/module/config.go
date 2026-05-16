@@ -8,13 +8,20 @@ import (
 	"strings"
 )
 
+// RequireEntry describes a named dependency in [require.NAME] sections.
+type RequireEntry struct {
+	URL    string // git URL for the module
+	Commit string // pinned commit hash
+}
+
 // Config represents the parsed contents of a promise.toml file.
 type Config struct {
-	Name    string            // module name
-	Epoch   string            // catalog epoch, e.g. "2026.0"
-	Require map[string]string // remote URL → commit hash
-	Replace map[string]string // URL or catalog name → local path
-	Dir     string            // directory containing promise.toml
+	Name         string                   // module name
+	Epoch        string                   // catalog epoch, e.g. "2026.0"
+	Require      map[string]string        // remote URL → commit hash
+	NamedRequire map[string]*RequireEntry // local import name → {url, commit}
+	Replace      map[string]string        // URL or catalog name → local path
+	Dir          string                   // directory containing promise.toml
 }
 
 // FindConfig walks up from dir until it finds a promise.toml file.
@@ -52,11 +59,14 @@ func ParseConfig(path string) (*Config, error) {
 	defer f.Close()
 
 	cfg := &Config{
-		Require: make(map[string]string),
-		Replace: make(map[string]string),
+		Require:      make(map[string]string),
+		NamedRequire: make(map[string]*RequireEntry),
+		Replace:      make(map[string]string),
 	}
 
 	var section string
+	var namedReqName string // current [require.NAME] entry name
+	var namedReqEntry *RequireEntry
 	scanner := bufio.NewScanner(f)
 	lineNum := 0
 	for scanner.Scan() {
@@ -74,6 +84,18 @@ func ParseConfig(path string) (*Config, error) {
 				return nil, fmt.Errorf("%s:%d: invalid section header: %s", path, lineNum, line)
 			}
 			section = line[1 : len(line)-1]
+			namedReqName = ""
+			namedReqEntry = nil
+
+			// Check for [require.NAME] pattern
+			if strings.HasPrefix(section, "require.") {
+				namedReqName = section[len("require."):]
+				if namedReqName == "" {
+					return nil, fmt.Errorf("%s:%d: empty name in section [%s]", path, lineNum, section)
+				}
+				namedReqEntry = &RequireEntry{}
+				cfg.NamedRequire[namedReqName] = namedReqEntry
+			}
 			continue
 		}
 
@@ -83,8 +105,15 @@ func ParseConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("%s:%d: %w", path, lineNum, err)
 		}
 
-		switch section {
-		case "module":
+		switch {
+		case namedReqEntry != nil:
+			switch key {
+			case "url":
+				namedReqEntry.URL = val
+			case "commit":
+				namedReqEntry.Commit = val
+			}
+		case section == "module":
 			switch key {
 			case "name":
 				cfg.Name = val
@@ -93,9 +122,9 @@ func ParseConfig(path string) (*Config, error) {
 			default:
 				// Forward compatibility: ignore unknown keys
 			}
-		case "require":
+		case section == "require":
 			cfg.Require[key] = val
-		case "replace":
+		case section == "replace":
 			cfg.Replace[key] = val
 		default:
 			// Forward compatibility: ignore unknown sections
@@ -108,6 +137,19 @@ func ParseConfig(path string) (*Config, error) {
 
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("%s: missing [module] name", path)
+	}
+
+	// Validate named require entries: url and commit must both be present.
+	for name, entry := range cfg.NamedRequire {
+		if entry.URL == "" && entry.Commit == "" {
+			return nil, fmt.Errorf("%s: [require.%s] missing 'url' and 'commit'", path, name)
+		}
+		if entry.URL != "" && entry.Commit == "" {
+			return nil, fmt.Errorf("%s: [require.%s] has 'url' but missing 'commit'", path, name)
+		}
+		if entry.URL == "" && entry.Commit != "" {
+			return nil, fmt.Errorf("%s: [require.%s] has 'commit' but missing 'url'", path, name)
+		}
 	}
 
 	return cfg, nil

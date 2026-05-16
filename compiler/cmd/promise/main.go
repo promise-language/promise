@@ -5080,6 +5080,9 @@ type moduleLoader struct {
 	// projectCfg is the root project's parsed promise.toml.
 	// Provides [require] pins and [replace] overrides for remote modules.
 	projectCfg *module.Config
+	// namedRequire maps import name → {url, commit} from [require.NAME] sections.
+	// These allow non-catalog git dependencies to be imported by local name.
+	namedRequire map[string]*module.RequireEntry
 	// loaded caches fully loaded modules by absolute directory path.
 	// This prevents re-loading the same module when multiple consumers import it.
 	loaded map[string]*sema.ModuleInfo
@@ -5145,9 +5148,15 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 
 	// Build initial commit pins from the root project's [require] section.
 	commitPins := make(map[string]string)
+	namedRequire := make(map[string]*module.RequireEntry)
 	if projectCfg != nil {
 		for url, pin := range projectCfg.Require {
 			commitPins[module.NormalizeURL(url)] = pin
+		}
+		// Add commit pins from named require entries ([require.NAME] sections).
+		for name, entry := range projectCfg.NamedRequire {
+			commitPins[module.NormalizeURL(entry.URL)] = entry.Commit
+			namedRequire[name] = entry
 		}
 	}
 
@@ -5162,9 +5171,18 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 		catalog = cat
 	}
 
+	// Validate: named require entries must not conflict with catalog module names.
+	for name := range namedRequire {
+		if catalog != nil && catalog.Lookup(name) != nil {
+			fmt.Fprintf(os.Stderr, "error: [require.%s] conflicts with catalog module '%s'\n", name, name)
+			os.Exit(1)
+		}
+	}
+
 	loader := &moduleLoader{
 		projectRoot:      projectRoot,
 		projectCfg:       projectCfg,
+		namedRequire:     namedRequire,
 		loaded:           make(map[string]*sema.ModuleInfo),
 		globalIdentities: make(map[string]string),
 		visiting:         make(map[string]string),
@@ -5179,10 +5197,17 @@ func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (
 	scopes := make(map[string]*types.Scope)
 	for _, u := range file.Uses {
 		if u.Path == "" {
-			// Catalog import — look up in embedded catalog
-			modInfo, err := loader.loadCatalog(u.CatalogName)
+			// Check named require entries before catalog lookup.
+			// This allows `use parser;` to resolve to a [require.parser] entry.
+			var modInfo *sema.ModuleInfo
+			var err error
+			if entry, ok := loader.namedRequire[u.CatalogName]; ok {
+				modInfo, err = loader.loadRemote(entry.URL, u.CatalogName)
+			} else {
+				modInfo, err = loader.loadCatalog(u.CatalogName)
+			}
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s: error loading catalog module '%s': %v\n", filename, u.CatalogName, err)
+				fmt.Fprintf(os.Stderr, "%s: error loading module '%s': %v\n", filename, u.CatalogName, err)
 				os.Exit(1)
 			}
 			if modInfo != nil {
@@ -5688,8 +5713,14 @@ func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]
 	scopes := make(map[string]*types.Scope)
 	for _, u := range file.Uses {
 		if u.Path == "" {
-			// Catalog import
-			depInfo, err := ml.loadCatalog(u.CatalogName)
+			// Check named require entries before catalog lookup.
+			var depInfo *sema.ModuleInfo
+			var err error
+			if entry, ok := ml.namedRequire[u.CatalogName]; ok {
+				depInfo, err = ml.loadRemote(entry.URL, u.CatalogName)
+			} else {
+				depInfo, err = ml.loadCatalog(u.CatalogName)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("in module '%s': %w", parentPath, err)
 			}

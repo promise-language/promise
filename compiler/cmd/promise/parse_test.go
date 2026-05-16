@@ -856,9 +856,14 @@ func testModuleLoader(projectDir string) *moduleLoader {
 
 func testModuleLoaderWithConfig(projectDir string, cfg *module.Config) *moduleLoader {
 	commitPins := make(map[string]string)
+	namedRequire := make(map[string]*module.RequireEntry)
 	if cfg != nil {
 		for url, pin := range cfg.Require {
 			commitPins[module.NormalizeURL(url)] = pin
+		}
+		for name, entry := range cfg.NamedRequire {
+			commitPins[module.NormalizeURL(entry.URL)] = entry.Commit
+			namedRequire[name] = entry
 		}
 	}
 	var cat *module.Catalog
@@ -870,6 +875,7 @@ func testModuleLoaderWithConfig(projectDir string, cfg *module.Config) *moduleLo
 	return &moduleLoader{
 		projectRoot:      projectDir,
 		projectCfg:       cfg,
+		namedRequire:     namedRequire,
 		loaded:           make(map[string]*sema.ModuleInfo),
 		globalIdentities: make(map[string]string),
 		visiting:         make(map[string]string),
@@ -1740,6 +1746,112 @@ b_func() int `+"`"+`public { return 2; }
 	sharedNorm := module.NormalizeURL("github.com/shared/lib")
 	if pin := loader.commitPins[sharedNorm]; pin != "ccccccc" {
 		t.Errorf("expected top-level pin 'ccccccc', got %q", pin)
+	}
+}
+
+// TestNamedRequireDispatch verifies that a [require.NAME] entry routes
+// through loadRemote with the correct URL (using [replace] for local resolution).
+func TestNamedRequireDispatch(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create local module directory
+	modDir := filepath.Join(projectDir, "local-parser")
+	os.MkdirAll(modDir, 0755)
+	os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
+[module]
+name = "parser"
+epoch = "2026.0"
+`), 0644)
+	os.WriteFile(filepath.Join(modDir, "parser.pr"), []byte(`
+parse(int x) int `+"`"+`public { return x + 1; }
+`), 0644)
+
+	cfg := &module.Config{
+		Name:    "myproject",
+		Epoch:   "2026.0",
+		Dir:     projectDir,
+		Require: map[string]string{},
+		NamedRequire: map[string]*module.RequireEntry{
+			"parser": {
+				URL:    "https://github.com/alice/parser",
+				Commit: "a1b2c3d",
+			},
+		},
+		Replace: map[string]string{
+			"github.com/alice/parser": "./local-parser",
+		},
+	}
+
+	loader := testModuleLoaderWithConfig(projectDir, cfg)
+
+	// Verify namedRequire is populated
+	if entry, ok := loader.namedRequire["parser"]; !ok {
+		t.Fatal("namedRequire[parser] not populated")
+	} else if entry.URL != "https://github.com/alice/parser" {
+		t.Errorf("namedRequire[parser].URL = %q", entry.URL)
+	}
+
+	// Verify commit pin was added from named require entry
+	norm := module.NormalizeURL("https://github.com/alice/parser")
+	if pin := loader.commitPins[norm]; pin != "a1b2c3d" {
+		t.Errorf("commitPins[%s] = %q, want %q", norm, pin, "a1b2c3d")
+	}
+
+	// Simulate the dispatch: loadRemote with the named require URL
+	// (same call loadModuleScopes/loadDeps would make)
+	modInfo, err := loader.loadRemote("https://github.com/alice/parser", "parser")
+	if err != nil {
+		t.Fatalf("loadRemote via named require: %v", err)
+	}
+	if modInfo == nil {
+		t.Fatal("expected non-nil ModuleInfo")
+	}
+	if modInfo.CanonicalName != "parser" {
+		t.Errorf("CanonicalName = %q, want %q", modInfo.CanonicalName, "parser")
+	}
+}
+
+// TestNamedRequireCommitPins verifies that named require entries contribute
+// to commitPins the same way as URL-keyed [require] entries.
+func TestNamedRequireCommitPins(t *testing.T) {
+	projectDir := t.TempDir()
+
+	cfg := &module.Config{
+		Name:  "myproject",
+		Epoch: "2026.0",
+		Dir:   projectDir,
+		Require: map[string]string{
+			"github.com/foo/bar": "aaa1111",
+		},
+		NamedRequire: map[string]*module.RequireEntry{
+			"parser": {
+				URL:    "https://github.com/alice/parser",
+				Commit: "bbb2222",
+			},
+			"utils": {
+				URL:    "git://github.com/bob/utils.git",
+				Commit: "ccc3333",
+			},
+		},
+		Replace: map[string]string{},
+	}
+
+	loader := testModuleLoaderWithConfig(projectDir, cfg)
+
+	// All three should have normalized commit pins
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"github.com/foo/bar", "aaa1111"},
+		{"https://github.com/alice/parser", "bbb2222"},
+		{"git://github.com/bob/utils.git", "ccc3333"},
+	}
+	for _, tt := range tests {
+		norm := module.NormalizeURL(tt.url)
+		if got := loader.commitPins[norm]; got != tt.want {
+			t.Errorf("commitPins[%s] = %q, want %q", norm, got, tt.want)
+		}
 	}
 }
 

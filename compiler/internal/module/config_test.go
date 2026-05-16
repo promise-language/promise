@@ -3,6 +3,7 @@ package module
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -385,6 +386,262 @@ epoch = "2026.0"
 	}
 	if got := cfg.Require["github.com/baz/qux"]; got != "hash2" {
 		t.Errorf("Require[baz/qux] = %q, want %q", got, "hash2")
+	}
+}
+
+func TestParseConfigNamedRequire(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.parser]
+url = "https://github.com/alice/parser"
+commit = "a1b2c3d"
+
+[require.utils]
+url = "https://github.com/bob/utils"
+commit = "e4f5a6b"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cfg.NamedRequire) != 2 {
+		t.Fatalf("NamedRequire has %d entries, want 2", len(cfg.NamedRequire))
+	}
+	p := cfg.NamedRequire["parser"]
+	if p == nil {
+		t.Fatal("NamedRequire[parser] is nil")
+	}
+	if p.URL != "https://github.com/alice/parser" {
+		t.Errorf("parser URL = %q, want %q", p.URL, "https://github.com/alice/parser")
+	}
+	if p.Commit != "a1b2c3d" {
+		t.Errorf("parser Commit = %q, want %q", p.Commit, "a1b2c3d")
+	}
+	u := cfg.NamedRequire["utils"]
+	if u == nil {
+		t.Fatal("NamedRequire[utils] is nil")
+	}
+	if u.URL != "https://github.com/bob/utils" {
+		t.Errorf("utils URL = %q, want %q", u.URL, "https://github.com/bob/utils")
+	}
+	if u.Commit != "e4f5a6b" {
+		t.Errorf("utils Commit = %q, want %q", u.Commit, "e4f5a6b")
+	}
+}
+
+func TestParseConfigNamedRequireMissingURL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.parser]
+commit = "a1b2c3d"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseConfig(path)
+	if err == nil {
+		t.Fatal("expected error for missing url")
+	}
+	if !strings.Contains(err.Error(), "missing 'url'") {
+		t.Errorf("error = %q, want to contain 'missing url'", err.Error())
+	}
+}
+
+func TestParseConfigNamedRequireMissingCommit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.parser]
+url = "https://github.com/alice/parser"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseConfig(path)
+	if err == nil {
+		t.Fatal("expected error for missing commit")
+	}
+	if !strings.Contains(err.Error(), "missing 'commit'") {
+		t.Errorf("error = %q, want to contain 'missing commit'", err.Error())
+	}
+}
+
+func TestParseConfigNamedRequireEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.]
+url = "https://github.com/alice/parser"
+commit = "a1b2c3d"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseConfig(path)
+	if err == nil {
+		t.Fatal("expected error for empty name")
+	}
+	if !strings.Contains(err.Error(), "empty name") {
+		t.Errorf("error = %q, want to contain 'empty name'", err.Error())
+	}
+}
+
+func TestParseConfigNamedRequireBothMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.parser]
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseConfig(path)
+	if err == nil {
+		t.Fatal("expected error for missing url and commit")
+	}
+	if !strings.Contains(err.Error(), "missing 'url' and 'commit'") {
+		t.Errorf("error = %q, want to contain \"missing 'url' and 'commit'\"", err.Error())
+	}
+}
+
+func TestParseConfigNamedRequireUnknownKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.parser]
+url = "https://github.com/alice/parser"
+commit = "a1b2c3d"
+future_key = "ignored"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.NamedRequire["parser"]
+	if p == nil {
+		t.Fatal("NamedRequire[parser] is nil")
+	}
+	if p.URL != "https://github.com/alice/parser" {
+		t.Errorf("parser URL = %q, want %q", p.URL, "https://github.com/alice/parser")
+	}
+	if p.Commit != "a1b2c3d" {
+		t.Errorf("parser Commit = %q, want %q", p.Commit, "a1b2c3d")
+	}
+}
+
+func TestParseConfigNamedRequireSectionReset(t *testing.T) {
+	// Verify that switching from [require.NAME] to [replace] resets context
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require.parser]
+url = "https://github.com/alice/parser"
+commit = "a1b2c3d"
+
+[replace]
+"https://github.com/alice/parser" = "../local-parser"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.NamedRequire["parser"]
+	if p == nil {
+		t.Fatal("NamedRequire[parser] is nil")
+	}
+	if p.URL != "https://github.com/alice/parser" {
+		t.Errorf("parser URL = %q", p.URL)
+	}
+	if cfg.Replace["https://github.com/alice/parser"] != "../local-parser" {
+		t.Errorf("Replace not parsed correctly after [require.NAME] section")
+	}
+}
+
+func TestParseConfigMixedRequire(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `
+[module]
+name = "myapp"
+epoch = "2026.0"
+
+[require]
+"https://github.com/someone/other" = "deadbeef"
+
+[require.parser]
+url = "https://github.com/alice/parser"
+commit = "a1b2c3d"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// URL-keyed require
+	if cfg.Require["https://github.com/someone/other"] != "deadbeef" {
+		t.Errorf("Require[other] = %q, want %q", cfg.Require["https://github.com/someone/other"], "deadbeef")
+	}
+	// Named require
+	p := cfg.NamedRequire["parser"]
+	if p == nil {
+		t.Fatal("NamedRequire[parser] is nil")
+	}
+	if p.URL != "https://github.com/alice/parser" {
+		t.Errorf("parser URL = %q, want %q", p.URL, "https://github.com/alice/parser")
+	}
+	if p.Commit != "a1b2c3d" {
+		t.Errorf("parser Commit = %q, want %q", p.Commit, "a1b2c3d")
 	}
 }
 

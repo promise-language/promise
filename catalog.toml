@@ -36,6 +36,9 @@ url = "ssh://hfe/git/promise_wasi.git"
 commit = "0acbef489f67a2825542e4554d1c41f9eb120b81"
 description = "WASI Preview 1 raw bindings: errno/flags/enums plus extern function declarations (target(wasi) only; function calls pending T0283)"
 
+[modules.wasi_preview_2]
+description = "WASI Preview 2 bindings: random, clocks, I/O, CLI, filesystem (target(wasi) only)"
+
 # Planned modules — not yet implemented, design in modules/<name>/plan.md
 
 [modules.term]

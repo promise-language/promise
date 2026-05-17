@@ -39,9 +39,16 @@ test_select_send_concurrent_race() `test(exclude: "wasm32") {
   go {
     sleep(Duration.from_millis(50));
     <-ch; // drain — wakes select's SWN
-    ch.send(99); // race to re-fill before select re-locks
-    sleep(Duration.from_millis(50));
-    <-ch; // drain again so select can succeed on retry
+    select {
+      ch.send(99): {
+          // race to re-fill before select re-locks
+          sleep(Duration.from_millis(50));
+          <-ch; // drain again so select can succeed on retry
+        }
+      default: {
+        }
+        // select already sent 42 — exit cleanly
+    }
   };
 
   // Select blocks on send case; after wake, must re-check fullness.

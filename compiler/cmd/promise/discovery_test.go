@@ -164,7 +164,7 @@ func TestAddNoPromiseToml(t *testing.T) {
 
 func TestAddCatalogResolvesToURL(t *testing.T) {
 	// Create a local bare git repo to act as the "remote"
-	bareDir := t.TempDir()
+	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
 	projDir := t.TempDir()
 
@@ -308,7 +308,7 @@ func TestUpdateNotFound(t *testing.T) {
 
 func TestUpdateURLKeyedEntry(t *testing.T) {
 	// Create a local bare git repo with two commits
-	bareDir := t.TempDir()
+	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
 	projDir := t.TempDir()
 
@@ -378,7 +378,7 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 
 func TestUpdateSpecificTarget(t *testing.T) {
 	// Test updating a specific URL-keyed entry by URL
-	bareDir := t.TempDir()
+	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
 	projDir := t.TempDir()
 
@@ -427,7 +427,7 @@ func TestUpdateSpecificTarget(t *testing.T) {
 
 func TestAddWithCustomRef(t *testing.T) {
 	// Test the len(args)==2 path with a custom ref
-	bareDir := t.TempDir()
+	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
 	projDir := t.TempDir()
 
@@ -503,7 +503,7 @@ func TestSearchUsageError(t *testing.T) {
 
 func TestUpdateNamedEntry(t *testing.T) {
 	// Test updating a [require.NAME] entry when HEAD has moved forward
-	bareDir := t.TempDir()
+	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
 	projDir := t.TempDir()
 
@@ -572,7 +572,7 @@ func TestUpdateNamedEntry(t *testing.T) {
 
 func TestUpdateAlreadyCurrent(t *testing.T) {
 	// Create a local bare git repo
-	bareDir := t.TempDir()
+	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
 	projDir := t.TempDir()
 

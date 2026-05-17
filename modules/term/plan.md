@@ -1,4 +1,4 @@
-# Promise `console` Module — API Proposal
+# Promise `term` Module — API Proposal
 
 ## Motivation
 
@@ -7,7 +7,7 @@ for building interactive terminal applications. To write a TUI app you need: raw
 (unbuffered, unechoed input), cursor positioning, styled text, screen clearing, alternate
 screen buffers, and structured input events (keys, mouse, resize). Every major systems
 language provides these — curses in C/Python, crossterm/termion in Rust, tcell/bubbletea in
-Go. Promise needs a `console` module to match.
+Go. Promise needs a `term` module to match.
 
 ### Design Principles
 
@@ -25,21 +25,21 @@ Go. Promise needs a `console` module to match.
 ## Quick Start
 
 ```
-use console;
+use term;
 
 main()! {
   // use-binding: restores terminal state when screen goes out of scope
-  use screen := console.Screen.open();
+  use screen := term.Screen.open();
 
   screen.clear();
-  screen.write(Point(0, 0), "Hello, TUI!", style: console.Style.default());
+  screen.write(Point(0, 0), "Hello, TUI!", style: term.Style.default());
   screen.show();
 
   // Block for one event
-  console.Event event = screen.poll_event();
+  term.Event event = screen.poll_event();
   match event {
-    console.Event.Key(k) => {
-      screen.write(Point(0, 1), "You pressed: {k.name}", style: console.Style.default());
+    term.Event.Key(k) => {
+      screen.write(Point(0, 1), "You pressed: {k.name}", style: term.Style.default());
     },
     _ => {},
   }
@@ -53,7 +53,7 @@ main()! {
 ## Assumed `std` Geometry Types
 
 These types live in `std` (auto-imported, no `use` needed) and are shared across
-modules. The console module uses `Point[int]`, `Size[int]`, and `Rect[int]`
+modules. The term module uses `Point[int]`, `Size[int]`, and `Rect[int]`
 throughout its API.
 
 ```
@@ -80,10 +80,10 @@ type Rect[T] `public {
 ## Module Overview
 
 ```
-use console;
+use term;
 ```
 
-The `console` module exports the following public types and functions.
+The `term` module exports the following public types and functions.
 It also relies on `Point[int]`, `Size[int]`, and `Rect[int]` from `std`.
 
 | Type / Function          | Purpose                                               |
@@ -253,16 +253,16 @@ to enable colors, progress bars, or interactive prompts. Equivalent to Rust's
 // Check if a file descriptor is a terminal.
 // Defaults to stdout (fd 1), the most common use.
 // 0 = stdin, 1 = stdout, 2 = stderr.
-console.is_terminal(int fd = 1) bool;
+term.is_terminal(int fd = 1) bool;
 ```
 
 Usage:
 
 ```
-use console;
+use term;
 
 main() {
-  if console.is_terminal() {
+  if term.is_terminal() {
     print_line("\x1b[32mGreen text!\x1b[0m");   // safe to use ANSI colors (checks stdout)
   } else {
     print_line("Plain text");                    // piped, no escapes
@@ -318,9 +318,9 @@ type Style `public {
 
 ```
 // Styles are value types — chain freely, pass around cheaply
-title_style := console.Style.default().foreground(console.Color.Yellow).bold();
-error_style := console.Style.default().foreground(console.Color.Red).background(console.Color.Black).bold();
-subtle      := console.Style.default().foreground(console.Color.rgb(128, 128, 128)).dim();
+title_style := term.Style.default().foreground(term.Color.Yellow).bold();
+error_style := term.Style.default().foreground(term.Color.Red).background(term.Color.Black).bold();
+subtle      := term.Style.default().foreground(term.Color.rgb(128, 128, 128)).dim();
 
 screen.write(Point(0, 0), "WARNING", style: error_style);
 ```
@@ -535,27 +535,27 @@ enum CursorShape `public {
 ### Simple blocking loop
 
 ```
-use console;
+use term;
 
 main()! {
-  use screen := console.Screen.open();
+  use screen := term.Screen.open();
   screen.clear();
 
   bool running = true;
   while running {
-    screen.write(Point(0, 0), "Press 'q' to quit", style: console.Style.default());
+    screen.write(Point(0, 0), "Press 'q' to quit", style: term.Style.default());
     screen.show();
 
-    console.Event event = screen.poll_event();
+    term.Event event = screen.poll_event();
     match event {
-      console.Event.Key(k) => {
+      term.Event.Key(k) => {
         match k.code {
-          console.Key.Char('q') => { running = false; },
-          console.Key.Escape    => { running = false; },
+          term.Key.Char('q') => { running = false; },
+          term.Key.Escape    => { running = false; },
           _ => {},
         }
       },
-      console.Event.Resize(_) => {
+      term.Event.Resize(_) => {
         screen.show(full: true);  // full redraw after resize
       },
       _ => {},
@@ -570,36 +570,36 @@ Separates input from rendering using Promise's concurrency primitives — this m
 how tcell recommends using `PollEvent` inside a goroutine.
 
 ```
-use console;
+use term;
 
 main()! {
-  use screen := console.Screen.open();
+  use screen := term.Screen.open();
   screen.enable_mouse();
 
   // events() spawns a reader goroutine, returns channel[Event]
-  channel[console.Event] events = screen.events();
+  channel[term.Event] events = screen.events();
 
   // Application state
   cursor := Point(0, 0);
 
   for event in events {
     match event {
-      console.Event.Key(k) => {
+      term.Event.Key(k) => {
         match k.code {
-          console.Key.Char('q') => { break; },
-          console.Key.Up        => { if cursor.y > 0 { cursor.y -= 1; } },
-          console.Key.Down      => { cursor.y += 1; },
-          console.Key.Left      => { if cursor.x > 0 { cursor.x -= 1; } },
-          console.Key.Right     => { cursor.x += 1; },
+          term.Key.Char('q') => { break; },
+          term.Key.Up        => { if cursor.y > 0 { cursor.y -= 1; } },
+          term.Key.Down      => { cursor.y += 1; },
+          term.Key.Left      => { if cursor.x > 0 { cursor.x -= 1; } },
+          term.Key.Right     => { cursor.x += 1; },
           _ => {},
         }
       },
-      console.Event.Mouse(m) => {
-        if m.action is console.MouseAction.Press {
+      term.Event.Mouse(m) => {
+        if m.action is term.MouseAction.Press {
           cursor = m.pos;
         }
       },
-      console.Event.Resize(_) => {
+      term.Event.Resize(_) => {
         screen.show(full: true);
       },
       _ => {},
@@ -607,7 +607,7 @@ main()! {
 
     // Redraw
     screen.clear();
-    screen.write(Point(0, 0), "Pos: ({cursor.x}, {cursor.y})", style: console.Style.default());
+    screen.write(Point(0, 0), "Pos: ({cursor.x}, {cursor.y})", style: term.Style.default());
     screen.set_cursor(cursor);
     screen.show();
   }
@@ -617,11 +617,11 @@ main()! {
 ### Select with timers (animation / polling)
 
 ```
-use console;
+use term;
 
 main()! {
-  use screen := console.Screen.open();
-  channel[console.Event] events = screen.events();
+  use screen := term.Screen.open();
+  channel[term.Event] events = screen.events();
   tick := channel[bool](capacity: 1);
 
   // Tick every 100ms
@@ -638,15 +638,15 @@ main()! {
     select {
       event := <-events:
         match event {
-          console.Event.Key(k) => {
-            if k.code is console.Key.Char('q') { return; }
+          term.Event.Key(k) => {
+            if k.code is term.Key.Char('q') { return; }
           },
           _ => {},
         }
       _ := <-tick:
         frame += 1;
         screen.clear();
-        screen.write(Point(0, 0), "Frame: {frame}", style: console.Style.default());
+        screen.write(Point(0, 0), "Frame: {frame}", style: term.Style.default());
         screen.show();
     }
   }
@@ -659,28 +659,28 @@ Temporarily yields the terminal to a subprocess — the pattern used by `git com
 opening `$EDITOR`, or any TUI that shells out to another interactive program.
 
 ```
-use console;
+use term;
 use os;
 
 main()! {
-  use screen := console.Screen.open();
+  use screen := term.Screen.open();
 
   screen.write(Point(0, 0), "Press 'e' to open editor, 'q' to quit",
-    style: console.Style.default());
+    style: term.Style.default());
   screen.show();
 
   for {
     event := screen.poll_event();
     match event {
-      console.Event.Key(k) => {
+      term.Event.Key(k) => {
         match k.code {
-          console.Key.Char('e') => {
+          term.Key.Char('e') => {
             // Hand terminal to $EDITOR
             screen.suspend();
             os.execute("vim", "/tmp/note.txt");
             screen.resume();   // re-enters raw mode, full redraw
           },
-          console.Key.Char('q') => { return; },
+          term.Key.Char('q') => { return; },
           _ => {},
         }
       },
@@ -694,7 +694,7 @@ main()! {
 
 ## Comparison: How the Primitives Map
 
-| Concept              | curses (C/Python)       | crossterm (Rust)                   | tcell (Go)                      | **Promise console**               |
+| Concept              | curses (C/Python)       | crossterm (Rust)                   | tcell (Go)                      | **Promise term**                  |
 | :------------------- | :---------------------- | :--------------------------------- | :------------------------------ | :-------------------------------- |
 | Init terminal        | `initscr()`             | `enable_raw_mode()` + `execute!()` | `screen.Init()`                 | `Screen.open()`                   |
 | Teardown             | `endwin()`              | `disable_raw_mode()`               | `screen.Fini()`                 | `screen.close()` / `use` auto    |
@@ -712,26 +712,26 @@ main()! {
 | Mouse                | `mousemask()`           | `EnableMouseCapture`               | `screen.EnableMouse()`          | `screen.enable_mouse()`          |
 | Cursor visibility    | `curs_set()`            | `Hide`/`Show` cursor cmds         | `ShowCursor` / `HideCursor`     | `set_cursor()` / `hide_cursor()`  |
 | Subprocess handoff   | `endwin()` / `refresh()`| Manual save/restore                | `Suspend()` / `Resume()`        | `suspend()` / `resume()`          |
-| TTY detection        | `isatty()`              | `IsTerminal` trait                 | `term.IsTerminal(fd)`           | `console.is_terminal()`           |
+| TTY detection        | `isatty()`              | `IsTerminal` trait                 | `term.IsTerminal(fd)`           | `term.is_terminal()`           |
 
 ---
 
 ## Full Example: Centered Message Box
 
 ```
-use console;
+use term;
 
 main()! {
-  use screen := console.Screen.open();
+  use screen := term.Screen.open();
 
   string message = "Press any key to continue...";
-  console.Style box_style = console.Style.default()
-    .foreground(console.Color.White)
-    .background(console.Color.Blue)
+  term.Style box_style = term.Style.default()
+    .foreground(term.Color.White)
+    .background(term.Color.Blue)
     .bold();
-  console.Style border_style = console.Style.default()
-    .foreground(console.Color.BrightWhite)
-    .background(console.Color.Blue);
+  term.Style border_style = term.Style.default()
+    .foreground(term.Color.BrightWhite)
+    .background(term.Color.Blue);
 
   bool running = true;
   while running {
@@ -773,10 +773,10 @@ main()! {
     screen.hide_cursor();
     screen.show();
 
-    console.Event event = screen.poll_event();
+    term.Event event = screen.poll_event();
     match event {
-      console.Event.Key(_) => { running = false; },
-      console.Event.Resize(_) => { screen.show(full: true); },
+      term.Event.Key(_) => { running = false; },
+      term.Event.Resize(_) => { screen.show(full: true); },
       _ => {},
     }
   }
@@ -818,7 +818,7 @@ The most dangerous bug in TUI programs is leaving the terminal in raw mode after
 crash. Promise's `use` binding must guarantee that `close()` runs even on unhandled
 errors and panics — the same guarantee that Rust's `Drop` and Go's `defer` provide.
 If Promise doesn't currently run `use` cleanup on panic, this is a prerequisite for
-shipping the console module — a TUI library that can brick your terminal on any
+shipping the term module — a TUI library that can brick your terminal on any
 unhandled error is unusable.
 
 ### Performance: Diff-Based Show
@@ -841,7 +841,7 @@ Crossterm uses a "command" pattern where you queue ANSI operations and flush. Th
 flexible but error-prone — it's easy to forget cursor repositioning, leave style state
 leaked, etc. The cell-buffer model (used by tcell, termbox, notcurses, and curses) is
 higher-level, eliminates flicker via diff-based updates, and is much easier for agents
-and beginners to reason about. A lower-level `console.raw_write(string)` escape hatch
+and beginners to reason about. A lower-level `term.raw_write(string)` escape hatch
 could be added later for advanced use cases without compromising the primary API.
 
 ---
@@ -850,10 +850,10 @@ could be added later for advanced use cases without compromising the primary API
 
 These are explicitly *not* in the initial module but designed to layer on top:
 
-- **`console.widgets`** — higher-level components (text input, list select, scrollable
+- **`term.widgets`** — higher-level components (text input, list select, scrollable
   viewport, table, progress bar) built on `Screen`.
-- **`console.layout`** — flexbox-like layout engine for splitting the screen into panes.
-- **`console.Canvas`** — a sub-region / window abstraction (like curses `WINDOW` or
+- **`term.layout`** — flexbox-like layout engine for splitting the screen into panes.
+- **`term.Canvas`** — a sub-region / window abstraction (like curses `WINDOW` or
   tcell's off-screen drawing), enabling composable widgets.
 - **Sixel / Kitty image protocol** — inline image rendering on supported terminals.
 - **24-bit color detection** — query `COLORTERM` env var and degrade gracefully.

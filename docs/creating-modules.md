@@ -112,7 +112,7 @@ Place the proposal inside the module directory: `modules/<name>/plan.md`. This k
 the design doc co-located with the code it describes, even before any code exists. Create
 the module directory and `promise.toml` first (see Phase 2), then add the proposal there.
 
-For example: `modules/console/plan.md`.
+For example: `modules/term/plan.md`.
 
 The filename `plan.md` is the standard — `promise doc <name>` automatically surfaces it
 when a module has no public declarations yet. This means a planned module directory with
@@ -236,12 +236,12 @@ For each native function needed:
 **a) Declare the extern in your `.pr` file:**
 
 ```promise
-_console_enter_raw_mode() int `extern("promise_console_enter_raw_mode");
-_console_exit_raw_mode() int `extern("promise_console_exit_raw_mode");
+_term_enter_raw_mode() int `extern("promise_term_enter_raw_mode");
+_term_exit_raw_mode() int `extern("promise_term_exit_raw_mode");
 ```
 
 Convention: prefix private externs with `_<module>_` (e.g., `_io_file_open`,
-`_console_enter_raw_mode`). The `\`extern` string is the LLVM symbol name that codegen
+`_term_enter_raw_mode`). The `\`extern` string is the LLVM symbol name that codegen
 will emit.
 
 **b) Implement the PAL function in codegen:**
@@ -274,7 +274,7 @@ Implement types and functions in `modules/<name>/<name>.pr`, following the propo
 | Fields | `snake_case` | `exit_code`, `has_ctrl` |
 | Getters | `snake_case` | `get size`, `get is_empty` |
 | Private members | `_` prefix | `int _fd`, `_make_error()` |
-| Extern wrappers | `_<module>_` prefix | `_io_file_open`, `_console_enter_raw_mode` |
+| Extern wrappers | `_<module>_` prefix | `_io_file_open`, `_term_enter_raw_mode` |
 
 Use full English words in all identifiers. The only allowed abbreviations are those in the
 approved dictionary (`docs/language-design.md` section 9.3a): `abs`, `arg`, `attr`, `ch`,
@@ -328,24 +328,24 @@ Every module that can fail needs an error type. Follow the established pattern:
 
 ```promise
 // Error type inherits from error, includes errno code
-type ConsoleError is error `public `doc("A terminal I/O error.") {
+type TermError is error `public `doc("A terminal I/O error.") {
   int code;
 }
 
 // Helper to wrap PAL return codes (PAL returns -errno on failure)
-_make_console_error(int rc) ConsoleError {
+_make_term_error(int rc) TermError {
   int c = 0 - rc;
-  return ConsoleError(code: c, message: _console_strerror(c));
+  return TermError(code: c, message: _term_strerror(c));
 }
 
 // Human-readable messages for common errno values
-_console_strerror(int code) string {
+_term_strerror(int code) string {
   return match code {
     5 => "input/output error",
     9 => "bad file descriptor",
     22 => "invalid argument",
     25 => "inappropriate ioctl for device",  // ENOTTY
-    _ => "console error (errno {code})",
+    _ => "term error (errno {code})",
   };
 }
 ```
@@ -354,9 +354,9 @@ Usage in API methods:
 
 ```promise
 open!() Self `factory {
-  int rc = _console_enter_raw_mode();
+  int rc = _term_enter_raw_mode();
   if rc < 0 {
-    raise _make_console_error(rc);
+    raise _make_term_error(rc);
   }
   // ...
 }
@@ -387,12 +387,12 @@ Conditions combine with `!` (not), `||` (or), `&&` (and), and `()` grouping.
 // Different implementations per platform — same signature, different target
 _get_terminal_size() (int, int) `target(posix) {
   // ioctl(TIOCGWINSZ) on POSIX
-  return (_console_ioctl_rows(), _console_ioctl_cols());
+  return (_term_ioctl_rows(), _term_ioctl_cols());
 }
 
 _get_terminal_size() (int, int) `target(windows) {
   // GetConsoleScreenBufferInfo on Windows
-  return (_console_win_rows(), _console_win_cols());
+  return (_term_win_rows(), _term_win_cols());
 }
 ```
 
@@ -432,7 +432,7 @@ WASM (wasm32-wasi) has significant limitations that affect module design:
 
 - Exclude WASM-incompatible types/functions with `\`target(!wasm)`
 - Pure computation (data structures, algorithms, formatting, parsing) works on all targets
-- If the entire module is WASM-incompatible (e.g., `console`), document this in the proposal
+- If the entire module is WASM-incompatible (e.g., `term`), document this in the proposal
 - Tests for OS-dependent behavior use `\`test(exclude: "wasm32")`
 - The WASM target is always tested in CI (`bin/verify.sh --wasm`) — if your module compiles
   on WASM (even with most APIs excluded), the remaining code must be correct
@@ -445,12 +445,12 @@ Add tests to `modules/<name>/<name>_test.pr` as you implement each piece.
 
 ```promise
 error_strerror_known() `test {
-  assert(_console_strerror(22) == "invalid argument", "errno 22");
-  assert(_console_strerror(9999) == "console error (errno 9999)", "unknown errno");
+  assert(_term_strerror(22) == "invalid argument", "errno 22");
+  assert(_term_strerror(9999) == "term error (errno 9999)", "unknown errno");
 }
 
 error_make_error() `test {
-  ConsoleError e = _make_console_error(-22);
+  TermError e = _make_term_error(-22);
   assert(e.code == 22, "code from -errno");
   assert(e.message == "invalid argument", "message");
 }
@@ -558,12 +558,12 @@ If the module interacts with language features in interesting ways, add integrat
 in `tests/catalog/` or `tests/modules/`:
 
 ```promise
-// tests/catalog/console_basic_test.pr
-use console;
+// tests/catalog/term_basic_test.pr
+use term;
 
-console_import() `test {
+term_import() `test {
   // Verify the module loads and basic types are accessible
-  ConsoleError e = ConsoleError(code: 1, message: "test");
+  TermError e = TermError(code: 1, message: "test");
   assert(e.code == 1);
 }
 ```
@@ -649,7 +649,7 @@ state lives in function-scoped locals, type instances, or is threaded through pa
 
 This means modules cannot have global singletons, caches, or registries. If persistent
 state is needed, model it as a type instance the caller creates and passes around (e.g.,
-`Screen` in the console module, `File` in the io module).
+`Screen` in the term module, `File` in the io module).
 
 ### 6.3 No module initializers
 
@@ -689,13 +689,13 @@ type Screen `public {
 
   // Called by `use` binding at scope exit — can propagate errors
   close!(~this) `doc("Restores terminal state. Called automatically by use binding.") {
-    int rc = _console_exit_raw_mode(this._fd);
-    if rc < 0 { raise _make_console_error(rc); }
+    int rc = _term_exit_raw_mode(this._fd);
+    if rc < 0 { raise _make_term_error(rc); }
   }
 
   // Called when a non-use Screen goes out of scope — best-effort cleanup
   drop(~this) {
-    _console_exit_raw_mode(this._fd);
+    _term_exit_raw_mode(this._fd);
   }
 }
 ```

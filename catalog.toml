@@ -38,7 +38,7 @@ description = "WASI Preview 1 raw bindings: errno/flags/enums plus extern functi
 
 # Planned modules — not yet implemented, design in modules/<name>/plan.md
 
-[modules.console]
+[modules.term]
 description = "Terminal UI: raw mode, cell buffer, styled text, input events, cursor control (planned)"
 
 [modules.toml]

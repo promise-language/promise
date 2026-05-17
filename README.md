@@ -8,7 +8,7 @@ Statically-typed language designed for AI-agent efficiency. Explicit ownership (
 
 **Self-contained toolchain.** The compiler is a single Go binary (~61MB release build) that embeds everything: LLVM tools, standard library, catalog modules, and runtime. `promise sync` downloads one file. `promise install` extracts it. No system dependencies beyond a linker. Multiple epochs can coexist side-by-side under `~/.promise/epochs/`.
 
-**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules (`io`, `json`, `os`, `net`, `path`, `math`, `strings`, `time`, `console`, `http`) are separate compilation units cached as LLVM bitcode for fast incremental builds.
+**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules (`io`, `json`, `os`, `net`, `path`, `math`, `strings`, `time`, `term`, `http`) are separate compilation units cached as LLVM bitcode for fast incremental builds.
 
 ## Example
 
@@ -147,7 +147,7 @@ promise_lang/
 │   ├── math/                    # Extended math
 │   ├── strings/                 # Extended string utilities
 │   ├── time/                    # Extended time utilities
-│   ├── console/                 # Console utilities
+│   ├── term/                    # Terminal UI (raw mode, cell buffer, events)
 │   └── http/                    # HTTP client (in progress)
 ├── tests/                       # Integration and e2e tests
 ├── examples/                    # Runnable examples

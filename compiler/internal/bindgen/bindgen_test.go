@@ -369,7 +369,7 @@ func TestCodegenResource(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type Descriptor `public {")
+	assertContains(t, out, "type Descriptor `public `target(wasi) {")
 	assertContains(t, out, "int _handle;")
 	assertContains(t, out, "read!(this, u64 length) u8[] `public {")
 	assertContains(t, out, "return _descriptor_read(this._handle, length)^;")
@@ -392,7 +392,7 @@ func TestCodegenFreeFunc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "now() u64 `public {")
+	assertContains(t, out, "now() u64 `public `target(wasi) {")
 	assertContains(t, out, "return _now();")
 	assertContains(t, out, "`extern(\"now\")")
 	assertContains(t, out, "`wasm_import(\"wasi:clocks/monotonic\", \"now\")")
@@ -410,7 +410,7 @@ func TestCodegenFailableResult(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "do_thing!() u32 `public {")
+	assertContains(t, out, "do_thing!() u32 `public `target(wasi) {")
 	assertContains(t, out, "return _do_thing()^;")
 }
 
@@ -894,9 +894,9 @@ interface types {
 	assertContains(t, out, "enum DescriptorType `public {")
 	assertContains(t, out, "type DescriptorStat `public `value {")
 	assertContains(t, out, "type OpenFlags `public `value {")
-	assertContains(t, out, "type Descriptor `public {")
+	assertContains(t, out, "type Descriptor `public `target(wasi) {")
 	assertContains(t, out, "drop(~this) {")
-	assertContains(t, out, "open_at!(string path, OpenFlags flags) Descriptor `public {")
+	assertContains(t, out, "open_at!(string path, OpenFlags flags) Descriptor `public `target(wasi) {")
 	assertContains(t, out, "`wasm_import(\"wasi:filesystem/types\"")
 	assertContains(t, out, "`target(wasi);")
 }
@@ -1525,7 +1525,7 @@ func TestCodegenFreeFuncVoidFailableRetPtr(t *testing.T) {
 	}}
 	out := GeneratePromiseWithOptions(modules, "wasi", true)
 	// Wrapper should be failable with no return type
-	assertContains(t, out, "do_action!() `public {")
+	assertContains(t, out, "do_action!() `public `target(wasi) {")
 }
 
 func TestCodegenCanonicalABIStringReturnDirect(t *testing.T) {
@@ -1831,7 +1831,7 @@ func TestCodegenResourceNoDrop(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type Handle `public {")
+	assertContains(t, out, "type Handle `public `target(wasi) {")
 	assertNotContains(t, out, "drop(~this)")
 	assertNotContains(t, out, "[resource-drop]")
 }
@@ -2070,6 +2070,21 @@ func TestKebabToPascalConsecutiveDashes(t *testing.T) {
 	got := kebabToPascal("a--b")
 	if got != "AB" {
 		t.Errorf("kebabToPascal(\"a--b\") = %q, want \"AB\"", got)
+	}
+}
+
+func TestConvertTypeRefNil(t *testing.T) {
+	got := convertTypeRef(nil)
+	if got.Kind != BuiltinKind || got.Builtin != "void" {
+		t.Errorf("convertTypeRef(nil) = {Kind:%v Builtin:%q}, want {BuiltinKind, \"void\"}", got.Kind, got.Builtin)
+	}
+}
+
+func TestConvertTypeRefUnknownKind(t *testing.T) {
+	ref := &wit.TypeRef{Kind: wit.TypeRefKind(99)}
+	got := convertTypeRef(ref)
+	if got.Kind != BuiltinKind || got.Builtin != "u32" {
+		t.Errorf("convertTypeRef(unknown kind) = {Kind:%v Builtin:%q}, want {BuiltinKind, \"u32\"}", got.Kind, got.Builtin)
 	}
 }
 

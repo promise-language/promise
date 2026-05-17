@@ -170,7 +170,7 @@ func (g *generator) emitResource(r Resource, importModule string) {
 	if r.Doc != "" {
 		g.line("`doc \"%s\"", escapeDoc(r.Doc))
 	}
-	g.line("type %s `public {", r.Name)
+	g.line("type %s `public `target(%s) {", r.Name, g.target)
 	g.indent++
 	g.line("int _handle;")
 	g.blank()
@@ -388,7 +388,7 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 		g.line("`doc \"%s\"", escapeDoc(f.Doc))
 	}
 	if retType != "" {
-		g.line("%s%s(%s) %s `public {", f.Name, failMark, params, retType)
+		g.line("%s%s(%s) %s `public `target(%s) {", f.Name, failMark, params, retType, g.target)
 		g.indent++
 		if useRetPtr && g.canonicalABI {
 			// Call extern (writes to retarea), then lift result
@@ -408,7 +408,7 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 		}
 		g.indent--
 	} else {
-		g.line("%s%s(%s) `public {", f.Name, failMark, params)
+		g.line("%s%s(%s) `public `target(%s) {", f.Name, failMark, params, g.target)
 		g.indent++
 		if useRetPtr && g.canonicalABI && failable {
 			g.line("%s(%s);", externName, externCallArgs)

@@ -1883,3 +1883,216 @@ func TestFormatExternParamsOverflow(t *testing.T) {
 		t.Errorf("formatExternParams(overflow) = %q, want \"i32 args_ptr\"", got)
 	}
 }
+
+// --- Error payload extraction tests (T0294) ---
+
+func TestCodegenCanonicalABIResultErrScalar(t *testing.T) {
+	// result<u32, u32>: error branch should load i32 and call .to_string()
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "do_thing",
+			Kind: FuncFree,
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+				Err:  &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+			}},
+			ImportName: "do-thing",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, `_cabi_load_i32(_cabi_retarea_ptr() + 4).to_string()`)
+	assertContains(t, out, `"component error: "`)
+	assertNotContains(t, out, `error("component error")`)
+}
+
+func TestCodegenCanonicalABIResultErrString(t *testing.T) {
+	// result<u32, string>: error branch should lift string via _cabi_string_from
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "do_thing",
+			Kind: FuncFree,
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+				Err:  &TypeRef{Kind: BuiltinKind, Builtin: "string"},
+			}},
+			ImportName: "do-thing",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// Error branch lifts string from retarea
+	assertContains(t, out, `error(_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr() + 4), _cabi_load_i32(_cabi_retarea_ptr() + 8)))`)
+}
+
+func TestCodegenCanonicalABIResultErrVoidOk(t *testing.T) {
+	// result<void, u32>: void return with retptr, error should extract payload
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "do_action",
+			Kind: FuncFree,
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Err:  &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+			}},
+			ImportName: "do-action",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, `_cabi_load_i32(_cabi_retarea_ptr() + 4).to_string()`)
+	assertContains(t, out, `"component error: "`)
+}
+
+func TestCodegenCanonicalABIResultUnionAlignment(t *testing.T) {
+	// result<u32, f64>: both Ok and Err should use offset 8 (f64 forces alignment)
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "get_value",
+			Kind: FuncFree,
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+				Err:  &TypeRef{Kind: BuiltinKind, Builtin: "f64"},
+			}},
+			ImportName: "get-value",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// Ok value at offset 8 (not 4, because f64 err forces union alignment)
+	assertContains(t, out, "_cabi_load_i32(_cabi_retarea_ptr() + 8)")
+	// Err value at offset 8
+	assertContains(t, out, "_cabi_load_f64(_cabi_retarea_ptr() + 8).to_string()")
+}
+
+func TestCodegenCanonicalABIResultStringOkWiderErr(t *testing.T) {
+	// result<string, f64>: string Ok at offset 8 (f64 forces union alignment)
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "get_name",
+			Kind: FuncFree,
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "string"},
+				Err:  &TypeRef{Kind: BuiltinKind, Builtin: "f64"},
+			}},
+			ImportName: "get-name",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// String Ok lifted from offset 8 (not 4)
+	assertContains(t, out, "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr() + 8), _cabi_load_i32(_cabi_retarea_ptr() + 12))")
+}
+
+func TestLiftErrFromRetPtr(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+
+	// Void error (Err == nil) → generic message
+	got := g.liftErrFromRetPtr(TypeRef{Kind: ResultKind})
+	if got != `"component error"` {
+		t.Errorf("liftErrFromRetPtr(void): got %q", got)
+	}
+
+	// String error
+	got = g.liftErrFromRetPtr(TypeRef{
+		Kind: ResultKind,
+		Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+		Err:  &TypeRef{Kind: BuiltinKind, Builtin: "string"},
+	})
+	if !strings.Contains(got, "_cabi_string_from(") {
+		t.Errorf("liftErrFromRetPtr(string): got %q, want _cabi_string_from", got)
+	}
+
+	// Scalar error (u32)
+	got = g.liftErrFromRetPtr(TypeRef{
+		Kind: ResultKind,
+		Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+		Err:  &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+	})
+	if !strings.Contains(got, ".to_string()") {
+		t.Errorf("liftErrFromRetPtr(u32): got %q, want .to_string()", got)
+	}
+	if !strings.Contains(got, `"component error: "`) {
+		t.Errorf("liftErrFromRetPtr(u32): got %q, want component error prefix", got)
+	}
+
+	// u64 error — offset should be 8
+	got = g.liftErrFromRetPtr(TypeRef{
+		Kind: ResultKind,
+		Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+		Err:  &TypeRef{Kind: BuiltinKind, Builtin: "u64"},
+	})
+	if !strings.Contains(got, "_cabi_load_i64(_cabi_retarea_ptr() + 8)") {
+		t.Errorf("liftErrFromRetPtr(u64): got %q, want offset 8", got)
+	}
+}
+
+func TestFormatExternParamsWithRetPtrNonEmptyBase(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	// Params + result that needs retptr → base params + ", i32 retptr"
+	params := []Param{{Name: "id", Type: TypeRef{Kind: BuiltinKind, Builtin: "u32"}}}
+	results := []TypeRef{{Kind: BuiltinKind, Builtin: "string"}} // string → 2 flat → retptr
+	got := g.formatExternParamsWithRetPtr(params, results)
+	if got != "i32 id, i32 retptr" {
+		t.Errorf("formatExternParamsWithRetPtr(params+string) = %q, want \"i32 id, i32 retptr\"", got)
+	}
+}
+
+func TestLiftReturnFromRetPtrNamedType(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	// Named type return → falls through to liftScalarFromRetPtr at offset 0
+	results := []TypeRef{{Kind: NamedKind, Name: "MyRecord"}}
+	got := g.liftReturnFromRetPtr(results)
+	if got != "_cabi_load_i32(_cabi_retarea_ptr() + 0)" {
+		t.Errorf("liftReturnFromRetPtr(named) = %q", got)
+	}
+}
+
+func TestPromiseTypeUnknownKind(t *testing.T) {
+	ref := TypeRef{Kind: TypeRefKind(99)}
+	got := promiseType(ref)
+	if got != "int" {
+		t.Errorf("promiseType(unknown) = %q, want \"int\"", got)
+	}
+}
+
+func TestKebabToPascalConsecutiveDashes(t *testing.T) {
+	// Consecutive dashes produce empty parts that should be skipped
+	got := kebabToPascal("a--b")
+	if got != "AB" {
+		t.Errorf("kebabToPascal(\"a--b\") = %q, want \"AB\"", got)
+	}
+}
+
+func TestResultPayloadOffsetUnion(t *testing.T) {
+	tests := []struct {
+		name   string
+		result TypeRef
+		want   int
+	}{
+		{"u32/u32", TypeRef{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}, Err: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}, 4},
+		{"u32/f64", TypeRef{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}, Err: &TypeRef{Kind: BuiltinKind, Builtin: "f64"}}, 8},
+		{"f64/u32", TypeRef{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "f64"}, Err: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}, 8},
+		{"f64/f64", TypeRef{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "f64"}, Err: &TypeRef{Kind: BuiltinKind, Builtin: "f64"}}, 8},
+		{"string/u32", TypeRef{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "string"}, Err: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}, 4},
+		{"u32/u64", TypeRef{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}, Err: &TypeRef{Kind: BuiltinKind, Builtin: "u64"}}, 8},
+		{"void/void", TypeRef{Kind: ResultKind}, 4},
+		{"void/u32", TypeRef{Kind: ResultKind, Err: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}, 4},
+		{"void/s64", TypeRef{Kind: ResultKind, Err: &TypeRef{Kind: BuiltinKind, Builtin: "s64"}}, 8},
+	}
+	for _, tt := range tests {
+		got := resultPayloadOffset(tt.result)
+		if got != tt.want {
+			t.Errorf("resultPayloadOffset(%s): got %d, want %d", tt.name, got, tt.want)
+		}
+	}
+}

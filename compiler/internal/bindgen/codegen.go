@@ -397,7 +397,8 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 			if failable {
 				// Check discriminant for result<T, E>
 				g.line("tag := _cabi_load_i32(_cabi_retarea_ptr());")
-				g.line("if tag != 0 { raise error(\"component error\"); }")
+				errMsg := g.liftErrFromRetPtr(f.Results[0])
+				g.line("if tag != 0 { raise error(%s); }", errMsg)
 				g.line("return %s;", lifted)
 			} else {
 				g.line("return %s;", lifted)
@@ -412,7 +413,8 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 		if useRetPtr && g.canonicalABI && failable {
 			g.line("%s(%s);", externName, externCallArgs)
 			g.line("tag := _cabi_load_i32(_cabi_retarea_ptr());")
-			g.line("if tag != 0 { raise error(\"component error\"); }")
+			errMsg := g.liftErrFromRetPtr(f.Results[0])
+			g.line("if tag != 0 { raise error(%s); }", errMsg)
 		} else {
 			g.line("%s(%s)%s;", externName, externCallArgs, raise)
 		}
@@ -730,12 +732,15 @@ func (g *generator) liftReturnFromRetPtr(results []TypeRef) string {
 	}
 	ref := results[0]
 	if ref.Kind == ResultKind {
-		// result<T, E>: read discriminant, branch on ok/err
+		// result<T, E>: payload offset is union-aligned across Ok and Err
+		result := ref
 		ref = *ref.Ok
+		offset := resultPayloadOffset(result)
 		if ref.Kind == BuiltinKind && ref.Builtin == "string" {
-			return "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr() + 4), _cabi_load_i32(_cabi_retarea_ptr() + 8))"
+			return fmt.Sprintf("_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr() + %d), _cabi_load_i32(_cabi_retarea_ptr() + %d))",
+				offset, offset+4)
 		}
-		return liftScalarFromRetPtr(ref, resultPayloadOffset(ref))
+		return liftScalarFromRetPtr(ref, offset)
 	}
 	if ref.Kind == BuiltinKind && ref.Builtin == "string" {
 		return "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr()), _cabi_load_i32(_cabi_retarea_ptr() + 4))"
@@ -764,14 +769,38 @@ func liftScalarFromRetPtr(ref TypeRef, offset int) string {
 	}
 }
 
-// resultPayloadOffset returns the canonical ABI payload offset for a result<T, E>
-// discriminant. 64-bit types require alignment 8; everything else uses alignment 4.
-func resultPayloadOffset(ref TypeRef) int {
-	if ref.Kind == BuiltinKind {
-		switch ref.Builtin {
-		case "u64", "s64", "f64":
-			return 8
+// liftErrFromRetPtr generates an expression for the error message extracted from
+// the canonical ABI retarea when a result<T, E> returns an error (discriminant != 0).
+func (g *generator) liftErrFromRetPtr(result TypeRef) string {
+	if result.Err == nil {
+		return `"component error"`
+	}
+	errRef := *result.Err
+	offset := resultPayloadOffset(result)
+	if errRef.Kind == BuiltinKind && errRef.Builtin == "string" {
+		// String error: lift string directly as error message
+		return fmt.Sprintf("_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr() + %d), _cabi_load_i32(_cabi_retarea_ptr() + %d))",
+			offset, offset+4)
+	}
+	// Scalar/named error: lift value and stringify
+	loadExpr := liftScalarFromRetPtr(errRef, offset)
+	return fmt.Sprintf(`"component error: " + %s.to_string()`, loadExpr)
+}
+
+// resultPayloadOffset returns the canonical ABI payload offset for a result<T, E>.
+// The payload is a union of Ok and Err — both start at the same offset, determined
+// by max(align(T), align(E)). 64-bit types require alignment 8; everything else 4.
+func resultPayloadOffset(result TypeRef) int {
+	align := 4
+	for _, ref := range []*TypeRef{result.Ok, result.Err} {
+		if ref != nil && ref.Kind == BuiltinKind {
+			switch ref.Builtin {
+			case "u64", "s64", "f64":
+				if align < 8 {
+					align = 8
+				}
+			}
 		}
 	}
-	return 4
+	return align
 }

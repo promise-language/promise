@@ -182,8 +182,9 @@ void *cabi_realloc(void *ptr, size_t old_size, size_t align, size_t new_size) {
 
 // __cabi_retarea — Fixed buffer for canonical ABI return value decoding.
 // Exported as a global; the host writes multi-value returns here.
+// Sized for canonical ABI max flat layout: 16 flat values × 8 bytes = 128 bytes.
 __attribute__((aligned(8)))
-unsigned char __cabi_retarea[32];
+unsigned char __cabi_retarea[128];
 
 // Canonical ABI memory access helpers for reading/writing linear memory.
 // Used by generated wrapper code to decode return values from retptr

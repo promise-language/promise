@@ -32,7 +32,6 @@ const (
 
 	// Literals
 	TokenIdent      // kebab-case identifier
-	TokenSemver     // version like 0.2.0 (only in package decls)
 	TokenDocComment // /// doc comment
 
 	// Keywords
@@ -97,7 +96,6 @@ var tokenNames = map[TokenKind]string{
 	TokenStar:        "*",
 	TokenIdent:       "identifier",
 	TokenDocComment:  "doc-comment",
-	TokenSemver:      "semver",
 	TokenPackage:     "package",
 	TokenInterface:   "interface",
 	TokenWorld:       "world",
@@ -384,6 +382,9 @@ func (l *Lexer) nextToken() Token {
 			l.advance()
 			return Token{Kind: TokenArrow, Value: "->", Pos: pos}
 		}
+		// Bare '-' is not a valid standalone WIT token.
+		l.advance()
+		return Token{Kind: TokenIdent, Value: "-", Pos: pos}
 	}
 
 	// Identifiers and keywords (kebab-case: [a-z][a-z0-9]*(-[a-z0-9]+)*)

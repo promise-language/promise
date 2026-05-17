@@ -31,6 +31,11 @@ description = "Time and duration operations (placeholder — pending native PAL 
 [modules.net]
 description = "TCP networking: TcpListener, TcpStream with reactor-based non-blocking I/O"
 
+[modules.wasi]
+url = "ssh://hfe/git/promise_wasi.git"
+commit = "0acbef489f67a2825542e4554d1c41f9eb120b81"
+description = "WASI Preview 1 raw bindings: errno/flags/enums plus extern function declarations (target(wasi) only; function calls pending T0283)"
+
 # Planned modules — not yet implemented, design in modules/<name>/plan.md
 
 [modules.console]

@@ -805,6 +805,20 @@ interface types {
 	}
 }
 
+func TestLexerBareDash(t *testing.T) {
+	src := `- record`
+	lex := NewLexer(src, "test.wit")
+
+	tok1 := lex.Next()
+	if tok1.Kind != TokenIdent || tok1.Value != "-" {
+		t.Errorf("expected ident \"-\", got %s %q", tok1.Kind, tok1.Value)
+	}
+	tok2 := lex.Next()
+	if tok2.Kind != TokenRecord {
+		t.Errorf("expected record, got %s", tok2.Kind)
+	}
+}
+
 func TestParseErrorRecovery(t *testing.T) {
 	// Invalid token where a type is expected
 	src := `

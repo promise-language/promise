@@ -112,6 +112,22 @@ func TestSearchEmptyCatalog(t *testing.T) {
 	}
 }
 
+// setupGitTestEnv configures the test environment for git operations.
+// It creates a temporary git global config with user identity and safe.directory=*,
+// then sets GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, and GIT_TERMINAL_PROMPT via t.Setenv
+// so all git commands (including those inside runAdd/runUpdate) inherit the correct settings.
+func setupGitTestEnv(t *testing.T) {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "gitconfig")
+	configContent := "[user]\n\temail = test@test.com\n\tname = Test\n[safe]\n\tdirectory = *\n"
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("setupGitTestEnv: write git config: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", configPath)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+}
+
 // --- runAdd tests ---
 
 func TestAddEmbeddedModule(t *testing.T) {
@@ -163,6 +179,8 @@ func TestAddNoPromiseToml(t *testing.T) {
 }
 
 func TestAddCatalogResolvesToURL(t *testing.T) {
+	setupGitTestEnv(t)
+
 	// Create a local bare git repo to act as the "remote"
 	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
@@ -173,7 +191,7 @@ func TestAddCatalogResolvesToURL(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command(name, args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
@@ -182,8 +200,6 @@ func TestAddCatalogResolvesToURL(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	run(workDir, "git", "config", "user.email", "test@test.com")
-	run(workDir, "git", "config", "user.name", "Test")
 	os.WriteFile(filepath.Join(workDir, "promise.toml"), []byte("[module]\nname = \"mymod\"\n"), 0644)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "init")
@@ -307,6 +323,8 @@ func TestUpdateNotFound(t *testing.T) {
 }
 
 func TestUpdateURLKeyedEntry(t *testing.T) {
+	setupGitTestEnv(t)
+
 	// Create a local bare git repo with two commits
 	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
@@ -316,7 +334,7 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command(name, args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
@@ -325,8 +343,6 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	run(workDir, "git", "config", "user.email", "test@test.com")
-	run(workDir, "git", "config", "user.name", "Test")
 	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v1"), 0644)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "first")
@@ -377,6 +393,8 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 }
 
 func TestUpdateSpecificTarget(t *testing.T) {
+	setupGitTestEnv(t)
+
 	// Test updating a specific URL-keyed entry by URL
 	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
@@ -386,7 +404,7 @@ func TestUpdateSpecificTarget(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command(name, args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
@@ -395,8 +413,6 @@ func TestUpdateSpecificTarget(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	run(workDir, "git", "config", "user.email", "test@test.com")
-	run(workDir, "git", "config", "user.name", "Test")
 	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("content"), 0644)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "init")
@@ -426,6 +442,8 @@ func TestUpdateSpecificTarget(t *testing.T) {
 }
 
 func TestAddWithCustomRef(t *testing.T) {
+	setupGitTestEnv(t)
+
 	// Test the len(args)==2 path with a custom ref
 	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
@@ -435,7 +453,7 @@ func TestAddWithCustomRef(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command(name, args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
@@ -444,8 +462,6 @@ func TestAddWithCustomRef(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	run(workDir, "git", "config", "user.email", "test@test.com")
-	run(workDir, "git", "config", "user.name", "Test")
 	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v1"), 0644)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "first")
@@ -502,6 +518,8 @@ func TestSearchUsageError(t *testing.T) {
 }
 
 func TestUpdateNamedEntry(t *testing.T) {
+	setupGitTestEnv(t)
+
 	// Test updating a [require.NAME] entry when HEAD has moved forward
 	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
@@ -511,7 +529,7 @@ func TestUpdateNamedEntry(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command(name, args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
@@ -520,8 +538,6 @@ func TestUpdateNamedEntry(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	run(workDir, "git", "config", "user.email", "test@test.com")
-	run(workDir, "git", "config", "user.name", "Test")
 	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("v1"), 0644)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "first")
@@ -571,6 +587,8 @@ func TestUpdateNamedEntry(t *testing.T) {
 }
 
 func TestUpdateAlreadyCurrent(t *testing.T) {
+	setupGitTestEnv(t)
+
 	// Create a local bare git repo
 	bareDir := filepath.ToSlash(t.TempDir())
 	workDir := t.TempDir()
@@ -580,7 +598,7 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command(name, args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
@@ -589,8 +607,6 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 
 	run(bareDir, "git", "init", "--bare", ".")
 	run(workDir, "git", "clone", bareDir, ".")
-	run(workDir, "git", "config", "user.email", "test@test.com")
-	run(workDir, "git", "config", "user.name", "Test")
 	os.WriteFile(filepath.Join(workDir, "dummy.txt"), []byte("hello"), 0644)
 	run(workDir, "git", "add", ".")
 	run(workDir, "git", "commit", "-m", "init")
@@ -623,5 +639,80 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 	}
 	if !strings.Contains(out, "Updated 0 of 1") {
 		t.Errorf("expected 'Updated 0 of 1', got: %s", out)
+	}
+}
+
+func TestAddUsageError(t *testing.T) {
+	// runAdd with wrong number of args calls os.Exit(1). Test via subprocess.
+	if os.Getenv("TEST_ADD_USAGE") == "1" {
+		runAdd(nil)
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestAddUsageError")
+	cmd.Env = append(os.Environ(), "TEST_ADD_USAGE=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(string(out), "usage: promise add") {
+		t.Errorf("expected usage message, got: %s", string(out))
+	}
+}
+
+func TestUpdateUsageError(t *testing.T) {
+	// runUpdate with more than one arg calls os.Exit(1). Test via subprocess.
+	if os.Getenv("TEST_UPDATE_USAGE") == "1" {
+		runUpdate([]string{"a", "b"})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestUpdateUsageError")
+	cmd.Env = append(os.Environ(), "TEST_UPDATE_USAGE=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(string(out), "usage: promise update") {
+		t.Errorf("expected usage message, got: %s", string(out))
+	}
+}
+
+func TestUpdateNoPromiseToml(t *testing.T) {
+	// runUpdate with no promise.toml calls os.Exit(1). Test via subprocess.
+	if os.Getenv("TEST_UPDATE_NO_TOML") == "1" {
+		dir := t.TempDir()
+		os.Chdir(dir)
+		runUpdate(nil)
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestUpdateNoPromiseToml")
+	cmd.Env = append(os.Environ(), "TEST_UPDATE_NO_TOML=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(string(out), "no promise.toml") {
+		t.Errorf("expected 'no promise.toml' in output, got: %s", string(out))
+	}
+}
+
+func TestAddInvalidCatalog(t *testing.T) {
+	// runAdd with an invalid catalog calls os.Exit(1). Test via subprocess.
+	if os.Getenv("TEST_ADD_INVALID_CATALOG") == "1" {
+		dir := t.TempDir()
+		os.Chdir(dir)
+		os.WriteFile(filepath.Join(dir, "promise.toml"), []byte("[module]\nname = \"test\"\nepoch = \"2026.0\"\n"), 0644)
+		withCatalog([]byte("[bad-header\n"), func() {
+			runAdd([]string{"foo"})
+		})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestAddInvalidCatalog")
+	cmd.Env = append(os.Environ(), "TEST_ADD_INVALID_CATALOG=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(string(out), "invalid catalog") {
+		t.Errorf("expected 'invalid catalog' in output, got: %s", string(out))
 	}
 }

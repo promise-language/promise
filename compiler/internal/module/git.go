@@ -245,6 +245,7 @@ func runGit(dir string, args ...string) (string, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))

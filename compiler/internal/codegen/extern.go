@@ -38,6 +38,17 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		if ext.IsFailable {
 			hasSret = true // failable result {i1, ..., i8*} always via sret
 		}
+		// WASM imports: primitive scalars return directly, not via sret.
+		// Only applies to actual WASM imports (wasm_import annotation), not internal
+		// PAL functions whose synthesized bodies expect sret ABI.
+		isWasmImport := c.isWasm && ext.WasmImportMod != ""
+		if isWasmImport && hasSret && !ext.IsFailable {
+			if named := extractNamed(ext.ResultType); named != nil {
+				if layout := c.lookupLayout(ext.ResultType); layout != nil && layout.Kind == LayoutPrimitive {
+					hasSret = false
+				}
+			}
+		}
 
 		// Deduplicate by C name — multiple Promise externs may map to the same C function
 		if fn, ok := cFuncs[ext.CName]; ok {
@@ -66,6 +77,9 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 				}
 				if isRefType(pt) {
 					paramType = irtypes.NewPointer(layout.Value.LLVMType)
+				} else if isWasmImport && layout.Kind == LayoutPrimitive {
+					// WASM imports: primitive scalars pass by value directly
+					paramType = llvmNamedType(extractNamed(pt))
 				} else {
 					// All extern value struct params: pass by pointer to match C ABI
 					paramType = irtypes.I8Ptr
@@ -75,8 +89,13 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		}
 
 		retType := irtypes.Type(irtypes.Void)
-		if !ext.IsFailable && ext.ResultType != nil && isOpaqueContainerType(ext.ResultType) {
-			retType = irtypes.I8Ptr
+		if !ext.IsFailable && ext.ResultType != nil {
+			if isOpaqueContainerType(ext.ResultType) {
+				retType = irtypes.I8Ptr
+			} else if !hasSret {
+				// WASM: primitive scalar direct return
+				retType = llvmNamedType(extractNamed(ext.ResultType))
+			}
 		}
 		fn := c.module.NewFunc(ext.CName, retType, params...)
 
@@ -142,6 +161,15 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 			continue
 		}
 
+		// WASM imports: primitive scalars pass by value directly
+		if c.isWasm && ext.WasmImportMod != "" {
+			paramLayout := c.lookupLayout(ext.ParamTypes[i])
+			if paramLayout != nil && paramLayout.Kind == LayoutPrimitive {
+				callArgs = append(callArgs, arg)
+				continue
+			}
+		}
+
 		named := extractNamed(argTypes[i])
 		layout := c.lookupLayout(argTypes[i])
 		if layout == nil {
@@ -157,6 +185,11 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 
 	// Container return types return i8* directly — no sret (non-failable only)
 	if !ext.IsFailable && ext.ResultType != nil && isOpaqueContainerType(ext.ResultType) {
+		return c.block.NewCall(ext.IRFunc, callArgs...)
+	}
+
+	// WASM: primitive scalar direct return — call returns value directly
+	if !ext.HasSret && ext.ResultType != nil {
 		return c.block.NewCall(ext.IRFunc, callArgs...)
 	}
 

@@ -652,6 +652,8 @@ func TestWasmImportAttributes(t *testing.T) {
 	`, "wasm32-wasi")
 	assertContains(t, ir, `"wasm-import-module"="wasi_snapshot_preview1"`)
 	assertContains(t, ir, `"wasm-import-name"="fd_write"`)
+	// WASM imports use direct return and params for primitives (not sret/i8*)
+	assertContains(t, ir, "declare i64 @fd_write(i64 %fd)")
 }
 
 func TestWasmImportIgnoredOnNative(t *testing.T) {
@@ -662,6 +664,96 @@ func TestWasmImportIgnoredOnNative(t *testing.T) {
 		main() {}
 	`)
 	assertNotContains(t, ir, "wasm-import-module")
+}
+
+func TestWasmExternDirectReturn(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_sched_yield() i32 `+"`extern(\"__wasi_sched_yield\") `wasm_import(\"wasi_snapshot_preview1\", \"sched_yield\") `target(wasm)"+`;
+		main() {}
+	`, "wasm32-wasi")
+	assertContains(t, ir, "declare i32 @__wasi_sched_yield()")
+}
+
+func TestWasmExternDirectParams(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_fd_close(i32 fd) `+"`extern(\"fd_close\") `wasm_import(\"wasi_snapshot_preview1\", \"fd_close\") `target(wasm)"+`;
+		main() {}
+	`, "wasm32-wasi")
+	assertContains(t, ir, "declare void @fd_close(i32 %fd)")
+}
+
+func TestWasmExternDirectReturnWithParams(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_fd_read(i32 fd, i32 iovs, i32 iovs_len, i32 nwritten) i32 `+"`extern(\"fd_read\") `wasm_import(\"wasi_snapshot_preview1\", \"fd_read\") `target(wasm)"+`;
+		main() {}
+	`, "wasm32-wasi")
+	assertContains(t, ir, "declare i32 @fd_read(i32 %fd, i32 %iovs, i32 %iovs_len, i32 %nwritten)")
+}
+
+func TestWasmExternDirectCall(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_get() int `+"`extern(\"test_get\") `wasm_import(\"env\", \"test_get\") `target(wasm)"+`;
+		main() { x := _get(); }
+	`, "wasm32-wasi")
+	assertContains(t, ir, "declare i64 @test_get()")
+	assertContains(t, ir, "call i64 @test_get()")
+}
+
+func TestWasmExternDirectCallWithParams(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_add(int a, int b) int `+"`extern(\"test_add\") `wasm_import(\"env\", \"test_add\") `target(wasm)"+`;
+		main() { x := _add(1, 2); }
+	`, "wasm32-wasi")
+	assertContains(t, ir, "declare i64 @test_add(i64 %a, i64 %b)")
+	assertContains(t, ir, "call i64 @test_add(i64")
+}
+
+func TestWasmExternNativeUnchanged(t *testing.T) {
+	// Native targets still use sret/i8* for the same types
+	ir := generateIR(t, `
+		get_value() int `+"`"+`extern("native_get");
+		use_value(int x) `+"`"+`extern("native_use");
+		main() { use_value(1); x := get_value(); }
+	`)
+	assertContains(t, ir, "declare void @native_get(i8* %sret)")
+	assertContains(t, ir, "declare void @native_use(i8* %x)")
+}
+
+func TestWasmExternBoolReturn(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_check() bool `+"`extern(\"test_check\") `wasm_import(\"env\", \"test_check\") `target(wasm)"+`;
+		main() { x := _check(); }
+	`, "wasm32-wasi")
+	// Bool (i1) should use direct return on WASM, not sret
+	assertContains(t, ir, "declare i1 @test_check()")
+	assertContains(t, ir, "call i1 @test_check()")
+}
+
+func TestWasmExternF64Param(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_set(f64 val) `+"`extern(\"test_set\") `wasm_import(\"env\", \"test_set\") `target(wasm)"+`;
+		main() { _set(3.14); }
+	`, "wasm32-wasi")
+	// f64 (double) should use direct param on WASM
+	assertContains(t, ir, "declare void @test_set(double %val)")
+}
+
+func TestWasmExternFailableStillSret(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_open!(i32 fd) i32 `+"`extern(\"test_open\") `wasm_import(\"env\", \"test_open\") `target(wasm)"+`;
+		main() {}
+	`, "wasm32-wasi")
+	// Failable externs always use sret, even on WASM
+	assertContains(t, ir, "declare void @test_open(i8* %sret")
+}
+
+func TestWasmExternWithoutImportStillSret(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_internal(int x) int `+"`extern(\"test_internal\") `target(wasm)"+`;
+		main() {}
+	`, "wasm32-wasi")
+	// Externs without wasm_import annotation keep sret ABI on WASM
+	assertContains(t, ir, "declare void @test_internal(i8* %sret, i8* %x)")
 }
 
 func TestExternMultipleParams(t *testing.T) {

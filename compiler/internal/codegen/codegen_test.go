@@ -19397,6 +19397,73 @@ func TestMutexLockAcquiresAndAllocatesGuard(t *testing.T) {
 	assertContains(t, ir, "call i8* @pal_alloc(i64 8)")
 }
 
+// T0301: Mutex.lock() must route to the contested path when waiters are queued,
+// even if held==0 momentarily. Prevents newcomer starvation under contention
+// when pthread_mutex is not FIFO. The acquired path requires both held==0 AND
+// waiter_head==null, combined via `or` on the two conditions.
+func TestMutexLockFairCheck(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](0);
+			use guard := m.lock();
+		}
+	`)
+	// Locate the block that branches on `mustWait` via `mutex.contested`/`mutex.acquired`.
+	acqIdx := strings.Index(ir, "label %mutex.acquired")
+	if acqIdx < 0 {
+		t.Fatal("expected mutex.acquired branch label in IR")
+	}
+	// Search a small window before the branch for the fair-check instructions:
+	// `icmp ne i8* %waiterHead, null` for hasWaiter, then `or i1 %isHeld, %hasWaiter`.
+	windowStart := acqIdx - 400
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	window := ir[windowStart:acqIdx]
+	if !strings.Contains(window, "or i1") {
+		t.Errorf("expected `or i1` combining held and waiter_head checks before mutex.acquired")
+	}
+	if !strings.Contains(window, "icmp ne i8*") {
+		t.Errorf("expected `icmp ne i8*` for waiter_head != null check before mutex.acquired")
+	}
+}
+
+// T0301: MutexGuard.drop's no-waiter unlock path must signal cond BEFORE
+// pal_mutex_unlock (within the unlock.no_waiter block). Signal-before-unlock
+// is the defensive POSIX ordering — it avoids a theoretical window where a
+// waking cond_wait thread could observe stale `held` state on re-acquire.
+func TestMutexUnlockNoWaiterSignalBeforeUnlock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](0);
+			guard := m.lock();
+		}
+	`)
+	dropFn := extractFunction(ir, "MutexGuard.drop")
+	if dropFn == "" {
+		t.Fatal("expected MutexGuard.drop function in IR")
+	}
+	// Locate the no_waiter block body.
+	marker := "unlock.no_waiter:"
+	blkStart := strings.Index(dropFn, marker)
+	if blkStart < 0 {
+		t.Fatal("expected unlock.no_waiter block in MutexGuard.drop")
+	}
+	// Block ends at the next block label or `br`/return.
+	blkTail := dropFn[blkStart:]
+	idxSignal := strings.Index(blkTail, "@pal_cond_signal")
+	idxUnlock := strings.Index(blkTail, "@pal_mutex_unlock")
+	if idxSignal < 0 {
+		t.Fatal("expected pal_cond_signal in unlock.no_waiter block")
+	}
+	if idxUnlock < 0 {
+		t.Fatal("expected pal_mutex_unlock in unlock.no_waiter block")
+	}
+	if idxSignal > idxUnlock {
+		t.Errorf("pal_cond_signal must come before pal_mutex_unlock in no_waiter block; signal@%d unlock@%d", idxSignal, idxUnlock)
+	}
+}
+
 // T0156: MutexGuard.borrow getter loads T through the guard's mutex pointer.
 func TestMutexGuardBorrowGetter(t *testing.T) {
 	ir := generateIR(t, `

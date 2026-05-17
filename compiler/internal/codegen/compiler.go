@@ -2559,15 +2559,19 @@ func (c *Compiler) defineMutexGuardUnlockFreeBody(fn *ir.Func) {
 	handoffBlk.NewCall(c.palMutexUnlock, handle)
 	handoffBlk.NewBr(freeGuardBlk)
 
-	// no_waiter: clear held=0, signal cond for thread-blocked waiters, unlock
+	// no_waiter: clear held=0, signal cond for thread-blocked waiters, unlock.
+	// Signal cond BEFORE unlocking so the waking thread (if any) sees a coherent
+	// state on re-acquire. T0301: defensive ordering; POSIX allows either order
+	// but signal-before-unlock avoids a theoretical window where the waiter
+	// re-checks held, races with another thread setting held=1, and misses.
 	heldField := noWaiterBlk.NewGetElementPtr(metaTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHeld)))
 	noWaiterBlk.NewStore(constant.NewInt(irtypes.I8, 0), heldField)
 	condField := noWaiterBlk.NewGetElementPtr(metaTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldCond)))
 	cond := noWaiterBlk.NewLoad(irtypes.I8Ptr, condField)
-	noWaiterBlk.NewCall(c.palMutexUnlock, handle)
 	noWaiterBlk.NewCall(c.palCondSignal, cond)
+	noWaiterBlk.NewCall(c.palMutexUnlock, handle)
 	noWaiterBlk.NewBr(freeGuardBlk)
 
 	// Free guard

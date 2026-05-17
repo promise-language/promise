@@ -2882,15 +2882,24 @@ func (c *Compiler) genMutexLock(mutexRaw value.Value, elemType types.Type) value
 	handle := c.block.NewLoad(irtypes.I8Ptr, handleField)
 	c.block.NewCall(c.palMutexLock, handle)
 
-	// Load held flag
+	// Load held flag and waiter head. Acquired iff held==0 AND waiter_head==null.
+	// Queuing behind existing waiters prevents newcomer starvation under contention:
+	// pthread_mutex is not FIFO, so an arrival that races with a handoff could
+	// otherwise win the PAL handle repeatedly and starve parked waiters (T0301).
 	heldField := c.block.NewGetElementPtr(metaTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHeld)))
 	held := c.block.NewLoad(irtypes.I8, heldField)
 	isHeld := c.block.NewICmp(enum.IPredEQ, held, constant.NewInt(irtypes.I8, 1))
 
+	waiterHeadReadField := c.block.NewGetElementPtr(metaTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldWaiterHead)))
+	waiterHeadRead := c.block.NewLoad(irtypes.I8Ptr, waiterHeadReadField)
+	hasWaiter := c.block.NewICmp(enum.IPredNE, waiterHeadRead, constant.NewNull(irtypes.I8Ptr))
+	mustWait := c.block.NewOr(isHeld, hasWaiter)
+
 	acquiredBlk := c.newBlock("mutex.acquired")
 	contestedBlk := c.newBlock("mutex.contested")
-	c.block.NewCondBr(isHeld, contestedBlk, acquiredBlk)
+	c.block.NewCondBr(mustWait, contestedBlk, acquiredBlk)
 
 	// acquired: held=0 → set held=1, unlock metadata mutex, allocate guard
 	c.block = acquiredBlk

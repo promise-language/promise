@@ -3402,6 +3402,86 @@ func TestIsPresentOnOptionalPrimitiveStillAllowed(t *testing.T) {
 	`)
 }
 
+// T0295: `is` check against enum type should be rejected with a helpful error
+func TestIsEnumTypeRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color { red, green, blue }
+		test() {
+			c := Color.red;
+			if c is Color {}
+		}
+	`)
+	expectError(t, errs, "cannot use 'is' to check against enum type Color; use 'match' to test specific variants")
+}
+
+func TestIsEnumVariantStillAllowed(t *testing.T) {
+	checkOK(t, `
+		enum Color { red, green, blue }
+		test() {
+			c := Color.red;
+			if c is red {}
+		}
+	`)
+}
+
+func TestIsEnumWithInterfaceStillAllowed(t *testing.T) {
+	// enum implementing a structural interface — `is InterfaceName` should still be allowed
+	checkOK(t, `
+		type Named {
+			get name string `+"`abstract;"+`
+		}
+		enum Color {
+			red, green, blue,
+			get name string {
+				match this {
+					Color.red => { return "red"; },
+					Color.green => { return "green"; },
+					_ => { return "blue"; },
+				}
+			}
+		}
+		test() {
+			c := Color.red;
+			if c is Named {}
+		}
+	`)
+}
+
+func TestIsGenericEnumTypeRejected(t *testing.T) {
+	// T0295: `is EnumType` on a generic enum instance should also be rejected
+	errs := checkErrs(t, `
+		enum Result[T] { ok(T), err }
+		test() {
+			r := Result[int].err;
+			if r is Result {}
+		}
+	`)
+	expectError(t, errs, "cannot use 'is' to check against enum type Result; use 'match' to test specific variants")
+}
+
+func TestIsGenericEnumVariantStillAllowed(t *testing.T) {
+	// T0295: checking `is variantName` on a generic enum instance should still compile
+	checkOK(t, `
+		enum Result[T] { ok(T), err }
+		test() {
+			r := Result[int].err;
+			if r is err {}
+		}
+	`)
+}
+
+func TestIsUndefinedVariantError(t *testing.T) {
+	// `is undefinedName` where the name is not a type or enum variant → "undefined type" error
+	errs := checkErrs(t, `
+		enum Color { red, green, blue }
+		test() {
+			c := Color.red;
+			if c is purple {}
+		}
+	`)
+	expectError(t, errs, "undefined type: purple")
+}
+
 // --- Map Literal Tests ---
 
 func TestMapLiteral(t *testing.T) {

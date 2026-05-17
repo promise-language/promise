@@ -1962,7 +1962,25 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 			break
 		}
 		obj := c.lookup(p.Name)
-		if obj == nil {
+		if obj != nil {
+			// Reject `enumVar is EnumType` — the `is` operator is for inheritance checks,
+			// not enum variant testing. But allow `optionalEnumVar is EnumType` which is
+			// a valid optional-presence check (the optional wraps an enum value).
+			if _, ok := obj.Type().(*types.Enum); ok {
+				subjectIsEnum := false
+				if subjectType != nil {
+					switch st := subjectType.Underlying().(type) {
+					case *types.Enum:
+						subjectIsEnum = true
+					case *types.Instance:
+						_, subjectIsEnum = st.Origin().(*types.Enum)
+					}
+				}
+				if subjectIsEnum {
+					c.errorf(p.Pos(), "cannot use 'is' to check against enum type %s; use 'match' to test specific variants", p.Name)
+				}
+			}
+		} else {
 			// Check if the subject is an enum and the name is a variant.
 			// Handles both direct Enum types and generic Instance types (e.g., Option[int]).
 			isEnumVariant := false

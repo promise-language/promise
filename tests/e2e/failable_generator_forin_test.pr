@@ -1,0 +1,182 @@
+// T0284: for-in over failable generator without explicit error handling.
+// A failable generator that succeeds — yields values, no error.
+success_gen!(int n) stream[int] {
+  int i = 0;
+  while i < n {
+    yield i * 10;
+    i = i + 1;
+  }
+}
+
+// A failable generator that always errors (conditional keeps yield reachable).
+fail_gen!(bool fail) stream[int] {
+  if fail {
+    raise error(message: "gen failed");
+  }
+  yield 0;
+}
+
+// A failable generator that errors mid-stream after some yields.
+partial_gen!(int count) stream[int] {
+  int i = 0;
+  while i < count {
+    yield i;
+    i = i + 1;
+  }
+  raise error(message: "partial done");
+}
+
+// --- for-in without error handling (non-failable context — panics on error) ---
+
+test_forin_failable_gen_success() `test {
+  // Failable generator that succeeds — all values collected, no panic.
+  int[] results = [];
+  for x in success_gen(3) {
+    results.push(x);
+  }
+  assert(results.len == 3, "should have 3 elements");
+  assert(results[0] == 0, "first element");
+  assert(results[1] == 10, "second element");
+  assert(results[2] == 20, "third element");
+}
+
+test_forin_failable_gen_empty() `test {
+  // Failable generator that succeeds with zero yields.
+  int[] results = [];
+  for x in success_gen(0) {
+    results.push(x);
+  }
+  assert(results.len == 0, "empty generator");
+}
+
+test_forin_failable_gen_break() `test {
+  // Break from for-in over failable generator without explicit error handling.
+  int count = 0;
+  for x in success_gen(10) {
+    if x >= 20 {
+      break;
+    }
+    count++;
+  }
+  assert(count == 2, "break after 0 and 10");
+}
+
+// --- for-in without error handling in failable context (propagates on error) ---
+
+collect_implicit!(int n) int[] {
+  // Failable function — implicit error from generator factory propagates to caller.
+  int[] results = [];
+  for x in success_gen(n) {
+    results.push(x);
+  }
+  return results;
+}
+
+test_forin_failable_gen_propagate_success() `test {
+  int[] results = collect_implicit(3)?!;
+  assert(results.len == 3, "should have 3 elements");
+  assert(results[0] == 0, "first element");
+  assert(results[1] == 10, "second element");
+  assert(results[2] == 20, "third element");
+}
+
+collect_failing_implicit!() int[] {
+  int[] results = [];
+  for x in fail_gen(true) {
+    results.push(x);
+  }
+  return results;
+}
+
+test_forin_failable_gen_propagate_error() `test {
+  // Factory error propagates through the failable caller.
+  bool caught = false;
+  collect_failing_implicit()? e {
+    caught = true;
+  };
+  assert(caught, "factory error should propagate");
+}
+
+// --- yield* without explicit error handling ---
+
+delegate_implicit!(int n) stream[int] {
+  yield * success_gen(n);
+}
+
+test_yield_delegate_failable_implicit_success() `test {
+  int[] results = [];
+  for x in delegate_implicit(3)?! {
+    results.push(x);
+  }
+  assert(results.len == 3, "should have 3 elements");
+  assert(results[0] == 0, "first element");
+  assert(results[1] == 10, "second element");
+  assert(results[2] == 20, "third element");
+}
+
+delegate_failing_implicit!() stream[int] {
+  yield * fail_gen(true);
+}
+
+test_yield_delegate_failable_implicit_error() `test {
+  bool caught = false;
+  delegate_failing_implicit()? e {
+    caught = true;
+  };
+  assert(caught, "delegated factory error should propagate");
+}
+
+// --- for-in (not yield*) inside a failable generator ---
+
+gen_forin_collect!(int n) stream[int] {
+  // Failable generator that uses for-in over another failable generator.
+  for x in success_gen(n) {
+    yield x + 1;
+  }
+}
+
+test_forin_in_failable_generator() `test {
+  int[] results = [];
+  for x in gen_forin_collect(3)?! {
+    results.push(x);
+  }
+  assert(results.len == 3, "should have 3 elements");
+  assert(results[0] == 1, "first +1");
+  assert(results[1] == 11, "second +1");
+  assert(results[2] == 21, "third +1");
+}
+
+gen_forin_fail_factory!(bool fail) stream[int] {
+  for x in fail_gen(fail) {
+    yield x;
+  }
+}
+
+test_forin_in_failable_generator_factory_error() `test {
+  bool caught = false;
+  gen_forin_fail_factory(true)? e {
+    caught = true;
+  };
+  assert(caught, "factory error inside failable generator should propagate");
+}
+
+// --- mid-iteration error from failable generator ---
+
+collect_partial!(int count) int[] {
+  // Failable function — partial_gen yields some values then raises.
+  int[] results = [];
+  for x in partial_gen(count) {
+    results.push(x);
+  }
+  return results;
+}
+
+test_forin_failable_gen_mid_iteration_error() `test {
+  // partial_gen yields 0,1,2 then raises — error propagates, partial results discarded.
+  bool caught = false;
+  collect_partial(3)? e {
+    caught = true;
+    assert(e.message == "partial done", "error message");
+  };
+  assert(caught, "mid-iteration error should propagate");
+}

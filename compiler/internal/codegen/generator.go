@@ -585,6 +585,41 @@ func (c *Compiler) emitGeneratorError(errVal value.Value) {
 	c.block.NewBr(c.generatorFinalSuspend)
 }
 
+// unwrapFailableGeneratorResult unwraps a failable result struct from a
+// generator factory call. On error: panics (non-failable context), propagates
+// (failable function), or stores to generator error slot (failable generator).
+// On success: returns the inner generator value struct.
+func (c *Compiler) unwrapFailableGeneratorResult(result value.Value, pos ast.Pos) value.Value {
+	resultType := result.Type().(*irtypes.StructType)
+	tag := c.block.NewExtractValue(result, 0)
+
+	errBlk := c.newBlock("gen.factory.err")
+	okBlk := c.newBlock("gen.factory.ok")
+	c.block.NewCondBr(tag, errBlk, okBlk)
+
+	c.block = errBlk
+	errPtr := c.block.NewExtractValue(result, resultErrIdx(resultType))
+	c.emitStmtTempCleanupForErrorPath()
+	c.emitHeapTempCleanupForErrorPath()
+	if c.inGenerator && c.generatorCanError {
+		if len(c.scopeBindings) > 0 {
+			c.emitScopeCleanup(0, true)
+		}
+		c.emitGeneratorError(errPtr)
+	} else if c.canError {
+		if len(c.scopeBindings) > 0 {
+			c.emitScopeCleanup(0, true)
+		}
+		callerResultType := c.currentResultType()
+		c.block.NewRet(c.wrapError(errPtr, callerResultType))
+	} else {
+		c.emitErrorPanic(errPtr, pos.File, pos.Line)
+	}
+
+	c.block = okBlk
+	return c.block.NewExtractValue(result, 1)
+}
+
 // emitYieldValue stores a value into the generator's yield slot and suspends.
 // On resume, execution continues in a new block (set as c.block).
 func (c *Compiler) emitYieldValue(val value.Value) {
@@ -610,6 +645,10 @@ func (c *Compiler) genYieldDelegateStmt(s *ast.YieldDelegateStmt) {
 
 	if elem, ok := types.AsStream(iterableType); ok {
 		genVal := c.genExpr(s.Value)
+		// T0284: Failable sub-generator factory called without explicit error handling.
+		if c.info.FailableExprs[s.Value] {
+			genVal = c.unwrapFailableGeneratorResult(genVal, s.Pos())
+		}
 		c.genYieldDelegateGenerator(genVal, elem, s.Pos())
 	} else if arr, ok := iterableType.(*types.Array); ok {
 		c.genYieldDelegateArray(s.Value, arr)

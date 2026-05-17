@@ -14599,6 +14599,59 @@ func TestFailableGeneratorBreakCleanup(t *testing.T) {
 	assertContains(t, ir, "gen.cleanup.skip")
 }
 
+// T0284: for-in over failable generator without explicit error handling
+// should unwrap the failable result and produce gen.factory.err / gen.factory.ok blocks.
+func TestFailableGeneratorForInUnwrap(t *testing.T) {
+	ir := generateIR(t, `
+		gen!() stream[int] {
+			yield 1;
+		}
+		main() {
+			for x in gen() {
+			}
+		}
+	`)
+	assertContains(t, ir, "gen.factory.err")
+	assertContains(t, ir, "gen.factory.ok")
+}
+
+// T0284: for-in over failable generator in a failable function — error propagates via ret.
+func TestFailableGeneratorForInUnwrapFailableFunc(t *testing.T) {
+	ir := generateIR(t, `
+		gen!() stream[int] {
+			yield 1;
+		}
+		foo!() int {
+			for x in gen() {
+			}
+			return 0;
+		}
+		main() {
+			foo()?!;
+		}
+	`)
+	assertContains(t, ir, "gen.factory.err")
+	assertContains(t, ir, "gen.factory.ok")
+}
+
+// T0284: yield* from failable generator in a failable generator — error stored to generator error slot.
+func TestFailableGeneratorYieldDelegateUnwrap(t *testing.T) {
+	ir := generateIR(t, `
+		gen!() stream[int] {
+			yield 1;
+		}
+		outer!() stream[int] {
+			yield * gen();
+		}
+		main() {
+			for x in outer()?! {
+			}
+		}
+	`)
+	assertContains(t, ir, "gen.factory.err")
+	assertContains(t, ir, "gen.factory.ok")
+}
+
 func TestMultiParamGenericType(t *testing.T) {
 	ir := generateIR(t, `
 		type Pair[A, B] {

@@ -648,6 +648,7 @@ func hMatchPattern(h hash.Hash, p ast.MatchPattern) {
 	switch pat := p.(type) {
 	case *ast.EnumDestructureMatchPattern:
 		wb(h, 1)
+		ws(h, pat.Module)
 		ws(h, pat.Enum)
 		ws(h, pat.Variant)
 		for _, b := range pat.Bindings {
@@ -656,6 +657,7 @@ func hMatchPattern(h hash.Hash, p ast.MatchPattern) {
 		wb(h, 0xFE)
 	case *ast.EnumVariantMatchPattern:
 		wb(h, 2)
+		ws(h, pat.Module)
 		ws(h, pat.Enum)
 		ws(h, pat.Variant)
 	case *ast.TypeBindingMatchPattern:

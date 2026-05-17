@@ -2274,6 +2274,12 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 	var resultType types.Type
 	for _, arm := range e.Arms {
 		c.openScope(arm, "match-arm")
+		// T0299: Rewrite module-qualified enum patterns before type-checking.
+		// The parser creates ExpressionMatchPattern for mod.Type.Variant because
+		// ANTLR's prediction prefers the expression alternative. Detect and rewrite
+		// to EnumVariantMatchPattern/EnumDestructureMatchPattern before checkMatchPattern
+		// would type-check the expression (which would fail for destructure bindings).
+		c.rewriteQualifiedEnumPattern(arm)
 		c.checkMatchPattern(arm.Pattern, subjectType)
 		// B0328: Resolve bare variant names to enum variant patterns.
 		// The parser creates NameMatchPattern for bare identifiers like "Red".
@@ -2349,20 +2355,8 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 
 	switch p := pat.(type) {
 	case *ast.EnumDestructureMatchPattern:
-		obj := c.lookup(p.Enum)
-		if obj == nil {
-			c.errorf(p.Pos(), "undefined: %s", p.Enum)
-			c.suggestForUndefinedIdent(p.Pos(), p.Enum)
-			return
-		}
-		tn, ok := obj.(*types.TypeName)
+		enum, ok := c.resolveEnumForPattern(p.Module, p.Enum, p.Pos())
 		if !ok {
-			c.errorf(p.Pos(), "%s is not a type", p.Enum)
-			return
-		}
-		enum, ok := tn.Type().(*types.Enum)
-		if !ok {
-			c.errorf(p.Pos(), "%s is not an enum type", p.Enum)
 			return
 		}
 		v := enum.LookupVariant(p.Variant)
@@ -2376,19 +2370,8 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 		}
 
 	case *ast.EnumVariantMatchPattern:
-		obj := c.lookup(p.Enum)
-		if obj == nil {
-			c.errorf(p.Pos(), "undefined: %s", p.Enum)
-			c.suggestForUndefinedIdent(p.Pos(), p.Enum)
-			return
-		}
-		tn, ok := obj.(*types.TypeName)
+		enum, ok := c.resolveEnumForPattern(p.Module, p.Enum, p.Pos())
 		if !ok {
-			return
-		}
-		enum, ok := tn.Type().(*types.Enum)
-		if !ok {
-			c.errorf(p.Pos(), "%s is not an enum type", p.Enum)
 			return
 		}
 		if enum.LookupVariant(p.Variant) == nil {
@@ -2531,10 +2514,178 @@ func (c *Checker) insertDestructureBindings(pos ast.Pos, bindings []string, fiel
 	}
 }
 
+// rewriteQualifiedEnumPattern detects ExpressionMatchPattern nodes that contain
+// module-qualified enum variant patterns (mod.Type.Variant or mod.Type.Variant(a,b))
+// and rewrites them to EnumVariantMatchPattern / EnumDestructureMatchPattern.
+// This must run BEFORE checkMatchPattern to prevent the expression type-checker
+// from treating destructure bindings as undefined variable references.
+func (c *Checker) rewriteQualifiedEnumPattern(arm *ast.MatchArm) {
+	ep, ok := arm.Pattern.(*ast.ExpressionMatchPattern)
+	if !ok {
+		return
+	}
+
+	// Case 1: mod.Type.Variant(bindings) — call expression on 3-part member access
+	if call, ok := ep.Expr.(*ast.CallExpr); ok {
+		mod, enum, variant, ok := c.extractQualifiedEnumChain(call.Callee)
+		if !ok {
+			return
+		}
+		// Verify bindings are all simple positional identifiers
+		var bindings []string
+		for _, arg := range call.Args {
+			if arg.Name != "" {
+				return // named args aren't destructure bindings
+			}
+			ident, ok := arg.Value.(*ast.IdentExpr)
+			if !ok {
+				return // not a destructure pattern
+			}
+			bindings = append(bindings, ident.Name)
+		}
+		p := &ast.EnumDestructureMatchPattern{
+			Module:   mod,
+			Enum:     enum,
+			Variant:  variant,
+			Bindings: bindings,
+		}
+		p.SetPosEnd(ep.Pos(), ep.End())
+		arm.Pattern = p
+		return
+	}
+
+	// Case 2: mod.Type.Variant — 3-part member access chain
+	mod, enum, variant, ok := c.extractQualifiedEnumChain(ep.Expr)
+	if !ok {
+		return
+	}
+	p := &ast.EnumVariantMatchPattern{
+		Module:  mod,
+		Enum:    enum,
+		Variant: variant,
+	}
+	p.SetPosEnd(ep.Pos(), ep.End())
+	arm.Pattern = p
+}
+
+// extractQualifiedEnumChain checks if an expression is a 3-part member access
+// chain (a.B.C) where a is a module and B is an enum in that module with variant C.
+// Returns (module, enum, variant, true) if valid, or ("", "", "", false) otherwise.
+func (c *Checker) extractQualifiedEnumChain(expr ast.Expr) (string, string, string, bool) {
+	// Must be MemberExpr: ?.Variant
+	outer, ok := expr.(*ast.MemberExpr)
+	if !ok {
+		return "", "", "", false
+	}
+	variant := outer.Field
+
+	// Target must be MemberExpr: ?.Enum
+	inner, ok := outer.Target.(*ast.MemberExpr)
+	if !ok {
+		return "", "", "", false
+	}
+	enumName := inner.Field
+
+	// Target must be IdentExpr: module
+	ident, ok := inner.Target.(*ast.IdentExpr)
+	if !ok {
+		return "", "", "", false
+	}
+	modName := ident.Name
+
+	// Verify: modName is a module, enumName is an enum in it, variant exists
+	modObj := c.lookup(modName)
+	if modObj == nil {
+		return "", "", "", false
+	}
+	mod, ok := modObj.(*types.Module)
+	if !ok {
+		return "", "", "", false
+	}
+	if mod.Scope() == nil {
+		return "", "", "", false
+	}
+	typeObj := mod.Scope().Lookup(enumName)
+	if typeObj == nil {
+		return "", "", "", false
+	}
+	tn, ok := typeObj.(*types.TypeName)
+	if !ok {
+		return "", "", "", false
+	}
+	enum, ok := tn.Type().(*types.Enum)
+	if !ok {
+		return "", "", "", false
+	}
+	if enum.LookupVariant(variant) == nil {
+		return "", "", "", false
+	}
+	return modName, enumName, variant, true
+}
+
+// resolveEnumForPattern resolves an enum type from a pattern, handling module-qualified names.
+func (c *Checker) resolveEnumForPattern(module, name string, pos ast.Pos) (*types.Enum, bool) {
+	var obj types.Object
+	if module != "" {
+		modObj := c.lookup(module)
+		if modObj == nil {
+			c.errorf(pos, "undefined: %s", module)
+			return nil, false
+		}
+		mod, ok := modObj.(*types.Module)
+		if !ok {
+			c.errorf(pos, "%s is not a module", module)
+			return nil, false
+		}
+		if mod.Scope() == nil {
+			c.errorf(pos, "module '%s' has no loaded scope", module)
+			return nil, false
+		}
+		obj = mod.Scope().Lookup(name)
+		if obj == nil {
+			c.errorf(pos, "module '%s' has no type '%s'", module, name)
+			return nil, false
+		}
+	} else {
+		obj = c.lookup(name)
+		if obj == nil {
+			c.errorf(pos, "undefined: %s", name)
+			c.suggestForUndefinedIdent(pos, name)
+			return nil, false
+		}
+	}
+	tn, ok := obj.(*types.TypeName)
+	if !ok {
+		c.errorf(pos, "%s is not a type", name)
+		return nil, false
+	}
+	enum, ok := tn.Type().(*types.Enum)
+	if !ok {
+		c.errorf(pos, "%s is not an enum type", name)
+		return nil, false
+	}
+	return enum, true
+}
+
 // insertEnumDestructureBindings handles Enum.Variant(a, b) pattern bindings.
 // Uses subjectType to build a substitution map for generic enum instances.
+// Errors are not emitted here — checkMatchPattern already validated the pattern.
 func (c *Checker) insertEnumDestructureBindings(p *ast.EnumDestructureMatchPattern, subjectType types.Type) {
-	obj := c.lookup(p.Enum)
+	// Silent lookup — errors were already emitted by checkMatchPattern.
+	var obj types.Object
+	if p.Module != "" {
+		modObj := c.lookup(p.Module)
+		if modObj == nil {
+			return
+		}
+		mod, ok := modObj.(*types.Module)
+		if !ok || mod.Scope() == nil {
+			return
+		}
+		obj = mod.Scope().Lookup(p.Enum)
+	} else {
+		obj = c.lookup(p.Enum)
+	}
 	if obj == nil {
 		return
 	}

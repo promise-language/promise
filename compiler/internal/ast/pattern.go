@@ -1,8 +1,9 @@
 package ast
 
-// EnumDestructureMatchPattern: Color.Custom(r, g, b)
+// EnumDestructureMatchPattern: Color.Custom(r, g, b) or mod.Color.Custom(r, g, b)
 type EnumDestructureMatchPattern struct {
 	nodeBase
+	Module   string // empty for unqualified (e.g., "json" for json.JsonValue.Null)
 	Enum     string
 	Variant  string
 	Bindings []string
@@ -10,9 +11,10 @@ type EnumDestructureMatchPattern struct {
 
 func (*EnumDestructureMatchPattern) matchPatternTag() {}
 
-// EnumVariantMatchPattern: Dir.North
+// EnumVariantMatchPattern: Dir.North or mod.Dir.North
 type EnumVariantMatchPattern struct {
 	nodeBase
+	Module  string // empty for unqualified (e.g., "json" for json.JsonValue.Null)
 	Enum    string
 	Variant string
 }

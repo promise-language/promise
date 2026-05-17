@@ -64,6 +64,14 @@ color_name(Color c) string `public {
   return c.name();
 }
 
+// --- Public enum with payload fields ---
+
+enum Shape `public {
+  Circle(int radius),
+  Rect(int w, int h),
+  Point,
+}
+
 // --- Public generic type ---
 
 type Pair[A, B] `public {

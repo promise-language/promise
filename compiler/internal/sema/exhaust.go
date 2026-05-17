@@ -76,11 +76,11 @@ func (c *Checker) hasCatchAll(arms []*ast.MatchArm) bool {
 func (c *Checker) collectCoveredVariants(pat ast.MatchPattern, enum *types.Enum, covered map[string]bool) {
 	switch p := pat.(type) {
 	case *ast.EnumVariantMatchPattern:
-		if c.matchesEnum(p.Enum, enum) {
+		if c.matchesEnumQualified(p.Module, p.Enum, enum) {
 			covered[p.Variant] = true
 		}
 	case *ast.EnumDestructureMatchPattern:
-		if c.matchesEnum(p.Enum, enum) {
+		if c.matchesEnumQualified(p.Module, p.Enum, enum) {
 			covered[p.Variant] = true
 		}
 	case *ast.ShortDestructureMatchPattern:
@@ -133,9 +133,26 @@ func extractEnum(typ types.Type) *types.Enum {
 	return nil
 }
 
-// matchesEnum checks if a pattern's enum name matches the given enum type.
-func (c *Checker) matchesEnum(name string, enum *types.Enum) bool {
-	obj := c.lookup(name)
+// matchesEnumQualified checks if a pattern's enum name matches the given enum type,
+// handling module-qualified names (e.g., "json", "JsonValue").
+func (c *Checker) matchesEnumQualified(module, name string, enum *types.Enum) bool {
+	var obj types.Object
+	if module != "" {
+		modObj := c.lookup(module)
+		if modObj == nil {
+			return false
+		}
+		mod, ok := modObj.(*types.Module)
+		if !ok {
+			return false
+		}
+		if mod.Scope() == nil {
+			return false
+		}
+		obj = mod.Scope().Lookup(name)
+	} else {
+		obj = c.lookup(name)
+	}
 	if obj == nil {
 		return false
 	}

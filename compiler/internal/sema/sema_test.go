@@ -14121,6 +14121,184 @@ func TestMutexConstructorWrongType(t *testing.T) {
 	expectError(t, errs, "cannot assign string")
 }
 
+// --- T0299: Module-qualified enum match pattern tests ---
+
+// makeModuleScopeWithEnum creates a module scope with an exported enum Color{Red,Green,Blue}
+// and an exported enum Shape{Circle(int radius), Rect(int w, int h), Point}.
+func makeModuleScopeWithEnum(t *testing.T) *types.Scope {
+	t.Helper()
+	scope := types.NewScope(nil, types.Pos{}, types.Pos{}, "module")
+
+	// Color enum: Red, Green, Blue (fieldless)
+	tn := types.NewTypeName(types.Pos{}, "Color", nil)
+	enum := types.NewEnum(tn, nil)
+	enum.SetExported(true)
+	enum.AddVariant(types.NewVariant("Red", nil))
+	enum.AddVariant(types.NewVariant("Green", nil))
+	enum.AddVariant(types.NewVariant("Blue", nil))
+	scope.Insert(tn)
+
+	// Shape enum: Circle(int radius), Rect(int w, int h), Point
+	tn2 := types.NewTypeName(types.Pos{}, "Shape", nil)
+	enum2 := types.NewEnum(tn2, nil)
+	enum2.SetExported(true)
+	enum2.AddVariant(types.NewVariant("Circle", []*types.VarField{types.NewVarField("radius", types.TypInt)}))
+	enum2.AddVariant(types.NewVariant("Rect", []*types.VarField{types.NewVarField("w", types.TypInt), types.NewVarField("h", types.TypInt)}))
+	enum2.AddVariant(types.NewVariant("Point", nil))
+	scope.Insert(tn2)
+
+	return scope
+}
+
+func TestModuleQualifiedEnumVariantMatch(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Color c = mymod.Color.Red;
+			int n = match c {
+				mymod.Color.Red => 1,
+				mymod.Color.Green => 2,
+				mymod.Color.Blue => 3,
+			};
+		}
+	`, moduleScopes)
+	expectNoErrors(t, errs)
+}
+
+func TestModuleQualifiedEnumDestructureMatch(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Shape s = mymod.Shape.Circle(radius: 5);
+			int r = match s {
+				mymod.Shape.Circle(radius) => radius,
+				mymod.Shape.Rect(w, h) => w + h,
+				mymod.Shape.Point => 0,
+			};
+		}
+	`, moduleScopes)
+	expectNoErrors(t, errs)
+}
+
+func TestModuleQualifiedEnumMatchExhaustive(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	// Exhaustive: all variants covered, no wildcard needed
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Color c = mymod.Color.Green;
+			string name = match c {
+				mymod.Color.Red => "red",
+				mymod.Color.Green => "green",
+				mymod.Color.Blue => "blue",
+			};
+		}
+	`, moduleScopes)
+	expectNoErrors(t, errs)
+}
+
+func TestModuleQualifiedEnumMatchNonExhaustive(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	// Non-exhaustive: missing Blue variant, no wildcard
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Color c = mymod.Color.Green;
+			string name = match c {
+				mymod.Color.Red => "red",
+				mymod.Color.Green => "green",
+			};
+		}
+	`, moduleScopes)
+	expectError(t, errs, "match is not exhaustive")
+}
+
+func TestModuleQualifiedEnumMatchUndefinedVariant(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Color c = mymod.Color.Red;
+			match c {
+				mymod.Color.Purple => {},
+				_ => {},
+			};
+		}
+	`, moduleScopes)
+	expectError(t, errs, "has no variant or method Purple")
+}
+
+func TestModuleQualifiedEnumMatchNotAnEnum(t *testing.T) {
+	// Module has a named type (not enum) — pattern should error
+	modScope := makeModuleScopeWithTypes(t)
+	moduleScopes := map[string]*types.Scope{"models": modScope}
+
+	_, errs := checkWithModules(t, `
+		use models;
+		test() {
+			int x = 1;
+			match x {
+				models.User.Foo => {},
+				_ => {},
+			};
+		}
+	`, moduleScopes)
+	// ExpressionMatchPattern not rewritten because User is not an enum
+	// Falls through to expression type checking
+	if len(errs) == 0 {
+		t.Fatal("expected errors for non-enum type in match pattern")
+	}
+}
+
+func TestModuleQualifiedEnumDestructureBindingCount(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	// Wrong number of bindings for Rect(w, h)
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Shape s = mymod.Shape.Rect(w: 3, h: 4);
+			match s {
+				mymod.Shape.Circle(r) => {},
+				mymod.Shape.Rect(x) => {},
+				mymod.Shape.Point => {},
+			};
+		}
+	`, moduleScopes)
+	expectError(t, errs, "has 2 fields, got 1")
+}
+
+func TestModuleQualifiedEnumMatchWithWildcard(t *testing.T) {
+	modScope := makeModuleScopeWithEnum(t)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	// Partial coverage + wildcard → exhaustive
+	_, errs := checkWithModules(t, `
+		use mymod;
+		test() {
+			mymod.Color c = mymod.Color.Red;
+			int n = match c {
+				mymod.Color.Red => 1,
+				_ => 0,
+			};
+		}
+	`, moduleScopes)
+	expectNoErrors(t, errs)
+}
+
 // T0156: MutexGuard cannot be constructed directly.
 func TestMutexGuardDirectConstruction(t *testing.T) {
 	errs := checkErrs(t, `

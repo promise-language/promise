@@ -1,0 +1,107 @@
+use mathlib "./mathlib";
+
+// ── Module-qualified enum variant match (fieldless) ─────────────────────────
+
+test_qualified_variant_match() `test {
+  mathlib.Color c = mathlib.Color.Red;
+  int n = match c {
+    mathlib.Color.Red => 1,
+    mathlib.Color.Green => 2,
+    mathlib.Color.Blue => 3,
+  };
+  assert(n == 1, "got " + n.to_string());
+}
+
+test_qualified_variant_match_all() `test {
+  assert(match mathlib.Color.Red {
+    mathlib.Color.Red => true, _ => false,
+  }
+  == true, "Red");
+  assert(match mathlib.Color.Green {
+    mathlib.Color.Green => true, _ => false,
+  }
+  == true, "Green");
+  assert(match mathlib.Color.Blue {
+    mathlib.Color.Blue => true, _ => false,
+  }
+  == true, "Blue");
+}
+
+// ── Module-qualified enum destructure match (with payload) ──────────────────
+
+test_qualified_destructure_match() `test {
+  mathlib.Shape s = mathlib.Shape.Circle(radius: 5);
+  int r = match s {
+    mathlib.Shape.Circle(radius) => radius,
+    mathlib.Shape.Rect(w, h) => w + h,
+    mathlib.Shape.Point => 0,
+  };
+  assert(r == 5, "got " + r.to_string());
+}
+
+test_qualified_destructure_rect() `test {
+  mathlib.Shape s = mathlib.Shape.Rect(w: 3, h: 4);
+  int area = match s {
+    mathlib.Shape.Circle(radius) => radius * radius,
+    mathlib.Shape.Rect(w, h) => w * h,
+    mathlib.Shape.Point => 0,
+  };
+  assert(area == 12, "got " + area.to_string());
+}
+
+test_qualified_destructure_point() `test {
+  mathlib.Shape s = mathlib.Shape.Point;
+  bool is_point = match s {
+    mathlib.Shape.Circle(radius) => false,
+    mathlib.Shape.Rect(w, h) => false,
+    mathlib.Shape.Point => true,
+  };
+  assert(is_point, "should be Point");
+}
+
+// ── Exhaustive match with module-qualified patterns (no wildcard) ───────────
+
+test_qualified_exhaustive() `test {
+  mathlib.Color c = mathlib.Color.Green;
+  string name = match c {
+    mathlib.Color.Red => "red",
+    mathlib.Color.Green => "green",
+    mathlib.Color.Blue => "blue",
+  };
+  assert(name == "green", "got " + name);
+}
+
+// ── Module-qualified match with wildcard ────────────────────────────────────
+
+test_qualified_with_wildcard() `test {
+  mathlib.Shape s = mathlib.Shape.Point;
+  bool matched = match s {
+    mathlib.Shape.Circle(r) => false,
+    _ => true,
+  };
+  assert(matched, "wildcard should match");
+}
+
+// ── Match result used in expression context ─────────────────────────────────
+
+test_qualified_match_in_expression() `test {
+  mathlib.Color c = mathlib.Color.Blue;
+  string result = "color is " + match c {
+    mathlib.Color.Red => "red",
+    mathlib.Color.Green => "green",
+    mathlib.Color.Blue => "blue",
+  };
+  assert(result == "color is blue", "got " + result);
+}
+
+// ── Destructure binding used in computation ─────────────────────────────────
+
+test_qualified_destructure_computation() `test {
+  mathlib.Shape s = mathlib.Shape.Rect(w: 6, h: 7);
+  int perimeter = match s {
+    mathlib.Shape.Circle(r) => 2 * r,
+    mathlib.Shape.Rect(w, h) => 2 * (w + h),
+    mathlib.Shape.Point => 0,
+  };
+  assert(perimeter == 26, "got " + perimeter.to_string());
+}

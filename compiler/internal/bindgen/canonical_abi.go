@@ -160,6 +160,28 @@ func flatParamName(baseName string, index, total int) string {
 	return fmt.Sprintf("%s_%d", baseName, index-1)
 }
 
+// witElemSize returns the canonical ABI element size in bytes for a WIT builtin type.
+func witElemSize(builtin string) int {
+	switch builtin {
+	case "u8", "s8", "bool":
+		return 1
+	case "u16", "s16":
+		return 2
+	case "u32", "s32", "f32", "char":
+		return 4
+	case "u64", "s64", "f64":
+		return 8
+	default:
+		return 4
+	}
+}
+
+// vectorHelperSuffix returns a safe identifier suffix for vector helper functions
+// based on the element type (e.g., "u8" for list<u8>, "i32" for list<s32>).
+func vectorHelperSuffix(elem TypeRef) string {
+	return promiseType(elem)
+}
+
 // needsCanonicalLowering returns true if a TypeRef requires canonical ABI
 // lowering (i.e., is not a simple scalar that passes directly).
 func needsCanonicalLowering(ref TypeRef) bool {

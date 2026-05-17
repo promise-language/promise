@@ -1662,9 +1662,17 @@ func TestLowerParamToFlatList(t *testing.T) {
 	g := &generator{canonicalABI: true, target: "wasi"}
 	p := Param{Name: "data", Type: TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}}}
 	got := g.lowerParamToFlat(p)
-	// List lowering is a TODO — should pass as-is for now
-	if len(got) != 1 || got[0] != "data" {
-		t.Errorf("lowerParamToFlat(list): got %v, want [data]", got)
+	if len(got) != 2 || got[0] != "_cabi_vector_data_u8(data)" || got[1] != "_cabi_vector_len_u8(data)" {
+		t.Errorf("lowerParamToFlat(list<u8>): got %v, want [_cabi_vector_data_u8(data), _cabi_vector_len_u8(data)]", got)
+	}
+}
+
+func TestLowerParamToFlatListS32(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	p := Param{Name: "ids", Type: TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "s32"}}}
+	got := g.lowerParamToFlat(p)
+	if len(got) != 2 || got[0] != "_cabi_vector_data_i32(ids)" || got[1] != "_cabi_vector_len_i32(ids)" {
+		t.Errorf("lowerParamToFlat(list<s32>): got %v", got)
 	}
 }
 
@@ -2110,4 +2118,236 @@ func TestResultPayloadOffsetUnion(t *testing.T) {
 			t.Errorf("resultPayloadOffset(%s): got %d, want %d", tt.name, got, tt.want)
 		}
 	}
+}
+
+// --- Vector/list canonical ABI tests (T0292) ---
+
+func TestWitElemSize(t *testing.T) {
+	tests := []struct {
+		builtin string
+		want    int
+	}{
+		{"u8", 1}, {"s8", 1}, {"bool", 1},
+		{"u16", 2}, {"s16", 2},
+		{"u32", 4}, {"s32", 4}, {"f32", 4}, {"char", 4},
+		{"u64", 8}, {"s64", 8}, {"f64", 8},
+		{"unknown", 4},
+	}
+	for _, tt := range tests {
+		got := witElemSize(tt.builtin)
+		if got != tt.want {
+			t.Errorf("witElemSize(%q) = %d, want %d", tt.builtin, got, tt.want)
+		}
+	}
+}
+
+func TestVectorHelperSuffix(t *testing.T) {
+	tests := []struct {
+		elem TypeRef
+		want string
+	}{
+		{TypeRef{Kind: BuiltinKind, Builtin: "u8"}, "u8"},
+		{TypeRef{Kind: BuiltinKind, Builtin: "s32"}, "i32"},
+		{TypeRef{Kind: BuiltinKind, Builtin: "f64"}, "f64"},
+		{TypeRef{Kind: BuiltinKind, Builtin: "bool"}, "bool"},
+	}
+	for _, tt := range tests {
+		got := vectorHelperSuffix(tt.elem)
+		if got != tt.want {
+			t.Errorf("vectorHelperSuffix(%q) = %q, want %q", tt.elem.Builtin, got, tt.want)
+		}
+	}
+}
+
+func TestCollectListElemTypes(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{
+			{
+				Name: "send",
+				Kind: FuncFree,
+				Params: []Param{
+					{Name: "data", Type: TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}}},
+				},
+				ImportName: "send",
+			},
+			{
+				Name: "get_ids",
+				Kind: FuncFree,
+				Results: []TypeRef{{
+					Kind: ResultKind,
+					Ok:   &TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "s32"}},
+				}},
+				ImportName: "get-ids",
+			},
+			{
+				Name: "dup",
+				Kind: FuncFree,
+				Params: []Param{
+					// Duplicate u8 — should deduplicate
+					{Name: "more", Type: TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}}},
+				},
+				ImportName: "dup",
+			},
+		},
+	}}
+	got := collectListElemTypes(modules)
+	if len(got) != 2 {
+		t.Fatalf("collectListElemTypes: got %d types, want 2", len(got))
+	}
+	// Should have u8 and s32 (deduplicated)
+	names := map[string]bool{}
+	for _, elem := range got {
+		names[promiseType(elem)] = true
+	}
+	if !names["u8"] {
+		t.Error("missing u8 in collected list elem types")
+	}
+	if !names["i32"] {
+		t.Error("missing i32 (from s32) in collected list elem types")
+	}
+}
+
+func TestCollectListElemTypesNested(t *testing.T) {
+	// list<u8> inside option<list<u8>> — should still find u8
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "maybe_data",
+			Kind: FuncFree,
+			Params: []Param{{
+				Name: "data",
+				Type: TypeRef{
+					Kind: OptionKind,
+					Elem: &TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}},
+				},
+			}},
+			ImportName: "maybe-data",
+		}},
+	}}
+	got := collectListElemTypes(modules)
+	if len(got) != 1 || promiseType(got[0]) != "u8" {
+		t.Errorf("collectListElemTypes(option<list<u8>>): got %v", got)
+	}
+}
+
+func TestCollectListElemTypesResource(t *testing.T) {
+	// list param on a resource method
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Resources: []Resource{{
+			Name: "Stream",
+			Methods: []Func{{
+				Name: "write",
+				Kind: FuncMethod,
+				Params: []Param{{
+					Name: "buf",
+					Type: TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}},
+				}},
+				ImportName: "[method]stream.write",
+			}},
+		}},
+	}}
+	got := collectListElemTypes(modules)
+	if len(got) != 1 || promiseType(got[0]) != "u8" {
+		t.Errorf("collectListElemTypes(resource method): got %v", got)
+	}
+}
+
+func TestCollectListElemTypesTuple(t *testing.T) {
+	// list<s32> inside tuple<string, list<s32>> — should find s32
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "pair",
+			Kind: FuncFree,
+			Results: []TypeRef{{
+				Kind: TupleKind,
+				Elements: []TypeRef{
+					{Kind: BuiltinKind, Builtin: "string"},
+					{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "s32"}},
+				},
+			}},
+			ImportName: "pair",
+		}},
+	}}
+	got := collectListElemTypes(modules)
+	if len(got) != 1 || promiseType(got[0]) != "i32" {
+		t.Errorf("collectListElemTypes(tuple<string, list<s32>>): got %v", got)
+	}
+}
+
+func TestLiftReturnFromRetPtrList(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	// Plain list<u8> return
+	results := []TypeRef{{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}}}
+	got := g.liftReturnFromRetPtr(results)
+	want := "_cabi_vector_from_u8(_cabi_load_i32(_cabi_retarea_ptr()), _cabi_load_i32(_cabi_retarea_ptr() + 4), 1)"
+	if got != want {
+		t.Errorf("liftReturnFromRetPtr(list<u8>) =\n  %q\nwant:\n  %q", got, want)
+	}
+}
+
+func TestLiftReturnFromRetPtrResultList(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	// result<list<u8>, string>
+	results := []TypeRef{{
+		Kind: ResultKind,
+		Ok:   &TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}},
+		Err:  &TypeRef{Kind: BuiltinKind, Builtin: "string"},
+	}}
+	got := g.liftReturnFromRetPtr(results)
+	want := "_cabi_vector_from_u8(_cabi_load_i32(_cabi_retarea_ptr() + 4), _cabi_load_i32(_cabi_retarea_ptr() + 8), 1)"
+	if got != want {
+		t.Errorf("liftReturnFromRetPtr(result<list<u8>, string>) =\n  %q\nwant:\n  %q", got, want)
+	}
+}
+
+func TestCodegenCanonicalABIListParam(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "send_data",
+			Kind: FuncFree,
+			Params: []Param{{
+				Name: "data",
+				Type: TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}},
+			}},
+			ImportName: "send-data",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// Vector helper declarations
+	assertContains(t, out, `_cabi_vector_data_u8(u8[] v) i32 `+"`"+`extern("cabi_vector_data")`)
+	assertContains(t, out, `_cabi_vector_len_u8(u8[] v) i32 `+"`"+`extern("cabi_vector_len")`)
+	assertContains(t, out, `_cabi_vector_from_u8(i32 ptr, i32 len, i32 elem_size) u8[] `+"`"+`extern("cabi_vector_from")`)
+	// Wrapper lowers list param
+	assertContains(t, out, "_cabi_vector_data_u8(data), _cabi_vector_len_u8(data)")
+}
+
+func TestCodegenCanonicalABIListReturn(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name: "get_data",
+			Kind: FuncFree,
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Ok:   &TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}},
+				Err:  &TypeRef{Kind: BuiltinKind, Builtin: "string"},
+			}},
+			ImportName: "get-data",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// Lifts list from retptr
+	assertContains(t, out, "_cabi_vector_from_u8(_cabi_load_i32(_cabi_retarea_ptr() + 4), _cabi_load_i32(_cabi_retarea_ptr() + 8), 1)")
+	// Error extraction
+	assertContains(t, out, "raise error(_cabi_string_from(")
 }

@@ -268,3 +268,38 @@ void *cabi_string_from(int ptr, int len) {
 int cabi_retarea_ptr(void) {
     return (int)__cabi_retarea;
 }
+
+// --- Canonical ABI vector helpers ---
+//
+// Promise vector layout on wasm32:
+//   offset 0:  i64 len          (8 bytes, bit 63 = static flag)
+//   offset 8:  i64 cap          (8 bytes)
+//   offset 16: [N x T] data
+//
+// The extern ABI passes vector as i8* (header pointer) on wasm32 = i32.
+
+// Get data pointer from a vector header pointer.
+int cabi_vector_data(void *header) {
+    return (int)((char *)header + 16);
+}
+
+// Get length from a vector header pointer (masking bit 63 static flag).
+int cabi_vector_len(void *header) {
+    long long raw = *(long long *)header;
+    return (int)(raw & 0x7FFFFFFFFFFFFFFFLL);
+}
+
+// Construct a new heap-allocated vector from a (ptr, len, elem_size) triple.
+// Copies data from ptr into the new vector. Caller owns the result.
+void *cabi_vector_from(int data_ptr, int len, int elem_size) {
+    int data_bytes = len * elem_size;
+    void *header = malloc(16 + data_bytes);
+    if (!header) return (void *)0;
+    __promise_alloc_count++;
+    *(long long *)header = (long long)len;                    // len (no static flag)
+    *(long long *)((char *)header + 8) = (long long)len;     // cap = len
+    char *dst = (char *)header + 16;
+    char *src = (char *)data_ptr;
+    for (int i = 0; i < data_bytes; i++) dst[i] = src[i];
+    return header;
+}

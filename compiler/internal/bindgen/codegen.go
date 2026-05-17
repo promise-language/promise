@@ -20,7 +20,8 @@ func GeneratePromiseWithOptions(modules []*Module, target string, canonicalABI b
 		canonicalABI: canonicalABI,
 	}
 	if canonicalABI {
-		g.emitCanonicalABIHelpers()
+		listElemTypes := collectListElemTypes(modules)
+		g.emitCanonicalABIHelpers(listElemTypes)
 	}
 	for _, m := range modules {
 		g.emitModule(m)
@@ -617,7 +618,7 @@ func escapeDoc(s string) string {
 
 // emitCanonicalABIHelpers emits private extern declarations for canonical ABI
 // helper functions provided by the WASM runtime (wasm_alloc.o).
-func (g *generator) emitCanonicalABIHelpers() {
+func (g *generator) emitCanonicalABIHelpers(listElemTypes []TypeRef) {
 	g.line("// --- Canonical ABI helper functions (provided by runtime) ---")
 	g.blank()
 	g.line("_cabi_load_i32(i32 ptr) i32 `extern(\"cabi_load_i32\") `target(%s);", g.target)
@@ -632,6 +633,14 @@ func (g *generator) emitCanonicalABIHelpers() {
 	g.line("_cabi_string_len(string s) i32 `extern(\"cabi_string_len\") `target(%s);", g.target)
 	g.line("_cabi_string_from(i32 ptr, i32 len) string `extern(\"cabi_string_from\") `target(%s);", g.target)
 	g.line("_cabi_retarea_ptr() i32 `extern(\"cabi_retarea_ptr\") `target(%s);", g.target)
+	// Per-element-type vector helpers
+	for _, elem := range listElemTypes {
+		suffix := vectorHelperSuffix(elem)
+		vecType := promiseType(elem) + "[]"
+		g.line("_cabi_vector_data_%s(%s v) i32 `extern(\"cabi_vector_data\") `target(%s);", suffix, vecType, g.target)
+		g.line("_cabi_vector_len_%s(%s v) i32 `extern(\"cabi_vector_len\") `target(%s);", suffix, vecType, g.target)
+		g.line("_cabi_vector_from_%s(i32 ptr, i32 len, i32 elem_size) %s `extern(\"cabi_vector_from\") `target(%s);", suffix, vecType, g.target)
+	}
 	g.blank()
 }
 
@@ -699,9 +708,11 @@ func (g *generator) lowerParamToFlat(p Param) []string {
 			fmt.Sprintf("_cabi_string_len(%s)", p.Name),
 		}
 	case p.Type.Kind == ListKind:
-		// TODO(T0289): list lowering needs vector-specific helpers (different layout from string).
-		// For now, pass as-is — will cause a compile error if used, which is safer than wrong codegen.
-		return []string{p.Name}
+		suffix := vectorHelperSuffix(*p.Type.Elem)
+		return []string{
+			fmt.Sprintf("_cabi_vector_data_%s(%s)", suffix, p.Name),
+			fmt.Sprintf("_cabi_vector_len_%s(%s)", suffix, p.Name),
+		}
 	default:
 		// For types we can't lower yet, pass as-is (will cause compile error)
 		return []string{p.Name}
@@ -740,10 +751,22 @@ func (g *generator) liftReturnFromRetPtr(results []TypeRef) string {
 			return fmt.Sprintf("_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr() + %d), _cabi_load_i32(_cabi_retarea_ptr() + %d))",
 				offset, offset+4)
 		}
+		if ref.Kind == ListKind {
+			suffix := vectorHelperSuffix(*ref.Elem)
+			elemSize := witElemSize(ref.Elem.Builtin)
+			return fmt.Sprintf("_cabi_vector_from_%s(_cabi_load_i32(_cabi_retarea_ptr() + %d), _cabi_load_i32(_cabi_retarea_ptr() + %d), %d)",
+				suffix, offset, offset+4, elemSize)
+		}
 		return liftScalarFromRetPtr(ref, offset)
 	}
 	if ref.Kind == BuiltinKind && ref.Builtin == "string" {
 		return "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr()), _cabi_load_i32(_cabi_retarea_ptr() + 4))"
+	}
+	if ref.Kind == ListKind {
+		suffix := vectorHelperSuffix(*ref.Elem)
+		elemSize := witElemSize(ref.Elem.Builtin)
+		return fmt.Sprintf("_cabi_vector_from_%s(_cabi_load_i32(_cabi_retarea_ptr()), _cabi_load_i32(_cabi_retarea_ptr() + 4), %d)",
+			suffix, elemSize)
 	}
 	return liftScalarFromRetPtr(ref, 0)
 }
@@ -785,6 +808,66 @@ func (g *generator) liftErrFromRetPtr(result TypeRef) string {
 	// Scalar/named error: lift value and stringify
 	loadExpr := liftScalarFromRetPtr(errRef, offset)
 	return fmt.Sprintf(`"component error: " + %s.to_string()`, loadExpr)
+}
+
+// collectListElemTypes finds all unique list element types used across all modules.
+// Recursively scans function params and results (including inside result<>, option<>, tuple).
+func collectListElemTypes(modules []*Module) []TypeRef {
+	seen := make(map[string]bool)
+	var result []TypeRef
+
+	var visit func(ref TypeRef)
+	visit = func(ref TypeRef) {
+		switch ref.Kind {
+		case ListKind:
+			if ref.Elem != nil {
+				key := promiseType(*ref.Elem)
+				if !seen[key] {
+					seen[key] = true
+					result = append(result, *ref.Elem)
+				}
+				visit(*ref.Elem) // nested lists
+			}
+		case OptionKind:
+			if ref.Elem != nil {
+				visit(*ref.Elem)
+			}
+		case ResultKind:
+			if ref.Ok != nil {
+				visit(*ref.Ok)
+			}
+			if ref.Err != nil {
+				visit(*ref.Err)
+			}
+		case TupleKind:
+			for _, e := range ref.Elements {
+				visit(e)
+			}
+		}
+	}
+
+	for _, m := range modules {
+		for _, f := range m.Functions {
+			for _, p := range f.Params {
+				visit(p.Type)
+			}
+			for _, r := range f.Results {
+				visit(r)
+			}
+		}
+		for _, r := range m.Resources {
+			for _, method := range r.Methods {
+				for _, p := range method.Params {
+					visit(p.Type)
+				}
+				for _, res := range method.Results {
+					visit(res)
+				}
+			}
+		}
+	}
+
+	return result
 }
 
 // resultPayloadOffset returns the canonical ABI payload offset for a result<T, E>.

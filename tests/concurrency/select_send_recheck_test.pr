@@ -41,9 +41,7 @@ test_select_send_concurrent_race() `test(exclude: "wasm32") {
     <-ch; // drain — wakes select's SWN
     select {
       ch.send(99): {
-          // race to re-fill before select re-locks
-          sleep(Duration.from_millis(50));
-          <-ch; // drain again so select can succeed on retry
+          <-ch; // drain — no sleep needed
         }
       default: {
         }

@@ -2507,7 +2507,8 @@ func (c *Compiler) defineMutexGuardDropFunc() {
 
 // defineMutexGuardUnlockFreeBody generates the body for MutexGuard close/drop:
 // null-check, load mutex pointer from guard, scheduler-aware unlock, free guard.
-// T0285: Dequeues a waiting goroutine (if any) and enqueues it, or clears held flag + signals cond.
+// T0285 added waiter_head/waiter_tail fields. T0291 implements park-and-wake: dequeues a
+// waiting goroutine (if any) and hands off the lock (held stays 1), or clears held=0 + signals cond.
 // Guard layout: {i8* mutex_alloc_ptr}. Mutex layout: {i8* pal_handle, i8* cond, i8* waiter_head, i8* waiter_tail, i8 held, T value}.
 func (c *Compiler) defineMutexGuardUnlockFreeBody(fn *ir.Func) {
 	thisParam := fn.Params[0]
@@ -2536,18 +2537,42 @@ func (c *Compiler) defineMutexGuardUnlockFreeBody(fn *ir.Func) {
 	handle := unlockBlk.NewLoad(irtypes.I8Ptr, handleField)
 	unlockBlk.NewCall(c.palMutexLock, handle)
 
-	// Clear held flag, signal cond for thread-blocked waiters, unlock
-	heldField := unlockBlk.NewGetElementPtr(metaTy, typedPtr,
+	// Check for a waiting goroutine on the waiter list
+	waiterHeadField := unlockBlk.NewGetElementPtr(metaTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldWaiterHead)))
+	waiterTailField := unlockBlk.NewGetElementPtr(metaTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldWaiterTail)))
+	waitG := unlockBlk.NewCall(c.funcs["promise_waiter_dequeue"], waiterHeadField, waiterTailField)
+	hasWaiter := unlockBlk.NewICmp(enum.IPredNE, waitG, constant.NewNull(irtypes.I8Ptr))
+	handoffBlk := fn.NewBlock("unlock.handoff")
+	noWaiterBlk := fn.NewBlock("unlock.no_waiter")
+	freeGuardBlk := fn.NewBlock("unlock.free_guard")
+	unlockBlk.NewCondBr(hasWaiter, handoffBlk, noWaiterBlk)
+
+	// handoff: held stays 1 — hand lock directly to the woken goroutine
+	gTy := goroutineStructType()
+	waitGTyped := handoffBlk.NewBitCast(waitG, irtypes.NewPointer(gTy))
+	waitStatusField := handoffBlk.NewGetElementPtr(gTy, waitGTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+	handoffBlk.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), waitStatusField)
+	handoffBlk.NewCall(c.funcs["promise_sched_enqueue"], waitG)
+	handoffBlk.NewCall(c.palMutexUnlock, handle)
+	handoffBlk.NewBr(freeGuardBlk)
+
+	// no_waiter: clear held=0, signal cond for thread-blocked waiters, unlock
+	heldField := noWaiterBlk.NewGetElementPtr(metaTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHeld)))
-	unlockBlk.NewStore(constant.NewInt(irtypes.I8, 0), heldField)
-	condField := unlockBlk.NewGetElementPtr(metaTy, typedPtr,
+	noWaiterBlk.NewStore(constant.NewInt(irtypes.I8, 0), heldField)
+	condField := noWaiterBlk.NewGetElementPtr(metaTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldCond)))
-	cond := unlockBlk.NewLoad(irtypes.I8Ptr, condField)
-	unlockBlk.NewCall(c.palMutexUnlock, handle)
-	unlockBlk.NewCall(c.palCondSignal, cond)
+	cond := noWaiterBlk.NewLoad(irtypes.I8Ptr, condField)
+	noWaiterBlk.NewCall(c.palMutexUnlock, handle)
+	noWaiterBlk.NewCall(c.palCondSignal, cond)
+	noWaiterBlk.NewBr(freeGuardBlk)
+
 	// Free guard
-	unlockBlk.NewCall(c.palFree, thisParam)
-	unlockBlk.NewBr(doneBlk)
+	freeGuardBlk.NewCall(c.palFree, thisParam)
+	freeGuardBlk.NewBr(doneBlk)
 
 	doneBlk.NewRet(nil)
 }

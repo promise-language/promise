@@ -19450,7 +19450,7 @@ func TestMutexGuardBorrowSetterCompoundAssign(t *testing.T) {
 	assertContains(t, ir, "add i64")
 }
 
-// T0156/T0285: MutexGuard close/drop functions do scheduler-aware unlock and free.
+// T0156/T0285/T0291: MutexGuard close/drop functions do scheduler-aware unlock and free.
 func TestMutexGuardCloseUnlocksAndFrees(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -19464,13 +19464,74 @@ func TestMutexGuardCloseUnlocksAndFrees(t *testing.T) {
 	}
 	// Null check
 	assertContains(t, closeFn, "icmp eq")
-	// Locks metadata mutex, clears held, signals cond, unlocks
+	// Locks metadata mutex
 	assertContains(t, closeFn, "call void @pal_mutex_lock(")
-	assertContains(t, closeFn, "store i8 0")
+	// Both handoff path and no-waiter path unlock the PAL mutex
 	assertContains(t, closeFn, "call void @pal_mutex_unlock(")
-	assertContains(t, closeFn, "call void @pal_cond_signal(")
 	// Free guard
 	assertContains(t, closeFn, "call void @pal_free(")
+}
+
+// T0291: Mutex.lock() inside a goroutine parks on the waiter list (not spin-yield).
+func TestMutexLockParksOnWaiterList(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](0);
+			go {
+				use guard := m.lock();
+			};
+		}
+	`)
+	// The goroutine contested path must enqueue on the waiter list
+	assertContains(t, ir, "call void @promise_waiter_enqueue(")
+	// The new park-and-wake block label must be present
+	assertContains(t, ir, "mutex.park.resume")
+	// No spin-retry: the old spin-yield block label must NOT be present
+	assertNotContains(t, ir, "mutex.wait.resume")
+}
+
+// T0291: MutexGuard.close hands lock off to a waiting goroutine (waiter_dequeue + sched_enqueue).
+func TestMutexGuardCloseHandsOffLock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](0);
+			use guard := m.lock();
+		}
+	`)
+	closeFn := extractFunction(ir, "MutexGuard.close")
+	if closeFn == "" {
+		t.Fatal("expected MutexGuard.close function in IR")
+	}
+	// Must dequeue a waiter
+	assertContains(t, closeFn, "call i8* @promise_waiter_dequeue(")
+	// Must enqueue the woken goroutine (handoff path)
+	assertContains(t, closeFn, "call void @promise_sched_enqueue(")
+	// No-waiter path: signal cond for thread-blocked waiters
+	assertContains(t, closeFn, "call void @pal_cond_signal(")
+}
+
+// T0291: MutexGuard.drop (non-use binding) also hands lock off — same body as close.
+func TestMutexGuardDropHandsOffLock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := Mutex[int](0);
+			guard := m.lock();
+		}
+	`)
+	dropFn := extractFunction(ir, "MutexGuard.drop")
+	if dropFn == "" {
+		t.Fatal("expected MutexGuard.drop function in IR")
+	}
+	// Null check (guard may be null if moved)
+	assertContains(t, dropFn, "icmp eq")
+	// Must dequeue a waiter (handoff path)
+	assertContains(t, dropFn, "call i8* @promise_waiter_dequeue(")
+	// Must enqueue the woken goroutine (handoff path)
+	assertContains(t, dropFn, "call void @promise_sched_enqueue(")
+	// No-waiter path: signal cond for thread-blocked waiters
+	assertContains(t, dropFn, "call void @pal_cond_signal(")
+	// Free guard
+	assertContains(t, dropFn, "call void @pal_free(")
 }
 
 // T0156: Mutex[string].drop calls promise_string_drop on inner value.

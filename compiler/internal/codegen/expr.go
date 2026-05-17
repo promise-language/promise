@@ -2905,24 +2905,30 @@ func (c *Compiler) genMutexLock(mutexRaw value.Value, elemType types.Type) value
 	// contested: held=1 → need to wait
 	c.block = contestedBlk
 	if c.inCoroutine {
-		// Goroutine mode: yield and retry (park_mutex=null → scheduler re-enqueues)
-		c.block.NewCall(c.palMutexUnlock, handle)
+		// Goroutine mode: park on mutex waiter list (park-and-wake, not spin-yield).
+		// PAL handle is still locked at entry here.
+		currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		waiterHeadField := c.block.NewGetElementPtr(metaTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldWaiterHead)))
+		waiterTailField := c.block.NewGetElementPtr(metaTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldWaiterTail)))
+		c.block.NewCall(c.funcs["promise_waiter_enqueue"], waiterHeadField, waiterTailField, currentG)
+		// Store mutex in G.park_mutex — scheduler releases after coro.suspend completes
+		gTyMtx := goroutineStructType()
+		mtxGPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTyMtx))
+		mtxPmField := c.block.NewGetElementPtr(gTyMtx, mtxGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+		c.block.NewStore(handle, mtxPmField)
 
 		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
-		resumeBlk := c.newBlock("mutex.wait.resume")
+		parkResumeBlk := c.newBlock("mutex.park.resume")
 		c.block.NewSwitch(suspResult, c.coroSuspendBlk,
-			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
+			ir.NewCase(constant.NewInt(irtypes.I8, 0), parkResumeBlk),
 			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
 
-		// Resume: retry lock from the top
-		c.block = resumeBlk
-		// Re-lock PAL mutex and re-check held flag
-		c.block.NewCall(c.palMutexLock, handle)
-		retryHeldField := c.block.NewGetElementPtr(metaTy, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHeld)))
-		retryHeld := c.block.NewLoad(irtypes.I8, retryHeldField)
-		retryIsHeld := c.block.NewICmp(enum.IPredEQ, retryHeld, constant.NewInt(irtypes.I8, 1))
-		c.block.NewCondBr(retryIsHeld, contestedBlk, acquiredBlk)
+		// Resume: lock was handed off (held=1 already), go directly to guardBlk
+		c.block = parkResumeBlk
+		c.block.NewBr(guardBlk)
 	} else {
 		// Non-coroutine mode: cond_wait loop
 		condField := c.block.NewGetElementPtr(metaTy, typedPtr,

@@ -1574,7 +1574,7 @@ func TestCodegenCanonicalABIResultF64Ok(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromiseWithOptions(modules, "wasi", true)
-	assertContains(t, out, "_cabi_load_f64(_cabi_retarea_ptr() + 4)")
+	assertContains(t, out, "_cabi_load_f64(_cabi_retarea_ptr() + 8)")
 }
 
 func TestCodegenCanonicalABIResultF32Ok(t *testing.T) {
@@ -1604,7 +1604,22 @@ func TestCodegenCanonicalABIResultU64Ok(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromiseWithOptions(modules, "wasi", true)
-	assertContains(t, out, "_cabi_load_i64(_cabi_retarea_ptr() + 4)")
+	assertContains(t, out, "_cabi_load_i64(_cabi_retarea_ptr() + 8)")
+}
+
+func TestCodegenCanonicalABIResultS64Ok(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "get_value",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "s64"}}},
+			ImportName: "get-value",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "_cabi_load_i64(_cabi_retarea_ptr() + 8)")
 }
 
 func TestCodegenCanonicalABIDirectScalarReturn(t *testing.T) {

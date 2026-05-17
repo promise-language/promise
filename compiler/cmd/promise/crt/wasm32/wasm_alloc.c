@@ -233,7 +233,7 @@ void cabi_store_f64(int ptr, double val) {
 // The extern ABI passes string as i8* (instance pointer) on wasm32 = i32.
 
 // Alloc counter declared in PAL-emitted LLVM IR.
-extern long long promise_alloc_count;
+extern long long __promise_alloc_count;
 
 // Get data pointer from a string instance pointer.
 int cabi_string_data(void *instance) {
@@ -252,7 +252,7 @@ void *cabi_string_from(int ptr, int len) {
     int total = 16 + len;
     void *inst = malloc(total);
     if (!inst) return (void *)0;
-    promise_alloc_count++; // track for leak detection (matches pal_alloc behavior)
+    __promise_alloc_count++; // track for leak detection (matches pal_alloc behavior)
     *(int *)inst = 0;                              // variant_ptr = null
     *(int *)((char *)inst + 4) = 0;                // padding = 0
     *(long long *)((char *)inst + 8) = (long long)len; // len (no literal flag)

@@ -735,7 +735,7 @@ func (g *generator) liftReturnFromRetPtr(results []TypeRef) string {
 		if ref.Kind == BuiltinKind && ref.Builtin == "string" {
 			return "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr() + 4), _cabi_load_i32(_cabi_retarea_ptr() + 8))"
 		}
-		return liftScalarFromRetPtr(ref, 4)
+		return liftScalarFromRetPtr(ref, resultPayloadOffset(ref))
 	}
 	if ref.Kind == BuiltinKind && ref.Builtin == "string" {
 		return "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr()), _cabi_load_i32(_cabi_retarea_ptr() + 4))"
@@ -762,4 +762,16 @@ func liftScalarFromRetPtr(ref TypeRef, offset int) string {
 	default:
 		return fmt.Sprintf("_cabi_load_i32(%s)", offsetExpr)
 	}
+}
+
+// resultPayloadOffset returns the canonical ABI payload offset for a result<T, E>
+// discriminant. 64-bit types require alignment 8; everything else uses alignment 4.
+func resultPayloadOffset(ref TypeRef) int {
+	if ref.Kind == BuiltinKind {
+		switch ref.Builtin {
+		case "u64", "s64", "f64":
+			return 8
+		}
+	}
+	return 4
 }

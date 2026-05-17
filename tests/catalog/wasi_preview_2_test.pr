@@ -1,0 +1,55 @@
+// Integration test for the wasi_preview_2 catalog module.
+//
+// Importing this module triggers a remote fetch + compile from the pinned
+// commit in catalog.toml, so this file serves as a gate for catalog registration.
+// Host-target tests exercise the value-type constructors and error types exported
+// by the module. The `target(wasi) test forces the full module (including all
+// `target(wasi) extern declarations and resource drop functions) to compile
+// and link for wasm32-wasi.
+use wasi_preview_2;
+
+test_datetime_construction() `test {
+  wasi_preview_2.Datetime dt = wasi_preview_2.Datetime(seconds: 1700000000u64, nanoseconds: 500000000u32);
+  assert(dt.seconds == 1700000000u64, "seconds");
+  assert(dt.nanoseconds == 500000000u32, "nanoseconds");
+}
+
+test_insecure_seed_construction() `test {
+  wasi_preview_2.InsecureSeed seed = wasi_preview_2.InsecureSeed(first: 42u64, second: 99u64);
+  assert(seed.first == 42u64, "first");
+  assert(seed.second == 99u64, "second");
+}
+
+test_stream_error_fields() `test {
+  wasi_preview_2.StreamError e = wasi_preview_2.StreamError(closed: true, message: "stream closed");
+  assert(e.closed, "closed flag");
+  assert(e.message == "stream closed", "message");
+}
+
+test_filesystem_error_fields() `test {
+  wasi_preview_2.FilesystemError e = wasi_preview_2.FilesystemError(code: 2i32, message: "not found");
+  assert(e.code == 2i32, "code");
+  assert(e.message == "not found", "message");
+}
+
+test_descriptor_type_enum() `test {
+  // Construct each variant — proves enum is importable and its variants
+  // are exported. (T0299: module-qualified match patterns silently fall
+  // through, so we avoid match here; runtime variant checks live in the
+  // module's own filesystem_test.pr where the enum is unqualified.)
+  wasi_preview_2.DescriptorType a = wasi_preview_2.DescriptorType.unknown;
+  wasi_preview_2.DescriptorType b = wasi_preview_2.DescriptorType.block_device;
+  wasi_preview_2.DescriptorType c = wasi_preview_2.DescriptorType.character_device;
+  wasi_preview_2.DescriptorType d = wasi_preview_2.DescriptorType.directory;
+  wasi_preview_2.DescriptorType e = wasi_preview_2.DescriptorType.fifo;
+  wasi_preview_2.DescriptorType f = wasi_preview_2.DescriptorType.symbolic_link;
+  wasi_preview_2.DescriptorType g = wasi_preview_2.DescriptorType.regular_file;
+  wasi_preview_2.DescriptorType h = wasi_preview_2.DescriptorType.socket;
+}
+
+// Force compile + link of the full wasi_preview_2 module for wasm32-wasi.
+// The assertion is trivial — the real verification is the compile+link step
+// which exercises every `target(wasi) function and resource drop.
+test_wasi_link_smoke() `test `target(wasi) {
+  assert(true, "wasi_preview_2 compiles and links for wasm32-wasi");
+}

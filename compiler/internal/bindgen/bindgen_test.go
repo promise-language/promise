@@ -721,6 +721,99 @@ interface api {
 	}
 }
 
+func TestCodegenRecordDoc(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/types",
+		Types: []Type{{
+			Name: "Point",
+			Kind: TypeRecord,
+			Doc:  "A 2D point.",
+			Fields: []Field{
+				{Name: "x", Type: TypeRef{Kind: BuiltinKind, Builtin: "f64"}},
+			},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "`doc \"A 2D point.\"")
+	assertContains(t, out, "type Point `public `value {")
+}
+
+func TestCodegenEnumDoc(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/types",
+		Types: []Type{{
+			Name: "Color",
+			Kind: TypeEnum,
+			Doc:  "Basic colors.",
+			Cases: []Case{
+				{Name: "Red"},
+			},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "`doc \"Basic colors.\"")
+	assertContains(t, out, "enum Color `public {")
+}
+
+func TestCodegenVariantDoc(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/types",
+		Types: []Type{{
+			Name: "Shape",
+			Kind: TypeVariant,
+			Doc:  "A shape variant.",
+			Cases: []Case{
+				{Name: "Circle", Type: &TypeRef{Kind: BuiltinKind, Builtin: "f64"}},
+			},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "`doc \"A shape variant.\"")
+	assertContains(t, out, "enum Shape `public {")
+}
+
+func TestCodegenMethodWrapperVoid(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Descriptor",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "sync",
+				Kind:       FuncMethod,
+				Results:    []TypeRef{},
+				ImportName: "[method]descriptor.sync",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "sync(this) `public {")
+	assertContains(t, out, "_descriptor_sync(this._handle);")
+}
+
+func TestCodegenMethodWrapperVoidFailable(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Descriptor",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "sync",
+				Kind:       FuncMethod,
+				Results:    []TypeRef{{Kind: ResultKind}},
+				ImportName: "[method]descriptor.sync",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "sync!(this) `public {")
+}
+
 func TestCodegenTypeAlias(t *testing.T) {
 	modules := []*Module{{
 		Name:         "test",
@@ -805,6 +898,137 @@ interface types {
 	assertContains(t, out, "open_at!(string path, OpenFlags flags) Descriptor `public {")
 	assertContains(t, out, "`wasm_import(\"wasi:filesystem/types\"")
 	assertContains(t, out, "`target(wasi);")
+}
+
+func TestWitToIRUseResolution(t *testing.T) {
+	src := `
+interface types {
+    record descriptor-stat {
+        size: u64,
+    }
+
+    enum error-code {
+        access,
+        not-found,
+    }
+}
+
+interface fs {
+    use types.{descriptor-stat, error-code};
+
+    get-stat: func() -> descriptor-stat;
+    last-error: func() -> error-code;
+}
+`
+	file, errs := wit.Parse(src, "test.wit")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WitToIR(file)
+	if len(modules) != 2 {
+		t.Fatalf("expected 2 modules, got %d", len(modules))
+	}
+	fsModule := modules[1]
+	if fsModule.Name != "fs" {
+		t.Fatalf("expected module name 'fs', got %q", fsModule.Name)
+	}
+	// The use-statement should have imported 2 types into the fs module.
+	if len(fsModule.Types) != 2 {
+		t.Fatalf("expected 2 types in fs module, got %d", len(fsModule.Types))
+	}
+	names := map[string]bool{}
+	for _, ty := range fsModule.Types {
+		names[ty.Name] = true
+	}
+	if !names["DescriptorStat"] {
+		t.Error("expected DescriptorStat type in fs module")
+	}
+	if !names["ErrorCode"] {
+		t.Error("expected ErrorCode type in fs module")
+	}
+}
+
+func TestWitToIRUseResolutionWithRename(t *testing.T) {
+	src := `
+interface types {
+    record descriptor-stat {
+        size: u64,
+    }
+}
+
+interface fs {
+    use types.{descriptor-stat as stat};
+
+    get-stat: func() -> stat;
+}
+`
+	file, errs := wit.Parse(src, "test.wit")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WitToIR(file)
+	fsModule := modules[1]
+	if len(fsModule.Types) != 1 {
+		t.Fatalf("expected 1 type in fs module, got %d", len(fsModule.Types))
+	}
+	if fsModule.Types[0].Name != "Stat" {
+		t.Errorf("expected renamed type 'Stat', got %q", fsModule.Types[0].Name)
+	}
+	// Verify the type retains its structure.
+	if fsModule.Types[0].Kind != TypeRecord {
+		t.Errorf("expected Record kind, got %v", fsModule.Types[0].Kind)
+	}
+	if len(fsModule.Types[0].Fields) != 1 {
+		t.Errorf("expected 1 field, got %d", len(fsModule.Types[0].Fields))
+	}
+}
+
+func TestWitToIRUseMissingTypeSkipped(t *testing.T) {
+	src := `
+interface types {
+    record real-type {
+        x: u32,
+    }
+}
+
+interface fs {
+    use types.{nonexistent};
+
+    get: func() -> u32;
+}
+`
+	file, errs := wit.Parse(src, "test.wit")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WitToIR(file)
+	fsModule := modules[1]
+	// The nonexistent type should be silently skipped.
+	if len(fsModule.Types) != 0 {
+		t.Errorf("expected 0 types, got %d", len(fsModule.Types))
+	}
+}
+
+func TestWitToIRUseMissingSourceSkipped(t *testing.T) {
+	src := `
+interface fs {
+    use external-pkg.{some-type};
+
+    get: func() -> u32;
+}
+`
+	file, errs := wit.Parse(src, "test.wit")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WitToIR(file)
+	// External use should be silently skipped — no types added, no panic.
+	if len(modules[0].Types) != 0 {
+		t.Errorf("expected 0 types, got %d", len(modules[0].Types))
+	}
+	if len(modules[0].Functions) != 1 {
+		t.Errorf("expected 1 function, got %d", len(modules[0].Functions))
+	}
 }
 
 func assertContains(t *testing.T, s, substr string) {

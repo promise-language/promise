@@ -12,17 +12,24 @@ import (
 // Each WIT interface produces one IR Module.
 func WitToIR(file *wit.File) []*Module {
 	c := &witConverter{
-		pkg: file.Package,
+		pkg:              file.Package,
+		typesByInterface: make(map[string]map[string]Type),
 	}
+	// Pass 1: convert all interfaces, building the type registry.
 	var modules []*Module
 	for _, iface := range file.Interfaces {
 		modules = append(modules, c.convertInterface(iface))
+	}
+	// Pass 2: resolve cross-interface use statements.
+	for i, iface := range file.Interfaces {
+		c.resolveUses(iface, modules[i])
 	}
 	return modules
 }
 
 type witConverter struct {
-	pkg *wit.Package
+	pkg              *wit.Package
+	typesByInterface map[string]map[string]Type // interfaceName → PascalName → Type
 }
 
 func (c *witConverter) importModule(ifaceName string) string {
@@ -41,27 +48,72 @@ func (c *witConverter) convertInterface(iface *wit.Interface) *Module {
 	for _, item := range iface.Items {
 		switch v := item.(type) {
 		case *wit.Record:
-			m.Types = append(m.Types, c.convertRecord(v))
+			t := c.convertRecord(v)
+			c.registerType(iface.Name, t)
+			m.Types = append(m.Types, t)
 		case *wit.Enum:
-			m.Types = append(m.Types, c.convertEnum(v))
+			t := c.convertEnum(v)
+			c.registerType(iface.Name, t)
+			m.Types = append(m.Types, t)
 		case *wit.Variant:
-			m.Types = append(m.Types, c.convertVariant(v))
+			t := c.convertVariant(v)
+			c.registerType(iface.Name, t)
+			m.Types = append(m.Types, t)
 		case *wit.Flags:
-			m.Types = append(m.Types, c.convertFlags(v))
+			t := c.convertFlags(v)
+			c.registerType(iface.Name, t)
+			m.Types = append(m.Types, t)
 		case *wit.TypeAlias:
-			m.Types = append(m.Types, c.convertTypeAlias(v))
+			t := c.convertTypeAlias(v)
+			c.registerType(iface.Name, t)
+			m.Types = append(m.Types, t)
 		case *wit.Resource:
 			m.Resources = append(m.Resources, c.convertResource(v, m.ImportModule))
 		case *wit.Func:
 			m.Functions = append(m.Functions, c.convertFunc(v, m.ImportModule))
 		case *wit.Use:
-			// Use-statements are parsed but cross-interface type resolution
-			// is not yet implemented. Named type references assume types are
-			// defined within the same interface or already converted.
+			// Resolved in pass 2 by resolveUses.
 		}
 	}
 
 	return m
+}
+
+// registerType adds a converted type to the per-interface registry.
+func (c *witConverter) registerType(ifaceName string, t Type) {
+	m := c.typesByInterface[ifaceName]
+	if m == nil {
+		m = make(map[string]Type)
+		c.typesByInterface[ifaceName] = m
+	}
+	m[t.Name] = t
+}
+
+// resolveUses copies type definitions from source interfaces into importing
+// modules for each use-statement. Only local (same-file) interfaces are
+// resolved; external package references are silently skipped.
+func (c *witConverter) resolveUses(iface *wit.Interface, m *Module) {
+	for _, item := range iface.Items {
+		u, ok := item.(*wit.Use)
+		if !ok {
+			continue
+		}
+		srcTypes := c.typesByInterface[u.Path]
+		if srcTypes == nil {
+			continue // external package reference, skip
+		}
+		for _, name := range u.Names {
+			pascalName := kebabToPascal(name.Name)
+			srcType, ok := srcTypes[pascalName]
+			if !ok {
+				continue
+			}
+			if name.As != "" {
+				srcType.Name = kebabToPascal(name.As)
+			}
+			m.Types = append(m.Types, srcType)
+		}
+	}
 }
 
 func (c *witConverter) convertRecord(r *wit.Record) Type {

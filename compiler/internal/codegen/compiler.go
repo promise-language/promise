@@ -1806,9 +1806,8 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineVectorContainsFunc()
 	c.defineVectorRemoveFunc()
 	c.defineVectorDropFunc()
-	c.defineChannelDropFunc()     // B0163: channel scope-exit drop
-	c.defineMutexGuardCloseFunc() // T0156: MutexGuard close (unlock + free)
-	c.defineMutexGuardDropFunc()  // T0156: MutexGuard drop (unlock + free)
+	c.defineChannelDropFunc() // B0163: channel scope-exit drop
+	// T0285: MutexGuard close/drop moved after scheduler functions (needs waiter_dequeue + sched_enqueue)
 	c.defineVectorCOWFunc()
 
 	// String trim/split/case/repeat (codegen-emitted LLVM IR)
@@ -1882,6 +1881,10 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineWaiterWakeOneFunc()
 	c.defineWaiterWakeAllFunc()
 	c.defineWaiterRemoveFunc()
+
+	// T0285: MutexGuard close/drop need waiter_dequeue + sched_enqueue from above
+	c.defineMutexGuardCloseFunc() // T0156: MutexGuard close (unlock + free)
+	c.defineMutexGuardDropFunc()  // T0156: MutexGuard drop (unlock + free)
 
 	// PAL: emit file I/O primitives (Phase D)
 	c.palFileOpen = p.EmitFileOpen(c.module)
@@ -2503,11 +2506,13 @@ func (c *Compiler) defineMutexGuardDropFunc() {
 }
 
 // defineMutexGuardUnlockFreeBody generates the body for MutexGuard close/drop:
-// null-check, load mutex pointer from guard, unlock PAL mutex, free guard.
-// Guard layout: {i8* mutex_alloc_ptr}. Mutex layout starts with {i8* pal_handle, ...}.
+// null-check, load mutex pointer from guard, scheduler-aware unlock, free guard.
+// T0285: Dequeues a waiting goroutine (if any) and enqueues it, or clears held flag + signals cond.
+// Guard layout: {i8* mutex_alloc_ptr}. Mutex layout: {i8* pal_handle, i8* cond, i8* waiter_head, i8* waiter_tail, i8 held, T value}.
 func (c *Compiler) defineMutexGuardUnlockFreeBody(fn *ir.Func) {
 	thisParam := fn.Params[0]
 	entry := fn.NewBlock(".entry")
+	metaTy := mutexMetaType()
 
 	// Null check
 	isNull := entry.NewICmp(enum.IPredEQ, thisParam, constant.NewNull(irtypes.I8Ptr))
@@ -2522,14 +2527,25 @@ func (c *Compiler) defineMutexGuardUnlockFreeBody(fn *ir.Func) {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	mutexRaw := unlockBlk.NewLoad(irtypes.I8Ptr, mutexField)
 
-	// Load PAL mutex handle from Mutex allocation field 0 (offset 0 = i8*)
-	mutexHandlePtr := unlockBlk.NewBitCast(mutexRaw, irtypes.NewPointer(irtypes.I8Ptr))
-	mutexHandle := unlockBlk.NewLoad(irtypes.I8Ptr, mutexHandlePtr)
+	// Bitcast to metadata struct
+	typedPtr := unlockBlk.NewBitCast(mutexRaw, irtypes.NewPointer(metaTy))
 
-	// Unlock
-	unlockBlk.NewCall(c.palMutexUnlock, mutexHandle)
+	// Lock metadata mutex
+	handleField := unlockBlk.NewGetElementPtr(metaTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHandle)))
+	handle := unlockBlk.NewLoad(irtypes.I8Ptr, handleField)
+	unlockBlk.NewCall(c.palMutexLock, handle)
 
-	// Free guard allocation
+	// Clear held flag, signal cond for thread-blocked waiters, unlock
+	heldField := unlockBlk.NewGetElementPtr(metaTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHeld)))
+	unlockBlk.NewStore(constant.NewInt(irtypes.I8, 0), heldField)
+	condField := unlockBlk.NewGetElementPtr(metaTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldCond)))
+	cond := unlockBlk.NewLoad(irtypes.I8Ptr, condField)
+	unlockBlk.NewCall(c.palMutexUnlock, handle)
+	unlockBlk.NewCall(c.palCondSignal, cond)
+	// Free guard
 	unlockBlk.NewCall(c.palFree, thisParam)
 	unlockBlk.NewBr(doneBlk)
 
@@ -2537,7 +2553,7 @@ func (c *Compiler) defineMutexGuardUnlockFreeBody(fn *ir.Func) {
 }
 
 // getOrCreateMutexDrop returns or creates the per-element-type Mutex[T].drop function.
-// Mutex layout: {i8* pal_handle, T value}. Drops inner T, destroys PAL mutex, frees.
+// Drops inner T, destroys cond var + PAL mutex, frees.
 func (c *Compiler) getOrCreateMutexDrop(elemType types.Type) *ir.Func {
 	elemName := typeArgStr(elemType)
 	funcName := "Mutex[" + elemName + "].drop"
@@ -2560,10 +2576,11 @@ func (c *Compiler) getOrCreateMutexDrop(elemType types.Type) *ir.Func {
 }
 
 // defineMutexDropBody generates the Mutex[T].drop body:
-// null-check, drop inner T, destroy PAL mutex, free allocation.
+// null-check, drop inner T, destroy cond var, destroy PAL mutex, free allocation.
+// T0285: Updated for new layout {pal_handle, cond, waiter_head, waiter_tail, held, T}.
 func (c *Compiler) defineMutexDropBody(fn *ir.Func, elemType types.Type) {
 	elemLLVM := c.resolveType(elemType)
-	mutexStructTy := irtypes.NewStruct(irtypes.I8Ptr, elemLLVM)
+	mutexStructTy := mutexStructType(elemLLVM)
 	thisParam := fn.Params[0]
 
 	entry := fn.NewBlock(".entry")
@@ -2576,12 +2593,18 @@ func (c *Compiler) defineMutexDropBody(fn *ir.Func, elemType types.Type) {
 
 	typedPtr := dropBlk.NewBitCast(thisParam, irtypes.NewPointer(mutexStructTy))
 
-	// Drop inner T value — Mutex has value at field 1
-	c.emitInnerDrop(dropBlk, typedPtr, mutexStructTy, elemType, 1)
+	// Drop inner T value — Mutex has value at field 5
+	c.emitInnerDrop(dropBlk, typedPtr, mutexStructTy, elemType, mutexFieldValue)
+
+	// Destroy cond var (field 1)
+	condField := dropBlk.NewGetElementPtr(mutexStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldCond)))
+	condHandle := dropBlk.NewLoad(irtypes.I8Ptr, condField)
+	dropBlk.NewCall(c.palCondDestroy, condHandle)
 
 	// Destroy PAL mutex (field 0)
 	handleField := dropBlk.NewGetElementPtr(mutexStructTy, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHandle)))
 	handle := dropBlk.NewLoad(irtypes.I8Ptr, handleField)
 	dropBlk.NewCall(c.palMutexDestroy, handle)
 
@@ -7900,6 +7923,43 @@ func (c *Compiler) emitNativeOp(named *types.Named, op string, left, right value
 		panic(fmt.Sprintf("codegen: no native emitter for %s.%s", named, op))
 	}
 	return emitter(c.block, left, right)
+}
+
+// --- Mutex[T] field layout (T0285: scheduler-aware) ---
+
+// Mutex struct field indices.
+// Layout: {i8* pal_handle, i8* cond, i8* waiter_head, i8* waiter_tail, i8 held, T value}
+const (
+	mutexFieldHandle     = 0 // i8*  PAL mutex (protects metadata only)
+	mutexFieldCond       = 1 // i8*  cond var for non-coroutine waiters
+	mutexFieldWaiterHead = 2 // i8*  head of parked goroutine waiter list
+	mutexFieldWaiterTail = 3 // i8*  tail of parked goroutine waiter list
+	mutexFieldHeld       = 4 // i8   0=unlocked, 1=locked
+	mutexFieldValue      = 5 // T    the protected value
+)
+
+// mutexStructType returns the LLVM struct type for a Mutex[T] with the given element type.
+func mutexStructType(elemLLVM irtypes.Type) *irtypes.StructType {
+	return irtypes.NewStruct(
+		irtypes.I8Ptr, // pal_handle
+		irtypes.I8Ptr, // cond
+		irtypes.I8Ptr, // waiter_head
+		irtypes.I8Ptr, // waiter_tail
+		irtypes.I8,    // held
+		elemLLVM,      // value
+	)
+}
+
+// mutexMetaType returns the T-independent metadata portion of the Mutex struct.
+// Used by MutexGuard unlock which doesn't need to know T.
+func mutexMetaType() *irtypes.StructType {
+	return irtypes.NewStruct(
+		irtypes.I8Ptr, // pal_handle
+		irtypes.I8Ptr, // cond
+		irtypes.I8Ptr, // waiter_head
+		irtypes.I8Ptr, // waiter_tail
+		irtypes.I8,    // held
+	)
 }
 
 // --- Channel infrastructure ---

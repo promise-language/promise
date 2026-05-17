@@ -19339,12 +19339,13 @@ func TestMutexConstructorAllocAndInit(t *testing.T) {
 			m := Mutex[int](42);
 		}
 	`)
-	// Should allocate 16 bytes (i8* mutex handle + i64 value)
-	assertContains(t, ir, "call i8* @pal_alloc(i64 16)")
-	// Should init the PAL mutex
+	// Should init the PAL mutex and cond var
 	assertContains(t, ir, "call i8* @pal_mutex_init()")
+	assertContains(t, ir, "call i8* @pal_cond_init()")
 	// Should store the value 42
 	assertContains(t, ir, "store i64 42")
+	// Should init held flag to 0
+	assertContains(t, ir, "store i8 0")
 }
 
 // T0156: Mutex[T] scope cleanup uses drop flag and calls Mutex[int].drop.
@@ -19358,7 +19359,7 @@ func TestMutexDropFlagAndCleanup(t *testing.T) {
 	assertContains(t, ir, `call void @"Mutex[int].drop"(`)
 }
 
-// T0156: Mutex[T].drop function has correct structure: null check, destroy PAL mutex, free.
+// T0156/T0285: Mutex[T].drop function has correct structure: null check, destroy cond + mutex, free.
 func TestMutexDropFunctionBody(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -19372,13 +19373,15 @@ func TestMutexDropFunctionBody(t *testing.T) {
 	// Null check
 	assertContains(t, dropFn, "icmp eq")
 	assertContains(t, dropFn, "null")
+	// Cond var destroy
+	assertContains(t, dropFn, "call void @pal_cond_destroy(")
 	// PAL mutex destroy
 	assertContains(t, dropFn, "call void @pal_mutex_destroy(")
 	// Free allocation
 	assertContains(t, dropFn, "call void @pal_free(")
 }
 
-// T0156: Mutex.lock() acquires the PAL mutex and allocates a guard.
+// T0156/T0285: Mutex.lock() uses scheduler-aware locking and allocates a guard.
 func TestMutexLockAcquiresAndAllocatesGuard(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -19386,8 +19389,10 @@ func TestMutexLockAcquiresAndAllocatesGuard(t *testing.T) {
 			use guard := m.lock();
 		}
 	`)
-	// Should lock the PAL mutex
+	// Should lock the PAL mutex (metadata critical section)
 	assertContains(t, ir, "call void @pal_mutex_lock(")
+	// Should check held flag
+	assertContains(t, ir, "icmp eq i8")
 	// Should allocate 8 bytes for the guard
 	assertContains(t, ir, "call i8* @pal_alloc(i64 8)")
 }
@@ -19401,9 +19406,9 @@ func TestMutexGuardBorrowGetter(t *testing.T) {
 			int x = guard.borrow;
 		}
 	`)
-	// Borrow navigates guard → mutex → value via GEPs on {i8*} and {i8*, i64}
+	// Borrow navigates guard → mutex → value via GEPs on {i8*} and the full mutex struct
 	assertContains(t, ir, "getelementptr { i8* }, { i8* }*")
-	assertContains(t, ir, "getelementptr { i8*, i64 }, { i8*, i64 }*")
+	assertContains(t, ir, "getelementptr { i8*, i8*, i8*, i8*, i8, i64 }, { i8*, i8*, i8*, i8*, i8, i64 }*")
 }
 
 // T0156: MutexGuard.borrow setter stores T through the guard's mutex pointer.
@@ -19445,7 +19450,7 @@ func TestMutexGuardBorrowSetterCompoundAssign(t *testing.T) {
 	assertContains(t, ir, "add i64")
 }
 
-// T0156: MutexGuard close/drop functions unlock and free.
+// T0156/T0285: MutexGuard close/drop functions do scheduler-aware unlock and free.
 func TestMutexGuardCloseUnlocksAndFrees(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -19459,8 +19464,11 @@ func TestMutexGuardCloseUnlocksAndFrees(t *testing.T) {
 	}
 	// Null check
 	assertContains(t, closeFn, "icmp eq")
-	// Unlock
+	// Locks metadata mutex, clears held, signals cond, unlocks
+	assertContains(t, closeFn, "call void @pal_mutex_lock(")
+	assertContains(t, closeFn, "store i8 0")
 	assertContains(t, closeFn, "call void @pal_mutex_unlock(")
+	assertContains(t, closeFn, "call void @pal_cond_signal(")
 	// Free guard
 	assertContains(t, closeFn, "call void @pal_free(")
 }
@@ -19476,8 +19484,9 @@ func TestMutexDropWithStringElement(t *testing.T) {
 	if dropFn == "" {
 		t.Fatal("expected Mutex[string].drop function in IR")
 	}
-	// Should drop the inner string before destroying the mutex
+	// Should drop the inner string before destroying cond + mutex
 	assertContains(t, dropFn, "call void @promise_string_drop(")
+	assertContains(t, dropFn, "call void @pal_cond_destroy(")
 	assertContains(t, dropFn, "call void @pal_mutex_destroy(")
 }
 

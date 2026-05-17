@@ -2793,30 +2793,51 @@ func (c *Compiler) genWeakUpgrade(weakRaw value.Value, elemType types.Type) valu
 
 // --- Mutex[T] / MutexGuard[T] codegen (T0156) ---
 
-// genMutexConstructor generates Mutex[T](value) — allocates {pal_handle, T}, inits mutex, stores value.
+// genMutexConstructor generates Mutex[T](value) — allocates scheduler-aware mutex struct, inits fields, stores value.
+// Layout: {i8* pal_handle, i8* cond, i8* waiter_head, i8* waiter_tail, i8 held, T value}
+// T0285: Scheduler-aware mutex — uses goroutine park/wake instead of blocking OS threads.
 func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) value.Value {
 	elemType := inst.TypeArgs()[0]
 	if c.typeSubst != nil {
 		elemType = types.Substitute(elemType, c.typeSubst)
 	}
 	elemLLVM := c.resolveType(elemType)
-	elemSize := c.typeSize(elemLLVM)
 
-	// Allocate: 8 bytes (mutex handle ptr) + sizeof(T)
-	totalSize := 8 + elemSize
-	mutexPtr := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, int64(totalSize)))
+	mutexStructTy := mutexStructType(elemLLVM)
+	mutexSize := c.typeSize(mutexStructTy)
+	mutexPtr := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, int64(mutexSize)))
 
 	// Bitcast to typed struct pointer for GEP
-	mutexStructTy := irtypes.NewStruct(irtypes.I8Ptr, elemLLVM)
 	typedPtr := c.block.NewBitCast(mutexPtr, irtypes.NewPointer(mutexStructTy))
 
-	// Init PAL mutex and store handle at field 0
+	// Field 0: PAL mutex handle (protects metadata only)
 	mutexHandle := c.block.NewCall(c.palMutexInit)
 	handleField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	c.block.NewStore(mutexHandle, handleField)
 
-	// Generate and store value (moved into the Mutex)
+	// Field 1: condition variable (for non-coroutine waiters)
+	condHandle := c.block.NewCall(c.palCondInit)
+	condField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	c.block.NewStore(condHandle, condField)
+
+	// Field 2: waiter_head = null
+	headField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	c.block.NewStore(constant.NewNull(irtypes.I8Ptr), headField)
+
+	// Field 3: waiter_tail = null
+	tailField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 3))
+	c.block.NewStore(constant.NewNull(irtypes.I8Ptr), tailField)
+
+	// Field 4: held = 0 (unlocked)
+	heldField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 4))
+	c.block.NewStore(constant.NewInt(irtypes.I8, 0), heldField)
+
+	// Field 5: user value (moved into the Mutex)
 	val := c.genCallArgExpr(e.Args[0].Value)
 	c.claimHeapTemp(val)
 	// T0273: Clear drop flag — value is moved into Mutex, caller must not double-drop.
@@ -2827,7 +2848,7 @@ func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) va
 	c.claimStringTemp(val)
 	c.claimEnvTemp(val)
 	valField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldValue)))
 	c.block.NewStore(val, valField)
 
 	return mutexPtr
@@ -2848,20 +2869,93 @@ func (c *Compiler) genMutexMethodCall(e *ast.CallExpr, member *ast.MemberExpr, e
 	}
 }
 
-// genMutexLock generates Mutex.lock() — acquires the PAL mutex, returns a MutexGuard.
+// genMutexLock generates Mutex.lock() — scheduler-aware lock, returns a MutexGuard.
+// T0285: Coroutine path uses goroutine park/wake; non-coroutine path uses cond_wait.
 // Guard layout: {i8* mutex_alloc_ptr}.
 func (c *Compiler) genMutexLock(mutexRaw value.Value, elemType types.Type) value.Value {
-	elemLLVM := c.resolveType(elemType)
+	metaTy := mutexMetaType()
+	typedPtr := c.block.NewBitCast(mutexRaw, irtypes.NewPointer(metaTy))
 
-	// Load PAL mutex handle from Mutex field 0 and lock
-	mutexStructTy := irtypes.NewStruct(irtypes.I8Ptr, elemLLVM)
-	typedPtr := c.block.NewBitCast(mutexRaw, irtypes.NewPointer(mutexStructTy))
-	handleField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	// Load PAL mutex handle and enter critical section
+	handleField := c.block.NewGetElementPtr(metaTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHandle)))
 	handle := c.block.NewLoad(irtypes.I8Ptr, handleField)
 	c.block.NewCall(c.palMutexLock, handle)
 
+	// Load held flag
+	heldField := c.block.NewGetElementPtr(metaTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHeld)))
+	held := c.block.NewLoad(irtypes.I8, heldField)
+	isHeld := c.block.NewICmp(enum.IPredEQ, held, constant.NewInt(irtypes.I8, 1))
+
+	acquiredBlk := c.newBlock("mutex.acquired")
+	contestedBlk := c.newBlock("mutex.contested")
+	c.block.NewCondBr(isHeld, contestedBlk, acquiredBlk)
+
+	// acquired: held=0 → set held=1, unlock metadata mutex, allocate guard
+	c.block = acquiredBlk
+	acquiredHeldField := c.block.NewGetElementPtr(metaTy, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHeld)))
+	c.block.NewStore(constant.NewInt(irtypes.I8, 1), acquiredHeldField)
+	c.block.NewCall(c.palMutexUnlock, handle)
+
+	guardBlk := c.newBlock("mutex.guard")
+	c.block.NewBr(guardBlk)
+
+	// contested: held=1 → need to wait
+	c.block = contestedBlk
+	if c.inCoroutine {
+		// Goroutine mode: yield and retry (park_mutex=null → scheduler re-enqueues)
+		c.block.NewCall(c.palMutexUnlock, handle)
+
+		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+		resumeBlk := c.newBlock("mutex.wait.resume")
+		c.block.NewSwitch(suspResult, c.coroSuspendBlk,
+			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
+			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
+
+		// Resume: retry lock from the top
+		c.block = resumeBlk
+		// Re-lock PAL mutex and re-check held flag
+		c.block.NewCall(c.palMutexLock, handle)
+		retryHeldField := c.block.NewGetElementPtr(metaTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHeld)))
+		retryHeld := c.block.NewLoad(irtypes.I8, retryHeldField)
+		retryIsHeld := c.block.NewICmp(enum.IPredEQ, retryHeld, constant.NewInt(irtypes.I8, 1))
+		c.block.NewCondBr(retryIsHeld, contestedBlk, acquiredBlk)
+	} else {
+		// Non-coroutine mode: cond_wait loop
+		condField := c.block.NewGetElementPtr(metaTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldCond)))
+		cond := c.block.NewLoad(irtypes.I8Ptr, condField)
+
+		waitLoopBlk := c.newBlock("mutex.wait.loop")
+		c.block.NewBr(waitLoopBlk)
+
+		c.block = waitLoopBlk
+		loopHeldField := c.block.NewGetElementPtr(metaTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHeld)))
+		loopHeld := c.block.NewLoad(irtypes.I8, loopHeldField)
+		stillHeld := c.block.NewICmp(enum.IPredEQ, loopHeld, constant.NewInt(irtypes.I8, 1))
+
+		waitBodyBlk := c.newBlock("mutex.wait.body")
+		waitDoneBlk := c.newBlock("mutex.wait.done")
+		c.block.NewCondBr(stillHeld, waitBodyBlk, waitDoneBlk)
+
+		c.block = waitBodyBlk
+		c.block.NewCall(c.palCondWait, cond, handle)
+		c.block.NewBr(waitLoopBlk)
+
+		c.block = waitDoneBlk
+		doneHeldField := c.block.NewGetElementPtr(metaTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldHeld)))
+		c.block.NewStore(constant.NewInt(irtypes.I8, 1), doneHeldField)
+		c.block.NewCall(c.palMutexUnlock, handle)
+		c.block.NewBr(guardBlk)
+	}
+
 	// Allocate guard: {i8*} — pointer back to the Mutex allocation
+	c.block = guardBlk
 	guardPtr := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, 8))
 	guardStructTy := irtypes.NewStruct(irtypes.I8Ptr)
 	guardTypedPtr := c.block.NewBitCast(guardPtr, irtypes.NewPointer(guardStructTy))
@@ -2873,7 +2967,7 @@ func (c *Compiler) genMutexLock(mutexRaw value.Value, elemType types.Type) value
 }
 
 // genMutexGuardBorrow generates the MutexGuard .borrow getter — loads T from the Mutex through the guard.
-// Guard layout: {i8* mutex_alloc_ptr}. Mutex layout: {i8* pal_handle, T value}.
+// Guard layout: {i8* mutex_alloc_ptr}. Mutex layout: {i8* pal_handle, i8* cond, i8* waiter_head, i8* waiter_tail, i8 held, T value}.
 func (c *Compiler) genMutexGuardBorrow(e *ast.MemberExpr, elemType types.Type) value.Value {
 	guardRaw := c.genExprAutoPropagate(e.Target)
 	elemLLVM := c.resolveType(elemType)
@@ -2885,11 +2979,11 @@ func (c *Compiler) genMutexGuardBorrow(e *ast.MemberExpr, elemType types.Type) v
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	mutexRaw := c.block.NewLoad(irtypes.I8Ptr, mutexPtrField)
 
-	// Load T from Mutex field 1
-	mutexStructTy := irtypes.NewStruct(irtypes.I8Ptr, elemLLVM)
+	// Load T from Mutex field 5 (value)
+	mutexStructTy := mutexStructType(elemLLVM)
 	mutexPtr := c.block.NewBitCast(mutexRaw, irtypes.NewPointer(mutexStructTy))
 	valField := c.block.NewGetElementPtr(mutexStructTy, mutexPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldValue)))
 	return c.block.NewLoad(elemLLVM, valField)
 }
 
@@ -2906,10 +3000,10 @@ func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignO
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	mutexRaw := c.block.NewLoad(irtypes.I8Ptr, mutexPtrField)
 
-	mutexStructTy := irtypes.NewStruct(irtypes.I8Ptr, elemLLVM)
+	mutexStructTy := mutexStructType(elemLLVM)
 	mutexPtr := c.block.NewBitCast(mutexRaw, irtypes.NewPointer(mutexStructTy))
 	valField := c.block.NewGetElementPtr(mutexStructTy, mutexPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldValue)))
 
 	// Handle compound assignment
 	if op != ast.OpAssign {
@@ -2918,7 +3012,7 @@ func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignO
 	}
 
 	// Drop old value if T is droppable (T0270)
-	c.emitInnerDrop(c.block, mutexPtr, mutexStructTy, elemType, 1)
+	c.emitInnerDrop(c.block, mutexPtr, mutexStructTy, elemType, mutexFieldValue)
 
 	c.block.NewStore(val, valField)
 }
@@ -7012,9 +7106,15 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedLocalNameCount := c.localNameCount             // T0261
 	savedPanicExitBlock := c.panicExitBlock             // T0262: clear in lambda (separate function)
 	savedCoroutineReturnBlock := c.coroutineReturnBlock // T0262: clear in lambda (separate function)
+	savedInCoroutine := c.inCoroutine                   // T0285: lambda is a separate function, not a coroutine
+	savedCoroCleanup := c.coroCleanupBlk                // T0285: save coroutine blocks
+	savedCoroSuspend := c.coroSuspendBlk                // T0285: save coroutine blocks
 	c.goExprFireAndForget = false                       // reset for inner statements (B0109)
 	c.panicExitBlock = nil                              // T0262: lambda is a separate function
 	c.coroutineReturnBlock = nil                        // T0262: lambda is a separate function
+	c.inCoroutine = false                               // T0285: lambda is not a coroutine
+	c.coroCleanupBlk = nil                              // T0285: no coroutine infrastructure
+	c.coroSuspendBlk = nil                              // T0285: no coroutine infrastructure
 
 	// Generate lambda body with fresh scope state
 	c.fn = fn
@@ -7148,6 +7248,9 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.localNameCount = savedLocalNameCount             // T0261
 	c.panicExitBlock = savedPanicExitBlock             // T0262
 	c.coroutineReturnBlock = savedCoroutineReturnBlock // T0262
+	c.inCoroutine = savedInCoroutine                   // T0285
+	c.coroCleanupBlk = savedCoroCleanup                // T0285
+	c.coroSuspendBlk = savedCoroSuspend                // T0285
 
 	// T0100: Track env temp for non-variable lambdas. If this lambda is
 	// assigned to a variable, maybeRegisterEnvFree handles cleanup and the

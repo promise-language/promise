@@ -1,6 +1,7 @@
 package bindgen
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1035,5 +1036,835 @@ func assertContains(t *testing.T, s, substr string) {
 	t.Helper()
 	if !strings.Contains(s, substr) {
 		t.Errorf("output does not contain %q\n\nFull output:\n%s", substr, s)
+	}
+}
+
+func assertNotContains(t *testing.T, s, substr string) {
+	t.Helper()
+	if strings.Contains(s, substr) {
+		t.Errorf("output should NOT contain %q\n\nFull output:\n%s", substr, s)
+	}
+}
+
+// --- Canonical ABI tests ---
+
+func TestFlattenTypeScalars(t *testing.T) {
+	tests := []struct {
+		ref  TypeRef
+		want []FlatType
+	}{
+		{TypeRef{Kind: BuiltinKind, Builtin: "u32"}, []FlatType{FlatI32}},
+		{TypeRef{Kind: BuiltinKind, Builtin: "u64"}, []FlatType{FlatI64}},
+		{TypeRef{Kind: BuiltinKind, Builtin: "f32"}, []FlatType{FlatF32}},
+		{TypeRef{Kind: BuiltinKind, Builtin: "f64"}, []FlatType{FlatF64}},
+		{TypeRef{Kind: BuiltinKind, Builtin: "bool"}, []FlatType{FlatI32}},
+		{TypeRef{Kind: BuiltinKind, Builtin: "char"}, []FlatType{FlatI32}},
+		{TypeRef{Kind: BuiltinKind, Builtin: "s8"}, []FlatType{FlatI32}},
+		{TypeRef{Kind: BuiltinKind, Builtin: "s16"}, []FlatType{FlatI32}},
+	}
+	for _, tt := range tests {
+		got := flattenType(tt.ref)
+		if len(got) != len(tt.want) {
+			t.Errorf("flattenType(%s): got %d flat types, want %d", tt.ref.Builtin, len(got), len(tt.want))
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("flattenType(%s)[%d]: got %d, want %d", tt.ref.Builtin, i, got[i], tt.want[i])
+			}
+		}
+	}
+}
+
+func TestFlattenTypeString(t *testing.T) {
+	ref := TypeRef{Kind: BuiltinKind, Builtin: "string"}
+	got := flattenType(ref)
+	if len(got) != 2 || got[0] != FlatI32 || got[1] != FlatI32 {
+		t.Errorf("flattenType(string): got %v, want [i32, i32]", got)
+	}
+}
+
+func TestFlattenTypeList(t *testing.T) {
+	ref := TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}}
+	got := flattenType(ref)
+	if len(got) != 2 || got[0] != FlatI32 || got[1] != FlatI32 {
+		t.Errorf("flattenType(list<u8>): got %v, want [i32, i32]", got)
+	}
+}
+
+func TestFlattenTypeOption(t *testing.T) {
+	ref := TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}
+	got := flattenType(ref)
+	// option<u32> → i32 (discriminant) + i32 (payload) = 2
+	if len(got) != 2 || got[0] != FlatI32 || got[1] != FlatI32 {
+		t.Errorf("flattenType(option<u32>): got %v, want [i32, i32]", got)
+	}
+}
+
+func TestFlattenTypeResult(t *testing.T) {
+	ref := TypeRef{
+		Kind: ResultKind,
+		Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+		Err:  &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+	}
+	got := flattenType(ref)
+	// result<u32, u32> → i32 (discriminant) + i32 (max of ok/err) = 2
+	if len(got) != 2 || got[0] != FlatI32 || got[1] != FlatI32 {
+		t.Errorf("flattenType(result<u32, u32>): got %v, want [i32, i32]", got)
+	}
+}
+
+func TestFlattenTypeResultStringOk(t *testing.T) {
+	ref := TypeRef{
+		Kind: ResultKind,
+		Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "string"},
+	}
+	got := flattenType(ref)
+	// result<string, void> → i32 (discriminant) + i32 + i32 (string ptr,len) = 3
+	if len(got) != 3 {
+		t.Errorf("flattenType(result<string>): got %d flat types, want 3", len(got))
+	}
+}
+
+func TestFlattenTypeHandle(t *testing.T) {
+	own := TypeRef{Kind: OwnKind, Elem: &TypeRef{Kind: NamedKind, Name: "Res"}}
+	borrow := TypeRef{Kind: BorrowKind, Elem: &TypeRef{Kind: NamedKind, Name: "Res"}}
+	if got := flattenType(own); len(got) != 1 || got[0] != FlatI32 {
+		t.Errorf("flattenType(own<Res>): got %v, want [i32]", got)
+	}
+	if got := flattenType(borrow); len(got) != 1 || got[0] != FlatI32 {
+		t.Errorf("flattenType(borrow<Res>): got %v, want [i32]", got)
+	}
+}
+
+func TestFlattenTypeTuple(t *testing.T) {
+	ref := TypeRef{
+		Kind: TupleKind,
+		Elements: []TypeRef{
+			{Kind: BuiltinKind, Builtin: "u32"},
+			{Kind: BuiltinKind, Builtin: "f64"},
+			{Kind: BuiltinKind, Builtin: "bool"},
+		},
+	}
+	got := flattenType(ref)
+	// (u32, f64, bool) → i32 + f64 + i32 = 3
+	if len(got) != 3 || got[0] != FlatI32 || got[1] != FlatF64 || got[2] != FlatI32 {
+		t.Errorf("flattenType(tuple): got %v, want [i32, f64, i32]", got)
+	}
+}
+
+func TestFlattenParams(t *testing.T) {
+	params := []Param{
+		{Name: "name", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}},
+		{Name: "count", Type: TypeRef{Kind: BuiltinKind, Builtin: "u32"}},
+	}
+	flat, usePtr := flattenParams(params)
+	if usePtr {
+		t.Error("expected direct params, got usePtr=true")
+	}
+	if len(flat) != 3 {
+		t.Fatalf("expected 3 flat params, got %d", len(flat))
+	}
+	// string → (name_ptr, name_len), u32 → count
+	if flat[0].Name != "name_ptr" || flat[0].Type != FlatI32 {
+		t.Errorf("flat[0]: got %v", flat[0])
+	}
+	if flat[1].Name != "name_len" || flat[1].Type != FlatI32 {
+		t.Errorf("flat[1]: got %v", flat[1])
+	}
+	if flat[2].Name != "count" || flat[2].Type != FlatI32 {
+		t.Errorf("flat[2]: got %v", flat[2])
+	}
+}
+
+func TestFlattenParamsExceedsLimit(t *testing.T) {
+	// Create > MaxFlatParams params
+	var params []Param
+	for i := 0; i < 9; i++ {
+		params = append(params, Param{
+			Name: fmt.Sprintf("s%d", i),
+			Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}, // 2 flat each
+		})
+	}
+	_, usePtr := flattenParams(params)
+	if !usePtr {
+		t.Error("expected usePtr=true for > 16 flat params")
+	}
+}
+
+func TestFlattenResultsRetPtr(t *testing.T) {
+	// string return → 2 flat results > MaxFlatResults (1) → retptr
+	results := []TypeRef{{Kind: BuiltinKind, Builtin: "string"}}
+	flat, useRetPtr := flattenResults(results)
+	if !useRetPtr {
+		t.Error("expected useRetPtr=true for string return")
+	}
+	if len(flat) != 2 {
+		t.Errorf("expected 2 flat results, got %d", len(flat))
+	}
+}
+
+func TestFlattenResultsDirect(t *testing.T) {
+	// u32 return → 1 flat result ≤ MaxFlatResults → direct
+	results := []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}}
+	flat, useRetPtr := flattenResults(results)
+	if useRetPtr {
+		t.Error("expected useRetPtr=false for u32 return")
+	}
+	if len(flat) != 1 || flat[0] != FlatI32 {
+		t.Errorf("expected [i32], got %v", flat)
+	}
+}
+
+func TestNeedsCanonicalLowering(t *testing.T) {
+	tests := []struct {
+		ref  TypeRef
+		want bool
+	}{
+		{TypeRef{Kind: BuiltinKind, Builtin: "u32"}, false},
+		{TypeRef{Kind: BuiltinKind, Builtin: "string"}, true},
+		{TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}}, true},
+		{TypeRef{Kind: OwnKind, Elem: &TypeRef{Kind: NamedKind, Name: "R"}}, false},
+		{TypeRef{Kind: BorrowKind, Elem: &TypeRef{Kind: NamedKind, Name: "R"}}, false},
+		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}, true},
+		{TypeRef{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}, true},
+	}
+	for _, tt := range tests {
+		got := needsCanonicalLowering(tt.ref)
+		if got != tt.want {
+			t.Errorf("needsCanonicalLowering(%v): got %v, want %v", tt.ref.Kind, got, tt.want)
+		}
+	}
+}
+
+// --- Canonical ABI codegen tests ---
+
+func TestCodegenCanonicalABIStringParam(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "greet",
+			Kind:       FuncFree,
+			Params:     []Param{{Name: "name", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+			ImportName: "greet",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// Extern should have flat params: i32 name_ptr, i32 name_len
+	assertContains(t, out, "_greet(i32 name_ptr, i32 name_len)")
+	// Wrapper should lower string to flat values
+	assertContains(t, out, "_cabi_string_data(name)")
+	assertContains(t, out, "_cabi_string_len(name)")
+	// Helper declarations should be present
+	assertContains(t, out, "_cabi_string_data(string s) i32")
+	assertContains(t, out, "_cabi_string_len(string s) i32")
+}
+
+func TestCodegenCanonicalABIStringReturn(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "get_name",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "string"}},
+			ImportName: "get-name",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// String return → retptr pattern
+	assertContains(t, out, "i32 retptr)")
+	// Wrapper should lift string from retptr
+	assertContains(t, out, "_cabi_string_from(")
+	assertContains(t, out, "_cabi_load_i32(")
+}
+
+func TestCodegenCanonicalABIScalarUnchanged(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "add",
+			Kind:       FuncFree,
+			Params:     []Param{{Name: "a", Type: TypeRef{Kind: BuiltinKind, Builtin: "u32"}}, {Name: "b", Type: TypeRef{Kind: BuiltinKind, Builtin: "u32"}}},
+			Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}},
+			ImportName: "add",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// Scalar extern should use flat types
+	assertContains(t, out, "_add(i32 a, i32 b) i32")
+	// Wrapper should pass scalars directly
+	assertContains(t, out, "return _add(a, b);")
+}
+
+func TestCodegenCanonicalABIResultRetPtr(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "do_thing",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}},
+			ImportName: "do-thing",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// result<u32> → 2 flat results → retptr
+	assertContains(t, out, "i32 retptr)")
+	// Wrapper should check discriminant
+	assertContains(t, out, "_cabi_load_i32(_cabi_retarea_ptr())")
+}
+
+func TestCodegenCanonicalABIResourceHandle(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Descriptor",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "read",
+				Kind:       FuncMethod,
+				Params:     []Param{{Name: "length", Type: TypeRef{Kind: BuiltinKind, Builtin: "u64"}}},
+				Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}},
+				ImportName: "[method]descriptor.read",
+			}},
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// Resource method extern: handle is i32
+	assertContains(t, out, "i32 handle")
+	// u64 param stays i64
+	assertContains(t, out, "i64 length")
+}
+
+func TestCodegenCanonicalABIHelpers(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "noop",
+			Kind:       FuncFree,
+			ImportName: "noop",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// All canonical ABI helpers should be declared
+	assertContains(t, out, "_cabi_load_i32(i32 ptr) i32")
+	assertContains(t, out, "_cabi_load_i64(i32 ptr) i64")
+	assertContains(t, out, "_cabi_load_f32(i32 ptr) f32")
+	assertContains(t, out, "_cabi_load_f64(i32 ptr) f64")
+	assertContains(t, out, "_cabi_store_i32(i32 ptr, i32 val)")
+	assertContains(t, out, "_cabi_store_i64(i32 ptr, i64 val)")
+	assertContains(t, out, "_cabi_string_data(string s) i32")
+	assertContains(t, out, "_cabi_string_from(i32 ptr, i32 len) string")
+	assertContains(t, out, "_cabi_retarea_ptr() i32")
+}
+
+func TestCodegenNonCanonicalUnchanged(t *testing.T) {
+	// Without canonical ABI, string params should NOT be flattened
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "greet",
+			Kind:       FuncFree,
+			Params:     []Param{{Name: "name", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+			ImportName: "greet",
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	// Should NOT flatten to ptr/len
+	assertNotContains(t, out, "name_ptr")
+	assertNotContains(t, out, "name_len")
+	// Should use Promise string type
+	assertContains(t, out, "string name")
+}
+
+func TestFlatParamName(t *testing.T) {
+	tests := []struct {
+		base  string
+		index int
+		total int
+		want  string
+	}{
+		{"name", 0, 2, "name_ptr"},
+		{"name", 1, 2, "name_len"},
+		{"val", 0, 3, "val_tag"},
+		{"val", 1, 3, "val_0"},
+		{"val", 2, 3, "val_1"},
+	}
+	for _, tt := range tests {
+		got := flatParamName(tt.base, tt.index, tt.total)
+		if got != tt.want {
+			t.Errorf("flatParamName(%q, %d, %d) = %q, want %q", tt.base, tt.index, tt.total, got, tt.want)
+		}
+	}
+}
+
+func TestFlatPromiseTypeAllCases(t *testing.T) {
+	tests := []struct {
+		ft   FlatType
+		want string
+	}{
+		{FlatI32, "i32"},
+		{FlatI64, "i64"},
+		{FlatF32, "f32"},
+		{FlatF64, "f64"},
+		{FlatType(99), "i32"}, // default
+	}
+	for _, tt := range tests {
+		got := flatPromiseType(tt.ft)
+		if got != tt.want {
+			t.Errorf("flatPromiseType(%d) = %q, want %q", tt.ft, got, tt.want)
+		}
+	}
+}
+
+func TestFlattenTypeNamed(t *testing.T) {
+	ref := TypeRef{Kind: NamedKind, Name: "MyRecord"}
+	got := flattenType(ref)
+	if len(got) != 1 || got[0] != FlatI32 {
+		t.Errorf("flattenType(named): got %v, want [i32]", got)
+	}
+}
+
+func TestFlattenTypeDefaultKind(t *testing.T) {
+	// Use a kind value that doesn't match any case
+	ref := TypeRef{Kind: TypeRefKind(99)}
+	got := flattenType(ref)
+	if len(got) != 1 || got[0] != FlatI32 {
+		t.Errorf("flattenType(unknown kind): got %v, want [i32]", got)
+	}
+}
+
+func TestFlattenBuiltinDefault(t *testing.T) {
+	got := flattenBuiltin("unknown_type")
+	if len(got) != 1 || got[0] != FlatI32 {
+		t.Errorf("flattenBuiltin(unknown): got %v, want [i32]", got)
+	}
+}
+
+func TestFlattenResultErrWiderThanOk(t *testing.T) {
+	// result<u32, string> — err (string → 2 flat) is wider than ok (u32 → 1 flat)
+	ref := TypeRef{
+		Kind: ResultKind,
+		Ok:   &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+		Err:  &TypeRef{Kind: BuiltinKind, Builtin: "string"},
+	}
+	got := flattenType(ref)
+	// discriminant (i32) + max(1, 2) = 3
+	if len(got) != 3 {
+		t.Errorf("flattenType(result<u32, string>): got %d flat types, want 3", len(got))
+	}
+}
+
+func TestFlattenResultBothNil(t *testing.T) {
+	// result<void, void>
+	ref := TypeRef{Kind: ResultKind}
+	got := flattenType(ref)
+	// discriminant only
+	if len(got) != 1 || got[0] != FlatI32 {
+		t.Errorf("flattenType(result<void,void>): got %v, want [i32]", got)
+	}
+}
+
+func TestCodegenMethodWrapperVoidClose(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Descriptor",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "close",
+				Kind:       FuncMethod,
+				Results:    []TypeRef{},
+				ImportName: "[method]descriptor.close",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "close(this) `public {")
+	assertContains(t, out, "_descriptor_close(this._handle);")
+}
+
+func TestCodegenMethodWrapperFailableVoid(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Descriptor",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "sync",
+				Kind:       FuncMethod,
+				Results:    []TypeRef{{Kind: ResultKind}},
+				ImportName: "[method]descriptor.sync",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "sync!(this) `public {")
+	assertContains(t, out, "_descriptor_sync(this._handle)^;")
+}
+
+func TestCodegenFreeFuncVoidFailableRetPtr(t *testing.T) {
+	// result<void, E> with canonical ABI → retptr for discriminant check, no return value
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "do_action",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: ResultKind}},
+			ImportName: "do-action",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// Wrapper should be failable with no return type
+	assertContains(t, out, "do_action!() `public {")
+}
+
+func TestCodegenCanonicalABIStringReturnDirect(t *testing.T) {
+	// Non-result string return → retptr (string is 2 flat > MaxFlatResults=1)
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "get_name",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "string"}},
+			ImportName: "get-name",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// Should use retptr and lift string from offset 0
+	assertContains(t, out, "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr()), _cabi_load_i32(_cabi_retarea_ptr() + 4))")
+}
+
+func TestCodegenCanonicalABIResultStringOk(t *testing.T) {
+	// result<string, E> → retptr, string lifted from offset 4
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "get_value",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+			ImportName: "get-value",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr() + 4), _cabi_load_i32(_cabi_retarea_ptr() + 8))")
+}
+
+func TestCodegenCanonicalABIResultF64Ok(t *testing.T) {
+	// result<f64, E> → retptr, f64 lifted via _cabi_load_f64
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "get_value",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "f64"}}},
+			ImportName: "get-value",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "_cabi_load_f64(_cabi_retarea_ptr() + 4)")
+}
+
+func TestCodegenCanonicalABIResultF32Ok(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "get_value",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "f32"}}},
+			ImportName: "get-value",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "_cabi_load_f32(_cabi_retarea_ptr() + 4)")
+}
+
+func TestCodegenCanonicalABIResultU64Ok(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "get_value",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "u64"}}},
+			ImportName: "get-value",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	assertContains(t, out, "_cabi_load_i64(_cabi_retarea_ptr() + 4)")
+}
+
+func TestCodegenCanonicalABIDirectScalarReturn(t *testing.T) {
+	// u32 return with canonical ABI → direct return (1 flat ≤ MaxFlatResults)
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "get_count",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}},
+			ImportName: "get-count",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// Should NOT use retptr — direct return
+	assertNotContains(t, out, "retptr")
+	assertContains(t, out, "_get_count() i32")
+}
+
+func TestCodegenCanonicalABIDirectFailable(t *testing.T) {
+	// result<void, E> with canonical ABI → discriminant is 1 flat → direct return
+	// But result<void> flattens to just [i32] (discriminant) which is ≤ MaxFlatResults
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/api",
+		Functions: []Func{{
+			Name:       "try_thing",
+			Kind:       FuncFree,
+			Results:    []TypeRef{{Kind: ResultKind}},
+			ImportName: "try-thing",
+		}},
+	}}
+	out := GeneratePromiseWithOptions(modules, "wasi", true)
+	// result<void,void> → 1 flat result → direct, not retptr
+	assertContains(t, out, "_try_thing()")
+}
+
+func TestLowerParamToFlatList(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	p := Param{Name: "data", Type: TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}}}
+	got := g.lowerParamToFlat(p)
+	// List lowering is a TODO — should pass as-is for now
+	if len(got) != 1 || got[0] != "data" {
+		t.Errorf("lowerParamToFlat(list): got %v, want [data]", got)
+	}
+}
+
+func TestLowerParamToFlatDefault(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	p := Param{Name: "val", Type: TypeRef{Kind: NamedKind, Name: "MyRecord"}}
+	got := g.lowerParamToFlat(p)
+	if len(got) != 1 || got[0] != "val" {
+		t.Errorf("lowerParamToFlat(named): got %v, want [val]", got)
+	}
+}
+
+func TestNeedsCanonicalLoweringTuple(t *testing.T) {
+	ref := TypeRef{Kind: TupleKind, Elements: []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}}}
+	if !needsCanonicalLowering(ref) {
+		t.Error("expected needsCanonicalLowering(tuple) = true")
+	}
+}
+
+func TestNeedsCanonicalLoweringNamed(t *testing.T) {
+	ref := TypeRef{Kind: NamedKind, Name: "Foo"}
+	if !needsCanonicalLowering(ref) {
+		t.Error("expected needsCanonicalLowering(named) = true")
+	}
+}
+
+func TestNeedsCanonicalLoweringDefaultKind(t *testing.T) {
+	ref := TypeRef{Kind: TypeRefKind(99)}
+	if needsCanonicalLowering(ref) {
+		t.Error("expected needsCanonicalLowering(unknown) = false")
+	}
+}
+
+func TestLiftReturnFromRetPtrEmpty(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	got := g.liftReturnFromRetPtr(nil)
+	if got != "" {
+		t.Errorf("liftReturnFromRetPtr(nil) = %q, want empty", got)
+	}
+}
+
+func TestLiftScalarFromRetPtrOffset0(t *testing.T) {
+	ref := TypeRef{Kind: BuiltinKind, Builtin: "u32"}
+	got := liftScalarFromRetPtr(ref, 0)
+	if got != "_cabi_load_i32(_cabi_retarea_ptr())" {
+		t.Errorf("liftScalarFromRetPtr(u32, 0) = %q", got)
+	}
+}
+
+func TestLiftScalarFromRetPtrNonBuiltin(t *testing.T) {
+	ref := TypeRef{Kind: NamedKind, Name: "MyType"}
+	got := liftScalarFromRetPtr(ref, 8)
+	if got != "_cabi_load_i32(_cabi_retarea_ptr() + 8)" {
+		t.Errorf("liftScalarFromRetPtr(named, 8) = %q", got)
+	}
+}
+
+func TestFormatExternReturnSigCanonicalFailable(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	// result<u32> → 2 flat → retptr, failable
+	results := []TypeRef{{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}}
+	got := g.formatExternReturnSig(results)
+	// retptr + failable → void extern (retptr in params)
+	if got != "" {
+		t.Errorf("formatExternReturnSig(result<u32>) = %q, want empty (retptr pattern)", got)
+	}
+}
+
+func TestFormatExternReturnSigCanonicalDirectFailable(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	// result<void> → [i32] (discriminant) → 1 flat → direct, failable
+	results := []TypeRef{{Kind: ResultKind}}
+	got := g.formatExternReturnSig(results)
+	// Extern returns the discriminant as i32, marked failable
+	if got != " i32!" {
+		t.Errorf("formatExternReturnSig(result<void>) = %q, want \" i32!\"", got)
+	}
+}
+
+func TestFormatExternReturnSigCanonicalDirectScalar(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	results := []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}}
+	got := g.formatExternReturnSig(results)
+	if got != " i32" {
+		t.Errorf("formatExternReturnSig(u32) = %q, want \" i32\"", got)
+	}
+}
+
+func TestFormatExternReturnSigCanonicalEmpty(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	got := g.formatExternReturnSig(nil)
+	if got != "" {
+		t.Errorf("formatExternReturnSig(nil) = %q, want empty", got)
+	}
+}
+
+func TestFormatReturnSigFailable(t *testing.T) {
+	g := &generator{}
+	// Failable with no Ok type → just "!"
+	results := []TypeRef{{Kind: ResultKind}}
+	got := g.formatReturnSig(results)
+	if got != "!" {
+		t.Errorf("formatReturnSig(result<void>) = %q, want \"!\"", got)
+	}
+}
+
+func TestCodegenFlagsDoc(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/types",
+		Types: []Type{{
+			Name:   "Perms",
+			Kind:   TypeFlags,
+			Doc:    "Permission flags.",
+			Fields: []Field{{Name: "read"}},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "`doc \"Permission flags.\"")
+}
+
+func TestCodegenTypeAliasDoc(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "test:test/types",
+		Types: []Type{{
+			Name:   "ErrorCode",
+			Kind:   TypeAlias,
+			Doc:    "Error code type.",
+			Target: &TypeRef{Kind: BuiltinKind, Builtin: "u32"},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "// ErrorCode: Error code type.")
+}
+
+func TestCodegenResourceDoc(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "File",
+			Drop: true,
+			Doc:  "A file handle.",
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "`doc \"A file handle.\"")
+}
+
+func TestCodegenResourceNoDrop(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Handle",
+			Drop: false,
+			Methods: []Func{{
+				Name:       "value",
+				Kind:       FuncMethod,
+				Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "u32"}},
+				ImportName: "[method]handle.value",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "type Handle `public {")
+	assertNotContains(t, out, "drop(~this)")
+	assertNotContains(t, out, "[resource-drop]")
+}
+
+func TestEscapeDocSpecialChars(t *testing.T) {
+	got := escapeDoc("line1\nline2 with \"quotes\" and \\backslash")
+	want := "line1 line2 with \\\"quotes\\\" and \\\\backslash"
+	if got != want {
+		t.Errorf("escapeDoc: got %q, want %q", got, want)
+	}
+}
+
+func TestToKebab(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"Descriptor", "descriptor"},
+		{"DescriptorStat", "descriptor-stat"},
+		{"simple", "simple"},
+	}
+	for _, tt := range tests {
+		got := toKebab(tt.in)
+		if got != tt.want {
+			t.Errorf("toKebab(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestFormatExternParamsWithRetPtrEmptyBase(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	// No params, but result needs retptr
+	results := []TypeRef{{Kind: BuiltinKind, Builtin: "string"}}
+	got := g.formatExternParamsWithRetPtr(nil, results)
+	if got != "i32 retptr" {
+		t.Errorf("formatExternParamsWithRetPtr(nil, string) = %q, want \"i32 retptr\"", got)
+	}
+}
+
+func TestFormatExternParamsOverflow(t *testing.T) {
+	g := &generator{canonicalABI: true, target: "wasi"}
+	// > MaxFlatParams → args_ptr
+	var params []Param
+	for i := 0; i < 9; i++ {
+		params = append(params, Param{
+			Name: fmt.Sprintf("s%d", i),
+			Type: TypeRef{Kind: BuiltinKind, Builtin: "string"},
+		})
+	}
+	got := g.formatExternParams(params)
+	if got != "i32 args_ptr" {
+		t.Errorf("formatExternParams(overflow) = %q, want \"i32 args_ptr\"", got)
 	}
 }

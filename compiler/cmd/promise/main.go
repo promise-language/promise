@@ -478,6 +478,8 @@ func runBuild(args []string) {
 func buildToFile(args []string) (filename, outputFile, target string) {
 	debugMode := false
 	releaseMode := false
+	componentMode := false
+	adaptPath := ""
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-o":
@@ -488,6 +490,13 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 		case "-target":
 			if i+1 < len(args) {
 				target = args[i+1]
+				i++
+			}
+		case "-component":
+			componentMode = true
+		case "-adapt":
+			if i+1 < len(args) {
+				adaptPath = args[i+1]
 				i++
 			}
 		case "-debug":
@@ -527,10 +536,19 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 		target = codegen.HostTargetTriple()
 	}
 
+	if componentMode && !isWasmTarget(target) {
+		fmt.Fprintln(os.Stderr, "error: -component requires a WASM target (e.g. -target wasm32-wasi)")
+		os.Exit(1)
+	}
+
 	if outputFile == "" {
 		base := strings.TrimSuffix(filepath.Base(filename), ".pr")
 		if isWasmTarget(target) {
-			outputFile = base + ".wasm"
+			if componentMode {
+				outputFile = base + ".component.wasm"
+			} else {
+				outputFile = base + ".wasm"
+			}
 		} else if isWindowsTarget(target) {
 			outputFile = base + ".exe"
 		} else {
@@ -566,7 +584,15 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 	})
 	timePhase("codegen", time.Since(tCodegen), "")
 
-	compileAndLink(result, outputFile, target, filename, releaseMode)
+	if componentMode {
+		// Component mode: link to a temp core wasm, then wrap with wasm-tools.
+		coreWasm := outputFile + ".core"
+		compileAndLink(result, coreWasm, target, filename, releaseMode)
+		defer os.Remove(coreWasm)
+		componentWrap(coreWasm, outputFile, adaptPath)
+	} else {
+		compileAndLink(result, outputFile, target, filename, releaseMode)
+	}
 
 	if timePhases {
 		timePhase("total", time.Since(compileStart), "")
@@ -4072,6 +4098,83 @@ func ensureWasmAllocObj() (string, error) {
 	return objPath, nil
 }
 
+// componentWrap wraps a core WASM binary into a Component Model binary using wasm-tools.
+// If adaptPath is non-empty, it's passed as --adapt to wasm-tools component new.
+// If adaptPath is empty and this is a WASI target, the embedded P1→P2 adapter is used
+// (if available), otherwise wasm-tools is called without an adapter.
+func componentWrap(coreWasm, outputFile, adaptPath string) {
+	wasmToolsPath, err := findWasmTools()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n"+
+			"Install wasm-tools: cargo install wasm-tools\n"+
+			"Or set PROMISE_WASM_TOOLS to the binary path.\n", err)
+		os.Exit(1)
+	}
+
+	args := []string{"component", "new", coreWasm, "-o", outputFile}
+
+	// Use explicit adapter if provided, otherwise try embedded P1 adapter.
+	if adaptPath != "" {
+		args = append(args, "--adapt", adaptPath)
+	} else if adapter, err := ensureWasiAdapter(); err == nil && adapter != "" {
+		args = append(args, "--adapt", adapter)
+	}
+
+	cmd := exec.Command(wasmToolsPath, args...)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error wrapping component (wasm-tools): %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// findWasmTools locates the wasm-tools binary.
+// Checks PROMISE_WASM_TOOLS env var first, then PATH.
+func findWasmTools() (string, error) {
+	if env := os.Getenv("PROMISE_WASM_TOOLS"); env != "" {
+		if _, err := os.Stat(env); err == nil {
+			return env, nil
+		}
+		return "", fmt.Errorf("PROMISE_WASM_TOOLS=%q: file not found", env)
+	}
+	path, err := exec.LookPath("wasm-tools")
+	if err != nil {
+		return "", fmt.Errorf("wasm-tools not found in PATH")
+	}
+	return path, nil
+}
+
+// ensureWasiAdapter extracts the embedded WASI P1→P2 adapter to cache (if embedded).
+// Returns the path to the adapter .wasm file, or empty string if not embedded.
+func ensureWasiAdapter() (string, error) {
+	if len(embeddedWasiAdapter) == 0 {
+		return "", nil
+	}
+
+	ensureCacheValid()
+	promiseHome, err := module.PromiseHome()
+	if err != nil {
+		return "", err
+	}
+	cacheDir := filepath.Join(promiseHome, "cache", "crt", "wasm32")
+	adapterPath := filepath.Join(cacheDir, "wasi_snapshot_preview1.command.wasm")
+
+	// Check if cached version matches embedded (by size)
+	if info, err := os.Stat(adapterPath); err == nil {
+		if info.Size() == int64(len(embeddedWasiAdapter)) {
+			return adapterPath, nil
+		}
+	}
+
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(adapterPath, embeddedWasiAdapter, 0644); err != nil {
+		return "", err
+	}
+	return adapterPath, nil
+}
+
 // linkWasmMulti links multiple .o files for WebAssembly.
 func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) {
 	lldPath, err := findLLVMTool("wasm-ld")
@@ -4116,6 +4219,9 @@ func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool
 	} else {
 		args = append(args, "--export=_start")
 	}
+	// Canonical ABI: export cabi_realloc (required by Component Model for host-side
+	// memory allocation) and __cabi_retarea (fixed buffer for multi-value returns).
+	args = append(args, "--export=cabi_realloc", "--export=__cabi_retarea")
 	args = append(args, objFiles...)
 	args = append(args, allocObj)
 	return args

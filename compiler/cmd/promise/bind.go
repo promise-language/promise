@@ -34,10 +34,11 @@ func runBind(args []string) {
 
 func runBindWit(args []string) {
 	var (
-		outDir     = "."
-		moduleName = ""
-		target     = "wasi"
-		files      []string
+		outDir       = "."
+		moduleName   = ""
+		target       = "wasi"
+		canonicalABI = false
+		files        []string
 	)
 
 	for i := 0; i < len(args); i++ {
@@ -63,6 +64,8 @@ func runBindWit(args []string) {
 				os.Exit(1)
 			}
 			target = args[i]
+		case "-canonical-abi":
+			canonicalABI = true
 		default:
 			files = append(files, args[i])
 		}
@@ -148,7 +151,7 @@ func runBindWit(args []string) {
 	}
 
 	// Generate Promise source
-	prSource := bindgen.GeneratePromise(allModules, target)
+	prSource := bindgen.GeneratePromiseWithOptions(allModules, target, canonicalABI)
 
 	// Create output directory
 	if err := os.MkdirAll(outDir, 0755); err != nil {

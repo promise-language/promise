@@ -8,8 +8,19 @@ import (
 // GeneratePromise generates Promise source code (.pr) from binding IR modules.
 // The target parameter controls the `target annotation (e.g. "wasi", "web").
 func GeneratePromise(modules []*Module, target string) string {
+	return GeneratePromiseWithOptions(modules, target, false)
+}
+
+// GeneratePromiseWithOptions generates Promise source code with optional canonical ABI lowering.
+// When canonicalABI is true, extern declarations use flattened canonical ABI types
+// (i32/i64/f32/f64) and wrapper functions include marshalling code.
+func GeneratePromiseWithOptions(modules []*Module, target string, canonicalABI bool) string {
 	g := &generator{
-		target: target,
+		target:       target,
+		canonicalABI: canonicalABI,
+	}
+	if canonicalABI {
+		g.emitCanonicalABIHelpers()
 	}
 	for _, m := range modules {
 		g.emitModule(m)
@@ -18,9 +29,10 @@ func GeneratePromise(modules []*Module, target string) string {
 }
 
 type generator struct {
-	buf    strings.Builder
-	target string
-	indent int
+	buf          strings.Builder
+	target       string
+	indent       int
+	canonicalABI bool
 }
 
 func (g *generator) line(format string, args ...interface{}) {
@@ -309,7 +321,7 @@ func (g *generator) emitResourceMethodExtern(m Func, resourceName, importModule 
 	switch m.Kind {
 	case FuncConstructor:
 		externName := fmt.Sprintf("_%s_constructor", toSnake(resourceName))
-		params := g.formatExternParams(m.Params)
+		params := g.formatExternParamsWithRetPtr(m.Params, m.Results)
 		retSig := "int"
 		failable := isFailable(m.Results)
 		if failable {
@@ -318,19 +330,22 @@ func (g *generator) emitResourceMethodExtern(m Func, resourceName, importModule 
 		g.line("%s(%s) %s", externName, params, retSig)
 	case FuncStatic:
 		externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), m.Name)
-		params := g.formatExternParams(m.Params)
-		retSig := g.formatReturnSig(m.Results)
+		params := g.formatExternParamsWithRetPtr(m.Params, m.Results)
+		retSig := g.formatExternReturnSig(m.Results)
 		g.line("%s(%s)%s", externName, params, retSig)
 	default:
 		externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), m.Name)
-		// Method extern takes handle as first param
-		handleParam := "int handle"
-		extraParams := g.formatExternParams(m.Params)
+		// Method extern takes handle (i32) as first param
+		handleParam := "i32 handle"
+		if !g.canonicalABI {
+			handleParam = "int handle"
+		}
+		extraParams := g.formatExternParamsWithRetPtr(m.Params, m.Results)
 		allParams := handleParam
 		if extraParams != "" {
 			allParams = handleParam + ", " + extraParams
 		}
-		retSig := g.formatReturnSig(m.Results)
+		retSig := g.formatExternReturnSig(m.Results)
 		g.line("%s(%s)%s", externName, allParams, retSig)
 	}
 	g.indent++
@@ -347,11 +362,8 @@ func (g *generator) emitResourceMethodExtern(m Func, resourceName, importModule 
 func (g *generator) emitFreeFunc(f Func, importModule string) {
 	externName := "_" + f.Name
 	params := g.formatParams(f.Params)
-	externParams := g.formatExternParams(f.Params)
 	retType := g.formatReturnType(f.Results)
-	retSig := g.formatReturnSig(f.Results)
 	failable := isFailable(f.Results)
-	externCallArgs := g.formatExternCallArgs(f.Params)
 
 	failMark := ""
 	raise := ""
@@ -360,6 +372,17 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 		raise = "^"
 	}
 
+	// Canonical ABI: check if retptr pattern is needed
+	_, useRetPtr := flattenResults(f.Results)
+	useRetPtr = useRetPtr && g.canonicalABI
+
+	// Extern params (with retptr appended if needed)
+	externParams := g.formatExternParamsWithRetPtr(f.Params, f.Results)
+	externRetSig := g.formatExternReturnSig(f.Results)
+
+	// Extern call args (with lowering + retptr)
+	externCallArgs := g.formatCanonicalCallArgs(f.Params, useRetPtr)
+
 	// Public wrapper
 	if f.Doc != "" {
 		g.line("`doc \"%s\"", escapeDoc(f.Doc))
@@ -367,19 +390,39 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 	if retType != "" {
 		g.line("%s%s(%s) %s `public {", f.Name, failMark, params, retType)
 		g.indent++
-		g.line("return %s(%s)%s;", externName, externCallArgs, raise)
+		if useRetPtr && g.canonicalABI {
+			// Call extern (writes to retarea), then lift result
+			g.line("%s(%s);", externName, externCallArgs)
+			lifted := g.liftReturnFromRetPtr(f.Results)
+			if failable {
+				// Check discriminant for result<T, E>
+				g.line("tag := _cabi_load_i32(_cabi_retarea_ptr());")
+				g.line("if tag != 0 { raise error(\"component error\"); }")
+				g.line("return %s;", lifted)
+			} else {
+				g.line("return %s;", lifted)
+			}
+		} else {
+			g.line("return %s(%s)%s;", externName, externCallArgs, raise)
+		}
 		g.indent--
 	} else {
 		g.line("%s%s(%s) `public {", f.Name, failMark, params)
 		g.indent++
-		g.line("%s(%s)%s;", externName, externCallArgs, raise)
+		if useRetPtr && g.canonicalABI && failable {
+			g.line("%s(%s);", externName, externCallArgs)
+			g.line("tag := _cabi_load_i32(_cabi_retarea_ptr());")
+			g.line("if tag != 0 { raise error(\"component error\"); }")
+		} else {
+			g.line("%s(%s)%s;", externName, externCallArgs, raise)
+		}
 		g.indent--
 	}
 	g.line("}")
 	g.blank()
 
 	// Private extern
-	g.line("%s(%s)%s", externName, externParams, retSig)
+	g.line("%s(%s)%s", externName, externParams, externRetSig)
 	g.indent++
 	g.line("`extern(\"%s\")", f.Name)
 	g.line("`wasm_import(\"%s\", \"%s\")", importModule, f.ImportName)
@@ -398,8 +441,18 @@ func (g *generator) formatParams(params []Param) string {
 }
 
 func (g *generator) formatExternParams(params []Param) string {
-	// For now, same as formatParams — canonical ABI lowering is a future step
-	return g.formatParams(params)
+	if !g.canonicalABI {
+		return g.formatParams(params)
+	}
+	flat, usePtr := flattenParams(params)
+	if usePtr {
+		return "i32 args_ptr"
+	}
+	var parts []string
+	for _, fp := range flat {
+		parts = append(parts, fmt.Sprintf("%s %s", flatPromiseType(fp.Type), fp.Name))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (g *generator) formatExternCallArgs(params []Param) string {
@@ -558,4 +611,155 @@ func escapeDoc(s string) string {
 	s = strings.ReplaceAll(s, "\"", "\\\"")
 	s = strings.ReplaceAll(s, "\n", " ")
 	return s
+}
+
+// emitCanonicalABIHelpers emits private extern declarations for canonical ABI
+// helper functions provided by the WASM runtime (wasm_alloc.o).
+func (g *generator) emitCanonicalABIHelpers() {
+	g.line("// --- Canonical ABI helper functions (provided by runtime) ---")
+	g.blank()
+	g.line("_cabi_load_i32(i32 ptr) i32 `extern(\"cabi_load_i32\") `target(%s);", g.target)
+	g.line("_cabi_load_i64(i32 ptr) i64 `extern(\"cabi_load_i64\") `target(%s);", g.target)
+	g.line("_cabi_load_f32(i32 ptr) f32 `extern(\"cabi_load_f32\") `target(%s);", g.target)
+	g.line("_cabi_load_f64(i32 ptr) f64 `extern(\"cabi_load_f64\") `target(%s);", g.target)
+	g.line("_cabi_store_i32(i32 ptr, i32 val) `extern(\"cabi_store_i32\") `target(%s);", g.target)
+	g.line("_cabi_store_i64(i32 ptr, i64 val) `extern(\"cabi_store_i64\") `target(%s);", g.target)
+	g.line("_cabi_store_f32(i32 ptr, f32 val) `extern(\"cabi_store_f32\") `target(%s);", g.target)
+	g.line("_cabi_store_f64(i32 ptr, f64 val) `extern(\"cabi_store_f64\") `target(%s);", g.target)
+	g.line("_cabi_string_data(string s) i32 `extern(\"cabi_string_data\") `target(%s);", g.target)
+	g.line("_cabi_string_len(string s) i32 `extern(\"cabi_string_len\") `target(%s);", g.target)
+	g.line("_cabi_string_from(i32 ptr, i32 len) string `extern(\"cabi_string_from\") `target(%s);", g.target)
+	g.line("_cabi_retarea_ptr() i32 `extern(\"cabi_retarea_ptr\") `target(%s);", g.target)
+	g.blank()
+}
+
+// formatExternReturnSig generates the return signature for a canonical ABI extern.
+// If the return requires a retptr (> MaxFlatResults), the extern returns void
+// and the retptr is added as the last param.
+func (g *generator) formatExternReturnSig(results []TypeRef) string {
+	if !g.canonicalABI {
+		return g.formatReturnSig(results)
+	}
+	_, useRetPtr := flattenResults(results)
+	if useRetPtr {
+		// retptr pattern: extern returns void (retptr added as last param)
+		if isFailable(results) {
+			return "" // void, but wrapper is failable
+		}
+		return ""
+	}
+	// Direct return: use the flat type
+	flat, _ := flattenResults(results)
+	if len(flat) == 0 {
+		if isFailable(results) {
+			return "!"
+		}
+		return ""
+	}
+	if len(flat) == 1 {
+		retType := flatPromiseType(flat[0])
+		if isFailable(results) {
+			return " " + retType + "!"
+		}
+		return " " + retType
+	}
+	// Multiple flat results (shouldn't reach here since useRetPtr would be true)
+	return g.formatReturnSig(results)
+}
+
+// formatCanonicalCallArgs generates the arguments for calling a canonical ABI extern
+// from a wrapper function, including type lowering for compound types.
+func (g *generator) formatCanonicalCallArgs(params []Param, hasRetPtr bool) string {
+	if !g.canonicalABI {
+		return g.formatExternCallArgs(params)
+	}
+	var parts []string
+	for _, p := range params {
+		if needsCanonicalLowering(p.Type) {
+			// Compound type: lower to flat values
+			parts = append(parts, g.lowerParamToFlat(p)...)
+		} else {
+			parts = append(parts, p.Name)
+		}
+	}
+	if hasRetPtr {
+		parts = append(parts, "_cabi_retarea_ptr()")
+	}
+	return strings.Join(parts, ", ")
+}
+
+// lowerParamToFlat generates the expression(s) to lower a Promise param to canonical ABI flat values.
+func (g *generator) lowerParamToFlat(p Param) []string {
+	switch {
+	case p.Type.Kind == BuiltinKind && p.Type.Builtin == "string":
+		return []string{
+			fmt.Sprintf("_cabi_string_data(%s)", p.Name),
+			fmt.Sprintf("_cabi_string_len(%s)", p.Name),
+		}
+	case p.Type.Kind == ListKind:
+		// TODO(T0289): list lowering needs vector-specific helpers (different layout from string).
+		// For now, pass as-is — will cause a compile error if used, which is safer than wrong codegen.
+		return []string{p.Name}
+	default:
+		// For types we can't lower yet, pass as-is (will cause compile error)
+		return []string{p.Name}
+	}
+}
+
+// formatExternParamsWithRetPtr generates extern params including retptr when needed.
+func (g *generator) formatExternParamsWithRetPtr(params []Param, results []TypeRef) string {
+	if !g.canonicalABI {
+		return g.formatExternParams(params)
+	}
+	base := g.formatExternParams(params)
+	_, useRetPtr := flattenResults(results)
+	if useRetPtr {
+		if base == "" {
+			return "i32 retptr"
+		}
+		return base + ", i32 retptr"
+	}
+	return base
+}
+
+// liftReturnFromRetPtr generates wrapper code to read and lift the return value
+// from the canonical ABI retptr area.
+func (g *generator) liftReturnFromRetPtr(results []TypeRef) string {
+	if len(results) == 0 {
+		return ""
+	}
+	ref := results[0]
+	if ref.Kind == ResultKind {
+		// result<T, E>: read discriminant, branch on ok/err
+		ref = *ref.Ok
+		if ref.Kind == BuiltinKind && ref.Builtin == "string" {
+			return "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr() + 4), _cabi_load_i32(_cabi_retarea_ptr() + 8))"
+		}
+		return liftScalarFromRetPtr(ref, 4)
+	}
+	if ref.Kind == BuiltinKind && ref.Builtin == "string" {
+		return "_cabi_string_from(_cabi_load_i32(_cabi_retarea_ptr()), _cabi_load_i32(_cabi_retarea_ptr() + 4))"
+	}
+	return liftScalarFromRetPtr(ref, 0)
+}
+
+// liftScalarFromRetPtr generates a load expression for a scalar at a retptr offset.
+func liftScalarFromRetPtr(ref TypeRef, offset int) string {
+	if ref.Kind != BuiltinKind {
+		return fmt.Sprintf("_cabi_load_i32(_cabi_retarea_ptr() + %d)", offset)
+	}
+	offsetExpr := fmt.Sprintf("_cabi_retarea_ptr() + %d", offset)
+	if offset == 0 {
+		offsetExpr = "_cabi_retarea_ptr()"
+	}
+	switch ref.Builtin {
+	case "u64", "s64":
+		return fmt.Sprintf("_cabi_load_i64(%s)", offsetExpr)
+	case "f32":
+		return fmt.Sprintf("_cabi_load_f32(%s)", offsetExpr)
+	case "f64":
+		return fmt.Sprintf("_cabi_load_f64(%s)", offsetExpr)
+	default:
+		return fmt.Sprintf("_cabi_load_i32(%s)", offsetExpr)
+	}
 }

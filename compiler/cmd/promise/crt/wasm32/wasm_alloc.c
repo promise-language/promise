@@ -166,3 +166,104 @@ void *realloc(void *ptr, size_t new_size) {
     free(ptr);
     return new_ptr;
 }
+
+// --- Canonical ABI support (Component Model) ---
+
+// cabi_realloc — Canonical ABI memory allocation for the Component Model.
+// Required export for every component; used by the host to allocate/reallocate
+// memory in the component's linear memory for passing compound types.
+// Alignment is naturally satisfied: all buckets are >= 16-byte aligned.
+void *cabi_realloc(void *ptr, size_t old_size, size_t align, size_t new_size) {
+    (void)old_size;
+    (void)align;
+    if (!ptr) return malloc(new_size);
+    return realloc(ptr, new_size);
+}
+
+// __cabi_retarea — Fixed buffer for canonical ABI return value decoding.
+// Exported as a global; the host writes multi-value returns here.
+__attribute__((aligned(8)))
+unsigned char __cabi_retarea[32];
+
+// Canonical ABI memory access helpers for reading/writing linear memory.
+// Used by generated wrapper code to decode return values from retptr
+// and encode compound parameters into linear memory buffers.
+// With LTO (always enabled for WASM), these inline at call sites.
+
+int cabi_load_i32(int ptr) {
+    return *(int *)ptr;
+}
+
+void cabi_store_i32(int ptr, int val) {
+    *(int *)ptr = val;
+}
+
+long long cabi_load_i64(int ptr) {
+    return *(long long *)ptr;
+}
+
+void cabi_store_i64(int ptr, long long val) {
+    *(long long *)ptr = val;
+}
+
+float cabi_load_f32(int ptr) {
+    return *(float *)ptr;
+}
+
+void cabi_store_f32(int ptr, float val) {
+    *(float *)ptr = val;
+}
+
+double cabi_load_f64(int ptr) {
+    return *(double *)ptr;
+}
+
+void cabi_store_f64(int ptr, double val) {
+    *(double *)ptr = val;
+}
+
+// --- Canonical ABI string helpers ---
+//
+// Promise string instance layout on wasm32:
+//   offset 0:  i32 variant_ptr  (4 bytes)
+//   offset 4:  [4 bytes padding to align i64]
+//   offset 8:  i64 len          (8 bytes, bit 63 = literal flag)
+//   offset 16: [N x i8] data
+//
+// The extern ABI passes string as i8* (instance pointer) on wasm32 = i32.
+
+// Alloc counter declared in PAL-emitted LLVM IR.
+extern long long promise_alloc_count;
+
+// Get data pointer from a string instance pointer.
+int cabi_string_data(void *instance) {
+    return (int)((char *)instance + 16);
+}
+
+// Get length from a string instance pointer (masking bit 63 literal flag).
+int cabi_string_len(void *instance) {
+    long long raw = *(long long *)((char *)instance + 8);
+    return (int)(raw & 0x7FFFFFFFFFFFFFFFLL);
+}
+
+// Construct a new heap-allocated string instance from a (ptr, len) pair.
+// Copies data from ptr into the new instance. Caller owns the result.
+void *cabi_string_from(int ptr, int len) {
+    int total = 16 + len;
+    void *inst = malloc(total);
+    if (!inst) return (void *)0;
+    promise_alloc_count++; // track for leak detection (matches pal_alloc behavior)
+    *(int *)inst = 0;                              // variant_ptr = null
+    *(int *)((char *)inst + 4) = 0;                // padding = 0
+    *(long long *)((char *)inst + 8) = (long long)len; // len (no literal flag)
+    // Copy data
+    char *dst = (char *)inst + 16;
+    char *src = (char *)ptr;
+    for (int i = 0; i < len; i++) dst[i] = src[i];
+    return inst;
+}
+
+// Return the address of the canonical ABI return area buffer.
+int cabi_retarea_ptr(void) {
+    return (int)__cabi_retarea;
+}

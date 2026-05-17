@@ -2364,7 +2364,8 @@ func TestErrorUnwrap(t *testing.T) {
 
 // B0256: emitErrorPanic heap-allocates a C string copy but promise_panic sets
 // type=1 (.rodata). The fix overwrites panic_type to 2 (heap) after the call
-// so goroutine_exit frees it.
+// so goroutine_exit frees it. T0142: now calls promise_panic_at which handles
+// the type=2 store internally.
 func TestErrorPanicSetsHeapType(t *testing.T) {
 	ir := generateIR(t, `
 		parse!(string s) int { return 0; }
@@ -2372,9 +2373,26 @@ func TestErrorPanicSetsHeapType(t *testing.T) {
 			x := parse("42")?!;
 		}
 	`)
-	// emitErrorPanic calls promise_panic then overwrites type to 2
-	assertContains(t, ir, "call void @promise_panic(")
+	// emitErrorPanic calls promise_panic_at (T0142)
+	assertContains(t, ir, "call void @promise_panic_at(")
+	// promise_panic_at body stores type=2 after calling promise_panic
 	assertContains(t, ir, "store i8 2, i8* @__promise_panic_type")
+}
+
+// T0142: error panic via ?! includes source file and line number.
+func TestErrorPanicSourceLocation(t *testing.T) {
+	ir := generateIR(t, `
+		fail!() int { return 0; }
+		main() {
+			x := fail()?!;
+		}
+	`)
+	// Should call promise_panic_at with a filename global and line number constant
+	assertContains(t, ir, "call void @promise_panic_at(")
+	// Filename global should be a .file. prefixed constant
+	assertContains(t, ir, "@.file.")
+	// promise_panic_at should be defined with its body (not just declared)
+	assertContains(t, ir, "define void @promise_panic_at(")
 }
 
 // T0125: When func()?! returns a string, the unwrapped i8* must be tracked

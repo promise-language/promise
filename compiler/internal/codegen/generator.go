@@ -528,7 +528,7 @@ func (c *Compiler) genForInGenerator(s *ast.ForInStmt, genVal value.Value, elemT
 			c.block.NewRet(c.wrapError(errPtr, callerResultType))
 		} else {
 			// Non-failable consumer — panic with the error
-			c.emitErrorPanic(errPtr)
+			c.emitErrorPanic(errPtr, s.Pos().File, s.Pos().Line)
 		}
 
 		// Normal cleanup path (no error)
@@ -610,7 +610,7 @@ func (c *Compiler) genYieldDelegateStmt(s *ast.YieldDelegateStmt) {
 
 	if elem, ok := types.AsStream(iterableType); ok {
 		genVal := c.genExpr(s.Value)
-		c.genYieldDelegateGenerator(genVal, elem)
+		c.genYieldDelegateGenerator(genVal, elem, s.Pos())
 	} else if arr, ok := iterableType.(*types.Array); ok {
 		c.genYieldDelegateArray(s.Value, arr)
 	} else if elem, ok := types.AsVector(iterableType); ok {
@@ -632,7 +632,7 @@ func (c *Compiler) genYieldDelegateStmt(s *ast.YieldDelegateStmt) {
 // genYieldDelegateGenerator yields all values from a sub-generator (stream[T]).
 // For failable sub-generators (3-field struct), errors are propagated to the
 // outer generator's error_slot.
-func (c *Compiler) genYieldDelegateGenerator(genVal value.Value, elemType types.Type) {
+func (c *Compiler) genYieldDelegateGenerator(genVal value.Value, elemType types.Type, pos ast.Pos) {
 	elemLLVM := c.resolveType(elemType)
 
 	// Detect failable sub-generator by struct field count
@@ -741,7 +741,7 @@ func (c *Compiler) genYieldDelegateGenerator(genVal value.Value, elemType types.
 			callerResultType := c.currentResultType()
 			c.block.NewRet(c.wrapError(subErrPtr, callerResultType))
 		} else {
-			c.emitErrorPanic(subErrPtr)
+			c.emitErrorPanic(subErrPtr, pos.File, pos.Line)
 		}
 
 		// Normal cleanup

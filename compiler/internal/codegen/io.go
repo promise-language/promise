@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -52,6 +53,9 @@ func (c *Compiler) definePALBodies() {
 	}
 	if fn, ok := irFuncByName["promise_panic_msg"]; ok {
 		c.definePanicMsgBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_panic_at"]; ok {
+		c.definePanicAtBody(fn)
 	}
 
 	// Runtime functions
@@ -154,12 +158,13 @@ func (c *Compiler) definePrintStringBody(fn *ir.Func) {
 }
 
 // emitErrorPanic extracts the message string from an error instance pointer
-// and calls promise_panic with a null-terminated C string copy, then overwrites
-// panic_type to 2 (heap-allocated) so goroutine_exit frees it, then does
+// and calls promise_panic_at with optional source location (T0142), then does
 // panic return (cleanup + return zero).
 // The errInstPtr is an i8* pointing to the error instance struct (field 0 = _variant,
 // field 1 = message string instance pointer).
-func (c *Compiler) emitErrorPanic(errInstPtr value.Value) {
+// file and line provide source location for the panic message; pass "" and 0 for
+// compiler-generated panics without meaningful source location.
+func (c *Compiler) emitErrorPanic(errInstPtr value.Value, file string, line int) {
 	errorLayout := c.layouts[types.TypError]
 	instType := errorLayout.Instance.LLVMType
 	instPtrType := errorLayout.InstancePtrType
@@ -175,18 +180,126 @@ func (c *Compiler) emitErrorPanic(errInstPtr value.Value) {
 	// Extract data pointer and length from the string instance
 	dataPtr, dataLen := c.extractStringDataLenFromInstance(c.block, msgInstPtr)
 
-	// Allocate a null-terminated C string copy: malloc(len+1), memcpy, null-terminate
-	allocSize := c.block.NewAdd(dataLen, constant.NewInt(irtypes.I64, 1))
-	cstr := c.block.NewCall(c.palAlloc, allocSize)
-	c.block.NewCall(c.funcs["llvm.memcpy"], cstr, dataPtr, dataLen, constant.False)
-	nullPos := c.block.NewGetElementPtr(irtypes.I8, cstr, dataLen)
-	c.block.NewStore(constant.NewInt(irtypes.I8, 0), nullPos)
-
-	c.block.NewCall(c.funcs["promise_panic"], cstr)
-	// B0256: promise_panic sets type=1 (.rodata), but this C string is heap-allocated.
-	// Overwrite to type=2 so goroutine_exit frees it.
-	c.block.NewStore(constant.NewInt(irtypes.I8, 2), c.panicTypeTlsGlobal)
+	// T0142: call promise_panic_at with source location (basename only for determinism)
+	if file != "" && line > 0 {
+		fileGlobal, fileLen := c.getFileNameGlobal(filepath.Base(file))
+		filePtr := c.block.NewGetElementPtr(fileGlobal.ContentType, fileGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		c.block.NewCall(c.funcs["promise_panic_at"],
+			dataPtr, dataLen,
+			filePtr, constant.NewInt(irtypes.I64, fileLen),
+			constant.NewInt(irtypes.I32, int64(line)))
+	} else {
+		c.block.NewCall(c.funcs["promise_panic_at"],
+			dataPtr, dataLen,
+			constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0),
+			constant.NewInt(irtypes.I32, 0))
+	}
 	c.emitPanicReturn()
+}
+
+// getFileNameGlobal returns a cached .rodata C string global for the given filename
+// and its byte length (excluding null terminator). Deduplicates per unique filename.
+func (c *Compiler) getFileNameGlobal(file string) (*ir.Global, int64) {
+	if g, ok := c.fileNameGlobals[file]; ok {
+		return g, int64(len(file))
+	}
+	data := constant.NewCharArrayFromString(file + "\x00")
+	globalName := fmt.Sprintf(".file.%x", fnv1aStr(file))
+	g := c.module.NewGlobalDef(globalName, data)
+	g.Immutable = true
+	g.Linkage = enum.LinkagePrivate
+	c.fileNameGlobals[file] = g
+	return g, int64(len(file))
+}
+
+// definePanicAtBody adds a function body to promise_panic_at(i8* %msg_data, i64 %msg_len,
+// i8* %filename, i64 %filename_len, i32 %line).
+// Constructs a heap-allocated C string: "msg\n  at file:line\0" (or just "msg\0" if
+// filename is null), calls promise_panic to set TLS state, then overwrites type to 2
+// (heap-allocated). T0142.
+func (c *Compiler) definePanicAtBody(fn *ir.Func) {
+	msgData := fn.Params[0]
+	msgLen := fn.Params[1]
+	filename := fn.Params[2]
+	filenameLen := fn.Params[3]
+	lineNum := fn.Params[4]
+
+	entry := fn.NewBlock(".entry")
+
+	// Check if filename is null → simple path (no location)
+	hasLoc := entry.NewICmp(enum.IPredNE, filename, constant.NewNull(irtypes.I8Ptr))
+	simpleBlk := fn.NewBlock("no_location")
+	locBlk := fn.NewBlock("with_location")
+	entry.NewCondBr(hasLoc, locBlk, simpleBlk)
+
+	// --- Simple path: just "msg\0" ---
+	simpleSize := simpleBlk.NewAdd(msgLen, constant.NewInt(irtypes.I64, 1))
+	simpleBuf := simpleBlk.NewCall(c.palAlloc, simpleSize)
+	simpleBlk.NewCall(c.funcs["llvm.memcpy"], simpleBuf, msgData, msgLen, constant.False)
+	simpleNull := simpleBlk.NewGetElementPtr(irtypes.I8, simpleBuf, msgLen)
+	simpleBlk.NewStore(constant.NewInt(irtypes.I8, 0), simpleNull)
+	simpleBlk.NewCall(c.funcs["promise_panic"], simpleBuf)
+	simpleBlk.NewStore(constant.NewInt(irtypes.I8, 2), c.panicTypeTlsGlobal)
+	simpleBlk.NewRet(nil)
+
+	// --- Location path: "msg\n  at file:line\0" ---
+	// Convert line number to string via promise_int_to_string
+	lineI64 := locBlk.NewSExt(lineNum, irtypes.I64)
+	lineStr := locBlk.NewCall(c.funcs["promise_int_to_string"], lineI64)
+	lineDataPtr, lineDataLen := c.extractStringDataLenFromInstance(locBlk, lineStr)
+
+	// "\n  at " prefix (6 bytes)
+	atPrefixData := constant.NewCharArrayFromString("\n  at ")
+	atPrefixGlobal := c.module.NewGlobalDef(".str.panic_at_prefix", atPrefixData)
+	atPrefixGlobal.Immutable = true
+	atPrefixGlobal.Linkage = enum.LinkagePrivate
+	atPrefixPtr := locBlk.NewGetElementPtr(atPrefixGlobal.ContentType, atPrefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+
+	// total = msg_len + 6 + filename_len + 1 (":") + line_len
+	total := locBlk.NewAdd(msgLen, constant.NewInt(irtypes.I64, 6))
+	total = locBlk.NewAdd(total, filenameLen)
+	total = locBlk.NewAdd(total, constant.NewInt(irtypes.I64, 1)) // ":"
+	total = locBlk.NewAdd(total, lineDataLen)
+
+	// Allocate total + 1 for null terminator
+	allocSize := locBlk.NewAdd(total, constant.NewInt(irtypes.I64, 1))
+	buf := locBlk.NewCall(c.palAlloc, allocSize)
+
+	// memcpy msg_data
+	locBlk.NewCall(c.funcs["llvm.memcpy"], buf, msgData, msgLen, constant.False)
+
+	// memcpy "\n  at "
+	pos1 := locBlk.NewGetElementPtr(irtypes.I8, buf, msgLen)
+	locBlk.NewCall(c.funcs["llvm.memcpy"], pos1, atPrefixPtr, constant.NewInt(irtypes.I64, 6), constant.False)
+
+	// memcpy filename
+	off2 := locBlk.NewAdd(msgLen, constant.NewInt(irtypes.I64, 6))
+	pos2 := locBlk.NewGetElementPtr(irtypes.I8, buf, off2)
+	locBlk.NewCall(c.funcs["llvm.memcpy"], pos2, filename, filenameLen, constant.False)
+
+	// store ':'
+	off3 := locBlk.NewAdd(off2, filenameLen)
+	pos3 := locBlk.NewGetElementPtr(irtypes.I8, buf, off3)
+	locBlk.NewStore(constant.NewInt(irtypes.I8, 58), pos3) // ':' = 58
+
+	// memcpy line digits
+	off4 := locBlk.NewAdd(off3, constant.NewInt(irtypes.I64, 1))
+	pos4 := locBlk.NewGetElementPtr(irtypes.I8, buf, off4)
+	locBlk.NewCall(c.funcs["llvm.memcpy"], pos4, lineDataPtr, lineDataLen, constant.False)
+
+	// null terminator
+	locNullPos := locBlk.NewGetElementPtr(irtypes.I8, buf, total)
+	locBlk.NewStore(constant.NewInt(irtypes.I8, 0), locNullPos)
+
+	// Free the line string instance
+	locBlk.NewCall(c.palFree, lineStr)
+
+	// Set panic state
+	locBlk.NewCall(c.funcs["promise_panic"], buf)
+	locBlk.NewStore(constant.NewInt(irtypes.I8, 2), c.panicTypeTlsGlobal)
+	locBlk.NewRet(nil)
 }
 
 // emitPanicCheck emits a TLS panic flag check after a call expression (T0146).

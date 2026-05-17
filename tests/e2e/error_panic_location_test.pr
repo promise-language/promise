@@ -1,0 +1,9 @@
+// T0142: Verify that ?! panic messages include source file and line number.
+make_error!() int {
+  raise error(message: "test failure");
+}
+
+main() `test(expected: """panic: test failure
+  at error_panic_location_test.pr:8""") {
+  make_error()?!;
+}

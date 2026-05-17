@@ -610,7 +610,7 @@ func (c *Compiler) callFormatToString(val value.Value, typ types.Type, named *ty
 
 	c.block = errBlock
 	errPtr := c.block.NewExtractValue(formatResult, 1)
-	c.emitErrorPanic(errPtr)
+	c.emitErrorPanic(errPtr, "", 0)
 
 	c.block = okBlock
 
@@ -5716,10 +5716,10 @@ func (c *Compiler) genErrorPanicExpr(e *ast.ErrorPanicExpr) value.Value {
 	okBlock := c.newBlock("error.ok")
 	c.block.NewCondBr(tag, panicBlock, okBlock)
 
-	// Error: extract message from error instance, panic with it
+	// Error: extract message from error instance, panic with it (T0142: include source location)
 	c.block = panicBlock
 	errMsg := c.block.NewExtractValue(result, resultErrIdx(resultType))
-	c.emitErrorPanic(errMsg)
+	c.emitErrorPanic(errMsg, e.Pos().File, e.Pos().Line)
 
 	// Ok: extract value
 	c.block = okBlock
@@ -5821,8 +5821,8 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			}
 			c.scopeBindings = c.scopeBindings[:savedElseScope]
 		} else if e.PanicOnNomatch {
-			// Explicit ! suffix: panic on non-matching error
-			c.emitErrorPanic(errVal)
+			// Explicit ! suffix: panic on non-matching error (T0142: include source location)
+			c.emitErrorPanic(errVal, e.Pos().File, e.Pos().Line)
 		} else if c.canError || (c.inGenerator && c.generatorCanError) {
 			if len(c.scopeBindings) > 0 {
 				c.emitScopeCleanup(0, true) // error in flight — suppress close errors

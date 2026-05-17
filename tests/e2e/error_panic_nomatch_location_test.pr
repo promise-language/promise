@@ -1,0 +1,15 @@
+// T0142: Verify ?^ ... ! (PanicOnNomatch) includes source location in panic.
+type IoError is error {
+  int code;
+}
+
+fail_generic!() int {
+  raise error(message: "generic fail");
+}
+
+main() `test(expected: """panic: generic fail
+  at error_panic_nomatch_location_test.pr:12""") {
+  int v = fail_generic()? e is IoError {
+    e.code;
+  }!;
+}

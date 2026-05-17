@@ -109,7 +109,8 @@ type Compiler struct {
 	// Keyed by content, returns the ir.Global. This deduplicates strings like
 	// "out of memory" and "string index out of bounds" so they have stable names
 	// across compilations regardless of mono instance ordering.
-	cstrGlobals map[string]*ir.Global
+	cstrGlobals     map[string]*ir.Global
+	fileNameGlobals map[string]*ir.Global // cache of per-file filename C string globals for panic_at
 
 	// Lambda counter for unique anonymous function names
 	lambdaCounter int
@@ -642,6 +643,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		instanceOwnedFuncs: make(map[string]string),
 		spiralInstances:    make(map[string]bool),
 		cstrGlobals:        make(map[string]*ir.Global),
+		fileNameGlobals:    make(map[string]*ir.Global),
 	}
 
 	// Apply options
@@ -1701,6 +1703,16 @@ func (c *Compiler) declareIntrinsics() {
 		irtypes.Void, ir.NewParam("msg", irtypes.I8Ptr))
 	panicFn.FuncAttrs = append(panicFn.FuncAttrs, enum.FuncAttrNoUnwind)
 	c.funcs["promise_panic"] = panicFn
+
+	// promise_panic_at: panic with error message + source location (T0142)
+	panicAtFn := c.module.NewFunc("promise_panic_at", irtypes.Void,
+		ir.NewParam("msg_data", irtypes.I8Ptr),
+		ir.NewParam("msg_len", irtypes.I64),
+		ir.NewParam("filename", irtypes.I8Ptr),
+		ir.NewParam("filename_len", irtypes.I64),
+		ir.NewParam("line", irtypes.I32))
+	panicAtFn.FuncAttrs = append(panicAtFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	c.funcs["promise_panic_at"] = panicAtFn
 
 	// PAL: emit platform-specific allocator primitives (needed by string/vector funcs below)
 	p := pal.ForTarget(c.module.TargetTriple)

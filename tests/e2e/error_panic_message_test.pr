@@ -5,6 +5,7 @@ fail_with_error!() {
   raise error(message: "something went wrong");
 }
 
-main() `test(expected: "panic: something went wrong") {
+main() `test(expected: """panic: something went wrong
+  at error_panic_message_test.pr:10""") {
   fail_with_error()?!;
 }

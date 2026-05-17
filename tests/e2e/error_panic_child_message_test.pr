@@ -7,6 +7,7 @@ fail_with_child_error!() {
   raise AppError(message: "app failure", code: 42);
 }
 
-main() `test(expected: "panic: app failure") {
+main() `test(expected: """panic: app failure
+  at error_panic_child_message_test.pr:12""") {
   fail_with_child_error()?!;
 }

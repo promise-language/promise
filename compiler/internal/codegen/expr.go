@@ -3206,11 +3206,8 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	shouldWait := c.block.NewAnd(rvHasItems, isOpen)
 
 	rendezvousWaitBlock := c.newBlock("send.rv.wait")
-	// When rendezvous exits (count==0 or closed), wake the next sender from
-	// send_waiters so it can write to the now-empty buffer. Without this,
-	// a second sender parked on send_waiters would stay stranded — nobody
-	// else calls wake_one(sendWaiters) until a recv succeeds, but recv can't
-	// succeed because no sender writes. (B0156)
+	// When rendezvous exits (count==0 or closed), wake one write-waiter from
+	// send_waiters so it can write to the now-empty buffer (B0156, T0305).
 	rendezvousExitBlock := c.newBlock("send.rv.exit")
 	c.block.NewCondBr(shouldWait, rendezvousWaitBlock, rendezvousExitBlock)
 

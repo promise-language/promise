@@ -151,3 +151,59 @@ test_channel_main_thread_loop() `test(exclude: "wasm32", timeout: "30s") {
   }
   assert(sum == 499500, "main thread loop sum");
 }
+
+// Unbuffered channel loop — exercises yield-spin rendezvous (T0305).
+// One producer goroutine, one consumer goroutine, 1000 iterations.
+test_channel_unbuffered_loop() `test(exclude: "wasm32", timeout: "30s") {
+  ch := channel[int]();
+  done := channel[int](capacity: 1);
+
+  go {
+    for i in 0..1000 {
+      ch.send(i);
+    }
+  };
+
+  go {
+    int sum = 0;
+    for i in 0..1000 {
+      r := <-ch;
+      if v := r {
+        sum += v;
+      }
+    }
+    done.send(sum);
+  };
+
+  r := <-done;
+  if v := r {
+    assert(v == 499500, "unbuffered loop sum");
+  }
+}
+
+// Multi-producer unbuffered channel — multiple goroutines racing to send
+// on the same unbuffered channel. Regression test for T0305: yield-spin
+// prevents lost wakeups when rendezvous-waiters and write-waiters would
+// have been conflated on send_waiters.
+test_channel_unbuffered_multi_producer() `test(exclude: "wasm32", timeout: "30s") {
+  ch := channel[int]();
+  n_producers := 5;
+  sends_each := 20;
+
+  for p in 0..n_producers {
+    go {
+      for i in 0..sends_each {
+        ch.send(1);
+      }
+    };
+  }
+
+  int total = 0;
+  for i in 0.. (n_producers * sends_each) {
+    r := <-ch;
+    if v := r {
+      total += v;
+    }
+  }
+  assert(total == 100, "5 producers * 20 sends = 100");
+}

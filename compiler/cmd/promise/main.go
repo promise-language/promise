@@ -2981,9 +2981,13 @@ func llvmCacheComplete(dir string) bool {
 			return false
 		}
 	}
-	// Also check symlinks
+	// Also check lld mode aliases (symlinks on Unix, copies on Windows)
 	for link := range embeddedLLVMSymlinks {
-		if _, err := os.Lstat(filepath.Join(dir, link)); err != nil {
+		name := link
+		if runtime.GOOS == "windows" {
+			name = link + ".exe"
+		}
+		if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
 			return false
 		}
 	}
@@ -3058,13 +3062,23 @@ func extractCompressedLLVM(destDir string) {
 		gr.Close()
 	}
 
-	// Create symlinks for lld modes
+	// Create lld mode aliases — symlinks on Unix, file copies on Windows
+	// (symlinks require admin privileges on Windows)
 	for link, target := range embeddedLLVMSymlinks {
+		if runtime.GOOS == "windows" {
+			link = link + ".exe"
+			target = target + ".exe"
+		}
 		linkPath := filepath.Join(destDir, link)
 		os.Remove(linkPath)
-		if err := os.Symlink(target, linkPath); err != nil {
-			fmt.Fprintf(os.Stderr, "error: cannot create symlink %s → %s: %v\n", link, target, err)
-			os.Exit(1)
+		if runtime.GOOS == "windows" {
+			targetPath := filepath.Join(destDir, target)
+			copyFile(targetPath, linkPath, 0755)
+		} else {
+			if err := os.Symlink(target, linkPath); err != nil {
+				fmt.Fprintf(os.Stderr, "error: cannot create symlink %s → %s: %v\n", link, target, err)
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -3221,7 +3235,7 @@ func runLLVMCmd(toolPath string, args ...string) *exec.Cmd {
 	// If the tool is in the embedded cache, ensure the library path includes that dir
 	// so it can find libLLVM alongside it.
 	toolDir := filepath.Dir(toolPath)
-	if llvmCacheDir != "" && toolDir == llvmCacheDir {
+	if llvmCacheDir != "" && toolDir == llvmCacheDir && llvmLibEnvKey != "" {
 		envKey := llvmLibEnvKey
 		env := os.Environ()
 		ldPath := os.Getenv(envKey)

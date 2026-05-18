@@ -93,12 +93,9 @@ func RunBuild(root string, args []string) error {
 	}
 	fmt.Printf("  LLVM %d: opt=%s lld=%s\n", llvm.Version, llvm.OptPath, llvm.LLDPath)
 
-	// 7. Release: bundle LLVM tools (Linux/macOS only — Windows has no embed support yet)
+	// 7. Release: bundle LLVM tools
 	buildTags := ""
 	if release {
-		if IsWindows() {
-			return fmt.Errorf("-release builds are not supported on Windows (no LLVM embedding support)")
-		}
 		fmt.Println("Bundling LLVM tools for release...")
 		if err := BundleLLVM(root, llvm); err != nil {
 			return fmt.Errorf("bundle LLVM: %w", err)

@@ -17,6 +17,9 @@ func BundleLLVM(root string, llvm *LLVMInfo) error {
 	if IsLinux() {
 		return bundleLLVMLinux(root, llvm)
 	}
+	if IsWindows() {
+		return bundleLLVMWindows(root, llvm)
+	}
 	fmt.Println("WARNING: LLVM bundling not supported on " + GoOS())
 	return nil
 }
@@ -128,6 +131,43 @@ func bundleLLVMDarwin(root string, llvm *LLVMInfo) error {
 		}
 	}
 
+	return nil
+}
+
+func bundleLLVMWindows(root string, llvm *LLVMInfo) error {
+	dst := filepath.Join(root, "compiler", "cmd", "promise", "resources", "llvm", "windows-amd64")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+
+	llvmDir := llvm.Dir
+	if llvmDir == "" {
+		return fmt.Errorf("LLVM directory not found for bundling")
+	}
+
+	fmt.Printf("Bundling LLVM %d tools from %s (windows-amd64)...\n", llvm.Version, llvmDir)
+
+	// Find lld: prefer lld.exe (base binary), fall back to lld-link.exe
+	lldSrc := filepath.Join(llvmDir, "bin", "lld.exe")
+	if !Exists(lldSrc) {
+		lldSrc = filepath.Join(llvmDir, "bin", "lld-link.exe")
+		if !Exists(lldSrc) {
+			return fmt.Errorf("neither lld.exe nor lld-link.exe found in %s", filepath.Join(llvmDir, "bin"))
+		}
+	}
+
+	files := map[string]string{
+		filepath.Join(llvmDir, "bin", "opt.exe"): "opt.exe.gz",
+		filepath.Join(llvmDir, "bin", "llc.exe"): "llc.exe.gz",
+		lldSrc: "lld.exe.gz",
+	}
+
+	for src, name := range files {
+		if err := gzipFile(src, filepath.Join(dst, name)); err != nil {
+			return fmt.Errorf("gzip %s: %w", name, err)
+		}
+		printSize(filepath.Join(dst, name))
+	}
 	return nil
 }
 

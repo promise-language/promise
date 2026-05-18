@@ -80,25 +80,36 @@ function exitWith(code) {
   process.exit(code | 0);
 }
 
-const importObject = {
-  promise_env: {
-    write: (fd, ptr, len) => {
-      // i64 args/returns are BigInts in default WebAssembly mode.
-      const lenN = Number(len);
-      if (lenN > 0) {
-        const view = memoryView(Number(ptr), lenN);
-        // Buffer.from copies; necessary because fs.writeSync may not handle
-        // a memory-backed Uint8Array if the buffer detaches before the write.
-        bufferWrite(Number(fd), Buffer.from(view));
-      }
-      return BigInt(lenN);
-    },
-    exit: (code) => {
-      exitWith(Number(code));
-      // process.exit never returns, but tell the WASM runtime we're done.
-      throw new Error("promise_env.exit");
-    },
+// Core promise_env functions (write + exit). Wrapped in a Proxy so that
+// unknown imports (e.g., web module bindings like Console.log, Node.appendChild)
+// get no-op stubs that return 0 rather than failing instantiation.
+const _promiseEnvImpl = {
+  write: (fd, ptr, len) => {
+    // i64 args/returns are BigInts in default WebAssembly mode.
+    const lenN = Number(len);
+    if (lenN > 0) {
+      const view = memoryView(Number(ptr), lenN);
+      // Buffer.from copies; necessary because fs.writeSync may not handle
+      // a memory-backed Uint8Array if the buffer detaches before the write.
+      bufferWrite(Number(fd), Buffer.from(view));
+    }
+    return BigInt(lenN);
   },
+  exit: (code) => {
+    exitWith(Number(code));
+    // process.exit never returns, but tell the WASM runtime we're done.
+    throw new Error("promise_env.exit");
+  },
+};
+
+const importObject = {
+  promise_env: new Proxy(_promiseEnvImpl, {
+    get: (target, prop) => {
+      if (prop in target) return target[prop];
+      // No-op stub for unknown imports (web module bindings, etc.).
+      return (..._args) => 0;
+    },
+  }),
 };
 
 (async () => {

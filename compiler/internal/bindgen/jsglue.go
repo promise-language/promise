@@ -214,18 +214,18 @@ func (g *jsGlueGenerator) emitMethodBody(resourceName string, f Func, jsParams [
 	args := g.buildJSCallArgs(f)
 	jsName := idlCamelCase(f.Name)
 
-	// Check if this is an attribute getter/setter
-	if strings.HasSuffix(f.ImportName, ".get") {
-		attrName := jsName
-		if strings.HasPrefix(f.Name, "set_") {
-			attrName = idlCamelCase(f.Name[4:])
-		}
+	// Check if this is an attribute getter/setter.
+	// Attribute import names have 3 parts: "Type.attrName.get/set"
+	// Operation import names have 2 parts: "Type.methodName"
+	parts := strings.Split(f.ImportName, ".")
+	if len(parts) == 3 && parts[2] == "get" {
+		attrName := idlCamelCase(parts[1])
 		call := fmt.Sprintf("_refLoad(handle).%s", attrName)
 		g.emitReturnConversion(f, call)
 		return
 	}
-	if strings.HasSuffix(f.ImportName, ".set") {
-		attrName := idlCamelCase(strings.TrimPrefix(f.Name, "set_"))
+	if len(parts) == 3 && parts[2] == "set" {
+		attrName := idlCamelCase(parts[1])
 		g.writef("      _refLoad(handle).%s = %s;\n", attrName, strings.Join(args, ", "))
 		return
 	}
@@ -258,6 +258,7 @@ func (g *jsGlueGenerator) emitReturnConversion(f Func, call string) {
 		g.writef("      %s;\n", call)
 		return
 	}
+	isNullable := f.Results[0].Kind == OptionKind
 	ret := f.Results[0]
 	// Unwrap option for the flat return type
 	if ret.Kind == OptionKind && ret.Elem != nil {
@@ -266,6 +267,9 @@ func (g *jsGlueGenerator) emitReturnConversion(f Func, call string) {
 	if isStringType(ret) {
 		// String return: write to linear memory, return ptr+len via retarea
 		g.writef("      const result = %s;\n", call)
+		if isNullable {
+			g.write("      if (result == null) return 0;\n")
+		}
 		g.write("      const { ptr, len } = _writeString(String(result));\n")
 		g.write("      const retarea = wasm.exports.cabi_retarea();\n")
 		g.write("      const view = new DataView(wasm.exports.memory.buffer);\n")
@@ -273,7 +277,13 @@ func (g *jsGlueGenerator) emitReturnConversion(f Func, call string) {
 		g.write("      view.setInt32(retarea + 4, len, true);\n")
 		g.write("      return retarea;\n")
 	} else if isRefType(ret) {
-		g.writef("      return _refStore(%s);\n", call)
+		if isNullable {
+			g.writef("      const result = %s;\n", call)
+			g.write("      if (result == null) return 0;\n")
+			g.write("      return _refStore(result);\n")
+		} else {
+			g.writef("      return _refStore(%s);\n", call)
+		}
 	} else {
 		g.writef("      return %s;\n", call)
 	}

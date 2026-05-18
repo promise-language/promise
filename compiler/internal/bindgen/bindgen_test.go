@@ -371,7 +371,7 @@ func TestCodegenResource(t *testing.T) {
 	}}
 	out := GeneratePromise(modules, "wasi")
 	assertContains(t, out, "type Descriptor `public `target(wasi) {")
-	assertContains(t, out, "int _handle;")
+	assertContains(t, out, "i32 _handle;")
 	assertContains(t, out, "read!(this, u64 length) u8[] `public {")
 	assertContains(t, out, "return _descriptor_read(this._handle, length)^;")
 	assertContains(t, out, "drop(~this) {")
@@ -379,6 +379,98 @@ func TestCodegenResource(t *testing.T) {
 	assertContains(t, out, "`wasm_import(\"wasi:fs/types\", \"[method]descriptor.read\")")
 	assertContains(t, out, "`wasm_import(\"wasi:fs/types\", \"[resource-drop]descriptor\")")
 	assertContains(t, out, "`target(wasi);")
+}
+
+func TestCodegenResourceReturn(t *testing.T) {
+	// Non-canonical: method returning a resource type must construct from i32 handle.
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Document",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "create_element",
+				Kind:       FuncMethod,
+				Params:     []Param{{Name: "tag", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+				Results:    []TypeRef{{Kind: NamedKind, Name: "Element"}},
+				ImportName: "Document.createElement",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "web")
+	// Wrapper constructs Element from handle
+	assertContains(t, out, "handle := _document_create_element(this._handle, tag);\n")
+	assertContains(t, out, "return Element(_handle: handle);")
+	// Extern returns i32, not Element
+	assertContains(t, out, "_document_create_element(i32 handle, string tag) i32")
+}
+
+func TestCodegenOptionalResourceReturn(t *testing.T) {
+	// Non-canonical: method returning optional resource checks handle == 0.
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Document",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "get_element_by_id",
+				Kind:       FuncMethod,
+				Params:     []Param{{Name: "id", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+				Results:    []TypeRef{{Kind: OptionKind, Elem: &TypeRef{Kind: NamedKind, Name: "Element"}}},
+				ImportName: "Document.getElementById",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "web")
+	// Wrapper checks handle and constructs
+	assertContains(t, out, "if handle == 0 { return none; }")
+	assertContains(t, out, "return Element(_handle: handle);")
+	// Extern returns i32
+	assertContains(t, out, "_document_get_element_by_id(i32 handle, string id) i32")
+}
+
+func TestCodegenResourceParam(t *testing.T) {
+	// Non-canonical: method taking a resource param passes ._handle to extern.
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Node",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "append_child",
+				Kind:       FuncMethod,
+				Params:     []Param{{Name: "child", Type: TypeRef{Kind: NamedKind, Name: "Node"}}},
+				ImportName: "Node.appendChild",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "web")
+	// Wrapper passes child._handle
+	assertContains(t, out, "_node_append_child(this._handle, child._handle);")
+	// Extern takes i32 for the resource param
+	assertContains(t, out, "_node_append_child(i32 handle, i32 child)")
+}
+
+func TestPromiseExternType(t *testing.T) {
+	tests := []struct {
+		ref  TypeRef
+		want string
+	}{
+		{TypeRef{Kind: BuiltinKind, Builtin: "u32"}, "u32"},
+		{TypeRef{Kind: BuiltinKind, Builtin: "string"}, "string"},
+		{TypeRef{Kind: NamedKind, Name: "Element"}, "i32"},
+		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: NamedKind, Name: "Element"}}, "i32"},
+		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "string"}}, "string?"},
+	}
+	for _, tt := range tests {
+		got := promiseExternType(tt.ref)
+		if got != tt.want {
+			t.Errorf("promiseExternType(%v) = %q, want %q", tt.ref.Kind, got, tt.want)
+		}
+	}
 }
 
 func TestCodegenFreeFunc(t *testing.T) {
@@ -3506,5 +3598,275 @@ func TestJsValueNotEmittedWhenUnreferenced(t *testing.T) {
 	code := GeneratePromise(modules, "web")
 	if strings.Contains(code, "enum JsValue") {
 		t.Error("JsValue enum should not be emitted when unreferenced")
+	}
+}
+
+// --- Coverage gap tests ---
+
+func TestCodegenStaticWrapperResourceReturn(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{
+			{Name: "File", Drop: true},
+			{Name: "Dir", Drop: true, Methods: []Func{{
+				Name:       "open_file",
+				Kind:       FuncStatic,
+				Params:     []Param{{Name: "path", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+				Results:    []TypeRef{{Kind: NamedKind, Name: "File"}},
+				ImportName: "[static]dir.open-file",
+			}}},
+		},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "open_file(string path) File `public `static {")
+	assertContains(t, out, "handle := _dir_open_file(path);")
+	assertContains(t, out, "return File(_handle: handle);")
+}
+
+func TestCodegenStaticWrapperOptionalResourceReturn(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{
+			{Name: "File", Drop: true},
+			{Name: "Dir", Drop: true, Methods: []Func{{
+				Name:       "find_file",
+				Kind:       FuncStatic,
+				Params:     []Param{{Name: "name", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+				Results:    []TypeRef{{Kind: OptionKind, Elem: &TypeRef{Kind: NamedKind, Name: "File"}}},
+				ImportName: "[static]dir.find-file",
+			}}},
+		},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "find_file(string name) File? `public `static {")
+	assertContains(t, out, "handle := _dir_find_file(name);")
+	assertContains(t, out, "if handle == 0 { return none; }")
+	assertContains(t, out, "return File(_handle: handle);")
+}
+
+func TestFormatReturnSig(t *testing.T) {
+	g := &generator{}
+
+	// No results → empty
+	if got := g.formatReturnSig(nil); got != "" {
+		t.Errorf("nil results: got %q, want empty", got)
+	}
+
+	// Plain type → " type"
+	got := g.formatReturnSig([]TypeRef{{Kind: BuiltinKind, Builtin: "u32"}})
+	if got != " u32" {
+		t.Errorf("plain type: got %q, want %q", got, " u32")
+	}
+
+	// Failable with type → " type!"
+	got = g.formatReturnSig([]TypeRef{{Kind: ResultKind, Ok: &TypeRef{Kind: BuiltinKind, Builtin: "string"}}})
+	if got != " string!" {
+		t.Errorf("failable+type: got %q, want %q", got, " string!")
+	}
+
+	// Failable void (Result with no Ok) → "!"
+	got = g.formatReturnSig([]TypeRef{{Kind: ResultKind}})
+	if got != "!" {
+		t.Errorf("failable void: got %q, want %q", got, "!")
+	}
+}
+
+func TestFormatExternReturnTypeMultiple(t *testing.T) {
+	g := &generator{}
+	results := []TypeRef{
+		{Kind: BuiltinKind, Builtin: "u32"},
+		{Kind: BuiltinKind, Builtin: "u64"},
+	}
+	got := g.formatExternReturnType(results)
+	if got != "(u32, u64)" {
+		t.Errorf("multi extern return: got %q, want %q", got, "(u32, u64)")
+	}
+}
+
+func TestGenerateJSGlueFreeFuncNoImportName(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Functions: []Func{{
+			Name: "do_thing",
+			Kind: FuncFree,
+			// ImportName intentionally empty — should fall back to Name
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, `"do_thing"`)
+	assertContains(t, out, "doThing()")
+}
+
+func TestGenerateJSGlueNullableStringReturn(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Storage",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "get_item",
+				Kind:       FuncMethod,
+				OwnerType:  "Storage",
+				ImportName: "Storage.getItem",
+				Params:     []Param{{Name: "key", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+				Results:    []TypeRef{{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+			}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "if (result == null) return 0;")
+	assertContains(t, out, "_writeString(String(result))")
+}
+
+func TestWebIdlOptionalParam(t *testing.T) {
+	src := `interface Foo {
+		void bar(optional DOMString name);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	if len(modules) == 0 || len(modules[0].Resources) == 0 {
+		t.Fatal("expected at least one resource")
+	}
+	// The optional parameter should be wrapped in OptionKind
+	method := modules[0].Resources[0].Methods[0]
+	if len(method.Params) != 1 {
+		t.Fatalf("expected 1 param, got %d", len(method.Params))
+	}
+	p := method.Params[0]
+	if p.Type.Kind != OptionKind {
+		t.Errorf("expected optional param to have OptionKind, got %v", p.Type.Kind)
+	}
+}
+
+func TestJsValueDetectedInFuncParam(t *testing.T) {
+	m := &Module{
+		Functions: []Func{{
+			Name:   "do_stuff",
+			Params: []Param{{Name: "val", Type: TypeRef{Kind: NamedKind, Name: "JsValue"}}},
+		}},
+	}
+	if !moduleHasJsValue(m) {
+		t.Error("expected HasJsValue=true when function param is JsValue")
+	}
+}
+
+func TestJsValueDetectedInFuncResult(t *testing.T) {
+	m := &Module{
+		Functions: []Func{{
+			Name:    "get_val",
+			Results: []TypeRef{{Kind: NamedKind, Name: "JsValue"}},
+		}},
+	}
+	if !moduleHasJsValue(m) {
+		t.Error("expected HasJsValue=true when function result is JsValue")
+	}
+}
+
+func TestJsValueDetectedInResourceMethodParam(t *testing.T) {
+	m := &Module{
+		Resources: []Resource{{
+			Name: "Foo",
+			Methods: []Func{{
+				Name:   "set_val",
+				Params: []Param{{Name: "v", Type: TypeRef{Kind: NamedKind, Name: "JsValue"}}},
+			}},
+		}},
+	}
+	if !moduleHasJsValue(m) {
+		t.Error("expected HasJsValue=true when resource method param is JsValue")
+	}
+}
+
+func TestJsValueDetectedInResourceMethodResult(t *testing.T) {
+	m := &Module{
+		Resources: []Resource{{
+			Name: "Foo",
+			Methods: []Func{{
+				Name:    "get_val",
+				Results: []TypeRef{{Kind: NamedKind, Name: "JsValue"}},
+			}},
+		}},
+	}
+	if !moduleHasJsValue(m) {
+		t.Error("expected HasJsValue=true when resource method result is JsValue")
+	}
+}
+
+func TestJsValueDetectedInVariantCase(t *testing.T) {
+	m := &Module{
+		Types: []Type{{
+			Name: "MyVariant",
+			Kind: TypeVariant,
+			Cases: []Case{{
+				Name: "dynamic",
+				Type: &TypeRef{Kind: NamedKind, Name: "JsValue"},
+			}},
+		}},
+	}
+	if !moduleHasJsValue(m) {
+		t.Error("expected HasJsValue=true when variant case type is JsValue")
+	}
+}
+
+func TestJsValueDetectedInResultOk(t *testing.T) {
+	m := &Module{
+		Functions: []Func{{
+			Name: "try_get",
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Ok:   &TypeRef{Kind: NamedKind, Name: "JsValue"},
+			}},
+		}},
+	}
+	if !moduleHasJsValue(m) {
+		t.Error("expected HasJsValue=true when Result.Ok is JsValue")
+	}
+}
+
+func TestJsValueDetectedInResultErr(t *testing.T) {
+	m := &Module{
+		Functions: []Func{{
+			Name: "try_get",
+			Results: []TypeRef{{
+				Kind: ResultKind,
+				Err:  &TypeRef{Kind: NamedKind, Name: "JsValue"},
+			}},
+		}},
+	}
+	if !moduleHasJsValue(m) {
+		t.Error("expected HasJsValue=true when Result.Err is JsValue")
+	}
+}
+
+func TestJsValueDetectedInTupleElements(t *testing.T) {
+	m := &Module{
+		Functions: []Func{{
+			Name: "get_pair",
+			Results: []TypeRef{{
+				Kind: TupleKind,
+				Elements: []TypeRef{
+					{Kind: BuiltinKind, Builtin: "u32"},
+					{Kind: NamedKind, Name: "JsValue"},
+				},
+			}},
+		}},
+	}
+	if !moduleHasJsValue(m) {
+		t.Error("expected HasJsValue=true when tuple element is JsValue")
+	}
+}
+
+func TestIdlCamelCaseConsecutiveUnderscores(t *testing.T) {
+	got := idlCamelCase("a__b")
+	if got != "aB" {
+		t.Errorf("idlCamelCase(%q) = %q, want %q", "a__b", got, "aB")
 	}
 }

@@ -232,7 +232,7 @@ func (g *generator) emitResource(r Resource, importModule string) {
 	}
 	g.line("type %s `public `target(%s) {", r.Name, g.target)
 	g.indent++
-	g.line("int _handle;")
+	g.line("i32 _handle;")
 	g.blank()
 
 	// Methods
@@ -264,7 +264,7 @@ func (g *generator) emitResource(r Resource, importModule string) {
 		g.blank()
 		externName := fmt.Sprintf("_%s_drop", toSnake(r.Name))
 		importName := "[resource-drop]" + toKebab(r.Name)
-		g.line("%s(int handle)", externName)
+		g.line("%s(i32 handle)", externName)
 		g.indent++
 		g.line("`extern(\"%s_drop\")", toSnake(r.Name))
 		g.line("`wasm_import(\"%s\", \"%s\")", importModule, importName)
@@ -323,7 +323,24 @@ func (g *generator) emitStaticWrapper(m Func, resourceName, importModule string)
 		raise = "^"
 	}
 
-	if retType != "" {
+	// Check for resource return types
+	resReturn, isResReturn := resourceReturnType(m.Results)
+	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
+
+	if !g.canonicalABI && isResReturn {
+		g.line("%s%s(%s) %s `public `static {", m.Name, failMark, params, retType)
+		g.indent++
+		g.line("handle := %s(%s)%s;", externName, externParams, raise)
+		g.line("return %s(_handle: handle);", resReturn)
+		g.indent--
+	} else if !g.canonicalABI && isOptResReturn {
+		g.line("%s%s(%s) %s `public `static {", m.Name, failMark, params, retType)
+		g.indent++
+		g.line("handle := %s(%s)%s;", externName, externParams, raise)
+		g.line("if handle == 0 { return none; }")
+		g.line("return %s(_handle: handle);", optResReturn)
+		g.indent--
+	} else if retType != "" {
 		g.line("%s%s(%s) %s `public `static {", m.Name, failMark, params, retType)
 		g.indent++
 		g.line("return %s(%s)%s;", externName, externParams, raise)
@@ -350,11 +367,15 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 		raise = "^"
 	}
 
-	// Build extern call args: this._handle, then regular params
+	// Build extern call args: this._handle, then params (._handle for resources)
 	var callArgs []string
 	callArgs = append(callArgs, "this._handle")
 	for _, p := range m.Params {
-		callArgs = append(callArgs, p.Name)
+		if !g.canonicalABI && isRefType(p.Type) {
+			callArgs = append(callArgs, p.Name+"._handle")
+		} else {
+			callArgs = append(callArgs, p.Name)
+		}
 	}
 	externCallArgs := strings.Join(callArgs, ", ")
 
@@ -363,7 +384,24 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 		thisParam = "this, " + params
 	}
 
-	if retType != "" {
+	// Check for resource return types (need handle→resource construction)
+	resReturn, isResReturn := resourceReturnType(m.Results)
+	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
+
+	if !g.canonicalABI && isResReturn {
+		g.line("%s%s(%s) %s `public {", m.Name, failMark, thisParam, retType)
+		g.indent++
+		g.line("handle := %s(%s)%s;", externName, externCallArgs, raise)
+		g.line("return %s(_handle: handle);", resReturn)
+		g.indent--
+	} else if !g.canonicalABI && isOptResReturn {
+		g.line("%s%s(%s) %s `public {", m.Name, failMark, thisParam, retType)
+		g.indent++
+		g.line("handle := %s(%s)%s;", externName, externCallArgs, raise)
+		g.line("if handle == 0 { return none; }")
+		g.line("return %s(_handle: handle);", optResReturn)
+		g.indent--
+	} else if retType != "" {
 		g.line("%s%s(%s) %s `public {", m.Name, failMark, thisParam, retType)
 		g.indent++
 		g.line("return %s(%s)%s;", externName, externCallArgs, raise)
@@ -382,10 +420,10 @@ func (g *generator) emitResourceMethodExtern(m Func, resourceName, importModule 
 	case FuncConstructor:
 		externName := fmt.Sprintf("_%s_constructor", toSnake(resourceName))
 		params := g.formatExternParamsWithRetPtr(m.Params, m.Results)
-		retSig := "int"
+		retSig := "i32"
 		failable := isFailable(m.Results)
 		if failable {
-			retSig = "int!"
+			retSig = "i32!"
 		}
 		g.line("%s(%s) %s", externName, params, retSig)
 	case FuncStatic:
@@ -395,11 +433,9 @@ func (g *generator) emitResourceMethodExtern(m Func, resourceName, importModule 
 		g.line("%s(%s)%s", externName, params, retSig)
 	default:
 		externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), m.Name)
-		// Method extern takes handle (i32) as first param
+		// Method extern takes handle (i32) as first param — handles are
+		// 32-bit ref table indices on all WASM targets.
 		handleParam := "i32 handle"
-		if !g.canonicalABI {
-			handleParam = "int handle"
-		}
 		extraParams := g.formatExternParamsWithRetPtr(m.Params, m.Results)
 		allParams := handleParam
 		if extraParams != "" {
@@ -504,7 +540,11 @@ func (g *generator) formatParams(params []Param) string {
 
 func (g *generator) formatExternParams(params []Param) string {
 	if !g.canonicalABI {
-		return g.formatParams(params)
+		var parts []string
+		for _, p := range params {
+			parts = append(parts, fmt.Sprintf("%s %s", promiseExternType(p.Type), p.Name))
+		}
+		return strings.Join(parts, ", ")
 	}
 	flat, usePtr := flattenParams(params)
 	if usePtr {
@@ -520,7 +560,11 @@ func (g *generator) formatExternParams(params []Param) string {
 func (g *generator) formatExternCallArgs(params []Param) string {
 	var parts []string
 	for _, p := range params {
-		parts = append(parts, p.Name)
+		if !g.canonicalABI && isRefType(p.Type) {
+			parts = append(parts, p.Name+"._handle")
+		} else {
+			parts = append(parts, p.Name)
+		}
 	}
 	return strings.Join(parts, ", ")
 }
@@ -543,6 +587,28 @@ func (g *generator) formatReturnType(results []TypeRef) string {
 	var parts []string
 	for _, r := range results {
 		parts = append(parts, promiseType(r))
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+// formatExternReturnType converts results to extern return type, mapping resource types to i32.
+func (g *generator) formatExternReturnType(results []TypeRef) string {
+	if len(results) == 0 {
+		return ""
+	}
+	if len(results) == 1 {
+		ref := results[0]
+		if ref.Kind == ResultKind {
+			if ref.Ok != nil {
+				return promiseExternType(*ref.Ok)
+			}
+			return ""
+		}
+		return promiseExternType(ref)
+	}
+	var parts []string
+	for _, r := range results {
+		parts = append(parts, promiseExternType(r))
 	}
 	return "(" + strings.Join(parts, ", ") + ")"
 }
@@ -594,6 +660,24 @@ func promiseType(ref TypeRef) string {
 	}
 }
 
+// promiseExternType converts a TypeRef to a Promise type for extern declarations.
+// Resource types (NamedKind) become i32 (handle), optional resource types become i32
+// (0 = null). All other types use the normal promiseType conversion.
+// Handles are i32 on WASM (32-bit ref table indices), not int (which is i64).
+func promiseExternType(ref TypeRef) string {
+	switch ref.Kind {
+	case NamedKind:
+		return "i32"
+	case OptionKind:
+		if ref.Elem != nil && ref.Elem.Kind == NamedKind {
+			return "i32"
+		}
+		return promiseType(ref)
+	default:
+		return promiseType(ref)
+	}
+}
+
 func witBuiltinToPromise(builtin string) string {
 	switch builtin {
 	case "u8":
@@ -625,6 +709,39 @@ func witBuiltinToPromise(builtin string) string {
 	default:
 		return "int"
 	}
+}
+
+// resourceReturnType returns the resource type name if the function returns a single
+// NamedKind type (resource). Used to detect when wrapper must construct from handle.
+func resourceReturnType(results []TypeRef) (string, bool) {
+	if len(results) != 1 {
+		return "", false
+	}
+	ref := results[0]
+	if ref.Kind == ResultKind && ref.Ok != nil {
+		ref = *ref.Ok
+	}
+	if ref.Kind == NamedKind {
+		return ref.Name, true
+	}
+	return "", false
+}
+
+// optionResourceReturnType returns the resource type name if the function returns
+// an optional resource (OptionKind wrapping NamedKind). The extern returns i32
+// where 0 = null, and the wrapper checks handle before constructing.
+func optionResourceReturnType(results []TypeRef) (string, bool) {
+	if len(results) != 1 {
+		return "", false
+	}
+	ref := results[0]
+	if ref.Kind == ResultKind && ref.Ok != nil {
+		ref = *ref.Ok
+	}
+	if ref.Kind == OptionKind && ref.Elem != nil && ref.Elem.Kind == NamedKind {
+		return ref.Elem.Name, true
+	}
+	return "", false
 }
 
 func isFailable(results []TypeRef) bool {
@@ -708,7 +825,18 @@ func (g *generator) emitCanonicalABIHelpers(listElemTypes []TypeRef) {
 // and the retptr is added as the last param.
 func (g *generator) formatExternReturnSig(results []TypeRef) string {
 	if !g.canonicalABI {
-		return g.formatReturnSig(results)
+		retType := g.formatExternReturnType(results)
+		failable := isFailable(results)
+		if retType == "" && failable {
+			return "!"
+		}
+		if retType == "" {
+			return ""
+		}
+		if failable {
+			return " " + retType + "!"
+		}
+		return " " + retType
 	}
 	_, useRetPtr := flattenResults(results)
 	if useRetPtr {

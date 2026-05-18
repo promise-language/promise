@@ -112,8 +112,7 @@ test_select_send_closed_retry() `test(exclude: "wasm32") {
 
   go {
     sleep(Duration.from_millis(5));
-    <-send_ch;
-    send_ch.close(); // close — select send will fail re-check
+    send_ch.close(); // close — wakes select's send SWN with closed flag already set
     recv_ch.send(3);
   };
 

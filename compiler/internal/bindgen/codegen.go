@@ -49,6 +49,12 @@ func (g *generator) blank() {
 }
 
 func (g *generator) emitModule(m *Module) {
+	// Emit JsValue enum if any type references it
+	if m.HasJsValue {
+		g.emitJsValueEnum()
+		g.blank()
+	}
+
 	// Emit types
 	for _, t := range m.Types {
 		g.emitType(t, m.ImportModule)
@@ -66,6 +72,59 @@ func (g *generator) emitModule(m *Module) {
 		g.emitFreeFunc(f, m.ImportModule)
 		g.blank()
 	}
+}
+
+// emitJsValueEnum emits the JsValue enum type used to represent dynamic
+// JavaScript values (any, object, Promise<T>, record<K,V>, unions, etc.).
+func (g *generator) emitJsValueEnum() {
+	g.line("`doc \"Represents a dynamic JavaScript value.\"")
+	g.line("enum JsValue `public {")
+	g.indent++
+	g.line("Undefined,")
+	g.line("Null,")
+	g.line("Bool(bool value),")
+	g.line("Number(f64 value),")
+	g.line("Str(string value),")
+	g.line("Object(int _js_ref),")
+	g.line("Array(int _js_ref),")
+	g.line("Function(int _js_ref),")
+	g.blank()
+	g.line("`doc \"Returns true if this value is undefined.\"")
+	g.line("get is_undefined bool `public {")
+	g.indent++
+	g.line("return this is Undefined;")
+	g.indent--
+	g.line("}")
+	g.blank()
+	g.line("`doc \"Returns true if this value is null.\"")
+	g.line("get is_null bool `public {")
+	g.indent++
+	g.line("return this is Null;")
+	g.indent--
+	g.line("}")
+	g.blank()
+	g.line("`doc \"Returns the bool value, or none if not a Bool.\"")
+	g.line("as_bool(this) bool? `public {")
+	g.indent++
+	g.line("return match this { Bool(v) => v, _ => none };")
+	g.indent--
+	g.line("}")
+	g.blank()
+	g.line("`doc \"Returns the number value, or none if not a Number.\"")
+	g.line("as_number(this) f64? `public {")
+	g.indent++
+	g.line("return match this { Number(v) => v, _ => none };")
+	g.indent--
+	g.line("}")
+	g.blank()
+	g.line("`doc \"Returns the string value, or none if not a Str.\"")
+	g.line("as_string(this) string? `public {")
+	g.indent++
+	g.line("return match this { Str(v) => v, _ => none };")
+	g.indent--
+	g.line("}")
+	g.indent--
+	g.line("}")
 }
 
 func (g *generator) emitType(t Type, importModule string) {

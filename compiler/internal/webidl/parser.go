@@ -103,9 +103,7 @@ func (p *Parser) parseFile() *File {
 				partial := p.parsePartialMixin()
 				file.Partials = append(file.Partials, partial)
 			case TokenDictionary:
-				// partial dictionary — treat like partial interface
-				partial := p.parsePartialDictionary()
-				file.Partials = append(file.Partials, partial)
+				file.PartialDicts = append(file.PartialDicts, p.parsePartialDictionary())
 			default:
 				p.errorf(partialTok.Pos, "expected interface, mixin, or dictionary after partial, got %s", partialTok.Kind)
 				p.next()
@@ -387,21 +385,17 @@ func (p *Parser) parsePartialMixin() *PartialInterface {
 	return partial
 }
 
-func (p *Parser) parsePartialDictionary() *PartialInterface {
+func (p *Parser) parsePartialDictionary() *PartialDictionary {
 	pos := p.expect(TokenDictionary).Pos
 	name := p.next().Value
-	partial := &PartialInterface{
+	partial := &PartialDictionary{
 		Name: name,
 		Pos:  pos,
 	}
 
 	p.expect(TokenLBrace)
-	// Dictionary members in partial — parse as attributes for simplicity
 	for !p.at(TokenRBrace) && !p.at(TokenEOF) {
-		member := p.parseMember()
-		if member != nil {
-			partial.Members = append(partial.Members, member)
-		}
+		partial.Members = append(partial.Members, p.parseDictMember())
 	}
 	p.expect(TokenRBrace)
 	p.expect(TokenSemicolon)
@@ -885,6 +879,17 @@ func Merge(file *File) {
 			if iface, ok := ifaceMap[partial.Name]; ok {
 				iface.Members = append(iface.Members, partial.Members...)
 			}
+		}
+	}
+
+	// Apply partial dictionaries
+	dictMap := make(map[string]*Dictionary)
+	for _, d := range file.Dictionaries {
+		dictMap[d.Name] = d
+	}
+	for _, pd := range file.PartialDicts {
+		if d, ok := dictMap[pd.Name]; ok {
+			d.Members = append(d.Members, pd.Members...)
 		}
 	}
 

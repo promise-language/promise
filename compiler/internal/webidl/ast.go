@@ -11,6 +11,7 @@ type File struct {
 	Callbacks    []*Callback
 	Typedefs     []*Typedef
 	Partials     []*PartialInterface
+	PartialDicts []*PartialDictionary
 	Mixins       []*Mixin
 	Includes     []*IncludesStatement
 }
@@ -74,6 +75,13 @@ type PartialInterface struct {
 	Name    string
 	Members []Member
 	IsMixin bool
+	Pos     Pos
+}
+
+// PartialDictionary represents a partial dictionary definition.
+type PartialDictionary struct {
+	Name    string
+	Members []*DictMember
 	Pos     Pos
 }
 

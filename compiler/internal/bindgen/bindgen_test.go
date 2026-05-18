@@ -2401,6 +2401,73 @@ func TestIdlCamelCase(t *testing.T) {
 	}
 }
 
+func TestIdlEnumValueToPascalEmpty(t *testing.T) {
+	// Empty string after splitting → "Empty"
+	got := idlEnumValueToPascal("")
+	if got != "Empty" {
+		t.Errorf("idlEnumValueToPascal(\"\") = %q, want \"Empty\"", got)
+	}
+	// Separator-only string → "Empty"
+	got = idlEnumValueToPascal("--")
+	if got != "Empty" {
+		t.Errorf("idlEnumValueToPascal(\"--\") = %q, want \"Empty\"", got)
+	}
+}
+
+func TestIdlToSnakeEmpty(t *testing.T) {
+	got := idlToSnake("")
+	if got != "" {
+		t.Errorf("idlToSnake(\"\") = %q, want \"\"", got)
+	}
+}
+
+func TestConvertOperationStatic(t *testing.T) {
+	src := `interface Foo {
+		static DOMString create(DOMString name);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	found := false
+	for _, r := range modules[0].Resources {
+		for _, m := range r.Methods {
+			if m.Name == "create" {
+				if m.Kind != FuncStatic {
+					t.Errorf("expected FuncStatic, got %d", m.Kind)
+				}
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("static method 'create' not found")
+	}
+}
+
+func TestConvertOperationSpecialNoName(t *testing.T) {
+	src := `interface Collection {
+		getter DOMString (unsigned long index);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	found := false
+	for _, r := range modules[0].Resources {
+		for _, m := range r.Methods {
+			if m.Name == "getter" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("unnamed getter operation should use special name 'getter'")
+	}
+}
+
 // --- WebIDL-to-IR conversion tests ---
 
 func TestWebIdlToIRInterface(t *testing.T) {
@@ -3301,5 +3368,143 @@ func TestWebIdlToIRNoInterfaces(t *testing.T) {
 	modules := WebIdlToIR(file)
 	if modules[0].Name != "web" {
 		t.Errorf("expected default module name 'web', got %q", modules[0].Name)
+	}
+}
+
+func TestWebIdlToIRMergedPartialDictionary(t *testing.T) {
+	src := `dictionary Options {
+		required DOMString name;
+	};
+	partial dictionary Options {
+		long timeout;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	m := modules[0]
+	if len(m.Types) != 1 {
+		t.Fatalf("expected 1 type, got %d", len(m.Types))
+	}
+	rec := m.Types[0]
+	if rec.Kind != TypeRecord {
+		t.Fatalf("expected TypeRecord, got %d", rec.Kind)
+	}
+	// name (required) + timeout (optional) = 2 fields
+	if len(rec.Fields) != 2 {
+		t.Fatalf("expected 2 fields after partial merge, got %d", len(rec.Fields))
+	}
+	if rec.Fields[0].Name != "name" {
+		t.Errorf("expected field 'name', got %q", rec.Fields[0].Name)
+	}
+	if rec.Fields[1].Name != "timeout" {
+		t.Errorf("expected field 'timeout', got %q", rec.Fields[1].Name)
+	}
+	// timeout is not required, so should be wrapped in OptionKind
+	if rec.Fields[1].Type.Kind != OptionKind {
+		t.Errorf("expected OptionKind for optional field, got %d", rec.Fields[1].Type.Kind)
+	}
+}
+
+func TestJsValueEmission(t *testing.T) {
+	// WebIDL with types that map to JsValue (any, union, Promise, record)
+	src := `interface Foo {
+		any getValue();
+		void doStuff((DOMString or long) input);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	if !modules[0].HasJsValue {
+		t.Fatal("expected HasJsValue=true when types reference JsValue")
+	}
+	code := GeneratePromise(modules, "web")
+	assertContains(t, code, "enum JsValue")
+	assertContains(t, code, "Undefined,")
+	assertContains(t, code, "Null,")
+	assertContains(t, code, "Bool(bool value),")
+	assertContains(t, code, "Number(f64 value),")
+	assertContains(t, code, "Str(string value),")
+	assertContains(t, code, "Object(int _js_ref),")
+	assertContains(t, code, "Array(int _js_ref),")
+	assertContains(t, code, "Function(int _js_ref),")
+	assertContains(t, code, "get is_undefined bool")
+	assertContains(t, code, "get is_null bool")
+	assertContains(t, code, "as_bool(this) bool?")
+	assertContains(t, code, "as_number(this) f64?")
+	assertContains(t, code, "as_string(this) string?")
+}
+
+func TestJsValueDetectedInDictField(t *testing.T) {
+	// JsValue detected via dictionary field of type 'any'
+	src := `dictionary Options {
+		any value;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	if !modules[0].HasJsValue {
+		t.Fatal("expected HasJsValue=true when dictionary field is 'any'")
+	}
+	code := GeneratePromise(modules, "web")
+	assertContains(t, code, "enum JsValue")
+}
+
+func TestJsValueDetectedInTypedef(t *testing.T) {
+	// JsValue detected via typedef target
+	src := `typedef any JsRef;`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	if !modules[0].HasJsValue {
+		t.Fatal("expected HasJsValue=true when typedef target is 'any'")
+	}
+}
+
+func TestJsValueDetectedNested(t *testing.T) {
+	// JsValue detected inside sequence<any> (nested Elem)
+	src := `dictionary Batch {
+		sequence<any> items;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	if !modules[0].HasJsValue {
+		t.Fatal("expected HasJsValue=true for sequence<any> in dict field")
+	}
+}
+
+func TestJsValueNotEmittedWhenUnreferenced(t *testing.T) {
+	// WebIDL with no types mapping to JsValue
+	src := `interface Foo {
+		DOMString getName();
+		void setCount(long count);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	if modules[0].HasJsValue {
+		t.Fatal("expected HasJsValue=false when no types reference JsValue")
+	}
+	code := GeneratePromise(modules, "web")
+	if strings.Contains(code, "enum JsValue") {
+		t.Error("JsValue enum should not be emitted when unreferenced")
 	}
 }

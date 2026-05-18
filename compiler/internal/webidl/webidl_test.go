@@ -846,7 +846,7 @@ func TestParsePartialDictionary(t *testing.T) {
 		DOMString name;
 	};
 	partial dictionary Options {
-		attribute long timeout;
+		long timeout;
 	};`
 	file, errs := Parse(src, "test.webidl")
 	if len(errs) > 0 {
@@ -855,11 +855,49 @@ func TestParsePartialDictionary(t *testing.T) {
 	if len(file.Dictionaries) != 1 {
 		t.Fatalf("expected 1 dictionary, got %d", len(file.Dictionaries))
 	}
-	if len(file.Partials) != 1 {
-		t.Fatalf("expected 1 partial, got %d", len(file.Partials))
+	if len(file.PartialDicts) != 1 {
+		t.Fatalf("expected 1 partial dict, got %d", len(file.PartialDicts))
 	}
-	if file.Partials[0].Name != "Options" {
-		t.Errorf("expected 'Options', got %q", file.Partials[0].Name)
+	pd := file.PartialDicts[0]
+	if pd.Name != "Options" {
+		t.Errorf("expected 'Options', got %q", pd.Name)
+	}
+	if len(pd.Members) != 1 {
+		t.Fatalf("expected 1 member, got %d", len(pd.Members))
+	}
+	if pd.Members[0].Name != "timeout" {
+		t.Errorf("expected member 'timeout', got %q", pd.Members[0].Name)
+	}
+	if pd.Members[0].Type.Builtin != "long" {
+		t.Errorf("expected type 'long', got %q", pd.Members[0].Type.Builtin)
+	}
+}
+
+func TestMergePartialDictionary(t *testing.T) {
+	src := `dictionary Options {
+		DOMString name;
+	};
+	partial dictionary Options {
+		long timeout;
+		required boolean verbose;
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	Merge(file)
+	dict := file.Dictionaries[0]
+	if len(dict.Members) != 3 {
+		t.Fatalf("expected 3 members after merge, got %d", len(dict.Members))
+	}
+	if dict.Members[1].Name != "timeout" {
+		t.Errorf("expected second member 'timeout', got %q", dict.Members[1].Name)
+	}
+	if dict.Members[2].Name != "verbose" {
+		t.Errorf("expected third member 'verbose', got %q", dict.Members[2].Name)
+	}
+	if !dict.Members[2].Required {
+		t.Error("expected 'verbose' to be required")
 	}
 }
 
@@ -1213,6 +1251,76 @@ func TestParseDictMemberDefault(t *testing.T) {
 	m := file.Dictionaries[0].Members[0]
 	if m.Default != "false" {
 		t.Errorf("expected default 'false', got %q", m.Default)
+	}
+}
+
+func TestParseEnumInvalidToken(t *testing.T) {
+	// Non-string token in enum body produces a parse error
+	src := `enum Foo { 123 };`
+	_, errs := Parse(src, "test.webidl")
+	if len(errs) == 0 {
+		t.Fatal("expected error for non-string token in enum")
+	}
+	found := false
+	for _, e := range errs {
+		if contains(e.Error(), "expected string literal in enum") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'expected string literal in enum' error, got: %v", errs)
+	}
+}
+
+func TestReadDefaultFloat(t *testing.T) {
+	// Float default value in dictionary member
+	src := `dictionary Opts {
+		double opacity = 1.0;
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	m := file.Dictionaries[0].Members[0]
+	if m.Default != "1.0" {
+		t.Errorf("expected default '1.0', got %q", m.Default)
+	}
+}
+
+func TestMergePartialDictUnmatched(t *testing.T) {
+	// Partial dictionary with no matching base is silently dropped
+	src := `dictionary Base {
+		DOMString name;
+	};
+	partial dictionary Unknown {
+		long extra;
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	Merge(file)
+	// Base should still have only its original member
+	if len(file.Dictionaries[0].Members) != 1 {
+		t.Errorf("expected 1 member in Base, got %d", len(file.Dictionaries[0].Members))
+	}
+}
+
+func TestMergePartialInterfaceUnmatched(t *testing.T) {
+	// Partial interface with no matching base is silently dropped
+	src := `interface Base {
+		readonly attribute DOMString name;
+	};
+	partial interface Unknown {
+		void extra();
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	Merge(file)
+	if len(file.Interfaces[0].Members) != 1 {
+		t.Errorf("expected 1 member in Base, got %d", len(file.Interfaces[0].Members))
 	}
 }
 

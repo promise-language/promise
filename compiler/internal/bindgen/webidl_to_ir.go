@@ -66,6 +66,9 @@ func (c *webidlConverter) convert() []*Module {
 		}
 	}
 
+	// Scan all type references for JsValue usage
+	m.HasJsValue = moduleHasJsValue(m)
+
 	return []*Module{m}
 }
 
@@ -387,4 +390,72 @@ func idlEnumValueToPascal(s string) string {
 		return "Empty"
 	}
 	return result
+}
+
+// moduleHasJsValue returns true if any TypeRef in the module references JsValue.
+func moduleHasJsValue(m *Module) bool {
+	var check func(ref TypeRef) bool
+	check = func(ref TypeRef) bool {
+		if ref.Kind == NamedKind && ref.Name == "JsValue" {
+			return true
+		}
+		if ref.Elem != nil && check(*ref.Elem) {
+			return true
+		}
+		if ref.Ok != nil && check(*ref.Ok) {
+			return true
+		}
+		if ref.Err != nil && check(*ref.Err) {
+			return true
+		}
+		for _, e := range ref.Elements {
+			if check(e) {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, t := range m.Types {
+		for _, f := range t.Fields {
+			if check(f.Type) {
+				return true
+			}
+		}
+		for _, c := range t.Cases {
+			if c.Type != nil && check(*c.Type) {
+				return true
+			}
+		}
+		if t.Target != nil && check(*t.Target) {
+			return true
+		}
+	}
+	for _, f := range m.Functions {
+		for _, p := range f.Params {
+			if check(p.Type) {
+				return true
+			}
+		}
+		for _, r := range f.Results {
+			if check(r) {
+				return true
+			}
+		}
+	}
+	for _, r := range m.Resources {
+		for _, method := range r.Methods {
+			for _, p := range method.Params {
+				if check(p.Type) {
+					return true
+				}
+			}
+			for _, res := range method.Results {
+				if check(res) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

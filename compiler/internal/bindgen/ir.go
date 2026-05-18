@@ -10,6 +10,7 @@ type Module struct {
 	Types        []Type     // type definitions
 	Functions    []Func     // free functions
 	Resources    []Resource // resource types
+	HasJsValue   bool       // true if any type reference resolves to JsValue
 }
 
 // Type represents a type definition in the binding IR.

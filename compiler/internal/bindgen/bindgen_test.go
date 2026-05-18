@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"djabi.dev/go/promise_lang/internal/webidl"
 	"djabi.dev/go/promise_lang/internal/wit"
 )
 
@@ -2350,4 +2351,955 @@ func TestCodegenCanonicalABIListReturn(t *testing.T) {
 	assertContains(t, out, "_cabi_vector_from_u8(_cabi_load_i32(_cabi_retarea_ptr() + 4), _cabi_load_i32(_cabi_retarea_ptr() + 8), 1)")
 	// Error extraction
 	assertContains(t, out, "raise error(_cabi_string_from(")
+}
+
+// --- WebIDL name conversion tests ---
+
+func TestIdlToSnake(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"getElementById", "get_element_by_id"},
+		{"setAttribute", "set_attribute"},
+		{"innerHTML", "inner_html"},
+		{"tagName", "tag_name"},
+		{"URL", "url"},
+		{"simple", "simple"},
+	}
+	for _, tt := range tests {
+		got := idlToSnake(tt.in)
+		if got != tt.want {
+			t.Errorf("idlToSnake(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestIdlEnumValueToPascal(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"read-write", "ReadWrite"},
+		{"auto", "Auto"},
+		{"same-origin", "SameOrigin"},
+		{"no-cors", "NoCors"},
+	}
+	for _, tt := range tests {
+		got := idlEnumValueToPascal(tt.in)
+		if got != tt.want {
+			t.Errorf("idlEnumValueToPascal(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestIdlCamelCase(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"get_element_by_id", "getElementById"},
+		{"set_attribute", "setAttribute"},
+		{"simple", "simple"},
+	}
+	for _, tt := range tests {
+		got := idlCamelCase(tt.in)
+		if got != tt.want {
+			t.Errorf("idlCamelCase(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// --- WebIDL-to-IR conversion tests ---
+
+func TestWebIdlToIRInterface(t *testing.T) {
+	src := `interface Element {
+		readonly attribute DOMString tagName;
+		Element? querySelector(DOMString selectors);
+		void setAttribute(DOMString name, DOMString value);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	if len(modules) != 1 {
+		t.Fatalf("expected 1 module, got %d", len(modules))
+	}
+	m := modules[0]
+	if m.ImportModule != "promise_env" {
+		t.Errorf("expected import module 'promise_env', got %q", m.ImportModule)
+	}
+	if len(m.Resources) != 1 {
+		t.Fatalf("expected 1 resource, got %d", len(m.Resources))
+	}
+	res := m.Resources[0]
+	if res.Name != "Element" {
+		t.Errorf("expected resource name 'Element', got %q", res.Name)
+	}
+	if !res.Drop {
+		t.Error("expected Drop=true")
+	}
+	// Readonly attribute → 1 getter. Operation → 1 method each. = 3 methods
+	if len(res.Methods) != 3 {
+		t.Errorf("expected 3 methods, got %d", len(res.Methods))
+	}
+	// Check getter
+	getter := res.Methods[0]
+	if getter.Name != "tag_name" {
+		t.Errorf("expected getter 'tag_name', got %q", getter.Name)
+	}
+	if getter.Kind != FuncMethod {
+		t.Errorf("expected FuncMethod kind, got %d", getter.Kind)
+	}
+	if len(getter.Results) != 1 || getter.Results[0].Builtin != "string" {
+		t.Errorf("expected string result for getter")
+	}
+}
+
+func TestWebIdlToIRDictionary(t *testing.T) {
+	src := `dictionary RequestInit {
+		required DOMString method;
+		DOMString body;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	m := modules[0]
+	if len(m.Types) != 1 {
+		t.Fatalf("expected 1 type, got %d", len(m.Types))
+	}
+	typ := m.Types[0]
+	if typ.Name != "RequestInit" {
+		t.Errorf("expected 'RequestInit', got %q", typ.Name)
+	}
+	if typ.Kind != TypeRecord {
+		t.Errorf("expected TypeRecord, got %d", typ.Kind)
+	}
+	if len(typ.Fields) != 2 {
+		t.Fatalf("expected 2 fields, got %d", len(typ.Fields))
+	}
+	// First field: required → direct type
+	if typ.Fields[0].Type.Kind != BuiltinKind {
+		t.Errorf("expected required field to be BuiltinKind, got %d", typ.Fields[0].Type.Kind)
+	}
+	// Second field: optional → OptionKind wrapping
+	if typ.Fields[1].Type.Kind != OptionKind {
+		t.Errorf("expected optional field to be OptionKind, got %d", typ.Fields[1].Type.Kind)
+	}
+}
+
+func TestWebIdlToIREnum(t *testing.T) {
+	src := `enum ScrollBehavior {
+		"auto",
+		"instant",
+		"smooth"
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	m := modules[0]
+	if len(m.Types) != 1 {
+		t.Fatalf("expected 1 type, got %d", len(m.Types))
+	}
+	typ := m.Types[0]
+	if typ.Kind != TypeEnum {
+		t.Errorf("expected TypeEnum, got %d", typ.Kind)
+	}
+	if len(typ.Cases) != 3 {
+		t.Fatalf("expected 3 cases, got %d", len(typ.Cases))
+	}
+	if typ.Cases[0].Name != "Auto" {
+		t.Errorf("expected 'Auto', got %q", typ.Cases[0].Name)
+	}
+}
+
+func TestWebIdlToIRConstructor(t *testing.T) {
+	src := `interface Image {
+		constructor(unsigned long width, unsigned long height);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	res := modules[0].Resources[0]
+	if len(res.Methods) != 1 {
+		t.Fatalf("expected 1 method, got %d", len(res.Methods))
+	}
+	ctor := res.Methods[0]
+	if ctor.Kind != FuncConstructor {
+		t.Errorf("expected FuncConstructor, got %d", ctor.Kind)
+	}
+	if ctor.Name != "create" {
+		t.Errorf("expected 'create', got %q", ctor.Name)
+	}
+	if len(ctor.Params) != 2 {
+		t.Errorf("expected 2 params, got %d", len(ctor.Params))
+	}
+}
+
+func TestWebIdlToIRTypeMapping(t *testing.T) {
+	// Test that WebIDL types map to the correct IR types
+	tests := []struct {
+		idlType  string
+		expected TypeRef
+	}{
+		{"DOMString", TypeRef{Kind: BuiltinKind, Builtin: "string"}},
+		{"boolean", TypeRef{Kind: BuiltinKind, Builtin: "bool"}},
+		{"long", TypeRef{Kind: BuiltinKind, Builtin: "s32"}},
+		{"unsigned long", TypeRef{Kind: BuiltinKind, Builtin: "u32"}},
+		{"double", TypeRef{Kind: BuiltinKind, Builtin: "f64"}},
+		{"float", TypeRef{Kind: BuiltinKind, Builtin: "f32"}},
+		{"byte", TypeRef{Kind: BuiltinKind, Builtin: "s8"}},
+		{"octet", TypeRef{Kind: BuiltinKind, Builtin: "u8"}},
+		{"any", TypeRef{Kind: NamedKind, Name: "JsValue"}},
+	}
+	for _, tt := range tests {
+		got := convertWebIdlBuiltin(tt.idlType)
+		if got.Kind != tt.expected.Kind {
+			t.Errorf("convertWebIdlBuiltin(%q): kind = %d, want %d", tt.idlType, got.Kind, tt.expected.Kind)
+		}
+		if got.Kind == BuiltinKind && got.Builtin != tt.expected.Builtin {
+			t.Errorf("convertWebIdlBuiltin(%q): builtin = %q, want %q", tt.idlType, got.Builtin, tt.expected.Builtin)
+		}
+		if got.Kind == NamedKind && got.Name != tt.expected.Name {
+			t.Errorf("convertWebIdlBuiltin(%q): name = %q, want %q", tt.idlType, got.Name, tt.expected.Name)
+		}
+	}
+}
+
+func TestWebIdlToIRReadWriteAttribute(t *testing.T) {
+	src := `interface Foo {
+		attribute DOMString name;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	res := modules[0].Resources[0]
+	// Read-write attribute should produce getter + setter = 2 methods
+	if len(res.Methods) != 2 {
+		t.Fatalf("expected 2 methods for read-write attribute, got %d", len(res.Methods))
+	}
+	if res.Methods[0].Name != "name" {
+		t.Errorf("expected getter 'name', got %q", res.Methods[0].Name)
+	}
+	if res.Methods[1].Name != "set_name" {
+		t.Errorf("expected setter 'set_name', got %q", res.Methods[1].Name)
+	}
+}
+
+func TestWebIdlToIRNullableParam(t *testing.T) {
+	src := `interface Foo {
+		void bar(DOMString? name);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	method := modules[0].Resources[0].Methods[0]
+	if method.Params[0].Type.Kind != OptionKind {
+		t.Errorf("expected OptionKind for nullable param, got %d", method.Params[0].Type.Kind)
+	}
+}
+
+func TestWebIdlToIRMergedPartials(t *testing.T) {
+	src := `interface Foo {
+		readonly attribute DOMString name;
+	};
+	partial interface Foo {
+		void doStuff();
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	res := modules[0].Resources[0]
+	// 1 getter (name) + 1 operation (doStuff) = 2 methods
+	if len(res.Methods) != 2 {
+		t.Errorf("expected 2 methods after merge, got %d", len(res.Methods))
+	}
+}
+
+// --- JS glue generation tests ---
+
+func TestGenerateJSGlueRefTable(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "function _refStore(obj)")
+	assertContains(t, out, "function _refLoad(handle)")
+	assertContains(t, out, "function _refRelease(handle)")
+}
+
+func TestGenerateJSGlueStringHelpers(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "function _readString(ptr, len)")
+	assertContains(t, out, "function _writeString(str)")
+	assertContains(t, out, "TextEncoder")
+	assertContains(t, out, "TextDecoder")
+}
+
+func TestGenerateJSGlueResourceDrop(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Element",
+			Drop: true,
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, `"Element.drop"(handle)`)
+	assertContains(t, out, "_refRelease(handle)")
+}
+
+func TestGenerateJSGlueMethodImport(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Element",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "set_attribute",
+				Kind:       FuncMethod,
+				OwnerType:  "Element",
+				ImportName: "Element.setAttribute",
+				Params: []Param{
+					{Name: "name", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}},
+					{Name: "value", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}},
+				},
+			}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, `"Element.setAttribute"`)
+	assertContains(t, out, "_readString(name_ptr, name_len)")
+	assertContains(t, out, "_refLoad(handle)")
+}
+
+func TestGenerateJSGlueConstructor(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Image",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "create",
+				Kind:       FuncConstructor,
+				OwnerType:  "Image",
+				ImportName: "Image.constructor",
+				Params: []Param{
+					{Name: "width", Type: TypeRef{Kind: BuiltinKind, Builtin: "u32"}},
+				},
+			}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "new Image(width)")
+	assertContains(t, out, "_refStore(")
+}
+
+func TestGenerateJSGlueInstantiation(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "WebAssembly.instantiateStreaming")
+	assertContains(t, out, "export async function init(wasmPath)")
+	assertContains(t, out, "_initialize")
+}
+
+func TestWebIdlEndToEnd(t *testing.T) {
+	// Full pipeline: parse WebIDL → IR → Promise code + JS glue
+	src := `
+	interface Console {
+		undefined log(DOMString message);
+	};
+
+	interface Document {
+		Element? getElementById(DOMString elementId);
+		Element createElement(DOMString localName);
+		readonly attribute DOMString title;
+	};
+
+	enum ScrollBehavior {
+		"auto",
+		"smooth"
+	};
+	`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+
+	// Generate Promise code
+	prCode := GeneratePromise(modules, "web")
+	if !strings.Contains(prCode, "Console") {
+		t.Error("Promise code should contain Console resource")
+	}
+	if !strings.Contains(prCode, "Document") {
+		t.Error("Promise code should contain Document resource")
+	}
+	if !strings.Contains(prCode, "ScrollBehavior") {
+		t.Error("Promise code should contain ScrollBehavior enum")
+	}
+	if !strings.Contains(prCode, "`target(web)") {
+		t.Error("Promise code should contain web target annotation")
+	}
+
+	// Generate JS glue
+	jsCode := GenerateJSGlue(modules)
+	if !strings.Contains(jsCode, "promise_env") {
+		t.Error("JS glue should reference promise_env import module")
+	}
+	if !strings.Contains(jsCode, "Console.drop") {
+		t.Error("JS glue should contain Console.drop")
+	}
+	if !strings.Contains(jsCode, "Document.drop") {
+		t.Error("JS glue should contain Document.drop")
+	}
+}
+
+// --- Coverage gap tests: WebIDL-to-IR ---
+
+func TestWebIdlToIRTypedef(t *testing.T) {
+	src := `typedef unsigned long long DOMTimeStamp;`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	m := modules[0]
+	if len(m.Types) != 1 {
+		t.Fatalf("expected 1 type, got %d", len(m.Types))
+	}
+	typ := m.Types[0]
+	if typ.Kind != TypeAlias {
+		t.Errorf("expected TypeAlias, got %d", typ.Kind)
+	}
+	if typ.Name != "DOMTimeStamp" {
+		t.Errorf("expected 'DOMTimeStamp', got %q", typ.Name)
+	}
+	if typ.Target == nil {
+		t.Fatal("expected non-nil target")
+	}
+	if typ.Target.Builtin != "u64" {
+		t.Errorf("expected target u64, got %q", typ.Target.Builtin)
+	}
+}
+
+func TestWebIdlToIRConstMember(t *testing.T) {
+	src := `interface Node {
+		const unsigned short ELEMENT_NODE = 1;
+		const unsigned short TEXT_NODE = 3;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	res := modules[0].Resources[0]
+	if len(res.Methods) != 2 {
+		t.Fatalf("expected 2 methods from consts, got %d", len(res.Methods))
+	}
+	f := res.Methods[0]
+	if f.Kind != FuncStatic {
+		t.Errorf("expected FuncStatic for const, got %d", f.Kind)
+	}
+	if f.Name != "element_node" {
+		t.Errorf("expected 'element_node', got %q", f.Name)
+	}
+}
+
+func TestWebIdlToIRSpecialOperations(t *testing.T) {
+	src := `interface Storage {
+		getter DOMString getItem(DOMString key);
+		setter void setItem(DOMString key, DOMString value);
+		deleter void removeItem(DOMString key);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	res := modules[0].Resources[0]
+	if len(res.Methods) != 3 {
+		t.Fatalf("expected 3 methods, got %d", len(res.Methods))
+	}
+}
+
+func TestWebIdlToIRStaticOperation(t *testing.T) {
+	src := `interface Crypto {
+		static DOMString randomUUID();
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	res := modules[0].Resources[0]
+	if len(res.Methods) != 1 {
+		t.Fatalf("expected 1 method, got %d", len(res.Methods))
+	}
+	f := res.Methods[0]
+	if f.Kind != FuncStatic {
+		t.Errorf("expected FuncStatic, got %d", f.Kind)
+	}
+}
+
+func TestWebIdlToIROptionalConstructorParam(t *testing.T) {
+	src := `interface Foo {
+		constructor(optional DOMString name);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	ctor := modules[0].Resources[0].Methods[0]
+	if ctor.Params[0].Type.Kind != OptionKind {
+		t.Errorf("expected OptionKind for optional ctor param, got %d", ctor.Params[0].Type.Kind)
+	}
+}
+
+func TestWebIdlToIRMixinSkipped(t *testing.T) {
+	// Mixin-tagged interfaces should be skipped as resources
+	src := `interface mixin Mix {
+		readonly attribute DOMString a;
+	};
+	interface Real {
+		readonly attribute long x;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	m := modules[0]
+	// Only "Real" should appear as a resource, Mix is skipped
+	if len(m.Resources) != 1 {
+		t.Fatalf("expected 1 resource (mixin skipped), got %d", len(m.Resources))
+	}
+	if m.Resources[0].Name != "Real" {
+		t.Errorf("expected 'Real', got %q", m.Resources[0].Name)
+	}
+	// Module name should come from first non-mixin interface
+	if m.Name != "real" {
+		t.Errorf("expected module name 'real', got %q", m.Name)
+	}
+}
+
+func TestConvertWebIdlTypeRefComprehensive(t *testing.T) {
+	tests := []struct {
+		name   string
+		ref    *webidl.TypeRef
+		expect TypeRef
+	}{
+		{
+			name:   "nil ref",
+			ref:    nil,
+			expect: TypeRef{Kind: BuiltinKind, Builtin: "void"},
+		},
+		{
+			name:   "promise type",
+			ref:    &webidl.TypeRef{Kind: webidl.PromiseType, Elem: &webidl.TypeRef{Kind: webidl.NamedType, Name: "Response"}},
+			expect: TypeRef{Kind: NamedKind, Name: "JsValue"},
+		},
+		{
+			name:   "record type",
+			ref:    &webidl.TypeRef{Kind: webidl.RecordType, Key: &webidl.TypeRef{Kind: webidl.BuiltinType, Builtin: "DOMString"}, Value: &webidl.TypeRef{Kind: webidl.BuiltinType, Builtin: "long"}},
+			expect: TypeRef{Kind: NamedKind, Name: "JsValue"},
+		},
+		{
+			name:   "union type",
+			ref:    &webidl.TypeRef{Kind: webidl.UnionType, Members: []*webidl.TypeRef{{Kind: webidl.BuiltinType, Builtin: "DOMString"}, {Kind: webidl.BuiltinType, Builtin: "long"}}},
+			expect: TypeRef{Kind: NamedKind, Name: "JsValue"},
+		},
+		{
+			name:   "observable array",
+			ref:    &webidl.TypeRef{Kind: webidl.ObservableArrayType, Elem: &webidl.TypeRef{Kind: webidl.BuiltinType, Builtin: "long"}},
+			expect: TypeRef{Kind: ListKind},
+		},
+		{
+			name:   "frozen array",
+			ref:    &webidl.TypeRef{Kind: webidl.FrozenArrayType, Elem: &webidl.TypeRef{Kind: webidl.BuiltinType, Builtin: "DOMString"}},
+			expect: TypeRef{Kind: ListKind},
+		},
+		{
+			name:   "nullable named",
+			ref:    &webidl.TypeRef{Kind: webidl.NamedType, Name: "Element", Nullable: true},
+			expect: TypeRef{Kind: OptionKind},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convertWebIdlTypeRef(tt.ref)
+			if got.Kind != tt.expect.Kind {
+				t.Errorf("kind = %d, want %d", got.Kind, tt.expect.Kind)
+			}
+			if tt.expect.Builtin != "" && got.Builtin != tt.expect.Builtin {
+				t.Errorf("builtin = %q, want %q", got.Builtin, tt.expect.Builtin)
+			}
+			if tt.expect.Name != "" && got.Name != tt.expect.Name {
+				t.Errorf("name = %q, want %q", got.Name, tt.expect.Name)
+			}
+		})
+	}
+}
+
+func TestConvertWebIdlBuiltinComprehensive(t *testing.T) {
+	tests := []struct {
+		builtin string
+		kind    TypeRefKind
+		value   string // Builtin or Name depending on kind
+	}{
+		{"short", BuiltinKind, "s16"},
+		{"unsigned short", BuiltinKind, "u16"},
+		{"long long", BuiltinKind, "s64"},
+		{"unsigned long long", BuiltinKind, "u64"},
+		{"unrestricted float", BuiltinKind, "f32"},
+		{"unrestricted double", BuiltinKind, "f64"},
+		{"void", BuiltinKind, "void"},
+		{"undefined", BuiltinKind, "void"},
+		{"object", NamedKind, "JsValue"},
+		{"bigint", BuiltinKind, "s64"},
+		{"symbol", NamedKind, "JsValue"},
+		{"ArrayBuffer", NamedKind, "JsValue"},
+		{"DataView", NamedKind, "JsValue"},
+		{"Int8Array", NamedKind, "JsValue"},
+		{"Int16Array", NamedKind, "JsValue"},
+		{"Int32Array", NamedKind, "JsValue"},
+		{"Uint8Array", NamedKind, "JsValue"},
+		{"Uint16Array", NamedKind, "JsValue"},
+		{"Uint32Array", NamedKind, "JsValue"},
+		{"Uint8ClampedArray", NamedKind, "JsValue"},
+		{"Float32Array", NamedKind, "JsValue"},
+		{"Float64Array", NamedKind, "JsValue"},
+		{"unknown_type", BuiltinKind, "u32"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.builtin, func(t *testing.T) {
+			got := convertWebIdlBuiltin(tt.builtin)
+			if got.Kind != tt.kind {
+				t.Errorf("kind = %d, want %d", got.Kind, tt.kind)
+			}
+			if tt.kind == BuiltinKind && got.Builtin != tt.value {
+				t.Errorf("builtin = %q, want %q", got.Builtin, tt.value)
+			}
+			if tt.kind == NamedKind && got.Name != tt.value {
+				t.Errorf("name = %q, want %q", got.Name, tt.value)
+			}
+		})
+	}
+}
+
+// --- Coverage gap tests: JS Glue ---
+
+func TestGenerateJSGlueStaticMethod(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Math",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "random",
+				Kind:       FuncStatic,
+				OwnerType:  "Math",
+				ImportName: "Math.random",
+				Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "f64"}},
+			}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, `"Math.random"`)
+	assertContains(t, out, "Math.random()")
+}
+
+func TestGenerateJSGlueFreeFunc(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Functions: []Func{{
+			Name:       "alert",
+			Kind:       FuncFree,
+			ImportName: "alert",
+			Params:     []Param{{Name: "message", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, `"alert"`)
+	assertContains(t, out, "message_ptr")
+	assertContains(t, out, "_readString")
+}
+
+func TestGenerateJSGlueRefReturnType(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Document",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "create_element",
+				Kind:       FuncMethod,
+				OwnerType:  "Document",
+				ImportName: "Document.createElement",
+				Params:     []Param{{Name: "tag", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+				Results:    []TypeRef{{Kind: NamedKind, Name: "Element"}},
+			}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "_refStore(")
+}
+
+func TestGenerateJSGlueAttributeSetter(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Element",
+			Drop: true,
+			Methods: []Func{
+				{
+					Name:       "text_content",
+					Kind:       FuncMethod,
+					OwnerType:  "Element",
+					ImportName: "Element.textContent.get",
+					Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "string"}},
+				},
+				{
+					Name:       "set_text_content",
+					Kind:       FuncMethod,
+					OwnerType:  "Element",
+					ImportName: "Element.textContent.set",
+					Params:     []Param{{Name: "value", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+				},
+			},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "textContent.get")
+	assertContains(t, out, "textContent.set")
+	assertContains(t, out, "_refLoad(handle).textContent")
+}
+
+func TestGenerateJSGlueRefParam(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Node",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "append_child",
+				Kind:       FuncMethod,
+				OwnerType:  "Node",
+				ImportName: "Node.appendChild",
+				Params:     []Param{{Name: "child", Type: TypeRef{Kind: NamedKind, Name: "Node"}}},
+				Results:    []TypeRef{{Kind: NamedKind, Name: "Node"}},
+			}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "_refLoad(child)")
+	assertContains(t, out, "_refStore(")
+}
+
+func TestJsParamNameReservedWords(t *testing.T) {
+	reserved := []string{"default", "class", "function", "var", "let", "const", "this", "new", "delete", "in", "typeof"}
+	for _, word := range reserved {
+		got := jsParamName(word)
+		if got != word+"_" {
+			t.Errorf("jsParamName(%q) = %q, want %q", word, got, word+"_")
+		}
+	}
+	// Non-reserved should pass through
+	if got := jsParamName("value"); got != "value" {
+		t.Errorf("jsParamName(\"value\") = %q, want \"value\"", got)
+	}
+}
+
+func TestGenerateJSGlueVoidReturnMethod(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Console",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "log",
+				Kind:       FuncMethod,
+				OwnerType:  "Console",
+				ImportName: "Console.log",
+				Params:     []Param{{Name: "msg", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
+				// No results (void)
+			}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, `"Console.log"`)
+	assertContains(t, out, "_refLoad(handle).log(")
+}
+
+func TestGenerateJSGlueOptionalParam(t *testing.T) {
+	elem := TypeRef{Kind: BuiltinKind, Builtin: "s32"}
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Foo",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "bar",
+				Kind:       FuncMethod,
+				OwnerType:  "Foo",
+				ImportName: "Foo.bar",
+				Params:     []Param{{Name: "x", Type: TypeRef{Kind: OptionKind, Elem: &elem}}},
+			}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	// Optional s32 should unwrap to scalar param "x"
+	assertContains(t, out, `"Foo.bar"(handle, x)`)
+}
+
+func TestGenerateJSGlueStringReturn(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Element",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "get_tag",
+				Kind:       FuncMethod,
+				OwnerType:  "Element",
+				ImportName: "Element.getTag",
+				Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "string"}},
+			}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	assertContains(t, out, "_writeString(String(result))")
+	assertContains(t, out, "cabi_retarea()")
+}
+
+func TestGenerateJSGlueMethodNoImportName(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Foo",
+			Drop: true,
+			Methods: []Func{{
+				Name:      "bar",
+				Kind:      FuncMethod,
+				OwnerType: "Foo",
+				// ImportName intentionally empty
+			}},
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	// Should fall back to "Foo.bar" as import name
+	assertContains(t, out, `"Foo.bar"`)
+}
+
+func TestGenerateJSGlueNoDrop(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "ReadOnly",
+			Drop: false, // no drop function
+		}},
+	}}
+	out := GenerateJSGlue(modules)
+	if strings.Contains(out, "ReadOnly.drop") {
+		t.Error("should not emit drop for Drop=false resource")
+	}
+}
+
+func TestWebIdlToIRVoidReturn(t *testing.T) {
+	src := `interface Foo {
+		void doStuff();
+		undefined doMore();
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	res := modules[0].Resources[0]
+	for _, m := range res.Methods {
+		if len(m.Results) != 0 {
+			t.Errorf("method %q should have no results for void/undefined return, got %d", m.Name, len(m.Results))
+		}
+	}
+}
+
+func TestWebIdlToIRStaticAttribute(t *testing.T) {
+	src := `interface Foo {
+		static attribute DOMString name;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	res := modules[0].Resources[0]
+	// static read-write attribute → getter + setter, both FuncStatic
+	if len(res.Methods) != 2 {
+		t.Fatalf("expected 2 methods, got %d", len(res.Methods))
+	}
+	if res.Methods[0].Kind != FuncStatic {
+		t.Errorf("expected static getter")
+	}
+	if res.Methods[1].Kind != FuncStatic {
+		t.Errorf("expected static setter")
+	}
+}
+
+func TestWebIdlToIRSequenceReturn(t *testing.T) {
+	src := `interface Foo {
+		sequence<DOMString> getNames();
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	res := modules[0].Resources[0]
+	if len(res.Methods[0].Results) != 1 {
+		t.Fatal("expected 1 result")
+	}
+	if res.Methods[0].Results[0].Kind != ListKind {
+		t.Errorf("expected ListKind, got %d", res.Methods[0].Results[0].Kind)
+	}
+}
+
+func TestWebIdlToIRNoInterfaces(t *testing.T) {
+	// Module name should default to "web" when no non-mixin interfaces
+	src := `enum Foo { "a", "b" };`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	if modules[0].Name != "web" {
+		t.Errorf("expected default module name 'web', got %q", modules[0].Name)
+	}
 }

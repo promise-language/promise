@@ -4205,6 +4205,39 @@ func linkWasmMulti(objFiles []string, target, outputFile string, useLTO bool) {
 		fmt.Fprintf(os.Stderr, "error linking (wasm-ld): %v\n", err)
 		os.Exit(1)
 	}
+
+	// Post-link: emit bootstrap .js loader for wasm32-web targets
+	if strings.Contains(target, "web") {
+		emitWebBootstrapJS(outputFile)
+	}
+}
+
+// emitWebBootstrapJS writes a minimal JavaScript loader alongside the .wasm
+// output for wasm32-web targets. The loader handles WebAssembly.instantiateStreaming
+// and provides the basic runtime entry point. Module-specific JS glue (from
+// promise bind webidl) should be imported separately.
+func emitWebBootstrapJS(wasmFile string) {
+	jsFile := strings.TrimSuffix(wasmFile, ".wasm") + ".js"
+	wasmBase := filepath.Base(wasmFile)
+
+	content := fmt.Sprintf(`// Auto-generated bootstrap loader for %s
+// Import module-specific glue files separately if using WebIDL bindings.
+
+export async function init(importObject = {}) {
+  const response = await fetch("%s");
+  const { instance } = await WebAssembly.instantiateStreaming(response, importObject);
+
+  if (instance.exports._initialize) {
+    instance.exports._initialize();
+  }
+
+  return instance.exports;
+}
+`, wasmBase, wasmBase)
+
+	if err := os.WriteFile(jsFile, []byte(content), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", jsFile, err)
+	}
 }
 
 // buildWasmLinkArgs builds the wasm-ld argument list for WASM linking.

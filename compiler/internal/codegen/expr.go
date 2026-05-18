@@ -3215,21 +3215,15 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	c.block.NewCondBr(shouldWait, rendezvousWaitBlock, rendezvousExitBlock)
 
 	if c.inCoroutine {
-		// Goroutine mode rendezvous: park + suspend
+		// Goroutine mode rendezvous: yield-spin (T0305).
+		// Instead of parking on send_waiters (which conflates write-waiters and
+		// rendezvous-waiters and causes lost-wakeup races under Mutex[T] contention),
+		// the sender releases the channel mutex, yields to the scheduler, and re-checks
+		// count on resume. This ensures send_waiters only contains write-waiters,
+		// eliminating the thundering herd from wake_all and the chain-breaking race.
 		c.block = rendezvousWaitBlock
-		rvCurrentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
-		rvSendHead := c.block.NewGetElementPtr(chanType, chPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
-		rvSendTail := c.block.NewGetElementPtr(chanType, chPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
-		c.block.NewCall(c.funcs["promise_waiter_enqueue"], rvSendHead, rvSendTail, rvCurrentG)
-		// Store mutex in G.park_mutex — scheduler releases after coro.suspend completes
-		gTyRv := goroutineStructType()
-		rvGPtr := c.block.NewBitCast(rvCurrentG, irtypes.NewPointer(gTyRv))
-		rvPmField := c.block.NewGetElementPtr(gTyRv, rvGPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
-		c.block.NewStore(mtx, rvPmField)
-
+		c.block.NewCall(c.palMutexUnlock, mtx)
+		// Yield: coro.suspend with null park_mutex → scheduler re-enqueues us
 		rvSuspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 		rvResumeBlk := c.newBlock("send.rv.resume")
 		c.block.NewSwitch(rvSuspResult, c.coroSuspendBlk,
@@ -3246,7 +3240,10 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		c.block.NewBr(rendezvousCheckBlock)
 	}
 
-	// rendezvous exit: wake next sender from send_waiters (B0156), then done
+	// rendezvous exit (T0305): wake one waiter on send_waiters (write-waiter or
+	// select SWN) so they can proceed now that count==0. With yield-spin rendezvous,
+	// rendezvous-waiters are NOT on send_waiters, so waking send_waiters here only
+	// affects genuine write-waiters (from the waitfull path) or select send SWNs.
 	c.block = rendezvousExitBlock
 	rvExitSendHead := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))

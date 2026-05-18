@@ -1,0 +1,27 @@
+// Browser interop example: declaring a raw `wasm_import` for wasm32-web.
+//
+// This shows the low-level mechanism that `promise bind webidl` (T0037) uses
+// to generate browser bindings: any `extern` annotated with `wasm_import`
+// becomes a WebAssembly host import. The compiler emits the correct
+// `wasm-import-module` / `wasm-import-name` attributes so the host JavaScript
+// can supply the implementation.
+//
+// In a real browser, the auto-generated bootstrap `.js` (see
+// `docs/wasm-bindings.md`) wires `promise_env.log` to `console.log`. The
+// Node.js test harness (compiler/cmd/promise/wasm_web_harness.js) routes
+// `promise_env.write`/`exit` to stdout/process.exit and stubs every other
+// import with a no-op — including `promise_env.log`. So the test below just
+// verifies the binding compiles and links cleanly for wasm32-web.
+//
+// For real DOM/web bindings, generate them from `.webidl` instead of writing
+// `wasm_import` declarations by hand:
+//   promise bind webidl path/to/dom.webidl -o modules/web/
+//
+// Run:
+//   bin/promise test --target wasm32-web examples/11_wasm/web_console.pr
+//   bin/verify --wasm-web
+_console_log(string msg) `extern("promise_console_log") `wasm_import("promise_env", "log") `target(web);
+
+test_console_log_links() `test `target(web) {
+  _console_log("hello from promise");
+}

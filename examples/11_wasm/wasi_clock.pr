@@ -1,0 +1,37 @@
+// WIT-generated bindings example: WASI Preview 2 clock interfaces.
+//
+// The `wasi_preview_2` catalog module is generated from `.wit` files by the
+// WIT→Promise binding pipeline (T0037, `promise bind wit ...`) and registered
+// in `catalog.toml` against a pinned commit. Importing it produces:
+//   - Promise value types for WIT `record`s (e.g. `Datetime`)
+//   - Promise enums for WIT `variant`s (e.g. `DescriptorType`)
+//   - `wasm_import` extern declarations for each WIT `func` (target(wasi))
+//
+// The actual runtime imports (`wasi:clocks/monotonic-clock@0.2.0::now`, ...)
+// follow the WASI Preview 2 component-model interface, which plain wasmtime
+// cannot resolve for a core wasm module. A component-model host (wasmtime
+// component, browser, etc.) is required to actually invoke them. The tests
+// below therefore exercise the value-type bindings directly — calling the
+// WASI imports is left to a hosted environment.
+//
+// Run:
+//   bin/promise test --target wasm32-wasi examples/11_wasm/wasi_clock.pr
+//   bin/verify --wasm
+use wasi_preview_2;
+
+test_datetime_value_type() `test {
+  wasi_preview_2.Datetime epoch = wasi_preview_2.Datetime(seconds: 0u64, nanoseconds: 0u32);
+  assert(epoch.seconds == 0u64, "epoch seconds");
+  assert(epoch.nanoseconds == 0u32, "epoch nanoseconds");
+
+  wasi_preview_2.Datetime moment = wasi_preview_2.Datetime(seconds: 1700000000u64, nanoseconds: 500000000u32);
+  assert(moment.seconds == 1700000000u64, "moment seconds");
+  assert(moment.nanoseconds == 500000000u32, "moment nanoseconds");
+}
+
+// Force the `wasi:clocks` module to compile and link for wasm32-wasi. The
+// imports are linked with `--allow-undefined`, so the binary is valid even
+// when the host can't resolve the symbols.
+test_wasi_clocks_link() `test `target(wasi) {
+  assert(true, "wasi_preview_2 clocks compile and link for wasm32-wasi");
+}

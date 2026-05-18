@@ -30,6 +30,9 @@ bin/promise test examples/...
 | [07_concurrency/](07_concurrency/) | Concurrency | Goroutines, channels, select, tasks, pipelines |
 | [08_modules/](08_modules/) | Modules | File I/O, JSON, OS interaction |
 | [09_patterns/](09_patterns/) | Design patterns | Builder, state machine, command dispatch |
+| [11_wasm/](11_wasm/) | WebAssembly | Cross-target compilation, raw `wasm_import`, WIT bindings via `wasi_preview_2` |
+
+WebAssembly examples are exercised on their target during `bin/verify --wasm` (wasm32-wasi via wasmtime) and `bin/verify --wasm-web` (wasm32-web via Node.js).
 
 ## Further Reading
 

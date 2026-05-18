@@ -1,0 +1,22 @@
+// Cross-target hello world for WebAssembly.
+//
+// The same Promise source compiles unchanged to native, wasm32-wasi, and
+// wasm32-web. The compiler picks the right Platform Abstraction Layer (PAL)
+// implementation for each target so `print_line` always reaches stdout:
+//
+//   - native:      writes via libc (write(2))
+//   - wasm32-wasi: writes via wasi_snapshot_preview1.fd_write
+//   - wasm32-web:  writes via promise_env.write (browser/Node.js host)
+//
+// Build for each target:
+//   bin/promise build examples/11_wasm/hello_wasm.pr
+//   bin/promise build -target wasm32-wasi examples/11_wasm/hello_wasm.pr
+//   bin/promise build -target wasm32-web examples/11_wasm/hello_wasm.pr
+//
+// Test on each target:
+//   bin/promise test examples/11_wasm/hello_wasm.pr
+//   bin/verify --wasm        # runs all tests under wasm32-wasi
+//   bin/verify --wasm-web    # runs all tests under wasm32-web (Node.js)
+main() `test(expected: "Hello from Promise on WebAssembly!") {
+  print_line("Hello from Promise on WebAssembly!");
+}

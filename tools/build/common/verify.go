@@ -16,21 +16,24 @@ var errInterrupted = fmt.Errorf("interrupted by Ctrl+C")
 
 // RunVerify orchestrates the full pre-commit verification pipeline:
 // format → build → vet → test. All steps are internal calls (no subprocess).
-// Flags: -shared (use ~/.promise), -wasm (include wasm target), -clean (clear caches), -push (git push on success).
+// Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi),
+// -wasm-web (include wasm32-web via Node), -clean (clear caches),
+// -push (git push on success).
 // Default cache is local (.promise-home/); -local is accepted for clarity.
 func RunVerify(root string, args []string) error {
 	args = NormalizeArgs(args)
 	shared := slices.Contains(args, "-shared")
 	wasm := slices.Contains(args, "-wasm")
+	wasmWeb := slices.Contains(args, "-wasm-web")
 	clean := slices.Contains(args, "-clean")
 	push := slices.Contains(args, "-push")
 
 	// Validate args
 	for _, arg := range args {
 		switch arg {
-		case "-local", "-shared", "-wasm", "-clean", "-push":
+		case "-local", "-shared", "-wasm", "-wasm-web", "-clean", "-push":
 		default:
-			return fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--clean] [--push]")
+			return fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push]")
 		}
 	}
 
@@ -143,6 +146,23 @@ func RunVerify(root string, args []string) error {
 		wasmElapsed = time.Since(wasmStart)
 	}
 
+	// 8b. Promise tests (wasm32-web via Node)
+	var wasmWebOutput string
+	var wasmWebElapsed time.Duration
+	if wasmWeb {
+		if Which("node") == "" {
+			return fmt.Errorf("node not found — install Node.js 20+ (https://nodejs.org/)")
+		}
+		fmt.Println("\nRunning promise tests (wasm32-web)...")
+		wasmWebStart := time.Now()
+		var wasmWebErr error
+		wasmWebOutput, wasmWebErr = RunPromiseTests(root, "wasm32-web")
+		if wasmWebErr != nil {
+			failures = append(failures, "promise tests (wasm32-web)")
+		}
+		wasmWebElapsed = time.Since(wasmWebStart)
+	}
+
 	// 9. Summary — always printed, even on failure.
 	elapsed := time.Since(start)
 	mins := int(elapsed.Minutes())
@@ -165,6 +185,13 @@ func RunVerify(root string, args []string) error {
 			fmt.Printf("  WASM tests:   passed (%s)\n", wasmElapsed.Round(time.Millisecond))
 		}
 	}
+	if wasmWeb {
+		if slices.Contains(failures, "promise tests (wasm32-web)") {
+			fmt.Printf("  WASM-web:     FAILED (%s)\n", wasmWebElapsed.Round(time.Millisecond))
+		} else {
+			fmt.Printf("  WASM-web:     passed (%s)\n", wasmWebElapsed.Round(time.Millisecond))
+		}
+	}
 	fmt.Printf("  Total time:   %dm%02ds\n", mins, secs)
 	fmt.Println("====================================================")
 
@@ -181,6 +208,11 @@ func RunVerify(root string, args []string) error {
 		if wasm {
 			if s := ExtractFailedSection(wasmOutput); s != "" {
 				sections = append(sections, failureSection{"wasm32-wasi", s})
+			}
+		}
+		if wasmWeb {
+			if s := ExtractFailedSection(wasmWebOutput); s != "" {
+				sections = append(sections, failureSection{"wasm32-web", s})
 			}
 		}
 		if len(sections) > 0 {
@@ -213,6 +245,13 @@ func RunVerify(root string, args []string) error {
 			gv.Values["wasm_test_count"] = float64(s.Passed)
 			gv.Values["wasm_leak_count"] = float64(s.Leaked)
 			gv.Values["wasm_test_failures"] = float64(s.Failed)
+		}
+	}
+	if wasmWeb {
+		if s := ParseTestSummaryLine(wasmWebOutput); s != nil {
+			gv.Values["wasm_web_test_count"] = float64(s.Passed)
+			gv.Values["wasm_web_leak_count"] = float64(s.Leaked)
+			gv.Values["wasm_web_test_failures"] = float64(s.Failed)
 		}
 	}
 	if err := WriteGateValues(root, gv); err != nil {

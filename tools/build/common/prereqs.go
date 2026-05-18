@@ -77,6 +77,22 @@ func RunPrereqs(root string, args []string) error {
 		}
 	}
 
+	// node (optional, for --target wasm32-web tests)
+	if path := Which("node"); path != "" {
+		ver, _ := RunOutputQuiet("node", "--version")
+		fmt.Printf("✅ node:     %s\n", ver)
+	} else {
+		fmt.Println("❌ node:     NOT FOUND (optional, for --target wasm32-web — Node 20+)")
+		switch runtime.GOOS {
+		case "windows":
+			fmt.Println("            Install: winget install OpenJS.NodeJS")
+		case "darwin":
+			fmt.Println("            Install: brew install node")
+		default:
+			fmt.Println("            Install: sudo apt-get install nodejs (or https://nodejs.org/)")
+		}
+	}
+
 	fmt.Println()
 	if ok {
 		fmt.Println("All required prerequisites installed.")

@@ -1265,9 +1265,12 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var cmd *exec.Cmd
-	if isWasmTarget(target) {
+	switch {
+	case isWasmWebTarget(target):
+		cmd = runWasmWeb(ctx, binaryPath)
+	case isWasmTarget(target):
 		cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
-	} else {
+	default:
 		cmd = exec.CommandContext(ctx, binaryPath)
 	}
 	isolateProcessGroup(cmd)
@@ -1360,9 +1363,12 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var cmd *exec.Cmd
-	if isWasmTarget(target) {
+	switch {
+	case isWasmWebTarget(target):
+		cmd = runWasmWeb(ctx, binaryPath)
+	case isWasmTarget(target):
 		cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
-	} else {
+	default:
 		cmd = exec.CommandContext(ctx, binaryPath)
 	}
 	isolateProcessGroup(cmd)
@@ -1573,9 +1579,12 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var cmd *exec.Cmd
-	if isWasmTarget(target) {
+	switch {
+	case isWasmWebTarget(target):
+		cmd = runWasmWeb(ctx, binaryPath)
+	case isWasmTarget(target):
 		cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
-	} else {
+	default:
 		cmd = exec.CommandContext(ctx, binaryPath)
 	}
 	isolateProcessGroup(cmd)
@@ -6306,9 +6315,12 @@ func runExec(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var cmd *exec.Cmd
-	if isWasmTarget(target) {
+	switch {
+	case isWasmWebTarget(target):
+		cmd = runWasmWeb(ctx, tmpOutput.Name())
+	case isWasmTarget(target):
 		cmd = exec.CommandContext(ctx, "wasmtime", tmpOutput.Name())
-	} else {
+	default:
 		cmd = exec.CommandContext(ctx, tmpOutput.Name())
 	}
 	isolateProcessGroup(cmd)

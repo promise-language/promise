@@ -455,9 +455,12 @@ func runStress(files []string, count int, duration time.Duration, cfg testTimeou
 			runStart := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), cfg.defaultTimeout)
 			var cmd *exec.Cmd
-			if isWasmTarget(targetTriple) {
+			switch {
+			case isWasmWebTarget(targetTriple):
+				cmd = runWasmWeb(ctx, t.binary)
+			case isWasmTarget(targetTriple):
 				cmd = exec.CommandContext(ctx, "wasmtime", t.binary)
-			} else {
+			default:
 				cmd = exec.CommandContext(ctx, t.binary)
 			}
 			var stdoutBuf, stderrBuf bytes.Buffer

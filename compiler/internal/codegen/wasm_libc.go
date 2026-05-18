@@ -92,10 +92,17 @@ func (c *Compiler) defineWasmUsleep() *ir.Func {
 	return fn
 }
 
-// emitWasmStart creates the @_start WASI entry point.
-// _start calls @main (which has scheduler code). The allocator self-initializes.
+// emitWasmStart creates the WASM entry point. For wasm32-wasi this is `_start`
+// (the WASI Command convention). For wasm32-web it is `_initialize` (called
+// from JS / the Node test harness — there is no WASI runtime to invoke
+// `_start` automatically). Either way the body calls @main and then @pal_exit
+// with main's return code; the allocator self-initializes.
 func (c *Compiler) emitWasmStart(mainFn *ir.Func) {
-	startFn := c.module.NewFunc("_start", irtypes.Void)
+	name := "_start"
+	if c.isWasmWeb {
+		name = "_initialize"
+	}
+	startFn := c.module.NewFunc(name, irtypes.Void)
 	startFn.FuncAttrs = append(startFn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := startFn.NewBlock(".entry")
 

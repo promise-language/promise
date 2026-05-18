@@ -756,6 +756,25 @@ func TestWasmExternWithoutImportStillSret(t *testing.T) {
 	assertContains(t, ir, "declare void @test_internal(i8* %sret, i8* %x)")
 }
 
+// T0315: wasm32-web targets must export @_initialize (the JS/Node entry point)
+// rather than @_start (the WASI Command convention).
+func TestWasmWebEmitsInitialize(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		main() { print_line("hi"); }
+	`, "wasm32-web")
+	assertContains(t, ir, "define void @_initialize()")
+	assertNotContains(t, ir, "define void @_start()")
+}
+
+// wasm32-wasi keeps the existing @_start export.
+func TestWasmWasiEmitsStart(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		main() { print_line("hi"); }
+	`, "wasm32-wasi")
+	assertContains(t, ir, "define void @_start()")
+	assertNotContains(t, ir, "define void @_initialize()")
+}
+
 func TestExternMultipleParams(t *testing.T) {
 	ir := generateIR(t, `
 		add_ext(int a, int b) `+"`"+`extern("test_add");

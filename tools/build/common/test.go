@@ -9,7 +9,8 @@ import (
 
 // RunTest builds the compiler and runs test suites.
 // Modes: "go" (Go unit tests), "promise" (Promise tests), "all" (default).
-// Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi), -clean (clear caches first).
+// Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi),
+// -wasm-web (include wasm32-web via Node), -clean (clear caches first).
 // Default cache is local (.promise-home/); -local is accepted for clarity.
 func RunTest(root string, args []string) error {
 	start := time.Now()
@@ -18,16 +19,17 @@ func RunTest(root string, args []string) error {
 	suite := "all"
 	shared := slices.Contains(args, "-shared")
 	wasm := slices.Contains(args, "-wasm")
+	wasmWeb := slices.Contains(args, "-wasm-web")
 	clean := slices.Contains(args, "-clean")
 
 	for _, arg := range args {
 		switch arg {
 		case "go", "promise", "all":
 			suite = arg
-		case "-local", "-shared", "-wasm", "-clean":
+		case "-local", "-shared", "-wasm", "-wasm-web", "-clean":
 			// already handled
 		default:
-			return fmt.Errorf("usage: bin/test [go|promise|all] [-shared] [-wasm] [-clean]")
+			return fmt.Errorf("usage: bin/test [go|promise|all] [-shared] [-wasm] [-wasm-web] [-clean]")
 		}
 	}
 
@@ -79,6 +81,17 @@ func RunTest(root string, args []string) error {
 			_, err = RunPromiseTests(root, "wasm32-wasi")
 			if err != nil {
 				return fmt.Errorf("promise tests (wasm32-wasi): %w", err)
+			}
+		}
+
+		if wasmWeb {
+			if Which("node") == "" {
+				return fmt.Errorf("node not found — install Node.js 20+ (see bin/prereqs)")
+			}
+			fmt.Println("\nRunning promise tests (wasm32-web)...")
+			_, err = RunPromiseTests(root, "wasm32-web")
+			if err != nil {
+				return fmt.Errorf("promise tests (wasm32-web): %w", err)
 			}
 		}
 	}

@@ -15,7 +15,7 @@ func TestRunVerify_UnknownFlagReturnsUsageError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown flag, got nil")
 	}
-	const want = "usage: bin/verify [--shared] [--wasm] [--clean] [--push]"
+	const want = "usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push]"
 	if err.Error() != want {
 		t.Errorf("got %q, want %q", err.Error(), want)
 	}
@@ -36,7 +36,7 @@ func TestRunVerify_PushFlagIsValid(t *testing.T) {
 // TestRunVerify_AllKnownFlagsAreValid checks that every documented flag
 // individually passes arg validation.
 func TestRunVerify_AllKnownFlagsAreValid(t *testing.T) {
-	for _, flag := range []string{"--local", "--shared", "--wasm", "--clean", "--push"} {
+	for _, flag := range []string{"--local", "--shared", "--wasm", "--wasm-web", "--clean", "--push"} {
 		// Always pair with --shared to avoid SetupLocalCache env-var side effects.
 		args := []string{"--shared", flag}
 		if flag == "--shared" {

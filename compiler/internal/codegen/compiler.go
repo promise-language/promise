@@ -364,6 +364,7 @@ type Compiler struct {
 	// Target triple and platform flags
 	target           string     // LLVM target triple
 	isWasm           bool       // true if targeting wasm32
+	isWasmWeb        bool       // true if targeting wasm32-web (browser/Node host, no WASI)
 	isWindows        bool       // true if targeting windows-msvc
 	debugFree        bool       // poison-fill freed memory for UAF detection (debug builds)
 	needsNetpoll     bool       // true if net module imported — netpoll_init needed at startup (T0071)
@@ -612,6 +613,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		rootInfo:  info,
 		target:    target,
 		isWasm:    strings.Contains(target, "wasm"),
+		isWasmWeb: strings.Contains(target, "wasm") && strings.Contains(target, "web"),
 		isWindows: strings.Contains(target, "windows"),
 		funcs:     make(map[string]*ir.Func),
 
@@ -1501,16 +1503,22 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		doneBlock.NewRet(retVal)
 	}
 
-	// WASM: emit @_start if not already present (test-only files have no user main)
+	// WASM: emit the entry point if not already present (test-only files have
+	// no user main). On wasm32-wasi this is @_start; on wasm32-web it is
+	// @_initialize (called from JS / Node harness — there is no WASI runtime).
 	if c.isWasm {
-		hasStart := false
+		entryName := "_start"
+		if c.isWasmWeb {
+			entryName = "_initialize"
+		}
+		hasEntry := false
 		for _, f := range c.module.Funcs {
-			if f.Name() == "_start" {
-				hasStart = true
+			if f.Name() == entryName {
+				hasEntry = true
 				break
 			}
 		}
-		if !hasStart {
+		if !hasEntry {
 			c.emitWasmStart(mainFn)
 		}
 	}

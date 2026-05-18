@@ -32,9 +32,11 @@ bin/build --release        # release build with embedded LLVM tools
 bin/test                   # build + run all tests (go + promise)
 bin/test go                # Go unit tests only
 bin/test promise           # Promise tests only
-bin/test --wasm            # include wasm32-wasi target
+bin/test --wasm            # include wasm32-wasi target (wasmtime)
+bin/test --wasm-web        # include wasm32-web target (Node.js harness)
 bin/test --clean           # clear caches first
 bin/verify --wasm          # format + vet + all tests (pre-commit check)
+bin/verify --wasm-web      # same + wasm32-web tests via Node
 bin/verify --shared --wasm # same but using shared ~/.promise cache
 bin/format                 # format Go + Promise code
 bin/vet                    # go vet (excluding generated parser)

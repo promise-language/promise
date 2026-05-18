@@ -76,7 +76,14 @@ test_select_send_retry_picks_recv() `test(exclude: "wasm32") {
   go {
     sleep(Duration.from_millis(5));
     <-send_ch;
-    send_ch.send(99); // re-fill — select send will fail re-check
+    select {
+      send_ch.send(99): {
+        }
+        // re-fill if room — select send will fail re-check
+      default: {
+        }
+        // select already sent 42 — skip re-fill
+    }
     recv_ch.send(7); // make recv case ready
   };
 

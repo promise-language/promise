@@ -17,7 +17,8 @@ interleaved ok""", exclude: "wasm32") {
   if result := r {
     assert(result == "hello from goroutine", "goroutine file IO");
   }
-  io.File.remove("/tmp/pr_syscall_t1")?!;
+  io.File.remove("/tmp/pr_syscall_t1")? e {
+  };
   print_line("single ok");
 
   // Test 2: Multiple goroutines doing file IO concurrently
@@ -26,28 +27,32 @@ interleaved ok""", exclude: "wasm32") {
     io.File.write_content("/tmp/pr_syscall_t2_0", "data_0")?!;
     string d = io.File.read_content("/tmp/pr_syscall_t2_0")?!;
     assert(d == "data_0", "concurrent 0");
-    io.File.remove("/tmp/pr_syscall_t2_0")?!;
+    io.File.remove("/tmp/pr_syscall_t2_0")? e {
+    };
     done.send(0);
   };
   go {
     io.File.write_content("/tmp/pr_syscall_t2_1", "data_1")?!;
     string d = io.File.read_content("/tmp/pr_syscall_t2_1")?!;
     assert(d == "data_1", "concurrent 1");
-    io.File.remove("/tmp/pr_syscall_t2_1")?!;
+    io.File.remove("/tmp/pr_syscall_t2_1")? e {
+    };
     done.send(1);
   };
   go {
     io.File.write_content("/tmp/pr_syscall_t2_2", "data_2")?!;
     string d = io.File.read_content("/tmp/pr_syscall_t2_2")?!;
     assert(d == "data_2", "concurrent 2");
-    io.File.remove("/tmp/pr_syscall_t2_2")?!;
+    io.File.remove("/tmp/pr_syscall_t2_2")? e {
+    };
     done.send(2);
   };
   go {
     io.File.write_content("/tmp/pr_syscall_t2_3", "data_3")?!;
     string d = io.File.read_content("/tmp/pr_syscall_t2_3")?!;
     assert(d == "data_3", "concurrent 3");
-    io.File.remove("/tmp/pr_syscall_t2_3")?!;
+    io.File.remove("/tmp/pr_syscall_t2_3")? e {
+    };
     done.send(3);
   };
   for _ in 0..4 {
@@ -67,6 +72,7 @@ interleaved ok""", exclude: "wasm32") {
   }
   string data = io.File.read_content("/tmp/pr_syscall_t3")?!;
   assert(data == "ping", "read after channel sync");
-  io.File.remove("/tmp/pr_syscall_t3")?!;
+  io.File.remove("/tmp/pr_syscall_t3")? e {
+  };
   print_line("interleaved ok");
 }

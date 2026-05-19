@@ -238,3 +238,193 @@ gunzip_truncated_test() `test {
   u8[] data = _bytes(raw);
   assert(_try_gunzip(data), "truncated stream raises");
 }
+
+gunzip_unsupported_cm_test() `test {
+  // CM=9 instead of CM=8 — unsupported compression method.
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x09);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  raw.push(0xCB);
+  raw.push(0x48);
+  raw.push(0xCD);
+  raw.push(0xC9);
+  raw.push(0xC9);
+  raw.push(0x07);
+  raw.push(0x00);
+  raw.push(0x86);
+  raw.push(0xA6);
+  raw.push(0x10);
+  raw.push(0x36);
+  raw.push(0x05);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  assert(_try_gunzip(data), "unsupported CM raises");
+}
+
+gunzip_fextra_test() `test {
+  // gzip("hello") with FEXTRA (FLG=0x04): 2-byte XLEN=2 + 2 extra bytes before body.
+  // Python: import struct, zlib, io, gzip; buf=io.BytesIO(); g=gzip.GzipFile(fileobj=buf,mode='wb',mtime=0); g.write(b'hello'); g.close()
+  // Then patch byte 3 to 0x04 and insert [02 00 AA BB] at offset 10.
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x04);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  // FEXTRA: XLEN=2 + 2 bytes data
+  raw.push(0x02);
+  raw.push(0x00);
+  raw.push(0xAA);
+  raw.push(0xBB);
+  // DEFLATE body for "hello"
+  raw.push(0xCB);
+  raw.push(0x48);
+  raw.push(0xCD);
+  raw.push(0xC9);
+  raw.push(0xC9);
+  raw.push(0x07);
+  raw.push(0x00);
+  // CRC32("hello")=0x3610A686, ISIZE=5
+  raw.push(0x86);
+  raw.push(0xA6);
+  raw.push(0x10);
+  raw.push(0x36);
+  raw.push(0x05);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = gunzip(data)?!;
+  string s = "hello";
+  u8[] want = s.bytes();
+  _assert_eq(result, want, "gunzip with FEXTRA");
+}
+
+gunzip_fcomment_test() `test {
+  // gzip("hello") with FCOMMENT (FLG=0x10): NUL-terminated "ok\0" before body.
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x10);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  // FCOMMENT: "ok\0"
+  raw.push(0x6F);
+  raw.push(0x6B);
+  raw.push(0x00);
+  // DEFLATE body for "hello"
+  raw.push(0xCB);
+  raw.push(0x48);
+  raw.push(0xCD);
+  raw.push(0xC9);
+  raw.push(0xC9);
+  raw.push(0x07);
+  raw.push(0x00);
+  // CRC32("hello")=0x3610A686, ISIZE=5
+  raw.push(0x86);
+  raw.push(0xA6);
+  raw.push(0x10);
+  raw.push(0x36);
+  raw.push(0x05);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = gunzip(data)?!;
+  string s = "hello";
+  u8[] want = s.bytes();
+  _assert_eq(result, want, "gunzip with FCOMMENT");
+}
+
+gunzip_fhcrc_test() `test {
+  // gzip("hello") with FHCRC (FLG=0x02): 2 fake header-CRC bytes (not verified).
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x02);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  // FHCRC: 2 bytes (not verified by implementation)
+  raw.push(0x00);
+  raw.push(0x00);
+  // DEFLATE body for "hello"
+  raw.push(0xCB);
+  raw.push(0x48);
+  raw.push(0xCD);
+  raw.push(0xC9);
+  raw.push(0xC9);
+  raw.push(0x07);
+  raw.push(0x00);
+  // CRC32("hello")=0x3610A686, ISIZE=5
+  raw.push(0x86);
+  raw.push(0xA6);
+  raw.push(0x10);
+  raw.push(0x36);
+  raw.push(0x05);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = gunzip(data)?!;
+  string s = "hello";
+  u8[] want = s.bytes();
+  _assert_eq(result, want, "gunzip with FHCRC");
+}
+
+gunzip_isize_mismatch_test() `test {
+  // Same as gunzip_hello_test but ISIZE patched to 6 (actual is 5).
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  raw.push(0xCB);
+  raw.push(0x48);
+  raw.push(0xCD);
+  raw.push(0xC9);
+  raw.push(0xC9);
+  raw.push(0x07);
+  raw.push(0x00);
+  // CRC32 correct, but ISIZE=6 instead of 5
+  raw.push(0x86);
+  raw.push(0xA6);
+  raw.push(0x10);
+  raw.push(0x36);
+  raw.push(0x06);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  assert(_try_gunzip(data), "ISIZE mismatch raises");
+}

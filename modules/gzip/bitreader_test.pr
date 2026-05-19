@@ -84,3 +84,27 @@ bitreader_aligned_u16_test() `test {
   u32 v = br.read_aligned_u16_le()?!;
   assert(v == 0xABCDu32, "read_aligned_u16_le == 0xABCD");
 }
+
+bitreader_read_bool_test() `test {
+  // 0b00000101 = 0x05: bits LSB-first are 1,0,1,0,0,0,0,0
+  int[] raw = int[]();
+  raw.push(0x05);
+  _BitReader br = _make_reader(raw);
+  assert(br.read_bool()?! == true, "bit 0 is true");
+  assert(br.read_bool()?! == false, "bit 1 is false");
+  assert(br.read_bool()?! == true, "bit 2 is true");
+  assert(br.read_bool()?! == false, "bit 3 is false");
+}
+
+bitreader_bytes_remaining_test() `test {
+  int[] raw = int[]();
+  raw.push(0xAA);
+  raw.push(0xBB);
+  raw.push(0xCC);
+  _BitReader br = _make_reader(raw);
+  assert(br.bytes_remaining == 3, "initially 3 bytes remain");
+  u32 _v = br.read_bits(8)?!;
+  assert(br.bytes_remaining == 2, "after one byte, 2 remain");
+  u32 _v2 = br.read_bits(8)?!;
+  assert(br.bytes_remaining == 1, "after two bytes, 1 remains");
+}

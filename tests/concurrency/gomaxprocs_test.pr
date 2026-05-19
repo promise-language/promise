@@ -3,7 +3,7 @@
 // batch test functions (no M threads).
 // Increase parallelism after decrease: set_max_procs(1) then set_max_procs(initial).
 // Verifies that Ms on re-enabled Ps can pick up work.
-test_increase_after_decrease() `test(exclude: "wasm32") {
+test_increase_after_decrease() `test(exclude: "wasm32", timeout: "30s") {
   initial := set_max_procs(0);
   set_max_procs(1);
 
@@ -35,7 +35,7 @@ test_increase_after_decrease() `test(exclude: "wasm32") {
 }
 
 // Multiple consecutive set_max_procs calls cycling up and down.
-test_multiple_changes() `test(exclude: "wasm32") {
+test_multiple_changes() `test(exclude: "wasm32", timeout: "30s") {
   initial := set_max_procs(0);
 
   ch := channel[int](capacity: 20);
@@ -76,6 +76,37 @@ test_multiple_changes() `test(exclude: "wasm32") {
     }
   }
   assert(total == 20, "all 20 goroutines should complete after cycling procs");
+}
+
+// Large n is clamped to max_p (number of CPUs). After clamping,
+// the value should not exceed the initial CPU count.
+test_clamp_high_value() `test(exclude: "wasm32") {
+  initial := set_max_procs(0);
+
+  // Pass a very large value — must be clamped to max_p
+  old := set_max_procs(999999);
+  assert(old == initial, "old should equal initial before clamping");
+
+  // Query: result must be <= initial (clamped to max_p)
+  cur := set_max_procs(0);
+  assert(cur == initial, "clamped value should equal max_p (== initial CPU count)");
+
+  set_max_procs(initial);
+}
+
+// Negative n behaves as query (same as n=0): returns current, no change.
+test_negative_n_query() `test(exclude: "wasm32") {
+  initial := set_max_procs(0);
+  set_max_procs(1);
+
+  // Negative n must not change num_p
+  before_query := set_max_procs(-1);
+  assert(before_query == 1, "negative n returns current (1)");
+
+  after_query := set_max_procs(0);
+  assert(after_query == 1, "num_p unchanged after negative n call");
+
+  set_max_procs(initial);
 }
 
 // NOTE: Panic recovery + set_max_procs is tested in gomaxprocs_panic.pr

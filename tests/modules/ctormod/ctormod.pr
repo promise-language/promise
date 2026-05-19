@@ -1,0 +1,18 @@
+// T0322: Module-defined types with constructors that take plain (non-`~`)
+// heap-typed parameters. Exercises defineModuleTypeMethods's drop-binding
+// registration for transferred owned params.
+type Holder `public {
+  int[] data;
+
+  new(~this, int[] codes) `public {
+    this.data = codes;
+  }
+}
+
+type Sized `public {
+  int n;
+
+  new(~this, int[] codes) `public {
+    this.n = codes.len;
+  }
+}

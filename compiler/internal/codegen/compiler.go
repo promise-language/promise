@@ -5755,6 +5755,28 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 					if p.IsVariadic() {
 						c.maybeRegisterDrop(p.Name(), alloca, p.Type())
 					}
+
+					// T0322: Register drop bindings for plain heap params on `new`
+					// constructor methods. genConstructorCallMono unconditionally
+					// clears the caller's drop flag for every arg except the
+					// strdup-borrow exception (string param on a type with drop /
+					// synth-drop), so the callee must drop them at scope exit if
+					// they aren't moved into a field. Restrict to Named-type
+					// receivers since genConstructorCallMono is the only caller
+					// that performs the unconditional clear; enum methods named
+					// `new` would not see this transfer.
+					if md.Name == "new" && p.Ref() != types.RefMut && !p.IsVariadic() {
+						var recvNamed *types.Named
+						if recv := m.Sig().Recv(); recv != nil {
+							recvNamed = extractNamed(recv.Type())
+						}
+						if recvNamed != nil {
+							skipDrop := extractNamed(p.Type()) == types.TypString && (recvNamed.HasDrop() || recvNamed.NeedsSynthDrop())
+							if !skipDrop {
+								c.maybeRegisterDrop(p.Name(), alloca, p.Type())
+							}
+						}
+					}
 				}
 			}
 
@@ -6316,6 +6338,32 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 					paramType = types.Substitute(paramType, c.typeSubst)
 				}
 				c.maybeRegisterDrop(p.Name(), alloca, paramType)
+			}
+
+			// T0322: Register drop bindings for plain heap params on `new`
+			// constructor methods. genConstructorCallMono unconditionally clears
+			// the caller's drop flag for every arg except the strdup-borrow
+			// exception (string param on a type with drop/synth-drop), so the
+			// callee must drop them at scope exit if they aren't moved into a
+			// field. Restrict to Named-type receivers since
+			// genConstructorCallMono is the only caller that performs the
+			// unconditional clear; enum methods named `new` would not see this
+			// transfer.
+			if md.Name == "new" && p.Ref() != types.RefMut && !p.IsVariadic() {
+				var recvNamed *types.Named
+				if recv := m.Sig().Recv(); recv != nil {
+					recvNamed = extractNamed(recv.Type())
+				}
+				if recvNamed != nil {
+					skipDrop := extractNamed(p.Type()) == types.TypString && (recvNamed.HasDrop() || recvNamed.NeedsSynthDrop())
+					if !skipDrop {
+						paramType := p.Type()
+						if c.typeSubst != nil {
+							paramType = types.Substitute(paramType, c.typeSubst)
+						}
+						c.maybeRegisterDrop(p.Name(), alloca, paramType)
+					}
+				}
 			}
 		}
 		paramIdx++

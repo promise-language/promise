@@ -1,0 +1,251 @@
+// T0322: Constructors with plain (non-`~`) heap-typed params must register
+// drop bindings on the param so they're freed at scope exit if not moved
+// into a field. The caller (genConstructorCallMono) clears the drop flag
+// for every arg except the strdup-borrow exception (string param on a
+// type with drop / synth-drop), so the callee must own and drop them.
+// --- Case 1: plain `int[]` param stored into a field. The field-store
+// clears the param's drop flag, so the scope-exit drop is skipped. The
+// type's synth-drop later frees the int[] when the instance dies.
+// Expected: no leak, no double-free.
+type _StoreIntVec {
+  int[] data;
+
+  new(~this, int[] codes) {
+    this.data = codes;
+  }
+}
+
+test_plain_intvec_param_stored() `test {
+  int[] cs = int[]();
+  cs.push(1);
+  cs.push(2);
+  cs.push(3);
+  _StoreIntVec t = _StoreIntVec(codes: cs);
+  assert(t.data.len == 3, "field length matches input");
+  assert(t.data[0] == 1, "first element");
+  assert(t.data[2] == 3, "third element");
+}
+
+// --- Case 2: plain `int[]` param NOT stored (only its length is read).
+// The drop flag stays set, so the scope-exit drop fires and frees the
+// vector. Expected: no leak.
+type _ReadIntVecLen {
+  int len;
+
+  new(~this, int[] codes) {
+    this.len = codes.len;
+  }
+}
+
+test_plain_intvec_param_not_stored() `test {
+  int[] cs = int[]();
+  cs.push(10);
+  cs.push(20);
+  cs.push(30);
+  cs.push(40);
+  _ReadIntVecLen t = _ReadIntVecLen(codes: cs);
+  assert(t.len == 4, "captured length only");
+}
+
+// --- Case 3: plain `string` param on type WITH drop. This is the
+// strdup-borrow exception: the caller keeps ownership; the constructor
+// body strdups when storing into the field. The callee must NOT register
+// a drop binding (it would double-free). Regression check.
+type _StringWithDrop {
+  string s;
+
+  drop(~this) {
+  }
+
+  new(~this, string name) {
+    this.s = name;
+  }
+}
+
+test_string_param_strdup_borrow() `test {
+  string n = "hello".to_string();
+  _StringWithDrop t = _StringWithDrop(name: n);
+  assert(t.s == "hello", "field strdup'd from caller");
+}
+
+// --- Case 4: `~int[]` param (move). Existing T0087 path. Regression check.
+type _MoveIntVec {
+  int[] data;
+
+  new(~this, ~int[] codes) {
+    this.data = codes;
+  }
+}
+
+test_move_intvec_param() `test {
+  int[] cs = int[]();
+  cs.push(7);
+  cs.push(8);
+  _MoveIntVec t = _MoveIntVec(codes: cs);
+  assert(t.data.len == 2, "field length");
+  assert(t.data[0] == 7, "first");
+}
+
+// --- Case 5: failable constructor. Param is owned by the callee. On the
+// error path, the param must be dropped before raise. Expected: no leak
+// on either success or error path.
+type _FailableCtor {
+  int[] data;
+
+  new!(~this, int[] codes) {
+    if codes.len == 0 {
+      raise error(message: "empty");
+    }
+    this.data = codes;
+  }
+}
+
+try_failable_ctor_success() bool {
+  int[] cs = int[]();
+  cs.push(1);
+  _FailableCtor t = _FailableCtor(codes: cs)? e {
+    return false;
+  };
+  return t.data.len == 1;
+}
+
+try_failable_ctor_error() bool {
+  int[] cs = int[]();
+  _FailableCtor t = _FailableCtor(codes: cs)? e {
+    return e.message == "empty";
+  };
+  return false;
+}
+
+test_failable_ctor_success() `test {
+  assert(try_failable_ctor_success(), "succeeded with non-empty codes");
+}
+
+test_failable_ctor_error_path() `test {
+  assert(try_failable_ctor_error(), "raise on empty codes was caught");
+}
+
+// --- Case 6: two heap params, one stored and one not. The stored one
+// has its drop flag cleared at the field-store; the unstored one is
+// dropped at scope exit. Both must be freed exactly once.
+type _MixedParams {
+  int[] data;
+  int note_len;
+
+  new(~this, int[] codes, string note) {
+    this.data = codes;
+    this.note_len = note.len;
+  }
+}
+
+test_mixed_heap_params() `test {
+  int[] cs = int[]();
+  cs.push(100);
+  cs.push(200);
+  string note = "abc".to_string();
+  _MixedParams t = _MixedParams(codes: cs, note: note);
+  assert(t.data.len == 2, "vector stored");
+  assert(t.note_len == 3, "string length captured");
+}
+
+// --- Case 7: generic user type with a plain heap param. Exercises the
+// mono.go defineMethodFunc path where typeSubst is active.
+type _GenericBox[T] {
+  T item;
+  int[] meta;
+
+  new(~this, T value, int[] meta) {
+    this.item = value;
+    this.meta = meta;
+  }
+}
+
+test_generic_type_plain_heap_param() `test {
+  int[] m = int[]();
+  m.push(1);
+  m.push(2);
+  m.push(3);
+  _GenericBox[int] b = _GenericBox[int](value: 42, meta: m);
+  assert(b.item == 42, "generic field");
+  assert(b.meta.len == 3, "meta vector stored");
+}
+
+// --- Case 8: plain `string` param on a type with NO drop and NO synth-drop
+// (only primitive fields). The strdup-borrow exception does NOT apply, so
+// the callee owns the string and must drop it at scope exit. The constructor
+// only reads `.len` — the string is not stored.
+type _StringNoDropNoSynth {
+  int n;
+
+  new(~this, string label) {
+    this.n = label.len;
+  }
+}
+
+test_string_param_no_drop_no_synth() `test {
+  string s = "hello".to_string();
+  _StringNoDropNoSynth x = _StringNoDropNoSynth(label: s);
+  assert(x.n == 5, "captured length only");
+}
+
+// --- Case 9: `channel[T]` param. Exercises the Channel.drop branch of
+// maybeRegisterDrop. Param is read but not stored.
+type _ChannelHolder {
+  int marker;
+
+  new(~this, channel[int] ch) {
+    this.marker = 42;
+  }
+}
+
+test_channel_param_not_stored() `test {
+  channel[int] c = channel[int](capacity: 4);
+  _ChannelHolder h = _ChannelHolder(ch: c);
+  assert(h.marker == 42, "constructed");
+}
+
+// --- Case 10: `map[K,V]` param. Exercises the heap-user-type drop branch
+// (Map has explicit `drop()`). Param is read but not stored.
+type _MapHolder {
+  int n_entries;
+
+  new(~this, map[string, int] m) {
+    this.n_entries = m.len;
+  }
+}
+
+test_map_param_not_stored() `test {
+  map[string, int] m = map[string, int]();
+  m["a"] = 1;
+  m["b"] = 2;
+  m["c"] = 3;
+  _MapHolder h = _MapHolder(m: m);
+  assert(h.n_entries == 3, "captured len only");
+}
+
+// --- Case 11: heap user type (with synth-drop) passed as a constructor
+// param. The inner instance is heap-allocated and drops via synth-drop;
+// the outer's constructor must drop the param if not stored.
+type _Inner {
+  int[] data;
+
+  new(~this) {
+    this.data = int[]();
+    this.data.push(1);
+    this.data.push(2);
+  }
+}
+
+type _Outer {
+  int marker;
+
+  new(~this, _Inner inner) {
+    this.marker = inner.data.len;
+  }
+}
+
+test_heap_user_type_param() `test {
+  _Inner inner = _Inner();
+  _Outer o = _Outer(inner: inner);
+  assert(o.marker == 2, "captured length from heap user type");
+}

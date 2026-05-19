@@ -36,7 +36,22 @@ func CleanHome(root string, shared bool) (string, error) {
 //
 // With opts.Shared=true, targets ~/.promise instead. Touching the global
 // home means the next release build re-extracts the embedded LLVM tools.
+//
+// Clean acquires the verify lock before removing anything. Callers that
+// already hold the lock (e.g. RunVerify with --clean) must use cleanLocked
+// instead to avoid a same-process flock deadlock.
 func Clean(root string, opts CleanOptions) error {
+	unlock, err := acquireVerifyLock(root)
+	if err != nil {
+		return fmt.Errorf("acquire verify lock: %w", err)
+	}
+	defer unlock()
+	return cleanLocked(root, opts)
+}
+
+// cleanLocked performs the clean without acquiring the verify lock.
+// Must only be called by callers that already hold it.
+func cleanLocked(root string, opts CleanOptions) error {
 	home, err := CleanHome(root, opts.Shared)
 	if err != nil {
 		return fmt.Errorf("resolve promise home: %w", err)

@@ -48,7 +48,7 @@ func RunVerify(root string, args []string) error {
 	// the local home is recreated empty, and before any build/test work so
 	// the run starts from a known state.
 	if clean {
-		if err := Clean(root, CleanOptions{Shared: shared}); err != nil {
+		if err := cleanLocked(root, CleanOptions{Shared: shared}); err != nil {
 			return fmt.Errorf("clean: %w", err)
 		}
 	}

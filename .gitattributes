@@ -1,0 +1,2 @@
+tests/embed/*.txt text eol=lf
+tests/embed/*.bin binary

@@ -48,10 +48,8 @@ func RunBuild(root string, args []string) error {
 		return err
 	}
 
-	// 1. Git hooks
-	RunSetup(root)
-
-	// 2. Quick up-to-date check (skip for --release/--generate)
+	// 1. Quick up-to-date check (skip for --release/--generate)
+	// Git hooks are configured by ./make as part of bootstrap, not here.
 	if !release && !generate {
 		if version, err := BuildVersion(root, false); err == nil {
 			if isBinaryUpToDate(root, binDir, version) {
@@ -65,19 +63,19 @@ func RunBuild(root string, args []string) error {
 		}
 	}
 
-	// 3. Generate parser (skip if up to date, unless --generate is passed)
+	// 2. Generate parser (skip if up to date, unless --generate is passed)
 	fmt.Println("Checking parser...")
 	if err := GenerateParser(root, generate); err != nil {
 		return fmt.Errorf("generate parser: %w", err)
 	}
 
-	// 4. Embed resources
+	// 3. Embed resources
 	fmt.Println("Embedding resources...")
 	if err := EmbedResources(root); err != nil {
 		return fmt.Errorf("embed resources: %w", err)
 	}
 
-	// 5. musl CRT (Linux only)
+	// 4. musl CRT (Linux only)
 	if IsLinux() {
 		fmt.Println("Embedding musl CRT...")
 		if err := EmbedMuslCRT(root); err != nil {
@@ -85,7 +83,7 @@ func RunBuild(root string, args []string) error {
 		}
 	}
 
-	// 6. Verify LLVM
+	// 5. Verify LLVM
 	fmt.Println("Detecting LLVM...")
 	llvm, err := FindLLVM()
 	if err != nil {
@@ -93,7 +91,7 @@ func RunBuild(root string, args []string) error {
 	}
 	fmt.Printf("  LLVM %d: opt=%s lld=%s\n", llvm.Version, llvm.OptPath, llvm.LLDPath)
 
-	// 7. Release: bundle LLVM tools
+	// 6. Release: bundle LLVM tools
 	buildTags := ""
 	if release {
 		fmt.Println("Bundling LLVM tools for release...")
@@ -103,14 +101,14 @@ func RunBuild(root string, args []string) error {
 		buildTags = "-tags=embed_llvm"
 	}
 
-	// 8. Compute version
+	// 7. Compute version
 	version, err := BuildVersion(root, release)
 	if err != nil {
 		return fmt.Errorf("version: %w", err)
 	}
 	ldflags := "-X main.version=" + version
 
-	// 9. Build
+	// 8. Build
 	binaryPath := filepath.Join(binDir, BinaryName())
 	fmt.Printf("Building %s (version: %s)...\n", BinaryName(), version)
 
@@ -124,7 +122,7 @@ func RunBuild(root string, args []string) error {
 		return fmt.Errorf("go build: %w", err)
 	}
 
-	// 10. Write hash sidecar
+	// 9. Write hash sidecar
 	hash, err := binarySHA256(binaryPath)
 	if err != nil {
 		return fmt.Errorf("hash binary: %w", err)
@@ -134,11 +132,11 @@ func RunBuild(root string, args []string) error {
 		return fmt.Errorf("write hash: %w", err)
 	}
 
-	// 11. Write buildinfo for up-to-date check
+	// 10. Write buildinfo for up-to-date check
 	infoFile := filepath.Join(binDir, ".promise.buildinfo")
 	os.WriteFile(infoFile, []byte(version+"\n"), 0o644)
 
-	// 12. Invalidate gate values — compiler changed, prior verify results are stale
+	// 11. Invalidate gate values — compiler changed, prior verify results are stale
 	InvalidateGateValues(root)
 
 	elapsed := time.Since(start).Round(time.Millisecond)

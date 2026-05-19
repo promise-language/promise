@@ -56,6 +56,13 @@ func main() {
 		return
 	}
 
+	// Configure git hooks before any short-circuit. ./make is the bootstrap
+	// entry point — running it once on a fresh clone enables hooks. Idempotent
+	// and fast (a single `git config` call), so it's safe to do unconditionally.
+	if err := common.RunSetup(root); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: git hooks setup failed: %v\n", err)
+	}
+
 	// Quick up-to-date check (skip with -force)
 	args := common.NormalizeArgs(os.Args[1:])
 	force := slices.Contains(args, "-force")

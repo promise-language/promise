@@ -75,16 +75,18 @@ func runGateTest(root string, args []string) error {
 
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
-	// Run host tests — tee to stderr so stdout is clean for JSON.
+	// Run host tests — tee to stderr so stdout is clean for JSON. Filter out
+	// passing-test lines from the console; the captured output retains them
+	// so the JSON envelope still records every test (T0323).
 	fmt.Fprintf(os.Stderr, "Running promise tests (%s)...\n", hostTarget)
-	hostOutput, hostErr := RunPromiseTestsCapture(root, "")
+	hostOutput, hostErr := RunPromiseTestsCaptureFiltered(root, "")
 
 	// Run wasm tests if requested.
 	var wasmOutput string
 	var wasmErr error
 	if wasm {
 		fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-wasi)...\n")
-		wasmOutput, wasmErr = RunPromiseTestsCapture(root, "wasm32-wasi")
+		wasmOutput, wasmErr = RunPromiseTestsCaptureFiltered(root, "wasm32-wasi")
 	}
 
 	// Collect gate values.
@@ -170,9 +172,11 @@ func runGateWasmTests(root string, args []string) error {
 
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
-	// Run wasm tests only — tee to stderr so stdout is clean for JSON.
+	// Run wasm tests only — tee to stderr so stdout is clean for JSON. Filter
+	// out passing-test lines from the console; captured output retains them
+	// for the JSON envelope (T0323).
 	fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-wasi)...\n")
-	wasmOutput, wasmErr := RunPromiseTestsCapture(root, "wasm32-wasi")
+	wasmOutput, wasmErr := RunPromiseTestsCaptureFiltered(root, "wasm32-wasi")
 
 	// Collect gate values.
 	gv := &GateValues{

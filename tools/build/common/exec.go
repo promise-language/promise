@@ -76,6 +76,78 @@ func RunTeeStderr(dir, name string, args ...string) (string, error) {
 	return strings.TrimSpace(buf.String()), nil
 }
 
+// lineFilterWriter buffers stdout into lines and forwards each complete line
+// to fwd only when keep(line) returns true. Every byte written is also copied
+// verbatim into capture, regardless of filter result.
+type lineFilterWriter struct {
+	fwd     io.Writer
+	capture *bytes.Buffer
+	keep    func(string) bool
+	pending []byte
+}
+
+func (w *lineFilterWriter) Write(p []byte) (int, error) {
+	w.capture.Write(p)
+	w.pending = append(w.pending, p...)
+	for {
+		i := bytes.IndexByte(w.pending, '\n')
+		if i < 0 {
+			break
+		}
+		line := w.pending[:i]
+		if w.keep(string(line)) {
+			if _, err := w.fwd.Write(w.pending[:i+1]); err != nil {
+				return len(p), err
+			}
+		}
+		w.pending = w.pending[i+1:]
+	}
+	return len(p), nil
+}
+
+// flush drains any trailing partial line through the filter.
+func (w *lineFilterWriter) flush() error {
+	if len(w.pending) == 0 {
+		return nil
+	}
+	if w.keep(string(w.pending)) {
+		if _, err := w.fwd.Write(w.pending); err != nil {
+			return err
+		}
+	}
+	w.pending = nil
+	return nil
+}
+
+// runTeeFilteredTo runs cmd in dir; captures stdout to the returned string.
+// Each complete line of stdout for which keep(line) returns true is also
+// written to fwd. Lines for which keep returns false are dropped from fwd
+// but still appear in the captured output. Stderr is connected to os.Stderr.
+func runTeeFilteredTo(fwd io.Writer, dir, name string, keep func(string) bool, args ...string) (string, error) {
+	var capture bytes.Buffer
+	w := &lineFilterWriter{fwd: fwd, capture: &capture, keep: keep}
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = w
+	cmd.Stderr = os.Stderr
+	runErr := cmd.Run()
+	flushErr := w.flush()
+	if runErr != nil {
+		return strings.TrimSpace(capture.String()), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), runErr)
+	}
+	if flushErr != nil {
+		return strings.TrimSpace(capture.String()), fmt.Errorf("%s %s: flush: %w", name, strings.Join(args, " "), flushErr)
+	}
+	return strings.TrimSpace(capture.String()), nil
+}
+
+// RunTeeStderrFiltered is like RunTeeStderr but only forwards stdout lines
+// for which keep(line) returns true to os.Stderr. The full stdout is still
+// captured and returned for callers that need to parse it.
+func RunTeeStderrFiltered(dir, name string, keep func(string) bool, args ...string) (string, error) {
+	return runTeeFilteredTo(os.Stderr, dir, name, keep, args...)
+}
+
 // RunSilent executes a command discarding stdout/stderr. Returns error on failure.
 func RunSilent(name string, args ...string) error {
 	cmd := exec.Command(name, args...)

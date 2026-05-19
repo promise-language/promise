@@ -3,6 +3,7 @@ package common
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"time"
 )
@@ -127,4 +128,30 @@ func RunPromiseTestsCapture(root, target string) (string, error) {
 		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...")
 	}
 	return RunTeeStderr(root, promiseBin, args...)
+}
+
+// promisePassLineRe matches the `pass (X.Xs) ...` result lines emitted by the
+// Promise test runner. Both multi-file (`pass (0.004s) e2e/basics.pr (3 tests)`)
+// and single-file (`pass (0.001s) test_add`) forms start the same way; pass
+// entries are always single-line with no continuation.
+var promisePassLineRe = regexp.MustCompile(`^pass\s+\(`)
+
+// IsPromisePassLine reports whether a line is a passing-test result line from
+// the Promise test runner. Used by gate runners to suppress these from the
+// user-facing console while keeping them in the captured JSON output.
+func IsPromisePassLine(line string) bool {
+	return promisePassLineRe.MatchString(line)
+}
+
+// RunPromiseTestsCaptureFiltered is like RunPromiseTestsCapture but suppresses
+// passing-test lines from the stderr stream the user sees. The full stdout is
+// still captured and returned so callers can build complete JSON output.
+func RunPromiseTestsCaptureFiltered(root, target string) (string, error) {
+	promiseBin := filepath.Join(root, "bin", BinaryName())
+	args := []string{"test", "-timeout", "10", "tests/...", "modules/...", "examples/..."}
+	if target != "" {
+		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...")
+	}
+	keep := func(line string) bool { return !IsPromisePassLine(line) }
+	return RunTeeStderrFiltered(root, promiseBin, keep, args...)
 }

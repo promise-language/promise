@@ -1180,7 +1180,9 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					for _, arg := range e.Args {
 						argVals = append(argVals, c.genCallArgExpr(arg.Value))
 					}
-					return c.genIndirectCall(closure, sig, argVals)
+					result := c.genIndirectCall(closure, sig, argVals)
+					c.emitReturnAliasCheck(result, sig, e.Args, argVals) // T0331
+					return result
 				}
 			}
 		}
@@ -1329,8 +1331,10 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		calleeType := c.info.Types[e.Callee]
 		if sig, ok := calleeType.(*types.Signature); ok {
 			closure := c.block.NewLoad(alloca.ElemType, alloca)
+			origArgVals := argVals // T0331: pre-coercion for alias check
 			result := c.genIndirectCall(closure, sig, argVals)
 			c.clearVariadicStaticFlags(variadicPTs)
+			c.emitReturnAliasCheck(result, sig, e.Args, origArgVals) // T0331
 			return result
 		}
 	}
@@ -1544,23 +1548,29 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
+	origArgVals := argVals // T0331: save pre-coercion values for alias check
 
 	// Coerce arguments when crossing type boundaries
 	var sigParams []*types.Param
+	var calleeSig *types.Signature
 	if callee := c.lookupFunc(ident.Name); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
 			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
 			sigParams = sig.Params()
+			calleeSig = sig
 		}
 	}
 	if sigParams == nil {
 		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
 			sigParams = sig.Params()
+			calleeSig = sig
 		}
 	}
 
 	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
-	return c.block.NewCall(fn, argVals...)
+	result := c.block.NewCall(fn, argVals...)
+	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals) // T0331
+	return result
 }
 
 // genInferredGenericCall generates a call to a monomorphic generic function
@@ -1590,23 +1600,29 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
+	origArgVals := argVals // T0331: save pre-coercion values for alias check
 
 	// Coerce arguments when crossing type boundaries.
 	var sigParams []*types.Param
+	var calleeSig *types.Signature
 	if callee := c.lookupFunc(inferred.FuncName); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
 			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
 			sigParams = sig.Params()
+			calleeSig = sig
 		}
 	}
 	if sigParams == nil {
 		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
 			sigParams = sig.Params()
+			calleeSig = sig
 		}
 	}
 
 	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
-	return c.block.NewCall(fn, argVals...)
+	result := c.block.NewCall(fn, argVals...)
+	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals) // T0331
+	return result
 }
 
 // genModuleGenericFuncCall generates a call to a monomorphized generic function
@@ -1639,13 +1655,16 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
+	origArgVals := argVals // T0331: save pre-coercion values for alias check
 
 	// Coerce arguments when crossing type boundaries
 	var sigParams []*types.Param
+	var calleeSig *types.Signature
 	if callee := c.lookupFunc(funcName); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
 			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
 			sigParams = sig.Params()
+			calleeSig = sig
 		}
 	}
 	// Module-qualified callee may not be visible via lookupFunc; fall back to
@@ -1653,11 +1672,14 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 	if sigParams == nil {
 		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
 			sigParams = sig.Params()
+			calleeSig = sig
 		}
 	}
 
 	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
-	return c.block.NewCall(fn, argVals...)
+	result := c.block.NewCall(fn, argVals...)
+	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals) // T0331
+	return result
 }
 
 // genGenericMethodCall generates a call to a monomorphized generic method.

@@ -541,22 +541,19 @@ func (c *Compiler) genReceiverExpr(expr ast.Expr) value.Value {
 // genCallArgExpr generates an expression used as a call argument.
 // If the expression is a failable call registered for auto-propagation,
 // it extracts the success value (propagating the error on failure).
+//
+// T0331: A previous version of this function unconditionally claimed
+// stmtTemps for vector/channel/arc/weak CallExpr args ("the callee takes
+// ownership"). That assumption is wrong for plain (non-`~`) heap params
+// on free functions and non-`new` methods — the callee borrows but doesn't
+// drop, so claiming the temp leaked it. Per-call-site emitters explicitly
+// claim where ownership actually transfers (~ params, variadic, container
+// stores, constructors via genConstructorCallMono). The return-aliases-arg
+// case is handled at runtime by emitReturnAliasCheck.
 func (c *Compiler) genCallArgExpr(expr ast.Expr) value.Value {
 	val := c.genExpr(expr)
 	if c.info.AutoPropagateExprs[expr] {
 		val = c.genAutoPropagateValue(val)
-	}
-	// T0109: When a call expression returning a vector or channel is passed
-	// as an argument to another function, claim the stmtTemp. The callee
-	// takes ownership. Without this, nested calls like f(g()) cause
-	// double-free: g()'s result is tracked as a stmtTemp and freed at
-	// statement end, but also consumed by f().
-	if _, isCall := expr.(*ast.CallExpr); isCall && val != nil {
-		if rt := c.info.Types[expr]; rt != nil {
-			if types.IsVector(rt) || types.IsChannel(rt) || types.IsArc(rt) || types.IsWeak(rt) {
-				c.claimStringTemp(val)
-			}
-		}
 	}
 	return val
 }
@@ -1280,6 +1277,24 @@ func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature
 			c.block.NewCondBr(same, clearBlock, skipBlock)
 			c.block = clearBlock
 			c.block.NewStore(constant.NewInt(irtypes.I1, 0), ht.dropFlag)
+			c.block.NewBr(skipBlock)
+			c.block = skipBlock
+		}
+
+		// T0331: Non-ident args from CallExpr (e.g., f(g())) are tracked as
+		// stmtTemps via expr.go's CallExpr case. If the return aliases such
+		// a temp (e.g., identity-style functions like Random.shuffle which
+		// return their input), clear the stmtTemp's drop flag — otherwise
+		// the caller's stmtTemp cleanup and the variable's drop binding
+		// would both free the same allocation.
+		if stIdx, ok := c.stmtTempMap[argVals[i]]; ok && stIdx >= 0 {
+			st := c.stmtTemps[stIdx]
+			same := c.block.NewICmp(enum.IPredEQ, retPtr, argPtr)
+			clearBlock := c.newBlock("alias.st.clear")
+			skipBlock := c.newBlock("alias.st.skip")
+			c.block.NewCondBr(same, clearBlock, skipBlock)
+			c.block = clearBlock
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), st.dropFlag)
 			c.block.NewBr(skipBlock)
 			c.block = skipBlock
 		}

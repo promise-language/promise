@@ -1,0 +1,276 @@
+// T0331: Temporaries (CallExpr results) passed as plain (non-`~`) args to
+// free functions or non-`new` methods must be dropped at statement end.
+// Previously, T0109 unconditionally claimed the stmtTemp at the call site,
+// which leaked the temp because the callee borrowed but didn't drop.
+//
+// Regression coverage for the related cases (return-aliases-arg, ~ params,
+// constructors, container ops) is included to ensure no double-free.
+makes_bytes() u8[] {
+  u8[] r = u8[]();
+  r.push(1u8);
+  r.push(2u8);
+  return r;
+}
+
+makes_strings() string[] {
+  string[] r = string[]();
+  r.push("a");
+  r.push("b");
+  return r;
+}
+
+assert_vec_len(u8[] a, u8[] b, int expected) {
+  assert(a.len == expected, "a.len");
+  assert(b.len == expected, "b.len");
+}
+
+assert_str_eq(string a, string b) {
+  assert(a == b, "str eq");
+}
+
+// =========================================================================
+// T0331-A: temporary from a method call passed as plain arg
+// =========================================================================
+
+t0331_method_temp() `test {
+  u8[] x = makes_bytes();
+  string s = "AB";
+  assert_vec_len(x, s.bytes(), 2);
+}
+
+// =========================================================================
+// T0331-B: temporaries from free-function calls passed as plain args
+// =========================================================================
+
+t0331_free_function_temps() `test {
+  assert_vec_len(makes_bytes(), makes_bytes(), 2);
+}
+
+// =========================================================================
+// Multiple temps in one call — each must drop independently
+// =========================================================================
+
+three_lens(u8[] a, u8[] b, u8[] c) int {
+  return a.len + b.len + c.len;
+}
+
+t0331_three_temps() `test {
+  int total = three_lens(makes_bytes(), makes_bytes(), makes_bytes());
+  assert(total == 6, "three temps total");
+}
+
+// =========================================================================
+// String temp as plain arg
+// =========================================================================
+
+t0331_string_temp() `test {
+  string s = "hello";
+  assert_str_eq(s.to_upper(), "HELLO");
+}
+
+// =========================================================================
+// Standalone CallExpr-result-discard (statement-only, no assignment)
+// =========================================================================
+
+t0331_discard_call_result() `test {
+  makes_bytes();
+  // If the temp wasn't tracked, this would leak. The call result is
+  // discarded — cleanupStmtTemps must drop it at statement end.
+  assert(true, "discard");
+}
+
+// =========================================================================
+// Regression: return-aliases-arg (identity-style on a temp)
+// shuffle returns its input vector pointer. Without the alias-clear branch
+// in emitReturnAliasCheck, the input stmtTemp would drop AND the result
+// variable's drop binding would drop the same allocation (double-free).
+// =========================================================================
+
+identity_vec[T](T[] v) T[] {
+  return v;
+}
+
+t0331_identity_returns_arg() `test {
+  int[] v = identity_vec[int](make_ints());
+  assert(v.len == 3, "identity len");
+  assert(v[0] == 1, "identity v[0]");
+}
+
+make_ints() int[] {
+  int[] r = int[]();
+  r.push(1);
+  r.push(2);
+  r.push(3);
+  return r;
+}
+
+// =========================================================================
+// Regression: ~ param with CallExpr arg (must not leak, must not double-free)
+// genCallArgsWithMutRef explicitly claims for ~ params, so this is unaffected
+// by the T0109 removal — but verifying anyway.
+// =========================================================================
+
+consume_vec(~int[] v) int {
+  return v.len;
+}
+
+t0331_tilde_param_with_temp() `test {
+  int n = consume_vec(make_ints());
+  assert(n == 3, "tilde param temp");
+}
+
+// =========================================================================
+// Regression: constructor with CallExpr heap arg (T0322 path)
+// genConstructorCallMono unconditionally claims; must not leak or double-free.
+// =========================================================================
+
+type Holder {
+  int[] data;
+}
+
+t0331_constructor_with_temp() `test {
+  Holder h = Holder(data: make_ints());
+  assert(h.data.len == 3, "ctor with temp");
+}
+
+// =========================================================================
+// Regression: Vector.push with CallExpr element
+// push handler claims explicitly — no leak, no double-free.
+// =========================================================================
+
+make_string() string {
+  return "ab" + "cd";
+}
+
+t0331_vector_push_temp() `test {
+  string[] v = string[]();
+  v.push(make_string());
+  assert(v.len == 1, "push temp len");
+  assert(v[0] == "abcd", "push temp value");
+}
+
+// =========================================================================
+// Regression: Channel send with CallExpr arg (must not leak, no double-free)
+// =========================================================================
+
+t0331_channel_send_temp() `test {
+  channel[int[]] ch = channel[int[]](capacity: 1);
+  ch.send(make_ints());
+  if v := <-ch {
+    assert(v.len == 3, "channel temp len");
+  } else {
+    assert(false, "channel recv");
+  }
+}
+
+// =========================================================================
+// Regression: lambda call with CallExpr arg, return aliases input
+// genIndirectCall must run emitReturnAliasCheck (added T0331). Without it,
+// the stmtTemp would drop AND the variable would drop the same allocation.
+// =========================================================================
+
+t0331_lambda_returns_arg() `test {
+  alias_fn := |int[] xs| -> int[] {
+    return xs;
+  };
+  int[] v = alias_fn(make_ints());
+  assert(v.len == 3, "lambda alias len");
+}
+
+// Lambda that does NOT return its arg — temp must drop at statement end.
+t0331_lambda_borrows_arg() `test {
+  count_fn := |int[] xs| -> int {
+    return xs.len;
+  };
+  int n = count_fn(make_ints());
+  assert(n == 3, "lambda borrow len");
+}
+
+// =========================================================================
+// Regression: container internal == with ident arg (T0085 path)
+// Map.get invokes key_eq with the second arg borrowed from container storage.
+// Removing T0109 must not affect this path (args are IdentExpr, not CallExpr).
+// =========================================================================
+
+t0331_map_get_no_corrupt() `test {
+  map[string, int] m = map[string, int]();
+  m["foo"] = 1;
+  m["bar"] = 2;
+  m["baz"] = 3;
+  if v := m["foo"] {
+    assert(v == 1, "map foo");
+  } else {
+    assert(false, "map foo missing");
+  }
+  if v := m["bar"] {
+    assert(v == 2, "map bar");
+  } else {
+    assert(false, "map bar missing");
+  }
+  if v := m["baz"] {
+    assert(v == 3, "map baz");
+  } else {
+    assert(false, "map baz missing");
+  }
+  assert(m.len == 3, "map len");
+}
+
+// =========================================================================
+// String-vector temp as plain arg
+// Exercises the string[] tracking path (Vector elem type = string).
+// =========================================================================
+
+assert_str_vec_len(string[] a, int expected) {
+  assert(a.len == expected, "str vec len");
+}
+
+t0331_string_vector_temp() `test {
+  assert_str_vec_len(makes_strings(), 2);
+}
+
+// =========================================================================
+// Member-field lambda call with CallExpr arg (genCallExpr line 1180 path)
+// Tests `obj.fn(make_temp())` where fn is a stored lambda field. Distinct
+// from the local-variable lambda path covered by t0331_lambda_*.
+// =========================================================================
+
+type Counter {
+  (int[]) -> int counter_fn;
+}
+
+type AliasFn {
+  (int[]) -> int[] alias_fn;
+}
+
+t0331_member_lambda_borrows_arg() `test {
+  Counter c = Counter(counter_fn: |int[] xs| -> xs.len);
+  int n = c.counter_fn(make_ints());
+  assert(n == 3, "member lambda borrow len");
+}
+
+t0331_member_lambda_returns_arg() `test {
+  AliasFn af = AliasFn(alias_fn: |int[] xs| -> int[] {
+    return xs;
+  });
+  int[] v = af.alias_fn(make_ints());
+  assert(v.len == 3, "member lambda alias len");
+}
+
+// =========================================================================
+// Variadic param with CallExpr args (genCallArgsWithMutRef variadic path)
+// genCallArgsWithMutRef explicitly claims for variadic — must not leak
+// or double-free.
+// =========================================================================
+
+sum_lens(...int[] vecs) int {
+  int total = 0;
+  for v in vecs {
+    total = total + v.len;
+  }
+  return total;
+}
+
+t0331_variadic_temps() `test {
+  int n = sum_lens(make_ints(), make_ints(), make_ints());
+  assert(n == 9, "variadic temps total");
+}

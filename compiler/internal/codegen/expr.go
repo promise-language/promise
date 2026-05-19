@@ -805,8 +805,8 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	}
 
 	// Type-system-driven path
-	left := c.genExpr(e.Left)
-	right := c.genExpr(e.Right)
+	left := c.genExprAutoPropagate(e.Left)
+	right := c.genExprAutoPropagate(e.Right)
 
 	leftType := c.info.Types[e.Left]
 	if c.typeSubst != nil {
@@ -997,7 +997,7 @@ func (c *Compiler) genUnaryExpr(e *ast.UnaryExpr) value.Value {
 		return c.genReceiveExpr(e)
 	}
 
-	operand := c.genExpr(e.Operand)
+	operand := c.genExprAutoPropagate(e.Operand)
 	operandType := c.info.Types[e.Operand]
 	named := extractNamed(operandType)
 	if named == nil {
@@ -1032,7 +1032,7 @@ func (c *Compiler) lookupUnaryMethod(named *types.Named, op string) *types.Metho
 // --- Short-circuit boolean operators ---
 
 func (c *Compiler) genShortCircuitAnd(e *ast.BinaryExpr) value.Value {
-	left := c.genExpr(e.Left)
+	left := c.genExprAutoPropagate(e.Left)
 	startBlock := c.block
 
 	rightBlock := c.newBlock("and.rhs")
@@ -1041,7 +1041,7 @@ func (c *Compiler) genShortCircuitAnd(e *ast.BinaryExpr) value.Value {
 	c.block.NewCondBr(left, rightBlock, mergeBlock)
 
 	c.block = rightBlock
-	right := c.genExpr(e.Right)
+	right := c.genExprAutoPropagate(e.Right)
 	rightEnd := c.block
 	c.block.NewBr(mergeBlock)
 
@@ -1054,7 +1054,7 @@ func (c *Compiler) genShortCircuitAnd(e *ast.BinaryExpr) value.Value {
 }
 
 func (c *Compiler) genShortCircuitOr(e *ast.BinaryExpr) value.Value {
-	left := c.genExpr(e.Left)
+	left := c.genExprAutoPropagate(e.Left)
 	startBlock := c.block
 
 	rightBlock := c.newBlock("or.rhs")
@@ -1063,7 +1063,7 @@ func (c *Compiler) genShortCircuitOr(e *ast.BinaryExpr) value.Value {
 	c.block.NewCondBr(left, mergeBlock, rightBlock)
 
 	c.block = rightBlock
-	right := c.genExpr(e.Right)
+	right := c.genExprAutoPropagate(e.Right)
 	rightEnd := c.block
 	c.block.NewBr(mergeBlock)
 
@@ -1080,8 +1080,8 @@ func (c *Compiler) genShortCircuitOr(e *ast.BinaryExpr) value.Value {
 // genRange constructs a Range[T] value type struct via insertvalue chain.
 // Layout: { i8* _vtable, T start, T end, i1 inclusive }
 func (c *Compiler) genRange(e *ast.BinaryExpr) value.Value {
-	start := c.genExpr(e.Left)
-	end := c.genExpr(e.Right)
+	start := c.genExprAutoPropagate(e.Left)
+	end := c.genExprAutoPropagate(e.Right)
 	inclusive := constant.NewInt(irtypes.I1, 0)
 	if e.Op == ast.BinInclusiveRange {
 		inclusive = constant.NewInt(irtypes.I1, 1)
@@ -6203,7 +6203,7 @@ func (c *Compiler) wrapReturnOptional(val value.Value, expr ast.Expr, retType ty
 }
 
 func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
-	optVal := c.genExpr(e.Left)
+	optVal := c.genExprAutoPropagate(e.Left)
 
 	// Extract the present flag (field 0)
 	flag := c.block.NewExtractValue(optVal, 0)
@@ -6228,7 +6228,7 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 
 	// None path: evaluate default
 	c.block = noneBlock
-	defaultVal := c.genExpr(e.Right)
+	defaultVal := c.genExprAutoPropagate(e.Right)
 	noneEnd := c.block
 	c.block.NewBr(mergeBlock)
 

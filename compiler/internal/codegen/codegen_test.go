@@ -3227,6 +3227,111 @@ func TestAutoPropagateGetterReceiver(t *testing.T) {
 	assertContains(t, ir, "auto.ok")
 }
 
+// T0330: Failable call used as binary expression operand must auto-propagate.
+func TestAutoPropagateInBinaryExpr(t *testing.T) {
+	ir := generateIR(t, `
+		read!() int { return 1; }
+		wrapper!() bool {
+			return read() != 0;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+	assertContains(t, ir, "extractvalue { i1, i64, i8* }")
+}
+
+// T0330: Failable call used as unary expression operand must auto-propagate.
+func TestAutoPropagateInUnaryExpr(t *testing.T) {
+	ir := generateIR(t, `
+		get_flag!() bool { return true; }
+		wrapper!() bool {
+			return !get_flag();
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// T0330: Failable call as operand of && must auto-propagate in failable context.
+func TestAutoPropagateInAndExpr(t *testing.T) {
+	ir := generateIR(t, `
+		flag!() bool { return true; }
+		wrapper!() bool {
+			return flag() && true;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// T0330: Failable call as operand of || must auto-propagate in failable context.
+func TestAutoPropagateInOrExpr(t *testing.T) {
+	ir := generateIR(t, `
+		flag!() bool { return false; }
+		wrapper!() bool {
+			return false || flag();
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// T0330: Failable call as range end operand must auto-propagate.
+func TestAutoPropagateInRangeExpr(t *testing.T) {
+	ir := generateIR(t, `
+		get_end!() int { return 5; }
+		wrapper!() {
+			for i in 0..get_end() { }
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// T0330: Failable call as range start operand must auto-propagate.
+func TestAutoPropagateInRangeStartExpr(t *testing.T) {
+	ir := generateIR(t, `
+		get_start!() int { return 0; }
+		wrapper!() {
+			for i in get_start()..5 { }
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// T0330: Failable call as elvis left operand must auto-propagate.
+func TestAutoPropagateInElvisLeft(t *testing.T) {
+	ir := generateIR(t, `
+		get_opt!() int? { return 1; }
+		wrapper!() int {
+			return get_opt() ?: 0;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+// T0330: Failable call as elvis right (default) operand must auto-propagate.
+func TestAutoPropagateInElvisRight(t *testing.T) {
+	ir := generateIR(t, `
+		fallback!() int { return 0; }
+		wrapper!(int? v) int {
+			return v ?: fallback();
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
 func TestDropNullSafe(t *testing.T) {
 	ir := generateIR(t, `
 		type Resource {

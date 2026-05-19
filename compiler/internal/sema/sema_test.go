@@ -14308,3 +14308,128 @@ func TestMutexGuardDirectConstruction(t *testing.T) {
 	`)
 	expectError(t, errs, "cannot be constructed directly")
 }
+
+// T0330: Failable call used as binary operand without ?^/?! must error in non-failable context.
+func TestFailableBinaryOperandNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		read!() int { return 1; }
+		test() bool { return read() != 0; }
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+// T0330: Failable call used as binary operand auto-propagates in failable context.
+func TestFailableBinaryOperandFailable(t *testing.T) {
+	checkOK(t, `
+		read!() int { return 1; }
+		test!() bool { return read() != 0; }
+	`)
+}
+
+// T0330: Failable call used as unary operand without ?^/?! must error in non-failable context.
+func TestFailableUnaryOperandNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		get_flag!() bool { return true; }
+		test() bool { return !get_flag(); }
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+// T0330: Failable call used as unary operand auto-propagates in failable context.
+func TestFailableUnaryOperandFailable(t *testing.T) {
+	checkOK(t, `
+		get_flag!() bool { return true; }
+		test!() bool { return !get_flag(); }
+	`)
+}
+
+// T0330: Failable call as left operand of && must error in non-failable context.
+func TestFailableAndOperandNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		flag!() bool { return true; }
+		test() bool { return flag() && true; }
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+// T0330: Failable call as left operand of && auto-propagates in failable context.
+func TestFailableAndOperandFailable(t *testing.T) {
+	checkOK(t, `
+		flag!() bool { return true; }
+		test!() bool { return flag() && true; }
+	`)
+}
+
+// T0330: Failable call as right operand of || auto-propagates in failable context.
+func TestFailableOrOperandFailable(t *testing.T) {
+	checkOK(t, `
+		flag!() bool { return false; }
+		test!() bool { return false || flag(); }
+	`)
+}
+
+// T0330: Failable call as range start operand must error in non-failable context.
+func TestFailableRangeStartNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		get_start!() int { return 0; }
+		test() {
+			for i in get_start()..5 { }
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+// T0330: Failable call as range end operand must error in non-failable context.
+func TestFailableRangeEndNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		get_end!() int { return 5; }
+		test() {
+			for i in 0..get_end() { }
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+// T0330: Failable call as range operand auto-propagates in failable context.
+func TestFailableRangeOperandFailable(t *testing.T) {
+	checkOK(t, `
+		get_end!() int { return 5; }
+		test!() {
+			for i in 0..get_end() { }
+		}
+	`)
+}
+
+// T0330: Failable call as elvis left operand must error in non-failable context.
+func TestFailableElvisLeftNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		get_opt!() int? { return 1; }
+		test() int { return get_opt() ?: 0; }
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+// T0330: Failable call as elvis left operand auto-propagates in failable context.
+func TestFailableElvisLeftFailable(t *testing.T) {
+	checkOK(t, `
+		get_opt!() int? { return 1; }
+		test!() int { return get_opt() ?: 0; }
+	`)
+}
+
+// T0330: Failable call as elvis right (default) operand must error in non-failable context.
+func TestFailableElvisRightNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		fallback!() int { return 0; }
+		test(int? v) int { return v ?: fallback(); }
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+// T0330: Failable call as elvis right (default) operand auto-propagates in failable context.
+func TestFailableElvisRightFailable(t *testing.T) {
+	checkOK(t, `
+		fallback!() int { return 0; }
+		test!(int? v) int { return v ?: fallback(); }
+	`)
+}

@@ -248,6 +248,21 @@ func (c *Checker) checkVarDeclFailable(expr ast.Expr) {
 	}
 }
 
+// checkSubExprFailable handles a failable call expression used as a
+// sub-expression (binary/unary operand, etc.) in a context that expects
+// its plain value type. In failable functions, the error is auto-propagated
+// to the caller. In non-failable functions, it is a compile error.
+func (c *Checker) checkSubExprFailable(expr ast.Expr) {
+	if !c.info.FailableExprs[expr] {
+		return
+	}
+	if c.curFunc != nil && c.curFunc.CanError() {
+		c.info.AutoPropagateExprs[expr] = true
+	} else {
+		c.errorf(expr.Pos(), "failable call must be handled: use ?^ to propagate, ?! to panic on error, or ? { } for an inline handler")
+	}
+}
+
 // checkErrorHandlerRecovery validates that an error handler used in a value
 // context (variable declaration) either produces a recovery value or diverges.
 // Without this, the variable would get a zero-initialized value, which is

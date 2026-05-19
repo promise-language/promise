@@ -174,8 +174,8 @@ type Info struct {
 
 	// AutoPropagateExprs records failable call expressions that need implicit
 	// error propagation. Applies to: expression statements, variable declaration
-	// initializers, and call arguments — all in failable functions.
-	// Codegen emits the same tag-check + early-return as explicit `?`.
+	// initializers, call arguments, binary operands, and unary operands — all
+	// in failable functions. Codegen emits the same tag-check + early-return as explicit `?`.
 	AutoPropagateExprs map[ast.Expr]bool
 
 	// OptionalHandlers records ErrorHandlerExpr nodes that are optional handlers

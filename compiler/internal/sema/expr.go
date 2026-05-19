@@ -541,6 +541,9 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
 		left = c.checkExpr(e.Left)
 	}
 
+	c.checkSubExprFailable(e.Left)
+	c.checkSubExprFailable(e.Right)
+
 	switch e.Op {
 	case ast.BinAnd, ast.BinOr:
 		if !types.Identical(left, types.TypBool) {
@@ -680,6 +683,7 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 	if operand == nil {
 		return nil
 	}
+	c.checkSubExprFailable(e.Operand)
 
 	switch e.Op {
 	case ast.UnaryNot:

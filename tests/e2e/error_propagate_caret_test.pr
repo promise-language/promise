@@ -105,3 +105,30 @@ test_propagate_inside_handler() `test {
 test_multiple_propagations() `test {
   assert(_add_parsed("ok", "ok")?! == 84, "multiple propagations");
 }
+
+// T0330: Failable call used as binary operand auto-propagates in failable function.
+type _Rd {
+  int x;
+  new(~this) {
+    this.x = 0;
+  }
+  read!(~this) u32 {
+    return 1u32;
+  }
+}
+
+type _Wrapper {
+  _Rd inner;
+  new(~this, ~_Rd r) {
+    this.inner = r;
+  }
+  is_one!(~this) bool {
+    return this.inner.read() != 0u32;
+  }
+}
+
+test_failable_binary_operand_auto_propagate() `test {
+  _Wrapper w = _Wrapper(r: _Rd());
+  bool b = w.is_one()?!;
+  assert(b, "expected true");
+}

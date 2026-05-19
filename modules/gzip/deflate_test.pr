@@ -64,9 +64,7 @@ inflate_fixed_aaaa_test() `test {
   _assert_eq(result, want, "AAAA");
 }
 
-// T0333: WASM-only "index out of bounds" in batched gzip module tests.
-// Remove the exclude when T0333 is fixed.
-inflate_fixed_long_aaa_test() `test(exclude: "wasm32") {
+inflate_fixed_long_aaa_test() `test {
   // 20 'A' bytes — exercises a longer back-reference (length code with extra bits).
   int[] raw = int[]();
   raw.push(0x73);

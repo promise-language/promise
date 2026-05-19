@@ -1,20 +1,16 @@
 // T0259: compile-time gzip compression of embedded data, lazy decompression
 // at the first call to the getter via the auto-injected gzip module.
-//
-// T0333: All tests are excluded on WASM — same root cause as the gzip module
-// failures (batch test corruption when multiple tests share gzip.gunzip).
-// Remove the excludes when T0333 is fixed.
 get small_compressed string `embed("greeting.txt", compress: true);
 get large_compressed string `embed("compress_fixture.txt", compress: true);
 get bin_compressed u8[] `embed("data.bin", compress: true);
 
-embed_compressed_string_short_test() `test(exclude: "wasm32") {
+embed_compressed_string_short_test() `test {
   // Round-trip should match the file contents byte-for-byte.
   assert(small_compressed == "Hello, embedded world!", "short compressed string round-trip");
   assert(small_compressed.len == 22, "short compressed string length");
 }
 
-embed_compressed_string_large_test() `test(exclude: "wasm32") {
+embed_compressed_string_large_test() `test {
   // Large fixture (~11KB) must round-trip. The file is highly compressible
   // (repeated sentence) — exercises dynamic Huffman + back-references.
   string s = large_compressed;
@@ -26,12 +22,12 @@ embed_compressed_string_large_test() `test(exclude: "wasm32") {
   assert(head == want_head, "head matches");
 }
 
-embed_compressed_bytes_test() `test(exclude: "wasm32") {
+embed_compressed_bytes_test() `test {
   u8[] b = bin_compressed;
   assert(b.len > 0, "bin_compressed nonempty");
 }
 
-embed_compressed_repeat_call_test() `test(exclude: "wasm32") {
+embed_compressed_repeat_call_test() `test {
   // Each call decompresses afresh; results must compare equal even when the
   // underlying allocations are distinct.
   string a = small_compressed;

@@ -116,9 +116,7 @@ gunzip_a100_test() `test {
   }
 }
 
-// T0333: WASM-only "index out of bounds" in batched gzip module tests.
-// Remove the exclude when T0333 is fixed.
-gunzip_with_fname_test() `test(exclude: "wasm32") {
+gunzip_with_fname_test() `test {
   // gzip("hi", filename="test.txt") — FNAME flag set.
   int[] raw = int[]();
   raw.push(0x1F);

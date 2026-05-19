@@ -2437,7 +2437,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 
 	// Release: LTO pipeline (opt -O1 → .bc → linker --lto-O1).
 	// Debug: object pipeline (opt -O1 → .bc → llc → .o → linker --gc-sections).
-	// WASM: always LTO (--lto-O2 needed to fold math intrinsics like sin/cos).
+	// WASM: always LTO (--lto-O1 — see T0333; --lto-O2 miscompiles `icmp samesign`).
 	// Windows: always object pipeline (LTO not wired up for MSVC).
 	// Note: opt -O1 in both modes until B0314 (alloca domination) is fixed to enable -O0.
 	useLTO := (releaseMode || isWasmTarget(target)) && !isWindowsTarget(target)
@@ -4121,6 +4121,37 @@ func ensureWasmAllocObj() (string, error) {
 	return objPath, nil
 }
 
+// ensureWasmMathObj extracts the embedded WASM math runtime object to cache.
+// T0333: WASM linking uses --lto-O1 to avoid an LLVM 23 miscompile of `icmp
+// samesign`, but at -O1 LLVM doesn't constant-fold sin/cos/etc. and instead
+// emits libcalls. wasm_math.o provides those libcall symbols (sin, cos, tan,
+// exp, log, pow, sqrt, fabs, floor, ceil, round + f32 variants) so unresolved
+// imports don't appear in the final WASM module.
+func ensureWasmMathObj() (string, error) {
+	ensureCacheValid()
+
+	promiseHome, err := module.PromiseHome()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine Promise home: %v", err)
+	}
+	cacheDir := filepath.Join(promiseHome, "cache", "crt", "wasm32")
+	objPath := filepath.Join(cacheDir, "wasm_math.o")
+
+	if info, err := os.Stat(objPath); err == nil {
+		if info.Size() == int64(len(embeddedWasmMathObj)) {
+			return objPath, nil
+		}
+	}
+
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create WASM CRT cache: %v", err)
+	}
+	if err := os.WriteFile(objPath, embeddedWasmMathObj, 0644); err != nil {
+		return "", fmt.Errorf("cannot write wasm_math.o to cache: %v", err)
+	}
+	return objPath, nil
+}
+
 // componentWrap wraps a core WASM binary into a Component Model binary using wasm-tools.
 // If adaptPath is non-empty, it's passed as --adapt to wasm-tools component new.
 // If adaptPath is empty and this is a WASI target, the embedded P1→P2 adapter is used
@@ -4250,7 +4281,9 @@ export async function init(importObject = {}) {
 }
 
 // buildWasmLinkArgs builds the wasm-ld argument list for WASM linking.
-// Links user code with the embedded free-list allocator (wasm_alloc.o).
+// Links user code with the embedded free-list allocator (wasm_alloc.o) and the
+// math runtime (wasm_math.o — sin/cos/exp/log/pow/etc. that LLVM lowers to
+// libcalls but WASI doesn't supply).
 // For wasm32-web: exports _initialize and memory instead of _start.
 func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool) []string {
 	allocObj, err := ensureWasmAllocObj()
@@ -4258,10 +4291,20 @@ func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	mathObj, err := ensureWasmMathObj()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 	isWeb := strings.Contains(target, "web")
 	var args []string
 	if useLTO {
-		args = []string{"--lto-O2"} // O2 needed to fold math intrinsics across module boundaries
+		// T0333: --lto-O2 miscompiles loops where icmp gets the `samesign` flag
+		// from opt's value-tracking pass (LLVM 23). The miscompilation causes the
+		// loop exit comparison to skip exit, leading to OOB index reads. --lto-O1
+		// avoids the buggy late-pass. We supply the math libcalls separately
+		// (wasm_math.o) since --lto-O1 doesn't constant-fold sin/cos/etc.
+		args = []string{"--lto-O1"}
 	} else {
 		args = []string{"--gc-sections"} // DCE for non-LTO object files
 	}
@@ -4279,7 +4322,7 @@ func buildWasmLinkArgs(objFiles []string, target, outputFile string, useLTO bool
 	// memory allocation) and __cabi_retarea (fixed buffer for multi-value returns).
 	args = append(args, "--export=cabi_realloc", "--export=__cabi_retarea")
 	args = append(args, objFiles...)
-	args = append(args, allocObj)
+	args = append(args, allocObj, mathObj)
 	return args
 }
 

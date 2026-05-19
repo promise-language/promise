@@ -31,7 +31,7 @@ import (
 	"strings"
 
 	"github.com/p5e-ia/promise-lang/tools/build/common"
-	"github.com/p5e-ia/promise-lang/tools/build/internal/heartbeat"
+	"github.com/p5e-ia/promise-lang/tools/build/internal/context"
 )
 
 var sourceHash = "dev"
@@ -88,17 +88,20 @@ func main() {
 	}
 
 	tool := detectTool(input)
+	isPost := input.HookEventName == "PostToolUse"
 
-	// Skill hook: heartbeat logic. Heartbeats are best-effort and never
-	// block Skill invocation, so skip the stale check entirely — the
-	// corresponding settings.json entry uses `|| true` anyway.
+	// PostToolUse hooks can't block — the tool already ran. Just notify
+	// the tracker (pop the context frame) and exit.
+	if isPost {
+		notifyContext(input, tool, false)
+		fmt.Println("{}")
+		return
+	}
+
+	// Skill PreToolUse: skip the stale check (heartbeats / context updates
+	// are best-effort and the settings.json entry uses `|| true` anyway).
 	if tool == "skill" {
-		heartbeat.Run(heartbeat.Input{
-			HookEventName: input.HookEventName,
-			CWD:           input.CWD,
-			Skill:         input.ToolInput.Skill,
-			Args:          input.ToolInput.Args,
-		})
+		notifyContext(input, tool, true)
 		fmt.Println("{}")
 		return
 	}
@@ -120,6 +123,7 @@ func main() {
 		if reason := checkAll(input.ToolInput.Command); reason != "" {
 			printDeny(reason)
 		} else {
+			notifyContext(input, tool, true)
 			fmt.Println("{}")
 		}
 
@@ -127,6 +131,7 @@ func main() {
 		if reason := checkEditGates(input.ToolInput.FilePath, input.ToolInput.NewString); reason != "" {
 			printDeny(reason)
 		} else {
+			notifyContext(input, tool, true)
 			fmt.Println("{}")
 		}
 
@@ -134,12 +139,51 @@ func main() {
 		if reason := checkEditGates(input.ToolInput.FilePath, input.ToolInput.Content); reason != "" {
 			printDeny(reason)
 		} else {
+			notifyContext(input, tool, true)
 			fmt.Println("{}")
 		}
 
 	default:
 		// Unknown tool type — allow (don't block what we don't understand).
 		fmt.Println("{}")
+	}
+}
+
+// notifyContext fires a context push (PreToolUse) or pop (PostToolUse) on
+// the tracker.
+func notifyContext(input hookInput, tool string, isPush bool) {
+	kind, name, inputText, ok := contextFields(input, tool)
+	if !ok {
+		return
+	}
+	in := context.Input{
+		HookEventName: input.HookEventName,
+		CWD:           input.CWD,
+		Kind:          kind,
+		Name:          name,
+		InputText:     inputText,
+	}
+	if isPush {
+		context.Push(in)
+	} else {
+		context.Pop(in)
+	}
+}
+
+// contextFields returns the (kind, name, input) tuple to forward to the
+// tracker for a given dispatched tool. Returns ok=false for unknown tools.
+func contextFields(input hookInput, tool string) (kind, name, inputText string, ok bool) {
+	switch tool {
+	case "skill":
+		return "skill", input.ToolInput.Skill, input.ToolInput.Args, true
+	case "bash":
+		return "tool", "Bash", input.ToolInput.Command, true
+	case "edit":
+		return "tool", "Edit", input.ToolInput.FilePath, true
+	case "write":
+		return "tool", "Write", input.ToolInput.FilePath, true
+	default:
+		return "", "", "", false
 	}
 }
 

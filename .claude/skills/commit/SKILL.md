@@ -5,10 +5,6 @@ description: Verify, rebase, and commit changes. Updates docs and tracker, files
 
 Verify, rebase, and commit the current changes. **Does NOT push** — the orchestrator handles pushing after independent verification.
 
-## Tracker status
-
-Before starting, update your tracker status: call `mcp__tracker__heartbeat` with `status: "committing"` (keep the same agent, item_id, item_title from earlier phases). If you haven't registered yet, determine your agent name via `basename $(pwd)` and hostname via `hostname`.
-
 ## Steps
 
 1. **Update docs.**
@@ -57,4 +53,4 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - Use `mcp__tracker__create` with priority **critical** for memory/concurrency issues, **high** for performance, **medium** for missing tests.
 
 9. **Mark done.**
-   - Call `mcp__tracker__heartbeat` with `status: "done"`, `item_id: ""`, `item_title: ""` to signal completion.
+   - Once `mcp__tracker__update` has marked the item(s) `status: "done"`, the skill is complete.

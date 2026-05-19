@@ -434,6 +434,49 @@ func TestCheckCopy(t *testing.T) {
 	}
 }
 
+func TestContextFields(t *testing.T) {
+	mk := func(skill, args, cmd, file string) hookInput {
+		h := hookInput{}
+		h.ToolInput.Skill = skill
+		h.ToolInput.Args = args
+		h.ToolInput.Command = cmd
+		h.ToolInput.FilePath = file
+		return h
+	}
+	tests := []struct {
+		name      string
+		input     hookInput
+		tool      string
+		wantKind  string
+		wantName  string
+		wantInput string
+		wantOK    bool
+	}{
+		{"skill", mk("do", "B0042", "", ""), "skill", "skill", "do", "B0042", true},
+		{"bash", mk("", "", "ls -la", ""), "bash", "tool", "Bash", "ls -la", true},
+		{"edit", mk("", "", "", "/tmp/foo.go"), "edit", "tool", "Edit", "/tmp/foo.go", true},
+		{"write", mk("", "", "", "/tmp/bar.go"), "write", "tool", "Write", "/tmp/bar.go", true},
+		{"unknown", mk("", "", "", ""), "unknown", "", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kind, name, in, ok := contextFields(tt.input, tt.tool)
+			if ok != tt.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if kind != tt.wantKind {
+				t.Errorf("kind = %q, want %q", kind, tt.wantKind)
+			}
+			if name != tt.wantName {
+				t.Errorf("name = %q, want %q", name, tt.wantName)
+			}
+			if in != tt.wantInput {
+				t.Errorf("input = %q, want %q", in, tt.wantInput)
+			}
+		})
+	}
+}
+
 func TestIsAllowedCopyDest(t *testing.T) {
 	tests := []struct {
 		dest string

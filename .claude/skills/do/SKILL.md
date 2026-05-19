@@ -14,7 +14,7 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
 
 2. **Claim the work.**
    - If a tracker ID was given, add a note with the hostname and the repo root so other agents/hosts can see which machine is working on it.
-   - The heartbeat hook automatically tracks which agent is working on which item.
+   - The guard hook automatically reports skill and tool activity to the tracker on every PreToolUse / PostToolUse — you do not need to call any heartbeat or context API directly.
 
 3. **Plan.**
    - Run `/plan` with the same arguments. This reads the code, produces an implementation plan, and checks feasibility.
@@ -55,4 +55,3 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - Stage and commit with a concise message including the item ID.
    - **Do NOT push.** The orchestrator handles pushing after independent verification.
    - Mark the task as done: call `mcp__tracker__update` with `status: "done"` and a `summary`.
-   - Call `mcp__tracker__heartbeat` with `status: "done"`.

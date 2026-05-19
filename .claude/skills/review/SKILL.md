@@ -5,10 +5,6 @@ description: Meticulous code review of recent changes. Checks correctness, tests
 
 Review the most recent changes in this project. If $ARGUMENTS is provided, it may be a tracker ID (e.g., `B0042`, `T0015`) — fetch it with `mcp__tracker__get` to determine scope — or a direct target: a Go package path (e.g., `./internal/codegen/`), a Promise test directory (e.g., `tests/e2e/`), or a specific source file to focus on. 
 
-## Tracker status
-
-Before starting, update your tracker status: call `mcp__tracker__heartbeat` with `status: "reviewing"` (keep the same agent, item_id, item_title from earlier phases). If you haven't registered yet, determine your agent name via `basename $(pwd)` and hostname via `hostname`.
-
 ## Steps
 
 1. **Identify what to review.** If arguments were given, use them. Otherwise, run `git diff HEAD~1` and `git diff --cached` to find recent changes. Read every changed file in full to understand context.

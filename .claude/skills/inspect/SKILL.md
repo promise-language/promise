@@ -7,33 +7,28 @@ Inspect the implementation of item $ARGUMENTS. You are providing an independent 
 
 ## Steps
 
-1. **Register with tracker.**
-   - Determine your agent name by running `basename $(pwd)`.
-   - Determine your hostname by running `hostname`.
-   - Call `mcp__tracker__heartbeat` with `agent: <dirname>`, `host: <hostname>`, `status: "reviewing"`, `item_id: "<ID>"`, `item_title: "<short-title>"`.
-
-2. **Fetch the item.**
+1. **Fetch the item.**
    - Call `mcp__tracker__get` with the item ID from $ARGUMENTS.
    - Read the full item: description, summary, notes, and chat_log.
    - The **description** tells you what was requested. The **summary** is the implementing agent's self-report. The **chat_log** shows their reasoning. Your job is to verify independently.
 
-3. **Find the relevant changes.**
+2. **Find the relevant changes.**
    - Run `git log --oneline --all --grep="<ID>" -20` to find commits mentioning this item.
    - If no commits found, run `git log --oneline -20` and look for relevant recent commits.
    - Run `git diff <before>..<after>` to see all code changes for this item.
    - If the commit range is unclear, use `git show <commit>` on individual commits.
 
-4. **Read the changed files.**
+3. **Read the changed files.**
    - Read every file that was modified, in full — not just the diff hunks.
    - Understand the implementation in context of the surrounding code.
 
-5. **Assess completion.**
+4. **Assess completion.**
    - Does the implementation actually address what was requested in the description?
    - Are all requirements met? Check each point in the description.
    - Were corners cut? Did the agent work around issues instead of solving them?
    - Is the task genuinely done, or is it partially done with the summary claiming otherwise?
 
-6. **Assess quality.**
+5. **Assess quality.**
    - Is the code well-structured and consistent with the rest of the codebase?
    - **Compiler changes (Go):**
      - Correct LLVM IR shape: proper types, no dangling references, null checks where needed.
@@ -51,14 +46,14 @@ Inspect the implementation of item $ARGUMENTS. You are providing an independent 
    - **Concurrency safety:** shared mutable state mutex-protected, channel operations follow park mutex protocol, address-ordered lock discipline.
    - Are there bugs, race conditions, or edge cases missed?
 
-7. **Assess test coverage.**
+6. **Assess test coverage.**
    - Were tests added or updated for the new/changed functionality?
    - **Go tests:** `codegen_test.go` (IR shape via `generateIR` + `assertContains`), `sema_test.go` (errors via `checkErrs` + `expectError`), `ownership_test.go` (via `ownerOK`/`ownerErrs`).
    - **Promise tests:** batch tests (`` `test `` + `assert()`) preferred over snapshot tests. Co-located `*_test.pr` for modules, `tests/` for cross-cutting e2e.
    - Do the tests cover the happy path, edge cases, and error paths?
    - Are there obvious gaps in test coverage?
 
-8. **Write the inspection result.**
+7. **Write the inspection result.**
    - Call `mcp__tracker__update` with `id: "<ID>"` and `inspection` set to a JSON string:
      ```json
      {
@@ -73,9 +68,6 @@ Inspect the implementation of item $ARGUMENTS. You are providing an independent 
      }
      ```
    - Also add a note to the item: `note: "Inspection: <verdict>. <one-line summary>"`, `agent: "<your agent name>"`.
-
-9. **Report done.**
-   - Call `mcp__tracker__heartbeat` with `status: "done"`.
 
 ## Rules
 

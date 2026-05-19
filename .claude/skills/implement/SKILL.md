@@ -34,4 +34,3 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
 
 4. **Mark done.**
    - Call `mcp__tracker__update` with `status: "done"` and a `summary` of what was changed.
-   - Call `mcp__tracker__heartbeat` with `status: "done"`.

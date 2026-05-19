@@ -226,7 +226,7 @@ inflate_dynamic_huffman_test() `test {
   _assert_eq(result, want, "dynamic Huffman 145B");
 }
 
-_try_inflate(u8[] data) bool {
+_try_inflate(~u8[] data) bool {
   u8[] _v = inflate(data)? e {
     return true;
   };

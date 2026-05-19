@@ -5,7 +5,7 @@ type AppError[T] is error {
   T detail;
 }
 
-make_error![T](T detail) AppError[T] {
+make_error![T](~T detail) AppError[T] {
   raise AppError[T](message: "app error", detail: detail);
 }
 
@@ -14,12 +14,12 @@ type Wrapper[T] {
   T value;
 }
 
-wrap[T](T v) Wrapper[T] {
+wrap[T](~T v) Wrapper[T] {
   return Wrapper[T](value: v);
 }
 
 // Generic function constructing a generic type conditionally.
-maybe_wrap[T](T v, bool do_wrap) Wrapper[T]? {
+maybe_wrap[T](~T v, bool do_wrap) Wrapper[T]? {
   if do_wrap {
     return Wrapper[T](value: v);
   }

@@ -3749,6 +3749,55 @@ func TestGenericFuncFailable(t *testing.T) {
 	assertContains(t, ir, "define { i1, i64, i8* } @\"tryIdentity[int]\"")
 }
 
+// T0340: a generic function with a `~T` parameter must clear the caller's
+// drop flag at the call site. Without the applyMutRefArgOwnership fix,
+// `~` args on generic calls left the caller's drop flag set → double-free
+// when the callee consumed the value (e.g. moved it into a struct field).
+func TestT0340_GenericFuncMutRefArgClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		consume[T](~T x) { }
+		main() {
+			s := "hello";
+			consume[string](s);
+		}
+	`)
+	// Drop flag store + immediate call to the monomorphized consume.
+	assertContainsMatch(t, ir,
+		`store i1 false, i1\* %s\.dropflag\s*\n\s*call void @"consume\[string\]"`)
+}
+
+// T0340: same fix must apply when the type parameter is inferred (no
+// explicit `[T]` at the call site). Exercises genInferredGenericCall.
+func TestT0340_InferredGenericFuncMutRefArgClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		consume[T](~T x) { }
+		main() {
+			s := "hello";
+			consume(s);
+		}
+	`)
+	assertContainsMatch(t, ir,
+		`store i1 false, i1\* %s\.dropflag\s*\n\s*call void @"consume\[string\]"`)
+}
+
+// T0340: same fix must apply for module-qualified generic calls. The
+// module callee may not be visible via lookupFunc, so genModuleGenericFuncCall
+// also checks c.info.Types[e.Callee] as a fallback — without it, the drop
+// flag clear was missed on module-imported `~` callees.
+func TestT0340_ModuleGenericFuncMutRefArgClearsDropFlag(t *testing.T) {
+	ir := generateIRWithModule(t, "mylib",
+		"consume[T](~T x) `public { }",
+		`
+		use mylib "./mylib";
+		main() {
+			s := "hello";
+			mylib.consume[string](s);
+		}
+	`)
+	assertContainsMatch(t, ir,
+		`store i1 false, i1\* %s\.dropflag\s*\n\s*call void @"consume\[string\]"`)
+}
+
 // B0099: Generic function calling another generic function with its own type param.
 func TestGenericFuncCallsGenericFunc(t *testing.T) {
 	ir := generateIR(t, `

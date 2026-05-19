@@ -650,7 +650,7 @@ encode_string![T: Encodable](T value) string `public `doc("Serializes a value to
   return enc.to_string();
 }
 
-decode_string![T: Decodable](string data) T `public `doc("Deserializes a value from a JSON string") {
+decode_string![T: Decodable](~string data) T `public `doc("Deserializes a value from a JSON string") {
   JsonDecoder dec = JsonDecoder(data: data);
   return T.decode(dec);
 }
@@ -868,7 +868,7 @@ encode_value!(JsonValue v, Encoder ~e) `public `doc("Writes a JsonValue tree to 
 }
 
 // Parse a JSON string into a JsonValue tree.
-parse_value!(string input) JsonValue `public `doc("Parses a JSON string into a JsonValue tree.") {
+parse_value!(~string input) JsonValue `public `doc("Parses a JSON string into a JsonValue tree.") {
   JsonDecoder dec = JsonDecoder(data: input);
   return _parse_json_value(dec);
 }

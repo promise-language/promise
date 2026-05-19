@@ -1458,25 +1458,33 @@ Promise uses Rust-style ownership with borrowing and lifetimes.
 ### 6.2 Syntax
 
 ```promise
-process(string &data) {              // shared borrow
+process(string &data) {              // shared borrow — read-only, caller still owns
   io.print_line(data);
 }
 
-modify(string ~data) {               // mutable borrow
+modify(string ~data) {               // mutable borrow — caller still owns
   data.append(" world");
 }
 
-consume(string data) {               // takes ownership
+consume(~string data) {              // takes ownership — callee owns; caller's drop flag cleared
   // data is dropped at end of scope
+}
+
+borrow(string data) {                // plain `T` is a borrow — caller still owns
+  // data may be read but cannot be moved out of (no consuming into a field, etc.)
+  io.print_line(data);
 }
 
 main() {
   string s = string("hello");
   process(&s);          // borrow
   modify(~s);           // mutable borrow
+  borrow(s);            // borrow — s still valid after
   consume(s);           // move — s is no longer valid after this line
 }
 ```
+
+Plain `T` parameters are borrows: the caller still owns the value and the callee may not move it out (into a struct field, into another `~T` callee, by-value return, or move-capture into a lambda env). To consume a value, declare the parameter as `~T`. This rule prevents double-free bugs where both the caller and the callee's transitive consumer would drop the same allocation.
 
 ### 6.3 Lifetimes
 

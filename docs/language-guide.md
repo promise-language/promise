@@ -358,15 +358,19 @@ if animal is Dog(name, breed) {
 // Three parameter modes (declared on the parameter):
 read_only(string &s) { }     // shared borrow (read)
 mutate(string ~s) { }        // mutable borrow (exclusive write)
-consume(string s) { }        // takes ownership (moved)
+consume(~string s) { }       // takes ownership (moved into callee)
+borrow(string s) { }         // shared borrow — caller still owns; callee may not consume
 
 // At call site — NO markers. Compiler infers borrow from declaration:
 read_only(val);               // auto-borrows &val
 mutate(val);                  // auto-borrows ~val
 consume(val);                 // val is moved, cannot use after
+borrow(val);                  // val is borrowed, still valid after
 
 // Copy types (auto-copy, no move): primitives, bool, char, pure value types
-// Move types: string, collections, heap types — passed by move unless param is & or ~
+// Move types: string, collections, heap types — plain `T` param is a borrow;
+// add `~T` to consume. Trying to move out of a plain-`T` parameter inside the
+// callee (e.g., into a struct field) is a compile-time error.
 ```
 
 ## Resource Management

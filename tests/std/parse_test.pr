@@ -30,7 +30,7 @@ test_bool_parse() `test {
   assert(!v2, "parse false");
 }
 
-_try_parse_int(string s) string {
+_try_parse_int(~string s) string {
   Scanner r = Scanner(s: s);
   int v = int.parse(r)? e {
     return e.message;
@@ -53,7 +53,7 @@ test_int_parse_minus_only() `test {
   assert(result == "expected digit", "minus only");
 }
 
-_try_parse_bool(string s) string {
+_try_parse_bool(~string s) string {
   Scanner r = Scanner(s: s);
   bool v = bool.parse(r)? e {
     return e.message;
@@ -104,7 +104,7 @@ test_uint_parse_large() `test {
   assert((v as! int) == 1000000, "parse 1000000");
 }
 
-_try_parse_uint(string s) string {
+_try_parse_uint(~string s) string {
   Scanner r = Scanner(s: s);
   uint v = uint.parse(r)? e {
     return e.message;
@@ -206,7 +206,7 @@ test_f64_parse_stops_at_non_digit() `test {
   assert(r.rest() == "bc", "remaining bc");
 }
 
-_try_parse_f64(string s) string {
+_try_parse_f64(~string s) string {
   Scanner r = Scanner(s: s);
   f64 v = f64.parse(r)? e {
     return e.message;
@@ -282,7 +282,7 @@ test_char_parse_space() `test {
   assert(c == ' ', "parse space");
 }
 
-_try_parse_char(string s) string {
+_try_parse_char(~string s) string {
   Scanner r = Scanner(s: s);
   char v = char.parse(r)? e {
     return e.message;
@@ -320,7 +320,7 @@ test_f32_parse_negative() `test {
   assert(v == -2.5f32, "parse -2.5");
 }
 
-_try_parse_f32(string s) string {
+_try_parse_f32(~string s) string {
   Scanner r = Scanner(s: s);
   f32 v = f32.parse(r)? e {
     return e.message;
@@ -360,7 +360,7 @@ test_i8_parse_min() `test {
   assert(v == -128i8, "parse -128");
 }
 
-_try_parse_i8(string s) string {
+_try_parse_i8(~string s) string {
   Scanner r = Scanner(s: s);
   i8 v = i8.parse(r)? e {
     return e.message;
@@ -395,7 +395,7 @@ test_i16_parse_negative() `test {
   assert(v == -5000i16, "parse -5000");
 }
 
-_try_parse_i16(string s) string {
+_try_parse_i16(~string s) string {
   Scanner r = Scanner(s: s);
   i16 v = i16.parse(r)? e {
     return e.message;
@@ -420,7 +420,7 @@ test_i32_parse_negative() `test {
   assert(v == -100000i32, "parse -100000");
 }
 
-_try_parse_i32(string s) string {
+_try_parse_i32(~string s) string {
   Scanner r = Scanner(s: s);
   i32 v = i32.parse(r)? e {
     return e.message;
@@ -445,7 +445,7 @@ test_i64_parse_negative() `test {
   assert(v == -99i64, "parse -99");
 }
 
-_try_parse_i64(string s) string {
+_try_parse_i64(~string s) string {
   Scanner r = Scanner(s: s);
   i64 v = i64.parse(r)? e {
     return e.message;
@@ -465,7 +465,7 @@ test_u8_parse() `test {
   assert(v == 200u8, "parse 200");
 }
 
-_try_parse_u8(string s) string {
+_try_parse_u8(~string s) string {
   Scanner r = Scanner(s: s);
   u8 v = u8.parse(r)? e {
     return e.message;
@@ -490,7 +490,7 @@ test_u16_parse() `test {
   assert(v == 50000u16, "parse 50000");
 }
 
-_try_parse_u16(string s) string {
+_try_parse_u16(~string s) string {
   Scanner r = Scanner(s: s);
   u16 v = u16.parse(r)? e {
     return e.message;
@@ -510,7 +510,7 @@ test_u32_parse() `test {
   assert(v == 3000000000u32, "parse 3000000000");
 }
 
-_try_parse_u32(string s) string {
+_try_parse_u32(~string s) string {
   Scanner r = Scanner(s: s);
   u32 v = u32.parse(r)? e {
     return e.message;
@@ -530,7 +530,7 @@ test_u64_parse() `test {
   assert(v == 123456789u64, "parse 123456789");
 }
 
-_try_parse_u64(string s) string {
+_try_parse_u64(~string s) string {
   Scanner r = Scanner(s: s);
   u64 v = u64.parse(r)? e {
     return e.message;

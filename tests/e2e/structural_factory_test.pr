@@ -3,12 +3,12 @@
 // abstract in structural interfaces, enabling generic factory patterns.
 // --- Basic: abstract factory in structural interface ---
 type Parseable `structural {
-  parse(string data) `abstract `factory;
+  parse(~string data) `abstract `factory;
 }
 
 type My {
   string value;
-  parse(string data) My `factory {
+  parse(~string data) My `factory {
     return My(value: data);
   }
 }
@@ -20,7 +20,7 @@ test_basic_factory() `test {
 
 // --- Generic factory pattern: load[T: Parseable] ---
 
-load[T: Parseable](string data) T {
+load[T: Parseable](~string data) T {
   return T.parse(data);
 }
 
@@ -125,13 +125,13 @@ test_multiple_types_same_interface() `test {
 // --- Mixed factory + instance methods in one interface ---
 
 type Codec `structural {
-  parse(string data) `abstract `factory;
+  parse(~string data) `abstract `factory;
   format() string `abstract;
 }
 
 type Json {
   string raw;
-  parse(string data) Json `factory {
+  parse(~string data) Json `factory {
     return Json(raw: data);
   }
   format() string {
@@ -139,7 +139,7 @@ type Json {
   }
 }
 
-roundTrip[T: Codec](string data) string {
+roundTrip[T: Codec](~string data) string {
   T obj = T.parse(data);
   return obj.format();
 }
@@ -153,7 +153,7 @@ test_mixed_factory_instance_generic() `test {
 
 type SafeParser {
   int n;
-  tryParse(string data) SafeParser `factory {
+  tryParse(~string data) SafeParser `factory {
     return SafeParser(n: 99);
   }
 }

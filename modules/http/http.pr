@@ -30,17 +30,17 @@ type Request `public `doc("An HTTP request.") {
   map[string, string] headers;
   string body;
 
-  new_get(string url) Self `factory `public `doc("Create a GET request.") {
+  new_get(~string url) Self `factory `public `doc("Create a GET request.") {
     return Request(method: Method.Get, url: url, headers: map[string, string](), body: "");
   }
 
-  new_post(string url, string body) Self `factory `public `doc("Create a POST request with a text body.") {
+  new_post(~string url, ~string body) Self `factory `public `doc("Create a POST request with a text body.") {
     map[string, string] h = map[string, string]();
     h["Content-Type"] = "text/plain";
     return Request(method: Method.Post, url: url, headers: h, body: body);
   }
 
-  set_header(~this, string key, string value) `public `doc("Set a header on the request.") {
+  set_header(~this, ~string key, ~string value) `public `doc("Set a header on the request.") {
     this.headers[key] = value;
   }
 
@@ -207,11 +207,11 @@ type ServerResponse `public `doc("An HTTP response to send to the client.") {
   map[string, string] headers;
   string body;
 
-  with_status(int status, string body) Self `factory `public `doc("Create a response with the given status code and body.") {
+  with_status(int status, ~string body) Self `factory `public `doc("Create a response with the given status code and body.") {
     return ServerResponse(status: status, headers: map[string, string](), body: body);
   }
 
-  ok(string body) Self `factory `public `doc("Create a 200 OK response.") {
+  ok(~string body) Self `factory `public `doc("Create a 200 OK response.") {
     return ServerResponse(status: 200, headers: map[string, string](), body: body);
   }
 
@@ -219,11 +219,11 @@ type ServerResponse `public `doc("An HTTP response to send to the client.") {
     return ServerResponse(status: 404, headers: map[string, string](), body: "Not Found");
   }
 
-  internal_error(string message) Self `factory `public `doc("Create a 500 Internal Server Error response.") {
+  internal_error(~string message) Self `factory `public `doc("Create a 500 Internal Server Error response.") {
     return ServerResponse(status: 500, headers: map[string, string](), body: message);
   }
 
-  set_header(~this, string key, string value) `public `doc("Set a response header.") {
+  set_header(~this, ~string key, ~string value) `public `doc("Set a response header.") {
     this.headers[key] = value;
   }
 }
@@ -234,7 +234,7 @@ type Server `public `doc("An HTTP/1.1 server that accepts and handles requests s
   int _port;
   channel[bool] _stop;
 
-  bind!(string address, int port) Self `factory `public `doc("Create a server bound to the given address and port.") {
+  bind!(~string address, int port) Self `factory `public `doc("Create a server bound to the given address and port.") {
     string addr = address[0:];
     net.TcpListener listener = net.TcpListener.bind(addr, port)?^;
     int actual_port = listener.local_port;
@@ -280,12 +280,12 @@ type Server `public `doc("An HTTP/1.1 server that accepts and handles requests s
 
 // ── Convenience functions ─────────��─────────────────────────────────────────
 
-http_get!(string url) Response `public `doc("Perform an HTTP GET request.") {
+http_get!(~string url) Response `public `doc("Perform an HTTP GET request.") {
   Request req = Request.new_get(url);
   return req.send()?^;
 }
 
-http_post!(string url, string body, map[string, string] headers) Response `public `doc("Perform an HTTP POST request with a string body.") {
+http_post!(~string url, ~string body, ~map[string, string] headers) Response `public `doc("Perform an HTTP POST request with a string body.") {
   Request req = Request.new_post(url, body);
   for key, value in headers {
     req.set_header(key, value);
@@ -293,7 +293,7 @@ http_post!(string url, string body, map[string, string] headers) Response `publi
   return req.send()?^;
 }
 
-http_post_json![T: Encodable](string url, T data) Response `public `doc("Perform an HTTP POST request with a JSON-encoded body.") {
+http_post_json![T: Encodable](~string url, T data) Response `public `doc("Perform an HTTP POST request with a JSON-encoded body.") {
   string json_body = json.encode_string[T](data)?^;
   map[string, string] h = map[string, string]();
   h["Content-Type"] = "application/json";
@@ -649,7 +649,7 @@ _read_request!(net.TcpStream ~conn) ServerRequest {
   return _parse_request(header_text, body_str)?^;
 }
 
-_parse_request!(string header_text, string body_str) ServerRequest {
+_parse_request!(string header_text, ~string body_str) ServerRequest {
   string[] lines = header_text.split("\r\n");
   if lines.len == 0 {
     raise HttpError(code: 0, message: "empty HTTP request");

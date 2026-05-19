@@ -13,7 +13,7 @@ enum Holder {
   Empty,
 }
 
-make_resource(string name) Resource {
+make_resource(~string name) Resource {
   return Resource(name: name);
 }
 
@@ -44,7 +44,7 @@ enum Wrapper {
   None,
 }
 
-make_info(string label) Info {
+make_info(~string label) Info {
   return Info(label: label);
 }
 

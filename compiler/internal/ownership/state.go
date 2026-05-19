@@ -4,8 +4,9 @@ package ownership
 type VarState int
 
 const (
-	Owned VarState = iota // variable currently owns its value
-	Moved                 // value has been moved; further use is invalid
+	Owned    VarState = iota // variable currently owns its value
+	Moved                    // value has been moved; further use is invalid
+	Borrowed                 // T0338: non-~ non-& non-Copy parameter; reads OK, moves rejected
 )
 
 // StateMap maps variable names to their ownership states.
@@ -21,6 +22,7 @@ func (s StateMap) clone() StateMap {
 }
 
 // merge performs conservative merge: if either branch has Moved, result is Moved.
+// Borrowed is a fixed point — borrowed parameters stay borrowed across branches.
 func merge(a, b StateMap) StateMap {
 	result := make(StateMap, len(a))
 	for k, va := range a {
@@ -31,6 +33,8 @@ func merge(a, b StateMap) StateMap {
 		}
 		if va == Moved || vb == Moved {
 			result[k] = Moved
+		} else if va == Borrowed || vb == Borrowed {
+			result[k] = Borrowed
 		} else {
 			result[k] = Owned
 		}

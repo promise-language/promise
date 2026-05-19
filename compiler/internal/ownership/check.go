@@ -36,6 +36,39 @@ type Checker struct {
 	returnOrigins map[string]ast.Pos
 }
 
+// paramInitialState returns the initial ownership state for a function or
+// method parameter. Non-`~` non-`&` non-Copy parameters (and plain `this`
+// receivers) are `Borrowed`: reads stay legal, but the callee cannot move
+// the value out (e.g., into a constructor field or a `~` callee). This
+// matches the codegen contract — the caller's drop flag is only cleared at
+// the call site for `~` arguments, so a callee-side move on a borrowed
+// parameter would create a double-free (T0338).
+//
+// Setters consume their value parameter implicitly (codegen clears the
+// caller's drop flag at the property assignment site), so setter params
+// are treated as `Owned`.
+func paramInitialState(p *types.Param, consuming bool) VarState {
+	if isCopyType(p.Type()) {
+		return Owned
+	}
+	if p.Ref() == types.RefMut {
+		// `~T` — caller transfers ownership; callee may consume.
+		return Owned
+	}
+	if p.IsVariadic() {
+		// Variadic params receive a synthesized vector that the callee owns
+		// (the caller-side T[] is consumed at the call site, or a fresh one
+		// is built from the variadic args). The callee may consume it.
+		return Owned
+	}
+	if consuming {
+		// Setter value parameter: caller's drop flag is cleared at the
+		// property assignment site, so the callee owns the value.
+		return Owned
+	}
+	return Borrowed
+}
+
 // Check performs ownership analysis on the given file using sema results.
 // Returns any ownership errors found. Also populates info.EarlyDrops with
 // NLL last-use analysis results for early drop insertion in codegen (B0035).
@@ -101,9 +134,10 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.varTypes = make(map[string]types.Type)
 	c.returnOrigins = nil
 
+	consuming := d.IsSetter
 	for _, p := range sig.Params() {
 		if p.Name() != "" && p.Name() != "_" {
-			c.state[p.Name()] = Owned
+			c.state[p.Name()] = paramInitialState(p, consuming)
 			c.params[p.Name()] = true
 			c.trackDeclOrder(p.Name(), p.Type())
 		}
@@ -210,15 +244,16 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.returnOrigins = nil
 
 	if m.Sig().Recv() != nil {
-		c.state["this"] = Owned
+		c.state["this"] = paramInitialState(m.Sig().Recv(), false)
 		c.params["this"] = true
 		if m.Sig().Recv().Type() != nil {
 			c.trackDeclOrder("this", m.Sig().Recv().Type())
 		}
 	}
+	consuming := md.IsSetter
 	for _, p := range m.Sig().Params() {
 		if p.Name() != "" && p.Name() != "_" {
-			c.state[p.Name()] = Owned
+			c.state[p.Name()] = paramInitialState(p, consuming)
 			c.params[p.Name()] = true
 			c.trackDeclOrder(p.Name(), p.Type())
 		}

@@ -33,7 +33,7 @@ type Wrapper {
   string data;
 }
 
-wrap(string s) Wrapper {
+wrap(~string s) Wrapper {
   return Wrapper(data: s);
 }
 

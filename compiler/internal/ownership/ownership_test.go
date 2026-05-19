@@ -1483,7 +1483,8 @@ func TestOwnershipGetterSetterSameName(t *testing.T) {
 			get inner string { return this._inner; }
 			set inner(string v) { this._inner = v; }
 		}
-		test(Box b, string v) {
+		test(Box b) {
+			string v = "hi";
 			b.inner = v;
 		}
 	`)
@@ -3292,4 +3293,269 @@ func TestFieldMoveFromCallResultReturnError(t *testing.T) {
 		test() {}
 	`)
 	expectOwnerError(t, errs, "cannot move field 'headers'")
+}
+
+// === T0338: borrowed parameter cannot be moved ===
+
+// Bug repro: moving a non-~ param into a constructor field is rejected.
+func TestT0338_MoveBorrowedParamIntoConstructor(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box {
+			u8[] data;
+			new(~this, ~u8[] d) { this.data = d; }
+		}
+		_take(u8[] data) int {
+			Box b = Box(d: data);
+			return 0;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'data'")
+}
+
+// Reading a non-~ param via a method call is fine — borrowed reads are OK.
+func TestT0338_BorrowedParamReadOK(t *testing.T) {
+	ownerOK(t, `
+		_read(string s) int { return 1; }
+		test() {
+			string a = "hi";
+			_read(a);
+		}
+	`)
+}
+
+// Returning a non-~ param by value is allowed — codegen emits a B0345
+// post-call alias check that clears the caller's drop flag if the return
+// value aliases the arg.
+func TestT0338_ReturnBorrowedParamOK(t *testing.T) {
+	ownerOK(t, `
+		identity(string s) string { return s; }
+		test() {
+			string a = "hi";
+			string b = identity(a);
+		}
+	`)
+}
+
+// Passing a non-~ param to a ~ callee is rejected.
+func TestT0338_PassBorrowedToConsume(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		forward(string s) { consume(s); }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Plain `this` (non-`~`, non-`&`) cannot itself be moved into a `~` callee.
+func TestT0338_MovePlainThis(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~Box b) {}
+		type Box {
+			int x;
+			leak(this) { consume(this); }
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed receiver 'this'")
+}
+
+// `~this` allows moving the receiver into a ~ callee.
+func TestT0338_MutThisConsumable(t *testing.T) {
+	ownerOK(t, `
+		consume(~Box b) {}
+		type Box {
+			int x;
+			into(~this) { consume(this); }
+		}
+		test() {}
+	`)
+}
+
+// Copy-type params are unaffected by the borrowed-param check.
+func TestT0338_CopyParamMovable(t *testing.T) {
+	ownerOK(t, `
+		f(int x) int { int y = x; return y; }
+		test() { f(1); }
+	`)
+}
+
+// `&` typed param remains borrowed (existing behavior, re-confirm).
+func TestT0338_RefParamBorrowed(t *testing.T) {
+	ownerOK(t, `
+		f(&string s) int { return 1; }
+		test() {
+			string a = "hi";
+			f(&a);
+			int n = 1;
+		}
+	`)
+}
+
+// Local owned values can still be moved — only parameters are borrowed.
+func TestT0338_LocalOwnedMovable(t *testing.T) {
+	ownerOK(t, `
+		consume(~string s) {}
+		test() {
+			string s = "hi";
+			consume(s);
+		}
+	`)
+}
+
+// `~param` allows the callee to move the value into a constructor field.
+func TestT0338_MutParamConsumableInConstructor(t *testing.T) {
+	ownerOK(t, `
+		type Box {
+			u8[] data;
+			new(~this, ~u8[] d) { this.data = d; }
+		}
+		_take(~u8[] data) int {
+			Box b = Box(d: data);
+			return 0;
+		}
+		test() {
+			u8[] v = u8[]();
+			_take(v);
+		}
+	`)
+}
+
+// Methods that mutate `this.field = v` via plain receiver are still legal —
+// no move of `this` itself occurs.
+func TestT0338_PlainThisFieldAssignOK(t *testing.T) {
+	ownerOK(t, `
+		type T {
+			int x;
+			set_x(this, int v) { this.x = v; }
+		}
+		test() {}
+	`)
+}
+
+// Setter parameters are implicitly consumed (codegen clears caller's drop
+// flag at the property assignment), so moving the value into the field is OK.
+func TestT0338_SetterParamConsumable(t *testing.T) {
+	ownerOK(t, `
+		type Box {
+			string _inner;
+			get inner string { return this._inner; }
+			set inner(string v) { this._inner = v; }
+		}
+		test() {
+			Box b = Box(_inner: "");
+			string s = "hi";
+			b.inner = s;
+		}
+	`)
+}
+
+// Variadic parameters are owned by the callee (synthesized vector).
+func TestT0338_VariadicParamOwned(t *testing.T) {
+	ownerOK(t, `
+		consume(~int[] v) {}
+		sum(...int nums) {
+			consume(nums);
+		}
+		test() {}
+	`)
+}
+
+// `move` lambda capture of a borrowed param is rejected — same double-free
+// pattern as moving into a constructor field.
+func TestT0338_LambdaMoveCaptureBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		f(string s) {
+			g := move || -> int {
+				consume(s);
+				return 1;
+			};
+			int n = g();
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move-capture borrowed parameter 's' into a lambda")
+}
+
+// `move` lambda capture of an owned local is fine.
+func TestT0338_LambdaMoveCaptureOwnedLocal(t *testing.T) {
+	ownerOK(t, `
+		consume(~string s) {}
+		test() {
+			string s = "hi";
+			g := move || -> int {
+				consume(s);
+				return 1;
+			};
+			int n = g();
+		}
+	`)
+}
+
+// Consuming an owned local that has an active stored borrow must error
+// inside tryMoveConsume — exercises the HasAnyBorrow check on the consuming
+// path (the equivalent on tryMove was already covered by
+// TestStoredBorrowBlocksMove). Both paths must enforce the same invariant.
+func TestT0338_ConsumeOwnedLocalWhileBorrowed(t *testing.T) {
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(~string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			consume(s);
+			string &r2 = r;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+// Borrowed parameters that are read in both branches of an if/else must
+// remain Borrowed after the merge, so a consuming use after the if/else
+// still errors. Exercises the Borrowed fixed-point branch in state.merge.
+func TestT0338_MergeBorrowedThenConsume(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		_use(string s, bool flag) {
+			if (flag) {
+				int n = s.len;
+			} else {
+				int m = s.len;
+			}
+			consume(s);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Constructor calls go through the unresolved-callee branch of
+// checkCallExpr (sig is nil). Exercises tryMoveConsume on a borrowed
+// parameter passed by name to a constructor — same double-free pattern
+// as the bug repro but via named-argument syntax.
+func TestT0338_ConstructorNamedArgBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box {
+			string s;
+			new(~this, ~string s) { this.s = s; }
+		}
+		_take(string s) {
+			Box b = Box(s: s);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Tuple/array/map literals use tryMoveConsume on each element — verify
+// rejecting a borrowed param being captured into a vector literal.
+func TestT0338_VectorLitBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		_take(string s) {
+			string[] v = [s];
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }

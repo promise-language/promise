@@ -1490,6 +1490,27 @@ func (c *Compiler) genModuleGetterCall(e *ast.MemberExpr, moduleName, propName s
 	return result
 }
 
+// applyMutRefArgOwnership performs the T0087/B0201 ownership transfer for
+// `~` parameters at a generic function/method call site: clears the caller's
+// drop flag and claims string/heap temps for each `~` arg. Mirrors the
+// non-generic logic in genCallArgsWithMutRef. params may be empty/short
+// (e.g., for unresolved callees) — extra args are skipped.
+func (c *Compiler) applyMutRefArgOwnership(argVals []value.Value, params []*types.Param, args []*ast.Arg) {
+	for i, arg := range args {
+		if i >= len(params) || i >= len(argVals) {
+			break
+		}
+		if params[i].Ref() != types.RefMut {
+			continue
+		}
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+		c.claimStringTemp(argVals[i])
+		c.claimHeapTemp(argVals[i])
+	}
+}
+
 // genGenericFuncCall generates a call to a monomorphic generic function instance.
 func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value.Value {
 	// Resolve all type arguments to build the mangled name
@@ -1525,12 +1546,20 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 	}
 
 	// Coerce arguments when crossing type boundaries
+	var sigParams []*types.Param
 	if callee := c.lookupFunc(ident.Name); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
 			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
+			sigParams = sig.Params()
+		}
+	}
+	if sigParams == nil {
+		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
+			sigParams = sig.Params()
 		}
 	}
 
+	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
 	return c.block.NewCall(fn, argVals...)
 }
 
@@ -1563,12 +1592,20 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 	}
 
 	// Coerce arguments when crossing type boundaries.
+	var sigParams []*types.Param
 	if callee := c.lookupFunc(inferred.FuncName); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
 			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
+			sigParams = sig.Params()
+		}
+	}
+	if sigParams == nil {
+		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
+			sigParams = sig.Params()
 		}
 	}
 
+	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
 	return c.block.NewCall(fn, argVals...)
 }
 
@@ -1604,12 +1641,22 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 	}
 
 	// Coerce arguments when crossing type boundaries
+	var sigParams []*types.Param
 	if callee := c.lookupFunc(funcName); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
 			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
+			sigParams = sig.Params()
+		}
+	}
+	// Module-qualified callee may not be visible via lookupFunc; fall back to
+	// the callee expression's type recorded by sema.
+	if sigParams == nil {
+		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
+			sigParams = sig.Params()
 		}
 	}
 
+	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
 	return c.block.NewCall(fn, argVals...)
 }
 

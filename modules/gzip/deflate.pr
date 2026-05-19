@@ -439,7 +439,7 @@ _inflate_dynamic!(_BitReader ~br, u8[] ~out) {
   _inflate_huffman_body(br, out, lit, dist)?^;
 }
 
-inflate!(u8[] data) u8[] `public `doc("Decompresses raw DEFLATE-encoded data (RFC 1951). Raises DecompressError on malformed input.") {
+inflate!(~u8[] data) u8[] `public `doc("Decompresses raw DEFLATE-encoded data (RFC 1951). Raises DecompressError on malformed input.") {
   _BitReader br = _BitReader(data: data);
   u8[] out = u8[]();
   bool done = false;

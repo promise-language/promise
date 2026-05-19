@@ -103,23 +103,25 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 		c.checkExpr(e.Expr)
 
 	case *ast.TupleLit:
+		// T0338: collection literals consume their elements into a new
+		// container that drops them — must reject borrowed params.
 		for _, elem := range e.Elements {
 			c.checkExpr(elem)
-			c.tryMove(elem)
+			c.tryMoveConsume(elem)
 		}
 
 	case *ast.ArrayLit:
 		for _, elem := range e.Elements {
 			c.checkExpr(elem)
-			c.tryMove(elem)
+			c.tryMoveConsume(elem)
 		}
 
 	case *ast.MapLit:
 		for _, entry := range e.Entries {
 			c.checkExpr(entry.Key)
-			c.tryMove(entry.Key)
+			c.tryMoveConsume(entry.Key)
 			c.checkExpr(entry.Value)
-			c.tryMove(entry.Value)
+			c.tryMoveConsume(entry.Value)
 		}
 
 	// Literals have no sub-expressions to walk.
@@ -144,11 +146,18 @@ func (c *Checker) checkIdentUse(e *ast.IdentExpr) {
 
 // tryMove marks the variable referenced by expr as Moved, if it is a
 // non-copy variable tracked in the current state. Also checks that the
-// variable is not actively borrowed.
+// variable is not actively borrowed. Borrowed parameters are not moved —
+// reads stay legal — but consuming contexts (call to `~` param, etc.) must
+// use tryMoveConsume to enforce the T0338 check.
 func (c *Checker) tryMove(expr ast.Expr) {
 	// B0341: check field reads from droppable owners before ident handling.
 	if member, ok := expr.(*ast.MemberExpr); ok {
 		c.checkFieldMoveOwnership(member)
+		return
+	}
+
+	// `this` is a parameter, not a regular tracked variable; no move bookkeeping.
+	if _, ok := expr.(*ast.ThisExpr); ok {
 		return
 	}
 
@@ -175,7 +184,71 @@ func (c *Checker) tryMove(expr ast.Expr) {
 		c.errorf(ident.Pos(), "cannot move use-bound variable '%s'", ident.Name)
 		return
 	}
+	// Borrowed parameters stay borrowed — their state is unchanged by
+	// tryMove. The T0338 check fires at consuming sites via tryMoveConsume.
+	if c.state[ident.Name] == Borrowed {
+		return
+	}
 	// Cannot move while borrowed
+	if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
+		c.errorf(ident.Pos(), "cannot move '%s' while it is borrowed", ident.Name)
+	}
+	c.state[ident.Name] = Moved
+}
+
+// tryMoveConsume is like tryMove but enforces the T0338 check: the value
+// being moved must not be a borrowed parameter, since the caller still owns
+// it and will drop it at scope exit. Used at sites that genuinely consume
+// (e.g., passing to a `~` callee parameter).
+func (c *Checker) tryMoveConsume(expr ast.Expr) {
+	// B0341 field-move check delegated to tryMove; inherit it here too.
+	if member, ok := expr.(*ast.MemberExpr); ok {
+		c.checkFieldMoveOwnership(member)
+		return
+	}
+	// `this` consume requires `~this` receiver.
+	if this, ok := expr.(*ast.ThisExpr); ok {
+		if c.state["this"] == Borrowed {
+			c.errorf(this.Pos(),
+				"cannot move borrowed receiver 'this'; declare the method as 'method(~this)' to consume the receiver")
+		} else if c.state["this"] == Moved {
+			c.errorf(this.Pos(), "use of moved variable 'this'")
+		}
+		return
+	}
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return
+	}
+	obj := c.info.Objects[ident]
+	if obj == nil {
+		return
+	}
+	v, ok := obj.(*types.Var)
+	if !ok {
+		return
+	}
+	if isCopyType(v.Type()) {
+		return
+	}
+	if _, tracked := c.state[ident.Name]; !tracked {
+		return
+	}
+	if c.pinned[ident.Name] {
+		c.errorf(ident.Pos(), "cannot move use-bound variable '%s'", ident.Name)
+		return
+	}
+	// T0338: cannot consume a borrowed parameter — the caller still drops it.
+	if c.state[ident.Name] == Borrowed {
+		if c.params[ident.Name] {
+			c.errorf(ident.Pos(),
+				"cannot move borrowed parameter '%s'; add '~' to the parameter declaration to consume it",
+				ident.Name)
+		} else {
+			c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
+		}
+		return
+	}
 	if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
 		c.errorf(ident.Pos(), "cannot move '%s' while it is borrowed", ident.Name)
 	}
@@ -225,8 +298,10 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 					c.tryMove(arg.Value)
 				} else if params[i].Ref() == types.RefMut {
 					// T0087: ~ on regular params means move (callee owns).
-					// Distinguished from MutRef type params which are mutable borrows.
-					c.tryMove(arg.Value)
+					// T0338: a `~` callee genuinely consumes the value, so the
+					// arg must not be a borrowed parameter — the outer caller
+					// still drops the original at scope exit.
+					c.tryMoveConsume(arg.Value)
 				} else {
 					c.createBorrowWithKind(arg.Value, kind, e.Pos())
 				}
@@ -238,7 +313,7 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 		// Constructor or unresolved call — all args are consumed.
 		for _, arg := range e.Args {
 			c.checkExpr(arg.Value)
-			c.tryMove(arg.Value)
+			c.tryMoveConsume(arg.Value)
 		}
 	}
 }
@@ -639,12 +714,34 @@ func (c *Checker) checkFieldMoveOwnership(e *ast.MemberExpr) {
 // --- Lambda expressions ---
 
 func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
-	// Mark move-captured variables as moved in the enclosing scope
+	// Mark move-captured variables as moved in the enclosing scope.
+	// T0338: a `move` capture of a borrowed parameter would let the lambda
+	// env take ownership of a value the outer caller still drops — the same
+	// double-free pattern as moving into a constructor field. Reject it
+	// with the same hint to add `~`. (Skip `this`: capturing `this` from a
+	// non-`~this` method is a common closure-returning-method pattern;
+	// codegen treats the captured `this` as a borrowed pointer rather than
+	// adding it to the env-drop chain.)
 	if captures := c.info.LambdaCaptures[e]; len(captures) > 0 {
 		for _, cv := range captures {
-			if cv.ByMove {
-				c.state[cv.Obj.Name()] = Moved
+			if !cv.ByMove {
+				continue
 			}
+			name := cv.Obj.Name()
+			if name == "this" {
+				continue
+			}
+			if c.state[name] == Borrowed {
+				if c.params[name] {
+					c.errorf(e.Pos(),
+						"cannot move-capture borrowed parameter '%s' into a lambda; add '~' to the parameter declaration to consume it",
+						name)
+				} else {
+					c.errorf(e.Pos(), "cannot move-capture borrowed value '%s' into a lambda", name)
+				}
+				continue
+			}
+			c.state[name] = Moved
 		}
 	}
 

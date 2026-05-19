@@ -340,7 +340,7 @@ test_multi_field_error_message() `test {
 // Section 7: Error as first-class value
 // ============================================================
 
-make_error(string msg) error {
+make_error(~string msg) error {
   return error(msg);
 }
 
@@ -349,7 +349,7 @@ test_error_as_value() `test {
   assert(e.message == "constructed", "error constructed as regular value");
 }
 
-make_and_raise!(string msg) void {
+make_and_raise!(~string msg) void {
   error e = make_error(msg);
   raise e;
 }

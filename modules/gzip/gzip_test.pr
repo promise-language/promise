@@ -1,0 +1,242 @@
+// All fixtures generated with Python:
+//   gzip.GzipFile(fileobj=buf, mode='wb', mtime=0).write(data)
+gunzip_hello_test() `test {
+  // gzip("hello") with mtime=0
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  raw.push(0xCB);
+  raw.push(0x48);
+  raw.push(0xCD);
+  raw.push(0xC9);
+  raw.push(0xC9);
+  raw.push(0x07);
+  raw.push(0x00);
+  raw.push(0x86);
+  raw.push(0xA6);
+  raw.push(0x10);
+  raw.push(0x36);
+  raw.push(0x05);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = gunzip(data)?!;
+  string s = "hello";
+  u8[] want = s.bytes();
+  _assert_eq(result, want, "gunzip hello");
+}
+
+gunzip_hello_world_test() `test {
+  // gzip("Hello, World!\n")
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  raw.push(0xF3);
+  raw.push(0x48);
+  raw.push(0xCD);
+  raw.push(0xC9);
+  raw.push(0xC9);
+  raw.push(0xD7);
+  raw.push(0x51);
+  raw.push(0x08);
+  raw.push(0xCF);
+  raw.push(0x2F);
+  raw.push(0xCA);
+  raw.push(0x49);
+  raw.push(0x51);
+  raw.push(0xE4);
+  raw.push(0x02);
+  raw.push(0x00);
+  raw.push(0x84);
+  raw.push(0x9E);
+  raw.push(0xE8);
+  raw.push(0xB4);
+  raw.push(0x0E);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = gunzip(data)?!;
+  string s = "Hello, World!\n";
+  u8[] want = s.bytes();
+  _assert_eq(result, want, "gunzip Hello World");
+}
+
+gunzip_a100_test() `test {
+  // gzip("A" * 100) — exercises back-reference compression.
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  raw.push(0x73);
+  raw.push(0x74);
+  raw.push(0xA4);
+  raw.push(0x3D);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x8D);
+  raw.push(0xBC);
+  raw.push(0x97);
+  raw.push(0x95);
+  raw.push(0x64);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = gunzip(data)?!;
+  assert(result.len == 100, "100 bytes out");
+  int i = 0;
+  while i < 100 {
+    assert(result[i] == 0x41u8, "byte " + i.to_string() + " is 'A'");
+    i = i + 1;
+  }
+}
+
+// T0333: WASM-only "index out of bounds" in batched gzip module tests.
+// Remove the exclude when T0333 is fixed.
+gunzip_with_fname_test() `test(exclude: "wasm32") {
+  // gzip("hi", filename="test.txt") — FNAME flag set.
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x08);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  raw.push(0x74);
+  raw.push(0x65);
+  raw.push(0x73);
+  raw.push(0x74);
+  raw.push(0x2E);
+  raw.push(0x74);
+  raw.push(0x78);
+  raw.push(0x74);
+  raw.push(0x00);
+  raw.push(0xCB);
+  raw.push(0xC8);
+  raw.push(0x04);
+  raw.push(0x00);
+  raw.push(0xAC);
+  raw.push(0x2A);
+  raw.push(0x93);
+  raw.push(0xD8);
+  raw.push(0x02);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = gunzip(data)?!;
+  string s = "hi";
+  u8[] want = s.bytes();
+  _assert_eq(result, want, "gunzip with FNAME");
+}
+
+_try_gunzip(u8[] data) bool {
+  u8[] _v = gunzip(data)? e {
+    return true;
+  };
+  return false;
+}
+
+gunzip_bad_magic_test() `test {
+  // Wrong magic bytes (not 1f 8b).
+  int[] raw = int[]();
+  raw.push(0xFF);
+  raw.push(0xFF);
+  raw.push(0x08);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  raw.push(0xCB);
+  raw.push(0x48);
+  raw.push(0xCD);
+  raw.push(0xC9);
+  raw.push(0xC9);
+  raw.push(0x07);
+  raw.push(0x00);
+  raw.push(0x86);
+  raw.push(0xA6);
+  raw.push(0x10);
+  raw.push(0x36);
+  raw.push(0x05);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  assert(_try_gunzip(data), "bad magic raises");
+}
+
+gunzip_corrupt_crc_test() `test {
+  // Same as gunzip_hello_test but with CRC trailer XOR'd to break it.
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  raw.push(0xCB);
+  raw.push(0x48);
+  raw.push(0xCD);
+  raw.push(0xC9);
+  raw.push(0xC9);
+  raw.push(0x07);
+  raw.push(0x00);
+  raw.push(0xFF);
+  raw.push(0xA6);
+  raw.push(0x10);
+  raw.push(0x36);
+  raw.push(0x05);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  assert(_try_gunzip(data), "corrupt CRC raises");
+}
+
+gunzip_truncated_test() `test {
+  // Just the magic + CM, no body.
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  assert(_try_gunzip(data), "truncated stream raises");
+}

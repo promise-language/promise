@@ -1,0 +1,115 @@
+// gzip/gzip.pr — RFC 1952 (gzip file format) decompressor.
+// Wraps inflate() with header parsing and trailer (CRC32 + ISIZE) verification.
+// Header byte indices and FLG bit positions.
+_FLG_FTEXT() int => 0x01;
+_FLG_FHCRC() int => 0x02;
+_FLG_FEXTRA() int => 0x04;
+_FLG_FNAME() int => 0x08;
+_FLG_FCOMMENT() int => 0x10;
+
+// Skip a NUL-terminated string in `data` starting at `pos`. Returns the index
+// of the byte right after the terminating 0x00. Raises if no NUL is found.
+_skip_cstring!(u8[] &data, int pos) int {
+  int i = pos;
+  while i < data.len {
+    if data[i] == 0u8 {
+      return i + 1;
+    }
+    i = i + 1;
+  }
+  raise DecompressError(message: "unterminated gzip metadata string", at_byte: pos);
+}
+
+// Read 4 bytes little-endian as u32 from `data` starting at `pos`.
+_read_u32_le!(u8[] &data, int pos) u32 {
+  if pos + 4 > data.len {
+    raise DecompressError(message: "gzip stream truncated (need 4 bytes)", at_byte: pos);
+  }
+  u32 b0 = data[pos] as! u32;
+  u32 b1 = data[pos + 1] as! u32;
+  u32 b2 = data[pos + 2] as! u32;
+  u32 b3 = data[pos + 3] as! u32;
+  return b0 | (b1 << 8u32) | (b2 << 16u32) | (b3 << 24u32);
+}
+
+// Read 2 bytes little-endian as u32 from `data` starting at `pos`.
+_read_u16_le!(u8[] &data, int pos) u32 {
+  if pos + 2 > data.len {
+    raise DecompressError(message: "gzip stream truncated (need 2 bytes)", at_byte: pos);
+  }
+  u32 b0 = data[pos] as! u32;
+  u32 b1 = data[pos + 1] as! u32;
+  return b0 | (b1 << 8u32);
+}
+
+gunzip!(u8[] &data) u8[] `public `doc("Decompresses a gzip-encoded byte stream (RFC 1952). Validates magic, CRC32, and uncompressed length. Raises DecompressError on any failure. Decodes only the first member of multi-member streams.") {
+  if data.len < 18 {
+    raise DecompressError(message: "gzip stream too short (header + trailer require 18 bytes)", at_byte: 0);
+  }
+
+  // Magic 1f 8b, CM=8.
+  if data[0] != 0x1Fu8 || data[1] != 0x8Bu8 {
+    raise DecompressError(message: "invalid gzip magic (expected 1f 8b)", at_byte: 0);
+  }
+  if data[2] != 0x08u8 {
+    raise DecompressError(message: "unsupported gzip compression method (only CM=8/DEFLATE is supported)", at_byte: 2);
+  }
+
+  int flg = data[3] as! int;
+  // MTIME (4) + XFL (1) + OS (1) follow but we don't validate them.
+  int pos = 10;
+
+  if (flg & _FLG_FEXTRA()) != 0 {
+    u32 xlen = _read_u16_le(data, pos)?^;
+    pos = pos + 2;
+    pos = pos + (xlen as! int);
+    if pos > data.len {
+      raise DecompressError(message: "gzip FEXTRA field overruns input", at_byte: pos);
+    }
+  }
+  if (flg & _FLG_FNAME()) != 0 {
+    pos = _skip_cstring(data, pos)?^;
+  }
+  if (flg & _FLG_FCOMMENT()) != 0 {
+    pos = _skip_cstring(data, pos)?^;
+  }
+  if (flg & _FLG_FHCRC()) != 0 {
+    // 16-bit header CRC. We don't verify it (low value, RFC says optional).
+    if pos + 2 > data.len {
+      raise DecompressError(message: "gzip stream truncated (FHCRC)", at_byte: pos);
+    }
+    pos = pos + 2;
+  }
+
+  int trailer_pos = data.len - 8;
+  if pos > trailer_pos {
+    raise DecompressError(message: "gzip header overruns into trailer", at_byte: pos);
+  }
+
+  u32 expected_crc = _read_u32_le(data, trailer_pos)?^;
+  u32 expected_isize = _read_u32_le(data, trailer_pos + 4)?^;
+
+  // Copy the compressed body byte-by-byte rather than using a slice expression.
+  // T0332: slicing + consuming + raising in the same function segfaults at runtime.
+  u8[] body = u8[]();
+  int j = pos;
+  while j < trailer_pos {
+    body.push(data[j]);
+    j = j + 1;
+  }
+
+  u8[] result = inflate(body)?^;
+
+  // ISIZE = uncompressed length mod 2^32. Compare low 32 bits.
+  u32 actual_isize = (result.len as! u32);
+  if actual_isize != expected_isize {
+    raise DecompressError(message: "gzip ISIZE mismatch (length check failed)", at_byte: trailer_pos + 4);
+  }
+
+  u32 actual_crc = crc32(result);
+  if actual_crc != expected_crc {
+    raise DecompressError(message: "gzip CRC32 mismatch (data corrupt)", at_byte: trailer_pos);
+  }
+
+  return result;
+}

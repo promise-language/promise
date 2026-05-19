@@ -1,0 +1,35 @@
+// gzip/crc32.pr — IEEE polynomial CRC32 (RFC 1952 §2.3.1, ISO 3309).
+// Sarwate's table-driven byte-at-a-time algorithm.
+_crc32_table() u32[] {
+  u32[] t = u32[].filled(0u32, 256);
+  u32 poly = 0xEDB88320u32;
+  int i = 0;
+  while i < 256 {
+    u32 c = i as! u32;
+    int k = 0;
+    while k < 8 {
+      if (c & 1u32) != 0u32 {
+        c = (c >> 1u32) ^ poly;
+      } else {
+        c = c >> 1u32;
+      }
+      k = k + 1;
+    }
+    t[i] = c;
+    i = i + 1;
+  }
+  return t;
+}
+
+crc32(u8[] &data) u32 `public `doc("Computes the IEEE polynomial CRC32 (used by gzip and zlib) over a byte slice.") {
+  u32[] table = _crc32_table();
+  u32 crc = 0xFFFFFFFFu32;
+  int i = 0;
+  while i < data.len {
+    u8 b = data[i];
+    u32 idx = (crc ^ (b as! u32)) & 0xFFu32;
+    crc = table[idx as! int] ^ (crc >> 8u32);
+    i = i + 1;
+  }
+  return crc ^ 0xFFFFFFFFu32;
+}

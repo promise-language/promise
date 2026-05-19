@@ -272,11 +272,12 @@ type EmbedDirEntry struct {
 
 // EmbedInfo records metadata for a module-level getter with an `embed annotation.
 type EmbedInfo struct {
-	Path       string          // raw relative path from the annotation
-	Kind       EmbedKind       // target type (string, u8[], or EmbeddedFiles)
-	Compress   bool            // `embed("path", compress: true)
-	Data       []byte          // populated after sema by ResolveEmbeds
-	DirEntries []EmbedDirEntry // populated for EmbedDir kind by ResolveEmbeds (T0031)
+	Path         string          // raw relative path from the annotation
+	Kind         EmbedKind       // target type (string, u8[], or EmbeddedFiles)
+	Compress     bool            // `embed("path", compress: true)
+	Data         []byte          // populated after sema by ResolveEmbeds; gzipped if Compress
+	OriginalSize int64           // uncompressed length when Compress is true
+	DirEntries   []EmbedDirEntry // populated for EmbedDir kind by ResolveEmbeds (T0031)
 }
 
 // NarrowedVar records a single variable narrowing (T? → T).

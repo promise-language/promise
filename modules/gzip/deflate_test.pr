@@ -1,0 +1,250 @@
+// Test fixtures generated with Python:
+//   zlib.compress(s)[2:-4]   # strip 2-byte zlib header and 4-byte adler trailer
+_bytes(int[] xs) u8[] {
+  u8[] r = u8[]();
+  for v in xs {
+    r.push(v as! u8);
+  }
+  return r;
+}
+
+_assert_eq(u8[] got, u8[] want, string label) {
+  assert(got.len == want.len, label + " length");
+  int i = 0;
+  while i < want.len {
+    assert(got[i] == want[i], label + " byte " + i.to_string());
+    i = i + 1;
+  }
+}
+
+inflate_empty_stored_test() `test {
+  // Empty stored block: BFINAL=1, BTYPE=00, padding-aligned, LEN=0, NLEN=0xFFFF.
+  // Bit layout: 0x01 (BFINAL=1, BTYPE=00, then alignment pad), 00 00, FF FF.
+  int[] raw = int[]();
+  raw.push(0x01);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0xFF);
+  raw.push(0xFF);
+  u8[] data = _bytes(raw);
+  u8[] result = inflate(data)?!;
+  assert(result.len == 0, "empty stored block decompresses to 0 bytes");
+}
+
+inflate_fixed_hello_test() `test {
+  // zlib.compress(b'hello')[2:-4] = cb 48 cd c9 c9 07 00 (fixed Huffman block).
+  int[] raw = int[]();
+  raw.push(0xCB);
+  raw.push(0x48);
+  raw.push(0xCD);
+  raw.push(0xC9);
+  raw.push(0xC9);
+  raw.push(0x07);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = inflate(data)?!;
+  string s = "hello";
+  u8[] want = s.bytes();
+  _assert_eq(result, want, "hello");
+}
+
+inflate_fixed_aaaa_test() `test {
+  // zlib.compress(b'AAAA')[2:-4] — fixed-Huffman with literal+length back-reference.
+  int[] raw = int[]();
+  raw.push(0x73);
+  raw.push(0x74);
+  raw.push(0x74);
+  raw.push(0x74);
+  raw.push(0x04);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = inflate(data)?!;
+  string s = "AAAA";
+  u8[] want = s.bytes();
+  _assert_eq(result, want, "AAAA");
+}
+
+// T0333: WASM-only "index out of bounds" in batched gzip module tests.
+// Remove the exclude when T0333 is fixed.
+inflate_fixed_long_aaa_test() `test(exclude: "wasm32") {
+  // 20 'A' bytes — exercises a longer back-reference (length code with extra bits).
+  int[] raw = int[]();
+  raw.push(0x73);
+  raw.push(0x74);
+  raw.push(0xC4);
+  raw.push(0x04);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = inflate(data)?!;
+  string s = "AAAAAAAAAAAAAAAAAAAA";
+  u8[] want = s.bytes(); // T0331 workaround: bind temp to local
+  _assert_eq(result, want, "20 As");
+}
+
+inflate_fixed_repeated_test() `test {
+  // 'abcdefghij' repeated 10 times — fixed Huffman with overlapping back-references.
+  int[] raw = int[]();
+  raw.push(0x4B);
+  raw.push(0x4C);
+  raw.push(0x4A);
+  raw.push(0x4E);
+  raw.push(0x49);
+  raw.push(0x4D);
+  raw.push(0x4B);
+  raw.push(0xCF);
+  raw.push(0xC8);
+  raw.push(0xCC);
+  raw.push(0x4A);
+  raw.push(0xA4);
+  raw.push(0x19);
+  raw.push(0x0B);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  u8[] result = inflate(data)?!;
+  string s = "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij";
+  u8[] want = s.bytes(); // T0331 workaround: bind temp to local
+  _assert_eq(result, want, "10x abcdefghij");
+}
+
+inflate_dynamic_huffman_test() `test {
+  // 145-byte text via dynamic Huffman (level=9 in Python's zlib).
+  int[] raw = int[]();
+  raw.push(0x2D);
+  raw.push(0xCD);
+  raw.push(0x41);
+  raw.push(0x0A);
+  raw.push(0x42);
+  raw.push(0x31);
+  raw.push(0x0C);
+  raw.push(0x04);
+  raw.push(0xD0);
+  raw.push(0xAB);
+  raw.push(0xCC);
+  raw.push(0x01);
+  raw.push(0xF4);
+  raw.push(0xDF);
+  raw.push(0xC1);
+  raw.push(0x95);
+  raw.push(0xB8);
+  raw.push(0x73);
+  raw.push(0xE1);
+  raw.push(0x05);
+  raw.push(0x42);
+  raw.push(0x7F);
+  raw.push(0xDA);
+  raw.push(0x1F);
+  raw.push(0x68);
+  raw.push(0x93);
+  raw.push(0x4F);
+  raw.push(0x12);
+  raw.push(0x11);
+  raw.push(0x6F);
+  raw.push(0x6F);
+  raw.push(0x0B);
+  raw.push(0xEE);
+  raw.push(0x86);
+  raw.push(0x81);
+  raw.push(0x37);
+  raw.push(0xF3);
+  raw.push(0x74);
+  raw.push(0x1B);
+  raw.push(0x12);
+  raw.push(0x0C);
+  raw.push(0x09);
+  raw.push(0x10);
+  raw.push(0x4E);
+  raw.push(0xB7);
+  raw.push(0xE6);
+  raw.push(0x34);
+  raw.push(0x86);
+  raw.push(0x68);
+  raw.push(0x43);
+  raw.push(0x27);
+  raw.push(0x6D);
+  raw.push(0x6F);
+  raw.push(0x6A);
+  raw.push(0x8C);
+  raw.push(0x9D);
+  raw.push(0x43);
+  raw.push(0x9A);
+  raw.push(0xF2);
+  raw.push(0x8E);
+  raw.push(0x6A);
+  raw.push(0x8E);
+  raw.push(0xDB);
+  raw.push(0x03);
+  raw.push(0xB3);
+  raw.push(0xD3);
+  raw.push(0x0C);
+  raw.push(0xA4);
+  raw.push(0x61);
+  raw.push(0x06);
+  raw.push(0x76);
+  raw.push(0x4A);
+  raw.push(0x46);
+  raw.push(0x31);
+  raw.push(0x77);
+  raw.push(0x2E);
+  raw.push(0x79);
+  raw.push(0x41);
+  raw.push(0x70);
+  raw.push(0xAF);
+  raw.push(0xD7);
+  raw.push(0x62);
+  raw.push(0x9A);
+  raw.push(0x24);
+  raw.push(0x4B);
+  raw.push(0xFC);
+  raw.push(0xF7);
+  raw.push(0x02);
+  raw.push(0x5C);
+  raw.push(0xAB);
+  raw.push(0x14);
+  raw.push(0x99);
+  raw.push(0xAE);
+  raw.push(0x7F);
+  raw.push(0x37);
+  raw.push(0xBC);
+  raw.push(0x8E);
+  raw.push(0x25);
+  raw.push(0xC6);
+  raw.push(0x29);
+  raw.push(0x9D);
+  raw.push(0x7D);
+  raw.push(0xFD);
+  raw.push(0x7E);
+  raw.push(0x5C);
+  raw.push(0x32);
+  raw.push(0x59);
+  raw.push(0x21);
+  raw.push(0x8A);
+  raw.push(0xBB);
+  raw.push(0x6D);
+  raw.push(0x3F);
+  u8[] data = _bytes(raw);
+  u8[] result = inflate(data)?!;
+  string s = "Promise is a programming language designed for AI agents to generate correct, self-contained programs efficiently. The compiler is written in Go.";
+  u8[] want = s.bytes();
+  _assert_eq(result, want, "dynamic Huffman 145B");
+}
+
+_try_inflate(u8[] data) bool {
+  u8[] _v = inflate(data)? e {
+    return true;
+  };
+  return false;
+}
+
+inflate_reserved_btype_test() `test {
+  // Single byte 0x07 = BFINAL=1, BTYPE=11 (reserved) — must raise.
+  int[] raw = int[]();
+  raw.push(0x07);
+  assert(_try_inflate(_bytes(raw)), "reserved BTYPE raises");
+}
+
+inflate_truncated_test() `test {
+  // Truncated stream: BFINAL=1, BTYPE=01, then EOF mid-symbol.
+  int[] raw = int[]();
+  raw.push(0x03);
+  assert(_try_inflate(_bytes(raw)), "truncated stream raises");
+}

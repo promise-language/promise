@@ -1,0 +1,463 @@
+// gzip/deflate.pr — RFC 1951 (DEFLATE) decompressor in pure Promise.
+//
+// Implements the puff.c style canonical-Huffman decoder (bit-by-bit walk,
+// no large lookup tables). This trades raw decode speed for code simplicity
+// and small memory footprint, which is appropriate for the embed-decompress
+// use case (one-shot decode of small/medium blobs at program startup).
+// ── Length code base values and extra bits (RFC 1951 §3.2.5) ──
+_length_base() int[] {
+  int[] r = int[]();
+  r.push(3);
+  r.push(4);
+  r.push(5);
+  r.push(6);
+  r.push(7);
+  r.push(8);
+  r.push(9);
+  r.push(10);
+  r.push(11);
+  r.push(13);
+  r.push(15);
+  r.push(17);
+  r.push(19);
+  r.push(23);
+  r.push(27);
+  r.push(31);
+  r.push(35);
+  r.push(43);
+  r.push(51);
+  r.push(59);
+  r.push(67);
+  r.push(83);
+  r.push(99);
+  r.push(115);
+  r.push(131);
+  r.push(163);
+  r.push(195);
+  r.push(227);
+  r.push(258);
+  return r;
+}
+
+_length_extra() int[] {
+  int[] r = int[]();
+  r.push(0);
+  r.push(0);
+  r.push(0);
+  r.push(0);
+  r.push(0);
+  r.push(0);
+  r.push(0);
+  r.push(0);
+  r.push(1);
+  r.push(1);
+  r.push(1);
+  r.push(1);
+  r.push(2);
+  r.push(2);
+  r.push(2);
+  r.push(2);
+  r.push(3);
+  r.push(3);
+  r.push(3);
+  r.push(3);
+  r.push(4);
+  r.push(4);
+  r.push(4);
+  r.push(4);
+  r.push(5);
+  r.push(5);
+  r.push(5);
+  r.push(5);
+  r.push(0);
+  return r;
+}
+
+// ── Distance code base values and extra bits (RFC 1951 §3.2.5) ──
+_dist_base() int[] {
+  int[] r = int[]();
+  r.push(1);
+  r.push(2);
+  r.push(3);
+  r.push(4);
+  r.push(5);
+  r.push(7);
+  r.push(9);
+  r.push(13);
+  r.push(17);
+  r.push(25);
+  r.push(33);
+  r.push(49);
+  r.push(65);
+  r.push(97);
+  r.push(129);
+  r.push(193);
+  r.push(257);
+  r.push(385);
+  r.push(513);
+  r.push(769);
+  r.push(1025);
+  r.push(1537);
+  r.push(2049);
+  r.push(3073);
+  r.push(4097);
+  r.push(6145);
+  r.push(8193);
+  r.push(12289);
+  r.push(16385);
+  r.push(24577);
+  return r;
+}
+
+_dist_extra() int[] {
+  int[] r = int[]();
+  r.push(0);
+  r.push(0);
+  r.push(0);
+  r.push(0);
+  r.push(1);
+  r.push(1);
+  r.push(2);
+  r.push(2);
+  r.push(3);
+  r.push(3);
+  r.push(4);
+  r.push(4);
+  r.push(5);
+  r.push(5);
+  r.push(6);
+  r.push(6);
+  r.push(7);
+  r.push(7);
+  r.push(8);
+  r.push(8);
+  r.push(9);
+  r.push(9);
+  r.push(10);
+  r.push(10);
+  r.push(11);
+  r.push(11);
+  r.push(12);
+  r.push(12);
+  r.push(13);
+  r.push(13);
+  return r;
+}
+
+// Code-length code order used by dynamic Huffman headers (RFC 1951 §3.2.7).
+_clen_order() int[] {
+  int[] r = int[]();
+  r.push(16);
+  r.push(17);
+  r.push(18);
+  r.push(0);
+  r.push(8);
+  r.push(7);
+  r.push(9);
+  r.push(6);
+  r.push(10);
+  r.push(5);
+  r.push(11);
+  r.push(4);
+  r.push(12);
+  r.push(3);
+  r.push(13);
+  r.push(2);
+  r.push(14);
+  r.push(1);
+  r.push(15);
+  return r;
+}
+
+// Canonical Huffman decoder using the puff.c bit-by-bit algorithm.
+// Stores: counts[L] = number of codes of length L (1..15),
+//         symbols[]  = symbols sorted by (length, value).
+type _HuffTable {
+  int[] counts;
+  int[] symbols;
+
+  new!(~this, int[] code_lengths) {
+    int n = code_lengths.len;
+    int max_bits = 15;
+
+    int[] counts = int[].filled(0, max_bits + 1);
+    int i = 0;
+    while i < n {
+      int L = code_lengths[i];
+      if L > max_bits {
+        raise DecompressError(message: "Huffman code length exceeds 15", at_byte: -1);
+      }
+      counts[L] = counts[L] + 1;
+      i = i + 1;
+    }
+    counts[0] = 0;
+
+    // Compute number of symbols, validate the code is complete or single-zero.
+    int total = 0;
+    int L = 1;
+    while L <= max_bits {
+      total = total + counts[L];
+      L = L + 1;
+    }
+
+    // Per-length cumulative offsets for sorting symbols.
+    int[] offsets = int[].filled(0, max_bits + 2);
+    int sum = 0;
+    L = 1;
+    while L <= max_bits {
+      offsets[L] = sum;
+      sum = sum + counts[L];
+      L = L + 1;
+    }
+
+    int[] symbols = int[].filled(0, total);
+    int sym = 0;
+    while sym < n {
+      int len = code_lengths[sym];
+      if len != 0 {
+        symbols[offsets[len]] = sym;
+        offsets[len] = offsets[len] + 1;
+      }
+      sym = sym + 1;
+    }
+
+    this.counts = counts;
+    this.symbols = symbols;
+  }
+
+  // Decode one symbol from the bit stream (puff.c §decode).
+  decode!(this, _BitReader ~br) int {
+    int code = 0;
+    int first = 0;
+    int index = 0;
+    int L = 1;
+    while L <= 15 {
+      int bit = br.read_bits(1)?^ as! int;
+      code = (code << 1) | bit;
+      int count = this.counts[L];
+      if code - count < first {
+        return this.symbols[index + (code - first)];
+      }
+      index = index + count;
+      first = (first + count) << 1;
+      L = L + 1;
+    }
+    raise DecompressError(message: "invalid Huffman code (no symbol matched within 15 bits)", at_byte: br.byte_pos);
+  }
+}
+
+// ── Fixed Huffman tables (RFC 1951 §3.2.6) ──
+// Lit/Length: symbols 0..143 → 8 bits, 144..255 → 9 bits,
+//             256..279 → 7 bits, 280..287 → 8 bits.
+_fixed_litlen_lens() int[] {
+  int[] r = int[].filled(0, 288);
+  int i = 0;
+  while i < 144 {
+    r[i] = 8;
+    i = i + 1;
+  }
+  while i < 256 {
+    r[i] = 9;
+    i = i + 1;
+  }
+  while i < 280 {
+    r[i] = 7;
+    i = i + 1;
+  }
+  while i < 288 {
+    r[i] = 8;
+    i = i + 1;
+  }
+  return r;
+}
+
+_fixed_dist_lens() int[] {
+  return int[].filled(5, 30);
+}
+
+// Decode one stored (BTYPE=00) block — copy LEN bytes literally.
+_inflate_stored!(_BitReader ~br, u8[] ~out) {
+  br.align_to_byte();
+  u32 len = br.read_aligned_u16_le()?^;
+  u32 nlen = br.read_aligned_u16_le()?^;
+  if (len ^ 0xFFFFu32) != nlen {
+    raise DecompressError(message: "stored block length mismatch (LEN vs ~LEN)", at_byte: br.byte_pos);
+  }
+  int n = len as! int;
+  int i = 0;
+  while i < n {
+    u8 b = br.read_aligned_byte()?^;
+    out.push(b);
+    i = i + 1;
+  }
+}
+
+// Decode one Huffman-coded block body using the supplied lit/length and
+// distance trees. Stops when symbol 256 (end of block) appears.
+_inflate_huffman_body!(_BitReader ~br, u8[] ~out, _HuffTable lit, _HuffTable dist) {
+  int[] lbase = _length_base();
+  int[] lextra = _length_extra();
+  int[] dbase = _dist_base();
+  int[] dextra = _dist_extra();
+  while true {
+    int sym = lit.decode(br)?^;
+    if sym < 0 || sym > 285 {
+      raise DecompressError(message: "literal/length symbol out of range", at_byte: br.byte_pos);
+    }
+    if sym < 256 {
+      out.push(sym as! u8);
+    } else if sym == 256 {
+      return;
+    } else {
+      int li = sym - 257;
+      int length = lbase[li];
+      int extra = lextra[li];
+      if extra > 0 {
+        u32 e = br.read_bits(extra)?^;
+        length = length + (e as! int);
+      }
+      int dsym = dist.decode(br)?^;
+      if dsym < 0 || dsym > 29 {
+        raise DecompressError(message: "distance symbol out of range", at_byte: br.byte_pos);
+      }
+      int distance = dbase[dsym];
+      int dextra_n = dextra[dsym];
+      if dextra_n > 0 {
+        u32 e = br.read_bits(dextra_n)?^;
+        distance = distance + (e as! int);
+      }
+      if distance > out.len {
+        raise DecompressError(message: "back-reference distance exceeds output length", at_byte: br.byte_pos);
+      }
+      // RLE-style copy: must support overlapping (distance < length).
+      int src = out.len - distance;
+      int copied = 0;
+      while copied < length {
+        out.push(out[src + copied]);
+        copied = copied + 1;
+      }
+    }
+  }
+}
+
+// Decode a fixed-Huffman (BTYPE=01) block.
+_inflate_fixed!(_BitReader ~br, u8[] ~out) {
+  _HuffTable lit = _HuffTable(code_lengths: _fixed_litlen_lens())?^;
+  _HuffTable dist = _HuffTable(code_lengths: _fixed_dist_lens())?^;
+  _inflate_huffman_body(br, out, lit, dist)?^;
+}
+
+// Decode a dynamic-Huffman (BTYPE=10) block: read the embedded code-length
+// alphabet, then the lit/length and distance code lengths, build trees, and
+// decode the body.
+_inflate_dynamic!(_BitReader ~br, u8[] ~out) {
+  int hlit = (br.read_bits(5)?^ as! int) + 257;
+  int hdist = (br.read_bits(5)?^ as! int) + 1;
+  int hclen = (br.read_bits(4)?^ as! int) + 4;
+  if hlit > 286 || hdist > 30 {
+    raise DecompressError(message: "dynamic-block header has too many literal/distance codes", at_byte: br.byte_pos);
+  }
+
+  // Read code-length code lengths, in CLEN_ORDER.
+  int[] clen_order = _clen_order();
+  int[] code_len_lens = int[].filled(0, 19);
+  int i = 0;
+  while i < hclen {
+    int v = br.read_bits(3)?^ as! int;
+    code_len_lens[clen_order[i]] = v;
+    i = i + 1;
+  }
+
+  _HuffTable code_len_tree = _HuffTable(code_lengths: code_len_lens)?^;
+
+  // Decode hlit + hdist code lengths using the code-length alphabet.
+  int total = hlit + hdist;
+  int[] all_lens = int[].filled(0, total);
+  int idx = 0;
+  while idx < total {
+    int sym = code_len_tree.decode(br)?^;
+    if sym < 16 {
+      all_lens[idx] = sym;
+      idx = idx + 1;
+    } else if sym == 16 {
+      if idx == 0 {
+        raise DecompressError(message: "code 16 (repeat-previous) at start of code-length sequence", at_byte: br.byte_pos);
+      }
+      int prev = all_lens[idx - 1];
+      int repeat = (br.read_bits(2)?^ as! int) + 3;
+      int k = 0;
+      while k < repeat {
+        if idx >= total {
+          raise DecompressError(message: "code-length repeat overflows lit+dist", at_byte: br.byte_pos);
+        }
+        all_lens[idx] = prev;
+        idx = idx + 1;
+        k = k + 1;
+      }
+    } else if sym == 17 {
+      int repeat = (br.read_bits(3)?^ as! int) + 3;
+      int k = 0;
+      while k < repeat {
+        if idx >= total {
+          raise DecompressError(message: "code-length zero-run overflows lit+dist", at_byte: br.byte_pos);
+        }
+        all_lens[idx] = 0;
+        idx = idx + 1;
+        k = k + 1;
+      }
+    } else if sym == 18 {
+      int repeat = (br.read_bits(7)?^ as! int) + 11;
+      int k = 0;
+      while k < repeat {
+        if idx >= total {
+          raise DecompressError(message: "code-length zero-run overflows lit+dist", at_byte: br.byte_pos);
+        }
+        all_lens[idx] = 0;
+        idx = idx + 1;
+        k = k + 1;
+      }
+    } else {
+      raise DecompressError(message: "invalid code-length symbol", at_byte: br.byte_pos);
+    }
+  }
+
+  int[] lit_lens = int[].filled(0, hlit);
+  int[] dist_lens = int[].filled(0, hdist);
+  int j = 0;
+  while j < hlit {
+    lit_lens[j] = all_lens[j];
+    j = j + 1;
+  }
+  j = 0;
+  while j < hdist {
+    dist_lens[j] = all_lens[hlit + j];
+    j = j + 1;
+  }
+
+  _HuffTable lit = _HuffTable(code_lengths: lit_lens)?^;
+  _HuffTable dist = _HuffTable(code_lengths: dist_lens)?^;
+  _inflate_huffman_body(br, out, lit, dist)?^;
+}
+
+inflate!(u8[] data) u8[] `public `doc("Decompresses raw DEFLATE-encoded data (RFC 1951). Raises DecompressError on malformed input.") {
+  _BitReader br = _BitReader(data: data);
+  u8[] out = u8[]();
+  bool done = false;
+  while !done {
+    u32 bfinal = br.read_bits(1)?^;
+    u32 btype = br.read_bits(2)?^;
+    if btype == 0u32 {
+      _inflate_stored(br, out)?^;
+    } else if btype == 1u32 {
+      _inflate_fixed(br, out)?^;
+    } else if btype == 2u32 {
+      _inflate_dynamic(br, out)?^;
+    } else {
+      raise DecompressError(message: "reserved block type (BTYPE=11)", at_byte: br.byte_pos);
+    }
+    if bfinal != 0u32 {
+      done = true;
+    }
+  }
+  return out;
+}

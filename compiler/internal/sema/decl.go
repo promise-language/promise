@@ -1190,6 +1190,11 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 				c.errorf(d.Pos(), "`embed getter '%s' must return string, u8[], or EmbeddedFiles, got %s", d.Name, retType)
 				valid = false
 			}
+			compress := extractEmbedCompress(d.Annotations)
+			if compress && kind == EmbedDir {
+				c.errorf(d.Pos(), "`embed getter '%s' with directory or glob path cannot use compress: true (per-file compression for directory embeds is not supported)", d.Name)
+				valid = false
+			}
 			if valid {
 				if c.info.Embeds == nil {
 					c.info.Embeds = make(map[*ast.FuncDecl]*EmbedInfo)
@@ -1197,7 +1202,7 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 				c.info.Embeds[d] = &EmbedInfo{
 					Path:     embedPath,
 					Kind:     kind,
-					Compress: extractEmbedCompress(d.Annotations),
+					Compress: compress,
 				}
 			}
 		}

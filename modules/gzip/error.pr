@@ -1,0 +1,3 @@
+type DecompressError is error `public `doc("Error raised when gzip/DEFLATE decompression fails.") {
+  int at_byte `doc("Byte offset into the compressed input where the failure was detected (-1 if unknown).");
+}

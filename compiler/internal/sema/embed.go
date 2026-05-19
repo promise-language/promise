@@ -1,6 +1,8 @@
 package sema
 
 import (
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io/fs"
 	"os"
@@ -48,7 +50,22 @@ func ResolveEmbeds(info *Info, sourceDir string) []error {
 				continue
 			}
 
-			embed.Data = data
+			if embed.Compress {
+				var buf bytes.Buffer
+				gw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+				if _, werr := gw.Write(data); werr != nil {
+					errs = append(errs, fmtEmbedError(fd, "gzip-compress of embedded file %q failed: %v", embed.Path, werr))
+					continue
+				}
+				if cerr := gw.Close(); cerr != nil {
+					errs = append(errs, fmtEmbedError(fd, "gzip-finalize of embedded file %q failed: %v", embed.Path, cerr))
+					continue
+				}
+				embed.OriginalSize = int64(len(data))
+				embed.Data = buf.Bytes()
+			} else {
+				embed.Data = data
+			}
 		}
 	}
 

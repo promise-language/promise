@@ -1,0 +1,86 @@
+_make_reader(int[] bytes) _BitReader {
+  u8[] data = u8[]();
+  for v in bytes {
+    data.push(v as! u8);
+  }
+  return _BitReader(data: data);
+}
+
+bitreader_single_bits_test() `test {
+  // 0b10110100 = 0xB4. LSB first: 0,0,1,0,1,1,0,1
+  int[] raw = int[]();
+  raw.push(0xB4);
+  _BitReader br = _make_reader(raw);
+  assert(br.read_bits(1)?! == 0u32, "bit 0");
+  assert(br.read_bits(1)?! == 0u32, "bit 1");
+  assert(br.read_bits(1)?! == 1u32, "bit 2");
+  assert(br.read_bits(1)?! == 0u32, "bit 3");
+  assert(br.read_bits(1)?! == 1u32, "bit 4");
+  assert(br.read_bits(1)?! == 1u32, "bit 5");
+  assert(br.read_bits(1)?! == 0u32, "bit 6");
+  assert(br.read_bits(1)?! == 1u32, "bit 7");
+}
+
+bitreader_cross_byte_test() `test {
+  // Two bytes 0xAB, 0xCD. LSB-first stream:
+  // 0xAB = 0b10101011 → first 5 bits = 01011 = 0x0B.
+  int[] raw = int[]();
+  raw.push(0xAB);
+  raw.push(0xCD);
+  _BitReader br = _make_reader(raw);
+  u32 first = br.read_bits(5)?!;
+  assert(first == 0x0Bu32, "first 5 bits == 0x0B");
+  // Remaining 11 bits: high 3 of 0xAB (bits 5,6,7 = 1,0,1) at result bits 0-2,
+  // then all 8 of 0xCD = 11001101 at result bits 3-10.
+  // 5 + (8+32+64+512+1024) = 1645 = 0x66D.
+  u32 second = br.read_bits(11)?!;
+  assert(second == 0x66Du32, "next 11 bits == 0x66D");
+}
+
+bitreader_full_byte_test() `test {
+  int[] raw = int[]();
+  raw.push(0x12);
+  raw.push(0x34);
+  raw.push(0x56);
+  raw.push(0x78);
+  _BitReader br = _make_reader(raw);
+  // 32-bit LE: 0x78563412
+  assert(br.read_bits(32)?! == 0x78563412u32, "read_bits(32) LE");
+}
+
+bitreader_alignment_test() `test {
+  int[] raw = int[]();
+  raw.push(0xFF);
+  raw.push(0xAB);
+  _BitReader br = _make_reader(raw);
+  assert(br.read_bits(3)?! == 0x07u32, "first 3 bits == 0x07");
+  br.align_to_byte();
+  // Should be at byte 1 now.
+  u8 b = br.read_aligned_byte()?!;
+  assert(b == 0xABu8, "aligned byte == 0xAB");
+}
+
+_try_read_extra_bit(_BitReader ~br) bool {
+  u32 _v = br.read_bits(1)? e {
+    return true;
+  };
+  return false;
+}
+
+bitreader_eof_test() `test {
+  int[] raw = int[]();
+  raw.push(0xFF);
+  _BitReader br = _make_reader(raw);
+  u32 v = br.read_bits(8)?!;
+  assert(v == 0xFFu32, "read full byte");
+  assert(_try_read_extra_bit(br), "raised on EOF");
+}
+
+bitreader_aligned_u16_test() `test {
+  int[] raw = int[]();
+  raw.push(0xCD);
+  raw.push(0xAB);
+  _BitReader br = _make_reader(raw);
+  u32 v = br.read_aligned_u16_le()?!;
+  assert(v == 0xABCDu32, "read_aligned_u16_le == 0xABCD");
+}

@@ -33,6 +33,11 @@ func (c *Compiler) defineEmbedGetter(fd *ast.FuncDecl, fn *ir.Func, embed *sema.
 	c.block = entry
 	c.entryBlock = entry
 
+	if embed.Compress && (embed.Kind == sema.EmbedString || embed.Kind == sema.EmbedBytes) {
+		c.defineEmbedCompressedGetter(fn, entry, embed)
+		return
+	}
+
 	switch embed.Kind {
 	case sema.EmbedString:
 		c.defineEmbedStringGetter(fn, entry, embed)
@@ -41,6 +46,106 @@ func (c *Compiler) defineEmbedGetter(fd *ast.FuncDecl, fn *ir.Func, embed *sema.
 	case sema.EmbedDir:
 		c.defineEmbedDirGetter(fn, embed)
 	}
+}
+
+// defineEmbedCompressedGetter emits a getter body that returns the
+// uncompressed contents of an `embed("path", compress: true) declaration.
+// The compressed bytes are stored as a private rodata global; each call
+// allocates a fresh u8[] header, copies the compressed bytes into it,
+// invokes gzip.gunzip, and returns the resulting u8[] (or wraps it in a
+// freshly allocated string for EmbedString).
+//
+// On a corrupt/invalid gzip stream — which would indicate a build-time bug
+// since the compressor is always Go's compress/gzip — the runtime panics
+// rather than propagating the error to the caller (embed getters are not
+// failable in the language).
+func (c *Compiler) defineEmbedCompressedGetter(fn *ir.Func, entry *ir.Block, embed *sema.EmbedInfo) {
+	gunzipFn, ok := c.moduleFuncs["gzip.gunzip"]
+	if !ok {
+		panic("codegen: gzip.gunzip not declared — `embed(..., compress: true) requires the gzip catalog module to be imported")
+	}
+
+	dataLen := int64(len(embed.Data))
+
+	// Compressed bytes — private rodata global.
+	compressed := constant.NewCharArrayFromString(string(embed.Data))
+	globalName := fmt.Sprintf(".embed.compressed.%d", c.strCounter)
+	c.strCounter++
+	global := c.module.NewGlobalDef(globalName, compressed)
+	global.Immutable = true
+	global.Linkage = enum.LinkagePrivate
+
+	// Allocate a fresh u8[] for the compressed bytes (header + data).
+	headerSize := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
+	dataSize := constant.NewInt(irtypes.I64, dataLen)
+	totalSize := entry.NewAdd(headerSize, dataSize)
+
+	rawPtr := entry.NewCall(c.palAlloc, totalSize)
+	isNull := entry.NewICmp(enum.IPredEQ, rawPtr, constant.NewNull(irtypes.I8Ptr))
+	oomBlk := fn.NewBlock("oom")
+	initBlk := fn.NewBlock("init")
+	entry.NewCondBr(isNull, oomBlk, initBlk)
+
+	panicGlobalOOM := c.getCStrGlobal("out of memory")
+	oomMsgPtr := oomBlk.NewGetElementPtr(panicGlobalOOM.ContentType, panicGlobalOOM,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	oomBlk.NewCall(c.funcs["promise_panic"], oomMsgPtr)
+	oomBlk.NewRet(c.zeroValue(fn.Sig.RetType))
+
+	// Set vector header (len, cap) and copy compressed bytes from rodata.
+	headerType := vectorHeaderType()
+	hdrPtr := initBlk.NewBitCast(rawPtr, irtypes.NewPointer(headerType))
+	lenPtr := initBlk.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	initBlk.NewStore(dataSize, lenPtr)
+	capPtr := initBlk.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	initBlk.NewStore(dataSize, capPtr)
+	if dataLen > 0 {
+		dataDst := initBlk.NewGetElementPtr(irtypes.I8, rawPtr, headerSize)
+		dataSrc := initBlk.NewGetElementPtr(global.ContentType, global,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		initBlk.NewCall(c.funcs["llvm.memcpy"], dataDst, dataSrc, dataSize, constant.False)
+	}
+
+	// Call __mod_gzip_gunzip. Signature: { i1, i8*, i8* } @gunzip(i8* data).
+	// gunzip takes &data (borrow) — we still own rawPtr and must free it.
+	gunzipResult := initBlk.NewCall(gunzipFn, rawPtr)
+	errFlag := initBlk.NewExtractValue(gunzipResult, 0)
+	decoded := initBlk.NewExtractValue(gunzipResult, 1)
+
+	// Free the compressed-input vector — gunzip borrowed, so ownership stayed here.
+	initBlk.NewCall(c.palFree, rawPtr)
+
+	// On error, panic with a clear message — embedded data must always decompress.
+	panicBlk := fn.NewBlock("decompress.panic")
+	okBlk := fn.NewBlock("decompress.ok")
+	initBlk.NewCondBr(errFlag, panicBlk, okBlk)
+
+	panicGlobalDec := c.getCStrGlobal("embed decompress failed (corrupt embedded gzip data)")
+	decMsgPtr := panicBlk.NewGetElementPtr(panicGlobalDec.ContentType, panicGlobalDec,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	panicBlk.NewCall(c.funcs["promise_panic"], decMsgPtr)
+	panicBlk.NewRet(c.zeroValue(fn.Sig.RetType))
+
+	// Success path — return decoded vector or wrap in a string.
+	if embed.Kind == sema.EmbedString {
+		decHdr := okBlk.NewBitCast(decoded, irtypes.NewPointer(headerType))
+		decLenPtr := okBlk.NewGetElementPtr(headerType, decHdr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		decLenRaw := okBlk.NewLoad(irtypes.I64, decLenPtr)
+		// Mask off the bit-63 literal flag if set.
+		decLen := okBlk.NewAnd(decLenRaw, constant.NewInt(irtypes.I64, 0x7FFFFFFFFFFFFFFF))
+		decDataPtr := okBlk.NewGetElementPtr(irtypes.I8, decoded, headerSize)
+		s := okBlk.NewCall(c.funcs["promise_string_new"], decDataPtr, decLen)
+		// promise_string_new copies the bytes — decoded vector is no longer needed.
+		okBlk.NewCall(c.palFree, decoded)
+		okBlk.NewRet(s)
+		return
+	}
+
+	// EmbedBytes — return the decoded vector directly.
+	okBlk.NewRet(decoded)
 }
 
 // defineEmbedStringGetter emits a getter body that returns a string from embedded data.

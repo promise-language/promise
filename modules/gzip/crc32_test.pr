@@ -1,0 +1,39 @@
+// Spot-check vectors for IEEE CRC32 against widely published values.
+crc32_empty_test() `test {
+  u8[] empty = u8[]();
+  assert(crc32(empty) == 0u32, "CRC32 of empty input is 0");
+}
+
+crc32_single_byte_test() `test {
+  u8[] data = u8[]();
+  data.push(0x61u8); // 'a'
+  assert(crc32(data) == 0xE8B7BE43u32, "CRC32('a') == 0xE8B7BE43");
+}
+
+crc32_check_string_test() `test {
+  // The canonical "check" value: CRC32("123456789") == 0xCBF43926
+  u8[] data = u8[]();
+  data.push(0x31u8);
+  data.push(0x32u8);
+  data.push(0x33u8);
+  data.push(0x34u8);
+  data.push(0x35u8);
+  data.push(0x36u8);
+  data.push(0x37u8);
+  data.push(0x38u8);
+  data.push(0x39u8);
+  assert(crc32(data) == 0xCBF43926u32, "CRC32('123456789') == 0xCBF43926");
+}
+
+crc32_zero_run_test() `test {
+  u8[] data = u8[].filled(0u8, 16);
+  // CRC32 of 16 zero bytes (verified against Python zlib.crc32 / Go hash/crc32 IEEE).
+  assert(crc32(data) == 0xECBB4B55u32, "CRC32 of 16 zero bytes == 0xECBB4B55");
+}
+
+crc32_pangram_test() `test {
+  // "The quick brown fox jumps over the lazy dog"
+  string s = "The quick brown fox jumps over the lazy dog";
+  u8[] data = s.bytes();
+  assert(crc32(data) == 0x414FA339u32, "CRC32 of pangram == 0x414FA339");
+}

@@ -4797,6 +4797,7 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 
 	// Inject std as a glob import so all std symbols are available without explicit `use std;`
 	file = injectStdImport(file)
+	file = injectGzipImportIfNeeded(file)
 
 	tSema := time.Now()
 
@@ -5215,6 +5216,7 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 
 	// Inject std as a glob import
 	merged = injectStdImport(merged)
+	merged = injectGzipImportIfNeeded(merged)
 
 	// Load module dependencies (the module's own `use` declarations)
 	moduleScopes, modInfos, depOrder, _ := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, target)
@@ -5579,6 +5581,10 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	// Don't inject std into the std module itself
 	if modCfg.Name != "std" {
 		merged = injectStdImport(merged)
+	}
+	// Don't inject gzip into the gzip module itself (would cause self-import).
+	if modCfg.Name != "gzip" {
+		merged = injectGzipImportIfNeeded(merged)
 	}
 
 	// Recursively load this module's own dependencies
@@ -5974,6 +5980,49 @@ func injectStdImport(file *ast.File) *ast.File {
 	return &result
 }
 
+// fileUsesEmbedCompress reports whether any FuncDecl in the file has an
+// `embed("...", compress: true) annotation. Used to decide whether to inject
+// the gzip module for runtime decompression.
+func fileUsesEmbedCompress(file *ast.File) bool {
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		for _, ann := range fd.Annotations {
+			if ann.Name != "embed" {
+				continue
+			}
+			for _, p := range ann.Params {
+				if p.Name != "compress" {
+					continue
+				}
+				if bl, ok := p.Value.(*ast.BoolLit); ok && bl.Value {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// injectGzipImportIfNeeded prepends `use gzip as _gzip;` to the file's UseDecls
+// when any embed getter requests `compress: true`. The aliased glob name
+// `_gzip` is reserved for the codegen-emitted decompression call site so the
+// user's symbol namespace is not polluted.
+func injectGzipImportIfNeeded(file *ast.File) *ast.File {
+	if !fileUsesEmbedCompress(file) {
+		return file
+	}
+	gzipUse := &ast.UseDecl{
+		Alias:       "_gzip",
+		CatalogName: "gzip",
+	}
+	result := *file // shallow copy
+	result.Uses = append([]*ast.UseDecl{gzipUse}, file.Uses...)
+	return &result
+}
+
 type errorListener struct {
 	antlr.DefaultErrorListener
 	filename   string
@@ -6231,6 +6280,7 @@ func runExec(args []string) {
 
 	// Inject std as a glob import so all std symbols are available
 	file = injectStdImport(file)
+	file = injectGzipImportIfNeeded(file)
 
 	tSema := time.Now()
 

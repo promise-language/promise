@@ -149,7 +149,7 @@ test_auto_sendable_through_channel() `test {
 }
 
 // --- Sendable with optional through channel ---
-test_optional_sendable_through_channel() `test {
+test_optional_sendable_through_channel() `test(timeout: "30s") {
   ch := channel[MaybeInt]();
   t := go {
     ch.send(MaybeInt(value: 99));

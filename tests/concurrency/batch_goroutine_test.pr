@@ -149,7 +149,7 @@ test_select_unbuffered_recv() `test(exclude: "wasm32") {
   }
 }
 
-test_select_unbuffered_multi_recv() `test(exclude: "wasm32", timeout: "30s") {
+test_select_unbuffered_multi_recv() `test(exclude: "wasm32") {
   ch := channel[int]();
   go {
     ch.send(1);

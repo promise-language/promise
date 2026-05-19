@@ -1,0 +1,65 @@
+// T0332: slicing a heap vector, passing the slice to a `~`-consuming callee,
+// then raising in the same function used to segfault on the raise cleanup
+// path because the slice's drop flag was not cleared after the move.
+type _SliceRaiseError is error {
+  int dummy;
+}
+
+_consume(~u8[] x) int {
+  return x.len;
+}
+
+_slice_consume_raise!(u8[] &data) int {
+  u8[] body = data[2:6];
+  int n = _consume(body);
+  if data.len > 0 {
+    raise _SliceRaiseError(message: "raise after consume", dummy: n);
+  }
+  return n;
+}
+
+_try_slice_consume(u8[] &data) bool {
+  int _v = _slice_consume_raise(data)? e {
+    return true;
+  };
+  return false;
+}
+
+slice_consume_raise_no_segfault_test() `test {
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 10 {
+    data.push(i as! u8);
+    i = i + 1;
+  }
+  assert(_try_slice_consume(data), "raised cleanly without segfault");
+}
+
+// Same scenario but with the param typed as `u8[]~` (suffix ~, MutRef) instead
+// of `u8[] &` (SharedRef). The codegen MutRef auto-deref path in genSliceExpr
+// is distinct from the SharedRef path, so both need an end-to-end test.
+_slice_consume_raise_mut!(u8[] ~data) int {
+  u8[] body = data[2:6];
+  int n = _consume(body);
+  if data.len > 0 {
+    raise _SliceRaiseError(message: "raise after consume (mut)", dummy: n);
+  }
+  return n;
+}
+
+_try_slice_consume_mut(u8[] ~data) bool {
+  int _v = _slice_consume_raise_mut(data)? e {
+    return true;
+  };
+  return false;
+}
+
+slice_consume_raise_mutref_no_segfault_test() `test {
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 10 {
+    data.push(i as! u8);
+    i = i + 1;
+  }
+  assert(_try_slice_consume_mut(data), "raised cleanly through MutRef");
+}

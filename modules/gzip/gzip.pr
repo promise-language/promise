@@ -89,15 +89,7 @@ gunzip!(u8[] &data) u8[] `public `doc("Decompresses a gzip-encoded byte stream (
   u32 expected_crc = _read_u32_le(data, trailer_pos)?^;
   u32 expected_isize = _read_u32_le(data, trailer_pos + 4)?^;
 
-  // Copy the compressed body byte-by-byte rather than using a slice expression.
-  // T0332: slicing + consuming + raising in the same function segfaults at runtime.
-  u8[] body = u8[]();
-  int j = pos;
-  while j < trailer_pos {
-    body.push(data[j]);
-    j = j + 1;
-  }
-
+  u8[] body = data[pos: trailer_pos];
   u8[] result = inflate(body)?^;
 
   // ISIZE = uncompressed length mod 2^32. Compare low 32 bits.

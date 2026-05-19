@@ -14450,6 +14450,38 @@ func TestSliceExprVector(t *testing.T) {
 	assertContains(t, ir, `call i8* @"Vector[int].[:]"(`)
 }
 
+func TestSliceExprThroughSharedRef(t *testing.T) {
+	// T0332: slicing a SharedRef parameter must auto-deref to the Vector's [:] method
+	ir := generateIR(t, `
+		take(int[] &xs) int[] {
+			return xs[1:3];
+		}
+		main() {
+			v := [1, 2, 3, 4, 5];
+			int[] sub = take(v);
+		}
+	`)
+	assertContains(t, ir, `call i8* @"Vector[int].[:]"(`)
+}
+
+func TestSliceExprThroughMutRef(t *testing.T) {
+	// T0332: slicing through a MutRef must auto-deref before looking up `[:]`.
+	// `int[]~` (suffix ~ on the typeRef) is the mutRefType form, producing a
+	// parameter whose Type is MutRef[Vector[int]]. (`~int[]` prefix ~ is
+	// moveParam syntax — it strips ~ and gives an unwrapped Vector[int] type,
+	// so it does not exercise the codegen MutRef unwrap branch.)
+	ir := generateIR(t, `
+		take(int[]~ xs) int[] {
+			return xs[1:3];
+		}
+		main() {
+			v := [1, 2, 3, 4, 5];
+			int[] sub = take(v);
+		}
+	`)
+	assertContains(t, ir, `call i8* @"Vector[int].[:]"(`)
+}
+
 func TestSliceAssignVector(t *testing.T) {
 	// Vector [:]= calls the Promise-implemented method
 	ir := generateIR(t, `

@@ -1628,6 +1628,14 @@ func (c *Checker) checkSliceExpr(e *ast.SliceExpr) types.Type {
 	// B0323: Register auto-propagation for failable call targets in slice access.
 	c.checkVarDeclFailable(e.Target)
 
+	// Unwrap MutRef/SharedRef for slicing (auto-deref through borrows)
+	if ref, ok := target.(*types.MutRef); ok {
+		target = ref.Elem()
+	}
+	if ref, ok := target.(*types.SharedRef); ok {
+		target = ref.Elem()
+	}
+
 	// Method dispatch: look up [:] on Named/Instance types
 	var named *types.Named
 	var subst map[*types.TypeParam]types.Type

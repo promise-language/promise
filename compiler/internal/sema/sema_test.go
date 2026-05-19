@@ -7016,6 +7016,35 @@ func TestSliceExprOnNonSliceable(t *testing.T) {
 	expectError(t, errs, "does not support slicing")
 }
 
+func TestSliceExprThroughSharedRef(t *testing.T) {
+	checkOK(t, `
+		take(int[] &xs) int[] {
+			return xs[1:3];
+		}
+		main() {
+			int[] items = [1, 2, 3, 4];
+			int[] sub = take(items);
+		}
+	`)
+}
+
+func TestSliceExprThroughMutRef(t *testing.T) {
+	// `int[]~` (suffix ~ on the typeRef) parses as a mutRefType, producing a
+	// parameter whose Type is MutRef[Vector[int]]. The auto-deref in
+	// checkSliceExpr must unwrap the MutRef before looking up `[:]`.
+	// (`~int[] xs` is moveParam syntax — it strips ~ and the param type is
+	// just Vector[int], so it does not exercise the auto-deref code path.)
+	checkOK(t, `
+		take(int[]~ xs) int[] {
+			return xs[1:3];
+		}
+		main() {
+			int[] items = [1, 2, 3, 4];
+			int[] sub = take(items);
+		}
+	`)
+}
+
 func TestSliceExprBoundTypeMismatch(t *testing.T) {
 	errs := checkErrs(t, `
 		main() {

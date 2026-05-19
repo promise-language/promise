@@ -6554,6 +6554,13 @@ func (c *Compiler) genSliceExpr(e *ast.SliceExpr) value.Value {
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
+	// Unwrap MutRef/SharedRef for slicing (auto-deref through borrows)
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
+	}
 
 	named := extractNamed(targetType)
 	if named == nil {

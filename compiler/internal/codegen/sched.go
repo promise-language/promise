@@ -80,7 +80,7 @@ const (
 	pFieldCurrentG  = 4 // i8*  currently running G
 	pFieldM         = 5 // i8*  associated M (OS thread)
 	pFieldLock      = 6 // i8*  mutex for queue overflow
-	pFieldSchedTick = 7 // i64  incremented each context switch (for sysmon)
+	pFieldSchedTick = 7 // i64  incremented at runG and find_runnable; used by find_runnable's global-first check (% 61 == 0)
 )
 
 // processorStructType returns the LLVM struct type for a processor (P).
@@ -684,7 +684,7 @@ func (c *Compiler) defineSchedLoopFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
 	runG.NewStore(gRaw, curGField)
 
-	// P.schedTick++ (for sysmon preemption detection)
+	// P.schedTick++ (for find_runnable's global-first check)
 	tickField := runG.NewGetElementPtr(pTy, pPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldSchedTick)))
 	curTick := runG.NewLoad(irtypes.I64, tickField)
@@ -1246,7 +1246,9 @@ func (c *Compiler) defineSchedEnqueueFunc() {
 }
 
 // defineSchedFindRunnableFunc emits @promise_sched_find_runnable(i8* %p_raw) → i8*
-// Searches for a runnable G: local queue → global queue → work stealing from other Ps.
+// Searches for a runnable G. Normal order: local queue → global queue → steal.
+// Every 61 calls (schedtick % 61 == 0), checks global queue first to prevent
+// starvation of Gs enqueued by non-M threads (e.g., test-thread channel ops).
 func (c *Compiler) defineSchedFindRunnableFunc() {
 	pParam := ir.NewParam("p_raw", irtypes.I8Ptr)
 	fn := c.module.NewFunc("promise_sched_find_runnable", irtypes.I8Ptr, pParam)
@@ -1257,6 +1259,7 @@ func (c *Compiler) defineSchedFindRunnableFunc() {
 	schedTy := schedStructType()
 
 	entry := fn.NewBlock(".entry")
+	checkLocal := fn.NewBlock("check_local")
 	tryGlobal := fn.NewBlock("try_global")
 	globalEmpty := fn.NewBlock("global_empty")
 	globalDequeue := fn.NewBlock("global_dequeue")
@@ -1271,14 +1274,35 @@ func (c *Compiler) defineSchedFindRunnableFunc() {
 
 	// Alloca for steal loop counter (must be in entry block)
 	iAlloca := entry.NewAlloca(irtypes.I32)
+	// Flag alloca: 1 when entered via global-first path (tick % 61 == 0).
+	// Read by globalEmpty to fall back to checkLocal on global-first ticks
+	// instead of going straight to steal — prevents deadlock on single-P
+	// targets like WASM where steal always returns null (T0326).
+	globalFirstFlagAlloca := entry.NewAlloca(irtypes.I32)
+
+	// --- Schedtick: every 61 scheduling iterations, check global queue first ---
+	// Prevents global queue starvation when the local queue has a yield-spinning G
+	// (e.g., unbuffered channel rendezvous). Same mechanism as the Go runtime's
+	// "schedtick % 61 == 0 → check global first" (T0326).
+	pPtr0 := entry.NewBitCast(pParam, irtypes.NewPointer(pTy))
+	tickField0 := entry.NewGetElementPtr(pTy, pPtr0,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldSchedTick)))
+	tick0 := entry.NewLoad(irtypes.I64, tickField0)
+	tick1 := entry.NewAdd(tick0, constant.NewInt(irtypes.I64, 1))
+	entry.NewStore(tick1, tickField0)
+	tickMod := entry.NewURem(tick1, constant.NewInt(irtypes.I64, 61))
+	globalFirst := entry.NewICmp(enum.IPredEQ, tickMod, constant.NewInt(irtypes.I64, 0))
+	flagVal := entry.NewSelect(globalFirst, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+	entry.NewStore(flagVal, globalFirstFlagAlloca)
+	entry.NewCondBr(globalFirst, tryGlobal, checkLocal)
 
 	// --- Step 1: Try local P queue ---
 	// Always check local queue first, even for disabled Ps — a disabled P may
 	// still have work from before num_p was reduced.
-	localG := entry.NewCall(c.funcs["promise_local_dequeue"], pParam)
-	localNull := entry.NewICmp(enum.IPredEQ, localG, constant.NewNull(irtypes.I8Ptr))
+	localG := checkLocal.NewCall(c.funcs["promise_local_dequeue"], pParam)
+	localNull := checkLocal.NewICmp(enum.IPredEQ, localG, constant.NewNull(irtypes.I8Ptr))
 	localFound := fn.NewBlock("local_found")
-	entry.NewCondBr(localNull, tryGlobal, localFound)
+	checkLocal.NewCondBr(localNull, tryGlobal, localFound)
 
 	localFound.NewRet(localG)
 
@@ -1302,7 +1326,13 @@ func (c *Compiler) defineSchedFindRunnableFunc() {
 	tryGlobal.NewCondBr(headIsNull, globalEmpty, globalDequeue)
 
 	globalEmpty.NewCall(c.palMutexUnlock, glLock)
-	globalEmpty.NewBr(trySteal)
+	// On global-first ticks (flag==1), fall through to checkLocal before
+	// stealing — preserves liveness on single-P targets (e.g., WASM) where
+	// steal always returns null (T0326).
+	gfFlag := globalEmpty.NewLoad(irtypes.I32, globalFirstFlagAlloca)
+	globalEmpty.NewStore(constant.NewInt(irtypes.I32, 0), globalFirstFlagAlloca)
+	gfIsSet := globalEmpty.NewICmp(enum.IPredEQ, gfFlag, constant.NewInt(irtypes.I32, 1))
+	globalEmpty.NewCondBr(gfIsSet, checkLocal, trySteal)
 
 	// globalDequeue: pop head
 	gPtr := globalDequeue.NewBitCast(head, irtypes.NewPointer(gTy))

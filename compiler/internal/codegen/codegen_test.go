@@ -16173,6 +16173,47 @@ func TestSchedShutdownUsesMaxP(t *testing.T) {
 	assertNotContains(t, fn, "@__promise_sched, i32 0, i32 5")
 }
 
+func TestFindRunnableSchedTickGlobalFirstCheck(t *testing.T) {
+	// T0326: find_runnable must check global queue first every 61 scheduling
+	// iterations (schedtick % 61 == 0) to prevent starvation of goroutines
+	// enqueued by non-M threads (e.g., test-thread channel ops).
+	ir := generateIR(t, `main() {}`)
+	fn := extractFunction(ir, "promise_sched_find_runnable")
+
+	// Entry block must read the schedtick field (P field index 7), increment it,
+	// and store it back.
+	assertContains(t, fn, "i32 0, i32 7")
+	// Must compute urem with 61 (prime modulus chosen to avoid resonance with
+	// power-of-2 queue sizes) and branch to try_global when result == 0.
+	assertContains(t, fn, "urem i64 %")
+	assertContains(t, fn, ", 61")
+	assertContains(t, fn, "label %try_global, label %check_local")
+}
+
+func TestFindRunnableGlobalEmptyFallsBackToLocal(t *testing.T) {
+	// T0326: when the global queue is empty on a global-first tick, find_runnable
+	// must fall back to check_local before trying work-stealing. This preserves
+	// liveness on single-P targets (e.g., WASM) where steal always returns null.
+	ir := generateIR(t, `main() {}`)
+	fn := extractFunction(ir, "promise_sched_find_runnable")
+
+	// The global_empty block must branch to check_local (not directly to try_steal)
+	// when the global-first flag is set. The br target order is check_local first,
+	// try_steal second — matching the conditional: if flag==1 → check_local else steal.
+	assertContains(t, fn, "label %check_local, label %try_steal")
+}
+
+func TestSchedLoopIncrementsSchedTick(t *testing.T) {
+	// T0326: sched_loop's runG block must also increment P.schedTick (field 7)
+	// before resuming a goroutine. find_runnable uses the tick value set here
+	// (not only the one it sets itself) for the global-first priority decision.
+	ir := generateIR(t, `main() {}`)
+	fn := extractFunction(ir, "promise_sched_loop")
+
+	// sched_loop's runG block reads, increments, and stores back P field 7.
+	assertContains(t, fn, "i32 0, i32 7")
+}
+
 // --- OS bridge tests ---
 
 func TestArgcArgvGlobals(t *testing.T) {

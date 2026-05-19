@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+
+	"github.com/p5e-ia/promise-lang/tools/build/common"
+)
 
 func TestTokenize(t *testing.T) {
 	tests := []struct {
@@ -210,39 +215,50 @@ func TestCheckStaleAllowsMake(t *testing.T) {
 	sourceHash = "stale-hash-for-test"
 	defer func() { sourceHash = old }()
 
-	makeInput := hookInput{ToolName: "Bash"}
-	makeInput.ToolInput.Command = "./make"
-	if reason := checkStale(makeInput); reason != "" {
-		t.Errorf("expected ./make to be allowed when stale, got: %s", reason)
+	root, err := common.FindRoot()
+	if err != nil {
+		t.Fatalf("find repo root: %v", err)
 	}
 
-	makeExeInput := hookInput{ToolName: "Bash"}
-	makeExeInput.ToolInput.Command = "./make.exe"
-	if reason := checkStale(makeExeInput); reason != "" {
-		t.Errorf("expected ./make.exe to be allowed when stale, got: %s", reason)
+	mk := func(cmd, cwd string) hookInput {
+		h := hookInput{ToolName: "Bash", CWD: cwd}
+		h.ToolInput.Command = cmd
+		return h
 	}
 
-	makeArgsInput := hookInput{ToolName: "Bash"}
-	makeArgsInput.ToolInput.Command = "./make --force"
-	if reason := checkStale(makeArgsInput); reason != "" {
-		t.Errorf("expected './make --force' to be allowed when stale, got: %s", reason)
+	if reason := checkStale(mk("./make", root)); reason != "" {
+		t.Errorf("expected ./make at root to be allowed when stale, got: %s", reason)
+	}
+	if reason := checkStale(mk("./make.exe", root)); reason != "" {
+		t.Errorf("expected ./make.exe at root to be allowed when stale, got: %s", reason)
+	}
+	if reason := checkStale(mk("./make --force", root)); reason != "" {
+		t.Errorf("expected './make --force' at root to be allowed when stale, got: %s", reason)
+	}
+	if reason := checkStale(mk(`.\make.cmd`, root)); reason != "" {
+		t.Errorf(`expected .\make.cmd at root to be allowed when stale, got: %s`, reason)
+	}
+	if reason := checkStale(mk(`.\make.cmd --force`, root)); reason != "" {
+		t.Errorf(`expected '.\make.cmd --force' at root to be allowed when stale, got: %s`, reason)
 	}
 
-	makeCmdInput := hookInput{ToolName: "Bash"}
-	makeCmdInput.ToolInput.Command = `.\make.cmd`
-	if reason := checkStale(makeCmdInput); reason != "" {
-		t.Errorf(`expected .\\make.cmd to be allowed when stale, got: %s`, reason)
+	// `cd <root> && ./make` from a drifted cwd must be allowed.
+	if reason := checkStale(mk("cd "+root+" && ./make", filepath.Join(root, "tools", "build"))); reason != "" {
+		t.Errorf("expected 'cd root && ./make' to be allowed when stale, got: %s", reason)
 	}
 
-	makeCmdArgsInput := hookInput{ToolName: "Bash"}
-	makeCmdArgsInput.ToolInput.Command = `.\make.cmd --force`
-	if reason := checkStale(makeCmdArgsInput); reason != "" {
-		t.Errorf(`expected '.\\make.cmd --force' to be allowed when stale, got: %s`, reason)
+	// ./make from outside the repo root must NOT be allowed (e.g. cwd has
+	// drifted into a subdirectory that happens to contain a stray ./make).
+	if reason := checkStale(mk("./make", filepath.Join(root, "tools", "build"))); reason == "" {
+		t.Error("expected ./make from a non-root cwd to be blocked when stale")
 	}
 
-	otherInput := hookInput{ToolName: "Bash"}
-	otherInput.ToolInput.Command = "git status"
-	if reason := checkStale(otherInput); reason == "" {
+	// `cd /tmp && ./make` must NOT be allowed.
+	if reason := checkStale(mk("cd /tmp && ./make", root)); reason == "" {
+		t.Error("expected 'cd /tmp && ./make' to be blocked when stale")
+	}
+
+	if reason := checkStale(mk("git status", root)); reason == "" {
 		t.Error("expected non-make command to be blocked when stale")
 	}
 
@@ -308,6 +324,54 @@ func TestDetectTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := detectTool(tt.input); got != tt.want {
 				t.Errorf("detectTool() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsRepoMakeChain(t *testing.T) {
+	root := "/repo"
+	tests := []struct {
+		name string
+		cmd  string
+		cwd  string
+		want bool
+	}{
+		// Allowed: cwd is the repo root and `./make` resolves to <root>/make.
+		{"plain ./make at root", "./make", root, true},
+		{"./make with args at root", "./make --force", root, true},
+		{"./make in pipe at root", "./make 2>&1 | tail", root, true},
+		{"./make.exe at root", "./make.exe", root, true},
+		// Allowed: cd into root then make.
+		{"cd root && ./make", "cd " + root + " && ./make", "/elsewhere", true},
+		{"cd root && ./make --force", "cd " + root + " && ./make --force", "/elsewhere", true},
+		// Allowed: absolute path to root/make.
+		{"abs path", root + "/make", "/elsewhere", true},
+		{"abs path with args", root + "/make --force", "/elsewhere", true},
+
+		// Blocked: cwd has drifted, ./make resolves elsewhere.
+		{"./make from subdir", "./make", root + "/tools", false},
+		{"./make from /tmp", "./make", "/tmp", false},
+		// Blocked: cd into a non-root dir, then ./make.
+		{"cd /tmp && ./make", "cd /tmp && ./make", root, false},
+		{"cd subdir && ./make", "cd " + root + "/tools && ./make", root, false},
+		// Blocked: bare 'make' (no ./) is not a recognized invocation.
+		{"bare make", "make", root, false},
+		// Blocked: a stray ./make that's not the repo's.
+		{"./make in /tmp via cd", "cd /tmp && ./make foo", root, false},
+		// Blocked: empty cwd — can't verify.
+		{"empty cwd", "./make", "", false},
+		// Blocked: empty command.
+		{"empty cmd", "", root, false},
+		// Other commands without make in chain — false.
+		{"git status", "git status", root, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRepoMakeChain(tt.cmd, tt.cwd, root)
+			if got != tt.want {
+				t.Errorf("isRepoMakeChain(%q, %q, %q) = %v, want %v",
+					tt.cmd, tt.cwd, root, got, tt.want)
 			}
 		})
 	}

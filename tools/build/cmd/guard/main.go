@@ -205,14 +205,15 @@ func checkStale(input hookInput) string {
 		return ""
 	}
 
-	// Stale — allow ./make, ./make.exe, and .\make.cmd through so the agent can rebuild.
-	if detectTool(input) == "bash" {
-		cmd := strings.TrimSpace(input.ToolInput.Command)
-		if cmd == "./make" || cmd == "./make.exe" || cmd == ".\\make.cmd" ||
-			strings.HasPrefix(cmd, "./make ") || strings.HasPrefix(cmd, "./make.exe ") ||
-			strings.HasPrefix(cmd, ".\\make.cmd ") {
-			return ""
-		}
+	// Stale — allow the agent to rebuild via the repo-root ./make, even when
+	// wrapped (e.g. `cd repo && ./make`, `./make 2>&1 | tail`). Resolves each
+	// subcommand's first token against the cwd it would run under and only
+	// allows when that path is exactly <root>/make (or its .exe/.cmd sibling).
+	// This prevents allowing a `./make` that happens to live in some other
+	// directory the agent has cd'd into. Per-subcommand safety checks
+	// (rm -rf, git push, etc.) still run downstream via checkAll.
+	if detectTool(input) == "bash" && isRepoMakeChain(input.ToolInput.Command, input.CWD, root) {
+		return ""
 	}
 
 	// Stale — allow Edit/Write through. Edit gates are loaded from disk
@@ -229,6 +230,69 @@ func checkStale(input hookInput) string {
 		makeCmd = ".\\make.cmd"
 	}
 	return "guard binary is stale — run " + makeCmd + " to rebuild tools before continuing"
+}
+
+// isRepoMakeChain reports whether the given command chain contains an
+// invocation of the repo-root ./make script (or its .exe/.cmd sibling),
+// resolving paths against the shell's cwd as it walks. Tracks `cd <path>`
+// updates so cwd reflects what the make subcommand would actually run with.
+//
+// This is intentionally conservative: it only accepts `./make`, `./make.exe`,
+// `.\make.cmd`, or the absolute path to the repo's make script. A bare
+// `make` (no `./`) is not a Promise bootstrap invocation and is rejected.
+//
+// cwd may be empty if the hook input lacks CWD; in that case we can't verify
+// resolution and refuse to whitelist.
+func isRepoMakeChain(command, cwd, root string) bool {
+	if cwd == "" {
+		return false
+	}
+	expectedMake := filepath.Join(root, "make")
+	expectedExe := filepath.Join(root, "make.exe")
+	expectedCmd := filepath.Join(root, "make.cmd")
+
+	for _, part := range splitCommands(command) {
+		trimmed := strings.TrimSpace(part)
+		tokens := tokenize(trimmed)
+		if len(tokens) == 0 {
+			continue
+		}
+		// `cd <path>` updates cwd for subsequent subcommands in the same chain.
+		if tokens[0] == "cd" && len(tokens) >= 2 {
+			target := stripQuotes(tokens[1])
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(cwd, target)
+			}
+			cwd = filepath.Clean(target)
+			continue
+		}
+		first := tokens[0]
+		// Absolute path to the repo make script.
+		if first == expectedMake || first == expectedExe || first == expectedCmd {
+			return true
+		}
+		// Relative invocation — strip the leading `./` or `.\` and resolve
+		// the bare basename against cwd. Done this way because filepath.Join
+		// treats `\` as a literal character on Unix, so naive joining of
+		// `.\\make.cmd` would not produce the expected path on non-Windows
+		// platforms.
+		var basename string
+		switch first {
+		case "./make", ".\\make":
+			basename = "make"
+		case "./make.exe", ".\\make.exe":
+			basename = "make.exe"
+		case "./make.cmd", ".\\make.cmd":
+			basename = "make.cmd"
+		}
+		if basename != "" {
+			resolved := filepath.Clean(filepath.Join(cwd, basename))
+			if resolved == filepath.Join(root, basename) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // detectTool determines the tool type from the input fields.

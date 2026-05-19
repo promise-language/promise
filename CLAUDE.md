@@ -38,6 +38,8 @@ bin/test --clean           # clear caches first
 bin/verify --wasm          # format + vet + all tests (pre-commit check)
 bin/verify --wasm-web      # same + wasm32-web tests via Node
 bin/verify --shared --wasm # same but using shared ~/.promise cache
+bin/clean                  # wipe .promise-home/ + go test cache (pristine state)
+bin/clean --shared         # wipe ~/.promise/ instead
 bin/format                 # format Go + Promise code
 bin/vet                    # go vet (excluding generated parser)
 bin/coverage               # Go + Promise test coverage

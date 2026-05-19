@@ -34,6 +34,14 @@ func RunTest(root string, args []string) error {
 		}
 	}
 
+	// Clean caches first if requested, before SetupLocalCache so the local
+	// home is recreated empty.
+	if clean {
+		if err := Clean(root, CleanOptions{Shared: shared}); err != nil {
+			return fmt.Errorf("clean: %w", err)
+		}
+	}
+
 	// Default to local cache; -shared opts into ~/.promise
 	if !shared {
 		if err := SetupLocalCache(root); err != nil {
@@ -42,20 +50,11 @@ func RunTest(root string, args []string) error {
 	}
 
 	compilerDir := filepath.Join(root, "compiler")
-	promiseBin := filepath.Join(root, "bin", BinaryName())
 
 	// Build first
 	fmt.Println("Building...")
 	if err := RunBuild(root, nil); err != nil {
 		return fmt.Errorf("build: %w", err)
-	}
-
-	// Clean caches if requested
-	if clean {
-		fmt.Println("Clearing go test cache...")
-		RunIn(compilerDir, "go", "clean", "-testcache")
-		fmt.Println("Clearing promise test cache...")
-		RunSilent(promiseBin, "clean")
 	}
 
 	// Go tests

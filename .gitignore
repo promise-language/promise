@@ -76,3 +76,6 @@ bin/gate.exe~
 bin/audit-exceptions
 bin/audit-exceptions.exe
 bin/audit-exceptions.exe~
+bin/clean
+bin/clean.exe
+bin/clean.exe~

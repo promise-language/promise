@@ -44,12 +44,17 @@ func RunVerify(root string, args []string) error {
 	}
 	defer unlock()
 
+	// Clean caches first if requested. Done before SetupLocalCache so that
+	// the local home is recreated empty, and before any build/test work so
+	// the run starts from a known state.
+	if clean {
+		if err := Clean(root, CleanOptions{Shared: shared}); err != nil {
+			return fmt.Errorf("clean: %w", err)
+		}
+	}
+
 	// Default to local cache; -shared opts into ~/.promise
 	if !shared {
-		promiseHome := filepath.Join(root, ".promise-home")
-		if clean {
-			os.RemoveAll(filepath.Join(promiseHome, "tmp"))
-		}
 		if err := SetupLocalCache(root); err != nil {
 			return fmt.Errorf("setup local cache: %w", err)
 		}
@@ -97,14 +102,7 @@ func RunVerify(root string, args []string) error {
 		return errInterrupted
 	}
 
-	// 5. Clear caches if requested
-	compilerDir := filepath.Join(root, "compiler")
-	if clean {
-		fmt.Println("Clearing go test cache...")
-		RunIn(compilerDir, "go", "clean", "-testcache")
-		fmt.Println("Clearing promise test cache...")
-		RunSilent(promiseBin, "clean")
-	}
+	// 5. (Cache clearing now happens up front via Clean.)
 
 	// 6. Go tests
 	var failures []string

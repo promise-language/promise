@@ -166,6 +166,7 @@ type Compiler struct {
 	dupStringFieldAccess    bool                // T0095: when true, genFieldAccess dups string fields from droppable types
 	dupContainerFieldAccess bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
 	optionalStringDup       value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
+	optionalContainerDup    value.Value         // T0366: pending dup from Optional[Vector|Channel|Arc|Weak] field-read path
 	optionalFieldString     bool                // B0190: set by genFieldAccess when loading a string? field from a droppable type
 	optionalFieldVector     bool                // T0354: set by genFieldAccess when loading a T[]? field from a droppable type
 

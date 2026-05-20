@@ -1,0 +1,77 @@
+// T0366: Reading a field of a droppable owner and passing it to a `~` (consuming)
+// param must dup the field's inner buffer. Without the dup, the callee frees the
+// buffer and the owner's synthesized drop frees it again → use-after-free / abort.
+//
+// Regression coverage for the cross-module pattern that broke
+// `Response.json[T]` in modules/http (B0344) once `decode_string[T]` started
+// taking `~string`. The same fix covers Vector / Channel / Arc / Weak fields
+// passed through `~` in either direct or generic call contexts.
+type StrHolder {
+  string body;
+  drop(~this) {
+  }
+}
+
+type VecHolder {
+  int[] values;
+  drop(~this) {
+  }
+}
+
+type GenStrHolder[T] {
+  string body;
+  drop(~this) {
+  }
+}
+
+t0366_consume_string!(~string s) int {
+  return s.len;
+}
+
+t0366_consume_vec!(~int[] v) int {
+  return v.len;
+}
+
+t0366_generic_consume_string![T](~string s) int {
+  return s.len;
+}
+
+t0366_string_field_to_mutref() `test {
+  StrHolder h = StrHolder(body: "hello world");
+  int n = t0366_consume_string(h.body)?!;
+  assert(n == 11, "string field to ~ param");
+  // h still owns its body — owner drop must not double-free
+}
+
+t0366_vector_field_to_mutref() `test {
+  VecHolder h = VecHolder(values: int[]());
+  h.values.push(1);
+  h.values.push(2);
+  h.values.push(3);
+  int n = t0366_consume_vec(h.values)?!;
+  assert(n == 3, "vector field to ~ param");
+  // h still owns its values — owner drop must not double-free
+}
+
+t0366_string_field_to_generic_mutref() `test {
+  StrHolder h = StrHolder(body: "abcd");
+  int n = t0366_generic_consume_string[int](h.body)?!;
+  assert(n == 4, "string field to generic ~ param");
+}
+
+t0366_optional_vector_field_to_var() `test {
+  // Companion case: assigning an Optional[Vector] field to a new variable
+  // must dup the inner buffer so both the new variable's optional drop and
+  // the owner's drop don't race to free the same buffer.
+  VecHolderOpt h = VecHolderOpt(items: int[]());
+  h.items!.push(7);
+  h.items!.push(8);
+  int[]? maybe = h.items;
+  assert(maybe!.len == 2, "optional vector field assign len");
+}
+
+type VecHolderOpt {
+  int[]? items;
+  drop(~this) {
+  }
+}

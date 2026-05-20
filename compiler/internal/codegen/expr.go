@@ -1595,10 +1595,28 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 		panic(fmt.Sprintf("codegen: undefined monomorphic function %q", mangledName))
 	}
 
+	// T0366: Pre-resolve signature so we can enable dup-on-field-access for `~` args.
+	var preSig *types.Signature
+	if callee := c.lookupFunc(ident.Name); callee != nil {
+		if sig, sOk := callee.Type().(*types.Signature); sOk {
+			preSig = sig
+		}
+	}
+	if preSig == nil {
+		if sig, sOk := c.info.Types[e.Callee].(*types.Signature); sOk {
+			preSig = sig
+		}
+	}
+
 	var argVals []value.Value
 	var argTypes []types.Type
-	for _, arg := range e.Args {
+	for i, arg := range e.Args {
+		if preSig != nil && i < len(preSig.Params()) && preSig.Params()[i].Ref() == types.RefMut {
+			c.maybeEnableDupForMutRefArg(arg.Value, preSig.Params()[i].Type())
+		}
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
+		c.dupStringFieldAccess = false
+		c.dupContainerFieldAccess = false
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
 	origArgVals := argVals // T0331: save pre-coercion values for alias check
@@ -1647,10 +1665,28 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 		panic(fmt.Sprintf("codegen: undefined inferred monomorphic function %q", mangledName))
 	}
 
+	// T0366: Pre-resolve signature so we can enable dup-on-field-access for `~` args.
+	var preSig *types.Signature
+	if callee := c.lookupFunc(inferred.FuncName); callee != nil {
+		if sig, sOk := callee.Type().(*types.Signature); sOk {
+			preSig = sig
+		}
+	}
+	if preSig == nil {
+		if sig, sOk := c.info.Types[e.Callee].(*types.Signature); sOk {
+			preSig = sig
+		}
+	}
+
 	var argVals []value.Value
 	var argTypes []types.Type
-	for _, arg := range e.Args {
+	for i, arg := range e.Args {
+		if preSig != nil && i < len(preSig.Params()) && preSig.Params()[i].Ref() == types.RefMut {
+			c.maybeEnableDupForMutRefArg(arg.Value, preSig.Params()[i].Type())
+		}
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
+		c.dupStringFieldAccess = false
+		c.dupContainerFieldAccess = false
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
 	origArgVals := argVals // T0331: save pre-coercion values for alias check
@@ -1702,10 +1738,28 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 		panic(fmt.Sprintf("codegen: undefined monomorphic module function %q", mangledName))
 	}
 
+	// T0366: Pre-resolve signature so we can enable dup-on-field-access for `~` args.
+	var preSig *types.Signature
+	if callee := c.lookupFunc(funcName); callee != nil {
+		if sig, sOk := callee.Type().(*types.Signature); sOk {
+			preSig = sig
+		}
+	}
+	if preSig == nil {
+		if sig, sOk := c.info.Types[e.Callee].(*types.Signature); sOk {
+			preSig = sig
+		}
+	}
+
 	var argVals []value.Value
 	var argTypes []types.Type
-	for _, arg := range e.Args {
+	for i, arg := range e.Args {
+		if preSig != nil && i < len(preSig.Params()) && preSig.Params()[i].Ref() == types.RefMut {
+			c.maybeEnableDupForMutRefArg(arg.Value, preSig.Params()[i].Type())
+		}
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
+		c.dupStringFieldAccess = false
+		c.dupContainerFieldAccess = false
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
 	origArgVals := argVals // T0331: save pre-coercion values for alias check
@@ -3678,6 +3732,57 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 				c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
 				return dup
 			}
+			// T0366: Optional[Vector|Channel|Arc|Weak] fields — dup the inner buffer
+			// so the new optional owns an independent copy. Without this, both the
+			// source's owner drop and the new variable's optional drop free the same
+			// buffer (mirrors the Optional[String] handling at lines 3635–3642).
+			// optionalContainerDup is consumed by genVarDecl (and similar sites) to
+			// claim the dup temp once the containing optional is bound to a variable.
+			if opt, ok := fType.(*types.Optional); ok {
+				elem := opt.Elem()
+				if elemType, isVec := types.AsVector(elem); isVec {
+					c.dupContainerFieldAccess = false
+					elemLLVM := c.resolveType(elemType)
+					elemSize := int64(c.typeSize(elemLLVM))
+					innerVec := c.block.NewExtractValue(val, 1)
+					dup := c.dupVector(innerVec, elemSize)
+					c.trackVectorTemp(dup)
+					c.optionalContainerDup = dup
+					return c.block.NewInsertValue(val, dup, 1)
+				}
+				if types.IsChannel(elem) {
+					c.dupContainerFieldAccess = false
+					innerCh := c.block.NewExtractValue(val, 1)
+					dup := c.dupChannel(innerCh)
+					c.trackChannelTemp(dup)
+					c.optionalContainerDup = dup
+					return c.block.NewInsertValue(val, dup, 1)
+				}
+				if arcElem, isArc := types.AsArc(elem); isArc {
+					c.dupContainerFieldAccess = false
+					innerArc := c.block.NewExtractValue(val, 1)
+					dup := c.dupArc(innerArc)
+					resolvedArcElem := arcElem
+					if c.typeSubst != nil {
+						resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+					}
+					c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
+					c.optionalContainerDup = dup
+					return c.block.NewInsertValue(val, dup, 1)
+				}
+				if weakElem, isWeak := types.AsWeak(elem); isWeak {
+					c.dupContainerFieldAccess = false
+					innerWeak := c.block.NewExtractValue(val, 1)
+					resolvedWeakElem := weakElem
+					if c.typeSubst != nil {
+						resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
+					}
+					dup := c.dupWeak(innerWeak, resolvedWeakElem)
+					c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
+					c.optionalContainerDup = dup
+					return c.block.NewInsertValue(val, dup, 1)
+				}
+			}
 		}
 		// B0190: Signal that this field access loaded a string? field from a
 		// droppable type. genOptionalForceUnwrap's result should NOT be tracked
@@ -4627,6 +4732,40 @@ func (c *Compiler) genMutRefArg(expr ast.Expr) value.Value {
 	}
 }
 
+// maybeEnableDupForMutRefArg sets dupStringFieldAccess or dupContainerFieldAccess
+// when an arg about to be evaluated is a field read on a droppable owner that's
+// being passed to a `~` (consuming) param. Without this, the field's inner
+// buffer is shared between the owner and the callee — both end up freeing it.
+// T0366.
+func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type) {
+	mem, ok := arg.(*ast.MemberExpr)
+	if !ok {
+		return
+	}
+	ownerType := c.info.Types[mem.Target]
+	if c.typeSubst != nil && ownerType != nil {
+		ownerType = types.Substitute(ownerType, c.typeSubst)
+	}
+	ownerNamed := extractNamed(ownerType)
+	if ownerNamed == nil || !ownerNamed.HasDrop() {
+		return
+	}
+	pt := paramType
+	if c.typeSubst != nil {
+		pt = types.Substitute(pt, c.typeSubst)
+	}
+	if isRefType(pt) {
+		return
+	}
+	if extractNamed(pt) == types.TypString {
+		c.dupStringFieldAccess = true
+		return
+	}
+	if types.IsVector(pt) || types.IsChannel(pt) || types.IsArc(pt) || types.IsWeak(pt) {
+		c.dupContainerFieldAccess = true
+	}
+}
+
 // genCallArgsWithMutRef evaluates call arguments with MutRef-awareness (B0149).
 // For MutRef params, passes the address of the caller's storage instead of the value.
 // When the arg needs no coercion and is a simple lvalue, passes the alloca directly.
@@ -4658,12 +4797,23 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 				continue
 			}
 		}
+		// T0366: For `~` (move) params, when the arg is a field read on a droppable
+		// owner, set the dup flag so genFieldAccess produces an independent copy.
+		// Without this, the inner buffer is shared between the caller's owner field
+		// and the callee — the callee frees it, then the owner's drop frees it again.
+		// Only meaningful for auto-dup container types (string, Vector, Channel, etc.).
+		isMutRefParam := i < len(params) && params[i].Ref() == types.RefMut
+		if isMutRefParam {
+			c.maybeEnableDupForMutRefArg(arg.Value, params[i].Type())
+		}
 		v := c.genCallArgExpr(arg.Value)
+		c.dupStringFieldAccess = false
+		c.dupContainerFieldAccess = false
 		argVals = append(argVals, v)
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 		// T0087: For ~ (move) params, transfer ownership to callee.
 		// Clear caller's drop flag and claim string/heap temps so they're not double-freed.
-		if i < len(params) && params[i].Ref() == types.RefMut {
+		if isMutRefParam {
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
@@ -6516,6 +6666,12 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 		c.block.NewStore(val, elemPtr)
 		// B0233: Claim heap temp — element ownership transferred to vector literal.
 		c.claimHeapTemp(val)
+		// T0366: Also claim string/vector/channel stmt-temps. trackVectorTempWithElemType
+		// (called by CallExpr / ?! / ?^ / ! / ? e {} for Vector results) registers in
+		// stmtTemps, not heapTemps — claimHeapTemp doesn't see them. Without claiming,
+		// the caller's stmt-temp cleanup runs Vector.drop while the gather buffer (owned
+		// by the variadic callee) also drops each element → double-free.
+		c.claimStringTemp(val)
 		// B0281: Clear enum ctor temps created during this element's evaluation.
 		// Same issue as map literals: the enum value is stored by LLVM value,
 		// so both the temp alloca and the vector slot share inner pointers.

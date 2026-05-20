@@ -641,6 +641,15 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType) || types.IsArc(resolvedExprType) || types.IsWeak(resolvedExprType)) && !isRefType(resolvedExprType) {
 		c.dupContainerFieldAccess = true
 	}
+	// T0366: Also set dup flag for Optional[Vector|Channel|Arc|Weak] fields. Without
+	// duping, both the source's owner drop and the new variable's optional drop would
+	// drop the same inner buffer → double-free.
+	if opt, ok := resolvedExprType.(*types.Optional); ok {
+		elem := opt.Elem()
+		if types.IsVector(elem) || types.IsChannel(elem) || types.IsArc(elem) || types.IsWeak(elem) {
+			c.dupContainerFieldAccess = true
+		}
+	}
 	val := c.genExpr(s.Value)
 	c.dupStringFieldAccess = false
 	c.dupContainerFieldAccess = false
@@ -664,6 +673,14 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if c.optionalStringDup != nil {
 		c.claimStringTemp(c.optionalStringDup)
 		c.optionalStringDup = nil
+	}
+	// T0366: Claim dup'd inner container (Vector/Channel/Arc/Weak) for
+	// Optional[container] field access. The dup is the value the new variable
+	// owns; without claiming it would be freed at stmt end while the new
+	// variable still references it.
+	if c.optionalContainerDup != nil {
+		c.claimStringTemp(c.optionalContainerDup)
+		c.optionalContainerDup = nil
 	}
 
 	// Wrap value in Optional if declared type is Optional but expr is not
@@ -902,6 +919,11 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if c.optionalStringDup != nil {
 		c.claimStringTemp(c.optionalStringDup)
 		c.optionalStringDup = nil
+	}
+	// T0366: Claim dup'd inner container for Optional[Vector|Channel|Arc|Weak] field access.
+	if c.optionalContainerDup != nil {
+		c.claimStringTemp(c.optionalContainerDup)
+		c.optionalContainerDup = nil
 	}
 	// B0219: Claim vector/channel/arc/weak temp — ownership transferred to this variable.
 	if types.IsVector(typ) || types.IsChannel(typ) || types.IsArc(typ) || types.IsWeak(typ) {
@@ -3448,6 +3470,7 @@ func (c *Compiler) cleanupStmtTemps() {
 	c.optionalFieldString = false
 	c.optionalFieldVector = false // T0354
 	c.optionalStringDup = nil
+	c.optionalContainerDup = nil // T0366
 	if len(c.stmtTemps) == 0 {
 		return
 	}
@@ -5194,6 +5217,11 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	if c.optionalStringDup != nil {
 		c.claimStringTemp(c.optionalStringDup)
 		c.optionalStringDup = nil
+	}
+	// T0366: Claim dup'd inner container for Optional[Vector|Channel|Arc|Weak] return values.
+	if c.optionalContainerDup != nil {
+		c.claimStringTemp(c.optionalContainerDup)
+		c.optionalContainerDup = nil
 	}
 	if c.block != nil && c.block.Term == nil {
 		c.cleanupStmtTemps()

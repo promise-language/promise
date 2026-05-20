@@ -967,3 +967,151 @@ t0344_handler_plain_arg() `test {
   },
   0);
 }
+
+// =========================================================================
+// T0350: ?! / ! / ?^ / ? e {} returning Vector[T] (i8* result) must drop
+// temps at statement end when discarded or passed as plain (non-`~`) args.
+// Vector returns as bare i8* (not the {i8*, i8*} value struct of T0343),
+// so the i8* branches in expr.go must explicitly check for TypVector and
+// route to Vector.drop with element-type info — otherwise:
+//   - ?! / ?^ leaked the entire vector buffer (no tracking).
+//   - ! / ? e {} leaked element strings (string[] elements never dropped;
+//     only the buffer was accidentally freed via promise_string_drop's
+//     bit-63 path on the cap field).
+// String-element variants are the strongest regression guard since they
+// exercise Vector.drop's per-element drop loop.
+// =========================================================================
+
+t0350_make_int_vec_failable!() int[] {
+  v := int[]();
+  v.push(1);
+  v.push(2);
+  return v;
+}
+
+t0350_make_int_vec_optional() int[]? {
+  v := int[]();
+  v.push(1);
+  v.push(2);
+  return v;
+}
+
+t0350_check_int_vec(int[] v) {
+  assert(v.len == 2, "int vec len");
+}
+
+t0350_make_str_vec_failable!() string[] {
+  v := string[]();
+  v.push("hello");
+  v.push("world");
+  return v;
+}
+
+t0350_make_str_vec_optional() string[]? {
+  v := string[]();
+  v.push("hello");
+  v.push("world");
+  return v;
+}
+
+t0350_check_str_vec(string[] v) {
+  assert(v.len == 2, "str vec len");
+}
+
+// ?! (ErrorPanicExpr) — int[]
+t0350_int_panic_discard() `test {
+  t0350_make_int_vec_failable()?!;
+}
+t0350_int_panic_plain_arg() `test {
+  t0350_check_int_vec(t0350_make_int_vec_failable()?!);
+}
+
+// ?! — string[] (string-element drop required)
+t0350_str_panic_discard() `test {
+  t0350_make_str_vec_failable()?!;
+}
+t0350_str_panic_plain_arg() `test {
+  t0350_check_str_vec(t0350_make_str_vec_failable()?!);
+}
+
+// ! (OptionalUnwrapExpr) — int[]
+t0350_int_optional_discard() `test {
+  t0350_make_int_vec_optional()!;
+}
+t0350_int_optional_plain_arg() `test {
+  t0350_check_int_vec(t0350_make_int_vec_optional()!);
+}
+
+// ! — string[]
+t0350_str_optional_discard() `test {
+  t0350_make_str_vec_optional()!;
+}
+t0350_str_optional_plain_arg() `test {
+  t0350_check_str_vec(t0350_make_str_vec_optional()!);
+}
+
+// B0287 regression: optional bound to a local then unwrapped — must NOT be
+// tracked, otherwise the optional's drop binding and the unwrap tracker
+// would double-free.
+t0350_int_optional_ident_unwrap() `test {
+  o := t0350_make_int_vec_optional();
+  v := o!;
+  assert(v.len == 2, "int ident unwrap");
+}
+t0350_str_optional_ident_unwrap() `test {
+  o := t0350_make_str_vec_optional();
+  v := o!;
+  assert(v.len == 2, "str ident unwrap");
+}
+
+// ?^ (ErrorPropagateExpr) — int[], wrapped because ?^ requires failable context
+t0350_int_propagate_discard_inner!() {
+  t0350_make_int_vec_failable()?^;
+}
+t0350_int_propagate_discard() `test {
+  t0350_int_propagate_discard_inner()?!;
+}
+t0350_int_propagate_plain_arg_inner!() {
+  t0350_check_int_vec(t0350_make_int_vec_failable()?^);
+}
+t0350_int_propagate_plain_arg() `test {
+  t0350_int_propagate_plain_arg_inner()?!;
+}
+
+// ?^ — string[]
+t0350_str_propagate_discard_inner!() {
+  t0350_make_str_vec_failable()?^;
+}
+t0350_str_propagate_discard() `test {
+  t0350_str_propagate_discard_inner()?!;
+}
+t0350_str_propagate_plain_arg_inner!() {
+  t0350_check_str_vec(t0350_make_str_vec_failable()?^);
+}
+t0350_str_propagate_plain_arg() `test {
+  t0350_str_propagate_plain_arg_inner()?!;
+}
+
+// ? e {} (ErrorHandlerExpr) — int[]
+t0350_int_handler_discard() `test {
+  t0350_make_int_vec_failable()? e {
+    return;
+  };
+}
+t0350_int_handler_plain_arg() `test {
+  t0350_check_int_vec(t0350_make_int_vec_failable()? e {
+    return;
+  });
+}
+
+// ? e {} — string[] (catches the previously-broken accidental tracking)
+t0350_str_handler_discard() `test {
+  t0350_make_str_vec_failable()? e {
+    return;
+  };
+}
+t0350_str_handler_plain_arg() `test {
+  t0350_check_str_vec(t0350_make_str_vec_failable()? e {
+    return;
+  });
+}

@@ -89,16 +89,24 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// heap-allocated temp that must be freed at statement end if not
 		// claimed (e.g., by push which dups the string). Without this,
 		// synthesized serializable decode methods leak decoded strings.
+		// T0350: Same gap for Vector results — i8* falls through with no tracking.
 		if result != nil && result.Type() == irtypes.I8Ptr {
 			exprType := c.info.Types[e]
 			if c.typeSubst != nil && exprType != nil {
 				exprType = types.Substitute(exprType, c.typeSubst)
 			}
-			if extractNamed(exprType) == types.TypString {
+			named := extractNamed(exprType)
+			if named == types.TypString {
 				if c.optionalFieldString {
 					c.optionalFieldString = false
 				} else {
 					c.trackStringTemp(result)
+				}
+			} else if named == types.TypVector {
+				if elemType, ok := types.AsVector(exprType); ok {
+					c.trackVectorTempWithElemType(result, elemType)
+				} else {
+					c.trackVectorTemp(result)
 				}
 			}
 		} else {
@@ -110,16 +118,24 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// T0125: Track string temps from failable call panic paths.
 		// When func()?! returns a string, the unwrapped i8* is a heap-allocated
 		// temp that must be freed at statement end if not claimed by a variable.
+		// T0350: Same gap for Vector results — i8* falls through with no tracking.
 		if result != nil && result.Type() == irtypes.I8Ptr {
 			exprType := c.info.Types[e]
 			if c.typeSubst != nil && exprType != nil {
 				exprType = types.Substitute(exprType, c.typeSubst)
 			}
-			if extractNamed(exprType) == types.TypString {
+			named := extractNamed(exprType)
+			if named == types.TypString {
 				if c.optionalFieldString {
 					c.optionalFieldString = false
 				} else {
 					c.trackStringTemp(result)
+				}
+			} else if named == types.TypVector {
+				if elemType, ok := types.AsVector(exprType); ok {
+					c.trackVectorTempWithElemType(result, elemType)
+				} else {
+					c.trackVectorTemp(result)
 				}
 			}
 		} else {
@@ -132,21 +148,29 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// B0190: Skip tracking when the unwrapped string comes from a field on a
 		// droppable type (signaled by optionalFieldString). The owner's drop
 		// handles the string's lifetime.
+		// T0350: Same gap for Vector results — i8* falls through with no tracking.
 		if result != nil && result.Type() == irtypes.I8Ptr {
 			exprType := c.info.Types[e]
 			if c.typeSubst != nil && exprType != nil {
 				exprType = types.Substitute(exprType, c.typeSubst)
 			}
-			if extractNamed(exprType) == types.TypString {
+			named := extractNamed(exprType)
+			// B0287: For optional unwrap on ident source, the optional's
+			// drop binding owns the inner. Don't track as a statement temp —
+			// that would cause a double-free at scope exit.
+			_, isIdentSource := e.Expr.(*ast.IdentExpr)
+			if named == types.TypString {
 				if c.optionalFieldString {
 					c.optionalFieldString = false
-				} else {
-					// B0287: For optional unwrap on ident source, the optional's
-					// drop binding owns the inner string. Don't track as a
-					// statement temp — that would cause a double-free at scope exit.
-					_, isIdentSource := e.Expr.(*ast.IdentExpr)
-					if !isIdentSource {
-						c.trackStringTemp(result)
+				} else if !isIdentSource {
+					c.trackStringTemp(result)
+				}
+			} else if named == types.TypVector {
+				if !isIdentSource {
+					if elemType, ok := types.AsVector(exprType); ok {
+						c.trackVectorTempWithElemType(result, elemType)
+					} else {
+						c.trackVectorTemp(result)
 					}
 				}
 			}
@@ -159,8 +183,25 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// B0185: Track string temps from error handler expressions.
 		// The result may be a phi merge of the Ok value and handler recovery value.
 		// If it's an i8* (string), it needs tracking for cleanup at statement end.
+		// T0350: Make tracking type-aware. Previously this branch unconditionally
+		// called trackStringTemp for any i8* — for Vector[T] results this only
+		// happened to free the buffer (because Vector and string share the bit-63
+		// literal flag and pal_free path) but never dropped element strings.
 		if result != nil && result.Type() == irtypes.I8Ptr {
-			c.trackStringTemp(result)
+			exprType := c.info.Types[e]
+			if c.typeSubst != nil && exprType != nil {
+				exprType = types.Substitute(exprType, c.typeSubst)
+			}
+			named := extractNamed(exprType)
+			if named == types.TypString {
+				c.trackStringTemp(result)
+			} else if named == types.TypVector {
+				if elemType, ok := types.AsVector(exprType); ok {
+					c.trackVectorTempWithElemType(result, elemType)
+				} else {
+					c.trackVectorTemp(result)
+				}
+			}
 		} else {
 			c.trackHeapUserTypeResult(e, result)
 		}
@@ -8447,17 +8488,35 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	// For assignment (val = opt!), the assignment site neutralizes the optional
 	// by setting its present flag to false (see genTypedVarDecl/genInferredVarDecl).
 
-	// Track the unwrapped string as a statement temp when the source is NOT an
-	// identifier (e.g., method call returning string?). For ident sources, the
-	// optional's own drop handles the inner string. For non-ident sources (call
-	// results), the string? temporary has no scope drop → the extracted string
-	// must be tracked and freed at statement end.
+	// Track the unwrapped i8* as a statement temp when the source is NOT an
+	// identifier (e.g., method call returning string? or T[]?). For ident
+	// sources, the optional's own drop handles the inner. For non-ident sources
+	// (call results), the optional? temporary has no scope drop → the extracted
+	// pointer must be tracked and freed at statement end.
 	// B0299: Skip when optionalFieldString is set — the field comes from a
 	// droppable type whose drop handles the string's lifetime. Tracking it
 	// as a temp would cause double-free (statement-end + owner drop).
+	// T0350: Type-aware tracking — strings via promise_string_drop, vectors via
+	// Vector.drop with element type so heap elements (e.g., string[]) are dropped.
 	if _, isIdent := expr.(*ast.IdentExpr); !isIdent && c.tempTrackingEnabled && !c.optionalFieldString {
 		if result.Type().Equal(irtypes.I8Ptr) {
-			c.trackStringTemp(result)
+			innerType := c.info.Types[expr]
+			if opt, ok := innerType.(*types.Optional); ok {
+				innerType = opt.Elem()
+			}
+			if c.typeSubst != nil && innerType != nil {
+				innerType = types.Substitute(innerType, c.typeSubst)
+			}
+			named := extractNamed(innerType)
+			if named == types.TypString {
+				c.trackStringTemp(result)
+			} else if named == types.TypVector {
+				if elemType, ok := types.AsVector(innerType); ok {
+					c.trackVectorTempWithElemType(result, elemType)
+				} else {
+					c.trackVectorTemp(result)
+				}
+			}
 		}
 	}
 

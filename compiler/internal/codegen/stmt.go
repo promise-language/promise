@@ -719,12 +719,16 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// clear the receiver's drop flag to prevent double-free. This handles the pattern
 	// `w2 := w.self()` where self() does `return this` from a borrowing method —
 	// both w and w2 would otherwise try to free the same heap allocation.
+	// T0347: walk through chained method calls so `r := c.iter().iter()` also clears
+	// `c`'s drop flag; for `r := this.method()` (chain rooted at `this`), defer until
+	// after maybeRegisterDrop so we can clear the new binding's drop flag instead.
 	if !isStructuralTarget {
 		if call, ok := s.Value.(*ast.CallExpr); ok {
-			if member, ok := call.Callee.(*ast.MemberExpr); ok {
-				if recvIdent, ok := member.Target.(*ast.IdentExpr); ok {
-					c.maybeClearReceiverDropFlag(val, recvIdent.Name, resolvedExprType)
-				}
+			switch origin := chainOriginExpr(call).(type) {
+			case *ast.IdentExpr:
+				c.maybeClearReceiverDropFlag(val, origin.Name, resolvedExprType)
+			case *ast.ThisExpr:
+				c.pendingThisAliasClear = &thisAliasClearReq{val: val, retType: resolvedExprType}
 			}
 		}
 	}
@@ -780,6 +784,16 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		dropType = types.Substitute(dropType, c.typeSubst)
 	}
 	c.maybeRegisterDrop(s.Name, alloca, dropType)
+	// T0347: Drain pending this-alias clear request set when RHS is a chain rooted
+	// at `this`. maybeRegisterDrop has now stored i1 1 into the binding's drop flag;
+	// emit a runtime alias check that clears it back to false when the result really
+	// aliases `this`, leaving the caller's drop flag intact.
+	if req := c.pendingThisAliasClear; req != nil {
+		c.pendingThisAliasClear = nil
+		if flag, ok := c.dropFlags[s.Name]; ok {
+			c.maybeClearBindingDropFlagOnThisAlias(req.val, flag, req.retType)
+		}
+	}
 	// T0111: Register optional drop for explicitly declared optional locals (string? s = ...).
 	if opt, ok := dropType.(*types.Optional); ok {
 		c.maybeRegisterOptionalDrop(s.Name, alloca, opt)
@@ -868,11 +882,14 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	}
 	// B0250: If RHS is a method call returning the same heap instance as its receiver,
 	// clear the receiver's drop flag to prevent double-free.
+	// T0347: walk through chained method calls; for chains rooted at `this`, defer
+	// the alias-clear so it targets the new binding's drop flag (set by maybeRegisterDrop).
 	if call, ok := s.Value.(*ast.CallExpr); ok {
-		if member, ok := call.Callee.(*ast.MemberExpr); ok {
-			if recvIdent, ok := member.Target.(*ast.IdentExpr); ok {
-				c.maybeClearReceiverDropFlag(val, recvIdent.Name, typ)
-			}
+		switch origin := chainOriginExpr(call).(type) {
+		case *ast.IdentExpr:
+			c.maybeClearReceiverDropFlag(val, origin.Name, typ)
+		case *ast.ThisExpr:
+			c.pendingThisAliasClear = &thisAliasClearReq{val: val, retType: typ}
 		}
 	}
 
@@ -914,6 +931,13 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	c.maybeRegisterDrop(s.Name, alloca, typ)
+	// T0347: Drain pending this-alias clear (see matching block in genVarDecl).
+	if req := c.pendingThisAliasClear; req != nil {
+		c.pendingThisAliasClear = nil
+		if flag, ok := c.dropFlags[s.Name]; ok {
+			c.maybeClearBindingDropFlagOnThisAlias(req.val, flag, req.retType)
+		}
+	}
 	// B0226: Register optional drop for inferred optional locals (r := factory_returning_optional()).
 	// Without this, optional values from inferred declarations leak their inner value at scope exit.
 	if opt, ok := typ.(*types.Optional); ok {
@@ -5257,6 +5281,26 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 	return result
 }
 
+// chainOriginExpr walks a possibly-chained method call back to its base
+// expression. For `w.f().g().h()` returns the IdentExpr `w`; for
+// `this.f().g()` returns the ThisExpr; for chains rooted in a non-method
+// expression (constructor, free call, field access) returns that expression
+// (which the caller's switch will ignore). T0347.
+func chainOriginExpr(call *ast.CallExpr) ast.Expr {
+	var expr ast.Expr = call
+	for {
+		c, ok := expr.(*ast.CallExpr)
+		if !ok {
+			return expr
+		}
+		m, ok := c.Callee.(*ast.MemberExpr)
+		if !ok {
+			return expr
+		}
+		expr = m.Target
+	}
+}
+
 // maybeClearReceiverDropFlag emits a runtime check: if the method call result's
 // instance pointer matches the receiver variable's instance pointer, clear the
 // receiver's drop flag. This prevents double-free when a borrowing method does
@@ -5293,6 +5337,52 @@ func (c *Compiler) maybeClearReceiverDropFlag(val value.Value, recvName string, 
 	c.block.NewCondBr(same, clearBlk, skipBlk)
 
 	clearBlk.NewStore(constant.False, flag)
+	clearBlk.NewBr(skipBlk)
+
+	c.block = skipBlk
+}
+
+// maybeClearBindingDropFlagOnThisAlias emits a runtime check: if the method
+// call result's instance pointer matches the current method's `this`, clear
+// the new binding's drop flag. Mirrors maybeClearReceiverDropFlag but applies
+// to `r := this.method()` (or any chain rooted at `this`) inside a method:
+// `this` itself has no drop flag (it's borrowed), so we must clear the binding's
+// flag instead of a receiver's. T0347.
+func (c *Compiler) maybeClearBindingDropFlagOnThisAlias(val value.Value, bindingFlag value.Value, retType types.Type) {
+	if retType == nil || bindingFlag == nil {
+		return
+	}
+	named := extractNamed(retType)
+	if named == nil || classify(named) != CatUnknown ||
+		named == types.TypString || named == types.TypVoid ||
+		named == types.TypNone || named.IsValueType() {
+		return
+	}
+	thisAlloca, ok := c.locals["this"]
+	if !ok {
+		return
+	}
+	st, ok := val.Type().(*irtypes.StructType)
+	if !ok || len(st.Fields) != 2 {
+		return
+	}
+	retInst := c.block.NewExtractValue(val, 1)
+	thisVal := c.block.NewLoad(thisAlloca.ElemType, thisAlloca)
+	var thisInst value.Value
+	if structTy, isStruct := thisVal.Type().(*irtypes.StructType); isStruct && len(structTy.Fields) == 2 {
+		thisInst = c.block.NewExtractValue(thisVal, 1)
+	} else if thisVal.Type() == irtypes.I8Ptr {
+		thisInst = thisVal
+	} else {
+		return
+	}
+	same := c.block.NewICmp(enum.IPredEQ, retInst, thisInst)
+
+	clearBlk := c.newBlock("this.alias.clear")
+	skipBlk := c.newBlock("this.alias.skip")
+	c.block.NewCondBr(same, clearBlk, skipBlk)
+
+	clearBlk.NewStore(constant.False, bindingFlag)
 	clearBlk.NewBr(skipBlk)
 
 	c.block = skipBlk

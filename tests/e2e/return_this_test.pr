@@ -63,3 +63,108 @@ test_chained_return_this() `test {
   w := Wrapper(value: 99).self().self().self();
   assert(w.value == 99, "chained self() should preserve value");
 }
+
+// T0347: chained self() rooted at a local (not an inline constructor)
+test_chained_self_on_local() `test {
+  w := Wrapper(value: 7);
+  r := w.self().self();
+  assert(r.value == 7, "chained self() on local should preserve value");
+}
+
+// T0347: deeper chain rooted at a local
+test_chained_self_three_deep() `test {
+  c := Counter(count: 0, max_val: 5);
+  r := c.iter().iter().iter();
+  assert(r.max_val == 5, "three-deep chain should preserve field");
+}
+
+type Inner {
+  int n;
+
+  iter() Inner {
+    return this;
+  }
+
+  use_self_field() int {
+    r := this.iter();
+    return r.n;
+  }
+
+  use_self_chain() int {
+    r := this.iter().iter();
+    return r.n;
+  }
+}
+
+// T0347: `r := this.iter()` inside a method, then field access on r
+test_method_internal_iter_then_field() `test {
+  i := Inner(n: 11);
+  v := i.use_self_field();
+  assert(v == 11, "this.iter() then field access should work");
+}
+
+// T0347: `r := this.iter().iter()` inside a method
+test_method_internal_chained_iter() `test {
+  i := Inner(n: 13);
+  v := i.use_self_chain();
+  assert(v == 13, "chained this.iter() inside a method should work");
+}
+
+// T0347: alias clear must not double-free heap fields.
+type StringHolder {
+  string name;
+  self() StringHolder {
+    return this;
+  }
+}
+
+test_chained_self_with_string_field() `test {
+  s := StringHolder(name: "hello world");
+  r := s.self().self();
+  assert(r.name == "hello world", "string field preserved through chain");
+}
+
+type VecHolder {
+  int[] nums;
+  self() VecHolder {
+    return this;
+  }
+}
+
+test_chained_self_with_vector_field() `test {
+  v := VecHolder(nums: [10, 20, 30]);
+  r := v.self().self();
+  assert(r.nums.len == 3, "vector field preserved through chain");
+}
+
+type InnerHeap {
+  string name;
+
+  iter() InnerHeap {
+    return this;
+  }
+
+  use_self_string() string {
+    r := this.iter();
+    return r.name;
+  }
+
+  use_chain_string() string {
+    r := this.iter().iter();
+    return r.name;
+  }
+}
+
+// T0347: `r := this.iter()` inside a method with heap field — must not double-free.
+test_method_internal_this_iter_heap() `test {
+  i := InnerHeap(name: "promise");
+  v := i.use_self_string();
+  assert(v == "promise", "this.iter() preserves heap field");
+}
+
+// T0347: chained `r := this.iter().iter()` inside a method with heap field.
+test_method_internal_chained_this_iter_heap() `test {
+  i := InnerHeap(name: "world");
+  v := i.use_chain_string();
+  assert(v == "world", "chained this.iter() preserves heap field");
+}

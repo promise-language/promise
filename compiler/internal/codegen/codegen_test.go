@@ -6961,6 +6961,57 @@ func TestReturnThisClearsReceiverDropFlag(t *testing.T) {
 	assertContains(t, ir, "return.this.skip")
 }
 
+// T0347: Chained self-returning calls on a local must walk through the chain
+// to find the IdentExpr root and clear its drop flag (not just direct calls).
+func TestReturnThisChainedClearsRootDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { int value; self() Wrapper { return this; } }
+		main() { w := Wrapper(value: 1); r := w.self().self(); }
+	`)
+	// chainOriginExpr should walk past the inner call and reach `w`,
+	// emitting the receiver alias-clear blocks for the chained case.
+	assertContains(t, ir, "return.this.clear")
+	assertContains(t, ir, "return.this.skip")
+}
+
+// T0347: `r := this.method()` inside a method must emit a different alias-clear
+// path that targets the new binding's drop flag (since `this` itself has no
+// drop flag — it's borrowed). Distinct block labels: this.alias.{clear,skip}.
+func TestReturnThisRootedClearsBindingDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int n;
+			iter() Inner { return this; }
+			use_self() int {
+				r := this.iter();
+				return r.n;
+			}
+		}
+		main() { i := Inner(n: 11); v := i.use_self(); }
+	`)
+	// New helper emits this.alias.clear / this.alias.skip blocks.
+	assertContains(t, ir, "this.alias.clear")
+	assertContains(t, ir, "this.alias.skip")
+}
+
+// T0347: Chained `r := this.iter().iter()` inside a method also emits the
+// this-alias clear path (chainOriginExpr walks the chain to ThisExpr root).
+func TestReturnThisRootedChainedClearsBindingDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int n;
+			iter() Inner { return this; }
+			use_self() int {
+				r := this.iter().iter();
+				return r.n;
+			}
+		}
+		main() { i := Inner(n: 13); v := i.use_self(); }
+	`)
+	assertContains(t, ir, "this.alias.clear")
+	assertContains(t, ir, "this.alias.skip")
+}
+
 func TestOptionalParamWrapping(t *testing.T) {
 	ir := generateIR(t, `
 		foo(int? x) int {

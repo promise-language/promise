@@ -176,6 +176,11 @@ type Compiler struct {
 	lastClaimedDropFunc  *ir.Func            // T0127: drop func from last claimHeapTemp (nil if none claimed)
 	pendingReceiverClaim value.Value         // T0130: deferred receiver claim from method dispatch
 
+	// T0347: deferred binding-drop-flag clear for `r := this.method()` chains
+	// where the method does `return this`. Set at the let/assign site, drained
+	// after maybeRegisterDrop has stored i1 1 into the new binding's drop flag.
+	pendingThisAliasClear *thisAliasClearReq
+
 	// T0100: Statement-level tracking for closure env pointers.
 	// Tracks env structs from lambda expressions passed directly as function
 	// arguments (not stored in variables). Unclaimed envs are freed at statement end.
@@ -467,6 +472,15 @@ type enumCtorTemp struct {
 	alloca   *ir.InstAlloca // entry-block i8* alloca (stores bitcast of enum alloca)
 	dropFlag *ir.InstAlloca // entry-block i1 alloca
 	dropFunc *ir.Func       // enum drop function (takes i8*)
+}
+
+// thisAliasClearReq carries the value and return type from a let/assign site
+// where the RHS is a chained method call rooted at `this`. The actual runtime
+// alias check is emitted only after maybeRegisterDrop has set up the binding's
+// drop flag (so we have a flag to clear). T0347.
+type thisAliasClearReq struct {
+	val     value.Value
+	retType types.Type
 }
 
 // envTemp tracks a heap-allocated closure env pointer from a lambda expression (T0100).

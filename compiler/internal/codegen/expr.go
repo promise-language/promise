@@ -3240,7 +3240,7 @@ func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignO
 	}
 
 	// Drop old value if T is droppable (T0270)
-	c.emitInnerDrop(c.block, mutexPtr, mutexStructTy, elemType, mutexFieldValue)
+	c.block = c.emitInnerDrop(c.block, mutexPtr, mutexStructTy, elemType, mutexFieldValue)
 
 	// T0351: defensive dup for borrow-param strings. The sema layer already
 	// rejects `g.borrow = borrow_param` via tryMoveConsume in checkAssignStmt,

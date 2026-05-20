@@ -2280,7 +2280,7 @@ func (c *Compiler) defineArcDropBody(fn *ir.Func, elemType types.Type) {
 	decrcBlk.NewCondBr(wasOne, dropBlk, doneBlk)
 
 	// Drop inner T value, then decrement weak_count
-	c.emitArcInnerDrop(dropBlk, typedPtr, arcStructTy, elemType)
+	dropBlk = c.emitArcInnerDrop(dropBlk, typedPtr, arcStructTy, elemType)
 	// Decrement weak_count (the +1 that represents all strong refs)
 	wcField := dropBlk.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
@@ -2299,20 +2299,24 @@ func (c *Compiler) defineArcDropBody(fn *ir.Func, elemType types.Type) {
 // emitArcInnerDrop emits the type-specific drop logic for the value stored inside an Arc.
 // T0155: handles primitives (no-op), strings, vectors, channels, nested arcs, and user types.
 // T0157: delegates to emitInnerDrop with arcFieldValue index.
-func (c *Compiler) emitArcInnerDrop(blk *ir.Block, typedPtr value.Value, arcStructTy *irtypes.StructType, elemType types.Type) {
-	c.emitInnerDrop(blk, typedPtr, arcStructTy, elemType, arcFieldValue)
+// T0358: returns the (possibly new) block — Vector inner drop emits a loop that
+// changes the active block, so callers must thread the returned block.
+func (c *Compiler) emitArcInnerDrop(blk *ir.Block, typedPtr value.Value, arcStructTy *irtypes.StructType, elemType types.Type) *ir.Block {
+	return c.emitInnerDrop(blk, typedPtr, arcStructTy, elemType, arcFieldValue)
 }
 
 // emitInnerDrop emits type-specific drop logic for a value at the given field index
 // in a container struct. Used by both Arc and Mutex drop bodies.
-func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *irtypes.StructType, elemType types.Type, fieldIdx int) {
+// T0358: returns the (possibly new) block. The Vector case emits an element drop
+// loop that creates new blocks; callers must continue from the returned block.
+func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *irtypes.StructType, elemType types.Type, fieldIdx int) *ir.Block {
 	named := extractNamed(elemType)
 	fi := constant.NewInt(irtypes.I32, int64(fieldIdx))
 
 	switch {
 	case named != nil && isPrimitiveScalar(named):
 		// Copy type — no inner drop needed
-		return
+		return blk
 	case named == types.TypString:
 		valField := blk.NewGetElementPtr(structTy, typedPtr,
 			constant.NewInt(irtypes.I32, 0), fi)
@@ -2324,6 +2328,18 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		valField := blk.NewGetElementPtr(structTy, typedPtr,
 			constant.NewInt(irtypes.I32, 0), fi)
 		vecVal := blk.NewLoad(irtypes.I8Ptr, valField)
+		// T0358 (T0354 follow-up): drop vector elements before freeing buffer.
+		// emitVectorElementDropLoop uses c.block/c.fn/c.entryBlock — temporarily
+		// swap them so allocas land in this drop fn's entry block, then restore.
+		if innerVecElem, isVec := types.AsVector(elemType); isVec {
+			savedFn, savedEntry, savedBlock := c.fn, c.entryBlock, c.block
+			c.fn = blk.Parent
+			c.entryBlock = blk.Parent.Blocks[0]
+			c.block = blk
+			c.emitVectorElementDropLoop(vecVal, innerVecElem)
+			blk = c.block
+			c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
+		}
 		if dropFn, ok := c.funcs["Vector.drop"]; ok {
 			blk.NewCall(dropFn, vecVal)
 		}
@@ -2399,6 +2415,7 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		instancePtr := blk.NewExtractValue(valStruct, 1)
 		blk.NewCall(c.palFree, instancePtr)
 	}
+	return blk
 }
 
 // dupArc duplicates an Arc reference (i8* → i8*) by atomically incrementing
@@ -2647,7 +2664,7 @@ func (c *Compiler) defineMutexDropBody(fn *ir.Func, elemType types.Type) {
 	typedPtr := dropBlk.NewBitCast(thisParam, irtypes.NewPointer(mutexStructTy))
 
 	// Drop inner T value — Mutex has value at field 5
-	c.emitInnerDrop(dropBlk, typedPtr, mutexStructTy, elemType, mutexFieldValue)
+	dropBlk = c.emitInnerDrop(dropBlk, typedPtr, mutexStructTy, elemType, mutexFieldValue)
 
 	// Destroy cond var (field 1)
 	condField := dropBlk.NewGetElementPtr(mutexStructTy, typedPtr,
@@ -6724,6 +6741,11 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 	innerVal := c.block.NewExtractValue(oldOpt, 1)
 
 	if innerNamed == types.TypString || types.IsVector(elem) || types.IsChannel(elem) {
+		// T0358 (T0354 follow-up): for Vector inner type, iterate elements and
+		// drop heap elements before freeing the buffer.
+		if elemType, isVec := types.AsVector(elem); isVec {
+			c.emitVectorElementDropLoop(innerVal, elemType)
+		}
 		// String/container: inner is i8*, call drop directly.
 		c.block.NewCall(dropFunc, innerVal)
 	} else {

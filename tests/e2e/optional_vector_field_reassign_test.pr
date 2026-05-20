@@ -1,0 +1,147 @@
+// T0358: Optional vector field reassignment must drop per-element heap data
+// before freeing the buffer. Mirrors the T0354 fix at the unwrap path, but
+// for the reassign path (B0240) — sibling code site that previously called
+// `Vector.drop` on the buffer pointer without iterating elements.
+type HolderStrVec {
+  string[]? items;
+  drop(~this) {
+  }
+}
+
+type HolderNestedVec {
+  int[][]? grid;
+  drop(~this) {
+  }
+}
+
+type Item {
+  int id;
+  string name;
+}
+
+type ItemHolder {
+  Item[]? items;
+  drop(~this) {
+  }
+}
+
+// Synthesized-drop owners (no explicit drop method)
+type AutoStrVecHolder {
+  string[]? items;
+  string label;
+}
+
+type AutoItemHolder {
+  Item[]? items;
+  int count;
+}
+
+// --- Site 1a: reassign string[]? to a new vector ---
+
+test_optional_string_vec_reassign_new() `test {
+  sv := string[]();
+  sv.push("hello" + "");
+  sv.push("world" + "");
+  h := HolderStrVec(items: sv);
+
+  sv2 := string[]();
+  sv2.push("foo" + "");
+  h.items = sv2;
+  assert(h.items!.len == 1, "reassigned vec len");
+}
+
+// --- Site 1b: reassign string[]? to none ---
+
+test_optional_string_vec_reassign_none() `test {
+  sv := string[]();
+  sv.push("hello" + "");
+  sv.push("world" + "");
+  h := HolderStrVec(items: sv);
+
+  h.items = none;
+  // Optional vec field comparisons aren't supported; use an unwrap-style check.
+  is_none := true;
+  if v := h.items {
+    is_none = false;
+  }
+  assert(is_none, "reassigned to none");
+}
+
+// --- Site 1c: nested vec int[][]? reassigned to none ---
+
+test_optional_nested_vec_reassign_none() `test {
+  outer := int[][]();
+  inner1 := int[]();
+  inner1.push(1);
+  inner1.push(2);
+  outer.push(inner1);
+
+  inner2 := int[]();
+  inner2.push(3);
+  outer.push(inner2);
+
+  h := HolderNestedVec(grid: outer);
+  h.grid = none;
+  is_none := true;
+  if g := h.grid {
+    is_none = false;
+  }
+  assert(is_none, "nested vec reassigned");
+}
+
+// --- Site 1d: user-type vec Item[]? reassigned to none ---
+
+test_optional_user_type_vec_reassign_none() `test {
+  items := Item[]();
+  items.push(Item(id: 1, name: "alpha" + ""));
+  items.push(Item(id: 2, name: "beta" + ""));
+  h := ItemHolder(items: items);
+
+  h.items = none;
+  is_none := true;
+  if v := h.items {
+    is_none = false;
+  }
+  assert(is_none, "user vec reassigned");
+}
+
+// --- Site 1e: user-type vec Item[]? reassigned to new ---
+
+test_optional_user_type_vec_reassign_new() `test {
+  items := Item[]();
+  items.push(Item(id: 1, name: "alpha" + ""));
+  items.push(Item(id: 2, name: "beta" + ""));
+  h := ItemHolder(items: items);
+
+  fresh := Item[]();
+  fresh.push(Item(id: 99, name: "z" + ""));
+  h.items = fresh;
+  assert(h.items!.len == 1, "user vec replaced");
+}
+
+// --- Synthesized drop owner: same paths still cover the leak ---
+
+test_synth_drop_owner_string_vec_reassign_none() `test {
+  sv := string[]();
+  sv.push("a" + "");
+  sv.push("b" + "");
+  h := AutoStrVecHolder(items: sv, label: "lbl" + "");
+
+  h.items = none;
+  is_none := true;
+  if v := h.items {
+    is_none = false;
+  }
+  assert(is_none, "synth drop reassign none");
+}
+
+test_synth_drop_owner_user_type_vec_reassign() `test {
+  items := Item[]();
+  items.push(Item(id: 1, name: "x" + ""));
+  h := AutoItemHolder(items: items, count: 1);
+
+  fresh := Item[]();
+  fresh.push(Item(id: 2, name: "y" + ""));
+  h.items = fresh;
+  assert(h.items!.len == 1, "synth drop reassign new");
+}

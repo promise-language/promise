@@ -1115,3 +1115,148 @@ t0350_str_handler_plain_arg() `test {
     return;
   });
 }
+
+// =========================================================================
+// T0356: Vector[T] elements (heap user types, enums with droppable variant
+// data, etc.) returned from CallExpr / ?! / ! / ?^ / ? e {} must be dropped
+// when the vector is discarded or passed as a plain (non-`~`) arg.
+//
+// stmtTemp cleanup previously called a string-only element drop helper,
+// so non-string elements leaked even after T0350 fixed the buffer leak.
+// Both cleanupStmtTemps and emitStmtTempCleanupForErrorPath were affected.
+// =========================================================================
+
+type T0356Holder {
+  string name;
+}
+
+t0356_make_holder_vec() T0356Holder[] {
+  v := T0356Holder[]();
+  v.push(T0356Holder(name: "a"));
+  v.push(T0356Holder(name: "b"));
+  return v;
+}
+
+t0356_make_holder_vec_failable!() T0356Holder[] {
+  v := T0356Holder[]();
+  v.push(T0356Holder(name: "a"));
+  v.push(T0356Holder(name: "b"));
+  return v;
+}
+
+t0356_make_holder_vec_optional() T0356Holder[]? {
+  v := T0356Holder[]();
+  v.push(T0356Holder(name: "a"));
+  v.push(T0356Holder(name: "b"));
+  return v;
+}
+
+t0356_check_holder_vec(T0356Holder[] v) {
+  assert(v.len == 2, "T0356 holder vec len");
+}
+
+// Plain CallExpr — discard / plain-arg
+t0356_call_discard() `test {
+  t0356_make_holder_vec();
+}
+t0356_call_plain_arg() `test {
+  t0356_check_holder_vec(t0356_make_holder_vec());
+}
+
+// ?! (ErrorPanicExpr) — discard / plain-arg
+t0356_panic_discard() `test {
+  t0356_make_holder_vec_failable()?!;
+}
+t0356_panic_plain_arg() `test {
+  t0356_check_holder_vec(t0356_make_holder_vec_failable()?!);
+}
+
+// ! (OptionalUnwrapExpr) — discard / plain-arg
+t0356_optional_discard() `test {
+  t0356_make_holder_vec_optional()!;
+}
+t0356_optional_plain_arg() `test {
+  t0356_check_holder_vec(t0356_make_holder_vec_optional()!);
+}
+
+// ? e {} (ErrorHandlerExpr) — discard / plain-arg
+t0356_handler_discard() `test {
+  t0356_make_holder_vec_failable()? e {
+    return;
+  };
+}
+t0356_handler_plain_arg() `test {
+  t0356_check_holder_vec(t0356_make_holder_vec_failable()? e {
+    return;
+  });
+}
+
+// Enum element with droppable variant data — uses to_string() so the payload
+// is heap-allocated (string literals live in .rodata and don't leak).
+enum T0356Color {
+  Named(string n),
+  Rgb(int r, int g, int b),
+}
+
+t0356_mk_color_str(int n) string {
+  return n.to_string();
+}
+
+t0356_make_enum_vec() T0356Color[] {
+  v := T0356Color[]();
+  v.push(T0356Color.Named(n: t0356_mk_color_str(1)));
+  v.push(T0356Color.Named(n: t0356_mk_color_str(2)));
+  return v;
+}
+
+t0356_enum_discard() `test {
+  t0356_make_enum_vec();
+}
+
+// Error-propagation cleanup path — exercises emitStmtTempCleanupForErrorPath.
+// make_vec() produces a stmt temp; fail()?^ then propagates an error, so the
+// error-path cleanup must drop the vector elements (not just the buffer).
+t0356_err_path_fail!() int {
+  raise error("nope");
+}
+
+t0356_err_path_consume(T0356Holder[] ~v, int x) {
+}
+
+t0356_err_path_inner!() {
+  t0356_err_path_consume(t0356_make_holder_vec(), t0356_err_path_fail()?^);
+}
+
+t0356_err_path() `test {
+  t0356_err_path_inner()? e {
+    return;
+  };
+}
+
+// Nested-vector elements (`int[][]`) — vectors are themselves heap-allocated
+// with their own synth drop, so cleanupStmtTemps must drop each inner Vector
+// before freeing the outer buffer. Exercises the vecElemNeedsUserTypeDrop /
+// recursive Vector.drop branch of emitVectorElementDropLoop.
+t0356_make_nested_vec() int[][] {
+  v := int[][]();
+  inner1 := int[]();
+  inner1.push(1);
+  inner1.push(2);
+  v.push(inner1);
+  inner2 := int[]();
+  inner2.push(3);
+  v.push(inner2);
+  return v;
+}
+
+t0356_check_nested_vec(int[][] v) {
+  assert(v.len == 2, "T0356 nested vec len");
+}
+
+t0356_nested_discard() `test {
+  t0356_make_nested_vec();
+}
+
+t0356_nested_plain_arg() `test {
+  t0356_check_nested_vec(t0356_make_nested_vec());
+}

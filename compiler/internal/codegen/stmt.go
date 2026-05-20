@@ -3140,19 +3140,6 @@ func (c *Compiler) cloneHeapElement(elemVal value.Value, elemType types.Type, na
 	return c.dupHeapValue(elemVal, elemType)
 }
 
-// emitVectorStringElementDropLoop is a string-only version of emitVectorElementDropLoop.
-// Used for Map for-in temporary vectors where values are shared copies — only strings
-// are safe to drop (they are dup'd, making each copy independent). B0212.
-func (c *Compiler) emitVectorStringElementDropLoop(vecPtr value.Value, elemType types.Type) {
-	if c.typeSubst != nil {
-		elemType = types.Substitute(elemType, c.typeSubst)
-	}
-	if extractNamed(elemType) != types.TypString {
-		return
-	}
-	c.emitVectorElementDropLoopBody(vecPtr, elemType)
-}
-
 // vecElemNeedsEnumDrop returns true if a vector element type is an enum that has
 // a drop function available. Checks both sema-time HasDrop (non-generic enums) and
 // codegen-time mono synth drops (generic enum instances like Slot[string, JsonValue]).
@@ -3488,10 +3475,13 @@ func (c *Compiler) cleanupStmtTemps() {
 		c.block.NewCondBr(isNull, doneBlock, execBlock)
 
 		c.block = execBlock
-		// T0109: For vector temps with string elements, drop string elements
-		// before freeing the vector buffer.
+		// T0356: For vector temps, drop droppable elements (strings, enums with
+		// droppable variants, heap user types, droppable tuples) before freeing
+		// the vector buffer. Only set on sole-owner vector temps via
+		// trackVectorTempWithElemType — shallow-dup field reads use trackVectorTemp
+		// (no elemType) to avoid double-freeing shared elements.
 		if temp.elemType != nil {
-			c.emitVectorStringElementDropLoop(ptr, temp.elemType)
+			c.emitVectorElementDropLoop(ptr, temp.elemType)
 		}
 		c.block.NewCall(temp.dropFunc, ptr)
 		c.block.NewBr(doneBlock)
@@ -3541,6 +3531,11 @@ func (c *Compiler) emitStmtTempCleanupForErrorPath() {
 		c.block.NewCondBr(isNull, doneBlock, execBlock)
 
 		c.block = execBlock
+		// T0356: Mirror cleanupStmtTemps — drop droppable vector elements
+		// before freeing the vector buffer on the error-propagation path.
+		if temp.elemType != nil {
+			c.emitVectorElementDropLoop(ptr, temp.elemType)
+		}
 		c.block.NewCall(temp.dropFunc, ptr)
 		c.block.NewBr(doneBlock)
 

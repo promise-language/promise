@@ -1443,12 +1443,19 @@ func (c *Compiler) defineSchedFindRunnableFunc() {
 // prevents M from returning prematurely and re-pushing onto the idle stack
 // (which would corrupt the intrusive linked list and potentially lose Ms).
 //
-// Lost-wakeup safety net (T0352): there is a small race window where a
-// non-M thread can enqueue to the global queue and call wake_m before this
-// M has pushed itself onto the idle stack — wake_m no-ops on the empty
-// stack, then this M parks indefinitely. Sysmon (sched.go ~789) periodically
-// calls wake_m when global work is pending, capping the worst-case stuck
-// time to ~10ms.
+// Lost-wakeup race (T0375): there is a window between find_runnable() returning
+// null and park_m acquiring idle_lock where a non-M enqueuer can complete
+// sched_enqueue + wake_m against an empty idle stack. To close this race we
+// re-check sched.global_size while still holding idle_lock AFTER pushing self
+// onto the idle stack. Both wake_m and this re-check serialize on idle_lock,
+// giving the invariant: either wake_m saw us on the stack and signaled (normal
+// park works), or we observe global_size > 0 and abort the park (popping self
+// off the stack and looping back to find_runnable). pthread mutex unlock/lock
+// provides cross-mutex visibility for global_size (which is incremented under
+// global_lock in sched_enqueue) without us needing to take global_lock here.
+//
+// Sysmon (sched.go ~789) still periodically calls wake_m as defense-in-depth
+// (T0352), but is no longer the primary mitigation for this race.
 func (c *Compiler) defineSchedParkMFunc() {
 	mParam := ir.NewParam("m_raw", irtypes.I8Ptr)
 	fn := c.module.NewFunc("promise_sched_park_m", irtypes.Void, mParam)
@@ -1458,6 +1465,8 @@ func (c *Compiler) defineSchedParkMFunc() {
 	schedTy := schedStructType()
 
 	entry := fn.NewBlock(".entry")
+	abortPark := fn.NewBlock("abort_park")
+	continuePark := fn.NewBlock("continue_park")
 	waitLoop := fn.NewBlock("wait_loop")
 	doWait := fn.NewBlock("do_wait")
 	doneBlk := fn.NewBlock("done")
@@ -1492,14 +1501,38 @@ func (c *Compiler) defineSchedParkMFunc() {
 	entry.NewStore(oldHead, mPField)      // M.p = old idle head (next pointer)
 	entry.NewStore(mParam, idleHeadField) // idle_head = M
 
-	entry.NewCall(c.palMutexUnlock, imLock)
+	// T0375: re-check global queue size while still holding idle_lock. If a
+	// non-M enqueuer raced ahead of us (queued work + ran wake_m on the empty
+	// stack), bail out before we commit to cond_wait. Reading global_size
+	// without global_lock is safe: we only need to observe enqueues whose
+	// wake_m has already run (and missed us); their global_size store is
+	// visible because pthread mutex unlock/lock pairs publish all prior
+	// writes from the unlocker's perspective.
+	globalSizeField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGlobalSize)))
+	globalSize := entry.NewLoad(irtypes.I64, globalSizeField)
+	hasWork := entry.NewICmp(enum.IPredNE, globalSize, constant.NewInt(irtypes.I64, 0))
 
 	// Pre-load park_cond (defined in entry, dominates all blocks)
 	parkCondField := entry.NewGetElementPtr(mTy, mPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkCond)))
 	parkCond := entry.NewLoad(irtypes.I8Ptr, parkCondField)
 
-	entry.NewBr(waitLoop)
+	entry.NewCondBr(hasWork, abortPark, continuePark)
+
+	// abort_park: work appeared in the global queue between find_runnable()
+	// and our idle-list push. Pop self (head == self, so head = oldHead),
+	// restore M.p, release both mutexes, and return so sched_loop loops back
+	// to find_runnable.
+	abortPark.NewStore(oldHead, idleHeadField) // pop self
+	abortPark.NewStore(savedP, mPField)        // restore M.p
+	abortPark.NewCall(c.palMutexUnlock, imLock)
+	abortPark.NewCall(c.palMutexUnlock, parkMtx)
+	abortPark.NewRet(nil)
+
+	// continue_park: normal path — release idle_lock, wait on park_cond.
+	continuePark.NewCall(c.palMutexUnlock, imLock)
+	continuePark.NewBr(waitLoop)
 
 	// wait_loop: check if deliberately woken (spinning==1) or shutdown.
 	// POSIX cond_wait may return spuriously; we must loop to prevent

@@ -13985,6 +13985,74 @@ func TestSchedulerClearsParkMutexBeforeUnlock(t *testing.T) {
 	}
 }
 
+func TestSchedParkMRechecksGlobalQueue(t *testing.T) {
+	// T0375: park_m must re-check sched.global_size while still holding
+	// idle_lock AFTER pushing self onto the idle stack. If a non-M enqueuer
+	// raced through sched_enqueue + wake_m against an empty idle stack, the
+	// re-check sees the queued work and aborts the park (popping self off the
+	// idle stack) instead of committing to cond_wait indefinitely.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			go { ch.send(42); };
+		}
+	`)
+	fn := extractFunction(ir, "promise_sched_park_m")
+	if fn == "" {
+		t.Fatal("promise_sched_park_m not found")
+	}
+
+	// The abort_park block must exist (the bail path).
+	abortIdx := strings.Index(fn, "abort_park:")
+	if abortIdx < 0 {
+		t.Fatal("abort_park block not found in promise_sched_park_m")
+	}
+
+	// continue_park is the normal park path; both must exist.
+	continueIdx := strings.Index(fn, "continue_park:")
+	if continueIdx < 0 {
+		t.Fatal("continue_park block not found in promise_sched_park_m")
+	}
+
+	// The conditional branch into abort_park must come from .entry,
+	// before we reach wait_loop / cond_wait.
+	entryEnd := strings.Index(fn, "abort_park:")
+	if entryEnd < 0 {
+		t.Fatal("could not locate end of entry block")
+	}
+	entryBlk := fn[:entryEnd]
+	if !strings.Contains(entryBlk, "br i1") {
+		t.Error("entry block must conditionally branch (abort_park vs continue_park)")
+	}
+	if !strings.Contains(entryBlk, ", label %abort_park, label %continue_park") {
+		t.Error("entry must branch to abort_park / continue_park based on global queue size")
+	}
+
+	// The entry must compare a freshly-loaded i64 against zero — that's the
+	// global_size != 0 test.
+	if !strings.Contains(entryBlk, "icmp ne i64") {
+		t.Error("entry must compare global_size (i64) against zero")
+	}
+
+	// The abort_park block must NOT contain pal_cond_wait — that's the whole
+	// point of bailing out before we commit to parking.
+	abortEnd := strings.Index(fn[abortIdx:], "\n\n")
+	if abortEnd < 0 {
+		abortEnd = len(fn) - abortIdx
+	}
+	abortBlk := fn[abortIdx : abortIdx+abortEnd]
+	if strings.Contains(abortBlk, "@pal_cond_wait") {
+		t.Error("abort_park must not call pal_cond_wait — bailing out before parking")
+	}
+	// abort_park must unlock both mutexes (idle_lock and park_mutex) and ret.
+	if strings.Count(abortBlk, "@pal_mutex_unlock") != 2 {
+		t.Error("abort_park must unlock both idle_lock and park_mutex (2 unlocks)")
+	}
+	if !strings.Contains(abortBlk, "ret void") {
+		t.Error("abort_park must return")
+	}
+}
+
 func TestGoroutineExitUsesDoneLock(t *testing.T) {
 	// goroutine_exit acquires sched.done_lock before setting done=1 and
 	// walking done_waiters, ensuring proper synchronization with task receivers.

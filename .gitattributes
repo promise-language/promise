@@ -1,2 +1,5 @@
-tests/embed/*.txt text eol=lf
-tests/embed/*.bin binary
+tests/embed/*.txt -text
+tests/embed/*.bin -text
+tests/embed/*.sql -text
+tests/embed/*.md -text
+tests/embed/glob_fixtures/** -text

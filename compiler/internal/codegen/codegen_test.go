@@ -20015,6 +20015,63 @@ func TestMutexGuardBorrowClearsDropFlagTypedDecl(t *testing.T) {
 	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
 }
 
+// T0379: Reassigning Arc[T].borrow to an existing variable must clear the
+// dropflag re-armed by the unconditional reset in the assignment path. After
+// the reassign-merge block, the sequence is: re-arm, store new pointer, clear
+// (T0379 fix). Without the fix, the trailing clear is missing.
+func TestArcBorrowReassignClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v1 := [1, 2, 3];
+			v2 := [4, 5, 6];
+			a1 := Arc[int[]](v1);
+			a2 := Arc[int[]](v2);
+			borrowed := a1.borrow;
+			borrowed = a2.borrow;
+		}
+	`)
+	assertContainsMatch(t, ir, `reassign\.merge[^:]*:\s+store i1 true, i1\* %borrowed\.dropflag\s+store i8\* %[^,]+, i8\*\* %borrowed\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0379: Same fix for MutexGuard[T].borrow reassignment.
+func TestMutexGuardBorrowReassignClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v1 := [1, 2, 3];
+			v2 := [4, 5, 6];
+			m1 := Mutex[int[]](v1);
+			m2 := Mutex[int[]](v2);
+			use g1 := m1.lock();
+			use g2 := m2.lock();
+			borrowed := g1.borrow;
+			borrowed = g2.borrow;
+		}
+	`)
+	assertContainsMatch(t, ir, `reassign\.merge[^:]*:\s+store i1 true, i1\* %borrowed\.dropflag\s+store i8\* %[^,]+, i8\*\* %borrowed\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0379: Borrow→owned reassignment must NOT clear the dropflag — the local
+// now owns the new value and its drop must run at scope exit. Verifies the fix
+// is conditional on `isBorrowGetterExpr(s.Value)` and not always applied.
+func TestArcBorrowReassignToOwnedKeepsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			a := Arc[int[]](v);
+			borrowed := a.borrow;
+			borrowed = [4, 5, 6];
+		}
+	`)
+	// The full T0379-fired pattern (re-arm → store new ptr → clear) must NOT appear
+	// after `reassign.merge`: the fix should fire only when RHS is `.borrow`.
+	bad := regexp.MustCompile(`reassign\.merge[^:]*:\s+store i1 true, i1\* %borrowed\.dropflag\s+store [^\n]*%borrowed[^\n]*\n\s+store i1 false, i1\* %borrowed\.dropflag`)
+	if bad.MatchString(ir) {
+		t.Errorf("expected NO trailing flag-clear in reassign.merge for borrow→owned (T0379 should not fire)\ngot:\n%s", ir)
+	}
+	// But the re-arm and the pointer store should still be present (assignment ran normally).
+	assertContainsMatch(t, ir, `reassign\.merge[^:]*:\s+store i1 true, i1\* %borrowed\.dropflag\s+store [^\n]*%borrowed`)
+}
+
 // T0156/T0285/T0291: MutexGuard close/drop functions do scheduler-aware unlock and free.
 func TestMutexGuardCloseUnlocksAndFrees(t *testing.T) {
 	ir := generateIR(t, `

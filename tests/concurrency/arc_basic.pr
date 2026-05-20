@@ -178,3 +178,103 @@ arc_borrow_in_generic_fn() `test {
   a := Arc[string[]](v);
   assert(arc_borrow_len[string](a) == 1, "generic borrow len");
 }
+
+// T0379: Reassignment of `.borrow` to an existing local must clear the dropflag
+// re-armed by the unconditional reset in the assignment path. Without the fix,
+// `borrowed`'s drop frees the inner buffer that Arc still owns → segfault.
+arc_borrow_reassign_after_borrow() `test {
+  v1 := string[]();
+  v1.push("hello" + "");
+  v2 := string[]();
+  v2.push("world" + "");
+  a1 := Arc[string[]](v1);
+  a2 := Arc[string[]](v2);
+  borrowed := a1.borrow;
+  borrowed = a2.borrow;
+  assert(borrowed.len == 1, "reassigned borrow len");
+}
+
+// T0379: Owned→borrow reassignment. The original local owns its vector; the
+// reassignment must drop the owned vec, store the borrow pointer, and clear
+// the dropflag so scope cleanup doesn't free the parent's buffer.
+arc_borrow_reassign_after_owned() `test {
+  owned := string[]();
+  owned.push("owned" + "");
+  v := string[]();
+  v.push("borrowed" + "");
+  a := Arc[string[]](v);
+  owned = a.borrow;
+  assert(owned.len == 1, "owned reassigned to borrow");
+}
+
+// T0379: Arc[string] analog. Exercises the string-drop alias-check branch
+// (bindingDropString) in the reassignment path.
+arc_borrow_reassign_heap_string() `test {
+  s1 := "hello" + "";
+  s2 := "world" + "";
+  a1 := Arc[string](s1);
+  a2 := Arc[string](s2);
+  borrowed := a1.borrow;
+  borrowed = a2.borrow;
+  assert(borrowed.len == 5, "reassigned string borrow");
+}
+
+// T0379: Multiple alternating reassignments — each must override the dropflag
+// re-arm so cleanup never double-frees.
+arc_borrow_reassign_alternating() `test {
+  v1 := string[]();
+  v1.push("a" + "");
+  v2 := string[]();
+  v2.push("b" + "");
+  a1 := Arc[string[]](v1);
+  a2 := Arc[string[]](v2);
+  borrowed := a1.borrow;
+  borrowed = a2.borrow;
+  borrowed = a1.borrow;
+  assert(borrowed.len == 1, "alternating reassign");
+}
+
+// T0379: Borrow→owned reassignment (negative test). The fix must NOT fire when
+// RHS is an owned constructor — the local now owns the new value and its drop
+// must run at scope exit. A regression that always cleared the dropflag would
+// leak the new vector here.
+arc_borrow_reassign_to_owned() `test {
+  v := string[]();
+  v.push("borrowed" + "");
+  a := Arc[string[]](v);
+  borrowed := a.borrow;
+  borrowed = string[]();
+  borrowed.push("owned" + "");
+  assert(borrowed.len == 1, "borrow reassigned to owned");
+}
+
+// T0379: Typed-decl path (T0367) followed by reassignment (T0379). Verifies
+// integration between the two fixes — the typed decl clears the flag, then the
+// reassignment correctly re-clears it after the unconditional re-arm.
+arc_borrow_typed_decl_reassign() `test {
+  v1 := string[]();
+  v1.push("a" + "");
+  v2 := string[]();
+  v2.push("b" + "");
+  a1 := Arc[string[]](v1);
+  a2 := Arc[string[]](v2);
+  string[] borrowed = a1.borrow;
+  borrowed = a2.borrow;
+  assert(borrowed.len == 1, "typed decl + reassign");
+}
+
+// T0379: Reassign inside a loop body. Each iteration re-arms the flag at the
+// reassignment site and the fix must clear it; cleanup at scope exit must see
+// flag=0. A bug here would surface as cumulative leaks across iterations.
+arc_borrow_reassign_in_loop() `test {
+  v := string[]();
+  v.push("loop" + "");
+  a := Arc[string[]](v);
+  borrowed := a.borrow;
+  i := 0;
+  while i < 4 {
+    borrowed = a.borrow;
+    i = i + 1;
+  }
+  assert(borrowed.len == 1, "reassign in loop");
+}

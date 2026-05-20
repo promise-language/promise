@@ -186,3 +186,34 @@ test_mutex_borrow_typed_decl_heap_vec() `test {
   string[] borrowed = guard.borrow;
   assert(borrowed.len == 1, "typed decl heap vec");
 }
+
+// T0379: Reassignment of `guard.borrow` to an existing local must clear the
+// dropflag re-armed by the unconditional reset in the assignment path.
+test_mutex_borrow_reassign() `test {
+  v1 := string[]();
+  v1.push("hello" + "");
+  v2 := string[]();
+  v2.push("world" + "");
+  m1 := Mutex[string[]](v1);
+  m2 := Mutex[string[]](v2);
+  use g1 := m1.lock();
+  use g2 := m2.lock();
+  borrowed := g1.borrow;
+  borrowed = g2.borrow;
+  borrowed = g1.borrow;
+  assert(borrowed.len == 1, "mutex borrow reassign");
+}
+
+// T0379: Borrow→owned reassignment (negative test). The fix must NOT fire when
+// RHS is owned — the local must drop the new vector at scope exit. A regression
+// that always cleared the dropflag would leak.
+test_mutex_borrow_reassign_to_owned() `test {
+  v := string[]();
+  v.push("borrowed" + "");
+  m := Mutex[string[]](v);
+  use g := m.lock();
+  borrowed := g.borrow;
+  borrowed = string[]();
+  borrowed.push("owned" + "");
+  assert(borrowed.len == 1, "mutex borrow reassigned to owned");
+}

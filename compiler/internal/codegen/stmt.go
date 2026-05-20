@@ -4490,6 +4490,13 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// T0379: When RHS is .borrow on Arc/MutexGuard, override the unconditional
+			// re-arm above. The borrow returns a non-owning reference; the parent
+			// Arc/Mutex retains ownership of the inner value. Without this, both the
+			// reassigned local's drop and the parent's drop free the same inner value.
+			if c.isBorrowGetterExpr(s.Value) {
+				c.clearDropFlag(target.Name)
+			}
 			// T0073: Claim string temp — ownership transferred to this variable.
 			// Skip if already claimed above (optional target).
 			if exprType != nil && extractNamed(exprType) == types.TypString {

@@ -392,3 +392,62 @@ test_t0369_error_path_enum_heap_variant() `test {
     assert(e.message == "fail", "error propagated, vector literal cleaned");
   };
 }
+
+// T0372 regression: vector slice with non-string heap element types must NOT
+// double-free against the parent vector. Vector.[:]'s push path only dups
+// strings (B0189); for other element types the slice's slots alias the
+// parent's pointers. Slice transient cleanup walks elements only when the
+// element type is `string` — for other types it does buffer-only Vector.drop,
+// leaving the parent's elements valid for its own end-of-scope drop. See
+// T0376 for the proper fix that lets the walk be unconditional again.
+_t0372_first_box_via_slice(_T0369Box[] v) int {
+  if v.len > 0 {
+    return v[0].n;
+  }
+  return -1;
+}
+
+test_t0372_slice_transient_heap_user_type() `test {
+  _T0369Box[] v = [_T0369Box(n: 1), _T0369Box(n: 2), _T0369Box(n: 3)];
+  int n = _t0372_first_box_via_slice(v[1:3]);
+  assert(n == 2, "slice transient over heap user-type elements");
+}
+
+// T0372: slice with inner-vector elements (each inner vector is heap).
+_t0372_make_int_vec(int x) int[] {
+  return[x, x + 1];
+}
+
+_t0372_first_inner_via_slice(int[][] vv) int {
+  if vv.len > 0 && vv[0].len > 0 {
+    return vv[0][0];
+  }
+  return -1;
+}
+
+test_t0372_slice_transient_inner_vec() `test {
+  int[][] vv = [_t0372_make_int_vec(10), _t0372_make_int_vec(20), _t0372_make_int_vec(30)];
+  int n = _t0372_first_inner_via_slice(vv[1:3]);
+  assert(n == 20, "slice transient over inner-vector elements");
+}
+
+// T0372: slice with enum-with-droppable-variant elements.
+_t0372_first_maybe_via_slice(_T0369Maybe[] v) string {
+  if v.len > 0 {
+    match v[0] {
+      _T0369Maybe.Some(s) => {
+        return s;
+      },
+      _ => {
+        return "empty";
+      },
+    }
+  }
+  return "x";
+}
+
+test_t0372_slice_transient_enum_droppable() `test {
+  _T0369Maybe[] v = [_T0369Maybe.Some(s: "a" + "b"), _T0369Maybe.Some(s: "c" + "d"), _T0369Maybe.Some(s: "e" + "f")];
+  string s = _t0372_first_maybe_via_slice(v[1:3]);
+  assert(s == "cd", "slice transient over enum-droppable-variant elements");
+}

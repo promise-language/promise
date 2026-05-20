@@ -234,10 +234,14 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 				// B0223: Track vector slice results as heap temps. Vector slicing
 				// allocates a new heap vector. Without tracking, the slice result
 				// leaks when used as an intermediate (e.g., in string.from_bytes).
-				// T0369: Pass the element type so transient cleanup walks droppable
-				// elements (Vector.slice clones each element by ref-copy; on free,
-				// element drops must fire).
-				if elemType, ok := types.AsVector(rt); ok {
+				// T0369/T0372: Element walk is safe only for string element types
+				// because Vector.[:]'s push path unconditionally dups strings (B0189).
+				// For non-string element types, the push path does NOT dup — the
+				// slice aliases the parent's element pointers — so an element walk
+				// would double-free. Fall back to buffer-only Vector.drop for those
+				// (pre-T0369 behavior). Follow-up T0376 tracks the proper fix:
+				// make Vector.[:] deep-clone elements on push.
+				if elemType, ok := types.AsVector(rt); ok && extractNamed(elemType) == types.TypString {
 					c.trackVectorHeapTempWithElemType(result, elemType)
 				} else if fn := c.funcs["Vector.drop"]; fn != nil {
 					c.trackHeapTemp(result, fn)

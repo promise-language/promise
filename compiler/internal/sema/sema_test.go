@@ -14462,3 +14462,47 @@ func TestFailableElvisRightFailable(t *testing.T) {
 		test!(int? v) int { return v ?: fallback(); }
 	`)
 }
+
+// T0362: (T1, T2)[]() tuple-element vector constructor must type-check without errors.
+func TestTupleVecConstructorOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := (string, int)[]();
+			_ = v;
+		}
+	`)
+}
+
+// T0362: Tuple-element vector push must type-check without errors.
+func TestTupleVecPushOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := (string, int)[]();
+			v.push(("hello", 1));
+			_ = v;
+		}
+	`)
+}
+
+// T0362: Value expression inside (...)[] must still error.
+func TestTupleVecConstructorValueExprErrors(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			x := 1;
+			v := (x, int)[]();
+			_ = v;
+		}
+	`)
+	expectError(t, errs, "expected type name before []")
+}
+
+// T0362: Generic instantiation as a tuple element exercises the IndexExpr
+// branch of isTypeRefExpr through TupleLit recursion.
+func TestTupleVecGenericElementOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := (Vector[int], string)[]();
+			_ = v;
+		}
+	`)
+}

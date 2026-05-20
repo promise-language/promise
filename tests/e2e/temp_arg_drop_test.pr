@@ -1260,3 +1260,24 @@ t0356_nested_discard() `test {
 t0356_nested_plain_arg() `test {
   t0356_check_nested_vec(t0356_make_nested_vec());
 }
+
+// =========================================================================
+// T0362: (T1, T2)[]() tuple-element vector constructor must compile and run.
+// Previously sema rejected the TupleLit inner expression as non-type-ref,
+// leaving the variable unbound. isTypeRefExpr now handles TupleLit.
+// =========================================================================
+
+t0362_tuple_vec_basic() `test {
+  v := (string, int)[]();
+  v.push(("hello", 1));
+  v.push(("world", 2));
+  assert(v.len == 2, "tuple vec len");
+  t0 := v[0];
+  t1 := v[1];
+  (s0, n0) := t0;
+  (s1, n1) := t1;
+  assert(s0 == "hello", "v[0] string");
+  assert(n0 == 1, "v[0] int");
+  assert(s1 == "world", "v[1] string");
+  assert(n1 == 2, "v[1] int");
+}

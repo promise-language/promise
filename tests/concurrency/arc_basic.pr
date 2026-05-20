@@ -278,3 +278,81 @@ arc_borrow_reassign_in_loop() `test {
   }
   assert(borrowed.len == 1, "reassign in loop");
 }
+
+// T0377: Borrow laundered through an if-expression. Both arms produce a
+// borrow, so the merged variable must clear its dropflag — without the fix,
+// scope cleanup double-frees with Arc.drop.
+arc_borrow_through_if() `test {
+  v := string[]();
+  v.push("hello" + "");
+  a := Arc[string[]](v);
+  cond := true;
+  borrowed := if cond {
+    a.borrow
+  } else {
+    a.borrow
+  };
+  assert(borrowed.len == 1, "if borrow len");
+}
+
+// T0377: Borrow laundered through a match expression with all arms producing
+// the same borrow.
+arc_borrow_through_match() `test {
+  v := string[]();
+  v.push("hi" + "");
+  a := Arc[string[]](v);
+  k := 1;
+  borrowed := match k {
+    1 => a.borrow, _ => a.borrow,
+  };
+  assert(borrowed.len == 1, "match borrow len");
+}
+
+// T0377: Recursion through nested if-expressions — outer if has an inner
+// (parenthesized) if-expression in one arm; every leaf produces a borrow.
+arc_borrow_through_nested_if() `test {
+  v := string[]();
+  v.push("nest" + "");
+  a := Arc[string[]](v);
+  cond := true;
+  cond2 := false;
+  borrowed := if cond {
+    (if cond2 {
+      a.borrow
+    } else {
+      a.borrow
+    })
+  } else {
+    a.borrow
+  };
+  assert(borrowed.len == 1, "nested if borrow len");
+}
+
+// T0377: Plain parenthesized borrow (`(a.borrow)`) is also a laundering form —
+// must clear the dropflag like the bare borrow does.
+arc_borrow_through_parens() `test {
+  v := string[]();
+  v.push("paren" + "");
+  a := Arc[string[]](v);
+  borrowed := (a.borrow);
+  assert(borrowed.len == 1, "paren borrow len");
+}
+
+// T0377: Block-bodied match arms (`=> { a.borrow }`) hit the `arm.Block`
+// path in `matchArmIsBorrowGetter`. Must still clear the dropflag when every
+// block result is a borrow — without the fix, this would double-free.
+arc_borrow_through_match_blocks() `test {
+  v := string[]();
+  v.push("blk" + "");
+  a := Arc[string[]](v);
+  k := 1;
+  borrowed := match k {
+    1 => {
+      a.borrow
+    },
+    _ => {
+      a.borrow
+    },
+  };
+  assert(borrowed.len == 1, "match block-arm borrow len");
+}

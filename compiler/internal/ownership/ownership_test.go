@@ -3990,3 +3990,109 @@ func TestT0380_MutexGuardCopyInnerNoReject(t *testing.T) {
 		}
 	`)
 }
+
+// T0377: Borrow laundered through an if-expression must mark the LHS as
+// Borrowed so a downstream `consume(~borrowed)` is rejected — same rule as the
+// direct case (T0380), now reaching through the laundering form.
+func TestT0377_ConsumeIfBorrowVarRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			cond := true;
+			borrowed := if cond { a.borrow } else { a.borrow };
+			consume(borrowed);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+}
+
+// T0377: Same with match-laundered borrow.
+func TestT0377_ConsumeMatchBorrowVarRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			k := 1;
+			borrowed := match k { 1 => a.borrow, _ => a.borrow };
+			consume(borrowed);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+}
+
+// T0377: Mixed-ownership if-expression (one borrow arm, one owned arm) is
+// outside the conservative rule — the LHS is NOT marked Borrowed, so a
+// `consume(~borrowed)` would slip through (status quo behavior). Documents
+// the gap subsumed by the long-term `&T` ref-type design (T0381).
+func TestT0377_MixedIfNotMarkedBorrowed(t *testing.T) {
+	ownerOK(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			cond := true;
+			other := "owned";
+			borrowed := if cond { a.borrow } else { other };
+			consume(borrowed);
+		}
+	`)
+}
+
+// T0377: Parenthesized borrow is also a laundering form — sema must mark the
+// LHS as Borrowed.
+func TestT0377_ConsumeParenBorrowVarRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			borrowed := (a.borrow);
+			consume(borrowed);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+}
+
+// T0377: Block-bodied match arms (`=> { a.borrow }`) take the `arm.Block`
+// path through `matchArmIsBorrowGetter` — must still mark the LHS as
+// Borrowed when every arm's block result is a borrow.
+func TestT0377_ConsumeMatchBlockBorrowVarRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			k := 1;
+			borrowed := match k {
+				1 => { a.borrow },
+				_ => { a.borrow },
+			};
+			consume(borrowed);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+}
+
+// T0377: Mixed-ownership match (one borrow arm, one owned arm) is outside
+// the conservative rule — the LHS is NOT marked Borrowed. Parallels
+// TestT0377_MixedIfNotMarkedBorrowed and exercises the
+// `!c.matchArmIsBorrowGetter(arm) return false` path in the arm loop.
+func TestT0377_MixedMatchNotMarkedBorrowed(t *testing.T) {
+	ownerOK(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			other := "owned";
+			k := 1;
+			borrowed := match k {
+				1 => a.borrow,
+				_ => other,
+			};
+			consume(borrowed);
+		}
+	`)
+}

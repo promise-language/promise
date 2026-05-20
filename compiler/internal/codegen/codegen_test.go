@@ -20072,6 +20072,124 @@ func TestArcBorrowReassignToOwnedKeepsDropFlag(t *testing.T) {
 	assertContainsMatch(t, ir, `reassign\.merge[^:]*:\s+store i1 true, i1\* %borrowed\.dropflag\s+store [^\n]*%borrowed`)
 }
 
+// T0377: A borrow laundered through an if-expression (both arms produce
+// `.borrow`) must clear the new variable's dropflag — without the fix,
+// scope cleanup double-frees with Arc.drop.
+func TestArcBorrowThroughIfClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			a := Arc[int[]](v);
+			cond := true;
+			borrowed := if cond { a.borrow } else { a.borrow };
+		}
+	`)
+	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
+	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0377: Same fix for match-laundered borrow — every arm produces `.borrow`.
+func TestArcBorrowThroughMatchClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			a := Arc[int[]](v);
+			k := 1;
+			borrowed := match k { 1 => a.borrow, _ => a.borrow };
+		}
+	`)
+	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
+	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0377: MutexGuard borrow laundered through an if-expression.
+func TestMutexGuardBorrowThroughIfClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			m := Mutex[int[]](v);
+			use guard := m.lock();
+			cond := true;
+			borrowed := if cond { guard.borrow } else { guard.borrow };
+		}
+	`)
+	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
+	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0377: Conservative rule — an if-expression with one borrow arm and one
+// owned arm must NOT clear the dropflag; a single dropflag cannot represent
+// per-arm ownership. The local owns the constructed value when cond is false.
+func TestArcBorrowMixedIfDoesNotClearDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v1 := [1, 2, 3];
+			a := Arc[int[]](v1);
+			cond := true;
+			borrowed := if cond { a.borrow } else { [4, 5, 6] };
+		}
+	`)
+	bad := regexp.MustCompile(`store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+	if bad.MatchString(ir) {
+		t.Errorf("expected NO dropflag clear for mixed-ownership if (T0377 should not fire)\ngot:\n%s", ir)
+	}
+}
+
+// T0377: Parenthesized borrow (`(a.borrow)`) is a trivial laundering form;
+// recursion must look through ParenExpr to find the borrow.
+func TestArcBorrowThroughParensClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			a := Arc[int[]](v);
+			borrowed := (a.borrow);
+		}
+	`)
+	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
+	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0377: Block-bodied match arms (`=> { a.borrow }` rather than `=> a.borrow`)
+// take the `arm.Block` path through `matchArmIsBorrowGetter` — must still
+// clear the dropflag when every arm's block result is a borrow.
+func TestArcBorrowThroughMatchBlockArmsClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			a := Arc[int[]](v);
+			k := 1;
+			borrowed := match k {
+				1 => { a.borrow },
+				_ => { a.borrow },
+			};
+		}
+	`)
+	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
+	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0377: Conservative rule — a match expression with one borrow arm and one
+// owned arm must NOT clear the dropflag (parallel of TestArcBorrowMixedIfDoesNotClearDropFlag
+// for match). Exercises the `!c.matchArmIsBorrowGetter(arm) return false` path
+// in the arm loop.
+func TestArcBorrowMixedMatchDoesNotClearDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v1 := [1, 2, 3];
+			a := Arc[int[]](v1);
+			k := 1;
+			borrowed := match k {
+				1 => a.borrow,
+				_ => [4, 5, 6],
+			};
+		}
+	`)
+	bad := regexp.MustCompile(`store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+	if bad.MatchString(ir) {
+		t.Errorf("expected NO dropflag clear for mixed-ownership match (T0377 should not fire)\ngot:\n%s", ir)
+	}
+}
+
 // T0156/T0285/T0291: MutexGuard close/drop functions do scheduler-aware unlock and free.
 func TestMutexGuardCloseUnlocksAndFrees(t *testing.T) {
 	ir := generateIR(t, `

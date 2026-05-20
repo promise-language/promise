@@ -185,26 +185,72 @@ func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
 // MutexGuard[T]. These getters return a non-owning reference to the inner T;
 // assigning the result to a variable must NOT register an active drop binding,
 // otherwise both the borrow and the parent's drop free the same inner value.
-// T0367.
+// T0367. T0377 extends recognition through if/match expressions whose every arm
+// produces a borrow getter — mixed-ownership branches are intentionally left
+// unhandled (a single dropflag cannot represent ownership that varies by arm).
 func (c *Compiler) isBorrowGetterExpr(expr ast.Expr) bool {
-	member, ok := expr.(*ast.MemberExpr)
-	if !ok || member.Field != "borrow" {
+	switch e := expr.(type) {
+	case *ast.MemberExpr:
+		if e.Field != "borrow" {
+			return false
+		}
+		targetType := c.info.Types[e.Target]
+		if c.typeSubst != nil {
+			targetType = types.Substitute(targetType, c.typeSubst)
+		}
+		if _, ok := types.AsArc(targetType); ok {
+			return true
+		}
+		if _, ok := types.AsMutexGuard(targetType); ok {
+			return true
+		}
+		if n := extractNamed(targetType); n == types.TypArc || n == types.TypMutexGuard {
+			return true
+		}
 		return false
-	}
-	targetType := c.info.Types[member.Target]
-	if c.typeSubst != nil {
-		targetType = types.Substitute(targetType, c.typeSubst)
-	}
-	if _, ok := types.AsArc(targetType); ok {
+	case *ast.IfExpr:
+		if e.Else == nil {
+			return false
+		}
+		return c.blockResultIsBorrowGetter(e.Then) && c.blockResultIsBorrowGetter(e.Else)
+	case *ast.MatchExpr:
+		if len(e.Arms) == 0 {
+			return false
+		}
+		for _, arm := range e.Arms {
+			if !c.matchArmIsBorrowGetter(arm) {
+				return false
+			}
+		}
 		return true
-	}
-	if _, ok := types.AsMutexGuard(targetType); ok {
-		return true
-	}
-	if n := extractNamed(targetType); n == types.TypArc || n == types.TypMutexGuard {
-		return true
+	case *ast.ParenExpr:
+		return c.isBorrowGetterExpr(e.Expr)
 	}
 	return false
+}
+
+// blockResultIsBorrowGetter inspects the block's final expression statement —
+// only the result expression determines borrow-ness; intermediate statements
+// are irrelevant.
+func (c *Compiler) blockResultIsBorrowGetter(block *ast.Block) bool {
+	if block == nil || len(block.Stmts) == 0 {
+		return false
+	}
+	last := block.Stmts[len(block.Stmts)-1]
+	es, ok := last.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	return c.isBorrowGetterExpr(es.Expr)
+}
+
+// matchArmIsBorrowGetter handles either expression-bodied (`=> expr`) or
+// block-bodied (`=> { ... }`) match arms.
+func (c *Compiler) matchArmIsBorrowGetter(arm *ast.MatchArm) bool {
+	if arm.Body != nil {
+		return c.isBorrowGetterExpr(arm.Body)
+	}
+	return c.blockResultIsBorrowGetter(arm.Block)
 }
 
 // isStringBorrowExpr returns true if the expression borrows an existing value

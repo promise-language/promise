@@ -217,3 +217,20 @@ test_mutex_borrow_reassign_to_owned() `test {
   borrowed.push("owned" + "");
   assert(borrowed.len == 1, "mutex borrow reassigned to owned");
 }
+
+// T0377: Borrow on a MutexGuard laundered through an if-expression. Both arms
+// must produce a borrow for the dropflag to be cleared — without the fix, scope
+// cleanup double-frees with MutexGuard.drop.
+test_mutex_borrow_through_if() `test {
+  v := string[]();
+  v.push("hello" + "");
+  m := Mutex[string[]](v);
+  use g := m.lock();
+  cond := true;
+  borrowed := if cond {
+    g.borrow
+  } else {
+    g.borrow
+  };
+  assert(borrowed.len == 1, "mutex if borrow len");
+}

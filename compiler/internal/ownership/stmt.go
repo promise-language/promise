@@ -117,6 +117,22 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	if s.Value != nil {
 		c.checkExpr(s.Value)
+		// T0380: `borrowed := a.borrow` on Arc/MutexGuard binds a non-owning
+		// reference; mark as Borrowed so downstream consume sites are rejected
+		// via the existing T0338 path. Skip tryMove (a no-op for the auto-dup
+		// MemberExpr today, but explicit short-circuit is clearer).
+		if c.isBorrowGetterExpr(s.Value) {
+			if s.Name != "_" {
+				c.state[s.Name] = Borrowed
+				if typ := c.info.Types[s.Value]; typ != nil {
+					c.trackDeclOrder(s.Name, typ)
+				}
+			}
+			if c.inUnsafe == 0 && isPointerTypeRef(s.Type) {
+				c.errorf(s.Pos(), "raw pointer type used outside of unsafe block")
+			}
+			return
+		}
 		c.tryMove(s.Value)
 	}
 	if s.Name != "_" {
@@ -140,6 +156,17 @@ func isPointerTypeRef(tr ast.TypeRef) bool {
 
 func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	c.checkExpr(s.Value)
+	// T0380: see checkTypedVarDecl — `borrowed := a.borrow` binds a non-owning
+	// reference and must not transition to Owned.
+	if c.isBorrowGetterExpr(s.Value) {
+		if s.Name != "_" {
+			c.state[s.Name] = Borrowed
+			if typ := c.info.Types[s.Value]; typ != nil {
+				c.trackDeclOrder(s.Name, typ)
+			}
+		}
+		return
+	}
 	c.tryMove(s.Value)
 	if s.Name != "_" {
 		c.state[s.Name] = Owned
@@ -200,10 +227,17 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	}
 
 	c.checkExpr(s.Value)
-	// T0351: assignment consumes the RHS — borrowed params cause a double-free
-	// because the caller still drops the original. tryMoveConsume rejects them
-	// at compile time (matches T0338/T0349 pattern for raise/yield/select-send).
-	c.tryMoveConsume(s.Value)
+	// T0380: `b = a.borrow` on Arc/MutexGuard is runtime-safe via the T0379
+	// codegen fix (clearDropFlag at the store site). Skip tryMoveConsume's
+	// inline-borrow rejection here — and below, force the LHS state to
+	// Borrowed so downstream consume sites still reject.
+	rhsIsBorrowGetter := s.Op == ast.OpAssign && c.isBorrowGetterExpr(s.Value)
+	if !rhsIsBorrowGetter {
+		// T0351: assignment consumes the RHS — borrowed params cause a double-free
+		// because the caller still drops the original. tryMoveConsume rejects them
+		// at compile time (matches T0338/T0349 pattern for raise/yield/select-send).
+		c.tryMoveConsume(s.Value)
+	}
 
 	// Simple assignment resurrects the target variable.
 	if s.Op == ast.OpAssign {
@@ -217,7 +251,11 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 				c.borrows.ExpireBorrower(ident.Name)
 			}
 			if _, tracked := c.state[ident.Name]; tracked {
-				c.state[ident.Name] = Owned
+				if rhsIsBorrowGetter {
+					c.state[ident.Name] = Borrowed
+				} else {
+					c.state[ident.Name] = Owned
+				}
 			}
 			// Promote call-scoped borrows if the RHS returns a ref type
 			c.promoteCallBorrows(ident.Name, s.Value)

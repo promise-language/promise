@@ -3839,3 +3839,154 @@ func TestT0351_CompoundAssignOwnedLocalMoves(t *testing.T) {
 		}
 	`)
 }
+
+// === T0380: cannot move out of `.borrow` getter on Arc/MutexGuard ===
+
+// Var bound to .borrow cannot be moved into a ~T callee.
+func TestT0380_ConsumeBorrowVar(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			borrowed := a.borrow;
+			consume(borrowed);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+}
+
+// Inline .borrow cannot be passed to a ~T callee.
+func TestT0380_ConsumeInlineBorrow(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			consume(a.borrow);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move out of '.borrow' getter")
+}
+
+// Reassignment `b = a.borrow` is runtime-safe via the T0379 codegen fix
+// (dropflag cleared at the store site). Sema does NOT reject — but the LHS
+// becomes Borrowed so downstream consume sites still reject.
+func TestT0380_AssignBorrowToOwnedThenConsumeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			b := "old";
+			b = a.borrow;
+			consume(b);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'b'")
+}
+
+// Plain `b = a.borrow` without downstream consume is OK (T0379 codegen handles it).
+func TestT0380_AssignBorrowToOwnedOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			b := "old";
+			b = a.borrow;
+		}
+	`)
+}
+
+// Same rule for MutexGuard.borrow.
+func TestT0380_ConsumeMutexGuardBorrow(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		test() {
+			m := Mutex[string]("hi");
+			use guard := m.lock();
+			borrowed := guard.borrow;
+			consume(borrowed);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+}
+
+// Passing borrowed to a non-~ param is OK (callee just reads).
+func TestT0380_BorrowVarToValueParamOK(t *testing.T) {
+	ownerOK(t, `
+		readlen(string s) int { return s.len; }
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			borrowed := a.borrow;
+			int n = readlen(borrowed);
+		}
+	`)
+}
+
+// Reading borrowed (member access) is OK.
+func TestT0380_BorrowVarReadOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			borrowed := a.borrow;
+			int n = borrowed.len;
+		}
+	`)
+}
+
+// Borrow used in vector literal is rejected (collection consumes).
+func TestT0380_BorrowInVectorLit(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			borrowed := a.borrow;
+			string[] v = [borrowed];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+}
+
+// Typed var decl path also marks borrow as Borrowed.
+func TestT0380_TypedDeclBorrowVar(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			string borrowed = a.borrow;
+			consume(borrowed);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+}
+
+// Copy inner types (Arc[int], Arc[bool], etc.) have no double-free risk:
+// `.borrow` returns a value copy, so moves into ~T params or channel sends
+// are safe. Existing patterns like `ch.send(a.borrow)` must continue to work.
+func TestT0380_CopyInnerTypeNoReject(t *testing.T) {
+	ownerOK(t, `
+		consume(~int n) {}
+		test() {
+			a := Arc[int](42);
+			consume(a.borrow);
+			b := a.borrow;
+			consume(b);
+		}
+	`)
+}
+
+// MutexGuard with Copy inner type: same — no rejection.
+func TestT0380_MutexGuardCopyInnerNoReject(t *testing.T) {
+	ownerOK(t, `
+		consume(~int n) {}
+		test() {
+			m := Mutex[int](42);
+			use guard := m.lock();
+			consume(guard.borrow);
+		}
+	`)
+}

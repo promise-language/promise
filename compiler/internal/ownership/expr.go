@@ -203,6 +203,14 @@ func (c *Checker) tryMove(expr ast.Expr) {
 func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	// B0341 field-move check delegated to tryMove; inherit it here too.
 	if member, ok := expr.(*ast.MemberExpr); ok {
+		// T0380: `.borrow` on Arc/MutexGuard returns a non-owning reference;
+		// moving it transfers ownership of the inner pointer to the consumer
+		// while the parent retains its own drop responsibility → double-free.
+		if c.isBorrowGetterExpr(member) {
+			c.errorf(member.Pos(),
+				"cannot move out of '.borrow' getter; the parent Arc/Mutex retains ownership — call .clone() to create an independent copy, or assign to a variable to bind a borrow")
+			return
+		}
 		c.checkFieldMoveOwnership(member)
 		return
 	}
@@ -594,6 +602,31 @@ func extractNamedType(typ types.Type) *types.Named {
 		return extractNamedType(t.Elem())
 	}
 	return nil
+}
+
+// isBorrowGetterExpr returns true if expr is the `.borrow` getter on Arc[T] or
+// MutexGuard[T] AND T is non-Copy. These getters return a non-owning reference
+// to the inner T; for non-Copy T, a move out of the result causes a double-free
+// since the parent Arc/Mutex retains ownership and drops on its own destruction
+// (T0380). For Copy T (int, float, bool, etc.) the move is a value copy with no
+// shared ownership, so no rejection is needed.
+func (c *Checker) isBorrowGetterExpr(expr ast.Expr) bool {
+	member, ok := expr.(*ast.MemberExpr)
+	if !ok || member.Field != "borrow" {
+		return false
+	}
+	targetType := c.info.Types[member.Target]
+	if elem, ok := types.AsArc(targetType); ok {
+		return !isCopyType(elem)
+	}
+	if elem, ok := types.AsMutexGuard(targetType); ok {
+		return !isCopyType(elem)
+	}
+	if n := extractNamedType(targetType); n == types.TypArc || n == types.TypMutexGuard {
+		// Bare Arc/MutexGuard without instantiation — conservative reject.
+		return true
+	}
+	return false
 }
 
 // isAutoDupType returns true for types that codegen auto-dups on field read:

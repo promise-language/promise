@@ -1,0 +1,95 @@
+// T0368: Compound assignment (`+=` etc.) to a field whose static type is a
+// TypeParam previously panicked in genCompoundOp.
+// T0390: Simple assignment to the same shape silently leaked the old value
+// because the drop blocks read field.Type() (an unsubstituted TypeParam),
+// which never matched extractNamed(...) == TypString / IsVector / etc.
+// Fix for both: route through c.info.Types[target], which sema already
+// substitutes via the receiver Instance's TypeArgs.
+type Box[T] {
+  T value;
+}
+
+type Counter[T] is Box[T] {
+}
+
+test_compound_int_field() `test {
+  Box[int] b = Box[int](value: 10);
+  b.value += 5;
+  assert(b.value == 15, "int += on generic field");
+  b.value -= 3;
+  assert(b.value == 12, "int -= on generic field");
+  b.value *= 2;
+  assert(b.value == 24, "int *= on generic field");
+}
+
+test_compound_f64_field() `test {
+  Box[f64] b = Box[f64](value: 1.5);
+  b.value += 2.5;
+  assert(b.value == 4.0, "f64 += on generic field");
+}
+
+test_compound_string_field() `test {
+  Box[string] b = Box[string](value: "hello");
+  b.value += " world";
+  assert(b.value == "hello world", "string += on generic field");
+}
+
+test_compound_inherited_generic_field() `test {
+  Counter[int] c = Counter[int](value: 100);
+  c.value += 7;
+  assert(c.value == 107, "compound on inherited generic field");
+}
+
+// T0390: simple assign on a generic-typed string field must drop the old
+// value. Pre-fix this leaked one allocation per overwrite.
+test_simple_assign_generic_string_field_no_leak() `test {
+  Box[string] b = Box[string](value: "initial_value");
+  for i in 0..50 {
+    b.value = i.to_string();
+  }
+  assert(b.value == "49", "final string value");
+}
+
+// T0390: simple assign on a generic-typed Vector field must drop the old
+// vector. Pre-fix this leaked the Vector backing storage on each overwrite.
+test_simple_assign_generic_vector_field_no_leak() `test {
+  Box[Vector[int]] b = Box[Vector[int]](value: [1, 2, 3]);
+  for i in 0..30 {
+    b.value = [i, i + 1];
+  }
+  assert(b.value.len == 2, "final vector length");
+  assert(b.value[0] == 29, "final vector first element");
+}
+
+// T0390: compound assign on a generic-typed string field already worked for
+// the panic (T0368 fix) but the drop branch under it relied on the same
+// fieldType lookup — guard against regression.
+test_compound_assign_generic_string_field_no_leak() `test {
+  Box[string] b = Box[string](value: "start_");
+  for i in 0..30 {
+    b.value += i.to_string();
+  }
+  assert(b.value.len > 0, "final string non-empty");
+}
+
+// T0390: simple assign on a generic-typed Channel field must drop the old
+// channel. Pre-fix this would have leaked the channel (B0219 drop branch).
+test_simple_assign_generic_channel_field_no_leak() `test {
+  b := Box[Channel[int]](value: channel[int]());
+  for i in 0..20 {
+    b.value = channel[int]();
+  }
+  b.value.close();
+  assert(true, "channel reassign no leak");
+}
+
+// T0390: simple assign on a generic-typed Mutex field must drop the old
+// mutex. Pre-fix this would have leaked the mutex (T0156 drop branch).
+test_simple_assign_generic_mutex_field_no_leak() `test {
+  b := Box[Mutex[int]](value: Mutex[int](0));
+  for i in 0..20 {
+    b.value = Mutex[int](i);
+  }
+  use guard := b.value.lock();
+  assert(guard.borrow == 19, "mutex final value");
+}

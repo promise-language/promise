@@ -4909,7 +4909,13 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 		if named != nil {
 			field := named.LookupField(target.Field)
 			if field != nil {
-				fieldType := field.Type()
+				// T0390: Use sema's resolved type for `target` rather than
+				// `field.Type()`. Sema substitutes the field's TypeParam through
+				// the receiver Instance's TypeArgs, so this is concrete even
+				// outside generic context (where `c.typeSubst` is nil) — without
+				// this, drop blocks below silently miss generic-typed fields and
+				// leak the old value. See also T0368 (same root cause, compound).
+				fieldType := c.info.Types[target]
 				if c.typeSubst != nil {
 					fieldType = types.Substitute(fieldType, c.typeSubst)
 				}
@@ -5044,11 +5050,15 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 		fieldLLVMType = layout.Instance.Fields[fieldIdx].LLVMType
 	}
 	current := c.block.NewLoad(fieldLLVMType, fieldPtr)
-	result := c.genCompoundOp(op, field.Type(), current, val)
+	// T0368: Use sema's resolved type for `target` rather than `field.Type()`.
+	// Sema's resolveInstanceMember substitutes the field's TypeParam through
+	// the receiver Instance's TypeArgs, so this is the concrete operand type
+	// even outside generic context (where `c.typeSubst` is nil).
+	fieldType := c.info.Types[target]
+	result := c.genCompoundOp(op, fieldType, current, val)
 	// T0363: Drop the old field value before storing the new one. Without
 	// this, heap-allocated old values leak. Only string is wired up — no
 	// other heap-owning type has a `+` operator (the only compound op).
-	fieldType := field.Type()
 	if c.typeSubst != nil {
 		fieldType = types.Substitute(fieldType, c.typeSubst)
 	}

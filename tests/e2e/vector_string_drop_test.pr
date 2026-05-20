@@ -139,3 +139,256 @@ test_literal_with_vector_call_element() `test {
   assert(vv[1][0] == "alpha", "[1][0]");
   assert(vv[1][1] == "beta", "[1][1]");
 }
+
+// T0369 regression: vector literal as a transient (fn arg / for-in source)
+// with heap-tracked elements. The buffer's heap-temp drop must walk droppable
+// elements before freeing — without that, claimStringTemp/claimHeapTemp at the
+// element store transferred ownership from the stmt-temp to the buffer, and a
+// buffer-only palFree leaked the elements.
+_t0369_first_string(string[] v) string {
+  if v.len > 0 {
+    return v[0];
+  }
+  return "empty";
+}
+
+test_t0369_literal_arg_heap_string() `test {
+  string s = _t0369_first_string(["hello " + "first "]);
+  assert(s == "hello first ", "heap string element");
+}
+
+// T0369: nested heap vector via literal arg.
+_t0369_first_int_vec(int[][] vv) int {
+  if vv.len > 0 && vv[0].len > 0 {
+    return vv[0][0];
+  }
+  return -1;
+}
+_t0369_make_int_vec(int x) int[] {
+  return[x, x + 1];
+}
+
+test_t0369_literal_arg_vec_of_heap_vec() `test {
+  int n = _t0369_first_int_vec([_t0369_make_int_vec(10)]);
+  assert(n == 10, "nested heap vector element");
+}
+
+// T0369: for-in with heap string elements.
+test_t0369_for_in_heap_strings() `test {
+  string out = "";
+  for s in["a" + "1", "b" + "2"] {
+    out = out + s;
+  }
+  assert(out == "a1b2", "for-in heap string elements");
+}
+
+// T0369: for-in with heap inner vector elements.
+test_t0369_for_in_heap_inner_vec() `test {
+  int total = 0;
+  for v in[_t0369_make_int_vec(1), _t0369_make_int_vec(3)] {
+    total = total + v[0];
+  }
+  assert(total == 4, "for-in heap inner vector elements");
+}
+
+// T0369: heap user-type elements via literal arg.
+type _T0369Box {
+  int n;
+}
+
+_t0369_first_box(_T0369Box[] v) int {
+  if v.len > 0 {
+    return v[0].n;
+  }
+  return -1;
+}
+
+test_t0369_literal_arg_heap_user_type() `test {
+  int n = _t0369_first_box([_T0369Box(n: 1), _T0369Box(n: 2)]);
+  assert(n == 1, "heap user-type element");
+}
+
+// T0369: enum element with droppable variant data via literal arg.
+enum _T0369Maybe {
+  Some(string s),
+  None,
+}
+
+_t0369_first_maybe(_T0369Maybe[] v) string {
+  if v.len > 0 {
+    match v[0] {
+      _T0369Maybe.Some(s) => {
+        return s;
+      },
+      _ => {
+        return "empty";
+      },
+    }
+  }
+  return "x";
+}
+
+test_t0369_literal_arg_enum_heap_variant() `test {
+  string s = _t0369_first_maybe([_T0369Maybe.Some(s: "hi" + "ya")]);
+  assert(s == "hiya", "enum heap variant element");
+}
+
+// T0369 negative: literal assigned to a variable still works (var binding's
+// Vector[T].drop walks elements; heap-temp claim at assign clears the temp's
+// drop flag, so cleanupHeapTemps does nothing).
+test_t0369_literal_assigned_var() `test {
+  string[] v = ["x" + "y"];
+  assert(v[0] == "xy", "assigned-to-var case");
+}
+
+// T0369: vector slice with heap string elements as transient (B0223 site
+// patched in parallel — same heapTemp infrastructure).
+_t0369_first_via_slice(string[] v) string {
+  if v.len > 0 {
+    return v[0];
+  }
+  return "empty";
+}
+
+test_t0369_vector_slice_transient_heap_strings() `test {
+  string[] v = ["x" + "y", "z" + "1"];
+  string r = _t0369_first_via_slice(v[0:1]);
+  assert(r == "xy", "slice transient with heap strings");
+}
+
+// T0369: vector literal whose element type *transitively* contains a droppable
+// tuple (e.g., Vector[Vector[(int, string)]]). The fix's containsDroppableTuple
+// check is recursive — without recursion, the outer walk would reach the
+// tuple via emitVariantFieldDrop's vector-field branch and double-drop the
+// stmtTemp-tracked inner string. We don't dereference the tuple's string
+// (asserts only on the int) because the tuple-with-string variable-assignment
+// case is the underlying T0371 bug — out of scope for T0369. This test guards
+// the regression that the buffer + heap-string cleanup remains balanced.
+_t0369_outer_first_int(int[][] vv) int {
+  if vv.len > 0 && vv[0].len > 0 {
+    return vv[0][0];
+  }
+  return -1;
+}
+_t0369_outer_first_box((int, _T0369Box)[][] vv) int {
+  if vv.len > 0 && vv[0].len > 0 {
+    (a, b) := vv[0][0];
+    return b.n;
+  }
+  return -1;
+}
+
+test_t0369_nested_vec_of_tuple_box() `test {
+  int n = _t0369_outer_first_box([[(1, _T0369Box(n: 9))]]);
+  assert(n == 9, "nested vector of tuple-with-box element");
+}
+
+// T0369: vector literal of tuple with a heap user-type field as transient.
+// Walk is suppressed via containsDroppableTuple → both the box's heap temp
+// and the buffer's heap temp clean up independently at stmt end. Before
+// containsDroppableTuple was recursive, this leaked the box; before walk-
+// suppression, the original genArrayLit double-freed the box.
+_t0369_first_tup_box((int, _T0369Box)[] v) int {
+  if v.len > 0 {
+    (a, b) := v[0];
+    return b.n;
+  }
+  return -1;
+}
+
+test_t0369_literal_arg_tuple_with_box() `test {
+  int n = _t0369_first_tup_box([(1, _T0369Box(n: 7)), (2, _T0369Box(n: 8))]);
+  assert(n == 7, "tuple-with-box element");
+}
+
+// T0369 coverage extension: for-in source with heap user-type elements.
+// Exercises the literal-as-iterator-source path with the user-type element
+// drop branch in emitVectorElementDropLoop.
+test_t0369_for_in_heap_user_type() `test {
+  int total = 0;
+  for b in[_T0369Box(n: 1), _T0369Box(n: 2), _T0369Box(n: 3)] {
+    total = total + b.n;
+  }
+  assert(total == 6, "for-in heap user-type elements");
+}
+
+// T0369 coverage extension: for-in source with enum-heap-variant elements.
+// Each element carries droppable variant data (string from concat).
+test_t0369_for_in_enum_heap_variant() `test {
+  int count = 0;
+  for m in[_T0369Maybe.Some(s: "a" + "b"), _T0369Maybe.Some(s: "c" + "d")] {
+    count = count + 1;
+  }
+  assert(count == 2, "for-in enum heap-variant elements");
+}
+
+// T0369 coverage extension: bare expression-statement consumes the vector
+// literal directly. cleanupHeapTemps fires at statement end — must walk
+// elements + free buffer with no orphaned heap allocations.
+test_t0369_expr_stmt_heap_strings() `test {
+  ["a" + "b", "c" + "d"];
+  assert(true, "raw expression-stmt with heap-element vector literal");
+}
+
+// T0369 coverage extension: function returns a heap-element vector literal,
+// caller consumes it inline via .len (transient — no caller variable owns it).
+// Tests the fn-return → caller-transient flow through trackVectorHeapTempWithElemType.
+_t0369_make_str_vec() string[] {
+  return["a" + "1", "b" + "2"];
+}
+
+test_t0369_returned_vec_consumed_inline() `test {
+  int n = _t0369_make_str_vec().len;
+  assert(n == 2, "returned heap-element vector consumed inline");
+}
+
+// T0369 coverage extension: error-path cleanup. emitHeapTempCleanupForErrorPath
+// got the same elemType walk fix as cleanupHeapTemps. When a failable call
+// raises after a vector literal arg, the literal's elements (heap strings,
+// heap user types, enum heap variants) must be dropped on the error path
+// before the error propagates.
+_t0369_always_fail!() int {
+  raise error(message: "fail");
+}
+
+_t0369_use_str_vec(string[] v, int x) int {
+  return x + v.len;
+}
+
+_t0369_use_box_vec(_T0369Box[] v, int x) int {
+  return x + v.len;
+}
+
+_t0369_use_enum_vec(_T0369Maybe[] v, int x) int {
+  return x + v.len;
+}
+
+_t0369_pattern_str_then_fail!() int {
+  return _t0369_use_str_vec(["a" + "1", "b" + "2"], _t0369_always_fail());
+}
+
+_t0369_pattern_box_then_fail!() int {
+  return _t0369_use_box_vec([_T0369Box(n: 1), _T0369Box(n: 2)], _t0369_always_fail());
+}
+
+_t0369_pattern_enum_then_fail!() int {
+  return _t0369_use_enum_vec([_T0369Maybe.Some(s: "x" + "y")], _t0369_always_fail());
+}
+
+test_t0369_error_path_heap_strings() `test {
+  _t0369_pattern_str_then_fail()? e {
+    assert(e.message == "fail", "error propagated, vector literal cleaned");
+  };
+}
+
+test_t0369_error_path_heap_user_type() `test {
+  _t0369_pattern_box_then_fail()? e {
+    assert(e.message == "fail", "error propagated, vector literal cleaned");
+  };
+}
+
+test_t0369_error_path_enum_heap_variant() `test {
+  _t0369_pattern_enum_then_fail()? e {
+    assert(e.message == "fail", "error propagated, vector literal cleaned");
+  };
+}

@@ -3615,6 +3615,11 @@ func (c *Compiler) emitHeapTempCleanupForErrorPath() {
 		c.block.NewCondBr(isNull, doneBlock, execBlock)
 
 		c.block = execBlock
+		// T0369: Mirror cleanupHeapTemps — walk droppable vector elements before
+		// freeing the buffer on the error-propagation path.
+		if temp.elemType != nil {
+			c.emitVectorElementDropLoop(ptr, temp.elemType)
+		}
 		c.block.NewCall(temp.dropFunc, ptr)
 		c.block.NewBr(doneBlock)
 
@@ -3679,6 +3684,85 @@ func (c *Compiler) trackChainIntermediateReceiver(memberTarget ast.Expr, receive
 		c.claimHeapTemp(receiverVal)
 		c.trackHeapTemp(trackedPtr, dropFunc)
 	}
+}
+
+// trackVectorHeapTempWithElemType registers a vector heap buffer for cleanup at
+// statement end with element-type info. When the vector literal is consumed as a
+// transient (fn arg, for-in source, expression stmt), cleanupHeapTemps walks
+// droppable elements via emitVectorElementDropLoop before freeing the buffer via
+// Vector.drop. Mirrors trackVectorTempWithElemType for the heapTemp path. T0369.
+//
+// T0369: When elemType transitively contains a droppable Tuple, the element
+// walk is skipped (elemType stays nil → buffer-only free via Vector.drop).
+// Reason: heap items inside tuple fields (string concats, etc.) are tracked as
+// stmtTemps that are NOT claimed when the tuple is consumed (pre-existing bug,
+// see T0371). Walking such tuples would drop those heap items twice — once via
+// the stmtTemp's own cleanup, once via the element walk reaching the tuple
+// through emitVariantFieldDrop. The check is recursive across Vector / Map /
+// Optional / Channel / Arc / Weak / Tuple / Array containers because tuples can
+// hide arbitrarily deep (e.g., Vector[Vector[Tuple[int,string]]] reaches the
+// tuple via emitVariantFieldDrop's vector-field branch). Once T0371 lands —
+// genTupleLit claiming heap field temps — this skip becomes unnecessary.
+// Returns true when the heap temp is configured to walk droppable elements at
+// cleanup (elemType set). Callers gate ownership-transfer claims on this — when
+// walk is enabled, the caller should claim heap/string/enum-ctor temps so the
+// walk owns them; when walk is disabled, leave temps tracked so they
+// self-cleanup at stmt end (B0281 enum ctor cleanup, cleanupStmtTemps).
+func (c *Compiler) trackVectorHeapTempWithElemType(rawPtr value.Value, elemType types.Type) bool {
+	dropFn := c.funcs["Vector.drop"]
+	if dropFn == nil {
+		return false
+	}
+	resolved := elemType
+	if c.typeSubst != nil {
+		resolved = types.Substitute(resolved, c.typeSubst)
+	}
+	prevLen := len(c.heapTemps)
+	c.trackHeapTemp(rawPtr, dropFn)
+	if len(c.heapTemps) > prevLen {
+		if !c.containsDroppableTuple(resolved) {
+			c.heapTemps[len(c.heapTemps)-1].elemType = elemType
+			return true
+		}
+	}
+	return false
+}
+
+// containsDroppableTuple reports whether t transitively contains a Tuple with
+// at least one droppable field (string, vector, channel, user type with drop,
+// enum with drop, or another droppable tuple). Recurses into Vector / Map /
+// Optional / Channel / Arc / Weak / Array / Tuple structures. Used by
+// trackVectorHeapTempWithElemType to suppress the element walk for elementtypes
+// that would reach a tuple-with-heap-field via emitVariantFieldDrop. T0369.
+func (c *Compiler) containsDroppableTuple(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	if c.typeSubst != nil {
+		t = types.Substitute(t, c.typeSubst)
+	}
+	switch tt := t.(type) {
+	case *types.Tuple:
+		if c.tupleNeedsDrop(tt) {
+			return true
+		}
+		for _, e := range tt.Elems() {
+			if c.containsDroppableTuple(e) {
+				return true
+			}
+		}
+	case *types.Instance:
+		for _, arg := range tt.TypeArgs() {
+			if c.containsDroppableTuple(arg) {
+				return true
+			}
+		}
+	case *types.Optional:
+		return c.containsDroppableTuple(tt.Elem())
+	case *types.Array:
+		return c.containsDroppableTuple(tt.Elem())
+	}
+	return false
 }
 
 // trackHeapTemp registers a heap-allocated droppable instance for cleanup at
@@ -3799,6 +3883,14 @@ func (c *Compiler) cleanupHeapTemps() {
 		c.block.NewCondBr(isNull, doneBlock, execBlock)
 
 		c.block = execBlock
+		// T0369: For vector heap temps, walk droppable elements (strings, enums
+		// with droppable variants, heap user types, droppable tuples) before
+		// freeing the buffer via Vector.drop. Mirrors the stmtTemp path's T0356
+		// fix. Only set on vector literals via trackVectorHeapTempWithElemType;
+		// other heap temps (slice results, ctor allocations) leave elemType nil.
+		if temp.elemType != nil {
+			c.emitVectorElementDropLoop(ptr, temp.elemType)
+		}
 		c.block.NewCall(temp.dropFunc, ptr)
 		c.block.NewBr(doneBlock)
 
@@ -3818,6 +3910,14 @@ func (c *Compiler) cleanupHeapTemps() {
 // heapTemp's existing drop flag is reused: the one claimed by the variable already
 // has flag=0 (its scope binding won't fire), while unclaimed intermediates have
 // flag=1 and will be freed at scope exit via emitFreeCall.
+//
+// T0369: temp.elemType is intentionally not propagated into the scopeBinding.
+// This path only fires for structural-typed variables (e.g., Iterator). Vector
+// literals have concrete Vector[T] declared types and never reach this code,
+// so element drops via emitVectorElementDropLoop happen exclusively on the
+// cleanupHeapTemps statement-end path. If a future callsite registers a vector
+// heap temp that survives to a scope binding, emitFreeCall would lose element
+// drops — extend scopeBinding/emitFreeCall at that point.
 func (c *Compiler) promoteHeapTempsToScope() {
 	if len(c.heapTemps) == 0 {
 		return

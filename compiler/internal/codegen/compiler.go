@@ -467,6 +467,7 @@ type heapTemp struct {
 	alloca   *ir.InstAlloca // entry-block i8* alloca (instance pointer)
 	dropFlag *ir.InstAlloca // entry-block i1, initialized to false
 	dropFunc *ir.Func       // concrete drop function to call
+	elemType types.Type     // T0369: vector element type — when set, cleanupHeapTemps walks droppable elements before calling dropFunc. nil for non-vector heap temps.
 }
 
 // enumCtorTemp tracks an inline enum constructor alloca with droppable variant data (B0267/B0269).

@@ -234,7 +234,12 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 				// B0223: Track vector slice results as heap temps. Vector slicing
 				// allocates a new heap vector. Without tracking, the slice result
 				// leaks when used as an intermediate (e.g., in string.from_bytes).
-				if fn := c.funcs["Vector.drop"]; fn != nil {
+				// T0369: Pass the element type so transient cleanup walks droppable
+				// elements (Vector.slice clones each element by ref-copy; on free,
+				// element drops must fire).
+				if elemType, ok := types.AsVector(rt); ok {
+					c.trackVectorHeapTempWithElemType(result, elemType)
+				} else if fn := c.funcs["Vector.drop"]; fn != nil {
 					c.trackHeapTemp(result, fn)
 				}
 			}
@@ -6640,7 +6645,14 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	// claim the temp via claimHeapTemp, preventing double-free. This code only
 	// runs on the heap path — static (.rodata) vectors return earlier via
 	// genStaticVectorLit and are never tracked.
-	c.trackHeapTemp(rawPtr, c.palFree)
+	// T0369: Use Vector.drop with element-type info so transient cleanup walks
+	// droppable elements (string concats, nested vectors, channels, heap user
+	// types, enum heap variant data) before freeing the buffer. The helper
+	// returns false when the walk is suppressed (elemType transitively contains
+	// a droppable tuple — see T0371): in that path the per-element claims below
+	// are skipped so each tracked temp self-cleans up at stmt end instead of
+	// being orphaned by a buffer-only Vector.drop.
+	walkEnabled := c.trackVectorHeapTempWithElemType(rawPtr, elem)
 
 	// Store len and cap via header GEP
 	headerType := vectorHeaderType()
@@ -6664,23 +6676,31 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 		elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr,
 			constant.NewInt(irtypes.I64, int64(i)))
 		c.block.NewStore(val, elemPtr)
-		// B0233: Claim heap temp — element ownership transferred to vector literal.
-		c.claimHeapTemp(val)
-		// T0366: Also claim string/vector/channel stmt-temps. trackVectorTempWithElemType
-		// (called by CallExpr / ?! / ?^ / ! / ? e {} for Vector results) registers in
-		// stmtTemps, not heapTemps — claimHeapTemp doesn't see them. Without claiming,
-		// the caller's stmt-temp cleanup runs Vector.drop while the gather buffer (owned
-		// by the variadic callee) also drops each element → double-free.
-		c.claimStringTemp(val)
-		// B0281: Clear enum ctor temps created during this element's evaluation.
-		// Same issue as map literals: the enum value is stored by LLVM value,
-		// so both the temp alloca and the vector slot share inner pointers.
-		// Only clear temps added since savedEnumTemps to avoid clobbering
-		// temps from outer expressions.
-		for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
-			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+		if walkEnabled {
+			// B0233: Claim heap temp — element ownership transferred to vector literal.
+			c.claimHeapTemp(val)
+			// T0366: Also claim string/vector/channel stmt-temps. trackVectorTempWithElemType
+			// (called by CallExpr / ?! / ?^ / ! / ? e {} for Vector results) registers in
+			// stmtTemps, not heapTemps — claimHeapTemp doesn't see them. Without claiming,
+			// the caller's stmt-temp cleanup runs Vector.drop while the gather buffer (owned
+			// by the variadic callee) also drops each element → double-free.
+			c.claimStringTemp(val)
+			// B0281: Clear enum ctor temps created during this element's evaluation.
+			// Same issue as map literals: the enum value is stored by LLVM value,
+			// so both the temp alloca and the vector slot share inner pointers.
+			// Only clear temps added since savedEnumTemps to avoid clobbering
+			// temps from outer expressions.
+			for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+				c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+			}
+			c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
 		}
-		c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+		// T0369: When walk is suppressed, leave heap temps / string stmt-temps /
+		// enum ctor temps tracked. They self-clean at stmt end so nothing is
+		// orphaned by the buffer-only Vector.drop. The vector slot retains the
+		// pointer, but ownership has not been transferred — both the slot and
+		// the original tracker reference the same heap value, and the buffer
+		// free does NOT walk them, so each tracker drops its own value once.
 	}
 
 	return rawPtr // i8*

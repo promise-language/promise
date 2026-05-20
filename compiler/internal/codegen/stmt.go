@@ -2857,6 +2857,26 @@ func (c *Compiler) emitStringDropCall(b scopeBinding) {
 	c.block = skipBlock
 }
 
+// emitStringDropOldValue conditionally drops the previous string at a non-local
+// compound-assignment site. Mirrors the local-var drop pattern from T0357: the
+// alias check is a no-op at runtime because promise_string_concat always
+// allocates a fresh result (current and result never alias), but it keeps the
+// emitted IR shape consistent across compound sites.
+func (c *Compiler) emitStringDropOldValue(current, result value.Value) {
+	dropFn, ok := c.funcs["promise_string_drop"]
+	if !ok {
+		return
+	}
+	diffBlk := c.newBlock("compound.strdrop.diff")
+	mergeBlk := c.newBlock("compound.strdrop.merge")
+	isSame := c.block.NewICmp(enum.IPredEQ, current, result)
+	c.block.NewCondBr(isSame, mergeBlk, diffBlk)
+	c.block = diffBlk
+	c.block.NewCall(dropFn, current)
+	c.block.NewBr(mergeBlk)
+	c.block = mergeBlk
+}
+
 // hasVectorStringBinding returns true if there's at least one Vector[string]
 // binding in the current scope that would trigger element drops.
 // B0189: Used to determine if a string return value needs duping.
@@ -4776,6 +4796,16 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 	}
 	current := c.block.NewLoad(fieldLLVMType, fieldPtr)
 	result := c.genCompoundOp(op, field.Type(), current, val)
+	// T0363: Drop the old field value before storing the new one. Without
+	// this, heap-allocated old values leak. Only string is wired up — no
+	// other heap-owning type has a `+` operator (the only compound op).
+	fieldType := field.Type()
+	if c.typeSubst != nil {
+		fieldType = types.Substitute(fieldType, c.typeSubst)
+	}
+	if extractNamed(fieldType) == types.TypString {
+		c.emitStringDropOldValue(current, result)
+	}
 	c.block.NewStore(result, fieldPtr)
 }
 
@@ -7079,6 +7109,11 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 	// Compound assignment
 	current := c.block.NewLoad(elemLLVM, elemPtr)
 	result := c.genCompoundOp(op, elemType, current, val)
+	// T0363: Drop the old element before storing the new one. Without this,
+	// heap-allocated old values leak.
+	if extractNamed(elemType) == types.TypString {
+		c.emitStringDropOldValue(current, result)
+	}
 	c.block.NewStore(result, elemPtr)
 }
 
@@ -7189,6 +7224,14 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 	operandType := c.compoundElemType(targetType)
 	result := c.genCompoundOp(op, operandType, current, val)
 
+	// T0363: Map.[] returns V? and dups the inner string when constructing the
+	// optional, so `current` is a heap-allocated dup that would otherwise leak.
+	// Drop it after computing `result`. The value stored in the map is freed
+	// separately by Map.[]='s drop-old-on-overwrite logic.
+	if operandType != nil && extractNamed(operandType) == types.TypString {
+		c.emitStringDropOldValue(current, result)
+	}
+
 	c.block.NewCall(setFn, instancePtr, keyVal, result)
 }
 
@@ -7240,6 +7283,11 @@ func (c *Compiler) genVectorCompoundAssign(slicePtr, idx value.Value, elemType t
 
 	current := c.block.NewLoad(elemLLVM, elemPtr)
 	result := c.genCompoundOp(op, elemType, current, val)
+	// T0363: Drop the old element before storing the new one. Without this,
+	// heap-allocated old values leak.
+	if extractNamed(elemType) == types.TypString {
+		c.emitStringDropOldValue(current, result)
+	}
 	c.block.NewStore(result, elemPtr)
 }
 

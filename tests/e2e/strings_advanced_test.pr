@@ -267,3 +267,103 @@ test_string_compound_guard_borrow_literal() `test {
     assert(guard.borrow == "abcdef", "guard borrow compound concat");
   }
 }
+
+// T0363: heap-old variants — exercise the drop-old-value path for non-local
+// compound sites. Without the fix these would leak under T0067.
+
+test_string_compound_field_heap() `test {
+  StringHolder h = StringHolder(value: "abc" + "");
+  h.value += "def";
+  assert(h.value == "abcdef", "field compound concat (heap old)");
+}
+
+test_string_compound_vec_index_heap() `test {
+  string[] vec = [];
+  vec.push("abc" + "");
+  vec[0] += "def";
+  assert(vec[0] == "abcdef", "vec compound concat (heap old)");
+}
+
+test_string_compound_map_literal() `test {
+  map[string, string] m = map[string, string]();
+  m["k"] = "abc";
+  m["k"] += "def";
+  assert(m["k"]! == "abcdef", "map compound concat (literal old)");
+}
+
+test_string_compound_map_heap() `test {
+  map[string, string] m = map[string, string]();
+  m["k"] = "abc" + "";
+  m["k"] += "def";
+  assert(m["k"]! == "abcdef", "map compound concat (heap old)");
+}
+
+// T0363 coverage: container fields of structs — exercises composition
+// of field access + container index compound at the same site.
+
+type StringVecHolder {
+  string[] items;
+}
+
+type StringMapHolder {
+  map[string, string] m;
+}
+
+test_string_compound_vec_field_heap() `test {
+  StringVecHolder h = StringVecHolder(items: []);
+  h.items.push("abc" + "");
+  h.items[0] += "def";
+  assert(h.items[0] == "abcdef", "vec field compound concat (heap old)");
+}
+
+test_string_compound_map_field_heap() `test {
+  StringMapHolder h = StringMapHolder(m: map[string, string]());
+  h.m["k"] = "abc" + "";
+  h.m["k"] += "def";
+  assert(h.m["k"]! == "abcdef", "map field compound concat (heap old)");
+}
+
+// T0363 coverage: repeated compound on the same target — verifies the
+// drop fires on every iteration (not just the first).
+
+test_string_compound_field_repeated() `test {
+  StringHolder h = StringHolder(value: "abc" + "");
+  h.value += "1";
+  h.value += "2";
+  h.value += "3";
+  assert(h.value == "abc123", "field compound repeated");
+}
+
+test_string_compound_vec_repeated() `test {
+  string[] vec = [];
+  vec.push("abc" + "");
+  vec[0] += "1";
+  vec[0] += "2";
+  vec[0] += "3";
+  assert(vec[0] == "abc123", "vec index compound repeated");
+}
+
+test_string_compound_map_repeated() `test {
+  map[string, string] m = map[string, string]();
+  m["k"] = "abc" + "";
+  m["k"] += "1";
+  m["k"] += "2";
+  m["k"] += "3";
+  assert(m["k"]! == "abc123", "map compound repeated");
+}
+
+// T0363 coverage: heap-allocated RHS — fresh allocation on the right side
+// of compound; both old and result are heap, exercises the alias-check no-op.
+
+test_string_compound_field_heap_rhs() `test {
+  StringHolder h = StringHolder(value: "abc");
+  h.value += "x" + "y";
+  assert(h.value == "abcxy", "field compound heap rhs");
+}
+
+test_string_compound_map_heap_rhs() `test {
+  map[string, string] m = map[string, string]();
+  m["k"] = "abc";
+  m["k"] += "x" + "y";
+  assert(m["k"]! == "abcxy", "map compound heap rhs");
+}

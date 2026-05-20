@@ -357,6 +357,46 @@ func emitLibcFree(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// emitLibcAllocDebug declares libc @malloc and defines @pal_alloc with a
+// scribble-fill (0xAA) on the returned buffer, mirroring macOS
+// MallocPreScribble. Surfaces use-of-uninitialized-memory bugs by ensuring
+// freshly-malloc'd bytes contain a recognizable, non-zero pattern. Pairs with
+// emitLibcFreeDebug's 0xDE post-free poison.
+func emitLibcAllocDebug(module *ir.Module) *ir.Func {
+	mallocSize := ir.NewParam("size", irtypes.I64)
+	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
+	mallocFn := getOrDeclareFunc(module, "malloc", irtypes.I8Ptr, mallocSize)
+	mallocFn.ReturnAttrs = append(mallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	addFuncAttr(mallocFn, enum.FuncAttrWillReturn)
+
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("dest", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	allocCount := getOrCreateAllocCountGlobal(module)
+
+	fn := module.NewFunc("pal_alloc", irtypes.I8Ptr,
+		ir.NewParam("size", irtypes.I64))
+	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(mallocFn, fn.Params[0])
+
+	// If malloc returned non-null: scribble [ret, ret+size) with 0xAA + bump count.
+	nonnull := entry.NewICmp(enum.IPredNE, ret, constant.NewNull(irtypes.I8Ptr))
+	trackBlk := fn.NewBlock(".track")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+
+	trackBlk.NewCall(memsetFn, ret, constant.NewInt(irtypes.I32, 0xAA), fn.Params[0])
+	trackBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	trackBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(ret)
+	return fn
+}
+
 // emitLibcFreeDebug declares libc @free + a platform-specific size query function
 // and defines @pal_free with poison-fill (0xDE) before free for UAF detection.
 // sizeFnName is the platform's allocation-size query: "malloc_usable_size" (Linux),
@@ -460,6 +500,106 @@ func emitLibcRealloc(module *ir.Module) *ir.Func {
 	// Normal case: resize — no count change
 	doneBlk.NewRet(ret)
 
+	return fn
+}
+
+// emitLibcReallocDebug declares libc @realloc + a platform-specific size query
+// and defines @pal_realloc that scribbles (0xAA) the newly-allocated bytes
+// when the buffer grows. sizeFnName is the platform's allocation-size query.
+//
+// Behavior:
+//   - realloc(NULL, n) with non-null result → scribble [0, n) (pure malloc)
+//   - realloc(p, n) where n > old_usable_size → scribble [old_usable, n) (grew)
+//   - realloc(p, n) where n <= old_usable_size → no scribble (shrunk in place)
+//   - realloc(p, 0) → no scribble (frees p, returns NULL on most libcs)
+//
+// The old user-requested size is unknown; we use malloc_usable_size as a
+// safe upper bound. Bytes the caller previously wrote past the requested
+// size into slack space are preserved (realloc preserves contents up to
+// min(old, new)).
+func emitLibcReallocDebug(module *ir.Module, sizeFnName string) *ir.Func {
+	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
+	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+	reallocSz := ir.NewParam("size", irtypes.I64)
+	reallocSz.Attrs = append(reallocSz.Attrs, enum.ParamAttrNoUndef)
+	reallocFn := getOrDeclareFunc(module, "realloc", irtypes.I8Ptr, reallocPtr, reallocSz)
+	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	addFuncAttr(reallocFn, enum.FuncAttrWillReturn)
+
+	sizeFn := getOrDeclareFunc(module, sizeFnName, irtypes.I64,
+		ir.NewParam("ptr", irtypes.I8Ptr))
+
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("dest", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+
+	allocCount := getOrCreateAllocCountGlobal(module)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	nullPtr := constant.NewNull(irtypes.I8Ptr)
+
+	fn := module.NewFunc("pal_realloc", irtypes.I8Ptr,
+		ir.NewParam("ptr", irtypes.I8Ptr),
+		ir.NewParam("size", irtypes.I64))
+	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	entry := fn.NewBlock(".entry")
+
+	// Capture old usable size *before* realloc moves the buffer. If old ptr is
+	// null, treat as 0 so the scribble covers the entire new allocation.
+	ptrIsNull := entry.NewICmp(enum.IPredEQ, fn.Params[0], nullPtr)
+	queryOldBlk := fn.NewBlock(".query_old")
+	skipQueryBlk := fn.NewBlock(".skip_query")
+	doReallocBlk := fn.NewBlock(".do_realloc")
+	entry.NewCondBr(ptrIsNull, skipQueryBlk, queryOldBlk)
+
+	oldUsable := queryOldBlk.NewCall(sizeFn, fn.Params[0])
+	queryOldBlk.NewBr(doReallocBlk)
+	skipQueryBlk.NewBr(doReallocBlk)
+
+	oldUsablePhi := doReallocBlk.NewPhi(
+		&ir.Incoming{X: oldUsable, Pred: queryOldBlk},
+		&ir.Incoming{X: zero64, Pred: skipQueryBlk},
+	)
+
+	sizeIsZero := doReallocBlk.NewICmp(enum.IPredEQ, fn.Params[1], zero64)
+	ret := doReallocBlk.NewCall(reallocFn, fn.Params[0], fn.Params[1])
+
+	// Branch on (old_ptr is null) for count tracking, mirroring emitLibcRealloc.
+	newAllocBlk := fn.NewBlock(".new_alloc")
+	checkFreeBlk := fn.NewBlock(".check_free")
+	doReallocBlk.NewCondBr(ptrIsNull, newAllocBlk, checkFreeBlk)
+
+	retNonNull := newAllocBlk.NewICmp(enum.IPredNE, ret, nullPtr)
+	incBlk := fn.NewBlock(".inc")
+	scribbleCheckBlk := fn.NewBlock(".scribble_check")
+	newAllocBlk.NewCondBr(retNonNull, incBlk, scribbleCheckBlk)
+	incBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, one64, enum.AtomicOrderingMonotonic)
+	incBlk.NewBr(scribbleCheckBlk)
+
+	decBlk := fn.NewBlock(".dec")
+	checkFreeBlk.NewCondBr(sizeIsZero, decBlk, scribbleCheckBlk)
+	decBlk.NewAtomicRMW(enum.AtomicOpSub, allocCount, one64, enum.AtomicOrderingMonotonic)
+	decBlk.NewBr(scribbleCheckBlk)
+
+	// Scribble grown region: if ret != null AND new_size > old_usable,
+	// memset(ret + old_usable, 0xAA, new_size - old_usable).
+	doneBlk := fn.NewBlock(".done")
+	resultNonNull := scribbleCheckBlk.NewICmp(enum.IPredNE, ret, nullPtr)
+	scribbleNeededBlk := fn.NewBlock(".scribble_needed")
+	scribbleCheckBlk.NewCondBr(resultNonNull, scribbleNeededBlk, doneBlk)
+
+	hasGrown := scribbleNeededBlk.NewICmp(enum.IPredUGT, fn.Params[1], oldUsablePhi)
+	scribbleBlk := fn.NewBlock(".scribble")
+	scribbleNeededBlk.NewCondBr(hasGrown, scribbleBlk, doneBlk)
+
+	scribbleStart := scribbleBlk.NewGetElementPtr(irtypes.I8, ret, oldUsablePhi)
+	scribbleLen := scribbleBlk.NewSub(fn.Params[1], oldUsablePhi)
+	scribbleBlk.NewCall(memsetFn, scribbleStart, constant.NewInt(irtypes.I32, 0xAA), scribbleLen)
+	scribbleBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(ret)
 	return fn
 }
 

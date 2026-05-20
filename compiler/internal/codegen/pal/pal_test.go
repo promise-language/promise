@@ -379,7 +379,7 @@ func TestEmitFreeDebug(t *testing.T) {
 	// Linux: uses malloc_usable_size
 	t.Run("Linux", func(t *testing.T) {
 		module := ir.NewModule()
-		p := &PosixPAL{target: "x86_64-unknown-linux-gnu", DebugFree: true}
+		p := &PosixPAL{target: "x86_64-unknown-linux-gnu", DebugAllocator: true}
 		p.EmitAlloc(module) // needed for allocCount global
 		fn := p.EmitFree(module)
 		out := module.String()
@@ -401,7 +401,7 @@ func TestEmitFreeDebug(t *testing.T) {
 	// macOS: uses malloc_size (not malloc_usable_size)
 	t.Run("Darwin", func(t *testing.T) {
 		module := ir.NewModule()
-		p := &PosixPAL{target: "arm64-apple-darwin24.3.0", DebugFree: true}
+		p := &PosixPAL{target: "arm64-apple-darwin24.3.0", DebugAllocator: true}
 		p.EmitAlloc(module)
 		fn := p.EmitFree(module)
 		out := module.String()
@@ -423,7 +423,7 @@ func TestEmitFreeDebug(t *testing.T) {
 	// Windows: uses _msize
 	t.Run("Windows", func(t *testing.T) {
 		module := ir.NewModule()
-		p := &WindowsPAL{DebugFree: true}
+		p := &WindowsPAL{DebugAllocator: true}
 		p.EmitAlloc(module)
 		fn := p.EmitFree(module)
 		out := module.String()
@@ -442,7 +442,7 @@ func TestEmitFreeDebug(t *testing.T) {
 	// WASM: uses malloc_usable_size (provided by wasm_alloc.c)
 	t.Run("Wasm", func(t *testing.T) {
 		module := ir.NewModule()
-		p := &WasmPAL{DebugFree: true}
+		p := &WasmPAL{DebugAllocator: true}
 		p.EmitAlloc(module)
 		fn := p.EmitFree(module)
 		out := module.String()
@@ -458,10 +458,10 @@ func TestEmitFreeDebug(t *testing.T) {
 		}
 	})
 
-	// WasmWeb: propagates DebugFree to inner WasmPAL
+	// WasmWeb: propagates DebugAllocator to inner WasmPAL
 	t.Run("WasmWeb", func(t *testing.T) {
 		module := ir.NewModule()
-		p := &WasmWebPAL{DebugFree: true}
+		p := &WasmWebPAL{DebugAllocator: true}
 		p.EmitAlloc(module)
 		fn := p.EmitFree(module)
 		out := module.String()

@@ -12,7 +12,7 @@ import (
 // Threading uses CRITICAL_SECTION (mutexes) and CONDITION_VARIABLE (condition vars).
 // All Win32 functions are declared as LLVM externals resolved by the linker from kernel32.lib/ucrt.
 type WindowsPAL struct {
-	DebugFree bool // poison-fill freed memory for UAF detection
+	DebugAllocator bool // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
 }
 
 // EmitWrite declares Win32 GetStdHandle/WriteFile and defines @pal_write.
@@ -85,14 +85,24 @@ func (p *WindowsPAL) EmitExit(module *ir.Module) *ir.Func {
 }
 
 // Windows UCRT provides libc-compatible malloc/free/realloc.
-func (p *WindowsPAL) EmitAlloc(module *ir.Module) *ir.Func { return emitLibcAlloc(module) }
+func (p *WindowsPAL) EmitAlloc(module *ir.Module) *ir.Func {
+	if p.DebugAllocator {
+		return emitLibcAllocDebug(module)
+	}
+	return emitLibcAlloc(module)
+}
 func (p *WindowsPAL) EmitFree(module *ir.Module) *ir.Func {
-	if p.DebugFree {
+	if p.DebugAllocator {
 		return emitLibcFreeDebug(module, "_msize")
 	}
 	return emitLibcFree(module)
 }
-func (p *WindowsPAL) EmitRealloc(module *ir.Module) *ir.Func { return emitLibcRealloc(module) }
+func (p *WindowsPAL) EmitRealloc(module *ir.Module) *ir.Func {
+	if p.DebugAllocator {
+		return emitLibcReallocDebug(module, "_msize")
+	}
+	return emitLibcRealloc(module)
+}
 
 // --- Windows threading via Win32 API ---
 

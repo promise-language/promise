@@ -201,7 +201,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 				os.Exit(1)
 			}
 			tmp.Close()
-			result := codegen.Compile(file, info, target)
+			result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{DebugAllocator: true})
 			testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 			result.GenerateTestMain(info.Tests, testTimeouts)
 			compileAndLink(result, tmp.Name(), target, f, false)
@@ -280,7 +280,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 				os.Remove(tmp.Name())
 				continue
 			}
-			result := codegen.Compile(file, info, target)
+			result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{DebugAllocator: true})
 			compileAndLink(result, tmp.Name(), target, f, false)
 			tempFiles = append(tempFiles, tmp.Name())
 
@@ -305,7 +305,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 				tests:    []string{strings.TrimSuffix(filepath.Base(f), ".pr")},
 			})
 		} else if len(info.Tests) > 0 {
-			result := codegen.Compile(file, info, target)
+			result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{DebugAllocator: true})
 			testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 			result.GenerateTestMain(info.Tests, testTimeouts)
 			compileAndLink(result, tmp.Name(), target, f, false)

@@ -12,8 +12,8 @@ import (
 
 // PosixPAL implements PAL for POSIX systems (macOS, Linux) using libc write/exit.
 type PosixPAL struct {
-	target    string // LLVM target triple (needed for platform-specific constants)
-	DebugFree bool   // poison-fill freed memory for UAF detection
+	target         string // LLVM target triple (needed for platform-specific constants)
+	DebugAllocator bool   // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
 }
 
 // EmitWrite declares libc @write and defines @pal_write as a thin wrapper.
@@ -56,19 +56,33 @@ func (p *PosixPAL) EmitExit(module *ir.Module) *ir.Func {
 	return fn
 }
 
-func (p *PosixPAL) EmitAlloc(module *ir.Module) *ir.Func { return emitLibcAlloc(module) }
+func (p *PosixPAL) EmitAlloc(module *ir.Module) *ir.Func {
+	if p.DebugAllocator {
+		return emitLibcAllocDebug(module)
+	}
+	return emitLibcAlloc(module)
+}
 func (p *PosixPAL) EmitFree(module *ir.Module) *ir.Func {
-	if p.DebugFree {
-		// macOS uses malloc_size(); Linux/other POSIX uses malloc_usable_size().
-		sizeFn := "malloc_usable_size"
-		if strings.Contains(p.target, "darwin") || strings.Contains(p.target, "apple") {
-			sizeFn = "malloc_size"
-		}
-		return emitLibcFreeDebug(module, sizeFn)
+	if p.DebugAllocator {
+		return emitLibcFreeDebug(module, p.allocSizeFn())
 	}
 	return emitLibcFree(module)
 }
-func (p *PosixPAL) EmitRealloc(module *ir.Module) *ir.Func { return emitLibcRealloc(module) }
+func (p *PosixPAL) EmitRealloc(module *ir.Module) *ir.Func {
+	if p.DebugAllocator {
+		return emitLibcReallocDebug(module, p.allocSizeFn())
+	}
+	return emitLibcRealloc(module)
+}
+
+// allocSizeFn returns the platform's allocation-size query: malloc_size on
+// macOS, malloc_usable_size elsewhere.
+func (p *PosixPAL) allocSizeFn() string {
+	if strings.Contains(p.target, "darwin") || strings.Contains(p.target, "apple") {
+		return "malloc_size"
+	}
+	return "malloc_usable_size"
+}
 
 // --- POSIX threading via pthreads ---
 

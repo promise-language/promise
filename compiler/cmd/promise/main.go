@@ -148,7 +148,7 @@ Commands:
 
 Options (build):
   -o <output>   Output file name (default: input file without extension)
-  -debug        Debug build (default) — poison-fills freed memory for UAF detection
+  -debug        Debug build (default) — instrumented allocator (scribble malloc'd / poison freed memory) for UAF / uninit-read detection
   -release      Release build — platform-default free behavior, no debug overhead
 
 Options (doc):
@@ -556,9 +556,9 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 		}
 	}
 
-	// Default to debug mode (poison-fill freed memory for UAF detection).
+	// Default to debug mode (scribble malloc'd + poison freed memory for UAF / uninit-read detection).
 	// Use -release for production builds with platform-default free behavior.
-	debugFree := !releaseMode
+	debugAllocator := !releaseMode
 
 	var compileStart time.Time
 	if timePhases {
@@ -580,7 +580,7 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
 		CachedInstances: lookupCachedInstances(info, target, buildModeStr(releaseMode)),
-		DebugFree:       debugFree,
+		DebugAllocator:  debugAllocator,
 	})
 	timePhase("codegen", time.Since(tCodegen), "")
 
@@ -1239,7 +1239,7 @@ func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile
 	}
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
-		DebugFree: true, // tests always use debug mode
+		DebugAllocator: true, // tests always use debug mode
 	})
 	result.GenerateTestMain(info.Tests, testTimeouts)
 	timePhase("codegen", time.Since(tCodegen), "")
@@ -1337,7 +1337,7 @@ func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple
 	}
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
 		CoverageEnabled: true,
-		DebugFree:       true, // tests always use debug mode
+		DebugAllocator:  true, // tests always use debug mode
 	})
 	result.GenerateTestMain(info.Tests, testTimeouts)
 
@@ -1644,7 +1644,7 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	// Codegen with normal main (no GenerateTestMain)
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
-		DebugFree: true, // tests always use debug mode
+		DebugAllocator: true, // tests always use debug mode
 	})
 	timePhase("codegen", time.Since(tCodegen), "")
 
@@ -6384,7 +6384,7 @@ func runExec(args []string) {
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
 		CachedInstances: lookupCachedInstances(info, target, "debug"),
-		DebugFree:       true, // exec uses debug mode
+		DebugAllocator:  true, // exec uses debug mode
 	})
 	timePhase("codegen", time.Since(tCodegen), "")
 

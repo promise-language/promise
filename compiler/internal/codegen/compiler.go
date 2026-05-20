@@ -373,7 +373,7 @@ type Compiler struct {
 	isWasm           bool       // true if targeting wasm32
 	isWasmWeb        bool       // true if targeting wasm32-web (browser/Node host, no WASI)
 	isWindows        bool       // true if targeting windows-msvc
-	debugFree        bool       // poison-fill freed memory for UAF detection (debug builds)
+	debugAllocator   bool       // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection (debug builds)
 	needsNetpoll     bool       // true if net module imported — netpoll_init needed at startup (T0071)
 	netpollBatchLock *ir.Global // @__netpoll_batch_lock — held by reactor during event processing; close waits on it (B0324)
 	nextDebugID      int        // counter for emitDebugPrint global names
@@ -593,7 +593,7 @@ func MonoName(inst *types.Instance) string {
 type CompileOptions struct {
 	CachedInstances map[string]bool // mono instance names whose .bc is already cached
 	CoverageEnabled bool            // instrument code for test coverage (T0030)
-	DebugFree       bool            // poison-fill freed memory for UAF detection (debug builds)
+	DebugAllocator  bool            // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection (debug builds)
 }
 
 // CompileWithCache is like Compile but skips method body codegen for instances
@@ -668,7 +668,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	if opts != nil {
 		c.cachedInstances = opts.CachedInstances
 		c.coverageEnabled = opts.CoverageEnabled
-		c.debugFree = opts.DebugFree
+		c.debugAllocator = opts.DebugAllocator
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -1740,16 +1740,16 @@ func (c *Compiler) declareIntrinsics() {
 
 	// PAL: emit platform-specific allocator primitives (needed by string/vector funcs below)
 	p := pal.ForTarget(c.module.TargetTriple)
-	if c.debugFree {
+	if c.debugAllocator {
 		switch pp := p.(type) {
 		case *pal.PosixPAL:
-			pp.DebugFree = true
+			pp.DebugAllocator = true
 		case *pal.WindowsPAL:
-			pp.DebugFree = true
+			pp.DebugAllocator = true
 		case *pal.WasmPAL:
-			pp.DebugFree = true
+			pp.DebugAllocator = true
 		case *pal.WasmWebPAL:
-			pp.DebugFree = true
+			pp.DebugAllocator = true
 		}
 	}
 	c.palAlloc = p.EmitAlloc(c.module)

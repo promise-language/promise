@@ -9,7 +9,7 @@ import (
 
 // WasmPAL implements PAL for WebAssembly using WASI (WebAssembly System Interface).
 type WasmPAL struct {
-	DebugFree bool // poison-fill freed memory for UAF detection
+	DebugAllocator bool // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
 }
 
 // EmitWrite declares WASI fd_write and defines @pal_write.
@@ -97,6 +97,10 @@ func (p *WasmPAL) EmitExit(module *ir.Module) *ir.Func {
 // Signature: @pal_alloc(i64 %size) → i8*
 // Includes allocation count tracking for leak detection (T0020).
 func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
+	if p.DebugAllocator {
+		return emitWasmAllocDebug(module)
+	}
+
 	// declare noalias i8* @malloc(i32 noundef) nounwind
 	mallocSize := ir.NewParam("size", irtypes.I32)
 	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
@@ -132,10 +136,50 @@ func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// emitWasmAllocDebug defines @pal_alloc with scribble-fill (0xAA) on the
+// returned buffer. WASM uses i32 sizes (wasm32 address space) and non-atomic
+// counters (single-threaded). Mirrors emitLibcAllocDebug.
+func emitWasmAllocDebug(module *ir.Module) *ir.Func {
+	mallocSize := ir.NewParam("size", irtypes.I32)
+	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
+	mallocFn := getOrDeclareFunc(module, "malloc", irtypes.I8Ptr, mallocSize)
+	mallocFn.ReturnAttrs = append(mallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	addFuncAttr(mallocFn, enum.FuncAttrWillReturn)
+
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("dest", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I32))
+
+	allocCount := getOrCreateAllocCountGlobal(module)
+
+	fn := module.NewFunc("pal_alloc", irtypes.I8Ptr,
+		ir.NewParam("size", irtypes.I64))
+	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	entry := fn.NewBlock(".entry")
+
+	size32 := entry.NewTrunc(fn.Params[0], irtypes.I32)
+	ret := entry.NewCall(mallocFn, size32)
+
+	nonnull := entry.NewICmp(enum.IPredNE, ret, constant.NewNull(irtypes.I8Ptr))
+	trackBlk := fn.NewBlock(".track")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+
+	trackBlk.NewCall(memsetFn, ret, constant.NewInt(irtypes.I32, 0xAA), size32)
+	old := trackBlk.NewLoad(irtypes.I64, allocCount)
+	trackBlk.NewStore(trackBlk.NewAdd(old, constant.NewInt(irtypes.I64, 1)), allocCount)
+	trackBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(ret)
+	return fn
+}
+
 // EmitFree declares extern @free and defines @pal_free as a wrapper.
 // Includes allocation count tracking for leak detection (T0020).
 func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
-	if p.DebugFree {
+	if p.DebugAllocator {
 		return emitWasmFreeDebug(module)
 	}
 
@@ -218,6 +262,10 @@ func emitWasmFreeDebug(module *ir.Module) *ir.Func {
 // EmitRealloc declares extern @realloc and defines @pal_realloc as a wrapper.
 // Includes allocation count tracking for leak detection (T0066).
 func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
+	if p.DebugAllocator {
+		return emitWasmReallocDebug(module)
+	}
+
 	// declare noalias i8* @realloc(i8* nocapture noundef, i32 noundef) nounwind
 	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
@@ -266,6 +314,93 @@ func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
 
 	doneBlk.NewRet(ret)
 
+	return fn
+}
+
+// emitWasmReallocDebug defines @pal_realloc that scribbles (0xAA) the
+// newly-allocated bytes when the buffer grows. WASM uses i32 sizes (wasm32)
+// and non-atomic counters (single-threaded). Mirrors emitLibcReallocDebug.
+func emitWasmReallocDebug(module *ir.Module) *ir.Func {
+	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
+	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+	reallocSize := ir.NewParam("size", irtypes.I32)
+	reallocSize.Attrs = append(reallocSize.Attrs, enum.ParamAttrNoUndef)
+	reallocFn := getOrDeclareFunc(module, "realloc", irtypes.I8Ptr, reallocPtr, reallocSize)
+	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	addFuncAttr(reallocFn, enum.FuncAttrWillReturn)
+
+	sizeFn := getOrDeclareFunc(module, "malloc_usable_size", irtypes.I32,
+		ir.NewParam("ptr", irtypes.I8Ptr))
+
+	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("dest", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I32))
+
+	allocCount := getOrCreateAllocCountGlobal(module)
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	nullPtr := constant.NewNull(irtypes.I8Ptr)
+
+	fn := module.NewFunc("pal_realloc", irtypes.I8Ptr,
+		ir.NewParam("ptr", irtypes.I8Ptr),
+		ir.NewParam("size", irtypes.I64))
+	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	entry := fn.NewBlock(".entry")
+
+	// Capture old usable size before realloc; treat null old ptr as 0.
+	ptrIsNull := entry.NewICmp(enum.IPredEQ, fn.Params[0], nullPtr)
+	queryOldBlk := fn.NewBlock(".query_old")
+	skipQueryBlk := fn.NewBlock(".skip_query")
+	doReallocBlk := fn.NewBlock(".do_realloc")
+	entry.NewCondBr(ptrIsNull, skipQueryBlk, queryOldBlk)
+
+	oldUsable := queryOldBlk.NewCall(sizeFn, fn.Params[0])
+	queryOldBlk.NewBr(doReallocBlk)
+	skipQueryBlk.NewBr(doReallocBlk)
+
+	oldUsablePhi := doReallocBlk.NewPhi(
+		&ir.Incoming{X: oldUsable, Pred: queryOldBlk},
+		&ir.Incoming{X: zero32, Pred: skipQueryBlk},
+	)
+
+	sizeIsZero := doReallocBlk.NewICmp(enum.IPredEQ, fn.Params[1], zero64)
+	size32 := doReallocBlk.NewTrunc(fn.Params[1], irtypes.I32)
+	ret := doReallocBlk.NewCall(reallocFn, fn.Params[0], size32)
+
+	newAllocBlk := fn.NewBlock(".new_alloc")
+	checkFreeBlk := fn.NewBlock(".check_free")
+	doReallocBlk.NewCondBr(ptrIsNull, newAllocBlk, checkFreeBlk)
+
+	retNonNull := newAllocBlk.NewICmp(enum.IPredNE, ret, nullPtr)
+	incBlk := fn.NewBlock(".inc")
+	scribbleCheckBlk := fn.NewBlock(".scribble_check")
+	newAllocBlk.NewCondBr(retNonNull, incBlk, scribbleCheckBlk)
+	incBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, one64, enum.AtomicOrderingMonotonic)
+	incBlk.NewBr(scribbleCheckBlk)
+
+	decBlk := fn.NewBlock(".dec")
+	checkFreeBlk.NewCondBr(sizeIsZero, decBlk, scribbleCheckBlk)
+	decBlk.NewAtomicRMW(enum.AtomicOpSub, allocCount, one64, enum.AtomicOrderingMonotonic)
+	decBlk.NewBr(scribbleCheckBlk)
+
+	doneBlk := fn.NewBlock(".done")
+	resultNonNull := scribbleCheckBlk.NewICmp(enum.IPredNE, ret, nullPtr)
+	scribbleNeededBlk := fn.NewBlock(".scribble_needed")
+	scribbleCheckBlk.NewCondBr(resultNonNull, scribbleNeededBlk, doneBlk)
+
+	hasGrown := scribbleNeededBlk.NewICmp(enum.IPredUGT, size32, oldUsablePhi)
+	scribbleBlk := fn.NewBlock(".scribble")
+	scribbleNeededBlk.NewCondBr(hasGrown, scribbleBlk, doneBlk)
+
+	scribbleStart := scribbleBlk.NewGetElementPtr(irtypes.I8, ret, oldUsablePhi)
+	scribbleLen := scribbleBlk.NewSub(size32, oldUsablePhi)
+	scribbleBlk.NewCall(memsetFn, scribbleStart, constant.NewInt(irtypes.I32, 0xAA), scribbleLen)
+	scribbleBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(ret)
 	return fn
 }
 

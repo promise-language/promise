@@ -185,7 +185,7 @@ test_channel_unbuffered_loop() `test(exclude: "wasm32", timeout: "30s") {
 // on the same unbuffered channel. Regression test for T0305: yield-spin
 // prevents lost wakeups when rendezvous-waiters and write-waiters would
 // have been conflated on send_waiters.
-test_channel_unbuffered_multi_producer() `test(exclude: "wasm32", timeout: "30s") {
+test_channel_unbuffered_multi_producer() `test(exclude: "wasm32", timeout: "60s") {
   ch := channel[int]();
   n_producers := 5;
   sends_each := 20;

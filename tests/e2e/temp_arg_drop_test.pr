@@ -918,3 +918,52 @@ t0343_self_alias_failable_local_plain_arg() `test {
   t0343_self_alias_failable_plain_arg(s.alias_failable()?!, 0);
   assert(s.data.len == 0, "s still owns data after alias_failable() ?! plain-arg");
 }
+
+// T0344: ?! / ! / ? e {...} returning heap user types must drop temps at
+// statement end when discarded or passed as plain (non-`~`) args.
+
+type T344Holder {
+  int[] data;
+}
+
+t0344_make_holder_failable!() T344Holder {
+  return T344Holder(data: int[]());
+}
+t0344_make_holder_optional() T344Holder? {
+  return T344Holder(data: int[]());
+}
+t0344_make_map_failable!() map[string, int] {
+  m := map[string, int]();
+  m["a"] = 1;
+  return m;
+}
+t0344_len_check_holder(T344Holder h, int expected) {
+  assert(h.data.len == expected, "holder.data.len");
+}
+
+t0344_panic_unwrap_discard() `test {
+  t0344_make_holder_failable()?!;
+}
+t0344_panic_unwrap_plain_arg() `test {
+  t0344_len_check_holder(t0344_make_holder_failable()?!, 0);
+}
+t0344_panic_unwrap_map_discard() `test {
+  t0344_make_map_failable()?!;
+}
+t0344_optional_unwrap_discard() `test {
+  t0344_make_holder_optional()!;
+}
+t0344_optional_unwrap_plain_arg() `test {
+  t0344_len_check_holder(t0344_make_holder_optional()!, 0);
+}
+t0344_handler_constructor_discard() `test {
+  t0344_make_holder_failable()? e {
+    T344Holder(data: int[]())
+  };
+}
+t0344_handler_plain_arg() `test {
+  t0344_len_check_holder(t0344_make_holder_failable()? e {
+    T344Holder(data: int[]())
+  },
+  0);
+}

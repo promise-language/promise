@@ -859,8 +859,23 @@ func (c *Compiler) defineSysmonFunc() {
 	scanNext.NewStore(nextI, iAlloca)
 	scanNext.NewBr(scanBody)
 
-	// scanDone: back to main loop
-	scanDone.NewBr(loop)
+	// scanDone: lost-wakeup safety net (T0352).
+	// Read global queue size — if non-zero, wake an idle M. This closes a
+	// narrow lost-wakeup race where a non-M thread (e.g. test trampoline)
+	// enqueues to the global queue and calls wake_m before any M has pushed
+	// itself onto the idle stack. wake_m then no-ops on the empty stack and
+	// the work sits unattended until the next enqueue triggers another
+	// wake_m. With this safety net, the worst-case stuck time is bounded
+	// by sysmon's 10ms tick. wake_m is a no-op when no Ms are idle.
+	gsField := scanDone.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGlobalSize)))
+	gsVal := scanDone.NewLoad(irtypes.I64, gsField)
+	hasGlobalWork := scanDone.NewICmp(enum.IPredNE, gsVal, constant.NewInt(irtypes.I64, 0))
+	wakeIdle := fn.NewBlock("sysmon_wake_idle")
+	scanDone.NewCondBr(hasGlobalWork, wakeIdle, loop)
+
+	wakeIdle.NewCall(c.funcs["promise_sched_wake_m"])
+	wakeIdle.NewBr(loop)
 
 	// exit: return null
 	exitBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
@@ -1427,6 +1442,13 @@ func (c *Compiler) defineSchedFindRunnableFunc() {
 // from the idle stack. park_m loops until spinning==1 or shutdown. This
 // prevents M from returning prematurely and re-pushing onto the idle stack
 // (which would corrupt the intrusive linked list and potentially lose Ms).
+//
+// Lost-wakeup safety net (T0352): there is a small race window where a
+// non-M thread can enqueue to the global queue and call wake_m before this
+// M has pushed itself onto the idle stack — wake_m no-ops on the empty
+// stack, then this M parks indefinitely. Sysmon (sched.go ~789) periodically
+// calls wake_m when global work is pending, capping the worst-case stuck
+// time to ~10ms.
 func (c *Compiler) defineSchedParkMFunc() {
 	mParam := ir.NewParam("m_raw", irtypes.I8Ptr)
 	fn := c.module.NewFunc("promise_sched_park_m", irtypes.Void, mParam)

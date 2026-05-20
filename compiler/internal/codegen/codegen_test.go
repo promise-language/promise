@@ -16504,6 +16504,29 @@ func TestSchedLoopIncrementsSchedTick(t *testing.T) {
 	assertContains(t, fn, "i32 0, i32 7")
 }
 
+func TestSysmonWakesIdleMOnGlobalWork(t *testing.T) {
+	// T0352: sysmon's lost-wakeup safety net. After scanning Ps for preemption,
+	// sysmon must check the global queue size (sched field 2) and call wake_m
+	// when it's non-zero. This bounds the worst-case stuck time for an M that
+	// missed a wake_m signal due to the push-vs-wake race in park_m.
+	ir := generateIR(t, `main() {}`)
+	fn := extractFunction(ir, "promise_sysmon")
+
+	// Must access sched.global_size (field 2 on the sched global) at scan_done.
+	// Binding to @__promise_sched ensures we're reading the sched struct, not
+	// some other struct's field 2 (e.g., gFieldWaitData=2 or pFieldRqHead=2).
+	assertContains(t, fn, "@__promise_sched, i32 0, i32 2")
+	// global_size is i64 — must load with the right width.
+	assertContains(t, fn, "load i64, i64*")
+	// Must call wake_m when global work is pending.
+	assertContains(t, fn, "call void @promise_sched_wake_m()")
+	// The new sysmon_wake_idle block must exist and be the target of the
+	// conditional branch when global_size != 0 (else fall through to loop).
+	assertContains(t, fn, "label %sysmon_wake_idle, label %loop")
+	// The wake_idle block must branch back to the main loop after wake_m.
+	assertContains(t, fn, "sysmon_wake_idle:\n\tcall void @promise_sched_wake_m()\n\tbr label %loop")
+}
+
 // --- OS bridge tests ---
 
 func TestArgcArgvGlobals(t *testing.T) {

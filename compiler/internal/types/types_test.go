@@ -1006,6 +1006,18 @@ func TestAssignableTo(t *testing.T) {
 		{"mut_ref_to_shared_ref", NewMutRef(TypString), NewSharedRef(TypString), true},
 		{"mut_ref_to_shared_ref_mismatch", NewMutRef(TypInt), NewSharedRef(TypString), false},
 
+		// Rule 8b (T0381): T& assignable to T (implicit decay)
+		{"shared_ref_string_to_string", NewSharedRef(TypString), TypString, true},
+		{"shared_ref_int_to_int", NewSharedRef(TypInt), TypInt, true},
+		{"shared_ref_dog_to_animal", NewSharedRef(dog), animal, true},
+		{"shared_ref_int_to_string", NewSharedRef(TypInt), TypString, false},
+
+		// Rule 8c (T0381): T~ assignable to T (implicit decay)
+		{"mut_ref_string_to_string", NewMutRef(TypString), TypString, true},
+		{"mut_ref_int_to_int", NewMutRef(TypInt), TypInt, true},
+		{"mut_ref_dog_to_animal", NewMutRef(dog), animal, true},
+		{"mut_ref_int_to_string", NewMutRef(TypInt), TypString, false},
+
 		// Not assignable
 		{"int_to_string", TypInt, TypString, false},
 		{"unrelated_types", makeNamed("Cat"), makeNamed("Fish"), false},

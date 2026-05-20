@@ -215,6 +215,23 @@ func AssignableTo(x, y Type) bool {
 		}
 	}
 
+	// Rule 8b: T& is assignable to T (implicit decay) — T0381.
+	// Drop-flag and ownership safety are tracked separately via the
+	// expression's static type, so this decay does not weaken safety
+	// checks for borrows that flow through assignment.
+	if sr, ok := x.(*SharedRef); ok {
+		if AssignableTo(sr.elem, y) {
+			return true
+		}
+	}
+
+	// Rule 8c: T~ is assignable to T (implicit decay) — T0381.
+	if mr, ok := x.(*MutRef); ok {
+		if AssignableTo(mr.elem, y) {
+			return true
+		}
+	}
+
 	// Rule 9: structural interface satisfaction (meta-tag gated)
 	// T is assignable to Interface if the interface is marked `structural
 	// and T has concrete implementations for all of its abstract methods.

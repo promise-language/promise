@@ -6,7 +6,7 @@ type Mutex[T] `native `public {
 }
 
 type MutexGuard[T] `native `public {
-  get borrow T `native `doc("Get the guarded value.");
+  get borrow T & `native `doc("Get the guarded value.");
   set borrow(T value) `native `doc("Set the guarded value.");
   close(~this) `native `doc("Unlock the mutex and release this guard.");
   drop(~this) `native `doc("Drop this guard, unlocking the mutex if still held.");

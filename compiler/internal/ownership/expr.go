@@ -203,10 +203,11 @@ func (c *Checker) tryMove(expr ast.Expr) {
 func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	// B0341 field-move check delegated to tryMove; inherit it here too.
 	if member, ok := expr.(*ast.MemberExpr); ok {
-		// T0380: `.borrow` on Arc/MutexGuard returns a non-owning reference;
-		// moving it transfers ownership of the inner pointer to the consumer
-		// while the parent retains its own drop responsibility → double-free.
-		if c.isBorrowGetterExpr(member) {
+		// T0380/T0381: a member expression typed as `T&`/`T~` is a non-owning
+		// reference (e.g., Arc.borrow, MutexGuard.borrow). Moving it transfers
+		// ownership of the inner pointer to the consumer while the parent
+		// retains its own drop responsibility → double-free.
+		if c.isBorrowedExpr(member) {
 			c.errorf(member.Pos(),
 				"cannot move out of '.borrow' getter; the parent Arc/Mutex retains ownership — call .clone() to create an independent copy, or assign to a variable to bind a borrow")
 			return
@@ -236,6 +237,21 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	if !ok {
 		return
 	}
+	// T0338/T0381: a Borrowed local cannot be consumed regardless of whether
+	// the variable's static type is Copy. Reference types (SharedRef/MutRef)
+	// are pointer-sized and thus marked Copy, but the underlying value still
+	// belongs to the owner — moving the ref into a `~T` consume site would
+	// double-free at the owner's drop. Check state before the Copy fast-path.
+	if state, tracked := c.state[ident.Name]; tracked && state == Borrowed {
+		if c.params[ident.Name] {
+			c.errorf(ident.Pos(),
+				"cannot move borrowed parameter '%s'; add '~' to the parameter declaration to consume it",
+				ident.Name)
+		} else {
+			c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
+		}
+		return
+	}
 	if isCopyType(v.Type()) {
 		return
 	}
@@ -244,17 +260,6 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	}
 	if c.pinned[ident.Name] {
 		c.errorf(ident.Pos(), "cannot move use-bound variable '%s'", ident.Name)
-		return
-	}
-	// T0338: cannot consume a borrowed parameter — the caller still drops it.
-	if c.state[ident.Name] == Borrowed {
-		if c.params[ident.Name] {
-			c.errorf(ident.Pos(),
-				"cannot move borrowed parameter '%s'; add '~' to the parameter declaration to consume it",
-				ident.Name)
-		} else {
-			c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
-		}
 		return
 	}
 	if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
@@ -604,74 +609,31 @@ func extractNamedType(typ types.Type) *types.Named {
 	return nil
 }
 
-// isBorrowGetterExpr returns true if expr is the `.borrow` getter on Arc[T] or
-// MutexGuard[T] AND T is non-Copy. These getters return a non-owning reference
-// to the inner T; for non-Copy T, a move out of the result causes a double-free
-// since the parent Arc/Mutex retains ownership and drops on its own destruction
-// (T0380). For Copy T (int, float, bool, etc.) the move is a value copy with no
-// shared ownership, so no rejection is needed. T0377 extends recognition through
-// if/match expressions whose every arm produces a borrow getter.
-func (c *Checker) isBorrowGetterExpr(expr ast.Expr) bool {
-	switch e := expr.(type) {
-	case *ast.MemberExpr:
-		if e.Field != "borrow" {
-			return false
-		}
-		targetType := c.info.Types[e.Target]
-		if elem, ok := types.AsArc(targetType); ok {
-			return !isCopyType(elem)
-		}
-		if elem, ok := types.AsMutexGuard(targetType); ok {
-			return !isCopyType(elem)
-		}
-		if n := extractNamedType(targetType); n == types.TypArc || n == types.TypMutexGuard {
-			// Bare Arc/MutexGuard without instantiation — conservative reject.
-			return true
-		}
-		return false
-	case *ast.IfExpr:
-		if e.Else == nil {
-			return false
-		}
-		return c.blockResultIsBorrowGetter(e.Then) && c.blockResultIsBorrowGetter(e.Else)
-	case *ast.MatchExpr:
-		if len(e.Arms) == 0 {
-			return false
-		}
-		for _, arm := range e.Arms {
-			if !c.matchArmIsBorrowGetter(arm) {
-				return false
-			}
-		}
-		return true
-	case *ast.ParenExpr:
-		return c.isBorrowGetterExpr(e.Expr)
+// isBorrowedExpr returns true if the expression's static type is a SharedRef
+// or MutRef (T&/T~) AND the underlying T is non-Copy. Such an expression
+// produces a non-owning reference; consuming or moving the result while the
+// owner remains alive would double-free. For Copy T (int, float, bool, etc.)
+// the value is independently copied, so no rejection is needed.
+//
+// Replaces the AST-shape heuristic from T0367/T0377/T0380 — keying on the
+// type means if/match/paren chains and any future borrow-returning getter
+// (not just `.borrow`) are handled uniformly, since sema propagates the
+// SharedRef through expression composition.
+func (c *Checker) isBorrowedExpr(expr ast.Expr) bool {
+	typ := c.info.Types[expr]
+	return isBorrowedType(typ)
+}
+
+// isBorrowedType reports whether typ is a SharedRef/MutRef whose element is
+// non-Copy. Copy elements (primitives) flow through borrows as plain values.
+func isBorrowedType(typ types.Type) bool {
+	switch t := typ.(type) {
+	case *types.SharedRef:
+		return !isCopyType(t.Elem())
+	case *types.MutRef:
+		return !isCopyType(t.Elem())
 	}
 	return false
-}
-
-// blockResultIsBorrowGetter inspects the block's final expression statement —
-// only the result expression determines borrow-ness; intermediate statements
-// are irrelevant.
-func (c *Checker) blockResultIsBorrowGetter(block *ast.Block) bool {
-	if block == nil || len(block.Stmts) == 0 {
-		return false
-	}
-	last := block.Stmts[len(block.Stmts)-1]
-	es, ok := last.(*ast.ExprStmt)
-	if !ok {
-		return false
-	}
-	return c.isBorrowGetterExpr(es.Expr)
-}
-
-// matchArmIsBorrowGetter handles either expression-bodied (`=> expr`) or
-// block-bodied (`=> { ... }`) match arms.
-func (c *Checker) matchArmIsBorrowGetter(arm *ast.MatchArm) bool {
-	if arm.Body != nil {
-		return c.isBorrowGetterExpr(arm.Body)
-	}
-	return c.blockResultIsBorrowGetter(arm.Block)
 }
 
 // isAutoDupType returns true for types that codegen auto-dups on field read:

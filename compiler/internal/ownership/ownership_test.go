@@ -3950,6 +3950,37 @@ func TestT0380_BorrowInVectorLit(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
 }
 
+// T0381: explicit `T&` declaration on a borrow var rejects consumes by type
+// (matches the inferred-decl path; covers the case the AST heuristic missed).
+func TestT0381_ExplicitRefDeclRejectsConsume(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) {}
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			string& borrowed = a.borrow;
+			consume(borrowed);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+}
+
+// T0381: a function that returns `T&` from a parameter, when stored, marks
+// the local as Borrowed — type-based detection works for any borrow source,
+// not just Arc/Mutex.
+func TestT0381_GenericRefReturnRejectsConsume(t *testing.T) {
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(~string s) {}
+		test() {
+			string s = "hello";
+			r := getRef(s);
+			consume(r);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'r'")
+}
+
 // Typed var decl path also marks borrow as Borrowed.
 func TestT0380_TypedDeclBorrowVar(t *testing.T) {
 	errs := ownerErrs(t, `

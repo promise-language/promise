@@ -356,3 +356,39 @@ arc_borrow_through_match_blocks() `test {
   };
   assert(borrowed.len == 1, "match block-arm borrow len");
 }
+
+// T0381: explicit `T&` annotation on a borrowed local — the new principled
+// way to bind a borrow. Replaces the implicit decay path that T0367 had to
+// detect via heuristics.
+arc_borrow_explicit_ref_type() `test {
+  v := string[]();
+  v.push("hello" + "");
+  a := Arc[string[]](v);
+  string[] &borrowed = a.borrow;
+  assert(borrowed.len == 1, "explicit ref type borrow");
+}
+
+// T0381: chained `.borrow.method` — auto-deref through `T&` finds methods
+// on the underlying type. This is the syntax that nested-Arc tests already
+// exercise; pinned here as an explicit T0381 regression check.
+arc_borrow_chained_method() `test {
+  v := [10, 20, 30];
+  a := Arc[int[]](v);
+  string r = a.borrow[1].to_string();
+  assert(r == "20", "chained .borrow[i].method");
+}
+
+// T0381: reassigning a `T&`-typed local from one borrow to another
+// continues to suppress the dropflag (codegen looks at the RHS type, not
+// the AST shape).
+arc_borrow_reassign_via_explicit_ref_type() `test {
+  v1 := string[]();
+  v1.push("a" + "");
+  v2 := string[]();
+  v2.push("b" + "");
+  a1 := Arc[string[]](v1);
+  a2 := Arc[string[]](v2);
+  string[] &borrowed = a1.borrow;
+  borrowed = a2.borrow;
+  assert(borrowed.len == 1, "explicit ref reassign");
+}

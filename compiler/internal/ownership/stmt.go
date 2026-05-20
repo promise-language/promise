@@ -117,13 +117,17 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	if s.Value != nil {
 		c.checkExpr(s.Value)
-		// T0380: `borrowed := a.borrow` on Arc/MutexGuard binds a non-owning
-		// reference; mark as Borrowed so downstream consume sites are rejected
-		// via the existing T0338 path. Skip tryMove (a no-op for the auto-dup
-		// MemberExpr today, but explicit short-circuit is clearer).
-		if c.isBorrowGetterExpr(s.Value) {
+		// T0380/T0381: when the RHS expression's static type is `T&`/`T~`,
+		// the LHS binds a non-owning reference. Mark as Borrowed so
+		// downstream consume sites are rejected via the existing T0338
+		// path. Skip tryMove (a no-op for the auto-dup MemberExpr today,
+		// but explicit short-circuit is clearer). Still promote any
+		// pending call-scoped borrows so cross-statement borrow tracking
+		// (e.g., `string &r = getRef(s)`) still anchors them to `s.Name`.
+		if c.isBorrowedExpr(s.Value) {
 			if s.Name != "_" {
 				c.state[s.Name] = Borrowed
+				c.promoteCallBorrows(s.Name, s.Value)
 				if typ := c.info.Types[s.Value]; typ != nil {
 					c.trackDeclOrder(s.Name, typ)
 				}
@@ -156,11 +160,12 @@ func isPointerTypeRef(tr ast.TypeRef) bool {
 
 func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	c.checkExpr(s.Value)
-	// T0380: see checkTypedVarDecl — `borrowed := a.borrow` binds a non-owning
-	// reference and must not transition to Owned.
-	if c.isBorrowGetterExpr(s.Value) {
+	// T0380/T0381: see checkTypedVarDecl — when RHS static type is `T&`/`T~`,
+	// the variable binds a non-owning reference and must not transition to Owned.
+	if c.isBorrowedExpr(s.Value) {
 		if s.Name != "_" {
 			c.state[s.Name] = Borrowed
+			c.promoteCallBorrows(s.Name, s.Value)
 			if typ := c.info.Types[s.Value]; typ != nil {
 				c.trackDeclOrder(s.Name, typ)
 			}
@@ -227,11 +232,12 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	}
 
 	c.checkExpr(s.Value)
-	// T0380: `b = a.borrow` on Arc/MutexGuard is runtime-safe via the T0379
-	// codegen fix (clearDropFlag at the store site). Skip tryMoveConsume's
-	// inline-borrow rejection here — and below, force the LHS state to
-	// Borrowed so downstream consume sites still reject.
-	rhsIsBorrowGetter := s.Op == ast.OpAssign && c.isBorrowGetterExpr(s.Value)
+	// T0380/T0381: `b = a.borrow` (or any RHS whose static type is `T&`/`T~`)
+	// is runtime-safe via the T0379 codegen fix (clearDropFlag at the store
+	// site). Skip tryMoveConsume's inline-borrow rejection here — and below,
+	// force the LHS state to Borrowed so downstream consume sites still
+	// reject.
+	rhsIsBorrowGetter := s.Op == ast.OpAssign && c.isBorrowedExpr(s.Value)
 	if !rhsIsBorrowGetter {
 		// T0351: assignment consumes the RHS — borrowed params cause a double-free
 		// because the caller still drops the original. tryMoveConsume rejects them

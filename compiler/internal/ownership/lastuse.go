@@ -163,14 +163,14 @@ func (a *lastUseAnalyzer) isSafeForEarlyDrop(stmt ast.Stmt, _ string) bool {
 			return true
 		}
 		typ := a.info.Types[s.Value]
-		return typ != nil && isCopyType(typ)
+		return typ != nil && isCopyType(typ) && !isStoredRefType(typ)
 
 	case *ast.InferredVarDecl:
 		if s.Name == "_" {
 			return true
 		}
 		typ := a.info.Types[s.Value]
-		return typ != nil && isCopyType(typ)
+		return typ != nil && isCopyType(typ) && !isStoredRefType(typ)
 
 	case *ast.DestructureVarDecl:
 		// Conservative: destructured values might be non-copy.
@@ -181,9 +181,11 @@ func (a *lastUseAnalyzer) isSafeForEarlyDrop(stmt ast.Stmt, _ string) bool {
 			// Compound assignment (+=, -=, etc.) doesn't store a new reference.
 			return true
 		}
-		// Simple assignment: safe only if the value type is copy.
+		// Simple assignment: safe only if the value type is copy AND not a
+		// stored borrow ref (T0381: `b = a.borrow` keeps `b` aliasing `a`'s
+		// data, so dropping `a` early would invalidate `b`).
 		typ := a.info.Types[s.Value]
-		return typ != nil && isCopyType(typ)
+		return typ != nil && isCopyType(typ) && !isStoredRefType(typ)
 
 	case *ast.ReturnStmt, *ast.RaiseStmt, *ast.YieldStmt, *ast.YieldDelegateStmt:
 		// Function is exiting or yielding — safe to drop before scope cleanup
@@ -198,6 +200,18 @@ func (a *lastUseAnalyzer) isSafeForEarlyDrop(stmt ast.Stmt, _ string) bool {
 		// Control flow and other complex statements — be conservative.
 		return false
 	}
+}
+
+// isStoredRefType reports whether a stored value of typ is a borrow ref
+// (SharedRef/MutRef) — such values may alias the source's heap data, so the
+// source cannot be safely dropped early. T0381: Arc.borrow / MutexGuard.borrow
+// now return `T&`, and storing the result must hold the source alive.
+func isStoredRefType(typ types.Type) bool {
+	switch typ.(type) {
+	case *types.SharedRef, *types.MutRef:
+		return true
+	}
+	return false
 }
 
 // isVarCopyType returns true if the expression's resolved type is a copy type.

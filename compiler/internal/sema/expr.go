@@ -452,12 +452,17 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit, hint types.Type) types.Type {
 	if elemType == nil {
 		return nil
 	}
+	// T0381: vector/array elements are owned by the container — strip
+	// borrow refs so `[a.borrow]` produces a `string[]` (with the move
+	// rejected later by ownership) rather than an unassignable `string&[]`.
+	elemType = stripRef(elemType)
 
 	for i := 1; i < len(e.Elements); i++ {
 		et := c.checkExpr(e.Elements[i])
 		if et == nil {
 			continue
 		}
+		et = stripRef(et)
 		if !types.Identical(et, elemType) {
 			c.errorf(e.Elements[i].Pos(), "array element type mismatch: expected %s, got %s", elemType, et)
 		}
@@ -583,6 +588,15 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
 func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right types.Type) types.Type {
 	var named *types.Named
 	var subst map[*types.TypeParam]types.Type
+
+	// T0381: unwrap shared/mut refs so operators dispatch on the underlying type.
+	// `a.borrow == 42` looks up `int.equal(int)` after stripping the `int&`.
+	if sr, ok := left.(*types.SharedRef); ok {
+		left = sr.Elem()
+	}
+	if mr, ok := left.(*types.MutRef); ok {
+		left = mr.Elem()
+	}
 
 	switch t := left.(type) {
 	case *types.Named:
@@ -723,6 +737,14 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string) types.Type {
 	var named *types.Named
 	var subst map[*types.TypeParam]types.Type
+
+	// T0381: unwrap shared/mut refs so operators dispatch on the underlying type.
+	if sr, ok := operand.(*types.SharedRef); ok {
+		operand = sr.Elem()
+	}
+	if mr, ok := operand.(*types.MutRef); ok {
+		operand = mr.Elem()
+	}
 
 	switch t := operand.(type) {
 	case *types.Named:
@@ -2278,19 +2300,59 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr) types.Type {
 	c.checkBlock(e.Then)
 	c.closeScope()
 
-	var thenType types.Type
-	if len(e.Then.Stmts) > 0 {
-		if es, ok := e.Then.Stmts[len(e.Then.Stmts)-1].(*ast.ExprStmt); ok {
-			thenType = c.info.Types[es.Expr]
-		}
-	}
+	thenType := c.blockValueType(e.Then)
 
 	c.openScope(e.Else, "if-else")
 	c.checkBlock(e.Else)
 	c.closeScope()
 
-	// Return the then-branch type (both branches should match, but we check what we can)
-	return thenType
+	elseType := c.blockValueType(e.Else)
+
+	// T0381: if one branch is a borrow (`T&`/`T~`) and the other is owned
+	// (`T`), the result is owned — a single dropflag cannot represent
+	// ownership that varies by arm, so the conservative choice is the
+	// owned form. Otherwise, prefer the then-branch type.
+	return joinBranchTypes(thenType, elseType)
+}
+
+// joinBranchTypes unifies two arm types of an if/match expression. When one
+// arm produces `T&`/`T~` and another produces `T`, we strip the borrow to
+// the owned form so downstream codegen treats the result as owned (T0381).
+// Returns the then-type if no unification is needed.
+func joinBranchTypes(a, b types.Type) types.Type {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	stripped := func(t types.Type) types.Type {
+		switch r := t.(type) {
+		case *types.SharedRef:
+			return r.Elem()
+		case *types.MutRef:
+			return r.Elem()
+		}
+		return t
+	}
+	aIsRef := false
+	bIsRef := false
+	switch a.(type) {
+	case *types.SharedRef, *types.MutRef:
+		aIsRef = true
+	}
+	switch b.(type) {
+	case *types.SharedRef, *types.MutRef:
+		bIsRef = true
+	}
+	if aIsRef != bIsRef {
+		// Mixed ref/owned — return the owned form.
+		if aIsRef {
+			return stripped(a)
+		}
+		return a
+	}
+	return a
 }
 
 func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
@@ -2346,6 +2408,9 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 
 		if resultType == nil {
 			resultType = armType
+		} else {
+			// T0381: unify ref/owned mismatches across arms.
+			resultType = joinBranchTypes(resultType, armType)
 		}
 	}
 
@@ -3020,6 +3085,20 @@ func semaExtractNamed(typ types.Type) *types.Named {
 		return semaExtractNamed(t.Elem())
 	}
 	return nil
+}
+
+// stripRef unwraps SharedRef/MutRef to expose the underlying owned type.
+// Used at sites that take ownership (vector/array literals, return values
+// without explicit ref type) so a `T&` value flows as `T` for type matching.
+// Movement out of the borrow is still rejected by the ownership pass.
+func stripRef(typ types.Type) types.Type {
+	switch t := typ.(type) {
+	case *types.SharedRef:
+		return t.Elem()
+	case *types.MutRef:
+		return t.Elem()
+	}
+	return typ
 }
 
 // isPrimitiveOrString returns true for built-in scalar types and string,

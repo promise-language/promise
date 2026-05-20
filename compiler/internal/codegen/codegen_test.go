@@ -20337,6 +20337,78 @@ func TestArcBorrowMixedMatchDoesNotClearDropFlag(t *testing.T) {
 	}
 }
 
+// T0381: explicit `T&` annotation drives the dropflag-clear path the same
+// way as inferred declarations. Type-based detection (replacing the old
+// AST-shape heuristic) sees the SharedRef on the RHS expression.
+func TestArcBorrowExplicitRefTypeClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			a := Arc[int[]](v);
+			int[]& borrowed = a.borrow;
+		}
+	`)
+	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
+	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0381: a getter chain ending in a non-borrow leaf (e.g., `.clone()`)
+// produces an OWNED value despite traversing a `T&`. The result expression
+// type is `T`, not `T&`, so the dropflag stays armed for proper cleanup.
+func TestArcBorrowCloneRetainsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := Arc[int](42);
+			b := a.clone();
+		}
+	`)
+	// b owns the cloned Arc — drop must run at scope exit.
+	assertContains(t, ir, "%b.dropflag = alloca i1")
+	bad := regexp.MustCompile(`store i1 true, i1\* %b\.dropflag\s+store i1 false, i1\* %b\.dropflag`)
+	if bad.MatchString(ir) {
+		t.Errorf("expected dropflag for clone() result to stay armed; T0381 type-based check should not fire (RHS type is Arc[int], not Arc[int]&)\ngot:\n%s", ir)
+	}
+}
+
+// T0381: chained `.borrow.field` access dispatches through genMemberExpr's
+// SharedRef unwrap — the inner member-access on `T&` looks up the field on
+// the underlying `T`. Without the unwrap, the field-resolution path would
+// fail to find the field on the SharedRef wrapper.
+func TestT0381_ChainedBorrowFieldAccess(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt { int x; }
+		main() {
+			a := Arc[Pt](Pt(x: 7));
+			x := a.borrow.x;
+		}
+	`)
+	// The Arc[Pt] type and its drop should appear; sema/codegen lowering
+	// of `.borrow.x` would fail without the SharedRef unwrap in genMemberExpr
+	// because the field 'x' is not present on the SharedRef wrapper itself.
+	assertContains(t, ir, "Arc[Pt].drop")
+}
+
+// T0381: a `T&`-typed local that is later reassigned to an owned `T`
+// must register its drop binding using the underlying owned type — the
+// SharedRef strip in maybeRegisterDrop ensures the proper drop function
+// is dispatched (e.g., per-element drops for `string[]`).
+func TestT0381_BorrowLocalReassignedToOwnedDrops(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := string[]();
+			v.push("hello");
+			a := Arc[string[]](v);
+			string[]& borrowed = a.borrow;
+			borrowed = string[]();
+			borrowed.push("owned");
+		}
+	`)
+	// The reassignment makes `borrowed` an owned vector; on scope exit
+	// we should see a call into Vector.drop (proves maybeRegisterDrop
+	// saw past the SharedRef and registered an owned-vector drop).
+	assertContains(t, ir, "call void @Vector.drop")
+}
+
 // T0156/T0285/T0291: MutexGuard close/drop functions do scheduler-aware unlock and free.
 func TestMutexGuardCloseUnlocksAndFrees(t *testing.T) {
 	ir := generateIR(t, `

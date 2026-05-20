@@ -14506,3 +14506,123 @@ func TestTupleVecGenericElementOK(t *testing.T) {
 		}
 	`)
 }
+
+// T0381: array literal containing a `T&` element strips the borrow ref so
+// the literal types as `T[]` rather than an unassignable `T&[]`. This is
+// the stripRef(elemType) call site in checkArrayLit.
+func TestT0381_ArrayLitStripsBorrowRef(t *testing.T) {
+	// Sema accepts `[a.borrow]` as `string[]` (the move-out is rejected by
+	// ownership in a separate pass — see ownership tests). Without the
+	// stripRef call, sema would either reject as an inferred element type
+	// of `string&` or fail subsequent .push/index operations.
+	checkOK(t, `
+		test() {
+			a := Arc[string]("hi");
+			x := [a.borrow];
+			_ = x.len;
+		}
+	`)
+}
+
+// T0381: array literal where a later element has a borrow type is also
+// stripped via stripRef on the element side.
+func TestT0381_ArrayLitStripsLaterElementRef(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[string]("hi");
+			b := Arc[string]("bye");
+			x := ["first", a.borrow, b.borrow];
+			_ = x.len;
+		}
+	`)
+}
+
+// T0381: if-expression with one borrow arm and one owned arm joins to the
+// owned form via joinBranchTypes — the result type is `T`, not `T&`.
+// Verifying via the no-error sema path: assigning the result to an owned
+// `T` local must succeed even though one arm produces `T&`.
+func TestT0381_IfMixedRefOwnedJoinsToOwned(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[string]("hi");
+			cond := true;
+			string x = if cond {
+				a.borrow
+			} else {
+				"other"
+			};
+			_ = x.len;
+		}
+	`)
+}
+
+// T0381: if-expression where the else arm is the borrow and then is owned —
+// exercises the `bIsRef && !aIsRef` direction of joinBranchTypes (the path
+// that returns `a` as-is, no stripping needed since `a` is already owned).
+func TestT0381_IfOwnedThenBorrowElseJoinsToOwned(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[string]("hi");
+			cond := true;
+			string x = if cond {
+				"other"
+			} else {
+				a.borrow
+			};
+			_ = x.len;
+		}
+	`)
+}
+
+// T0381: match-expression with mixed ref/owned arms — joinBranchTypes
+// reaches the unification path through checkMatchExpr's recursive call.
+func TestT0381_MatchMixedRefOwnedJoinsToOwned(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[string]("hi");
+			k := 1;
+			string x = match k {
+				1 => a.borrow,
+				_ => "other",
+			};
+			_ = x.len;
+		}
+	`)
+}
+
+// T0381: equality operator on `T&` unwraps to underlying `T` and
+// dispatches the normal int.equal(int) operator. Without the SharedRef
+// unwrap in checkOperator, sema would not find `equal` on `int&`.
+func TestT0381_BinaryOpOnSharedRefUnwraps(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[int](42);
+			b := a.borrow == 42;
+			_ = b;
+		}
+	`)
+}
+
+// T0381: arithmetic operator on `T&` (not just equality) — exercises
+// the same unwrap path with a different operator and operand order.
+func TestT0381_ArithmeticOpOnSharedRefUnwraps(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[int](10);
+			x := a.borrow + 5;
+			_ = x;
+		}
+	`)
+}
+
+// T0381: unary minus operator on `T&` — exercises the SharedRef unwrap
+// branch of checkUnaryOperator.
+func TestT0381_UnaryOpOnSharedRefUnwraps(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[int](42);
+			x := -a.borrow;
+			_ = x;
+		}
+	`)
+}

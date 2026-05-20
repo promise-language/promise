@@ -2622,6 +2622,16 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	if c.selfSubst != nil {
 		targetType = types.SubstituteSelf(targetType, c.selfSubst.iface, c.selfSubst.concrete)
 	}
+	// T0381: unwrap SharedRef/MutRef so member dispatch sees the underlying
+	// type. The runtime representation is identical (same pointer / value
+	// struct), so all the type-based getter/method lookups below operate on
+	// the owned form.
+	if sr, ok := targetType.(*types.SharedRef); ok {
+		targetType = sr.Elem()
+	}
+	if mr, ok := targetType.(*types.MutRef); ok {
+		targetType = mr.Elem()
+	}
 
 	// Container .len property (string, vector, fixed array)
 	// Check both Instance wrappers (user code: Vector[int]) and bare Named (method body: this is TypVector)

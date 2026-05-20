@@ -181,76 +181,26 @@ func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
 	return false
 }
 
-// isBorrowGetterExpr returns true if expr is the `.borrow` getter on Arc[T] or
-// MutexGuard[T]. These getters return a non-owning reference to the inner T;
-// assigning the result to a variable must NOT register an active drop binding,
-// otherwise both the borrow and the parent's drop free the same inner value.
-// T0367. T0377 extends recognition through if/match expressions whose every arm
-// produces a borrow getter — mixed-ownership branches are intentionally left
-// unhandled (a single dropflag cannot represent ownership that varies by arm).
-func (c *Compiler) isBorrowGetterExpr(expr ast.Expr) bool {
-	switch e := expr.(type) {
-	case *ast.MemberExpr:
-		if e.Field != "borrow" {
-			return false
-		}
-		targetType := c.info.Types[e.Target]
-		if c.typeSubst != nil {
-			targetType = types.Substitute(targetType, c.typeSubst)
-		}
-		if _, ok := types.AsArc(targetType); ok {
-			return true
-		}
-		if _, ok := types.AsMutexGuard(targetType); ok {
-			return true
-		}
-		if n := extractNamed(targetType); n == types.TypArc || n == types.TypMutexGuard {
-			return true
-		}
-		return false
-	case *ast.IfExpr:
-		if e.Else == nil {
-			return false
-		}
-		return c.blockResultIsBorrowGetter(e.Then) && c.blockResultIsBorrowGetter(e.Else)
-	case *ast.MatchExpr:
-		if len(e.Arms) == 0 {
-			return false
-		}
-		for _, arm := range e.Arms {
-			if !c.matchArmIsBorrowGetter(arm) {
-				return false
-			}
-		}
+// isBorrowedExpr returns true if the expression's static type is `T&` or `T~`.
+// Such expressions produce non-owning references (e.g., Arc.borrow,
+// MutexGuard.borrow); assigning the result to a variable must NOT register an
+// active drop binding, otherwise both the borrow and the parent's drop free
+// the same inner value.
+//
+// Replaces the AST-shape heuristic from T0367/T0377/T0379. Sema propagates
+// SharedRef/MutRef through if/match/paren composition, so the type check
+// uniformly subsumes those cases (and extends to any future borrow-returning
+// getter without enumerating expression shapes).
+func (c *Compiler) isBorrowedExpr(expr ast.Expr) bool {
+	typ := c.info.Types[expr]
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	switch typ.(type) {
+	case *types.SharedRef, *types.MutRef:
 		return true
-	case *ast.ParenExpr:
-		return c.isBorrowGetterExpr(e.Expr)
 	}
 	return false
-}
-
-// blockResultIsBorrowGetter inspects the block's final expression statement —
-// only the result expression determines borrow-ness; intermediate statements
-// are irrelevant.
-func (c *Compiler) blockResultIsBorrowGetter(block *ast.Block) bool {
-	if block == nil || len(block.Stmts) == 0 {
-		return false
-	}
-	last := block.Stmts[len(block.Stmts)-1]
-	es, ok := last.(*ast.ExprStmt)
-	if !ok {
-		return false
-	}
-	return c.isBorrowGetterExpr(es.Expr)
-}
-
-// matchArmIsBorrowGetter handles either expression-bodied (`=> expr`) or
-// block-bodied (`=> { ... }`) match arms.
-func (c *Compiler) matchArmIsBorrowGetter(arm *ast.MatchArm) bool {
-	if arm.Body != nil {
-		return c.isBorrowGetterExpr(arm.Body)
-	}
-	return c.blockResultIsBorrowGetter(arm.Block)
 }
 
 // isStringBorrowExpr returns true if the expression borrows an existing value
@@ -939,9 +889,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			}
 		}
 	}
-	// T0367: .borrow on Arc/MutexGuard returns a non-owning reference. Clear the
-	// drop flag so scope cleanup doesn't double-free with the parent's drop.
-	if c.isBorrowGetterExpr(s.Value) {
+	// T0367/T0381: when the RHS expression's static type is `T&`/`T~`, it
+	// is a non-owning reference. Clear the drop flag so scope cleanup
+	// doesn't double-free with the owner's drop.
+	if c.isBorrowedExpr(s.Value) {
 		c.clearDropFlag(s.Name)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, dropType)
@@ -1104,9 +1055,10 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 			}
 		}
 	}
-	// T0367: .borrow on Arc/MutexGuard returns a non-owning reference. Clear the
-	// drop flag so scope cleanup doesn't double-free with the parent's drop.
-	if c.isBorrowGetterExpr(s.Value) {
+	// T0367/T0381: when the RHS expression's static type is `T&`/`T~`, it
+	// is a non-owning reference. Clear the drop flag so scope cleanup
+	// doesn't double-free with the owner's drop.
+	if c.isBorrowedExpr(s.Value) {
 		c.clearDropFlag(s.Name)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ)
@@ -1523,6 +1475,19 @@ func extractAliasPtr(c *Compiler, v value.Value) value.Value {
 // the drop function, and appends a scopeBinding.
 // Strings are special: they use promise_string_drop (checks literal flag before freeing).
 func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ types.Type) {
+	// T0381: A ref-typed local (`T&`/`T~`) starts life borrowing from the
+	// owner — drop is cleared at the assignment site. But the same local
+	// can later be reassigned to an owned `T` (decay rule), at which point
+	// it owns the new value and must drop on scope exit. Register the
+	// binding using the underlying owned type so the drop machinery emits
+	// a proper drop (e.g., per-element string drops for `string[]`) when
+	// the runtime dropflag is true.
+	if sr, ok := typ.(*types.SharedRef); ok {
+		typ = sr.Elem()
+	}
+	if mr, ok := typ.(*types.MutRef); ok {
+		typ = mr.Elem()
+	}
 	// T0102: Enum drop — check before extractNamed since enums are *types.Enum, not *types.Named.
 	if enum := extractEnum(typ); enum != nil {
 		if enum.HasDrop() {
@@ -4655,11 +4620,12 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
-			// T0379: When RHS is .borrow on Arc/MutexGuard, override the unconditional
-			// re-arm above. The borrow returns a non-owning reference; the parent
-			// Arc/Mutex retains ownership of the inner value. Without this, both the
-			// reassigned local's drop and the parent's drop free the same inner value.
-			if c.isBorrowGetterExpr(s.Value) {
+			// T0379/T0381: when RHS static type is `T&`/`T~`, override the
+			// unconditional re-arm above. The borrow returns a non-owning
+			// reference; the owner retains the value. Without this, both
+			// the reassigned local's drop and the owner's drop free the same
+			// inner value.
+			if c.isBorrowedExpr(s.Value) {
 				c.clearDropFlag(target.Name)
 			}
 			// T0073: Claim string temp — ownership transferred to this variable.

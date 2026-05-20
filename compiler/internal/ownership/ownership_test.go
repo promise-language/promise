@@ -3559,3 +3559,118 @@ func TestT0338_VectorLitBorrowedParam(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
+
+// === T0349: extend tryMoveConsume to raise/yield/yield-from/select-send ===
+
+// raise consumes the value into the caller's error slot — the outer caller
+// owns and drops it. Same double-free pattern as T0338 if the raised value
+// is a borrowed param.
+func TestT0349_RaiseBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		type MyError is error {
+			string field;
+			new(~this, ~string message, ~string field) {
+				this.message = message;
+				this.field = field;
+			}
+		}
+		forward!(MyError e) {
+			raise e;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'e'")
+}
+
+// Owned local raised — fine, the local is consumed in place of being dropped.
+func TestT0349_RaiseOwnedLocalOK(t *testing.T) {
+	ownerOK(t, `
+		type MyError is error {
+			string field;
+			new(~this, ~string message, ~string field) {
+				this.message = message;
+				this.field = field;
+			}
+		}
+		forward!() {
+			MyError e = MyError(message: "boom", field: "x");
+			raise e;
+		}
+		test() {}
+	`)
+}
+
+// yield value goes to the generator's yield slot; consumer owns and drops it.
+// Yielding a borrowed param is a double-free.
+func TestT0349_YieldBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; new(~this, ~string s) { this.s = s; } }
+		gen(Box b) stream[Box] {
+			yield b;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'b'")
+}
+
+// Yielding an owned local works.
+func TestT0349_YieldOwnedLocalOK(t *testing.T) {
+	ownerOK(t, `
+		type Box { string s; new(~this, ~string s) { this.s = s; } }
+		gen() stream[Box] {
+			Box b = Box(s: "hi");
+			yield b;
+		}
+		test() {}
+	`)
+}
+
+// `yield* g` consumes the inner generator (iterates to exhaustion, then drops).
+// Yielding a borrowed-param generator is a double-free.
+func TestT0349_YieldDelegateBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		outer(stream[int] s) stream[int] {
+			yield* s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// select-case channel send transfers ownership to the receiver — borrowed
+// param sent in a select case is a double-free.
+func TestT0349_SelectSendBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		send_via_select(channel[string] ch, string s) {
+			select {
+				ch.send(s):
+				default:
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Direct ch.send(s) call routes through Channel.send(~T) → tryMoveConsume on
+// the arg branch. Borrowed param fails the consume check.
+func TestT0349_DirectChannelSendBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		send_direct(channel[string] ch, string s) {
+			ch.send(s);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Direct ch.send of an owned local works.
+func TestT0349_DirectChannelSendOwnedLocalOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			channel[string] ch = channel[string]();
+			string s = "hi";
+			ch.send(s);
+		}
+	`)
+}

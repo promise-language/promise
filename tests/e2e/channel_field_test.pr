@@ -33,7 +33,7 @@ type GenericChan[T] {
     this._ch = channel[T](capacity: capacity);
   }
 
-  emit(~this, T value) {
+  emit(~this, ~T value) {
     this._ch.send(value);
   }
 

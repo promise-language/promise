@@ -72,7 +72,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 
 	case *ast.RaiseStmt:
 		c.checkExpr(s.Value)
-		c.tryMove(s.Value)
+		c.tryMoveConsume(s.Value)
 
 	case *ast.ExprStmt:
 		c.checkExpr(s.Expr)
@@ -97,11 +97,11 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 
 	case *ast.YieldStmt:
 		c.checkExpr(s.Value)
-		c.tryMove(s.Value)
+		c.tryMoveConsume(s.Value)
 
 	case *ast.YieldDelegateStmt:
 		c.checkExpr(s.Value)
-		c.tryMove(s.Value)
+		c.tryMoveConsume(s.Value)
 
 	case *ast.IncDecStmt:
 		c.checkExpr(s.Target)
@@ -517,7 +517,7 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 		c.checkExpr(sc.Channel)
 		if sc.IsSend && sc.SendValue != nil {
 			c.checkExpr(sc.SendValue)
-			c.tryMove(sc.SendValue)
+			c.tryMoveConsume(sc.SendValue)
 		}
 		// Expire call-scoped borrows from channel/send expressions so the case
 		// body can re-borrow the same variables (B0103).

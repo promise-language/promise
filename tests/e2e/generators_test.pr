@@ -255,7 +255,7 @@ test_yield_delegate_array() `test {
 }
 
 // yield* from vector
-vector_delegate(int[] items) stream[int] {
+vector_delegate(~int[] items) stream[int] {
   yield * items;
 }
 
@@ -269,7 +269,7 @@ test_yield_delegate_vector() `test {
 }
 
 // yield* from string (yields chars)
-char_delegate(string s) stream[char] {
+char_delegate(~string s) stream[char] {
   yield * s;
 }
 

@@ -87,3 +87,55 @@ test_return_from_vector_scope() `test {
   string result = _first_part("hello,world");
   assert(result == "hello", "returned first part");
 }
+
+// T0364 regression: vector literal with heap (concat-result) element.
+// Without T0366's claimStringTemp in genArrayLit, the concat temp would be
+// freed at end-of-statement while the vector slot still points at it,
+// causing UAF on the subsequent read.
+test_literal_concat_elem_read() `test {
+  string[] vec = ["hello " + "first "];
+  assert(vec[0] == "hello first ", "concat element read");
+}
+
+// T0364: function-call result as literal element exercises the same path.
+_concat_string() string {
+  return "alpha" + "/" + "beta";
+}
+test_literal_call_elem_read() `test {
+  string[] vec = [_concat_string()];
+  assert(vec[0] == "alpha/beta", "call-result element read");
+}
+
+// T0364: mix of literal and heap elements — every slot must outlive the
+// statement and stay readable. Multi-element form catches per-slot regressions.
+test_literal_mixed_concat_and_literal() `test {
+  string[] vec = ["raw", "x" + "y", _concat_string(), "z"];
+  assert(vec.len == 4, "len");
+  assert(vec[0] == "raw", "literal slot 0");
+  assert(vec[1] == "xy", "concat slot 1");
+  assert(vec[2] == "alpha/beta", "call slot 2");
+  assert(vec[3] == "z", "literal slot 3");
+}
+
+// T0364: same fix line (claimStringTemp at expr.go:6674) also covers Vector
+// stmt-temps. Without it, vector-of-vectors with a call-result inner element
+// would double-free: the stmt-temp cleanup runs Vector.drop on the inner
+// vector while the outer literal's slot still owns it. Inner-string elements
+// make the regression visible — without the fix, scribbled freed memory
+// makes the read crash. The variadic case is covered by t0331_variadic_temps;
+// this is the explicit literal shape.
+_make_str_inner() string[] {
+  string[] v = string[]();
+  v.push("alpha");
+  v.push("beta");
+  return v;
+}
+test_literal_with_vector_call_element() `test {
+  string[][] vv = [_make_str_inner(), _make_str_inner()];
+  assert(vv.len == 2, "outer len");
+  assert(vv[0].len == 2, "inner 0 len");
+  assert(vv[0][0] == "alpha", "[0][0]");
+  assert(vv[0][1] == "beta", "[0][1]");
+  assert(vv[1][0] == "alpha", "[1][0]");
+  assert(vv[1][1] == "beta", "[1][1]");
+}

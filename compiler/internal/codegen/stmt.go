@@ -2726,6 +2726,11 @@ func (c *Compiler) dropDiscardedHeapType(expr ast.Expr, result value.Value) {
 		return
 	}
 
+	// T0346: Claim any existing heap temp tracking this allocation (e.g.,
+	// genConstructorCallMono's palFree track at expr.go:1903) so cleanupHeapTemps
+	// doesn't double-free what we're about to free explicitly.
+	c.claimHeapTemp(result)
+
 	instance := c.extractInstancePtr(result)
 	nullCheck := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
 	freeBlock := c.newBlock("discard.heap.free")

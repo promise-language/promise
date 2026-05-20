@@ -425,3 +425,32 @@ t0341_method_on_field_plain_arg() `test {
   o := T341FieldOwner(factory: T341Factory(x: 1));
   t0341_len_check_holder(o.factory.produce(), 0);
 }
+
+// =========================================================================
+// T0346: A constructor expression used as a standalone discard statement
+// (no LHS, no enclosing call) must free its allocation exactly once.
+// Previously, two cleanup paths fired on the same allocation (the
+// genConstructorCallMono heap-temp's palFree at statement end AND
+// dropDiscardedHeapType's explicit free), causing a double-free segfault.
+// Fix: dropDiscardedHeapType claims the constructor's heap temp before
+// emitting its own free, so cleanupHeapTemps skips the now-claimed temp.
+// =========================================================================
+
+type T0346Holder {
+  int x;
+}
+
+t0346_user_heap_discard() `test {
+  T0346Holder(x: 5);
+  assert(true, "no segfault");
+}
+
+t0346_map_discard() `test {
+  map[string, int]();
+  assert(true, "no segfault");
+}
+
+t0346_set_discard() `test {
+  Set[int]();
+  assert(true, "no segfault");
+}

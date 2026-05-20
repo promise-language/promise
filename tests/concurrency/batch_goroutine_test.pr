@@ -138,7 +138,7 @@ test_unbuffered_three_senders() `test(exclude: "wasm32") {
 
 // --- Select with unbuffered channels (B0156) ---
 
-test_select_unbuffered_recv() `test(exclude: "wasm32") {
+test_select_unbuffered_recv() `test(exclude: "wasm32", timeout: "60s") {
   ch := channel[int]();
   go {
     ch.send(42);

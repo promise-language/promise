@@ -722,9 +722,16 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			c.dupContainerFieldAccess = true
 		}
 	}
+	// T0370: Set dup flag for droppable tuple types so genVectorIndex deep-clones
+	// tuple elements on read. Without this, `t := v[0]` aliases v's element data
+	// and bindingDropTuple would double-free with v's element walk.
+	if _, isTup := resolvedExprType.(*types.Tuple); isTup && c.tupleNeedsDrop(resolvedExprType) {
+		c.dupTupleFieldAccess = true
+	}
 	val := c.genExpr(s.Value)
 	c.dupStringFieldAccess = false
 	c.dupContainerFieldAccess = false
+	c.dupTupleFieldAccess = false
 	c.targetType = nil
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
@@ -961,9 +968,16 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if (types.IsVector(typ) || types.IsChannel(typ) || types.IsArc(typ) || types.IsWeak(typ)) && !isRefType(typ) {
 		c.dupContainerFieldAccess = true
 	}
+	// T0370: Set dup flag for droppable tuple types so genVectorIndex deep-clones
+	// tuple elements on read. Without this, `t := v[0]` aliases v's element data
+	// and bindingDropTuple would double-free with v's element walk.
+	if _, isTup := typ.(*types.Tuple); isTup && c.tupleNeedsDrop(typ) {
+		c.dupTupleFieldAccess = true
+	}
 	val := c.genExpr(s.Value)
 	c.dupStringFieldAccess = false
 	c.dupContainerFieldAccess = false
+	c.dupTupleFieldAccess = false
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
 	if c.info.AutoPropagateExprs[s.Value] {
@@ -3476,6 +3490,40 @@ func (c *Compiler) tupleNeedsDrop(elemType types.Type) bool {
 		}
 	}
 	return false
+}
+
+// dupTupleValue creates a deep copy of a tuple value by dup'ing each droppable
+// field (strings, vectors, channels, nested tuples, heap user types, enums).
+// Non-droppable fields (primitives, value types) are copied by struct value.
+// Used when reading a tuple from a container (`t := v[0]`) so the result is
+// independently owned and can be safely dropped without affecting the
+// container's element. Symmetric with the Vector[string] dup-on-read pattern
+// (B0204) and the Vector[user heap type] cloneHeapElement pattern (B0275).
+// T0370.
+func (c *Compiler) dupTupleValue(tupVal value.Value, tup *types.Tuple) value.Value {
+	result := tupVal
+	for i, fieldType := range tup.Elems() {
+		resolved := fieldType
+		if c.typeSubst != nil {
+			resolved = types.Substitute(resolved, c.typeSubst)
+		}
+		elemVal := c.block.NewExtractValue(result, uint64(i))
+		var dupped value.Value
+		if innerTup, isTup := resolved.(*types.Tuple); isTup {
+			if c.tupleNeedsDrop(resolved) {
+				dupped = c.dupTupleValue(elemVal, innerTup)
+			}
+		} else if extractNamed(resolved) == types.TypString && !isRefType(resolved) {
+			dupped = c.dupString(elemVal)
+		} else {
+			// Vectors, channels, heap user types, droppable enums: delegate.
+			dupped = c.maybeDupPushElement(elemVal, resolved)
+		}
+		if dupped != nil {
+			result = c.block.NewInsertValue(result, dupped, uint64(i))
+		}
+	}
+	return result
 }
 
 // emitFreeCall emits a conditional pal_free call for a heap-allocated user type

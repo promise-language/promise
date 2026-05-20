@@ -165,6 +165,7 @@ type Compiler struct {
 	tempTrackingEnabled     bool                // T0084: true in free functions + user method bodies
 	dupStringFieldAccess    bool                // T0095: when true, genFieldAccess dups string fields from droppable types
 	dupContainerFieldAccess bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
+	dupTupleFieldAccess     bool                // T0370: when true, genVectorIndex dups droppable tuple elements on read
 	optionalStringDup       value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
 	optionalContainerDup    value.Value         // T0366: pending dup from Optional[Vector|Channel|Arc|Weak] field-read path
 	optionalFieldString     bool                // B0190: set by genFieldAccess when loading a string? field from a droppable type

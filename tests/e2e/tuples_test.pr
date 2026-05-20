@@ -448,3 +448,172 @@ make_then_drop_t0371[T](~T x, ~T y) {
 test_t0371_generic_fn_tuple_local() `test {
   make_then_drop_t0371[string]("a" + "b", "c" + "d");
 }
+
+// T0370: heap string in tuple-element vector survives multiple reads.
+// Without dup-on-read, the first read aliases v's element data; the
+// destructure binding then drops the heap string, leaving v's element
+// pointing into freed memory. The second v[0] read would segfault.
+test_t0370_heap_string_repeated_read() `test {
+  v := (string, int)[]();
+  v.push(("first".to_string(), 100));
+  v.push(("second".to_string(), 200));
+  t := v[0];
+  (s, n) := t;
+  assert(s == "first", "first read string");
+  assert(n == 100, "first read int");
+  t0 := v[0];
+  (s0, n0) := t0;
+  assert(s0 == "first", "second read string");
+  assert(n0 == 100, "second read int");
+}
+
+// T0370: tuple with two heap-string elements — both fields need dup.
+test_t0370_two_heap_strings() `test {
+  v := (string, string)[]();
+  v.push(("a" + "b", "c" + "d"));
+  t := v[0];
+  (s1, s2) := t;
+  assert(s1 == "ab", "s1");
+  assert(s2 == "cd", "s2");
+}
+
+// T0370: tuple with vector element — vector field also needs dup.
+test_t0370_tuple_with_vector_elem() `test {
+  v := (string, int[])[]();
+  vec := int[]();
+  vec.push(1);
+  vec.push(2);
+  v.push(("hello".to_string(), vec));
+  t := v[0];
+  (s, ints) := t;
+  assert(s == "hello", "string");
+  assert(ints.len == 2, "vec len");
+}
+
+// T0370: nested tuple in vector — inner tuple's heap fields need recursive dup.
+test_t0370_nested_tuple_vec() `test {
+  v := ((string, int), int)[]();
+  v.push((("first".to_string(), 1), 10));
+  t := v[0];
+  (inner, outer) := t;
+  (s, n) := inner;
+  assert(s == "first", "nested string");
+  assert(n == 1, "nested int");
+  assert(outer == 10, "outer");
+}
+
+// T0370: function returning a tuple-vec, then reading multiple elements.
+make_pairs_t0370()(string, int)[] {
+  v := (string, int)[]();
+  v.push(("x".to_string(), 1));
+  v.push(("y".to_string(), 2));
+  return v;
+}
+
+test_t0370_returned_tuple_vec_reread() `test {
+  v := make_pairs_t0370();
+  t := v[0];
+  (s, n) := t;
+  assert(s == "x", "first");
+  assert(n == 1, "first int");
+  t1 := v[1];
+  (s1, n1) := t1;
+  assert(s1 == "y", "second");
+  assert(n1 == 2, "second int");
+}
+
+// T0370: typed var decl path — `(string, int) t = v[0];` (vs the inferred `:=`).
+// genTypedVarDecl sets dupTupleFieldAccess just like genInferredVarDecl.
+test_t0370_typed_var_decl() `test {
+  v := (string, int)[]();
+  v.push(("a" + "b", 1));
+  (string, int) t = v[0];
+  (s, n) := t;
+  assert(s == "ab", "first");
+  assert(n == 1, "first int");
+  (string, int) t2 = v[0];
+  (s2, n2) := t2;
+  assert(s2 == "ab", "second");
+  assert(n2 == 1, "second int");
+}
+
+// T0370: tuple with channel field in vector — dupTupleValue delegates to
+// maybeDupPushElement which dups channel via dupChannel (refcount inc).
+test_t0370_tuple_with_channel_vec() `test {
+  v := (string, channel[int])[]();
+  ch := channel[int](capacity: 4);
+  v.push(("hello".to_string(), ch));
+  t := v[0];
+  (s, c) := t;
+  c.send(42);
+  assert(s == "hello", "string");
+}
+
+// T0370: tuple with droppable enum field in vector — dupTupleValue delegates
+// to maybeDupPushElement which dups enum via cloneEnumValue / dupEnumElementInPlace.
+enum _T0370EnumTag {
+  _T0370Plain,
+  _T0370Tagged(string label),
+}
+
+test_t0370_tuple_with_enum_vec() `test {
+  v := (int, _T0370EnumTag)[]();
+  v.push((1, _T0370EnumTag._T0370Tagged(label: "x" + "y")));
+  t := v[0];
+  (i, c) := t;
+  match c {
+    _T0370Plain => assert(false, "should be tagged"),
+    _T0370Tagged(s) => assert(s == "xy", "label"),
+  };
+  assert(i == 1, "i");
+}
+
+// T0370: tuple with heap user-type field in vector — dupTupleValue delegates
+// to maybeDupPushElement which dups via cloneHeapElement (memcpy + sub-field dup).
+type _T0370Box {
+  string label;
+  drop(~this) {
+  }
+}
+
+test_t0370_tuple_with_heap_user_vec() `test {
+  v := (int, _T0370Box)[]();
+  v.push((1, _T0370Box(label: "a" + "b")));
+  t := v[0];
+  (i, b) := t;
+  assert(i == 1, "i");
+  assert(b.label == "ab", "box label");
+}
+
+// T0370: generic function reading tuple from vector — exercises typeSubst != nil
+// branch in dupTupleValue so the substituted concrete element type is used.
+read_first_t0370[T](~(string, T)[] v) string {
+  t := v[0];
+  (s, _) := t;
+  return s;
+}
+
+test_t0370_generic_read_from_tuple_vec() `test {
+  v := (string, int)[]();
+  v.push(("a" + "b", 99));
+  s := read_first_t0370[int](v);
+  assert(s == "ab", "generic read");
+}
+
+// T0370: for-in over tuple-vec borrow path is unaffected by the fix —
+// dupTupleFieldAccess flag is not set in that path so no duplicate dup happens.
+// Regression guard.
+test_t0370_for_in_no_regression() `test {
+  v := (string, int)[]();
+  v.push(("a" + "b", 1));
+  v.push(("c" + "d", 2));
+  int total = 0;
+  string concat = "";
+  for tup in v {
+    (s, n) := tup;
+    concat += s;
+    total += n;
+  }
+  assert(total == 3, "total");
+  assert(concat == "abcd", "concat");
+}

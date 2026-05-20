@@ -7270,6 +7270,17 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 		return dup
 	}
 
+	// T0370: Dup-on-read for Vector[(droppable, ...)] index access. Without this,
+	// `t := v[0]` aliases v's element data — t's bindingDropTuple and v's element
+	// walk would both drop the same heap allocations. Symmetric with the string
+	// branch above (B0204).
+	if c.dupTupleFieldAccess && c.tempTrackingEnabled {
+		if tup, ok := elemType.(*types.Tuple); ok && c.tupleNeedsDrop(elemType) {
+			c.dupTupleFieldAccess = false // consume the flag
+			return c.dupTupleValue(val, tup)
+		}
+	}
+
 	return val
 }
 

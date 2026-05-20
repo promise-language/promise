@@ -689,3 +689,232 @@ t0345_failable_ctor_plain_arg_failure() `test {
   };
   assert(caught == 1, "err propagated, instance dropped without crash");
 }
+
+// =========================================================================
+// T0343: Heap user type results from ErrorPanicExpr (?!), OptionalUnwrapExpr
+// (!), ErrorPropagateExpr (?^), and ErrorHandlerExpr (? e {}) must be dropped
+// at statement end when discarded or passed as plain (non-`~`) args.
+// Previously, only the i8* (string) branch tracked the result; value-struct
+// heap user types fell through with no tracking, leaking 2 allocations
+// (instance + transitive heap field).
+// =========================================================================
+
+type T0343Holder {
+  int[] data;
+}
+
+t0343_make_failable!() T0343Holder {
+  return T0343Holder(data: int[]());
+}
+
+t0343_make_optional() T0343Holder? {
+  return T0343Holder(data: int[]());
+}
+
+t0343_check_holder(T0343Holder h) {
+  assert(h.data.len == 0, "holder data.len");
+}
+
+// ?! (ErrorPanicExpr) discard / plain-arg
+t0343_panic_discard() `test {
+  t0343_make_failable()?!;
+}
+
+t0343_panic_plain_arg() `test {
+  t0343_check_holder(t0343_make_failable()?!);
+}
+
+// ! (OptionalUnwrapExpr) discard / plain-arg
+t0343_optional_discard() `test {
+  t0343_make_optional()!;
+}
+
+t0343_optional_plain_arg() `test {
+  t0343_check_holder(t0343_make_optional()!);
+}
+
+// ?^ (ErrorPropagateExpr) discard / plain-arg, in a failable wrapper
+t0343_propagate_discard_inner!() {
+  t0343_make_failable()?^;
+}
+
+t0343_propagate_discard() `test {
+  t0343_propagate_discard_inner()?!;
+}
+
+t0343_propagate_plain_arg_inner!() {
+  t0343_check_holder(t0343_make_failable()?^);
+}
+
+t0343_propagate_plain_arg() `test {
+  t0343_propagate_plain_arg_inner()?!;
+}
+
+// ? e { } (ErrorHandlerExpr) discard / plain-arg
+t0343_handler_discard() `test {
+  t0343_make_failable()? e {
+    return;
+  };
+}
+
+t0343_handler_plain_arg() `test {
+  t0343_check_holder(t0343_make_failable()? e {
+    return;
+  });
+}
+
+// Method on a local returning failable heap user type — exercises the
+// receiver-alias check after peeling the ?! through findInnerCallExpr.
+type T0343Factory {
+  int x;
+  produce!() T0343Holder {
+    return T0343Holder(data: int[]());
+  }
+}
+
+t0343_method_failable_discard() `test {
+  f := T0343Factory(x: 1);
+  f.produce()?!;
+}
+
+t0343_method_failable_plain_arg() `test {
+  f := T0343Factory(x: 1);
+  t0343_check_holder(f.produce()?!);
+}
+
+// Optional bound to a local then unwrapped — must NOT be tracked, otherwise
+// the optional's drop binding and the unwrap tracker would double-free.
+t0343_optional_ident_unwrap() `test {
+  o := t0343_make_optional();
+  h := o!;
+  assert(h.data.len == 0, "ident-source unwrap");
+}
+
+// =========================================================================
+// T0343 coverage gaps — additional cases for the unwrap/propagate/handler
+// receiver-alias paths and findInnerCallExpr's ParenExpr peel.
+// =========================================================================
+
+type T0343FactoryAll {
+  int x;
+  produce_failable!() T0343Holder {
+    return T0343Holder(data: int[]());
+  }
+  produce_optional() T0343Holder? {
+    return T0343Holder(data: int[]());
+  }
+}
+
+// Method-on-local with ! (optional) — exercises receiver-alias peel through
+// OptionalUnwrapExpr in findInnerCallExpr.
+t0343_method_optional_discard() `test {
+  f := T0343FactoryAll(x: 1);
+  f.produce_optional()!;
+}
+
+t0343_method_optional_plain_arg() `test {
+  f := T0343FactoryAll(x: 1);
+  t0343_check_holder(f.produce_optional()!);
+}
+
+// Method-on-local with ?^ — exercises receiver-alias peel through
+// ErrorPropagateExpr inside a failable wrapper.
+t0343_method_propagate_inner!() {
+  f := T0343FactoryAll(x: 1);
+  f.produce_failable()?^;
+}
+
+t0343_method_propagate_discard() `test {
+  t0343_method_propagate_inner()?!;
+}
+
+t0343_method_propagate_plain_arg_inner!() {
+  f := T0343FactoryAll(x: 1);
+  t0343_check_holder(f.produce_failable()?^);
+}
+
+t0343_method_propagate_plain_arg() `test {
+  t0343_method_propagate_plain_arg_inner()?!;
+}
+
+// Method-on-local with ? e {} — exercises receiver-alias peel through
+// ErrorHandlerExpr.
+t0343_method_handler_discard() `test {
+  f := T0343FactoryAll(x: 1);
+  f.produce_failable()? e {
+    return;
+  };
+}
+
+t0343_method_handler_plain_arg() `test {
+  f := T0343FactoryAll(x: 1);
+  t0343_check_holder(f.produce_failable()? e {
+    return;
+  });
+}
+
+// Map result through ?! — exercises trackHeapUserTypeResult on a non-user
+// heap type (Map is a heap-allocated generic but not a "container" per
+// isContainerType; it must still be tracked through the unwrap path).
+t0343_make_map_failable!() map[string, int] {
+  m := map[string, int]();
+  m["a"] = 1;
+  return m;
+}
+
+t0343_check_map(map[string, int] m) {
+  assert(m.len == 1, "map.len");
+}
+
+t0343_map_panic_discard() `test {
+  t0343_make_map_failable()?!;
+}
+
+t0343_map_panic_plain_arg() `test {
+  t0343_check_map(t0343_make_map_failable()?!);
+}
+
+// Set result through ! — same path with optional.
+t0343_make_set_optional() Set[int]? {
+  s := Set[int]();
+  s.add(42);
+  return s;
+}
+
+t0343_check_set(Set[int] s) {
+  assert(s.len == 1, "set.len");
+}
+
+t0343_set_optional_discard() `test {
+  t0343_make_set_optional()!;
+}
+
+t0343_set_optional_plain_arg() `test {
+  t0343_check_set(t0343_make_set_optional()!);
+}
+
+// Self-returning method through ?! — exercises claimHeapTemp pointer
+// comparison on the unwrap result aliasing the receiver. Failable variant
+// of T0341's t0341_self_returning_local_plain_arg.
+type T0343SelfAlias {
+  int[] data;
+  alias_failable!() T0343SelfAlias {
+    return this;
+  }
+}
+
+t0343_self_alias_failable_discard() `test {
+  s := T0343SelfAlias(data: int[]());
+  s.alias_failable()?!;
+  assert(s.data.len == 0, "s still owns data after alias_failable() ?!");
+}
+
+t0343_self_alias_failable_plain_arg(T0343SelfAlias x, int expected) {
+  assert(x.data.len == expected, "alias failable plain arg");
+}
+
+t0343_self_alias_failable_local_plain_arg() `test {
+  s := T0343SelfAlias(data: int[]());
+  t0343_self_alias_failable_plain_arg(s.alias_failable()?!, 0);
+  assert(s.data.len == 0, "s still owns data after alias_failable() ?! plain-arg");
+}

@@ -71,7 +71,7 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 				}
 			}
 		} else {
-			c.trackHeapUserTypeCallResult(e, result)
+			c.trackHeapUserTypeResult(e, result)
 		}
 		return result
 	case *ast.MemberExpr:
@@ -101,6 +101,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					c.trackStringTemp(result)
 				}
 			}
+		} else {
+			c.trackHeapUserTypeResult(e, result)
 		}
 		return result
 	case *ast.ErrorPanicExpr:
@@ -120,6 +122,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					c.trackStringTemp(result)
 				}
 			}
+		} else {
+			c.trackHeapUserTypeResult(e, result)
 		}
 		return result
 	case *ast.OptionalUnwrapExpr:
@@ -146,6 +150,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					}
 				}
 			}
+		} else {
+			c.trackHeapUserTypeResult(e, result)
 		}
 		return result
 	case *ast.ErrorHandlerExpr:
@@ -155,6 +161,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// If it's an i8* (string), it needs tracking for cleanup at statement end.
 		if result != nil && result.Type() == irtypes.I8Ptr {
 			c.trackStringTemp(result)
+		} else {
+			c.trackHeapUserTypeResult(e, result)
 		}
 		return result
 	case *ast.TupleLit:

@@ -3941,12 +3941,42 @@ func (c *Compiler) isTrackedStringCall(_ *ast.CallExpr) bool {
 	return true
 }
 
-// trackHeapUserTypeCallResult tracks a call result that is a heap-allocated
+// findInnerCallExpr peels through unwrap/propagate/parenthesis layers to find
+// the underlying CallExpr (used to derive the receiver for alias checks in
+// trackHeapUserTypeResult). Returns nil if the chain doesn't bottom out in a
+// call.
+func findInnerCallExpr(expr ast.Expr) *ast.CallExpr {
+	for {
+		switch e := expr.(type) {
+		case *ast.CallExpr:
+			return e
+		case *ast.ParenExpr:
+			expr = e.Expr
+		case *ast.ErrorPanicExpr:
+			expr = e.Expr
+		case *ast.ErrorPropagateExpr:
+			expr = e.Expr
+		case *ast.OptionalUnwrapExpr:
+			expr = e.Expr
+		case *ast.ErrorHandlerExpr:
+			expr = e.Expr
+		default:
+			return nil
+		}
+	}
+}
+
+// trackHeapUserTypeResult tracks an expression result that is a heap-allocated
 // user type (Map, Set, regular user-defined heap types) returned as a value
-// struct {i8*, i8*} (T0341). Constructor calls already track via
-// genConstructorCallMono (T0135) — skip them here to avoid double-tracking.
-// Strings, vectors, structural interfaces, value types, copy types, and
-// primitives have their own tracking paths and are skipped.
+// struct {i8*, i8*} (T0341, generalized in T0343). Used for direct CallExpr
+// results and for ErrorPanicExpr / ErrorPropagateExpr / OptionalUnwrapExpr /
+// ErrorHandlerExpr results, which all peel a failable/optional struct down to
+// the bare value struct.
+//
+// Constructor calls already track via genConstructorCallMono (T0135) — skip
+// them here to avoid double-tracking. Strings, vectors, structural interfaces,
+// value types, copy types, and primitives have their own tracking paths and
+// are skipped.
 //
 // Aliasing is handled via runtime pointer comparison:
 //   - claimHeapTemp(result) clears any existing heapTemp whose runtime pointer
@@ -3954,8 +3984,9 @@ func (c *Compiler) isTrackedStringCall(_ *ast.CallExpr) bool {
 //   - For method calls, an additional runtime check against the receiver's
 //     instance pointer clears the new temp's drop flag if the call result
 //     aliases a non-temp receiver (e.g., `c.iter()` where `c` is a local
-//     variable whose own scope binding will free the allocation).
-func (c *Compiler) trackHeapUserTypeCallResult(e *ast.CallExpr, result value.Value) {
+//     variable whose own scope binding will free the allocation). The receiver
+//     is found by peeling unwrap layers via findInnerCallExpr.
+func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	if result == nil || c.block == nil || c.block.Term != nil {
 		return
 	}
@@ -3966,16 +3997,28 @@ func (c *Compiler) trackHeapUserTypeCallResult(e *ast.CallExpr, result value.Val
 	if !ok || len(st.Fields) != 2 || st.Fields[0] != irtypes.I8Ptr || st.Fields[1] != irtypes.I8Ptr {
 		return
 	}
+	// B0287 / T0343: For optional unwrap on ident source, the optional's drop
+	// binding owns the inner allocation. Tracking would double-free at scope exit.
+	if opt, isOpt := expr.(*ast.OptionalUnwrapExpr); isOpt {
+		if _, isIdent := opt.Expr.(*ast.IdentExpr); isIdent {
+			return
+		}
+	}
 	// Skip constructor calls — those are tracked inside genConstructorCallMono.
-	calleeType := c.info.Types[e.Callee]
-	if c.typeSubst != nil && calleeType != nil {
-		calleeType = types.Substitute(calleeType, c.typeSubst)
+	// Only applies when the outermost expression is itself a CallExpr; the
+	// unwrap/propagate operators can't legally have a constructor as their
+	// inner expression (constructors don't return failable/optional types).
+	if call, isCall := expr.(*ast.CallExpr); isCall {
+		calleeType := c.info.Types[call.Callee]
+		if c.typeSubst != nil && calleeType != nil {
+			calleeType = types.Substitute(calleeType, c.typeSubst)
+		}
+		switch calleeType.(type) {
+		case *types.Named, *types.Instance:
+			return
+		}
 	}
-	switch calleeType.(type) {
-	case *types.Named, *types.Instance:
-		return
-	}
-	rt := c.info.Types[e]
+	rt := c.info.Types[expr]
 	if c.typeSubst != nil && rt != nil {
 		rt = types.Substitute(rt, c.typeSubst)
 	}
@@ -4001,7 +4044,9 @@ func (c *Compiler) trackHeapUserTypeCallResult(e *ast.CallExpr, result value.Val
 	beforeLen := len(c.heapTemps)
 	c.trackHeapTemp(instancePtr, dropFunc)
 	if len(c.heapTemps) > beforeLen {
-		c.emitReceiverAliasCheck(e, instancePtr, c.heapTemps[beforeLen].dropFlag)
+		if innerCall := findInnerCallExpr(expr); innerCall != nil {
+			c.emitReceiverAliasCheck(innerCall, instancePtr, c.heapTemps[beforeLen].dropFlag)
+		}
 	}
 }
 

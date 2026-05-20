@@ -617,3 +617,115 @@ test_t0370_for_in_no_regression() `test {
   assert(total == 3, "total");
   assert(concat == "abcd", "concat");
 }
+
+// T0399: v2.push(v[i]) for Vector[(string, int)] must deep-clone the tuple.
+// Without dup, both vectors alias the same heap-string pointers; when v drops
+// at the inner block end, v2's elements point into freed memory.
+test_t0399_push_indexed_heap_string() `test {
+  v2 := (string, int)[]();
+  {
+    v := (string, int)[]();
+    v.push(("a" + "b", 1));
+    v.push(("c" + "d", 2));
+    v2.push(v[0]);
+    v2.push(v[1]);
+  }
+  t := v2[0];
+  (s, n) := t;
+  assert(s == "ab", "v2[0] string survived");
+  assert(n == 1, "v2[0] int");
+  t1 := v2[1];
+  (s1, n1) := t1;
+  assert(s1 == "cd", "v2[1] string survived");
+  assert(n1 == 2, "v2[1] int");
+}
+
+// T0399: two heap-string fields.
+test_t0399_push_indexed_two_heap_strings() `test {
+  v2 := (string, string)[]();
+  {
+    v := (string, string)[]();
+    v.push(("a" + "b", "c" + "d"));
+    v2.push(v[0]);
+  }
+  t := v2[0];
+  (s1, s2) := t;
+  assert(s1 == "ab", "first");
+  assert(s2 == "cd", "second");
+}
+
+// T0399: vector field inside the tuple.
+test_t0399_push_indexed_tuple_with_vector() `test {
+  v2 := (string, int[])[]();
+  {
+    v := (string, int[])[]();
+    inner := int[]();
+    inner.push(10);
+    inner.push(20);
+    v.push(("hello".to_string(), inner));
+    v2.push(v[0]);
+  }
+  t := v2[0];
+  (s, ints) := t;
+  assert(s == "hello", "string");
+  assert(ints.len == 2, "vec len");
+  assert(ints[0] == 10, "vec[0]");
+  assert(ints[1] == 20, "vec[1]");
+}
+
+// T0399: nested tuple.
+test_t0399_push_indexed_nested_tuple() `test {
+  v2 := ((string, int), int)[]();
+  {
+    v := ((string, int), int)[]();
+    v.push((("first".to_string(), 1), 10));
+    v2.push(v[0]);
+  }
+  t := v2[0];
+  (inner, outer) := t;
+  (s, n) := inner;
+  assert(s == "first", "nested string");
+  assert(n == 1, "nested int");
+  assert(outer == 10, "outer");
+}
+
+// T0399: slice push via for-in — exercises slice-element walk.
+test_t0399_for_in_slice_push() `test {
+  v2 := (string, int)[]();
+  {
+    v := (string, int)[]();
+    v.push(("a" + "b", 1));
+    v.push(("c" + "d", 2));
+    for elem in v[0:1] {
+      v2.push(elem);
+    }
+  }
+  t := v2[0];
+  (s, n) := t;
+  assert(s == "ab", "slice push string");
+  assert(n == 1, "slice push int");
+}
+
+// T0399: re-push a droppable tuple variable in a loop. First iteration moves;
+// subsequent iterations hit the IdentExpr-with-drop-flag dup branch (line
+// 4520). Without `pushElemNeedsDup`'s tuple branch, the runtime CFG isn't
+// generated and the re-pushed slots alias the moved-out tuple's heap fields,
+// crashing with "invalid free" on Vector.drop. Sibling to Vector.filled.
+test_t0399_repush_owned_tuple_loop() `test {
+  v := (string, int)[]();
+  t := ("hello".to_string(), 42);
+  int i = 0;
+  while i < 3 {
+    v.push(t);
+    i = i + 1;
+  }
+  assert(v.len == 3, "len");
+  e0 := v[0];
+  (s0, n0) := e0;
+  assert(s0 == "hello", "v[0] string");
+  assert(n0 == 42, "v[0] int");
+  e2 := v[2];
+  (s2, n2) := e2;
+  assert(s2 == "hello", "v[2] string");
+  assert(n2 == 42, "v[2] int");
+}

@@ -4690,6 +4690,10 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 // pushElemNeedsDup returns true if the element type is a non-string droppable type
 // that would need duplication on push (to prevent aliased pointers). B0302.
 func (c *Compiler) pushElemNeedsDup(resolvedElem types.Type) bool {
+	// T0399: tuples with droppable fields need dup on push.
+	if _, isTup := resolvedElem.(*types.Tuple); isTup {
+		return c.tupleNeedsDrop(resolvedElem)
+	}
 	named := extractNamed(resolvedElem)
 	if named == nil {
 		if en := extractEnum(resolvedElem); en != nil {
@@ -4713,6 +4717,17 @@ func (c *Compiler) pushElemNeedsDup(resolvedElem types.Type) bool {
 // type that needs duplication on push. Returns the duplicated value, or nil if
 // no duplication is needed (primitive/Copy/string types). B0302.
 func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Type) value.Value {
+	// T0399: Tuples with droppable fields need a deep clone on push. Without
+	// this, v2.push(v[i]) for Vector[(string, int)] aliases v's heap-string
+	// pointers — both vectors' drop walks would free the same memory. Pure-value
+	// tuples (no droppable fields) need no dup.
+	if tup, isTup := resolvedElem.(*types.Tuple); isTup {
+		if c.tupleNeedsDrop(resolvedElem) {
+			return c.dupTupleValue(argVal, tup)
+		}
+		return nil
+	}
+
 	named := extractNamed(resolvedElem)
 
 	// Check for droppable enum types (B0244/B0290 pattern)

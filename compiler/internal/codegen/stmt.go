@@ -3936,6 +3936,135 @@ func (c *Compiler) isTrackedStringCall(_ *ast.CallExpr) bool {
 	return true
 }
 
+// trackHeapUserTypeCallResult tracks a call result that is a heap-allocated
+// user type (Map, Set, regular user-defined heap types) returned as a value
+// struct {i8*, i8*} (T0341). Constructor calls already track via
+// genConstructorCallMono (T0135) — skip them here to avoid double-tracking.
+// Strings, vectors, structural interfaces, value types, copy types, and
+// primitives have their own tracking paths and are skipped.
+//
+// Aliasing is handled via runtime pointer comparison:
+//   - claimHeapTemp(result) clears any existing heapTemp whose runtime pointer
+//     matches the result (e.g., method on a temp returning `this`).
+//   - For method calls, an additional runtime check against the receiver's
+//     instance pointer clears the new temp's drop flag if the call result
+//     aliases a non-temp receiver (e.g., `c.iter()` where `c` is a local
+//     variable whose own scope binding will free the allocation).
+func (c *Compiler) trackHeapUserTypeCallResult(e *ast.CallExpr, result value.Value) {
+	if result == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if !c.tempTrackingEnabled {
+		return
+	}
+	st, ok := result.Type().(*irtypes.StructType)
+	if !ok || len(st.Fields) != 2 || st.Fields[0] != irtypes.I8Ptr || st.Fields[1] != irtypes.I8Ptr {
+		return
+	}
+	// Skip constructor calls — those are tracked inside genConstructorCallMono.
+	calleeType := c.info.Types[e.Callee]
+	if c.typeSubst != nil && calleeType != nil {
+		calleeType = types.Substitute(calleeType, c.typeSubst)
+	}
+	switch calleeType.(type) {
+	case *types.Named, *types.Instance:
+		return
+	}
+	rt := c.info.Types[e]
+	if c.typeSubst != nil && rt != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	if c.selfSubst != nil && rt != nil {
+		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	named := extractNamed(rt)
+	if named == nil {
+		return
+	}
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return
+	}
+	if isContainerType(rt) || named == types.TypString {
+		return
+	}
+	dropFunc := c.resolveDropFuncForTemp(named, rt)
+	if dropFunc == nil {
+		return
+	}
+	c.claimHeapTemp(result)
+	instancePtr := c.block.NewExtractValue(result, 1)
+	beforeLen := len(c.heapTemps)
+	c.trackHeapTemp(instancePtr, dropFunc)
+	if len(c.heapTemps) > beforeLen {
+		c.emitReceiverAliasCheck(e, instancePtr, c.heapTemps[beforeLen].dropFlag)
+	}
+}
+
+// emitReceiverAliasCheck handles T0341's receiver-aliasing case for method
+// calls: if a method returns its receiver (e.g., `c.iter()` returning `this`),
+// the receiver's owning variable (or `this` parameter) will free the allocation
+// at scope exit. The given drop flag is cleared at runtime when the result
+// pointer equals the receiver's instance pointer to prevent double-free.
+//
+// Only side-effect-free receiver expressions are handled (IdentExpr loading a
+// local, ThisExpr) — re-evaluating other expressions (chained calls, etc.)
+// would risk duplicating side effects. claimHeapTemp already covers the case
+// where the receiver is itself a tracked temp.
+func (c *Compiler) emitReceiverAliasCheck(e *ast.CallExpr, newTempInstancePtr value.Value, newTempDropFlag value.Value) {
+	mem, ok := e.Callee.(*ast.MemberExpr)
+	if !ok {
+		return
+	}
+
+	var recvInstPtr value.Value
+	switch t := mem.Target.(type) {
+	case *ast.IdentExpr:
+		alloca, isLocal := c.locals[t.Name]
+		if !isLocal {
+			return
+		}
+		structTy, isStruct := alloca.ElemType.(*irtypes.StructType)
+		if !isStruct || len(structTy.Fields) != 2 {
+			return
+		}
+		recvVal := c.block.NewLoad(alloca.ElemType, alloca)
+		recvInstPtr = c.block.NewExtractValue(recvVal, 1)
+	case *ast.ThisExpr:
+		alloca, isLocal := c.locals["this"]
+		if !isLocal {
+			return
+		}
+		thisVal := c.block.NewLoad(alloca.ElemType, alloca)
+		if structTy, isStruct := thisVal.Type().(*irtypes.StructType); isStruct && len(structTy.Fields) == 2 {
+			recvInstPtr = c.block.NewExtractValue(thisVal, 1)
+		} else if thisVal.Type() == irtypes.I8Ptr {
+			recvInstPtr = thisVal
+		} else {
+			return
+		}
+	default:
+		return
+	}
+	if recvInstPtr == nil {
+		return
+	}
+	if recvInstPtr.Type() != irtypes.I8Ptr {
+		if _, isPtr := recvInstPtr.Type().(*irtypes.PointerType); isPtr {
+			recvInstPtr = c.block.NewBitCast(recvInstPtr, irtypes.I8Ptr)
+		} else {
+			return
+		}
+	}
+	same := c.block.NewICmp(enum.IPredEQ, newTempInstancePtr, recvInstPtr)
+	clearBlk := c.newBlock("recv.alias.clear")
+	skipBlk := c.newBlock("recv.alias.skip")
+	c.block.NewCondBr(same, clearBlk, skipBlk)
+	c.block = clearBlk
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), newTempDropFlag)
+	c.block.NewBr(skipBlk)
+	c.block = skipBlk
+}
+
 // hasStructuralParam returns true if any parameter of sig is a structural interface (T0092).
 func hasStructuralParam(sig *types.Signature, typeSubst map[*types.TypeParam]types.Type) bool {
 	for _, param := range sig.Params() {

@@ -274,3 +274,154 @@ t0331_variadic_temps() `test {
   int n = sum_lens(make_ints(), make_ints(), make_ints());
   assert(n == 9, "variadic temps total");
 }
+
+// =========================================================================
+// T0341: CallExpr results returning Map / Set / heap user types must be
+// dropped at statement end when discarded or passed as plain (non-`~`) args.
+// Previously these leaked because expr.go only tracked string and vector
+// return types — not value-struct heap user types.
+// =========================================================================
+
+t0341_make_map() map[string, int] {
+  map[string, int] m = map[string, int]();
+  m["a"] = 1;
+  m["b"] = 2;
+  return m;
+}
+
+t0341_len_check_map(map[string, int] m, int expected) {
+  assert(m.len == expected, "map.len");
+}
+
+t0341_map_plain_arg() `test {
+  t0341_len_check_map(t0341_make_map(), 2);
+}
+
+t0341_map_discard() `test {
+  t0341_make_map();
+  assert(true, "ok");
+}
+
+t0341_make_set() Set[int] {
+  Set[int] s = Set[int]();
+  s.add(1);
+  s.add(2);
+  s.add(3);
+  return s;
+}
+
+t0341_len_check_set(Set[int] s, int expected) {
+  assert(s.len == expected, "set.len");
+}
+
+t0341_set_plain_arg() `test {
+  t0341_len_check_set(t0341_make_set(), 3);
+}
+
+t0341_set_discard() `test {
+  t0341_make_set();
+  assert(true, "ok");
+}
+
+type T341Holder {
+  int[] data;
+}
+
+t0341_make_holder() T341Holder {
+  return T341Holder(data: int[]());
+}
+
+t0341_len_check_holder(T341Holder h, int expected) {
+  assert(h.data.len == expected, "holder.data.len");
+}
+
+t0341_user_heap_plain_arg() `test {
+  t0341_len_check_holder(t0341_make_holder(), 0);
+}
+
+t0341_user_heap_discard() `test {
+  t0341_make_holder();
+  assert(true, "ok");
+}
+
+type T341Factory {
+  int x;
+  produce() T341Holder => T341Holder(data: int[]());
+}
+
+t0341_method_heap_discard() `test {
+  T341Factory f = T341Factory(x: 1);
+  f.produce();
+}
+
+t0341_method_heap_plain_arg() `test {
+  T341Factory f = T341Factory(x: 1);
+  t0341_len_check_holder(f.produce(), 0);
+}
+
+// T0341: Receiver alias check — a method that returns `this` aliases its
+// receiver. The new tracking from T0341 must not double-free the receiver's
+// allocation. emitReceiverAliasCheck handles this for IdentExpr-on-local and
+// ThisExpr receivers via a runtime pointer comparison. These tests use a heap
+// user type WITH a heap field (int[]) so a double-free would crash, distinct
+// from the tests in return_this_test.pr which use only int fields.
+
+type T341SelfAlias {
+  int[] data;
+  alias() T341SelfAlias {
+    return this;
+  }
+}
+
+t0341_self_returning_discard_local() `test {
+  s := T341SelfAlias(data: int[]());
+  s.alias();
+  assert(s.data.len == 0, "s still owns data after alias() discard");
+}
+
+t0341_self_returning_plain_arg(T341SelfAlias x, int expected) {
+  assert(x.data.len == expected, "alias plain arg data.len");
+}
+
+t0341_self_returning_local_plain_arg() `test {
+  s := T341SelfAlias(data: int[]());
+  t0341_self_returning_plain_arg(s.alias(), 0);
+  assert(s.data.len == 0, "s still owns data after alias() plain-arg");
+}
+
+// ThisExpr branch: a method on `this` that returns `this`, where the result
+// is bound to a local before being returned. emitReceiverAliasCheck reaches
+// the *ast.ThisExpr branch when the alias call appears inside another method.
+type T341SelfAlias2 {
+  int[] data;
+  alias() T341SelfAlias2 {
+    return this;
+  }
+  bind_self_then_return() T341SelfAlias2 {
+    r := this.alias();
+    return r;
+  }
+}
+
+t0341_this_alias_inside_method() `test {
+  s := T341SelfAlias2(data: int[]());
+  r := s.bind_self_then_return();
+  assert(r.data.len == 0, "this.alias() inside method preserves data");
+}
+
+// Method on a field receiver (MemberExpr target) — emitReceiverAliasCheck
+// short-circuits via the default branch (only IdentExpr/ThisExpr). claimHeapTemp
+// catches any aliasing at runtime via pointer comparison.
+type T341FieldOwner {
+  T341Factory factory;
+}
+
+t0341_method_on_field_discard() `test {
+  o := T341FieldOwner(factory: T341Factory(x: 1));
+  o.factory.produce();
+}
+
+t0341_method_on_field_plain_arg() `test {
+  o := T341FieldOwner(factory: T341Factory(x: 1));
+  t0341_len_check_holder(o.factory.produce(), 0);
+}

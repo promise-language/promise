@@ -70,6 +70,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					}
 				}
 			}
+		} else {
+			c.trackHeapUserTypeCallResult(e, result)
 		}
 		return result
 	case *ast.MemberExpr:

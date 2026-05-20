@@ -234,17 +234,30 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 				// B0223: Track vector slice results as heap temps. Vector slicing
 				// allocates a new heap vector. Without tracking, the slice result
 				// leaks when used as an intermediate (e.g., in string.from_bytes).
-				// T0369/T0372: Element walk is safe only for string element types
-				// because Vector.[:]'s push path unconditionally dups strings (B0189).
-				// For non-string element types, the push path does NOT dup — the
-				// slice aliases the parent's element pointers — so an element walk
-				// would double-free. Fall back to buffer-only Vector.drop for those
-				// (pre-T0369 behavior). Follow-up T0376 tracks the proper fix:
-				// make Vector.[:] deep-clone elements on push.
-				if elemType, ok := types.AsVector(rt); ok && extractNamed(elemType) == types.TypString {
-					c.trackVectorHeapTempWithElemType(result, elemType)
-				} else if fn := c.funcs["Vector.drop"]; fn != nil {
-					c.trackHeapTemp(result, fn)
+				// T0369: Pass the element type so transient cleanup walks droppable
+				// elements. After T0376, Vector.[:]'s push path deep-clones non-
+				// string heap elements (via the IndexExpr dup gate in
+				// genVectorMethodCall), so the slice owns independent copies and
+				// the walk is unconditionally safe. Carve-outs:
+				//   - containsDroppableTuple (T0371 territory) — suppressed inside
+				//     trackVectorHeapTempWithElemType.
+				//   - Polymorphic element types (those needing a vtable) — the
+				//     push dup is suppressed because cloneHeapElement uses the
+				//     static layout and would truncate subtypes; symmetrically,
+				//     the slice walk must also be suppressed so the slice does
+				//     not double-free against the source's element walk.
+				if elemType, ok := types.AsVector(rt); ok {
+					skipWalkForPolymorphic := false
+					if en := extractNamed(elemType); en != nil && c.needsVtable(en) {
+						skipWalkForPolymorphic = true
+					}
+					if skipWalkForPolymorphic {
+						if fn := c.funcs["Vector.drop"]; fn != nil {
+							c.trackHeapTemp(result, fn)
+						}
+					} else {
+						c.trackVectorHeapTempWithElemType(result, elemType)
+					}
 				}
 			}
 		}
@@ -4468,7 +4481,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 			// was already consumed (e.g., in a prior loop iteration of Vector.filled)
 			// — dup the element to avoid aliased pointers that cause double-free.
 			// For idents WITHOUT a drop flag (function params), always dup droppable
-			// types. For non-ident sources (call results), use normal move semantics.
+			// types. For non-ident sources, see the T0376 branch below.
 			dupped := false
 			if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
 				if flagAlloca, hasFlag := c.dropFlags[ident.Name]; hasFlag {
@@ -4501,6 +4514,39 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 					c.clearDropFlag(ident.Name)
 				} else {
 					// No drop flag (function parameter): always dup droppable types.
+					if dupVal := c.maybeDupPushElement(argVal, resolvedElem); dupVal != nil {
+						argVal = dupVal
+						dupped = true
+					}
+				}
+			} else if _, isIndex := e.Args[0].Value.(*ast.IndexExpr); isIndex {
+				// T0376: IndexExpr source (e.g. this[i] in Vector.[:], arr[k]).
+				// Returns a load — an alias to the element at the given index.
+				// Without dup, the new vector's slot would alias the source
+				// container's element pointer and the cleanup walks (vector +
+				// source) would double-free. Dup so the new vector owns an
+				// independent copy. Symmetric with the IdentExpr-without-flag
+				// (function param) path. CallExpr / MemberExpr / literal
+				// sources are left alone — CallExpr returns fresh allocations
+				// (constructors, getters) whose ownership the vector inherits,
+				// and MemberExpr field-access dup is left for a follow-up
+				// because some MemberExpr forms (module getters, instance
+				// getters) also return fresh values and can't be safely
+				// distinguished from field access at this layer.
+				//
+				// Skip the dup for polymorphic element types (those needing a
+				// vtable). cloneHeapElement → dupHeapValue uses the *static*
+				// element layout for the memcpy size, which truncates concrete
+				// subtypes (e.g., Circle → Shape size, dropping radius). For
+				// those, fall back to no-dup; the slice tracking site below
+				// suppresses the element walk for the same reason, restoring
+				// pre-T0376 behavior (slice slots alias the source — safe iff
+				// the source outlives the slice).
+				skipForPolymorphic := false
+				if rn := extractNamed(resolvedElem); rn != nil && c.needsVtable(rn) {
+					skipForPolymorphic = true
+				}
+				if !skipForPolymorphic {
 					if dupVal := c.maybeDupPushElement(argVal, resolvedElem); dupVal != nil {
 						argVal = dupVal
 						dupped = true

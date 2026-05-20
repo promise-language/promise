@@ -19887,6 +19887,66 @@ func TestMutexGuardBorrowSetterCompoundAssign(t *testing.T) {
 	assertContains(t, ir, "add i64")
 }
 
+// T0367: Assigning Arc[T].borrow to a variable must clear the variable's drop
+// flag — the borrow returns a non-owning reference, so the parent's drop owns
+// the inner value. Without the clear, both the borrow's drop and Arc.drop would
+// free the same buffer (double-free / segfault for heap T).
+func TestArcBorrowClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			a := Arc[int[]](v);
+			borrowed := a.borrow;
+		}
+	`)
+	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
+	// maybeRegisterDrop sets dropflag=true; T0367 fix immediately clears it.
+	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0367: Same fix for MutexGuard[T].borrow.
+func TestMutexGuardBorrowClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			m := Mutex[int[]](v);
+			use guard := m.lock();
+			borrowed := guard.borrow;
+		}
+	`)
+	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
+	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0367: Typed var decl path (`T borrowed = a.borrow`) — exercises
+// genTypedVarDecl rather than genInferredVarDecl. The fix is mirrored across
+// both paths so the dropflag clear must appear here too.
+func TestArcBorrowClearsDropFlagTypedDecl(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			a := Arc[int[]](v);
+			int[] borrowed = a.borrow;
+		}
+	`)
+	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
+	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
+// T0367: Typed var decl path for MutexGuard.
+func TestMutexGuardBorrowClearsDropFlagTypedDecl(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			m := Mutex[int[]](v);
+			use guard := m.lock();
+			int[] borrowed = guard.borrow;
+		}
+	`)
+	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
+	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
+}
+
 // T0156/T0285/T0291: MutexGuard close/drop functions do scheduler-aware unlock and free.
 func TestMutexGuardCloseUnlocksAndFrees(t *testing.T) {
 	ir := generateIR(t, `

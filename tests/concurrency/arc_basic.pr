@@ -120,3 +120,61 @@ arc_vector_element() `test {
   assert(borrowed[0] == 10, "vector[0]");
   assert(borrowed[2] == 30, "vector[2]");
 }
+
+// T0367: Arc[string[]] — heap container with heap elements. Without the fix,
+// `borrowed`'s drop and Arc's inner drop both free the same buffer → segfault
+// when the second drop reads scribbled string pointers from the freed buffer.
+arc_borrow_heap_vec() `test {
+  v := string[]();
+  v.push("hello" + "");
+  a := Arc[string[]](v);
+  borrowed := a.borrow;
+  assert(borrowed.len == 1, "heap vec len");
+}
+
+// T0367: Arc[string] with a heap-allocated string — silently double-frees
+// without the fix (string drop's bit-63 check happens to mask it).
+arc_borrow_heap_string() `test {
+  s := "hello" + "";
+  a := Arc[string](s);
+  borrowed := a.borrow;
+  assert(borrowed.len == 5, "heap string len");
+}
+
+// T0367: Optional-chained borrow via Weak.upgrade!.
+arc_borrow_optional_chain() `test {
+  v := string[]();
+  v.push("hello" + "");
+  a := Arc[string[]](v);
+  w := a.downgrade();
+  if strong := w.upgrade() {
+    borrowed := strong.borrow;
+    assert(borrowed.len == 1, "weak upgrade borrow len");
+  }
+}
+
+// T0367: Typed var decl path (`T borrowed = a.borrow`) with heap T.
+// `arc_vector_element` exercises this syntax with a static literal that masks
+// the bug via Vector.drop's bit-63 check; this variant pushes a heap-allocated
+// element so the static-flag short-circuit cannot hide a double-free.
+arc_borrow_typed_decl_heap_vec() `test {
+  v := string[]();
+  v.push("hello" + "");
+  a := Arc[string[]](v);
+  string[] borrowed = a.borrow;
+  assert(borrowed.len == 1, "typed decl heap vec");
+}
+
+// T0367: `.borrow` inside a generic function — monomorphization preserves
+// the dropflag-clear when T is heap.
+arc_borrow_len[T](Arc[Vector[T]] arc) int {
+  borrowed := arc.borrow;
+  return borrowed.len;
+}
+
+arc_borrow_in_generic_fn() `test {
+  v := string[]();
+  v.push("hello" + "");
+  a := Arc[string[]](v);
+  assert(arc_borrow_len[string](a) == 1, "generic borrow len");
+}

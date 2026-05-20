@@ -156,3 +156,33 @@ test_mutex_user_type_synth_drop() `test {
   assert(guard.borrow.name == "hello", "synth drop name");
   assert(guard.borrow.id == 5, "synth drop id");
 }
+
+// T0367: Mutex[string[]] — heap container borrowed via guard.borrow. Without the
+// fix, `borrowed`'s drop and Mutex.drop both free the same buffer → segfault.
+test_mutex_borrow_heap_vec() `test {
+  v := string[]();
+  v.push("hello" + "");
+  m := Mutex[string[]](v);
+  use guard := m.lock();
+  borrowed := guard.borrow;
+  assert(borrowed.len == 1, "heap vec borrow len");
+}
+
+// T0367: Mutex[string] with a heap-allocated string borrowed via guard.borrow.
+test_mutex_borrow_heap_string() `test {
+  s := "hello" + "";
+  m := Mutex[string](s);
+  use guard := m.lock();
+  borrowed := guard.borrow;
+  assert(borrowed.len == 5, "heap string borrow len");
+}
+
+// T0367: Typed var decl (`T borrowed = guard.borrow`) for MutexGuard with heap T.
+test_mutex_borrow_typed_decl_heap_vec() `test {
+  v := string[]();
+  v.push("hello" + "");
+  m := Mutex[string[]](v);
+  use guard := m.lock();
+  string[] borrowed = guard.borrow;
+  assert(borrowed.len == 1, "typed decl heap vec");
+}

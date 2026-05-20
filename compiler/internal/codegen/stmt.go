@@ -181,6 +181,32 @@ func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
 	return false
 }
 
+// isBorrowGetterExpr returns true if expr is the `.borrow` getter on Arc[T] or
+// MutexGuard[T]. These getters return a non-owning reference to the inner T;
+// assigning the result to a variable must NOT register an active drop binding,
+// otherwise both the borrow and the parent's drop free the same inner value.
+// T0367.
+func (c *Compiler) isBorrowGetterExpr(expr ast.Expr) bool {
+	member, ok := expr.(*ast.MemberExpr)
+	if !ok || member.Field != "borrow" {
+		return false
+	}
+	targetType := c.info.Types[member.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	if _, ok := types.AsArc(targetType); ok {
+		return true
+	}
+	if _, ok := types.AsMutexGuard(targetType); ok {
+		return true
+	}
+	if n := extractNamed(targetType); n == types.TypArc || n == types.TypMutexGuard {
+		return true
+	}
+	return false
+}
+
 // isStringBorrowExpr returns true if the expression borrows an existing value
 // (e.g., container element access, field access) rather than creating a new one.
 // Borrowed values should not be freed by the borrower — the owner retains responsibility.
@@ -851,6 +877,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			}
 		}
 	}
+	// T0367: .borrow on Arc/MutexGuard returns a non-owning reference. Clear the
+	// drop flag so scope cleanup doesn't double-free with the parent's drop.
+	if c.isBorrowGetterExpr(s.Value) {
+		c.clearDropFlag(s.Name)
+	}
 	c.maybeRegisterEnvFree(s.Name, alloca, dropType)
 }
 
@@ -1003,6 +1034,11 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 				c.clearDropFlag(s.Name)
 			}
 		}
+	}
+	// T0367: .borrow on Arc/MutexGuard returns a non-owning reference. Clear the
+	// drop flag so scope cleanup doesn't double-free with the parent's drop.
+	if c.isBorrowGetterExpr(s.Value) {
+		c.clearDropFlag(s.Name)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ)
 }

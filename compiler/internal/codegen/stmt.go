@@ -678,10 +678,22 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if _, isTup := resolvedExprType.(*types.Tuple); isTup && c.tupleNeedsDrop(resolvedExprType) {
 		c.dupTupleFieldAccess = true
 	}
+	// T0398: Set dup flag for heap user types so genVectorIndex deep-clones the
+	// element on read. Without this, `b := v[0]` aliases v's element instance
+	// pointer — b's drop binding and v's element walk would double-free. Only
+	// fires when the RHS is a direct vector-index expression: chains like
+	// `b := v[0].method()` are excluded because the cloned receiver would not
+	// be consumed (method takes a borrow), leaking the clone.
+	if isDroppableHeapUserType(resolvedExprType) {
+		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+			c.dupHeapUserFieldAccess = true
+		}
+	}
 	val := c.genExpr(s.Value)
 	c.dupStringFieldAccess = false
 	c.dupContainerFieldAccess = false
 	c.dupTupleFieldAccess = false
+	c.dupHeapUserFieldAccess = false
 	c.targetType = nil
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
@@ -925,10 +937,22 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if _, isTup := typ.(*types.Tuple); isTup && c.tupleNeedsDrop(typ) {
 		c.dupTupleFieldAccess = true
 	}
+	// T0398: Set dup flag for heap user types so genVectorIndex deep-clones the
+	// element on read. Without this, `b := v[0]` aliases v's element instance
+	// pointer — b's drop binding and v's element walk would double-free. Only
+	// fires when the RHS is a direct vector-index expression: chains like
+	// `b := v[0].method()` are excluded because the cloned receiver would not
+	// be consumed (method takes a borrow), leaking the clone.
+	if isDroppableHeapUserType(typ) {
+		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+			c.dupHeapUserFieldAccess = true
+		}
+	}
 	val := c.genExpr(s.Value)
 	c.dupStringFieldAccess = false
 	c.dupContainerFieldAccess = false
 	c.dupTupleFieldAccess = false
+	c.dupHeapUserFieldAccess = false
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
 	if c.info.AutoPropagateExprs[s.Value] {
@@ -3457,6 +3481,32 @@ func (c *Compiler) tupleNeedsDrop(elemType types.Type) bool {
 	return false
 }
 
+// isDroppableHeapUserType returns true if typ is a heap user type whose instance
+// is heap-allocated and registered for drop or pal_free at scope exit — i.e., the
+// kind of type whose alias would cause double-free after a container index read.
+// Excludes strings (handled by dupStringFieldAccess), containers/Arc/Weak
+// (dupContainerFieldAccess), tuples (dupTupleFieldAccess), and
+// borrow/value/Copy/primitive/structural types. T0398.
+func isDroppableHeapUserType(typ types.Type) bool {
+	if isRefType(typ) {
+		return false
+	}
+	if isContainerType(typ) {
+		return false
+	}
+	named := extractNamed(typ)
+	if named == nil {
+		return false
+	}
+	if named == types.TypString {
+		return false
+	}
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return false
+	}
+	return true
+}
+
 // dupTupleValue creates a deep copy of a tuple value by dup'ing each droppable
 // field (strings, vectors, channels, nested tuples, heap user types, enums).
 // Non-droppable fields (primitives, value types) are copied by struct value.
@@ -4497,8 +4547,29 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.targetType = targetType
 		}
 	}
+	// T0398: For `vec[i] = vec[j]` where the element type is a heap user type,
+	// set dup flag so the RHS vec read is deep-cloned. Combined with
+	// drop-on-overwrite below in genVectorIndexAssign, this preserves the
+	// invariant that no two vec slots alias the same instance — e.g.,
+	// `vec[j+1] = vec[j]` shifts in sort produce independent clones. Only
+	// fires when the RHS is a direct vector-index expression to avoid orphan
+	// clones from chains like `vec[i] = v[j].method()`.
+	if s.Op == ast.OpAssign {
+		if idxTarget, ok := s.Target.(*ast.IndexExpr); ok {
+			if _, isIdxRhs := s.Value.(*ast.IndexExpr); isIdxRhs {
+				elemType := c.info.Types[idxTarget]
+				if c.typeSubst != nil {
+					elemType = types.Substitute(elemType, c.typeSubst)
+				}
+				if isDroppableHeapUserType(elemType) {
+					c.dupHeapUserFieldAccess = true
+				}
+			}
+		}
+	}
 	val := c.genExpr(s.Value)
 	c.targetType = nil
+	c.dupHeapUserFieldAccess = false
 
 	// Auto-propagate failable call in assignment RHS.
 	if c.info.AutoPropagateExprs[s.Value] {
@@ -7384,6 +7455,13 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 			// stored by value in vector buffers, so each element is an independent
 			// copy. emitVariantFieldDrop allocas the old value, bitcasts to i8*,
 			// and calls the synthesized enum drop function.
+			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
+			c.emitVariantFieldDrop(oldVal, elemType)
+		} else if isDroppableHeapUserType(elemType) {
+			// T0398: Drop old heap user-type element before overwriting. Without this,
+			// `vec[i] = X` leaks vec[i]'s previous instance. Safe because dup-on-read
+			// (T0398 in genVectorIndex, set above in genAssignStmt) ensures any RHS
+			// vec reads return independent clones — no live alias to the freed instance.
 			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 			c.emitVariantFieldDrop(oldVal, elemType)
 		}

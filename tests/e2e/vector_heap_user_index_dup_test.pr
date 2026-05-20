@@ -1,0 +1,240 @@
+// T0398: Vector[heap-user-type] dup-on-read regression tests.
+// `b := v[0]` previously aliased v's element instance — b's drop binding
+// and v's element walk would double-free (segfault on second read).
+// Symmetric with B0204 (string), T0370 (tuple). Fix: dupHeapUserFieldAccess
+// flag set in genTyped/InferredVarDecl, consumed by genVectorIndex via
+// cloneHeapElement (which calls clone() if available, else dupHeapValue).
+type _T0398Box {
+  string label;
+  drop(~this) {
+  }
+}
+
+// --- 1. Basic repro: explicit drop, two consecutive reads. ---
+test_t0398_repeated_read() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "a" + "b"));
+  b := v[0];
+  assert(b.label == "ab", "first read");
+  b2 := v[0];
+  assert(b2.label == "ab", "second read");
+}
+
+// --- 2. Multi heap fields: string + Vector[string] + nested heap user. ---
+type _T0398Inner {
+  string tag;
+  drop(~this) {
+  }
+}
+
+type _T0398Multi {
+  string label;
+  string[] items;
+  _T0398Inner inner;
+  drop(~this) {
+  }
+}
+
+test_t0398_multi_heap_fields() `test {
+  v := _T0398Multi[]();
+  v.push(_T0398Multi(label: "hello" + " world",
+  items: ["x" + "1", "y" + "2"],
+  inner: _T0398Inner(tag: "tag" + "1")));
+  b := v[0];
+  assert(b.label == "hello world", "label first");
+  assert(b.items.len == 2, "items len");
+  assert(b.items[0] == "x1", "items[0]");
+  assert(b.inner.tag == "tag1", "inner tag");
+  b2 := v[0];
+  assert(b2.label == "hello world", "label second");
+  assert(b2.items.len == 2, "items len second");
+  assert(b2.inner.tag == "tag1", "inner tag second");
+}
+
+// --- 3. Typed var decl path (genTypedVarDecl). ---
+test_t0398_typed_var_decl() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "x" + "y"));
+  _T0398Box b = v[0];
+  assert(b.label == "xy", "typed first read");
+  _T0398Box b2 = v[0];
+  assert(b2.label == "xy", "typed second read");
+}
+
+// --- 4. No explicit drop method — exercises the bindingFree (B0164) path. ---
+type _T0398NoDrop {
+  string label;
+}
+
+test_t0398_no_explicit_drop() `test {
+  v := _T0398NoDrop[]();
+  v.push(_T0398NoDrop(label: "p" + "q"));
+  b := v[0];
+  assert(b.label == "pq", "no-drop first read");
+  b2 := v[0];
+  assert(b2.label == "pq", "no-drop second read");
+}
+
+// --- 5. Generic function reading from Vector[T]. ---
+read_first[T](~T[] v) T {
+  b := v[0];
+  return b;
+}
+
+test_t0398_generic_read() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "g" + "h"));
+  v.push(_T0398Box(label: "i" + "j"));
+  b := read_first[_T0398Box](v);
+  assert(b.label == "gh", "generic read");
+}
+
+// --- 6. for-in: regression guard — for-in over heap user vector still works
+// (the new flag is not set in for-in body, so no spurious dup). ---
+test_t0398_for_in_no_dup() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "a" + "1"));
+  v.push(_T0398Box(label: "b" + "2"));
+  count := 0;
+  for elem in v {
+    count = count + 1;
+    assert(elem.label.len == 2, "for-in label len");
+  }
+  assert(count == 2, "for-in count");
+}
+
+// --- 7. Direct field access — no intermediate variable, no flag set. ---
+test_t0398_direct_field_access() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "d" + "f"));
+  assert(v[0].label == "df", "direct field 1");
+  assert(v[0].label == "df", "direct field 2");
+}
+
+// Note: f(v[0]) call-arg site has the same dup-on-read gap (filed as T0403).
+// Workaround: bind to a variable first so T0398's var-decl dup kicks in.
+read_label(~_T0398Box b) string {
+  return b.label;
+}
+
+test_t0398_call_arg_via_var() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "c" + "a"));
+  b := v[0]; // T0398: dup'd here
+  s := read_label(b);
+  assert(s == "ca", "call arg label via var");
+}
+
+// --- 9. Vec-to-vec index assign (sort shift pattern). ---
+// `vec[i] = vec[j]` must clone vec[j] AND drop old vec[i] for correctness
+// and zero leaks. Without this, sort.pr's insertion-sort shifts would leak
+// the displaced element at each iteration.
+test_t0398_index_assign_self_shift() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "a" + "1"));
+  v.push(_T0398Box(label: "b" + "2"));
+  v.push(_T0398Box(label: "c" + "3"));
+  // Shift vec[1] up: vec[2] = vec[1] should clone (not alias) so dropping
+  // vec[2] later doesn't dangle the alias.
+  v[2] = v[1];
+  assert(v[1].label == "b2", "source after copy");
+  assert(v[2].label == "b2", "dest after copy");
+  // Overwrite v[1] independently — must NOT corrupt v[2].
+  v[1] = v[0];
+  assert(v[1].label == "a1", "v[1] after overwrite");
+  assert(v[2].label == "b2", "v[2] still independent");
+}
+
+// --- 10. Move local into vec (sort end pattern). ---
+test_t0398_index_assign_from_local() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "x" + "1"));
+  v.push(_T0398Box(label: "y" + "2"));
+  b := _T0398Box(label: "z" + "3");
+  v[0] = b;
+  assert(v[0].label == "z3", "v[0] after move");
+  assert(v[1].label == "y2", "v[1] unchanged");
+}
+
+// --- 11. Method-on-vec-read regression guard. ---
+// `b := v[0].method()` must NOT trigger dup-on-read of v[0]: the cloned
+// receiver would be passed as &this borrow to the method, then leaked
+// (the method's return value is a different instance the var-decl owns).
+type _T0398CopyBox {
+  string label;
+  drop(~this) {
+  }
+
+  copy(&this) _T0398CopyBox {
+    return _T0398CopyBox(label: this.label);
+  }
+}
+
+test_t0398_method_on_index_no_leak() `test {
+  v := _T0398CopyBox[]();
+  v.push(_T0398CopyBox(label: "a" + "b"));
+  // Without the IndexExpr guard, v[0] would clone, then .copy() borrows the
+  // clone and returns a new Box — the clone leaks because nothing claims it.
+  b := v[0].copy();
+  assert(b.label == "ab", "method on indexed");
+}
+
+// --- 12. clone() method dispatch path in cloneHeapElement. ---
+// When a heap user type has an explicit `clone()` method, cloneHeapElement
+// dispatches to it instead of falling back to dupHeapValue. This path
+// (stmt.go:3358) was previously only covered by Map/Set Go tests, never by
+// a Promise-level Vector[T] read. Without the user-defined clone correctly
+// deep-cloning each heap field, two reads alias the same string buffer.
+type _T0398CloneBox {
+  string label;
+  drop(~this) {
+  }
+
+  clone() _T0398CloneBox {
+    return _T0398CloneBox(label: this.label.clone());
+  }
+}
+
+test_t0398_clone_method_dispatch() `test {
+  v := _T0398CloneBox[]();
+  v.push(_T0398CloneBox(label: "a" + "b"));
+  b := v[0];
+  assert(b.label == "ab", "clone first read");
+  b2 := v[0];
+  assert(b2.label == "ab", "clone second read");
+}
+
+// --- 13. Generic vec-to-vec index-assign. ---
+// `vec[i] = vec[j]` inside a generic function over T exercises the
+// typeSubst branch of genAssignStmt's heap-user index-assign path.
+// Test 5 covers genVectorIndex's typeSubst branch for var-decl reads;
+// this test covers the same for genAssignStmt's flag-set logic.
+shift_first[T](~T[] v) T[] {
+  if v.len >= 2 {
+    v[0] = v[1];
+  }
+  return v;
+}
+
+test_t0398_generic_index_assign() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "x" + "1"));
+  v.push(_T0398Box(label: "y" + "2"));
+  v = shift_first[_T0398Box](v);
+  assert(v[0].label == "y2", "v[0] after generic shift");
+  assert(v[1].label == "y2", "v[1] still independent");
+}
+
+// --- 14. Method on vec-index in assign RHS — regression guard. ---
+// `vec[i] = vec[j].method()` must NOT trigger dup-on-read on vec[j]:
+// the chain isn't a direct IndexExpr, so the flag is correctly skipped
+// and the method call's returned value (an independent instance) is
+// stored. Symmetric with test 11 for var-decl chains.
+test_t0398_assign_method_chain_no_leak() `test {
+  v := _T0398CopyBox[]();
+  v.push(_T0398CopyBox(label: "a" + "b"));
+  v.push(_T0398CopyBox(label: "c" + "d"));
+  v[0] = v[1].copy();
+  assert(v[0].label == "cd", "v[0] after method chain");
+  assert(v[1].label == "cd", "v[1] unchanged");
+}

@@ -7291,6 +7291,31 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 		}
 	}
 
+	// T0398: Dup-on-read for Vector[heap-user-type] index access. Without this,
+	// `b := v[0]` aliases v's element instance pointer — b's drop binding and
+	// v's element walk would free the same instance. Symmetric with the string
+	// branch above (B0204) and the tuple branch (T0370). cloneHeapElement calls
+	// the type's clone() method when available, falls back to dupHeapValue
+	// (alloc + memcpy + recursive sub-field dup via dupHeapValueFields).
+	// The flag is set only when the call site (var-decl or vec-to-vec
+	// assign) directly consumes the index expression, so the clone is
+	// guaranteed to be moved into a binding/slot — no orphaned clone leaks.
+	// Note: for polymorphic element types (e.g. Vector[Shape] containing Circle),
+	// dupHeapValue uses the static element layout for memcpy size — same
+	// limitation as B0204/T0370/T0376.
+	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled {
+		resolvedElem := elemType
+		if c.typeSubst != nil {
+			resolvedElem = types.Substitute(elemType, c.typeSubst)
+		}
+		if isDroppableHeapUserType(resolvedElem) {
+			if named := extractNamed(resolvedElem); named != nil {
+				c.dupHeapUserFieldAccess = false // consume the flag
+				return c.cloneHeapElement(val, resolvedElem, named)
+			}
+		}
+	}
+
 	return val
 }
 

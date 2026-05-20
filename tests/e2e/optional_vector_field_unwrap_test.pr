@@ -1,0 +1,179 @@
+// T0354: Suppress unwrap stmtTemp tracking on `T[]?` field reads from droppable
+// owners. Without `optionalFieldVector`, the unwrap path would track the inner
+// vector i8* as a stmtTemp AND the owner's drop would also call `Vector.drop`
+// → double-free at statement end.
+type HolderVec {
+  int[]? data;
+  drop(~this) {
+  }
+}
+
+type HolderStrVec {
+  string[]? items;
+  drop(~this) {
+  }
+}
+
+type AutoHolderVec {
+  int[]? data;
+  string name;
+}
+
+// --- Inline unwrap of vector field (the strongest trigger) ---
+
+test_inline_optional_vector_unwrap() `test {
+  v := int[]();
+  v.push(1);
+  v.push(2);
+  HolderVec h = HolderVec(data: v);
+  assert(h.data!.len == 2, "inline unwrap dynamic vector");
+}
+
+test_inline_optional_vector_field_access() `test {
+  v := int[]();
+  v.push(10);
+  v.push(20);
+  v.push(30);
+  HolderVec h = HolderVec(data: v);
+  int len = h.data!.len;
+  assert(len == 3, "inline unwrap len");
+}
+
+// Field access then unwrap — owner stays valid after the unwrap
+test_optional_vector_field_unwrap_owner_still_valid() `test {
+  v := int[]();
+  v.push(42);
+  HolderVec h = HolderVec(data: v);
+  assert(h.data!.len == 1, "unwrap len");
+  assert(h.data!.len == 1, "owner still valid after unwrap");
+}
+
+// String element vector — leak guard for per-element drops
+test_optional_string_vector_unwrap() `test {
+  sv := string[]();
+  sv.push("hello");
+  sv.push("world");
+  HolderStrVec h = HolderStrVec(items: sv);
+  assert(h.items!.len == 2, "string vec unwrap");
+}
+
+test_optional_string_vector_unwrap_repeat() `test {
+  sv := string[]();
+  sv.push("a" + "b");
+  sv.push("c" + "d");
+  HolderStrVec h = HolderStrVec(items: sv);
+  assert(h.items!.len == 2, "len 1");
+  assert(h.items!.len == 2, "len 2");
+}
+
+// --- Synthesized drop owner variant ---
+
+test_synthesized_drop_owner_vec_unwrap() `test {
+  v := int[]();
+  v.push(7);
+  AutoHolderVec h = AutoHolderVec(data: v, name: "x");
+  assert(h.data!.len == 1, "synth drop owner unwrap");
+}
+
+// --- Cross-statement flag-leak guard ---
+// Mirrors B0190 test_field_access_then_failable_unwrap. A field access on one
+// statement sets optionalFieldVector; if the flag isn't reset by
+// cleanupStmtTemps, the next statement's unrelated vector unwrap would skip
+// stmt-temp tracking and leak.
+
+make_vec_failable!() int[] {
+  v := int[]();
+  v.push(99);
+  return v;
+}
+
+test_field_access_then_failable_unwrap_vec() `test {
+  v := int[]();
+  v.push(1);
+  HolderVec h = HolderVec(data: v);
+  int[]? maybe = h.data; // sets optionalFieldVector for this stmt
+  int[] result = make_vec_failable()?!; // must NOT be suppressed by leaked flag
+  assert(result.len == 1, "post-flag tracking still works");
+}
+
+// --- Nested / heap-element variants exercise emitVectorElementDropLoop  ---
+// through the unwrap + owner-drop chain.
+
+type NestedHolder {
+  int[][]? grid;
+  drop(~this) {
+  }
+}
+
+test_nested_vec_field_unwrap() `test {
+  outer := int[][]();
+  inner1 := int[]();
+  inner1.push(1);
+  inner1.push(2);
+  outer.push(inner1);
+  h := NestedHolder(grid: outer);
+  assert(h.grid!.len == 1, "nested unwrap len");
+  assert(h.grid![0].len == 2, "nested inner len");
+}
+
+type Item {
+  int id;
+  string name;
+}
+
+type ItemHolder {
+  Item[]? items;
+  drop(~this) {
+  }
+}
+
+test_user_type_vec_field_unwrap() `test {
+  items := Item[]();
+  items.push(Item(id: 1, name: "alpha" + ""));
+  items.push(Item(id: 2, name: "beta" + ""));
+  h := ItemHolder(items: items);
+  assert(h.items!.len == 2, "user vec unwrap len");
+}
+
+// --- Generic owner: optionalFieldVector flag must apply on monomorphized owners ---
+
+type Box[T] {
+  T[]? data;
+  drop(~this) {
+  }
+}
+
+test_generic_owner_int_vec_field_unwrap() `test {
+  v := int[]();
+  v.push(7);
+  v.push(11);
+  b := Box[int](data: v);
+  assert(b.data!.len == 2, "generic owner int unwrap");
+}
+
+test_generic_owner_string_vec_field_unwrap() `test {
+  sv := string[]();
+  sv.push("foo" + "");
+  b := Box[string](data: sv);
+  assert(b.data!.len == 1, "generic owner string vec unwrap");
+}
+
+// --- Field access inside the owner's own method body ---
+
+type SelfHolder {
+  string[]? items;
+  drop(~this) {
+  }
+
+  count() int {
+    return this.items!.len;
+  }
+}
+
+test_method_body_field_unwrap() `test {
+  sv := string[]();
+  sv.push("x" + "");
+  sv.push("y" + "");
+  h := SelfHolder(items: sv);
+  assert(h.count() == 2, "method body unwrap");
+}

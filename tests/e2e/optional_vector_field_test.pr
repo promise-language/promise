@@ -1,0 +1,180 @@
+// T0353: Constructor field-init for `T[]?` corrupts the inner pointer because
+// the bare i8* in stmtTempMap is never claimed when wrapped into the Optional
+// payload. Fix: claim the pre-wrap value (works for any stmtTemp-tracked heap
+// type, not just strings).
+type HolderVec {
+  int[]? data;
+  drop(~this) {
+  }
+}
+
+type HolderVecAuto {
+  int[]? data;
+  string name;
+}
+
+type HolderStrVec {
+  string[]? items;
+  drop(~this) {
+  }
+}
+
+// Inline `int[]()` in constructor → drop owner + read inner len
+test_inline_int_vec_field_with_drop() `test {
+  s := HolderVec(data: int[]());
+  if v := s.data {
+    assert(v.len == 0, "vec field len");
+  } else {
+    assert(false, "absent");
+  }
+}
+
+// Synthesized-drop owner variant
+test_inline_int_vec_field_synth_drop() `test {
+  s := HolderVecAuto(data: int[](), name: "x");
+  if v := s.data {
+    assert(v.len == 0, "synth drop vec field len");
+  } else {
+    assert(false, "absent");
+  }
+}
+
+// Vector with elements — verify pointer integrity, not just length
+test_vec_field_data_integrity() `test {
+  v := int[]();
+  v.push(10);
+  v.push(20);
+  v.push(30);
+  s := HolderVec(data: v);
+  if vv := s.data {
+    assert(vv.len == 3, "len");
+    assert(vv[0] == 10, "elem 0");
+    assert(vv[1] == 20, "elem 1");
+    assert(vv[2] == 30, "elem 2");
+  } else {
+    assert(false, "absent");
+  }
+}
+
+// String[] element vector — heap elements via inline call
+test_inline_string_vec_field() `test {
+  s := HolderStrVec(items: string[]());
+  if v := s.items {
+    assert(v.len == 0, "string vec field len");
+  } else {
+    assert(false, "absent");
+  }
+}
+
+// String vec with elements — drop must free both buffer and per-element strings
+test_string_vec_field_with_elements() `test {
+  sv := string[]();
+  sv.push("hello");
+  sv.push("world");
+  s := HolderStrVec(items: sv);
+  if v := s.items {
+    assert(v.len == 2, "len");
+    assert(v[0] == "hello", "elem 0");
+    assert(v[1] == "world", "elem 1");
+  } else {
+    assert(false, "absent");
+  }
+}
+
+// Absent — no-arg constructor
+test_absent_vec_field() `test {
+  s := HolderVec();
+  if v := s.data {
+    assert(false, "should be absent");
+  } else {
+    assert(true, "absent ok");
+  }
+}
+
+// Ident-source path regression guard (the only path that worked before T0353)
+test_ident_source_vec_field() `test {
+  v := int[]();
+  v.push(1);
+  v.push(2);
+  s := HolderVec(data: v);
+  if vv := s.data {
+    assert(vv.len == 2, "ident source len");
+  } else {
+    assert(false, "absent");
+  }
+}
+
+// --- Nested / generic / heap-element variants ---
+
+type NestedHolder {
+  int[][]? grid;
+  drop(~this) {
+  }
+}
+
+test_nested_vec_field_construct() `test {
+  outer := int[][]();
+  i1 := int[]();
+  i1.push(7);
+  outer.push(i1);
+  h := NestedHolder(grid: outer);
+  if g := h.grid {
+    assert(g.len == 1, "nested len");
+    assert(g[0].len == 1, "inner len");
+    assert(g[0][0] == 7, "inner elem");
+  } else {
+    assert(false, "absent");
+  }
+}
+
+type Item {
+  int id;
+  string name;
+}
+
+type ItemHolder {
+  Item[]? items;
+  drop(~this) {
+  }
+}
+
+test_user_type_vec_field_construct() `test {
+  items := Item[]();
+  items.push(Item(id: 1, name: "x" + ""));
+  h := ItemHolder(items: items);
+  if v := h.items {
+    assert(v.len == 1, "user vec len");
+  } else {
+    assert(false, "absent");
+  }
+}
+
+// Generic owner — verify constructor field-init handles monomorphized T[]? fields
+type GenericBox[T] {
+  T[]? data;
+  drop(~this) {
+  }
+}
+
+test_generic_owner_int_vec_field_construct() `test {
+  v := int[]();
+  v.push(1);
+  v.push(2);
+  b := GenericBox[int](data: v);
+  if vv := b.data {
+    assert(vv.len == 2, "generic int len");
+  } else {
+    assert(false, "absent");
+  }
+}
+
+test_generic_owner_string_vec_field_construct() `test {
+  sv := string[]();
+  sv.push("hi" + "");
+  b := GenericBox[string](data: sv);
+  if vv := b.data {
+    assert(vv.len == 1, "generic string len");
+  } else {
+    assert(false, "absent");
+  }
+}

@@ -3459,6 +3459,7 @@ func (c *Compiler) cleanupStmtTemps() {
 	// B0190: Clear per-statement flags that must not leak across statements.
 	// Done before early returns so flags are always reset.
 	c.optionalFieldString = false
+	c.optionalFieldVector = false // T0354
 	c.optionalStringDup = nil
 	if len(c.stmtTemps) == 0 {
 		return

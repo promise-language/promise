@@ -166,7 +166,9 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					c.trackStringTemp(result)
 				}
 			} else if named == types.TypVector {
-				if !isIdentSource {
+				if c.optionalFieldVector {
+					c.optionalFieldVector = false
+				} else if !isIdentSource {
 					if elemType, ok := types.AsVector(exprType); ok {
 						c.trackVectorTempWithElemType(result, elemType)
 					} else {
@@ -2210,6 +2212,10 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				// present flag so its scope cleanup won't double-free the inner value
 				// that now lives in the constructor field.
 				c.neutralizeForceUnwrapSource(arg.Value)
+				// T0353: For optional fields wrapping stmtTemp-tracked heap values
+				// (Vector, Channel), the wrapped {i1, i8*} won't match the bare i8*
+				// in stmtTempMap. Claim preWrapVal too.
+				c.claimStringTemp(preWrapVal)
 				// B0168: Claim string temp — ownership transferred to constructor field.
 				c.claimStringTemp(val)
 				// B0233: Claim heap temp — ownership transferred to constructor field.
@@ -2229,10 +2235,12 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 			if defExpr, ok := c.info.FieldDefaults[f]; ok {
 				val := c.genExpr(defExpr)
+				preWrapVal := val // T0353: needed for optional-wrapped stmtTemp claim
 				val = maybeWrapOptional(val, defExpr, f.Name(), fieldIdx)
 				c.block.NewStore(val, fieldPtr)
-				c.claimStringTemp(val) // B0168: ownership transferred to field
-				c.claimHeapTemp(val)   // B0233: ownership transferred to field
+				c.claimStringTemp(preWrapVal) // T0353: claim bare i8* hidden inside the wrap
+				c.claimStringTemp(val)        // B0168: ownership transferred to field
+				c.claimHeapTemp(val)          // B0233: ownership transferred to field
 			} else {
 				c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)
 			}
@@ -3676,6 +3684,14 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		// as a temp (the owner's drop handles the string's lifetime).
 		if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
 			c.optionalFieldString = true
+		}
+		// T0354: Same for vector fields — the owner's drop frees the inner Vector
+		// via optfield.drop. Suppress unwrap-path stmt-temp tracking to avoid
+		// double-free at statement end.
+		if opt, ok := fType.(*types.Optional); ok && ownerNamed != nil && ownerNamed.HasDrop() {
+			if _, isVec := types.AsVector(opt.Elem()); isVec {
+				c.optionalFieldVector = true
+			}
 		}
 	}
 
@@ -8512,9 +8528,10 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	// B0299: Skip when optionalFieldString is set — the field comes from a
 	// droppable type whose drop handles the string's lifetime. Tracking it
 	// as a temp would cause double-free (statement-end + owner drop).
+	// T0354: Same for optionalFieldVector — vector field on droppable type.
 	// T0350: Type-aware tracking — strings via promise_string_drop, vectors via
 	// Vector.drop with element type so heap elements (e.g., string[]) are dropped.
-	if _, isIdent := expr.(*ast.IdentExpr); !isIdent && c.tempTrackingEnabled && !c.optionalFieldString {
+	if _, isIdent := expr.(*ast.IdentExpr); !isIdent && c.tempTrackingEnabled && !c.optionalFieldString && !c.optionalFieldVector {
 		if result.Type().Equal(irtypes.I8Ptr) {
 			innerType := c.info.Types[expr]
 			if opt, ok := innerType.(*types.Optional); ok {

@@ -167,6 +167,7 @@ type Compiler struct {
 	dupContainerFieldAccess bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
 	optionalStringDup       value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
 	optionalFieldString     bool                // B0190: set by genFieldAccess when loading a string? field from a droppable type
+	optionalFieldVector     bool                // T0354: set by genFieldAccess when loading a T[]? field from a droppable type
 
 	// T0088: Statement-level tracking for heap-allocated droppable instances.
 	// Tracks constructor results (e.g., _FnIter[T]) in iterator chains and drops
@@ -6629,6 +6630,15 @@ func (c *Compiler) emitOptionalFieldDrop(opt *types.Optional, f *types.Field, la
 
 	c.block = dropBlock
 	innerVal := c.block.NewExtractValue(fieldVal, 1)
+
+	// T0354: For Vector inner type, iterate elements and drop heap elements
+	// (strings, enums, user types, tuples) before freeing the buffer. Without
+	// this, optional `T[]?` fields leak per-element heap allocations.
+	if innerNamed == types.TypVector {
+		if elemType, isVec := types.AsVector(elem); isVec {
+			c.emitVectorElementDropLoop(innerVal, elemType)
+		}
+	}
 
 	// String/container: inner is i8*, call drop directly
 	c.block.NewCall(dropFunc, innerVal)

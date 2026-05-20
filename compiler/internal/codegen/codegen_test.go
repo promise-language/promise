@@ -20633,3 +20633,70 @@ func TestLambdaEnvDropMutexGuardCapture(t *testing.T) {
 	`)
 	assertContains(t, ir, "call void @MutexGuard.drop(")
 }
+
+// T0373: Assigning a T? value into a T?? variable wraps the value once
+// (lifting from single- to double-Optional). Before the fix, the wrap
+// predicate skipped because the expression type was already Optional,
+// leaving the T? value stored into a T?? slot → store-type panic.
+func TestDoubleOptionalDeclWrapsOnce(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? a = 7;
+			int?? b = a;
+		}
+	`)
+	// b's alloca is a double-Optional struct {i1, {i1, i64}}.
+	assertContains(t, ir, "%b = alloca { i1, { i1, i64 } }")
+	// a wrapped once into double-Optional via two insertvalues:
+	// one for the outer present flag, one for the inner T? value.
+	assertContains(t, ir, "insertvalue { i1, { i1, i64 } } undef, i1 true, 0")
+	assertContains(t, ir, "insertvalue { i1, { i1, i64 } } %")
+}
+
+// T0373: Reassigning a T? value into a T?? local wraps the value at the
+// target's depth via insertvalue.
+func TestDoubleOptionalReassignWrapsOnce(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int?? b = none;
+			int? a = 5;
+			b = a;
+		}
+	`)
+	assertContains(t, ir, "%b = alloca { i1, { i1, i64 } }")
+	assertContains(t, ir, "insertvalue { i1, { i1, i64 } } undef, i1 true, 0")
+}
+
+// T0373: Returning a T? expression from a T??-returning function wraps
+// once at the return site.
+func TestDoubleOptionalReturnWrapsOnce(t *testing.T) {
+	ir := generateIR(t, `
+		f(int? a) int?? {
+			return a;
+		}
+		main() {
+			int?? r = f(3);
+		}
+	`)
+	// Function signature is T? in, T?? out (no caller-side wrap needed).
+	assertContains(t, ir, "define { i1, { i1, i64 } } @__user.f({ i1, i64 } %a)")
+	// Return wraps the T? value once into T?? via insertvalue.
+	assertContains(t, ir, "insertvalue { i1, { i1, i64 } } undef, i1 true, 0")
+}
+
+// T0373: Value-type constructors take a distinct codegen path
+// (genValueTypeConstructor) from heap-type constructors. Verify the
+// value-type ctor's maybeWrapOptional wraps a T? arg into a T?? field.
+func TestDoubleOptionalValueCtorWrapsOnce(t *testing.T) {
+	ir := generateIR(t, `
+		type VT { int?? data `+"`value;"+` }
+		main() {
+			int? a = 5;
+			VT v = VT(data: a);
+		}
+	`)
+	// Value-type Value struct embeds the field directly: {vtable, {i1,{i1,i64}}}.
+	assertContains(t, ir, "%promise_VT_v = type { i8*, { i1, { i1, i64 } } }")
+	// Field arg is wrapped once before being placed in the Value struct.
+	assertContains(t, ir, "insertvalue { i1, { i1, i64 } } undef, i1 true, 0")
+}

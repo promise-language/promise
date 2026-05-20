@@ -755,12 +755,21 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		c.optionalContainerDup = nil
 	}
 
-	// Wrap value in Optional if declared type is Optional but expr is not
+	// Wrap value in Optional if declared type is Optional and expr differs in shape.
+	// Using Identical (not "is exprOpt?") correctly handles T?? = T? — both are
+	// Optional but at different depths, so a wrap is still needed.
 	if declType != nil {
 		if _, isOpt := declType.(*types.Optional); isOpt {
-			if _, isNone := exprType.(*types.Named); isNone && exprType == types.TypNone {
+			// Substitute exprType under typeSubst so generic body bodies (where the
+			// AST records `T?` and the substitution maps T → some Optional) compare
+			// against the resolved declType correctly.
+			cmpExprType := exprType
+			if c.typeSubst != nil && cmpExprType != nil {
+				cmpExprType = types.Substitute(cmpExprType, c.typeSubst)
+			}
+			if _, isNone := cmpExprType.(*types.Named); isNone && cmpExprType == types.TypNone {
 				// NoneLit already handled via targetType
-			} else if _, exprOpt := exprType.(*types.Optional); !exprOpt {
+			} else if !types.Identical(cmpExprType, declType) {
 				val = c.wrapOptional(val, lt.(*irtypes.StructType))
 			}
 		}
@@ -4582,11 +4591,13 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				}
 			}
 
-			// Wrap value in Optional if target is Optional but expr is not
+			// Wrap value in Optional if target is Optional and expr differs in shape.
+			// Using Identical (not "is exprOpt?") correctly handles T?? = T? — both
+			// are Optional but at different depths, so a wrap is still needed.
 			if _, isOpt := targetType.(*types.Optional); isOpt {
 				if exprType == types.TypNone {
 					// none: already handled by genExpr (zeroinit)
-				} else if _, exprOpt := exprType.(*types.Optional); !exprOpt {
+				} else if !types.Identical(exprType, targetType) {
 					val = c.wrapOptional(val, alloca.ElemType.(*irtypes.StructType))
 				}
 			}
@@ -4682,7 +4693,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			if _, isOpt := memberType.(*types.Optional); isOpt {
 				if exprType != types.TypNone {
-					if _, exprOpt := exprType.(*types.Optional); !exprOpt {
+					// Use Identical (not "is exprOpt?") so T?? = T? still wraps.
+					if !types.Identical(exprType, memberType) {
 						optType := c.resolveType(memberType)
 						if st, ok := optType.(*irtypes.StructType); ok {
 							val = c.wrapOptional(val, st)
@@ -7612,27 +7624,14 @@ func (c *Compiler) lookupLocalType(s *ast.TypedVarDecl) types.Type {
 	if !ok {
 		return nil // use expression type
 	}
-
-	exprType := c.info.Types[s.Value]
-	if c.typeSubst != nil && exprType != nil {
-		exprType = types.Substitute(exprType, c.typeSubst)
+	// Always resolve the declared type from the AST so nested OptionalTypeRef
+	// (T??, T???) preserves its full depth even when the value expr is itself
+	// Optional (e.g. `T?? b = a` where a:T?). Using exprType here would collapse
+	// the alloca to T?, mismatching sema and breaking unwraps.
+	if t := c.resolveTypeRefToType(optRef); t != nil {
+		return t
 	}
-
-	// If value is NoneLit, resolve the inner type from the AST OptionalTypeRef
-	if exprType == types.TypNone || exprType == nil {
-		innerType := c.resolveTypeRefToType(optRef.Inner)
-		if innerType != nil {
-			return types.NewOptional(innerType)
-		}
-		// Fallback: search sema scopes
-		return c.lookupVarType(s.Name)
-	}
-
-	// Value has a concrete type — wrap in Optional
-	if _, isOpt := exprType.(*types.Optional); isOpt {
-		return exprType // already Optional
-	}
-	return types.NewOptional(exprType)
+	return c.lookupVarType(s.Name)
 }
 
 // resolveTypeRefToType resolves an AST TypeRef to a types.Type.

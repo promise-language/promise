@@ -1,0 +1,136 @@
+// T0373: Double-Optional wrap sites — exercises every codegen wrap path
+// where the target is `T??` and the expression is at depth `T?`.
+//
+// Each path was previously broken: the wrap predicate used "is exprOpt?"
+// which incorrectly treated `T?` as already at the right depth, leaving
+// `T?` values stored into `T??` slots → store/insertvalue type panic.
+//
+// Inner-value verification uses `is present`/`is absent` (not nested if-let
+// chains) to avoid hitting T0391, a separate preexisting double-free in
+// if-let unwrap of optional locals when the inner type is heap-owning.
+type _Box {
+  int n;
+}
+
+type _IntHolder {
+  int?? data;
+}
+
+type _VTHolder {
+  int?? data `value;
+}
+
+// --- Vector literal of Optional[heap] (the original T0373 repro) ---
+
+vector_literal_of_optional_heap() `test {
+  _Box? a = _Box(n: 5);
+  _Box? b = none;
+  _Box?[] v = [a, b];
+  assert(v.len == 2, "len");
+}
+
+vector_literal_of_optional_int() `test {
+  int? a = 1;
+  int? b = none;
+  int?[] v = [a, b];
+  assert(v.len == 2, "len");
+}
+
+// --- Direct variable declaration `T?? x = e` where e: T? ---
+
+double_optional_decl_from_some() `test {
+  int? a = 7;
+  int?? b = a;
+  assert(b is present, "outer present");
+}
+
+double_optional_decl_from_inner_none() `test {
+  int? a = none;
+  int?? b = a;
+  // Outer is some(none): present at outer level, none inside.
+  assert(b is present, "outer present (wrapping inner none)");
+}
+
+double_optional_decl_from_outer_none() `test {
+  int?? b = none;
+  assert(b is absent, "outer absent");
+}
+
+// --- Reassignment `t = e` where t: T??, e: T? ---
+
+double_optional_reassign_from_some() `test {
+  int?? b = none;
+  int? a = 42;
+  b = a;
+  assert(b is present, "reassigned outer present");
+}
+
+double_optional_reassign_from_inner_none() `test {
+  int?? b = none;
+  int? a = none;
+  b = a;
+  assert(b is present, "reassigned outer present even when inner is none");
+}
+
+// --- Member assignment `holder.field = e` where field: T??, e: T? ---
+
+double_optional_member_assign() `test {
+  _IntHolder h = _IntHolder(data: none);
+  int? a = 99;
+  h.data = a;
+  assert(h.data is present, "member outer present");
+}
+
+// --- Constructor field init: int — verifies the heap-ctor wrap site
+//     (T0392 leaks the inner _Box for heap-typed Optional fields, so this
+//     uses int? to avoid that preexisting leak; coverage of the heap path
+//     is via Go shape-check tests in codegen_test.go).
+
+double_optional_ctor_int_field() `test {
+  int? a = 7;
+  _IntHolder h = _IntHolder(data: a);
+  assert(h.data is present, "int ctor outer present");
+}
+
+// Value-type constructor wrap (expr.go genValueTypeConstructor maybeWrapOptional):
+// distinct codepath from heap-type ctor — value types embed fields directly in
+// the Value struct, no instance struct.
+double_optional_ctor_value_type() `test {
+  int? a = 4;
+  _VTHolder v = _VTHolder(data: a);
+  assert(v.data is present, "value-ctor outer present");
+
+  _VTHolder w = _VTHolder(data: none);
+  assert(w.data is absent, "value-ctor outer absent");
+}
+
+// --- Function arg wrap: param T??, arg T? — primitive (no double-free) ---
+
+_take_double_int(int?? x) bool {
+  return x is present;
+}
+
+double_optional_func_arg_int() `test {
+  int? a = 8;
+  bool got = _take_double_int(a);
+  assert(got, "arg present");
+
+  int? b = none;
+  bool got2 = _take_double_int(b);
+  assert(got2, "outer always present even when inner none");
+
+  bool got3 = _take_double_int(none);
+  assert(!got3, "outer absent when arg is none literal");
+}
+
+// --- Return wrap: function returns T??, body returns T? — primitive ---
+
+_returns_double_int(int? a) int?? {
+  return a;
+}
+
+double_optional_return_int() `test {
+  int? a = 33;
+  int?? r = _returns_double_int(a);
+  assert(r is present, "return outer present");
+}

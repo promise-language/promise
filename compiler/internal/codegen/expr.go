@@ -2185,8 +2185,11 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 
 		// maybeWrapOptional wraps val in an optional struct when the field type
 		// is T? but the expression produces a non-optional, non-none value.
+		// Uses Identical (not "is exprOpt?") so a T? expr targeting a T?? field
+		// still gets wrapped to match the slot's depth.
 		maybeWrapOptional := func(val value.Value, expr ast.Expr, fieldName string, fieldIdx int) value.Value {
-			if _, isOpt := fieldTypeMap[fieldName].(*types.Optional); !isOpt {
+			fieldType := fieldTypeMap[fieldName]
+			if _, isOpt := fieldType.(*types.Optional); !isOpt {
 				return val
 			}
 			exprType := c.info.Types[expr]
@@ -2196,7 +2199,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if exprType == types.TypNone {
 				return val
 			}
-			if _, exprOpt := exprType.(*types.Optional); exprOpt {
+			if types.Identical(exprType, fieldType) {
 				return val
 			}
 			return c.wrapOptional(val, layout.Instance.Fields[fieldIdx].LLVMType.(*irtypes.StructType))
@@ -2521,7 +2524,8 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 	}
 
 	maybeWrapOptional := func(v value.Value, expr ast.Expr, fieldName string, fieldIdx int) value.Value {
-		if _, isOpt := fieldTypeMap[fieldName].(*types.Optional); !isOpt {
+		fieldType := fieldTypeMap[fieldName]
+		if _, isOpt := fieldType.(*types.Optional); !isOpt {
 			return v
 		}
 		exprType := c.info.Types[expr]
@@ -2531,7 +2535,9 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		if exprType == types.TypNone {
 			return v
 		}
-		if _, exprOpt := exprType.(*types.Optional); exprOpt {
+		// Use Identical (not "is exprOpt?") so a T? expr targeting a T?? field
+		// still gets wrapped to match the slot's depth.
+		if types.Identical(exprType, fieldType) {
 			return v
 		}
 		return c.wrapOptional(v, layout.Value.Fields[fieldIdx].LLVMType.(*irtypes.StructType))
@@ -6595,8 +6601,9 @@ func (c *Compiler) wrapReturnOptional(val value.Value, expr ast.Expr, retType ty
 	if exprType == types.TypNone {
 		return val
 	}
-	// Already Optional — no wrapping needed
-	if _, exprOpt := exprType.(*types.Optional); exprOpt {
+	// Same shape — no wrapping needed. Use Identical (not "is exprOpt?") so
+	// returning T? from a T??-returning function still wraps.
+	if types.Identical(exprType, retType) {
 		return val
 	}
 	lt := c.resolveType(retType)

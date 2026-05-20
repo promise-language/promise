@@ -974,8 +974,9 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 			if c.typeSubst != nil && argType != nil {
 				argType = types.Substitute(argType, c.typeSubst)
 			}
-			_, argIsOpt := argType.(*types.Optional)
-			if !argIsOpt {
+			// Use Identical (not "is argOpt?") so a T? arg targeting a T?? param
+			// still gets wrapped to match the param's depth.
+			if !types.Identical(argType, paramType) {
 				lt := c.resolveType(paramType)
 				if xn, ok := argType.(*types.Named); ok && xn == types.TypNone {
 					// none → T?: produce zeroinitializer
@@ -992,7 +993,7 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 						c.claimStringTemp(v)
 						c.claimHeapTemp(v)
 					}
-					// T → T?: wrap as some
+					// T → T?: wrap as some (or T? → T??)
 					v = c.wrapOptional(v, st)
 				}
 			}

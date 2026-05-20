@@ -200,7 +200,10 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	}
 
 	c.checkExpr(s.Value)
-	c.tryMove(s.Value)
+	// T0351: assignment consumes the RHS — borrowed params cause a double-free
+	// because the caller still drops the original. tryMoveConsume rejects them
+	// at compile time (matches T0338/T0349 pattern for raise/yield/select-send).
+	c.tryMoveConsume(s.Value)
 
 	// Simple assignment resurrects the target variable.
 	if s.Op == ast.OpAssign {

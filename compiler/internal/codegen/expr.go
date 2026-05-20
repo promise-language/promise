@@ -3153,7 +3153,9 @@ func (c *Compiler) genMutexGuardBorrow(e *ast.MemberExpr, elemType types.Type) v
 
 // genMutexGuardBorrowSet generates the MutexGuard .borrow setter — stores T into the Mutex through the guard.
 // Handles compound assignment (+=, -=, etc.) by reading the current value first.
-func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignOp, val value.Value, elemType types.Type) {
+// srcExpr (may be nil) is the RHS source AST; used by the T0351 defensive dup
+// path to detect a borrow-param string and dup it before store.
+func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignOp, val value.Value, elemType types.Type, srcExpr ast.Expr) {
 	guardRaw := c.genExpr(target.Target)
 	elemLLVM := c.resolveType(elemType)
 
@@ -3177,6 +3179,20 @@ func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignO
 
 	// Drop old value if T is droppable (T0270)
 	c.emitInnerDrop(c.block, mutexPtr, mutexStructTy, elemType, mutexFieldValue)
+
+	// T0351: defensive dup for borrow-param strings. The sema layer already
+	// rejects `g.borrow = borrow_param` via tryMoveConsume in checkAssignStmt,
+	// but mirror the T0095 string-field setter pattern as a runtime safety net
+	// in case a future codegen path bypasses sema.
+	if op == ast.OpAssign && srcExpr != nil && extractNamed(elemType) == types.TypString {
+		if ident, ok := srcExpr.(*ast.IdentExpr); ok {
+			if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
+				c.clearDropFlag(ident.Name)
+			} else {
+				val = c.dupString(val)
+			}
+		}
+	}
 
 	c.block.NewStore(val, valField)
 }

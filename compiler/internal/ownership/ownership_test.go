@@ -3674,3 +3674,168 @@ func TestT0349_DirectChannelSendOwnedLocalOK(t *testing.T) {
 		}
 	`)
 }
+
+// === T0351: AssignStmt RHS borrow-param consume rejected ===
+//
+// `x = borrow_param`, `obj.field = borrow_param`, `vec[i] = borrow_param`,
+// `m[k] = borrow_param`, `vec[i:j] = borrow_param`, and `g.borrow = borrow_param`
+// all consume the RHS — caller still drops the original, so a double-free
+// occurs at runtime. tryMoveConsume in checkAssignStmt rejects them at
+// compile time with "cannot move borrowed parameter".
+
+// Simple variable reassignment to a borrowed param double-frees.
+func TestT0351_AssignVarBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		swap(string s) {
+			string x = "init";
+			x = s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Simple variable reassignment to an owned local works.
+func TestT0351_AssignVarOwnedLocalOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			string x = "init";
+			string y = "other";
+			x = y;
+		}
+	`)
+}
+
+// Field assignment to a borrowed param double-frees.
+func TestT0351_AssignFieldBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string s; new(~this, ~string s) { this.s = s; } }
+		store(~Box b, string s) {
+			b.s = s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Field assignment with ~ param works.
+func TestT0351_AssignFieldMoveParamOK(t *testing.T) {
+	ownerOK(t, `
+		type Box { string s; new(~this, ~string s) { this.s = s; } }
+		store(~Box b, ~string s) {
+			b.s = s;
+		}
+		test() {}
+	`)
+}
+
+// Vector index assign to a borrowed param double-frees.
+func TestT0351_AssignIndexVectorBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		put(string[] vec, string s) {
+			vec[0] = s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Map index assign to a borrowed param double-frees.
+func TestT0351_AssignIndexMapBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		put(map[string,string] m, string k, string v) {
+			m[k] = v;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'v'")
+}
+
+// Vector slice assign to a borrowed-param Vector double-frees.
+func TestT0351_AssignSliceBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		put(string[] vec, string[] s) {
+			vec[1:3] = s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// MutexGuard.borrow setter assigning a borrowed param double-frees.
+func TestT0351_AssignMutexGuardBorrowBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		forward(Mutex[string] m, string s) {
+			use g := m.lock();
+			g.borrow = s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// MutexGuard.borrow setter assigning a ~ param works.
+func TestT0351_AssignMutexGuardBorrowMoveParamOK(t *testing.T) {
+	ownerOK(t, `
+		forward(Mutex[string] m, ~string s) {
+			use g := m.lock();
+			g.borrow = s;
+		}
+		test() {}
+	`)
+}
+
+// MutexGuard.borrow setter with an owned local works.
+func TestT0351_AssignMutexGuardBorrowOwnedLocalOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			m := Mutex[string]("init");
+			use g := m.lock();
+			string s = "new";
+			g.borrow = s;
+		}
+	`)
+}
+
+// Copy types are unaffected by tryMoveConsume — int reassignment from a
+// non-~ param is fine.
+func TestT0351_AssignCopyParamUnaffected(t *testing.T) {
+	ownerOK(t, `
+		swap(int n) {
+			int x = 0;
+			x = n;
+		}
+		test() {}
+	`)
+}
+
+// Compound assignment (`+=`, `-=`, etc.) takes the same path as plain
+// assignment in checkAssignStmt — tryMoveConsume runs unconditionally.
+// Borrowed-param RHS is rejected for all assign ops, including compound.
+// This is a deliberately conservative consequence of T0351; the codegen
+// panic on `string +=` (T0357) makes the practical user-visible impact
+// minimal.
+func TestT0351_CompoundAssignBorrowedParam(t *testing.T) {
+	errs := ownerErrs(t, `
+		append_to(string s) {
+			string x = "init";
+			x += s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Owned-local compound assign reaches sema move (drop flag clear) — the
+// codegen panic on string += (T0357) is independent of the sema layer.
+// This test confirms the sema accepts the move; codegen will then panic
+// at run time, but that's a separate bug.
+func TestT0351_CompoundAssignOwnedLocalMoves(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			string x = "hello";
+			string y = "world";
+			x += y;
+		}
+	`)
+}

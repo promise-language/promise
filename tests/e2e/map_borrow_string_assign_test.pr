@@ -1,11 +1,14 @@
-// B0350: Map[K,string] index assign from borrow param must dup to avoid double-free.
+// B0350 / T0351: `Map[K,string] index assign` from a borrow param double-frees
+// because the caller still owns the value. T0351 now rejects this at sema.
+// Setters that store into a map must take `~string` (consume) and callers
+// must clone if they need to retain the source.
 type Sink {
   map[string, string] m;
 
   drop(~this) {
   }
 
-  set(~this, string key, string value) {
+  set(~this, ~string key, ~string value) {
     this.m[key] = value;
   }
 
@@ -17,8 +20,8 @@ type Sink {
 test_borrow_param_into_map() `test {
   map[string, string] init = {:};
   sink := Sink(m: init);
-  sink.set("a", "hello");
-  sink.set("b", "world");
+  sink.set("a".clone(), "hello".clone());
+  sink.set("b".clone(), "world".clone());
 
   if v := sink.get("a") {
     assert(v == "hello", "a == hello");
@@ -35,8 +38,8 @@ test_borrow_param_into_map() `test {
 test_borrow_param_overwrite() `test {
   map[string, string] init = {:};
   sink := Sink(m: init);
-  sink.set("key", "first");
-  sink.set("key", "second");
+  sink.set("key".clone(), "first".clone());
+  sink.set("key".clone(), "second".clone());
 
   if v := sink.get("key") {
     assert(v == "second", "overwrite");
@@ -49,7 +52,7 @@ test_borrow_from_variable() `test {
   map[string, string] init = {:};
   sink := Sink(m: init);
   string val = "from_var";
-  sink.set("k", val);
+  sink.set("k".clone(), val.clone());
 
   if v := sink.get("k") {
     assert(v == "from_var", "from variable");
@@ -58,13 +61,11 @@ test_borrow_from_variable() `test {
   }
 }
 
-// B0350: Heap-allocated string (not a literal) stored via borrow param
-// must not double-free. Tests the dup path with a non-rodata string.
-test_heap_string_borrow_into_map() `test {
+test_heap_string_into_map() `test {
   string val = "he" + "llo";
   map[string, string] init = {:};
   sink := Sink(m: init);
-  sink.set("k", val);
+  sink.set("k".clone(), val.clone());
   if v := sink.get("k") {
     assert(v == "hello", "heap string stored");
   } else {

@@ -377,7 +377,7 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
   int _pos;
   int _end;
 
-  new(~this, File file, int buf_size = 4096) `public `doc("Wraps a file in a buffered reader.") {
+  new(~this, ~File file, int buf_size = 4096) `public `doc("Wraps a file in a buffered reader.") {
     this._file = file;
     this._buf = Vector[u8].filled(0u8, buf_size);
     this._pos = 0;
@@ -466,7 +466,7 @@ type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batc
   u8[] _buf;
   int _len;
 
-  new(~this, File file, int buf_size = 4096) `public `doc("Wraps a file in a buffered writer.") {
+  new(~this, ~File file, int buf_size = 4096) `public `doc("Wraps a file in a buffered writer.") {
     this._file = file;
     this._buf = Vector[u8].filled(0u8, buf_size);
     this._len = 0;

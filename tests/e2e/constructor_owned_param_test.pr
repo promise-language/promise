@@ -1,16 +1,16 @@
 // T0322: Constructors with plain (non-`~`) heap-typed params must register
 // drop bindings on the param so they're freed at scope exit if not moved
-// into a field. The caller (genConstructorCallMono) clears the drop flag
-// for every arg except the strdup-borrow exception (string param on a
-// type with drop / synth-drop), so the callee must own and drop them.
-// --- Case 1: plain `int[]` param stored into a field. The field-store
+// into a field. T0351 now rejects `this.field = borrow_param` at sema; the
+// store-cases below use `~` to consume; the read-only cases keep the
+// non-`~` borrow form to exercise the T0322 scope-exit drop path.
+// --- Case 1: `~int[]` param stored into a field. The field-store
 // clears the param's drop flag, so the scope-exit drop is skipped. The
 // type's synth-drop later frees the int[] when the instance dies.
 // Expected: no leak, no double-free.
 type _StoreIntVec {
   int[] data;
 
-  new(~this, int[] codes) {
+  new(~this, ~int[] codes) {
     this.data = codes;
   }
 }
@@ -47,25 +47,24 @@ test_plain_intvec_param_not_stored() `test {
   assert(t.len == 4, "captured length only");
 }
 
-// --- Case 3: plain `string` param on type WITH drop. This is the
-// strdup-borrow exception: the caller keeps ownership; the constructor
-// body strdups when storing into the field. The callee must NOT register
-// a drop binding (it would double-free). Regression check.
+// --- Case 3: `~string` param on type WITH drop. After T0351 the caller
+// must consume or clone; the constructor moves the string into the field.
+// Regression check for the move path.
 type _StringWithDrop {
   string s;
 
   drop(~this) {
   }
 
-  new(~this, string name) {
+  new(~this, ~string name) {
     this.s = name;
   }
 }
 
 test_string_param_strdup_borrow() `test {
   string n = "hello".to_string();
-  _StringWithDrop t = _StringWithDrop(name: n);
-  assert(t.s == "hello", "field strdup'd from caller");
+  _StringWithDrop t = _StringWithDrop(name: n.clone());
+  assert(t.s == "hello", "field initialized from cloned string");
 }
 
 // --- Case 4: `~int[]` param (move). Existing T0087 path. Regression check.
@@ -92,7 +91,7 @@ test_move_intvec_param() `test {
 type _FailableCtor {
   int[] data;
 
-  new!(~this, int[] codes) {
+  new!(~this, ~int[] codes) {
     if codes.len == 0 {
       raise error(message: "empty");
     }
@@ -125,14 +124,14 @@ test_failable_ctor_error_path() `test {
   assert(try_failable_ctor_error(), "raise on empty codes was caught");
 }
 
-// --- Case 6: two heap params, one stored and one not. The stored one
-// has its drop flag cleared at the field-store; the unstored one is
-// dropped at scope exit. Both must be freed exactly once.
+// --- Case 6: two heap params, one stored (`~`) and one not (borrow). The
+// stored one has its drop flag cleared at the field-store; the unstored
+// one is dropped at scope exit. Both must be freed exactly once.
 type _MixedParams {
   int[] data;
   int note_len;
 
-  new(~this, int[] codes, string note) {
+  new(~this, ~int[] codes, string note) {
     this.data = codes;
     this.note_len = note.len;
   }
@@ -148,13 +147,13 @@ test_mixed_heap_params() `test {
   assert(t.note_len == 3, "string length captured");
 }
 
-// --- Case 7: generic user type with a plain heap param. Exercises the
+// --- Case 7: generic user type with `~` heap params. Exercises the
 // mono.go defineMethodFunc path where typeSubst is active.
 type _GenericBox[T] {
   T item;
   int[] meta;
 
-  new(~this, T value, int[] meta) {
+  new(~this, ~T value, ~int[] meta) {
     this.item = value;
     this.meta = meta;
   }

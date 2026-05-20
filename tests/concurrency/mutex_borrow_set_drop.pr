@@ -69,3 +69,31 @@ test_borrow_set_compound_assign() `test {
 
 // T0274: Mutex[Weak[T]] causes stack overflow at runtime (pre-existing).
 // test_borrow_set_weak skipped until T0274 is fixed.
+
+// T0351: `g.borrow = s` with a borrowed-param `s` double-frees because the
+// caller still drops the original. Sema now rejects the borrow form via
+// tryMoveConsume in checkAssignStmt; the supported alternatives are `~string`
+// (consume the param) or `.clone()` (preserve the caller's copy).
+
+forward_move(~Mutex[string] m, ~string s) {
+  use g := m.lock();
+  g.borrow = s;
+  assert(g.borrow == "moved value", "moved-in value present");
+}
+
+forward_clone(~Mutex[string] m, string s) {
+  use g := m.lock();
+  g.borrow = s.clone();
+  assert(g.borrow == "cloned value", "cloned value present");
+}
+
+test_borrow_set_move_param() `test {
+  m := Mutex[string]("init");
+  forward_move(m, "moved " + "value");
+}
+
+test_borrow_set_clone_borrow() `test {
+  m := Mutex[string]("init");
+  string heap_str = "cloned " + "value";
+  forward_clone(m, heap_str);
+}

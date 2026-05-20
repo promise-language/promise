@@ -233,7 +233,7 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
   string _data;
   int _pos;
 
-  new(~this, string data) {
+  new(~this, ~string data) {
     this._data = data;
     this._pos = 0;
   }

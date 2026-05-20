@@ -10,7 +10,7 @@ type Box[T] {
     return this.value;
   }
 
-  set(~this, T val) {
+  set(~this, ~T val) {
     this.value = val;
   }
 }

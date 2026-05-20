@@ -4400,15 +4400,17 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				if ident, ok := s.Value.(*ast.IdentExpr); ok {
 					if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
 						// Has drop flag: move ownership
-						c.genMemberAssign(target, s.Op, val)
+						c.genMemberAssign(target, s.Op, val, s.Value)
 						c.clearDropFlag(ident.Name)
 					} else {
-						// No drop flag: dup for exclusive ownership
-						c.genMemberAssign(target, s.Op, c.dupString(val))
+						// No drop flag: dup for exclusive ownership.
+						// Pass nil srcExpr so genMutexGuardBorrowSet's defensive
+						// dup doesn't fire — already duped here.
+						c.genMemberAssign(target, s.Op, c.dupString(val), nil)
 					}
 				} else {
 					// Expression result: store directly, claim temp
-					c.genMemberAssign(target, s.Op, val)
+					c.genMemberAssign(target, s.Op, val, s.Value)
 					c.claimStringTemp(val)
 					// B0312: When RHS is opt!, neutralize the source optional so its
 					// drop doesn't double-free the inner value now owned by this field.
@@ -4417,7 +4419,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				break
 			}
 		}
-		c.genMemberAssign(target, s.Op, val)
+		c.genMemberAssign(target, s.Op, val, s.Value)
 		// Clear drop flag on RHS if it's being moved via simple assign
 		if s.Op == ast.OpAssign {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
@@ -4544,7 +4546,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 // If the member is a setter property, emits a setter call instead.
 // Uses lookupTypeLayout for layout-driven field types that work for both
 // regular and monomorphic types.
-func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val value.Value) {
+// srcExpr (may be nil) is the RHS source AST; used by the T0351 defensive
+// dup path in genMutexGuardBorrowSet to detect a borrow-param string.
+func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val value.Value, srcExpr ast.Expr) {
 	// Check for setter property
 	targetType := c.info.Types[target.Target]
 	if c.typeSubst != nil {
@@ -4559,13 +4563,13 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 			if c.typeSubst != nil {
 				resolvedElem = types.Substitute(elem, c.typeSubst)
 			}
-			c.genMutexGuardBorrowSet(target, op, val, resolvedElem)
+			c.genMutexGuardBorrowSet(target, op, val, resolvedElem, srcExpr)
 			return
 		}
 		guardNamed := extractNamed(targetType)
 		if guardNamed == types.TypMutexGuard {
 			if tp := c.resolveTypeParam(types.TypMutexGuard.TypeParams()[0]); tp != nil {
-				c.genMutexGuardBorrowSet(target, op, val, tp)
+				c.genMutexGuardBorrowSet(target, op, val, tp, srcExpr)
 				return
 			}
 		}

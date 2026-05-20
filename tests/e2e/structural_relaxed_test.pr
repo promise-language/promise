@@ -172,7 +172,7 @@ type Config {
     } else {
       this.timeout = 30;
     }
-    this.mode = mode;
+    this.mode = mode.clone();
   }
 }
 

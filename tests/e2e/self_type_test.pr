@@ -138,7 +138,7 @@ test_vector_filled_string_uses_self() `test {
 type Counter[T] {
   T value;
   int count;
-  new(~this, T v) {
+  new(~this, ~T v) {
     this.value = v;
     this.count = 0;
   }
@@ -211,7 +211,7 @@ test_self_optional_factory_none() `test {
 
 type Holder[T] {
   T value;
-  new(~this, T v) {
+  new(~this, ~T v) {
     this.value = v;
   }
 

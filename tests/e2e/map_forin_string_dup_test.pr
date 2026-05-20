@@ -1,12 +1,14 @@
 // B0343: for-in map iteration must dup string keys/values to prevent
 // double-free when iteration variables are passed to method calls.
+// T0351: setter consumes both k and v (`~string`); callers clone if they
+// need to retain the originals.
 type Holder {
   map[string, string] data;
 
   drop(~this) {
   }
 
-  set(~this, string k, string v) {
+  set(~this, ~string k, ~string v) {
     this.data[k] = v;
   }
 

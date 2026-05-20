@@ -234,3 +234,21 @@ test_mutex_borrow_through_if() `test {
   };
   assert(borrowed.len == 1, "mutex if borrow len");
 }
+
+// T0383: `vec[i] = guard.borrow` for non-string heap element types must dup
+// (MutexGuard analog of arc_borrow_index_assign_vector). Without dup, both
+// Vector.drop and MutexGuard.drop free the same inner buffer → double-free.
+test_mutex_borrow_index_assign_vector() `test {
+  vec := string[][]();
+  v1 := string[]();
+  v1.push("init" + "");
+  vec.push(v1);
+
+  v2 := string[]();
+  v2.push("hello" + "");
+  m := Mutex[string[]](v2);
+  use g := m.lock();
+
+  vec[0] = g.borrow;
+  assert(vec[0].len == 1, "vec[0] len after mutex borrow assign");
+}

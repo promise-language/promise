@@ -163,18 +163,26 @@ func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
 		return ownerNamed != nil && ownerNamed.HasDrop()
 	}
 	// B0204: IndexExpr on Vector[string] → string is dup'd by dup-on-read in genVectorIndex.
-	if isString {
-		if idx, ok := expr.(*ast.IndexExpr); ok {
-			targetType := c.info.Types[idx.Target]
+	// T0383: IndexExpr on Vector[Vector|Channel|Arc|Weak] → element is dup'd by
+	// dup-on-read in genVectorIndex (mirrors B0219 for fields).
+	if idx, ok := expr.(*ast.IndexExpr); ok {
+		targetType := c.info.Types[idx.Target]
+		if c.typeSubst != nil {
+			targetType = types.Substitute(targetType, c.typeSubst)
+		}
+		if elem, isVec := types.AsVector(targetType); isVec {
+			resolvedElem := elem
 			if c.typeSubst != nil {
-				targetType = types.Substitute(targetType, c.typeSubst)
+				resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
 			}
-			if elem, isVec := types.AsVector(targetType); isVec {
-				resolvedElem := elem
-				if c.typeSubst != nil {
-					resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+			if isString && extractNamed(resolvedElem) == types.TypString {
+				return true
+			}
+			if isVecOrChan {
+				if types.IsVector(resolvedElem) || types.IsChannel(resolvedElem) ||
+					types.IsArc(resolvedElem) || types.IsWeak(resolvedElem) {
+					return true
 				}
-				return extractNamed(resolvedElem) == types.TypString
 			}
 		}
 	}
@@ -4868,6 +4876,27 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					// the source optional (whose drop frees it at scope exit).
 					break
 				}
+				// T0383: Vector index-assign from a borrow (T&/T~) for non-string
+				// heap element types. The borrow returns a non-owning reference;
+				// without duping, both the container's drop and the borrow source's
+				// drop free the same inner value → double-free. Mirrors Vector.push
+				// semantics (T0376) for the index-assign path. Only fires when RHS
+				// is statically a borrow type (T0381's isBorrowedExpr), so owned
+				// IdentExpr/heap-temp sources keep their move/claim semantics.
+				// Polymorphic element types (those needing a vtable) skip dup —
+				// dupHeapValue uses the static layout, which would truncate.
+				if c.isBorrowedExpr(s.Value) {
+					skipForPolymorphic := false
+					if rn := extractNamed(resolvedElem); rn != nil && c.needsVtable(rn) {
+						skipForPolymorphic = true
+					}
+					if !skipForPolymorphic {
+						if dupVal := c.maybeDupPushElement(val, resolvedElem); dupVal != nil {
+							c.genIndexAssign(target, s.Op, dupVal)
+							break
+						}
+					}
+				}
 			}
 			// B0350: Map[K,string] index assign from borrow param — dup value
 			// so the map owns an independent copy. Borrow params have no drop
@@ -4887,6 +4916,21 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 						// B0355: non-ident borrow expr (field access, container element) as map value —
 						// the source still owns the pointer; dup so map holds an independent copy.
 						val = c.dupString(val)
+					}
+				} else if c.isBorrowedExpr(s.Value) {
+					// T0383: Map index-assign from a borrow for non-string heap
+					// value types. Same pattern as the Vector case — the borrow
+					// source retains ownership; the map needs an independent copy.
+					// Modifies val in place and falls through to the shared
+					// genIndexAssign + cleanup path (mirrors B0350/B0355).
+					skipForPolymorphic := false
+					if rn := extractNamed(resolvedVal); rn != nil && c.needsVtable(rn) {
+						skipForPolymorphic = true
+					}
+					if !skipForPolymorphic {
+						if dupVal := c.maybeDupPushElement(val, resolvedVal); dupVal != nil {
+							val = dupVal
+						}
 					}
 				}
 			}
@@ -7455,6 +7499,15 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 			// stored by value in vector buffers, so each element is an independent
 			// copy. emitVariantFieldDrop allocas the old value, bitcasts to i8*,
 			// and calls the synthesized enum drop function.
+			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
+			c.emitVariantFieldDrop(oldVal, elemType)
+		} else if types.IsVector(elemType) || types.IsChannel(elemType) ||
+			types.IsArc(elemType) || types.IsWeak(elemType) {
+			// T0383: Drop old element before overwriting for nested heap container
+			// types (Vector, Channel, Arc, Weak). Without this, overwriting via
+			// vec[i] = newVal leaks the old element. Safe because genVectorIndex
+			// dups these on read (T0383 dup-on-read), so any aliased local owns
+			// an independent copy. Mirrors the Vector[string] B0204 pattern.
 			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 			c.emitVariantFieldDrop(oldVal, elemType)
 		} else if isDroppableHeapUserType(elemType) {

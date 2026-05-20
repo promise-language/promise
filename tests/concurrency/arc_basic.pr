@@ -392,3 +392,93 @@ arc_borrow_reassign_via_explicit_ref_type() `test {
   borrowed = a2.borrow;
   assert(borrowed.len == 1, "explicit ref reassign");
 }
+
+// T0383: `vec[i] = a.borrow` for non-string heap element types must dup the
+// borrowed value so the vector owns an independent copy. Without the dup,
+// Vector.drop and Arc.drop both free the same inner buffer → double-free.
+// The dup at the call site + drop-old-element in genVectorIndexAssign +
+// dup-on-read in genVectorIndex together prevent double-free, leak, and UAF.
+arc_borrow_index_assign_vector() `test {
+  vec := string[][]();
+  v1 := string[]();
+  v1.push("init" + "");
+  vec.push(v1);
+
+  v2 := string[]();
+  v2.push("hello" + "");
+  a := Arc[string[]](v2);
+
+  vec[0] = a.borrow;
+  assert(vec[0].len == 1, "vec[0] len after borrow assign");
+}
+
+// T0383: Channel element analog. Borrow assignment must increment refcount
+// (dupChannel) so the vector owns its own ref.
+arc_borrow_index_assign_channel() `test {
+  ch1 := channel[int](capacity: 1);
+  ch1.send(1);
+  vec := channel[int][]();
+  vec.push(ch1);
+
+  ch2 := channel[int](capacity: 1);
+  ch2.send(42);
+  a := Arc[channel[int]](ch2);
+
+  vec[0] = a.borrow;
+  assert(true, "no double-free on borrow channel assign");
+}
+
+// T0383: Owned move into vec[i] must still work — dup only fires for borrows.
+arc_borrow_index_assign_owned_unaffected() `test {
+  vec := string[][]();
+  v1 := string[]();
+  v1.push("init" + "");
+  vec.push(v1);
+
+  v2 := string[]();
+  v2.push("hello" + "");
+  vec[0] = v2;
+  assert(vec[0].len == 1, "owned move still works");
+}
+
+// T0383: Repeated borrow assignments — old element drop fires correctly,
+// no double-free, no leak.
+arc_borrow_index_assign_repeat_borrows() `test {
+  vec := string[][]();
+  v0 := string[]();
+  v0.push("v0" + "");
+  vec.push(v0);
+
+  v1 := string[]();
+  v1.push("a" + "");
+  v2 := string[]();
+  v2.push("b" + "");
+  v2.push("c" + "");
+  a1 := Arc[string[]](v1);
+  a2 := Arc[string[]](v2);
+
+  vec[0] = a1.borrow;
+  vec[0] = a2.borrow;
+  assert(vec[0].len == 2, "second borrow assign");
+}
+
+// T0383: `t := vec[i]` for nested heap element dups (B0219 analog) so that
+// drop-on-write on vec[i] does NOT cause UAF through t. Mirrors the field
+// pattern T0095/B0219.
+arc_borrow_index_assign_alias_safe() `test {
+  vec := string[][]();
+  v1 := string[]();
+  v1.push("hi" + "");
+  vec.push(v1);
+
+  // t dups vec[0] — independent owned copy
+  t := vec[0];
+
+  // overwrite vec[0] — drops old (which was vec[0]'s buffer), but t owns its dup
+  v2 := string[]();
+  v2.push("ok" + "");
+  vec[0] = v2;
+
+  // t is still valid
+  assert(t.len == 1, "t still valid after overwrite");
+}

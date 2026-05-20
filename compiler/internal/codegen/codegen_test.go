@@ -10096,6 +10096,65 @@ func TestVectorStringIndexReadDup(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new")
 }
 
+// T0383: Vector[Vector[T]] index assign from a borrow source dups the
+// borrow so the vector owns an independent copy. Mirrors B0195 for non-string.
+func TestT0383VectorIndexAssignBorrowDupsHeapElement(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			outer := string[][]();
+			inner := string[]();
+			inner.push("init");
+			outer.push(inner);
+
+			v2 := string[]();
+			v2.push("hello");
+			a := Arc[string[]](v2);
+
+			outer[0] = a.borrow;
+		}
+	`)
+	// The dup-on-borrow path emits a vecdup.copy block (from dupVector) +
+	// a vector-element clone loop before genIndexAssign.
+	assertContains(t, ir, "vecdup.copy")
+}
+
+// T0383: Vector[Vector[T]] index assign drops the old element before the
+// store, preventing leak of the previously-pushed buffer.
+func TestT0383VectorIndexAssignDropsOldHeapElement(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			outer := string[][]();
+			inner := string[]();
+			inner.push("init");
+			outer.push(inner);
+
+			v2 := string[]();
+			v2.push("hello");
+			outer[0] = v2;
+		}
+	`)
+	// The drop-old path loads the old slot value and calls Vector.drop on it
+	// inside the indexassign.ok block (before the new-value store).
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
+// T0383: Vector[Vector[T]] index read dups when stored in a variable
+// (mirror of B0204 for nested heap vectors). Without this, drop-on-write
+// at vec[i] would create a use-after-free through the aliased local.
+func TestT0383VectorIndexReadDupsHeapElement(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			outer := string[][]();
+			inner := string[]();
+			inner.push("init");
+			outer.push(inner);
+			t := outer[0];
+		}
+	`)
+	// Dup-on-read emits a vecdup.copy block via dupVector for the read path.
+	assertContains(t, ir, "vecdup.copy")
+}
+
 // Error propagation triggers scope cleanup
 func TestDropErrorPropagateCleansUp(t *testing.T) {
 	ir := generateIR(t, `

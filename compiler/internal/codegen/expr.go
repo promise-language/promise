@@ -7331,6 +7331,55 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 		}
 	}
 
+	// T0383: Dup-on-read for Vector[Vector|Channel|Arc|Weak] index access. The
+	// var-decl path sets dupContainerFieldAccess for these types (mirrors B0219
+	// for fields). Without dup, `t := vec[i]` aliases vec's element buffer and
+	// drop-on-write at the same slot (vec[i] = X) would create a UAF through t.
+	// Symmetric with the string branch (B0204) and tuple branch (T0370).
+	if c.dupContainerFieldAccess && c.tempTrackingEnabled {
+		if innerElem, isVec := types.AsVector(elemType); isVec {
+			c.dupContainerFieldAccess = false // consume the flag
+			innerLLVM := c.resolveType(innerElem)
+			innerSize := int64(c.typeSize(innerLLVM))
+			dup := c.dupVector(val, innerSize)
+			c.emitVectorElementCloneLoop(dup, innerElem)
+			c.trackVectorTemp(dup)
+			return dup
+		}
+		if extractNamed(elemType) == types.TypVector {
+			c.dupContainerFieldAccess = false
+			dup := c.dupVector(val, 0)
+			c.trackVectorTemp(dup)
+			return dup
+		}
+		if _, isCh := types.AsChannel(elemType); isCh || extractNamed(elemType) == types.TypChannel {
+			c.dupContainerFieldAccess = false
+			dup := c.dupChannel(val)
+			c.trackChannelTemp(dup)
+			return dup
+		}
+		if arcElem, isArc := types.AsArc(elemType); isArc {
+			c.dupContainerFieldAccess = false
+			dup := c.dupArc(val)
+			resolvedArcElem := arcElem
+			if c.typeSubst != nil {
+				resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+			}
+			c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
+			return dup
+		}
+		if weakElem, isWeak := types.AsWeak(elemType); isWeak {
+			c.dupContainerFieldAccess = false
+			resolvedWeakElem := weakElem
+			if c.typeSubst != nil {
+				resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
+			}
+			dup := c.dupWeak(val, resolvedWeakElem)
+			c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
+			return dup
+		}
+	}
+
 	return val
 }
 

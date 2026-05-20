@@ -12189,7 +12189,7 @@ func TestOptionalFieldStringInlineUnwrapNoTempTrack(t *testing.T) {
 	assertNotContains(t, testIR, "promise_string_new")
 }
 
-// Compound assignment on different typed variables exercises namedFromLLVMType branches
+// Compound assignment on different typed variables exercises native operator dispatch
 func TestCompoundAssignF64(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -12242,6 +12242,59 @@ func TestCompoundAssignI8(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "add i8")
+}
+
+// T0357: string compound assignment must dispatch through genStringOp,
+// not panic in namedFromLLVMType.
+func TestCompoundAssignString(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string a = "hello ";
+			string b = "world";
+			a += b;
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_string_concat(")
+}
+
+// T0357: local-var string compound must drop the old value before storing
+// the new concat result, with a same-pointer guard mirroring OpAssign.
+func TestCompoundAssignStringDropsOld(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string a = "hello " + "first ";
+			a += "world";
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_string_concat(")
+	assertContains(t, ir, "call void @promise_string_drop(")
+	assertContains(t, ir, "compound.diff")
+	assertContains(t, ir, "compound.merge")
+}
+
+// T0357: field compound on a string field routes through genMemberAssign
+// (compound branch). Asserts the code path is reachable for non-local sites.
+func TestCompoundAssignStringField(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { string s; }
+		main() {
+			Holder h = Holder(s: "abc");
+			h.s += "def";
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_string_concat(")
+}
+
+// T0357: vector index compound (native path) on string elements routes
+// through genVectorCompoundAssign with elemType passed correctly.
+func TestCompoundAssignStringVecIndex(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[] v = ["abc", "xyz"];
+			v[0] += "def";
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_string_concat(")
 }
 
 // --- Hash getter tests ---

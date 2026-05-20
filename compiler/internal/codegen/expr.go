@@ -3182,7 +3182,7 @@ func (c *Compiler) genMutexGuardBorrowSet(target *ast.MemberExpr, op ast.AssignO
 	// Handle compound assignment
 	if op != ast.OpAssign {
 		current := c.block.NewLoad(elemLLVM, valField)
-		val = c.genCompoundOp(op, current, val)
+		val = c.genCompoundOp(op, elemType, current, val)
 	}
 
 	// Drop old value if T is droppable (T0270)

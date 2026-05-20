@@ -4211,7 +4211,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 						panic(fmt.Sprintf("codegen: compound assignment to setter %s but no getter found", target.Name))
 					}
 					current := c.block.NewCall(getterFn)
-					val = c.genCompoundOp(s.Op, current, val)
+					val = c.genCompoundOp(s.Op, c.info.Types[target], current, val)
 				}
 				c.block.NewCall(setterFn, val)
 				if s.Op == ast.OpAssign {
@@ -4239,7 +4239,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			// Compound assignment on MutRef param
 			current := c.block.NewLoad(c.mutRefTypes[target.Name], ptr)
-			result := c.genCompoundOp(s.Op, current, val)
+			result := c.genCompoundOp(s.Op, c.info.Types[target], current, val)
 			c.block.NewStore(result, ptr)
 			return
 		}
@@ -4341,8 +4341,27 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			return
 		}
 		// Compound assignment: load current value, apply operator, store result
+		targetType := c.info.Types[target]
 		current := c.block.NewLoad(alloca.ElemType, alloca)
-		result := c.genCompoundOp(s.Op, current, val)
+		result := c.genCompoundOp(s.Op, targetType, current, val)
+		// T0357: For string locals with a drop binding, drop the old value
+		// before storing the new one. promise_string_concat always allocates,
+		// so the result never aliases the old pointer; runtime alias check
+		// mirrors the OpAssign branch above for consistency.
+		if binding, ok := c.dropBindings[target.Name]; ok && binding.kind == bindingDropString {
+			diffBlk := c.newBlock("compound.diff")
+			mergeBlk := c.newBlock("compound.merge")
+			isSame := c.block.NewICmp(enum.IPredEQ, current, result)
+			c.block.NewCondBr(isSame, mergeBlk, diffBlk)
+			c.block = diffBlk
+			c.emitStringDropCall(binding)
+			if c.block.Term == nil {
+				c.block.NewBr(mergeBlk)
+			}
+			c.block = mergeBlk
+			// New value is now owned by the local — drop flag stays at 1.
+			c.block.NewStore(constant.NewInt(irtypes.I1, 1), binding.dropFlag)
+		}
 		c.block.NewStore(result, alloca)
 
 	case *ast.MemberExpr:
@@ -4582,7 +4601,7 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 					panic(fmt.Sprintf("codegen: compound assignment to setter %s.%s but no getter found", named, target.Field))
 				}
 				current := c.genGetterCall(target, targetType, named, getter)
-				val = c.genCompoundOp(op, current, val)
+				val = c.genCompoundOp(op, c.info.Types[target], current, val)
 			}
 			c.genSetterCall(target, targetType, named, setter, val)
 			return
@@ -4733,7 +4752,7 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 		fieldLLVMType = layout.Instance.Fields[fieldIdx].LLVMType
 	}
 	current := c.block.NewLoad(fieldLLVMType, fieldPtr)
-	result := c.genCompoundOp(op, current, val)
+	result := c.genCompoundOp(op, field.Type(), current, val)
 	c.block.NewStore(result, fieldPtr)
 }
 
@@ -4831,14 +4850,17 @@ func (c *Compiler) genModuleSetterAssign(target *ast.MemberExpr, moduleName stri
 			panic(fmt.Sprintf("codegen: compound assignment to module setter %s.%s but no getter found", moduleName, target.Field))
 		}
 		current := c.block.NewCall(getterFn)
-		val = c.genCompoundOp(op, current, val)
+		val = c.genCompoundOp(op, c.info.Types[target], current, val)
 	}
 
 	c.block.NewCall(setterFn, val)
 }
 
 // genCompoundOp applies a compound assignment operator through the type system.
-func (c *Compiler) genCompoundOp(op ast.AssignOp, current, val value.Value) value.Value {
+// operandType is the AST type of the operand (current value being modified).
+// Required because compound assignment on i8*-shaped types (string, vector,
+// channel, etc.) cannot reverse-resolve from the LLVM type alone (T0357).
+func (c *Compiler) genCompoundOp(op ast.AssignOp, operandType types.Type, current, val value.Value) value.Value {
 	// Map compound op to binary operator name
 	var binOp string
 	switch op {
@@ -4856,10 +4878,18 @@ func (c *Compiler) genCompoundOp(op ast.AssignOp, current, val value.Value) valu
 		panic(fmt.Sprintf("codegen: unsupported compound assignment %s", op))
 	}
 
-	// Use the type of the current value to look up the operator method
-	named := c.namedFromLLVMType(current.Type())
+	if operandType == nil {
+		panic(fmt.Sprintf("codegen: missing operand type for compound assignment %s", op))
+	}
+	if c.typeSubst != nil {
+		operandType = types.Substitute(operandType, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		operandType = types.SubstituteSelf(operandType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	named := extractNamed(operandType)
 	if named == nil {
-		panic("codegen: cannot determine type for compound assignment")
+		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for compound assignment %s", operandType, op))
 	}
 
 	method := named.LookupMethod(binOp)
@@ -4868,6 +4898,15 @@ func (c *Compiler) genCompoundOp(op ast.AssignOp, current, val value.Value) valu
 	}
 
 	if method.IsNative() {
+		// String operators dispatch to runtime intrinsics (mirrors genBinaryOp).
+		// The concat result is intentionally NOT tracked as a stmt temp here:
+		// every caller stores the result into a location that owns it (local
+		// alloca, field, vector slot, map slot, MutexGuard) so cleanup at
+		// scope exit handles drop. Tracking here would conflict with stores
+		// to non-local sites that don't claim, causing use-after-free.
+		if named == types.TypString {
+			return c.genStringOp(binOp, current, val)
+		}
 		return c.emitNativeOp(named, binOp, current, val)
 	}
 
@@ -5009,30 +5048,6 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 	default:
 		panic(fmt.Sprintf("codegen: unsupported inc/dec target %T", target))
 	}
-}
-
-// namedFromLLVMType reverse-maps an LLVM type to the most common Promise Named type.
-// Used for compound assignments where we need the type system for operator dispatch.
-// NOTE: Does not handle pointer types (i8*) — compound assignment on string/user-type
-// fields is not supported until those types define operator methods.
-func (c *Compiler) namedFromLLVMType(typ irtypes.Type) *types.Named {
-	switch typ {
-	case irtypes.I64:
-		return types.TypInt
-	case irtypes.I32:
-		return types.TypI32
-	case irtypes.I16:
-		return types.TypI16
-	case irtypes.I8:
-		return types.TypI8
-	case irtypes.I1:
-		return types.TypBool
-	case irtypes.Double:
-		return types.TypF64
-	case irtypes.Float:
-		return types.TypF32
-	}
-	return nil
 }
 
 // --- Return ---
@@ -6713,7 +6728,7 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 					c.block.NewStore(updateVal, alloca)
 				} else {
 					current := c.block.NewLoad(alloca.ElemType, alloca)
-					result := c.genCompoundOp(s.UpdateOp, current, updateVal)
+					result := c.genCompoundOp(s.UpdateOp, c.info.Types[s.UpdateTarget], current, updateVal)
 					c.block.NewStore(result, alloca)
 				}
 			}
@@ -6905,7 +6920,7 @@ func (c *Compiler) genArrayIndexAssign(target *ast.IndexExpr, arr *types.Array, 
 
 	// Compound assignment
 	current := c.block.NewLoad(elemLLVM, elemPtr)
-	result := c.genCompoundOp(op, current, val)
+	result := c.genCompoundOp(op, arr.Elem(), current, val)
 	c.block.NewStore(result, elemPtr)
 }
 
@@ -7035,7 +7050,7 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 
 	// Compound assignment
 	current := c.block.NewLoad(elemLLVM, elemPtr)
-	result := c.genCompoundOp(op, current, val)
+	result := c.genCompoundOp(op, elemType, current, val)
 	c.block.NewStore(result, elemPtr)
 }
 
@@ -7140,9 +7155,35 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 
 	c.block = okBlock
 	current := c.block.NewExtractValue(optVal, 1)
-	result := c.genCompoundOp(op, current, val)
+	// Compound op operates on V (the unwrapped element type from V?). For maps,
+	// V is the second type argument; for other containers, derive from the []=
+	// method's value parameter.
+	operandType := c.compoundElemType(targetType)
+	result := c.genCompoundOp(op, operandType, current, val)
 
 	c.block.NewCall(setFn, instancePtr, keyVal, result)
+}
+
+// compoundElemType returns the element type that compound assignment on a
+// container operates on (V for Map[K, V], element for Vector, etc.). Falls
+// back to the []= method's value parameter when the container isn't a known
+// builtin.
+func (c *Compiler) compoundElemType(containerType types.Type) types.Type {
+	if _, v, ok := types.AsMap(containerType); ok {
+		return v
+	}
+	if elem, ok := types.AsVector(containerType); ok {
+		return elem
+	}
+	if named := extractNamed(containerType); named != nil {
+		if m := named.LookupMethod("[]="); m != nil {
+			params := m.Sig().Params()
+			if len(params) >= 2 {
+				return params[1].Type()
+			}
+		}
+	}
+	return nil
 }
 
 // genVectorCompoundAssign handles vec[i] += val with bounds check and pre-evaluated operands.
@@ -7170,7 +7211,7 @@ func (c *Compiler) genVectorCompoundAssign(slicePtr, idx value.Value, elemType t
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
 
 	current := c.block.NewLoad(elemLLVM, elemPtr)
-	result := c.genCompoundOp(op, current, val)
+	result := c.genCompoundOp(op, elemType, current, val)
 	c.block.NewStore(result, elemPtr)
 }
 

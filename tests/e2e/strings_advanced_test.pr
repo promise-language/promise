@@ -204,3 +204,66 @@ test_char_equality() `test {
   assert(a == 'a', "char equality");
   assert(a != b, "char inequality");
 }
+
+// --- compound assignment (T0357) ---
+
+test_string_compound_concat() `test {
+  string a = "hello ";
+  string b = "world";
+  a += b;
+  assert(a == "hello world", "compound concat with owned local");
+}
+
+test_string_compound_with_literal() `test {
+  string s = "abc";
+  s += "def";
+  assert(s == "abcdef", "compound concat with literal RHS");
+}
+
+test_string_compound_chained() `test {
+  string s = "1";
+  s += "2";
+  s += "3";
+  s += "4";
+  assert(s == "1234", "chained compound concat");
+}
+
+test_string_compound_starts_empty() `test {
+  string s = "";
+  s += "first";
+  assert(s == "first", "compound concat starting from empty");
+  s += "";
+  assert(s == "first", "compound concat with empty RHS is no-op");
+}
+
+// Non-local compound sites — exercise paths through genMemberAssign,
+// genVectorIndexAssign, and genMutexGuardBorrowSet with literal-only
+// strings (no heap allocation in the old slot, so no leak surface).
+// The leak surface for non-local sites with heap-old values is filed
+// separately (T0357 follow-up).
+
+type StringHolder {
+  string value;
+}
+
+test_string_compound_field_literal() `test {
+  StringHolder h = StringHolder(value: "abc");
+  h.value += "def";
+  assert(h.value == "abcdef", "field compound concat (literal old)");
+}
+
+test_string_compound_vec_index_literal() `test {
+  string[] vec = ["abc", "xyz"];
+  vec[0] += "def";
+  assert(vec[0] == "abcdef", "vec index compound concat (literal old)");
+  assert(vec[1] == "xyz", "untouched element");
+}
+
+test_string_compound_guard_borrow_literal() `test {
+  Mutex[string] m = Mutex[string]("abc");
+  {
+    MutexGuard[string] guard = m.lock();
+    guard.borrow += "def";
+    assert(guard.borrow == "abcdef", "guard borrow compound concat");
+  }
+}

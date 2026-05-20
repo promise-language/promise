@@ -11848,6 +11848,153 @@ func TestVectorTupleFieldlessEnumNoDrop(t *testing.T) {
 	assertNotContains(t, ir, "Color.drop")
 }
 
+// T0371: genTupleLit claims the heap-tracked string concat temp so the tuple
+// is the unique owner of the concat result. Without this claim, the stmt-temp
+// cleanup would free the string while the tuple still references it (UAF).
+func TestT0371TupleLitClaimsHeapStringTemp(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			(int, string) t = (1, "a" + "b");
+		}
+	`)
+	// Concat result is tracked as a stmtTemp; genTupleLit clears its drop flag.
+	assertContains(t, ir, "promise_string_concat")
+	assertContains(t, ir, "store i1 false")
+	// And the tuple variable t gets a tuple-walk drop binding at scope exit.
+	assertContains(t, ir, "tupdrop.exec")
+	assertContains(t, ir, "tupdrop.skip")
+	assertContains(t, ir, "promise_string_drop")
+}
+
+// T0371: genTupleLit claims the heap-tracked user type temp so the tuple is
+// the unique owner. Without this claim, the heap temp would be freed at stmt
+// end and dropped again via the tuple's scope-exit walk (double-free).
+func TestT0371TupleLitClaimsHeapBoxTemp(t *testing.T) {
+	ir := generateIR(t, `
+		type Box { int n; }
+		main() {
+			(int, Box) t = (1, Box(n: 5));
+		}
+	`)
+	// Tuple variable t gets a tuple-walk drop binding.
+	assertContains(t, ir, "tupdrop.exec")
+	// The walk frees the heap Box via emitVariantFieldDrop's pal_free branch.
+	assertContains(t, ir, "varfield.free")
+	assertContains(t, ir, "@pal_free")
+}
+
+// T0371: A tuple variable with droppable fields registers a bindingDropTuple
+// that walks the fields and drops each droppable one at scope exit. The drop
+// flag is checked first so moves can suppress the walk.
+func TestT0371TupleVarDropsFields(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "a" + "b";
+			(int, string) t = (1, s);
+		}
+	`)
+	// Tuple var has a drop flag and a tupdrop block at scope exit.
+	assertContains(t, ir, "t.dropflag")
+	assertContains(t, ir, "tupdrop.exec")
+	assertContains(t, ir, "promise_string_drop")
+}
+
+// T0371: Destructuring a tuple-with-heap-fields into named locals registers
+// a drop binding per field so each local owns and frees its piece. Without
+// these per-field drops, the string would leak after destructure.
+func TestT0371DestructureRegistersFieldDrops(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			(a, b) := (1, "a" + "b");
+		}
+	`)
+	// b is a destructured string local — should have a drop flag and call drop.
+	assertContains(t, ir, "b.dropflag")
+	assertContains(t, ir, "promise_string_drop")
+}
+
+// T0371: Enum variant with tuple-of-string field. Sema's fieldTypeHasDrop and
+// codegen's variantFieldNeedsDrop must both recurse into tuples so the synth
+// enum drop walks the tuple field and frees the inner string.
+func TestT0371EnumWithTupleStringHasDrop(t *testing.T) {
+	ir := generateIR(t, `
+		enum Pair {
+			Empty,
+			Some((int, string) data),
+		}
+		main() {
+			s := Pair.Some(data: (1, "a" + "b"));
+		}
+	`)
+	// Synth drop function should be emitted for Pair (because tuple variant
+	// field contains a string). Verify via the variant drop block name.
+	assertContains(t, ir, "Pair.drop")
+	assertContains(t, ir, "promise_string_drop")
+}
+
+// T0371: Destructuring a borrowed tuple (e.g., from a for-in loop variable)
+// must NOT register drops for the destructured locals — they are borrows of
+// the container's elements, and adding drops would double-free with the
+// container's element walk.
+func TestT0371DestructureBorrowSourceNoDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Box { int n; }
+		sum_first((int, Box)[] v) int {
+			int total = 0;
+			for tup in v {
+				(idx, bx) := tup;
+				total = total + bx.n;
+			}
+			return total;
+		}
+		main() {
+			int n = sum_first([(1, Box(n: 5))]);
+		}
+	`)
+	// bx is destructured from a for-in loop variable (borrow); no drop binding.
+	assertNotContains(t, ir, "bx.dropflag")
+}
+
+// T0371: A tuple containing an enum constructor with heap variant data must
+// claim the enum-ctor temp's drop flag so the tuple is the unique owner. Tests
+// the savedEnumTemps loop in genTupleLit. Without it, the enum's variant
+// string would be freed at stmt end while the tuple still references it.
+func TestT0371TupleClaimsEnumCtorTemp(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color {
+			Red,
+			Tagged(string label),
+		}
+		main() {
+			(int, Color) t = (1, Color.Tagged(label: "a" + "b"));
+		}
+	`)
+	// Tuple var t has its own tuple-walk drop binding.
+	assertContains(t, ir, "t.dropflag")
+	assertContains(t, ir, "tupdrop.exec")
+	// The savedEnumTemps loop emits a drop-flag-clear store for the enum ctor
+	// temp during element evaluation. The tuple-walk then drops the enum.
+	assertContains(t, ir, "Color.drop")
+}
+
+// T0371: Generic function with a tuple-of-T local variable. Exercises the
+// typeSubst != nil branch in emitTupleDropCall so the tuple type's elements
+// are substituted at monomorphization time and the walk uses concrete types.
+func TestT0371GenericFnTupleLocalSubstitutes(t *testing.T) {
+	ir := generateIR(t, `
+		make_then_drop[T](~T x, ~T y) {
+			(T, T) t = (x, y);
+		}
+		main() {
+			make_then_drop[string]("a" + "b", "c" + "d");
+		}
+	`)
+	// The mono'd function must register a tuple-walk drop binding that calls
+	// promise_string_drop on the (substituted) string fields.
+	assertContains(t, ir, "tupdrop.exec")
+	assertContains(t, ir, "promise_string_drop")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

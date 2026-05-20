@@ -238,9 +238,10 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 				// elements. After T0376, Vector.[:]'s push path deep-clones non-
 				// string heap elements (via the IndexExpr dup gate in
 				// genVectorMethodCall), so the slice owns independent copies and
-				// the walk is unconditionally safe. Carve-outs:
-				//   - containsDroppableTuple (T0371 territory) — suppressed inside
-				//     trackVectorHeapTempWithElemType.
+				// the walk is unconditionally safe. T0371 made the walk safe for
+				// tuple element types as well — genTupleLit now claims
+				// heap-tracked field temps, so the buffer-walk is the unique
+				// drop site. Carve-out:
 				//   - Polymorphic element types (those needing a vtable) — the
 				//     push dup is suppressed because cloneHeapElement uses the
 				//     static layout and would truncate subtypes; symmetrically,
@@ -6530,7 +6531,9 @@ func (c *Compiler) genTupleLit(e *ast.TupleLit) value.Value {
 	}
 	var agg value.Value = constant.NewZeroInitializer(structType)
 	for i, elem := range e.Elements {
-		agg = c.block.NewInsertValue(agg, c.genExpr(elem), uint64(i))
+		savedEnumTemps := len(c.enumCtorTemps)
+		elemVal := c.genExpr(elem)
+		agg = c.block.NewInsertValue(agg, elemVal, uint64(i))
 		// B0242: Clear drop flags for ident elements consumed by the tuple.
 		// When a dup'd match binding is embedded in a tuple (e.g., (k, v)),
 		// ownership transfers to the tuple — the binding must not be dropped
@@ -6538,6 +6541,21 @@ func (c *Compiler) genTupleLit(e *ast.TupleLit) value.Value {
 		if ident, ok := elem.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		}
+		// T0371: Claim heap-tracked field temps so they are not double-freed at
+		// stmt end (their ownership is now in the tuple slot). Mirrors the
+		// pattern used in genArrayLit / genMapLit. Without these claims:
+		//   - string/vector/channel stmt-temps would self-clean at stmt end,
+		//     leaving a dangling pointer in the tuple slot (case D/E garbage).
+		//   - heap user-type temps would be freed at stmt end, then dropped
+		//     again when the tuple is consumed (case A double-free).
+		c.claimStringTemp(elemVal) // strings, vectors, channels, arcs, mutexes
+		c.claimHeapTemp(elemVal)   // heap user-type instances
+		// Clear enum ctor temps created during this element's evaluation so
+		// the tuple is the unique owner of the enum's variant data.
+		for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
 	}
 	return agg
 }

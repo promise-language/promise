@@ -131,3 +131,320 @@ test_failable_destructure_error_path() `test {
   (p, err) := fail_pt();
   assert(err is present, "should error");
 }
+
+// --- T0371: Tuple values with heap-tracked fields ownership ---
+// All cases below previously leaked, double-freed, or returned UAF garbage.
+
+type _T0371Box {
+  int n;
+}
+
+// Case B: standalone tuple var with heap string concat (was leaking).
+test_t0371_var_tuple_string_concat() `test {
+  s := "a" + "b";
+  (int, string) t = (1, s);
+  (a, b) := t;
+  assert(a == 1, "first");
+  assert(b == "ab", "tuple held the concat result");
+}
+
+// Case D: inline tuple lit with heap string, then read after binding (was UAF).
+test_t0371_inline_tuple_string_concat() `test {
+  (int, string) t = (1, "a" + "b");
+  (a, b) := t;
+  assert(a == 1, "first");
+  assert(b == "ab", "second survived destructure");
+}
+
+// Case E: direct destructure of inline tuple (was UAF).
+test_t0371_destructure_inline() `test {
+  (a, b) := (1, "a" + "b");
+  assert(a == 1, "first");
+  assert(b == "ab", "second survived inline destructure");
+}
+
+// Destructure of a variable-bound tuple that owns its fields.
+test_t0371_destructure_var() `test {
+  (int, string) t = (1, "a" + "b");
+  (a, b) := t;
+  assert(a == 1, "first");
+  assert(b == "ab", "second");
+}
+
+// Case 1: standalone tuple var with heap user type (was leaking).
+test_t0371_var_tuple_box() `test {
+  (int, _T0371Box) t = (1, _T0371Box(n: 5));
+  (a, b) := t;
+  assert(a == 1, "first");
+  assert(b.n == 5, "box field");
+}
+
+// Case A: vector-literal containing tuple-with-Box, variable case (was double-free).
+test_t0371_vector_var_tuple_box() `test {
+  (int, _T0371Box)[] v = [(1, _T0371Box(n: 5)), (2, _T0371Box(n: 10))];
+  assert(v.len == 2, "vector len");
+  int sum = 0;
+  for tup in v {
+    (i, b) := tup;
+    sum = sum + b.n;
+  }
+  assert(sum == 15, "5 + 10 = 15");
+}
+
+// Vector of tuples with heap strings, bound to a variable.
+test_t0371_vector_var_tuple_string() `test {
+  (int, string)[] v = [(1, "a" + "b"), (2, "c" + "d")];
+  assert(v.len == 2, "vector len");
+  int total = 0;
+  for tup in v {
+    (i, s) := tup;
+    total = total + s.len;
+  }
+  assert(total == 4, "ab + cd = 4 chars");
+}
+
+// Tuple returned from a function with heap string fields.
+swap_str_t0371(~string a, ~string b)(string, string) {
+  return (b, a);
+}
+
+test_t0371_tuple_returned_from_func() `test {
+  (x, y) := swap_str_t0371("hello", "world");
+  assert(x == "world", "x");
+  assert(y == "hello", "y");
+}
+
+// Nested tuple with a heap string at depth 1.
+test_t0371_nested_tuple_string() `test {
+  ((int, string), int) t = ((1, "a" + "b"), 3);
+  (inner, c) := t;
+  (a, b) := inner;
+  assert(a == 1, "a");
+  assert(b == "ab", "b");
+  assert(c == 3, "c");
+}
+
+// Tuple containing a vector field — drop must walk and free the vector.
+test_t0371_tuple_with_vector() `test {
+  (int, string[]) t = (1, ["x", "y"]);
+  (i, v) := t;
+  assert(i == 1, "first");
+  assert(v.len == 2, "vector len inside tuple");
+}
+
+// Vector of tuples with heap strings consumed via for-in (case 2 borrow path).
+sum_lengths((int, string)[] v) int {
+  int total = 0;
+  for tup in v {
+    (i, s) := tup;
+    total = total + s.len;
+  }
+  return total;
+}
+
+test_t0371_for_in_destructure_borrow() `test {
+  (int, string)[] v = [(1, "a" + "b"), (2, "c" + "d")];
+  int n = sum_lengths(v);
+  assert(n == 4, "ab + cd = 4");
+}
+
+// T0371: enum variant with tuple-of-string field. Pre-T0371 this leaked or
+// UAF'd because sema's fieldTypeHasDrop didn't recurse into tuples, so the
+// enum got no drop and the inner string was never freed. Fixed by making
+// fieldTypeHasDrop and variantFieldNeedsDrop recurse into tuple elements.
+enum _T0371Pair {
+  _T0371Empty,
+  _T0371Some((int, string) data),
+}
+
+test_t0371_enum_with_tuple_string() `test {
+  s := _T0371Pair._T0371Some(data: (1, "a" + "b"));
+  match s {
+    _T0371Empty => assert(false, "should be some"),
+    _T0371Some(d) => {
+      (a, b) := d;
+      assert(a == 1, "first");
+      assert(b == "ab", "second");
+    },
+  };
+}
+
+// Deeply nested: vector of tuple-of-tuple-with-string.
+test_t0371_vector_nested_tuple() `test {
+  ((int, string), int)[] v = [((1, "a" + "b"), 3), ((2, "c" + "d"), 4)];
+  assert(v.len == 2, "vector len");
+  int sum = 0;
+  for elem in v {
+    (inner, c) := elem;
+    sum = sum + c;
+  }
+  assert(sum == 7, "3 + 4 = 7");
+}
+
+// Tuple with a vector field whose elements are heap strings.
+test_t0371_tuple_with_string_vec() `test {
+  (int, string[]) t = (1, ["a" + "b", "c" + "d"]);
+  (i, v) := t;
+  assert(i == 1, "first");
+  assert(v.len == 2, "vec len");
+  assert(v[0] == "ab", "v[0]");
+  assert(v[1] == "cd", "v[1]");
+}
+
+// Tuple variable reassignment must drop the old tuple's fields before storing
+// the new value. Without proper bindingDropTuple dispatch in genAssignStmt,
+// the old string would leak.
+test_t0371_reassign_tuple_string() `test {
+  (int, string) t = (1, "a" + "b");
+  t = (2, "c" + "d");
+  (a, b) := t;
+  assert(a == 2, "reassigned int");
+  assert(b == "cd", "reassigned string");
+}
+
+// Tuple element is an enum constructor with heap variant data. genTupleLit's
+// savedEnumTemps loop must clear the enum-ctor temp's drop flag so the tuple
+// is the unique owner of the enum's variant data. Without the loop, the enum
+// ctor temp would be freed at stmt end while the tuple still references it.
+enum _T0371Color {
+  _T0371Red,
+  _T0371Tagged(string label),
+}
+
+test_t0371_tuple_containing_enum_ctor() `test {
+  (int, _T0371Color) t = (1, _T0371Color._T0371Tagged(label: "a" + "b"));
+  (i, c) := t;
+  assert(i == 1, "i");
+  match c {
+    _T0371Red => assert(false, "should be tagged"),
+    _T0371Tagged(s) => assert(s == "ab", "label"),
+  };
+}
+
+// Tuple containing a channel field. Drop walk must reach Channel.drop via
+// emitVariantFieldDrop's channel branch; closing happens automatically on drop.
+test_t0371_tuple_with_channel() `test {
+  channel[int] ch = channel[int](capacity: 4);
+  (int, channel[int]) t = (1, ch);
+  (i, c) := t;
+  c.send(42);
+  assert(i == 1, "i");
+}
+
+// Move tuple variable into a function parameter. The receiving param takes
+// ownership; the source's drop flag must be cleared so its scope-exit walk
+// doesn't double-free.
+take_t0371_tuple(~(int, string) t) string {
+  (a, b) := t;
+  return b;
+}
+
+test_t0371_move_into_func() `test {
+  (int, string) t = (1, "a" + "b");
+  string s = take_t0371_tuple(t);
+  assert(s == "ab", "moved into func");
+}
+
+// Early return inside a function with a tuple var: emitEarlyDrops must
+// dispatch bindingDropTuple so the tuple's heap fields are freed before
+// the function returns.
+maybe_early_t0371(bool flag) int {
+  (int, string) t = (1, "a" + "b");
+  if flag {
+    return 99;
+  }
+  (a, b) := t;
+  return a;
+}
+
+test_t0371_early_return_with_tuple_var() `test {
+  assert(maybe_early_t0371(true) == 99, "early branch (drops tuple)");
+  assert(maybe_early_t0371(false) == 1, "late branch (consumes tuple)");
+}
+
+// Break inside a loop with a tuple var per iteration: emitScopeCleanup must
+// drop the tuple before exiting the loop body.
+test_t0371_break_with_tuple_var() `test {
+  int n = 0;
+  for i in 0..10 {
+    (int, string) t = (i, "a" + "b");
+    n += i;
+    if i == 3 {
+      break;
+    }
+  }
+  assert(n == 6, "0+1+2+3 = 6");
+}
+
+// Continue inside a loop with a tuple var: emitScopeCleanup must drop the
+// tuple before continuing to the next iteration.
+test_t0371_continue_with_tuple_var() `test {
+  int n = 0;
+  for i in 0..5 {
+    (int, string) t = (i, "x" + "y");
+    if i % 2 == 1 {
+      continue;
+    }
+    n += i;
+  }
+  assert(n == 6, "0+2+4 = 6");
+}
+
+// Raise inside a failable function with a tuple var: scope cleanup on raise
+// must drop the tuple's heap fields.
+fail_with_t0371_tuple!() int {
+  (int, string) t = (1, "a" + "b");
+  raise error(message: "boom");
+}
+
+test_t0371_raise_with_tuple_var() `test {
+  (n, err) := fail_with_t0371_tuple();
+  assert(err is present, "should error");
+}
+
+// Conditional move: tuple consumed in one branch, dropped via dropflag in the
+// other. Tests that emitTupleDropCall's flag check correctly suppresses the
+// walk on the consumed branch and runs it on the unconsumed branch.
+choose_or_drop_t0371(bool flag) string {
+  (int, string) t = (1, "a" + "b");
+  if flag {
+    (a, b) := t;
+    return b;
+  }
+  return "none";
+}
+
+test_t0371_conditional_move() `test {
+  assert(choose_or_drop_t0371(true) == "ab", "consumed");
+  assert(choose_or_drop_t0371(false) == "none", "dropped via flag");
+}
+
+// Pure-value tuple (all primitive fields) must NOT register a drop binding
+// — tupleNeedsDrop returns false. Negative test (no leak, no perf hit).
+test_t0371_pure_value_tuple_no_drop() `test {
+  (int, int) t = (1, 2);
+  (a, b) := t;
+  assert(a == 1, "a");
+  assert(b == 2, "b");
+}
+
+// Nested pure-value tuple — recursion in tupleNeedsDrop returns false.
+test_t0371_pure_value_nested_tuple() `test {
+  ((int, int), int) t = ((1, 2), 3);
+  (inner, c) := t;
+  (a, b) := inner;
+  assert(a == 1, "a");
+  assert(b == 2, "b");
+  assert(c == 3, "c");
+}
+
+// Generic function with tuple-of-T local. Exercises emitTupleDropCall's
+// typeSubst != nil branch: the tuple type's elements get substituted at
+// monomorphization so the drop walk uses the concrete element types.
+make_then_drop_t0371[T](~T x, ~T y) {
+  (T, T) t = (x, y);
+}
+
+test_t0371_generic_fn_tuple_local() `test {
+  make_then_drop_t0371[string]("a" + "b", "c" + "d");
+}

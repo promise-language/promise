@@ -1104,15 +1104,50 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 	if !ok {
 		panic(fmt.Sprintf("codegen: destructure value type is %T, want *types.Tuple", tupleType))
 	}
+	// T0371: Determine whether the source tuple is owned (has its own drop
+	// binding, or is a transient temp like a literal/call result). If the source
+	// is a borrow (for-in loop variable, container index expression, member
+	// access), the destructured fields are also borrows and must not get drop
+	// bindings — otherwise they would double-free with the container's element
+	// walk or the parent's drop.
+	srcOwned := true
+	switch src := s.Value.(type) {
+	case *ast.IdentExpr:
+		_, hasBinding := c.dropBindings[src.Name]
+		srcOwned = hasBinding
+	case *ast.IndexExpr, *ast.MemberExpr:
+		srcOwned = false
+	}
 	for i, name := range s.Names {
 		if name == "_" {
 			continue
 		}
-		elemType := c.resolveType(tup.Elems()[i])
+		elemPromiseType := tup.Elems()[i]
+		if c.typeSubst != nil {
+			elemPromiseType = types.Substitute(elemPromiseType, c.typeSubst)
+		}
+		elemType := c.resolveType(elemPromiseType)
 		alloca := c.createEntryAlloca(elemType)
 		alloca.SetName(c.uniqueLocalName(name))
 		c.block.NewStore(c.block.NewExtractValue(tupleVal, uint64(i)), alloca)
 		c.locals[name] = alloca
+		// T0371: Register drop tracking so destructured locals own and free
+		// their pieces. Skipped when the source is a borrow (ident without a
+		// drop binding) — otherwise destructured locals would double-free with
+		// the container's element walk (e.g., for tup in vec { (a, b) := tup }).
+		if srcOwned {
+			c.maybeRegisterDrop(name, alloca, elemPromiseType)
+		}
+	}
+	// T0371: Source tuple transferred field ownership to the destructured
+	// locals. Clear its drop flag (ident case) so its scope-exit tuple-walk
+	// doesn't double-free those pieces. For non-ident sources (literal,
+	// function-call result), genTupleLit's per-element claims plus the
+	// per-name drops registered above cover ownership.
+	if srcOwned {
+		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
 	}
 }
 
@@ -1284,6 +1319,16 @@ func isTypeDroppable(typ types.Type) bool {
 		}
 		if inst, ok := typ.(*types.Instance); ok && monoEnumInstNeedsSynthDrop(inst) {
 			return true
+		}
+		return false
+	}
+	// T0371: Tuples with droppable fields require a tuple-walk drop binding.
+	// Recurse into fields — pure-value tuples (int, bool, etc.) are not droppable.
+	if tup, ok := typ.(*types.Tuple); ok {
+		for _, e := range tup.Elems() {
+			if isTypeDroppable(e) {
+				return true
+			}
 		}
 		return false
 	}
@@ -1467,6 +1512,29 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 			c.maybeRegisterEnumDrop(varName, alloca, typ, enum)
 			return
 		}
+	}
+
+	// T0371: Tuple value with droppable fields — register a bindingDropTuple
+	// that walks fields and drops each droppable one at scope exit.
+	// Tuples are stored in struct allocas (not i8*), so we use a dedicated kind.
+	if _, ok := typ.(*types.Tuple); ok {
+		if !c.tupleNeedsDrop(typ) {
+			return
+		}
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+		c.dropFlags[varName] = dropFlag
+		binding := scopeBinding{
+			kind:     bindingDropTuple,
+			alloca:   alloca,
+			valType:  typ,
+			dropFlag: dropFlag,
+			varName:  varName,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[varName] = binding
+		return
 	}
 
 	named := extractNamed(typ)
@@ -2061,6 +2129,32 @@ func (c *Compiler) emitOptionalDropCall(b scopeBinding) {
 	c.block = skipBlock
 }
 
+// emitTupleDropCall emits a conditional drop for a tuple value variable (T0371).
+// Loads the tuple struct from its alloca, then walks fields and drops each
+// droppable element via emitVariantFieldDrop (string, vector, channel, user
+// types with drop, enums with drop, recursive tuples).
+func (c *Compiler) emitTupleDropCall(b scopeBinding) {
+	if b.dropFlag == nil {
+		return
+	}
+
+	flag := c.block.NewLoad(irtypes.I1, b.dropFlag)
+	dropBlock := c.newBlock("tupdrop.exec")
+	skipBlock := c.newBlock("tupdrop.skip")
+	c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	tupVal := c.block.NewLoad(b.alloca.ElemType, b.alloca)
+	typ := b.valType
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	c.emitVariantFieldDrop(tupVal, typ)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
 // maybeRegisterOptionalDrop registers a bindingDropOptional for an explicitly declared
 // optional local variable (T0111). Only called for typed declarations (string? s = ...)
 // where the inner type is droppable (string, vector, channel, user type with drop).
@@ -2287,6 +2381,8 @@ func (c *Compiler) emitEarlyDrops(stmt ast.Stmt) {
 			c.emitEnumDropCall(binding)
 		case bindingDropOptional:
 			c.emitOptionalDropCall(binding)
+		case bindingDropTuple:
+			c.emitTupleDropCall(binding)
 		case bindingFree:
 			c.emitFreeCall(binding)
 		case bindingFreeEnv:
@@ -2342,6 +2438,8 @@ func (c *Compiler) emitScopeCleanup(fromIdx int, errorInFlight bool) *closeErrCa
 			c.emitEnumDropCall(b)
 		case bindingDropOptional:
 			c.emitOptionalDropCall(b)
+		case bindingDropTuple:
+			c.emitTupleDropCall(b)
 		case bindingFree:
 			c.emitFreeCall(b)
 		case bindingFreeEnv:
@@ -2513,6 +2611,10 @@ func (c *Compiler) emitDropCall(b scopeBinding) {
 	}
 	if b.kind == bindingDropOptional {
 		c.emitOptionalDropCall(b)
+		return
+	}
+	if b.kind == bindingDropTuple {
+		c.emitTupleDropCall(b)
 		return
 	}
 	if b.dropFlag == nil {
@@ -3319,8 +3421,10 @@ func (c *Compiler) vecElemNeedsUserTypeDrop(elemType types.Type) bool {
 }
 
 // tupleNeedsDrop returns true if a tuple type contains any droppable element
-// (string, vector, channel, user type with drop, enum with drop).
+// (string, vector, channel, user type with drop, enum with drop, or another
+// droppable tuple).
 // B0264: Enables vector element drop loop to clean up tuple elements.
+// T0371: Recurses into nested tuples so e.g. ((int, string), int) is droppable.
 func (c *Compiler) tupleNeedsDrop(elemType types.Type) bool {
 	tup, ok := elemType.(*types.Tuple)
 	if !ok {
@@ -3330,6 +3434,13 @@ func (c *Compiler) tupleNeedsDrop(elemType types.Type) bool {
 		resolved := e
 		if c.typeSubst != nil {
 			resolved = types.Substitute(resolved, c.typeSubst)
+		}
+		// T0371: Recurse into nested tuple fields.
+		if _, isTup := resolved.(*types.Tuple); isTup {
+			if c.tupleNeedsDrop(resolved) {
+				return true
+			}
+			continue
 		}
 		if named := extractNamed(resolved); named != nil {
 			if named == types.TypString || named.HasDrop() || named.NeedsSynthDrop() {
@@ -3774,75 +3885,22 @@ func (c *Compiler) trackChainIntermediateReceiver(memberTarget ast.Expr, receive
 // droppable elements via emitVectorElementDropLoop before freeing the buffer via
 // Vector.drop. Mirrors trackVectorTempWithElemType for the heapTemp path. T0369.
 //
-// T0369: When elemType transitively contains a droppable Tuple, the element
-// walk is skipped (elemType stays nil → buffer-only free via Vector.drop).
-// Reason: heap items inside tuple fields (string concats, etc.) are tracked as
-// stmtTemps that are NOT claimed when the tuple is consumed (pre-existing bug,
-// see T0371). Walking such tuples would drop those heap items twice — once via
-// the stmtTemp's own cleanup, once via the element walk reaching the tuple
-// through emitVariantFieldDrop. The check is recursive across Vector / Map /
-// Optional / Channel / Arc / Weak / Tuple / Array containers because tuples can
-// hide arbitrarily deep (e.g., Vector[Vector[Tuple[int,string]]] reaches the
-// tuple via emitVariantFieldDrop's vector-field branch). Once T0371 lands —
-// genTupleLit claiming heap field temps — this skip becomes unnecessary.
-// Returns true when the heap temp is configured to walk droppable elements at
-// cleanup (elemType set). Callers gate ownership-transfer claims on this — when
-// walk is enabled, the caller should claim heap/string/enum-ctor temps so the
-// walk owns them; when walk is disabled, leave temps tracked so they
-// self-cleanup at stmt end (B0281 enum ctor cleanup, cleanupStmtTemps).
+// T0371: With genTupleLit now claiming heap-tracked field temps as the tuple
+// takes ownership (string concats, heap user types, enum ctor temps), the
+// element walk is safe even when the element type contains a droppable tuple —
+// the buffer-walk is the unique drop site for those tuple fields. Returns true
+// when the heap temp is configured to walk droppable elements at cleanup
+// (elemType set). Callers gate ownership-transfer claims on this.
 func (c *Compiler) trackVectorHeapTempWithElemType(rawPtr value.Value, elemType types.Type) bool {
 	dropFn := c.funcs["Vector.drop"]
 	if dropFn == nil {
 		return false
 	}
-	resolved := elemType
-	if c.typeSubst != nil {
-		resolved = types.Substitute(resolved, c.typeSubst)
-	}
 	prevLen := len(c.heapTemps)
 	c.trackHeapTemp(rawPtr, dropFn)
 	if len(c.heapTemps) > prevLen {
-		if !c.containsDroppableTuple(resolved) {
-			c.heapTemps[len(c.heapTemps)-1].elemType = elemType
-			return true
-		}
-	}
-	return false
-}
-
-// containsDroppableTuple reports whether t transitively contains a Tuple with
-// at least one droppable field (string, vector, channel, user type with drop,
-// enum with drop, or another droppable tuple). Recurses into Vector / Map /
-// Optional / Channel / Arc / Weak / Array / Tuple structures. Used by
-// trackVectorHeapTempWithElemType to suppress the element walk for elementtypes
-// that would reach a tuple-with-heap-field via emitVariantFieldDrop. T0369.
-func (c *Compiler) containsDroppableTuple(t types.Type) bool {
-	if t == nil {
-		return false
-	}
-	if c.typeSubst != nil {
-		t = types.Substitute(t, c.typeSubst)
-	}
-	switch tt := t.(type) {
-	case *types.Tuple:
-		if c.tupleNeedsDrop(tt) {
-			return true
-		}
-		for _, e := range tt.Elems() {
-			if c.containsDroppableTuple(e) {
-				return true
-			}
-		}
-	case *types.Instance:
-		for _, arg := range tt.TypeArgs() {
-			if c.containsDroppableTuple(arg) {
-				return true
-			}
-		}
-	case *types.Optional:
-		return c.containsDroppableTuple(tt.Elem())
-	case *types.Array:
-		return c.containsDroppableTuple(tt.Elem())
+		c.heapTemps[len(c.heapTemps)-1].elemType = elemType
+		return true
 	}
 	return false
 }
@@ -4496,6 +4554,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					c.block = mergeBlk
 				} else if binding.kind == bindingDropEnum {
 					c.emitEnumDropCall(binding)
+				} else if binding.kind == bindingDropTuple {
+					c.emitTupleDropCall(binding)
 				} else if binding.kind == bindingFree {
 					c.emitFreeCall(binding)
 				} else {

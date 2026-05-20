@@ -426,6 +426,7 @@ const (
 	bindingDropString                           // string: call promise_string_drop (alloca is i8*, not value struct)
 	bindingDropEnum                             // enum: call enum drop (alloca ptr bitcast to i8*) T0102
 	bindingDropOptional                         // optional: check has-value flag, then drop inner value (T0101)
+	bindingDropTuple                            // tuple value: walk fields and drop droppables at scope exit (T0371)
 	bindingFree                                 // heap-only: call pal_free (no drop method, just free the instance)
 	bindingFreeEnv                              // closure env: free env pointer at scope exit
 	bindingGenerator                            // generator: destroy coroutine + free yield slot at scope exit
@@ -7197,6 +7198,16 @@ func (c *Compiler) variantFieldNeedsDrop(typ types.Type) bool {
 	// Apply type substitution for mono contexts
 	if c.typeSubst != nil {
 		typ = types.Substitute(typ, c.typeSubst)
+	}
+	// T0371: Tuples with droppable fields need cleanup so the synth enum drop
+	// walks them via emitVariantFieldDrop's tuple branch.
+	if tup, ok := typ.(*types.Tuple); ok {
+		for _, e := range tup.Elems() {
+			if c.variantFieldNeedsDrop(e) {
+				return true
+			}
+		}
+		return false
 	}
 	named := extractNamed(typ)
 	if named != nil {

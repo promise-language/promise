@@ -3,6 +3,7 @@ package codegen
 import (
 	"fmt"
 	"math"
+	"strconv"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -7263,7 +7264,8 @@ func (c *Compiler) lookupLocalType(s *ast.TypedVarDecl) types.Type {
 }
 
 // resolveTypeRefToType resolves an AST TypeRef to a types.Type.
-// Handles named types (primitives and user types) by looking up in Universe and sema scopes.
+// Mirrors sema.Checker.resolveType so codegen can re-derive types for AST refs
+// that don't have a direct Types[expr] entry (e.g., the target of `as!`).
 func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 	switch r := ref.(type) {
 	case *ast.NamedTypeRef:
@@ -7277,34 +7279,128 @@ func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 				}
 			}
 		}
+		var base types.Type
 		// Check Universe scope first (primitives)
 		if obj, _ := types.Universe.LookupParent(r.Name); obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
-				return tn.Type()
+				base = tn.Type()
 			}
 		}
 		// Check file scope (user-defined types)
-		for _, scope := range c.info.ScopeOrder {
-			if obj := scope.Lookup(r.Name); obj != nil {
-				if tn, ok := obj.(*types.TypeName); ok {
-					return tn.Type()
+		if base == nil {
+			for _, scope := range c.info.ScopeOrder {
+				if obj := scope.Lookup(r.Name); obj != nil {
+					if tn, ok := obj.(*types.TypeName); ok {
+						base = tn.Type()
+						break
+					}
 				}
 			}
 		}
+		if base == nil {
+			return nil
+		}
+		if len(r.TypeArgs) == 0 {
+			return base
+		}
+		args := make([]types.Type, len(r.TypeArgs))
+		for i, ta := range r.TypeArgs {
+			args[i] = c.resolveTypeRefToType(ta)
+			if args[i] == nil {
+				return nil
+			}
+		}
+		return types.NewInstance(base, args)
 	case *ast.QualifiedTypeRef:
 		// Module-qualified types: look up in sema scopes by unqualified name
+		var base types.Type
 		for _, scope := range c.info.ScopeOrder {
 			if obj := scope.Lookup(r.Name); obj != nil {
 				if tn, ok := obj.(*types.TypeName); ok {
-					return tn.Type()
+					base = tn.Type()
+					break
 				}
 			}
 		}
+		if base == nil {
+			return nil
+		}
+		if len(r.TypeArgs) == 0 {
+			return base
+		}
+		args := make([]types.Type, len(r.TypeArgs))
+		for i, ta := range r.TypeArgs {
+			args[i] = c.resolveTypeRefToType(ta)
+			if args[i] == nil {
+				return nil
+			}
+		}
+		return types.NewInstance(base, args)
 	case *ast.OptionalTypeRef:
 		inner := c.resolveTypeRefToType(r.Inner)
 		if inner != nil {
 			return types.NewOptional(inner)
 		}
+	case *ast.SliceTypeRef:
+		elem := c.resolveTypeRefToType(r.Element)
+		if elem != nil {
+			return types.NewVector(elem)
+		}
+	case *ast.ArrayTypeRef:
+		elem := c.resolveTypeRefToType(r.Element)
+		if elem == nil {
+			return nil
+		}
+		size, err := strconv.ParseInt(r.Size, 10, 64)
+		if err != nil {
+			return nil
+		}
+		return types.NewArray(elem, size)
+	case *ast.SharedRefTypeRef:
+		inner := c.resolveTypeRefToType(r.Inner)
+		if inner != nil {
+			return types.NewSharedRef(inner)
+		}
+	case *ast.MutRefTypeRef:
+		inner := c.resolveTypeRefToType(r.Inner)
+		if inner != nil {
+			return types.NewMutRef(inner)
+		}
+	case *ast.PointerTypeRef:
+		inner := c.resolveTypeRefToType(r.Inner)
+		if inner != nil {
+			return types.NewPointer(inner)
+		}
+	case *ast.TupleTypeRef:
+		elems := make([]types.Type, len(r.Elements))
+		for i, e := range r.Elements {
+			elems[i] = c.resolveTypeRefToType(e)
+			if elems[i] == nil {
+				return nil
+			}
+		}
+		return types.NewTuple(elems)
+	case *ast.FunctionTypeRef:
+		params := make([]*types.Param, len(r.Params))
+		for i, p := range r.Params {
+			pt := c.resolveTypeRefToType(p)
+			if pt == nil {
+				return nil
+			}
+			params[i] = types.NewParam("", pt, types.RefNone)
+		}
+		var result types.Type
+		if r.Return != nil {
+			if named, ok := r.Return.(*ast.NamedTypeRef); ok && named.Name == "void" && len(named.TypeArgs) == 0 {
+				// result stays nil
+			} else {
+				result = c.resolveTypeRefToType(r.Return)
+				if result == nil {
+					return nil
+				}
+			}
+		}
+		return types.NewSignature(nil, params, result, false)
 	}
 	return nil
 }

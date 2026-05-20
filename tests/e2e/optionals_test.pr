@@ -539,6 +539,116 @@ as_bang_user_type() `test {
   assert(q.y == 9, "as! on user type optional y");
 }
 
+// T0355: as! on slice/array/map optionals
+as_bang_vector_optional() `test {
+  v_opt := make_int_vec_optional();
+  int[] v = v_opt as! int[];
+  assert(v.len == 2, "as! on vector optional len");
+  assert(v[0] == 1, "as! on vector optional [0]");
+  assert(v[1] == 2, "as! on vector optional [1]");
+}
+
+make_int_vec_optional() int[]? {
+  v := int[]();
+  v.push(1);
+  v.push(2);
+  return v;
+}
+
+as_bang_vector_string_optional() `test {
+  v_opt := make_string_vec_optional();
+  string[] v = v_opt as! string[];
+  assert(v.len == 2, "as! on string vector optional len");
+  assert(v[0] == "hello", "as! on string vector optional [0]");
+  assert(v[1] == "world", "as! on string vector optional [1]");
+}
+
+make_string_vec_optional() string[]? {
+  v := string[]();
+  v.push("hello");
+  v.push("world");
+  return v;
+}
+
+as_bang_map_optional() `test {
+  m_opt := make_map_optional();
+  map[string, int] m = m_opt as! map[string, int];
+  assert(m.len == 2, "as! on map optional len");
+  assert(m["a"] as! int == 1, "as! on map optional [a]");
+  assert(m["b"] as! int == 2, "as! on map optional [b]");
+}
+
+make_map_optional() map[string, int]? {
+  m := map[string, int]();
+  m["a"] = 1;
+  m["b"] = 2;
+  return m;
+}
+
+// T0355: uninitialized typed decl with slice optional resolves to a real type
+uninitialized_slice_optional() `test {
+  int[]? v;
+  if v {
+    assert(false, "uninitialized slice optional should be none");
+  }
+}
+
+// T0355: as! on tuple optional (TupleTypeRef cast target)
+as_bang_tuple_optional() `test {
+  t_opt := make_tuple_optional();
+  (int, string) t = t_opt as!(int, string);
+  (a, b) := t;
+  assert(a == 42, "as! on tuple optional .0");
+  assert(b == "hello", "as! on tuple optional .1");
+}
+
+make_tuple_optional()(int, string)? {
+  return (42, "hello");
+}
+
+// T0355: as! on function-type optional (FunctionTypeRef cast target)
+as_bang_function_optional() `test {
+  f_opt := make_function_optional();
+  (int) -> int f = f_opt as!((int) -> int);
+  assert(f(5) == 6, "as! on fn optional call");
+}
+
+make_function_optional()((int) -> int)? {
+  (int) -> int g = |int x| -> x + 1;
+  return g;
+}
+
+// T0355: as! on (T) -> void optional (FunctionTypeRef with void return)
+as_bang_void_function_optional() `test {
+  f_opt := make_void_function_optional();
+  (int) -> void f = f_opt as!((int) -> void);
+  f(7);
+  assert(true, "as! on void fn optional invoked");
+}
+
+make_void_function_optional()((int) -> void)? {
+  (int) -> void g = |int x| {
+    int _ = x + 1;
+  };
+  return g;
+}
+
+// T0355: uninitialized typed decl with tuple optional
+uninitialized_tuple_optional() `test {
+  (int, string)? t;
+  if t {
+    assert(false, "uninitialized tuple optional should be none");
+  }
+}
+
+// T0355: uninitialized typed decl with function-type optional
+uninitialized_function_optional() `test {
+  ((int) -> int)? f;
+  if f {
+    assert(false, "uninitialized function optional should be none");
+  }
+}
+
 // --- Optional handler: more types ---
 
 handler_string_recovery() `test {

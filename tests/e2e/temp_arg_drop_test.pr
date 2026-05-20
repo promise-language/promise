@@ -454,3 +454,238 @@ t0346_set_discard() `test {
   Set[int]();
   assert(true, "no segfault");
 }
+
+// =========================================================================
+// T0345: Constructor inline as plain (non-`~`) arg must free transitive heap
+// fields. genConstructorCallMono tracks the new instance with palFree (T0135),
+// which only frees the top-level instance struct at statement end. The type's
+// synthesized drop (which would free heap fields like vector buffers, map
+// storage, strings) was never invoked. Fix: swap the heap-temp dropFunc from
+// palFree to the full drop after construction completes successfully.
+// =========================================================================
+
+type T0345VecHolder {
+  int[] data;
+}
+
+t0345_len_check_vec(T0345VecHolder h, int expected) {
+  assert(h.data.len == expected, "vec.len");
+}
+
+t0345_ctor_vec_field_plain_arg() `test {
+  t0345_len_check_vec(T0345VecHolder(data: int[]()), 0);
+}
+
+type T0345StrHolder {
+  string name;
+}
+
+t0345_len_check_str(T0345StrHolder h, int expected) {
+  assert(h.name.len == expected, "str.len");
+}
+
+t0345_ctor_str_field_plain_arg() `test {
+  t0345_len_check_str(T0345StrHolder(name: "hello"), 5);
+}
+
+type T0345MapHolder {
+  map[string, int] m;
+}
+
+t0345_len_check_map(T0345MapHolder h, int expected) {
+  assert(h.m.len == expected, "map.len");
+}
+
+t0345_ctor_map_field_plain_arg() `test {
+  t0345_len_check_map(T0345MapHolder(m: map[string, int]()), 0);
+}
+
+type T0345SetHolder {
+  Set[int] s;
+}
+
+t0345_len_check_set(T0345SetHolder h, int expected) {
+  assert(h.s.len == expected, "set.len");
+}
+
+t0345_ctor_set_field_plain_arg() `test {
+  t0345_len_check_set(T0345SetHolder(s: Set[int]()), 0);
+}
+
+type T0345Inner {
+  int[] data;
+}
+type T0345Outer {
+  T0345Inner inner;
+}
+
+t0345_check_outer(T0345Outer h, int expected) {
+  assert(h.inner.data.len == expected, "nested data.len");
+}
+
+t0345_ctor_nested_user_heap_plain_arg() `test {
+  t0345_check_outer(T0345Outer(inner: T0345Inner(data: int[]())), 0);
+}
+
+type T0345MultiField {
+  int[] a;
+  string b;
+  map[string, int] c;
+}
+
+t0345_check_multi(T0345MultiField h) {
+  assert(h.a.len == 0, "a.len");
+  assert(h.b.len == 5, "b.len");
+  assert(h.c.len == 0, "c.len");
+}
+
+t0345_ctor_multi_field_plain_arg() `test {
+  t0345_check_multi(T0345MultiField(a: int[](), b: "hello", c: map[string, int]()));
+}
+
+// Failable HasNew constructor as plain arg: the okBlock swap site is exercised
+// here. The instance is allocated, fields zero-init'd, new() runs and succeeds,
+// the dropFunc is swapped, and the value struct is built. The unclaimed temp
+// must invoke the type's full drop at statement end, freeing the int[] field.
+type T0345FailableHolder {
+  int[] data;
+
+  new!(~this, ~int[] codes) {
+    if codes.len > 100 {
+      raise error(message: "too long");
+    }
+    this.data = codes;
+  }
+}
+
+t0345_len_check_failable(T0345FailableHolder h, int expected) {
+  assert(h.data.len == expected, "failable.data.len");
+}
+
+t0345_use_failable!() {
+  // Constructor is failable; `?!` unwraps inline and the unwrapped value
+  // is passed as a plain arg. The temp must be cleaned up via the
+  // okBlock-swapped full drop at statement end (freeing the int[] field).
+  t0345_len_check_failable(T0345FailableHolder(codes: int[]())?!, 0);
+}
+
+t0345_failable_ctor_plain_arg_success() `test {
+  t0345_use_failable()?!;
+  assert(true, "failable ok-path plain-arg ok");
+}
+
+// Generic mono type as plain-arg: exercises resolveDropFuncForTemp's
+// monoName lookup path (via *types.Instance branch). The synth drop for
+// Box__intvec must be declared before the constructor body emits.
+type T0345Box[T] {
+  T[] items;
+}
+
+t0345_check_box_int(T0345Box[int] b, int expected) {
+  assert(b.items.len == expected, "box.items.len");
+}
+
+t0345_generic_mono_plain_arg() `test {
+  t0345_check_box_int(T0345Box[int](items: int[]()), 0);
+}
+
+// Generic mono type with multiple type parameters as plain-arg.
+type T0345Pair[K, V] {
+  K[] keys;
+  V[] values;
+}
+
+t0345_check_pair(T0345Pair[string, int] p) {
+  assert(p.keys.len == 0, "pair keys");
+  assert(p.values.len == 0, "pair values");
+}
+
+t0345_generic_mono_multi_param_plain_arg() `test {
+  t0345_check_pair(T0345Pair[string, int](keys: string[](), values: int[]()));
+}
+
+// Explicit user drop (HasDrop) with heap fields: exercises
+// resolveDropFuncForTemp's HasDrop branch (returns the $wrap drop, which
+// calls the user drop then pal_free). Without the swap, the heap field
+// leaks because the original tracker only freed the instance struct.
+type T0345HasDrop {
+  int[] data;
+  int id;
+
+  new(~this, ~int[] data, int id) {
+    this.data = data;
+    this.id = id;
+  }
+
+  drop(~this) {
+    // Explicit user drop. Synth drop is suppressed; the $wrap added by
+    // codegen wraps this call with pal_free for the instance struct.
+    // Heap fields (this.data) are dropped by the $wrap path.
+  }
+}
+
+t0345_check_has_drop(T0345HasDrop r, int expected_id) {
+  assert(r.id == expected_id, "has_drop.id");
+}
+
+t0345_has_drop_plain_arg() `test {
+  t0345_check_has_drop(T0345HasDrop(data: int[](), id: 7), 7);
+}
+
+// Discard of constructor with heap fields: T0345 swaps dropFunc, then
+// T0346's dropDiscardedHeapType claims the heap temp and emits its own
+// drop call using resolveDropFuncForTemp. Both should resolve to the
+// same full drop. Verifies the two fixes interact cleanly.
+type T0345DiscardWithFields {
+  string name;
+  int[] codes;
+}
+
+t0345_discard_with_heap_fields() `test {
+  T0345DiscardWithFields(name: "abc", codes: int[]());
+  assert(true, "no leak/segfault");
+}
+
+// Failable HasNew err-path: when new() raises, the instance is left
+// zero-initialized. cleanupHeapTemps fires the swapped fullDrop on the
+// zero-init'd instance. Synth drop must null-check heap fields to avoid
+// segfault. Verifies the safety claim from the T0345 fix plan.
+type T0345ErrFailable {
+  int[] data;
+
+  new!(~this, ~int[] codes) {
+    if codes.len > 100 {
+      raise error(message: "too long");
+    }
+    this.data = codes;
+  }
+}
+
+t0345_make_long_vec() int[] {
+  int[] v = int[]();
+  int i = 0;
+  while i < 101 {
+    v.push(i);
+    i = i + 1;
+  }
+  return v;
+}
+
+t0345_check_err_failable(T0345ErrFailable h, int expected) {
+  assert(h.data.len == expected, "err_failable.data.len");
+}
+
+t0345_err_callsite!() {
+  // Failable constructor as plain-arg with `?^` propagation. On err,
+  // the instance is zero-init'd and the swapped fullDrop must safely
+  // walk the null heap fields without crashing.
+  t0345_check_err_failable(T0345ErrFailable(codes: t0345_make_long_vec())?^, 0);
+}
+
+t0345_failable_ctor_plain_arg_failure() `test {
+  int caught = 0;
+  t0345_err_callsite()? e {
+    caught = 1;
+  };
+  assert(caught == 1, "err propagated, instance dropped without crash");
+}

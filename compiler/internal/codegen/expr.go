@@ -2011,6 +2011,9 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 
 			// Ok path: build value struct and wrap
 			c.block = okBlock
+			// T0345: Swap heap-temp dropFunc from palFree to the type's full drop
+			// so unclaimed/discarded instances free their transitive heap fields.
+			c.updateConstructorTempDrop(rawPtr, named, typ)
 			var vtablePtr2 value.Value
 			if vtGlobal := c.lookupVtableGlobal(typ); vtGlobal != nil {
 				vtablePtr2 = constant.NewBitCast(vtGlobal, irtypes.I8Ptr)
@@ -2210,6 +2213,11 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	// - Container store (push, send, field/index assign)
 	// If nobody claims, cleanupHeapTemps frees the temp at statement end.
 
+	// T0345: Swap heap-temp dropFunc from palFree to the type's full drop so
+	// unclaimed/discarded instances free their transitive heap fields. Covers
+	// both non-failable HasNew and implicit-constructor paths.
+	c.updateConstructorTempDrop(rawPtr, named, typ)
+
 	// Build value struct: { vtable_ptr, instance_ptr }
 	var vtablePtr value.Value
 	if vtGlobal := c.lookupVtableGlobal(typ); vtGlobal != nil {
@@ -2279,6 +2287,27 @@ func (c *Compiler) resolveDropFuncForTemp(named *types.Named, typ types.Type) *i
 	}
 	// Heap type without drop: use pal_free
 	return c.palFree
+}
+
+// updateConstructorTempDrop swaps the heap temp's dropFunc from palFree (the safe
+// error-during-arg-eval default registered at T0135 by genConstructorCallMono) to
+// the type's full drop after construction completes successfully (T0345). Without
+// this swap, an unclaimed instance discarded or passed as a plain (non-`~`) arg
+// would only get its top-level allocation freed at statement end, leaking any
+// transitive heap fields (vector buffers, map storage, string allocations, etc.).
+func (c *Compiler) updateConstructorTempDrop(rawPtr value.Value, named *types.Named, typ types.Type) {
+	if rawPtr == nil || named == nil {
+		return
+	}
+	idx, ok := c.heapTempMap[rawPtr]
+	if !ok || idx < 0 {
+		return
+	}
+	fullDrop := c.resolveDropFuncForTemp(named, typ)
+	if fullDrop == nil || fullDrop == c.palFree {
+		return
+	}
+	c.heapTemps[idx].dropFunc = fullDrop
 }
 
 // genValueTypeConstructor builds a value type by insertvalue chain — no heap allocation.

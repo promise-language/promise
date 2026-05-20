@@ -93,13 +93,14 @@ func (p *WindowsPAL) EmitAlloc(module *ir.Module) *ir.Func {
 }
 func (p *WindowsPAL) EmitFree(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitLibcFreeDebug(module, "_msize")
+		// UCRT _write returns int (i32) and takes count as unsigned int (i32).
+		return emitLibcFreeDebug(module, "_write", true)
 	}
 	return emitLibcFree(module)
 }
 func (p *WindowsPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitLibcReallocDebug(module, "_msize")
+		return emitLibcReallocDebug(module, "_write", true)
 	}
 	return emitLibcRealloc(module)
 }

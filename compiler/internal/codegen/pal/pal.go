@@ -10,6 +10,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 )
 
 // PAL emits platform-specific LLVM IR functions into the module.
@@ -357,11 +358,159 @@ func emitLibcFree(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// emitLibcAllocDebug declares libc @malloc and defines @pal_alloc with a
-// scribble-fill (0xAA) on the returned buffer, mirroring macOS
-// MallocPreScribble. Surfaces use-of-uninitialized-memory bugs by ensuring
-// freshly-malloc'd bytes contain a recognizable, non-zero pattern. Pairs with
-// emitLibcFreeDebug's 0xDE post-free poison.
+// Debug allocator header constants (T0365).
+//
+// Layout — every pal_alloc'd buffer in DebugAllocator builds is laid out as:
+//
+//	internal_ptr → [ magic_alive : i64 ][ requested_size : i64 ][ user_data … ][ magic_tail : i64 ]
+//	                                                            ^
+//	                                                            user_ptr returned to caller
+//
+// Header is 16 bytes (8 + 8). Trailing sentinel is 8 bytes. Internal allocation
+// is `requested_size + 24`. malloc returns ≥16-byte aligned, so the user pointer
+// at +16 keeps malloc's native alignment.
+const (
+	debugMagicAlive = 0x4D414C4C4F435F41 // "MALLOC_A" — set on alloc
+	debugMagicFreed = 0x4D414C4C4F435F46 // "MALLOC_F" — set on free (turns next free into a detected double-free)
+	debugMagicTail  = 0x5441494C5F4D4147 // "TAIL_MAG" — written at user_ptr + size
+	debugHeaderSize = 16                 // magic_alive (8) + requested_size (8)
+	debugTailSize   = 8                  // magic_tail (8)
+	debugSlackSize  = debugHeaderSize + debugTailSize
+)
+
+// getOrCreateDebugMsgGlobal returns a private global containing msg with a
+// trailing newline, creating it on first use. Symbol name is derived from key.
+func getOrCreateDebugMsgGlobal(module *ir.Module, key, msg string) *ir.Global {
+	name := "__promise_dbgmsg_" + key
+	for _, g := range module.Globals {
+		if g.Name() == name {
+			return g
+		}
+	}
+	c := constant.NewCharArrayFromString(msg)
+	g := module.NewGlobalDef(name, c)
+	g.Linkage = enum.LinkagePrivate
+	g.Immutable = true
+	return g
+}
+
+// emitDebugAbortCall emits a tail call sequence that writes msg to stderr and
+// exits with code 134 (SIGABRT). blk is terminated with `unreachable`.
+//
+// The libc `write`/`_write` and `exit` functions are forward-declared via
+// getOrDeclareFunc — both POSIX libc and Windows UCRT provide them under the
+// names passed in. Used by libc-based debug allocator (POSIX + Windows).
+func emitDebugAbortCallLibc(module *ir.Module, blk *ir.Block, key, msg, writeName string, writeReturnsI32 bool) {
+	// Declare write / _write — Windows UCRT exports _write returning i32, POSIX
+	// libc exports write returning i64. The return value is unused either way.
+	var writeRetType irtypes.Type = irtypes.I64
+	if writeReturnsI32 {
+		writeRetType = irtypes.I32
+	}
+	// Windows _write takes an i32 byte count; POSIX write takes i64. Encode both.
+	var lenParam *ir.Param
+	if writeReturnsI32 {
+		lenParam = ir.NewParam("count", irtypes.I32)
+	} else {
+		lenParam = ir.NewParam("count", irtypes.I64)
+	}
+	writeFn := getOrDeclareFunc(module, writeName, writeRetType,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		lenParam)
+
+	exitFn := getOrDeclareFunc(module, "exit", irtypes.Void,
+		ir.NewParam("status", irtypes.I32))
+	addFuncAttr(exitFn, enum.FuncAttrNoReturn)
+
+	g := getOrCreateDebugMsgGlobal(module, key, msg)
+	msgPtr := blk.NewBitCast(g, irtypes.I8Ptr)
+	stderr := constant.NewInt(irtypes.I32, 2)
+	if writeReturnsI32 {
+		blk.NewCall(writeFn, stderr, msgPtr, constant.NewInt(irtypes.I32, int64(len(msg))))
+	} else {
+		blk.NewCall(writeFn, stderr, msgPtr, constant.NewInt(irtypes.I64, int64(len(msg))))
+	}
+	blk.NewCall(exitFn, constant.NewInt(irtypes.I32, 134))
+	blk.NewUnreachable()
+}
+
+// emitHeaderValidationLibc validates the debug allocator header at userPtr and
+// returns (sizeI64, validatedBlk) — control falls through to validatedBlk only
+// when the header magic is alive AND the tail sentinel matches.
+//
+// Double-free detection is checked at TWO header positions: offset 0 AND offset
+// 8 (the size-field slot, which the free path overwrites with MAGIC_FREED in
+// addition to the magic-alive slot). libc allocators typically use offset 0 of
+// the freed user data for free-list pointers, so checking the secondary slot
+// makes double-free detection survive that overwrite.
+//
+// Three abort blocks are emitted for double-free / bad-magic / tail-corruption
+// paths, each using emitDebugAbortCallLibc with platform-specific write fn.
+func emitHeaderValidationLibc(
+	module *ir.Module,
+	fn *ir.Func, blk *ir.Block, userPtr value.Value,
+	writeName string, writeReturnsI32 bool,
+) (sizeVal value.Value, headerPtr value.Value, validatedBlk *ir.Block) {
+	negHeader := constant.NewInt(irtypes.I64, -debugHeaderSize)
+	hdrPtr := blk.NewGetElementPtr(irtypes.I8, userPtr, negHeader)
+
+	magicSlot := blk.NewBitCast(hdrPtr, irtypes.NewPointer(irtypes.I64))
+	magic := blk.NewLoad(irtypes.I64, magicSlot)
+	sizeFieldPtr := blk.NewGetElementPtr(irtypes.I64, magicSlot, constant.NewInt(irtypes.I64, 1))
+	sizeOrFreedTag := blk.NewLoad(irtypes.I64, sizeFieldPtr)
+
+	freedMagic := constant.NewInt(irtypes.I64, debugMagicFreed)
+	aliveMagic := constant.NewInt(irtypes.I64, debugMagicAlive)
+	tailMagic := constant.NewInt(irtypes.I64, debugMagicTail)
+
+	aliveBlk := fn.NewBlock(".dbg.header_alive_check")
+	checkSecondaryFreedBlk := fn.NewBlock(".dbg.check_secondary_freed")
+	freedAbortBlk := fn.NewBlock(".dbg.double_free")
+	badMagicAbortBlk := fn.NewBlock(".dbg.bad_magic")
+	tailOkBlk := fn.NewBlock(".dbg.tail_check")
+	tailAbortBlk := fn.NewBlock(".dbg.tail_corrupt")
+	postValidatedBlk := fn.NewBlock(".dbg.validated")
+
+	// Primary check: offset 0 == MAGIC_FREED → double free.
+	isFreed := blk.NewICmp(enum.IPredEQ, magic, freedMagic)
+	blk.NewCondBr(isFreed, freedAbortBlk, aliveBlk)
+
+	// Offset 0 != MAGIC_FREED. Either MAGIC_ALIVE (live alloc) or anything else
+	// (bad pointer OR doubled-free with offset-0 overwritten by libc).
+	isAlive := aliveBlk.NewICmp(enum.IPredEQ, magic, aliveMagic)
+	aliveBlk.NewCondBr(isAlive, tailOkBlk, checkSecondaryFreedBlk)
+
+	// Secondary check: if offset 0 isn't ALIVE/FREED, the size field at offset 8
+	// may still contain MAGIC_FREED — that's a doubled-free where libc clobbered
+	// offset 0 with its free-list pointer.
+	isSecondaryFreed := checkSecondaryFreedBlk.NewICmp(enum.IPredEQ, sizeOrFreedTag, freedMagic)
+	checkSecondaryFreedBlk.NewCondBr(isSecondaryFreed, freedAbortBlk, badMagicAbortBlk)
+
+	// Tail validation uses the live size field.
+	tailBytePtr := tailOkBlk.NewGetElementPtr(irtypes.I8, userPtr, sizeOrFreedTag)
+	tailSlot := tailOkBlk.NewBitCast(tailBytePtr, irtypes.NewPointer(irtypes.I64))
+	tailLoad := tailOkBlk.NewLoad(irtypes.I64, tailSlot)
+	tailLoad.Align = 1
+	tailOk := tailOkBlk.NewICmp(enum.IPredEQ, tailLoad, tailMagic)
+	tailOkBlk.NewCondBr(tailOk, postValidatedBlk, tailAbortBlk)
+
+	emitDebugAbortCallLibc(module, freedAbortBlk, "double_free",
+		"fatal: double free\n", writeName, writeReturnsI32)
+	emitDebugAbortCallLibc(module, badMagicAbortBlk, "bad_magic",
+		"fatal: invalid free (bad header magic)\n", writeName, writeReturnsI32)
+	emitDebugAbortCallLibc(module, tailAbortBlk, "tail_corrupt",
+		"fatal: heap corruption (tail sentinel mismatch)\n", writeName, writeReturnsI32)
+
+	return sizeOrFreedTag, hdrPtr, postValidatedBlk
+}
+
+// emitLibcAllocDebug defines @pal_alloc with the T0365 sentinel-header debug
+// allocator. Bumps malloc by 24 bytes (16-byte header + 8-byte tail), writes
+// MAGIC_ALIVE + requested_size + MAGIC_TAIL, and scribbles the user region
+// with 0xAA so reads of uninitialized memory show a recognizable pattern.
+//
+// Pairs with emitLibcFreeDebug, which validates the header on free.
 func emitLibcAllocDebug(module *ir.Module) *ir.Func {
 	mallocSize := ir.NewParam("size", irtypes.I64)
 	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
@@ -381,38 +530,64 @@ func emitLibcAllocDebug(module *ir.Module) *ir.Func {
 	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock(".entry")
-	ret := entry.NewCall(mallocFn, fn.Params[0])
 
-	// If malloc returned non-null: scribble [ret, ret+size) with 0xAA + bump count.
-	nonnull := entry.NewICmp(enum.IPredNE, ret, constant.NewNull(irtypes.I8Ptr))
-	trackBlk := fn.NewBlock(".track")
+	// total = size + 24 (header + tail)
+	totalSize := entry.NewAdd(fn.Params[0], constant.NewInt(irtypes.I64, debugSlackSize))
+	internal := entry.NewCall(mallocFn, totalSize)
+
+	nonnull := entry.NewICmp(enum.IPredNE, internal, constant.NewNull(irtypes.I8Ptr))
+	headerBlk := fn.NewBlock(".dbg.write_header")
 	doneBlk := fn.NewBlock(".done")
-	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+	entry.NewCondBr(nonnull, headerBlk, doneBlk)
 
-	trackBlk.NewCall(memsetFn, ret, constant.NewInt(irtypes.I32, 0xAA), fn.Params[0])
-	trackBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
-	trackBlk.NewBr(doneBlk)
+	// magic_alive at internal + 0
+	magicSlot := headerBlk.NewBitCast(internal, irtypes.NewPointer(irtypes.I64))
+	headerBlk.NewStore(constant.NewInt(irtypes.I64, debugMagicAlive), magicSlot)
 
-	doneBlk.NewRet(ret)
+	// requested_size at internal + 8
+	sizeSlot := headerBlk.NewGetElementPtr(irtypes.I64, magicSlot, constant.NewInt(irtypes.I64, 1))
+	headerBlk.NewStore(fn.Params[0], sizeSlot)
+
+	// user_ptr = internal + 16
+	userPtr := headerBlk.NewGetElementPtr(irtypes.I8, internal, constant.NewInt(irtypes.I64, debugHeaderSize))
+
+	// magic_tail at user_ptr + size (unaligned i64 store)
+	tailBytePtr := headerBlk.NewGetElementPtr(irtypes.I8, userPtr, fn.Params[0])
+	tailSlot := headerBlk.NewBitCast(tailBytePtr, irtypes.NewPointer(irtypes.I64))
+	tailStore := headerBlk.NewStore(constant.NewInt(irtypes.I64, debugMagicTail), tailSlot)
+	tailStore.Align = 1
+
+	// Scribble user region with 0xAA
+	headerBlk.NewCall(memsetFn, userPtr, constant.NewInt(irtypes.I32, 0xAA), fn.Params[0])
+
+	// Bump alloc count
+	headerBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	headerBlk.NewBr(doneBlk)
+
+	// On null malloc, return null. Otherwise, return user_ptr.
+	retPhi := doneBlk.NewPhi(
+		&ir.Incoming{X: constant.NewNull(irtypes.I8Ptr), Pred: entry},
+		&ir.Incoming{X: userPtr, Pred: headerBlk},
+	)
+	doneBlk.NewRet(retPhi)
 	return fn
 }
 
-// emitLibcFreeDebug declares libc @free + a platform-specific size query function
-// and defines @pal_free with poison-fill (0xDE) before free for UAF detection.
-// sizeFnName is the platform's allocation-size query: "malloc_usable_size" (Linux),
-// "malloc_size" (macOS), or "_msize" (Windows).
-func emitLibcFreeDebug(module *ir.Module, sizeFnName string) *ir.Func {
-	// declare void @free(i8* nocapture noundef) nounwind willreturn
+// emitLibcFreeDebug defines @pal_free with header + tail validation. Detects
+// double-free, free-of-invalid-pointer, and tail-sentinel corruption (T0365).
+//
+// On valid input: poisons user region with 0xDE, marks header MAGIC_FREED so
+// the next free is caught as a double-free, decrements the alloc count, and
+// frees the underlying allocation.
+//
+// writeName: libc write fn ("write" on POSIX, "_write" on Windows UCRT).
+// writeReturnsI32: true for Windows (i32-return _write), false for POSIX i64.
+func emitLibcFreeDebug(module *ir.Module, writeName string, writeReturnsI32 bool) *ir.Func {
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
 	addFuncAttr(freeFn, enum.FuncAttrWillReturn)
 
-	// declare i64 @malloc_usable_size(i8*) / @_msize(i8*)
-	sizeFn := getOrDeclareFunc(module, sizeFnName, irtypes.I64,
-		ir.NewParam("ptr", irtypes.I8Ptr))
-
-	// declare i8* @memset(i8*, i32, i64)
 	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
 		ir.NewParam("dest", irtypes.I8Ptr),
 		ir.NewParam("c", irtypes.I32),
@@ -420,27 +595,37 @@ func emitLibcFreeDebug(module *ir.Module, sizeFnName string) *ir.Func {
 
 	allocCount := getOrCreateAllocCountGlobal(module)
 
-	// define void @pal_free(i8* %ptr) nounwind willreturn
 	fn := module.NewFunc("pal_free", irtypes.Void,
 		ir.NewParam("ptr", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock(".entry")
 
-	// Track: if ptr is non-null, poison-fill + decrement alloc count + free
 	nonnull := entry.NewICmp(enum.IPredNE, fn.Params[0], constant.NewNull(irtypes.I8Ptr))
-	trackBlk := fn.NewBlock(".track")
+	checkBlk := fn.NewBlock(".dbg.check")
 	doneBlk := fn.NewBlock(".done")
-	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+	entry.NewCondBr(nonnull, checkBlk, doneBlk)
 
-	trackBlk.NewAtomicRMW(enum.AtomicOpSub, allocCount, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
-	// Poison-fill: memset(ptr, 0xDE, malloc_usable_size(ptr))
-	size := trackBlk.NewCall(sizeFn, fn.Params[0])
-	trackBlk.NewCall(memsetFn, fn.Params[0], constant.NewInt(irtypes.I32, 0xDE), size)
-	trackBlk.NewCall(freeFn, fn.Params[0])
-	trackBlk.NewBr(doneBlk)
+	size, hdrPtr, validated := emitHeaderValidationLibc(module, fn, checkBlk, fn.Params[0],
+		writeName, writeReturnsI32)
+
+	// Poison user region with 0xDE (using stored requested_size — exact bound).
+	validated.NewCall(memsetFn, fn.Params[0], constant.NewInt(irtypes.I32, 0xDE), size)
+
+	// Mark header MAGIC_FREED at BOTH header slots (offset 0 + offset 8). libc
+	// commonly overwrites offset 0 with a free-list pointer immediately after
+	// free(); the secondary slot at offset 8 is more likely to survive and
+	// keep double-free detection working in that case.
+	freedSlot := validated.NewBitCast(hdrPtr, irtypes.NewPointer(irtypes.I64))
+	validated.NewStore(constant.NewInt(irtypes.I64, debugMagicFreed), freedSlot)
+	freedSlot2 := validated.NewGetElementPtr(irtypes.I64, freedSlot, constant.NewInt(irtypes.I64, 1))
+	validated.NewStore(constant.NewInt(irtypes.I64, debugMagicFreed), freedSlot2)
+
+	// Decrement count and free internal pointer.
+	validated.NewAtomicRMW(enum.AtomicOpSub, allocCount, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	validated.NewCall(freeFn, hdrPtr)
+	validated.NewBr(doneBlk)
 
 	doneBlk.NewRet(nil)
-
 	return fn
 }
 
@@ -503,21 +688,15 @@ func emitLibcRealloc(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// emitLibcReallocDebug declares libc @realloc + a platform-specific size query
-// and defines @pal_realloc that scribbles (0xAA) the newly-allocated bytes
-// when the buffer grows. sizeFnName is the platform's allocation-size query.
+// emitLibcReallocDebug defines @pal_realloc with header validation and
+// re-construction (T0365). On non-null input, the existing header is validated
+// (catches double-free / bad pointer / tail corruption); on null input the
+// realloc behaves like alloc; on size==0 like free.
 //
-// Behavior:
-//   - realloc(NULL, n) with non-null result → scribble [0, n) (pure malloc)
-//   - realloc(p, n) where n > old_usable_size → scribble [old_usable, n) (grew)
-//   - realloc(p, n) where n <= old_usable_size → no scribble (shrunk in place)
-//   - realloc(p, 0) → no scribble (frees p, returns NULL on most libcs)
-//
-// The old user-requested size is unknown; we use malloc_usable_size as a
-// safe upper bound. Bytes the caller previously wrote past the requested
-// size into slack space are preserved (realloc preserves contents up to
-// min(old, new)).
-func emitLibcReallocDebug(module *ir.Module, sizeFnName string) *ir.Func {
+// The old `requested_size` is read from the validated header — no need for
+// libc's malloc_usable_size, and grown bytes are scribbled with 0xAA using
+// the exact old size as the lower bound.
+func emitLibcReallocDebug(module *ir.Module, writeName string, writeReturnsI32 bool) *ir.Func {
 	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	reallocSz := ir.NewParam("size", irtypes.I64)
@@ -526,17 +705,18 @@ func emitLibcReallocDebug(module *ir.Module, sizeFnName string) *ir.Func {
 	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	addFuncAttr(reallocFn, enum.FuncAttrWillReturn)
 
-	sizeFn := getOrDeclareFunc(module, sizeFnName, irtypes.I64,
-		ir.NewParam("ptr", irtypes.I8Ptr))
-
 	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
 		ir.NewParam("dest", irtypes.I8Ptr),
 		ir.NewParam("c", irtypes.I32),
 		ir.NewParam("n", irtypes.I64))
 
-	allocCount := getOrCreateAllocCountGlobal(module)
+	// Look up sibling pal_alloc / pal_free to delegate the malloc-like and
+	// free-like cases. Both must be emitted before pal_realloc (per the PAL
+	// emission order in compiler.go declareIntrinsics — alloc → free → realloc).
+	palAllocFn := lookupFunc(module, "pal_alloc")
+	palFreeFn := lookupFunc(module, "pal_free")
+
 	zero64 := constant.NewInt(irtypes.I64, 0)
-	one64 := constant.NewInt(irtypes.I64, 1)
 	nullPtr := constant.NewNull(irtypes.I8Ptr)
 
 	fn := module.NewFunc("pal_realloc", irtypes.I8Ptr,
@@ -546,60 +726,68 @@ func emitLibcReallocDebug(module *ir.Module, sizeFnName string) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock(".entry")
 
-	// Capture old usable size *before* realloc moves the buffer. If old ptr is
-	// null, treat as 0 so the scribble covers the entire new allocation.
 	ptrIsNull := entry.NewICmp(enum.IPredEQ, fn.Params[0], nullPtr)
-	queryOldBlk := fn.NewBlock(".query_old")
-	skipQueryBlk := fn.NewBlock(".skip_query")
-	doReallocBlk := fn.NewBlock(".do_realloc")
-	entry.NewCondBr(ptrIsNull, skipQueryBlk, queryOldBlk)
+	allocLikeBlk := fn.NewBlock(".dbg.alloc_like") // ptr == null → pal_alloc(size)
+	checkFreeLikeBlk := fn.NewBlock(".dbg.check_free_like")
+	entry.NewCondBr(ptrIsNull, allocLikeBlk, checkFreeLikeBlk)
 
-	oldUsable := queryOldBlk.NewCall(sizeFn, fn.Params[0])
-	queryOldBlk.NewBr(doReallocBlk)
-	skipQueryBlk.NewBr(doReallocBlk)
-
-	oldUsablePhi := doReallocBlk.NewPhi(
-		&ir.Incoming{X: oldUsable, Pred: queryOldBlk},
-		&ir.Incoming{X: zero64, Pred: skipQueryBlk},
-	)
-
-	sizeIsZero := doReallocBlk.NewICmp(enum.IPredEQ, fn.Params[1], zero64)
-	ret := doReallocBlk.NewCall(reallocFn, fn.Params[0], fn.Params[1])
-
-	// Branch on (old_ptr is null) for count tracking, mirroring emitLibcRealloc.
-	newAllocBlk := fn.NewBlock(".new_alloc")
-	checkFreeBlk := fn.NewBlock(".check_free")
-	doReallocBlk.NewCondBr(ptrIsNull, newAllocBlk, checkFreeBlk)
-
-	retNonNull := newAllocBlk.NewICmp(enum.IPredNE, ret, nullPtr)
-	incBlk := fn.NewBlock(".inc")
-	scribbleCheckBlk := fn.NewBlock(".scribble_check")
-	newAllocBlk.NewCondBr(retNonNull, incBlk, scribbleCheckBlk)
-	incBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, one64, enum.AtomicOrderingMonotonic)
-	incBlk.NewBr(scribbleCheckBlk)
-
-	decBlk := fn.NewBlock(".dec")
-	checkFreeBlk.NewCondBr(sizeIsZero, decBlk, scribbleCheckBlk)
-	decBlk.NewAtomicRMW(enum.AtomicOpSub, allocCount, one64, enum.AtomicOrderingMonotonic)
-	decBlk.NewBr(scribbleCheckBlk)
-
-	// Scribble grown region: if ret != null AND new_size > old_usable,
-	// memset(ret + old_usable, 0xAA, new_size - old_usable).
+	// Case 1: realloc(NULL, n) → pal_alloc(n) (handles header construction).
+	allocResult := allocLikeBlk.NewCall(palAllocFn, fn.Params[1])
 	doneBlk := fn.NewBlock(".done")
-	resultNonNull := scribbleCheckBlk.NewICmp(enum.IPredNE, ret, nullPtr)
-	scribbleNeededBlk := fn.NewBlock(".scribble_needed")
-	scribbleCheckBlk.NewCondBr(resultNonNull, scribbleNeededBlk, doneBlk)
+	allocLikeBlk.NewBr(doneBlk)
 
-	hasGrown := scribbleNeededBlk.NewICmp(enum.IPredUGT, fn.Params[1], oldUsablePhi)
-	scribbleBlk := fn.NewBlock(".scribble")
-	scribbleNeededBlk.NewCondBr(hasGrown, scribbleBlk, doneBlk)
+	// Case 2: realloc(p, 0) → pal_free(p), return NULL (mirrors libc realloc semantics).
+	sizeIsZero := checkFreeLikeBlk.NewICmp(enum.IPredEQ, fn.Params[1], zero64)
+	freeLikeBlk := fn.NewBlock(".dbg.free_like")
+	resizeBlk := fn.NewBlock(".dbg.resize")
+	checkFreeLikeBlk.NewCondBr(sizeIsZero, freeLikeBlk, resizeBlk)
+	freeLikeBlk.NewCall(palFreeFn, fn.Params[0])
+	freeLikeBlk.NewBr(doneBlk)
 
-	scribbleStart := scribbleBlk.NewGetElementPtr(irtypes.I8, ret, oldUsablePhi)
-	scribbleLen := scribbleBlk.NewSub(fn.Params[1], oldUsablePhi)
+	// Case 3: resize. Validate the old header, then realloc(header_ptr, n + 24)
+	// and reconstruct header + tail.
+	oldSize, hdrPtr, validatedBlk := emitHeaderValidationLibc(module, fn, resizeBlk, fn.Params[0],
+		writeName, writeReturnsI32)
+
+	newTotal := validatedBlk.NewAdd(fn.Params[1], constant.NewInt(irtypes.I64, debugSlackSize))
+	newInternal := validatedBlk.NewCall(reallocFn, hdrPtr, newTotal)
+
+	newNonNull := validatedBlk.NewICmp(enum.IPredNE, newInternal, nullPtr)
+	resizeOkBlk := fn.NewBlock(".dbg.resize_ok")
+	validatedBlk.NewCondBr(newNonNull, resizeOkBlk, doneBlk)
+
+	// Update header: magic_alive (already alive — but realloc may have moved
+	// memory; the header is still intact since realloc preserves contents).
+	// Update requested_size to the new size. Write fresh tail at user_ptr + new_size.
+	newMagicSlot := resizeOkBlk.NewBitCast(newInternal, irtypes.NewPointer(irtypes.I64))
+	newSizeSlot := resizeOkBlk.NewGetElementPtr(irtypes.I64, newMagicSlot, constant.NewInt(irtypes.I64, 1))
+	resizeOkBlk.NewStore(fn.Params[1], newSizeSlot)
+
+	newUserPtr := resizeOkBlk.NewGetElementPtr(irtypes.I8, newInternal, constant.NewInt(irtypes.I64, debugHeaderSize))
+	newTailBytePtr := resizeOkBlk.NewGetElementPtr(irtypes.I8, newUserPtr, fn.Params[1])
+	newTailSlot := resizeOkBlk.NewBitCast(newTailBytePtr, irtypes.NewPointer(irtypes.I64))
+	newTailStore := resizeOkBlk.NewStore(constant.NewInt(irtypes.I64, debugMagicTail), newTailSlot)
+	newTailStore.Align = 1
+
+	// If new size > old size, scribble the grown region [user+old, user+new) with 0xAA.
+	hasGrown := resizeOkBlk.NewICmp(enum.IPredUGT, fn.Params[1], oldSize)
+	scribbleBlk := fn.NewBlock(".dbg.scribble_grown")
+	resizeOkBlk.NewCondBr(hasGrown, scribbleBlk, doneBlk)
+
+	scribbleStart := scribbleBlk.NewGetElementPtr(irtypes.I8, newUserPtr, oldSize)
+	scribbleLen := scribbleBlk.NewSub(fn.Params[1], oldSize)
 	scribbleBlk.NewCall(memsetFn, scribbleStart, constant.NewInt(irtypes.I32, 0xAA), scribbleLen)
 	scribbleBlk.NewBr(doneBlk)
 
-	doneBlk.NewRet(ret)
+	// Phi the result: alloc-result, null (for free-like), null (for resize-fail), or new_user_ptr.
+	retPhi := doneBlk.NewPhi(
+		&ir.Incoming{X: allocResult, Pred: allocLikeBlk},
+		&ir.Incoming{X: nullPtr, Pred: freeLikeBlk},
+		&ir.Incoming{X: nullPtr, Pred: validatedBlk},
+		&ir.Incoming{X: newUserPtr, Pred: resizeOkBlk},
+		&ir.Incoming{X: newUserPtr, Pred: scribbleBlk},
+	)
+	doneBlk.NewRet(retPhi)
 	return fn
 }
 

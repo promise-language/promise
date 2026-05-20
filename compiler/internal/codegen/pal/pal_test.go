@@ -374,72 +374,95 @@ func TestEmitFree(t *testing.T) {
 	})
 }
 
-// Debug free: pal_free should poison-fill (0xDE) via memset before calling free.
+// Debug free: T0365 sentinel-header allocator should validate magic + tail
+// before freeing, and poison-fill (0xDE) the user region using the size from
+// the header (no longer libc's malloc_usable_size / _msize / malloc_size).
 func TestEmitFreeDebug(t *testing.T) {
-	// Linux: uses malloc_usable_size
-	t.Run("Linux", func(t *testing.T) {
-		module := ir.NewModule()
-		p := &PosixPAL{target: "x86_64-unknown-linux-gnu", DebugAllocator: true}
-		p.EmitAlloc(module) // needed for allocCount global
-		fn := p.EmitFree(module)
-		out := module.String()
+	platforms := []struct {
+		name           string
+		newPAL         func() PAL
+		writeFnName    string // libc symbol used by the abort helper
+		notWriteFnName string // symbol that must NOT appear (the other libc variant)
+	}{
+		{
+			name:           "Linux",
+			newPAL:         func() PAL { return &PosixPAL{target: "x86_64-unknown-linux-gnu", DebugAllocator: true} },
+			writeFnName:    "@write(",
+			notWriteFnName: "@_write(",
+		},
+		{
+			name:           "Darwin",
+			newPAL:         func() PAL { return &PosixPAL{target: "arm64-apple-darwin24.3.0", DebugAllocator: true} },
+			writeFnName:    "@write(",
+			notWriteFnName: "@_write(",
+		},
+		{
+			name:           "Windows",
+			newPAL:         func() PAL { return &WindowsPAL{DebugAllocator: true} },
+			writeFnName:    "@_write(",
+			notWriteFnName: "",
+		},
+	}
+	for _, plat := range platforms {
+		t.Run(plat.name, func(t *testing.T) {
+			module := ir.NewModule()
+			p := plat.newPAL()
+			p.EmitAlloc(module) // creates allocCount global + sibling alloc
+			fn := p.EmitFree(module)
+			out := module.String()
 
-		if fn.Name() != "pal_free" {
-			t.Errorf("expected function name pal_free, got %s", fn.Name())
-		}
-		if !strings.Contains(out, "@malloc_usable_size(") {
-			t.Error("debug pal_free should declare @malloc_usable_size")
-		}
-		if !strings.Contains(out, "@memset(") {
-			t.Error("debug pal_free should call @memset for poison fill")
-		}
-		if !strings.Contains(out, "call void @free(") {
-			t.Error("debug pal_free should still call @free")
-		}
-	})
+			if fn.Name() != "pal_free" {
+				t.Errorf("expected function name pal_free, got %s", fn.Name())
+			}
+			// Size-fn helpers should NOT appear in the new debug path —
+			// requested_size is read from the per-allocation header.
+			for _, banned := range []string{"@malloc_usable_size(", "@malloc_size(", "@_msize("} {
+				if strings.Contains(out, banned) {
+					t.Errorf("debug pal_free should NOT call %s (size now stored in header)", banned)
+				}
+			}
+			if !strings.Contains(out, "@memset(") {
+				t.Error("debug pal_free should call @memset for poison fill")
+			}
+			if !strings.Contains(out, "call void @free(") {
+				t.Error("debug pal_free should still call @free")
+			}
+			// Header validation: load + icmp against MAGIC_ALIVE / MAGIC_FREED.
+			if !strings.Contains(out, "load i64") {
+				t.Error("debug pal_free should load header magic word")
+			}
+			// Magic constant for double-free detection: MAGIC_FREED 0x4D414C4C4F435F46
+			if !strings.Contains(out, "5566814505037684550") {
+				t.Error("debug pal_free should compare against MAGIC_FREED constant")
+			}
+			// Magic constant for alive header: MAGIC_ALIVE 0x4D414C4C4F435F41
+			if !strings.Contains(out, "5566814505037684545") {
+				t.Error("debug pal_free should compare against MAGIC_ALIVE constant")
+			}
+			// Tail sentinel constant: MAGIC_TAIL 0x5441494C5F4D4147
+			if !strings.Contains(out, "6071214365037379911") {
+				t.Error("debug pal_free should compare against MAGIC_TAIL constant")
+			}
+			// Abort path: write to fd 2 + exit(134).
+			if !strings.Contains(out, plat.writeFnName) {
+				t.Errorf("debug pal_free abort path should use %s", plat.writeFnName)
+			}
+			if plat.notWriteFnName != "" && strings.Contains(out, plat.notWriteFnName) {
+				t.Errorf("debug pal_free should NOT use %s on this platform", plat.notWriteFnName)
+			}
+			if !strings.Contains(out, "call void @exit(i32 134)") {
+				t.Error("debug pal_free abort path should exit(134)")
+			}
+			// Three abort messages: double-free, bad magic, tail corruption.
+			for _, expected := range []string{"double free", "bad header magic", "tail sentinel mismatch"} {
+				if !strings.Contains(out, expected) {
+					t.Errorf("debug pal_free abort messages should contain %q", expected)
+				}
+			}
+		})
+	}
 
-	// macOS: uses malloc_size (not malloc_usable_size)
-	t.Run("Darwin", func(t *testing.T) {
-		module := ir.NewModule()
-		p := &PosixPAL{target: "arm64-apple-darwin24.3.0", DebugAllocator: true}
-		p.EmitAlloc(module)
-		fn := p.EmitFree(module)
-		out := module.String()
-
-		if fn.Name() != "pal_free" {
-			t.Errorf("expected function name pal_free, got %s", fn.Name())
-		}
-		if !strings.Contains(out, "@malloc_size(") {
-			t.Error("Darwin debug pal_free should declare @malloc_size")
-		}
-		if strings.Contains(out, "@malloc_usable_size(") {
-			t.Error("Darwin debug pal_free should NOT use @malloc_usable_size")
-		}
-		if !strings.Contains(out, "@memset(") {
-			t.Error("debug pal_free should call @memset for poison fill")
-		}
-	})
-
-	// Windows: uses _msize
-	t.Run("Windows", func(t *testing.T) {
-		module := ir.NewModule()
-		p := &WindowsPAL{DebugAllocator: true}
-		p.EmitAlloc(module)
-		fn := p.EmitFree(module)
-		out := module.String()
-
-		if fn.Name() != "pal_free" {
-			t.Errorf("expected function name pal_free, got %s", fn.Name())
-		}
-		if !strings.Contains(out, "@_msize(") {
-			t.Error("debug pal_free on Windows should declare @_msize")
-		}
-		if !strings.Contains(out, "@memset(") {
-			t.Error("debug pal_free should call @memset for poison fill")
-		}
-	})
-
-	// WASM: uses malloc_usable_size (provided by wasm_alloc.c)
+	// WASM uses fd_write (WASI) + proc_exit instead of libc write/exit.
 	t.Run("Wasm", func(t *testing.T) {
 		module := ir.NewModule()
 		p := &WasmPAL{DebugAllocator: true}
@@ -450,11 +473,19 @@ func TestEmitFreeDebug(t *testing.T) {
 		if fn.Name() != "pal_free" {
 			t.Errorf("expected function name pal_free, got %s", fn.Name())
 		}
-		if !strings.Contains(out, "@malloc_usable_size(") {
-			t.Error("WASM debug pal_free should declare @malloc_usable_size")
+		// Old libc-bookkeeping size queries are no longer used in the debug path.
+		if strings.Contains(out, "@malloc_usable_size(") {
+			t.Error("WASM debug pal_free should NOT call @malloc_usable_size (size now in header)")
 		}
 		if !strings.Contains(out, "@memset(") {
 			t.Error("WASM debug pal_free should call @memset for poison fill")
+		}
+		// WASI abort path
+		if !strings.Contains(out, "@fd_write(") {
+			t.Error("WASM debug pal_free abort path should call @fd_write")
+		}
+		if !strings.Contains(out, "@proc_exit(i32 134)") {
+			t.Error("WASM debug pal_free abort path should call @proc_exit(134)")
 		}
 	})
 
@@ -469,12 +500,15 @@ func TestEmitFreeDebug(t *testing.T) {
 		if fn.Name() != "pal_free" {
 			t.Errorf("expected function name pal_free, got %s", fn.Name())
 		}
-		if !strings.Contains(out, "@malloc_usable_size(") {
-			t.Error("WasmWeb debug pal_free should declare @malloc_usable_size")
+		if strings.Contains(out, "@malloc_usable_size(") {
+			t.Error("WasmWeb debug pal_free should NOT call @malloc_usable_size")
+		}
+		if !strings.Contains(out, "@fd_write(") {
+			t.Error("WasmWeb debug pal_free abort path should call @fd_write")
 		}
 	})
 
-	// Non-debug should NOT have malloc_usable_size or _msize
+	// Non-debug should NOT use any of the debug machinery.
 	t.Run("NonDebug", func(t *testing.T) {
 		module := ir.NewModule()
 		p := &PosixPAL{}
@@ -482,11 +516,145 @@ func TestEmitFreeDebug(t *testing.T) {
 		p.EmitFree(module)
 		out := module.String()
 
-		if strings.Contains(out, "malloc_usable_size") {
-			t.Error("non-debug pal_free should NOT use malloc_usable_size")
-		}
 		if strings.Contains(out, "@memset(") {
 			t.Error("non-debug pal_free should NOT call memset")
+		}
+		// No abort path / no header magic
+		if strings.Contains(out, "call void @exit(i32 134)") {
+			t.Error("non-debug pal_free should NOT have an abort exit path")
+		}
+		if strings.Contains(out, "5566814505037684545") {
+			t.Error("non-debug pal_free should NOT reference MAGIC_ALIVE")
+		}
+	})
+}
+
+// T0365: pal_alloc in DebugAllocator mode bumps the malloc size by 24 bytes
+// (16-byte header + 8-byte tail) and writes magic constants.
+func TestEmitAllocDebug(t *testing.T) {
+	platforms := []struct {
+		name   string
+		newPAL func() PAL
+	}{
+		{"Linux", func() PAL { return &PosixPAL{target: "x86_64-unknown-linux-gnu", DebugAllocator: true} }},
+		{"Darwin", func() PAL { return &PosixPAL{target: "arm64-apple-darwin24.3.0", DebugAllocator: true} }},
+		{"Windows", func() PAL { return &WindowsPAL{DebugAllocator: true} }},
+	}
+	for _, plat := range platforms {
+		t.Run(plat.name, func(t *testing.T) {
+			module := ir.NewModule()
+			p := plat.newPAL()
+			p.EmitAlloc(module)
+			out := module.String()
+
+			// Should add 24 bytes to user-requested size.
+			if !strings.Contains(out, "add i64 %size, 24") {
+				t.Error("debug pal_alloc should add 24 bytes (16 header + 8 tail) to requested size")
+			}
+			// Should still scribble user region with 0xAA.
+			if !strings.Contains(out, "@memset(") {
+				t.Error("debug pal_alloc should call @memset for 0xAA scribble")
+			}
+			// Should reference MAGIC_ALIVE and MAGIC_TAIL constants.
+			if !strings.Contains(out, "5566814505037684545") {
+				t.Error("debug pal_alloc should store MAGIC_ALIVE")
+			}
+			if !strings.Contains(out, "6071214365037379911") {
+				t.Error("debug pal_alloc should store MAGIC_TAIL")
+			}
+		})
+	}
+
+	t.Run("Wasm", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WasmPAL{DebugAllocator: true}
+		p.EmitAlloc(module)
+		out := module.String()
+
+		// WASM uses i32 sizes; total = size32 + 24 (16 header + 8 tail).
+		if !strings.Contains(out, "add i32 %0, 24") {
+			t.Error("WASM debug pal_alloc should bump size32 by 24 bytes (16 header + 8 tail)")
+		}
+		// Magic constants are stored as i64 even on WASM.
+		if !strings.Contains(out, "5566814505037684545") {
+			t.Error("WASM debug pal_alloc should store MAGIC_ALIVE")
+		}
+		if !strings.Contains(out, "6071214365037379911") {
+			t.Error("WASM debug pal_alloc should store MAGIC_TAIL")
+		}
+	})
+}
+
+// T0365: pal_realloc in DebugAllocator mode validates the existing header,
+// re-allocates with header+tail bookkeeping, and scribbles only the grown
+// region. The old size is read from the header (no malloc_usable_size).
+func TestEmitReallocDebug(t *testing.T) {
+	platforms := []struct {
+		name   string
+		newPAL func() PAL
+	}{
+		{"Linux", func() PAL { return &PosixPAL{target: "x86_64-unknown-linux-gnu", DebugAllocator: true} }},
+		{"Darwin", func() PAL { return &PosixPAL{target: "arm64-apple-darwin24.3.0", DebugAllocator: true} }},
+		{"Windows", func() PAL { return &WindowsPAL{DebugAllocator: true} }},
+	}
+	for _, plat := range platforms {
+		t.Run(plat.name, func(t *testing.T) {
+			module := ir.NewModule()
+			p := plat.newPAL()
+			p.EmitAlloc(module)
+			p.EmitFree(module)
+			fn := p.EmitRealloc(module)
+			out := module.String()
+
+			if fn.Name() != "pal_realloc" {
+				t.Errorf("expected function name pal_realloc, got %s", fn.Name())
+			}
+			// No libc size queries in the debug path.
+			for _, banned := range []string{"@malloc_usable_size(", "@malloc_size(", "@_msize("} {
+				if strings.Contains(out, banned) {
+					t.Errorf("debug pal_realloc should NOT call %s", banned)
+				}
+			}
+			// Should still call libc realloc.
+			if !strings.Contains(out, "call i8* @realloc(") {
+				t.Error("debug pal_realloc should call libc @realloc")
+			}
+			// Should reference both header and tail magic constants.
+			if !strings.Contains(out, "5566814505037684545") {
+				t.Error("debug pal_realloc should validate against MAGIC_ALIVE")
+			}
+			if !strings.Contains(out, "6071214365037379911") {
+				t.Error("debug pal_realloc should write/validate MAGIC_TAIL")
+			}
+			// Delegates to pal_alloc / pal_free for the malloc-like / free-like cases.
+			if !strings.Contains(out, "call i8* @pal_alloc(") {
+				t.Error("debug pal_realloc(NULL, n) should delegate to @pal_alloc")
+			}
+			if !strings.Contains(out, "call void @pal_free(") {
+				t.Error("debug pal_realloc(p, 0) should delegate to @pal_free")
+			}
+		})
+	}
+
+	t.Run("Wasm", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WasmPAL{DebugAllocator: true}
+		p.EmitAlloc(module)
+		p.EmitFree(module)
+		fn := p.EmitRealloc(module)
+		out := module.String()
+
+		if fn.Name() != "pal_realloc" {
+			t.Errorf("expected function name pal_realloc, got %s", fn.Name())
+		}
+		if strings.Contains(out, "@malloc_usable_size(") {
+			t.Error("WASM debug pal_realloc should NOT call @malloc_usable_size")
+		}
+		if !strings.Contains(out, "5566814505037684545") {
+			t.Error("WASM debug pal_realloc should validate against MAGIC_ALIVE")
+		}
+		if !strings.Contains(out, "6071214365037379911") {
+			t.Error("WASM debug pal_realloc should write/validate MAGIC_TAIL")
 		}
 	})
 }

@@ -64,24 +64,16 @@ func (p *PosixPAL) EmitAlloc(module *ir.Module) *ir.Func {
 }
 func (p *PosixPAL) EmitFree(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitLibcFreeDebug(module, p.allocSizeFn())
+		// POSIX libc 'write' returns ssize_t (i64).
+		return emitLibcFreeDebug(module, "write", false)
 	}
 	return emitLibcFree(module)
 }
 func (p *PosixPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitLibcReallocDebug(module, p.allocSizeFn())
+		return emitLibcReallocDebug(module, "write", false)
 	}
 	return emitLibcRealloc(module)
-}
-
-// allocSizeFn returns the platform's allocation-size query: malloc_size on
-// macOS, malloc_usable_size elsewhere.
-func (p *PosixPAL) allocSizeFn() string {
-	if strings.Contains(p.target, "darwin") || strings.Contains(p.target, "apple") {
-		return "malloc_size"
-	}
-	return "malloc_usable_size"
 }
 
 // --- POSIX threading via pthreads ---

@@ -5,6 +5,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 )
 
 // WasmPAL implements PAL for WebAssembly using WASI (WebAssembly System Interface).
@@ -136,9 +137,107 @@ func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// emitWasmAllocDebug defines @pal_alloc with scribble-fill (0xAA) on the
-// returned buffer. WASM uses i32 sizes (wasm32 address space) and non-atomic
-// counters (single-threaded). Mirrors emitLibcAllocDebug.
+// emitWasmDebugAbortCall emits a fd_write(2, msg) + proc_exit(134) + unreachable
+// sequence into blk for the WASM debug allocator (T0365). Each call site uses
+// its own private message global; ciovec is built on the stack via alloca.
+func emitWasmDebugAbortCall(module *ir.Module, blk *ir.Block, key, msg string) {
+	ciovecType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32)
+	fdWrite := getOrDeclareFunc(module, "fd_write", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("iovs", irtypes.NewPointer(ciovecType)),
+		ir.NewParam("iovs_len", irtypes.I32),
+		ir.NewParam("nwritten", irtypes.NewPointer(irtypes.I32)))
+	fdWrite.FuncAttrs = append(fdWrite.FuncAttrs,
+		ir.AttrPair{Key: "wasm-import-module", Value: "wasi_snapshot_preview1"},
+		ir.AttrPair{Key: "wasm-import-name", Value: "fd_write"})
+
+	procExit := getOrDeclareFunc(module, "proc_exit", irtypes.Void,
+		ir.NewParam("rval", irtypes.I32))
+	addFuncAttr(procExit, enum.FuncAttrNoReturn)
+	procExit.FuncAttrs = append(procExit.FuncAttrs,
+		ir.AttrPair{Key: "wasm-import-module", Value: "wasi_snapshot_preview1"},
+		ir.AttrPair{Key: "wasm-import-name", Value: "proc_exit"})
+
+	g := getOrCreateDebugMsgGlobal(module, "wasm_"+key, msg)
+	msgPtr := blk.NewBitCast(g, irtypes.I8Ptr)
+
+	iov := blk.NewAlloca(ciovecType)
+	iovBufField := blk.NewGetElementPtr(ciovecType, iov,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	blk.NewStore(msgPtr, iovBufField)
+	iovLenField := blk.NewGetElementPtr(ciovecType, iov,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	blk.NewStore(constant.NewInt(irtypes.I32, int64(len(msg))), iovLenField)
+
+	nwrittenPtr := blk.NewAlloca(irtypes.I32)
+	blk.NewCall(fdWrite, constant.NewInt(irtypes.I32, 2), iov,
+		constant.NewInt(irtypes.I32, 1), nwrittenPtr)
+	blk.NewCall(procExit, constant.NewInt(irtypes.I32, 134))
+	blk.NewUnreachable()
+}
+
+// emitHeaderValidationWasm validates the debug allocator header at userPtr on
+// WASM (i32 internal sizes, i64 magic words). Mirrors emitHeaderValidationLibc
+// — checks MAGIC_FREED at BOTH offset 0 and offset 8 to make double-free
+// detection survive offset-0 reuse by the wasm allocator.
+func emitHeaderValidationWasm(
+	module *ir.Module,
+	fn *ir.Func, blk *ir.Block, userPtr value.Value,
+) (sizeVal value.Value, headerPtr value.Value, validatedBlk *ir.Block) {
+	negHeader := constant.NewInt(irtypes.I32, -debugHeaderSize)
+	hdrPtr := blk.NewGetElementPtr(irtypes.I8, userPtr, negHeader)
+
+	magicSlot := blk.NewBitCast(hdrPtr, irtypes.NewPointer(irtypes.I64))
+	magic := blk.NewLoad(irtypes.I64, magicSlot)
+	sizeFieldPtr := blk.NewGetElementPtr(irtypes.I64, magicSlot, constant.NewInt(irtypes.I32, 1))
+	sizeOrFreedTag := blk.NewLoad(irtypes.I64, sizeFieldPtr)
+
+	freedMagic := constant.NewInt(irtypes.I64, debugMagicFreed)
+	aliveMagic := constant.NewInt(irtypes.I64, debugMagicAlive)
+	tailMagic := constant.NewInt(irtypes.I64, debugMagicTail)
+
+	aliveBlk := fn.NewBlock(".dbg.header_alive_check")
+	checkSecondaryFreedBlk := fn.NewBlock(".dbg.check_secondary_freed")
+	freedAbortBlk := fn.NewBlock(".dbg.double_free")
+	badMagicAbortBlk := fn.NewBlock(".dbg.bad_magic")
+	tailOkBlk := fn.NewBlock(".dbg.tail_check")
+	tailAbortBlk := fn.NewBlock(".dbg.tail_corrupt")
+	postValidatedBlk := fn.NewBlock(".dbg.validated")
+
+	isFreed := blk.NewICmp(enum.IPredEQ, magic, freedMagic)
+	blk.NewCondBr(isFreed, freedAbortBlk, aliveBlk)
+
+	isAlive := aliveBlk.NewICmp(enum.IPredEQ, magic, aliveMagic)
+	aliveBlk.NewCondBr(isAlive, tailOkBlk, checkSecondaryFreedBlk)
+
+	isSecondaryFreed := checkSecondaryFreedBlk.NewICmp(enum.IPredEQ, sizeOrFreedTag, freedMagic)
+	checkSecondaryFreedBlk.NewCondBr(isSecondaryFreed, freedAbortBlk, badMagicAbortBlk)
+
+	tailBytePtr := tailOkBlk.NewGetElementPtr(irtypes.I8, userPtr, sizeOrFreedTag)
+	tailSlot := tailOkBlk.NewBitCast(tailBytePtr, irtypes.NewPointer(irtypes.I64))
+	tailLoad := tailOkBlk.NewLoad(irtypes.I64, tailSlot)
+	tailLoad.Align = 1
+	tailOk := tailOkBlk.NewICmp(enum.IPredEQ, tailLoad, tailMagic)
+	tailOkBlk.NewCondBr(tailOk, postValidatedBlk, tailAbortBlk)
+
+	emitWasmDebugAbortCall(module, freedAbortBlk, "double_free",
+		"fatal: double free\n")
+	emitWasmDebugAbortCall(module, badMagicAbortBlk, "bad_magic",
+		"fatal: invalid free (bad header magic)\n")
+	emitWasmDebugAbortCall(module, tailAbortBlk, "tail_corrupt",
+		"fatal: heap corruption (tail sentinel mismatch)\n")
+
+	return sizeOrFreedTag, hdrPtr, postValidatedBlk
+}
+
+// emitWasmAllocDebug defines @pal_alloc with the T0365 sentinel-header debug
+// allocator for WASM. Adds a 16-byte header + 8-byte tail (24 bytes total
+// overhead) per allocation. WASM uses i32 internal sizes; magic words remain
+// i64 (8-byte aligned, fits within 8-byte WASM allocator alignment).
+//
+// Note on alignment: the WASM allocator (wasm_alloc.c) returns 8-byte aligned
+// pointers for double. After a 16-byte header, the user pointer is still
+// 8-byte aligned — sufficient for all current Promise types.
 func emitWasmAllocDebug(module *ir.Module) *ir.Func {
 	mallocSize := ir.NewParam("size", irtypes.I32)
 	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
@@ -160,19 +259,40 @@ func emitWasmAllocDebug(module *ir.Module) *ir.Func {
 	entry := fn.NewBlock(".entry")
 
 	size32 := entry.NewTrunc(fn.Params[0], irtypes.I32)
-	ret := entry.NewCall(mallocFn, size32)
+	totalSize := entry.NewAdd(size32, constant.NewInt(irtypes.I32, debugSlackSize))
+	internal := entry.NewCall(mallocFn, totalSize)
 
-	nonnull := entry.NewICmp(enum.IPredNE, ret, constant.NewNull(irtypes.I8Ptr))
-	trackBlk := fn.NewBlock(".track")
+	nonnull := entry.NewICmp(enum.IPredNE, internal, constant.NewNull(irtypes.I8Ptr))
+	headerBlk := fn.NewBlock(".dbg.write_header")
 	doneBlk := fn.NewBlock(".done")
-	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+	entry.NewCondBr(nonnull, headerBlk, doneBlk)
 
-	trackBlk.NewCall(memsetFn, ret, constant.NewInt(irtypes.I32, 0xAA), size32)
-	old := trackBlk.NewLoad(irtypes.I64, allocCount)
-	trackBlk.NewStore(trackBlk.NewAdd(old, constant.NewInt(irtypes.I64, 1)), allocCount)
-	trackBlk.NewBr(doneBlk)
+	// magic_alive at internal + 0
+	magicSlot := headerBlk.NewBitCast(internal, irtypes.NewPointer(irtypes.I64))
+	headerBlk.NewStore(constant.NewInt(irtypes.I64, debugMagicAlive), magicSlot)
 
-	doneBlk.NewRet(ret)
+	// requested_size at internal + 8 (stored as i64 even though wasm uses i32 sizes)
+	sizeSlot := headerBlk.NewGetElementPtr(irtypes.I64, magicSlot, constant.NewInt(irtypes.I32, 1))
+	headerBlk.NewStore(fn.Params[0], sizeSlot)
+
+	userPtr := headerBlk.NewGetElementPtr(irtypes.I8, internal, constant.NewInt(irtypes.I32, debugHeaderSize))
+
+	tailBytePtr := headerBlk.NewGetElementPtr(irtypes.I8, userPtr, size32)
+	tailSlot := headerBlk.NewBitCast(tailBytePtr, irtypes.NewPointer(irtypes.I64))
+	tailStore := headerBlk.NewStore(constant.NewInt(irtypes.I64, debugMagicTail), tailSlot)
+	tailStore.Align = 1
+
+	headerBlk.NewCall(memsetFn, userPtr, constant.NewInt(irtypes.I32, 0xAA), size32)
+
+	old := headerBlk.NewLoad(irtypes.I64, allocCount)
+	headerBlk.NewStore(headerBlk.NewAdd(old, constant.NewInt(irtypes.I64, 1)), allocCount)
+	headerBlk.NewBr(doneBlk)
+
+	retPhi := doneBlk.NewPhi(
+		&ir.Incoming{X: constant.NewNull(irtypes.I8Ptr), Pred: entry},
+		&ir.Incoming{X: userPtr, Pred: headerBlk},
+	)
+	doneBlk.NewRet(retPhi)
 	return fn
 }
 
@@ -213,20 +333,15 @@ func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// emitWasmFreeDebug defines @pal_free with poison-fill (0xDE) before free for UAF detection.
-// WASM uses i32 sizes and non-atomic alloc count tracking (single-threaded).
+// emitWasmFreeDebug defines @pal_free with header + tail validation. Detects
+// double-free, free-of-invalid-pointer, and tail-sentinel corruption via the
+// T0365 sentinel scheme on WASM. Mirrors emitLibcFreeDebug.
 func emitWasmFreeDebug(module *ir.Module) *ir.Func {
-	// declare void @free(i8* nocapture noundef) nounwind
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
 	addFuncAttr(freeFn, enum.FuncAttrWillReturn)
 
-	// declare i32 @malloc_usable_size(i8*) — provided by wasm_alloc.c
-	sizeFn := getOrDeclareFunc(module, "malloc_usable_size", irtypes.I32,
-		ir.NewParam("ptr", irtypes.I8Ptr))
-
-	// declare i8* @memset(i8*, i32, i32)
 	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
 		ir.NewParam("dest", irtypes.I8Ptr),
 		ir.NewParam("c", irtypes.I32),
@@ -234,28 +349,37 @@ func emitWasmFreeDebug(module *ir.Module) *ir.Func {
 
 	allocCount := getOrCreateAllocCountGlobal(module)
 
-	// define void @pal_free(i8* %ptr) nounwind willreturn
 	fn := module.NewFunc("pal_free", irtypes.Void,
 		ir.NewParam("ptr", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock(".entry")
 
-	// Track: if ptr is non-null, poison-fill + decrement alloc count + free
 	nonnull := entry.NewICmp(enum.IPredNE, fn.Params[0], constant.NewNull(irtypes.I8Ptr))
-	trackBlk := fn.NewBlock(".track")
+	checkBlk := fn.NewBlock(".dbg.check")
 	doneBlk := fn.NewBlock(".done")
-	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+	entry.NewCondBr(nonnull, checkBlk, doneBlk)
 
-	old := trackBlk.NewLoad(irtypes.I64, allocCount)
-	trackBlk.NewStore(trackBlk.NewSub(old, constant.NewInt(irtypes.I64, 1)), allocCount)
-	// Poison-fill: memset(ptr, 0xDE, malloc_usable_size(ptr))
-	size := trackBlk.NewCall(sizeFn, fn.Params[0])
-	trackBlk.NewCall(memsetFn, fn.Params[0], constant.NewInt(irtypes.I32, 0xDE), size)
-	trackBlk.NewCall(freeFn, fn.Params[0])
-	trackBlk.NewBr(doneBlk)
+	size, hdrPtr, validated := emitHeaderValidationWasm(module, fn, checkBlk, fn.Params[0])
+
+	// Poison-fill user region: memset(user_ptr, 0xDE, requested_size).
+	// memset on WASM takes i32 size — truncate the i64 size from header.
+	size32 := validated.NewTrunc(size, irtypes.I32)
+	validated.NewCall(memsetFn, fn.Params[0], constant.NewInt(irtypes.I32, 0xDE), size32)
+
+	// Mark BOTH header slots MAGIC_FREED — see emitHeaderValidationLibc for the
+	// rationale (offset 0 may be overwritten by allocator free-list bookkeeping).
+	freedSlot := validated.NewBitCast(hdrPtr, irtypes.NewPointer(irtypes.I64))
+	validated.NewStore(constant.NewInt(irtypes.I64, debugMagicFreed), freedSlot)
+	freedSlot2 := validated.NewGetElementPtr(irtypes.I64, freedSlot, constant.NewInt(irtypes.I32, 1))
+	validated.NewStore(constant.NewInt(irtypes.I64, debugMagicFreed), freedSlot2)
+
+	// Decrement count and free internal pointer.
+	old := validated.NewLoad(irtypes.I64, allocCount)
+	validated.NewStore(validated.NewSub(old, constant.NewInt(irtypes.I64, 1)), allocCount)
+	validated.NewCall(freeFn, hdrPtr)
+	validated.NewBr(doneBlk)
 
 	doneBlk.NewRet(nil)
-
 	return fn
 }
 
@@ -317,9 +441,10 @@ func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// emitWasmReallocDebug defines @pal_realloc that scribbles (0xAA) the
-// newly-allocated bytes when the buffer grows. WASM uses i32 sizes (wasm32)
-// and non-atomic counters (single-threaded). Mirrors emitLibcReallocDebug.
+// emitWasmReallocDebug defines @pal_realloc with header validation and
+// re-construction (T0365). Mirrors emitLibcReallocDebug but uses i32 sizes
+// for the WASM allocator. Delegates the malloc-like (NULL, n) and free-like
+// (p, 0) cases to pal_alloc / pal_free for header consistency.
 func emitWasmReallocDebug(module *ir.Module) *ir.Func {
 	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
@@ -329,18 +454,15 @@ func emitWasmReallocDebug(module *ir.Module) *ir.Func {
 	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	addFuncAttr(reallocFn, enum.FuncAttrWillReturn)
 
-	sizeFn := getOrDeclareFunc(module, "malloc_usable_size", irtypes.I32,
-		ir.NewParam("ptr", irtypes.I8Ptr))
-
 	memsetFn := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
 		ir.NewParam("dest", irtypes.I8Ptr),
 		ir.NewParam("c", irtypes.I32),
 		ir.NewParam("n", irtypes.I32))
 
-	allocCount := getOrCreateAllocCountGlobal(module)
-	zero32 := constant.NewInt(irtypes.I32, 0)
+	palAllocFn := lookupFunc(module, "pal_alloc")
+	palFreeFn := lookupFunc(module, "pal_free")
+
 	zero64 := constant.NewInt(irtypes.I64, 0)
-	one64 := constant.NewInt(irtypes.I64, 1)
 	nullPtr := constant.NewNull(irtypes.I8Ptr)
 
 	fn := module.NewFunc("pal_realloc", irtypes.I8Ptr,
@@ -350,57 +472,60 @@ func emitWasmReallocDebug(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock(".entry")
 
-	// Capture old usable size before realloc; treat null old ptr as 0.
 	ptrIsNull := entry.NewICmp(enum.IPredEQ, fn.Params[0], nullPtr)
-	queryOldBlk := fn.NewBlock(".query_old")
-	skipQueryBlk := fn.NewBlock(".skip_query")
-	doReallocBlk := fn.NewBlock(".do_realloc")
-	entry.NewCondBr(ptrIsNull, skipQueryBlk, queryOldBlk)
+	allocLikeBlk := fn.NewBlock(".dbg.alloc_like")
+	checkFreeLikeBlk := fn.NewBlock(".dbg.check_free_like")
+	entry.NewCondBr(ptrIsNull, allocLikeBlk, checkFreeLikeBlk)
 
-	oldUsable := queryOldBlk.NewCall(sizeFn, fn.Params[0])
-	queryOldBlk.NewBr(doReallocBlk)
-	skipQueryBlk.NewBr(doReallocBlk)
-
-	oldUsablePhi := doReallocBlk.NewPhi(
-		&ir.Incoming{X: oldUsable, Pred: queryOldBlk},
-		&ir.Incoming{X: zero32, Pred: skipQueryBlk},
-	)
-
-	sizeIsZero := doReallocBlk.NewICmp(enum.IPredEQ, fn.Params[1], zero64)
-	size32 := doReallocBlk.NewTrunc(fn.Params[1], irtypes.I32)
-	ret := doReallocBlk.NewCall(reallocFn, fn.Params[0], size32)
-
-	newAllocBlk := fn.NewBlock(".new_alloc")
-	checkFreeBlk := fn.NewBlock(".check_free")
-	doReallocBlk.NewCondBr(ptrIsNull, newAllocBlk, checkFreeBlk)
-
-	retNonNull := newAllocBlk.NewICmp(enum.IPredNE, ret, nullPtr)
-	incBlk := fn.NewBlock(".inc")
-	scribbleCheckBlk := fn.NewBlock(".scribble_check")
-	newAllocBlk.NewCondBr(retNonNull, incBlk, scribbleCheckBlk)
-	incBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, one64, enum.AtomicOrderingMonotonic)
-	incBlk.NewBr(scribbleCheckBlk)
-
-	decBlk := fn.NewBlock(".dec")
-	checkFreeBlk.NewCondBr(sizeIsZero, decBlk, scribbleCheckBlk)
-	decBlk.NewAtomicRMW(enum.AtomicOpSub, allocCount, one64, enum.AtomicOrderingMonotonic)
-	decBlk.NewBr(scribbleCheckBlk)
-
+	allocResult := allocLikeBlk.NewCall(palAllocFn, fn.Params[1])
 	doneBlk := fn.NewBlock(".done")
-	resultNonNull := scribbleCheckBlk.NewICmp(enum.IPredNE, ret, nullPtr)
-	scribbleNeededBlk := fn.NewBlock(".scribble_needed")
-	scribbleCheckBlk.NewCondBr(resultNonNull, scribbleNeededBlk, doneBlk)
+	allocLikeBlk.NewBr(doneBlk)
 
-	hasGrown := scribbleNeededBlk.NewICmp(enum.IPredUGT, size32, oldUsablePhi)
-	scribbleBlk := fn.NewBlock(".scribble")
-	scribbleNeededBlk.NewCondBr(hasGrown, scribbleBlk, doneBlk)
+	sizeIsZero := checkFreeLikeBlk.NewICmp(enum.IPredEQ, fn.Params[1], zero64)
+	freeLikeBlk := fn.NewBlock(".dbg.free_like")
+	resizeBlk := fn.NewBlock(".dbg.resize")
+	checkFreeLikeBlk.NewCondBr(sizeIsZero, freeLikeBlk, resizeBlk)
+	freeLikeBlk.NewCall(palFreeFn, fn.Params[0])
+	freeLikeBlk.NewBr(doneBlk)
 
-	scribbleStart := scribbleBlk.NewGetElementPtr(irtypes.I8, ret, oldUsablePhi)
-	scribbleLen := scribbleBlk.NewSub(size32, oldUsablePhi)
+	oldSize, hdrPtr, validatedBlk := emitHeaderValidationWasm(module, fn, resizeBlk, fn.Params[0])
+
+	newSize32 := validatedBlk.NewTrunc(fn.Params[1], irtypes.I32)
+	newTotal := validatedBlk.NewAdd(newSize32, constant.NewInt(irtypes.I32, debugSlackSize))
+	newInternal := validatedBlk.NewCall(reallocFn, hdrPtr, newTotal)
+
+	newNonNull := validatedBlk.NewICmp(enum.IPredNE, newInternal, nullPtr)
+	resizeOkBlk := fn.NewBlock(".dbg.resize_ok")
+	validatedBlk.NewCondBr(newNonNull, resizeOkBlk, doneBlk)
+
+	newMagicSlot := resizeOkBlk.NewBitCast(newInternal, irtypes.NewPointer(irtypes.I64))
+	newSizeSlot := resizeOkBlk.NewGetElementPtr(irtypes.I64, newMagicSlot, constant.NewInt(irtypes.I32, 1))
+	resizeOkBlk.NewStore(fn.Params[1], newSizeSlot)
+
+	newUserPtr := resizeOkBlk.NewGetElementPtr(irtypes.I8, newInternal, constant.NewInt(irtypes.I32, debugHeaderSize))
+	newTailBytePtr := resizeOkBlk.NewGetElementPtr(irtypes.I8, newUserPtr, newSize32)
+	newTailSlot := resizeOkBlk.NewBitCast(newTailBytePtr, irtypes.NewPointer(irtypes.I64))
+	newTailStore := resizeOkBlk.NewStore(constant.NewInt(irtypes.I64, debugMagicTail), newTailSlot)
+	newTailStore.Align = 1
+
+	hasGrown := resizeOkBlk.NewICmp(enum.IPredUGT, fn.Params[1], oldSize)
+	scribbleBlk := fn.NewBlock(".dbg.scribble_grown")
+	resizeOkBlk.NewCondBr(hasGrown, scribbleBlk, doneBlk)
+
+	oldSize32 := scribbleBlk.NewTrunc(oldSize, irtypes.I32)
+	scribbleStart := scribbleBlk.NewGetElementPtr(irtypes.I8, newUserPtr, oldSize32)
+	scribbleLen := scribbleBlk.NewSub(newSize32, oldSize32)
 	scribbleBlk.NewCall(memsetFn, scribbleStart, constant.NewInt(irtypes.I32, 0xAA), scribbleLen)
 	scribbleBlk.NewBr(doneBlk)
 
-	doneBlk.NewRet(ret)
+	retPhi := doneBlk.NewPhi(
+		&ir.Incoming{X: allocResult, Pred: allocLikeBlk},
+		&ir.Incoming{X: nullPtr, Pred: freeLikeBlk},
+		&ir.Incoming{X: nullPtr, Pred: validatedBlk},
+		&ir.Incoming{X: newUserPtr, Pred: resizeOkBlk},
+		&ir.Incoming{X: newUserPtr, Pred: scribbleBlk},
+	)
+	doneBlk.NewRet(retPhi)
 	return fn
 }
 

@@ -518,3 +518,63 @@ arc_borrow_into_field_via_clone() `test {
   h := _ArcBorrowHolder(a.borrow.clone());
   assert(h.field.len == 1, "clone into field via constructor");
 }
+
+// T0386: Slice-assign from Arc.borrow with `string[]` payload — full-range.
+// Without Patch 1, the per-element store inside `Vector[T].[:]=` aliases the
+// source's string pointers into the target; both Vector.drop and Arc.drop
+// then free the same pointers → double-free / segfault. Patch 1 makes the
+// IndexExpr branch see the concrete `Vector[string]` instance via
+// `c.monoCtx.inst`, firing B0195 to dup each string element.
+arc_borrow_slice_assign() `test {
+  s := string[]();
+  s.push("a" + "");
+  s.push("b" + "");
+  s.push("c" + "");
+  a := Arc[string[]](s);
+  v1 := string[]();
+  v1.push("x" + "");
+  v1.push("y" + "");
+  v1.push("z" + "");
+  v1[0:3] = a.borrow;
+  assert(v1[0] == "a", "v1[0]");
+  assert(v1[1] == "b", "v1[1]");
+  assert(v1[2] == "c", "v1[2]");
+}
+
+// T0386: Partial-range slice assignment — only target indices in the slice
+// range change; other elements remain owned by the target.
+arc_borrow_slice_assign_partial() `test {
+  s := string[]();
+  s.push("a" + "");
+  a := Arc[string[]](s);
+  v1 := string[]();
+  v1.push("x" + "");
+  v1.push("y" + "");
+  v1.push("z" + "");
+  v1[0:1] = a.borrow;
+  assert(v1[0] == "a", "v1[0]");
+  assert(v1[1] == "y", "v1[1]");
+  assert(v1[2] == "z", "v1[2]");
+}
+
+// T0386: Two Arcs alternating into the same target — exercises the mono
+// `Vector[string].[:]=` with multiple instances and confirms each borrow
+// source independently retains its elements after the assign.
+arc_borrow_slice_assign_alternating() `test {
+  s1 := string[]();
+  s1.push("a" + "");
+  s1.push("b" + "");
+  s2 := string[]();
+  s2.push("c" + "");
+  a := Arc[string[]](s1);
+  b := Arc[string[]](s2);
+  v := string[]();
+  v.push("x" + "");
+  v.push("y" + "");
+  v.push("z" + "");
+  v[0:2] = a.borrow;
+  v[2:3] = b.borrow;
+  assert(v[0] == "a", "v[0]");
+  assert(v[1] == "b", "v[1]");
+  assert(v[2] == "c", "v[2]");
+}

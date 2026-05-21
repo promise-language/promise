@@ -4910,6 +4910,13 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 		// Old element is NOT dropped here (see B0204 for why).
 		if s.Op == ast.OpAssign {
 			idxTargetType := c.info.Types[target.Target]
+			// T0386: Inside generic method bodies, c.info.Types[ThisExpr] returns
+			// the bare Named owner without TypeArgs bound. Use c.monoCtx.inst
+			// (the concrete Instance) so types.AsVector succeeds and the
+			// per-element string-dup fires inside Vector[T].[:]=.
+			if _, isThis := target.Target.(*ast.ThisExpr); isThis && c.monoCtx != nil {
+				idxTargetType = c.monoCtx.inst
+			}
 			if c.typeSubst != nil {
 				idxTargetType = types.Substitute(idxTargetType, c.typeSubst)
 			}
@@ -5021,22 +5028,36 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 		c.genSliceAssign(target, val)
 		if s.Op == ast.OpAssign {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
-				// B0313: Free the source vector's backing array before
-				// clearing the drop flag. The [:]=  method borrows elements
-				// (creating raw pointer aliases in the target), so we must
-				// skip individual element drops to avoid double-free. But
-				// the backing array is a separate allocation that leaks if
-				// we only clear the drop flag.
+				// B0313: For non-string element types, the [:]= method aliases
+				// element pointers; we free the source backing array here, skip
+				// normal vecdrop on the source (clearDropFlag) to avoid double-free.
+				// T0386: For string element type, Patch 1 makes [:]= dup
+				// strings via B0195, so the source retains independent
+				// ownership of its elements — running B0313's destructive
+				// path would orphan and leak them, and disarming the source's
+				// drop flag would leak the source's backing array + element
+				// strings. Let normal scope cleanup handle the source vector.
 				rhsType := c.info.Types[s.Value]
 				if c.typeSubst != nil {
 					rhsType = types.Substitute(rhsType, c.typeSubst)
 				}
-				if _, isVec := types.AsVector(rhsType); isVec {
-					alloca := c.locals[ident.Name]
-					srcPtr := c.block.NewLoad(irtypes.I8Ptr, alloca)
-					c.block.NewCall(c.funcs["Vector.drop"], srcPtr)
+				skipB0313 := false
+				if elemType, isVec := types.AsVector(rhsType); isVec {
+					resolvedElem := elemType
+					if c.typeSubst != nil {
+						resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+					}
+					if extractNamed(resolvedElem) == types.TypString {
+						skipB0313 = true
+					} else {
+						alloca := c.locals[ident.Name]
+						srcPtr := c.block.NewLoad(irtypes.I8Ptr, alloca)
+						c.block.NewCall(c.funcs["Vector.drop"], srcPtr)
+					}
 				}
-				c.clearDropFlag(ident.Name)
+				if !skipB0313 {
+					c.clearDropFlag(ident.Name)
+				}
 			}
 			// B0312: When RHS is opt!, neutralize the source optional so its
 			// drop doesn't double-free the inner value now owned by the slice target.

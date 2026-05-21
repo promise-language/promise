@@ -252,3 +252,22 @@ test_mutex_borrow_index_assign_vector() `test {
   vec[0] = g.borrow;
   assert(vec[0].len == 1, "vec[0] len after mutex borrow assign");
 }
+
+// T0386: MutexGuard analog of `arc_borrow_slice_assign` — slice assign from a
+// guard-borrowed `string[]` must dup elements per Patch 1.
+test_mutex_guard_slice_assign() `test {
+  s := string[]();
+  s.push("a" + "");
+  s.push("b" + "");
+  s.push("c" + "");
+  m := Mutex[string[]](s);
+  use g := m.lock();
+  v1 := string[]();
+  v1.push("x" + "");
+  v1.push("y" + "");
+  v1.push("z" + "");
+  v1[0:3] = g.borrow;
+  assert(v1[0] == "a", "v1[0]");
+  assert(v1[1] == "b", "v1[1]");
+  assert(v1[2] == "c", "v1[2]");
+}

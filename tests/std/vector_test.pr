@@ -316,3 +316,44 @@ test_slice_assign_string_partial_source() `test {
   assert(v[2] == "y", "[2] from src");
   assert(v[3] == "d", "[3] unchanged");
 }
+
+// T0386 / B0313 regression: slice assign from a heap-string source IdentExpr.
+// Existing slice-assign tests use `.rodata` literals (T0060) whose drops short-
+// circuit on the static flag, masking any source-cleanup bug. This pushes
+// runtime-allocated strings (`"x" + ""`) so `promise_string_drop` actually
+// touches the source-owned pointers; Patch 2 must skip the destructive
+// Vector.drop on the source for `string[]` and let normal scope cleanup run.
+test_slice_assign_string_heap_ident() `test {
+  src := string[]();
+  src.push("hello" + "");
+  src.push("world" + "");
+  v := string[]();
+  v.push("a" + "");
+  v.push("b" + "");
+  v.push("c" + "");
+  v[0:2] = src;
+  assert(v[0] == "hello", "[0] from src");
+  assert(v[1] == "world", "[1] from src");
+  assert(v[2] == "c", "[2] unchanged");
+}
+
+// T0431 coverage: slice assign from an int[] IdentExpr source. Exercises
+// Patch 2's non-string branch (skipB0313=false): emit Vector.drop on the
+// source to free its backing array, then clearDropFlag to disarm the
+// source's normal scope cleanup. Element values are raw-copied into the
+// target (no aliasing risk for value types). All other IdentExpr slice-
+// assign tests use string[], which Patch 2 routes through the new skip
+// branch — without this test the non-string path goes uncovered.
+test_slice_assign_int_heap_ident() `test {
+  src := int[]();
+  src.push(100);
+  src.push(200);
+  v := int[]();
+  v.push(1);
+  v.push(2);
+  v.push(3);
+  v[0:2] = src;
+  assert(v[0] == 100, "[0] from src");
+  assert(v[1] == 200, "[1] from src");
+  assert(v[2] == 3, "[2] unchanged");
+}

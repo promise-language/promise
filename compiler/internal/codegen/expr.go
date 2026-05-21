@@ -4472,7 +4472,23 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 
 	switch method {
 	case "push":
+		// T0388: When the source is a field read on a droppable owner
+		// (e.g. v.push(h.arr) where arr is a Vector/Channel/Arc/Weak/
+		// Optional[these] field), set dupContainerFieldAccess so
+		// genFieldAccess produces an independent dup tracked as a heap
+		// temp. claimHeapTemp below then transfers ownership to the
+		// vector. Module/native getters and enum-variant access take
+		// other paths in genMemberExpr and never reach genFieldAccess,
+		// so the flag is only consumed for actual struct field reads —
+		// getter results are not double-dup'd. String fields use a
+		// separate flag (dupStringFieldAccess) and are handled by the
+		// post-load c.dupString(argVal) below; setting the container
+		// flag is harmless for string-element pushes.
+		if _, isMember := e.Args[0].Value.(*ast.MemberExpr); isMember {
+			c.dupContainerFieldAccess = true
+		}
 		argVal := c.genCallArgExpr(e.Args[0].Value)
+		c.dupContainerFieldAccess = false
 
 		// B0189: For string elements, dup before push to ensure exclusive ownership.
 		// Each vector must independently own its string elements so that the element

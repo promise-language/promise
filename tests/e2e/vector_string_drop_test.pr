@@ -571,3 +571,109 @@ test_t0376_direct_loop_push_enum() `test {
   assert(_t0369_first_maybe(dest) == "ab", "dest first variant string");
   assert(_t0369_first_maybe(src) == "ab", "src first variant string after dup");
 }
+
+// T0388: push of a MemberExpr that resolves to a Vector field on a droppable
+// owner. Without the fix, dest's slot would alias the inner buffer of h.arr;
+// at end-of-scope both _MFHolder.drop and Vector[Vector[int]].drop would free
+// the same buffer (invalid free / double free).
+type _T0388Holder {
+  int[] arr;
+}
+
+_t0388_make_int_vec() int[] {
+  int[] v = int[]();
+  v.push(1);
+  v.push(2);
+  return v;
+}
+
+test_t0388_member_field_push_inner_vec() `test {
+  _T0388Holder h = _T0388Holder(arr: _t0388_make_int_vec());
+  int[][] v = int[][]();
+  v.push(h.arr);
+  assert(v.len == 1, "v len");
+  assert(v[0].len == 2, "v[0] len");
+  assert(v[0][0] == 1, "v[0][0]");
+  assert(v[0][1] == 2, "v[0][1]");
+  assert(h.arr.len == 2, "h.arr still readable after push");
+  assert(h.arr[0] == 1, "h.arr[0] still readable");
+}
+
+// T0388: push of a string field on a droppable owner. The string-element path
+// already dup'd via post-load c.dupString(argVal) (B0189), so this test pins
+// down that the new container-flag setting doesn't double-dup or leak.
+type _T0388StrHolder {
+  string s;
+}
+
+test_t0388_member_field_push_string() `test {
+  _T0388StrHolder h = _T0388StrHolder(s: "hi" + "ya");
+  string[] v = string[]();
+  v.push(h.s);
+  assert(v.len == 1, "v len");
+  assert(v[0] == "hiya", "v[0]");
+  assert(h.s == "hiya", "h.s still readable after push");
+}
+
+// T0388: push of a Channel field on a droppable owner. dupChannel is an
+// incref, so the source channel still owns a ref after the push and is
+// freed exactly once across owner-drop and vector-drop. Capacity 2 lets us
+// confirm both refs reach the same underlying channel without blocking.
+type _T0388ChanHolder {
+  channel[int] ch;
+}
+
+test_t0388_member_field_push_channel() `test(exclude: "wasm32") {
+  _T0388ChanHolder h = _T0388ChanHolder(ch: channel[int](capacity: 2));
+  channel[int][] v = channel[int][]();
+  v.push(h.ch);
+  assert(v.len == 1, "v len");
+  h.ch.send(7);
+  v[0].send(8);
+  if a := <-h.ch {
+    assert(a == 7, "first recv from source ref");
+  } else {
+    assert(false, "expected first recv to succeed");
+  }
+  if b := <-v[0] {
+    assert(b == 8, "second recv from vector slot");
+  } else {
+    assert(false, "expected second recv to succeed");
+  }
+}
+
+// T0388: push of a value returned from an instance getter. genGetterCall
+// returns a fresh allocation that's already heap-tracked; the dup flag must
+// NOT be consumed (mirrors the T0376 enum/polymorphic-ctor regression risk).
+// genFieldAccess is bypassed — only `field := named.LookupField(e.Field)`
+// success calls genFieldAccess; getters route through genGetterCall.
+type _T0388GetterHolder {
+  get fresh int[] {
+    int[] v = int[]();
+    v.push(100);
+    v.push(200);
+    return v;
+  }
+}
+
+test_t0388_member_field_push_does_not_break_instance_getter() `test {
+  _T0388GetterHolder h = _T0388GetterHolder();
+  int[][] v = int[][]();
+  v.push(h.fresh);
+  assert(v.len == 1, "v len");
+  assert(v[0].len == 2, "v[0] len");
+  assert(v[0][0] == 100, "v[0][0]");
+  assert(v[0][1] == 200, "v[0][1]");
+}
+
+// T0388: push of a native getter result (Arc.borrow). Native getters return
+// early in genMemberExpr before reaching genFieldAccess, so the dup flag is
+// not consumed and the borrow path is unaffected.
+test_t0388_member_field_push_does_not_break_native_getter() `test {
+  Arc[int] a = Arc[int](42);
+  int[] v = int[]();
+  v.push(a.borrow);
+  assert(v.len == 1, "v len");
+  assert(v[0] == 42, "v[0]");
+  assert(a.borrow == 42, "arc value still readable");
+}

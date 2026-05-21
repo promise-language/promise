@@ -1,0 +1,205 @@
+// T0391: if-let on T?? double-frees inner heap value.
+// Covers: single/double/triple Optional × unwrap depth × none variations.
+// All tests must run leak-free.
+type _Box {
+  int n;
+}
+
+_passthrough(_Box? a) _Box? {
+  return a;
+}
+_returns_double(_Box? a) _Box?? {
+  return a;
+}
+_returns_triple(_Box? a) _Box??? {
+  _Box?? b = a;
+  return b;
+}
+
+iflet_single_optional_passthrough() `test {
+  _Box? a = _Box(n: 1);
+  _Box? r = _passthrough(a);
+  if x := r {
+    assert(x.n == 1, "single");
+  }
+}
+
+iflet_double_unwrap() `test {
+  _Box? a = _Box(n: 33);
+  _Box?? r = _returns_double(a);
+  if x := r {
+    if y := x {
+      assert(y.n == 33, "double");
+    }
+  }
+}
+
+iflet_double_outer_only() `test {
+  _Box? a = _Box(n: 7);
+  _Box?? r = _returns_double(a);
+  if x := r {
+    assert(true, "outer");
+  }
+}
+
+iflet_double_no_unwrap() `test {
+  _Box? a = _Box(n: 7);
+  _Box?? r = _returns_double(a);
+  assert(r is present, "no unwrap");
+}
+
+iflet_none_inner_double() `test {
+  _Box? a = none;
+  _Box?? r = _returns_double(a);
+  if x := r {
+    assert(true, "outer some, inner none");
+  }
+}
+
+iflet_none_outer_single() `test {
+  _Box? a = none;
+  _Box? r = _passthrough(a);
+  if x := r {
+    assert(false, "should not enter");
+  }
+}
+
+iflet_triple() `test {
+  _Box? a = _Box(n: 99);
+  _Box??? r = _returns_triple(a);
+  if x := r {
+    if y := x {
+      if z := y {
+        assert(z.n == 99, "triple");
+      }
+    }
+  }
+}
+
+iflet_triple_partial() `test {
+  _Box? a = _Box(n: 5);
+  _Box??? r = _returns_triple(a);
+  if x := r {
+    if y := x {
+      assert(y is present, "two layers");
+    }
+  }
+}
+
+// Heap user type with explicit drop method — fully unwrapping exercises the
+// maybeRegisterOptionalDrop walk-past loop and the genIfUnwrapStmt nested
+// Optional registration. Inner-only cases (no unwrap, outer-only) leak via
+// T0419 (preexisting bug: Optional[T-with-drop] uses bare `T.drop` instead of
+// `T.drop$wrap`, so pal_free is never called) — covered there, not here.
+type _BoxDrop {
+  int n;
+  drop(~this) {
+  }
+}
+
+_returns_double_boxdrop(_BoxDrop? a) _BoxDrop?? {
+  return a;
+}
+
+iflet_double_unwrap_explicit_drop() `test {
+  _BoxDrop? a = _BoxDrop(n: 11);
+  _BoxDrop?? r = _returns_double_boxdrop(a);
+  if x := r {
+    if y := x {
+      assert(y.n == 11, "explicit drop");
+    }
+  }
+}
+
+// String inner — exercises emitOptionalValueDrop's `b.named == TypString` branch
+// at the bottom of the recursive walk.
+_returns_double_str(string? a) string?? {
+  return a;
+}
+
+iflet_double_unwrap_string() `test {
+  string? a = "hello";
+  string?? r = _returns_double_str(a);
+  if x := r {
+    if y := x {
+      assert(y == "hello", "str");
+    }
+  }
+}
+
+iflet_double_no_unwrap_string() `test {
+  string? a = "world";
+  string?? r = _returns_double_str(a);
+  assert(r is present, "no unwrap str");
+}
+
+// Vector inner — exercises emitOptionalValueDrop's `isContainerType` branch
+// (Vector.drop) at the bottom of the recursive walk.
+_returns_double_vec(int[]? a) int[]?? {
+  return a;
+}
+
+iflet_double_unwrap_vector() `test {
+  int[]? a = [1, 2, 3];
+  int[]?? r = _returns_double_vec(a);
+  if x := r {
+    if y := x {
+      assert(y[0] == 1, "vec");
+    }
+  }
+}
+
+iflet_double_no_unwrap_vector() `test {
+  int[]? a = [4, 5, 6];
+  int[]?? r = _returns_double_vec(a);
+  assert(r is present, "no unwrap vec");
+}
+
+// Enum with droppable variant — exercises emitOptionalValueDrop's enum branch
+// (b.dropFunc = _Msg.drop with bitcast to i8*) at the bottom of the walk.
+enum _Msg {
+  Empty,
+  Text(string body),
+}
+
+_returns_double_enum(_Msg? a) _Msg?? {
+  return a;
+}
+
+iflet_double_unwrap_enum() `test {
+  _Msg? a = _Msg.Text("hi");
+  _Msg?? r = _returns_double_enum(a);
+  if x := r {
+    if y := x {
+      match y {
+        _Msg.Text(s) => {
+          assert(s == "hi", "enum text");
+        },
+        _Msg.Empty => {
+          assert(false, "enum empty");
+        },
+      }
+    }
+  }
+}
+
+iflet_double_no_unwrap_enum() `test {
+  _Msg? a = _Msg.Text("bye");
+  _Msg?? r = _returns_double_enum(a);
+  assert(r is present, "no unwrap enum");
+}
+
+// while-let on T?? — exercises genWhileUnwrapStmt's nested Optional path
+// (line 6774) which was hit 0 by the original e2e tests. Runs once and breaks.
+while_let_double_unwrap() `test {
+  _BoxDrop? a = _BoxDrop(n: 21);
+  _BoxDrop?? r = _returns_double_boxdrop(a);
+  while x := r {
+    while y := x {
+      assert(y.n == 21, "while-let double");
+      r = none;
+      break;
+    }
+    break;
+  }
+}

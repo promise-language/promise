@@ -1339,6 +1339,11 @@ func isTypeDroppable(typ types.Type) bool {
 		}
 		return false
 	}
+	// T0391: Optional[T] is droppable iff T is droppable. Recurse so the return-alias
+	// check sees through any number of Optional wrappings to reach the inner type.
+	if opt, ok := typ.(*types.Optional); ok {
+		return isTypeDroppable(opt.Elem())
+	}
 	named := extractNamed(typ)
 	if named == nil {
 		return false
@@ -1485,6 +1490,7 @@ func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature
 // extractAliasPtr returns the instance pointer from a value for aliasing comparison.
 // For i8* values (string, vector, channel): returns the value directly.
 // For value structs {i8*, i8*}: extracts field 1 (the instance pointer).
+// For Optional structs {i1, X}: extracts field 1 and recurses (T0391).
 func extractAliasPtr(c *Compiler, v value.Value) value.Value {
 	if v == nil {
 		return nil
@@ -1493,10 +1499,21 @@ func extractAliasPtr(c *Compiler, v value.Value) value.Value {
 	if v.Type() == irtypes.I8Ptr {
 		return v
 	}
-	// Value structs {i8*, i8*}: extract instance pointer (field 1)
+	// Struct values: value struct {i8*, i8*}, Optional {i1, X}, or other.
 	if st, ok := v.Type().(*irtypes.StructType); ok && len(st.Fields) == 2 {
+		// Value structs {i8*, i8*}: extract instance pointer (field 1)
 		if st.Fields[0] == irtypes.I8Ptr && st.Fields[1] == irtypes.I8Ptr {
 			return c.block.NewExtractValue(v, 1)
+		}
+		// T0391: Optional struct {i1, X} — extract field 1 and recurse so we
+		// reach the heap pointer through any number of Optional layers.
+		// {i1, {i8*, i8*}} → {i8*, i8*} → i8*  (Optional[heap user type])
+		// {i1, i8*}        → i8*               (Optional[string|vector|channel])
+		// {i1, {i1, ...}}  → recurse           (Optional[Optional[...]])
+		// {i1, i64}        → i64 → returns nil (Optional[primitive], non-droppable)
+		if st.Fields[0] == irtypes.I1 {
+			inner := c.block.NewExtractValue(v, 1)
+			return extractAliasPtr(c, inner)
 		}
 	}
 	return nil
@@ -2075,23 +2092,16 @@ func (c *Compiler) emitEnumDropCall(b scopeBinding) {
 	c.block = skipBlock
 }
 
-// emitOptionalDropCall emits a conditional drop for an optional value (T0101).
-// Checks: drop flag → has-value flag → drop inner value.
-// Layout: optional is {i1 flag, T value} — field 0 is has-value, field 1 is inner.
-func (c *Compiler) emitOptionalDropCall(b scopeBinding) {
-	if b.dropFlag == nil {
-		return
-	}
-
-	flag := c.block.NewLoad(irtypes.I1, b.dropFlag)
-	dropBlock := c.newBlock("optdrop.check")
-	skipBlock := c.newBlock("optdrop.skip")
-	c.block.NewCondBr(flag, dropBlock, skipBlock)
-
-	c.block = dropBlock
-	optVal := c.block.NewLoad(b.alloca.ElemType, b.alloca)
-
-	// Check has-value flag (field 0 of the optional struct)
+// emitOptionalLocalValueDrop drops the inner value of an Optional struct held
+// by a local variable binding. optVal is the loaded {i1 flag, X} struct;
+// elemType is the immediate inner Promise type X. If X is itself Optional
+// (nested), walks through layers recursively. At the bottom (non-Optional
+// inner), dispatches via b.dropFunc / b.rttiDrop using elemType to choose the
+// call shape (T0391). Distinct from compiler.go's emitOptionalValueDrop, which
+// derives dispatch from the type alone — this helper reuses the precomputed
+// dispatch info on the binding so per-instantiation drops (Arc, Mutex, Weak,
+// MutexGuard) and structural-interface RTTI dispatch are handled correctly.
+func (c *Compiler) emitOptionalLocalValueDrop(optVal value.Value, elemType types.Type, b scopeBinding) {
 	hasVal := c.block.NewExtractValue(optVal, 0)
 	dropInnerBlock := c.newBlock("optdrop.inner")
 	doneBlock := c.newBlock("optdrop.done")
@@ -2100,8 +2110,14 @@ func (c *Compiler) emitOptionalDropCall(b scopeBinding) {
 	c.block = dropInnerBlock
 	innerVal := c.block.NewExtractValue(optVal, 1)
 
-	// Dispatch inner drop based on stored type info
-	if b.rttiDrop {
+	if innerOpt, ok := elemType.(*types.Optional); ok {
+		// T0391: Nested Optional — walk into the next layer.
+		innerElem := innerOpt.Elem()
+		if c.typeSubst != nil {
+			innerElem = types.Substitute(innerElem, c.typeSubst)
+		}
+		c.emitOptionalLocalValueDrop(innerVal, innerElem, b)
+	} else if b.rttiDrop {
 		// B0243: RTTI-based drop dispatch for Optional[StructuralInterface].
 		// The concrete type is unknown at compile time — dispatch through typeinfo.
 		instance := c.extractInstancePtr(innerVal)
@@ -2117,13 +2133,13 @@ func (c *Compiler) emitOptionalDropCall(b scopeBinding) {
 		c.block = nullSkip
 	} else if b.dropFunc != nil {
 		// Enum inner type: store to temp alloca, bitcast to i8*, call drop.
-		if extractEnum(b.valType) != nil {
-			enumLLVM := c.resolveType(b.valType)
+		if extractEnum(elemType) != nil {
+			enumLLVM := c.resolveType(elemType)
 			tmpAlloca := c.createEntryAlloca(enumLLVM)
 			c.block.NewStore(innerVal, tmpAlloca)
 			ptr := c.block.NewBitCast(tmpAlloca, irtypes.I8Ptr)
 			c.block.NewCall(b.dropFunc, ptr)
-		} else if isContainerType(b.valType) || b.named == types.TypString {
+		} else if isContainerType(elemType) || b.named == types.TypString {
 			// String, vector, channel: inner is i8*, call drop directly
 			c.block.NewCall(b.dropFunc, innerVal)
 		} else {
@@ -2144,6 +2160,28 @@ func (c *Compiler) emitOptionalDropCall(b scopeBinding) {
 	c.block.NewBr(doneBlock)
 
 	c.block = doneBlock
+}
+
+// emitOptionalDropCall emits a conditional drop for an optional value (T0101).
+// Checks: drop flag → has-value flag → drop inner value.
+// Layout: optional is {i1 flag, T value} — field 0 is has-value, field 1 is inner.
+// T0391: For nested Optionals (T??, T???...), b.valType is the immediate inner
+// Optional and emitOptionalLocalValueDrop walks through layers recursively.
+func (c *Compiler) emitOptionalDropCall(b scopeBinding) {
+	if b.dropFlag == nil {
+		return
+	}
+
+	flag := c.block.NewLoad(irtypes.I1, b.dropFlag)
+	dropBlock := c.newBlock("optdrop.check")
+	skipBlock := c.newBlock("optdrop.skip")
+	c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	optVal := c.block.NewLoad(b.alloca.ElemType, b.alloca)
+
+	c.emitOptionalLocalValueDrop(optVal, b.valType, b)
+
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock
@@ -2180,15 +2218,34 @@ func (c *Compiler) emitTupleDropCall(b scopeBinding) {
 // where the inner type is droppable (string, vector, channel, user type with drop).
 // Inferred optional variables (s := func_returning_optional()) are NOT registered —
 // they are consumed via if-let/while-let/force-unwrap patterns.
+//
+// T0391: For nested Optionals (T??, T???, ...) walks through Optional layers to
+// reach the bottom inner type for dispatch info, but stores the immediate inner
+// type in valType so emitOptionalLocalValueDrop can recurse through layers correctly.
 func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAlloca, opt *types.Optional) {
 	// Don't double-register if maybeRegisterDrop already handled this variable.
 	if _, exists := c.dropBindings[varName]; exists {
 		return
 	}
 
-	elem := opt.Elem()
+	immediateElem := opt.Elem()
 	if c.typeSubst != nil {
-		elem = types.Substitute(elem, c.typeSubst)
+		immediateElem = types.Substitute(immediateElem, c.typeSubst)
+	}
+	// T0391: Walk past nested Optionals to find the bottom inner type for dispatch.
+	// For T??, immediateElem is T? and elem becomes T. The helper recurses through
+	// layers at IR generation time using valType = immediateElem.
+	elem := immediateElem
+	for {
+		innerOpt, ok := elem.(*types.Optional)
+		if !ok {
+			break
+		}
+		next := innerOpt.Elem()
+		if c.typeSubst != nil {
+			next = types.Substitute(next, c.typeSubst)
+		}
+		elem = next
 	}
 	innerNamed := extractNamed(elem)
 
@@ -2280,7 +2337,7 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 			kind:     bindingDropOptional,
 			alloca:   alloca,
 			named:    innerNamed,
-			valType:  elem,
+			valType:  immediateElem,
 			dropFlag: dropFlag,
 			rttiDrop: true,
 			varName:  varName,
@@ -2305,7 +2362,7 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		kind:     bindingDropOptional,
 		alloca:   alloca,
 		named:    innerNamed,
-		valType:  elem,
+		valType:  immediateElem,
 		dropFlag: dropFlag,
 		dropFunc: dropFunc,
 		varName:  varName,
@@ -6550,7 +6607,18 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		initType = types.Substitute(initType, c.typeSubst)
 	}
 	if opt, ok := initType.(*types.Optional); ok && c.isOwnedOptionalExpr(s.Init) {
-		c.maybeRegisterDrop(s.Binding, alloca, opt.Elem())
+		// T0391: When unwrapping a nested Optional (T?? → T?), the element type is
+		// itself Optional and needs an Optional drop binding so its inner heap value
+		// is freed at scope exit (or transferred ownership to a further unwrap).
+		elemType := opt.Elem()
+		if c.typeSubst != nil {
+			elemType = types.Substitute(elemType, c.typeSubst)
+		}
+		if innerOpt, ok := elemType.(*types.Optional); ok {
+			c.maybeRegisterOptionalDrop(s.Binding, alloca, innerOpt)
+		} else {
+			c.maybeRegisterDrop(s.Binding, alloca, elemType)
+		}
 		// Only transfer ownership (clear source dropflag) if the unwrapped binding
 		// actually got a drop registered. B0246: Structural interfaces don't get drops
 		// via maybeRegisterDrop — the source must retain ownership so its Optional drop
@@ -6700,7 +6768,18 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 		valType = types.Substitute(valType, c.typeSubst)
 	}
 	if opt, ok := valType.(*types.Optional); ok && c.isOwnedOptionalExpr(s.Value) {
-		c.maybeRegisterDrop(s.Binding, alloca, opt.Elem())
+		// T0391: When unwrapping a nested Optional (T?? → T?), the element type is
+		// itself Optional and needs an Optional drop binding so its inner heap value
+		// is freed at scope exit (or transferred ownership to a further unwrap).
+		elemType := opt.Elem()
+		if c.typeSubst != nil {
+			elemType = types.Substitute(elemType, c.typeSubst)
+		}
+		if innerOpt, ok := elemType.(*types.Optional); ok {
+			c.maybeRegisterOptionalDrop(s.Binding, alloca, innerOpt)
+		} else {
+			c.maybeRegisterDrop(s.Binding, alloca, elemType)
+		}
 		// Only transfer ownership if the unwrapped binding got a drop registered.
 		// B0246: Structural interfaces don't get drops via maybeRegisterDrop — the
 		// source must retain ownership for its Optional drop (RTTI-based) to handle cleanup.

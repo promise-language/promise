@@ -19181,6 +19181,126 @@ func TestOptionalDroppableFieldReassignDrop(t *testing.T) {
 	assertContains(t, ir, "call void @Resource.drop")
 }
 
+// T0391: Returning a non-~ Optional argument from a function that returns the same
+// Optional type causes the caller's drop flag to alias with the return value's
+// drop binding. The alias check (extended in T0391 to recognise Optional structs)
+// must clear the caller's drop flag when the inner pointers compare equal,
+// preventing double-free.
+func TestOptionalReturnAliasCheckClearsArgFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Box { int n; drop(~this) {} }
+		passthrough(Box? a) Box? { return a; }
+		main() {
+			Box? a = Box(n: 1);
+			Box? r = passthrough(a);
+		}
+	`)
+	// Caller must emit an alias check for the call result vs the arg pointer.
+	assertContains(t, ir, "alias.clear")
+	assertContains(t, ir, "alias.skip")
+	// On the alias-clear path, a's drop flag is set to false.
+	assertContains(t, ir, "store i1 false, i1* %a.dropflag")
+}
+
+// T0391: A nested Optional local (T??) must register a scope-exit drop binding
+// so its inner heap pointer is freed. The drop emits an outer present check,
+// extracts the inner Optional, then a second present check before the actual
+// drop (or pal_free for heap user types without a drop method).
+func TestNestedOptionalDropRecurses(t *testing.T) {
+	ir := generateIR(t, `
+		type Box { int n; drop(~this) {} }
+		returns_double(Box? a) Box?? { return a; }
+		main() {
+			Box? a = Box(n: 1);
+			Box?? r = returns_double(a);
+		}
+	`)
+	// r must have its own drop flag for scope-exit cleanup.
+	assertContains(t, ir, "%r.dropflag")
+	// The optional drop chain must traverse two layers — the helper emits
+	// nested optdrop.inner / optdrop.done blocks via recursion.
+	assertContains(t, ir, "optdrop.check")
+	assertContainsMatch(t, ir, `optdrop\.inner[\s\S]*optdrop\.inner`)
+	// Bottom-level dispatch reaches Box.drop (the heap user type has a drop method).
+	assertContains(t, ir, "call void @Box.drop")
+}
+
+// T0391: A nested Optional[string] (string??) drop reaches promise_string_drop
+// at the bottom of the recursive walk via the `b.named == TypString` branch
+// in emitOptionalValueDrop.
+func TestNestedOptionalStringDropRecurses(t *testing.T) {
+	ir := generateIR(t, `
+		returns_double_str(string? a) string?? { return a; }
+		main() {
+			string? a = "hello";
+			string?? r = returns_double_str(a);
+		}
+	`)
+	assertContains(t, ir, "%r.dropflag")
+	// Two layers of optdrop.inner (recursive walk through string?? → string? → string).
+	assertContainsMatch(t, ir, `optdrop\.inner[\s\S]*optdrop\.inner`)
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0391: A nested Optional[Vector] drop reaches Vector.drop at the bottom of the
+// recursive walk via the `isContainerType` branch in emitOptionalValueDrop.
+func TestNestedOptionalVectorDropRecurses(t *testing.T) {
+	ir := generateIR(t, `
+		returns_double_vec(int[]? a) int[]?? { return a; }
+		main() {
+			int[]? a = [1, 2, 3];
+			int[]?? r = returns_double_vec(a);
+		}
+	`)
+	assertContains(t, ir, "%r.dropflag")
+	assertContainsMatch(t, ir, `optdrop\.inner[\s\S]*optdrop\.inner`)
+	assertContains(t, ir, "call void @Vector.drop")
+}
+
+// T0391: A nested Optional[enum] drop reaches the enum drop function at the
+// bottom via the `extractEnum != nil` branch in emitOptionalValueDrop. The
+// inner value is an enum struct stored to a temp alloca and bitcast to i8*.
+func TestNestedOptionalEnumDropRecurses(t *testing.T) {
+	ir := generateIR(t, `
+		enum Msg { Empty, Text(string body) }
+		returns_double_enum(Msg? a) Msg?? { return a; }
+		main() {
+			Msg? a = Msg.Text("hi");
+			Msg?? r = returns_double_enum(a);
+		}
+	`)
+	assertContains(t, ir, "%r.dropflag")
+	assertContainsMatch(t, ir, `optdrop\.inner[\s\S]*optdrop\.inner`)
+	assertContains(t, ir, "call void @Msg.drop")
+}
+
+// T0391: while-let on T?? must register a nested Optional drop binding for the
+// unwrapped element (just like if-let). Mirror of TestNestedOptionalDropRecurses
+// for genWhileUnwrapStmt's nested Optional path.
+func TestWhileLetNestedOptionalDropBinding(t *testing.T) {
+	ir := generateIR(t, `
+		type Box { int n; drop(~this) {} }
+		returns_double(Box? a) Box?? { return a; }
+		main() {
+			Box? a = Box(n: 1);
+			Box?? r = returns_double(a);
+			while x := r {
+				while y := x {
+					r = none;
+					break;
+				}
+				break;
+			}
+		}
+	`)
+	// Inner while-let unwraps Box?? → Box?, so x: Box? must register an
+	// Optional-drop binding (a regular drop-binding would not free the inner Box).
+	assertContains(t, ir, "%x.dropflag")
+	// Body of the unwrap walks through optdrop.inner blocks.
+	assertContains(t, ir, "optdrop.check")
+	assertContains(t, ir, "call void @Box.drop")
+}
+
 // B0237: Constructor temps passed as map literal values should be claimed.
 func TestConstructorTempClaimedInMapLiteral(t *testing.T) {
 	ir := generateIR(t, `

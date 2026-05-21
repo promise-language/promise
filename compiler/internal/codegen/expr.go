@@ -8891,6 +8891,32 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	var result value.Value
 	result = c.block.NewExtractValue(optVal, 1)
 
+	// T0428 Case 3B: borrowed this.field! — dup the inner heap value so the new
+	// variable gets an independent copy. The caller still owns the original (we
+	// can't clear the present flag on a borrowed receiver), so both the caller's
+	// synth drop and the new variable get independent copies to free.
+	if member, ok := expr.(*ast.MemberExpr); ok {
+		if _, isThis := member.Target.(*ast.ThisExpr); isThis && !c.thisRecvIsOwned {
+			innerType := c.info.Types[expr]
+			if c.typeSubst != nil {
+				innerType = types.Substitute(innerType, c.typeSubst)
+			}
+			if opt, optOk := innerType.(*types.Optional); optOk {
+				innerElem := opt.Elem()
+				if c.typeSubst != nil {
+					innerElem = types.Substitute(innerElem, c.typeSubst)
+				}
+				innerNamed := extractNamed(innerElem)
+				if innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() &&
+					!isPrimitiveScalar(innerNamed) && innerNamed != types.TypString &&
+					!types.IsVector(innerElem) && !types.IsChannel(innerElem) &&
+					!innerNamed.IsStructural() && !isOpaqueContainerType(innerElem) {
+					result = c.dupHeapValue(result, innerElem)
+				}
+			}
+		}
+	}
+
 	// T0111: Do NOT clear the drop flag here. The optional still owns the inner
 	// value and will free it at scope exit via its drop binding. For temporary
 	// access (opt!.len), this is correct — the inner stays alive until scope exit.
@@ -8985,99 +9011,197 @@ func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
 }
 
 // neutralizeMemberOptionalField clears the present flag of an Optional[heap-user-type]
-// field on an owned variable (T0392). Only handles `ident.field` — chained member
-// access (`a.b.c`) is not supported and silently no-ops. String/Vector/Channel/Arc/Weak
-// optional fields are skipped because genFieldAccess already dups them — clearing the
-// flag would leak the original.
+// field on an owned variable (T0392). Handles:
+//   - Simple `ident.field!` (original case)
+//   - T0428 Case 1: `ident.field!!` (T?? field — look through inner Optional for guard checks)
+//   - T0428 Case 2: `outer.inner.field!` (chained MemberExpr — walk chain)
+//   - T0428 Case 3A: `this.field!` inside ~this method (owned receiver)
+//
+// String/Vector/Channel/Arc/Weak optional fields are skipped because genFieldAccess
+// already dups them — clearing the flag would leak the original.
+// T0428 Case 3B (borrowed this.field!): handled in genOptionalForceUnwrap via dup.
 func (c *Compiler) neutralizeMemberOptionalField(m *ast.MemberExpr) {
-	targetIdent, ok := m.Target.(*ast.IdentExpr)
-	if !ok {
-		return
-	}
-	ownerAlloca, ok := c.locals[targetIdent.Name]
-	if !ok {
-		return // not an owned local (e.g., MutRef param)
-	}
-	ownerType := c.info.Types[m.Target]
-	if c.typeSubst != nil {
-		ownerType = types.Substitute(ownerType, c.typeSubst)
-	}
-	// Don't neutralize through a borrow: the caller owns the field and its
-	// drop will visit it. Mutating the flag would silently change caller state.
-	if _, isShared := ownerType.(*types.SharedRef); isShared {
-		return
-	}
-	if _, isMut := ownerType.(*types.MutRef); isMut {
-		return
-	}
-	ownerNamed := extractNamed(ownerType)
-	if ownerNamed == nil {
-		return
-	}
-	// Only neutralize when the owner's drop would actually visit this field —
-	// i.e., heap user types with synth or explicit drops. Value types and
-	// structural types don't have field-walking drops.
-	if ownerNamed.IsValueType() || ownerNamed.IsStructural() {
-		return
-	}
-	if !ownerNamed.HasDrop() && !ownerNamed.NeedsSynthDrop() {
-		if inst, ok := ownerType.(*types.Instance); ok {
-			if !monoInstNeedsSynthDrop(inst) {
-				return
-			}
+	// T0428 Case 2: Walk the MemberExpr chain to find the root variable.
+	// chain[i] = step i from root toward leaf. chain[0].Target is the root.
+	// chain[last] = m (the final Optional field access).
+	chain := []*ast.MemberExpr{m}
+	cur := ast.Expr(m.Target)
+	for {
+		if me, ok := cur.(*ast.MemberExpr); ok {
+			chain = append([]*ast.MemberExpr{me}, chain...)
+			cur = me.Target
 		} else {
-			return
+			break
 		}
 	}
-	// Look up the field's declared type to inspect the Optional inner.
-	field := ownerNamed.LookupField(m.Field)
-	if field == nil {
+
+	// Resolve the root alloca and initial owner named type.
+	var ownerAlloca *ir.InstAlloca
+	var ownerType types.Type // used for layout lookup (ident-rooted chains)
+	var ownerNamed *types.Named
+	var rootIsThis bool
+
+	switch root := cur.(type) {
+	case *ast.IdentExpr:
+		a, ok := c.locals[root.Name]
+		if !ok {
+			return // not an owned local
+		}
+		ownerAlloca = a
+		ownerType = c.info.Types[root]
+		if c.typeSubst != nil {
+			ownerType = types.Substitute(ownerType, c.typeSubst)
+		}
+		// Don't neutralize through a borrow.
+		if _, isShared := ownerType.(*types.SharedRef); isShared {
+			return
+		}
+		if _, isMut := ownerType.(*types.MutRef); isMut {
+			return
+		}
+		ownerNamed = extractNamed(ownerType)
+		if ownerNamed == nil {
+			return
+		}
+		// Only neutralize when the owner's drop would actually visit this field.
+		if ownerNamed.IsValueType() || ownerNamed.IsStructural() {
+			return
+		}
+		if !ownerNamed.HasDrop() && !ownerNamed.NeedsSynthDrop() {
+			if inst, ok := ownerType.(*types.Instance); ok {
+				if !monoInstNeedsSynthDrop(inst) {
+					return
+				}
+			} else {
+				return
+			}
+		}
+	case *ast.ThisExpr:
+		// T0428 Case 3A: owned ~this — 'this' alloca holds a raw i8* instance ptr.
+		// T0428 Case 3B: borrowed this — handled via dup in genOptionalForceUnwrap; skip here.
+		if !c.thisRecvIsOwned {
+			return
+		}
+		a, ok := c.locals["this"]
+		if !ok {
+			return
+		}
+		ownerAlloca = a
+		ownerNamed = c.currentNamed
+		if ownerNamed == nil {
+			return
+		}
+		if ownerNamed.IsValueType() || ownerNamed.IsStructural() {
+			return
+		}
+		if !ownerNamed.HasDrop() && !ownerNamed.NeedsSynthDrop() {
+			return
+		}
+		ownerType = ownerNamed
+		rootIsThis = true
+	default:
 		return
 	}
-	fType := field.Type()
-	if c.typeSubst != nil {
-		fType = types.Substitute(fType, c.typeSubst)
-	}
-	opt, isOpt := fType.(*types.Optional)
-	if !isOpt {
-		return
-	}
-	// Skip neutralization for inner types where genFieldAccess already dups —
-	// the original must remain in the field for the owner's drop to free.
-	elem := opt.Elem()
-	innerNamed := extractNamed(elem)
-	if innerNamed == types.TypString || types.IsVector(elem) || types.IsChannel(elem) ||
-		types.IsArc(elem) || types.IsWeak(elem) {
-		return
-	}
-	// Only heap user types need neutralization (no dup at field access time).
-	if innerNamed == nil || innerNamed.IsValueType() || innerNamed.IsCopy() ||
-		isPrimitiveScalar(innerNamed) || innerNamed.IsStructural() ||
-		isOpaqueContainerType(elem) {
-		return
-	}
-	layout := c.lookupTypeLayout(ownerType)
-	if layout == nil || layout.IsValueType {
-		return
-	}
-	fieldIdx, ok := layout.InstanceFieldIndex[m.Field]
-	if !ok {
-		return
-	}
-	optStruct, ok := layout.Instance.Fields[fieldIdx].LLVMType.(*irtypes.StructType)
-	if !ok || len(optStruct.Fields) < 2 {
-		return
-	}
-	// Load the owner value struct, extract instance ptr, and GEP to the
-	// field's optional storage, then to the flag (field 0).
+
+	// Load the root instance pointer.
 	ownerVal := c.block.NewLoad(ownerAlloca.ElemType, ownerAlloca)
-	instance := c.extractInstancePtr(ownerVal)
-	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
-	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-	flagPtr := c.block.NewGetElementPtr(optStruct, fieldPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	c.block.NewStore(constant.NewInt(irtypes.I1, 0), flagPtr)
+	var rootInstance value.Value
+	if rootIsThis {
+		// ~this: the alloca holds an i8* instance pointer directly.
+		rootInstance = ownerVal
+	} else {
+		rootInstance = c.extractInstancePtr(ownerVal)
+	}
+
+	// Walk the chain. For each step, GEP through the instance to the field.
+	// For intermediate steps: load the value struct, extract instance ptr, advance named type.
+	// For the final step: validate Optional field type and clear the present flag.
+	curInstance := rootInstance
+	curNamed := ownerNamed
+	curType := ownerType
+
+	for i, step := range chain {
+		stepLayout := c.lookupTypeLayout(curType)
+		if stepLayout == nil || stepLayout.IsValueType {
+			return
+		}
+		stepFieldIdx, ok := stepLayout.InstanceFieldIndex[step.Field]
+		if !ok {
+			return
+		}
+		typedPtr := c.block.NewBitCast(curInstance, stepLayout.InstancePtrType)
+		fieldPtr := c.block.NewGetElementPtr(stepLayout.Instance.LLVMType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(stepFieldIdx)))
+		fieldLLVMType := stepLayout.Instance.Fields[stepFieldIdx].LLVMType
+
+		if i < len(chain)-1 {
+			// Intermediate step: load the value struct and extract instance ptr.
+			fieldVal := c.block.NewLoad(fieldLLVMType, fieldPtr)
+			fieldSt, ok2 := fieldLLVMType.(*irtypes.StructType)
+			if !ok2 || len(fieldSt.Fields) < 2 {
+				return
+			}
+			curInstance = c.block.NewExtractValue(fieldVal, 1)
+			// Advance named/type for next step.
+			stepField := curNamed.LookupField(step.Field)
+			if stepField == nil {
+				return
+			}
+			nextType := stepField.Type()
+			if c.typeSubst != nil {
+				nextType = types.Substitute(nextType, c.typeSubst)
+			}
+			curNamed = extractNamed(nextType)
+			if curNamed == nil {
+				return
+			}
+			curType = nextType
+			continue
+		}
+
+		// Final step: validate the Optional field type and clear the present flag.
+		// Look up the field from curNamed to get its declared type.
+		stepField := curNamed.LookupField(step.Field)
+		if stepField == nil {
+			return
+		}
+		fType := stepField.Type()
+		if c.typeSubst != nil {
+			fType = types.Substitute(fType, c.typeSubst)
+		}
+		opt, isOpt := fType.(*types.Optional)
+		if !isOpt {
+			return
+		}
+		// T0428 Case 1: For T?? fields, opt.Elem() is itself Optional[T]. Look through
+		// to find the deep inner named type for guard checks, but still neutralize the
+		// outermost Optional's present flag (field 0 of the field struct).
+		elem := opt.Elem()
+		innerElem := elem
+		if innerOpt, ok2 := elem.(*types.Optional); ok2 {
+			innerElem = innerOpt.Elem()
+		}
+		innerNamed := extractNamed(innerElem)
+		// Skip for inner types where genFieldAccess already dups.
+		if innerNamed == types.TypString || types.IsVector(innerElem) || types.IsChannel(innerElem) ||
+			types.IsArc(innerElem) || types.IsWeak(innerElem) {
+			return
+		}
+		if innerNamed == nil || innerNamed.IsValueType() || innerNamed.IsCopy() ||
+			isPrimitiveScalar(innerNamed) || innerNamed.IsStructural() ||
+			isOpaqueContainerType(innerElem) {
+			return
+		}
+
+		// GEP to the Optional present flag (field 0) and clear it.
+		optStruct, ok2 := fieldLLVMType.(*irtypes.StructType)
+		if !ok2 || len(optStruct.Fields) < 2 {
+			return
+		}
+		flagPtr := c.block.NewGetElementPtr(optStruct, fieldPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), flagPtr)
+	}
 }
 
 // emitScalarCast emits LLVM IR for a primitive scalar type conversion.

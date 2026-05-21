@@ -21183,3 +21183,162 @@ func TestDoubleOptionalValueCtorWrapsOnce(t *testing.T) {
 	// Field arg is wrapped once before being placed in the Value struct.
 	assertContains(t, ir, "insertvalue { i1, { i1, i64 } } undef, i1 true, 0")
 }
+
+// T0428: Force-unwrap of a call-returning string? must track the extracted string
+// pointer as a statement temp so it gets freed at statement end. The temp tracking
+// branch (genOptionalForceUnwrap lines 8938-8949) fires for non-ident sources.
+func TestT0428CallResultStringOptForceUnwrapTracksTemp(t *testing.T) {
+	ir := generateIR(t, `
+		get_greet() string? { return "hello"; }
+		main() {
+			int n = get_greet()!.len;
+		}
+	`)
+	// The extracted string i8* must be tracked as a stmt temp with a drop at statement end.
+	assertContains(t, ir, "promise_string_drop")
+}
+
+// T0428: Force-unwrap of a call-returning int[]? must track the extracted vector
+// pointer as a statement temp so it gets freed at statement end.
+func TestT0428CallResultVectorOptForceUnwrapTracksTemp(t *testing.T) {
+	ir := generateIR(t, `
+		get_nums() int[]? {
+			int[] v = [1, 2, 3];
+			return v;
+		}
+		main() {
+			int n = get_nums()!.len;
+		}
+	`)
+	// The extracted vector pointer must be tracked as a stmt temp with vector drop.
+	assertContains(t, ir, "Vector.drop")
+}
+
+// T0428: Generic type with borrowed this.field! exercises the typeSubst branches
+// in genOptionalForceUnwrap (Case 3B with typeSubst != nil).
+func TestT0428GenericBorrowedThisForceUnwrapTypeSubst(t *testing.T) {
+	ir := generateIR(t, `
+		type GenHolder[T] {
+			T? data;
+			get_val(this) T {
+				return this.data!;
+			}
+		}
+		type GBox { int n; drop(~this) {} }
+		main() {
+			h := GenHolder[GBox](data: GBox(n: 42));
+			v := h.get_val();
+		}
+	`)
+	// get_val must dup the heap value for the borrowed receiver case.
+	// The function is LLVM-quoted as @"GenHolder[GBox].get_val".
+	assertContains(t, ir, `"GenHolder[GBox].get_val"`)
+	assertContains(t, ir, "call i8* @pal_alloc")
+	assertContains(t, ir, "call void @llvm.memcpy")
+}
+
+// T0428: Generic function with local var force-unwrap exercises typeSubst path
+// in neutralizeMemberOptionalField (IdentExpr root, lines 9052-9054).
+// When a generic method/function body has `b.field!` where b's type has a TypeParam,
+// c.typeSubst is applied to resolve the concrete owner type.
+func TestT0428GenericFuncLocalVarOptFieldNeutralization(t *testing.T) {
+	ir := generateIR(t, `
+		type T0428ContainerBox { int n; drop(~this) {} }
+		type T0428Container[T] {
+			T? item;
+		}
+		unwrap_item[T](T0428Container[T] c) T {
+			return c.item!;
+		}
+		main() {
+			c := T0428Container[T0428ContainerBox](item: T0428ContainerBox(n: 5));
+			b := unwrap_item[T0428ContainerBox](c);
+		}
+	`)
+	// The concrete monomorphized function must clear the optional present flag.
+	assertContains(t, ir, "store i1 false")
+}
+
+// T0428 Case 1: T?? field force-unwrap — neutralizeMemberOptionalField must
+// look through the inner Optional to find the named type and clear the outer flag.
+func TestT0428DoubleOptionalFieldNeutralization(t *testing.T) {
+	ir := generateIR(t, `
+		type T0428Box { int n; drop(~this) {} }
+		type T0428Dbl { T0428Box?? data; }
+		make_inner() T0428Box? { return T0428Box(n: 1); }
+		main() {
+			T0428Box? inner = make_inner();
+			h := T0428Dbl(data: inner);
+			b := h.data!;
+		}
+	`)
+	// The present flag of h.data (outer Optional) must be stored false.
+	// The neutralize store appears in the goroutine body, not the C main wrapper.
+	assertContains(t, ir, "store i1 false")
+}
+
+// T0428 Case 2: chained MemberExpr force-unwrap — neutralizeMemberOptionalField
+// must walk the chain to clear the Optional's present flag.
+func TestT0428ChainedMemberForceUnwrapNeutralization(t *testing.T) {
+	ir := generateIR(t, `
+		type T0428Box2 { int n; drop(~this) {} }
+		type T0428Inner { T0428Box2? data; }
+		type T0428Outer { T0428Inner inner; }
+		main() {
+			o := T0428Outer(inner: T0428Inner(data: T0428Box2(n: 5)));
+			b := o.inner.data!;
+		}
+	`)
+	// The Optional present flag must be cleared via GEP into inner.data.
+	assertContains(t, ir, "store i1 false")
+}
+
+// T0428 Case 3A: ~this method force-unwrap — neutralizeMemberOptionalField
+// must handle ThisExpr root without calling extractInstancePtr on i8*.
+func TestT0428OwnedThisForceUnwrapNeutralization(t *testing.T) {
+	ir := generateIR(t, `
+		type T0428Box3 { int n; drop(~this) {} }
+		type T0428Holder3 {
+			T0428Box3? data;
+			drop(~this) {
+				b := this.data!;
+			}
+		}
+		main() {
+			h := T0428Holder3(data: T0428Box3(n: 7));
+		}
+	`)
+	dropFn := extractFunction(ir, "T0428Holder3.drop")
+	if dropFn == "" {
+		t.Fatal("expected T0428Holder3.drop in IR")
+	}
+	// Present flag must be cleared in the drop method body.
+	assertContains(t, dropFn, "store i1 false")
+}
+
+// T0428 Case 3B: borrowed this.field! — genOptionalForceUnwrap must dup the
+// inner heap value so both the caller's synth drop and the local own independent copies.
+func TestT0428BorrowedThisForceUnwrapDup(t *testing.T) {
+	ir := generateIR(t, `
+		type T0428Box4 { int n; drop(~this) {} }
+		type T0428Holder4 {
+			T0428Box4? data;
+			get_n(this) int {
+				b := this.data!;
+				return b.n;
+			}
+		}
+		main() {
+			h := T0428Holder4(data: T0428Box4(n: 3));
+			n := h.get_n();
+		}
+	`)
+	// The get_n method should call dupHeapValue logic: alloc + memcpy.
+	getNFn := extractFunction(ir, "T0428Holder4.get_n")
+	if getNFn == "" {
+		t.Fatal("expected T0428Holder4.get_n in IR")
+	}
+	// dupHeapValue allocates new memory and memcpy's the instance.
+	assertContains(t, getNFn, "call i8* @pal_alloc")
+	assertContains(t, getNFn, "call void @llvm.memcpy")
+}

@@ -1,0 +1,104 @@
+// T0428: Force-unwrap of Optional[heap-user-type] in three special patterns
+// that caused double-free after T0392 added synth drop for Optional fields.
+// All tests must run leak-free.
+type _FUBox {
+  int n;
+  drop(~this) {
+  }
+}
+
+type _FUHolder {
+  _FUBox? data;
+}
+
+type _FUOuter {
+  _FUHolder inner;
+}
+
+// Case 1: T?? field force-unwrap (h.data!!)
+// h.data is _FUBox??, unwrapping gives _FUBox? then _FUBox.
+type _FUDblHolder {
+  _FUBox?? data;
+}
+
+_make_dbl_box(int n) _FUBox?? {
+  b := _FUBox(n: n);
+  _FUBox? inner = b;
+  return inner;
+}
+
+// h.data is _FUBox??. Force-unwrap outer → _FUBox?, then inner → _FUBox.
+// Without Case 1 fix, h's synth drop would double-free: the T?? outer Optional
+// present flag wasn't cleared because extractNamed(Optional[_FUBox]) returned nil.
+double_wrap_direct_force_unwrap() `test {
+  h := _FUDblHolder(data: _make_dbl_box(7));
+  inner := h.data!; // _FUBox? — clears outer Optional's present flag
+  b := inner!; // _FUBox — clears inner Optional's present flag
+  assert(b.n == 7, "T?? direct");
+}
+
+// Case 2: chained MemberExpr force-unwrap (outer.inner.data!)
+chained_member_force_unwrap() `test {
+  outer := _FUOuter(inner: _FUHolder(data: _FUBox(n: 99)));
+  b := outer.inner.data!;
+  assert(b.n == 99, "chained");
+}
+
+// Case 3A: ~this inside drop(~this) — must clear Optional field's present flag
+// so it isn't double-freed when the type's own cleanup runs.
+// Without the fix, neutralizeMemberOptionalField called ExtractValue on i8* → crash.
+type _FUDropReceiver {
+  _FUBox? data;
+  int result;
+  drop(~this) {
+    // Move the Box out of the Optional field: must clear present flag.
+    b := this.data!;
+    // b.n is 55; drop b (frees Box). Since present flag is cleared, synth drop
+    // won't re-free the Box when the instance is freed.
+  }
+}
+
+owned_this_drop_force_unwrap() `test {
+  h := _FUDropReceiver(data: _FUBox(n: 55), result: 0);
+  // h is dropped at end of scope — drop(~this) fires, moves Box out, Box drops.
+  // No double-free if Case 3A neutralization works.
+}
+
+// Case 3B: borrowed this.field! — must dup the inner value
+// genOptionalForceUnwrap dups the heap value so both b and h.data own independent copies.
+// h.data.present stays true (we can't clear it on a borrow); h's synth drop frees the
+// original Box; b's drop frees the dup'd copy — no double-free, no leak.
+type _FUBorrowedReceiver {
+  _FUBox? data;
+  get_n(this) int {
+    b := this.data!;
+    return b.n;
+  }
+}
+
+borrowed_this_force_unwrap() `test {
+  h := _FUBorrowedReceiver(data: _FUBox(n: 77));
+  n := h.get_n();
+  assert(n == 77, "borrowed this.data!");
+}
+
+// Generic borrowed this.field! — exercises typeSubst branches in Case 3B.
+// The generic method gets a concrete instance substitution, so c.typeSubst != nil
+// when genOptionalForceUnwrap runs the dup logic.
+type _FUGenBox {
+  int n;
+  drop(~this) {
+  }
+}
+type _FUGenHolder[T] {
+  T? data;
+  get_val(this) T {
+    return this.data!;
+  }
+}
+
+generic_borrowed_this_force_unwrap() `test {
+  h := _FUGenHolder[_FUGenBox](data: _FUGenBox(n: 13));
+  v := h.get_val();
+  assert(v.n == 13, "generic borrowed this.data!");
+}

@@ -198,6 +198,11 @@ type Compiler struct {
 	// and leaked intermediates. For recursive types this causes stack overflow.
 	suppressMatchDup bool
 
+	// T0428: Set to true when compiling a method whose receiver is owned (~this).
+	// False for borrowed-this methods. Used by neutralizeMemberOptionalField and
+	// genOptionalForceUnwrap to distinguish Cases 3A and 3B.
+	thisRecvIsOwned bool
+
 	// B0290: Tracks enums currently being processed by dupEnumElementInPlace
 	// to detect recursive types and prevent infinite codegen.
 	enumDupInProgress map[*types.Enum]bool
@@ -6326,6 +6331,9 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 
 	paramIdx := 0
 
+	// T0428: track whether the receiver is owned (~this) for force-unwrap neutralization.
+	c.thisRecvIsOwned = m.Sig().Recv() != nil && m.Sig().Recv().Ref() == types.RefMut
+
 	// Allocate receiver as "this"
 	if m.Sig().Recv() != nil {
 		receiverType := fn.Params[paramIdx].Typ
@@ -7895,6 +7903,7 @@ type compilerState struct {
 	tempTrackingEnabled  bool
 	panicExitBlock       *ir.Block // T0262: prevent cross-function block references
 	coroutineReturnBlock *ir.Block // T0262: prevent cross-function block references
+	thisRecvIsOwned      bool      // T0428: true when current method has ~this receiver
 }
 
 func (c *Compiler) saveState() compilerState {
@@ -7926,6 +7935,7 @@ func (c *Compiler) saveState() compilerState {
 		tempTrackingEnabled:  c.tempTrackingEnabled,
 		panicExitBlock:       c.panicExitBlock,
 		coroutineReturnBlock: c.coroutineReturnBlock,
+		thisRecvIsOwned:      c.thisRecvIsOwned,
 	}
 	// T0262: clear coroutine-specific blocks to prevent cross-function references
 	// when saveState is used before switching c.fn to a different LLVM function.
@@ -7962,6 +7972,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.lambdaWritebacks = s.lambdaWritebacks
 	c.panicExitBlock = s.panicExitBlock
 	c.coroutineReturnBlock = s.coroutineReturnBlock
+	c.thisRecvIsOwned = s.thisRecvIsOwned
 }
 
 // findTypeDeclAnyFile searches for a TypeDecl by name in c.file first,

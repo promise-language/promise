@@ -503,3 +503,18 @@ arc_borrow_clone_returned_owned() `test {
     i = i + 1;
   }
 }
+
+// T0382: `Holder(a.borrow.clone())` deep-copies the Arc's inner buffer at
+// construction. Field is then independently owned — both Holder and Arc can
+// drop without aliasing the buffer.
+type _ArcBorrowHolder {
+  string[] field;
+}
+
+arc_borrow_into_field_via_clone() `test {
+  v2 := string[]();
+  v2.push("hello" + "");
+  a := Arc[string[]](v2);
+  h := _ArcBorrowHolder(a.borrow.clone());
+  assert(h.field.len == 1, "clone into field via constructor");
+}

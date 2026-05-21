@@ -243,6 +243,17 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		// because the caller still drops the original. tryMoveConsume rejects them
 		// at compile time (matches T0338/T0349 pattern for raise/yield/select-send).
 		c.tryMoveConsume(s.Value)
+	} else if _, ok := s.Target.(*ast.MemberExpr); ok {
+		// T0382: `obj.field = a.borrow` for a non-ref-typed field stores an
+		// alias to the source's inner buffer. Fields have no per-slot
+		// dropflag, so the parent's drop walks them unconditionally and
+		// double-frees the buffer the source still owns. T0367/T0379 only
+		// cover IdentExpr targets via per-local dropflag clear. Mirrors
+		// T0380's pattern. (IndexExpr siblings are handled by codegen-dup —
+		// see T0383.)
+		if !isRefType(c.info.Types[s.Target]) {
+			c.errorf(s.Pos(), "cannot assign borrow to owned field; use '.clone()' to copy")
+		}
 	}
 
 	// Simple assignment resurrects the target variable.

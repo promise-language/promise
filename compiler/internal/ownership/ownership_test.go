@@ -4270,3 +4270,77 @@ func TestT0402_ReturnAfterTypedReassignToOwnedOK(t *testing.T) {
 		}
 	`)
 }
+
+// === T0382: borrow → owned field rejected ===
+//
+// T0385 (the IndexExpr sibling) is fixed by codegen-dup in T0383, so only
+// the MemberExpr case needs a sema rejection here.
+
+// T0382: `obj.field = a.borrow` for a non-Copy element T is rejected. Fields
+// have no per-slot dropflag, so the parent's drop walks them unconditionally
+// — the borrowed buffer would be double-freed against Arc's drop. Use
+// '.clone()' to deep-copy or restructure the field type for sharing.
+func TestT0382_FieldAssignFromArcBorrowRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Holder { string[] field; }
+		test() {
+			v1 := string[]();
+			v1.push("init" + "");
+			h := Holder(v1);
+			v2 := string[]();
+			v2.push("hello" + "");
+			a := Arc[string[]](v2);
+			h.field = a.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign borrow to owned field")
+}
+
+// T0382: same rule applies to MutexGuard.borrow.
+func TestT0382_FieldAssignFromMutexGuardBorrowRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Holder { string[] field; }
+		test() {
+			v1 := string[]();
+			v1.push("init" + "");
+			h := Holder(v1);
+			v2 := string[]();
+			v2.push("hello" + "");
+			m := Mutex[string[]](v2);
+			use guard := m.lock();
+			h.field = guard.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign borrow to owned field")
+}
+
+// T0382: Copy element types (Arc[int].borrow → int field) are independently
+// copied through the borrow, so no double-free risk and no rejection.
+// isBorrowedExpr returns false for Copy underlying types (T0380).
+func TestT0382_FieldAssignFromArcBorrowCopyAllowed(t *testing.T) {
+	ownerOK(t, `
+		type IntHolder { int n; }
+		test() {
+			h := IntHolder(0);
+			a := Arc[int](42);
+			h.n = a.borrow;
+		}
+	`)
+}
+
+// T0382: explicit `.clone()` on the borrow yields an owned independent copy
+// — assignment to the field is then a normal owned move and is permitted.
+func TestT0382_FieldAssignFromBorrowClonedAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Holder { string[] field; }
+		test() {
+			v1 := string[]();
+			v1.push("init" + "");
+			h := Holder(v1);
+			v2 := string[]();
+			v2.push("hello" + "");
+			a := Arc[string[]](v2);
+			h.field = a.borrow.clone();
+		}
+	`)
+}

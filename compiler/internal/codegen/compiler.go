@@ -6610,11 +6610,52 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 // Checks the has-value flag, then drops the inner value if present.
 // Layout: optional field is {i1 flag, T value} stored in the instance struct.
 func (c *Compiler) emitOptionalFieldDrop(opt *types.Optional, f *types.Field, layout *TypeDeclLayout, typedPtr value.Value) {
+	fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
+	if !ok {
+		return
+	}
+
+	// Load the optional field value.
+	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+	fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+
+	c.emitOptionalValueDrop(fieldVal, opt)
+}
+
+// emitOptionalValueDrop emits cleanup for an already-loaded {i1 flag, T} optional value.
+// Branches on the has-value flag, then drops the inner T according to its kind:
+//   - string / Vector / Channel: i8* — call type-specific drop directly
+//   - heap user type: {vtable*, instance*} — drop() if present, then pal_free unless
+//     the type has a synthesized drop (which already calls pal_free)
+//   - nested Optional[U]: recurse on the inner Optional
+//
+// T0392: Heap user types are now handled here (was previously deferred via stale
+// B0181/T0111 comment). Force-unwrap sites neutralize the source's present flag
+// (see neutralizeForceUnwrapSource), so the new owner doesn't double-free.
+func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional) {
 	elem := opt.Elem()
 	innerNamed := extractNamed(elem)
 
-	// Determine drop function for inner type (string/container only — i8* drops).
+	// T0392: Recurse for nested Optional (T??) — drop the inner Optional's value.
+	if innerOpt, isOpt := elem.(*types.Optional); isOpt {
+		hasVal := c.block.NewExtractValue(optVal, 0)
+		dropBlock := c.newBlock("optfield.drop")
+		skipBlock := c.newBlock("optfield.skip")
+		c.block.NewCondBr(hasVal, dropBlock, skipBlock)
+		c.block = dropBlock
+		innerVal := c.block.NewExtractValue(optVal, 1)
+		c.emitOptionalValueDrop(innerVal, innerOpt)
+		if c.block.Term == nil {
+			c.block.NewBr(skipBlock)
+		}
+		c.block = skipBlock
+		return
+	}
+
+	// Determine cleanup needed for the inner type.
 	var dropFunc *ir.Func
+	isHeapUser := false
 
 	switch {
 	case innerNamed == types.TypString:
@@ -6623,48 +6664,78 @@ func (c *Compiler) emitOptionalFieldDrop(opt *types.Optional, f *types.Field, la
 		dropFunc = c.funcs["Vector.drop"]
 	case innerNamed == types.TypChannel:
 		dropFunc = c.funcs["Channel.drop"]
-	// Note: user types with HasDrop() are intentionally excluded here (B0181).
-	// Dropping a user type inside an optional requires dup-on-unwrap to prevent
-	// double-free when the inner value is also extracted elsewhere. Tracked as T0111.
+	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() &&
+		!isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural() &&
+		!isOpaqueContainerType(elem):
+		// T0392: Heap user type — needs pal_free at minimum, plus drop() if it has one.
+		isHeapUser = true
+		hasMonoSynthDrop := false
+		if inst, ok := elem.(*types.Instance); ok {
+			hasMonoSynthDrop = monoInstNeedsSynthDrop(inst)
+		}
+		if innerNamed.HasDrop() || innerNamed.NeedsSynthDrop() || hasMonoSynthDrop {
+			ownerName := c.resolveMethodOwner(innerNamed, "drop")
+			// Generic type methods are mangled per-instance — always use the mono
+			// name when elem is an Instance (covers explicit drop, sema synth, and
+			// mono synth alike).
+			if inst, ok := elem.(*types.Instance); ok {
+				ownerName = monoName(inst)
+			}
+			dropFunc = c.funcs[mangleMethodName(ownerName, "drop", false)]
+		}
 	default:
-		return // inner type not droppable
+		return // value type or primitive — no cleanup needed
 	}
 
-	if dropFunc == nil {
+	if dropFunc == nil && !isHeapUser {
 		return
 	}
 
-	fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
-	if !ok {
-		return
-	}
-
-	// Load the optional field value
-	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-	fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
-
-	// Extract has-value flag (field 0 of the optional struct)
-	hasVal := c.block.NewExtractValue(fieldVal, 0)
+	hasVal := c.block.NewExtractValue(optVal, 0)
 	dropBlock := c.newBlock("optfield.drop")
 	skipBlock := c.newBlock("optfield.skip")
 	c.block.NewCondBr(hasVal, dropBlock, skipBlock)
 
 	c.block = dropBlock
-	innerVal := c.block.NewExtractValue(fieldVal, 1)
+	innerVal := c.block.NewExtractValue(optVal, 1)
 
-	// T0354: For Vector inner type, iterate elements and drop heap elements
-	// (strings, enums, user types, tuples) before freeing the buffer. Without
-	// this, optional `T[]?` fields leak per-element heap allocations.
-	if innerNamed == types.TypVector {
+	if isHeapUser {
+		// User type: inner is value struct {vtable*, instance*}.
+		instancePtr := c.extractInstancePtr(innerVal)
+		// Null-check: zero-initialized optionals may have null instance pointers.
+		nullCheck := c.block.NewICmp(enum.IPredEQ, instancePtr, constant.NewNull(irtypes.I8Ptr))
+		freeBlock := c.newBlock("optfield.free")
+		skipFreeBlock := c.newBlock("optfield.free.skip")
+		c.block.NewCondBr(nullCheck, skipFreeBlock, freeBlock)
+
+		c.block = freeBlock
+		if dropFunc != nil {
+			c.block.NewCall(dropFunc, instancePtr)
+		}
+		// Free the instance — synthesized drops already call pal_free; explicit
+		// drops do not. Without an explicit drop, dropFunc is nil and we still pal_free.
+		needsFree := !innerNamed.NeedsSynthDrop()
+		if inst, ok := elem.(*types.Instance); ok && monoInstNeedsSynthDrop(inst) {
+			needsFree = false
+		}
+		if needsFree {
+			c.block.NewCall(c.palFree, instancePtr)
+		}
+		c.block.NewBr(skipFreeBlock)
+
+		c.block = skipFreeBlock
+		c.block.NewBr(skipBlock)
+	} else {
+		// T0354: For Vector inner type, iterate elements and drop heap elements
+		// (strings, enums, user types, tuples) before freeing the buffer. Without
+		// this, optional `T[]?` fields leak per-element heap allocations.
 		if elemType, isVec := types.AsVector(elem); isVec {
 			c.emitVectorElementDropLoop(innerVal, elemType)
 		}
+		// String/container: inner is i8*, call drop directly.
+		c.block.NewCall(dropFunc, innerVal)
+		c.block.NewBr(skipBlock)
 	}
-
-	// String/container: inner is i8*, call drop directly
-	c.block.NewCall(dropFunc, innerVal)
-	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock
 }

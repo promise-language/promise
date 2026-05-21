@@ -1,0 +1,201 @@
+// T0392: Synth drop must recurse into Optional[heap-user-type] fields, otherwise
+// the inner heap allocation leaks. Covers:
+//   1. Heap user type with explicit drop()
+//   2. Heap user type with synth drop (string field → drop synthesized)
+//   3. Heap user type with no drop (only int fields, but still heap-allocated)
+//   4. Nested Optional T??
+//   5. Force-unwrap-to-variable: must not double-free (MemberExpr neutralization)
+//   6. None case
+//   7. Reassignment
+type _T0392Box {
+  int n;
+  drop(~this) {
+  }
+}
+
+type _T0392SynthBox {
+  string s;
+}
+
+type _T0392RawBox {
+  int n;
+}
+
+type _T0392Holder1 {
+  _T0392Box? data;
+}
+
+type _T0392Holder2 {
+  _T0392SynthBox? data;
+}
+
+type _T0392Holder3 {
+  _T0392RawBox? data;
+}
+
+type _T0392Holder4 {
+  _T0392Box?? data;
+}
+
+basic_explicit_drop() `test {
+  h := _T0392Holder1(data: _T0392Box(n: 7));
+  assert(h.data is present, "explicit drop present");
+}
+
+basic_synth_drop() `test {
+  h := _T0392Holder2(data: _T0392SynthBox(s: "x"));
+  assert(h.data is present, "synth drop present");
+}
+
+basic_no_drop() `test {
+  h := _T0392Holder3(data: _T0392RawBox(n: 7));
+  assert(h.data is present, "no drop present");
+}
+
+basic_double_optional_present() `test {
+  _T0392Box? inner = _T0392Box(n: 1);
+  h := _T0392Holder4(data: inner);
+  assert(h.data is present, "double-optional present");
+}
+
+basic_double_optional_absent_outer() `test {
+  h := _T0392Holder4(data: none);
+  assert(h.data is absent, "double-optional absent outer");
+}
+
+force_unwrap_explicit_drop() `test {
+  h := _T0392Holder1(data: _T0392Box(n: 9));
+  b := h.data!;
+  assert(b.n == 9, "explicit drop unwrap");
+}
+
+force_unwrap_synth_drop() `test {
+  h := _T0392Holder2(data: _T0392SynthBox(s: "hello"));
+  b := h.data!;
+  assert(b.s == "hello", "synth drop unwrap");
+}
+
+force_unwrap_no_drop() `test {
+  h := _T0392Holder3(data: _T0392RawBox(n: 11));
+  b := h.data!;
+  assert(b.n == 11, "no drop unwrap");
+}
+
+none_field_explicit() `test {
+  h := _T0392Holder1(data: none);
+  assert(h.data is absent, "explicit drop none");
+}
+
+none_field_synth() `test {
+  h := _T0392Holder2(data: none);
+  assert(h.data is absent, "synth drop none");
+}
+
+reassign_to_new_value() `test {
+  h := _T0392Holder1(data: _T0392Box(n: 1));
+  h.data = _T0392Box(n: 2);
+  b := h.data!;
+  assert(b.n == 2, "reassigned new value");
+}
+
+reassign_to_none() `test {
+  h := _T0392Holder1(data: _T0392Box(n: 5));
+  h.data = none;
+  assert(h.data is absent, "reassigned none");
+}
+
+// Generic case: Holder[T] { Box[T]? data } where Box[T] has explicit drop.
+// The mono'd Box[int].drop must be called via the optional field drop path.
+type _T0392GenBox[T] {
+  T val;
+  drop(~this) {
+  }
+}
+
+type _T0392GenHolder[T] {
+  _T0392GenBox[T]? data;
+}
+
+generic_optional_explicit_drop() `test {
+  h := _T0392GenHolder[int](data: _T0392GenBox[int](val: 42));
+  assert(h.data is present, "generic explicit drop present");
+}
+
+generic_optional_force_unwrap() `test {
+  h := _T0392GenHolder[int](data: _T0392GenBox[int](val: 99));
+  b := h.data!;
+  assert(b.val == 99, "generic force unwrap");
+}
+
+none_field_no_drop() `test {
+  h := _T0392Holder3(data: none);
+  assert(h.data is absent, "no drop none");
+}
+
+double_optional_with_inner_none() `test {
+  _T0392Box? inner = none;
+  h := _T0392Holder4(data: inner);
+  assert(h.data is present, "outer present");
+}
+
+reassign_none_to_present() `test {
+  h := _T0392Holder1(data: none);
+  h.data = _T0392Box(n: 7);
+  assert(h.data is present, "reassigned absent to present");
+}
+
+reassign_synth_drop_to_new() `test {
+  h := _T0392Holder2(data: _T0392SynthBox(s: "first"));
+  h.data = _T0392SynthBox(s: "second");
+  b := h.data!;
+  assert(b.s == "second", "synth-drop reassigned");
+}
+
+reassign_no_drop_to_new() `test {
+  h := _T0392Holder3(data: _T0392RawBox(n: 1));
+  h.data = _T0392RawBox(n: 2);
+  b := h.data!;
+  assert(b.n == 2, "no-drop reassigned");
+}
+
+// Verify that string-optional and vector-optional fields don't get the
+// MemberExpr neutralization path (they dup at access time instead).
+type _StringHolder {
+  string? name;
+  drop(~this) {
+  }
+}
+type _VecHolder {
+  int[]? data;
+  drop(~this) {
+  }
+}
+
+force_unwrap_string_optional_field() `test {
+  h := _StringHolder(name: "world");
+  s := h.name!;
+  assert(s == "world", "string field unwrap");
+}
+
+force_unwrap_vector_optional_field() `test {
+  v := int[]();
+  v.push(10);
+  v.push(20);
+  h := _VecHolder(data: v);
+  unwrapped := h.data!;
+  assert(unwrapped.len == 2, "vec field unwrap len");
+  assert(unwrapped[0] == 10, "vec elem 0");
+}
+
+// Optional field on a synth-drop owner — covers a subtle path where
+// neutralization gates on owner.NeedsSynthDrop() rather than HasDrop().
+type _SynthOwner {
+  string label;
+  _T0392Box? extra;
+}
+
+synth_owner_optional_field_unwrap() `test {
+  h := _SynthOwner(label: "x", extra: _T0392Box(n: 33));
+  b := h.extra!;
+  assert(b.n == 33, "synth owner unwrap");
+}

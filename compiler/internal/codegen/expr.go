@@ -8945,20 +8945,121 @@ func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
 	if inner == nil {
 		return
 	}
-	ident, ok := inner.(*ast.IdentExpr)
+	switch src := inner.(type) {
+	case *ast.IdentExpr:
+		alloca, ok := c.locals[src.Name]
+		if !ok {
+			return
+		}
+		optType, ok := alloca.ElemType.(*irtypes.StructType)
+		if !ok || len(optType.Fields) < 2 {
+			return
+		}
+		// Set present flag (field 0) to false — optional drop will skip inner free.
+		flagPtr := c.block.NewGetElementPtr(optType, alloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), flagPtr)
+	case *ast.MemberExpr:
+		// T0392: Force-unwrap of an optional field on an owned variable
+		// (`v.field!`). The owner's drop will visit this field via
+		// emitOptionalFieldDrop and double-free the inner value unless we
+		// clear the present flag in the owner's instance memory.
+		c.neutralizeMemberOptionalField(src)
+	}
+}
+
+// neutralizeMemberOptionalField clears the present flag of an Optional[heap-user-type]
+// field on an owned variable (T0392). Only handles `ident.field` — chained member
+// access (`a.b.c`) is not supported and silently no-ops. String/Vector/Channel/Arc/Weak
+// optional fields are skipped because genFieldAccess already dups them — clearing the
+// flag would leak the original.
+func (c *Compiler) neutralizeMemberOptionalField(m *ast.MemberExpr) {
+	targetIdent, ok := m.Target.(*ast.IdentExpr)
 	if !ok {
 		return
 	}
-	alloca, ok := c.locals[ident.Name]
+	ownerAlloca, ok := c.locals[targetIdent.Name]
+	if !ok {
+		return // not an owned local (e.g., MutRef param)
+	}
+	ownerType := c.info.Types[m.Target]
+	if c.typeSubst != nil {
+		ownerType = types.Substitute(ownerType, c.typeSubst)
+	}
+	// Don't neutralize through a borrow: the caller owns the field and its
+	// drop will visit it. Mutating the flag would silently change caller state.
+	if _, isShared := ownerType.(*types.SharedRef); isShared {
+		return
+	}
+	if _, isMut := ownerType.(*types.MutRef); isMut {
+		return
+	}
+	ownerNamed := extractNamed(ownerType)
+	if ownerNamed == nil {
+		return
+	}
+	// Only neutralize when the owner's drop would actually visit this field —
+	// i.e., heap user types with synth or explicit drops. Value types and
+	// structural types don't have field-walking drops.
+	if ownerNamed.IsValueType() || ownerNamed.IsStructural() {
+		return
+	}
+	if !ownerNamed.HasDrop() && !ownerNamed.NeedsSynthDrop() {
+		if inst, ok := ownerType.(*types.Instance); ok {
+			if !monoInstNeedsSynthDrop(inst) {
+				return
+			}
+		} else {
+			return
+		}
+	}
+	// Look up the field's declared type to inspect the Optional inner.
+	field := ownerNamed.LookupField(m.Field)
+	if field == nil {
+		return
+	}
+	fType := field.Type()
+	if c.typeSubst != nil {
+		fType = types.Substitute(fType, c.typeSubst)
+	}
+	opt, isOpt := fType.(*types.Optional)
+	if !isOpt {
+		return
+	}
+	// Skip neutralization for inner types where genFieldAccess already dups —
+	// the original must remain in the field for the owner's drop to free.
+	elem := opt.Elem()
+	innerNamed := extractNamed(elem)
+	if innerNamed == types.TypString || types.IsVector(elem) || types.IsChannel(elem) ||
+		types.IsArc(elem) || types.IsWeak(elem) {
+		return
+	}
+	// Only heap user types need neutralization (no dup at field access time).
+	if innerNamed == nil || innerNamed.IsValueType() || innerNamed.IsCopy() ||
+		isPrimitiveScalar(innerNamed) || innerNamed.IsStructural() ||
+		isOpaqueContainerType(elem) {
+		return
+	}
+	layout := c.lookupTypeLayout(ownerType)
+	if layout == nil || layout.IsValueType {
+		return
+	}
+	fieldIdx, ok := layout.InstanceFieldIndex[m.Field]
 	if !ok {
 		return
 	}
-	optType, ok := alloca.ElemType.(*irtypes.StructType)
-	if !ok || len(optType.Fields) < 2 {
+	optStruct, ok := layout.Instance.Fields[fieldIdx].LLVMType.(*irtypes.StructType)
+	if !ok || len(optStruct.Fields) < 2 {
 		return
 	}
-	// Set present flag (field 0) to false — optional drop will skip inner free.
-	flagPtr := c.block.NewGetElementPtr(optType, alloca,
+	// Load the owner value struct, extract instance ptr, and GEP to the
+	// field's optional storage, then to the flag (field 0).
+	ownerVal := c.block.NewLoad(ownerAlloca.ElemType, ownerAlloca)
+	instance := c.extractInstancePtr(ownerVal)
+	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
+	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+	flagPtr := c.block.NewGetElementPtr(optStruct, fieldPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	c.block.NewStore(constant.NewInt(irtypes.I1, 0), flagPtr)
 }

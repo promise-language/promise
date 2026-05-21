@@ -686,6 +686,17 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if _, isTup := resolvedExprType.(*types.Tuple); isTup && c.tupleNeedsDrop(resolvedExprType) {
 		c.dupTupleFieldAccess = true
 	}
+	// T0397: Same flag for typed `(...)? opt = m[k]` — Optional[Tuple] LHS where
+	// the inner tuple has droppable fields aliased into the container's bucket.
+	if opt, ok := resolvedExprType.(*types.Optional); ok {
+		elem := opt.Elem()
+		if c.typeSubst != nil {
+			elem = types.Substitute(elem, c.typeSubst)
+		}
+		if _, isTup := elem.(*types.Tuple); isTup && c.tupleNeedsDrop(elem) {
+			c.dupTupleFieldAccess = true
+		}
+	}
 	// T0398: Set dup flag for heap user types so genVectorIndex deep-clones the
 	// element on read. Without this, `b := v[0]` aliases v's element instance
 	// pointer — b's drop binding and v's element walk would double-free. Only
@@ -945,6 +956,17 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if _, isTup := typ.(*types.Tuple); isTup && c.tupleNeedsDrop(typ) {
 		c.dupTupleFieldAccess = true
 	}
+	// T0397: Same flag for inferred `opt := m[k]` — Optional[Tuple] LHS where
+	// the inner tuple has droppable fields aliased into the container's bucket.
+	if opt, ok := typ.(*types.Optional); ok {
+		elem := opt.Elem()
+		if c.typeSubst != nil {
+			elem = types.Substitute(elem, c.typeSubst)
+		}
+		if _, isTup := elem.(*types.Tuple); isTup && c.tupleNeedsDrop(elem) {
+			c.dupTupleFieldAccess = true
+		}
+	}
 	// T0398: Set dup flag for heap user types so genVectorIndex deep-clones the
 	// element on read. Without this, `b := v[0]` aliases v's element instance
 	// pointer — b's drop binding and v's element walk would double-free. Only
@@ -1102,7 +1124,27 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 		c.genFailableDestructure(s)
 		return
 	}
+	// T0397: Direct destructure of `m[k]!` aliases the map's bucket data:
+	// each destructured local would get its own drop binding, but the inner
+	// string/vector pointers still belong to the map → double-free at scope
+	// exit. Set dupTupleFieldAccess so genMethodIndex (reached through the
+	// force-unwrap inside `s.Value`) deep-clones the tuple. Skip when the
+	// source obviously aliases (IndexExpr/MemberExpr), where srcOwned will be
+	// false and no drop bindings are registered anyway.
+	switch s.Value.(type) {
+	case *ast.IndexExpr, *ast.MemberExpr:
+		// borrow path — no drop bindings registered → no double-free.
+	default:
+		valType := c.info.Types[s.Value]
+		if c.typeSubst != nil {
+			valType = types.Substitute(valType, c.typeSubst)
+		}
+		if _, isTup := valType.(*types.Tuple); isTup && c.tupleNeedsDrop(valType) {
+			c.dupTupleFieldAccess = true
+		}
+	}
 	tupleVal := c.genExpr(s.Value)
+	c.dupTupleFieldAccess = false
 	tupleType := c.info.Types[s.Value]
 	if c.typeSubst != nil {
 		tupleType = types.Substitute(tupleType, c.typeSubst)
@@ -2117,6 +2159,14 @@ func (c *Compiler) emitOptionalLocalValueDrop(optVal value.Value, elemType types
 			innerElem = types.Substitute(innerElem, c.typeSubst)
 		}
 		c.emitOptionalLocalValueDrop(innerVal, innerElem, b)
+	} else if _, isTup := elemType.(*types.Tuple); isTup {
+		// T0397: Tuple inner type — walk fields and drop droppable ones via
+		// the same helper used by bindingDropTuple.
+		typ := elemType
+		if c.typeSubst != nil {
+			typ = types.Substitute(typ, c.typeSubst)
+		}
+		c.emitVariantFieldDrop(innerVal, typ)
 	} else if b.rttiDrop {
 		// B0243: RTTI-based drop dispatch for Optional[StructuralInterface].
 		// The concrete type is unknown at compile time — dispatch through typeinfo.
@@ -2340,6 +2390,27 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 			valType:  immediateElem,
 			dropFlag: dropFlag,
 			rttiDrop: true,
+			varName:  varName,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[varName] = binding
+		return
+	case func() bool {
+		_, isTup := elem.(*types.Tuple)
+		return isTup && c.tupleNeedsDrop(elem)
+	}():
+		// T0397: Tuple inner type — register binding without dropFunc. The
+		// emitOptionalLocalValueDrop Tuple branch dispatches via emitVariantFieldDrop
+		// on the inner tuple value (walks fields, drops droppable elements).
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+		c.dropFlags[varName] = dropFlag
+		binding := scopeBinding{
+			kind:     bindingDropOptional,
+			alloca:   alloca,
+			valType:  immediateElem,
+			dropFlag: dropFlag,
 			varName:  varName,
 		}
 		c.scopeBindings = append(c.scopeBindings, binding)
@@ -3821,6 +3892,7 @@ func (c *Compiler) cleanupStmtTemps() {
 	c.optionalFieldVector = false // T0354
 	c.optionalStringDup = nil
 	c.optionalContainerDup = nil // T0366
+	c.optionalTupleDup = nil     // T0397
 	if len(c.stmtTemps) == 0 {
 		return
 	}
@@ -6557,7 +6629,25 @@ func (c *Compiler) bindIsDestructureNamed(subject value.Value, narrow *sema.IsDe
 // genIfUnwrapStmt handles if-unwrap: if val := optExpr { } else { }
 // Evaluates the optional, checks the present flag, binds the unwrapped value in the then block.
 func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
+	// T0397: When unwrapping a Map[K, (droppable, ...)] index, the inner tuple
+	// aliases the container's bucket data. Setting dupTupleFieldAccess here
+	// causes genMethodIndex to deep-clone the tuple so the binding takes
+	// ownership of an independent copy.
+	dupInitType := c.info.Types[s.Init]
+	if c.typeSubst != nil {
+		dupInitType = types.Substitute(dupInitType, c.typeSubst)
+	}
+	if opt, ok := dupInitType.(*types.Optional); ok {
+		elem := opt.Elem()
+		if c.typeSubst != nil {
+			elem = types.Substitute(elem, c.typeSubst)
+		}
+		if _, isTup := elem.(*types.Tuple); isTup && c.tupleNeedsDrop(elem) {
+			c.dupTupleFieldAccess = true
+		}
+	}
 	optVal := c.genExpr(s.Init)
+	c.dupTupleFieldAccess = false
 
 	// Guard: if the expression is not an optional struct (e.g., post-narrowing
 	// made it a plain value), treat the if as always-true with no unwrapping.
@@ -6756,7 +6846,25 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 
 	// Header: evaluate optional, check flag
 	c.block = headerBlock
+	// T0397: Same dup-on-read pattern as genIfUnwrapStmt — when iterating
+	// over `Map[K, (droppable,...)]` indices, the inner tuple aliases bucket
+	// data; without dupping, the binding's per-iteration drop would free the
+	// map's storage.
+	dupValType := c.info.Types[s.Value]
+	if c.typeSubst != nil {
+		dupValType = types.Substitute(dupValType, c.typeSubst)
+	}
+	if opt, ok := dupValType.(*types.Optional); ok {
+		elem := opt.Elem()
+		if c.typeSubst != nil {
+			elem = types.Substitute(elem, c.typeSubst)
+		}
+		if _, isTup := elem.(*types.Tuple); isTup && c.tupleNeedsDrop(elem) {
+			c.dupTupleFieldAccess = true
+		}
+	}
 	optVal := c.genExpr(s.Value)
+	c.dupTupleFieldAccess = false
 	flag := c.block.NewExtractValue(optVal, 0)
 	c.block.NewCondBr(flag, bodyBlock, exitBlock)
 

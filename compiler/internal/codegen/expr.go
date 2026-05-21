@@ -7232,6 +7232,33 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 		}
 	}
 
+	// T0397: Dup borrowed tuple when `[]` returns `Optional[(droppable, ...)]`
+	// whose inner fields alias the container's stored heap allocations. Without
+	// the dup, force-unwrapping into a variable would let both the variable's
+	// bindingDropTuple and the container's element walk drop the same heap data
+	// → double-free. Mirrors B0347 (Optional[string]) and T0370 (Vector[Tuple]).
+	// NOT gated on isContainerType — fires for Map and any other type with
+	// `[]` returning `Optional[Tuple]`.
+	if c.dupTupleFieldAccess && c.tempTrackingEnabled {
+		resultType := c.info.Types[e]
+		if c.typeSubst != nil {
+			resultType = types.Substitute(resultType, c.typeSubst)
+		}
+		if opt, ok := resultType.(*types.Optional); ok {
+			elem := opt.Elem()
+			if c.typeSubst != nil {
+				elem = types.Substitute(elem, c.typeSubst)
+			}
+			if tup, isTup := elem.(*types.Tuple); isTup && c.tupleNeedsDrop(elem) {
+				c.dupTupleFieldAccess = false // consume the flag
+				innerTup := c.block.NewExtractValue(result, 1)
+				dup := c.dupTupleValue(innerTup, tup)
+				c.optionalTupleDup = dup
+				return c.block.NewInsertValue(result, dup, 1)
+			}
+		}
+	}
+
 	return result
 }
 
@@ -8886,6 +8913,14 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	if c.optionalStringDup != nil {
 		dup := c.optionalStringDup
 		c.optionalStringDup = nil
+		return dup
+	}
+	// T0397: Same shape for tuple dup — when genMethodIndex created a dup for
+	// the inner Optional[Tuple], return it directly so the binding takes
+	// ownership of the deep-cloned tuple instead of an aliased extractvalue.
+	if c.optionalTupleDup != nil {
+		dup := c.optionalTupleDup
+		c.optionalTupleDup = nil
 		return dup
 	}
 	var result value.Value

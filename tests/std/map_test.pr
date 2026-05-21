@@ -563,3 +563,230 @@ test_map_string_tuple_drop() `test {
   m["k3"] = ("gamma", 3);
   assert(m.len == 3, "before drop");
 }
+
+// T0397: Heap string in tuple-valued map — repeated reads must not double-free.
+// Uses .to_string() to force heap allocation (literal-only tests miss the bug
+// because pal_free short-circuits on the literal flag).
+test_map_tuple_heap_string_repeated_read() `test {
+  m := map[string, (string, int)]();
+  m["a"] = ("first".to_string(), 100);
+  m["b"] = ("second".to_string(), 200);
+  if t := m["a"] {
+    (s, n) := t;
+    assert(s == "first", "first read string");
+    assert(n == 100, "first read int");
+  }
+  if t0 := m["a"] {
+    (s0, n0) := t0;
+    assert(s0 == "first", "second read string");
+    assert(n0 == 100, "second read int");
+  }
+}
+
+// T0397: tuple with two heap-string fields (heap via concatenation).
+test_map_tuple_two_heap_strings() `test {
+  m := map[string, (string, string)]();
+  m["k"] = ("a" + "b", "c" + "d");
+  if t := m["k"] {
+    (s1, s2) := t;
+    assert(s1 == "ab", "s1");
+    assert(s2 == "cd", "s2");
+  }
+}
+
+// T0397: tuple with a vector field — drop must not free the map's vector.
+test_map_tuple_with_vector() `test {
+  m := map[string, (string, int[])]();
+  vec := int[]();
+  vec.push(1);
+  vec.push(2);
+  m["k"] = ("hello".to_string(), vec);
+  if t := m["k"] {
+    (s, ints) := t;
+    assert(s == "hello", "string");
+    assert(ints.len == 2, "vec len");
+  }
+}
+
+// T0397: nested tuple in map.
+test_map_nested_tuple_heap() `test {
+  m := map[string, ((string, int), int)]();
+  m["k"] = (("first".to_string(), 1), 10);
+  if t := m["k"] {
+    (inner, outer) := t;
+    (s, n) := inner;
+    assert(s == "first", "nested string");
+    assert(n == 1, "nested int");
+    assert(outer == 10, "outer");
+  }
+}
+
+// T0397: typed Optional[Tuple] decl path — `(string, int)? opt = m["k"]`.
+test_map_typed_optional_tuple_decl() `test {
+  m := map[string, (string, int)]();
+  m["k"] = ("hello".to_string(), 42);
+  (string, int)? opt = m["k"];
+  if t := opt {
+    (s, n) := t;
+    assert(s == "hello", "typed decl string");
+    assert(n == 42, "typed decl int");
+  }
+}
+
+// T0397: force unwrap with `!`.
+test_map_tuple_force_unwrap() `test {
+  m := map[string, (string, int)]();
+  m["k"] = ("hello".to_string(), 1);
+  t := m["k"]!;
+  (s, n) := t;
+  assert(s == "hello", "force unwrap string");
+  assert(n == 1, "force unwrap int");
+}
+
+// T0397: re-read after typed-decl unwrap (catches the alias bug — the typed
+// decl variable was holding a borrowed pointer into the map; the second read
+// would double-free without the dup).
+test_map_typed_decl_post_read() `test {
+  m := map[string, (string, int)]();
+  m["k"] = ("hello".to_string(), 42);
+  (string, int)? opt = m["k"];
+  if t := opt {
+    (s, n) := t;
+    assert(s == "hello", "first read");
+  }
+  if t2 := m["k"] {
+    (s2, n2) := t2;
+    assert(s2 == "hello", "post read after typed-decl unwrap");
+  }
+}
+
+// T0397: while-let unwrap on map index — same alias bug as if-let. Each
+// iteration re-reads the same key; without the dup, the binding's
+// per-iteration drop would free the map's bucket data and the next
+// iteration would crash.
+test_map_while_let_tuple_heap() `test {
+  m := map[string, (string, int)]();
+  m["k"] = ("hello".to_string(), 1);
+  count := 0;
+  while t := m["k"] {
+    (s, n) := t;
+    assert(s == "hello", "while iter string");
+    assert(n == 1, "while iter int");
+    count = count + 1;
+    if count >= 3 {
+      break;
+    }
+  }
+  assert(count == 3, "iter count");
+}
+
+// T0397: direct destructure of `m[k]!` aliases bucket data — without the dup,
+// each destructured local takes a drop binding while the map still owns the
+// underlying string, causing use-after-free when the same key is re-read.
+test_map_destructure_force_unwrap_then_reread() `test {
+  m := map[string, (string, int)]();
+  m["k"] = ("hello".to_string(), 42);
+  (s, n) := m["k"]!;
+  assert(s == "hello", "first destructure");
+  assert(n == 42, "first int");
+  if t := m["k"] {
+    (s2, n2) := t;
+    assert(s2 == "hello", "post-destructure read");
+  }
+}
+
+// T0397/T0439 coverage: typed Optional[Tuple] decl that is NEVER unwrapped —
+// exercises maybeRegisterOptionalDrop's new Tuple case and
+// emitOptionalLocalValueDrop's Tuple branch when `opt` drops at scope exit
+// while still holding the dup'd inner tuple. Without the new branches,
+// the dup'd tuple's heap fields would leak.
+test_map_typed_decl_drop_no_unwrap() `test {
+  m := map[string, (string, int)]();
+  m["k"] = ("hello".to_string(), 42);
+  (string, int)? opt = m["k"];
+  // opt drops at scope exit without ever being unwrapped — must not leak.
+  assert(m.contains("k"), "key still in map");
+}
+
+// T0397/T0439 coverage: inferred `opt := m[k]` decl without unwrap.
+test_map_inferred_decl_drop_no_unwrap() `test {
+  m := map[string, (string, int)]();
+  m["k"] = ("hello".to_string(), 42);
+  opt := m["k"];
+  assert(m.contains("k"), "key still in map");
+}
+
+// T0397/T0439 coverage: missing key returns None — dup should not crash on
+// zero-initialized tuple data. dupString/dupVector null-check, but the
+// Tuple loop runs unconditionally so this verifies safety.
+test_map_tuple_missing_key_none() `test {
+  m := map[string, (string, int)]();
+  m["a"] = ("alpha".to_string(), 1);
+  if t := m["nonexistent"] {
+    assert(false, "nonexistent should be None");
+  } else {
+    assert(true, "None branch taken");
+  }
+  // Re-read present key still works after a None lookup.
+  if t := m["a"] {
+    (s, n) := t;
+    assert(s == "alpha", "present key");
+  }
+}
+
+// T0397/T0439 coverage: nested 2-tuple with three heap-string slots
+// exercises dupTupleValue's loop and the recursive nested-tuple branch.
+// Encodes (a, (b, c)) since 3-tuple destructure has a parser limitation
+// (T0441).
+test_map_tuple_three_heap_strings_nested() `test {
+  m := map[string, (string, (string, string))]();
+  m["k"] = ("a".to_string(), ("b".to_string(), "c".to_string()));
+  if t := m["k"] {
+    (s1, rest) := t;
+    (s2, s3) := rest;
+    assert(s1 == "a", "f1");
+    assert(s2 == "b", "f2");
+    assert(s3 == "c", "f3");
+  }
+  // Re-read must not double-free any of the three heap strings.
+  if t2 := m["k"] {
+    (a, rest2) := t2;
+    (b, c) := rest2;
+    assert(a == "a", "re-read f1");
+    assert(b == "b", "re-read f2");
+    assert(c == "c", "re-read f3");
+  }
+}
+
+// T0442 (pre-existing codegen bug): heap user type as a tuple field
+// (Map[K, (HeapUserType, int)]) panics in wrapOptional with type mismatch.
+// Once T0442 is fixed, add a regression test here that exercises the
+// dupTupleValue → maybeDupPushElement heap-user-type clone path:
+//
+//   m := map[string, (MapTestRow, int)]();
+//   m["k"] = (MapTestRow(name: "row1".to_string()), 7);
+//   if t := m["k"] { (row, n) := t; ... }
+//   if t2 := m["k"] { (row2, n2) := t2; ... }   // re-read no double-free
+
+// T0397/T0439 coverage: vector field inside tuple — Vector dup path
+// inside dupTupleValue (via maybeDupPushElement → dupVector + element clone).
+test_map_tuple_with_inner_vector() `test {
+  m := map[string, (string, int[])]();
+  v := int[]();
+  v.push(10);
+  v.push(20);
+  v.push(30);
+  m["k"] = ("data".to_string(), v);
+  if t := m["k"] {
+    (s, ints) := t;
+    assert(s == "data", "string field");
+    assert(ints.len == 3, "vec len");
+    assert(ints[0] == 10, "vec[0]");
+    assert(ints[2] == 30, "vec[2]");
+  }
+  // Re-read — vector ownership must be fully independent.
+  if t2 := m["k"] {
+    (s2, ints2) := t2;
+    assert(ints2.len == 3, "reread vec len");
+  }
+}

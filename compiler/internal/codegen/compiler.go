@@ -169,6 +169,7 @@ type Compiler struct {
 	dupHeapUserFieldAccess  bool                // T0398: when true, genVectorIndex deep-clones heap user-type elements on read
 	optionalStringDup       value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
 	optionalContainerDup    value.Value         // T0366: pending dup from Optional[Vector|Channel|Arc|Weak] field-read path
+	optionalTupleDup        value.Value         // T0397: pending dup from Map[K,(droppable,...)] index path; consumed by genOptionalForceUnwrap
 	optionalFieldString     bool                // B0190: set by genFieldAccess when loading a string? field from a droppable type
 	optionalFieldVector     bool                // T0354: set by genFieldAccess when loading a T[]? field from a droppable type
 

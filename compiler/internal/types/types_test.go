@@ -1006,17 +1006,63 @@ func TestAssignableTo(t *testing.T) {
 		{"mut_ref_to_shared_ref", NewMutRef(TypString), NewSharedRef(TypString), true},
 		{"mut_ref_to_shared_ref_mismatch", NewMutRef(TypInt), NewSharedRef(TypString), false},
 
-		// Rule 8b (T0381): T& assignable to T (implicit decay)
-		{"shared_ref_string_to_string", NewSharedRef(TypString), TypString, true},
+		// Rule 8b (T0381 / T0438): T& assignable to T only when T is Copy.
+		// int is Copy → decay allowed; string and Dog/Animal are non-Copy → rejected.
+		{"shared_ref_string_to_string", NewSharedRef(TypString), TypString, false},
 		{"shared_ref_int_to_int", NewSharedRef(TypInt), TypInt, true},
-		{"shared_ref_dog_to_animal", NewSharedRef(dog), animal, true},
+		{"shared_ref_dog_to_animal", NewSharedRef(dog), animal, false},
 		{"shared_ref_int_to_string", NewSharedRef(TypInt), TypString, false},
 
-		// Rule 8c (T0381): T~ assignable to T (implicit decay)
-		{"mut_ref_string_to_string", NewMutRef(TypString), TypString, true},
+		// Rule 8c (T0381 / T0438): T~ assignable to T only when T is Copy.
+		{"mut_ref_string_to_string", NewMutRef(TypString), TypString, false},
 		{"mut_ref_int_to_int", NewMutRef(TypInt), TypInt, true},
-		{"mut_ref_dog_to_animal", NewMutRef(dog), animal, true},
+		{"mut_ref_dog_to_animal", NewMutRef(dog), animal, false},
 		{"mut_ref_int_to_string", NewMutRef(TypInt), TypString, false},
+
+		// Rule 8b/8c (T0438) — compound types: tuple/optional/array decay
+		// follows the same Copy-only gate via IsCopy's structural recursion.
+		{
+			"shared_ref_tuple_int_to_tuple_int",
+			NewSharedRef(NewTuple([]Type{TypInt, TypBool})),
+			NewTuple([]Type{TypInt, TypBool}),
+			true,
+		},
+		{
+			"shared_ref_tuple_with_string_rejected",
+			NewSharedRef(NewTuple([]Type{TypInt, TypString})),
+			NewTuple([]Type{TypInt, TypString}),
+			false,
+		},
+		{
+			"shared_ref_optional_int_to_optional_int",
+			NewSharedRef(NewOptional(TypInt)),
+			NewOptional(TypInt),
+			true,
+		},
+		{
+			"shared_ref_optional_string_rejected",
+			NewSharedRef(NewOptional(TypString)),
+			NewOptional(TypString),
+			false,
+		},
+		{
+			"shared_ref_array_int_to_array_int",
+			NewSharedRef(NewArray(TypInt, 4)),
+			NewArray(TypInt, 4),
+			true,
+		},
+		{
+			"shared_ref_array_string_rejected",
+			NewSharedRef(NewArray(TypString, 4)),
+			NewArray(TypString, 4),
+			false,
+		},
+		{
+			"mut_ref_tuple_int_to_tuple_int",
+			NewMutRef(NewTuple([]Type{TypInt, TypBool})),
+			NewTuple([]Type{TypInt, TypBool}),
+			true,
+		},
 
 		// Not assignable
 		{"int_to_string", TypInt, TypString, false},
@@ -1028,6 +1074,95 @@ func TestAssignableTo(t *testing.T) {
 			got := AssignableTo(tt.x, tt.y)
 			if got != tt.want {
 				t.Errorf("AssignableTo(%v, %v) = %v, want %v", tt.x, tt.y, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── IsCopy ──────────────────────────────────────────────────────────
+
+func TestIsCopy(t *testing.T) {
+	dog := makeNamed("Dog")     // non-Copy by default
+	color := makeNamed("Color") // explicitly Copy
+	color.SetCopy(true)
+	enumA := NewEnum(NewTypeName(Pos{}, "EnumA", nil), nil)
+	enumCopy := NewEnum(NewTypeName(Pos{}, "EnumCopy", nil), nil)
+	enumCopy.SetCopy(true)
+
+	tests := []struct {
+		name string
+		typ  Type
+		want bool
+	}{
+		// Primitives are Copy.
+		{"int", TypInt, true},
+		{"i64", TypI64, true},
+		{"f64", TypF64, true},
+		{"bool", TypBool, true},
+		{"char", TypChar, true},
+		{"none", TypNone, true},
+		{"void", TypVoid, true},
+
+		// Strings are Named — non-Copy by default.
+		{"string", TypString, false},
+
+		// Refs are pointer-sized → Copy.
+		{"shared_ref_string", NewSharedRef(TypString), true},
+		{"mut_ref_string", NewMutRef(TypString), true},
+		{"shared_ref_dog", NewSharedRef(dog), true},
+
+		// Named types follow the IsCopy flag.
+		{"named_dog_non_copy", dog, false},
+		{"named_color_copy", color, true},
+
+		// Enum types follow the IsCopy flag.
+		{"enum_non_copy", enumA, false},
+		{"enum_copy", enumCopy, true},
+
+		// Tuples: copy iff every elem is copy.
+		{"tuple_all_copy", NewTuple([]Type{TypInt, TypBool}), true},
+		{"tuple_with_string", NewTuple([]Type{TypInt, TypString}), false},
+
+		// Optional/Array: copy iff elem is copy.
+		{"optional_int", NewOptional(TypInt), true},
+		{"optional_string", NewOptional(TypString), false},
+		{"array_int", NewArray(TypInt, 4), true},
+		{"array_string", NewArray(TypString, 4), false},
+
+		// Instance: defers to origin's IsCopy.
+		{"instance_vector_int", NewVector(TypInt), false}, // Vector itself is non-Copy
+		{"instance_vector_string", NewVector(TypString), false},
+
+		// Instance with *Named origin marked Copy → IsCopy true.
+		{"instance_copy_named", NewInstance(color, []Type{TypInt}), true},
+
+		// Instance with *Enum origin: defers to the enum's IsCopy flag
+		// (covers the Origin().(*Enum) branch in IsCopy).
+		{"instance_enum_non_copy", NewInstance(enumA, []Type{TypInt}), false},
+		{"instance_enum_copy", NewInstance(enumCopy, []Type{TypInt}), true},
+
+		// TypeParam: conservatively NOT Copy at sema time.
+		{
+			"typeparam",
+			func() Type {
+				return NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+			}(),
+			false,
+		},
+
+		// Pointers and signatures: not in the Copy switch → false.
+		{"raw_pointer", NewPointer(TypInt), false},
+		{"signature", NewSignature(nil, nil, nil, false), false},
+
+		// nil: false.
+		{"nil_type", nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsCopy(tt.typ)
+			if got != tt.want {
+				t.Errorf("IsCopy(%v) = %v, want %v", tt.typ, got, tt.want)
 			}
 		})
 	}

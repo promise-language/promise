@@ -371,6 +371,14 @@ borrow(val);                  // val is borrowed, still valid after
 // Move types: string, collections, heap types — plain `T` param is a borrow;
 // add `~T` to consume. Trying to move out of a plain-`T` parameter inside the
 // callee (e.g., into a struct field) is a compile-time error.
+
+// Implicit `T& → T` and `T~ → T` decay only happens for Copy types.
+// For non-Copy types (string, vectors, heap user types), use `.clone()` for an
+// owned copy or declare the local/parameter as `T&` to keep it as a borrow.
+//   string s = arc.borrow;          // error: cannot assign string& to string
+//   string s = arc.borrow.clone();  // OK: explicit owned copy
+//   string& s = arc.borrow;         // OK: kept as borrow
+//   int n = arc.borrow;             // OK: int is Copy
 ```
 
 ## Resource Management

@@ -85,13 +85,15 @@ test_mutex_string_multiple_writes() `test {
   assert(guard.borrow == "d", "should be d after multiple writes");
 }
 
-// Mutex with vector inner type — exercises Mutex.drop calling Vector.drop
+// Mutex with vector inner type — exercises Mutex.drop calling Vector.drop.
+// T0438: keep `r` typed as `int[]&` to read through the guard without an
+// implicit decay.
 test_mutex_vector_inner() `test {
   v := [1, 2, 3];
   m := Mutex[int[]](v);
   {
     use guard := m.lock();
-    int[] r = guard.borrow;
+    int[] &r = guard.borrow;
     assert(r.len == 3, "vector should have 3 elements");
   }
   // m dropped at scope exit — must drop inner vector without leak
@@ -177,13 +179,14 @@ test_mutex_borrow_heap_string() `test {
   assert(borrowed.len == 5, "heap string borrow len");
 }
 
-// T0367: Typed var decl (`T borrowed = guard.borrow`) for MutexGuard with heap T.
+// T0367: Typed var decl (`T& borrowed = guard.borrow`) for MutexGuard with heap T.
+// T0438: keep the local typed as `T&` (no implicit decay).
 test_mutex_borrow_typed_decl_heap_vec() `test {
   v := string[]();
   v.push("hello" + "");
   m := Mutex[string[]](v);
   use guard := m.lock();
-  string[] borrowed = guard.borrow;
+  string[] &borrowed = guard.borrow;
   assert(borrowed.len == 1, "typed decl heap vec");
 }
 
@@ -235,9 +238,11 @@ test_mutex_borrow_through_if() `test {
   assert(borrowed.len == 1, "mutex if borrow len");
 }
 
-// T0383: `vec[i] = guard.borrow` for non-string heap element types must dup
-// (MutexGuard analog of arc_borrow_index_assign_vector). Without dup, both
-// Vector.drop and MutexGuard.drop free the same inner buffer → double-free.
+// T0383: `vec[i] = guard.borrow.clone()` exercises Vector.drop on the old
+// element + an explicit clone of the borrowed value into the slot. T0438:
+// the original `vec[0] = g.borrow` form is rejected at sema (no implicit
+// `string[]& → string[]` decay); `.clone()` is the documented owned-copy
+// recovery path.
 test_mutex_borrow_index_assign_vector() `test {
   vec := string[][]();
   v1 := string[]();
@@ -249,12 +254,14 @@ test_mutex_borrow_index_assign_vector() `test {
   m := Mutex[string[]](v2);
   use g := m.lock();
 
-  vec[0] = g.borrow;
+  vec[0] = g.borrow.clone();
   assert(vec[0].len == 1, "vec[0] len after mutex borrow assign");
 }
 
-// T0386: MutexGuard analog of `arc_borrow_slice_assign` — slice assign from a
-// guard-borrowed `string[]` must dup elements per Patch 1.
+// T0386 / T0438: MutexGuard slice-assign with an explicit clone of the
+// borrowed source. The original `v1[0:3] = g.borrow` form is rejected at
+// sema (no implicit `string[]& → string[]` decay); `.clone()` produces an
+// owned vector whose elements are dup'd into the slice slots.
 test_mutex_guard_slice_assign() `test {
   s := string[]();
   s.push("a" + "");
@@ -266,7 +273,7 @@ test_mutex_guard_slice_assign() `test {
   v1.push("x" + "");
   v1.push("y" + "");
   v1.push("z" + "");
-  v1[0:3] = g.borrow;
+  v1[0:3] = g.borrow.clone();
   assert(v1[0] == "a", "v1[0]");
   assert(v1[1] == "b", "v1[1]");
   assert(v1[2] == "c", "v1[2]");

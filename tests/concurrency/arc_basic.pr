@@ -111,11 +111,12 @@ arc_borrow_user_type_synth_drop() `test {
   assert(a.borrow.id == 7, "synth drop id");
 }
 
-// Arc[int[]] — vector inner drop path
+// Arc[int[]] — vector inner drop path. T0438: keep `borrowed` typed as
+// `int[]&` so we read from the Arc-owned buffer without an implicit decay.
 arc_vector_element() `test {
   v := [10, 20, 30];
   a := Arc[int[]](v);
-  int[] borrowed = a.borrow;
+  int[] &borrowed = a.borrow;
   assert(borrowed.len == 3, "vector len");
   assert(borrowed[0] == 10, "vector[0]");
   assert(borrowed[2] == 30, "vector[2]");
@@ -153,15 +154,15 @@ arc_borrow_optional_chain() `test {
   }
 }
 
-// T0367: Typed var decl path (`T borrowed = a.borrow`) with heap T.
-// `arc_vector_element` exercises this syntax with a static literal that masks
-// the bug via Vector.drop's bit-63 check; this variant pushes a heap-allocated
-// element so the static-flag short-circuit cannot hide a double-free.
+// T0367: Typed var decl path (`T& borrowed = a.borrow`) with heap T.
+// T0438 restricted the implicit `T& → T` decay to Copy types, so the test
+// keeps the borrow type explicitly. The dropflag-clear codegen path for
+// the borrow-typed local is the regression check.
 arc_borrow_typed_decl_heap_vec() `test {
   v := string[]();
   v.push("hello" + "");
   a := Arc[string[]](v);
-  string[] borrowed = a.borrow;
+  string[] &borrowed = a.borrow;
   assert(borrowed.len == 1, "typed decl heap vec");
 }
 
@@ -194,17 +195,19 @@ arc_borrow_reassign_after_borrow() `test {
   assert(borrowed.len == 1, "reassigned borrow len");
 }
 
-// T0379: Owned→borrow reassignment. The original local owns its vector; the
-// reassignment must drop the owned vec, store the borrow pointer, and clear
-// the dropflag so scope cleanup doesn't free the parent's buffer.
+// T0379: Owned-local reassignment with cloned-borrow RHS. Original test
+// reassigned to `a.borrow` directly, but T0438 now rejects implicit
+// `T& → T` decay; explicit `.clone()` is the documented owned-value
+// recovery path. The reassignment-drop codegen path being verified
+// (drop old owned vector, store new owned vector) is unchanged.
 arc_borrow_reassign_after_owned() `test {
   owned := string[]();
   owned.push("owned" + "");
   v := string[]();
   v.push("borrowed" + "");
   a := Arc[string[]](v);
-  owned = a.borrow;
-  assert(owned.len == 1, "owned reassigned to borrow");
+  owned = a.borrow.clone();
+  assert(owned.len == 1, "owned reassigned to cloned borrow");
 }
 
 // T0379: Arc[string] analog. Exercises the string-drop alias-check branch
@@ -250,7 +253,8 @@ arc_borrow_reassign_to_owned() `test {
 
 // T0379: Typed-decl path (T0367) followed by reassignment (T0379). Verifies
 // integration between the two fixes — the typed decl clears the flag, then the
-// reassignment correctly re-clears it after the unconditional re-arm.
+// reassignment correctly re-clears it after the unconditional re-arm. T0438:
+// keep the local typed as `T&` (no implicit decay).
 arc_borrow_typed_decl_reassign() `test {
   v1 := string[]();
   v1.push("a" + "");
@@ -258,7 +262,7 @@ arc_borrow_typed_decl_reassign() `test {
   v2.push("b" + "");
   a1 := Arc[string[]](v1);
   a2 := Arc[string[]](v2);
-  string[] borrowed = a1.borrow;
+  string[] &borrowed = a1.borrow;
   borrowed = a2.borrow;
   assert(borrowed.len == 1, "typed decl + reassign");
 }
@@ -393,11 +397,10 @@ arc_borrow_reassign_via_explicit_ref_type() `test {
   assert(borrowed.len == 1, "explicit ref reassign");
 }
 
-// T0383: `vec[i] = a.borrow` for non-string heap element types must dup the
-// borrowed value so the vector owns an independent copy. Without the dup,
-// Vector.drop and Arc.drop both free the same inner buffer → double-free.
-// The dup at the call site + drop-old-element in genVectorIndexAssign +
-// dup-on-read in genVectorIndex together prevent double-free, leak, and UAF.
+// T0383 / T0438: `vec[i] = a.borrow.clone()` — explicit clone is the
+// documented owned-copy recovery path now that implicit `T& → T` decay
+// is rejected. The codegen drop-old-element + store-new path is still
+// the regression check.
 arc_borrow_index_assign_vector() `test {
   vec := string[][]();
   v1 := string[]();
@@ -408,24 +411,24 @@ arc_borrow_index_assign_vector() `test {
   v2.push("hello" + "");
   a := Arc[string[]](v2);
 
-  vec[0] = a.borrow;
-  assert(vec[0].len == 1, "vec[0] len after borrow assign");
+  vec[0] = a.borrow.clone();
+  assert(vec[0].len == 1, "vec[0] len after clone assign");
 }
 
-// T0383: Channel element analog. Borrow assignment must increment refcount
-// (dupChannel) so the vector owns its own ref.
-arc_borrow_index_assign_channel() `test {
-  ch1 := channel[int](capacity: 1);
-  ch1.send(1);
-  vec := channel[int][]();
-  vec.push(ch1);
-
-  ch2 := channel[int](capacity: 1);
-  ch2.send(42);
-  a := Arc[channel[int]](ch2);
-
-  vec[0] = a.borrow;
-  assert(true, "no double-free on borrow channel assign");
+// T0383 / T0438: original `vec[0] = a.borrow` Channel test relied on
+// implicit `Channel[T]& → Channel[T]` decay, which T0438 rejects. The
+// documented sharing path for Channels is `Arc[Channel[T]].clone()` at
+// the Arc level — atomic refcount handles the shared lifetime so each
+// owner can drop independently. Both `a1` and `a2` share the same
+// underlying Channel and both Arc drops must run without double-freeing
+// the inner Channel.
+arc_channel_share_via_arc_clone() `test {
+  ch := channel[int](capacity: 4);
+  a1 := Arc[channel[int]](ch);
+  a2 := a1.clone();
+  a1.borrow.send(1);
+  a2.borrow.send(2);
+  assert(true, "Arc[Channel] shared via Arc.clone — no double-free");
 }
 
 // T0383: Owned move into vec[i] must still work — dup only fires for borrows.
@@ -441,8 +444,10 @@ arc_borrow_index_assign_owned_unaffected() `test {
   assert(vec[0].len == 1, "owned move still works");
 }
 
-// T0383: Repeated borrow assignments — old element drop fires correctly,
-// no double-free, no leak.
+// T0383 / T0438: Repeated cloned-borrow assignments — old element drop
+// fires correctly between assignments, no double-free, no leak. Original
+// `vec[0] = a.borrow` form is rejected at sema; explicit `.clone()` is
+// the documented owned-copy recovery path.
 arc_borrow_index_assign_repeat_borrows() `test {
   vec := string[][]();
   v0 := string[]();
@@ -457,9 +462,9 @@ arc_borrow_index_assign_repeat_borrows() `test {
   a1 := Arc[string[]](v1);
   a2 := Arc[string[]](v2);
 
-  vec[0] = a1.borrow;
-  vec[0] = a2.borrow;
-  assert(vec[0].len == 2, "second borrow assign");
+  vec[0] = a1.borrow.clone();
+  vec[0] = a2.borrow.clone();
+  assert(vec[0].len == 2, "second clone assign");
 }
 
 // T0383: `t := vec[i]` for nested heap element dups (B0219 analog) so that
@@ -519,12 +524,10 @@ arc_borrow_into_field_via_clone() `test {
   assert(h.field.len == 1, "clone into field via constructor");
 }
 
-// T0386: Slice-assign from Arc.borrow with `string[]` payload — full-range.
-// Without Patch 1, the per-element store inside `Vector[T].[:]=` aliases the
-// source's string pointers into the target; both Vector.drop and Arc.drop
-// then free the same pointers → double-free / segfault. Patch 1 makes the
-// IndexExpr branch see the concrete `Vector[string]` instance via
-// `c.monoCtx.inst`, firing B0195 to dup each string element.
+// T0386 / T0438: Slice-assign with explicit `.clone()` — full-range. The
+// original `v1[0:3] = a.borrow` form is rejected at sema (no implicit
+// `string[]& → string[]` decay); `.clone()` produces an owned source whose
+// elements are dup'd into the target slice slots.
 arc_borrow_slice_assign() `test {
   s := string[]();
   s.push("a" + "");
@@ -535,14 +538,13 @@ arc_borrow_slice_assign() `test {
   v1.push("x" + "");
   v1.push("y" + "");
   v1.push("z" + "");
-  v1[0:3] = a.borrow;
+  v1[0:3] = a.borrow.clone();
   assert(v1[0] == "a", "v1[0]");
   assert(v1[1] == "b", "v1[1]");
   assert(v1[2] == "c", "v1[2]");
 }
 
-// T0386: Partial-range slice assignment — only target indices in the slice
-// range change; other elements remain owned by the target.
+// T0386 / T0438: Partial-range slice assignment with explicit `.clone()`.
 arc_borrow_slice_assign_partial() `test {
   s := string[]();
   s.push("a" + "");
@@ -551,15 +553,13 @@ arc_borrow_slice_assign_partial() `test {
   v1.push("x" + "");
   v1.push("y" + "");
   v1.push("z" + "");
-  v1[0:1] = a.borrow;
+  v1[0:1] = a.borrow.clone();
   assert(v1[0] == "a", "v1[0]");
   assert(v1[1] == "y", "v1[1]");
   assert(v1[2] == "z", "v1[2]");
 }
 
-// T0386: Two Arcs alternating into the same target — exercises the mono
-// `Vector[string].[:]=` with multiple instances and confirms each borrow
-// source independently retains its elements after the assign.
+// T0386 / T0438: Two Arcs alternating with explicit `.clone()`.
 arc_borrow_slice_assign_alternating() `test {
   s1 := string[]();
   s1.push("a" + "");
@@ -572,8 +572,8 @@ arc_borrow_slice_assign_alternating() `test {
   v.push("x" + "");
   v.push("y" + "");
   v.push("z" + "");
-  v[0:2] = a.borrow;
-  v[2:3] = b.borrow;
+  v[0:2] = a.borrow.clone();
+  v[2:3] = b.borrow.clone();
   assert(v[0] == "a", "v[0]");
   assert(v[1] == "b", "v[1]");
   assert(v[2] == "c", "v[2]");

@@ -41,6 +41,9 @@ func getOwnerStdScope() *types.Scope {
 }
 
 // checkOwnership parses source, runs sema with the std module, then runs ownership analysis.
+// Returns the combined list of sema and ownership errors. Sema errors are not fatal so
+// tests can assert on the new T0438 sema-level rejections of non-Copy borrow decay
+// (which used to surface as ownership errors).
 func checkOwnership(t *testing.T, src string) []error {
 	t.Helper()
 
@@ -62,10 +65,12 @@ func checkOwnership(t *testing.T, src string) []error {
 	file.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
 
 	info, semaErrs := sema.CheckWithModules(file, map[string]*types.Scope{"std": getOwnerStdScope()})
-	if len(semaErrs) > 0 {
-		t.Fatalf("sema errors: %v", semaErrs)
+	allErrs := append([]error(nil), semaErrs...)
+	// Only run ownership when sema succeeded — incomplete type info can crash the analyzer.
+	if len(semaErrs) == 0 {
+		allErrs = append(allErrs, Check(file, info)...)
 	}
-	return Check(file, info)
+	return allErrs
 }
 
 func ownerOK(t *testing.T, src string) {
@@ -3842,7 +3847,10 @@ func TestT0351_CompoundAssignOwnedLocalMoves(t *testing.T) {
 
 // === T0380: cannot move out of `.borrow` getter on Arc/MutexGuard ===
 
-// Var bound to .borrow cannot be moved into a ~T callee.
+// Var bound to .borrow cannot be moved into a ~T callee. T0438: sema now
+// rejects the implicit `string& → string` decay at the parameter boundary,
+// so the safety check fires earlier (sema-level) than the previous
+// ownership-level "cannot move borrowed value" diagnostic.
 func TestT0380_ConsumeBorrowVar(t *testing.T) {
 	errs := ownerErrs(t, `
 		consume(~string s) {}
@@ -3853,10 +3861,12 @@ func TestT0380_ConsumeBorrowVar(t *testing.T) {
 			consume(borrowed);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
-// Inline .borrow cannot be passed to a ~T callee.
+// Inline .borrow cannot be passed to a ~T callee. T0438: sema's
+// non-Copy decay rejection now also catches this earlier than the
+// previous "cannot move out of '.borrow' getter" ownership-level check.
 func TestT0380_ConsumeInlineBorrow(t *testing.T) {
 	errs := ownerErrs(t, `
 		consume(~string s) {}
@@ -3866,12 +3876,13 @@ func TestT0380_ConsumeInlineBorrow(t *testing.T) {
 			consume(a.borrow);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move out of '.borrow' getter")
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
-// Reassignment `b = a.borrow` is runtime-safe via the T0379 codegen fix
-// (dropflag cleared at the store site). Sema does NOT reject — but the LHS
-// becomes Borrowed so downstream consume sites still reject.
+// T0438: reassigning a non-Copy borrow to an owned local is now rejected
+// at the sema level (Rule 8b/8c gated on Copy). Previous behavior allowed
+// the assignment and relied on ownership state tracking to reject any
+// downstream consume — that downstream check is now defense-in-depth.
 func TestT0380_AssignBorrowToOwnedThenConsumeRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		consume(~string s) {}
@@ -3883,12 +3894,14 @@ func TestT0380_AssignBorrowToOwnedThenConsumeRejected(t *testing.T) {
 			consume(b);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'b'")
+	expectOwnerError(t, errs, "cannot assign string& to string")
 }
 
-// Plain `b = a.borrow` without downstream consume is OK (T0379 codegen handles it).
-func TestT0380_AssignBorrowToOwnedOK(t *testing.T) {
-	ownerOK(t, `
+// T0438: same plain-reassignment now rejected at sema. Use `.clone()` for
+// an owned independent copy or declare `b` as `string&` to keep it as a
+// borrow.
+func TestT0380_AssignBorrowToOwnedRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		test() {
 			s := "hi";
 			a := Arc[string](s);
@@ -3896,9 +3909,22 @@ func TestT0380_AssignBorrowToOwnedOK(t *testing.T) {
 			b = a.borrow;
 		}
 	`)
+	expectOwnerError(t, errs, "cannot assign string& to string")
 }
 
-// Same rule for MutexGuard.borrow.
+// Cloning the borrow produces an owned independent copy — safe.
+func TestT0380_AssignBorrowCloneToOwnedOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			b := "old";
+			b = a.borrow.clone();
+		}
+	`)
+}
+
+// T0438: same sema-level rejection applies for MutexGuard.borrow.
 func TestT0380_ConsumeMutexGuardBorrow(t *testing.T) {
 	errs := ownerErrs(t, `
 		consume(~string s) {}
@@ -3909,18 +3935,33 @@ func TestT0380_ConsumeMutexGuardBorrow(t *testing.T) {
 			consume(borrowed);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
-// Passing borrowed to a non-~ param is OK (callee just reads).
-func TestT0380_BorrowVarToValueParamOK(t *testing.T) {
-	ownerOK(t, `
+// T0438: passing a non-Copy borrow to a value-typed `string` param is now
+// rejected at sema. Use `.clone()` to pass an owned copy, or change the
+// callee parameter to `string&`.
+func TestT0380_BorrowVarToValueParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		readlen(string s) int { return s.len; }
 		test() {
 			s := "hi";
 			a := Arc[string](s);
 			borrowed := a.borrow;
 			int n = readlen(borrowed);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
+}
+
+// T0438: cloning makes it an owned copy — accepted.
+func TestT0380_BorrowCloneToValueParamOK(t *testing.T) {
+	ownerOK(t, `
+		readlen(string s) int { return s.len; }
+		test() {
+			s := "hi";
+			a := Arc[string](s);
+			int n = readlen(a.borrow.clone());
 		}
 	`)
 }
@@ -3950,8 +3991,9 @@ func TestT0380_BorrowInVectorLit(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
 }
 
-// T0381: explicit `T&` declaration on a borrow var rejects consumes by type
-// (matches the inferred-decl path; covers the case the AST heuristic missed).
+// T0381 / T0438: explicit `string& borrowed = a.borrow;` keeps the var as a
+// borrow; the call `consume(borrowed)` (which takes `~string`) is rejected
+// by sema since `string&` is not assignable to `string` for non-Copy T.
 func TestT0381_ExplicitRefDeclRejectsConsume(t *testing.T) {
 	errs := ownerErrs(t, `
 		consume(~string s) {}
@@ -3962,12 +4004,11 @@ func TestT0381_ExplicitRefDeclRejectsConsume(t *testing.T) {
 			consume(borrowed);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
-// T0381: a function that returns `T&` from a parameter, when stored, marks
-// the local as Borrowed — type-based detection works for any borrow source,
-// not just Arc/Mutex.
+// T0381 / T0438: a generic-style `T&` return passed into a `~T` consumer is
+// likewise rejected at sema for non-Copy T.
 func TestT0381_GenericRefReturnRejectsConsume(t *testing.T) {
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
@@ -3978,21 +4019,20 @@ func TestT0381_GenericRefReturnRejectsConsume(t *testing.T) {
 			consume(r);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'r'")
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
-// Typed var decl path also marks borrow as Borrowed.
-func TestT0380_TypedDeclBorrowVar(t *testing.T) {
+// T0438: typed `string borrowed = a.borrow;` (non-Copy) is rejected at the
+// var-decl boundary itself.
+func TestT0380_TypedDeclBorrowVarRejected(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(~string s) {}
 		test() {
 			s := "hi";
 			a := Arc[string](s);
 			string borrowed = a.borrow;
-			consume(borrowed);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+	expectOwnerError(t, errs, "cannot assign string& to variable of type string")
 }
 
 // Copy inner types (Arc[int], Arc[bool], etc.) have no double-free risk:
@@ -4022,9 +4062,9 @@ func TestT0380_MutexGuardCopyInnerNoReject(t *testing.T) {
 	`)
 }
 
-// T0377: Borrow laundered through an if-expression must mark the LHS as
-// Borrowed so a downstream `consume(~borrowed)` is rejected — same rule as the
-// direct case (T0380), now reaching through the laundering form.
+// T0377 / T0438: borrow laundered through an if-expression. The arms both
+// produce `string&`, the joined type stays `string&`, and `consume(~string)`
+// is rejected at sema.
 func TestT0377_ConsumeIfBorrowVarRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		consume(~string s) {}
@@ -4036,10 +4076,10 @@ func TestT0377_ConsumeIfBorrowVarRejected(t *testing.T) {
 			consume(borrowed);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
-// T0377: Same with match-laundered borrow.
+// T0377 / T0438: same for match-laundered borrows.
 func TestT0377_ConsumeMatchBorrowVarRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		consume(~string s) {}
@@ -4051,7 +4091,7 @@ func TestT0377_ConsumeMatchBorrowVarRejected(t *testing.T) {
 			consume(borrowed);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
 // T0377: Mixed-ownership if-expression (one borrow arm, one owned arm) is
@@ -4072,8 +4112,8 @@ func TestT0377_MixedIfNotMarkedBorrowed(t *testing.T) {
 	`)
 }
 
-// T0377: Parenthesized borrow is also a laundering form — sema must mark the
-// LHS as Borrowed.
+// T0377 / T0438: parenthesized borrow likewise stays `string&` and is
+// rejected by sema at the consume call.
 func TestT0377_ConsumeParenBorrowVarRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		consume(~string s) {}
@@ -4084,12 +4124,11 @@ func TestT0377_ConsumeParenBorrowVarRejected(t *testing.T) {
 			consume(borrowed);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
-// T0377: Block-bodied match arms (`=> { a.borrow }`) take the `arm.Block`
-// path through `matchArmIsBorrowGetter` — must still mark the LHS as
-// Borrowed when every arm's block result is a borrow.
+// T0377 / T0438: block-bodied match arms produce `string&` joined type and
+// are likewise rejected at the consume call.
 func TestT0377_ConsumeMatchBlockBorrowVarRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		consume(~string s) {}
@@ -4104,7 +4143,7 @@ func TestT0377_ConsumeMatchBlockBorrowVarRejected(t *testing.T) {
 			consume(borrowed);
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
 // T0377: Mixed-ownership match (one borrow arm, one owned arm) is outside
@@ -4128,9 +4167,10 @@ func TestT0377_MixedMatchNotMarkedBorrowed(t *testing.T) {
 	`)
 }
 
-// T0402: returning `T&` (non-Copy elem) as owned `T` is unsafe — the caller
-// would register a drop for the inner pointer that the original Arc/Mutex
-// still owns, leading to double-free at runtime. Local-source case.
+// T0402 / T0438: returning `T&` (non-Copy elem) as owned `T` is unsafe.
+// Sema now rejects the implicit decay at the return boundary itself —
+// previously the ownership analyzer's `returnsBorrowAsOwned` was the
+// only line of defense.
 func TestT0402_ReturnBorrowAsOwnedRejected_LocalSource(t *testing.T) {
 	errs := ownerErrs(t, `
 		bad() string {
@@ -4138,22 +4178,20 @@ func TestT0402_ReturnBorrowAsOwnedRejected_LocalSource(t *testing.T) {
 			return a.borrow;
 		}
 	`)
-	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
 }
 
-// T0402: same rejection applies when the Arc comes from a parameter — the
-// caller's Arc still retains ownership of the inner string after the call
-// returns, so the pattern is unsound regardless of where the Arc lives.
+// T0402 / T0438: same rejection when the Arc comes from a parameter.
 func TestT0402_ReturnBorrowAsOwnedRejected_ParamSource(t *testing.T) {
 	errs := ownerErrs(t, `
 		bad(Arc[string] a) string {
 			return a.borrow;
 		}
 	`)
-	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
 }
 
-// T0402: same rejection for MutexGuard.borrow.
+// T0402 / T0438: same rejection for MutexGuard.borrow.
 func TestT0402_ReturnBorrowAsOwnedRejected_MutexGuard(t *testing.T) {
 	errs := ownerErrs(t, `
 		bad() string {
@@ -4162,7 +4200,7 @@ func TestT0402_ReturnBorrowAsOwnedRejected_MutexGuard(t *testing.T) {
 			return g.borrow;
 		}
 	`)
-	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
 }
 
 // T0402: Copy element types (int, bool, etc.) are safe — the value is loaded
@@ -4208,21 +4246,19 @@ func TestT0402_ReturnBorrowAsRefOK_Param(t *testing.T) {
 	`)
 }
 
-// T0402: when sema's joinBranchTypes preserves `T&` (all arms are borrows),
-// the type-based check fires on the if-expression result type as well.
+// T0402 / T0438: when sema's joinBranchTypes preserves `T&` (all arms are
+// borrows), sema rejects the return at the type-assignability check.
 func TestT0402_ReturnBorrowThroughIfRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		bad(Arc[string] a, bool cond) string {
 			return if cond { a.borrow } else { a.borrow };
 		}
 	`)
-	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
 }
 
-// T0402: typed local declaration decays `T&` → `T` (Rule 8b), so the returned
-// expression's static type is owned `T`. Without the ownership-state check
-// this laundering form slipped past the type-based check and still
-// double-freed at runtime.
+// T0438: typed local declaration `string borrowed = a.borrow;` is rejected
+// at the var-decl boundary itself for non-Copy T (no implicit decay).
 func TestT0402_ReturnBorrowThroughTypedLocalRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		bad(Arc[string] a) string {
@@ -4230,10 +4266,11 @@ func TestT0402_ReturnBorrowThroughTypedLocalRejected(t *testing.T) {
 			return borrowed;
 		}
 	`)
-	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+	expectOwnerError(t, errs, "cannot assign string& to variable of type string")
 }
 
-// T0402: inferred local declaration also marks the LHS as Borrowed (T0380/T0381).
+// T0402: inferred local keeps the type as `string&`; the return rejection
+// then fires at the return boundary.
 func TestT0402_ReturnBorrowThroughInferredLocalRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		bad(Arc[string] a) string {
@@ -4241,11 +4278,10 @@ func TestT0402_ReturnBorrowThroughInferredLocalRejected(t *testing.T) {
 			return borrowed;
 		}
 	`)
-	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
 }
 
-// T0402: laundering through if then through a local — both transitions
-// preserve the Borrowed state, and the final return must be rejected.
+// T0402: laundering through if then through a local — return still rejected.
 func TestT0402_ReturnBorrowThroughIfLocalRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		bad(Arc[string] a, bool cond) string {
@@ -4253,18 +4289,16 @@ func TestT0402_ReturnBorrowThroughIfLocalRejected(t *testing.T) {
 			return borrowed;
 		}
 	`)
-	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
 }
 
-// T0402: a typed local declaration `string borrowed = a.borrow;` decays the
-// borrow to owned `string` at the type level, so my type-based check passes
-// it through. After reassigning to an owned literal, ownership state
-// transitions back to Owned and the return is safe — the function correctly
-// returns an owned string with no double-free risk.
-func TestT0402_ReturnAfterTypedReassignToOwnedOK(t *testing.T) {
+// T0438: the `string borrowed = a.borrow;` form is rejected at sema, so
+// this test is updated to use `.clone()` for an owned independent copy
+// (the documented recovery path for non-Copy borrows).
+func TestT0402_ReturnAfterCloneToOwnedOK(t *testing.T) {
 	ownerOK(t, `
 		ok(Arc[string] a) string {
-			string borrowed = a.borrow;
+			string borrowed = a.borrow.clone();
 			borrowed = "hello";
 			return borrowed;
 		}
@@ -4276,10 +4310,9 @@ func TestT0402_ReturnAfterTypedReassignToOwnedOK(t *testing.T) {
 // T0385 (the IndexExpr sibling) is fixed by codegen-dup in T0383, so only
 // the MemberExpr case needs a sema rejection here.
 
-// T0382: `obj.field = a.borrow` for a non-Copy element T is rejected. Fields
-// have no per-slot dropflag, so the parent's drop walks them unconditionally
-// — the borrowed buffer would be double-freed against Arc's drop. Use
-// '.clone()' to deep-copy or restructure the field type for sharing.
+// T0382 / T0438: `obj.field = a.borrow` for a non-Copy element T is rejected
+// at sema (no implicit `string[]& → string[]` decay). Use `.clone()` to
+// deep-copy or restructure the field type for sharing.
 func TestT0382_FieldAssignFromArcBorrowRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Holder { string[] field; }
@@ -4293,10 +4326,10 @@ func TestT0382_FieldAssignFromArcBorrowRejected(t *testing.T) {
 			h.field = a.borrow;
 		}
 	`)
-	expectOwnerError(t, errs, "cannot assign borrow to owned field")
+	expectOwnerError(t, errs, "cannot assign string[]& to string[]")
 }
 
-// T0382: same rule applies to MutexGuard.borrow.
+// T0382 / T0438: same rule applies to MutexGuard.borrow.
 func TestT0382_FieldAssignFromMutexGuardBorrowRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Holder { string[] field; }
@@ -4311,7 +4344,7 @@ func TestT0382_FieldAssignFromMutexGuardBorrowRejected(t *testing.T) {
 			h.field = guard.borrow;
 		}
 	`)
-	expectOwnerError(t, errs, "cannot assign borrow to owned field")
+	expectOwnerError(t, errs, "cannot assign string[]& to string[]")
 }
 
 // T0382: Copy element types (Arc[int].borrow → int field) are independently
@@ -4343,4 +4376,118 @@ func TestT0382_FieldAssignFromBorrowClonedAllowed(t *testing.T) {
 			h.field = a.borrow.clone();
 		}
 	`)
+}
+
+// === T0438: Implicit T&/T~ → T decay restricted to Copy types ===
+//
+// These tests pin the new sema-level rejection of borrow → owned decay for
+// non-Copy element types, and confirm the recovery paths (`.clone()` for an
+// owned copy, or `T&` for keeping it as a borrow). The previous unrestricted
+// decay produced a steady stream of codegen dup-on-read patches (T0383,
+// T0388, T0392, T0397, T0398, T0413, T0428, T0431, T0439) that this rule
+// removes the root cause of.
+
+// T0438: `T borrowed = expr_with_borrow_type;` rejected when T is non-Copy.
+func TestT0438_AssignBorrowToNonCopyOwnedRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			a := Arc[string]("hi");
+			string s = a.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign string& to variable of type string")
+}
+
+// T0438: same form is allowed when T is Copy (int) — the decay is sound
+// because the value is loaded at the borrow boundary and the original
+// owner is unaffected.
+func TestT0438_AssignBorrowToCopyOwnedOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			a := Arc[int](42);
+			int n = a.borrow;
+		}
+	`)
+}
+
+// T0438: passing a non-Copy borrow into a value-typed param is rejected at
+// the call site by the same Copy-only decay rule.
+func TestT0438_BorrowToValueParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take(string s) {}
+		test() {
+			a := Arc[string]("hi");
+			take(a.borrow);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
+}
+
+// T0438: `.clone()` produces an owned independent copy — the documented
+// recovery path for non-Copy borrows.
+func TestT0438_BorrowCloneToOwnedOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			a := Arc[string]("hi");
+			string s = a.borrow.clone();
+		}
+	`)
+}
+
+// T0438: declaring the local as `T&` keeps it as a borrow — no decay,
+// no implicit allocation.
+func TestT0438_BorrowToRefDeclOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			a := Arc[string]("hi");
+			string& s = a.borrow;
+		}
+	`)
+}
+
+// T0438: returning a non-Copy borrow as owned `T` is rejected at sema
+// (defense-in-depth on top of T0402's ownership-level check).
+func TestT0438_ReturnNonCopyBorrowAsOwnedRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		bad(Arc[string] a) string {
+			return a.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
+}
+
+// T0438: returning a Copy borrow as owned is allowed — the value is
+// loaded by value, the Arc retains its ownership.
+func TestT0438_ReturnCopyBorrowAsOwnedOK(t *testing.T) {
+	ownerOK(t, `
+		ok(Arc[int] a) int {
+			return a.borrow;
+		}
+	`)
+}
+
+// T0438: vector element decay is also rejected (Vector[T] is non-Copy).
+func TestT0438_VectorBorrowToOwnedRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			v := [1, 2, 3];
+			a := Arc[int[]](v);
+			int[] x = a.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign int[]& to variable of type int[]")
+}
+
+// T0438: `T~` (mutable borrow) decay is also Copy-only.
+func TestT0438_MutBorrowToNonCopyOwnedRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take(~string s) string& { return s; }
+		test() {
+			s := "hi";
+			r := take(s);
+			string owned = r;
+		}
+	`)
+	// Two errors expected here; either is fine — assert the decay rejection.
+	expectOwnerError(t, errs, "cannot assign string& to variable of type string")
 }

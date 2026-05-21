@@ -10096,27 +10096,10 @@ func TestVectorStringIndexReadDup(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new")
 }
 
-// T0383: Vector[Vector[T]] index assign from a borrow source dups the
-// borrow so the vector owns an independent copy. Mirrors B0195 for non-string.
-func TestT0383VectorIndexAssignBorrowDupsHeapElement(t *testing.T) {
-	ir := generateIR(t, `
-		main() {
-			outer := string[][]();
-			inner := string[]();
-			inner.push("init");
-			outer.push(inner);
-
-			v2 := string[]();
-			v2.push("hello");
-			a := Arc[string[]](v2);
-
-			outer[0] = a.borrow;
-		}
-	`)
-	// The dup-on-borrow path emits a vecdup.copy block (from dupVector) +
-	// a vector-element clone loop before genIndexAssign.
-	assertContains(t, ir, "vecdup.copy")
-}
+// T0383 / T0438: assigning `outer[0] = a.borrow` for non-Copy element T is
+// rejected at sema (no implicit `T& → T` decay). The codegen dup-on-borrow
+// path being tested here is unreachable under Option A; users must
+// `.clone()` to obtain an owned independent copy.
 
 // T0383: Vector[Vector[T]] index assign drops the old element before the
 // store, preventing leak of the previously-pushed buffer.
@@ -20544,34 +20527,11 @@ func TestMutexGuardBorrowClearsDropFlag(t *testing.T) {
 	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
 }
 
-// T0367: Typed var decl path (`T borrowed = a.borrow`) — exercises
-// genTypedVarDecl rather than genInferredVarDecl. The fix is mirrored across
-// both paths so the dropflag clear must appear here too.
-func TestArcBorrowClearsDropFlagTypedDecl(t *testing.T) {
-	ir := generateIR(t, `
-		main() {
-			v := [1, 2, 3];
-			a := Arc[int[]](v);
-			int[] borrowed = a.borrow;
-		}
-	`)
-	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
-	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
-}
-
-// T0367: Typed var decl path for MutexGuard.
-func TestMutexGuardBorrowClearsDropFlagTypedDecl(t *testing.T) {
-	ir := generateIR(t, `
-		main() {
-			v := [1, 2, 3];
-			m := Mutex[int[]](v);
-			use guard := m.lock();
-			int[] borrowed = guard.borrow;
-		}
-	`)
-	assertContains(t, ir, "%borrowed.dropflag = alloca i1")
-	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
-}
+// T0367 / T0438: the typed-decl path `T borrowed = a.borrow` for non-Copy T
+// is now rejected at sema (no implicit `T& → T` decay). The codegen
+// dropflag-clear path being tested here is unreachable under Option A;
+// the inferred-decl variant (`borrowed := a.borrow`) still tests the
+// codegen behavior for the kept `T&` borrow type.
 
 // T0379: Reassigning Arc[T].borrow to an existing variable must clear the
 // dropflag re-armed by the unconditional reset in the assignment path. After

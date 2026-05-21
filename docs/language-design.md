@@ -1508,26 +1508,49 @@ longest['a](string &'a a, string &'a b) string &'a {
 }
 ```
 
-**No borrow-as-owned at return boundaries.** A function declared to return owned `T` cannot return an expression whose static type is `T&` or `T~` when `T` is non-Copy (string, vectors, user heap types). The decay would produce a value the caller treats as owned and registers a drop binding for, while the original `Arc`/`Mutex`/etc. still owns the same heap allocation — leading to a double-free at runtime. To produce an owned copy, call `.clone()`:
+**Implicit borrow → owned decay is restricted to Copy types.** A `T&` or `T~` is implicitly assignable to a plain owned `T` only when `T` is a Copy type (primitives, value types, references themselves — anything for which `IsCopy(T)` returns true). For non-Copy `T` (string, vectors, heap user types) the decay would silently duplicate ownership of heap data the original owner still holds — a guaranteed double-free at drop time — so it is rejected at every assignment-shaped boundary:
+
+- variable declarations: `string s = a.borrow;`
+- function parameters: `consume(a.borrow)` where `consume(string s)`
+- field assignment: `obj.field = a.borrow;`
+- return statements: `return a.borrow;` from a `string`-returning function
+- joined branches (`if`, `match`, parens): when every arm produces a borrow, the joined type stays `T&` and the same boundary rules apply.
+
+To recover an owned value, choose one of:
 
 ```promise
-// Rejected at compile time — `a.borrow` returns `string&`, function returns `string`:
+// Rejected — implicit `string& → string` decay for a non-Copy type:
 get(Arc[string] a) string {
-  return a.borrow;          // error: cannot return a borrowed reference as owned
+  return a.borrow;          // error: cannot return string& from function returning string
 }
 
-// OK — explicit clone produces an owned copy independent of the Arc:
+// (1) Explicit clone — produces an owned independent copy:
 get(Arc[string] a) string {
   return a.borrow.clone();
 }
 
-// OK — return a borrow as a borrow (no decay):
+// (2) Keep it as a borrow — declare the local/parameter/return as `T&`:
 get(Arc[string] a) string& {
   return a.borrow;
 }
+
+// (3) For locals, declare with the borrow type to skip the decay:
+inspect(Arc[string] a) {
+  string& s = a.borrow;     // OK — no decay, no implicit allocation.
+  println(s);
+}
 ```
 
-The same rule applies to non-Copy borrows joined through `if`/`match`/parens, since `joinBranchTypes` preserves `T&` when every arm is a borrow. Borrows of Copy elements (`Arc[int]`, `Arc[bool]`) are unaffected — the value is loaded freshly at the borrow boundary.
+The Copy carve-out is sound because Copy types are loaded by value at the borrow boundary — the original owner is unaffected:
+
+```promise
+n(Arc[int] a) int { return a.borrow; }   // OK: int is Copy.
+m(Arc[int] a) {
+  int x = a.borrow;                       // OK: int is Copy.
+}
+```
+
+Rationale: the previous unrestricted decay produced a steady stream of codegen dup-on-read patches around contexts where a borrow leaked into an owned-tracking path (vector index assigns, slice assigns, map index reads, optional fields, etc.). Restricting the decay to Copy at the type level removes the root cause once instead of patching each downstream symptom.
 
 ### 6.4 Copy and Clone
 

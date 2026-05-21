@@ -215,19 +215,20 @@ func AssignableTo(x, y Type) bool {
 		}
 	}
 
-	// Rule 8b: T& is assignable to T (implicit decay) — T0381.
-	// Drop-flag and ownership safety are tracked separately via the
-	// expression's static type, so this decay does not weaken safety
-	// checks for borrows that flow through assignment.
+	// Rule 8b: T& is assignable to T (implicit decay) — T0381 / T0438.
+	// Restricted to Copy element types: non-Copy decay would silently
+	// duplicate ownership of heap data (the borrow's owner still exists).
+	// Non-Copy borrows must be made owned via explicit `.clone()`.
 	if sr, ok := x.(*SharedRef); ok {
-		if AssignableTo(sr.elem, y) {
+		if IsCopy(sr.elem) && AssignableTo(sr.elem, y) {
 			return true
 		}
 	}
 
-	// Rule 8c: T~ is assignable to T (implicit decay) — T0381.
+	// Rule 8c: T~ is assignable to T (implicit decay) — T0381 / T0438.
+	// Restricted to Copy element types (see Rule 8b).
 	if mr, ok := x.(*MutRef); ok {
-		if AssignableTo(mr.elem, y) {
+		if IsCopy(mr.elem) && AssignableTo(mr.elem, y) {
 			return true
 		}
 	}

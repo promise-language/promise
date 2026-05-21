@@ -298,6 +298,17 @@ func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
 		return
 	}
 	if !isRefType(c.curSig.Result()) {
+		// T0402: returning a non-Copy borrow as owned is unsafe — the caller
+		// would register a drop for the inner pointer that the original Arc/
+		// Mutex still owns, leading to double-free. Reject regardless of
+		// whether the borrow's source is a local or a parameter (parameter
+		// case is also unsound: the caller's Arc/Mutex retains ownership of
+		// the inner T after the call returns).
+		if s.Value != nil && c.returnsBorrowAsOwned(s.Value) {
+			c.errorf(s.Pos(),
+				"cannot return a borrowed reference as owned '%s'; the original Arc/Mutex still owns this value — call .clone() to produce an independent owned copy",
+				c.curSig.Result().String())
+		}
 		return
 	}
 
@@ -347,6 +358,37 @@ func resolveReturnOrigin(expr ast.Expr) string {
 		return resolveReturnOrigin(e.Target)
 	}
 	return ""
+}
+
+// returnsBorrowAsOwned reports whether `expr` is a non-Copy borrow being
+// returned where the function declares an owned non-ref result. T0402.
+//
+// Two shapes need to be caught:
+//
+//  1. Static-type borrow — `return arc.borrow` (expr type is `T&`/`T~` non-Copy).
+//     `Arc[T].borrow` and `MutexGuard[T].borrow` return `T&` post-T0381.
+//
+//  2. Laundered borrow — `string borrowed = arc.borrow; return borrowed;`
+//     The typed local declaration decays `T&` → `T` so the expr's static type
+//     is owned `T`, but ownership tracks the local with state Borrowed. Without
+//     this branch the laundered form slips through the type-based check and
+//     still double-frees at runtime.
+//
+// The state check is restricted to non-parameter locals: by-value parameters
+// (plain `T`) are also tracked as Borrowed (T0338) but their return path is
+// safe — return implicitly dups for non-Copy types so the caller gets an
+// independent value.
+func (c *Checker) returnsBorrowAsOwned(expr ast.Expr) bool {
+	t := c.info.Types[expr]
+	if isBorrowedType(t) {
+		return true
+	}
+	if ident, ok := expr.(*ast.IdentExpr); ok {
+		if c.state[ident.Name] == Borrowed && !c.params[ident.Name] && !isCopyType(t) {
+			return true
+		}
+	}
+	return false
 }
 
 // countRefParams counts the number of reference parameters in the current signature

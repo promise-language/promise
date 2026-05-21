@@ -482,3 +482,24 @@ arc_borrow_index_assign_alias_safe() `test {
   // t is still valid
   assert(t.len == 1, "t still valid after overwrite");
 }
+
+// T0402: pinning the documented fix path — `.borrow.clone()` produces an
+// owned copy that can safely cross a return boundary. Without the fix in
+// T0402 the unsafe `return a.borrow;` pattern crashed with `fatal: invalid
+// free (bad header magic)` after a few iterations; the type-based ownership
+// check now rejects the unsafe pattern at compile time and this test pins
+// the runtime correctness of the .clone() workaround.
+get_inner_str_clone(Arc[string] a) string {
+  return a.borrow.clone();
+}
+
+arc_borrow_clone_returned_owned() `test {
+  i := 0;
+  while i < 50 {
+    s := "hello" + i.to_string();
+    a := Arc[string](s);
+    result := get_inner_str_clone(a);
+    assert(result.starts_with("hello"), "starts with hello");
+    i = i + 1;
+  }
+}

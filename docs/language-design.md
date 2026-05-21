@@ -1508,6 +1508,27 @@ longest['a](string &'a a, string &'a b) string &'a {
 }
 ```
 
+**No borrow-as-owned at return boundaries.** A function declared to return owned `T` cannot return an expression whose static type is `T&` or `T~` when `T` is non-Copy (string, vectors, user heap types). The decay would produce a value the caller treats as owned and registers a drop binding for, while the original `Arc`/`Mutex`/etc. still owns the same heap allocation — leading to a double-free at runtime. To produce an owned copy, call `.clone()`:
+
+```promise
+// Rejected at compile time — `a.borrow` returns `string&`, function returns `string`:
+get(Arc[string] a) string {
+  return a.borrow;          // error: cannot return a borrowed reference as owned
+}
+
+// OK — explicit clone produces an owned copy independent of the Arc:
+get(Arc[string] a) string {
+  return a.borrow.clone();
+}
+
+// OK — return a borrow as a borrow (no decay):
+get(Arc[string] a) string& {
+  return a.borrow;
+}
+```
+
+The same rule applies to non-Copy borrows joined through `if`/`match`/parens, since `joinBranchTypes` preserves `T&` when every arm is a borrow. Borrows of Copy elements (`Arc[int]`, `Arc[bool]`) are unaffected — the value is loaded freshly at the borrow boundary.
+
 ### 6.4 Copy and Clone
 
 `` `copy `` and `` `clone `` are built-in meta annotations that control assignment semantics:

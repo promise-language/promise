@@ -4127,3 +4127,146 @@ func TestT0377_MixedMatchNotMarkedBorrowed(t *testing.T) {
 		}
 	`)
 }
+
+// T0402: returning `T&` (non-Copy elem) as owned `T` is unsafe — the caller
+// would register a drop for the inner pointer that the original Arc/Mutex
+// still owns, leading to double-free at runtime. Local-source case.
+func TestT0402_ReturnBorrowAsOwnedRejected_LocalSource(t *testing.T) {
+	errs := ownerErrs(t, `
+		bad() string {
+			a := Arc[string]("x");
+			return a.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+// T0402: same rejection applies when the Arc comes from a parameter — the
+// caller's Arc still retains ownership of the inner string after the call
+// returns, so the pattern is unsound regardless of where the Arc lives.
+func TestT0402_ReturnBorrowAsOwnedRejected_ParamSource(t *testing.T) {
+	errs := ownerErrs(t, `
+		bad(Arc[string] a) string {
+			return a.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+// T0402: same rejection for MutexGuard.borrow.
+func TestT0402_ReturnBorrowAsOwnedRejected_MutexGuard(t *testing.T) {
+	errs := ownerErrs(t, `
+		bad() string {
+			m := Mutex[string]("x");
+			use g := m.lock();
+			return g.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+// T0402: Copy element types (int, bool, etc.) are safe — the value is loaded
+// at the borrow boundary and the original owner is unaffected.
+func TestT0402_ReturnBorrowAsOwnedOK_CopyElem(t *testing.T) {
+	ownerOK(t, `
+		ok(Arc[int] a) int {
+			return a.borrow;
+		}
+	`)
+}
+
+// T0402: explicit `.clone()` produces an owned copy — the documented fix.
+func TestT0402_ReturnBorrowCloneOK(t *testing.T) {
+	ownerOK(t, `
+		ok(Arc[string] a) string {
+			return a.borrow.clone();
+		}
+	`)
+}
+
+// T0402: regression check — the existing local-vs-param check on ref-typed
+// returns must still fire when the result type is `string&` and the source
+// is a local Arc (the reference outlives its Arc).
+func TestT0402_ReturnBorrowAsRefRejected_Local(t *testing.T) {
+	errs := ownerErrs(t, `
+		bad() string& {
+			a := Arc[string]("x");
+			return a.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return reference to local variable 'a'")
+}
+
+// T0402: returning `T&` from a borrow-typed expression where source is a
+// parameter is allowed by the existing ref-result branch (the borrow stays
+// a borrow, no decay to owned).
+func TestT0402_ReturnBorrowAsRefOK_Param(t *testing.T) {
+	ownerOK(t, `
+		ok(Arc[string] a) string& {
+			return a.borrow;
+		}
+	`)
+}
+
+// T0402: when sema's joinBranchTypes preserves `T&` (all arms are borrows),
+// the type-based check fires on the if-expression result type as well.
+func TestT0402_ReturnBorrowThroughIfRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		bad(Arc[string] a, bool cond) string {
+			return if cond { a.borrow } else { a.borrow };
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+// T0402: typed local declaration decays `T&` → `T` (Rule 8b), so the returned
+// expression's static type is owned `T`. Without the ownership-state check
+// this laundering form slipped past the type-based check and still
+// double-freed at runtime.
+func TestT0402_ReturnBorrowThroughTypedLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		bad(Arc[string] a) string {
+			string borrowed = a.borrow;
+			return borrowed;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+// T0402: inferred local declaration also marks the LHS as Borrowed (T0380/T0381).
+func TestT0402_ReturnBorrowThroughInferredLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		bad(Arc[string] a) string {
+			borrowed := a.borrow;
+			return borrowed;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+// T0402: laundering through if then through a local — both transitions
+// preserve the Borrowed state, and the final return must be rejected.
+func TestT0402_ReturnBorrowThroughIfLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		bad(Arc[string] a, bool cond) string {
+			borrowed := if cond { a.borrow } else { a.borrow };
+			return borrowed;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+// T0402: a typed local declaration `string borrowed = a.borrow;` decays the
+// borrow to owned `string` at the type level, so my type-based check passes
+// it through. After reassigning to an owned literal, ownership state
+// transitions back to Owned and the return is safe — the function correctly
+// returns an owned string with no double-free risk.
+func TestT0402_ReturnAfterTypedReassignToOwnedOK(t *testing.T) {
+	ownerOK(t, `
+		ok(Arc[string] a) string {
+			string borrowed = a.borrow;
+			borrowed = "hello";
+			return borrowed;
+		}
+	`)
+}

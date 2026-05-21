@@ -2746,8 +2746,31 @@ func lookupCachedInstances(info *sema.Info, target, buildMode string) map[string
 	return cached
 }
 
+// sanitizeTempPrefix replaces characters that are invalid in file names on
+// Windows (and visually noisy elsewhere) with '_'. Mono instance names like
+// "Vector[int?]" embed '?' which Windows rejects as a wildcard (T0425), and
+// '*' / ':' / '<' / '>' / '|' / '"' / '/' / '\' are similarly reserved.
+func sanitizeTempPrefix(prefix string) string {
+	var b strings.Builder
+	b.Grow(len(prefix))
+	for _, r := range prefix {
+		switch r {
+		case '<', '>', ':', '"', '/', '\\', '|', '?', '*':
+			b.WriteByte('_')
+		default:
+			if r < 0x20 {
+				b.WriteByte('_')
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
+}
+
 // compileLLToObj compiles LLVM IR text to an object file via opt + llc.
 func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) string {
+	prefix = sanitizeTempPrefix(prefix)
 	llFile, err := os.CreateTemp("", prefix+"-*.ll")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -2804,6 +2827,7 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath, optLevel string) s
 // compileLLToBC compiles LLVM IR text to LLVM bitcode via opt.
 // The bitcode is passed to LTO-capable linkers (ld.lld/wasm-ld/ld64.lld with --lto-O1).
 func compileLLToBC(irText, prefix, optPath, optLevel string) string {
+	prefix = sanitizeTempPrefix(prefix)
 	llFile, err := os.CreateTemp("", prefix+"-*.ll")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)

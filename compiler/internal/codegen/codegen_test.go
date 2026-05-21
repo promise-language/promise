@@ -16172,6 +16172,27 @@ func TestMonoSynthesizedDefaultOnGenericType(t *testing.T) {
 	assertContains(t, ir, "Pair[int].size")
 }
 
+// TestMonoMapWithTupleValue is a regression test for T0400: instantiating
+// Map[K, V] with a tuple V used to panic in codegen because the mono spiral
+// guard over-marked Vector[(K, V)] as spiral, preventing _FnIter[T] from
+// being resolved during Vector.iter()'s body monomorphization. After the
+// originWrapsTypeParams precondition was added, Vector — which doesn't
+// intrinsically wrap its TypeParam in a Tuple — is correctly skipped from
+// spiral marking, letting the chain bound at Iterator/_FnIter as intended.
+func TestMonoMapWithTupleValue(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := map[string, (string, int)]();
+			m["a"] = ("alpha", 1);
+		}
+	`)
+	// _FnIter[(string, (string, int))] must be monomorphized (so its layout
+	// exists) — this is the instance whose missing layout caused the panic.
+	assertContains(t, ir, "_FnIter[(string, (string, int))]")
+	// Vector and Iterator instances for the tuple value must also exist.
+	assertContains(t, ir, "Vector[(string, (string, int))]")
+}
+
 // TestGenericFuncWithGenericReturnType verifies a generic function that both
 // takes and returns a monomorphic generic type. Box[int] is instantiated directly
 // in main so its layout is collected; the generic function takes and returns it.

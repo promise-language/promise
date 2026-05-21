@@ -174,6 +174,7 @@ func collectMonoInstances(info *sema.Info, spiralInstances map[string]bool) []*t
 	// _FnIter[T]. Sema records the expression types but skips recording the
 	// instance because it contains TypeParams.
 	unresolvedInsts := collectUnresolvedInstances(info)
+	wrapsCache := make(map[types.Type]bool)
 
 	// Transitively expand: walk substituted field types, parent instances,
 	// and resolve unresolved method-body instances.
@@ -207,7 +208,7 @@ func collectMonoInstances(info *sema.Info, spiralInstances map[string]bool) []*t
 			// E.g., Iterator[int] has subst {T→int}; _FnIter[T] in method
 			// bodies resolves to _FnIter[int].
 			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances)
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances, wrapsCache)
 			}
 		case *types.Enum:
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -218,7 +219,7 @@ func collectMonoInstances(info *sema.Info, spiralInstances map[string]bool) []*t
 				}
 			}
 			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances)
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances, wrapsCache)
 			}
 		}
 	}
@@ -252,13 +253,14 @@ func resolveTypeInstancesFromFuncInstances(
 	}
 
 	var newInstances []*types.Instance
+	wrapsCache := make(map[types.Type]bool)
 
 	// Apply substitution maps from concrete func instances.
 	for _, fi := range funcInstances {
 		sig := fi.Func.Type().(*types.Signature)
 		subst := types.BuildSubstMap(sig.TypeParams(), fi.TypeArgs)
 		if len(subst) > 0 {
-			resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances)
+			resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances, wrapsCache)
 		}
 	}
 
@@ -266,7 +268,7 @@ func resolveTypeInstancesFromFuncInstances(
 	for _, mi := range methodInstances {
 		subst := buildMethodInstanceSubst(mi)
 		if len(subst) > 0 {
-			resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances)
+			resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances, wrapsCache)
 		}
 	}
 
@@ -298,7 +300,7 @@ func resolveTypeInstancesFromFuncInstances(
 				}
 			}
 			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances)
+				resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances, wrapsCache)
 			}
 		case *types.Enum:
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -309,7 +311,7 @@ func resolveTypeInstancesFromFuncInstances(
 				}
 			}
 			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances)
+				resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances, wrapsCache)
 			}
 		}
 	}
@@ -375,7 +377,7 @@ func findUnresolvedInstances(typ types.Type, result *[]*types.Instance, visited 
 // checking whether any resolved type arg strictly contains a compound substitution
 // value as a proper sub-expression. Direct user code seeded via info.Instances
 // bypasses this guard, so explicit .enumerate() calls still work.
-func resolveUnresolvedInstances(unresolved []*types.Instance, subst map[*types.TypeParam]types.Type, result *[]*types.Instance, seen map[string]bool, spiralInstances map[string]bool) {
+func resolveUnresolvedInstances(unresolved []*types.Instance, subst map[*types.TypeParam]types.Type, result *[]*types.Instance, seen map[string]bool, spiralInstances map[string]bool, wrapsCache map[types.Type]bool) {
 	for _, ui := range unresolved {
 		resolved := types.Substitute(ui, subst)
 		if resolved == ui {
@@ -392,15 +394,217 @@ func resolveUnresolvedInstances(unresolved []*types.Instance, subst map[*types.T
 			seen[key] = true
 			*result = append(*result, ri)
 			// Spiral guard: instances whose type args strictly contain a compound
-			// substitution value are added for layout purposes but marked no-expand.
-			// Their inherited default method bodies use unreachable to avoid
-			// requiring yet-deeper instances (e.g. _FnIter[(int,(int,X))] from
-			// Iterator[(int,X)].enumerate won't try to build _FnIter[(int,(int,(int,X)))]).
-			if instanceArgSpiralCheck(ri, subst) {
+			// substitution value AND whose origin intrinsically wraps its TypeParams
+			// in a Tuple are added for layout purposes but marked no-expand. The
+			// origin-wraps precondition prevents over-marking benign cases like
+			// Vector[(string, X)] where Vector itself doesn't spiral; only origins
+			// like Iterator/_FnIter (whose enumerate/zip return Iterator[(..., T)])
+			// can chain via inherited default-method bodies.
+			if instanceArgSpiralCheck(ri, subst) && originWrapsTypeParams(ri.Origin(), wrapsCache) {
 				spiralInstances[key] = true
 			}
 		}
 	}
+}
+
+// originWrapsTypeParams reports whether a Named/Enum origin intrinsically
+// references its own TypeParams from inside a Tuple type — either directly
+// in its method signatures or fields, or transitively through a structural
+// parent. This is the precondition for marking an instance as a spiral.
+//
+// Iterator[T] satisfies this (enumerate() returns Iterator[(int, T)]).
+// _FnIter[T] satisfies this transitively (is Iterator[T]).
+// Vector[T] does NOT (iter() returns Iterator[T] without Tuple wrap).
+//
+// Without this precondition, Map[K, (K, V)] paths over-mark Vector[(K, V)]
+// as spiral, which prevents resolving _FnIter[T] from Vector.iter()'s body
+// and panics at codegen with "no layout for type _FnIter[...]" (T0400).
+func originWrapsTypeParams(origin types.Type, cache map[types.Type]bool) bool {
+	if origin == nil {
+		return false
+	}
+	if v, ok := cache[origin]; ok {
+		return v
+	}
+	// Tentative false: prevents infinite recursion if structural parents form a
+	// cycle. Updated to true below if a wrap is found.
+	cache[origin] = false
+
+	var typeParams []*types.TypeParam
+	var parents []*types.ParentRef
+	var fieldTypes []types.Type
+	var sigs []*types.Signature
+
+	switch o := origin.(type) {
+	case *types.Named:
+		typeParams = o.TypeParams()
+		parents = o.Parents()
+		for _, f := range o.AllFields() {
+			fieldTypes = append(fieldTypes, f.Type())
+		}
+		for _, m := range o.Methods() {
+			if m.Sig() != nil {
+				sigs = append(sigs, m.Sig())
+			}
+		}
+	case *types.Enum:
+		typeParams = o.TypeParams()
+		for _, v := range o.Variants() {
+			for _, f := range v.Fields() {
+				fieldTypes = append(fieldTypes, f.Type())
+			}
+		}
+		for _, m := range o.Methods() {
+			if m.Sig() != nil {
+				sigs = append(sigs, m.Sig())
+			}
+		}
+	default:
+		return false
+	}
+
+	if len(typeParams) == 0 {
+		return false
+	}
+
+	tpSet := make(map[*types.TypeParam]bool, len(typeParams))
+	for _, tp := range typeParams {
+		tpSet[tp] = true
+	}
+
+	for _, ft := range fieldTypes {
+		if containsTupleWrappingTypeParams(ft, tpSet) {
+			cache[origin] = true
+			return true
+		}
+	}
+
+	for _, sig := range sigs {
+		if sig.Recv() != nil && containsTupleWrappingTypeParams(sig.Recv().Type(), tpSet) {
+			cache[origin] = true
+			return true
+		}
+		for _, p := range sig.Params() {
+			if containsTupleWrappingTypeParams(p.Type(), tpSet) {
+				cache[origin] = true
+				return true
+			}
+		}
+		if sig.Result() != nil && containsTupleWrappingTypeParams(sig.Result(), tpSet) {
+			cache[origin] = true
+			return true
+		}
+	}
+
+	for _, p := range parents {
+		if p.Named != nil && p.Named.IsStructural() {
+			if originWrapsTypeParams(p.Named, cache) {
+				cache[origin] = true
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// containsTupleWrappingTypeParams reports whether t contains a Tuple anywhere
+// in its structure where any element (recursively) references one of the
+// target TypeParams.
+func containsTupleWrappingTypeParams(t types.Type, tps map[*types.TypeParam]bool) bool {
+	if t == nil {
+		return false
+	}
+	if tup, ok := t.(*types.Tuple); ok {
+		for _, e := range tup.Elems() {
+			if walkTypeContainsTypeParam(e, tps) {
+				return true
+			}
+		}
+		// Also keep walking inside the tuple in case there's a deeper tuple.
+	}
+	switch tt := t.(type) {
+	case *types.Tuple:
+		for _, e := range tt.Elems() {
+			if containsTupleWrappingTypeParams(e, tps) {
+				return true
+			}
+		}
+	case *types.Instance:
+		for _, a := range tt.TypeArgs() {
+			if containsTupleWrappingTypeParams(a, tps) {
+				return true
+			}
+		}
+	case *types.Optional:
+		return containsTupleWrappingTypeParams(tt.Elem(), tps)
+	case *types.SharedRef:
+		return containsTupleWrappingTypeParams(tt.Elem(), tps)
+	case *types.MutRef:
+		return containsTupleWrappingTypeParams(tt.Elem(), tps)
+	case *types.Pointer:
+		return containsTupleWrappingTypeParams(tt.Elem(), tps)
+	case *types.Array:
+		return containsTupleWrappingTypeParams(tt.Elem(), tps)
+	case *types.Signature:
+		for _, p := range tt.Params() {
+			if containsTupleWrappingTypeParams(p.Type(), tps) {
+				return true
+			}
+		}
+		if tt.Result() != nil {
+			if containsTupleWrappingTypeParams(tt.Result(), tps) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// walkTypeContainsTypeParam reports whether t contains (anywhere in its
+// structure) any of the target TypeParams.
+func walkTypeContainsTypeParam(t types.Type, tps map[*types.TypeParam]bool) bool {
+	if t == nil {
+		return false
+	}
+	switch tt := t.(type) {
+	case *types.TypeParam:
+		return tps[tt]
+	case *types.Instance:
+		for _, a := range tt.TypeArgs() {
+			if walkTypeContainsTypeParam(a, tps) {
+				return true
+			}
+		}
+	case *types.Tuple:
+		for _, e := range tt.Elems() {
+			if walkTypeContainsTypeParam(e, tps) {
+				return true
+			}
+		}
+	case *types.Optional:
+		return walkTypeContainsTypeParam(tt.Elem(), tps)
+	case *types.SharedRef:
+		return walkTypeContainsTypeParam(tt.Elem(), tps)
+	case *types.MutRef:
+		return walkTypeContainsTypeParam(tt.Elem(), tps)
+	case *types.Pointer:
+		return walkTypeContainsTypeParam(tt.Elem(), tps)
+	case *types.Array:
+		return walkTypeContainsTypeParam(tt.Elem(), tps)
+	case *types.Signature:
+		for _, p := range tt.Params() {
+			if walkTypeContainsTypeParam(p.Type(), tps) {
+				return true
+			}
+		}
+		if tt.Result() != nil {
+			if walkTypeContainsTypeParam(tt.Result(), tps) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // instanceArgSpiralCheck reports whether any type arg of inst strictly contains
@@ -1939,6 +2143,7 @@ func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, 
 	// Unresolved instances from module's method bodies (e.g. _FnIter[T] inside
 	// Vector[T].iter()). These will be resolved transitively for each concrete inst.
 	unresolvedInsts := collectUnresolvedInstances(modInfo.SemaInfo)
+	wrapsCache := make(map[types.Type]bool)
 
 	// Transitively expand (same logic as collectMonoInstances).
 	for i := 0; i < len(result); i++ {
@@ -1967,7 +2172,7 @@ func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, 
 				}
 			}
 			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances)
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances, wrapsCache)
 			}
 		case *types.Enum:
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -1978,7 +2183,7 @@ func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, 
 				}
 			}
 			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances)
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances, wrapsCache)
 			}
 		}
 	}

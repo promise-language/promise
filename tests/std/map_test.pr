@@ -498,3 +498,68 @@ test_map_member_expr_value_no_double_free() `test {
   // r.name still valid — no double-free
   assert(r.name == "world", "original unchanged");
 }
+
+// T0400: Map with tuple value type. Previously panicked at codegen with
+// "no layout for type _FnIter[(K, V)]" because the mono spiral guard
+// over-marked Vector[(K, V)] as spiral, preventing _FnIter[T] from being
+// resolved during Vector.iter()'s body monomorphization.
+
+test_map_tuple_value_basics() `test {
+  m := map[string, (string, int)]();
+  m["a"] = ("alpha", 1);
+  m["b"] = ("beta", 2);
+
+  assert(m.len == 2, "len");
+  assert(m.contains("a"), "contains a");
+
+  if v := m["a"] {
+    (s, n) := v;
+    assert(s == "alpha", "tuple str field");
+    assert(n == 1, "tuple int field");
+  } else {
+    assert(false, "a missing");
+  }
+
+  m.remove("a");
+  assert(m.len == 1, "after remove");
+  assert(m.contains("a") == false, "a removed");
+}
+
+test_map_tuple_value_iter() `test {
+  m := map[string, (string, int)]();
+  m["x"] = ("ex", 10);
+  m["y"] = ("why", 20);
+
+  int total = 0;
+  for entry in m.entries() {
+    (k, v) := entry;
+    (s, n) := v;
+    total = total + n;
+  }
+  assert(total == 30, "iter total");
+}
+
+test_map_nested_tuple_value() `test {
+  m := map[string, ((string, int), int)]();
+  m["k"] = (("nested", 1), 99);
+
+  if v := m["k"] {
+    (inner, outer) := v;
+    (s, n) := inner;
+    assert(s == "nested", "nested str");
+    assert(n == 1, "nested int");
+    assert(outer == 99, "outer int");
+  } else {
+    assert(false, "k missing");
+  }
+}
+
+test_map_string_tuple_drop() `test {
+  // Exercises drop of (string, int) values — string elements must be freed
+  // as the map is dropped at scope exit. Leak detector enforces zero leaks.
+  m := map[string, (string, int)]();
+  m["k1"] = ("alpha", 1);
+  m["k2"] = ("beta", 2);
+  m["k3"] = ("gamma", 3);
+  assert(m.len == 3, "before drop");
+}

@@ -5292,15 +5292,31 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				if c.typeSubst != nil {
 					rhsType = types.Substitute(rhsType, c.typeSubst)
 				}
+				// T0490: Same skip applies to any element type whose [:]= body
+				// dups elements on read — string (T0386), tuple-needs-drop
+				// (T0412 dupTupleFieldAccess), heap user-type (T0398
+				// dupHeapUserFieldAccess). Symmetric with the dup-flag set
+				// in the IndexExpr-RHS branch above. Plain Vector[T]/Channel/
+				// Arc/Weak/enum elements still alias on read inside [:]=, so
+				// B0313's destructive shallow Vector.drop is correct for them.
 				skipB0313 := false
 				if elemType, isVec := types.AsVector(rhsType); isVec {
 					resolvedElem := elemType
 					if c.typeSubst != nil {
 						resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
 					}
-					if extractNamed(resolvedElem) == types.TypString {
+					isTupNeedsDrop := false
+					if _, isTup := resolvedElem.(*types.Tuple); isTup && c.tupleNeedsDrop(resolvedElem) {
+						isTupNeedsDrop = true
+					}
+					switch {
+					case extractNamed(resolvedElem) == types.TypString:
 						skipB0313 = true
-					} else {
+					case isTupNeedsDrop:
+						skipB0313 = true
+					case isDroppableHeapUserType(resolvedElem):
+						skipB0313 = true
+					default:
 						alloca := c.locals[ident.Name]
 						srcPtr := c.block.NewLoad(irtypes.I8Ptr, alloca)
 						c.block.NewCall(c.funcs["Vector.drop"], srcPtr)

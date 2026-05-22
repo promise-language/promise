@@ -15,81 +15,7 @@
       "updated": "2026-04-06"
     },
     "host_test_count": {
-      "value": 4402,
-      "direction": "up",
-      "updated": "2026-05-07"
-    },
-    "host_test_failures": {
-      "value": 0,
-      "direction": "exact",
-      "updated": "2026-04-06"
-    },
-    "promise_coverage_pct": {
-      "direction": "up"
-    },
-    "stress_flaky_count": {
-      "direction": "down"
-    },
-    "wasm_leak_count": {
-      "value": 0,
-      "direction": "down",
-      "updated": "2026-04-06"
-    },
-    "wasm_size_collections": {
-      "direction": "down"
-    },
-    "wasm_size_concurrency": {
-      "direction": "down"
-    },
-    "wasm_size_full": {
-      "direction": "down"
-    },
-    "wasm_size_minimal": {
-      "direction": "down"
-    },
-    "wasm_size_strings": {
-      "direction": "down"
-    },
-    "wasm_size_total": {
-      "direction": "down"
-    },
-    "wasm_test_count": {
-      "value": 4048,
-      "direction": "up",
-      "updated": "2026-05-07"
-    },
-    "wasm_test_failures": {
-      "value": 0,
-      "direction": "exact",
-      "updated": "2026-04-06"
-    },
-    "wasm_web_leak_count": {
-      "type": "informational"
-    },
-    "wasm_web_test_count": {
-      "type": "informational"
-    },
-    "wasm_web_test_failures": {
-      "type": "informational"
-    }
-  },
-  "linux-amd64": {
-    "go_coverage_pct": {
-      "direction": "up"
-    },
-    "go_test_count": {
-      "direction": "up"
-    },
-    "go_test_failures": {
-      "direction": "exact"
-    },
-    "host_leak_count": {
-      "value": 0,
-      "direction": "down",
-      "updated": "2026-04-06"
-    },
-    "host_test_count": {
-      "value": 4830,
+      "value": 4421,
       "direction": "up",
       "updated": "2026-05-08"
     },
@@ -128,7 +54,81 @@
       "direction": "down"
     },
     "wasm_test_count": {
-      "value": 4468,
+      "value": 4067,
+      "direction": "up",
+      "updated": "2026-05-08"
+    },
+    "wasm_test_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-04-06"
+    },
+    "wasm_web_leak_count": {
+      "type": "informational"
+    },
+    "wasm_web_test_count": {
+      "type": "informational"
+    },
+    "wasm_web_test_failures": {
+      "type": "informational"
+    }
+  },
+  "linux-amd64": {
+    "go_coverage_pct": {
+      "direction": "up"
+    },
+    "go_test_count": {
+      "direction": "up"
+    },
+    "go_test_failures": {
+      "direction": "exact"
+    },
+    "host_leak_count": {
+      "value": 0,
+      "direction": "down",
+      "updated": "2026-04-06"
+    },
+    "host_test_count": {
+      "value": 4849,
+      "direction": "up",
+      "updated": "2026-05-08"
+    },
+    "host_test_failures": {
+      "value": 0,
+      "direction": "exact",
+      "updated": "2026-04-06"
+    },
+    "promise_coverage_pct": {
+      "direction": "up"
+    },
+    "stress_flaky_count": {
+      "direction": "down"
+    },
+    "wasm_leak_count": {
+      "value": 0,
+      "direction": "down",
+      "updated": "2026-04-06"
+    },
+    "wasm_size_collections": {
+      "direction": "down"
+    },
+    "wasm_size_concurrency": {
+      "direction": "down"
+    },
+    "wasm_size_full": {
+      "direction": "down"
+    },
+    "wasm_size_minimal": {
+      "direction": "down"
+    },
+    "wasm_size_strings": {
+      "direction": "down"
+    },
+    "wasm_size_total": {
+      "direction": "down"
+    },
+    "wasm_test_count": {
+      "value": 4487,
       "direction": "up",
       "updated": "2026-05-08"
     },

@@ -1,0 +1,266 @@
+// T0490: Vector[(droppable, ...)] and Vector[heap_user] slice-assign regressions.
+// Call-site post-[:]= cleanup must skip B0313's destructive Vector.drop(src)
+// for element types whose [:]= body dups on read (T0386 string, T0412 tuple,
+// T0398 heap user). Without the skip, src's element heap fields are orphaned.
+test_t0490_tuple_string_int_slice() `test {
+  outer := (string, int)[]();
+  outer.push(("a" + "", 1));
+  outer.push(("b" + "", 2));
+  src := (string, int)[]();
+  src.push(("c" + "", 3));
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_tuple_vec_int_slice() `test {
+  v_a := string[]();
+  v_a.push("a" + "");
+  v_b := string[]();
+  v_b.push("b" + "");
+  outer := (string[], int)[]();
+  outer.push((v_a, 1));
+  outer.push((v_b, 2));
+  src := (string[], int)[]();
+  v_c := string[]();
+  v_c.push("c" + "");
+  src.push((v_c, 3));
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_tuple_nested_slice() `test {
+  outer := ((string, int), int)[]();
+  outer.push((("first" + "", 1), 10));
+  src := ((string, int), int)[]();
+  src.push((("second" + "", 2), 20));
+  outer[0:1] = src;
+  assert(outer.len == 1, "len");
+}
+
+type Box_t0490 {
+  string name;
+  drop(~this) {
+  }
+}
+
+test_t0490_heap_user_slice() `test {
+  outer := Box_t0490[]();
+  outer.push(Box_t0490(name: "a" + ""));
+  outer.push(Box_t0490(name: "b" + ""));
+  src := Box_t0490[]();
+  src.push(Box_t0490(name: "c" + ""));
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_tuple_with_heap_user() `test {
+  // Tuple containing a heap user-type — exercises dupTupleValue's recursion
+  // into Box via maybeDupPushElement. tupleNeedsDrop=true → skip B0313.
+  outer := (Box_t0490, int)[]();
+  outer.push((Box_t0490(name: "a" + ""), 1));
+  outer.push((Box_t0490(name: "b" + ""), 2));
+  src := (Box_t0490, int)[]();
+  src.push((Box_t0490(name: "c" + ""), 3));
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_multi_droppable_tuple() `test {
+  // Multiple droppable elements side-by-side — both fields must dup on read
+  // and both old fields must drop on overwrite inside the [:]= body.
+  outer := (string, string)[]();
+  outer.push(("a" + "", "b" + ""));
+  outer.push(("c" + "", "d" + ""));
+  src := (string, string)[]();
+  src.push(("e" + "", "f" + ""));
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_partial_slice() `test {
+  // Replace a sub-range with a shorter source — `[:]=` walks min(end-start, src.len).
+  outer := (string, int)[]();
+  outer.push(("a" + "", 1));
+  outer.push(("b" + "", 2));
+  outer.push(("c" + "", 3));
+  src := (string, int)[]();
+  src.push(("X" + "", 99));
+  outer[1:3] = src; // src.len=1, range=2 — only outer[1] overwritten
+  assert(outer.len == 3, "len");
+}
+
+// Regression guards — these must continue to work after the fix.
+
+test_t0490_value_tuple_no_skip() `test {
+  // Pure value tuple — tupleNeedsDrop=false, skipB0313 must NOT fire,
+  // destructive Vector.drop on src still runs (no-op for the int buffer).
+  outer := (int, int)[]();
+  outer.push((1, 2));
+  outer.push((3, 4));
+  src := (int, int)[]();
+  src.push((5, 6));
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_int_slice_no_skip() `test {
+  outer := int[]();
+  outer.push(1);
+  outer.push(2);
+  src := int[]();
+  src.push(99);
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_string_slice_t0386() `test {
+  // T0386: existing string skip — must still pass.
+  outer := string[]();
+  outer.push("a" + "");
+  outer.push("b" + "");
+  src := string[]();
+  src.push("c" + "");
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_inner_vec_slice_no_skip() `test {
+  // Vector[Vector[string]] — inner vec is aliased on read inside [:]= (no
+  // dup-flag fires for plain Vector elements at stmt.go:4894-4903), so the
+  // call-site B0313 destructive Vector.drop(src) path is correct. Regression
+  // guard: the T0490 fix must not accidentally trigger skipB0313 for this.
+  v_a := string[]();
+  v_a.push("a" + "");
+  v_b := string[]();
+  v_b.push("b" + "");
+  outer := Vector[string[]]();
+  outer.push(v_a);
+  outer.push(v_b);
+  v_c := string[]();
+  v_c.push("c" + "");
+  src := Vector[string[]]();
+  src.push(v_c);
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_channel_slice_no_skip() `test {
+  // Vector[Channel[int]] — channel element is aliased on read inside [:]=,
+  // call-site B0313 destructive path applies. Regression guard.
+  c_a := Channel[int](1);
+  c_b := Channel[int](1);
+  outer := Vector[Channel[int]]();
+  outer.push(c_a);
+  outer.push(c_b);
+  c_c := Channel[int](1);
+  src := Vector[Channel[int]]();
+  src.push(c_c);
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_tuple_int_vec_int_slice() `test {
+  // (int[], int) — droppable tuple containing a non-string vector. tupleNeedsDrop
+  // returns true via the vector-branch in tupleNeedsDrop (stmt.go:3749). Body
+  // dups the inner vector via dupTupleValue → maybeDupPushElement(int[]) → dupVector.
+  v_a := int[]();
+  v_a.push(1);
+  outer := (int[], int)[]();
+  outer.push((v_a, 10));
+  v_b := int[]();
+  v_b.push(2);
+  outer.push((v_b, 20));
+  v_c := int[]();
+  v_c.push(3);
+  src := (int[], int)[]();
+  src.push((v_c, 30));
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+type SynthBox_t0490 {
+  // Heap user-type with NO explicit drop method but a droppable string field
+  // → NeedsSynthDrop() == true. Exercises the second predicate inside
+  // isDroppableHeapUserType (stmt.go:3813).
+  string name;
+}
+
+test_t0490_synth_drop_heap_user_slice() `test {
+  outer := SynthBox_t0490[]();
+  outer.push(SynthBox_t0490(name: "a" + ""));
+  outer.push(SynthBox_t0490(name: "b" + ""));
+  src := SynthBox_t0490[]();
+  src.push(SynthBox_t0490(name: "c" + ""));
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+make_tuple_src_t0490()(string, int)[] {
+  // Helper for test_t0490_call_rhs_tuple_slice — non-IdentExpr RHS gates
+  // the entire skipB0313 block at stmt.go:5281, so this exercises a separate
+  // code path (stmt-temp drop walk) that must also walk tuple elements.
+  v := (string, int)[]();
+  v.push(("c" + "", 3));
+  v.push(("d" + "", 4));
+  return v;
+}
+
+test_t0490_call_rhs_tuple_slice() `test {
+  outer := (string, int)[]();
+  outer.push(("a" + "", 1));
+  outer.push(("b" + "", 2));
+  outer[0:1] = make_tuple_src_t0490();
+  assert(outer.len == 2, "len");
+}
+
+enum Color_t0490 {
+  Plain,
+  Named(string n),
+}
+
+test_t0490_tuple_with_droppable_enum_slice() `test {
+  // (Color_t0490, int) — droppable tuple containing a droppable enum (Named has
+  // a string variant payload). tupleNeedsDrop returns true via vecElemNeedsEnumDrop.
+  outer := (Color_t0490, int)[]();
+  outer.push((Color_t0490.Named("a" + ""), 1));
+  outer.push((Color_t0490.Named("b" + ""), 2));
+  src := (Color_t0490, int)[]();
+  src.push((Color_t0490.Named("c" + ""), 3));
+  outer[0:1] = src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_full_range_slice() `test {
+  // outer[:] = src — full-range slice assignment for tuple element type.
+  outer := (string, int)[]();
+  outer.push(("a" + "", 1));
+  outer.push(("b" + "", 2));
+  src := (string, int)[]();
+  src.push(("c" + "", 3));
+  src.push(("d" + "", 4));
+  outer[:]= src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_open_end_slice() `test {
+  // outer[1:] = src — open-ended slice (start only) for tuple element type.
+  outer := (string, int)[]();
+  outer.push(("a" + "", 1));
+  outer.push(("b" + "", 2));
+  src := (string, int)[]();
+  src.push(("c" + "", 3));
+  outer[1:]= src;
+  assert(outer.len == 2, "len");
+}
+
+test_t0490_zero_len_slice() `test {
+  // outer[0:0] = src — zero-length range, no overwrites; src must still be
+  // dup'd (or aliased then disarmed) without leaking.
+  outer := (string, int)[]();
+  outer.push(("a" + "", 1));
+  outer.push(("b" + "", 2));
+  src := (string, int)[]();
+  src.push(("c" + "", 3));
+  outer[0:0] = src;
+  assert(outer.len == 2, "len");
+}

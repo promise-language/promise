@@ -475,13 +475,22 @@ func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 				// Method defined on this type — use mono instance name
 				mangledName = mangleMethodName(name, m.Name(), m.IsSetter())
 			} else {
-				// Inherited method — resolve through mono parent chain
-				monoOwner := c.resolveMonoParentName(named, inst, ownerName)
-				mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
-				// Structural parents skip mono method generation — fall back to
-				// concrete mono name where synthesized defaults are registered.
-				if _, ok := c.funcs[mangledName]; !ok {
-					mangledName = mangleMethodName(name, m.Name(), m.IsSetter())
+				// Inherited method — prefer the child's own mono name if it
+				// exists (e.g. T0468 inherited-drop synthesis adds Box[int].drop
+				// even though drop is owned by Logger). Falls back to the parent's
+				// mono name otherwise. Without the child-first preference, virtual
+				// dispatch through the vtable would skip the child's field cleanup.
+				ownMangled := mangleMethodName(name, m.Name(), m.IsSetter())
+				if _, ok := c.funcs[ownMangled]; ok {
+					mangledName = ownMangled
+				} else {
+					monoOwner := c.resolveMonoParentName(named, inst, ownerName)
+					mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
+					// Structural parents skip mono method generation — fall back to
+					// concrete mono name where synthesized defaults are registered.
+					if _, ok := c.funcs[mangledName]; !ok {
+						mangledName = ownMangled
+					}
 				}
 			}
 			if fn, ok := c.funcs[mangledName]; ok {
@@ -750,7 +759,13 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 	for _, m := range methods {
 		ownerName := c.resolveMethodOwner(concrete, m.Name())
 		mangledName := mangleMethodName(ownerName, m.Name(), m.IsSetter())
-		if _, ok := c.funcs[mangledName]; !ok && ownerName != concrete.Obj().Name() {
+		// T0468: Prefer the concrete's mono name if it has its own (possibly
+		// synthesized) implementation — virtual dispatch must reach the child's
+		// override/synthesis, not the parent's directly.
+		concreteMonoMangled := mangleMethodName(concreteCacheKey, m.Name(), m.IsSetter())
+		if _, ok := c.funcs[concreteMonoMangled]; ok && ownerName != concrete.Obj().Name() {
+			mangledName = concreteMonoMangled
+		} else if _, ok := c.funcs[mangledName]; !ok && ownerName != concrete.Obj().Name() {
 			// Inherited method from a generic parent — resolve to mono name,
 			// same fallback as emitVtableGlobal.
 			monoOwner := c.resolveMonoParentName(concrete, fromType, ownerName)
@@ -758,9 +773,8 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 		}
 		// Also try the mono concrete name (e.g., Entity__int.method)
 		if _, ok := c.funcs[mangledName]; !ok {
-			monoMangledName := mangleMethodName(concreteCacheKey, m.Name(), m.IsSetter())
-			if _, ok2 := c.funcs[monoMangledName]; ok2 {
-				mangledName = monoMangledName
+			if _, ok2 := c.funcs[concreteMonoMangled]; ok2 {
+				mangledName = concreteMonoMangled
 			}
 		}
 		if fn, ok := c.funcs[mangledName]; ok {

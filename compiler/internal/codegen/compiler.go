@@ -753,6 +753,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.declareSynthesizedEnumDrops(file)                    // T0102: auto-synthesized enum drops (non-generic)
 	c.declareSynthesizedMonoDrops(file, monoInstances)     // B0158: auto-synthesized drops (generic)
 	c.declareSynthesizedMonoEnumDrops(file, monoInstances) // T0102: auto-synthesized enum drops (generic)
+	c.declareMonoInheritedDrops(monoInstances)             // T0468: drops inherited from generic parents
 
 	// Compute vtable info and emit vtable globals (after method stubs are declared)
 	c.computeVtableInfo(file)
@@ -793,6 +794,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineSynthesizedEnumDrops(file)                    // T0102: auto-synthesized enum drops (non-generic)
 	c.defineSynthesizedMonoDrops(file, monoInstances)     // B0158: auto-synthesized drops (generic)
 	c.defineSynthesizedMonoEnumDrops(file, monoInstances) // T0102: auto-synthesized enum drops (generic)
+	c.defineMonoInheritedDrops(monoInstances)             // T0468: drops inherited from generic parents
 	c.defineFuncs(file)
 	c.defineMonoFuncs(file, monoFuncInstances)
 	c.defineMonoMethodInstances(file, monoMethodInstances)
@@ -5512,6 +5514,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.declareSynthesizedModuleEnumDrops(modFile, irName)      // T0102
 	c.declareSynthesizedMonoDrops(modFile, monoInstances)     // B0158
 	c.declareSynthesizedMonoEnumDrops(modFile, monoInstances) // T0102
+	c.declareMonoInheritedDrops(monoInstances)                // T0468
 
 	// 6. Compute vtable info and emit for module types
 	c.computeVtableInfo(modFile)
@@ -5536,6 +5539,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.defineSynthesizedModuleEnumDrops(modFile, irName)      // T0102
 	c.defineSynthesizedMonoDrops(modFile, monoInstances)     // B0158
 	c.defineSynthesizedMonoEnumDrops(modFile, monoInstances) // T0102
+	c.defineMonoInheritedDrops(monoInstances)                // T0468
 
 	// 9. Define module function bodies
 	c.defineModuleFuncs(modFile, irName)
@@ -6615,6 +6619,14 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 // Called at the end of a user-defined drop() method to ensure fields are cleaned up.
 // Fields are dropped in reverse declaration order.
 func (c *Compiler) emitFieldDrops(named *types.Named) {
+	c.emitFieldDropsFor(named, named.AllFields())
+}
+
+// emitFieldDropsFor emits drop() calls for the given subset of `named`'s fields.
+// Used by emitFieldDrops (all fields, including inherited) and by inherited-drop
+// synthesis (T0468) which drops only the child's own fields before delegating to
+// the parent's mono drop. Fields are dropped in reverse declaration order.
+func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) {
 	layout := c.lookupTypeLayout(named)
 	if layout == nil {
 		return
@@ -6628,7 +6640,6 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 	thisPtr := c.block.NewLoad(thisAlloca.ElemType, thisAlloca)
 	typedPtr := c.block.NewBitCast(thisPtr, layout.InstancePtrType)
 
-	fields := named.AllFields()
 	for i := len(fields) - 1; i >= 0; i-- {
 		f := fields[i]
 

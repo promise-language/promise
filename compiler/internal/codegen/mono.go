@@ -1903,6 +1903,169 @@ func (c *Compiler) defineSynthesizedMonoDrops(file *ast.File, instances []*types
 	}
 }
 
+// findImmediateDropParent returns the immediate parent of `named` whose
+// LookupMethod("drop") is non-nil — i.e., the parent that supplies the drop
+// (whether own or inherited from a grandparent). For multi-level chains
+// (`C is B is A` with drop on A), this returns B for C and A for B, so the
+// per-instance synth drops cascade correctly. Skips structural parents.
+func findImmediateDropParent(named *types.Named) *types.Named {
+	for _, pr := range named.Parents() {
+		if pr.Named.IsStructural() {
+			continue
+		}
+		if pr.Named.LookupMethod("drop") != nil {
+			return pr.Named
+		}
+	}
+	return nil
+}
+
+// monoNeedsInheritedDropSynth returns true if a mono instance inherits its drop
+// from a parent (rather than defining its own) and therefore needs a synthesized
+// per-instance drop that drops the child's own fields and tail-calls the parent's
+// mono drop. T0468.
+func monoNeedsInheritedDropSynth(inst *types.Instance) bool {
+	named, ok := inst.Origin().(*types.Named)
+	if !ok {
+		return false
+	}
+	if named.IsStructural() || named.IsCopy() || named.IsValueType() {
+		return false
+	}
+	if !named.HasDrop() {
+		return false
+	}
+	if hasOwnMethod(named, "drop") {
+		return false // child has its own drop — emitFieldDrops in that body handles fields
+	}
+	// Synth-drop paths (B0158/B0202) already handle AllFields correctly.
+	if named.NeedsSynthDrop() || monoInstNeedsSynthDrop(inst) {
+		return false
+	}
+	dropMethod := named.LookupMethod("drop")
+	if dropMethod == nil || dropMethod.IsNative() {
+		return false
+	}
+	return true
+}
+
+// declareMonoInheritedDrops declares a per-instance drop stub for mono instances
+// whose drop is inherited from a generic parent (T0468). Without this synthesis,
+// emitFieldDrops cannot find a function named e.g. `_Box[int].drop` and silently
+// skips the call, leaking the child's own heap fields. The body (defined in
+// defineMonoInheritedDrops) drops the child's own fields and tail-calls the
+// parent's mono drop, which runs the parent body and drops the parent's fields.
+func (c *Compiler) declareMonoInheritedDrops(instances []*types.Instance) {
+	for _, inst := range instances {
+		if !monoNeedsInheritedDropSynth(inst) {
+			continue
+		}
+		name := monoName(inst)
+		mangledName := mangleMethodName(name, "drop", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, irtypes.Void,
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+		if c.compilingModule != "" {
+			c.moduleOwnedFuncs[mangledName] = c.compilingModule
+		}
+	}
+}
+
+// defineMonoInheritedDrops generates bodies for synthesized inherited-drop
+// stubs. The body drops the child's own fields (in reverse declaration order)
+// and then tail-calls the parent type's mono drop, which runs the parent's
+// user-written drop body and emits its own emitFieldDrops over the parent's
+// fields. Order matches Rust's "child cleanup first, then super.drop". T0468.
+func (c *Compiler) defineMonoInheritedDrops(instances []*types.Instance) {
+	for _, inst := range instances {
+		if !monoNeedsInheritedDropSynth(inst) {
+			continue
+		}
+		named := inst.Origin().(*types.Named)
+		name := monoName(inst)
+		mangledName := mangleMethodName(name, "drop", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		// Tag as instance-owned for SplitInstanceIRs.
+		c.instanceOwnedFuncs[mangledName] = name
+		// Skip body generation for cached instances.
+		if c.cachedInstances[name] {
+			continue
+		}
+
+		// Resolve the immediate parent that owns drop (own or inherited). For
+		// `C is B is A` with drop on A, C's drop must call B's drop (which we
+		// also synthesize), not A's drop directly — otherwise B's own fields
+		// leak. The synthesis cascades naturally because B's synth drops B's
+		// fields then calls A's drop.
+		parentNamed := findImmediateDropParent(named)
+		if parentNamed == nil {
+			entry := fn.NewBlock(".entry")
+			entry.NewRet(nil)
+			continue
+		}
+		parentMonoName := c.resolveMonoParentName(named, inst, parentNamed.Obj().Name())
+		parentMangled := mangleMethodName(parentMonoName, "drop", false)
+		parentFn := c.funcs[parentMangled]
+		if parentFn == nil {
+			// Parent's drop function not yet declared — no-op stub. Should not
+			// happen in practice: declareMonoMethods (for parents with own drop)
+			// and declareMonoInheritedDrops (for parents that also inherit) both
+			// run before define.
+			entry := fn.NewBlock(".entry")
+			entry.NewRet(nil)
+			continue
+		}
+
+		entry := fn.NewBlock(".entry")
+		savedBlock := c.block
+		savedFn := c.fn
+		savedEntry := c.entryBlock
+		savedPanicExit := c.panicExitBlock
+		savedCoroReturn := c.coroutineReturnBlock
+		savedLocals := c.locals
+		savedTypeSubst := c.typeSubst
+		savedMonoCtx := c.monoCtx
+
+		c.block = entry
+		c.fn = fn
+		c.entryBlock = entry
+		c.panicExitBlock = nil
+		c.coroutineReturnBlock = nil
+		c.locals = make(map[string]*ir.InstAlloca)
+
+		thisAlloca := entry.NewAlloca(irtypes.I8Ptr)
+		entry.NewStore(fn.Params[0], thisAlloca)
+		c.locals["this"] = thisAlloca
+
+		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+		mergeParentSubst(named, subst)
+		c.typeSubst = subst
+		c.monoCtx = &monoContext{inst: inst, origin: named, name: name}
+
+		// Drop the child's own fields only (parent fields are dropped by parent's drop).
+		c.emitFieldDropsFor(named, named.Fields())
+
+		// Tail-call the parent's mono drop, which runs parent body + parent fields.
+		c.block.NewCall(parentFn, fn.Params[0])
+		c.block.NewRet(nil)
+
+		c.block = savedBlock
+		c.fn = savedFn
+		c.entryBlock = savedEntry
+		c.panicExitBlock = savedPanicExit
+		c.coroutineReturnBlock = savedCoroReturn
+		c.locals = savedLocals
+		c.typeSubst = savedTypeSubst
+		c.monoCtx = savedMonoCtx
+	}
+}
+
 // declareSynthesizedMonoEnumDrops declares drop stubs for monomorphized enum instances
 // that need a compiler-synthesized drop (T0102/B0212).
 func (c *Compiler) declareSynthesizedMonoEnumDrops(file *ast.File, instances []*types.Instance) {

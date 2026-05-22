@@ -133,3 +133,17 @@ type TupleConsumer `public {
     this.last_n = n;
   }
 }
+
+// --- T0468: generic type defined in a module that inherits drop from another
+// generic type defined in the same module. Used by tests to verify the
+// inherited-drop synthesis runs through the module-compile pipeline path
+// (declareMonoInheritedDrops with c.compilingModule != "").
+type _T0468ModLogger[T] `public {
+  T val;
+  drop(~this) {
+  }
+}
+
+type _T0468ModBox[T] is _T0468ModLogger[T] `public {
+  string label;
+}

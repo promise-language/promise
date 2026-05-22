@@ -35,3 +35,15 @@ test_t0406_module_method_tuple_param() `test {
   c.consume_pair(("hello".to_string(), 42));
   assert(c.last_n == 42, "consumer recorded n");
 }
+
+// T0468: generic type in a module that inherits drop from a generic parent.
+// Both types live in the module, so declareMonoInheritedDrops/defineMonoInheritedDrops
+// run through the c.compilingModule != "" path and register the synthesized
+// drop in moduleOwnedFuncs. Without the synthesis the child's own field (label)
+// would leak.
+test_t0468_module_inherited_drop_no_leak() `test {
+  s := "label".repeat(2);
+  b := mathlib._T0468ModBox[int](val: 1, label: s);
+  assert(b.val == 1, "val");
+  assert(b.label == "labellabel", "label");
+}

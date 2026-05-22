@@ -1,0 +1,196 @@
+// T0468: A generic field whose drop is inherited from a generic parent (rather
+// than defined on the field type itself) had its drop call silently skipped.
+// The mangled name `Box[int].drop` did not exist (only `Logger[int].drop` was
+// emitted), so emitFieldDrops / emitOptionalFieldReassignDrop fell through and
+// the child's own heap fields leaked. The fix synthesizes a per-instance drop
+// that drops the child's own fields and tail-calls the parent's mono drop.
+type _T0468Logger[T] {
+  T val;
+  drop(~this) {
+  }
+}
+
+type _T0468Box[T] is _T0468Logger[T] {
+  string label;
+}
+
+type _T0468Holder[T] {
+  _T0468Box[T] data;
+}
+
+type _T0468OptHolder[T] {
+  _T0468Box[T]? data;
+}
+
+inherit_field_label_no_leak() `test {
+  s := "hello".repeat(2);
+  h := _T0468Holder[int](data: _T0468Box[int](val: 1, label: s));
+  assert(h.data.val == 1, "v");
+}
+
+inherit_field_val_heap_no_leak() `test {
+  v := "v".repeat(2);
+  h := _T0468Holder[string](data: _T0468Box[string](val: v, label: "fixed"));
+  assert(h.data.val == "vv", "v");
+}
+
+inherit_field_both_heap_no_leak() `test {
+  v := "v".repeat(2);
+  s := "s".repeat(2);
+  h := _T0468Holder[string](data: _T0468Box[string](val: v, label: s));
+  assert(h.data.val == "vv", "v");
+  assert(h.data.label == "ss", "label");
+}
+
+inherit_local_no_leak() `test {
+  s := "x".repeat(2);
+  b := _T0468Box[int](val: 7, label: s);
+  assert(b.val == 7, "v");
+  assert(b.label == "xx", "label");
+}
+
+inherit_optional_to_none_no_leak() `test {
+  s := "x".repeat(2);
+  h := _T0468OptHolder[int](data: _T0468Box[int](val: 1, label: s));
+  h.data = none;
+  assert(!(h.data is _T0468Box[int]), "absent");
+}
+
+inherit_optional_to_value_no_leak() `test {
+  s1 := "old".repeat(2);
+  s2 := "new".repeat(2);
+  h := _T0468OptHolder[int](data: _T0468Box[int](val: 1, label: s1));
+  h.data = _T0468Box[int](val: 2, label: s2);
+  assert(h.data is _T0468Box[int], "present");
+}
+
+// Three-level chain: drop on _T0468A only; _T0468B and _T0468C have their own
+// fields. All three layers' fields must be dropped.
+type _T0468A[T] {
+  T anchor;
+  drop(~this) {
+  }
+}
+
+type _T0468B[T] is _T0468A[T] {
+  string mid;
+}
+
+type _T0468C[T] is _T0468B[T] {
+  string outer;
+}
+
+type _T0468ChainHolder[T] {
+  _T0468C[T] data;
+}
+
+inherit_chain_no_leak() `test {
+  m := "m".repeat(2);
+  o := "o".repeat(2);
+  h := _T0468ChainHolder[int](data: _T0468C[int](anchor: 1, mid: m, outer: o));
+  assert(h.data.mid == "mm", "mid");
+  assert(h.data.outer == "oo", "outer");
+}
+
+// Virtual drop dispatch: Box[T] is held as Logger[T] through a function
+// parameter, so the call site emits a vtable-dispatched drop (not direct).
+// The vtable for Box[T] must point to Box[T].drop — not Logger[T].drop —
+// otherwise the child's own fields leak through the dispatch.
+_T0468_receive[T](~_T0468Logger[T] l) {
+}
+
+inherit_virtual_dispatch_no_leak() `test {
+  s := "v".repeat(2);
+  _T0468_receive[int](_T0468Box[int](val: 1, label: s));
+}
+
+// Child with no own fields — synthesis still runs but the own-field drop loop
+// is empty. Body must just forward to the parent's drop.
+type _T0468Plain[T] is _T0468Logger[T] {
+}
+
+type _T0468PlainHolder[T] {
+  _T0468Plain[T] data;
+}
+
+inherit_no_own_fields_no_leak() `test {
+  v := "v".repeat(2);
+  h := _T0468PlainHolder[string](data: _T0468Plain[string](val: v));
+  assert(h.data.val == "vv", "v");
+}
+
+// Vector elements are dropped via emitVectorElementDrops → emitVariantFieldDrop,
+// which calls @"_T0468Box[int].drop" (the synth) and then pal_free. Without the
+// T0468 synth, the lookup for Box[int].drop returns nil and the call is silently
+// skipped — both the own field (label) and parent's pal_free would leak.
+inherit_in_vector_no_leak() `test {
+  s1 := "a".repeat(2);
+  s2 := "b".repeat(2);
+  s3 := "c".repeat(2);
+  _T0468Box[int][] xs = [_T0468Box[int](val: 1, label: s1),
+  _T0468Box[int](val: 2, label: s2),
+  _T0468Box[int](val: 3, label: s3),
+  ];
+  assert(xs.len == 3, "len");
+  assert(xs[0].label == "aa", "0.label");
+  assert(xs[2].val == 3, "2.val");
+}
+
+// Map values exercise the same emitVariantFieldDrop path as vectors. Keys are
+// strings (literal) so only the value drop is interesting here.
+inherit_in_map_no_leak() `test {
+  s1 := "x".repeat(2);
+  s2 := "y".repeat(2);
+  map[string, _T0468Box[int]] m = {
+    "a": _T0468Box[int](val: 1, label: s1),
+    "b": _T0468Box[int](val: 2, label: s2),
+  };
+  assert(m.len == 2, "len");
+  assert(m.contains("a"), "a present");
+  assert(m.contains("b"), "b present");
+}
+
+// Non-generic parent + generic child: drop owner is non-generic so
+// findMonoParentName returns the plain name "_T0468NgParent" and the synth
+// tail-calls @"_T0468NgParent.drop" (no mono suffix). Covers the
+// `len(pr.TypeArgs) == 0` branch of findMonoParentName via resolveMonoParentName.
+type _T0468NgParent {
+  string note;
+  drop(~this) {
+  }
+}
+
+type _T0468NgChild[T] is _T0468NgParent {
+  T extra;
+  string label;
+}
+
+type _T0468NgHolder[T] {
+  _T0468NgChild[T] data;
+}
+
+inherit_non_generic_parent_no_leak() `test {
+  n := "n".repeat(2);
+  s := "s".repeat(2);
+  h := _T0468NgHolder[int](data: _T0468NgChild[int](note: n, extra: 7, label: s));
+  assert(h.data.note == "nn", "note");
+  assert(h.data.extra == 7, "extra");
+  assert(h.data.label == "ss", "label");
+}
+
+// Field reassignment on a non-optional field. The old value's drop must run
+// — emitFieldDrops on the old-value path and then the new value gets stored.
+// Covers the same lookup as emitOptionalFieldReassignDrop but on the
+// regular-field assignment path (B0245 / store-to-field drop).
+type _T0468ReassignHolder[T] {
+  _T0468Box[T] data;
+}
+
+inherit_field_reassign_no_leak() `test {
+  s1 := "old".repeat(2);
+  s2 := "new".repeat(2);
+  h := _T0468ReassignHolder[int](data: _T0468Box[int](val: 1, label: s1));
+  h.data = _T0468Box[int](val: 2, label: s2);
+  assert(h.data.val == 2, "val");
+  assert(h.data.label == "newnew", "label");
+}

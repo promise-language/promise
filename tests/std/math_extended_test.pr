@@ -1,0 +1,404 @@
+// math_extended_test.pr — libm-quality boundary tests for sin/cos/tan/exp/log/pow.
+//
+// Exercises values at extremes (large/small/negative/special) where the previous
+// Taylor-series implementation lost accuracy or didn't propagate IEEE 754 specials
+// correctly. After T0337 the WASM math runtime is musl libm, so these tests must
+// pass on both host and WASM with ~1 ULP accuracy in the primary range and exact
+// results on NaN/±Inf/±0.
+//
+// NaN/Inf checks use the `f64.is_nan` / `f64.is_infinite` bit-pattern getters
+// rather than the `is_nan(x)`/`is_inf(x)` functions in std/math.pr — the latter
+// rely on `x != x`, which Promise currently emits as `fcmp one` (ordered, returns
+// false when either operand is NaN) instead of `fcmp une`. See T0463.
+// --- helpers ---
+// Approximate equality with a relative tolerance. Returns true for exact 0/0
+// matches and for values within `tol` of the expected (relative when expected
+// is non-zero, absolute otherwise).
+approx(f64 actual, f64 expected, f64 tol) bool {
+  f64 d = actual - expected;
+  if d < 0.0 {
+    d = 0.0 - d;
+  }
+  f64 e = expected;
+  if e < 0.0 {
+    e = 0.0 - e;
+  }
+  if e < 1.0 {
+    return d <= tol;
+  }
+  return d <= tol * e;
+}
+
+// --- sin / cos: exact and near-boundary values ---
+
+test_sin_exact_zero() `test {
+  // sin(0) is exactly 0 (not just close to it).
+  assert(sin(0.0) == 0.0, "sin(0) is exactly 0");
+  // sin(-0) preserves the sign: it is also exactly 0, and per IEEE 754 should
+  // be -0 (bit pattern 0x8000000000000000). Constructing -0 via 0 * -1 (since
+  // `0.0 - 0.0` rounds to +0 in round-to-nearest).
+  f64 neg_zero = 0.0 * (0.0 - 1.0);
+  assert(sin(neg_zero) == 0.0, "sin(-0) is 0");
+}
+
+test_sin_pi() `test {
+  // sin(pi) should be tiny (<1e-15) — Taylor with naive reduction gave ~1e-9.
+  f64 s = sin(f64.pi);
+  f64 a = s;
+  if a < 0.0 {
+    a = 0.0 - a;
+  }
+  assert(a < 1e-15, "|sin(pi)| < 1e-15");
+}
+
+test_sin_2pi() `test {
+  // sin(2*pi) — same precision target as sin(pi).
+  f64 s = sin(2.0 * f64.pi);
+  f64 a = s;
+  if a < 0.0 {
+    a = 0.0 - a;
+  }
+  assert(a < 1e-14, "|sin(2*pi)| < 1e-14");
+}
+
+test_sin_half_pi() `test {
+  // sin(pi/2) = 1 exactly within ~1 ULP.
+  assert(approx(sin(f64.pi / 2.0), 1.0, 1e-15), "sin(pi/2) == 1");
+}
+
+test_sin_large_arg() `test {
+  // sin of a large argument requires high-quality argument reduction
+  // (Payne-Hanek) — Taylor series with float-mod reduction lost accuracy.
+  // sin(100*pi) should be very near 0.
+  f64 s = sin(100.0 * f64.pi);
+  f64 a = s;
+  if a < 0.0 {
+    a = 0.0 - a;
+  }
+  assert(a < 1e-12, "|sin(100*pi)| < 1e-12");
+}
+
+test_sin_negative() `test {
+  // sin(-x) == -sin(x) within 1 ULP.
+  assert(approx(sin(0.0 - 1.0), 0.0 - sin(1.0), 1e-15), "sin(-1) == -sin(1)");
+}
+
+test_sin_nan() `test {
+  // sin(NaN) == NaN. The previous Taylor-series implementation would have
+  // returned a finite garbage value because the floor-based reduction did not
+  // detect NaN.
+  assert(sin(f64.nan).is_nan, "sin(nan) == nan");
+}
+
+test_sin_inf() `test {
+  // sin(±Inf) == NaN — argument reduction is undefined for infinity. The
+  // previous implementation would have looped/returned garbage; musl's
+  // __rem_pio2 returns NaN.
+  assert(sin(f64.infinity).is_nan, "sin(+inf) == nan");
+  assert(sin(0.0 - f64.infinity).is_nan, "sin(-inf) == nan");
+}
+
+test_cos_exact_zero() `test {
+  assert(cos(0.0) == 1.0, "cos(0) is exactly 1");
+}
+
+test_cos_half_pi() `test {
+  // cos(pi/2) should be very close to 0.
+  f64 c = cos(f64.pi / 2.0);
+  f64 a = c;
+  if a < 0.0 {
+    a = 0.0 - a;
+  }
+  assert(a < 1e-15, "|cos(pi/2)| < 1e-15");
+}
+
+test_cos_pi() `test {
+  // cos(pi) = -1 exactly within 1 ULP.
+  assert(approx(cos(f64.pi), 0.0 - 1.0, 1e-15), "cos(pi) == -1");
+}
+
+test_cos_negative() `test {
+  // cos(-x) == cos(x) (cosine is even).
+  assert(cos(0.0 - 1.5) == cos(1.5), "cos(-1.5) == cos(1.5)");
+}
+
+test_cos_nan() `test {
+  // cos(NaN) == NaN.
+  assert(cos(f64.nan).is_nan, "cos(nan) == nan");
+}
+
+test_cos_inf() `test {
+  // cos(±Inf) == NaN.
+  assert(cos(f64.infinity).is_nan, "cos(+inf) == nan");
+  assert(cos(0.0 - f64.infinity).is_nan, "cos(-inf) == nan");
+}
+
+test_sin_cos_pythagorean() `test {
+  // sin² + cos² == 1 for a non-trivial argument.
+  f64 x = 1.5;
+  f64 s = sin(x);
+  f64 c = cos(x);
+  assert(approx(s * s + c * c, 1.0, 1e-15), "sin² + cos² == 1");
+}
+
+// --- tan ---
+
+test_tan_zero() `test {
+  assert(tan(0.0) == 0.0, "tan(0) is exactly 0");
+}
+
+test_tan_pi_over_4() `test {
+  // tan(pi/4) = 1.
+  assert(approx(tan(f64.pi / 4.0), 1.0, 1e-15), "tan(pi/4) == 1");
+}
+
+test_tan_nan() `test {
+  // tan(NaN) == NaN. Note: in std/math.pr `tan` is implemented as `sin/cos`,
+  // so this also exercises NaN propagation through division.
+  assert(tan(f64.nan).is_nan, "tan(nan) == nan");
+}
+
+test_tan_inf() `test {
+  // tan(±Inf) == NaN — same reduction undefined-on-infinity rationale as sin.
+  assert(tan(f64.infinity).is_nan, "tan(+inf) == nan");
+  assert(tan(0.0 - f64.infinity).is_nan, "tan(-inf) == nan");
+}
+
+// --- exp ---
+
+test_exp_zero() `test {
+  assert(exp(0.0) == 1.0, "exp(0) is exactly 1");
+}
+
+test_exp_one() `test {
+  // exp(1) == e to within 1 ULP.
+  assert(approx(exp(1.0), f64.e, 1e-15), "exp(1) == e");
+}
+
+test_exp_large_positive() `test {
+  // exp(700) is very large but finite (~1e304). Taylor-series with int-part
+  // multiply lost lots of precision here; libm gets ~1 ULP.
+  f64 r = exp(700.0);
+  // Expected value: 1.0142320547350045e+304 (matches libm/wolfram).
+  assert(approx(r, 1.0142320547350045e304, 1e-13), "exp(700) ~= 1.014e304");
+}
+
+test_exp_overflow_to_inf() `test {
+  // exp(1000) overflows to +Inf in IEEE 754. The previous implementation
+  // returned a finite garbage value.
+  f64 r = exp(1000.0);
+  assert(r.is_infinite, "exp(1000) overflows to +Inf");
+  assert(r > 0.0, "exp(1000) overflows to *positive* Inf");
+}
+
+test_exp_underflow_to_zero() `test {
+  // exp(-1000) underflows to 0.
+  f64 r = exp(0.0 - 1000.0);
+  assert(r == 0.0, "exp(-1000) underflows to 0");
+}
+
+test_exp_neg_inf() `test {
+  // exp(-Inf) == 0 exactly.
+  f64 r = exp(0.0 - f64.infinity);
+  assert(r == 0.0, "exp(-inf) == 0");
+}
+
+test_exp_pos_inf() `test {
+  // exp(+Inf) == +Inf.
+  f64 r = exp(f64.infinity);
+  assert(r.is_infinite && r > 0.0, "exp(+inf) == +inf");
+}
+
+test_exp_nan() `test {
+  // exp(NaN) == NaN.
+  f64 r = exp(f64.nan);
+  assert(r.is_nan, "exp(nan) == nan");
+}
+
+// --- log ---
+
+test_log_one() `test {
+  assert(log(1.0) == 0.0, "log(1) is exactly 0");
+}
+
+test_log_e() `test {
+  assert(approx(log(f64.e), 1.0, 1e-15), "log(e) == 1");
+}
+
+test_log_large() `test {
+  // log(1e100) = 100 * ln(10) ≈ 230.2585
+  assert(approx(log(1e100), 230.2585092994046, 1e-12), "log(1e100) ~= 230.26");
+}
+
+test_log_small() `test {
+  // log(1e-100) = -100 * ln(10) ≈ -230.2585
+  assert(approx(log(1e-100), 0.0 - 230.2585092994046, 1e-12), "log(1e-100) ~= -230.26");
+}
+
+test_log_zero() `test {
+  // log(0) == -Inf (not a sentinel like the previous -1e308).
+  f64 r = log(0.0);
+  assert(r.is_infinite && r < 0.0, "log(0) == -inf");
+}
+
+test_log_negative() `test {
+  // log(negative) == NaN.
+  f64 r = log(0.0 - 1.0);
+  assert(r.is_nan, "log(-1) == nan");
+}
+
+test_log_pos_inf() `test {
+  // log(+Inf) == +Inf.
+  f64 r = log(f64.infinity);
+  assert(r.is_infinite && r > 0.0, "log(+inf) == +inf");
+}
+
+test_log_nan() `test {
+  // log(NaN) == NaN.
+  f64 r = log(f64.nan);
+  assert(r.is_nan, "log(nan) == nan");
+}
+
+// --- pow ---
+
+test_pow_zero_zero() `test {
+  // pow(0, 0) == 1 by IEEE 754 convention.
+  assert(pow(0.0, 0.0) == 1.0, "pow(0, 0) == 1");
+}
+
+test_pow_one_anything() `test {
+  // pow(1, x) == 1 for any finite x — including very large.
+  assert(pow(1.0, 1e100) == 1.0, "pow(1, 1e100) == 1");
+  assert(pow(1.0, 0.0 - 1e100) == 1.0, "pow(1, -1e100) == 1");
+}
+
+test_pow_one_inf() `test {
+  // pow(1, +Inf) == 1 by IEEE 754 convention.
+  assert(pow(1.0, f64.infinity) == 1.0, "pow(1, +inf) == 1");
+}
+
+test_pow_integer_exponent() `test {
+  // pow(2, 10) == 1024 exactly.
+  assert(pow(2.0, 10.0) == 1024.0, "pow(2, 10) == 1024 exactly");
+}
+
+test_pow_negative_integer_exponent() `test {
+  // pow(2, -10) == 1/1024.
+  assert(approx(pow(2.0, 0.0 - 10.0), 1.0 / 1024.0, 1e-15), "pow(2, -10) == 1/1024");
+}
+
+test_pow_fractional() `test {
+  // pow(2, 0.5) == sqrt(2).
+  assert(approx(pow(2.0, 0.5), sqrt(2.0), 1e-15), "pow(2, 0.5) == sqrt(2)");
+}
+
+test_pow_negative_base_fractional_exp() `test {
+  // pow(-1, 0.5) == NaN (no real square root of negative).
+  f64 r = pow(0.0 - 1.0, 0.5);
+  assert(r.is_nan, "pow(-1, 0.5) == nan");
+}
+
+test_pow_nan_propagation() `test {
+  // NaN in either input — except for the (1, x) and (x, 0) special cases —
+  // propagates to NaN.
+  f64 r1 = pow(f64.nan, 2.0);
+  f64 r2 = pow(2.0, f64.nan);
+  assert(r1.is_nan, "pow(nan, 2) == nan");
+  assert(r2.is_nan, "pow(2, nan) == nan");
+}
+
+test_pow_zero_positive() `test {
+  // pow(0, +x) == 0 for x > 0.
+  assert(pow(0.0, 5.0) == 0.0, "pow(0, 5) == 0");
+}
+
+test_pow_zero_negative() `test {
+  // pow(0, -x) == +Inf for x > 0 (division by zero).
+  f64 r = pow(0.0, 0.0 - 5.0);
+  assert(r.is_infinite && r > 0.0, "pow(0, -5) == +inf");
+}
+
+test_pow_inf_positive() `test {
+  // pow(+Inf, x) == +Inf for x > 0.
+  f64 r = pow(f64.infinity, 2.0);
+  assert(r.is_infinite && r > 0.0, "pow(+inf, 2) == +inf");
+}
+
+test_pow_inf_negative() `test {
+  // pow(+Inf, -x) == 0 for x > 0.
+  assert(pow(f64.infinity, 0.0 - 2.0) == 0.0, "pow(+inf, -2) == 0");
+}
+
+test_pow_one_nan() `test {
+  // pow(1, NaN) == 1 by IEEE 754 convention — same family as pow(1, +Inf).
+  assert(pow(1.0, f64.nan) == 1.0, "pow(1, nan) == 1");
+}
+
+test_pow_nan_zero() `test {
+  // pow(NaN, 0) == 1 by IEEE 754 convention — same family as pow(x, 0) == 1.
+  // The previous implementation propagated NaN here because it had no special
+  // case for exponent 0.
+  assert(pow(f64.nan, 0.0) == 1.0, "pow(nan, 0) == 1");
+}
+
+test_pow_base_gt_one_pos_inf() `test {
+  // pow(x, +Inf) for |x| > 1 → +Inf.
+  f64 r = pow(2.0, f64.infinity);
+  assert(r.is_infinite && r > 0.0, "pow(2, +inf) == +inf");
+}
+
+test_pow_base_lt_one_pos_inf() `test {
+  // pow(x, +Inf) for 0 < |x| < 1 → 0.
+  assert(pow(0.5, f64.infinity) == 0.0, "pow(0.5, +inf) == 0");
+}
+
+test_pow_base_gt_one_neg_inf() `test {
+  // pow(x, -Inf) for |x| > 1 → 0.
+  assert(pow(2.0, 0.0 - f64.infinity) == 0.0, "pow(2, -inf) == 0");
+}
+
+test_pow_base_lt_one_neg_inf() `test {
+  // pow(x, -Inf) for 0 < |x| < 1 → +Inf.
+  f64 r = pow(0.5, 0.0 - f64.infinity);
+  assert(r.is_infinite && r > 0.0, "pow(0.5, -inf) == +inf");
+}
+
+test_pow_neg_inf_even_exp() `test {
+  // pow(-Inf, n) for n > 0 even integer → +Inf.
+  f64 r = pow(0.0 - f64.infinity, 2.0);
+  assert(r.is_infinite && r > 0.0, "pow(-inf, 2) == +inf");
+}
+
+test_pow_neg_inf_odd_exp() `test {
+  // pow(-Inf, n) for n > 0 odd integer → -Inf (sign preserved).
+  f64 r = pow(0.0 - f64.infinity, 3.0);
+  assert(r.is_infinite && r < 0.0, "pow(-inf, 3) == -inf");
+}
+
+test_pow_neg_inf_neg_exp() `test {
+  // pow(-Inf, n) for n < 0 → 0.
+  assert(pow(0.0 - f64.infinity, 0.0 - 2.0) == 0.0, "pow(-inf, -2) == 0");
+}
+
+// --- sqrt: IEEE 754 specials (wrapper over __builtin_sqrt → native f64.sqrt) ---
+
+test_sqrt_negative() `test {
+  // sqrt of a negative real returns NaN.
+  assert(sqrt(0.0 - 1.0).is_nan, "sqrt(-1) == nan");
+}
+
+test_sqrt_nan() `test {
+  // sqrt(NaN) == NaN.
+  assert(sqrt(f64.nan).is_nan, "sqrt(nan) == nan");
+}
+
+test_sqrt_pos_inf() `test {
+  // sqrt(+Inf) == +Inf.
+  f64 r = sqrt(f64.infinity);
+  assert(r.is_infinite && r > 0.0, "sqrt(+inf) == +inf");
+}
+
+test_sqrt_zero() `test {
+  // sqrt(+0) == +0 exactly.
+  assert(sqrt(0.0) == 0.0, "sqrt(0) == 0");
+}

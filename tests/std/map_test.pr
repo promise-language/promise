@@ -626,6 +626,34 @@ test_map_vector_value_iter() `test {
   assert(count == 1, "iter count");
 }
 
+// T0404: Map[string, string[]] — heap-of-heap V (Vector wrapping heap strings).
+// Mirrors the exact T0404 repro. Underlying fix: T0400 (originWrapsTypeParams
+// precondition in resolveUnresolvedInstances). Locks in the contract for V's
+// that themselves wrap a heap-droppable type (deeper chain than T0408).
+test_map_string_vec_string() `test {
+  m := map[string, string[]]();
+  v := string[]();
+  v.push("x" + "");
+  m["k" + ""] = v;
+  if got := m["k" + ""] {
+    assert(got.len == 1, "len 1");
+  }
+}
+
+// T0404: forces _FnIter[(string, string[])] codegen via entries() iteration —
+// the exact mono panic site reported by T0404 ("no layout for _FnIter[(string, string[])]").
+test_map_string_vec_string_iter() `test {
+  m := map[string, string[]]();
+  v := string[]();
+  v.push("hello" + "");
+  m["k" + ""] = v;
+  count := 0;
+  for entry in m.entries() {
+    count = count + 1;
+  }
+  assert(count == 1, "iter count");
+}
+
 // T0397: Heap string in tuple-valued map — repeated reads must not double-free.
 // Uses .to_string() to force heap allocation (literal-only tests miss the bug
 // because pal_free short-circuits on the literal flag).

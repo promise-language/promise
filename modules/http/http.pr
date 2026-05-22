@@ -136,7 +136,9 @@ type Response `public `doc("An HTTP response.") {
 
   get status_code int `public `doc("The response status code.") => this.status;
 
-  get response_headers map[string, string] `public `doc("The response headers (keys are lowercase).") => this.headers;
+  response_headers() map[string, string] `public `doc("The response headers (keys are lowercase).") {
+    return this.headers.clone();
+  }
 
   get body string `public `doc("The response body as a string.") => this._body;
 

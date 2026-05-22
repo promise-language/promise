@@ -703,6 +703,13 @@ func (c *Checker) isValueTarget(e *ast.MemberExpr) bool {
 	if _, ok := target.(*ast.CallExpr); ok {
 		return true
 	}
+	// T0411: `this.field` is also a value-target — `this` is a borrowed or
+	// consumed owner whose drop will free its fields, so moving a non-auto-dup
+	// droppable field out of `this` has the same double-drop risk as moving
+	// from an owned local or a call temp.
+	if _, ok := target.(*ast.ThisExpr); ok {
+		return true
+	}
 	if ident, ok := target.(*ast.IdentExpr); ok {
 		if obj := c.info.Objects[ident]; obj != nil {
 			_, isVar := obj.(*types.Var)

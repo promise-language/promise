@@ -192,7 +192,7 @@ test_response_headers() `test(exclude: "wasm32", timeout: "10s") {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
     // Headers are lowercase — iterate directly to avoid B0341 (non-Copy field double-drop)
     bool found = false;
-    for k, v in resp.response_headers {
+    for k, v in resp.response_headers() {
       if k == "x-custom" && v == "hello" {
         found = true;
       }

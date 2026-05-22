@@ -2300,11 +2300,21 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 					if ft, ok := fieldTypeMap[arg.Name].(*types.Optional); ok {
 						c.targetType = ft
 					}
+					// T0411: Auto-dup string/container fields read from a droppable
+					// owner so the new instance gets an independent copy.
+					c.maybeEnableDupForConstructorArg(arg.Value, fieldTypeMap[arg.Name])
 					val = c.genCallArgExpr(arg.Value)
+					c.dupStringFieldAccess = false
+					c.dupContainerFieldAccess = false
 					c.targetType = nil
 				}
 			} else {
+				// T0411: Auto-dup string/container fields read from a droppable
+				// owner so the new instance gets an independent copy.
+				c.maybeEnableDupForConstructorArg(arg.Value, fieldTypeMap[arg.Name])
 				val = c.genCallArgExpr(arg.Value)
+				c.dupStringFieldAccess = false
+				c.dupContainerFieldAccess = false
 			}
 			// T0101: Save pre-wrap value for string temp claiming on optional fields
 			preWrapVal := val
@@ -4959,6 +4969,45 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 		return
 	}
 	if types.IsVector(pt) || types.IsChannel(pt) || types.IsArc(pt) || types.IsWeak(pt) {
+		c.dupContainerFieldAccess = true
+	}
+}
+
+// maybeEnableDupForConstructorArg sets dupStringFieldAccess or
+// dupContainerFieldAccess when a constructor field-init arg is a field read
+// on a droppable owner. Without this, the field's inner buffer is shared
+// between the owner and the new instance — both end up freeing it. Mirrors
+// maybeEnableDupForMutRefArg (T0366) for the constructor field-init path.
+// T0411.
+func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types.Type) {
+	mem, ok := arg.(*ast.MemberExpr)
+	if !ok {
+		return
+	}
+	ownerType := c.info.Types[mem.Target]
+	if c.typeSubst != nil && ownerType != nil {
+		ownerType = types.Substitute(ownerType, c.typeSubst)
+	}
+	ownerNamed := extractNamed(ownerType)
+	if ownerNamed == nil || !ownerNamed.HasDrop() {
+		return
+	}
+	ft := fieldType
+	if c.typeSubst != nil {
+		ft = types.Substitute(ft, c.typeSubst)
+	}
+	if isRefType(ft) {
+		return
+	}
+	if extractNamed(ft) == types.TypString {
+		c.dupStringFieldAccess = true
+		return
+	}
+	if opt, ok := ft.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
+		c.dupStringFieldAccess = true
+		return
+	}
+	if types.IsVector(ft) || types.IsChannel(ft) || types.IsArc(ft) || types.IsWeak(ft) {
 		c.dupContainerFieldAccess = true
 	}
 }

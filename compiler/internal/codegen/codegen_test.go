@@ -21924,3 +21924,83 @@ func TestOptionalLocalDropSynthSkipsWrap(t *testing.T) {
 	}
 	assertContains(t, userFn, "call void @SynthDropBox.drop(")
 }
+
+// T0411: Constructor field-init that reads a string field from a droppable
+// owner (`Type(label: this.label)`) must dup the string so the new instance
+// owns an independent copy. Without the dup, both the source's drop and the
+// new instance's drop free the same buffer → double-free.
+func TestT0411_ConstructorStringFieldFromThisDups(t *testing.T) {
+	ir := generateIR(t, `
+		type CB {
+			string label;
+			drop(~this) {}
+			clone() CB {
+				return CB(label: this.label);
+			}
+		}
+		test_t0411_dup() {
+			c := CB(label: "hi");
+			c2 := c.clone();
+		}
+	`)
+	cloneFn := extractFunction(ir, "CB.clone")
+	if cloneFn == "" {
+		t.Fatal("expected CB.clone in IR")
+	}
+	// The clone body must dup the string when initializing the new CB —
+	// i.e., a call to promise_string_new must appear inside CB.clone.
+	assertContains(t, cloneFn, "call i8* @promise_string_new(")
+}
+
+// T0411: Vector field auto-dup via constructor field-init from `this.field`.
+// Mirrors TestT0411_ConstructorStringFieldFromThisDups but for the
+// dupContainerFieldAccess path on a Vector field.
+func TestT0411_ConstructorVectorFieldFromThisDups(t *testing.T) {
+	ir := generateIR(t, `
+		type V {
+			int[] items;
+			drop(~this) {}
+			clone() V {
+				return V(items: this.items);
+			}
+		}
+		test_t0411_vec_dup() {
+			a := V(items: [1, 2, 3]);
+			b := a.clone();
+		}
+	`)
+	cloneFn := extractFunction(ir, "V.clone")
+	if cloneFn == "" {
+		t.Fatal("expected V.clone in IR")
+	}
+	// dupContainerFieldAccess for a Vector field routes through dupVector,
+	// which emits a `vecdup.copy` block label. Without the T0411 fix, the
+	// field would be a direct store with no dup logic.
+	assertContains(t, cloneFn, "vecdup.copy")
+}
+
+// T0411: Channel field auto-dup via constructor field-init from `this.field`.
+// Channel dup is a refcount increment via promise_channel_incref.
+func TestT0411_ConstructorChannelFieldFromThisDups(t *testing.T) {
+	ir := generateIR(t, `
+		type ChH {
+			channel[int] ch;
+			drop(~this) {}
+			clone() ChH {
+				return ChH(ch: this.ch);
+			}
+		}
+		test_t0411_ch_dup() {
+			c := channel[int](1);
+			h := ChH(ch: c);
+			h2 := h.clone();
+		}
+	`)
+	cloneFn := extractFunction(ir, "ChH.clone")
+	if cloneFn == "" {
+		t.Fatal("expected ChH.clone in IR")
+	}
+	// dupChannel emits a `chdup.inc` block label and an inline atomicrmw add
+	// to bump the channel's reference count.
+	assertContains(t, cloneFn, "chdup.inc")
+}

@@ -4719,3 +4719,235 @@ func TestT0438_MutBorrowToNonCopyOwnedRejected(t *testing.T) {
 	// Two errors expected here; either is fine — assert the decay rejection.
 	expectOwnerError(t, errs, "cannot assign string& to variable of type string")
 }
+
+// === T0411: `this.field` move from droppable owner ===
+//
+// Before T0411, `this.field` slipped past the B0341 field-move check because
+// `isValueTarget` only recognized IdentExpr/CallExpr roots — never ThisExpr.
+// Heap user-type fields shallow-copied silently, leading to double-free at
+// runtime. Auto-dup field types (string, Vector, Channel, Arc) are still
+// allowed because codegen handles them via dupStringFieldAccess /
+// dupContainerFieldAccess.
+
+func TestT0411_VarDeclFromThisFieldUserTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { string label; drop(~this) {} }
+		type Outer {
+			Inner inner;
+			drop(~this) {}
+			extract() Inner {
+				i := this.inner;
+				return i;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'inner'")
+}
+
+func TestT0411_ReturnThisFieldUserTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { string label; drop(~this) {} }
+		type Outer {
+			Inner inner;
+			drop(~this) {}
+			extract() Inner {
+				return this.inner;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'inner'")
+}
+
+func TestT0411_ConstructorFieldInitFromThisFieldUserTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { string label; drop(~this) {} }
+		type Outer {
+			Inner inner;
+			drop(~this) {}
+			clone() Outer {
+				return Outer(inner: this.inner);
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'inner'")
+}
+
+func TestT0411_FunctionConsumeArgFromThisFieldUserTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { string label; drop(~this) {} }
+		consume(~Inner i) {}
+		type Outer {
+			Inner inner;
+			drop(~this) {}
+			send() {
+				consume(this.inner);
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'inner'")
+}
+
+func TestT0411_ConsumeReceiverFieldUserTypeRejected(t *testing.T) {
+	// `~this` consume-receiver: even though `this` is consumed, B0341's
+	// design demands `.clone()` for non-auto-dup heap user-type fields —
+	// consistent with owned-local behavior.
+	errs := ownerErrs(t, `
+		type Inner { string label; drop(~this) {} }
+		type Outer {
+			Inner inner;
+			drop(~this) {}
+			destroy(~this) Inner {
+				return this.inner;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'inner'")
+}
+
+func TestT0411_StringFieldFromThisOK(t *testing.T) {
+	// Strings are auto-dup — codegen handles via dupStringFieldAccess. No error.
+	ownerOK(t, `
+		type CB {
+			string label;
+			drop(~this) {}
+			clone() CB {
+				return CB(label: this.label);
+			}
+		}
+		test() {}
+	`)
+}
+
+func TestT0411_VectorFieldFromThisOK(t *testing.T) {
+	// Vector[T] is auto-dup — codegen handles via dupContainerFieldAccess.
+	ownerOK(t, `
+		type V {
+			int[] items;
+			drop(~this) {}
+			clone() V {
+				return V(items: this.items);
+			}
+		}
+		test() {}
+	`)
+}
+
+func TestT0411_PrimitiveFieldFromThisOK(t *testing.T) {
+	// Primitive (Copy) fields — no double-drop risk, no error.
+	ownerOK(t, `
+		type C {
+			int n;
+			string label;
+			drop(~this) {}
+			clone() C {
+				return C(n: this.n, label: this.label);
+			}
+		}
+		test() {}
+	`)
+}
+
+func TestT0411_ExplicitCloneFromThisFieldOK(t *testing.T) {
+	// The documented workaround: explicit .clone() returns an owned temp,
+	// so the MemberExpr root is a CallExpr and the check passes.
+	ownerOK(t, `
+		type Inner {
+			string label;
+			drop(~this) {}
+			clone() Inner { return Inner(label: this.label); }
+		}
+		type Outer {
+			Inner inner;
+			drop(~this) {}
+			clone() Outer {
+				return Outer(inner: this.inner.clone());
+			}
+		}
+		test() {}
+	`)
+}
+
+func TestT0411_FieldlessEnumFromThisOK(t *testing.T) {
+	// Fieldless enum is non-Copy but non-droppable — safe to shallow-copy,
+	// no error.
+	ownerOK(t, `
+		enum Tag { A; B; C; }
+		type Tagged {
+			string label;
+			Tag tag;
+			drop(~this) {}
+			clone() Tagged {
+				return Tagged(label: this.label, tag: this.tag);
+			}
+		}
+		test() {}
+	`)
+}
+
+func TestT0411_TupleLitElementFromThisFieldUserTypeRejected(t *testing.T) {
+	// Tuple literal element from `this.field` for a non-auto-dup heap user-type
+	// field hits the same B0341 path as constructor field-init / return.
+	errs := ownerErrs(t, `
+		type Inner { string label; drop(~this) {} }
+		type Outer {
+			Inner inner;
+			drop(~this) {}
+			pair() (Inner, int) {
+				return (this.inner, 42);
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'inner'")
+}
+
+func TestT0411_MapFieldFromThisRejected(t *testing.T) {
+	// Map[K, V] is not in isAutoDupType — sema rejects with B0341. This is the
+	// shape that surfaced via modules/http/http.pr's response_headers getter.
+	errs := ownerErrs(t, `
+		type H {
+			map[string, string] headers;
+			drop(~this) {}
+			clone() H {
+				return H(headers: this.headers);
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'headers'")
+}
+
+func TestT0411_OptionalStringFieldFromThisOK(t *testing.T) {
+	// Optional[string] is auto-dup — sema allows; codegen handles via
+	// dupStringFieldAccess set in maybeEnableDupForConstructorArg.
+	ownerOK(t, `
+		type O {
+			string? subtitle;
+			drop(~this) {}
+			clone() O {
+				return O(subtitle: this.subtitle);
+			}
+		}
+		test() {}
+	`)
+}
+
+func TestT0411_ChannelFieldFromThisOK(t *testing.T) {
+	// Channel is auto-dup — sema allows; codegen handles via
+	// dupContainerFieldAccess set in maybeEnableDupForConstructorArg.
+	ownerOK(t, `
+		type ChH {
+			channel[int] ch;
+			drop(~this) {}
+			clone() ChH {
+				return ChH(ch: this.ch);
+			}
+		}
+		test() {}
+	`)
+}

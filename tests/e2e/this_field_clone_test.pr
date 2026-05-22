@@ -1,0 +1,312 @@
+// T0411: Constructor field-init / var-decl / return / consume-arg from
+// `this.field` on a droppable owner must not silently shallow-copy.
+//
+// Auto-dup field types (string, Vector[T], Channel[T], Arc[T]) are dup'd
+// by codegen, so `Type(field: this.field)` produces an independent copy.
+// Non-auto-dup heap user-type fields are rejected at sema with the
+// existing B0341 "use .clone()" error (covered in unit tests).
+// --- Original T0411 repro (string field via Vector indexing) ---
+type CloneBox {
+  string label;
+  drop(~this) {
+  }
+
+  clone() CloneBox {
+    return CloneBox(label: this.label);
+  }
+}
+
+test_t0411_clone_string_field_via_index() `test {
+  v := CloneBox[]();
+  v.push(CloneBox(label: "a" + "b"));
+  b := v[0];
+  assert(b.label == "ab", "first read");
+  b2 := v[0];
+  assert(b2.label == "ab", "second read");
+}
+
+// --- Vector field on a droppable owner ---
+
+type VecHolder {
+  int[] items;
+  drop(~this) {
+  }
+
+  clone() VecHolder {
+    return VecHolder(items: this.items);
+  }
+}
+
+test_t0411_clone_vector_field() `test {
+  h := VecHolder(items: [10, 20, 30]);
+  h2 := h.clone();
+  assert(h2.items.len == 3, "len");
+  assert(h2.items[0] == 10, "0");
+  assert(h2.items[1] == 20, "1");
+  assert(h2.items[2] == 30, "2");
+  // Independence: mutating the clone must not touch the original.
+  h2.items.push(40);
+  assert(h.items.len == 3, "orig len unchanged");
+  assert(h2.items.len == 4, "clone len grew");
+}
+
+// --- Optional[string] field on a droppable owner ---
+
+type OptHolder {
+  string? subtitle;
+  drop(~this) {
+  }
+
+  clone() OptHolder {
+    return OptHolder(subtitle: this.subtitle);
+  }
+}
+
+test_t0411_clone_optional_string_field_some() `test {
+  h := OptHolder(subtitle: "sub");
+  h2 := h.clone();
+  if s := h2.subtitle {
+    assert(s == "sub", "clone subtitle");
+  } else {
+    assert(false, "expected some");
+  }
+  if s := h.subtitle {
+    assert(s == "sub", "orig subtitle still readable");
+  } else {
+    assert(false, "orig should still have value");
+  }
+}
+
+test_t0411_clone_optional_string_field_none() `test {
+  h := OptHolder(subtitle: none);
+  h2 := h.clone();
+  if _ := h2.subtitle {
+    assert(false, "clone subtitle should be none");
+  }
+}
+
+// --- Arc[T] field on a droppable owner (explicit .clone() required) ---
+//
+// Arc[T] / Weak[T] are not in `isAutoDupType` — sema requires explicit
+// `.clone()` for field moves out of a droppable owner. T0411's fix doesn't
+// change that; this test confirms the explicit-clone path still works.
+
+type ArcHolder {
+  Arc[string] data;
+  drop(~this) {
+  }
+
+  clone() ArcHolder {
+    return ArcHolder(data: this.data.clone());
+  }
+}
+
+test_t0411_clone_arc_field_via_explicit_clone() `test {
+  h := ArcHolder(data: Arc[string]("hello"));
+  h2 := h.clone();
+  // Both handles refer to the same underlying value; both must be readable.
+  assert(h.data.borrow == "hello", "orig value");
+  assert(h2.data.borrow == "hello", "clone value");
+}
+
+// --- Explicit `.clone()` for non-auto-dup heap user-type field ---
+
+type Inner {
+  string label;
+  drop(~this) {
+  }
+
+  clone() Inner {
+    return Inner(label: this.label);
+  }
+}
+
+type Outer {
+  Inner inner;
+  drop(~this) {
+  }
+
+  // Heap user-type field requires explicit .clone() — the bare
+  // `Outer(inner: this.inner)` would error at sema (B0341).
+  clone() Outer {
+    return Outer(inner: this.inner.clone());
+  }
+}
+
+test_t0411_explicit_clone_for_user_type_field() `test {
+  o := Outer(inner: Inner(label: "x" + "y"));
+  o2 := o.clone();
+  assert(o.inner.label == "xy", "orig label");
+  assert(o2.inner.label == "xy", "clone label");
+}
+
+// --- Owned-owner regression: `Type(field: localOwner.field)` ---
+
+test_t0411_owned_owner_constructor_field_init() `test {
+  // The dup must also fire when the owner is an owned local — this is the
+  // already-fixed B0345/B0351 path; the T0411 fix makes it consistent for
+  // ThisExpr roots too. Belt-and-braces regression check.
+  cb := CloneBox(label: "hello world");
+  cb2 := CloneBox(label: cb.label);
+  assert(cb.label == "hello world", "orig");
+  assert(cb2.label == "hello world", "dup");
+}
+
+// --- Non-MemberExpr arg: no dup, no leak ---
+
+test_t0411_no_field_dup_for_unrelated_constructor() `test {
+  // When the constructor arg isn't a MemberExpr on a droppable owner,
+  // the dup flag must NOT fire — verified by no-leak assertion.
+  cb := CloneBox(label: "alpha");
+  assert(cb.label == "alpha", "ok");
+}
+
+// --- var-decl from `this.field` (auto-dup type) ---
+
+type StringRdr {
+  string content;
+  drop(~this) {
+  }
+
+  read_label() string {
+    s := this.content;
+    return s;
+  }
+}
+
+test_t0411_var_decl_from_this_string_field() `test {
+  r := StringRdr(content: "ab" + "c");
+  s := r.read_label();
+  assert(s == "abc", "ok");
+  // Original is still readable — the var-decl produced an independent copy.
+  assert(r.content == "abc", "orig");
+}
+
+// --- return `this.field` (auto-dup type) ---
+
+type VecRdr {
+  int[] items;
+  drop(~this) {
+  }
+
+  take_items() int[] {
+    return this.items;
+  }
+}
+
+test_t0411_return_this_vector_field() `test {
+  r := VecRdr(items: [1, 2, 3]);
+  v := r.take_items();
+  assert(v.len == 3, "len");
+  assert(v[0] == 1, "0");
+  // Original still owns its own buffer.
+  assert(r.items.len == 3, "orig len");
+  assert(r.items[0] == 1, "orig 0");
+}
+
+// --- consume-arg `consume(this.field)` (auto-dup type) ---
+
+_consume_string(~string s) `public {
+  // No-op — just consume.
+}
+
+type StringSrc {
+  string content;
+  drop(~this) {
+  }
+
+  send() {
+    _consume_string(this.content);
+  }
+}
+
+test_t0411_consume_arg_from_this_string_field() `test {
+  s := StringSrc(content: "hello");
+  s.send();
+  // After consume, original must still own its content.
+  assert(s.content == "hello", "orig content preserved");
+}
+
+// --- Channel field on a droppable owner ---
+
+type ChHolder {
+  channel[int] ch;
+  drop(~this) {
+  }
+
+  clone() ChHolder {
+    return ChHolder(ch: this.ch);
+  }
+}
+
+test_t0411_clone_channel_field() `test {
+  c := channel[int](1);
+  c.send(42);
+  h := ChHolder(ch: c);
+  // h2 must hold an independent reference (incref) to the same channel.
+  // Without dup, the channel ref-count stays the same and the second close
+  // would underflow.
+  h2 := h.clone();
+  if v := <-h2.ch {
+    assert(v == 42, "got value via clone");
+  } else {
+    assert(false, "expected value");
+  }
+}
+
+// --- Map field on a droppable owner: explicit .clone() workaround ---
+//
+// Map[K, V] is not in isAutoDupType — sema rejects bare `Type(headers: this.headers)`
+// with B0341. The user must call .clone() explicitly. This was the pattern that
+// surfaced T0411 via modules/http/http.pr's response_headers getter.
+
+type MapHolder {
+  map[string, string] headers;
+  drop(~this) {
+  }
+
+  clone() MapHolder {
+    return MapHolder(headers: this.headers.clone());
+  }
+}
+
+test_t0411_explicit_clone_for_map_field() `test {
+  m := map[string, string]();
+  m["a"] = "1";
+  m["b"] = "2";
+  h := MapHolder(headers: m);
+  h2 := h.clone();
+  // Both must own independent maps with the same contents.
+  if a := h2.headers["a"] {
+    assert(a == "1", "h2 a");
+  }
+  if a := h.headers["a"] {
+    assert(a == "1", "h a");
+  }
+}
+
+// --- Generic owner type with auto-dup field ---
+//
+// Verifies that maybeEnableDupForConstructorArg's c.typeSubst path works:
+// the owner type is a monomorphized generic, the field type substitutes
+// through TypeParam to a concrete auto-dup type.
+
+type GenericStringHolder[T] {
+  string label;
+  T payload;
+  drop(~this) {
+  }
+
+  clone() GenericStringHolder[T] {
+    return GenericStringHolder[T](label: this.label, payload: this.payload);
+  }
+}
+
+test_t0411_generic_owner_string_field_clone() `test {
+  h := GenericStringHolder[int](label: "x" + "y", payload: 7);
+  h2 := h.clone();
+  assert(h.label == "xy", "orig label");
+  assert(h2.label == "xy", "clone label");
+  assert(h.payload == 7, "orig payload");
+  assert(h2.payload == 7, "clone payload");
+}

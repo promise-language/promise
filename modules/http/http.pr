@@ -125,19 +125,24 @@ type Request `public `doc("An HTTP request.") {
     }
 
     string body_str = string.from_bytes(body_data);
-    return Response(status: pr.status, headers: pr.headers.clone(), _body: body_str);
+    return Response(_status: pr.status, _headers: pr.headers.clone(), _body: body_str);
   }
 }
 
 type Response `public `doc("An HTTP response.") {
-  int status;
-  map[string, string] headers;
+  int _status;
+  map[string, string] _headers;
   string _body;
 
-  get status_code int `public `doc("The response status code.") => this.status;
+  get status int `public `doc("The response status code.") => this._status;
 
+  get headers map[string, string] `public `doc("The response headers (keys are lowercase).") => this._headers.clone();
+
+  // T0494: response_headers() kept alongside the getter because using a getter that returns a
+  // droppable value directly in a for-in loop leaks (codegen does not register a drop binding
+  // for getter return values in for-in position). Remove once T0494 is fixed.
   response_headers() map[string, string] `public `doc("The response headers (keys are lowercase).") {
-    return this.headers.clone();
+    return this._headers.clone();
   }
 
   get body string `public `doc("The response body as a string.") => this._body;
@@ -148,7 +153,7 @@ type Response `public `doc("An HTTP response.") {
     return json.decode_string[T](this._body)?^;
   }
 
-  get is_success bool `public `doc("True if the status code indicates success (2xx).") => this.status >= 200 && this.status < 300;
+  get is_success bool `public `doc("True if the status code indicates success (2xx).") => this._status >= 200 && this._status < 300;
 }
 
 type ServerShutdownHandle `public `doc("A handle to shut down a running Server. Create before calling serve, then call shutdown from another goroutine.") {
@@ -171,22 +176,22 @@ type Handler `structural `public `doc("Interface for handling HTTP requests. Imp
 }
 
 type ServerRequest `public `doc("An incoming HTTP request received by the server.") {
-  Method method;
-  string path;
-  string query;
-  map[string, string] headers;
-  string body;
+  Method _method;
+  string _path;
+  string _query;
+  map[string, string] _headers;
+  string _body;
 
-  get request_method Method `public `doc("The HTTP method.") => this.method;
-  get request_path string `public `doc("The request path (without query string).") => this.path;
-  get query_string string `public `doc("The query string (after '?'), empty if none.") => this.query;
-  get request_body string `public `doc("The request body.") => this.body;
+  get method Method `public `doc("The HTTP method.") => this._method;
+  get path string `public `doc("The request path (without query string).") => this._path;
+  get query string `public `doc("The query string (after '?'), empty if none.") => this._query;
+  get body string `public `doc("The request body.") => this._body;
 
   header(~this, string key) string? `public `doc("Get a header value by name (case-insensitive, keys stored lowercase).") {
     string lower = key.to_lower();
     string lookup = lower[0:];
-    if this.headers.contains(lookup) {
-      return this.headers[lower];
+    if this._headers.contains(lookup) {
+      return this._headers[lower];
     }
     return none;
   }
@@ -684,7 +689,7 @@ _parse_request!(string header_text, ~string body_str) ServerRequest {
     i = i + 1;
   }
 
-  return ServerRequest(method: method, path: path_val, query: query_val, headers: hdrs, body: body_str);
+  return ServerRequest(_method: method, _path: path_val, _query: query_val, _headers: hdrs, _body: body_str);
 }
 
 _serialize_response(ServerResponse ~resp) string {

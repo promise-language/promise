@@ -10,7 +10,7 @@ type _EchoHandler {
   string prefix;
 
   handle!(~this, ServerRequest request) ServerResponse {
-    return ServerResponse.ok(this.prefix + request.request_body);
+    return ServerResponse.ok(this.prefix + request.body);
   }
 }
 
@@ -26,7 +26,7 @@ type _HeaderEchoHandler {
   string echo_header;
 
   handle!(~this, ServerRequest request) ServerResponse {
-    ServerResponse resp = ServerResponse.ok(request.request_path);
+    ServerResponse resp = ServerResponse.ok(request.path);
     if h := request.header(this.echo_header) {
       resp.set_header("X-Echo", h);
     }
@@ -79,10 +79,10 @@ test_server_status_text() `test(exclude: wasm) {
 
 test_server_request_parse() `test(exclude: wasm) {
   ServerRequest req = _parse_request("GET /hello?name=world HTTP/1.1\r\nHost: localhost\r\nX-Test: foo", "")?!;
-  assert(_method_to_string(req.request_method) == "GET", "method GET");
-  assert(req.request_path == "/hello", "path");
-  assert(req.query_string == "name=world", "query");
-  assert(req.request_body == "", "empty body");
+  assert(_method_to_string(req.method) == "GET", "method GET");
+  assert(req.path == "/hello", "path");
+  assert(req.query == "name=world", "query");
+  assert(req.body == "", "empty body");
   if h := req.header("host") {
     assert(h == "localhost", "host header");
   } else {
@@ -100,10 +100,10 @@ test_server_request_parse() `test(exclude: wasm) {
 
 test_server_request_parse_post() `test(exclude: wasm) {
   ServerRequest req = _parse_request("POST /api HTTP/1.1\r\nContent-Length: 4", "data")?!;
-  assert(_method_to_string(req.request_method) == "POST", "method POST");
-  assert(req.request_path == "/api", "path");
-  assert(req.query_string == "", "no query");
-  assert(req.request_body == "data", "body");
+  assert(_method_to_string(req.method) == "POST", "method POST");
+  assert(req.path == "/api", "path");
+  assert(req.query == "", "no query");
+  assert(req.body == "data", "body");
 }
 
 test_server_response_serialize() `test(exclude: wasm) {
@@ -146,7 +146,7 @@ test_server_basic() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
     assert(resp.body == "hello server", "body");
   };
 
@@ -164,7 +164,7 @@ test_server_post() `test(exclude: wasm, timeout: "10s") {
   go {
     Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/submit", "request body");
     Response resp = req.send()?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
     assert(resp.body == "request body", "echoed body");
   };
 
@@ -188,7 +188,7 @@ test_server_headers() `test(exclude: wasm || macos, timeout: "10s") {
     Request req = Request.new_get("http://127.0.0.1:" + port.to_string() + "/path");
     req.set_header("X-Test", "hello");
     Response resp = req.send()?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
     assert(resp.body == "/path", "path echoed");
     bool found = false;
     for k, v in resp.response_headers() {
@@ -212,7 +212,7 @@ test_server_error_handling() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-    assert(resp.status_code == 500, "status 500");
+    assert(resp.status == 500, "status 500");
     assert(resp.body == "handler error", "error message in body");
   };
 
@@ -229,7 +229,7 @@ test_server_not_found() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/missing")?!;
-    assert(resp.status_code == 404, "status 404");
+    assert(resp.status == 404, "status 404");
     assert(resp.body == "Not Found", "not found body");
   };
 
@@ -289,7 +289,7 @@ test_server_large_body() `test(exclude: wasm, timeout: "10s") {
     string large_body = "X".repeat(8000);
     Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/big", large_body);
     Response resp = req.send()?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
     assert(resp.body.len == 8000, "echoed large body length");
   };
 
@@ -319,7 +319,7 @@ test_server_serve() `test(exclude: wasm, timeout: "10s") {
 
       // Send a real request through serve
       Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-      assert(resp.status_code == 200, "status 200");
+      assert(resp.status == 200, "status 200");
       assert(resp.body == "served", "body from serve");
 
       // Shut down: signal + wake accept
@@ -350,7 +350,7 @@ test_server_serve_error_handler() `test(exclude: wasm, timeout: "10s") {
 
       // Handler raises — serve should return 500 and continue
       Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-      assert(resp.status_code == 500, "status 500");
+      assert(resp.status == 500, "status 500");
       assert(resp.body == "serve error", "error body");
 
       stop.send(true);
@@ -378,7 +378,7 @@ test_server_shutdown_handle() `test(exclude: wasm, timeout: "10s") {
     if handle := <-handle_ch {
       sleep(Duration.from_millis(100));
       Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-      assert(resp.status_code == 200, "status 200");
+      assert(resp.status == 200, "status 200");
       assert(resp.body == "served", "body");
       handle.shutdown()?!;
       sleep(Duration.from_millis(200));
@@ -403,7 +403,7 @@ test_server_shutdown_handle_error_handler() `test(exclude: wasm, timeout: "10s")
     if handle := <-handle_ch {
       sleep(Duration.from_millis(100));
       Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-      assert(resp.status_code == 500, "status 500");
+      assert(resp.status == 500, "status 500");
       assert(resp.body == "serve error", "error body");
       handle.shutdown()?!;
       sleep(Duration.from_millis(200));

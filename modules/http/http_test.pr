@@ -51,7 +51,7 @@ test_http_get() `test(exclude: wasm, timeout: "10s") {
   // Client goroutine (captures only port — int is Copy)
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
     assert(resp.body == "hello", "body");
     assert(resp.is_success, "is_success");
   };
@@ -69,7 +69,7 @@ test_http_post() `test(exclude: wasm, timeout: "10s") {
   go {
     Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/submit", "test body");
     Response resp = req.send()?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
     assert(resp.body == "ok", "body ok");
   };
 
@@ -90,7 +90,7 @@ test_http_post_convenience() `test(exclude: wasm, timeout: "10s") {
     Request req = Request.new_post("http://127.0.0.1:" + port.to_string() + "/api", "data");
     req.set_header("X-Token", "secret");
     Response resp = req.send()?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
@@ -109,7 +109,7 @@ test_http_headers() `test(exclude: wasm, timeout: "10s") {
     Request req = Request.new_get("http://127.0.0.1:" + port.to_string() + "/");
     req.set_header("X-Custom", "test-value");
     Response resp = req.send()?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?!;
@@ -124,7 +124,7 @@ test_http_404() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/missing")?!;
-    assert(resp.status_code == 404, "status 404");
+    assert(resp.status == 404, "status 404");
     assert(!resp.is_success, "not success");
     assert(resp.body == "not found", "body");
   };
@@ -140,7 +140,7 @@ test_http_500() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-    assert(resp.status_code == 500, "status 500");
+    assert(resp.status == 500, "status 500");
     assert(!resp.is_success, "not success");
   };
 
@@ -155,7 +155,7 @@ test_http_chunked() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
     assert(resp.body == "HelloWorld", "chunked body");
   };
 
@@ -262,7 +262,7 @@ test_http_put() `test(exclude: wasm, timeout: "10s") {
   go {
     Request req = Request(method: Method.Put, url: "http://127.0.0.1:" + port.to_string() + "/res", headers: map[string, string](), body: "update");
     Response resp = req.send()?!;
-    assert(resp.status_code == 200, "status");
+    assert(resp.status == 200, "status");
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
@@ -278,7 +278,7 @@ test_status_no_reason() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-    assert(resp.status_code == 200, "status parsed without reason phrase");
+    assert(resp.status == 200, "status parsed without reason phrase");
   };
 
   _serve_once(listener, "HTTP/1.1 200\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?!;
@@ -314,7 +314,7 @@ test_http_post_function() `test(exclude: wasm, timeout: "10s") {
   go {
     map[string, string] h = map[string, string]();
     Response resp = http_post("http://127.0.0.1:" + port.to_string() + "/api", "payload", h)?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
     assert(resp.body == "ok", "body");
   };
 
@@ -331,7 +331,7 @@ test_response_json_int() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-    assert(resp.status_code == 200, "status");
+    assert(resp.status == 200, "status");
     int val = resp.json[int]()?!;
     assert(val == 42, "json int");
   };
@@ -347,7 +347,7 @@ test_response_json_string() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-    assert(resp.status_code == 200, "status");
+    assert(resp.status == 200, "status");
     string val = resp.json[string]()?!;
     assert(val == "hello", "json string");
   };
@@ -363,7 +363,7 @@ test_response_json_bool() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-    assert(resp.status_code == 200, "status");
+    assert(resp.status == 200, "status");
     bool val = resp.json[bool]()?!;
     assert(val, "json bool");
   };
@@ -382,7 +382,7 @@ test_http_post_with_headers() `test(exclude: wasm, timeout: "10s") {
     h["X-Token"] = "abc";
     h["X-User"] = "alice";
     Response resp = http_post("http://127.0.0.1:" + port.to_string() + "/api", "payload", h)?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
     assert(resp.body == "ok", "body ok");
   };
 
@@ -401,7 +401,7 @@ test_http_post_json_int() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_post_json[int]("http://127.0.0.1:" + port.to_string() + "/api", 42)?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
@@ -418,7 +418,7 @@ test_http_post_json_string() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_post_json[string]("http://127.0.0.1:" + port.to_string() + "/api", "hello")?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
@@ -435,7 +435,7 @@ test_http_post_json_bool() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_post_json[bool]("http://127.0.0.1:" + port.to_string() + "/api", true)?!;
-    assert(resp.status_code == 200, "status 200");
+    assert(resp.status == 200, "status 200");
   };
 
   string request = _serve_once(listener, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
@@ -444,4 +444,24 @@ test_http_post_json_bool() `test(exclude: wasm, timeout: "10s") {
   assert(request.contains("true"), "bool body");
   listener.close()?!;
   sleep(Duration.from_millis(100));
+}
+
+test_parse_status_code_no_space() `test(exclude: wasm) {
+  _ParsedResponse pr = _parse_response("MALFORMED\r\nHost: foo")? e {
+    return;
+  };
+  assert(false, "should have raised for status line with no space");
+}
+
+test_decode_chunked_no_newline() `test(exclude: wasm) {
+  u8[] data = "5Hello".bytes();
+  u8[] result = _decode_chunked(data);
+  assert(result.len == 0, "no data decoded when chunk has no CRLF");
+}
+
+test_decode_chunked_empty_size_after_extension() `test(exclude: wasm) {
+  // chunk line is only the extension (";ext"), trimming yields empty size → break
+  u8[] data = ";ext\r\nstuff".bytes();
+  u8[] result = _decode_chunked(data);
+  assert(result.len == 0, "no data decoded when size is empty after stripping extension");
 }

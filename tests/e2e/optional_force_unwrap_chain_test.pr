@@ -102,3 +102,65 @@ generic_borrowed_this_force_unwrap() `test {
   v := h.get_val();
   assert(v.n == 13, "generic borrowed this.data!");
 }
+
+// T0436 Issue 1: single-line `b := h.data!!` on a T?? field.
+// AST is OptionalUnwrapExpr(OptionalUnwrapExpr(MemberExpr)). Without the
+// nested-unwrap walk in neutralizeForceUnwrapSource, the inner
+// OptionalUnwrapExpr falls off the switch → no neutralization → double-free.
+double_wrap_single_line_force_unwrap() `test {
+  h := _FUDblHolder(data: _make_dbl_box(8));
+  b := h.data!!;
+  assert(b.n == 8, "T?? single-line");
+}
+
+// T0436 Issue 1: chained `outer.inner.data!!` on a struct holding a T?? field.
+type _FUDblInner {
+  _FUBox?? data;
+}
+
+type _FUDblOuter {
+  _FUDblInner inner;
+}
+
+chained_double_wrap_single_line_force_unwrap() `test {
+  outer := _FUDblOuter(inner: _FUDblInner(data: _make_dbl_box(9)));
+  b := outer.inner.data!!;
+  assert(b.n == 9, "T?? chained single-line");
+}
+
+// T0436 Issue 2: borrowed `this.data!` in a generator method — must dup, not
+// neutralize the caller's Optional field. Before T0436 fixed
+// buildGeneratorCoroutine, a stale thisRecvIsOwned=true (from a prior ~this
+// method on a different type) would cause the borrowed generator to clear the
+// caller's `data` present flag → caller's `is_data_present()` would return
+// false after iteration.
+type _FUGenForceConsumer {
+  _FUBox? data;
+  consume(~this) {
+    // Sets thisRecvIsOwned=true in the compiler's per-method state.
+    b := this.data!;
+  }
+}
+
+type _FUGenBorrowed {
+  _FUBox? data;
+  iter_n(this) stream[int] {
+    b := this.data!;
+    yield b.n;
+  }
+  is_data_present(this) bool {
+    return this.data is present;
+  }
+}
+
+borrowed_generator_this_field_unwrap_after_owned() `test {
+  // Force the consume method to be defined first so its thisRecvIsOwned=true
+  // can leak into iter_n's coroutine state if buildGeneratorCoroutine doesn't
+  // reset it. We don't actually need to call consume — just defining it is
+  // enough since methods are compiled in declaration order.
+  h := _FUGenBorrowed(data: _FUBox(n: 42));
+  for n in h.iter_n() {
+    assert(n == 42, "generator yield value");
+  }
+  assert(h.is_data_present(), "caller's data still present after borrowed iter");
+}

@@ -9022,6 +9022,17 @@ func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
 	if inner == nil {
 		return
 	}
+	// T0436: traverse nested force-unwraps (e.g., `b := h.data!!`).
+	// Each nested OptionalUnwrapExpr exposes one Optional level; we only need to
+	// clear the OUTERMOST present flag (on the original source) — synth drop will
+	// then skip the field entirely and not descend into the inner Optional.
+	for {
+		if uw, ok := inner.(*ast.OptionalUnwrapExpr); ok {
+			inner = uw.Expr
+			continue
+		}
+		break
+	}
 	switch src := inner.(type) {
 	case *ast.IdentExpr:
 		alloca, ok := c.locals[src.Name]

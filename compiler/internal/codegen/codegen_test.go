@@ -21302,3 +21302,132 @@ func TestT0428BorrowedThisForceUnwrapDup(t *testing.T) {
 	assertContains(t, getNFn, "call i8* @pal_alloc")
 	assertContains(t, getNFn, "call void @llvm.memcpy")
 }
+
+// T0436 Issue 1: single-line `b := h.data!!` on a T?? field — the AST is
+// OptionalUnwrapExpr(OptionalUnwrapExpr(MemberExpr)), so neutralizeForceUnwrapSource
+// must look through the inner OptionalUnwrapExpr to reach the MemberExpr.
+// Without the fix, the outer Optional's present flag stays true → double-free
+// when the holder is dropped.
+func TestT0436SingleLineDoubleUnwrapNeutralizes(t *testing.T) {
+	ir := generateIR(t, `
+		type T0436Box1 { int n; drop(~this) {} }
+		type T0436Dbl1 { T0436Box1?? data; }
+		make_inner1() T0436Box1?? {
+			T0436Box1? inner = T0436Box1(n: 1);
+			return inner;
+		}
+		main() {
+			h := T0436Dbl1(data: make_inner1());
+			b := h.data!!;
+		}
+	`)
+	// neutralizeMemberOptionalField clears the outermost Optional's present flag
+	// by GEPing into the field's full T?? layout `{ i1, { i1, T_v } }` and then
+	// storing i1 false. Without the nested-unwrap walk in
+	// neutralizeForceUnwrapSource, no such GEP is emitted (only loads for the
+	// drop and unwrap exist) and the holder's drop double-frees the heap value.
+	gepPattern := "getelementptr { i1, { i1, { i8*, i8* } } }, { i1, { i1, { i8*, i8* } } }* %"
+	if !strings.Contains(ir, gepPattern) {
+		t.Fatal("expected a GEP through the T?? outer-Optional struct (neutralization site)")
+	}
+}
+
+// T0436 Issue 2: a generator method with borrowed this following a ~this method
+// on a different type must NOT clear the caller's Optional field present flag
+// — it must dup instead. Before the fix, stale thisRecvIsOwned=true from the
+// prior ~this method leaked into the generator coroutine, causing
+// neutralizeMemberOptionalField to clear the caller's flag through the borrow.
+func TestT0436BorrowedGeneratorThisAfterOwnedDups(t *testing.T) {
+	ir := generateIR(t, `
+		type T0436Box2 { int n; drop(~this) {} }
+		type T0436Consumer { T0436Box2? data; consume(~this) { b := this.data!; } }
+		type T0436Gen {
+			T0436Box2? data;
+			iter_n(this) stream[int] {
+				b := this.data!;
+				yield b.n;
+			}
+		}
+		main() {
+			h := T0436Gen(data: T0436Box2(n: 5));
+			for n in h.iter_n() {}
+		}
+	`)
+	// Find the iter_n wrapper, then the generator coroutine it calls. The
+	// wrapper allocates the yield slot and calls @.generator.N — N is unique
+	// per generator function.
+	wrapper := extractFunction(ir, "T0436Gen.iter_n")
+	if wrapper == "" {
+		t.Fatal("expected T0436Gen.iter_n in IR")
+	}
+	callIdx := strings.Index(wrapper, "@.generator.")
+	if callIdx < 0 {
+		t.Fatal("expected iter_n to call a generator coroutine")
+	}
+	parenIdx := strings.Index(wrapper[callIdx:], "(")
+	if parenIdx < 0 {
+		t.Fatal("malformed coroutine call")
+	}
+	coroName := wrapper[callIdx+1 : callIdx+parenIdx] // ".generator.N"
+	gen := strings.Index(ir, "define i8* @"+coroName+"(")
+	if gen < 0 {
+		t.Fatalf("expected coroutine %s in IR", coroName)
+	}
+	rest := ir[gen:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+	// With the fix, the borrowed receiver dups the heap value via memcpy.
+	assertContains(t, body, "call void @llvm.memcpy")
+}
+
+// T0436 Issue 2 (defineModuleTypeMethods path): a borrowed-this method on a
+// module type, declared after a ~this method on the same module type, must dup
+// rather than clear the caller's flag. To expose stale thisRecvIsOwned from a
+// prior ~this method, the test puts a generic type with a ~this method in a
+// FIRST module. After mod1 is compiled, defineMonoMethods for that generic's
+// ~this method leaves thisRecvIsOwned=true. mod2 is compiled next, and without
+// the fix, defineModuleTypeMethods inherits the stale flag.
+func TestT0436ModuleTypeBorrowedThisAfterOwnedDups(t *testing.T) {
+	ir := generateIRWithTwoModules(t,
+		"t0436a",
+		`
+		type GenBox[T] `+"`public"+` {
+			T item;
+			consume(~this) `+"`public"+` {}
+		}
+		`,
+		"t0436b",
+		`
+		type Box2 `+"`public"+` { int n; drop(~this) {} }
+		type Holder2 `+"`public"+` {
+			Box2? data;
+			get_n(this) int `+"`public"+` {
+				b := this.data!;
+				return b.n;
+			}
+		}
+		`,
+		`
+		use t0436a "./t0436a";
+		use t0436b "./t0436b";
+		main() {
+			// Force a generic instantiation in mod1 so its ~this consume() compiles
+			// via defineMonoMethods → defineMethodFunc, leaving thisRecvIsOwned=true.
+			gb := t0436a.GenBox[int](item: 1);
+			h := t0436b.Holder2(data: t0436b.Box2(n: 3));
+			n := h.get_n();
+		}
+		`,
+	)
+	// get_n is in mod2, compiled via defineModuleTypeMethods AFTER mod1.
+	// Must dup the heap value (pal_alloc + memcpy), not clear the caller's flag.
+	getNFn := extractFunction(ir, "__mod_t0436b_Holder2.get_n")
+	if getNFn == "" {
+		t.Fatal("expected __mod_t0436b_Holder2.get_n in IR")
+	}
+	assertContains(t, getNFn, "call i8* @pal_alloc")
+	assertContains(t, getNFn, "call void @llvm.memcpy")
+}

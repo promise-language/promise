@@ -5733,6 +5733,12 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 
 			c.currentNamed = named
 
+			// T0436: track whether the receiver is owned (~this) for force-unwrap
+			// neutralization. Without this, the flag carries over from the previous
+			// defineMethodFunc call, potentially causing a borrowed-this method to
+			// incorrectly clear the caller's Optional field present flag.
+			c.thisRecvIsOwned = m.Sig().Recv() != nil && m.Sig().Recv().Ref() == types.RefMut
+
 			// Route generator methods to the generator codegen path
 			if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
 				c.defineGeneratorMethod(md, m, fn, genInfo.ElemType, named)

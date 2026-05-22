@@ -102,6 +102,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	savedLocalNameCount := c.localNameCount // T0261
 	savedPanicExitBlock := c.panicExitBlock
 	savedCoroutineReturnBlock := c.coroutineReturnBlock
+	savedThisRecvIsOwned := c.thisRecvIsOwned // T0436
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -122,6 +123,10 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	if ownerNamed != nil {
 		c.currentNamed = ownerNamed
 	}
+	// T0436: track whether the generator method's receiver is owned (~this).
+	// Generator funcs (no receiver) get false. Without this, the flag leaks from
+	// the previous defineMethodFunc call into the coroutine body.
+	c.thisRecvIsOwned = sig.Recv() != nil && sig.Recv().Ref() == types.RefMut
 
 	// Yield slot is the second-to-last (or last for non-failable) parameter
 	yieldSlotParam := coroFn.Params[len(coroFn.Params)-1]
@@ -275,6 +280,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.localNameCount = savedLocalNameCount // T0261
 	c.panicExitBlock = savedPanicExitBlock
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
+	c.thisRecvIsOwned = savedThisRecvIsOwned // T0436
 
 	// 7. Build factory body for original function
 	c.fn = fn

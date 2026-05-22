@@ -28,46 +28,25 @@ bundle_dir = "compiler/cmd/promise/resources/llvm"
 [binaries.llvm.targets.linux-amd64]
 url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-X64.tar.xz"
 sha256 = "8d662e425e46c48b45f5f970770b5e37f323607c8c2cbc371593fc9c4ba1e7b3"
-# Files to copy out of the extracted tree into <bundle_dir>/<target>/, gzipped.
-# `src` paths are relative to the top-level extracted directory.
-# `resolve_symlink = true` runs filepath.EvalSymlinks before reading (libLLVM.so
-# is normally a symlink to libLLVM.so.22 etc.).
+# The upstream LLVM-22.1.0-Linux-X64.tar.xz ships statically-linked binaries
+# (bin/lld is 199 MB, depends only on system libs). No libLLVM.so / liblld* /
+# libz3 / libzstd shared libraries needed at runtime.
 files = [
-  { src = "bin/opt",        out = "opt" },
-  { src = "bin/llc",        out = "llc" },
-  { src = "bin/lld",        out = "lld" },
-  { src = "lib/libLLVM.so", out = "libLLVM.so", resolve_symlink = true },
+  { src = "bin/opt", out = "opt" },
+  { src = "bin/llc", out = "llc" },
+  { src = "bin/lld", out = "lld" },
 ]
 
 [binaries.llvm.targets.darwin-arm64]
 url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-macOS-ARM64.tar.xz"
 sha256 = "cd5e615f4dab23d0239359cd343202c5f6ceeaf072c245a3c685d73afac09646"
-# Exhaustive list of every file that ends up in the runtime bundle for this
-# pinned LLVM version. No globs, no auto-discovery — what's listed here is
-# what gets embedded in the compiler binary, regardless of source (--fetch
-# tarball or local Homebrew install). If a future LLVM version adds, removes,
-# or renames any file (e.g., bumps libz3 to a different soname), bump
-# `version` above and update this list in lockstep.
-#
-# Categories:
-#   bin/{opt,llc,lld}           — tools the compiler invokes via PAL
-#   lib/libLLVM.dylib           — LLVM core, dlopen'd by the tools
-#   lib/liblld*.dylib           — lld linker plugins (NOT liblldb, NOT clang)
-#   lib/libz3.*.dylib           — Z3 SMT solver, used by libLLVM polyhedral passes
-#   lib/libzstd.1.dylib         — zstd compression, used by libLLVM ELF/MachO sections
+# The upstream LLVM-22.1.0-macOS-ARM64.tar.xz ships statically-linked binaries
+# (bin/lld is 131 MB, depends only on system libs). No libLLVM.dylib /
+# liblld*.dylib / libz3 / libzstd shared libraries needed at runtime.
 files = [
-  { src = "bin/opt",                out = "opt" },
-  { src = "bin/llc",                out = "llc" },
-  { src = "bin/lld",                out = "lld" },
-  { src = "lib/libLLVM.dylib",      out = "libLLVM.dylib" },
-  { src = "lib/liblldCOFF.dylib",   out = "liblldCOFF.dylib" },
-  { src = "lib/liblldCommon.dylib", out = "liblldCommon.dylib" },
-  { src = "lib/liblldELF.dylib",    out = "liblldELF.dylib" },
-  { src = "lib/liblldMachO.dylib",  out = "liblldMachO.dylib" },
-  { src = "lib/liblldMinGW.dylib",  out = "liblldMinGW.dylib" },
-  { src = "lib/liblldWasm.dylib",   out = "liblldWasm.dylib" },
-  { src = "lib/libz3.4.15.dylib",   out = "libz3.4.15.dylib" },
-  { src = "lib/libzstd.1.dylib",    out = "libzstd.1.dylib" },
+  { src = "bin/opt", out = "opt" },
+  { src = "bin/llc", out = "llc" },
+  { src = "bin/lld", out = "lld" },
 ]
 
 [binaries.llvm.targets.darwin-amd64]

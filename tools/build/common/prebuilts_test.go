@@ -780,11 +780,11 @@ func TestSingleTopLevelDir(t *testing.T) {
 	})
 }
 
-// TestBundleLLVMFromFetched_HappyPath wires the --fetch bundling end-to-end
-// against a synthetic flat cache dir (no actual download). After FetchPrebuilt
-// the cache dir holds files at their `out` names; BundleLLVMFromFetched gzips
-// them into the embed dir as "<out>.gz".
-func TestBundleLLVMFromFetched_HappyPath(t *testing.T) {
+// TestBundleLLVM_HappyPath wires the release-build bundling end-to-end against
+// a synthetic flat cache dir (no actual download). After FetchPrebuilt the
+// cache dir holds files at their `out` names; BundleLLVM gzips them into the
+// embed dir as "<out>.gz".
+func TestBundleLLVM_HappyPath(t *testing.T) {
 	// Synthetic prebuilts cache dir with the manifest's `out` files flat.
 	cacheDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cacheDir, "opt"), []byte("OPT_FETCHED"), 0o755); err != nil {
@@ -820,8 +820,8 @@ files = [
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := BundleLLVMFromFetched(root, m, cacheDir); err != nil {
-		t.Fatalf("BundleLLVMFromFetched: %v", err)
+	if err := BundleLLVM(root, m, cacheDir); err != nil {
+		t.Fatalf("BundleLLVM: %v", err)
 	}
 	dst := filepath.Join(root, "compiler/cmd/promise/resources/llvm", target)
 	for name, want := range map[string]string{
@@ -839,10 +839,10 @@ files = [
 	}
 }
 
-// TestBundleLLVMFromFetched_NoCacheDir is the "all-optional, none fetched"
-// short-circuit: returns nil without touching the filesystem.
-func TestBundleLLVMFromFetched_NoCacheDir(t *testing.T) {
-	if err := BundleLLVMFromFetched(t.TempDir(), &PrebuiltsManifest{}, ""); err != nil {
+// TestBundleLLVM_NoCacheDir is the "all-optional, none fetched" short-circuit:
+// returns nil without touching the filesystem.
+func TestBundleLLVM_NoCacheDir(t *testing.T) {
+	if err := BundleLLVM(t.TempDir(), &PrebuiltsManifest{}, ""); err != nil {
 		t.Errorf("expected nil for empty cacheDir, got %v", err)
 	}
 }

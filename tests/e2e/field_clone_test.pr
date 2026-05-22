@@ -42,3 +42,37 @@ test_clone_vector_field_no_clone_needed() `test {
 type VecHolder {
   int[] items;
 }
+
+// T0473: generic owner with a non-Optional TypeParam field instantiated with a
+// droppable concrete type. Sema's fieldTypeHasDrop returns false for TypeParam,
+// but codegen synthesizes a drop for `GenHolder[map[string,string]]` — without
+// the ownership fix, `m = h.value` would double-free at runtime.
+type GenHolder[T] {
+  T value;
+}
+
+test_clone_generic_typeparam_field() `test {
+  map[string, string] src = map[string, string]();
+  src["a"] = "b";
+  GenHolder[map[string, string]] h = GenHolder[map[string, string]](value: src);
+  // h.value requires .clone() — ownership rejects bare field read on the
+  // droppable instantiation. Cloned copy is independent.
+  map[string, string] cloned = h.value.clone();
+  assert(cloned.len == 1, "clone has 1 entry");
+  assert(cloned.contains("a"), "clone has key a");
+  // Mutate the clone — original must be unaffected.
+  cloned["c"] = "d";
+  assert(h.value.len == 1, "owner field still has 1 entry after clone mutation");
+}
+
+// Generic owner with non-droppable TypeArg — no .clone() needed.
+type GenHolderOpt[T] {
+  T? value;
+}
+
+test_generic_optional_field_non_droppable_ok() `test {
+  GenHolderOpt[int] h = GenHolderOpt[int](value: 7);
+  if y := h.value {
+    assert(y == 7, "got 7");
+  }
+}

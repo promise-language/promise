@@ -3300,6 +3300,150 @@ func TestFieldMoveFromCallResultReturnError(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move field 'headers'")
 }
 
+// === T0473: generic Optional/TypeParam field move on droppable instantiation ===
+
+// `Holder[T]{T? value}` instantiated with a droppable T must reject `if y := h.value`
+// — sema's fieldTypeHasDrop returns false for TypeParam, so the generic origin has
+// HasDrop=false and NeedsSynthDrop=false, but codegen's monoInstNeedsSynthDrop
+// generates a drop for `Holder[_BoxDrop]`, leading to a runtime double-free if the
+// move is not rejected here.
+func TestFieldMoveGenericOptionalDroppableError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		type Holder[T] { T? value; }
+		test() {
+			_BoxDrop? a = _BoxDrop(n: 7);
+			Holder[_BoxDrop] h = Holder[_BoxDrop](value: a);
+			if y := h.value {}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'value'")
+}
+
+// Same shape via the var-decl path (no `if` unwrap) — also rejected.
+func TestFieldMoveGenericOptionalDroppableVarDeclError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		type Holder[T] { T? value; }
+		test() {
+			_BoxDrop? a = _BoxDrop(n: 7);
+			Holder[_BoxDrop] h = Holder[_BoxDrop](value: a);
+			_BoxDrop? y = h.value;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'value'")
+}
+
+// `Holder[int]{T? value}` — the substituted field type is `int?`, which is
+// non-droppable. Bare field read must remain allowed (no false positive).
+func TestFieldMoveGenericOptionalNonDroppableOK(t *testing.T) {
+	ownerOK(t, `
+		type Holder[T] { T? value; }
+		test() {
+			Holder[int] h = Holder[int](value: 7);
+			if y := h.value {}
+		}
+	`)
+}
+
+// `Holder[T]{T value}` — non-Optional TypeParam field instantiated with a
+// droppable type must also reject the field move (parallels B0202/B0209).
+func TestFieldMoveGenericNonOptionalDroppableError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		type Holder[T] { T value; }
+		test() {
+			Holder[_BoxDrop] h = Holder[_BoxDrop](value: _BoxDrop(n: 7));
+			_BoxDrop b = h.value;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'value'")
+}
+
+// Inside a generic method body, the owner's TypeArgs are still TypeParams.
+// The check must skip — preserves the existing "skip on unresolved TypeParam"
+// semantics. (Regression guard for the ContainsTypeParam(TypeArg) gate.)
+func TestFieldMoveGenericMethodBodyOK(t *testing.T) {
+	ownerOK(t, `
+		type Holder[T] {
+			T? value;
+			peek(this) {
+				_a := this.value;
+			}
+		}
+		test() {}
+	`)
+}
+
+// Concrete non-droppable field on a generic owner instantiated with a
+// non-droppable TypeArg. Exercises the `continue` (non-TypeParam field) and
+// final `return false` paths inside instanceHasDroppableField — origin Holder
+// has no drop flags, TypeArgs are concrete, and no substituted field is
+// droppable, so the move is allowed.
+func TestFieldMoveGenericNoDropConcreteFieldOK(t *testing.T) {
+	ownerOK(t, `
+		enum Color { Red; Green; Blue; }
+		type Holder[T] {
+			Color c;
+			T v;
+		}
+		test() {
+			Holder[int] h = Holder[int](c: Color.Red, v: 7);
+			Color c = h.c;
+		}
+	`)
+}
+
+// Inside a generic function body, the parameter's type is an Instance whose
+// TypeArgs are still TypeParams. Reading a concrete-typed (non-TypeParam)
+// field from such an Instance exercises the TypeArg-contains-TypeParam early
+// return inside instanceHasDroppableField. Without the guard, substitution
+// would run with TypeParam args and produce nonsense. (Generic methods bind
+// the receiver as the bare Named, so this path is reached only via generic
+// free functions.)
+func TestFieldMoveGenericFnBodyConcreteFieldOK(t *testing.T) {
+	ownerOK(t, `
+		enum Color { Red; Green; Blue; }
+		type Holder[T] {
+			Color c;
+			T v;
+		}
+		peek_holder[T](Holder[T] h) {
+			Color c = h.c;
+		}
+		test() {}
+	`)
+}
+
+// Field type is a generic Instance (GenWrap[Color]) whose origin Named has no
+// drop flags — exercises the `case *types.Instance` fallthrough into
+// instanceHasDroppableField in isDroppableType. The droppable Outer owner
+// passes the isDroppableOwner gate, but the field type's substituted-drop
+// check returns false (Color is non-droppable), so the move is allowed.
+func TestFieldMoveGenericInstanceFieldNonDroppableOK(t *testing.T) {
+	ownerOK(t, `
+		enum Color { Red; Green; Blue; }
+		type GenWrap[T] { T inner; }
+		type Outer {
+			GenWrap[Color] gw;
+			drop(~this) {}
+		}
+		test() {
+			Outer o = Outer(gw: GenWrap[Color](inner: Color.Red));
+			GenWrap[Color] g = o.gw;
+		}
+	`)
+}
+
 // === T0338: borrowed parameter cannot be moved ===
 
 // Bug repro: moving a non-~ param into a constructor field is rejected.

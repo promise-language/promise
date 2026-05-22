@@ -664,7 +664,14 @@ func isAutoDupType(typ types.Type) bool {
 // covers enums directly (extractNamedType does not unwrap Enum).
 func isDroppableOwner(typ types.Type) bool {
 	if n := extractNamedType(typ); n != nil {
-		return n.HasDrop() || n.NeedsSynthDrop()
+		if n.HasDrop() || n.NeedsSynthDrop() {
+			return true
+		}
+	}
+	if inst, ok := typ.(*types.Instance); ok {
+		if instanceHasDroppableField(inst) {
+			return true
+		}
 	}
 	if e, ok := typ.(*types.Enum); ok {
 		return e.HasDrop() || e.NeedsSynthDrop()
@@ -680,12 +687,53 @@ func isDroppableType(typ types.Type) bool {
 		return t.HasDrop() || t.NeedsSynthDrop()
 	case *types.Instance:
 		if n, ok := t.Origin().(*types.Named); ok {
-			return n.HasDrop() || n.NeedsSynthDrop()
+			if n.HasDrop() || n.NeedsSynthDrop() {
+				return true
+			}
 		}
+		return instanceHasDroppableField(t)
 	case *types.Enum:
 		return t.HasDrop() || t.NeedsSynthDrop()
 	case *types.Optional:
 		return isDroppableType(t.Elem())
+	}
+	return false
+}
+
+// instanceHasDroppableField reports whether a generic Instance with concrete
+// TypeArgs has any field whose substituted type is droppable. Mirrors codegen's
+// monoInstNeedsSynthDrop (compiler/internal/codegen/mono.go): sema's
+// fieldTypeHasDrop skips TypeParam fields by design, so a generic origin like
+// Holder[T]{T? v} has HasDrop=false and NeedsSynthDrop=false even when
+// Holder[_BoxDrop] is droppable. The ownership checker needs the
+// substitution-aware view to reject moves that would otherwise double-free at
+// runtime (T0473).
+func instanceHasDroppableField(inst *types.Instance) bool {
+	named, ok := inst.Origin().(*types.Named)
+	if !ok {
+		return false
+	}
+	if named.IsCopy() || named.IsValueType() || named.IsStructural() {
+		return false
+	}
+	// Don't apply when TypeArgs aren't concrete (e.g. inside a generic method
+	// body where the outer T is still a TypeParam) — preserves the existing
+	// "skip on TypeParam" semantics that callers already enforce on the
+	// fieldType side.
+	for _, ta := range inst.TypeArgs() {
+		if types.ContainsTypeParam(ta) {
+			return false
+		}
+	}
+	subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+	for _, f := range named.AllFields() {
+		if !types.ContainsTypeParam(f.Type()) {
+			continue // sema already accounted for it via origin's flags
+		}
+		ft := types.Substitute(f.Type(), subst)
+		if isDroppableType(ft) {
+			return true
+		}
 	}
 	return false
 }

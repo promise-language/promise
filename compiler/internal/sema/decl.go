@@ -547,6 +547,10 @@ func fieldTypeHasDrop(typ types.Type) bool {
 			}
 		}
 		return false
+	case *types.Array:
+		// T0485: Fixed-size [N]T with a droppable element type needs synth drop
+		// so the synth enum/struct drop walks each element.
+		return fieldTypeHasDrop(t.Elem())
 	case *types.Signature:
 		// B0217: Function-typed fields hold closure fat pointers {fn_ptr, env_ptr}.
 		// The env_ptr may be a heap-allocated capture struct that needs freeing.

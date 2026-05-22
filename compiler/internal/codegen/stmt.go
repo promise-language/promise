@@ -121,6 +121,14 @@ func argTypeIsDroppable(typ types.Type) bool {
 func (c *Compiler) isOwnedOptionalExpr(expr ast.Expr) bool {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
+		// T0485: Match-bound Optional variant fields have no drop binding (the
+		// variant data owns the inner). Without this check, the if-let unwrap
+		// would take ownership and double-free with the synth enum drop's
+		// Optional walk. matchBorrowedIdents tracks idents bound by match
+		// destructure as borrows (no dup, no drop binding registered).
+		if c.matchBorrowedIdents != nil && c.matchBorrowedIdents[e.Name] {
+			return false
+		}
 		return true // local variable — ownership transferred via clearDropFlag
 	case *ast.CallExpr:
 		return true // function call returns owned value

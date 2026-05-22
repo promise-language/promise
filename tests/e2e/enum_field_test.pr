@@ -549,3 +549,201 @@ test_t0442_optional_tuple_user_in_enum_field() `test {
     _T0442OptTupWrapper.Empty => assert(false, "should not be empty"),
   }
 }
+
+// T0485: enum variant drop must walk Optional<HeapUserType> variant fields.
+// Before T0485, the synth enum drop's variantFieldNeedsDrop / emitVariantFieldDrop
+// pair only had a Tuple branch — Optional fell through to extractNamed (nil) and
+// the inner heap type leaked when the variant was dropped without a consuming match.
+type _T0485Row {
+  string name;
+}
+
+enum _T0485OptWrapper {
+  Empty,
+  Some(_T0485Row? value),
+}
+
+test_t0485_optional_user_in_enum_synth_drop() `test {
+  _T0485Row? r = _T0485Row(name: "synth_drop".to_string());
+  w := _T0485OptWrapper.Some(r);
+  // No match — synth drop must walk the Optional and drop the inner Row.
+}
+
+// T0485: enum variant drop must walk Array<HeapUserType> variant fields.
+// Before T0485, sema's fieldTypeHasDrop didn't recurse into *types.Array,
+// so the enum was never marked NeedsSynthDrop and no drop function was generated.
+enum _T0485ArrHolder {
+  Empty,
+  ThreeRows(_T0485Row[3] arr),
+}
+
+test_t0485_array_user_in_enum_synth_drop() `test {
+  _T0485Row[3] rs = [_T0485Row(name: "x".to_string()), _T0485Row(name: "y".to_string()), _T0485Row(name: "z".to_string())];
+  h := _T0485ArrHolder.ThreeRows(rs);
+  // No match — synth drop must walk each array element.
+}
+
+test_t0485_array_user_in_enum_with_match() `test {
+  _T0485Row[3] rs = [_T0485Row(name: "a".to_string()), _T0485Row(name: "b".to_string()), _T0485Row(name: "c".to_string())];
+  h := _T0485ArrHolder.ThreeRows(rs);
+  match h {
+    _T0485ArrHolder.ThreeRows(arr) => {
+      assert(arr[0].name == "a", "first");
+      assert(arr[1].name == "b", "second");
+      assert(arr[2].name == "c", "third");
+    },
+    _T0485ArrHolder.Empty => assert(false, "should not be empty"),
+  }
+}
+
+// T0485: Optional<(HeapUser, int)> as enum variant field — locks in the
+// tuple-inner branch added to emitOptionalValueDrop. Without it, dropping an
+// unmatched _T0485OptTupWrapper.Some leaks the inner Row + its string.
+enum _T0485OptTupWrapper {
+  Empty,
+  Some((_T0485Row, int)? pair),
+}
+
+test_t0485_optional_tuple_user_in_enum_synth_drop() `test {
+  (_T0485Row, int)? t = (_T0485Row(name: "ot".to_string()), 7);
+  w := _T0485OptTupWrapper.Some(t);
+  // No match — Optional<Tuple> branch must walk the tuple and drop the Row.
+}
+
+// T0485: Array of tuples as enum variant field — locks in the variant Array
+// branch with a tuple element type.
+enum _T0485ArrTup {
+  Empty,
+  Pairs((_T0485Row, int)[3] pairs),
+}
+
+test_t0485_array_tuple_user_in_enum_synth_drop() `test {
+  (_T0485Row, int)[3] ps = [(_T0485Row(name: "a".to_string()), 1),
+  (_T0485Row(name: "b".to_string()), 2),
+  (_T0485Row(name: "c".to_string()), 3),
+  ];
+  w := _T0485ArrTup.Pairs(ps);
+}
+
+// T0485: borrow markers added by match destructure must not leak past the
+// arm. If the same name is later reused for an owned Optional, an in-arm
+// reassignment must drop the old inner correctly without UAF on the binding.
+test_t0485_borrow_marker_arm_scoped() `test {
+  _T0485Row? r1 = _T0485Row(name: "first".to_string());
+  e := _T0485OptWrapper.Some(r1);
+  match e {
+    _T0485OptWrapper.Some(opt) => {
+      // opt is a borrowed match-binding (variant data owns inner).
+      if r := opt {
+        assert(r.name == "first", "first");
+      } else {
+        assert(false, "expected Some");
+      }
+    },
+    _T0485OptWrapper.Empty => assert(false, "expected Some"),
+  }
+
+  // Same name 'opt' as match binding above; declared as an owned Optional.
+  // Borrow marker must have been cleared at arm end.
+  _T0485Row? opt = _T0485Row(name: "second".to_string());
+  if r := opt {
+    assert(r.name == "second", "second");
+  } else {
+    assert(false, "expected Some");
+  }
+}
+
+// T0485: nested Optional in enum variant — Some(Row?? value). Exercises the
+// emitOptionalValueDrop nested-Optional branch reached via the new
+// emitVariantFieldDrop Optional branch, and borrowInnerHasDrop's Optional
+// recursion in matchBindingIsBorrow.
+enum _T0485NestedOptWrapper {
+  Empty,
+  Some(_T0485Row?? value),
+}
+
+test_t0485_nested_optional_in_enum_synth_drop() `test {
+  _T0485Row? inner = _T0485Row(name: "nested".to_string());
+  _T0485Row?? outer = inner;
+  w := _T0485NestedOptWrapper.Some(outer);
+  // No match — synth drop walks Optional<Optional<Row>> and frees inner Row.
+}
+
+// T0485: Optional<[N]Row> in enum variant — exercises the new Array branch
+// added to emitOptionalValueDrop (compiler.go), plus borrowInnerHasDrop's
+// Array recursion via Optional in matchBindingIsBorrow.
+enum _T0485OptArrWrapper {
+  Empty,
+  Some(_T0485Row[3]? arr),
+}
+
+test_t0485_optional_array_in_enum_synth_drop() `test {
+  _T0485Row[3] rs = [_T0485Row(name: "x".to_string()),
+  _T0485Row(name: "y".to_string()),
+  _T0485Row(name: "z".to_string())];
+  _T0485Row[3]? opt = rs;
+  w := _T0485OptArrWrapper.Some(opt);
+  // No match — synth drop walks Optional<[3]Row> and frees each Row.
+}
+
+// T0485: [N]Row? in enum variant — fixed-size array of Optionals. Exercises
+// emitVariantFieldDrop's Array branch with an Optional element type, and
+// borrowInnerHasDrop's recursion through Array → Optional → leaf.
+enum _T0485ArrOptHolder {
+  Empty,
+  Multiples(_T0485Row?[3] arr),
+}
+
+test_t0485_array_of_optional_in_enum_synth_drop() `test {
+  _T0485Row? r1 = _T0485Row(name: "p".to_string());
+  _T0485Row? r2 = _T0485Row(name: "q".to_string());
+  _T0485Row? r3 = _T0485Row(name: "r".to_string());
+  _T0485Row?[3] rs = [r1, r2, r3];
+  h := _T0485ArrOptHolder.Multiples(rs);
+  // No match — synth drop walks [3]Row? and frees each Some inner.
+}
+
+// T0485: [M][N]Row in enum variant — array of arrays. Exercises
+// emitVariantFieldDrop's Array branch recursing into another Array,
+// and borrowInnerHasDrop's Array → Array recursion.
+enum _T0485ArrArrHolder {
+  Empty,
+  Grid(_T0485Row[2][2] grid),
+}
+
+test_t0485_array_of_array_in_enum_synth_drop() `test {
+  _T0485Row[2] row1 = [_T0485Row(name: "a".to_string()), _T0485Row(name: "b".to_string())];
+  _T0485Row[2] row2 = [_T0485Row(name: "c".to_string()), _T0485Row(name: "d".to_string())];
+  _T0485Row[2][2] grid = [row1, row2];
+  h := _T0485ArrArrHolder.Grid(grid);
+  // No match — synth drop walks [2][2]Row and frees all 4 Rows.
+}
+
+// T0485: match destructure on the new compound types — confirms the borrow
+// marker keeps the binding from transferring ownership while the synth drop
+// still walks the variant data correctly.
+test_t0485_optional_array_in_enum_with_match() `test {
+  _T0485Row[3] rs = [_T0485Row(name: "j".to_string()),
+  _T0485Row(name: "k".to_string()),
+  _T0485Row(name: "l".to_string())];
+  _T0485Row[3]? opt = rs;
+  w := _T0485OptArrWrapper.Some(opt);
+  match w {
+    _T0485OptArrWrapper.Some(arr_opt) => {
+      // arr_opt is Optional<[3]Row>; variant data still owns the inner array.
+      if a := arr_opt {
+        assert(a[0].name == "j", "first");
+        assert(a[1].name == "k", "second");
+        assert(a[2].name == "l", "third");
+      } else {
+        assert(false, "expected Some");
+      }
+    },
+    _T0485OptArrWrapper.Empty => assert(false, "expected Some"),
+  }
+}
+
+// T0512 (filed): nested if-let on a borrowed Optional<Optional<HeapUser>> from
+// a match binding segfaults — the inner if-let's bound local is not propagated
+// as borrow, so its scope drop double-frees with the synth enum drop. A test
+// for this case will be added when T0512 is fixed.

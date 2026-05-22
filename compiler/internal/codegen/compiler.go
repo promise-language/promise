@@ -173,6 +173,7 @@ type Compiler struct {
 	dupStringFieldAccess    bool                // T0095: when true, genFieldAccess dups string fields from droppable types
 	dupContainerFieldAccess bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
 	b0219DupedVecFields     map[string]bool     // T0405: tracks "TypeName.fieldName" entries when B0219 dups a vector field; genMemberAssign skips element drops for these (elements are owned by the dup)
+	matchBorrowedIdents     map[string]bool     // T0485: tracks idents bound by match destructure as borrows (no drop binding); if-let unwrap must not transfer ownership
 	dupTupleFieldAccess     bool                // T0370: when true, genVectorIndex dups droppable tuple elements on read
 	dupHeapUserFieldAccess  bool                // T0398: when true, genVectorIndex deep-clones heap user-type elements on read
 	optionalStringDup       value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
@@ -5160,6 +5161,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.blockCounter = 0
 	c.enumCtorTemps = nil       // B0267: prevent cross-function alloca leak
 	c.b0219DupedVecFields = nil // T0405: clear cross-function stale entries
+	c.matchBorrowedIdents = nil // T0485: clear cross-function stale entries
 
 	entry := fn.NewBlock(".entry")
 	c.block = entry
@@ -6467,6 +6469,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.blockCounter = 0
 	c.enumCtorTemps = nil       // B0267: prevent cross-function alloca leak
 	c.b0219DupedVecFields = nil // T0405: clear cross-function stale entries
+	c.matchBorrowedIdents = nil // T0485: clear cross-function stale entries
 	c.canError = m.Sig().CanError()
 	c.currentRetType = m.Sig().Result()
 	savedNamed := c.currentNamed
@@ -6875,6 +6878,41 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 		c.block = dropBlock
 		innerVal := c.block.NewExtractValue(optVal, 1)
 		c.emitOptionalValueDrop(innerVal, innerOpt)
+		if c.block.Term == nil {
+			c.block.NewBr(skipBlock)
+		}
+		c.block = skipBlock
+		return
+	}
+
+	// T0485: Tuple inner — Optional<(A, B, ...)>. Branch on has-value, then walk
+	// each tuple element via emitVariantFieldDrop (which handles every element kind:
+	// string, Vector, Channel, heap user, nested Tuple/Optional/Array).
+	if tup, ok := elem.(*types.Tuple); ok {
+		hasVal := c.block.NewExtractValue(optVal, 0)
+		dropBlock := c.newBlock("optfield.drop")
+		skipBlock := c.newBlock("optfield.skip")
+		c.block.NewCondBr(hasVal, dropBlock, skipBlock)
+		c.block = dropBlock
+		innerVal := c.block.NewExtractValue(optVal, 1)
+		c.emitVariantFieldDrop(innerVal, tup)
+		if c.block.Term == nil {
+			c.block.NewBr(skipBlock)
+		}
+		c.block = skipBlock
+		return
+	}
+
+	// T0485: Array inner — Optional<[N]T>. Branch on has-value, then walk
+	// each array element via emitVariantFieldDrop.
+	if arr, ok := elem.(*types.Array); ok {
+		hasVal := c.block.NewExtractValue(optVal, 0)
+		dropBlock := c.newBlock("optfield.drop")
+		skipBlock := c.newBlock("optfield.skip")
+		c.block.NewCondBr(hasVal, dropBlock, skipBlock)
+		c.block = dropBlock
+		innerVal := c.block.NewExtractValue(optVal, 1)
+		c.emitVariantFieldDrop(innerVal, arr)
 		if c.block.Term == nil {
 			c.block.NewBr(skipBlock)
 		}
@@ -7527,6 +7565,15 @@ func (c *Compiler) variantFieldNeedsDrop(typ types.Type) bool {
 		}
 		return false
 	}
+	// T0485: Optional<T> with droppable inner needs cleanup so the synth enum
+	// drop walks it via emitVariantFieldDrop's optional branch.
+	if opt, ok := typ.(*types.Optional); ok {
+		return c.variantFieldNeedsDrop(opt.Elem())
+	}
+	// T0485: Fixed-size Array[N]T with droppable elements needs cleanup.
+	if arr, ok := typ.(*types.Array); ok {
+		return c.variantFieldNeedsDrop(arr.Elem())
+	}
 	named := extractNamed(typ)
 	if named != nil {
 		if named == types.TypString || named == types.TypVector || named == types.TypChannel {
@@ -7675,6 +7722,30 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			}
 			elemVal := c.block.NewExtractValue(fieldVal, uint64(i))
 			c.emitVariantFieldDrop(elemVal, resolved)
+		}
+		return
+	}
+
+	// T0485: Optional<T> field — delegate to emitOptionalValueDrop which already
+	// handles every relevant inner type (string, Vector, Channel, heap user type,
+	// nested Optional). The variant-data layout for Optional<T> is {i1, T_llvm}
+	// (see llvmTypeForEnumFieldFromPromise), matching what emitOptionalValueDrop
+	// expects from a loaded {i1, T} value.
+	if opt, ok := typ.(*types.Optional); ok {
+		c.emitOptionalValueDrop(fieldVal, opt)
+		return
+	}
+
+	// T0485: Fixed-size [N]T field — extract each element and recurse. Variant
+	// data layout for [N]T is `[N x T_llvm]`.
+	if arr, ok := typ.(*types.Array); ok {
+		elemType := arr.Elem()
+		if c.typeSubst != nil {
+			elemType = types.Substitute(elemType, c.typeSubst)
+		}
+		for i := int64(0); i < arr.Size(); i++ {
+			elemVal := c.block.NewExtractValue(fieldVal, uint64(i))
+			c.emitVariantFieldDrop(elemVal, elemType)
 		}
 		return
 	}

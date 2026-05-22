@@ -5674,6 +5674,19 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 		// the arm falls through to match.end (scope cleanup here) or when the
 		// arm exits early via return/break (handled by emitScopeCleanup in those paths).
 		armScopeLen := len(c.scopeBindings)
+		// T0485: Snapshot match-borrow markers present before this arm so any
+		// added by this arm's bindings can be reverted at arm end. The bound
+		// idents are arm-scoped; without this, later code in the function that
+		// reuses the binding name (e.g., declaring a new owned Optional) would
+		// inherit the stale "borrowed" marker and disable correct ownership
+		// transfer in if-let unwraps.
+		var armBorrowedSnapshot map[string]bool
+		if len(c.matchBorrowedIdents) > 0 {
+			armBorrowedSnapshot = make(map[string]bool, len(c.matchBorrowedIdents))
+			for k := range c.matchBorrowedIdents {
+				armBorrowedSnapshot[k] = true
+			}
+		}
 		c.bindMatchPattern(arm.Pattern, subject, enum, layout, enumHasDrop, subjectType)
 
 		var armVal value.Value
@@ -5697,6 +5710,15 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 			c.emitScopeCleanup(armScopeLen, false)
 		}
 		c.scopeBindings = c.scopeBindings[:armScopeLen]
+
+		// T0485: Revert match-borrow markers added in this arm. Entries present
+		// before the arm are kept (they belong to an outer match in a nested
+		// scenario); entries newly added are removed.
+		for k := range c.matchBorrowedIdents {
+			if !armBorrowedSnapshot[k] {
+				delete(c.matchBorrowedIdents, k)
+			}
+		}
 
 		armEnd := c.block
 		if c.block.Term == nil {
@@ -6038,7 +6060,60 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		bindAlloca := c.createEntryAlloca(fieldType)
 		c.block.NewStore(val, bindAlloca)
 		c.locals[binding] = bindAlloca
+
+		// T0485: Mark Optional/Array variant field bindings as match-borrowed
+		// when the enum has a drop. The variant data owns the inner heap value;
+		// the bound variable is just a copy that aliases it. Without this mark,
+		// `if x := optBinding` (and similar unwraps) would treat the bound
+		// variable as owned and transfer ownership, causing double-free with
+		// the synth enum drop's Optional/Array walk.
+		if enumHasDrop {
+			resolved := c.resolveMatchFieldType(variant.Fields()[i].Type(), subjectType, enum)
+			if c.matchBindingIsBorrow(resolved) {
+				if c.matchBorrowedIdents == nil {
+					c.matchBorrowedIdents = make(map[string]bool)
+				}
+				c.matchBorrowedIdents[binding] = true
+			}
+		}
 	}
+}
+
+// matchBindingIsBorrow reports whether the bound variant-field type holds a
+// droppable inner that the variant data still owns (i.e., the binding aliases
+// rather than owns). T0485: Optional/Array variant fields that contain heap
+// values are bound as borrows because dupping them would require recursive
+// deep-clone logic; the synth enum drop walks the variant data and frees
+// the inner value, so the binding must not transfer ownership.
+func (c *Compiler) matchBindingIsBorrow(resolved types.Type) bool {
+	if opt, ok := resolved.(*types.Optional); ok {
+		return c.borrowInnerHasDrop(opt.Elem())
+	}
+	if arr, ok := resolved.(*types.Array); ok {
+		return c.borrowInnerHasDrop(arr.Elem())
+	}
+	return false
+}
+
+// borrowInnerHasDrop returns true if a type wrapped inside an Optional/Array
+// variant field holds any droppable subterm. Recurses through Tuple/Optional/
+// Array; defers to fieldTypeNeedsDrop for leaf cases.
+func (c *Compiler) borrowInnerHasDrop(typ types.Type) bool {
+	if tup, ok := typ.(*types.Tuple); ok {
+		for _, e := range tup.Elems() {
+			if c.borrowInnerHasDrop(e) {
+				return true
+			}
+		}
+		return false
+	}
+	if opt, ok := typ.(*types.Optional); ok {
+		return c.borrowInnerHasDrop(opt.Elem())
+	}
+	if arr, ok := typ.(*types.Array); ok {
+		return c.borrowInnerHasDrop(arr.Elem())
+	}
+	return fieldTypeNeedsDrop(typ)
 }
 
 // resolveMatchFieldType resolves a match-destructured field's type using enum

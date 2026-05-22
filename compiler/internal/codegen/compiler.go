@@ -8219,12 +8219,16 @@ const (
 	chanFieldRecvWaitersHead = 13 // i8*  head of parked receiver Gs
 	chanFieldRecvWaitersTail = 14 // i8*  tail of parked receiver Gs
 
+	// Rendezvous waiter list for unbuffered channels (T0312)
+	chanFieldRvWaitersHead = 15 // i8*  head of rendezvous-parked senders
+	chanFieldRvWaitersTail = 16 // i8*  tail of rendezvous-parked senders
+
 	// Reference count for shared channels (B0163)
-	chanFieldRefcount = 15 // i64  atomic reference count (starts at 1)
+	chanFieldRefcount = 17 // i64  atomic reference count (starts at 1)
 )
 
 // channelStructType returns the LLVM struct type for a channel.
-// Layout: { i8*, i64, i64, i64, i64, i64, i8, i8, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64 } — 16 fields
+// Layout: { i8*, i64, i64, i64, i64, i64, i8, i8, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64 } — 18 fields
 func channelStructType() *irtypes.StructType {
 	return irtypes.NewStruct(
 		irtypes.I8Ptr, // buffer
@@ -8242,6 +8246,8 @@ func channelStructType() *irtypes.StructType {
 		irtypes.I8Ptr, // send_waiters_tail
 		irtypes.I8Ptr, // recv_waiters_head
 		irtypes.I8Ptr, // recv_waiters_tail
+		irtypes.I8Ptr, // rv_waiters_head (T0312: rendezvous-parked senders)
+		irtypes.I8Ptr, // rv_waiters_tail (T0312)
 		irtypes.I64,   // refcount (B0163: atomic reference count)
 	)
 }
@@ -8329,10 +8335,11 @@ func (c *Compiler) defineChannelNewFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
 	entry.NewStore(notFull, nfField)
 
-	// Init goroutine waiter lists to null
+	// Init goroutine waiter lists to null (send, recv, rv)
 	nullPtr := constant.NewNull(irtypes.I8Ptr)
 	for _, idx := range []int{chanFieldSendWaitersHead, chanFieldSendWaitersTail,
-		chanFieldRecvWaitersHead, chanFieldRecvWaitersTail} {
+		chanFieldRecvWaitersHead, chanFieldRecvWaitersTail,
+		chanFieldRvWaitersHead, chanFieldRvWaitersTail} {
 		field := entry.NewGetElementPtr(chanType, chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 		entry.NewStore(nullPtr, field)

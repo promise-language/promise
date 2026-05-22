@@ -9158,6 +9158,13 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		nf := c.block.NewLoad(i8PtrTy, nfPtr)
 		c.block.NewCall(c.funcs["promise_waiter_wake_one"], sendHeadPtr, sendTailPtr, nf)
 
+		// Wake a rendezvous-parked sender (T0312)
+		rvSendHeadPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRvWaitersHead)))
+		rvSendTailPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRvWaitersTail)))
+		c.block.NewCall(c.funcs["promise_waiter_wake_one"], rvSendHeadPtr, rvSendTailPtr, nf)
+
 		someVal := c.block.NewInsertValue(constant.NewZeroInitializer(optType), constant.True, 0)
 		someVal2 := c.block.NewInsertValue(someVal, rVal, 1)
 		someBlk := c.block // capture for phi predecessor

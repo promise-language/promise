@@ -3531,24 +3531,33 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	c.block.NewCondBr(shouldWait, rendezvousWaitBlock, rendezvousExitBlock)
 
 	if c.inCoroutine {
-		// Goroutine mode rendezvous: yield-spin (T0305).
-		// Instead of parking on send_waiters (which conflates write-waiters and
-		// rendezvous-waiters and causes lost-wakeup races under Mutex[T] contention),
-		// the sender releases the channel mutex, yields to the scheduler, and re-checks
-		// count on resume. This ensures send_waiters only contains write-waiters,
-		// eliminating the thundering herd from wake_all and the chain-breaking race.
+		// Goroutine mode rendezvous: park on rv_waiters (T0312).
+		// Enqueue G on rv_waiters while ch.mutex is locked, then set park_mutex so
+		// the scheduler unlocks ch.mutex after coro.suspend completes. The receiver
+		// wakes us (via wake_one(rv_waiters)) only after count-- (count==0), so no
+		// re-check is needed on resume — go directly to rendezvousExitBlock.
 		c.block = rendezvousWaitBlock
-		c.block.NewCall(c.palMutexUnlock, mtx)
-		// Yield: coro.suspend with null park_mutex → scheduler re-enqueues us
+		rvCurrentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		rvHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRvWaitersHead)))
+		rvTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRvWaitersTail)))
+		c.block.NewCall(c.funcs["promise_waiter_enqueue"], rvHeadPtr, rvTailPtr, rvCurrentG)
+		rvGTy := goroutineStructType()
+		rvGPtr := c.block.NewBitCast(rvCurrentG, irtypes.NewPointer(rvGTy))
+		rvPmField := c.block.NewGetElementPtr(rvGTy, rvGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+		c.block.NewStore(mtx, rvPmField)
 		rvSuspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 		rvResumeBlk := c.newBlock("send.rv.resume")
 		c.block.NewSwitch(rvSuspResult, c.coroSuspendBlk,
 			ir.NewCase(constant.NewInt(irtypes.I8, 0), rvResumeBlk),
 			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
 
+		// Scheduler unlocked ch.mutex via park_mutex; re-lock to proceed.
 		c.block = rvResumeBlk
 		c.block.NewCall(c.palMutexLock, mtx)
-		c.block.NewBr(rendezvousCheckBlock)
+		c.block.NewBr(rendezvousExitBlock)
 	} else {
 		// Thread-blocking mode rendezvous: cond_wait
 		c.block = rendezvousWaitBlock
@@ -3556,10 +3565,9 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		c.block.NewBr(rendezvousCheckBlock)
 	}
 
-	// rendezvous exit (T0305): wake one waiter on send_waiters (write-waiter or
-	// select SWN) so they can proceed now that count==0. With yield-spin rendezvous,
-	// rendezvous-waiters are NOT on send_waiters, so waking send_waiters here only
-	// affects genuine write-waiters (from the waitfull path) or select send SWNs.
+	// rendezvous exit: wake one write-waiter from send_waiters (T0305/T0312).
+	// rv_waiters holds rendezvous-parked senders; send_waiters holds only genuine
+	// write-waiters and select SWNs, so waking it here is safe.
 	c.block = rendezvousExitBlock
 	rvExitSendHead := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
@@ -3622,6 +3630,13 @@ func (c *Compiler) genChannelClose(chRaw value.Value, chPtr value.Value, chanTyp
 	recvTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
 	c.block.NewCall(c.funcs["promise_waiter_wake_all"], recvHeadPtr, recvTailPtr)
+
+	// Wake all rendezvous-parked senders (T0312): channel closed while they waited
+	closeRvHead := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRvWaitersHead)))
+	closeRvTail := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRvWaitersTail)))
+	c.block.NewCall(c.funcs["promise_waiter_wake_all"], closeRvHead, closeRvTail)
 
 	// Broadcast both cond vars to wake thread-blocked waiters
 	neFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
@@ -10846,6 +10861,14 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 	sendTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
 	c.block.NewCall(c.funcs["promise_waiter_wake_one"], sendHeadPtr, sendTailPtr, notFull)
+
+	// Wake a rendezvous-parked sender (T0312): count is now 0, so the sender's
+	// rendezvous wait is complete. Waking rv_waiters lets it proceed without spinning.
+	rvWakeHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRvWaitersHead)))
+	rvWakeTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRvWaitersTail)))
+	c.block.NewCall(c.funcs["promise_waiter_wake_one"], rvWakeHeadPtr, rvWakeTailPtr, notFull)
 
 	// Unlock
 	c.block.NewCall(c.palMutexUnlock, mtx)

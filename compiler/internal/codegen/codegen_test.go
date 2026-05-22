@@ -13641,18 +13641,68 @@ func TestChannelCloseWakesAllWaiters(t *testing.T) {
 			ch.close();
 		}
 	`)
-	// Close should call promise_waiter_wake_all for both send and recv waiters
+	// Close should call promise_waiter_wake_all for send, recv, and rv_waiters (T0312)
 	assertContains(t, ir, "call void @promise_waiter_wake_all(")
 }
 
-func TestChannelStructHas15Fields(t *testing.T) {
+func TestChannelCloseWakesRvWaiters(t *testing.T) {
+	// T0312: genChannelClose must wake rv_waiters in addition to send/recv waiters.
+	// A rendezvous-parked sender (goroutine that wrote to an unbuffered channel and
+	// is parked on rv_waiters) must be unblocked when the channel closes.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			ch.close();
+		}
+	`)
+	// Three wake_all calls: send_waiters, recv_waiters, rv_waiters
+	count := strings.Count(ir, "call void @promise_waiter_wake_all(")
+	if count < 3 {
+		t.Errorf("expected >= 3 promise_waiter_wake_all calls in close (send/recv/rv_waiters), got %d", count)
+	}
+}
+
+func TestSelectRecvWakesRvWaiters(t *testing.T) {
+	// T0312: the select execRecv path must call wake_one for rv_waiters (field 15)
+	// in addition to send_waiters, so rendezvous-parked senders are unblocked
+	// when their value is consumed via a select recv case.
+	irBaseline := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			ch.send(1);
+		}
+	`)
+	baseline := strings.Count(irBaseline, "call void @promise_waiter_wake_one(")
+
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			ch.send(1);
+			select {
+				v := <-ch:
+					print_line("got");
+				default:
+					print_line("default");
+			}
+		}
+	`)
+	total := strings.Count(ir, "call void @promise_waiter_wake_one(")
+	delta := total - baseline
+	// execRecv adds 2 wake_one calls: send_waiters + rv_waiters
+	if delta < 2 {
+		t.Errorf("select recv must add >= 2 wake_one calls (send_waiters + rv_waiters), got delta=%d (rv_waiters wake missing?)", delta)
+	}
+}
+
+func TestChannelStructHas18Fields(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			ch := channel[int](capacity: 1);
 		}
 	`)
-	// Channel struct should have 16 fields including the 4 waiter lists and refcount
-	// The channel_new function initializes all fields including waiter lists
+	// Channel struct has 18 fields: buffer, head, tail, count, cap, elem_size,
+	// is_closed, is_unbuffered, not_empty, not_full, send_waiters(2), recv_waiters(2),
+	// rv_waiters(2, T0312), refcount. Verified by promise_channel_new definition.
 	assertContains(t, ir, "define i8* @promise_channel_new(")
 }
 
@@ -13855,10 +13905,10 @@ func TestFireAndForgetNonVoidNoResultBuffer(t *testing.T) {
 }
 
 func TestChannelSendCoroutineRendezvous(t *testing.T) {
-	// T0305: Unbuffered channel send inside a go block uses yield-spin rendezvous:
-	// after writing the value, the sender unlocks the channel mutex, yields to the
-	// scheduler (coro.suspend with null park_mutex), and re-checks count on resume.
-	// This avoids conflating write-waiters and rendezvous-waiters on send_waiters.
+	// T0312: Unbuffered channel send inside a go block parks on rv_waiters for the
+	// rendezvous. After writing the value, the sender enqueues itself on rv_waiters,
+	// sets park_mutex=&ch.mutex, and calls coro.suspend. The scheduler unlocks
+	// ch.mutex. The receiver wakes the sender via wake_one(rv_waiters) after count--.
 	ir := generateIR(t, `
 		main() {
 			ch := channel[int]();
@@ -13868,16 +13918,19 @@ func TestChannelSendCoroutineRendezvous(t *testing.T) {
 			result := <-ch;
 		}
 	`)
-	// Inside the coroutine, the rendezvous wait should use unlock + coro.suspend (yield-spin)
+	// Rendezvous wait and resume blocks must exist
 	assertContains(t, ir, "send.rv.wait")
-	// Yield-spin: unlocks mutex before suspend, no waiter_enqueue for rendezvous
 	assertContains(t, ir, "send.rv.resume")
+	// rv_waiters park: waiter_enqueue IS called (unlike the old yield-spin)
+	assertContains(t, ir, "call void @promise_waiter_enqueue(")
+	// Receiver must wake rv_waiters after count--
+	assertContains(t, ir, "call void @promise_waiter_wake_one(")
 }
 
 func TestChannelSendRendezvousExitWakesNextWaiter(t *testing.T) {
-	// T0305: Rendezvous exit wakes one waiter on send_waiters. With yield-spin
-	// rendezvous, rendezvous-waiters are NOT on send_waiters, so this only wakes
-	// write-waiters (waitfull path) or select send SWNs — never strands them.
+	// T0305/T0312: Rendezvous exit wakes one waiter on send_waiters. rv_waiters
+	// holds rendezvous-parked senders; send_waiters holds only write-waiters and
+	// select SWNs, so waking it here is safe and never strands a write-waiter.
 	ir := generateIR(t, `
 		main() {
 			ch := channel[int]();

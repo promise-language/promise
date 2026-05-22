@@ -163,3 +163,17 @@ test_borrow_set_from_paren_clone() `test {
   guard.borrow = (guard.borrow.clone());
   assert(guard.borrow == "init", "paren-clone preserves value");
 }
+
+// T0488: setter LHS with mixed if-arm — `.clone()` on the borrow arm
+// produces a fresh owned string, so the setter's drop-then-store is sound.
+test_t0488_setter_mixed_arm_clone_ok() `test {
+  m := Mutex[string]("originalvalue" + "");
+  use guard := m.lock();
+  cond := true;
+  guard.borrow = if cond {
+    guard.borrow.clone()
+  } else {
+    "owned"
+  };
+  assert(guard.borrow == "originalvalue", "clone arm preserves value");
+}

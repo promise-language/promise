@@ -4097,12 +4097,11 @@ func TestT0377_ConsumeMatchBorrowVarRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
-// T0377: Mixed-ownership if-expression (one borrow arm, one owned arm) is
-// outside the conservative rule — the LHS is NOT marked Borrowed, so a
-// `consume(~borrowed)` would slip through (status quo behavior). Documents
-// the gap subsumed by the long-term `&T` ref-type design (T0381).
-func TestT0377_MixedIfNotMarkedBorrowed(t *testing.T) {
-	ownerOK(t, `
+// T0488: Mixed-ownership if-expression (one borrow arm, one owned arm) of
+// non-Copy type is rejected at sema time — the prior T0377 "gap" left the
+// borrow inner pointer treated as owned, causing UAF on scope exit.
+func TestT0488_MixedIfNonCopyRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		consume(~string s) {}
 		test() {
 			s := "hi";
@@ -4113,6 +4112,7 @@ func TestT0377_MixedIfNotMarkedBorrowed(t *testing.T) {
 			consume(borrowed);
 		}
 	`)
+	expectOwnerError(t, errs, "mix borrowed and owned non-Copy 'string'")
 }
 
 // T0377 / T0438: parenthesized borrow likewise stays `string&` and is
@@ -4149,12 +4149,11 @@ func TestT0377_ConsumeMatchBlockBorrowVarRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
-// T0377: Mixed-ownership match (one borrow arm, one owned arm) is outside
-// the conservative rule — the LHS is NOT marked Borrowed. Parallels
-// TestT0377_MixedIfNotMarkedBorrowed and exercises the
-// `!c.matchArmIsBorrowGetter(arm) return false` path in the arm loop.
-func TestT0377_MixedMatchNotMarkedBorrowed(t *testing.T) {
-	ownerOK(t, `
+// T0488: Mixed-ownership match (one borrow arm, one owned arm) of non-Copy
+// type is rejected at sema time. Parallels TestT0488_MixedIfNonCopyRejected
+// for the match-expression code path in checkMatchExpr.
+func TestT0488_MixedMatchNonCopyRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		consume(~string s) {}
 		test() {
 			s := "hi";
@@ -4168,6 +4167,7 @@ func TestT0377_MixedMatchNotMarkedBorrowed(t *testing.T) {
 			consume(borrowed);
 		}
 	`)
+	expectOwnerError(t, errs, "mix borrowed and owned non-Copy 'string'")
 }
 
 // T0402 / T0438: returning `T&` (non-Copy elem) as owned `T` is unsafe.

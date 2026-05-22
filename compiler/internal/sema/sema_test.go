@@ -14567,12 +14567,12 @@ func TestT0381_ArrayLitStripsLaterElementRef(t *testing.T) {
 	`)
 }
 
-// T0381: if-expression with one borrow arm and one owned arm joins to the
-// owned form via joinBranchTypes — the result type is `T`, not `T&`.
-// Verifying via the no-error sema path: assigning the result to an owned
-// `T` local must succeed even though one arm produces `T&`.
-func TestT0381_IfMixedRefOwnedJoinsToOwned(t *testing.T) {
-	checkOK(t, `
+// T0488: if-expression with one borrow arm and one owned arm of non-Copy
+// element type is rejected — silent decay would treat the borrow's inner
+// pointer as owned and cause UAF/double-free on scope exit. Replaces the
+// prior T0381 "joins to owned" contract for non-Copy `T`.
+func TestT0488_IfMixedNonCopyRejected(t *testing.T) {
+	errs := checkErrs(t, `
 		test() {
 			a := Arc[string]("hi");
 			cond := true;
@@ -14584,13 +14584,13 @@ func TestT0381_IfMixedRefOwnedJoinsToOwned(t *testing.T) {
 			_ = x.len;
 		}
 	`)
+	expectError(t, errs, "mix borrowed and owned non-Copy 'string'")
 }
 
-// T0381: if-expression where the else arm is the borrow and then is owned —
-// exercises the `bIsRef && !aIsRef` direction of joinBranchTypes (the path
-// that returns `a` as-is, no stripping needed since `a` is already owned).
-func TestT0381_IfOwnedThenBorrowElseJoinsToOwned(t *testing.T) {
-	checkOK(t, `
+// T0488: rejection fires when the borrow is in the else arm too — exercises
+// the `bIsRef && !aIsRef` direction of joinBranchTypes.
+func TestT0488_IfMixedNonCopyRejected_BorrowInElse(t *testing.T) {
+	errs := checkErrs(t, `
 		test() {
 			a := Arc[string]("hi");
 			cond := true;
@@ -14602,12 +14602,13 @@ func TestT0381_IfOwnedThenBorrowElseJoinsToOwned(t *testing.T) {
 			_ = x.len;
 		}
 	`)
+	expectError(t, errs, "mix borrowed and owned non-Copy 'string'")
 }
 
-// T0381: match-expression with mixed ref/owned arms — joinBranchTypes
-// reaches the unification path through checkMatchExpr's recursive call.
-func TestT0381_MatchMixedRefOwnedJoinsToOwned(t *testing.T) {
-	checkOK(t, `
+// T0488: match-expression with mixed ref/owned non-Copy arms — same
+// rejection through checkMatchExpr's recursive joinBranchTypes call.
+func TestT0488_MatchMixedNonCopyRejected(t *testing.T) {
+	errs := checkErrs(t, `
 		test() {
 			a := Arc[string]("hi");
 			k := 1;
@@ -14618,6 +14619,131 @@ func TestT0381_MatchMixedRefOwnedJoinsToOwned(t *testing.T) {
 			_ = x.len;
 		}
 	`)
+	expectError(t, errs, "mix borrowed and owned non-Copy 'string'")
+}
+
+// T0488: explicit `.clone()` on the borrow arm is the documented fix —
+// the if-expression's joined type is owned `string` and both arms produce
+// owned values, so no silent decay occurs.
+func TestT0488_IfMixedNonCopyCloneOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[string]("hi");
+			cond := true;
+			string x = if cond {
+				a.borrow.clone()
+			} else {
+				"other"
+			};
+			_ = x.len;
+		}
+	`)
+}
+
+// T0488: Copy element types (e.g. `int`) preserve the prior T0381 decay —
+// loading a primitive through a borrow is sound and the joined type is
+// the underlying owned `int`.
+func TestT0488_IfMixedCopyOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[int](42);
+			cond := true;
+			int x = if cond {
+				a.borrow
+			} else {
+				0
+			};
+			_ = x;
+		}
+	`)
+}
+
+// T0488: same Copy-OK path through match-expression.
+func TestT0488_MatchMixedCopyOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[int](42);
+			k := 1;
+			int x = match k {
+				1 => a.borrow,
+				_ => 0,
+			};
+			_ = x;
+		}
+	`)
+}
+
+// T0488: Copy decay with the borrow in the *else* arm — exercises the
+// `bIsRef && !aIsRef` fall-through path of joinBranchTypes (returns the
+// already-owned `a`). The borrow-in-then direction is covered by
+// TestT0488_IfMixedCopyOK above.
+func TestT0488_IfMixedCopyOK_BorrowInElse(t *testing.T) {
+	checkOK(t, `
+		test() {
+			a := Arc[int](42);
+			cond := true;
+			int x = if cond {
+				0
+			} else {
+				a.borrow
+			};
+			_ = x;
+		}
+	`)
+}
+
+// T0488: mutable-ref arm (`T~`) of non-Copy type is rejected the same way
+// as `T&` — joinBranchTypes treats SharedRef and MutRef identically and
+// the rejection covers the `*types.MutRef` case in the stripped() helper.
+func TestT0488_IfMutRefMixedNonCopyRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		take(int[]~ xs) {
+			cond := true;
+			int[] x = if cond {
+				xs
+			} else {
+				[1, 2, 3]
+			};
+			_ = x.len;
+		}
+	`)
+	expectError(t, errs, "mix borrowed and owned non-Copy 'int[]'")
+}
+
+// T0488: mutable-ref arm (`T~`) of Copy element type decays to owned `T`
+// — exercises the MutRef path in stripped() under the Copy-OK branch.
+func TestT0488_IfMutRefMixedCopyOK(t *testing.T) {
+	checkOK(t, `
+		take(int~ r) {
+			cond := true;
+			int x = if cond {
+				r
+			} else {
+				0
+			};
+			_ = x;
+		}
+	`)
+}
+
+// T0488: match with 3+ arms where the first two unify cleanly to a borrow
+// `T&` and a later arm produces owned `T` — the rejection fires once on
+// the third arm join, exercising the loop accumulator path in
+// checkMatchExpr (resultType already non-nil when the mismatch is hit).
+func TestT0488_MatchMultiArmMixedRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			a := Arc[string]("hi");
+			k := 1;
+			string x = match k {
+				1 => a.borrow,
+				2 => a.borrow,
+				_ => "owned",
+			};
+			_ = x.len;
+		}
+	`)
+	expectError(t, errs, "mix borrowed and owned non-Copy 'string'")
 }
 
 // T0381: equality operator on `T&` unwraps to underlying `T` and

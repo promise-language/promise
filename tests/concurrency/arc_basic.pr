@@ -653,3 +653,71 @@ type ArcChild is ArcParent {
 arc_inherited_field_no_leak() `test {
   ArcChild c = ArcChild(shared: Arc[int](99), extra: 1);
 }
+
+// T0488: explicit `.clone()` on the borrow arm is the documented fix when
+// arms produce mixed `T&` and `T` for non-Copy `T`. The if-expression's
+// joined type is owned `string`; the Arc still owns the original.
+test_t0488_mixed_arm_clone_local_ok() `test {
+  a := Arc[string]("foo" + "");
+  cond := true;
+  s := if cond {
+    a.borrow.clone()
+  } else {
+    "owned"
+  };
+  assert(s == "foo", "clone arm value");
+  v := a.borrow;
+  assert(v.len == 3, "Arc unaffected by clone");
+}
+
+// T0488: making both arms produce `T&` (the all-borrow form) is the other
+// valid fix — the joined type stays `string&` and no consume occurs.
+test_t0488_all_borrow_arms_local_ok() `test {
+  a := Arc[string]("foo" + "");
+  cond := true;
+  s := if cond {
+    a.borrow
+  } else {
+    a.borrow
+  };
+  assert(s == "foo", "all-borrow arms value");
+  v := a.borrow;
+  assert(v.len == 3, "Arc unaffected by all-borrow");
+}
+
+// T0488: same explicit `.clone()` fix at a `~T` parameter site.
+consume_string_t0488(~string s) {
+  // s is owned — promise_string_drop called at scope exit.
+}
+
+test_t0488_consume_mixed_arm_clone_ok() `test {
+  a := Arc[string]("foo" + "");
+  cond := true;
+  consume_string_t0488(if cond {
+    a.borrow.clone()
+  } else {
+    "owned"
+  });
+  v := a.borrow;
+  assert(v == "foo", "Arc still owns original");
+}
+
+// T0488: return-statement consume site — the function returns owned
+// `string`, so a mixed `T&`/`T` if-expression as the return value would be
+// rejected without `.clone()`. The clone fix produces a fresh owned string,
+// so the Arc keeps its inner pointer intact for the caller.
+take_t0488(Arc[string] &a, bool cond) string {
+  return if cond {
+    a.borrow.clone()
+  } else {
+    "owned"
+  };
+}
+
+test_t0488_return_mixed_arm_clone_ok() `test {
+  a := Arc[string]("foo" + "");
+  v := take_t0488(a, true);
+  assert(v == "foo", "clone-arm return value");
+  b := a.borrow;
+  assert(b.len == 3, "Arc unaffected by return-site clone");
+}

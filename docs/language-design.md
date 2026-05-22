@@ -1514,7 +1514,26 @@ longest['a](string &'a a, string &'a b) string &'a {
 - function parameters: `consume(a.borrow)` where `consume(string s)`
 - field assignment: `obj.field = a.borrow;`
 - return statements: `return a.borrow;` from a `string`-returning function
-- joined branches (`if`, `match`, parens): when every arm produces a borrow, the joined type stays `T&` and the same boundary rules apply.
+- joined branches (`if`, `match`, parens): when every arm produces a borrow, the joined type stays `T&` and the same boundary rules apply. When arms **mix** borrowed and owned (one arm `T&`, another `T`), the same Copy-only rule applies — silent decay is rejected for non-Copy `T` (the borrow arm's runtime value is the parent's inner pointer, so consuming the joined value as owned `T` would free a pointer the parent still holds). The fix is the same: call `.clone()` on the borrow arm, or change all arms to produce `T&`.
+
+```promise
+// Rejected — `if` arms mix `string&` and `string`:
+inspect(Arc[string] a, bool cond) {
+  string s = if cond { a.borrow } else { "owned" };
+  // error: if/match arms mix borrowed and owned non-Copy 'string';
+  //        call .clone() on the borrow arm or change all arms to produce 'string&'
+}
+
+// Fix (1) — clone the borrow arm:
+inspect(Arc[string] a, bool cond) {
+  string s = if cond { a.borrow.clone() } else { "owned" };
+}
+
+// Fix (2) — make every arm produce a borrow (the joined type stays `string&`):
+inspect(Arc[string] a, Arc[string] b, bool cond) {
+  string& s = if cond { a.borrow } else { b.borrow };
+}
+```
 
 To recover an owned value, choose one of:
 

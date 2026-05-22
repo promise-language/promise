@@ -21287,23 +21287,10 @@ func TestMutexGuardBorrowThroughIfClearsDropFlag(t *testing.T) {
 	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
 }
 
-// T0377: Conservative rule — an if-expression with one borrow arm and one
-// owned arm must NOT clear the dropflag; a single dropflag cannot represent
-// per-arm ownership. The local owns the constructed value when cond is false.
-func TestArcBorrowMixedIfDoesNotClearDropFlag(t *testing.T) {
-	ir := generateIR(t, `
-		main() {
-			v1 := [1, 2, 3];
-			a := Arc[int[]](v1);
-			cond := true;
-			borrowed := if cond { a.borrow } else { [4, 5, 6] };
-		}
-	`)
-	bad := regexp.MustCompile(`store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
-	if bad.MatchString(ir) {
-		t.Errorf("expected NO dropflag clear for mixed-ownership if (T0377 should not fire)\ngot:\n%s", ir)
-	}
-}
+// T0488: mixed-ownership if-expression (one borrow arm + one owned arm) for
+// non-Copy `T` is now rejected at sema time — the codegen path that "must
+// NOT clear the dropflag" is unreachable. Sema rejection is covered by
+// TestT0488_IfMixedNonCopyRejected in sema/sema_test.go.
 
 // T0377: Parenthesized borrow (`(a.borrow)`) is a trivial laundering form;
 // recursion must look through ParenExpr to find the borrow.
@@ -21338,27 +21325,8 @@ func TestArcBorrowThroughMatchBlockArmsClearsDropFlag(t *testing.T) {
 	assertContainsMatch(t, ir, `store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
 }
 
-// T0377: Conservative rule — a match expression with one borrow arm and one
-// owned arm must NOT clear the dropflag (parallel of TestArcBorrowMixedIfDoesNotClearDropFlag
-// for match). Exercises the `!c.matchArmIsBorrowGetter(arm) return false` path
-// in the arm loop.
-func TestArcBorrowMixedMatchDoesNotClearDropFlag(t *testing.T) {
-	ir := generateIR(t, `
-		main() {
-			v1 := [1, 2, 3];
-			a := Arc[int[]](v1);
-			k := 1;
-			borrowed := match k {
-				1 => a.borrow,
-				_ => [4, 5, 6],
-			};
-		}
-	`)
-	bad := regexp.MustCompile(`store i1 true, i1\* %borrowed\.dropflag\s+store i1 false, i1\* %borrowed\.dropflag`)
-	if bad.MatchString(ir) {
-		t.Errorf("expected NO dropflag clear for mixed-ownership match (T0377 should not fire)\ngot:\n%s", ir)
-	}
-}
+// T0488: mixed-ownership match-expression for non-Copy `T` is rejected at
+// sema time — see TestT0488_MatchMixedNonCopyRejected in sema/sema_test.go.
 
 // T0381: explicit `T&` annotation drives the dropflag-clear path the same
 // way as inferred declarations. Type-based detection (replacing the old

@@ -2312,14 +2312,20 @@ func (c *Checker) checkIfExpr(e *ast.IfExpr) types.Type {
 	// (`T`), the result is owned — a single dropflag cannot represent
 	// ownership that varies by arm, so the conservative choice is the
 	// owned form. Otherwise, prefer the then-branch type.
-	return joinBranchTypes(thenType, elseType)
+	return c.joinBranchTypes(thenType, elseType, e.Pos())
 }
 
 // joinBranchTypes unifies two arm types of an if/match expression. When one
 // arm produces `T&`/`T~` and another produces `T`, we strip the borrow to
 // the owned form so downstream codegen treats the result as owned (T0381).
-// Returns the then-type if no unification is needed.
-func joinBranchTypes(a, b types.Type) types.Type {
+//
+// T0488: silent decay is unsound for non-Copy `T` — the borrow arm's runtime
+// value is the parent Arc/Mutex inner pointer (no clone), so consuming the
+// joined value as owned `T` causes UAF/double-free on scope exit. Mirrors
+// T0438's Rules 8b/8c by gating the decay on `IsCopy(elem)`. For non-Copy
+// elements we emit a sema error and continue with the owned form to avoid
+// cascading "cannot assign T& to T" diagnostics.
+func (c *Checker) joinBranchTypes(a, b types.Type, pos ast.Pos) types.Type {
 	if a == nil {
 		return b
 	}
@@ -2346,7 +2352,20 @@ func joinBranchTypes(a, b types.Type) types.Type {
 		bIsRef = true
 	}
 	if aIsRef != bIsRef {
-		// Mixed ref/owned — return the owned form.
+		var refSide types.Type
+		if aIsRef {
+			refSide = a
+		} else {
+			refSide = b
+		}
+		elem := stripped(refSide)
+		if !types.IsCopy(elem) {
+			c.errorf(pos,
+				"if/match arms mix borrowed and owned non-Copy '%s'; "+
+					"call .clone() on the borrow arm or change all arms to produce '%s&'",
+				elem, elem)
+			return elem
+		}
 		if aIsRef {
 			return stripped(a)
 		}
@@ -2410,7 +2429,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 			resultType = armType
 		} else {
 			// T0381: unify ref/owned mismatches across arms.
-			resultType = joinBranchTypes(resultType, armType)
+			resultType = c.joinBranchTypes(resultType, armType, e.Pos())
 		}
 	}
 

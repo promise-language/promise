@@ -270,6 +270,29 @@ func userValueType() *irtypes.StructType {
 // struct) to match the representation produced by genExpr. Enum types use their
 // internal representation (i32 for fieldless, {i32, [N x i8]} for data enums).
 func llvmTypeForEnumFieldFromPromise(typ types.Type, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout) irtypes.Type {
+	// Handle Tuple types — recurse so heap user / optional / enum elements get
+	// their proper layout (value struct {i8*, i8*}, not bare i8*). (T0442)
+	if tup, ok := typ.(*types.Tuple); ok {
+		fields := make([]irtypes.Type, len(tup.Elems()))
+		for i, elem := range tup.Elems() {
+			fields[i] = llvmTypeForEnumFieldFromPromise(elem, ptrSize, enumLayouts, monoEnumLayouts)
+		}
+		return irtypes.NewStruct(fields...)
+	}
+	// Handle Optional types — recurse for inner type so Optional<UserType>
+	// gets {i1, {i8*, i8*}} instead of {i1, i8*}. (T0442)
+	if opt, ok := typ.(*types.Optional); ok {
+		inner := llvmTypeForEnumFieldFromPromise(opt.Elem(), ptrSize, enumLayouts, monoEnumLayouts)
+		if _, isVoid := inner.(*irtypes.VoidType); isVoid {
+			return irtypes.I1
+		}
+		return irtypes.NewStruct(irtypes.I1, inner)
+	}
+	// Handle Array types — recurse for element type. (T0442)
+	if arr, ok := typ.(*types.Array); ok {
+		elem := llvmTypeForEnumFieldFromPromise(arr.Elem(), ptrSize, enumLayouts, monoEnumLayouts)
+		return irtypes.NewArray(uint64(arr.Size()), elem)
+	}
 	// Handle enum types — enums used as fields in other enum variants
 	if lt := enumInternalTypeForField(typ, ptrSize, enumLayouts, monoEnumLayouts); lt != nil {
 		return lt

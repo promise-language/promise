@@ -466,3 +466,86 @@ test_map_data_enum_rehash() `test {
     _ => assert(false, "expected Circle"),
   }
 }
+
+// T0442: heap user type wrapped in Optional/Tuple as enum variant fields.
+// The enum-variant-data layout function `llvmTypeForEnumFieldFromPromise`
+// previously fell through to plain `llvmType` for these structural wrappers,
+// emitting bare `i8*` for the heap user type instead of the `{i8*, i8*}`
+// value struct. This caused a layout-vs-resolveType mismatch that panicked
+// in `wrapOptional`. Fix in `compiler/internal/codegen/types.go` adds
+// Tuple/Optional/Array recursion symmetric to T0420's `instanceFieldLLVMType`.
+type _T0442EnumRow {
+  string name;
+}
+
+// T0442: Optional<UserType> as enum variant field. Locks in the Optional
+// recursion path. Match arm consumes the variant (no synth-drop walk over
+// the unmatched Optional, which is a separate drop-synth gap tracked
+// elsewhere).
+enum _T0442OptWrapper {
+  Empty,
+  Some(_T0442EnumRow? value),
+}
+
+test_t0442_optional_user_type_in_enum_field() `test {
+  _T0442EnumRow? r = _T0442EnumRow(name: "opt".to_string());
+  w := _T0442OptWrapper.Some(r);
+  match w {
+    _T0442OptWrapper.Some(opt) => {
+      if row := opt {
+        assert(row.name == "opt", "row.name");
+      } else {
+        assert(false, "should have value");
+      }
+    },
+    _T0442OptWrapper.Empty => assert(false, "should not be empty"),
+  }
+}
+
+// T0442: tuple containing Optional<UserType> as enum variant field — locks
+// in the nested Tuple→Optional recursion in `llvmTypeForEnumFieldFromPromise`.
+enum _T0442TupOptWrapper {
+  None,
+  Both(_T0442EnumRow? first, int second),
+}
+
+test_t0442_tuple_with_optional_user_in_enum_field() `test {
+  _T0442EnumRow? r = _T0442EnumRow(name: "tup_opt".to_string());
+  p := _T0442TupOptWrapper.Both(r, 13);
+  match p {
+    _T0442TupOptWrapper.Both(opt, n) => {
+      assert(n == 13, "second int");
+      if row := opt {
+        assert(row.name == "tup_opt", "row.name");
+      } else {
+        assert(false, "should have value");
+      }
+    },
+    _T0442TupOptWrapper.None => assert(false, "should not be None"),
+  }
+}
+
+// T0442: Optional<(UserType, int)> as enum variant field — locks in the
+// nested Optional→Tuple recursion. The enum-variant data must lay out
+// the inner tuple's user-type as `{i8*, i8*}`, not bare `i8*`.
+enum _T0442OptTupWrapper {
+  Empty,
+  Some((_T0442EnumRow, int)? pair),
+}
+
+test_t0442_optional_tuple_user_in_enum_field() `test {
+  (_T0442EnumRow, int)? t = (_T0442EnumRow(name: "opt_tup".to_string()), 19);
+  w := _T0442OptTupWrapper.Some(t);
+  match w {
+    _T0442OptTupWrapper.Some(opt) => {
+      if pair := opt {
+        (row, n) := pair;
+        assert(n == 19, "inner int");
+        assert(row.name == "opt_tup", "row.name");
+      } else {
+        assert(false, "should have value");
+      }
+    },
+    _T0442OptTupWrapper.Empty => assert(false, "should not be empty"),
+  }
+}

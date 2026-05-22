@@ -1133,3 +1133,69 @@ test_t0440_with_nested_heap_user_field() `test {
     assert(t2.inner.x == 41, "second read inner.x");
   }
 }
+
+// T0442 regression type — heap user type with a single string field, used
+// inside a tuple value. Exercises the enum variant data layout's tuple
+// recursion in `llvmTypeForEnumFieldFromPromise`.
+type _T0442Row {
+  string name;
+}
+
+// T0442: Map[K, (HeapUserType, int)] used to panic in wrapOptional with
+// "insertvalue elem type mismatch, expected { { i8*, i8* }, i64 }, got
+// { i8*, i64 }" — the enum variant data type fell through to plain llvmType
+// for tuples, which used bare i8* for heap user types instead of the
+// {i8*, i8*} value struct. Fix: tuple/optional/array recursion in
+// llvmTypeForEnumFieldFromPromise (types.go), symmetric to T0420's fix in
+// instanceFieldLLVMType.
+test_t0442_user_type_in_tuple_value() `test {
+  m := map[string, (_T0442Row, int)]();
+  m["k"] = (_T0442Row(name: "row1".to_string()), 7);
+  if t := m["k"] {
+    (row, n) := t;
+    assert(n == 7, "int field");
+    assert(row.name == "row1", "row.name");
+  }
+}
+
+// T0442: heap user type as the second tuple field — covers element-position
+// independence (the panic was about layout of any tuple containing a heap
+// user type).
+test_t0442_user_type_as_second_tuple_field() `test {
+  m := map[string, (int, _T0442Row)]();
+  m["k"] = (42, _T0442Row(name: "second".to_string()));
+  if t := m["k"] {
+    (n, row) := t;
+    assert(n == 42, "int field");
+    assert(row.name == "second", "row.name");
+  }
+}
+
+// T0442: heap user type in a 3-tuple with an int — verifies multi-element
+// tuple recursion and ordering doesn't drift.
+test_t0442_user_type_in_3tuple() `test {
+  m := map[string, (_T0442Row, int, int)]();
+  m["k"] = (_T0442Row(name: "row3".to_string()), 1, 2);
+  if t := m["k"] {
+    (row, a, b) := t;
+    assert(a == 1, "first int");
+    assert(b == 2, "second int");
+    assert(row.name == "row3", "row.name");
+  }
+}
+
+// T0442: nested tuple ((UserType, int), int) — exercises Tuple recursion
+// at depth. The outer tuple's first element is itself a tuple with a heap
+// user type, so `llvmTypeForEnumFieldFromPromise` recurses twice through
+// the Tuple branch before reaching the user-type case.
+test_t0442_nested_tuple_in_map_value() `test {
+  m := map[string, ((_T0442Row, int), int)]();
+  m["k"] = ((_T0442Row(name: "deep".to_string()), 7), 11);
+  if t := m["k"] {
+    (inner, outer) := t;
+    (row, n) := inner;
+    assert(n == 7, "inner int");
+    assert(outer == 11, "outer int");
+    assert(row.name == "deep", "row.name");
+  }
+}

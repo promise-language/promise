@@ -18505,6 +18505,113 @@ func TestSynthDropOptionalGenericInnerUsesMonoName(t *testing.T) {
 	assertContains(t, holderDrop, `call void @"T0392GBox[int].drop"`)
 }
 
+// T0415: emitFieldDrops must use the mono'd drop name for non-optional generic
+// instance fields with explicit drop. Before the fix, the lookup used the
+// origin name "Box.drop" which doesn't exist — the user's drop body was
+// silently skipped, leaking heap content inside the field.
+func TestFieldDropUsesMonoNameForGenericExplicitDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type T0415Box[T] { T val; drop(~this) {} }
+		type T0415Holder[T] { T0415Box[T] data; }
+		main() {
+			h := T0415Holder[int](data: T0415Box[int](val: 7));
+		}
+	`)
+	holderDrop := extractFunction(ir, `"T0415Holder[int].drop"`)
+	if holderDrop == "" {
+		t.Fatal("expected T0415Holder[int].drop in IR")
+	}
+	// The mono'd inner drop must be called by name.
+	assertContains(t, holderDrop, `call void @"T0415Box[int].drop"`)
+	// And NOT the origin name (which is the bug shape).
+	assertNotContains(t, holderDrop, "call void @T0415Box.drop")
+}
+
+// T0415: emitOptionalFieldReassignDrop must use the mono'd drop name when
+// reassigning an optional generic field whose inner has explicit drop.
+func TestOptionalFieldReassignDropUsesMonoName(t *testing.T) {
+	ir := generateIR(t, `
+		type T0415Box2[T] { T val; drop(~this) {} }
+		type T0415Holder2[T] { T0415Box2[T]? data; }
+		main() {
+			h := T0415Holder2[int](data: T0415Box2[int](val: 1));
+			h.data = T0415Box2[int](val: 2);
+		}
+	`)
+	// The reassignment site lives in the user's main goroutine body.
+	start := strings.Index(ir, "define i8* @.goroutine.main")
+	if start < 0 {
+		t.Fatal("expected .goroutine.main")
+	}
+	rest := ir[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("expected closing brace")
+	}
+	mainFn := rest[:end+2]
+	assertContains(t, mainFn, "field.optdrop")
+	assertContains(t, mainFn, `call void @"T0415Box2[int].drop"`)
+	assertNotContains(t, mainFn, "call void @T0415Box2.drop")
+}
+
+// T0415: emitOptionalFieldReassignDrop must also handle the synth-drop-only
+// path — generic types with no explicit drop where the type argument resolves
+// to a heap type at mono time. The drop call must use the mono name and the
+// optdrop block must NOT call pal_free (the synth drop already pal_frees).
+// Before the fix, the drop call was skipped entirely (HasDrop=false,
+// NeedsSynthDrop=false) and pal_free was called directly, leaking the inner
+// heap content. The mono'd synth drop function exists either way (it's used by
+// the holder's own drop at scope exit) — to detect the regression we must
+// inspect the field.optdrop.free block specifically, not just the whole main.
+func TestOptionalFieldReassignDropMonoSynthSkipsExtraFree(t *testing.T) {
+	ir := generateIR(t, `
+		type T0415RawBox[T] { T val; }
+		type T0415RawHolder[T] { T0415RawBox[T]? data; }
+		main() {
+			h := T0415RawHolder[string](data: T0415RawBox[string](val: "a"));
+			h.data = T0415RawBox[string](val: "b");
+		}
+	`)
+	start := strings.Index(ir, "define i8* @.goroutine.main")
+	if start < 0 {
+		t.Fatal("expected .goroutine.main")
+	}
+	rest := ir[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("expected closing brace")
+	}
+	mainFn := rest[:end+2]
+	// Isolate the field.optdrop.free block — content between the label line
+	// and the next blank line. emitOptionalFieldReassignDrop produces this
+	// label only when handling the reassignment.
+	freeLabel := "\nfield.optdrop.free"
+	freeStart := strings.Index(mainFn, freeLabel)
+	if freeStart < 0 {
+		t.Fatal("expected field.optdrop.free block in main")
+	}
+	// Skip past the label line.
+	blockStart := strings.Index(mainFn[freeStart+1:], "\n") + freeStart + 2
+	blockEnd := strings.Index(mainFn[blockStart:], "\n\n")
+	if blockEnd < 0 {
+		t.Fatal("expected end of field.optdrop.free block")
+	}
+	freeBlock := mainFn[blockStart : blockStart+blockEnd]
+	// The reassignment must invoke the mono'd synth drop INSIDE the optdrop
+	// free block (not just somewhere else in main).
+	assertContains(t, freeBlock, `call void @"T0415RawBox[string].drop"`)
+	// And must NOT call pal_free here — the synth drop already pal_freed.
+	assertNotContains(t, freeBlock, "call void @pal_free")
+	// Confirm test premise: the mono'd synth drop itself does both the
+	// inner string drop and the pal_free of the box instance.
+	synthDrop := extractFunction(ir, `"T0415RawBox[string].drop"`)
+	if synthDrop == "" {
+		t.Fatal("expected T0415RawBox[string].drop in IR")
+	}
+	assertContains(t, synthDrop, "call void @promise_string_drop")
+	assertContains(t, synthDrop, "call void @pal_free")
+}
+
 // T0392: Force-unwrap of an Optional[heap-user-type] field neutralizes the
 // owner's flag so the holder's drop doesn't double-free the inner instance now
 // owned by the new local.

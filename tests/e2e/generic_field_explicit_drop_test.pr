@@ -1,0 +1,101 @@
+// T0415: emitFieldDrops must call the mono'd drop method when a field is a
+// generic instance with an explicit drop. Heap content inside such fields was
+// silently leaking because the lookup used "Box.drop" instead of
+// "Box[int].drop". The reassignment site for optional generic fields had the
+// same gap.
+type _T0415Box[T] {
+  T val;
+  string label;
+  drop(~this) {
+  }
+}
+
+type _T0415Holder[T] {
+  _T0415Box[T] data;
+}
+
+type _T0415OptHolder[T] {
+  _T0415Box[T]? data;
+}
+
+basic_generic_explicit_drop_no_leak() `test {
+  s := "hello".repeat(2);
+  h := _T0415Holder[int](data: _T0415Box[int](val: 7, label: s));
+  assert(h.data.val == 7, "value");
+}
+
+generic_explicit_drop_string_arg() `test {
+  s := "k".repeat(2);
+  v := "v".repeat(2);
+  h := _T0415Holder[string](data: _T0415Box[string](val: v, label: s));
+  assert(h.data.val == "vv", "value");
+}
+
+reassign_optional_generic_explicit_drop_no_leak() `test {
+  s1 := "old".repeat(2);
+  s2 := "new".repeat(2);
+  h := _T0415OptHolder[int](data: _T0415Box[int](val: 1, label: s1));
+  h.data = _T0415Box[int](val: 2, label: s2);
+  assert(h.data is _T0415Box[int], "present");
+}
+
+reassign_optional_generic_to_none_no_leak() `test {
+  s := "x".repeat(2);
+  h := _T0415OptHolder[int](data: _T0415Box[int](val: 1, label: s));
+  h.data = none;
+  assert(!(h.data is _T0415Box[int]), "absent");
+}
+
+type _T0415StringHolder {
+  _T0415Box[string] data;
+}
+
+generic_string_arg_in_concrete_holder() `test {
+  s := "hello".repeat(2);
+  v := "v".repeat(2);
+  h := _T0415StringHolder(data: _T0415Box[string](val: v, label: s));
+  assert(h.data.val == "vv", "v");
+}
+
+type _T0415Wrap[T] {
+  _T0415Box[T] inner;
+}
+
+type _T0415Outer[T] {
+  _T0415Wrap[T] w;
+}
+
+nested_generic_explicit_drop() `test {
+  s := "deep".repeat(2);
+  o := _T0415Outer[int](w: _T0415Wrap[int](inner: _T0415Box[int](val: 5, label: s)));
+  assert(o.w.inner.val == 5, "v");
+}
+
+// Synth-drop-only path: a generic type without an explicit drop, where the
+// type parameter resolves to a heap type at mono time. emitOptionalFieldReassignDrop
+// must call the mono'd synth drop on the old value AND must NOT pal_free the
+// instance again (the synth drop already freed it). Before the fix, the drop
+// call was skipped entirely (HasDrop=false, NeedsSynthDrop=false) — the box
+// was pal_freed but its inner string leaked.
+type _T0415SynBox[T] {
+  T val;
+}
+
+type _T0415SynOptHolder[T] {
+  _T0415SynBox[T]? data;
+}
+
+reassign_optional_generic_synthdrop_no_leak() `test {
+  s1 := "old".repeat(2);
+  s2 := "new".repeat(2);
+  h := _T0415SynOptHolder[string](data: _T0415SynBox[string](val: s1));
+  h.data = _T0415SynBox[string](val: s2);
+  assert(h.data is _T0415SynBox[string], "present");
+}
+
+reassign_optional_generic_synthdrop_to_none_no_leak() `test {
+  s := "x".repeat(2);
+  h := _T0415SynOptHolder[string](data: _T0415SynBox[string](val: s));
+  h.data = none;
+  assert(!(h.data is _T0415SynBox[string]), "absent");
+}

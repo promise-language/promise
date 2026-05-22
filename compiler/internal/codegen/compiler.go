@@ -6623,8 +6623,21 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			c.emitVectorElementDropLoop(fieldInstance, elemType)
 		}
 
+		// T0415: Generic user types with body-defined drops have per-instance
+		// mangled names (e.g., Box[int].drop). Built-in native container types
+		// (Vector, Channel) have a single global drop function and use the
+		// origin name. Sema/mono synth drops are always per-instance.
+		// Without the explicit-drop check, generic field types with an explicit
+		// drop (HasDrop=true, NeedsSynthDrop=false, no mono synth) had their
+		// drop silently skipped because the lookup used the origin name.
 		ownerName := c.resolveMethodOwner(fieldNamed, "drop")
-		if fieldNamed.NeedsSynthDrop() || hasMonoSynthDrop {
+		useMonoName := fieldNamed.NeedsSynthDrop() || hasMonoSynthDrop
+		if !useMonoName && fieldNamed.HasDrop() {
+			if dropMethod := fieldNamed.LookupMethod("drop"); dropMethod != nil && !dropMethod.IsNative() {
+				useMonoName = true
+			}
+		}
+		if useMonoName {
 			if inst, ok := fieldType.(*types.Instance); ok {
 				ownerName = monoName(inst)
 			}
@@ -6805,8 +6818,18 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 		!isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural() &&
 		!isOpaqueContainerType(elem):
 		// Heap user type — needs pal_free at minimum, plus drop() if it has one.
-		if innerNamed.HasDrop() || innerNamed.NeedsSynthDrop() {
+		// T0415: Generic type methods are mangled per-instance — always use the
+		// mono name when elem is an Instance (covers explicit drop, sema synth,
+		// and mono synth alike).
+		hasMonoSynthDrop := false
+		if inst, ok := elem.(*types.Instance); ok {
+			hasMonoSynthDrop = monoInstNeedsSynthDrop(inst)
+		}
+		if innerNamed.HasDrop() || innerNamed.NeedsSynthDrop() || hasMonoSynthDrop {
 			ownerName := c.resolveMethodOwner(innerNamed, "drop")
+			if inst, ok := elem.(*types.Instance); ok {
+				ownerName = monoName(inst)
+			}
 			mangledName := mangleMethodName(ownerName, "drop", false)
 			dropFunc = c.funcs[mangledName]
 		}
@@ -6874,7 +6897,13 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 			c.block.NewCall(dropFunc, instancePtr)
 		}
 		// Free the instance (synthesized drops include pal_free; explicit drops do not).
-		if innerNamed != nil && !innerNamed.NeedsSynthDrop() {
+		// T0415: A generic instance whose origin lacks a synth-drop flag may still
+		// have a mono-time synth drop that already calls pal_free — don't double-free.
+		needsFree := innerNamed != nil && !innerNamed.NeedsSynthDrop()
+		if inst, ok := elem.(*types.Instance); ok && monoInstNeedsSynthDrop(inst) {
+			needsFree = false
+		}
+		if needsFree {
 			c.block.NewCall(c.palFree, instancePtr)
 		}
 		c.block.NewBr(skipFreeBlock)

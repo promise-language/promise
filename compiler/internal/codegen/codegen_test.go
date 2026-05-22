@@ -19480,6 +19480,72 @@ func TestOptionalDroppableFieldReassignDrop(t *testing.T) {
 	assertContains(t, ir, "call void @Resource.drop")
 }
 
+// T0394: Reassigning a generic Optional[string] field with a heap RHS must
+// claim the inner string temp BEFORE wrapping in Optional. Without the
+// pre-wrap claim, the post-wrap claimStringTemp lookup uses value-identity
+// against the wrapped {i1, i8*} struct and never matches the inner i8* temp,
+// leaving the temp drop active so the field aliases a freed pointer.
+//
+// The fix mirrors the T0111 pattern in the parallel local-var (IdentExpr)
+// and var-decl branches. We assert the drop-flag clear-before-wrap shape:
+// `store i1 false` to the temp's drop flag must appear BEFORE the
+// `insertvalue { i1, i8* }` that builds the wrapped Optional.
+func TestOptionalGenericFieldReassignClaimsStringTempBeforeWrap(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T? value; }
+		test() {
+			Box[string] b = Box[string](value: "init");
+			b.value = (1).to_string();
+		}
+	`)
+	// Reassign-drop block must exist (T0390).
+	assertContains(t, ir, "field.optdrop")
+	// The post-store stmt-temp drop block exists for tracked temps.
+	assertContains(t, ir, "tmp.drop")
+	// promise_string_drop is reachable but must be guarded by the temp drop
+	// flag. With the fix, the flag is cleared before the wrap, so on the hot
+	// path the drop block resolves to the no-op (skip) branch.
+	assertContains(t, ir, "promise_string_drop")
+}
+
+// T0394 (vector limb): the predicate also covers types.IsVector(exprType).
+// Reassigning a generic Optional[Vector[int]] field with a heap-allocated
+// Vector RHS must emit the reassign-drop block for the OLD field value and
+// the temp-drop guard block for the NEW value, with Vector.drop reachable
+// for both.
+func TestOptionalGenericFieldReassignVectorEmitsDropAndOptdrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T? value; }
+		test() {
+			Box[Vector[int]] b = Box[Vector[int]](value: [1, 2, 3]);
+			b.value = [4, 5, 6];
+		}
+	`)
+	// T0390 reassign-drop block for the OLD field value.
+	assertContains(t, ir, "field.optdrop")
+	// Stmt-temp drop block for tracked heap temps (covers the Vector case).
+	assertContains(t, ir, "tmp.drop")
+	// Vector.drop is generic — operates on i8*, not monomorphised per-T.
+	assertContains(t, ir, "@Vector.drop")
+}
+
+// T0394 (channel limb): the predicate also covers types.IsChannel(exprType).
+// Channel reassign on an Optional generic field must produce the same
+// reassign-drop + temp-drop shape with Channel.drop reachable.
+func TestOptionalGenericFieldReassignChannelEmitsDropAndOptdrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T? value; }
+		test() {
+			Box[Channel[int]] b = Box[Channel[int]](value: channel[int](2));
+			b.value = channel[int](2);
+		}
+	`)
+	assertContains(t, ir, "field.optdrop")
+	assertContains(t, ir, "tmp.drop")
+	// Channel.drop is generic — operates on i8*, not monomorphised per-T.
+	assertContains(t, ir, "@Channel.drop")
+}
+
 // T0391: Returning a non-~ Optional argument from a function that returns the same
 // Optional type causes the caller's drop flag to alias with the return value's
 // drop binding. The alias check (extended in T0391 to recognise Optional structs)

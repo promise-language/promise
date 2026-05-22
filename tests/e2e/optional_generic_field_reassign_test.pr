@@ -1,0 +1,195 @@
+// T0394: Optional generic-typed field reassignment must claim heap temps
+// before wrapping the RHS in an Optional struct. Without the fix, the
+// post-wrap claim path uses direct value-identity lookup which fails (val
+// identity changes after wrapOptional), leaving the inner heap pointer
+// tracked as a stmt temp — at statement end the temp drop fires while the
+// field still aliases the same pointer → use-after-free or double-free on
+// the next reassignment.
+//
+// Mirrors the T0111 fix in the parallel local-var (IdentExpr) and var-decl
+// branches (stmt.go ~lines 4811 and 727) for the MemberExpr branch.
+type Box[T] {
+  T? value;
+
+  set_via_method(this, ~T new_val) {
+    this.value = new_val;
+  }
+}
+
+// === STRING — the original repro ===
+
+test_optional_string_one_assign_then_read() `test {
+  b := Box[string](value: "initial");
+  b.value = (1).to_string();
+  s := b.value!;
+  assert(s == "1", "value is 1");
+}
+
+test_optional_string_field_loop() `test {
+  b := Box[string](value: "initial");
+  for i in 0..3 {
+    b.value = i.to_string();
+  }
+}
+
+test_optional_string_field_loop_with_read() `test {
+  b := Box[string](value: "initial");
+  for i in 0..3 {
+    b.value = i.to_string();
+    s := b.value!;
+    assert(s == i.to_string(), "loop value");
+  }
+}
+
+test_optional_string_field_no_leak_50() `test {
+  b := Box[string](value: "initial");
+  for i in 0..50 {
+    b.value = i.to_string();
+  }
+  s := b.value!;
+  assert(s == "49", "final value");
+}
+
+test_assign_none_then_some_string() `test {
+  b := Box[string](value: "initial");
+  b.value = none;
+  b.value = (5).to_string();
+  s := b.value!;
+  assert(s == "5", "after none");
+}
+
+test_assign_some_then_none_string() `test {
+  b := Box[string](value: (3).to_string());
+  b.value = none;
+}
+
+// === RHS Optional[T] = LHS Optional[T] — Identical branch (no wrap) ===
+
+get_optional_string() string? {
+  return (42).to_string();
+}
+
+test_assign_optional_string_to_optional_field() `test {
+  b := Box[string](value: "init");
+  b.value = get_optional_string();
+  s := b.value!;
+  assert(s == "42", "optional-to-optional, no wrap");
+}
+
+// === Function-call RHS — different AST shape from method-call RHS ===
+
+get_plain_string() string {
+  return (7).to_string();
+}
+
+test_assign_plain_function_string_to_optional_field() `test {
+  b := Box[string](value: "init");
+  b.value = get_plain_string();
+  s := b.value!;
+  assert(s == "7", "plain-fn RHS wraps");
+}
+
+// === Method-based reassign — exercises the same MemberExpr Optional-wrap
+// branch but receiver is `this`, not a local. AST differs from `b.value = X`
+// because target.Target is a `this` IdentExpr inside a method body. ===
+
+test_method_reassign_string() `test {
+  b := Box[string](value: "init");
+  b.set_via_method((9).to_string());
+  s := b.value!;
+  assert(s == "9", "method reassign one-shot");
+}
+
+test_method_reassign_string_loop() `test {
+  b := Box[string](value: "init");
+  for i in 0..30 {
+    b.set_via_method(i.to_string());
+  }
+  s := b.value!;
+  assert(s == "29", "method reassign loop final");
+}
+
+// === Nested heap — Vector[string] with dynamic-string elements ===
+// Exercises the IsVector predicate branch with a heap-string element type.
+// (Vector unwrap+read in a loop is blocked by T0470; reassign-only path
+// works.)
+
+test_optional_vector_of_strings_reassign() `test {
+  b := Box[Vector[string]](value: ["a", "b"]);
+  b.value = [(1).to_string(), (2).to_string()];
+}
+
+test_optional_vector_of_strings_loop() `test {
+  b := Box[Vector[string]](value: ["x"]);
+  for i in 0..20 {
+    b.value = [i.to_string(), (i + 1).to_string()];
+  }
+}
+
+// === VECTOR — simple reassign without read-after-unwrap (T0470 covers
+// the unwrap+read-in-loop case which still fails via a different path) ===
+
+test_optional_vector_field_assign() `test {
+  b := Box[Vector[int]](value: [1, 2, 3]);
+  b.value = [4, 5, 6];
+}
+
+test_optional_vector_field_loop_50() `test {
+  b := Box[Vector[int]](value: [0]);
+  for i in 0..50 {
+    b.value = [i];
+  }
+}
+
+test_optional_vector_field_assign_none() `test {
+  b := Box[Vector[int]](value: [1, 2, 3]);
+  b.value = none;
+}
+
+// === CHANNEL — simple reassign ===
+
+test_optional_channel_field_assign() `test {
+  b := Box[Channel[int]](value: channel[int](2));
+  b.value = channel[int](2);
+}
+
+// === HEAP USER TYPE — simple reassign ===
+
+type Item {
+  int id;
+  string name;
+}
+
+test_optional_heap_user_field_assign() `test {
+  b := Box[Item](value: Item(id: 1, name: "a"));
+  b.value = Item(id: 2, name: "b");
+}
+
+test_optional_heap_user_field_loop() `test {
+  b := Box[Item](value: Item(id: 0, name: "init"));
+  for i in 0..10 {
+    b.value = Item(id: i, name: "n");
+  }
+}
+
+// === INHERITED FIELD — generic parent ===
+
+type Counter[T] is Box[T] {
+  int count;
+}
+
+test_inherited_optional_string_assign() `test {
+  c := Counter[string](value: "first", count: 0);
+  c.value = (7).to_string();
+  s := c.value!;
+  assert(s == "7", "inherited assign");
+}
+
+test_inherited_optional_string_loop() `test {
+  c := Counter[string](value: "first", count: 0);
+  for i in 0..20 {
+    c.value = i.to_string();
+  }
+  s := c.value!;
+  assert(s == "19", "inherited final");
+}

@@ -4919,6 +4919,18 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			if _, isOpt := memberType.(*types.Optional); isOpt {
 				if exprType != types.TypNone {
+					// T0394: Claim heap temps from stmtTemps BEFORE wrapping in
+					// Optional. claimStringTemp uses direct val-identity lookup,
+					// so the post-wrap claim below fails (val identity changes
+					// after wrapOptional). Mirrors T0111 fix in IdentExpr branch
+					// (~line 4811) and genVarDecl (~line 727). claimHeapTemp
+					// post-wrap still handles heapTemp-tracked vector literals
+					// via runtime extractvalue.
+					if extractNamed(exprType) == types.TypString ||
+						types.IsVector(exprType) || types.IsChannel(exprType) ||
+						types.IsArc(exprType) || types.IsWeak(exprType) {
+						c.claimStringTemp(val)
+					}
 					// Use Identical (not "is exprOpt?") so T?? = T? still wraps.
 					if !types.Identical(exprType, memberType) {
 						optType := c.resolveType(memberType)

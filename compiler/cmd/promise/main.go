@@ -398,7 +398,27 @@ func runEmitIR(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: promise emit-ir [-target triple] <file.pr>")
 		os.Exit(1)
 	}
-	file, info := compileFrontend(filename)
+	var file *ast.File
+	var info *sema.Info
+	if stat, err := os.Stat(filename); err == nil && stat.IsDir() {
+		cfg, files, err := discoverProject(filename)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if cfg != nil {
+			file, info = compileProjectFrontend(cfg.Dir, files, target)
+		} else {
+			discovered, err := discoverMainFile(filename)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			file, info = compileFrontendForTarget(discovered, target)
+		}
+	} else {
+		file, info = compileFrontendForTarget(filename, target)
+	}
 	result := codegen.Compile(file, info, target)
 	fmt.Print(result.Module.String())
 }
@@ -407,6 +427,38 @@ func runEmitIR(args []string) {
 // Matches: main() { ... }, main!() { ... }, main() Type { ... }, main() ! { ... }
 // Avoids matching: comments, strings, or nested/indented declarations.
 var mainFuncRe = regexp.MustCompile(`(?m)^main\s*!?\s*\(`)
+
+// discoverProject returns the project config and full list of non-test .pr
+// source files when dir contains a promise.toml. When there is no promise.toml
+// it returns (nil, nil, nil) so callers can fall back to single-file discovery.
+// When promise.toml exists but the directory has no .pr files, an error is
+// returned so the user is told their project is empty.
+func discoverProject(dir string) (*module.Config, []string, error) {
+	tomlPath := filepath.Join(dir, "promise.toml")
+	if _, err := os.Stat(tomlPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	cfg, err := module.ParseConfig(tomlPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg.Dir = absDir
+	files, err := module.CollectModuleSources(absDir, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(files) == 0 {
+		return nil, nil, fmt.Errorf("error: project %q contains no .pr files", cfg.Name)
+	}
+	return cfg, files, nil
+}
 
 // discoverMainFile finds the entry point .pr file for a project directory.
 // Discovery rules (in order):
@@ -515,21 +567,37 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 		os.Exit(1)
 	}
 
-	// Auto-discover main file: no arg → CWD, directory arg → that dir (T0115)
+	// Auto-discover main file: no arg → CWD, directory arg → that dir (T0115).
+	// When the directory contains a promise.toml, switch to project mode and
+	// compile every .pr file in the tree as a single program (T0492).
+	var projectDir string
+	var projectCfg *module.Config
+	var projectFiles []string
+
+	resolveDir := func(dir string) {
+		cfg, files, err := discoverProject(dir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if cfg != nil {
+			projectDir = cfg.Dir
+			projectCfg = cfg
+			projectFiles = files
+			return
+		}
+		discovered, err := discoverMainFile(dir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		filename = discovered
+	}
+
 	if filename == "" {
-		discovered, err := discoverMainFile(".")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		filename = discovered
+		resolveDir(".")
 	} else if info, err := os.Stat(filename); err == nil && info.IsDir() {
-		discovered, err := discoverMainFile(filename)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		filename = discovered
+		resolveDir(filename)
 	}
 
 	if target == "" {
@@ -542,7 +610,12 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 	}
 
 	if outputFile == "" {
-		base := strings.TrimSuffix(filepath.Base(filename), ".pr")
+		var base string
+		if projectCfg != nil {
+			base = projectCfg.Name
+		} else {
+			base = strings.TrimSuffix(filepath.Base(filename), ".pr")
+		}
 		if isWasmTarget(target) {
 			if componentMode {
 				outputFile = base + ".component.wasm"
@@ -565,7 +638,13 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 		compileStart = time.Now()
 	}
 
-	file, info := compileFrontend(filename)
+	var file *ast.File
+	var info *sema.Info
+	if projectCfg != nil {
+		file, info = compileProjectFrontend(projectDir, projectFiles, target)
+	} else {
+		file, info = compileFrontend(filename)
+	}
 
 	// Check for main() function — must exist for build/run (not test).
 	if !hasMainFunc(info) {
@@ -596,6 +675,11 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 
 	if timePhases {
 		timePhase("total", time.Since(compileStart), "")
+	}
+	if projectCfg != nil {
+		// Report the project directory in the "Compiled X → Y" message rather
+		// than an empty source path.
+		filename = projectDir
 	}
 	return filename, outputFile, target
 }
@@ -650,15 +734,21 @@ func runRun(args []string) {
 	filename, target, releaseMode := parseRunArgs(args)
 
 	// Resolve the target binary to what buildToFile would actually compile so the
-	// cache key matches across invocations (T0115 auto-discovery).
+	// cache key matches across invocations (T0115 auto-discovery, T0492 project mode).
+	var projectDir string
+	resolveDir := func(dir string) {
+		if cfg, _, err := discoverProject(dir); err == nil && cfg != nil {
+			projectDir = cfg.Dir
+			return
+		}
+		if discovered, err := discoverMainFile(dir); err == nil {
+			filename = discovered
+		}
+	}
 	if filename == "" {
-		if discovered, err := discoverMainFile("."); err == nil {
-			filename = discovered
-		}
+		resolveDir(".")
 	} else if info, err := os.Stat(filename); err == nil && info.IsDir() {
-		if discovered, err := discoverMainFile(filename); err == nil {
-			filename = discovered
-		}
+		resolveDir(filename)
 	}
 
 	if target == "" {
@@ -672,18 +762,22 @@ func runRun(args []string) {
 	var cacheKey string
 	var cacheable bool
 	var cacheDir string
-	if filename != "" {
+	cacheLabel := filename
+	if projectDir != "" {
+		cacheKey, cacheable = computeProjectBinaryCacheKey(projectDir, target, releaseMode)
+		cacheLabel = projectDir
+	} else if filename != "" {
 		cacheKey, cacheable = computeRunBinaryCacheKey(filename, target, releaseMode)
-		if cacheable {
-			cacheDir, _ = module.BuildCacheDir()
-		}
+	}
+	if cacheable {
+		cacheDir, _ = module.BuildCacheDir()
 	}
 
 	// Cache hit — exec directly, no compile.
 	if cacheDir != "" {
 		if cachedBin := module.LookupTestBinaryCache(cacheDir, cacheKey); cachedBin != "" {
 			if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
-				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(filename), cacheKey[:16])
+				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(cacheLabel), cacheKey[:16])
 			}
 			execRunBinary(cachedBin)
 			return
@@ -693,14 +787,19 @@ func runRun(args []string) {
 	if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
 		if cacheable {
 			fmt.Fprintf(os.Stderr, "[cache MISS] %s key=%s compiler=%s std=%s target=%s\n",
-				filepath.Base(filename), cacheKey[:16], module.CompilerHash()[:16], cachedStdHash()[:16], target)
+				filepath.Base(cacheLabel), cacheKey[:16], module.CompilerHash()[:16], cachedStdHash()[:16], target)
 			if os.Getenv("PROMISE_CACHE_DEBUG") == "verbose" {
-				inputs := computeRunBinaryCacheInputs(filename, target, releaseMode)
+				var inputs []module.CacheKeyInput
+				if projectDir != "" {
+					inputs = computeProjectBinaryCacheInputs(projectDir, target, releaseMode)
+				} else {
+					inputs = computeRunBinaryCacheInputs(filename, target, releaseMode)
+				}
 				fmt.Fprintln(os.Stderr, module.FormatCacheKeyInputs(
-					"run-binary "+filepath.Base(filename), cacheKey, inputs))
+					"run-binary "+filepath.Base(cacheLabel), cacheKey, inputs))
 			}
-		} else if filename != "" {
-			fmt.Fprintf(os.Stderr, "[cache SKIP] %s (not cacheable)\n", filepath.Base(filename))
+		} else if cacheLabel != "" {
+			fmt.Fprintf(os.Stderr, "[cache SKIP] %s (not cacheable)\n", filepath.Base(cacheLabel))
 		}
 	}
 
@@ -723,7 +822,7 @@ func runRun(args []string) {
 		if err := module.SaveTestBinaryCache(cacheDir, cacheKey, tmpOutput.Name()); err == nil {
 			module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.CacheMeta{
 				Kind:     module.CacheKindBinary,
-				Name:     filename,
+				Name:     cacheLabel,
 				CacheKey: cacheKey,
 			})
 		}
@@ -4827,6 +4926,116 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	return compileFrontendForTarget(filename, "")
 }
 
+// compileProjectFrontend runs the full frontend pipeline on every non-test
+// .pr file in a project directory, merging them into a single AST so symbols
+// defined in one file are visible to the others. The project is anchored at
+// projectDir/promise.toml; embed paths and module dependencies resolve
+// relative to that root.
+func compileProjectFrontend(projectDir string, files []string, triple string) (*ast.File, *sema.Info) {
+	if len(files) == 0 {
+		fmt.Fprintf(os.Stderr, "error: project %q contains no .pr files\n", projectDir)
+		os.Exit(1)
+	}
+
+	tParse := time.Now()
+	var merged *ast.File
+	if home, homeErr := module.PromiseHome(); homeErr == nil {
+		cacheDir := filepath.Join(home, "cache", "astcache")
+		fileContents := make([][]byte, len(files))
+		for i, f := range files {
+			data, err := os.ReadFile(f)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error reading %s: %v\n", f, err)
+				os.Exit(1)
+			}
+			fileContents[i] = []byte(strings.ReplaceAll(string(data), "\r\n", "\n"))
+		}
+		contentHash := astcache.ContentHash(files, fileContents)
+		key := astcache.Key(module.CompilerHash(), contentHash)
+		if cached, _ := astcache.Load(cacheDir, key); cached != nil {
+			merged = cached
+		} else {
+			parsed := make([]*ast.File, 0, len(files))
+			for i, f := range files {
+				parsed = append(parsed, parseSource(f, string(fileContents[i])))
+			}
+			merged = mergeModuleFiles(parsed)
+			astcache.Save(cacheDir, key, merged)
+		}
+	} else {
+		parsed := make([]*ast.File, 0, len(files))
+		for _, f := range files {
+			parsed = append(parsed, parseSourceFile(f))
+		}
+		merged = mergeModuleFiles(parsed)
+	}
+	timePhase("parse", time.Since(tParse), "")
+
+	filterTriple := triple
+	if filterTriple == "" {
+		filterTriple = codegen.HostTargetTriple()
+	}
+	target := sema.ParseTargetInfo(filterTriple)
+
+	merged = injectStdImport(merged)
+	merged = injectGzipImportIfNeeded(merged)
+
+	tSema := time.Now()
+
+	tomlPath := filepath.Join(projectDir, "promise.toml")
+	moduleScopes, modInfos, depOrder, modTiming := loadModuleScopes(tomlPath, merged, target)
+
+	tUserSema := time.Now()
+	info, errs := sema.CheckWithTarget(merged, moduleScopes, target)
+	userSemaDur := time.Since(tUserSema)
+	if modInfos != nil {
+		info.ModuleInfos = modInfos
+		info.ModuleOrder = depOrder
+	}
+	if len(errs) > 0 {
+		timePhase("sema", time.Since(tSema), "")
+		printFileErrors(projectDir, errs)
+		os.Exit(1)
+	}
+
+	absProjectDir, _ := filepath.Abs(projectDir)
+	embedErrs := sema.ResolveEmbeds(info, absProjectDir)
+	timePhase("sema", time.Since(tSema), "")
+	if timePhases {
+		if modTiming != nil {
+			parseExtra := fmt.Sprintf("(%d files)", modTiming.files)
+			if modTiming.parseCached {
+				parseExtra += " (cached)"
+			}
+			timeSubPhase("mod parse", modTiming.parseTime, parseExtra)
+			mt := modTiming.timings
+			timeSubPhase("mod sema", modTiming.semaTime,
+				fmt.Sprintf("(declare: %dms, define: %dms, check: %dms, verify: %dms)",
+					mt.Declare.Milliseconds(), mt.Define.Milliseconds(),
+					mt.Check.Milliseconds(), mt.Verify.Milliseconds()))
+		}
+		ut := info.Timings
+		timeSubPhase("user sema", userSemaDur,
+			fmt.Sprintf("(declare: %dms, define: %dms, check: %dms, verify: %dms)",
+				ut.Declare.Milliseconds(), ut.Define.Milliseconds(),
+				ut.Check.Milliseconds(), ut.Verify.Milliseconds()))
+	}
+	if len(embedErrs) > 0 {
+		printFileErrors(projectDir, embedErrs)
+		os.Exit(1)
+	}
+
+	tOwner := time.Now()
+	ownerErrs := ownership.Check(merged, info)
+	timePhase("ownership", time.Since(tOwner), "")
+	if len(ownerErrs) > 0 {
+		printFileErrors(projectDir, ownerErrs)
+		os.Exit(1)
+	}
+
+	return merged, info
+}
+
 // compileFrontendForTarget runs the full frontend pipeline: parse → merge std → sema → ownership.
 // triple is the LLVM target triple used for `target(cond)` filtering (empty = host target).
 func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
@@ -5163,6 +5372,64 @@ func computeRunBinaryCacheInputs(filename, target string, releaseMode bool) []mo
 		}
 	}
 
+	return inputs
+}
+
+// computeProjectBinaryCacheKey computes a cache key for a `promise run` /
+// `promise build` invocation against a project directory containing a
+// promise.toml. The key covers all .pr files in the project tree (excluding
+// tests), the compiler binary, std library, target triple, build mode,
+// embedded files referenced from any project source, and local module deps.
+func computeProjectBinaryCacheKey(projectDir, target string, releaseMode bool) (string, bool) {
+	implHash, err := module.HashModuleSources(projectDir, false)
+	if err != nil {
+		return "", false
+	}
+
+	compilerHash := module.CompilerHash()
+	sHash := cachedStdHash()
+	if sHash == "" {
+		return "", false
+	}
+
+	h := fnv.New128a()
+	fmt.Fprintf(h, "project-binary:%s\n", implHash)
+	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
+	fmt.Fprintf(h, "std:%s\n", sHash)
+	fmt.Fprintf(h, "target:%s\n", target)
+	fmt.Fprintf(h, "mode:%s\n", buildModeStr(releaseMode))
+
+	if embedHash := module.HashModuleEmbeds(projectDir, false); embedHash != "" {
+		fmt.Fprintf(h, "embed:%s\n", embedHash)
+	}
+
+	for _, dep := range scanModuleLocalDeps(projectDir) {
+		fmt.Fprintf(h, "mod:%s\n", dep)
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), true
+}
+
+// computeProjectBinaryCacheInputs mirrors computeProjectBinaryCacheKey for
+// PROMISE_CACHE_DEBUG=verbose output.
+func computeProjectBinaryCacheInputs(projectDir, target string, releaseMode bool) []module.CacheKeyInput {
+	implHash, err := module.HashModuleSources(projectDir, false)
+	if err != nil {
+		return nil
+	}
+	inputs := []module.CacheKeyInput{
+		{Label: "impl", Value: implHash},
+		{Label: "compiler", Value: module.CompilerHash()},
+		{Label: "std", Value: cachedStdHash()},
+		{Label: "target", Value: target},
+		{Label: "mode", Value: buildModeStr(releaseMode)},
+	}
+	if embedHash := module.HashModuleEmbeds(projectDir, false); embedHash != "" {
+		inputs = append(inputs, module.CacheKeyInput{Label: "embed", Value: embedHash})
+	}
+	for _, dep := range scanModuleLocalDeps(projectDir) {
+		inputs = append(inputs, module.CacheKeyInput{Label: "dep", Value: dep})
+	}
 	return inputs
 }
 
@@ -6624,9 +6891,11 @@ func readFileLines(filename string) []string {
 }
 
 // printFileErrors formats errors with source context for file-based compilation.
+// filename is the fallback source path when an error has no position file
+// (e.g. a top-level message). When errors carry per-file positions (project
+// or module-test builds spanning multiple files), context is loaded from the
+// per-error file so the snippet under the message stays accurate.
 func printFileErrors(filename string, errs []error) {
-	lines := readFileLines(filename)
-
 	for _, e := range errs {
 		var pos ast.Pos
 		var msg string
@@ -6641,7 +6910,11 @@ func printFileErrors(filename string, errs []error) {
 		}
 
 		fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", pos.File, pos.Line, pos.Column, msg)
-		if lines != nil {
+		ctxFile := pos.File
+		if ctxFile == "" {
+			ctxFile = filename
+		}
+		if lines := readFileLines(ctxFile); lines != nil {
 			printErrorContext(lines, pos.Line-1, pos.Column)
 		}
 	}

@@ -168,6 +168,244 @@ func TestComputeRunBinaryCacheKeyMissingFile(t *testing.T) {
 	}
 }
 
+// writeProjectFile writes a file inside a project directory, creating
+// intermediate directories as needed.
+func writeProjectFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestComputeProjectBinaryCacheKeyStable(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "promise.toml", "[module]\nname = \"app\"\nepoch = \"2026.0\"\n")
+	writeProjectFile(t, dir, "main.pr", "main() {}\n")
+	writeProjectFile(t, dir, "lib.pr", "type Foo {}\n")
+
+	key1, ok1 := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+	key2, ok2 := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+
+	if !ok1 || !ok2 {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+	if key1 != key2 {
+		t.Errorf("same inputs produced different keys: %q vs %q", key1, key2)
+	}
+}
+
+func TestComputeProjectBinaryCacheKeySourceChange(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "promise.toml", "[module]\nname = \"app\"\nepoch = \"2026.0\"\n")
+	writeProjectFile(t, dir, "main.pr", "main() {}\n")
+	libPath := filepath.Join(dir, "lib.pr")
+	writeProjectFile(t, dir, "lib.pr", "type Foo {}\n")
+
+	key1, ok := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+	if !ok {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+
+	// Change a non-main file
+	if err := os.WriteFile(libPath, []byte("type Foo { int x; }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	key2, _ := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+
+	if key1 == key2 {
+		t.Error("source change in any project file should invalidate cache key")
+	}
+}
+
+func TestComputeProjectBinaryCacheKeyDistinctFromRunBinary(t *testing.T) {
+	// Project-mode keys must not collide with single-file run keys.
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "promise.toml", "[module]\nname = \"app\"\nepoch = \"2026.0\"\n")
+	writeProjectFile(t, dir, "main.pr", "main() {}\n")
+
+	projectKey, ok := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+	if !ok {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+	runKey, ok := computeRunBinaryCacheKey(filepath.Join(dir, "main.pr"), "x86_64-unknown-linux-gnu", false)
+	if !ok {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+	if projectKey == runKey {
+		t.Error("project-mode key must differ from single-file run key")
+	}
+}
+
+func TestComputeProjectBinaryCacheKeyEmbedChange(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "promise.toml", "[module]\nname = \"app\"\nepoch = \"2026.0\"\n")
+	embedPath := filepath.Join(dir, "data.txt")
+	if err := os.WriteFile(embedPath, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeProjectFile(t, dir, "main.pr", "`embed(\"data.txt\")\nblob bytes;\nmain() {}\n")
+
+	key1, ok := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+	if !ok {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+	if err := os.WriteFile(embedPath, []byte("goodbye"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	key2, _ := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+	if key1 == key2 {
+		t.Error("embed file change should invalidate project cache key")
+	}
+}
+
+func TestComputeProjectBinaryCacheKeyTargetChange(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "promise.toml", "[module]\nname = \"app\"\nepoch = \"2026.0\"\n")
+	writeProjectFile(t, dir, "main.pr", "main() {}\n")
+
+	keyLinux, ok := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+	if !ok {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+	keyMac, _ := computeProjectBinaryCacheKey(dir, "aarch64-apple-darwin24", false)
+	if keyLinux == keyMac {
+		t.Error("different target triples should produce different project cache keys")
+	}
+}
+
+func TestComputeProjectBinaryCacheKeyReleaseMode(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "promise.toml", "[module]\nname = \"app\"\nepoch = \"2026.0\"\n")
+	writeProjectFile(t, dir, "main.pr", "main() {}\n")
+
+	keyDebug, ok := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+	if !ok {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+	keyRelease, _ := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", true)
+	if keyDebug == keyRelease {
+		t.Error("debug vs release mode should produce different project cache keys")
+	}
+}
+
+func TestComputeProjectBinaryCacheKeyLocalDepChange(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "promise.toml", "[module]\nname = \"app\"\nepoch = \"2026.0\"\n")
+	// Sibling local module under ./dep
+	depDir := filepath.Join(dir, "dep")
+	if err := os.MkdirAll(depDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	depFile := filepath.Join(depDir, "dep.pr")
+	if err := os.WriteFile(depFile, []byte("`public\nhello() int { 1 }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeProjectFile(t, dir, "main.pr", `use dep "./dep";
+main() {}
+`)
+
+	key1, ok := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+	if !ok {
+		t.Skipf("cache key computation not available (missing std hash)")
+	}
+	if err := os.WriteFile(depFile, []byte("`public\nhello() int { 2 }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	key2, _ := computeProjectBinaryCacheKey(dir, "x86_64-unknown-linux-gnu", false)
+	if key1 == key2 {
+		t.Error("local dep change should invalidate project cache key")
+	}
+}
+
+func TestComputeProjectBinaryCacheKeyMissingDir(t *testing.T) {
+	_, ok := computeProjectBinaryCacheKey("/nonexistent/project/dir/12345", "x86_64-unknown-linux-gnu", false)
+	if ok {
+		t.Error("missing project dir should not be cacheable")
+	}
+}
+
+func TestComputeProjectBinaryCacheInputs(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "promise.toml", "[module]\nname = \"app\"\nepoch = \"2026.0\"\n")
+	writeProjectFile(t, dir, "main.pr", "main() {}\n")
+	writeProjectFile(t, dir, "lib.pr", "type Foo {}\n")
+
+	inputs := computeProjectBinaryCacheInputs(dir, "x86_64-unknown-linux-gnu", false)
+	if inputs == nil {
+		t.Skipf("cache inputs not available (missing std hash)")
+	}
+
+	// Required labels in the order they're written by the function.
+	want := []string{"impl", "compiler", "std", "target", "mode"}
+	if len(inputs) < len(want) {
+		t.Fatalf("got %d inputs, want at least %d: %+v", len(inputs), len(want), inputs)
+	}
+	for i, label := range want {
+		if inputs[i].Label != label {
+			t.Errorf("inputs[%d].Label = %q, want %q", i, inputs[i].Label, label)
+		}
+		if inputs[i].Value == "" {
+			t.Errorf("inputs[%d] (%s).Value is empty", i, label)
+		}
+	}
+	// target should match what we passed in.
+	for _, in := range inputs {
+		if in.Label == "target" && in.Value != "x86_64-unknown-linux-gnu" {
+			t.Errorf("target value = %q, want %q", in.Value, "x86_64-unknown-linux-gnu")
+		}
+		if in.Label == "mode" && in.Value != "debug" {
+			t.Errorf("mode value = %q, want %q", in.Value, "debug")
+		}
+	}
+}
+
+func TestComputeProjectBinaryCacheInputsReleaseAndEmbed(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "promise.toml", "[module]\nname = \"app\"\nepoch = \"2026.0\"\n")
+	embedPath := filepath.Join(dir, "data.txt")
+	if err := os.WriteFile(embedPath, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeProjectFile(t, dir, "main.pr", "`embed(\"data.txt\")\nblob bytes;\nmain() {}\n")
+
+	inputs := computeProjectBinaryCacheInputs(dir, "x86_64-unknown-linux-gnu", true)
+	if inputs == nil {
+		t.Skipf("cache inputs not available (missing std hash)")
+	}
+	var foundMode, foundEmbed bool
+	for _, in := range inputs {
+		if in.Label == "mode" {
+			foundMode = true
+			if in.Value != "release" {
+				t.Errorf("release mode value = %q, want %q", in.Value, "release")
+			}
+		}
+		if in.Label == "embed" {
+			foundEmbed = true
+			if in.Value == "" {
+				t.Error("embed value is empty")
+			}
+		}
+	}
+	if !foundMode {
+		t.Error("inputs missing 'mode' label")
+	}
+	if !foundEmbed {
+		t.Error("inputs missing 'embed' label")
+	}
+}
+
+func TestComputeProjectBinaryCacheInputsMissingDir(t *testing.T) {
+	inputs := computeProjectBinaryCacheInputs("/nonexistent/project/dir/12345", "x86_64-unknown-linux-gnu", false)
+	if inputs != nil {
+		t.Errorf("missing project dir should return nil inputs, got %+v", inputs)
+	}
+}
+
 func TestParseRunArgs(t *testing.T) {
 	cases := []struct {
 		name            string

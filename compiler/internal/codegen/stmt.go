@@ -688,6 +688,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	// T0397: Same flag for typed `(...)? opt = m[k]` — Optional[Tuple] LHS where
 	// the inner tuple has droppable fields aliased into the container's bucket.
+	// (Not borrow-gated — checks Optional[Tuple] type shape. Remains active post-T0438.)
 	if opt, ok := resolvedExprType.(*types.Optional); ok {
 		elem := opt.Elem()
 		if c.typeSubst != nil {
@@ -703,6 +704,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// fires when the RHS is a direct vector-index expression: chains like
 	// `b := v[0].method()` are excluded because the cloned receiver would not
 	// be consumed (method takes a borrow), leaking the clone.
+	// (Not borrow-gated — checks AST shape (IndexExpr) and element type. Remains active post-T0438.)
 	if isDroppableHeapUserType(resolvedExprType) {
 		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
 			c.dupHeapUserFieldAccess = true
@@ -958,6 +960,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	}
 	// T0397: Same flag for inferred `opt := m[k]` — Optional[Tuple] LHS where
 	// the inner tuple has droppable fields aliased into the container's bucket.
+	// (Not borrow-gated — checks Optional[Tuple] type shape. Remains active post-T0438.)
 	if opt, ok := typ.(*types.Optional); ok {
 		elem := opt.Elem()
 		if c.typeSubst != nil {
@@ -973,6 +976,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// fires when the RHS is a direct vector-index expression: chains like
 	// `b := v[0].method()` are excluded because the cloned receiver would not
 	// be consumed (method takes a borrow), leaking the clone.
+	// (Not borrow-gated — checks AST shape (IndexExpr) and element type. Remains active post-T0438.)
 	if isDroppableHeapUserType(typ) {
 		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
 			c.dupHeapUserFieldAccess = true
@@ -5012,27 +5016,6 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					// the source optional (whose drop frees it at scope exit).
 					break
 				}
-				// T0383: Vector index-assign from a borrow (T&/T~) for non-string
-				// heap element types. The borrow returns a non-owning reference;
-				// without duping, both the container's drop and the borrow source's
-				// drop free the same inner value → double-free. Mirrors Vector.push
-				// semantics (T0376) for the index-assign path. Only fires when RHS
-				// is statically a borrow type (T0381's isBorrowedExpr), so owned
-				// IdentExpr/heap-temp sources keep their move/claim semantics.
-				// Polymorphic element types (those needing a vtable) skip dup —
-				// dupHeapValue uses the static layout, which would truncate.
-				if c.isBorrowedExpr(s.Value) {
-					skipForPolymorphic := false
-					if rn := extractNamed(resolvedElem); rn != nil && c.needsVtable(rn) {
-						skipForPolymorphic = true
-					}
-					if !skipForPolymorphic {
-						if dupVal := c.maybeDupPushElement(val, resolvedElem); dupVal != nil {
-							c.genIndexAssign(target, s.Op, dupVal)
-							break
-						}
-					}
-				}
 			}
 			// B0350: Map[K,string] index assign from borrow param — dup value
 			// so the map owns an independent copy. Borrow params have no drop
@@ -5052,21 +5035,6 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 						// B0355: non-ident borrow expr (field access, container element) as map value —
 						// the source still owns the pointer; dup so map holds an independent copy.
 						val = c.dupString(val)
-					}
-				} else if c.isBorrowedExpr(s.Value) {
-					// T0383: Map index-assign from a borrow for non-string heap
-					// value types. Same pattern as the Vector case — the borrow
-					// source retains ownership; the map needs an independent copy.
-					// Modifies val in place and falls through to the shared
-					// genIndexAssign + cleanup path (mirrors B0350/B0355).
-					skipForPolymorphic := false
-					if rn := extractNamed(resolvedVal); rn != nil && c.needsVtable(rn) {
-						skipForPolymorphic = true
-					}
-					if !skipForPolymorphic {
-						if dupVal := c.maybeDupPushElement(val, resolvedVal); dupVal != nil {
-							val = dupVal
-						}
 					}
 				}
 			}

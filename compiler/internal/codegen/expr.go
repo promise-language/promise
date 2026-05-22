@@ -4552,6 +4552,8 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		// separate flag (dupStringFieldAccess) and are handled by the
 		// post-load c.dupString(argVal) below; setting the container
 		// flag is harmless for string-element pushes.
+		// (Not borrow-gated — checks MemberExpr AST shape on an owned type.
+		// Remains active post-T0438.)
 		if _, isMember := e.Args[0].Value.(*ast.MemberExpr); isMember {
 			c.dupContainerFieldAccess = true
 		}
@@ -7429,6 +7431,8 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 	// Note: for polymorphic element types (e.g. Vector[Shape] containing Circle),
 	// dupHeapValue uses the static element layout for memcpy size — same
 	// limitation as B0204/T0370/T0376.
+	// (Not borrow-gated — triggered by dupHeapUserFieldAccess flag set at the
+	// var-decl AST site. Remains active post-T0438.)
 	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled {
 		resolvedElem := elemType
 		if c.typeSubst != nil {
@@ -7447,6 +7451,8 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 	// for fields). Without dup, `t := vec[i]` aliases vec's element buffer and
 	// drop-on-write at the same slot (vec[i] = X) would create a UAF through t.
 	// Symmetric with the string branch (B0204) and tuple branch (T0370).
+	// (Not borrow-gated — triggered by dupContainerFieldAccess flag set at the
+	// var-decl AST site, not by a borrow type on the RHS. Remains active post-T0438.)
 	if c.dupContainerFieldAccess && c.tempTrackingEnabled {
 		if innerElem, isVec := types.AsVector(elemType); isVec {
 			c.dupContainerFieldAccess = false // consume the flag

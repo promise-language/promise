@@ -10148,6 +10148,75 @@ func TestT0383VectorIndexReadDupsHeapElement(t *testing.T) {
 	assertContains(t, ir, "vecdup.copy")
 }
 
+// T0388: push(h.containerField) where h is a droppable owned type must dup the
+// field so that both h.drop and v's element walk own independent copies.
+// genVectorMethodCall detects the MemberExpr arg and sets dupContainerFieldAccess;
+// genFieldAccess then dups the vector when the owner has HasDrop() true.
+func TestT0388PushVectorFieldFromDroppableOwnerDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Container {
+			int[] data;
+			drop(~this) {}
+		}
+		test() {
+			c := Container(data: [1, 2, 3]);
+			v := int[][]();
+			v.push(c.data);
+		}
+	`)
+	// genFieldAccess must emit vecdup.copy so v's element and Container.data are
+	// independent — otherwise Container.drop and v's Vector.drop double-free the buffer.
+	assertContains(t, ir, "vecdup.copy")
+}
+
+// T0398: `b := v[0]` where v is Vector[heap-user-type-with-drop] must deep-clone
+// the element via cloneHeapElement so b holds an independent instance.
+// Without the dup, b's drop binding and v's element walk double-free the same pointer.
+// genInferredVarDecl sets dupHeapUserFieldAccess; genVectorIndex calls cloneHeapElement
+// which falls back to dupHeapValue (pal_alloc + memcpy) when there is no clone method.
+func TestT0398VectorHeapElementReadDupsOnVarDecl(t *testing.T) {
+	ir := generateIR(t, `
+		type Item { int n; drop(~this) {} }
+		test() {
+			v := Item[]();
+			v.push(Item(n: 1));
+			b := v[0];
+		}
+	`)
+	// cloneHeapElement → dupHeapValue: allocate a new instance and memcpy the data.
+	assertContains(t, ir, "call i8* @pal_alloc")
+	assertContains(t, ir, "call void @llvm.memcpy")
+}
+
+// T0397: `opt := m[k]` where the map value type is a tuple with droppable fields
+// must dup the tuple's string fields so opt holds an independent copy.
+// Without the dup, opt's bindingDropTuple and the map's element walk double-free
+// the same string pointer. genInferredVarDecl sets dupTupleFieldAccess;
+// genMethodIndex calls dupTupleValue which emits promise_string_new for string fields.
+func TestT0397MapOptionalTupleIndexDupsStringField(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			m := map[string, (string, int)]();
+			m["a"] = ("hello", 1);
+			opt := m["a"];
+		}
+	`)
+	// dupTupleValue emits promise_string_new to clone the string element.
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
+// T0397 (typed path): same dup via genTypedVarDecl's Optional[Tuple] check.
+func TestT0397TypedVarDeclMapOptionalTupleDupsStringField(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			m := map[string, (string, int)]();
+			m["a"] = ("hello", 1);
+			(string, int)? opt = m["a"];
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
 // Error propagation triggers scope cleanup
 func TestDropErrorPropagateCleansUp(t *testing.T) {
 	ir := generateIR(t, `

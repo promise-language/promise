@@ -4308,7 +4308,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	}
 
 	result := c.block.NewCall(fn, args...)
-	c.trackGetterResult(e, getter, result)
+	c.trackGetterResult(e, getter, targetType, result)
 	return result
 }
 
@@ -4363,7 +4363,7 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 
 	result := c.block.NewCall(fnTyped, instance)
-	c.trackGetterResult(e, getter, result)
+	c.trackGetterResult(e, getter, targetType, result)
 	return result
 }
 
@@ -4380,12 +4380,26 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 // {i8*, i8*} value-struct results (Map, Set, user heap types) dispatch to
 // trackHeapUserTypeResult, which already filters out value/copy/structural
 // types and primitives so calling it unconditionally is safe.
-func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, result value.Value) {
+//
+// targetType is the receiver type at the call site. It supplies owner-type
+// substitution (e.g., ArcCell[int].fresh's `Arc[T]` → `Arc[int]`) so the
+// per-element-type drop function looks up the concrete instantiation rather
+// than the unsubstituted TypeParam.
+func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, targetType types.Type, result value.Value) {
 	if !c.tempTrackingEnabled || result == nil {
 		return
 	}
 	if result.Type() == irtypes.I8Ptr {
 		retType := getter.Sig().Result()
+		// Owner-type subst: when the getter's owner is a generic instance
+		// (e.g. ArcCell[int]), resolve the owner's TypeParams against the
+		// instance's TypeArgs before applying any further substitution.
+		// Without this, Arc[T] from ArcCell[T].fresh's signature stays as
+		// Arc[T] and getOrCreateArcDrop(T) would produce an Arc[T].drop fn
+		// that doesn't know T's concrete layout/inner-drop.
+		if ownerSubst := c.buildOwnerTypeArgSubst(targetType); ownerSubst != nil && retType != nil {
+			retType = types.Substitute(retType, ownerSubst)
+		}
 		if c.typeSubst != nil && retType != nil {
 			retType = types.Substitute(retType, c.typeSubst)
 		}
@@ -4404,6 +4418,22 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, re
 			} else {
 				c.trackVectorTemp(result)
 			}
+		} else if types.IsChannel(retType) || named == types.TypChannel {
+			// T0486: Channel[T] getter result owns a heap allocation; without
+			// tracking the cloned channel pointer leaks at statement end.
+			c.trackChannelTemp(result)
+		} else if arcElem, isArc := types.AsArc(retType); isArc {
+			// T0486: Arc[T] getter result owns a heap allocation; without
+			// tracking the cloned Arc leaks at statement end. arcElem is
+			// already substituted (Substitute on Instance produces a new
+			// Instance with substituted typeArgs).
+			c.trackTempWithDrop(result, c.getOrCreateArcDrop(arcElem))
+		} else if weakElem, isWeak := types.AsWeak(retType); isWeak {
+			// T0486: Weak[T] getter result owns a heap allocation.
+			c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
+		} else if mutexElem, isMutex := types.AsMutex(retType); isMutex {
+			// T0486: Mutex[T] getter result owns a heap allocation.
+			c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
 		}
 	} else {
 		c.trackHeapUserTypeResult(e, result)

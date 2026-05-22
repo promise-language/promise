@@ -226,3 +226,148 @@ test_virtual_getter_heap_chain() `test {
   HeapSource src = HeapImpl(_item: HeapItem(_label: "x"));
   assert(src.item.ok(), "virtual getter heap chain ok");
 }
+
+// T0486: Arc[T]/Channel[T]/Weak[T]/Mutex[T] getter results also own a heap
+// allocation; before T0486 these container types fell through trackGetterResult
+// (only String/Vector/heap-user-type were dispatched) and leaked at stmt end.
+
+type ABox {
+  drop(~this) {
+  }
+
+  get fresh Arc[int] `public => Arc[int](42);
+}
+
+type CBox {
+  drop(~this) {
+  }
+
+  get fresh channel[int] `public => channel[int](2);
+}
+
+type WBox {
+  drop(~this) {
+  }
+
+  // Method-body form so the Arc local is dropped at end of getter body. The
+  // returned Weak still owns +1 weak count; trackGetterResult must register
+  // that as a temp at the call site so the allocation is freed.
+  // Avoids both the chain-intermediate Arc-temp leak (T0499) and the
+  // field-read-dup × clone double-increment that field-based Weak getters hit.
+  get fresh Weak[int] `public {
+    Arc[int] inner = Arc[int](42);
+    return inner.downgrade();
+  }
+}
+
+type MBox {
+  drop(~this) {
+  }
+
+  get fresh Mutex[int] `public => Mutex[int](42);
+}
+
+// Arc getter as discarded expression statement — the cloned Arc must drop at
+// stmt end (decrement strong count to zero, free the allocation).
+test_arc_getter_expression_stmt() `test {
+  ABox a = ABox();
+  a.fresh;
+  assert(true, "no leak from discarded arc getter result");
+}
+
+// Arc getter in method-chain receiver position — `.borrow` returns the inner
+// int value, but the Arc temp from `a.fresh` itself must drop at stmt end.
+test_arc_getter_chain() `test {
+  ABox a = ABox();
+  assert(a.fresh.borrow == 42, "arc getter chain borrow");
+}
+
+// Channel getter as discarded expression statement — the cloned channel
+// (buffer + mutex + 2 cond vars + struct) must drop at stmt end.
+test_channel_getter_expression_stmt() `test {
+  CBox c = CBox();
+  c.fresh;
+  assert(true, "no leak from discarded channel getter result");
+}
+
+// Weak getter as discarded expression statement — the returned Weak temp
+// must drop at stmt end (decrement weak count to zero, free the allocation
+// that the getter body's local Arc dropped strong on).
+test_weak_getter_expression_stmt() `test {
+  WBox w = WBox();
+  w.fresh;
+  assert(true, "no leak from discarded weak getter result");
+}
+
+// Mutex getter as discarded expression statement — the Mutex (lock + inner
+// value) must drop at stmt end.
+test_mutex_getter_expression_stmt() `test {
+  MBox m = MBox();
+  m.fresh;
+  assert(true, "no leak from discarded mutex getter result");
+}
+
+// Generic owner type with Arc[T] getter exercises the typeSubst path: the
+// getter's Arc[T] return type is substituted to Arc[int] under monomorphization,
+// and types.AsArc on the substituted Instance returns the post-subst element.
+type ArcCell[T] {
+  T _value;
+
+  get fresh Arc[T] `public => Arc[T](this._value);
+}
+
+test_generic_arc_getter_chain() `test {
+  ArcCell[int] c = ArcCell[int](_value: 99);
+  assert(c.fresh.borrow == 99, "generic arc getter chain borrow");
+}
+
+// Generic Arc[T] with non-Copy T (string) — exercises owner-type substitution
+// in trackGetterResult so getOrCreateArcDrop is called with the concrete
+// element type (string) and the generated Arc[string].drop function correctly
+// drops the inner string. Without owner-subst, getOrCreateArcDrop would be
+// called with TypeParam T and produce a wrong Arc[T].drop fn that skips inner
+// string drop, leaking the cloned-string allocation.
+type StrCell[T] {
+  T _value;
+
+  get fresh Arc[T] `public => Arc[T](this._value);
+}
+
+test_generic_arc_string_chain() `test {
+  StrCell[string] c = StrCell[string](_value: "hello");
+  assert(c.fresh.borrow == "hello", "generic arc string getter chain borrow");
+}
+
+// Virtual dispatch path: abstract base with Arc[int] getter, exercising the
+// genVirtualGetterCall side of trackGetterResult.
+type ArcSource {
+  get fresh Arc[int] `public `abstract;
+}
+
+type ArcImpl is ArcSource {
+  get fresh Arc[int] `public => Arc[int](7);
+}
+
+test_virtual_arc_getter_chain() `test {
+  ArcSource src = ArcImpl();
+  assert(src.fresh.borrow == 7, "virtual arc getter chain borrow");
+}
+
+// Getter called from inside another method body — exercises the
+// tempTrackingEnabled gating (true for user method bodies) so the Arc temp
+// produced by the inner call is tracked just like at the test top level.
+type ArcRoom {
+  drop(~this) {
+  }
+
+  get item Arc[int] `public => Arc[int](100);
+
+  use_item(&this) bool `public {
+    return this.item.borrow == 100;
+  }
+}
+
+test_arc_getter_does_not_leak_inside_method() `test {
+  ArcRoom r = ArcRoom();
+  assert(r.use_item(), "arc getter chain inside method body");
+}

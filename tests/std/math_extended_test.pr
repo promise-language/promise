@@ -5,11 +5,6 @@
 // correctly. After T0337 the WASM math runtime is musl libm, so these tests must
 // pass on both host and WASM with ~1 ULP accuracy in the primary range and exact
 // results on NaN/±Inf/±0.
-//
-// NaN/Inf checks use the `f64.is_nan` / `f64.is_infinite` bit-pattern getters
-// rather than the `is_nan(x)`/`is_inf(x)` functions in std/math.pr — the latter
-// rely on `x != x`, which Promise currently emits as `fcmp one` (ordered, returns
-// false when either operand is NaN) instead of `fcmp une`. See T0463.
 // --- helpers ---
 // Approximate equality with a relative tolerance. Returns true for exact 0/0
 // matches and for values within `tol` of the expected (relative when expected

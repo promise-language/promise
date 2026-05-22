@@ -161,3 +161,65 @@ test_f64_arithmetic_special() `test {
   f64 nan2 = f64.infinity - f64.infinity;
   assert(nan2.is_nan, "inf - inf is NaN");
 }
+
+test_f64_nan_comparison() `test {
+  f64 n = f64.nan;
+  assert(n != n, "NaN != NaN is true (IEEE 754)");
+  assert(!(n == n), "NaN == NaN is false");
+  assert(n != 1.0, "NaN != 1.0 is true");
+  assert(!(n == 1.0), "NaN == 1.0 is false");
+  assert(!(n < 1.0), "NaN < 1.0 is false");
+  assert(!(n > 1.0), "NaN > 1.0 is false");
+  assert(!(n <= 1.0), "NaN <= 1.0 is false");
+  assert(!(n >= 1.0), "NaN >= 1.0 is false");
+  // NaN vs NaN ordered comparisons all return false (degenerate IEEE 754 case)
+  assert(!(n < n), "NaN < NaN is false");
+  assert(!(n > n), "NaN > NaN is false");
+  assert(!(n <= n), "NaN <= NaN is false");
+  assert(!(n >= n), "NaN >= NaN is false");
+  // NaN vs +/- infinity
+  f64 inf = f64.infinity;
+  assert(n != inf, "NaN != +inf is true");
+  assert(!(n == inf), "NaN == +inf is false");
+  assert(!(n < inf), "NaN < +inf is false");
+  assert(!(n > -inf), "NaN > -inf is false");
+}
+
+test_f32_nan_comparison() `test {
+  f32 n = f32.nan;
+  assert(n != n, "f32 NaN != NaN is true (IEEE 754)");
+  assert(!(n == n), "f32 NaN == NaN is false");
+  assert(n != 1.0f32, "f32 NaN != 1.0 is true");
+  assert(!(n == 1.0f32), "f32 NaN == 1.0 is false");
+  // f32 ordered comparisons against NaN return false (parity with f64)
+  assert(!(n < 1.0f32), "f32 NaN < 1.0 is false");
+  assert(!(n > 1.0f32), "f32 NaN > 1.0 is false");
+  assert(!(n <= 1.0f32), "f32 NaN <= 1.0 is false");
+  assert(!(n >= 1.0f32), "f32 NaN >= 1.0 is false");
+  assert(!(n < n), "f32 NaN < NaN is false");
+  assert(!(n >= n), "f32 NaN >= NaN is false");
+}
+
+test_f64_nan_to_bool_cast() `test {
+  // Float-to-bool cast uses fcmp une (non-zero is true; NaN is non-zero) — same
+  // predicate as float `!=`, so casting NaN must yield true to stay consistent
+  // with `n != 0.0`.
+  f64 n = f64.nan;
+  bool b = n as bool;
+  assert(b, "NaN as bool is true");
+  assert(n != 0.0, "consistency: NaN != 0.0 is true");
+  // Sanity: zero casts to false, non-zero finite casts to true.
+  assert(!((0.0) as bool), "0.0 as bool is false");
+  assert((1.5) as bool, "1.5 as bool is true");
+  // +/- infinity also non-zero.
+  assert(f64.infinity as bool, "+inf as bool is true");
+  assert((-f64.infinity) as bool, "-inf as bool is true");
+}
+
+test_f32_nan_to_bool_cast() `test {
+  f32 n = f32.nan;
+  bool b = n as bool;
+  assert(b, "f32 NaN as bool is true");
+  assert(!((0.0f32) as bool), "f32 0.0 as bool is false");
+  assert((1.5f32) as bool, "f32 1.5 as bool is true");
+}

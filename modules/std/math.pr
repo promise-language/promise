@@ -94,16 +94,16 @@ trunc(f64 x) f64 `public {
   return ceil(x);
 }
 
-is_nan(f64 x) bool `public {
-  return x != x;
+is_nan(f64 x) bool `public `doc("Returns true if x is NaN.") {
+  return x.is_nan;
 }
 
-is_inf(f64 x) bool `public {
-  return x != 0.0 && x + x == x;
+is_inf(f64 x) bool `public `doc("Returns true if x is positive or negative infinity.") {
+  return x.is_infinite;
 }
 
-is_finite(f64 x) bool `public {
-  return !is_nan(x) && !is_inf(x);
+is_finite(f64 x) bool `public `doc("Returns true if x is neither NaN nor infinite.") {
+  return x.is_finite;
 }
 
 abs_f64(f64 x) f64 `public {

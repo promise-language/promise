@@ -115,7 +115,7 @@ func floatOps() map[string]nativeEmitter {
 		"/":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewFDiv(l, r) },
 		"%":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewFRem(l, r) },
 		"==": func(b *ir.Block, l, r value.Value) value.Value { return b.NewFCmp(enum.FPredOEQ, l, r) },
-		"!=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewFCmp(enum.FPredONE, l, r) },
+		"!=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewFCmp(enum.FPredUNE, l, r) },
 		"<":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewFCmp(enum.FPredOLT, l, r) },
 		">":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewFCmp(enum.FPredOGT, l, r) },
 		"<=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewFCmp(enum.FPredOLE, l, r) },

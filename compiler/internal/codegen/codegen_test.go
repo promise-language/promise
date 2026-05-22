@@ -5105,7 +5105,25 @@ func TestFloatComparisonFull(t *testing.T) {
 	assertContains(t, ir, "fcmp olt double")
 	assertContains(t, ir, "fcmp ogt double")
 	assertContains(t, ir, "fcmp oeq double")
-	assertContains(t, ir, "fcmp one double")
+	assertContains(t, ir, "fcmp une double")
+}
+
+// floatOps: != uses unordered predicate (UNE) so NaN != NaN evaluates true (IEEE 754, T0463).
+func TestFloatNotEqualNaN(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 a = 1.0;
+			f64 b = 2.0;
+			bool ne = a != b;
+			f32 c = 1.0;
+			f32 d = 2.0;
+			bool ne32 = c != d;
+		}
+	`)
+	assertContains(t, ir, "fcmp une double")
+	assertContains(t, ir, "fcmp une float")
+	assertNotContains(t, ir, "fcmp one double")
+	assertNotContains(t, ir, "fcmp one float")
 }
 
 // resolveEscape: additional escape sequences

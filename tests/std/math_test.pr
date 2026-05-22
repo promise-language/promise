@@ -131,14 +131,23 @@ test_trunc() `test {
 test_is_nan() `test {
   assert(!is_nan(1.0), "1.0 is not NaN");
   assert(!is_nan(0.0), "0.0 is not NaN");
+  assert(is_nan(f64.nan), "is_nan(NaN)");
+  assert(!is_nan(f64.infinity), "+inf is not NaN");
+  assert(!is_nan(-f64.infinity), "-inf is not NaN");
 }
 
 test_is_inf() `test {
   assert(!is_inf(1.0), "1.0 is not inf");
   assert(!is_inf(0.0), "0.0 is not inf");
+  assert(is_inf(f64.infinity), "is_inf(+inf)");
+  assert(is_inf(-f64.infinity), "is_inf(-inf)");
+  assert(!is_inf(f64.nan), "NaN is not inf");
 }
 
 test_is_finite() `test {
   assert(is_finite(1.0), "1.0 is finite");
   assert(is_finite(0.0), "0.0 is finite");
+  assert(!is_finite(f64.nan), "NaN is not finite");
+  assert(!is_finite(f64.infinity), "+inf is not finite");
+  assert(!is_finite(-f64.infinity), "-inf is not finite");
 }

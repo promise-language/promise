@@ -283,7 +283,7 @@ func main() {
 	case "doc":
 		runDoc(os.Args[2:])
 	case "init":
-		runInit()
+		runInit(os.Args[2:])
 	case "clean":
 		runClean(os.Args[2:])
 	case "pin":
@@ -7057,31 +7057,74 @@ func runUpdate(args []string) {
 	fmt.Printf("\nUpdated %d of %d dependencies\n", updated, len(entries))
 }
 
-func runInit() {
+func runInit(args []string) {
 	const defaultEpoch = "2026.0"
 
-	if _, err := os.Stat("promise.toml"); err == nil {
-		fmt.Fprintln(os.Stderr, "promise.toml already exists")
-		os.Exit(1)
+	// Parse --force flag and optional target directory
+	force := false
+	targetDir := ""
+	for _, arg := range args {
+		if arg == "-force" || arg == "--force" {
+			force = true
+		} else if !strings.HasPrefix(arg, "-") && targetDir == "" {
+			targetDir = arg
+		}
+	}
+	if targetDir == "" {
+		targetDir = "."
 	}
 
-	// Use directory name as default module name
-	dir, err := os.Getwd()
+	// Resolve to absolute path
+	absDir, err := filepath.Abs(targetDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	name := filepath.Base(dir)
+
+	// Create directory if it doesn't exist
+	if info, err := os.Stat(absDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(absDir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "error creating directory: %v\n", err)
+			os.Exit(1)
+		}
+	} else if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	} else if !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "error: %s is not a directory\n", absDir)
+		os.Exit(1)
+	} else if !force {
+		// Check if directory is non-empty (ignoring dotfiles)
+		entries, err := os.ReadDir(absDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), ".") {
+				fmt.Fprintf(os.Stderr, "error: directory %s is not empty (use --force to override)\n", absDir)
+				os.Exit(1)
+			}
+		}
+	}
+
+	j := func(file string) string { return filepath.Join(absDir, file) }
+	name := filepath.Base(absDir)
+
+	if _, err := os.Stat(j("promise.toml")); err == nil {
+		fmt.Fprintln(os.Stderr, "promise.toml already exists")
+		os.Exit(1)
+	}
 
 	content := fmt.Sprintf("[module]\nname = %q\nepoch = %q\n", name, defaultEpoch)
-	if err := os.WriteFile("promise.toml", []byte(content), 0644); err != nil {
+	if err := os.WriteFile(j("promise.toml"), []byte(content), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing promise.toml: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Created promise.toml (module: %s, epoch: %s)\n", name, defaultEpoch)
 
 	// Generate main.pr if it doesn't exist
-	if _, err := os.Stat("main.pr"); err != nil {
+	if _, err := os.Stat(j("main.pr")); err != nil {
 		mainContent := `use io;
 use os;
 
@@ -7100,7 +7143,7 @@ main!() {
     print_line("Safe: {safe.len} items");
 }
 `
-		if err := os.WriteFile("main.pr", []byte(mainContent), 0644); err != nil {
+		if err := os.WriteFile(j("main.pr"), []byte(mainContent), 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing main.pr: %v\n", err)
 			os.Exit(1)
 		}
@@ -7108,7 +7151,7 @@ main!() {
 	}
 
 	// Generate CLAUDE.md if it doesn't exist
-	if _, err := os.Stat("CLAUDE.md"); err != nil {
+	if _, err := os.Stat(j("CLAUDE.md")); err != nil {
 		claudeContent := `# ` + name + `
 
 Promise project. Use ` + "`promise guide`" + ` for the full language reference.
@@ -7150,7 +7193,7 @@ value := try_thing() ? { fallback(); };  # catch with recovery block
 | ` + "`time`" + ` | Extended time utilities | ` + "`promise doc time`" + ` |
 | ` + "`http`" + ` | HTTP client | ` + "`promise doc http`" + ` |
 `
-		if err := os.WriteFile("CLAUDE.md", []byte(claudeContent), 0644); err != nil {
+		if err := os.WriteFile(j("CLAUDE.md"), []byte(claudeContent), 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing CLAUDE.md: %v\n", err)
 			os.Exit(1)
 		}

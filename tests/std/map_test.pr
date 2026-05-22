@@ -1199,3 +1199,120 @@ test_t0442_nested_tuple_in_map_value() `test {
     assert(row.name == "deep", "row.name");
   }
 }
+
+// T0491 regression: heap user type holder for MemberExpr-LHS reassignment.
+type _T0491Holder {
+  _T0440Box current;
+  drop(~this) {
+  }
+}
+
+// T0491: `b = m[k]!` where `b` is a local IdentExpr of heap-user-type. Without
+// the dup-on-read flag-set in genAssignStmt, the unwrapped value aliases the
+// map's bucket and double-frees at scope exit. Companion to
+// test_t0440_typed_force_unwrap (var-decl path) and test_t0440_force_unwrap
+// (inferred var-decl path) — both already covered by T0440.
+test_t0491_var_reassign_force_unwrap() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 42);
+  b := _T0440Box(value: 1);
+  b = m["k"]!;
+  assert(b.value == 42, "reassigned value");
+  assert(m.contains("k"), "key still in map");
+  if t := m["k"] {
+    assert(t.value == 42, "post-reassign reread");
+  }
+}
+
+// T0491: `h.current = m[k]!` — MemberExpr LHS reassignment to a heap-user-type
+// field. genMemberAssign drops the old field; the dup-on-read flag must make
+// the new value independent of the bucket so the bucket isn't double-freed.
+test_t0491_member_reassign_force_unwrap() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 99);
+  h := _T0491Holder(current: _T0440Box(value: 1));
+  h.current = m["k"]!;
+  assert(h.current.value == 99, "reassigned member");
+  assert(m.contains("k"), "key still in map");
+  if t := m["k"] {
+    assert(t.value == 99, "post-member-reassign reread");
+  }
+}
+
+// T0491: `v[0] = m[k]!` — IndexExpr LHS reassignment. genVectorIndexAssign
+// drops the old element; the dup-on-read flag prevents the new element from
+// aliasing the map's bucket.
+test_t0491_index_reassign_force_unwrap() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 17);
+  v := _T0440Box[]();
+  v.push(_T0440Box(value: 1));
+  v[0] = m["k"]!;
+  assert(v[0].value == 17, "reassigned index");
+  assert(m.contains("k"), "key still in map");
+  if t := m["k"] {
+    assert(t.value == 17, "post-index-reassign reread");
+  }
+}
+
+// T0491 coverage: heap user type with a heap-string field — `b = m[k]!` must
+// recurse through `dupHeapValueFields` to clone the string, not alias it.
+// Without the fix path the unwrap result would alias the bucket including its
+// string field, so dropping the local would free the bucket's string and a
+// second read would observe corrupted data. Companion to test_t0440_with_heap_string_field
+// (which covers the if-let path); this is the reassignment path.
+test_t0491_var_reassign_force_unwrap_with_heap_string() `test {
+  m := map[string, _T0440StrBox]();
+  m["k"] = _T0440StrBox(label: "a" + "b", value: 5);
+  b := _T0440StrBox(label: "init" + "1", value: 0);
+  b = m["k"]!;
+  assert(b.label == "ab", "reassigned label");
+  assert(b.value == 5, "reassigned value");
+  if t := m["k"] {
+    assert(t.label == "ab", "post-reassign reread label");
+    assert(t.value == 5, "post-reassign reread value");
+  }
+}
+
+// T0491 coverage: multiple consecutive MemberExpr reassignments. Each
+// `h.current = m[k]!` exercises the drop-old + dup-on-read + store cycle.
+// Verifies drop-old fires correctly across writes (no leaked old instances)
+// and each unwrap is independent of the source bucket. Mirrors
+// test_t0410_member_multi_reassign for the `m[k]!` RHS shape.
+test_t0491_member_multi_reassign_force_unwrap() `test {
+  m := map[string, _T0440Box]();
+  m["a"] = _T0440Box(value: 11);
+  m["b"] = _T0440Box(value: 22);
+  m["c"] = _T0440Box(value: 33);
+  h := _T0491Holder(current: _T0440Box(value: 0));
+  h.current = m["a"]!;
+  assert(h.current.value == 11, "first member reassign");
+  h.current = m["b"]!;
+  assert(h.current.value == 22, "second member reassign");
+  h.current = m["c"]!;
+  assert(h.current.value == 33, "third member reassign");
+  assert(m.contains("a"), "key a still present");
+  assert(m.contains("c"), "key c still present");
+  if t := m["a"] {
+    assert(t.value == 11, "post-multi-reassign reread a");
+  }
+}
+
+// T0491 coverage: generic function — `b = m[k]!` under typeSubst exercises
+// the `types.Substitute(lhsType, c.typeSubst)` branch in the fix. Without
+// honoring typeSubst, the LHS would resolve to the unsubstituted TypeParam
+// and `isDroppableHeapUserType` would short-circuit (TypeParam is not
+// droppable), the dup flag would stay clear, and the bucket alias would
+// double-free at scope exit. Companion to test_t0410_generic_reassign.
+swap_first_from_map[T](~Map[string, T] m, string key, ~T local) T {
+  local = m[key]!;
+  return local;
+}
+
+test_t0491_generic_reassign_force_unwrap() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 77);
+  init := _T0440Box(value: 1);
+  out := swap_first_from_map[_T0440Box](m, "k", init);
+  assert(out.value == 77, "generic reassign result");
+}

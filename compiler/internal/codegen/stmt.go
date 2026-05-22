@@ -4866,8 +4866,18 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	// local writes produce independent clones instead of aliasing the bucket.
 	// Direct IndexExpr RHS only — chains like `b = v[0].method()` are excluded
 	// to avoid orphan clones (method takes a borrow, clone would leak).
+	// T0491: also fire for `OptionalUnwrapExpr` wrapping `IndexExpr` (e.g.
+	// `b = m[k]!`) — same dup-on-read need as the var-decl path (T0440).
 	if s.Op == ast.OpAssign {
-		if _, isIdxRhs := s.Value.(*ast.IndexExpr); isIdxRhs {
+		isIdxRhs := false
+		if _, ok := s.Value.(*ast.IndexExpr); ok {
+			isIdxRhs = true
+		} else if unwrap, ok := s.Value.(*ast.OptionalUnwrapExpr); ok {
+			if _, ok := unwrap.Expr.(*ast.IndexExpr); ok {
+				isIdxRhs = true
+			}
+		}
+		if isIdxRhs {
 			var lhsType types.Type
 			switch t := s.Target.(type) {
 			case *ast.IndexExpr:

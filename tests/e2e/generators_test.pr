@@ -348,5 +348,264 @@ test_yield_delegate_empty_subgen() `test {
   assert(sum == 42, "empty delegate + yield should produce 42");
 }
 
+// --- T0479: Generator coroutine params own heap data must be dropped ---
+
+t0479_take_string(~string s) {
+  // s is moved here; consumed by callee, no leak.
+}
+
+t0479_gen_owned_string(~string s) stream[int] {
+  yield 1;
+}
+
+t0479_gen_plain_tuple((string, int) t) stream[int] {
+  yield 1;
+}
+
+t0479_gen_owned_tuple(~(string, int) t) stream[int] {
+  yield 1;
+}
+
+t0479_gen_owned_vec(~int[] xs) stream[int] {
+  yield 1;
+}
+
+t0479_gen_variadic(...string xs) stream[int] {
+  yield 1;
+}
+
+t0479_gen_mixed(~string a, (string, int) b, int c) stream[int] {
+  yield 1;
+}
+
+t0479_gen_generic[T](~T x) stream[int] {
+  yield 1;
+}
+
+t0479_gen_return_then_destroy(~string s) stream[int] {
+  if true {
+    return;
+  }
+  yield 1;
+}
+
+t0479_gen_consume(~string s) stream[int] {
+  t0479_take_string(s);
+  yield 1;
+}
+
+test_t0479_owned_string_break() `test {
+  for x in t0479_gen_owned_string("hi".to_string()) {
+    break;
+  }
+}
+
+test_t0479_owned_string_run() `test {
+  for x in t0479_gen_owned_string("hi".to_string()) {
+  }
+}
+
+test_t0479_plain_tuple_break() `test {
+  for x in t0479_gen_plain_tuple(("hi".to_string(), 1)) {
+    break;
+  }
+}
+
+test_t0479_plain_tuple_run() `test {
+  for x in t0479_gen_plain_tuple(("hi".to_string(), 1)) {
+  }
+}
+
+test_t0479_owned_tuple_break() `test {
+  for x in t0479_gen_owned_tuple(("hi".to_string(), 1)) {
+    break;
+  }
+}
+
+test_t0479_owned_tuple_run() `test {
+  for x in t0479_gen_owned_tuple(("hi".to_string(), 1)) {
+  }
+}
+
+test_t0479_owned_vec_break() `test {
+  int[] data = [1, 2, 3];
+  for x in t0479_gen_owned_vec(data) {
+    break;
+  }
+}
+
+test_t0479_owned_vec_run() `test {
+  int[] data = [1, 2, 3];
+  for x in t0479_gen_owned_vec(data) {
+  }
+}
+
+test_t0479_variadic_break() `test {
+  for x in t0479_gen_variadic("a".to_string(), "b".to_string()) {
+    break;
+  }
+}
+
+test_t0479_variadic_run() `test {
+  for x in t0479_gen_variadic("a".to_string(), "b".to_string()) {
+  }
+}
+
+test_t0479_mixed_params_break() `test {
+  for x in t0479_gen_mixed("a".to_string(), ("b".to_string(), 5), 7) {
+    break;
+  }
+}
+
+test_t0479_mixed_params_run() `test {
+  for x in t0479_gen_mixed("a".to_string(), ("b".to_string(), 5), 7) {
+  }
+}
+
+test_t0479_generic_owned_break() `test {
+  for x in t0479_gen_generic[string]("hi".to_string()) {
+    break;
+  }
+}
+
+test_t0479_generic_owned_run() `test {
+  for x in t0479_gen_generic[string]("hi".to_string()) {
+  }
+}
+
+test_t0479_return_then_destroy() `test {
+  for x in t0479_gen_return_then_destroy("hi".to_string()) {
+  }
+}
+
+test_t0479_param_consumed_then_break() `test {
+  for x in t0479_gen_consume("hi".to_string()) {
+    break;
+  }
+}
+
+// --- T0479 coverage: failable generator with owned param ---
+
+type T0479Err is error {
+  string detail;
+}
+
+t0479_failable_owned!(~string s) stream[int] {
+  yield 1;
+  yield 2;
+}
+
+t0479_failable_raise!(~string s) stream[int] {
+  yield 1;
+  raise T0479Err(message: "boom", detail: "mid");
+}
+
+t0479_collect_failable_owned!() int {
+  int total = 0;
+  for x in t0479_failable_owned("a".to_string())?^ {
+    total = total + x;
+  }
+  return total;
+}
+
+t0479_break_failable_owned!() int {
+  for x in t0479_failable_owned("b".to_string())?^ {
+    return 1;
+  }
+  return 0;
+}
+
+t0479_run_failable_raise!() int {
+  int total = 0;
+  for x in t0479_failable_raise("c".to_string())?^ {
+    total = total + x;
+  }
+  return total;
+}
+
+test_t0479_failable_owned_break() `test {
+  int n = t0479_break_failable_owned()?!;
+  assert(n == 1, "break path should return 1");
+}
+
+test_t0479_failable_owned_run() `test {
+  int sum = t0479_collect_failable_owned()?!;
+  assert(sum == 3, "failable owned generator should yield 1+2");
+}
+
+test_t0479_failable_raise_propagate() `test {
+  bool caught = false;
+  t0479_run_failable_raise()? e {
+    caught = true;
+  };
+  assert(caught, "mid-stream raise should propagate");
+}
+
+// --- T0479 coverage: user type with drop() as `~T` param ---
+
+type T0479Box {
+  string s;
+  int x;
+  drop(~this) {
+    // Explicit drop hook; the `string` field is dropped automatically.
+  }
+}
+
+t0479_gen_user_type(~T0479Box b) stream[int] {
+  yield 1;
+}
+
+test_t0479_user_type_break() `test {
+  for x in t0479_gen_user_type(T0479Box(s: "u".to_string(), x: 7)) {
+    break;
+  }
+}
+
+test_t0479_user_type_run() `test {
+  for x in t0479_gen_user_type(T0479Box(s: "u".to_string(), x: 7)) {
+  }
+}
+
+// --- T0479 coverage: `~this` generator method on type with droppable field ---
+
+type T0479Holder {
+  string s;
+  drain(~this) stream[int] {
+    yield 1;
+  }
+}
+
+test_t0479_self_method_break() `test {
+  T0479Holder h = T0479Holder(s: "h".to_string());
+  for x in h.drain() {
+    break;
+  }
+}
+
+test_t0479_self_method_run() `test {
+  T0479Holder h = T0479Holder(s: "h".to_string());
+  for x in h.drain() {
+  }
+}
+
+// --- T0479 coverage: multi-yield with break after first yield ---
+
+t0479_gen_multi_yield(~string s) stream[int] {
+  yield 10;
+  yield 20;
+  yield 30;
+}
+
+test_t0479_multi_yield_break_after_first() `test {
+  int seen = 0;
+  for x in t0479_gen_multi_yield("m".to_string()) {
+    seen = seen + 1;
+    if seen == 2 {
+      break;
+    }
+  }
+  assert(seen == 2, "should iterate twice before break");
+}
+
 main() {
 }

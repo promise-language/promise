@@ -15566,6 +15566,86 @@ func TestFailableGeneratorYieldDelegateUnwrap(t *testing.T) {
 	assertContains(t, ir, "gen.factory.ok")
 }
 
+// T0479: Generator coroutine `~string` param must be dropped at coroutine end.
+// Mirrors T0087 (regular function ~ param drop) but inside a generator coroutine,
+// where the drop must happen at cleanupBlk (the universal destruction sink for
+// natural completion, return, and mid-flight destroy).
+func TestT0479GeneratorOwnedStringParamDrop(t *testing.T) {
+	ir := generateIR(t, `
+		gen(~string s) stream[int] {
+			yield 1;
+		}
+		main() {
+			for x in gen("hi".to_string()) {
+				break;
+			}
+		}
+	`)
+	// Drop flag alloca for the param + conditional drop in the cleanup block.
+	assertContains(t, ir, "%s.dropflag = alloca i1")
+	assertContains(t, ir, "call void @promise_string_drop(")
+	// Drop must happen in the cleanup block (the universal destroy sink), not
+	// in the body or final.suspend.
+	assertContains(t, ir, "strdrop.call")
+}
+
+// T0479: Plain tuple-by-value param with droppable fields must be dropped.
+// Mirrors T0406 (regular function tuple-by-value drop) inside a generator.
+func TestT0479GeneratorPlainTupleParamDrop(t *testing.T) {
+	ir := generateIR(t, `
+		gen((string, int) t) stream[int] {
+			yield 1;
+		}
+		main() {
+			for x in gen(("hi".to_string(), 1)) {
+				break;
+			}
+		}
+	`)
+	// Tuple-by-value drop walks fields; the string field's drop should fire.
+	assertContains(t, ir, "%t.dropflag = alloca i1")
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
+// T0479: Variadic generator param (vector storage) must be dropped at coroutine end.
+// Mirrors B0191 (regular function variadic drop) inside a generator.
+func TestT0479GeneratorVariadicParamDrop(t *testing.T) {
+	ir := generateIR(t, `
+		gen(...string xs) stream[int] {
+			yield 1;
+		}
+		main() {
+			for x in gen("a".to_string(), "b".to_string()) {
+				break;
+			}
+		}
+	`)
+	assertContains(t, ir, "%xs.dropflag = alloca i1")
+	// Variadic vector storage drops via Vector.drop.
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
+// T0479: Non-droppable generator params must NOT trigger any drop machinery.
+// Verifies maybeRegisterDrop's early-return paths for `~int` (RefMut copy type)
+// and plain `int` parameters keep paramDrops empty.
+func TestT0479GeneratorNonDroppableParamSkipped(t *testing.T) {
+	ir := generateIR(t, `
+		gen(~int n, int m) stream[int] {
+			yield n + m;
+		}
+		main() {
+			for x in gen(1, 2) {
+				break;
+			}
+		}
+	`)
+	// The generator coroutine should exist but not register any drop flag for
+	// int params.
+	assertContains(t, ir, ".generator.")
+	assertNotContains(t, ir, "%n.dropflag")
+	assertNotContains(t, ir, "%m.dropflag")
+}
+
 func TestMultiParamGenericType(t *testing.T) {
 	ir := generateIR(t, `
 		type Pair[A, B] {

@@ -199,6 +199,55 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 		paramIdx++
 	}
 
+	// T0479: Register drop bindings for params that own heap data so they are
+	// freed at coroutine end. Mirrors T0087/B0191/T0406 from defineFunc/defineMethodFunc.
+	// We harvest the new bindings out of c.scopeBindings into a separate paramDrops
+	// slice and emit them at cleanupBlk start (the universal destroy sink). Keeping
+	// them out of c.scopeBindings prevents `return` mid-body from double-dropping
+	// via emitScopeCleanup(0), since the existing emit*DropCall helpers don't clear
+	// the drop flag after firing. The c.dropBindings map stays populated so
+	// clearDropFlag still works for moves inside the body.
+	prevBlock := c.block
+	prevEntry := c.entryBlock
+	c.block = startBlk
+	c.entryBlock = startBlk
+
+	var paramDrops []scopeBinding
+	for _, p := range sig.Params() {
+		if p.Name() == "" || p.Name() == "_" {
+			continue
+		}
+		alloca := c.locals[p.Name()]
+		if alloca == nil {
+			continue
+		}
+		paramType := p.Type()
+		if c.typeSubst != nil {
+			paramType = types.Substitute(paramType, c.typeSubst)
+		}
+		before := len(c.scopeBindings)
+		switch {
+		case p.Ref() == types.RefMut:
+			// T0087-equivalent: ~ ownership transfer.
+			c.maybeRegisterDrop(p.Name(), alloca, paramType)
+		case p.IsVariadic():
+			// B0191-equivalent: variadic vector storage.
+			c.maybeRegisterDrop(p.Name(), alloca, paramType)
+		default:
+			if _, isTuple := paramType.(*types.Tuple); isTuple {
+				// T0406-equivalent: plain tuple-by-value with droppable fields.
+				c.maybeRegisterDrop(p.Name(), alloca, paramType)
+			}
+		}
+		if len(c.scopeBindings) > before {
+			paramDrops = append(paramDrops, c.scopeBindings[before:]...)
+			c.scopeBindings = c.scopeBindings[:before]
+		}
+	}
+
+	c.block = prevBlock
+	c.entryBlock = prevEntry
+
 	cleanupBlk := coroFn.NewBlock("cleanup")
 	doneBlk := coroFn.NewBlock("coro.done")
 	finalSuspBlk := coroFn.NewBlock("final.suspend")
@@ -234,11 +283,24 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 		c.block.NewBr(finalSuspBlk)
 	}
 
-	// 5. Cleanup: free coroutine memory (destroy path)
-	coroMem := cleanupBlk.NewCall(c.coroFree, coroId, hdl)
-	needFree := cleanupBlk.NewICmp(enum.IPredNE, coroMem, constant.NewNull(irtypes.I8Ptr))
+	// 5. Cleanup: drop owned params, then free coroutine memory (destroy path).
+	// T0479: cleanupBlk is the universal destruction sink — reached on natural
+	// completion (body fall-through → finalSuspBlk → consumer destroys → tag=1),
+	// `return` mid-body (body locals dropped via emitScopeCleanup, branches to
+	// finalSuspBlk → destroy → tag=1), and mid-flight destroy (yield's
+	// coro.suspend tag=1 → cleanupBlk directly). Emitting param drops here fires
+	// them exactly once per coroutine instance.
+	c.block = cleanupBlk
+	if len(paramDrops) > 0 {
+		savedScope := c.scopeBindings
+		c.scopeBindings = paramDrops
+		c.emitScopeCleanup(0, false)
+		c.scopeBindings = savedScope
+	}
+	coroMem := c.block.NewCall(c.coroFree, coroId, hdl)
+	needFree := c.block.NewICmp(enum.IPredNE, coroMem, constant.NewNull(irtypes.I8Ptr))
 	freeBlk := coroFn.NewBlock("coro.free")
-	cleanupBlk.NewCondBr(needFree, freeBlk, doneBlk)
+	c.block.NewCondBr(needFree, freeBlk, doneBlk)
 
 	freeBlk.NewCall(c.palFree, coroMem)
 	freeBlk.NewBr(doneBlk)

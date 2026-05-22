@@ -4720,6 +4720,119 @@ func TestT0438_MutBorrowToNonCopyOwnedRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot assign string& to variable of type string")
 }
 
+// === T0401: assignment to `MutexGuard.borrow` setter from a borrow getter ===
+//
+// `guard.borrow = guard.borrow` (or any `g.borrow = src.borrow` where the
+// underlying T is non-Copy) is a UAF: the setter does drop-then-store on the
+// same slot, and the source's inner pointer aliases the dest's, so the drop
+// frees what the store re-installs. T0379's codegen-level dropflag-clear
+// only protects local IdentExpr LHS; member/index targets have no per-slot
+// dropflag. T0401 narrows the T0380/T0381 skip to require IdentExpr LHS, so
+// member/index targets fall through to `tryMoveConsume` and are rejected
+// with the "cannot move out of '.borrow' getter" diagnostic.
+
+// T0401: the original repro from the bug — self-assignment via the setter.
+func TestT0401_AssignSetterFromBorrowSelf(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			m := Mutex[string]("hi" + "");
+			use guard := m.lock();
+			guard.borrow = guard.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move out of '.borrow' getter")
+}
+
+// T0401: cross-mutex case — also UAF since the source mutex still owns its
+// inner string and would double-free at end of scope.
+func TestT0401_AssignSetterFromOtherBorrow(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			m1 := Mutex[string]("a" + "");
+			m2 := Mutex[string]("b" + "");
+			use g1 := m1.lock();
+			use g2 := m2.lock();
+			g1.borrow = g2.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move out of '.borrow' getter")
+}
+
+// T0401: field-typed LHS — sema's T0438 non-Copy decay rejection fires
+// first since the field's static type is `T`, not `T&`. Pinned here so
+// future sema changes can't silently regress to runtime UAF.
+func TestT0401_AssignFieldFromBorrow(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Holder { string s; }
+		test() {
+			h := Holder("init" + "");
+			a := Arc[string]("hello" + "");
+			h.s = a.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign string& to string")
+}
+
+// T0401: vector index LHS — sema rejects the implicit decay at the setter
+// param boundary (`[]$set` takes `~T`).
+func TestT0401_AssignVectorIndexFromBorrow(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			v := string[]();
+			v.push("init" + "");
+			a := Arc[string]("hello" + "");
+			v[0] = a.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign string& to")
+}
+
+// T0401: `.clone()` on the borrow yields an owned independent copy — the
+// supported recovery path. No rejection.
+func TestT0401_AssignSetterFromBorrowCloneOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			m1 := Mutex[string]("a" + "");
+			m2 := Mutex[string]("b" + "");
+			use g1 := m1.lock();
+			use g2 := m2.lock();
+			g1.borrow = g2.borrow.clone();
+		}
+	`)
+}
+
+// T0401: Copy inner type (`int`) — `isBorrowedExpr` returns false so
+// `rhsIsBorrowGetter` stays false for both the old and new code paths.
+// No spurious rejection on Copy types.
+func TestT0401_AssignSetterCopyInnerOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			m1 := Mutex[int](1);
+			m2 := Mutex[int](2);
+			use g1 := m1.lock();
+			use g2 := m2.lock();
+			g1.borrow = g2.borrow;
+		}
+	`)
+}
+
+// T0401: re-assignment to a typed `T&` local (`string& b = a1.borrow; b = a2.borrow;`)
+// is the preserved `lhsIsIdent && rhsIsBorrowGetter` path — the skip is sound
+// here because T0379's codegen-level dropflag-clear protects local IdentExpr
+// LHS. Pins the preserved branch so a future regression that broadens the
+// narrow (or always runs tryMoveConsume) gets caught — existing T0381 var-decl
+// tests don't exercise the OpAssign + IdentExpr LHS shape.
+func TestT0401_TypedRefLocalReassignFromBorrowOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			a1 := Arc[string]("a" + "");
+			a2 := Arc[string]("b" + "");
+			string& b = a1.borrow;
+			b = a2.borrow;
+		}
+	`)
+}
+
 // === T0411: `this.field` move from droppable owner ===
 //
 // Before T0411, `this.field` slipped past the B0341 field-move check because

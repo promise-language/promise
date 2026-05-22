@@ -75,6 +75,13 @@ test_borrow_set_compound_assign() `test {
 // tryMoveConsume in checkAssignStmt; the supported alternatives are `~string`
 // (consume the param) or `.clone()` (preserve the caller's copy).
 
+// T0401: similarly, `g.borrow = src.borrow` (assigning a `T&` getter result
+// into the setter slot) is rejected. The setter does drop-then-store on the
+// same slot, and self-aliasing or cross-mutex aliasing produces a UAF since
+// the source's parent (Arc/Mutex) still owns and will drop the inner value.
+// The supported alternative is `g.borrow = src.borrow.clone()` to install
+// an independent owned copy.
+
 forward_move(~Mutex[string] m, ~string s) {
   use g := m.lock();
   g.borrow = s;
@@ -96,4 +103,29 @@ test_borrow_set_clone_borrow() `test {
   m := Mutex[string]("init");
   string heap_str = "cloned " + "value";
   forward_clone(m, heap_str);
+}
+
+// T0401: the supported recovery path — `g.borrow = src.borrow.clone()` where
+// the source is another Arc/Mutex. The clone produces an independent owned
+// string, so the setter's drop-then-store does not alias the source's inner
+// pointer. Pins the runtime side of the rejection diagnostic in T0401.
+test_borrow_set_from_arc_borrow_clone() `test {
+  a := Arc[string]("source" + "");
+  m := Mutex[string]("dest" + "");
+  use guard := m.lock();
+  guard.borrow = a.borrow.clone();
+  assert(guard.borrow == "source", "should be source");
+  assert(a.borrow == "source", "arc still owns original");
+}
+
+// T0401: cross-Mutex recovery — `g1.borrow = g2.borrow.clone()`. Both mutexes
+// retain independent inner strings; no aliasing, no UAF.
+test_borrow_set_from_mutex_borrow_clone() `test {
+  m1 := Mutex[string]("a" + "");
+  m2 := Mutex[string]("b" + "");
+  use g1 := m1.lock();
+  use g2 := m2.lock();
+  g1.borrow = g2.borrow.clone();
+  assert(g1.borrow == "b", "g1 should hold cloned value");
+  assert(g2.borrow == "b", "g2 still owns original");
 }

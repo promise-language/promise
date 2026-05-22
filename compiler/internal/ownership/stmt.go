@@ -237,7 +237,16 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	// site). Skip tryMoveConsume's inline-borrow rejection here — and below,
 	// force the LHS state to Borrowed so downstream consume sites still
 	// reject.
-	rhsIsBorrowGetter := s.Op == ast.OpAssign && c.isBorrowedExpr(s.Value)
+	//
+	// T0401: this skip is only sound when LHS is a local IdentExpr — that's
+	// the shape T0379's codegen-level dropflag-clear protects. For
+	// MemberExpr/IndexExpr (e.g., `guard.borrow = guard.borrow` via the
+	// MutexGuard.borrow setter), there is no per-slot dropflag: codegen does
+	// drop-then-store on the same slot, and self-aliasing produces a UAF.
+	// Falling through to tryMoveConsume rejects with the existing
+	// "cannot move out of '.borrow' getter" diagnostic (T0380).
+	_, lhsIsIdent := s.Target.(*ast.IdentExpr)
+	rhsIsBorrowGetter := s.Op == ast.OpAssign && lhsIsIdent && c.isBorrowedExpr(s.Value)
 	if !rhsIsBorrowGetter {
 		// T0351: assignment consumes the RHS — borrowed params cause a double-free
 		// because the caller still drops the original. tryMoveConsume rejects them

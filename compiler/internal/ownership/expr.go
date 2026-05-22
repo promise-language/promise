@@ -788,17 +788,38 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	// Check lambda body in isolation
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
+	savedSig := c.curSig
+	savedParams := c.params
+	savedReturnOrigins := c.returnOrigins
 
-	// Captured variables are fresh owned values inside the lambda
+	// T0426: use the lambda's own signature for return checks. Without this,
+	// `checkReturnRefSafety` reads the outer fn's c.curSig, producing both
+	// false negatives (outer void → skips T0402) and false positives (outer
+	// owned T → rejects legit `return &capture` from a lambda returning T&).
+	// Sema records the lambda's signature in info.Types[e].
+	lambdaSig, _ := c.info.Types[e].(*types.Signature)
+	c.curSig = lambdaSig
+	c.params = make(map[string]bool)
+	c.returnOrigins = nil
+
+	// Captured variables are fresh owned values inside the lambda. Treat
+	// them as parameter-like for return-ref checks so `return &capture`
+	// from a `move ||` lambda is allowed (the capture lives in the env,
+	// whose lifetime is tied to the closure value).
 	if captures := c.info.LambdaCaptures[e]; len(captures) > 0 {
 		for _, cv := range captures {
-			c.state[cv.Obj.Name()] = Owned
+			name := cv.Obj.Name()
+			c.state[name] = Owned
+			if name != "_" && name != "this" {
+				c.params[name] = true
+			}
 		}
 	}
 
 	for _, p := range e.Params {
 		if p.Name != "_" {
 			c.state[p.Name] = Owned
+			c.params[p.Name] = true
 		}
 	}
 	if e.Body != nil {
@@ -807,6 +828,11 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	if e.ExprBody != nil {
 		c.checkExpr(e.ExprBody)
 	}
+	c.checkReturnAmbiguity()
+
 	c.state = savedState
 	c.borrows = savedBorrows
+	c.curSig = savedSig
+	c.params = savedParams
+	c.returnOrigins = savedReturnOrigins
 }

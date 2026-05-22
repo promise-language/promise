@@ -62,3 +62,33 @@ lambda_captures_arc_drop_only() `test {
   };
   f();
 }
+
+// T0426: lambda with explicit `string&` return type, borrowing from a
+// move-captured Arc[string]. Before T0426, the ownership pass used the
+// outer fn's signature inside lambda bodies, falsely rejecting this legit
+// pattern. After the fix the lambda's own signature is used and captures
+// are treated as parameter-like for return-ref checks.
+lambda_returns_string_ref() `test {
+  a := Arc[string]("hello");
+  f := move || -> string & {
+    return a.borrow;
+  };
+  s := f();
+  assert(s == "hello", "lambda string ref return");
+}
+
+// T0426: nested lambdas — outer lambda returns string& by delegating to an
+// inner identity lambda that takes a string& param. Each lambda has its own
+// signature; the save/restore in checkLambdaExpr must work through nesting
+// without polluting either level's params/curSig/returnOrigins state.
+lambda_nested_returns_string_ref() `test {
+  a := Arc[string]("nested");
+  outer := move || -> string & {
+    inner := |string &s| -> string & {
+      return s;
+    };
+    return inner(a.borrow);
+  };
+  result := outer();
+  assert(result == "nested", "nested lambda ref return");
+}

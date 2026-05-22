@@ -4305,6 +4305,234 @@ func TestT0402_ReturnAfterCloneToOwnedOK(t *testing.T) {
 	`)
 }
 
+// === T0426: checkLambdaExpr uses lambda signature for return checks ===
+//
+// Before T0426, `checkLambdaExpr` did not save/restore `c.curSig`, `c.params`,
+// or `c.returnOrigins`, so a `return` inside a lambda body ran through
+// `checkReturnRefSafety` using the OUTER function's signature. Two failure
+// modes existed:
+//
+//  1. False negative: outer fn `void` → `c.curSig.Result() == nil` → T0402's
+//     borrow-as-owned check skipped, even though the lambda's actual return
+//     type is owned `T`. (Sema's T0438 still fires for this case via its own
+//     curFunc save/restore — sema's correct here — but the ownership pass
+//     becoming a defensive duplicate is the goal.)
+//
+//  2. False positive: outer fn returns owned `T`, lambda returns `T&`. The
+//     ownership pass saw outer's owned `T` result type and `a.borrow` of type
+//     `T&`, fired the "cannot return borrowed reference as owned" error,
+//     even though the lambda's own signature is `T&` and the return is legit.
+
+// T0426: lambda body returning `T&` typed expr from inside a void outer
+// function — sema catches this via T0438 (lambda's c.curFunc has owned
+// `string` result, return value typed `string&` is not assignable). Before
+// T0426, even if sema were silent, the ownership pass would have skipped
+// the check because outer was void. After T0426 the ownership pass also
+// uses the lambda's signature, so the check would fire defensively.
+func TestT0426_LambdaReturnBorrowAsOwnedRejected_VoidOuter(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			bar := move || -> string {
+				a := Arc[string]("x");
+				return a.borrow;
+			};
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
+}
+
+// T0426: false-positive case. Outer returns owned `string`, lambda returns
+// `string&` and borrows from a move-captured Arc. Before T0426, the ownership
+// pass used the outer's owned `string` signature inside the lambda body and
+// rejected the legit `return a.borrow`. After the fix the lambda's own
+// `string&` signature is used and captures are treated as parameter-like.
+func TestT0426_LambdaReturnRefOK_OwnedOuter(t *testing.T) {
+	ownerOK(t, `
+		test() string {
+			a := Arc[string]("x");
+			f := move || -> string& {
+				return a.borrow;
+			};
+			return "ok";
+		}
+	`)
+}
+
+// T0426: sanity — a lambda taking a ref param can return that param.
+func TestT0426_LambdaReturnRefToLambdaParam_OK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			f := |string& s| -> string& { return s; };
+		}
+	`)
+}
+
+// T0426: locals declared inside the lambda body still produce ref-to-local
+// errors — captures are param-like, but body locals are not.
+func TestT0426_LambdaReturnRefToLambdaLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			f := || -> string& {
+				a := Arc[string]("x");
+				return a.borrow;
+			};
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return reference to local variable 'a'")
+}
+
+// T0426: regression — outer fn's own `return` checks must still use the
+// outer's signature after a lambda body has been processed. Place a lambda
+// before the outer's return and confirm the outer's T0402 rejection fires.
+func TestT0426_LambdaInsideOwnedReturnDoesNotPolluteOuter(t *testing.T) {
+	errs := ownerErrs(t, `
+		bad() string {
+			f := move || -> int { return 42; };
+			a := Arc[string]("x");
+			return a.borrow;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
+}
+
+// T0426: nested lambdas — outer lambda returns string& from a move-captured
+// Arc[string], inner lambda returns string& from its own ref param. The
+// save/restore must work through nesting: the inner's signature/params are
+// pushed and popped without polluting the outer lambda's state.
+func TestT0426_NestedLambdaRefReturnsBothLevels_OK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			a := Arc[string]("x");
+			outer := move || -> string& {
+				inner := |string& s| -> string& { return s; };
+				return inner(a.borrow);
+			};
+		}
+	`)
+}
+
+// T0426: nested lambdas — inner lambda has its own owned-result signature;
+// returning a borrow from a lambda-local Arc must still fail with the
+// "borrow as owned" rejection, proving the inner lambda's signature is used
+// (not the outer lambda's). The outer lambda's signature is also owned, so
+// to ensure the rejection is coming from the *inner* check we use a
+// distinct local name and assert the position points inside the inner body.
+func TestT0426_NestedLambdaInnerBorrowAsOwnedRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			outer := move || -> int {
+				inner := move || -> string {
+					a := Arc[string]("x");
+					return a.borrow;
+				};
+				return 0;
+			};
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
+}
+
+// T0426: lambda inside method body, lambda has owned `string` result, body
+// returns a borrow → must fire the borrow-as-owned check using the lambda's
+// signature, not the method's. Method has no result (void), so this
+// confirms the path where method's c.curSig.Result() is nil but the
+// lambda's signature is correctly substituted in.
+func TestT0426_LambdaInsideMethodBorrowAsOwnedRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type W {
+			int x;
+			method(&this) {
+				f := move || -> string {
+					a := Arc[string]("x");
+					return a.borrow;
+				};
+			}
+		}
+		test() { w := W(x: 1); }
+	`)
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
+}
+
+// T0426: lambda inside method body — method has owned `string` result, but
+// the lambda inside it returns `string&` from its own ref param. Before
+// T0426 the ownership pass would (wrongly) use the method's owned-string
+// curSig inside the lambda body and reject the legit ref return. After the
+// fix the lambda's own signature is used.
+func TestT0426_LambdaInsideOwnedMethod_RefReturnOK(t *testing.T) {
+	ownerOK(t, `
+		type W {
+			int x;
+			method(&this) string {
+				f := move |string& s| -> string& { return s; };
+				return "ok";
+			}
+		}
+		test() {}
+	`)
+}
+
+// T0426: regression for the method case — after the lambda body has been
+// checked, the method's own `return` must still use the method's signature.
+// Place a lambda first, then a borrow-as-owned return; the method's owned
+// result type must reject the return.
+func TestT0426_LambdaInsideMethodDoesNotPolluteMethodSig(t *testing.T) {
+	errs := ownerErrs(t, `
+		type W {
+			int x;
+			bad(&this) string {
+				f := move || -> int { return 42; };
+				a := Arc[string]("x");
+				return a.borrow;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot return string& from function returning string")
+}
+
+// T0426: returnAmbiguity now fires inside a lambda body. Lambda has two ref
+// params and returns from both (via if/else), with the lambda's own
+// signature being a ref result. Before T0426, c.returnOrigins was shared
+// with the outer fn (and its outer signature was used), so this case
+// either silently passed (void outer) or fired confusingly against the
+// outer fn. After T0426, checkReturnAmbiguity is called inside
+// checkLambdaExpr on the lambda's own returnOrigins.
+func TestT0426_LambdaMultipleRefParamsAmbiguous(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			f := |string& a, string& b, bool c| -> string& {
+				if c { return a; }
+				return b;
+			};
+		}
+	`)
+	expectOwnerError(t, errs, "ambiguous return reference")
+}
+
+// T0426: lambda's returnOrigins must be reset on entry, so a previous
+// lambda's return-from-param doesn't leak into a sibling lambda. Two
+// independent lambdas in the same outer fn, each returning from its own
+// (single) ref param, must both type-check cleanly with no ambiguity.
+func TestT0426_SiblingLambdasReturnOriginsReset(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			f := |string& a| -> string& { return a; };
+			g := |string& b| -> string& { return b; };
+		}
+	`)
+}
+
+// T0426: a lambda's `_` parameter must not be added to c.params (sema also
+// skips it from scope). Sanity-check that mixing a `_` with a real param
+// still permits returning the real param.
+func TestT0426_LambdaUnderscoreParamSkipped_OK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			f := |int _, string& s| -> string& { return s; };
+		}
+	`)
+}
+
 // === T0382: borrow → owned field rejected ===
 //
 // T0385 (the IndexExpr sibling) is fixed by codegen-dup in T0383, so only

@@ -1,0 +1,315 @@
+// T0418: wrapOptional panics for generic call returning T?? of heap user type.
+// Root cause: coerceCallArgs only applied c.typeSubst (the outer mono context),
+// not the call's own type-arg subst. For an explicit-instantiation generic call
+// like _generic_passthrough[_Box](a), the param T? was never substituted, so
+// resolveType(T?) produced the wrong LLVM struct shape and wrapOptional panicked.
+//
+// Fix: thread a per-call type-arg subst map (callSubst) into coerceCallArgs so
+// generic params resolve correctly at the call site.
+//
+// All tests must run leak-free.
+type _BoxDrop {
+  int n;
+  drop(~this) {
+  }
+}
+
+_generic_passthrough[T](T? a) T? {
+  return a;
+}
+_generic_double[T](T? a) T?? {
+  return a;
+}
+_generic_wrap[T](T a) T? {
+  return a;
+}
+
+// --- Single Optional passthrough ---
+
+single_optional_passthrough_box() `test {
+  _BoxDrop? a = _BoxDrop(n: 9);
+  _BoxDrop? r = _generic_passthrough[_BoxDrop](a);
+  if y := r {
+    assert(y.n == 9, "value preserved");
+  }
+}
+
+single_optional_passthrough_int() `test {
+  int? a = 42;
+  int? r = _generic_passthrough[int](a);
+  if y := r {
+    assert(y == 42, "int value preserved");
+  }
+}
+
+single_optional_passthrough_string() `test {
+  string? a = "hello";
+  string? r = _generic_passthrough[string](a);
+  if y := r {
+    assert(y == "hello", "string value preserved");
+  }
+}
+
+single_optional_passthrough_none() `test {
+  int? a = none;
+  int? r = _generic_passthrough[int](a);
+  if x := r {
+    assert(false, "should not be present");
+  } else {
+    assert(true, "still none");
+  }
+}
+
+// --- T → T? wrap inside generic ---
+
+t_to_topt_wrap_box() `test {
+  _BoxDrop a = _BoxDrop(n: 5);
+  _BoxDrop? r = _generic_wrap[_BoxDrop](a);
+  if y := r {
+    assert(y.n == 5, "wrapped value");
+  }
+}
+
+t_to_topt_wrap_int() `test {
+  int? r = _generic_wrap[int](7);
+  if y := r {
+    assert(y == 7, "wrapped int");
+  }
+}
+
+t_to_topt_wrap_string() `test {
+  string? r = _generic_wrap[string]("wrapped");
+  if y := r {
+    assert(y == "wrapped", "wrapped string");
+  }
+}
+
+// --- T? → T?? double-wrap (the original T0418 panic) ---
+
+topt_to_tdoubleopt_box() `test {
+  _BoxDrop? a = _BoxDrop(n: 9);
+  _BoxDrop?? r = _generic_double[_BoxDrop](a);
+  if x := r {
+    if y := x {
+      assert(y.n == 9, "value preserved through double wrap");
+    }
+  }
+}
+
+topt_to_tdoubleopt_int() `test {
+  int? a = 42;
+  int?? r = _generic_double[int](a);
+  if x := r {
+    if y := x {
+      assert(y == 42, "int double-wrapped");
+    }
+  }
+}
+
+topt_to_tdoubleopt_string() `test {
+  string? a = "hello";
+  string?? r = _generic_double[string](a);
+  if x := r {
+    if y := x {
+      assert(y == "hello", "string double-wrapped");
+    }
+  }
+}
+
+topt_to_tdoubleopt_none() `test {
+  _BoxDrop? a = none;
+  _BoxDrop?? r = _generic_double[_BoxDrop](a);
+  if x := r {
+    if y := x {
+      assert(false, "should not have inner value");
+    } else {
+      assert(true, "outer present, inner none");
+    }
+  } else {
+    assert(false, "outer should be present (wrapped from none)");
+  }
+}
+
+// --- Outer generic calling inner generic (transitive subst) ---
+
+_wrap_outer[U](U? x) U? {
+  return _generic_passthrough[U](x);
+}
+
+generic_call_inside_generic_box() `test {
+  _BoxDrop? a = _BoxDrop(n: 4);
+  _BoxDrop? r = _wrap_outer[_BoxDrop](a);
+  if y := r {
+    assert(y.n == 4, "transitive generic call");
+  }
+}
+
+generic_call_inside_generic_int() `test {
+  int? a = 3;
+  int? r = _wrap_outer[int](a);
+  if y := r {
+    assert(y == 3, "transitive int");
+  }
+}
+
+// --- Generic method on generic owner with optional arg ---
+
+type Holder[T] {
+  T base;
+
+  echo[U](U? x) U? {
+    return x;
+  }
+}
+
+generic_method_optional_arg_box() `test {
+  Holder[int] h = Holder[int](base: 0);
+  _BoxDrop? a = _BoxDrop(n: 8);
+  _BoxDrop? r = h.echo[_BoxDrop](a);
+  if y := r {
+    assert(y.n == 8, "owner-subst + method-subst combined");
+  }
+}
+
+generic_method_optional_arg_double() `test {
+  Holder[int] h = Holder[int](base: 0);
+  string? a = "hi";
+  string? r = h.echo[string](a);
+  if y := r {
+    assert(y == "hi", "owner-subst + method-subst with string");
+  }
+}
+
+// --- Inherited virtual method on generic type with Optional T param ---
+// T0418: genVirtualMethodCall must include mergeParentSubst so methods
+// inherited from a generic parent see parent's TypeParams resolved.
+
+type _Base[T] {
+  echo(T? x) T? {
+    return x;
+  }
+}
+
+type _Mid[T] is _Base[T] {
+  T mid_val;
+}
+
+type _Leaf[T] is _Mid[T] {
+  T leaf_val;
+}
+
+invoke_via_mid[T](_Mid[T] m, T? a) T? {
+  return m.echo(a);
+}
+
+inherited_virtual_optional_arg() `test {
+  _Leaf[_BoxDrop] l = _Leaf[_BoxDrop](mid_val: _BoxDrop(n: 1), leaf_val: _BoxDrop(n: 2));
+  _BoxDrop? a = _BoxDrop(n: 7);
+  _BoxDrop? r = invoke_via_mid[_BoxDrop](l, a);
+  if y := r {
+    assert(y.n == 7, "virtual dispatch through inherited method");
+  }
+}
+
+// --- Triple Optional T?? → T??? (missing from initial test set) ---
+// Exercises wrapOptional at depth 3, ensuring the recursive resolveType walk
+// substitutes TypeParam at every nesting level.
+
+_generic_triple[T](T?? a) T??? {
+  return a;
+}
+
+triple_optional_box() `test {
+  _BoxDrop? inner = _BoxDrop(n: 11);
+  _BoxDrop?? a = inner;
+  _BoxDrop??? r = _generic_triple[_BoxDrop](a);
+  if x := r {
+    if y := x {
+      if z := y {
+        assert(z.n == 11, "value preserved through triple wrap");
+      }
+    }
+  }
+}
+
+triple_optional_int() `test {
+  int? inner = 99;
+  int?? a = inner;
+  int??? r = _generic_triple[int](a);
+  if x := r {
+    if y := x {
+      if z := y {
+        assert(z == 99, "int preserved through triple wrap");
+      }
+    }
+  }
+}
+
+// --- Inferred type args (no explicit [T] at the call site) ---
+// T0418 also threads callSubst through genInferredGenericCall; verify
+// the same Optional wrap behavior when sema infers the type arg.
+
+inferred_generic_optional_box() `test {
+  _BoxDrop? a = _BoxDrop(n: 13);
+  _BoxDrop? r = _generic_passthrough(a);
+  if y := r {
+    assert(y.n == 13, "inferred type-arg path");
+  }
+}
+
+inferred_generic_optional_int() `test {
+  int? a = 17;
+  int? r = _generic_passthrough(a);
+  if y := r {
+    assert(y == 17, "inferred type-arg int");
+  }
+}
+
+inferred_generic_double_box() `test {
+  _BoxDrop? a = _BoxDrop(n: 21);
+  _BoxDrop?? r = _generic_double(a);
+  if x := r {
+    if y := x {
+      assert(y.n == 21, "inferred T? → T?? wrap");
+    }
+  }
+}
+
+// --- Generic enum method with T? param (genEnumMethodCall path) ---
+// T0418 also threads enumSubst through coerceCallArgs in genEnumMethodCall.
+
+enum _MaybeBox[T] {
+  Empty,
+  Filled(T value),
+
+  echo(T? x) T? {
+    return x;
+  }
+}
+
+generic_enum_method_optional_box() `test {
+  _MaybeBox[_BoxDrop] e = _MaybeBox[_BoxDrop].Empty;
+  _BoxDrop? a = _BoxDrop(n: 23);
+  _BoxDrop? r = e.echo(a);
+  if y := r {
+    assert(y.n == 23, "enum method preserves heap value");
+  }
+}
+
+generic_enum_method_optional_int() `test {
+  _MaybeBox[int] e = _MaybeBox[int].Empty;
+  int? a = 29;
+  int? r = e.echo(a);
+  if y := r {
+    assert(y == 29, "enum method preserves int");
+  }
+}
+
+generic_enum_method_double_optional() `test {
+  _MaybeBox[_BoxDrop] e = _MaybeBox[_BoxDrop].Empty;
+  _BoxDrop? a = _BoxDrop(n: 31);
+  _BoxDrop? r = e.echo(a);
+  if y := r {
+    assert(y.n == 31, "enum echo passthrough");
+  }
+}

@@ -953,8 +953,11 @@ func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toN
 // argument whose type differs from the parameter type.
 // args is the AST argument list (may be nil); used to clear drop flags when
 // wrapping droppable values into optionals (B0358).
+// callSubst (T0418) maps the callee's TypeParams to the call's concrete type
+// args; applied BEFORE c.typeSubst so generic params like T? resolve correctly
+// at the call site even when the outer mono context doesn't cover them.
 // Returns a new slice (or the original if no coercion was needed).
-func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, params []*types.Param, args []*ast.Arg) []value.Value {
+func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, params []*types.Param, args []*ast.Arg, callSubst map[*types.TypeParam]types.Type) []value.Value {
 	n := len(params)
 	if n > len(argVals) {
 		n = len(argVals)
@@ -966,11 +969,17 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 
 		// Optional wrapping: param is T? but arg is not optional
 		paramType := params[i].Type()
+		if callSubst != nil {
+			paramType = types.Substitute(paramType, callSubst)
+		}
 		if c.typeSubst != nil {
 			paramType = types.Substitute(paramType, c.typeSubst)
 		}
 		if _, isOpt := paramType.(*types.Optional); isOpt {
 			argType := argTypes[i]
+			if callSubst != nil && argType != nil {
+				argType = types.Substitute(argType, callSubst)
+			}
 			if c.typeSubst != nil && argType != nil {
 				argType = types.Substitute(argType, c.typeSubst)
 			}

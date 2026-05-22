@@ -1498,7 +1498,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	// Coerce arguments when crossing type boundaries
 	origArgVals := argVals // B0345: save pre-coercion values for alias check
 	if calleeSig != nil {
-		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args)
+		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args, nil)
 	}
 
 	result := c.block.NewCall(fn, argVals...)
@@ -1598,7 +1598,7 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 	// Coerce arguments using the callee's signature from sema
 	origArgVals := argVals // B0345
 	if calleeSig != nil {
-		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args)
+		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args, nil)
 	}
 
 	result := c.block.NewCall(fn, argVals...)
@@ -1697,12 +1697,17 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 	}
 	origArgVals := argVals // T0331: save pre-coercion values for alias check
 
-	// Coerce arguments when crossing type boundaries
+	// Coerce arguments when crossing type boundaries.
+	// T0418: Build a per-call subst map from the explicit type-arg exprs so
+	// generic params like T? are resolved at the call site even when the
+	// outer mono context (c.typeSubst) doesn't cover the callee's TypeParams.
 	var sigParams []*types.Param
 	var calleeSig *types.Signature
+	var callSubst map[*types.TypeParam]types.Type
 	if callee := c.lookupFunc(ident.Name); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
-			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
+			callSubst = c.buildCallTypeArgSubst(sig.TypeParams(), allTypeArgExprs)
+			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args, callSubst)
 			sigParams = sig.Params()
 			calleeSig = sig
 		}
@@ -1716,7 +1721,7 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 
 	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
 	result := c.block.NewCall(fn, argVals...)
-	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals) // T0331
+	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst) // T0331/T0418
 	return result
 }
 
@@ -1768,11 +1773,14 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 	origArgVals := argVals // T0331: save pre-coercion values for alias check
 
 	// Coerce arguments when crossing type boundaries.
+	// T0418: Build a per-call subst map from the inferred type args.
 	var sigParams []*types.Param
 	var calleeSig *types.Signature
+	var callSubst map[*types.TypeParam]types.Type
 	if callee := c.lookupFunc(inferred.FuncName); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
-			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
+			callSubst = c.buildInferredCallSubst(sig.TypeParams(), inferred.TypeArgs)
+			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args, callSubst)
 			sigParams = sig.Params()
 			calleeSig = sig
 		}
@@ -1786,7 +1794,7 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 
 	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
 	result := c.block.NewCall(fn, argVals...)
-	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals) // T0331
+	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst) // T0331/T0418
 	return result
 }
 
@@ -1840,12 +1848,15 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 	}
 	origArgVals := argVals // T0331: save pre-coercion values for alias check
 
-	// Coerce arguments when crossing type boundaries
+	// Coerce arguments when crossing type boundaries.
+	// T0418: Build a per-call subst map from the explicit type-arg exprs.
 	var sigParams []*types.Param
 	var calleeSig *types.Signature
+	var callSubst map[*types.TypeParam]types.Type
 	if callee := c.lookupFunc(funcName); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
-			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args)
+			callSubst = c.buildCallTypeArgSubst(sig.TypeParams(), allTypeArgExprs)
+			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args, callSubst)
 			sigParams = sig.Params()
 			calleeSig = sig
 		}
@@ -1861,7 +1872,7 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 
 	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
 	result := c.block.NewCall(fn, argVals...)
-	c.emitReturnAliasCheck(result, calleeSig, e.Args, origArgVals) // T0331
+	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst) // T0331/T0418
 	return result
 }
 
@@ -1939,12 +1950,17 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	// Generate arguments
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	origArgVals := argVals // B0345: save pre-coercion values
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args)
+	// T0418: Combine owner-type subst (Box[int].T → int + parents) with
+	// method-level subst (transform[string].T → string).
+	ownerSubst := c.buildOwnerTypeArgSubst(targetType)
+	methodSubst := c.buildCallTypeArgSubst(method.Sig().TypeParams(), allTypeArgExprs)
+	combined := mergeSubstMaps(ownerSubst, methodSubst)
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, combined)
 	args = append(args, argVals...)
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheck(result, method.Sig(), e.Args, origArgVals) // B0345
+	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, combined) // B0345/T0418
 	return result
 }
 
@@ -1983,7 +1999,20 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 		}
 		newMethod := parent.LookupMethod("new")
 		if newMethod != nil {
-			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args)
+			// T0418: Build subst for parent's TypeParams from the inheritance
+			// type args (e.g., `type Foo[T] is Bar[T]` → Bar.T → resolved T).
+			var superSubst map[*types.TypeParam]types.Type
+			if parentRef := named.Parents()[0]; len(parentRef.TypeArgs) > 0 && len(parent.TypeParams()) > 0 {
+				resolvedArgs := make([]types.Type, len(parentRef.TypeArgs))
+				for i, ta := range parentRef.TypeArgs {
+					if c.typeSubst != nil {
+						ta = types.Substitute(ta, c.typeSubst)
+					}
+					resolvedArgs[i] = ta
+				}
+				superSubst = types.BuildSubstMap(parent.TypeParams(), resolvedArgs)
+			}
+			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args, superSubst)
 		}
 		args := append([]value.Value{thisPtr}, argVals...)
 		result := c.block.NewCall(fn, args...)
@@ -2164,7 +2193,11 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		// If nobody claims, cleanupHeapTemps frees the temp at statement end.
 
 		if newMethod != nil {
-			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args)
+			// T0418: Resolve T-typed params against the owner type's
+			// concrete args (e.g., Box[int] → T → int) so generic
+			// constructors with T? params don't double-wrap.
+			ownerSubst := c.buildOwnerTypeArgSubst(typ)
+			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args, ownerSubst)
 		}
 		args := append([]value.Value{typedPtr}, argVals...)
 		newResult := c.block.NewCall(fn, args...)
@@ -2547,7 +2580,10 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		}
 		newMethod := named.LookupMethod("new")
 		if newMethod != nil {
-			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args)
+			// T0418: Resolve T-typed params against the owner type's
+			// concrete args for generic value types.
+			ownerSubst := c.buildOwnerTypeArgSubst(typ)
+			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params(), e.Args, ownerSubst)
 		}
 		thisPtr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
 		args := append([]value.Value{thisPtr}, argVals...)
@@ -4014,12 +4050,15 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	origArgVals := argVals // B0345
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args)
+	// T0418: Build owner-type subst (e.g., Box[int].T → int) so generic
+	// methods on a generic instance see TypeParam-typed params resolved.
+	ownerSubst := c.buildOwnerTypeArgSubst(targetType)
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, ownerSubst)
 	args = append(args, argVals...)
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheck(result, method.Sig(), e.Args, origArgVals) // B0345
+	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, ownerSubst) // B0345/T0418
 	return result
 }
 
@@ -4162,12 +4201,20 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	origArgVals := argVals // B0345
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args)
+	// T0418: Build owner-enum subst so generic methods on a generic enum
+	// instance see TypeParam-typed params resolved.
+	var enumSubst map[*types.TypeParam]types.Type
+	if inst, ok := targetType.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Enum); ok && len(origin.TypeParams()) > 0 {
+			enumSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+		}
+	}
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, enumSubst)
 	args = append(args, argVals...)
 
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheck(result, method.Sig(), e.Args, origArgVals) // B0345
+	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, enumSubst) // B0345/T0418
 
 	// Drop temp enum receiver if it was a fresh temporary not tracked by
 	// the enumCtorTemps mechanism. When movedDroppable caused enumCtorTemps
@@ -4301,14 +4348,9 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 		constant.NewInt(irtypes.I32, int64(slotIndex)))
 	fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
 
-	// Substitute type params for generic instances (e.g. Transformer[int])
-	var vtableSubst map[*types.TypeParam]types.Type
-	if inst, ok := targetType.(*types.Instance); ok {
-		origin, _ := inst.Origin().(*types.Named)
-		if origin != nil && len(origin.TypeParams()) > 0 {
-			vtableSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
-		}
-	}
+	// Substitute type params for generic instances (e.g. Transformer[int]).
+	// T0418: include parent-type params so inherited getters resolve correctly.
+	vtableSubst := c.buildOwnerTypeArgSubst(targetType)
 	resolveVtableType := func(t types.Type) irtypes.Type {
 		if vtableSubst != nil {
 			t = types.Substitute(t, vtableSubst)
@@ -4384,13 +4426,10 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	// 4. Build the correct function type and bitcast.
 	// If the static type is a generic instance (e.g. Transformer[int]),
 	// substitute type params so T→int in method signatures.
-	var vtableSubst map[*types.TypeParam]types.Type
-	if inst, ok := targetType.(*types.Instance); ok {
-		origin, _ := inst.Origin().(*types.Named)
-		if origin != nil && len(origin.TypeParams()) > 0 {
-			vtableSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
-		}
-	}
+	// T0418: include parent-type params (via mergeParentSubst inside
+	// buildOwnerTypeArgSubst) so inherited methods using parent's TypeParams
+	// resolve correctly.
+	vtableSubst := c.buildOwnerTypeArgSubst(targetType)
 	resolveVtableType := func(t types.Type) irtypes.Type {
 		if vtableSubst != nil {
 			t = types.Substitute(t, vtableSubst)
@@ -4427,11 +4466,13 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	}
 	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	origArgVals := argVals // B0345
-	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args)
+	// T0418: vtableSubst (with parent subst merged) covers both the static
+	// type's TypeParams and inherited parent-type TypeParams.
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, vtableSubst)
 	args = append(args, argVals...)
 	result := c.block.NewCall(fnTyped, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
-	c.emitReturnAliasCheck(result, method.Sig(), e.Args, origArgVals) // B0345
+	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, vtableSubst) // B0345/T0418
 	return result
 }
 

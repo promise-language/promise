@@ -126,6 +126,84 @@ func monoFuncName(fi *sema.FuncInstance) string {
 	return name + "]"
 }
 
+// buildCallTypeArgSubst (T0418) builds a substitution map from a callee's
+// TypeParams to the call site's concrete type arguments, parsed from AST
+// expressions. Each type-arg expr's resolved type is also passed through
+// c.typeSubst so a generic outer caller's TypeParams resolve too.
+// Returns nil if tparams is empty or the lengths don't match.
+func (c *Compiler) buildCallTypeArgSubst(tparams []*types.TypeParam, typeArgExprs []ast.Expr) map[*types.TypeParam]types.Type {
+	if len(tparams) == 0 || len(tparams) != len(typeArgExprs) {
+		return nil
+	}
+	targs := make([]types.Type, len(typeArgExprs))
+	for i, expr := range typeArgExprs {
+		ta := c.info.Types[expr]
+		if c.typeSubst != nil && ta != nil {
+			ta = types.Substitute(ta, c.typeSubst)
+		}
+		targs[i] = ta
+	}
+	return types.BuildSubstMap(tparams, targs)
+}
+
+// buildInferredCallSubst (T0418) builds a substitution map from a callee's
+// TypeParams to already-resolved concrete type arguments (sema-inferred).
+// Each type arg is also passed through c.typeSubst.
+// Returns nil if tparams is empty or the lengths don't match.
+func (c *Compiler) buildInferredCallSubst(tparams []*types.TypeParam, targs []types.Type) map[*types.TypeParam]types.Type {
+	if len(tparams) == 0 || len(tparams) != len(targs) {
+		return nil
+	}
+	resolved := make([]types.Type, len(targs))
+	for i, ta := range targs {
+		if c.typeSubst != nil && ta != nil {
+			ta = types.Substitute(ta, c.typeSubst)
+		}
+		resolved[i] = ta
+	}
+	return types.BuildSubstMap(tparams, resolved)
+}
+
+// buildOwnerTypeArgSubst (T0418) builds a substitution map for a generic
+// type instance's TypeParams from targetType (typically *types.Instance).
+// Includes mergeParentSubst so inherited generic parents are also covered.
+// Returns nil for non-generic owners.
+func (c *Compiler) buildOwnerTypeArgSubst(targetType types.Type) map[*types.TypeParam]types.Type {
+	inst, ok := targetType.(*types.Instance)
+	if !ok {
+		return nil
+	}
+	origin, ok := inst.Origin().(*types.Named)
+	if !ok || len(origin.TypeParams()) == 0 {
+		return nil
+	}
+	subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+	if subst == nil {
+		return nil
+	}
+	mergeParentSubst(origin, subst)
+	return subst
+}
+
+// mergeSubstMaps (T0418) returns a non-destructive union of two subst maps.
+// Mappings in b take precedence over a. Returns nil if both are nil.
+func mergeSubstMaps(a, b map[*types.TypeParam]types.Type) map[*types.TypeParam]types.Type {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	out := make(map[*types.TypeParam]types.Type, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
+}
+
 // mergeParentSubst augments a type param substitution map with mappings for
 // inherited generic parent type params. E.g., if Derived[T] is Base[T] and
 // subst = {Derived.T → int}, this adds {Base.T → int} so that inherited

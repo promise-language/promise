@@ -1438,12 +1438,25 @@ func isTypeDroppable(typ types.Type) bool {
 // the caller has drop flags for both v and the return value s, but they point
 // to the same memory — both get freed at scope exit.
 func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value) {
+	c.emitReturnAliasCheckSubst(result, sig, args, argVals, nil)
+}
+
+// emitReturnAliasCheckSubst is the generic-aware variant. T0418: callSubst maps
+// the callee's TypeParams to the call's concrete type args so droppability
+// checks see through TypeParams (e.g., T? → _Box? → droppable).
+func (c *Compiler) emitReturnAliasCheckSubst(result value.Value, sig *types.Signature, args []*ast.Arg, argVals []value.Value, callSubst map[*types.TypeParam]types.Type) {
 	if result == nil || sig == nil {
 		return
 	}
 	retType := sig.Result()
 	if retType == nil {
 		return
+	}
+	if callSubst != nil {
+		retType = types.Substitute(retType, callSubst)
+	}
+	if c.typeSubst != nil {
+		retType = types.Substitute(retType, c.typeSubst)
 	}
 	// Only check for non-Copy return types that could alias.
 	if !isTypeDroppable(retType) {
@@ -1468,7 +1481,14 @@ func (c *Compiler) emitReturnAliasCheck(result value.Value, sig *types.Signature
 		if _, isSR := p.Type().(*types.SharedRef); isSR {
 			continue
 		}
-		if !isTypeDroppable(p.Type()) {
+		paramType := p.Type()
+		if callSubst != nil {
+			paramType = types.Substitute(paramType, callSubst)
+		}
+		if c.typeSubst != nil {
+			paramType = types.Substitute(paramType, c.typeSubst)
+		}
+		if !isTypeDroppable(paramType) {
 			continue
 		}
 

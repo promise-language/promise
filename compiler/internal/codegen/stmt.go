@@ -2345,6 +2345,7 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		dropFunc = c.funcs["MutexGuard.drop"]
 	case innerNamed != nil && (innerNamed.HasDrop() || innerNamed.NeedsSynthDrop()):
 		// User type with explicit or synthesized drop
+		explicitDrop := innerNamed.HasDrop() && !innerNamed.NeedsSynthDrop()
 		ownerName := innerNamed.Obj().Name()
 		resolvedElem := elem
 		if c.typeSubst != nil {
@@ -2352,11 +2353,19 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		}
 		if inst, ok := resolvedElem.(*types.Instance); ok {
 			ownerName = monoName(inst)
-		} else if innerNamed.HasDrop() && !innerNamed.NeedsSynthDrop() {
+		} else if explicitDrop {
 			ownerName = c.resolveMethodOwner(innerNamed, "drop")
 		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
-		dropFunc = c.funcs[mangledName]
+		if fn, ok := c.funcs[mangledName]; ok {
+			if explicitDrop {
+				// T0419: Explicit user drops don't include pal_free — wrap with $wrap
+				// so the Optional drop path frees the instance after calling drop.
+				// Synthesized drops already include pal_free.
+				fn = c.getOrCreateDropWrap(mangledName, fn)
+			}
+			dropFunc = fn
+		}
 	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() && !isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural():
 		// B0211: Heap user type without drop — use pal_free to free the instance.
 		dropFunc = c.palFree

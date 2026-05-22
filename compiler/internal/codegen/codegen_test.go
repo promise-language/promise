@@ -21792,3 +21792,80 @@ func TestT0436ModuleTypeBorrowedThisAfterOwnedDups(t *testing.T) {
 	assertContains(t, getNFn, "call i8* @pal_alloc")
 	assertContains(t, getNFn, "call void @llvm.memcpy")
 }
+
+// T0419: Optional[T] with explicit user drop must dispatch the scope-exit drop
+// through T.drop$wrap (which calls drop + pal_free), not the bare T.drop
+// (which only runs the user body and leaks the heap allocation).
+func TestOptionalLocalDropExplicitUserDropWrap(t *testing.T) {
+	ir := generateIR(t, `
+		type BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		test_no_unwrap() {
+			BoxDrop? a = BoxDrop(n: 12);
+		}
+	`)
+	// The Optional drop dispatch must call the $wrap variant.
+	assertContains(t, ir, "@BoxDrop.drop$wrap")
+	// The $wrap function itself must call both drop and pal_free.
+	wrapFn := extractFunction(ir, "BoxDrop.drop$wrap")
+	if wrapFn == "" {
+		t.Fatal("expected BoxDrop.drop$wrap in IR")
+	}
+	assertContains(t, wrapFn, "call void @BoxDrop.drop")
+	assertContains(t, wrapFn, "call void @pal_free")
+}
+
+// T0419: Optional[GenericBox[int]] with explicit drop must dispatch through
+// the mono-mangled $wrap (e.g. GenericBoxD[int].drop$wrap).
+func TestOptionalLocalDropExplicitUserDropWrapMono(t *testing.T) {
+	ir := generateIR(t, `
+		type GenericBoxD[T] {
+			T val;
+			drop(~this) {}
+		}
+		test_mono_no_unwrap() {
+			GenericBoxD[int]? a = GenericBoxD[int](val: 5);
+		}
+	`)
+	// The mono Optional drop dispatch must call the mono $wrap variant.
+	assertContains(t, ir, `@"GenericBoxD[int].drop$wrap"`)
+	wrapFn := extractFunction(ir, `"GenericBoxD[int].drop$wrap"`)
+	if wrapFn == "" {
+		t.Fatal(`expected "GenericBoxD[int].drop$wrap" in IR`)
+	}
+	assertContains(t, wrapFn, `call void @"GenericBoxD[int].drop"`)
+	assertContains(t, wrapFn, "call void @pal_free")
+}
+
+// T0419: Optional[T] where T has only a SYNTHESIZED drop (auto-generated because
+// of droppable fields) must dispatch the bare T.drop — NOT T.drop$wrap. Synth
+// drops already include pal_free; wrapping would call pal_free twice.
+// This guards the `if explicitDrop` check in maybeRegisterOptionalDrop.
+func TestOptionalLocalDropSynthSkipsWrap(t *testing.T) {
+	ir := generateIR(t, `
+		type SynthDropBox {
+			string s;
+		}
+		test_synth_no_unwrap() {
+			SynthDropBox? a = SynthDropBox(s: "hello");
+		}
+	`)
+	// Premise: SynthDropBox has a synthesized drop that includes pal_free.
+	synthFn := extractFunction(ir, "SynthDropBox.drop")
+	if synthFn == "" {
+		t.Fatal("expected SynthDropBox.drop in IR")
+	}
+	assertContains(t, synthFn, "call void @promise_string_drop")
+	assertContains(t, synthFn, "call void @pal_free")
+	// The Optional drop dispatch must call the bare drop, NOT the wrapper.
+	// (No SynthDropBox.drop$wrap function should be emitted at all.)
+	assertNotContains(t, ir, "SynthDropBox.drop$wrap")
+	// And the user function must dispatch directly to SynthDropBox.drop.
+	userFn := extractFunction(ir, "__user.test_synth_no_unwrap")
+	if userFn == "" {
+		t.Fatal("expected __user.test_synth_no_unwrap in IR")
+	}
+	assertContains(t, userFn, "call void @SynthDropBox.drop(")
+}

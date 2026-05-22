@@ -88,9 +88,8 @@ iflet_triple_partial() `test {
 
 // Heap user type with explicit drop method — fully unwrapping exercises the
 // maybeRegisterOptionalDrop walk-past loop and the genIfUnwrapStmt nested
-// Optional registration. Inner-only cases (no unwrap, outer-only) leak via
-// T0419 (preexisting bug: Optional[T-with-drop] uses bare `T.drop` instead of
-// `T.drop$wrap`, so pal_free is never called) — covered there, not here.
+// Optional registration. T0419 fixed the Optional[T-with-drop] path so the
+// inner-only cases (no unwrap, outer-only) also free correctly.
 type _BoxDrop {
   int n;
   drop(~this) {
@@ -108,6 +107,85 @@ iflet_double_unwrap_explicit_drop() `test {
     if y := x {
       assert(y.n == 11, "explicit drop");
     }
+  }
+}
+
+// T0419: Single Optional with explicit-drop type, never consumed.
+iflet_single_no_unwrap_explicit_drop() `test {
+  _BoxDrop? a = _BoxDrop(n: 12);
+  assert(a is present, "single no unwrap");
+}
+
+// T0419: Single Optional passthrough via assignment, never consumed.
+iflet_single_passthrough_explicit_drop() `test {
+  _BoxDrop? a = _BoxDrop(n: 13);
+  _BoxDrop? r = a;
+  assert(r is present, "single passthrough");
+}
+
+// T0419: Double Optional with explicit-drop type, never unwrapped.
+iflet_double_no_unwrap_explicit_drop() `test {
+  _BoxDrop? a = _BoxDrop(n: 11);
+  _BoxDrop?? r = _returns_double_boxdrop(a);
+  assert(r is present, "no unwrap");
+}
+
+// T0419: Double Optional with explicit-drop type, only outer unwrapped.
+iflet_double_outer_only_explicit_drop() `test {
+  _BoxDrop? a = _BoxDrop(n: 7);
+  _BoxDrop?? r = _returns_double_boxdrop(a);
+  if x := r {
+    assert(true, "outer only");
+  }
+}
+
+_returns_triple_boxdrop(_BoxDrop? a) _BoxDrop??? {
+  _BoxDrop?? b = a;
+  return b;
+}
+
+// T0419: Triple Optional with explicit-drop type, never unwrapped — exercises the
+// walk-past-nested-Optionals loop in maybeRegisterOptionalDrop with an explicit
+// drop inner that needs $wrap dispatch.
+iflet_triple_no_unwrap_explicit_drop() `test {
+  _BoxDrop? a = _BoxDrop(n: 91);
+  _BoxDrop??? r = _returns_triple_boxdrop(a);
+  assert(r is present, "triple no unwrap");
+}
+
+// T0419: Triple Optional with explicit-drop type, fully unwrapped — confirms the
+// walk-past loop still works when consumption clears the drop flag.
+iflet_triple_unwrap_explicit_drop() `test {
+  _BoxDrop? a = _BoxDrop(n: 92);
+  _BoxDrop??? r = _returns_triple_boxdrop(a);
+  if x := r {
+    if y := x {
+      if z := y {
+        assert(z.n == 92, "triple unwrap");
+      }
+    }
+  }
+}
+
+type _GenBoxDrop[T] {
+  T val;
+  drop(~this) {
+  }
+}
+
+// T0419: Generic Optional[GenericType[T]-with-explicit-drop], never consumed —
+// exercises the mono path in maybeRegisterOptionalDrop where ownerName is set
+// from monoName(inst) and explicitDrop forces $wrap dispatch.
+iflet_single_no_unwrap_generic_explicit_drop() `test {
+  _GenBoxDrop[int]? a = _GenBoxDrop[int](val: 42);
+  assert(a is present, "generic single no unwrap");
+}
+
+// T0419: Generic Optional with explicit drop, fully unwrapped.
+iflet_single_unwrap_generic_explicit_drop() `test {
+  _GenBoxDrop[int]? a = _GenBoxDrop[int](val: 7);
+  if x := a {
+    assert(x.val == 7, "generic unwrap");
   }
 }
 

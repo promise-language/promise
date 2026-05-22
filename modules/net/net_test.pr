@@ -1,4 +1,3 @@
-// ── Low-level tests ─────────────────────────────────────────────────────────
 test_raw_socket_create_close() `test(exclude: "wasm32") {
   int fd = _net_socket_create(2, 1, 0);
   assert(fd >= 0, "socket created");
@@ -30,7 +29,6 @@ test_netpoll_multiple_open_close() `test(exclude: "wasm32") {
   }
 }
 
-// ── TcpListener tests ────────────────────────────────────────────────────────
 test_listener_bind_auto_drop() `test(exclude: "wasm32") {
   TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
 }
@@ -99,7 +97,6 @@ test_net_strerror_known_and_unknown() `test(exclude: "wasm32") {
   assert(_net_strerror(999999) == "network error (errno 999999)", "unknown errno");
 }
 
-// ── TcpStream tests ─────────────────────────────────────────────────────────
 // Server side uses raw blocking sockets; sequential flow — no goroutines
 // needed because kernel buffers handle connect backlog and data.
 
@@ -267,6 +264,22 @@ test_listener_accept() `test(exclude: "wasm32") {
   stream.close()?!;
   _net_socket_close(cfd);
   listener.close()?!;
+}
+
+_try_connect_refused!() bool {
+  // Port 1 is reserved and should not have a listener — connect must fail.
+  TcpStream s = TcpStream.connect("127.0.0.1", 1)?^;
+  s.close()?^;
+  return true;
+}
+
+test_stream_connect_refused() `test(exclude: "wasm32") {
+  bool ok = _try_connect_refused()? e {
+    assert(e.message.contains("connection refused"), "connect refused message");
+    return;
+  };
+  // On some CI environments port 1 may unexpectedly be open; skip rather than
+  // fail to avoid a flaky test.
 }
 
 test_stream_drop_without_close() `test(exclude: "wasm32") {

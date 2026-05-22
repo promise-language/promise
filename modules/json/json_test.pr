@@ -1,5 +1,4 @@
 // json_test.pr — Tests for JSON encoding and decoding
-// ── Encoder tests ───────────────────────────────────────────────────────────
 encode_int_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_int(42)?!;
@@ -101,8 +100,6 @@ encode_nested_test() `test {
   enc.end_object()?!;
   assert(enc.to_string() == "\{\"items\":[\"a\",\"b\"]}", "encode nested");
 }
-
-// ── Decoder tests ───────────────────────────────────────────────────────────
 
 decode_int_test() `test {
   JsonDecoder dec = JsonDecoder(data: "42");
@@ -255,8 +252,6 @@ skip_value_test() `test {
   assert(c_val == 3, "skip_value: got c=3");
 }
 
-// ── Round-trip via Encodable/Decodable on primitives ────────────────────────
-
 round_trip_int_test() `test {
   string s = encode_string[int](42)?!;
   assert(s == "42", "round trip int encode");
@@ -283,8 +278,6 @@ round_trip_f64_test() `test {
   f64 v = decode_string[f64](s)?!;
   assert(v == 2.5, "round trip f64");
 }
-
-// ── Round-trip: sized integer types ──────────────────────────────────────────
 
 round_trip_uint_test() `test {
   string s = encode_string[uint](999u)?!;
@@ -348,8 +341,6 @@ round_trip_char_test() `test {
   assert(v == 'A', "char decode");
 }
 
-// ── Sized type range checking ───────────────────────────────────────────────
-
 decode_i8_overflow_test() `test {
   JsonDecoder dec = JsonDecoder(data: "200");
   (v, err) := i8.decode(dec);
@@ -373,8 +364,6 @@ decode_u16_overflow_test() `test {
   (v, err) := u16.decode(dec);
   assert(err is present, "u16 decode 70000 should overflow");
 }
-
-// ── Encoder edge cases ──────────────────────────────────────────────────────
 
 encode_empty_string_test() `test {
   JsonEncoder enc = JsonEncoder();
@@ -414,8 +403,6 @@ encode_object_with_null_test() `test {
   enc.end_object()?!;
   assert(enc.to_string() == "\{\"a\":1,\"b\":null}", "encode object with null");
 }
-
-// ── Decoder edge cases ──────────────────────────────────────────────────────
 
 decode_empty_string_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"\"");
@@ -506,8 +493,6 @@ skip_value_string_test() `test {
   assert(b_val == 42, "skip string, got b=42");
 }
 
-// ── Pretty printing ─────────────────────────────────────────────────────────
-
 encode_pretty_object_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
   enc.begin_object(1)?!;
@@ -519,8 +504,6 @@ encode_pretty_object_test() `test {
   assert(result.contains("\n"), "pretty has newlines");
   assert(result.contains("  \"x\""), "pretty has indented key");
 }
-
-// ── Decode error tests ──────────────────────────────────────────────────────
 
 decode_error_invalid_bool_test() `test {
   (v, err) := decode_string[int]("abc");
@@ -544,8 +527,6 @@ decode_error_position_test() `test {
   (v, err) := dec.decode_bool();
   assert(err is present, "bad bool should error");
 }
-
-// ── JsonValue tests ─────────────────────────────────────────────────────────
 
 parse_value_null_test() `test {
   JsonValue v = parse_value("null")?!;
@@ -766,8 +747,6 @@ deep_nesting_test() `test {
   }
 }
 
-// ── Object field value access tests ─────────────────────────────────────────
-
 object_field_value_access_test() `test {
   // Verify we can look up values by key after parsing
   string data = "\{\"name\":\"Alice\",\"age\":30,\"active\":true}";
@@ -873,8 +852,6 @@ object_null_value_test() `test {
   }
 }
 
-// ── String escape coverage ──────────────────────────────────────────────────
-
 encode_string_tab_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("a\tb")?!;
@@ -925,8 +902,6 @@ decode_string_backspace_formfeed_test() `test {
   string v = dec.decode_string()?!;
   assert(v.len == 2, "decode backspace+formfeed length");
 }
-
-// ── Pretty printing coverage ────────────────────────────────────────────────
 
 encode_pretty_array_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
@@ -980,8 +955,6 @@ encode_pretty_empty_array_test() `test {
   assert(s.contains("[]"), "pretty empty array contains brackets");
   assert(!s.contains("  "), "pretty empty array no indented content");
 }
-
-// ── Mixed structure coverage ────────────────────────────────────────────────
 
 parse_object_in_array_test() `test {
   // Array of objects
@@ -1062,8 +1035,6 @@ round_trip_complex_test() `test {
   }
 }
 
-// ── Decoder has_next_element array pattern ───────────────────────────────────
-
 decode_array_has_next_element_test() `test {
   JsonDecoder dec = JsonDecoder(data: "[10,20,30]");
   dec.begin_array()?!;
@@ -1091,8 +1062,6 @@ decode_array_has_next_empty_test() `test {
   dec.end_array()?!;
 }
 
-// ── parse_value error cases ─────────────────────────────────────────────────
-
 parse_value_error_empty_test() `test {
   (v, err) := parse_value("");
   assert(err is present, "empty input should error");
@@ -1118,8 +1087,6 @@ parse_value_error_unterminated_string_test() `test {
   assert(err is present, "unterminated string should error");
 }
 
-// ── Whitespace tolerance ────────────────────────────────────────────────────
-
 parse_value_whitespace_object_test() `test {
   // Generous whitespace
   string data = "  \{  \"a\"  :  1  ,  \"b\"  :  2  }  ";
@@ -1137,8 +1104,6 @@ parse_value_whitespace_array_test() `test {
     _ => assert(false, "expected array"),
   }
 }
-
-// ── Number edge cases ───────────────────────────────────────────────────────
 
 parse_value_zero_test() `test {
   JsonValue v = parse_value("0")?!;
@@ -1168,8 +1133,6 @@ format_value_number_negative_test() `test {
   string s = format_value(JsonValue.Number(-3.5))?!;
   assert(s == "-3.5", "format negative float");
 }
-
-// ── JsonValue method tests ───────────────────────────────────────────────────
 
 // Type-check getters
 
@@ -1390,8 +1353,6 @@ chained_access_test() `test {
   assert(first!.as_number()! == 10.0, "chained: first score is 10");
 }
 
-// ── Edge cases for value extraction ──────────────────────────────────────────
-
 as_bool_false_test() `test {
   // Verify as_bool returns false (not just "present") for Bool(false)
   bool? b = JsonValue.Bool(false).as_bool();
@@ -1429,8 +1390,6 @@ as_object_empty_test() `test {
   assert(obj!.len == 0, "as_object empty len");
 }
 
-// ── Edge cases for get/at ────────────────────────────────────────────────────
-
 get_empty_object_test() `test {
   JsonValue obj = JsonValue.Object(map[string, JsonValue]());
   JsonValue? v = obj.get("anything");
@@ -1442,8 +1401,6 @@ at_empty_array_test() `test {
   JsonValue? v = arr.at(0);
   assert(v is absent, "at(0) on empty array is none");
 }
-
-// ── Encode method with all variant types ─────────────────────────────────────
 
 encode_method_null_test() `test {
   JsonEncoder enc = JsonEncoder();
@@ -1484,8 +1441,6 @@ encode_method_nested_test() `test {
   assert(s.contains("\"count\":2"), "encode nested number in object");
 }
 
-// ── format_pretty round-trip ─────────────────────────────────────────────────
-
 format_pretty_round_trip_test() `test {
   map[string, JsonValue] fields = {
     "name": JsonValue.Str("Alice"),
@@ -1502,8 +1457,6 @@ format_pretty_round_trip_test() `test {
   assert(name!.as_string()! == "Alice", "pretty rt: name value");
 }
 
-// ── format for all variant types ─────────────────────────────────────────────
-
 format_method_all_variants_test() `test {
   assert(JsonValue.Null.format()?! == "null", "format null");
   assert(JsonValue.Bool(true).format()?! == "true", "format true");
@@ -1513,8 +1466,6 @@ format_method_all_variants_test() `test {
   assert(JsonValue.Array(JsonValue[]()).format()?! == "[]", "format empty array");
   assert(JsonValue.Object(map[string, JsonValue]()).format()?! == "\{}", "format empty object");
 }
-
-// ── Parsed values with methods ───────────────────────────────────────────────
 
 parsed_value_methods_test() `test {
   // Verify methods work on values from parse_value, not just constructed values

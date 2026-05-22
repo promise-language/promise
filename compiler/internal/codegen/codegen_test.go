@@ -2381,8 +2381,6 @@ func TestEnumHeaderData(t *testing.T) {
 	assertContains(t, header, "uint8_t              data[16];")
 }
 
-// ── Error handling tests ──────────────────────────────────────────
-
 func TestFailableDeclaration(t *testing.T) {
 	ir := generateIR(t, `
 		parse!(string s) int { return 0; }
@@ -7807,7 +7805,7 @@ func TestStdExternDedupWithUserExtern(t *testing.T) {
 }
 
 func TestStdFuncUnshadowed(t *testing.T) {
-	// After module-based refactor: helper is user code �� @__user.helper name (B0319)
+	// After module-based refactor: helper is user code → @__user.helper name (B0319)
 	ir := generateIRWithStd(t,
 		`helper() int { return 42; }`,
 		`main() { x := helper(); }`,

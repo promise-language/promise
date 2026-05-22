@@ -4,7 +4,7 @@
 // no large lookup tables). This trades raw decode speed for code simplicity
 // and small memory footprint, which is appropriate for the embed-decompress
 // use case (one-shot decode of small/medium blobs at program startup).
-// ── Length code base values and extra bits (RFC 1951 §3.2.5) ──
+// Length code base values and extra bits (RFC 1951 §3.2.5)
 _length_base() int[] {
   int[] r = int[]();
   r.push(3);
@@ -73,7 +73,7 @@ _length_extra() int[] {
   return r;
 }
 
-// ── Distance code base values and extra bits (RFC 1951 §3.2.5) ──
+// Distance code base values and extra bits (RFC 1951 §3.2.5)
 _dist_base() int[] {
   int[] r = int[]();
   r.push(1);
@@ -246,7 +246,7 @@ type _HuffTable {
   }
 }
 
-// ── Fixed Huffman tables (RFC 1951 §3.2.6) ──
+// Fixed Huffman tables (RFC 1951 §3.2.6)
 // Lit/Length: symbols 0..143 → 8 bits, 144..255 → 9 bits,
 //             256..279 → 7 bits, 280..287 → 8 bits.
 _fixed_litlen_lens() int[] {

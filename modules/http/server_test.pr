@@ -1,4 +1,3 @@
-// ── Test handlers ───────────────────────────────────────────────────────────
 type _OkHandler {
   string response_body;
 
@@ -42,8 +41,6 @@ type _NotFoundHandler {
     return ServerResponse.not_found();
   }
 }
-
-// ── Unit tests (no network) ─────────────────────────────────────────────────
 
 test_server_string_to_method() `test(exclude: "wasm32") {
   assert(_method_to_string(_string_to_method("GET")?!) == "GET", "GET");
@@ -142,8 +139,6 @@ test_server_set_header() `test(exclude: "wasm32") {
   string s = _serialize_response(resp);
   assert(s.contains("X-Custom: value"), "custom header in serialized response");
 }
-
-// ── Round-trip tests (network) ──────────────────────────────────────────────
 
 test_server_basic() `test(exclude: "wasm32", timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
@@ -252,8 +247,6 @@ test_server_bind_and_port() `test(exclude: "wasm32", timeout: "10s") {
   server.close()?!;
 }
 
-// ── Error path tests ───────────────────────────────────────────────────────
-
 test_parse_request_malformed_no_space() `test(exclude: "wasm32") {
   ServerRequest req = _parse_request("GETHTTP", "")? e {
     assert(e.message.contains("malformed"), "malformed error");
@@ -288,8 +281,6 @@ test_read_request_early_close() `test(exclude: "wasm32", timeout: "10s") {
   assert(false, "should have raised error");
 }
 
-// ── Large body test (exercises multi-read path in _read_request) ───────────
-
 test_server_large_body() `test(exclude: "wasm32", timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
@@ -308,8 +299,6 @@ test_server_large_body() `test(exclude: "wasm32", timeout: "10s") {
   listener.close()?!;
   sleep(Duration.from_millis(100));
 }
-
-// ── Serve + shutdown tests ─────────────────────────────────────────────────
 
 test_server_serve() `test(exclude: "wasm32", timeout: "10s") {
   channel[int] port_ch = channel[int](capacity: 1);

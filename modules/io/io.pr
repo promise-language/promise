@@ -1,6 +1,5 @@
 // io module — File and directory I/O operations.
 // Requires: use io;
-// ── Extern PAL wrappers (codegen provides LLVM IR bodies) ────────────────────
 // All functions that can fail return -errno on failure (errno is folded into the
 // return value atomically, eliminating thread-local errno races in M:N scheduling).
 _io_file_open(string path, int mode) int `extern("promise_io_file_open");
@@ -32,8 +31,6 @@ _io_file_stat_field(string path, int field_index, int follow) int `extern("promi
 _io_eof_sentinel() int {
   return 2147418113;
 }
-
-// ── Error type ───────────────────────────────────────────────────────────────
 
 type IoError is error `public `doc("An operating system I/O error with an errno code.") {
   int code;
@@ -70,8 +67,6 @@ _io_strerror(int code) string {
   };
 }
 
-// ── Stdin functions ──────────────────────────────────────────────────────────
-
 read_line!() string? `public `doc("Reads one line from stdin. Returns absent at EOF, raises IoError on error. Strips trailing newline.") {
   string line = _io_file_read_line(0);
   int rc = _io_errno();
@@ -93,12 +88,8 @@ read_stdin!() string `public `doc("Reads all of stdin into a string.") {
   return data;
 }
 
-// ── File type ────────────────────────────────────────────────────────────────
-
 type File `public `doc("A file handle. Use factory constructors to open files. Auto-closes on drop.") {
   int _fd;
-
-  // ── Factory constructors ─────────────────────────────────────────────
 
   open!(string path, bool readonly = false) Self `factory `public `doc("Opens an existing file. Pass readonly: true for read-only access.") {
     int mode = 0;
@@ -127,8 +118,6 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     }
     return File(_fd: fd);
   }
-
-  // ── Handle methods ───────────────────────────────────────────────────
 
   close!(~this) `public `doc("Closes the file handle. Returns error on double-close.") {
     if this._fd < 0 {
@@ -186,8 +175,6 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     }
   }
 
-  // ── Byte-level I/O (Reader/Writer interface) ──────────────────────────
-
   read!(~this, u8[] ~buf) int `public `doc("Reads up to buf.len bytes into buf. Returns bytes read (0 = EOF). Satisfies Reader.") {
     if this._fd < 0 {
       raise IoError(code: 9, message: "bad file descriptor");
@@ -229,8 +216,6 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     }
     return line;
   }
-
-  // ── One-shot convenience (global) ────────────────────────────────────
 
   read_content!(string path) string `global `public `doc("Reads entire file contents as a string.") {
     File f = File.open(path, readonly: true);
@@ -281,15 +266,12 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     return Metadata(size: s, mode: m, uid: u, gid: g, modified: mt, accessed: at, created: ct, _file_type: ft);
   }
 
-  // ── Auto-close on scope exit ─────────────────────────────────────────
   drop(~this) {
     if this._fd >= 0 {
       _io_file_close(this._fd);
     }
   }
 }
-
-// ── Dir type ─────────────────────────────────────────────────────────────────
 
 type Dir `public `doc("Directory operations. All methods are global.") {
   make!(string path) `global `public `doc("Creates a directory. Parent must exist.") {
@@ -368,8 +350,6 @@ type Dir `public `doc("Directory operations. All methods are global.") {
 
   exists(string path) bool `global `public `doc("Returns true if the path is a directory.") => _io_dir_exists(path) == 1;
 }
-
-// ── BufferedReader ───────────────────────────────────────────────────────────
 
 type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by reading in chunks. Satisfies Reader.") {
   File _file;
@@ -459,8 +439,6 @@ type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by read
   }
 }
 
-// ── BufferedWriter ───────────────────────────────────────────────────────────
-
 type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batching writes. Satisfies Writer. Call flush() before drop.") {
   File _file;
   u8[] _buf;
@@ -520,8 +498,6 @@ type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batc
     }
   }
 }
-
-// ── Metadata type (D0012) ───────────────────────────────────────────────────
 
 type Metadata `public `doc("File system metadata for a path. Use File.metadata() to query.") {
   int size `value `public `doc("File size in bytes.");

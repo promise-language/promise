@@ -83,7 +83,7 @@ func (c *Compiler) defineFileIOBodies() {
 	}
 }
 
-// ── Syscall handoff helpers ──────────────────────────────────────────────────
+// Syscall handoff helpers
 
 // emitEnterSyscall emits a call to promise_sched_enter_syscall before a blocking PAL call.
 // Releases P so other goroutines can run while this M blocks in the kernel.
@@ -97,7 +97,7 @@ func (c *Compiler) emitExitSyscall(block *ir.Block) {
 	block.NewCall(c.funcs["promise_sched_exit_syscall"])
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// Helpers
 
 // extractRawInt extracts the raw i64 value from a Promise int value struct pointer.
 // The int value struct layout is {i8* vtable, instance_ptr, i64 raw} — raw is at index 2.
@@ -159,7 +159,7 @@ func (c *Compiler) stringToCStr(block *ir.Block, strParam value.Value) value.Val
 	return cstr
 }
 
-// ── File open/close/seek ─────────────────────────────────────────────────────
+// File open/close/seek
 
 // defineFileOpenBody: void @promise_io_file_open(i8* sret, i8* path, i8* mode)
 // Extracts path string → cstr, mode int → i32, calls pal_file_open, wraps i32 fd as int.
@@ -231,7 +231,7 @@ func (c *Compiler) defineFileSeekBody(fn *ir.Func) {
 	entry.NewRet(nil)
 }
 
-// ── File read/write ──────────────────────────────────────────────────────────
+// File read/write
 
 // defineFileWriteStringBody: void @promise_io_file_write_string(i8* sret, i8* fd, i8* data)
 // Extracts fd and string data/len, calls pal_file_write, returns bytes written.
@@ -285,7 +285,7 @@ func (c *Compiler) defineFileReadAllBody(fn *ir.Func) {
 	loopBlk := fn.NewBlock("read_loop")
 	entry.NewBr(loopBlk)
 
-	// ── Read loop ──
+	// Read loop
 	buf := loopBlk.NewLoad(irtypes.I8Ptr, bufAlloca)
 	total := loopBlk.NewLoad(irtypes.I64, totalAlloca)
 	cap_ := loopBlk.NewLoad(irtypes.I64, capAlloca)
@@ -325,7 +325,7 @@ func (c *Compiler) defineFileReadAllBody(fn *ir.Func) {
 	growBlk.NewStore(newCap, capAlloca)
 	growBlk.NewBr(loopBlk)
 
-	// ── Done: create string from buffer, store via sret ──
+	// Done: create string from buffer, store via sret
 	doneBuf := doneBlk.NewLoad(irtypes.I8Ptr, bufAlloca)
 	doneTotal := doneBlk.NewLoad(irtypes.I64, totalAlloca)
 	str := doneBlk.NewCall(c.funcs["promise_string_new"], doneBuf, doneTotal)
@@ -338,7 +338,7 @@ func (c *Compiler) defineFileReadAllBody(fn *ir.Func) {
 	c.storeStringResult(doneBlk, sret, str)
 	doneBlk.NewRet(nil)
 
-	// ── Error: n is -errno. Free buffer, set errno, return empty string ──
+	// Error: n is -errno. Free buffer, set errno, return empty string
 	// Extract errno code from -n (pal_file_read returns -errno on failure)
 	negN := errorBlk.NewSub(constant.NewInt(irtypes.I64, 0), n)
 	errCode := errorBlk.NewTrunc(negN, irtypes.I32)
@@ -369,7 +369,7 @@ func (c *Compiler) findErrnoLocationFn() *ir.Func {
 	return nil
 }
 
-// ── Path-based operations (string path → cstr → PAL → int result) ───────────
+// Path-based operations (string path → cstr → PAL → int result)
 
 // defineFileStatSizeBody: void @promise_io_file_stat_size(i8* sret, i8* path)
 func (c *Compiler) defineFileStatSizeBody(fn *ir.Func) {
@@ -448,7 +448,7 @@ func (c *Compiler) defineDirExistsBody(fn *ir.Func) {
 	entry.NewRet(nil)
 }
 
-// ── Errno ────────────────────────────────────────────────────────────────────
+// Errno
 
 // defineErrnoBody: void @promise_io_errno(i8* sret)
 func (c *Compiler) defineErrnoBody(fn *ir.Func) {
@@ -463,7 +463,7 @@ func (c *Compiler) defineErrnoBody(fn *ir.Func) {
 	entry.NewRet(nil)
 }
 
-// ── Read line ────────────────────────────────────────────────────────────────
+// Read line
 
 // defineFileReadLineBody: void @promise_io_file_read_line(i8* sret, i8* fd)
 // Reads one line from fd by calling pal_file_read one byte at a time.
@@ -496,7 +496,7 @@ func (c *Compiler) defineFileReadLineBody(fn *ir.Func) {
 	loopBlk := fn.NewBlock("read_loop")
 	entry.NewBr(loopBlk)
 
-	// ── Read loop: read one byte at a time ──
+	// Read loop: read one byte at a time
 	c.emitEnterSyscall(loopBlk)
 	n := loopBlk.NewCall(c.palFileRead, fdI32,
 		loopBlk.NewBitCast(oneByte, irtypes.I8Ptr),
@@ -515,14 +515,14 @@ func (c *Compiler) defineFileReadLineBody(fn *ir.Func) {
 	gotByte := fn.NewBlock("got_byte")
 	checkEOF.NewCondBr(isEOF, eofBlk, gotByte)
 
-	// ── Got a byte: check for newline ──
+	// Got a byte: check for newline
 	ch := gotByte.NewLoad(irtypes.I8, oneByte)
 	isNewline := gotByte.NewICmp(enum.IPredEQ, ch, constant.NewInt(irtypes.I8, '\n'))
 	doneBlk := fn.NewBlock("line_done")
 	appendBlk := fn.NewBlock("append_byte")
 	gotByte.NewCondBr(isNewline, doneBlk, appendBlk)
 
-	// ── Append byte to buffer ──
+	// Append byte to buffer
 	curLen := appendBlk.NewLoad(irtypes.I64, lenAlloca)
 	curCap := appendBlk.NewLoad(irtypes.I64, capAlloca)
 	curBuf := appendBlk.NewLoad(irtypes.I8Ptr, bufAlloca)
@@ -549,7 +549,7 @@ func (c *Compiler) defineFileReadLineBody(fn *ir.Func) {
 	storeBlk.NewStore(newLen, lenAlloca)
 	storeBlk.NewBr(loopBlk)
 
-	// ── Line done (hit \n): strip trailing \r if present, clear errno, return ──
+	// Line done (hit \n): strip trailing \r if present, clear errno, return
 	doneLen := doneBlk.NewLoad(irtypes.I64, lenAlloca)
 	doneBuf := doneBlk.NewLoad(irtypes.I8Ptr, bufAlloca)
 
@@ -575,7 +575,7 @@ func (c *Compiler) defineFileReadLineBody(fn *ir.Func) {
 	c.storeStringResult(doneBlk, sret, str)
 	doneBlk.NewRet(nil)
 
-	// ── EOF: check if we have accumulated data ──
+	// EOF: check if we have accumulated data
 	eofLen := eofBlk.NewLoad(irtypes.I64, lenAlloca)
 	eofBuf := eofBlk.NewLoad(irtypes.I8Ptr, bufAlloca)
 	hasAccum := eofBlk.NewICmp(enum.IPredUGT, eofLen, constant.NewInt(irtypes.I64, 0))
@@ -604,7 +604,7 @@ func (c *Compiler) defineFileReadLineBody(fn *ir.Func) {
 	c.storeStringResult(eofNoData, sret, emptyStr)
 	eofNoData.NewRet(nil)
 
-	// ── Error: set errno, return empty string ──
+	// Error: set errno, return empty string
 	negN := errorBlk.NewSub(constant.NewInt(irtypes.I64, 0), n)
 	errCode := errorBlk.NewTrunc(negN, irtypes.I32)
 	errBuf := errorBlk.NewLoad(irtypes.I8Ptr, bufAlloca)
@@ -619,7 +619,7 @@ func (c *Compiler) defineFileReadLineBody(fn *ir.Func) {
 	errorBlk.NewRet(nil)
 }
 
-// ── Directory listing bridges ────────────────────────────────────────────────
+// Directory listing bridges
 
 // defineDirOpenBody: void @promise_io_dir_open(i8* sret, i8* path)
 // Converts Promise string path to C string, calls pal_dir_open, returns handle as int.
@@ -711,7 +711,7 @@ func (c *Compiler) defineDirCloseHandleBody(fn *ir.Func) {
 	entry.NewRet(nil)
 }
 
-// ── Byte-level read/write (direct u8[] vector access) ────────────────────────
+// Byte-level read/write (direct u8[] vector access)
 
 // extractVectorDataLen extracts the data pointer (i8*) and length (i64) from a
 // Vector's raw allocation pointer. Vector layout: {i64 len, i64 cap} header at

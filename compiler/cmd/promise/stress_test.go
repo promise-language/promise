@@ -10,9 +10,7 @@ import (
 	"testing"
 )
 
-// ---------------------------------------------------------------------------
 // extractCrashReason
-// ---------------------------------------------------------------------------
 
 func TestExtractCrashReason_PanicOnStderr(t *testing.T) {
 	reason := extractCrashReason("", "panic: assertion failed: expected 3, got 4\ngoroutine 1:\n", nil)
@@ -108,9 +106,7 @@ func TestExtractCrashReason_PanicPlusSignal(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // extractSignal
-// ---------------------------------------------------------------------------
 
 func TestExtractSignal_NilError(t *testing.T) {
 	if sig := extractSignal(nil); sig != "" {
@@ -146,9 +142,7 @@ func TestExtractSignal_RealSignal(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // signalName
-// ---------------------------------------------------------------------------
 
 func TestSignalName_Known(t *testing.T) {
 	tests := []struct {
@@ -181,9 +175,7 @@ func TestSignalName_Unknown(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // extractExitCode
-// ---------------------------------------------------------------------------
 
 func TestExtractExitCode_NilError(t *testing.T) {
 	if code := extractExitCode(nil); code != -1 {
@@ -220,9 +212,7 @@ func TestExtractExitCode_SignalKill(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // buildCrashContext
-// ---------------------------------------------------------------------------
 
 func TestBuildCrashContext_EmptyStderr(t *testing.T) {
 	ctx := buildCrashContext("", nil)
@@ -278,9 +268,7 @@ func TestBuildCrashContext_WithSignal(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // lastNLines
-// ---------------------------------------------------------------------------
 
 func TestLastNLines_Basic(t *testing.T) {
 	result := lastNLines("line1\nline2\nline3\nline4\nline5\n", 3)
@@ -326,9 +314,7 @@ func TestLastNLines_SingleLine(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // indent
-// ---------------------------------------------------------------------------
 
 func TestIndent_Basic(t *testing.T) {
 	result := indent("line1\nline2\nline3", "  ")
@@ -344,9 +330,7 @@ func TestIndent_SingleLine(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // testStats methods
-// ---------------------------------------------------------------------------
 
 func TestTestStats_Total(t *testing.T) {
 	st := &testStats{passes: 3, fails: 2}
@@ -493,9 +477,7 @@ func TestTestStats_IsHighVariance_LowCoV(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // fileStats methods
-// ---------------------------------------------------------------------------
 
 func makeFileStats(tests ...testStats) *fileStats {
 	stats := make(map[string]*testStats)
@@ -575,9 +557,7 @@ func TestFileStats_RecalcInterval(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // collectTestsByCategory
-// ---------------------------------------------------------------------------
 
 func TestCollectTestsByCategory(t *testing.T) {
 	files := []*fileStats{
@@ -646,9 +626,7 @@ func TestCollectTestsByCategory_SortOrder(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // failSummary
-// ---------------------------------------------------------------------------
 
 func TestFailSummary_NoFails(t *testing.T) {
 	st := &testStats{passes: 5}
@@ -701,9 +679,7 @@ func TestFailSummary_CrashReason(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // failReason
-// ---------------------------------------------------------------------------
 
 func TestFailReason_EmptyOutput(t *testing.T) {
 	if got := failReason("expected stuff", ""); got != "no output" {
@@ -744,9 +720,7 @@ func TestFailReason_IdenticalContent(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // fmtDuration
-// ---------------------------------------------------------------------------
 
 func TestFmtDuration(t *testing.T) {
 	tests := []struct {
@@ -771,9 +745,7 @@ func TestFmtDuration(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // commonDir
-// ---------------------------------------------------------------------------
 
 func TestCommonDir_SingleFile(t *testing.T) {
 	if got := commonDir([]string{"/a/b/c.pr"}); got != "" {
@@ -829,9 +801,7 @@ func TestCommonDir_NoCommonPrefix(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // buildStressReport
-// ---------------------------------------------------------------------------
 
 func makeFileStatsWithPath(path string, tests ...testStats) *fileStats {
 	stats := make(map[string]*testStats)

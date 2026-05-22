@@ -850,7 +850,7 @@ func (c *Compiler) defineKillBody(fn *ir.Func) {
 	entry.NewRet(nil)
 }
 
-// ── OS info bridges ──────────────────────────────────────────────────────────
+// OS info bridges
 
 // defineGetEnvironBody: i8* @promise_os_get_environ()
 // Returns string[] built from the C environ global (null-terminated array of "KEY=VALUE" strings).
@@ -1072,7 +1072,7 @@ func (c *Compiler) defineGetHostnameBody(fn *ir.Func) {
 	errorBlk.NewRet(nil)
 }
 
-// ── Signal bridges ───────────────────────────────────────────────────────────
+// Signal bridges
 
 // defineSignalInitBody: void @promise_os_signal_init(i8* sret)
 // Calls pal_signal_init(), stores rd_fd in global, returns rd_fd as Promise int.
@@ -1185,7 +1185,7 @@ func (c *Compiler) defineGetPidBody(fn *ir.Func) {
 	entry.NewRet(nil)
 }
 
-// ── Spawn with env/cwd bridges ──────────────────────────────────────────────
+// Spawn with env/cwd bridges
 
 // defineSpawnEnvBody: void @promise_os_spawn_env(i8* sret, i8* program, i8* args_vec, i8* env_entries_vec, i8* has_env_int, i8* cwd_str, i8* has_cwd_int)
 // Like defineSpawnBody but with optional envp and cwd parameters.

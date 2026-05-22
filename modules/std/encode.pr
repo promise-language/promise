@@ -4,8 +4,6 @@ type DecodeError is error `public `doc("Error raised when decoding fails.") {
   int? position `doc("Byte position in input (none if unknown).");
 }
 
-// ── Encoder/Decoder interfaces (non-structural — implementations must declare `is`) ──
-
 type Encoder `public `doc("Format-agnostic encoding interface. Implementations must declare `is Encoder`.") {
   // Scalars
   encode_bool!(~this, bool value) `abstract;
@@ -47,8 +45,6 @@ type Decoder `public `doc("Format-agnostic decoding interface. Implementations m
   // Array element iteration
   has_next_element!(~this) bool `abstract `doc("Returns true if there are more elements in the current array. Handles comma skipping.");
 }
-
-// ── Encodable/Decodable structural interfaces (1 method each — widely satisfied) ──
 
 type Encodable `structural `public `doc("Types that can serialize themselves to an Encoder.") {
   encode!(Encoder ~e) `abstract;

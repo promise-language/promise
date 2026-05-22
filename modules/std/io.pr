@@ -1,7 +1,6 @@
 // std/io.pr — Core I/O interfaces and console output
 // Reader, Writer, and Closer are the fundamental I/O structural interfaces.
 // They are used throughout the platform (File, BufferedReader, Builder, Scanner, etc.).
-// ── Core I/O interfaces ─────────────────────────────────────────────────────
 // Reader is the byte-oriented input structural interface.
 // Go-style: caller pre-sizes buf, reader overwrites buf[0..n-1], returns n.
 type Reader `structural `public `doc("Byte-oriented input interface. Caller pre-sizes buf, reader fills buf[0..n-1] and returns n. Returns 0 at EOF.") {
@@ -35,8 +34,6 @@ type Writer `structural `public `doc("Byte-oriented output interface. Writes raw
 type Closer `structural `public `doc("Structural interface for resources that need cleanup. Implement `close(~this)?!` to satisfy.") {
   close!(~this) `abstract `doc("Releases the underlying resource.");
 }
-
-// ── Console output ──────────────────────────────────────────────────────────
 
 // Low-level C binding (prefixed with _ by convention)
 _print_string(string s) `extern("promise_print_string");

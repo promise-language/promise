@@ -12181,7 +12181,7 @@ func TestGenericErrorHandlerNotError(t *testing.T) {
 	expectError(t, errs, "does not inherit from error")
 }
 
-// ── Flatten annotation validation ──────────────────────────────────────────
+// Flatten annotation validation
 
 func TestFlattenBasic(t *testing.T) {
 	checkOK(t, `

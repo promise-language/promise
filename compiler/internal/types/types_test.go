@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// ── helpers ──────────────────────────────────────────────────────────
+// helpers
 
 func assertEqual(t *testing.T, got, want interface{}) {
 	t.Helper()
@@ -40,7 +40,7 @@ func makeNamed(name string) *Named {
 	return NewNamed(tn, nil)
 }
 
-// ── Named types ─────────────────────────────────────────────────────
+// Named types
 
 func TestNamed(t *testing.T) {
 	tests := []struct {
@@ -295,7 +295,7 @@ func TestNamed(t *testing.T) {
 	}
 }
 
-// ── Enum types ──────────────────────────────────────────────────────
+// Enum types
 
 func TestEnum(t *testing.T) {
 	tests := []struct {
@@ -415,7 +415,7 @@ func TestEnum(t *testing.T) {
 	}
 }
 
-// ── Signature ───────────────────────────────────────────────────────
+// Signature
 
 func TestSignature(t *testing.T) {
 	tests := []struct {
@@ -485,7 +485,7 @@ func TestSignature(t *testing.T) {
 	}
 }
 
-// ── Container types ─────────────────────────────────────────────────
+// Container types
 
 func TestContainers(t *testing.T) {
 	tests := []struct {
@@ -544,7 +544,7 @@ func TestContainers(t *testing.T) {
 	}
 }
 
-// ── Reference types ─────────────────────────────────────────────────
+// Reference types
 
 func TestRefs(t *testing.T) {
 	tests := []struct {
@@ -595,7 +595,7 @@ func TestRefs(t *testing.T) {
 	}
 }
 
-// ── TypeParam & Instance ────────────────────────────────────────────
+// TypeParam & Instance
 
 func TestTypeParam(t *testing.T) {
 	tests := []struct {
@@ -649,7 +649,7 @@ func TestTypeParam(t *testing.T) {
 	}
 }
 
-// ── Scope ───────────────────────────────────────────────────────────
+// Scope
 
 func TestScope(t *testing.T) {
 	tests := []struct {
@@ -789,7 +789,7 @@ func TestScope(t *testing.T) {
 	}
 }
 
-// ── Universe ────────────────────────────────────────────────────────
+// Universe
 
 func TestUniverse(t *testing.T) {
 	builtins := []string{
@@ -850,7 +850,7 @@ func TestUniverse(t *testing.T) {
 	})
 }
 
-// ── Identical ───────────────────────────────────────────────────────
+// Identical
 
 func TestIdentical(t *testing.T) {
 	tests := []struct {
@@ -944,7 +944,7 @@ func TestIdentical(t *testing.T) {
 	}
 }
 
-// ── Assignability ───────────────────────────────────────────────────
+// Assignability
 
 func TestAssignableTo(t *testing.T) {
 	// Set up inheritance: Dog is Animal
@@ -1079,7 +1079,7 @@ func TestAssignableTo(t *testing.T) {
 	}
 }
 
-// ── IsCopy ──────────────────────────────────────────────────────────
+// IsCopy
 
 func TestIsCopy(t *testing.T) {
 	dog := makeNamed("Dog")     // non-Copy by default
@@ -1168,7 +1168,7 @@ func TestIsCopy(t *testing.T) {
 	}
 }
 
-// ── Implements ──────────────────────────────────────────────────────
+// Implements
 
 func TestImplements(t *testing.T) {
 	// Interface: all abstract
@@ -1198,7 +1198,7 @@ func TestImplements(t *testing.T) {
 	})
 }
 
-// ── Format ──────────────────────────────────────────────────────────
+// Format
 
 func TestFormat(t *testing.T) {
 	t.Run("type_string_nil", func(t *testing.T) {
@@ -1248,7 +1248,7 @@ func TestFormat(t *testing.T) {
 	})
 }
 
-// ── Pos ─────────────────────────────────────────────────────────────
+// Pos
 
 func TestPos(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {

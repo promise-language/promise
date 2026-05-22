@@ -4,13 +4,9 @@
 use json;
 use net;
 
-// ── Error type ─────────────────��───────────────────��────────────────────────
-
 type HttpError is error `public `doc("HTTP error with an optional status code.") {
   int code;
 }
-
-// ── Method enum ─────────────────────────────────────────────────────────────
 
 enum Method `public `doc("HTTP request method.") {
   Get,
@@ -21,8 +17,6 @@ enum Method `public `doc("HTTP request method.") {
   Head,
   Options,
 }
-
-// ── Request ───────────────���─────────────────────────────────────────────────
 
 type Request `public `doc("An HTTP request.") {
   Method method;
@@ -135,8 +129,6 @@ type Request `public `doc("An HTTP request.") {
   }
 }
 
-// ── Response ───────────────��───────────────────────────────���────────────────
-
 type Response `public `doc("An HTTP response.") {
   int status;
   map[string, string] headers;
@@ -157,8 +149,6 @@ type Response `public `doc("An HTTP response.") {
   get is_success bool `public `doc("True if the status code indicates success (2xx).") => this.status >= 200 && this.status < 300;
 }
 
-// ── Server shutdown handle ───────────────────────────────────────────────────
-
 type ServerShutdownHandle `public `doc("A handle to shut down a running Server. Create before calling serve, then call shutdown from another goroutine.") {
   string _address;
   int _port;
@@ -173,8 +163,6 @@ type ServerShutdownHandle `public `doc("A handle to shut down a running Server. 
     };
   }
 }
-
-// ── Server types ─────────────────────────────────────────────────────────────
 
 type Handler `structural `public `doc("Interface for handling HTTP requests. Implement handle! to process requests.") {
   handle!(~this, ServerRequest request) ServerResponse `abstract `doc("Handle an incoming request and return a response.");
@@ -278,8 +266,6 @@ type Server `public `doc("An HTTP/1.1 server that accepts and handles requests s
   get port int `public `doc("The bound port.") => this._port;
 }
 
-// ── Convenience functions ─────────��─────────────────────────────────────────
-
 http_get!(~string url) Response `public `doc("Perform an HTTP GET request.") {
   Request req = Request.new_get(url);
   return req.send()?^;
@@ -300,8 +286,6 @@ http_post_json![T: Encodable](~string url, T data) Response `public `doc("Perfor
   return http_post(url, json_body, h)?^;
 }
 
-// ── Internal types ────────────────���─────────────────────────────────────────
-
 type _Url {
   string host;
   int port;
@@ -312,8 +296,6 @@ type _ParsedResponse {
   int status;
   map[string, string] headers;
 }
-
-// ── Internal helpers ─────────────���──────────────────────────────────────────
 
 _parse_url!(string url) _Url {
   if !url.starts_with("http://") {
@@ -494,8 +476,6 @@ _parse_hex(string s) int {
   }
   return result;
 }
-
-// ── Server internal helpers ──────────────────────────────────────────────────
 
 _string_to_method!(string s) Method {
   if s == "GET" {

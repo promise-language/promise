@@ -1,5 +1,4 @@
 // Test the io module (compiled as part of the module).
-// ── IoError / _io_strerror ───────────────────────────────────────────────────
 // flaky leak — sometimes leaks depending on timing
 strerror_known_codes() `test {
   assert(_io_strerror(1) == "operation not permitted", "errno 1");
@@ -19,8 +18,6 @@ make_io_error_test() `test {
   assert(e.message == "no such file or directory", "io error message");
 }
 
-// ── File.create / File.exists / File.remove ──────────────────────────────────
-
 file_create_exists_remove() `test(exclude: "wasm32") {
   if File.exists("/tmp/pr_iot_cer") {
     File.remove("/tmp/pr_iot_cer")?!;
@@ -31,8 +28,6 @@ file_create_exists_remove() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_cer")?!;
   assert(!File.exists("/tmp/pr_iot_cer"), "file gone after remove");
 }
-
-// ── File.write_string / File.read_all ────────────────────────────────────────
 
 file_write_read() `test(exclude: "wasm32") {
   File fw = File.create("/tmp/pr_iot_wr")?!;
@@ -45,8 +40,6 @@ file_write_read() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_wr")?!;
 }
 
-// ── File.read_content / File.write_content ───────────────────────────────────
-
 file_content_oneshot() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_rwc", "one-shot")?!;
   string d = File.read_content("/tmp/pr_iot_rwc")?!;
@@ -54,16 +47,12 @@ file_content_oneshot() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_rwc")?!;
 }
 
-// ── File.size ────────────────────────────────────────────────────────────────
-
 file_size_test() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_sz", "12345")?!;
   int sz = File.size("/tmp/pr_iot_sz")?!;
   assert(sz == 5, "size matches content length");
   File.remove("/tmp/pr_iot_sz")?!;
 }
-
-// ── File.position / File.seek ────────────────────────────────────────────────
 
 file_seek_test() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_seek", "abcdef")?!;
@@ -79,8 +68,6 @@ file_seek_test() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_seek")?!;
 }
 
-// ── File.append ──────────────────────────────────────────────────────────────
-
 file_append_test() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_app", "first")?!;
   File fa = File.append("/tmp/pr_iot_app")?!;
@@ -91,8 +78,6 @@ file_append_test() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_app")?!;
 }
 
-// ── File.create truncates ────────────────────────────────────────────────────
-
 file_truncate_test() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_trunc", "long content here")?!;
   File.write_content("/tmp/pr_iot_trunc", "short")?!;
@@ -100,8 +85,6 @@ file_truncate_test() `test(exclude: "wasm32") {
   assert(d == "short", "write_content truncates");
   File.remove("/tmp/pr_iot_trunc")?!;
 }
-
-// ── Multiple writes ──────────────────────────────────────────────────────────
 
 file_multi_write() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_multi")?!;
@@ -114,8 +97,6 @@ file_multi_write() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_multi")?!;
 }
 
-// ── Empty file ───────────────────────────────────────────────────────────────
-
 file_empty_test() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_empty", "")?!;
   string d = File.read_content("/tmp/pr_iot_empty")?!;
@@ -124,8 +105,6 @@ file_empty_test() `test(exclude: "wasm32") {
   assert(sz == 0, "empty file has size 0");
   File.remove("/tmp/pr_iot_empty")?!;
 }
-
-// ── Error: open nonexistent ──────────────────────────────────────────────────
 
 file_open_nonexistent() `test(exclude: "wasm32") {
   bool caught = false;
@@ -143,8 +122,6 @@ file_read_content_nonexistent() `test(exclude: "wasm32") {
   assert(caught, "read_content on nonexistent raises error");
 }
 
-// ── Error: remove nonexistent ────────────────────────────────────────────────
-
 file_remove_nonexistent() `test(exclude: "wasm32") {
   bool caught = false;
   File.remove("/tmp/pr_iot_rm_nofile")? e {
@@ -152,8 +129,6 @@ file_remove_nonexistent() `test(exclude: "wasm32") {
   };
   assert(caught, "remove nonexistent raises error");
 }
-
-// ── Error: double close ──────────────────────────────────────────────────────
 
 file_double_close() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_dblc")?!;
@@ -165,8 +140,6 @@ file_double_close() `test(exclude: "wasm32") {
   assert(caught, "double close raises error");
   File.remove("/tmp/pr_iot_dblc")?!;
 }
-
-// ── Dir operations ───────────────────────────────────────────────────────────
 
 dir_make_exists_remove() `test(exclude: "wasm32") {
   if Dir.exists("/tmp/pr_iot_dir") {
@@ -183,8 +156,6 @@ dir_exists_on_file() `test(exclude: "wasm32") {
   assert(!Dir.exists("/tmp/pr_iot_df"), "Dir.exists returns false for a file");
   File.remove("/tmp/pr_iot_df")?!;
 }
-
-// ── Dir.make_all ─────────────────────────────────────────────────────────────
 
 dir_make_all_nested() `test(exclude: "wasm32") {
   // Clean up first
@@ -218,8 +189,6 @@ dir_make_all_existing() `test(exclude: "wasm32") {
   assert(Dir.exists("/tmp/pr_iot_mkall2"), "still exists after make_all on existing");
   Dir.remove("/tmp/pr_iot_mkall2")?!;
 }
-
-// ── Dir.list ─────────────────────────────────────────────────────────────────
 
 dir_list_basic() `test(exclude: "wasm32") {
   // Clean up any leftovers from a previous run.
@@ -278,8 +247,6 @@ dir_list_nonexistent() `test(exclude: "wasm32") {
   };
   assert(caught, "listing nonexistent dir raises error");
 }
-
-// ── read_line (via file fd) ──────────────────────────────────────────────────
 
 read_line_from_file() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_readline", "line1\nline2\nline3")?!;
@@ -393,8 +360,6 @@ read_line_single_no_newline() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_rlsingle")?!;
 }
 
-// ── Edge cases: opening directories ──────────────────────────────────────────
-
 file_open_directory() `test(exclude: "wasm32") {
   // Opening a directory as a file should raise an error (EISDIR)
   bool caught = false;
@@ -417,8 +382,6 @@ file_create_on_directory_path() `test(exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_cdir")?!;
 }
 
-// ── Edge cases: File.exists vs Dir.exists ────────────────────────────────────
-
 file_exists_on_directory() `test(exclude: "wasm32") {
   // File.exists uses access(F_OK) — returns true for any path that exists,
   // including directories
@@ -437,8 +400,6 @@ file_exists_nonexistent() `test(exclude: "wasm32") {
 dir_exists_nonexistent() `test(exclude: "wasm32") {
   assert(!Dir.exists("/tmp/pr_iot_never_exists_xyz"), "nonexistent dir");
 }
-
-// ── Edge cases: write to readonly, read after close ──────────────────────────
 
 file_write_readonly() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_wro", "data")?!;
@@ -500,8 +461,6 @@ file_position_after_close() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_pac")?!;
 }
 
-// ── Edge cases: File.remove / Dir.remove wrong type ──────────────────────────
-
 file_remove_directory() `test(exclude: "wasm32") {
   // File.remove on a directory should fail (use Dir.remove for directories)
   if !Dir.exists("/tmp/pr_iot_frd") {
@@ -538,8 +497,6 @@ dir_remove_nonempty() `test(exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_drne")?!;
 }
 
-// ── Edge cases: Dir.make duplicate ───────────────────────────────────────────
-
 dir_make_duplicate() `test(exclude: "wasm32") {
   if !Dir.exists("/tmp/pr_iot_ddup") {
     Dir.make("/tmp/pr_iot_ddup")?!;
@@ -552,8 +509,6 @@ dir_make_duplicate() `test(exclude: "wasm32") {
   assert(caught, "Dir.make on existing dir raises error");
   Dir.remove("/tmp/pr_iot_ddup")?!;
 }
-
-// ── Edge cases: Dir.make_all ─────────────────────────────────────────────────
 
 dir_make_all_single_component() `test(exclude: "wasm32") {
   if Dir.exists("/tmp/pr_iot_mksc") {
@@ -628,8 +583,6 @@ dir_list_mixed() `test(exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_dlmix")?!;
 }
 
-// ── Edge cases: File.size ────────────────────────────────────────────────────
-
 file_size_nonexistent() `test(exclude: "wasm32") {
   bool caught = false;
   File.size("/tmp/pr_iot_szne")? e {
@@ -637,8 +590,6 @@ file_size_nonexistent() `test(exclude: "wasm32") {
   };
   assert(caught, "size of nonexistent raises error");
 }
-
-// ── Edge cases: binary data / null bytes in content ──────────────────────────
 
 file_binary_content() `test(exclude: "wasm32") {
   // Write string with embedded null byte and verify round-trip.
@@ -656,8 +607,6 @@ file_binary_content() `test(exclude: "wasm32") {
   assert(back == data, "binary round-trip");
   File.remove("/tmp/pr_iot_bin")?!;
 }
-
-// ── Edge cases: IoError fields ───────────────────────────────────────────────
 
 io_error_has_code() `test(exclude: "wasm32") {
   // Verify IoError message for ENOENT
@@ -677,8 +626,6 @@ io_error_open_root() `test(exclude: "wasm32") {
   assert(got_error, "open root dir as file should error");
 }
 
-// ── Edge cases: write empty string ───────────────────────────────────────────
-
 file_write_empty_string() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_wes")?!;
   f.write_string("")?!;
@@ -689,8 +636,6 @@ file_write_empty_string() `test(exclude: "wasm32") {
   assert(d == "hello", "empty writes are no-ops");
   File.remove("/tmp/pr_iot_wes")?!;
 }
-
-// ── File.read / File.write (byte-level) ──────────────────────────────────────
 
 file_write_read_bytes() `test(exclude: "wasm32") {
   File fw = File.create("/tmp/pr_iot_wrb")?!;
@@ -761,8 +706,6 @@ file_write_after_close_bytes() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_wacb")?!;
 }
 
-// ── File.read_line (instance method) ─────────────────────────────────────────
-
 file_read_line_method() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_frl", "alpha\nbeta\ngamma")?!;
   File f = File.open("/tmp/pr_iot_frl", readonly: true)?!;
@@ -787,8 +730,6 @@ file_read_line_method() `test(exclude: "wasm32") {
   f.close()?!;
   File.remove("/tmp/pr_iot_frl")?!;
 }
-
-// ── BufferedReader ───────────────────────────────────────────────────────────
 
 buffered_reader_basic() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_br", "hello world")?!;
@@ -874,8 +815,6 @@ buffered_reader_read_byte() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_brb")?!;
 }
 
-// ── BufferedWriter ───────────────────────────────────────────────────────────
-
 buffered_writer_basic() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_bw")?!;
   BufferedWriter w = BufferedWriter(f, buf_size: 8);
@@ -917,8 +856,6 @@ buffered_writer_write_string() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_bws")?!;
 }
 
-// ── File.write_line ──────────────────────────────────────────────────────────
-
 file_write_line() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_fwl")?!;
   f.write_line("hello")?!;
@@ -929,8 +866,6 @@ file_write_line() `test(exclude: "wasm32") {
   assert(content == "hello" + sep + "world" + sep, "file write_line");
   File.remove("/tmp/pr_iot_fwl")?!;
 }
-
-// ── BufferedWriter.write_line ────────────────────────────────────────────────
 
 buffered_writer_write_line() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_bwl")?!;
@@ -943,8 +878,6 @@ buffered_writer_write_line() `test(exclude: "wasm32") {
   assert(content == "alpha" + sep + "beta" + sep, "buffered write_line");
   File.remove("/tmp/pr_iot_bwl")?!;
 }
-
-// ── File.metadata (D0012) ───────────────────────────────────────────────────
 
 metadata_file() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_mdf", "hello")?!;
@@ -1044,4 +977,25 @@ metadata_format() `test(exclude: "wasm32") {
   assert(s.contains("file"), "format contains kind");
   assert(s.contains("size:"), "format contains size");
   File.remove("/tmp/pr_iot_mdfmt")?!;
+}
+
+metadata_uid_gid() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_mdug", "u")?!;
+  Metadata m = File.metadata("/tmp/pr_iot_mdug")?!;
+  assert(m.uid >= 0, "uid is non-negative");
+  assert(m.gid >= 0, "gid is non-negative");
+  File.remove("/tmp/pr_iot_mdug")?!;
+}
+
+metadata_no_follow_symlinks() `test(exclude: "wasm32") {
+  // When follow_symlinks=false the stat call uses lstat which returns
+  // the symlink entry itself. For a regular file there is no symlink, so
+  // results are identical to a regular stat call.
+  File.write_content("/tmp/pr_iot_mdnf", "x")?!;
+  Metadata m1 = File.metadata("/tmp/pr_iot_mdnf")?!;
+  Metadata m2 = File.metadata("/tmp/pr_iot_mdnf", follow_symlinks: false)?!;
+  assert(m1.size == m2.size, "no-follow size matches for regular file");
+  assert(m1.is_file == m2.is_file, "no-follow is_file matches");
+  assert(!m2.is_symlink, "regular file is not a symlink");
+  File.remove("/tmp/pr_iot_mdnf")?!;
 }

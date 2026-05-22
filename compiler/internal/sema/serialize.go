@@ -734,7 +734,7 @@ func (c *Checker) zeroValueExpr(typ types.Type) ast.Expr {
 	return nil
 }
 
-// ── Enum serialization ────────────────────────────────────────────────────
+// Enum serialization
 
 // isSimpleEnum returns true if no variant has data fields.
 func isSimpleEnum(enum *types.Enum) bool {
@@ -918,7 +918,7 @@ func (c *Checker) synthesizeEnumDecodeMethod(enum *types.Enum, d *ast.EnumDecl) 
 	}
 }
 
-// ── Data enum serialization (tagged object format) ────────────────────────
+// Data enum serialization (tagged object format)
 
 // synthesizeDataEnumEncodeMethod builds:
 //
@@ -1252,7 +1252,7 @@ func (c *Checker) makeDecodeError(msg string) ast.Expr {
 	}
 }
 
-// ── AST node construction helpers ─────────────────────────────────────────
+// AST node construction helpers
 
 func ident(name string) *ast.IdentExpr {
 	return &ast.IdentExpr{Name: name}

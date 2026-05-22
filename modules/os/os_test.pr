@@ -97,8 +97,6 @@ test_executable_path_is_stable() `test(exclude: "wasm32") {
   assert(exe1 == exe2, "reading executable_path twice should return the same value");
 }
 
-// ── execute tests ────────────────────────────────────────────────────────────
-
 test_execute_echo() `test(exclude: "wasm32") `target(!windows) {
   ProcessResult result = execute("echo", ["hello"])?!;
   assert(result.exit_code == 0, "echo should exit with 0");
@@ -287,8 +285,6 @@ test_execute_many_args() `test(exclude: "wasm32") `target(!windows) {
   assert(result.standard_output.starts_with("a b c d e f g h i j"), "all 10 arguments should be passed");
 }
 
-// ── execute + environment/cwd interaction tests ─────────────────────────────
-
 test_execute_inherits_env() `test(exclude: "wasm32") `target(!windows) {
   // Child process should see environment variables set by parent
   set_env_var("PROMISE_TEST_EXEC_ENV", "inherited_value");
@@ -319,8 +315,6 @@ test_execute_inherits_cwd() `test(exclude: "wasm32") `target(windows) {
   assert(cwd == "C:\\Windows", "working directory should be C:\\Windows after set");
   set_working_dir(original)?!;
 }
-
-// ── set_env_var tests ──────────────────────────────────────────
 
 test_set_env_var_new() `test(exclude: "wasm32") {
   // Set a new variable and read it back
@@ -386,8 +380,6 @@ test_set_env_var_unset_nonexistent() `test(exclude: "wasm32") {
   assert(val is absent, "nonexistent variable should remain absent");
 }
 
-// ── set_working_dir tests ─────────────────────────────────────────────
-
 test_set_working_dir() `test(exclude: "wasm32") `target(!windows) {
   // Save original, change to /usr, verify, restore
   // (avoid /tmp which is a symlink to /private/tmp on macOS)
@@ -440,8 +432,6 @@ test_set_working_dir_preserves_env() `test(exclude: "wasm32") `target(windows) {
   assert(val is present, "env var should survive cwd change");
   set_working_dir(original)?!;
 }
-
-// ── Streaming Process tests ──────────────────────────────────────────────────
 
 test_process_spawn_and_wait() `test(exclude: "wasm32") `target(!windows) {
   Process p = Process.spawn("echo", ["hello"])?!;
@@ -779,8 +769,6 @@ test_process_output_structural_reader() `test(exclude: "wasm32") `target(!window
   assert(out.trim() == "from_reader", "should read via Reader interface");
 }
 
-// ── OS info tests ────────────────────────────────────────────────────────────
-
 test_env_contains_path() `test(exclude: "wasm32") {
   map[string, string] e = env;
   // Windows stores it as "Path", POSIX as "PATH"; get_env_var is case-insensitive
@@ -882,8 +870,6 @@ test_user_name_matches_env() `test(exclude: "wasm32") `target(windows) {
     assert(name.to_lower() == u.to_lower(), "user_name should match USERNAME (case-insensitive)");
   }
 }
-
-// ── Signal handling tests ────────────────────────────────────────────────────
 
 test_signal_enum_posix_numbers() `test(exclude: "wasm32") {
   assert(Signal.Interrupt._to_posix_number() == 2, "Interrupt should be SIGINT (2)");
@@ -999,8 +985,6 @@ test_env_reflects_set() `test(exclude: "wasm32") {
   string? absent;
   set_env_var("PROMISE_TEST_ENV_MAP", absent);
 }
-
-// ── execute with custom environment tests ───────────────────────────────────
 
 test_execute_custom_env() `test(exclude: "wasm32") `target(!windows) {
   map[string, string] custom_env = map[string, string]();

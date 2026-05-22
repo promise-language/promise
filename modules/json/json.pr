@@ -2,7 +2,6 @@
 //
 // Provides JsonEncoder (is Encoder) and JsonDecoder (is Decoder) for
 // serializing and deserializing Promise values as JSON text.
-// ── JsonEncoder ─────────────────────────────────────────────────────────────
 // _JsonState tracks nesting context for comma insertion.
 enum _JsonState {
   Empty,
@@ -27,8 +26,6 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
   }
 
   to_string() string `public `doc("Returns the accumulated JSON string.") => this._buf.to_string();
-
-  // ── Internal helpers ──
 
   _write_comma(~this) {
     if this._stack.len > 0 {
@@ -103,8 +100,6 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     }
     this._buf.write_string("\"");
   }
-
-  // ── Encoder interface implementation ──
 
   encode_bool!(~this, bool value) `public {
     this._write_comma();
@@ -227,8 +222,6 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
   }
 }
 
-// ── JsonDecoder ─────────────────────────────────────────────────────────────
-
 type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Satisfies the Decoder interface.") {
   string _data;
   int _pos;
@@ -237,8 +230,6 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     this._data = data;
     this._pos = 0;
   }
-
-  // ── Internal helpers ──
 
   _skip_whitespace(~this) {
     while this._pos < this._data.len {
@@ -462,8 +453,6 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     }
   }
 
-  // ── Decoder interface implementation ──
-
   decode_bool!(~this) bool `public {
     this._skip_whitespace();
     if this._pos + 4 <= this._data.len && this._data[this._pos:this._pos + 4] == "true" {
@@ -642,8 +631,6 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
   }
 }
 
-// ── Convenience functions ───────────────────────────────────────────────────
-
 encode_string![T: Encodable](T value) string `public `doc("Serializes a value to a JSON string") {
   JsonEncoder enc = JsonEncoder();
   value.encode(enc);
@@ -661,8 +648,6 @@ encode_string_pretty![T: Encodable](T value, int indent = 2) string `public `doc
   return enc.to_string();
 }
 
-// ── JsonValue — tree-based JSON representation ──────────────────────────────
-
 enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/untyped JSON manipulation.") {
   Null,
   Bool(bool value),
@@ -670,8 +655,6 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
   Str(string value),
   Array(JsonValue[] items),
   Object(map[string, JsonValue] fields),
-
-  // ── Type-check getters ──
 
   get is_null bool `public `doc("Returns true if this value is Null.") {
     match this {
@@ -739,8 +722,6 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  // ── Value extraction methods ──
-
   as_bool(&this) bool? `public `doc("Returns the bool value if this is a Bool, or none otherwise.") {
     match this {
       JsonValue.Bool(b) => {
@@ -796,8 +777,6 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
     }
   }
 
-  // ── Convenience access methods ──
-
   get(&this, string key) JsonValue? `public `doc("Returns the value for a key if this is an Object, or none otherwise.") {
     match this {
       JsonValue.Object(fields) => {
@@ -822,8 +801,6 @@ enum JsonValue `clone `public `doc("Tree-based JSON representation for dynamic/u
       },
     }
   }
-
-  // ── Encoding/formatting methods ──
 
   encode!(&this, Encoder ~e) `public `doc("Writes this JsonValue tree to an Encoder.") {
     match this {
@@ -989,8 +966,6 @@ _parse_json_object!(JsonDecoder ~dec) JsonValue {
   }
   return JsonValue.Object(fields);
 }
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
 
 _hex_digit(int v) string {
   if v < 10 {

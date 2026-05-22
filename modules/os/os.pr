@@ -1,6 +1,5 @@
 // os module — operating system interface.
 // Requires: use os;
-// ── Extern PAL wrappers (codegen provides LLVM IR bodies) ────────────────────
 // Returns the value as string? — present if set, none if not defined.
 _os_get_env_var(string name) string? `extern("promise_os_get_env");
 
@@ -41,13 +40,9 @@ _os_read_pipe(int fd) string `extern("promise_os_read_pipe");
 // Waits for a child process to exit. Returns exit code or raises error.
 _os_wait_pid!(int pid) int `extern("promise_os_wait_pid");
 
-// ── Streaming process externs ──────────��─────────────────────────────────────
-
 // Spawns a child process with piped stdin/stdout/stderr. Returns pid or raises error.
 // Caches all 3 pipe fds in TLS — retrieve with _os_spawn_stdin_fd/_os_spawn_stdout_fd/_os_spawn_stderr_fd.
 _os_spawn_streaming!(string program, string[] args) int `extern("promise_os_spawn_streaming");
-
-// ── Environment/cwd-aware spawn externs ─────────────────────────────────────
 
 // Like _os_spawn but with optional envp and cwd.
 // env_entries is a string[] of "KEY=VALUE" entries. has_env: 1=use env_entries, 0=inherit.
@@ -72,8 +67,6 @@ _os_pipe_close(int fd) int `extern("promise_os_pipe_close");
 // Sends SIGKILL to a process. Returns 0 on success, -1 on error.
 _os_kill(int pid) int `extern("promise_os_kill");
 
-// ── OS info externs ──────────────────────────────────────────────────────────
-
 // Returns all environment variables as a string[] of "KEY=VALUE" entries.
 _os_get_environ() string[] `extern("promise_os_get_environ");
 
@@ -92,8 +85,6 @@ _os_get_home_dir() string `extern("promise_os_get_home_dir");
 // Returns the system hostname.
 _os_get_hostname() string `extern("promise_os_get_hostname");
 
-// ── Signal externs ───────────────────────────────────────────────────────────
-
 // Creates signal pipe and handler. Returns pipe read fd (or -1 on error).
 _os_signal_init() int `extern("promise_os_signal_init");
 
@@ -109,21 +100,15 @@ _os_send_signal(int pid, int signum) int `extern("promise_os_send_signal");
 // Returns the current process ID.
 _os_get_pid() int `extern("promise_os_get_pid");
 
-// ── Error type ───────────────────────────────────────────────────────────────
-
 type OsError is error `public `doc("An operating system error.") {
   int code;
 }
-
-// ── Result types ─────────────────────────────────────────────────────────────
 
 type ProcessResult `public `doc("The result of executing a subprocess. Contains the exit code and captured standard output and standard error.") {
   int exit_code;
   string standard_output;
   string standard_error;
 }
-
-// ── ProcessInput (satisfies Writer) ──────────────────────────────────────────
 
 type ProcessInput `public `doc("Write end of a subprocess stdin pipe. Satisfies the Writer structural interface. Auto-closes on drop.") {
   int _fd;
@@ -167,8 +152,6 @@ type ProcessInput `public `doc("Write end of a subprocess stdin pipe. Satisfies 
     }
   }
 }
-
-// ── ProcessOutput (satisfies Reader) ─────────────────────────────────────────
 
 type ProcessOutput `public `doc("Read end of a subprocess stdout or stderr pipe. Satisfies the Reader structural interface. Auto-closes on drop.") {
   int _fd;
@@ -215,8 +198,6 @@ type ProcessOutput `public `doc("Read end of a subprocess stdout or stderr pipe.
     }
   }
 }
-
-// ── Process ──────────────────────────────────────────────────────────────────
 
 type Process `public `doc("A running subprocess with piped stdin, stdout, and stderr. Created via Process.spawn(). Pipe handles are obtained via take_standard_input(), take_standard_output(), and take_standard_error(), which transfer ownership of the pipe out of the Process. The Process must be waited on (or dropped) to avoid zombie processes.") {
   int _pid;
@@ -324,8 +305,6 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
   }
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
-
 get_env_var(string name) string? `public `doc("Returns the value of the named environment variable. Returns none if the variable is not defined. An empty string is returned when the variable is set but empty.") {
   return _os_get_env_var(name);
 }
@@ -388,8 +367,6 @@ execute!(string program, string[] args, map[string, string]? environment, string
   return ProcessResult(exit_code: exit_code, standard_output: stdout, standard_error: stderr);
 }
 
-// ── OS info getters ──────────────────────────────────────────────────────────
-
 get env map[string, string] `public `doc("Returns all environment variables as a map from variable name to value. Each entry is parsed from the process environment.") {
   map[string, string] result = map[string, string]();
   string[] entries = _os_get_environ();
@@ -426,8 +403,6 @@ get hostname string `public `doc("Returns the hostname of the machine. Returns a
 get process_id int `public `doc("Returns the process ID (pid) of the current process.") {
   return _os_get_pid();
 }
-
-// ── Signal handling ──────────────────────────────────────────────────────────
 
 enum Signal `public `doc("A POSIX signal type. Use with setup_signal_handling() and receive_signal() to handle signals.") {
   Interrupt `doc("SIGINT (2) — sent by Ctrl+C."),

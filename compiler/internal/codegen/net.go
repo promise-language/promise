@@ -144,7 +144,7 @@ func (c *Compiler) defineNetPALBodies() {
 	// no bridge bodies needed.
 }
 
-// ── Socket bridge functions ─────────────────────────────────────────────────
+// Socket bridge functions
 
 // defineNetSocketCreateBody: void @promise_net_socket_create(i8* sret, i8* domain, i8* typ, i8* protocol)
 func (c *Compiler) defineNetSocketCreateBody(fn *ir.Func) {
@@ -358,7 +358,7 @@ func (c *Compiler) defineNetSocketSetNonBlockBody(fn *ir.Func) {
 	entry.NewRet(nil)
 }
 
-// ── Reactor bridge functions ────────────────────────────────────────────────
+// Reactor bridge functions
 
 // defineNetNetpollOpenBody: void @promise_net_netpoll_open(i8* sret, i8* fd)
 // Calls promise_netpoll_open(i32 fd) → i8* (PollDesc*), returns as Promise int.

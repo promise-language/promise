@@ -4,7 +4,6 @@
 // Uses the M:N scheduler's IO reactor for goroutine parking: when a socket
 // would block (EAGAIN), the goroutine suspends via coro.suspend and is woken
 // by the reactor poller thread when the fd becomes ready.
-// ── Extern PAL wrappers (codegen provides LLVM IR bodies) ────────────────────
 // Socket operations return -errno on failure.
 _net_socket_create(int domain, int typ, int protocol) int `extern("promise_net_socket_create");
 _net_socket_bind_addr(int fd, string host, int port) int `extern("promise_net_socket_bind_addr");
@@ -26,8 +25,6 @@ _net_netpoll_open(int fd) int `extern("promise_net_netpoll_open");
 _net_netpoll_close(int pd) `extern("promise_net_netpoll_close");
 _net_netpoll_wait_read(int pd) `extern("promise_netpoll_wait_read");
 _net_netpoll_wait_write(int pd) `extern("promise_netpoll_wait_write");
-
-// ── Platform-specific errno constants ────────────────────────────────────────
 
 _eagain() int `target(macos) {
   return 35;
@@ -53,8 +50,6 @@ _einprogress() int `target(wasm) {
 _einprogress() int `target(windows) {
   return 10035; // WSAEWOULDBLOCK (Windows uses this for non-blocking connect in progress)
 }
-
-// ── Error type ──────────────────────────────────────────────────────────────
 
 type NetError is error `public `doc("A network I/O error with an errno code.") {
   int code;
@@ -93,8 +88,6 @@ _net_strerror(int code) string {
   };
 }
 
-// ── AF/SOCK constants ────────────────────────────────────────────────────────
-
 _af_inet() int {
   return 2;
 }
@@ -102,8 +95,6 @@ _af_inet() int {
 _sock_stream() int {
   return 1;
 }
-
-// ── TcpListener ──────────────────────────────────────────────────────────────
 
 type TcpListener `public `doc("A TCP listener socket. Binds to an address and accepts incoming connections. Auto-closes on drop.") {
   int _fd;
@@ -178,8 +169,6 @@ type TcpListener `public `doc("A TCP listener socket. Binds to an address and ac
     }
   }
 }
-
-// ─ TcpStream ──────────────────────────────────────────────────────────────
 
 type TcpStream `public `doc("A TCP connection stream. Supports non-blocking read/write with reactor-based goroutine parking. Auto-closes on drop.") {
   int _fd;

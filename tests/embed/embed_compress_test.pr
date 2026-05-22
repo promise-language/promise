@@ -34,3 +34,20 @@ embed_compressed_repeat_call_test() `test {
   string b = small_compressed;
   assert(a == b, "repeat calls return equal data");
 }
+
+embed_compress_fixture_no_line_endings_test() `test {
+  // T0437 regression guard: compress_fixture.txt must contain no LF (0x0A) or
+  // CR (0x0D) bytes. With LFs present, Windows core.autocrlf=true converts
+  // them to CRLF at smudge time, inflating the file from 11300 to 11350 and
+  // breaking the round-trip length assertion. Scanning the decompressed
+  // string is equivalent to scanning the source — gzip round-trips byte for
+  // byte.
+  string s = large_compressed;
+  int i = 0;
+  while i < s.len {
+    int b = s.byte_at(i) as! int;
+    assert(b != 10, "fixture contains LF; Windows CRLF conversion would break length round-trip");
+    assert(b != 13, "fixture contains CR; Windows CRLF conversion would break length round-trip");
+    i = i + 1;
+  }
+}

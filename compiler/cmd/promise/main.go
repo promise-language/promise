@@ -404,9 +404,9 @@ func runEmitIR(args []string) {
 }
 
 // mainFuncRe matches a top-level main() function declaration in Promise source.
-// Matches: main() { ... }, main() Type { ... }, main() ! { ... }
+// Matches: main() { ... }, main!() { ... }, main() Type { ... }, main() ! { ... }
 // Avoids matching: comments, strings, or nested/indented declarations.
-var mainFuncRe = regexp.MustCompile(`(?m)^main\s*\(`)
+var mainFuncRe = regexp.MustCompile(`(?m)^main\s*!?\s*\(`)
 
 // discoverMainFile finds the entry point .pr file for a project directory.
 // Discovery rules (in order):

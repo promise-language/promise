@@ -134,6 +134,13 @@ type Compiler struct {
 	nextTypeID      int32
 	typeInfoGlobals map[*types.Named]*ir.Global
 
+	// T0387: synthesized clone functions for polymorphic dispatch in dupHeapValue.
+	// Each concrete heap user type gets a clone fn that allocs + memcpy's using its
+	// own static layout, then dups droppable sub-fields. Reached via the
+	// clone_fn_ptr slot in typeinfo when dupHeapValue dispatches polymorphically.
+	typeCloneFns     map[*types.Named]*ir.Func
+	monoTypeCloneFns map[string]*ir.Func
+
 	// VTable state
 	hasChildren               map[*types.Named]bool        // true if any type declares `is ThisType`
 	vtableGlobals             map[*types.Named]*ir.Global  // type → @promise_vtable_TypeName
@@ -655,6 +662,8 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		typeIDs:            make(map[*types.Named]int32),
 		nextTypeID:         1, // 0 reserved for "no type info"
 		typeInfoGlobals:    make(map[*types.Named]*ir.Global),
+		typeCloneFns:       make(map[*types.Named]*ir.Func),
+		monoTypeCloneFns:   make(map[string]*ir.Func),
 		hasChildren:        make(map[*types.Named]bool),
 		vtableGlobals:      make(map[*types.Named]*ir.Global),
 		viewVtables:        make(map[viewVtableKey]*ir.Global),
@@ -2719,6 +2728,10 @@ func (c *Compiler) defineMutexDropBody(fn *ir.Func, elemType types.Type) {
 // instance, memcpy'ing the original, and dup'ing any droppable sub-fields.
 // B0236: Used for match destructure of droppable enums where extracted heap
 // user type values would otherwise share instance pointers with enum data.
+// T0387: For polymorphic types (those needing a vtable), dispatches to a
+// per-concrete-type clone fn via typeinfo's clone_fn_ptr so the runtime concrete
+// subtype is duplicated correctly (right size + sub-field dup matching the
+// concrete layout). The static path is used otherwise.
 func (c *Compiler) dupHeapValue(val value.Value, resolvedType types.Type) value.Value {
 	named := extractNamed(resolvedType)
 	layout := c.lookupTypeLayout(resolvedType)
@@ -2726,9 +2739,6 @@ func (c *Compiler) dupHeapValue(val value.Value, resolvedType types.Type) value.
 		// No layout found — return as-is (shouldn't happen for heap user types)
 		return val
 	}
-
-	instanceStructType := layout.Instance.LLVMType
-	instancePtrType := layout.InstancePtrType
 
 	// Extract instance pointer from value struct (field 1)
 	instancePtr := c.extractInstancePtr(val)
@@ -2742,23 +2752,54 @@ func (c *Compiler) dupHeapValue(val value.Value, resolvedType types.Type) value.
 
 	c.block = dupBlock
 
-	// Compute instance size via GEP-from-null trick
-	nullPtr := constant.NewNull(instancePtrType)
-	sizePtr := c.block.NewGetElementPtr(instanceStructType, nullPtr,
-		constant.NewInt(irtypes.I32, 1))
-	sizeRaw := c.block.NewPtrToInt(sizePtr, c.ptrIntType())
-	var size value.Value = sizeRaw
-	if c.isWasm {
-		size = c.block.NewZExt(sizeRaw, irtypes.I64)
+	var newPtr value.Value
+	if named != nil && c.needsVtable(named) {
+		// T0387: Polymorphic dispatch via typeinfo's clone_fn_ptr.
+		// For polymorphic types, the runtime concrete subtype may have a different
+		// size and additional droppable fields beyond the static layout. Loading
+		// the clone fn from typeinfo (set up by maybeSynthesizeCloneFn) ensures we
+		// allocate + memcpy the right size and dup the right fields.
+		variantPtr := c.loadVariantPtr(instancePtr)
+		typeinfoType := irtypes.NewStruct(
+			irtypes.I8Ptr, // 0: vtable_ptr
+			irtypes.I8Ptr, // 1: drop_fn_ptr
+			irtypes.I8Ptr, // 2: clone_fn_ptr
+		)
+		typedTI := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoType))
+		cloneFnField := c.block.NewGetElementPtr(typeinfoType, typedTI,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+		cloneFn := c.block.NewLoad(irtypes.I8Ptr, cloneFnField)
+
+		// If clone_fn is null (e.g., abstract base or types not eligible for synth
+		// clone), fall back to the static path so dupHeapValue still produces a copy.
+		isNull := c.block.NewICmp(enum.IPredEQ, cloneFn, constant.NewNull(irtypes.I8Ptr))
+		dispatchBlk := c.newBlock("heapdup.dispatch")
+		staticBlk := c.newBlock("heapdup.static")
+		dynMergeBlk := c.newBlock("heapdup.dyn_merge")
+		c.block.NewCondBr(isNull, staticBlk, dispatchBlk)
+
+		// Dynamic dispatch through the typeinfo clone fn pointer.
+		c.block = dispatchBlk
+		cloneFnType := irtypes.NewFunc(irtypes.I8Ptr, irtypes.I8Ptr)
+		typedFn := c.block.NewBitCast(cloneFn, irtypes.NewPointer(cloneFnType))
+		dynNewPtr := c.block.NewCall(typedFn, instancePtr)
+		dispatchEnd := c.block
+		dispatchEnd.NewBr(dynMergeBlk)
+
+		// Static fallback for null clone fn pointer.
+		c.block = staticBlk
+		staticNewPtr := c.dupHeapValueStatic(instancePtr, resolvedType, layout)
+		staticEnd := c.block
+		staticEnd.NewBr(dynMergeBlk)
+
+		c.block = dynMergeBlk
+		newPtr = c.block.NewPhi(
+			ir.NewIncoming(dynNewPtr, dispatchEnd),
+			ir.NewIncoming(staticNewPtr, staticEnd),
+		)
+	} else {
+		newPtr = c.dupHeapValueStatic(instancePtr, resolvedType, layout)
 	}
-
-	// Allocate and memcpy
-	newPtr := c.block.NewCall(c.palAlloc, size)
-	c.block.NewCall(c.funcs["llvm.memcpy"], newPtr, instancePtr, size, constant.False)
-
-	// Dup droppable sub-fields in the new instance
-	typedNewPtr := c.block.NewBitCast(newPtr, instancePtrType)
-	c.dupHeapValueFields(named, resolvedType, layout, typedNewPtr)
 
 	// Build new value struct: same vtable, new instance pointer
 	vtablePtr := c.extractVtablePtr(val)
@@ -2774,6 +2815,32 @@ func (c *Compiler) dupHeapValue(val value.Value, resolvedType types.Type) value.
 		ir.NewIncoming(val, entryBlock),
 		ir.NewIncoming(newVal2, dupEnd),
 	)
+}
+
+// dupHeapValueStatic emits the static (non-polymorphic) duplication path:
+// allocate using the static layout's size, memcpy from the source instance,
+// and dup droppable sub-fields. Used directly for non-polymorphic types and as
+// a fallback when typeinfo's clone_fn_ptr is null (T0387).
+func (c *Compiler) dupHeapValueStatic(instancePtr value.Value, resolvedType types.Type, layout *TypeDeclLayout) value.Value {
+	named := extractNamed(resolvedType)
+	instanceStructType := layout.Instance.LLVMType
+	instancePtrType := layout.InstancePtrType
+
+	nullPtr := constant.NewNull(instancePtrType)
+	sizePtr := c.block.NewGetElementPtr(instanceStructType, nullPtr,
+		constant.NewInt(irtypes.I32, 1))
+	sizeRaw := c.block.NewPtrToInt(sizePtr, c.ptrIntType())
+	var size value.Value = sizeRaw
+	if c.isWasm {
+		size = c.block.NewZExt(sizeRaw, irtypes.I64)
+	}
+
+	newPtr := c.block.NewCall(c.palAlloc, size)
+	c.block.NewCall(c.funcs["llvm.memcpy"], newPtr, instancePtr, size, constant.False)
+
+	typedNewPtr := c.block.NewBitCast(newPtr, instancePtrType)
+	c.dupHeapValueFields(named, resolvedType, layout, typedNewPtr)
+	return newPtr
 }
 
 // dupHeapValueFields walks the fields of a heap user type instance and dups
@@ -2823,6 +2890,22 @@ func (c *Compiler) dupHeapValueFields(named *types.Named, resolvedType types.Typ
 		} else if _, isChan := types.AsChannel(fType); isChan || fNamed == types.TypChannel {
 			dup := c.dupChannel(fieldVal)
 			c.block.NewStore(dup, fieldPtr)
+		} else if _, isArc := types.AsArc(fType); isArc || fNamed == types.TypArc {
+			dup := c.dupArc(fieldVal)
+			c.block.NewStore(dup, fieldPtr)
+		} else if _, isWeak := types.AsWeak(fType); isWeak || fNamed == types.TypWeak {
+			elemType := fType
+			if w, ok := types.AsWeak(fType); ok {
+				elemType = w
+			}
+			dup := c.dupWeak(fieldVal, elemType)
+			c.block.NewStore(dup, fieldPtr)
+		} else if isOpaqueContainerType(fType) {
+			// T0387: Other opaque container types (Task, Mutex, MutexGuard) lack a
+			// generic dup helper — leave the memcpy'd pointer as-is. Cloning a user
+			// type with such fields is a separate concern; leaving the field shallow
+			// at least avoids generating broken IR. The original use of dupHeapValue
+			// (B0236 match destructure) had the same limitation.
 		} else if !fNamed.IsValueType() && !fNamed.IsCopy() && !isPrimitiveScalar(fNamed) && !fNamed.IsStructural() {
 			// Nested heap user type — recursive dup
 			dup := c.dupHeapValue(fieldVal, fType)
@@ -7507,6 +7590,16 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			if dropFn, ok := c.funcs["Channel.drop"]; ok {
 				c.block.NewCall(dropFn, fieldVal)
 			}
+			return
+		}
+		// T0387: Polymorphic heap user type — dispatch through typeinfo's
+		// drop_fn_ptr so subclass-only droppable fields (e.g. a string field on
+		// Container is Shape) are reached. The static-type drop walk would only
+		// see Shape's fields (or none), missing Container's string. Symmetric
+		// with the polymorphic clone dispatch in dupHeapValue.
+		if c.needsVtable(named) && !named.IsStructural() && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) {
+			instance := c.extractInstancePtr(fieldVal)
+			c.emitStructuralInstanceDrop(instance)
 			return
 		}
 		// User type with explicit or synthesized drop: extract instance ptr and call drop.

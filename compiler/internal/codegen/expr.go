@@ -241,24 +241,11 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 				// the walk is unconditionally safe. T0371 made the walk safe for
 				// tuple element types as well — genTupleLit now claims
 				// heap-tracked field temps, so the buffer-walk is the unique
-				// drop site. Carve-out:
-				//   - Polymorphic element types (those needing a vtable) — the
-				//     push dup is suppressed because cloneHeapElement uses the
-				//     static layout and would truncate subtypes; symmetrically,
-				//     the slice walk must also be suppressed so the slice does
-				//     not double-free against the source's element walk.
+				// drop site. T0387 removed the polymorphic carve-out: dupHeapValue
+				// now dispatches through typeinfo.clone_fn_ptr for polymorphic
+				// types so the slice owns independent concrete subtype copies.
 				if elemType, ok := types.AsVector(rt); ok {
-					skipWalkForPolymorphic := false
-					if en := extractNamed(elemType); en != nil && c.needsVtable(en) {
-						skipWalkForPolymorphic = true
-					}
-					if skipWalkForPolymorphic {
-						if fn := c.funcs["Vector.drop"]; fn != nil {
-							c.trackHeapTemp(result, fn)
-						}
-					} else {
-						c.trackVectorHeapTempWithElemType(result, elemType)
-					}
+					c.trackVectorHeapTempWithElemType(result, elemType)
 				}
 			}
 		}
@@ -4683,23 +4670,14 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 				// getters) also return fresh values and can't be safely
 				// distinguished from field access at this layer.
 				//
-				// Skip the dup for polymorphic element types (those needing a
-				// vtable). cloneHeapElement → dupHeapValue uses the *static*
-				// element layout for the memcpy size, which truncates concrete
-				// subtypes (e.g., Circle → Shape size, dropping radius). For
-				// those, fall back to no-dup; the slice tracking site below
-				// suppresses the element walk for the same reason, restoring
-				// pre-T0376 behavior (slice slots alias the source — safe iff
-				// the source outlives the slice).
-				skipForPolymorphic := false
-				if rn := extractNamed(resolvedElem); rn != nil && c.needsVtable(rn) {
-					skipForPolymorphic = true
-				}
-				if !skipForPolymorphic {
-					if dupVal := c.maybeDupPushElement(argVal, resolvedElem); dupVal != nil {
-						argVal = dupVal
-						dupped = true
-					}
+				// T0387: Polymorphic element types (those needing a vtable) are
+				// no longer carved out. dupHeapValue → maybeDupPushElement →
+				// cloneHeapElement falls through to dupHeapValue, which now
+				// dispatches via typeinfo.clone_fn_ptr to the runtime concrete
+				// type's clone fn — independent copy with full subtype data.
+				if dupVal := c.maybeDupPushElement(argVal, resolvedElem); dupVal != nil {
+					argVal = dupVal
+					dupped = true
 				}
 			}
 			if !dupped {

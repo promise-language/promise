@@ -99,9 +99,12 @@ func (c *Compiler) collectMonoParentIDs(named *types.Named, subst map[*types.Typ
 }
 
 // emitTypeInfo creates a global type info constant for a Named type.
-// Layout: { i8* vtable_ptr, i8* drop_fn_ptr, i32 type_id, i32 num_parents, [N x i32] parent_ids }
+// Layout: { i8* vtable_ptr, i8* drop_fn_ptr, i8* clone_fn_ptr, i32 type_id, i32 num_parents, [N x i32] parent_ids }
 // B0226: drop_fn_ptr enables runtime dispatch to the correct drop function for
 // untyped error catches (where the concrete error type isn't known at compile time).
+// T0387: clone_fn_ptr enables runtime dispatch to the correct synthesized clone
+// function in dupHeapValue, so polymorphic vector slicing produces independent
+// copies of the concrete subtype (rather than truncating via the static layout).
 func (c *Compiler) emitTypeInfo(named *types.Named) *ir.Global {
 	typeID := c.assignTypeID(named)
 	parentIDs := c.collectAllParentIDs(named)
@@ -120,12 +123,15 @@ func (c *Compiler) emitTypeInfo(named *types.Named) *ir.Global {
 	// Field 1: drop function pointer (B0226)
 	fields = append(fields, c.resolveTypeInfoDropFn(named.Obj().Name(), named))
 
+	// Field 2: clone function pointer (T0387)
+	fields = append(fields, c.resolveTypeInfoCloneFn(named))
+
 	fields = append(fields, constant.NewInt(irtypes.I32, int64(typeID)))
 	fields = append(fields, constant.NewInt(irtypes.I32, int64(numParents)))
 
 	if numParents > 0 {
 		arrayType := irtypes.NewArray(uint64(numParents), irtypes.I32)
-		structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32, arrayType)
+		structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32, arrayType)
 
 		var parentConsts []constant.Constant
 		for _, pid := range parentIDs {
@@ -134,7 +140,7 @@ func (c *Compiler) emitTypeInfo(named *types.Named) *ir.Global {
 		parentArray := constant.NewArray(arrayType, parentConsts...)
 		fields = append(fields, parentArray)
 	} else {
-		structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
+		structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
 	}
 
 	init := constant.NewStruct(structType, fields...)
@@ -166,6 +172,134 @@ func (c *Compiler) resolveTypeInfoDropFn(ownerName string, named *types.Named) c
 		}
 	}
 	return constant.NewNull(irtypes.I8Ptr)
+}
+
+// resolveTypeInfoCloneFn resolves the clone function pointer for a type's typeinfo.
+// Returns a bitcast to i8* of the synthesized clone function, or null if no clone
+// fn was synthesized for this type.
+// T0387: Used to populate the typeinfo clone_fn_ptr field for runtime dispatch in
+// dupHeapValue when the static element type is polymorphic.
+func (c *Compiler) resolveTypeInfoCloneFn(named *types.Named) constant.Constant {
+	if fn, ok := c.typeCloneFns[named]; ok && fn != nil {
+		return constant.NewBitCast(fn, irtypes.I8Ptr)
+	}
+	return constant.NewNull(irtypes.I8Ptr)
+}
+
+// maybeSynthesizeCloneFn synthesizes a per-type clone function for a concrete heap
+// user type. The clone takes an i8* instance pointer and returns a freshly malloc'd
+// i8* instance pointer with all droppable sub-fields independently dup'd.
+// T0387: Stored in typeinfo at field 2 (clone_fn_ptr) so dupHeapValue can dispatch
+// to the runtime concrete type rather than truncating via the static layout.
+//
+// owner is *types.Named (non-generic) or *types.Instance (mono). globalName is the
+// IR symbol prefix (e.g. "Shape" or "Box__int"). layout/subst are nil for non-generic
+// owners — looked up via lookupTypeLayout in that case.
+func (c *Compiler) maybeSynthesizeCloneFn(named *types.Named, owner types.Type, globalName string, layout *TypeDeclLayout, subst map[*types.TypeParam]types.Type) {
+	// Eligibility: only concrete heap user types. Abstract/value/copy/structural
+	// types are skipped — none can reach dupHeapValue's polymorphic path.
+	if named.IsAbstract() || named.IsValueType() || named.IsCopy() || named.IsStructural() {
+		return
+	}
+	if isPrimitiveScalar(named) {
+		return
+	}
+	// Opaque container types (Vector, Channel, Task, Arc, Weak, Mutex, MutexGuard)
+	// are stored as raw i8* buffers — their dup goes through type-specific helpers
+	// (dupVector, dupChannel, dupArc, dupWeak), not the synthesized clone path.
+	if isOpaqueContainerType(owner) {
+		return
+	}
+	// Skip generic origin types in the non-mono path; their mono instances handle clone.
+	if owner == named && len(named.TypeParams()) > 0 {
+		return
+	}
+	// Don't double-emit
+	if owner == named {
+		if _, exists := c.typeCloneFns[named]; exists {
+			return
+		}
+	} else {
+		if _, exists := c.monoTypeCloneFns[globalName]; exists {
+			return
+		}
+	}
+
+	// Resolve layout
+	if layout == nil {
+		layout = c.lookupTypeLayout(owner)
+	}
+	if layout == nil || layout.Instance == nil || layout.InstancePtrType == nil {
+		return
+	}
+	// Only user types have heap layouts compatible with the synth clone path.
+	// Strings, primitives, opaque containers, and enums use specialized clones.
+	if layout.Kind != LayoutUserType {
+		return
+	}
+
+	cloneFnName := globalName + ".__clone"
+	if _, exists := c.funcs[cloneFnName]; exists {
+		return
+	}
+
+	param := ir.NewParam("instance", irtypes.I8Ptr)
+	fn := c.module.NewFunc(cloneFnName, irtypes.I8Ptr, param)
+	c.funcs[cloneFnName] = fn
+	if owner == named {
+		c.typeCloneFns[named] = fn
+	} else {
+		c.monoTypeCloneFns[globalName] = fn
+	}
+	if c.compilingModule != "" {
+		c.moduleOwnedFuncs[cloneFnName] = c.compilingModule
+	}
+
+	// Build body with full state save/restore so we can reuse dupHeapValueFields.
+	saved := c.saveState()
+	defer c.restoreState(saved)
+	c.fn = fn
+	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
+	c.typeSubst = subst
+	if inst, ok := owner.(*types.Instance); ok {
+		c.monoCtx = &monoContext{inst: inst, origin: named, name: globalName}
+	} else {
+		c.monoCtx = nil
+	}
+
+	entry := fn.NewBlock(".entry")
+	c.block = entry
+	c.entryBlock = entry
+
+	// Null check on the input
+	isNull := c.block.NewICmp(enum.IPredEQ, param, constant.NewNull(irtypes.I8Ptr))
+	allocBlk := fn.NewBlock("clone.alloc")
+	nullBlk := fn.NewBlock("clone.null")
+	c.block.NewCondBr(isNull, nullBlk, allocBlk)
+
+	nullBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+
+	c.block = allocBlk
+	instanceStructType := layout.Instance.LLVMType
+	instancePtrType := layout.InstancePtrType
+
+	// Compute size via GEP-from-null
+	nullPtr := constant.NewNull(instancePtrType)
+	sizePtr := c.block.NewGetElementPtr(instanceStructType, nullPtr,
+		constant.NewInt(irtypes.I32, 1))
+	sizeRaw := c.block.NewPtrToInt(sizePtr, c.ptrIntType())
+	var size value.Value = sizeRaw
+	if c.isWasm {
+		size = c.block.NewZExt(sizeRaw, irtypes.I64)
+	}
+
+	newPtr := c.block.NewCall(c.palAlloc, size)
+	c.block.NewCall(c.funcs["llvm.memcpy"], newPtr, param, size, constant.False)
+
+	typedNewPtr := c.block.NewBitCast(newPtr, instancePtrType)
+	c.dupHeapValueFields(named, owner, layout, typedNewPtr)
+	c.block.NewRet(newPtr)
 }
 
 // getOrCreateDropWrap returns a wrapper function that calls the given drop function
@@ -241,6 +375,25 @@ func (c *Compiler) emitVtableGlobals(file *ast.File) {
 // emitTypeInfoGlobals creates global type info constants for all user types in the file.
 // Generic types are skipped (they get type info through monomorphization).
 func (c *Compiler) emitTypeInfoGlobals(file *ast.File) {
+	// First pass: synthesize per-type clone functions so the typeinfo can
+	// reference them (T0387). Done as a separate pass so all clone fns are
+	// declared before any typeinfo emits, which lets typeinfo also reference
+	// clone fns of other types (e.g. for nested polymorphic dispatch).
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil {
+			continue
+		}
+		if len(named.TypeParams()) > 0 {
+			continue
+		}
+		c.maybeSynthesizeCloneFn(named, named, named.Obj().Name(), nil, nil)
+	}
+
 	for _, decl := range file.Decls {
 		td, ok := decl.(*ast.TypeDecl)
 		if !ok {
@@ -373,6 +526,24 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 		}
 	}
 
+	// Pass 1b: synthesize per-mono clone functions so typeinfo can reference them (T0387).
+	for _, inst := range instances {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok || len(named.TypeParams()) == 0 {
+			continue
+		}
+		name := monoName(inst)
+		if _, exists := c.monoTypeInfoGlobals[name]; exists {
+			continue
+		}
+		layout := c.monoLayouts[name]
+		if layout == nil {
+			continue
+		}
+		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+		c.maybeSynthesizeCloneFn(named, inst, name, layout, subst)
+	}
+
 	// Pass 2: emit typeinfo globals using the pre-assigned IDs
 	for _, inst := range instances {
 		named, ok := inst.Origin().(*types.Named)
@@ -436,12 +607,19 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 		}
 		fields = append(fields, dropFnConst)
 
+		// Field 2: clone function pointer (T0387)
+		cloneFnConst := constant.Constant(constant.NewNull(irtypes.I8Ptr))
+		if fn, ok := c.monoTypeCloneFns[name]; ok {
+			cloneFnConst = constant.NewBitCast(fn, irtypes.I8Ptr)
+		}
+		fields = append(fields, cloneFnConst)
+
 		fields = append(fields, constant.NewInt(irtypes.I32, int64(typeID)))
 		fields = append(fields, constant.NewInt(irtypes.I32, int64(numParents)))
 
 		if numParents > 0 {
 			arrayType := irtypes.NewArray(uint64(numParents), irtypes.I32)
-			structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32, arrayType)
+			structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32, arrayType)
 			var parentConsts []constant.Constant
 			for _, pid := range parentIDs {
 				parentConsts = append(parentConsts, constant.NewInt(irtypes.I32, int64(pid)))
@@ -449,7 +627,7 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 			parentArray := constant.NewArray(arrayType, parentConsts...)
 			fields = append(fields, parentArray)
 		} else {
-			structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
+			structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I32, irtypes.I32)
 		}
 
 		init := constant.NewStruct(structType, fields...)
@@ -476,20 +654,22 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 // defineTypeIsFunc emits an LLVM IR function that checks if a type identified
 // by its variant pointer is or inherits from the expected type ID.
 // Replaces the C runtime promise_type_is.
-// Typeinfo layout: { i8* vtable_ptr, i8* drop_fn_ptr, i32 type_id, i32 num_parents, [0 x i32] parent_ids }
+// Typeinfo layout: { i8* vtable_ptr, i8* drop_fn_ptr, i8* clone_fn_ptr, i32 type_id, i32 num_parents, [0 x i32] parent_ids }
 func (c *Compiler) defineTypeIsFunc() {
 	variantParam := ir.NewParam("variant_ptr", irtypes.I8Ptr)
 	expectedParam := ir.NewParam("expected_id", irtypes.I32)
 	fn := c.module.NewFunc("promise_type_is", irtypes.I32, variantParam, expectedParam)
 
 	// Typeinfo struct type with flexible array member for parent_ids
-	// B0226: field 1 is drop_fn_ptr, shifting type_id to field 2, etc.
+	// B0226: field 1 is drop_fn_ptr.
+	// T0387: field 2 is clone_fn_ptr, shifting type_id to field 3, etc.
 	typeinfoType := irtypes.NewStruct(
 		irtypes.I8Ptr,                    // field 0: vtable_ptr
 		irtypes.I8Ptr,                    // field 1: drop_fn_ptr (B0226)
-		irtypes.I32,                      // field 2: type_id
-		irtypes.I32,                      // field 3: num_parents
-		irtypes.NewArray(0, irtypes.I32), // field 4: parent_ids (flexible)
+		irtypes.I8Ptr,                    // field 2: clone_fn_ptr (T0387)
+		irtypes.I32,                      // field 3: type_id
+		irtypes.I32,                      // field 4: num_parents
+		irtypes.NewArray(0, irtypes.I32), // field 5: parent_ids (flexible)
 	)
 
 	zero32 := constant.NewInt(irtypes.I32, 0)
@@ -508,15 +688,15 @@ func (c *Compiler) defineTypeIsFunc() {
 	isNull := entry.NewICmp(enum.IPredEQ, variantParam, constant.NewNull(irtypes.I8Ptr))
 	entry.NewCondBr(isNull, retFalseBlk, checkID)
 
-	// check_id: load type_id (field 2), compare with expected_id
+	// check_id: load type_id (field 3), compare with expected_id
 	typedPtr := checkID.NewBitCast(variantParam, irtypes.NewPointer(typeinfoType))
-	tidPtr := checkID.NewGetElementPtr(typeinfoType, typedPtr, zero32, constant.NewInt(irtypes.I32, 2))
+	tidPtr := checkID.NewGetElementPtr(typeinfoType, typedPtr, zero32, constant.NewInt(irtypes.I32, 3))
 	typeID := checkID.NewLoad(irtypes.I32, tidPtr)
 	match := checkID.NewICmp(enum.IPredEQ, typeID, expectedParam)
 	checkID.NewCondBr(match, retTrueBlk, loopInit)
 
-	// loop_init: load num_parents (field 3), check if > 0
-	npPtr := loopInit.NewGetElementPtr(typeinfoType, typedPtr, zero32, constant.NewInt(irtypes.I32, 3))
+	// loop_init: load num_parents (field 4), check if > 0
+	npPtr := loopInit.NewGetElementPtr(typeinfoType, typedPtr, zero32, constant.NewInt(irtypes.I32, 4))
 	numParents := loopInit.NewLoad(irtypes.I32, npPtr)
 	hasParents := loopInit.NewICmp(enum.IPredSGT, numParents, zero32)
 	loopInit.NewCondBr(hasParents, loopHeader, retFalseBlk)
@@ -526,9 +706,9 @@ func (c *Compiler) defineTypeIsFunc() {
 	inBounds := loopHeader.NewICmp(enum.IPredSLT, iPhi, numParents)
 	loopHeader.NewCondBr(inBounds, loopBody, retFalseBlk)
 
-	// loop_body: load parent_ids[i] (field 4), compare, increment
+	// loop_body: load parent_ids[i] (field 5), compare, increment
 	pidPtr := loopBody.NewGetElementPtr(typeinfoType, typedPtr,
-		zero32, constant.NewInt(irtypes.I32, 4), iPhi)
+		zero32, constant.NewInt(irtypes.I32, 5), iPhi)
 	parentID := loopBody.NewLoad(irtypes.I32, pidPtr)
 	parentMatch := loopBody.NewICmp(enum.IPredEQ, parentID, expectedParam)
 	iNext := loopBody.NewAdd(iPhi, one32)

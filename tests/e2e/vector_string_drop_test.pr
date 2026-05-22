@@ -538,6 +538,172 @@ test_t0376_polymorphic_slice_transient() `test {
   assert(s == "circle(2)", "polymorphic slice transient preserves concrete type");
 }
 
+// T0387: polymorphic vector slice assigned to a variable. Pre-T0387, the slice
+// slot aliased the source's element pointer; both drops walked the elements and
+// the second drop double-freed. T0387 added a clone_fn_ptr slot to typeinfo so
+// dupHeapValue dispatches to the runtime concrete type's clone (correct memcpy
+// size + sub-field dup). Both source and slice now own independent Circle
+// instances, so the second drop is safe.
+type _T0387Shape {
+  format!(Writer ~w) {
+    w.write_string("shape");
+  }
+}
+
+type _T0387Circle is _T0387Shape {
+  int radius;
+  format!(Writer ~w) {
+    w.write_string("circle({this.radius})");
+  }
+}
+
+test_t0387_polymorphic_variable_bound_slice() `test {
+  _T0387Shape[] shapes = Vector[_T0387Shape]();
+  shapes.push(_T0387Circle(radius: 1));
+  shapes.push(_T0387Circle(radius: 2));
+  shapes.push(_T0387Circle(radius: 3));
+  _T0387Shape[] slice = shapes[1:3];
+  string r0 = "{slice[0]}";
+  string r1 = "{slice[1]}";
+  assert(r0 == "circle(2)", "polymorphic slice preserves Circle.radius for first elem");
+  assert(r1 == "circle(3)", "polymorphic slice preserves Circle.radius for second elem");
+  assert(slice.len == 2, "slice has 2 elements");
+}
+
+// T0387: polymorphic slice outliving its source vector. Source drops at the
+// callee scope exit; the slice slots no longer alias source pointers (they are
+// independent clones). Without the clone_fn_ptr dispatch, the slice elements
+// would dangle. This is the same root cause as the variable-bound double-free.
+_t0387_make_poly_slice() _T0387Shape[] {
+  _T0387Shape[] src = Vector[_T0387Shape]();
+  src.push(_T0387Circle(radius: 10));
+  src.push(_T0387Circle(radius: 20));
+  src.push(_T0387Circle(radius: 30));
+  return src[1:3];
+}
+
+test_t0387_polymorphic_slice_outlives_source() `test {
+  _T0387Shape[] sl = _t0387_make_poly_slice();
+  assert(sl.len == 2, "slice has 2 elements after source drop");
+  string r0 = "{sl[0]}";
+  string r1 = "{sl[1]}";
+  assert(r0 == "circle(20)", "element 0 readable + correct after source drop");
+  assert(r1 == "circle(30)", "element 1 readable + correct after source drop");
+}
+
+// T0387: polymorphic subtype with a droppable string field. Tests that the
+// synthesized clone fn dups subclass-only droppable fields (Container.label),
+// not just the size. Pre-T0387, the static layout walk missed these fields.
+type _T0387Container is _T0387Shape {
+  string label;
+  format!(Writer ~w) {
+    w.write_string("container({this.label})");
+  }
+}
+
+test_t0387_polymorphic_subtype_string_field() `test {
+  _T0387Shape[] shapes = Vector[_T0387Shape]();
+  shapes.push(_T0387Container(label: "a" + "b"));
+  shapes.push(_T0387Container(label: "c" + "d"));
+  _T0387Shape[] slice = shapes[0:2];
+  string r0 = "{slice[0]}";
+  string r1 = "{slice[1]}";
+  assert(r0 == "container(ab)", "subtype string field preserved through clone");
+  assert(r1 == "container(cd)", "second subtype string field preserved");
+}
+
+// T0387: polymorphic subtype with a droppable Vector field (with droppable
+// elements). Exercises dupHeapValueFields' vector-field branch (dupVector +
+// emitVectorElementCloneLoop) inside the synthesized clone fn. Pre-T0387 the
+// static layout walk missed _T0387Tagged.tags entirely.
+type _T0387Tagged is _T0387Shape {
+  string[] tags;
+  format!(Writer ~w) {
+    w.write_string("tagged");
+  }
+}
+
+test_t0387_polymorphic_subtype_vector_field() `test {
+  _T0387Shape[] shapes = Vector[_T0387Shape]();
+  string[] tags1 = Vector[string]();
+  tags1.push("a" + "b");
+  tags1.push("c" + "d");
+  shapes.push(_T0387Tagged(tags: tags1));
+  string[] tags2 = Vector[string]();
+  tags2.push("e" + "f");
+  shapes.push(_T0387Tagged(tags: tags2));
+  _T0387Shape[] slice = shapes[0:2];
+  string r0 = "{slice[0]}";
+  string r1 = "{slice[1]}";
+  assert(r0 == "tagged", "tagged element 0 readable after clone");
+  assert(r1 == "tagged", "tagged element 1 readable after clone");
+  assert(slice.len == 2, "slice has 2 elements");
+}
+
+// T0387: three-level inheritance — typeinfo dispatch on the deepest concrete
+// type. Polymorphic vector typed as the topmost base; instances are the
+// deepest subclass. Synth-clone for _T0387Level3 walks all inherited fields
+// (label from Level2, extra from Level3). Verifies the clone_fn_ptr in
+// typeinfo points to the right per-concrete-type clone fn through a chain.
+type _T0387Level1 {
+  format!(Writer ~w) {
+    w.write_string("level1");
+  }
+}
+
+type _T0387Level2 is _T0387Level1 {
+  string label;
+  format!(Writer ~w) {
+    w.write_string("level2({this.label})");
+  }
+}
+
+type _T0387Level3 is _T0387Level2 {
+  int extra;
+  format!(Writer ~w) {
+    w.write_string("level3({this.label},{this.extra})");
+  }
+}
+
+test_t0387_three_level_inheritance_clone() `test {
+  _T0387Level1[] items = Vector[_T0387Level1]();
+  items.push(_T0387Level3(label: "x" + "y", extra: 42));
+  items.push(_T0387Level3(label: "p" + "q", extra: 7));
+  _T0387Level1[] slice = items[0:2];
+  string r0 = "{slice[0]}";
+  string r1 = "{slice[1]}";
+  assert(r0 == "level3(xy,42)", "level-3 clone preserves inherited label and own extra");
+  assert(r1 == "level3(pq,7)", "second level-3 clone");
+  assert(slice.len == 2, "slice len");
+}
+
+// T0387: explicit user-code `dest.push(src[i])` for polymorphic types — the
+// same dup-on-push path as Vector.[:], but exercised in plain user code (not
+// stdlib). Pre-T0387 this had a polymorphic carve-out at expr.go:4670 (no
+// dup, alias instead) so both vectors would double-free. Now both own
+// independent concrete subtype copies.
+test_t0387_polymorphic_dest_push() `test {
+  _T0387Shape[] src = Vector[_T0387Shape]();
+  src.push(_T0387Circle(radius: 1));
+  src.push(_T0387Circle(radius: 2));
+  src.push(_T0387Circle(radius: 3));
+  _T0387Shape[] dest = Vector[_T0387Shape]();
+  int i = 0;
+  while i < src.len {
+    dest.push(src[i]);
+    i = i + 1;
+  }
+  assert(dest.len == 3, "dest len after loop push");
+  string d0 = "{dest[0]}";
+  string d2 = "{dest[2]}";
+  string s0 = "{src[0]}";
+  string s2 = "{src[2]}";
+  assert(d0 == "circle(1)", "dest[0]");
+  assert(d2 == "circle(3)", "dest[2]");
+  assert(s0 == "circle(1)", "src[0] still readable after dup");
+  assert(s2 == "circle(3)", "src[2] still readable after dup");
+}
+
 // T0376: direct user-visible `dest.push(src[i])` for non-string heap user
 // types. Same IndexExpr branch as Vector.[:]'s `result.push(this[i])`, but
 // exercised in plain user code (not stdlib) with both src and dest reaching

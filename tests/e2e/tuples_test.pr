@@ -912,3 +912,101 @@ test_t0406_generic_user_method_tuple_typevar() `test {
   b.set_pair(("hello".to_string(), 7));
   assert(b.value == 7, "set_pair updated value");
 }
+
+// T0481: `(_, n) := t` with an owned tuple source must drop the discarded
+// heap field. Without the fix, the source's drop flag is cleared (transfer
+// to LHS) but the `_` slot has no owner → memory leak.
+
+test_t0481_discard_at_index_0() `test {
+  t := ("hello".to_string(), 42);
+  (_, n) := t;
+  assert(n == 42, "second field destructured");
+}
+
+test_t0481_discard_at_index_1() `test {
+  t := (42, "hello".to_string());
+  (n, _) := t;
+  assert(n == 42, "first field destructured");
+}
+
+test_t0481_three_element_double_discard() `test {
+  t := ("a".to_string(), "b".to_string(), 42);
+  (_, _, n) := t;
+  assert(n == 42, "third field destructured, two strings discarded");
+}
+
+_t0481_take((string, int) t) {
+  (_, n) := t;
+  assert(n == 42, "param destructure with discard");
+}
+
+test_t0481_param_destructure_discard() `test {
+  _t0481_take(("hello".to_string(), 42));
+}
+
+test_t0481_borrow_source_discard() `test {
+  (string, int)[] v = [("hello".to_string(), 5), ("world".to_string(), 7)];
+  int total = 0;
+  for tup in v {
+    (_, n) := tup;
+    total = total + n;
+  }
+  assert(total == 12, "borrowed destructure with discard");
+}
+
+// T0481: Discard a heap user type. Exercises the named-type drop path
+// in maybeRegisterDrop (Type.drop instead of promise_string_drop).
+type _T0481Box {
+  string label;
+}
+
+test_t0481_discard_user_type() `test {
+  t := (_T0481Box(label: "discarded".to_string()), 42);
+  (_, n) := t;
+  assert(n == 42, "user type discarded, int kept");
+}
+
+// T0481: Discard a vector. Exercises Vector.drop instead of promise_string_drop.
+test_t0481_discard_vector() `test {
+  (string[], int) t = (["a" + "b", "c" + "d"], 99);
+  (_, n) := t;
+  assert(n == 99, "vector discarded, int kept");
+}
+
+// T0481: Discard a nested tuple. Exercises the tupdrop path in maybeRegisterDrop
+// — the discarded slot is itself a tuple and must walk its inner droppable fields.
+test_t0481_discard_nested_tuple() `test {
+  inner := ("inner".to_string(), 7);
+  outer := (inner, 42);
+  (_, n) := outer;
+  assert(n == 42, "nested tuple discarded, int kept");
+}
+
+// T0481: Middle-position discard with droppable fields on both sides ensures
+// indices around `_` aren't disturbed by the synthetic-key insertion.
+test_t0481_discard_middle() `test {
+  t := ("first".to_string(), "middle".to_string(), "third".to_string());
+  (a, _, c) := t;
+  assert(a == "first", "first kept");
+  assert(c == "third", "third kept");
+}
+
+// T0481: Function-call source. `s.Value` is a *ast.CallExpr (not IdentExpr),
+// so the trailing clearDropFlag(ident) is skipped — discarded slot must still
+// own and free its piece via the registered drop binding.
+_t0481_returns_pair()(string, int) {
+  return ("call_result".to_string(), 33);
+}
+
+test_t0481_discard_call_source() `test {
+  (_, n) := _t0481_returns_pair();
+  assert(n == 33, "call-source destructure with discard");
+}
+
+// T0481: Tuple-literal source — `s.Value` is a *ast.TupleLitExpr directly,
+// not an IdentExpr. genTupleLit's per-element-claim path plus the discard
+// drop binding must cover the heap field.
+test_t0481_discard_tuple_literal_source() `test {
+  (_, n) := ("literal".to_string(), 17);
+  assert(n == 17, "literal-source destructure with discard");
+}

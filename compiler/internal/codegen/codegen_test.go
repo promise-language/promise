@@ -12172,6 +12172,58 @@ func TestT0371GenericFnTupleLocalSubstitutes(t *testing.T) {
 	assertContains(t, ir, "promise_string_drop")
 }
 
+// T0481: `(_, n) := t` with an owned tuple source must register a drop binding
+// for the discarded slot under a synthetic key. Without it, the source's drop
+// flag is cleared (transfer to LHS) but the heap field at `_` is orphaned.
+func TestT0481DiscardRegistersDropString(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			t := ("a" + "b", 42);
+			(_, n) := t;
+		}
+	`)
+	// The synthetic discard binding must produce a drop flag and a string drop.
+	assertContains(t, ir, "_destructure.discard")
+	assertContains(t, ir, "_destructure.discard.dropflag")
+	assertContains(t, ir, "promise_string_drop")
+}
+
+// T0481: Borrow-source destructure with `_` must NOT register a drop binding
+// for the discarded slot — borrowed elements are owned by the container, and
+// adding a drop would double-free with the container's element walk.
+func TestT0481DiscardBorrowSourceNoDrop(t *testing.T) {
+	ir := generateIR(t, `
+		sum_seconds((string, int)[] v) int {
+			int total = 0;
+			for tup in v {
+				(_, n) := tup;
+				total = total + n;
+			}
+			return total;
+		}
+		main() {
+			int n = sum_seconds([("a" + "b", 5)]);
+		}
+	`)
+	// No drop binding for the borrowed `_` slot inside the for-in loop.
+	assertNotContains(t, ir, "_destructure.discard.dropflag")
+}
+
+// T0481: Multiple `_` slots in the same destructure must produce unique keys
+// via uniqueLocalName so dropFlags entries don't collide. The IR should
+// contain both `_destructure.discard.dropflag` (first) and
+// `_destructure.discard.1.dropflag` (second).
+func TestT0481MultipleDiscardsUseUniqueKeys(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			t := ("a" + "b", "c" + "d", 42);
+			(_, _, n) := t;
+		}
+	`)
+	assertContains(t, ir, "_destructure.discard.dropflag")
+	assertContains(t, ir, "_destructure.discard.1.dropflag")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

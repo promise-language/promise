@@ -1210,24 +1210,34 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 		srcOwned = false
 	}
 	for i, name := range s.Names {
-		if name == "_" {
-			continue
-		}
 		elemPromiseType := tup.Elems()[i]
 		if c.typeSubst != nil {
 			elemPromiseType = types.Substitute(elemPromiseType, c.typeSubst)
 		}
 		elemType := c.resolveType(elemPromiseType)
 		alloca := c.createEntryAlloca(elemType)
-		alloca.SetName(c.uniqueLocalName(name))
+		// T0481: `_` slots still need an alloca + drop binding. The source's
+		// drop flag is cleared below (transfer to LHS locals), so without a
+		// drop binding under a synthetic key the discarded heap field would
+		// be orphaned. Use a unique synthetic name so multiple `_` slots and
+		// repeated destructures within a scope don't collide.
+		bindKey := name
+		if name == "_" {
+			bindKey = c.uniqueLocalName("_destructure.discard")
+			alloca.SetName(bindKey)
+		} else {
+			alloca.SetName(c.uniqueLocalName(name))
+		}
 		c.block.NewStore(c.block.NewExtractValue(tupleVal, uint64(i)), alloca)
-		c.locals[name] = alloca
+		if name != "_" {
+			c.locals[name] = alloca
+		}
 		// T0371: Register drop tracking so destructured locals own and free
 		// their pieces. Skipped when the source is a borrow (ident without a
 		// drop binding) — otherwise destructured locals would double-free with
 		// the container's element walk (e.g., for tup in vec { (a, b) := tup }).
 		if srcOwned {
-			c.maybeRegisterDrop(name, alloca, elemPromiseType)
+			c.maybeRegisterDrop(bindKey, alloca, elemPromiseType)
 		}
 	}
 	// T0371: Source tuple transferred field ownership to the destructured

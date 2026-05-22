@@ -254,22 +254,14 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					// only expression arms (arm.Body) produce match result values.
 					c.genAutoPropagate(es.Expr)
 				} else {
-					// T0095: Signal genFieldAccess to dup string fields for block results.
+					// T0095/B0219/B0310/T0487: Signal genFieldAccess to dup string,
+					// Vector|Channel|Arc|Weak, and Optional[...] fields for block
+					// results so the block's caller owns an independent copy.
 					exprType := c.info.Types[es.Expr]
 					if c.typeSubst != nil && exprType != nil {
 						exprType = types.Substitute(exprType, c.typeSubst)
 					}
-					if extractNamed(exprType) == types.TypString && !isRefType(exprType) {
-						c.dupStringFieldAccess = true
-					}
-					// B0310: Also set dup flag for Optional[string] fields.
-					if opt, ok := exprType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
-						c.dupStringFieldAccess = true
-					}
-					// B0219: Signal genFieldAccess to dup vector/channel/arc/weak fields for block results.
-					if (types.IsVector(exprType) || types.IsChannel(exprType) || types.IsArc(exprType) || types.IsWeak(exprType)) && !isRefType(exprType) {
-						c.dupContainerFieldAccess = true
-					}
+					c.setDupFlagsForFieldAccess(exprType)
 					result = c.genExpr(es.Expr)
 					c.dupStringFieldAccess = false
 					c.dupContainerFieldAccess = false
@@ -283,6 +275,20 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					// Without this, a dup from e.g. `e.message` would be freed at
 					// statement end while the caller still holds the pointer.
 					c.claimStringTemp(result)
+					// T0487: Claim dup'd inner string for Optional[string] field
+					// access — the dup is embedded in the result struct.
+					if c.optionalStringDup != nil {
+						c.claimStringTemp(c.optionalStringDup)
+						c.optionalStringDup = nil
+					}
+					// T0487: Claim dup'd inner container for
+					// Optional[Vector|Channel|Arc|Weak] field access — the dup is
+					// embedded in the result struct and must survive past
+					// statement-end cleanup.
+					if c.optionalContainerDup != nil {
+						c.claimStringTemp(c.optionalContainerDup)
+						c.optionalContainerDup = nil
+					}
 				}
 				break
 			}
@@ -959,19 +965,11 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	lt := c.resolveType(typ)
 	alloca := c.createEntryAlloca(lt)
 	alloca.SetName(c.uniqueLocalName(s.Name))
-	// T0095: Signal genFieldAccess to dup string fields from droppable types.
-	// B0179: Skip for borrow types — borrows don't own the value.
-	if extractNamed(typ) == types.TypString && !isRefType(typ) {
-		c.dupStringFieldAccess = true
-	}
-	// B0310: Also set dup flag for Optional[string] fields.
-	if opt, ok := typ.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
-		c.dupStringFieldAccess = true
-	}
-	// B0219: Signal genFieldAccess to dup vector/channel/arc/weak fields from droppable types.
-	if (types.IsVector(typ) || types.IsChannel(typ) || types.IsArc(typ) || types.IsWeak(typ)) && !isRefType(typ) {
-		c.dupContainerFieldAccess = true
-	}
+	// T0095/B0179/B0219/B0310/T0487: Signal genFieldAccess to dup string,
+	// Vector|Channel|Arc|Weak, and Optional[...] fields from droppable types
+	// so this binding owns an independent copy. Skip for borrow types
+	// (B0179) — borrows don't own the value.
+	c.setDupFlagsForFieldAccess(typ)
 	// T0370: Set dup flag for droppable tuple types so genVectorIndex deep-clones
 	// tuple elements on read. Without this, `t := v[0]` aliases v's element data
 	// and bindingDropTuple would double-free with v's element walk.
@@ -5895,21 +5893,12 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	var val value.Value
 	if s.Value != nil {
 		c.targetType = retType
-		// T0095: Signal genFieldAccess to dup string fields for return values.
-		// Scope cleanup after the return may drop the containing type, freeing the
-		// field — the caller needs an independent copy.
-		// B0179: Skip for borrow return types — borrows don't own the value.
-		if extractNamed(retType) == types.TypString && !isRefType(retType) {
-			c.dupStringFieldAccess = true
-		}
-		// B0310: Also set dup flag for Optional[string] return values.
-		if opt, ok := retType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
-			c.dupStringFieldAccess = true
-		}
-		// B0219: Signal genFieldAccess to dup vector/channel/arc/weak fields for return values.
-		if (types.IsVector(retType) || types.IsChannel(retType) || types.IsArc(retType) || types.IsWeak(retType)) && !isRefType(retType) {
-			c.dupContainerFieldAccess = true
-		}
+		// T0095/B0179/B0219/B0310/T0487: Signal genFieldAccess to dup string,
+		// Vector|Channel|Arc|Weak, and Optional[...] fields for return values.
+		// Scope cleanup after the return may drop the containing type, freeing
+		// the field — the caller needs an independent copy. Skip for borrow
+		// return types (B0179) — borrows don't own the value.
+		c.setDupFlagsForFieldAccess(retType)
 		// T0440: Signal genMethodIndex to dup heap user types out of container
 		// indices for Optional[heap-user-type] return values. Without this,
 		// `return m[k]` from a function owning m propagates an alias that

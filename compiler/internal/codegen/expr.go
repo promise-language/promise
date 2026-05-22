@@ -4964,6 +4964,37 @@ func (c *Compiler) genMutRefArg(expr ast.Expr) value.Value {
 	}
 }
 
+// setDupFlagsForFieldAccess sets dupStringFieldAccess or dupContainerFieldAccess
+// based on the resolved type shape — the four shapes that need dup at every
+// owner-droppable field-read consume site: string, Optional[string],
+// Vector|Channel|Arc|Weak, and Optional[Vector|Channel|Arc|Weak]. Borrow types
+// are skipped (they don't own the value). Caller is responsible for the
+// owner-droppable gate (where applicable) and for clearing the flags after the
+// dependent codegen runs. T0487.
+func (c *Compiler) setDupFlagsForFieldAccess(t types.Type) {
+	if t == nil || isRefType(t) {
+		return
+	}
+	if extractNamed(t) == types.TypString {
+		c.dupStringFieldAccess = true
+		return
+	}
+	if types.IsVector(t) || types.IsChannel(t) || types.IsArc(t) || types.IsWeak(t) {
+		c.dupContainerFieldAccess = true
+		return
+	}
+	if opt, ok := t.(*types.Optional); ok {
+		elem := opt.Elem()
+		if extractNamed(elem) == types.TypString {
+			c.dupStringFieldAccess = true
+			return
+		}
+		if types.IsVector(elem) || types.IsChannel(elem) || types.IsArc(elem) || types.IsWeak(elem) {
+			c.dupContainerFieldAccess = true
+		}
+	}
+}
+
 // maybeEnableDupForMutRefArg sets dupStringFieldAccess or dupContainerFieldAccess
 // when an arg about to be evaluated is a field read on a droppable owner that's
 // being passed to a `~` (consuming) param. Without this, the field's inner
@@ -5015,13 +5046,9 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 	if ownerNamed == nil || !ownerNamed.HasDrop() {
 		return
 	}
-	if extractNamed(pt) == types.TypString {
-		c.dupStringFieldAccess = true
-		return
-	}
-	if types.IsVector(pt) || types.IsChannel(pt) || types.IsArc(pt) || types.IsWeak(pt) {
-		c.dupContainerFieldAccess = true
-	}
+	// T0487: covers string, Optional[string], Vector|Channel|Arc|Weak, and
+	// Optional[Vector|Channel|Arc|Weak] in one place.
+	c.setDupFlagsForFieldAccess(pt)
 }
 
 // maybeEnableDupForConstructorArg sets dupStringFieldAccess or
@@ -5047,20 +5074,9 @@ func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types
 	if c.typeSubst != nil {
 		ft = types.Substitute(ft, c.typeSubst)
 	}
-	if isRefType(ft) {
-		return
-	}
-	if extractNamed(ft) == types.TypString {
-		c.dupStringFieldAccess = true
-		return
-	}
-	if opt, ok := ft.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
-		c.dupStringFieldAccess = true
-		return
-	}
-	if types.IsVector(ft) || types.IsChannel(ft) || types.IsArc(ft) || types.IsWeak(ft) {
-		c.dupContainerFieldAccess = true
-	}
+	// T0487: covers string, Optional[string], Vector|Channel|Arc|Weak, and
+	// Optional[Vector|Channel|Arc|Weak] in one place.
+	c.setDupFlagsForFieldAccess(ft)
 }
 
 // genCallArgsWithMutRef evaluates call arguments with MutRef-awareness (B0149).

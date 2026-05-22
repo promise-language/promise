@@ -356,3 +356,227 @@ test_t0413_consume_recv_string_field() `test {
   b2 := b.to_owned();
   assert(b2.label == "pq", "b2.label after consume-recv");
 }
+
+// --- T0487: Optional[Vector|Channel|Arc|Weak] field on a droppable owner ---
+//
+// Pre-fix: `Type(items: this.items)`, `v := h.items`, `return this.items`,
+// and `f(h.items)` for an `Optional[Vector|Channel|Arc|Weak]` field on a
+// droppable owner shallow-copied the inner pointer. Both the original `this`
+// and the new instance dropped the same buffer → segfault.
+//
+// Tests use heap-allocated vectors (built via `int[]() + .push`, not
+// `[1,2,3]` literals) so any double-free actually crashes — `.rodata`-backed
+// static vectors silently no-op on `Vector.drop`.
+
+type _T0487OptVecHolder {
+  int[]? items;
+  drop(~this) {
+  }
+
+  clone() _T0487OptVecHolder {
+    return _T0487OptVecHolder(items: this.items);
+  }
+
+  take_items() int[]? {
+    return this.items;
+  }
+}
+
+_t0487_make_dynamic_vec() int[] {
+  v := int[]();
+  for i := 0; i < 100; i++ {
+    v.push(i);
+  }
+  return v;
+}
+
+test_t0487_clone_optional_vector_field_constructor_init() `test {
+  // `Type(items: this.items)` — the maybeEnableDupForConstructorArg path.
+  h := _T0487OptVecHolder(items: _t0487_make_dynamic_vec());
+  h2 := h.clone();
+  if v := h2.items {
+    assert(v.len == 100, "clone len");
+    assert(v[0] == 0, "clone[0]");
+    assert(v[99] == 99, "clone[99]");
+  } else {
+    assert(false, "clone should have value");
+  }
+  // Independence: original still has its own buffer.
+  if v := h.items {
+    assert(v.len == 100, "orig len");
+    assert(v[50] == 50, "orig[50]");
+  } else {
+    assert(false, "orig should still have value");
+  }
+}
+
+test_t0487_clone_optional_vector_field_inferred_decl() `test {
+  // `v := h.items` — the genInferredVarDecl path.
+  h := _T0487OptVecHolder(items: _t0487_make_dynamic_vec());
+  vopt := h.items;
+  if v := vopt {
+    assert(v.len == 100, "inferred decl len");
+    assert(v[7] == 7, "inferred decl[7]");
+  } else {
+    assert(false, "inferred decl should have value");
+  }
+  // Original must still be readable.
+  if v := h.items {
+    assert(v.len == 100, "orig len after inferred decl");
+  } else {
+    assert(false, "orig should still have value");
+  }
+}
+
+test_t0487_optional_vector_field_typed_decl() `test {
+  // `int[]? v = h.items` — the genTypedVarDecl path (gold standard;
+  // included for parity so the entire matrix is exercised in one file).
+  h := _T0487OptVecHolder(items: _t0487_make_dynamic_vec());
+  int[]? vopt = h.items;
+  if v := vopt {
+    assert(v.len == 100, "typed decl len");
+  } else {
+    assert(false, "typed decl should have value");
+  }
+}
+
+test_t0487_optional_vector_field_return() `test {
+  // `return this.items` — the genReturnStmt path.
+  h := _T0487OptVecHolder(items: _t0487_make_dynamic_vec());
+  ropt := h.take_items();
+  if v := ropt {
+    assert(v.len == 100, "return len");
+    assert(v[42] == 42, "return[42]");
+  } else {
+    assert(false, "return should have value");
+  }
+  // Original still owns its own buffer.
+  if v := h.items {
+    assert(v.len == 100, "orig len after return");
+  } else {
+    assert(false, "orig should still have value");
+  }
+}
+
+type _T0487OptVecHolder2 {
+  int[]? primary;
+  int[]? secondary;
+  drop(~this) {
+  }
+}
+
+test_t0487_optional_vector_field_block_result() `test {
+  // Block-result expression path (stmt.go:262-272). The if-expression's last
+  // statement in each arm is a field read of an Optional[Vector] — both arms
+  // must be dup'd because the if's value is bound into a new variable.
+  // (Two field-read arms used instead of `if/none` to dodge an unrelated
+  // pre-existing block-result/none codegen mismatch.)
+  h := _T0487OptVecHolder2(primary: _t0487_make_dynamic_vec(),
+  secondary: _t0487_make_dynamic_vec());
+  flag := true;
+  vopt := if flag {
+    h.primary
+  } else {
+    h.secondary
+  };
+  if v := vopt {
+    assert(v.len == 100, "block result len");
+    assert(v[10] == 10, "block result[10]");
+  } else {
+    assert(false, "block result should have value");
+  }
+  // Original still readable.
+  if v := h.primary {
+    assert(v.len == 100, "orig primary len after block result");
+  } else {
+    assert(false, "orig primary should still have value");
+  }
+}
+
+_t0487_consume_optional_vec(~int[]? v) `public {
+  // No-op — just consume.
+  if x := v {
+    assert(x.len == 100, "consumed len");
+  }
+}
+
+test_t0487_optional_vector_field_consume_arg() `test {
+  // `f(h.items)` with `~T?` param — the maybeEnableDupForMutRefArg path.
+  h := _T0487OptVecHolder(items: _t0487_make_dynamic_vec());
+  _t0487_consume_optional_vec(h.items);
+  // After consume, original must still own its buffer.
+  if v := h.items {
+    assert(v.len == 100, "orig len after consume");
+    assert(v[3] == 3, "orig[3] after consume");
+  } else {
+    assert(false, "orig should still have value");
+  }
+}
+
+// --- T0487: Optional[Channel] field on a droppable owner ---
+
+type _T0487OptChHolder {
+  channel[int]? ch;
+  drop(~this) {
+  }
+
+  clone() _T0487OptChHolder {
+    return _T0487OptChHolder(ch: this.ch);
+  }
+}
+
+test_t0487_clone_optional_channel_field_constructor() `test {
+  c := channel[int](1);
+  c.send(42);
+  h := _T0487OptChHolder(ch: c);
+  h2 := h.clone();
+  // Both must hold independent refcounts to the same channel.
+  if ch := h2.ch {
+    if v := <-ch {
+      assert(v == 42, "got value via clone");
+    } else {
+      assert(false, "expected value");
+    }
+  } else {
+    assert(false, "clone should have channel");
+  }
+}
+
+// --- T0487: Optional[string] consume-arg path ---
+//
+// Pre-fix, `maybeEnableDupForMutRefArg` set the dup flag for direct `string`
+// but not `Optional[string]`. After T0487's helper switch, the Optional[string]
+// consume-arg case is also covered. Verifies no double-free / no leak.
+
+type _T0487OptStrHolder {
+  string? title;
+  drop(~this) {
+  }
+}
+
+_t0487_consume_opt_string(~string? s) `public {
+  // No-op — just consume.
+  if x := s {
+    assert(x == "foobar", "consumed");
+  } else {
+    assert(false, "consumed value should be some");
+  }
+}
+
+test_t0487_optional_string_field_consume_arg() `test {
+  // Heap-allocated string via concat (literal would be .rodata-flagged).
+  h := _T0487OptStrHolder(title: "foo" + "bar");
+  _t0487_consume_opt_string(h.title);
+  // Original still owns its string.
+  if x := h.title {
+    assert(x == "foobar", "orig after consume");
+  } else {
+    assert(false, "orig should still have value");
+  }
+}
+
+// (Optional[Arc] / Optional[Weak] field moves are gated by sema's B0341 —
+// `isAutoDupType` only auto-dups string, Vector, Channel, and Optional of
+// those. Arc/Weak require explicit `.clone()`, so the codegen dup-flag path
+// for Optional[Arc|Weak] can only be reached via generics; not exercised
+// here because Vector + Channel already cover the 5 broken codegen sites.)

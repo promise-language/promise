@@ -166,9 +166,7 @@ type _T0398CopyBox {
   }
 
   copy(&this) _T0398CopyBox {
-    // T0413: must `.clone()` — `this.label` from borrowed `this` would
-    // otherwise alias the original string and double-free at drop.
-    return _T0398CopyBox(label: this.label.clone());
+    return _T0398CopyBox(label: this.label);
   }
 }
 

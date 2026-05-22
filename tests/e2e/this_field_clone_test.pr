@@ -310,3 +310,49 @@ test_t0411_generic_owner_string_field_clone() `test {
   assert(h.payload == 7, "orig payload");
   assert(h2.payload == 7, "clone payload");
 }
+
+// --- Explicit `&this` receiver auto-dup (T0413) ---
+//
+// T0411's auto-dup fires whenever the owner has drop, regardless of
+// whether the receiver is implicit (`clone()`) or explicit (`copy(&this)`).
+// This locks the explicit-receiver path so a future change to receiver-kind
+// handling doesn't silently regress field-init dup.
+type _T0413Box {
+  string label;
+  drop(~this) {
+  }
+
+  copy(&this) _T0413Box {
+    return _T0413Box(label: this.label);
+  }
+}
+
+test_t0413_explicit_borrow_string_field() `test {
+  b := _T0413Box(label: "a" + "b");
+  c := b.copy();
+  assert(c.label == "ab", "c.label");
+  assert(b.label == "ab", "b.label still readable");
+}
+
+// --- Explicit `~this` (consume-self) receiver auto-dup (T0413) ---
+//
+// `~this` consumes the receiver — the synth drop runs at end of method,
+// freeing `this.label`. Without dup, the new instance's `label` would alias
+// the freed buffer and double-free at caller drop time. `genThisExpr` takes
+// a different path when `thisRecvIsOwned=true` (T0428 Case 3A), so this is
+// a structurally distinct codegen path from `&this`.
+type _T0413ConsumeBox {
+  string label;
+  drop(~this) {
+  }
+
+  to_owned(~this) _T0413ConsumeBox {
+    return _T0413ConsumeBox(label: this.label);
+  }
+}
+
+test_t0413_consume_recv_string_field() `test {
+  b := _T0413ConsumeBox(label: "p" + "q");
+  b2 := b.to_owned();
+  assert(b2.label == "pq", "b2.label after consume-recv");
+}

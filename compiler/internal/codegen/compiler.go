@@ -165,6 +165,7 @@ type Compiler struct {
 	tempTrackingEnabled     bool                // T0084: true in free functions + user method bodies
 	dupStringFieldAccess    bool                // T0095: when true, genFieldAccess dups string fields from droppable types
 	dupContainerFieldAccess bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
+	b0219DupedVecFields     map[string]bool     // T0405: tracks "TypeName.fieldName" entries when B0219 dups a vector field; genMemberAssign skips element drops for these (elements are owned by the dup)
 	dupTupleFieldAccess     bool                // T0370: when true, genVectorIndex dups droppable tuple elements on read
 	dupHeapUserFieldAccess  bool                // T0398: when true, genVectorIndex deep-clones heap user-type elements on read
 	optionalStringDup       value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
@@ -5070,7 +5071,8 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.scopeBindings = nil // T0085: reset scope bindings for each new function
 	c.loopScopeDepth = 0
 	c.blockCounter = 0
-	c.enumCtorTemps = nil // B0267: prevent cross-function alloca leak
+	c.enumCtorTemps = nil       // B0267: prevent cross-function alloca leak
+	c.b0219DupedVecFields = nil // T0405: clear cross-function stale entries
 
 	entry := fn.NewBlock(".entry")
 	c.block = entry
@@ -6342,7 +6344,8 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.scopeBindings = nil
 	c.loopScopeDepth = 0
 	c.blockCounter = 0
-	c.enumCtorTemps = nil // B0267: prevent cross-function alloca leak
+	c.enumCtorTemps = nil       // B0267: prevent cross-function alloca leak
+	c.b0219DupedVecFields = nil // T0405: clear cross-function stale entries
 	c.canError = m.Sig().CanError()
 	c.currentRetType = m.Sig().Result()
 	savedNamed := c.currentNamed

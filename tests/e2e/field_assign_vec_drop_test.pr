@@ -1,0 +1,61 @@
+// T0405: Field reassignment must drop elements of the old vector before freeing the buffer.
+// Repro: overwriting a string[] field leaked the old vector's string elements.
+type Holder {
+  string[] field;
+}
+
+type GenHolder[T] {
+  T[] field;
+  set_field(~this, ~T[] val) {
+    this.field = val;
+  }
+}
+
+test_string_vec_field_reassign() `test {
+  v1 := string[]();
+  v1.push("init" + "");
+  h := Holder(v1);
+  v2 := string[]();
+  v2.push("hello" + "");
+  h.field = v2;
+  assert(h.field.len == 1, "field has 1 element after reassign");
+}
+
+test_multi_elem_string_vec_field_reassign() `test {
+  v1 := string[]();
+  v1.push("a" + "");
+  v1.push("b" + "");
+  v1.push("c" + "");
+  h := Holder(v1);
+  v2 := string[]();
+  v2.push("x" + "");
+  h.field = v2;
+  assert(h.field.len == 1, "field has 1 element after reassign");
+  assert(h.field[0] == "x", "field element correct after reassign");
+}
+
+test_repeated_field_reassign() `test {
+  v1 := string[]();
+  v1.push("first" + "");
+  h := Holder(v1);
+  v2 := string[]();
+  v2.push("second" + "");
+  h.field = v2;
+  v3 := string[]();
+  v3.push("third" + "");
+  h.field = v3;
+  assert(h.field.len == 1, "field has 1 element after double reassign");
+  assert(h.field[0] == "third", "field element correct after double reassign");
+}
+
+// T0405: Generic type with T[]=string[] field — reassignment must drop string elements (no leak).
+test_generic_string_vec_field_reassign() `test {
+  v1 := string[]();
+  v1.push("init" + "");
+  h := GenHolder[string](v1);
+  v2 := string[]();
+  v2.push("hello" + "");
+  h.set_field(v2);
+  assert(h.field.len == 1, "generic field has 1 element after reassign");
+  assert(h.field[0] == "hello", "generic field element correct after reassign");
+}

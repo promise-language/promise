@@ -3847,6 +3847,11 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 				elemSize := int64(c.typeSize(elemLLVM))
 				dup := c.dupVector(val, elemSize)
 				c.trackVectorTemp(dup)
+				// T0405: record this dup so genMemberAssign skips element drops for the original field
+				if c.b0219DupedVecFields == nil {
+					c.b0219DupedVecFields = make(map[string]bool)
+				}
+				c.b0219DupedVecFields[ownerNamed.Obj().Name()+"."+field.Name()] = true
 				return dup
 			}
 			if types.IsChannel(fType) {

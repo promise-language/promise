@@ -5305,15 +5305,28 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 						c.block = mergeBlock
 					}
 				}
-				// B0219: Vector: call Vector.drop (handles null + static flag).
-				if types.IsVector(fieldType) {
+				// B0219/T0405: Vector: drop elements first, then call Vector.drop (handles null + static flag).
+				// Guard: skip if old == new (same pointer) OR old is null (zero-initialized from error
+				// fallthrough). emitVectorElementDropLoop reads the header unconditionally, so we must
+				// null-check here; Vector.drop has its own internal null check but the loop does not.
+				// Exception: if B0219 dup'd this field earlier in the same function, elements are owned
+				// by the dup — only free the buffer, not the elements (b0219DupedVecFields tracks this).
+				if elemType, isVec := types.AsVector(fieldType); isVec {
 					if dropFunc, ok := c.funcs["Vector.drop"]; ok {
 						oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
+						isNull := c.block.NewICmp(enum.IPredEQ, oldVal, constant.NewNull(irtypes.I8Ptr))
 						isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
+						skipDrop := c.block.NewOr(isNull, isSame)
 						dropBlock := c.newBlock("field.vecdrop")
 						mergeBlock := c.newBlock("field.vecdrop.done")
-						c.block.NewCondBr(isSame, mergeBlock, dropBlock)
+						c.block.NewCondBr(skipDrop, mergeBlock, dropBlock)
 						c.block = dropBlock
+						wasDuped := named != nil && c.b0219DupedVecFields != nil && c.b0219DupedVecFields[named.Obj().Name()+"."+target.Field]
+						if wasDuped {
+							delete(c.b0219DupedVecFields, named.Obj().Name()+"."+target.Field)
+						} else {
+							c.emitVectorElementDropLoop(oldVal, elemType)
+						}
 						c.block.NewCall(dropFunc, oldVal)
 						c.block.NewBr(mergeBlock)
 						c.block = mergeBlock

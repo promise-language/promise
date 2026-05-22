@@ -12565,6 +12565,61 @@ func TestCompoundAssignStringVecIndex(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_concat(")
 }
 
+// T0405: Vector field reassignment must drop elements before freeing the buffer.
+// Verifies that genMemberAssign emits a vector element drop loop (string drop)
+// before calling Vector.drop for a string[] field.
+func TestFieldAssignVecDropsElements(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { string[] field; }
+		main() {
+			v1 := string[]();
+			h := Holder(v1);
+			v2 := string[]();
+			h.field = v2;
+		}
+	`)
+	// The field.vecdrop block must contain a string element drop loop
+	assertContains(t, ir, "field.vecdrop")
+	assertContains(t, ir, "call void @promise_string_drop(")
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
+// T0405: Vector field reassign must emit null guard (skip drop when field is null/zero).
+func TestFieldAssignVecNullGuardInIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { string[] field; }
+		main() {
+			v := string[]();
+			h := Holder(v);
+			v2 := string[]();
+			h.field = v2;
+		}
+	`)
+	// The vecdrop block must guard against null (zero-initialized fields from
+	// error fallthroughs) — emits an `or i1` combining isNull and isSame checks.
+	assertContains(t, ir, "field.vecdrop")
+	assertContains(t, ir, "or i1")
+}
+
+// T0405: Generic type with T[] field — reassignment must drop string elements
+// when T=string (exercises the typeSubst-substituted fieldType path).
+func TestFieldAssignGenericVecDropsElements(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T[] items;
+			update(~this, ~T[] val) { this.items = val; }
+		}
+		main() {
+			b := Box[string](items: string[]());
+			v := string[]();
+			b.update(v);
+		}
+	`)
+	assertContains(t, ir, "field.vecdrop")
+	assertContains(t, ir, "call void @promise_string_drop(")
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
 // --- Hash getter tests ---
 
 func TestHashGetterInt(t *testing.T) {

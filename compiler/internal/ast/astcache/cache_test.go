@@ -312,11 +312,173 @@ func TestRemove(t *testing.T) {
 	Remove(dir, Key("nonexistent", "key"))
 }
 
+// TestShardedLayout verifies that Save writes files into a 2-char-prefix subdirectory
+// and that flat-layout files (legacy) are not visible to Load (cache miss, recomputed).
+func TestShardedLayout(t *testing.T) {
+	dir := t.TempDir()
+	key := Key("compiler", "content")
+
+	f := &ast.File{}
+	f.SetPosEnd(ast.Pos{}, ast.Pos{})
+	Save(dir, key, f)
+
+	// Saved file must live under <dir>/<key[:2]>/<key>.bin
+	wantPath := filepath.Join(dir, key[:2], key+".bin")
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("expected sharded cache file at %q, got error: %v", wantPath, err)
+	}
+
+	// Flat-layout file at <dir>/<key>.bin must NOT exist
+	flatPath := filepath.Join(dir, key+".bin")
+	if _, err := os.Stat(flatPath); err == nil {
+		t.Fatalf("unexpected flat-layout cache file at %q", flatPath)
+	}
+
+	// Old flat-layout files must be ignored by Load (cache miss, recomputed)
+	dir2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir2, key+".bin"), []byte("legacy-flat-data"), 0o644); err != nil {
+		t.Fatalf("seed legacy flat file: %v", err)
+	}
+	loaded, _ := Load(dir2, key)
+	if loaded != nil {
+		t.Fatal("expected cache miss for legacy flat-layout file")
+	}
+}
+
+// TestLoadKeyHashMismatch verifies that a cache file whose embedded key-hash
+// does not match the requested key is treated as a cache miss (defensive check
+// against hash collisions or hand-crafted corruption).
+func TestLoadKeyHashMismatch(t *testing.T) {
+	dir := t.TempDir()
+	keyA := Key("compiler-A", "content-1")
+	keyB := Key("compiler-B", "content-2")
+
+	f := &ast.File{}
+	f.SetPosEnd(ast.Pos{}, ast.Pos{})
+	Save(dir, keyA, f)
+
+	// Copy keyA's serialized cache file to keyB's sharded path.
+	// Magic + version are valid, but the embedded key-hash is keyA's, not keyB's.
+	data, err := os.ReadFile(cachePath(dir, keyA))
+	if err != nil {
+		t.Fatalf("read keyA cache file: %v", err)
+	}
+	pathB := cachePath(dir, keyB)
+	if err := os.MkdirAll(filepath.Dir(pathB), 0o755); err != nil {
+		t.Fatalf("mkdir keyB shard subdir: %v", err)
+	}
+	if err := os.WriteFile(pathB, data, 0o644); err != nil {
+		t.Fatalf("write keyB cache file: %v", err)
+	}
+
+	loaded, _ := Load(dir, keyB)
+	if loaded != nil {
+		t.Fatal("expected cache miss when embedded key-hash does not match requested key")
+	}
+}
+
+// TestShardedSamePrefix verifies that two keys sharing the same 2-char shard
+// prefix coexist correctly in a single subdirectory.
+func TestShardedSamePrefix(t *testing.T) {
+	dir := t.TempDir()
+	// Two synthetic 32-char hex keys that share the same shard prefix "ab".
+	keyA := "ab" + Key("x", "1")[2:]
+	keyB := "ab" + Key("y", "2")[2:]
+	if keyA == keyB {
+		t.Fatal("test setup: synthetic keys collide")
+	}
+
+	f := &ast.File{}
+	f.SetPosEnd(ast.Pos{}, ast.Pos{})
+	Save(dir, keyA, f)
+	Save(dir, keyB, f)
+
+	// Both cache files must live in the same shard subdir <dir>/ab/
+	shardDir := filepath.Join(dir, "ab")
+	for _, k := range []string{keyA, keyB} {
+		want := filepath.Join(shardDir, k+".bin")
+		if _, err := os.Stat(want); err != nil {
+			t.Fatalf("expected sharded cache file at %q, got error: %v", want, err)
+		}
+	}
+
+	// Both keys must be independently loadable
+	for _, k := range []string{keyA, keyB} {
+		loaded, err := Load(dir, k)
+		if err != nil {
+			t.Fatalf("Load(%s) failed: %v", k, err)
+		}
+		if loaded == nil {
+			t.Fatalf("expected cache hit for %s", k)
+		}
+	}
+
+	// Removing one key must not affect the other
+	Remove(dir, keyA)
+	if loaded, _ := Load(dir, keyA); loaded != nil {
+		t.Fatal("expected cache miss for keyA after Remove")
+	}
+	if loaded, _ := Load(dir, keyB); loaded == nil {
+		t.Fatal("expected cache hit for keyB after Removing keyA")
+	}
+}
+
+// TestShardedReSave verifies that calling Save twice for the same key under the
+// sharded layout overwrites correctly and leaves no leftover temp files.
+// The atomic-rename source must be in the same shard subdir as the target so
+// the rename stays on the same filesystem.
+func TestShardedReSave(t *testing.T) {
+	dir := t.TempDir()
+	key := Key("compiler", "content")
+
+	// Two distinct ASTs so the encoded payloads differ
+	f1 := &ast.File{}
+	f1.SetPosEnd(ast.Pos{File: "first.pr", Line: 1}, ast.Pos{File: "first.pr", Line: 1})
+	f2 := &ast.File{}
+	f2.SetPosEnd(ast.Pos{File: "second.pr", Line: 99}, ast.Pos{File: "second.pr", Line: 99})
+
+	Save(dir, key, f1)
+	first, err := os.ReadFile(cachePath(dir, key))
+	if err != nil {
+		t.Fatalf("read after first Save: %v", err)
+	}
+
+	Save(dir, key, f2)
+	second, err := os.ReadFile(cachePath(dir, key))
+	if err != nil {
+		t.Fatalf("read after second Save: %v", err)
+	}
+
+	if bytes.Equal(first, second) {
+		t.Fatal("expected re-save to change cache file contents")
+	}
+
+	// Shard subdir must contain exactly one file (the target) — no leftover temp files.
+	shardDir := filepath.Join(dir, key[:2])
+	entries, err := os.ReadDir(shardDir)
+	if err != nil {
+		t.Fatalf("ReadDir shard subdir: %v", err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("expected exactly 1 file in shard subdir, got %d: %v", len(entries), names)
+	}
+	if entries[0].Name() != key+".bin" {
+		t.Fatalf("expected file named %q in shard subdir, got %q", key+".bin", entries[0].Name())
+	}
+}
+
 // TestLoadCorruptData tests Load with various corrupt inputs.
 func TestLoadCorruptData(t *testing.T) {
 	dir := t.TempDir()
 	key := Key("compiler", "content")
 	path := cachePath(dir, key)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir shard subdir: %v", err)
+	}
 
 	// Truncated data (less than header size)
 	os.WriteFile(path, []byte("short"), 0o644)

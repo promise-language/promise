@@ -48,8 +48,11 @@ func CacheDir(buildCacheRoot string) string {
 }
 
 // cachePath returns the full path for a cache entry.
+// Uses a two-level directory structure (first 2 hex chars of the key as subdirectory)
+// to avoid slow directory lookups when thousands of entries accumulate.
 func cachePath(cacheDir, key string) string {
-	return filepath.Join(cacheDir, key+".bin")
+	subdir := key[:2]
+	return filepath.Join(cacheDir, subdir, key+".bin")
 }
 
 // Load attempts to load a cached AST file. Returns nil, nil on cache miss.
@@ -89,7 +92,8 @@ func Load(cacheDir, key string) (*ast.File, error) {
 
 // Save writes a cached AST file. Errors are silently ignored (cache is best-effort).
 func Save(cacheDir, key string, f *ast.File) {
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	subdir := filepath.Join(cacheDir, key[:2])
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
 		return
 	}
 
@@ -106,9 +110,9 @@ func Save(cacheDir, key string, f *ast.File) {
 	data = append(data, header[:]...)
 	data = append(data, payload...)
 
-	// Atomic write: unique temp file + rename
+	// Atomic write: unique temp file + rename (temp file in same shard subdir to keep rename on the same fs)
 	target := cachePath(cacheDir, key)
-	tmp, err := os.CreateTemp(cacheDir, "ast-*.tmp")
+	tmp, err := os.CreateTemp(subdir, "ast-*.tmp")
 	if err != nil {
 		return
 	}

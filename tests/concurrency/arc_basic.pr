@@ -578,3 +578,78 @@ arc_borrow_slice_assign_alternating() `test {
   assert(v[1] == "b", "v[1]");
   assert(v[2] == "c", "v[2]");
 }
+
+// T0393: Arc as a struct field — synth-drop must call Arc[T].drop on the field.
+// Without the fix, the user type's synthesized drop walked fields but skipped
+// Arc/Weak (only Mutex/MutexGuard had explicit cases), leaking 1 alloc per Arc.
+type ArcFieldBox {
+  Arc[int] value;
+}
+
+arc_field_no_leak() `test {
+  ArcFieldBox b = ArcFieldBox(value: Arc[int](42));
+}
+
+// T0393: Arc[string] as a field — heap inner type. Verifies the per-instantiation
+// drop is dispatched correctly (Arc[string].drop, not Arc.drop).
+type ArcStringFieldBox {
+  Arc[string] value;
+}
+
+arc_field_string_no_leak() `test {
+  ArcStringFieldBox b = ArcStringFieldBox(value: Arc[string]("hello"));
+}
+
+// T0393: Arc inside a generic carrier — Box[Arc[int]] must monomorphize the
+// synth-drop with the substituted Arc[int] field type.
+type GenericFieldBox[T] {
+  T value;
+}
+
+arc_in_generic_box_no_leak() `test {
+  GenericFieldBox[Arc[int]] b = GenericFieldBox[Arc[int]](value: Arc[int](7));
+}
+
+// T0393: Multiple Arc fields in same type — verify reverse-order field drop
+// loop hits every field, including consecutive Arc[T] entries with different T.
+type MultiArcFieldBox {
+  Arc[int] a;
+  Arc[int] b;
+  Arc[string] c;
+}
+
+arc_multi_field_no_leak() `test {
+  MultiArcFieldBox box = MultiArcFieldBox(a: Arc[int](1),
+  b: Arc[int](2),
+  c: Arc[string]("hi"));
+}
+
+// T0393: Arc field with a user-defined drop — exercises the second call site
+// of emitFieldDrops (after the user drop() body runs, not the synth-drop path).
+// Without the fix, this path also leaked 1 alloc per Arc.
+type ArcUserDropBox {
+  Arc[int] value;
+  int counter;
+
+  drop(~this) {
+    // No-op user drop — auto field drops still run after this body.
+  }
+}
+
+arc_user_drop_no_leak() `test {
+  ArcUserDropBox b = ArcUserDropBox(value: Arc[int](42), counter: 0);
+}
+
+// T0393: Arc field inherited from a parent type — AllFields() must surface
+// the parent's Arc field for the child's synth drop.
+type ArcParent {
+  Arc[int] shared;
+}
+
+type ArcChild is ArcParent {
+  int extra;
+}
+
+arc_inherited_field_no_leak() `test {
+  ArcChild c = ArcChild(shared: Arc[int](99), extra: 1);
+}

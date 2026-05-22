@@ -6583,6 +6583,28 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			continue
 		}
 
+		// T0393: Arc fields — per-instantiation drop (like Mutex).
+		if arcElem, ok := types.AsArc(fieldType); ok {
+			resolvedElem := arcElem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(arcElem, c.typeSubst)
+			}
+			dropFn := c.getOrCreateArcDrop(resolvedElem)
+			c.block.NewCall(dropFn, fieldInstance)
+			continue
+		}
+
+		// T0393: Weak fields — per-instantiation drop (like Arc).
+		if weakElem, ok := types.AsWeak(fieldType); ok {
+			resolvedElem := weakElem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(weakElem, c.typeSubst)
+			}
+			dropFn := c.getOrCreateWeakDrop(resolvedElem)
+			c.block.NewCall(dropFn, fieldInstance)
+			continue
+		}
+
 		// Resolve and call field type's drop() method.
 		// T0132/B0202: For generic field instances with synthesized drops
 		// (sema-time or mono-time), use the monomorphized name. Check the resolved

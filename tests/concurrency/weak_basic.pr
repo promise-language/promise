@@ -160,3 +160,17 @@ weak_concurrent_upgrade() `test(timeout: "5s") {
     j = j + 1;
   }
 }
+
+// T0393: Weak as a struct field — synth-drop must call Weak[T].drop on the field.
+// Without the fix, the field was loaded but no drop call was emitted before
+// pal_free(this), leaking 1 alloc per instance (the Arc backing struct kept alive
+// by the weak_count).
+type WeakFieldBox {
+  Weak[int] value;
+}
+
+weak_field_no_leak() `test {
+  Arc[int] a = Arc[int](42);
+  Weak[int] w = a.downgrade();
+  WeakFieldBox b = WeakFieldBox(value: w);
+}

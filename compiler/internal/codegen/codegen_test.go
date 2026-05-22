@@ -10188,6 +10188,28 @@ func TestT0398VectorHeapElementReadDupsOnVarDecl(t *testing.T) {
 	assertContains(t, ir, "call void @llvm.memcpy")
 }
 
+// T0403: `f(v[0])` where v is Vector[heap-user-type-with-drop] and f takes a `~T`
+// param must deep-clone the element via cloneHeapElement so the callee receives an
+// independent instance. Without the dup, the callee's `~T` drop and v's element
+// walk double-free the same pointer. maybeEnableDupForMutRefArg sets
+// dupHeapUserFieldAccess for IndexExpr against Vector[heap-user-type] passed to ~T;
+// genVectorIndex's existing consume-branch then clones via cloneHeapElement.
+// Sibling of T0398 (var-decl-site).
+func TestT0403VectorHeapElementCallArgDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Item { int n; drop(~this) {} }
+		take(~Item b) {}
+		test() {
+			v := Item[]();
+			v.push(Item(n: 1));
+			take(v[0]);
+		}
+	`)
+	// cloneHeapElement → dupHeapValue: allocate a new instance and memcpy the data.
+	assertContains(t, ir, "call i8* @pal_alloc")
+	assertContains(t, ir, "call void @llvm.memcpy")
+}
+
 // T0397: `opt := m[k]` where the map value type is a tuple with droppable fields
 // must dup the tuple's string fields so opt holds an independent copy.
 // Without the dup, opt's bindingDropTuple and the map's element walk double-free

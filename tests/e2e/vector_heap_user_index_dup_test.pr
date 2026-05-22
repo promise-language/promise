@@ -238,3 +238,159 @@ test_t0398_assign_method_chain_no_leak() `test {
   assert(v[0].label == "cd", "v[0] after method chain");
   assert(v[1].label == "cd", "v[1] unchanged");
 }
+
+// === T0403: Vector[heap-user-type] dup-on-read at call-arg site. ===
+// Sibling of T0398 (var-decl) and T0412 (vec[i] = vec[j]).
+// `f(v[0])` with `f(~Box b)` aliases v's element instance — callee's ~T
+// drop and v's element walk would double-free. Fix: maybeEnableDupForMutRefArg
+// (expr.go) recognizes IndexExpr against Vector[heap-user-type] for ~T
+// params and sets dupHeapUserFieldAccess; genVectorIndex's existing
+// consume-branch then clones via cloneHeapElement.
+read_label_mut(~_T0398Box b) string {
+  return b.label;
+}
+
+// --- 15. T0403 original repro: f(v[0]) with ~Box param. ---
+test_t0403_call_arg_direct() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "c" + "a"));
+  s := read_label_mut(v[0]);
+  assert(s == "ca", "call-arg label");
+  // Second read must still work — v[0] was cloned, not consumed.
+  b2 := v[0];
+  assert(b2.label == "ca", "v[0] still readable");
+}
+
+// --- 16. Heap user without explicit drop (B0164 bindingFree path). ---
+read_no_drop(~_T0398NoDrop b) string {
+  return b.label;
+}
+
+test_t0403_no_explicit_drop() `test {
+  v := _T0398NoDrop[]();
+  v.push(_T0398NoDrop(label: "p" + "q"));
+  s := read_no_drop(v[0]);
+  assert(s == "pq", "call-arg no-drop label");
+  b2 := v[0];
+  assert(b2.label == "pq", "v[0] still readable");
+}
+
+// --- 17. Method-call arg site: obj.method(v[0]). ---
+type _T0403Reader {
+  string prefix;
+  drop(~this) {
+  }
+
+  read(&this, ~_T0398Box b) string {
+    return this.prefix + b.label;
+  }
+}
+
+test_t0403_method_call_arg() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "x" + "y"));
+  r := _T0403Reader(prefix: "[" + "]");
+  s := r.read(v[0]);
+  assert(s == "[]xy", "method call-arg label");
+  b2 := v[0];
+  assert(b2.label == "xy", "v[0] still readable");
+}
+
+// --- 18. Two ~Box args from the same vector — both must dup independently. ---
+read_pair(~_T0398Box a, ~_T0398Box b) string {
+  return a.label + b.label;
+}
+
+test_t0403_two_args() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "a" + "1"));
+  v.push(_T0398Box(label: "b" + "2"));
+  s := read_pair(v[0], v[1]);
+  assert(s == "a1b2", "two-arg label");
+  // Both v[0] and v[1] must still be readable.
+  b0 := v[0];
+  b1 := v[1];
+  assert(b0.label == "a1", "v[0] survives");
+  assert(b1.label == "b2", "v[1] survives");
+}
+
+// --- 19. clone() method dispatch path. ---
+read_clone(~_T0398CloneBox b) string {
+  return b.label;
+}
+
+test_t0403_clone_method_dispatch() `test {
+  v := _T0398CloneBox[]();
+  v.push(_T0398CloneBox(label: "g" + "h"));
+  s := read_clone(v[0]);
+  assert(s == "gh", "clone-dispatch label");
+  b2 := v[0];
+  assert(b2.label == "gh", "v[0] still readable");
+}
+
+// --- 20. Generic call-arg site exercising c.typeSubst resolution. ---
+read_first_arg[T](~T b) T {
+  return b;
+}
+
+test_t0403_generic_call() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "k" + "m"));
+  b := read_first_arg[_T0398Box](v[0]);
+  assert(b.label == "km", "generic call-arg label");
+  b2 := v[0];
+  assert(b2.label == "km", "v[0] still readable");
+}
+
+// --- 21. Borrow-arg regression guard: f(Box &b) must NOT trigger dup. ---
+read_borrow(_T0398Box & b) string {
+  return b.label;
+}
+
+test_t0403_borrow_arg_no_dup() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "n" + "o"));
+  s := read_borrow(v[0]);
+  assert(s == "no", "borrow arg label");
+  // No dup — v[0] is borrowed, not cloned. v still owns it.
+  b2 := v[0];
+  assert(b2.label == "no", "v[0] still readable after borrow");
+}
+
+// --- 22. Method-chain regression guard: f(v[0].method()) must NOT dup v[0]. ---
+// The arg is a CallExpr, not a direct IndexExpr — guard rejects it, so no
+// orphan-clone leak. Symmetric with test 11 for var-decl chains.
+test_t0403_method_chain_no_dup() `test {
+  v := _T0398CopyBox[]();
+  v.push(_T0398CopyBox(label: "p" + "q"));
+  s := read_label_copy(v[0].copy());
+  assert(s == "pq", "method-chain label");
+  b2 := v[0];
+  assert(b2.label == "pq", "v[0] still readable");
+}
+
+read_label_copy(~_T0398CopyBox b) string {
+  return b.label;
+}
+
+// --- 23. Inferred generic call path: f(local, v[0]) where T is inferred from
+// the first arg, then v[0] passed as ~T at the second position. Exercises
+// genInferredGenericCall (expr.go:1718) — the helper's IndexExpr branch must
+// fire and the dup-flag reset (after each arg) must clear it before the next
+// arg evaluation. Test 20 covers explicit-type-arg path (genGenericFuncCall);
+// this test covers the inferred-type-arg path. ---
+read_pair_inferred[T](~T a, ~T b) string {
+  return "ok";
+}
+
+test_t0403_inferred_generic_call() `test {
+  v := _T0398Box[]();
+  v.push(_T0398Box(label: "v" + "1"));
+  local := _T0398Box(label: "x" + "y");
+  // T inferred from local; v[0] is the IndexExpr arg that needs dup-on-read.
+  s := read_pair_inferred(local, v[0]);
+  assert(s == "ok", "inferred-generic call");
+  // v[0] must still be readable — only its dup was consumed.
+  b := v[0];
+  assert(b.label == "v1", "v[0] survives inferred call");
+}

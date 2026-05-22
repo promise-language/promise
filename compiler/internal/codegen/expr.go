@@ -1680,6 +1680,7 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
+		c.dupHeapUserFieldAccess = false // T0403
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
 	origArgVals := argVals // T0331: save pre-coercion values for alias check
@@ -1755,6 +1756,7 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
+		c.dupHeapUserFieldAccess = false // T0403
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
 	origArgVals := argVals // T0331: save pre-coercion values for alias check
@@ -1831,6 +1833,7 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
+		c.dupHeapUserFieldAccess = false // T0403
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
 	origArgVals := argVals // T0331: save pre-coercion values for alias check
@@ -4944,7 +4947,40 @@ func (c *Compiler) genMutRefArg(expr ast.Expr) value.Value {
 // being passed to a `~` (consuming) param. Without this, the field's inner
 // buffer is shared between the owner and the callee — both end up freeing it.
 // T0366.
+//
+// T0403: Also sets dupHeapUserFieldAccess when the arg is a direct IndexExpr
+// against a Vector[heap-user-type]. Without this, `f(v[0])` aliases v's
+// element instance pointer — the callee's `~T` drop and v's element walk
+// would double-free. Direct IndexExpr only (matching the var-decl-site
+// policy in genTyped/InferredVarDecl) avoids orphan-clone leaks for chains
+// like `f(v[0].method())`.
 func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type) {
+	pt := paramType
+	if c.typeSubst != nil {
+		pt = types.Substitute(pt, c.typeSubst)
+	}
+	if isRefType(pt) {
+		return
+	}
+	// T0403: IndexExpr against Vector[heap-user-type] passed to ~T.
+	// Use the arg expression's resolved type (works for generic callees where
+	// pt is a TypeParam pre-substitution); mirrors T0398's var-decl-site check.
+	if idx, ok := arg.(*ast.IndexExpr); ok {
+		argType := c.info.Types[idx]
+		if c.typeSubst != nil && argType != nil {
+			argType = types.Substitute(argType, c.typeSubst)
+		}
+		if isDroppableHeapUserType(argType) {
+			targetType := c.info.Types[idx.Target]
+			if c.typeSubst != nil && targetType != nil {
+				targetType = types.Substitute(targetType, c.typeSubst)
+			}
+			if _, isVec := types.AsVector(targetType); isVec {
+				c.dupHeapUserFieldAccess = true
+				return
+			}
+		}
+	}
 	mem, ok := arg.(*ast.MemberExpr)
 	if !ok {
 		return
@@ -4955,13 +4991,6 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 	}
 	ownerNamed := extractNamed(ownerType)
 	if ownerNamed == nil || !ownerNamed.HasDrop() {
-		return
-	}
-	pt := paramType
-	if c.typeSubst != nil {
-		pt = types.Substitute(pt, c.typeSubst)
-	}
-	if isRefType(pt) {
 		return
 	}
 	if extractNamed(pt) == types.TypString {
@@ -5055,6 +5084,7 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 		v := c.genCallArgExpr(arg.Value)
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
+		c.dupHeapUserFieldAccess = false // T0403
 		argVals = append(argVals, v)
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 		// T0087: For ~ (move) params, transfer ownership to callee.

@@ -10217,6 +10217,40 @@ func TestT0397TypedVarDeclMapOptionalTupleDupsStringField(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new")
 }
 
+// T0412: vec[i] = (...) for Vector[(droppable, ...)] must drop the old tuple
+// element via emitVariantFieldDrop before storing the new value. Without this,
+// the previous tuple's heap fields (string instance) leak.
+func TestT0412VectorIndexAssignDropsOldTuple(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			outer := (string, int)[]();
+			outer.push(("a" + "", 1));
+			outer[0] = ("b" + "", 2);
+		}
+	`)
+	// emitVariantFieldDrop's tuple branch walks fields via ExtractValue and
+	// calls promise_string_drop on the string element. The drop must appear
+	// inside the indexassign.ok block (not just at scope exit).
+	assertContains(t, ir, "indexassign.ok")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0412: vec[i] = vec[j] for Vector[(droppable, ...)] must dup the RHS read
+// via dupTupleValue so the new slot holds an independent clone. Without this,
+// Part 1's drop-old would free heap fields still aliased by another slot.
+func TestT0412VectorIndexAssignDupsTupleOnVecToVec(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			outer := (string, int)[]();
+			outer.push(("a" + "", 1));
+			outer.push(("b" + "", 2));
+			outer[0] = outer[1];
+		}
+	`)
+	// dupTupleValue emits promise_string_new to clone the string element on read.
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
 // Error propagation triggers scope cleanup
 func TestDropErrorPropagateCleansUp(t *testing.T) {
 	ir := generateIR(t, `

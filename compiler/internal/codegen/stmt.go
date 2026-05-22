@@ -4867,12 +4867,24 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				if isDroppableHeapUserType(elemType) {
 					c.dupHeapUserFieldAccess = true
 				}
+				// T0412: For `vec[i] = vec[j]` where the element type is a
+				// droppable tuple, set dupTupleFieldAccess so the RHS read is
+				// deep-cloned. Combined with the drop-old branch in
+				// genVectorIndexAssign, preserves the no-alias invariant —
+				// `outer[0] = outer[1]` produces an independent clone in slot 0
+				// instead of aliasing slot 1's heap fields. Direct IndexExpr RHS
+				// only — same orphan-clone safety reasoning as the heap-user
+				// branch above.
+				if _, isTup := elemType.(*types.Tuple); isTup && c.tupleNeedsDrop(elemType) {
+					c.dupTupleFieldAccess = true
+				}
 			}
 		}
 	}
 	val := c.genExpr(s.Value)
 	c.targetType = nil
 	c.dupHeapUserFieldAccess = false
+	c.dupTupleFieldAccess = false
 
 	// Auto-propagate failable call in assignment RHS.
 	if c.info.AutoPropagateExprs[s.Value] {
@@ -7906,6 +7918,16 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 			// `vec[i] = X` leaks vec[i]'s previous instance. Safe because dup-on-read
 			// (T0398 in genVectorIndex, set above in genAssignStmt) ensures any RHS
 			// vec reads return independent clones — no live alias to the freed instance.
+			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
+			c.emitVariantFieldDrop(oldVal, elemType)
+		} else if c.tupleNeedsDrop(elemType) {
+			// T0412: Drop old tuple element before overwriting. Without this,
+			// `vec[i] = X` for Vector[(droppable, ...)] leaks vec[i]'s previous
+			// tuple's heap fields (vector buffers, strings, channels, nested
+			// user types). Safe because the dup-on-read flag set in genAssignStmt
+			// ensures vec-to-vec writes produce independent clones — no live
+			// alias to the freed tuple's fields. emitVariantFieldDrop's tuple
+			// branch walks each element via ExtractValue + recursive drop.
 			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 			c.emitVariantFieldDrop(oldVal, elemType)
 		}

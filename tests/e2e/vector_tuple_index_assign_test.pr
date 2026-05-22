@@ -1,0 +1,137 @@
+// T0412: Vector[(droppable, ...)] index-assign regressions.
+// Two coordinated codegen fixes: drop-old in genVectorIndexAssign
+// (Part 1) and dup-on-read for vec-to-vec assigns in genAssignStmt
+// (Part 2). Symmetric with T0398 for heap user-type elements.
+test_t0412_overwrite_with_tuple_lit() `test {
+  v_init := string[]();
+  v_init.push("init" + "");
+  outer := (string[], int)[]();
+  outer.push((v_init, 1));
+  v2 := string[]();
+  v2.push("replaced" + "");
+  outer[0] = (v2, 99);
+  assert(outer.len == 1, "len");
+}
+
+test_t0412_overwrite_with_tuple_var() `test {
+  v_init := string[]();
+  v_init.push("init" + "");
+  outer := (string[], int)[]();
+  outer.push((v_init, 1));
+  v2 := string[]();
+  v2.push("replaced" + "");
+  t := (v2, 99);
+  outer[0] = t;
+  assert(outer.len == 1, "len");
+}
+
+make_pairs_t0412()(string[], int) {
+  v := string[]();
+  v.push("from_func" + "");
+  return (v, 99);
+}
+
+test_t0412_overwrite_with_func_return() `test {
+  v_init := string[]();
+  v_init.push("init" + "");
+  outer := (string[], int)[]();
+  outer.push((v_init, 1));
+  outer[0] = make_pairs_t0412();
+  assert(outer.len == 1, "len");
+}
+
+test_t0412_vec_to_vec_self_shift() `test {
+  v_a := string[]();
+  v_a.push("a" + "");
+  v_b := string[]();
+  v_b.push("b" + "");
+  outer := (string[], int)[]();
+  outer.push((v_a, 1));
+  outer.push((v_b, 2));
+  outer[0] = outer[1];
+  assert(outer.len == 2, "len");
+}
+
+test_t0412_vec_to_vec_repeated_shifts() `test {
+  v_a := string[]();
+  v_a.push("a" + "");
+  v_b := string[]();
+  v_b.push("b" + "");
+  v_c := string[]();
+  v_c.push("c" + "");
+  outer := (string[], int)[]();
+  outer.push((v_a, 1));
+  outer.push((v_b, 2));
+  outer.push((v_c, 3));
+  outer[0] = outer[1];
+  outer[1] = outer[2];
+  assert(outer.len == 3, "len");
+}
+
+test_t0412_nested_tuple_overwrite() `test {
+  outer := ((string, int), int)[]();
+  outer.push((("first" + "", 1), 10));
+  outer[0] = (("second" + "", 2), 20);
+  assert(outer.len == 1, "len");
+}
+
+test_t0412_no_drop_tuple_no_dup() `test {
+  outer := (int, int)[]();
+  outer.push((1, 2));
+  outer.push((3, 4));
+  outer[0] = (5, 6);
+  outer[0] = outer[1];
+  assert(outer.len == 2, "len");
+}
+
+test_t0412_string_only_tuple() `test {
+  outer := (string, int)[]();
+  outer.push(("first" + "", 1));
+  outer[0] = ("second" + "", 2);
+  assert(outer.len == 1, "len");
+}
+
+test_t0412_multi_droppable_tuple() `test {
+  // Multiple droppable elements side-by-side — exercises the field loop in
+  // emitVariantFieldDrop's tuple branch (must drop both old strings, not
+  // just the first). Distinct from nested_tuple_overwrite which has only
+  // one droppable element per level.
+  outer := (string, string)[]();
+  outer.push(("a" + "", "b" + ""));
+  outer[0] = ("c" + "", "d" + ""); // owned-RHS overwrite
+  outer.push(("e" + "", "f" + ""));
+  outer[0] = outer[1]; // vec-to-vec — both fields must dup
+  assert(outer.len == 2, "len");
+}
+
+test_t0412_multi_vec_tuple() `test {
+  // Multi-droppable with heap containers (Vector). Each element of the
+  // old tuple must call Vector.drop; the dup-on-read must clone both
+  // vectors. Most demanding shape covered.
+  v_a := string[]();
+  v_a.push("a" + "");
+  v_b := string[]();
+  v_b.push("b" + "");
+  outer := (string[], string[])[]();
+  outer.push((v_a, v_b));
+  v_c := string[]();
+  v_c.push("c" + "");
+  v_d := string[]();
+  v_d.push("d" + "");
+  outer[0] = (v_c, v_d); // both old vecs must drop
+  outer.push((string[](), string[]())); // bring back len=2
+  outer[0] = outer[1]; // both vecs must clone
+  assert(outer.len == 2, "len");
+}
+
+test_t0412_ident_rhs_no_over_dup() `test {
+  v_a := string[]();
+  v_a.push("a" + "");
+  outer := (string[], int)[]();
+  outer.push((v_a, 1));
+  v2 := string[]();
+  v2.push("replaced" + "");
+  t := (v2, 99);
+  outer[0] = t;
+  assert(outer.len == 1, "len");
+}

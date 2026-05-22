@@ -114,399 +114,40 @@ any catalog module plus other community modules they explicitly pin.
 
 ---
 
-## 3. `modules/schema` — Type-Driven Schema Generation
-
-The foundation layer. Derives machine-readable schemas from Promise types using the
-information already collected by sema: field names, field types, `` `doc `` annotations,
-defaults, optionality (`T?`), `` `required ``/`` `key ``/`` `skip ``/`` `flatten ``
-field annotations, enum variants, and structural-vs-nominal classification. The same
-inspection pass that drives `` `serializable `` (see `docs/serialization-plan.md`)
-produces the schema descriptor — there is no separate reflection mechanism.
-
-### 3.1 Design Constraints
-
-The schema descriptor must faithfully model what Promise actually expresses, not what a
-generic JSON-Schema library expresses. Concretely:
-
-1. **Optional vs required must match Promise's three-state field model.** Promise has
-   *three* presence states for a field, not two. A schema descriptor that only carries
-   `bool required` collapses two of them and produces wrong JSON Schema output:
-
-   | Promise field            | Optional? | Has default? | Decode if missing | Encode when none |
-   |--------------------------|-----------|--------------|-------------------|------------------|
-   | `string name;`           | no        | no           | error             | always encoded   |
-   | `string? email;`         | yes       | implicit none| set to none       | omitted (default)|
-   | `string role = "viewer";`| no        | yes          | use default       | always encoded   |
-   | `string v `` `required ``;`| no       | n/a          | error             | always encoded   |
-   | `string? v `` `include_none ``;`| yes | implicit none| set to none       | encoded as null  |
-
-   The schema must capture all five rows — JSON Schema's `required` array is just a
-   downstream serialization concern.
-
-2. **Names and docs come from `` `doc ``, not from heuristics.** The compiler already
-   stores `` `doc `` text on every type, field, method, function, parameter, and enum
-   variant (language-design §8.4). The schema must wire those through verbatim.
-
-3. **Field-level serialization metas must be honored.** A field marked `` `key("foo") ``
-   serializes as `"foo"`, not as the Promise field name. A field marked `` `skip ``
-   must not appear in the schema. A field marked `` `flatten `` must inline its nested
-   object's properties into the parent. These already exist for `` `serializable `` and
-   the schema must agree with what the generated `encode`/`decode` actually emits.
-
-4. **The same descriptor must describe types, methods, free functions, and getters.**
-   MCP servers expose tools (functions) and resources (typed handlers); structured
-   output uses types; agent introspection wants to enumerate methods. One descriptor
-   shape with three top-level kinds covers all of this without duplication.
-
-5. **Generation must be available to any module, not just `std`.** This requires a
-   compiler hook with clear scoping rules — see §3.6.
-
-### 3.2 The `Type` Tagged Enum
-
-The descriptor for one Promise declaration is a tagged enum named `schema.Type`. The
-name follows the schema-language convention (Object / Array / Function / … are the
-"types" of a schema), not Promise's `type` keyword — at the call site, `schema.Type`
-disambiguates clearly. Because all symbols are already namespaced under `schema.`,
-the helper structs drop the `Schema` prefix entirely: `schema.Field`, `schema.Variant`,
-`schema.Param`.
-
-A tagged enum is the right shape because every consumer needs to discriminate on the
-kind anyway. Encoding the discriminator as a Promise enum makes the discrimination
-exhaustive (the compiler errors on missing match arms), removes the long list of
-nullable fields-per-kind from the previous `Schema { kind, key_schema?, value_schema?, … }`
-design, and matches how the standard library models comparable shapes (e.g.
-`json.JsonValue`).
-
-```promise
-// modules/schema/schema.pr
-
-// Promise scalar primitives.
-enum ScalarKind `public {
-    Bool, Char, String,
-    Int, Int8, Int16, Int32, Int64,
-    Uint, Uint8, Uint16, Uint32, Uint64,
-    F32, F64,
-}
-
-// The schema descriptor for one Promise declaration. One enum, one match expression
-// at every consumer — no `kind` field, no nullable per-kind payloads.
-enum Type `public `clone `doc("Compile-time descriptor of a Promise type, function, or method.") {
-    // Heap user types marked `serializable. Includes inherited and flattened fields,
-    // excludes `skip-ed fields. `definitions` carries sub-schemas for cyclic and shared types.
-    Object(
-        string name,                      // fully-qualified Promise name (e.g. "std.Vector", "json.JsonEncoder")
-        string? description,              // from `doc on the declaration
-        Field[] fields,
-        map[string, Type] definitions,
-    ),
-
-    // T[]
-    Array(Type element),
-
-    // map[K, V]
-    Map(Type key, Type value),
-
-    // Primitives. `description` is filled when the scalar is a named field.
-    Scalar(ScalarKind kind, string? description),
-
-    // Both simple enums (Variant.fields is empty) and tagged-data enums.
-    // discriminator_key is "type" by default and is overridden via `serializable(tag: "kind").
-    Enum(
-        string name,
-        string? description,
-        Variant[] variants,
-        string discriminator_key,
-    ),
-
-    // Free function or method declaration. Captures parameter names and per-parameter `doc,
-    // which only declarations carry — function-typed values erase both (see §3.3).
-    Function(
-        string name,
-        string? description,
-        Param[] parameters,
-        Type? return_type,
-        bool failable,                    // declared with `!`
-    ),
-
-    // T? wrapper. Inner carries the wrapped Type.
-    Optional(Type inner),
-
-    // Named reference into the enclosing Object's `definitions` map. Emitted on cycles
-    // and on widely-shared sub-types so the same descriptor is not duplicated.
-    Reference(string name),
-}
-
-type Field `public `clone {
-    string name `doc("Wire name — already adjusted for `key annotations.");
-    string source_name `doc("Original Promise field name (for diagnostics).");
-    Type field_type;
-    string? description;
-
-    // Presence semantics — see §3.1 table. Exactly one of these three is true for any field.
-    bool required `doc("Field must be present during decode. True when the type has no `?` and no default, or carries `required.");
-    bool optional `doc("Field type is T?. None is the implicit value when missing.");
-    bool has_default `doc("Field declares an `= expr default.");
-
-    string? default_repr `doc("Source-form repr of the default expression, if has_default.");
-    bool include_none_in_output `doc("True for T? fields with `include_none — encode as null instead of omitting.");
-    bool readonly `doc("True for `final fields — informational only.");
-}
-
-type Variant `public `clone {
-    string name;             // wire name (already adjusted for `key on the variant)
-    string source_name;      // Promise variant name
-    string? description;     // from `doc on the variant
-    Field[] fields;          // empty for variants with no payload
-}
-
-type Param `public `clone {
-    string name;             // parameter name from the function signature
-    Type param_type;
-    string? description;     // from `doc on the parameter
-    bool optional;           // parameter type is T?
-    bool has_default;        // parameter has `= expr`
-    string? default_repr;
-}
-```
-
-#### Construction — free functions (not enum methods)
-
-Promise enum methods cannot be `` `mono `` or `` `factory `` (language-design §5.6).
-Both constructors are therefore plain module-level functions in `schema`:
-
-```promise
-// modules/schema/schema.pr (continued)
-
-of[T]() Type `mono `public
-    `doc("Compile-time derivation from a Promise type. T must be marked `serializable. Returns Type.Object, Type.Enum, Type.Map, Type.Array, or Type.Scalar based on T's shape.");
-
-for_func[F]() Type `mono `public
-    `doc("Compile-time derivation from a free-function or method declaration. Captures parameter names, `doc annotations, defaults, and failability. F is a function reference (declaration), not a function-typed value — see §3.3.");
-```
-
-Call sites read naturally:
-
-```promise
-schema.Type t  = schema.of[CreateUserRequest]();
-schema.Type fn = schema.for_func[read_text]();
-```
-
-#### Rendering — enum methods that match on `this`
-
-Renderers are normal methods on the enum:
-
-```promise
-type Type {
-    // ... variants above ...
-
-    to_json_schema(this) string `public `doc("Render as draft-2020-12 JSON Schema.") {
-        return match this {
-            Type.Object(name, desc, fields, defs) => _render_object_json(name, desc, fields, defs),
-            Type.Array(elem)                      => _render_array_json(elem),
-            Type.Map(k, v)                        => _render_map_json(k, v),
-            Type.Scalar(kind, desc)               => _render_scalar_json(kind, desc),
-            Type.Enum(name, desc, vs, tag)        => _render_enum_json(name, desc, vs, tag),
-            Type.Function(name, desc, ps, r, f)   => _render_function_json(name, desc, ps, r, f),
-            Type.Optional(inner)                  => inner.to_json_schema(),     // emit nullable wrapper
-            Type.Reference(name)                  => "{\"$ref\": \"#/$defs/{name}\"}",
-        };
-    }
-
-    to_openapi(this) string `public `doc("Render as OpenAPI 3.1 schema fragment.");
-    to_tool_input_schema(this) string `public `doc("Render as the Anthropic/OpenAI tool input_schema shape (object with required[]).");
-}
-```
-
-#### Why this beats the kind-discriminator struct
-
-- **Exhaustiveness.** A consumer that adds a new platform target (e.g. an OpenAPI 3.0
-  renderer) gets a compile error from sema if it forgets a variant — no quiet
-  fallthrough.
-- **No nullable salad.** The previous `Schema { Type? inner; Type? key_schema; Type?
-  value_schema; schema.Param[] parameters; … }` had ~6 fields that were valid only for
-  one specific kind. Each variant now carries exactly its own payload.
-- **Pattern matching for free.** Recursion (e.g. `Optional(inner)` rendering) reads as
-  one match arm with a typed binding instead of a manual `if shape.kind == ... && let
-  Some(x) = shape.inner else { panic }`.
-- **Mirrors `json.JsonValue`.** Anyone who has used the std json module already knows
-  this pattern.
-
-### 3.3 What Can Be Derived From Functions vs Function Types
-
-This is the critical distinction the previous design glossed over:
-
-- **Function-typed values** — e.g., a parameter of type `(string, int) -> bool`. The
-  type erases parameter names, per-parameter `` `doc ``, and defaults (language-design
-  §9.5). Only positional types and the return type survive. **Do not** attempt to
-  derive a useful schema from a value of function type.
-- **Function declarations** — e.g., a free function `add(int a, int b) int`. The
-  declaration carries names, parameter `` `doc `` annotations, defaults, return type,
-  and failability. The compiler **does** have this information, and `schema.for_func`
-  is allowed to recover it because `schema.for_func[add]()` resolves to the
-  declaration (the identifier path), not to a runtime function value.
-
-This matters for MCP server authoring (§6) and `promise ai serve` (§9): both register
-free functions or methods, which means the declaration is in scope and the names/docs
-are available. They never derive schemas from anonymous closures.
-
-### 3.4 Automatic Derivation — Worked Example
-
-```promise
-use schema;
-
-type CreateUserRequest `serializable
-    `doc("Request to create a new user.") {
-    string name `doc("The user's full name.");
-    string email `doc("Email address. Must be unique.") `key("email_address");
-    int? age `doc("Age in years. Optional.");
-    string role = "viewer" `doc("Role assignment. One of: viewer, editor, admin.");
-    string _trace_id `skip;
-    int version = 1 `required `doc("Schema version — required even though defaulted.");
-}
-
-main() {
-    schema.Type s = schema.of[CreateUserRequest]();
-    print_line(s.to_json_schema());
-}
-```
-
-The corresponding JSON Schema (draft 2020-12):
-
-```json
-{
-  "type": "object",
-  "title": "CreateUserRequest",
-  "description": "Request to create a new user.",
-  "properties": {
-    "name":          { "type": "string",  "description": "The user's full name." },
-    "email_address": { "type": "string",  "description": "Email address. Must be unique." },
-    "age":           { "type": "integer", "description": "Age in years. Optional." },
-    "role":          { "type": "string",  "description": "Role assignment. One of: viewer, editor, admin.", "default": "viewer" },
-    "version":       { "type": "integer", "description": "Schema version — required even though defaulted.", "default": 1 }
-  },
-  "required": ["name", "email_address", "version"]
-}
-```
-
-Note how the descriptor honors:
-- `` `key("email_address") `` — wire name in `properties` and in `required`.
-- `` `skip `` — `_trace_id` is absent from the output entirely.
-- `T?` — `age` is in `properties` but not `required`.
-- `=` defaults — `role` has `default` but is not `required`.
-- `` `required `` — `version` has `default` *and* is `required`.
-
-### 3.5 Opt-In: `` `serializable `` Drives Schema Generation
-
-Per `docs/serialization-plan.md`, only types annotated `` `serializable `` get
-encode/decode methods synthesized. The same constraint applies to schemas: only
-`` `serializable `` types support `schema.of[T]()`. This is a deliberate alignment, not
-a parallel mechanism:
-
-- The list of fields that contribute to the schema is the same list that contributes to
-  the encoded output. This avoids drift between "what I serialize" and "what I describe".
-- Honoring `` `key ``, `` `skip ``, `` `flatten ``, `` `required ``, `` `include_none ``
-  in only one place (the sema synthesis pass) is cheaper and less error-prone than
-  computing it twice.
-- Trying to derive a schema for a non-serializable type at compile time is a compile
-  error with a clear message:
-  ```
-  schema.of[Foo]() requires Foo to be marked `serializable`
-  ```
-
-For free functions, no annotation is required to *derive* a `schema.for_func` — the
-declaration always has names and docs. To **register** a function as an MCP tool, see
-the `` `tool `` annotation in §6.
-
-### 3.6 Compiler Extension — How Generation Works for Any Module
-
-`schema.of[T]()` is a `` `mono `` factory: each instantiation triggers the compiler's
-monomorphization pipeline (CLAUDE.md §"Monomorphization"). The schema-generation hook
-runs in the same pass that synthesizes encode/decode for `` `serializable `` types
-(see `compiler/internal/sema/serialize.go`). It produces an AST-level expression that
-constructs the `Type` value at runtime.
-
-**Scope of generation**
-
-The hook is **not** restricted to `std` or to catalog modules — it runs for any
-`` `serializable `` type the compiler sees, in any module. This is required so that:
-
-- A user project can define its own `type Request `` `serializable `` { ... }` and call
-  `schema.of[Request]()` to drive an MCP server.
-- A community module can define types whose schemas are visible to consumers.
-
-**What the compiler must do for every `` `serializable `` type**
-
-1. While synthesizing encode/decode methods, also synthesize a static factory
-   `_schema_descriptor() Schema `` `factory `` `` `mono `` `` `internal ``` that returns
-   the runtime `Type` value. This method is private (uses `_` prefix) and only the
-   `schema` module's `schema.of[T]` accesses it via a compiler-recognized intrinsic.
-2. The descriptor captures: type name, `` `doc ``, every visible-after-`skip`-and-
-   `flatten` field with name (post-`` `key ``), inferred `Type` of the field type
-   (recursing for nested `` `serializable `` types and using `Reference` for cycles),
-   and the three presence flags.
-3. For enums, the descriptor includes one `schema.Variant` per variant and the
-   discriminator key (default `"type"`, override via `` `serializable(tag: "kind") ``).
-
-This piggybacks on the existing serialization codegen — no separate type-information
-table is added. The cost is one extra synthesized method per `` `serializable `` type,
-which is bounded by the same instance-cache mechanism documented in CLAUDE.md.
-
-**Why not a `` `schemable `` annotation alongside `` `serializable ``?** Two
-annotations meaning "describe my fields" is bad ergonomics. A type that wants to be
-described to an LLM almost always also wants to round-trip JSON. The few cases where
-that is not true (a type that should be visible to LLMs but never serialized) can be
-handled by `schema.for_func` over a constructor or by a manually-built `schema.Type` literal.
-
-### 3.7 Free Functions and Methods
-
-`schema.for_func[F]()` produces a `Type.Function` value for a free-function (or method)
-declaration. Consumers pattern-match to access the payload — there are no nullable
-sibling fields to navigate around:
-
-```promise
-use io;
-use schema;
-
-read_text!(string path `doc("Absolute or relative file path.")) string
-    `public `doc("Read a UTF-8 file from disk.") {
-    return io.File.read!(path);
-}
-
-main!() {
-    schema.Type fn = schema.for_func[read_text]();
-
-    match fn {
-        schema.Type.Function(name, desc, params, ret, failable) => {
-            print_line("{name}: {desc ?: \"\"}");
-            print_line("  failable: {failable}");
-            for p in params {
-                print_line("  {p.name}: {p.description ?: \"\"}");
-            }
-        },
-        _ => {},   // for_func always returns a Function variant
-    }
-
-    print_line(fn.to_tool_input_schema());
-}
-```
-
-For the example above, the `Function` payload carries `params[0].name = "path"`,
-`params[0].description` from the parameter's `` `doc ``, a `ret` of
-`Type.Scalar(ScalarKind.String, none)`, and `failable = true`. `to_tool_input_schema()`
-wraps the parameters as an object with required/optional bookkeeping derived from each
-parameter's optionality and defaults — what tool-using LLMs expect as `input_schema`.
-
-### 3.8 Limitations and Boundaries
-
-- **No runtime reflection.** Schemas are built at compile time. There is no
-  `schema.of(some_value)` taking a runtime value — the type must be known statically.
-- **No anonymous closures.** Per §3.3, function values lose names. Code that wants to
-  expose a closure as a tool must wrap it in a named function declaration.
-- **No cross-module private fields.** A `` `serializable `` type with `_`-prefixed
-  fields excludes them from both encode/decode and the schema, regardless of caller.
-- **Cycles are bounded.** Recursive types (`type Tree `` `serializable `` { Tree[]
-  children; }`) are emitted with `schema.Type.Reference` after the first occurrence;
-  the full descriptor lives once in `definitions`.
+## 3. `modules/schema` — Shared with Cloud Persistence
+
+`modules/schema` is described in full in **`docs/schema.md`** because it is the
+shared foundation for both the AI platform and cloud persistence
+(`docs/cloud-persistence.md`). This section summarizes only what AI tooling
+specifically consumes and refers the reader to the schema doc for everything else.
+
+**What `schema` provides** (see `docs/schema.md` for full detail):
+
+- A tagged enum `schema.Type` with variants `Object` / `Array` / `Map` / `Scalar` /
+  `Enum` / `Function` / `Optional` / `Reference`. One descriptor for types,
+  enums, free functions, and methods.
+- Free-function constructors `schema.of[T]()` (compile-time derivation from a type)
+  and `schema.for_func[F]()` (compile-time derivation from a function declaration).
+- Renderers `to_json_schema()`, `to_openapi()`, `to_tool_input_schema()` defined as
+  methods on `Type`.
+- A 128-bit content-addressed identity `Hash128` on every type / field / function /
+  variant / parameter, and a `` `id("...") `` meta annotation that pins the identity
+  across renames.
+- A three-state field model (required / optional / has_default) honored by both
+  schema rendering and `` `serializable `` encode/decode.
+- Compile-time-only generation. No runtime reflection.
+
+**What AI tooling adds on top:**
+
+- `Tool.create[T, R]` (§5.3) calls `schema.of[T]()` for the input shape and
+  `to_tool_input_schema()` for the on-the-wire descriptor LLMs consume.
+- `Agent.run_typed[T]` (§8) calls `schema.of[T]()` to produce the JSON Schema it
+  injects into the system prompt.
+- The `` `tool `` annotation (§9.1) drives `schema.for_func[F]()` and registers each
+  annotated function in a per-module manifest.
+
+For the schema's design constraints, identity composition, project identity in
+`promise.toml`, and the compiler extension contract, see `docs/schema.md`.
 
 ---
 
@@ -1969,10 +1610,10 @@ implemented in `compiler/internal/sema/meta.go`) as a function-and-method annota
    with optional named parameters (e.g., `` `tool(name: "wire_name") ``). Reject on
    types, fields, or anything else.
 2. **Synthesize a `Type` descriptor** for each `` `tool ``-annotated declaration in
-   the same pass that handles `` `serializable `` schemas (§3.6). The descriptor
+   the same pass that handles `` `serializable `` schemas (see `docs/schema.md` §7). The descriptor
    captures parameter names, parameter `` `doc `` annotations, parameter defaults,
    parameter optionality (`T?`), return type, and failability — the function-declaration
-   information the compiler always has and never erases (§3.3).
+   information the compiler always has and never erases (see `docs/schema.md` §3).
 3. **Validate parameter types** are either primitive, `` `serializable ``, or
    primitive-of-`` `serializable ``-containers (`T[]`, `map[string, T]`, `T?`). Emit a
    precise diagnostic when not — `mcp tools cannot accept non-serializable parameter
@@ -1988,7 +1629,7 @@ implemented in `compiler/internal/sema/meta.go`) as a function-and-method annota
 
 - All the type information needed already exists — `` `tool `` does not introduce a
   new reflection facility, only a new label on top of facilities the compiler has.
-- The schema synthesis hook is the same one that powers `schema.of[T]()` (§3.6) and
+- The schema synthesis hook is the same one that powers `schema.of[T]()` (see `docs/schema.md` §7) and
   `` `serializable `` (`docs/serialization-plan.md`); it does not need to be invented.
 - Free-function manifest enumeration is already a well-defined operation — every Go
   unit-test discovery, every embedded-resource registry uses the same shape.
@@ -2284,23 +1925,24 @@ test_agent_responds() `test {
 
 ### Phase 0 — Prerequisites (already covered or in progress)
 
-1. **`modules/json`**: already implemented — `json.encode_string[T]()`, `json.decode_string[T]()`
+1. **`modules/json`**: already implemented — `json.encode_string[T]()`,
+   `json.decode_string[T]()`.
 2. **`modules/http`**: currently a placeholder in `catalog.toml` — must be filled in
-   (HTTP client with `get`, `post`, SSE streaming support; uses `modules/net`)
-3. **Compiler — schema-synthesis hook**: extend the existing `` `serializable ``
-   pass in `compiler/internal/sema/serialize.go` to also synthesize a hidden
-   `_schema_descriptor()` factory per type/enum (§3.6).
+   (HTTP client with `get`, `post`, SSE streaming support; uses `modules/net`).
+3. **`modules/schema` and shared compiler hooks** — see `docs/schema.md` for the full
+   plan. The AI platform depends on:
+   - The `Type` tagged enum and helper structs.
+   - `schema.of[T]()` and `schema.for_func[F]()` free functions.
+   - The `_schema_descriptor()` synthesis hook in
+     `compiler/internal/sema/serialize.go`.
+   - `Hash128`, `Origin`, the `` `id `` meta, and the `[executable]` table in
+     `promise.toml`.
 4. **Compiler — `` `tool `` meta**: add to `builtinMetas` in
    `compiler/internal/sema/meta.go`; emit per-module `_tool_manifest()` getter (§9.1).
 
-### Phase 1 — Foundation (schema + auth)
+### Phase 1 — AI-specific foundation (auth)
 
-5. **`modules/schema`**: `Type` (tagged enum with variants `Object` / `Array` / `Map` /
-   `Scalar` / `Enum` / `Function` / `Optional` / `Reference`), `Field`, `Variant`,
-   `Param`, `ScalarKind`, free functions `schema.of[T]()` and `schema.for_func[F]()`,
-   and the rendering methods `to_json_schema()`, `to_openapi()`,
-   `to_tool_input_schema()` defined on `Type`.
-6. **`modules/auth`**: `AuthError`, `Credential`, `TokenProvider`, `StaticToken`,
+5. **`modules/auth`**: `AuthError`, `Credential`, `TokenProvider`, `StaticToken`,
    `EnvToken`. Credential store (`~/.promise/credentials.toml`) read.
 
 ### Phase 2 — Core AI (provider interface + agent + MockProvider)
@@ -2363,7 +2005,7 @@ future readers can see *why* the platform looks the way it does, not only *what*
 **Q1: Schema derivation — compile-time or runtime?**
 *Decision: compile-time, via monomorphization.* `schema.of[T]()` is a `` `mono `` free
 function whose body is synthesized in the same sema pass that generates encode/decode
-for `` `serializable `` types (§3.6). There is no runtime reflection facility to add
+for `` `serializable `` types (see `docs/schema.md` §7). There is no runtime reflection facility to add
 or maintain. `serialization-plan.md` §7.1 already rules out runtime reflection on cost
 and philosophy grounds, and the schema mechanism reuses the hook the serializer already
 needs.
@@ -2432,7 +2074,7 @@ schema.of[Foo]() requires Foo to be marked `serializable`
 ```
 
 This keeps "what I describe" and "what I encode" aligned via a single sema hook
-(§3.6). The rare type that should be visible to LLMs but intentionally never
+(see `docs/schema.md` §7). The rare type that should be visible to LLMs but intentionally never
 serialized is handled by manually constructing a `schema.Type` literal rather than by
 forking the synthesis machinery — that case is rare enough that the manual cost is
 preferable to a second annotation.

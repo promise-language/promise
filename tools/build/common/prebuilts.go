@@ -529,14 +529,15 @@ func acquireCacheLock(cacheDir, identityHint string) (func(), error) {
 // FetchAll fetches every required (and optional-with-target) binary in the
 // manifest for the given target. Returns a map name → extractedRoot.
 //
-// `only` may be non-empty to restrict to a subset (e.g., from `--fetch=llvm`).
+// `only` may be non-empty to restrict to a subset (callers that want to fetch
+// just one binary; release builds pass nil to fetch every required entry).
 // Unknown names in `only` are an error.
 func FetchAll(m *PrebuiltsManifest, target string, only []string) (map[string]string, error) {
 	out := make(map[string]string)
 	if len(only) > 0 {
 		for _, name := range only {
 			if _, ok := m.Binaries[name]; !ok {
-				return nil, fmt.Errorf("--fetch=%s: not declared in manifest", name)
+				return nil, fmt.Errorf("FetchAll only=%s: not declared in manifest", name)
 			}
 		}
 	}

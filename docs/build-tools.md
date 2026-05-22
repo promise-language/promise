@@ -120,13 +120,23 @@ The epoch is read from `catalog.toml`. After building, writes `bin/.promise.hash
 
 ### 6. Release builds (`bin/build --release`)
 
-Release builds embed LLVM tools in the binary for self-contained distribution. The set of files bundled per target is declared in `tools/build/prebuilts.toml` (manifest schema 1) — both the local-LLVM and `--fetch` paths read their file list from the same source.
+Release builds embed LLVM tools in the binary for self-contained distribution. The set of files bundled per target is declared in `tools/build/prebuilts.toml` (manifest schema 1).
 
-**Linux:** Gzips `opt`, `llc`, `lld`, and `libLLVM.so` from the system LLVM installation.
+**Source of truth — pinned upstream tarballs.** `bin/build --release` always downloads the pinned upstream LLVM tarball (URL + SHA256 from the manifest) into the host-stable prebuilts cache and gzips the manifest's `out` files into the embed dir. The cache lives at:
 
-**macOS:** Gzips `opt`, `llc`, `lld`, `libLLVM.dylib`, and the explicit dylib entries from the manifest (`libc++.1.dylib`, `libunwind.1.dylib`, `liblld*.dylib`). For local Homebrew installs only, additional transitive dylibs are discovered via `otool -L` and bundled too. At runtime, extracted Mach-O binaries are patched with `install_name_tool` and re-signed with `codesign`.
+- macOS: `~/Library/Caches/promise/prebuilts/`
+- Linux: `~/.cache/promise/prebuilts/` (or `$XDG_CACHE_HOME/promise/prebuilts/` if set)
+- Windows: `%LOCALAPPDATA%\promise\prebuilts\`
+- Override: `PROMISE_PREBUILTS_CACHE`
 
-**`--fetch` flag:** `bin/build --release --fetch` downloads pinned upstream tarballs (URL + SHA256 from the manifest) into `~/.promise/cache/prebuilts/<name>/<version>/<target>/` instead of using the locally-installed LLVM. Verifies SHA256 (mismatch is fatal). Use `--fetch=name1,name2` to fetch a subset. Default behavior (no `--fetch`) is unchanged.
+The cache is independent of `PROMISE_HOME`, so `bin/verify` and other tools that override `PROMISE_HOME` to a repo-local arena reuse the same downloaded tarball. SHA256 verification is mandatory (mismatch is fatal); a per-target `gofrs/flock` makes concurrent invocations from multiple arenas safe.
+
+**Per-target file lists** (everything that ends up in the bundle, named per the manifest's `out` field):
+
+- **Linux:** `opt`, `llc`, `lld` from `LLVM-22.1.0-Linux-X64.tar.xz` (statically linked).
+- **macOS arm64:** `opt`, `llc`, `lld` from `LLVM-22.1.0-macOS-ARM64.tar.xz` (statically linked).
+- **macOS amd64:** unsupported — no upstream x86_64 macOS tarball at this LLVM version.
+- **Windows:** `opt.exe`, `llc.exe`, `lld.exe` from `clang+llvm-22.1.0-x86_64-pc-windows-msvc.tar.xz`.
 
 Release builds compile with `-tags embed_llvm` to enable the embedded tool extraction code paths.
 

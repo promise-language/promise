@@ -1,8 +1,10 @@
 # Pinned prebuilt binaries embedded in `bin/promise --release`.
 #
-# Use `bin/build --release --fetch` to download from the URLs below instead of
-# bundling whatever is locally installed (Homebrew on macOS, apt llvm-22 on
-# Linux, manual install dir on Windows).
+# `bin/build --release` always downloads from the URLs below into the
+# host-stable prebuilts cache (~/Library/Caches/promise/prebuilts on macOS,
+# ~/.cache/promise/prebuilts on Linux, %LOCALAPPDATA%\promise\prebuilts on
+# Windows; override with PROMISE_PREBUILTS_CACHE). Subsequent builds reuse
+# the cache.
 #
 # To pin a new version: bump `version`, update URLs, run `bin/pin-prebuilts`
 # (which downloads each URL, computes its sha256, and writes it back here).
@@ -53,9 +55,8 @@ files = [
 # Upstream LLVM stopped publishing macOS x86_64 tarballs at version 22 (the
 # release page only ships LLVM-22.1.0-macOS-ARM64.tar.xz). The entry stays
 # here so a community member can fill it in later if they host an x86_64
-# build under their own URL — until then, `bin/build --release` and
-# `bin/build --release --fetch` will surface the `unsupported` reason
-# verbatim and refuse to build for this target.
+# build under their own URL — until then, `bin/build --release` surfaces
+# the `unsupported` reason verbatim and refuses to build for this target.
 unsupported = "no upstream LLVM 22.1.0 tarball for macOS x86_64; Apple Silicon only on this release"
 url = ""
 sha256 = ""

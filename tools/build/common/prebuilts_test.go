@@ -410,8 +410,8 @@ files = [{ src = "a", out = "b.gz" }]
 	}
 }
 
-// TestFetchAll_OnlySubset verifies the --fetch=name filter only fetches the
-// named subset.
+// TestFetchAll_OnlySubset verifies the `only` parameter restricts FetchAll
+// to the named subset of binaries (the rest are skipped).
 func TestFetchAll_OnlySubset(t *testing.T) {
 	tarBytes, err := makeTarGzContent(map[string]string{"a": "A"})
 	if err != nil {
@@ -474,8 +474,8 @@ files = [{ src = "a", out = "a" }]
 	}
 }
 
-// TestFetchAll_UnknownInOnly returns an error when --fetch=foo names a binary
-// that's not in the manifest.
+// TestFetchAll_UnknownInOnly returns an error when the `only` slice names a
+// binary that's not in the manifest.
 func TestFetchAll_UnknownInOnly(t *testing.T) {
 	manifestPath := filepath.Join(t.TempDir(), "prebuilts.toml")
 	if err := os.WriteFile(manifestPath, []byte(`schema = 1
@@ -495,7 +495,7 @@ files = [{ src = "a", out = "a.gz" }]
 	}
 	_, err = FetchAll(m, "linux-amd64", []string{"unknown"})
 	if err == nil {
-		t.Fatal("expected error for unknown name in --fetch list")
+		t.Fatal("expected error for unknown name in FetchAll only list")
 	}
 	if !strings.Contains(err.Error(), "not declared") {
 		t.Errorf("error = %v, want 'not declared'", err)

@@ -564,6 +564,68 @@ test_map_string_tuple_drop() `test {
   assert(m.len == 3, "before drop");
 }
 
+// T0408: Map[K, V] for non-tuple heap V (Vector, channel, Set, nested map).
+// Originally panicked at codegen with "no layout for type _FnIter[(K, V)]"
+// because the mono spiral guard over-marked Vector[T]/Map[K, V] origins as
+// spiral when V was a heap type. Fixed by T0400's spiral-guard refinement
+// (originWrapsTypeParams precondition). These tests lock in the contract
+// that Vector/Channel/Set/Map origins are not over-marked spiral, so
+// _FnIter[(K, V)] resolves for any non-tuple-wrapping V.
+
+test_map_vector_value() `test {
+  m := map[string, int[]]();
+  v := int[]();
+  v.push(1);
+  v.push(2);
+  m["a"] = v;
+  assert(m.contains("a"), "contains");
+  if got := m["a"] {
+    assert(got.len == 2, "vec len");
+    assert(got[0] == 1, "vec[0]");
+  }
+}
+
+test_map_channel_value() `test {
+  m := map[string, channel[int]]();
+  c := channel[int]();
+  m["a"] = c;
+  assert(m.contains("a"), "channel value");
+  assert(m.len == 1, "len");
+}
+
+test_map_set_value() `test {
+  m := map[string, Set[int]]();
+  s := Set[int]();
+  s.add(1);
+  s.add(2);
+  m["a"] = s;
+  assert(m.contains("a"), "set value");
+}
+
+test_map_nested_map_value() `test {
+  m := map[string, map[string, int]]();
+  inner := map[string, int]();
+  inner["x"] = 1;
+  m["a"] = inner;
+  assert(m.contains("a"), "nested map value");
+  if got := m["a"] {
+    assert(got.contains("x"), "inner key");
+  }
+}
+
+test_map_vector_value_iter() `test {
+  // Forces _FnIter[(string, int[])] codegen — the panic site in T0408.
+  m := map[string, int[]]();
+  v := int[]();
+  v.push(42);
+  m["a"] = v;
+  count := 0;
+  for entry in m.entries() {
+    count = count + 1;
+  }
+  assert(count == 1, "iter count");
+}
+
 // T0397: Heap string in tuple-valued map — repeated reads must not double-free.
 // Uses .to_string() to force heap allocation (literal-only tests miss the bug
 // because pal_free short-circuits on the literal flag).

@@ -60,3 +60,21 @@ description = "MessagePack binary encoding and decoding: MsgpackEncoder, Msgpack
 
 [modules.markdown]
 description = "CommonMark 0.31 + GFM parsing and rendering: Document (with Document.parse factory), Block, Inline, Builder (planned)"
+
+[modules.schema]
+description = "Type-driven schema generation: Type tagged enum, Hash128 identity, `id and `entity metas, schema.of[T]/for_func[F] (planned — see docs/schema.md, T0446)"
+
+[modules.auth]
+description = "Authentication primitives: Credential, TokenProvider, StaticToken, EnvToken, credential store (planned — see docs/ai-platform.md §4, T0449)"
+
+[modules.ai]
+description = "Provider-neutral agent orchestration: Provider interface, MockProvider, Agent, Tool, sessions, multi-agent. Vendor providers live in community modules (planned — see docs/ai-platform.md §5, T0450/T0453)"
+
+[modules.mcp]
+description = "Model Context Protocol: Server, Client, stdio/SSE/HTTP transports; tools/resources/prompts (planned — see docs/ai-platform.md §6, T0451)"
+
+[modules.sandbox]
+description = "Capability-controlled execution: Capability enum, Sandbox, ExecutionResult; PAL-level enforcement (planned — see docs/ai-platform.md §7, T0452)"
+
+[modules.cloud]
+description = "Schema-driven durable state: Ref/Inverse, single-endpoint sync protocol, block-scoped transactions, pluggable Backend (planned — see docs/cloud-persistence.md, T0456)"

@@ -191,7 +191,7 @@ test_server_headers() `test(exclude: wasm || macos, timeout: "10s") {
     assert(resp.status == 200, "status 200");
     assert(resp.body == "/path", "path echoed");
     bool found = false;
-    for k, v in resp.response_headers() {
+    for k, v in resp.headers {
       if k == "x-echo" && v == "hello" {
         found = true;
       }

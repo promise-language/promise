@@ -1,0 +1,228 @@
+// T0494: Getters returning droppable values (string/vector/map/user heap type)
+// must register cleanup at the call site so the cloned/owned return value is
+// freed once the temp goes out of scope. Before T0494, only string getters
+// were tracked (B0290). This test exercises the for-in iterable, method-chain
+// receiver, and standalone-expression positions for vectors, maps, and user
+// heap types — all four scenarios leaked memory (or crashed) prior to the fix.
+type Inner {
+  string _name;
+  drop(~this) {
+  }
+  ok(&this) bool {
+    return true;
+  }
+}
+
+type Outer {
+  Inner _inner;
+
+  get inner Inner `public => Inner(_name: this._inner._name);
+}
+
+type Holder {
+  map[string, string] _data;
+  string[] _tags;
+
+  get data map[string, string] `public => this._data.clone();
+  get tags string[] `public => this._tags.clone();
+  data_method() map[string, string] `public {
+    return this._data.clone();
+  }
+}
+
+setup_holder() Holder {
+  Holder h = Holder(_data: map[string, string](), _tags: ["red", "blue", "green"]);
+  h._data["a"] = "1";
+  h._data["b"] = "2";
+  return h;
+}
+
+// Map getter in for-in iterable position — the original repro from T0494.
+test_map_getter_for_in() `test {
+  Holder h = setup_holder();
+  int n = 0;
+  for k, v in h.data {
+    n = n + 1;
+  }
+  assert(n == 2, "map getter for-in count");
+}
+
+// Map getter in method-chain receiver position — second case from T0494.
+test_map_getter_chain() `test {
+  Holder h = setup_holder();
+  assert(h.data.contains("a"), "map getter chain contains");
+}
+
+// Method form (kept here as the reference: this never leaked).
+test_map_method_for_in() `test {
+  Holder h = setup_holder();
+  int n = 0;
+  for k, v in h.data_method() {
+    n = n + 1;
+  }
+  assert(n == 2, "map method for-in count");
+}
+
+// Vector getter in for-in iterable position — generalized leak case.
+test_vector_getter_for_in() `test {
+  Holder h = setup_holder();
+  int n = 0;
+  for t in h.tags {
+    n = n + 1;
+  }
+  assert(n == 3, "vector getter for-in count");
+}
+
+// Vector getter in method-chain receiver position.
+test_vector_getter_chain() `test {
+  Holder h = setup_holder();
+  assert(h.tags.contains("red"), "vector getter chain contains");
+}
+
+// User heap type getter in method-chain receiver position.
+test_user_heap_getter_chain() `test {
+  Outer o = Outer(_inner: Inner(_name: "hi"));
+  assert(o.inner.ok(), "user heap getter chain ok");
+}
+
+// Vector getter as a standalone-expression statement (drop at stmt end only).
+test_vector_getter_expression_stmt() `test {
+  Holder h = setup_holder();
+  h.tags;
+  assert(true, "no leak from discarded vector getter result");
+}
+
+// Map getter as a standalone-expression statement.
+test_map_getter_expression_stmt() `test {
+  Holder h = setup_holder();
+  h.data;
+  assert(true, "no leak from discarded map getter result");
+}
+
+type StringBox {
+  string _content;
+
+  get content string `public => this._content + "!";
+}
+
+// String getter result used in for-in iterable position. Without the lifetime
+// extension fix in genForInStmt's string path, the cloned string would be
+// freed by the body's first stmt-end cleanup and subsequent iterations would
+// read freed memory.
+test_string_getter_for_in() `test {
+  StringBox b = StringBox(_content: "abc");
+  int n = 0;
+  for c in b.content {
+    n = n + 1;
+  }
+  assert(n == 4, "string getter for-in char count");
+}
+
+// Generic owner type with getter returning T[]: exercises trackGetterResult's
+// typeSubst path. When `for x in this.items` is generated inside a method body
+// of the monomorphized Box[int], c.typeSubst = {T->int} is set so the
+// getter's T[] return type substitutes to int[] before tracking — without
+// substitution the type-shape check would see TypeParam, miss the Vector,
+// and leak.
+type Box[T] {
+  T[] _items;
+
+  get items T[] `public => this._items.clone();
+
+  count() int `public {
+    int n = 0;
+    for x in this.items {
+      n = n + 1;
+    }
+    return n;
+  }
+}
+
+test_generic_getter_for_in_inside_method() `test {
+  Box[int] b = Box[int](_items: [10, 20, 30]);
+  assert(b.count() == 3, "generic getter for-in count from inside method");
+}
+
+// Generic owner type with getter returning Map[K,V] used in chain receiver
+// position. Exercises the heap-user-type branch of trackGetterResult under
+// monomorphization (typeSubst is set in trackHeapUserTypeResult's lookup of
+// c.info.Types[expr]).
+type Cache[V] {
+  map[string, V] _entries;
+
+  get entries map[string, V] `public => this._entries.clone();
+}
+
+test_generic_map_getter_chain() `test {
+  Cache[int] c = Cache[int](_entries: map[string, int]());
+  c._entries["a"] = 1;
+  c._entries["b"] = 2;
+  assert(c.entries.contains("a"), "generic map getter chain contains");
+}
+
+// Virtual dispatch path: abstract base with concrete impl whose getter returns
+// a Vector[T]. Exercises trackGetterResult through genVirtualGetterCall (the
+// other call site of trackGetterResult, distinct from genGetterCall).
+type ItemSource {
+  get items string[] `public `abstract;
+}
+
+type ItemImpl is ItemSource {
+  string[] _items;
+
+  get items string[] `public => this._items.clone();
+}
+
+test_virtual_getter_vector_for_in() `test {
+  ItemSource src = ItemImpl(_items: ["a", "b", "c", "d"]);
+  int n = 0;
+  for x in src.items {
+    n = n + 1;
+  }
+  assert(n == 4, "virtual getter vector for-in count");
+}
+
+// Virtual dispatch with map result in chain receiver position.
+type DataSource {
+  get data map[string, string] `public `abstract;
+}
+
+type DataImpl is DataSource {
+  map[string, string] _data;
+
+  get data map[string, string] `public => this._data.clone();
+}
+
+test_virtual_getter_map_chain() `test {
+  DataImpl impl = DataImpl(_data: map[string, string]());
+  impl._data["k"] = "v";
+  DataSource src = impl;
+  assert(src.data.contains("k"), "virtual getter map chain contains");
+}
+
+// Virtual dispatch with user heap type return.
+type HeapItem {
+  string _label;
+
+  drop(~this) {
+  }
+
+  ok(&this) bool `public {
+    return true;
+  }
+}
+
+type HeapSource {
+  get item HeapItem `public `abstract;
+}
+
+type HeapImpl is HeapSource {
+  HeapItem _item;
+
+  get item HeapItem `public => HeapItem(_label: this._item._label);
+}
+
+test_virtual_getter_heap_chain() `test {
+  HeapSource src = HeapImpl(_item: HeapItem(_label: "x"));
+  assert(src.item.ok(), "virtual getter heap chain ok");
+}

@@ -190,14 +190,29 @@ test_response_headers() `test(exclude: wasm, timeout: "10s") {
 
   go {
     Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
-    // Headers are lowercase — iterate directly to avoid B0341 (non-Copy field double-drop)
+    // Headers are lowercase.
     bool found = false;
-    for k, v in resp.response_headers() {
+    for k, v in resp.headers {
       if k == "x-custom" && v == "hello" {
         found = true;
       }
     }
     assert(found, "x-custom header found");
+  };
+
+  _serve_once(listener, "HTTP/1.1 200 OK\r\nX-Custom: hello\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;
+  listener.close()?!;
+  sleep(Duration.from_millis(100));
+}
+
+test_response_headers_getter() `test(exclude: wasm, timeout: "10s") {
+  net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
+  int port = listener.local_port;
+
+  go {
+    Response resp = http_get("http://127.0.0.1:" + port.to_string() + "/")?!;
+    // T0494: getter result used as method-chain receiver.
+    assert(resp.headers.contains("x-custom"), "headers contains x-custom");
   };
 
   _serve_once(listener, "HTTP/1.1 200 OK\r\nX-Custom: hello\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?!;

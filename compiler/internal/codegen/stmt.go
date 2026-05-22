@@ -7194,7 +7194,13 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		// are dropped by their own scope bindings; only call results are orphaned.
 		// Using a scope binding ensures cleanup on ALL exit paths (normal exit,
 		// early return, break, panic) — not just after the loop.
-		if _, isCall := s.Iterable.(*ast.CallExpr); isCall {
+		// T0494: extended from CallExpr-only to any tracked stmt temp so getter
+		// MemberExpr results (e.g., `for k,v in resp.headers`) also survive the
+		// for-in's lifetime. stmtTemps are NOT saved across block entry (unlike
+		// heapTemps), so without this promotion the temp would be dropped by the
+		// first body statement's cleanupStmtTemps and the loop would read freed
+		// memory.
+		if idx, isTracked := c.stmtTempMap[slicePtr]; isTracked && idx >= 0 {
 			if dropFn, ok := c.funcs["Vector.drop"]; ok {
 				tmpName := c.uniqueLocalName("__forin_vec_tmp")
 				tmpAlloca := c.createEntryAlloca(irtypes.I8Ptr)
@@ -7245,6 +7251,31 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		named := extractNamed(iterableType)
 		if named == types.TypString {
 			strPtr := c.genExpr(s.Iterable)
+			// T0494: Same lifetime-extension fix as the vector path. When the
+			// iterable is a tracked stmt temp (call result, getter result,
+			// string concat result, etc.), promote it to a scope binding so
+			// the body's stmt-end cleanup doesn't free the string mid-loop.
+			if idx, isTracked := c.stmtTempMap[strPtr]; isTracked && idx >= 0 {
+				if dropFn, ok := c.funcs["promise_string_drop"]; ok {
+					tmpName := c.uniqueLocalName("__forin_str_tmp")
+					tmpAlloca := c.createEntryAlloca(irtypes.I8Ptr)
+					tmpAlloca.SetName(tmpName)
+					c.block.NewStore(strPtr, tmpAlloca)
+					dropFlag := c.createEntryAlloca(irtypes.I1)
+					dropFlag.SetName(tmpName + ".dropflag")
+					c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+					c.scopeBindings = append(c.scopeBindings, scopeBinding{
+						kind:     bindingDropString,
+						alloca:   tmpAlloca,
+						named:    types.TypString,
+						valType:  iterableType,
+						dropFlag: dropFlag,
+						dropFunc: dropFn,
+						varName:  tmpName,
+					})
+					c.claimStringTemp(strPtr)
+				}
+			}
 			c.genForInString(s, strPtr)
 			return
 		}

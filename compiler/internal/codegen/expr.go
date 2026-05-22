@@ -4308,19 +4308,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	}
 
 	result := c.block.NewCall(fn, args...)
-	// B0290: Track string results from getter calls for cleanup at statement end.
-	// Getters on types with drop emit a dup of string fields (T0095/T0110),
-	// creating a heap-allocated clone. Without tracking, the clone leaks when
-	// used as a chain intermediate (e.g., x.name.len).
-	if c.tempTrackingEnabled && result.Type() == irtypes.I8Ptr {
-		retType := getter.Sig().Result()
-		if c.typeSubst != nil && retType != nil {
-			retType = types.Substitute(retType, c.typeSubst)
-		}
-		if retType != nil && extractNamed(retType) == types.TypString {
-			c.trackStringTemp(result)
-		}
-	}
+	c.trackGetterResult(e, getter, result)
 	return result
 }
 
@@ -4375,17 +4363,51 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 
 	result := c.block.NewCall(fnTyped, instance)
-	// B0290: Track string results from virtual getter calls (same as direct path).
-	if c.tempTrackingEnabled && result.Type() == irtypes.I8Ptr {
+	c.trackGetterResult(e, getter, result)
+	return result
+}
+
+// trackGetterResult registers a getter return value for cleanup at statement end.
+// T0494: extends the original B0290 sliver (which only handled string results)
+// to cover every droppable return type — string, vector, map, and user heap
+// types — mirroring the tracking pattern in genExpr's *ast.CallExpr case.
+// Without this, getter results in for-in iterable position (e.g.
+// `for k,v in resp.headers`), method-chain receiver position (e.g.
+// `resp.headers.contains(k)`), or any other dropped/expression position leak
+// because no scope binding owns the cloned heap allocation.
+//
+// String/Vector i8* results dispatch to trackStringTemp / trackVectorTemp.
+// {i8*, i8*} value-struct results (Map, Set, user heap types) dispatch to
+// trackHeapUserTypeResult, which already filters out value/copy/structural
+// types and primitives so calling it unconditionally is safe.
+func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, result value.Value) {
+	if !c.tempTrackingEnabled || result == nil {
+		return
+	}
+	if result.Type() == irtypes.I8Ptr {
 		retType := getter.Sig().Result()
 		if c.typeSubst != nil && retType != nil {
 			retType = types.Substitute(retType, c.typeSubst)
 		}
-		if retType != nil && extractNamed(retType) == types.TypString {
-			c.trackStringTemp(result)
+		if c.selfSubst != nil && retType != nil {
+			retType = types.SubstituteSelf(retType, c.selfSubst.iface, c.selfSubst.concrete)
 		}
+		if retType == nil {
+			return
+		}
+		named := extractNamed(retType)
+		if named == types.TypString {
+			c.trackStringTemp(result)
+		} else if named == types.TypVector {
+			if elemType, ok := types.AsVector(retType); ok {
+				c.trackVectorTempWithElemType(result, elemType)
+			} else {
+				c.trackVectorTemp(result)
+			}
+		}
+	} else {
+		c.trackHeapUserTypeResult(e, result)
 	}
-	return result
 }
 
 // genVirtualMethodCall emits an indirect call through the vtable.

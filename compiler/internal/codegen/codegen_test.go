@@ -16947,6 +16947,186 @@ func TestFailableGetterStringResult(t *testing.T) {
 	assertContains(t, ir, "define { i1, i8*, i8* } @Foo.label(")
 }
 
+// T0494: Getter returning a heap user type ({i8*, i8*}) used as a method-chain
+// receiver must register a heap temp drop so the cloned value is freed.
+func TestGetterUserHeapResultTrackedInChain(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner { string _name; drop(~this) {}
+			ok(&this) bool { return true; }
+		}
+		type Outer { Inner _inner;
+			get inner Inner `+"`public"+` => Inner(_name: this._inner._name);
+		}
+		test() {
+			Outer o = Outer(_inner: Inner(_name: "hi"));
+			bool b = o.inner.ok();
+		}
+	`)
+	// The cloned Inner returned by the getter must be tracked as a heap temp
+	// (heap.drop block) and freed with the type's drop function at stmt end.
+	assertContains(t, ir, "define void @__user.test()")
+	assertContains(t, ir, "heap.drop")
+	assertContains(t, ir, "Inner.drop")
+}
+
+// T0494: Getter returning Vector[T] used in for-in iterable position must be
+// promoted to a scope binding so the for-in body's stmt-end cleanup does not
+// drop the cloned vector mid-loop.
+func TestGetterVectorResultPromotedInForIn(t *testing.T) {
+	ir := generateIR(t, `
+		type Bag { string[] _tags;
+			get tags string[] `+"`public"+` => this._tags.clone();
+		}
+		test() {
+			Bag b = Bag(_tags: ["a", "b"]);
+			for t in b.tags {}
+		}
+	`)
+	// The forin promotion creates a scope-bound vector temp.
+	assertContains(t, ir, "%__forin_vec_tmp")
+	// Vector.drop must be called for the promoted scope binding.
+	assertContains(t, ir, "Vector.drop")
+}
+
+// T0494: Getter returning Map[K,V] used in for-in iterable position must register
+// a heap temp drop so the cloned map is freed once the loop exits.
+func TestGetterMapResultTrackedInForIn(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { map[string, string] _data;
+			get data map[string, string] `+"`public"+` => this._data.clone();
+		}
+		test() {
+			Holder h = Holder(_data: map[string, string]());
+			for k, v in h.data {}
+		}
+	`)
+	// The cloned map's instance pointer must be tracked as a heap temp
+	// and freed with the Map's drop function.
+	assertContains(t, ir, "heap.drop")
+	assertContains(t, ir, "Map[string, string].drop")
+}
+
+// T0494: A getter returning a non-droppable primitive must NOT add any new
+// drop tracking — the original B0290 sliver only fired for strings.
+func TestGetterPrimitiveResultNotTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter { int _n;
+			get n int => this._n;
+		}
+		test() {
+			Counter c = Counter(_n: 5);
+			int v = c.n;
+		}
+	`)
+	fn := extractFunction(ir, "__user.test")
+	// No new heap.drop or stmt-temp drop should appear for the int getter.
+	assertNotContains(t, fn, "promise_string_drop")
+	assertNotContains(t, fn, "Vector.drop")
+}
+
+// T0494: Tracked string temp used as for-in iterable must be promoted to a
+// scope binding so the body's stmt-end cleanup does not free the string
+// mid-iteration. Covers both call results (latent bug pre-T0494) and getter
+// results (the T0494-specific case).
+func TestStringGetterResultPromotedInForIn(t *testing.T) {
+	ir := generateIR(t, `
+		type Box { string _content;
+			get content string `+"`public"+` => this._content + "!";
+		}
+		test() {
+			Box b = Box(_content: "abc");
+			for c in b.content {}
+		}
+	`)
+	// The for-in promotion creates a scope-bound string temp.
+	assertContains(t, ir, "%__forin_str_tmp")
+	// promise_string_drop must be wired up for the promoted scope binding.
+	assertContains(t, ir, "promise_string_drop")
+}
+
+// T0494: Generic owner type with getter returning T[] called from inside a
+// monomorphized method body exercises the typeSubst branch of
+// trackGetterResult — the getter's return type T[] must be substituted to
+// e.g. int[] before the Vector check fires, otherwise the result leaks.
+func TestGenericGetterVectorResultPromotedInForIn(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T[] _items;
+			get items T[] `+"`public"+` => this._items.clone();
+			count() int `+"`public"+` {
+				int n = 0;
+				for x in this.items { n = n + 1; }
+				return n;
+			}
+		}
+		test() {
+			Box[int] b = Box[int](_items: [1, 2, 3]);
+			int n = b.count();
+		}
+	`)
+	// The for-in promotion fires inside the monomorphized Box[int].count body.
+	assertContains(t, ir, "%__forin_vec_tmp")
+	// Vector.drop is the canonical drop path; substitution must succeed for it
+	// to be wired up.
+	assertContains(t, ir, "Vector.drop")
+	// The monomorphized method must exist so the typeSubst path is exercised.
+	assertContains(t, ir, `@"Box[int].count"`)
+}
+
+// T0494: Virtual dispatch path through genVirtualGetterCall with a Vector[T]
+// return must also tracking-promote in for-in. Distinct from the direct path
+// covered by TestGetterVectorResultPromotedInForIn — the virtual path resolves
+// the function pointer through the vtable.
+func TestVirtualGetterVectorResultPromotedInForIn(t *testing.T) {
+	ir := generateIR(t, `
+		type ItemSource {
+			get items string[] `+"`public"+` `+"`abstract"+`;
+		}
+		type ItemImpl is ItemSource {
+			string[] _items;
+			get items string[] `+"`public"+` => this._items.clone();
+		}
+		test() {
+			ItemSource src = ItemImpl(_items: ["a", "b"]);
+			for x in src.items {}
+		}
+	`)
+	// The vtable must exist for both abstract base and concrete impl.
+	assertContains(t, ir, "@promise_vtable_ItemSource")
+	assertContains(t, ir, "@promise_vtable_ItemImpl")
+	// Promotion still fires when the call is made via vtable dispatch.
+	assertContains(t, ir, "%__forin_vec_tmp")
+	assertContains(t, ir, "Vector.drop")
+}
+
+// T0494: Virtual dispatch path with a heap user-type return. Exercises
+// trackHeapUserTypeResult under genVirtualGetterCall — symmetric to the
+// direct-path TestGetterUserHeapResultTrackedInChain.
+func TestVirtualGetterHeapResultTrackedInChain(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner { string _name; drop(~this) {}
+			ok(&this) bool { return true; }
+		}
+		type HeapSource {
+			get item Inner `+"`public"+` `+"`abstract"+`;
+		}
+		type HeapImpl is HeapSource {
+			Inner _item;
+			get item Inner `+"`public"+` => Inner(_name: this._item._name);
+		}
+		test() {
+			HeapSource src = HeapImpl(_item: Inner(_name: "x"));
+			bool b = src.item.ok();
+		}
+	`)
+	// Vtable wiring exists (virtual dispatch path).
+	assertContains(t, ir, "@promise_vtable_HeapSource")
+	assertContains(t, ir, "@promise_vtable_HeapImpl")
+	// Heap-temp drop is registered and Inner.drop is wired up.
+	assertContains(t, ir, "heap.drop")
+	assertContains(t, ir, "Inner.drop")
+}
+
 // --- Syscall Handoff Tests (Phase 6a) ---
 
 func TestSyscallHandoffFunctionsExist(t *testing.T) {

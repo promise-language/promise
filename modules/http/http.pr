@@ -138,13 +138,6 @@ type Response `public `doc("An HTTP response.") {
 
   get headers map[string, string] `public `doc("The response headers (keys are lowercase).") => this._headers.clone();
 
-  // T0494: response_headers() kept alongside the getter because using a getter that returns a
-  // droppable value directly in a for-in loop leaks (codegen does not register a drop binding
-  // for getter return values in for-in position). Remove once T0494 is fixed.
-  response_headers() map[string, string] `public `doc("The response headers (keys are lowercase).") {
-    return this._headers.clone();
-  }
-
   get body string `public `doc("The response body as a string.") => this._body;
 
   get body_bytes u8[] `public `doc("The response body as raw bytes.") => this._body.bytes();

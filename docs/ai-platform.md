@@ -43,125 +43,470 @@ not hand-written JSON schemas.
 
 ## 2. Module Layout
 
+The AI platform is split between **catalog modules** (shipped with the compiler, listed
+in `catalog.toml`) and **community modules** (external git repos, pinned per project):
+
+**Catalog modules** (provider-neutral, agent-agnostic):
+
 ```
 modules/
-  ai/               — Agent orchestration, provider-neutral LLM interface
+  schema/           — Type-to-schema derivation (JSON Schema, tool/function descriptors)
+  auth/             — Authentication primitives (API keys, env tokens, credential store)
+  ai/               — Agent orchestration, provider interface, Tool, Agent, Session
+                       (NO concrete LLM provider implementations)
   mcp/              — MCP server and client framework
   sandbox/          — Sandboxed code execution with capability control
-  schema/           — Type-to-schema derivation (JSON Schema, tool definitions)
-  auth/             — Authentication primitives (API keys, OAuth, tokens)
 ```
+
+**Community modules** (one per provider, pinned via `catalog.toml`):
+
+```
+ai_anthropic/       — Concrete Anthropic provider (claude-* models)
+ai_openai/          — Concrete OpenAI provider + OpenAI-compatible endpoints
+ai_router/          — Multi-provider routing
+ai_google/          — Google Gemini provider
+... (one per vendor)
+```
+
+Concrete providers do not belong in the standard set: they evolve with vendor APIs,
+require per-vendor wire-format work, and accumulate dependencies that the rest of the
+platform should not pay for. The `ai` catalog module defines only the **`Provider`
+interface** plus a built-in **`MockProvider`** for testing. Real providers are
+community modules that implement `Provider` and call the appropriate HTTP API.
 
 All AI modules are explicit imports (`use ai;`, `use mcp;`). None belong in `std/` —
 AI orchestration is not universal to every Promise program.
 
 ### Prerequisites
 
-The AI modules depend on two catalog modules that must be implemented first:
+The AI platform depends on two catalog modules that must be implemented first:
 
-- **`modules/json`** — JSON encoding/decoding. Used by tool argument serialization
-  (`json.decode[T]`, `json.encode`), session persistence, and MCP protocol messages.
-- **`modules/http`** — HTTP client. Used by all `Provider` implementations to call
-  LLM APIs. Also used by MCP SSE/HTTP transports.
+- **`modules/json`** — already implemented. Used by tool argument serialization
+  (`json.decode_string[T]`, `json.encode_string`), session persistence, and MCP
+  protocol messages.
+- **`modules/http`** — currently a placeholder in `catalog.toml`. Used by community
+  provider modules and MCP SSE/HTTP transports. Must be completed before any concrete
+  provider can be implemented.
 
-These are listed as future modules in `platform-modules.md` (Section 10). They must be
-implemented before Phase 2 of the AI platform.
+The standard library already provides what the platform needs at the language level:
+the `Encoder`/`Decoder` interfaces (`modules/std/encode.pr`), the `` `serializable ``
+auto-derive mechanism, structural interfaces (`Iterator[T]`, `Generator[T]`), the
+`task[T]`/`channel[T]` concurrency primitives, and the `error` base type.
 
 ### Dependencies between modules
 
 ```
-json/ ──────────▶  (standalone — prerequisite for all AI modules)
-http/ ──────────▶  (standalone — prerequisite for ai/ providers)
-schema/ ────────▶  json/  (schema serialization)
-auth/  ─────────▶  (standalone — credential management)
-ai/  ───────────▶  schema/ + auth/ + json/ + http/
-mcp/ ───────────▶  schema/ + ai/ + json/
-sandbox/ ───────▶  (standalone — no AI dependency; used by ai/ and mcp/)
+json/ ──────────▶  std (auto)                — JSON encoder/decoder for Encoder/Decoder
+http/ ──────────▶  std (auto), net           — HTTP client (prerequisite)
+schema/ ────────▶  std (auto), json          — Type descriptors + JSON Schema output
+auth/  ─────────▶  std (auto)                — Credentials and tokens
+ai/  ───────────▶  schema, auth, json, http  — Agent loop, Provider interface, MockProvider
+mcp/ ───────────▶  schema, ai, json, http    — Tools/resources/prompts over JSON-RPC
+sandbox/ ───────▶  std (auto)                — Capability-controlled subprocess execution
+
+ai_anthropic/ ─▶  ai, auth, http, json   (community)
+ai_openai/ ────▶  ai, auth, http, json   (community)
 ```
+
+Catalog modules can depend only on `std` and on other catalog modules listed in
+`catalog.toml` (per `docs/creating-modules.md` §6.6). Community modules can depend on
+any catalog module plus other community modules they explicitly pin.
 
 ---
 
 ## 3. `modules/schema` — Type-Driven Schema Generation
 
 The foundation layer. Derives machine-readable schemas from Promise types using the
-`doc()` meta annotations, field types, and structural information already present in
-the type system.
+information already collected by sema: field names, field types, `` `doc `` annotations,
+defaults, optionality (`T?`), `` `required ``/`` `key ``/`` `skip ``/`` `flatten ``
+field annotations, enum variants, and structural-vs-nominal classification. The same
+inspection pass that drives `` `serializable `` (see `docs/serialization-plan.md`)
+produces the schema descriptor — there is no separate reflection mechanism.
 
-### 3.1 The `Schema` Type
+### 3.1 Design Constraints
+
+The schema descriptor must faithfully model what Promise actually expresses, not what a
+generic JSON-Schema library expresses. Concretely:
+
+1. **Optional vs required must match Promise's three-state field model.** Promise has
+   *three* presence states for a field, not two. A schema descriptor that only carries
+   `bool required` collapses two of them and produces wrong JSON Schema output:
+
+   | Promise field            | Optional? | Has default? | Decode if missing | Encode when none |
+   |--------------------------|-----------|--------------|-------------------|------------------|
+   | `string name;`           | no        | no           | error             | always encoded   |
+   | `string? email;`         | yes       | implicit none| set to none       | omitted (default)|
+   | `string role = "viewer";`| no        | yes          | use default       | always encoded   |
+   | `string v `` `required ``;`| no       | n/a          | error             | always encoded   |
+   | `string? v `` `include_none ``;`| yes | implicit none| set to none       | encoded as null  |
+
+   The schema must capture all five rows — JSON Schema's `required` array is just a
+   downstream serialization concern.
+
+2. **Names and docs come from `` `doc ``, not from heuristics.** The compiler already
+   stores `` `doc `` text on every type, field, method, function, parameter, and enum
+   variant (language-design §8.4). The schema must wire those through verbatim.
+
+3. **Field-level serialization metas must be honored.** A field marked `` `key("foo") ``
+   serializes as `"foo"`, not as the Promise field name. A field marked `` `skip ``
+   must not appear in the schema. A field marked `` `flatten `` must inline its nested
+   object's properties into the parent. These already exist for `` `serializable `` and
+   the schema must agree with what the generated `encode`/`decode` actually emits.
+
+4. **The same descriptor must describe types, methods, free functions, and getters.**
+   MCP servers expose tools (functions) and resources (typed handlers); structured
+   output uses types; agent introspection wants to enumerate methods. One descriptor
+   shape with three top-level kinds covers all of this without duplication.
+
+5. **Generation must be available to any module, not just `std`.** This requires a
+   compiler hook with clear scoping rules — see §3.6.
+
+### 3.2 The `Type` Tagged Enum
+
+The descriptor for one Promise declaration is a tagged enum named `schema.Type`. The
+name follows the schema-language convention (Object / Array / Function / … are the
+"types" of a schema), not Promise's `type` keyword — at the call site, `schema.Type`
+disambiguates clearly. Because all symbols are already namespaced under `schema.`,
+the helper structs drop the `Schema` prefix entirely: `schema.Field`, `schema.Variant`,
+`schema.Param`.
+
+A tagged enum is the right shape because every consumer needs to discriminate on the
+kind anyway. Encoding the discriminator as a Promise enum makes the discrimination
+exhaustive (the compiler errors on missing match arms), removes the long list of
+nullable fields-per-kind from the previous `Schema { kind, key_schema?, value_schema?, … }`
+design, and matches how the standard library models comparable shapes (e.g.
+`json.JsonValue`).
 
 ```promise
-type Schema `public {
-    string name;
-    string? description;
-    SchemaField[] fields;
-    map[string, Schema] definitions;    // referenced sub-schemas
+// modules/schema/schema.pr
 
-    // Derive schema from any type at compile time via monomorphization
-    from_type[T]() Schema `mono `public;
-
-    // Serialize to standard formats
-    to_json_schema(&this) string `public `instance;
-    to_openapi(&this) string `public `instance;
+// Promise scalar primitives.
+enum ScalarKind `public {
+    Bool, Char, String,
+    Int, Int8, Int16, Int32, Int64,
+    Uint, Uint8, Uint16, Uint32, Uint64,
+    F32, F64,
 }
 
-type SchemaField `public {
-    string name;
-    string type_name;           // "string", "int", "bool", "array", "object", etc.
-    string? description;        // from `doc on the field
-    bool required;
-    string? default_value;      // serialized default, if any
-    Schema? item_schema;        // for arrays: schema of elements
-    Schema? value_schema;       // for maps: schema of values
-    string[] enum_values;       // for enums: variant names
+// The schema descriptor for one Promise declaration. One enum, one match expression
+// at every consumer — no `kind` field, no nullable per-kind payloads.
+enum Type `public `clone `doc("Compile-time descriptor of a Promise type, function, or method.") {
+    // Heap user types marked `serializable. Includes inherited and flattened fields,
+    // excludes `skip-ed fields. `definitions` carries sub-schemas for cyclic and shared types.
+    Object(
+        string name,                      // fully-qualified Promise name (e.g. "std.Vector", "json.JsonEncoder")
+        string? description,              // from `doc on the declaration
+        Field[] fields,
+        map[string, Type] definitions,
+    ),
+
+    // T[]
+    Array(Type element),
+
+    // map[K, V]
+    Map(Type key, Type value),
+
+    // Primitives. `description` is filled when the scalar is a named field.
+    Scalar(ScalarKind kind, string? description),
+
+    // Both simple enums (Variant.fields is empty) and tagged-data enums.
+    // discriminator_key is "type" by default and is overridden via `serializable(tag: "kind").
+    Enum(
+        string name,
+        string? description,
+        Variant[] variants,
+        string discriminator_key,
+    ),
+
+    // Free function or method declaration. Captures parameter names and per-parameter `doc,
+    // which only declarations carry — function-typed values erase both (see §3.3).
+    Function(
+        string name,
+        string? description,
+        Param[] parameters,
+        Type? return_type,
+        bool failable,                    // declared with `!`
+    ),
+
+    // T? wrapper. Inner carries the wrapped Type.
+    Optional(Type inner),
+
+    // Named reference into the enclosing Object's `definitions` map. Emitted on cycles
+    // and on widely-shared sub-types so the same descriptor is not duplicated.
+    Reference(string name),
+}
+
+type Field `public `clone {
+    string name `doc("Wire name — already adjusted for `key annotations.");
+    string source_name `doc("Original Promise field name (for diagnostics).");
+    Type field_type;
+    string? description;
+
+    // Presence semantics — see §3.1 table. Exactly one of these three is true for any field.
+    bool required `doc("Field must be present during decode. True when the type has no `?` and no default, or carries `required.");
+    bool optional `doc("Field type is T?. None is the implicit value when missing.");
+    bool has_default `doc("Field declares an `= expr default.");
+
+    string? default_repr `doc("Source-form repr of the default expression, if has_default.");
+    bool include_none_in_output `doc("True for T? fields with `include_none — encode as null instead of omitting.");
+    bool readonly `doc("True for `final fields — informational only.");
+}
+
+type Variant `public `clone {
+    string name;             // wire name (already adjusted for `key on the variant)
+    string source_name;      // Promise variant name
+    string? description;     // from `doc on the variant
+    Field[] fields;          // empty for variants with no payload
+}
+
+type Param `public `clone {
+    string name;             // parameter name from the function signature
+    Type param_type;
+    string? description;     // from `doc on the parameter
+    bool optional;           // parameter type is T?
+    bool has_default;        // parameter has `= expr`
+    string? default_repr;
 }
 ```
 
-### 3.2 Automatic Derivation
+#### Construction — free functions (not enum methods)
 
-`Schema.from_type[T]()` inspects the type at compile time (monomorphization phase) and
-produces a `Schema` value. This uses the same information available to `promise doc`:
-field names, types, `doc()` annotations, defaults, optionality (`T?`), and enum variants.
+Promise enum methods cannot be `` `mono `` or `` `factory `` (language-design §5.6).
+Both constructors are therefore plain module-level functions in `schema`:
 
 ```promise
-type CreateUserRequest `doc("Request to create a new user.") {
+// modules/schema/schema.pr (continued)
+
+of[T]() Type `mono `public
+    `doc("Compile-time derivation from a Promise type. T must be marked `serializable. Returns Type.Object, Type.Enum, Type.Map, Type.Array, or Type.Scalar based on T's shape.");
+
+for_func[F]() Type `mono `public
+    `doc("Compile-time derivation from a free-function or method declaration. Captures parameter names, `doc annotations, defaults, and failability. F is a function reference (declaration), not a function-typed value — see §3.3.");
+```
+
+Call sites read naturally:
+
+```promise
+schema.Type t  = schema.of[CreateUserRequest]();
+schema.Type fn = schema.for_func[read_text]();
+```
+
+#### Rendering — enum methods that match on `this`
+
+Renderers are normal methods on the enum:
+
+```promise
+type Type {
+    // ... variants above ...
+
+    to_json_schema(this) string `public `doc("Render as draft-2020-12 JSON Schema.") {
+        return match this {
+            Type.Object(name, desc, fields, defs) => _render_object_json(name, desc, fields, defs),
+            Type.Array(elem)                      => _render_array_json(elem),
+            Type.Map(k, v)                        => _render_map_json(k, v),
+            Type.Scalar(kind, desc)               => _render_scalar_json(kind, desc),
+            Type.Enum(name, desc, vs, tag)        => _render_enum_json(name, desc, vs, tag),
+            Type.Function(name, desc, ps, r, f)   => _render_function_json(name, desc, ps, r, f),
+            Type.Optional(inner)                  => inner.to_json_schema(),     // emit nullable wrapper
+            Type.Reference(name)                  => "{\"$ref\": \"#/$defs/{name}\"}",
+        };
+    }
+
+    to_openapi(this) string `public `doc("Render as OpenAPI 3.1 schema fragment.");
+    to_tool_input_schema(this) string `public `doc("Render as the Anthropic/OpenAI tool input_schema shape (object with required[]).");
+}
+```
+
+#### Why this beats the kind-discriminator struct
+
+- **Exhaustiveness.** A consumer that adds a new platform target (e.g. an OpenAPI 3.0
+  renderer) gets a compile error from sema if it forgets a variant — no quiet
+  fallthrough.
+- **No nullable salad.** The previous `Schema { Type? inner; Type? key_schema; Type?
+  value_schema; schema.Param[] parameters; … }` had ~6 fields that were valid only for
+  one specific kind. Each variant now carries exactly its own payload.
+- **Pattern matching for free.** Recursion (e.g. `Optional(inner)` rendering) reads as
+  one match arm with a typed binding instead of a manual `if shape.kind == ... && let
+  Some(x) = shape.inner else { panic }`.
+- **Mirrors `json.JsonValue`.** Anyone who has used the std json module already knows
+  this pattern.
+
+### 3.3 What Can Be Derived From Functions vs Function Types
+
+This is the critical distinction the previous design glossed over:
+
+- **Function-typed values** — e.g., a parameter of type `(string, int) -> bool`. The
+  type erases parameter names, per-parameter `` `doc ``, and defaults (language-design
+  §9.5). Only positional types and the return type survive. **Do not** attempt to
+  derive a useful schema from a value of function type.
+- **Function declarations** — e.g., a free function `add(int a, int b) int`. The
+  declaration carries names, parameter `` `doc `` annotations, defaults, return type,
+  and failability. The compiler **does** have this information, and `schema.for_func`
+  is allowed to recover it because `schema.for_func[add]()` resolves to the
+  declaration (the identifier path), not to a runtime function value.
+
+This matters for MCP server authoring (§6) and `promise ai serve` (§9): both register
+free functions or methods, which means the declaration is in scope and the names/docs
+are available. They never derive schemas from anonymous closures.
+
+### 3.4 Automatic Derivation — Worked Example
+
+```promise
+use schema;
+
+type CreateUserRequest `serializable
+    `doc("Request to create a new user.") {
     string name `doc("The user's full name.");
-    string email `doc("Email address. Must be unique.");
+    string email `doc("Email address. Must be unique.") `key("email_address");
     int? age `doc("Age in years. Optional.");
     string role = "viewer" `doc("Role assignment. One of: viewer, editor, admin.");
+    string _trace_id `skip;
+    int version = 1 `required `doc("Schema version — required even though defaulted.");
 }
 
-// Derive schema — all field docs, types, defaults, optionality preserved
-Schema s = Schema.from_type[CreateUserRequest]();
-string json_str = s.to_json_schema();
+main() {
+    schema.Type s = schema.of[CreateUserRequest]();
+    print_line(s.to_json_schema());
+}
 ```
 
-The generated JSON Schema:
+The corresponding JSON Schema (draft 2020-12):
 
 ```json
 {
   "type": "object",
+  "title": "CreateUserRequest",
   "description": "Request to create a new user.",
   "properties": {
-    "name":  { "type": "string", "description": "The user's full name." },
-    "email": { "type": "string", "description": "Email address. Must be unique." },
-    "age":   { "type": "integer", "description": "Age in years. Optional." },
-    "role":  { "type": "string", "description": "Role assignment. One of: viewer, editor, admin.", "default": "viewer" }
+    "name":          { "type": "string",  "description": "The user's full name." },
+    "email_address": { "type": "string",  "description": "Email address. Must be unique." },
+    "age":           { "type": "integer", "description": "Age in years. Optional." },
+    "role":          { "type": "string",  "description": "Role assignment. One of: viewer, editor, admin.", "default": "viewer" },
+    "version":       { "type": "integer", "description": "Schema version — required even though defaulted.", "default": 1 }
   },
-  "required": ["name", "email"]
+  "required": ["name", "email_address", "version"]
 }
 ```
 
-### 3.3 Why Not `from_func[F]()`
+Note how the descriptor honors:
+- `` `key("email_address") `` — wire name in `properties` and in `required`.
+- `` `skip `` — `_trace_id` is absent from the output entirely.
+- `T?` — `age` is in `properties` but not `required`.
+- `=` defaults — `role` has `default` but is not `required`.
+- `` `required `` — `version` has `default` *and* is `required`.
 
-A natural idea is `ToolDef.from_func[F]()` — derive a tool schema from a function type.
-This does not work in Promise because function types erase parameter names and `doc()`
-annotations (see language-design §9.5). The type `(string, int) -> bool` carries no names
-or documentation — only the parameter types and return type survive.
+### 3.5 Opt-In: `` `serializable `` Drives Schema Generation
 
-Tool schema derivation instead works through the **input type**: `Tool.create[T, R]()`
-uses `Schema.from_type[T]()` on a struct whose fields carry names, types, docs, defaults,
-and optionality. This is more explicit and produces richer schemas than function-type
-introspection ever could.
+Per `docs/serialization-plan.md`, only types annotated `` `serializable `` get
+encode/decode methods synthesized. The same constraint applies to schemas: only
+`` `serializable `` types support `schema.of[T]()`. This is a deliberate alignment, not
+a parallel mechanism:
+
+- The list of fields that contribute to the schema is the same list that contributes to
+  the encoded output. This avoids drift between "what I serialize" and "what I describe".
+- Honoring `` `key ``, `` `skip ``, `` `flatten ``, `` `required ``, `` `include_none ``
+  in only one place (the sema synthesis pass) is cheaper and less error-prone than
+  computing it twice.
+- Trying to derive a schema for a non-serializable type at compile time is a compile
+  error with a clear message:
+  ```
+  schema.of[Foo]() requires Foo to be marked `serializable`
+  ```
+
+For free functions, no annotation is required to *derive* a `schema.for_func` — the
+declaration always has names and docs. To **register** a function as an MCP tool, see
+the `` `tool `` annotation in §6.
+
+### 3.6 Compiler Extension — How Generation Works for Any Module
+
+`schema.of[T]()` is a `` `mono `` factory: each instantiation triggers the compiler's
+monomorphization pipeline (CLAUDE.md §"Monomorphization"). The schema-generation hook
+runs in the same pass that synthesizes encode/decode for `` `serializable `` types
+(see `compiler/internal/sema/serialize.go`). It produces an AST-level expression that
+constructs the `Type` value at runtime.
+
+**Scope of generation**
+
+The hook is **not** restricted to `std` or to catalog modules — it runs for any
+`` `serializable `` type the compiler sees, in any module. This is required so that:
+
+- A user project can define its own `type Request `` `serializable `` { ... }` and call
+  `schema.of[Request]()` to drive an MCP server.
+- A community module can define types whose schemas are visible to consumers.
+
+**What the compiler must do for every `` `serializable `` type**
+
+1. While synthesizing encode/decode methods, also synthesize a static factory
+   `_schema_descriptor() Schema `` `factory `` `` `mono `` `` `internal ``` that returns
+   the runtime `Type` value. This method is private (uses `_` prefix) and only the
+   `schema` module's `schema.of[T]` accesses it via a compiler-recognized intrinsic.
+2. The descriptor captures: type name, `` `doc ``, every visible-after-`skip`-and-
+   `flatten` field with name (post-`` `key ``), inferred `Type` of the field type
+   (recursing for nested `` `serializable `` types and using `Reference` for cycles),
+   and the three presence flags.
+3. For enums, the descriptor includes one `schema.Variant` per variant and the
+   discriminator key (default `"type"`, override via `` `serializable(tag: "kind") ``).
+
+This piggybacks on the existing serialization codegen — no separate type-information
+table is added. The cost is one extra synthesized method per `` `serializable `` type,
+which is bounded by the same instance-cache mechanism documented in CLAUDE.md.
+
+**Why not a `` `schemable `` annotation alongside `` `serializable ``?** Two
+annotations meaning "describe my fields" is bad ergonomics. A type that wants to be
+described to an LLM almost always also wants to round-trip JSON. The few cases where
+that is not true (a type that should be visible to LLMs but never serialized) can be
+handled by `schema.for_func` over a constructor or by a manually-built `schema.Type` literal.
+
+### 3.7 Free Functions and Methods
+
+`schema.for_func[F]()` produces a `Type.Function` value for a free-function (or method)
+declaration. Consumers pattern-match to access the payload — there are no nullable
+sibling fields to navigate around:
+
+```promise
+use io;
+use schema;
+
+read_text!(string path `doc("Absolute or relative file path.")) string
+    `public `doc("Read a UTF-8 file from disk.") {
+    return io.File.read!(path);
+}
+
+main!() {
+    schema.Type fn = schema.for_func[read_text]();
+
+    match fn {
+        schema.Type.Function(name, desc, params, ret, failable) => {
+            print_line("{name}: {desc ?: \"\"}");
+            print_line("  failable: {failable}");
+            for p in params {
+                print_line("  {p.name}: {p.description ?: \"\"}");
+            }
+        },
+        _ => {},   // for_func always returns a Function variant
+    }
+
+    print_line(fn.to_tool_input_schema());
+}
+```
+
+For the example above, the `Function` payload carries `params[0].name = "path"`,
+`params[0].description` from the parameter's `` `doc ``, a `ret` of
+`Type.Scalar(ScalarKind.String, none)`, and `failable = true`. `to_tool_input_schema()`
+wraps the parameters as an object with required/optional bookkeeping derived from each
+parameter's optionality and defaults — what tool-using LLMs expect as `input_schema`.
+
+### 3.8 Limitations and Boundaries
+
+- **No runtime reflection.** Schemas are built at compile time. There is no
+  `schema.of(some_value)` taking a runtime value — the type must be known statically.
+- **No anonymous closures.** Per §3.3, function values lose names. Code that wants to
+  expose a closure as a tool must wrap it in a named function declaration.
+- **No cross-module private fields.** A `` `serializable `` type with `_`-prefixed
+  fields excludes them from both encode/decode and the schema, regardless of caller.
+- **Cycles are bounded.** Recursive types (`type Tree `` `serializable `` { Tree[]
+  children; }`) are emitted with `schema.Type.Reference` after the first occurrence;
+  the full descriptor lives once in `definitions`.
 
 ---
 
@@ -171,38 +516,47 @@ Handles API key management, token refresh, and credential storage for AI provide
 connections and MCP transport authentication.
 
 ```promise
-type Credential `public {
-    string name;            // logical name: "openai", "anthropic", "github"
-    string value;           // the secret value
+use os;
 
-    // Load from environment variable
-    from_env!(string var_name) Credential `factory `public;
-
-    // Load from a credentials file (~/.promise/credentials.toml)
-    from_store!(string name) Credential `factory `public;
+type AuthError is error `public `doc("Raised when credentials cannot be loaded or refreshed.") {
+    int code `doc("0 = missing source, 1 = invalid format, 2 = refresh failed.");
 }
 
-type TokenProvider `public `structural {
-    // Returns a valid token, refreshing if needed
-    token!(~this) string `abstract `instance;
-}
-
-type StaticToken is TokenProvider `public {
+type Credential `public `doc("A named secret value loaded from environment or credential store.") {
+    string name `doc("Logical name: \"openai\", \"anthropic\", \"github\".");
     string _value;
-    token!(~this) string `instance { return this._value; }
+
+    // Load from an environment variable. Raises AuthError if unset.
+    from_env!(string name, string var_name) Credential `factory `public;
+
+    // Load from the credential store at ~/.promise/credentials.toml.
+    from_store!(string name) Credential `factory `public;
+
+    // Read the secret. The accessor is a method (not a getter) to keep the
+    // call site loud — secrets shouldn't read like ordinary properties.
+    value(&this) string `public `instance => this._value;
 }
 
-type EnvToken is TokenProvider `public {
+type TokenProvider `structural `public `doc("Anything that can mint a valid bearer token on demand.") {
+    token!(~this) string `abstract `instance `doc("Returns a valid token, refreshing if needed.");
+}
+
+type StaticToken is TokenProvider `public `doc("A bearer token that never changes.") {
+    string _value;
+    new(~this, string value) `public { this._value = value; }
+    token!(~this) string `public `instance => this._value;
+}
+
+type EnvToken is TokenProvider `public `doc("A bearer token loaded from an environment variable on each access.") {
     string _var_name;
-    token!(~this) string `instance {
-        return os.get_env(this._var_name) ?: {
-            raise AuthError(message: "environment variable '{this._var_name}' not set");
-        };
+    new(~this, string var_name) `public { this._var_name = var_name; }
+    token!(~this) string `public `instance {
+        string? v = os.env[this._var_name];
+        if val := v {
+            return val;
+        }
+        raise AuthError(message: "environment variable '{this._var_name}' not set", code: 0);
     }
-}
-
-type AuthError is error `public {
-    // Inherits message from error
 }
 ```
 
@@ -282,9 +636,10 @@ type Provider `public {
     complete!(~this, Request &req) Response `abstract `instance;
 
     // Stream a completion request token-by-token.
-    // Errors are surfaced as StreamEvent.Error — the stream itself is failable
-    // only for transport-level failures (connection lost, etc.).
-    stream!(~this, Request &req) stream[StreamEvent] `abstract `instance;
+    // The Generator yields StreamEvents. Errors are surfaced as StreamEvent.Error —
+    // the call itself is failable only for transport-level failures (connection lost,
+    // bad URL, etc.) raised before the first event.
+    stream!(~this, Request &req) Generator[StreamEvent] `abstract `instance;
 
     // Generate embeddings for a batch of inputs
     embed!(~this, string[] &inputs, string model) f64[][] `abstract `instance;
@@ -318,7 +673,7 @@ enum Content `public {
 
 // ── Request/Response ───────────────────────────────────────────────────
 
-type Request `public {
+type Request `public `serializable {
     string model;
     Message[] messages;
     Tool[] tools;
@@ -374,10 +729,12 @@ type Usage `public `clone {
 }
 
 // ── Streaming ──────────────────────────────────────────────────────────
-// Errors are surfaced as StreamEvent.Error rather than making each yielded
-// element failable. This avoids double-failable `stream[StreamEvent!]!` and
-// matches how streaming APIs actually work: the stream is opened (failable),
-// then events flow until completion or error.
+// The provider's stream() returns a Generator[StreamEvent] (yield-based
+// coroutine; std/iter.pr). Errors are surfaced as StreamEvent.Error rather
+// than making each yielded element failable. This avoids a double-failable
+// "Generator[StreamEvent!]!" shape and matches how streaming APIs actually
+// work: the stream is opened (the open call is failable), then events flow
+// until completion or error.
 
 enum StreamEvent `public {
     Start(string id, string model),
@@ -397,47 +754,49 @@ enum ContentDelta `public {
 ### 5.3 Tool System
 
 Tools are Promise functions that AI models can call. The `Tool` type wraps a function
-with its schema, derived automatically from the function signature and `doc()` annotations.
+with its `Type` (a `Type.Object` variant describing the input), derived from the type via
+`schema.of[T]()` (§3) — which in turn requires `T` to be `` `serializable ``.
 
 ```promise
-// ToolCallEvent carries information about a pending tool invocation.
-// Used by tool filters for human-in-the-loop approval.
-type ToolCallEvent `public {
+use schema;
+use json;
+
+type ToolCallEvent `public `doc("Information about a pending tool invocation, surfaced to filters and hooks.") {
     string id;
     string name;
     string arguments_json;
 }
 
-type Tool `public {
+type Tool `public `doc("A function exposed to the model, with a schema describing its input.") {
     string name;
     string? description;
-    Schema input_schema;
-    (string) -> string! handler;    // takes JSON args, returns JSON result
+    schema.Type input_schema;
+    (string) -> string! _handler;   // takes JSON args, returns JSON result
 
     // Create a tool from a typed handler function.
     // T = input type (deserialized from JSON), R = output type (serialized to JSON).
-    // The schema is derived from T's fields and `doc() annotations.
+    // T must be `serializable`; R must satisfy Encodable.
     create[T, R](
         string name,
         string description,
         (T) -> R! handler
-    ) Tool `mono `public {
-        Schema schema = Schema.from_type[T]();
+    ) Tool `mono `factory `public {
+        schema.Type input_schema = schema.of[T]();
         return Tool(
             name: name,
             description: description,
-            input_schema: schema,
-            handler: |string args_json| -> string! {
-                T input = json.decode[T](args_json);
-                R result = handler(input);
-                return json.encode(result);
+            input_schema: input_schema,
+            _handler: |string args_json| -> string! {
+                T input = json.decode_string[T](args_json)!;
+                R result = handler(input)!;
+                return json.encode_string(result)!;
             },
         );
     }
 
     // Wrap an agent as a tool. The tool input is a string prompt;
     // the output is the agent's response.
-    from_agent(string name, string description, Agent ~agent) Tool `mono `public;
+    from_agent(string name, string description, Agent ~agent) Tool `factory `public;
 }
 ```
 
@@ -445,14 +804,15 @@ Usage:
 
 ```promise
 use ai;
-use json;
+use schema;
 
-type WeatherRequest `doc("Get current weather for a location.") {
+type WeatherRequest `serializable
+    `doc("Get current weather for a location.") {
     string location `doc("City name or coordinates.");
     string? units `doc("Temperature units: celsius or fahrenheit.");
 }
 
-type WeatherResponse {
+type WeatherResponse `serializable {
     f64 temperature;
     string condition;
     int humidity;
@@ -463,13 +823,14 @@ get_weather!(WeatherRequest req) WeatherResponse {
 }
 
 main!() {
-    Tool weather_tool = Tool.create[WeatherRequest, WeatherResponse](
+    ai.Tool weather_tool = ai.Tool.create[WeatherRequest, WeatherResponse](
         name: "get_weather",
         description: "Get current weather for a location.",
         handler: get_weather,
     );
 
-    // Tool schema is automatically derived from WeatherRequest's fields + doc()
+    // Tool schema is automatically derived from WeatherRequest's fields + `doc.
+    // The optionality of `units` is honored — it appears in `properties` but not in `required`.
 }
 ```
 
@@ -518,7 +879,7 @@ type Agent `public {
 
     // Send a message and run with streaming output.
     // Yields text deltas as they arrive, executes tool calls automatically.
-    run_stream!(~this, string user_message) stream[string] `public `instance;
+    run_stream!(~this, string user_message) Generator[string] `public `instance;
 
     // ── Interactive (multi-turn) mode ──────────────────────────────────
 
@@ -528,7 +889,7 @@ type Agent `public {
 
     // Send a user message with streaming.
     // Yields TurnEvents as they happen.
-    turn_stream!(~this, string user_message) stream[TurnEvent] `public `instance;
+    turn_stream!(~this, string user_message) Generator[TurnEvent] `public `instance;
 
     // ── Structured output ──────────────────────────────────────────────
 
@@ -569,15 +930,15 @@ type AgentConfig `public {
     int? max_tokens;
     f64? temperature;
     bool parallel_tool_calls = true; // execute independent tool calls concurrently
-    (ToolCallEvent) -> bool? tool_filter;  // optional: approve/deny tool calls
+    ((ToolCallEvent) -> bool)? tool_filter;  // optional: approve/deny tool calls
     RetryConfig retry;
 }
 
 type RetryConfig `public {
-    int max_retries = 3;            // max retry attempts for transient errors
-    Duration initial_delay = Duration.millis(500);
-    f64 backoff_multiplier = 2.0;   // exponential backoff factor
-    Duration max_delay = Duration.seconds(30);
+    int max_retries = 3;
+    Duration initial_delay = Duration.from_millis(500);
+    f64 backoff_multiplier = 2.0;
+    Duration max_delay = Duration.from_secs(30);
     bool retry_on_rate_limit = true;
     bool retry_on_server_error = true;
 }
@@ -606,9 +967,10 @@ final response. Best for autonomous tasks.
 
 ```promise
 use ai;
+use ai_anthropic;
 
 main!() {
-    use provider := ai.Anthropic.from_env();
+    use provider := ai_anthropic.Anthropic.from_env!();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     agent.set_system("You are a helpful assistant.");
     agent.add_tool(weather_tool);
@@ -624,10 +986,11 @@ and decide whether to continue. Best for conversational UIs and human-in-the-loo
 
 ```promise
 use ai;
+use ai_anthropic;
 use io;
 
 main!() {
-    use provider := ai.Anthropic.from_env();
+    use provider := ai_anthropic.Anthropic.from_env!();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     agent.set_system("You are a coding assistant.");
 
@@ -643,7 +1006,8 @@ main!() {
 
 ### 5.6 Streaming
 
-Both modes support streaming via `stream[T]` (Promise's generator/iterator type):
+Both modes support streaming via `Generator[T]` (the coroutine generator from
+`std/iter.pr`, which satisfies `Iterator[T]` and is therefore consumable with `for`):
 
 ```promise
 // One-shot streaming — yields text as it arrives
@@ -671,17 +1035,18 @@ When the model returns multiple tool calls in a single response and
 ```promise
 // Internal implementation sketch:
 if config.parallel_tool_calls && tool_calls.len > 1 {
-    task[string!][] tasks = [];
+    Task[string!][] tasks = [];
     for call in tool_calls {
         tasks.push(go { execute_tool(call) });
     }
-    for i, t in tasks {
-        results[i] = <-t;
+    string![] results = [];
+    for t in tasks {
+        results.push(t.await());
     }
 }
 ```
 
-This uses Promise's existing concurrency model — no new primitives needed.
+This uses Promise's existing concurrency model (`std/task.pr`) — no new primitives needed.
 
 ### 5.8 Tool Call Filtering
 
@@ -699,59 +1064,26 @@ agent.config.tool_filter = |ToolCallEvent evt| -> bool {
 };
 ```
 
-### 5.9 Built-in Providers
+### 5.9 Providers
+
+The `ai` catalog module ships **only** the abstract `Provider` interface (§5.2) and a
+built-in `MockProvider` for testing. Concrete vendor providers live in **community
+modules** registered in `catalog.toml` and pinned per project. The split is deliberate:
+
+- **Vendors evolve independently of the language.** Anthropic ships new models and
+  endpoint changes on their own cadence; binding those revisions to the compiler
+  release cycle would be the wrong dependency.
+- **Vendor SDKs accumulate dependencies.** Token counting, retry semantics, SSE event
+  formats, and tool-format quirks differ per vendor. Keeping that out of `ai/` keeps
+  the orchestration layer small and reviewable.
+- **Programs already use `Provider` polymorphically.** Code written against `Provider`
+  works unchanged with any community implementation; swapping providers is a `use`
+  statement and a constructor change.
+
+#### `MockProvider` (built into `ai`)
 
 ```promise
-// Anthropic (Claude)
-type Anthropic is Provider `public {
-    new(~this, string api_key) `public;
-    from_env!() Self `factory `public; // reads ANTHROPIC_API_KEY
-
-    complete!(~this, Request &req) Response `public `instance;
-    stream!(~this, Request &req) stream[StreamEvent] `public `instance;
-    embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
-    close!(~this) `public `instance;
-}
-
-// OpenAI
-type OpenAI is Provider `public {
-    new(~this, string api_key) `public;
-    from_env!() Self `factory `public; // reads OPENAI_API_KEY
-
-    complete!(~this, Request &req) Response `public `instance;
-    stream!(~this, Request &req) stream[StreamEvent] `public `instance;
-    embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
-    close!(~this) `public `instance;
-}
-
-// Generic OpenAI-compatible endpoint (Ollama, vLLM, LiteLLM, etc.)
-type OpenAICompat is Provider `public {
-    new(~this, string base_url, string? api_key) `public;
-
-    complete!(~this, Request &req) Response `public `instance;
-    stream!(~this, Request &req) stream[StreamEvent] `public `instance;
-    embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
-    close!(~this) `public `instance;
-}
-
-// Provider that routes to different models/providers based on model name prefix.
-// Routes "anthropic/claude-..." to the Anthropic provider, "openai/gpt-..." to OpenAI, etc.
-type Router is Provider `public {
-    // Register a provider under a prefix. Requests whose model starts with
-    // "prefix/" are routed to this provider (prefix stripped before forwarding).
-    add_route(~this, string prefix, Provider ~provider) `public `instance;
-
-    // Set the fallback provider for models that match no prefix.
-    set_default(~this, Provider ~provider) `public `instance;
-
-    complete!(~this, Request &req) Response `public `instance;
-    stream!(~this, Request &req) stream[StreamEvent] `public `instance;
-    embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
-    close!(~this) `public `instance;
-}
-
-// Mock provider for testing — returns canned responses without hitting any API.
-type MockProvider is Provider `public {
+type MockProvider is Provider `public `doc("Returns canned responses for tests. Never hits the network.") {
     Response[] _responses;
     int _call_count;
 
@@ -760,20 +1092,64 @@ type MockProvider is Provider `public {
         this._call_count = 0;
     }
 
-    // Queue a response. Responses are returned in order; panics if exhausted.
-    add_response(~this, Response resp) `public `instance {
-        this._responses.push(resp);
-    }
-
-    // Number of times complete() has been called.
+    add_response(~this, Response resp) `public `instance `doc("Queue a response. Responses are returned in order; panics if exhausted.");
     get call_count int `public `instance;
 
     complete!(~this, Request &req) Response `public `instance;
-    stream!(~this, Request &req) stream[StreamEvent] `public `instance;
+    stream!(~this, Request &req) Generator[StreamEvent] `public `instance;
     embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
     close!(~this) `public `instance;
 }
 ```
+
+#### Community provider modules (illustrative — not part of the standard set)
+
+| Module          | Source                          | Provides                                                |
+|-----------------|---------------------------------|---------------------------------------------------------|
+| `ai_anthropic`  | `community/promise_ai_anthropic`| `Anthropic is Provider` — claude-* models, MessagesAPI  |
+| `ai_openai`     | `community/promise_ai_openai`   | `OpenAI is Provider`, `OpenAICompat is Provider`        |
+| `ai_google`     | `community/promise_ai_google`   | `Google is Provider` — Gemini API                       |
+| `ai_router`     | `community/promise_ai_router`   | `Router is Provider` — prefix-based fan-out             |
+
+A community module's surface area is just the constructor and any vendor-specific
+extras — the `Provider` interface itself is stable and lives in `ai`:
+
+```promise
+// In community module ai_anthropic:
+use ai;
+use auth;
+use http;
+
+type Anthropic is ai.Provider `public `doc("Anthropic Messages API provider.") {
+    string _api_key;
+    http.Client _client;
+
+    new(~this, string api_key) `public;
+    from_env!() Self `factory `public `doc("Reads the ANTHROPIC_API_KEY environment variable.");
+
+    complete!(~this, ai.Request &req) ai.Response `public `instance;
+    stream!(~this, ai.Request &req) Generator[ai.StreamEvent] `public `instance;
+    embed!(~this, string[] &inputs, string model) f64[][] `public `instance;
+    close!(~this) `public `instance;
+}
+```
+
+Programs use it like this:
+
+```promise
+use ai;
+use ai_anthropic;
+
+main!() {
+    use provider := ai_anthropic.Anthropic.from_env!();
+    agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
+    print_line(agent.run!("Hello"));
+}
+```
+
+`Provider` is a nominal interface (§5.2), so a community module declaring
+`type Anthropic is ai.Provider` is a compile-time guarantee that the module
+implements every abstract method.
 
 ### 5.10 Session Management
 
@@ -869,13 +1245,14 @@ type MemorySessionStore is SessionStore `public {
 
 ```promise
 use ai;
+use ai_anthropic;
 use io;
 
 main!() {
     // Resume or create session
     session := ai.Session.load("session.json") ? { ai.Session.create() };
 
-    use provider := ai.Anthropic.from_env();
+    use provider := ai_anthropic.Anthropic.from_env!();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     agent.set_system("You are a project manager assistant.");
 
@@ -966,7 +1343,7 @@ type Pipeline `public {
     run!(~this, string input) string `public `instance;
 
     // Run with streaming — yields events from all steps.
-    run_stream!(~this, string input) stream[PipelineEvent] `public `instance;
+    run_stream!(~this, string input) Generator[PipelineEvent] `public `instance;
 }
 
 enum PipelineEvent `public {
@@ -984,9 +1361,10 @@ prompts:
 
 ```promise
 use ai;
+use ai_anthropic;
 
 main!() {
-    use provider := ai.Anthropic.from_env();
+    use provider := ai_anthropic.Anthropic.from_env!();
 
     // Specialist agents
     researcher := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
@@ -1139,7 +1517,7 @@ type Server `public {
 type ServerConfig `public {
     bool logging = true;
     int? max_concurrent_tools;
-    (ai.ToolCallEvent) -> bool? auth_filter;    // per-call authorization
+    ((ai.ToolCallEvent) -> bool)? auth_filter;    // per-call authorization
 }
 ```
 
@@ -1306,6 +1684,7 @@ MCP tools discovered from a server can be directly plugged into an `ai.Agent`:
 
 ```promise
 use ai;
+use ai_anthropic;
 use mcp;
 
 main!() {
@@ -1318,7 +1697,7 @@ main!() {
     ai.Tool[] db_tools = db_server.list_tools();
 
     // Create agent with all discovered tools
-    use provider := ai.Anthropic.from_env();
+    use provider := ai_anthropic.Anthropic.from_env!();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     for tool in file_tools { agent.add_tool(tool); }
     for tool in db_tools { agent.add_tool(tool); }
@@ -1438,7 +1817,7 @@ type Sandbox `public {
 }
 
 type SandboxConfig `public {
-    Duration timeout = Duration.seconds(30);
+    Duration timeout = Duration.from_secs(30);
     int max_memory_mb = 256;
     int max_output_bytes = 1_048_576;   // 1MB stdout/stderr cap
     string? working_dir;
@@ -1457,15 +1836,32 @@ type ExecutionResult `public {
 ### 7.4 How the Sandbox Works
 
 The sandbox compiles (if needed) and executes Promise code in a restricted subprocess.
-Capability enforcement happens at the **PAL layer** — the sandbox sets up the subprocess
-environment so that:
+**Capability enforcement is implemented at the PAL layer** — the same layer that
+mediates filesystem, network, process, environment, and time access for ordinary
+Promise programs (`compiler/internal/codegen/pal/`). The PAL inspects each
+capability-gated call against the active `Capability[]` and refuses operations not in
+the grant set:
 
-- **Filesystem**: Uses OS-level mechanisms (Linux: seccomp + landlock; macOS: sandbox-exec)
-  to restrict file access to granted paths.
-- **Network**: Restricts socket operations to allowed hosts/ports.
-- **Process**: Restricts `execve` to allowed programs (or disables it entirely).
-- **Environment**: Filters environment variables to only those granted.
-- **Time/Memory**: Uses `setrlimit` and process-level timeouts.
+- **Filesystem**: `pal_file_open`, `pal_file_create`, `pal_dir_open`, etc. check the
+  requested path against `FileRead` / `FileWrite` glob lists.
+- **Network**: `pal_tcp_connect`, `pal_tcp_listen`, `pal_udp_send` check the host/port
+  against `NetConnect` / `NetListen` lists.
+- **Process**: `pal_exec` checks the program path against `Exec` / `ExecAll`.
+- **Environment**: `pal_get_env` filters by `EnvRead` allowlist.
+- **Time / Memory**: `pal_sleep` and process resource limits are enforced via PAL
+  shims plus `setrlimit` where the platform supports it.
+
+**Why PAL-level instead of syscall-level?** There is no syscall-sandboxing primitive
+that works consistently across the four platforms Promise targets (Linux, macOS,
+Windows, WASM). seccomp and landlock are Linux-only; sandbox-exec is macOS-only;
+Windows has Job Objects and AppContainer with a different model again; WASM has no
+syscalls at all and relies entirely on host-imposed import restrictions. Putting the
+authoritative check at the PAL — which already sits in front of every syscall the
+runtime makes — gives one consistent semantics on every target. Specific PAL
+implementations may *additionally* invoke the platform's syscall sandbox (seccomp on
+Linux, sandbox-exec on macOS) as a defense-in-depth layer, but that is an
+implementation detail; the `Capability` enum and the sandbox config are the portable
+contract.
 
 The Promise compiler can optionally compile in **sandbox mode** (`promise build --sandbox`),
 which statically verifies that the code does not use any module whose capabilities exceed
@@ -1476,17 +1872,18 @@ imports `io` without `FileRead`/`FileWrite` capability.
 
 ```promise
 use ai;
+use ai_anthropic;
 use sandbox;
 
 main!() {
-    use provider := ai.Anthropic.from_env();
+    use provider := ai_anthropic.Anthropic.from_env!();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     agent.set_system("You write Promise code. Return only code, no explanation.");
 
     // Create a sandbox for executing AI-generated code
     sb := sandbox.Sandbox.standard();
     sb.allow(sandbox.Capability.FileRead(["/data/*"]));
-    sb.config.timeout = Duration.seconds(10);
+    sb.config.timeout = Duration.from_secs(10);
 
     // Generate code
     string code = agent.run("Write a program that counts lines in /data/input.txt");
@@ -1513,7 +1910,10 @@ LLMs increasingly support structured output (JSON matching a schema). Promise's 
 system makes this natural — request a typed response and get back a deserialized value.
 
 ```promise
-type MovieRecommendation {
+use ai;
+use ai_anthropic;
+
+type MovieRecommendation `serializable {
     string title `doc("Movie title.");
     int year `doc("Release year.");
     string reason `doc("Why this movie was recommended.");
@@ -1521,10 +1921,10 @@ type MovieRecommendation {
 }
 
 main!() {
-    use provider := ai.Anthropic.from_env();
+    use provider := ai_anthropic.Anthropic.from_env!();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
 
-    MovieRecommendation rec = agent.run_typed[MovieRecommendation](
+    MovieRecommendation rec = agent.run_typed[MovieRecommendation]!(
         "Recommend a sci-fi movie for someone who loved Arrival."
     );
 
@@ -1533,10 +1933,10 @@ main!() {
 ```
 
 The `run_typed[T]` method:
-1. Generates a JSON Schema from `T` via `Schema.from_type[T]()`
-2. Appends schema instructions to the system prompt
-3. Parses the model's JSON response into `T` via `json.decode[T]()`
-4. Retries once on parse failure with the error message (self-correction)
+1. Generates a JSON Schema from `T` via `schema.of[T]()` (requires `T` to be `` `serializable ``).
+2. Appends schema instructions to the system prompt.
+3. Parses the model's JSON response into `T` via `json.decode_string[T]()`.
+4. Retries once on parse failure with the error message (self-correction).
 
 ---
 
@@ -1553,7 +1953,57 @@ promise ai run file.pr              # Run an agent program
 promise ai sandbox file.pr          # Run file.pr in minimal sandbox
 ```
 
-### 9.1 `promise ai serve`
+### 9.1 The `` `tool `` Annotation — A Compiler Extension
+
+`` `tool `` is the single compiler change required to make MCP server creation
+zero-boilerplate. It is added to the built-in metas table (language-design §8.3,
+implemented in `compiler/internal/sema/meta.go`) as a function-and-method annotation:
+
+| Meta | Applies To | Description |
+|------|------------|-------------|
+| `` `tool `` | functions, methods | Mark as exposable as an MCP/agent tool. The compiler builds a `schema.Type` (kind `Function`) descriptor and registers it on the enclosing module so `promise ai serve` and runtime helpers can enumerate annotated tools. |
+
+**What the compiler must do**
+
+1. **Recognize `` `tool ``** as a valid annotation on `func` and method declarations,
+   with optional named parameters (e.g., `` `tool(name: "wire_name") ``). Reject on
+   types, fields, or anything else.
+2. **Synthesize a `Type` descriptor** for each `` `tool ``-annotated declaration in
+   the same pass that handles `` `serializable `` schemas (§3.6). The descriptor
+   captures parameter names, parameter `` `doc `` annotations, parameter defaults,
+   parameter optionality (`T?`), return type, and failability — the function-declaration
+   information the compiler always has and never erases (§3.3).
+3. **Validate parameter types** are either primitive, `` `serializable ``, or
+   primitive-of-`` `serializable ``-containers (`T[]`, `map[string, T]`, `T?`). Emit a
+   precise diagnostic when not — `mcp tools cannot accept non-serializable parameter
+   'config' of type Config; mark Config as `` `serializable ``` is far better than a
+   runtime crash inside a JSON decoder.
+4. **Register each tool in a per-module manifest** that `promise ai serve` and the
+   runtime can read at startup. The manifest entry is the same `Type` value used at
+   runtime — no second representation. Concretely, for each module the compiler emits
+   a hidden module-level getter `_tool_manifest() Tool[]` that constructs all the
+   tool wrappers; `promise ai serve` calls this getter.
+
+**Why this minimal extension is sufficient**
+
+- All the type information needed already exists — `` `tool `` does not introduce a
+  new reflection facility, only a new label on top of facilities the compiler has.
+- The schema synthesis hook is the same one that powers `schema.of[T]()` (§3.6) and
+  `` `serializable `` (`docs/serialization-plan.md`); it does not need to be invented.
+- Free-function manifest enumeration is already a well-defined operation — every Go
+  unit-test discovery, every embedded-resource registry uses the same shape.
+
+**What `` `tool `` does NOT do**
+
+- It does not make the function callable from JSON automatically — wrapping the
+  function in a JSON-decoding/encoding shim is the job of `mcp.Server` or
+  `ai.Tool.create[T, R]()`. The annotation only carries the schema, the name, and
+  the description.
+- It does not opt in to network exposure. A `` `tool ``-annotated function is just
+  metadata; it is exposed only when a `mcp.Server` (or the `promise ai serve` driver)
+  reads the manifest and registers it.
+
+### 9.2 `promise ai serve`
 
 Takes a `.pr` file that defines tools and runs it as an MCP server. The file can be a
 full MCP server program (with `main()` and explicit `mcp.Server` setup), or a simpler
@@ -1562,28 +2012,31 @@ full MCP server program (with `main()` and explicit `mcp.Server` setup), or a si
 ```promise
 // tools.pr — no main(), no mcp import needed
 // promise ai serve tools.pr  auto-registers `tool-annotated functions
+use io;
 
 add(int a `doc("First number."), int b `doc("Second number.")) int
     `tool `doc("Add two numbers.") {
     return a + b;
 }
 
-read_file(string path `doc("File path to read.")) string!
+read_file!(string path `doc("File path to read.")) string
     `tool `doc("Read the contents of a file.") {
-    return io.File.read(path);
+    return io.File.read!(path);
 }
 ```
 
-`promise ai serve tools.pr` wraps these in an MCP server automatically — no boilerplate.
-The tool schemas are derived from the function signatures and `doc()` annotations.
+`promise ai serve tools.pr` wraps these in an MCP server automatically — no
+boilerplate. The tool schemas are derived from the function signatures and
+`` `doc `` annotations as described in §9.1.
 
-The `` `tool `` annotation is an explicit opt-in — only annotated functions are registered.
-This follows Promise's "explicit over implicit" philosophy: a function must declare its
-intent to be exposed as a tool.
+`` `tool `` is an explicit opt-in: only annotated functions are registered. This
+follows Promise's "explicit over implicit" philosophy — a function must declare its
+intent to be exposed as a tool. Functions without `` `tool `` are invisible to the
+manifest even if their signature would otherwise be valid.
 
-### 9.2 `promise ai schema`
+### 9.3 `promise ai schema`
 
-Prints the JSON Schema for a type, useful for debugging tool definitions:
+Prints the JSON Schema for a type or function, useful for debugging tool definitions:
 
 ```
 $ promise ai schema CreateUserRequest -f user.pr
@@ -1592,7 +2045,26 @@ $ promise ai schema CreateUserRequest -f user.pr
   "description": "Request to create a new user.",
   ...
 }
+
+$ promise ai schema add -f tools.pr
+{
+  "type": "function",
+  "name": "add",
+  "description": "Add two numbers.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "a": { "type": "integer", "description": "First number." },
+      "b": { "type": "integer", "description": "Second number." }
+    },
+    "required": ["a", "b"]
+  }
+}
 ```
+
+The CLI distinguishes types from functions automatically — types resolve via
+`schema.of[T]()`, free functions and `` `tool ``-annotated declarations resolve via
+`schema.for_func[F]()`.
 
 ---
 
@@ -1602,13 +2074,14 @@ $ promise ai schema CreateUserRequest -f user.pr
 
 ```promise
 use ai;
+use ai_anthropic;
 use io;
 
 main!() {
     // Load or create session
     session := ai.Session.load("chat.json") ? { ai.Session.create() };
 
-    use provider := ai.Anthropic.from_env();
+    use provider := ai_anthropic.Anthropic.from_env!();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     agent.set_system("You are a friendly assistant.");
     agent.set_history(session.history.clone());
@@ -1650,17 +2123,18 @@ main!() {
 
 ```promise
 use ai;
+use ai_anthropic;
 use sandbox;
 
 main!() {
-    use provider := ai.Anthropic.from_env();
+    use provider := ai_anthropic.Anthropic.from_env!();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
     agent.set_system(
         "You write Promise programs. Return ONLY the code, no markdown fences or explanation."
     );
 
     sb := sandbox.Sandbox.standard();
-    sb.config.timeout = Duration.seconds(10);
+    sb.config.timeout = Duration.from_secs(10);
 
     prompt := "Write a program that prints the first 20 Fibonacci numbers.";
 
@@ -1730,6 +2204,7 @@ main!() {
 
 ```promise
 use ai;
+use ai_anthropic;
 use mcp;
 use io;
 
@@ -1739,7 +2214,7 @@ main!() {
     use db := mcp.Client.connect_stdio("db-server", []);
     use web := mcp.Client.connect_stdio("web-search", []);
 
-    use provider := ai.Anthropic.from_env();
+    use provider := ai_anthropic.Anthropic.from_env!();
     agent := ai.Agent(provider: provider, model: "claude-sonnet-4-20250514");
 
     // Register all tools from all servers
@@ -1786,11 +2261,13 @@ test_agent_responds() `test {
     mock := ai.MockProvider();
     mock.add_response(ai.Response(
         message: ai.Message(
-            role: Role.Assistant,
+            role: ai.Role.Assistant,
             content: [ai.Content.Text(text: "Hello!")],
+            name: none,
+            tool_call_id: none,
         ),
         stop_reason: ai.StopReason.EndTurn,
-        usage: ai.Usage(input_tokens: 10, output_tokens: 5),
+        usage: ai.Usage(input_tokens: 10, output_tokens: 5, cache_read_tokens: none, cache_write_tokens: none),
     ));
 
     agent := ai.Agent(provider: mock, model: "test");
@@ -1805,114 +2282,172 @@ test_agent_responds() `test {
 
 ## 11. Implementation Order
 
-### Phase 0 — Prerequisites
+### Phase 0 — Prerequisites (already covered or in progress)
 
-1. **`modules/json`**: JSON encoding/decoding with `json.encode[T]()`, `json.decode[T]()`
-2. **`modules/http`**: HTTP client with `get`, `post`, SSE streaming support
+1. **`modules/json`**: already implemented — `json.encode_string[T]()`, `json.decode_string[T]()`
+2. **`modules/http`**: currently a placeholder in `catalog.toml` — must be filled in
+   (HTTP client with `get`, `post`, SSE streaming support; uses `modules/net`)
+3. **Compiler — schema-synthesis hook**: extend the existing `` `serializable ``
+   pass in `compiler/internal/sema/serialize.go` to also synthesize a hidden
+   `_schema_descriptor()` factory per type/enum (§3.6).
+4. **Compiler — `` `tool `` meta**: add to `builtinMetas` in
+   `compiler/internal/sema/meta.go`; emit per-module `_tool_manifest()` getter (§9.1).
 
 ### Phase 1 — Foundation (schema + auth)
 
-3. **`modules/schema`**: `Schema`, `SchemaField`, `from_type[T]()`, `to_json_schema()`
-4. **`modules/auth`**: `Credential`, `TokenProvider`, `StaticToken`, `EnvToken`
+5. **`modules/schema`**: `Type` (tagged enum with variants `Object` / `Array` / `Map` /
+   `Scalar` / `Enum` / `Function` / `Optional` / `Reference`), `Field`, `Variant`,
+   `Param`, `ScalarKind`, free functions `schema.of[T]()` and `schema.for_func[F]()`,
+   and the rendering methods `to_json_schema()`, `to_openapi()`,
+   `to_tool_input_schema()` defined on `Type`.
+6. **`modules/auth`**: `AuthError`, `Credential`, `TokenProvider`, `StaticToken`,
+   `EnvToken`. Credential store (`~/.promise/credentials.toml`) read.
 
-### Phase 2 — Core AI (provider + agent)
+### Phase 2 — Core AI (provider interface + agent + MockProvider)
 
-5. **`modules/ai` error types**: `AiError`, `RateLimitError`, `ContextLengthError`, `ApiError`
-6. **`modules/ai` core types**: `Message`, `Content`, `Request`, `Response`, `Role`, `ToolCallEvent`
-7. **`modules/ai` providers**: `Anthropic`, `OpenAI`, `OpenAICompat`, `MockProvider`
-8. **`modules/ai` tools**: `Tool`, `Tool.create[T, R]`
-9. **`modules/ai` agent**: `Agent`, `AgentConfig`, `RetryConfig`, one-shot `run()`, interactive `turn()`
-10. **`modules/ai` streaming**: `stream()`, `run_stream()`, `turn_stream()`
+7. **`modules/ai` error types**: `AiError`, `RateLimitError`, `ContextLengthError`,
+   `ApiError`, `ProviderError`.
+8. **`modules/ai` core types**: `Message`, `Content`, `Request`, `Response`, `Role`,
+   `Usage`, `StopReason`, `StreamEvent`, `ContentDelta`, `ToolCallEvent`.
+9. **`modules/ai` Provider interface + MockProvider**. **No** vendor providers ship
+   here — those are Phase 7.
+10. **`modules/ai` tools**: `Tool`, `Tool.create[T, R]` (depends on `schema`).
+11. **`modules/ai` agent**: `Agent`, `AgentConfig`, `RetryConfig`, one-shot `run()`,
+    interactive `turn()`.
+12. **`modules/ai` streaming**: `run_stream()`, `turn_stream()` returning
+    `Generator[T]` (uses `std/iter.pr`'s coroutine generator).
 
 ### Phase 3 — MCP
 
-11. **`modules/mcp` transport**: `Transport`, `StdioTransport`
-12. **`modules/mcp` error types**: `McpError`
-13. **`modules/mcp` server**: `Server`, tool/resource/prompt registration, stdio transport
-14. **`modules/mcp` client**: `Client`, `connect_stdio()`, `list_tools()`, `call_tool()`
-15. **`modules/mcp` SSE + HTTP**: `SseTransport`, `HttpTransport`, additional serve modes
-16. **`promise ai serve`**: CLI command for auto-serving `` `tool ``-annotated files
+13. **`modules/mcp` transport**: `Transport`, `StdioTransport`.
+14. **`modules/mcp` error types**: `McpError`.
+15. **`modules/mcp` server**: `Server`, tool/resource/prompt registration, stdio transport.
+16. **`modules/mcp` client**: `Client`, `connect_stdio()`, `list_tools()`, `call_tool()`.
+17. **`modules/mcp` SSE + HTTP**: `SseTransport`, `HttpTransport`, additional serve modes.
+18. **`promise ai serve`**: CLI command for auto-serving `` `tool ``-annotated files —
+    reads the per-module `_tool_manifest()` emitted in Phase 0 step 4.
 
 ### Phase 4 — Sandbox
 
-17. **`modules/sandbox`**: `Sandbox`, `Capability`, `ExecutionResult`, `SandboxError`
-18. **OS-level enforcement**: seccomp/landlock on Linux, sandbox-exec on macOS
-19. **`promise ai sandbox`**: CLI command
+19. **`modules/sandbox`**: `Sandbox`, `Capability`, `ExecutionResult`, `SandboxError`.
+20. **OS-level enforcement**: seccomp/landlock on Linux, sandbox-exec on macOS.
+21. **`promise ai sandbox`**: CLI command.
 
 ### Phase 5 — Sessions + Advanced
 
-20. **`modules/ai` sessions**: `Session`, `SessionStore`, `FileSessionStore`, `MemorySessionStore`
-21. **`modules/ai` structured output**: `run_typed[T]()`
-22. **`modules/ai` multi-agent**: `Pipeline`, `PipelineStep`, `Tool.from_agent()`
-23. **`modules/ai` observability**: `AgentHooks`, `UsageTracker`
+22. **`modules/ai` sessions**: `Session`, `SessionStore`, `FileSessionStore`,
+    `MemorySessionStore`.
+23. **`modules/ai` structured output**: `run_typed[T]()`.
+24. **`modules/ai` multi-agent**: `Pipeline`, `PipelineStep`, `Tool.from_agent()`.
+25. **`modules/ai` observability**: `AgentHooks`, `UsageTracker`.
 
 ### Phase 6 — CLI integration
 
-24. **`promise ai tools`**: list tools from a file
-25. **`promise ai schema`**: print JSON Schema for a type
+26. **`promise ai tools`**: list tools from a file.
+27. **`promise ai schema`**: print JSON Schema for a type or function.
+
+### Phase 7 — Community provider modules (out of catalog)
+
+28. **`ai_anthropic`**: `Anthropic is ai.Provider` — claude-* models.
+29. **`ai_openai`**: `OpenAI`, `OpenAICompat is ai.Provider` — OpenAI + Ollama/vLLM/LiteLLM.
+30. **`ai_router`**: `Router is ai.Provider` — prefix-based fan-out across providers.
+31. **(open-ended)** other vendors as community demand requires.
 
 ---
 
-## 12. Open Design Questions
+## 12. Resolved Design Decisions
+
+All eleven open questions are now resolved. They are kept here as a decision log so
+future readers can see *why* the platform looks the way it does, not only *what* it is.
 
 **Q1: Schema derivation — compile-time or runtime?**
-`Schema.from_type[T]()` is monomorphized at compile time, meaning the schema is a
-compile-time constant embedded in the binary. This is efficient but means schema generation
-requires compilation. Alternative: runtime reflection via the Type struct (T#t).
-**Lean**: compile-time via monomorphization — it is faster, requires no runtime reflection
-machinery, and Promise already monomorphizes generics.
+*Decision: compile-time, via monomorphization.* `schema.of[T]()` is a `` `mono `` free
+function whose body is synthesized in the same sema pass that generates encode/decode
+for `` `serializable `` types (§3.6). There is no runtime reflection facility to add
+or maintain. `serialization-plan.md` §7.1 already rules out runtime reflection on cost
+and philosophy grounds, and the schema mechanism reuses the hook the serializer already
+needs.
 
-**Q2: Sandbox enforcement granularity**
-Should the sandbox enforce at the syscall level (seccomp) or at the Promise PAL level
-(intercepting `pal_file_open` etc.)? Syscall-level is more secure but platform-specific.
-PAL-level is portable but bypassable with `unsafe`.
-**Lean**: both — PAL-level for portability and user-friendly error messages, syscall-level
-as a defense-in-depth layer on supported platforms.
+**Q2: Sandbox enforcement granularity — syscall or PAL?**
+*Decision: PAL is the authoritative layer.* No syscall-sandboxing primitive works
+consistently across Promise's four targets — Linux (seccomp/landlock), macOS
+(sandbox-exec), Windows (Job Objects / AppContainer), WASM (no syscalls at all, only
+host imports). The portable contract is the `Capability` enum and the sandbox config;
+the PAL is where `Capability[]` is checked against every gated call (§7.4). Specific
+PAL implementations *may* additionally engage the platform's syscall sandbox as a
+defense-in-depth layer on platforms where one exists, but that is an implementation
+detail of that PAL, not part of the user-visible model.
 
-**Q3: MCP transport: which to prioritize?**
-stdio is the most common MCP transport today. SSE is used for remote servers. Streamable
-HTTP is the newest spec addition. All three should eventually be supported.
-**Lean**: stdio first (covers local tool use and `promise ai serve`), SSE second (covers
-remote deployment), streamable HTTP third.
+**Q3: MCP transport — which to prioritize?**
+*Decision: stdio first, SSE second, streamable HTTP third.* stdio covers local tool
+use and `promise ai serve` (the dominant case). SSE covers remote deployment. Streamable
+HTTP follows when the spec stabilizes further.
 
-**Q4: Provider streaming protocol differences**
-Anthropic and OpenAI have different SSE event formats. Should the `Provider` interface
-abstract over these differences completely, or expose provider-specific event types?
-**Lean**: abstract completely — `StreamEvent` is the universal type. Provider implementations
-translate their wire format to `StreamEvent`. Provider-specific metadata can be attached
-via `map[string, string] metadata` on events if needed.
+**Q4: Provider streaming protocol differences — abstract or expose?**
+*Decision: abstract completely.* `StreamEvent` is the universal type. Provider
+implementations translate their wire format to `StreamEvent` at the boundary.
+Vendor-specific metadata can be attached as a `map[string, string]` on the event when
+needed, so abstraction does not lose information.
 
-**Q5: Session compaction strategy**
-`session.compact()` takes a summarizer callback rather than a provider+model directly.
-This decouples Session from Provider — the caller wraps an LLM call in a closure.
-The callback receives old messages and returns a single summary message.
-**Lean**: configurable with a sensible default callback. Default: summarize when estimated
-tokens exceed 80% of the model's context window.
+**Q5: Session compaction strategy.**
+*Decision: caller-supplied summarizer callback with a sensible default.*
+`session.compact()` takes a `(Message[]) -> Message!` closure, decoupling `Session`
+from `Provider`. The default callback summarizes once estimated tokens exceed 80% of
+the model's context window; callers that want a different policy pass their own.
 
-**Q6: Multi-agent communication model**
-Should agents communicate through tools (agent-as-tool, current design), through shared
-channels, or through a message bus? Tools are simple but serial. Channels enable concurrent
-agent communication but add complexity.
-**Lean**: tools for now (simple, fits the existing model). Channels for agent-to-agent
-communication can be explored later when real-world patterns emerge.
+**Q6: Multi-agent communication model.**
+*Decision: agent-as-tool for now.* Tools are simple, serial, and fit the existing
+agent-loop model. Channels for concurrent agent-to-agent communication can be added
+later if real-world patterns demand them; doing it speculatively before the patterns
+exist would add surface area without a corresponding use case.
 
-**Q7: `promise ai serve` — auto-discovery scope**
-When `promise ai serve` auto-discovers tools from a file, should it register ALL public
-functions or only those with a specific annotation?
-**Lean**: require an explicit `` `tool `` annotation. This follows Promise's "explicit over
-implicit" philosophy — a function must opt in to being exposed as an MCP tool. Functions
-without `` `tool `` are not registered. Functions with `` `tool `` and `` `doc() `` get rich
-schema descriptions; those with `` `tool `` alone get name-only descriptions.
+**Q7: `promise ai serve` — auto-discovery scope.**
+*Decision: explicit `` `tool `` annotation required.* Following Promise's "explicit
+over implicit" philosophy, a function must opt in to MCP exposure. Functions without
+`` `tool `` are invisible to the manifest even if their signature would otherwise be
+valid. Functions with `` `tool `` and `` `doc() `` produce rich schemas; those with
+`` `tool `` alone produce name-only descriptions.
 
-**Q8: Embeddings API — batch size and dimensions**
-The `embed()` method takes `string[]` for batching. Should there be a max batch size?
-Should the return type expose vector dimensions for type safety?
-**Lean**: no compile-time dimension tracking (too heavyweight for the common case). Document
-the model-specific batch limits. The caller checks `f64[]` length at runtime if needed.
+**Q8: Embeddings API — batch size and dimensions.**
+*Decision: no compile-time dimension tracking.* `embed()` takes `string[]` and returns
+`f64[][]`. Documented per-model batch limits live in each provider module's docs; the
+caller checks `f64[]` length at runtime if it matters. Encoding dimensions in the type
+system would require dependent types or per-model phantom parameters — too heavyweight
+for the common case.
 
 **Q9: `` `tool `` annotation — should it carry metadata?**
-Should `` `tool `` accept parameters like `` `tool(name: "custom_name") `` to override the
-function name in the MCP tool registration?
-**Lean**: start with bare `` `tool `` (uses the function name as-is). Add parameterized
-form later if renaming proves commonly needed. The function name is already a good tool
-name in most cases.
+*Decision: bare `` `tool `` for now, parameters added if needed.* The annotation
+starts with no parameters; the registered tool name is the function name as written.
+Renaming via `` `tool(name: "...") `` is a syntactically compatible extension that
+can be added later if renaming proves commonly needed in practice. The function name
+is already a good tool name in nearly all cases.
+
+**Q10: Should schema generation require `` `serializable ``?**
+*Decision: yes, and a missing annotation is a hard compile error.* `schema.of[T]()`
+on a non-serializable `T` produces a precise diagnostic of the form:
+
+```
+schema.of[Foo]() requires Foo to be marked `serializable`
+  → add `serializable on the type definition, or build a schema.Type literal manually if Foo intentionally has no encode/decode
+```
+
+This keeps "what I describe" and "what I encode" aligned via a single sema hook
+(§3.6). The rare type that should be visible to LLMs but intentionally never
+serialized is handled by manually constructing a `schema.Type` literal rather than by
+forking the synthesis machinery — that case is rare enough that the manual cost is
+preferable to a second annotation.
+
+**Q11: Where should community providers live?**
+*Decision: separate repos in a community organization, embedded into the catalog by
+url + commit pin.* Each provider (e.g. `ai_anthropic`, `ai_openai`) lives in its own
+repository. The catalog (`catalog.toml`) embeds them by pinning a `url` plus a
+`commit` SHA, identical to the existing pattern for `wasi` / `wasi_preview_2`. This
+keeps version pins per-provider and lets vendor-specific contributors maintain their
+own modules without monorepo coordination overhead.
+
+**Deferred (not part of this proposal)**: how community catalog inclusion fits into
+the monoversion / epoch release validation story. That topic spans more than the AI
+platform — it affects every external module the catalog references — and is being
+worked through separately. Until that story is settled, community provider modules
+ship through the same mechanism as today's `wasi` entries: explicit `url` + `commit`
+in `catalog.toml`, no additional epoch metadata.

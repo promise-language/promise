@@ -3,6 +3,7 @@ package module
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -142,6 +143,49 @@ func TestInstalledEpochs(t *testing.T) {
 	// Sorted: "2026.0" < "dev"
 	if epochs[0] != "2026.0" || epochs[1] != "dev" {
 		t.Fatalf("unexpected order: %v", epochs)
+	}
+}
+
+func TestInstalledEpochsFileAtPath(t *testing.T) {
+	// A regular file at <PromiseHome>/epochs must produce an error rather than
+	// being silently treated as "no epochs" — Go's os.ReadDir is inconsistent
+	// here across platforms (returns ENOTDIR on Linux, but ([]DirEntry{}, nil)
+	// on Windows due to a quirk in dir_windows.go). InstalledEpochs uses an
+	// os.Stat guard to make the behavior consistent.
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	if err := os.WriteFile(filepath.Join(tmp, "epochs"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	epochs, err := InstalledEpochs()
+	if err == nil {
+		t.Fatalf("expected error when epochs path is a file, got %v", epochs)
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("expected 'not a directory' in error, got %q", err.Error())
+	}
+	if epochs != nil {
+		t.Errorf("expected nil epochs on error, got %v", epochs)
+	}
+}
+
+func TestActiveEpochPropagatesInstalledError(t *testing.T) {
+	// When no <PromiseHome>/active file exists, ActiveEpoch falls back to
+	// InstalledEpochs. If that errors (e.g., epochs path is a file), the
+	// error must propagate rather than be swallowed.
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	if err := os.WriteFile(filepath.Join(tmp, "epochs"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ActiveEpoch()
+	if err == nil {
+		t.Fatal("expected error when epochs path is a file")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("expected 'not a directory' in error, got %q", err.Error())
 	}
 }
 

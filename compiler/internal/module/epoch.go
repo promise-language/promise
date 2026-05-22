@@ -75,11 +75,22 @@ func InstalledEpochs() ([]string, error) {
 		return nil, err
 	}
 	epochsDir := filepath.Join(home, "epochs")
-	entries, err := os.ReadDir(epochsDir)
+	// Stat first so a non-directory at this path produces a consistent error
+	// across platforms. On Windows, os.ReadDir(regular_file) returns
+	// ([]DirEntry{}, nil) due to a quirk in Go's dir_windows.go that swallows
+	// ERROR_FILE_NOT_FOUND from GetFileInformationByHandleEx.
+	info, err := os.Stat(epochsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", epochsDir)
+	}
+	entries, err := os.ReadDir(epochsDir)
+	if err != nil {
 		return nil, err
 	}
 	var epochs []string

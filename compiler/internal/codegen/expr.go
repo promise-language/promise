@@ -7074,12 +7074,43 @@ func (c *Compiler) genFixedArrayLit(e *ast.ArrayLit, arr *types.Array) value.Val
 	elemLLVM := c.resolveType(arr.Elem())
 	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
 
+	// T0389: When the array's element type is droppable, the new bindingDropArray
+	// (registered by maybeRegisterDrop) takes ownership of each slot at scope
+	// exit. To avoid double-free, claim element temps so stmt-end cleanup
+	// doesn't also free them. Gating on variantFieldNeedsDrop keeps non-droppable
+	// element types (e.g. Optional[string]) on their pre-T0389 path where the
+	// source variables drop normally — without this gate, clearing an ident's
+	// drop flag would orphan its inner allocation since no array binding fires.
+	resolvedElem := arr.Elem()
+	if c.typeSubst != nil {
+		resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+	}
+	claim := c.variantFieldNeedsDrop(resolvedElem)
+
 	tmp := c.createEntryAlloca(arrType)
 	for i, elemExpr := range e.Elements {
+		savedEnumTemps := len(c.enumCtorTemps)
 		val := c.genCallArgExpr(elemExpr)
 		ptr := c.block.NewGetElementPtr(arrType, tmp,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 		c.block.NewStore(val, ptr)
+		if !claim {
+			continue
+		}
+		// Element ownership transfers to the array binding — claim temps and
+		// clear ident drop flags so they are not double-freed at stmt end or
+		// at the source variable's scope exit. Mirrors genTupleLit.
+		if ident, ok := elemExpr.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+		c.claimStringTemp(val) // strings, vectors, channels, arcs, mutexes
+		c.claimHeapTemp(val)   // heap user-type instances
+		// Clear enum ctor temps created during this element's evaluation so
+		// the array is the unique owner of the enum's variant data.
+		for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+		}
+		c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
 	}
 	return c.block.NewLoad(arrType, tmp)
 }

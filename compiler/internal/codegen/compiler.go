@@ -435,6 +435,7 @@ const (
 	bindingDropEnum                             // enum: call enum drop (alloca ptr bitcast to i8*) T0102
 	bindingDropOptional                         // optional: check has-value flag, then drop inner value (T0101)
 	bindingDropTuple                            // tuple value: walk fields and drop droppables at scope exit (T0371)
+	bindingDropArray                            // fixed-size array: walk elements and drop droppables at scope exit (T0389)
 	bindingFree                                 // heap-only: call pal_free (no drop method, just free the instance)
 	bindingFreeEnv                              // closure env: free env pointer at scope exit
 	bindingGenerator                            // generator: destroy coroutine + free yield slot at scope exit
@@ -2322,6 +2323,24 @@ func (c *Compiler) emitArcInnerDrop(blk *ir.Block, typedPtr value.Value, arcStru
 func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *irtypes.StructType, elemType types.Type, fieldIdx int) *ir.Block {
 	named := extractNamed(elemType)
 	fi := constant.NewInt(irtypes.I32, int64(fieldIdx))
+
+	// T0389: Tuple element — load the tuple value and drop each droppable element.
+	// emitVariantFieldDrop's tuple branch walks elements via ExtractValue. Save/restore
+	// c.fn/c.entryBlock/c.block so any sub-blocks (e.g., Vector inside the tuple) land
+	// in this drop function's entry, then thread the returned block back.
+	if tup, ok := elemType.(*types.Tuple); ok {
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
+		tupVal := blk.NewLoad(c.resolveType(tup), valField)
+		savedFn, savedEntry, savedBlock := c.fn, c.entryBlock, c.block
+		c.fn = blk.Parent
+		c.entryBlock = blk.Parent.Blocks[0]
+		c.block = blk
+		c.emitVariantFieldDrop(tupVal, tup)
+		blk = c.block
+		c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
+		return blk
+	}
 
 	switch {
 	case named != nil && isPrimitiveScalar(named):

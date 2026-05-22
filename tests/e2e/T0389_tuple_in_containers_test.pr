@@ -1,0 +1,275 @@
+// T0389: tuple inside container/wrapper types must drop droppable fields.
+// Six original reproducer cases: generic struct, generic enum, optional, map,
+// Arc, fixed-size array (each with tuple-of-string element).
+//
+// Regression watchpoints (also covered):
+//   * string[N], _Inner[N], (int, int)[N] — pre-T0389 paths that worked by
+//     "lucky" stmt-temp drop must keep working after the new array binding.
+//   * Arc[string], Arc[int] — non-tuple Arc inner drop must still dispatch.
+//   * Map[int, string], _BoxT[int], _BoxE[int]._Some — non-tuple wrappers.
+//   * Cross-product: tuple-of-heap-user inside generic, tuple-inside-array.
+// --- Fixtures ---
+type _BoxT[T] {
+  T value;
+}
+
+enum _BoxE[T] {
+  _Empty, _Some(T data),
+}
+
+type _Inner {
+  int x;
+  string s;
+}
+
+// --- Case 1: Generic struct with TypeParam field substituted to tuple-of-string ---
+
+case1_box_with_tuple() `test {
+  _BoxT[(int, string)] b = _BoxT[(int, string)](value: (1, "a" + "b"));
+  (a, s) := b.value;
+  assert(a == 1, "a=1");
+  assert(s == "ab", "s=ab");
+}
+
+// --- Case 2: Generic enum with TypeParam variant field substituted to tuple-of-string ---
+
+case2_enum_with_tuple_string() `test {
+  e := _BoxE[(int, string)]._Some(data: (1, "a" + "b"));
+  match e {
+    _Some(d) => {
+      (n, s) := d;
+      assert(n == 1, "n=1");
+      assert(s == "ab", "s=ab");
+    },
+    _Empty => assert(false, "should not match"),
+  }
+}
+
+// --- Case 3: Optional wrapping tuple-of-string ---
+
+case3_optional_tuple_with_string() `test {
+  (int, string)? t = (1, "a" + "b");
+  assert(t is present, "t present");
+  (n, s) := t!;
+  assert(n == 1, "n=1");
+  assert(s == "ab", "s=ab");
+}
+
+// --- Case 4: Map with tuple-of-string value ---
+
+case4_map_with_tuple_value() `test {
+  map[int, (int, string)] m = {:};
+  m[1] = (10, "a" + "b");
+  m[2] = (20, "c" + "d");
+  assert(m.len == 2, "len=2");
+}
+
+// --- Case 5: Arc wrapping tuple-of-string ---
+
+case5_arc_with_tuple() `test {
+  Arc[(int, string)] a = Arc[(int, string)]((1, "a" + "b"));
+  // borrow returns a reference into the Arc; no destructure needed —
+  // the construction + scope-exit drop is what we're testing.
+  assert(true, "arc constructed");
+}
+
+// --- Case 6: Fixed-size array of tuple-of-string ---
+
+case6_array_of_tuples() `test {
+  (int, string)[2] arr = [(1, "a" + "b"), (2, "c" + "d")];
+  (a0, s0) := arr[0];
+  (a1, s1) := arr[1];
+  assert(a0 == 1, "a0=1");
+  assert(s0 == "ab", "s0=ab");
+  assert(a1 == 2, "a1=2");
+  assert(s1 == "cd", "s1=cd");
+}
+
+// --- Negative regressions: pre-T0389 paths must still work ---
+
+regression_string_array_lucky_drop() `test {
+  string[2] arr = ["a" + "b", "c" + "d"];
+  assert(arr[0] == "ab", "arr[0]");
+  assert(arr[1] == "cd", "arr[1]");
+}
+
+regression_inner_array_lucky_drop() `test {
+  _Inner[2] arr = [_Inner(x: 1, s: "a" + "b"), _Inner(x: 2, s: "c" + "d")];
+  assert(arr[0].x == 1, "arr[0].x");
+  assert(arr[1].x == 2, "arr[1].x");
+}
+
+regression_int_int_array_no_drop() `test {
+  (int, int)[2] arr = [(1, 2), (3, 4)];
+  (a, b) := arr[0];
+  (c, d) := arr[1];
+  assert(a == 1, "a=1");
+  assert(b == 2, "b=2");
+  assert(c == 3, "c=3");
+  assert(d == 4, "d=4");
+}
+
+regression_arc_string() `test {
+  Arc[string] a = Arc[string]("a" + "b");
+  assert(true, "arc string constructed");
+}
+
+regression_arc_int() `test {
+  Arc[int] a = Arc[int](42);
+  assert(true, "arc int constructed");
+}
+
+regression_optional_string() `test {
+  string? s = "a" + "b";
+  assert(s is present, "s present");
+}
+
+regression_optional_string_array() `test {
+  // Pre-T0389 path: each Optional[string] source variable owns its inner string,
+  // and the array stores the Optional struct value (no element-drop binding fires
+  // because Optional[X] is not in variantFieldNeedsDrop's whitelist). The source
+  // bindings drop on scope exit. T0389's claim must NOT clear ident drop flags
+  // when the element is not in the array-drop gate, or both the source and the
+  // array would skip the drop.
+  string? a = "a" + "b";
+  string? b = "c" + "d";
+  string?[2] arr = [a, b];
+  assert(arr.len == 2, "len");
+}
+
+regression_map_int_string() `test {
+  map[int, string] m = {:};
+  m[1] = "a" + "b";
+  m[2] = "c" + "d";
+  assert(m.len == 2, "len=2");
+}
+
+regression_box_int() `test {
+  _BoxT[int] b = _BoxT[int](value: 42);
+  assert(b.value == 42, "value");
+}
+
+regression_box_enum_int() `test {
+  e := _BoxE[int]._Some(data: 42);
+  match e {
+    _Some(n) => assert(n == 42, "n=42"),
+    _Empty => assert(false, "should not match"),
+  }
+}
+
+// --- Cross-product cases ---
+
+case_box_with_tuple_of_heap_user() `test {
+  _BoxT[(int, _Inner)] b = _BoxT[(int, _Inner)](value: (1, _Inner(x: 5, s: "x" + "y")));
+  (n, inner) := b.value;
+  assert(n == 1, "outer int");
+  assert(inner.x == 5, "inner x");
+}
+
+case_array_of_string_int_tuples() `test {
+  // Array slot is a tuple containing a string; the array binding's per-element
+  // walk must dispatch through the tuple and free the string.
+  (string, int)[3] arr = [("a" + "1", 1), ("b" + "2", 2), ("c" + "3", 3)];
+  (s0, n0) := arr[0];
+  (s1, n1) := arr[1];
+  (s2, n2) := arr[2];
+  assert(n0 == 1, "0");
+  assert(n1 == 2, "1");
+  assert(n2 == 3, "2");
+  assert(s0 == "a1", "s0");
+  assert(s1 == "b2", "s1");
+  assert(s2 == "c3", "s2");
+}
+
+// Note: map[string, (int, _Inner)] hits a pre-existing codegen panic in
+// wrapOptional (see T0476 — out of scope for T0389). Once T0476 lands, this
+// test should be re-enabled.
+
+// --- Nested-tuple-with-TypeParam cases ---
+//
+// Sema's fieldTypeHasDrop recurses into tuples but cannot see through TypeParams,
+// so a field like `(T, int) data` with T=string is missed at sema time. The mono
+// gate must use ContainsTypeParam (not just direct-TypeParam) to re-check at
+// substitution time.
+
+type _NestedT[T] {
+  (T, int) data;
+}
+
+enum _NestedE[T] {
+  _NEmpty,
+  _NSome((T, int) data),
+}
+
+case_named_nested_tuple_typeparam() `test {
+  w := _NestedT[string](data: ("a" + "b", 1));
+  (s, n) := w.data;
+  assert(n == 1, "n=1");
+  assert(s == "ab", "s=ab");
+}
+
+case_enum_nested_tuple_typeparam() `test {
+  e := _NestedE[string]._NSome(data: ("a" + "b", 1));
+  match e {
+    _NSome(d) => {
+      (s, n) := d;
+      assert(n == 1, "n=1");
+      assert(s == "ab", "s=ab");
+    },
+    _NEmpty => assert(false, "should not match"),
+  }
+}
+
+// --- Additional T0389 path coverage (added during /coverage) ---
+
+// Exercises genAssignStmt's bindingDropArray dispatch (stmt.go:4889) — the old
+// array's elements must be freed before the new array's elements are stored.
+reassign_array_string() `test {
+  string[2] arr = ["a" + "b", "c" + "d"];
+  arr = ["e" + "f", "g" + "h"];
+  assert(arr[0] == "ef", "0");
+  assert(arr[1] == "gh", "1");
+}
+
+// Exercises emitArrayDropCall on a heap user-type element with explicit drop().
+// emitVariantFieldDrop must dispatch through the type's Drop path.
+type _DropInner_T0389 {
+  int x;
+  drop(~this) {
+  }
+}
+
+array_of_drop_inner() `test {
+  _DropInner_T0389[2] arr = [_DropInner_T0389(x: 1), _DropInner_T0389(x: 2)];
+  assert(arr[0].x == 1, "0");
+}
+
+// Exercises emitEarlyDrops dispatch (stmt.go:2628) — the array binding must
+// drop its elements when control leaves the scope via early return.
+early_return_drops_array(bool flag) {
+  string[2] arr = ["a" + "b", "c" + "d"];
+  if flag {
+    return;
+  }
+  assert(arr[0] == "ab", "");
+}
+
+early_return_with_array() `test {
+  early_return_drops_array(true);
+  early_return_drops_array(false);
+}
+
+// Mutex shares emitInnerDrop with Arc — the tuple branch (compiler.go:2330)
+// must dispatch correctly when called from the Mutex inner-drop path.
+mutex_with_tuple_inner() `test {
+  Mutex[(int, string)] m = Mutex[(int, string)]((1, "a" + "b"));
+  assert(true, "constructed");
+}
+
+// Cross-product: Arc inner drop must walk a tuple containing a heap user-type
+// element. emitVariantFieldDrop's tuple branch must thread blocks correctly
+// when one of the elements is itself a heap user (which adds drop blocks).
+arc_tuple_with_inner_user() `test {
+  Arc[(int, _Inner)] a = Arc[(int, _Inner)]((1, _Inner(x: 5, s: "x" + "y")));
+  assert(true, "constructed");
+}

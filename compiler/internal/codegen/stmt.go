@@ -1640,6 +1640,33 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		return
 	}
 
+	// T0389: Fixed-size array with droppable element type — register a
+	// bindingDropArray that walks elements and drops each droppable one at
+	// scope exit. Arrays are stored in [N x T] allocas.
+	if arr, ok := typ.(*types.Array); ok {
+		elemType := arr.Elem()
+		if c.typeSubst != nil {
+			elemType = types.Substitute(elemType, c.typeSubst)
+		}
+		if !c.variantFieldNeedsDrop(elemType) {
+			return
+		}
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+		c.dropFlags[varName] = dropFlag
+		binding := scopeBinding{
+			kind:     bindingDropArray,
+			alloca:   alloca,
+			valType:  typ,
+			dropFlag: dropFlag,
+			varName:  varName,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[varName] = binding
+		return
+	}
+
 	named := extractNamed(typ)
 	if named == nil {
 		return
@@ -2287,6 +2314,41 @@ func (c *Compiler) emitTupleDropCall(b scopeBinding) {
 	c.block = skipBlock
 }
 
+// emitArrayDropCall emits a conditional per-element drop for a fixed-size array
+// variable (T0389). Walks each [N x T] slot via GEP, loads the element, and
+// calls emitVariantFieldDrop on it (string, vector, channel, user types with
+// drop, enums with drop, tuples with droppable fields).
+func (c *Compiler) emitArrayDropCall(b scopeBinding) {
+	if b.dropFlag == nil {
+		return
+	}
+	arrType, ok := b.valType.(*types.Array)
+	if !ok {
+		return
+	}
+	elemType := arrType.Elem()
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+
+	flag := c.block.NewLoad(irtypes.I1, b.dropFlag)
+	dropBlock := c.newBlock("arrdrop.exec")
+	skipBlock := c.newBlock("arrdrop.skip")
+	c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	llvmArrType := b.alloca.ElemType
+	for i := int64(0); i < arrType.Size(); i++ {
+		elemPtr := c.block.NewGetElementPtr(llvmArrType, b.alloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, i))
+		elemVal := c.block.NewLoad(c.resolveType(elemType), elemPtr)
+		c.emitVariantFieldDrop(elemVal, elemType)
+	}
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
 // maybeRegisterOptionalDrop registers a bindingDropOptional for an explicitly declared
 // optional local variable (T0111). Only called for typed declarations (string? s = ...)
 // where the inner type is droppable (string, vector, channel, user type with drop).
@@ -2564,6 +2626,8 @@ func (c *Compiler) emitEarlyDrops(stmt ast.Stmt) {
 			c.emitOptionalDropCall(binding)
 		case bindingDropTuple:
 			c.emitTupleDropCall(binding)
+		case bindingDropArray:
+			c.emitArrayDropCall(binding)
 		case bindingFree:
 			c.emitFreeCall(binding)
 		case bindingFreeEnv:
@@ -2621,6 +2685,8 @@ func (c *Compiler) emitScopeCleanup(fromIdx int, errorInFlight bool) *closeErrCa
 			c.emitOptionalDropCall(b)
 		case bindingDropTuple:
 			c.emitTupleDropCall(b)
+		case bindingDropArray:
+			c.emitArrayDropCall(b)
 		case bindingFree:
 			c.emitFreeCall(b)
 		case bindingFreeEnv:
@@ -2796,6 +2862,10 @@ func (c *Compiler) emitDropCall(b scopeBinding) {
 	}
 	if b.kind == bindingDropTuple {
 		c.emitTupleDropCall(b)
+		return
+	}
+	if b.kind == bindingDropArray {
+		c.emitArrayDropCall(b)
 		return
 	}
 	if b.dropFlag == nil {
@@ -4819,6 +4889,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					c.emitEnumDropCall(binding)
 				} else if binding.kind == bindingDropTuple {
 					c.emitTupleDropCall(binding)
+				} else if binding.kind == bindingDropArray {
+					c.emitArrayDropCall(binding)
 				} else if binding.kind == bindingFree {
 					c.emitFreeCall(binding)
 				} else {

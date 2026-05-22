@@ -1749,24 +1749,21 @@ func monoInstNeedsSynthDrop(inst *types.Instance) bool {
 	if named.NeedsSynthDrop() || named.HasDrop() || named.IsCopy() || named.IsValueType() || named.IsStructural() {
 		return false
 	}
-	// Check if any TypeParam field resolves to a type needing drop after substitution.
-	// Also handles Optional[TypeParam] (B0209) — sema can't resolve T? when T is a TypeParam.
+	// Check if any field that contains a TypeParam resolves to a droppable type
+	// after substitution. Sema's fieldTypeHasDrop returns false for TypeParam,
+	// so any field whose type tree includes a TypeParam needs re-checking here.
+	// B0209 covered the direct-TypeParam and Optional[TypeParam] cases; T0420
+	// extended to tuples whose elements substitute to droppables; T0389 widens
+	// the gate to fields that *contain* a TypeParam anywhere (e.g. (T, int)).
 	subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
 	for _, f := range named.AllFields() {
-		fType := f.Type()
-		// Unwrap Optional to check inner type (B0209)
-		if opt, isOpt := fType.(*types.Optional); isOpt {
-			fType = opt.Elem()
-		}
-		if _, isTP := fType.(*types.TypeParam); !isTP {
-			continue // non-TypeParam fields already checked by sema
+		if !types.ContainsTypeParam(f.Type()) {
+			continue // sema already saw the concrete type
 		}
 		ft := types.Substitute(f.Type(), subst)
-		// Unwrap Optional after substitution (B0209): T? with T=string → Optional[string]
 		if opt, isOpt := ft.(*types.Optional); isOpt {
 			ft = opt.Elem()
 		}
-		// T0420: Tuples after substitution may contain droppable elements.
 		if monoTypeHasDroppable(ft) {
 			return true
 		}
@@ -1775,9 +1772,10 @@ func monoInstNeedsSynthDrop(inst *types.Instance) bool {
 }
 
 // monoTypeHasDroppable returns true if the given concrete type needs cleanup at
-// drop time. Handles primitive named types, tuples (recurse), and unwrapped
-// optional types. Used by monoInstNeedsSynthDrop and is independent of
-// Compiler state so it can run during the declare phase.
+// drop time. Handles primitive named types, tuples (recurse), unwrapped
+// optional types, and enums with drop. Used by monoInstNeedsSynthDrop and
+// monoEnumInstNeedsSynthDrop and is independent of Compiler state so it can
+// run during the declare phase.
 func monoTypeHasDroppable(typ types.Type) bool {
 	if tup, ok := typ.(*types.Tuple); ok {
 		for _, e := range tup.Elems() {
@@ -1802,6 +1800,9 @@ func monoTypeHasDroppable(typ types.Type) bool {
 			return true
 		}
 	}
+	if fEnum := extractEnum(typ); fEnum != nil && (fEnum.HasDrop() || fEnum.NeedsSynthDrop()) {
+		return true
+	}
 	return false
 }
 
@@ -1810,6 +1811,7 @@ func monoTypeHasDroppable(typ types.Type) bool {
 // Named types. Handles generic enums like Slot[K, V] where variant fields are TypeParams
 // — sema's fieldTypeHasDrop returns false for TypeParam, so NeedsSynthDrop is never set.
 // At mono time we check if concrete substituted variant field types need drop. B0212.
+// T0389: also recurses into tuple variant fields via monoTypeHasDroppable.
 func monoEnumInstNeedsSynthDrop(inst *types.Instance) bool {
 	enum, ok := inst.Origin().(*types.Enum)
 	if !ok {
@@ -1819,30 +1821,22 @@ func monoEnumInstNeedsSynthDrop(inst *types.Instance) bool {
 	if enum.NeedsSynthDrop() || enum.HasDrop() {
 		return false
 	}
-	// Check if any TypeParam variant field resolves to a droppable type
+	// Check if any variant field that contains a TypeParam resolves to a
+	// droppable type after substitution. T0389: matches monoInstNeedsSynthDrop —
+	// any field whose type tree includes a TypeParam (direct, in Optional, or
+	// inside a Tuple) needs re-checking, because sema's fieldTypeHasDrop returns
+	// false for TypeParam.
 	subst := types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
 	for _, v := range enum.Variants() {
 		for _, f := range v.Fields() {
-			fType := f.Type()
-			if _, isTP := fType.(*types.TypeParam); !isTP {
-				continue // non-TypeParam fields already checked by sema
+			if !types.ContainsTypeParam(f.Type()) {
+				continue // sema already saw the concrete type
 			}
-			ft := types.Substitute(fType, subst)
-			// Check resolved type for droppability
-			if fNamed := extractNamed(ft); fNamed != nil {
-				if fNamed == types.TypString || fNamed == types.TypVector || fNamed == types.TypChannel ||
-					fNamed == types.TypMutex || fNamed == types.TypMutexGuard {
-					return true
-				}
-				if fNamed.HasDrop() {
-					return true
-				}
-				// Heap user type that needs at least pal_free
-				if !fNamed.IsValueType() && !fNamed.IsCopy() && !isPrimitiveScalar(fNamed) && !fNamed.IsStructural() {
-					return true
-				}
+			ft := types.Substitute(f.Type(), subst)
+			if opt, isOpt := ft.(*types.Optional); isOpt {
+				ft = opt.Elem()
 			}
-			if fEnum := extractEnum(ft); fEnum != nil && fEnum.HasDrop() {
+			if monoTypeHasDroppable(ft) {
 				return true
 			}
 		}

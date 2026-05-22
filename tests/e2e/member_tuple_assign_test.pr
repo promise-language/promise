@@ -1,0 +1,140 @@
+// T0489: MemberExpr tuple-field assign regressions.
+// Two coordinated codegen fixes: drop-old in genMemberAssign (Part 1)
+// and dup-on-read for vec-to-field assigns in genAssignStmt (Part 2).
+// Symmetric with T0412 for IndexExpr LHS and T0410 for heap-user fields.
+type T0489Container {
+  (string, int) field;
+  drop(~this) {
+  }
+}
+
+make_pair_t0489()(string, int) {
+  return ("from_func" + "", 99);
+}
+
+test_t0489_overwrite_with_tuple_lit() `test {
+  c := T0489Container(field: ("first" + "", 1));
+  c.field = ("second" + "", 2);
+  assert(true, "ok");
+}
+
+test_t0489_overwrite_with_tuple_var() `test {
+  c := T0489Container(field: ("first" + "", 1));
+  t := ("second" + "", 2);
+  c.field = t;
+  assert(true, "ok");
+}
+
+test_t0489_overwrite_with_func_return() `test {
+  c := T0489Container(field: ("first" + "", 1));
+  c.field = make_pair_t0489();
+  assert(true, "ok");
+}
+
+test_t0489_overwrite_with_vec_index() `test {
+  v := (string, int)[]();
+  v.push(("from_vec" + "", 0));
+  v.push(("from_vec2" + "", 1));
+  c := T0489Container(field: ("first" + "", 1));
+  c.field = v[0];
+  assert(v.len == 2, "v intact");
+}
+
+type T0489Nested {
+  ((string, int), int) field;
+  drop(~this) {
+  }
+}
+
+test_t0489_nested_tuple_field() `test {
+  c := T0489Nested(field: (("first" + "", 1), 10));
+  c.field = (("second" + "", 2), 20);
+  assert(true, "ok");
+}
+
+type T0489NoDrop {
+  (int, int) field;
+  drop(~this) {
+  }
+}
+
+test_t0489_no_drop_tuple_no_emit() `test {
+  // Regression guard: pure-value tuple field — tupleNeedsDrop returns
+  // false, no spurious drop-old emission.
+  c := T0489NoDrop(field: (1, 2));
+  c.field = (3, 4);
+  assert(true, "ok");
+}
+
+type T0489MapContainer {
+  (string, int) field;
+  drop(~this) {
+  }
+}
+
+test_t0489_overwrite_with_map_unwrap() `test {
+  // Part 2 (dup-on-read) via OptionalUnwrap-of-IndexExpr path: Map[]
+  // returns Optional[V], so `c.field = m[k]!` must dup the borrowed
+  // tuple before it lands in c.field, otherwise both the field and
+  // the map's stored value alias the same heap allocations and would
+  // double-free at scope exit.
+  m := map[string, (string, int)]();
+  m["k"] = ("from_map" + "", 99);
+  c := T0489MapContainer(field: ("first" + "", 1));
+  c.field = m["k"]!;
+  assert(true, "ok");
+}
+
+type T0489VecElemField {
+  (string[], int) field;
+  drop(~this) {
+  }
+}
+
+test_t0489_tuple_with_vector_element() `test {
+  // emitVariantFieldDrop's tuple branch must walk into Vector elements
+  // when the tuple holds a vector. Without Part 1, the old vector buffer
+  // and its string elements both leak.
+  v1 := string[]();
+  v1.push("a" + "");
+  v1.push("b" + "");
+  c := T0489VecElemField(field: (v1, 1));
+
+  v2 := string[]();
+  v2.push("c" + "");
+  c.field = (v2, 2);
+  assert(true, "ok");
+}
+
+type T0489InnerHeap {
+  string s;
+  drop(~this) {
+  }
+}
+
+type T0489HeapElemField {
+  (T0489InnerHeap, int) field;
+  drop(~this) {
+  }
+}
+
+test_t0489_tuple_with_heap_user_element() `test {
+  // emitVariantFieldDrop's tuple branch must walk into heap user-type
+  // elements (calls per-instance drop + pal_free on the instance pointer).
+  // Without Part 1, the old T0489InnerHeap instance leaks.
+  c := T0489HeapElemField(field: (T0489InnerHeap(s: "first" + ""), 1));
+  c.field = (T0489InnerHeap(s: "second" + ""), 2);
+  assert(true, "ok");
+}
+
+test_t0489_sequential_reassignments() `test {
+  // Verify Part 1's drop-old branch fires correctly across multiple
+  // sequential reassignments in the same function body — each
+  // overwrite must drop the prior tuple's heap fields, not just
+  // the first.
+  c := T0489Container(field: ("v0" + "", 0));
+  c.field = ("v1" + "", 1);
+  c.field = ("v2" + "", 2);
+  c.field = ("v3" + "", 3);
+  assert(true, "ok");
+}

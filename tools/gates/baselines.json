@@ -15,7 +15,7 @@
       "updated": "2026-04-06"
     },
     "host_test_count": {
-      "value": 4421,
+      "value": 4431,
       "direction": "up",
       "updated": "2026-05-08"
     },
@@ -54,7 +54,7 @@
       "direction": "down"
     },
     "wasm_test_count": {
-      "value": 4067,
+      "value": 4077,
       "direction": "up",
       "updated": "2026-05-08"
     },
@@ -89,7 +89,7 @@
       "updated": "2026-04-06"
     },
     "host_test_count": {
-      "value": 4849,
+      "value": 4859,
       "direction": "up",
       "updated": "2026-05-08"
     },
@@ -128,7 +128,7 @@
       "direction": "down"
     },
     "wasm_test_count": {
-      "value": 4487,
+      "value": 4497,
       "direction": "up",
       "updated": "2026-05-08"
     },

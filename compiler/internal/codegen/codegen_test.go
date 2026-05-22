@@ -10291,6 +10291,60 @@ func TestT0412VectorIndexAssignDupsTupleOnVecToVec(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new")
 }
 
+// T0489: c.tup_field = (...) for a droppable tuple field must drop the old
+// field's heap contents via emitVariantFieldDrop before storing the new value.
+// Without this, the previous tuple's string instance leaks.
+func TestT0489MemberAssignDropsOldTuple(t *testing.T) {
+	ir := generateIR(t, `
+		type T0489C { (string, int) f; drop(~this) {} }
+		test() {
+			c := T0489C(f: ("a" + "", 1));
+			c.f = ("b" + "", 2);
+		}
+	`)
+	// emitVariantFieldDrop's tuple branch walks fields via ExtractValue and
+	// calls promise_string_drop on the string element. Drop must appear in the
+	// function body (not just at scope exit T0489C.drop).
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0489: c.tup_field = vec[i] for a droppable tuple field must dup the RHS
+// read via dupTupleValue before storing. Without this, the field and vec[i]
+// alias the same heap contents, causing a silent double-free at scope exit.
+func TestT0489MemberAssignDupsTupleOnVecToField(t *testing.T) {
+	ir := generateIR(t, `
+		type T0489D { (string, int) f; drop(~this) {} }
+		test() {
+			v := (string, int)[]();
+			v.push(("a" + "", 1));
+			c := T0489D(f: ("first" + "", 1));
+			c.f = v[0];
+		}
+	`)
+	// dupTupleValue emits promise_string_new to clone the string element on read.
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
+// T0489: c.tup_field = m[k]! must dup the RHS read via dupTupleValue before
+// storing. The OptionalUnwrap-of-IndexExpr path goes through genMethodIndex's
+// dupTupleFieldAccess consumer (expr.go:7514), which is a different consumer
+// than the Vector path covered by TestT0489MemberAssignDupsTupleOnVecToField
+// (expr.go:7654). Without this, the field and the map's stored value alias
+// the same heap allocations, causing a silent double-free at scope exit.
+func TestT0489MemberAssignDupsTupleOnMapUnwrapToField(t *testing.T) {
+	ir := generateIR(t, `
+		type T0489E { (string, int) f; drop(~this) {} }
+		test() {
+			m := map[string, (string, int)]();
+			m["k"] = ("a" + "", 1);
+			c := T0489E(f: ("first" + "", 1));
+			c.f = m["k"]!;
+		}
+	`)
+	// dupTupleValue emits promise_string_new to clone the string element on read.
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
 // Error propagation triggers scope cleanup
 func TestDropErrorPropagateCleansUp(t *testing.T) {
 	ir := generateIR(t, `

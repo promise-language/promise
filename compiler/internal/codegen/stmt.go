@@ -4894,12 +4894,16 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				if isDroppableHeapUserType(lhsType) {
 					c.dupHeapUserFieldAccess = true
 				}
-				// T0412: same for droppable tuple LHS — covered for IndexExpr LHS;
-				// IdentExpr/MemberExpr tuple-reassign is out of scope for T0410.
-				if _, isIdxLhs := s.Target.(*ast.IndexExpr); isIdxLhs {
-					if _, isTup := lhsType.(*types.Tuple); isTup && c.tupleNeedsDrop(lhsType) {
-						c.dupTupleFieldAccess = true
-					}
+				// T0412/T0489: same dup-on-read for droppable tuple LHS. Combined
+				// with the drop-old branches in genMemberAssign / genVectorIndexAssign /
+				// IdentExpr's bindingDropTuple, preserves the no-alias invariant for
+				// every LHS shape — `obj.tup = vec[i]`, `t = vec[i]`, and
+				// `outer[0] = vec[i]` all produce independent clones in the new slot
+				// instead of aliasing the source. Direct IndexExpr/OptionalUnwrap RHS
+				// only (gate inherited from the surrounding isIdxRhs check) — same
+				// orphan-clone safety reasoning as the heap-user-type branch above.
+				if _, isTup := lhsType.(*types.Tuple); isTup && c.tupleNeedsDrop(lhsType) {
+					c.dupTupleFieldAccess = true
 				}
 			}
 		}
@@ -5551,6 +5555,18 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 					c.emitVariantFieldDrop(oldVal, fieldType)
 					c.block.NewBr(mergeBlock)
 					c.block = mergeBlock
+				}
+				// T0489: Tuple field reassignment drop. Without this, `obj.tup_field = X`
+				// for droppable tuple types leaks the old tuple's heap fields (string,
+				// vector buffer, nested user types). emitVariantFieldDrop's tuple branch
+				// walks each element via ExtractValue + recursive drop. Mirrors the
+				// heap-user-type T0410 branch above and the genVectorIndexAssign tuple
+				// branch (T0412). Safe because Part 2 (dup-on-read in genAssignStmt)
+				// ensures aliased RHS reads from containers produce independent clones.
+				if c.tupleNeedsDrop(fieldType) {
+					fieldLLVM := c.resolveType(fieldType)
+					oldVal := c.block.NewLoad(fieldLLVM, fieldPtr)
+					c.emitVariantFieldDrop(oldVal, fieldType)
 				}
 			}
 		}

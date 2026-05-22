@@ -117,3 +117,19 @@ safe_identity![T](T x) T `public {
 _internal_helper() int {
   return 999;
 }
+
+// --- T0406: tuple-by-value param coverage for module sites ---
+// Site 2 (defineModuleFuncs): module free function with droppable tuple param.
+take_tuple_in_module((string, int) t) `public {
+  // Body intentionally minimal — the test asserts no leak at scope exit.
+}
+
+// Site 3 (defineModuleTypeMethods): non-generic method on a module type
+// with droppable tuple param.
+type TupleConsumer `public {
+  int last_n;
+  consume_pair((string, int) p) `public {
+    (_s, n) := p;
+    this.last_n = n;
+  }
+}

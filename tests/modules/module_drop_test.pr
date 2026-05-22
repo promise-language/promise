@@ -23,3 +23,15 @@ test_drop_in_if_block() `test {
   }
   assert(x == 42, "resource used before drop");
 }
+
+// T0406 Site 2: module free function with droppable tuple-by-value param.
+test_t0406_module_func_tuple_param() `test {
+  mathlib.take_tuple_in_module(("hello".to_string(), 7));
+}
+
+// T0406 Site 3: non-generic method on module type with droppable tuple param.
+test_t0406_module_method_tuple_param() `test {
+  c := mathlib.TupleConsumer(last_n: 0);
+  c.consume_pair(("hello".to_string(), 42));
+  assert(c.last_n == 42, "consumer recorded n");
+}

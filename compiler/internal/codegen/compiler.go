@@ -5130,6 +5130,20 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 				}
 				c.maybeRegisterDrop(p.Name(), alloca, paramType)
 			}
+
+			// T0406: Plain tuple-by-value params with droppable fields. Tuple
+			// construction at the call site clears source drop flags (the
+			// tuple takes ownership of its elements); without a callee-side
+			// drop binding, the heap data is orphaned. Treat as ~ for cleanup.
+			if p.Ref() != types.RefMut && !p.IsVariadic() {
+				paramType := p.Type()
+				if c.typeSubst != nil {
+					paramType = types.Substitute(paramType, c.typeSubst)
+				}
+				if _, isTuple := paramType.(*types.Tuple); isTuple {
+					c.maybeRegisterDrop(p.Name(), alloca, paramType)
+				}
+			}
 		}
 	}
 
@@ -5627,6 +5641,14 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 				if sp.IsVariadic() {
 					c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
 				}
+
+				// T0406: Plain tuple-by-value params with droppable fields.
+				// See defineFunc for rationale.
+				if sp.Ref() != types.RefMut && !sp.IsVariadic() {
+					if _, isTuple := sp.Type().(*types.Tuple); isTuple {
+						c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
+					}
+				}
 			}
 		}
 
@@ -5845,6 +5867,16 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 							if !skipDrop {
 								c.maybeRegisterDrop(p.Name(), alloca, p.Type())
 							}
+						}
+					}
+
+					// T0406: Plain tuple-by-value params with droppable fields.
+					// See defineFunc for rationale. Guarded with md.Name != "new"
+					// to avoid double-registering on Named-receiver `new` methods
+					// where T0322 already handles tuple params.
+					if md.Name != "new" && p.Ref() != types.RefMut && !p.IsVariadic() {
+						if _, isTuple := p.Type().(*types.Tuple); isTuple {
+							c.maybeRegisterDrop(p.Name(), alloca, p.Type())
 						}
 					}
 				}
@@ -6437,6 +6469,20 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 						}
 						c.maybeRegisterDrop(p.Name(), alloca, paramType)
 					}
+				}
+			}
+
+			// T0406: Plain tuple-by-value params with droppable fields.
+			// See defineFunc for rationale. Guarded with md.Name != "new"
+			// to avoid double-registering on Named-receiver `new` methods
+			// where T0322 already handles tuple params.
+			if md.Name != "new" && p.Ref() != types.RefMut && !p.IsVariadic() {
+				paramType := p.Type()
+				if c.typeSubst != nil {
+					paramType = types.Substitute(paramType, c.typeSubst)
+				}
+				if _, isTuple := paramType.(*types.Tuple); isTuple {
+					c.maybeRegisterDrop(p.Name(), alloca, paramType)
 				}
 			}
 		}

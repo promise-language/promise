@@ -15,20 +15,55 @@ import (
 // RunBuild executes the full compiler build pipeline.
 // This is the main implementation — called by bin/build and internally
 // by other tools (e.g., verify, test) without spawning a subprocess.
-// Flags: -release, -generate, -shared (use ~/.promise), -local (default, no-op).
+// Flags: -release, -generate, -shared (use ~/.promise), -local (default, no-op),
+// -fetch[=name1,name2] (download pinned prebuilts from prebuilts.toml).
 func RunBuild(root string, args []string) error {
 	start := time.Now()
 	args = NormalizeArgs(args)
 	release := slices.Contains(args, "-release")
 	generate := slices.Contains(args, "-generate")
 
-	// Validate flags (-local/-shared accepted for CLI consistency)
-	for _, arg := range args {
+	// -fetch may be passed alone or as -fetch=<name>[,<name2>] (NormalizeArgs
+	// splits the latter into ["-fetch", "name1,name2"]). Empty list = all.
+	wantFetch := false
+	var fetchOnly []string
+	for i := 0; i < len(args); i++ {
+		if args[i] != "-fetch" {
+			continue
+		}
+		wantFetch = true
+		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			for _, name := range strings.Split(args[i+1], ",") {
+				if name = strings.TrimSpace(name); name != "" {
+					fetchOnly = append(fetchOnly, name)
+				}
+			}
+			i++ // consume the value
+		}
+	}
+
+	// Validate flags (-local/-shared accepted for CLI consistency).
+	// -fetch's optional value is consumed above and then skipped here.
+	skipNext := false
+	for i, arg := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
 		switch arg {
 		case "-release", "-generate", "-local", "-shared":
+		case "-fetch":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				skipNext = true
+			}
 		default:
-			return fmt.Errorf("usage: bin/build [-release] [-generate] [-shared]")
+			return fmt.Errorf("usage: bin/build [-release] [-generate] [-shared] [-fetch[=<name>[,<name>...]]]")
 		}
+	}
+
+	if wantFetch && !release {
+		fmt.Println("warning: -fetch has no effect without -release; ignoring")
+		wantFetch = false
 	}
 
 	// Default to local cache when called as CLI (args != nil).
@@ -94,9 +129,26 @@ func RunBuild(root string, args []string) error {
 	// 6. Release: bundle LLVM tools
 	buildTags := ""
 	if release {
-		fmt.Println("Bundling LLVM tools for release...")
-		if err := BundleLLVM(root, llvm); err != nil {
-			return fmt.Errorf("bundle LLVM: %w", err)
+		if wantFetch {
+			manifest, err := LoadPrebuiltsManifest(root)
+			if err != nil {
+				return fmt.Errorf("load prebuilts manifest: %w", err)
+			}
+			target := CurrentBuildTarget()
+			fmt.Println("Fetching prebuilts...")
+			extractedRoots, err := FetchAll(manifest, target, fetchOnly)
+			if err != nil {
+				return fmt.Errorf("fetch prebuilts: %w", err)
+			}
+			fmt.Println("Bundling fetched LLVM tools for release...")
+			if err := BundleLLVMFromFetched(root, manifest, extractedRoots["llvm"]); err != nil {
+				return fmt.Errorf("bundle LLVM: %w", err)
+			}
+		} else {
+			fmt.Println("Bundling LLVM tools for release...")
+			if err := BundleLLVM(root, llvm); err != nil {
+				return fmt.Errorf("bundle LLVM: %w", err)
+			}
 		}
 		buildTags = "-tags=embed_llvm"
 	}

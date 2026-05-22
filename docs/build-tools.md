@@ -120,11 +120,13 @@ The epoch is read from `catalog.toml`. After building, writes `bin/.promise.hash
 
 ### 6. Release builds (`bin/build --release`)
 
-Release builds embed LLVM tools in the binary for self-contained distribution:
+Release builds embed LLVM tools in the binary for self-contained distribution. The set of files bundled per target is declared in `tools/build/prebuilts.toml` (manifest schema 1) — both the local-LLVM and `--fetch` paths read their file list from the same source.
 
 **Linux:** Gzips `opt`, `llc`, `lld`, and `libLLVM.so` from the system LLVM installation.
 
-**macOS:** Gzips `opt`, `llc`, `lld`, `libLLVM.dylib`, and all transitive dylib dependencies (discovered via `otool -L`). At runtime, extracted Mach-O binaries are patched with `install_name_tool` and re-signed with `codesign`.
+**macOS:** Gzips `opt`, `llc`, `lld`, `libLLVM.dylib`, and the explicit dylib entries from the manifest (`libc++.1.dylib`, `libunwind.1.dylib`, `liblld*.dylib`). For local Homebrew installs only, additional transitive dylibs are discovered via `otool -L` and bundled too. At runtime, extracted Mach-O binaries are patched with `install_name_tool` and re-signed with `codesign`.
+
+**`--fetch` flag:** `bin/build --release --fetch` downloads pinned upstream tarballs (URL + SHA256 from the manifest) into `~/.promise/cache/prebuilts/<name>/<version>/<target>/` instead of using the locally-installed LLVM. Verifies SHA256 (mismatch is fatal). Use `--fetch=name1,name2` to fetch a subset. Default behavior (no `--fetch`) is unchanged.
 
 Release builds compile with `-tags embed_llvm` to enable the embedded tool extraction code paths.
 

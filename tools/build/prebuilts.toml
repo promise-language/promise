@@ -1,0 +1,73 @@
+# Pinned prebuilt binaries embedded in `bin/promise --release`.
+#
+# Use `bin/build --release --fetch` to download from the URLs below instead of
+# bundling whatever is locally installed (Homebrew on macOS, apt llvm-22 on
+# Linux, manual install dir on Windows).
+#
+# To pin a new version: download the asset, `shasum -a 256`, paste the digest
+# into `sha256`, bump `version`, commit. Empty `sha256` skips verification with
+# a loud warning — fine for development, MUST be filled in before release.
+
+schema = 1
+
+# ----------------------------------------------------------------------------
+# LLVM toolchain (opt, llc, lld, libLLVM) — required for codegen + linking.
+# ----------------------------------------------------------------------------
+[binaries.llvm]
+version = "22.1.0"
+# Where bundle ops write their gzipped output (relative to repo root).
+# The runtime extraction layer in compiler/cmd/promise/llvm_*.go reads from
+# <bundle_dir>/<target>/*.gz via //go:embed, so this path is fixed.
+bundle_dir = "compiler/cmd/promise/resources/llvm"
+
+[binaries.llvm.targets.linux-amd64]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-linux-gnu-ubuntu-22.04.tar.xz"
+sha256 = ""
+# Files to copy out of the extracted tree into <bundle_dir>/<target>/, gzipped.
+# `src` paths are relative to the top-level extracted directory.
+# `resolve_symlink = true` runs filepath.EvalSymlinks before reading (libLLVM.so
+# is normally a symlink to libLLVM.so.22 etc.).
+files = [
+  { src = "bin/opt",        out = "opt.gz" },
+  { src = "bin/llc",        out = "llc.gz" },
+  { src = "bin/lld",        out = "lld.gz" },
+  { src = "lib/libLLVM.so", out = "libLLVM.so.gz", resolve_symlink = true },
+]
+
+[binaries.llvm.targets.darwin-arm64]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-arm64-apple-darwin22.0.tar.xz"
+sha256 = ""
+files = [
+  { src = "bin/opt",                 out = "opt.gz" },
+  { src = "bin/llc",                 out = "llc.gz" },
+  { src = "bin/lld",                 out = "lld.gz" },
+  { src = "lib/libLLVM.dylib",       out = "libLLVM.dylib.gz" },
+  { src = "lib/libc++.1.dylib",      out = "libc++.1.dylib.gz" },
+  { src = "lib/libunwind.1.dylib",   out = "libunwind.1.dylib.gz" },
+  # liblld dylibs — glob to match the existing bundleLLVMDarwin behavior.
+  # `{basename}` in `out` substitutes the matched file's basename.
+  { glob = "lib/liblld*.dylib",      out = "{basename}.gz" },
+]
+
+[binaries.llvm.targets.darwin-amd64]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-apple-darwin22.0.tar.xz"
+sha256 = ""
+files = [
+  { src = "bin/opt",                 out = "opt.gz" },
+  { src = "bin/llc",                 out = "llc.gz" },
+  { src = "bin/lld",                 out = "lld.gz" },
+  { src = "lib/libLLVM.dylib",       out = "libLLVM.dylib.gz" },
+  { src = "lib/libc++.1.dylib",      out = "libc++.1.dylib.gz" },
+  { src = "lib/libunwind.1.dylib",   out = "libunwind.1.dylib.gz" },
+  { glob = "lib/liblld*.dylib",      out = "{basename}.gz" },
+]
+
+[binaries.llvm.targets.windows-amd64]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-pc-windows-msvc.tar.xz"
+sha256 = ""
+files = [
+  { src = "bin/opt.exe", out = "opt.exe.gz" },
+  { src = "bin/llc.exe", out = "llc.exe.gz" },
+  # Codegen aliases lld.exe to lld-link at runtime (see llvm_windows_amd64.go).
+  { src = "bin/lld.exe", out = "lld.exe.gz" },
+]

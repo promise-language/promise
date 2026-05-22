@@ -1009,15 +1009,13 @@ test_t0440_with_heap_string_field() `test {
   }
 }
 
-// T0440: heap user types with a user-defined `clone()` method are intentionally
-// excluded from the dup-on-read branch (see `isDroppableHeapUserType`'s
-// LookupMethod check). The if-let / typed-decl drop machinery doesn't track
-// the result of cloneHeapElement's user-clone path correctly, leaking 1 alloc
-// per dup. T0440 prefers preserving the master aliasing behavior (no clone)
-// for these types over the alternative (cloning + leaking). Filed as T0484.
-//
-// No regression test is needed for the user-clone case because the master
-// behavior is unchanged for that scope.
+// T0440/T0484: heap user types with a user-defined `clone()` method or with
+// a synthesized drop are intentionally excluded from the dup-on-read branch
+// in `genMethodIndex` — `Map[K, V].[]`'s match destructure already dups V
+// internally (via `cloneHeapElement` or `dupHeapValue` from `dupMatchBinding`)
+// for those shapes. Firing the dup-on-read branch on top would produce a
+// redundant second copy whose pointer leaks. Regression coverage for those
+// excluded shapes lives in the T0484 tests below.
 
 // T0440 coverage: heap user type with a Vector field. Exercises recursive
 // dupHeapValueFields → emitVectorElementCloneLoop path so the dup'd instance
@@ -1315,4 +1313,123 @@ test_t0491_generic_reassign_force_unwrap() `test {
   init := _T0440Box(value: 1);
   out := swap_first_from_map[_T0440Box](m, "k", init);
   assert(out.value == 77, "generic reassign result");
+}
+
+// T0484 regression types — heap user types whose drop is auto-synthesized
+// (heap field, no explicit drop) and types with explicit drop+clone. These
+// must NOT trigger the T0440 dup-on-read branch because Map[K, V].[]'s
+// match destructure already dups V internally for these shapes.
+type _T0484SynthBox {
+  string s;
+}
+
+// T0484: V has a heap field (string), no explicit drop, no clone. Sema sets
+// HasDrop=true alongside NeedsSynthDrop=true. The previous T0440 gate let
+// this type through, but Map[K,V].[]'s match destructure already dups V
+// (heapTypeSafeToDup walks fields), creating a redundant second dup whose
+// pointer was leaked. Tightened gate (LookupMethod("drop") != nil) excludes
+// synth-drop types.
+test_t0484_synth_drop_no_clone() `test {
+  m := map[string, _T0484SynthBox]();
+  m["k"] = _T0484SynthBox(s: "a" + "b");
+  if t := m["k"] {
+    assert(t.s == "ab", "synth-drop V");
+  }
+  if t := m["k"] {
+    assert(t.s == "ab", "second read");
+  }
+}
+
+// T0484: V has no drop, no clone, no synth — pure-primitive heap user type.
+// `isDroppableHeapUserType` returns false (HasDrop=false, NeedsSynthDrop=false),
+// so the T0440 dup branch is already excluded. Map.[]'s match destructure dups
+// via heapTypeSafeToDup; binding owns the dup via bindingFree. Locks in the
+// master behavior described in T0484's bug report.
+type _T0484PlainBox {
+  int v;
+}
+
+test_t0484_no_drop_no_clone_no_synth() `test {
+  m := map[string, _T0484PlainBox]();
+  m["k"] = _T0484PlainBox(v: 7);
+  if t := m["k"] {
+    assert(t.v == 7, "no-drop V");
+  }
+  if t := m["k"] {
+    assert(t.v == 7, "second read");
+  }
+}
+
+// T0484: V has explicit drop AND user-defined clone. Map.[]'s match destructure
+// clones V via the user's clone(); the T0440 dup branch must NOT fire (excluded
+// by the LookupMethod("clone") == nil gate). Lifting that gate would create a
+// redundant second clone whose pointer is leaked.
+type _T0484CloneBox {
+  int v;
+  drop(~this) {
+  }
+  clone() _T0484CloneBox {
+    return _T0484CloneBox(v: this.v);
+  }
+}
+
+test_t0484_drop_with_clone() `test {
+  m := map[string, _T0484CloneBox]();
+  m["k"] = _T0484CloneBox(v: 9);
+  if t := m["k"] {
+    assert(t.v == 9, "drop+clone V");
+  }
+  if t := m["k"] {
+    assert(t.v == 9, "second read");
+  }
+}
+
+// T0484: V has a heap field (synth-drop) AND user-defined clone. Sema sets
+// HasDrop=true alongside NeedsSynthDrop=true; clone is also present. Inside
+// `Map[K, V].[]`, the match destructure routes through `dupMatchBinding`,
+// which calls `heapTypeSafeToDup` first (true → string field is safe) — so V
+// is dup'd via `dupHeapValue`, NOT via the user clone. The new T0484 gate
+// excludes this case because `LookupMethod("drop") != nil` is false (no
+// explicit user drop). Verifies the synth-drop+clone code path doesn't leak.
+type _T0484SynthCloneBox {
+  string s;
+  clone() _T0484SynthCloneBox {
+    return _T0484SynthCloneBox(s: this.s);
+  }
+}
+
+test_t0484_synth_drop_with_clone() `test {
+  m := map[string, _T0484SynthCloneBox]();
+  m["k"] = _T0484SynthCloneBox(s: "a" + "b");
+  if t := m["k"] {
+    assert(t.s == "ab", "synth+clone V");
+  }
+  if t := m["k"] {
+    assert(t.s == "ab", "second read");
+  }
+}
+
+// T0484: synth-drop V, force-unwrap path — exercises `genOptionalForceUnwrap`
+// after `Map.[]`'s internal dup. Without the T0484 gate, the redundant
+// genMethodIndex dup would have leaked an instance plus its string sub-field.
+test_t0484_synth_drop_force_unwrap() `test {
+  m := map[string, _T0484SynthBox]();
+  m["k"] = _T0484SynthBox(s: "x" + "y");
+  b := m["k"]!;
+  assert(b.s == "xy", "synth-drop force unwrap");
+  if t := m["k"] {
+    assert(t.s == "xy", "post-force-unwrap reread");
+  }
+}
+
+// T0484: synth-drop V, typed Optional decl that is NEVER unwrapped — the
+// synth drop on `b` at scope exit must drop the string field independently
+// from the map's bucket. Mirrors `test_t0440_typed_decl_dropped_without_unwrap`
+// but exercises the synth-drop bindingDrop path rather than the explicit-drop
+// path.
+test_t0484_synth_drop_typed_decl_dropped_without_unwrap() `test {
+  m := map[string, _T0484SynthBox]();
+  m["k"] = _T0484SynthBox(s: "p" + "q");
+  _T0484SynthBox? b = m["k"];
+  assert(m.contains("k"), "key still in map");
 }

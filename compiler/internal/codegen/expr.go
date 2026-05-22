@@ -7614,11 +7614,14 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 	// isContainerType — fires for Map and any other type with `[]` returning
 	// `Optional[heap-user-type]`.
 	//
-	// Skips types with a user-defined `clone()` method: the if-let / typed-decl
-	// path doesn't track the user-clone result through the same heap-temp claim
-	// machinery as the var-decl path used by T0398 (Vector index), causing a
-	// 1-alloc-per-dup leak (filed as T0484 follow-up). Master's aliasing behavior
-	// is preserved for these types instead. Uses dupHeapValue (memcpy + sub-field
+	// Gated to V types with an *explicit* user-written `drop()` AND no `clone()`
+	// (T0484). `Map[K, V].[]` is a synthesized method whose body uses a match
+	// destructure (`Slot.Used(k, v) => return v;`) that already dups V internally
+	// when V is safely-dup'able (typeNeedsMatchDup → heapTypeSafeToDup walks
+	// fields) or when V has a `clone()` method. The only V shape where Map.[]'s
+	// body leaves V aliased is: explicit drop, no clone, no synth-drop. Firing
+	// the dup outside that shape produces a redundant second copy whose pointer
+	// is lost (one alloc leaks per read). Uses dupHeapValue (memcpy + sub-field
 	// dup) directly, which is null-safe internally — important because `result`'s
 	// value field is zero/null when the Optional is None.
 	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled {
@@ -7632,7 +7635,9 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 				elem = types.Substitute(elem, c.typeSubst)
 			}
 			if isDroppableHeapUserType(elem) {
-				if named := extractNamed(elem); named != nil && named.LookupMethod("clone") == nil {
+				if named := extractNamed(elem); named != nil &&
+					named.LookupMethod("drop") != nil &&
+					named.LookupMethod("clone") == nil {
 					c.dupHeapUserFieldAccess = false // consume the flag
 					innerVal := c.block.NewExtractValue(result, 1)
 					dup := c.dupHeapValue(innerVal, elem)

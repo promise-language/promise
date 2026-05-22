@@ -1,0 +1,198 @@
+// T0410: Vector[heap-user-type] dup-on-read for var/field reassignment sites.
+// Sibling of T0398 (var-decl + index-assign) and T0412 (Vector[(droppable...)]).
+// `b = v[0]` and `h.field = v[0]` previously aliased v's element instance —
+// at scope exit, both the local/field drop and v's element walk would
+// double-free (segfault). Fix: extend the dup-on-read flag-set in
+// genAssignStmt to fire for IdentExpr and MemberExpr LHS, and add a heap
+// user-type drop-old branch in genMemberAssign.
+type _T0410Box {
+  string label;
+  drop(~this) {
+  }
+}
+
+// --- 1. Var reassignment: explicit drop method. ---
+test_t0410_var_reassign_with_drop() `test {
+  v := _T0410Box[]();
+  v.push(_T0410Box(label: "a" + "b"));
+  v.push(_T0410Box(label: "c" + "d"));
+  b := _T0410Box(label: "init" + "1");
+  b = v[0];
+  assert(b.label == "ab", "b after reassign");
+  assert(v[0].label == "ab", "v[0] still readable");
+  assert(v[1].label == "cd", "v[1] unchanged");
+}
+
+// --- 2. Var reassignment: no explicit drop (B0164 bindingFree path). ---
+type _T0410NoDrop {
+  string label;
+}
+
+test_t0410_var_reassign_no_drop() `test {
+  v := _T0410NoDrop[]();
+  v.push(_T0410NoDrop(label: "p" + "q"));
+  b := _T0410NoDrop(label: "init" + "x");
+  b = v[0];
+  assert(b.label == "pq", "no-drop b after reassign");
+  assert(v[0].label == "pq", "no-drop v[0] still readable");
+}
+
+// --- 3. Field reassignment via MemberExpr LHS. ---
+type _T0410Holder {
+  _T0410Box current;
+  drop(~this) {
+  }
+}
+
+test_t0410_member_field_reassign() `test {
+  v := _T0410Box[]();
+  v.push(_T0410Box(label: "x" + "y"));
+  h := _T0410Holder(current: _T0410Box(label: "init" + "1"));
+  h.current = v[0];
+  assert(h.current.label == "xy", "h.current after reassign");
+  assert(v[0].label == "xy", "v[0] still readable");
+}
+
+// --- 4. Typed var-decl + later reassignment. ---
+test_t0410_typed_var_reassign() `test {
+  v := _T0410Box[]();
+  v.push(_T0410Box(label: "m" + "n"));
+  _T0410Box b = _T0410Box(label: "init" + "2");
+  b = v[0];
+  assert(b.label == "mn", "typed b after reassign");
+  assert(v[0].label == "mn", "typed v[0] still readable");
+}
+
+// --- 5. Multi heap fields: string + Vector[string] + nested heap user. ---
+type _T0410Inner {
+  string tag;
+  drop(~this) {
+  }
+}
+
+type _T0410Multi {
+  string label;
+  string[] items;
+  _T0410Inner inner;
+  drop(~this) {
+  }
+}
+
+test_t0410_multi_heap_fields() `test {
+  v := _T0410Multi[]();
+  v.push(_T0410Multi(label: "hello" + " world",
+  items: ["x" + "1", "y" + "2"],
+  inner: _T0410Inner(tag: "tag" + "1")));
+  b := _T0410Multi(label: "init" + "0", items: [], inner: _T0410Inner(tag: "init" + "i"));
+  b = v[0];
+  assert(b.label == "hello world", "multi label");
+  assert(b.items.len == 2, "multi items len");
+  assert(b.items[0] == "x1", "multi items[0]");
+  assert(b.inner.tag == "tag1", "multi inner tag");
+  assert(v[0].label == "hello world", "multi v[0] still readable");
+  assert(v[0].items.len == 2, "multi v[0] items still readable");
+}
+
+// --- 6. Generic function: vec-to-local reassignment under typeSubst. ---
+swap_first[T](~T[] v, ~T local) T {
+  local = v[0];
+  return local;
+}
+
+test_t0410_generic_reassign() `test {
+  v := _T0410Box[]();
+  v.push(_T0410Box(label: "g" + "h"));
+  v.push(_T0410Box(label: "i" + "j"));
+  init := _T0410Box(label: "init" + "g");
+  out := swap_first[_T0410Box](v, init);
+  assert(out.label == "gh", "generic swap result");
+}
+
+// --- 7. Method-chain RHS: regression guard — flag must NOT fire. ---
+// `b = v[0].method()` is not a direct IndexExpr RHS (it's a CallExpr), so
+// the dup-on-read flag must remain unset. The method's returned value is an
+// independent instance the local owns; cloning v[0] would leak the clone
+// (method takes a borrow). Mirrors T0398's test_t0398_method_on_index_no_leak.
+type _T0410CopyBox {
+  string label;
+  drop(~this) {
+  }
+
+  copy(&this) _T0410CopyBox {
+    return _T0410CopyBox(label: this.label);
+  }
+}
+
+test_t0410_method_chain_no_leak() `test {
+  v := _T0410CopyBox[]();
+  v.push(_T0410CopyBox(label: "a" + "b"));
+  b := _T0410CopyBox(label: "init" + "z");
+  b = v[0].copy();
+  assert(b.label == "ab", "method chain b");
+  assert(v[0].label == "ab", "method chain v[0] unchanged");
+}
+
+// --- 8. Method-chain RHS for MemberExpr LHS: regression guard. ---
+// `h.f = v[0].method()` — same orphan-clone safety as test 7 but for MemberExpr
+// LHS. Flag must NOT fire (RHS is CallExpr, not direct IndexExpr); method's
+// borrow on v[0] must not be paired with a dup that leaks. The drop-old branch
+// in genMemberAssign still fires for h.f's old instance.
+type _T0410CopyHolder {
+  _T0410CopyBox current;
+  drop(~this) {
+  }
+}
+
+test_t0410_method_chain_member_no_leak() `test {
+  v := _T0410CopyBox[]();
+  v.push(_T0410CopyBox(label: "p" + "q"));
+  h := _T0410CopyHolder(current: _T0410CopyBox(label: "init" + "h"));
+  h.current = v[0].copy();
+  assert(h.current.label == "pq", "method chain member");
+  assert(v[0].label == "pq", "method chain member v[0] unchanged");
+}
+
+// --- 9. Multiple consecutive MemberExpr reassignments. ---
+// Each `h.current = v[i]` exercises the drop-old + dup-on-read + store cycle.
+// Verifies drop-old fires correctly across multiple writes (no leaked old
+// instances) and each clone is independent of the source vec slot.
+test_t0410_member_multi_reassign() `test {
+  v := _T0410Box[]();
+  v.push(_T0410Box(label: "a" + "1"));
+  v.push(_T0410Box(label: "b" + "2"));
+  v.push(_T0410Box(label: "c" + "3"));
+  h := _T0410Holder(current: _T0410Box(label: "init" + "x"));
+  h.current = v[0];
+  assert(h.current.label == "a1", "first member reassign");
+  h.current = v[1];
+  assert(h.current.label == "b2", "second member reassign");
+  h.current = v[2];
+  assert(h.current.label == "c3", "third member reassign");
+  assert(v[0].label == "a1", "v[0] still readable after");
+  assert(v[2].label == "c3", "v[2] still readable after");
+}
+
+// --- 10. Generic Holder field reassignment under typeSubst. ---
+// `h.item = v[0]` inside a generic function exercises the typeSubst path in
+// both genAssignStmt's flag-set (lhsType resolution via Substitute) and
+// genMemberAssign's drop-old branch (resolveType honors c.typeSubst).
+// Mirrors test 6 (which covers IdentExpr LHS in a generic fn).
+type _T0410GenHolder[T] {
+  T item;
+  drop(~this) {
+  }
+}
+
+swap_into_holder[T](~_T0410GenHolder[T] h, ~T[] v) _T0410GenHolder[T] {
+  h.item = v[0];
+  return h;
+}
+
+test_t0410_generic_holder_member() `test {
+  v := _T0410Box[]();
+  v.push(_T0410Box(label: "g" + "h"));
+  v.push(_T0410Box(label: "i" + "j"));
+  h := _T0410GenHolder[_T0410Box](item: _T0410Box(label: "init" + "g"));
+  h = swap_into_holder[_T0410Box](h, v);
+  assert(h.item.label == "gh", "generic holder member typeSubst");
+}

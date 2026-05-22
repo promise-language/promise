@@ -4850,33 +4850,38 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			c.targetType = targetType
 		}
 	}
-	// T0398: For `vec[i] = vec[j]` where the element type is a heap user type,
-	// set dup flag so the RHS vec read is deep-cloned. Combined with
-	// drop-on-overwrite below in genVectorIndexAssign, this preserves the
-	// invariant that no two vec slots alias the same instance — e.g.,
-	// `vec[j+1] = vec[j]` shifts in sort produce independent clones. Only
-	// fires when the RHS is a direct vector-index expression to avoid orphan
-	// clones from chains like `vec[i] = v[j].method()`.
+	// T0398/T0410/T0412: When the RHS is a direct vector-index expression and the
+	// LHS is droppable, set the dup-on-read flag so genVectorIndex deep-clones
+	// the element. Combined with drop-on-overwrite (genVectorIndexAssign for
+	// IndexExpr LHS, genMemberAssign for MemberExpr LHS, the IdentExpr branch
+	// below for IdentExpr LHS), this preserves the no-alias invariant — vec-to-
+	// local writes produce independent clones instead of aliasing the bucket.
+	// Direct IndexExpr RHS only — chains like `b = v[0].method()` are excluded
+	// to avoid orphan clones (method takes a borrow, clone would leak).
 	if s.Op == ast.OpAssign {
-		if idxTarget, ok := s.Target.(*ast.IndexExpr); ok {
-			if _, isIdxRhs := s.Value.(*ast.IndexExpr); isIdxRhs {
-				elemType := c.info.Types[idxTarget]
+		if _, isIdxRhs := s.Value.(*ast.IndexExpr); isIdxRhs {
+			var lhsType types.Type
+			switch t := s.Target.(type) {
+			case *ast.IndexExpr:
+				lhsType = c.info.Types[t]
+			case *ast.IdentExpr:
+				lhsType = c.info.Types[t]
+			case *ast.MemberExpr:
+				lhsType = c.info.Types[t]
+			}
+			if lhsType != nil {
 				if c.typeSubst != nil {
-					elemType = types.Substitute(elemType, c.typeSubst)
+					lhsType = types.Substitute(lhsType, c.typeSubst)
 				}
-				if isDroppableHeapUserType(elemType) {
+				if isDroppableHeapUserType(lhsType) {
 					c.dupHeapUserFieldAccess = true
 				}
-				// T0412: For `vec[i] = vec[j]` where the element type is a
-				// droppable tuple, set dupTupleFieldAccess so the RHS read is
-				// deep-cloned. Combined with the drop-old branch in
-				// genVectorIndexAssign, preserves the no-alias invariant —
-				// `outer[0] = outer[1]` produces an independent clone in slot 0
-				// instead of aliasing slot 1's heap fields. Direct IndexExpr RHS
-				// only — same orphan-clone safety reasoning as the heap-user
-				// branch above.
-				if _, isTup := elemType.(*types.Tuple); isTup && c.tupleNeedsDrop(elemType) {
-					c.dupTupleFieldAccess = true
+				// T0412: same for droppable tuple LHS — covered for IndexExpr LHS;
+				// IdentExpr/MemberExpr tuple-reassign is out of scope for T0410.
+				if _, isIdxLhs := s.Target.(*ast.IndexExpr); isIdxLhs {
+					if _, isTup := lhsType.(*types.Tuple); isTup && c.tupleNeedsDrop(lhsType) {
+						c.dupTupleFieldAccess = true
+					}
 				}
 			}
 		}
@@ -5491,6 +5496,27 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 				// inner value must be freed/dropped to prevent memory leaks.
 				if opt, ok := fieldType.(*types.Optional); ok {
 					c.emitOptionalFieldReassignDrop(opt, field, targetType, fieldPtr)
+				}
+				// T0410: Heap user-type fields: drop old instance before reassignment.
+				// Without this, `h.f = v[0]` (after dup-on-read clones the RHS via the
+				// flag set in genAssignStmt) leaks h.f's previous instance. Symmetric
+				// with genVectorIndexAssign's heap user-type branch. Null + same-
+				// pointer guard mirrors the existing Vector/Channel branches above.
+				if isDroppableHeapUserType(fieldType) {
+					fieldLLVM := c.resolveType(fieldType)
+					oldVal := c.block.NewLoad(fieldLLVM, fieldPtr)
+					oldInstance := c.extractInstancePtr(oldVal)
+					newInstance := c.extractInstancePtr(val)
+					isNull := c.block.NewICmp(enum.IPredEQ, oldInstance, constant.NewNull(irtypes.I8Ptr))
+					isSame := c.block.NewICmp(enum.IPredEQ, oldInstance, newInstance)
+					skipDrop := c.block.NewOr(isNull, isSame)
+					dropBlock := c.newBlock("field.userdrop")
+					mergeBlock := c.newBlock("field.userdrop.done")
+					c.block.NewCondBr(skipDrop, mergeBlock, dropBlock)
+					c.block = dropBlock
+					c.emitVariantFieldDrop(oldVal, fieldType)
+					c.block.NewBr(mergeBlock)
+					c.block = mergeBlock
 				}
 			}
 		}

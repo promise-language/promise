@@ -1,0 +1,154 @@
+_writer_to_bytes_roundtrip(string s, string label) {
+  GzipWriter w = GzipWriter();
+  u8[] bytes = s.bytes();
+  int _n = w.write(bytes)?!;
+  u8[] compressed = w.to_bytes()?!;
+  u8[] decoded = gunzip(compressed)?!;
+  string s2 = s;
+  u8[] want = s2.bytes();
+  _assert_eq(decoded, want, label);
+}
+
+writer_to_bytes_short_test() `test {
+  _writer_to_bytes_roundtrip("hello", "short ASCII");
+}
+
+writer_to_bytes_empty_test() `test {
+  GzipWriter w = GzipWriter();
+  u8[] compressed = w.to_bytes()?!;
+  u8[] decoded = gunzip(compressed)?!;
+  assert(decoded.len == 0, "empty round-trip");
+}
+
+writer_chunked_input_test() `test {
+  // Simulate streaming: write the input in 7-byte chunks via the Writer interface.
+  string s = "the quick brown fox jumps over the lazy dog";
+  u8[] bytes = s.bytes();
+  GzipWriter w = GzipWriter();
+  int pos = 0;
+  while pos < bytes.len {
+    int chunk = bytes.len - pos;
+    if chunk > 7 {
+      chunk = 7;
+    }
+    u8[] tmp = u8[]();
+    int j = 0;
+    while j < chunk {
+      tmp.push(bytes[pos + j]);
+      j = j + 1;
+    }
+    int _n = w.write(tmp)?!;
+    pos = pos + chunk;
+  }
+  assert(w.input_length == bytes.len, "all bytes buffered");
+  u8[] compressed = w.to_bytes()?!;
+  u8[] decoded = gunzip(compressed)?!;
+  string s2 = s;
+  u8[] want = s2.bytes();
+  _assert_eq(decoded, want, "chunked round-trip");
+}
+
+writer_finish_to_builder_test() `test {
+  // Builder satisfies Writer. Compose: GzipWriter → Builder.
+  GzipWriter w = GzipWriter();
+  string s = "compose with Builder";
+  u8[] bytes = s.bytes();
+  int _n = w.write(bytes)?!;
+  Builder b = Builder();
+  w.finish_to(b)?!;
+  u8[] compressed = b.buf;
+  u8[] decoded = gunzip(compressed)?!;
+  u8[] want = s.bytes();
+  _assert_eq(decoded, want, "Builder composition");
+}
+
+writer_write_string_test() `test {
+  GzipWriter w = GzipWriter();
+  int _n = w.write_string("default write_string")?!;
+  assert(w.input_length == 20, "20 bytes buffered via write_string");
+  u8[] compressed = w.to_bytes()?!;
+  u8[] decoded = gunzip(compressed)?!;
+  string s = "default write_string";
+  u8[] want = s.bytes();
+  _assert_eq(decoded, want, "write_string round-trip");
+}
+
+_try_double_finish() bool {
+  GzipWriter w = GzipWriter();
+  u8[] _v = w.to_bytes()? e {
+    return false;
+  };
+  // Second call must raise.
+  u8[] _v2 = w.to_bytes()? e {
+    return true;
+  };
+  return false;
+}
+
+writer_double_finish_raises_test() `test {
+  assert(_try_double_finish(), "double to_bytes raises");
+}
+
+_try_write_after_finish() bool {
+  GzipWriter w = GzipWriter();
+  u8[] _v = w.to_bytes()? e {
+    return false;
+  };
+  u8[] data = u8[]();
+  data.push(0x41u8);
+  int _n = w.write(data)? e {
+    return true;
+  };
+  return false;
+}
+
+writer_write_after_finish_raises_test() `test {
+  assert(_try_write_after_finish(), "write after to_bytes raises");
+}
+
+_try_finish_to_after_finalize() bool {
+  GzipWriter w = GzipWriter();
+  u8[] _v = w.to_bytes()? e {
+    return false;
+  };
+  // finish_to has its own _finished guard distinct from to_bytes/write.
+  Builder b = Builder();
+  w.finish_to(b)? e {
+    return true;
+  };
+  return false;
+}
+
+writer_finish_to_after_finalize_raises_test() `test {
+  assert(_try_finish_to_after_finalize(), "finish_to after to_bytes raises");
+}
+
+writer_input_length_test() `test {
+  GzipWriter w = GzipWriter();
+  assert(w.input_length == 0, "starts empty");
+  assert(!w.is_finished, "not finished initially");
+  u8[] data = u8[]();
+  data.push(0x41u8);
+  data.push(0x42u8);
+  data.push(0x43u8);
+  int _n = w.write(data)?!;
+  assert(w.input_length == 3, "3 bytes buffered");
+  u8[] _compressed = w.to_bytes()?!;
+  assert(w.is_finished, "finished after to_bytes");
+}
+
+writer_large_input_test() `test {
+  // Forces multi-block stored encoding (>65535 bytes).
+  GzipWriter w = GzipWriter();
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 70000 {
+    data.push((i % 251) as! u8);
+    i = i + 1;
+  }
+  u8[] cloned = data.clone();
+  int _n = w.write(cloned)?!;
+  u8[] compressed = w.to_bytes()?!;
+  u8[] decoded = gunzip(compressed)?!;
+  _assert_eq(decoded, data, "70000-byte round-trip");
+}

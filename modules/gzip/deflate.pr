@@ -461,3 +461,43 @@ inflate!(~u8[] data) u8[] `public `doc("Decompresses raw DEFLATE-encoded data (R
   }
   return out;
 }
+
+// Maximum payload of a single DEFLATE stored block (RFC 1951 §3.2.4: LEN is u16).
+_stored_block_max() int => 65535;
+
+deflate(u8[] &data) u8[] `public `doc("Compresses raw bytes into a DEFLATE stream (RFC 1951). v1 emits stored (uncompressed) blocks only — the output is valid DEFLATE that round-trips exactly, but is not size-reduced. Real Huffman+LZ77 compression is tracked as T0462.") {
+  _BitWriter bw = _BitWriter();
+  int n = data.len;
+  int max_block = _stored_block_max();
+  int pos = 0;
+  // Emit at least one block so an empty input still produces a final
+  // (BFINAL=1, BTYPE=00, LEN=0, NLEN=0xFFFF) block.
+  bool first = true;
+  while first || pos < n {
+    first = false;
+    int remaining = n - pos;
+    int block_len = remaining;
+    if block_len > max_block {
+      block_len = max_block;
+    }
+    bool is_final = (pos + block_len) >= n;
+    u32 bfinal = 0u32;
+    if is_final {
+      bfinal = 1u32;
+    }
+    bw.write_bits(1, bfinal); // BFINAL
+    bw.write_bits(2, 0u32); // BTYPE=00 (stored)
+    bw.align_to_byte();
+    u32 len_u16 = (block_len as! u32) & 0xFFFFu32;
+    u32 nlen_u16 = len_u16 ^ 0xFFFFu32;
+    bw.write_aligned_u16_le(len_u16);
+    bw.write_aligned_u16_le(nlen_u16);
+    int i = 0;
+    while i < block_len {
+      bw.write_aligned_byte(data[pos + i]);
+      i = i + 1;
+    }
+    pos = pos + block_len;
+  }
+  return bw.finalize();
+}

@@ -1,0 +1,55 @@
+// gzip/writer.pr — buffered gzip-compressing Writer.
+//
+// Accumulates bytes via the standard `Writer` interface, then emits a
+// gzip-compressed stream on `finish_to(Writer)` or `to_bytes()`. The
+// underlying Writer (file, builder, ...) is not stored as a field — it is
+// passed in to the finalize call. This sidesteps T0460 (storing structural
+// types in fields leaks at scope exit). Once T0460 lands, this can evolve
+// into a streaming writer that flushes blocks as they fill.
+type GzipWriter `public `doc("Buffered gzip-compressing Writer. Accepts bytes through the Writer interface, then emits a gzip-encoded stream when `finish_to(Writer)` or `to_bytes()` is called. Buffers all input in memory; for large streams use chunked input. The output is valid RFC 1952 gzip.") {
+  u8[] _buf;
+  bool _finished;
+
+  new(~this) `public `doc("Creates an empty gzip writer.") {
+    this._buf = u8[]();
+    this._finished = false;
+  }
+
+  // Satisfies Writer.
+  write!(~this, u8[] ~buf) int `public `doc("Appends bytes to the input buffer. Returns the number of bytes accepted. Raises if the writer has already been finalized.") {
+    if this._finished {
+      raise DecompressError(message: "GzipWriter.write called after finalization", at_byte: -1);
+    }
+    int i = 0;
+    while i < buf.len {
+      this._buf.push(buf[i]);
+      i = i + 1;
+    }
+    return buf.len;
+  }
+
+  write_string!(~this, string s) int `public `doc("Appends a string as bytes. Returns the number of bytes accepted.") {
+    u8[] b = s.bytes();
+    return this.write(b)?^;
+  }
+
+  finish_to!(~this, Writer ~out) `public `doc("Compresses all buffered input and writes the gzip output to the given Writer. The writer is finalized; subsequent calls raise.") {
+    if this._finished {
+      raise DecompressError(message: "GzipWriter.finish_to called after finalization", at_byte: -1);
+    }
+    u8[] compressed = gzip_encode(this._buf);
+    int _n = out.write(compressed)?^;
+    this._finished = true;
+  }
+
+  to_bytes!(~this) u8[] `public `doc("Compresses all buffered input and returns the gzip-encoded bytes. The writer is finalized; subsequent calls raise.") {
+    if this._finished {
+      raise DecompressError(message: "GzipWriter.to_bytes called after finalization", at_byte: -1);
+    }
+    this._finished = true;
+    return gzip_encode(this._buf);
+  }
+
+  get input_length int `public `doc("Number of input bytes buffered so far (before compression).") => this._buf.len;
+  get is_finished bool `public `doc("True after `finish_to` or `to_bytes` has been called.") => this._finished;
+}

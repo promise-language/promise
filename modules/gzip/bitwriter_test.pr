@@ -1,0 +1,106 @@
+bitwriter_single_bits_test() `test {
+  // Write LSB-first bits 1,0,1,1,0,1,0,0 → expect byte 0x2D
+  // (bit 0 → 0x01, bit 2 → 0x04, bit 3 → 0x08, bit 5 → 0x20 = 0x2D)
+  _BitWriter bw = _BitWriter();
+  bw.write_bits(1, 1u32);
+  bw.write_bits(1, 0u32);
+  bw.write_bits(1, 1u32);
+  bw.write_bits(1, 1u32);
+  bw.write_bits(1, 0u32);
+  bw.write_bits(1, 1u32);
+  bw.write_bits(1, 0u32);
+  bw.write_bits(1, 0u32);
+  u8[] out = bw.finalize();
+  assert(out.len == 1, "one byte after eight single-bit writes");
+  assert(out[0] == 0x2Du8, "byte equals 0x2D");
+}
+
+bitwriter_roundtrip_via_reader_test() `test {
+  // Write a mix of widths, read back via _BitReader, verify identical sequence.
+  _BitWriter bw = _BitWriter();
+  bw.write_bits(3, 0x05u32); // 101
+  bw.write_bits(5, 0x13u32); // 10011
+  bw.write_bits(8, 0xA5u32);
+  bw.write_bits(11, 0x7FFu32);
+  bw.write_bits(5, 0x1Fu32);
+  u8[] out = bw.finalize();
+  _BitReader br = _BitReader(data: out);
+  assert(br.read_bits(3)?! == 0x05u32, "3 bits");
+  assert(br.read_bits(5)?! == 0x13u32, "5 bits");
+  assert(br.read_bits(8)?! == 0xA5u32, "8 bits");
+  assert(br.read_bits(11)?! == 0x7FFu32, "11 bits");
+  assert(br.read_bits(5)?! == 0x1Fu32, "5 bits");
+}
+
+bitwriter_aligned_byte_test() `test {
+  _BitWriter bw = _BitWriter();
+  bw.write_bits(3, 0x07u32);
+  bw.align_to_byte();
+  bw.write_aligned_byte(0xABu8);
+  bw.write_aligned_byte(0xCDu8);
+  u8[] out = bw.finalize();
+  assert(out.len == 3, "3 bytes total");
+  assert(out[0] == 0x07u8, "first byte is 0x07 (3 bits + 5 zero pad)");
+  assert(out[1] == 0xABu8, "second byte 0xAB");
+  assert(out[2] == 0xCDu8, "third byte 0xCD");
+}
+
+bitwriter_aligned_u16_test() `test {
+  _BitWriter bw = _BitWriter();
+  bw.write_aligned_u16_le(0xABCDu32);
+  u8[] out = bw.finalize();
+  assert(out.len == 2, "u16 yields 2 bytes");
+  assert(out[0] == 0xCDu8, "low byte first");
+  assert(out[1] == 0xABu8, "high byte second");
+}
+
+bitwriter_finalize_pads_test() `test {
+  _BitWriter bw = _BitWriter();
+  bw.write_bits(1, 1u32);
+  u8[] out = bw.finalize();
+  assert(out.len == 1, "trailing bits flushed into a byte");
+  assert(out[0] == 0x01u8, "single trailing 1 bit");
+}
+
+bitwriter_empty_test() `test {
+  _BitWriter bw = _BitWriter();
+  u8[] out = bw.finalize();
+  assert(out.len == 0, "empty writer yields empty buffer");
+}
+
+bitwriter_bit_position_test() `test {
+  _BitWriter bw = _BitWriter();
+  assert(bw.bit_position == 0, "starts at 0");
+  bw.write_bits(3, 0x07u32);
+  assert(bw.bit_position == 3, "3 bits");
+  bw.write_bits(8, 0xFFu32);
+  assert(bw.bit_position == 11, "11 bits");
+  bw.align_to_byte();
+  assert(bw.bit_position == 16, "aligned to 16");
+}
+
+bitwriter_cross_byte_test() `test {
+  // Write a 16-bit value all at once, verify byte layout (LSB-first packing).
+  _BitWriter bw = _BitWriter();
+  bw.write_bits(16, 0xABCDu32);
+  u8[] out = bw.finalize();
+  assert(out.len == 2, "16 bits → 2 bytes");
+  // Within a byte: low 8 bits = 0xCD, high 8 bits = 0xAB.
+  assert(out[0] == 0xCDu8, "low byte is 0xCD");
+  assert(out[1] == 0xABu8, "high byte is 0xAB");
+}
+
+bitwriter_align_when_already_aligned_test() `test {
+  // align_to_byte when bit_count == 0 is a no-op.
+  _BitWriter bw = _BitWriter();
+  bw.write_bits(8, 0xAAu32);
+  // After 8 bits, bit_count was reset to 0 and the byte was flushed.
+  assert(bw.bit_position == 8, "8 bits flushed, bit_count == 0");
+  bw.align_to_byte();
+  assert(bw.bit_position == 8, "align is a no-op when already aligned");
+  bw.write_aligned_byte(0x55u8);
+  u8[] out = bw.finalize();
+  assert(out.len == 2, "two bytes after no-op align + aligned write");
+  assert(out[0] == 0xAAu8, "first byte preserved");
+  assert(out[1] == 0x55u8, "second byte appended");
+}

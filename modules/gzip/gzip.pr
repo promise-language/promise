@@ -105,3 +105,37 @@ gunzip!(u8[] &data) u8[] `public `doc("Decompresses a gzip-encoded byte stream (
 
   return result;
 }
+
+gzip_encode(u8[] &data) u8[] `public `doc("Compresses bytes into a gzip-formatted stream (RFC 1952). The output is valid gzip readable by standard tools (gunzip, the gzip Go package, etc.). Currently uses stored-block DEFLATE — the output round-trips correctly but is not size-reduced. Real Huffman-based compression is tracked as T0462. Named gzip_encode rather than gzip() to avoid conflicting with the module name when imported as `use gzip;`.") {
+  u8[] out = u8[]();
+  // Fixed header: magic(2) + CM(1) + FLG(1) + MTIME(4) + XFL(1) + OS(1) = 10 bytes.
+  out.push(0x1Fu8);
+  out.push(0x8Bu8);
+  out.push(0x08u8); // CM=8 (DEFLATE)
+  out.push(0x00u8); // FLG=0 (no FNAME, FCOMMENT, FEXTRA, FHCRC, FTEXT)
+  out.push(0x00u8); // MTIME[0]
+  out.push(0x00u8); // MTIME[1]
+  out.push(0x00u8); // MTIME[2]
+  out.push(0x00u8); // MTIME[3]
+  out.push(0x00u8); // XFL=0
+  out.push(0xFFu8); // OS=0xFF (unknown)
+  // DEFLATE body
+  u8[] body = deflate(data);
+  int i = 0;
+  while i < body.len {
+    out.push(body[i]);
+    i = i + 1;
+  }
+  // Trailer: CRC32(data) LE + ISIZE(data.len mod 2^32) LE.
+  u32 crc = crc32(data);
+  u32 isize = (data.len as! u32) & 0xFFFFFFFFu32;
+  out.push((crc & 0xFFu32) as! u8);
+  out.push(((crc >> 8u32) & 0xFFu32) as! u8);
+  out.push(((crc >> 16u32) & 0xFFu32) as! u8);
+  out.push(((crc >> 24u32) & 0xFFu32) as! u8);
+  out.push((isize & 0xFFu32) as! u8);
+  out.push(((isize >> 8u32) & 0xFFu32) as! u8);
+  out.push(((isize >> 16u32) & 0xFFu32) as! u8);
+  out.push(((isize >> 24u32) & 0xFFu32) as! u8);
+  return out;
+}

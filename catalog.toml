@@ -32,7 +32,7 @@ description = "Time and duration operations (placeholder — pending native PAL 
 description = "TCP networking: TcpListener, TcpStream with reactor-based non-blocking I/O"
 
 [modules.gzip]
-description = "RFC 1951 (DEFLATE) and RFC 1952 (gzip) decompression in pure Promise: gunzip, inflate, crc32, DecompressError"
+description = "RFC 1951 (DEFLATE) and RFC 1952 (gzip) compression and decompression in pure Promise: gzip_encode, gunzip, deflate, inflate, crc32, GzipWriter, GunzipReader, gunzip_from, DecompressError"
 
 [modules.wasi]
 url = "ssh://hfe/git/promise_wasi.git"

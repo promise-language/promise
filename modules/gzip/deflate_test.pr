@@ -246,3 +246,105 @@ inflate_truncated_test() `test {
   raw.push(0x03);
   assert(_try_inflate(_bytes(raw)), "truncated stream raises");
 }
+
+// ---------------------------------------------------------------------------
+// deflate() encoder tests — round-trip through inflate() (the canonical
+// reference) is the strongest check available without external tooling.
+// ---------------------------------------------------------------------------
+
+_roundtrip(u8[] data, string label) {
+  u8[] cloned = data.clone();
+  u8[] compressed = deflate(cloned);
+  u8[] decoded = inflate(compressed)?!;
+  _assert_eq(decoded, data, label);
+}
+
+deflate_empty_test() `test {
+  // Empty input must still produce a final stored block that decodes to [].
+  u8[] data = u8[]();
+  u8[] compressed = deflate(data);
+  // Stored-block layout: 1 byte (BFINAL=1, BTYPE=00, padding) + LEN(2) + NLEN(2) = 5 bytes.
+  assert(compressed.len == 5, "empty input → 5-byte stored block");
+  assert(compressed[0] == 0x01u8, "BFINAL=1, BTYPE=00, padded to 0x01");
+  assert(compressed[1] == 0x00u8, "LEN low = 0");
+  assert(compressed[2] == 0x00u8, "LEN high = 0");
+  assert(compressed[3] == 0xFFu8, "NLEN low = 0xFF");
+  assert(compressed[4] == 0xFFu8, "NLEN high = 0xFF");
+  u8[] decoded = inflate(compressed)?!;
+  assert(decoded.len == 0, "round-trip empty → empty");
+}
+
+deflate_single_byte_test() `test {
+  u8[] data = u8[]();
+  data.push(0x42u8);
+  _roundtrip(data, "single byte");
+}
+
+deflate_short_ascii_test() `test {
+  string s = "hello, deflate";
+  u8[] bytes = s.bytes();
+  _roundtrip(bytes, "short ASCII");
+}
+
+deflate_100_byte_ascii_test() `test {
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 100 {
+    data.push((0x41 + (i % 26)) as! u8);
+    i = i + 1;
+  }
+  _roundtrip(data, "100 ASCII bytes");
+}
+
+deflate_all_byte_values_test() `test {
+  // 256 distinct byte values — exercises full u8 range.
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 256 {
+    data.push(i as! u8);
+    i = i + 1;
+  }
+  _roundtrip(data, "all 256 byte values");
+}
+
+deflate_block_boundary_test() `test {
+  // Exactly 65535 bytes — fills a single stored block to its maximum.
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 65535 {
+    data.push((i % 251) as! u8);
+    i = i + 1;
+  }
+  _roundtrip(data, "65535 bytes (single block)");
+}
+
+deflate_multi_block_test() `test {
+  // 65540 bytes — forces two stored blocks (65535 + 5).
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 65540 {
+    data.push((i % 251) as! u8);
+    i = i + 1;
+  }
+  u8[] cloned = data.clone();
+  u8[] compressed = deflate(cloned);
+  u8[] decoded = inflate(compressed)?!;
+  _assert_eq(decoded, data, "65540 bytes (two blocks)");
+}
+
+deflate_large_binary_test() `test {
+  // 200000 bytes of mixed binary data — forces 4 stored blocks.
+  // Uses a deterministic LCG to avoid huge test-source inflation.
+  u8[] data = u8[]();
+  u32 state = 0x12345678u32;
+  int i = 0;
+  while i < 200000 {
+    state = (state * 1103515245u32 + 12345u32) & 0xFFFFFFFFu32;
+    data.push((state >> 16u32) as! u8);
+    i = i + 1;
+  }
+  u8[] cloned = data.clone();
+  u8[] compressed = deflate(cloned);
+  u8[] decoded = inflate(compressed)?!;
+  _assert_eq(decoded, data, "200000 random bytes");
+}

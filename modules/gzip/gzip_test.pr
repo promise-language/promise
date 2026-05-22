@@ -428,3 +428,85 @@ gunzip_isize_mismatch_test() `test {
   u8[] data = _bytes(raw);
   assert(_try_gunzip(data), "ISIZE mismatch raises");
 }
+
+// ---------------------------------------------------------------------------
+// gzip() encoder tests — round-trip through gunzip().
+// ---------------------------------------------------------------------------
+
+_gzip_roundtrip(u8[] data, string label) {
+  u8[] cloned = data.clone();
+  u8[] compressed = gzip_encode(cloned);
+  // Magic header sanity check.
+  assert(compressed.len >= 18, label + ": minimum 18-byte frame");
+  assert(compressed[0] == 0x1Fu8, label + ": magic 0x1F");
+  assert(compressed[1] == 0x8Bu8, label + ": magic 0x8B");
+  assert(compressed[2] == 0x08u8, label + ": CM=8 (DEFLATE)");
+  u8[] decoded = gunzip(compressed)?!;
+  _assert_eq(decoded, data, label + ": round-trip");
+}
+
+gzip_empty_test() `test {
+  u8[] data = u8[]();
+  _gzip_roundtrip(data, "empty");
+}
+
+gzip_hello_test() `test {
+  string s = "hello";
+  u8[] bytes = s.bytes();
+  _gzip_roundtrip(bytes, "hello");
+}
+
+gzip_hello_world_test() `test {
+  string s = "Hello, World!\n";
+  u8[] bytes = s.bytes();
+  _gzip_roundtrip(bytes, "Hello, World!");
+}
+
+gzip_repeated_a_test() `test {
+  // 100 'A' bytes — exercises a payload that the original Python fixture
+  // (gunzip_a100_test) compresses heavily; our stored-block encoder produces
+  // a different but still valid bytestream.
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 100 {
+    data.push(0x41u8);
+    i = i + 1;
+  }
+  _gzip_roundtrip(data, "100 As");
+}
+
+gzip_all_byte_values_test() `test {
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 256 {
+    data.push(i as! u8);
+    i = i + 1;
+  }
+  _gzip_roundtrip(data, "all 256 byte values");
+}
+
+gzip_large_binary_test() `test {
+  // 100KB of pseudo-random bytes — exercises CRC32 over a realistic size and
+  // forces the encoder across the 65535-byte stored-block boundary.
+  u8[] data = u8[]();
+  u32 state = 0xDEADBEEFu32;
+  int i = 0;
+  while i < 100000 {
+    state = (state * 1664525u32 + 1013904223u32) & 0xFFFFFFFFu32;
+    data.push((state >> 16u32) as! u8);
+    i = i + 1;
+  }
+  _gzip_roundtrip(data, "100KB binary");
+}
+
+gzip_trailer_isize_test() `test {
+  // Verify ISIZE matches input length for a known-size payload.
+  string s = "Promise";
+  u8[] bytes = s.bytes();
+  u8[] cloned = bytes.clone();
+  u8[] compressed = gzip_encode(cloned);
+  int trailer = compressed.len - 8;
+  // ISIZE is bytes 4..7 of the trailer (after CRC32).
+  u32 isize = (compressed[trailer + 4] as! u32) | ((compressed[trailer + 5] as! u32) << 8u32) | ((compressed[trailer + 6] as! u32) << 16u32) | ((compressed[trailer + 7] as! u32) << 24u32);
+  assert(isize == 7u32, "ISIZE = 7 for 'Promise'");
+}

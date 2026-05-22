@@ -1,0 +1,226 @@
+// Test-only: a minimal byte-array-backed Reader for exercising
+// `gunzip_from(Reader)` without depending on the io catalog module.
+type _BytesReader {
+  u8[] _buf;
+  int _pos;
+
+  new(~this, ~u8[] data) {
+    this._buf = data;
+    this._pos = 0;
+  }
+
+  read!(~this, u8[] ~buf) int {
+    int avail = this._buf.len - this._pos;
+    if avail == 0 {
+      return 0;
+    }
+    int n = avail;
+    if n > buf.len {
+      n = buf.len;
+    }
+    int i = 0;
+    while i < n {
+      buf[i] = this._buf[this._pos + i];
+      i = i + 1;
+    }
+    this._pos = this._pos + n;
+    return n;
+  }
+}
+
+reader_basic_roundtrip_test() `test {
+  string s = "the quick brown fox";
+  u8[] bytes = s.bytes();
+  GzipWriter w = GzipWriter();
+  u8[] cloned = bytes.clone();
+  int _n = w.write(cloned)?!;
+  u8[] compressed = w.to_bytes()?!;
+  GunzipReader r = GunzipReader(compressed: compressed)?!;
+  assert(r.total_size == bytes.len, "total_size matches input");
+  u8[] out = u8[].filled(0u8, bytes.len);
+  int got = r.read(out)?!;
+  assert(got == bytes.len, "read all bytes in one call");
+  _assert_eq(out, bytes, "round-trip via GunzipReader");
+  assert(r.bytes_remaining == 0, "no bytes remain");
+}
+
+reader_chunked_test() `test {
+  // Read in small chunks, reassemble, compare.
+  string s = "the quick brown fox jumps over the lazy dog";
+  u8[] bytes = s.bytes();
+  u8[] cloned = bytes.clone();
+  u8[] compressed = gzip_encode(cloned);
+  GunzipReader r = GunzipReader(compressed: compressed)?!;
+  u8[] reassembled = u8[]();
+  u8[] tmp = u8[].filled(0u8, 5);
+  bool done = false;
+  while !done {
+    int n = r.read(tmp)?!;
+    if n == 0 {
+      done = true;
+    } else {
+      int i = 0;
+      while i < n {
+        reassembled.push(tmp[i]);
+        i = i + 1;
+      }
+    }
+  }
+  _assert_eq(reassembled, bytes, "chunked read round-trip");
+}
+
+reader_read_byte_test() `test {
+  string s = "abc";
+  u8[] bytes = s.bytes();
+  u8[] cloned = bytes.clone();
+  u8[] compressed = gzip_encode(cloned);
+  GunzipReader r = GunzipReader(compressed: compressed)?!;
+  u8? b1 = r.read_byte()?!;
+  u8? b2 = r.read_byte()?!;
+  u8? b3 = r.read_byte()?!;
+  u8? b4 = r.read_byte()?!;
+  if v := b1 {
+    assert(v == 0x61u8, "first byte is 'a'");
+  } else {
+    assert(false, "first byte unexpectedly absent");
+  }
+  if v := b2 {
+    assert(v == 0x62u8, "second byte is 'b'");
+  } else {
+    assert(false, "second byte unexpectedly absent");
+  }
+  if v := b3 {
+    assert(v == 0x63u8, "third byte is 'c'");
+  } else {
+    assert(false, "third byte unexpectedly absent");
+  }
+  if _v := b4 {
+    assert(false, "fourth byte should be absent (EOF)");
+  }
+}
+
+reader_eof_returns_zero_test() `test {
+  string s = "x";
+  u8[] bytes = s.bytes();
+  u8[] cloned = bytes.clone();
+  u8[] compressed = gzip_encode(cloned);
+  GunzipReader r = GunzipReader(compressed: compressed)?!;
+  u8[] tmp = u8[].filled(0u8, 4);
+  int n1 = r.read(tmp)?!;
+  assert(n1 == 1, "first read returns 1 byte");
+  assert(tmp[0] == 0x78u8, "byte is 'x'");
+  int n2 = r.read(tmp)?!;
+  assert(n2 == 0, "second read returns 0 (EOF)");
+}
+
+reader_empty_test() `test {
+  // Round-trip empty input.
+  u8[] data = u8[]();
+  u8[] compressed = gzip_encode(data);
+  GunzipReader r = GunzipReader(compressed: compressed)?!;
+  assert(r.total_size == 0, "empty payload");
+  u8[] tmp = u8[].filled(0u8, 4);
+  int n = r.read(tmp)?!;
+  assert(n == 0, "empty read returns 0");
+}
+
+reader_large_test() `test {
+  // 70000-byte payload — exercises multi-block deflate output.
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 70000 {
+    data.push((i % 251) as! u8);
+    i = i + 1;
+  }
+  u8[] cloned = data.clone();
+  u8[] compressed = gzip_encode(cloned);
+  GunzipReader r = GunzipReader(compressed: compressed)?!;
+  u8[] reassembled = u8[]();
+  u8[] tmp = u8[].filled(0u8, 1024);
+  bool done = false;
+  while !done {
+    int n = r.read(tmp)?!;
+    if n == 0 {
+      done = true;
+    } else {
+      int j = 0;
+      while j < n {
+        reassembled.push(tmp[j]);
+        j = j + 1;
+      }
+    }
+  }
+  _assert_eq(reassembled, data, "70000-byte chunked round-trip");
+}
+
+reader_bytes_remaining_test() `test {
+  string s = "abcdef";
+  u8[] bytes = s.bytes();
+  u8[] cloned = bytes.clone();
+  u8[] compressed = gzip_encode(cloned);
+  GunzipReader r = GunzipReader(compressed: compressed)?!;
+  assert(r.bytes_remaining == 6, "all 6 bytes remain initially");
+  u8[] tmp = u8[].filled(0u8, 2);
+  int _n = r.read(tmp)?!;
+  assert(r.bytes_remaining == 4, "4 remain after reading 2");
+  int _n2 = r.read(tmp)?!;
+  assert(r.bytes_remaining == 2, "2 remain after reading 2 more");
+}
+
+gunzip_from_test() `test {
+  // Compose: gunzip_from(Reader) reads a gzip stream from a custom Reader.
+  string s = "compose with Reader";
+  u8[] bytes = s.bytes();
+  u8[] cloned = bytes.clone();
+  u8[] compressed = gzip_encode(cloned);
+  _BytesReader src = _BytesReader(data: compressed);
+  u8[] decoded = gunzip_from(src)?!;
+  _assert_eq(decoded, bytes, "gunzip_from round-trip");
+}
+
+gunzip_from_large_test() `test {
+  // Large input via Reader interface — exercises the chunk-read loop.
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 10000 {
+    data.push((i % 251) as! u8);
+    i = i + 1;
+  }
+  u8[] cloned = data.clone();
+  u8[] compressed = gzip_encode(cloned);
+  _BytesReader src = _BytesReader(data: compressed);
+  u8[] decoded = gunzip_from(src)?!;
+  _assert_eq(decoded, data, "gunzip_from large round-trip");
+}
+
+_try_gunzip_reader(~u8[] bad) bool {
+  GunzipReader _r = GunzipReader(compressed: bad)? e {
+    return true;
+  };
+  return false;
+}
+
+reader_invalid_gzip_test() `test {
+  // Random non-gzip bytes — construction must raise.
+  u8[] bad = u8[]();
+  bad.push(0xDEu8);
+  bad.push(0xADu8);
+  bad.push(0xBEu8);
+  bad.push(0xEFu8);
+  assert(_try_gunzip_reader(bad), "GunzipReader raises on invalid gzip");
+}
+
+_try_gunzip_from_empty() bool {
+  // gunzip_from on an empty reader produces 0 bytes, then gunzip([]) raises
+  // because the gzip frame requires at least 18 bytes (header + trailer).
+  u8[] empty = u8[]();
+  _BytesReader src = _BytesReader(data: empty);
+  u8[] _v = gunzip_from(src)? e {
+    return true;
+  };
+  return false;
+}
+
+gunzip_from_empty_reader_test() `test {
+  assert(_try_gunzip_from_empty(), "gunzip_from raises on empty reader");
+}

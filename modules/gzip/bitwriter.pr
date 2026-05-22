@@ -1,0 +1,77 @@
+// gzip/bitwriter.pr — LSB-first bit writer for DEFLATE streams (RFC 1951 §3.1.1).
+// Within a byte, bits are written from least-significant to most-significant.
+// Multi-byte values are little-endian.
+//
+// All members are private; this is an implementation detail of the DEFLATE
+// encoder and not part of the gzip module's public API.
+type _BitWriter {
+  u8[] buf;
+  u32 bit_buf;
+  int bit_count;
+
+  new(~this) {
+    this.buf = u8[]();
+    this.bit_buf = 0u32;
+    this.bit_count = 0;
+  }
+
+  // Append `n` bits LSB-first. Caller must ensure 0 <= n <= 32.
+  write_bits(~this, int n, u32 value) {
+    u32 v = value;
+    int remaining = n;
+    while remaining > 0 {
+      int space = 8 - this.bit_count;
+      int take = remaining;
+      if take > space {
+        take = space;
+      }
+      u32 mask = (1u32 << (take as! u32)) - 1u32;
+      u32 chunk = v & mask;
+      this.bit_buf = this.bit_buf | (chunk << (this.bit_count as! u32));
+      this.bit_count = this.bit_count + take;
+      v = v >> (take as! u32);
+      remaining = remaining - take;
+      if this.bit_count == 8 {
+        this.buf.push((this.bit_buf & 0xFFu32) as! u8);
+        this.bit_buf = 0u32;
+        this.bit_count = 0;
+      }
+    }
+  }
+
+  // Pad pending bits with zeros to the next byte boundary and flush.
+  align_to_byte(~this) {
+    if this.bit_count != 0 {
+      this.buf.push((this.bit_buf & 0xFFu32) as! u8);
+      this.bit_buf = 0u32;
+      this.bit_count = 0;
+    }
+  }
+
+  // Append a byte. Caller must ensure the stream is byte-aligned.
+  write_aligned_byte(~this, u8 b) {
+    this.buf.push(b);
+  }
+
+  // Append a 16-bit little-endian value. Caller must ensure byte alignment.
+  write_aligned_u16_le(~this, u32 v) {
+    this.buf.push((v & 0xFFu32) as! u8);
+    this.buf.push(((v >> 8u32) & 0xFFu32) as! u8);
+  }
+
+  // Flush any trailing bits (zero-padded to a byte) and return the buffer.
+  // The writer is left empty.
+  finalize(~this) u8[] {
+    if this.bit_count != 0 {
+      this.buf.push((this.bit_buf & 0xFFu32) as! u8);
+      this.bit_buf = 0u32;
+      this.bit_count = 0;
+    }
+    u8[] out = this.buf;
+    this.buf = u8[]();
+    return out;
+  }
+
+  // Total number of bits written so far (including pending bits).
+  get bit_position int => this.buf.len * 8 + this.bit_count;
+}

@@ -1,0 +1,67 @@
+// gzip/reader.pr — buffered gzip-decompressing Reader.
+//
+// Decompresses a complete gzip byte stream up-front and serves the resulting
+// bytes via the standard `Reader` interface. Eager decode (rather than
+// streaming) keeps the implementation simple — the existing inflate() is
+// one-shot — and avoids storing an underlying Reader as a structural field
+// (T0460). `gunzip_from(Reader)` is a free function that consumes a Reader
+// (file, builder-backed reader, ...), reads all its bytes, then decompresses.
+type GunzipReader `public `doc("Buffered gzip-decompressing Reader. Decompresses a complete gzip stream on construction, then serves bytes via the Reader interface. Eager decode rather than streaming — full input must fit in memory. Composes with any code that takes a Reader (BufferedReader-style consumers, scan loops, etc.).") {
+  u8[] _buf;
+  int _pos;
+
+  new!(~this, ~u8[] compressed) `public `doc("Decompresses a complete gzip byte stream and prepares to serve the bytes. Raises DecompressError on malformed input.") {
+    this._buf = gunzip(compressed)?^;
+    this._pos = 0;
+  }
+
+  // Satisfies Reader.
+  read!(~this, u8[] ~buf) int `public `doc("Reads up to buf.len decompressed bytes into buf. Returns the number of bytes read (0 = EOF).") {
+    int avail = this._buf.len - this._pos;
+    if avail == 0 {
+      return 0;
+    }
+    int n = avail;
+    if n > buf.len {
+      n = buf.len;
+    }
+    int i = 0;
+    while i < n {
+      buf[i] = this._buf[this._pos + i];
+      i = i + 1;
+    }
+    this._pos = this._pos + n;
+    return n;
+  }
+
+  read_byte!(~this) u8? `public `doc("Reads a single decompressed byte. Returns absent at EOF.") {
+    if this._pos >= this._buf.len {
+      return none;
+    }
+    u8 b = this._buf[this._pos];
+    this._pos = this._pos + 1;
+    return b;
+  }
+
+  get bytes_remaining int `public `doc("Number of decompressed bytes not yet read.") => this._buf.len - this._pos;
+  get total_size int `public `doc("Total decompressed payload size, in bytes.") => this._buf.len;
+}
+
+gunzip_from!(Reader ~src) u8[] `public `doc("Reads a complete gzip byte stream from a Reader (file, in-memory reader, ...) and decompresses it. The Reader is consumed; its bytes_remaining is drained.") {
+  u8[] all = u8[]();
+  u8[] tmp = u8[].filled(0u8, 4096);
+  bool done = false;
+  while !done {
+    int n = src.read(tmp)?^;
+    if n == 0 {
+      done = true;
+    } else {
+      int i = 0;
+      while i < n {
+        all.push(tmp[i]);
+        i = i + 1;
+      }
+    }
+  }
+  return gunzip(all)?^;
+}

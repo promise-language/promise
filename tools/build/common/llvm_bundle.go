@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // BundleLLVM gzips LLVM tools into the resources directory for release builds.
@@ -35,6 +34,9 @@ func BundleLLVM(root string, llvm *LLVMInfo) error {
 	if tEntry == nil {
 		return fmt.Errorf("prebuilts manifest: no [binaries.llvm.targets.%s] entry", target)
 	}
+	if tEntry.Unsupported != "" {
+		return fmt.Errorf("LLVM bundling is not supported on %s: %s", target, tEntry.Unsupported)
+	}
 
 	dst := filepath.Join(root, llvmEntry.BundleDir, target)
 
@@ -48,60 +50,58 @@ func BundleLLVM(root string, llvm *LLVMInfo) error {
 	if err := BundleFromExtracted(extractedRoot, dst, tEntry.Files); err != nil {
 		return fmt.Errorf("bundle LLVM: %w", err)
 	}
-
-	// Local-only post-step: macOS Homebrew's libLLVM.dylib has absolute
-	// dyld refs to /opt/homebrew/lib/lib{c++,unwind}.1.dylib etc. The official
-	// llvmorg tarball is self-contained and doesn't need this. So we run otool
-	// against the local install and bundle whatever Homebrew dylibs it pulls in,
-	// in addition to the manifest's explicit entries.
-	if IsDarwin() {
-		if err := bundleDarwinHomebrewDeps(extractedRoot, dst); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
 // localLLVMExtractedRoot returns a synthetic "extracted root" for the local
 // LLVM install — a directory whose layout matches the official tarball's
-// (bin/{opt,llc,lld}, lib/libLLVM.*) so the same manifest file ops apply.
+// (bin/{opt,llc,lld}, lib/libLLVM.*, lib/libz3.*, lib/libzstd.*) so the same
+// manifest file ops apply.
 //
-// On Linux/Windows this is just `llvm.Dir`. On macOS it stitches together
-// the Homebrew llvm + lld trees (Homebrew may package lld separately) into a
-// staging directory under PROMISE_HOME.
+// On Linux/Windows this is just `llvm.Dir`. On macOS it stitches together the
+// Homebrew llvm keg with the separate kegs that hold lld and libLLVM's runtime
+// dylib dependencies (z3, zstd) into a single staging tree under PROMISE_HOME.
 func localLLVMExtractedRoot(llvm *LLVMInfo) (string, error) {
 	if !IsDarwin() {
 		return llvm.Dir, nil
 	}
 
-	// macOS path: Homebrew may put lld in a separate prefix.
-	brewLLDDir := llvm.Dir
-	lldBin := filepath.Join(llvm.Dir, "bin", "lld")
-	if !Exists(lldBin) {
-		for _, prefix := range []string{"/opt/homebrew/opt/lld", "/usr/local/opt/lld"} {
-			if Exists(filepath.Join(prefix, "bin", "lld")) {
-				brewLLDDir = prefix
-				break
-			}
+	// On macOS, libz3 and libzstd live in their own Homebrew kegs (not the
+	// llvm@22 keg). Resolve each keg the manifest requires; missing kegs are
+	// a hard error so the build fails loudly with a clear message instead of
+	// producing an incomplete bundle.
+	overlayLibs := []string{}
+	for _, keg := range []string{"lld", "z3", "zstd"} {
+		dir, err := resolveBrewKeg(keg)
+		if err != nil {
+			return "", err
 		}
-	}
-	// If lld lives in the same tree as opt, no staging needed.
-	if brewLLDDir == llvm.Dir {
-		return llvm.Dir, nil
+		overlayLibs = append(overlayLibs, dir)
 	}
 
-	// Stage lld bin+lib alongside the LLVM tree via symlinks. Stable path
-	// keyed on the LLVM dir basename so repeated builds don't accumulate
-	// staging dirs.
+	// Stable staging path keyed on the LLVM dir basename so repeated builds
+	// don't accumulate staging dirs.
 	stageRoot, err := stageDir("llvm-" + filepath.Base(llvm.Dir))
 	if err != nil {
 		return "", err
 	}
-	if err := mirrorTreeWithLLD(stageRoot, llvm.Dir, brewLLDDir); err != nil {
+	if err := mirrorStagingTree(stageRoot, llvm.Dir, overlayLibs); err != nil {
 		return "", err
 	}
 	return stageRoot, nil
+}
+
+// resolveBrewKeg locates a Homebrew keg by name. Searches /opt/homebrew/opt/<name>
+// (Apple Silicon) then /usr/local/opt/<name> (x86_64). Returns the keg's root
+// (which contains lib/ and possibly bin/).
+func resolveBrewKeg(name string) (string, error) {
+	for _, prefix := range []string{"/opt/homebrew/opt", "/usr/local/opt"} {
+		path := filepath.Join(prefix, name)
+		if Exists(path) {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("Homebrew keg %q not found in /opt/homebrew/opt or /usr/local/opt — install with `brew install %s`", name, name)
 }
 
 // stageDir returns a stable scratch directory under $PROMISE_HOME/cache/build-stage/<name>.
@@ -130,9 +130,11 @@ func buildStageRoot() (string, error) {
 }
 
 // mirrorTreeWithLLD populates stageRoot with bin/ and lib/ symlinks from the
-// LLVM install, overlaying lld's bin/ and lib/ from a separate prefix. This
-// lets the manifest see a unified `bin/lld` + `lib/liblld*.dylib` layout.
-func mirrorTreeWithLLD(stageRoot, llvmDir, lldDir string) error {
+// LLVM install, overlaying bin/ and lib/ from each additional Homebrew keg.
+// This lets the manifest see a unified layout (e.g. `bin/lld` and
+// `lib/liblld*.dylib` even though Homebrew packages lld separately, plus
+// `lib/libz3.*.dylib` from the z3 keg, `lib/libzstd.*.dylib` from zstd, etc).
+func mirrorStagingTree(stageRoot, llvmDir string, overlays []string) error {
 	for _, sub := range []string{"bin", "lib"} {
 		dst := filepath.Join(stageRoot, sub)
 		if err := os.RemoveAll(dst); err != nil {
@@ -148,12 +150,13 @@ func mirrorTreeWithLLD(stageRoot, llvmDir, lldDir string) error {
 	if err := mirrorDir(filepath.Join(llvmDir, "lib"), filepath.Join(stageRoot, "lib")); err != nil {
 		return err
 	}
-	// Overlay lld bin/lib (only files not already present).
-	if err := overlayDir(filepath.Join(lldDir, "bin"), filepath.Join(stageRoot, "bin")); err != nil {
-		return err
-	}
-	if err := overlayDir(filepath.Join(lldDir, "lib"), filepath.Join(stageRoot, "lib")); err != nil {
-		return err
+	for _, overlay := range overlays {
+		if err := overlayDir(filepath.Join(overlay, "bin"), filepath.Join(stageRoot, "bin")); err != nil {
+			return err
+		}
+		if err := overlayDir(filepath.Join(overlay, "lib"), filepath.Join(stageRoot, "lib")); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -205,11 +208,12 @@ func overlayDir(src, dst string) error {
 	return nil
 }
 
-// BundleLLVMFromFetched is the --fetch counterpart to BundleLLVM. It uses the
-// extracted tree from the downloaded tarball instead of the local install.
+// BundleLLVMFromFetched is the --fetch counterpart to BundleLLVM. FetchPrebuilt
+// has already populated cacheDir with the manifest's `out` files (flat layout);
+// this function just gzips them into the embed dir.
 // Returns nil if no LLVM was fetched (all targets optional + missing).
-func BundleLLVMFromFetched(root string, manifest *PrebuiltsManifest, extractedRoot string) error {
-	if extractedRoot == "" {
+func BundleLLVMFromFetched(root string, manifest *PrebuiltsManifest, cacheDir string) error {
+	if cacheDir == "" {
 		return nil
 	}
 	target := CurrentBuildTarget()
@@ -221,91 +225,44 @@ func BundleLLVMFromFetched(root string, manifest *PrebuiltsManifest, extractedRo
 	if tEntry == nil {
 		return fmt.Errorf("prebuilts manifest: no [binaries.llvm.targets.%s] entry", target)
 	}
+	if tEntry.Unsupported != "" {
+		return fmt.Errorf("LLVM bundling is not supported on %s: %s", target, tEntry.Unsupported)
+	}
 	dst := filepath.Join(root, llvmEntry.BundleDir, target)
 
-	// LLVM tarballs typically extract into a single top-level dir like
-	// "clang+llvm-22.1.0-x86_64-linux-gnu-ubuntu-22.04/". Resolve that.
-	innerRoot, err := singleTopLevelDir(extractedRoot)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Bundling fetched LLVM %s (%s)...\n", llvmEntry.Version, target)
-	return BundleFromExtracted(innerRoot, dst, tEntry.Files)
+	fmt.Printf("Bundling fetched LLVM %s (%s) from %s...\n", llvmEntry.Version, target, cacheDir)
+	return BundleFromCache(cacheDir, dst, tEntry.Files)
 }
 
 // singleTopLevelDir returns the unique top-level subdirectory of root,
 // or root itself if there isn't exactly one.
+// singleTopLevelDir returns the unique top-level subdirectory of root, or
+// root itself if the tarball didn't pack everything under a wrapper.
+//
+// Heuristic: only treat the single dir as a wrapper when ALL top-level entries
+// are directories AND there's exactly one. If any top-level file exists, the
+// tarball was packed flat and we should use root directly. (LLVM-22.1.0-* and
+// similar tarballs always have a wrapper; test tarballs typically don't.)
 func singleTopLevelDir(root string) (string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return "", err
 	}
 	var dirs []string
+	hasFile := false
 	for _, e := range entries {
 		if e.IsDir() {
 			dirs = append(dirs, e.Name())
+		} else {
+			hasFile = true
 		}
 	}
-	if len(dirs) == 1 {
+	if len(dirs) == 1 && !hasFile {
 		return filepath.Join(root, dirs[0]), nil
 	}
 	return root, nil
 }
 
-// bundleDarwinHomebrewDeps scans the extracted libLLVM.dylib for Homebrew-prefix
-// dependencies and gzips them into dst. Local-only — fetched LLVM tarballs
-// declare their dylibs explicitly in the manifest and don't have Homebrew refs.
-func bundleDarwinHomebrewDeps(extractedRoot, dst string) error {
-	libLLVM := filepath.Join(extractedRoot, "lib", "libLLVM.dylib")
-	if !Exists(libLLVM) {
-		return nil
-	}
-	deps, err := otoolDeps(libLLVM)
-	if err != nil {
-		// otool may not be installed in some environments — soft-fail so
-		// non-darwin paths still bundle correctly.
-		fmt.Fprintf(os.Stderr, "  warning: otool failed (skipping Homebrew dep scan): %v\n", err)
-		return nil
-	}
-	for _, dep := range deps {
-		name := filepath.Base(dep) + ".gz"
-		out := filepath.Join(dst, name)
-		if Exists(out) {
-			continue
-		}
-		if err := gzipFile(dep, out); err != nil {
-			fmt.Fprintf(os.Stderr, "  warning: could not bundle %s: %v\n", dep, err)
-			continue
-		}
-		printSize(out)
-	}
-	return nil
-}
-
-// otoolDeps returns Homebrew dependency paths from otool -L output,
-// excluding libLLVM itself. Used as a darwin-local post-hook to capture
-// the implicit dylib graph that Homebrew install paths produce.
-func otoolDeps(dylib string) ([]string, error) {
-	out, err := RunOutput("otool", "-L", dylib)
-	if err != nil {
-		return nil, err
-	}
-	var deps []string
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		parts := strings.Fields(line)
-		if len(parts) == 0 {
-			continue
-		}
-		path := parts[0]
-		if (strings.HasPrefix(path, "/opt/homebrew/") || strings.HasPrefix(path, "/usr/local/")) &&
-			!strings.Contains(path, "libLLVM") {
-			deps = append(deps, path)
-		}
-	}
-	return deps, nil
-}
 
 func gzipFile(src, dst string) error {
 	in, err := os.Open(src)

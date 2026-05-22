@@ -4,9 +4,14 @@
 # bundling whatever is locally installed (Homebrew on macOS, apt llvm-22 on
 # Linux, manual install dir on Windows).
 #
-# To pin a new version: download the asset, `shasum -a 256`, paste the digest
-# into `sha256`, bump `version`, commit. Empty `sha256` skips verification with
-# a loud warning — fine for development, MUST be filled in before release.
+# To pin a new version: bump `version`, update URLs, run `bin/pin-prebuilts`
+# (which downloads each URL, computes its sha256, and writes it back here).
+# Empty `sha256` skips verification with a loud warning — fine for development,
+# MUST be filled in before release.
+#
+# The `out` field is the cache-relative file name *without* the .gz suffix.
+# At build time, the file is gzipped into the embed dir as "<out>.gz". At
+# runtime / in the prebuilts cache, it lives as "<out>" (raw, executable).
 
 schema = 1
 
@@ -21,53 +26,68 @@ version = "22.1.0"
 bundle_dir = "compiler/cmd/promise/resources/llvm"
 
 [binaries.llvm.targets.linux-amd64]
-url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-linux-gnu-ubuntu-22.04.tar.xz"
-sha256 = ""
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-X64.tar.xz"
+sha256 = "8d662e425e46c48b45f5f970770b5e37f323607c8c2cbc371593fc9c4ba1e7b3"
 # Files to copy out of the extracted tree into <bundle_dir>/<target>/, gzipped.
 # `src` paths are relative to the top-level extracted directory.
 # `resolve_symlink = true` runs filepath.EvalSymlinks before reading (libLLVM.so
 # is normally a symlink to libLLVM.so.22 etc.).
 files = [
-  { src = "bin/opt",        out = "opt.gz" },
-  { src = "bin/llc",        out = "llc.gz" },
-  { src = "bin/lld",        out = "lld.gz" },
-  { src = "lib/libLLVM.so", out = "libLLVM.so.gz", resolve_symlink = true },
+  { src = "bin/opt",        out = "opt" },
+  { src = "bin/llc",        out = "llc" },
+  { src = "bin/lld",        out = "lld" },
+  { src = "lib/libLLVM.so", out = "libLLVM.so", resolve_symlink = true },
 ]
 
 [binaries.llvm.targets.darwin-arm64]
-url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-arm64-apple-darwin22.0.tar.xz"
-sha256 = ""
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-macOS-ARM64.tar.xz"
+sha256 = "cd5e615f4dab23d0239359cd343202c5f6ceeaf072c245a3c685d73afac09646"
+# Exhaustive list of every file that ends up in the runtime bundle for this
+# pinned LLVM version. No globs, no auto-discovery — what's listed here is
+# what gets embedded in the compiler binary, regardless of source (--fetch
+# tarball or local Homebrew install). If a future LLVM version adds, removes,
+# or renames any file (e.g., bumps libz3 to a different soname), bump
+# `version` above and update this list in lockstep.
+#
+# Categories:
+#   bin/{opt,llc,lld}           — tools the compiler invokes via PAL
+#   lib/libLLVM.dylib           — LLVM core, dlopen'd by the tools
+#   lib/liblld*.dylib           — lld linker plugins (NOT liblldb, NOT clang)
+#   lib/libz3.*.dylib           — Z3 SMT solver, used by libLLVM polyhedral passes
+#   lib/libzstd.1.dylib         — zstd compression, used by libLLVM ELF/MachO sections
 files = [
-  { src = "bin/opt",                 out = "opt.gz" },
-  { src = "bin/llc",                 out = "llc.gz" },
-  { src = "bin/lld",                 out = "lld.gz" },
-  { src = "lib/libLLVM.dylib",       out = "libLLVM.dylib.gz" },
-  { src = "lib/libc++.1.dylib",      out = "libc++.1.dylib.gz" },
-  { src = "lib/libunwind.1.dylib",   out = "libunwind.1.dylib.gz" },
-  # liblld dylibs — glob to match the existing bundleLLVMDarwin behavior.
-  # `{basename}` in `out` substitutes the matched file's basename.
-  { glob = "lib/liblld*.dylib",      out = "{basename}.gz" },
+  { src = "bin/opt",                out = "opt" },
+  { src = "bin/llc",                out = "llc" },
+  { src = "bin/lld",                out = "lld" },
+  { src = "lib/libLLVM.dylib",      out = "libLLVM.dylib" },
+  { src = "lib/liblldCOFF.dylib",   out = "liblldCOFF.dylib" },
+  { src = "lib/liblldCommon.dylib", out = "liblldCommon.dylib" },
+  { src = "lib/liblldELF.dylib",    out = "liblldELF.dylib" },
+  { src = "lib/liblldMachO.dylib",  out = "liblldMachO.dylib" },
+  { src = "lib/liblldMinGW.dylib",  out = "liblldMinGW.dylib" },
+  { src = "lib/liblldWasm.dylib",   out = "liblldWasm.dylib" },
+  { src = "lib/libz3.4.15.dylib",   out = "libz3.4.15.dylib" },
+  { src = "lib/libzstd.1.dylib",    out = "libzstd.1.dylib" },
 ]
 
 [binaries.llvm.targets.darwin-amd64]
-url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-apple-darwin22.0.tar.xz"
+# Upstream LLVM stopped publishing macOS x86_64 tarballs at version 22 (the
+# release page only ships LLVM-22.1.0-macOS-ARM64.tar.xz). The entry stays
+# here so a community member can fill it in later if they host an x86_64
+# build under their own URL — until then, `bin/build --release` and
+# `bin/build --release --fetch` will surface the `unsupported` reason
+# verbatim and refuse to build for this target.
+unsupported = "no upstream LLVM 22.1.0 tarball for macOS x86_64; Apple Silicon only on this release"
+url = ""
 sha256 = ""
-files = [
-  { src = "bin/opt",                 out = "opt.gz" },
-  { src = "bin/llc",                 out = "llc.gz" },
-  { src = "bin/lld",                 out = "lld.gz" },
-  { src = "lib/libLLVM.dylib",       out = "libLLVM.dylib.gz" },
-  { src = "lib/libc++.1.dylib",      out = "libc++.1.dylib.gz" },
-  { src = "lib/libunwind.1.dylib",   out = "libunwind.1.dylib.gz" },
-  { glob = "lib/liblld*.dylib",      out = "{basename}.gz" },
-]
+files = []
 
 [binaries.llvm.targets.windows-amd64]
 url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-pc-windows-msvc.tar.xz"
-sha256 = ""
+sha256 = "2dd6a6c990865f98766dec58cce1cbfba48e5affc0098e5b1fff96c2f1d23e81"
 files = [
-  { src = "bin/opt.exe", out = "opt.exe.gz" },
-  { src = "bin/llc.exe", out = "llc.exe.gz" },
+  { src = "bin/opt.exe", out = "opt.exe" },
+  { src = "bin/llc.exe", out = "llc.exe" },
   # Codegen aliases lld.exe to lld-link at runtime (see llvm_windows_amd64.go).
-  { src = "bin/lld.exe", out = "lld.exe.gz" },
+  { src = "bin/lld.exe", out = "lld.exe" },
 ]

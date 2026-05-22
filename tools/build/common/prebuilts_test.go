@@ -46,6 +46,11 @@ func TestLoadPrebuiltsManifest_Real(t *testing.T) {
 			t.Errorf("missing [binaries.llvm.targets.%s]", target)
 			continue
 		}
+		if te.Unsupported != "" {
+			// Placeholder targets (e.g., upstream stopped publishing macOS x86_64
+			// tarballs at LLVM 22) are valid with empty url/files.
+			continue
+		}
 		if te.URL == "" {
 			t.Errorf("target %s: empty url", target)
 		}
@@ -74,19 +79,7 @@ func TestPrebuiltsManifest_ValidateRejectsBadFiles(t *testing.T) {
 		want string
 	}{
 		{
-			name: "both src and glob",
-			toml: `schema = 1
-[binaries.x]
-version = "1"
-bundle_dir = "out"
-[binaries.x.targets.linux-amd64]
-url = "https://example/a.tar.xz"
-files = [{ src = "a", glob = "b*", out = "c.gz" }]
-`,
-			want: "exactly one of src or glob",
-		},
-		{
-			name: "neither src nor glob",
+			name: "missing src",
 			toml: `schema = 1
 [binaries.x]
 version = "1"
@@ -95,7 +88,7 @@ bundle_dir = "out"
 url = "https://example/a.tar.xz"
 files = [{ out = "c.gz" }]
 `,
-			want: "exactly one of src or glob",
+			want: "missing src",
 		},
 		{
 			name: "missing out",
@@ -157,9 +150,11 @@ files = [{ src = "a", out = "b.gz" }]
 	}
 }
 
-// TestBundleFromExtracted_SrcAndGlob exercises both file-op forms against a
-// staged extracted tree.
-func TestBundleFromExtracted_SrcAndGlob(t *testing.T) {
+// TestBundleFromExtracted_MultipleFiles exercises the explicit file list against
+// a staged extracted tree. The manifest is exhaustive (no globs, no
+// auto-discovery), so multiple Src entries must round-trip correctly and any
+// file not listed must be ignored.
+func TestBundleFromExtracted_MultipleFiles(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
 
@@ -178,13 +173,15 @@ func TestBundleFromExtracted_SrcAndGlob(t *testing.T) {
 	mkFile("lib/unrelated.txt", "should_not_match")
 
 	files := []PrebuiltFile{
-		{Src: "bin/opt", Out: "opt.gz"},
-		{Glob: "lib/liblld*.dylib", Out: "{basename}.gz"},
+		{Src: "bin/opt", Out: "opt"},
+		{Src: "lib/liblldCommon.dylib", Out: "liblldCommon.dylib"},
+		{Src: "lib/liblldELF.dylib", Out: "liblldELF.dylib"},
 	}
 	if err := BundleFromExtracted(src, dst, files); err != nil {
 		t.Fatalf("BundleFromExtracted: %v", err)
 	}
 
+	// `out` is the cache-relative name without .gz; bundling appends .gz.
 	want := map[string]string{
 		"opt.gz":                "OPT_BINARY",
 		"liblldCommon.dylib.gz": "LLD_COMMON",
@@ -200,9 +197,9 @@ func TestBundleFromExtracted_SrcAndGlob(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", name, got, wantContent)
 		}
 	}
-	// Glob must not pick up unrelated files.
+	// Unlisted files must not appear in the bundle.
 	if _, err := os.Stat(filepath.Join(dst, "unrelated.txt.gz")); !os.IsNotExist(err) {
-		t.Errorf("unrelated.txt.gz should not exist (glob too greedy)")
+		t.Errorf("unrelated.txt.gz should not exist (manifest is exhaustive)")
 	}
 }
 
@@ -224,7 +221,7 @@ func TestBundleFromExtracted_ResolveSymlink(t *testing.T) {
 	}
 
 	files := []PrebuiltFile{
-		{Src: "lib/libLLVM.so", Out: "libLLVM.so.gz", ResolveSymlink: true},
+		{Src: "lib/libLLVM.so", Out: "libLLVM.so", ResolveSymlink: true},
 	}
 	if err := BundleFromExtracted(src, dst, files); err != nil {
 		t.Fatalf("BundleFromExtracted: %v", err)
@@ -258,7 +255,7 @@ func TestFetchPrebuilt_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	cacheRoot := t.TempDir()
-	t.Setenv("PROMISE_HOME", cacheRoot)
+	t.Setenv("PROMISE_PREBUILTS_CACHE", cacheRoot)
 
 	manifestPath := filepath.Join(t.TempDir(), "prebuilts.toml")
 	if err := os.WriteFile(manifestPath, []byte(`schema = 1
@@ -268,7 +265,7 @@ bundle_dir = "out"
 [binaries.demo.targets.linux-amd64]
 url = "`+srv.URL+`/demo.tar.gz"
 sha256 = "`+wantHash+`"
-files = [{ src = "bin/opt", out = "opt.gz" }]
+files = [{ src = "bin/opt", out = "opt" }]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -277,20 +274,22 @@ files = [{ src = "bin/opt", out = "opt.gz" }]
 		t.Fatal(err)
 	}
 
-	root, err := FetchPrebuilt(m, "demo", "linux-amd64")
+	cacheDir, err := FetchPrebuilt(m, "demo", "linux-amd64")
 	if err != nil {
 		t.Fatalf("FetchPrebuilt: %v", err)
 	}
 
-	// sha256.ok marker exists.
-	parent := filepath.Dir(root)
-	if !Exists(filepath.Join(parent, "sha256.ok")) {
-		t.Errorf("missing sha256.ok marker in %s", parent)
+	// archive.ok and tools.ok markers exist.
+	if !Exists(filepath.Join(cacheDir, "archive.ok")) {
+		t.Errorf("missing archive.ok marker in %s", cacheDir)
 	}
-	// File extracted with content.
-	got, err := os.ReadFile(filepath.Join(root, "bin", "opt"))
+	if !Exists(filepath.Join(cacheDir, "tools.ok")) {
+		t.Errorf("missing tools.ok marker in %s", cacheDir)
+	}
+	// Manifest's `out` file lives flat in the cache dir with the source content.
+	got, err := os.ReadFile(filepath.Join(cacheDir, "opt"))
 	if err != nil {
-		t.Fatalf("read extracted opt: %v", err)
+		t.Fatalf("read cached opt: %v", err)
 	}
 	if string(got) != "OPT_CONTENT" {
 		t.Errorf("opt content = %q, want OPT_CONTENT", got)
@@ -317,7 +316,8 @@ func TestFetchPrebuilt_BadSHA(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	cacheRoot := t.TempDir()
+	t.Setenv("PROMISE_PREBUILTS_CACHE", cacheRoot)
 
 	manifestPath := filepath.Join(t.TempDir(), "prebuilts.toml")
 	if err := os.WriteFile(manifestPath, []byte(`schema = 1
@@ -327,7 +327,7 @@ bundle_dir = "out"
 [binaries.demo.targets.linux-amd64]
 url = "`+srv.URL+`/demo.tar.gz"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-files = [{ src = "bin/opt", out = "opt.gz" }]
+files = [{ src = "bin/opt", out = "opt" }]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -344,11 +344,12 @@ files = [{ src = "bin/opt", out = "opt.gz" }]
 		t.Errorf("error = %v, want sha256 mismatch", err)
 	}
 
-	// No sha256.ok marker should exist.
-	root, _ := PrebuiltsCacheRoot()
-	marker := filepath.Join(root, "demo", "1.0.0", "linux-amd64", "sha256.ok")
-	if Exists(marker) {
-		t.Errorf("sha256.ok exists despite mismatch: %s", marker)
+	// Neither sentinel should be written when the hash mismatches.
+	cacheDir := filepath.Join(cacheRoot, "demo", "1.0.0", "linux-amd64")
+	for _, name := range []string{"archive.ok", "tools.ok"} {
+		if Exists(filepath.Join(cacheDir, name)) {
+			t.Errorf("%s exists despite mismatch: %s", name, filepath.Join(cacheDir, name))
+		}
 	}
 }
 
@@ -428,7 +429,7 @@ func TestFetchAll_OnlySubset(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
 
 	manifestPath := filepath.Join(t.TempDir(), "prebuilts.toml")
 	if err := os.WriteFile(manifestPath, []byte(`schema = 1
@@ -438,7 +439,7 @@ bundle_dir = "outa"
 [binaries.a.targets.linux-amd64]
 url = "`+srv.URL+`/a/a.tar.gz"
 sha256 = "`+wantHash+`"
-files = [{ src = "a", out = "a.gz" }]
+files = [{ src = "a", out = "a" }]
 
 [binaries.b]
 version = "1"
@@ -446,7 +447,7 @@ bundle_dir = "outb"
 [binaries.b.targets.linux-amd64]
 url = "`+srv.URL+`/b/b.tar.gz"
 sha256 = "`+wantHash+`"
-files = [{ src = "a", out = "a.gz" }]
+files = [{ src = "a", out = "a" }]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +602,7 @@ func TestFetchPrebuilt_EmptySHA256Warning(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("PROMISE_HOME", t.TempDir())
+	t.Setenv("PROMISE_PREBUILTS_CACHE", t.TempDir())
 
 	manifestPath := filepath.Join(t.TempDir(), "prebuilts.toml")
 	if err := os.WriteFile(manifestPath, []byte(`schema = 1
@@ -611,7 +612,7 @@ bundle_dir = "out"
 [binaries.demo.targets.linux-amd64]
 url = "`+srv.URL+`/demo.tar.gz"
 sha256 = ""
-files = [{ src = "bin/opt", out = "opt.gz" }]
+files = [{ src = "bin/opt", out = "opt" }]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -620,48 +621,19 @@ files = [{ src = "bin/opt", out = "opt.gz" }]
 		t.Fatal(err)
 	}
 
-	root, err := FetchPrebuilt(m, "demo", "linux-amd64")
+	cacheDir, err := FetchPrebuilt(m, "demo", "linux-amd64")
 	if err != nil {
 		t.Fatalf("FetchPrebuilt with empty sha256: %v", err)
 	}
-	if !Exists(filepath.Join(filepath.Dir(root), "sha256.ok")) {
-		t.Error("sha256.ok marker missing despite empty-sha success path")
+	if !Exists(filepath.Join(cacheDir, "archive.ok")) {
+		t.Error("archive.ok marker missing despite empty-sha success path")
 	}
-	got, err := os.ReadFile(filepath.Join(root, "bin", "opt"))
+	if !Exists(filepath.Join(cacheDir, "tools.ok")) {
+		t.Error("tools.ok marker missing despite empty-sha success path")
+	}
+	got, err := os.ReadFile(filepath.Join(cacheDir, "opt"))
 	if err != nil || string(got) != "OPT" {
-		t.Errorf("extracted content = %q (err %v), want OPT", got, err)
-	}
-}
-
-// TestBundleFromExtracted_GlobWithResolveSymlink covers the combined-feature
-// path: a glob match that also follows a symlink.
-func TestBundleFromExtracted_GlobWithResolveSymlink(t *testing.T) {
-	src := t.TempDir()
-	dst := t.TempDir()
-
-	if err := os.MkdirAll(filepath.Join(src, "lib"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	real := filepath.Join(src, "lib", "liblldELF.dylib.22")
-	if err := os.WriteFile(real, []byte("REAL_LLD_ELF"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("liblldELF.dylib.22", filepath.Join(src, "lib", "liblldELF.dylib")); err != nil {
-		t.Fatal(err)
-	}
-
-	files := []PrebuiltFile{
-		{Glob: "lib/liblldELF.dylib", Out: "{basename}.gz", ResolveSymlink: true},
-	}
-	if err := BundleFromExtracted(src, dst, files); err != nil {
-		t.Fatalf("BundleFromExtracted: %v", err)
-	}
-	got, err := readGzipped(filepath.Join(dst, "liblldELF.dylib.gz"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "REAL_LLD_ELF" {
-		t.Errorf("got %q, want REAL_LLD_ELF", got)
+		t.Errorf("cached content = %q (err %v), want OPT", got, err)
 	}
 }
 
@@ -680,7 +652,7 @@ func TestExtractZip_HappyPath(t *testing.T) {
 	}
 
 	dst := t.TempDir()
-	if err := extractArchive(zipPath, dst); err != nil {
+	if err := ExtractArchive(zipPath, dst); err != nil {
 		t.Fatalf("extractArchive: %v", err)
 	}
 
@@ -725,7 +697,7 @@ func TestExtractZip_PathTraversal(t *testing.T) {
 				t.Fatal(err)
 			}
 			dst := t.TempDir()
-			err := extractArchive(zipPath, dst)
+			err := ExtractArchive(zipPath, dst)
 			if err == nil {
 				t.Fatalf("expected refusal for entry %q, got nil", tc.entryName)
 			}
@@ -751,7 +723,7 @@ func TestExtractArchive_UnsupportedFormat(t *testing.T) {
 	if err := os.WriteFile(bogus, []byte("not a real archive"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := extractArchive(bogus, t.TempDir())
+	err := ExtractArchive(bogus, t.TempDir())
 	if err == nil {
 		t.Fatal("expected error for unsupported format, got nil")
 	}
@@ -809,29 +781,18 @@ func TestSingleTopLevelDir(t *testing.T) {
 }
 
 // TestBundleLLVMFromFetched_HappyPath wires the --fetch bundling end-to-end
-// against a synthetic extracted tree (no actual download). This covers the
-// path that `bin/build --release --fetch` takes after FetchAll returns.
+// against a synthetic flat cache dir (no actual download). After FetchPrebuilt
+// the cache dir holds files at their `out` names; BundleLLVMFromFetched gzips
+// them into the embed dir as "<out>.gz".
 func TestBundleLLVMFromFetched_HappyPath(t *testing.T) {
-	// Synthetic "extracted root" with a single top-level dir matching the
-	// shape of an LLVM tarball.
-	extracted := t.TempDir()
-	inner := filepath.Join(extracted, "clang+llvm-22.1.0-x86_64-linux")
-	for _, sub := range []string{"bin", "lib"} {
-		if err := os.MkdirAll(filepath.Join(inner, sub), 0o755); err != nil {
-			t.Fatal(err)
-		}
+	// Synthetic prebuilts cache dir with the manifest's `out` files flat.
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "opt"), []byte("OPT_FETCHED"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	mkFile := func(rel, content string) {
-		full := filepath.Join(inner, rel)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(filepath.Join(cacheDir, "llc"), []byte("LLC_FETCHED"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	mkFile("bin/opt", "OPT_FETCHED")
-	mkFile("bin/llc", "LLC_FETCHED")
 
 	// Synthetic "repo root" + manifest declaring just the running target.
 	root := t.TempDir()
@@ -848,8 +809,8 @@ bundle_dir = "compiler/cmd/promise/resources/llvm"
 url = "https://example/llvm.tar.xz"
 sha256 = "deadbeef"
 files = [
-  { src = "bin/opt", out = "opt.gz" },
-  { src = "bin/llc", out = "llc.gz" },
+  { src = "bin/opt", out = "opt" },
+  { src = "bin/llc", out = "llc" },
 ]
 `
 	if err := os.WriteFile(filepath.Join(manifestDir, "prebuilts.toml"), []byte(manifestText), 0o644); err != nil {
@@ -859,7 +820,7 @@ files = [
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := BundleLLVMFromFetched(root, m, extracted); err != nil {
+	if err := BundleLLVMFromFetched(root, m, cacheDir); err != nil {
 		t.Fatalf("BundleLLVMFromFetched: %v", err)
 	}
 	dst := filepath.Join(root, "compiler/cmd/promise/resources/llvm", target)
@@ -878,11 +839,11 @@ files = [
 	}
 }
 
-// TestBundleLLVMFromFetched_NoExtractedRoot is the "all-optional, none fetched"
+// TestBundleLLVMFromFetched_NoCacheDir is the "all-optional, none fetched"
 // short-circuit: returns nil without touching the filesystem.
-func TestBundleLLVMFromFetched_NoExtractedRoot(t *testing.T) {
+func TestBundleLLVMFromFetched_NoCacheDir(t *testing.T) {
 	if err := BundleLLVMFromFetched(t.TempDir(), &PrebuiltsManifest{}, ""); err != nil {
-		t.Errorf("expected nil for empty extractedRoot, got %v", err)
+		t.Errorf("expected nil for empty cacheDir, got %v", err)
 	}
 }
 

@@ -79,3 +79,6 @@ bin/audit-exceptions.exe~
 bin/clean
 bin/clean.exe
 bin/clean.exe~
+bin/pin-prebuilts
+bin/pin-prebuilts.exe
+bin/pin-prebuilts.exe~

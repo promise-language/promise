@@ -201,17 +201,22 @@ func (c *Checker) tryMove(expr ast.Expr) {
 // it and will drop it at scope exit. Used at sites that genuinely consume
 // (e.g., passing to a `~` callee parameter).
 func (c *Checker) tryMoveConsume(expr ast.Expr) {
+	// T0407: any expression whose static type is `T&`/`T~` (non-Copy) is a
+	// non-owning reference produced by Arc.borrow, MutexGuard.borrow, or any
+	// composition through if/match/paren that preserves the borrow type.
+	// Moving it into a consume site transfers ownership of the inner pointer
+	// while the parent Arc/Mutex retains its drop responsibility → UAF on the
+	// next read or owner drop. The type-driven check supplants the AST-shape
+	// recursion T0377/T0380/T0381/T0401 needed: a single check covers all
+	// current and future wrapping shapes uniformly, since sema propagates
+	// `T&` through expression composition.
+	if c.isBorrowedExpr(expr) {
+		c.errorf(expr.Pos(),
+			"cannot move out of '.borrow' getter; the parent Arc/Mutex retains ownership — call .clone() to create an independent copy, or assign to a variable to bind a borrow")
+		return
+	}
 	// B0341 field-move check delegated to tryMove; inherit it here too.
 	if member, ok := expr.(*ast.MemberExpr); ok {
-		// T0380/T0381: a member expression typed as `T&`/`T~` is a non-owning
-		// reference (e.g., Arc.borrow, MutexGuard.borrow). Moving it transfers
-		// ownership of the inner pointer to the consumer while the parent
-		// retains its own drop responsibility → double-free.
-		if c.isBorrowedExpr(member) {
-			c.errorf(member.Pos(),
-				"cannot move out of '.borrow' getter; the parent Arc/Mutex retains ownership — call .clone() to create an independent copy, or assign to a variable to bind a borrow")
-			return
-		}
 		c.checkFieldMoveOwnership(member)
 		return
 	}

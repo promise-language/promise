@@ -3979,6 +3979,9 @@ func TestT0380_BorrowVarReadOK(t *testing.T) {
 }
 
 // Borrow used in vector literal is rejected (collection consumes).
+// T0407: the type-driven check at the top of `tryMoveConsume` fires first
+// because `borrowed` is typed `string&` (a non-Copy borrow) — the unified
+// diagnostic supersedes the per-ident "borrowed value" message.
 func TestT0380_BorrowInVectorLit(t *testing.T) {
 	errs := ownerErrs(t, `
 		test() {
@@ -3988,7 +3991,7 @@ func TestT0380_BorrowInVectorLit(t *testing.T) {
 			string[] v = [borrowed];
 		}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'borrowed'")
+	expectOwnerError(t, errs, "cannot move out of '.borrow' getter")
 }
 
 // T0381 / T0438: explicit `string& borrowed = a.borrow;` keeps the var as a
@@ -4831,6 +4834,96 @@ func TestT0401_TypedRefLocalReassignFromBorrowOK(t *testing.T) {
 			b = a2.borrow;
 		}
 	`)
+}
+
+// === T0407: setter LHS / consume site with if/match/paren-wrapped borrow RHS ===
+//
+// `tryMoveConsume` previously only inspected the direct `MemberExpr` shape,
+// so `guard.borrow = if cond { guard.borrow } else { guard.borrow }` (and the
+// match/paren variants) slipped through to runtime as a UAF — the setter
+// drop-then-stores while the parent Mutex retains its drop responsibility.
+// T0407 replaces the AST-shape check with a type-driven one at the top of
+// `tryMoveConsume`: any expr typed `T&`/`T~` (non-Copy) is rejected
+// uniformly, since sema's `joinBranchTypes` preserves the borrow type
+// through if/match arms and `ParenExpr` propagates the inner type.
+
+func TestT0407_AssignSetterFromIfBorrow(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			m := Mutex[string]("hi" + "");
+			use guard := m.lock();
+			cond := true;
+			guard.borrow = if cond { guard.borrow } else { guard.borrow };
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move out of '.borrow' getter")
+}
+
+func TestT0407_AssignSetterFromMatchBorrow(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			m := Mutex[string]("hi" + "");
+			use guard := m.lock();
+			x := 1;
+			guard.borrow = match x { 1 => guard.borrow, _ => guard.borrow };
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move out of '.borrow' getter")
+}
+
+func TestT0407_AssignSetterFromParenBorrow(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			m := Mutex[string]("hi" + "");
+			use guard := m.lock();
+			guard.borrow = (guard.borrow);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move out of '.borrow' getter")
+}
+
+// T0407: clone() inside each arm yields independent owned copies — no UAF.
+func TestT0407_AssignSetterFromIfBorrowCloneOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			m := Mutex[string]("hi" + "");
+			use guard := m.lock();
+			cond := true;
+			guard.borrow = if cond { guard.borrow.clone() } else { guard.borrow.clone() };
+		}
+	`)
+}
+
+// T0407: Copy inner type — joined if-arm type decays via Rule 8b, so
+// `isBorrowedExpr` returns false and there is no spurious rejection. Mirrors
+// `TestT0401_AssignSetterCopyInnerOK` but for the wrapped RHS shape.
+func TestT0407_AssignSetterFromIfBorrowCopyInnerOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			m := Mutex[int](1);
+			use guard := m.lock();
+			cond := true;
+			guard.borrow = if cond { guard.borrow } else { guard.borrow };
+		}
+	`)
+}
+
+// T0407 — bug repro case (4): `~T` consume-site with if-wrapped borrow.
+// Sema's T0438 (Rule 8b/8c gated on Copy) rejects this first because the
+// joined arm type `string&` cannot decay implicitly to `string` for non-
+// Copy T. Pinned here to satisfy the bug's "all four shapes" test plan and
+// as defense-in-depth: if T0438 ever regresses, ownership's type-driven
+// check at the top of `tryMoveConsume` is the next line of defense.
+func TestT0407_ConsumeArgFromIfBorrow(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume_string(~string s) {}
+		test() {
+			a := Arc[string]("hi" + "");
+			cond := true;
+			consume_string(if cond { a.borrow } else { a.borrow });
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign string& to parameter 's'")
 }
 
 // === T0411: `this.field` move from droppable owner ===

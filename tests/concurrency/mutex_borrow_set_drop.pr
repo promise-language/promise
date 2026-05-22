@@ -129,3 +129,37 @@ test_borrow_set_from_mutex_borrow_clone() `test {
   assert(g1.borrow == "b", "g1 should hold cloned value");
   assert(g2.borrow == "b", "g2 still owns original");
 }
+
+// T0407: setter assignment from an if/match/paren-wrapped borrow getter is
+// rejected at compile time (any expr typed `T&` is a non-owning reference,
+// so moving it into the setter slot would alias the parent Mutex's pointer
+// → UAF). The supported workaround uses `.clone()` inside each arm to
+// produce independent owned copies — pin the runtime contract.
+test_borrow_set_from_if_clone() `test {
+  m := Mutex[string]("init" + "");
+  use guard := m.lock();
+  cond := true;
+  guard.borrow = if cond {
+    guard.borrow.clone()
+  } else {
+    guard.borrow.clone()
+  };
+  assert(guard.borrow == "init", "self-clone preserves value");
+}
+
+test_borrow_set_from_match_clone() `test {
+  m := Mutex[string]("init" + "");
+  use guard := m.lock();
+  x := 1;
+  guard.borrow = match x {
+    1 => guard.borrow.clone(), _ => guard.borrow.clone(),
+  };
+  assert(guard.borrow == "init", "match-clone preserves value");
+}
+
+test_borrow_set_from_paren_clone() `test {
+  m := Mutex[string]("init" + "");
+  use guard := m.lock();
+  guard.borrow = (guard.borrow.clone());
+  assert(guard.borrow == "init", "paren-clone preserves value");
+}

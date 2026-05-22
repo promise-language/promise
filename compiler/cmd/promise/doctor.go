@@ -77,7 +77,10 @@ func runDoctor(args []string) {
 		doctorCheckBuildCache(),
 		doctorCheckModuleCache(flags.network),
 		doctorCheckPromiseHome(),
+		doctorCheckEpochs(),
 		doctorCheckJava(),
+		doctorCheckWasmtime(),
+		doctorCheckNode(),
 	)
 	if runtime.GOOS == "darwin" {
 		checks = append(checks, doctorCheckXcodeCLT())
@@ -420,6 +423,76 @@ func doctorCheckJava() doctorCheck {
 		if len(lines) > 0 {
 			c.Details = append(c.Details, lines[0])
 		}
+	}
+
+	return c
+}
+
+func doctorCheckWasmtime() doctorCheck {
+	c := makeDoctorCheck("wasmtime (optional — wasm32-wasi target)", doctorOK, false)
+
+	path, err := exec.LookPath("wasmtime")
+	if err != nil {
+		c.Status = doctorWarn.String()
+		c.Summary = "Not found on PATH"
+		c.Fix = "Install from https://wasmtime.dev/ to run wasm32-wasi binaries"
+		return c
+	}
+
+	c.Summary = "Found: " + path
+	if out, err := exec.Command(path, "--version").Output(); err == nil {
+		c.Details = append(c.Details, strings.TrimSpace(string(out)))
+	}
+
+	return c
+}
+
+func doctorCheckNode() doctorCheck {
+	c := makeDoctorCheck("node (optional — wasm32-web target tests)", doctorOK, false)
+
+	path, err := exec.LookPath("node")
+	if err != nil {
+		c.Status = doctorWarn.String()
+		c.Summary = "Not found on PATH"
+		c.Fix = "Install Node.js to run wasm32-web tests"
+		return c
+	}
+
+	c.Summary = "Found: " + path
+	if out, err := exec.Command(path, "--version").Output(); err == nil {
+		c.Details = append(c.Details, "Version: "+strings.TrimSpace(string(out)))
+	}
+
+	return c
+}
+
+func doctorCheckEpochs() doctorCheck {
+	c := makeDoctorCheck("Epochs", doctorOK, false)
+
+	epochs, err := module.InstalledEpochs()
+	if err != nil {
+		c.Status = doctorWarn.String()
+		c.Summary = "Cannot list installed epochs"
+		c.Details = append(c.Details, err.Error())
+		c.Fix = "Check PROMISE_HOME permissions"
+		return c
+	}
+	if len(epochs) == 0 {
+		c.Summary = "No epochs installed (using embedded compiler only)"
+		return c
+	}
+
+	active, _ := module.ActiveEpoch()
+	c.Summary = fmt.Sprintf("%d installed", len(epochs))
+	if active != "" {
+		c.Details = append(c.Details, "Active: "+active)
+	}
+	for _, ep := range epochs {
+		marker := "  "
+		if ep == active {
+			marker = "* "
+		}
+		c.Details = append(c.Details, marker+ep)
 	}
 
 	return c

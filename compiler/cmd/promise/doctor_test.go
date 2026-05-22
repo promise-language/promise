@@ -37,8 +37,8 @@ func TestDoctorJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &report); err != nil {
 		t.Fatalf("invalid JSON: %v\noutput: %s", err, output)
 	}
-	if len(report.Checks) < 5 {
-		t.Errorf("expected at least 5 checks, got %d", len(report.Checks))
+	if len(report.Checks) < 8 {
+		t.Errorf("expected at least 8 checks, got %d", len(report.Checks))
 	}
 
 	// Verify all checks have valid status values
@@ -133,6 +133,105 @@ func TestDoctorCheckJava(t *testing.T) {
 	}
 	if c.Required {
 		t.Error("Java check should not be required")
+	}
+}
+
+func TestDoctorCheckWasmtime(t *testing.T) {
+	c := doctorCheckWasmtime()
+	if c.Name != "wasmtime (optional — wasm32-wasi target)" {
+		t.Errorf("unexpected name: %s", c.Name)
+	}
+	if c.Required {
+		t.Error("wasmtime check should not be required")
+	}
+	if c.Summary == "" {
+		t.Error("expected non-empty summary")
+	}
+	switch c.Status {
+	case "ok", "warning":
+	default:
+		t.Errorf("unexpected status: %s", c.Status)
+	}
+}
+
+func TestDoctorCheckNode(t *testing.T) {
+	c := doctorCheckNode()
+	if c.Name != "node (optional — wasm32-web target tests)" {
+		t.Errorf("unexpected name: %s", c.Name)
+	}
+	if c.Required {
+		t.Error("node check should not be required")
+	}
+	if c.Summary == "" {
+		t.Error("expected non-empty summary")
+	}
+	switch c.Status {
+	case "ok", "warning":
+	default:
+		t.Errorf("unexpected status: %s", c.Status)
+	}
+}
+
+func TestDoctorCheckEpochs(t *testing.T) {
+	c := doctorCheckEpochs()
+	if c.Name != "Epochs" {
+		t.Errorf("unexpected name: %s", c.Name)
+	}
+	if c.Required {
+		t.Error("epochs check should not be required")
+	}
+	if c.Summary == "" {
+		t.Error("expected non-empty summary")
+	}
+}
+
+func TestDoctorCheckEpochsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PROMISE_HOME", dir)
+	c := doctorCheckEpochs()
+	if c.Status != "ok" {
+		t.Errorf("expected ok with no epochs, got %s", c.Status)
+	}
+	if !strings.Contains(c.Summary, "No epochs installed") {
+		t.Errorf("expected 'No epochs installed' summary, got %s", c.Summary)
+	}
+}
+
+func TestDoctorCheckEpochsInstalled(t *testing.T) {
+	dir := t.TempDir()
+	epochsDir := filepath.Join(dir, "epochs")
+	if err := os.MkdirAll(filepath.Join(epochsDir, "2026.0"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(epochsDir, "2026.1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "active"), []byte("2026.1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROMISE_HOME", dir)
+	c := doctorCheckEpochs()
+	if c.Status != "ok" {
+		t.Errorf("expected ok, got %s", c.Status)
+	}
+	if !strings.Contains(c.Summary, "2 installed") {
+		t.Errorf("expected '2 installed' summary, got %s", c.Summary)
+	}
+	hasActive := false
+	hasMarker := false
+	for _, d := range c.Details {
+		if strings.Contains(d, "Active: 2026.1") {
+			hasActive = true
+		}
+		if strings.HasPrefix(d, "* 2026.1") {
+			hasMarker = true
+		}
+	}
+	if !hasActive {
+		t.Error("expected 'Active:' detail")
+	}
+	if !hasMarker {
+		t.Error("expected '*' marker on active epoch")
 	}
 }
 
@@ -366,5 +465,120 @@ func TestDoctorPrintReportErrorsOnly(t *testing.T) {
 	}
 	if strings.Contains(output, "warning(s)") {
 		t.Error("should not mention warnings when there are none")
+	}
+}
+
+func TestDoctorRunNetworkFlag(t *testing.T) {
+	// Cover the -network flag parsing branch in runDoctor.
+	// The `-network` arg is parsed and forwarded to doctorCheckModuleCache.
+	output := captureStdout(t, func() {
+		runDoctor([]string{"-network"})
+	})
+	if !strings.Contains(output, "Module cache") {
+		t.Error("missing module cache check in output")
+	}
+	if !strings.Contains(output, "Network:") {
+		t.Error("expected Network: detail when -network is passed")
+	}
+}
+
+func TestDoctorCheckJavaMissing(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	c := doctorCheckJava()
+	if c.Status != "warning" {
+		t.Errorf("expected warning when java not on PATH, got %s", c.Status)
+	}
+	if !strings.Contains(c.Summary, "Not found") {
+		t.Errorf("expected 'Not found' in summary, got %s", c.Summary)
+	}
+	if c.Fix == "" {
+		t.Error("expected fix hint when java is missing")
+	}
+}
+
+func TestDoctorCheckWasmtimeMissing(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	c := doctorCheckWasmtime()
+	if c.Status != "warning" {
+		t.Errorf("expected warning when wasmtime not on PATH, got %s", c.Status)
+	}
+	if !strings.Contains(c.Summary, "Not found") {
+		t.Errorf("expected 'Not found' in summary, got %s", c.Summary)
+	}
+	if c.Fix == "" {
+		t.Error("expected fix hint when wasmtime is missing")
+	}
+}
+
+func TestDoctorCheckNodeMissing(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	c := doctorCheckNode()
+	if c.Status != "warning" {
+		t.Errorf("expected warning when node not on PATH, got %s", c.Status)
+	}
+	if !strings.Contains(c.Summary, "Not found") {
+		t.Errorf("expected 'Not found' in summary, got %s", c.Summary)
+	}
+	if c.Fix == "" {
+		t.Error("expected fix hint when node is missing")
+	}
+}
+
+func TestDoctorCheckEpochsError(t *testing.T) {
+	// Make <PROMISE_HOME>/epochs a file so InstalledEpochs ReadDir fails
+	// with a non-IsNotExist error, exercising the warn path.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "epochs"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROMISE_HOME", dir)
+	c := doctorCheckEpochs()
+	if c.Status != "warning" {
+		t.Errorf("expected warning when epochs dir is unreadable, got %s: %s", c.Status, c.Summary)
+	}
+	if !strings.Contains(c.Summary, "Cannot list installed epochs") {
+		t.Errorf("expected 'Cannot list' summary, got %s", c.Summary)
+	}
+	if c.Fix == "" {
+		t.Error("expected fix hint on epochs error")
+	}
+}
+
+func TestDoctorCheckBuildCacheError(t *testing.T) {
+	// Set PROMISE_HOME to a regular file so MkdirAll inside BuildCacheDir
+	// fails with "not a directory", exercising the warn path.
+	f := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROMISE_HOME", f)
+	c := doctorCheckBuildCache()
+	if c.Status != "warning" {
+		t.Errorf("expected warning when build cache cannot be created, got %s: %s", c.Status, c.Summary)
+	}
+	if !strings.Contains(c.Summary, "Cannot access build cache") {
+		t.Errorf("expected 'Cannot access' summary, got %s", c.Summary)
+	}
+	if c.Fix == "" {
+		t.Error("expected fix hint on build cache error")
+	}
+}
+
+func TestDoctorCheckModuleCacheNetworkUnreachable(t *testing.T) {
+	// Clear PATH so `git` cannot be located; cmd.Run then fails immediately
+	// without making real network calls. Exercises the unreachable branch.
+	t.Setenv("PATH", "/nonexistent")
+	dir := t.TempDir()
+	t.Setenv("PROMISE_HOME", dir)
+	c := doctorCheckModuleCache(true)
+	hasUnreachable := false
+	for _, d := range c.Details {
+		if strings.Contains(d, "git host unreachable") {
+			hasUnreachable = true
+			break
+		}
+	}
+	if !hasUnreachable {
+		t.Errorf("expected 'git host unreachable' detail, got details: %v", c.Details)
 	}
 }

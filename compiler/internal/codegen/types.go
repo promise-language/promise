@@ -365,6 +365,15 @@ func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDecl
 		}
 		return irtypes.NewStruct(irtypes.I1, inner)
 	}
+	// Handle Tuple types — recurse so heap user / optional / enum elements get
+	// their proper field layout (value struct {i8*, i8*}, not bare i8*). (T0420)
+	if tup, ok := typ.(*types.Tuple); ok {
+		fields := make([]irtypes.Type, len(tup.Elems()))
+		for i, elem := range tup.Elems() {
+			fields[i] = instanceFieldLLVMType(elem, allLayouts, ptrSize, enumLayouts, monoEnumLayouts)
+		}
+		return irtypes.NewStruct(fields...)
+	}
 	// Handle enum types — enums used as fields in user types
 	if lt := enumInternalTypeForField(typ, ptrSize, enumLayouts, monoEnumLayouts); lt != nil {
 		return lt

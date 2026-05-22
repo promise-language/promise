@@ -1766,10 +1766,31 @@ func monoInstNeedsSynthDrop(inst *types.Instance) bool {
 		if opt, isOpt := ft.(*types.Optional); isOpt {
 			ft = opt.Elem()
 		}
-		fNamed := extractNamed(ft)
-		if fNamed == nil {
-			continue
+		// T0420: Tuples after substitution may contain droppable elements.
+		if monoTypeHasDroppable(ft) {
+			return true
 		}
+	}
+	return false
+}
+
+// monoTypeHasDroppable returns true if the given concrete type needs cleanup at
+// drop time. Handles primitive named types, tuples (recurse), and unwrapped
+// optional types. Used by monoInstNeedsSynthDrop and is independent of
+// Compiler state so it can run during the declare phase.
+func monoTypeHasDroppable(typ types.Type) bool {
+	if tup, ok := typ.(*types.Tuple); ok {
+		for _, e := range tup.Elems() {
+			if monoTypeHasDroppable(e) {
+				return true
+			}
+		}
+		return false
+	}
+	if opt, ok := typ.(*types.Optional); ok {
+		return monoTypeHasDroppable(opt.Elem())
+	}
+	if fNamed := extractNamed(typ); fNamed != nil {
 		if fNamed == types.TypString || fNamed == types.TypVector || fNamed == types.TypChannel ||
 			fNamed == types.TypMutex || fNamed == types.TypMutexGuard {
 			return true
@@ -1777,7 +1798,6 @@ func monoInstNeedsSynthDrop(inst *types.Instance) bool {
 		if fNamed.HasDrop() {
 			return true
 		}
-		// Heap user type that needs at least pal_free
 		if !fNamed.IsValueType() && !fNamed.IsCopy() && !isPrimitiveScalar(fNamed) && !fNamed.IsStructural() {
 			return true
 		}

@@ -6498,6 +6498,21 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			continue
 		}
 
+		// T0420: Tuple-typed fields (e.g., generic T resolving to (int, HeapUser))
+		// are stored inline. Load the struct value and drop each droppable element
+		// via emitVariantFieldDrop, which handles tuple recursion.
+		if tup, ok := fieldTypeRaw.(*types.Tuple); ok && c.tupleNeedsDrop(fieldTypeRaw) {
+			fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
+			if !ok {
+				continue
+			}
+			fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+			c.emitVariantFieldDrop(fieldVal, tup)
+			continue
+		}
+
 		// B0192: Apply type substitution before extracting the named type,
 		// so generic field types (e.g., T in GenericError[T]) resolve to
 		// their concrete types (e.g., Point).

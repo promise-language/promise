@@ -769,3 +769,62 @@ test_t0399_repush_owned_tuple_loop() `test {
   assert(s2 == "hello", "v[2] string");
   assert(n2 == 42, "v[2] int");
 }
+
+// T0420: generic constructor with tuple-of-heap-user TypeArg. Pre-fix this
+// panicked in codegen with "store operands are not compatible" because
+// instanceFieldLLVMType lowered the heap user element inside the tuple to
+// bare i8* via llvmType, while the expression-side resolveType produced the
+// full {i8*, i8*} value struct.
+type _T0420BoxT[T] {
+  T value;
+}
+type _T0420Inner {
+  string s;
+}
+
+test_t0420_generic_tuple_heap_user() `test {
+  _T0420BoxT[(int, _T0420Inner)] b = _T0420BoxT[(int, _T0420Inner)](value: (7, _T0420Inner(s: "x" + "y")));
+  (n, inner) := b.value;
+  assert(n == 7, "first");
+  assert(inner.s == "xy", "heap user inside tuple");
+}
+
+// T0420: tuple with two droppable elements (string + heap user) inside generic.
+test_t0420_generic_tuple_string_heap_user() `test {
+  _T0420BoxT[(string, _T0420Inner)] b = _T0420BoxT[(string, _T0420Inner)](value: ("hi" + "!", _T0420Inner(s: "a" + "b")));
+  (s, inner) := b.value;
+  assert(s == "hi!", "first");
+  assert(inner.s == "ab", "second heap user");
+}
+
+// T0420: vector inside tuple TypeArg — element type must lower correctly.
+test_t0420_generic_tuple_vector() `test {
+  _T0420BoxT[(int, string[])] b = _T0420BoxT[(int, string[])](value: (1, ["a" + "b", "c" + "d"]));
+  (n, v) := b.value;
+  assert(n == 1, "first");
+  assert(v.len == 2, "vec len");
+  assert(v[0] == "ab", "vec[0]");
+  assert(v[1] == "cd", "vec[1]");
+}
+
+// T0420 coverage: nested tuple inside tuple TypeArg — exercises recursive
+// tuple lowering in instanceFieldLLVMType and recursive drop in
+// emitVariantFieldDrop.
+test_t0420_generic_nested_tuple() `test {
+  _T0420BoxT[((int, _T0420Inner), string)] b = _T0420BoxT[((int, _T0420Inner), string)](value: ((1, _T0420Inner(s: "a" + "b")), "c" + "d"));
+  (inner_pair, s) := b.value;
+  (n, inner) := inner_pair;
+  assert(n == 1, "nested first");
+  assert(inner.s == "ab", "nested heap user");
+  assert(s == "cd", "outer string");
+}
+
+// T0420 coverage: tuple-of-primitives TypeArg — negative case. Field type
+// lowering must still recurse into the tuple (mismatch would also panic),
+// but no synth drop should be generated.
+test_t0420_generic_tuple_all_primitives() `test {
+  _T0420BoxT[(int, bool)] b = _T0420BoxT[(int, bool)](value: (42, true));
+  (n, flag) := b.value;
+  assert(n == 42, "primitive int");
+  assert(flag == true, "primitive bool");
+}

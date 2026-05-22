@@ -880,3 +880,256 @@ test_map_tuple_with_inner_vector() `test {
     assert(ints2.len == 3, "reread vec len");
   }
 }
+
+// T0440 regression types — heap user types stored in maps. The map's
+// element walk and the unwrapped-binding's drop must not double-free
+// the same instance.
+type _T0440Box {
+  int value;
+  drop(~this) {
+  }
+}
+
+type _T0440StrBox {
+  string label;
+  int value;
+  drop(~this) {
+  }
+}
+
+// T0440: basic if-let on Map[K, heap-user-type], read twice — without the
+// dup, both unwraps would alias the map's bucket and double-free at scope
+// exit (the original repro from the bug report).
+test_t0440_basic_if_let_repeated_read() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 42);
+  if t := m["k"] {
+    assert(t.value == 42, "first read");
+  }
+  if t2 := m["k"] {
+    assert(t2.value == 42, "second read");
+  }
+}
+
+// T0440: typed Optional[heap-user-type] decl, then unwrap — exercises
+// genTypedVarDecl's new flag-set block.
+test_t0440_typed_decl_unwrapped() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 99);
+  _T0440Box? b = m["k"];
+  if x := b {
+    assert(x.value == 99, "typed decl unwrap");
+  }
+}
+
+// T0440: typed Optional[heap-user-type] decl that is NEVER unwrapped —
+// `b` drops at scope exit holding the dup'd inner instance; map's bucket
+// ownership stays independent. Drop-without-unwrap leak guard.
+test_t0440_typed_decl_dropped_without_unwrap() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 55);
+  _T0440Box? b = m["k"];
+  // b drops here without ever being unwrapped — must not leak nor
+  // double-free with the map's bucket.
+  assert(m.contains("k"), "key still in map");
+}
+
+// T0440: force-unwrap into a variable — exercises optionalHeapDup
+// consumption in genOptionalForceUnwrap.
+test_t0440_force_unwrap() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 17);
+  b := m["k"]!;
+  assert(b.value == 17, "force unwrap value");
+  if t := m["k"] {
+    assert(t.value == 17, "post-force-unwrap reread");
+  }
+}
+
+// T0440: while-let iteration over the same key — each iteration reads
+// the map and would double-free on the second read without the dup.
+// Use break to avoid an infinite loop since `m["k"]` is constant.
+test_t0440_while_let_iteration() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 88);
+  count := 0;
+  while t := m["k"] {
+    assert(t.value == 88, "while iter value");
+    count = count + 1;
+    if count >= 3 {
+      break;
+    }
+  }
+  assert(count == 3, "iter count");
+}
+
+// T0440: missing key returns None — clone branch must not crash on the
+// zero-initialized inner value (the present flag short-circuits the if-let).
+test_t0440_missing_key_none() `test {
+  m := map[string, _T0440Box]();
+  m["a"] = _T0440Box(value: 1);
+  if t := m["missing"] {
+    assert(false, "missing key should be None");
+  } else {
+    assert(true, "None branch taken");
+  }
+  // Present-key reads still work after a None lookup.
+  if t := m["a"] {
+    assert(t.value == 1, "present key after None");
+  }
+}
+
+// T0440: function returning Optional[heap-user-type] read from a Map —
+// validates that the wrap+propagate path doesn't double-free either.
+get_at(~Map[string, _T0440Box] m, string k) _T0440Box? {
+  return m[k];
+}
+
+test_t0440_function_return() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 31);
+  if t := get_at(m, "k") {
+    assert(t.value == 31, "via function return");
+  }
+}
+
+// T0440: heap user type with a heap-string field. Exercises
+// dupHeapValue/dupHeapValueFields recursion through string fields.
+// "a" + "b" forces heap allocation (not a literal).
+test_t0440_with_heap_string_field() `test {
+  m := map[string, _T0440StrBox]();
+  m["k"] = _T0440StrBox(label: "a" + "b", value: 5);
+  if t := m["k"] {
+    assert(t.label == "ab", "first read label");
+    assert(t.value == 5, "first read value");
+  }
+  if t2 := m["k"] {
+    assert(t2.label == "ab", "second read label");
+    assert(t2.value == 5, "second read value");
+  }
+}
+
+// T0440: heap user types with a user-defined `clone()` method are intentionally
+// excluded from the dup-on-read branch (see `isDroppableHeapUserType`'s
+// LookupMethod check). The if-let / typed-decl drop machinery doesn't track
+// the result of cloneHeapElement's user-clone path correctly, leaking 1 alloc
+// per dup. T0440 prefers preserving the master aliasing behavior (no clone)
+// for these types over the alternative (cloning + leaking). Filed as T0484.
+//
+// No regression test is needed for the user-clone case because the master
+// behavior is unchanged for that scope.
+
+// T0440 coverage: heap user type with a Vector field. Exercises recursive
+// dupHeapValueFields → emitVectorElementCloneLoop path so the dup'd instance
+// owns an independent vector. Without recursion, the dup'd box would alias
+// the original vector and double-free its data on scope exit.
+type _T0440VecBox {
+  int[] data;
+  drop(~this) {
+  }
+}
+
+// T0440 coverage: nested heap user type field. Exercises dupHeapValueFields'
+// "nested heap user type — recursive dup" branch (last case in the field
+// dispatch), ensuring the inner `_T0440Inner` heap instance is also cloned.
+type _T0440Inner {
+  int x;
+  drop(~this) {
+  }
+}
+
+type _T0440Outer {
+  _T0440Inner inner;
+  drop(~this) {
+  }
+}
+
+// T0440: inferred `b := m[k]` decl where `b` is inferred as `_T0440Box?` —
+// exercises genInferredVarDecl's Optional[heap-user-type] flag-set block.
+// Companion to test_t0440_typed_decl_unwrapped (which uses the typed form).
+test_t0440_inferred_decl_unwrapped() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 73);
+  b := m["k"];
+  if x := b {
+    assert(x.value == 73, "inferred decl unwrap");
+  }
+}
+
+// T0440: inferred Optional[heap-user-type] decl that is NEVER unwrapped —
+// analog to test_t0440_typed_decl_dropped_without_unwrap but for the
+// inferred-decl path. Drop-without-unwrap leak guard.
+test_t0440_inferred_decl_dropped_without_unwrap() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 21);
+  b := m["k"];
+  // b drops at scope exit without ever being unwrapped — must not leak nor
+  // double-free with the map's bucket.
+  assert(m.contains("k"), "key still in map");
+}
+
+// T0440: typed force-unwrap (`_T0440Box b = m[k]!`) — exercises
+// genTypedVarDecl's OptionalUnwrapExpr-around-IndexExpr branch. Companion
+// to test_t0440_force_unwrap (which uses the inferred form).
+test_t0440_typed_force_unwrap() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 7);
+  _T0440Box b = m["k"]!;
+  assert(b.value == 7, "typed force unwrap");
+  if t := m["k"] {
+    assert(t.value == 7, "post-typed-force-unwrap reread");
+  }
+}
+
+// T0440: re-read after typed-decl unwrap. Catches the alias bug specifically
+// for the typed-decl flow — the typed `_T0440Box?` variable holds the dup'd
+// instance; the second `m[k]` read must produce another independent dup, not
+// an alias of the first or the bucket. Mirrors test_map_typed_decl_post_read.
+test_t0440_typed_decl_post_read() `test {
+  m := map[string, _T0440Box]();
+  m["k"] = _T0440Box(value: 13);
+  _T0440Box? opt = m["k"];
+  if t := opt {
+    assert(t.value == 13, "first read via typed decl");
+  }
+  if t2 := m["k"] {
+    assert(t2.value == 13, "post-read after typed-decl unwrap");
+  }
+}
+
+// T0440: heap user type with a Vector[int] field. dupHeapValueFields
+// recurses into the vector field via emitVectorElementCloneLoop; without
+// that recursion, the dup'd box would alias the original vector's data
+// and double-free on scope exit.
+test_t0440_with_vector_field() `test {
+  m := map[string, _T0440VecBox]();
+  v := int[]();
+  v.push(11);
+  v.push(22);
+  v.push(33);
+  m["k"] = _T0440VecBox(data: v);
+  if t := m["k"] {
+    assert(t.data.len == 3, "first read vec len");
+    assert(t.data[0] == 11, "first read v[0]");
+    assert(t.data[2] == 33, "first read v[2]");
+  }
+  if t2 := m["k"] {
+    assert(t2.data.len == 3, "second read vec len");
+    assert(t2.data[1] == 22, "second read v[1]");
+  }
+}
+
+// T0440: nested heap user type field. dupHeapValueFields recurses into the
+// inner heap user type via the "recursive dup" branch. Without recursion,
+// both reads would alias the same inner instance and double-free on scope
+// exit. Exercises dupHeapValue → dupHeapValueFields → dupHeapValue chain.
+test_t0440_with_nested_heap_user_field() `test {
+  m := map[string, _T0440Outer]();
+  m["k"] = _T0440Outer(inner: _T0440Inner(x: 41));
+  if t := m["k"] {
+    assert(t.inner.x == 41, "first read inner.x");
+  }
+  if t2 := m["k"] {
+    assert(t2.inner.x == 41, "second read inner.x");
+  }
+}

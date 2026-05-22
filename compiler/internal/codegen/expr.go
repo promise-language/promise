@@ -7384,6 +7384,43 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 		}
 	}
 
+	// T0440: Dup borrowed heap user type when `[]` returns `Optional[heap-user-type]`
+	// whose inner value aliases the container's stored element. Without the dup,
+	// force-unwrapping into a variable would let both the variable's drop binding
+	// and the container's element walk drop the same instance → double-free.
+	// Mirrors B0347 (Optional[string]) and T0397 (Optional[Tuple]). NOT gated on
+	// isContainerType — fires for Map and any other type with `[]` returning
+	// `Optional[heap-user-type]`.
+	//
+	// Skips types with a user-defined `clone()` method: the if-let / typed-decl
+	// path doesn't track the user-clone result through the same heap-temp claim
+	// machinery as the var-decl path used by T0398 (Vector index), causing a
+	// 1-alloc-per-dup leak (filed as T0484 follow-up). Master's aliasing behavior
+	// is preserved for these types instead. Uses dupHeapValue (memcpy + sub-field
+	// dup) directly, which is null-safe internally — important because `result`'s
+	// value field is zero/null when the Optional is None.
+	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled {
+		resultType := c.info.Types[e]
+		if c.typeSubst != nil {
+			resultType = types.Substitute(resultType, c.typeSubst)
+		}
+		if opt, ok := resultType.(*types.Optional); ok {
+			elem := opt.Elem()
+			if c.typeSubst != nil {
+				elem = types.Substitute(elem, c.typeSubst)
+			}
+			if isDroppableHeapUserType(elem) {
+				if named := extractNamed(elem); named != nil && named.LookupMethod("clone") == nil {
+					c.dupHeapUserFieldAccess = false // consume the flag
+					innerVal := c.block.NewExtractValue(result, 1)
+					dup := c.dupHeapValue(innerVal, elem)
+					c.optionalHeapDup = dup
+					return c.block.NewInsertValue(result, dup, 1)
+				}
+			}
+		}
+	}
+
 	return result
 }
 
@@ -9050,6 +9087,15 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	if c.optionalTupleDup != nil {
 		dup := c.optionalTupleDup
 		c.optionalTupleDup = nil
+		return dup
+	}
+	// T0440: Same shape for heap-user-type dup — when genMethodIndex created a
+	// dup for the inner Optional[heap-user-type], return it directly so the
+	// binding takes ownership of the cloned instance instead of an aliased
+	// extractvalue.
+	if c.optionalHeapDup != nil {
+		dup := c.optionalHeapDup
+		c.optionalHeapDup = nil
 		return dup
 	}
 	var result value.Value

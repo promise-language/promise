@@ -705,8 +705,28 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// `b := v[0].method()` are excluded because the cloned receiver would not
 	// be consumed (method takes a borrow), leaking the clone.
 	// (Not borrow-gated — checks AST shape (IndexExpr) and element type. Remains active post-T0438.)
+	//
+	// T0440: Also set the flag for `b := m[k]!` — the RHS unwraps an
+	// Optional[heap-user-type] from a Map index. The unwrap consumes the
+	// Optional and returns V; without the dup, b would alias the bucket.
 	if isDroppableHeapUserType(resolvedExprType) {
 		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+			c.dupHeapUserFieldAccess = true
+		} else if unwrap, isUnwrap := s.Value.(*ast.OptionalUnwrapExpr); isUnwrap {
+			if _, isInnerIdx := unwrap.Expr.(*ast.IndexExpr); isInnerIdx {
+				c.dupHeapUserFieldAccess = true
+			}
+		}
+	}
+	// T0440: Same flag for typed `T? b = m[k]` — Optional[heap-user-type] LHS
+	// where the inner value aliases the container's bucket. Set the flag so
+	// genMethodIndex deep-clones via cloneHeapElement.
+	if opt, ok := resolvedExprType.(*types.Optional); ok {
+		elem := opt.Elem()
+		if c.typeSubst != nil {
+			elem = types.Substitute(elem, c.typeSubst)
+		}
+		if isDroppableHeapUserType(elem) {
 			c.dupHeapUserFieldAccess = true
 		}
 	}
@@ -977,8 +997,28 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// `b := v[0].method()` are excluded because the cloned receiver would not
 	// be consumed (method takes a borrow), leaking the clone.
 	// (Not borrow-gated — checks AST shape (IndexExpr) and element type. Remains active post-T0438.)
+	//
+	// T0440: Also set the flag for `b := m[k]!` — the RHS unwraps an
+	// Optional[heap-user-type] from a Map index. The unwrap consumes the
+	// Optional and returns V; without the dup, b would alias the bucket.
 	if isDroppableHeapUserType(typ) {
 		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
+			c.dupHeapUserFieldAccess = true
+		} else if unwrap, isUnwrap := s.Value.(*ast.OptionalUnwrapExpr); isUnwrap {
+			if _, isInnerIdx := unwrap.Expr.(*ast.IndexExpr); isInnerIdx {
+				c.dupHeapUserFieldAccess = true
+			}
+		}
+	}
+	// T0440: Same flag for inferred `b := m[k]` — Optional[heap-user-type] LHS
+	// where the inner value aliases the container's bucket. Set the flag so
+	// genMethodIndex deep-clones via cloneHeapElement.
+	if opt, ok := typ.(*types.Optional); ok {
+		elem := opt.Elem()
+		if c.typeSubst != nil {
+			elem = types.Substitute(elem, c.typeSubst)
+		}
+		if isDroppableHeapUserType(elem) {
 			c.dupHeapUserFieldAccess = true
 		}
 	}
@@ -3613,7 +3653,8 @@ func (c *Compiler) cloneHeapElement(elemVal value.Value, elemType types.Type, na
 		return c.block.NewCall(cloneFn, instance)
 	}
 
-	// No clone method — fall back to dupHeapValue (alloc + memcpy + sub-field dup)
+	// No clone method — fall back to dupHeapValue (alloc + memcpy + sub-field dup,
+	// which is already null-safe internally).
 	return c.dupHeapValue(elemVal, elemType)
 }
 
@@ -3726,6 +3767,13 @@ func (c *Compiler) tupleNeedsDrop(elemType types.Type) bool {
 // Excludes strings (handled by dupStringFieldAccess), containers/Arc/Weak
 // (dupContainerFieldAccess), tuples (dupTupleFieldAccess), and
 // borrow/value/Copy/primitive/structural types. T0398.
+//
+// T0440: Also excludes Map and Set — these are user-defined generic containers
+// with their own clone() methods that don't reliably deep-clone V values (Map's
+// clone uses `result[k] = v` which shallow-copies value-structs for nested heap
+// types). Treating them as plain heap user types here would route through the
+// problematic clone path; instead, we leave them to the existing aliasing
+// behavior at the if-let/force-unwrap site.
 func isDroppableHeapUserType(typ types.Type) bool {
 	if isRefType(typ) {
 		return false
@@ -3740,7 +3788,21 @@ func isDroppableHeapUserType(typ types.Type) bool {
 	if named == types.TypString {
 		return false
 	}
+	if named == types.TypMap {
+		return false
+	}
+	if named.Obj() != nil && named.Obj().Name() == "Set" {
+		return false
+	}
 	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return false
+	}
+	// T0440: Also requires the type to have an explicit drop or synthesized drop.
+	// Heap user types without any drop method use the bindingFree (pal_free) path,
+	// which has a separate latent leak issue with cloned values (T0484). Restricting
+	// the dup branch to types with drop methods ensures the bindingDrop path
+	// (which correctly emits drop+pal_free) handles the cloned instances.
+	if !named.HasDrop() && !named.NeedsSynthDrop() {
 		return false
 	}
 	return true
@@ -3996,6 +4058,7 @@ func (c *Compiler) cleanupStmtTemps() {
 	c.optionalStringDup = nil
 	c.optionalContainerDup = nil // T0366
 	c.optionalTupleDup = nil     // T0397
+	c.optionalHeapDup = nil      // T0440
 	if len(c.stmtTemps) == 0 {
 		return
 	}
@@ -5809,9 +5872,23 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		if (types.IsVector(retType) || types.IsChannel(retType) || types.IsArc(retType) || types.IsWeak(retType)) && !isRefType(retType) {
 			c.dupContainerFieldAccess = true
 		}
+		// T0440: Signal genMethodIndex to dup heap user types out of container
+		// indices for Optional[heap-user-type] return values. Without this,
+		// `return m[k]` from a function owning m propagates an alias that
+		// becomes dangling when m drops at function exit.
+		if opt, ok := retType.(*types.Optional); ok {
+			elem := opt.Elem()
+			if c.typeSubst != nil {
+				elem = types.Substitute(elem, c.typeSubst)
+			}
+			if isDroppableHeapUserType(elem) {
+				c.dupHeapUserFieldAccess = true
+			}
+		}
 		val = c.genExpr(s.Value)
 		c.dupStringFieldAccess = false
 		c.dupContainerFieldAccess = false
+		c.dupHeapUserFieldAccess = false
 		c.targetType = nil
 		val = c.wrapThisReturnValue(val, s.Value, retType)
 	}
@@ -6739,9 +6816,16 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		if _, isTup := elem.(*types.Tuple); isTup && c.tupleNeedsDrop(elem) {
 			c.dupTupleFieldAccess = true
 		}
+		// T0440: Same dup-on-read for Optional[heap-user-type] — the inner
+		// value aliases the container's bucket; without dupping, the if-let
+		// binding's drop would free the same instance the container drops.
+		if isDroppableHeapUserType(elem) {
+			c.dupHeapUserFieldAccess = true
+		}
 	}
 	optVal := c.genExpr(s.Init)
 	c.dupTupleFieldAccess = false
+	c.dupHeapUserFieldAccess = false
 
 	// Guard: if the expression is not an optional struct (e.g., post-narrowing
 	// made it a plain value), treat the if as always-true with no unwrapping.
@@ -6956,9 +7040,14 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 		if _, isTup := elem.(*types.Tuple); isTup && c.tupleNeedsDrop(elem) {
 			c.dupTupleFieldAccess = true
 		}
+		// T0440: Same dup-on-read for Optional[heap-user-type] in while-let.
+		if isDroppableHeapUserType(elem) {
+			c.dupHeapUserFieldAccess = true
+		}
 	}
 	optVal := c.genExpr(s.Value)
 	c.dupTupleFieldAccess = false
+	c.dupHeapUserFieldAccess = false
 	flag := c.block.NewExtractValue(optVal, 0)
 	c.block.NewCondBr(flag, bodyBlock, exitBlock)
 

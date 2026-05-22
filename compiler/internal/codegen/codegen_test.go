@@ -3995,6 +3995,18 @@ func TestTupleDestructure(t *testing.T) {
 	assertContains(t, ir, "extractvalue { i64, i64 }")
 }
 
+// T0441: 3-element tuple destructure (grammar now accepts N>=2 names).
+func TestTupleDestructureThreeElements(t *testing.T) {
+	ir := generateIR(t, `
+		triple() (int, int, int) { return (1, 2, 3); }
+		main() { (a, b, c) := triple(); }
+	`)
+	assertContains(t, ir, "extractvalue { i64, i64, i64 }")
+	assertContains(t, ir, "%a = alloca i64")
+	assertContains(t, ir, "%b = alloca i64")
+	assertContains(t, ir, "%c = alloca i64")
+}
+
 func TestTupleDestructureSkip(t *testing.T) {
 	ir := generateIR(t, `
 		pair() (int, int) { return (1, 2); }

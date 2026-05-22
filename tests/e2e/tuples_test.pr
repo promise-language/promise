@@ -706,6 +706,46 @@ test_t0399_for_in_slice_push() `test {
   assert(n == 1, "slice push int");
 }
 
+// T0441: 3-element tuple destructure (grammar fix — was parser error).
+test_t0441_three_element_destructure() `test {
+  t := ("a", "b", "c");
+  (s1, s2, s3) := t;
+  assert(s1 == "a", "s1");
+  assert(s2 == "b", "s2");
+  assert(s3 == "c", "s3");
+}
+
+// T0441: 4-element tuple destructure.
+test_t0441_four_element_destructure() `test {
+  t := (1, 2, 3, 4);
+  (a, b, c, d) := t;
+  assert(a == 1, "a");
+  assert(b == 2, "b");
+  assert(c == 3, "c");
+  assert(d == 4, "d");
+}
+
+// T0441: 3-element tuple returned from a function.
+triple(int x)(int, int, int) {
+  return (x, x * 2, x * 3);
+}
+
+test_t0441_three_element_from_func() `test {
+  (a, b, c) := triple(3);
+  assert(a == 3, "a");
+  assert(b == 6, "b");
+  assert(c == 9, "c");
+}
+
+// T0441: 3-element tuple with mixed types.
+test_t0441_three_element_mixed_types() `test {
+  t := (42, "hello", true);
+  (n, s, flag) := t;
+  assert(n == 42, "int");
+  assert(s == "hello", "string");
+  assert(flag == true, "bool");
+}
+
 // T0399: re-push a droppable tuple variable in a loop. First iteration moves;
 // subsequent iterations hit the IdentExpr-with-drop-flag dup branch (line
 // 4520). Without `pushElemNeedsDup`'s tuple branch, the runtime CFG isn't

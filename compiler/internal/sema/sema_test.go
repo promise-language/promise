@@ -14656,3 +14656,91 @@ func TestT0381_UnaryOpOnSharedRefUnwraps(t *testing.T) {
 		}
 	`)
 }
+
+// T0234: test(exclude:) must use identifier syntax, not string literals.
+
+func TestT0234_ExcludeIdentAccepted(t *testing.T) {
+	checkOK(t, `test_foo() `+"`test(exclude: wasm) {}")
+}
+
+func TestT0234_ExcludeOrExprAccepted(t *testing.T) {
+	checkOK(t, `test_foo() `+"`test(exclude: wasm || windows) {}")
+}
+
+func TestT0234_ExcludeStringLiteralRejected(t *testing.T) {
+	errs := checkErrs(t, `test_foo() `+"`test(exclude: \"wasm32\") {}")
+	expectError(t, errs, "exclude target must be an identifier, not a string literal")
+}
+
+func TestT0234_ExcludeUnknownIdentRejected(t *testing.T) {
+	errs := checkErrs(t, `test_foo() `+"`test(exclude: sparc64) {}")
+	expectError(t, errs, "unknown exclude target")
+}
+
+func TestT0234_ExcludeNonOrBinaryRejected(t *testing.T) {
+	errs := checkErrs(t, `test_foo() `+"`test(exclude: wasm && linux) {}")
+	expectError(t, errs, "exclude expression must use ||")
+}
+
+func TestT0234_ExcludeMainWithExpectedAccepted(t *testing.T) {
+	checkOK(t, `main() `+"`test(expected: \"ok\", exclude: wasm) { print_line(\"ok\"); }")
+}
+
+// T0234: non-test annotation before test annotation — covers the ann.Name != "test" continue branch
+// in both extractTestExclude and validateTestExclude.
+func TestT0234_ExcludeWithDocAnnotation(t *testing.T) {
+	checkOK(t, "test_foo() `doc(\"desc\") `test(exclude: wasm) {}")
+}
+
+// T0234: invalid expression type in exclude (e.g. numeric literal) — covers the default branch
+// in validateExcludeExpr.
+func TestT0234_ExcludeInvalidExprRejected(t *testing.T) {
+	errs := checkErrs(t, "test_foo() `test(exclude: 42) {}")
+	expectError(t, errs, "invalid exclude expression; expected identifier or identifier || identifier")
+}
+
+// T0234: MatchTargetIdent covers web, posix, and unknown identifier cases.
+func TestT0234_MatchTargetIdentWeb(t *testing.T) {
+	ti := ParseTargetInfo("wasm32-web")
+	if !MatchTargetIdent(ti, "web") {
+		t.Error("expected wasm32-web to match 'web'")
+	}
+	if MatchTargetIdent(ti, "wasi") {
+		t.Error("expected wasm32-web to not match 'wasi'")
+	}
+}
+
+func TestT0234_MatchTargetIdentPosix(t *testing.T) {
+	linux := ParseTargetInfo("x86_64-unknown-linux-gnu")
+	if !MatchTargetIdent(linux, "posix") {
+		t.Error("expected linux to match 'posix'")
+	}
+	macos := ParseTargetInfo("aarch64-apple-macosx")
+	if !MatchTargetIdent(macos, "posix") {
+		t.Error("expected macos to match 'posix'")
+	}
+}
+
+func TestT0234_MatchTargetIdentUnknown(t *testing.T) {
+	ti := ParseTargetInfo("x86_64-unknown-linux-gnu")
+	if MatchTargetIdent(ti, "sparc64") {
+		t.Error("expected unknown identifier 'sparc64' to not match")
+	}
+}
+
+func TestT0234_MatchTargetIdentArch(t *testing.T) {
+	x86 := ParseTargetInfo("x86_64-unknown-linux-gnu")
+	if !MatchTargetIdent(x86, "x86_64") {
+		t.Error("expected x86_64 linux to match 'x86_64'")
+	}
+	if MatchTargetIdent(x86, "aarch64") {
+		t.Error("expected x86_64 linux to not match 'aarch64'")
+	}
+	arm := ParseTargetInfo("aarch64-apple-macosx")
+	if !MatchTargetIdent(arm, "aarch64") {
+		t.Error("expected aarch64 macos to match 'aarch64'")
+	}
+	if !MatchTargetIdent(arm, "arm64") {
+		t.Error("expected aarch64 macos to match 'arm64'")
+	}
+}

@@ -130,12 +130,12 @@ type Info struct {
 	ExpectOutput    string
 	HasExpectOutput bool
 
-	// ExcludeTargets lists target substrings for which this test should be skipped.
-	// Parsed from `test(expected="...", exclude: "wasm32") annotation on main().
+	// ExcludeTargets lists target identifier names for which this test should be skipped.
+	// Parsed from `test(expected="...", exclude: wasm) annotation on main().
 	ExcludeTargets []string
 
-	// TestExcludes maps test function names to their exclude target substrings.
-	// Parsed from `test(exclude: "wasm32") annotations on individual test functions.
+	// TestExcludes maps test function names to their exclude target identifier names.
+	// Parsed from `test(exclude: wasm) annotations on individual test functions.
 	TestExcludes map[string][]string
 
 	// TestTimeouts maps test function names to their timeout duration strings.

@@ -9,7 +9,7 @@ seek ok
 stat_size ok
 exists ok
 mkdir_dir ok
-error_handling ok""", exclude: "wasm32") {
+error_handling ok""", exclude: wasm) {
   // Test 1: open, write_string, close, open, read_all, close
   channel[string] ch1 = channel[string](capacity: 1);
   go {

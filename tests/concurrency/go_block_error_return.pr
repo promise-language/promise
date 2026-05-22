@@ -5,7 +5,7 @@ fail_always!() int {
 }
 
 // Basic: return in error handler exits the goroutine.
-test_go_block_return_in_error_handler() `test(exclude: "wasm32") {
+test_go_block_return_in_error_handler() `test(exclude: wasm) {
   ch := channel[int](capacity: 1);
   go {
     x := fail_always()? e {
@@ -21,7 +21,7 @@ test_go_block_return_in_error_handler() `test(exclude: "wasm32") {
 }
 
 // Return in error handler with captured variables that need cleanup.
-test_go_block_return_in_error_handler_with_captures() `test(exclude: "wasm32") {
+test_go_block_return_in_error_handler_with_captures() `test(exclude: wasm) {
   ch := channel[int](capacity: 1);
   msg := "hello";
   go {
@@ -37,7 +37,7 @@ test_go_block_return_in_error_handler_with_captures() `test(exclude: "wasm32") {
 }
 
 // Return in nested block inside error handler.
-test_go_block_return_in_error_handler_nested() `test(exclude: "wasm32") {
+test_go_block_return_in_error_handler_nested() `test(exclude: wasm) {
   ch := channel[int](capacity: 1);
   go {
     x := fail_always()? e {

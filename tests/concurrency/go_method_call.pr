@@ -17,7 +17,7 @@ type Counter {
 }
 
 // Method call returning a value via task
-test_go_method_call_with_result() `test(exclude: "wasm32") {
+test_go_method_call_with_result() `test(exclude: wasm) {
   c := Counter(value: 42);
   t := go c.get_value();
   result := <-t;
@@ -25,7 +25,7 @@ test_go_method_call_with_result() `test(exclude: "wasm32") {
 }
 
 // Method call with arguments returning a value via task
-test_go_method_call_with_args() `test(exclude: "wasm32") {
+test_go_method_call_with_args() `test(exclude: wasm) {
   c := Counter(value: 10);
   t := go c.add(32);
   result := <-t;
@@ -33,7 +33,7 @@ test_go_method_call_with_args() `test(exclude: "wasm32") {
 }
 
 // Fire-and-forget method call (void, result discarded)
-test_go_method_call_fire_and_forget() `test(exclude: "wasm32") {
+test_go_method_call_fire_and_forget() `test(exclude: wasm) {
   c := Counter(value: 1);
   go c.run();
   // Just verify it doesn't panic — the goroutine runs and exits
@@ -41,14 +41,14 @@ test_go_method_call_fire_and_forget() `test(exclude: "wasm32") {
 }
 
 // Void method call as task (awaited but no value)
-test_go_method_call_void_task() `test(exclude: "wasm32") {
+test_go_method_call_void_task() `test(exclude: wasm) {
   c := Counter(value: 1);
   t := go c.run();
   <-t;
 }
 
 // Multiple concurrent method calls on different objects
-test_go_method_call_multiple() `test(exclude: "wasm32") {
+test_go_method_call_multiple() `test(exclude: wasm) {
   a := Counter(value: 10);
   b := Counter(value: 20);
   c := Counter(value: 30);

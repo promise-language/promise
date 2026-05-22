@@ -9,42 +9,42 @@ _serve_once!(net.TcpListener ~listener, string response) string {
   return request;
 }
 
-test_url_basic() `test(exclude: "wasm32") {
+test_url_basic() `test(exclude: wasm) {
   _Url u = _parse_url("http://example.com/")?!;
   assert(u.host == "example.com", "host");
   assert(u.port == 80, "default port");
   assert(u.path == "/", "path /");
 }
 
-test_url_with_port() `test(exclude: "wasm32") {
+test_url_with_port() `test(exclude: wasm) {
   _Url u = _parse_url("http://localhost:8080/api/v1?key=val")?!;
   assert(u.host == "localhost", "host localhost");
   assert(u.port == 8080, "port 8080");
   assert(u.path == "/api/v1?key=val", "path with query");
 }
 
-test_url_no_path() `test(exclude: "wasm32") {
+test_url_no_path() `test(exclude: wasm) {
   _Url u = _parse_url("http://10.0.0.1")?!;
   assert(u.host == "10.0.0.1", "ip host");
   assert(u.port == 80, "default port");
   assert(u.path == "/", "default path");
 }
 
-test_url_error_https() `test(exclude: "wasm32") {
+test_url_error_https() `test(exclude: wasm) {
   _Url u = _parse_url("https://example.com/")? e {
     return;
   };
   assert(false, "https should fail");
 }
 
-test_url_error_empty_host() `test(exclude: "wasm32") {
+test_url_error_empty_host() `test(exclude: wasm) {
   _Url u = _parse_url("http:///path")? e {
     return;
   };
   assert(false, "empty host should fail");
 }
 
-test_http_get() `test(exclude: "wasm32", timeout: "10s") {
+test_http_get() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -62,7 +62,7 @@ test_http_get() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_post() `test(exclude: "wasm32", timeout: "10s") {
+test_http_post() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -80,7 +80,7 @@ test_http_post() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_post_convenience() `test(exclude: "wasm32", timeout: "10s") {
+test_http_post_convenience() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -101,7 +101,7 @@ test_http_post_convenience() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_headers() `test(exclude: "wasm32", timeout: "10s") {
+test_http_headers() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -118,7 +118,7 @@ test_http_headers() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_404() `test(exclude: "wasm32", timeout: "10s") {
+test_http_404() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -134,7 +134,7 @@ test_http_404() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_500() `test(exclude: "wasm32", timeout: "10s") {
+test_http_500() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -149,7 +149,7 @@ test_http_500() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_chunked() `test(exclude: "wasm32", timeout: "10s") {
+test_http_chunked() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -165,7 +165,7 @@ test_http_chunked() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_connection_error() `test(exclude: "wasm32", timeout: "10s") {
+test_http_connection_error() `test(exclude: wasm, timeout: "10s") {
   // Bind then close to get a port that refuses connections
   net.TcpListener temp = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = temp.local_port;
@@ -177,14 +177,14 @@ test_http_connection_error() `test(exclude: "wasm32", timeout: "10s") {
   assert(false, "should have raised an error");
 }
 
-test_http_bad_scheme() `test(exclude: "wasm32") {
+test_http_bad_scheme() `test(exclude: wasm) {
   Response resp = http_get("https://example.com/")? e {
     return; // expected: unsupported scheme
   };
   assert(false, "should have raised an error");
 }
 
-test_response_headers() `test(exclude: "wasm32", timeout: "10s") {
+test_response_headers() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -205,7 +205,7 @@ test_response_headers() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_method_to_string() `test(exclude: "wasm32") {
+test_method_to_string() `test(exclude: wasm) {
   assert(_method_to_string(Method.Get) == "GET", "GET");
   assert(_method_to_string(Method.Post) == "POST", "POST");
   assert(_method_to_string(Method.Put) == "PUT", "PUT");
@@ -215,7 +215,7 @@ test_method_to_string() `test(exclude: "wasm32") {
   assert(_method_to_string(Method.Options) == "OPTIONS", "OPTIONS");
 }
 
-test_parse_hex_cases() `test(exclude: "wasm32") {
+test_parse_hex_cases() `test(exclude: wasm) {
   assert(_parse_hex("ff") == 255, "lowercase ff");
   assert(_parse_hex("FF") == 255, "uppercase FF");
   assert(_parse_hex("1A") == 26, "uppercase mixed");
@@ -224,20 +224,20 @@ test_parse_hex_cases() `test(exclude: "wasm32") {
   assert(_parse_hex("10") == 16, "sixteen");
 }
 
-test_parse_decimal_cases() `test(exclude: "wasm32") {
+test_parse_decimal_cases() `test(exclude: wasm) {
   assert(_parse_decimal("0") == 0, "zero");
   assert(_parse_decimal("123") == 123, "basic");
   assert(_parse_decimal("8080") == 8080, "port");
   assert(_parse_decimal("65535") == 65535, "large");
 }
 
-test_decode_chunked_with_extension() `test(exclude: "wasm32") {
+test_decode_chunked_with_extension() `test(exclude: wasm) {
   u8[] data = "5;ext=val\r\nHello\r\n0\r\n\r\n".bytes();
   u8[] result = _decode_chunked(data);
   assert(string.from_bytes(result) == "Hello", "chunked with extension");
 }
 
-test_body_bytes() `test(exclude: "wasm32", timeout: "10s") {
+test_body_bytes() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -255,7 +255,7 @@ test_body_bytes() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_put() `test(exclude: "wasm32", timeout: "10s") {
+test_http_put() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -272,7 +272,7 @@ test_http_put() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_status_no_reason() `test(exclude: "wasm32", timeout: "10s") {
+test_status_no_reason() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -286,7 +286,7 @@ test_status_no_reason() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_malformed_response() `test(exclude: "wasm32", timeout: "10s") {
+test_malformed_response() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -307,7 +307,7 @@ test_malformed_response() `test(exclude: "wasm32", timeout: "10s") {
   listener.close()?!;
 }
 
-test_http_post_function() `test(exclude: "wasm32", timeout: "10s") {
+test_http_post_function() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -325,7 +325,7 @@ test_http_post_function() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_response_json_int() `test(exclude: "wasm32", timeout: "10s") {
+test_response_json_int() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -341,7 +341,7 @@ test_response_json_int() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_response_json_string() `test(exclude: "wasm32", timeout: "10s") {
+test_response_json_string() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -357,7 +357,7 @@ test_response_json_string() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_response_json_bool() `test(exclude: "wasm32", timeout: "10s") {
+test_response_json_bool() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -373,7 +373,7 @@ test_response_json_bool() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_post_with_headers() `test(exclude: "wasm32", timeout: "10s") {
+test_http_post_with_headers() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -395,7 +395,7 @@ test_http_post_with_headers() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_post_json_int() `test(exclude: "wasm32", timeout: "10s") {
+test_http_post_json_int() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -412,7 +412,7 @@ test_http_post_json_int() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_post_json_string() `test(exclude: "wasm32", timeout: "10s") {
+test_http_post_json_string() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -429,7 +429,7 @@ test_http_post_json_string() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_http_post_json_bool() `test(exclude: "wasm32", timeout: "10s") {
+test_http_post_json_bool() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 

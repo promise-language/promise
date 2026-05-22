@@ -5,7 +5,7 @@ use io;
 
 main() `test(expected: """single ok
 concurrent ok
-interleaved ok""", exclude: "wasm32") {
+interleaved ok""", exclude: wasm) {
   // Test 1: Single goroutine file IO
   channel[string] ch = channel[string](capacity: 1);
   go {

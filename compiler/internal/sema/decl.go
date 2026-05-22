@@ -1102,6 +1102,7 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 			}
 		}
 
+		c.validateTestExclude(d.Annotations)
 		if expected, ok := extractTestExpected(d.Annotations); ok {
 			// `test(expected="...") — e2e output test on main()
 			if d.Name != "main" {

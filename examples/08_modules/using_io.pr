@@ -10,7 +10,7 @@ read back: Hello from Promise!
 
 --- Append ---
 appended content: Hello from Promise!
-And another line.""", exclude: "wasm32") {
+And another line.""", exclude: wasm) {
   // --- Write and Read ---
   print_line("--- Write and Read ---");
 

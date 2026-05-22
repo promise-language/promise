@@ -1,11 +1,11 @@
-test_raw_socket_create_close() `test(exclude: "wasm32") {
+test_raw_socket_create_close() `test(exclude: wasm) {
   int fd = _net_socket_create(2, 1, 0);
   assert(fd >= 0, "socket created");
   int rc = _net_socket_close(fd);
   assert(rc >= 0, "socket closed");
 }
 
-test_netpoll_open_close() `test(exclude: "wasm32") {
+test_netpoll_open_close() `test(exclude: wasm) {
   int fd = _net_socket_create(2, 1, 0);
   assert(fd >= 0, "socket created");
   int pd = _net_netpoll_open(fd);
@@ -15,7 +15,7 @@ test_netpoll_open_close() `test(exclude: "wasm32") {
   assert(rc >= 0, "socket closed");
 }
 
-test_netpoll_multiple_open_close() `test(exclude: "wasm32") {
+test_netpoll_multiple_open_close() `test(exclude: wasm) {
   int i = 0;
   while i < 5 {
     int fd = _net_socket_create(2, 1, 0);
@@ -29,11 +29,11 @@ test_netpoll_multiple_open_close() `test(exclude: "wasm32") {
   }
 }
 
-test_listener_bind_auto_drop() `test(exclude: "wasm32") {
+test_listener_bind_auto_drop() `test(exclude: wasm) {
   TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
 }
 
-test_listener_bind_and_close() `test(exclude: "wasm32") {
+test_listener_bind_and_close() `test(exclude: wasm) {
   TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
   listener.close()?!;
 }
@@ -44,21 +44,21 @@ _try_bind_invalid!() bool {
   return false;
 }
 
-test_listener_bind_invalid_address() `test(exclude: "wasm32") {
+test_listener_bind_invalid_address() `test(exclude: wasm) {
   bool ok = _try_bind_invalid()? e {
     return; // bind failed as expected
   };
   assert(false, "bind should have failed for invalid address");
 }
 
-test_listener_local_port() `test(exclude: "wasm32") {
+test_listener_local_port() `test(exclude: wasm) {
   TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
   assert(port > 0, "local_port should be positive");
   assert(port < 65536, "local_port should be valid");
 }
 
-test_listener_drop_multiple() `test(exclude: "wasm32") {
+test_listener_drop_multiple() `test(exclude: wasm) {
   int i = 0;
   while i < 3 {
     TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
@@ -69,7 +69,7 @@ test_listener_drop_multiple() `test(exclude: "wasm32") {
 // Regression test for B0340: 10 sequential open/close cycles stress the
 // batch_lock acquire path in netpoll_close. With the old 10ms reactor timeout,
 // this could time out under heavy load (lock starvation). With 1ms it is fast.
-test_netpoll_close_batch_lock_stress() `test(exclude: "wasm32") {
+test_netpoll_close_batch_lock_stress() `test(exclude: wasm) {
   int i = 0;
   while i < 10 {
     int fd = _net_socket_create(2, 1, 0);
@@ -85,13 +85,13 @@ test_netpoll_close_batch_lock_stress() `test(exclude: "wasm32") {
 
 // Verify _eagain() returns a valid positive errno value on the current platform.
 // Linux=11 (EAGAIN), macOS=35, Windows=10035 (WSAEWOULDBLOCK).
-test_eagain_is_valid_errno() `test(exclude: "wasm32") {
+test_eagain_is_valid_errno() `test(exclude: wasm) {
   int e = _eagain();
   assert(e > 0, "eagain is positive");
 }
 
 // Verify _net_strerror returns a human-readable message for known and unknown errno values.
-test_net_strerror_known_and_unknown() `test(exclude: "wasm32") {
+test_net_strerror_known_and_unknown() `test(exclude: wasm) {
   assert(_net_strerror(9) == "bad file descriptor", "EBADF");
   assert(_net_strerror(32) == "broken pipe", "EPIPE");
   assert(_net_strerror(999999) == "network error (errno 999999)", "unknown errno");
@@ -100,7 +100,7 @@ test_net_strerror_known_and_unknown() `test(exclude: "wasm32") {
 // Server side uses raw blocking sockets; sequential flow — no goroutines
 // needed because kernel buffers handle connect backlog and data.
 
-test_stream_connect_and_close() `test(exclude: "wasm32") {
+test_stream_connect_and_close() `test(exclude: wasm) {
   int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
   assert(sfd >= 0, "server socket");
   assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
@@ -116,7 +116,7 @@ test_stream_connect_and_close() `test(exclude: "wasm32") {
   _net_socket_close(sfd);
 }
 
-test_stream_write() `test(exclude: "wasm32") {
+test_stream_write() `test(exclude: wasm) {
   int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
   assert(sfd >= 0, "server socket");
   assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
@@ -142,7 +142,7 @@ test_stream_write() `test(exclude: "wasm32") {
   _net_socket_close(sfd);
 }
 
-test_stream_read() `test(exclude: "wasm32") {
+test_stream_read() `test(exclude: wasm) {
   int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
   assert(sfd >= 0, "server socket");
   assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
@@ -168,7 +168,7 @@ test_stream_read() `test(exclude: "wasm32") {
   _net_socket_close(sfd);
 }
 
-test_stream_shutdown_write() `test(exclude: "wasm32") {
+test_stream_shutdown_write() `test(exclude: wasm) {
   int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
   assert(sfd >= 0, "server socket");
   assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
@@ -189,7 +189,7 @@ test_stream_shutdown_write() `test(exclude: "wasm32") {
   _net_socket_close(sfd);
 }
 
-test_stream_shutdown_read() `test(exclude: "wasm32") {
+test_stream_shutdown_read() `test(exclude: wasm) {
   int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
   assert(sfd >= 0, "server socket");
   assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
@@ -216,7 +216,7 @@ test_stream_shutdown_read() `test(exclude: "wasm32") {
   _net_socket_close(sfd);
 }
 
-test_stream_shutdown_both() `test(exclude: "wasm32") {
+test_stream_shutdown_both() `test(exclude: wasm) {
   int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
   assert(sfd >= 0, "server socket");
   assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");
@@ -237,7 +237,7 @@ test_stream_shutdown_both() `test(exclude: "wasm32") {
   _net_socket_close(sfd);
 }
 
-test_listener_accept() `test(exclude: "wasm32") {
+test_listener_accept() `test(exclude: wasm) {
   TcpListener listener = TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -273,7 +273,7 @@ _try_connect_refused!() bool {
   return true;
 }
 
-test_stream_connect_refused() `test(exclude: "wasm32") {
+test_stream_connect_refused() `test(exclude: wasm) {
   bool ok = _try_connect_refused()? e {
     assert(e.message.contains("connection refused"), "connect refused message");
     return;
@@ -282,7 +282,7 @@ test_stream_connect_refused() `test(exclude: "wasm32") {
   // fail to avoid a flaky test.
 }
 
-test_stream_drop_without_close() `test(exclude: "wasm32") {
+test_stream_drop_without_close() `test(exclude: wasm) {
   int sfd = _net_socket_create(_af_inet(), _sock_stream(), 0);
   assert(sfd >= 0, "server socket");
   assert(_net_socket_bind_addr(sfd, "127.0.0.1", 0) == 0, "bind");

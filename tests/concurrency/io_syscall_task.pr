@@ -32,7 +32,7 @@ _write_and_read_2c() string {
 }
 
 main() `test(expected: """task_io ok
-multi_task ok""", exclude: "wasm32") {
+multi_task ok""", exclude: wasm) {
   // Test 1: Single task doing file IO, await result
   task[string] t = go _write_and_read_1();
   string result = <-t;

@@ -4,7 +4,7 @@
 use io;
 
 main() `test(expected: """main_io ok
-concurrent_main_io ok""", exclude: "wasm32") {
+concurrent_main_io ok""", exclude: wasm) {
   // Test 1: Main does file IO, goroutine does CPU work + channel send
   io.File.write_content("/tmp/pr_sc_main1", "from main")?!;
   channel[int] ch = channel[int](capacity: 1);

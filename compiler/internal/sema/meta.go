@@ -406,8 +406,8 @@ func extractTestTimeout(annotations []*ast.MetaAnnotation) (string, bool) {
 	return "", false
 }
 
-// extractTestExclude extracts the exclude targets from a `test(exclude: "wasm32") annotation.
-// The value is split by comma into a list of target substrings.
+// extractTestExclude extracts the exclude target identifiers from a `test(exclude: wasm) annotation.
+// The value may be a single identifier or an || expression of identifiers.
 func extractTestExclude(annotations []*ast.MetaAnnotation) []string {
 	for _, ann := range annotations {
 		if ann.Name != "test" {
@@ -415,22 +415,59 @@ func extractTestExclude(annotations []*ast.MetaAnnotation) []string {
 		}
 		for _, p := range ann.Params {
 			if p.Name == "exclude" {
-				raw := evalStringLit(p.Value)
-				if raw == "" {
-					return nil
-				}
-				var targets []string
-				for _, t := range strings.Split(raw, ",") {
-					t = strings.TrimSpace(t)
-					if t != "" {
-						targets = append(targets, t)
-					}
-				}
-				return targets
+				return collectExcludeIdents(p.Value)
 			}
 		}
 	}
 	return nil
+}
+
+// collectExcludeIdents recursively gathers identifier names from || expressions.
+func collectExcludeIdents(expr ast.Expr) []string {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return []string{e.Name}
+	case *ast.BinaryExpr:
+		if e.Op == ast.BinOr {
+			return append(collectExcludeIdents(e.Left), collectExcludeIdents(e.Right)...)
+		}
+	}
+	return nil
+}
+
+// validateTestExclude validates the exclude parameter(s) of a `test annotation.
+func (c *Checker) validateTestExclude(annotations []*ast.MetaAnnotation) {
+	for _, ann := range annotations {
+		if ann.Name != "test" {
+			continue
+		}
+		for _, p := range ann.Params {
+			if p.Name == "exclude" {
+				c.validateExcludeExpr(p.Value)
+			}
+		}
+	}
+}
+
+// validateExcludeExpr validates an exclude expression (identifier or || of identifiers).
+func (c *Checker) validateExcludeExpr(expr ast.Expr) {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		if !ValidExcludeIdents[e.Name] {
+			c.errorf(e.Pos(), "unknown exclude target %q; valid identifiers: windows, linux, macos, wasm, wasi, web, posix, x86_64, aarch64, arm64", e.Name)
+		}
+	case *ast.BinaryExpr:
+		if e.Op == ast.BinOr {
+			c.validateExcludeExpr(e.Left)
+			c.validateExcludeExpr(e.Right)
+		} else {
+			c.errorf(expr.Pos(), "exclude expression must use || to combine target identifiers")
+		}
+	case *ast.StringLit:
+		c.errorf(expr.Pos(), "exclude target must be an identifier, not a string literal (e.g., exclude: wasm instead of exclude: \"wasm32\")")
+	default:
+		c.errorf(expr.Pos(), "invalid exclude expression; expected identifier or identifier || identifier")
+	}
 }
 
 // extractTestAllowLeaks extracts the allow_leaks flag from a `test(allow_leaks: true) annotation.

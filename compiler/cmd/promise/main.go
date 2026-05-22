@@ -3697,10 +3697,11 @@ func binaryExtension(target string) string {
 	return ""
 }
 
-// isTestExcluded checks if the current target matches any of the exclude substrings.
+// isTestExcluded checks if the current target matches any of the exclude identifiers.
 func isTestExcluded(target string, excludes []string) bool {
+	info := sema.ParseTargetInfo(target)
 	for _, ex := range excludes {
-		if strings.Contains(target, ex) {
+		if sema.MatchTargetIdent(info, ex) {
 			return true
 		}
 	}

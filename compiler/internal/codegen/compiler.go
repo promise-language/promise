@@ -969,11 +969,12 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	}
 
 	// Count tests excluded for this target
+	targetInfo := sema.ParseTargetInfo(c.target)
 	skippedCount := 0
 	for _, test := range tests {
 		if excludes, ok := c.info.TestExcludes[test.Name()]; ok {
 			for _, ex := range excludes {
-				if strings.Contains(c.target, ex) {
+				if sema.MatchTargetIdent(targetInfo, ex) {
 					skippedCount++
 					break
 				}
@@ -1014,7 +1015,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		if excludes, ok := c.info.TestExcludes[test.Name()]; ok {
 			excluded := false
 			for _, ex := range excludes {
-				if strings.Contains(c.target, ex) {
+				if sema.MatchTargetIdent(targetInfo, ex) {
 					excluded = true
 					break
 				}

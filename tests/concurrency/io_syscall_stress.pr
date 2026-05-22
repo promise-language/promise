@@ -4,7 +4,7 @@
 use io;
 
 main() `test(expected: """stress_8 ok
-rapid_cycle ok""", exclude: "wasm32") {
+rapid_cycle ok""", exclude: wasm) {
   // Test 1: 8 goroutines each doing write+read+remove
   channel[int] done = channel[int](capacity: 8);
   go {

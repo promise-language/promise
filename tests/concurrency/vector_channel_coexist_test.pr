@@ -1,6 +1,6 @@
 // T0261: Vector drop + channel/goroutine in the same function must not
 // produce duplicate LLVM local names (vecdrop.idx).
-vector_and_channel() `test(exclude: "wasm32") {
+vector_and_channel() `test(exclude: wasm) {
   string[] items = ["hello", "world"];
   ch := channel[int](capacity: 1);
   go {
@@ -12,7 +12,7 @@ vector_and_channel() `test(exclude: "wasm32") {
   assert(items.len == 2, "expected 2 items");
 }
 
-multiple_vectors_and_goroutine() `test(exclude: "wasm32") {
+multiple_vectors_and_goroutine() `test(exclude: wasm) {
   int[] nums = [1, 2, 3];
   string[] words = ["a", "b"];
   ch := channel[int](capacity: 1);

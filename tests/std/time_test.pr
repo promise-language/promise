@@ -136,7 +136,7 @@ test_duration_format() `test {
 
 // --- Instant ---
 
-test_instant_now() `test(exclude: "wasm32") {
+test_instant_now() `test(exclude: wasm) {
   Instant t = Instant.now();
   assert(t.nanos > 0, "now returns positive nanos");
 }
@@ -177,7 +177,7 @@ test_instant_comparison() `test {
 
 // --- sleep ---
 
-test_sleep() `test(exclude: "wasm32") {
+test_sleep() `test(exclude: wasm) {
   Instant start = Instant.now();
   sleep(Duration.from_millis(15));
   Duration elapsed = start.elapsed();

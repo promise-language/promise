@@ -1,7 +1,7 @@
 // B0354: Go blocks must transfer ownership of droppable captures.
 // Without the fix, the outer scope drops the value before the goroutine
 // uses it, causing use-after-free / closed-fd / dangling pointer.
-test_string_capture_in_goroutine() `test(exclude: "wasm32") {
+test_string_capture_in_goroutine() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   s := "hello world from outer scope";
   go {
@@ -15,7 +15,7 @@ test_string_capture_in_goroutine() `test(exclude: "wasm32") {
   }
 }
 
-test_vector_capture_in_goroutine() `test(exclude: "wasm32") {
+test_vector_capture_in_goroutine() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   v := [1, 2, 3, 4, 5];
   go {
@@ -33,7 +33,7 @@ test_vector_capture_in_goroutine() `test(exclude: "wasm32") {
   }
 }
 
-test_multiple_droppable_captures() `test(exclude: "wasm32") {
+test_multiple_droppable_captures() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   s := "promise";
   v := [10, 20, 30];
@@ -60,7 +60,7 @@ read_payload(string name, int value, channel[int] ~ch) {
   ch.send(1);
 }
 
-test_user_type_fields_captured() `test(exclude: "wasm32") {
+test_user_type_fields_captured() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   p := Payload(name: "hello", value: 99);
   go {
@@ -81,7 +81,7 @@ type Greeter {
   }
 }
 
-test_go_method_call_via_block() `test(exclude: "wasm32") {
+test_go_method_call_via_block() `test(exclude: wasm) {
   done := channel[int](capacity: 1);
   g := Greeter(prefix: "hi ");
   nm := "world";

@@ -789,7 +789,7 @@ type _T0388ChanHolder {
   channel[int] ch;
 }
 
-test_t0388_member_field_push_channel() `test(exclude: "wasm32") {
+test_t0388_member_field_push_channel() `test(exclude: wasm) {
   _T0388ChanHolder h = _T0388ChanHolder(ch: channel[int](capacity: 2));
   channel[int][] v = channel[int][]();
   v.push(h.ch);

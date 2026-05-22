@@ -46,7 +46,7 @@ test_nfd_hangul_lv() `test {
   assert(normalize_nfd(_cp(0xAC00)) == _cp2(0x1100, 0x1161), "nfd hangul LV");
 }
 
-test_nfd_hangul_lvt() `test(exclude: "wasm32") {
+test_nfd_hangul_lvt() `test(exclude: wasm) {
   // B0149: WASM drops conditional push in nested if
   assert(normalize_nfd(_cp(0xD55C)) == _cp3(0x1112, 0x1161, 0x11AB), "nfd hangul LVT");
 }

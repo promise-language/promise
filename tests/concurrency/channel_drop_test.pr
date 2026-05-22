@@ -12,7 +12,7 @@ channel_drop_local() `test {
 }
 
 // Channel shared with goroutine: refcount prevents double-free.
-channel_drop_shared() `test(exclude: "wasm32") {
+channel_drop_shared() `test(exclude: wasm) {
   ch := channel[int](capacity: 1);
   go {
     ch.send(99);
@@ -25,7 +25,7 @@ channel_drop_shared() `test(exclude: "wasm32") {
 }
 
 // Multiple goroutines sharing a channel.
-channel_drop_multi_goroutine() `test(exclude: "wasm32") {
+channel_drop_multi_goroutine() `test(exclude: wasm) {
   ch := channel[int](capacity: 10);
   for i in 0..5 {
     go {

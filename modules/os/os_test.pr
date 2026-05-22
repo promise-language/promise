@@ -1,10 +1,10 @@
 // Tests for os module: env vars, working dir, exit, args, executable_path, execute.
-test_get_env_var_path() `test(exclude: "wasm32") {
+test_get_env_var_path() `test(exclude: wasm) {
   string? path = get_env_var("PATH");
   assert(path is present, "PATH should be present");
 }
 
-test_get_env_var_home() `test(exclude: "wasm32") `target(!windows) {
+test_get_env_var_home() `test(exclude: wasm) `target(!windows) {
   string? home = get_env_var("HOME");
   assert(home is present, "HOME should be present");
   if h := home {
@@ -12,7 +12,7 @@ test_get_env_var_home() `test(exclude: "wasm32") `target(!windows) {
   }
 }
 
-test_get_env_var_home() `test(exclude: "wasm32") `target(windows) {
+test_get_env_var_home() `test(exclude: wasm) `target(windows) {
   string? home = get_env_var("USERPROFILE");
   assert(home is present, "USERPROFILE should be present");
   if h := home {
@@ -20,12 +20,12 @@ test_get_env_var_home() `test(exclude: "wasm32") `target(windows) {
   }
 }
 
-test_get_env_var_absent() `test(exclude: "wasm32") {
+test_get_env_var_absent() `test(exclude: wasm) {
   string? val = get_env_var("PROMISE_NONEXISTENT_VAR_12345");
   assert(val is absent, "absent variable returns none");
 }
 
-test_get_env_var_unwrap() `test(exclude: "wasm32") {
+test_get_env_var_unwrap() `test(exclude: wasm) {
   string? path = get_env_var("PATH");
   if p := path {
     assert(p.len > 0, "PATH value should be non-empty");
@@ -34,7 +34,7 @@ test_get_env_var_unwrap() `test(exclude: "wasm32") {
   }
 }
 
-test_get_env_var_empty_value() `test(exclude: "wasm32") {
+test_get_env_var_empty_value() `test(exclude: wasm) {
   // Test that a present env var can be unwrapped and compared.
   // Use PATH which is guaranteed present on all platforms.
   string? path = get_env_var("PATH");
@@ -45,31 +45,31 @@ test_get_env_var_empty_value() `test(exclude: "wasm32") {
   }
 }
 
-test_working_dir_is_stable() `test(exclude: "wasm32") {
+test_working_dir_is_stable() `test(exclude: wasm) {
   string cwd1 = working_dir?!;
   string cwd2 = working_dir?!;
   assert(cwd1 == cwd2, "reading working_dir twice should return the same value");
 }
 
-test_working_dir_nonempty() `test(exclude: "wasm32") {
+test_working_dir_nonempty() `test(exclude: wasm) {
   string cwd = working_dir?!;
   assert(cwd.len > 0, "working directory should be non-empty");
 }
 
-test_working_dir_absolute() `test(exclude: "wasm32") {
+test_working_dir_absolute() `test(exclude: wasm) {
   string cwd = working_dir?!;
   // On POSIX: starts with "/". On Windows: drive letter like "C:\".
   bool is_abs = cwd.starts_with("/") || (cwd.len >= 3 && cwd[1] == ':');
   assert(is_abs, "working directory should be absolute path");
 }
 
-test_args_returns_empty_in_test_runner() `test(exclude: "wasm32") {
+test_args_returns_empty_in_test_runner() `test(exclude: wasm) {
   string[] a = args;
   // Test runner passes no user args, so args should be empty
   assert(a.len == 0, "args should be empty in test runner");
 }
 
-test_args_is_iterable() `test(exclude: "wasm32") {
+test_args_is_iterable() `test(exclude: wasm) {
   string[] a = args;
   int count = 0;
   for _ in a {
@@ -78,12 +78,12 @@ test_args_is_iterable() `test(exclude: "wasm32") {
   assert(count == 0, "iterating empty args should produce zero elements");
 }
 
-test_executable_path_returns_string() `test(exclude: "wasm32") {
+test_executable_path_returns_string() `test(exclude: wasm) {
   string exe = executable_path;
   assert(exe.len > 0, "executable_path should be non-empty");
 }
 
-test_executable_path_contains_slash() `test(exclude: "wasm32") {
+test_executable_path_contains_slash() `test(exclude: wasm) {
   string exe = executable_path;
   // The executable path should be an absolute or relative path with a separator.
   // On Windows the separator is "\", on POSIX it is "/".
@@ -91,53 +91,53 @@ test_executable_path_contains_slash() `test(exclude: "wasm32") {
   assert(has_sep, "executable_path should contain a path separator");
 }
 
-test_executable_path_is_stable() `test(exclude: "wasm32") {
+test_executable_path_is_stable() `test(exclude: wasm) {
   string exe1 = executable_path;
   string exe2 = executable_path;
   assert(exe1 == exe2, "reading executable_path twice should return the same value");
 }
 
-test_execute_echo() `test(exclude: "wasm32") `target(!windows) {
+test_execute_echo() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("echo", ["hello"])?!;
   assert(result.exit_code == 0, "echo should exit with 0");
   assert(result.standard_output.starts_with("hello"), "stdout should contain hello");
 }
 
-test_execute_exit_code() `test(exclude: "wasm32") `target(!windows) {
+test_execute_exit_code() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("false", [])?!;
   assert(result.exit_code != 0, "false should exit with non-zero");
 }
 
-test_execute_true() `test(exclude: "wasm32") `target(!windows) {
+test_execute_true() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("true", [])?!;
   assert(result.exit_code == 0, "true should exit with 0");
   assert(result.standard_output.len == 0, "true should produce no stdout");
   assert(result.standard_error.len == 0, "true should produce no stderr");
 }
 
-test_execute_captures_stdout() `test(exclude: "wasm32") `target(!windows) {
+test_execute_captures_stdout() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("printf", ["one two three"])?!;
   assert(result.standard_output == "one two three", "stdout should match printf output");
 }
 
-test_execute_captures_stderr() `test(exclude: "wasm32") `target(!windows) {
+test_execute_captures_stderr() `test(exclude: wasm) `target(!windows) {
   // sh -c 'echo err >&2' writes to stderr
   ProcessResult result = execute("sh", ["-c", "echo err >&2"])?!;
   assert(result.exit_code == 0, "sh should exit with 0");
   assert(result.standard_error.starts_with("err"), "stderr should contain err");
 }
 
-test_execute_multiple_args() `test(exclude: "wasm32") `target(!windows) {
+test_execute_multiple_args() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("echo", ["a", "b", "c"])?!;
   assert(result.standard_output.starts_with("a b c"), "echo should join arguments with spaces");
 }
 
-test_execute_empty_args() `test(exclude: "wasm32") `target(!windows) {
+test_execute_empty_args() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("echo", [])?!;
   assert(result.exit_code == 0, "echo with no args should succeed");
 }
 
-test_execute_process_result_fields() `test(exclude: "wasm32") `target(!windows) {
+test_execute_process_result_fields() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("echo", ["test"])?!;
   // Verify all fields are accessible
   int code = result.exit_code;
@@ -147,7 +147,7 @@ test_execute_process_result_fields() `test(exclude: "wasm32") `target(!windows) 
   assert(out.len > 0, "stdout should be non-empty");
 }
 
-test_execute_nonexistent_program() `test(exclude: "wasm32") `target(!windows) {
+test_execute_nonexistent_program() `test(exclude: wasm) `target(!windows) {
   // On POSIX, a nonexistent program still returns a ProcessResult
   // with exit code 127 (the execvp-failure convention).
   ProcessResult result = execute("__promise_no_such_program__", [])?!;
@@ -162,25 +162,25 @@ _execute_nonexistent() bool {
   return false;
 }
 
-test_execute_nonexistent_program_windows() `test(exclude: "wasm32") `target(windows) {
+test_execute_nonexistent_program_windows() `test(exclude: wasm) `target(windows) {
   // On Windows, CreateProcessA fails for nonexistent programs,
   // so execute() raises an error instead of returning a ProcessResult.
   assert(_execute_nonexistent(), "execute of nonexistent program should raise an error on Windows");
 }
 
-test_execute_args_with_spaces() `test(exclude: "wasm32") `target(!windows) {
+test_execute_args_with_spaces() `test(exclude: wasm) `target(!windows) {
   // Verify arguments containing spaces are passed through correctly
   ProcessResult result = execute("printf", ["%s|%s", "hello world", "foo bar"])?!;
   assert(result.exit_code == 0, "printf should exit with 0");
   assert(result.standard_output == "hello world|foo bar", "arguments with spaces should be preserved");
 }
 
-test_execute_specific_exit_code() `test(exclude: "wasm32") `target(!windows) {
+test_execute_specific_exit_code() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("sh", ["-c", "exit 42"])?!;
   assert(result.exit_code == 42, "should capture exact exit code 42");
 }
 
-test_execute_stdout_and_stderr_together() `test(exclude: "wasm32") `target(!windows) {
+test_execute_stdout_and_stderr_together() `test(exclude: wasm) `target(!windows) {
   // Command that writes to both stdout and stderr
   ProcessResult result = execute("sh", ["-c", "echo out; echo err >&2"])?!;
   assert(result.exit_code == 0, "should exit with 0");
@@ -188,13 +188,13 @@ test_execute_stdout_and_stderr_together() `test(exclude: "wasm32") `target(!wind
   assert(result.standard_error.starts_with("err"), "stderr should contain err");
 }
 
-test_execute_multiline_stdout() `test(exclude: "wasm32") `target(!windows) {
+test_execute_multiline_stdout() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("printf", ["line1\nline2\nline3"])?!;
   assert(result.exit_code == 0, "printf should exit with 0");
   assert(result.standard_output == "line1\nline2\nline3", "multiline output should be preserved");
 }
 
-test_execute_large_output() `test(exclude: "wasm32") `target(!windows) {
+test_execute_large_output() `test(exclude: wasm) `target(!windows) {
   // Generate >4096 bytes to exercise the realloc growth path in __pal_read_all.
   // seq 1 1000 produces ~3893 bytes; seq 1 2000 produces ~8893 bytes.
   ProcessResult result = execute("sh", ["-c", "seq 1 2000"])?!;
@@ -204,7 +204,7 @@ test_execute_large_output() `test(exclude: "wasm32") `target(!windows) {
   assert(result.standard_output.ends_with("2000\n"), "output should end with last number");
 }
 
-test_execute_large_stderr() `test(exclude: "wasm32") `target(!windows) {
+test_execute_large_stderr() `test(exclude: wasm) `target(!windows) {
   // Generate >4KB on stderr to exercise the goroutine read path.
   ProcessResult result = execute("sh", ["-c", "seq 1 2000 >&2"])?!;
   assert(result.exit_code == 0, "seq to stderr should exit with 0");
@@ -214,7 +214,7 @@ test_execute_large_stderr() `test(exclude: "wasm32") `target(!windows) {
   assert(result.standard_output.len == 0, "stdout should be empty");
 }
 
-test_execute_large_stdout_and_stderr() `test(exclude: "wasm32") `target(!windows) {
+test_execute_large_stdout_and_stderr() `test(exclude: wasm) `target(!windows) {
   // Write >64KB to BOTH streams simultaneously — the exact scenario that
   // deadlocked before concurrent reads (B0028). The child writes to stdout
   // and stderr in alternating chunks; if either pipe blocks because the
@@ -229,7 +229,7 @@ test_execute_large_stdout_and_stderr() `test(exclude: "wasm32") `target(!windows
   assert(result.standard_error.ends_with("10000\n"), "stderr should end correctly");
 }
 
-test_execute_only_stderr() `test(exclude: "wasm32") `target(!windows) {
+test_execute_only_stderr() `test(exclude: wasm) `target(!windows) {
   // No stdout, only stderr — goroutine reads empty stdout while main thread gets content.
   ProcessResult result = execute("sh", ["-c", "echo error_only >&2"])?!;
   assert(result.exit_code == 0, "should exit with 0");
@@ -237,14 +237,14 @@ test_execute_only_stderr() `test(exclude: "wasm32") `target(!windows) {
   assert(result.standard_error.starts_with("error_only"), "stderr should have content");
 }
 
-test_execute_empty_string_args() `test(exclude: "wasm32") `target(!windows) {
+test_execute_empty_string_args() `test(exclude: wasm) `target(!windows) {
   // Empty strings should be passed as distinct argv entries
   ProcessResult result = execute("printf", ["%s|%s|%s", "", "mid", ""])?!;
   assert(result.exit_code == 0, "printf should exit with 0");
   assert(result.standard_output == "|mid|", "empty string args should produce empty segments");
 }
 
-test_execute_special_characters() `test(exclude: "wasm32") `target(!windows) {
+test_execute_special_characters() `test(exclude: wasm) `target(!windows) {
   // Tabs, quotes, and backslashes in arguments
   ProcessResult result = execute("printf", ["%s", "tab\there \"quote\" back\\slash"])?!;
   assert(result.exit_code == 0, "printf should exit with 0");
@@ -253,7 +253,7 @@ test_execute_special_characters() `test(exclude: "wasm32") `target(!windows) {
   assert(result.standard_output.contains("\\"), "backslash should be preserved");
 }
 
-test_execute_sequential_calls() `test(exclude: "wasm32") `target(!windows) {
+test_execute_sequential_calls() `test(exclude: wasm) `target(!windows) {
   // Verify TLS globals are properly reset between sequential execute calls
   ProcessResult r1 = execute("printf", ["first"])?!;
   assert(r1.standard_output == "first", "first call stdout should be 'first'");
@@ -265,27 +265,27 @@ test_execute_sequential_calls() `test(exclude: "wasm32") `target(!windows) {
   assert(r3.standard_output.len == 0, "third call stdout should be empty");
 }
 
-test_execute_fail_with_stderr() `test(exclude: "wasm32") `target(!windows) {
+test_execute_fail_with_stderr() `test(exclude: wasm) `target(!windows) {
   // Command that writes to stderr and exits non-zero
   ProcessResult result = execute("sh", ["-c", "echo failure >&2; exit 1"])?!;
   assert(result.exit_code == 1, "should exit with 1");
   assert(result.standard_error.starts_with("failure"), "stderr should contain failure message");
 }
 
-test_execute_exact_echo_output() `test(exclude: "wasm32") `target(!windows) {
+test_execute_exact_echo_output() `test(exclude: wasm) `target(!windows) {
   // echo appends a trailing newline — verify exact output
   ProcessResult result = execute("echo", ["hello"])?!;
   assert(result.standard_output == "hello\n", "echo output should be exactly 'hello\\n'");
 }
 
-test_execute_many_args() `test(exclude: "wasm32") `target(!windows) {
+test_execute_many_args() `test(exclude: wasm) `target(!windows) {
   // Stress the argv construction with many arguments
   ProcessResult result = execute("echo", ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"])?!;
   assert(result.exit_code == 0, "echo should exit with 0");
   assert(result.standard_output.starts_with("a b c d e f g h i j"), "all 10 arguments should be passed");
 }
 
-test_execute_inherits_env() `test(exclude: "wasm32") `target(!windows) {
+test_execute_inherits_env() `test(exclude: wasm) `target(!windows) {
   // Child process should see environment variables set by parent
   set_env_var("PROMISE_TEST_EXEC_ENV", "inherited_value");
   ProcessResult result = execute("sh", ["-c", "echo $PROMISE_TEST_EXEC_ENV"])?!;
@@ -296,7 +296,7 @@ test_execute_inherits_env() `test(exclude: "wasm32") `target(!windows) {
   set_env_var("PROMISE_TEST_EXEC_ENV", absent);
 }
 
-test_execute_inherits_cwd() `test(exclude: "wasm32") `target(!windows) {
+test_execute_inherits_cwd() `test(exclude: wasm) `target(!windows) {
   // Child process should run in the parent's current working directory
   string original = working_dir?!;
   set_working_dir("/usr")?!;
@@ -306,7 +306,7 @@ test_execute_inherits_cwd() `test(exclude: "wasm32") `target(!windows) {
   set_working_dir(original)?!;
 }
 
-test_execute_inherits_cwd() `test(exclude: "wasm32") `target(windows) {
+test_execute_inherits_cwd() `test(exclude: wasm) `target(windows) {
   // On Windows, CreateProcessA with lpCurrentDirectory=NULL inherits the parent's CWD.
   // Verify set_working_dir + working_dir round-trips (child inheritance is guaranteed by the OS).
   string original = working_dir?!;
@@ -316,7 +316,7 @@ test_execute_inherits_cwd() `test(exclude: "wasm32") `target(windows) {
   set_working_dir(original)?!;
 }
 
-test_set_env_var_new() `test(exclude: "wasm32") {
+test_set_env_var_new() `test(exclude: wasm) {
   // Set a new variable and read it back
   set_env_var("PROMISE_TEST_SET_ENV_1", "hello");
   string? val = get_env_var("PROMISE_TEST_SET_ENV_1");
@@ -326,7 +326,7 @@ test_set_env_var_new() `test(exclude: "wasm32") {
   }
 }
 
-test_set_env_var_overwrite() `test(exclude: "wasm32") {
+test_set_env_var_overwrite() `test(exclude: wasm) {
   // Set, then overwrite with a different value
   set_env_var("PROMISE_TEST_SET_ENV_2", "first");
   set_env_var("PROMISE_TEST_SET_ENV_2", "second");
@@ -338,7 +338,7 @@ test_set_env_var_overwrite() `test(exclude: "wasm32") {
   }
 }
 
-test_set_env_var_empty() `test(exclude: "wasm32") `target(!windows) {
+test_set_env_var_empty() `test(exclude: wasm) `target(!windows) {
   // Set to empty string — should be present but empty (POSIX behavior)
   set_env_var("PROMISE_TEST_SET_ENV_3", "");
   string? val = get_env_var("PROMISE_TEST_SET_ENV_3");
@@ -348,7 +348,7 @@ test_set_env_var_empty() `test(exclude: "wasm32") `target(!windows) {
   }
 }
 
-test_set_env_var_empty() `test(exclude: "wasm32") `target(windows) {
+test_set_env_var_empty() `test(exclude: wasm) `target(windows) {
   // On Windows, _putenv_s(name, "") removes the variable (OS behavior).
   // Verify that setting to empty effectively unsets it.
   set_env_var("PROMISE_TEST_SET_ENV_3", "something");
@@ -359,7 +359,7 @@ test_set_env_var_empty() `test(exclude: "wasm32") `target(windows) {
   assert(after is absent, "variable set to empty should be absent on Windows");
 }
 
-test_set_env_var_unset() `test(exclude: "wasm32") {
+test_set_env_var_unset() `test(exclude: wasm) {
   // Set a variable then unset it
   set_env_var("PROMISE_TEST_SET_ENV_4", "temp");
   string? val1 = get_env_var("PROMISE_TEST_SET_ENV_4");
@@ -372,7 +372,7 @@ test_set_env_var_unset() `test(exclude: "wasm32") {
   assert(val2 is absent, "variable should be absent after unset");
 }
 
-test_set_env_var_unset_nonexistent() `test(exclude: "wasm32") {
+test_set_env_var_unset_nonexistent() `test(exclude: wasm) {
   // Unsetting a variable that doesn't exist should not error
   string? absent;
   set_env_var("PROMISE_NONEXISTENT_UNSET_TEST", absent);
@@ -380,7 +380,7 @@ test_set_env_var_unset_nonexistent() `test(exclude: "wasm32") {
   assert(val is absent, "nonexistent variable should remain absent");
 }
 
-test_set_working_dir() `test(exclude: "wasm32") `target(!windows) {
+test_set_working_dir() `test(exclude: wasm) `target(!windows) {
   // Save original, change to /usr, verify, restore
   // (avoid /tmp which is a symlink to /private/tmp on macOS)
   string original = working_dir?!;
@@ -394,7 +394,7 @@ test_set_working_dir() `test(exclude: "wasm32") `target(!windows) {
   assert(restored == original2, "working directory should be restored");
 }
 
-test_set_working_dir() `test(exclude: "wasm32") `target(windows) {
+test_set_working_dir() `test(exclude: wasm) `target(windows) {
   string original = working_dir?!;
   string original2 = working_dir?!;
   set_working_dir("C:\\Windows")?!;
@@ -405,7 +405,7 @@ test_set_working_dir() `test(exclude: "wasm32") `target(windows) {
   assert(restored == original2, "working directory should be restored");
 }
 
-test_set_working_dir_nonexistent() `test(exclude: "wasm32") {
+test_set_working_dir_nonexistent() `test(exclude: wasm) {
   // Changing to a nonexistent path should raise an error
   bool got_error = false;
   set_working_dir("/promise_nonexistent_path_12345")? e {
@@ -414,7 +414,7 @@ test_set_working_dir_nonexistent() `test(exclude: "wasm32") {
   assert(got_error, "set_working_dir to nonexistent path should raise error");
 }
 
-test_set_working_dir_preserves_env() `test(exclude: "wasm32") `target(!windows) {
+test_set_working_dir_preserves_env() `test(exclude: wasm) `target(!windows) {
   // Verify that changing cwd doesn't affect environment variables
   set_env_var("PROMISE_TEST_CWD_ENV", "keep");
   string original = working_dir?!;
@@ -424,7 +424,7 @@ test_set_working_dir_preserves_env() `test(exclude: "wasm32") `target(!windows) 
   set_working_dir(original)?!;
 }
 
-test_set_working_dir_preserves_env() `test(exclude: "wasm32") `target(windows) {
+test_set_working_dir_preserves_env() `test(exclude: wasm) `target(windows) {
   set_env_var("PROMISE_TEST_CWD_ENV", "keep");
   string original = working_dir?!;
   set_working_dir("C:\\Windows")?!;
@@ -433,7 +433,7 @@ test_set_working_dir_preserves_env() `test(exclude: "wasm32") `target(windows) {
   set_working_dir(original)?!;
 }
 
-test_process_spawn_and_wait() `test(exclude: "wasm32") `target(!windows) {
+test_process_spawn_and_wait() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("echo", ["hello"])?!;
   ProcessOutput stdout = p.take_standard_output()?!;
   string out = stdout.read_all()?!;
@@ -442,7 +442,7 @@ test_process_spawn_and_wait() `test(exclude: "wasm32") `target(!windows) {
   assert(out.trim() == "hello", "stdout should contain hello");
 }
 
-test_process_stdin_write() `test(exclude: "wasm32") `target(!windows) {
+test_process_stdin_write() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
   ProcessInput stdin = p.take_standard_input()?!;
   ProcessOutput stdout = p.take_standard_output()?!;
@@ -456,7 +456,7 @@ test_process_stdin_write() `test(exclude: "wasm32") `target(!windows) {
   assert(out == "hello from stdin", "cat should echo stdin to stdout");
 }
 
-test_process_streaming_read() `test(exclude: "wasm32") `target(!windows) {
+test_process_streaming_read() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("sh", ["-c", "seq 1 100"])?!;
   ProcessOutput stdout = p.take_standard_output()?!;
 
@@ -476,7 +476,7 @@ test_process_streaming_read() `test(exclude: "wasm32") `target(!windows) {
   assert(total.ends_with("100\n"), "should end with 100");
 }
 
-test_process_stderr() `test(exclude: "wasm32") `target(!windows) {
+test_process_stderr() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("sh", ["-c", "echo err >&2"])?!;
   ProcessOutput stderr = p.take_standard_error()?!;
   string err = stderr.read_all()?!;
@@ -485,13 +485,13 @@ test_process_stderr() `test(exclude: "wasm32") `target(!windows) {
   assert(err.trim() == "err", "stderr should contain err");
 }
 
-test_process_id() `test(exclude: "wasm32") `target(!windows) {
+test_process_id() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("true", [])?!;
   assert(p.id > 0, "pid should be positive");
   p.wait()?!;
 }
 
-test_process_kill() `test(exclude: "wasm32") `target(!windows) {
+test_process_kill() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("sleep", ["60"])?!;
   p.kill()?!;
   // wait() should return without hanging — the process was killed
@@ -500,7 +500,7 @@ test_process_kill() `test(exclude: "wasm32") `target(!windows) {
   assert(code >= 0, "wait after kill should succeed");
 }
 
-test_process_wait_twice() `test(exclude: "wasm32") `target(!windows) {
+test_process_wait_twice() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("true", [])?!;
   int code1 = p.wait()?!;
   int code2 = p.wait()?!;
@@ -513,12 +513,12 @@ _spawn_and_drop!() {
   // p goes out of scope here, drop should close fds and reap zombie
 }
 
-test_process_drop_cleanup() `test(exclude: "wasm32") `target(!windows) {
+test_process_drop_cleanup() `test(exclude: wasm) `target(!windows) {
   _spawn_and_drop()?!;
   assert(true, "drop cleanup should not hang");
 }
 
-test_process_large_bidirectional() `test(exclude: "wasm32") `target(!windows) {
+test_process_large_bidirectional() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
   ProcessInput stdin = p.take_standard_input()?!;
   ProcessOutput stdout = p.take_standard_output()?!;
@@ -533,7 +533,7 @@ test_process_large_bidirectional() `test(exclude: "wasm32") `target(!windows) {
   assert(out.len == 8192, "cat should echo all 8192 bytes");
 }
 
-test_process_close_stdin_eof() `test(exclude: "wasm32") `target(!windows) {
+test_process_close_stdin_eof() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("wc", ["-l"])?!;
   ProcessInput stdin = p.take_standard_input()?!;
   ProcessOutput stdout = p.take_standard_output()?!;
@@ -547,7 +547,7 @@ test_process_close_stdin_eof() `test(exclude: "wasm32") `target(!windows) {
   assert(out.trim() == "3", "wc should count 3 lines, got: " + out.trim());
 }
 
-test_process_take_already_taken() `test(exclude: "wasm32") `target(!windows) {
+test_process_take_already_taken() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("true", [])?!;
   ProcessOutput stdout = p.take_standard_output()?!;
 
@@ -559,7 +559,7 @@ test_process_take_already_taken() `test(exclude: "wasm32") `target(!windows) {
   p.wait()?!;
 }
 
-test_process_writer_interface() `test(exclude: "wasm32") `target(!windows) {
+test_process_writer_interface() `test(exclude: wasm) `target(!windows) {
   // Verify ProcessInput write_line works end-to-end
   Process p = Process.spawn("cat", [])?!;
   ProcessInput stdin = p.take_standard_input()?!;
@@ -576,7 +576,7 @@ test_process_writer_interface() `test(exclude: "wasm32") `target(!windows) {
   assert(out.contains("world"), "output should contain world");
 }
 
-test_process_close_stdin_twice() `test(exclude: "wasm32") `target(!windows) {
+test_process_close_stdin_twice() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
   ProcessInput stdin = p.take_standard_input()?!;
   stdin.close()?!;
@@ -584,7 +584,7 @@ test_process_close_stdin_twice() `test(exclude: "wasm32") `target(!windows) {
   p.wait()?!;
 }
 
-test_process_close_stdout_twice() `test(exclude: "wasm32") `target(!windows) {
+test_process_close_stdout_twice() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("echo", ["hi"])?!;
   ProcessOutput stdout = p.take_standard_output()?!;
   stdout.close()?!;
@@ -592,7 +592,7 @@ test_process_close_stdout_twice() `test(exclude: "wasm32") `target(!windows) {
   p.wait()?!;
 }
 
-test_process_write_after_close() `test(exclude: "wasm32") `target(!windows) {
+test_process_write_after_close() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
   ProcessInput stdin = p.take_standard_input()?!;
   stdin.close()?!;
@@ -605,7 +605,7 @@ test_process_write_after_close() `test(exclude: "wasm32") `target(!windows) {
   p.wait()?!;
 }
 
-test_process_take_stdin_twice() `test(exclude: "wasm32") `target(!windows) {
+test_process_take_stdin_twice() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
   ProcessInput stdin = p.take_standard_input()?!;
   stdin.close()?!;
@@ -618,7 +618,7 @@ test_process_take_stdin_twice() `test(exclude: "wasm32") `target(!windows) {
   p.wait()?!;
 }
 
-test_process_take_stderr_twice() `test(exclude: "wasm32") `target(!windows) {
+test_process_take_stderr_twice() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("true", [])?!;
   ProcessOutput stderr = p.take_standard_error()?!;
 
@@ -630,7 +630,7 @@ test_process_take_stderr_twice() `test(exclude: "wasm32") `target(!windows) {
   p.wait()?!;
 }
 
-test_process_spawn_variadic() `test(exclude: "wasm32") `target(!windows) {
+test_process_spawn_variadic() `test(exclude: wasm) `target(!windows) {
   // Variadic inline args (not string[])
   Process p = Process.spawn("echo", ["one", "two", "three"])?!;
   ProcessOutput stdout = p.take_standard_output()?!;
@@ -640,13 +640,13 @@ test_process_spawn_variadic() `test(exclude: "wasm32") `target(!windows) {
   assert(out.trim() == "one two three", "variadic args should be passed");
 }
 
-test_process_nonzero_exit() `test(exclude: "wasm32") `target(!windows) {
+test_process_nonzero_exit() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("sh", ["-c", "exit 42"])?!;
   int code = p.wait()?!;
   assert(code == 42, "should capture exit code 42");
 }
 
-test_process_multiple_writes() `test(exclude: "wasm32") `target(!windows) {
+test_process_multiple_writes() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
   ProcessInput stdin = p.take_standard_input()?!;
   ProcessOutput stdout = p.take_standard_output()?!;
@@ -662,14 +662,14 @@ test_process_multiple_writes() `test(exclude: "wasm32") `target(!windows) {
   assert(out == "chunk1-chunk2-chunk3", "multiple writes should be concatenated");
 }
 
-test_process_spawn_nonexistent() `test(exclude: "wasm32") `target(!windows) {
+test_process_spawn_nonexistent() `test(exclude: wasm) `target(!windows) {
   // Nonexistent program: spawn succeeds (fork+exec), but child exits 127
   Process p = Process.spawn("__promise_no_such_program__", [])?!;
   int code = p.wait()?!;
   assert(code == 127, "nonexistent program should exit with 127");
 }
 
-test_process_empty_output() `test(exclude: "wasm32") `target(!windows) {
+test_process_empty_output() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("true", [])?!;
   ProcessOutput stdout = p.take_standard_output()?!;
   string out = stdout.read_all()?!;
@@ -684,7 +684,7 @@ _drop_process_input!(Process ~p) {
   // stdin goes out of scope without explicit close — drop should handle it
 }
 
-test_process_input_drop_auto_closes() `test(exclude: "wasm32") `target(!windows) {
+test_process_input_drop_auto_closes() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
   _drop_process_input(p)?!;
   ProcessOutput stdout = p.take_standard_output()?!;
@@ -694,7 +694,7 @@ test_process_input_drop_auto_closes() `test(exclude: "wasm32") `target(!windows)
   assert(out == "auto-close", "auto-closed stdin should have sent data");
 }
 
-test_process_wait_auto_closes_stdin() `test(exclude: "wasm32") `target(!windows) {
+test_process_wait_auto_closes_stdin() `test(exclude: wasm) `target(!windows) {
   // Don't take stdin — wait() should close it automatically
   Process p = Process.spawn("cat", [])?!;
   ProcessOutput stdout = p.take_standard_output()?!;
@@ -705,7 +705,7 @@ test_process_wait_auto_closes_stdin() `test(exclude: "wasm32") `target(!windows)
   assert(out.len == 0, "no input was written");
 }
 
-test_process_sequential_spawns() `test(exclude: "wasm32") `target(!windows) {
+test_process_sequential_spawns() `test(exclude: wasm) `target(!windows) {
   // Verify TLS globals reset between sequential Process.spawn calls
   Process p1 = Process.spawn("echo", ["first"])?!;
   ProcessOutput stdout1 = p1.take_standard_output()?!;
@@ -721,7 +721,7 @@ test_process_sequential_spawns() `test(exclude: "wasm32") `target(!windows) {
   assert(out2.trim() == "second", "second spawn output should be correct");
 }
 
-test_process_stdout_and_stderr_concurrent() `test(exclude: "wasm32") `target(!windows) {
+test_process_stdout_and_stderr_concurrent() `test(exclude: wasm) `target(!windows) {
   // Read both stdout and stderr from the same process
   Process p = Process.spawn("sh", ["-c", "echo out; echo err >&2"])?!;
   ProcessOutput stdout = p.take_standard_output()?!;
@@ -745,7 +745,7 @@ _read_from_reader!(Reader ~r) string {
   return string.from_bytes(buf[0:n]);
 }
 
-test_process_input_structural_writer() `test(exclude: "wasm32") `target(!windows) {
+test_process_input_structural_writer() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("cat", [])?!;
   ProcessInput stdin = p.take_standard_input()?!;
   ProcessOutput stdout = p.take_standard_output()?!;
@@ -759,7 +759,7 @@ test_process_input_structural_writer() `test(exclude: "wasm32") `target(!windows
   assert(out == "structural", "should receive what was written via Writer interface");
 }
 
-test_process_output_structural_reader() `test(exclude: "wasm32") `target(!windows) {
+test_process_output_structural_reader() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("echo", ["from_reader"])?!;
   ProcessOutput stdout = p.take_standard_output()?!;
 
@@ -769,7 +769,7 @@ test_process_output_structural_reader() `test(exclude: "wasm32") `target(!window
   assert(out.trim() == "from_reader", "should read via Reader interface");
 }
 
-test_env_contains_path() `test(exclude: "wasm32") {
+test_env_contains_path() `test(exclude: wasm) {
   map[string, string] e = env;
   // Windows stores it as "Path", POSIX as "PATH"; get_env_var is case-insensitive
   // but the env map uses the original case. Check both.
@@ -777,17 +777,17 @@ test_env_contains_path() `test(exclude: "wasm32") {
   assert(found, "env should contain PATH or Path");
 }
 
-test_env_contains_home() `test(exclude: "wasm32") `target(!windows) {
+test_env_contains_home() `test(exclude: wasm) `target(!windows) {
   map[string, string] e = env;
   assert(e.contains("HOME"), "env should contain HOME");
 }
 
-test_env_contains_home() `test(exclude: "wasm32") `target(windows) {
+test_env_contains_home() `test(exclude: wasm) `target(windows) {
   map[string, string] e = env;
   assert(e.contains("USERPROFILE"), "env should contain USERPROFILE");
 }
 
-test_env_values_match_get() `test(exclude: "wasm32") {
+test_env_values_match_get() `test(exclude: wasm) {
   // env map values should match get_env_var (case-insensitive on Windows)
   string? path = get_env_var("PATH");
   if p := path {
@@ -796,40 +796,40 @@ test_env_values_match_get() `test(exclude: "wasm32") {
   }
 }
 
-test_env_has_entries() `test(exclude: "wasm32") {
+test_env_has_entries() `test(exclude: wasm) {
   map[string, string] e = env;
   assert(e.len > 0, "env should have at least one entry");
 }
 
-test_user_name_nonempty() `test(exclude: "wasm32") {
+test_user_name_nonempty() `test(exclude: wasm) {
   string name = user_name;
   assert(name.len > 0, "user_name should be non-empty");
 }
 
-test_user_id_nonnegative() `test(exclude: "wasm32") {
+test_user_id_nonnegative() `test(exclude: wasm) {
   int uid = user_id;
   assert(uid >= 0, "user_id should be non-negative");
 }
 
-test_group_id_nonnegative() `test(exclude: "wasm32") {
+test_group_id_nonnegative() `test(exclude: wasm) {
   int gid = group_id;
   assert(gid >= 0, "group_id should be non-negative");
 }
 
-test_home_dir_absolute() `test(exclude: "wasm32") `target(!windows) {
+test_home_dir_absolute() `test(exclude: wasm) `target(!windows) {
   string home = home_dir;
   assert(home.len > 0, "home_dir should be non-empty");
   assert(home.starts_with("/"), "home_dir should be an absolute path");
 }
 
-test_home_dir_absolute() `test(exclude: "wasm32") `target(windows) {
+test_home_dir_absolute() `test(exclude: wasm) `target(windows) {
   string home = home_dir;
   assert(home.len > 0, "home_dir should be non-empty");
   // Windows paths: C:\Users\... or similar
   assert(home.len >= 3 && home[1] == ':', "home_dir should be an absolute Windows path");
 }
 
-test_home_dir_matches_env() `test(exclude: "wasm32") `target(!windows) {
+test_home_dir_matches_env() `test(exclude: wasm) `target(!windows) {
   string home = home_dir;
   string? env_home = get_env_var("HOME");
   if h := env_home {
@@ -837,7 +837,7 @@ test_home_dir_matches_env() `test(exclude: "wasm32") `target(!windows) {
   }
 }
 
-test_home_dir_matches_env() `test(exclude: "wasm32") `target(windows) {
+test_home_dir_matches_env() `test(exclude: wasm) `target(windows) {
   string home = home_dir;
   string? env_home = get_env_var("USERPROFILE");
   if h := env_home {
@@ -845,17 +845,17 @@ test_home_dir_matches_env() `test(exclude: "wasm32") `target(windows) {
   }
 }
 
-test_hostname_nonempty() `test(exclude: "wasm32") {
+test_hostname_nonempty() `test(exclude: wasm) {
   string host = hostname;
   assert(host.len > 0, "hostname should be non-empty");
 }
 
-test_hostname_no_newline() `test(exclude: "wasm32") {
+test_hostname_no_newline() `test(exclude: wasm) {
   string host = hostname;
   assert(!host.contains("\n"), "hostname should not contain newline");
 }
 
-test_user_name_matches_env() `test(exclude: "wasm32") `target(!windows) {
+test_user_name_matches_env() `test(exclude: wasm) `target(!windows) {
   string name = user_name;
   string? env_user = get_env_var("USER");
   if u := env_user {
@@ -863,7 +863,7 @@ test_user_name_matches_env() `test(exclude: "wasm32") `target(!windows) {
   }
 }
 
-test_user_name_matches_env() `test(exclude: "wasm32") `target(windows) {
+test_user_name_matches_env() `test(exclude: wasm) `target(windows) {
   string name = user_name;
   string? env_user = get_env_var("USERNAME");
   if u := env_user {
@@ -871,13 +871,13 @@ test_user_name_matches_env() `test(exclude: "wasm32") `target(windows) {
   }
 }
 
-test_signal_enum_posix_numbers() `test(exclude: "wasm32") {
+test_signal_enum_posix_numbers() `test(exclude: wasm) {
   assert(Signal.Interrupt._to_posix_number() == 2, "Interrupt should be SIGINT (2)");
   assert(Signal.Terminate._to_posix_number() == 15, "Terminate should be SIGTERM (15)");
   assert(Signal.Hangup._to_posix_number() == 1, "Hangup should be SIGHUP (1)");
 }
 
-test_signal_from_posix_roundtrip() `test(exclude: "wasm32") {
+test_signal_from_posix_roundtrip() `test(exclude: wasm) {
   if sig := _signal_from_posix(2) {
     assert(sig._to_posix_number() == 2, "roundtrip should preserve signal number");
   } else {
@@ -890,12 +890,12 @@ test_signal_from_posix_roundtrip() `test(exclude: "wasm32") {
   }
 }
 
-test_signal_from_posix_unknown() `test(exclude: "wasm32") {
+test_signal_from_posix_unknown() `test(exclude: wasm) {
   Signal? sig = _signal_from_posix(999);
   assert(sig is absent, "unknown signal number should return none");
 }
 
-test_signal_receive_interrupt() `test(exclude: "wasm32") `target(!windows) {
+test_signal_receive_interrupt() `test(exclude: wasm) `target(!windows) {
   setup_signal_handling(Signal.Interrupt)?!;
   // Send SIGINT to self in a goroutine (so receive_signal can block)
   int pid = process_id;
@@ -904,7 +904,7 @@ test_signal_receive_interrupt() `test(exclude: "wasm32") `target(!windows) {
   assert(received._to_posix_number() == 2, "should receive Signal.Interrupt");
 }
 
-test_signal_receive_terminate() `test(exclude: "wasm32") `target(!windows) {
+test_signal_receive_terminate() `test(exclude: wasm) `target(!windows) {
   setup_signal_handling(Signal.Terminate)?!;
   int pid = process_id;
   go _os_send_signal(pid, 15);
@@ -912,7 +912,7 @@ test_signal_receive_terminate() `test(exclude: "wasm32") `target(!windows) {
   assert(received._to_posix_number() == 15, "should receive Signal.Terminate");
 }
 
-test_signal_receive_hangup() `test(exclude: "wasm32") `target(!windows) {
+test_signal_receive_hangup() `test(exclude: wasm) `target(!windows) {
   setup_signal_handling(Signal.Hangup)?!;
   int pid = process_id;
   go _os_send_signal(pid, 1);
@@ -920,7 +920,7 @@ test_signal_receive_hangup() `test(exclude: "wasm32") `target(!windows) {
   assert(received._to_posix_number() == 1, "should receive Signal.Hangup");
 }
 
-test_signal_setup_multiple_signals() `test(exclude: "wasm32") `target(!windows) {
+test_signal_setup_multiple_signals() `test(exclude: wasm) `target(!windows) {
   // Register multiple signals in one call (variadic)
   setup_signal_handling(Signal.Interrupt, Signal.Terminate)?!;
   int pid = process_id;
@@ -929,7 +929,7 @@ test_signal_setup_multiple_signals() `test(exclude: "wasm32") `target(!windows) 
   assert(received._to_posix_number() == 15, "should receive Signal.Terminate from multi-register");
 }
 
-test_signal_setup_idempotent() `test(exclude: "wasm32") `target(!windows) {
+test_signal_setup_idempotent() `test(exclude: wasm) `target(!windows) {
   // Calling setup twice should not fail (idempotent pipe init)
   setup_signal_handling(Signal.Interrupt)?!;
   setup_signal_handling(Signal.Terminate)?!;
@@ -939,18 +939,18 @@ test_signal_setup_idempotent() `test(exclude: "wasm32") `target(!windows) {
   assert(received._to_posix_number() == 2, "should work after double setup");
 }
 
-test_process_id_positive() `test(exclude: "wasm32") `target(!windows) {
+test_process_id_positive() `test(exclude: wasm) `target(!windows) {
   int pid = process_id;
   assert(pid > 0, "process_id should be positive");
 }
 
-test_process_id_stable() `test(exclude: "wasm32") `target(!windows) {
+test_process_id_stable() `test(exclude: wasm) `target(!windows) {
   int pid1 = process_id;
   int pid2 = process_id;
   assert(pid1 == pid2, "process_id should be stable across calls");
 }
 
-test_process_output_read_after_close() `test(exclude: "wasm32") `target(!windows) {
+test_process_output_read_after_close() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("echo", ["hi"])?!;
   ProcessOutput stdout = p.take_standard_output()?!;
   stdout.close()?!;
@@ -966,14 +966,14 @@ _drop_process_output!(Process ~p) {
   // stdout goes out of scope without explicit close — drop should handle it
 }
 
-test_process_output_drop_auto_closes() `test(exclude: "wasm32") `target(!windows) {
+test_process_output_drop_auto_closes() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("echo", ["dropped"])?!;
   _drop_process_output(p)?!;
   // If drop didn't close the fd, this would leak. Just verify no hang.
   p.wait()?!;
 }
 
-test_env_reflects_set() `test(exclude: "wasm32") {
+test_env_reflects_set() `test(exclude: wasm) {
   // Set a variable, then verify it appears in the env map
   set_env_var("PROMISE_TEST_ENV_MAP", "from_map_test");
   map[string, string] e = env;
@@ -986,7 +986,7 @@ test_env_reflects_set() `test(exclude: "wasm32") {
   set_env_var("PROMISE_TEST_ENV_MAP", absent);
 }
 
-test_execute_custom_env() `test(exclude: "wasm32") `target(!windows) {
+test_execute_custom_env() `test(exclude: wasm) `target(!windows) {
   map[string, string] custom_env = map[string, string]();
   custom_env["PATH"] = "/usr/bin:/bin";
   custom_env["MY_TEST_VAR"] = "custom_value";
@@ -995,13 +995,13 @@ test_execute_custom_env() `test(exclude: "wasm32") `target(!windows) {
   assert(result.standard_output.trim() == "custom_value", "child should see custom env var");
 }
 
-test_execute_custom_cwd() `test(exclude: "wasm32") `target(!windows) {
+test_execute_custom_cwd() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("pwd", [], working_directory: "/usr")?!;
   assert(result.exit_code == 0, "pwd should exit with 0");
   assert(result.standard_output.trim() == "/usr", "child should run in /usr");
 }
 
-test_execute_env_isolation() `test(exclude: "wasm32") `target(!windows) {
+test_execute_env_isolation() `test(exclude: wasm) `target(!windows) {
   // Custom env does NOT inherit parent env — child should NOT see PATH from parent
   // (unless we explicitly set it)
   set_env_var("PROMISE_TEST_ISOLATION", "parent_value");
@@ -1014,7 +1014,7 @@ test_execute_env_isolation() `test(exclude: "wasm32") `target(!windows) {
   set_env_var("PROMISE_TEST_ISOLATION", absent);
 }
 
-test_execute_env_and_cwd() `test(exclude: "wasm32") `target(!windows) {
+test_execute_env_and_cwd() `test(exclude: wasm) `target(!windows) {
   map[string, string] custom_env = map[string, string]();
   custom_env["PATH"] = "/usr/bin:/bin";
   custom_env["COMBO_VAR"] = "combined";
@@ -1025,7 +1025,7 @@ test_execute_env_and_cwd() `test(exclude: "wasm32") `target(!windows) {
   assert(result.standard_output.contains("/usr"), "should run in /usr");
 }
 
-test_execute_empty_env() `test(exclude: "wasm32") `target(!windows) {
+test_execute_empty_env() `test(exclude: wasm) `target(!windows) {
   // Empty map = nearly-empty environment (child has no PATH, etc.)
   map[string, string] empty_env = map[string, string]();
   empty_env["PATH"] = "/usr/bin:/bin";
@@ -1035,13 +1035,13 @@ test_execute_empty_env() `test(exclude: "wasm32") `target(!windows) {
   assert(result.standard_output.contains("PATH="), "should have PATH");
 }
 
-test_execute_invalid_cwd() `test(exclude: "wasm32") `target(!windows) {
+test_execute_invalid_cwd() `test(exclude: wasm) `target(!windows) {
   // Nonexistent cwd → child exits 127 (chdir fails in child)
   ProcessResult result = execute("true", [], working_directory: "/nonexistent_dir_promise_test")?!;
   assert(result.exit_code == 127, "invalid cwd should cause exit 127");
 }
 
-test_execute_none_env_inherits() `test(exclude: "wasm32") `target(!windows) {
+test_execute_none_env_inherits() `test(exclude: wasm) `target(!windows) {
   // Absent env = inherit parent (default behavior)
   set_env_var("PROMISE_TEST_INHERIT", "should_see");
   ProcessResult result = execute("sh", ["-c", "echo $PROMISE_TEST_INHERIT"])?!;
@@ -1051,7 +1051,7 @@ test_execute_none_env_inherits() `test(exclude: "wasm32") `target(!windows) {
   set_env_var("PROMISE_TEST_INHERIT", absent);
 }
 
-test_execute_none_cwd_inherits() `test(exclude: "wasm32") `target(!windows) {
+test_execute_none_cwd_inherits() `test(exclude: wasm) `target(!windows) {
   // Absent cwd = inherit parent cwd (default behavior)
   string original = working_dir?!;
   set_working_dir("/usr")?!;
@@ -1061,7 +1061,7 @@ test_execute_none_cwd_inherits() `test(exclude: "wasm32") `target(!windows) {
   set_working_dir(original)?!;
 }
 
-test_spawn_custom_env() `test(exclude: "wasm32") `target(!windows) {
+test_spawn_custom_env() `test(exclude: wasm) `target(!windows) {
   map[string, string] custom_env = map[string, string]();
   custom_env["PATH"] = "/usr/bin:/bin";
   custom_env["SPAWN_VAR"] = "from_spawn";
@@ -1073,7 +1073,7 @@ test_spawn_custom_env() `test(exclude: "wasm32") `target(!windows) {
   assert(out.trim() == "from_spawn", "streaming process should see custom env");
 }
 
-test_spawn_custom_cwd() `test(exclude: "wasm32") `target(!windows) {
+test_spawn_custom_cwd() `test(exclude: wasm) `target(!windows) {
   Process p = Process.spawn("pwd", [], working_directory: "/usr")?!;
   ProcessOutput stdout = p.take_standard_output()?!;
   string out = stdout.read_all()?!;

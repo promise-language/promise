@@ -1,6 +1,6 @@
 use net;
 
-main() `test(expected: "echo ok", exclude: "wasm32") {
+main() `test(expected: "echo ok", exclude: wasm) {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 19950)?!;
 
   // Client goroutine: connect, send "hi", read echo reply

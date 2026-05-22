@@ -135,6 +135,40 @@ func (c *Checker) evalTargetExpr(expr ast.Expr) bool {
 	return true // unknown expression form — include by default (safe)
 }
 
+// ValidExcludeIdents is the set of valid identifier names for test(exclude:) parameters.
+var ValidExcludeIdents = map[string]bool{
+	"windows": true, "linux": true, "macos": true,
+	"wasm": true, "wasi": true, "web": true,
+	"posix": true, "x86_64": true, "aarch64": true, "arm64": true,
+}
+
+// MatchTargetIdent returns true if the target identifier matches the given TargetInfo.
+// This is the public counterpart to the private matchTargetIdent method.
+func MatchTargetIdent(ti TargetInfo, name string) bool {
+	switch name {
+	case "windows":
+		return ti.OS == "windows"
+	case "linux":
+		return ti.OS == "linux"
+	case "macos":
+		return ti.OS == "macos"
+	case "wasm":
+		return ti.OS == "wasm"
+	case "wasi":
+		return ti.Env == "wasi"
+	case "web":
+		return ti.Env == "web"
+	case "posix":
+		return ti.OS == "linux" || ti.OS == "macos"
+	case "x86_64":
+		return ti.Arch == "x86_64"
+	case "aarch64", "arm64": // arm64 is Apple's convention for the same architecture
+		return ti.Arch == "aarch64"
+	default:
+		return false // unknown target identifier — does not match
+	}
+}
+
 // matchTargetIdent returns true if the target identifier matches c.target.
 //
 // Supported identifiers:
@@ -151,26 +185,5 @@ func (c *Checker) evalTargetExpr(expr ast.Expr) bool {
 //
 // Unknown identifiers return false (does not match).
 func (c *Checker) matchTargetIdent(name string) bool {
-	switch name {
-	case "windows":
-		return c.target.OS == "windows"
-	case "linux":
-		return c.target.OS == "linux"
-	case "macos":
-		return c.target.OS == "macos"
-	case "wasm":
-		return c.target.OS == "wasm"
-	case "wasi":
-		return c.target.Env == "wasi"
-	case "web":
-		return c.target.Env == "web"
-	case "posix":
-		return c.target.OS == "linux" || c.target.OS == "macos"
-	case "x86_64":
-		return c.target.Arch == "x86_64"
-	case "aarch64", "arm64": // arm64 is Apple's convention for the same architecture
-		return c.target.Arch == "aarch64"
-	default:
-		return false // unknown target identifier — does not match
-	}
+	return MatchTargetIdent(c.target, name)
 }

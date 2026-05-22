@@ -42,7 +42,7 @@ type _NotFoundHandler {
   }
 }
 
-test_server_string_to_method() `test(exclude: "wasm32") {
+test_server_string_to_method() `test(exclude: wasm) {
   assert(_method_to_string(_string_to_method("GET")?!) == "GET", "GET");
   assert(_method_to_string(_string_to_method("POST")?!) == "POST", "POST");
   assert(_method_to_string(_string_to_method("PUT")?!) == "PUT", "PUT");
@@ -52,14 +52,14 @@ test_server_string_to_method() `test(exclude: "wasm32") {
   assert(_method_to_string(_string_to_method("OPTIONS")?!) == "OPTIONS", "OPTIONS");
 }
 
-test_server_string_to_method_error() `test(exclude: "wasm32") {
+test_server_string_to_method_error() `test(exclude: wasm) {
   Method m = _string_to_method("INVALID")? e {
     return;
   };
   assert(false, "should have raised");
 }
 
-test_server_status_text() `test(exclude: "wasm32") {
+test_server_status_text() `test(exclude: wasm) {
   assert(_status_text(200) == "OK", "200");
   assert(_status_text(201) == "Created", "201");
   assert(_status_text(204) == "No Content", "204");
@@ -77,7 +77,7 @@ test_server_status_text() `test(exclude: "wasm32") {
   assert(_status_text(999) == "Unknown", "unknown");
 }
 
-test_server_request_parse() `test(exclude: "wasm32") {
+test_server_request_parse() `test(exclude: wasm) {
   ServerRequest req = _parse_request("GET /hello?name=world HTTP/1.1\r\nHost: localhost\r\nX-Test: foo", "")?!;
   assert(_method_to_string(req.request_method) == "GET", "method GET");
   assert(req.request_path == "/hello", "path");
@@ -98,7 +98,7 @@ test_server_request_parse() `test(exclude: "wasm32") {
   }
 }
 
-test_server_request_parse_post() `test(exclude: "wasm32") {
+test_server_request_parse_post() `test(exclude: wasm) {
   ServerRequest req = _parse_request("POST /api HTTP/1.1\r\nContent-Length: 4", "data")?!;
   assert(_method_to_string(req.request_method) == "POST", "method POST");
   assert(req.request_path == "/api", "path");
@@ -106,7 +106,7 @@ test_server_request_parse_post() `test(exclude: "wasm32") {
   assert(req.request_body == "data", "body");
 }
 
-test_server_response_serialize() `test(exclude: "wasm32") {
+test_server_response_serialize() `test(exclude: wasm) {
   ServerResponse resp = ServerResponse.ok("hello");
   string s = _serialize_response(resp);
   assert(s.contains("HTTP/1.1 200 OK"), "status line");
@@ -115,7 +115,7 @@ test_server_response_serialize() `test(exclude: "wasm32") {
   assert(s.ends_with("\r\n\r\nhello"), "body after blank line");
 }
 
-test_server_response_factories() `test(exclude: "wasm32") {
+test_server_response_factories() `test(exclude: wasm) {
   ServerResponse ok_resp = ServerResponse.ok("hi");
   assert(ok_resp.status == 200, "ok status");
   assert(ok_resp.body == "hi", "ok body");
@@ -133,14 +133,14 @@ test_server_response_factories() `test(exclude: "wasm32") {
   assert(custom.body == "created", "custom body");
 }
 
-test_server_set_header() `test(exclude: "wasm32") {
+test_server_set_header() `test(exclude: wasm) {
   ServerResponse resp = ServerResponse.ok("test");
   resp.set_header("X-Custom", "value");
   string s = _serialize_response(resp);
   assert(s.contains("X-Custom: value"), "custom header in serialized response");
 }
 
-test_server_basic() `test(exclude: "wasm32", timeout: "10s") {
+test_server_basic() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -157,7 +157,7 @@ test_server_basic() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_server_post() `test(exclude: "wasm32", timeout: "10s") {
+test_server_post() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -180,7 +180,7 @@ test_server_post() `test(exclude: "wasm32", timeout: "10s") {
 // unwrapped string to another `~this` method that stores it into a container
 // still double-free. That case is tracked separately; this test is excluded
 // on macOS until the follow-up lands.
-test_server_headers() `test(exclude: "wasm32, macosx", timeout: "10s") {
+test_server_headers() `test(exclude: wasm || macos, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -206,7 +206,7 @@ test_server_headers() `test(exclude: "wasm32, macosx", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_server_error_handling() `test(exclude: "wasm32", timeout: "10s") {
+test_server_error_handling() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -223,7 +223,7 @@ test_server_error_handling() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_server_not_found() `test(exclude: "wasm32", timeout: "10s") {
+test_server_not_found() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -240,14 +240,14 @@ test_server_not_found() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_server_bind_and_port() `test(exclude: "wasm32", timeout: "10s") {
+test_server_bind_and_port() `test(exclude: wasm, timeout: "10s") {
   Server server = Server.bind("127.0.0.1", 0)?!;
   assert(server.address == "127.0.0.1", "address");
   assert(server.port > 0, "port assigned");
   server.close()?!;
 }
 
-test_parse_request_malformed_no_space() `test(exclude: "wasm32") {
+test_parse_request_malformed_no_space() `test(exclude: wasm) {
   ServerRequest req = _parse_request("GETHTTP", "")? e {
     assert(e.message.contains("malformed"), "malformed error");
     return;
@@ -255,7 +255,7 @@ test_parse_request_malformed_no_space() `test(exclude: "wasm32") {
   assert(false, "should have raised");
 }
 
-test_parse_request_malformed_no_version() `test(exclude: "wasm32") {
+test_parse_request_malformed_no_version() `test(exclude: wasm) {
   ServerRequest req = _parse_request("GET /path", "")? e {
     assert(e.message.contains("malformed"), "malformed error");
     return;
@@ -263,7 +263,7 @@ test_parse_request_malformed_no_version() `test(exclude: "wasm32") {
   assert(false, "should have raised");
 }
 
-test_read_request_early_close() `test(exclude: "wasm32", timeout: "10s") {
+test_read_request_early_close() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -281,7 +281,7 @@ test_read_request_early_close() `test(exclude: "wasm32", timeout: "10s") {
   assert(false, "should have raised error");
 }
 
-test_server_large_body() `test(exclude: "wasm32", timeout: "10s") {
+test_server_large_body() `test(exclude: wasm, timeout: "10s") {
   net.TcpListener listener = net.TcpListener.bind("127.0.0.1", 0)?!;
   int port = listener.local_port;
 
@@ -300,7 +300,7 @@ test_server_large_body() `test(exclude: "wasm32", timeout: "10s") {
   sleep(Duration.from_millis(100));
 }
 
-test_server_serve() `test(exclude: "wasm32", timeout: "10s") {
+test_server_serve() `test(exclude: wasm, timeout: "10s") {
   channel[int] port_ch = channel[int](capacity: 1);
   channel[channel[bool]] stop_ch = channel[channel[bool]](capacity: 1);
 
@@ -331,7 +331,7 @@ test_server_serve() `test(exclude: "wasm32", timeout: "10s") {
   }
 }
 
-test_server_serve_error_handler() `test(exclude: "wasm32", timeout: "10s") {
+test_server_serve_error_handler() `test(exclude: wasm, timeout: "10s") {
   channel[int] port_ch = channel[int](capacity: 1);
   channel[channel[bool]] stop_ch = channel[channel[bool]](capacity: 1);
 
@@ -361,7 +361,7 @@ test_server_serve_error_handler() `test(exclude: "wasm32", timeout: "10s") {
   }
 }
 
-test_server_shutdown_handle() `test(exclude: "wasm32", timeout: "10s") {
+test_server_shutdown_handle() `test(exclude: wasm, timeout: "10s") {
   channel[int] port_ch = channel[int](capacity: 1);
   channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
 
@@ -386,7 +386,7 @@ test_server_shutdown_handle() `test(exclude: "wasm32", timeout: "10s") {
   }
 }
 
-test_server_shutdown_handle_error_handler() `test(exclude: "wasm32", timeout: "10s") {
+test_server_shutdown_handle_error_handler() `test(exclude: wasm, timeout: "10s") {
   channel[int] port_ch = channel[int](capacity: 1);
   channel[ServerShutdownHandle] handle_ch = channel[ServerShutdownHandle](capacity: 1);
 

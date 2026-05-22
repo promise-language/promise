@@ -14554,6 +14554,62 @@ func TestStringInterpolationUserTypeVtable(t *testing.T) {
 	assertContains(t, ir, "interp.format.ok")
 }
 
+// T0421: Fieldless enum interpolation emits switch on tag → variant name string.
+func TestStringInterpolationEnumFieldless(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		main() {
+			Color c = Color.Green;
+			string s = "{c}";
+		}
+	`)
+	assertContains(t, ir, "switch i32")
+	assertContains(t, ir, "enum.interp.Red")
+	assertContains(t, ir, "enum.interp.Green")
+	assertContains(t, ir, "enum.interp.Blue")
+	assertContains(t, ir, "enum.interp.merge")
+	assertContains(t, ir, `"Red"`)
+	assertContains(t, ir, `"Green"`)
+	assertContains(t, ir, `"Blue"`)
+}
+
+// T0421: Data enum interpolation extracts tag from field 0 and emits switch.
+func TestStringInterpolationEnumData(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		main() {
+			Shape s = Shape.Circle(1.0);
+			string x = "{s}";
+		}
+	`)
+	assertContains(t, ir, "switch i32")
+	assertContains(t, ir, "enum.interp.Circle")
+	assertContains(t, ir, "enum.interp.Rect")
+	assertContains(t, ir, `"Circle"`)
+	assertContains(t, ir, `"Rect"`)
+}
+
+// T0421: Optional enum interpolation emits interp.some/none wrapper + inner enum switch.
+func TestStringInterpolationEnumOptional(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		main() {
+			Color? c = Color.Green;
+			string s = "{c}";
+		}
+	`)
+	// Optional wrapping blocks
+	assertContains(t, ir, "interp.some")
+	assertContains(t, ir, "interp.none")
+	// Enum switch inside the some branch
+	assertContains(t, ir, "switch i32")
+	assertContains(t, ir, "enum.interp.Red")
+	assertContains(t, ir, "enum.interp.Green")
+	assertContains(t, ir, "enum.interp.Blue")
+	// "none" string for absent case
+	assertContains(t, ir, `"none"`)
+}
+
 // T0084: Builder is freed after callFormatToString extracts the string
 func TestCallFormatToStringBuilderDrop(t *testing.T) {
 	ir := generateIR(t, `

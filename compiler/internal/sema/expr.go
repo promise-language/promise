@@ -3054,6 +3054,10 @@ func (c *Checker) validateInterpolationType(typ types.Type, node ast.Expr) {
 	if _, ok := inner.(*types.Tuple); ok {
 		return
 	}
+	// Enum types: always allowed; codegen synthesizes variant-name output.
+	if semaExtractEnum(inner) != nil {
+		return
+	}
 	named := semaExtractNamed(inner)
 	if named == nil {
 		c.errorf(node.Pos(), "type %s cannot be used in string interpolation", inner)
@@ -3083,6 +3087,23 @@ func semaExtractNamed(typ types.Type) *types.Named {
 		return semaExtractNamed(t.Elem())
 	case *types.MutRef:
 		return semaExtractNamed(t.Elem())
+	}
+	return nil
+}
+
+// semaExtractEnum unwraps Instance/SharedRef/MutRef to get the underlying *Enum type.
+func semaExtractEnum(typ types.Type) *types.Enum {
+	switch t := typ.(type) {
+	case *types.Enum:
+		return t
+	case *types.Instance:
+		if e, ok := t.Origin().(*types.Enum); ok {
+			return e
+		}
+	case *types.SharedRef:
+		return semaExtractEnum(t.Elem())
+	case *types.MutRef:
+		return semaExtractEnum(t.Elem())
 	}
 	return nil
 }

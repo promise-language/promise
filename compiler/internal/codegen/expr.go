@@ -558,6 +558,11 @@ func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value 
 		return c.convertTupleToString(val, tup)
 	}
 
+	// Handle enum types: synthesize switch on tag → variant name string.
+	if enum := extractEnum(typ); enum != nil {
+		return c.convertEnumToString(val, typ, enum)
+	}
+
 	named := extractNamed(typ)
 	if named == nil {
 		// Unknown type — produce type name as fallback
@@ -705,6 +710,54 @@ func (c *Compiler) callFormatToString(val value.Value, typ types.Type, named *ty
 	}
 
 	return strResult
+}
+
+// convertEnumToString emits a switch on the enum tag and returns the matching variant name string.
+func (c *Compiler) convertEnumToString(val value.Value, typ types.Type, enum *types.Enum) value.Value {
+	layout := c.lookupEnumLayout(typ)
+	if layout == nil {
+		return c.makeRuntimeString("<" + enum.Obj().Name() + ">")
+	}
+
+	// Extract tag: fieldless enum → value IS the i32; data enum → field 0 of struct.
+	var tag value.Value
+	if layout.MaxVariantDataSize == 0 {
+		tag = val
+	} else {
+		tag = c.block.NewExtractValue(val, 0)
+	}
+
+	switchBlock := c.block
+	mergeBlock := c.newBlock("enum.interp.merge")
+	defaultBlock := c.newBlock("enum.interp.default")
+
+	var cases []*ir.Case
+	var incomings []*ir.Incoming
+
+	for _, v := range enum.Variants() {
+		tagVal, ok := layout.VariantTag[v.Name()]
+		if !ok {
+			continue
+		}
+		caseBlock := c.newBlock("enum.interp." + v.Name())
+		cases = append(cases, &ir.Case{X: constant.NewInt(irtypes.I32, int64(tagVal)), Target: caseBlock})
+		c.block = caseBlock
+		str := c.makeRuntimeString(v.Name())
+		caseEnd := c.block
+		c.block.NewBr(mergeBlock)
+		incomings = append(incomings, ir.NewIncoming(str, caseEnd))
+	}
+
+	switchBlock.NewSwitch(tag, defaultBlock, cases...)
+
+	c.block = defaultBlock
+	defaultStr := c.makeRuntimeString("<unknown>")
+	defaultEnd := c.block
+	c.block.NewBr(mergeBlock)
+	incomings = append(incomings, ir.NewIncoming(defaultStr, defaultEnd))
+
+	c.block = mergeBlock
+	return c.block.NewPhi(incomings...)
 }
 
 // callFormatMethod dispatches the format(Writer ~w)! call on the user type,

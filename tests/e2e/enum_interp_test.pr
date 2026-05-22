@@ -1,0 +1,42 @@
+// T0421: Enum values can be used in string interpolation.
+enum Color {
+  Red, Green, Blue,
+}
+enum Shape {
+  Circle(f64 radius), Rect(f64 w, f64 h),
+}
+
+test_fieldless_enum_interp() `test {
+  assert("{Color.Red}" == "Red", "Red");
+  assert("{Color.Green}" == "Green", "Green");
+  assert("{Color.Blue}" == "Blue", "Blue");
+  c := Color.Blue;
+  assert("{c}" == "Blue", "variable");
+}
+
+test_data_enum_interp() `test {
+  s := Shape.Circle(3.14);
+  assert("{s}" == "Circle", "Circle");
+  r := Shape.Rect(2.0, 4.0);
+  assert("{r}" == "Rect", "Rect");
+}
+
+test_optional_enum_interp() `test {
+  Color? present = Color.Green;
+  assert("{present}" == "Green", "present");
+  Color? absent = none;
+  assert("{absent}" == "none", "none");
+}
+
+// T0421: Generic enum instance interpolation yields variant name.
+enum Status[T] {
+  Value(T val),
+  Empty,
+}
+
+test_generic_enum_interp() `test {
+  Status[int] v = Status[int].Value(42);
+  assert("{v}" == "Value", "generic enum Value");
+  Status[int] e = Status[int].Empty;
+  assert("{e}" == "Empty", "generic enum Empty");
+}

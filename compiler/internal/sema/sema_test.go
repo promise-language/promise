@@ -11182,6 +11182,36 @@ func TestStringInterpTupleAllowed(t *testing.T) {
 	`)
 }
 
+// T0421: Enum interpolation
+func TestStringInterpEnumFieldlessAllowed(t *testing.T) {
+	checkOK(t, `
+		enum Color { Red, Green, Blue }
+		test() { Color c = Color.Red; string s = "{c}"; }
+	`)
+}
+
+func TestStringInterpEnumDataAllowed(t *testing.T) {
+	checkOK(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		test() { Shape s = Shape.Circle(1.0); string x = "{s}"; }
+	`)
+}
+
+func TestStringInterpOptionalEnumAllowed(t *testing.T) {
+	checkOK(t, `
+		enum Dir { North, South }
+		test() { Dir? d = Dir.North; string s = "{d}"; }
+	`)
+}
+
+// T0421: Generic enum instance (Instance with Enum origin) allowed in interpolation.
+func TestStringInterpGenericEnumAllowed(t *testing.T) {
+	checkOK(t, `
+		enum Maybe[T] { Just(T value), Nothing }
+		test() { Maybe[int] m = Maybe[int].Just(42); string s = "{m}"; }
+	`)
+}
+
 // --- `target(cond) filtering tests ---
 
 // checkSourceWithTarget parses src as user code and checks with a specific target.

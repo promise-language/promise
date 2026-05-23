@@ -5,6 +5,7 @@
 - [language-design.md](language-design.md) — Full language specification: types, ownership, errors, generics, modules, concurrency.
 - [language-guide.md](language-guide.md) — Concise reference for writing correct Promise code.
 - [memory-management.md](memory-management.md) — Rust-inspired ownership semantics, drop/clone, leak tracking status.
+- [large-integers.md](large-integers.md) — Plan for native i128/u128, i256/u256, i512/u512 primitive types backed by LLVM iN.
 
 ## Compiler and Runtime
 

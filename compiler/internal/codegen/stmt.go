@@ -519,7 +519,7 @@ func (c *Compiler) dropDiscardedAutoPropagate(expr ast.Expr, val value.Value) {
 		if inst, ok := resolvedType.(*types.Instance); ok {
 			ownerName = monoName(inst)
 		} else if named.HasDrop() && !named.NeedsSynthDrop() {
-			ownerName = c.resolveMethodOwner(named, "drop")
+			ownerName = c.resolveDropOwner(named)
 		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		if dropFn := c.funcs[mangledName]; dropFn != nil {
@@ -2061,7 +2061,7 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		if inst, ok := resolvedTyp.(*types.Instance); ok {
 			ownerName = monoName(inst)
 		} else if !named.NeedsSynthDrop() {
-			ownerName = c.resolveMethodOwner(named, "drop")
+			ownerName = c.resolveDropOwner(named)
 		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		if fn, ok := c.funcs[mangledName]; ok {
@@ -2202,8 +2202,8 @@ func (c *Compiler) registerErrorDrop(varName string, alloca *ir.InstAlloca, conc
 	dropName := mangleMethodName(ownerName, "drop", false)
 	dropFunc := c.funcs[dropName]
 	if dropFunc == nil {
-		// Fallback: resolve via method owner chain
-		fallbackOwner := c.resolveMethodOwner(concreteNamed, "drop")
+		// Fallback: resolve via method owner chain (with child-first preference)
+		fallbackOwner := c.resolveDropOwner(concreteNamed)
 		dropFunc = c.funcs[mangleMethodName(fallbackOwner, "drop", false)]
 	}
 	if dropFunc == nil {
@@ -2535,7 +2535,7 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		if inst, ok := resolvedElem.(*types.Instance); ok {
 			ownerName = monoName(inst)
 		} else if explicitDrop {
-			ownerName = c.resolveMethodOwner(innerNamed, "drop")
+			ownerName = c.resolveDropOwner(innerNamed)
 		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		if fn, ok := c.funcs[mangledName]; ok {
@@ -2853,7 +2853,7 @@ func (c *Compiler) emitCloseCall(b scopeBinding, cap *closeErrCapture) {
 		c.block = freeBlock
 		if b.named.HasDrop() {
 			// Type has drop (explicit or synthesized) — call it to clean up fields + free
-			ownerName := c.resolveMethodOwner(b.named, "drop")
+			ownerName := c.resolveDropOwner(b.named)
 			mangledName := mangleMethodName(ownerName, "drop", false)
 			if dropFn, ok := c.funcs[mangledName]; ok {
 				c.block.NewCall(dropFn, instance)
@@ -3215,7 +3215,7 @@ func (c *Compiler) dropDiscardedOptional(expr ast.Expr, result value.Value) {
 		if inst, ok := resolvedElem.(*types.Instance); ok {
 			ownerName = monoName(inst)
 		} else if innerNamed.HasDrop() && !innerNamed.NeedsSynthDrop() {
-			ownerName = c.resolveMethodOwner(innerNamed, "drop")
+			ownerName = c.resolveDropOwner(innerNamed)
 		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		dropFunc = c.funcs[mangledName]

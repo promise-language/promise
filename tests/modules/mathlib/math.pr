@@ -147,3 +147,22 @@ type _T0468ModLogger[T] `public {
 type _T0468ModBox[T] is _T0468ModLogger[T] `public {
   string label;
 }
+
+// --- T0507: non-generic type defined in a module that inherits drop from a
+// non-generic parent. Exercises the module-compile variant of the T0507
+// inherited-drop synthesis (declareInheritedModuleDrops /
+// defineInheritedModuleDrops with c.compilingModule != "").
+//
+// Note: parent has only an int field (not droppable) to avoid hitting T0553
+// (module-defined types with user-written empty drop don't auto-append field
+// drops for heap fields). When T0553 is fixed, this can be updated to use a
+// heap parent field for stronger coverage.
+type _T0507ModLogger `public {
+  int marker;
+  drop(~this) {
+  }
+}
+
+type _T0507ModBox is _T0507ModLogger `public {
+  string label;
+}

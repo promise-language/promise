@@ -2482,7 +2482,7 @@ func (c *Compiler) resolveDropFuncForTemp(named *types.Named, typ types.Type) *i
 		if inst, ok := resolvedTyp.(*types.Instance); ok {
 			ownerName = monoName(inst)
 		} else if explicitDrop {
-			ownerName = c.resolveMethodOwner(named, "drop")
+			ownerName = c.resolveDropOwner(named)
 		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		if fn, ok := c.funcs[mangledName]; ok {
@@ -8915,7 +8915,7 @@ func (c *Compiler) dropTempOptionalInner(expr ast.Expr, optVal value.Value, flag
 			if inst, ok := resolvedElem.(*types.Instance); ok {
 				ownerName = monoName(inst)
 			} else if innerNamed.HasDrop() && !innerNamed.NeedsSynthDrop() {
-				ownerName = c.resolveMethodOwner(innerNamed, "drop")
+				ownerName = c.resolveDropOwner(innerNamed)
 			}
 			mangledName := mangleMethodName(ownerName, "drop", false)
 			dropFunc = c.funcs[mangledName]

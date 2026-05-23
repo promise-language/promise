@@ -1,0 +1,254 @@
+// T0507: A non-generic type whose drop is inherited from a parent (rather than
+// defined on the type itself) had its drop call resolve to the parent's drop
+// name, so the child's own droppable fields leaked. Non-generic complement of
+// T0468. The fix synthesizes a per-type drop that drops the child's own fields
+// and tail-calls the immediate drop parent's drop.
+type _T0507Logger {
+  string s;
+  drop(~this) {
+  }
+}
+
+type _T0507Box is _T0507Logger {
+  string label;
+}
+
+type _T0507Holder {
+  _T0507Box data;
+}
+
+type _T0507OptHolder {
+  _T0507Box? data;
+}
+
+inherit_nongen_field_label() `test {
+  s := "hello".repeat(2);
+  h := _T0507Holder(data: _T0507Box(s: "x", label: s));
+  assert(h.data.s == "x", "s");
+  assert(h.data.label == "hellohello", "label");
+}
+
+inherit_nongen_field_parent_heap() `test {
+  p := "p".repeat(2);
+  h := _T0507Holder(data: _T0507Box(s: p, label: "fixed"));
+  assert(h.data.s == "pp", "s");
+}
+
+inherit_nongen_field_both_heap() `test {
+  p := "p".repeat(2);
+  s := "s".repeat(2);
+  h := _T0507Holder(data: _T0507Box(s: p, label: s));
+  assert(h.data.s == "pp", "s");
+  assert(h.data.label == "ss", "label");
+}
+
+inherit_nongen_local() `test {
+  s := "x".repeat(2);
+  b := _T0507Box(s: "fixed", label: s);
+  assert(b.s == "fixed", "s");
+  assert(b.label == "xx", "label");
+}
+
+inherit_nongen_optional_to_none() `test {
+  s := "x".repeat(2);
+  h := _T0507OptHolder(data: _T0507Box(s: "fixed", label: s));
+  h.data = none;
+  assert(!(h.data is _T0507Box), "absent");
+}
+
+inherit_nongen_optional_to_value() `test {
+  s1 := "old".repeat(2);
+  s2 := "new".repeat(2);
+  h := _T0507OptHolder(data: _T0507Box(s: "fixed", label: s1));
+  h.data = _T0507Box(s: "fixed", label: s2);
+  assert(h.data is _T0507Box, "present");
+}
+
+// Three-level chain: drop on _T0507A only; _T0507B and _T0507C have their own
+// fields. All three layers' fields must be dropped.
+type _T0507A {
+  string anchor;
+  drop(~this) {
+  }
+}
+
+type _T0507B is _T0507A {
+  string mid;
+}
+
+type _T0507C is _T0507B {
+  string outer;
+}
+
+type _T0507ChainHolder {
+  _T0507C data;
+}
+
+inherit_nongen_chain() `test {
+  a := "a".repeat(2);
+  m := "m".repeat(2);
+  o := "o".repeat(2);
+  h := _T0507ChainHolder(data: _T0507C(anchor: a, mid: m, outer: o));
+  assert(h.data.anchor == "aa", "anchor");
+  assert(h.data.mid == "mm", "mid");
+  assert(h.data.outer == "oo", "outer");
+}
+
+// Child with no own fields — synthesis still runs but the own-field drop loop
+// is empty. Body must just forward to the parent's drop.
+type _T0507Plain is _T0507Logger {
+}
+
+type _T0507PlainHolder {
+  _T0507Plain data;
+}
+
+inherit_nongen_no_own_fields() `test {
+  p := "p".repeat(2);
+  h := _T0507PlainHolder(data: _T0507Plain(s: p));
+  assert(h.data.s == "pp", "s");
+}
+
+// Virtual drop dispatch: Box held as Logger through a function parameter, so
+// the call site emits a vtable-dispatched drop (not direct). The vtable for
+// _T0507Box must point to _T0507Box.drop — not _T0507Logger.drop — otherwise
+// the child's own fields leak through the dispatch.
+_T0507_receive(~_T0507Logger l) {
+}
+
+inherit_nongen_virtual_dispatch() `test {
+  s := "v".repeat(2);
+  _T0507_receive(_T0507Box(s: "fixed", label: s));
+}
+
+// Vector elements are dropped via emitVectorElementDrops → emitVariantFieldDrop,
+// which calls @_T0507Box.drop (the synth) and then pal_free. Without the synth,
+// the lookup falls back to _T0507Logger.drop and the child's own field leaks.
+inherit_nongen_in_vector() `test {
+  s1 := "a".repeat(2);
+  s2 := "b".repeat(2);
+  s3 := "c".repeat(2);
+  _T0507Box[] xs = [_T0507Box(s: "s1", label: s1),
+  _T0507Box(s: "s2", label: s2),
+  _T0507Box(s: "s3", label: s3),
+  ];
+  assert(xs.len == 3, "len");
+  assert(xs[0].label == "aa", "0.label");
+  assert(xs[2].s == "s3", "2.s");
+}
+
+// Map values exercise the same emitVariantFieldDrop path as vectors. Keys are
+// strings (literal) so only the value drop is interesting here.
+inherit_nongen_in_map() `test {
+  s1 := "x".repeat(2);
+  s2 := "y".repeat(2);
+  map[string, _T0507Box] m = {
+    "a": _T0507Box(s: "s1", label: s1),
+    "b": _T0507Box(s: "s2", label: s2),
+  };
+  assert(m.len == 2, "len");
+  assert(m.contains("a"), "a present");
+  assert(m.contains("b"), "b present");
+}
+
+// Field reassignment on a non-optional field. The old value's drop must run
+// — covers the regular-field assignment path (B0245 / store-to-field drop).
+type _T0507ReassignHolder {
+  _T0507Box data;
+}
+
+inherit_nongen_field_reassign() `test {
+  s1 := "old".repeat(2);
+  s2 := "new".repeat(2);
+  h := _T0507ReassignHolder(data: _T0507Box(s: "fixed", label: s1));
+  h.data = _T0507Box(s: "fixed", label: s2);
+  assert(h.data.label == "newnew", "label");
+}
+
+// Non-generic child inheriting from a generic parent instance. The synth must
+// tail-call the parent's mono name (e.g. _T0507GenLogger[int].drop) — not the
+// origin name (_T0507GenLogger.drop) — otherwise the parent's drop is silently
+// skipped and parent's fields leak.
+type _T0507GenLogger[T] {
+  T val;
+  string note;
+  drop(~this) {
+  }
+}
+
+type _T0507NonGenChild is _T0507GenLogger[int] {
+  string label;
+}
+
+type _T0507NonGenHolder {
+  _T0507NonGenChild data;
+}
+
+inherit_nongen_generic_parent() `test {
+  n := "n".repeat(2);
+  l := "l".repeat(2);
+  h := _T0507NonGenHolder(data: _T0507NonGenChild(val: 7, note: n, label: l));
+  assert(h.data.val == 7, "val");
+  assert(h.data.note == "nn", "note");
+  assert(h.data.label == "ll", "label");
+}
+
+// Function returns the inherited-drop type — the caller binds the result and
+// drops at scope exit. Exercises resolveDropFuncForTemp (expr.go) for the
+// return-value temp path. Without the child synth, the temp would drop via
+// the parent's drop and leak label.
+_T0507_make_box() _T0507Box {
+  return _T0507Box(s: "fixed", label: "x".repeat(2));
+}
+
+inherit_nongen_returned_value() `test {
+  b := _T0507_make_box();
+  assert(b.label == "xx", "label");
+}
+
+// Closure capture of user-type values (move ||) is blocked by T0554 (preexisting
+// segfault on scope-exit for ALL user-type captures, not just inherited-drop).
+// Add the test here once T0554 is fixed:
+//
+//   inherit_nongen_closure_capture() `test {
+//     s := "c".repeat(2);
+//     b := _T0507Box(s: "fixed", label: s);
+//     f := move || -> string { return b.label.repeat(1); };
+//     result := f();
+//     assert(result == "cc", "captured");
+//   }
+
+// Failable function returns the inherited-drop type. The caller (also failable)
+// uses inferred auto-propagation `x := call()`, where x is bound to the success
+// value. The bound variable must drop via the child synth at scope exit
+// (covers maybeRegisterDrop for the failable-return path).
+_T0507_fallible_make!(bool fail) _T0507Box {
+  if fail {
+    raise error(message: "x");
+  }
+  return _T0507Box(s: "fixed", label: "f".repeat(2));
+}
+
+_T0507_caller!() int {
+  b := _T0507_fallible_make(false);
+  if b.label == "ff" {
+    return 1;
+  }
+  return 0;
+}
+
+inherit_nongen_failable_propagation() `test {
+  int got = _T0507_caller()?!;
+  assert(got == 1, "ok");
+}
+
+// Tuple element drop path. Tuples store inherited-drop types; tuple drop
+// must dispatch through child synth.
+inherit_nongen_tuple_element() `test {
+  s1 := "t".repeat(2);
+  s2 := "u".repeat(2);
+  pair := (_T0507Box(s: "fixed", label: s1), _T0507Box(s: "fixed", label: s2));
+  (a, b) := pair;
+  assert(a.label == "tt", "a.label");
+  assert(b.label == "uu", "b.label");
+}

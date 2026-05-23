@@ -47,3 +47,19 @@ test_t0468_module_inherited_drop_no_leak() `test {
   assert(b.val == 1, "val");
   assert(b.label == "labellabel", "label");
 }
+
+// T0507: non-generic type in a module that inherits drop from a non-generic
+// parent. Exercises declareInheritedModuleDrops / defineInheritedModuleDrops
+// (the module-compile variant of the T0507 synthesis). Without the synthesis
+// the child's own field (label) would leak.
+//
+// Parent is non-heap (only an int field) to avoid T0553 (preexisting bug where
+// module-defined types with empty user drop bodies don't auto-append field
+// drops). When T0553 is fixed, the parent can be made heap for stronger
+// coverage.
+test_t0507_module_inherited_drop_no_leak() `test {
+  child_l := "child".repeat(2);
+  b := mathlib._T0507ModBox(marker: 42, label: child_l);
+  assert(b.marker == 42, "parent marker");
+  assert(b.label == "childchild", "child label");
+}

@@ -160,7 +160,7 @@ func (c *Compiler) resolveTypeInfoDropFn(ownerName string, named *types.Named) c
 		resolvedOwner := ownerName
 		explicitDrop := named.HasDrop() && !named.NeedsSynthDrop()
 		if explicitDrop {
-			resolvedOwner = c.resolveMethodOwner(named, "drop")
+			resolvedOwner = c.resolveDropOwner(named)
 		}
 		mangledName := mangleMethodName(resolvedOwner, "drop", false)
 		if fn, ok := c.funcs[mangledName]; ok {
@@ -332,10 +332,19 @@ func (c *Compiler) emitVtableGlobal(named *types.Named) *ir.Global {
 	for _, m := range methods {
 		ownerName := c.resolveMethodOwner(named, m.Name())
 		mangledName := mangleMethodName(ownerName, m.Name(), m.IsSetter())
-		if _, ok := c.funcs[mangledName]; !ok && ownerName != named.Obj().Name() {
-			// Inherited method from a generic parent — resolve to mono name.
-			monoOwner := c.resolveMonoParentName(named, named, ownerName)
-			mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
+		// T0468/T0507: Prefer the child's own (possibly synthesized) implementation
+		// when the method is inherited — otherwise virtual dispatch through the
+		// vtable skips the child's cleanup. The T0507 inherited-drop synthesis adds
+		// e.g. _NgBox.drop even though drop is owned by _NgLogger.
+		if ownerName != named.Obj().Name() {
+			ownMangled := mangleMethodName(named.Obj().Name(), m.Name(), m.IsSetter())
+			if _, ok := c.funcs[ownMangled]; ok {
+				mangledName = ownMangled
+			} else if _, ok := c.funcs[mangledName]; !ok {
+				// Inherited method from a generic parent — resolve to mono name.
+				monoOwner := c.resolveMonoParentName(named, named, ownerName)
+				mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
+			}
 		}
 		if fn, ok := c.funcs[mangledName]; ok {
 			entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))

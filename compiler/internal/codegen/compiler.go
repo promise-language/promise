@@ -754,6 +754,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.declareSynthesizedMonoDrops(file, monoInstances)     // B0158: auto-synthesized drops (generic)
 	c.declareSynthesizedMonoEnumDrops(file, monoInstances) // T0102: auto-synthesized enum drops (generic)
 	c.declareMonoInheritedDrops(monoInstances)             // T0468: drops inherited from generic parents
+	c.declareInheritedDrops(file)                          // T0507: drops inherited from non-generic parents
 
 	// Compute vtable info and emit vtable globals (after method stubs are declared)
 	c.computeVtableInfo(file)
@@ -795,6 +796,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineSynthesizedMonoDrops(file, monoInstances)     // B0158: auto-synthesized drops (generic)
 	c.defineSynthesizedMonoEnumDrops(file, monoInstances) // T0102: auto-synthesized enum drops (generic)
 	c.defineMonoInheritedDrops(monoInstances)             // T0468: drops inherited from generic parents
+	c.defineInheritedDrops(file)                          // T0507: drops inherited from non-generic parents
 	c.defineFuncs(file)
 	c.defineMonoFuncs(file, monoFuncInstances)
 	c.defineMonoMethodInstances(file, monoMethodInstances)
@@ -2439,7 +2441,7 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		if inst, ok := elemType.(*types.Instance); ok {
 			ownerName = monoName(inst)
 		} else if named.HasDrop() && !named.NeedsSynthDrop() {
-			ownerName = c.resolveMethodOwner(named, "drop")
+			ownerName = c.resolveDropOwner(named)
 		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		if dropFn, ok := c.funcs[mangledName]; ok {
@@ -5643,6 +5645,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.declareSynthesizedMonoDrops(modFile, monoInstances)     // B0158
 	c.declareSynthesizedMonoEnumDrops(modFile, monoInstances) // T0102
 	c.declareMonoInheritedDrops(monoInstances)                // T0468
+	c.declareInheritedModuleDrops(modFile, irName)            // T0507
 
 	// 6. Compute vtable info and emit for module types
 	c.computeVtableInfo(modFile)
@@ -5668,6 +5671,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.defineSynthesizedMonoDrops(modFile, monoInstances)     // B0158
 	c.defineSynthesizedMonoEnumDrops(modFile, monoInstances) // T0102
 	c.defineMonoInheritedDrops(monoInstances)                // T0468
+	c.defineInheritedModuleDrops(modFile, irName)            // T0507
 
 	// 9. Define module function bodies
 	c.defineModuleFuncs(modFile, irName)
@@ -6937,7 +6941,7 @@ func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) 
 		// Without the explicit-drop check, generic field types with an explicit
 		// drop (HasDrop=true, NeedsSynthDrop=false, no mono synth) had their
 		// drop silently skipped because the lookup used the origin name.
-		ownerName := c.resolveMethodOwner(fieldNamed, "drop")
+		ownerName := c.resolveDropOwner(fieldNamed)
 		useMonoName := fieldNamed.NeedsSynthDrop() || hasMonoSynthDrop
 		if !useMonoName && fieldNamed.HasDrop() {
 			if dropMethod := fieldNamed.LookupMethod("drop"); dropMethod != nil && !dropMethod.IsNative() {
@@ -7066,7 +7070,7 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 			hasMonoSynthDrop = monoInstNeedsSynthDrop(inst)
 		}
 		if innerNamed.HasDrop() || innerNamed.NeedsSynthDrop() || hasMonoSynthDrop {
-			ownerName := c.resolveMethodOwner(innerNamed, "drop")
+			ownerName := c.resolveDropOwner(innerNamed)
 			// Generic type methods are mangled per-instance — always use the mono
 			// name when elem is an Instance (covers explicit drop, sema synth, and
 			// mono synth alike).
@@ -7168,7 +7172,7 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 			hasMonoSynthDrop = monoInstNeedsSynthDrop(inst)
 		}
 		if innerNamed.HasDrop() || innerNamed.NeedsSynthDrop() || hasMonoSynthDrop {
-			ownerName := c.resolveMethodOwner(innerNamed, "drop")
+			ownerName := c.resolveDropOwner(innerNamed)
 			if inst, ok := elem.(*types.Instance); ok {
 				ownerName = monoName(inst)
 			}
@@ -7439,6 +7443,208 @@ func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
 	c.entryBlock = savedEntry
 	c.panicExitBlock = savedPanicExit
 	c.coroutineReturnBlock = savedCoroReturn
+}
+
+// resolveDropOwner returns the type name to use when resolving the drop function
+// for a non-Instance Named type. Prefers the type's own drop name (covers own
+// explicit drop, B0158 synth, and T0507 inherited-drop synth) when a function
+// exists under that name; otherwise falls back to resolveMethodOwner which walks
+// the parent chain. T0507.
+func (c *Compiler) resolveDropOwner(named *types.Named) string {
+	if named == nil {
+		return ""
+	}
+	childName := named.Obj().Name()
+	if _, ok := c.funcs[mangleMethodName(childName, "drop", false)]; ok {
+		return childName
+	}
+	return c.resolveMethodOwner(named, "drop")
+}
+
+// needsInheritedDropSynth returns true if a non-generic Named type inherits its
+// drop from a parent and needs a per-type synth that drops own fields + tail-calls
+// the parent's drop. T0507 (non-generic complement of T0468).
+func needsInheritedDropSynth(named *types.Named) bool {
+	if named == nil {
+		return false
+	}
+	if len(named.TypeParams()) > 0 {
+		return false // generic → T0468
+	}
+	if named.IsStructural() || named.IsCopy() || named.IsValueType() {
+		return false
+	}
+	if !named.HasDrop() {
+		return false
+	}
+	if hasOwnMethod(named, "drop") {
+		return false // own drop → emitFieldDrops in that body handles fields
+	}
+	if named.NeedsSynthDrop() {
+		return false // B0158 path handles
+	}
+	dropMethod := named.LookupMethod("drop")
+	if dropMethod == nil || dropMethod.IsNative() {
+		return false
+	}
+	return true
+}
+
+// declareInheritedDrops declares drop stubs for non-generic types whose drop is
+// inherited from a parent (T0507). Without this synthesis, drop call sites resolve
+// to the parent's drop name and silently skip the child's own droppable fields.
+// The body (defineInheritedDrops) drops the child's own fields and tail-calls the
+// immediate drop parent.
+func (c *Compiler) declareInheritedDrops(file *ast.File) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if !needsInheritedDropSynth(named) {
+			continue
+		}
+		mangledName := mangleMethodName(td.Name, "drop", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, irtypes.Void,
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+	}
+}
+
+// defineInheritedDrops generates bodies for inherited-drop synth stubs (T0507).
+func (c *Compiler) defineInheritedDrops(file *ast.File) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if !needsInheritedDropSynth(named) {
+			continue
+		}
+		mangledName := mangleMethodName(td.Name, "drop", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		c.defineInheritedDropBody(fn, named)
+	}
+}
+
+// declareInheritedModuleDrops declares inherited-drop stubs for module types (T0507).
+// Registers both module-prefixed and plain aliases so resolveDropOwner finds it.
+func (c *Compiler) declareInheritedModuleDrops(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if !needsInheritedDropSynth(named) {
+			continue
+		}
+		mangledName := mangleModuleMethodName(moduleName, td.Name, "drop", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, irtypes.Void,
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+		c.moduleOwnedFuncs[mangledName] = moduleName
+		// Also register the non-prefixed name for dispatch from user code
+		plainName := mangleMethodName(td.Name, "drop", false)
+		if _, exists := c.funcs[plainName]; !exists {
+			c.funcs[plainName] = fn
+		}
+	}
+}
+
+// defineInheritedModuleDrops generates bodies for module inherited-drop synth (T0507).
+func (c *Compiler) defineInheritedModuleDrops(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if !needsInheritedDropSynth(named) {
+			continue
+		}
+		mangledName := mangleModuleMethodName(moduleName, td.Name, "drop", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		c.defineInheritedDropBody(fn, named)
+	}
+}
+
+// defineInheritedDropBody generates the body for an inherited-drop synth (T0507).
+// The body drops the child's own fields (reverse declaration order) and then
+// tail-calls the immediate drop parent's drop, which runs the parent body and
+// drops the parent's fields. NO pal_free — caller handles, since NeedsSynthDrop
+// stays false (matches the explicit-drop convention).
+func (c *Compiler) defineInheritedDropBody(fn *ir.Func, named *types.Named) {
+	entry := fn.NewBlock(".entry")
+	savedBlock := c.block
+	savedFn := c.fn
+	savedEntry := c.entryBlock
+	savedPanicExit := c.panicExitBlock
+	savedCoroReturn := c.coroutineReturnBlock
+	savedLocals := c.locals
+
+	c.block = entry
+	c.fn = fn
+	c.entryBlock = entry
+	c.panicExitBlock = nil
+	c.coroutineReturnBlock = nil
+	c.locals = make(map[string]*ir.InstAlloca)
+
+	thisAlloca := entry.NewAlloca(irtypes.I8Ptr)
+	entry.NewStore(fn.Params[0], thisAlloca)
+	c.locals["this"] = thisAlloca
+
+	// Drop the child's own fields only (parent fields are dropped by parent's drop).
+	c.emitFieldDropsFor(named, named.Fields())
+
+	// Tail-call the immediate drop parent's drop. For multi-level chains (C is B
+	// is A with drop on A), the synthesis cascades naturally because B's synth
+	// drops B's fields then calls A's drop. When the parent is generic (e.g.
+	// `_NonGenChild is _GenericLogger[int]`), use the mono name `_GenericLogger[int]`
+	// rather than the origin name `_GenericLogger`.
+	parentNamed := findImmediateDropParent(named)
+	if parentNamed != nil {
+		parentTypeName := c.resolveMonoParentName(named, named, parentNamed.Obj().Name())
+		parentMangled := mangleMethodName(parentTypeName, "drop", false)
+		if parentFn, ok := c.funcs[parentMangled]; ok {
+			c.block.NewCall(parentFn, fn.Params[0])
+		}
+	}
+
+	c.block.NewRet(nil)
+
+	c.block = savedBlock
+	c.fn = savedFn
+	c.entryBlock = savedEntry
+	c.panicExitBlock = savedPanicExit
+	c.coroutineReturnBlock = savedCoroReturn
+	c.locals = savedLocals
 }
 
 // declareSynthesizedEnumDrops declares drop function stubs for non-generic enums
@@ -7793,7 +7999,7 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 		// behavior). Synthesized drops already include pal_free in the generated body.
 		if named.HasDrop() || named.NeedsSynthDrop() {
 			instance := c.extractInstancePtr(fieldVal)
-			ownerName := c.resolveMethodOwner(named, "drop")
+			ownerName := c.resolveDropOwner(named)
 			if inst, ok := typ.(*types.Instance); ok {
 				ownerName = monoName(inst)
 			}

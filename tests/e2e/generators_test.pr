@@ -607,5 +607,565 @@ test_t0479_multi_yield_break_after_first() `test {
   assert(seen == 2, "should iterate twice before break");
 }
 
+// --- T0504: Body-local variables alive at yield point must drop on mid-flight destroy ---
+
+t0504_take_string(~string s) {
+}
+
+// 1. The original repro — single string body local + break.
+t0504_gen_single_string() stream[int] {
+  string s = "x".to_string();
+  yield 1;
+  yield 2;
+}
+
+test_t0504_single_string_break() `test {
+  for x in t0504_gen_single_string() {
+    break;
+  }
+}
+
+test_t0504_single_string_run() `test {
+  for x in t0504_gen_single_string() {
+  }
+}
+
+// 2. Multiple body locals alive across yields.
+t0504_gen_two_strings() stream[int] {
+  string s = "x".to_string();
+  string t = "y".to_string();
+  yield 1;
+  yield 2;
+}
+
+test_t0504_two_strings_break() `test {
+  for x in t0504_gen_two_strings() {
+    break;
+  }
+}
+
+test_t0504_two_strings_run() `test {
+  for x in t0504_gen_two_strings() {
+  }
+}
+
+// 3. Locals introduced between yields — different snapshots per yield.
+t0504_gen_locals_between_yields() stream[int] {
+  string s = "x".to_string();
+  yield 1;
+  string t = "y".to_string();
+  yield 2;
+}
+
+test_t0504_break_at_first_yield() `test {
+  for x in t0504_gen_locals_between_yields() {
+    break;
+  }
+}
+
+test_t0504_break_at_second_yield() `test {
+  int seen = 0;
+  for x in t0504_gen_locals_between_yields() {
+    seen = seen + 1;
+    if seen == 2 {
+      break;
+    }
+  }
+  assert(seen == 2, "should reach second yield before break");
+}
+
+test_t0504_locals_between_yields_run() `test {
+  for x in t0504_gen_locals_between_yields() {
+  }
+}
+
+// 4. Reassignment before yield — drop-old fires at assign; alive at yield drops new.
+t0504_gen_reassign() stream[int] {
+  string s = "x".to_string();
+  s = "z".to_string();
+  yield 1;
+}
+
+test_t0504_reassign_break() `test {
+  for x in t0504_gen_reassign() {
+    break;
+  }
+}
+
+test_t0504_reassign_run() `test {
+  for x in t0504_gen_reassign() {
+  }
+}
+
+// 5. Move before yield — drop flag false; no double-free on mid-flight destroy.
+t0504_gen_move_before_yield() stream[int] {
+  string s = "x".to_string();
+  t0504_take_string(s);
+  yield 1;
+}
+
+test_t0504_move_before_yield_break() `test {
+  for x in t0504_gen_move_before_yield() {
+    break;
+  }
+}
+
+test_t0504_move_before_yield_run() `test {
+  for x in t0504_gen_move_before_yield() {
+  }
+}
+
+// 6. Vector body local with non-constant elements (heap path).
+t0504_gen_vector_nonconst(int seed) stream[int] {
+  int[] v = [seed, seed + 1, seed + 2];
+  yield 1;
+}
+
+test_t0504_vector_nonconst_break() `test {
+  for x in t0504_gen_vector_nonconst(10) {
+    break;
+  }
+}
+
+test_t0504_vector_nonconst_run() `test {
+  for x in t0504_gen_vector_nonconst(10) {
+  }
+}
+
+// Vector with string elements (heap + heap elements).
+t0504_gen_vector_strings() stream[int] {
+  string[] v = ["a".to_string(), "b".to_string()];
+  yield 1;
+}
+
+test_t0504_vector_strings_break() `test {
+  for x in t0504_gen_vector_strings() {
+    break;
+  }
+}
+
+test_t0504_vector_strings_run() `test {
+  for x in t0504_gen_vector_strings() {
+  }
+}
+
+// 7. Channel body local.
+t0504_gen_channel() stream[int] {
+  ch := channel[int](capacity: 2);
+  yield 1;
+}
+
+test_t0504_channel_break() `test {
+  for x in t0504_gen_channel() {
+    break;
+  }
+}
+
+test_t0504_channel_run() `test {
+  for x in t0504_gen_channel() {
+  }
+}
+
+// 8. Arc body local.
+t0504_gen_arc() stream[int] {
+  a := Arc[string]("hi".to_string());
+  yield 1;
+}
+
+test_t0504_arc_break() `test {
+  for x in t0504_gen_arc() {
+    break;
+  }
+}
+
+test_t0504_arc_run() `test {
+  for x in t0504_gen_arc() {
+  }
+}
+
+// 9. Mutex body local.
+t0504_gen_mutex() stream[int] {
+  m := Mutex[int](42);
+  yield 1;
+}
+
+test_t0504_mutex_break() `test {
+  for x in t0504_gen_mutex() {
+    break;
+  }
+}
+
+test_t0504_mutex_run() `test {
+  for x in t0504_gen_mutex() {
+  }
+}
+
+// 10. Named type with explicit drop.
+type T0504Box {
+  string s;
+  drop(~this) {
+  }
+}
+
+t0504_gen_user_type() stream[int] {
+  T0504Box b = T0504Box(s: "u".to_string());
+  yield 1;
+}
+
+test_t0504_user_type_break() `test {
+  for x in t0504_gen_user_type() {
+    break;
+  }
+}
+
+test_t0504_user_type_run() `test {
+  for x in t0504_gen_user_type() {
+  }
+}
+
+// 11. Optional body local (covers bindingDropOptional).
+t0504_gen_optional_int() stream[int] {
+  int? opt = 42;
+  yield 1;
+}
+
+test_t0504_optional_int_break() `test {
+  for x in t0504_gen_optional_int() {
+    break;
+  }
+}
+
+test_t0504_optional_int_run() `test {
+  for x in t0504_gen_optional_int() {
+  }
+}
+
+t0504_gen_optional_string() stream[int] {
+  string? opt = "x".to_string();
+  yield 1;
+}
+
+test_t0504_optional_string_break() `test {
+  for x in t0504_gen_optional_string() {
+    break;
+  }
+}
+
+test_t0504_optional_string_run() `test {
+  for x in t0504_gen_optional_string() {
+  }
+}
+
+// 12. Tuple body local with droppable field (covers bindingDropTuple).
+t0504_gen_tuple() stream[int] {
+  (string, int) t = ("x".to_string(), 1);
+  yield 1;
+}
+
+test_t0504_tuple_break() `test {
+  for x in t0504_gen_tuple() {
+    break;
+  }
+}
+
+test_t0504_tuple_run() `test {
+  for x in t0504_gen_tuple() {
+  }
+}
+
+// 13. Array body local with droppable elements (covers bindingDropArray).
+t0504_gen_array_strings() stream[int] {
+  string[2] arr = ["a".to_string(), "b".to_string()];
+  yield 1;
+}
+
+test_t0504_array_strings_break() `test {
+  for x in t0504_gen_array_strings() {
+    break;
+  }
+}
+
+test_t0504_array_strings_run() `test {
+  for x in t0504_gen_array_strings() {
+  }
+}
+
+// 14. Enum body local with droppable variant data (covers bindingDropEnum, T0102 family).
+enum T0504Value {
+  Text(string s),
+  Number(int n),
+}
+
+t0504_gen_enum() stream[int] {
+  T0504Value v = T0504Value.Text("hello".to_string());
+  yield 1;
+}
+
+test_t0504_enum_break() `test {
+  for x in t0504_gen_enum() {
+    break;
+  }
+}
+
+test_t0504_enum_run() `test {
+  for x in t0504_gen_enum() {
+  }
+}
+
+// 15. Inner-scope body local — `if cond { string t = ...; yield 1; }`.
+t0504_gen_inner_scope() stream[int] {
+  if true {
+    string t = "x".to_string();
+    yield 1;
+  }
+}
+
+test_t0504_inner_scope_break() `test {
+  for x in t0504_gen_inner_scope() {
+    break;
+  }
+}
+
+test_t0504_inner_scope_run() `test {
+  for x in t0504_gen_inner_scope() {
+  }
+}
+
+// 16. Body local + yield* delegate from vector. The underlying yield (inside
+// genYieldDelegateVector) sees the vector binding in c.scopeBindings (added by
+// the outer "v" declaration); the snapshot at the per-element yield carries it.
+t0504_gen_yieldstar_with_local() stream[int] {
+  int[] v = [1, 2, 3, 4, 5];
+  yield * v;
+}
+
+test_t0504_yieldstar_with_local_break() `test {
+  int seen = 0;
+  for x in t0504_gen_yieldstar_with_local() {
+    seen = seen + 1;
+    if seen == 2 {
+      break;
+    }
+  }
+  assert(seen == 2, "should yield twice before break");
+}
+
+test_t0504_yieldstar_with_local_run() `test {
+  int sum = 0;
+  for x in t0504_gen_yieldstar_with_local() {
+    sum = sum + x;
+  }
+  assert(sum == 15, "sum should be 15");
+}
+
+// 17. Nested generator inside body — for-in loop adds bindingGenerator to the snapshot.
+t0504_inner_gen() stream[int] {
+  yield 10;
+  yield 20;
+  yield 30;
+}
+
+t0504_gen_nested() stream[int] {
+  for y in t0504_inner_gen() {
+    yield y;
+  }
+}
+
+test_t0504_nested_break() `test {
+  int seen = 0;
+  for x in t0504_gen_nested() {
+    seen = seen + 1;
+    if seen == 2 {
+      break;
+    }
+  }
+  assert(seen == 2, "should reach second yield before break");
+}
+
+test_t0504_nested_run() `test {
+  int sum = 0;
+  for x in t0504_gen_nested() {
+    sum = sum + x;
+  }
+  assert(sum == 60, "sum should be 60");
+}
+
+// 18. Failable generator with body local — both break (mid-flight) and raise (error path).
+type T0504Err is error {
+  string detail;
+}
+
+t0504_fail_gen!() stream[int] {
+  string s = "x".to_string();
+  yield 1;
+  yield 2;
+}
+
+t0504_fail_gen_raise!() stream[int] {
+  string s = "x".to_string();
+  yield 1;
+  raise T0504Err(message: "boom", detail: "mid");
+}
+
+t0504_call_fail_break!() int {
+  for x in t0504_fail_gen()?^ {
+    return x;
+  }
+  return 0;
+}
+
+t0504_call_fail_run!() int {
+  int total = 0;
+  for x in t0504_fail_gen()?^ {
+    total = total + x;
+  }
+  return total;
+}
+
+t0504_call_fail_raise!() int {
+  int total = 0;
+  for x in t0504_fail_gen_raise()?^ {
+    total = total + x;
+  }
+  return total;
+}
+
+test_t0504_failable_break() `test {
+  int n = t0504_call_fail_break()?!;
+  assert(n == 1, "break path should return 1");
+}
+
+test_t0504_failable_run() `test {
+  int sum = t0504_call_fail_run()?!;
+  assert(sum == 3, "full iteration should sum 1+2=3");
+}
+
+test_t0504_failable_raise() `test {
+  bool caught = false;
+  t0504_call_fail_raise()? e {
+    caught = true;
+  };
+  assert(caught, "raise should propagate");
+}
+
+// 19. Body local + return mid-body — no regression: body-scope cleanup fires on
+// return, no double-drop on consumer destroy at final suspend.
+t0504_gen_return_mid_body() stream[int] {
+  string s = "x".to_string();
+  if true {
+    return;
+  }
+  yield 1;
+}
+
+test_t0504_return_mid_body() `test {
+  for x in t0504_gen_return_mid_body() {
+  }
+}
+
+// 20. Use-bound body local (bindingClose) — exercises emitCloseCall on the
+// per-yield cleanup path. The synthesized drop also calls pal_free on the heap
+// instance (T0106), so this validates close + free together.
+type T0504UseConn {
+  int fd;
+  close() {
+  }
+}
+
+t0504_gen_use_bound() stream[int] {
+  use c := T0504UseConn(fd: 7);
+  yield 1;
+  yield 2;
+}
+
+test_t0504_use_bound_break() `test {
+  for x in t0504_gen_use_bound() {
+    break;
+  }
+}
+
+test_t0504_use_bound_run() `test {
+  for x in t0504_gen_use_bound() {
+  }
+}
+
+// 21. Heap user type without an explicit drop method (bindingFree) — the type
+// has a droppable field (string), so codegen synthesizes a drop and registers
+// bindingFree which pal_frees the instance + drops fields.
+type T0504HeapNoDrop {
+  int x;
+  string label;
+}
+
+t0504_gen_heap_no_drop() stream[int] {
+  T0504HeapNoDrop b = T0504HeapNoDrop(x: 1, label: "z".to_string());
+  yield 1;
+  yield 2;
+}
+
+test_t0504_heap_no_drop_break() `test {
+  for x in t0504_gen_heap_no_drop() {
+    break;
+  }
+}
+
+test_t0504_heap_no_drop_run() `test {
+  for x in t0504_gen_heap_no_drop() {
+  }
+}
+
+// 22. Closure with captures (bindingFreeEnv) — the lambda's env struct is heap-
+// allocated; the per-yield cleanup must free it on mid-flight destroy.
+t0504_gen_closure() stream[int] {
+  int n = 7;
+  f := |int x| -> x + n;
+  int r = f(3);
+  yield r;
+  yield r + 1;
+}
+
+test_t0504_closure_break() `test {
+  for x in t0504_gen_closure() {
+    break;
+  }
+}
+
+test_t0504_closure_run() `test {
+  int sum = 0;
+  for x in t0504_gen_closure() {
+    sum = sum + x;
+  }
+  assert(sum == 21, "10 + 11 = 21");
+}
+
+// 23. Mixed binding kinds in the same snapshot — string body local outside a
+// for-in over a sub-generator. The yield inside the loop snapshots BOTH the
+// outer bindingDropString and the inner bindingGenerator.
+t0504_gen_mixed_kinds() stream[int] {
+  string s = "outer".to_string();
+  for y in t0504_inner_gen() {
+    yield y;
+  }
+}
+
+test_t0504_mixed_kinds_break() `test {
+  int seen = 0;
+  for x in t0504_gen_mixed_kinds() {
+    seen = seen + 1;
+    if seen == 2 {
+      break;
+    }
+  }
+  assert(seen == 2, "should reach second yield before break");
+}
+
+test_t0504_mixed_kinds_run() `test {
+  int sum = 0;
+  for x in t0504_gen_mixed_kinds() {
+    sum = sum + x;
+  }
+  assert(sum == 60, "sum should be 60");
+}
+
 main() {
 }

@@ -15780,6 +15780,49 @@ func TestT0479GeneratorNonDroppableParamSkipped(t *testing.T) {
 	assertNotContains(t, ir, "%m.dropflag")
 }
 
+// T0504: Body-local string in a generator must drop on mid-flight destroy.
+// emitYieldValue snapshots c.scopeBindings and emits a per-yield cleanup block
+// that drops body locals before chaining to the generator's universal cleanup.
+func TestT0504GeneratorBodyLocalYieldCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		gen() stream[int] {
+			string s = "x".to_string();
+			yield 1;
+			yield 2;
+		}
+		main() {
+			for x in gen() {
+				break;
+			}
+		}
+	`)
+	// A per-yield cleanup block must be emitted (numbered suffix from newBlock).
+	assertContains(t, ir, "yield.cleanup")
+	// The string drop call must fire from the per-yield cleanup path.
+	assertContains(t, ir, "call void @promise_string_drop(")
+	// Drop flag alloca for the body local.
+	assertContains(t, ir, "%s.dropflag = alloca i1")
+}
+
+// T0504: When the generator body has no scope bindings at a yield, no
+// per-yield cleanup block is emitted (the switch's tag=1 case targets
+// c.generatorCleanup directly).
+func TestT0504GeneratorNoBodyLocalsNoYieldCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		gen() stream[int] {
+			yield 1;
+			yield 2;
+		}
+		main() {
+			for x in gen() {
+				break;
+			}
+		}
+	`)
+	// No body locals → no per-yield cleanup block.
+	assertNotContains(t, ir, "yield.cleanup")
+}
+
 func TestMultiParamGenericType(t *testing.T) {
 	ir := generateIR(t, `
 		type Pair[A, B] {

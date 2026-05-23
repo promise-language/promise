@@ -690,6 +690,13 @@ func (c *Compiler) unwrapFailableGeneratorResult(result value.Value, pos ast.Pos
 
 // emitYieldValue stores a value into the generator's yield slot and suspends.
 // On resume, execution continues in a new block (set as c.block).
+//
+// T0504: Mid-flight destroy (consumer breaks before the generator completes)
+// resumes at coro.suspend with tag=1, which would jump straight to
+// c.generatorCleanup — bypassing body scope cleanup. To prevent leaks of body
+// locals alive at this suspend point, snapshot c.scopeBindings and emit a
+// per-yield cleanup block that drops them before chaining to c.generatorCleanup
+// (which still handles param drops via T0479's paramDrops slice).
 func (c *Compiler) emitYieldValue(val value.Value) {
 	slotPtr := c.block.NewLoad(irtypes.I8Ptr, c.generatorYieldSlot.(*ir.InstAlloca))
 	typedSlot := c.block.NewBitCast(slotPtr, irtypes.NewPointer(val.Type()))
@@ -697,9 +704,29 @@ func (c *Compiler) emitYieldValue(val value.Value) {
 
 	suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 	resumeBlk := c.newBlock("yield.resume")
+
+	cleanupTarget := c.generatorCleanup
+	if len(c.scopeBindings) > 0 {
+		snapshot := make([]scopeBinding, len(c.scopeBindings))
+		copy(snapshot, c.scopeBindings)
+
+		yieldCleanupBlk := c.newBlock("yield.cleanup")
+		savedBlock := c.block
+		c.block = yieldCleanupBlk
+
+		savedScope := c.scopeBindings
+		c.scopeBindings = snapshot
+		c.emitScopeCleanup(0, false)
+		c.scopeBindings = savedScope
+
+		c.block.NewBr(c.generatorCleanup)
+		c.block = savedBlock
+		cleanupTarget = yieldCleanupBlk
+	}
+
 	c.block.NewSwitch(suspResult, c.generatorSuspend,
 		ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
-		ir.NewCase(constant.NewInt(irtypes.I8, 1), c.generatorCleanup))
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupTarget))
 	c.block = resumeBlk
 }
 

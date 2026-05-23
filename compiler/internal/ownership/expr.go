@@ -681,7 +681,8 @@ func isDroppableOwner(typ types.Type) bool {
 
 // isDroppableType reports whether a type has drop semantics (explicit or synthesized).
 // For Optional and Tuple types, recurses into the wrapped/element types.
-// Mirrors codegen's monoTypeHasDroppable (T0505).
+// For generic Instance types, handles both *types.Named and *types.Enum origins
+// via substitution-aware helpers. Mirrors codegen's monoTypeHasDroppable (T0506).
 func isDroppableType(typ types.Type) bool {
 	switch t := typ.(type) {
 	case *types.Named:
@@ -691,8 +692,15 @@ func isDroppableType(typ types.Type) bool {
 			if n.HasDrop() || n.NeedsSynthDrop() {
 				return true
 			}
+			return instanceHasDroppableField(t)
 		}
-		return instanceHasDroppableField(t)
+		if e, ok := t.Origin().(*types.Enum); ok {
+			if e.HasDrop() || e.NeedsSynthDrop() {
+				return true
+			}
+			return enumInstanceHasDroppableField(t)
+		}
+		return false
 	case *types.Enum:
 		return t.HasDrop() || t.NeedsSynthDrop()
 	case *types.Optional:
@@ -741,6 +749,45 @@ func instanceHasDroppableField(inst *types.Instance) bool {
 		ft := types.Substitute(f.Type(), subst)
 		if isDroppableType(ft) {
 			return true
+		}
+	}
+	return false
+}
+
+// enumInstanceHasDroppableField reports whether a generic enum Instance with
+// concrete TypeArgs has any variant field whose substituted type is droppable.
+// Mirrors codegen's monoEnumInstNeedsSynthDrop (compiler/internal/codegen/mono.go):
+// sema's fieldTypeHasDrop skips TypeParam variant fields, so a generic enum
+// origin like Maybe[T]{Just(T)} has HasDrop=false and NeedsSynthDrop=false even
+// when Maybe[_BoxDrop] is droppable. Without this, the ownership pass treats
+// Maybe[_BoxDrop] as non-droppable and lets the bare field move through,
+// producing a runtime double-free (T0506).
+func enumInstanceHasDroppableField(inst *types.Instance) bool {
+	enum, ok := inst.Origin().(*types.Enum)
+	if !ok {
+		return false
+	}
+	if enum.IsCopy() {
+		return false
+	}
+	// Skip when TypeArgs aren't concrete (e.g. inside a generic method body
+	// where the outer T is still a TypeParam) — preserves the existing
+	// "skip on unresolved TypeParam" semantics.
+	for _, ta := range inst.TypeArgs() {
+		if types.ContainsTypeParam(ta) {
+			return false
+		}
+	}
+	subst := types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
+	for _, v := range enum.Variants() {
+		for _, f := range v.Fields() {
+			if !types.ContainsTypeParam(f.Type()) {
+				continue // sema already accounted for it via origin's flags
+			}
+			ft := types.Substitute(f.Type(), subst)
+			if isDroppableType(ft) {
+				return true
+			}
 		}
 	}
 	return false

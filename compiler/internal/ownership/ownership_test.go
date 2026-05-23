@@ -3517,6 +3517,210 @@ func TestFieldMoveGenericInstanceFieldNonDroppableOK(t *testing.T) {
 	`)
 }
 
+// T0506: `Container[T]{Maybe[T] m}` instantiated with a droppable T must reject
+// `Maybe[_BoxDrop] m = c.m;` — sema's fieldTypeHasDrop doesn't see through the
+// TypeParam-containing generic enum field, but codegen's monoEnumInstNeedsSynthDrop
+// synthesizes a drop for `Maybe[_BoxDrop]`, so without the ownership-side
+// Enum-origin branch the move would slip through and double-free at runtime.
+func TestFieldMoveGenericEnumDroppableError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		enum Maybe[T] {
+			Just(T val);
+			Nothing;
+		}
+		type Container[T] { Maybe[T] m; }
+		test() {
+			Container[_BoxDrop] c = Container[_BoxDrop](m: Maybe[_BoxDrop].Just(_BoxDrop(n: 7)));
+			Maybe[_BoxDrop] m = c.m;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'm'")
+}
+
+// T0506: variant payload is a tuple containing a TypeParam (`Both((T, int) data)`)
+// — exercises the recursion into Tuple inside isDroppableType, confirming that
+// T0505's Tuple case composes correctly with the new Enum case (the enum
+// branch resolves to isDroppableType, which then recurses into the tuple
+// element types).
+func TestFieldMoveGenericEnumDroppableTupleVariantError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		enum Pair[T] {
+			Both((T, int) data);
+			None;
+		}
+		type Container[T] { Pair[T] p; }
+		test() {
+			Container[_BoxDrop] c = Container[_BoxDrop](p: Pair[_BoxDrop].Both((_BoxDrop(n: 1), 2)));
+			Pair[_BoxDrop] p = c.p;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'p'")
+}
+
+// `Container[int]{Maybe[T] m}` — substituted variant field types are non-droppable.
+// Bare field read must remain allowed (negative test: guards against the new
+// enumInstanceHasDroppableField producing false positives).
+func TestFieldMoveGenericEnumNonDroppableOK(t *testing.T) {
+	ownerOK(t, `
+		enum Maybe[T] {
+			Just(T val);
+			Nothing;
+		}
+		type Container[T] { Maybe[T] m; }
+		test() {
+			Container[int] c = Container[int](m: Maybe[int].Just(7));
+			Maybe[int] m = c.m;
+		}
+	`)
+}
+
+// `enum E[T] { A; B; }` — no variant fields at all. Substituted to a droppable
+// T should still be non-droppable. Negative test for the loop-yields-no-droppable
+// path inside enumInstanceHasDroppableField.
+func TestFieldMoveGenericEnumNoVariantFieldsOK(t *testing.T) {
+	ownerOK(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		enum E[T] {
+			A;
+			B;
+		}
+		type Container[T] { E[T] e; }
+		test() {
+			Container[_BoxDrop] c = Container[_BoxDrop](e: E[_BoxDrop].A);
+			E[_BoxDrop] e = c.e;
+		}
+	`)
+}
+
+// Inside a generic method body, the enum instance's TypeArgs are still TypeParams.
+// The TypeArg-contains-TypeParam early return inside enumInstanceHasDroppableField
+// must skip — preserves the existing "skip on unresolved TypeParam" semantics
+// parallel to TestFieldMoveGenericMethodBodyOK.
+func TestFieldMoveGenericEnumInGenericMethodBodyOK(t *testing.T) {
+	ownerOK(t, `
+		enum Maybe[T] {
+			Just(T val);
+			Nothing;
+		}
+		type Container[T] {
+			Maybe[T] m;
+			peek(this) {
+				_a := this.m;
+			}
+		}
+		test() {}
+	`)
+}
+
+// `Container[T]{Maybe[T]? m}` — Optional wrapping a generic enum instance with
+// a TypeParam variant payload, instantiated with a droppable T. Exercises
+// composition: isDroppableType's Optional case recurses into Elem, which is an
+// Instance with Enum origin, dispatching to enumInstanceHasDroppableField. Without
+// this composition working, the move would slip through. (Likely real-world
+// pattern: optional generic enum field.)
+func TestFieldMoveGenericOptionalEnumDroppableError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		enum Maybe[T] {
+			Just(T val);
+			Nothing;
+		}
+		type Container[T] { Maybe[T]? m; }
+		test() {
+			Container[_BoxDrop] c = Container[_BoxDrop](m: Maybe[_BoxDrop].Just(_BoxDrop(n: 7)));
+			Maybe[_BoxDrop]? x = c.m;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'm'")
+}
+
+// `Container[T]{(Maybe[T], int) p}` — Tuple element is a generic enum instance.
+// Exercises composition: isDroppableType's Tuple case iterates elements, hitting
+// the Instance/Enum branch on the first element. Confirms the new Enum-origin
+// branch composes correctly with the Tuple recursion path (the inverse of
+// TestFieldMoveGenericEnumDroppableTupleVariantError, which exercises Enum→Tuple).
+func TestFieldMoveGenericTupleContainingEnumDroppableError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		enum Maybe[T] {
+			Just(T val);
+			Nothing;
+		}
+		type Container[T] { (Maybe[T], int) p; }
+		test() {
+			Container[_BoxDrop] c = Container[_BoxDrop](p: (Maybe[_BoxDrop].Just(_BoxDrop(n: 1)), 2));
+			(Maybe[_BoxDrop], int) p = c.p;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'p'")
+}
+
+// `Container[T]{Maybe[Maybe[T]] m}` — nested generic enum instance. The outer
+// Maybe[Maybe[_BoxDrop]] variant carries a Maybe[_BoxDrop] payload, which must
+// itself be detected as droppable via the recursive enumInstanceHasDroppableField
+// call from within isDroppableType. Without recursion working through the enum
+// branch, the move would slip through.
+func TestFieldMoveGenericNestedEnumDroppableError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		enum Maybe[T] {
+			Just(T val);
+			Nothing;
+		}
+		type Container[T] { Maybe[Maybe[T]] m; }
+		test() {
+			Container[_BoxDrop] c = Container[_BoxDrop](m: Maybe[Maybe[_BoxDrop]].Just(Maybe[_BoxDrop].Just(_BoxDrop(n: 7))));
+			Maybe[Maybe[_BoxDrop]] m = c.m;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'm'")
+}
+
+// Variant `Just(int tag, T val)` mixes a concrete (non-TypeParam) field with a
+// TypeParam-containing field. The concrete int tag triggers the `continue`
+// path inside enumInstanceHasDroppableField (sema already accounted for it via
+// the origin's flags), then T val is checked, substituted to _BoxDrop, and
+// found droppable. Exercises both the continue and the return-true branches in
+// a single test.
+func TestFieldMoveGenericEnumMixedFieldVariantError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		enum Tagged[T] {
+			Just(int tag, T val);
+			Nothing;
+		}
+		type Container[T] { Tagged[T] m; }
+		test() {
+			Container[_BoxDrop] c = Container[_BoxDrop](m: Tagged[_BoxDrop].Just(7, _BoxDrop(n: 1)));
+			Tagged[_BoxDrop] m = c.m;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'm'")
+}
+
 // === T0338: borrowed parameter cannot be moved ===
 
 // Bug repro: moving a non-~ param into a constructor field is rejected.

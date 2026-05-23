@@ -107,3 +107,36 @@ test_destructure_indexexpr_droppable_tuple() `test {
   assert(s == "ab", "destructured string borrow");
   assert(n == 10, "destructured int");
 }
+
+// T0506: generic owner whose field is a generic enum instance with a TypeParam
+// variant payload, instantiated with a droppable concrete type. Sema's
+// fieldTypeHasDrop returns false for the TypeParam-containing enum field, but
+// codegen synthesizes a drop for the substituted enum via
+// monoEnumInstNeedsSynthDrop. Without the ownership Enum-origin branch a
+// bare `m = c.m;` would slip through sema and double-free at runtime; the
+// new branch rejects it at compile time (verified by
+// TestFieldMoveGenericEnumDroppableError in the ownership unit tests). This
+// e2e test exercises the codegen-side synth drop end-to-end: build the
+// holder with an inline constructor and let it drop at scope exit. The
+// construction temp's enum drop must fire and drop the inner droppable
+// without crashing.
+type _BoxDropT0506 {
+  int n;
+  drop(~this) {
+  }
+}
+
+enum MaybeBox[T] {
+  Just(T val),
+  Nothing,
+}
+
+type MaybeBoxHolder[T] {
+  MaybeBox[T] m;
+}
+
+test_generic_enum_field_drop_only() `test {
+  MaybeBoxHolder[_BoxDropT0506] c = MaybeBoxHolder[_BoxDropT0506](m: MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 42)));
+  // Let c drop at scope exit — the construction temp's enum drop must fire
+  // and drop the inner _BoxDropT0506 without crashing or leaking.
+}

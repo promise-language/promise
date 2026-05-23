@@ -59,3 +59,83 @@ test_generic_string_vec_field_reassign() `test {
   assert(h.field.len == 1, "generic field has 1 element after reassign");
   assert(h.field[0] == "hello", "generic field element correct after reassign");
 }
+
+// T0516: After a B0219 dup of `h.field`, a subsequent `h.field = w` must skip
+// the element drop loop because the original elements are now owned by the dup.
+// Without skip-on-wasDuped, the original elements would be double-freed (dropped
+// here AND when the duped local is dropped at scope end).
+test_t0516_was_duped_path() `test {
+  v1 := string[]();
+  v1.push("init" + "");
+  h := Holder(v1);
+  v := h.field;
+  w := string[]();
+  w.push("new" + "");
+  h.field = w;
+  assert(v[0] == "init", "v retains original element");
+  assert(h.field[0] == "new", "h.field has new value");
+  assert(h.field.len == 1, "h.field has 1 element");
+}
+
+// T0516: B0219 dup tracking must be per-receiver. A dup of `h1.field` must not
+// cause the wasDuped=TRUE skip to fire on a different instance like `h2.field`,
+// otherwise h2's old elements leak. Without the fix this either leaks "b"
+// (h2's old element skipped) or double-frees "a" (h1 not marked, emits element
+// drop on the buffer still aliased with v).
+test_t0516_cross_instance() `test {
+  va := string[]();
+  va.push("a" + "");
+  h1 := Holder(va);
+  vb := string[]();
+  vb.push("b" + "");
+  h2 := Holder(vb);
+  v := h1.field;
+  w := string[]();
+  w.push("c" + "");
+  h2.field = w;
+  x := string[]();
+  x.push("d" + "");
+  h1.field = x;
+  assert(v[0] == "a", "v retains h1's original element");
+  assert(h1.field[0] == "d", "h1.field has d");
+  assert(h2.field[0] == "c", "h2.field has c");
+}
+
+// T0516: Non-canonicalizable receivers (index exprs, call results) must use a
+// per-type fallback key so self-reassign on the same indexed element correctly
+// skips the element drop. Without the fallback, the dup'd local aliases the
+// element pointers and `arr[0].field = w` would double-free at the next drop.
+test_t0516_index_recv_self_reassign() `test {
+  v1 := string[]();
+  v1.push("init" + "");
+  arr := Holder[]();
+  arr.push(Holder(v1));
+  v := arr[0].field;
+  w := string[]();
+  w.push("new" + "");
+  arr[0].field = w;
+  assert(v[0] == "init", "v retains init");
+  assert(arr[0].field[0] == "new", "arr[0].field is new");
+}
+
+// T0516: B0219 dup tracking must distinguish generic instantiations. The dup
+// marker for `hi.field` (GenHolder[int]) must not cause `hs.field = w`
+// (GenHolder[string]) to wrongly skip its element drop, otherwise "hello" leaks.
+test_t0516_cross_generic_instantiation() `test {
+  v1 := int[]();
+  v1.push(42);
+  hi := GenHolder[int](v1);
+  v2 := string[]();
+  v2.push("hello" + "");
+  hs := GenHolder[string](v2);
+  vs := hi.field;
+  w := string[]();
+  w.push("new" + "");
+  hs.field = w;
+  x := int[]();
+  x.push(7);
+  hi.field = x;
+  assert(vs[0] == 42, "vs retains hi's original element");
+  assert(hs.field[0] == "new", "hs.field has new");
+  assert(hi.field[0] == 7, "hi.field has 7");
+}

@@ -3883,11 +3883,21 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 				elemSize := int64(c.typeSize(elemLLVM))
 				dup := c.dupVector(val, elemSize)
 				c.trackVectorTemp(dup)
-				// T0405: record this dup so genMemberAssign skips element drops for the original field
+				// T0405/T0516: record this dup so genMemberAssign skips element drops for the original field.
+				// Canonicalizable receivers (IdentExpr/ThisExpr/MemberExpr chains) use a per-receiver
+				// key, avoiding false matches across instances of the same type. Non-canonicalizable
+				// receivers (index exprs, call results) fall back to a per-type key — preserves
+				// pre-T0516 behavior for cases like `v := arr[0].field; arr[0].field = w`, where
+				// dropping the marker would cause a double-free because the shallow dup aliases
+				// the elements (see T0540).
 				if c.b0219DupedVecFields == nil {
 					c.b0219DupedVecFields = make(map[string]bool)
 				}
-				c.b0219DupedVecFields[ownerNamed.Obj().Name()+"."+field.Name()] = true
+				if recvKey, ok := c.receiverKey(e.Target); ok {
+					c.b0219DupedVecFields[recvKey+"."+ownerNamed.Obj().Name()+"."+field.Name()] = true
+				} else {
+					c.b0219DupedVecFields[ownerNamed.Obj().Name()+"."+field.Name()] = true
+				}
 				return dup
 			}
 			if types.IsChannel(fType) {

@@ -12800,6 +12800,30 @@ func TestFieldAssignGenericVecDropsElements(t *testing.T) {
 	assertContains(t, ir, "call void @Vector.drop(")
 }
 
+// T0516: B0219 dup tracking must be per-receiver so reassigns on a DIFFERENT
+// instance of the same type still emit element drops correctly. With per-type
+// keying, a dup of h1.field would mark "Holder.field" and cause h2.field = w
+// to skip its element drop loop, leaking h2's old elements.
+func TestFieldAssignVecCrossInstanceDropsElements(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { string[] field; }
+		main() {
+			h1 := Holder(string[]());
+			h2 := Holder(string[]());
+			v := h1.field;
+			w := string[]();
+			h2.field = w;
+			x := string[]();
+			h1.field = x;
+		}
+	`)
+	// Both reassigns must emit Vector.drop on the buffer. The h2 reassign
+	// must also emit a string element drop loop (h2 was not the duped receiver).
+	assertContains(t, ir, "field.vecdrop")
+	assertContains(t, ir, "call void @promise_string_drop(")
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
 // --- Hash getter tests ---
 
 func TestHashGetterInt(t *testing.T) {

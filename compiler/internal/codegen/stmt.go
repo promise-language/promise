@@ -5452,10 +5452,25 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 						mergeBlock := c.newBlock("field.vecdrop.done")
 						c.block.NewCondBr(skipDrop, mergeBlock, dropBlock)
 						c.block = dropBlock
-						wasDuped := named != nil && c.b0219DupedVecFields != nil && c.b0219DupedVecFields[named.Obj().Name()+"."+target.Field]
-						if wasDuped {
-							delete(c.b0219DupedVecFields, named.Obj().Name()+"."+target.Field)
-						} else {
+						// T0516: per-receiver key, mirrors the dup site in genFieldAccess.
+						// Canonical receivers use a per-receiver key (avoids cross-instance
+						// false matches). Non-canonical receivers (index exprs, call results)
+						// use the per-type fallback key — preserves pre-T0516 self-reassign
+						// correctness for patterns like `v := arr[0].field; arr[0].field = w`.
+						wasDuped := false
+						if named != nil && c.b0219DupedVecFields != nil {
+							var fullKey string
+							if recvKey, ok := c.receiverKey(target.Target); ok {
+								fullKey = recvKey + "." + named.Obj().Name() + "." + target.Field
+							} else {
+								fullKey = named.Obj().Name() + "." + target.Field
+							}
+							if c.b0219DupedVecFields[fullKey] {
+								wasDuped = true
+								delete(c.b0219DupedVecFields, fullKey)
+							}
+						}
+						if !wasDuped {
 							c.emitVectorElementDropLoop(oldVal, elemType)
 						}
 						c.block.NewCall(dropFunc, oldVal)

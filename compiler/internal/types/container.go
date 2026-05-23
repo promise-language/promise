@@ -179,6 +179,21 @@ func AsChannel(t Type) (elem Type, ok bool) {
 	return nil, false
 }
 
+// IsTask reports whether t is a Task instance (Instance{TypTask, _}).
+func IsTask(t Type) bool {
+	inst, ok := t.(*Instance)
+	return ok && inst.origin == TypTask
+}
+
+// AsTask extracts the element type from a Task instance.
+// Returns (elem, true) for Task instances, (nil, false) otherwise.
+func AsTask(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypTask {
+		return inst.typeArgs[0], true
+	}
+	return nil, false
+}
+
 // IsMap reports whether t is a Map instance (Instance{TypMap, _}).
 func IsMap(t Type) bool {
 	inst, ok := t.(*Instance)

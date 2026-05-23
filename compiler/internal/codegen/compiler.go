@@ -2728,6 +2728,134 @@ func (c *Compiler) defineMutexDropBody(fn *ir.Func, elemType types.Type) {
 	doneBlk.NewRet(nil)
 }
 
+// --- Task[T] codegen (T0503) ---
+
+// getOrCreateTaskDrop returns or creates the per-element-type Task[T].drop function.
+// T0503: When a task handle is never awaited via <-t, scope-exit drop blocks
+// until the goroutine finishes, drops the result value (if any), then frees
+// G.result_ptr (skipping the void sentinel 0x1), panic_msg (if heap-allocated),
+// and the G struct itself.
+//
+// Spin-wait note: thread-spin via palUsleep(100) is the only portable choice
+// for a callable drop function (cannot be a presplitcoroutine). Default
+// scheduler uses NumCPU Ms so the awaited G runs on another M. A single-P/
+// single-M scheduler config can deadlock if the awaited G is enqueued behind
+// the spinning caller on the same P — acceptable for the default config; a
+// coroutine-aware inline path is left as a future refactor.
+func (c *Compiler) getOrCreateTaskDrop(elemType types.Type) *ir.Func {
+	elemName := "void"
+	if elemType != nil {
+		elemName = typeArgStr(elemType)
+	}
+	funcName := "Task[" + elemName + "].drop"
+
+	if fn, ok := c.funcs[funcName]; ok {
+		if len(fn.Blocks) > 0 {
+			return fn
+		}
+		c.defineTaskDropBody(fn, elemType)
+		return fn
+	}
+
+	thisParam := ir.NewParam("this", irtypes.I8Ptr)
+	fn := c.module.NewFunc(funcName, irtypes.Void, thisParam)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	c.defineTaskDropBody(fn, elemType)
+
+	c.funcs[funcName] = fn
+	return fn
+}
+
+// defineTaskDropBody generates the Task[T].drop body:
+// null-check → spin-wait on G.done → drop result T (if any, and not the void
+// sentinel 0x1) → free result_ptr (when non-sentinel) → free panic_msg if
+// heap-allocated → free the G struct.
+func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
+	gTy := goroutineStructType()
+	thisParam := fn.Params[0]
+	isVoid := (elemType == nil || elemType == types.TypVoid)
+
+	entry := fn.NewBlock(".entry")
+
+	// Null check
+	isNull := entry.NewICmp(enum.IPredEQ, thisParam, constant.NewNull(irtypes.I8Ptr))
+	checkBlk := fn.NewBlock("task.drop.check")
+	spinBlk := fn.NewBlock("task.drop.spin")
+	readyBlk := fn.NewBlock("task.drop.ready")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isNull, doneBlk, checkBlk)
+
+	gPtr := checkBlk.NewBitCast(thisParam, irtypes.NewPointer(gTy))
+
+	// Spin-wait loop: re-load G.done; if 0, brief usleep(100) and recheck.
+	doneField := checkBlk.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldDone)))
+	doneVal := checkBlk.NewLoad(irtypes.I8, doneField)
+	isDone := checkBlk.NewICmp(enum.IPredNE, doneVal, constant.NewInt(irtypes.I8, 0))
+	checkBlk.NewCondBr(isDone, readyBlk, spinBlk)
+
+	spinBlk.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
+	spinBlk.NewBr(checkBlk)
+
+	// ready: drop result, then free result_ptr, panic_msg, G.
+	// emitVariantFieldDrop uses c.fn/c.entryBlock/c.block; save and restore so
+	// caller state isn't disturbed (same pattern as defineArcDropBody's vector path).
+	savedFn, savedEntry, savedBlock := c.fn, c.entryBlock, c.block
+	c.fn = fn
+	c.entryBlock = entry
+	c.block = readyBlk
+
+	rpField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+	rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
+
+	if !isVoid {
+		// Non-void task: result_ptr is a heap allocation holding T.
+		// Defensive sentinel guard: skip if result_ptr is null or the 0x1 sentinel.
+		resultLLVM := c.resolveType(elemType)
+		sentinelInt := c.block.NewPtrToInt(rpVal, c.ptrIntType())
+		isSentinel := c.block.NewICmp(enum.IPredULE, sentinelInt,
+			constant.NewInt(c.ptrIntType(), 1))
+		freeResultBlk := c.newBlock("task.drop.free_result")
+		afterResultBlk := c.newBlock("task.drop.after_result")
+		c.block.NewCondBr(isSentinel, afterResultBlk, freeResultBlk)
+
+		c.block = freeResultBlk
+		typedRP := c.block.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
+		loadedVal := c.block.NewLoad(resultLLVM, typedRP)
+		c.emitVariantFieldDrop(loadedVal, elemType)
+		c.block.NewCall(c.palFree, rpVal)
+		c.block.NewBr(afterResultBlk)
+
+		c.block = afterResultBlk
+	}
+	// Void task: result_ptr is the sentinel 0x1 — never freed.
+
+	// Free panic_msg if heap-allocated (panicked == 2).
+	panickedField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
+	panickedVal := c.block.NewLoad(irtypes.I8, panickedField)
+	isHeapMsg := c.block.NewICmp(enum.IPredEQ, panickedVal,
+		constant.NewInt(irtypes.I8, int64(gPanickedHeapMsg)))
+	freePanicBlk := c.newBlock("task.drop.free_panic")
+	freeGBlk := c.newBlock("task.drop.free_g")
+	c.block.NewCondBr(isHeapMsg, freePanicBlk, freeGBlk)
+
+	panicMsgField := freePanicBlk.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
+	panicMsg := freePanicBlk.NewLoad(irtypes.I8Ptr, panicMsgField)
+	freePanicBlk.NewCall(c.palFree, panicMsg)
+	freePanicBlk.NewBr(freeGBlk)
+
+	freeGBlk.NewCall(c.palFree, thisParam)
+	freeGBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+
+	c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
+}
+
 // dupHeapValue duplicates a heap user type value struct by allocating a new
 // instance, memcpy'ing the original, and dup'ing any droppable sub-fields.
 // B0236: Used for match destructure of droppable enums where extracted heap

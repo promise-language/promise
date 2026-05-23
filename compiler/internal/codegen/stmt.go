@@ -74,6 +74,9 @@ func isDroppableContainerOrString(typ types.Type) bool {
 	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
 		return true
 	}
+	if _, ok := types.AsTask(typ); ok || named == types.TypTask {
+		return true
+	}
 	return false
 }
 
@@ -83,7 +86,7 @@ func isDroppableContainerOrString(typ types.Type) bool {
 func argTypeIsDroppable(typ types.Type) bool {
 	switch t := typ.(type) {
 	case *types.Named:
-		if t == types.TypString || t == types.TypVector || t == types.TypChannel {
+		if t == types.TypString || t == types.TypVector || t == types.TypChannel || t == types.TypTask {
 			return true
 		}
 		if t.HasDrop() || t.NeedsSynthDrop() {
@@ -95,7 +98,7 @@ func argTypeIsDroppable(typ types.Type) bool {
 		return t.HasDrop() || t.NeedsSynthDrop()
 	case *types.Instance:
 		if n, ok := t.Origin().(*types.Named); ok {
-			if n == types.TypVector || n == types.TypChannel {
+			if n == types.TypVector || n == types.TypChannel || n == types.TypTask {
 				return true
 			}
 			if n.HasDrop() || n.NeedsSynthDrop() {
@@ -1919,6 +1922,41 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		dropFunc := c.funcs["MutexGuard.drop"]
 		binding := scopeBinding{
 			kind:     bindingDropString,
+			alloca:   alloca,
+			named:    named,
+			valType:  typ,
+			dropFlag: dropFlag,
+			dropFunc: dropFunc,
+			varName:  varName,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[varName] = binding
+		return
+	}
+
+	// Task drop (T0503): per-instantiation drop blocks until the goroutine
+	// finishes, drops the result T (if any), then frees result_ptr/panic_msg/G.
+	// Without this, `task[T] t = go fn();` leaks the G struct, the result_ptr
+	// buffer, and any droppable result value when t is never awaited via <-t.
+	if elemType, ok := types.AsTask(typ); ok || named == types.TypTask {
+		resolvedElem := elemType
+		if resolvedElem == nil && named == types.TypTask && c.typeSubst != nil {
+			if tp := types.TypTask.TypeParams(); len(tp) > 0 {
+				resolvedElem = c.typeSubst[tp[0]]
+			}
+		}
+		if c.typeSubst != nil && resolvedElem != nil {
+			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+		}
+		// resolvedElem may be nil (task[void]) — getOrCreateTaskDrop handles that.
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+		c.dropFlags[varName] = dropFlag
+
+		dropFunc := c.getOrCreateTaskDrop(resolvedElem)
+		binding := scopeBinding{
+			kind:     bindingDropString, // reuse: same i8* alloca + void(i8*) drop pattern
 			alloca:   alloca,
 			named:    named,
 			valType:  typ,

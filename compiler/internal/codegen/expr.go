@@ -4474,6 +4474,9 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, ta
 		} else if mutexElem, isMutex := types.AsMutex(retType); isMutex {
 			// T0486: Mutex[T] getter result owns a heap allocation.
 			c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
+		} else if taskElem, isTask := types.AsTask(retType); isTask {
+			// T0503: Task[T] getter result owns a G struct + result buffer.
+			c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
 		}
 	} else {
 		c.trackHeapUserTypeResult(e, result)
@@ -8384,6 +8387,12 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 			return envFieldDrop{envDropCallFn, fn}
 		}
 	}
+	// T0503: Task[T] capture → per-instantiation drop (spin-wait + free).
+	if elemType, ok := types.AsTask(typ); ok || (named != nil && named == types.TypTask) {
+		if ok {
+			return envFieldDrop{envDropCallFn, c.getOrCreateTaskDrop(elemType)}
+		}
+	}
 
 	// Closure (Signature) → free inner env
 	if _, ok := typ.(*types.Signature); ok {
@@ -10962,6 +10971,13 @@ func (c *Compiler) genReceiveExpr(e *ast.UnaryExpr) value.Value {
 // The task handle is now a G pointer (i8*). Checks G.done and loads from G.result_ptr.
 func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.Value {
 	gRaw := c.genExpr(e.Operand)
+	// T0503: `<-t` consumes the task — clear the scope-exit drop flag so the
+	// receive's own pal_free(G) isn't followed by a double-free at scope exit.
+	// Same for tracked getter temps (e.g. `<-obj.task_getter`).
+	if ident, ok := e.Operand.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+	c.claimStringTemp(gRaw)
 
 	var innerType types.Type
 	if len(inst.TypeArgs()) > 0 {

@@ -1,0 +1,146 @@
+// T0503: Task[T] scope-exit drop — tasks are freed when they go out of scope
+// without being awaited. Without Task[T].drop, G struct + result_ptr buffer
+// (+ inner result T if droppable) would leak.
+worker_int() int {
+  return 42;
+}
+
+worker_void() {
+  // side-effect-only goroutine
+}
+
+worker_string() string {
+  return "hello task";
+}
+
+// task[int] dropped without await — G + result_ptr leak without Task[T].drop.
+task_drop_unawaited_int() `test(exclude: wasm) {
+  task[int] t = go worker_int();
+  // No <-t. Task.drop must wait for completion, free result_ptr and G.
+}
+
+// task[void] dropped without await — G leaks without Task[T].drop (result_ptr
+// is sentinel 0x1, must NOT be freed but G must be freed).
+task_drop_unawaited_void() `test(exclude: wasm) {
+  task[void] t = go worker_void();
+  // No <-t.
+}
+
+// task[string] dropped without await — inner string would leak without
+// emitVariantFieldDrop walking the result.
+task_drop_unawaited_string() `test(exclude: wasm) {
+  task[string] t = go worker_string();
+  // No <-t. Task.drop must drop the inner string before freeing result_ptr.
+}
+
+// Awaited task: <-t consumes the handle; scope-exit drop is no-op.
+// Verifies clearDropFlag in genReceiveTask prevents double-free.
+task_drop_awaited_int() `test(exclude: wasm) {
+  task[int] t = go worker_int();
+  int r = <-t;
+  assert(r == 42, "expected 42");
+}
+
+task_drop_awaited_string() `test(exclude: wasm) {
+  task[string] t = go worker_string();
+  string r = <-t;
+  assert(r == "hello task", "expected hello task");
+}
+
+// Multiple unawaited tasks in the same scope — each gets its own drop binding.
+task_drop_multiple_unawaited() `test(exclude: wasm) {
+  task[int] t1 = go worker_int();
+  task[int] t2 = go worker_int();
+  task[int] t3 = go worker_int();
+  // All three dropped at scope exit.
+}
+
+// Mixed: some awaited, some not.
+task_drop_mixed() `test(exclude: wasm) {
+  task[int] t1 = go worker_int();
+  task[int] t2 = go worker_int();
+  int r1 = <-t1;
+  assert(r1 == 42, "expected 42");
+  // t2 dropped at scope exit.
+}
+
+// Getter returning task — discarded result must be tracked and dropped.
+type TaskBox {
+  drop(~this) {
+  }
+  get worker task[int] `public => go worker_int();
+}
+
+task_drop_getter_discarded() `test(exclude: wasm) {
+  TaskBox b = TaskBox();
+  b.worker; // discarded getter result — must be tracked and dropped
+}
+
+// Getter result consumed by <-: getter temp gets tracked, but the receive
+// consumes it. Verifies no double-free between temp tracking and receive.
+task_drop_getter_chained() `test(exclude: wasm) {
+  TaskBox b = TaskBox();
+  int r = <-b.worker;
+  assert(r == 42, "expected 42");
+}
+
+// Task returning a droppable container — exercises emitVariantFieldDrop's
+// Vector dispatch inside Task[T].drop. Without the inner-element drop, the
+// vector itself and its backing buffer would leak.
+worker_vec() int[] {
+  return[10, 20, 30];
+}
+
+task_drop_unawaited_vector() `test(exclude: wasm) {
+  task[int[]] t = go worker_vec();
+  // No <-t. Task.drop must Vector.drop the result before freeing result_ptr.
+}
+
+task_drop_awaited_vector() `test(exclude: wasm) {
+  task[int[]] t = go worker_vec();
+  int[] v = <-t;
+  assert(v.len == 3, "expected len 3");
+  assert(v[0] == 10, "expected 10");
+}
+
+// Task that panics — exercises Task[T].drop's panic_msg heap-free path
+// (gPanickedHeapMsg == 2). Without the free, panic_msg leaks. goroutine_exit
+// skips freeing for task[T] (result_ptr != null), so the drop must do it.
+panicking_void() {
+  assert(false, "task panic");
+}
+
+task_drop_unawaited_panicked() `test(exclude: wasm) {
+  task[void] t = go panicking_void();
+  // No <-t. Goroutine panics, sets panicked=2 + panic_msg on G.
+  // Task.drop must spin-wait, free panic_msg (heap), free G.
+}
+
+// Closure captures task[T] by move but does not consume it inside the body.
+// Exercises analyzeEnvCaptureDrop's Task branch: when the closure env is
+// freed, it must call Task[T].drop on the captured task field.
+task_drop_captured_unconsumed() `test(exclude: wasm) {
+  task[int] t = go worker_int();
+  f := move || {
+    // capture only; never consume.
+  };
+  f();
+  // closure env drop must drop the captured task.
+}
+
+// Generic helper with a task[T] local — exercises maybeRegisterDrop's
+// typeSubst fallback that resolves T against c.typeSubst inside generic
+// function bodies.
+identity[T](T val) T {
+  return val;
+}
+
+spawn_drop_generic[T](T val) {
+  task[T] t = go identity[T](val);
+  // unawaited; drop must use typeSubst to resolve task[T] → concrete type.
+}
+
+task_drop_generic_function() `test(exclude: wasm) {
+  spawn_drop_generic[int](42);
+  spawn_drop_generic[string]("hi");
+}

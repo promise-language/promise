@@ -5440,8 +5440,6 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 				// Guard: skip if old == new (same pointer) OR old is null (zero-initialized from error
 				// fallthrough). emitVectorElementDropLoop reads the header unconditionally, so we must
 				// null-check here; Vector.drop has its own internal null check but the loop does not.
-				// Exception: if B0219 dup'd this field earlier in the same function, elements are owned
-				// by the dup — only free the buffer, not the elements (b0219DupedVecFields tracks this).
 				if elemType, isVec := types.AsVector(fieldType); isVec {
 					if dropFunc, ok := c.funcs["Vector.drop"]; ok {
 						oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
@@ -5452,27 +5450,7 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 						mergeBlock := c.newBlock("field.vecdrop.done")
 						c.block.NewCondBr(skipDrop, mergeBlock, dropBlock)
 						c.block = dropBlock
-						// T0516: per-receiver key, mirrors the dup site in genFieldAccess.
-						// Canonical receivers use a per-receiver key (avoids cross-instance
-						// false matches). Non-canonical receivers (index exprs, call results)
-						// use the per-type fallback key — preserves pre-T0516 self-reassign
-						// correctness for patterns like `v := arr[0].field; arr[0].field = w`.
-						wasDuped := false
-						if named != nil && c.b0219DupedVecFields != nil {
-							var fullKey string
-							if recvKey, ok := c.receiverKey(target.Target); ok {
-								fullKey = recvKey + "." + named.Obj().Name() + "." + target.Field
-							} else {
-								fullKey = named.Obj().Name() + "." + target.Field
-							}
-							if c.b0219DupedVecFields[fullKey] {
-								wasDuped = true
-								delete(c.b0219DupedVecFields, fullKey)
-							}
-						}
-						if !wasDuped {
-							c.emitVectorElementDropLoop(oldVal, elemType)
-						}
+						c.emitVectorElementDropLoop(oldVal, elemType)
 						c.block.NewCall(dropFunc, oldVal)
 						c.block.NewBr(mergeBlock)
 						c.block = mergeBlock

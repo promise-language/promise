@@ -3882,22 +3882,14 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 				elemLLVM := c.resolveType(elemType)
 				elemSize := int64(c.typeSize(elemLLVM))
 				dup := c.dupVector(val, elemSize)
-				c.trackVectorTemp(dup)
-				// T0405/T0516: record this dup so genMemberAssign skips element drops for the original field.
-				// Canonicalizable receivers (IdentExpr/ThisExpr/MemberExpr chains) use a per-receiver
-				// key, avoiding false matches across instances of the same type. Non-canonicalizable
-				// receivers (index exprs, call results) fall back to a per-type key — preserves
-				// pre-T0516 behavior for cases like `v := arr[0].field; arr[0].field = w`, where
-				// dropping the marker would cause a double-free because the shallow dup aliases
-				// the elements (see T0540).
-				if c.b0219DupedVecFields == nil {
-					c.b0219DupedVecFields = make(map[string]bool)
-				}
-				if recvKey, ok := c.receiverKey(e.Target); ok {
-					c.b0219DupedVecFields[recvKey+"."+ownerNamed.Obj().Name()+"."+field.Name()] = true
-				} else {
-					c.b0219DupedVecFields[ownerNamed.Obj().Name()+"."+field.Name()] = true
-				}
+				// T0540: Deep-clone droppable elements so the dup owns independent
+				// copies. Without this, the shallow memcpy aliases element pointers
+				// between the original field and the dup, causing a double-free at
+				// scope end. No-op for primitive/copy element types.
+				c.emitVectorElementCloneLoop(dup, elemType)
+				// The dup now owns its elements independently; statement-end cleanup
+				// must drop the elements before freeing the buffer.
+				c.trackVectorTempWithElemType(dup, elemType)
 				return dup
 			}
 			if types.IsChannel(fType) {
@@ -3940,7 +3932,9 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 					elemSize := int64(c.typeSize(elemLLVM))
 					innerVec := c.block.NewExtractValue(val, 1)
 					dup := c.dupVector(innerVec, elemSize)
-					c.trackVectorTemp(dup)
+					// T0540: Deep-clone droppable elements (mirror the bare Vector branch above).
+					c.emitVectorElementCloneLoop(dup, elemType)
+					c.trackVectorTempWithElemType(dup, elemType)
 					c.optionalContainerDup = dup
 					return c.block.NewInsertValue(val, dup, 1)
 				}

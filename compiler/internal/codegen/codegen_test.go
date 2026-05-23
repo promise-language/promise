@@ -12824,6 +12824,44 @@ func TestFieldAssignVecCrossInstanceDropsElements(t *testing.T) {
 	assertContains(t, ir, "call void @Vector.drop(")
 }
 
+// T0540: `v := h.field` for a Vector field with droppable elements on a droppable
+// owner must emit a deep element-dup loop (not just a shallow buffer memcpy) so
+// the dup owns independent copies. Without the loop, both v and h.field alias
+// element pointers and scope-end drops cause a double-free.
+func TestB0219FieldAccessVecDeepDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { string[] field; }
+		main() {
+			v1 := string[]();
+			h := Holder(v1);
+			v := h.field;
+		}
+	`)
+	// The shallow dup (vecdup.copy) must be followed by a per-element string
+	// dup loop (vecdup_str.head + promise_string_new).
+	assertContains(t, ir, "vecdup.copy")
+	assertContains(t, ir, "vecdup_str.head")
+	assertContains(t, ir, "promise_string_new")
+}
+
+// T0540: same deep-dup requirement for the Optional[Vector] field branch.
+func TestB0219OptionalVecFieldDeepDup(t *testing.T) {
+	ir := generateIR(t, `
+		type OptHolder {
+			string[]? field;
+			drop(~this) {}
+		}
+		main() {
+			v1 := string[]();
+			h := OptHolder(field: v1);
+			v := h.field;
+		}
+	`)
+	assertContains(t, ir, "vecdup.copy")
+	assertContains(t, ir, "vecdup_str.head")
+	assertContains(t, ir, "promise_string_new")
+}
+
 // --- Hash getter tests ---
 
 func TestHashGetterInt(t *testing.T) {

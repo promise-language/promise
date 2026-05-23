@@ -172,7 +172,6 @@ type Compiler struct {
 	tempTrackingEnabled     bool                // T0084: true in free functions + user method bodies
 	dupStringFieldAccess    bool                // T0095: when true, genFieldAccess dups string fields from droppable types
 	dupContainerFieldAccess bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
-	b0219DupedVecFields     map[string]bool     // T0405/T0516: tracks "receiver.TypeName.fieldName" entries when B0219 dups a vector field; genMemberAssign skips element drops for these (elements are owned by the dup). Per-receiver keying ensures cross-instance/cross-instantiation correctness.
 	matchBorrowedIdents     map[string]bool     // T0485: tracks idents bound by match destructure as borrows (no drop binding); if-let unwrap must not transfer ownership
 	dupTupleFieldAccess     bool                // T0370: when true, genVectorIndex dups droppable tuple elements on read
 	dupHeapUserFieldAccess  bool                // T0398: when true, genVectorIndex deep-clones heap user-type elements on read
@@ -433,29 +432,6 @@ func (c *Compiler) typeSize(typ irtypes.Type) int {
 // typeAlign returns the alignment of an LLVM type on the current target.
 func (c *Compiler) typeAlign(typ irtypes.Type) int {
 	return llvmTypeAlignWithPtr(typ, c.ptrSize())
-}
-
-// receiverKey returns a canonical string identifier for a receiver expression,
-// for use as a per-instance key in dup/reassign tracking maps. Returns
-// (key, true) for receivers rooted in IdentExpr or ThisExpr (with optional
-// MemberExpr chaining); returns ("", false) for non-canonicalizable receivers
-// (call results, index expressions, etc.) — in which case tracking is skipped.
-// T0516: replaces per-type keying that caused false hits across instances of
-// the same type and across distinct generic instantiations.
-func (c *Compiler) receiverKey(expr ast.Expr) (string, bool) {
-	switch e := expr.(type) {
-	case *ast.IdentExpr:
-		return e.Name, true
-	case *ast.ThisExpr:
-		return "this", true
-	case *ast.MemberExpr:
-		inner, ok := c.receiverKey(e.Target)
-		if !ok {
-			return "", false
-		}
-		return inner + "." + e.Field, true
-	}
-	return "", false
 }
 
 // scopeBindingKind distinguishes close() bindings (use) from drop() bindings.
@@ -5183,7 +5159,6 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.loopScopeDepth = 0
 	c.blockCounter = 0
 	c.enumCtorTemps = nil       // B0267: prevent cross-function alloca leak
-	c.b0219DupedVecFields = nil // T0405: clear cross-function stale entries
 	c.matchBorrowedIdents = nil // T0485: clear cross-function stale entries
 
 	entry := fn.NewBlock(".entry")
@@ -6491,7 +6466,6 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.loopScopeDepth = 0
 	c.blockCounter = 0
 	c.enumCtorTemps = nil       // B0267: prevent cross-function alloca leak
-	c.b0219DupedVecFields = nil // T0405: clear cross-function stale entries
 	c.matchBorrowedIdents = nil // T0485: clear cross-function stale entries
 	c.canError = m.Sig().CanError()
 	c.currentRetType = m.Sig().Result()

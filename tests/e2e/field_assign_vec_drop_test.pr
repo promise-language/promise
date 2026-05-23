@@ -4,10 +4,35 @@ type Holder {
   string[] field;
 }
 
+type OptHolder {
+  string[]? field;
+  drop(~this) {
+  }
+}
+
 type GenHolder[T] {
   T[] field;
   set_field(~this, ~T[] val) {
     this.field = val;
+  }
+}
+
+type NestedHolder {
+  string[][] field;
+}
+
+type HeapElem {
+  string name;
+}
+
+type HeapHolder {
+  HeapElem[] field;
+}
+
+type SelfHolder {
+  string[] field;
+  read_field(this) string[] {
+    return this.field;
   }
 }
 
@@ -138,4 +163,163 @@ test_t0516_cross_generic_instantiation() `test {
   assert(vs[0] == 42, "vs retains hi's original element");
   assert(hs.field[0] == "new", "hs.field has new");
   assert(hi.field[0] == 7, "hi.field has 7");
+}
+
+// T0540: `v := h.field` on a droppable owner with a droppable-element vector field
+// produces a deep dup. Without the fix, the shallow memcpy aliases element pointers
+// between v and h.field; at scope end both vectors would call promise_string_drop
+// on the same "init" pointer → `bad header magic`.
+test_t0540_dup_only_no_reassign() `test {
+  v1 := string[]();
+  v1.push("init" + "");
+  h := Holder(v1);
+  v := h.field;
+  assert(v[0] == "init", "dup'd vector reads element");
+  assert(h.field[0] == "init", "original field still readable");
+}
+
+// T0540: Multi-element variant exercises the per-element clone loop boundary.
+test_t0540_dup_only_multi_element() `test {
+  v1 := string[]();
+  v1.push("a" + "");
+  v1.push("b" + "");
+  v1.push("c" + "");
+  h := Holder(v1);
+  v := h.field;
+  assert(v.len == 3, "dup len");
+  assert(v[0] == "a" && v[1] == "b" && v[2] == "c", "dup elements");
+  assert(h.field[0] == "a" && h.field[1] == "b" && h.field[2] == "c", "original elements");
+}
+
+// T0540: Optional[Vector] field — the deep-dup must apply to the inner vector
+// extracted from the Optional payload.
+test_t0540_optional_vec_field() `test {
+  v1 := string[]();
+  v1.push("opt" + "");
+  h := OptHolder(field: v1);
+  if v := h.field {
+    assert(v[0] == "opt", "optional dup'd vector reads element");
+  } else {
+    assert(false, "field should be present");
+  }
+}
+
+// T0541: branch-mutation pattern — `v := h.field` then a conditionally-skipped
+// reassign followed by an unconditional reassign. Pre-T0540 this double-freed
+// "init" on the cond=true path because the wasDuped consume in the else branch
+// caused the unconditional reassign's element drop loop to see no mark.
+// With deep-dup, both branches are safe.
+test_t0541_branch_mutation_cond_true() `test {
+  v1 := string[]();
+  v1.push("init" + "");
+  h := Holder(v1);
+  cond := true;
+  v := h.field;
+  if cond {
+    // no reassign
+  } else {
+    x := string[]();
+    x.push("x" + "");
+    h.field = x;
+  }
+  z := string[]();
+  z.push("z" + "");
+  h.field = z;
+  assert(v[0] == "init", "v retains original after branch + reassign");
+  assert(h.field[0] == "z", "h.field reflects final reassign");
+}
+
+test_t0541_branch_mutation_cond_false() `test {
+  v1 := string[]();
+  v1.push("init" + "");
+  h := Holder(v1);
+  cond := false;
+  v := h.field;
+  if cond {
+    // no reassign
+  } else {
+    x := string[]();
+    x.push("x" + "");
+    h.field = x;
+  }
+  z := string[]();
+  z.push("z" + "");
+  h.field = z;
+  assert(v[0] == "init", "v retains original after branch + reassign");
+  assert(h.field[0] == "z", "h.field reflects final reassign");
+}
+
+// T0540: dup + reassign — after the fix, the originals must still be dropped
+// unconditionally at reassign (no skip path), and the dup retains its own
+// independent copy. This is the simple correct behavior the workaround used
+// to obscure.
+test_t0540_dup_plus_reassign_still_drops_originals() `test {
+  v1 := string[]();
+  v1.push("orig" + "");
+  h := Holder(v1);
+  v := h.field;
+  w := string[]();
+  w.push("new" + "");
+  h.field = w;
+  assert(v[0] == "orig", "v retains deep-cloned original");
+  assert(h.field[0] == "new", "h.field has new");
+}
+
+// T0540: nested Vector[Vector[string]] field — exercises the recursive
+// emitVectorElementCloneLoop path (inner vectors must also deep-clone their
+// string elements, otherwise the inner buffers alias and double-free at scope end).
+test_t0540_nested_vec_field_dup() `test {
+  inner1 := string[]();
+  inner1.push("a" + "");
+  inner1.push("b" + "");
+  inner2 := string[]();
+  inner2.push("c" + "");
+  outer := string[][]();
+  outer.push(inner1);
+  outer.push(inner2);
+  h := NestedHolder(outer);
+  v := h.field;
+  assert(v.len == 2, "outer len");
+  assert(v[0].len == 2 && v[1].len == 1, "inner lens");
+  assert(v[0][0] == "a" && v[0][1] == "b" && v[1][0] == "c", "v elements");
+  assert(h.field[0][0] == "a" && h.field[1][0] == "c", "original elements");
+}
+
+// T0540: Vector[HeapUserType] field — exercises the isHeapUser branch in
+// emitVectorElementCloneLoop (each element is deep-cloned via dupHeapValue;
+// without it, both v and h.field alias the same heap instance pointers).
+test_t0540_heap_user_vec_field_dup() `test {
+  e1 := HeapElem(name: "alice" + "");
+  e2 := HeapElem(name: "bob" + "");
+  v1 := HeapElem[]();
+  v1.push(e1);
+  v1.push(e2);
+  h := HeapHolder(v1);
+  v := h.field;
+  assert(v.len == 2, "len");
+  assert(v[0].name == "alice" && v[1].name == "bob", "v elements");
+  assert(h.field[0].name == "alice" && h.field[1].name == "bob", "original elements");
+}
+
+// T0540: `this.field` access from a method — exercises the deep-dup path
+// when the receiver is ThisExpr (vs. IdentExpr or MemberExpr in other tests).
+// SelfHolder.read_field returns this.field, which auto-dups via the B0219 path.
+test_t0540_this_field_dup_via_method() `test {
+  v1 := string[]();
+  v1.push("self" + "");
+  v1.push("ish" + "");
+  h := SelfHolder(v1);
+  v := h.read_field();
+  assert(v.len == 2 && v[0] == "self" && v[1] == "ish", "v elements");
+  assert(h.field[0] == "self" && h.field[1] == "ish", "h.field elements");
+}
+
+// T0540: empty vector field auto-dup — exercises the len=0 boundary in the
+// element clone loop (the `idx < length` guard must skip the body, no crash).
+test_t0540_empty_vec_field_dup() `test {
+  v1 := string[]();
+  h := Holder(v1);
+  v := h.field;
+  assert(v.len == 0, "v empty");
+  assert(h.field.len == 0, "h.field empty");
 }

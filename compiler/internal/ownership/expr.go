@@ -680,7 +680,8 @@ func isDroppableOwner(typ types.Type) bool {
 }
 
 // isDroppableType reports whether a type has drop semantics (explicit or synthesized).
-// For Optional types, checks the wrapped element recursively.
+// For Optional and Tuple types, recurses into the wrapped/element types.
+// Mirrors codegen's monoTypeHasDroppable (T0505).
 func isDroppableType(typ types.Type) bool {
 	switch t := typ.(type) {
 	case *types.Named:
@@ -696,6 +697,13 @@ func isDroppableType(typ types.Type) bool {
 		return t.HasDrop() || t.NeedsSynthDrop()
 	case *types.Optional:
 		return isDroppableType(t.Elem())
+	case *types.Tuple:
+		for _, e := range t.Elems() {
+			if isDroppableType(e) {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }

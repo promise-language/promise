@@ -184,7 +184,20 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 
 func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 	c.checkExpr(s.Value)
-	c.tryMove(s.Value)
+	// T0505: For MemberExpr/IndexExpr sources, codegen's genDestructureVarDecl
+	// treats the destructured locals as borrows (srcOwned=false, no drop
+	// bindings) — the parent owner retains ownership of the data. Routing
+	// these through the B0341 field-move check (via tryMove → MemberExpr →
+	// checkFieldMoveOwnership) would falsely reject safe borrow patterns like
+	// `(a, b) := holder.tup` that the existing T0389/T0420 tests rely on.
+	// Skip the move check for these source kinds; var-decl paths (typed and
+	// inferred) still go through tryMove and catch the real unsafe case.
+	switch s.Value.(type) {
+	case *ast.MemberExpr, *ast.IndexExpr:
+		// borrow path — no move, no field-move check
+	default:
+		c.tryMove(s.Value)
+	}
 	for _, name := range s.Names {
 		if name != "_" {
 			c.state[name] = Owned

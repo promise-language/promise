@@ -76,3 +76,34 @@ test_generic_optional_field_non_droppable_ok() `test {
     assert(y == 7, "got 7");
   }
 }
+
+// T0505: generic owner with a tuple field whose element is a TypeParam,
+// instantiated with a droppable concrete type. Sema's fieldTypeHasDrop returns
+// false for the TypeParam-containing tuple, but codegen's monoTypeHasDroppable
+// recurses into tuple elems and synthesizes a drop for
+// `GenTupHolder[map[string,string]]`. Without the ownership Tuple-case fix, a
+// bare field move would double-free; here we only let the owner go out of
+// scope, exercising the codegen-side synth drop end-to-end.
+type GenTupHolder[T] {
+  (T, int) pair;
+}
+
+test_generic_tuple_field_drop_only() `test {
+  map[string, string] m = map[string, string]();
+  m["a"] = "b";
+  GenTupHolder[map[string, string]] h = GenTupHolder[map[string, string]](pair: (m, 2));
+  // No bare move of h.pair — let h drop at scope exit; the synthesized drop
+  // must recurse into the tuple and free the inner map without crashing.
+}
+
+// T0505: destructure-decl from an IndexExpr source on a vector of droppable
+// tuples. checkDestructureVarDecl skips the field-move check for IndexExpr
+// sources (parallel to the MemberExpr borrow path) because codegen treats the
+// destructured locals as non-owning borrows. The parent vector retains
+// ownership of its elements, so no double-free occurs at scope exit.
+test_destructure_indexexpr_droppable_tuple() `test {
+  (string, int)[] v = [("a" + "b", 10), ("c" + "d", 20)];
+  (s, n) := v[0];
+  assert(s == "ab", "destructured string borrow");
+  assert(n == 10, "destructured int");
+}

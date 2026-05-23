@@ -3369,6 +3369,79 @@ func TestFieldMoveGenericNonOptionalDroppableError(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move field 'value'")
 }
 
+// T0505: `Holder[T]{(T, int) pair}` instantiated with a droppable T must reject
+// `(_BoxDrop, int) p = h.pair;` — sema's fieldTypeHasDrop doesn't see through
+// the TypeParam-containing tuple field, but codegen's monoTypeHasDroppable
+// recurses into tuple elements, so without the ownership-side Tuple case the
+// move would slip through and double-free at runtime.
+func TestFieldMoveGenericTupleDroppableError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		type Holder[T] { (T, int) pair; }
+		test() {
+			Holder[_BoxDrop] h = Holder[_BoxDrop](pair: (_BoxDrop(n: 7), 2));
+			(_BoxDrop, int) p = h.pair;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'pair'")
+}
+
+// Destructure-decl from a MemberExpr source is handled at codegen as a borrow
+// (genDestructureVarDecl srcOwned=false: no drop bindings on destructured
+// locals, parent owner retains ownership). So `(b, n) := h.pair` is safe at
+// runtime even when the tuple has droppable elements. checkDestructureVarDecl
+// skips the field-move check for MemberExpr/IndexExpr sources to align with
+// this. Existing T0389/T0420 e2e tests rely on this borrow-from-field pattern.
+func TestFieldMoveGenericTupleDroppableDestructureOK(t *testing.T) {
+	ownerOK(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		type Holder[T] { (T, int) pair; }
+		test() {
+			Holder[_BoxDrop] h = Holder[_BoxDrop](pair: (_BoxDrop(n: 7), 2));
+			(b, n) := h.pair;
+		}
+	`)
+}
+
+// `Holder[int]{(T, int) pair}` — substituted field type is `(int, int)`, all
+// non-droppable. Bare field read must remain allowed (negative test: guards
+// against the Tuple recursion producing false positives).
+func TestFieldMoveGenericTupleNonDroppableOK(t *testing.T) {
+	ownerOK(t, `
+		type Holder[T] { (T, int) pair; }
+		test() {
+			Holder[int] h = Holder[int](pair: (7, 2));
+			(int, int) p = h.pair;
+		}
+	`)
+}
+
+// Parallel to TestFieldMoveGenericTupleDroppableDestructureOK but exercising
+// the *ast.IndexExpr branch of checkDestructureVarDecl's switch. A destructure
+// from `v[i]` on a droppable-tuple vector must be allowed (borrow path) —
+// codegen treats the destructured locals as non-owning, parent vector retains
+// ownership. The corresponding e2e test
+// test_destructure_indexexpr_droppable_tuple validates the runtime
+// no-double-free behavior.
+func TestFieldMoveGenericTupleDroppableIndexExprDestructureOK(t *testing.T) {
+	ownerOK(t, `
+		type _BoxDrop {
+			int n;
+			drop(~this) {}
+		}
+		test() {
+			(_BoxDrop, int)[] v = [(_BoxDrop(n: 7), 2)];
+			(b, n) := v[0];
+		}
+	`)
+}
+
 // Inside a generic method body, the owner's TypeArgs are still TypeParams.
 // The check must skip — preserves the existing "skip on unresolved TypeParam"
 // semantics. (Regression guard for the ContainsTypeParam(TypeArg) gate.)

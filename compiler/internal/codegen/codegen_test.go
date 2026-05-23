@@ -20167,6 +20167,101 @@ func TestGenericOwnerConstructorArgDupsStringField(t *testing.T) {
 	assertContains(t, testFn, "promise_string_new")
 }
 
+// T0522 (destructure neutralization): destructuring `t!` where `t` is an
+// Optional[(int, string)] local must clear t's present flag — otherwise both
+// the destructured `s` and t's scope-exit optdrop will free the same heap
+// string. The neutralization emits a GEP into t at index (0,0) followed by a
+// `store i1 false`, which is the distinguishing IR pattern.
+func TestT0522DestructureForceUnwrapNeutralizesSource(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			(int, string)? t = (1, "a" + "b");
+			(n, s) := t!;
+		}
+	`)
+	testFn := extractFunction(ir, "__user.test")
+	if testFn == "" {
+		t.Fatal("expected __user.test in IR")
+	}
+	// Distinctive pattern: GEP into the source Optional alloca %t selecting
+	// the present-flag field (i32 0, i32 0). Without the fix, no such GEP
+	// exists — operations on %t are only the initial store and the load for
+	// the unwrap / scope-exit optdrop.
+	assertContains(t, testFn, "%t, i32 0, i32 0")
+}
+
+// T0522 (consume-arg Optional[string] field dup claim): when passing an
+// Optional[string] field from a droppable owner to a `~` param, the inner
+// string is duped and tracked as a stmt temp. The dup temp's drop flag must
+// be cleared BEFORE the consume call so the stmt-end cleanup doesn't free
+// the pointer the callee consumed.
+//
+// Distinguishing IR: between the dup's `insertvalue` reconstructing the
+// Optional and the consume call, there must be a `store i1 false, i1* %flag`
+// (the claim). Without the fix, only `store i1 true` precedes the call.
+func TestT0522ConsumeArgOptionalStringFieldClaimsDup(t *testing.T) {
+	ir := generateIR(t, `
+		type _Holder { string? title; drop(~this) {} }
+		_consume_opt_string(~string? s) `+"`public {}"+`
+		test() {
+			h := _Holder(title: "foo" + "bar");
+			_consume_opt_string(h.title);
+		}
+	`)
+	testFn := extractFunction(ir, "__user.test")
+	if testFn == "" {
+		t.Fatal("expected __user.test in IR")
+	}
+	assertContains(t, testFn, "strdup.copy")
+	callIdx := strings.Index(testFn, "@__user._consume_opt_string")
+	if callIdx < 0 {
+		t.Fatalf("expected consume call in test body\n%s", testFn)
+	}
+	// Look back ~400 chars for the strdup.merge label that contains the
+	// insertvalue + claim. With the fix, both `store i1 true` (set flag) and
+	// `store i1 false` (claim) precede the call. Without it, only `store i1
+	// true` precedes the call.
+	start := callIdx - 600
+	if start < 0 {
+		start = 0
+	}
+	preCall := testFn[start:callIdx]
+	if !strings.Contains(preCall, "store i1 false, i1*") {
+		t.Errorf("expected `store i1 false, i1*` (T0522 dup-temp claim) before consume call\npre-call window:\n%s", preCall)
+	}
+}
+
+// T0522 (consume-arg Optional[Vector] field dup claim): same pattern as the
+// string variant — the inner Vector dup must be claimed after the consume call
+// returns. The dup is via `vecdup.copy` (alloc + memcpy + tag clear).
+func TestT0522ConsumeArgOptionalVectorFieldClaimsDup(t *testing.T) {
+	ir := generateIR(t, `
+		type _Holder { Vector[int]? items; drop(~this) {} }
+		_consume_opt_vec(~Vector[int]? v) `+"`public {}"+`
+		test() {
+			h := _Holder(items: [1, 2, 3]);
+			_consume_opt_vec(h.items);
+		}
+	`)
+	testFn := extractFunction(ir, "__user.test")
+	if testFn == "" {
+		t.Fatal("expected __user.test in IR")
+	}
+	assertContains(t, testFn, "vecdup.copy")
+	callIdx := strings.Index(testFn, "@__user._consume_opt_vec")
+	if callIdx < 0 {
+		t.Fatalf("expected consume call in test body\n%s", testFn)
+	}
+	start := callIdx - 600
+	if start < 0 {
+		start = 0
+	}
+	preCall := testFn[start:callIdx]
+	if !strings.Contains(preCall, "store i1 false, i1*") {
+		t.Errorf("expected `store i1 false, i1*` (T0522 dup-temp claim) before consume call\npre-call window:\n%s", preCall)
+	}
+}
+
 // T0391: Returning a non-~ Optional argument from a function that returns the same
 // Optional type causes the caller's drop flag to alias with the return value's
 // drop binding. The alias check (extended in T0391 to recognise Optional structs)

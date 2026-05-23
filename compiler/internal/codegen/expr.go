@@ -1628,6 +1628,15 @@ func (c *Compiler) applyMutRefArgOwnership(argVals []value.Value, params []*type
 		}
 		c.claimStringTemp(argVals[i])
 		c.claimHeapTemp(argVals[i])
+		// T0522: Same Optional-field-dup claim as in genCallArgsWithMutRef.
+		if c.optionalStringDup != nil {
+			c.claimStringTemp(c.optionalStringDup)
+			c.optionalStringDup = nil
+		}
+		if c.optionalContainerDup != nil {
+			c.claimStringTemp(c.optionalContainerDup)
+			c.optionalContainerDup = nil
+		}
 	}
 }
 
@@ -5192,6 +5201,20 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 			}
 			c.claimStringTemp(v)
 			c.claimHeapTemp(v) // B0201: prevent double-free for vector literals passed to ~ params
+			// T0522: When the arg is a field-access dup wrapped in an Optional
+			// struct, claimStringTemp/claimHeapTemp can't match — `v` is the
+			// outer struct, but the inner dup pointer is tracked separately via
+			// optionalStringDup/optionalContainerDup. Claim the inner dup so
+			// the callee owns it after the consume call and the caller's stmt
+			// cleanup doesn't double-free.
+			if c.optionalStringDup != nil {
+				c.claimStringTemp(c.optionalStringDup)
+				c.optionalStringDup = nil
+			}
+			if c.optionalContainerDup != nil {
+				c.claimStringTemp(c.optionalContainerDup)
+				c.optionalContainerDup = nil
+			}
 		}
 		// B0203: Variadic passthrough — set static flag (bit 63) on the vector's
 		// len field so the callee's scope-exit drop skips element drops and buffer free.

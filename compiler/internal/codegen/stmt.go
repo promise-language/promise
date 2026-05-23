@@ -1258,6 +1258,11 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 			c.clearDropFlag(ident.Name)
 		}
 	}
+	// T0522: When RHS is `opt!` (force-unwrap of an Optional containing a tuple
+	// with droppable fields), neutralize the source Optional's present flag so
+	// its scope-exit optdrop doesn't free the inner values now owned by the
+	// destructured locals. Mirrors genTypedVarDecl/genInferredVarDecl.
+	c.neutralizeForceUnwrapSource(s.Value)
 }
 
 // genFailableDestructure handles (val, err) := failableCall()

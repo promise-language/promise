@@ -3754,6 +3754,23 @@ func (c *Compiler) genNativeHashGetter(e *ast.MemberExpr, named *types.Named) (v
 	}
 }
 
+// ownerHasOrSynthDrop returns true if the field owner needs cleanup at drop
+// time. Covers explicit drop, sema-detected synth drop, and mono-detected synth
+// drop on generic instances (T0513): the Named origin has HasDrop=false for
+// generic types like Box[T] { T? value } because sema's fieldTypeHasDrop
+// returns false for TypeParam fields. The concrete instance (e.g. Box[string])
+// gets a synthesized drop via monoInstNeedsSynthDrop at codegen time, so the
+// dup-on-read paths must also check that signal.
+func (c *Compiler) ownerHasOrSynthDrop(typ types.Type, named *types.Named) bool {
+	if named != nil && (named.HasDrop() || named.NeedsSynthDrop()) {
+		return true
+	}
+	if inst, ok := typ.(*types.Instance); ok {
+		return monoInstNeedsSynthDrop(inst)
+	}
+	return false
+}
+
 // genFieldAccess loads a field value from a user type instance.
 // Uses lookupTypeLayout for layout-driven field types that work for both
 // regular and monomorphic types.
@@ -3816,9 +3833,19 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		if c.typeSubst != nil {
 			fType = types.Substitute(fType, c.typeSubst)
 		}
+		// T0513: Also substitute using the Instance's TypeArgs so generic field
+		// types like T? on Box[T] resolve to string? when accessed on Box[string].
+		// Without this, the dup checks below see TypeParam and skip the dup,
+		// leaving the field aliased between the owner and the new variable.
+		if inst, ok := typ.(*types.Instance); ok {
+			if origin, ok := inst.Origin().(*types.Named); ok && len(origin.TypeParams()) > 0 {
+				localSubst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+				fType = types.Substitute(fType, localSubst)
+			}
+		}
 		ownerNamed := extractNamed(typ)
 		if c.dupStringFieldAccess {
-			if extractNamed(fType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
+			if extractNamed(fType) == types.TypString && c.ownerHasOrSynthDrop(typ, ownerNamed) {
 				c.dupStringFieldAccess = false // consume the flag
 				dup := c.dupString(val)
 				c.trackStringTemp(dup)
@@ -3829,7 +3856,7 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 			// B0190: Track the dup as a temp AND store it in optionalStringDup so
 			// genOptionalForceUnwrap can return it directly (bypassing extractvalue
 			// which creates a different value.Value that claimStringTemp can't match).
-			if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
+			if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && c.ownerHasOrSynthDrop(typ, ownerNamed) {
 				c.dupStringFieldAccess = false // consume the flag
 				innerStr := c.block.NewExtractValue(val, 1)
 				dup := c.dupString(innerStr)
@@ -3840,7 +3867,7 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		}
 		// B0219: Dup vector/channel fields from types with drop.
 		// Vector: shallow copy (allocate + memcpy). Channel: incref.
-		if c.dupContainerFieldAccess && ownerNamed != nil && ownerNamed.HasDrop() {
+		if c.dupContainerFieldAccess && c.ownerHasOrSynthDrop(typ, ownerNamed) {
 			if elemType, ok := types.AsVector(fType); ok {
 				c.dupContainerFieldAccess = false // consume the flag
 				elemLLVM := c.resolveType(elemType)
@@ -3935,13 +3962,13 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		// B0190: Signal that this field access loaded a string? field from a
 		// droppable type. genOptionalForceUnwrap's result should NOT be tracked
 		// as a temp (the owner's drop handles the string's lifetime).
-		if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
+		if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && c.ownerHasOrSynthDrop(typ, ownerNamed) {
 			c.optionalFieldString = true
 		}
 		// T0354: Same for vector fields — the owner's drop frees the inner Vector
 		// via optfield.drop. Suppress unwrap-path stmt-temp tracking to avoid
 		// double-free at statement end.
-		if opt, ok := fType.(*types.Optional); ok && ownerNamed != nil && ownerNamed.HasDrop() {
+		if opt, ok := fType.(*types.Optional); ok && c.ownerHasOrSynthDrop(typ, ownerNamed) {
 			if _, isVec := types.AsVector(opt.Elem()); isVec {
 				c.optionalFieldVector = true
 			}
@@ -5073,7 +5100,8 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 		ownerType = types.Substitute(ownerType, c.typeSubst)
 	}
 	ownerNamed := extractNamed(ownerType)
-	if ownerNamed == nil || !ownerNamed.HasDrop() {
+	// T0513: also accept mono-synthesized drop on generic instances.
+	if !c.ownerHasOrSynthDrop(ownerType, ownerNamed) {
 		return
 	}
 	// T0487: covers string, Optional[string], Vector|Channel|Arc|Weak, and
@@ -5097,7 +5125,8 @@ func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types
 		ownerType = types.Substitute(ownerType, c.typeSubst)
 	}
 	ownerNamed := extractNamed(ownerType)
-	if ownerNamed == nil || !ownerNamed.HasDrop() {
+	// T0513: also accept mono-synthesized drop on generic instances.
+	if !c.ownerHasOrSynthDrop(ownerType, ownerNamed) {
 		return
 	}
 	ft := fieldType

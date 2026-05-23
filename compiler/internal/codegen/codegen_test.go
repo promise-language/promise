@@ -20041,6 +20041,132 @@ func TestOptionalGenericFieldReassignChannelEmitsDropAndOptdrop(t *testing.T) {
 	assertContains(t, ir, "@Channel.drop")
 }
 
+// T0513: Force-unwrap of an Optional[string] field on a generic-type instance
+// (e.g. Box[string]) must dup the inner string. Sema's fieldTypeHasDrop returns
+// false for T? where T is a TypeParam, so the bare Named's HasDrop()=false; the
+// mono instance Box[string] gets synth drop via monoInstNeedsSynthDrop. Without
+// the dup, the field and the new var alias the same heap pointer — at scope
+// end one drops the pointer; the next reassignment frees again -> invalid free.
+func TestGenericOptionalStringFieldUnwrapDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T? value; }
+		test() {
+			Box[string] b = Box[string](value: "init");
+			string s = b.value!;
+		}
+	`)
+	// dupStringFieldAccess mechanism must emit strdup block + promise_string_new.
+	assertContains(t, ir, "strdup.copy")
+	assertContains(t, ir, "promise_string_new")
+}
+
+// T0513 (vector limb): same fix must apply to generic Optional[Vector[T]] field
+// unwrap — the inner Vector buffer must be duped on read so the field and the
+// new variable own independent copies.
+func TestGenericOptionalVectorFieldUnwrapDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T? value; }
+		test() {
+			Box[Vector[int]] b = Box[Vector[int]](value: [1, 2, 3]);
+			Vector[int] v = b.value!;
+		}
+	`)
+	// dupContainerFieldAccess emits a vecdup block (alloc + memcpy) for the dup.
+	assertContains(t, ir, "vecdup.copy")
+	assertContains(t, ir, "memcpy")
+}
+
+// T0513 (direct string field on generic owner): reading a plain `T` field
+// from `Box[string]` must dup the string when bound to a new variable.
+// Without the Instance-local TypeArgs substitution (added in T0513), the dup
+// check sees the raw TypeParam and skips; without the ownerHasOrSynthDrop
+// gate the bare Named has HasDrop=false (sema's fieldTypeHasDrop returns
+// false for TypeParam) and the dup is skipped entirely.
+func TestGenericDirectStringFieldReadDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[string] b = Box[string](value: "hi");
+			string s = b.value;
+		}
+	`)
+	// Scope the assertion to the user's test() function — the broader IR
+	// contains many stdlib strdup.copy blocks unrelated to this fix.
+	testFn := extractFunction(ir, "__user.test")
+	if testFn == "" {
+		t.Fatal("expected __user.test in IR")
+	}
+	assertContains(t, testFn, "strdup.copy")
+	assertContains(t, testFn, "promise_string_new")
+}
+
+// T0513 (maybeEnableDupForMutRefArg generic owner): passing a generic
+// owner's field to a `~` (consuming) param must auto-dup the field so the
+// callee's consume-drop and the owner's drop don't double-free. Exercises
+// the MemberExpr branch of maybeEnableDupForMutRefArg (expr.go:5094-5109),
+// which had zero coverage before T0513 added a test for the generic-owner
+// gate.
+func TestGenericOwnerMutRefArgDupsStringField(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		consume(~string s) {}
+		test() {
+			b := Box[string](value: "hi");
+			consume(b.value);
+		}
+	`)
+	testFn := extractFunction(ir, "__user.test")
+	if testFn == "" {
+		t.Fatal("expected __user.test in IR")
+	}
+	// dupStringFieldAccess + strdup.copy emitted at the field read site,
+	// guarded by the ownerHasOrSynthDrop generic-owner gate.
+	assertContains(t, testFn, "strdup.copy")
+	assertContains(t, testFn, "promise_string_new")
+}
+
+// T0513 (maybeEnableDupForMutRefArg generic owner — Vector limb): same
+// auto-dup must apply when the field type substitutes to a Vector and is
+// passed to a consuming param. dupContainerFieldAccess routes through
+// dupVector which emits a vecdup.copy block.
+func TestGenericOwnerMutRefArgDupsVectorField(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		consume(~Vector[int] v) {}
+		test() {
+			b := Box[Vector[int]](value: [1, 2, 3]);
+			consume(b.value);
+		}
+	`)
+	testFn := extractFunction(ir, "__user.test")
+	if testFn == "" {
+		t.Fatal("expected __user.test in IR")
+	}
+	assertContains(t, testFn, "vecdup.copy")
+}
+
+// T0513 (maybeEnableDupForConstructorArg generic owner): constructor
+// field-init that reads from a generic owner's field must auto-dup so the
+// new instance owns an independent copy. Mirrors T0411 (non-generic owner)
+// for generic-owner instances; without ownerHasOrSynthDrop, the early
+// return at expr.go:5129 would skip the dup setup.
+func TestGenericOwnerConstructorArgDupsStringField(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		type Holder { string s; drop(~this) {} }
+		test() {
+			b := Box[string](value: "hi");
+			h := Holder(s: b.value);
+		}
+	`)
+	testFn := extractFunction(ir, "__user.test")
+	if testFn == "" {
+		t.Fatal("expected __user.test in IR")
+	}
+	assertContains(t, testFn, "strdup.copy")
+	assertContains(t, testFn, "promise_string_new")
+}
+
 // T0391: Returning a non-~ Optional argument from a function that returns the same
 // Optional type causes the caller's drop flag to alias with the return value's
 // drop binding. The alias check (extended in T0391 to recognise Optional structs)

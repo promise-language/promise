@@ -157,7 +157,12 @@ func (c *Checker) tryMove(expr ast.Expr) {
 	}
 
 	// `this` is a parameter, not a regular tracked variable; no move bookkeeping.
-	if _, ok := expr.(*ast.ThisExpr); ok {
+	// T0548: still reject moves of `this` while a borrow on it is active
+	// (e.g., from `(b, n) := this.pair` registering Origin:"this").
+	if this, ok := expr.(*ast.ThisExpr); ok {
+		if c.borrows != nil && c.borrows.HasAnyBorrow("this") {
+			c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
+		}
 		return
 	}
 
@@ -227,6 +232,10 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 				"cannot move borrowed receiver 'this'; declare the method as 'method(~this)' to consume the receiver")
 		} else if c.state["this"] == Moved {
 			c.errorf(this.Pos(), "use of moved variable 'this'")
+		} else if c.borrows != nil && c.borrows.HasAnyBorrow("this") {
+			// T0548: reject consume of `this` while a borrow on it is
+			// active (e.g., from `(b, n) := this.pair`).
+			c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
 		}
 		return
 	}

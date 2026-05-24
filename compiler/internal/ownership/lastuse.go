@@ -765,6 +765,29 @@ func (a *lastUseAnalyzer) analyzeRefBlock(block *ast.Block, result map[ast.Stmt]
 			if s.Name != "_" && a.isVarRefType(s.Value) {
 				refVars = append(refVars, varInfo{name: s.Name, declIdx: i})
 			}
+		case *ast.DestructureVarDecl:
+			// T0548: destructured locals from MemberExpr/IndexExpr sources
+			// hold shared borrows on the source's root variable (registered in
+			// checkDestructureVarDecl). Non-Copy locals need last-use tracking
+			// so the borrow expires at the borrower's last use rather than
+			// scope exit — otherwise destructure-then-consume-parent (after
+			// the locals' last use) would falsely reject.
+			switch s.Value.(type) {
+			case *ast.MemberExpr, *ast.IndexExpr:
+				var elems []types.Type
+				if tup, ok := a.info.Types[s.Value].(*types.Tuple); ok {
+					elems = tup.Elems()
+				}
+				for j, name := range s.Names {
+					if name == "_" {
+						continue
+					}
+					if j < len(elems) && isCopyType(elems[j]) {
+						continue
+					}
+					refVars = append(refVars, varInfo{name: name, declIdx: i})
+				}
+			}
 		}
 	}
 

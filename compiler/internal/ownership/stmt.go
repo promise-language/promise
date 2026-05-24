@@ -192,15 +192,73 @@ func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 	// `(a, b) := holder.tup` that the existing T0389/T0420 tests rely on.
 	// Skip the move check for these source kinds; var-decl paths (typed and
 	// inferred) still go through tryMove and catch the real unsafe case.
+	//
+	// T0548: The destructured locals are borrows at runtime, so mark non-Copy
+	// names as Borrowed and register a shared borrow on the source's root
+	// variable. Subsequent moves/consumes of the parent are then rejected by
+	// the existing HasAnyBorrow check in tryMove/tryMoveConsume while the
+	// borrowers are alive. T0164 NLL narrowing expires the borrow at each
+	// borrower's last use (extended for this shape in lastuse.go).
 	switch s.Value.(type) {
 	case *ast.MemberExpr, *ast.IndexExpr:
-		// borrow path — no move, no field-move check
+		rootName := destructureBorrowRoot(s.Value)
+		var elems []types.Type
+		if tup, ok := c.info.Types[s.Value].(*types.Tuple); ok {
+			elems = tup.Elems()
+		}
+		for i, name := range s.Names {
+			if name == "_" {
+				continue
+			}
+			var elem types.Type
+			if i < len(elems) {
+				elem = elems[i]
+			}
+			if elem != nil && isCopyType(elem) {
+				c.state[name] = Owned
+				continue
+			}
+			c.state[name] = Borrowed
+			if rootName != "" && c.borrows != nil {
+				c.borrows.Add(&Borrow{
+					Origin:   rootName,
+					Kind:     BorrowShared,
+					Borrower: name,
+					Pos:      s.Pos(),
+				})
+			}
+		}
+		return
 	default:
 		c.tryMove(s.Value)
 	}
 	for _, name := range s.Names {
 		if name != "_" {
 			c.state[name] = Owned
+		}
+	}
+}
+
+// destructureBorrowRoot walks a destructure source down to the root variable
+// name, threading through MemberExpr / IndexExpr / ParenExpr. Returns the
+// root IdentExpr name, or "this" for a ThisExpr root (ownership tracks the
+// receiver under the name "this"). Returns "" if no root is reachable (e.g.
+// nested call expressions).
+func destructureBorrowRoot(expr ast.Expr) string {
+	for {
+		switch e := expr.(type) {
+		case *ast.IdentExpr:
+			return e.Name
+		case *ast.ThisExpr:
+			return "this"
+		case *ast.MemberExpr:
+			expr = e.Target
+		case *ast.IndexExpr:
+			expr = e.Target
+		case *ast.ParenExpr:
+			expr = e.Expr
+		default:
+			return ""
 		}
 	}
 }

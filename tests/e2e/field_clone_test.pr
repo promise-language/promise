@@ -200,3 +200,43 @@ test_generic_plain_named_field_drop_only() `test {
   _OuterPlainGenT0549 o = _OuterPlainGenT0549(inner: _PlainGenT0549[int](n: 2));
   // Let o drop at scope exit — synth drop pal_free's the inner _PlainGenT0549[int].
 }
+
+// T0548: destructure-from-field produces borrows that escape parent's lifetime.
+// Prior to T0548 the destructured locals were tracked as Owned, so consuming
+// the parent before the locals' last use silently UAF/double-freed at runtime.
+// The fix registers a shared borrow on the parent so consume-then-read is now
+// a compile-time error; consume-AFTER-last-use is allowed via T0164 NLL.
+type _BoxStrT0548 {
+  string s;
+}
+
+type _HolderT0548 {
+  (_BoxStrT0548, int) pair;
+}
+
+// Positive: destructure, read both locals (last uses), then let the parent
+// drop at scope exit. The parent retains ownership of the inner _BoxStrT0548
+// throughout — its synth drop fires once at scope exit with no double-free.
+test_destructure_member_read_then_scope_drop() `test {
+  _HolderT0548 h = _HolderT0548(pair: (_BoxStrT0548(s: "hello" + " world"), 7));
+  (b, n) := h.pair;
+  assert(b.s == "hello world", "b.s");
+  assert(n == 7, "n");
+}
+
+// Positive: destructure, finish reading destructured locals, THEN move the
+// parent into a consuming function. T0164 NLL borrow narrowing expires the
+// borrow at the locals' last use, so the consume is legal.
+test_destructure_member_consume_after_last_use() `test {
+  _HolderT0548 h = _HolderT0548(pair: (_BoxStrT0548(s: "ab" + "cd"), 5));
+  (b, n) := h.pair;
+  assert(b.s == "abcd", "b.s");
+  assert(n == 5, "n");
+  consume_holder_t0548(h);
+}
+
+consume_holder_t0548(~_HolderT0548 h) {
+  (b2, n2) := h.pair;
+  assert(b2.s == "abcd", "b2.s after consume");
+  assert(n2 == 5, "n2 after consume");
+}

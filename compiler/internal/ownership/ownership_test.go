@@ -3704,6 +3704,220 @@ func TestFieldMoveGenericTupleDroppableIndexExprDestructureOK(t *testing.T) {
 	`)
 }
 
+// === T0548: destructure-from-field produces tracked borrows ===
+//
+// Destructuring from a MemberExpr / IndexExpr source emits no drop bindings
+// in codegen — the parent owner retains ownership of the inner data, and the
+// destructured locals are borrows at runtime. T0505 left the ownership-side
+// permissive (no field-move check, all locals marked Owned), which let
+// `consume(h)` AFTER `(b, n) := h.pair` slip through to runtime UAF/double-free.
+// T0548 marks the non-Copy locals as Borrowed and registers a shared borrow
+// on the source's root variable so subsequent moves of the parent are
+// rejected at compile time while any borrower is alive. T0164 NLL borrow
+// narrowing expires the borrow at each borrower's last use.
+
+// Destructure-from-field then consume parent — must reject. This was the
+// original T0548 UAF / segfault repro.
+func TestDestructureFromFieldConsumeParentRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		consume(~Holder h) {}
+		test() {
+			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, n) := h.pair;
+			consume(h);
+			_ = b.s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 'h' while it is borrowed")
+}
+
+// IndexExpr source variant — destructure-from-vector-element then consume the
+// vector must reject. Parallel to the MemberExpr case.
+func TestDestructureFromIndexConsumeParentRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		consume_vec(~Vector[(_BoxStr, int)] v) {}
+		test() {
+			Vector[(_BoxStr, int)] arr = [];
+			arr.push((_BoxStr(s: "x"), 2));
+			(b, n) := arr[0];
+			consume_vec(arr);
+			_ = b.s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 'arr' while it is borrowed")
+}
+
+// T0164 NLL borrow narrowing: destructure, use both locals, THEN consume the
+// parent — must accept (borrow expires at the borrower's last use).
+func TestDestructureFromFieldNLLNarrowing(t *testing.T) {
+	ownerOK(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		consume(~Holder h) {}
+		test() {
+			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, n) := h.pair;
+			_ = b.s;
+			_ = n;
+			consume(h);
+		}
+	`)
+}
+
+// Destructure-from-field then move the destructured local into a consume
+// site — must reject. Mirrors the existing T0338 "cannot move borrowed value"
+// path: the local is in Borrowed state so tryMoveConsume rejects.
+func TestDestructureFromFieldMoveLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		consume_box(~_BoxStr b) {}
+		test() {
+			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, n) := h.pair;
+			consume_box(b);
+			_ = n;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'b'")
+}
+
+// All-Copy tuple elements: no borrow is registered for `b`/`n` (both int) →
+// consuming the parent is allowed.
+func TestDestructureFromFieldAllCopyElemsOK(t *testing.T) {
+	ownerOK(t, `
+		type Holder { (int, int) pair; }
+		consume(~Holder h) {}
+		test() {
+			Holder h = Holder(pair: (1, 2));
+			(a, b) := h.pair;
+			_ = a + b;
+			consume(h);
+		}
+	`)
+}
+
+// Mixed Copy / non-Copy: only the non-Copy local registers a borrow. Consume
+// after its last use must still be accepted via NLL narrowing.
+func TestDestructureFromFieldPartialCopyMixedNLL(t *testing.T) {
+	ownerOK(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		consume(~Holder h) {}
+		test() {
+			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, n) := h.pair;
+			_ = b.s;
+			consume(h);
+			_ = n;
+		}
+	`)
+}
+
+// `_` discard slot does not register a borrow (the unused element is dropped
+// at scope exit normally); the non-`_` slot still registers, so consuming
+// the parent before its last use is rejected.
+func TestDestructureFromFieldDiscardSlotRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		consume(~Holder h) {}
+		test() {
+			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, _) := h.pair;
+			consume(h);
+			_ = b.s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 'h' while it is borrowed")
+}
+
+// ThisExpr root: destructure from `this.pair` in a `~this` method then call
+// a consumer that takes `~Holder` — must reject. Without the `this` borrow
+// check this slips through to a runtime UAF.
+func TestDestructureFromThisConsumeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder {
+			(_BoxStr, int) pair;
+			eat(~this) {
+				(b, n) := this.pair;
+				consume_holder(this);
+				_ = b.s;
+				_ = n;
+			}
+		}
+		consume_holder(~Holder h) {}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move 'this' while it is borrowed")
+}
+
+// ThisExpr root + NLL narrowing: destructure, read both locals, THEN consume
+// the receiver — must accept (borrow expires at borrower's last use).
+func TestDestructureFromThisNLLNarrowing(t *testing.T) {
+	ownerOK(t, `
+		type _BoxStr { string s; }
+		type Holder {
+			(_BoxStr, int) pair;
+			eat(~this) {
+				(b, n) := this.pair;
+				_ = b.s;
+				_ = n;
+				consume_holder(this);
+			}
+		}
+		consume_holder(~Holder h) {}
+		test() {}
+	`)
+}
+
+// Destructure from a call-result member (`make_holder().pair`) — the source
+// has no stable IdentExpr root, so destructureBorrowRoot returns "" and no
+// borrow constraint is registered. The destructured locals are still marked
+// Borrowed though, so attempting to move them into a consume site is still
+// rejected. (Runtime-level UAF for this shape is tracked separately as T0571.)
+func TestDestructureFromCallMemberMoveLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		make_holder() Holder { return Holder(pair: (_BoxStr(s: "x"), 2)); }
+		consume_box(~_BoxStr b) {}
+		test() {
+			(b, n) := make_holder().pair;
+			consume_box(b);
+			_ = n;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'b'")
+}
+
+// ThisExpr root + non-consuming move (inferred var-decl RHS): `x := this`
+// after a destructure-from-this borrow must reject via tryMove(ThisExpr)'s
+// borrow check (distinct from the tryMoveConsume(ThisExpr) path covered by
+// TestDestructureFromThisConsumeRejected — different call site, different
+// error path).
+func TestDestructureFromThisMoveLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder {
+			(_BoxStr, int) pair;
+			eat(~this) {
+				(b, n) := this.pair;
+				x := this;
+				_ = b.s;
+				_ = n;
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move 'this' while it is borrowed")
+}
+
 // Inside a generic method body, the owner's TypeArgs are still TypeParams.
 // The check must skip — preserves the existing "skip on unresolved TypeParam"
 // semantics. (Regression guard for the ContainsTypeParam(TypeArg) gate.)

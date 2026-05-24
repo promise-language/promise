@@ -3903,10 +3903,12 @@ func (c *Compiler) typeNeedsFieldDrop(typ types.Type) bool {
 }
 
 // tupleNeedsDrop returns true if a tuple type contains any droppable element
-// (string, vector, channel, user type with drop, enum with drop, or another
-// droppable tuple).
+// (string, vector, channel, user type with drop, enum with drop, droppable
+// Optional/Array, or another droppable tuple).
 // B0264: Enables vector element drop loop to clean up tuple elements.
 // T0371: Recurses into nested tuples so e.g. ((int, string), int) is droppable.
+// T0578: Delegates per-element check to typeNeedsFieldDrop so Optional, Array,
+// Mutex, and MutexGuard tuple elements are recognized as droppable.
 func (c *Compiler) tupleNeedsDrop(elemType types.Type) bool {
 	tup, ok := elemType.(*types.Tuple)
 	if !ok {
@@ -3917,34 +3919,7 @@ func (c *Compiler) tupleNeedsDrop(elemType types.Type) bool {
 		if c.typeSubst != nil {
 			resolved = types.Substitute(resolved, c.typeSubst)
 		}
-		// T0371: Recurse into nested tuple fields.
-		if _, isTup := resolved.(*types.Tuple); isTup {
-			if c.tupleNeedsDrop(resolved) {
-				return true
-			}
-			continue
-		}
-		if named := extractNamed(resolved); named != nil {
-			if named == types.TypString || named.HasDrop() || named.NeedsSynthDrop() {
-				return true
-			}
-			if _, isVec := types.AsVector(resolved); isVec {
-				return true
-			}
-			if _, isCh := types.AsChannel(resolved); isCh {
-				return true
-			}
-			if _, isArc := types.AsArc(resolved); isArc {
-				return true
-			}
-			if _, isWeak := types.AsWeak(resolved); isWeak {
-				return true
-			}
-			if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
-				return true
-			}
-		}
-		if c.vecElemNeedsEnumDrop(resolved) {
+		if c.typeNeedsFieldDrop(resolved) {
 			return true
 		}
 	}

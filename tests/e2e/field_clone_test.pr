@@ -278,6 +278,222 @@ test_optenum_field_no_drop_needed_none() `test {
   _HolderColorT0572 h = _HolderColorT0572(c: none, box: _BoxDropT0506(n: 200));
 }
 
+// T0578: tuple field whose elements include `Optional<X>`. tupleNeedsDrop was
+// missing an Optional branch, so the holder's synth-drop predicate returned
+// false and the entire tuple field was skipped at the field-walk gate — the
+// inner heap allocation leaked. Fix routes per-element check through
+// typeNeedsFieldDrop, which already recurses into Optional/Array/Tuple. These
+// tests cover Optional<heap-user>, Optional as first element, Optional<Tuple>,
+// Optional<Vector>, and Optional<Enum-with-drop>. All Some/None construction
+// paths leak under master pre-fix.
+type _HolderT0578a {
+  (int, _BoxDropT0506?) pair;
+}
+
+test_optbox_in_tuple_field_some() `test {
+  _BoxDropT0506? m = _BoxDropT0506(n: 7);
+  _HolderT0578a h = _HolderT0578a(pair: (1, m));
+}
+
+test_optbox_in_tuple_field_none() `test {
+  _BoxDropT0506? m = none;
+  _HolderT0578a h = _HolderT0578a(pair: (1, m));
+}
+
+// Optional as the first tuple element (B0264 / T0371 exercises trailing
+// element only — this confirms we no longer short-circuit on element 0).
+type _HolderT0578b {
+  (_BoxDropT0506?, int) pair;
+}
+
+test_optbox_first_elem() `test {
+  _BoxDropT0506? m = _BoxDropT0506(n: 11);
+  _HolderT0578b h = _HolderT0578b(pair: (m, 42));
+}
+
+test_optbox_first_elem_none() `test {
+  _BoxDropT0506? m = none;
+  _HolderT0578b h = _HolderT0578b(pair: (m, 42));
+}
+
+// Optional<Tuple<heap>> — exercises typeNeedsFieldDrop → tupleNeedsDrop
+// recursion through the Optional branch.
+type _HolderT0578c {
+  (int, (string, _BoxDropT0506)?) pair;
+}
+
+test_opt_tuple_in_tuple_field() `test {
+  (string, _BoxDropT0506)? t = ("hi", _BoxDropT0506(n: 3));
+  _HolderT0578c h = _HolderT0578c(pair: (1, t));
+}
+
+test_opt_tuple_in_tuple_field_none() `test {
+  (string, _BoxDropT0506)? t = none;
+  _HolderT0578c h = _HolderT0578c(pair: (1, t));
+}
+
+// Optional<Vector> with non-constant elements (forces heap allocation, not
+// the .rodata literal path).
+type _HolderT0578d {
+  (int, int[]?) pair;
+}
+
+test_opt_vector_in_tuple_field() `test {
+  int x = 1;
+  int y = 2;
+  int[]? v = [x, y, 3];
+  _HolderT0578d h = _HolderT0578d(pair: (1, v));
+}
+
+test_opt_vector_in_tuple_field_none() `test {
+  int[]? v = none;
+  _HolderT0578d h = _HolderT0578d(pair: (1, v));
+}
+
+// Optional<Enum-with-drop> tuple element — the Optional has-value branch
+// must dispatch into emitVariantFieldDrop for the inner enum.
+enum _MaybeT0578e {
+  Just(_BoxDropT0506 val),
+  Nothing,
+}
+
+type _HolderT0578e {
+  (int, _MaybeT0578e?) pair;
+}
+
+test_opt_enum_in_tuple_field() `test {
+  _MaybeT0578e? e = _MaybeT0578e.Just(_BoxDropT0506(n: 5));
+  _HolderT0578e h = _HolderT0578e(pair: (1, e));
+}
+
+test_opt_enum_in_tuple_field_none() `test {
+  _MaybeT0578e? e = none;
+  _HolderT0578e h = _HolderT0578e(pair: (1, e));
+}
+
+// Latent gap from same refactor: fixed-size array of heap-user as tuple
+// element. Pre-fix tupleNeedsDrop had no Array branch (extractNamed returns
+// nil for *types.Array), so the field walk was skipped and the inner
+// _BoxDropT0506 elements leaked. Verified on master: leaks 3 allocations.
+type _HolderT0578f {
+  (int, _BoxDropT0506[3]) pair;
+}
+
+test_array_heap_in_tuple_field() `test {
+  _BoxDropT0506[3] arr = [_BoxDropT0506(n: 1), _BoxDropT0506(n: 2), _BoxDropT0506(n: 3)];
+  _HolderT0578f h = _HolderT0578f(pair: (1, arr));
+}
+
+// T0578 coverage: additional Optional<X> tuple-element variants that pre-fix
+// also leaked through the same gating-predicate gap. Each was verified to leak
+// on master pre-fix (counts in comments) and pass post-fix.
+
+// Optional<string> tuple element — exercises the Optional→string path in
+// typeNeedsFieldDrop. Pre-fix: 1 allocation leaked.
+type _HolderT0578g {
+  (int, string?) pair;
+}
+
+test_opt_string_in_tuple_field_some() `test {
+  string? s = "hello".to_string() + "!";
+  _HolderT0578g h = _HolderT0578g(pair: (1, s));
+}
+
+test_opt_string_in_tuple_field_none() `test {
+  string? s = none;
+  _HolderT0578g h = _HolderT0578g(pair: (1, s));
+}
+
+// Optional<Array<heap>> tuple element — explicit sibling case from the bug
+// report. Exercises typeNeedsFieldDrop → Optional → Array → heap-user
+// recursion. Pre-fix: 3 allocations leaked.
+type _HolderT0578h {
+  (int, _BoxDropT0506[3]?) pair;
+}
+
+test_opt_array_heap_in_tuple_field_some() `test {
+  _BoxDropT0506[3] inner = [_BoxDropT0506(n: 1), _BoxDropT0506(n: 2), _BoxDropT0506(n: 3)];
+  _BoxDropT0506[3]? arr = inner;
+  _HolderT0578h h = _HolderT0578h(pair: (1, arr));
+}
+
+test_opt_array_heap_in_tuple_field_none() `test {
+  _BoxDropT0506[3]? arr = none;
+  _HolderT0578h h = _HolderT0578h(pair: (1, arr));
+}
+
+// Optional<Channel> tuple element — exercises the Optional→Channel path.
+// Pre-fix: 5 allocations leaked (channel internals).
+type _HolderT0578i {
+  (int, channel[int]?) pair;
+}
+
+test_opt_channel_in_tuple_field_some() `test {
+  channel[int] inner = channel[int]();
+  channel[int]? c = inner;
+  _HolderT0578i h = _HolderT0578i(pair: (1, c));
+}
+
+test_opt_channel_in_tuple_field_none() `test {
+  channel[int]? c = none;
+  _HolderT0578i h = _HolderT0578i(pair: (1, c));
+}
+
+// Optional<Arc> tuple element — exercises Optional→Arc path. Pre-fix:
+// 2 allocations leaked (control block + inner _BoxDropT0506).
+type _HolderT0578j {
+  (int, Arc[_BoxDropT0506]?) pair;
+}
+
+test_opt_arc_in_tuple_field_some() `test {
+  Arc[_BoxDropT0506] inner = Arc[_BoxDropT0506](_BoxDropT0506(n: 1));
+  Arc[_BoxDropT0506]? a = inner;
+  _HolderT0578j h = _HolderT0578j(pair: (1, a));
+}
+
+test_opt_arc_in_tuple_field_none() `test {
+  Arc[_BoxDropT0506]? a = none;
+  _HolderT0578j h = _HolderT0578j(pair: (1, a));
+}
+
+// Optional<Mutex> tuple element — exercises Optional→Mutex path. Latent gap
+// even on top of Optional handling because the old tupleNeedsDrop also lacked
+// an explicit AsMutex branch (only caught Mutex via the heap-user fallback).
+// Pre-fix: 3 allocations leaked.
+type _HolderT0578k {
+  (int, Mutex[int]?) pair;
+}
+
+test_opt_mutex_in_tuple_field_some() `test {
+  Mutex[int] inner = Mutex[int](42);
+  Mutex[int]? m = inner;
+  _HolderT0578k h = _HolderT0578k(pair: (1, m));
+}
+
+test_opt_mutex_in_tuple_field_none() `test {
+  Mutex[int]? m = none;
+  _HolderT0578k h = _HolderT0578k(pair: (1, m));
+}
+
+// Optional<Optional<heap>> nested-Optional tuple element — exercises the
+// recursive call typeNeedsFieldDrop → Optional → typeNeedsFieldDrop → Optional
+// → heap-user. Pre-fix: 1 allocation leaked.
+type _HolderT0578l {
+  (int, _BoxDropT0506??) pair;
+}
+
+test_opt_opt_heap_in_tuple_field_some() `test {
+  _BoxDropT0506 b = _BoxDropT0506(n: 9);
+  _BoxDropT0506? inner = b;
+  _BoxDropT0506?? outer = inner;
+  _HolderT0578l h = _HolderT0578l(pair: (1, outer));
+}
+
+test_opt_opt_heap_in_tuple_field_none() `test {
+  _BoxDropT0506?? outer = none;
+  _HolderT0578l h = _HolderT0578l(pair: (1, outer));
+}
+
 // T0552: holder with TWO droppable generic-enum fields. Exercises the loop in
 // emitFieldDropsFor across multiple enum-typed fields and a non-droppable field
 // in between, ensuring the iteration order and per-field GEP computation are

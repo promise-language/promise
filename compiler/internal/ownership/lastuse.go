@@ -151,10 +151,17 @@ func (a *lastUseAnalyzer) analyzeBlock(block *ast.Block) {
 //     string, etc.) — the new variable might hold a pointer to the original's data
 //   - Control flow statements (if/while/for/select) — too complex, inner scope
 //     interactions could cause LLVM IR domination issues
-func (a *lastUseAnalyzer) isSafeForEarlyDrop(stmt ast.Stmt, _ string) bool {
+func (a *lastUseAnalyzer) isSafeForEarlyDrop(stmt ast.Stmt, name string) bool {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
-		// Result is discarded — no reference retention possible.
+		// The call's own return value is discarded, but a sub-expression may
+		// produce a back-ref carrier (e.g. MutexGuard[T] from m.lock()) that is
+		// then stored elsewhere by an enclosing call (e.g. outer.push(m.lock())).
+		// Such a stored value holds a back-pointer to `name`, so dropping `name`
+		// early would leave a dangling pointer. T0557.
+		if a.exprBackRefCapturesVar(s.Expr, name) {
+			return false
+		}
 		return true
 
 	case *ast.TypedVarDecl:
@@ -210,6 +217,135 @@ func isStoredRefType(typ types.Type) bool {
 	switch typ.(type) {
 	case *types.SharedRef, *types.MutRef:
 		return true
+	}
+	return false
+}
+
+// isBackRefCarrier reports whether typ is an opaque value type that internally
+// stores a raw back-pointer to another value. Such carriers cannot be allowed
+// to outlive the value they reference. MutexGuard[T] stores a pointer to its
+// parent Mutex[T] and dereferences it in drop() to unlock. T0557.
+func isBackRefCarrier(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	if _, ok := types.AsMutexGuard(typ); ok {
+		return true
+	}
+	return false
+}
+
+// exprBackRefCapturesVar reports whether the expression tree contains a method
+// call on the named variable whose return type is a back-ref carrier. Such a
+// call produces a value that retains a pointer to `name`'s storage; if that
+// value is then stored elsewhere (e.g. pushed into a container), early-dropping
+// `name` would leave a dangling pointer. T0557.
+//
+// Scope: only walks expression sub-trees. Block-as-expression sub-blocks of
+// IfExpr/MatchExpr/ErrorHandlerExpr/UnsafeExpr/LambdaExpr/GoExpr are NOT
+// traversed — a call inside `if cond { m.lock() } else { ... }` is not
+// currently detected. See T0564 for the related VarDecl/AssignStmt gap.
+func (a *lastUseAnalyzer) exprBackRefCapturesVar(expr ast.Expr, name string) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		if mem, ok := e.Callee.(*ast.MemberExpr); ok {
+			if id, ok := mem.Target.(*ast.IdentExpr); ok && id.Name == name {
+				if isBackRefCarrier(a.info.Types[e]) {
+					return true
+				}
+			}
+		}
+		if a.exprBackRefCapturesVar(e.Callee, name) {
+			return true
+		}
+		for _, arg := range e.Args {
+			if a.exprBackRefCapturesVar(arg.Value, name) {
+				return true
+			}
+		}
+		return false
+
+	case *ast.MemberExpr:
+		return a.exprBackRefCapturesVar(e.Target, name)
+
+	case *ast.OptionalChainExpr:
+		return a.exprBackRefCapturesVar(e.Target, name)
+
+	case *ast.ParenExpr:
+		return a.exprBackRefCapturesVar(e.Expr, name)
+
+	case *ast.BinaryExpr:
+		return a.exprBackRefCapturesVar(e.Left, name) || a.exprBackRefCapturesVar(e.Right, name)
+
+	case *ast.UnaryExpr:
+		return a.exprBackRefCapturesVar(e.Operand, name)
+
+	case *ast.IndexExpr:
+		if a.exprBackRefCapturesVar(e.Target, name) || a.exprBackRefCapturesVar(e.Index, name) {
+			return true
+		}
+		for _, extra := range e.ExtraIndices {
+			if a.exprBackRefCapturesVar(extra, name) {
+				return true
+			}
+		}
+		return false
+
+	case *ast.SliceExpr:
+		return a.exprBackRefCapturesVar(e.Target, name) ||
+			a.exprBackRefCapturesVar(e.Low, name) ||
+			a.exprBackRefCapturesVar(e.High, name)
+
+	case *ast.CastExpr:
+		return a.exprBackRefCapturesVar(e.Expr, name)
+
+	case *ast.IsExpr:
+		return a.exprBackRefCapturesVar(e.Expr, name)
+
+	case *ast.ErrorPropagateExpr:
+		return a.exprBackRefCapturesVar(e.Expr, name)
+
+	case *ast.ErrorPanicExpr:
+		return a.exprBackRefCapturesVar(e.Expr, name)
+
+	case *ast.OptionalUnwrapExpr:
+		return a.exprBackRefCapturesVar(e.Expr, name)
+
+	case *ast.ErrorHandlerExpr:
+		return a.exprBackRefCapturesVar(e.Expr, name)
+
+	case *ast.IfExpr:
+		return a.exprBackRefCapturesVar(e.Cond, name)
+
+	case *ast.MatchExpr:
+		return a.exprBackRefCapturesVar(e.Subject, name)
+
+	case *ast.TupleLit:
+		for _, elem := range e.Elements {
+			if a.exprBackRefCapturesVar(elem, name) {
+				return true
+			}
+		}
+		return false
+
+	case *ast.ArrayLit:
+		for _, elem := range e.Elements {
+			if a.exprBackRefCapturesVar(elem, name) {
+				return true
+			}
+		}
+		return false
+
+	case *ast.MapLit:
+		for _, entry := range e.Entries {
+			if a.exprBackRefCapturesVar(entry.Key, name) || a.exprBackRefCapturesVar(entry.Value, name) {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }

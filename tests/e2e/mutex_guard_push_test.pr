@@ -1,0 +1,54 @@
+// T0557: pushing MutexGuard[T] into a Vector caused a use-after-free at drop
+// because NLL early-drop ran the parent Mutex.drop before the Vector.drop that
+// owns the guard. NLL now suppresses early-drop when an ExprStmt sub-expression
+// is a method call on the variable whose return type is a back-ref carrier
+// (currently MutexGuard[T]).
+test_push_guard_then_use_outer() `test {
+  m := Mutex[int](42);
+  outer := Vector[MutexGuard[int]]();
+  outer.push(m.lock());
+  // sentinel statement after push — without the fix this triggered NLL early-drop of m.
+  assert(outer.len == 1, "guard pushed");
+}
+
+test_push_guard_no_trailing_use() `test {
+  // Even when there's no later use, scope-exit LIFO must drop outer (and its
+  // guard element) before m. The variable is dropped at scope exit.
+  m := Mutex[int](7);
+  outer := Vector[MutexGuard[int]]();
+  outer.push(m.lock());
+}
+
+test_push_guards_from_different_mutexes() `test {
+  m1 := Mutex[int](1);
+  m2 := Mutex[int](2);
+  m3 := Mutex[int](3);
+  guards := Vector[MutexGuard[int]]();
+  guards.push(m1.lock());
+  guards.push(m2.lock());
+  guards.push(m3.lock());
+  assert(guards.len == 3, "three guards pushed");
+}
+
+// --- positive control: use-binding (the idiomatic pattern) still works ---
+
+test_use_binding_unchanged() `test {
+  m := Mutex[int](99);
+  use g := m.lock();
+  assert(g.borrow == 99, "use-binding still works");
+  int sentinel = 1;
+  assert(sentinel == 1, "sentinel");
+}
+
+// --- wrapper-expression coverage: m.lock() nested inside enclosing expressions ---
+// The NLL fix walks the ExprStmt expression tree to find back-ref-carrier calls
+// in any position. These cases exercise the recursion through ParenExpr and
+// nested CallExpr (where the lock call is an argument to another function).
+
+test_push_guard_wrapped_in_parens() `test {
+  // Redundant parens around the lock call — ParenExpr branch of the walker.
+  m := Mutex[int](11);
+  outer := Vector[MutexGuard[int]]();
+  outer.push((m.lock()));
+  assert(outer.len == 1, "guard pushed through parens");
+}

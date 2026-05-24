@@ -2796,6 +2796,268 @@ func TestNLLCompoundAssignment(t *testing.T) {
 	}
 }
 
+func TestNLLNoEarlyDropMutexGuardInExprStmt(t *testing.T) {
+	// T0557: pushing MutexGuard[T] into a container stores a back-pointer to
+	// the parent Mutex[T]. NLL must NOT early-drop the mutex after such a
+	// statement — the guard outlives it and dereferences it at drop time.
+	_, info := checkOwnershipWithInfo(t, `
+		test() {
+			m := Mutex[int](42);
+			outer := Vector[MutexGuard[int]]();
+			outer.push(m.lock());
+			int sentinel = 1;
+		}
+	`)
+	if hasEarlyDrop(info, "m") {
+		t.Error("should not early-drop 'm' when m.lock() produces a MutexGuard captured by an enclosing call")
+	}
+}
+
+func TestNLLNoEarlyDropMutexGuardDiscarded(t *testing.T) {
+	// Even when the guard is the discarded ExprStmt result (no enclosing
+	// capture), suppressing the early drop is harmless: the guard's drop
+	// runs as a temp before m's scope-exit drop, so ordering stays LIFO.
+	// Conservative behavior is fine here.
+	_, info := checkOwnershipWithInfo(t, `
+		test() {
+			m := Mutex[int](42);
+			m.lock();
+			int sentinel = 1;
+		}
+	`)
+	if hasEarlyDrop(info, "m") {
+		t.Error("should not early-drop 'm' when m.lock() returns a MutexGuard temp")
+	}
+}
+
+func TestNLLEarlyDropNonGuardMethod(t *testing.T) {
+	// Regression: ExprStmt method calls that don't return a back-ref carrier
+	// must still be eligible for early drop. The T0557 fix only suppresses
+	// MutexGuard-returning calls.
+	_, info := checkOwnershipWithInfo(t, `
+		test() {
+			s := "hello" + "";
+			s.contains("ll");
+			int sentinel = 1;
+		}
+	`)
+	if !hasEarlyDrop(info, "s") {
+		t.Error("expected early drop for 's' after s.contains() (returns bool, not a back-ref carrier)")
+	}
+}
+
+// TestExprBackRefCapturesVar_AllWrappers exercises every AST wrapper branch in
+// exprBackRefCapturesVar by synthesizing AST trees with a `m.lock()` call (return
+// type MutexGuard[int]) nested inside each wrapper type. The function must
+// return true for every wrapper that can transitively contain the call. T0557.
+//
+// Without these tests, a missing wrapper case would silently allow NLL to
+// early-drop the parent Mutex despite a guard being captured deeper in the
+// expression tree → use-after-free at drop time.
+func TestExprBackRefCapturesVar_AllWrappers(t *testing.T) {
+	a := &lastUseAnalyzer{info: &sema.Info{Types: map[ast.Expr]types.Type{}}}
+
+	// makeLock builds an `m.lock()` CallExpr with return type MutexGuard[int].
+	makeLock := func() *ast.CallExpr {
+		mem := &ast.MemberExpr{Target: &ast.IdentExpr{Name: "m"}, Field: "lock"}
+		call := &ast.CallExpr{Callee: mem}
+		a.info.Types[call] = types.NewMutexGuard(types.TypInt)
+		return call
+	}
+
+	// Benign expression standing in for any non-matching subtree.
+	benign := func() ast.Expr { return &ast.IntLit{Raw: "1"} }
+
+	cases := []struct {
+		name string
+		make func(inner ast.Expr) ast.Expr
+	}{
+		{"ParenExpr", func(inner ast.Expr) ast.Expr {
+			return &ast.ParenExpr{Expr: inner}
+		}},
+		{"BinaryExpr_Left", func(inner ast.Expr) ast.Expr {
+			return &ast.BinaryExpr{Left: inner, Right: benign()}
+		}},
+		{"BinaryExpr_Right", func(inner ast.Expr) ast.Expr {
+			return &ast.BinaryExpr{Left: benign(), Right: inner}
+		}},
+		{"UnaryExpr", func(inner ast.Expr) ast.Expr {
+			return &ast.UnaryExpr{Operand: inner}
+		}},
+		{"IndexExpr_Target", func(inner ast.Expr) ast.Expr {
+			return &ast.IndexExpr{Target: inner, Index: benign()}
+		}},
+		{"IndexExpr_Index", func(inner ast.Expr) ast.Expr {
+			return &ast.IndexExpr{Target: &ast.IdentExpr{Name: "x"}, Index: inner}
+		}},
+		{"IndexExpr_ExtraIndices", func(inner ast.Expr) ast.Expr {
+			return &ast.IndexExpr{
+				Target:       &ast.IdentExpr{Name: "x"},
+				Index:        benign(),
+				ExtraIndices: []ast.Expr{inner},
+			}
+		}},
+		{"SliceExpr_Target", func(inner ast.Expr) ast.Expr {
+			return &ast.SliceExpr{Target: inner, Low: benign(), High: benign()}
+		}},
+		{"SliceExpr_Low", func(inner ast.Expr) ast.Expr {
+			return &ast.SliceExpr{Target: &ast.IdentExpr{Name: "x"}, Low: inner, High: benign()}
+		}},
+		{"SliceExpr_High", func(inner ast.Expr) ast.Expr {
+			return &ast.SliceExpr{Target: &ast.IdentExpr{Name: "x"}, Low: benign(), High: inner}
+		}},
+		{"CastExpr", func(inner ast.Expr) ast.Expr {
+			return &ast.CastExpr{Expr: inner}
+		}},
+		{"IsExpr", func(inner ast.Expr) ast.Expr {
+			return &ast.IsExpr{Expr: inner}
+		}},
+		{"ErrorPropagateExpr", func(inner ast.Expr) ast.Expr {
+			return &ast.ErrorPropagateExpr{Expr: inner}
+		}},
+		{"ErrorPanicExpr", func(inner ast.Expr) ast.Expr {
+			return &ast.ErrorPanicExpr{Expr: inner}
+		}},
+		{"OptionalUnwrapExpr", func(inner ast.Expr) ast.Expr {
+			return &ast.OptionalUnwrapExpr{Expr: inner}
+		}},
+		{"ErrorHandlerExpr", func(inner ast.Expr) ast.Expr {
+			return &ast.ErrorHandlerExpr{Expr: inner}
+		}},
+		{"IfExpr_Cond", func(inner ast.Expr) ast.Expr {
+			return &ast.IfExpr{Cond: inner}
+		}},
+		{"MatchExpr_Subject", func(inner ast.Expr) ast.Expr {
+			return &ast.MatchExpr{Subject: inner}
+		}},
+		{"TupleLit", func(inner ast.Expr) ast.Expr {
+			return &ast.TupleLit{Elements: []ast.Expr{benign(), inner}}
+		}},
+		{"ArrayLit", func(inner ast.Expr) ast.Expr {
+			return &ast.ArrayLit{Elements: []ast.Expr{benign(), inner}}
+		}},
+		{"MapLit_Key", func(inner ast.Expr) ast.Expr {
+			return &ast.MapLit{Entries: []*ast.MapEntry{{Key: inner, Value: benign()}}}
+		}},
+		{"MapLit_Value", func(inner ast.Expr) ast.Expr {
+			return &ast.MapLit{Entries: []*ast.MapEntry{{Key: benign(), Value: inner}}}
+		}},
+		{"MemberExpr_Target", func(inner ast.Expr) ast.Expr {
+			return &ast.MemberExpr{Target: inner, Field: "field"}
+		}},
+		{"OptionalChainExpr_Target", func(inner ast.Expr) ast.Expr {
+			return &ast.OptionalChainExpr{Target: inner, Field: "field"}
+		}},
+		{"CallExpr_Arg", func(inner ast.Expr) ast.Expr {
+			return &ast.CallExpr{
+				Callee: &ast.IdentExpr{Name: "f"},
+				Args:   []*ast.Arg{{Value: inner}},
+			}
+		}},
+		{"CallExpr_NestedCallee", func(inner ast.Expr) ast.Expr {
+			// outer call whose callee tree contains the back-ref call.
+			// e.g. inner.something(...) — exercises the Callee recursion (line 261-263).
+			callee := &ast.MemberExpr{Target: inner, Field: "borrow"}
+			return &ast.CallExpr{Callee: callee}
+		}},
+		// Deeply nested: array → paren → tuple → call.
+		{"DeepNested", func(inner ast.Expr) ast.Expr {
+			return &ast.ArrayLit{Elements: []ast.Expr{
+				&ast.ParenExpr{Expr: &ast.TupleLit{Elements: []ast.Expr{
+					&ast.BinaryExpr{Left: benign(), Right: inner},
+				}}},
+			}}
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+"_positive", func(t *testing.T) {
+			expr := tc.make(makeLock())
+			if !a.exprBackRefCapturesVar(expr, "m") {
+				t.Errorf("expected true for %s wrapping m.lock(), got false", tc.name)
+			}
+		})
+		t.Run(tc.name+"_negative", func(t *testing.T) {
+			// Same wrapper, but inner expression doesn't reference m.
+			expr := tc.make(benign())
+			if a.exprBackRefCapturesVar(expr, "m") {
+				t.Errorf("expected false for %s wrapping benign expression, got true", tc.name)
+			}
+		})
+	}
+}
+
+// TestExprBackRefCapturesVar_NilExpr verifies the nil-guard. Defense-in-depth
+// for callers that may pass nil sub-expressions (e.g. SliceExpr.Low/High can be
+// nil for [:high] / [low:] forms).
+func TestExprBackRefCapturesVar_NilExpr(t *testing.T) {
+	a := &lastUseAnalyzer{info: &sema.Info{Types: map[ast.Expr]types.Type{}}}
+	if a.exprBackRefCapturesVar(nil, "m") {
+		t.Error("nil expression must return false")
+	}
+	// SliceExpr with nil Low and High (legal AST for x[:]) must not panic.
+	slice := &ast.SliceExpr{Target: &ast.IdentExpr{Name: "x"}, Low: nil, High: nil}
+	if a.exprBackRefCapturesVar(slice, "m") {
+		t.Error("SliceExpr with nil bounds and benign target must return false")
+	}
+}
+
+// TestExprBackRefCapturesVar_WrongReceiver verifies that a back-ref-carrier
+// method call on a *different* variable does not trigger suppression for the
+// variable being analyzed.
+func TestExprBackRefCapturesVar_WrongReceiver(t *testing.T) {
+	a := &lastUseAnalyzer{info: &sema.Info{Types: map[ast.Expr]types.Type{}}}
+	// n.lock() — receiver is "n", we ask about "m".
+	mem := &ast.MemberExpr{Target: &ast.IdentExpr{Name: "n"}, Field: "lock"}
+	call := &ast.CallExpr{Callee: mem}
+	a.info.Types[call] = types.NewMutexGuard(types.TypInt)
+	if a.exprBackRefCapturesVar(call, "m") {
+		t.Error("expected false: receiver is 'n', not 'm'")
+	}
+	if !a.exprBackRefCapturesVar(call, "n") {
+		t.Error("expected true: receiver matches 'n'")
+	}
+}
+
+// TestExprBackRefCapturesVar_NonIdentReceiver verifies that a method call
+// whose receiver is not a simple IdentExpr (e.g. `something.field.lock()`)
+// does not trigger the direct-match path, but recursion still works.
+func TestExprBackRefCapturesVar_NonIdentReceiver(t *testing.T) {
+	a := &lastUseAnalyzer{info: &sema.Info{Types: map[ast.Expr]types.Type{}}}
+	// x.field.lock() — receiver is MemberExpr, not IdentExpr.
+	inner := &ast.MemberExpr{Target: &ast.IdentExpr{Name: "x"}, Field: "field"}
+	mem := &ast.MemberExpr{Target: inner, Field: "lock"}
+	call := &ast.CallExpr{Callee: mem}
+	a.info.Types[call] = types.NewMutexGuard(types.TypInt)
+	// Direct-match path requires IdentExpr receiver, so "x" is not matched here.
+	// (Future work: recursive descent into MemberExpr targets if needed — see T0564 scope note.)
+	if a.exprBackRefCapturesVar(call, "x") {
+		t.Error("non-IdentExpr receiver should not trigger direct match for 'x'")
+	}
+}
+
+// TestIsBackRefCarrier exercises the helper directly for all branches.
+func TestIsBackRefCarrier(t *testing.T) {
+	// nil → false (defensive)
+	if isBackRefCarrier(nil) {
+		t.Error("nil type must return false")
+	}
+	// MutexGuard[T] → true
+	if !isBackRefCarrier(types.NewMutexGuard(types.TypInt)) {
+		t.Error("MutexGuard[int] must return true")
+	}
+	// Plain types → false
+	if isBackRefCarrier(types.TypInt) {
+		t.Error("int must return false")
+	}
+	if isBackRefCarrier(types.TypString) {
+		t.Error("string must return false")
+	}
+	if isBackRefCarrier(types.TypBool) {
+		t.Error("bool must return false")
+	}
+}
+
 // === NLL Phase 3: Borrow Narrowing (T0164) ===
 
 func TestNLLBorrowExpiredAfterLastUse(t *testing.T) {

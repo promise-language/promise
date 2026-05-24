@@ -1,0 +1,225 @@
+// T0555: Native handle temporaries (Arc/Weak/Mutex/Task) passed directly
+// as call arguments must not leak. Pre-fix, the callee param is borrowed
+// by-value (no scope drop binding) and the caller had no statement-temp
+// tracking for these handle types, so each constructor expression as a
+// borrow arg leaked one or more allocations.
+take_arc(Arc[int] a) {
+}
+take_mutex(Mutex[int] m) {
+}
+take_arc_string(Arc[string] a) {
+}
+take_arc_move(~Arc[int] a) {
+}
+
+worker_t0555() int {
+  return 42;
+}
+take_task(Task[int] t) {
+}
+
+// Constructor temp as borrow arg — Arc, primitive inner.
+test_arc_ctor_temp() `test {
+  take_arc(Arc[int](99));
+}
+
+// Constructor temp as borrow arg — Mutex (3 inner allocations: handle + payload box + mutex).
+test_mutex_ctor_temp() `test {
+  take_mutex(Mutex[int](99));
+}
+
+// Constructor temp as borrow arg — Arc[string]. String is dropped as part
+// of Arc.drop, so 2 allocations total (Arc cell + inner string).
+test_arc_string_ctor_temp() `test {
+  take_arc_string(Arc[string]("hello"));
+}
+
+// go-expr returning Task as borrow arg — G struct + result buffer.
+test_task_temp() `test(exclude: wasm) {
+  take_task(go worker_t0555());
+}
+
+// Free function returning native handle — caller's stmt-temp tracking must
+// fire on the call result, not just the inner Arc[T](...) literal.
+make_arc_t0555() Arc[int] {
+  return Arc[int](42);
+}
+
+test_call_returning_arc() `test {
+  take_arc(make_arc_t0555());
+}
+
+// Move semantics preserved (callee consumes via ~) — no double-free.
+test_move_temp_no_double_free() `test {
+  take_arc_move(Arc[int](99));
+}
+
+// Variable-binding path still works — the claim site at variable
+// initialization clears the tracked temp flag, so the variable's scope drop
+// is the only drop and there is no double-free.
+test_arc_via_local() `test {
+  a := Arc[int](99);
+  take_arc(a);
+}
+
+// Discarded native handle (statement-level expression) — cleanup at
+// statement end via the registered stmt-temp drop.
+test_discarded_arc() `test {
+  Arc[int](99);
+}
+
+test_discarded_mutex() `test {
+  Mutex[int](99);
+}
+
+// Discarded fire-and-forget go expression — must still be leak-free. The
+// goroutine_exit path frees the G; tracking the result as a stmt-temp would
+// double-free, so the GoExpr tracking is guarded by !c.goExprFireAndForget.
+test_discarded_go() `test(exclude: wasm) {
+  go worker_t0555();
+}
+
+// Weak[T] temp from `.downgrade()` method call as borrow arg — exercises the
+// AsWeak branch in genExpr's CallExpr case.
+take_weak(Weak[int] w) {
+}
+
+test_weak_downgrade_temp() `test {
+  a := Arc[int](7);
+  take_weak(a.downgrade());
+}
+
+// T0555 secondary fix: typed-var-decl Optional[Arc] — the pre-wrap T0111
+// claim must fire so the stmt-temp drop doesn't double-free with the
+// optional binding drop. Pre-fix this leaked silently because Arc.drop's
+// pal_free was idempotent enough not to crash, but the IR had a double-free.
+test_optional_arc_typed_decl() `test {
+  Arc[int]? opt = Arc[int](99);
+}
+
+// T0555 secondary fix: typed-var-decl Optional[Task] — same pattern but for
+// Task[T]. Pre-fix this CRASHED at scope exit because Task.drop touches
+// scheduler state and the second drop saw a freed G.
+test_optional_task_typed_decl() `test(exclude: wasm) {
+  Task[int]? opt = go worker_t0555();
+}
+
+// T0555 secondary fix: reassignment to Optional[Arc] — the reassignment-path
+// pre-wrap T0111 claim must fire too.
+test_optional_arc_reassign() `test {
+  Arc[int]? opt = none;
+  opt = Arc[int](99);
+}
+
+// T0555 secondary fix: reassignment to Optional[Task] — same for Task.
+test_optional_task_reassign() `test(exclude: wasm) {
+  Task[int]? opt = none;
+  opt = go worker_t0555();
+}
+
+// Inferred declaration of Mutex constructor temp — exercises the
+// stmt.go:1099 inferred-decl claim site that T0555 extended with
+// IsMutex/IsTask. Without the extension, the stmt-temp's drop flag
+// stays set and Mutex.drop fires twice (double-free).
+test_inferred_mutex_decl() `test {
+  m := Mutex[int](42);
+  take_mutex(m);
+}
+
+// Inferred declaration of Task from go-expr — same path for IsTask.
+test_inferred_task_decl() `test(exclude: wasm) {
+  t := go worker_t0555();
+  take_task(t);
+}
+
+// Plain reassignment (non-Optional) for Arc — exercises stmt.go:5141
+// assignment claim site. Old Arc must drop, new Arc temp must be claimed.
+test_plain_reassign_arc() `test {
+  a := Arc[int](1);
+  a = Arc[int](2);
+}
+
+// Plain reassignment for Mutex — same path, IsMutex branch.
+test_plain_reassign_mutex() `test {
+  m := Mutex[int](1);
+  m = Mutex[int](2);
+}
+
+// Plain reassignment for Task — same path, IsTask branch.
+test_plain_reassign_task() `test(exclude: wasm) {
+  t := go worker_t0555();
+  t = go worker_t0555();
+}
+
+// Generic free function returning Arc[T] — exercises the c.typeSubst
+// substitution in genExpr's CallExpr case. Pre-fix (or without the
+// typeSubst handling), the AsArc check would see TypeParam T and fail
+// to dispatch, leaving the call result untracked → leak in
+// caller of the generic body.
+make_arc_generic[T](~T value) Arc[T] {
+  return Arc[T](value);
+}
+
+test_generic_arc_int() `test {
+  take_arc(make_arc_generic[int](99));
+}
+
+test_generic_arc_string() `test {
+  take_arc_string(make_arc_generic[string]("hello"));
+}
+
+// Generic free function returning Mutex[T] — same typeSubst path,
+// IsMutex branch.
+make_mutex_generic[T](~T value) Mutex[T] {
+  return Mutex[T](value);
+}
+
+test_generic_mutex_int() `test {
+  take_mutex(make_mutex_generic[int](42));
+}
+
+// Generic method on a user type — exercises typeSubst with monoCtx for
+// owner-type generic method bodies. Receiver borrowed (this), method
+// substitution-driven Arc[T] return.
+type T0555Maker {
+  make[T](this, ~T value) Arc[T] {
+    return Arc[T](value);
+  }
+}
+
+test_generic_method_arc() `test {
+  m := T0555Maker();
+  take_arc(m.make[int](99));
+}
+
+// Discarded call result from free function returning Arc — the call
+// result must still register as a stmt-temp so that the statement-end
+// drop fires.
+test_discarded_call_result_arc() `test {
+  make_arc_t0555();
+}
+
+// Discarded call result from free function returning Mutex.
+make_mutex_t0555() Mutex[int] {
+  return Mutex[int](42);
+}
+
+test_discarded_call_result_mutex() `test {
+  make_mutex_t0555();
+}
+
+// Free function returning Task (from go-expr inside) — wraps the go-expr
+// tracking. The G is owned by the returned Task; the call result must be
+// stmt-temp-tracked at the caller.
+make_task_t0555() Task[int] {
+  return go worker_t0555();
+}
+
+test_call_returning_task() `test(exclude: wasm) {
+  take_task(make_task_t0555());
+}
+
+// Discarded Task from a function returning Task.
+test_discarded_call_result_task() `test(exclude: wasm) {
+  make_task_t0555();
+}

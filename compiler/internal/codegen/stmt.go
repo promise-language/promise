@@ -761,10 +761,19 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 
 	// T0111: Claim string temp BEFORE optional wrapping. After wrapOptional, the
 	// value identity changes and claimStringTemp can't find the tracked temp.
+	// T0555: Also claim native handle / container temps before the wrap.
+	// Without this, the post-wrap claim site (which uses the wrapped struct)
+	// cannot locate the tracked i8* temp, so the stmt-temp drop AND the
+	// optional binding drop both fire → double-free.
 	if declType != nil {
 		if _, isOpt := declType.(*types.Optional); isOpt {
-			if exprType != nil && extractNamed(exprType) == types.TypString {
-				c.claimStringTemp(val)
+			if exprType != nil {
+				if extractNamed(exprType) == types.TypString ||
+					types.IsVector(exprType) || types.IsChannel(exprType) ||
+					types.IsArc(exprType) || types.IsWeak(exprType) ||
+					types.IsMutex(exprType) || types.IsTask(exprType) {
+					c.claimStringTemp(val)
+				}
 			}
 		}
 	}
@@ -865,7 +874,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		c.claimStringTemp(val)
 	}
 	// B0219: Claim vector/channel/arc/weak temp — ownership transferred to this variable.
-	if resolvedExprType != nil && (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType) || types.IsArc(resolvedExprType) || types.IsWeak(resolvedExprType)) {
+	// T0555: Mutex/Task also need claiming now that their constructor temps are tracked.
+	if resolvedExprType != nil && (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType) ||
+		types.IsArc(resolvedExprType) || types.IsWeak(resolvedExprType) ||
+		types.IsMutex(resolvedExprType) || types.IsTask(resolvedExprType)) {
 		c.claimStringTemp(val)
 	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
@@ -1084,7 +1096,9 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 		c.optionalContainerDup = nil
 	}
 	// B0219: Claim vector/channel/arc/weak temp — ownership transferred to this variable.
-	if types.IsVector(typ) || types.IsChannel(typ) || types.IsArc(typ) || types.IsWeak(typ) {
+	// T0555: Mutex/Task also need claiming now that their constructor temps are tracked.
+	if types.IsVector(typ) || types.IsChannel(typ) || types.IsArc(typ) || types.IsWeak(typ) ||
+		types.IsMutex(typ) || types.IsTask(typ) {
 		c.claimStringTemp(val)
 	}
 	// B0175: Claim heap temp — ownership transferred to this variable.
@@ -5084,9 +5098,16 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 
 			// T0111: Claim string temp BEFORE optional wrapping — after wrap,
 			// value identity changes and claimStringTemp can't match the temp.
+			// T0555: Same for native handle / container temps so the stmt-temp
+			// drop doesn't double-free with the optional's binding drop.
 			if _, isOpt := targetType.(*types.Optional); isOpt {
-				if exprType != nil && extractNamed(exprType) == types.TypString {
-					c.claimStringTemp(val)
+				if exprType != nil {
+					if extractNamed(exprType) == types.TypString ||
+						types.IsVector(exprType) || types.IsChannel(exprType) ||
+						types.IsArc(exprType) || types.IsWeak(exprType) ||
+						types.IsMutex(exprType) || types.IsTask(exprType) {
+						c.claimStringTemp(val)
+					}
 				}
 			}
 
@@ -5120,7 +5141,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				c.claimStringTemp(val)
 			}
 			// T0109: Claim vector/channel/arc/weak temp — ownership transferred to this variable.
-			if exprType != nil && (types.IsVector(exprType) || types.IsChannel(exprType) || types.IsArc(exprType) || types.IsWeak(exprType)) {
+			// T0555: Mutex/Task also need claiming now that their constructor temps are tracked.
+			if exprType != nil && (types.IsVector(exprType) || types.IsChannel(exprType) ||
+				types.IsArc(exprType) || types.IsWeak(exprType) ||
+				types.IsMutex(exprType) || types.IsTask(exprType)) {
 				c.claimStringTemp(val)
 			}
 			// B0187: Claim heap temp — ownership transferred to reassigned variable.

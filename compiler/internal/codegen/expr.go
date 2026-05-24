@@ -54,8 +54,19 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		c.emitPanicCheck() // T0147: detect panic flag after every call expression
 		// T0073: Track known-safe string-producing calls (primitive to_string, string methods)
 		// T0109: Also track vector-producing calls (e.g., split()) for cleanup.
+		// T0555: Track native handle (Arc/Weak/Mutex/Task) constructor/call results
+		// for cleanup at statement end — without this, expressions like
+		// `take_arc(Arc[int](99))` leak because the param is borrowed and the
+		// caller has no temp tracking.
 		if result != nil && result.Type() == irtypes.I8Ptr {
-			if rt := c.info.Types[e]; rt != nil {
+			rt := c.info.Types[e]
+			if c.typeSubst != nil && rt != nil {
+				rt = types.Substitute(rt, c.typeSubst)
+			}
+			if c.selfSubst != nil && rt != nil {
+				rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+			}
+			if rt != nil {
 				named := extractNamed(rt)
 				if named == types.TypString {
 					if c.isTrackedStringCall(e) {
@@ -68,6 +79,14 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					} else {
 						c.trackVectorTemp(result)
 					}
+				} else if arcElem, isArc := types.AsArc(rt); isArc {
+					c.trackTempWithDrop(result, c.getOrCreateArcDrop(arcElem))
+				} else if weakElem, isWeak := types.AsWeak(rt); isWeak {
+					c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
+				} else if mutexElem, isMutex := types.AsMutex(rt); isMutex {
+					c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
+				} else if taskElem, isTask := types.AsTask(rt); isTask {
+					c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
 				}
 			}
 		} else {
@@ -266,7 +285,24 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 	case *ast.CastExpr:
 		return c.genCastExpr(e)
 	case *ast.GoExpr:
-		return c.genGoExpr(e)
+		result := c.genGoExpr(e)
+		// T0555: Track awaitable Task[T] results from `go expr` so the G
+		// struct + result buffer are freed at statement end if not bound
+		// to a local. Fire-and-forget go (statement-level discard) is
+		// freed by goroutine_exit — tracking would double-free.
+		if !c.goExprFireAndForget && result != nil && result.Type() == irtypes.I8Ptr {
+			rt := c.info.Types[e]
+			if c.typeSubst != nil && rt != nil {
+				rt = types.Substitute(rt, c.typeSubst)
+			}
+			if c.selfSubst != nil && rt != nil {
+				rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+			}
+			if taskElem, isTask := types.AsTask(rt); isTask {
+				c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+			}
+		}
+		return result
 	default:
 		panic(fmt.Sprintf("codegen: unhandled expression type %T", expr))
 	}

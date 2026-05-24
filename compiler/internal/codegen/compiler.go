@@ -7110,6 +7110,34 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 		return
 	}
 
+	// T0572: Enum inner — Optional<EnumT>. Branch on has-value, then drop the
+	// loaded enum value via emitVariantFieldDrop, which already dispatches to
+	// the right drop name (plain / mono / cross-module forward-declared). The
+	// `extractNamed` switch below cannot handle enums (extractNamed returns nil
+	// for enum types), so without this branch the optional silently skips its
+	// inner enum's drop and leaks variant data.
+	if enumType := extractEnum(elem); enumType != nil {
+		needsDrop := enumType.HasDrop() || enumType.NeedsSynthDrop()
+		if inst, ok := elem.(*types.Instance); ok && monoEnumInstNeedsSynthDrop(inst) {
+			needsDrop = true
+		}
+		if !needsDrop {
+			return
+		}
+		hasVal := c.block.NewExtractValue(optVal, 0)
+		dropBlock := c.newBlock("optfield.drop")
+		skipBlock := c.newBlock("optfield.skip")
+		c.block.NewCondBr(hasVal, dropBlock, skipBlock)
+		c.block = dropBlock
+		innerVal := c.block.NewExtractValue(optVal, 1)
+		c.emitVariantFieldDrop(innerVal, elem)
+		if c.block.Term == nil {
+			c.block.NewBr(skipBlock)
+		}
+		c.block = skipBlock
+		return
+	}
+
 	// Determine cleanup needed for the inner type.
 	var dropFunc *ir.Func
 	isHeapUser := false

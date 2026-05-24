@@ -201,6 +201,83 @@ test_nongen_enum_field_drop_inline() `test {
   _HolderPlainT0552 c = _HolderPlainT0552(m: _MaybePlainT0552.Just(_BoxDropT0506(n: 13)));
 }
 
+// T0572: Optional-wrapped enum field with droppable variant data. Symmetric
+// to T0552 but for Optional<Enum> fields. emitOptionalValueDrop had no enum
+// branch — extractNamed returns nil for enums, so the has-value path fell
+// through to the default `return` and skipped cleanup, leaking the inner
+// _BoxDropT0506. The new enum branch in emitOptionalValueDrop delegates to
+// emitVariantFieldDrop, which handles the full enum dispatch (plain / mono
+// / cross-module forward-declared).
+enum _MaybeLT0572 {
+  Just(_BoxDropT0506 val),
+  Nothing,
+}
+
+type _HolderLT0572 {
+  _MaybeLT0572? m;
+}
+
+test_optenum_field_drop_named_var() `test {
+  _MaybeLT0572 j = _MaybeLT0572.Just(_BoxDropT0506(n: 42));
+  _HolderLT0572 c = _HolderLT0572(m: j);
+}
+
+test_optenum_field_drop_inline() `test {
+  _HolderLT0572 c = _HolderLT0572(m: _MaybeLT0572.Just(_BoxDropT0506(n: 13)));
+}
+
+test_optenum_field_none() `test {
+  _HolderLT0572 c = _HolderLT0572(m: none);
+}
+
+// T0572: Optional-wrapped generic-enum field. The generic case exercises
+// monoEnumInstNeedsSynthDrop on the Instance — without that branch in the
+// needsDrop check, generic enum drops would be skipped (since HasDrop is
+// false on the un-substituted enum origin). The owner's mono synth drop
+// is also generic; the new branch must still emit the proper has-value
+// guard and dispatch via emitVariantFieldDrop's monoName path.
+type _HolderGenT0572[T] {
+  MaybeBox[T]? m;
+}
+
+test_optenum_field_generic_named_var() `test {
+  MaybeBox[_BoxDropT0506] j = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 51));
+  _HolderGenT0572[_BoxDropT0506] c = _HolderGenT0572[_BoxDropT0506](m: j);
+}
+
+test_optenum_field_generic_inline() `test {
+  _HolderGenT0572[_BoxDropT0506] c = _HolderGenT0572[_BoxDropT0506](m: MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 52)));
+}
+
+test_optenum_field_generic_none() `test {
+  _HolderGenT0572[_BoxDropT0506] c = _HolderGenT0572[_BoxDropT0506](m: none);
+}
+
+// T0572: Optional-wrapped fieldless enum field — exercises the `!needsDrop`
+// short-circuit in the new enum branch. The holder needs to be droppable
+// (sibling _BoxDropT0506 field forces synth drop), so emitFieldDropsFor walks
+// fields and reaches the Optional<FieldlessEnum> field — the early return
+// must fire so we don't emit dead conditional cleanup blocks (or, worse, try
+// to invoke a non-existent enum drop function).
+enum _ColorT0572 {
+  Red,
+  Green,
+  Blue,
+}
+
+type _HolderColorT0572 {
+  _ColorT0572? c;
+  _BoxDropT0506 box;
+}
+
+test_optenum_field_no_drop_needed_some() `test {
+  _HolderColorT0572 h = _HolderColorT0572(c: _ColorT0572.Red, box: _BoxDropT0506(n: 100));
+}
+
+test_optenum_field_no_drop_needed_none() `test {
+  _HolderColorT0572 h = _HolderColorT0572(c: none, box: _BoxDropT0506(n: 200));
+}
+
 // T0552: holder with TWO droppable generic-enum fields. Exercises the loop in
 // emitFieldDropsFor across multiple enum-typed fields and a non-droppable field
 // in between, ensuring the iteration order and per-field GEP computation are

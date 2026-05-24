@@ -12529,6 +12529,89 @@ func TestDropTypeWithEnumFieldNonGeneric(t *testing.T) {
 	assertContains(t, ir, "call void @Maybe.drop")
 }
 
+// T0572: Holder with Optional<Enum> field where the inner enum has droppable
+// variant data. emitOptionalValueDrop had no enum branch — extractNamed
+// returns nil for enums, so the has-value path fell through to the default
+// `return` and skipped cleanup. The new branch must guard on the optional's
+// has-value flag and call the enum's drop function.
+func TestDropTypeWithOptionalEnumField(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource { int id; drop(~this) { } }
+		enum Maybe {
+			Some(Resource value),
+			Nothing,
+		}
+		type Holder {
+			Maybe? m;
+		}
+		main() {
+			j := Maybe.Some(Resource(id: 1));
+			c := Holder(m: j);
+		}
+	`)
+	assertContains(t, ir, "define void @Holder.drop")
+	// The has-value guard for the optional enum field.
+	assertContains(t, ir, "optfield.drop")
+	assertContains(t, ir, "optfield.skip")
+	// The enum's drop is invoked from inside the has-value branch.
+	assertContains(t, ir, "call void @Maybe.drop")
+}
+
+// T0572: Holder with Optional<FieldlessEnum> field — the !needsDrop short-
+// circuit must fire so no spurious cleanup branches are emitted for the
+// fieldless enum slot. The holder itself has a sibling droppable field
+// (Resource) so its synth drop body is generated and walks all fields,
+// reaching the Optional<FieldlessEnum> branch. The short-circuit ensures
+// only the sibling Resource's drop appears in the holder body — no
+// optfield.drop block for the Color slot.
+func TestDropTypeWithOptionalFieldlessEnumFieldShortCircuits(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource { int id; drop(~this) { } }
+		enum Color {
+			Red,
+			Green,
+			Blue,
+		}
+		type Holder {
+			Color? c;
+			Resource r;
+		}
+		main() {
+			h := Holder(c: Color.Red, r: Resource(id: 1));
+		}
+	`)
+	assertContains(t, ir, "define void @Holder.drop")
+	// The Resource sibling is dropped — confirms the holder synth drop runs.
+	assertContains(t, ir, "call void @Resource.drop")
+	// Fieldless Color enum has no drop fn, so the short-circuit must skip
+	// emitting any call to a Color drop. (No @Color.drop function exists.)
+	assertNotContains(t, ir, "call void @Color.drop")
+}
+
+// T0572: Generic holder with Optional<GenericEnum[T]> field. Exercises the
+// monoEnumInstNeedsSynthDrop branch in the needsDrop check — without it,
+// HasDrop on the un-substituted enum origin is false, the early-return
+// fires, and the inner droppable leaks.
+func TestDropGenericTypeWithOptionalGenericEnumField(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource { int id; drop(~this) { } }
+		enum Maybe[T] {
+			Some(T value),
+			Nothing,
+		}
+		type Holder[T] {
+			Maybe[T]? m;
+		}
+		main() {
+			j := Maybe[Resource].Some(Resource(id: 1));
+			c := Holder[Resource](m: j);
+		}
+	`)
+	assertContains(t, ir, `define void @"Holder[Resource].drop"`)
+	assertContains(t, ir, "optfield.drop")
+	assertContains(t, ir, `call void @"Maybe[Resource].drop"`)
+}
+
 // B0238: Generic enum variables with TypeParam-only droppable fields must get drop
 // registered at scope exit. maybeRegisterDrop must check monoEnumInstNeedsSynthDrop.
 func TestDropGenericEnumVarWithDroppableTypeParam(t *testing.T) {

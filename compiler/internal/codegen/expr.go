@@ -87,6 +87,11 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
 				} else if taskElem, isTask := types.AsTask(rt); isTask {
 					c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+				} else if _, isMG := types.AsMutexGuard(rt); isMG {
+					// T0561: MutexGuard.drop is a single non-per-element-type symbol.
+					if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
+						c.trackTempWithDrop(result, dropFn)
+					}
 				}
 			}
 		} else {

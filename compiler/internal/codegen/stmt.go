@@ -771,7 +771,8 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 				if extractNamed(exprType) == types.TypString ||
 					types.IsVector(exprType) || types.IsChannel(exprType) ||
 					types.IsArc(exprType) || types.IsWeak(exprType) ||
-					types.IsMutex(exprType) || types.IsTask(exprType) {
+					types.IsMutex(exprType) || types.IsTask(exprType) ||
+					types.IsMutexGuard(exprType) {
 					c.claimStringTemp(val)
 				}
 			}
@@ -875,9 +876,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	// B0219: Claim vector/channel/arc/weak temp — ownership transferred to this variable.
 	// T0555: Mutex/Task also need claiming now that their constructor temps are tracked.
+	// T0561: MutexGuard temps from m.lock() also need claiming.
 	if resolvedExprType != nil && (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType) ||
 		types.IsArc(resolvedExprType) || types.IsWeak(resolvedExprType) ||
-		types.IsMutex(resolvedExprType) || types.IsTask(resolvedExprType)) {
+		types.IsMutex(resolvedExprType) || types.IsTask(resolvedExprType) ||
+		types.IsMutexGuard(resolvedExprType)) {
 		c.claimStringTemp(val)
 	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
@@ -1097,8 +1100,9 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	}
 	// B0219: Claim vector/channel/arc/weak temp — ownership transferred to this variable.
 	// T0555: Mutex/Task also need claiming now that their constructor temps are tracked.
+	// T0561: MutexGuard temps from m.lock() also need claiming.
 	if types.IsVector(typ) || types.IsChannel(typ) || types.IsArc(typ) || types.IsWeak(typ) ||
-		types.IsMutex(typ) || types.IsTask(typ) {
+		types.IsMutex(typ) || types.IsTask(typ) || types.IsMutexGuard(typ) {
 		c.claimStringTemp(val)
 	}
 	// B0175: Claim heap temp — ownership transferred to this variable.
@@ -1414,6 +1418,12 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 	c.locals[s.Name] = alloca
 	// B0233: Claim heap temp — ownership transferred to use binding.
 	c.claimHeapTemp(val)
+	// T0561: Claim stmt-temp (string/vector/Arc/Weak/Mutex/Task/MutexGuard)
+	// so the per-statement drop doesn't double-cleanup against the close
+	// binding. Without this, `use g := m.lock();` causes a double-free
+	// because MutexGuard's stmt-temp drop AND the bindingClose's close()
+	// both run on the same pointer.
+	c.claimStringTemp(val)
 	// Track for scope-exit close() insertion
 	named := extractNamed(typ)
 	var closeMethod *types.Method
@@ -5105,7 +5115,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					if extractNamed(exprType) == types.TypString ||
 						types.IsVector(exprType) || types.IsChannel(exprType) ||
 						types.IsArc(exprType) || types.IsWeak(exprType) ||
-						types.IsMutex(exprType) || types.IsTask(exprType) {
+						types.IsMutex(exprType) || types.IsTask(exprType) ||
+						types.IsMutexGuard(exprType) {
 						c.claimStringTemp(val)
 					}
 				}
@@ -5142,9 +5153,11 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			// T0109: Claim vector/channel/arc/weak temp — ownership transferred to this variable.
 			// T0555: Mutex/Task also need claiming now that their constructor temps are tracked.
+			// T0561: MutexGuard temps from m.lock() also need claiming.
 			if exprType != nil && (types.IsVector(exprType) || types.IsChannel(exprType) ||
 				types.IsArc(exprType) || types.IsWeak(exprType) ||
-				types.IsMutex(exprType) || types.IsTask(exprType)) {
+				types.IsMutex(exprType) || types.IsTask(exprType) ||
+				types.IsMutexGuard(exprType)) {
 				c.claimStringTemp(val)
 			}
 			// B0187: Claim heap temp — ownership transferred to reassigned variable.

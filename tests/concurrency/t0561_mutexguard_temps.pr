@@ -1,0 +1,92 @@
+// T0561: MutexGuard temporaries from m.lock() passed directly as borrow
+// arguments must not leak. T0555 added stmt-temp tracking for native
+// handle (Arc/Weak/Mutex/Task) constructor/call temps but omitted
+// MutexGuard — `take_guard(m.lock())` leaked 1 allocation per call.
+take_guard(MutexGuard[int] g) {
+}
+take_guard_move(~MutexGuard[int] g) {
+}
+take_two(int x, MutexGuard[int] g) {
+}
+
+// Primary repro — guard temp from m.lock() as borrow arg.
+test_mg_lock_temp() `test {
+  m := Mutex[int](42);
+  take_guard(m.lock());
+}
+
+// Variable-binding path still works — the claim site at variable
+// initialization clears the tracked temp flag, so the variable's scope drop
+// is the only drop and there is no double-free.
+test_mg_via_local() `test {
+  m := Mutex[int](42);
+  g := m.lock();
+  take_guard(g);
+}
+
+// Move semantics preserved — callee consumes via `~`, claims the stmt-temp,
+// no caller-side double-free.
+test_mg_move_temp_no_double_free() `test {
+  m := Mutex[int](42);
+  take_guard_move(m.lock());
+}
+
+// Discarded guard (statement-level expression) — cleanup at statement end
+// via the registered stmt-temp drop. Without T0561 fix, the unlock+free is
+// missed and the guard leaks.
+test_mg_discarded() `test {
+  m := Mutex[int](42);
+  m.lock();
+}
+
+// Use binding — the typical idiomatic pattern. Already works via the close
+// binding path, but verify the T0561 changes don't break it.
+test_mg_use_binding() `test {
+  m := Mutex[int](42);
+  use g := m.lock();
+}
+
+// Pass guard as borrow into a multi-arg call — exercises the same temp
+// tracking + claim path but with a non-trailing arg position.
+test_mg_multi_arg() `test {
+  m := Mutex[int](42);
+  take_two(1, m.lock());
+}
+
+// Multiple guard temps in a single statement — each must register and drop
+// independently. Use separate mutexes so the locks don't conflict.
+test_mg_two_guards_one_stmt() `test {
+  m1 := Mutex[int](1);
+  m2 := Mutex[int](2);
+  take_two(0, m1.lock());
+  take_two(0, m2.lock());
+}
+
+// Typed non-Optional declaration — exercises the post-claim site in
+// genTypedVarDecl (stmt.go ~880). Without IsMutexGuard in the predicate,
+// the stmt-temp drop AND the variable's scope drop both fire on the same
+// guard pointer (double-free).
+test_mg_typed_decl() `test {
+  m := Mutex[int](42);
+  MutexGuard[int] g = m.lock();
+}
+
+// Reassignment to a non-Optional MutexGuard variable — exercises the
+// post-claim site in genAssignStmt (stmt.go ~5155). The old guard's drop
+// must fire and the new guard temp must be claimed by the variable.
+test_mg_plain_reassign() `test {
+  m1 := Mutex[int](1);
+  m2 := Mutex[int](2);
+  g := m1.lock();
+  g = m2.lock();
+}
+
+// Reassignment to Optional[MutexGuard] — exercises the pre-wrap claim
+// site in genAssignStmt (stmt.go ~5115). Initialize the Optional with
+// `none` so the assignment doesn't trigger the broken typed-decl path
+// (T0562 — Optional[MG] typed-decl from m.lock() leaks).
+test_mg_optional_reassign_from_none() `test {
+  m := Mutex[int](42);
+  MutexGuard[int]? opt = none;
+  opt = m.lock();
+}

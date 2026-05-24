@@ -137,6 +137,26 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 			}
 			return
 		}
+		// T0576: binding `this` to a fresh local crashes codegen — the
+		// receiver value at runtime is the raw `i8*` instance pointer, but
+		// the destination alloca expects the type's value-struct shape
+		// (`{i8*,i8*}` for heap user types, `{i8*, field…}` for value
+		// types). Even if codegen wrapped correctly, the new local would
+		// carry its own drop binding aliasing the caller's heap allocation
+		// → double-free at scope exit. Reject at sema with the same
+		// diagnostic shape as `tryMoveConsume(ThisExpr)` (T0569), since
+		// var decls bypass that path.
+		if this, isThis := s.Value.(*ast.ThisExpr); isThis {
+			if c.state["this"] == Moved {
+				c.errorf(this.Pos(), "use of moved variable 'this'")
+			} else if c.borrows != nil && c.borrows.HasAnyBorrow("this") {
+				c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
+			} else {
+				c.errorf(this.Pos(),
+					"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
+			}
+			return
+		}
 		c.tryMove(s.Value)
 	}
 	if s.Name != "_" {
@@ -169,6 +189,18 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 			if typ := c.info.Types[s.Value]; typ != nil {
 				c.trackDeclOrder(s.Name, typ)
 			}
+		}
+		return
+	}
+	// T0576: see checkTypedVarDecl — same crash class on `x := this`.
+	if this, isThis := s.Value.(*ast.ThisExpr); isThis {
+		if c.state["this"] == Moved {
+			c.errorf(this.Pos(), "use of moved variable 'this'")
+		} else if c.borrows != nil && c.borrows.HasAnyBorrow("this") {
+			c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
+		} else {
+			c.errorf(this.Pos(),
+				"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
 		}
 		return
 	}

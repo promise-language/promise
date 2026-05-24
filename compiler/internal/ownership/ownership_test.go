@@ -4827,6 +4827,184 @@ func TestT0569_TryMoveConsumeThisMoved(t *testing.T) {
 	expectOwnerError(t, c.errors, "use of moved variable 'this'")
 }
 
+// --- T0576 ---
+// T0576: binding `this` to a fresh local via a typed var decl in a `~this`
+// method body crashes codegen (the receiver `i8*` is stored into a value-
+// struct slot). Sema must reject before codegen ever sees it.
+func TestT0576_TypedVarDeclMutThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			eat(~this) {
+				Holder x = this;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0576: same crash on the inferred-var-decl path (`x := this;`).
+func TestT0576_InferredVarDeclMutThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			eat(~this) {
+				x := this;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0576: same crash on plain `this` (no `~`) — receiver still belongs to
+// caller, and codegen still mismatches the value-struct shape.
+func TestT0576_TypedVarDeclPlainThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int x; }
+		type Counter {
+			Box b;
+			read(this) {
+				Counter c = this;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0576: same crash on inferred-var-decl with plain `this`.
+func TestT0576_InferredVarDeclPlainThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int x; }
+		type Counter {
+			Box b;
+			read(this) {
+				c := this;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0576: pure value-type receivers also crash today (the destination
+// alloca expects `{i8*, field…}` but codegen stores the raw `i8*`).
+// Reject for consistency — user should call `.clone()` or construct
+// manually.
+func TestT0576_TypedVarDeclCopyThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Pair {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+			peek(this) {
+				Pair p = this;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0576: borrow-state branch — destructure-from-this first registers a
+// shared borrow on "this"; the subsequent typed-var-decl move must hit
+// the "cannot move 'this' while it is borrowed" branch of the new check.
+// (`TestDestructureFromThisMoveLocalRejected` covers the inferred form.)
+func TestT0576_VarDeclThisInBorrowedState(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder {
+			(_BoxStr, int) pair;
+			eat(~this) {
+				(b, n) := this.pair;
+				Holder x = this;
+				_ = b.s;
+				_ = n;
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move 'this' while it is borrowed")
+}
+
+// T0576 regression guard: `return this;` from a `~this` method must keep
+// compiling. The return path is wrapped by `wrapThisReturnValue` and the
+// caller's drop flag is cleared via B0250 — moving `this` is the one
+// place where it is semantically defensible.
+func TestT0576_ReturnThisStillCompiles(t *testing.T) {
+	ownerOK(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			eat(~this) Holder { return this; }
+		}
+		test() {}
+	`)
+}
+
+// T0576 regression guard: `.clone()` is the recommended workaround — the
+// suggested fix path must compile cleanly.
+func TestT0576_CloneWorkaroundCompiles(t *testing.T) {
+	ownerOK(t, `
+		type Box {
+			int x;
+			clone(this) Box { return Box(x: this.x); }
+		}
+		type Holder {
+			Box b;
+			clone(this) Holder { return Holder(b: this.b.clone()); }
+			eat(~this) {
+				Holder x = this.clone();
+			}
+		}
+		test() {}
+	`)
+}
+
+// T0576 regression guard: calling a `~this` method while passing a
+// borrow of `this` as the receiver chain (the de-facto pattern used by
+// stdlib `string.format!`/`encode!`) must keep compiling — the var-decl
+// rejection must not leak into the receiver chain.
+func TestT0576_ReceiverChainThisStillCompiles(t *testing.T) {
+	ownerOK(t, `
+		type Box {
+			int x;
+			bump(~this) { this.x = this.x + 1; }
+			run(~this) {
+				this.bump();
+				this.bump();
+			}
+		}
+		test() {}
+	`)
+}
+
+// T0576 defense-in-depth: the Moved-state branch in the new ThisExpr
+// short-circuit (checkTypedVarDecl) is unreachable through normal sema
+// — production never sets state["this"] = Moved (the new check errors
+// immediately instead of transitioning state, mirroring T0569). Exercise
+// it directly via newUnitChecker, parallel to TestT0569_TryMoveConsume-
+// ThisMoved.
+func TestT0576_TypedVarDeclThisMovedBranch(t *testing.T) {
+	c := newUnitChecker()
+	c.state["this"] = Moved
+	c.checkTypedVarDecl(&ast.TypedVarDecl{Name: "x", Value: &ast.ThisExpr{}})
+	expectOwnerError(t, c.errors, "use of moved variable 'this'")
+}
+
+// T0576 defense-in-depth: same as above for the inferred var decl path
+// (`x := this`).
+func TestT0576_InferredVarDeclThisMovedBranch(t *testing.T) {
+	c := newUnitChecker()
+	c.state["this"] = Moved
+	c.checkInferredVarDecl(&ast.InferredVarDecl{Name: "x", Value: &ast.ThisExpr{}})
+	expectOwnerError(t, c.errors, "use of moved variable 'this'")
+}
+
 // Copy-type params are unaffected by the borrowed-param check.
 func TestT0338_CopyParamMovable(t *testing.T) {
 	ownerOK(t, `

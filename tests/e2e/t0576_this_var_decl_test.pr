@@ -1,0 +1,38 @@
+// T0576: binding `this` to a fresh local via `T x = this;` or
+// `x := this;` inside a method body is rejected at sema (the receiver
+// belongs to the caller — moving it would double-free at scope exit,
+// and codegen's value-struct shape mismatch would crash before that).
+// The recommended workaround is `.clone()`; this file regression-guards
+// that the workaround compiles and runs correctly.
+type Box {
+  string s;
+
+  clone(this) Box {
+    return Box(s: this.s.clone());
+  }
+}
+
+type Holder {
+  Box b;
+
+  clone(this) Holder {
+    return Holder(b: this.b.clone());
+  }
+
+  eat(~this) string {
+    Holder x = this.clone();
+    return x.b.s;
+  }
+}
+
+test_typed_clone_workaround() `test {
+  h := Holder(b: Box(s: "hi"));
+  s := h.eat();
+  assert(s == "hi", "clone workaround should preserve string field");
+}
+
+test_inferred_clone_workaround() `test {
+  h := Holder(b: Box(s: "world"));
+  x := h.clone();
+  assert(x.b.s == "world", "inferred clone should preserve string field");
+}

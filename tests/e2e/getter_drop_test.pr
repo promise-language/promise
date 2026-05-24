@@ -546,3 +546,157 @@ test_var_decl_typed_vector_getter() `test {
   assert(s.len == 1, "vector var-decl typed");
   assert(s[0] == 42, "vector var-decl typed value");
 }
+
+// T0502: for-in over a getter result of channel[T] type leaked the channel's
+// 5 allocations (struct + buffer + mutex + 2 cond vars). The vector/string
+// branches of genForInStmt promote a tracked stmt temp to a scope binding
+// (T0494); the channel branch did not, so the temp's drop never fired and the
+// channel was leaked. The fix mirrors the vector/string promotion pattern in
+// stmt.go's channel branch.
+type ChanCBox {
+  drop(~this) {
+  }
+
+  get empty channel[int] `public {
+    ch := channel[int](2);
+    ch.close();
+    return ch;
+  }
+
+  get full channel[int] `public {
+    ch := channel[int](3);
+    ch.send(1);
+    ch.send(2);
+    ch.send(3);
+    ch.close();
+    return ch;
+  }
+}
+
+// Empty closed channel from a getter — the exact repro from the bug.
+test_channel_getter_for_in_empty() `test {
+  ChanCBox c = ChanCBox();
+  int n = 0;
+  for v in c.empty {
+    n = n + 1;
+  }
+  assert(n == 0, "empty channel for-in count");
+}
+
+// Non-empty channel from a getter — the body actually iterates and the
+// channel is still dropped at end of scope.
+test_channel_getter_for_in_nonempty() `test {
+  ChanCBox c = ChanCBox();
+  int sum = 0;
+  for v in c.full {
+    sum = sum + v;
+  }
+  assert(sum == 6, "non-empty channel for-in sum");
+}
+
+// Generic owner — exercises monomorphized method/getter lookup on the for-in
+// channel iterable path.
+type ChanCell[T] {
+  get empty channel[T] `public {
+    ch := channel[T](1);
+    ch.close();
+    return ch;
+  }
+}
+
+test_generic_channel_getter_for_in() `test {
+  ChanCell[int] c = ChanCell[int]();
+  int n = 0;
+  for v in c.empty {
+    n = n + 1;
+  }
+  assert(n == 0, "generic channel for-in");
+}
+
+// Virtual dispatch — abstract base with channel getter, concrete subtype
+// returns the channel. Exercises the virtual-getter side of trackGetterResult.
+type ChanSrc {
+  get empty channel[int] `public `abstract;
+}
+
+type ChanImpl is ChanSrc {
+  get empty channel[int] `public {
+    ch := channel[int](1);
+    ch.close();
+    return ch;
+  }
+}
+
+test_virtual_channel_getter_for_in() `test {
+  ChanSrc src = ChanImpl();
+  int n = 0;
+  for v in src.empty {
+    n = n + 1;
+  }
+  assert(n == 0, "virtual channel for-in");
+}
+
+// For-in inside a method body with `this.getter` — mirrors
+// `test_generic_getter_for_in_inside_method` for the channel branch. This
+// exercises the path where the for-in is generated inside a user method body
+// (which is when `tempTrackingEnabled` is set), and the iterable target is
+// `this` rather than a top-level local. Without T0502, the cloned channel
+// from `this.empty` would leak when the method runs.
+type ChanRoom {
+  drop(~this) {
+  }
+
+  get empty channel[int] `public {
+    ch := channel[int](2);
+    ch.send(10);
+    ch.send(20);
+    ch.close();
+    return ch;
+  }
+
+  count_items(&this) int `public {
+    int n = 0;
+    for v in this.empty {
+      n = n + 1;
+    }
+    return n;
+  }
+}
+
+test_channel_getter_for_in_inside_method() `test {
+  ChanRoom r = ChanRoom();
+  assert(r.count_items() == 2, "channel for-in inside method body count");
+}
+
+// Chained-target getter (`outer._inner.empty`) — exercises the MemberExpr
+// chain path. The static type of `outer._inner` is the inner type, and the
+// getter is then looked up on that. Without T0502 the cloned channel from
+// the chained getter call would leak.
+type ChanOuter {
+  ChanCBox _inner;
+}
+
+test_chain_target_channel_getter_for_in() `test {
+  ChanOuter o = ChanOuter(_inner: ChanCBox());
+  int sum = 0;
+  for v in o._inner.full {
+    sum = sum + v;
+  }
+  assert(sum == 6, "chain-target channel for-in sum");
+}
+
+// Early break out of channel for-in — verifies the scope-binding promotion
+// added by T0502 cleans up on the break exit path, not just on normal
+// fall-through. Channel is closed before the for-in starts (via `full`
+// getter) so breaking out without draining the buffer is safe.
+test_channel_getter_for_in_break() `test {
+  ChanCBox c = ChanCBox();
+  int n = 0;
+  for v in c.full {
+    n = n + 1;
+    if n == 2 {
+      break;
+    }
+  }
+  assert(n == 2, "channel for-in break count");
+}

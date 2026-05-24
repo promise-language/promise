@@ -7605,6 +7605,32 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		c.genForInMap(s, mapPtr, key, val)
 	} else if elem, ok := types.AsChannel(iterableType); ok {
 		chPtr := c.genExpr(s.Iterable)
+		// T0502: Same lifetime-extension fix as the vector/string for-in
+		// branches. When the iterable is a tracked stmt temp (getter result,
+		// call result), promote it to a scope binding so the body's
+		// cleanupStmtTemps doesn't free the channel mid-loop and the channel
+		// is reliably dropped on all exit paths.
+		if idx, isTracked := c.stmtTempMap[chPtr]; isTracked && idx >= 0 {
+			if dropFn, ok := c.funcs["Channel.drop"]; ok {
+				tmpName := c.uniqueLocalName("__forin_ch_tmp")
+				tmpAlloca := c.createEntryAlloca(irtypes.I8Ptr)
+				tmpAlloca.SetName(tmpName)
+				c.block.NewStore(chPtr, tmpAlloca)
+				dropFlag := c.createEntryAlloca(irtypes.I1)
+				dropFlag.SetName(tmpName + ".dropflag")
+				c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+				c.scopeBindings = append(c.scopeBindings, scopeBinding{
+					kind:     bindingDropString, // reuse: same i8* alloca + void(i8*) drop pattern
+					alloca:   tmpAlloca,
+					named:    types.TypChannel,
+					valType:  iterableType,
+					dropFlag: dropFlag,
+					dropFunc: dropFn,
+					varName:  tmpName,
+				})
+				c.claimStringTemp(chPtr)
+			}
+		}
 		c.genForInChannel(s, chPtr, elem)
 	} else if elem, ok := types.AsStream(iterableType); ok {
 		genVal := c.genExpr(s.Iterable)

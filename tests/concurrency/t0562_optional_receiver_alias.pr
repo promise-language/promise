@@ -1,0 +1,69 @@
+// T0562: `Optional[NativeHandle] x = receiver.method()` leaked because
+// maybeClearReceiverDropFlag (B0250 alias-clear emitter) used a too-loose
+// shape check. With Optional wrapping, val.Type() became `{i1, i8*}` (or
+// `{i1, {i8*,i8*}}` for user types) — the existing StructType-only guard
+// accepted it, then a `load userValueType()` from the receiver's 8-byte
+// `alloca i8*` read 16 bytes (UB). If the trailing garbage matched the
+// inner pointer, the receiver's drop flag was wrongly cleared and the
+// handle leaked. Fix tightens the guard to bail unless both sides are
+// exactly `{i8*, i8*}`.
+// Primary repro from the bug report — Weak[T] from Arc.downgrade() into
+// Optional typed decl. Pre-fix: leaks 1 allocation (the Arc cell — Arc.drop
+// never fires because the drop flag was wrongly cleared).
+test_optional_weak_decl() `test {
+  a := Arc[int](7);
+  Weak[int]? opt = a.downgrade();
+  assert(opt is present, "Optional[Weak] from downgrade() must be present");
+}
+
+// Optional[MutexGuard] from Mutex.lock() typed decl. Pre-fix: leaks 4
+// allocations (mutex + cond + mutex_internal + guard).
+test_optional_mutexguard_decl() `test {
+  m := Mutex[int](42);
+  MutexGuard[int]? opt = m.lock();
+  assert(opt is present, "Optional[MutexGuard] from lock() must be present");
+}
+
+// Optional[Weak] via reassignment (instead of typed decl). Same code path
+// through maybeClearReceiverDropFlag from the call site in genAssignStmt.
+test_optional_weak_decl_assigned() `test {
+  a := Arc[int](7);
+  Weak[int]? opt = none;
+  opt = a.downgrade();
+  assert(opt is present, "Optional[Weak] reassign from downgrade() must be present");
+}
+
+// User-type recv into Optional decl — pre-fix this CRASHED the compiler
+// (invalid icmp operand: struct vs ptr) because val became
+// `{i1, {i8*, i8*}}` and field 1 extraction returned a struct, not a ptr.
+type T0562Box `public {
+  int x;
+  // Note: not a `return this` pattern — clone allocates a fresh Box,
+  // so the alias check would never match anyway. The fix ensures the
+  // emitter doesn't crash even when running on this shape.
+  clone(this) T0562Box {
+    return T0562Box(x: this.x);
+  }
+}
+
+test_optional_user_type_decl() `test {
+  b := T0562Box(x: 1);
+  T0562Box? opt = b.clone();
+  assert(opt is present, "Optional[Box] from clone() must be present");
+}
+
+// Sanity: the unwrapped `r := w.self()` pattern (the form the alias-clear
+// was actually designed for) must continue to work — fix should not have
+// touched this path.
+type T0562Wrapper `public {
+  int value;
+  self(this) T0562Wrapper {
+    return this;
+  }
+}
+
+test_bare_alias_clear_still_works() `test {
+  w := T0562Wrapper(value: 42);
+  w2 := w.self();
+  assert(w2.value == 42, "bare alias-clear still emits correct value");
+}

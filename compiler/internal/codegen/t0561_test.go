@@ -255,10 +255,7 @@ func TestT0561_MutexGuardPlainReassignClaim(t *testing.T) {
 // `opt: MutexGuard[int]?` (reassign to Optional MutexGuard) must fire the
 // pre-wrap claim at genAssignStmt (stmt.go:5105-5108). Without IsMutexGuard
 // there, the stmt-temp drop fires AND the new Optional's drop fires on the
-// same guard pointer (double-free). Note: the typed-decl Optional path is
-// broken by T0562 (maybeClearReceiverDropFlag bug), so this test uses
-// `MutexGuard[int]? opt = none; opt = m.lock();` to exercise the reassign
-// path only.
+// same guard pointer (double-free).
 //
 // Verifies that reassigning a MutexGuard temp into an Optional variable
 // emits both stmt-temp tracking (tmp.drop) AND optional-aware cleanup
@@ -279,6 +276,35 @@ func TestT0561_MutexGuardOptionalReassignClaim(t *testing.T) {
 	}
 	if !hasMutexGuardTmpDropBlock(body) {
 		t.Errorf("expected tmp.drop block calling @MutexGuard.drop:\n%s", body)
+	}
+	if !strings.Contains(body, "optdrop.check") {
+		t.Errorf("expected optdrop.check block (Optional[MutexGuard] scope cleanup):\n%s", body)
+	}
+}
+
+// TestT0561_MutexGuardOptionalDeclClaim — direct typed-Optional decl form
+// `MutexGuard[int]? opt = m.lock();`. Previously deferred because T0562
+// (maybeClearReceiverDropFlag with too-loose shape guard) caused this exact
+// path to leak — the alias-clear emitter wrongly cleared `m`'s drop flag via
+// a 16-byte load from an 8-byte alloca (Mutex uses alloca i8*). With the
+// T0562 fix in place, the typed-Optional decl now also fires both
+// stmt-temp tracking and Optional scope cleanup correctly. Runtime
+// no-leak/no-double-free guarantee verified by test_optional_mutexguard_decl
+// in tests/concurrency/t0562_optional_receiver_alias.pr.
+func TestT0561_MutexGuardOptionalDeclClaim(t *testing.T) {
+	ir := generateIR(t, `
+		caller() {
+			m := Mutex[int](42);
+			MutexGuard[int]? opt = m.lock();
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	if !hasMutexGuardTmpDropBlock(body) {
+		t.Errorf("expected tmp.drop block calling @MutexGuard.drop (stmt-temp tracking for typed-Optional decl):\n%s", body)
 	}
 	if !strings.Contains(body, "optdrop.check") {
 		t.Errorf("expected optdrop.check block (Optional[MutexGuard] scope cleanup):\n%s", body)

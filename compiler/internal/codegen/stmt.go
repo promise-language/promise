@@ -6325,8 +6325,19 @@ func (c *Compiler) maybeClearReceiverDropFlag(val value.Value, recvName string, 
 		return
 	}
 
-	// val must be a value struct {i8*, i8*} to extract the instance pointer.
-	if _, ok := val.Type().(*irtypes.StructType); !ok {
+	// T0562: val must be exactly {i8*, i8*} (a bare user value struct). After
+	// Optional/Tuple wrapping val becomes e.g. {i1, {i8*,i8*}} — field 1 is no
+	// longer the instance pointer, and emitting the icmp would either crash
+	// the IR builder (struct vs ptr) or compare wrong bytes.
+	if !isUserValueStructType(val.Type()) {
+		return
+	}
+	// T0562: recvAlloca's pointee must also be {i8*, i8*}. Native handles
+	// (Arc/Weak/Mutex/MutexGuard/Channel/Vector/Task) use `alloca i8*` — loading
+	// userValueType() would read 16 bytes from an 8-byte slot (UB), and if the
+	// trailing garbage happens to match the result's inner pointer, the receiver's
+	// drop flag would be wrongly cleared and the handle would leak.
+	if !isUserValueStructType(recvAlloca.ElemType) {
 		return
 	}
 	retInst := c.block.NewExtractValue(val, 1)
@@ -6342,6 +6353,17 @@ func (c *Compiler) maybeClearReceiverDropFlag(val value.Value, recvName string, 
 	clearBlk.NewBr(skipBlk)
 
 	c.block = skipBlk
+}
+
+// isUserValueStructType reports whether t is exactly the user value struct
+// shape {i8*, i8*}. Used by the B0250/T0347 alias-clear emitters to guard
+// against Optional/Tuple-wrapped values and native-handle allocas. T0562.
+func isUserValueStructType(t irtypes.Type) bool {
+	st, ok := t.(*irtypes.StructType)
+	if !ok || len(st.Fields) != 2 {
+		return false
+	}
+	return st.Fields[0].Equal(irtypes.I8Ptr) && st.Fields[1].Equal(irtypes.I8Ptr)
 }
 
 // maybeClearBindingDropFlagOnThisAlias emits a runtime check: if the method
@@ -6364,8 +6386,11 @@ func (c *Compiler) maybeClearBindingDropFlagOnThisAlias(val value.Value, binding
 	if !ok {
 		return
 	}
-	st, ok := val.Type().(*irtypes.StructType)
-	if !ok || len(st.Fields) != 2 {
+	// T0562: val must be exactly {i8*, i8*}. After Optional/Tuple wrapping
+	// (e.g., `Box? r = this.clone()`) val is `{i1, {i8*,i8*}}` and field 1 is
+	// a struct, which would crash the icmp emit. Bail in those shapes — the
+	// inner pointer is no longer at field 1.
+	if !isUserValueStructType(val.Type()) {
 		return
 	}
 	retInst := c.block.NewExtractValue(val, 1)

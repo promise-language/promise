@@ -82,11 +82,18 @@ test_mg_plain_reassign() `test {
 }
 
 // Reassignment to Optional[MutexGuard] — exercises the pre-wrap claim
-// site in genAssignStmt (stmt.go ~5115). Initialize the Optional with
-// `none` so the assignment doesn't trigger the broken typed-decl path
-// (T0562 — Optional[MG] typed-decl from m.lock() leaks).
+// site in genAssignStmt (stmt.go ~5115).
 test_mg_optional_reassign_from_none() `test {
   m := Mutex[int](42);
   MutexGuard[int]? opt = none;
   opt = m.lock();
+}
+
+// Typed-Optional decl form `MutexGuard[int]? opt = m.lock();` —
+// previously broken by T0562 (maybeClearReceiverDropFlag UB-load on
+// 8-byte native-handle alloca). With T0562 fixed, this direct form must
+// also be leak-free.
+test_mg_typed_optional_decl() `test {
+  m := Mutex[int](42);
+  MutexGuard[int]? opt = m.lock();
 }

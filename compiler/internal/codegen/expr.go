@@ -7663,7 +7663,209 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 	c.block = okBlock
 	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
 		constant.NewInt(irtypes.I32, 0), idx)
-	return c.block.NewLoad(elemLLVM, elemPtr)
+	val := c.block.NewLoad(elemLLVM, elemPtr)
+
+	// T0590: Dup-on-read for fixed-size arrays. Mirrors the Vector dup-on-read
+	// branches in genVectorIndex (B0204/T0370/T0383/T0398/T0412) plus the Optional
+	// extract+dup+insert branches from genMethodIndex (B0347/T0397/T0440/T0366).
+	// Without these dups, slot reads alias the array's owned data — combined with
+	// drop-on-overwrite (T0583), `arr[1] = arr[0]` and `let x = arr[0]; arr[0] = c;`
+	// produce double-frees at scope exit. Bare types dup directly; Optional types
+	// extract inner, dup, re-insert, and set the optional*Dup sentinel.
+	elemType := arr.Elem()
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+
+	// String element (B0204 analogue)
+	if c.dupStringFieldAccess && c.tempTrackingEnabled && extractNamed(elemType) == types.TypString {
+		c.dupStringFieldAccess = false // consume the flag
+		dup := c.dupString(val)
+		c.trackStringTemp(dup)
+		return dup
+	}
+
+	// Optional[string] element (B0347 analogue)
+	if c.dupStringFieldAccess && c.tempTrackingEnabled {
+		if opt, ok := elemType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
+			c.dupStringFieldAccess = false // consume the flag
+			innerStr := c.block.NewExtractValue(val, 1)
+			dup := c.dupString(innerStr)
+			c.trackStringTemp(dup)
+			c.optionalStringDup = dup
+			return c.block.NewInsertValue(val, dup, 1)
+		}
+	}
+
+	// Droppable tuple element (T0370 analogue)
+	if c.dupTupleFieldAccess && c.tempTrackingEnabled {
+		if tup, ok := elemType.(*types.Tuple); ok && c.tupleNeedsDrop(elemType) {
+			c.dupTupleFieldAccess = false // consume the flag
+			return c.dupTupleValue(val, tup)
+		}
+	}
+
+	// Optional[Tuple<droppable>] element (T0397 analogue)
+	if c.dupTupleFieldAccess && c.tempTrackingEnabled {
+		if opt, ok := elemType.(*types.Optional); ok {
+			inner := opt.Elem()
+			if c.typeSubst != nil {
+				inner = types.Substitute(inner, c.typeSubst)
+			}
+			if tup, isTup := inner.(*types.Tuple); isTup && c.tupleNeedsDrop(inner) {
+				c.dupTupleFieldAccess = false // consume the flag
+				innerTup := c.block.NewExtractValue(val, 1)
+				dup := c.dupTupleValue(innerTup, tup)
+				c.optionalTupleDup = dup
+				return c.block.NewInsertValue(val, dup, 1)
+			}
+		}
+	}
+
+	// Droppable heap user element (T0398 analogue)
+	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled {
+		if isDroppableHeapUserType(elemType) {
+			if named := extractNamed(elemType); named != nil {
+				c.dupHeapUserFieldAccess = false // consume the flag
+				return c.cloneHeapElement(val, elemType, named)
+			}
+		}
+	}
+
+	// T0590: Heap user without explicit drop (pal_free-only path) — same dup-on-
+	// read need as the drop branch above. `isDroppableHeapUserType` excludes types
+	// with no drop/synth-drop because the Map clone path relies on that gate, but
+	// arrays have no internal match-dup so we dup unconditionally for any heap
+	// user type. `dupHeapValue` handles the no-droppable-field layout fine
+	// (pal_alloc + memcpy + sub-field dup, with no sub-fields to dup for _Bare).
+	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled && isHeapUserNoDropPalFree(elemType) {
+		c.dupHeapUserFieldAccess = false // consume the flag
+		return c.dupHeapValue(val, elemType)
+	}
+
+	// Optional[heap-user-type] element (T0440 analogue, relaxed for arrays).
+	// The genMethodIndex gate restricts to `drop && !clone` because Map.[]'s
+	// body internally dups V via match-destructure for clone-bearing types —
+	// duping again at the call site would double-allocate. Arrays have no
+	// internal dup in `genArrayIndex`, so the gate is dropped: any droppable
+	// heap user (with or without clone, with or without drop) needs dup here.
+	// `dupHeapValue` is null-safe internally and dispatches to the type's
+	// typeinfo clone fn for polymorphic types (T0387).
+	if c.dupHeapUserFieldAccess && c.tempTrackingEnabled {
+		if opt, ok := elemType.(*types.Optional); ok {
+			inner := opt.Elem()
+			if c.typeSubst != nil {
+				inner = types.Substitute(inner, c.typeSubst)
+			}
+			if isDroppableHeapUserType(inner) || isHeapUserNoDropPalFree(inner) {
+				c.dupHeapUserFieldAccess = false // consume the flag
+				innerVal := c.block.NewExtractValue(val, 1)
+				dup := c.dupHeapValue(innerVal, inner)
+				c.optionalHeapDup = dup
+				return c.block.NewInsertValue(val, dup, 1)
+			}
+		}
+	}
+
+	// Container element: Vector / Channel / Arc / Weak (T0383 analogue)
+	if c.dupContainerFieldAccess && c.tempTrackingEnabled {
+		if innerElem, isVec := types.AsVector(elemType); isVec {
+			c.dupContainerFieldAccess = false // consume the flag
+			innerLLVM := c.resolveType(innerElem)
+			innerSize := int64(c.typeSize(innerLLVM))
+			dup := c.dupVector(val, innerSize)
+			c.emitVectorElementCloneLoop(dup, innerElem)
+			c.trackVectorTempWithElemType(dup, innerElem)
+			return dup
+		}
+		if extractNamed(elemType) == types.TypVector {
+			c.dupContainerFieldAccess = false
+			dup := c.dupVector(val, 0)
+			c.trackVectorTemp(dup)
+			return dup
+		}
+		if _, isCh := types.AsChannel(elemType); isCh || extractNamed(elemType) == types.TypChannel {
+			c.dupContainerFieldAccess = false
+			dup := c.dupChannel(val)
+			c.trackChannelTemp(dup)
+			return dup
+		}
+		if arcElem, isArc := types.AsArc(elemType); isArc {
+			c.dupContainerFieldAccess = false
+			dup := c.dupArc(val)
+			resolvedArcElem := arcElem
+			if c.typeSubst != nil {
+				resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+			}
+			c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
+			return dup
+		}
+		if weakElem, isWeak := types.AsWeak(elemType); isWeak {
+			c.dupContainerFieldAccess = false
+			resolvedWeakElem := weakElem
+			if c.typeSubst != nil {
+				resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
+			}
+			dup := c.dupWeak(val, resolvedWeakElem)
+			c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
+			return dup
+		}
+	}
+
+	// Optional[Vector|Channel|Arc|Weak] element (T0366 analogue)
+	if c.dupContainerFieldAccess && c.tempTrackingEnabled {
+		if opt, ok := elemType.(*types.Optional); ok {
+			inner := opt.Elem()
+			if c.typeSubst != nil {
+				inner = types.Substitute(inner, c.typeSubst)
+			}
+			if innerElem, isVec := types.AsVector(inner); isVec {
+				c.dupContainerFieldAccess = false
+				innerLLVM := c.resolveType(innerElem)
+				innerSize := int64(c.typeSize(innerLLVM))
+				innerVec := c.block.NewExtractValue(val, 1)
+				dup := c.dupVector(innerVec, innerSize)
+				c.emitVectorElementCloneLoop(dup, innerElem)
+				c.trackVectorTempWithElemType(dup, innerElem)
+				c.optionalContainerDup = dup
+				return c.block.NewInsertValue(val, dup, 1)
+			}
+			if types.IsChannel(inner) {
+				c.dupContainerFieldAccess = false
+				innerCh := c.block.NewExtractValue(val, 1)
+				dup := c.dupChannel(innerCh)
+				c.trackChannelTemp(dup)
+				c.optionalContainerDup = dup
+				return c.block.NewInsertValue(val, dup, 1)
+			}
+			if arcElem, isArc := types.AsArc(inner); isArc {
+				c.dupContainerFieldAccess = false
+				innerArc := c.block.NewExtractValue(val, 1)
+				dup := c.dupArc(innerArc)
+				resolvedArcElem := arcElem
+				if c.typeSubst != nil {
+					resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+				}
+				c.trackTempWithDrop(dup, c.getOrCreateArcDrop(resolvedArcElem))
+				c.optionalContainerDup = dup
+				return c.block.NewInsertValue(val, dup, 1)
+			}
+			if weakElem, isWeak := types.AsWeak(inner); isWeak {
+				c.dupContainerFieldAccess = false
+				innerWeak := c.block.NewExtractValue(val, 1)
+				resolvedWeakElem := weakElem
+				if c.typeSubst != nil {
+					resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
+				}
+				dup := c.dupWeak(innerWeak, resolvedWeakElem)
+				c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
+				c.optionalContainerDup = dup
+				return c.block.NewInsertValue(val, dup, 1)
+			}
+		}
+	}
+
+	return val
 }
 
 // genNativeIndex dispatches native [] implementations for built-in types.

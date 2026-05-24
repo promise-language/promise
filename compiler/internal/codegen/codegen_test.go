@@ -5672,6 +5672,217 @@ func TestFixedArrayIndexAssignNoDropForPrimitive(t *testing.T) {
 		`getelementptr \[3 x i64\][^\n]*\n[^\n]*store i64 42`)
 }
 
+// T0590: genArrayIndex had no dup-on-read, so any read from a fixed-size array
+// slot returned an alias. Combined with T0583's drop-on-overwrite, slot-to-slot
+// copies and let-then-X reads on droppable elements produced double-frees.
+// Tests below verify each dup branch fires.
+
+func TestFixedArrayIndexDupsString(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := "first";
+			a = a + "+";
+			b := "second";
+			b = b + "+";
+			string[2] arr = [a, b];
+			string x = arr[0];
+		}
+	`)
+	// After the array index load, genArrayIndex must call promise_string_new
+	// (via dupString) so x owns an independent copy.
+	assertContains(t, ir, "arridx.ok")
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
+func TestFixedArrayIndexDupsHeapUser(t *testing.T) {
+	ir := generateIR(t, `
+		type _B { int n; drop(~this) {} }
+		main() {
+			_B[2] arr = [_B(n: 1), _B(n: 2)];
+			_B x = arr[0];
+		}
+	`)
+	assertContains(t, ir, "arridx.ok")
+	// dupHeapValue path: pal_alloc + memcpy for the new instance.
+	assertContains(t, ir, "call i8* @pal_alloc(")
+	assertContains(t, ir, "call void @llvm.memcpy")
+}
+
+func TestFixedArrayIndexDupsOptionalHeapUser(t *testing.T) {
+	ir := generateIR(t, `
+		type _B { int n; drop(~this) {} }
+		main() {
+			_B? a = _B(n: 1);
+			_B? b = _B(n: 2);
+			_B?[2] arr = [a, b];
+			_B? x = arr[0];
+		}
+	`)
+	assertContains(t, ir, "arridx.ok")
+	// Optional[heap-user] dup path: extract inner, dupHeapValue, insert back.
+	assertContains(t, ir, "call i8* @pal_alloc(")
+	assertContains(t, ir, "call void @llvm.memcpy")
+}
+
+func TestFixedArrayIndexDupsVector(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v0 := Vector[int]();
+			v0.push(1);
+			v1 := Vector[int]();
+			v1.push(2);
+			Vector[int][2] arr = [v0, v1];
+			Vector[int] x = arr[0];
+		}
+	`)
+	assertContains(t, ir, "arridx.ok")
+	// dupVector: pal_alloc for the new buffer + memcpy from the old one.
+	assertContains(t, ir, "call i8* @pal_alloc(")
+}
+
+func TestFixedArrayIndexNoDupForPrimitive(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[2] arr = [10, 20];
+			int x = arr[0];
+		}
+	`)
+	// Primitives use the bare load — no dup helper. Check the main goroutine
+	// specifically (std library code emitted in the same IR may reference
+	// promise_string_new for other reasons).
+	assertContains(t, ir, "arridx.ok")
+	mainIR := extractFunction(ir, ".goroutine.main")
+	if strings.Contains(mainIR, "promise_string_new") || strings.Contains(mainIR, "pal_alloc") {
+		t.Errorf("expected main goroutine to have no dup helper for primitive array index, got:\n%s", mainIR)
+	}
+}
+
+func TestFixedArrayIndexAssignSlotToSlotDupsHeapUser(t *testing.T) {
+	// T0590: slot-to-slot copy (`arr[1] = arr[0]`) must dup on RHS read, then
+	// drop-on-overwrite frees the previous arr[1] (T0583), then stores the dup.
+	ir := generateIR(t, `
+		type _B { int n; drop(~this) {} }
+		main() {
+			_B[2] arr = [_B(n: 1), _B(n: 2)];
+			arr[1] = arr[0];
+		}
+	`)
+	assertContains(t, ir, "arridx.ok")    // RHS read
+	assertContains(t, ir, "arrassign.ok") // LHS assign with drop-on-overwrite
+	// Must see both: drop-on-overwrite (drop of old arr[1]) and dup (clone of arr[0]).
+	assertContains(t, ir, "call void @_B.drop")
+	assertContains(t, ir, "call i8* @pal_alloc(")
+}
+
+// T0590 coverage additions: confirm each remaining dup branch in genArrayIndex
+// actually emits the per-type dup helper. The original 6 tests covered string,
+// heap user, Optional<heap user>, Vector, and the primitive negative case; the
+// tests below fill in tuple, Optional[string], heap-user-no-drop (_Bare),
+// channel, Arc, and Weak.
+
+func TestFixedArrayIndexDupsTuple(t *testing.T) {
+	// Droppable tuple element: dup must walk the tuple's droppable inner
+	// (string) so both slots own independent string allocations.
+	ir := generateIR(t, `
+		main() {
+			(string, int)[2] arr = [("first", 1), ("second", 2)];
+			(string, int) t = arr[0];
+		}
+	`)
+	assertContains(t, ir, "arridx.ok")
+	// dupTupleValue: emits a per-field dup; for the string sub-field this
+	// is promise_string_new. With static-literal flag, copy-on-write may
+	// route through promise_vector_cow style — but the dup-on-read path
+	// always emits promise_string_new for the inner string.
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
+func TestFixedArrayIndexDupsOptionalString(t *testing.T) {
+	// Optional[string]: extract inner, dup the string, insert back.
+	ir := generateIR(t, `
+		main() {
+			a := "first";
+			a = a + "+";
+			b := "second";
+			b = b + "+";
+			string? oa = a;
+			string? ob = b;
+			string?[2] arr = [oa, ob];
+			string? x = arr[0];
+		}
+	`)
+	assertContains(t, ir, "arridx.ok")
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
+func TestFixedArrayIndexDupsHeapUserNoDrop(t *testing.T) {
+	// _Bare: heap user with no explicit drop / no synth drop.
+	// dup-on-read must still fire via the isHeapUserNoDropPalFree branch
+	// (otherwise both slots alias one pal_free'd allocation).
+	ir := generateIR(t, `
+		type _Bare { int x; }
+		main() {
+			_Bare[2] arr = [_Bare(x: 1), _Bare(x: 2)];
+			_Bare x = arr[0];
+		}
+	`)
+	assertContains(t, ir, "arridx.ok")
+	// dupHeapValue path: pal_alloc + memcpy
+	assertContains(t, ir, "call i8* @pal_alloc(")
+	assertContains(t, ir, "call void @llvm.memcpy")
+}
+
+func TestFixedArrayIndexDupsChannel(t *testing.T) {
+	// Channel element: dupChannel inlines a null check + atomic refcount
+	// incref on the channel struct (compiler.go:2234, chdup.inc block).
+	ir := generateIR(t, `
+		main() {
+			c0 := channel[int]();
+			c1 := channel[int]();
+			channel[int][2] arr = [c0, c1];
+			channel[int] x = arr[0];
+		}
+	`)
+	assertContains(t, ir, "arridx.ok")
+	// dupChannel emits a chdup.inc / chdup.merge block pair and an atomic add.
+	assertContains(t, ir, "chdup.inc")
+	assertContains(t, ir, "chdup.merge")
+}
+
+func TestFixedArrayIndexDupsArc(t *testing.T) {
+	// Arc element: dupArc emits an atomic refcount incref.
+	ir := generateIR(t, `
+		main() {
+			Arc[int][2] arr = [Arc[int](1), Arc[int](2)];
+			Arc[int] x = arr[0];
+		}
+	`)
+	assertContains(t, ir, "arridx.ok")
+	// dupArc emits an atomic fetch-add on the Arc's refcount field.
+	if !strings.Contains(ir, "atomicrmw add") && !strings.Contains(ir, "promise_arc_clone") {
+		t.Errorf("expected Arc dup helper in IR; got:\n%s", ir)
+	}
+}
+
+func TestFixedArrayIndexDupsWeak(t *testing.T) {
+	// Weak element: dupWeak emits the type-specific Weak clone helper.
+	ir := generateIR(t, `
+		main() {
+			Arc[int] keep0 = Arc[int](10);
+			Arc[int] keep1 = Arc[int](20);
+			Weak[int] w0 = keep0.downgrade();
+			Weak[int] w1 = keep1.downgrade();
+			Weak[int][2] arr = [w0, w1];
+			Weak[int] x = arr[0];
+		}
+	`)
+	assertContains(t, ir, "arridx.ok")
+	// dupWeak emits an atomic refcount on the weak count.
+	if !strings.Contains(ir, "atomicrmw add") && !strings.Contains(ir, "promise_weak") {
+		t.Errorf("expected Weak dup helper in IR; got:\n%s", ir)
+	}
+}
+
 func TestFixedArrayF64(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

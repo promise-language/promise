@@ -176,13 +176,29 @@ func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
 	// B0204: IndexExpr on Vector[string] → string is dup'd by dup-on-read in genVectorIndex.
 	// T0383: IndexExpr on Vector[Vector|Channel|Arc|Weak] → element is dup'd by
 	// dup-on-read in genVectorIndex (mirrors B0219 for fields).
+	// T0590: Same for fixed-size array (T[N]) — element is dup'd by dup-on-read
+	// in genArrayIndex. Without this case, isStringBorrowExpr's clear-drop-flag
+	// branch fires for `string x = arr[0]` and leaks the dup.
 	if idx, ok := expr.(*ast.IndexExpr); ok {
 		targetType := c.info.Types[idx.Target]
 		if c.typeSubst != nil {
 			targetType = types.Substitute(targetType, c.typeSubst)
 		}
+		// Unwrap refs for auto-deref.
+		if ref, ok := targetType.(*types.SharedRef); ok {
+			targetType = ref.Elem()
+		}
+		if ref, ok := targetType.(*types.MutRef); ok {
+			targetType = ref.Elem()
+		}
+		var elemType types.Type
 		if elem, isVec := types.AsVector(targetType); isVec {
-			resolvedElem := elem
+			elemType = elem
+		} else if arr, isArr := targetType.(*types.Array); isArr {
+			elemType = arr.Elem()
+		}
+		if elemType != nil {
+			resolvedElem := elemType
 			if c.typeSubst != nil {
 				resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
 			}
@@ -748,7 +764,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// T0440: Also set the flag for `b := m[k]!` — the RHS unwraps an
 	// Optional[heap-user-type] from a Map index. The unwrap consumes the
 	// Optional and returns V; without the dup, b would alias the bucket.
-	if isDroppableHeapUserType(resolvedExprType) {
+	//
+	// T0590: Also fire for heap-user-no-drop types (`_Bare[2]`) when the RHS is
+	// a direct IndexExpr. These need dup-on-read in arrays so let-then-X reads
+	// don't alias pal_free'd allocations.
+	if isDroppableHeapUserType(resolvedExprType) || isHeapUserNoDropPalFree(resolvedExprType) {
 		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
 			c.dupHeapUserFieldAccess = true
 		} else if unwrap, isUnwrap := s.Value.(*ast.OptionalUnwrapExpr); isUnwrap {
@@ -765,7 +785,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		if c.typeSubst != nil {
 			elem = types.Substitute(elem, c.typeSubst)
 		}
-		if isDroppableHeapUserType(elem) {
+		if isDroppableHeapUserType(elem) || isHeapUserNoDropPalFree(elem) {
 			c.dupHeapUserFieldAccess = true
 		}
 	}
@@ -4048,6 +4068,43 @@ func isDroppableHeapUserType(typ types.Type) bool {
 	return true
 }
 
+// isHeapUserNoDropPalFree returns true for heap user types that are heap-
+// allocated (and thus need pal_free at scope exit) but have no explicit `drop()`
+// or synthesized drop — i.e., types excluded by `isDroppableHeapUserType` for
+// the T0440 Map-clone-gating reason. Used by genArrayIndex's T0590 dup-on-read:
+// arrays have no internal match-dup, so slot-to-slot / let-then-X reads must
+// dup these pointers to avoid aliasing + double-free at pal_free time.
+func isHeapUserNoDropPalFree(typ types.Type) bool {
+	if isRefType(typ) {
+		return false
+	}
+	if isContainerType(typ) {
+		return false
+	}
+	named := extractNamed(typ)
+	if named == nil {
+		return false
+	}
+	if named == types.TypString {
+		return false
+	}
+	if named == types.TypMap {
+		return false
+	}
+	if named.Obj() != nil && named.Obj().Name() == "Set" {
+		return false
+	}
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return false
+	}
+	// Drop / synth-drop case is handled by `isDroppableHeapUserType` — this
+	// helper covers only the pal_free-only complement.
+	if named.HasDrop() || named.NeedsSynthDrop() {
+		return false
+	}
+	return true
+}
+
 // dupTupleValue creates a deep copy of a tuple value by dup'ing each droppable
 // field (strings, vectors, channels, nested tuples, heap user types, enums).
 // Non-droppable fields (primitives, value types) are copied by struct value.
@@ -5111,9 +5168,33 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 		}
 		if isIdxRhs {
 			var lhsType types.Type
+			// T0590: For the string/container dup branches below, we further gate
+			// on whether the LHS *target container* is a fixed-size array. Plain
+			// Vector slot-to-slot reads alias on read by design (T0490) — the
+			// destructive Vector.drop at the slice-assign call site (stmt.go:5648)
+			// relies on that aliasing to balance ownership. Setting the dup flag
+			// for Vector LHS would force the [:]= body to dup, leaving src's
+			// inner buffers leaked. Fixed-size arrays have no such call-site
+			// destructive drop; the dup is the only way to avoid the slot-to-slot
+			// double-free. Heap-user / tuple flags already exist with this
+			// asymmetry: the existing skipB0313 list at line 5648 covers them.
+			lhsIsFixedArrayElem := false
 			switch t := s.Target.(type) {
 			case *ast.IndexExpr:
 				lhsType = c.info.Types[t]
+				targetType := c.info.Types[t.Target]
+				if c.typeSubst != nil && targetType != nil {
+					targetType = types.Substitute(targetType, c.typeSubst)
+				}
+				if ref, ok := targetType.(*types.SharedRef); ok {
+					targetType = ref.Elem()
+				}
+				if ref, ok := targetType.(*types.MutRef); ok {
+					targetType = ref.Elem()
+				}
+				if _, isArr := targetType.(*types.Array); isArr {
+					lhsIsFixedArrayElem = true
+				}
 			case *ast.IdentExpr:
 				lhsType = c.info.Types[t]
 			case *ast.MemberExpr:
@@ -5123,7 +5204,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				if c.typeSubst != nil {
 					lhsType = types.Substitute(lhsType, c.typeSubst)
 				}
-				if isDroppableHeapUserType(lhsType) {
+				if isDroppableHeapUserType(lhsType) || isHeapUserNoDropPalFree(lhsType) {
 					c.dupHeapUserFieldAccess = true
 				}
 				// T0412/T0489: same dup-on-read for droppable tuple LHS. Combined
@@ -5137,6 +5218,46 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				if _, isTup := lhsType.(*types.Tuple); isTup && c.tupleNeedsDrop(lhsType) {
 					c.dupTupleFieldAccess = true
 				}
+				// T0590: string and container LHS — required for fixed-size array
+				// slot-to-slot copies (`arr[1] = arr[0]`). Without these, the bare
+				// `genArrayIndex` returns an alias of the source slot's pointer; the
+				// store + drop-on-overwrite then leaves both slots aliasing one
+				// allocation → scope-exit double-free. Gated to fixed-size array
+				// LHS only because Vector slot-to-slot (inside [:]=) is intentionally
+				// aliased; the destructive drop at the slice-assign call site
+				// balances ownership for plain container element types.
+				if lhsIsFixedArrayElem {
+					if extractNamed(lhsType) == types.TypString && !isRefType(lhsType) {
+						c.dupStringFieldAccess = true
+					}
+					if (types.IsVector(lhsType) || types.IsChannel(lhsType) || types.IsArc(lhsType) || types.IsWeak(lhsType)) && !isRefType(lhsType) {
+						c.dupContainerFieldAccess = true
+					}
+					if opt, ok := lhsType.(*types.Optional); ok {
+						inner := opt.Elem()
+						if c.typeSubst != nil {
+							inner = types.Substitute(inner, c.typeSubst)
+						}
+						if extractNamed(inner) == types.TypString {
+							c.dupStringFieldAccess = true
+						}
+						if types.IsVector(inner) || types.IsChannel(inner) || types.IsArc(inner) || types.IsWeak(inner) {
+							c.dupContainerFieldAccess = true
+						}
+					}
+				}
+				if opt, ok := lhsType.(*types.Optional); ok {
+					inner := opt.Elem()
+					if c.typeSubst != nil {
+						inner = types.Substitute(inner, c.typeSubst)
+					}
+					if _, isTup := inner.(*types.Tuple); isTup && c.tupleNeedsDrop(inner) {
+						c.dupTupleFieldAccess = true
+					}
+					if isDroppableHeapUserType(inner) || isHeapUserNoDropPalFree(inner) {
+						c.dupHeapUserFieldAccess = true
+					}
+				}
 			}
 		}
 	}
@@ -5144,6 +5265,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	c.targetType = nil
 	c.dupHeapUserFieldAccess = false
 	c.dupTupleFieldAccess = false
+	c.dupStringFieldAccess = false
+	c.dupContainerFieldAccess = false
 
 	// Auto-propagate failable call in assignment RHS.
 	if c.info.AutoPropagateExprs[s.Value] {

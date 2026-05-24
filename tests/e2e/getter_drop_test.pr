@@ -371,3 +371,178 @@ test_arc_getter_does_not_leak_inside_method() `test {
   ArcRoom r = ArcRoom();
   assert(r.use_item(), "arc getter chain inside method body");
 }
+
+// T0501: Binding a getter result to a local (var-decl) used to leak. Before the
+// fix, the var-decl path's "RHS is a borrow" branch ran clearDropFlag(s.Name) on
+// `local.getter` because isGetterCall only matched top-level or module getters,
+// not MemberExprs on locals. claimStringTemp already transferred the temp's
+// ownership into the LHS, but clearing the LHS drop flag immediately after
+// orphaned the allocation.
+//
+// Uses ArcCell[T] (no drop on the owner) because sema currently rejects the
+// var-decl form for types with explicit drop methods returning Arc — that
+// rejection is a separate sema-level diagnostic mistake noted in T0501's
+// plan and is out of scope here.
+
+// Inferred form: `s := c.fresh;` with Arc[int] getter on a local owner.
+test_var_decl_inferred_arc_getter() `test {
+  ArcCell[int] c = ArcCell[int](_value: 42);
+  s := c.fresh;
+  assert(s.borrow == 42, "arc var-decl inferred borrow");
+}
+
+// Typed form: `Arc[int] s = c.fresh;` — same root cause, separate codepath
+// (genTypedVarDecl vs genInferredVarDecl).
+test_var_decl_typed_arc_getter() `test {
+  ArcCell[int] c = ArcCell[int](_value: 42);
+  Arc[int] s = c.fresh;
+  assert(s.borrow == 42, "arc var-decl typed borrow");
+}
+
+// Channel[T] getter result bound to a local — uses a drop-less owner because
+// isStringFieldDup returns HasDrop() for member exprs, so a CBox-style owner
+// (with drop) would short-circuit the borrow-RHS branch entirely and mask the
+// T0501 bug. ChCell has no drop → the buggy branch was reachable.
+type ChCell {
+  get fresh channel[int] `public => channel[int](2);
+}
+
+test_var_decl_inferred_channel_getter() `test {
+  ChCell c = ChCell();
+  s := c.fresh;
+  assert(true, "channel var-decl inferred no leak");
+}
+
+test_var_decl_typed_channel_getter() `test {
+  ChCell c = ChCell();
+  channel[int] s = c.fresh;
+  assert(true, "channel var-decl typed no leak");
+}
+
+// Virtual dispatch: abstract base's getter bound to a local. LookupGetter walks
+// the parent chain so the inherited getter is found via the static target type.
+test_var_decl_inferred_virtual_arc_getter() `test {
+  ArcSource src = ArcImpl();
+  s := src.fresh;
+  assert(s.borrow == 7, "virtual arc var-decl inferred borrow");
+}
+
+test_var_decl_typed_virtual_arc_getter() `test {
+  ArcSource src = ArcImpl();
+  Arc[int] s = src.fresh;
+  assert(s.borrow == 7, "virtual arc var-decl typed borrow");
+}
+
+// Chained-target var-decl: `s := outer.field.getter` where `outer.field` is
+// itself a MemberExpr (not an IdentExpr). The pre-T0501 module-getter check
+// looks for an IdentExpr target that resolves to a module name, so chained
+// targets never matched. The new isGetterCallExpr matches on any MemberExpr
+// whose target's static type has the named getter — so chains work uniformly.
+// Without the fix, the cloned Arc allocation leaks because clearDropFlag still
+// fires on the LHS after claimStringTemp transferred ownership.
+type ArcOuter {
+  ArcCell[int] _inner;
+}
+
+test_var_decl_inferred_chain_target_arc_getter() `test {
+  ArcOuter o = ArcOuter(_inner: ArcCell[int](_value: 77));
+  s := o._inner.fresh;
+  assert(s.borrow == 77, "chain target arc var-decl inferred borrow");
+}
+
+test_var_decl_typed_chain_target_arc_getter() `test {
+  ArcOuter o = ArcOuter(_inner: ArcCell[int](_value: 77));
+  Arc[int] s = o._inner.fresh;
+  assert(s.borrow == 77, "chain target arc var-decl typed borrow");
+}
+
+// Mutex[T] getter var-decl — same root cause as Arc/Channel; the Mutex
+// allocation (lock + inner value) leaks 3 allocations without the T0501 fix.
+// Drop-less owner so the buggy borrow-RHS branch is reachable.
+type MCell {
+  get fresh Mutex[int] `public => Mutex[int](42);
+}
+
+test_var_decl_inferred_mutex_getter() `test {
+  MCell c = MCell();
+  s := c.fresh;
+  assert(true, "mutex var-decl inferred no leak");
+}
+
+test_var_decl_typed_mutex_getter() `test {
+  MCell c = MCell();
+  Mutex[int] s = c.fresh;
+  assert(true, "mutex var-decl typed no leak");
+}
+
+// Weak[T] getter var-decl. The getter uses a method body form (not lambda-expr)
+// to set up an Arc, downgrade it, and let the Arc drop at the end of the body,
+// leaving only the Weak ref alive. Without T0501, binding that Weak to a local
+// leaks the underlying Arc-state allocation (weak count was the last keeper).
+// Drop-less owner so the buggy branch is reachable. (Lambda-expr form `=>
+// inner.downgrade()` is rejected by sema with the same diagnostic mistake
+// noted in T0501's plan.)
+type WCell {
+  get fresh Weak[int] `public {
+    Arc[int] inner = Arc[int](42);
+    return inner.downgrade();
+  }
+}
+
+test_var_decl_inferred_weak_getter() `test {
+  WCell c = WCell();
+  s := c.fresh;
+  assert(true, "weak var-decl inferred no leak");
+}
+
+// Heap-allocated string getter var-decl. With a drop-less owner (no synth drop),
+// isStringFieldDup returns false, so the borrow-RHS branch is reachable. The
+// getter returns a runtime-concatenated string (not a .rodata literal — bit 63
+// would make Vector/String drop a no-op and mask the bug). Without T0501 the
+// allocation leaks.
+fresh_str_t0501(int n) string {
+  return "x" + n.to_string();
+}
+
+type StringSCell {
+  get fresh string `public => fresh_str_t0501(42);
+}
+
+test_var_decl_inferred_string_getter() `test {
+  StringSCell c = StringSCell();
+  s := c.fresh;
+  assert(s == "x42", "string var-decl inferred");
+}
+
+test_var_decl_typed_string_getter() `test {
+  StringSCell c = StringSCell();
+  string s = c.fresh;
+  assert(s == "x42", "string var-decl typed");
+}
+
+// Heap-allocated vector getter var-decl. Drop-less owner + non-literal element
+// (so it can't be a .rodata static vector — T0062's bit-63 flag would mask the
+// leak). Returns a fresh Vector[int] from a helper, ensuring real pal_alloc'd
+// storage.
+fresh_vec_t0501(int n) int[] {
+  int[] v = [n];
+  return v;
+}
+
+type VectorSCell {
+  get fresh int[] `public => fresh_vec_t0501(42);
+}
+
+test_var_decl_inferred_vector_getter() `test {
+  VectorSCell c = VectorSCell();
+  s := c.fresh;
+  assert(s.len == 1, "vector var-decl inferred");
+  assert(s[0] == 42, "vector var-decl inferred value");
+}
+
+test_var_decl_typed_vector_getter() `test {
+  VectorSCell c = VectorSCell();
+  int[] s = c.fresh;
+  assert(s.len == 1, "vector var-decl typed");
+  assert(s[0] == 42, "vector var-decl typed value");
+}

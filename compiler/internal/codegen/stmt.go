@@ -222,6 +222,28 @@ func (c *Compiler) isBorrowedExpr(expr ast.Expr) bool {
 	return false
 }
 
+// isGetterCallExpr reports whether expr is a MemberExpr whose Field resolves
+// to a getter method on its target's type. Getters return owned values
+// (tracked via trackGetterResult/claimStringTemp), so the LHS of
+// `s := obj.getter` must keep its drop flag instead of being cleared by
+// the borrow-RHS branch. Complements the existing detection for
+// non-local IdentExpr and module.getter MemberExpr. T0501.
+func (c *Compiler) isGetterCallExpr(expr ast.Expr) bool {
+	member, ok := expr.(*ast.MemberExpr)
+	if !ok {
+		return false
+	}
+	targetType := c.info.Types[member.Target]
+	if c.typeSubst != nil && targetType != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	named := extractNamed(targetType)
+	if named == nil {
+		return false
+	}
+	return named.LookupGetter(member.Field) != nil
+}
+
 // isStringBorrowExpr returns true if the expression borrows an existing value
 // (e.g., container element access, field access) rather than creating a new one.
 // Borrowed values should not be freed by the borrower — the owner retains responsibility.
@@ -959,6 +981,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// dups the string, so the variable owns the copy (not a borrow).
 	// T0137: Skip for getter calls (IdentExpr not in locals, or module.getter MemberExpr) —
 	// getters return owned values, not borrows.
+	// T0501: Also skip for local.getter / this.getter MemberExprs — getters on
+	// locals return owned values whose tracking has already been claimed into
+	// the LHS by claimStringTemp; clearing the drop flag here would orphan the
+	// allocation.
 	if isDroppableContainerOrString(dropType) && isStringBorrowExpr(s.Value) {
 		isGetterCall := false
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
@@ -972,6 +998,9 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 					isGetterCall = true
 				}
 			}
+		}
+		if !isGetterCall && c.isGetterCallExpr(s.Value) {
+			isGetterCall = true
 		}
 		if !isGetterCall && !c.isStringFieldDup(s.Value, dropType) {
 			if rhsOldDropFlag != nil {
@@ -1182,6 +1211,10 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// dups the string, so the variable owns the copy (not a borrow).
 	// T0137: Skip for getter calls (IdentExpr not in locals, or module.getter MemberExpr) —
 	// getters return owned values, not borrows.
+	// T0501: Also skip for local.getter / this.getter MemberExprs — getters on
+	// locals return owned values whose tracking has already been claimed into
+	// the LHS by claimStringTemp; clearing the drop flag here would orphan the
+	// allocation.
 	if isDroppableContainerOrString(typ) && isStringBorrowExpr(s.Value) {
 		isGetterCall := false
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
@@ -1195,6 +1228,9 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 					isGetterCall = true
 				}
 			}
+		}
+		if !isGetterCall && c.isGetterCallExpr(s.Value) {
+			isGetterCall = true
 		}
 		if !isGetterCall && !c.isStringFieldDup(s.Value, typ) {
 			if rhsOldDropFlag != nil {

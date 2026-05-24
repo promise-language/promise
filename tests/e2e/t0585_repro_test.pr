@@ -1,0 +1,136 @@
+// T0585: Wrapping borrowed Optional into wider Optional via intermediate
+// local double-frees when the intermediate is consumed by nested if-let
+// (not returned). The wrap site materializes a local that aliases the
+// borrowed inner heap value; without flag propagation, the if-let
+// consumption chain claims ownership and frees the caller's allocation.
+// (The direct `if x := a` shape on a borrowed param is tracked separately
+// as T0589 — it can't be resolved by codegen propagation alone because
+// the borrowed/auto-moved distinction is invisible to the callee.)
+type _Box {
+  int n;
+}
+
+_test_wrap_no_return(_Box? a) {
+  _Box?? b = a;
+  if x := b {
+    if y := x {
+      assert(y.n == 1, "wrap_no_return");
+    }
+  }
+}
+
+t0585_wrap_no_return() `test {
+  _Box? a = _Box(n: 1);
+  _test_wrap_no_return(a);
+}
+
+// Triple Optional via wrap on a borrowed double Optional.
+_test_wrap_triple(_Box?? a) {
+  _Box??? b = a;
+  if x := b {
+    if y := x {
+      if z := y {
+        assert(z.n == 3, "wrap_triple");
+      }
+    }
+  }
+}
+
+t0585_wrap_triple() `test {
+  _Box? a = _Box(n: 3);
+  _Box?? aa = a;
+  _test_wrap_triple(aa);
+}
+
+// Consume-param wrap (owned RHS via `~T?`): the wrapped local must still
+// drop the inner value at scope exit. Regression guard for the
+// maybeRegisterDrop Optional handling that gives `~T?` params a flag.
+_test_wrap_consume(~_Box? a) {
+  _Box?? b = a;
+  if x := b {
+    if y := x {
+      assert(y.n == 13, "wrap_consume");
+    }
+  }
+}
+
+t0585_wrap_consume() `test {
+  _Box? a = _Box(n: 13);
+  _test_wrap_consume(a);
+}
+
+// Constructor RHS (non-IdentExpr) — fix should NOT apply, owned path works.
+_test_wrap_construct() {
+  _Box? c = _Box(n: 7);
+  _Box?? b = c;
+  if x := b {
+    if y := x {
+      assert(y.n == 7, "wrap_construct");
+    }
+  }
+}
+
+t0585_wrap_construct() `test {
+  _test_wrap_construct();
+}
+
+// Regression: the `_returns_triple` shape (T0568 carve-out) where the wrapped
+// local is returned (not consumed in-callee). Caller-side B0345 alias-clear
+// must still work after T0585's drop-flag propagation at the wrap site.
+_returns_triple_585(_Box? a) _Box??? {
+  _Box?? b = a;
+  return b;
+}
+
+t0585_returns_triple_regression() `test {
+  _Box? a = _Box(n: 17);
+  _Box??? r = _returns_triple_585(a);
+  if x := r {
+    if y := x {
+      if z := y {
+        assert(z.n == 17, "returns_triple");
+      }
+    }
+  }
+}
+
+// Wrap-then-while-let: exercises Site 4 (genWhileUnwrapStmt drop-flag
+// propagation) at runtime. The wrap site sets b.dropflag=0 (borrowed source);
+// while-let on b must propagate that into x.dropflag so the loop's scope exit
+// doesn't double-free the caller's allocation. Without site 4's propagation,
+// x.dropflag would stay at 1 from maybeRegisterOptionalDrop's init and the
+// break path's scope cleanup would drop the inner _Box that the caller still
+// owns.
+_test_wrap_while(_Box? a) {
+  _Box?? b = a;
+  while x := b {
+    if y := x {
+      assert(y.n == 23, "wrap_while");
+    }
+    break;
+  }
+}
+
+t0585_wrap_while_let() `test {
+  _Box? a = _Box(n: 23);
+  _test_wrap_while(a);
+}
+
+// Wrap-then-while-let with consume param (`~T?` owned RHS). Symmetric to
+// `t0585_wrap_consume` but exercises Site 4. The wrap site propagates the
+// owned flag (=1) into b.dropflag; while-let then propagates b.dropflag (=1)
+// into x.dropflag; on break, scope cleanup drops the wrapped local once.
+_test_wrap_while_consume(~_Box? a) {
+  _Box?? b = a;
+  while x := b {
+    if y := x {
+      assert(y.n == 29, "wrap_while_consume");
+    }
+    break;
+  }
+}
+
+t0585_wrap_while_consume() `test {
+  _Box? a = _Box(n: 29);
+  _test_wrap_while_consume(a);
+}

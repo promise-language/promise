@@ -795,6 +795,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// Wrap value in Optional if declared type is Optional and expr differs in shape.
 	// Using Identical (not "is exprOpt?") correctly handles T?? = T? — both are
 	// Optional but at different depths, so a wrap is still needed.
+	willWrap := false // T0585: track whether an Optional-wrap is materialized.
 	if declType != nil {
 		if _, isOpt := declType.(*types.Optional); isOpt {
 			// Substitute exprType under typeSubst so generic body bodies (where the
@@ -808,6 +809,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 				// NoneLit already handled via targetType
 			} else if !types.Identical(cmpExprType, declType) {
 				val = c.wrapOptional(val, lt.(*irtypes.StructType))
+				willWrap = true
 			}
 		}
 	}
@@ -836,7 +838,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		}
 	}
 	// T0106: For droppable containers/strings, save the RHS's old flag value before clearing.
+	// T0585: For an Optional-wrap from an IdentExpr RHS, also save the flag so we can mirror
+	// the RHS's ownership state into the LHS drop flag after maybeRegisterDrop.
 	var rhsOldDropFlag value.Value
+	var rhsFlagForWrap value.Value
 	if !isStructuralTarget {
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
 			dropType := declType
@@ -846,6 +851,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			if isDroppableContainerOrString(dropType) {
 				if flag, ok := c.dropFlags[ident.Name]; ok {
 					rhsOldDropFlag = c.block.NewLoad(irtypes.I1, flag)
+				}
+			}
+			if willWrap {
+				if flag, ok := c.dropFlags[ident.Name]; ok {
+					rhsFlagForWrap = c.block.NewLoad(irtypes.I1, flag)
 				}
 			}
 			c.clearDropFlag(ident.Name)
@@ -971,6 +981,25 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 				}
 			} else {
 				c.clearDropFlag(s.Name)
+			}
+		}
+	}
+	// T0585: For an Optional-wrap from an IdentExpr RHS, the wrapped local aliases
+	// the RHS's inner heap value. Mirror the RHS's ownership state into the LHS
+	// drop flag — `1` when RHS owned (transferring ownership; the RHS flag was
+	// cleared above), `0` when RHS was borrowed (no flag existed). Without this,
+	// scope-exit drop of the wrapped local would double-free the heap value still
+	// owned by the original (borrowed) RHS.
+	if willWrap {
+		if _, isIdent := s.Value.(*ast.IdentExpr); isIdent {
+			if lhsFlag, ok := c.dropFlags[s.Name]; ok {
+				var newVal value.Value
+				if rhsFlagForWrap != nil {
+					newVal = rhsFlagForWrap
+				} else {
+					newVal = constant.NewInt(irtypes.I1, 0)
+				}
+				c.block.NewStore(newVal, lhsFlag)
 			}
 		}
 	}
@@ -1730,6 +1759,16 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 			c.maybeRegisterEnumDrop(varName, alloca, typ, enum)
 			return
 		}
+	}
+
+	// T0585: Optional drop — delegate to maybeRegisterOptionalDrop so callers
+	// passing Optional types (notably `~T?` consume params via defineFunc) get
+	// a drop flag and binding consistent with other owned values. Without this,
+	// `~T?` params had no flag, which both leaked when not consumed and broke
+	// borrowed-vs-owned discrimination in the T0585 wrap propagation.
+	if opt, ok := typ.(*types.Optional); ok {
+		c.maybeRegisterOptionalDrop(varName, alloca, opt)
+		return
 	}
 
 	// T0371: Tuple value with droppable fields — register a bindingDropTuple
@@ -7202,6 +7241,17 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		if c.typeSubst != nil {
 			elemType = types.Substitute(elemType, c.typeSubst)
 		}
+		// T0585: For an IdentExpr source, load its drop flag value before
+		// maybeRegister* / clearDropFlag so we can mirror the source's ownership
+		// state into the binding. A borrowed source (no flag) means the unwrapped
+		// binding is also a borrow (flag=0); without this, the binding would
+		// incorrectly claim ownership and double-free the heap value at scope exit.
+		var srcFlagVal value.Value
+		if ident, isIdent := s.Init.(*ast.IdentExpr); isIdent {
+			if srcFlag, has := c.dropFlags[ident.Name]; has {
+				srcFlagVal = c.block.NewLoad(irtypes.I1, srcFlag)
+			}
+		}
 		if innerOpt, ok := elemType.(*types.Optional); ok {
 			c.maybeRegisterOptionalDrop(s.Binding, alloca, innerOpt)
 		} else {
@@ -7213,6 +7263,19 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		// (RTTI-based) handles cleanup on reassignment or scope exit.
 		if _, innerHasDrop := c.dropBindings[s.Binding]; innerHasDrop {
 			if ident, ok := s.Init.(*ast.IdentExpr); ok {
+				// T0585: Propagate source's pre-clear drop flag into the binding's
+				// drop flag only when the source had a flag. Source with no flag
+				// is ambiguous at the callee — it could be a borrowed param or an
+				// owned param that was auto-moved at the call site (Optional wrap
+				// of a narrower arg). We can't distinguish without runtime info,
+				// so leave the binding's flag as initialized (1 from
+				// maybeRegisterDrop) and let the owned-via-wrap path drop the
+				// value at scope exit.
+				if srcFlagVal != nil {
+					if bindingFlag, has := c.dropFlags[s.Binding]; has {
+						c.block.NewStore(srcFlagVal, bindingFlag)
+					}
+				}
 				c.clearDropFlag(ident.Name)
 			}
 		}
@@ -7386,6 +7449,14 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 		if c.typeSubst != nil {
 			elemType = types.Substitute(elemType, c.typeSubst)
 		}
+		// T0585: Load source's drop flag value before maybeRegister* / clearDropFlag
+		// so we can mirror the source's ownership state into the binding.
+		var srcFlagVal value.Value
+		if ident, isIdent := s.Value.(*ast.IdentExpr); isIdent {
+			if srcFlag, has := c.dropFlags[ident.Name]; has {
+				srcFlagVal = c.block.NewLoad(irtypes.I1, srcFlag)
+			}
+		}
 		if innerOpt, ok := elemType.(*types.Optional); ok {
 			c.maybeRegisterOptionalDrop(s.Binding, alloca, innerOpt)
 		} else {
@@ -7396,6 +7467,14 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 		// source must retain ownership for its Optional drop (RTTI-based) to handle cleanup.
 		if _, innerHasDrop := c.dropBindings[s.Binding]; innerHasDrop {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				// T0585: Propagate source's pre-clear drop flag into the binding's
+				// drop flag only when the source had a flag. See genIfUnwrapStmt
+				// for the rationale — no-flag source is ambiguous at the callee.
+				if srcFlagVal != nil {
+					if bindingFlag, has := c.dropFlags[s.Binding]; has {
+						c.block.NewStore(srcFlagVal, bindingFlag)
+					}
+				}
 				c.clearDropFlag(ident.Name)
 			}
 		}

@@ -214,36 +214,39 @@ Each of the six types gets the standard four-struct layout (Type, Variant, Insta
 
 ## 5. Standard Library Changes
 
-### 5.1 Files
+### 5.1 File layout
 
-Add six files mirroring the existing pattern:
+All six wide-integer types ship in one file: **[modules/std/wide_int.pr](modules/std/wide_int.pr)**. This mirrors how the existing `int.pr` declares `int`/`i8`/`i16`/`i32`/`i64` in a single source file and `uint.pr` declares `uint`/`u8`/`u16`/`u32`/`u64` — the type declarations are mostly `` `native `` operator stubs (no Promise bodies), so per-type files would add cache and compile cost without adding readability. One file for all six covers `i128`, `u128`, `i256`, `u256`, `i512`, `u512`.
 
-- [modules/std/i128.pr](modules/std/i128.pr)
-- [modules/std/u128.pr](modules/std/u128.pr)
-- [modules/std/i256.pr](modules/std/i256.pr)
-- [modules/std/u256.pr](modules/std/u256.pr)
-- [modules/std/i512.pr](modules/std/i512.pr)
-- [modules/std/u512.pr](modules/std/u512.pr)
-
-Each contains the same surface as `i64.pr`: arithmetic/comparison/bitwise/range operators (all `\`native`), `get min`/`get max` constants, `to_string`, `format`, `parse`, `encode`, `decode`, `hash`. Implementation strategy follows CLAUDE.md's "Prefer Promise over IR" rule:
+Each declaration contains the same surface as the entries in `i64.pr`: arithmetic/comparison/bitwise/range operators (all `\`native`), `get min`/`get max` constants, `to_string`, `format`, `parse`, `encode`, `decode`, `hash`. Implementation strategy follows CLAUDE.md's "Prefer Promise over IR" rule:
 
 - **Operators**: `\`native` (LLVM emits the instruction directly).
-- **`to_string` / `parse`**: written in Promise, calling into a generic helper rather than per-type IR. Decimal printing needs repeated 10-divide-and-modulo; for wide types this is slower than i64 but still O(width × log10(value)) and runs entirely in user code.
+- **`to_string` / `parse`**: written in Promise, calling into a small set of helpers (one per width, see §5.2) rather than per-type IR.
 - **`encode` / `decode`**: serialize as a sequence of bytes (little-endian, 16/32/64 bytes for 128/256/512). The `Encoder`/`Decoder` interface gains `encode_i128`/`encode_u128`/... methods on each implementation, mirroring the existing `encode_int`/`encode_i64` shape.
 - **`hash`**: `\`native`, fold to 64 bits by XORing 64-bit limbs and applying the existing `int.hash` finisher.
 
-### 5.2 Format/Parse
+### 5.2 Format / parse — default base 16
 
-`to_string(int base = 10, bool prefix = false, int? width, char fill = ' ')` for wide types is implemented in pure Promise: a `while value > 0 { digits.push(value % base); value = value / base; }` loop emits digits in reverse. This is identical to `int.to_string` except using the wide type's own arithmetic — which routes through LLVM and (for division) the soft-arith library. No new format infrastructure required.
+Wide integers default to **base 16** for both `to_string` and `parse`. This is the only place the wide-integer surface deliberately diverges from the small-integer surface (which defaults to base 10).
 
-`parse!(Reader ~r) Self` accumulates digits into a wide value the same way `int.parse` does, replacing the inner `result` variable with the wide type. Range overflow is detected by the wide type's own `*` and `+` checks (or, for safety, by tracking the iteration count and capping).
+Rationale:
 
-The existing `_int_format` helper in [modules/std/int.pr](modules/std/int.pr) is `int`-only. Either:
+- The dominant use of wide integers is cryptographic — hashes, addresses, UUIDs as `u128`, ECC scalars. These are universally written and read in hex.
+- Hex formatting is shift-and-mask: O(width) with no division. Decimal formatting needs one full division per digit; on `i512` that's ~155 divisions per call, each a libcall. The default that's "fast and crypto-shaped" is the right default for the type.
+- A `u128` rendered in hex is exactly 32 characters wide regardless of value — a stable, alignable shape — whereas the decimal width varies with magnitude.
+- Decimal remains available via `to_string(base: 10)` / `parse(reader, base: 10)` for the cases where it's wanted (human-readable counters, currency at fixed-point precision, etc.).
 
-1. Make `_int_format` generic over `Ordered & Hashable` integer types (preferred; one implementation, all widths benefit), or
-2. Generate parallel `_i128_format`, `_i256_format`, `_i512_format` helpers (uglier, but acceptable if generic-over-numerics is not yet implemented when this lands).
+Method signatures:
 
-The plan picks (2) initially and migrates to (1) once Promise generics over numeric types are proven sufficient — tracker item to be filed.
+```promise
+to_string(int base = 16, bool prefix = false, int? width, char fill = ' ') string `public;
+parse!(Reader ~r, int base = 16) Self `factory `public;
+format!(Writer ~w) `public;                       // delegates to to_string() — base 16
+```
+
+Default parameter values let `parse(reader)` and `to_string()` continue to satisfy the `Parse` and `Format` structural interfaces (which declare `parse!(Reader ~r) Self` and `to_string() string`). A caller passing only the `Reader` gets the base-16 default; an explicit base overrides. This also keeps the wide types usable as `T: Parse` in `scan[T](string s)`, so `scan[u128]("abc123…")` works without ceremony.
+
+Implementation: a per-width helper (`_wide_int_format_128`, `_wide_int_format_256`, `_wide_int_format_512`) does the digit loop using the wide type's own arithmetic (which routes through LLVM and, for division, the soft-arith library). Base 16 takes the fast path (4-bit shifts); base 10 (and other bases) take the slow division path. Once generics-over-numeric-types are expressive enough, the three helpers collapse into one — tracked separately.
 
 ### 5.3 Hashable, Ordered, Equal, Cloneable
 
@@ -274,7 +277,7 @@ Each new type implements `is Hashable`, `is Ordered`, `is Equal` via the standar
 - **i128 division** is a libcall — ~30–50 cycles on modern CPUs. Tight inner loops should reuse Barrett/Montgomery reductions, same as in C/Rust.
 - **i256 / i512 arithmetic** scales linearly; multiply scales quadratically (Karatsuba kicks in around 1024 bits, beyond our scope, so it doesn't apply here).
 - **i256 / i512 division** is a libcall to `__udivei*`/`__divei*` — hundreds of cycles. For crypto, division is rare (modular reductions use specialized routines); for general use, this is acceptable.
-- **Decimal `to_string`** on `i512` is slow (one full division per digit, ~150 digits worst case). Acceptable for diagnostics; users doing high-throughput formatting should prefer `to_string(base: 16)` (which is shifts and masks only) or pre-format outside hot paths.
+- **Default `to_string` is base 16** (shifts and masks only) so the fast path is the default. Decimal output via `to_string(base: 10)` falls back to the soft-division loop — ~155 divisions for a `u512` worst case. Acceptable for diagnostics or human-readable values; users formatting in tight loops should keep the default.
 
 These costs are documented in the language guide section that introduces wide types so users can reason about hot paths.
 
@@ -302,29 +305,31 @@ Each phase is independently shippable and testable.
 - `llvmNamedType` mapping.
 - Native operator dispatch for the two new types.
 - Numeric-literal suffix `i128`/`u128`; switch literal magnitude representation in the AST to `*big.Int`.
-- Stdlib files [modules/std/i128.pr](modules/std/i128.pr) and [modules/std/u128.pr](modules/std/u128.pr).
-- `_i128_format` helper for decimal/hex/octal/binary printing.
+- Create [modules/std/wide_int.pr](modules/std/wide_int.pr) with `i128` and `u128` declarations (default base 16 for `to_string` and `parse`).
+- `_wide_int_format_128` helper for hex (fast path) and base-N (slow path) printing.
 - Cast rules (`as!`) covering all combinations with existing integer/float types.
 - Range/iteration tests.
 - JSON encoder/decoder using string representation.
-- Test suite: `tests/std/wide_int_test.pr` covering arithmetic, comparison, conversion, parse/format, range, hash, encode/decode round-trips, overflow at `max`/`min`.
+- Test suite: `tests/std/wide_int_test.pr` covering arithmetic, comparison, conversion, parse/format (both base 16 default and explicit base 10), range, hash, encode/decode round-trips, overflow at `max`/`min`, structural-interface usage (`scan[u128](...)` via the `Parse` interface with default-base param).
 - **Done when**: `bin/verify --wasm --wasm-web` passes with the new tests, no regressions.
 
 ### Phase 2 — `i256` / `u256`
 
 - Same shape as Phase 1 for the 256-bit pair.
-- Add stdlib `i256.pr`, `u256.pr`.
+- Append `i256` and `u256` declarations to the same [modules/std/wide_int.pr](modules/std/wide_int.pr) — no new file.
+- Add `_wide_int_format_256` helper.
 - Verify division libcalls resolve on all targets; file bugs against PAL/compiler-rt linkage if missing.
 - Test suite: extend `tests/std/wide_int_test.pr`; add a `tests/std/sha256_smoke_test.pr` demonstrating SHA-256-style word arithmetic for confidence.
 
 ### Phase 3 — `i512` / `u512`
 
-- Same shape; stdlib files.
+- Same shape; append to [modules/std/wide_int.pr](modules/std/wide_int.pr).
+- Add `_wide_int_format_512` helper.
 - Test suite extension; smoke test against a known SHA-512 test vector represented as `u512`.
 
 ### Phase 4 — Cleanup
 
-- Migrate `_iN_format` helpers to a single Promise generic helper (depends on numeric generics being expressive enough; if not, file a tracker task and defer).
+- Migrate the three per-width `_wide_int_format_*` helpers to a single Promise generic helper (depends on numeric generics being expressive enough; if not, file a tracker task and defer).
 - Documentation: extend [docs/language-guide.md](language-guide.md) with the wide-type ladder and performance notes; cross-link from this plan.
 - Examples: add a `examples/wide_int.pr` showing UUID-as-`u128` and a small SHA-256-style use of `u256`.
 
@@ -333,10 +338,11 @@ Each phase is independently shippable and testable.
 ## 10. Open Questions
 
 1. **Should `parse` on wide types support a leading `+` sign?** Existing `int.parse` does not. Keep consistent (no leading `+`).
-2. **Should `to_string` default base for wide types be 16 instead of 10?** Decimal is slower but matches the existing primitive convention; users with hot paths can choose. Keep base 10 default.
-3. **Should we expose `wrapping_add` / `checked_add` / `overflowing_add` (Rust-style)?** Out of scope for this plan. The current Promise position is "arithmetic wraps silently for unsigned, traps for signed in debug" (matching Rust `Wrapping` / debug-overflow conventions); wide types follow the same rule. A future tracker task can introduce a checked-arithmetic family across all integer widths uniformly.
-4. **Constant-time operations for crypto?** Out of scope. LLVM's `iN` div/mul are not constant-time. Crypto code that needs constant-time must hand-craft routines using bitwise ops on `u64[]` or `u32[]` arrays — that pattern remains valid even after this plan lands. Document this clearly in the language guide.
-5. **Atomic operations on wide types?** Out of scope. Atomics on `i128` are platform-specific (x86 has `cmpxchg16b`, ARM64 has `casp`); 256/512 generally lack hardware atomics. If atomics on wide types become necessary, file a separate tracker task.
+2. **Should we expose `wrapping_add` / `checked_add` / `overflowing_add` (Rust-style)?** Out of scope for this plan. The current Promise position is "arithmetic wraps silently for unsigned, traps for signed in debug" (matching Rust `Wrapping` / debug-overflow conventions); wide types follow the same rule. A future tracker task can introduce a checked-arithmetic family across all integer widths uniformly.
+3. **Constant-time operations for crypto?** Out of scope. LLVM's `iN` div/mul are not constant-time. Crypto code that needs constant-time must hand-craft routines using bitwise ops on `u64[]` or `u32[]` arrays — that pattern remains valid even after this plan lands. Document this clearly in the language guide.
+4. **Atomic operations on wide types?** Out of scope. Atomics on `i128` are platform-specific (x86 has `cmpxchg16b`, ARM64 has `casp`); 256/512 generally lack hardware atomics. If atomics on wide types become necessary, file a separate tracker task.
+
+(The earlier draft included "default base 16 vs 10 for `to_string`/`parse`" here; that's now a settled decision — see §5.2.)
 
 ---
 

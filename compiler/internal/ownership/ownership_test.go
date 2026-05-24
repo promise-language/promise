@@ -6952,3 +6952,213 @@ func TestT0411_ChannelFieldFromThisOK(t *testing.T) {
 		test() {}
 	`)
 }
+
+// T0568: a Borrowed param of a non-auto-dup heap user type cannot be moved
+// into a typed var-decl — both the caller and the new local would drop the
+// same heap allocation at scope exit (runtime double-free / segfault).
+func TestT0568_TypedDeclBorrowedParamUserTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		dup_param(_BoxStr b) {
+			_BoxStr c = b;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'b'")
+}
+
+// T0568: same shape as TypedDecl but via the inferred var-decl path (`c := b`).
+func TestT0568_InferredDeclBorrowedParamUserTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		dup_param(_BoxStr b) {
+			c := b;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'b'")
+}
+
+// T0568 carve-out: `string c = s` from a borrowed string param remains
+// allowed — string is auto-dup and codegen clears the LHS drop flag.
+func TestT0568_TypedDeclBorrowedStringParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		dup_str(string s) {
+			string c = s;
+		}
+		test() {}
+	`)
+}
+
+// T0568 carve-out: `int[] c = v` from a borrowed vector param remains allowed.
+func TestT0568_TypedDeclBorrowedVectorParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		dup_vec(int[] v) {
+			int[] c = v;
+		}
+		test() {}
+	`)
+}
+
+// T0568 carve-out: handle types (Arc, Mutex, etc.) remain allowed at the
+// var-decl site because codegen's drop-flag-propagation handles them
+// safely (mirrors T0556's existing Mutex carve-out). Regression guard for
+// the isVarDeclAliasSafeType match-up with codegen's
+// isDroppableContainerOrString set.
+func TestT0568_TypedDeclBorrowedArcParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		dup_arc(Arc[int] a) {
+			Arc[int] c = a;
+		}
+		test() {}
+	`)
+}
+
+// T0568 carve-out coverage: Channel[T] is in isVarDeclAliasSafeType's
+// codegen-safe set. Without this test the Channel branch of
+// isVarDeclAliasSafeType goes uncovered.
+func TestT0568_TypedDeclBorrowedChannelParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		dup_ch(Channel[int] ch) {
+			Channel[int] c = ch;
+		}
+		test() {}
+	`)
+}
+
+// T0568 carve-out coverage: Weak[T] is in isVarDeclAliasSafeType's
+// codegen-safe set.
+func TestT0568_TypedDeclBorrowedWeakParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		dup_weak(Weak[int] w) {
+			Weak[int] c = w;
+		}
+		test() {}
+	`)
+}
+
+// T0568 carve-out coverage: MutexGuard[T] is in isVarDeclAliasSafeType's
+// codegen-safe set (locks are exclusive but the alias path still gets
+// special drop-flag handling at the var-decl site in codegen).
+func TestT0568_TypedDeclBorrowedMutexGuardParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		dup_guard(MutexGuard[int] g) {
+			MutexGuard[int] c = g;
+		}
+		test() {}
+	`)
+}
+
+// T0568 carve-out coverage: Task[T] is in isVarDeclAliasSafeType's
+// codegen-safe set.
+func TestT0568_TypedDeclBorrowedTaskParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		dup_task(Task[int] t) {
+			Task[int] c = t;
+		}
+		test() {}
+	`)
+}
+
+// T0568 carve-out coverage: Mutex[T] is in isVarDeclAliasSafeType's
+// codegen-safe set (no clone semantics, but the alias path is handled by
+// codegen's drop-flag propagation at the var-decl site).
+func TestT0568_TypedDeclBorrowedMutexParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		dup_mutex(Mutex[int] m) {
+			Mutex[int] c = m;
+		}
+		test() {}
+	`)
+}
+
+// T0568 carve-out coverage: Optional wrapping of a codegen-safe type
+// (e.g., `Channel[int]?`) still routes through the recursive Optional
+// branch of isVarDeclAliasSafeType. Without an Optional-wrapped non-string
+// codegen-safe type, that recursion only fires from the string-Optional
+// path covered indirectly elsewhere.
+func TestT0568_TypedDeclBorrowedOptionalChannelParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		dup_opt_ch(Channel[int]? ch) {
+			Channel[int]? c = ch;
+		}
+		test() {}
+	`)
+}
+
+// T0568 carve-out: when LHS adds an Optional wrap over the RHS type
+// (`_Box?? b = a` with `a: _Box?`), sema inserts an implicit `Some` and
+// codegen produces a wrapped value rather than a runtime alias. T0568 only
+// targets pure-alias shapes (LHS depth ≤ RHS depth), so this case must keep
+// compiling — regression guard for tests/e2e/optional_heap_iflet_test.pr's
+// `_returns_triple` shape.
+func TestT0568_TypedDeclOptionalWrapBorrowedParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { int n; }
+		wrap_into_outer(_Box? a) _Box?? {
+			_Box?? b = a;
+			return b;
+		}
+		test() {}
+	`)
+}
+
+// T0568: a `~` consume parameter has state Owned, not Borrowed, so the
+// typed var-decl form is accepted (the move transfers ownership).
+func TestT0568_TypedDeclMutParamUserTypeOK(t *testing.T) {
+	ownerOK(t, `
+		type _BoxStr { string s; }
+		consume(~_BoxStr b) {
+			_BoxStr c = b;
+		}
+		test() {}
+	`)
+}
+
+// T0568 + T0548 interaction: a destructured local from a MemberExpr source
+// is marked Borrowed; binding it into a fresh owned typed var-decl must be
+// rejected with the non-param ("cannot move borrowed value") diagnostic.
+func TestT0568_TypedDeclDestructuredBorrowRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		test() {
+			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, n) := h.pair;
+			_BoxStr c = b;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'b'")
+}
+
+// T0568: same-depth Optional alias (`_BoxStr? c = b` with `b: _BoxStr?`)
+// is still a double-free shape — both LHS and RHS wrap the same heap _BoxStr
+// allocation, and codegen does not auto-dup Optional[heap-user-type].
+func TestT0568_TypedDeclOptionalSameDepthRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		opt_alias(_BoxStr? b) {
+			_BoxStr? c = b;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'b'")
+}
+
+// T0568: an inheritance upcast (`Parent p = childParam`) aliases at the
+// instance pointer; both p and childParam would drop the same heap
+// allocation. Confirmed runtime-segfault pre-fix.
+func TestT0568_TypedDeclInheritanceUpcastRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Parent { int x; }
+		type Child is Parent {
+			int y;
+			new(~this, int x, int y) { this.x = x; this.y = y; }
+		}
+		upcast(Child c) {
+			Parent p = c;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'c'")
+}

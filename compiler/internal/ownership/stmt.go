@@ -157,6 +157,20 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 			}
 			return
 		}
+		// T0568: reject moving a Borrowed ident into an owned var-decl when
+		// the type is not codegen-safe for the alias pattern. Codegen does a
+		// shallow copy for plain heap user types and both the caller (which
+		// still owns the origin) and the new local will drop the same heap
+		// allocation → runtime double-free. The codegen-safe set is captured
+		// by `isVarDeclAliasSafeType` and mirrors codegen's
+		// `isDroppableContainerOrString` (string / Vector / Channel / Arc /
+		// Weak / Mutex / MutexGuard / Task plus Optional thereof): for those
+		// codegen propagates the RHS's drop flag (cleared, for a borrowed
+		// param) or auto-dups via `setDupFlagsForFieldAccess`, so the LHS
+		// does not double-drop.
+		if c.rejectBorrowedIdentVarDecl(s.Value, s.Type) {
+			return
+		}
 		c.tryMove(s.Value)
 	}
 	if s.Name != "_" {
@@ -170,6 +184,120 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	if c.inUnsafe == 0 && isPointerTypeRef(s.Type) {
 		c.errorf(s.Pos(), "raw pointer type used outside of unsafe block")
 	}
+}
+
+// rejectBorrowedIdentVarDecl errors and returns true when `value` is an
+// IdentExpr whose state is Borrowed and whose type is a non-Copy droppable
+// type that codegen does NOT safely alias at the var-decl site — the shape
+// that surfaces a double-free if allowed through to `tryMove`'s silent
+// Borrowed-return path. Callers proceed with the usual `tryMove` only when
+// this returns false.
+//
+// `lhsRef` is the declared LHS TypeRef when known (typed var-decls); pass nil
+// for inferred var-decls. When the LHS adds extra Optional wrap layers over
+// the RHS type (e.g., `_Box?? b = a` with `a: _Box?`), sema inserts an
+// implicit `Some` wrap and codegen produces a wrapped value rather than an
+// alias — those cases are out of scope for T0568 (the runtime safety relies
+// on B0345 caller-side alias clearing after the function returns, which fires
+// when the wrapped value is itself returned). Only reject pure-alias shapes
+// where the LHS wrap depth ≤ RHS wrap depth. T0568.
+func (c *Checker) rejectBorrowedIdentVarDecl(value ast.Expr, lhsRef ast.TypeRef) bool {
+	ident, ok := value.(*ast.IdentExpr)
+	if !ok {
+		return false
+	}
+	state, tracked := c.state[ident.Name]
+	if !tracked || state != Borrowed {
+		return false
+	}
+	typ := c.info.Types[value]
+	if isCopyType(typ) || isVarDeclAliasSafeType(typ) || !isDroppableType(typ) {
+		return false
+	}
+	// Skip when the LHS adds Optional wrap layers — that's a coercion, not
+	// an alias, and codegen materializes a wrapped value.
+	if optionalDepthTypeRef(lhsRef) > optionalDepthType(typ) {
+		return false
+	}
+	if c.params[ident.Name] {
+		c.errorf(ident.Pos(),
+			"cannot move borrowed parameter '%s'; add '~' to the parameter declaration to consume it",
+			ident.Name)
+	} else {
+		c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
+	}
+	return true
+}
+
+// optionalDepthTypeRef returns the count of leading OptionalTypeRef wrappers
+// on a TypeRef. Used to detect implicit `Some` wrapping at a typed var-decl
+// site (T0568). Returns 0 for non-Optional refs and nil refs.
+func optionalDepthTypeRef(ref ast.TypeRef) int {
+	n := 0
+	for {
+		opt, ok := ref.(*ast.OptionalTypeRef)
+		if !ok {
+			return n
+		}
+		n++
+		ref = opt.Inner
+	}
+}
+
+// optionalDepthType returns the count of nested *types.Optional layers on a
+// resolved type. Used to detect implicit `Some` wrapping at a typed var-decl
+// site (T0568). Returns 0 for non-Optional types and nil.
+func optionalDepthType(t types.Type) int {
+	n := 0
+	for {
+		opt, ok := t.(*types.Optional)
+		if !ok {
+			return n
+		}
+		n++
+		t = opt.Elem()
+	}
+}
+
+// isVarDeclAliasSafeType reports whether a typed/inferred var-decl from a
+// Borrowed RHS of this type is runtime-safe due to codegen's drop-flag
+// propagation or auto-dup. Mirrors codegen's `isDroppableContainerOrString`
+// (compiler/internal/codegen/stmt.go) plus Optional wrapping any of those.
+// Used by T0568 to carve out the safe shapes that the borrowed-ident reject
+// must not block. Keep in sync with codegen when new container/handle types
+// are added.
+func isVarDeclAliasSafeType(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	if n := extractNamedType(typ); n != nil && n == types.TypString {
+		return true
+	}
+	if types.IsVector(typ) {
+		return true
+	}
+	if types.IsChannel(typ) {
+		return true
+	}
+	if types.IsArc(typ) {
+		return true
+	}
+	if types.IsWeak(typ) {
+		return true
+	}
+	if types.IsMutex(typ) {
+		return true
+	}
+	if types.IsMutexGuard(typ) {
+		return true
+	}
+	if types.IsTask(typ) {
+		return true
+	}
+	if opt, ok := typ.(*types.Optional); ok {
+		return isVarDeclAliasSafeType(opt.Elem())
+	}
+	return false
 }
 
 // isPointerTypeRef checks whether a type reference is a raw pointer type.
@@ -202,6 +330,12 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 			c.errorf(this.Pos(),
 				"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
 		}
+		return
+	}
+	// T0568: see checkTypedVarDecl — same double-free shape on `c := b`.
+	// Inferred decls cannot have implicit Optional wrap (LHS type is the RHS
+	// type), so no LHS TypeRef is needed for the wrap-depth carve-out.
+	if c.rejectBorrowedIdentVarDecl(s.Value, nil) {
 		return
 	}
 	c.tryMove(s.Value)

@@ -1,0 +1,142 @@
+// T0589: a non-`~` `T?` parameter consumed directly via `if x := a { ... }`
+// or `while x := a { ... }` double-frees with the caller. The if-let /
+// while-let binding takes ownership of the inner heap value, but the caller
+// still owns and drops the same allocation. Sema rejects this pre-codegen,
+// directing the user to either annotate the param `~T?` (consume) or wrap
+// into a wider Optional via an intermediate local (T0585's carve-out).
+//
+// These batch tests exercise the working carve-outs at runtime; the
+// rejection-shape tests live in `compiler/internal/ownership/ownership_test.go`
+// (TestT0589_*).
+type _Box {
+  int n;
+}
+
+// Carve-out: `~_Box? a` consume param. paramInitialState returns Owned for
+// `~T?` params, so T0589 doesn't fire. Codegen flows ownership through to
+// the if-let binding via T0585's drop-flag propagation. Inner is dropped
+// once at the binding's scope exit.
+_test_consume_iflet(~_Box? a) {
+  if x := a {
+    assert(x.n == 1, "consume_iflet");
+  }
+}
+
+t0589_consume_iflet() `test {
+  _Box? a = _Box(n: 1);
+  _test_consume_iflet(a);
+}
+
+// Carve-out: `~_Box? a` consume param with while-let. Inner drops on
+// break-out of the loop via scope cleanup.
+_test_consume_whilelet(~_Box? a) {
+  while x := a {
+    assert(x.n == 2, "consume_whilelet");
+    break;
+  }
+}
+
+t0589_consume_whilelet() `test {
+  _Box? a = _Box(n: 2);
+  _test_consume_whilelet(a);
+}
+
+// Carve-out: borrowed `int?` param — int isn't droppable, predicate skips.
+_test_iflet_int_borrowed(int? n) int {
+  if x := n {
+    return x;
+  }
+  return 0;
+}
+
+t0589_iflet_int_borrowed() `test {
+  int? n = 7;
+  assert(_test_iflet_int_borrowed(n) == 7, "iflet_int_borrowed");
+}
+
+// Carve-out: borrowed `bool?` param — bool isn't droppable.
+_test_iflet_bool_borrowed(bool? b) bool {
+  if x := b {
+    return x;
+  }
+  return false;
+}
+
+t0589_iflet_bool_borrowed() `test {
+  bool? b = true;
+  assert(_test_iflet_bool_borrowed(b) == true, "iflet_bool_borrowed");
+}
+
+// Carve-out: borrowed pure value-type Optional. Value types have no drop,
+// so the predicate skips them. Runtime: data embedded in the Optional value
+// struct, no aliasing of heap allocations.
+type P {
+  int x `value;
+  int y `value;
+}
+
+_test_iflet_value_borrowed(P? p) int {
+  if v := p {
+    return v.x + v.y;
+  }
+  return 0;
+}
+
+t0589_iflet_value_borrowed() `test {
+  P? p = P(x: 3, y: 4);
+  assert(_test_iflet_value_borrowed(p) == 7, "iflet_value_borrowed");
+}
+
+// Carve-out: T0585 wrap-then-iflet path. Borrowed `_Box?` param wrapped
+// into a wider `_Box??` local, then if-let consumes the local. T0585's
+// codegen propagation clears the wrapped local's drop flag so the inner
+// pointer isn't double-freed.
+_test_wrap_then_iflet(_Box? a) int {
+  _Box?? b = a;
+  if x := b {
+    if y := x {
+      return y.n;
+    }
+  }
+  return 0;
+}
+
+t0589_wrap_then_iflet() `test {
+  _Box? a = _Box(n: 42);
+  assert(_test_wrap_then_iflet(a) == 42, "wrap_then_iflet");
+}
+
+// Carve-out: owned local Optional with if-let. The local is Owned, not
+// Borrowed, so T0589 doesn't fire. T0585's drop-flag propagation handles
+// the binding's drop correctly.
+_test_owned_local_iflet() int {
+  _Box? a = _Box(n: 11);
+  if x := a {
+    return x.n;
+  }
+  return 0;
+}
+
+t0589_owned_local_iflet() `test {
+  assert(_test_owned_local_iflet() == 11, "owned_local_iflet");
+}
+
+// Carve-out: owned local Optional with while-let. Owned state, no
+// rejection.
+_test_owned_local_whilelet() int {
+  _Box? a = _Box(n: 13);
+  while x := a {
+    return x.n;
+  }
+  return 0;
+}
+
+t0589_owned_local_whilelet() `test {
+  assert(_test_owned_local_whilelet() == 13, "owned_local_whilelet");
+}
+
+// Integration smoke: `os.execute` was migrated from `map[string,string]?` /
+// `string?` to `~map[string,string]?` / `~string?` params (T0589 forced the
+// migration). All existing callers pass owned locals, which satisfy
+// tryMoveConsume. The migration is exercised end-to-end by
+// `modules/os/os_test.pr::test_execute_custom_env` and siblings.

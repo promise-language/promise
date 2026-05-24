@@ -895,7 +895,7 @@ exit_process(int code);
 get args string[];
 executable_path() string;
 execute!(string program, ...string arguments) ProcessResult ;
-set_env_var(string name, string? value);
+set_env_var(string name, ~string? value);
 set_working_dir(string path) !;
 
 // Streaming process execution

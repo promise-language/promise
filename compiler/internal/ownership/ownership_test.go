@@ -7765,3 +7765,365 @@ func TestT0581_IsThisCallArgSafePrimitiveScalars(t *testing.T) {
 		t.Errorf("isThisCallArgSafe(nil) = true, want false (defensive nil branch)")
 	}
 }
+
+// --- T0589 ---
+// T0589: an `if x := a { … }` (or `while x := a { … }`) on a non-`~` Optional
+// parameter whose inner type is droppable double-frees with the caller. The
+// if-let / while-let binding takes ownership of the inner heap value (drops at
+// scope exit), but the caller still owns and drops the same allocation. Sema
+// must reject before codegen sees the unsafe shape. Mirrors T0586's call-arg
+// reject pattern.
+
+// Plain heap user type inner: `_Box?` borrowed param consumed via if-let.
+func TestT0589_IfLetBorrowedHeapUserOptionalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		take(_Box? a) {
+			if x := a {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
+}
+
+// Heap string inner: `string?` borrowed param.
+func TestT0589_IfLetBorrowedStringOptionalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take(string? s) {
+			if x := s {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 's' via if-let")
+}
+
+// Heap vector inner: `int[]?` borrowed param.
+func TestT0589_IfLetBorrowedVectorOptionalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take(int[]? v) {
+			if x := v {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'v' via if-let")
+}
+
+// Map inner: `map[string,int]?` borrowed param. Map has synth drop.
+func TestT0589_IfLetBorrowedMapOptionalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take(map[string, int]? m) {
+			if x := m {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'm' via if-let")
+}
+
+// Channel inner: `Channel[int]?` borrowed param. Channel is droppable.
+func TestT0589_IfLetBorrowedChannelOptionalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take(Channel[int]? c) {
+			if x := c {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'c' via if-let")
+}
+
+// Arc inner: `Arc[int]?` borrowed param. Arc is droppable (refcount dec).
+func TestT0589_IfLetBorrowedArcOptionalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take(Arc[int]? a) {
+			if x := a {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
+}
+
+// Nested Optional inner: `_Box??` borrowed param. Inner `_Box?` is droppable
+// (Optional recurses).
+func TestT0589_IfLetBorrowedNestedOptionalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		take(_Box?? a) {
+			if x := a {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
+}
+
+// Tuple inner with droppable element: `(_Box, int)?` borrowed param.
+func TestT0589_IfLetBorrowedTupleOptionalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		take((_Box, int)? p) {
+			if x := p {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'p' via if-let")
+}
+
+// Droppable enum inner: enum with droppable variant payload (string field).
+// Exercises the `*types.Enum` branch of `isDroppableType`.
+func TestT0589_IfLetBorrowedEnumOptionalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Msg { Text(string s); Ping; }
+		take(Msg? m) {
+			if x := m {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'm' via if-let")
+}
+
+// While-let parallel of the if-let reject. Same predicate, different statement
+// kind (checkWhileUnwrapStmt).
+func TestT0589_WhileLetBorrowedHeapUserOptionalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		take(_Box? a) {
+			while x := a {
+				_ = x;
+				break;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via while-let")
+}
+
+// Paren-wrapped source: `if x := (a) { … }`. The walk peels ParenExpr just
+// like T0586's helper.
+func TestT0589_IfLetBorrowedThroughParenRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		take(_Box? a) {
+			if x := (a) {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
+}
+
+// If-expr-wrapped source: `if x := (if flag { a } else { a }) { … }`. Codegen
+// forwards the IfExpr's PHI value directly to the unwrap site, so a Borrowed
+// param surfaced in either branch reaches the if-let as the same alias the
+// caller still owns. Confirmed double-free on master without IfExpr peeling.
+func TestT0589_IfLetBorrowedThroughIfExprRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		take(_Box? a, bool flag) {
+			if x := (if flag { a } else { a }) {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
+}
+
+// Match-arm Body source: `if x := (match k { 1 => a, _ => a }) { … }`. The
+// walk recurses into arm.Body via findBorrowedDroppableOptionalIfletSource.
+func TestT0589_IfLetBorrowedThroughMatchBodyRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		take(_Box? a, int k) {
+			if x := (match k { 1 => a, _ => a }) {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
+}
+
+// Match-arm Block source: `if x := (match k { 1 => { a }, _ => { a } }) { … }`.
+// The walk recurses into arm.Block via findBorrowedDroppableOptionalIfletInBlock.
+func TestT0589_IfLetBorrowedThroughMatchBlockRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		take(_Box? a, int k) {
+			if x := (match k { 1 => { a }, _ => { a } }) {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
+}
+
+// Carve-out: `_Box? local = …; if x := local { … }`. The local's state is
+// Owned, not Borrowed — the predicate doesn't fire and codegen's existing
+// drop-flag propagation (T0585) handles this correctly.
+func TestT0589_IfLetOwnedLocalAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { int n; }
+		take() {
+			_Box? a = _Box(n: 1);
+			if x := a {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: `~_Box? a` consume param. paramInitialState returns Owned for
+// `~T?` params, so the predicate doesn't fire — codegen flows ownership
+// through to the if-let binding via T0585's propagation.
+func TestT0589_IfLetConsumeParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { int n; }
+		take(~_Box? a) {
+			if x := a {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: `int?` borrowed param. int isn't droppable — the predicate
+// short-circuits on `!isDroppableType(elem)`. Regression guard that pure
+// primitive Optionals continue to flow through.
+func TestT0589_IfLetBorrowedIntOptionalAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(int? n) {
+			if x := n {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: pure value-type Optional. Value types have no drop (data
+// embedded in the value struct), so `isDroppableType(P) == false` and the
+// predicate skips them.
+func TestT0589_IfLetBorrowedValueTypeOptionalAllowed(t *testing.T) {
+	ownerOK(t, `
+		type P {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+		take(P? p) {
+			if x := p {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: T0585's wrap-then-iflet path. `_Box? a; _Box?? b = a; if x := b`
+// is the documented escape hatch for borrowed sources — codegen's T0585
+// propagation clears b.dropflag at the wrap site. Regression guard that
+// T0589's reject doesn't bleed into this path: the if-let source is the
+// local `b` (Owned), not the param `a`.
+func TestT0589_IfLetWrappedBorrowedOptionalAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { int n; }
+		take(_Box? a) {
+			_Box?? b = a;
+			if x := b {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+}
+
+// Coverage: a Borrowed local (e.g., a destructured borrow) is NOT a param,
+// so the predicate's `c.params[name]` gate skips it. The shape is unsafe in
+// the same way, but other sema rules (T0568, T0571) reject upstream — this
+// regression guard just confirms T0589 itself doesn't generate a false
+// positive on destructure-borrows.
+func TestT0589_IfLetBorrowedDestructureLocalNotRejected(t *testing.T) {
+	// T0571 rejects destructure from a temporary, so we use a tuple field
+	// pattern that does compile. The destructured local is Borrowed.
+	// Because it's not a param, T0589 doesn't fire (other sema rules do).
+	// We assert here that the error, if any, is NOT T0589's diagnostic.
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		type Holder { (_Box?, int) pair; }
+		take() {
+			h := Holder(pair: (_Box(n: 1), 2));
+			(a, _) := h.pair;
+			if x := a {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "cannot consume borrowed parameter") {
+			t.Errorf("T0589 diagnostic incorrectly fired on destructure-borrow local: %v", e)
+		}
+	}
+}
+
+// If-expr with the borrowed param surfaced ONLY in the Else branch (Then
+// returns a non-borrowed Optional). Exercises the `e.Else` recursive call in
+// findBorrowedDroppableOptionalIfletSource — the Then branch's
+// findBorrowedDroppableOptionalIfletInBlock returns nil (the call expression
+// doesn't surface a borrowed param), so the predicate falls through to the
+// Else branch and detects `a` there. Without this case, the existing
+// IfExpr/MatchExpr tests have the borrowed param in BOTH branches, so the
+// Then path always returns first and the Else recursion is never exercised.
+func TestT0589_IfLetBorrowedThroughIfExprElseOnlyRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		gen() _Box? { return _Box(n: 1); }
+		take(_Box? a, bool flag) {
+			if x := (if flag { gen() } else { a }) {
+				_ = x;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
+}
+
+// Method body context (instead of free function). The predicate must fire
+// for if-let on a borrowed Optional method parameter as well — methods
+// register their params via the same c.params/c.state machinery in
+// checkMethodDecl that free functions use in checkFuncDecl. Regression guard
+// against the predicate accidentally being function-scope-only.
+func TestT0589_IfLetBorrowedMethodParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { int n; }
+		type Holder {
+			int x;
+			take(_Box? a) {
+				if y := a {
+					_ = y;
+				}
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
+}

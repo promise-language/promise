@@ -761,11 +761,97 @@ func (c *Checker) checkReturnAmbiguity() {
 
 // --- Control flow statements ---
 
+// findBorrowedDroppableOptionalIfletSource reports the borrowed parameter ident
+// surfaced as an if-let / while-let init expression whose static type is an
+// `Optional[T]` with `isDroppableType(T)` true. The if-let / while-let unwrap
+// transfers ownership of the inner heap value into the binding, which then
+// drops at scope exit — but a non-`~` Optional parameter is borrowed (the
+// caller retains ownership and will also drop), so the consume would
+// double-free. Mirror T0586's call-arg reject (`findBorrowedNonAliasSafeIdent`)
+// at the if-let / while-let init position. Walks through transparent wrappers
+// (ParenExpr / IfExpr / MatchExpr) — codegen forwards the branch value directly
+// (the if/match's PHI value, the paren-stripped inner), so a Borrowed param
+// surfaced through any of these wrappers reaches the unwrap site as the same
+// alias the caller still owns. T0589.
+//
+// Limited to identifiers tracked as parameters (`c.params[name]`) — non-param
+// Borrowed locals (destructure-bound borrows) are caught elsewhere and the
+// affordance ("add '~' to the parameter declaration") only applies to params.
+// The carve-outs match the bug analysis: `int?`, `bool?`, primitive Optionals,
+// value-type Optionals, and structural-interface Optionals are not droppable
+// (their inner type isn't), so the predicate skips them.
+func (c *Checker) findBorrowedDroppableOptionalIfletSource(expr ast.Expr) *ast.IdentExpr {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		if !c.params[e.Name] {
+			return nil
+		}
+		state, tracked := c.state[e.Name]
+		if !tracked || state != Borrowed {
+			return nil
+		}
+		opt, ok := c.info.Types[e].(*types.Optional)
+		if !ok {
+			return nil
+		}
+		if !isDroppableType(opt.Elem()) {
+			return nil
+		}
+		return e
+	case *ast.ParenExpr:
+		return c.findBorrowedDroppableOptionalIfletSource(e.Expr)
+	case *ast.IfExpr:
+		if id := c.findBorrowedDroppableOptionalIfletInBlock(e.Then); id != nil {
+			return id
+		}
+		return c.findBorrowedDroppableOptionalIfletInBlock(e.Else)
+	case *ast.MatchExpr:
+		for _, arm := range e.Arms {
+			if arm.Body != nil {
+				if id := c.findBorrowedDroppableOptionalIfletSource(arm.Body); id != nil {
+					return id
+				}
+			}
+			if arm.Block != nil {
+				if id := c.findBorrowedDroppableOptionalIfletInBlock(arm.Block); id != nil {
+					return id
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// findBorrowedDroppableOptionalIfletInBlock inspects a block's trailing
+// expression (the block's result value) for a surfaced borrowed-Optional
+// ident. Mirrors T0586's findBorrowedNonAliasSafeIdentInBlock — codegen's
+// match-arm-block lowering returns the trailing ExprStmt as the arm's value.
+func (c *Checker) findBorrowedDroppableOptionalIfletInBlock(block *ast.Block) *ast.IdentExpr {
+	if block == nil || len(block.Stmts) == 0 {
+		return nil
+	}
+	if es, ok := block.Stmts[len(block.Stmts)-1].(*ast.ExprStmt); ok {
+		return c.findBorrowedDroppableOptionalIfletSource(es.Expr)
+	}
+	return nil
+}
+
 func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 	if s.Binding != "" {
 		// if-unwrap: if val := expr { }
 		c.checkExpr(s.Init)
 		c.tryMove(s.Init)
+		// T0589: reject consume of a borrowed droppable Optional parameter
+		// via if-let. The if-let binding takes ownership of the inner heap
+		// pointer (drops at scope exit), but the caller still owns and drops
+		// the same allocation → double-free. Force `~T?` to make the consume
+		// explicit, or wrap into a wider Optional via an intermediate local
+		// (T0585's working wrap-then-iflet path).
+		if ident := c.findBorrowedDroppableOptionalIfletSource(s.Init); ident != nil {
+			c.errorf(ident.Pos(),
+				"cannot consume borrowed parameter '%s' via if-let; add '~' to the parameter declaration to consume the Optional, or wrap into a wider Optional via an intermediate local",
+				ident.Name)
+		}
 	} else {
 		c.checkExpr(s.Cond)
 	}
@@ -815,6 +901,16 @@ func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 
 func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	c.checkExpr(s.Value)
+	// T0589: same shape as if-let — `while x := a { … }` consumes the inner
+	// heap value of a borrowed Optional parameter on each loop iteration.
+	// Caller still owns and drops the same allocation → double-free / UAF on
+	// the second iteration even if the first wouldn't crash. Reject under the
+	// same predicate as if-let.
+	if ident := c.findBorrowedDroppableOptionalIfletSource(s.Value); ident != nil {
+		c.errorf(ident.Pos(),
+			"cannot consume borrowed parameter '%s' via while-let; add '~' to the parameter declaration to consume the Optional, or wrap into a wider Optional via an intermediate local",
+			ident.Name)
+	}
 	// Expire call-scoped borrows from the condition expression so the loop
 	// body can re-borrow the same variables (B0004).
 	if c.borrows != nil {

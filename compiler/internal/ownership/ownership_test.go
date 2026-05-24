@@ -3856,10 +3856,11 @@ func TestDestructureFromThisConsumeRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move 'this' while it is borrowed")
 }
 
-// ThisExpr root + NLL narrowing: destructure, read both locals, THEN consume
-// the receiver — must accept (borrow expires at borrower's last use).
+// ThisExpr root + NLL narrowing: destructure, read both locals, THEN attempt
+// to consume the receiver — T0569 rejects the consume regardless of NLL
+// narrowing, since `~this` does not grant ownership.
 func TestDestructureFromThisNLLNarrowing(t *testing.T) {
-	ownerOK(t, `
+	errs := ownerErrs(t, `
 		type _BoxStr { string s; }
 		type Holder {
 			(_BoxStr, int) pair;
@@ -3873,6 +3874,7 @@ func TestDestructureFromThisNLLNarrowing(t *testing.T) {
 		consume_holder(~Holder h) {}
 		test() {}
 	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
 }
 
 // Destructure from a call-result member (`make_holder().pair`) — the source
@@ -4392,12 +4394,14 @@ func TestT0338_MovePlainThis(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed receiver 'this'")
+	expectOwnerError(t, errs, "cannot consume 'this'")
 }
 
-// `~this` allows moving the receiver into a ~ callee.
-func TestT0338_MutThisConsumable(t *testing.T) {
-	ownerOK(t, `
+// T0569: `~this` does NOT allow moving the receiver into a ~ callee — the
+// value still belongs to the caller, so a consume from inside the body
+// would double-free at the caller's scope exit.
+func TestT0569_MutThisCannotBeConsumed(t *testing.T) {
+	errs := ownerErrs(t, `
 		consume(~Box b) {}
 		type Box {
 			int x;
@@ -4405,6 +4409,106 @@ func TestT0338_MutThisConsumable(t *testing.T) {
 		}
 		test() {}
 	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0569 regression guard: calling a `~this` method on the receiver (as the
+// receiver position, not as an argument) is the de-facto borrow pattern
+// used widely in stdlib. This must keep compiling.
+func TestT0569_MutThisReceiverChaining(t *testing.T) {
+	ownerOK(t, `
+		type Counter {
+			int n;
+			bump(~this) { this.n = this.n + 1; }
+			run(~this) {
+				this.bump();
+				this.bump();
+			}
+		}
+		test() {}
+	`)
+}
+
+// T0569 regression guard: a `~this` method body can still mutate fields.
+func TestT0569_MutThisFieldWrite(t *testing.T) {
+	ownerOK(t, `
+		type Counter {
+			int n;
+			reset(~this) { this.n = 0; }
+		}
+		test() {}
+	`)
+}
+
+// T0569 consume-site coverage: tuple literal containing `this` routes
+// through tryMoveConsume(elem) at expr.go's TupleLit branch and must reject.
+func TestT0569_MutThisInTupleLit(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box {
+			int x;
+			into(~this) {
+				(Box, int) p = (this, 1);
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0569 consume-site coverage: array literal element via tryMoveConsume.
+func TestT0569_MutThisInArrayLit(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box {
+			int x;
+			into(~this) {
+				Box[] arr = [this];
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0569 consume-site coverage: map literal value via tryMoveConsume.
+func TestT0569_MutThisInMapLit(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box {
+			int x;
+			into(~this) {
+				map[int, Box] m = {1: this};
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0569 consume-site coverage: assignment to an existing local routes
+// through tryMoveConsume in checkAssignStmt — must reject `y = this`.
+func TestT0569_MutThisAssignToExisting(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box {
+			int x;
+			into(~this) {
+				Box y = Box(x: 0);
+				y = this;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0569 consume-site coverage: tryMoveConsume's Moved-state branch on
+// ThisExpr. Production code never sets state["this"] = Moved (the fix
+// errors immediately instead of transitioning state), so this branch is
+// only reachable via direct unit-level construction — but it remains as
+// defense-in-depth, so exercise it explicitly.
+func TestT0569_TryMoveConsumeThisMoved(t *testing.T) {
+	c := newUnitChecker()
+	c.state["this"] = Moved
+	c.tryMoveConsume(&ast.ThisExpr{})
+	expectOwnerError(t, c.errors, "use of moved variable 'this'")
 }
 
 // Copy-type params are unaffected by the borrowed-param check.

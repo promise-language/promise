@@ -225,17 +225,23 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 		c.checkFieldMoveOwnership(member)
 		return
 	}
-	// `this` consume requires `~this` receiver.
+	// T0569: `this` cannot be consumed from a method body, even under `~this`.
+	// `~this` grants the body mutable access (mutate fields, call `~this`
+	// setters), but the value still belongs to the caller — moving `this` into
+	// a `~T` consume slot would leave the caller's drop flag set on a freed
+	// allocation. The synthesized drop infrastructure (`emitFieldDrops` +
+	// `pal_free` at the end of `drop`) bypasses this check, so it does not
+	// affect drop bodies.
 	if this, ok := expr.(*ast.ThisExpr); ok {
-		if c.state["this"] == Borrowed {
-			c.errorf(this.Pos(),
-				"cannot move borrowed receiver 'this'; declare the method as 'method(~this)' to consume the receiver")
-		} else if c.state["this"] == Moved {
+		if c.state["this"] == Moved {
 			c.errorf(this.Pos(), "use of moved variable 'this'")
 		} else if c.borrows != nil && c.borrows.HasAnyBorrow("this") {
 			// T0548: reject consume of `this` while a borrow on it is
 			// active (e.g., from `(b, n) := this.pair`).
 			c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
+		} else {
+			c.errorf(this.Pos(),
+				"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
 		}
 		return
 	}

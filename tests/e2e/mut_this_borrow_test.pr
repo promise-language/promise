@@ -1,0 +1,47 @@
+// T0569 regression guard: `~this` is a mutable borrow, not an ownership
+// transfer. The method body may mutate fields and chain into other `~this`
+// methods on the same receiver, but it cannot move `this` into a `~T`
+// consume slot (that case is rejected at compile time — see the Go-level
+// ownership tests).
+type Counter {
+  int n;
+  string label;
+
+  bump(~this) {
+    this.n = this.n + 1;
+  }
+
+  bump_twice(~this) {
+    this.bump();
+    this.bump();
+  }
+
+  relabel(~this, ~string s) {
+    this.label = s;
+  }
+}
+
+// `~this` body mutates a primitive field — caller still owns the value.
+test_mut_this_field_int() `test {
+  Counter c = Counter(n: 0, label: "init");
+  c.bump();
+  assert(c.n == 1, "n incremented once");
+  c.bump();
+  c.bump();
+  assert(c.n == 3, "n incremented twice more");
+}
+
+// `~this` method chaining: bump_twice calls bump twice on `this` as receiver.
+test_mut_this_receiver_chain() `test {
+  Counter c = Counter(n: 5, label: "x");
+  c.bump_twice();
+  assert(c.n == 7, "chained bumps applied");
+}
+
+// `~this` body mutates a heap-allocated string field — caller's drop still
+// frees the new value, not a freed one.
+test_mut_this_field_string() `test {
+  Counter c = Counter(n: 0, label: "old".to_upper());
+  c.relabel("new" + "label");
+  assert(c.label == "newlabel", "label replaced");
+}

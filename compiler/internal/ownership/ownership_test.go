@@ -3972,10 +3972,12 @@ func TestDestructureFromThisNLLNarrowing(t *testing.T) {
 }
 
 // Destructure from a call-result member (`make_holder().pair`) — the source
-// has no stable IdentExpr root, so destructureBorrowRoot returns "" and no
-// borrow constraint is registered. The destructured locals are still marked
-// Borrowed though, so attempting to move them into a consume site is still
-// rejected. (Runtime-level UAF for this shape is tracked separately as T0571.)
+// has no stable IdentExpr root, so destructureBorrowRoot returns "" and the
+// T0571 rejection fires up front. The per-element loop still runs and marks
+// non-Copy locals as Borrowed (no Origin to attach), so the subsequent
+// `consume_box(b)` also triggers the "cannot move borrowed value" diagnostic.
+// This test guards the Borrowed-state propagation path; the T0571 block below
+// guards the primary rejection diagnostic.
 func TestDestructureFromCallMemberMoveLocalRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type _BoxStr { string s; }
@@ -4012,6 +4014,226 @@ func TestDestructureFromThisMoveLocalRejected(t *testing.T) {
 		test() {}
 	`)
 	expectOwnerError(t, errs, "cannot move 'this' while it is borrowed")
+}
+
+// === T0571: destructure-from-temporary-expression is rejected at compile
+// time. T0548/T0570 covered destructure sources rooted at a stable variable
+// (IdentExpr / ThisExpr), but a MemberExpr/IndexExpr whose root is a transient
+// temporary (CallExpr, conditional, error-handler, cast, …) has no anchoring
+// owner to extend the borrow's lifetime to. Codegen drops the temp at end of
+// the destructure statement (via stmtTemps cleanup), leaving any non-Copy
+// destructured local dangling. The fix rejects the pattern up-front in
+// checkDestructureVarDecl when destructureBorrowRoot returns "" and any
+// non-Copy slot exists. Workaround: bind the source to a local first. ===
+
+// Exact bug repro: `(b, n) := make_holder().pair;` — call-result.field source.
+// Without the fix this segfaults at runtime; with it, a clear compile-time
+// error fires.
+func TestDestructureFromCallExprRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		make_holder() Holder { return Holder(pair: (_BoxStr(s: "x"), 2)); }
+		test() {
+			(b, n) := make_holder().pair;
+			_ = b.s;
+			_ = n;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot destructure from temporary expression")
+}
+
+// IndexExpr arm: `(b, n) := make_vec()[0];` — call-result[0] source. The
+// CallExpr return is a temp Vector; IndexExpr produces an inner-buffer
+// reference that has no anchoring local to constrain its lifetime to.
+func TestDestructureFromCallExprViaIndexExprRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		make_vec() Vector[(_BoxStr, int)] {
+			Vector[(_BoxStr, int)] v = [];
+			v.push((_BoxStr(s: "x"), 2));
+			return v;
+		}
+		test() {
+			(b, n) := make_vec()[0];
+			_ = b.s;
+			_ = n;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot destructure from temporary expression")
+}
+
+// ParenExpr-wrapped repro: `(b, n) := (make_holder().pair);` — the T0570 paren
+// peel routes through the MemberExpr arm, then T0571's root check sees the
+// inner CallExpr and rejects.
+func TestDestructureFromCallExprParenRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		make_holder() Holder { return Holder(pair: (_BoxStr(s: "x"), 2)); }
+		test() {
+			(b, n) := (make_holder().pair);
+			_ = b.s;
+			_ = n;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot destructure from temporary expression")
+}
+
+// All-Copy tuple elements: every destructured local is implicitly copied out
+// of the temp before it's dropped, so there's no dangling borrow. The
+// rejection must not fire.
+func TestDestructureFromCallExprAllCopyOK(t *testing.T) {
+	ownerOK(t, `
+		type Holder { (int, int) pair; }
+		make_holder() Holder { return Holder(pair: (1, 2)); }
+		test() {
+			(a, b) := make_holder().pair;
+			_ = a + b;
+		}
+	`)
+}
+
+// All-discard slots: every non-Copy element is `_`, so nothing borrows the
+// temp's heap data. The temp drops cleanly at end of statement with no
+// dangling reference.
+func TestDestructureFromCallExprAllDiscardOK(t *testing.T) {
+	ownerOK(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		make_holder() Holder { return Holder(pair: (_BoxStr(s: "x"), 2)); }
+		test() {
+			(_, _) := make_holder().pair;
+		}
+	`)
+}
+
+// Documented workaround: bind the temp to a local first, then destructure
+// from the local. T0548's borrow registration anchors the destructured
+// locals to the local, which has scope-tied drop ordering — runtime-safe.
+func TestDestructureFromCallExprWorkaroundOK(t *testing.T) {
+	ownerOK(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		make_holder() Holder { return Holder(pair: (_BoxStr(s: "x"), 2)); }
+		test() {
+			Holder h = make_holder();
+			(b, n) := h.pair;
+			_ = b.s;
+			_ = n;
+		}
+	`)
+}
+
+// Partial Copy: only one slot is non-Copy. A single non-Copy borrow with no
+// anchor is enough to UAF, so the rejection still fires.
+func TestDestructureFromCallExprPartialCopyRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (int, _BoxStr) pair; }
+		make_holder() Holder { return Holder(pair: (1, _BoxStr(s: "x"))); }
+		test() {
+			(n, b) := make_holder().pair;
+			_ = n;
+			_ = b.s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot destructure from temporary expression")
+}
+
+// Chained method call: `obj.method().field` — the inner CallExpr produces a
+// temp, walked-up root is the CallExpr, so destructureBorrowRoot returns ""
+// and the rejection fires. Mirrors the bare make_holder() case.
+func TestDestructureFromChainedCallRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		type Factory {
+			make(this) Holder { return Holder(pair: (_BoxStr(s: "x"), 2)); }
+		}
+		test() {
+			Factory f = Factory();
+			(b, n) := f.make().pair;
+			_ = b.s;
+			_ = n;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot destructure from temporary expression")
+}
+
+// Discard-first with non-Copy second slot: `(_, b) := f().pair` exercises the
+// "skip _ then encounter non-Copy" path in the rejection loop. Without this
+// test, a future change that returns early on the first slot (e.g. checking
+// only s.Names[0]) would silently miss this UAF pattern.
+func TestDestructureFromCallExprDiscardFirstRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, _BoxStr) pair; }
+		make_holder() Holder { return Holder(pair: (_BoxStr(s: "x"), _BoxStr(s: "y"))); }
+		test() {
+			(_, b) := make_holder().pair;
+			_ = b.s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot destructure from temporary expression")
+}
+
+// OptionalUnwrapExpr source: `(b, n) := opt!.pair` — the `!` operator produces
+// the inner value of the optional but the unwrapped expression is still a
+// transient temp with no anchoring local. Falls through destructureBorrowRoot's
+// default arm. Regression guard against a future change that adds
+// OptionalUnwrapExpr to the walk-down switch without also extending the temp's
+// lifetime.
+func TestDestructureFromOptionalUnwrapRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		test() {
+			Holder? oh = Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, n) := oh!.pair;
+			_ = b.s;
+			_ = n;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot destructure from temporary expression")
+}
+
+// IfExpr source: `(b, n) := (if c { a } else { b }).pair`. Both arms produce
+// owned Holder values, the IfExpr's result is a temp dropped at end of
+// statement. Falls through destructureBorrowRoot's default arm. Regression
+// guard against a future change that adds IfExpr to the walk-down.
+func TestDestructureFromIfExprRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		make_a() Holder { return Holder(pair: (_BoxStr(s: "a"), 1)); }
+		make_b() Holder { return Holder(pair: (_BoxStr(s: "b"), 2)); }
+		test() {
+			bool flag = true;
+			(b, n) := (if flag { make_a() } else { make_b() }).pair;
+			_ = b.s;
+			_ = n;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot destructure from temporary expression")
+}
+
+// ErrorPanicExpr source: `(b, n) := f()?!.pair` — the `?!` operator panics on
+// error and otherwise produces the inner value. Like OptionalUnwrap, the
+// unwrapped expression is a transient temp. Falls through to default arm.
+// Regression guard for the failable-expression family of patterns.
+func TestDestructureFromErrorPanicRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		make_holder!() Holder { return Holder(pair: (_BoxStr(s: "x"), 2)); }
+		test() {
+			(b, n) := make_holder()?!.pair;
+			_ = b.s;
+			_ = n;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot destructure from temporary expression")
 }
 
 // Inside a generic method body, the owner's TypeArgs are still TypeParams.

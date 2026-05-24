@@ -383,3 +383,24 @@ test_destructure_paren_ident_owned_tuple() `test {
   assert(b.s == "xyzw", "b.s");
   assert(n == 22, "n");
 }
+
+// T0571: destructure-from-temporary (`f().field`) is rejected at compile
+// time. The documented workaround — bind the source to a local first — must
+// run cleanly with no UAF and no leak. This positive test guards against
+// future regressions in the bind-to-local destructure path.
+type _BoxStrT0571 {
+  string s;
+}
+type _HolderT0571 {
+  (_BoxStrT0571, int) pair;
+}
+make_holder_t0571() _HolderT0571 {
+  return _HolderT0571(pair: (_BoxStrT0571(s: "x" + "y"), 5));
+}
+
+test_destructure_call_result_via_local() `test {
+  _HolderT0571 m = make_holder_t0571();
+  (b, n) := m.pair;
+  assert(b.s == "xy", "b.s");
+  assert(n == 5, "n");
+}

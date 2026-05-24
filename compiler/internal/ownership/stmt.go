@@ -213,6 +213,25 @@ func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 		if tup, ok := c.info.Types[s.Value].(*types.Tuple); ok {
 			elems = tup.Elems()
 		}
+		// T0571: When the destructure source's root is not a stable variable
+		// (CallExpr / conditional / error-handler / cast / etc.), the source is
+		// a transient temporary that codegen drops at end of the destructure
+		// statement (via stmtTemps cleanup). Non-Copy destructured locals are
+		// pure borrows into that temp's heap data, so they dangle the moment
+		// the statement ends. Reject at compile time and direct the user to
+		// bind the source to a local first.
+		if rootName == "" {
+			for i, name := range s.Names {
+				if name == "_" {
+					continue
+				}
+				if i < len(elems) && !isCopyType(elems[i]) {
+					c.errorf(s.Pos(),
+						"cannot destructure from temporary expression; non-Copy destructured locals would dangle after the source is dropped — bind the source to a local first")
+					break
+				}
+			}
+		}
 		for i, name := range s.Names {
 			if name == "_" {
 				continue

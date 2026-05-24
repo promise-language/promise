@@ -1,0 +1,63 @@
+// T0556: pushing a borrowed Mutex/Task/MutexGuard param into a heap
+// container double-free'd at runtime because sema's `tryMove` is a no-op for
+// Borrowed sources but codegen has no dup path for these single-owner native
+// handles. Sema now rejects the unsafe pattern at the call site and directs
+// the user to add `~` to the parameter — at which point the caller transfers
+// ownership and the runtime is correct.
+//
+// This file is the runtime-correctness companion to the Go-level rejection
+// tests in compiler/internal/ownership/ownership_test.go (TestT0556_*).
+// --- Arc[T] (duppable, control case) ------------------------------------
+// Arc pushes from a borrowed param still work — codegen emits dupArc at the
+// call site so the caller's drop and the vector's element drop reach the
+// same Arc with refcount 2.
+push_arc(Arc[int] a) {
+  v := Vector[Arc[int]]();
+  v.push(a);
+}
+
+test_arc_param_push_ok() `test {
+  a := Arc[int](7);
+  push_arc(a);
+}
+
+// --- Mutex[T] -----------------------------------------------------------
+
+push_mutex(~Mutex[int] m) {
+  v := Vector[Mutex[int]]();
+  v.push(m);
+}
+
+test_mutex_consume_push() `test {
+  m := Mutex[int](42);
+  push_mutex(m);
+}
+
+// --- Task[T] ------------------------------------------------------------
+
+worker_t0556() int {
+  return 17;
+}
+
+push_task(~Task[int] t) {
+  v := Vector[Task[int]]();
+  v.push(t);
+}
+
+test_task_consume_push() `test(exclude: wasm) {
+  t := go worker_t0556();
+  push_task(t);
+}
+
+// --- MutexGuard[T] ------------------------------------------------------
+
+push_guard(~MutexGuard[int] g) {
+  v := Vector[MutexGuard[int]]();
+  v.push(g);
+}
+
+test_guard_consume_push() `test {
+  m := Mutex[int](42);
+  g := m.lock();
+  push_guard(g);
+}

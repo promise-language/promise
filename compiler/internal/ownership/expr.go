@@ -297,6 +297,75 @@ func paramBorrowKind(p *types.Param) BorrowKind {
 	return BorrowNone
 }
 
+// isNonDuppableNativeHandle reports whether t is a single-owner native handle
+// (Mutex[T], MutexGuard[T], Task[T]) with no clone/dup semantics. Moving such
+// a value out of a Borrowed param into a call argument has no codegen
+// compensation (see maybeDupPushElement in codegen/expr.go), so both the
+// callee-side consumer's drop and the caller's drop fire on the same
+// allocation → runtime double-free (T0556).
+func isNonDuppableNativeHandle(t types.Type) bool {
+	if _, ok := types.AsMutex(t); ok {
+		return true
+	}
+	if _, ok := types.AsMutexGuard(t); ok {
+		return true
+	}
+	if _, ok := types.AsTask(t); ok {
+		return true
+	}
+	return false
+}
+
+// findBorrowedNonDuppableIdent reports a borrowed identifier of a non-duppable
+// single-owner handle type reachable through transparent wrappers (parens,
+// if/else, match arms). Returns the offending ident or nil. The walk mirrors
+// the type-driven shape that isBorrowedExpr uses for SharedRef/MutRef: sema
+// propagates the value type through these compositions, so any branch that
+// surfaces a Borrowed Mutex/Task/MutexGuard variable is unsafe.
+func (c *Checker) findBorrowedNonDuppableIdent(expr ast.Expr) *ast.IdentExpr {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		if state, tracked := c.state[e.Name]; tracked && state == Borrowed {
+			if isNonDuppableNativeHandle(c.info.Types[e]) {
+				return e
+			}
+		}
+	case *ast.ParenExpr:
+		return c.findBorrowedNonDuppableIdent(e.Expr)
+	case *ast.IfExpr:
+		if id := c.findBorrowedNonDuppableIdentInBlock(e.Then); id != nil {
+			return id
+		}
+		return c.findBorrowedNonDuppableIdentInBlock(e.Else)
+	case *ast.MatchExpr:
+		for _, arm := range e.Arms {
+			if arm.Body != nil {
+				if id := c.findBorrowedNonDuppableIdent(arm.Body); id != nil {
+					return id
+				}
+			}
+			if arm.Block != nil {
+				if id := c.findBorrowedNonDuppableIdentInBlock(arm.Block); id != nil {
+					return id
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// findBorrowedNonDuppableIdentInBlock inspects a block's trailing expression
+// (the block's result value). Mirrors codegen's clearBlockResultDropFlags.
+func (c *Checker) findBorrowedNonDuppableIdentInBlock(block *ast.Block) *ast.IdentExpr {
+	if block == nil || len(block.Stmts) == 0 {
+		return nil
+	}
+	if es, ok := block.Stmts[len(block.Stmts)-1].(*ast.ExprStmt); ok {
+		return c.findBorrowedNonDuppableIdent(es.Expr)
+	}
+	return nil
+}
+
 // checkCallExpr handles function calls and constructor calls.
 // For function calls, arguments matched to value parameters trigger moves;
 // arguments matched to borrow parameters create borrows.
@@ -313,6 +382,24 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 			if i < len(params) {
 				kind := paramBorrowKind(params[i])
 				if kind == BorrowNone {
+					// T0556: Reject moves of borrowed non-duppable single-owner
+					// handles (Mutex/MutexGuard/Task) into plain-param call args.
+					// Unlike duppable types (Arc, Channel, Vector, string), there
+					// is no codegen path to dup the value at the call site, so
+					// the callee's consumer drop and the caller's drop both
+					// fire on the same allocation → runtime double-free.
+					if ident := c.findBorrowedNonDuppableIdent(arg.Value); ident != nil {
+						if c.params[ident.Name] {
+							c.errorf(ident.Pos(),
+								"cannot move borrowed parameter '%s' of single-owner type into call argument; add '~' to the parameter declaration to consume it",
+								ident.Name)
+						} else {
+							c.errorf(ident.Pos(),
+								"cannot move borrowed value '%s' of single-owner type into call argument",
+								ident.Name)
+						}
+						continue
+					}
 					c.tryMove(arg.Value)
 				} else if params[i].Ref() == types.RefMut {
 					// T0087: ~ on regular params means move (callee owns).

@@ -3986,6 +3986,173 @@ func TestT0338_VectorLitBorrowedParam(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
 
+// === T0556: borrowed non-duppable single-owner handles into call args ===
+
+// Mutex[T] has no clone/dup semantics. Without rejection, the callee's
+// push consumes the value, the callee scope-exit drops the vector (and its
+// Mutex element), and the caller's drop fires on the same allocation →
+// runtime double-free. Sema must reject the move.
+func TestT0556_PushBorrowedMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take_mutex_push(Mutex[int] m) {
+			outer := Vector[Mutex[int]]();
+			outer.push(m);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+}
+
+// Task[T] is also a single-owner native handle with no dup path.
+func TestT0556_PushBorrowedTaskParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		take_task_push(Task[int] t) {
+			outer := Vector[Task[int]]();
+			outer.push(t);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 't' of single-owner type into call argument")
+}
+
+// MutexGuard[T] cannot be duped either (locking is exclusive).
+func TestT0556_PushBorrowedMutexGuardParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take_guard_push(MutexGuard[int] g) {
+			outer := Vector[MutexGuard[int]]();
+			outer.push(g);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'g' of single-owner type into call argument")
+}
+
+// With `~Mutex[int] m`, the caller transfers ownership at the call site
+// (drop flag cleared), and the callee may consume it. No double-free.
+func TestT0556_PushMutMutexParamOK(t *testing.T) {
+	ownerOK(t, `
+		take_mutex_push(~Mutex[int] m) {
+			outer := Vector[Mutex[int]]();
+			outer.push(m);
+		}
+		test() {
+			m := Mutex[int](42);
+			take_mutex_push(m);
+		}
+	`)
+}
+
+// Arc[T] is duppable (refcount inc), so push of a borrowed Arc param is
+// still allowed — codegen emits dupArc at the call site. Regression guard.
+func TestT0556_PushBorrowedArcParamOK(t *testing.T) {
+	ownerOK(t, `
+		take_arc_push(Arc[int] a) {
+			outer := Vector[Arc[int]]();
+			outer.push(a);
+		}
+		test() {
+			a := Arc[int](7);
+			take_arc_push(a);
+		}
+	`)
+}
+
+// `return m` for a borrowed Mutex param is handled by codegen's B0345
+// alias-clear of the caller's drop flag — not by sema rejection.
+// Regression guard that T0556's call-arg rejection doesn't bleed into
+// the return path (which uses tryMove, not checkCallExpr).
+func TestT0556_ReturnBorrowedMutexParamOK(t *testing.T) {
+	ownerOK(t, `
+		identity(Mutex[int] m) Mutex[int] { return m; }
+		test() {
+			m := Mutex[int](42);
+			m2 := identity(m);
+		}
+	`)
+}
+
+// `n := m` for a borrowed Mutex param produces an aliased local (codegen
+// detects the missing drop flag on the RHS and skips registering one for
+// the LHS). Sema's call-arg rejection must not apply to var-decl sites.
+func TestT0556_VarDeclBorrowedMutexParamOK(t *testing.T) {
+	ownerOK(t, `
+		alias(Mutex[int] m) {
+			n := m;
+		}
+		test() {}
+	`)
+}
+
+// Transparent wrappers must not let a borrowed Mutex slip past the check.
+// Without unwrapping ParenExpr, `v.push((m))` segfaults at runtime — the
+// outer ParenExpr is neither an IdentExpr nor handled by tryMove.
+func TestT0556_PushParenWrappedMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take_paren(Mutex[int] m) {
+			v := Vector[Mutex[int]]();
+			v.push((m));
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+}
+
+// If-expression branches that return a borrowed Mutex must also be
+// rejected — both branches produce the same aliased pointer the caller
+// will drop.
+func TestT0556_PushIfWrappedMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take_if(Mutex[int] m, bool flag) {
+			v := Vector[Mutex[int]]();
+			v.push(if flag { m } else { m });
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+}
+
+// Coverage: when only the Else branch surfaces the borrowed Mutex param,
+// the walk must fall through to checking Else (the Then branch returns
+// nil because make_mutex() is a fresh owned CallExpr, not an IdentExpr).
+func TestT0556_PushIfElseOnlyMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		make_mutex_t0556() Mutex[int] { return Mutex[int](0); }
+		take_if_else(Mutex[int] m, bool flag) {
+			v := Vector[Mutex[int]]();
+			v.push(if flag { make_mutex_t0556() } else { m });
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+}
+
+// Coverage: match-expression with arm.Body (no block, `=> expr`) form —
+// the walk recurses into arm.Body via findBorrowedNonDuppableIdent.
+func TestT0556_PushMatchExprBodyMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take_match(Mutex[int] m, int k) {
+			v := Vector[Mutex[int]]();
+			v.push(match k { 1 => m, _ => m });
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+}
+
+// Coverage: match-expression with arm.Block (`=> { stmts; expr }`) form —
+// the walk recurses into arm.Block via findBorrowedNonDuppableIdentInBlock.
+func TestT0556_PushMatchExprBlockMutexParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take_match_block(Mutex[int] m, int k) {
+			v := Vector[Mutex[int]]();
+			v.push(match k { 1 => { m }, _ => { m } });
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+}
+
 // === T0349: extend tryMoveConsume to raise/yield/yield-from/select-send ===
 
 // raise consumes the value into the caller's error slot — the outer caller

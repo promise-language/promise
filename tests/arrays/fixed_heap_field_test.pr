@@ -325,5 +325,101 @@ test_local_enum_array_reassign_across_variants() `test {
   assert(desc == "inactive", "slot 1 reassigned to inactive");
 }
 
-// NOTE: Generic types with `T[N]` fields (e.g. `Holder[_Box]`) currently leak
-// because `monoTypeHasDroppable` is missing the Array case. Tracked under T0584.
+type _GenHolder[T] {
+  T[2] data;
+}
+
+test_generic_array_field_heap_user() `test {
+  // T0584: _Box is a heap user type with explicit drop. Without the Array case
+  // in monoTypeHasDroppable, _GenHolder[_Box].drop is not synthesised — the two
+  // _Box allocations leak when h goes out of scope.
+  _GenHolder[_Box] h = _GenHolder[_Box](data: [_Box(n: 1), _Box(n: 2)]);
+  assert(h.data[0].n == 1, "elem 0");
+  assert(h.data[1].n == 2, "elem 1");
+}
+
+test_generic_array_field_string() `test {
+  // string element with forced heap allocation (concat lifts from .rodata).
+  string a = "x";
+  a = a + "x";
+  string b = "y";
+  b = b + "y";
+  _GenHolder[string] h = _GenHolder[string](data: [a, b]);
+  assert(h.data[0] == "xx", "elem 0");
+  assert(h.data[1] == "yy", "elem 1");
+}
+
+test_generic_array_field_vector() `test {
+  // Vector[int] element — synth drop must walk the array and call Vector.drop
+  // on each slot.
+  Vector[int] v0 = Vector[int]();
+  v0.push(1);
+  Vector[int] v1 = Vector[int]();
+  v1.push(2);
+  _GenHolder[Vector[int]] h = _GenHolder[Vector[int]](data: [v0, v1]);
+  assert(h.data[0][0] == 1, "elem 0");
+  assert(h.data[1][0] == 2, "elem 1");
+}
+
+type _TupArrGen[T] {
+  (T, int)[2] data;
+}
+
+test_generic_array_of_tuple_of_typeparam() `test {
+  // Array of Tuple of TypeParam — exercises both the Array and Tuple recursion
+  // branches of monoTypeHasDroppable. Without the Array case, the gate never
+  // reaches the inner Tuple's TypeParam droppable check.
+  _TupArrGen[_Box] h = _TupArrGen[_Box](data: [(_Box(n: 1), 1), (_Box(n: 2), 2)]);
+  assert(true, "constructed");
+}
+
+type _OptArrGen[T] {
+  T?[2] data;
+}
+
+test_generic_array_of_optional_of_typeparam() `test {
+  // Array of Optional of TypeParam — exercises the Array → Optional recursion
+  // chain. Sema's fieldTypeHasDrop returns false for the bare TypeParam, so
+  // detection must happen at mono time and recurse through both wrappers.
+  _Box? a = _Box(n: 1);
+  _Box? b = _Box(n: 2);
+  _OptArrGen[_Box] h = _OptArrGen[_Box](data: [a, b]);
+  assert(true, "constructed");
+}
+
+type _Pair[T, U] {
+  T[2] a;
+  U[2] b;
+}
+
+test_generic_array_field_multi_typeparam() `test {
+  // Multi-typeparam generic with two T[N] fields — confirms the gate fires
+  // per-field and substitution maps for distinct type params resolve correctly.
+  _Pair[_Box, string] h = _Pair[_Box, string](a: [_Box(n: 1), _Box(n: 2)],
+  b: ["alpha", "beta"]);
+  assert(h.a[0].n == 1, "a[0]");
+  assert(h.b[0] == "alpha", "b[0]");
+}
+
+enum _GenEnum[T] {
+  Pair(T[2] data),
+  Empty,
+}
+
+test_generic_enum_array_variant_field() `test {
+  // Generic ENUM with T[N] variant field — parallel case for the fix in
+  // monoEnumInstNeedsSynthDrop, which calls into the same monoTypeHasDroppable.
+  // Without the Array case, the synth enum drop is never generated and the
+  // _Box allocations in the variant data leak.
+  _GenEnum[_Box] e = _GenEnum[_Box].Pair([_Box(n: 1), _Box(n: 2)]);
+  assert(true, "constructed");
+}
+
+test_generic_array_field_primitive_no_false_positive() `test {
+  // Negative test: T = int (primitive) must NOT trigger synth drop generation.
+  // The Array recursion bottoms out at the primitive Named branch, which
+  // returns false. No leak, no false-positive drop emission.
+  _GenHolder[int] h = _GenHolder[int](data: [10, 20]);
+  assert(h.data[0] == 10, "elem 0");
+  assert(h.data[1] == 20, "elem 1");
+}

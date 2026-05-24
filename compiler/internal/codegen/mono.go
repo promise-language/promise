@@ -1775,6 +1775,9 @@ func monoTypeHasDroppable(typ types.Type) bool {
 		}
 		return false
 	}
+	if arr, ok := typ.(*types.Array); ok {
+		return monoTypeHasDroppable(arr.Elem())
+	}
 	if opt, ok := typ.(*types.Optional); ok {
 		return monoTypeHasDroppable(opt.Elem())
 	}

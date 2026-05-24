@@ -3074,7 +3074,15 @@ func (c *Compiler) genArcMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ele
 	if c.typeSubst != nil {
 		elemType = types.Substitute(elemType, c.typeSubst)
 	}
+	// T0500: suppress the receiver field-read dup — clone()/downgrade() perform
+	// their own atomic increment that produces the caller's owning reference.
+	// Without this, `owner._arcField.clone()` increments strong_count twice
+	// (dup + method body) but the caller registers only one matching drop,
+	// leaking +1.
+	savedDup := c.dupContainerFieldAccess
+	c.dupContainerFieldAccess = false
 	arcRaw := c.genExprAutoPropagate(member.Target) // B0323
+	c.dupContainerFieldAccess = savedDup
 
 	switch method {
 	case "clone":
@@ -3110,7 +3118,15 @@ func (c *Compiler) genWeakMethodCall(e *ast.CallExpr, member *ast.MemberExpr, el
 	if c.typeSubst != nil {
 		elemType = types.Substitute(elemType, c.typeSubst)
 	}
+	// T0500: suppress the receiver field-read dup — clone()/upgrade() perform
+	// their own atomic increment that produces the caller's owning reference.
+	// Without this, `owner._weakField.clone()` increments weak_count twice
+	// (dup + method body) but the caller registers only one matching drop,
+	// leaking +1.
+	savedDup := c.dupContainerFieldAccess
+	c.dupContainerFieldAccess = false
 	weakRaw := c.genExprAutoPropagate(member.Target) // B0323
+	c.dupContainerFieldAccess = savedDup
 
 	switch method {
 	case "clone":

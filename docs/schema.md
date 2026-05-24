@@ -96,9 +96,11 @@ enum ScalarKind `public {
 }
 
 // 128-bit content-addressed identity. See §4.
+// Wraps a single native u128 (see docs/large-integers.md); the wrapper carries
+// the semantic name and the `value/`clone placement so it stays distinct from
+// a plain numeric u128 at the type system level.
 type Hash128 `public `value `clone {
-    u64 hi;
-    u64 lo;
+    u128 value;
 }
 
 // Where a type is defined. Determines the project-level inputs to the hash. See §5.

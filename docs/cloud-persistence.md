@@ -121,38 +121,37 @@ free side-effect of the lookup the server was going to do anyway.
   didn't already do. The server lookup is the path; the type is the
   by-product.
 
-### 2.3 Optional type hint for shard-aware backends
+### 2.3 No client-side type hint on Get
 
-The server lookup is not a bottleneck (it's needed anyway to locate the row),
-but on backends that physically shard storage by type (per-type tables in
-Postgres, per-type collections in Firestore), routing the read to the right
-shard requires knowing the type *before* the lookup. The wire-level op shape
-allows an **optional type hint** for that case:
+A client never knows an entity's concrete type from its id alone — a
+`Ref[Animal]` may hold an id whose entity is a `Dog`, and the client has no
+way to know which subtype until it has the entity in hand. Any "hint" the
+client could supply would be at best the declared bound (`Animal._type_id`),
+which is useless to a sharded backend because the actual row lives in the
+`Dog` shard, not the `Animal` shard. A bad hint is worse than no hint: it
+either forces the backend to scan the wrong shard first and fall back, or
+the backend trusts the hint and returns "not found" for an entity that
+exists.
 
-```promise
-Op.Get(EntityId id, Hash128? type_hint)
-```
-
-The hint is advisory — when present, the server uses it to pick a shard;
-when absent, it falls through to the cross-type id index. The hint never
-changes the result, only the cost of fetching it. Clients that hold a
-typed `Ref[T]` can populate the hint with `T._type_id` (the declared bound is
-correct often enough to be worth trying; backends that miss the hint just fall
-back). Clients holding bare ids — during recovery, batch import, or after
-following a polymorphic reference — leave it `none`.
-
-This keeps identity single-value while preserving the routing optimisation the
-bundled design was trying to bake in.
+Therefore `Op.Get` takes the id alone. Backends are required to maintain a
+global id index that maps any id to its row (and, on per-type-sharded
+storage, to the shard the row lives in). The lookup the server needs to do
+anyway to find the row is the same lookup that resolves the type — no
+client-side hinting needed.
 
 ### 2.4 128-bit identity and the `u128` dependency
 
-`Hash128` is currently defined as `{ u64 hi; u64 lo }` because Promise has no
-128-bit integer type today. Once `u128` lands (see [docs/large-integers.md](large-integers.md)
-and the tracker entry for that work), `Hash128` collapses to a plain
-`u128` — equality, hashing, and copying become single-instruction native
-operations instead of two-word struct ops. The wire format does not change;
-only the in-memory representation. This is one of the reasons cloud persistence
-v1 lists large integers as a prerequisite (§13).
+`Hash128` is defined in [docs/schema.md](schema.md) §3 as a value-type wrapper
+around a single native `u128`. The wrapper exists so the type system can tell
+a content hash apart from a plain numeric u128 at compile time; the in-memory
+representation is one 128-bit word. Equality, hashing, and copying are
+single-instruction native operations, and the wire format is just the
+underlying 128 bits.
+
+This is why cloud persistence v1 lists large integers as a prerequisite (§13):
+the entire identity story (entity ids, type ids, field ids, references) rides
+on `Hash128`, which only exists in its single-word form once `u128` lands per
+[docs/large-integers.md](large-integers.md).
 
 ### 2.5 The `` `entity `` annotation
 
@@ -217,8 +216,8 @@ enum Op `public `serializable {
     Put(EntityId id, Hash128 type_id, map[Hash128, Value]? data)
         `doc("Create or update an instance. `type_id` is carried explicitly (not part of the EntityId) so the server can validate the payload against the type's schema. `data` is `none` to delete. Server enforces schema and updates inverse relations."),
 
-    Get(EntityId id, Hash128? type_hint = none)
-        `doc("Fetch one instance by id alone. `type_hint` is optional and advisory — backends that shard by type may use it for routing but must still confirm the row's actual type. Server may also include related instances it had to load anyway."),
+    Get(EntityId id)
+        `doc("Fetch one instance by id alone. The id is globally unique across all types, so the server does not need a type hint to find the row. Server may also include related instances it had to load anyway."),
 
     List(Hash128 type_id, ListFilter? filter)
         `doc("Enumerate all instances of a type. Returns ids only — fetch payloads with Get."),
@@ -349,21 +348,18 @@ backups, etc.). Most types pick one mode and stick with it.
 ### 4.3 Get
 
 ```promise
-Op.Get(id: some_entity_id)                              // bare id
-Op.Get(id: some_entity_id, type_hint: Foo._type_id)     // with optional hint
+Op.Get(id: some_entity_id)
 ```
 
 Fetch one instance by id alone. The id is globally unique across all types, so
-the server does not need a type to find the row. If absent or deleted,
-`response.entities[id] = none`.
+the server does not need a type to find the row — it looks up the id in its
+global index, which yields both the row and its concrete `type_id` as a single
+operation. If absent or deleted, `response.entities[id] = none`.
 
-The optional `type_hint` is advisory — useful for backends that physically shard
-storage by type (per-type tables, per-type collections) and would otherwise need
-a cross-type index lookup to locate the row. When the hint matches, the backend
-can route the read directly to the shard; when it doesn't, the backend falls
-back to the index. The hint never changes the result, only the cost of fetching
-it. Clients holding a typed `Ref[T]` can populate the hint for free; clients
-holding a bare id leave it `none`.
+There is no client-side type hint on Get (see §2.3): under inheritance the
+client only knows the declared bound from the field's `Ref[T]`, not the
+concrete type, so any hint would either be useless or actively wrong on
+sharded backends.
 
 The server is allowed (and encouraged) to include other entities it had to load
 anyway — particularly the targets of references on the requested entity, when
@@ -611,11 +607,10 @@ Properties:
 - Wire format: when an entity's `Ref[T]` field is encoded, the 128-bit id goes
   on the wire and nothing else. The schema descriptor for that field is
   `Type.Reference(T._type_id)` — used by the server to validate that the
-  referenced entity is in fact some subtype of `T`, and used by the client to
-  populate the optional `type_hint` on Get (§2.3) when speculating about the
-  shard. Neither side treats the bound as the *concrete* type — that comes from
-  the entity itself, either from the heap value already in hand or from the
-  type the server records alongside the row.
+  referenced entity is in fact some subtype of `T`. The bound is *not* the
+  concrete type; the concrete type comes from the entity itself, either from
+  the heap value already in hand or from the type the server records alongside
+  the row.
 
 ```promise
 type Item `entity {
@@ -838,9 +833,9 @@ Promise diverges:
 - **No `T<n>I<m>` string keys, and no bundled type id either.** Identity is a
   single 128-bit value. The prototype tied type and instance together so the
   server could route a request without an index; Promise drops the tie and
-  relies on the server's id index for routing, with an optional `type_hint` for
-  shard-aware backends (§2.3). The result is one fewer field on the wire and
-  one fewer way for client/server type beliefs to drift.
+  requires backends to maintain a global id index (§2.3). The result is one
+  fewer field on the wire and one fewer way for client/server type beliefs to
+  drift.
 - **Many-to-many inverse relations land in v1**, not as a TODO.
 - **`Backend` is structural and pluggable from day one.** The prototype hard-coded
   Firestore + memory; Promise treats backends as community modules.
@@ -921,9 +916,10 @@ under any name.
 Identity is a bare `Hash128` (which becomes a `u128` alias once the large-integer
 work in [docs/large-integers.md](large-integers.md) lands). The type id is *not*
 bundled. Operations that need to know the type on creation (`Put` of a new id,
-`Allocate`, `List`) carry it as an explicit op parameter; `Get` accepts an
-optional `type_hint` for backends that shard storage by type (§2.3) but the
-hint is advisory.
+`Allocate`, `List`) carry it as an explicit op parameter; `Get` takes the id
+alone — there is no client-side type hint, because under inheritance the
+client only ever knows the declared `Ref[T]` bound, not the concrete type
+(§2.3).
 
 The load-bearing observation (§2.1) is that the concrete type is **never** what
 identity is for — it's a property of the entity itself, encoded in the heap
@@ -940,12 +936,11 @@ Earlier drafts bundled type and instance into a struct
 did: single-pass server-side routing without a cross-type index. That was
 rejected because (a) the bound on `Ref[T]` is not the concrete type, so the
 bundled id wasn't pinning what users would assume it was; (b) a duplicated
-wire copy that can drift from the server's record is a bug source; (c)
-backends need a global id index anyway to support cross-type references, so
-the bundled type never did meaningful routing work the index didn't already
-do; (d) when routing genuinely matters (sharded backends), the optional
-`type_hint` on Get does it cleanly without making the hint part of identity.
-Full rationale in §2.
+wire copy that can drift from the server's record is a bug source; (c) the
+client doesn't know the concrete type anyway (only the bound), so it couldn't
+even supply a correct type alongside the id on Get; (d) backends need a global
+id index anyway to support cross-type references, so the bundled type never
+did meaningful routing work the index didn't already do. Full rationale in §2.
 
 Phantom-typed variants (`EntityId[T]`) were also considered and dropped —
 they would force every reference field to be generic and complicate the

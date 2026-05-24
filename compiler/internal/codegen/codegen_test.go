@@ -22980,6 +22980,80 @@ func TestT0436SingleLineDoubleUnwrapNeutralizes(t *testing.T) {
 	}
 }
 
+// T0577: `b := (opt!);` — ParenExpr wrapping a force-unwrap. Before the fix,
+// neutralizeForceUnwrapSource matched only OptionalUnwrapExpr/CastExpr/
+// ErrorHandlerExpr at its outer switch and fell through for *ast.ParenExpr,
+// so the source optional's present flag was never cleared and its scope-exit
+// drop re-freed the inner value (double-free → segfault). The fix peels
+// ParenExpr at the top of the function before the switch.
+func TestT0577ParenForceUnwrapNeutralizes(t *testing.T) {
+	ir := generateIR(t, `
+		type T0577Box { int n; drop(~this) {} }
+		main() {
+			T0577Box? opt = T0577Box(n: 1);
+			b := (opt!);
+		}
+	`)
+	// Locate the unwrap.ok block emitted for `(opt!)` and confirm the present-flag
+	// store appears in that block. Without the paren peel, no GEP+store i1 false
+	// is emitted in unwrap.ok — only the b store and drop-flag set — and the
+	// optional's scope drop later double-frees.
+	unwrapOKIdx := strings.Index(ir, "\nunwrap.ok")
+	if unwrapOKIdx < 0 {
+		t.Fatal("expected an unwrap.ok block in IR")
+	}
+	rest := ir[unwrapOKIdx:]
+	endIdx := strings.Index(rest, "\n\n")
+	if endIdx < 0 {
+		endIdx = len(rest)
+	}
+	block := rest[:endIdx]
+	if !strings.Contains(block, "getelementptr { i1, { i8*, i8* } }, { i1, { i8*, i8* } }* %opt") {
+		t.Fatalf("expected GEP into opt's Optional struct in unwrap.ok block (neutralization site); got:\n%s", block)
+	}
+	if !strings.Contains(block, "store i1 false") {
+		t.Fatalf("expected `store i1 false` neutralization store in unwrap.ok block; got:\n%s", block)
+	}
+}
+
+// T0577 mirror: `b := (opt)!;` — ParenExpr inside the OptionalUnwrap's `.Expr`.
+// The outer switch matches OptionalUnwrapExpr, but `inner` is then ParenExpr,
+// so the inner T0436-style chain walk (which previously only peeled
+// OptionalUnwrapExpr) must also peel ParenExpr to reach IdentExpr. Without
+// the inner peel, neither the IdentExpr nor MemberExpr arm fires, the present
+// flag is never cleared, and the optional's scope-exit drop double-frees.
+//
+// IR shape note: this form goes through the heap-claim path rather than the
+// `unwrap.ok` flag-store path used by `(opt!)`, so we assert the present-flag
+// GEP+store appears anywhere in main rather than locating a specific block.
+func TestT0577InnerParenForceUnwrapNeutralizes(t *testing.T) {
+	ir := generateIR(t, `
+		type T0577Box2 { int n; drop(~this) {} }
+		main() {
+			T0577Box2? opt = T0577Box2(n: 1);
+			b := (opt)!;
+		}
+	`)
+	// The exact pattern emitted by the IdentExpr arm of neutralizeForceUnwrapSource:
+	// GEP through the Optional struct on %opt followed by `store i1 false`.
+	// Without the inner ParenExpr peel, no such GEP/store pair is emitted on %opt.
+	gep := "getelementptr { i1, { i8*, i8* } }, { i1, { i8*, i8* } }* %opt, i32 0, i32 0"
+	if !strings.Contains(ir, gep) {
+		t.Fatalf("expected GEP into opt's Optional struct (neutralization site) — inner ParenExpr peel did not reach IdentExpr arm")
+	}
+	// Confirm the GEP is followed by a `store i1 false` neutralization.
+	gepIdx := strings.Index(ir, gep)
+	tail := ir[gepIdx:]
+	endIdx := strings.Index(tail, "\n\n")
+	if endIdx < 0 {
+		endIdx = len(tail)
+	}
+	region := tail[:endIdx]
+	if !strings.Contains(region, "store i1 false") {
+		t.Fatalf("expected `store i1 false` after GEP into %%opt; got:\n%s", region)
+	}
+}
+
 // T0436 Issue 2: a generator method with borrowed this following a ~this method
 // on a different type must NOT clear the caller's Optional field present flag
 // — it must dup instead. Before the fix, stale thisRecvIsOwned=true from the

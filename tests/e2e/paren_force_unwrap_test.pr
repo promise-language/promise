@@ -1,0 +1,144 @@
+// T0577: ParenExpr-wrapped force-unwrap source bypassed
+// `neutralizeForceUnwrapSource` because the outer switch only matched
+// `*ast.OptionalUnwrapExpr` / `*ast.CastExpr` / `*ast.ErrorHandlerExpr`
+// directly. With parens, the source optional's present flag was never
+// cleared and the optional's scope-exit drop re-freed the inner value that
+// ownership already transferred to the new binding (double-free, segfault).
+//
+// The fix peels ParenExpr at the top of `neutralizeForceUnwrapSource`.
+// String fields ensure any missed neutralization surfaces as a double-free
+// segfault or leak under the zero-tolerance leak policy.
+type _BoxT0577 {
+  string s;
+}
+
+// Var-decl: `b := (opt!);` -- bare form works, paren-wrapped form segfaulted
+// before the fix because the present flag never cleared.
+test_var_decl_paren_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "hi" + "there");
+  b := (opt!);
+  assert(b.s == "hithere", "var decl");
+}
+
+// Destructure: `(b, n) := (opt!);` for tuple optional. Same UAF shape as
+// the var-decl case but through `genDestructureVarDecl`.
+test_destructure_paren_force_unwrap() `test {
+  (_BoxT0577, int)? opt = (_BoxT0577(s: "ab" + "cd"), 7);
+  (b, n) := (opt!);
+  assert(b.s == "abcd", "destructure box");
+  assert(n == 7, "destructure int");
+}
+
+// Iterative peel: `((opt!))` -- confirms the paren-peel loop handles >1 layer.
+test_double_paren_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "deeper" + "nest");
+  b := ((opt!));
+  assert(b.s == "deepernest", "double paren");
+}
+
+// CastExpr arm: `(opt as! T)` -- force-cast on Optional consumes inner value
+// (B0293); paren wrapper must not bypass neutralization.
+test_paren_cast_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "cast" + "src");
+  b := (opt as! _BoxT0577);
+  assert(b.s == "castsrc", "paren cast");
+}
+
+// ErrorHandlerExpr arm: `(opt? _ { fallback })` on Optional extracts inner
+// value (B0293); paren wrapper must not bypass neutralization.
+test_paren_error_handler_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "han" + "dler");
+  b := (opt? _ {
+    _BoxT0577(s: "fallback")
+  });
+  assert(b.s == "handler", "paren handler");
+}
+
+// Mirror cases: parens around the SOURCE rather than the whole unwrap.
+// `(opt)!`, `(opt) as! T`, `(opt)? _ { ... }` all carry a ParenExpr inside
+// the unwrap/cast/handler expr's `.Expr` field. The inner T0436-style walk
+// must peel ParenExpr alongside OptionalUnwrapExpr to reach IdentExpr.
+test_inner_paren_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "inner" + "paren");
+  b := (opt)!;
+  assert(b.s == "innerparen", "inner paren unwrap");
+}
+
+test_inner_paren_cast_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "inner" + "cast");
+  b := (opt) as! _BoxT0577;
+  assert(b.s == "innercast", "inner paren cast");
+}
+
+test_inner_paren_error_handler_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "inner" + "handler");
+  b := (opt)? _ {
+    _BoxT0577(s: "fallback")
+  };
+  assert(b.s == "innerhandler", "inner paren handler");
+}
+
+// Combo: parens at both layers. Requires both outer and inner peel.
+test_double_layer_paren_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "combo" + "test");
+  b := ((opt))!;
+  assert(b.s == "combotest", "double layer paren");
+}
+
+// neutralizeForceUnwrapSource is called from 14+ sites — var-decl is one of
+// many. The fix is at the function level so all sites benefit, but the
+// following tests pin behavior at the other key call-site shapes so a
+// future regression (e.g., a refactor that bypasses the function for one
+// path) shows up as a leak/segfault rather than going unnoticed.
+
+// Typed var-decl: stmt.go:944 (genTypedVarDecl) — distinct from the inferred
+// var-decl path tested above (stmt.go:1147).
+test_typed_var_decl_paren_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "typed" + "decl");
+  _BoxT0577 b = (opt!);
+  assert(b.s == "typeddecl", "typed var decl");
+}
+
+// Plain reassignment to existing local: stmt.go:5267 (genAssignStmt IdentExpr).
+// The pre-existing `b` has its own drop binding; reassign must drop the old
+// value AND neutralize the source optional so the optional's scope drop
+// doesn't double-free the new owner.
+test_reassign_paren_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "reassign" + "src");
+  b := _BoxT0577(s: "initial");
+  b = (opt!);
+  assert(b.s == "reassignsrc", "reassign");
+}
+
+// Member field assignment: stmt.go:5402 (genMemberAssign value path).
+// Field receives ownership; source optional's scope drop must be neutralized.
+type _HolderT0577 {
+  _BoxT0577 b;
+}
+
+test_member_assign_paren_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "member" + "assign");
+  h := _HolderT0577(b: _BoxT0577(s: "initial"));
+  h.b = (opt!);
+  assert(h.b.s == "memberassign", "member assign");
+}
+
+// Call-argument: expr.go:2224 (new()) and other arg paths neutralize
+// when an `opt!` (or paren-wrapped form) is consumed by a function call.
+// The constructor takes ownership of the inner _BoxT0577 via the field
+// initializer; opt's scope drop must be neutralized.
+test_call_arg_paren_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "call" + "arg");
+  h := _HolderT0577(b: (opt!));
+  assert(h.b.s == "callarg", "call arg");
+}
+
+// Index assign: stmt.go:5476 — opt! consumed as RHS of `vec[i] = (opt!)`.
+// Vector takes ownership of the unwrapped value; opt's scope drop must
+// be neutralized.
+test_index_assign_paren_force_unwrap() `test {
+  _BoxT0577? opt = _BoxT0577(s: "index" + "assign");
+  vec := [_BoxT0577(s: "initial")];
+  vec[0] = (opt!);
+  assert(vec[0].s == "indexassign", "index assign");
+}

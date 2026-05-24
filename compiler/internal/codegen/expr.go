@@ -9587,9 +9587,21 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 // neutralizeForceUnwrapSource sets the present flag to false in the source
 // optional's alloca when a force-unwrap result is consumed by an assignment.
 // T0111: Prevents double-free when both the new variable and the source optional
-// would otherwise try to drop the same inner value. Only called at assignment
-// sites (genTypedVarDecl, genInferredVarDecl, genAssignStmt).
+// would otherwise try to drop the same inner value. Called from many assignment
+// and arg-passing sites in expr.go (call-arg paths) and stmt.go (var decls,
+// destructure, assign, for/yield).
 func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
+	// T0577: peel ParenExpr wrappers so `(opt!)` neutralizes like `opt!`.
+	// genExpr already sees through ParenExpr; this peel fixes the AST-shape
+	// dispatch below. A second peel inside the T0436 inner loop handles the
+	// mirror case `(opt)!` (parens around the source, not the unwrap).
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
 	// Extract the source identifier from opt!, opt as! T, or opt? _ { fallback }.
 	var inner ast.Expr
 	switch e := expr.(type) {
@@ -9616,9 +9628,15 @@ func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
 	// Each nested OptionalUnwrapExpr exposes one Optional level; we only need to
 	// clear the OUTERMOST present flag (on the original source) — synth drop will
 	// then skip the field entirely and not descend into the inner Optional.
+	// T0577: also peel ParenExpr inside the chain so `(opt)!`, `(opt) as! T`,
+	// `(opt)? _ { ... }`, and combinations like `((opt))!` all reach IdentExpr.
 	for {
 		if uw, ok := inner.(*ast.OptionalUnwrapExpr); ok {
 			inner = uw.Expr
+			continue
+		}
+		if p, ok := inner.(*ast.ParenExpr); ok {
+			inner = p.Expr
 			continue
 		}
 		break

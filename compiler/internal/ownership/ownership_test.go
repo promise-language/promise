@@ -7162,3 +7162,291 @@ func TestT0568_TypedDeclInheritanceUpcastRejected(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot move borrowed parameter 'c'")
 }
+
+// --- T0581 ---
+// T0581: passing `this` as a plain (non-`~`, non-`&`) call-arg whose
+// parameter slot expects the type's value-struct shape segfaults at runtime
+// (heap user type: `{i8*,i8*}` expected, raw `i8*` passed). Sema must
+// reject before codegen ever sees it.
+func TestT0581_CallArgPlainThisHeapUserTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			forward(this) int { return consume_holder(this); }
+		}
+		consume_holder(Holder h) int { return h.b.x; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0581: same crash class on pure value-type receivers — destination
+// parameter expects `{i8* vtable, fields…}` but the raw `i8*` receiver is
+// passed, yielding garbage extractvalue reads.
+func TestT0581_CallArgPlainThisValueTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type V {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+			do_it(this) int { return take_v(this); }
+		}
+		take_v(V v) int { return v.x + v.y; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0581: `~this` receiver variant — same crash class. `~this` grants
+// mutate access but the receiver still belongs to the caller, so passing
+// it as a plain-T call-arg has the same ABI mismatch + alias double-free.
+func TestT0581_CallArgMutThisHeapUserTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			forward(~this) int { return consume_holder(this); }
+		}
+		consume_holder(Holder h) int { return h.b.x; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0581 carve-out: `this` of a primitive Copy type passed to a free
+// function taking the same primitive is safe — the value is the data,
+// ABI matches, no drop. modules/std/int.pr's `int.encode` relies on this.
+func TestT0581_CallArgThisCopyPrimitiveOK(t *testing.T) {
+	ownerOK(t, `
+		take_int(int n) int { return n; }
+		type IntWrap {
+			int v;
+			use_it(this) int { return take_int(this.v); }
+		}
+		test() {}
+	`)
+}
+
+// T0581 carve-out: passing `this` (an int) directly from inside a wrapper
+// method body exercises the primitive branch of isThisCallArgSafe at the
+// ThisExpr position. (Cannot extend int via `type` syntax, so this is
+// covered transitively by the `IntWrap.use_it` shape above plus the
+// existing `int.encode(this, Encoder e)` usage in modules/std/int.pr.)
+func TestT0581_CallArgPlainPrimitiveFieldOK(t *testing.T) {
+	ownerOK(t, `
+		take_int(int n) int { return n; }
+		type Counter {
+			int n;
+			get_doubled(this) int { return take_int(this.n) + take_int(this.n); }
+		}
+		test() {}
+	`)
+}
+
+// T0581 carve-out: `this` of `string` (an auto-dup container handle) is
+// runtime-safe — codegen uses `i8*` for both value-rep and parameter
+// shape, and clones at the call site. modules/std/string.pr's
+// `string.write` relies on this.
+func TestT0581_CallArgThisStringOK(t *testing.T) {
+	ownerOK(t, `
+		take_str(string s) {}
+		type StrHolder {
+			string s;
+			use_it(this) { take_str(this.s); }
+		}
+		test() {}
+	`)
+}
+
+// T0581 carve-out: passing a `Vector[int]` field as a non-receiver arg
+// is safe — Vector is auto-dup at the call-arg site (`_vec_clone`).
+func TestT0581_CallArgVectorFieldOK(t *testing.T) {
+	ownerOK(t, `
+		take_vec(int[] v) int { return v.len; }
+		type Holder {
+			int[] xs;
+			get_size(this) int { return take_vec(this.xs); }
+		}
+		test() {}
+	`)
+}
+
+// T0581 borrow-arm coverage: when `this` has an active borrow registered
+// (e.g., from `(b, n) := this.pair`), the subsequent call-arg move must
+// diagnose with the "while it is borrowed" message rather than the
+// generic consume message.
+func TestT0581_CallArgThisInBorrowedState(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder {
+			(_BoxStr, int) pair;
+			eat(~this) {
+				(b, n) := this.pair;
+				_ = consume_holder(this);
+				_ = b.s;
+				_ = n;
+			}
+		}
+		consume_holder(Holder h) int { return 0; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move 'this' while it is borrowed")
+}
+
+// T0581 regression guard: `return this;` from a plain or `~this` method
+// must keep compiling. Return path uses `wrapThisReturnValue` + B0250
+// alias-clear, so it's the one place moving `this` is semantically
+// defensible. T0576's regression guard covers the same shape; this one
+// makes sure the T0581 call-arg check doesn't leak into ReturnStmt.
+func TestT0581_ReturnThisStillCompiles(t *testing.T) {
+	ownerOK(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			eat(~this) Holder { return this; }
+		}
+		test() {}
+	`)
+}
+
+// T0581 wrapper coverage: paren-wrapped `f((this))` reaches the call site
+// through a transparent wrapper. Codegen forwards the inner value directly,
+// so the same crash class applies. Mirrors the Paren branch of
+// findBorrowedNonDuppableIdent (T0556).
+func TestT0581_CallArgParenThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			forward(this) int { return consume_holder((this)); }
+		}
+		consume_holder(Holder h) int { return h.b.x; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0581 wrapper coverage: if-expression with `this` in a branch — codegen's
+// PHI surfaces the raw `i8*` receiver as the if's value.
+func TestT0581_CallArgIfBranchThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			int f;
+			forward(this) int {
+				return consume_holder(if this.f > 0 { this } else { this });
+			}
+		}
+		consume_holder(Holder h) int { return h.b.x; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0581 regression guard: `.clone()` is the suggested workaround.
+func TestT0581_CloneWorkaroundCompiles(t *testing.T) {
+	ownerOK(t, `
+		type Box {
+			int x;
+			clone(this) Box { return Box(x: this.x); }
+		}
+		type Holder {
+			Box b;
+			clone(this) Holder { return Holder(b: this.b.clone()); }
+			forward(this) int { return consume_holder(this.clone()); }
+		}
+		consume_holder(Holder h) int { return h.b.x; }
+		test() {}
+	`)
+}
+
+// T0581 wrapper coverage: match-expression with `this` in an arm-body
+// (`pattern => this`) — the arm's Body field holds the ThisExpr directly.
+// Codegen's match lowering forwards the arm value (no wrap), so the same
+// `{i8*,i8*}` vs raw `i8*` ABI mismatch applies. Covers the MatchExpr +
+// arm.Body branch of findThisExprInArg.
+func TestT0581_CallArgMatchArmBodyThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			int kind;
+			forward(this) int {
+				return consume_holder(match this.kind {
+					0 => this,
+					_ => this,
+				});
+			}
+		}
+		consume_holder(Holder h) int { return h.b.x; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0581 wrapper coverage: match-expression with `this` in an arm block
+// (`pattern => { ...; this }`). The arm's Block field holds the block,
+// whose trailing ExprStmt is the ThisExpr. Codegen's match lowering
+// surfaces the block's trailing value as the arm result, so a `this`
+// reaches the call site as the raw receiver pointer with no wrap.
+// Covers the MatchExpr + arm.Block branch of findThisExprInArg via
+// findThisExprInArgBlock.
+func TestT0581_CallArgMatchArmBlockThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			int kind;
+			forward(this) int {
+				return consume_holder(match this.kind {
+					0 => { this },
+					_ => this,
+				});
+			}
+		}
+		consume_holder(Holder h) int { return h.b.x; }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0581 carve-out unit test: `isThisCallArgSafe` must return true for
+// every primitive scalar singleton (int / float / bool / char / uint /
+// void / none) — that's what permits stdlib patterns like
+// `int.encode!(Encoder ~e) { e.encode_int(this); }` to keep compiling.
+// Stdlib re-checks via the precomputed scope in unit tests, so this
+// branch of the helper is not reached by the parsed-source tests above.
+// Exercise it directly to guard against accidental shrinkage of the
+// carve-out (e.g., a refactor that drops one of the integer aliases).
+func TestT0581_IsThisCallArgSafePrimitiveScalars(t *testing.T) {
+	cases := []struct {
+		name string
+		typ  types.Type
+	}{
+		{"int", types.TypInt},
+		{"i8", types.TypI8},
+		{"i16", types.TypI16},
+		{"i32", types.TypI32},
+		{"i64", types.TypI64},
+		{"uint", types.TypUint},
+		{"u8", types.TypU8},
+		{"u16", types.TypU16},
+		{"u32", types.TypU32},
+		{"u64", types.TypU64},
+		{"f32", types.TypF32},
+		{"f64", types.TypF64},
+		{"bool", types.TypBool},
+		{"char", types.TypChar},
+		{"none", types.TypNone},
+		{"void", types.TypVoid},
+	}
+	for _, tc := range cases {
+		if !isThisCallArgSafe(tc.typ) {
+			t.Errorf("isThisCallArgSafe(%s) = false, want true (primitive carve-out)", tc.name)
+		}
+	}
+	if isThisCallArgSafe(nil) {
+		t.Errorf("isThisCallArgSafe(nil) = true, want false (defensive nil branch)")
+	}
+}

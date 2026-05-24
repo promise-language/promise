@@ -1,0 +1,105 @@
+// T0581: passing `this` as a plain (non-`~`, non-`&`) call-arg into a slot
+// that expects the type's value-struct shape segfaults at runtime — the
+// raw `i8*` receiver pointer does not match `{i8*,i8*}` (heap user type) or
+// `{i8*, fields…}` (value type). Sema rejects the buggy shape; allowed
+// shapes (return-this, .clone() workaround, primitive/auto-dup args from
+// inside method bodies) must keep compiling and running correctly.
+type Box {
+  string s;
+
+  clone(this) Box {
+    return Box(s: this.s.clone());
+  }
+}
+
+type Holder {
+  Box b;
+
+  clone(this) Holder {
+    return Holder(b: this.b.clone());
+  }
+
+  // `.clone()` workaround for the T0581 pattern: explicitly produce an
+  // independent copy before passing to the consuming free function.
+  forward(this) string {
+    return consume_holder(this.clone());
+  }
+
+  // `return this;` is the one place moving `this` is safe — the return
+  // path is wrapped by codegen's `wrapThisReturnValue` and the caller's
+  // drop flag is cleared (B0250).
+  yield_self(~this) Holder {
+    return this;
+  }
+}
+
+consume_holder(Holder h) string {
+  return h.b.s;
+}
+
+// Calling a `~this` method on `this` (the receiver position, not as an
+// argument) is the de-facto borrow pattern — must keep compiling.
+type Counter {
+  int n;
+
+  bump(~this) {
+    this.n = this.n + 1;
+  }
+
+  bump_twice(~this) {
+    this.bump();
+    this.bump();
+  }
+}
+
+// Heap user-type field passed as a non-receiver call arg goes through the
+// MemberExpr path (not the ThisExpr path), so the T0581 check doesn't fire.
+// Codegen has its own dup/drop-flag plumbing for this shape (T0506-family).
+type FieldHolder {
+  string s;
+
+  use_string_field(this) int {
+    return take_str_len(this.s);
+  }
+  use_int_field(this) int {
+    return take_int(this.s.len);
+  }
+}
+
+take_str_len(string s) int {
+  return s.len;
+}
+take_int(int n) int {
+  return n;
+}
+
+// `.clone()` workaround for the heap user-type T0581 pattern.
+test_clone_workaround_heap_user_type() `test {
+  h := Holder(b: Box(s: "hi"));
+  v := h.forward();
+  assert(v == "hi", "clone workaround should preserve string field");
+}
+
+// `return this;` from a `~this` method must compile and run.
+test_return_this_mut() `test {
+  h := Holder(b: Box(s: "world"));
+  x := h.yield_self();
+  assert(x.b.s == "world", "return this from ~this should preserve fields");
+}
+
+// `~this` method chaining via the receiver is unaffected.
+test_mut_this_chain() `test {
+  Counter c = Counter(n: 5);
+  c.bump_twice();
+  assert(c.n == 7, "chained ~this calls should apply");
+}
+
+// MemberExpr field-arg path (this.field as call arg) must remain allowed
+// for primitive fields and auto-dup container fields. These shapes don't
+// take the ThisExpr branch, but they regress easily if the rejection
+// becomes too broad.
+test_field_arg_primitive_and_string() `test {
+  h := FieldHolder(s: "hello");
+  assert(h.use_string_field() == 5, "string field forwarded as call arg");
+  assert(h.use_int_field() == 5, "primitive field forwarded as call arg");
+}

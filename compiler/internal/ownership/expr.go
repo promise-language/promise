@@ -312,6 +312,86 @@ func paramBorrowKind(p *types.Param) BorrowKind {
 	return BorrowNone
 }
 
+// isThisCallArgSafe reports whether passing `this` of the given type as a
+// plain (non-`~`, non-`&`) call argument is runtime-safe. Two shapes pass:
+//
+//  1. Primitive scalars (int / float / bool / char / uint / void / none):
+//     `this` is the value directly (i64/i32/etc.), parameter ABI is the same,
+//     no drop. `e.encode_int(this)` etc. in modules/std/*.pr rely on this.
+//
+//  2. Auto-dup container handles (string / Vector / Channel / Arc / Weak /
+//     Mutex / MutexGuard / Task plus Optional thereof): codegen uses `i8*` for
+//     both the receiver value and the parameter shape, and either auto-dups
+//     at the call site or propagates per-slot drop-flag so the callee's drop
+//     and the caller's drop refer to distinct allocations.
+//
+// Heap user types and value types (Copy via `IsCopy()` on a Named with all
+// `value` fields) are NOT safe: heap user types expect `{i8*, i8*}` and
+// value types expect `{i8*, field…}` — codegen at the call site has no
+// wrapping path for ThisExpr in either case. T0581.
+func isThisCallArgSafe(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	// Primitive scalars: hardcoded singletons; value and ABI coincide.
+	switch typ {
+	case types.TypInt, types.TypI8, types.TypI16, types.TypI32, types.TypI64,
+		types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64,
+		types.TypF32, types.TypF64,
+		types.TypBool, types.TypChar, types.TypNone, types.TypVoid:
+		return true
+	}
+	// Auto-dup container handles share the codegen-safe alias path.
+	return isVarDeclAliasSafeType(typ)
+}
+
+// findThisExprInArg reports the ThisExpr surfaced through transparent
+// wrappers (parens, if/else branches, match arms). Mirrors the walk in
+// findBorrowedNonDuppableIdent: codegen emits the wrapped expression's
+// branch value directly (the if/match's PHI value, the paren-stripped
+// inner), so a `this` deep inside a wrapper still reaches the call site
+// as the raw `i8*` receiver pointer with no wrapping → same crash class
+// as a bare `f(this)`. T0581.
+func findThisExprInArg(expr ast.Expr) *ast.ThisExpr {
+	switch e := expr.(type) {
+	case *ast.ThisExpr:
+		return e
+	case *ast.ParenExpr:
+		return findThisExprInArg(e.Expr)
+	case *ast.IfExpr:
+		if t := findThisExprInArgBlock(e.Then); t != nil {
+			return t
+		}
+		return findThisExprInArgBlock(e.Else)
+	case *ast.MatchExpr:
+		for _, arm := range e.Arms {
+			if arm.Body != nil {
+				if t := findThisExprInArg(arm.Body); t != nil {
+					return t
+				}
+			}
+			if arm.Block != nil {
+				if t := findThisExprInArgBlock(arm.Block); t != nil {
+					return t
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// findThisExprInArgBlock inspects a block's trailing expression for a
+// surfaced ThisExpr. Mirrors findBorrowedNonDuppableIdentInBlock.
+func findThisExprInArgBlock(block *ast.Block) *ast.ThisExpr {
+	if block == nil || len(block.Stmts) == 0 {
+		return nil
+	}
+	if es, ok := block.Stmts[len(block.Stmts)-1].(*ast.ExprStmt); ok {
+		return findThisExprInArg(es.Expr)
+	}
+	return nil
+}
+
 // isNonDuppableNativeHandle reports whether t is a single-owner native handle
 // (Mutex[T], MutexGuard[T], Task[T]) with no clone/dup semantics. Moving such
 // a value out of a Borrowed param into a call argument has no codegen
@@ -397,6 +477,41 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 			if i < len(params) {
 				kind := paramBorrowKind(params[i])
 				if kind == BorrowNone {
+					// T0581: passing `this` as a plain (non-`~`, non-`&`) call-arg
+					// into a slot expecting the type's value-struct shape (`{i8*,i8*}`
+					// for heap user types, `{i8*, field…}` for value types) crashes at
+					// runtime — codegen emits the raw `i8*` receiver pointer with no
+					// wrapping, so the callee `extractvalue` reads garbage (heap user
+					// type case) or returns a wrong value (value-type case). Even if
+					// wrapping were added, the new local in the callee would alias the
+					// caller's heap allocation and the caller's drop binding would
+					// still fire → double-free. Carve out primitive scalars
+					// (int/float/bool/char/uint — `this` is the value directly, ABI
+					// matches) and the auto-dup container set captured by
+					// isVarDeclAliasSafeType (string / Vector / Channel / Arc / Weak /
+					// Mutex / MutexGuard / Task plus Optional thereof), whose
+					// value-rep and parameter-shape coincide and whose lifetime is
+					// handled safely by codegen's auto-dup or per-slot drop-flag
+					// logic. User-defined Copy value types are NOT in the carve-out
+					// because their parameter-shape is the embedded-field value
+					// struct, not the raw receiver pointer. Surfacing through
+					// transparent wrappers (parens, if/else, match) shares the same
+					// runtime path — codegen forwards the branch value directly —
+					// so peel them via findThisExprInArg, mirroring T0556's pattern.
+					if this := findThisExprInArg(arg.Value); this != nil {
+						thisType := c.info.Types[arg.Value]
+						if thisType != nil && !isThisCallArgSafe(thisType) {
+							if c.state["this"] == Moved {
+								c.errorf(this.Pos(), "use of moved variable 'this'")
+							} else if c.borrows != nil && c.borrows.HasAnyBorrow("this") {
+								c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
+							} else {
+								c.errorf(this.Pos(),
+									"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
+							}
+							continue
+						}
+					}
 					// T0556: Reject moves of borrowed non-duppable single-owner
 					// handles (Mutex/MutexGuard/Task) into plain-param call args.
 					// Unlike duppable types (Arc, Channel, Vector, string), there

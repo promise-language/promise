@@ -5207,7 +5207,7 @@ func TestT0556_PushBorrowedMutexParamRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
 }
 
 // Task[T] is also a single-owner native handle with no dup path.
@@ -5220,7 +5220,7 @@ func TestT0556_PushBorrowedTaskParamRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 't' of single-owner type into call argument")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 't'")
 }
 
 // MutexGuard[T] cannot be duped either (locking is exclusive).
@@ -5232,7 +5232,7 @@ func TestT0556_PushBorrowedMutexGuardParamRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'g' of single-owner type into call argument")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'g'")
 }
 
 // With `~Mutex[int] m`, the caller transfers ownership at the call site
@@ -5302,7 +5302,7 @@ func TestT0556_PushParenWrappedMutexParamRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
 }
 
 // If-expression branches that return a borrowed Mutex must also be
@@ -5316,7 +5316,7 @@ func TestT0556_PushIfWrappedMutexParamRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
 }
 
 // Coverage: when only the Else branch surfaces the borrowed Mutex param,
@@ -5331,11 +5331,11 @@ func TestT0556_PushIfElseOnlyMutexParamRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
 }
 
 // Coverage: match-expression with arm.Body (no block, `=> expr`) form —
-// the walk recurses into arm.Body via findBorrowedNonDuppableIdent.
+// the walk recurses into arm.Body via findBorrowedNonAliasSafeIdent.
 func TestT0556_PushMatchExprBodyMutexParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		take_match(Mutex[int] m, int k) {
@@ -5344,11 +5344,11 @@ func TestT0556_PushMatchExprBodyMutexParamRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
 }
 
 // Coverage: match-expression with arm.Block (`=> { stmts; expr }`) form —
-// the walk recurses into arm.Block via findBorrowedNonDuppableIdentInBlock.
+// the walk recurses into arm.Block via findBorrowedNonAliasSafeIdentInBlock.
 func TestT0556_PushMatchExprBlockMutexParamRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		take_match_block(Mutex[int] m, int k) {
@@ -5357,7 +5357,7 @@ func TestT0556_PushMatchExprBlockMutexParamRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'm' of single-owner type into call argument")
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
 }
 
 // === T0349: extend tryMoveConsume to raise/yield/yield-from/select-send ===
@@ -7163,6 +7163,321 @@ func TestT0568_TypedDeclInheritanceUpcastRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move borrowed parameter 'c'")
 }
 
+// --- T0586 ---
+// T0586 broadens the T0556 call-arg reject from the Mutex/MutexGuard/Task
+// subset to all non-Copy, non-auto-dup, droppable types. Passing a Borrowed
+// plain heap user type to a plain (non-`~`, non-`&`) callee parameter has no
+// codegen-side dup, so both the caller's drop binding and the downstream
+// callee chain's drop fire on the same heap allocation → runtime double-free
+// / segfault. Sema must reject before codegen ever sees the unsafe shape.
+func TestT0586_CallPlainBorrowedParamUserTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		take(_BoxStr b) {}
+		forward(_BoxStr s) {
+			take(s);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// T0586: generic instance — `_Holder[T]` with a string field is heap-user
+// type after substitution; the predicate also catches Borrowed generic
+// instances via the `instanceHasDroppableField` branch of `isDroppableType`.
+func TestT0586_CallPlainBorrowedParamGenericTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Holder[T] { T value; }
+		take(_Holder[string] h) {}
+		forward(_Holder[string] h) {
+			take(h);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'h'")
+}
+
+// T0586: Map[K,V] is a heap container with synth drop. Not in
+// isVarDeclAliasSafeType, so the broadened predicate catches it.
+func TestT0586_CallPlainBorrowedParamMapRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take(map[string, int] m) {}
+		forward(map[string, int] m) {
+			take(m);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
+}
+
+// T0586: Set[T] follows the same shape as Map — non-auto-dup heap container.
+func TestT0586_CallPlainBorrowedParamSetRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take(Set[int] s) {}
+		forward(Set[int] s) {
+			take(s);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// T0586: method call — the predicate fires on argument position regardless of
+// whether the callee is a free function or a method (receiver borrow is
+// orthogonal to the call-arg check).
+func TestT0586_CallPlainBorrowedMethodArgRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder {
+			take(this, _BoxStr b) {}
+		}
+		forward(_BoxStr s) {
+			h := Holder();
+			h.take(s);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// T0586 wrapper coverage: paren-wrapped `take((s))` — the walk peels
+// ParenExpr to find the borrowed ident inside.
+func TestT0586_CallPlainBorrowedThroughParenRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		take(_BoxStr b) {}
+		forward(_BoxStr s) {
+			take((s));
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// T0586 wrapper coverage: if-expression branches that surface a borrowed
+// ident. Codegen forwards the PHI value as a raw alias, so the same crash
+// class applies.
+func TestT0586_CallPlainBorrowedThroughIfElseRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		take(_BoxStr b) {}
+		forward(_BoxStr s, bool flag) {
+			take(if flag { s } else { s });
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// T0586 wrapper coverage: match arm Body (`=> expr`) form — walk recurses
+// into arm.Body via findBorrowedNonAliasSafeIdent.
+func TestT0586_CallPlainBorrowedThroughMatchBodyRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		take(_BoxStr b) {}
+		forward(_BoxStr s, int k) {
+			take(match k { 1 => s, _ => s });
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// T0586 wrapper coverage: match arm Block (`=> { stmts; expr }`) form —
+// walk recurses into arm.Block via findBorrowedNonAliasSafeIdentInBlock.
+func TestT0586_CallPlainBorrowedThroughMatchBlockRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		take(_BoxStr b) {}
+		forward(_BoxStr s, int k) {
+			take(match k { 1 => { s }, _ => { s } });
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// T0586 carve-out: string is in isVarDeclAliasSafeType and codegen auto-dups
+// at the call site for any push/store; passing it through a plain-T callee
+// is runtime-safe. Regression guard.
+func TestT0586_CallPlainBorrowedParamStringAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(string s) {}
+		forward(string s) {
+			take(s);
+		}
+		test() {}
+	`)
+}
+
+// T0586 carve-out: Vector[T] is also auto-dup at the call site.
+func TestT0586_CallPlainBorrowedParamVectorAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(int[] v) {}
+		forward(int[] v) {
+			take(v);
+		}
+		test() {}
+	`)
+}
+
+// T0586 carve-out: Arc[T] is refcount-duppable; codegen emits dupArc at the
+// call site.
+func TestT0586_CallPlainBorrowedParamArcAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(Arc[int] a) {}
+		forward(Arc[int] a) {
+			take(a);
+		}
+		test() {}
+	`)
+}
+
+// T0586 carve-out: Optional[Channel[int]] — Optional wrapping a codegen-safe
+// element recurses through the Optional branch of isVarDeclAliasSafeType.
+func TestT0586_CallPlainBorrowedParamOptionalChannelAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(Channel[int]? ch) {}
+		forward(Channel[int]? ch) {
+			take(ch);
+		}
+		test() {}
+	`)
+}
+
+// T0586: a `~_BoxStr` callee param transitions the local out of Borrowed via
+// the consume path; the rejection check does not fire because the param's
+// initial state is Owned. Regression guard that the mut-param path is
+// unaffected.
+func TestT0586_CallMutParamUserTypeOK(t *testing.T) {
+	ownerOK(t, `
+		type _BoxStr { string s; }
+		take(_BoxStr b) {}
+		forward(~_BoxStr s) {
+			take(s);
+		}
+		test() {}
+	`)
+}
+
+// T0586 non-parameter coverage: a destructured local from a MemberExpr
+// source is marked Borrowed (T0548); passing it as a plain-T call arg must
+// emit the non-param diagnostic. Covers the `else` branch of the call-site
+// error in `checkCallExpr`.
+func TestT0586_CallPlainBorrowedDestructuredLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		take(_BoxStr b) {}
+		forward() {
+			h := Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, _) := h.pair;
+			take(b);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'b'")
+}
+
+// T0586 enum coverage: a plain enum with a droppable variant payload (e.g.
+// a string field) has NeedsSynthDrop=true via the synthesized variant-data
+// drop function. Exercises the `*types.Enum` branch of `isDroppableType`.
+// Without the broadened predicate, a borrowed enum-typed param would slip
+// through and double-free at scope exit.
+func TestT0586_CallPlainBorrowedParamEnumRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Msg { Text(string s); Ping; }
+		take(Msg m) {}
+		forward(Msg m) {
+			take(m);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
+}
+
+// T0586 generic enum instance coverage: `Maybe[_BoxStr]` substitutes a
+// droppable heap user type into the `Just(T)` variant. Exercises the
+// `*types.Instance` with `*types.Enum` origin branch via
+// `enumInstanceHasDroppableField`, which mirrors codegen's
+// monoEnumInstNeedsSynthDrop. T0506 added the recursion; T0586 ensures the
+// call-arg site reject fires on it.
+func TestT0586_CallPlainBorrowedParamGenericEnumRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		enum Maybe[T] { Just(T val); Nothing; }
+		take(Maybe[_BoxStr] m) {}
+		forward(Maybe[_BoxStr] m) {
+			take(m);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
+}
+
+// T0586 Optional-of-heap-user-type coverage: `_BoxStr?` recurses through
+// `isDroppableType`'s Optional branch (returns droppable). The
+// `isVarDeclAliasSafeType` Optional branch only carves out Optionals of the
+// auto-dup set (string/Vector/Channel/Arc/Weak/Mutex/MutexGuard/Task), so
+// `_BoxStr?` falls through and gets caught. Mirrors T0568's
+// TestT0568_TypedDeclOptionalSameDepthRejected but at the call-arg site.
+func TestT0586_CallPlainBorrowedParamOptionalHeapUserTypeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		take(_BoxStr? b) {}
+		forward(_BoxStr? b) {
+			take(b);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'b'")
+}
+
+// T0586 Tuple coverage: a tuple-typed param like `(_BoxStr, int)` recurses
+// through `isDroppableType`'s Tuple branch (any droppable element makes the
+// tuple droppable). Tuples are not in `isVarDeclAliasSafeType`, so the
+// predicate fires.
+func TestT0586_CallPlainBorrowedParamTupleRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		take((_BoxStr, int) p) {}
+		forward((_BoxStr, int) p) {
+			take(p);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'p'")
+}
+
+// T0586 carve-out: a plain enum with no droppable variant payloads
+// (NeedsSynthDrop=false, HasDrop=false) is not droppable, so the predicate
+// doesn't fire. Regression guard that pure tag-only enums still pass freely.
+func TestT0586_CallPlainBorrowedParamPlainEnumAllowed(t *testing.T) {
+	ownerOK(t, `
+		enum Color { Red; Green; Blue; }
+		take(Color c) {}
+		forward(Color c) {
+			take(c);
+		}
+		test() {}
+	`)
+}
+
+// T0586 carve-out: `int?` is not droppable (Optional[primitive] recurses to
+// a non-droppable element), so the predicate must not fire. Regression
+// guard alongside the Optional[Channel] carve-out which exercises the
+// `isVarDeclAliasSafeType` Optional path; this case exercises the
+// !isDroppableType short-circuit.
+func TestT0586_CallPlainBorrowedParamOptionalPrimitiveAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(int? n) {}
+		forward(int? n) {
+			take(n);
+		}
+		test() {}
+	`)
+}
+
 // --- T0581 ---
 // T0581: passing `this` as a plain (non-`~`, non-`&`) call-arg whose
 // parameter slot expects the type's value-struct shape segfaults at runtime
@@ -7312,7 +7627,7 @@ func TestT0581_ReturnThisStillCompiles(t *testing.T) {
 // T0581 wrapper coverage: paren-wrapped `f((this))` reaches the call site
 // through a transparent wrapper. Codegen forwards the inner value directly,
 // so the same crash class applies. Mirrors the Paren branch of
-// findBorrowedNonDuppableIdent (T0556).
+// findBorrowedNonAliasSafeIdent (T0556).
 func TestT0581_CallArgParenThisRejected(t *testing.T) {
 	errs := ownerErrs(t, `
 		type Box { int x; }

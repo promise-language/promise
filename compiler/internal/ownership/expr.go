@@ -347,7 +347,7 @@ func isThisCallArgSafe(typ types.Type) bool {
 
 // findThisExprInArg reports the ThisExpr surfaced through transparent
 // wrappers (parens, if/else branches, match arms). Mirrors the walk in
-// findBorrowedNonDuppableIdent: codegen emits the wrapped expression's
+// findBorrowedNonAliasSafeIdent: codegen emits the wrapped expression's
 // branch value directly (the if/match's PHI value, the paren-stripped
 // inner), so a `this` deep inside a wrapper still reaches the call site
 // as the raw `i8*` receiver pointer with no wrapping → same crash class
@@ -381,7 +381,7 @@ func findThisExprInArg(expr ast.Expr) *ast.ThisExpr {
 }
 
 // findThisExprInArgBlock inspects a block's trailing expression for a
-// surfaced ThisExpr. Mirrors findBorrowedNonDuppableIdentInBlock.
+// surfaced ThisExpr. Mirrors findBorrowedNonAliasSafeIdentInBlock.
 func findThisExprInArgBlock(block *ast.Block) *ast.ThisExpr {
 	if block == nil || len(block.Stmts) == 0 {
 		return nil
@@ -392,13 +392,39 @@ func findThisExprInArgBlock(block *ast.Block) *ast.ThisExpr {
 	return nil
 }
 
-// isNonDuppableNativeHandle reports whether t is a single-owner native handle
-// (Mutex[T], MutexGuard[T], Task[T]) with no clone/dup semantics. Moving such
-// a value out of a Borrowed param into a call argument has no codegen
-// compensation (see maybeDupPushElement in codegen/expr.go), so both the
-// callee-side consumer's drop and the caller's drop fire on the same
-// allocation → runtime double-free (T0556).
-func isNonDuppableNativeHandle(t types.Type) bool {
+// isCallArgUnsafeBorrowedType reports whether moving a Borrowed value of type
+// t into a plain (non-`~`, non-`&`) call argument is runtime-unsafe.
+//
+// Two disjoint shapes produce the same crash class:
+//
+//  1. **T0556 — non-duppable single-owner native handles** (Mutex[T],
+//     MutexGuard[T], Task[T]). Codegen's Vector.push (and similar
+//     ownership-transferring builtins) has no dup path for these, so the
+//     callee's element drop and the caller's drop fire on the same
+//     allocation → double-free.
+//
+//  2. **T0586 — plain heap user types, Map, Set, and other non-auto-dup
+//     droppable values**. Same root cause: the value-struct is passed by
+//     alias, both caller and callee's downstream drop sites land on the
+//     same heap allocation.
+//
+// Codegen-safe types (string, Vector, Channel, Arc, Weak, Optional thereof
+// for the auto-dup set) are carved out — codegen's `maybeDupPushElement` /
+// `setDupFlagsForFieldAccess` clones at the call site so caller and callee
+// have independent values.
+//
+// The predicate is structured so that types satisfying T0586's broader rule
+// (`!isCopy && !isVarDeclAliasSafe && isDroppable`) are caught alongside
+// T0556's Mutex/MutexGuard/Task subset (which IS in
+// `isVarDeclAliasSafeType` because of the codegen drop-flag propagation
+// applicable at the var-decl site, not the call-arg site).
+func isCallArgUnsafeBorrowedType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	// T0556 subset — Mutex/MutexGuard/Task are flagged var-decl-alias-safe
+	// (codegen drop-flag propagation works at the var-decl site) but NOT
+	// call-arg safe (codegen has no dup path at push/store sites).
 	if _, ok := types.AsMutex(t); ok {
 		return true
 	}
@@ -408,39 +434,51 @@ func isNonDuppableNativeHandle(t types.Type) bool {
 	if _, ok := types.AsTask(t); ok {
 		return true
 	}
+	// T0586 broader rule — plain heap user types, Map, Set, generic user
+	// types with droppable fields. Same predicate shape as T0568's var-decl
+	// reject; carves out auto-dup containers (string, Vector, Channel, Arc,
+	// Weak) and their Optional wrappers via isVarDeclAliasSafeType.
+	if !isCopyType(t) && !isVarDeclAliasSafeType(t) && isDroppableType(t) {
+		return true
+	}
 	return false
 }
 
-// findBorrowedNonDuppableIdent reports a borrowed identifier of a non-duppable
-// single-owner handle type reachable through transparent wrappers (parens,
-// if/else, match arms). Returns the offending ident or nil. The walk mirrors
-// the type-driven shape that isBorrowedExpr uses for SharedRef/MutRef: sema
-// propagates the value type through these compositions, so any branch that
-// surfaces a Borrowed Mutex/Task/MutexGuard variable is unsafe.
-func (c *Checker) findBorrowedNonDuppableIdent(expr ast.Expr) *ast.IdentExpr {
+// findBorrowedNonAliasSafeIdent reports a borrowed identifier of a type that
+// is unsafe to move into a plain (non-`~`, non-`&`) call argument. Walks
+// through transparent wrappers (parens, if/else, match arms). Returns the
+// offending ident or nil. The walk mirrors the type-driven shape that
+// isBorrowedExpr uses for SharedRef/MutRef: sema propagates the value type
+// through these compositions, so any branch that surfaces a Borrowed
+// call-arg-unsafe variable reaches the call site as the same alias the
+// caller still owns.
+//
+// See `isCallArgUnsafeBorrowedType` for the union of T0556 (single-owner
+// native handles) and T0586 (plain heap user types and friends).
+func (c *Checker) findBorrowedNonAliasSafeIdent(expr ast.Expr) *ast.IdentExpr {
 	switch e := expr.(type) {
 	case *ast.IdentExpr:
 		if state, tracked := c.state[e.Name]; tracked && state == Borrowed {
-			if isNonDuppableNativeHandle(c.info.Types[e]) {
+			if isCallArgUnsafeBorrowedType(c.info.Types[e]) {
 				return e
 			}
 		}
 	case *ast.ParenExpr:
-		return c.findBorrowedNonDuppableIdent(e.Expr)
+		return c.findBorrowedNonAliasSafeIdent(e.Expr)
 	case *ast.IfExpr:
-		if id := c.findBorrowedNonDuppableIdentInBlock(e.Then); id != nil {
+		if id := c.findBorrowedNonAliasSafeIdentInBlock(e.Then); id != nil {
 			return id
 		}
-		return c.findBorrowedNonDuppableIdentInBlock(e.Else)
+		return c.findBorrowedNonAliasSafeIdentInBlock(e.Else)
 	case *ast.MatchExpr:
 		for _, arm := range e.Arms {
 			if arm.Body != nil {
-				if id := c.findBorrowedNonDuppableIdent(arm.Body); id != nil {
+				if id := c.findBorrowedNonAliasSafeIdent(arm.Body); id != nil {
 					return id
 				}
 			}
 			if arm.Block != nil {
-				if id := c.findBorrowedNonDuppableIdentInBlock(arm.Block); id != nil {
+				if id := c.findBorrowedNonAliasSafeIdentInBlock(arm.Block); id != nil {
 					return id
 				}
 			}
@@ -449,14 +487,14 @@ func (c *Checker) findBorrowedNonDuppableIdent(expr ast.Expr) *ast.IdentExpr {
 	return nil
 }
 
-// findBorrowedNonDuppableIdentInBlock inspects a block's trailing expression
+// findBorrowedNonAliasSafeIdentInBlock inspects a block's trailing expression
 // (the block's result value). Mirrors codegen's clearBlockResultDropFlags.
-func (c *Checker) findBorrowedNonDuppableIdentInBlock(block *ast.Block) *ast.IdentExpr {
+func (c *Checker) findBorrowedNonAliasSafeIdentInBlock(block *ast.Block) *ast.IdentExpr {
 	if block == nil || len(block.Stmts) == 0 {
 		return nil
 	}
 	if es, ok := block.Stmts[len(block.Stmts)-1].(*ast.ExprStmt); ok {
-		return c.findBorrowedNonDuppableIdent(es.Expr)
+		return c.findBorrowedNonAliasSafeIdent(es.Expr)
 	}
 	return nil
 }
@@ -512,21 +550,24 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 							continue
 						}
 					}
-					// T0556: Reject moves of borrowed non-duppable single-owner
-					// handles (Mutex/MutexGuard/Task) into plain-param call args.
-					// Unlike duppable types (Arc, Channel, Vector, string), there
-					// is no codegen path to dup the value at the call site, so
-					// the callee's consumer drop and the caller's drop both
-					// fire on the same allocation → runtime double-free.
-					if ident := c.findBorrowedNonDuppableIdent(arg.Value); ident != nil {
+					// T0556/T0586: Reject moves of borrowed non-Copy, non-auto-dup,
+					// droppable values into plain-param call args. Originally T0556
+					// covered the single-owner handle subset (Mutex/MutexGuard/Task);
+					// T0586 broadens to all non-auto-dup droppable types (plain heap
+					// user types, generic user types, Map, Set). For these types no
+					// codegen path dups the value at the call site, so the callee's
+					// consumer drop and the caller's drop fire on the same allocation
+					// → runtime double-free. The predicate matches T0568's var-decl
+					// reject (`!isCopyType && !isVarDeclAliasSafeType &&
+					// isDroppableType`), so the call-arg and var-decl sites use the
+					// same rule and same `~`-affordance diagnostic.
+					if ident := c.findBorrowedNonAliasSafeIdent(arg.Value); ident != nil {
 						if c.params[ident.Name] {
 							c.errorf(ident.Pos(),
-								"cannot move borrowed parameter '%s' of single-owner type into call argument; add '~' to the parameter declaration to consume it",
+								"cannot move borrowed parameter '%s'; add '~' to the parameter declaration to consume it",
 								ident.Name)
 						} else {
-							c.errorf(ident.Pos(),
-								"cannot move borrowed value '%s' of single-owner type into call argument",
-								ident.Name)
+							c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
 						}
 						continue
 					}

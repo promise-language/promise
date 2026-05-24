@@ -199,7 +199,14 @@ func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 	// the existing HasAnyBorrow check in tryMove/tryMoveConsume while the
 	// borrowers are alive. T0164 NLL narrowing expires the borrow at each
 	// borrower's last use (extended for this shape in lastuse.go).
-	switch s.Value.(type) {
+	//
+	// T0570: peel ParenExpr so `(b, n) := (h.pair);` takes the same borrow
+	// path as the bare `(b, n) := h.pair;` form. Without peeling, the
+	// paren-wrapped source falls through to `tryMove(ParenExpr)` (a no-op
+	// for non-IdentExpr/ThisExpr/MemberExpr) leaving the destructured names
+	// Owned and the parent un-borrowed → consume of the parent slips through
+	// to a runtime UAF / double-free.
+	switch unwrapDestructureParens(s.Value).(type) {
 	case *ast.MemberExpr, *ast.IndexExpr:
 		rootName := destructureBorrowRoot(s.Value)
 		var elems []types.Type
@@ -236,6 +243,21 @@ func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 		if name != "_" {
 			c.state[name] = Owned
 		}
+	}
+}
+
+// unwrapDestructureParens peels any number of *ast.ParenExpr wrappers from a
+// destructure source expression. T0570: the dispatch switch in
+// checkDestructureVarDecl matches on AST shape; without peeling, a paren-
+// wrapped MemberExpr/IndexExpr would fall to the `default` arm and skip the
+// borrow registration, allowing a runtime UAF.
+func unwrapDestructureParens(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.Expr
 	}
 }
 

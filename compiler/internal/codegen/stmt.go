@@ -1189,6 +1189,22 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.maybeRegisterEnvFree(s.Name, alloca, typ)
 }
 
+// unwrapDestructureParens peels any number of *ast.ParenExpr wrappers from a
+// destructure source. T0570: the AST-shape dispatch in genDestructureVarDecl
+// matches against *ast.IdentExpr / *ast.IndexExpr / *ast.MemberExpr; without
+// peeling, paren-wrapped sources fall through to the default arm and
+// destructured locals incorrectly get drop bindings → double-free at scope
+// exit. (genExpr already sees through ParenExpr; this only fixes dispatch.)
+func unwrapDestructureParens(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.Expr
+	}
+}
+
 // genDestructureVarDecl handles tuple destructuring: (a, b) := expr
 func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 	if c.info.FailableDestructures[s] {
@@ -1202,7 +1218,11 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 	// force-unwrap inside `s.Value`) deep-clones the tuple. Skip when the
 	// source obviously aliases (IndexExpr/MemberExpr), where srcOwned will be
 	// false and no drop bindings are registered anyway.
-	switch s.Value.(type) {
+	// T0570: peel ParenExpr so `(b, n) := (arr[i]);` takes the same alias
+	// path as `(b, n) := arr[i];` — otherwise we'd dup the tuple (default
+	// arm) while the second switch correctly leaves srcOwned=false, leaking
+	// the dup'd pieces.
+	switch unwrapDestructureParens(s.Value).(type) {
 	case *ast.IndexExpr, *ast.MemberExpr:
 		// borrow path — no drop bindings registered → no double-free.
 	default:
@@ -1230,8 +1250,13 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 	// access), the destructured fields are also borrows and must not get drop
 	// bindings — otherwise they would double-free with the container's element
 	// walk or the parent's drop.
+	//
+	// T0570: peel ParenExpr so `(b, n) := (h.pair);` takes the same borrow
+	// path as `(b, n) := h.pair;`. Without peeling, srcOwned stayed true →
+	// destructured locals got drop bindings → double-free at scope exit.
+	unwrappedSrc := unwrapDestructureParens(s.Value)
 	srcOwned := true
-	switch src := s.Value.(type) {
+	switch src := unwrappedSrc.(type) {
 	case *ast.IdentExpr:
 		_, hasBinding := c.dropBindings[src.Name]
 		srcOwned = hasBinding
@@ -1274,8 +1299,10 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 	// doesn't double-free those pieces. For non-ident sources (literal,
 	// function-call result), genTupleLit's per-element claims plus the
 	// per-name drops registered above cover ownership.
+	// T0570: use the paren-peeled expression so `(ident)` still clears the
+	// drop flag on the underlying variable.
 	if srcOwned {
-		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+		if ident, ok := unwrappedSrc.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		}
 	}

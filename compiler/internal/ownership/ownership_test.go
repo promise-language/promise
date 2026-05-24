@@ -3750,6 +3750,100 @@ func TestDestructureFromIndexConsumeParentRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move 'arr' while it is borrowed")
 }
 
+// === T0570: ParenExpr-wrapped destructure sources route through the same
+// borrow path as bare MemberExpr / IndexExpr. Without paren peeling at the
+// dispatch switch, the ownership-side tryMove silently no-ops on
+// ParenExpr → destructured locals stayed Owned → consume of the parent slipped
+// through to a runtime UAF / double-free. ===
+
+// Paren-wrapped MemberExpr source — consume parent before locals' last use
+// must reject. Mirrors TestDestructureFromFieldConsumeParentRejected, but
+// with `(h.pair)` instead of `h.pair`.
+func TestDestructureFromFieldParenConsumeParentRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		consume(~Holder h) {}
+		test() {
+			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, n) := (h.pair);
+			consume(h);
+			_ = b.s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 'h' while it is borrowed")
+}
+
+// Paren-wrapped MemberExpr + NLL borrow narrowing — read both locals, then
+// consume the parent. Must accept (borrow expires at the borrowers' last use).
+func TestDestructureFromFieldParenConsumeAfterLastUseOK(t *testing.T) {
+	ownerOK(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		consume(~Holder h) {}
+		test() {
+			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, n) := (h.pair);
+			_ = b.s;
+			_ = n;
+			consume(h);
+		}
+	`)
+}
+
+// Paren-wrapped IndexExpr source — destructure from a vector element wrapped
+// in parens, then consume the vector. Must reject for symmetry with the
+// MemberExpr case.
+func TestDestructureFromIndexParenConsumeParentRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		consume_vec(~Vector[(_BoxStr, int)] v) {}
+		test() {
+			Vector[(_BoxStr, int)] arr = [];
+			arr.push((_BoxStr(s: "x"), 2));
+			(b, n) := (arr[0]);
+			consume_vec(arr);
+			_ = b.s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 'arr' while it is borrowed")
+}
+
+// Paren-wrapped IndexExpr + NLL borrow narrowing — read both locals, then
+// consume the vector. Must accept; mirrors the MemberExpr OK test for the
+// IndexExpr arm of the lastuse.go T0570 paren peel.
+func TestDestructureFromIndexParenConsumeAfterLastUseOK(t *testing.T) {
+	ownerOK(t, `
+		type _BoxStr { string s; }
+		consume_vec(~Vector[(_BoxStr, int)] v) {}
+		test() {
+			Vector[(_BoxStr, int)] arr = [];
+			arr.push((_BoxStr(s: "x"), 2));
+			(b, n) := (arr[0]);
+			_ = b.s;
+			_ = n;
+			consume_vec(arr);
+		}
+	`)
+}
+
+// Double-wrapped parens — `((h.pair))` — confirms the iterative peel handles
+// nested ParenExpr without leaving a borrow gap.
+func TestDestructureFromFieldDoubleParenRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _BoxStr { string s; }
+		type Holder { (_BoxStr, int) pair; }
+		consume(~Holder h) {}
+		test() {
+			Holder h = Holder(pair: (_BoxStr(s: "x"), 2));
+			(b, n) := ((h.pair));
+			consume(h);
+			_ = b.s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 'h' while it is borrowed")
+}
+
 // T0164 NLL borrow narrowing: destructure, use both locals, THEN consume the
 // parent — must accept (borrow expires at the borrower's last use).
 func TestDestructureFromFieldNLLNarrowing(t *testing.T) {

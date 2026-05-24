@@ -772,7 +772,10 @@ func (a *lastUseAnalyzer) analyzeRefBlock(block *ast.Block, result map[ast.Stmt]
 			// so the borrow expires at the borrower's last use rather than
 			// scope exit — otherwise destructure-then-consume-parent (after
 			// the locals' last use) would falsely reject.
-			switch s.Value.(type) {
+			// T0570: peel ParenExpr so paren-wrapped sources (`(h.pair)`,
+			// `(arr[0])`) still get last-use narrowing — otherwise consume-
+			// after-last-use is incorrectly rejected.
+			switch unwrapDestructureParens(s.Value).(type) {
 			case *ast.MemberExpr, *ast.IndexExpr:
 				var elems []types.Type
 				if tup, ok := a.info.Types[s.Value].(*types.Tuple); ok {

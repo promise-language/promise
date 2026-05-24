@@ -317,3 +317,69 @@ consume_holder_t0548(~_HolderT0548 h) {
   assert(b2.s == "abcd", "b2.s after consume");
   assert(n2 == 5, "n2 after consume");
 }
+
+// T0570: destructure source wrapped in ParenExpr — `(b, n) := (h.pair);` —
+// bypassed the T0548 borrow-tracking fix (both ownership-side borrow
+// registration and codegen-side srcOwned short-circuit only matched bare
+// MemberExpr / IndexExpr). Without paren peeling, the destructured locals
+// got their own drop bindings → double-free with the parent at scope exit
+// (segfault), and consume-of-parent was permitted → runtime UAF.
+type _BoxStrT0570 {
+  string s;
+}
+
+type _HolderT0570 {
+  (_BoxStrT0570, int) pair;
+}
+
+// Positive: paren-wrapped source, read both locals, then scope-drop the
+// parent. No double-free, no leak.
+test_destructure_member_paren_read_then_scope_drop() `test {
+  _HolderT0570 h = _HolderT0570(pair: (_BoxStrT0570(s: "hello" + " world"), 7));
+  (b, n) := (h.pair);
+  assert(b.s == "hello world", "b.s");
+  assert(n == 7, "n");
+}
+
+// Positive: paren-wrapped source, read both locals, then move parent into a
+// consumer. T0164 NLL narrowing (extended for ParenExpr in T0570) expires
+// the borrow at the locals' last use, so the consume is legal.
+test_destructure_member_paren_consume_after_last_use() `test {
+  _HolderT0570 h = _HolderT0570(pair: (_BoxStrT0570(s: "ab" + "cd"), 5));
+  (b, n) := (h.pair);
+  assert(b.s == "abcd", "b.s");
+  assert(n == 5, "n");
+  consume_holder_t0570(h);
+}
+
+consume_holder_t0570(~_HolderT0570 h) {
+  (b2, n2) := (h.pair);
+  assert(b2.s == "abcd", "b2.s after consume");
+  assert(n2 == 5, "n2 after consume");
+}
+
+// T0570: coverage — paren-wrapped IndexExpr source. Exercises the Site 1
+// `dupTupleFieldAccess` and Site 2 `srcOwned` codegen switches for the
+// IndexExpr arm at runtime; without paren peeling, the tuple would be
+// dup'd into a temp AND the destructured locals would receive their own
+// drop bindings → double-free with the vector's element drop at scope
+// exit.
+test_destructure_paren_index_read_then_scope_drop() `test {
+  Vector[(_BoxStrT0570, int)] arr = [];
+  arr.push((_BoxStrT0570(s: "ab" + "cd"), 11));
+  (b, n) := (arr[0]);
+  assert(b.s == "abcd", "b.s");
+  assert(n == 11, "n");
+}
+
+// T0570: coverage — paren-wrapped IdentExpr source. Exercises Site 3
+// (clearDropFlag uses the paren-peeled expression). Without the fix, the
+// tuple variable's drop flag would not be cleared after destructure → the
+// tuple-walk at scope exit would double-free the inner string while the
+// destructured `b` also owns it.
+test_destructure_paren_ident_owned_tuple() `test {
+  (_BoxStrT0570, int) tup = (_BoxStrT0570(s: "xy" + "zw"), 22);
+  (b, n) := (tup);
+  assert(b.s == "xyzw", "b.s");
+  assert(n == 22, "n");
+}

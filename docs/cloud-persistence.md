@@ -55,24 +55,72 @@ are defined in `docs/schema.md` §4. This doc only adds the operational implicat
 - **Field id** identifies a single field in an instance. Wire-side, an instance is
   `map[Hash128, Value]` keyed by field id, not by source name. A field rename without
   `` `id `` pinning is a hard schema break.
-- **Instance id** is a 128-bit identifier within a type. Combined with a type id it
-  forms an `EntityId` — the persistent address of one row. The id can come from
-  either side: the server can allocate fresh ids on demand (the typical pattern, via
-  the `Allocate` op in §4.1), or the client can generate them locally (random UUIDs,
-  hashes of payload, deterministic application keys) and submit them on a `Put`. The
-  server decides per type whether client-supplied ids are accepted; both modes use
-  the same `EntityId` shape on the wire.
+- **Entity id** is a single 128-bit identifier — globally unique across all types
+  and all instances. It is **the** persistent address of one row. Nothing else is
+  part of the identity. The id can come from either side: the server can allocate
+  fresh ids on demand (the typical pattern, via the `Allocate` op in §4.1), or the
+  client can generate them locally (random UUIDs, hashes of payload, deterministic
+  application keys) and submit them on a `Put`. The server decides per type whether
+  client-supplied ids are accepted.
 
 ```promise
-type EntityId `public `value `clone `serializable {
-    Hash128 type_id;
-    Hash128 instance_id;     // server-allocated or client-generated; opaque on the wire
-}
+// EntityId is just a 128-bit value. No struct, no type+instance pair —
+// the type comes from elsewhere (schema of the field that references it,
+// or an explicit op parameter when one is needed).
+type EntityId = Hash128;
 ```
 
-The prototype encoded entity ids as `T200I12` strings on the wire. Promise uses two
-128-bit values explicitly. JSON encoding is a 32-hex tuple inside one object —
-self-describing, no parser needed.
+The prototype encoded entity ids as `T200I12` strings on the wire — type and
+instance concatenated. Promise drops the bundled type entirely. Earlier drafts of
+this design (see §14 Q1) carried `{Hash128 type_id, Hash128 instance_id}` for the
+same reason as the prototype: to let the server route a request to the right
+storage shard without an extra index lookup. That optimisation is rejected here
+because:
+
+- **The type is recoverable from context.** Every reference in user code goes
+  through a typed `Ref[T]`, so the *field schema* already encodes the target type.
+  Operations that genuinely need a type id at execution time (Put validation,
+  Allocate, List) carry it as an explicit op parameter — and that copy is the
+  authoritative one.
+- **A redundant copy on the wire is a bug source.** If the client's belief about
+  an entity's type drifts from the server's record (renamed type without an
+  `` `id `` pin, schema rewind, etc.), a bundled `(type_id, instance_id)` causes
+  silent mis-routing or a confusing "type mismatch" error far from the cause.
+  With identity = id alone, the server checks the type from its own records and
+  the failure mode collapses to "entity not found" or "wrong type for this field".
+- **Backends already need a global id index.** Cross-type references force every
+  backend to be able to resolve "what row is this id?" without knowing the type
+  up front — so the type-in-id was never doing meaningful routing work that the
+  index didn't already do.
+
+### 2.1a Optional type hint
+
+For backends that genuinely shard by type at the storage layer (per-type tables in
+Postgres, per-type collections in Firestore) and would otherwise do a fan-out scan
+on a bare-id `Get`, the wire-level op shape allows an **optional type hint**:
+
+```promise
+Op.Get(EntityId id, Hash128? type_hint)
+```
+
+The hint is advisory — the server uses it to pick a shard but must still verify
+the row's actual type. If the hint is wrong, the server falls back to the
+cross-type index and returns the entity as if the hint had been omitted. Clients
+that always carry a `Ref[T]` typed at the schema layer can populate the hint for
+free; clients holding bare ids (during recovery, batch import) leave it `none`.
+
+This keeps the identity single-value while preserving the performance escape
+hatch the original bundled design was trying to bake in.
+
+### 2.1b 128-bit identity and the `u128` dependency
+
+`Hash128` is currently defined as `{ u64 hi; u64 lo }` because Promise has no
+128-bit integer type today. Once `u128` lands (see [docs/large-integers.md](large-integers.md)
+and the tracker entry for that work), `Hash128` collapses to a plain
+`u128` — equality, hashing, and copying become single-instruction native
+operations instead of two-word struct ops. The wire format does not change;
+only the in-memory representation. This is one of the reasons cloud persistence
+v1 lists large integers as a prerequisite (§13).
 
 ### 2.1 The `` `entity `` Annotation
 
@@ -132,13 +180,13 @@ type Request `public `serializable
 
 enum Op `public `serializable {
     Allocate(Hash128 type_id, int count = 1)
-        `doc("Reserve `count` fresh instance ids of the given type. Server returns the allocated EntityIds in the response."),
+        `doc("Reserve `count` fresh entity ids in the given type's namespace. Server returns the allocated EntityIds (bare 128-bit values) in the response."),
 
-    Put(EntityId id, map[Hash128, Value]? data)
-        `doc("Create or update an instance. `data` is `none` to delete. Server enforces schema and updates inverse relations."),
+    Put(EntityId id, Hash128 type_id, map[Hash128, Value]? data)
+        `doc("Create or update an instance. `type_id` is carried explicitly (not part of the EntityId) so the server can validate the payload against the type's schema. `data` is `none` to delete. Server enforces schema and updates inverse relations."),
 
-    Get(EntityId id)
-        `doc("Fetch one instance. Server may also include related instances it had to load anyway."),
+    Get(EntityId id, Hash128? type_hint = none)
+        `doc("Fetch one instance by id alone. `type_hint` is optional and advisory — backends that shard by type may use it for routing but must still confirm the row's actual type. Server may also include related instances it had to load anyway."),
 
     List(Hash128 type_id, ListFilter? filter)
         `doc("Enumerate all instances of a type. Returns ids only — fetch payloads with Get."),
@@ -197,10 +245,12 @@ deployment choice, not a protocol concern.
 Op.Allocate(type_id: Foo._type_id, count: 1)
 ```
 
-Server picks fresh `instance_id` values for the given type and returns them in
-`response.allocated` in op order. Allocation is typically monotonic per type — the
-server maintains a counter — but the protocol does not require monotonicity; a
-backend that wants UUID-style ids may return random ones.
+Server picks fresh `EntityId` values (bare 128-bit ids) for the given type and
+returns them in `response.allocated` in op order. Allocation is typically monotonic
+per type — the server maintains a counter — but the protocol does not require
+monotonicity; a backend that wants UUID-style ids may return random ones. The
+type id is *not* embedded in the returned id; the server records the type
+separately so future Gets can be answered with id alone.
 
 Clients that want a Put-then-Get pattern (allocate id, fill payload, commit) batch
 it as a single request: `Allocate` then `Put` referencing the soon-to-be-allocated
@@ -213,26 +263,40 @@ generation, which skips the round-trip entirely — see §4.2.
 ### 4.2 Put
 
 ```promise
-Op.Put(id: EntityId(...), data: { Foo._field_name_id: Value.String("alice"), ... })
+Op.Put(
+    id: some_entity_id,
+    type_id: Foo._type_id,
+    data: { Foo._field_name_id: Value.String("alice"), ... },
+)
 ```
 
-Set creates or updates an instance. `data: none` deletes. The `id.instance_id` may
-be one the server allocated earlier (via `Allocate`, §4.1) or one the client
-generated locally — random UUIDs, content-addressed hashes, deterministic
-application keys, etc. The server enforces a per-type policy on whether
-client-supplied ids are accepted; an unaccepted client-id Put returns a
-`client_id_not_allowed` status without touching the backend.
+Put creates or updates an instance. `data: none` deletes. The `id` may be one
+the server allocated earlier (via `Allocate`, §4.1) or one the client generated
+locally — random UUIDs, content-addressed hashes, deterministic application
+keys, etc. The server enforces a per-type policy on whether client-supplied ids
+are accepted; an unaccepted client-id Put returns a `client_id_not_allowed`
+status without touching the backend.
+
+`type_id` is a separate op parameter, *not* part of the `EntityId`. This is the
+authoritative type for the Put: the server validates the payload against the
+type's schema and, on first write of a never-seen id, records this type as the
+id's permanent type. On a re-write (the id already exists), the server verifies
+the incoming `type_id` matches the recorded type and rejects the op with a
+`type_mismatch` status if they disagree — the type of an existing entity is
+immutable.
 
 The server:
 
-1. Validates every key in `data` is a known field id of `id.type_id` (per
+1. Resolves the type from `type_id` against its schema registry (per
    `schema.Type.Object.fields`).
-2. Validates every value matches the field's `Type` — scalar kinds, optional vs
+2. Validates every key in `data` is a known field id of that type.
+3. Validates every value matches the field's `Type` — scalar kinds, optional vs
    required, etc.
-3. Validates id ownership — see above.
-4. Updates inverse relations (§7). Any entity touched by inverse maintenance is
+4. Validates id ownership — see above.
+5. For an existing id, confirms the recorded type equals `type_id`.
+6. Updates inverse relations (§7). Any entity touched by inverse maintenance is
    added to `response.entities` so the client cache reflects reality.
-5. Writes through to the storage backend.
+7. Writes through to the storage backend.
 
 Validation errors short-circuit the request — no partial application. Status field
 in the response carries the error class; details go in a structured error type
@@ -253,13 +317,25 @@ backups, etc.). Most types pick one mode and stick with it.
 ### 4.3 Get
 
 ```promise
-Op.Get(id: EntityId(...))
+Op.Get(id: some_entity_id)                              // bare id
+Op.Get(id: some_entity_id, type_hint: Foo._type_id)     // with optional hint
 ```
 
-Fetch one instance by id. If absent or deleted, `response.entities[id] = none`. The
-server is allowed (and encouraged) to include other entities it had to load anyway —
-particularly the targets of references on the requested entity, when the server
-already paid the load cost.
+Fetch one instance by id alone. The id is globally unique across all types, so
+the server does not need a type to find the row. If absent or deleted,
+`response.entities[id] = none`.
+
+The optional `type_hint` is advisory — useful for backends that physically shard
+storage by type (per-type tables, per-type collections) and would otherwise need
+a cross-type index lookup to locate the row. When the hint matches, the backend
+can route the read directly to the shard; when it doesn't, the backend falls
+back to the index. The hint never changes the result, only the cost of fetching
+it. Clients holding a typed `Ref[T]` can populate the hint for free; clients
+holding a bare id leave it `none`.
+
+The server is allowed (and encouraged) to include other entities it had to load
+anyway — particularly the targets of references on the requested entity, when
+the server already paid the load cost.
 
 ### 4.4 List
 
@@ -490,13 +566,18 @@ Properties:
 - `Ref[T]` is a value type — copying is a memcpy, no indirection.
 - The type parameter is constrained to `` `entity ``. A `Ref[Address]` (where
   `Address` is `` `serializable `` but not `` `entity ``) is a compile error.
-- `ref.id` is a getter — synchronous, no network.
+- `ref.id` is a getter — synchronous, no network. Returns a bare 128-bit
+  `Hash128`; the target type is known from the field's schema descriptor, not
+  from the id itself.
 - `ref.get()` is failable — it may need to round-trip. The cloud client maintains
   a cache; loaded entities are returned without a fetch. `is_loaded` lets callers
   decide whether to skip a code path that would round-trip.
-- Wire format: when an entity's `Ref[T]` field is encoded, only the `Hash128` id
-  goes on the wire. The schema descriptor for that field is
-  `Type.Reference(target_entity_type_id)`.
+- Wire format: when an entity's `Ref[T]` field is encoded, the 128-bit id goes on
+  the wire. The schema descriptor for that field carries the target type as
+  `Type.Reference(target_entity_type_id)` — that descriptor is the *only*
+  authoritative source of the referent type. The client uses it to populate
+  `type_hint` on Gets, and the server uses it to validate that the referenced
+  entity actually has the expected type.
 
 ```promise
 type Item `entity {
@@ -716,8 +797,12 @@ Promise diverges:
 - **Generic instantiations get distinct ids automatically.** The prototype had no
   generics so this didn't apply; Promise does, and `Vector[int]` vs `Vector[string]`
   must have separate ids.
-- **No `T<n>I<m>` string keys.** Wire format uses two-`Hash128` `EntityId` records.
-  More verbose, but self-describing and parseable without a regex.
+- **No `T<n>I<m>` string keys, and no bundled type id either.** Identity is a
+  single 128-bit value. The prototype tied type and instance together so the
+  server could route a request without an index; Promise drops the tie and
+  relies on the server's id index for routing, with an optional `type_hint` for
+  shard-aware backends (§2.1a). The result is one fewer field on the wire and
+  one fewer way for client/server type beliefs to drift.
 - **Many-to-many inverse relations land in v1**, not as a TODO.
 - **`Backend` is structural and pluggable from day one.** The prototype hard-coded
   Firestore + memory; Promise treats backends as community modules.
@@ -747,11 +832,18 @@ under any name.
 
 ### Phase 0 — Prerequisites
 
-1. `modules/schema` (see `docs/schema.md`) — `Hash128`, `Origin`, `Type`, `id` meta,
+1. **Native large integer types** (`u128` at minimum, full ladder per
+   [docs/large-integers.md](large-integers.md)). `Hash128` — and therefore every
+   entity id and every reference — is a 128-bit value. With `u128` available,
+   `Hash128` collapses to a `u128` alias and identity becomes a single native
+   load/store/compare instead of a two-word struct. Cloud persistence v1 does
+   not start until at least Phase 1 of the large-integers work (i128/u128) is
+   done.
+2. `modules/schema` (see `docs/schema.md`) — `Hash128`, `Origin`, `Type`, `id` meta,
    project-id resolution, and the `` `entity `` meta with hidden-id-field synthesis.
-2. `modules/json` — already done.
-3. `modules/http` — currently a placeholder; required for the default transport.
-4. `[executable]` table support in `promise.toml` parsing.
+3. `modules/json` — already done.
+4. `modules/http` — currently a placeholder; required for the default transport.
+5. `[executable]` table support in `promise.toml` parsing.
 
 ### Phase 1 — Wire Types and Client
 
@@ -787,25 +879,28 @@ under any name.
 
 ## 14. Open Design Questions
 
-**Q1 (settled): `EntityId` is a flat value type.**
-`EntityId { Hash128 type_id; Hash128 instance_id }` — simple record. The type id
-travels with every reference, so server-side validation and storage sharding are
-single-pass and the wire format stays self-describing. Phantom-typed variants
-(`EntityId[T]`) were considered and dropped — they would force every reference
-field to be generic and complicate the schema descriptor for no functional gain.
-Server backends may not even be implemented in Promise, and a flat record stays
-trivial to model in any other language.
+**Q1 (settled): `EntityId` is a single 128-bit value.**
+Identity is a bare `Hash128` (which becomes a `u128` alias once the large-integer
+work in [docs/large-integers.md](large-integers.md) lands). The type id is *not*
+bundled. Operations that need to know the type (`Put`, `Allocate`, `List`) carry
+it as an explicit op parameter; `Get` accepts an optional `type_hint` for
+backends that shard storage by type (§2.1a) but the hint is advisory and the
+server's record of the entity's type is the authoritative one.
 
-**Forward note: should Promise gain a native `u128` type?**
-`Hash128 { u64 hi; u64 lo; }` is a struct because Promise has no 128-bit integer
-type today. LLVM does support arbitrary-width integers natively, and Promise's
-scalar types already define their operators explicitly per type (see `int`, `u64`,
-etc. in `modules/std/`), so adding `u128` would mostly be a matter of adding the
-type, the literal grammar, and the operator stubs — most of the math support
-needed for `Hash128` is shift/and/xor/equality, not a full numeric tower. If
-`u128` lands, `Hash128` collapses to a type alias and every reference field
-shrinks. This is a language-level question, not a cloud-persistence one — file
-when relevant, but it does not block the v1 protocol design.
+Earlier drafts of this design bundled type and instance into a struct
+(`{ Hash128 type_id; Hash128 instance_id }`) for the same reason the prototype
+did: single-pass server-side routing without a cross-type index. That was
+rejected because (a) the type is already encoded in the field's schema
+descriptor for every typed reference, (b) a duplicated wire copy that can drift
+from the server's record is a bug source, and (c) backends need a global id
+index anyway to support cross-type references, so the bundled type never did
+meaningful routing work the index didn't already do. Full rationale in §2.
+
+Phantom-typed variants (`EntityId[T]`) were also considered and dropped —
+they would force every reference field to be generic and complicate the
+schema descriptor for no functional gain. Server backends may not even be
+implemented in Promise, and a flat 128-bit id is trivial to model in any
+other language.
 
 **Q2 (settled): protocol versioning piggybacks on client identity.**
 Earlier drafts asked whether `Request` / `Response` should carry an explicit

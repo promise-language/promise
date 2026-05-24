@@ -770,16 +770,30 @@ func isDroppableOwner(typ types.Type) bool {
 // For Optional and Tuple types, recurses into the wrapped/element types.
 // For generic Instance types, handles both *types.Named and *types.Enum origins
 // via substitution-aware helpers. Mirrors codegen's monoTypeHasDroppable (T0506).
+//
+// For *types.Named and *types.Instance (with Named origin), also applies the
+// B0192 catch-all: a non-value, non-structural, non-copy Named is droppable
+// because codegen synthesizes `pal_free` for it at scope exit. This brings
+// ownership into alignment with sema's `fieldTypeHasDrop` and codegen's
+// `monoTypeHasDroppable`, which both treat plain heap user types (e.g.
+// `_Plain { int n; }` with no drop method and only primitive fields) as
+// droppable (T0549).
 func isDroppableType(typ types.Type) bool {
 	switch t := typ.(type) {
 	case *types.Named:
-		return t.HasDrop() || t.NeedsSynthDrop()
+		if t.HasDrop() || t.NeedsSynthDrop() {
+			return true
+		}
+		return !t.IsValueType() && !t.IsStructural() && !isCopyType(t)
 	case *types.Instance:
 		if n, ok := t.Origin().(*types.Named); ok {
 			if n.HasDrop() || n.NeedsSynthDrop() {
 				return true
 			}
-			return instanceHasDroppableField(t)
+			if instanceHasDroppableField(t) {
+				return true
+			}
+			return !n.IsValueType() && !n.IsStructural() && !isCopyType(n)
 		}
 		if e, ok := t.Origin().(*types.Enum); ok {
 			if e.HasDrop() || e.NeedsSynthDrop() {

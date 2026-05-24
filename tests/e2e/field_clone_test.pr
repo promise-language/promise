@@ -140,3 +140,63 @@ test_generic_enum_field_drop_only() `test {
   // Let c drop at scope exit — the construction temp's enum drop must fire
   // and drop the inner _BoxDropT0506 without crashing or leaking.
 }
+
+// T0549: plain Named field with no drop method and only primitive fields.
+// Sema's fieldTypeHasDrop / codegen's monoTypeHasDroppable apply the B0192
+// catch-all (non-value, non-structural, non-copy Named is droppable because
+// codegen `pal_free`s it at drop time), but prior to T0549 ownership's
+// `isDroppableType` returned false for such types, letting a bare field move
+// slip through and double-free at runtime. The new B0192 catch-all in
+// ownership now rejects the move at compile time; `.clone()` is the documented
+// workaround. This e2e test verifies the clone produces an independent copy
+// and that no double-free occurs.
+type _PlainT0549 `clone {
+  int n;
+}
+
+type _OuterPlainT0549 {
+  _PlainT0549 inner;
+  drop(~this) {
+  }
+}
+
+test_clone_plain_named_field() `test {
+  _OuterPlainT0549 o = _OuterPlainT0549(inner: _PlainT0549(n: 1));
+  _PlainT0549 p = o.inner.clone();
+  assert(p.n == 1, "cloned plain field value");
+}
+
+// Companion: build the owner, never read the field. Confirms codegen's
+// synth drop fires cleanly on the owner without crashing or leaking when
+// the inner plain Named stays inside.
+test_plain_named_field_drop_only() `test {
+  _OuterPlainT0549 o = _OuterPlainT0549(inner: _PlainT0549(n: 2));
+  // Let o drop at scope exit — synth drop pal_free's the inner plain.
+}
+
+// T0549: parallel e2e for the generic-Instance variant. `_PlainGenT0549[U]`
+// with a primitive U field is, when instantiated as `_PlainGenT0549[int]`,
+// a heap user type whose origin is non-value, non-structural, non-Copy.
+// The Instance-branch B0192 catch-all in ownership rejects the bare move;
+// `.clone()` is the workaround. Verifies the cloned copy is independent
+// and that the owner's synth drop fires cleanly when the field stays in.
+type _PlainGenT0549[U] `clone {
+  U n;
+}
+
+type _OuterPlainGenT0549 {
+  _PlainGenT0549[int] inner;
+  drop(~this) {
+  }
+}
+
+test_clone_generic_plain_named_field() `test {
+  _OuterPlainGenT0549 o = _OuterPlainGenT0549(inner: _PlainGenT0549[int](n: 1));
+  _PlainGenT0549[int] p = o.inner.clone();
+  assert(p.n == 1, "cloned generic plain field value");
+}
+
+test_generic_plain_named_field_drop_only() `test {
+  _OuterPlainGenT0549 o = _OuterPlainGenT0549(inner: _PlainGenT0549[int](n: 2));
+  // Let o drop at scope exit — synth drop pal_free's the inner _PlainGenT0549[int].
+}

@@ -3760,12 +3760,14 @@ func TestFieldMoveGenericFnBodyConcreteFieldOK(t *testing.T) {
 }
 
 // Field type is a generic Instance (GenWrap[Color]) whose origin Named has no
-// drop flags — exercises the `case *types.Instance` fallthrough into
-// instanceHasDroppableField in isDroppableType. The droppable Outer owner
-// passes the isDroppableOwner gate, but the field type's substituted-drop
-// check returns false (Color is non-droppable), so the move is allowed.
-func TestFieldMoveGenericInstanceFieldNonDroppableOK(t *testing.T) {
-	ownerOK(t, `
+// drop flags. Even though Color (the type arg) is non-droppable, the origin
+// `GenWrap` itself is a heap user type (non-value, non-structural, non-Copy),
+// so codegen's monoTypeHasDroppable returns true via the B0192 catch-all and
+// synthesizes a drop that `pal_free`s the heap instance. Without the parallel
+// catch-all on the ownership side, `GenWrap[Color] g = o.gw` slips through and
+// double-frees at runtime (verified prior to T0549 fix: `fatal: double free`).
+func TestFieldMoveGenericInstanceFieldHeapOriginError(t *testing.T) {
+	errs := ownerErrs(t, `
 		enum Color { Red; Green; Blue; }
 		type GenWrap[T] { T inner; }
 		type Outer {
@@ -3777,6 +3779,7 @@ func TestFieldMoveGenericInstanceFieldNonDroppableOK(t *testing.T) {
 			GenWrap[Color] g = o.gw;
 		}
 	`)
+	expectOwnerError(t, errs, "cannot move field 'gw'")
 }
 
 // T0506: `Container[T]{Maybe[T] m}` instantiated with a droppable T must reject
@@ -3981,6 +3984,136 @@ func TestFieldMoveGenericEnumMixedFieldVariantError(t *testing.T) {
 		}
 	`)
 	expectOwnerError(t, errs, "cannot move field 'm'")
+}
+
+// === T0549: plain Named / Instance field-move with B0192 catch-all ===
+
+// `_Plain { int n; }` has no drop method and only primitive fields, so
+// sema's fieldTypeHasDrop and the Named's HasDrop/NeedsSynthDrop flags are
+// all false. But codegen treats it as a heap user type (B0192 catch-all in
+// monoTypeHasDroppable) and emits `pal_free` for it both inside `_Outer`'s
+// synth drop and at the moved local's scope exit — a runtime double-free.
+// The new B0192 catch-all in isDroppableType rejects the move at compile time.
+func TestFieldMovePlainNamedFromDroppableError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Plain { int n; }
+		type _Outer {
+			_Plain inner;
+			drop(~this) {}
+		}
+		test() {
+			_Outer o = _Outer(inner: _Plain(n: 1));
+			_Plain p = o.inner;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'inner'")
+}
+
+// Same shape but the field type is a generic Instance whose origin is a plain
+// heap user type (`_Plain[U] { U n; }` instantiated as `_Plain[int]`). The
+// instance has only a primitive field after substitution, so
+// `instanceHasDroppableField` returns false — only the new Instance-branch
+// B0192 catch-all on the origin catches it.
+func TestFieldMoveGenericInstancePlainOriginError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Plain[U] { U n; }
+		type _Outer {
+			_Plain[int] inner;
+			drop(~this) {}
+		}
+		test() {
+			_Outer o = _Outer(inner: _Plain[int](n: 1));
+			_Plain[int] p = o.inner;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'inner'")
+}
+
+// `_Pt` is a value type — all fields `value, so it's inlined and has no
+// heap drop. The new B0192 catch-all must exclude IsValueType via the
+// `!t.IsValueType()` guard. Negative guard.
+func TestFieldMovePlainValueTypeFieldOK(t *testing.T) {
+	ownerOK(t, `
+		type _Pt { int x `+"`value"+`; int y `+"`value"+`; }
+		type _Outer {
+			_Pt inner;
+			drop(~this) {}
+		}
+		test() {
+			_Outer o = _Outer(inner: _Pt(x: 1, y: 2));
+			_Pt p = o.inner;
+		}
+	`)
+}
+
+// `_PtCopy `copy { ... }` is a Copy Named — auto-copied on assignment,
+// no heap drop. The field-move check filters Copy types upstream
+// (`isCopyType(fieldType)` returns true at line ~930), but the new
+// catch-all also excludes IsCopy via `!isCopyType(t)`. Negative guard.
+func TestFieldMovePlainCopyTypeFieldOK(t *testing.T) {
+	ownerOK(t, `
+		type _PtCopy `+"`copy"+` { int x; int y; }
+		type _Outer {
+			_PtCopy inner;
+			drop(~this) {}
+		}
+		test() {
+			_Outer o = _Outer(inner: _PtCopy(x: 1, y: 2));
+			_PtCopy p = o.inner;
+		}
+	`)
+}
+
+// Field type is a generic Instance whose origin Named is a heap user type AND
+// whose substituted TypeParam-bearing field is itself droppable
+// (`GenWrap[map[string,string]]`). Both `instanceHasDroppableField` (via the
+// droppable substituted field) AND the B0192 catch-all (via the heap origin)
+// independently return true here — the catch-all subsumes the middle clause.
+// Regression guard: ensure the move stays rejected when both paths agree, so
+// any future simplification (removing the now-redundant `instanceHasDroppableField`
+// call inside isDroppableType's Instance branch) still preserves correctness.
+func TestFieldMoveGenericInstanceDroppableSubstFieldError(t *testing.T) {
+	errs := ownerErrs(t, `
+		type GenWrap[T] { T inner; }
+		type Outer {
+			GenWrap[map[string, string]] gw;
+			drop(~this) {}
+		}
+		test() {
+			map[string, string] m = map[string, string]();
+			Outer o = Outer(gw: GenWrap[map[string, string]](inner: m));
+			GenWrap[map[string, string]] g = o.gw;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'gw'")
+}
+
+// Field type is a generic enum Instance whose origin has HasDrop/NeedsSynthDrop
+// set (via T0102: a variant has a concrete droppable string field at the generic
+// level). Exercises the
+// `case *types.Instance: ... if e, ok := t.Origin().(*types.Enum); ok { if e.HasDrop() ... return true }`
+// branch inside isDroppableType, which had no test coverage prior — this
+// branch must short-circuit before falling through to
+// `enumInstanceHasDroppableField` (which only inspects substituted TypeParam
+// fields). Without this short-circuit, an enum with a concrete-typed droppable
+// variant field would slip through whenever none of its TypeParam fields
+// substitute to droppable types.
+func TestFieldMoveGenericEnumInstanceOriginHasDropError(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum E[T] {
+			Just(T x, string s);
+			Nothing;
+		}
+		type Outer {
+			E[int] e;
+			drop(~this) {}
+		}
+		test() {
+			Outer o = Outer(e: E[int].Just(7, "tag"));
+			E[int] e = o.e;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'e'")
 }
 
 // === T0338: borrowed parameter cannot be moved ===

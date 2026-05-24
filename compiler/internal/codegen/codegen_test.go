@@ -5573,6 +5573,105 @@ func TestFixedArrayFieldHeapNoDropElement(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free")
 }
 
+// T0583: `arr[i] = newVal` on a fixed-size array of droppable elements must
+// emit a drop call for the old slot value before storing the new one.
+// Before the fix, `genArrayIndexAssign` did a bare `NewStore` and leaked the
+// previous allocation. The IR for a heap-user element with explicit drop must
+// load the old element, drop it (Type.drop + pal_free), then store the new.
+func TestFixedArrayIndexAssignDropsOldHeapUser(t *testing.T) {
+	ir := generateIR(t, `
+		type _Box { int n; drop(~this) {} }
+		main() {
+			_Box[2] arr = [_Box(n: 1), _Box(n: 2)];
+			_Box c = _Box(n: 3);
+			arr[1] = c;
+		}
+	`)
+	// After bounds-check OK, the IR must drop the previous element before storing.
+	assertContains(t, ir, "arrassign.ok")
+	assertContains(t, ir, "call void @_Box.drop")
+}
+
+// T0583: String element — overwrite must call promise_string_drop on the old slot.
+func TestFixedArrayIndexAssignDropsOldString(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[2] arr = ["alpha", "beta"];
+			arr[1] = "gamma";
+		}
+	`)
+	assertContains(t, ir, "arrassign.ok")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0583: String compound assignment — `arr[i] += s` must drop the old string
+// after computing the concat result and before storing it.
+func TestFixedArrayIndexCompoundAssignDropsOldString(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[2] arr = ["foo", "bar"];
+			arr[1] += "baz";
+		}
+	`)
+	assertContains(t, ir, "arrassign.ok")
+	// Compound path goes through emitStringDropOldValue.
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0583: Optional<HeapUser> element — overwrite must run the Optional drop
+// dispatcher on the previous slot, dropping the inner instance when present.
+func TestFixedArrayIndexAssignDropsOldOptionalHeapUser(t *testing.T) {
+	ir := generateIR(t, `
+		type _Box { int n; drop(~this) {} }
+		main() {
+			_Box? a = _Box(n: 1);
+			_Box? b = _Box(n: 2);
+			_Box?[2] arr = [a, b];
+			_Box? c = _Box(n: 3);
+			arr[1] = c;
+		}
+	`)
+	assertContains(t, ir, "arrassign.ok")
+	// The Optional's drop dispatcher checks presence then drops the inner _Box.
+	assertContains(t, ir, "call void @_Box.drop")
+}
+
+// T0583: Vector element — overwrite must call Vector.drop on the old slot.
+func TestFixedArrayIndexAssignDropsOldVector(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v0 := Vector[int]();
+			v0.push(10);
+			v1 := Vector[int]();
+			v1.push(20);
+			Vector[int][2] arr = [v0, v1];
+			v2 := Vector[int]();
+			v2.push(30);
+			arr[1] = v2;
+		}
+	`)
+	assertContains(t, ir, "arrassign.ok")
+	assertContains(t, ir, "call void @Vector.drop")
+}
+
+// T0583: Primitive element (no drop needed) — `arr[i] = val` must NOT emit a
+// load-and-drop dance for the old slot. Confirms typeNeedsFieldDrop correctly
+// gates the new code path: for ints, the arrassign.ok block goes directly from
+// GEP to store without any intervening load of the old value.
+func TestFixedArrayIndexAssignNoDropForPrimitive(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[3] arr = [1, 2, 3];
+			arr[1] = 42;
+		}
+	`)
+	assertContains(t, ir, "arrassign.ok")
+	// For primitives the codegen emits: GEP into [3 x i64] then `store i64 42`
+	// immediately. No old-value load or drop call appears between them.
+	assertContainsMatch(t, ir,
+		`getelementptr \[3 x i64\][^\n]*\n[^\n]*store i64 42`)
+}
+
 func TestFixedArrayF64(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

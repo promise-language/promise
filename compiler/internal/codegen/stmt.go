@@ -8171,7 +8171,21 @@ func (c *Compiler) genArrayIndexAssign(target *ast.IndexExpr, arr *types.Array, 
 	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
 		constant.NewInt(irtypes.I32, 0), idx)
 
+	elemType := arr.Elem()
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+
 	if op == ast.OpAssign {
+		// T0583: Drop the previous element before storing the new value. Without
+		// this, overwriting a droppable element (string, Vector, Channel, Arc,
+		// heap user, Optional<droppable>, droppable tuple/nested array) leaks
+		// the previous allocation. Mirrors genVectorIndexAssign and
+		// genMemberAssign drop-on-overwrite patterns.
+		if c.typeNeedsFieldDrop(elemType) {
+			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
+			c.emitVariantFieldDrop(oldVal, elemType)
+		}
 		c.block.NewStore(val, elemPtr)
 		return
 	}
@@ -8179,6 +8193,11 @@ func (c *Compiler) genArrayIndexAssign(target *ast.IndexExpr, arr *types.Array, 
 	// Compound assignment
 	current := c.block.NewLoad(elemLLVM, elemPtr)
 	result := c.genCompoundOp(op, arr.Elem(), current, val)
+	// T0583: Drop old string before storing the concat result. Numeric/bool/char
+	// compound ops produce values, not new allocations — only string applies.
+	if extractNamed(elemType) == types.TypString {
+		c.emitStringDropOldValue(current, result)
+	}
 	c.block.NewStore(result, elemPtr)
 }
 

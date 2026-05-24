@@ -138,9 +138,192 @@ test_heap_user_no_drop_element_in_array_field() `test {
   assert(b.data[1].x == 2, "second bare");
 }
 
-// NOTE: `h.data[i] = newVal` reassignment on fixed-size array of heap/Optional
-// elements is tracked under T0583 (pre-existing leak in genArrayIndexAssign,
-// independent of T0579's layout/drop fix).
+// T0583: `arr[i] = newVal` on a fixed-size array of droppable elements must
+// drop the previous slot value, not just overwrite it. Tests below exercise
+// every droppable branch reached via emitVariantFieldDrop from
+// genArrayIndexAssign, mirroring the drop-on-overwrite behavior already in
+// place for Vector and struct field assignment.
 //
+// Verification strategy: the zero-tolerance leak policy (T0067) already fails
+// the test if any allocation is unfreed, so the assertions only need to confirm
+// observable post-state (slot present/absent, primitive contents). Reading a
+// droppable element back into an owning binding (e.g. `if v := arr[i]`) would
+// alias arr's slot — `genArrayIndex` has no dup-on-read — and is intentionally
+// out of scope for this fix (noted in T0583's plan; would be a follow-up bug).
+
+test_local_optional_box_array_reassign() `test {
+  // Direct T0583 repro — overwrite the second slot with a fresh _BoxA.
+  // Pre-fix: leaks the previous _BoxA(n: 2) allocation.
+  _BoxA? a = _BoxA(n: 1);
+  _BoxA? b = _BoxA(n: 2);
+  _BoxA?[2] arr = [a, b];
+  _BoxA? c = _BoxA(n: 3);
+  arr[1] = c;
+  assert(arr[1] is present, "slot 1 still present");
+  assert(arr[0] is present, "slot 0 untouched");
+}
+
+test_local_optional_box_array_reassign_to_none() `test {
+  // Overwrite a present slot with `none` — must drop the previous _BoxA.
+  _BoxA? a = _BoxA(n: 5);
+  _BoxA? b = _BoxA(n: 6);
+  _BoxA?[2] arr = [a, b];
+  _BoxA? empty = none;
+  arr[0] = empty;
+  assert(arr[0] is absent, "slot 0 cleared");
+  assert(arr[1] is present, "slot 1 untouched");
+}
+
+test_local_optional_box_array_reassign_from_none() `test {
+  // Overwrite an absent slot with a present value — drops `none`, no leak.
+  _BoxA? a = _BoxA(n: 9);
+  _BoxA? b = none;
+  _BoxA?[2] arr = [a, b];
+  _BoxA? c = _BoxA(n: 10);
+  arr[1] = c;
+  assert(arr[1] is present, "slot 1 now present");
+  assert(arr[0] is present, "slot 0 untouched");
+}
+
+test_holder_optional_box_array_field_reassign() `test {
+  // Field-arr path through `genArrayBasePtr`'s MemberExpr branch.
+  _BoxA? a = _BoxA(n: 21);
+  _BoxA? b = _BoxA(n: 22);
+  _HolderOptBox h = _HolderOptBox(data: [a, b]);
+  _BoxA? c = _BoxA(n: 23);
+  h.data[1] = c;
+  assert(h.data[1] is present, "field arr slot 1 reassigned");
+  assert(h.data[0] is present, "field arr slot 0 untouched");
+}
+
+test_local_box_array_reassign() `test {
+  // Plain _Box (non-Optional, explicit drop) — exercises the named.HasDrop()
+  // branch of emitVariantFieldDrop (drop call + pal_free). Reading .n is safe
+  // because n is a value-type field, not the heap instance pointer.
+  _Box[2] arr = [_Box(n: 31), _Box(n: 32)];
+  _Box c = _Box(n: 33);
+  arr[1] = c;
+  assert(arr[1].n == 33, "slot 1 reassigned");
+  assert(arr[0].n == 31, "slot 0 untouched");
+}
+
+test_local_bare_array_reassign() `test {
+  // _Bare (heap user, no explicit drop) — exercises the pal_free-only branch.
+  _Bare[2] arr = [_Bare(x: 41), _Bare(x: 42)];
+  _Bare c = _Bare(x: 43);
+  arr[1] = c;
+  assert(arr[1].x == 43, "slot 1 reassigned");
+  assert(arr[0].x == 41, "slot 0 untouched");
+}
+
+test_local_string_array_reassign() `test {
+  // string element — exercises promise_string_drop branch.
+  string[2] arr = ["alpha", "beta"];
+  arr[1] = "gamma";
+  assert(arr[1] == "gamma", "slot 1 reassigned");
+  assert(arr[0] == "alpha", "slot 0 untouched");
+}
+
+test_local_string_array_compound_assign() `test {
+  // string compound (+=) — exercises emitStringDropOldValue path.
+  string[2] arr = ["foo", "bar"];
+  arr[1] += "baz";
+  assert(arr[1] == "barbaz", "slot 1 concatenated");
+  assert(arr[0] == "foo", "slot 0 untouched");
+}
+
+test_local_vector_array_reassign() `test {
+  // Vector[int] element — exercises Vector.drop branch. The original Vector
+  // at slot 1 had a heap buffer; without drop-on-overwrite, that buffer leaks.
+  // No element-read assertions: the fix is verified by leak-free completion.
+  Vector[int] v0 = Vector[int]();
+  v0.push(100);
+  Vector[int] v1 = Vector[int]();
+  v1.push(200);
+  Vector[int][2] arr = [v0, v1];
+  Vector[int] v2 = Vector[int]();
+  v2.push(300);
+  arr[1] = v2;
+  assert(true, "vector reassign completed without leak");
+}
+
+test_local_tuple_array_reassign() `test {
+  // (string, int) element — exercises tuple-walk branch of
+  // emitVariantFieldDrop (drops the old string inside the old tuple). The
+  // original "second" string at slot 1 must be released by the tuple-walk
+  // path before "third" is stored. Verified by leak-free completion.
+  (string, int)[2] arr = [("first", 1), ("second", 2)];
+  arr[1] = ("third", 3);
+  assert(true, "tuple reassign completed without leak");
+}
+
+test_local_arc_array_reassign() `test {
+  // Arc[T] element — exercises the AsArc branch of emitVariantFieldDrop
+  // (getOrCreateArcDrop). Arc handles refcounted heap allocation; without
+  // drop-on-overwrite the original Arc's refcount never reaches zero.
+  Arc[int][2] arr = [Arc[int](1), Arc[int](2)];
+  Arc[int] c = Arc[int](3);
+  arr[1] = c;
+  assert(arr[1].borrow == 3, "slot 1 reassigned");
+  assert(arr[0].borrow == 1, "slot 0 untouched");
+}
+
+test_local_channel_array_reassign() `test {
+  // channel[T] element — exercises the AsChannel branch (Channel.drop).
+  // The replaced channel's buffer/state must be released.
+  channel[int] c0 = channel[int]();
+  channel[int] c1 = channel[int]();
+  channel[int][2] arr = [c0, c1];
+  channel[int] c2 = channel[int]();
+  arr[1] = c2;
+  assert(true, "channel reassign completed without leak");
+}
+
+test_local_mutex_array_reassign() `test {
+  // Mutex[T] element — exercises the AsMutex branch (getOrCreateMutexDrop).
+  // Mutex owns its inner value's allocation plus the mutex primitive.
+  Mutex[int] m0 = Mutex[int](1);
+  Mutex[int] m1 = Mutex[int](2);
+  Mutex[int][2] arr = [m0, m1];
+  Mutex[int] m2 = Mutex[int](3);
+  arr[1] = m2;
+  use g := arr[1].lock();
+  assert(g.borrow == 3, "mutex reassigned, lock works");
+}
+
+test_local_nested_string_array_reassign() `test {
+  // Nested fixed-size array — exercises the Array recursion branch in
+  // emitVariantFieldDrop (walks each element of the old inner array and
+  // drops it). The replaced row's two strings must both be released.
+  string[2] row0 = ["a", "b"];
+  string[2] row1 = ["c", "d"];
+  string[2][2] arr = [row0, row1];
+  string[2] new_row = ["e", "f"];
+  arr[1] = new_row;
+  assert(arr[1][0] == "e", "slot 1,0");
+  assert(arr[1][1] == "f", "slot 1,1");
+  assert(arr[0][0] == "a", "slot 0,0 untouched");
+}
+
+enum _Status {
+  Active(string name),
+  Inactive(int id),
+}
+
+test_local_enum_array_reassign_across_variants() `test {
+  // Enum element with droppable variant data — exercises the enum branch in
+  // emitVariantFieldDrop. The original Active("second") allocated a string;
+  // overwriting with Inactive(99) must drop that string via the synthesized
+  // enum drop function (switches on tag, drops per-variant data).
+  _Status[2] arr = [_Status.Active("first"), _Status.Active("second")];
+  _Status c = _Status.Inactive(99);
+  arr[1] = c;
+  string desc = match arr[1] {
+    _Status.Active(name) => "active",
+    _Status.Inactive(id) => "inactive",
+  };
+  assert(desc == "inactive", "slot 1 reassigned to inactive");
+}
+
 // NOTE: Generic types with `T[N]` fields (e.g. `Holder[_Box]`) currently leak
 // because `monoTypeHasDroppable` is missing the Array case. Tracked under T0584.

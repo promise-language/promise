@@ -7983,6 +7983,36 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			}
 			return
 		}
+		// T0508: Arc/Weak/Mutex/Task are native handle types — LLVM value is a
+		// single i8*, not a fat-pointer value struct. Call the per-element-type
+		// drop function with fieldVal directly (no extractInstancePtr, no pal_free
+		// — these drops free their own allocation).
+		if arcElem, isArc := types.AsArc(typ); isArc {
+			dropFn := c.getOrCreateArcDrop(arcElem)
+			c.block.NewCall(dropFn, fieldVal)
+			return
+		}
+		if weakElem, isWeak := types.AsWeak(typ); isWeak {
+			dropFn := c.getOrCreateWeakDrop(weakElem)
+			c.block.NewCall(dropFn, fieldVal)
+			return
+		}
+		if mutexElem, isMutex := types.AsMutex(typ); isMutex {
+			dropFn := c.getOrCreateMutexDrop(mutexElem)
+			c.block.NewCall(dropFn, fieldVal)
+			return
+		}
+		if _, isMG := types.AsMutexGuard(typ); isMG || named == types.TypMutexGuard {
+			if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
+				c.block.NewCall(dropFn, fieldVal)
+			}
+			return
+		}
+		if taskElem, isTask := types.AsTask(typ); isTask || named == types.TypTask {
+			dropFn := c.getOrCreateTaskDrop(taskElem)
+			c.block.NewCall(dropFn, fieldVal)
+			return
+		}
 		// T0387: Polymorphic heap user type — dispatch through typeinfo's
 		// drop_fn_ptr so subclass-only droppable fields (e.g. a string field on
 		// Container is Shape) are reached. The static-type drop walk would only

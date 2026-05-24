@@ -203,6 +203,12 @@ func isContainerType(typ types.Type) bool {
 	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
 		return true
 	}
+	// T0508: Task[T] is an opaque i8* handle (G struct pointer), same as the
+	// other native handles. Missing entry caused Optional[Task[T]] drop paths
+	// to fall through to extractInstancePtr and emit malformed IR.
+	if _, ok := types.AsTask(typ); ok || named == types.TypTask {
+		return true
+	}
 	if named == types.TypString {
 		return true
 	}

@@ -4928,6 +4928,26 @@ func (c *Compiler) pushElemNeedsDup(resolvedElem types.Type) bool {
 	if _, isCh := types.AsChannel(resolvedElem); isCh || named == types.TypChannel {
 		return true
 	}
+	// T0508: Arc/Weak need dup (ref-count increment); make explicit so the
+	// catch-all below doesn't accidentally exclude them if IsValueType/IsCopy
+	// flags change.
+	if _, isArc := types.AsArc(resolvedElem); isArc || named == types.TypArc {
+		return true
+	}
+	if _, isWeak := types.AsWeak(resolvedElem); isWeak || named == types.TypWeak {
+		return true
+	}
+	// T0508: Mutex/MutexGuard/Task are single-owner native handles — no dup
+	// semantics. Move-only push; the ownership system prevents reuse.
+	if _, isMutex := types.AsMutex(resolvedElem); isMutex || named == types.TypMutex {
+		return false
+	}
+	if _, isMG := types.AsMutexGuard(resolvedElem); isMG || named == types.TypMutexGuard {
+		return false
+	}
+	if _, isTask := types.AsTask(resolvedElem); isTask || named == types.TypTask {
+		return false
+	}
 	return !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural()
 }
 
@@ -4981,6 +5001,33 @@ func (c *Compiler) maybeDupPushElement(argVal value.Value, resolvedElem types.Ty
 	// Channel element: dup (increment ref count)
 	if _, isCh := types.AsChannel(resolvedElem); isCh || named == types.TypChannel {
 		return c.dupChannel(argVal)
+	}
+
+	// T0508: Arc[T] — atomic strong-count increment.
+	if _, isArc := types.AsArc(resolvedElem); isArc || named == types.TypArc {
+		return c.dupArc(argVal)
+	}
+
+	// T0508: Weak[T] — atomic weak-count increment.
+	if elem, isWeak := types.AsWeak(resolvedElem); isWeak {
+		resolvedWeakElem := elem
+		if c.typeSubst != nil {
+			resolvedWeakElem = types.Substitute(resolvedWeakElem, c.typeSubst)
+		}
+		return c.dupWeak(argVal, resolvedWeakElem)
+	}
+
+	// T0508: Single-owner native handles (Mutex/MutexGuard/Task) have no dup
+	// semantics. Ownership rejects double-moves of non-Copy values, so the
+	// runtime dup branch is unreachable in valid programs — return nil.
+	if _, isMutex := types.AsMutex(resolvedElem); isMutex || named == types.TypMutex {
+		return nil
+	}
+	if _, isMG := types.AsMutexGuard(resolvedElem); isMG || named == types.TypMutexGuard {
+		return nil
+	}
+	if _, isTask := types.AsTask(resolvedElem); isTask || named == types.TypTask {
+		return nil
 	}
 
 	// Heap user type with drop: clone via clone method or dupHeapValue fallback

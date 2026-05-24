@@ -1,0 +1,149 @@
+// T0508: Vector[Arc[T]] / Vector[Weak[T]] / Vector[Mutex[T]] / Vector[Task[T]] /
+// Vector[MutexGuard[T]] push must use the per-handle dup function (or move
+// semantics for single-owner handles), not the generic dupHeapValue path which
+// panics because these types are LLVM `i8*`, not the fat-pointer value struct.
+// --- Arc[T] ---
+test_arc_push() `test {
+  a := Arc[int](42);
+  outer := Vector[Arc[int]]();
+  outer.push(a);
+  assert(outer.len == 1, "arc push len");
+}
+
+test_arc_push_multiple() `test {
+  outer := Vector[Arc[int]]();
+  outer.push(Arc[int](1));
+  outer.push(Arc[int](2));
+  outer.push(Arc[int](3));
+  assert(outer.len == 3, "arc push multi len");
+}
+
+test_arc_push_dup_via_filled() `test {
+  // filled() pushes the same source N times — exercises the dup path.
+  a := Arc[int](7);
+  v := Vector[Arc[int]].filled(a, 3);
+  assert(v.len == 3, "arc filled len");
+  // Each element shares the underlying allocation; reading via borrow reaches it.
+  assert(v[0].borrow == 7, "elem 0");
+  assert(v[1].borrow == 7, "elem 1");
+  assert(v[2].borrow == 7, "elem 2");
+}
+
+test_arc_push_from_param(Arc[int] a) {
+  outer := Vector[Arc[int]]();
+  outer.push(a);
+  assert(outer.len == 1, "arc push param len");
+}
+
+// Bind the Arc to a local first — temporary native-handle arg leaks via T0555,
+// which is independent of the T0508 push fix being tested here.
+test_arc_push_param() `test {
+  arc := Arc[int](99);
+  test_arc_push_from_param(arc);
+}
+
+// --- Weak[T] ---
+
+test_weak_push() `test {
+  a := Arc[int](42);
+  w := a.downgrade();
+  outer := Vector[Weak[int]]();
+  outer.push(w);
+  assert(outer.len == 1, "weak push len");
+}
+
+test_weak_push_dup_via_filled() `test {
+  a := Arc[int](7);
+  w := a.downgrade();
+  v := Vector[Weak[int]].filled(w, 3);
+  assert(v.len == 3, "weak filled len");
+}
+
+// --- Mutex[T] (move-only, single owner) ---
+
+test_mutex_push() `test {
+  m := Mutex[int](42);
+  outer := Vector[Mutex[int]]();
+  outer.push(m);
+  assert(outer.len == 1, "mutex push len");
+}
+
+test_mutex_push_multiple() `test {
+  outer := Vector[Mutex[int]]();
+  outer.push(Mutex[int](1));
+  outer.push(Mutex[int](2));
+  assert(outer.len == 2, "mutex push multi len");
+}
+
+// --- Task[T] (move-only, single owner) ---
+// MutexGuard[T] push is intentionally NOT tested here — see T0557. The guard
+// stores a back-pointer to its parent Mutex; pushing it into a vector that
+// outlives the Mutex causes use-after-free at drop time. Use `use` bindings
+// or wrap MutexGuard in Arc instead.
+
+worker_t0508() int {
+  return 17;
+}
+
+test_task_push() `test(exclude: wasm) {
+  outer := Vector[Task[int]]();
+  outer.push(go worker_t0508());
+  assert(outer.len == 1, "task push len");
+}
+
+// --- IndexExpr-source dup path ---
+// Pushing v[0] into another vector exercises the dup-from-IndexExpr branch in
+// maybeDupPushElement. Distinct entry point from filled().
+
+test_arc_push_from_index() `test {
+  src := Vector[Arc[int]]();
+  src.push(Arc[int](42));
+  dest := Vector[Arc[int]]();
+  dest.push(src[0]);
+  assert(dest.len == 1, "indexexpr arc push");
+  assert(src.len == 1, "src not consumed");
+}
+
+test_weak_push_from_index() `test {
+  a := Arc[int](7);
+  src := Vector[Weak[int]]();
+  src.push(a.downgrade());
+  dest := Vector[Weak[int]]();
+  dest.push(src[0]);
+  assert(dest.len == 1, "indexexpr weak push");
+}
+
+// --- User-defined enum with native handle variants (emitVariantFieldDrop) ---
+// T0508 added Arc/Weak/Mutex/MutexGuard/Task branches to emitVariantFieldDrop.
+// Without them, dropping an enum value whose active variant carries a native
+// handle would emit `extractvalue i8*` (malformed IR). User-defined enums use
+// emitVariantFieldDrop (Optional[T] takes a different path via maybeRegisterOptionalDrop).
+
+enum T0508HandleEnum {
+  Empty,
+  WithArc(Arc[int] a),
+  WithWeak(Weak[int] w),
+  WithMutex(Mutex[int] m),
+  WithTask(Task[int] t),
+}
+
+test_enum_variant_arc_drop() `test {
+  h := T0508HandleEnum.WithArc(Arc[int](42));
+}
+
+test_enum_variant_weak_drop() `test {
+  a := Arc[int](7);
+  h := T0508HandleEnum.WithWeak(a.downgrade());
+}
+
+test_enum_variant_mutex_drop() `test {
+  h := T0508HandleEnum.WithMutex(Mutex[int](99));
+}
+
+test_enum_variant_task_drop() `test(exclude: wasm) {
+  h := T0508HandleEnum.WithTask(go worker_t0508());
+}
+
+test_enum_variant_empty_drop() `test {
+  h := T0508HandleEnum.Empty;
+}

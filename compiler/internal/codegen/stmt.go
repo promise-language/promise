@@ -2524,6 +2524,26 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 	case innerNamed != nil && (func() bool { _, ok := types.AsMutexGuard(elem); return ok }() || innerNamed == types.TypMutexGuard):
 		// T0156: MutexGuard inner drop — T-independent
 		dropFunc = c.funcs["MutexGuard.drop"]
+	case innerNamed != nil && (func() bool { _, ok := types.AsTask(elem); return ok }() || innerNamed == types.TypTask):
+		// T0558: Task inner drop — per-instantiation drop blocks on goroutine
+		// completion, drops the result, frees result_ptr/panic_msg/G. Without
+		// this case, dispatch fell through to the heap-user-type catch-all and
+		// called pal_free on the raw G handle, causing segfaults at scope exit.
+		var resolvedTaskElem types.Type
+		if taskElem, ok := types.AsTask(elem); ok {
+			resolvedTaskElem = taskElem
+			if c.typeSubst != nil {
+				resolvedTaskElem = types.Substitute(taskElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypTask && c.typeSubst != nil {
+			if tp := types.TypTask.TypeParams(); len(tp) > 0 {
+				resolvedTaskElem = c.typeSubst[tp[0]]
+				if resolvedTaskElem != nil {
+					resolvedTaskElem = types.Substitute(resolvedTaskElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem)
 	case innerNamed != nil && (innerNamed.HasDrop() || innerNamed.NeedsSynthDrop()):
 		// User type with explicit or synthesized drop
 		explicitDrop := innerNamed.HasDrop() && !innerNamed.NeedsSynthDrop()

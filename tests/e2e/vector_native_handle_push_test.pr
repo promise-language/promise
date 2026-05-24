@@ -147,3 +147,67 @@ test_enum_variant_task_drop() `test(exclude: wasm) {
 test_enum_variant_empty_drop() `test {
   h := T0508HandleEnum.Empty;
 }
+
+// --- Optional[Task[T]] drop (T0558) ---
+// Before T0558: drop dispatch fell through to the heap-user-type catch-all
+// and called pal_free on the raw G handle → segfault at scope exit.
+// After T0558: maybeRegisterOptionalDrop dispatches to getOrCreateTaskDrop
+// so the goroutine is awaited and the G is freed correctly.
+
+test_optional_task_drop() `test(exclude: wasm) {
+  Task[int]? opt = go worker_t0508();
+  // opt drops at scope exit — must wait for worker and free G.
+}
+
+test_optional_task_drop_none() `test(exclude: wasm) {
+  Task[int]? opt = none;
+  // has-value flag false — drop is a no-op.
+}
+
+test_optional_task_drop_reassign() `test(exclude: wasm) {
+  Task[int]? opt = go worker_t0508();
+  opt = go worker_t0508();
+  // First task must be dropped on reassignment; second at scope exit.
+}
+
+worker_t0558_void() {
+}
+
+worker_t0558_string() string {
+  return "task result";
+}
+
+// task[void]: result_ptr is the 0x1 sentinel — drop must skip the result
+// drop step and still free G. Exercises the isVoid branch of Task[T].drop body.
+test_optional_task_void_drop() `test(exclude: wasm) {
+  task[void]? opt = go worker_t0558_void();
+}
+
+// Task[string]: result_ptr holds a heap-allocated string — drop must
+// promise_string_drop the inner result before freeing result_ptr.
+test_optional_task_string_drop() `test(exclude: wasm) {
+  Task[string]? opt = go worker_t0558_string();
+}
+
+// Reassigning some → none must drop the old task before clearing the flag.
+test_optional_task_reassign_to_none() `test(exclude: wasm) {
+  Task[int]? opt = go worker_t0508();
+  opt = none;
+}
+
+// Generic context: exercises the `innerNamed == types.TypTask && c.typeSubst != nil`
+// branch of maybeRegisterOptionalDrop (the alternative to types.AsTask matching).
+// Without the typeSubst fallback, the unbound Task type param would not resolve
+// to the concrete element, producing the wrong per-instantiation drop function.
+identity_t0558[T](T val) T {
+  return val;
+}
+
+generic_optional_task_spawn[T](T val) {
+  Task[T]? opt = go identity_t0558[T](val);
+}
+
+test_optional_task_generic() `test(exclude: wasm) {
+  generic_optional_task_spawn[int](42);
+  generic_optional_task_spawn[bool](true);
+}

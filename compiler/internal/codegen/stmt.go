@@ -5267,13 +5267,18 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					if extractNamed(exprType) == types.TypString ||
 						types.IsVector(exprType) || types.IsChannel(exprType) ||
 						types.IsArc(exprType) || types.IsWeak(exprType) ||
-						types.IsTask(exprType) {
+						types.IsTask(exprType) || types.IsMutex(exprType) ||
+						types.IsMutexGuard(exprType) {
 						// T0560: Task RHS in `field = go ...` where the field is
 						// Optional[Task[T]]. Without claiming the temp BEFORE
 						// wrapping into the Optional struct, the stmtTemp cleanup
 						// runs at statement end and drops G — but G is now owned
 						// by the optional field, causing a double-free at scope
 						// exit via the Optional field-drop path.
+						// T0573: Mutex/MutexGuard added — their constructors track
+						// stmtTemps too, so without claiming before wrapping the
+						// optional field path's drop double-frees with the temp
+						// cleanup.
 						c.claimStringTemp(val)
 					}
 					// Use Identical (not "is exprOpt?") so T?? = T? still wraps.

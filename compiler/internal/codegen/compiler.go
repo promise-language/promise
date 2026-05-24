@@ -7169,6 +7169,66 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 			}
 		}
 		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem)
+	case types.IsArc(elem) || innerNamed == types.TypArc:
+		// T0573: Optional[Arc[T]] field scope-exit — per-instantiation drop
+		// decrements the refcount, drops the payload + frees the box on last ref.
+		// Without this case, Arc fell through to the heap-user-type path (gated
+		// by !isOpaqueContainerType) and silently leaked.
+		var resolvedArcElem types.Type
+		if arcElem, ok := types.AsArc(elem); ok {
+			resolvedArcElem = arcElem
+			if c.typeSubst != nil {
+				resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypArc && c.typeSubst != nil {
+			if tp := types.TypArc.TypeParams(); len(tp) > 0 {
+				resolvedArcElem = c.typeSubst[tp[0]]
+				if resolvedArcElem != nil {
+					resolvedArcElem = types.Substitute(resolvedArcElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateArcDrop(resolvedArcElem)
+	case types.IsWeak(elem) || innerNamed == types.TypWeak:
+		// T0573: Optional[Weak[T]] field scope-exit — per-instantiation drop
+		// decrements the weak count and frees the box if both counts reach zero.
+		var resolvedWeakElem types.Type
+		if weakElem, ok := types.AsWeak(elem); ok {
+			resolvedWeakElem = weakElem
+			if c.typeSubst != nil {
+				resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypWeak && c.typeSubst != nil {
+			if tp := types.TypWeak.TypeParams(); len(tp) > 0 {
+				resolvedWeakElem = c.typeSubst[tp[0]]
+				if resolvedWeakElem != nil {
+					resolvedWeakElem = types.Substitute(resolvedWeakElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateWeakDrop(resolvedWeakElem)
+	case types.IsMutex(elem) || innerNamed == types.TypMutex:
+		// T0573: Optional[Mutex[T]] field scope-exit — per-instantiation drop
+		// destroys the mutex, drops the payload, and frees the box.
+		var resolvedMutexElem types.Type
+		if mutexElem, ok := types.AsMutex(elem); ok {
+			resolvedMutexElem = mutexElem
+			if c.typeSubst != nil {
+				resolvedMutexElem = types.Substitute(mutexElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypMutex && c.typeSubst != nil {
+			if tp := types.TypMutex.TypeParams(); len(tp) > 0 {
+				resolvedMutexElem = c.typeSubst[tp[0]]
+				if resolvedMutexElem != nil {
+					resolvedMutexElem = types.Substitute(resolvedMutexElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateMutexDrop(resolvedMutexElem)
+	case types.IsMutexGuard(elem) || innerNamed == types.TypMutexGuard:
+		// T0573: Optional[MutexGuard] field scope-exit — MutexGuard.drop is a
+		// single T-independent symbol (T0156), so look it up by name.
+		dropFunc = c.funcs["MutexGuard.drop"]
 	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() &&
 		!isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural() &&
 		!isOpaqueContainerType(elem):
@@ -7290,6 +7350,66 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 			}
 		}
 		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem)
+	case types.IsArc(elem) || innerNamed == types.TypArc:
+		// T0573: Optional[Arc[T]] field reassignment — per-instantiation drop
+		// decrements the refcount on the old value. Without this case, dispatch
+		// fell through to the heap-user-type path (gated by !isOpaqueContainerType)
+		// and old Arc values leaked on reassignment.
+		var resolvedArcElem types.Type
+		if arcElem, ok := types.AsArc(elem); ok {
+			resolvedArcElem = arcElem
+			if c.typeSubst != nil {
+				resolvedArcElem = types.Substitute(arcElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypArc && c.typeSubst != nil {
+			if tp := types.TypArc.TypeParams(); len(tp) > 0 {
+				resolvedArcElem = c.typeSubst[tp[0]]
+				if resolvedArcElem != nil {
+					resolvedArcElem = types.Substitute(resolvedArcElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateArcDrop(resolvedArcElem)
+	case types.IsWeak(elem) || innerNamed == types.TypWeak:
+		// T0573: Optional[Weak[T]] field reassignment — per-instantiation drop
+		// decrements the weak count on the old value.
+		var resolvedWeakElem types.Type
+		if weakElem, ok := types.AsWeak(elem); ok {
+			resolvedWeakElem = weakElem
+			if c.typeSubst != nil {
+				resolvedWeakElem = types.Substitute(weakElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypWeak && c.typeSubst != nil {
+			if tp := types.TypWeak.TypeParams(); len(tp) > 0 {
+				resolvedWeakElem = c.typeSubst[tp[0]]
+				if resolvedWeakElem != nil {
+					resolvedWeakElem = types.Substitute(resolvedWeakElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateWeakDrop(resolvedWeakElem)
+	case types.IsMutex(elem) || innerNamed == types.TypMutex:
+		// T0573: Optional[Mutex[T]] field reassignment — per-instantiation drop
+		// destroys the old mutex, drops its payload, and frees the box.
+		var resolvedMutexElem types.Type
+		if mutexElem, ok := types.AsMutex(elem); ok {
+			resolvedMutexElem = mutexElem
+			if c.typeSubst != nil {
+				resolvedMutexElem = types.Substitute(mutexElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypMutex && c.typeSubst != nil {
+			if tp := types.TypMutex.TypeParams(); len(tp) > 0 {
+				resolvedMutexElem = c.typeSubst[tp[0]]
+				if resolvedMutexElem != nil {
+					resolvedMutexElem = types.Substitute(resolvedMutexElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateMutexDrop(resolvedMutexElem)
+	case types.IsMutexGuard(elem) || innerNamed == types.TypMutexGuard:
+		// T0573: Optional[MutexGuard] field reassignment — MutexGuard.drop is a
+		// single T-independent symbol (T0156).
+		dropFunc = c.funcs["MutexGuard.drop"]
 	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() &&
 		!isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural() &&
 		!isOpaqueContainerType(elem):
@@ -7352,13 +7472,17 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 	innerVal := c.block.NewExtractValue(oldOpt, 1)
 
 	if innerNamed == types.TypString || types.IsVector(elem) || types.IsChannel(elem) ||
-		types.IsTask(elem) || innerNamed == types.TypTask {
+		types.IsTask(elem) || innerNamed == types.TypTask ||
+		types.IsArc(elem) || innerNamed == types.TypArc ||
+		types.IsWeak(elem) || innerNamed == types.TypWeak ||
+		types.IsMutex(elem) || innerNamed == types.TypMutex ||
+		types.IsMutexGuard(elem) || innerNamed == types.TypMutexGuard {
 		// T0358 (T0354 follow-up): for Vector inner type, iterate elements and
 		// drop heap elements before freeing the buffer.
 		if elemType, isVec := types.AsVector(elem); isVec {
 			c.emitVectorElementDropLoop(innerVal, elemType)
 		}
-		// String/container/task: inner is i8*, call drop directly.
+		// String/container/task/Arc/Weak/Mutex/MutexGuard: inner is i8*, call drop directly.
 		c.block.NewCall(dropFunc, innerVal)
 	} else {
 		// User type: inner is value struct {vtable*, instance*}.

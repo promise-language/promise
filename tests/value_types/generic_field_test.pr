@@ -1,0 +1,208 @@
+// T0565: Generic value-type instances used as fields of other types.
+// Before the fix, layout for the containing type computed a {i8*, i8*} slot
+// for the field, but the constructor stored the wider value struct,
+// causing "store operands are not compatible" in codegen.
+type Pt[T] {
+  T x `value;
+  T y `value;
+}
+
+type Pair[T] {
+  T a `value;
+  T b `value;
+}
+
+type X {
+  int v `value;
+}
+
+type Outer {
+  Pt[int] inner;
+}
+
+type WithTwo {
+  Pt[int] a;
+  Pt[f64] b;
+}
+
+type WithOptional {
+  Pt[int]? inner;
+}
+
+type WithUserValArg {
+  Pair[X] pair;
+}
+
+type Box[T] {
+  T inner;
+}
+
+test_basic_field() `test {
+  Outer o = Outer(inner: Pt[int](x: 1, y: 2));
+  assert(o.inner.x == 1, "x should be 1");
+  assert(o.inner.y == 2, "y should be 2");
+}
+
+test_field_assign() `test {
+  Outer o = Outer(inner: Pt[int](x: 1, y: 2));
+  o.inner = Pt[int](x: 10, y: 20);
+  assert(o.inner.x == 10, "x should be 10");
+  assert(o.inner.y == 20, "y should be 20");
+}
+
+test_multi_generic_fields() `test {
+  WithTwo w = WithTwo(a: Pt[int](x: 1, y: 2), b: Pt[f64](x: 3.5, y: 4.5));
+  assert(w.a.x == 1, "a.x should be 1");
+  assert(w.a.y == 2, "a.y should be 2");
+  assert(w.b.x == 3.5, "b.x should be 3.5");
+  assert(w.b.y == 4.5, "b.y should be 4.5");
+}
+
+test_optional_present() `test {
+  WithOptional w = WithOptional(inner: Pt[int](x: 1, y: 2));
+  int saw_x = 0;
+  int saw_y = 0;
+  if p := w.inner {
+    saw_x = p.x;
+    saw_y = p.y;
+  }
+  assert(saw_x == 1, "x should be 1");
+  assert(saw_y == 2, "y should be 2");
+}
+
+test_optional_absent() `test {
+  WithOptional w = WithOptional(inner: none);
+  bool had = false;
+  if p := w.inner {
+    had = true;
+  }
+  assert(!had, "inner should be none");
+}
+
+test_user_value_as_type_arg() `test {
+  WithUserValArg w = WithUserValArg(pair: Pair[X](a: X(v: 1), b: X(v: 2)));
+  assert(w.pair.a.v == 1, "a.v should be 1");
+  assert(w.pair.b.v == 2, "b.v should be 2");
+}
+
+test_box_holding_generic_value() `test {
+  Box[Pt[int]] b = Box[Pt[int]](inner: Pt[int](x: 1, y: 2));
+  assert(b.inner.x == 1, "x should be 1");
+  assert(b.inner.y == 2, "y should be 2");
+}
+
+test_vector_of_generic_value() `test {
+  Pt[int][] pts = [Pt[int](x: 1, y: 2), Pt[int](x: 3, y: 4)];
+  assert(pts.len == 2, "len should be 2");
+  assert(pts[0].x == 1, "pts[0].x should be 1");
+  assert(pts[1].x == 3, "pts[1].x should be 3");
+}
+
+type Sprite {
+  Point[int] pos;
+  Size[int] dim;
+}
+
+type ScreenRect {
+  Rect[f64] bounds;
+}
+
+test_geometry_point_field() `test {
+  Sprite s = Sprite(pos: Point[int](x: 5, y: 10), dim: Size[int](width: 20, height: 30));
+  assert(s.pos.x == 5, "pos.x should be 5");
+  assert(s.pos.y == 10, "pos.y should be 10");
+  assert(s.dim.width == 20, "dim.width should be 20");
+  assert(s.dim.height == 30, "dim.height should be 30");
+}
+
+test_geometry_rect_field() `test {
+  ScreenRect r = ScreenRect(bounds: Rect[f64](x: 1.0, y: 2.0, width: 100.0, height: 50.0));
+  assert(r.bounds.x == 1.0, "x should be 1.0");
+  assert(r.bounds.y == 2.0, "y should be 2.0");
+  assert(r.bounds.width == 100.0, "width should be 100.0");
+  assert(r.bounds.height == 50.0, "height should be 50.0");
+}
+
+// Tuple containing generic value types — exercises the *types.Tuple recursion
+// in collectValueTypeFieldDeps so both Pt[int] and Pt[f64] get laid out before
+// the containing type.
+type WithTuple {
+  (Pt[int], Pt[f64]) pair;
+}
+
+test_tuple_of_generic_value() `test {
+  WithTuple w = WithTuple(pair: (Pt[int](x: 1, y: 2), Pt[f64](x: 3.0, y: 4.0)));
+  (a, b) := w.pair;
+  assert(a.x == 1, "a.x should be 1");
+  assert(a.y == 2, "a.y should be 2");
+  assert(b.x == 3.0, "b.x should be 3.0");
+  assert(b.y == 4.0, "b.y should be 4.0");
+}
+
+// Optional containing tuple containing generic value type — nested Optional →
+// Tuple → Instance recursion in collectValueTypeFieldDeps.
+type WithOptTuple {
+  (Pt[int], int)? data;
+}
+
+test_optional_tuple_with_generic_value() `test {
+  WithOptTuple w = WithOptTuple(data: (Pt[int](x: 5, y: 6), 99));
+  bool ok = false;
+  if d := w.data {
+    (p, n) := d;
+    ok = (p.x == 5) && (p.y == 6) && (n == 99);
+  }
+  assert(ok, "destructure should match");
+}
+
+// Non-generic value type used as a field of another type, with the value type
+// declared AFTER the containing type. Exercises the final extractNamed/IsValueType
+// fallback in collectValueTypeFieldDeps and verifies the topological pass
+// correctly orders non-generic value-type field dependencies.
+type WithCoord {
+  Coord pos;
+}
+
+type Coord {
+  int x `value;
+  int y `value;
+}
+
+test_nongeneric_value_field_reverse_order() `test {
+  WithCoord w = WithCoord(pos: Coord(x: 5, y: 10));
+  assert(w.pos.x == 5, "pos.x should be 5");
+  assert(w.pos.y == 10, "pos.y should be 10");
+}
+
+// Inheritance with a generic value-type field on the parent. Tests the parent
+// dependency path (pr.TypeArgs == 0 → user: key) combined with the inherited
+// field walk via AllFields().
+type Base {
+  Pt[int] basis;
+}
+
+type Derived is Base {
+}
+
+test_inherit_generic_value_field() `test {
+  Derived d = Derived(basis: Pt[int](x: 7, y: 14));
+  assert(d.basis.x == 7, "basis.x");
+  assert(d.basis.y == 14, "basis.y");
+}
+
+// Generic outer with Pt[T] field — at mono time T → int, so the field type
+// becomes Pt[int] after substitution. Tests that the post-substitution
+// Instance is correctly fed into the dependency walker.
+type Container[T] {
+  Pt[T] pos;
+}
+
+test_generic_outer_with_generic_value_field() `test {
+  Container[int] c = Container[int](pos: Pt[int](x: 11, y: 22));
+  assert(c.pos.x == 11, "pos.x");
+  assert(c.pos.y == 22, "pos.y");
+
+  Container[f64] cf = Container[f64](pos: Pt[f64](x: 1.5, y: 2.5));
+  assert(cf.pos.x == 1.5, "pos.x f64");
+  assert(cf.pos.y == 2.5, "pos.y f64");
+}

@@ -16784,6 +16784,96 @@ func TestGenericValueTypeLayout(t *testing.T) {
 	assertNotContains(t, ir, "promise_Pair[int]_i* @malloc")
 }
 
+// T0565: a non-generic user type that has a generic value-type instance as a
+// field must lay out the field slot using the mono value struct (wider, with
+// embedded fields), not the generic {i8*, i8*} slot. The construction-time
+// store would otherwise mismatch the slot type and crash codegen.
+func TestGenericValueTypeAsField(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt[T] {
+			T x `+"`"+`value;
+			T y `+"`"+`value;
+		}
+		type Outer {
+			Pt[int] inner;
+		}
+		main() {
+			o := Outer(inner: Pt[int](x: 1, y: 2));
+		}
+	`)
+	// The mono value struct typedef is present.
+	assertContains(t, ir, "%\"promise_Pt[int]_v\" = type { i8*, i64, i64 }")
+	// Outer's instance struct uses the wider mono value struct as the field
+	// slot, not the standard {i8*, i8*} value layout.
+	assertContains(t, ir, "%promise_Outer_i = type { %promise_Outer_m*, %\"promise_Pt[int]_v\" }")
+}
+
+// T0565: a non-generic value type used as a direct field of another type with
+// REVERSE declaration order (containing type before value type). Without the
+// topological walk over value-type field dependencies, the containing type's
+// layout would be computed before the value type's, producing the wrong slot
+// type. This exercises the extractNamed/IsValueType fallback in
+// collectValueTypeFieldDeps.
+func TestNonGenericValueTypeFieldReverseOrder(t *testing.T) {
+	ir := generateIR(t, `
+		type WithCoord {
+			Coord pos;
+		}
+		type Coord {
+			int x `+"`"+`value;
+			int y `+"`"+`value;
+		}
+		main() {
+			w := WithCoord(pos: Coord(x: 1, y: 2));
+		}
+	`)
+	// Coord's value struct typedef exists.
+	assertContains(t, ir, "%promise_Coord_v = type { i8*, i64, i64 }")
+	// WithCoord's instance struct uses the wider Coord value struct, not {i8*, i8*}.
+	assertContains(t, ir, "%promise_WithCoord_i = type { %promise_WithCoord_m*, %promise_Coord_v }")
+}
+
+// T0565: a tuple field containing generic value-type instances. Exercises the
+// *types.Tuple recursion in collectValueTypeFieldDeps so each tuple element is
+// laid out before the containing type.
+func TestTupleOfGenericValueTypesAsField(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt[T] {
+			T x `+"`"+`value;
+			T y `+"`"+`value;
+		}
+		type WithTuple {
+			(Pt[int], Pt[f64]) pair;
+		}
+		main() {
+			w := WithTuple(pair: (Pt[int](x: 1, y: 2), Pt[f64](x: 3.0, y: 4.0)));
+		}
+	`)
+	// Both mono value structs are present.
+	assertContains(t, ir, "%\"promise_Pt[int]_v\" = type { i8*, i64, i64 }")
+	assertContains(t, ir, "%\"promise_Pt[f64]_v\" = type { i8*, double, double }")
+}
+
+// T0565: a generic outer type with a Pt[T] field — after monomorphization the
+// substituted field becomes Pt[int] (a *types.Instance after subst). The mono
+// outer layout must use the wider value struct for the field slot.
+func TestGenericOuterWithGenericValueField(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt[T] {
+			T x `+"`"+`value;
+			T y `+"`"+`value;
+		}
+		type Container[T] {
+			Pt[T] pos;
+		}
+		main() {
+			c := Container[int](pos: Pt[int](x: 1, y: 2));
+		}
+	`)
+	assertContains(t, ir, "%\"promise_Pt[int]_v\" = type { i8*, i64, i64 }")
+	assertContains(t, ir, "%\"promise_Container[int]_i\" = type { %\"promise_Container[int]_m\"*, %\"promise_Pt[int]_v\" }")
+}
+
 // TestGenericValueTypeTwoInstances verifies that two instantiations of the same
 // generic value type produce distinct layouts and RTTI globals.
 func TestGenericValueTypeTwoInstances(t *testing.T) {

@@ -718,12 +718,11 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	}
 	c.computeEnumLayouts(file)
 
-	// Compute user type layouts (after built-in and enum layouts are ready)
-	c.computeUserTypeLayouts(file)
-
-	// Compute monomorphic layouts for all concrete generic instantiations
+	// Compute user type layouts and monomorphic instance layouts together so that
+	// generic value-type instances used as fields (e.g. Outer { Pt[int] inner; })
+	// are laid out before their containing user types. (T0565)
 	monoInstances := collectMonoInstances(info, c.spiralInstances)
-	c.computeMonoLayouts(monoInstances)
+	c.computeAllTypeLayouts(file, monoInstances)
 	monoFuncInstances := collectMonoFuncInstances(info, monoInstances)
 	monoMethodInstances := collectMonoMethodInstances(info, monoInstances)
 	crossResolveFuncMethodInstances(info, &monoFuncInstances, &monoMethodInstances)
@@ -5617,14 +5616,15 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	// 1. Compute enum layouts for module types
 	c.computeEnumLayouts(modFile)
 
-	// 2. Compute user type layouts for module types
-	c.computeUserTypeLayouts(modFile)
-
-	// 3. Collect mono instances: module's own + any extra from caller that belong
+	// 2. Collect mono instances: module's own + any extra from caller that belong
 	//    to types defined in this module's file. Transitive expansion uses the
 	//    module's sema info so method-body references (e.g. _FnIter[T]) resolve.
 	monoInstances := collectMonoInstancesWithExtra(modInfo, modFile, extraInstances, c.spiralInstances)
-	c.computeMonoLayouts(monoInstances)
+
+	// 3. Compute user type and monomorphic instance layouts together so that
+	//    generic value-type instances used as fields get laid out before their
+	//    containing user types. (T0565)
+	c.computeAllTypeLayouts(modFile, monoInstances)
 
 	monoFuncInstances := collectMonoFuncInstancesWithExtra(modInfo.SemaInfo, modFile, extraFuncInstances, monoInstances)
 	monoMethodInstances := collectMonoMethodInstancesWithExtra(modInfo.SemaInfo, modFile, extraMethodInstances, monoInstances)
@@ -6133,62 +6133,187 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 // computeUserTypeLayouts computes layouts for all user-declared types in the file.
 // Generic types (with TypeParams) are skipped — they're handled by computeMonoLayouts.
 // Uses topological ordering to ensure parent layouts are computed before children.
+// Equivalent to computeAllTypeLayouts(file, nil).
 func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
-	// Collect all user type decls that need layouts
-	pending := make(map[string]*types.Named)
-	var names []string
-	for _, decl := range file.Decls {
-		td, ok := decl.(*ast.TypeDecl)
-		if !ok {
-			continue
+	c.computeAllTypeLayouts(file, nil)
+}
+
+// layoutPendingItem represents a type whose layout still needs to be computed.
+// Exactly one of userNamed or monoInst is non-nil.
+type layoutPendingItem struct {
+	userNamed *types.Named    // non-generic user type from a TypeDecl
+	monoInst  *types.Instance // monomorphic instance of a generic type
+}
+
+// computeAllTypeLayouts computes layouts for all user-declared types in the file
+// and all monomorphic type instances in a single topological pass. Value-type
+// field dependencies are resolved so that a user type with a generic value-type
+// field (e.g., `Outer { Pt[int] inner; }`) has Pt[int]'s mono layout computed
+// before Outer's layout is built. (T0565)
+//
+// Generic enum instances are computed first via the mono-enum dependency walker.
+// Cycles among value types (which would mean an unsizable type) silently break
+// recursion; the construction-time check will surface the resulting type error.
+func (c *Compiler) computeAllTypeLayouts(file *ast.File, monoInstances []*types.Instance) {
+	// 1. Mono enum layouts first (own dependency walker; sees enum-in-enum deps).
+	c.computeMonoEnumLayoutsOnly(monoInstances)
+
+	// 2. Build unified pending map for user types + mono type instances.
+	pending := make(map[string]layoutPendingItem)
+	var order []string
+
+	if file != nil {
+		for _, decl := range file.Decls {
+			td, ok := decl.(*ast.TypeDecl)
+			if !ok {
+				continue
+			}
+			if c.info.FilteredDecls[decl] {
+				continue // excluded by `target(cond) annotation for this build target
+			}
+			named := c.lookupNamedType(td.Name)
+			if named == nil {
+				continue
+			}
+			if _, exists := c.layouts[named]; exists {
+				continue // skip built-in types with pre-computed layouts
+			}
+			if len(named.TypeParams()) > 0 {
+				continue // generic — handled via monoInstances below
+			}
+			if isNativeTypeDecl(td) {
+				continue // native types have special codegen layout handling
+			}
+			key := "user:" + td.Name
+			if _, exists := pending[key]; exists {
+				continue
+			}
+			pending[key] = layoutPendingItem{userNamed: named}
+			order = append(order, key)
 		}
-		if c.info.FilteredDecls[decl] {
-			continue // excluded by `target(cond) annotation for this build target
-		}
-		named := c.lookupNamedType(td.Name)
-		if named == nil {
-			continue
-		}
-		if _, exists := c.layouts[named]; exists {
-			continue // skip built-in types with pre-computed layouts
-		}
-		if len(named.TypeParams()) > 0 {
-			continue // generic — handled by monomorphization
-		}
-		if isNativeTypeDecl(td) {
-			continue // native types have special codegen layout handling
-		}
-		pending[td.Name] = named
-		names = append(names, td.Name)
 	}
 
-	// Compute layouts with dependency resolution (parents before children)
+	for _, inst := range monoInstances {
+		origin, ok := inst.Origin().(*types.Named)
+		if !ok || len(origin.TypeParams()) == 0 {
+			continue
+		}
+		name := monoName(inst)
+		if _, exists := c.monoLayouts[name]; exists {
+			continue
+		}
+		key := "mono:" + name
+		if _, exists := pending[key]; exists {
+			continue
+		}
+		pending[key] = layoutPendingItem{monoInst: inst}
+		order = append(order, key)
+	}
+
+	// 3. Topological compute with cycle detection.
 	computed := make(map[string]bool)
-	var compute func(name string)
-	compute = func(name string) {
-		if computed[name] {
+	inProgress := make(map[string]bool)
+	var compute func(key string)
+	compute = func(key string) {
+		if computed[key] {
 			return
 		}
-		named := pending[name]
-		if named == nil {
+		if inProgress[key] {
+			return // cycle break — recursive value types would be unsizable
+		}
+		item, ok := pending[key]
+		if !ok {
 			return
 		}
-		// Ensure parent layouts are computed first
+		inProgress[key] = true
+
+		// Compute dependencies (parents + value-type field targets).
+		var named *types.Named
+		var subst map[*types.TypeParam]types.Type
+		if item.userNamed != nil {
+			named = item.userNamed
+			subst = buildParentFieldSubst(named)
+		} else {
+			inst := item.monoInst
+			named = inst.Origin().(*types.Named)
+			subst = types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+			mergeParentSubst(named, subst)
+		}
+
+		// Parent dependencies — for non-generic parents we depend on the user
+		// layout entry; for generic parents (`is Foo[int]`) we depend on the
+		// corresponding mono layout if pending.
 		for _, pr := range named.Parents() {
-			pName := pr.Named.Obj().Name()
-			if _, ok := pending[pName]; ok {
-				compute(pName)
+			if len(pr.TypeArgs) == 0 {
+				pkey := "user:" + pr.Named.Obj().Name()
+				if _, ok := pending[pkey]; ok {
+					compute(pkey)
+				}
+			}
+			// Generic parents have their layouts created through monoInstances
+			// (transitive expansion includes parent type instances). They're
+			// covered by the mono pending entries; no extra lookup needed here.
+		}
+
+		// Value-type field dependencies (recurses into Optional/Tuple).
+		for _, f := range named.AllFields() {
+			fType := types.Substitute(f.Type(), subst)
+			collectValueTypeFieldDeps(fType, pending, compute)
+		}
+
+		// Now compute this item.
+		if item.userNamed != nil {
+			if named.IsValueType() {
+				c.layouts[named] = computeValueTypeLayout(c.module, named, c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.monoLayouts)
+			} else {
+				c.layouts[named] = computeUserTypeLayout(c.module, named, c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.monoLayouts)
+			}
+		} else {
+			inst := item.monoInst
+			name := monoName(inst)
+			if named.IsValueType() {
+				c.monoLayouts[name] = computeMonoValueTypeLayout(c.module, named, name, subst, c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.monoLayouts)
+			} else {
+				c.monoLayouts[name] = computeMonoUserTypeLayout(c.module, named, name, subst, c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.monoLayouts)
 			}
 		}
-		if named.IsValueType() {
-			c.layouts[named] = computeValueTypeLayout(c.module, named, c.layouts, c.ptrSize(), c.enumLayouts)
-		} else {
-			c.layouts[named] = computeUserTypeLayout(c.module, named, c.layouts, c.ptrSize(), c.enumLayouts)
-		}
-		computed[name] = true
+		delete(inProgress, key)
+		computed[key] = true
 	}
-	for _, name := range names {
-		compute(name)
+
+	for _, key := range order {
+		compute(key)
+	}
+}
+
+// collectValueTypeFieldDeps walks a field type and calls compute(key) for every
+// value-type target (user value type or mono value-type instance) whose layout
+// must exist before the containing item's layout is built. Recurses into
+// Optional and Tuple inner types.
+func collectValueTypeFieldDeps(typ types.Type, pending map[string]layoutPendingItem, compute func(string)) {
+	switch t := typ.(type) {
+	case *types.Optional:
+		collectValueTypeFieldDeps(t.Elem(), pending, compute)
+		return
+	case *types.Tuple:
+		for _, elem := range t.Elems() {
+			collectValueTypeFieldDeps(elem, pending, compute)
+		}
+		return
+	case *types.Instance:
+		if origin, ok := t.Origin().(*types.Named); ok && origin.IsValueType() {
+			key := "mono:" + monoName(t)
+			if _, ok := pending[key]; ok {
+				compute(key)
+			}
+		}
+		return
+	}
+	if n := extractNamed(typ); n != nil && n.IsValueType() {
+		key := "user:" + n.Obj().Name()
+		if _, ok := pending[key]; ok {
+			compute(key)
+		}
 	}
 }
 

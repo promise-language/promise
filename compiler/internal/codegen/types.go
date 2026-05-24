@@ -384,11 +384,11 @@ func computeEnumInternalType(enum *types.Enum, subst map[*types.TypeParam]types.
 // representation (i32 for fieldless, {i32, [N x i8]} for data enums).
 // Value types use their wider value struct (with embedded fields) instead of
 // the standard {i8*, i8*} layout.
-func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout) irtypes.Type {
+func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout, monoLayouts map[string]*TypeDeclLayout) irtypes.Type {
 	// Handle Optional types — recurse into inner type so Optional<UserType>
 	// gets {i1, {i8*, i8*}} instead of the incorrect {i1, i8*} from llvmType. (B0030)
 	if opt, ok := typ.(*types.Optional); ok {
-		inner := instanceFieldLLVMType(opt.Elem(), allLayouts, ptrSize, enumLayouts, monoEnumLayouts)
+		inner := instanceFieldLLVMType(opt.Elem(), allLayouts, ptrSize, enumLayouts, monoEnumLayouts, monoLayouts)
 		if _, isVoid := inner.(*irtypes.VoidType); isVoid {
 			return irtypes.I1
 		}
@@ -399,13 +399,25 @@ func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDecl
 	if tup, ok := typ.(*types.Tuple); ok {
 		fields := make([]irtypes.Type, len(tup.Elems()))
 		for i, elem := range tup.Elems() {
-			fields[i] = instanceFieldLLVMType(elem, allLayouts, ptrSize, enumLayouts, monoEnumLayouts)
+			fields[i] = instanceFieldLLVMType(elem, allLayouts, ptrSize, enumLayouts, monoEnumLayouts, monoLayouts)
 		}
 		return irtypes.NewStruct(fields...)
 	}
 	// Handle enum types — enums used as fields in user types
 	if lt := enumInternalTypeForField(typ, ptrSize, enumLayouts, monoEnumLayouts); lt != nil {
 		return lt
+	}
+	// Handle generic value-type instances — use the mono layout's value struct so
+	// the field slot matches the wider {i8* _vtable, field1, field2, ...} layout
+	// produced by the value-type constructor. (T0565)
+	if inst, ok := typ.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Named); ok && origin.IsValueType() {
+			if monoLayouts != nil {
+				if layout, ok := monoLayouts[monoName(inst)]; ok {
+					return layout.Value.LLVMType
+				}
+			}
+		}
 	}
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
 		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&

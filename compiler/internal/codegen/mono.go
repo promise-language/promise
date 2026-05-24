@@ -1211,7 +1211,7 @@ func collectMonoFuncInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.File
 
 // computeMonoUserTypeLayout computes a TypeDeclLayout for a monomorphic user type instance.
 // It substitutes all TypeParam fields with concrete types from the subst map.
-func computeMonoUserTypeLayout(module *ir.Module, named *types.Named, name string, subst map[*types.TypeParam]types.Type, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout) *TypeDeclLayout {
+func computeMonoUserTypeLayout(module *ir.Module, named *types.Named, name string, subst map[*types.TypeParam]types.Type, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout, monoLayouts map[string]*TypeDeclLayout) *TypeDeclLayout {
 	// Type struct: empty {}
 	typeStruct := irtypes.NewStruct()
 	typeStruct.SetName("promise_" + name + "_t")
@@ -1236,7 +1236,7 @@ func computeMonoUserTypeLayout(module *ir.Module, named *types.Named, name strin
 	for _, f := range named.AllFields() {
 		// Substitute TypeParams with concrete types
 		fieldType := types.Substitute(f.Type(), subst)
-		llvmFT := instanceFieldLLVMType(fieldType, allLayouts, ptrSize, enumLayouts, monoEnumLayouts)
+		llvmFT := instanceFieldLLVMType(fieldType, allLayouts, ptrSize, enumLayouts, monoEnumLayouts, monoLayouts)
 		cType := userFieldCType(fieldType, allLayouts)
 		instanceLLVMFields = append(instanceLLVMFields, llvmFT)
 		idx := len(fieldLayouts)
@@ -1296,7 +1296,7 @@ func computeMonoUserTypeLayout(module *ir.Module, named *types.Named, name strin
 
 // computeMonoValueTypeLayout computes a TypeDeclLayout for a monomorphic value type instance.
 // Value types embed fields directly in the value struct: { i8* _vtable, field1, field2, ... }.
-func computeMonoValueTypeLayout(module *ir.Module, named *types.Named, name string, subst map[*types.TypeParam]types.Type, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout) *TypeDeclLayout {
+func computeMonoValueTypeLayout(module *ir.Module, named *types.Named, name string, subst map[*types.TypeParam]types.Type, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout, monoLayouts map[string]*TypeDeclLayout) *TypeDeclLayout {
 	// Type struct: empty {}
 	typeStruct := irtypes.NewStruct()
 	typeStruct.SetName("promise_" + name + "_t")
@@ -1328,7 +1328,7 @@ func computeMonoValueTypeLayout(module *ir.Module, named *types.Named, name stri
 
 	for _, f := range named.AllFields() {
 		fieldType := types.Substitute(f.Type(), subst)
-		llvmFT := instanceFieldLLVMType(fieldType, allLayouts, ptrSize, enumLayouts, monoEnumLayouts)
+		llvmFT := instanceFieldLLVMType(fieldType, allLayouts, ptrSize, enumLayouts, monoEnumLayouts, monoLayouts)
 		cType := userFieldCType(fieldType, allLayouts)
 		idx := len(valueFieldLayouts)
 		valueLLVMFields = append(valueLLVMFields, llvmFT)
@@ -1487,8 +1487,17 @@ func computeMonoEnumLayout(module *ir.Module, enum *types.Enum, name string, sub
 // computeMonoLayouts computes layouts for all monomorphic type instances.
 // Processes enum instances first (with dependency resolution) so that type instances
 // that have enum fields can look up the correct named enum struct types.
+// User-type layouts share the topological walker with computeAllTypeLayouts so that
+// generic value-type instances used as fields (e.g., Outer { Pt[int] inner; }) get
+// laid out before their containing types. (T0565)
 func (c *Compiler) computeMonoLayouts(instances []*types.Instance) {
-	// First pass: compute all mono enum layouts (with dependency resolution)
+	c.computeAllTypeLayouts(nil, instances)
+}
+
+// computeMonoEnumLayoutsOnly computes only the mono enum layouts for the given
+// instances. Extracted so computeAllTypeLayouts can run it before the unified
+// user/mono type layout pass.
+func (c *Compiler) computeMonoEnumLayoutsOnly(instances []*types.Instance) {
 	pendingEnums := make(map[string]*types.Instance)
 	var enumNames []string
 	for _, inst := range instances {
@@ -1535,25 +1544,6 @@ func (c *Compiler) computeMonoLayouts(instances []*types.Instance) {
 	}
 	for _, name := range enumNames {
 		computeEnum(name)
-	}
-
-	// Second pass: compute type layouts (enum layouts are now available)
-	for _, inst := range instances {
-		name := monoName(inst)
-		origin, ok := inst.Origin().(*types.Named)
-		if !ok || len(origin.TypeParams()) == 0 {
-			continue
-		}
-		if _, exists := c.monoLayouts[name]; exists {
-			continue
-		}
-		subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
-		mergeParentSubst(origin, subst)
-		if origin.IsValueType() {
-			c.monoLayouts[name] = computeMonoValueTypeLayout(c.module, origin, name, subst, c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts)
-		} else {
-			c.monoLayouts[name] = computeMonoUserTypeLayout(c.module, origin, name, subst, c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts)
-		}
 	}
 }
 

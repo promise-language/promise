@@ -6105,6 +6105,13 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 
 			c.genBlock(md.Body)
 
+			// T0553: For drop() methods, auto-append field drops (mirrors defineMethodFunc).
+			// Without this, module-defined types with user-written drop bodies leak their
+			// droppable fields.
+			if md.Name == "drop" && c.block != nil && c.block.Term == nil {
+				c.emitFieldDrops(named)
+			}
+
 			if c.block != nil && c.block.Term == nil {
 				// Emit scope cleanup for drop bindings (variadic, move params)
 				if len(c.scopeBindings) > 0 {

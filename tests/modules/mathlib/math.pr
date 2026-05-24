@@ -153,16 +153,45 @@ type _T0468ModBox[T] is _T0468ModLogger[T] `public {
 // inherited-drop synthesis (declareInheritedModuleDrops /
 // defineInheritedModuleDrops with c.compilingModule != "").
 //
-// Note: parent has only an int field (not droppable) to avoid hitting T0553
-// (module-defined types with user-written empty drop don't auto-append field
-// drops for heap fields). When T0553 is fixed, this can be updated to use a
-// heap parent field for stronger coverage.
+// Parent has a heap field (string marker) so the T0507 chain exercises both
+// the parent's user-drop auto-appending its own field drop (T0553) and the
+// synthesized child drop dropping its own heap field.
 type _T0507ModLogger `public {
-  int marker;
+  string marker;
   drop(~this) {
   }
 }
 
 type _T0507ModBox is _T0507ModLogger `public {
   string label;
+}
+
+// --- T0553: module-defined non-generic type with a user-written empty drop
+// body and a heap field. Exercises the auto-append of field drops at the end
+// of a user-written drop body in defineModuleTypeMethods.
+type _T0553ModBase `public {
+  string s;
+  drop(~this) {
+  }
+}
+
+// T0553 follow-up: module type with a non-empty user drop body alongside a
+// heap field. Verifies the auto-append of field drops runs AFTER the user's
+// body, not just for empty bodies — defends against a refactor that only
+// fires the auto-append when md.Body is empty.
+type _T0553ModBaseBody `public {
+  string s;
+  int counter;
+  drop(~this) {
+    this.counter = this.counter + 1;
+  }
+}
+
+// T0553 follow-up: module type with a Vector field + empty user drop body.
+// Exercises the auto-append for a non-string heap field type — the field-drop
+// path emits @Vector_int.drop instead of @promise_string_drop.
+type _T0553ModBaseVec `public {
+  int[] v;
+  drop(~this) {
+  }
 }

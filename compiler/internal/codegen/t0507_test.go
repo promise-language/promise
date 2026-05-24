@@ -223,14 +223,13 @@ func TestT0507_InheritedDropChain(t *testing.T) {
 // (the module-compile variant of the T0507 synth), which run with
 // c.compilingModule != "" and register the synthesized drop under BOTH the
 // module-prefixed mangled name and the plain alias so resolveDropOwner finds it.
-// Parent has only a non-droppable field (int marker) to avoid hitting T0553,
-// which is the preexisting bug where module-defined types with user-written
-// empty drop don't auto-append field drops for heap fields.
+// Parent has a heap field (string marker) — T0553 ensures the parent's own
+// drop auto-appends the field drop for that.
 func TestT0507_InheritedDropModule(t *testing.T) {
 	ir := generateIRWithModule(t, "modlib",
 		`
 			type _T0507ModLogger `+"`"+`public {
-			  int marker;
+			  string marker;
 			  drop(~this) {}
 			}
 			type _T0507ModBox is _T0507ModLogger `+"`"+`public {
@@ -240,8 +239,9 @@ func TestT0507_InheritedDropModule(t *testing.T) {
 		`
 			use modlib "./modlib";
 			main() {
+			  m := "m";
 			  s := "x";
-			  b := modlib._T0507ModBox(marker: 42, label: s);
+			  b := modlib._T0507ModBox(marker: m, label: s);
 			}
 		`,
 	)

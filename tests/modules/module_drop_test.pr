@@ -53,13 +53,42 @@ test_t0468_module_inherited_drop_no_leak() `test {
 // (the module-compile variant of the T0507 synthesis). Without the synthesis
 // the child's own field (label) would leak.
 //
-// Parent is non-heap (only an int field) to avoid T0553 (preexisting bug where
-// module-defined types with empty user drop bodies don't auto-append field
-// drops). When T0553 is fixed, the parent can be made heap for stronger
-// coverage.
+// Parent has a heap field (string marker), exercising the T0553 auto-append
+// of parent's own field drop together with the synthesized child drop of the
+// child's own heap field.
 test_t0507_module_inherited_drop_no_leak() `test {
+  parent_m := "marker".repeat(2);
   child_l := "child".repeat(2);
-  b := mathlib._T0507ModBox(marker: 42, label: child_l);
-  assert(b.marker == 42, "parent marker");
+  b := mathlib._T0507ModBox(marker: parent_m, label: child_l);
+  assert(b.marker == "markermarker", "parent marker");
   assert(b.label == "childchild", "child label");
+}
+
+// T0553: module-defined non-generic type with user-written empty drop body
+// and a heap field. Without the auto-append of field drops in
+// defineModuleTypeMethods the string field would leak at scope exit.
+test_module_user_empty_drop_heap_field_no_leak() `test {
+  s := "x".repeat(2);
+  b := mathlib._T0553ModBase(s: s);
+  assert(b.s == "xx", "s");
+}
+
+// T0553 follow-up: module type with a *non-empty* user drop body. The user
+// body increments an int counter; the heap field must still be dropped via
+// the auto-appended emitFieldDrops call. Catches a refactor that would only
+// auto-append for empty drop bodies.
+test_module_user_nonempty_drop_heap_field_no_leak() `test {
+  s := "y".repeat(3);
+  b := mathlib._T0553ModBaseBody(s: s, counter: 0);
+  assert(b.s == "yyy", "s");
+  assert(b.counter == 0, "counter starts at 0");
+}
+
+// T0553 follow-up: module type with a Vector field (different drop function
+// from string). Verifies the auto-append works for any droppable field type.
+test_module_user_drop_vector_field_no_leak() `test {
+  int[] v = [1, 2, 3];
+  b := mathlib._T0553ModBaseVec(v: v);
+  assert(b.v.len == 3, "vector len");
+  assert(b.v[0] == 1, "vector[0]");
 }

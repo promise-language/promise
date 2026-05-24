@@ -5464,6 +5464,115 @@ func TestFixedArrayFieldAssign(t *testing.T) {
 	assertContains(t, ir, "getelementptr [3 x i64]")
 }
 
+// T0579: Array field with heap user element — layout must recurse so the
+// field slot stores the value-struct {i8*, i8*} form, matching the array
+// literal's element type. Pre-fix produced [N x i8*] and crashed NewStore.
+func TestFixedArrayFieldHeapUserElement(t *testing.T) {
+	ir := generateIR(t, `
+		type _Box { int n; drop(~this) {} }
+		type _Holder { _Box[2] data; }
+		main() {
+			h := _Holder(data: [_Box(n: 1), _Box(n: 2)]);
+		}
+	`)
+	// Field slot should be [2 x value struct], not [2 x i8*].
+	assertContains(t, ir, "[2 x { i8*, i8* }]")
+	// Synth drop must walk the array and drop each element.
+	assertContains(t, ir, "call void @_Box.drop")
+}
+
+// T0579: Array field with Optional<HeapUser> element — exact repro from the
+// bug. The Optional inside the array carries the full value struct, not
+// bare i8*.
+func TestFixedArrayFieldOptionalHeapUserElement(t *testing.T) {
+	ir := generateIR(t, `
+		type _BoxA { int n; drop(~this) {} }
+		type _HolderArr { _BoxA?[2] data; }
+		main() {
+			_BoxA? a = _BoxA(n: 7);
+			_BoxA? b = _BoxA(n: 8);
+			_HolderArr h = _HolderArr(data: [a, b]);
+		}
+	`)
+	// Field slot should hold {i1, value_struct} per element, not {i1, i8*}.
+	assertContains(t, ir, "[2 x { i1, { i8*, i8* } }]")
+}
+
+// T0579: Array field with value-type element — the topological layout pass
+// must compute the value type's layout before the container, otherwise the
+// slot falls back to the narrow {i8*, i8*} layout.
+func TestFixedArrayFieldValueTypeElement(t *testing.T) {
+	ir := generateIR(t, `
+		type _Pt { int x `+"`value"+`; int y `+"`value"+`; }
+		type _Holder { _Pt[2] data; }
+		main() {
+			h := _Holder(data: [_Pt(x: 1, y: 2), _Pt(x: 3, y: 4)]);
+		}
+	`)
+	// Field slot should hold the wider value struct per element (i8* vtable + 2 ints).
+	assertContains(t, ir, "[2 x %promise__Pt_v]")
+}
+
+// T0579: Array field with tuple element containing a droppable inner —
+// exercises the Tuple branch in `typeNeedsFieldDrop`. The synth drop must
+// walk the array and drop the tuple's string element.
+func TestFixedArrayFieldTupleElement(t *testing.T) {
+	ir := generateIR(t, `
+		type _TupArr { (string, int)[2] data; }
+		main() {
+			t := _TupArr(data: [("a", 1), ("b", 2)]);
+		}
+	`)
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0579: Array field with Vector element — exercises `typeNeedsFieldDrop`'s
+// `AsVector` branch. Without it, the predicate returns false and the inner
+// Vector's heap buffer leaks at scope exit.
+func TestFixedArrayFieldVectorElement(t *testing.T) {
+	ir := generateIR(t, `
+		type _VecArr { Vector[int][2] data; }
+		main() {
+			v0 := Vector[int]();
+			v0.push(10);
+			v1 := Vector[int]();
+			v1.push(20);
+			v := _VecArr(data: [v0, v1]);
+		}
+	`)
+	assertContains(t, ir, "call void @Vector.drop")
+}
+
+// T0579: Array field with channel element — exercises `typeNeedsFieldDrop`'s
+// `AsChannel` branch.
+func TestFixedArrayFieldChannelElement(t *testing.T) {
+	ir := generateIR(t, `
+		type _ChArr { channel[int][2] data; }
+		main() {
+			c0 := channel[int]();
+			c1 := channel[int]();
+			c := _ChArr(data: [c0, c1]);
+		}
+	`)
+	assertContains(t, ir, "call void @Channel.drop")
+}
+
+// T0579: Array field with heap user type that has no explicit drop —
+// exercises the "heap user without explicit drop" branch in
+// `typeNeedsFieldDrop` (must return true so the per-element `pal_free` fires).
+func TestFixedArrayFieldHeapNoDropElement(t *testing.T) {
+	ir := generateIR(t, `
+		type _Bare { int x; }
+		type _BareArr { _Bare[2] data; }
+		main() {
+			b := _BareArr(data: [_Bare(x: 1), _Bare(x: 2)]);
+		}
+	`)
+	// The element type has no drop method, so the synth drop must fall back to
+	// pal_free per element.
+	assertContains(t, ir, "call void @pal_free")
+}
+
 func TestFixedArrayF64(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

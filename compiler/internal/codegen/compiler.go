@@ -6289,7 +6289,7 @@ func (c *Compiler) computeAllTypeLayouts(file *ast.File, monoInstances []*types.
 // collectValueTypeFieldDeps walks a field type and calls compute(key) for every
 // value-type target (user value type or mono value-type instance) whose layout
 // must exist before the containing item's layout is built. Recurses into
-// Optional and Tuple inner types.
+// Optional, Tuple, and Array inner types.
 func collectValueTypeFieldDeps(typ types.Type, pending map[string]layoutPendingItem, compute func(string)) {
 	switch t := typ.(type) {
 	case *types.Optional:
@@ -6299,6 +6299,11 @@ func collectValueTypeFieldDeps(typ types.Type, pending map[string]layoutPendingI
 		for _, elem := range t.Elems() {
 			collectValueTypeFieldDeps(elem, pending, compute)
 		}
+		return
+	case *types.Array:
+		// T0579: Fixed-size array fields can hold value-type elements; the
+		// element layout must exist before the container's layout is built.
+		collectValueTypeFieldDeps(t.Elem(), pending, compute)
 		return
 	case *types.Instance:
 		if origin, ok := t.Origin().(*types.Named); ok && origin.IsValueType() {
@@ -6938,6 +6943,22 @@ func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) 
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 			fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
 			c.emitVariantFieldDrop(fieldVal, tup)
+			continue
+		}
+
+		// T0579: Fixed-size array fields with droppable element types. Without this,
+		// extractNamed(arrType) returns nil and the field is silently skipped → leak.
+		// Delegate per-element drop to emitVariantFieldDrop, which already handles
+		// the Array case (T0485).
+		if arr, ok := fieldTypeRaw.(*types.Array); ok && c.arrayFieldNeedsDrop(arr) {
+			fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
+			if !ok {
+				continue
+			}
+			fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+			c.emitVariantFieldDrop(fieldVal, arr)
 			continue
 		}
 

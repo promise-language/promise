@@ -3842,6 +3842,66 @@ func (c *Compiler) vecElemNeedsUserTypeDrop(elemType types.Type) bool {
 	return false
 }
 
+// arrayFieldNeedsDrop returns true if a fixed-size array type has a droppable
+// element type. Used by emitFieldDropsFor to skip non-droppable arrays (e.g.
+// int[3]) instead of emitting an empty per-element loop. (T0579)
+func (c *Compiler) arrayFieldNeedsDrop(arr *types.Array) bool {
+	elem := arr.Elem()
+	if c.typeSubst != nil {
+		elem = types.Substitute(elem, c.typeSubst)
+	}
+	return c.typeNeedsFieldDrop(elem)
+}
+
+// typeNeedsFieldDrop returns true if a single value of typ has any drop work
+// (string, vector, channel, heap user type, droppable tuple/array, Optional
+// wrapping a droppable inner, enum with drop, etc.). Used by tuple/array field
+// drop predicates. (T0579)
+func (c *Compiler) typeNeedsFieldDrop(typ types.Type) bool {
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	if tup, ok := typ.(*types.Tuple); ok {
+		return c.tupleNeedsDrop(tup)
+	}
+	if arr, ok := typ.(*types.Array); ok {
+		return c.arrayFieldNeedsDrop(arr)
+	}
+	if opt, ok := typ.(*types.Optional); ok {
+		return c.typeNeedsFieldDrop(opt.Elem())
+	}
+	if named := extractNamed(typ); named != nil {
+		if named == types.TypString || named.HasDrop() || named.NeedsSynthDrop() {
+			return true
+		}
+		if _, isVec := types.AsVector(typ); isVec {
+			return true
+		}
+		if _, isCh := types.AsChannel(typ); isCh {
+			return true
+		}
+		if _, isArc := types.AsArc(typ); isArc {
+			return true
+		}
+		if _, isWeak := types.AsWeak(typ); isWeak {
+			return true
+		}
+		if _, isMutex := types.AsMutex(typ); isMutex {
+			return true
+		}
+		if types.IsMutexGuard(typ) || named == types.TypMutexGuard {
+			return true
+		}
+		if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+			return true
+		}
+	}
+	if c.vecElemNeedsEnumDrop(typ) {
+		return true
+	}
+	return false
+}
+
 // tupleNeedsDrop returns true if a tuple type contains any droppable element
 // (string, vector, channel, user type with drop, enum with drop, or another
 // droppable tuple).

@@ -1,0 +1,146 @@
+// T0579: Fixed-size array fields with non-primitive element types.
+// Before T0579, `instanceFieldLLVMType` had no Array recursion case so any
+// non-primitive element (heap user / Optional / value-type) made the field
+// slot type `[N x i8*]`, mismatching the array-literal expression layout and
+// crashing `NewStore` in `genConstructorCallMono`. After T0579, layouts agree
+// and droppable elements are released by a new `emitFieldDropsFor` branch.
+type _Box {
+  int n;
+  drop(~this) {
+  }
+}
+
+type _HolderBox {
+  _Box[2] data;
+}
+
+test_heap_box_in_array_field() `test {
+  _HolderBox h = _HolderBox(data: [_Box(n: 1), _Box(n: 2)]);
+  assert(h.data[0].n == 1, "first box n");
+  assert(h.data[1].n == 2, "second box n");
+}
+
+type _BoxA {
+  int n;
+  drop(~this) {
+  }
+}
+
+type _HolderOptBox {
+  _BoxA?[2] data;
+}
+
+test_optional_heap_box_in_array_field() `test {
+  // Direct repro from T0579.
+  _BoxA? a = _BoxA(n: 7);
+  _BoxA? b = _BoxA(n: 8);
+  _HolderOptBox h = _HolderOptBox(data: [a, b]);
+  assert(h.data[0] is present, "first slot present");
+  assert(h.data[1] is present, "second slot present");
+}
+
+test_optional_heap_box_array_field_with_none() `test {
+  // One slot populated, one absent — exercises both Optional branches inside
+  // the drop walk.
+  _BoxA? a = _BoxA(n: 11);
+  _BoxA? b = none;
+  _HolderOptBox h = _HolderOptBox(data: [a, b]);
+  assert(h.data[0] is present, "filled slot present");
+  assert(h.data[1] is absent, "empty slot absent");
+}
+
+type _HolderPoint {
+  Point[int][2] data;
+}
+
+test_value_type_point_in_array_field() `test {
+  _HolderPoint h = _HolderPoint(data: [Point[int](x: 1, y: 2), Point[int](x: 3, y: 4)]);
+  assert(h.data[0].x == 1, "p0.x");
+  assert(h.data[0].y == 2, "p0.y");
+  assert(h.data[1].x == 3, "p1.x");
+  assert(h.data[1].y == 4, "p1.y");
+}
+
+type _MixedFields {
+  int[3] nums;
+  string label;
+}
+
+test_mixed_array_and_string_fields() `test {
+  // Non-droppable element type (int) in an array field on a type that ALSO has
+  // a droppable string field — confirms the new Array branch doesn't crash and
+  // that string drop still fires for the sibling field.
+  _MixedFields m = _MixedFields(nums: [10, 20, 30], label: "test");
+  assert(m.nums[0] == 10, "n0");
+  assert(m.nums[2] == 30, "n2");
+  assert(m.label == "test", "label");
+}
+
+type _TupArr {
+  (string, int)[2] data;
+}
+
+test_tuple_element_in_array_field() `test {
+  // Exercises `typeNeedsFieldDrop`'s Tuple branch — predicate must recognise
+  // that the array's element tuple holds a droppable string and emit drops.
+  _TupArr t = _TupArr(data: [("a", 1), ("b", 2)]);
+  (s0, n0) := t.data[0];
+  (s1, n1) := t.data[1];
+  assert(n0 == 1, "first elem int");
+  assert(n1 == 2, "second elem int");
+  assert(s0 == "a", "first elem string");
+  assert(s1 == "b", "second elem string");
+}
+
+type _VecArr {
+  Vector[int][2] data;
+}
+
+test_vector_element_in_array_field() `test {
+  // Exercises `typeNeedsFieldDrop`'s `AsVector` branch — without it the
+  // predicate would return false and the inner Vector's heap buffer would leak.
+  Vector[int] v0 = Vector[int]();
+  v0.push(10);
+  Vector[int] v1 = Vector[int]();
+  v1.push(20);
+  _VecArr v = _VecArr(data: [v0, v1]);
+  assert(v.data[0][0] == 10, "v0[0]");
+  assert(v.data[1][0] == 20, "v1[0]");
+}
+
+type _ChArr {
+  channel[int][2] data;
+}
+
+test_channel_element_in_array_field() `test {
+  // Exercises `typeNeedsFieldDrop`'s `AsChannel` branch.
+  channel[int] c0 = channel[int]();
+  channel[int] c1 = channel[int]();
+  _ChArr c = _ChArr(data: [c0, c1]);
+  assert(true, "channels stored in array field");
+}
+
+type _Bare {
+  int x;
+}
+
+type _BareArr {
+  _Bare[2] data;
+}
+
+test_heap_user_no_drop_element_in_array_field() `test {
+  // _Bare has no explicit drop and isn't a value type — exercises the
+  // "heap user without explicit drop" branch in `typeNeedsFieldDrop` that
+  // must still return true so the per-element `pal_free` fires (otherwise
+  // every _Bare instance in the array leaks).
+  _BareArr b = _BareArr(data: [_Bare(x: 1), _Bare(x: 2)]);
+  assert(b.data[0].x == 1, "first bare");
+  assert(b.data[1].x == 2, "second bare");
+}
+
+// NOTE: `h.data[i] = newVal` reassignment on fixed-size array of heap/Optional
+// elements is tracked under T0583 (pre-existing leak in genArrayIndexAssign,
+// independent of T0579's layout/drop fix).
+//
+// NOTE: Generic types with `T[N]` fields (e.g. `Holder[_Box]`) currently leak
+// because `monoTypeHasDroppable` is missing the Array case. Tracked under T0584.

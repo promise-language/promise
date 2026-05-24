@@ -403,6 +403,14 @@ func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDecl
 		}
 		return irtypes.NewStruct(fields...)
 	}
+	// Handle Array types — recurse so heap user / optional / enum / value-type
+	// elements get their proper field layout. Without this, [N x T] field slots
+	// fall through to llvmType(typ) which yields [N x i8*] for any user-typed
+	// element, mismatching the array-literal expression layout. (T0579)
+	if arr, ok := typ.(*types.Array); ok {
+		elem := instanceFieldLLVMType(arr.Elem(), allLayouts, ptrSize, enumLayouts, monoEnumLayouts, monoLayouts)
+		return irtypes.NewArray(uint64(arr.Size()), elem)
+	}
 	// Handle enum types — enums used as fields in user types
 	if lt := enumInternalTypeForField(typ, ptrSize, enumLayouts, monoEnumLayouts); lt != nil {
 		return lt

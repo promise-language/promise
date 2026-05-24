@@ -11095,6 +11095,23 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	if ident, ok := e.Operand.(*ast.IdentExpr); ok {
 		c.clearDropFlag(ident.Name)
 	}
+	// T0560: `<-h.field` consumes the task field. After T0560 wired field-drop
+	// for Task[T], the field's scope-exit drop would double-free the G we just
+	// freed here. Null the field so the field-drop's null check no-ops.
+	// Only applies when target.Field is an actual field (not a getter).
+	if member, ok := e.Operand.(*ast.MemberExpr); ok {
+		targetType := c.info.Types[member.Target]
+		if c.typeSubst != nil {
+			targetType = types.Substitute(targetType, c.typeSubst)
+		}
+		if c.selfSubst != nil {
+			targetType = types.SubstituteSelf(targetType, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		if named := extractNamed(targetType); named != nil && named.LookupField(member.Field) != nil {
+			fieldPtr := c.genFieldPtr(member)
+			c.block.NewStore(constant.NewNull(irtypes.I8Ptr), fieldPtr)
+		}
+	}
 	c.claimStringTemp(gRaw)
 
 	var innerType types.Type

@@ -1,0 +1,228 @@
+// T0560: Task[T] field drop — completes the Task field-drop story after T0508
+// (added Task to opaque-container types) and T0558 (wired the local-variable
+// Optional[Task[T]] drop). Four sibling field-drop paths previously had no
+// Task case and silently leaked the G handle:
+//
+//   1. emitFieldDropsFor                — plain Task[T] field at scope exit
+//   2. emitOptionalValueDrop            — Optional[Task[T]] field at scope exit
+//   3. emitOptionalFieldReassignDrop    — Optional[Task[T]] field on reassign
+//   4. genMemberAssign handle block     — plain Task[T] field on reassign
+worker_t0560_int() int {
+  return 17;
+}
+
+worker_t0560_void() {
+}
+
+worker_t0560_string() string {
+  return "task result";
+}
+
+worker_t0560_vec() int[] {
+  return[1, 2, 3];
+}
+
+// --- Site 1: plain Task[T] field, synthesized drop ---
+
+type T0560SynthHolder {
+  Task[int] t;
+}
+
+test_task_field_synth_drop() `test(exclude: wasm) {
+  h := T0560SynthHolder(t: go worker_t0560_int());
+  // synthesized drop must call Task[int].drop on field at scope exit.
+}
+
+// --- Site 1: plain Task[T] field, explicit empty drop body (T0553 append) ---
+
+type T0560ExplicitHolder {
+  Task[int] t;
+  drop(~this) {
+  }
+}
+
+test_task_field_explicit_drop() `test(exclude: wasm) {
+  h := T0560ExplicitHolder(t: go worker_t0560_int());
+  // T0553 appends field drops to the explicit drop body.
+}
+
+// --- Site 1: Task field alongside other droppable fields ---
+
+type T0560MixedHolder {
+  string name;
+  Task[int] t;
+}
+
+test_task_field_with_other_droppable() `test(exclude: wasm) {
+  h := T0560MixedHolder(name: "hello" + "", t: go worker_t0560_int());
+  // both the string and the Task must drop at scope exit.
+}
+
+// --- Site 2: Optional[Task[T]] field, synthesized drop, some ---
+
+type T0560SynthOptHolder {
+  Task[int]? t;
+}
+
+test_optional_task_field_some_drop() `test(exclude: wasm) {
+  h := T0560SynthOptHolder(t: go worker_t0560_int());
+  // emitOptionalValueDrop branches on has-value and drops the inner Task.
+}
+
+// --- Site 2: Optional[Task[T]] field, none initializer (no-op path) ---
+
+test_optional_task_field_none_drop() `test(exclude: wasm) {
+  h := T0560SynthOptHolder(t: none);
+  // has-value flag false — drop is a no-op.
+}
+
+// --- Site 4: plain Task[T] field reassignment ---
+
+test_task_field_reassign() `test(exclude: wasm) {
+  h := T0560SynthHolder(t: go worker_t0560_int());
+  h.t = go worker_t0560_int();
+  // genMemberAssign must Task[int].drop the old field before overwriting.
+}
+
+// --- Site 4: plain Task[T] field same-pointer reassign (no-op guard) ---
+
+test_task_field_reassign_same() `test(exclude: wasm) {
+  t := go worker_t0560_int();
+  h := T0560SynthHolder(t: t);
+  // Same-pointer guard prevents UAF; field still drops once at scope exit.
+}
+
+// --- Site 3: Optional[Task[T]] field reassignment some → some ---
+
+test_optional_task_field_reassign() `test(exclude: wasm) {
+  h := T0560SynthOptHolder(t: go worker_t0560_int());
+  h.t = go worker_t0560_int();
+  // emitOptionalFieldReassignDrop must drop the old inner Task.
+}
+
+// --- Site 3: Optional[Task[T]] field reassignment some → none ---
+
+test_optional_task_field_reassign_to_none() `test(exclude: wasm) {
+  h := T0560SynthOptHolder(t: go worker_t0560_int());
+  h.t = none;
+  // The old some(Task) must drop before clearing the flag.
+}
+
+// --- Generic holder with Task field — exercises typeSubst path in all four sites ---
+
+type T0560Box[T] {
+  Task[T] t;
+}
+
+spawn_t0560_int() int {
+  return 7;
+}
+
+spawn_t0560_string() string {
+  return "g" + "en";
+}
+
+test_generic_holder_task_field_int() `test(exclude: wasm) {
+  b := T0560Box[int](t: go spawn_t0560_int());
+  // Generic field type Task[T] must resolve via c.typeSubst to Task[int].
+}
+
+test_generic_holder_task_field_string() `test(exclude: wasm) {
+  b := T0560Box[string](t: go spawn_t0560_string());
+  // Non-trivial concrete T — inner string also dropped by Task[string].drop.
+}
+
+// --- Generic holder with Optional[Task[T]] field — exercises typeSubst path
+//     in emitOptionalValueDrop and emitOptionalFieldReassignDrop ---
+
+type T0560OptBox[T] {
+  Task[T]? t;
+}
+
+test_generic_optional_task_field_some() `test(exclude: wasm) {
+  b := T0560OptBox[int](t: go spawn_t0560_int());
+  // Generic Optional[Task[T]] field at scope exit — emitOptionalValueDrop
+  // must resolve Task[T] → Task[int] via c.typeSubst.
+}
+
+test_generic_optional_task_field_reassign() `test(exclude: wasm) {
+  b := T0560OptBox[int](t: go spawn_t0560_int());
+  b.t = go spawn_t0560_int();
+  // Reassignment — emitOptionalFieldReassignDrop must resolve Task[T] → Task[int]
+  // via c.typeSubst and drop the old some(Task) before overwriting.
+}
+
+// --- Task[void] field — exercises the isVoid branch of Task[T].drop ---
+
+type T0560VoidHolder {
+  task[void] t;
+}
+
+test_void_task_field() `test(exclude: wasm) {
+  h := T0560VoidHolder(t: go worker_t0560_void());
+  // Task[void].drop skips the result drop step but still frees G.
+}
+
+// --- Task with droppable result — exercises emitVariantFieldDrop inside Task drop ---
+
+type T0560StringHolder {
+  Task[string] t;
+}
+
+test_task_field_string_result_drop() `test(exclude: wasm) {
+  h := T0560StringHolder(t: go worker_t0560_string());
+  // Task[string].drop must promise_string_drop the inner result.
+}
+
+type T0560VecHolder {
+  Task[int[]] t;
+}
+
+test_task_field_vec_result_drop() `test(exclude: wasm) {
+  h := T0560VecHolder(t: go worker_t0560_vec());
+  // Task[int[]].drop must Vector.drop the inner result before freeing result_ptr.
+}
+
+// --- `<-h.field` consumes the task — field must be nulled so scope-exit drop is a no-op ---
+
+test_task_field_await_consume() `test(exclude: wasm) {
+  h := T0560SynthHolder(t: go worker_t0560_int());
+  int r = <-h.t;
+  assert(r == 17, "expected 17");
+  // h.t was freed by <-; field-drop must null-check and no-op at scope exit.
+}
+
+// --- `<-this.field` inside a method body — same null-out path through ThisExpr target ---
+
+type T0560MethodBox {
+  Task[int] t;
+  drop(~this) {
+  }
+  consume_task(~this) int `public {
+    return <-this.t;
+  }
+}
+
+test_task_field_method_consume() `test(exclude: wasm) {
+  b := T0560MethodBox(t: go worker_t0560_int());
+  int r = b.consume_task();
+  assert(r == 17, "method consume expected 17");
+}
+
+// --- `<-this.field` inside a generic method — exercises typeSubst path in
+//     the genReceiveTask MemberExpr null-out logic ---
+
+type T0560GenericMethodBox[T] {
+  Task[T] t;
+  drop(~this) {
+  }
+  consume_task(~this) T `public {
+    return <-this.t;
+  }
+}
+
+test_task_field_generic_method_consume() `test(exclude: wasm) {
+  b := T0560GenericMethodBox[int](t: go worker_t0560_int());
+  int r = b.consume_task();
+  assert(r == 17, "generic method consume expected 17");
+}

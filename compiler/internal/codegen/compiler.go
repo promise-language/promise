@@ -6882,7 +6882,11 @@ func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) 
 			!fieldNamed.IsValueType() && !fieldNamed.IsCopy() && !isPrimitiveScalar(fieldNamed) &&
 			!fieldNamed.IsStructural() && !isOpaqueContainerType(fieldType)
 
-		if !hasMonoSynthDrop && !fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString && !needsFreeOnly {
+		// T0560: TypTask has no declared drop() method (per-instantiation drop
+		// is synthesized via getOrCreateTaskDrop). Without the explicit Task
+		// allowance, the skip below fires and the Task field branch below is
+		// unreachable, leaking the G handle.
+		if !hasMonoSynthDrop && !fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString && fieldNamed != types.TypTask && !needsFreeOnly {
 			continue
 		}
 
@@ -6955,6 +6959,20 @@ func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) 
 				resolvedElem = types.Substitute(weakElem, c.typeSubst)
 			}
 			dropFn := c.getOrCreateWeakDrop(resolvedElem)
+			c.block.NewCall(dropFn, fieldInstance)
+			continue
+		}
+
+		// T0560: Task fields — per-instantiation drop blocks on goroutine completion,
+		// drops the result, frees result_ptr/panic_msg/G. Without this case the field
+		// fell through to the heap-user-type path (gated by !isOpaqueContainerType),
+		// so plain Task[T] fields silently no-op'd at scope exit and leaked the G.
+		if taskElem, ok := types.AsTask(fieldType); ok {
+			resolvedElem := taskElem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(taskElem, c.typeSubst)
+			}
+			dropFn := c.getOrCreateTaskDrop(resolvedElem)
 			c.block.NewCall(dropFn, fieldInstance)
 			continue
 		}
@@ -7103,6 +7121,26 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 		dropFunc = c.funcs["Vector.drop"]
 	case innerNamed == types.TypChannel:
 		dropFunc = c.funcs["Channel.drop"]
+	case types.IsTask(elem) || innerNamed == types.TypTask:
+		// T0560: Optional[Task[T]] field scope-exit — per-instantiation drop
+		// blocks on goroutine completion, drops result, frees result_ptr/G.
+		// Without this, dispatch fell through to the heap-user-type case which
+		// is gated by !isOpaqueContainerType, so this branch was never taken.
+		var resolvedTaskElem types.Type
+		if taskElem, ok := types.AsTask(elem); ok {
+			resolvedTaskElem = taskElem
+			if c.typeSubst != nil {
+				resolvedTaskElem = types.Substitute(taskElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypTask && c.typeSubst != nil {
+			if tp := types.TypTask.TypeParams(); len(tp) > 0 {
+				resolvedTaskElem = c.typeSubst[tp[0]]
+				if resolvedTaskElem != nil {
+					resolvedTaskElem = types.Substitute(resolvedTaskElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem)
 	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() &&
 		!isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural() &&
 		!isOpaqueContainerType(elem):
@@ -7203,6 +7241,27 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 		dropFunc = c.funcs["Vector.drop"]
 	case types.IsChannel(elem):
 		dropFunc = c.funcs["Channel.drop"]
+	case types.IsTask(elem) || innerNamed == types.TypTask:
+		// T0560: Optional[Task[T]] field reassignment — per-instantiation drop
+		// blocks on goroutine completion, drops result, frees result_ptr/G.
+		// Without this, dispatch fell through to the heap-user-type case which
+		// is gated by !isOpaqueContainerType, so this branch was never taken
+		// and old tasks leaked on reassignment.
+		var resolvedTaskElem types.Type
+		if taskElem, ok := types.AsTask(elem); ok {
+			resolvedTaskElem = taskElem
+			if c.typeSubst != nil {
+				resolvedTaskElem = types.Substitute(taskElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypTask && c.typeSubst != nil {
+			if tp := types.TypTask.TypeParams(); len(tp) > 0 {
+				resolvedTaskElem = c.typeSubst[tp[0]]
+				if resolvedTaskElem != nil {
+					resolvedTaskElem = types.Substitute(resolvedTaskElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem)
 	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() &&
 		!isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural() &&
 		!isOpaqueContainerType(elem):
@@ -7264,13 +7323,14 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 	c.block = dropBlock
 	innerVal := c.block.NewExtractValue(oldOpt, 1)
 
-	if innerNamed == types.TypString || types.IsVector(elem) || types.IsChannel(elem) {
+	if innerNamed == types.TypString || types.IsVector(elem) || types.IsChannel(elem) ||
+		types.IsTask(elem) || innerNamed == types.TypTask {
 		// T0358 (T0354 follow-up): for Vector inner type, iterate elements and
 		// drop heap elements before freeing the buffer.
 		if elemType, isVec := types.AsVector(elem); isVec {
 			c.emitVectorElementDropLoop(innerVal, elemType)
 		}
-		// String/container: inner is i8*, call drop directly.
+		// String/container/task: inner is i8*, call drop directly.
 		c.block.NewCall(dropFunc, innerVal)
 	} else {
 		// User type: inner is value struct {vtable*, instance*}.

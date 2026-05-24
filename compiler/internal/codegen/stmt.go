@@ -5226,7 +5226,14 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					// via runtime extractvalue.
 					if extractNamed(exprType) == types.TypString ||
 						types.IsVector(exprType) || types.IsChannel(exprType) ||
-						types.IsArc(exprType) || types.IsWeak(exprType) {
+						types.IsArc(exprType) || types.IsWeak(exprType) ||
+						types.IsTask(exprType) {
+						// T0560: Task RHS in `field = go ...` where the field is
+						// Optional[Task[T]]. Without claiming the temp BEFORE
+						// wrapping into the Optional struct, the stmtTemp cleanup
+						// runs at statement end and drops G — but G is now owned
+						// by the optional field, causing a double-free at scope
+						// exit via the Optional field-drop path.
 						c.claimStringTemp(val)
 					}
 					// Use Identical (not "is exprOpt?") so T?? = T? still wraps.
@@ -5616,6 +5623,26 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 						c.block.NewBr(mergeBlock)
 						c.block = mergeBlock
 					}
+				}
+				// T0560: Task field reassignment drop. Without this, `h.t = go ...`
+				// for a plain Task[T] field silently leaks the old G handle (the
+				// generic dispatch falls into the heap-user-type catch-all which
+				// is gated by !isOpaqueContainerType and so skips Task entirely).
+				if taskElem, isTask := types.AsTask(fieldType); isTask {
+					resolvedElem := taskElem
+					if c.typeSubst != nil {
+						resolvedElem = types.Substitute(taskElem, c.typeSubst)
+					}
+					dropFunc := c.getOrCreateTaskDrop(resolvedElem)
+					oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
+					isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
+					dropBlock := c.newBlock("field.taskdrop")
+					mergeBlock := c.newBlock("field.taskdrop.done")
+					c.block.NewCondBr(isSame, mergeBlock, dropBlock)
+					c.block = dropBlock
+					c.block.NewCall(dropFunc, oldVal)
+					c.block.NewBr(mergeBlock)
+					c.block = mergeBlock
 				}
 				// B0240: Optional fields: drop old inner value before reassignment.
 				// When overwriting an optional field (e.g., p.location = none), the old

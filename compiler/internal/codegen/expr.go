@@ -8297,12 +8297,11 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 					envFieldPtr: fieldPtr,
 					elemType:    captureType,
 				})
-				// Register drop for move-captured values — but skip string/vector types.
-				// Lambda captures are borrows from the outer scope; the env-free mechanism
-				// handles cleanup. Registering drops here would free on every lambda call.
-				if !isDroppableContainerOrString(cv.Obj.Type()) {
-					c.maybeRegisterDrop(cv.Obj.Name(), alloca, cv.Obj.Type())
-				}
+				// T0554: Do NOT register a scope-exit drop on the capture local. The env
+				// drop function (genEnvDropFunc) is responsible for dropping all captured
+				// values when the env struct is freed. Registering here would double-drop
+				// (lambda-body exit + env_drop), causing segfaults for user types and
+				// double-frees for any type with droppable fields.
 				// B0229: Register reassignment-only drop for captured optional structural
 				// interfaces (e.g., Iterator[R]? in flat_map). Only added to dropBindings,
 				// NOT scopeBindings — the env drop function handles final cleanup, and
@@ -8413,7 +8412,7 @@ const (
 	envDropCallFn                           // call dropFn(i8*) — string, vector, channel (handles free internally)
 	envDropClosureEnv                       // extract env from closure {i8*,i8*}, env-drop-or-free
 	envDropUserValue                        // extract inst from value {i8*,i8*}, pal_free — heap user type without drop
-	envDropUserValueDrop                    // extract inst from value {i8*,i8*}, call drop + pal_free
+	envDropUserValueDrop                    // extract inst from value {i8*,i8*}, call cleanup fn (synth drop incl. pal_free, or $wrap, or palFree)
 	envDropOptionalStructural               // B0229: optional structural iface — check has_value, extract inst, cleanup
 )
 
@@ -8485,12 +8484,14 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 	// Heap user type — need to free instance (and call drop if it has one).
 	// Skip `this` captures: method receivers are borrowed from the caller, which
 	// handles cleanup via its own scope binding. Freeing here would double-free.
+	//
+	// T0554: Use resolveDropFuncForTemp to get the correct cleanup function.
+	// For synthesized drops, the bare drop already includes pal_free. For
+	// explicit user drops, $wrap is returned which calls drop + pal_free.
+	// Either way, env_drop just calls this function (no separate pal_free).
 	if named != nil && cv.Obj.Name() != "this" && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
-		if named.HasDrop() {
-			dropName := mangleMethodName(c.resolveTypeName(typ), "drop", false)
-			if fn, ok := c.funcs[dropName]; ok {
-				return envFieldDrop{envDropUserValueDrop, fn}
-			}
+		if dropFn := c.resolveDropFuncForTemp(named, typ); dropFn != nil {
+			return envFieldDrop{envDropUserValueDrop, dropFn}
 		}
 		return envFieldDrop{envDropUserValue, nil}
 	}
@@ -8597,13 +8598,15 @@ func (c *Compiler) genEnvDropFunc(lambdaName string, envStructType *irtypes.Stru
 			freeBlk.NewBr(nextBlk)
 
 		case envDropUserValueDrop:
-			// User type value struct {vtable, instance}: extract instance, null-check, drop + pal_free
+			// User type value struct {vtable, instance}: extract instance, null-check, call cleanup fn.
+			// T0554: dropFn is from resolveDropFuncForTemp — synth drops include pal_free,
+			// explicit-drop $wrap calls drop + pal_free. Either way, do NOT call pal_free
+			// separately or we double-free.
 			instPtr := curBlock.NewExtractValue(fieldVal, 1)
 			isNull := curBlock.NewICmp(enum.IPredEQ, instPtr, constant.NewNull(irtypes.I8Ptr))
 			dropBlk := dropFn.NewBlock(fmt.Sprintf("udrop.%d", blockIdx))
 			curBlock.NewCondBr(isNull, nextBlk, dropBlk)
 			dropBlk.NewCall(act.dropFn, instPtr)
-			dropBlk.NewCall(c.palFree, instPtr)
 			dropBlk.NewBr(nextBlk)
 
 		case envDropOptionalStructural:

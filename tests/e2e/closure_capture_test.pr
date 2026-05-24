@@ -1,0 +1,198 @@
+// T0554: move-closure capture of user-type values must not double-drop.
+//
+// The lambda body used to register a scope-exit drop on the captured local in
+// addition to the env_drop function's drop, causing a segfault (double-free)
+// for any user type and a double-drop for any type with droppable fields.
+//
+// These tests use heap-allocated strings (via .repeat) so the leak detector
+// catches under-drop, and segfault catches over-drop. Together: drop must run
+// exactly once.
+type _T0554Box {
+  string label;
+}
+
+type _T0554BoxEmptyDrop {
+  string label;
+  drop(~this) {
+  }
+}
+
+// --- 1. capture user type with auto-synthesized drop ---
+test_move_capture_user_type_no_drop() `test {
+  s := "hi".repeat(2);
+  b := _T0554Box(label: s);
+  f := move || -> string {
+    return b.label.repeat(1);
+  };
+  result := f();
+  assert(result == "hihi", "lambda body returns captured label");
+}
+
+// --- 2. capture user type with explicit empty drop ---
+test_move_capture_user_type_empty_drop() `test {
+  s := "ho".repeat(2);
+  b := _T0554BoxEmptyDrop(label: s);
+  f := move || -> string {
+    return b.label.repeat(1);
+  };
+  result := f();
+  assert(result == "hoho", "lambda body returns captured label");
+}
+
+// --- 3. call the closure multiple times — drop still runs only once ---
+test_move_capture_user_type_called_multiple_times() `test {
+  s := "ab".repeat(2);
+  b := _T0554Box(label: s);
+  f := move || -> string {
+    return b.label.repeat(1);
+  };
+  r1 := f();
+  r2 := f();
+  r3 := f();
+  assert(r1 == "abab", "first call");
+  assert(r2 == "abab", "second call");
+  assert(r3 == "abab", "third call");
+}
+
+// --- 4. inherited-drop type capture (was the original T0507 reproducer) ---
+type _T0554Logger {
+  string s;
+  drop(~this) {
+  }
+}
+
+type _T0554Child is _T0554Logger {
+  string label;
+}
+
+test_move_capture_inherited_drop() `test {
+  s := "c".repeat(2);
+  b := _T0554Child(s: "fixed", label: s);
+  f := move || -> string {
+    return b.label.repeat(1);
+  };
+  result := f();
+  assert(result == "cc", "captured inherited-drop type");
+}
+
+// --- 5. closure passed to function and invoked there ---
+_t0554_invoke(() -> string fn) string {
+  return fn();
+}
+
+test_move_capture_passed_as_arg() `test {
+  s := "z".repeat(2);
+  b := _T0554Box(label: s);
+  f := move || -> string {
+    return b.label.repeat(1);
+  };
+  result := _t0554_invoke(f);
+  assert(result == "zz", "closure called via function arg");
+}
+
+// --- 6. capture two user types in same closure ---
+test_move_capture_two_user_types() `test {
+  s1 := "x".repeat(2);
+  s2 := "y".repeat(2);
+  b1 := _T0554Box(label: s1);
+  b2 := _T0554Box(label: s2);
+  f := move || -> string {
+    return b1.label + b2.label;
+  };
+  result := f();
+  assert(result == "xxyy", "two captured user types");
+}
+
+// --- 7. closure dropped without being called — env_drop must still run ---
+test_move_capture_never_called() `test {
+  s := "n".repeat(2);
+  b := _T0554Box(label: s);
+  f := move || -> string {
+    return b.label.repeat(1);
+  };
+  // f is never invoked — env_drop at scope exit is the sole cleanup path.
+  // Suppress unused-variable if the compiler warns by referencing the type.
+  assert(true, "lambda created but never called");
+}
+
+// --- 8. capture user type with NO droppable fields (only primitives) ---
+// Exercises envDropUserValueDrop with palFree as cleanup fn (heap type, no drop
+// method, no synth drop). Before T0554, this also segfaulted — the lambda body
+// registered a drop flag for the local copy and env_drop would also pal_free.
+type _T0554Plain {
+  int v;
+  bool flag;
+}
+
+test_move_capture_user_type_no_droppable_fields() `test {
+  p := _T0554Plain(v: 42, flag: true);
+  f := move || -> int {
+    if p.flag {
+      return p.v;
+    }
+    return 0;
+  };
+  assert(f() == 42, "first call");
+  assert(f() == 42, "second call");
+}
+
+// --- 9. capture a generic user type instantiation ---
+// Exercises monomorphized capture path: _T0554GenBox[int] has synth drop because
+// its T field becomes int (no drop), but the type-substitution still needs to
+// flow through analyzeEnvCaptureDrop → resolveDropFuncForTemp.
+type _T0554GenBox[T] {
+  T value;
+  string tag;
+}
+
+test_move_capture_generic_user_type() `test {
+  s := "g".repeat(2);
+  b := _T0554GenBox[int](value: 99, tag: s);
+  f := move || -> int {
+    return b.value;
+  };
+  assert(f() == 99, "captured generic user type");
+}
+
+// --- 10. capture user type whose droppable field is a Vector (not a string) ---
+// Different droppable field type — string capture works (test 1), so confirm
+// vector capture also works through env_drop without double-drop.
+type _T0554VecBox {
+  int[] items;
+  int id;
+}
+
+test_move_capture_user_type_vector_field() `test {
+  int[] items = [1, 2, 3];
+  b := _T0554VecBox(items: items, id: 7);
+  f := move || -> int {
+    return b.id + b.items.len;
+  };
+  assert(f() == 10, "captured user type with vector field");
+}
+
+// --- 11. capture user type with a nested droppable user-type field ---
+// _T0554Inner has synth drop (string field); _T0554Outer's synth drop must
+// recurse into Inner's drop. Move-capturing Outer exercises chained cleanup
+// via env_drop.
+type _T0554Inner {
+  string label;
+}
+
+type _T0554Outer {
+  _T0554Inner inner;
+  int n;
+}
+
+test_move_capture_nested_droppable_field() `test {
+  s := "n".repeat(2);
+  inner := _T0554Inner(label: s);
+  outer := _T0554Outer(inner: inner, n: 5);
+  f := move || -> int {
+    return outer.n;
+  };
+  assert(f() == 5, "captured outer with nested droppable inner");
+}
+
+main() {
+}

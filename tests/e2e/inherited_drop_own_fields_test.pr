@@ -206,17 +206,17 @@ inherit_nongen_returned_value() `test {
   assert(b.label == "xx", "label");
 }
 
-// Closure capture of user-type values (move ||) is blocked by T0554 (preexisting
-// segfault on scope-exit for ALL user-type captures, not just inherited-drop).
-// Add the test here once T0554 is fixed:
-//
-//   inherit_nongen_closure_capture() `test {
-//     s := "c".repeat(2);
-//     b := _T0507Box(s: "fixed", label: s);
-//     f := move || -> string { return b.label.repeat(1); };
-//     result := f();
-//     assert(result == "cc", "captured");
-//   }
+// T0554: closure capture of user-type values (move ||) — must drop the
+// captured value exactly once via env_drop, not in the lambda body.
+inherit_nongen_closure_capture() `test {
+  s := "c".repeat(2);
+  b := _T0507Box(s: "fixed", label: s);
+  f := move || -> string {
+    return b.label.repeat(1);
+  };
+  result := f();
+  assert(result == "cc", "captured");
+}
 
 // Failable function returns the inherited-drop type. The caller (also failable)
 // uses inferred auto-propagation `x := call()`, where x is bound to the success

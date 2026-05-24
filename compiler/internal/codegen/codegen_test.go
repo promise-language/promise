@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"bytes"
+	"fmt"
 	"regexp"
 	"runtime"
 	"strings"
@@ -22225,6 +22226,171 @@ func TestLambdaEnvDropMutexGuardCapture(t *testing.T) {
 		}
 	`)
 	assertContains(t, ir, "call void @MutexGuard.drop(")
+}
+
+// findEnvDropContaining returns the body of the first .lambda.N.env_drop
+// function whose body contains marker. There are many stdlib-generated
+// env_drop functions; this helper picks out the one for the user code under
+// test.
+func findEnvDropContaining(ir, marker string) string {
+	// Iterate over candidate lambda numbers — the user's lambda lands after
+	// stdlib lambdas, so the range needs to be large enough.
+	idx := 0
+	for {
+		needle := fmt.Sprintf(".lambda.%d.env_drop", idx)
+		if !strings.Contains(ir, "@"+needle+"(") {
+			if idx > 500 {
+				return ""
+			}
+			idx++
+			continue
+		}
+		body := extractFunction(ir, needle)
+		if strings.Contains(body, marker) {
+			return body
+		}
+		idx++
+	}
+}
+
+// T0554: env_drop for a captured user type with an explicit drop method calls
+// T.drop$wrap (drop + pal_free) — not the bare T.drop followed by a separate
+// pal_free on the instance, which would double-free.
+func TestLambdaEnvDropUserTypeExplicitDropUsesWrap(t *testing.T) {
+	ir := generateIR(t, `
+		type _T554EX {
+			string label;
+			drop(~this) {}
+		}
+		main() {
+			b := _T554EX(label: "x");
+			f := move || -> string { return b.label; };
+			f();
+		}
+	`)
+	envDrop := findEnvDropContaining(ir, "_T554EX")
+	if envDrop == "" {
+		t.Fatal("expected an env_drop referencing _T554EX")
+	}
+	assertContains(t, envDrop, "call void @_T554EX.drop$wrap(")
+	// Must NOT call _T554EX.drop directly outside the $wrap helper (that would
+	// double-drop with $wrap inside).
+	if strings.Contains(envDrop, "call void @_T554EX.drop(") {
+		t.Errorf("env_drop should call $wrap, not bare drop:\n%s", envDrop)
+	}
+}
+
+// T0554: env_drop for a captured user type with synthesized drop (no explicit
+// drop, only droppable fields) calls the bare T.drop — synth drops already
+// include pal_free, so calling pal_free again would double-free.
+func TestLambdaEnvDropUserTypeSynthDropNoExtraPalFree(t *testing.T) {
+	ir := generateIR(t, `
+		type _T554SY {
+			string label;
+		}
+		main() {
+			b := _T554SY(label: "x");
+			f := move || -> string { return b.label; };
+			f();
+		}
+	`)
+	envDrop := findEnvDropContaining(ir, "_T554SY")
+	if envDrop == "" {
+		t.Fatal("expected an env_drop referencing _T554SY")
+	}
+	assertContains(t, envDrop, "call void @_T554SY.drop(")
+	// Count pal_free calls — must be exactly 1 (for the env struct itself).
+	// A second pal_free on the instance would double-free with the synth drop.
+	count := strings.Count(envDrop, "call void @pal_free(")
+	if count != 1 {
+		t.Errorf("expected exactly 1 pal_free call (for env), got %d:\n%s", count, envDrop)
+	}
+}
+
+// T0554: env_drop for a captured user type with NO droppable fields and NO
+// drop method falls through resolveDropFuncForTemp to palFree as the cleanup
+// fn — single pal_free on the instance plus a pal_free on the env struct.
+func TestLambdaEnvDropUserTypeNoDropUsesPalFree(t *testing.T) {
+	ir := generateIR(t, `
+		type _T554NO {
+			int v;
+			bool flag;
+		}
+		main() {
+			p := _T554NO(v: 42, flag: true);
+			f := move || -> int { return p.v; };
+			f();
+		}
+	`)
+	// This env_drop has no type-name marker (uses palFree for cleanup), so we
+	// look for one that does NOT call any user T.drop, has the user-type Value
+	// layout {i8*, i8*}, and has exactly 2 pal_free calls.
+	idx := 0
+	var envDrop string
+	for idx < 500 {
+		needle := fmt.Sprintf(".lambda.%d.env_drop", idx)
+		if !strings.Contains(ir, "@"+needle+"(") {
+			idx++
+			continue
+		}
+		body := extractFunction(ir, needle)
+		// User-type value struct capture: { i8*, i8* } payload + 2 pal_free calls.
+		if strings.Contains(body, "{ i8*, { i8*, i8* } }") &&
+			strings.Count(body, "call void @pal_free(") == 2 {
+			envDrop = body
+			break
+		}
+		idx++
+	}
+	if envDrop == "" {
+		t.Fatal("expected an env_drop with 2 pal_free calls on a user value capture")
+	}
+}
+
+// T0554: the lambda BODY for a move-captured user type must NOT register a
+// scope-exit drop on the capture local. Before the fix, the body called the
+// captured type's drop (or pal_free) on the local copy, which then ran AGAIN
+// in env_drop → segfault on user types, double-free on droppable fields.
+func TestLambdaBodyNoDropOnMoveCapture(t *testing.T) {
+	ir := generateIR(t, `
+		type _T554BO {
+			string label;
+		}
+		main() {
+			b := _T554BO(label: "x");
+			f := move || -> string { return b.label; };
+			f();
+		}
+	`)
+	// Find the lambda function (not env_drop) that has _T554BO in its body —
+	// the user-defined lambda captures _T554BO.
+	idx := 0
+	var body string
+	for idx < 500 {
+		needle := fmt.Sprintf(".lambda.%d", idx)
+		if !strings.Contains(ir, "@"+needle+"(") {
+			idx++
+			continue
+		}
+		fnBody := extractFunction(ir, needle)
+		// Skip env_drop and pick the lambda body that loads from a _T554BO
+		// instance pointer.
+		if !strings.Contains(fnBody, ".env_drop") &&
+			strings.Contains(fnBody, "_T554BO") {
+			body = fnBody
+			break
+		}
+		idx++
+	}
+	if body == "" {
+		t.Fatal("expected a lambda body referencing _T554BO")
+	}
+	// The lambda body must not invoke the captured type's drop (it would
+	// duplicate env_drop's cleanup).
+	if strings.Contains(body, "call void @_T554BO.drop(") ||
+		strings.Contains(body, "call void @_T554BO.drop$wrap(") {
+		t.Errorf("lambda body should not drop captured user type:\n%s", body)
+	}
 }
 
 // T0373: Assigning a T? value into a T?? variable wraps the value once

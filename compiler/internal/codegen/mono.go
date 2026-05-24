@@ -1800,8 +1800,19 @@ func monoTypeHasDroppable(typ types.Type) bool {
 			return true
 		}
 	}
-	if fEnum := extractEnum(typ); fEnum != nil && (fEnum.HasDrop() || fEnum.NeedsSynthDrop()) {
-		return true
+	if fEnum := extractEnum(typ); fEnum != nil {
+		if fEnum.HasDrop() || fEnum.NeedsSynthDrop() {
+			return true
+		}
+		// T0552: For generic enum Instances, recurse into substituted variant
+		// fields. Sema's fieldTypeHasDrop returns false for TypeParam variant
+		// fields, so the origin enum reports HasDrop=NeedsSynthDrop=false even
+		// when the concrete instantiation carries a droppable payload.
+		if inst, ok := typ.(*types.Instance); ok {
+			if monoEnumInstNeedsSynthDrop(inst) {
+				return true
+			}
+		}
 	}
 	return false
 }

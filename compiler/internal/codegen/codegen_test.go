@@ -12479,6 +12479,56 @@ func TestDropMonoEnumInstSynthDrop(t *testing.T) {
 	assertContains(t, ir, "call void @Resource.drop(")
 }
 
+// T0552: Type with generic-enum field whose TypeParam resolves to a droppable
+// concrete type. monoTypeHasDroppable must see through the generic enum Instance
+// (via monoEnumInstNeedsSynthDrop), and emitFieldDropsFor must drop the enum
+// field by invoking the mono enum's drop function. Without both, the inner
+// droppable leaks at scope exit of the holder.
+func TestDropGenericTypeWithGenericEnumField(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource { int id; drop(~this) { } }
+		enum Maybe[T] {
+			Some(T value),
+			Nothing,
+		}
+		type Holder[T] {
+			Maybe[T] m;
+		}
+		main() {
+			j := Maybe[Resource].Some(Resource(id: 1));
+			c := Holder[Resource](m: j);
+		}
+	`)
+	assertContains(t, ir, `define void @"Holder[Resource].drop"`)
+	assertContains(t, ir, `call void @"Maybe[Resource].drop"`)
+}
+
+// T0552: Non-generic holder containing a non-generic enum field with a
+// droppable variant. Sema sets NeedsSynthDrop=true on the holder (since the
+// concrete enum's HasDrop is observable), so a synth drop body is generated —
+// but before T0552, emitFieldDropsFor's `extractNamed == nil` skip dropped the
+// enum field silently. This test locks down the enum-field branch added in
+// emitFieldDropsFor for the non-generic case (the generic case is covered by
+// TestDropGenericTypeWithGenericEnumField above).
+func TestDropTypeWithEnumFieldNonGeneric(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource { int id; drop(~this) { } }
+		enum Maybe {
+			Some(Resource value),
+			Nothing,
+		}
+		type Holder {
+			Maybe m;
+		}
+		main() {
+			j := Maybe.Some(Resource(id: 1));
+			c := Holder(m: j);
+		}
+	`)
+	assertContains(t, ir, "define void @Holder.drop")
+	assertContains(t, ir, "call void @Maybe.drop")
+}
+
 // B0238: Generic enum variables with TypeParam-only droppable fields must get drop
 // registered at scope exit. maybeRegisterDrop must check monoEnumInstNeedsSynthDrop.
 func TestDropGenericEnumVarWithDroppableTypeParam(t *testing.T) {

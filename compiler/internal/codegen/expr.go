@@ -2187,6 +2187,12 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		var argVals []value.Value
 		var argTypes []types.Type
 		for i, arg := range e.Args {
+			// T0552: Save enum ctor temp count so we can clear those added during
+			// this arg's evaluation once the value is passed to new() (which stores
+			// it into a field). Without clearing, the temp's scope-exit drop runs
+			// and double-frees the variant payload the owner's synth drop now also
+			// handles. Symmetric to the implicit-constructor field loop below.
+			savedEnumTemps := len(c.enumCtorTemps)
 			v := c.genCallArgExpr(arg.Value)
 			argVals = append(argVals, v)
 			argTypes = append(argTypes, c.info.Types[arg.Value])
@@ -2196,11 +2202,12 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			// flag so the original string is freed. For move params and non-string
 			// params, clear the drop flag as before (direct pointer store).
 			skipClear := false
+			isMoveParam := true
 			if newMethod != nil && i < len(newParams) {
 				paramType := newParams[i].Type()
 				_, isMutRef := paramType.(*types.MutRef)
-				isMove := isMutRef || newParams[i].Ref() == types.RefMut
-				if !isMove && extractNamed(paramType) == types.TypString && (named.HasDrop() || named.NeedsSynthDrop()) {
+				isMoveParam = isMutRef || newParams[i].Ref() == types.RefMut
+				if !isMoveParam && extractNamed(paramType) == types.TypString && (named.HasDrop() || named.NeedsSynthDrop()) {
 					skipClear = true
 				}
 			}
@@ -2220,6 +2227,16 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			// B0233: Claim heap temp — ownership transferred to new() constructor field.
 			c.claimHeapTemp(v)
 			c.claimEnvTemp(v) // T0100: claim env temp for closure args
+			// T0552: Clear enum ctor temps created during arg evaluation when the
+			// param consumes the enum by move — ownership transfers to new() and
+			// then to whatever field it stores into. Borrow params don't take
+			// ownership, so leave the temps in place for the caller's cleanup.
+			if isMoveParam {
+				for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+				}
+				c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+			}
 		}
 		// B0233: Do NOT claim heap temp here. Let downstream consumers claim:
 		// - Variable assignment (stmt.go genAssignment)
@@ -2332,6 +2349,12 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				panic(fmt.Sprintf("codegen: positional constructor args not supported for %s", typ))
 			}
 			provided[arg.Name] = true
+			// T0552: Save enum ctor temp count so we can clear those added during
+			// this arg's evaluation once the value is stored in the field. The
+			// field becomes the unique owner of the enum data; without clearing,
+			// the temp's scope-exit drop runs and double-frees the variant payload
+			// the owner's synth drop now also handles.
+			savedEnumTemps := len(c.enumCtorTemps)
 			fieldIdx, ok := layout.InstanceFieldIndex[arg.Name]
 			if !ok {
 				panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
@@ -2434,6 +2457,15 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				// T0100: Claim env temp — closure env is now owned by the struct field.
 				c.claimEnvTemp(val)
 			}
+			// T0552: Clear enum ctor temps created during this arg's evaluation —
+			// the field is now the unique owner of the enum's variant data, so the
+			// ctor temp's scope-exit drop must not fire. Without this, the
+			// owner's synth drop (which T0552 makes drop the enum field) and the
+			// temp drop both target the same heap allocation → double-free.
+			for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+				c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+			}
+			c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
 		}
 
 		// Initialize omitted fields: evaluate default expression if present, otherwise zero-init.

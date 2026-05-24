@@ -6823,6 +6823,42 @@ func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) 
 		if c.typeSubst != nil {
 			fieldType = types.Substitute(fieldType, c.typeSubst)
 		}
+
+		// T0552: Enum-typed field. The enum value is stored inline in the
+		// owner's instance struct; pass a pointer to it to the enum's drop
+		// function (which switches on tag and drops variant data). Without
+		// this branch, the field walk's `extractNamed == nil` skip below
+		// silently drops enum fields, leaking their droppable variant data.
+		if enumType := extractEnum(fieldType); enumType != nil {
+			needsDrop := enumType.HasDrop() || enumType.NeedsSynthDrop()
+			if inst, ok := fieldType.(*types.Instance); ok && monoEnumInstNeedsSynthDrop(inst) {
+				needsDrop = true
+			}
+			if !needsDrop {
+				continue
+			}
+			fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
+			if !ok {
+				continue
+			}
+			fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			enumName := enumType.Obj().Name()
+			if inst, ok := fieldType.(*types.Instance); ok {
+				enumName = monoName(inst)
+			}
+			mangledName := mangleMethodName(enumName, "drop", false)
+			dropFn := c.funcs[mangledName]
+			if dropFn == nil && c.moduleInfos != nil {
+				dropFn = c.forwardDeclareModuleEnumDrop(enumType, enumName, mangledName)
+			}
+			if dropFn != nil {
+				ptr := c.block.NewBitCast(fieldPtr, irtypes.I8Ptr)
+				c.block.NewCall(dropFn, ptr)
+			}
+			continue
+		}
+
 		fieldNamed := extractNamed(fieldType)
 		if fieldNamed == nil {
 			continue

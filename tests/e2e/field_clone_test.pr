@@ -141,6 +141,83 @@ test_generic_enum_field_drop_only() `test {
   // and drop the inner _BoxDropT0506 without crashing or leaking.
 }
 
+// T0552: same shape as T0506's inline test, but with named-variable
+// construction. The inline form happens to drop the construction temp
+// (since the move into the field doesn't clear that temp's flag), masking
+// the bug. The named-variable form below clears `j`'s drop flag on the
+// move, so cleanup must come from the holder's synth drop. monoTypeHasDroppable
+// needs to recurse into the generic enum Instance (gap 1) AND emitFieldDropsFor
+// needs to emit the enum field's drop call (gap 2). Memory-leak enforcement
+// fails this test if either gap is open.
+test_generic_enum_field_drop_named_var() `test {
+  MaybeBox[_BoxDropT0506] j = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 42));
+  MaybeBoxHolder[_BoxDropT0506] c = MaybeBoxHolder[_BoxDropT0506](m: j);
+  // Let c drop at scope exit — HolderL[_BoxDropT0506]'s synth drop must call
+  // MaybeL[_BoxDropT0506].drop, which in turn drops the inner _BoxDropT0506.
+}
+
+// T0552: user-defined new() with an enum-typed move param. The new() path
+// in genConstructorCallMono also needs to clear enum ctor temps after the
+// move arg is evaluated — otherwise the inline form double-frees (caller's
+// ctor temp drop fires AND new() stores the enum into a field that the
+// owner's synth drop now also handles).
+type _MaybeBoxHolderNewT0552[T] {
+  MaybeBox[T] m;
+  new(~this, ~MaybeBox[T] m) {
+    this.m = m;
+  }
+}
+
+test_generic_enum_field_drop_inline_userctor() `test {
+  _MaybeBoxHolderNewT0552[_BoxDropT0506] c = _MaybeBoxHolderNewT0552[_BoxDropT0506](m: MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 1)));
+}
+
+test_generic_enum_field_drop_named_var_userctor() `test {
+  MaybeBox[_BoxDropT0506] j = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 2));
+  _MaybeBoxHolderNewT0552[_BoxDropT0506] c = _MaybeBoxHolderNewT0552[_BoxDropT0506](m: j);
+}
+
+// T0552: non-generic holder with non-generic enum field. The plan noted that
+// Gap 2's fix (emitFieldDropsFor enum-field branch) "incidentally repairs"
+// this case — sema sets NeedsSynthDrop=true on the holder because the concrete
+// enum's HasDrop is observable, but before T0552 the synth drop body silently
+// skipped the enum field. Both forms (named-var move + inline ctor temp) must
+// drop the inner _BoxDropT0506 without leaking or double-freeing.
+enum _MaybePlainT0552 {
+  Just(_BoxDropT0506 val),
+  Nothing,
+}
+
+type _HolderPlainT0552 {
+  _MaybePlainT0552 m;
+}
+
+test_nongen_enum_field_drop_named_var() `test {
+  _MaybePlainT0552 j = _MaybePlainT0552.Just(_BoxDropT0506(n: 11));
+  _HolderPlainT0552 c = _HolderPlainT0552(m: j);
+}
+
+test_nongen_enum_field_drop_inline() `test {
+  _HolderPlainT0552 c = _HolderPlainT0552(m: _MaybePlainT0552.Just(_BoxDropT0506(n: 13)));
+}
+
+// T0552: holder with TWO droppable generic-enum fields. Exercises the loop in
+// emitFieldDropsFor across multiple enum-typed fields and a non-droppable field
+// in between, ensuring the iteration order and per-field GEP computation are
+// correct. Regressions in field-index computation or loop early-exit would
+// leak one (or both) inner _BoxDropT0506 values.
+type _Holder2T0552[T] {
+  MaybeBox[T] a;
+  int x;
+  MaybeBox[T] b;
+}
+
+test_generic_enum_field_drop_two_fields() `test {
+  MaybeBox[_BoxDropT0506] j1 = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 21));
+  MaybeBox[_BoxDropT0506] j2 = MaybeBox[_BoxDropT0506].Just(_BoxDropT0506(n: 22));
+  _Holder2T0552[_BoxDropT0506] c = _Holder2T0552[_BoxDropT0506](a: j1, x: 0, b: j2);
+}
+
 // T0549: plain Named field with no drop method and only primitive fields.
 // Sema's fieldTypeHasDrop / codegen's monoTypeHasDroppable apply the B0192
 // catch-all (non-value, non-structural, non-copy Named is droppable because

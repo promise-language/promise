@@ -97,6 +97,15 @@ type Resource `public {
   }
 }
 
+// T0552: public enum with droppable variant data, used cross-module as a
+// field type. Exercises forwardDeclareModuleEnumDrop in emitFieldDropsFor —
+// the holder's synth drop body must forward-declare and call this enum's
+// drop function when the holder lives in another module.
+enum _T0552DropEnum `public {
+  Has(Resource r),
+  Empty,
+}
+
 // --- Public generic functions ---
 
 identity[T](T x) T `public {

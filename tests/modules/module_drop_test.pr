@@ -92,3 +92,24 @@ test_module_user_drop_vector_field_no_leak() `test {
   assert(b.v.len == 3, "vector len");
   assert(b.v[0] == 1, "vector[0]");
 }
+
+// T0552: cross-module enum field. Holder is defined locally; the enum it stores
+// (and the inner Resource the enum's variant payload owns) lives in mathlib.
+// Exercises forwardDeclareModuleEnumDrop in emitFieldDropsFor — the locally
+// generated synth drop must forward-declare and call mathlib._T0552DropEnum.drop,
+// which in turn drops the inner mathlib.Resource. Both inline and named-var
+// construction must remain leak-free and crash-free.
+type _T0552CrossHolder {
+  mathlib._T0552DropEnum m;
+}
+
+test_t0552_cross_module_enum_field_inline() `test {
+  _T0552CrossHolder h = _T0552CrossHolder(m: mathlib._T0552DropEnum.Has(r: mathlib.Resource(id: 1)));
+  assert(true, "constructed");
+}
+
+test_t0552_cross_module_enum_field_named_var() `test {
+  mathlib._T0552DropEnum e = mathlib._T0552DropEnum.Has(r: mathlib.Resource(id: 2));
+  _T0552CrossHolder h = _T0552CrossHolder(m: e);
+  assert(true, "constructed");
+}

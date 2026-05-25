@@ -8947,3 +8947,215 @@ func TestT0623_MatchGenericEnumHandleMovesSubject(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "use of moved variable 'b'")
 }
+
+// === T0635: enum-variant constructor consume-checks its args even under
+// generics ===
+//
+// An enum-variant constructor (`Box[T].Full`) is signature-typed by sema, so
+// it would otherwise take the function-call path whose borrowed-param
+// rejection is droppability-gated (`findBorrowedNonAliasSafeIdent` →
+// `isDroppableType`) and thus blind to `*types.TypeParam` fields. A variant
+// field owns its value, so its args are now routed through `tryMoveConsume`
+// (identical to a true struct constructor), which rejects borrowed params
+// unconditionally — generic-safe and symmetric with the non-generic case.
+
+// Generic fn, explicit `T?` (borrowed) param moved into an owned variant
+// field — previously slipped through (TypeParam-blind), now rejected.
+func TestT0635_GenericFnOptBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Box[T] { Full(T? v), Vacant, }
+		make_box_opt[T](T? x) Box[T] {
+			return Box[T].Full(x);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'x'")
+}
+
+// Generic fn, bare `T` (borrowed) param implicitly widened into the `T?`
+// variant field — same defect shape, same rejection.
+func TestT0635_GenericFnBareBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Box[T] { Full(T? v), Vacant, }
+		make_box[T](T x) Box[T] {
+			return Box[T].Full(x);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'x'")
+}
+
+// Generic METHOD body (owner type generic): borrowed `T?` param moved into
+// the owned variant field — the bug title covers fn AND method bodies; the
+// fix is enclosing-context-agnostic, this pins the method case.
+func TestT0635_GenericMethodOptBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Box[T] { Full(T? v), Vacant, }
+		type Holder[T] {
+			T seed;
+			wrap(this, T? o) Box[T] {
+				return Box[T].Full(o);
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'o'")
+}
+
+// Generic METHOD body with `~T?` (owned) — correct, no error.
+func TestT0635_GenericMethodOwnedOptParamOK(t *testing.T) {
+	ownerOK(t, `
+		enum Box[T] { Full(T? v), Vacant, }
+		type Holder[T] {
+			T seed;
+			wrap(this, ~T? o) Box[T] {
+				return Box[T].Full(o);
+			}
+		}
+		test() {}
+	`)
+}
+
+// `~T?` (owned) — the param consumes, so moving it into the variant field is
+// correct. Must NOT error (the idiomatic remediation the diagnostic asks for).
+func TestT0635_GenericFnOwnedOptParamOK(t *testing.T) {
+	ownerOK(t, `
+		enum Box[T] { Full(T? v), Vacant, }
+		make_box_opt[T](~T? x) Box[T] {
+			return Box[T].Full(x);
+		}
+		test() {}
+	`)
+}
+
+// `~T` (owned) bare param widened into `T?` — also correct, no error.
+func TestT0635_GenericFnOwnedBareParamOK(t *testing.T) {
+	ownerOK(t, `
+		enum Box[T] { Full(T? v), Vacant, }
+		make_box[T](~T x) Box[T] {
+			return Box[T].Full(x);
+		}
+		test() {}
+	`)
+}
+
+// Non-regression: an owned LOCAL (not a borrowed param) moved into a variant
+// field is fine — tryMoveConsume only rejects the Borrowed state.
+func TestT0635_OwnedLocalIntoVariantOK(t *testing.T) {
+	ownerOK(t, `
+		enum Box[T] { Full(T? v), Vacant, }
+		make_from_local() Box[string] {
+			string s = "hi".to_upper();
+			return Box[string].Full(s);
+		}
+		test() {}
+	`)
+}
+
+// Non-regression: a no-arg variant (`Box[T].Vacant`) is not a consuming call
+// and must not be misclassified — no spurious error.
+func TestT0635_NoArgVariantOK(t *testing.T) {
+	ownerOK(t, `
+		enum Box[T] { Full(T? v), Vacant, }
+		make_vacant[T]() Box[T] {
+			return Box[T].Vacant;
+		}
+		test() {}
+	`)
+}
+
+// Non-regression: an enum-VALUE method call (`e.peek(s)`) is not a variant
+// constructor — `LookupVariant("peek")` is nil — so it stays on the normal
+// function-call path. A borrowed arg into a borrow param of that method is
+// still accepted (method-arg borrow semantics unchanged).
+func TestT0635_EnumMethodCallNotMisclassified(t *testing.T) {
+	ownerOK(t, `
+		enum E {
+			A, B,
+			peek(&this, string s) bool { return s.len > 0; }
+		}
+		check_it(E e, string s) bool {
+			return e.peek(s);
+		}
+		test() {}
+	`)
+}
+
+// Non-regression guard: an enum-value method that genuinely consumes
+// (`~string`) must STILL reject a borrowed-param arg — the new variant-ctor
+// routing must not make method calls lenient.
+func TestT0635_EnumMethodConsumeBorrowedParamStillRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum E {
+			A, B,
+			into(&this, ~string s) bool { return s.len > 0; }
+		}
+		feed(E e, string s) bool {
+			return e.into(s);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Guard against accidental relaxation: the non-generic concrete case sema
+// already rejected must keep erroring.
+func TestT0635_NonGenericVariantBorrowedParamStillRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Pt { int x; int y; }
+		enum MaybePt { Slot(Pt? p), None_, }
+		mk_maybe(Pt? p) MaybePt {
+			return MaybePt.Slot(p);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'p'")
+}
+
+// Loop-coverage regression: a MULTI-field variant constructor must
+// consume-check EVERY argument, not just e.Args[0]. First arg is owned
+// (`~T?`, consumes fine) so any non-looping implementation would stop there;
+// the second arg is a borrowed `T?` param and MUST still be rejected. A
+// refactor to `c.tryMoveConsume(e.Args[0].Value)` would pass every other
+// T0635 test (all single-arg) yet silently reintroduce the exact double-free
+// bug class for the non-first field — this test pins the loop.
+func TestT0635_MultiArgVariantSecondBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Pair[T] { Both(T? a, T? b), Empty, }
+		mk_pair[T](~T? a_owned, T? b_borrow) Pair[T] {
+			return Pair[T].Both(a_owned, b_borrow);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'b_borrow'")
+}
+
+// Non-regression: a multi-field variant constructor with ALL owned (`~T?`)
+// params is correct — the loop iterates over every arg without spuriously
+// erroring (multi-iteration no-error path at the unit level).
+func TestT0635_MultiArgVariantAllOwnedOK(t *testing.T) {
+	ownerOK(t, `
+		enum Pair[T] { Both(T? a, T? b), Empty, }
+		mk_pair[T](~T? a_owned, ~T? b_owned) Pair[T] {
+			return Pair[T].Both(a_owned, b_owned);
+		}
+		test() {}
+	`)
+}
+
+// `this` (borrowed receiver) moved into an owned variant field from a method
+// body: the new guard routes the arg through tryMoveConsume, whose own `this`
+// branch must still reject it. Confirms the variant-ctor reroute does NOT
+// open a silent escape for `this` consumption — that would be the same
+// caller-drop-flag-still-set double-free class as T0635 itself.
+func TestT0635_ThisIntoVariantConstructorRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Node {
+			int v;
+			pack(this) Holder { return Holder.Has(this); }
+		}
+		enum Holder { Has(Node? n), Empty, }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}

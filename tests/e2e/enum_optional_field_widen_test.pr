@@ -823,3 +823,45 @@ generic_method_none_literal_string() `test {
     Box.Vacant => assert(false, "expected Full"),
   }
 }
+
+// --- T0635: bare `~T` (owned) generic-fn body, GENUINELY heap-droppable
+// inner types (not .rodata literals). The earlier generic_fn_bare_widen_*
+// tests only use int / string-literal / int[]-literal, whose .rodata flag
+// makes drop a no-op and thus masked the borrowed-param double-free. These
+// exercise the consume path of `make_box[T](~T x)` with a heap-allocated
+// string and a heap user type Pt: caller's drop flag must be cleared at the
+// move into the variant field (no double-free), and the enum drop must free
+// exactly once (0 leaks under enforcement). The fix landed via T0634 (the
+// expr.go change); these add the T?/Optional-widen heap-droppable regression
+// coverage T0634's bare-`T` tests did not exercise.
+
+generic_fn_bare_widen_string_heap() `test {
+  string s = "ab".to_upper();
+  Box[string] b = make_box(s);
+  match b {
+    Box.Full(slot) => {
+      if v := slot {
+        assert(v == "AB", "bare ~T widened heap string? holds AB");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_fn_bare_widen_pt_user() `test {
+  Pt p = Pt(x: 8, y: 9);
+  Box[Pt] b = make_box(p);
+  match b {
+    Box.Full(slot) => {
+      if pt := slot {
+        assert(pt.x == 8, "bare ~T widened Pt? holds x=8");
+        assert(pt.y == 9, "bare ~T widened Pt? holds y=9");
+      } else {
+        assert(false, "expected present Pt?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}

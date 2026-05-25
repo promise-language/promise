@@ -2604,8 +2604,12 @@ func (c *Compiler) defineMonoEnumMethods(file *ast.File, instances []*types.Inst
 			if md.Name == "clone" {
 				c.suppressMatchDup = true
 			}
+			// T0604: Set currentDropEnum so defineMethodFunc emits variant field drops
+			if md.Name == "drop" {
+				c.currentDropEnum = enum
+			}
 			func() {
-				defer func() { c.typeSubst = nil; c.monoCtx = nil; c.suppressMatchDup = false }()
+				defer func() { c.typeSubst = nil; c.monoCtx = nil; c.suppressMatchDup = false; c.currentDropEnum = nil }()
 				if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
 					c.defineGeneratorMethod(md, m, fn, genInfo.ElemType, nil)
 				} else {

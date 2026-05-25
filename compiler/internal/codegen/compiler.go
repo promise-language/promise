@@ -92,6 +92,10 @@ type Compiler struct {
 	// Current type being compiled (set during method body generation)
 	currentNamed *types.Named
 
+	// T0604: Current enum being compiled for drop — set when compiling an enum's
+	// explicit drop body so variant field drops can be emitted after the user code.
+	currentDropEnum *types.Enum
+
 	// String literal counter for unique global names (main code)
 	strCounter int
 
@@ -6572,7 +6576,12 @@ func (c *Compiler) defineEnumMethods(file *ast.File) {
 			if md.Name == "clone" {
 				c.suppressMatchDup = true
 			}
+			// T0604: Set currentDropEnum so defineMethodFunc emits variant field drops
+			if md.Name == "drop" {
+				c.currentDropEnum = enum
+			}
 			c.defineMethodFunc(md, m, fn)
+			c.currentDropEnum = nil
 			c.suppressMatchDup = false
 		}
 	}
@@ -6700,7 +6709,12 @@ func (c *Compiler) defineModuleEnumMethods(file *ast.File, moduleName string) {
 			if md.Name == "clone" {
 				c.suppressMatchDup = true
 			}
+			// T0604: Set currentDropEnum so defineMethodFunc emits variant field drops
+			if md.Name == "drop" {
+				c.currentDropEnum = enum
+			}
 			c.defineMethodFunc(md, m, fn)
+			c.currentDropEnum = nil
 			c.suppressMatchDup = false
 		}
 	}
@@ -6892,8 +6906,13 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.genBlock(md.Body)
 
 	// For drop() methods: after the user body, automatically drop all fields that have drop()
-	if md.Name == "drop" && c.block != nil && c.block.Term == nil && len(ownerNamed) > 0 {
-		c.emitFieldDrops(ownerNamed[0])
+	if md.Name == "drop" && c.block != nil && c.block.Term == nil {
+		if len(ownerNamed) > 0 {
+			c.emitFieldDrops(ownerNamed[0])
+		} else if c.currentDropEnum != nil {
+			// T0604: enum explicit drop — clean up droppable variant fields
+			c.emitEnumVariantFieldDropsInline(c.currentDropEnum)
+		}
 	}
 
 	// Ensure the function ends with a terminator
@@ -8312,6 +8331,105 @@ func (c *Compiler) defineSynthesizedEnumDropBody(fn *ir.Func, enum *types.Enum, 
 	c.entryBlock = savedEntry
 	c.panicExitBlock = savedPanicExit
 	c.coroutineReturnBlock = savedCoroReturn
+}
+
+// emitEnumVariantFieldDropsInline emits variant-field drops inline after an
+// enum's explicit drop(~this) body (T0604). This mirrors emitFieldDrops for
+// named types: switch on the tag and drop each variant's droppable fields.
+// Called from defineMethodFunc when currentDropEnum is set.
+func (c *Compiler) emitEnumVariantFieldDropsInline(enum *types.Enum) {
+	layout := c.lookupEnumLayout(enum)
+	if layout == nil {
+		return
+	}
+
+	internalType, ok := layout.EnumInternalType.(*irtypes.StructType)
+	if !ok {
+		// Fieldless enum (i32) — nothing to drop
+		return
+	}
+
+	// this = alloca of the receiver parameter (i8* for enum drop)
+	thisAlloca := c.locals["this"]
+	if thisAlloca == nil {
+		return
+	}
+
+	// Collect variants that need cleanup before emitting any IR
+	type variantDrop struct {
+		tag      int
+		name     string
+		variant  *types.Variant
+		dataType *irtypes.StructType
+	}
+	var droppableVariants []variantDrop
+	for _, v := range enum.Variants() {
+		if v.NumFields() == 0 {
+			continue
+		}
+		dt := layout.VariantDataTypes[v.Name()]
+		if dt == nil {
+			continue
+		}
+		hasDroppable := false
+		for _, f := range v.Fields() {
+			if c.variantFieldNeedsDrop(f.Type()) {
+				hasDroppable = true
+				break
+			}
+		}
+		if hasDroppable {
+			droppableVariants = append(droppableVariants, variantDrop{
+				tag:      layout.VariantTag[v.Name()],
+				name:     v.Name(),
+				variant:  v,
+				dataType: dt,
+			})
+		}
+	}
+
+	if len(droppableVariants) == 0 {
+		return
+	}
+
+	// Load this, cast to internal type, extract tag and data pointer.
+	// All loads go into the current block (end of user's drop body).
+	switchBlock := c.block
+	thisVal := switchBlock.NewLoad(thisAlloca.ElemType, thisAlloca)
+	typedPtr := switchBlock.NewBitCast(thisVal, irtypes.NewPointer(internalType))
+
+	tagPtr := switchBlock.NewGetElementPtr(internalType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	tag := switchBlock.NewLoad(irtypes.I32, tagPtr)
+
+	dataPtr := switchBlock.NewGetElementPtr(internalType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+
+	// Create case blocks and continue block
+	contBlock := c.newBlock("enum.drop.field.done")
+	var cases []*ir.Case
+	for _, vd := range droppableVariants {
+		varBlock := c.newBlock(fmt.Sprintf("enum.drop.field.%s", vd.name))
+		cases = append(cases, &ir.Case{X: constant.NewInt(irtypes.I32, int64(vd.tag)), Target: varBlock})
+
+		c.block = varBlock
+		typedDataPtr := varBlock.NewBitCast(dataPtr, irtypes.NewPointer(vd.dataType))
+
+		for i, f := range vd.variant.Fields() {
+			if !c.variantFieldNeedsDrop(f.Type()) {
+				continue
+			}
+			fieldPtr := c.block.NewGetElementPtr(vd.dataType, typedDataPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+			fieldVal := c.block.NewLoad(vd.dataType.Fields[i], fieldPtr)
+			c.emitVariantFieldDrop(fieldVal, f.Type())
+		}
+		c.block.NewBr(contBlock)
+	}
+
+	// Terminate the switch block and set continuation as current
+	switchBlock.NewSwitch(tag, contBlock, cases...)
+	c.block = contBlock
 }
 
 // variantFieldNeedsDrop returns true if an enum variant field type needs cleanup.

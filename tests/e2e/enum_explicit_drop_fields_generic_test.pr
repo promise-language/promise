@@ -1,0 +1,25 @@
+// T0604: Generic enum with explicit drop — verifies variant field cleanup
+// works correctly through monomorphization.
+enum Wrapper[T] {
+  Some(T value),
+  None,
+
+  drop(~this) {
+  }
+}
+
+test_generic_vector() `test {
+  int[] v = [];
+  v.push(1);
+  v.push(2);
+  Wrapper[int[]] w = Wrapper[int[]].Some(value: v);
+}
+
+test_generic_string() `test {
+  string s = "hello" + " world";
+  Wrapper[string] w = Wrapper[string].Some(value: s);
+}
+
+test_generic_none() `test {
+  Wrapper[string] w = Wrapper[string].None;
+}

@@ -1,0 +1,94 @@
+// T0604: Enum explicit drop with droppable variant fields — verifies that
+// variant field data (string, vector, user types) is cleaned up after the
+// user's drop body runs. Without the fix, these leak memory.
+// --- Vector variant field ---
+enum Container {
+  Data(int[] items),
+  Empty,
+
+  drop(~this) {
+    // User drop body — does not manually clean up variant fields.
+    // The compiler must auto-clean droppable variant data after this.
+  }
+}
+
+make_container() Container {
+  int[] v = [];
+  v.push(1);
+  v.push(2);
+  v.push(3);
+  return Container.Data(items: v);
+}
+
+test_vector_variant() `test {
+  Container c = make_container();
+  // c goes out of scope — explicit drop fires, vector in Data variant must be freed
+}
+
+test_vector_variant_empty() `test {
+  Container c = Container.Empty;
+  // Empty variant — no variant data to drop, should not crash
+}
+
+// --- String variant field (heap-allocated) ---
+
+enum Message {
+  Text(string content),
+  Code(int value),
+
+  drop(~this) {
+  }
+}
+
+make_message() Message {
+  string s = "hello" + " world";
+  return Message.Text(content: s);
+}
+
+test_string_variant() `test {
+  Message m = make_message();
+}
+
+test_string_variant_non_droppable() `test {
+  Message m = Message.Code(value: 42);
+  // Code variant has int field — not droppable, no cleanup needed
+}
+
+// --- Multiple droppable fields in one variant ---
+
+enum Multi {
+  Both(string name, int[] data),
+  None,
+
+  drop(~this) {
+  }
+}
+
+test_multi_droppable_fields() `test {
+  int[] v = [];
+  v.push(10);
+  string s = "test" + "ing";
+  Multi m = Multi.Both(name: s, data: v);
+}
+
+// --- User type with drop as variant field ---
+
+type Resource {
+  int id;
+
+  drop(~this) {
+  }
+}
+
+enum Holder {
+  Active(Resource res),
+  Inactive,
+
+  drop(~this) {
+  }
+}
+
+test_user_type_variant() `test {
+  Resource r = Resource(id: 99);
+  Holder h = Holder.Active(res: r);
+}

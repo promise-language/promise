@@ -13189,6 +13189,26 @@ func TestDropExplicitEnumMethod(t *testing.T) {
 	assertContains(t, ir, "enum.drop.call")
 }
 
+// T0604: Explicit drop(~this) on enum with droppable variant fields —
+// variant field cleanup (switch on tag, drop per-variant) is emitted after the user body.
+func TestDropExplicitEnumVariantFieldCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		enum Container {
+			Data(string name),
+			Empty,
+			drop(~this) {}
+		}
+		main() {
+			c := Container.Data(name: "test");
+		}
+	`)
+	// The user's drop method should contain variant field cleanup blocks
+	assertContains(t, ir, "define void @Container.drop(")
+	assertContains(t, ir, "enum.drop.field.Data")
+	assertContains(t, ir, "enum.drop.field.done")
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
 // T0552: Type with generic-enum field whose TypeParam resolves to a droppable
 // concrete type. monoTypeHasDroppable must see through the generic enum Instance
 // (via monoEnumInstNeedsSynthDrop), and emitFieldDropsFor must drop the enum

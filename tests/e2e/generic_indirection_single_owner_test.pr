@@ -147,3 +147,87 @@ test_method_chain_arc() `test {
   v := c.outer_chain();
   assert(v.len == 2, "method chain arc len");
 }
+
+// --- T0629: clone-req propagation through getters and enum methods ---
+// The negative cases (Task/Mutex must fail at sema) live in sema_test.go
+// (TestT0629_*). These pin the positive runtime behavior with Arc
+// (refcounted, duplicable): a Named getter chain, and a generic enum's
+// getter + method that clone the inner vector. All must run leak-free
+// (T0067 zero-leak enforcement).
+
+type Holder[T] {
+  Vector[T] data;
+  get cloned Vector[T] {
+    return this.data.clone();
+  }
+  via_getter() Vector[T] {
+    return this.cloned;
+  }
+}
+
+test_named_getter_chain_arc() `test {
+  h := Holder[Arc[int]](data: [Arc[int](1), Arc[int](2), Arc[int](3)]);
+  v := h.via_getter();
+  assert(v.len == 3, "named getter chain arc len");
+}
+
+test_named_getter_concrete_arc() `test {
+  h := Holder[Arc[int]](data: [Arc[int](9)]);
+  v := h.cloned;
+  assert(v.len == 1, "named getter concrete arc len");
+}
+
+enum Box[T] {
+  Filled(Vector[T] items),
+  Bare,
+  get cloned Vector[T] {
+    match this {
+      Filled(it) => {
+        return it.clone();
+      },
+      Bare => {
+        return[];
+      },
+    }
+  }
+  copy_items() Vector[T] {
+    match this {
+      Filled(it) => {
+        return it.clone();
+      },
+      Bare => {
+        return[];
+      },
+    }
+  }
+  // Enum getter accessed via `this` (identity-subst path through Site C's
+  // getter branch). The Task/Mutex negative is TestT0629_EnumGetterViaThis-
+  // TaskError in sema_test.go; this pins the positive Arc runtime behavior.
+  outer_via_getter() Vector[T] {
+    return this.cloned;
+  }
+}
+
+test_enum_getter_arc() `test {
+  b := Box[Arc[int]].Filled([Arc[int](5), Arc[int](6)]);
+  v := b.cloned;
+  assert(v.len == 2, "enum getter arc len");
+}
+
+test_enum_method_arc() `test {
+  b := Box[Arc[int]].Filled([Arc[int](7)]);
+  v := b.copy_items();
+  assert(v.len == 1, "enum method arc len");
+}
+
+test_enum_getter_bare_arc() `test {
+  b := Box[Arc[int]].Bare;
+  v := b.cloned;
+  assert(v.len == 0, "enum getter bare arc len");
+}
+
+test_enum_getter_via_this_arc() `test {
+  b := Box[Arc[int]].Filled([Arc[int](3), Arc[int](4), Arc[int](5)]);
+  v := b.outer_via_getter();
+  assert(v.len == 3, "enum getter via this arc len");
+}

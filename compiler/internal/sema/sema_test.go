@@ -15885,6 +15885,367 @@ func TestT0627_MutuallyRecursiveMethodsTaskError(t *testing.T) {
 	expectError(t, errs, "Task[int] is a single-owner handle")
 }
 
+// === T0629: clone-req propagation through getter access and enum methods ===
+//
+// T0627 closed the method-to-method gap for *types.Named receivers, but the
+// parallel getter and enum paths still lacked GenericCallEdge recording:
+//   - Named getter via `this`        (checkMemberExpr *types.Named branch)
+//   - Named getter from concrete code (resolveInstanceMember getter branch)
+//   - Enum getter + method           (resolveEnumMemberInst — covers both the
+//                                      via-`this` *types.Enum auto-instantiate
+//                                      path and the concrete Instance path)
+// Each fix mirrors T0616/T0627: record an edge with CalleeMethod set to the
+// getter/method *types.Method so propagateCloneReqs forwards the callee's
+// clone reqs to the eventual concrete call site.
+
+// Case 1 — Named getter via `this` inside the generic body. `outer()` returns
+// `this.cloned`; the getter clones `this.data`. Task is move-only → reject at
+// the concrete call site.
+func TestT0629_NamedGetterViaThisTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			get cloned Vector[T] { return this.data.clone(); }
+			outer() Vector[T] { return this.cloned; }
+		}
+		worker() int { return 42; }
+		test_named_getter_this() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := w.outer();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Case 2 — Named getter from concrete code (outside the type body).
+func TestT0629_NamedGetterConcreteTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			get cloned Vector[T] { return this.data.clone(); }
+		}
+		worker() int { return 42; }
+		test_named_getter_concrete() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := w.cloned;
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Case 2 shape with Mutex — also a single-owner handle.
+func TestT0629_NamedGetterConcreteMutexError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			get cloned Vector[T] { return this.data.clone(); }
+		}
+		test_named_getter_mu() {
+			w := Wrapper[Mutex[int]](data: [Mutex[int](5)]);
+			v := w.cloned;
+		}
+	`)
+	expectError(t, errs, "Mutex[int] is a single-owner handle")
+}
+
+// Getter declared on a generic parent Base[T], accessed on a generic child
+// Wrapper[T] is Base[T] from concrete code — exercises the composeParentSubst
+// merge in the resolveInstanceMember getter branch (Site B).
+func TestT0629_NamedGetterInheritedTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Base[T] {
+			Vector[T] data;
+			get cloned Vector[T] { return this.data.clone(); }
+		}
+		type Wrapper[T] is Base[T] {}
+		worker() int { return 42; }
+		test_named_getter_inherited() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := w.cloned;
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Case 3 — generic enum method called from concrete code.
+func TestT0629_EnumMethodConcreteTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Container[T] {
+			Holding(Vector[T] data),
+			Empty,
+			copy_inner() Vector[T] {
+				match this {
+					Holding(d) => { return d.clone(); },
+					Empty => { return []; },
+				}
+			}
+		}
+		worker() int { return 42; }
+		test_enum_method_concrete() {
+			c := Container[Task[int]].Holding([go worker()]);
+			v := c.copy_inner();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Case 4 — generic enum method called via `this` (two-level chain inside the
+// enum body: outer_copy → this.inner_copy() → d.clone()).
+func TestT0629_EnumMethodViaThisTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Container[T] {
+			Holding(Vector[T] data),
+			Empty,
+			inner_copy() Vector[T] {
+				match this {
+					Holding(d) => { return d.clone(); },
+					Empty => { return []; },
+				}
+			}
+			outer_copy() Vector[T] { return this.inner_copy(); }
+		}
+		worker() int { return 42; }
+		test_enum_method_this() {
+			c := Container[Task[int]].Holding([go worker()]);
+			v := c.outer_copy();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Case 5 — generic enum getter called from concrete code.
+func TestT0629_EnumGetterConcreteTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Container[T] {
+			Holding(Vector[T] data),
+			Empty,
+			get cloned Vector[T] {
+				match this {
+					Holding(d) => { return d.clone(); },
+					Empty => { return []; },
+				}
+			}
+		}
+		worker() int { return 42; }
+		test_enum_getter_concrete() {
+			c := Container[Task[int]].Holding([go worker()]);
+			v := c.cloned;
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Case 5 shape with Mutex.
+func TestT0629_EnumGetterConcreteMutexError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Container[T] {
+			Holding(Vector[T] data),
+			Empty,
+			get cloned Vector[T] {
+				match this {
+					Holding(d) => { return d.clone(); },
+					Empty => { return []; },
+				}
+			}
+		}
+		test_enum_getter_mu() {
+			c := Container[Mutex[int]].Holding([Mutex[int](5)]);
+			v := c.cloned;
+		}
+	`)
+	expectError(t, errs, "Mutex[int] is a single-owner handle")
+}
+
+// --- Positive: Arc (refcounted, duplicable) and int must NOT be rejected ---
+
+func TestT0629_NamedGetterViaThisArcOK(t *testing.T) {
+	checkOK(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			get cloned Vector[T] { return this.data.clone(); }
+			outer() Vector[T] { return this.cloned; }
+		}
+		test_named_getter_this_arc() {
+			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			v := w.outer();
+		}
+	`)
+}
+
+func TestT0629_NamedGetterConcreteArcOK(t *testing.T) {
+	checkOK(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			get cloned Vector[T] { return this.data.clone(); }
+		}
+		test_named_getter_concrete_arc() {
+			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			v := w.cloned;
+		}
+	`)
+}
+
+func TestT0629_NamedGetterConcreteIntOK(t *testing.T) {
+	checkOK(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			get cloned Vector[T] { return this.data.clone(); }
+		}
+		test_named_getter_concrete_int() {
+			w := Wrapper[int](data: [1, 2, 3]);
+			v := w.cloned;
+		}
+	`)
+}
+
+func TestT0629_EnumMethodConcreteArcOK(t *testing.T) {
+	checkOK(t, `
+		enum Container[T] {
+			Holding(Vector[T] data),
+			Empty,
+			copy_inner() Vector[T] {
+				match this {
+					Holding(d) => { return d.clone(); },
+					Empty => { return []; },
+				}
+			}
+		}
+		test_enum_method_concrete_arc() {
+			c := Container[Arc[int]].Holding([Arc[int](7)]);
+			v := c.copy_inner();
+		}
+	`)
+}
+
+func TestT0629_EnumGetterConcreteArcOK(t *testing.T) {
+	checkOK(t, `
+		enum Container[T] {
+			Holding(Vector[T] data),
+			Empty,
+			get cloned Vector[T] {
+				match this {
+					Holding(d) => { return d.clone(); },
+					Empty => { return []; },
+				}
+			}
+		}
+		test_enum_getter_concrete_arc() {
+			c := Container[Arc[int]].Holding([Arc[int](7)]);
+			v := c.cloned;
+		}
+	`)
+}
+
+// --- T0629 coverage-audit gap fills (2026-05-16) ---
+//
+// The original T0629 suite left two paths in the changed code unexercised:
+//
+//  (1) Site A's parentSubst merge loop (expr.go ~1198-1200): an inherited
+//      generic-parent getter accessed *via `this`* inside a generic child's
+//      method body. TestT0629_NamedGetterInheritedTaskError exercises the
+//      inherited getter only from concrete code (Site B / composeParentSubst),
+//      never the Site A `this` path — coverage showed that loop body at count 0.
+//
+//  (2) Site C's getter branch via the *identity-subst* (`this`) path: only the
+//      enum *method* via-`this` chain was tested (TestT0629_EnumMethodViaThis-
+//      TaskError); the enum *getter* via-`this` path (checkMemberExpr's
+//      *types.Enum auto-instantiation → resolveEnumMemberInst getter branch
+//      with identity subst, propagated through an outer enum method) had no
+//      test.
+//
+// Note: the Named inherited-getter-via-`this` *runtime* counterpart crashes in
+// codegen today (T0637 — inherited getter/method from a generic parent is
+// undeclared during monomorphization; pre-existing, independent of T0629).
+// These are therefore sema-only (checkErrs/checkOK) until T0637 is fixed; the
+// e2e runtime test is tracked in T0637's test plan.
+
+// Gap (1) negative — getter on generic parent Base[T], accessed via `this`
+// inside generic child Wrapper[T]'s own method. Exercises Site A's identity-
+// subst build + parentSubst merge loop. Task is move-only → reject at the
+// concrete call site.
+func TestT0629_NamedGetterInheritedViaThisTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Base[T] {
+			Vector[T] data;
+			get cloned Vector[T] { return this.data.clone(); }
+		}
+		type Wrapper[T] is Base[T] {
+			outer() Vector[T] { return this.cloned; }
+		}
+		worker() int { return 42; }
+		test_named_getter_inherited_this() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := w.outer();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Gap (1) positive — same shape with Arc (refcounted, duplicable). Sema must
+// accept (no false rejection). Runtime is blocked on T0637.
+func TestT0629_NamedGetterInheritedViaThisArcOK(t *testing.T) {
+	checkOK(t, `
+		type Base[T] {
+			Vector[T] data;
+			get cloned Vector[T] { return this.data.clone(); }
+		}
+		type Wrapper[T] is Base[T] {
+			outer() Vector[T] { return this.cloned; }
+		}
+		test_named_getter_inherited_this_arc() {
+			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			v := w.outer();
+		}
+	`)
+}
+
+// Gap (2) negative — enum getter accessed via `this` through an outer enum
+// method, then called from concrete code. Exercises Site C's getter branch on
+// the via-`this` identity-subst path (auto-instantiation in checkMemberExpr's
+// *types.Enum branch), with propagation through the outer method's edge.
+func TestT0629_EnumGetterViaThisTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Container[T] {
+			Holding(Vector[T] data),
+			Empty,
+			get cloned Vector[T] {
+				match this {
+					Holding(d) => { return d.clone(); },
+					Empty => { return []; },
+				}
+			}
+			outer() Vector[T] { return this.cloned; }
+		}
+		worker() int { return 42; }
+		test_enum_getter_this() {
+			c := Container[Task[int]].Holding([go worker()]);
+			v := c.outer();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Gap (2) positive — same shape with Arc. Sema must accept.
+func TestT0629_EnumGetterViaThisArcOK(t *testing.T) {
+	checkOK(t, `
+		enum Container[T] {
+			Holding(Vector[T] data),
+			Empty,
+			get cloned Vector[T] {
+				match this {
+					Holding(d) => { return d.clone(); },
+					Empty => { return []; },
+				}
+			}
+			outer() Vector[T] { return this.cloned; }
+		}
+		test_enum_getter_this_arc() {
+			c := Container[Arc[int]].Holding([Arc[int](7)]);
+			v := c.outer();
+		}
+	`)
+}
+
 // === T0482/T0619: implicit structural-clone of a value transitively owning a
 // single-owner handle through a user-type field or enum variant ===
 //

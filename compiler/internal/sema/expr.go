@@ -1181,6 +1181,31 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 			if g.Sig().CanError() {
 				c.info.FailableExprs[e] = true
 			}
+			// T0629: getter access on `this` inside a generic type's body
+			// resolves to *types.Named (not Instance), bypassing the
+			// Instance-branch edge recording. Mirror the T0627 method-branch
+			// fix below: record an identity-subst edge so the getter body's
+			// clone reqs propagate to the caller; the eventual concrete call
+			// site (Instance branch / resolveInstanceMember) supplies real
+			// args and triggers validation in propagateCloneReqs. Getters
+			// cannot have their own TypeParams, so no method-TypeParam guard
+			// is needed.
+			if len(t.TypeParams()) > 0 {
+				subst := make(map[*types.TypeParam]types.Type, len(t.TypeParams())+len(parentSubst))
+				for _, tp := range t.TypeParams() {
+					subst[tp] = tp
+				}
+				for k, v := range parentSubst {
+					subst[k] = v
+				}
+				c.info.GenericCallEdges = append(c.info.GenericCallEdges, GenericCallEdge{
+					CallerFunc:   c.curFuncObj,
+					CallerMethod: c.curMethodObj,
+					CalleeMethod: g,
+					Subst:        subst,
+					CallPos:      e.Pos(),
+				})
+			}
 			return types.Substitute(g.Sig().Result(), parentSubst)
 		}
 		if m := t.LookupMethod(e.Field); m != nil {
@@ -1394,6 +1419,20 @@ func (c *Checker) resolveInstanceMember(expr ast.Expr, pos ast.Pos, inst *types.
 			if !hasOwnGetter(origin, name) {
 				subst = c.composeParentSubst(origin, inst.TypeArgs(), name, memberGetter)
 			}
+			// T0629: getter access on a parametric receiver from concrete
+			// code doesn't flow through inferAndInstantiateCall, so record
+			// the edge here using the owner's substitution (mirrors the
+			// T0616 method branch below). Getters cannot have their own
+			// TypeParams, so no method-TypeParam guard is needed.
+			if len(subst) > 0 {
+				c.info.GenericCallEdges = append(c.info.GenericCallEdges, GenericCallEdge{
+					CallerFunc:   c.curFuncObj,
+					CallerMethod: c.curMethodObj,
+					CalleeMethod: g,
+					Subst:        subst,
+					CallPos:      pos,
+				})
+			}
 			return types.Substitute(g.Sig().Result(), subst)
 		}
 		if m := origin.LookupMethod(name); m != nil {
@@ -1584,11 +1623,39 @@ func (c *Checker) resolveEnumMemberInst(pos ast.Pos, enum *types.Enum, name stri
 		if g.Deprecated() != "" {
 			c.warnf(pos, "use of deprecated getter '%s'", name)
 		}
+		// T0629: enum getter access. Both the via-`this` path (identity
+		// subst from checkMemberExpr's *types.Enum auto-instantiation) and
+		// the concrete-code path (concrete subst from resolveInstanceMember's
+		// enum-origin branch) converge here. Record an edge so the getter
+		// body's clone reqs propagate; the eventual concrete call site
+		// triggers validation in propagateCloneReqs. Getters cannot have
+		// their own TypeParams, so no method-TypeParam guard is needed.
+		if len(subst) > 0 {
+			c.info.GenericCallEdges = append(c.info.GenericCallEdges, GenericCallEdge{
+				CallerFunc:   c.curFuncObj,
+				CallerMethod: c.curMethodObj,
+				CalleeMethod: g,
+				Subst:        subst,
+				CallPos:      pos,
+			})
+		}
 		return types.Substitute(g.Sig().Result(), subst)
 	}
 	if m := enum.LookupMethod(name); m != nil {
 		if m.Deprecated() != "" {
 			c.warnf(pos, "use of deprecated method '%s'", name)
+		}
+		// T0629: enum non-generic method access — same path convergence as
+		// the getter branch above. Generic methods (`m[U]()`) flow through
+		// inferAndInstantiateCall, so guard on no method TypeParams.
+		if len(subst) > 0 && len(m.Sig().TypeParams()) == 0 {
+			c.info.GenericCallEdges = append(c.info.GenericCallEdges, GenericCallEdge{
+				CallerFunc:   c.curFuncObj,
+				CallerMethod: c.curMethodObj,
+				CalleeMethod: m,
+				Subst:        subst,
+				CallPos:      pos,
+			})
 		}
 		return types.Substitute(m.Sig(), subst)
 	}

@@ -1,0 +1,207 @@
+// T0605: Cloning a generic `clone TYPE (not enum) whose TypeArg is droppable
+// (map, vector, heap string, user type with drop) must deep-copy the field.
+// The synthesized type clone treats a TypeParam field as copy
+// (isCopyField(TypeParam)==true) so it emitted a bare shallow read — both
+// original and clone aliased the same heap value → double-free segfault.
+// The fix emits a synth-only AutoCloneExpr for TypeParam-containing fields,
+// lowered type-directed at mono codegen. Both `j` and `c` are kept live to
+// scope exit so both drop paths run (the double-free repro). 0 leaks required.
+//
+// Parallel to tests/e2e/enum_clone_generic_typearg_test.pr (T0551, enum case).
+type BoxT[T] `clone {
+  T val;
+}
+
+// Droppable TypeArg: map[K,V] — the original repro from the bug report.
+test_clone_boxt_map() `test {
+  map[string, string] src = map[string, string]();
+  src["a"] = "b";
+  src["c"] = "d";
+  BoxT[map[string, string]] j = BoxT[map[string, string]](val: src);
+  BoxT[map[string, string]] c = j.clone();
+  assert(c.val.len == 2, "clone has 2 entries");
+  assert(c.val.get_or("a", "") == "b", "clone a=b");
+  assert(j.val.len == 2, "original still has 2 entries");
+  assert(j.val.get_or("c", "") == "d", "original c=d");
+}
+
+// Droppable TypeArg: a HEAP string (concatenation, not a .rodata literal — the
+// literal/static bit-63 flag would otherwise mask the double-free).
+test_clone_boxt_heap_string() `test {
+  string s = "a" + "b";
+  BoxT[string] j = BoxT[string](val: s);
+  BoxT[string] c = j.clone();
+  assert(c.val == "ab", "clone string ab");
+  assert(j.val == "ab", "original string ab");
+}
+
+// TypeArg: string[] — vector of heap strings.
+test_clone_boxt_string_vec() `test {
+  string[] data = ["x", "y", "z"];
+  BoxT[string[]] j = BoxT[string[]](val: data);
+  BoxT[string[]] c = j.clone();
+  assert(c.val.len == 3, "clone vec len 3");
+  assert(c.val[0] == "x", "clone[0]");
+  assert(c.val[2] == "z", "clone[2]");
+  assert(j.val.len == 3, "original vec len 3");
+}
+
+// TypeArg: int[] — vector of copy scalars (vector itself is still heap).
+test_clone_boxt_int_vec() `test {
+  int[] nums = [1, 2, 3, 4];
+  BoxT[int[]] j = BoxT[int[]](val: nums);
+  BoxT[int[]] c = j.clone();
+  assert(c.val.len == 4, "clone len 4");
+  assert(c.val[3] == 4, "clone[3]==4");
+  assert(j.val.len == 4, "original len 4");
+}
+
+// TypeArg: int — pure copy. Behavior must be unchanged (bit copy).
+test_clone_boxt_int() `test {
+  BoxT[int] j = BoxT[int](val: 42);
+  BoxT[int] c = j.clone();
+  assert(c.val == 42, "clone int 42");
+  assert(j.val == 42, "original int 42");
+}
+
+// TypeArg: a user `clone type wrapping a droppable map field — exercises the
+// nested clone-of-clone path (cloneHeapElement prefers Bag.clone()).
+type Bag `clone {
+  map[string, int] counts;
+}
+
+test_clone_boxt_user_clone_type() `test {
+  map[string, int] m = map[string, int]();
+  m["apples"] = 3;
+  Bag b = Bag(counts: m);
+  BoxT[Bag] j = BoxT[Bag](val: b);
+  BoxT[Bag] c = j.clone();
+  assert(c.val.counts.len == 1, "clone bag len 1");
+  assert(c.val.counts.get_or("apples", 0) == 3, "clone apples==3");
+  assert(j.val.counts.len == 1, "original bag len 1");
+  assert(j.val.counts.get_or("apples", 0) == 3, "original apples==3");
+}
+
+// Mutating the clone must not affect the original (true deep copy).
+test_clone_boxt_map_independence() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v1";
+  BoxT[map[string, string]] j = BoxT[map[string, string]](val: src);
+  BoxT[map[string, string]] c = j.clone();
+  c.val["k"] = "mutated";
+  c.val["extra"] = "new";
+  assert(c.val.len == 2, "clone mutated to 2 entries");
+  assert(j.val.len == 1, "original unaffected: still 1 entry");
+  assert(j.val.get_or("k", "") == "v1", "original value untouched");
+}
+
+// Multiple TypeParam fields, both droppable. Each field must resolve its own
+// concrete type under the mono substitution.
+type Pair[A, B] `clone {
+  A first;
+  B second;
+}
+
+test_clone_pair_two_typeparams() `test {
+  string[] sv = ["a", "b"];
+  map[string, int] mm = map[string, int]();
+  mm["z"] = 3;
+  Pair[string[], map[string, int]] j = Pair[string[], map[string, int]](first: sv, second: mm);
+  Pair[string[], map[string, int]] c = j.clone();
+  assert(c.first.len == 2, "clone first len 2");
+  assert(c.second.get_or("z", 0) == 3, "clone second z==3");
+  assert(j.first.len == 2, "original first len 2");
+  assert(j.second.len == 1, "original second intact");
+}
+
+// A concrete non-copy field (heap string) ALONGSIDE a TypeParam field. The
+// concrete field keeps its existing synth behavior (explicit .clone()); only
+// the TypeParam field routes through AutoCloneExpr. Per-field scoping check.
+type Mixed[T] `clone {
+  string label;
+  T payload;
+}
+
+test_clone_mixed_concrete_and_typeparam() `test {
+  map[string, int] m = map[string, int]();
+  m["k"] = 7;
+  Mixed[map[string, int]] j = Mixed[map[string, int]](label: "ta" + "g", payload: m);
+  Mixed[map[string, int]] c = j.clone();
+  assert(c.label == "tag", "clone concrete-string field intact");
+  assert(c.payload.len == 1, "clone TypeParam-map field deep-copied");
+  assert(c.payload.get_or("k", 0) == 7, "clone map k==7");
+  assert(j.label == "tag", "original label intact");
+  assert(j.payload.len == 1, "original map independent and intact");
+}
+
+// Optional TypeParam field: BoxT2[T] `clone { T? val; }`. ContainsTypeParam is
+// true for Optional[T], so AutoCloneExpr is emitted; codegen lowers it with a
+// none-check + deep-clone-of-payload + rewrap.
+type BoxT2[T] `clone {
+  T? val;
+}
+
+// Optional-some: the clone's optional payload must be an independent deep copy
+// (the none-check + cloneByType(payload) + rewrap path). The inner payload
+// cannot be moved out of the field to peek (correct move-out-of-field rule;
+// deep independence of the map itself is already proven by the non-optional
+// tests above). Presence is preserved, and keeping both `j` and `c` live to
+// scope exit exercises the optional double-drop — the segfault/leak repro.
+test_clone_optional_typeparam_some() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v1";
+  BoxT2[map[string, string]] j = BoxT2[map[string, string]](val: src);
+  BoxT2[map[string, string]] c = j.clone();
+  assert(c.val is present, "clone optional payload present");
+  assert(j.val is present, "original optional payload present");
+}
+
+// Optional-none: clone must pass the none through (no payload deref) and both
+// must drop cleanly.
+test_clone_optional_typeparam_none() `test {
+  BoxT2[map[string, string]] j = BoxT2[map[string, string]](val: none);
+  BoxT2[map[string, string]] c = j.clone();
+  assert(c.val is absent, "clone optional payload absent");
+  assert(j.val is absent, "original optional payload absent");
+}
+
+// Optional of a COPY TypeParam (BoxT2[int] → `int? val`): cloneByType's
+// Optional branch must short-circuit to a whole-struct bit copy via
+// isAutoCloneBitCopy(elem) — no none-check, no payload deref. Distinct branch
+// from the heap-payload optional tests above.
+test_clone_optional_copy_typeparam() `test {
+  BoxT2[int] j = BoxT2[int](val: 7);
+  BoxT2[int] c = j.clone();
+  assert(c.val is present, "clone copy-optional present");
+  assert(j.val is present, "original copy-optional present");
+  BoxT2[int] n = BoxT2[int](val: none);
+  BoxT2[int] nc = n.clone();
+  assert(nc.val is absent, "clone copy-optional none");
+}
+
+// Nested optional TypeParam field: BoxT3[T] `clone { T?? val; }`. Exercises
+// cloneByType's Optional branch where the unwrapped element is itself an
+// Optional of a heap type — isAutoCloneBitCopy must recurse through Optional
+// so the inner map is deep-cloned (a non-recursing predicate short-circuits
+// to a bit copy and re-introduces the T0605 double-free one level deeper —
+// confirmed: pre-fix this segfaults).
+type BoxT3[T] `clone {
+  T?? val;
+}
+
+test_clone_nested_optional_some() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v1";
+  map[string, string]? inner = src;
+  BoxT3[map[string, string]] j = BoxT3[map[string, string]](val: inner);
+  BoxT3[map[string, string]] c = j.clone();
+  assert(c.val is present, "clone nested-optional outer present");
+  assert(j.val is present, "original nested-optional outer present");
+}
+
+test_clone_nested_optional_none() `test {
+  BoxT3[map[string, string]] j = BoxT3[map[string, string]](val: none);
+  BoxT3[map[string, string]] c = j.clone();
+  assert(c.val is absent, "clone nested-optional absent");
+  assert(j.val is absent, "original nested-optional absent");
+}

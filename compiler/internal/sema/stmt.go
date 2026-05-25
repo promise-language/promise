@@ -1341,6 +1341,8 @@ func isConstructorCallExpr(expr ast.Expr) bool {
 		return isConstructorCallExpr(e.Expr)
 	case *ast.OptionalUnwrapExpr:
 		return isConstructorCallExpr(e.Expr)
+	case *ast.AutoCloneExpr: // T0605: synth-only; inner is always this.field
+		return isConstructorCallExpr(e.Expr)
 	}
 	call, ok := expr.(*ast.CallExpr)
 	if !ok {

@@ -271,6 +271,9 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	case *ast.OptionalUnwrapExpr:
 		typ = c.checkOptionalUnwrapExpr(e)
 
+	case *ast.AutoCloneExpr:
+		typ = c.checkAutoCloneExpr(e)
+
 	case *ast.ErrorHandlerExpr:
 		typ = c.checkErrorHandlerExpr(e)
 
@@ -2225,6 +2228,15 @@ func (c *Checker) checkOptionalUnwrapExpr(e *ast.OptionalUnwrapExpr) types.Type 
 	}
 	c.errorf(e.Pos(), "unwrap (!) requires an optional expression")
 	return inner
+}
+
+// checkAutoCloneExpr type-checks the synth-only AutoCloneExpr intrinsic
+// (T0605). It is a transparent wrapper: the result type is exactly the inner
+// expression's type. At generic-check time the inner is a TypeParam-containing
+// type; codegen lowers it type-directed once the concrete substitution is
+// known. The inner type is recorded by checkExpr's recordType tail.
+func (c *Checker) checkAutoCloneExpr(e *ast.AutoCloneExpr) types.Type {
+	return c.checkExpr(e.Expr)
 }
 
 func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {

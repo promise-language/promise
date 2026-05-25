@@ -270,6 +270,21 @@ func (c *Checker) synthesizeCloneMethod(named *types.Named, _ *ast.TypeDecl) *as
 	for _, f := range fields {
 		fieldType := f.Type()
 
+		// T0605: fields whose declared type contains a TypeParam cannot be
+		// classified copy/non-copy at synth time (isCopyField(TypeParam) is
+		// optimistically true, which would emit a bare shallow read and alias
+		// the heap value → double-free at mono codegen). Defer the decision to
+		// codegen via the synth-only AutoCloneExpr intrinsic, which lowers
+		// type-directed once the concrete substitution is known. Concrete
+		// fields keep their exact existing behavior (zero regression surface).
+		if types.ContainsTypeParam(fieldType) {
+			args = append(args, &ast.Arg{
+				Name:  f.Name(),
+				Value: &ast.AutoCloneExpr{Expr: memberExpr(&ast.ThisExpr{}, f.Name())},
+			})
+			continue
+		}
+
 		// Check if the field type is Optional wrapping a non-copy type
 		if opt, isOpt := fieldType.(*types.Optional); isOpt && !isCopyField(opt.Elem()) {
 			// Generate:

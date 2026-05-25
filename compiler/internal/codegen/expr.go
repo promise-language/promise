@@ -166,6 +166,34 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 			c.trackHeapUserTypeResult(e, result)
 		}
 		return result
+	case *ast.AutoCloneExpr:
+		result := c.genAutoCloneExpr(e)
+		// T0605: the cloned value is a fresh owned heap allocation. Mirror the
+		// synth clone()-CallExpr result temp-tracking so the enclosing
+		// Self(...) constructor claims ownership (no leak; no double-drop with
+		// the owner's synth drop of the field).
+		if result != nil && result.Type() == irtypes.I8Ptr {
+			rt := c.info.Types[e]
+			if c.typeSubst != nil && rt != nil {
+				rt = types.Substitute(rt, c.typeSubst)
+			}
+			if c.selfSubst != nil && rt != nil {
+				rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+			}
+			named := extractNamed(rt)
+			if named == types.TypString {
+				c.trackStringTemp(result)
+			} else if named == types.TypVector {
+				if elemType, ok := types.AsVector(rt); ok {
+					c.trackVectorTempWithElemType(result, elemType)
+				} else {
+					c.trackVectorTemp(result)
+				}
+			}
+		} else {
+			c.trackHeapUserTypeResult(e, result)
+		}
+		return result
 	case *ast.OptionalUnwrapExpr:
 		result := c.genOptionalForceUnwrap(e.Expr)
 		// T0125: Track string temps from optional unwrap paths.
@@ -4406,6 +4434,8 @@ func isFreshEnumExpr(expr ast.Expr) bool {
 		// Unwrap of a call result (e.g., at(0)!) produces a fresh value.
 		// Unwrap of a variable (e.g., opt_var!) references existing data.
 		return isFreshEnumExpr(e.Expr)
+	case *ast.AutoCloneExpr:
+		return true // T0605: a deep clone is always a fresh owned value
 	default:
 		return false
 	}
@@ -6628,7 +6658,14 @@ func fieldTypeNeedsDrop(typ types.Type) bool {
 // and heap user types (not just strings).
 // B0237: The dup'd copy is owned by whoever consumes it (push, return via PHI, etc.).
 // No post-match cleanup — consumers manage the value's lifetime.
-func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtypes.Type, resolvedType types.Type) {
+// cloneResolvedValue produces a deep, owned copy of val given its fully
+// resolved (already type-substituted) type. It is the dispatch core shared by
+// dupMatchBinding (match destructure dup) and genAutoCloneExpr (T0605
+// synth-clone of TypeParam fields): string→dupString, vector→dupVector +
+// element clone loop, channel→dupChannel, enum-with-clone→cloneEnumValue,
+// else heap user type→cloneHeapElement (clone() then shallow dup fallback).
+// Callers are responsible for any alloca/drop-registration tail.
+func (c *Compiler) cloneResolvedValue(val value.Value, resolvedType types.Type) value.Value {
 	named := extractNamed(resolvedType)
 	var dupVal value.Value
 
@@ -6663,6 +6700,11 @@ func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtype
 		// like Map, Set), fall back to shallow dup (alloc + memcpy + field dup).
 		dupVal = c.cloneHeapElement(val, resolvedType, named)
 	}
+	return dupVal
+}
+
+func (c *Compiler) dupMatchBinding(name string, val value.Value, llvmType irtypes.Type, resolvedType types.Type) {
+	dupVal := c.cloneResolvedValue(val, resolvedType)
 
 	bindAlloca := c.createEntryAlloca(llvmType)
 	c.locals[name] = bindAlloca
@@ -6706,6 +6748,105 @@ func (c *Compiler) cloneEnumValue(val value.Value, resolvedType types.Type) (val
 	ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
 	result := c.block.NewCall(cloneFn, ptr)
 	return result, true
+}
+
+// isAutoCloneBitCopy reports whether a value of (already type-substituted)
+// type t can be deep-copied by a plain bit copy in the AutoClone path — i.e.
+// it owns no heap allocation that the copy would alias and double-free.
+// Mirrors the copy/value/primitive/structural predicate used throughout
+// stmt.go (e.g. trackHeapUserTypeResult): scalars/refs/fn-ptrs (non-named)
+// and value/copy/primitive-scalar/structural named types are bit copies;
+// string/vector/channel/enum/heap-user types are not (they fall through to
+// cloneResolvedValue). (T0605)
+func (c *Compiler) isAutoCloneBitCopy(t types.Type) bool {
+	// Optional[E] is a bit copy iff its payload is — recurse so a nested
+	// optional of a heap type (e.g. `T?? val` with T=Map) is NOT treated as a
+	// bit copy by cloneByType's Optional short-circuit (that would re-introduce
+	// the T0605 double-free one level deeper).
+	if opt, isOpt := t.(*types.Optional); isOpt {
+		return c.isAutoCloneBitCopy(opt.Elem())
+	}
+	named := extractNamed(t)
+	if named == nil {
+		// Non-named: scalars (int/float/bool/char), refs, function pointers,
+		// scalar tuples — bitwise copy is correct (no shared heap).
+		return true
+	}
+	return named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural()
+}
+
+// cloneByType produces a deep, owned copy of val given its fully resolved
+// (post-mono-substitution) type. Used by genAutoCloneExpr (T0605):
+//   - Optional[E] → none-check; on some, deep-clone the unwrapped concrete
+//     payload and rewrap; on none, pass the {i1,payload} struct through.
+//   - bit-copy types (copy/value/scalar/structural) → return val unchanged.
+//   - else (string/vector/channel/enum/heap-user) → cloneResolvedValue.
+func (c *Compiler) cloneByType(val value.Value, t types.Type) value.Value {
+	if val == nil || t == nil {
+		return val
+	}
+
+	if opt, isOpt := t.(*types.Optional); isOpt {
+		elem := opt.Elem()
+		// A bit-copy payload makes the whole {i1, payload} struct a bit copy.
+		if c.isAutoCloneBitCopy(elem) {
+			return val
+		}
+		optStruct, ok := val.Type().(*irtypes.StructType)
+		if !ok {
+			return val
+		}
+		present := c.block.NewExtractValue(val, 0)
+		entryBlock := c.block
+		someBlock := c.newBlock("autoclone.some")
+		mergeBlock := c.newBlock("autoclone.merge")
+		entryBlock.NewCondBr(present, someBlock, mergeBlock)
+
+		c.block = someBlock
+		payload := c.block.NewExtractValue(val, 1)
+		clonedPayload := c.cloneByType(payload, elem)
+		rewrapped := c.wrapOptional(clonedPayload, optStruct)
+		someEnd := c.block
+		someEnd.NewBr(mergeBlock)
+
+		c.block = mergeBlock
+		return c.block.NewPhi(
+			ir.NewIncoming(val, entryBlock),
+			ir.NewIncoming(rewrapped, someEnd),
+		)
+	}
+
+	// Bit copy is correct for copy/value/scalar/structural — no shared heap
+	// allocation, the field's drop (if any) is a no-op for these. This guard
+	// also keeps value/copy types away from cloneResolvedValue, whose
+	// dupHeapValue tail assumes a heap instance layout.
+	if c.isAutoCloneBitCopy(t) {
+		return val
+	}
+
+	// string / vector / channel / enum / heap user type — full deep clone.
+	return c.cloneResolvedValue(val, t)
+}
+
+// genAutoCloneExpr lowers the synth-only AutoCloneExpr intrinsic (T0605). The
+// inner is always `this.<field>` for a `clone-type field whose declared type
+// contains a TypeParam; the concrete type is known only here, after mono
+// substitution. The result is consumed by the enclosing Self(...) constructor
+// (the genExpr case applies the same result temp-tracking as the synth
+// clone()-CallExpr path so ownership transfers cleanly to the new field).
+func (c *Compiler) genAutoCloneExpr(e *ast.AutoCloneExpr) value.Value {
+	val := c.genExpr(e.Expr)
+	if val == nil {
+		return nil
+	}
+	t := c.info.Types[e.Expr]
+	if c.typeSubst != nil && t != nil {
+		t = types.Substitute(t, c.typeSubst)
+	}
+	if c.selfSubst != nil && t != nil {
+		t = types.SubstituteSelf(t, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	return c.cloneByType(val, t)
 }
 
 // --- If expressions ---
@@ -10881,6 +11022,8 @@ func collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca)
 		case *ast.ErrorPanicExpr:
 			walkExpr(e.Expr)
 		case *ast.OptionalUnwrapExpr:
+			walkExpr(e.Expr)
+		case *ast.AutoCloneExpr: // T0605
 			walkExpr(e.Expr)
 		case *ast.ErrorHandlerExpr:
 			walkExpr(e.Expr)

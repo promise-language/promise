@@ -35,6 +35,7 @@ const (
 	tagTupleLit           = 29
 	tagArrayLit           = 30
 	tagMapLit             = 31
+	tagAutoCloneExpr      = 32 // T0605: synth-only; never serialized (defensive)
 
 	// Statements (51-80)
 	tagBlock              = 51

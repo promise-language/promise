@@ -374,6 +374,8 @@ func (c *Checker) checkGoBlockSendable(e *ast.GoExpr) {
 			walkExpr(ex.Expr)
 		case *ast.OptionalUnwrapExpr:
 			walkExpr(ex.Expr)
+		case *ast.AutoCloneExpr: // T0605
+			walkExpr(ex.Expr)
 		case *ast.ErrorHandlerExpr:
 			walkExpr(ex.Expr)
 			walkBlock(ex.Body)

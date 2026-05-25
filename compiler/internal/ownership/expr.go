@@ -70,6 +70,11 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 	case *ast.OptionalUnwrapExpr:
 		c.checkExpr(e.Expr)
 
+	case *ast.AutoCloneExpr:
+		// T0605: synth-only deep-clone of `this.field` — a read/borrow, not a
+		// move. The original stays owned by the clone() receiver.
+		c.checkExpr(e.Expr)
+
 	case *ast.ErrorHandlerExpr:
 		c.checkExpr(e.Expr)
 		if e.Binding != "" && e.Binding != "_" {

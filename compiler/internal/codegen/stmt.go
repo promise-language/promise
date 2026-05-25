@@ -139,6 +139,8 @@ func (c *Compiler) isOwnedOptionalExpr(expr ast.Expr) bool {
 		return true // failable panic (?!) of a call/expression returns owned value
 	case *ast.OptionalUnwrapExpr:
 		return true // optional unwrap (!) of an expression returns owned value
+	case *ast.AutoCloneExpr:
+		return true // T0605: synth deep-clone returns a fresh owned value
 	case *ast.MemberExpr:
 		// Field access on a droppable type — parent's drop handles the field.
 		targetType := c.info.Types[e.Target]
@@ -4980,6 +4982,8 @@ func findInnerCallExpr(expr ast.Expr) *ast.CallExpr {
 		case *ast.ErrorPropagateExpr:
 			expr = e.Expr
 		case *ast.OptionalUnwrapExpr:
+			expr = e.Expr
+		case *ast.AutoCloneExpr: // T0605
 			expr = e.Expr
 		case *ast.ErrorHandlerExpr:
 			expr = e.Expr

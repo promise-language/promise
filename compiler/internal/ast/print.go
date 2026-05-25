@@ -331,6 +331,11 @@ func (p *printer) printExpr(e Expr) {
 		p.indent++
 		p.printExpr(n.Expr)
 		p.indent--
+	case *AutoCloneExpr:
+		p.line("AutoClone")
+		p.indent++
+		p.printExpr(n.Expr)
+		p.indent--
 	case *ErrorHandlerExpr:
 		p.line("ErrorHandler")
 	default:

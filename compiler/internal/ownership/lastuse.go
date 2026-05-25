@@ -334,6 +334,9 @@ func (a *lastUseAnalyzer) exprBackRefCapturesVar(expr ast.Expr, name string) boo
 	case *ast.OptionalUnwrapExpr:
 		return a.exprBackRefCapturesVar(e.Expr, name)
 
+	case *ast.AutoCloneExpr: // T0605
+		return a.exprBackRefCapturesVar(e.Expr, name)
+
 	case *ast.ErrorHandlerExpr:
 		return a.exprBackRefCapturesVar(e.Expr, name)
 
@@ -606,6 +609,9 @@ func (a *lastUseAnalyzer) exprReferencesVar(expr ast.Expr, name string) bool {
 		return a.exprReferencesVar(e.Expr, name)
 
 	case *ast.OptionalUnwrapExpr:
+		return a.exprReferencesVar(e.Expr, name)
+
+	case *ast.AutoCloneExpr: // T0605
 		return a.exprReferencesVar(e.Expr, name)
 
 	case *ast.ErrorHandlerExpr:

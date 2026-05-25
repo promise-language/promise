@@ -180,6 +180,11 @@ func (d *decoder) expr() ast.Expr {
 		d.setPosEnd(n)
 		n.Expr = d.expr()
 		return n
+	case tagAutoCloneExpr: // T0605: synth-only; never serialized (defensive)
+		n := &ast.AutoCloneExpr{}
+		d.setPosEnd(n)
+		n.Expr = d.expr()
+		return n
 	case tagErrorHandlerExpr:
 		n := &ast.ErrorHandlerExpr{}
 		d.setPosEnd(n)

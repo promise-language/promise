@@ -126,6 +126,18 @@ type OptionalUnwrapExpr struct {
 
 func (*OptionalUnwrapExpr) exprTag() {}
 
+// AutoCloneExpr is a synth-only intrinsic that produces an owned deep copy of
+// Expr. It is emitted by synthesizeCloneMethod for `clone-type fields whose
+// declared type contains a TypeParam, and is lowered type-directed at mono
+// codegen (copy → bit-copy, string/vector/channel/enum/heap-user → deep clone,
+// optional → none-check + recurse). It is never produced by the parser. (T0605)
+type AutoCloneExpr struct {
+	nodeBase
+	Expr Expr
+}
+
+func (*AutoCloneExpr) exprTag() {}
+
 // ErrorHandlerExpr represents an error handler: expr ? binding { body }
 // With optional type filter: expr ? binding is TypeName { body }
 // With optional else clause: expr ? binding is TypeName { body } else binding { body }

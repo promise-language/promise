@@ -12532,6 +12532,55 @@ func TestEnumCloneMixedConcreteAndTypeParamField(t *testing.T) {
 	}
 }
 
+// T0605: Cloning a generic `clone TYPE (not enum) whose TypeArg is droppable
+// (map[K,V]) must deep-copy the field. The synth body treats the TypeParam
+// field as copy (isCopyField(TypeParam)==true) so it emitted a bare shallow
+// member read — the constructor then stored the un-dup'd Map fat pointer →
+// both original and clone aliased the same heap value → double-free segfault.
+// The fix emits a synth-only AutoCloneExpr for TypeParam-containing fields,
+// lowered type-directed at mono codegen. Assert the mono clone body deep-
+// copies the Map payload (a Map[..].clone call — or, as a fallback, a
+// heapdup.copy block from dupHeapValue) rather than a bare shallow store.
+// Parallel to TestGenericEnumCloneDroppableTypeArg (T0551, enum case).
+func TestGenericTypeCloneDroppableTypeArg(t *testing.T) {
+	ir := generateIR(t, ""+
+		"type BoxT[T] `clone {\n"+
+		"  T val;\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, string] src = map[string, string]();\n"+
+		"  BoxT[map[string, string]] j = BoxT[map[string, string]](val: src);\n"+
+		"  BoxT[map[string, string]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawDeepCopy := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `BoxT[Map[string, string]].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if !inClone {
+			continue
+		}
+		// Deep copy = an explicit Map clone call, or the dupHeapValue static
+		// fallback (heapdup.copy block label).
+		if strings.Contains(line, `@"Map[string, string].clone"`) {
+			sawDeepCopy = true
+		}
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "heapdup.copy") && strings.HasSuffix(trimmed, ":") {
+			sawDeepCopy = true
+		}
+	}
+	if !sawDeepCopy {
+		t.Errorf("T0605: BoxT[Map[string, string]].clone() body must deep-copy the TypeParam `val` field (Map[..].clone or dupHeapValue), got a bare shallow alias")
+	}
+}
+
 // B0237/B0242: Match destructure of droppable enum dups string fields and
 // registers them for arm-scope cleanup with a drop flag. The drop flag is
 // cleared at move sites (PHI, push, etc.), so consumed bindings are not

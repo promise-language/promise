@@ -496,6 +496,9 @@ func hExpr(h hash.Hash, e ast.Expr) {
 	case *ast.OptionalUnwrapExpr:
 		wb(h, 20)
 		hExpr(h, ex.Expr)
+	case *ast.AutoCloneExpr: // T0605: distinct tag (synth clone body is hashed)
+		wb(h, 31)
+		hExpr(h, ex.Expr)
 	case *ast.ErrorHandlerExpr:
 		wb(h, 13)
 		hExpr(h, ex.Expr)

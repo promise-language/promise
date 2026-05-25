@@ -138,6 +138,10 @@ func (e *encoder) expr(x ast.Expr) {
 		e.u8(tagOptionalUnwrapExpr)
 		e.nodePos(n)
 		e.expr(n.Expr)
+	case *ast.AutoCloneExpr: // T0605: synth-only; never serialized (defensive)
+		e.u8(tagAutoCloneExpr)
+		e.nodePos(n)
+		e.expr(n.Expr)
 	case *ast.ErrorHandlerExpr:
 		e.u8(tagErrorHandlerExpr)
 		e.nodePos(n)

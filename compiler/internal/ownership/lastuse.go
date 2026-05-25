@@ -149,6 +149,10 @@ func (a *lastUseAnalyzer) analyzeBlock(block *ast.Block) {
 // Unsafe statements (conservative — might hold a reference):
 //   - VarDecl/AssignStmt where the stored value is NON-COPY (closure, user type,
 //     string, etc.) — the new variable might hold a pointer to the original's data
+//   - VarDecl/AssignStmt whose RHS contains a back-ref-carrier call on `name`
+//     (e.g. `n := helper(vec, m.lock())`) — the helper may have stored the guard
+//     in a longer-lived container, hiding the escape behind a copy-type return.
+//     T0564.
 //   - Control flow statements (if/while/for/select) — too complex, inner scope
 //     interactions could cause LLVM IR domination issues
 func (a *lastUseAnalyzer) isSafeForEarlyDrop(stmt ast.Stmt, name string) bool {
@@ -165,6 +169,12 @@ func (a *lastUseAnalyzer) isSafeForEarlyDrop(stmt ast.Stmt, name string) bool {
 		return true
 
 	case *ast.TypedVarDecl:
+		// T0564: RHS may contain a back-ref-carrier call (e.g. m.lock()) buried
+		// in a helper's argument list, with the helper returning a copy primitive
+		// that masks the captured guard.
+		if a.exprBackRefCapturesVar(s.Value, name) {
+			return false
+		}
 		// Safe only if the produced value is a copy type (can't hold a reference).
 		if s.Name == "_" {
 			return true
@@ -173,6 +183,10 @@ func (a *lastUseAnalyzer) isSafeForEarlyDrop(stmt ast.Stmt, name string) bool {
 		return typ != nil && isCopyType(typ) && !isStoredRefType(typ)
 
 	case *ast.InferredVarDecl:
+		// T0564: see TypedVarDecl above.
+		if a.exprBackRefCapturesVar(s.Value, name) {
+			return false
+		}
 		if s.Name == "_" {
 			return true
 		}
@@ -184,6 +198,12 @@ func (a *lastUseAnalyzer) isSafeForEarlyDrop(stmt ast.Stmt, name string) bool {
 		return false
 
 	case *ast.AssignStmt:
+		// T0564: RHS may contain a back-ref-carrier call (e.g. m.lock()) buried
+		// in a helper's argument list. Applies regardless of Op — compound
+		// assigns evaluate the RHS the same way as simple assigns.
+		if a.exprBackRefCapturesVar(s.Value, name) {
+			return false
+		}
 		if s.Op != ast.OpAssign {
 			// Compound assignment (+=, -=, etc.) doesn't store a new reference.
 			return true
@@ -244,7 +264,7 @@ func isBackRefCarrier(typ types.Type) bool {
 // Scope: only walks expression sub-trees. Block-as-expression sub-blocks of
 // IfExpr/MatchExpr/ErrorHandlerExpr/UnsafeExpr/LambdaExpr/GoExpr are NOT
 // traversed — a call inside `if cond { m.lock() } else { ... }` is not
-// currently detected. See T0564 for the related VarDecl/AssignStmt gap.
+// currently detected.
 func (a *lastUseAnalyzer) exprBackRefCapturesVar(expr ast.Expr, name string) bool {
 	if expr == nil {
 		return false

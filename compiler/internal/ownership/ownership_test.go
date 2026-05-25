@@ -2846,6 +2846,131 @@ func TestNLLEarlyDropNonGuardMethod(t *testing.T) {
 	}
 }
 
+func TestNLLNoEarlyDropMutexGuardInInferredVarDecl(t *testing.T) {
+	// T0564: VarDecl/AssignStmt RHS may carry a back-ref-carrier call inside
+	// a helper argument list. The helper's copy-type return value masks the
+	// captured guard from the existing top-level type check, so NLL would
+	// early-drop the parent Mutex before the container that owns the guard
+	// runs its drop. Suppress when the RHS contains a m.lock() on `m`.
+	_, info := checkOwnershipWithInfo(t, `
+		helper(int x, MutexGuard[int] g) int { return x; }
+		test() {
+			m := Mutex[int](42);
+			n := helper(1, m.lock());
+			int sentinel = 1;
+		}
+	`)
+	if hasEarlyDrop(info, "m") {
+		t.Error("should not early-drop 'm' when InferredVarDecl RHS captures m.lock() in a helper arg")
+	}
+}
+
+func TestNLLNoEarlyDropMutexGuardInTypedVarDecl(t *testing.T) {
+	// T0564: TypedVarDecl form of the same gap.
+	_, info := checkOwnershipWithInfo(t, `
+		helper(int x, MutexGuard[int] g) int { return x; }
+		test() {
+			m := Mutex[int](42);
+			int n = helper(1, m.lock());
+			int sentinel = 1;
+		}
+	`)
+	if hasEarlyDrop(info, "m") {
+		t.Error("should not early-drop 'm' when TypedVarDecl RHS captures m.lock() in a helper arg")
+	}
+}
+
+func TestNLLNoEarlyDropMutexGuardInAssignStmt(t *testing.T) {
+	// T0564: AssignStmt form of the same gap (OpAssign).
+	_, info := checkOwnershipWithInfo(t, `
+		helper(int x, MutexGuard[int] g) int { return x; }
+		test() {
+			m := Mutex[int](42);
+			int n = 0;
+			n = helper(1, m.lock());
+			int sentinel = 1;
+		}
+	`)
+	if hasEarlyDrop(info, "m") {
+		t.Error("should not early-drop 'm' when AssignStmt RHS captures m.lock() in a helper arg")
+	}
+}
+
+func TestNLLNoEarlyDropMutexGuardInCompoundAssign(t *testing.T) {
+	// T0564: compound assign (n += ...) must also run the back-ref check
+	// before returning true. Without the fix, the early `return true` for
+	// non-OpAssign skipped the check entirely.
+	_, info := checkOwnershipWithInfo(t, `
+		helper(int x, MutexGuard[int] g) int { return x; }
+		test() {
+			m := Mutex[int](42);
+			int n = 0;
+			n += helper(1, m.lock());
+			int sentinel = 1;
+		}
+	`)
+	if hasEarlyDrop(info, "m") {
+		t.Error("should not early-drop 'm' when compound-assign RHS captures m.lock() in a helper arg")
+	}
+}
+
+func TestNLLEarlyDropNonGuardArgInVarDecl(t *testing.T) {
+	// T0564 regression guard: the new check must only suppress when a back-ref
+	// carrier is actually involved. A helper that takes a string and returns
+	// an int must still allow early-drop of the string argument.
+	_, info := checkOwnershipWithInfo(t, `
+		str_len(string s) int { return 0; }
+		test() {
+			s := "hello" + "";
+			int n = str_len(s);
+			int sentinel = 1;
+		}
+	`)
+	if !hasEarlyDrop(info, "s") {
+		t.Error("expected early drop for 's' after VarDecl with copy result and no back-ref carrier")
+	}
+}
+
+func TestNLLEarlyDropNonGuardArgInAssignStmt(t *testing.T) {
+	// T0564 regression guard: AssignStmt with simple `=` Op, no back-ref
+	// carrier, and a copy-type RHS must still allow early drop. Verifies the
+	// new exprBackRefCapturesVar check at the top of the AssignStmt arm falls
+	// through to the existing copy-type logic when no carrier is present.
+	_, info := checkOwnershipWithInfo(t, `
+		str_len(string s) int { return 0; }
+		test() {
+			s := "hello" + "";
+			int n = 0;
+			n = str_len(s);
+			int sentinel = 1;
+		}
+	`)
+	if !hasEarlyDrop(info, "s") {
+		t.Error("expected early drop for 's' after AssignStmt with simple `=` Op and no back-ref carrier")
+	}
+}
+
+func TestNLLEarlyDropNonGuardArgInCompoundAssign(t *testing.T) {
+	// T0564 regression guard: compound-assign (n += ...) without a back-ref
+	// carrier must still allow early drop. Exercises the `s.Op != ast.OpAssign`
+	// early `return true` branch — reached only after the new back-ref check
+	// passes. Symmetric counterpart to TestNLLNoEarlyDropMutexGuardInCompoundAssign:
+	// that test confirms the back-ref check runs before the op-check; this one
+	// confirms the op-check still fires when no back-ref is present.
+	_, info := checkOwnershipWithInfo(t, `
+		str_len(string s) int { return 0; }
+		test() {
+			s := "hello" + "";
+			int n = 0;
+			n += str_len(s);
+			int sentinel = 1;
+		}
+	`)
+	if !hasEarlyDrop(info, "s") {
+		t.Error("expected early drop for 's' after compound-assign with no back-ref carrier")
+	}
+}
+
 // TestExprBackRefCapturesVar_AllWrappers exercises every AST wrapper branch in
 // exprBackRefCapturesVar by synthesizing AST trees with a `m.lock()` call (return
 // type MutexGuard[int]) nested inside each wrapper type. The function must

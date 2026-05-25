@@ -1,0 +1,32 @@
+// T0564: NLL early-drop must not run when a VarDecl/AssignStmt RHS contains a
+// back-ref-carrier method call (e.g. m.lock()) inside a function-call argument.
+// Without the fix, the outer call's copy-type return value masks the captured
+// guard, NLL early-drops the parent Mutex, and vec's element-drop dereferences
+// the freed Mutex -> use-after-free at scope exit.
+push_guard_count(Vector[MutexGuard[int]] ~vec, ~MutexGuard[int] g) int {
+  vec.push(g);
+  return vec.len;
+}
+
+test_push_via_helper_inferred() `test {
+  m := Mutex[int](42);
+  vec := Vector[MutexGuard[int]]();
+  n := push_guard_count(vec, m.lock());
+  assert(n == 1, "one guard");
+  assert(vec.len == 1, "vec len");
+}
+
+test_push_via_helper_typed() `test {
+  m := Mutex[int](7);
+  vec := Vector[MutexGuard[int]]();
+  int n = push_guard_count(vec, m.lock());
+  assert(n == 1, "one guard");
+}
+
+test_push_via_helper_reassign() `test {
+  m := Mutex[int](9);
+  vec := Vector[MutexGuard[int]]();
+  int n = 0;
+  n = push_guard_count(vec, m.lock());
+  assert(n == 1, "one guard");
+}

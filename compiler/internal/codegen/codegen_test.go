@@ -3708,6 +3708,123 @@ func TestT0636_NonGenericEnumGenericMethodMono(t *testing.T) {
 	assertContains(t, ir, `call i64 @"Tagged.pick[string]"`)
 }
 
+// TestT0639_GenericMethodViaThis verifies Defect B: a generic (method-type-
+// param) method invoked via `this` inside the owner's own method body is
+// emitted under the per-instance mono name (e.g. "NBox[int].inner[int]"),
+// matching the monoCtx-built call site — NOT the bare-owner name
+// ("NBox.inner[int]") which would be a different (mis-substituted) instance.
+// Symmetric across a generic Named type and a generic enum.
+func TestT0639_GenericMethodViaThis(t *testing.T) {
+	ir := generateIR(t, `
+		type NBox[T] {
+			Vector[T] d;
+			inner[U](U _x) int { return this.d.len; }
+			outer(&this) int { return this.inner[int](7); }
+		}
+		enum EBox[T] {
+			V(Vector[T] d),
+			N,
+			inner[U](U _x) int {
+				match this {
+					V(d) => { return d.len; },
+					N => { return 0; },
+				}
+			}
+			outer(&this) int { return this.inner[int](7); }
+		}
+		main() {
+			n := NBox[int](d: [1, 2, 3]);
+			x := n.outer();
+			e := EBox[int].V([1, 2]);
+			y := e.outer();
+		}
+	`)
+	assertContains(t, ir, `define i64 @"NBox[int].inner[int]"`)
+	assertContains(t, ir, `define i64 @"EBox[int].inner[int]"`)
+	assertContains(t, ir, `call i64 @"NBox[int].inner[int]"`)
+	assertContains(t, ir, `call i64 @"EBox[int].inner[int]"`)
+	// The bare-owner name must never appear (would be the wrong instance).
+	assertNotContains(t, ir, `@"NBox.inner[int]"`)
+	assertNotContains(t, ir, `@"EBox.inner[int]"`)
+}
+
+// TestT0639_GenericFnRefParamGenericInstance verifies Defect A (call-site mono
+// name unwraps `~`/`&` to the instance, not the bare owner) and Defect C (the
+// generic free-function call passes a `~` param by pointer, matching the
+// monomorphic callee's pointer ABI — no by-value/pointer mismatch segfault).
+func TestT0639_GenericFnRefParamGenericInstance(t *testing.T) {
+	ir := generateIR(t, `
+		type NBox[T] {
+			Vector[T] d;
+			transform[U](U _x) int { return this.d.len; }
+		}
+		proc_named[X](NBox[X]~ b) int { return b.transform[int](5); }
+		main() {
+			x := proc_named[int](NBox[int](d: [1, 2, 3]));
+		}
+	`)
+	// Defect A: receiver mangles to the instance, not the bare owner.
+	assertContains(t, ir, `define i64 @"NBox[int].transform[int]"`)
+	assertContains(t, ir, `call i64 @"NBox[int].transform[int]"`)
+	assertNotContains(t, ir, `@"NBox.transform[int]"`)
+	// Defect C: definition and call site agree on the pointer ABI for the `~`
+	// generic-instance param. The pre-fix bug passed it by value
+	// (`...({ i8*, i8* } %`), dereferenced as a pointer => segfault.
+	assertContains(t, ir, `define i64 @"proc_named[int]"({ i8*, i8* }* %`)
+	assertContains(t, ir, `call i64 @"proc_named[int]"({ i8*, i8* }* %`)
+	assertNotContains(t, ir, `call i64 @"proc_named[int]"({ i8*, i8* } %`)
+}
+
+// TestT0639_GenericFnRefParamStringVector verifies Defect C for the broader
+// param class the bug also covered: a generic function with `~` string and
+// `~` Vector params must pass them by pointer (matching the monomorphic
+// callee's `i8**` ABI), not by value.
+func TestT0639_GenericFnRefParamStringVector(t *testing.T) {
+	ir := generateIR(t, `
+		take_str[T](string~ s, T _x) int { return s.len; }
+		take_vec[T](Vector[T]~ v) int { return v.len; }
+		main() {
+			a := take_str[int]("hello", 1);
+			b := take_vec[int]([1, 2, 3, 4]);
+		}
+	`)
+	assertContains(t, ir, `define i64 @"take_str[int]"(i8** %`)
+	assertContains(t, ir, `call i64 @"take_str[int]"(i8** %`)
+	assertContains(t, ir, `define i64 @"take_vec[int]"(i8** %`)
+	assertContains(t, ir, `call i64 @"take_vec[int]"(i8** %`)
+}
+
+// TestT0639_RefWrappedGenericInstanceOperatorGetter verifies Defect A reaches
+// beyond plain method calls: `resolveTypeName` is the shared mangling helper
+// for ~20 dispatch sites. A `[]`-index and a parameterless-getter call on a
+// `~`/`&` generic-instance receiver must mangle to the instance name
+// ("GBox[int].[]" / "GBox[int].total"), NOT the bare generic owner
+// ("GBox.[]" / "GBox.total") which pre-fix panicked "undeclared method".
+func TestT0639_RefWrappedGenericInstanceOperatorGetter(t *testing.T) {
+	ir := generateIR(t, `
+		type GBox[T] {
+			Vector[T] d;
+			get total int { return this.d.len; }
+			[](int i) T { return this.d[i]; }
+		}
+		idx_mut(GBox[int] ~b) int { return b[1]; }
+		get_shared(GBox[int] &b) int { return b.total; }
+		main() {
+			x := idx_mut(GBox[int](d: [10, 20, 30]));
+			y := get_shared(GBox[int](d: [1, 2, 3, 4]));
+		}
+	`)
+	// `[]` operator dispatch on a `~` generic-instance receiver.
+	assertContains(t, ir, `define i64 @"GBox[int].[]"`)
+	assertContains(t, ir, `call i64 @"GBox[int].[]"`)
+	// Getter dispatch on a `&` generic-instance receiver.
+	assertContains(t, ir, `define i64 @"GBox[int].total"`)
+	assertContains(t, ir, `call i64 @"GBox[int].total"`)
+	// The bare generic-owner name must never appear for either caller.
+	assertNotContains(t, ir, `@"GBox.[]"`)
+	assertNotContains(t, ir, `@"GBox.total"`)
+}
+
 func TestGenericConstructorZeroInit(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] { T value; }

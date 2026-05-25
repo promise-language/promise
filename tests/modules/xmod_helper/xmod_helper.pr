@@ -10,3 +10,25 @@ double_vec[T](T[] items) T[] `public {
   }
   return result;
 }
+
+type HBox[T] `public {
+  Vector[T] d;
+  size(&this) int `public {
+    return this.d.len;
+  }
+}
+
+// T0639 Defect C: a module-level generic function taking a `~`/`&`
+// generic-instance (or `~string`) param must pass it by pointer, matching
+// the monomorphic callee's pointer ABI. Exercises genModuleGenericFuncCall +
+// genGenericCallArgs across a module boundary (the same-file generic-func
+// path is covered by tests/e2e/generic_method_parametric_receiver.pr).
+take_box_mut[X](HBox[X] ~b) int `public {
+  return b.size();
+}
+take_box_shared[X](HBox[X] &b) int `public {
+  return b.size();
+}
+take_owned_string[T](string ~s, T _x) int `public {
+  return s.len;
+}

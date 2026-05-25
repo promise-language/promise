@@ -1,0 +1,232 @@
+// T0639: generic (method-type-param) methods and plain methods on a receiver
+// whose type still contains a TypeParam. Three independent defects, all locked
+// here (Named + enum twins, droppable payloads => batch tests enforce 0 leaks):
+//
+//   Defect A — codegen `resolveTypeName` / the enum-dispatch switches did not
+//     unwrap `~`/`&` (MutRef/SharedRef) before mangling, so a method on a
+//     ref-wrapped generic-instance receiver mangled to the *bare* generic
+//     owner ("NBox.m") and panicked "undefined monomorphic method".
+//   Defect B — a generic method invoked via `this` inside the owner's own
+//     method body recorded a MethodInstance with OwnerInst == nil, so it was
+//     declared under the bare owner name while the call site built the
+//     per-instance name => "undefined monomorphic method NBox[int].inner[int]".
+//   Defect C — the generic free/module call paths passed `~`/`&` params by
+//     value while the monomorphic callee expects a pointer (ABI mismatch =>
+//     runtime segfault). Now they share the non-generic MutRef-aware arg path.
+type NBox[T] {
+  Vector[T] d;
+  // Defect B: generic method reached via `this` from a non-generic method.
+  inner[U](U _x) int {
+    return this.d.len;
+  }
+  // Plain (non-generic) method — exercises the broader non-generic-method-on-
+  // ref-wrapped-generic-instance gap (Defect A) and ref-receiver dispatch.
+  plain() int {
+    return this.d.len;
+  }
+  outer(&this) int {
+    return this.inner[int](7);
+  }
+}
+
+enum EBox[T] {
+  V(Vector[T] d),
+  N,
+  inner[U](U _x) int {
+    match this {
+      V(d) => {
+        return d.len;
+      },
+      N => {
+        return 0;
+      },
+    }
+  }
+  plain() int {
+    match this {
+      V(d) => {
+        return d.len;
+      },
+      N => {
+        return 0;
+      },
+    }
+  }
+  outer(&this) int {
+    return this.inner[int](7);
+  }
+}
+
+// Defect A + C: generic method forwarded through a *generic* function, on a
+// still-parametric `~` / `&` receiver (Named + enum).
+fwd_named_mut[X](NBox[X] ~b) int {
+  return b.inner[int](1);
+}
+fwd_named_shared[X](NBox[X] &b) int {
+  return b.inner[int](1);
+}
+fwd_enum_mut[X](EBox[X] ~b) int {
+  return b.inner[int](1);
+}
+fwd_enum_shared[X](EBox[X] &b) int {
+  return b.inner[int](1);
+}
+
+// Defect A (broader gap): generic AND non-generic method on a `~` / `&`
+// concrete generic-instance param inside a *non-generic* function.
+ng_named_mut(NBox[int] ~b) int {
+  return b.inner[int](1);
+}
+ng_named_shared(NBox[int] &b) int {
+  return b.plain();
+}
+ng_enum_mut(EBox[int] ~b) int {
+  return b.inner[int](1);
+}
+ng_enum_shared(EBox[int] &b) int {
+  return b.plain();
+}
+
+// By-value sanity — generic instance passed by value (already worked; guards
+// against the fix regressing the working path).
+bv_named[X](NBox[X] b) int {
+  return b.inner[int](1);
+}
+bv_enum[X](EBox[X] b) int {
+  return b.inner[int](1);
+}
+
+// Deepest case: still-parametric receiver forwarded through a generic fn whose
+// own type param is bound as the method type arg (cross-resolution + Defect A
+// + C combined). String payload sharpens leak coverage.
+type SBox[T] {
+  Vector[T] d;
+  echo_first[U](U fallback) U {
+    return fallback;
+  }
+}
+fwd_sbox_xres[X](SBox[X] ~b, X probe) X {
+  return b.echo_first[X](probe);
+}
+
+// Defect A is in `resolveTypeName`, a shared mangling helper used by ~20
+// dispatch sites (method calls, `[]`, `[:]`, getters/setters, format/new), not
+// just plain method calls. The tests above only exercise the method-call
+// caller; these lock the `[]`-index and getter callers on a `~`/`&`
+// generic-instance receiver — without the ref-unwrap they would mangle to the
+// bare generic owner ("GBox") and panic "undeclared method".
+type GBox[T] {
+  Vector[T] d;
+  get total int {
+    return this.d.len;
+  }
+  [](int i) T {
+    return this.d[i];
+  }
+}
+idx_named_mut(GBox[int] ~b) int {
+  return b[1];
+}
+idx_named_shared(GBox[int] &b) int {
+  return b[0];
+}
+getter_named_mut(GBox[int] ~b) int {
+  return b.total;
+}
+getter_named_shared(GBox[int] &b) int {
+  return b.total;
+}
+// Defect A on a still-parametric `~`/`&` receiver inside a *generic* fn:
+// `[]` and getter dispatch where the receiver type still contains a TypeParam.
+fwd_idx_generic[X](GBox[X] ~b, int i) X {
+  return b[i];
+}
+fwd_getter_generic[X](GBox[X] &b) int {
+  return b.total;
+}
+// String-payload getter variant — sharpens leak enforcement on the getter
+// ref-dispatch path. (A `[]`-returns-string variant is intentionally omitted:
+// a user-defined `[]` returning a heap type leaks via an unrelated
+// pre-existing bug, T0647 — tracked separately, NOT a T0639 regression.)
+getter_string(GBox[string] &b) int {
+  return b.total;
+}
+
+test_t0639_via_this_named() `test {
+  n := NBox[int](d: [1, 2, 3, 4]);
+  assert(n.outer() == 4, "named generic method via this");
+}
+
+test_t0639_via_this_enum() `test {
+  e := EBox[int].V([1, 2, 3, 4, 5]);
+  assert(e.outer() == 5, "enum generic method via this");
+  assert(EBox[int].N.outer() == 0, "enum N via this");
+}
+
+test_t0639_generic_fwd_named() `test {
+  assert(fwd_named_mut[int](NBox[int](d: [1, 2, 3])) == 3, "named ~ forward");
+  assert(fwd_named_shared[int](NBox[int](d: [1, 2])) == 2, "named & forward");
+}
+
+test_t0639_generic_fwd_enum() `test {
+  assert(fwd_enum_mut[int](EBox[int].V([1, 2, 3, 4])) == 4, "enum ~ forward");
+  assert(fwd_enum_shared[int](EBox[int].V([9])) == 1, "enum & forward");
+}
+
+test_t0639_nongeneric_concrete_named() `test {
+  assert(ng_named_mut(NBox[int](d: [1, 2, 3])) == 3, "named concrete ~");
+  assert(ng_named_shared(NBox[int](d: [1, 2])) == 2, "named concrete &");
+}
+
+test_t0639_nongeneric_concrete_enum() `test {
+  assert(ng_enum_mut(EBox[int].V([1, 2, 3, 4, 5, 6])) == 6, "enum concrete ~");
+  assert(ng_enum_shared(EBox[int].V([7, 8])) == 2, "enum concrete &");
+}
+
+test_t0639_byvalue_sanity() `test {
+  assert(bv_named[int](NBox[int](d: [1, 2, 3])) == 3, "named by value");
+  assert(bv_enum[int](EBox[int].V([1, 2, 3, 4])) == 4, "enum by value");
+}
+
+test_t0639_xres_still_parametric() `test {
+  // Generic fn forwarding a ~ still-parametric receiver, method type arg bound
+  // to the fn's own type param. String payloads => sharper leak enforcement.
+  assert(fwd_sbox_xres[string](SBox[string](d: ["a", "b"]), "hi") == "hi",
+  "sbox xres string");
+  assert(fwd_sbox_xres[int](SBox[int](d: [1, 2, 3]), 42) == 42,
+  "sbox xres int");
+}
+
+test_t0639_string_payload_no_leak() `test {
+  // Droppable string Vector payload through every fixed path — the batch
+  // harness fails the test on any leaked allocation.
+  s := NBox[string](d: ["x", "y", "z"]);
+  assert(s.outer() == 3, "string named via this");
+  assert(fwd_named_mut[string](NBox[string](d: ["p", "q"])) == 2, "string ~");
+  assert(bv_enum[string](EBox[string].V(["m"])) == 1, "string enum by value");
+}
+
+test_t0639_index_caller_on_ref() `test {
+  // Defect A broader reach: `[]` index dispatch on a ~/& generic-instance
+  // receiver (resolveTypeName caller other than method-call).
+  assert(idx_named_mut(GBox[int](d: [10, 20, 30])) == 20, "[] on ~");
+  assert(idx_named_shared(GBox[int](d: [42, 1])) == 42, "[] on &");
+  assert(fwd_idx_generic[int](GBox[int](d: [7, 8, 9]), 2) == 9, "[] generic fwd ~");
+}
+
+test_t0639_getter_caller_on_ref() `test {
+  // Defect A broader reach: parameterless-getter dispatch on a ~/&
+  // generic-instance receiver.
+  assert(getter_named_mut(GBox[int](d: [1, 2, 3, 4])) == 4, "getter on ~");
+  assert(getter_named_shared(GBox[int](d: [9])) == 1, "getter on &");
+  assert(fwd_getter_generic[int](GBox[int](d: [5, 6])) == 2, "getter generic fwd &");
+}
+
+test_t0639_getter_string_payload_no_leak() `test {
+  // String Vector payload through the getter ref-dispatch path — the batch
+  // harness fails the test on any leaked allocation.
+  g := GBox[string](d: ["x", "y", "z", "w"]);
+  assert(getter_string(g) == 4, "getter string payload on &");
+  assert(fwd_getter_generic[string](GBox[string](d: ["m", "n"])) == 2,
+  "getter string payload generic fwd &");
+}

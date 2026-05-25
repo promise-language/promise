@@ -1679,34 +1679,38 @@ func (c *Compiler) genModuleGetterCall(e *ast.MemberExpr, moduleName, propName s
 	return result
 }
 
-// applyMutRefArgOwnership performs the T0087/B0201 ownership transfer for
-// `~` parameters at a generic function/method call site: clears the caller's
-// drop flag and claims string/heap temps for each `~` arg. Mirrors the
-// non-generic logic in genCallArgsWithMutRef. params may be empty/short
-// (e.g., for unresolved callees) — extra args are skipped.
-func (c *Compiler) applyMutRefArgOwnership(argVals []value.Value, params []*types.Param, args []*ast.Arg) {
-	for i, arg := range args {
-		if i >= len(params) || i >= len(argVals) {
-			break
+// genGenericCallArgs evaluates arguments for a monomorphic generic free/module
+// function call. It substitutes the callee signature's params with the call's
+// type-arg subst so genCallArgsWithMutRef sees concrete param types — without
+// this, `~`/`&` generic-instance (and string/Vector) params are passed by
+// value while the monomorphic callee expects a pointer, producing an ABI
+// mismatch and a runtime segfault (T0639). When the signature can't be
+// resolved it falls back to the plain by-value loop (old behavior). This makes
+// the generic call paths use the same MutRef-aware arg generation +
+// T0087/B0201 ownership transfer as the non-generic path (genCallExpr).
+func (c *Compiler) genGenericCallArgs(args []*ast.Arg, sig *types.Signature, subst map[*types.TypeParam]types.Type) ([]value.Value, []types.Type, []variadicPassthrough) {
+	if sig == nil {
+		var argVals []value.Value
+		var argTypes []types.Type
+		for _, arg := range args {
+			argVals = append(argVals, c.genCallArgExpr(arg.Value))
+			c.dupStringFieldAccess = false
+			c.dupContainerFieldAccess = false
+			c.dupHeapUserFieldAccess = false // T0403
+			argTypes = append(argTypes, c.info.Types[arg.Value])
 		}
-		if params[i].Ref() != types.RefMut {
-			continue
-		}
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
-		c.claimStringTemp(argVals[i])
-		c.claimHeapTemp(argVals[i])
-		// T0522: Same Optional-field-dup claim as in genCallArgsWithMutRef.
-		if c.optionalStringDup != nil {
-			c.claimStringTemp(c.optionalStringDup)
-			c.optionalStringDup = nil
-		}
-		if c.optionalContainerDup != nil {
-			c.claimStringTemp(c.optionalContainerDup)
-			c.optionalContainerDup = nil
+		return argVals, argTypes, nil
+	}
+	params := sig.Params()
+	if len(subst) > 0 {
+		params = make([]*types.Param, len(sig.Params()))
+		for i, p := range sig.Params() {
+			np := types.NewParam(p.Name(), types.Substitute(p.Type(), subst), p.Ref())
+			np.SetVariadic(p.IsVariadic())
+			params[i] = np
 		}
 	}
+	return c.genCallArgsWithMutRef(args, params)
 }
 
 // genGenericFuncCall generates a call to a monomorphic generic function instance.
@@ -1736,57 +1740,34 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 		panic(fmt.Sprintf("codegen: undefined monomorphic function %q", mangledName))
 	}
 
-	// T0366: Pre-resolve signature so we can enable dup-on-field-access for `~` args.
-	var preSig *types.Signature
-	if callee := c.lookupFunc(ident.Name); callee != nil {
-		if sig, sOk := callee.Type().(*types.Signature); sOk {
-			preSig = sig
-		}
-	}
-	if preSig == nil {
-		if sig, sOk := c.info.Types[e.Callee].(*types.Signature); sOk {
-			preSig = sig
-		}
-	}
-
-	var argVals []value.Value
-	var argTypes []types.Type
-	for i, arg := range e.Args {
-		if preSig != nil && i < len(preSig.Params()) && preSig.Params()[i].Ref() == types.RefMut {
-			c.maybeEnableDupForMutRefArg(arg.Value, preSig.Params()[i].Type())
-		}
-		argVals = append(argVals, c.genCallArgExpr(arg.Value))
-		c.dupStringFieldAccess = false
-		c.dupContainerFieldAccess = false
-		c.dupHeapUserFieldAccess = false // T0403
-		argTypes = append(argTypes, c.info.Types[arg.Value])
-	}
-	origArgVals := argVals // T0331: save pre-coercion values for alias check
-
-	// Coerce arguments when crossing type boundaries.
-	// T0418: Build a per-call subst map from the explicit type-arg exprs so
-	// generic params like T? are resolved at the call site even when the
-	// outer mono context (c.typeSubst) doesn't cover the callee's TypeParams.
-	var sigParams []*types.Param
+	// T0639: Resolve the callee signature + per-call type-arg subst BEFORE arg
+	// generation so genGenericCallArgs can pass `~`/`&` params by pointer with
+	// concrete (substituted) param types. T0418: the subst also resolves
+	// generic params like T? at the call site even when the outer mono context
+	// (c.typeSubst) doesn't cover the callee's TypeParams.
 	var calleeSig *types.Signature
 	var callSubst map[*types.TypeParam]types.Type
 	if callee := c.lookupFunc(ident.Name); callee != nil {
-		if sig, ok := callee.Type().(*types.Signature); ok {
-			callSubst = c.buildCallTypeArgSubst(sig.TypeParams(), allTypeArgExprs)
-			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args, callSubst)
-			sigParams = sig.Params()
+		if sig, sOk := callee.Type().(*types.Signature); sOk {
 			calleeSig = sig
+			callSubst = c.buildCallTypeArgSubst(sig.TypeParams(), allTypeArgExprs)
 		}
 	}
-	if sigParams == nil {
-		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
-			sigParams = sig.Params()
+	if calleeSig == nil {
+		if sig, sOk := c.info.Types[e.Callee].(*types.Signature); sOk {
 			calleeSig = sig
 		}
 	}
 
-	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, calleeSig, callSubst)
+	origArgVals := argVals // T0331: save pre-coercion values for alias check
+
+	if calleeSig != nil {
+		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args, callSubst)
+	}
+
 	result := c.block.NewCall(fn, argVals...)
+	c.clearVariadicStaticFlags(variadicPTs)
 	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst) // T0331/T0418
 	return result
 }
@@ -1812,55 +1793,32 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 		panic(fmt.Sprintf("codegen: undefined inferred monomorphic function %q", mangledName))
 	}
 
-	// T0366: Pre-resolve signature so we can enable dup-on-field-access for `~` args.
-	var preSig *types.Signature
-	if callee := c.lookupFunc(inferred.FuncName); callee != nil {
-		if sig, sOk := callee.Type().(*types.Signature); sOk {
-			preSig = sig
-		}
-	}
-	if preSig == nil {
-		if sig, sOk := c.info.Types[e.Callee].(*types.Signature); sOk {
-			preSig = sig
-		}
-	}
-
-	var argVals []value.Value
-	var argTypes []types.Type
-	for i, arg := range e.Args {
-		if preSig != nil && i < len(preSig.Params()) && preSig.Params()[i].Ref() == types.RefMut {
-			c.maybeEnableDupForMutRefArg(arg.Value, preSig.Params()[i].Type())
-		}
-		argVals = append(argVals, c.genCallArgExpr(arg.Value))
-		c.dupStringFieldAccess = false
-		c.dupContainerFieldAccess = false
-		c.dupHeapUserFieldAccess = false // T0403
-		argTypes = append(argTypes, c.info.Types[arg.Value])
-	}
-	origArgVals := argVals // T0331: save pre-coercion values for alias check
-
-	// Coerce arguments when crossing type boundaries.
-	// T0418: Build a per-call subst map from the inferred type args.
-	var sigParams []*types.Param
+	// T0639: Resolve the callee signature + inferred-type-arg subst BEFORE arg
+	// generation so genGenericCallArgs passes `~`/`&` params by pointer with
+	// concrete (substituted) param types.
 	var calleeSig *types.Signature
 	var callSubst map[*types.TypeParam]types.Type
 	if callee := c.lookupFunc(inferred.FuncName); callee != nil {
-		if sig, ok := callee.Type().(*types.Signature); ok {
-			callSubst = c.buildInferredCallSubst(sig.TypeParams(), inferred.TypeArgs)
-			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args, callSubst)
-			sigParams = sig.Params()
+		if sig, sOk := callee.Type().(*types.Signature); sOk {
 			calleeSig = sig
+			callSubst = c.buildInferredCallSubst(sig.TypeParams(), inferred.TypeArgs)
 		}
 	}
-	if sigParams == nil {
-		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
-			sigParams = sig.Params()
+	if calleeSig == nil {
+		if sig, sOk := c.info.Types[e.Callee].(*types.Signature); sOk {
 			calleeSig = sig
 		}
 	}
 
-	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, calleeSig, callSubst)
+	origArgVals := argVals // T0331: save pre-coercion values for alias check
+
+	if calleeSig != nil {
+		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args, callSubst)
+	}
+
 	result := c.block.NewCall(fn, argVals...)
+	c.clearVariadicStaticFlags(variadicPTs)
 	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst) // T0331/T0418
 	return result
 }
@@ -1889,57 +1847,34 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 		panic(fmt.Sprintf("codegen: undefined monomorphic module function %q", mangledName))
 	}
 
-	// T0366: Pre-resolve signature so we can enable dup-on-field-access for `~` args.
-	var preSig *types.Signature
-	if callee := c.lookupFunc(funcName); callee != nil {
-		if sig, sOk := callee.Type().(*types.Signature); sOk {
-			preSig = sig
-		}
-	}
-	if preSig == nil {
-		if sig, sOk := c.info.Types[e.Callee].(*types.Signature); sOk {
-			preSig = sig
-		}
-	}
-
-	var argVals []value.Value
-	var argTypes []types.Type
-	for i, arg := range e.Args {
-		if preSig != nil && i < len(preSig.Params()) && preSig.Params()[i].Ref() == types.RefMut {
-			c.maybeEnableDupForMutRefArg(arg.Value, preSig.Params()[i].Type())
-		}
-		argVals = append(argVals, c.genCallArgExpr(arg.Value))
-		c.dupStringFieldAccess = false
-		c.dupContainerFieldAccess = false
-		c.dupHeapUserFieldAccess = false // T0403
-		argTypes = append(argTypes, c.info.Types[arg.Value])
-	}
-	origArgVals := argVals // T0331: save pre-coercion values for alias check
-
-	// Coerce arguments when crossing type boundaries.
-	// T0418: Build a per-call subst map from the explicit type-arg exprs.
-	var sigParams []*types.Param
+	// T0639: Resolve the callee signature + per-call type-arg subst BEFORE arg
+	// generation so genGenericCallArgs passes `~`/`&` params by pointer with
+	// concrete (substituted) param types.
 	var calleeSig *types.Signature
 	var callSubst map[*types.TypeParam]types.Type
 	if callee := c.lookupFunc(funcName); callee != nil {
-		if sig, ok := callee.Type().(*types.Signature); ok {
-			callSubst = c.buildCallTypeArgSubst(sig.TypeParams(), allTypeArgExprs)
-			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params(), e.Args, callSubst)
-			sigParams = sig.Params()
+		if sig, sOk := callee.Type().(*types.Signature); sOk {
 			calleeSig = sig
+			callSubst = c.buildCallTypeArgSubst(sig.TypeParams(), allTypeArgExprs)
 		}
 	}
 	// Module-qualified callee may not be visible via lookupFunc; fall back to
 	// the callee expression's type recorded by sema.
-	if sigParams == nil {
-		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
-			sigParams = sig.Params()
+	if calleeSig == nil {
+		if sig, sOk := c.info.Types[e.Callee].(*types.Signature); sOk {
 			calleeSig = sig
 		}
 	}
 
-	c.applyMutRefArgOwnership(argVals, sigParams, e.Args)
+	argVals, argTypes, variadicPTs := c.genGenericCallArgs(e.Args, calleeSig, callSubst)
+	origArgVals := argVals // T0331: save pre-coercion values for alias check
+
+	if calleeSig != nil {
+		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params(), e.Args, callSubst)
+	}
+
 	result := c.block.NewCall(fn, argVals...)
+	c.clearVariadicStaticFlags(variadicPTs)
 	c.emitReturnAliasCheckSubst(result, calleeSig, e.Args, origArgVals, callSubst) // T0331/T0418
 	return result
 }
@@ -2045,6 +1980,15 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 // temp alloca, bitcast to i8*, and enum-drop fresh temporaries after the call)
 // and the mono-name/subst construction of genGenericMethodCall.
 func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, member *ast.MemberExpr, targetType types.Type) value.Value {
+	// T0639: a ~/& generic-enum-instance receiver arrives wrapped in a
+	// MutRef/SharedRef; unwrap so the enum + monoName resolve instead of
+	// hitting the "cannot resolve enum" panic.
+	if ref, ok := targetType.(*types.MutRef); ok {
+		return c.genGenericEnumMethodCall(e, idx, member, ref.Elem())
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		return c.genGenericEnumMethodCall(e, idx, member, ref.Elem())
+	}
 	var enum *types.Enum
 	var enumName string
 	switch t := targetType.(type) {
@@ -4440,6 +4384,16 @@ func (c *Compiler) genEnumGetterAccess(e *ast.MemberExpr, targetType types.Type,
 // genEnumMethodCall generates a method call on an enum value.
 // Returns (result, true) if the target is an enum with a matching method, (nil, false) otherwise.
 func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, targetType types.Type) (value.Value, bool) {
+	// T0639: unwrap a ~/& generic-enum-instance receiver so the enum +
+	// monoName resolve (mirrors genGenericEnumMethodCall). Without this a
+	// non-generic enum method on a `~`/`&` generic-enum param falls through
+	// to the default branch and the call silently fails to dispatch.
+	if ref, ok := targetType.(*types.MutRef); ok {
+		return c.genEnumMethodCall(e, member, ref.Elem())
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		return c.genEnumMethodCall(e, member, ref.Elem())
+	}
 	var enum *types.Enum
 	var enumName string
 

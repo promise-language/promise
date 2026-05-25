@@ -56,6 +56,23 @@ func (c *Checker) selfType() types.Type {
 	return c.curType
 }
 
+// selfInstanceOf builds the self-instance of a generic origin (a *Named or
+// *Enum): an Instance whose type args are the origin's own *TypeParam pointers
+// (e.g. NBox[T], EBox[T]). It mirrors selfType() but works for an arbitrary
+// origin (not just c.curType) and supports enums. Returns nil if the origin is
+// not generic. Keying the args by the origin's own *TypeParam pointers lets a
+// later BuildSubstMap(origin.TypeParams(), inst.TypeArgs()) resolve it (T0639).
+func selfInstanceOf(origin types.Type, tparams []*types.TypeParam) *types.Instance {
+	if len(tparams) == 0 {
+		return nil
+	}
+	args := make([]types.Type, len(tparams))
+	for i, tp := range tparams {
+		args[i] = tp
+	}
+	return types.NewInstance(origin, args)
+}
+
 // Check performs semantic analysis on the given AST file.
 // It returns type information and any semantic errors found.
 func Check(file *ast.File) (*Info, []error) {

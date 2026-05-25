@@ -533,6 +533,15 @@ func (c *Checker) recordInferredCallInstance(e *ast.CallExpr, typeArgs []types.T
 				ownerInst = tt
 			}
 		}
+		// T0639: bare generic owner (e.g. generic method via `this` with an
+		// inferred type arg) — synthesize the owner's self-instance so the
+		// MethodInstance resolves to the per-instance mono name matching the
+		// call site instead of the bare owner name.
+		if owner != nil && ownerInst == nil && len(owner.TypeParams()) > 0 {
+			ownerInst = selfInstanceOf(owner, owner.TypeParams())
+		} else if ownerEnum != nil && ownerInst == nil && len(ownerEnum.TypeParams()) > 0 {
+			ownerInst = selfInstanceOf(ownerEnum, ownerEnum.TypeParams())
+		}
 		if owner != nil {
 			if method := owner.LookupMethod(callee.Field); method != nil {
 				defOwner := findMethodDefiner(owner, callee.Field)

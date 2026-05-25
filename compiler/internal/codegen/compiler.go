@@ -9066,6 +9066,22 @@ func (c *Compiler) lookupValueTypeRTTI(typ types.Type) *ir.Global {
 
 // resolveTypeName returns the mangled type name for method dispatch.
 func (c *Compiler) resolveTypeName(typ types.Type) string {
+	// T0639: unwrap a chain of ~/& refs so a ref-wrapped generic-instance
+	// receiver (e.g. NBox[int]~) mangles to the same name as the bare
+	// instance (NBox[int]), not the bare generic owner (NBox). For
+	// non-generic types the unwrapped Named yields the same name; for bare
+	// instances there is no ref to strip.
+	for {
+		if ref, ok := typ.(*types.MutRef); ok {
+			typ = ref.Elem()
+			continue
+		}
+		if ref, ok := typ.(*types.SharedRef); ok {
+			typ = ref.Elem()
+			continue
+		}
+		break
+	}
 	if inst, ok := typ.(*types.Instance); ok {
 		return monoName(inst)
 	}

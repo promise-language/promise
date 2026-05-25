@@ -2036,6 +2036,18 @@ func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature)
 				ownerInst = tt
 			}
 		}
+		// T0639: a generic method invoked on a bare generic owner — e.g. via
+		// `this` inside the owner's own method body — has ownerInst == nil, so
+		// the recorded MethodInstance would be declared/defined under the bare
+		// owner name (NBox.m[Arg]) while the call site builds the per-instance
+		// name (NBox[int].m[Arg]) via monoCtx. Synthesize the owner's
+		// self-instance so the unresolved→per-instance mono resolution produces
+		// the matching name.
+		if owner != nil && ownerInst == nil && len(owner.TypeParams()) > 0 {
+			ownerInst = selfInstanceOf(owner, owner.TypeParams())
+		} else if ownerEnum != nil && ownerInst == nil && len(ownerEnum.TypeParams()) > 0 {
+			ownerInst = selfInstanceOf(ownerEnum, ownerEnum.TypeParams())
+		}
 		if owner != nil {
 			if method := owner.LookupMethod(t.Field); method != nil {
 				// Find the type that actually declares the method (may be a parent).

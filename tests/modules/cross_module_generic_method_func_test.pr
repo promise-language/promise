@@ -2,6 +2,7 @@
 // Tests that monomorphization correctly resolves generic function instances
 // referenced from generic method bodies across module boundaries.
 use xmod_caller "./xmod_caller";
+use xmod_helper "./xmod_helper";
 
 test_cross_module_generic_method_int() `test {
   w := xmod_caller.Wrapper[string](_value: "hello");
@@ -23,4 +24,23 @@ test_cross_module_generic_method_vec() `test {
   assert(result[1] == 1, "doubled[1]");
   assert(result[2] == 2, "doubled[2]");
   assert(result[3] == 2, "doubled[3]");
+}
+
+// T0639 Defect C: calling a module-level generic function that takes a
+// `~`/`&` generic-instance (or `~string`) param. genModuleGenericFuncCall
+// must pass the arg by pointer matching the monomorphic callee — the pre-fix
+// bug passed it by value (ABI mismatch => runtime segfault). The string
+// payload also enforces 0 leaks on the by-pointer ownership transfer.
+test_t0639_module_generic_ref_param_int() `test {
+  assert(xmod_helper.take_box_mut[int](xmod_helper.HBox[int](d: [1, 2, 3])) == 3,
+  "module generic ~ box int");
+  assert(xmod_helper.take_box_shared[int](xmod_helper.HBox[int](d: [9, 8])) == 2,
+  "module generic & box int");
+}
+
+test_t0639_module_generic_ref_param_string() `test {
+  assert(xmod_helper.take_box_mut[string](xmod_helper.HBox[string](d: ["a", "b", "c"])) == 3,
+  "module generic ~ box string");
+  assert(xmod_helper.take_owned_string[int]("hello", 1) == 5,
+  "module generic ~string");
 }

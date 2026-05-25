@@ -1,0 +1,178 @@
+// T0620: Vector[T?] with droppable inner T — correct ownership transfer,
+// element drop on Vector.drop, dup-on-read, and drop-on-overwrite.
+//
+// Pre-fix, two gaps existed:
+//   Gap A: slice-literal init didn't clear source variable drop flags for
+//          Optional elements → shadow double-ownership.
+//   Gap B: emitVectorElementDropLoop early-returned for Optional elements
+//          → Vector.drop skipped inner payload drops → leaks.
+//
+// These tests cover the droppable-inner cases that were intentionally
+// excluded from optional_vector_index_assign_test.pr.
+type _BoxA620 {
+  int id;
+  drop(~this) {
+  }
+}
+
+// --- Gap B: push path (source drop flag cleared by move semantics) ---
+
+// Push transfers ownership. Without Gap B fix, inner payload leaks.
+test_push_string_optional_no_leak() `test {
+  string s = "he" + "llo";
+  string? os = s;
+  string?[] v = [];
+  v.push(os);
+  assert(v[0] is present, "pushed element present");
+}
+
+// --- Gap A + B: literal-init path ---
+
+// Literal init must transfer ownership (clear source drop flag) and
+// Vector.drop must walk Optional elements.
+test_literal_init_string_optional_no_leak() `test {
+  string sa = "al" + "pha";
+  string? oa = sa;
+  string sb = "be" + "ta";
+  string? ob = sb;
+  string?[] v = [oa, ob];
+  assert(v[0] is present, "slot 0 present");
+  assert(v[1] is present, "slot 1 present");
+}
+
+// --- Drop-on-overwrite: bare-T overwrites existing Optional[droppable] ---
+
+test_overwrite_string_optional() `test {
+  string sa = "ol" + "d";
+  string? oa = sa;
+  string?[] v = [oa];
+  v[0] = "ne" + "w";
+  assert(v[0] is present, "slot 0 present after overwrite");
+}
+
+// --- Dup-on-read: reading v[i] into a variable must deep-clone ---
+
+test_read_string_optional_then_overwrite() `test {
+  string sa = "or" + "ig";
+  string? oa = sa;
+  string?[] v = [oa];
+  string? x = v[0];
+  v[0] = "re" + "pl";
+  assert(x is present, "x still valid after overwrite");
+}
+
+// --- Heap user-type inner ---
+
+test_heap_user_optional_literal() `test {
+  _BoxA620? ba = _BoxA620(id: 1);
+  _BoxA620? bb = _BoxA620(id: 2);
+  _BoxA620?[] v = [ba, bb];
+  assert(v[0] is present, "slot 0 present");
+  assert(v[1] is present, "slot 1 present");
+}
+
+test_heap_user_optional_overwrite() `test {
+  _BoxA620? ba = _BoxA620(id: 1);
+  _BoxA620?[] v = [ba];
+  v[0] = _BoxA620(id: 2);
+  assert(v[0] is present, "slot 0 present after overwrite");
+}
+
+test_heap_user_optional_push() `test {
+  _BoxA620? ba = _BoxA620(id: 1);
+  _BoxA620?[] v = [];
+  v.push(ba);
+  assert(v[0] is present, "pushed element present");
+}
+
+// --- Nested vector inner ---
+
+test_nested_vector_optional_literal() `test {
+  int[] inner = [1, 2, 3];
+  int[]? oi = inner;
+  int[]?[] v = [oi];
+  assert(v[0] is present, "slot 0 present");
+}
+
+test_nested_vector_optional_overwrite() `test {
+  int[] inner1 = [1, 2];
+  int[]? oi = inner1;
+  int[]?[] v = [oi];
+  v[0] = [4, 5, 6];
+  assert(v[0] is present, "slot 0 present after overwrite");
+}
+
+// --- Channel inner ---
+
+test_channel_optional_push() `test {
+  channel[int]? ch = channel[int]();
+  channel[int]?[] v = [];
+  v.push(ch);
+  assert(v[0] is present, "pushed element present");
+}
+
+test_channel_optional_literal() `test {
+  channel[int]? ch = channel[int]();
+  channel[int]?[] v = [ch];
+  assert(v[0] is present, "slot 0 present");
+}
+
+// --- None → overwrite (regression guard for none slots) ---
+
+test_none_slot_then_bare_string() `test {
+  string? n = none;
+  string?[] v = [n];
+  v[0] = "he" + "llo";
+  assert(v[0] is present, "slot 0 present after none→string");
+}
+
+// --- Dup-on-read: non-string inner types (exercises dupOptionalVectorElem branches) ---
+
+// Heap user: exercises isDroppableHeapUserType branch
+test_read_heap_user_optional_then_overwrite() `test {
+  _BoxA620? ba = _BoxA620(id: 42);
+  _BoxA620?[] v = [ba];
+  _BoxA620? x = v[0];
+  v[0] = _BoxA620(id: 99);
+  assert(x is present, "x still valid after overwrite");
+}
+
+// Nested vector: exercises types.IsVector branch
+test_read_nested_vector_optional_then_overwrite() `test {
+  int[] inner = [1, 2, 3];
+  int[]? oi = inner;
+  int[]?[] v = [oi];
+  int[]? x = v[0];
+  v[0] = [7, 8, 9];
+  assert(x is present, "x still valid after overwrite");
+}
+
+// Channel: exercises types.IsChannel branch
+test_read_channel_optional_then_overwrite() `test {
+  channel[int]? ch = channel[int]();
+  channel[int]?[] v = [ch];
+  channel[int]? x = v[0];
+  v[0] = channel[int]();
+  assert(x is present, "x still valid after overwrite");
+}
+
+// Arc: exercises types.IsArc branch
+test_read_arc_optional_then_overwrite() `test {
+  Arc[int]? a = Arc[int](42);
+  Arc[int]?[] v = [a];
+  Arc[int]? x = v[0];
+  v[0] = Arc[int](99);
+  assert(x is present, "x still valid after overwrite");
+}
+
+// --- Multiple overwrites (stress drop-on-overwrite path) ---
+
+test_multiple_overwrites_string() `test {
+  string sa = "fi" + "rst";
+  string? oa = sa;
+  string?[] v = [oa];
+  v[0] = "se" + "cond";
+  v[0] = "th" + "ird";
+  v[0] = "fo" + "urth";
+  assert(v[0] is present, "slot 0 present after multiple overwrites");
+}

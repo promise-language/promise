@@ -2257,6 +2257,76 @@ func (c *Compiler) dupChannel(ptr value.Value) value.Value {
 	)
 }
 
+// dupOptionalVectorElem duplicates the inner value of an Optional loaded from a
+// vector element. Branches on has-value: if present, extracts the inner value,
+// deep-dups it based on type, and rebuilds the Optional; if absent, passes
+// through. No temp tracking — the variable's Optional drop binding owns cleanup.
+// T0620: Prevents double-free between variable's Optional drop and vector's
+// element drop loop (enabled by Gap B fix).
+func (c *Compiler) dupOptionalVectorElem(optVal value.Value, opt *types.Optional, innerElem types.Type) value.Value {
+	optLLVM := optVal.Type()
+
+	hasVal := c.block.NewExtractValue(optVal, 0)
+	dupBlock := c.newBlock("optdup.dup")
+	skipBlock := c.newBlock("optdup.skip")
+	mergeBlock := c.newBlock("optdup.merge")
+	c.block.NewCondBr(hasVal, dupBlock, skipBlock)
+
+	// Absent path: use original value as-is
+	c.block = skipBlock
+	skipBlock.NewBr(mergeBlock)
+
+	// Present path: extract inner, dup, rebuild Optional
+	c.block = dupBlock
+	innerVal := c.block.NewExtractValue(optVal, 1)
+
+	var dupedInner value.Value
+	named := extractNamed(innerElem)
+	switch {
+	case named == types.TypString:
+		dupedInner = c.dupString(innerVal)
+	case types.IsVector(innerElem):
+		vecElem, _ := types.AsVector(innerElem)
+		innerLLVM := c.resolveType(vecElem)
+		innerSize := int64(c.typeSize(innerLLVM))
+		dupedInner = c.dupVector(innerVal, innerSize)
+		c.emitVectorElementCloneLoop(dupedInner, vecElem)
+	case named == types.TypVector:
+		dupedInner = c.dupVector(innerVal, 0)
+	case types.IsChannel(innerElem) || named == types.TypChannel:
+		dupedInner = c.dupChannel(innerVal)
+	case types.IsArc(innerElem):
+		dupedInner = c.dupArc(innerVal)
+	case types.IsWeak(innerElem):
+		weakElem, _ := types.AsWeak(innerElem)
+		dupedInner = c.dupWeak(innerVal, weakElem)
+	case isDroppableHeapUserType(innerElem) || isHeapUserNoDropPalFree(innerElem):
+		if namedInner := extractNamed(innerElem); namedInner != nil {
+			dupedInner = c.cloneHeapElement(innerVal, innerElem, namedInner)
+		}
+	default:
+		if tup, ok := innerElem.(*types.Tuple); ok {
+			dupedInner = c.dupTupleValue(innerVal, tup)
+		}
+	}
+
+	if dupedInner == nil {
+		dupedInner = innerVal
+	}
+
+	// Rebuild Optional: {i1 true, T dupedInner}
+	result := c.block.NewInsertValue(constant.NewUndef(optLLVM), constant.NewInt(irtypes.I1, 1), 0)
+	result = c.block.NewInsertValue(result, dupedInner, 1)
+	exitDupBlock := c.block
+	exitDupBlock.NewBr(mergeBlock)
+
+	c.block = mergeBlock
+	return c.block.NewPhi(
+		ir.NewIncoming(optVal, skipBlock),
+		ir.NewIncoming(result, exitDupBlock),
+	)
+}
+
 // getOrCreateArcDrop lazily creates a per-element-type drop function for Arc[T].
 // T0155: Arc[T] atomic reference counting.
 // The drop function atomically decrements the refcount. When it reaches zero,

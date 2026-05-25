@@ -3638,7 +3638,7 @@ func (c *Compiler) emitVectorElementDropLoop(vecPtr value.Value, elemType types.
 	// owner of user-type instances — constructors transfer ownership to push, and
 	// sort temps clear their drop flags when moved back into the vector.
 	if extractNamed(elemType) != types.TypString {
-		if !c.vecElemNeedsEnumDrop(elemType) && !c.vecElemNeedsUserTypeDrop(elemType) && !c.tupleNeedsDrop(elemType) {
+		if !c.vecElemNeedsEnumDrop(elemType) && !c.vecElemNeedsUserTypeDrop(elemType) && !c.tupleNeedsDrop(elemType) && !c.vecElemNeedsOptionalDrop(elemType) {
 			return
 		}
 	}
@@ -3984,6 +3984,22 @@ func (c *Compiler) vecElemNeedsUserTypeDrop(elemType types.Type) bool {
 		return true
 	}
 	return false
+}
+
+// vecElemNeedsOptionalDrop returns true if a vector element type is Optional[T]
+// where T is a droppable type. Enables emitVectorElementDropLoop to walk Optional
+// elements and drop their inner payloads via emitOptionalValueDrop.
+// T0620: Closes Gap B — without this, Vector[T?] drop skips inner payload drops.
+func (c *Compiler) vecElemNeedsOptionalDrop(elemType types.Type) bool {
+	opt, ok := elemType.(*types.Optional)
+	if !ok {
+		return false
+	}
+	inner := opt.Elem()
+	if c.typeSubst != nil {
+		inner = types.Substitute(inner, c.typeSubst)
+	}
+	return c.typeNeedsFieldDrop(inner)
 }
 
 // arrayFieldNeedsDrop returns true if a fixed-size array type has a droppable
@@ -5709,17 +5725,6 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// own dispatch (stmt.go:8410-8421). For arrays/vectors
 			// c.info.Types[target] is the element type (sema checkIndexExpr
 			// returns the [] return type), i.e. directly the slot type.
-			//
-			// Note (T0615 limitation, tracked as T0620): for Vector[T?] with
-			// droppable T, the current ownership model has slice-literal init
-			// leave the source variable's drop flag set (the source remains the
-			// de-facto owner of the inner payload, and emitVectorElementDropLoop
-			// early-returns for Optional elements). Drop-on-overwrite is therefore
-			// NOT emitted in genVectorIndexAssign for Optional elements — doing
-			// so would double-free against the source's scope-exit drop. The
-			// wrap below only fixes the codegen panic; bare-T overwrite of an
-			// already-present Optional[droppable] slot in a vector still leaks
-			// the previous payload pending the T0620 fix.
 			_, isArr := idxTargetType.(*types.Array)
 			_, isVec := types.AsVector(idxTargetType)
 			if isArr || isVec {
@@ -8716,15 +8721,14 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 			// branch walks each element via ExtractValue + recursive drop.
 			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 			c.emitVariantFieldDrop(oldVal, elemType)
+		} else if c.vecElemNeedsOptionalDrop(elemType) {
+			// T0620: Drop old Optional[droppable] element before overwriting.
+			// Safe because: Gap A (genArrayLit clearDropFlag) ensures the vector
+			// is the sole owner, and dup-on-read (genVectorIndex) ensures any
+			// local variable that read via v[i] holds an independent copy.
+			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
+			c.emitVariantFieldDrop(oldVal, elemType)
 		}
-		// T0615/T0620: Drop-on-overwrite for Optional[droppable] elements is NOT
-		// added here because Vector[T?] currently relies on an implicit shadow-
-		// owner invariant — slice-literal init does not clear source-variable
-		// drop flags for Optional payloads (Gap A), and emitVectorElementDropLoop
-		// early-returns for Optional elements (Gap B), so the source ident keeps
-		// owning the inner payload. Dropping here would double-free against the
-		// source's scope-exit drop. Tracked as T0620; this branch should be re-
-		// added once T0620's Gaps A and B are closed.
 		c.block.NewStore(val, elemPtr)
 		return
 	}

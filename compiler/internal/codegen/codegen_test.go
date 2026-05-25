@@ -21594,12 +21594,11 @@ func TestVectorLitMoveFromVarClearsDropFlag(t *testing.T) {
 	assertContains(t, ir, "store i1 false, i1* %b0.dropflag")
 }
 
-// T0610: regression guard — the drop-flag clear must be type-gated to exactly
-// the set emitVectorElementDropLoop walks. Optional[heap-user] elements are
-// stored aliased but Vector.drop does NOT recurse into them; only the source
-// variable's bindingDropOptional frees them. Clearing the flag here would
-// orphan the allocation → leak. So `_Box?[] v = [a]` must NOT clear %a.dropflag.
-func TestVectorLitMoveFromVarOptionalHeapNotCleared(t *testing.T) {
+// T0620: Optional[heap-user] moved from variable into Vector[T?] literal must
+// clear the source's drop flag — the vector now owns the inner payload via
+// emitVectorElementDropLoop's Optional branch. Pre-T0620, this was NOT cleared
+// (T0610 regression guard); now it IS cleared because Gap A is fixed.
+func TestVectorLitMoveFromVarOptionalHeapClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `
 		type _Box { string label; drop(~this) {} }
 		main() {
@@ -21607,12 +21606,99 @@ func TestVectorLitMoveFromVarOptionalHeapNotCleared(t *testing.T) {
 			_Box?[] v = [a];
 		}
 	`)
-	// The Optional local has a drop flag (so "not cleared" is a real signal).
 	assertContains(t, ir, "%a.dropflag = alloca i1")
-	// ...but the vector-literal path must NOT clear it (type-gate excludes
-	// Optional — extractNamed does not unwrap it, and it is not a droppable
-	// enum / heap-user / tuple per Vector.drop's element walk).
-	assertNotContains(t, ir, "store i1 false, i1* %a.dropflag")
+	// T0620: Gap A fix — vecElemNeedsOptionalDrop now matches, so the drop flag
+	// is cleared, transferring ownership to the vector.
+	assertContains(t, ir, "store i1 false, i1* %a.dropflag")
+}
+
+// T0620: Gap B fix — Vector[string?] drop must enter the element drop loop
+// and emit the Optional drop branch (optfield.drop block). Pre-T0620, the
+// emitVectorElementDropLoop guard early-returned for Optional elements.
+func TestVectorOptionalStringElementDropLoop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? a = "hello";
+			string?[] v = [a];
+		}
+	`)
+	// The element drop loop body enters emitVariantFieldDrop → emitOptionalValueDrop,
+	// which creates an "optfield.drop" block for the has-value branch.
+	assertContains(t, ir, "optfield.drop")
+	// The drop loop itself is emitted (vecdrop.head/body/done blocks).
+	assertContains(t, ir, "vecdrop.head")
+}
+
+// T0620: Drop-on-overwrite for Vector[string?] index assign — must emit
+// emitVariantFieldDrop on the old element before storing the new one.
+func TestVectorOptionalStringIndexAssignDropsOld(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? a = "old";
+			string?[] v = [a];
+			v[0] = "new";
+		}
+	`)
+	// The overwrite path loads the old element, drops it via emitVariantFieldDrop
+	// (Optional branch → optfield.drop), then stores the new value.
+	assertContains(t, ir, "optfield.drop")
+}
+
+// T0620: Dup-on-read for Vector[T?] exercises dupOptionalVectorElem branches.
+// Reading v[i] into a variable must deep-dup the Optional inner so both
+// the variable and the vector own independent copies.
+func TestVectorOptionalDupOnReadBranches(t *testing.T) {
+	// String branch — dupOptionalVectorElem → dupString
+	ir := generateIR(t, `
+		main() {
+			string? a = "x";
+			string?[] v = [a];
+			string? x = v[0];
+		}
+	`)
+	assertContains(t, ir, "optdup.dup")
+	assertContains(t, ir, "optdup.merge")
+
+	// Heap user branch — dupOptionalVectorElem → cloneHeapElement
+	ir = generateIR(t, `
+		type _B620 { string s; drop(~this) {} }
+		main() {
+			_B620? b = _B620(s: "hi");
+			_B620?[] v = [b];
+			_B620? x = v[0];
+		}
+	`)
+	assertContains(t, ir, "optdup.dup")
+
+	// Vector branch — dupOptionalVectorElem → dupVector
+	ir = generateIR(t, `
+		main() {
+			int[]? a = [1, 2];
+			int[]?[] v = [a];
+			int[]? x = v[0];
+		}
+	`)
+	assertContains(t, ir, "optdup.dup")
+
+	// Channel branch — dupOptionalVectorElem → dupChannel
+	ir = generateIR(t, `
+		main() {
+			channel[int]? ch = channel[int]();
+			channel[int]?[] v = [ch];
+			channel[int]? x = v[0];
+		}
+	`)
+	assertContains(t, ir, "optdup.dup")
+
+	// Arc branch — dupOptionalVectorElem → dupArc
+	ir = generateIR(t, `
+		main() {
+			Arc[int]? a = Arc[int](1);
+			Arc[int]?[] v = [a];
+			Arc[int]? x = v[0];
+		}
+	`)
+	assertContains(t, ir, "optdup.dup")
 }
 
 // T0610: a droppable tuple bound to a *variable* and moved into a vector

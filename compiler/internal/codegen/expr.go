@@ -7648,7 +7648,8 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 				if extractNamed(elem) == types.TypString ||
 					c.vecElemNeedsEnumDrop(elem) ||
 					c.vecElemNeedsUserTypeDrop(elem) ||
-					c.tupleNeedsDrop(elem) {
+					c.tupleNeedsDrop(elem) ||
+					c.vecElemNeedsOptionalDrop(elem) {
 					c.clearDropFlag(ident.Name)
 				}
 			}
@@ -8558,6 +8559,48 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 			dup := c.dupWeak(val, resolvedWeakElem)
 			c.trackTempWithDrop(dup, c.getOrCreateWeakDrop(resolvedWeakElem))
 			return dup
+		}
+	}
+
+	// T0620: Dup-on-read for Vector[T?] where T is droppable. The var-decl path
+	// sets dup flags for Optional[string/Vector/Channel/Arc/Weak/heap-user/tuple]
+	// (stmt.go:726-794), but the bare-type branches above don't match Optional
+	// element types. When we detect an Optional with droppable inner and a matching
+	// flag, consume the flag and deep-dup the inner value so the variable owns an
+	// independent copy — preventing double-free between the variable's Optional
+	// drop binding and the vector's element drop loop (now enabled by Gap B fix).
+	if opt, ok := elemType.(*types.Optional); ok && c.tempTrackingEnabled {
+		innerElem := opt.Elem()
+		if c.typeSubst != nil {
+			innerElem = types.Substitute(innerElem, c.typeSubst)
+		}
+		if c.typeNeedsFieldDrop(innerElem) {
+			flagConsumed := false
+			if c.dupStringFieldAccess && extractNamed(innerElem) == types.TypString {
+				c.dupStringFieldAccess = false
+				flagConsumed = true
+			} else if c.dupContainerFieldAccess {
+				if types.IsVector(innerElem) || types.IsChannel(innerElem) ||
+					types.IsArc(innerElem) || types.IsWeak(innerElem) ||
+					extractNamed(innerElem) == types.TypVector ||
+					extractNamed(innerElem) == types.TypChannel {
+					c.dupContainerFieldAccess = false
+					flagConsumed = true
+				}
+			} else if c.dupTupleFieldAccess {
+				if _, isTup := innerElem.(*types.Tuple); isTup {
+					c.dupTupleFieldAccess = false
+					flagConsumed = true
+				}
+			} else if c.dupHeapUserFieldAccess {
+				if isDroppableHeapUserType(innerElem) || isHeapUserNoDropPalFree(innerElem) {
+					c.dupHeapUserFieldAccess = false
+					flagConsumed = true
+				}
+			}
+			if flagConsumed {
+				return c.dupOptionalVectorElem(val, opt, innerElem)
+			}
 		}
 	}
 

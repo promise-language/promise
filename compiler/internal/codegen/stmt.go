@@ -5686,22 +5686,39 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					}
 				}
 			}
-			// T0599: Wrap bare RHS in Optional when a fixed-size-array slot
+			// T0599/T0615: Wrap bare RHS in Optional when an array/vector slot
 			// type is Optional but the expr is not (mirrors the MemberExpr-LHS
 			// path, stmt.go:5485-5528, and the IdentExpr-LHS path,
-			// stmt.go:5371-5396). Without this, genArrayIndexAssign stores a
-			// bare T into a {i1, T} slot → "store operands are not compatible".
+			// stmt.go:5371-5396). Without this, genArrayIndexAssign /
+			// genVectorIndexAssign store a bare T into a {i1, T} slot →
+			// "store operands are not compatible".
 			//
-			// Gated to *types.Array only: genIndexAssign routes *types.Array to
-			// genArrayIndexAssign (raw NewStore, no coercion) but Vector/Map go
-			// through the []= method whose argument-passing already wraps bare
-			// values into Optional — wrapping here too would double-wrap and
-			// corrupt every Map[K,V?]/Vector[T?] index assign. idxTargetType is
+			// Gated to *types.Array and Vector: both route to a path that does
+			// raw NewStore (genArrayIndexAssign / genVectorIndexAssign) with no
+			// argument coercion. Vector's []= is `native` so it bypasses the
+			// argument-passing coercion that the original T0599 gating assumed
+			// would handle the wrap. Map's []= is a normal Promise method so
+			// argument-passing already wraps bare values into Optional —
+			// wrapping here would double-wrap and corrupt every Map[K,V?]
+			// index assign, so Map is intentionally excluded. idxTargetType is
 			// already MutRef/SharedRef-unwrapped above, matching genIndexAssign's
-			// own dispatch (stmt.go:8410-8421). For arrays c.info.Types[target]
-			// is the element type (sema checkIndexExpr returns arr.Elem()), i.e.
-			// directly the slot type.
-			if _, isArr := idxTargetType.(*types.Array); isArr {
+			// own dispatch (stmt.go:8410-8421). For arrays/vectors
+			// c.info.Types[target] is the element type (sema checkIndexExpr
+			// returns the [] return type), i.e. directly the slot type.
+			//
+			// Note (T0615 limitation, tracked as T0620): for Vector[T?] with
+			// droppable T, the current ownership model has slice-literal init
+			// leave the source variable's drop flag set (the source remains the
+			// de-facto owner of the inner payload, and emitVectorElementDropLoop
+			// early-returns for Optional elements). Drop-on-overwrite is therefore
+			// NOT emitted in genVectorIndexAssign for Optional elements — doing
+			// so would double-free against the source's scope-exit drop. The
+			// wrap below only fixes the codegen panic; bare-T overwrite of an
+			// already-present Optional[droppable] slot in a vector still leaks
+			// the previous payload pending the T0620 fix.
+			_, isArr := idxTargetType.(*types.Array)
+			_, isVec := types.AsVector(idxTargetType)
+			if isArr || isVec {
 				slotType := c.info.Types[target]
 				exprType := c.info.Types[s.Value]
 				if c.typeSubst != nil {
@@ -8696,6 +8713,14 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 			c.emitVariantFieldDrop(oldVal, elemType)
 		}
+		// T0615/T0620: Drop-on-overwrite for Optional[droppable] elements is NOT
+		// added here because Vector[T?] currently relies on an implicit shadow-
+		// owner invariant — slice-literal init does not clear source-variable
+		// drop flags for Optional payloads (Gap A), and emitVectorElementDropLoop
+		// early-returns for Optional elements (Gap B), so the source ident keeps
+		// owning the inner payload. Dropping here would double-free against the
+		// source's scope-exit drop. Tracked as T0620; this branch should be re-
+		// added once T0620's Gaps A and B are closed.
 		c.block.NewStore(val, elemPtr)
 		return
 	}

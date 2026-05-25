@@ -1,0 +1,109 @@
+// T0615: bare-T RHS assigned to a Vector[T?] slot. Pre-fix, the IndexExpr-LHS
+// wrap-block in genAssignStmt was gated to *types.Array only — Vector
+// destinations fell through to genVectorIndexAssign which did a raw NewStore
+// of the bare T into a {i1, T} slot, panicking "store operands are not
+// compatible". Vector's `[]=` is `\`native` so it bypasses the argument-passing
+// coercion that the original T0599 gating assumed would handle the wrap.
+//
+// This file covers the cases where Change 1 (extending the wrap predicate to
+// Vector destinations) is sufficient on its own:
+//   - Bare value-type RHS into Vector[T?] slot for non-droppable inner T (int).
+//   - Coexistence with fixed `T?[N]` bare assigns in the same compilation unit.
+//   - `v[i] = none` regression guard (the wrap is skipped via the existing
+//     `exprType != TypNone` predicate).
+//   - Already-wrapped T? RHS regression guard (skipped via `!types.Identical`).
+//   - Pushed-vector init form to confirm the trigger is independent of init style.
+//
+// Droppable-inner cases (string, _BoxA, Vector, Arc, channel) are intentionally
+// NOT covered here. Those run into a deeper pre-existing ownership-model bug:
+// slice-literal init for Vector[T?] does not clear the source variable's drop
+// flag (`oa.dropflag` remains set), and emitVectorElementDropLoop early-returns
+// for Optional elements — so the source variable is the de-facto owner of the
+// inner payload. Adding drop-on-overwrite in genVectorIndexAssign would double-
+// free against the source's scope-exit drop. Filed as a separate task — see the
+// note in genAssignStmt's IndexExpr-LHS branch.
+// (1) Primary repro from T0615 — bare int → int?[] slot.
+test_bare_int_to_optional_vector_slot() `test {
+  int? z0 = none;
+  int? z1 = none;
+  int?[] v = [z0, z1];
+  v[0] = 5;
+  assert(v[0] is present, "slot 0 present after bare-int assign");
+  assert(v[1] is absent, "slot 1 untouched");
+}
+
+// (2) Coexistence regression guard — int?[2] bare assign AND int?[] bare
+// assign in the same compilation unit. The bug report observed cross-form
+// poisoning; verify both forms succeed when compiled together.
+test_optional_fixedarray_and_vector_coexist() `test {
+  int? a0 = none;
+  int? a1 = none;
+  int?[2] arr = [a0, a1];
+  int n = 7;
+  arr[0] = n;
+
+  int? w0 = none;
+  int? w1 = none;
+  int?[] vec = [w0, w1];
+  vec[0] = 9;
+
+  assert(arr[0] is present, "fixed array slot 0 present");
+  assert(vec[0] is present, "vector slot 0 present");
+}
+
+// (3) Generic + vector coexistence — exercises the typeSubst path of
+// _set_opt_arr_first[int] alongside an int?[] vector bare assign. Bug report
+// called this form out as a panic trigger.
+_set_opt_arr_first_t0615[T](~T x) bool {
+  T? z0 = none;
+  T? z1 = none;
+  T?[2] a = [z0, z1];
+  a[0] = x;
+  return a[0] is present;
+}
+
+test_generic_optional_array_with_vector() `test {
+  assert(_set_opt_arr_first_t0615[int](7), "generic instantiation");
+  int? w0 = none;
+  int? w1 = none;
+  int?[] v = [w0, w1];
+  v[0] = 5;
+  assert(v[0] is present, "vector slot present");
+}
+
+// (4) Regression guard — `v[i] = none` must skip the wrap (existing
+// `exprType != TypNone` predicate). None is encoded as a zero-init {i1, T}.
+test_none_to_optional_vector_slot() `test {
+  int? a = 1;
+  int? b = 2;
+  int?[] v = [a, b];
+  v[0] = none;
+  assert(v[0] is absent, "slot 0 cleared to none");
+  assert(v[1] is present, "slot 1 untouched");
+}
+
+// (5) Regression guard — assigning an already-wrapped int? to an int?[] slot
+// must NOT double-wrap (existing `!types.Identical` predicate). Pre-fix
+// behavior here was correct; new wrap predicate must preserve it.
+test_optional_int_to_optional_vector_slot() `test {
+  int? a = 1;
+  int? b = 2;
+  int?[] v = [a, b];
+  int? c = 99;
+  v[0] = c;
+  assert(v[0] is present, "slot 0 still present");
+  assert(v[1] is present, "slot 1 untouched");
+}
+
+// (6) Vector built via push (not slice literal) — confirms the trigger is
+// purely Vector + Optional element + bare RHS, independent of init style.
+test_bare_int_to_pushed_optional_vector_slot() `test {
+  int?[] v = [];
+  int? z0 = none;
+  v.push(z0);
+  int? z1 = none;
+  v.push(z1);
+  v[0] = 11;
+  assert(v[0] is present, "slot 0 present after bare assign on pushed vec");
+  assert(v[1] is absent, "slot 1 untouched");
+}

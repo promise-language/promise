@@ -1,0 +1,234 @@
+// T0655: a single-owner Mutex *temp* receiver (constructor or plain-method
+// return) used as the receiver of `.lock()` must outlive the derived
+// MutexGuard. Pre-fix the Mutex temp was dropped at statement end before the
+// guard that borrows it → MutexGuard.drop unlocked/dereferenced freed Mutex
+// memory (use-after-free / SEGV at 0x0). Each row also asserts 0-leak
+// (enforced by the test harness — any leak fails the test).
+mk_mtx() Mutex[int] {
+  return Mutex[int](5);
+}
+take_mtx_i(Mutex[int] m) {
+}
+take_two_guards(MutexGuard[int] a, MutexGuard[int] b) {
+}
+
+// Constructor temp + use-bound guard (primary repro — SEGV pre-fix).
+test_ctor_temp_use() `test {
+  use g := Mutex[int](7).lock();
+  assert(g.borrow == 7, "ctor temp use");
+}
+
+// Constructor temp + plain-bound guard (no `use`).
+test_ctor_temp_nouse() `test {
+  g := Mutex[int](7).lock();
+  assert(g.borrow == 7, "ctor temp nouse");
+}
+
+// Plain-method-return temp receiver.
+test_meth_temp_use() `test {
+  use g := mk_mtx().lock();
+  assert(g.borrow == 5, "meth temp use");
+}
+
+// Bare discard — the guard stmt-temp drops at statement end (unlock) while the
+// promoted Mutex scope binding is still alive; Mutex freed at scope exit.
+test_ctor_temp_discard() `test {
+  Mutex[int](2).lock();
+}
+
+// Multiple Mutex temps + derived guards in one statement — each promotes its
+// own Mutex; both guards drop at statement end, both mutexes freed at scope
+// exit (LIFO). Distinct mutexes — no lock conflict.
+test_multi_temp_one_stmt() `test {
+  take_two_guards(Mutex[int](3).lock(), Mutex[int](4).lock());
+}
+
+// Nested temp guards across separate statements — independent mutexes held
+// until scope exit; scope order [mtx1, g1, mtx2, g2] → LIFO g2,mtx2,g1,mtx1.
+test_nested_temp_guards() `test {
+  use g1 := Mutex[int](1).lock();
+  use g2 := mk_mtx().lock();
+  assert(g1.borrow == 1, "nested g1");
+  assert(g2.borrow == 5, "nested g2");
+}
+
+// Mutate through the guard derived from a temp receiver, then read back.
+test_ctor_temp_mutate() `test {
+  use g := Mutex[int](10).lock();
+  g.borrow = 99;
+  assert(g.borrow == 99, "ctor temp mutate");
+}
+
+// Regression control: bound receiver must stay correct (promotion no-op —
+// mutexRaw is a fresh load, not a tracked stmt-temp).
+test_bound_receiver_control() `test {
+  m := Mutex[int](7);
+  use g := m.lock();
+  assert(g.borrow == 7, "bound control");
+}
+
+// Regression control: consume-only ctor temp (no `.lock()`) must stay correct
+// — genMutexMethodCall and the promotion are never invoked.
+test_consume_only_control() `test {
+  take_mtx_i(Mutex[int](1));
+}
+
+// ── Droppable-element coverage (T0655 leak-invariant) ─────────────────────────
+// The rows above all use Mutex[int] — a `copy` value type with NO element drop,
+// so they cannot catch a leaked/double-freed inner payload. These rows put a
+// heap/droppable value INSIDE the promoted-temp Mutex: the promoted scope
+// binding's Mutex.drop must free the element exactly once (0-leak enforced; a
+// missed free leaks → test fails, a double free aborts).
+
+type T0655SynthBox {
+  // synthesized drop (heap string field)
+  string name;
+  int id;
+}
+
+type T0655ExplicitDrop {
+  // explicit drop holding a heap string
+  string tag;
+  drop(~this) {
+  }
+}
+
+mk_str_mtx() Mutex[string] {
+  return Mutex[string]("from method" + "");
+}
+
+// Constructor temp, heap-string element — Mutex.drop must call string drop once.
+test_ctor_temp_string_drop() `test {
+  use g := Mutex[string]("owned" + "").lock();
+  assert(g.borrow == "owned", "ctor temp string element");
+}
+
+// Method-return temp, heap-string element.
+test_meth_temp_string_drop() `test {
+  use g := mk_str_mtx().lock();
+  assert(g.borrow == "from method", "meth temp string element");
+}
+
+// Constructor temp wrapping a moved-in heap vector — Mutex.drop must free the
+// vector buffer (and its elements) once.
+test_ctor_temp_heap_vec_drop() `test {
+  v := string[]();
+  v.push("a" + "");
+  v.push("b" + "");
+  use g := Mutex[string[]](v).lock();
+  assert(g.borrow.len == 2, "ctor temp heap-vec element");
+}
+
+// Constructor temp wrapping a user type with a synthesized drop (string field).
+test_ctor_temp_synth_drop() `test {
+  use g := Mutex[T0655SynthBox](T0655SynthBox(name: "syn" + "", id: 7)).lock();
+  assert(g.borrow.name == "syn", "ctor temp synth-drop element name");
+  assert(g.borrow.id == 7, "ctor temp synth-drop element id");
+}
+
+// Constructor temp wrapping a user type with an EXPLICIT drop holding a heap
+// string — proves the explicit drop runs exactly once via the promoted binding
+// (missed → string leak; doubled → abort).
+test_ctor_temp_explicit_drop() `test {
+  use g := Mutex[T0655ExplicitDrop](T0655ExplicitDrop(tag: "exp" + "")).lock();
+  assert(g.borrow.tag == "exp", "ctor temp explicit-drop element");
+}
+
+// Bare-discard of a droppable-element temp Mutex — guard drops at statement end
+// (unlock, Mutex alive as promoted binding), Mutex+string freed at scope exit.
+test_ctor_temp_string_discard() `test {
+  Mutex[string]("discarded" + "").lock();
+}
+
+// ── Generic (typeSubst) coverage ──────────────────────────────────────────────
+// `Mutex[T]` temp receiver inside a generic body exercises the T0655-added
+// `c.typeSubst != nil && mtxType != nil` substitution branch in
+// genMutexMethodCall (expr.go) — zero coverage before this row. The string
+// instantiation makes the promoted-temp element-drop chain leak-meaningful
+// under monomorphization.
+t0655_glock[T](~T v) {
+  use g := Mutex[T](v).lock();
+}
+
+test_generic_temp_lock_int() `test {
+  t0655_glock[int](42);
+}
+
+test_generic_temp_lock_string() `test {
+  t0655_glock[string]("generic heap" + "");
+}
+
+// ── Coroutine / goroutine context ─────────────────────────────────────────────
+// The bug's original failing context was `.goroutine.main`. A promoted-temp
+// `.lock()` inside a `go {}` block must spill its entry-block alloca into the
+// coroutine frame (createEntryAlloca) and still order guard-unlock before
+// Mutex-free. 0-leak across the goroutine boundary.
+test_goroutine_temp_lock() `test(exclude: wasm) {
+  done := channel[int]();
+  go {
+    use g := Mutex[int](7).lock();
+    done.send(g.borrow);
+  };
+  r := <-done;
+  assert(r! == 7, "goroutine promoted-temp lock");
+}
+
+test_goroutine_temp_string_lock() `test(exclude: wasm) {
+  done := channel[bool]();
+  go {
+    use g := Mutex[string]("coro" + "").lock();
+    done.send(g.borrow == "coro");
+  };
+  r := <-done;
+  assert(r! == true, "goroutine promoted-temp string lock");
+}
+
+// ── Conditional branch (entry-alloca init on untaken paths) ──────────────────
+// The helper inits the alloca to null/false in the entry block so a temp
+// created inside a branch has defined values on untaken paths. Exercise both
+// the taken and the not-taken arm in one function.
+t0655_cond_lock(bool take) {
+  if take {
+    use g := Mutex[int](5).lock();
+    assert(g.borrow == 5, "conditional taken");
+  }
+}
+
+test_conditional_temp_lock_taken() `test {
+  t0655_cond_lock(true);
+}
+
+test_conditional_temp_lock_untaken() `test {
+  t0655_cond_lock(false);
+}
+
+// ── Error / raise path ───────────────────────────────────────────────────────
+// A promoted Mutex temp is an ordinary scope binding, so emitScopeCleanup's
+// error-path handling must free it on a raise. Heap-string element makes a
+// missed error-path free a detectable leak.
+t0655_lock_then_raise!(bool fail) int {
+  use g := Mutex[string]("err path" + "").lock();
+  if fail {
+    raise error("boom");
+  }
+  return g.borrow.len;
+}
+
+test_error_path_temp_lock() `test {
+  t0655_lock_then_raise(true)? e {
+    assert(e.message == "boom", "error propagated past promoted Mutex temp");
+  };
+}
+
+// Non-error path through a function that holds a promoted Mutex temp across a
+// `?^` unwrap — the Mutex must still be freed once on the success return.
+t0655_ok_caller!() {
+  n := t0655_lock_then_raise(false)?^;
+  assert(n == 8, "non-error path returns through promoted Mutex temp");
+}
+
+test_error_path_temp_lock_ok() `test {
+  t0655_ok_caller()? e {
+    assert(false, "ok path unexpectedly raised");
+  };
+}

@@ -3440,6 +3440,16 @@ func (c *Compiler) genMutexMethodCall(e *ast.CallExpr, member *ast.MemberExpr, e
 
 	switch method {
 	case "lock":
+		// T0655: a single-owner Mutex *temp* receiver would be dropped at
+		// statement end before the MutexGuard that borrows it → UAF. Promote
+		// it to a scope binding so it outlives the guard, mirroring the
+		// already-correct bound-receiver path. No-op for bound receivers
+		// (mutexRaw is a fresh load, not a tracked stmt-temp).
+		mtxType := c.info.Types[member.Target]
+		if c.typeSubst != nil && mtxType != nil {
+			mtxType = types.Substitute(mtxType, c.typeSubst)
+		}
+		c.promoteHandleTempToScopeBinding(mutexRaw, c.getOrCreateMutexDrop(elemType), mtxType)
 		return c.genMutexLock(mutexRaw, elemType)
 	default:
 		panic(fmt.Sprintf("codegen: unknown mutex method %q", method))

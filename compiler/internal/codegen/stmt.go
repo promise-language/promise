@@ -4860,6 +4860,54 @@ func (c *Compiler) promoteHeapTempsToScope() {
 	c.heapTempMap = make(map[value.Value]int)
 }
 
+// promoteHandleTempToScopeBinding promotes a tracked single-owner handle
+// stmtTemp (the receiver of a borrowing method such as Mutex.lock()) into a
+// scope binding so it outlives the derived guard. A single-owner Mutex *temp*
+// receiver (`Mutex[int](7).lock()`, `mk_mtx().lock()`) would otherwise be
+// dropped at statement end before the MutexGuard that borrows it, and
+// MutexGuard.drop then unlocks/derefs freed Mutex memory → UAF/SEGV (T0655).
+// Registering it as a scope binding before the guard's var-decl scope binding
+// makes LIFO scope cleanup drop the guard (unlock) before the Mutex (free) —
+// exactly mirroring the already-correct bound-receiver path.
+//
+// Returns false (no-op) when val is not a currently-tracked stmtTemp — e.g. a
+// bound-variable receiver (`m := ...; m.lock()`), where mutexRaw is a fresh
+// load and never a stmtTempMap key — so the must-stay-correct bound and
+// consume-only cases are provably untouched.
+func (c *Compiler) promoteHandleTempToScopeBinding(val value.Value, dropFunc *ir.Func, valType types.Type) bool {
+	if val == nil || c.block == nil || c.block.Term != nil || c.entryBlock == nil {
+		return false
+	}
+	idx, ok := c.stmtTempMap[val]
+	if !ok || idx < 0 { // not a tracked temp → leave bound path untouched
+		return false
+	}
+	// Coroutine-safe entry-block allocas (same primitive as trackTempWithDrop):
+	// initialized to null/false in the entry block so a temp created inside a
+	// branch has defined values on untaken paths.
+	alloca := c.createEntryAlloca(irtypes.I8Ptr)
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	c.entryBlock.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
+	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+	c.block.NewStore(val, alloca)
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	// bindingDropString: i8* alloca + void(i8*) drop — identical IR shape to the
+	// known-good bound-Mutex scope binding (stmt.go ~2097). The Vector
+	// static-flag branch in emitStringDropCall is inert for a Mutex valType.
+	c.scopeBindings = append(c.scopeBindings, scopeBinding{
+		kind:     bindingDropString,
+		alloca:   alloca,
+		dropFlag: dropFlag,
+		dropFunc: dropFunc,
+		valType:  valType,
+	})
+	// Neutralize the stmt-temp (clears its flag + maps it to -1) so it is not
+	// also dropped at statement end. Keeps the T0555/T0561 binding-site claim
+	// machinery intact.
+	c.claimStringTemp(val)
+	return true
+}
+
 // trackEnvTemp registers a heap-allocated closure env pointer for cleanup at
 // statement end (T0100). Called from genLambdaExpr when the lambda has captures.
 // If the lambda is later stored in a variable, claimEnvTemp prevents double-free.

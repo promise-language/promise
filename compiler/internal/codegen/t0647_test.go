@@ -159,10 +159,10 @@ func TestT0647_GenericUserIndexStringTempTracked(t *testing.T) {
 // tracked → 1 leaked Arc cell per call. In __user.caller, @"Arc[int].drop"
 // uniquely denotes the tracked operator-return temp (the ArcBox receiver's own
 // Arc field is dropped inside @ArcBox.drop, a separate function — never inlined
-// here). NOTE: the Mutex/Task/MutexGuard analogues of this branch are
-// unreachable until T0650 (the ownership pass wrongly rejects a user `[]`
-// returning a single-owner handle), so only Arc is locked structurally here;
-// runtime 0-leak for Arc+Weak is enforced by tests/e2e/
+// here). The Mutex/Task/MutexGuard analogues of this branch are now reachable
+// (T0650 added the ownership exemption) and are locked structurally by
+// TestT0650_UserIndex{Mutex,Task,MutexGuard}HandleTracked; runtime 0-leak for
+// Arc/Weak/Mutex/Task/MutexGuard is enforced by tests/e2e/
 // user_index_heap_return_test.pr.
 func TestT0647_UserIndexArcHandleTracked(t *testing.T) {
 	ir := generateIR(t, `
@@ -199,5 +199,148 @@ func TestT0647_UserIndexArcHandleTracked(t *testing.T) {
 		t.Errorf("expected the tracked `[]` Arc return to be dropped via "+
 			"@\"Arc[int].drop\" (getOrCreateArcDrop) after the call; none found "+
 			"(pre-fix the `[]` result was never tracked → leaked Arc cell):\n%s", body)
+	}
+}
+
+// === T0650: single-owner native handle (Mutex/Task/MutexGuard) returned by a
+// user-defined non-native `[]` ===
+//
+// trackUserIndexResult's AsMutex/AsTask/AsMutexGuard branches (mirrored from
+// the *ast.CallExpr T0555/T0561 path) were *unreachable dead code*: the
+// ownership pass rejected every program with a user `[]` returning a
+// single-owner handle before codegen ran (T0650). With the ownership exemption
+// (isUserIndexExpr in ownership/expr.go) those branches are now live; these
+// tests lock the IR signature. Runtime 0-leak / no-double-free is enforced by
+// the batch tests in tests/e2e/user_index_heap_return_test.pr.
+
+// Mutex[int] returned by a user `[]`, used as a temporary (fn-arg). The fresh
+// Mutex must be registered as a tracked stmt-temp and dropped at statement end
+// via @"Mutex[int].drop" (getOrCreateMutexDrop). MtxBox has no Mutex field, so
+// in __user.caller @"Mutex[int].drop" uniquely denotes the tracked operator
+// return (the @"MtxBox.[]" body is a separate function, never inlined here).
+func TestT0650_UserIndexMutexHandleTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type MtxBox { int n; [](int i) Mutex[int] { return Mutex[int](this.n + i); } }
+		take_mtx(Mutex[int] m) {}
+		caller() { b := MtxBox(n: 100); take_mtx(b[0]); }
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	if !strings.Contains(body, `@"MtxBox.[]"`) {
+		t.Fatalf("expected user-defined [] call @\"MtxBox.[]\" in caller:\n%s", body)
+	}
+	callIdx := strings.Index(body, `@"MtxBox.[]"`)
+	post := body[callIdx:]
+	if !strings.Contains(post, "tmp.exec") {
+		t.Errorf("expected a tmp.exec stmt-temp cleanup block after the `[]` call "+
+			"for the owned Mutex return (trackUserIndexResult AsMutex); none found "+
+			"(pre-fix this branch was unreachable — ownership rejected first):\n%s", body)
+	}
+	if !strings.Contains(post, `call void @"Mutex[int].drop"(`) {
+		t.Errorf("expected the tracked `[]` Mutex return to be dropped via "+
+			"@\"Mutex[int].drop\" (getOrCreateMutexDrop) after the call; none found:\n%s", body)
+	}
+}
+
+// Task[int] returned by a user `[]` (go-spawned). The fresh Task handle is a
+// tracked stmt-temp dropped via @"Task[int].drop" (getOrCreateTaskDrop) at
+// statement end. (TaskBox has no Task field — the only Task drop is the
+// tracked operator return.)
+func TestT0650_UserIndexTaskHandleTracked(t *testing.T) {
+	ir := generateIR(t, `
+		worker_t0650() int { return 42; }
+		type TaskBox { [](int i) Task[int] { return go worker_t0650(); } }
+		caller() { tb := TaskBox(); r := <-tb[0]; }
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	if !strings.Contains(body, `@"TaskBox.[]"`) {
+		t.Fatalf("expected user-defined [] call @\"TaskBox.[]\" in caller:\n%s", body)
+	}
+	callIdx := strings.Index(body, `@"TaskBox.[]"`)
+	post := body[callIdx:]
+	if !strings.Contains(post, "tmp.exec") {
+		t.Errorf("expected a tmp.exec stmt-temp cleanup block after the `[]` call "+
+			"for the owned Task return (trackUserIndexResult AsTask):\n%s", body)
+	}
+	if !strings.Contains(post, `call void @"Task[int].drop"(`) {
+		t.Errorf("expected the tracked `[]` Task return to be dropped via "+
+			"@\"Task[int].drop\" (getOrCreateTaskDrop) after the call; none found:\n%s", body)
+	}
+}
+
+// MutexGuard[int] returned by a user `[]` (`this.m.lock()`), used as a
+// temporary (`.borrow` getter read leaves the guard un-bound). The guard is a
+// tracked stmt-temp dropped via the single @MutexGuard.drop symbol (T0561) at
+// statement end. NOTE: @"Mutex[int].drop" appears *before* the @"MgBox.[]"
+// call here (the MgBox-ctor `Mutex[int](42)` arg temp), so anchor strictly on
+// the post-`[]`-call slice — there @MutexGuard.drop uniquely denotes the
+// tracked operator return.
+func TestT0650_UserIndexMutexGuardHandleTracked(t *testing.T) {
+	ir := generateIR(t, `
+		type MgBox { Mutex[int] m; [](int i) MutexGuard[int] { return this.m.lock(); } }
+		caller() { mgb := MgBox(m: Mutex[int](42)); n := mgb[0].borrow; }
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	if !strings.Contains(body, `@"MgBox.[]"`) {
+		t.Fatalf("expected user-defined [] call @\"MgBox.[]\" in caller:\n%s", body)
+	}
+	callIdx := strings.Index(body, `@"MgBox.[]"`)
+	post := body[callIdx:]
+	if !strings.Contains(post, "tmp.exec") {
+		t.Errorf("expected a tmp.exec stmt-temp cleanup block after the `[]` call "+
+			"for the owned MutexGuard return (trackUserIndexResult AsMutexGuard):\n%s", body)
+	}
+	if !strings.Contains(post, "call void @MutexGuard.drop(") {
+		t.Errorf("expected the tracked `[]` MutexGuard return to be dropped via "+
+			"@MutexGuard.drop (T0561 single symbol) after the call; none found:\n%s", body)
+	}
+}
+
+// Binding path: `m := b[1]` must claim the tracked Mutex temp into `m` and KEEP
+// m's drop binding armed (m's scope-exit drop frees the owned Mutex exactly
+// once). The pre-fix borrow-RHS over-clear (isStringBorrowExpr treats every
+// IndexExpr as a container borrow) would arm then immediately clear
+// %m.dropflag. The isUserIndexExpr exemption (codegen/stmt.go) removes that
+// spurious clear; this guards the Mutex analogue of
+// TestT0647_UserIndexStringBindKeepsDropFlag.
+func TestT0650_UserIndexMutexBindKeepsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type MtxBox { int n; [](int i) Mutex[int] { return Mutex[int](this.n + i); } }
+		caller() { b := MtxBox(n: 100); m := b[1]; use g := m.lock(); }
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	if !strings.Contains(body, `@"MtxBox.[]"`) {
+		t.Fatalf("expected user-defined [] call @\"MtxBox.[]\" in caller:\n%s", body)
+	}
+	if !strings.Contains(body, "store i1 true, i1* %m.dropflag") {
+		t.Fatalf("expected m's drop flag to be armed (store i1 true, i1* %%m.dropflag):\n%s", body)
+	}
+	// The pre-fix spurious clear: m's flag armed then immediately cleared.
+	// Its absence is the isUserIndexExpr exemption.
+	spurious := "store i1 true, i1* %m.dropflag\n\tstore i1 false, i1* %m.dropflag"
+	if strings.Contains(body, spurious) {
+		t.Errorf("m's drop flag is armed then immediately cleared — the borrow-RHS "+
+			"over-clear; owned `[]` Mutex return leaks:\n%s", body)
+	}
+	// Positive: m's scope-exit drop reads m.dropflag and drops the Mutex.
+	if !strings.Contains(body, "load i1, i1* %m.dropflag") ||
+		!strings.Contains(body, `call void @"Mutex[int].drop"(`) {
+		t.Errorf("expected m's scope-exit Mutex drop wired (load %%m.dropflag + "+
+			"@\"Mutex[int].drop\"):\n%s", body)
 	}
 }

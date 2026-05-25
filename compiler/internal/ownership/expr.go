@@ -1089,6 +1089,26 @@ func isSingleOwnerNativeType(typ types.Type) bool {
 	return types.IsMutex(typ) || types.IsMutexGuard(typ) || types.IsTask(typ)
 }
 
+// isUserIndexExpr reports whether idx dispatches to a user-defined *non-native*
+// `[]` operator. Such a read is an ordinary method call returning an *owned*
+// value (freshly constructed / `.lock()`-derived / cloned) — there is no
+// container slot to alias, so moving the result out is sound and is already
+// made leak-safe at codegen by T0647's trackUserIndexResult. Mirrors codegen's
+// isUserIndexExpr (codegen/stmt.go) with one difference: the ownership pass
+// runs on the un-monomorphized generic AST, so no typeSubst is applied here.
+// extractNamedType peels MutRef/SharedRef/Instance and returns nil for
+// *types.Array, so native container indexing and fixed-size array indexing
+// (which alias the slot's owned pointer) are NOT exempted and remain correctly
+// rejected by rejectIndexExprSingleOwnerMove.
+func (c *Checker) isUserIndexExpr(idx *ast.IndexExpr) bool {
+	named := extractNamedType(c.info.Types[idx.Target])
+	if named == nil {
+		return false
+	}
+	m := named.LookupMethod("[]")
+	return m != nil && !m.IsNative()
+}
+
 // rejectIndexExprSingleOwnerMove emits an error if expr is an IndexExpr whose
 // result type is a single-owner native handle (Mutex/MutexGuard/Task or
 // Optional thereof). T0596: dup-on-read is not defined for these container
@@ -1118,6 +1138,14 @@ func (c *Checker) rejectIndexExprSingleOwnerMove(expr ast.Expr) bool {
 	}
 	typ := c.info.Types[idx]
 	if !isSingleOwnerNativeType(typ) {
+		return false
+	}
+	// T0650: a user-defined non-native `[]` is an ordinary method returning an
+	// *owned* handle — there is no container slot to alias. T0647's
+	// trackUserIndexResult already makes the owned operator return leak-safe at
+	// codegen. Native container/array indexing resolves to a native/nil `[]`
+	// (extractNamedType→nil for arrays) and stays correctly rejected below.
+	if c.isUserIndexExpr(idx) {
 		return false
 	}
 	c.errorf(idx.Pos(),

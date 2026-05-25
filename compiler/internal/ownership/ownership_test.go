@@ -8948,6 +8948,216 @@ func TestT0623_MatchGenericEnumHandleMovesSubject(t *testing.T) {
 	expectOwnerError(t, errs, "use of moved variable 'b'")
 }
 
+// === T0650: user-defined non-native `[]` returning a single-owner native
+// handle is NOT a slot-alias move ===
+//
+// rejectIndexExprSingleOwnerMove keyed solely on the IndexExpr result type,
+// so a user-defined non-native `[]` returning a freshly-constructed /
+// `.lock()`-derived owned Mutex/Task/MutexGuard was wrongly rejected — even
+// though the IDENTICAL plain `at()` method compiles, runs, and is 0-leak
+// (T0647-class asymmetry, ownership-pass analogue). The fix exempts user
+// non-native `[]` via isUserIndexExpr (mirrors codegen/stmt.go); native
+// container/array indexing still aliases the slot's owned pointer and stays
+// rejected.
+
+// Fresh-constructor Mutex via a user `[]`: temp arg + binding + `.lock()`.
+// Mirrors the proven /tmp/t0647_mtx_parity.pr operator arm.
+func TestT0650_UserIndexMutexReturnAllowed(t *testing.T) {
+	ownerOK(t, `
+		type MtxBox {
+			int n;
+			[](int i) Mutex[int] { return Mutex[int](this.n + i); }
+		}
+		take_mtx_i(Mutex[int] m) {}
+		test() {
+			mb := MtxBox(n: 100);
+			take_mtx_i(mb[0]);
+			m := mb[1];
+			use g := m.lock();
+		}
+	`)
+}
+
+// Task handle returned from a user `[]` (go-spawned). Temp arg + binding +
+// receive. Bodies from the proven /tmp/t0647_method_only.pr task case.
+func TestT0650_UserIndexTaskReturnAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker_t0650() int { return 42; }
+		type TaskBox {
+			[](int i) Task[int] { return go worker_t0650(); }
+		}
+		take_task_i(Task[int] t) {}
+		test() {
+			tb := TaskBox();
+			take_task_i(tb[0]);
+			t := tb[1];
+			r := <-t;
+		}
+	`)
+}
+
+// MutexGuard return from a user `[]` (`this.m.lock()`). The guard is
+// use-bound; the index read must not hit the single-owner rejection.
+func TestT0650_UserIndexMutexGuardReturnAllowed(t *testing.T) {
+	ownerOK(t, `
+		type MgBox {
+			Mutex[int] m;
+			[](int i) MutexGuard[int] { return this.m.lock(); }
+		}
+		test() {
+			mgb := MgBox(m: Mutex[int](42));
+			use g := mgb[0];
+		}
+	`)
+}
+
+// Optional-Mutex return: isSingleOwnerNativeType recurses through Optional,
+// so the Optional arm must also be exempted via the user `[]`.
+func TestT0650_UserIndexOptionalMutexReturnAllowed(t *testing.T) {
+	ownerOK(t, `
+		type OptMtxBox {
+			[](int i) Mutex[int]? { return Mutex[int](i); }
+		}
+		test() {
+			b := OptMtxBox();
+			m := b[0];
+		}
+	`)
+}
+
+// Generic owner Box[T] whose `[]` returns a fresh Mutex[int]. extractNamedType
+// resolves the Instance origin to the Named Box, whose non-native `[]` exempts
+// the read (T0647 generic parity).
+func TestT0650_GenericUserIndexMutexReturnAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box[T] {
+			T v;
+			[](int i) Mutex[int] { return Mutex[int](i); }
+		}
+		test() {
+			b := Box[int](v: 9);
+			m := b[0];
+		}
+	`)
+}
+
+// Regression guard: native Vector[Mutex[int]] indexing resolves to Vector's
+// *native* `[]` (IsNative → not exempt). Moving a Mutex out of the slot
+// aliases the container's owned pointer → must stay rejected.
+func TestT0650_NativeVectorMutexIndexStillRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Vector[Mutex[int]] v = [m0, m1];
+			Mutex[int] x = v[0];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int] out of indexed slot")
+}
+
+// Regression guard: fixed-size Mutex[int][2] indexing. extractNamedType(Array)
+// is nil → not exempt → slot-alias move stays rejected.
+func TestT0650_FixedArrayMutexIndexStillRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Mutex[int][2] arr = [m0, m1];
+			Mutex[int] x = arr[0];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int] out of indexed slot")
+}
+
+// --- T0650 × T0596/T0612 peel-loop composition ---
+//
+// rejectIndexExprSingleOwnerMove peels ParenExpr / OptionalUnwrapExpr (T0596 /
+// T0612) BEFORE the IndexExpr cast, then applies the isUserIndexExpr exemption
+// to the peeled IndexExpr. The original T0650 tests only exercise bare `mb[0]`
+// / `m := mb[1]`; they never exercise the exemption *through* a peel. Those
+// composed shapes are reachable (an AI agent writes `take((box[i]))` or, for a
+// fallible accessor, `take(box[i]!)`) and were uncovered. The ownership pass
+// correctly ALLOWS all of these (the value is a freshly-constructed owned
+// handle, not a container-slot alias). NOTE: the consume/temp `!`-unwrap
+// *runtime* path currently leaks at codegen — that is a pre-existing,
+// T0650-independent codegen gap (the IDENTICAL plain method `at()!` leaks the
+// same), filed as **T0654**; the binding `m := b[i]!` form is 0-leak. These
+// ownership tests assert only the (correct) ownership-pass acceptance.
+
+// ParenExpr peel + user-`[]` exemption, BOTH call sites: `take((mb[0]))`
+// (tryMoveConsume) and `m := (mb[1])` (tryMove var-decl). Mirrors
+// TestT0596_ParenthesisedSlotMoveRejected on the exemption side.
+func TestT0650_UserIndexMutexThroughParenAllowed(t *testing.T) {
+	ownerOK(t, `
+		type MtxBox {
+			int n;
+			[](int i) Mutex[int] { return Mutex[int](this.n + i); }
+		}
+		take_mtx_i(Mutex[int] m) {}
+		test() {
+			mb := MtxBox(n: 100);
+			take_mtx_i((mb[0]));
+			m := (mb[1]);
+			use g := m.lock();
+		}
+	`)
+}
+
+// OptionalUnwrapExpr peel + user-`[]` exemption, BOTH call sites: the `[]`
+// returns Mutex[int]? and the result is `!`-unwrapped at a consume site
+// (`take_mtx_i(b[0]!)`) and a var-decl site (`m := b[1]!`). Mirrors
+// TestT0612_OptionalUnwrapMutexArrayElementRejected on the exemption side.
+func TestT0650_UserIndexOptionalMutexUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		type OptMtxBox {
+			int n;
+			[](int i) Mutex[int]? { return Mutex[int](this.n + i); }
+		}
+		take_mtx_i(Mutex[int] m) {}
+		test() {
+			b := OptMtxBox(n: 200);
+			take_mtx_i(b[0]!);
+			m := b[1]!;
+			use g := m.lock();
+		}
+	`)
+}
+
+// ParenExpr + OptionalUnwrapExpr composition over a user `[]` — `(b[0]!)` —
+// the peel loop must strip both layers in any order and the exemption must
+// still apply. Mirrors TestT0612_ParenthesisedOptionalUnwrapRejected.
+func TestT0650_UserIndexOptionalMutexParenUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		type OptMtxBox {
+			int n;
+			[](int i) Mutex[int]? { return Mutex[int](this.n + i); }
+		}
+		take_mtx_i(Mutex[int] m) {}
+		test() {
+			b := OptMtxBox(n: 300);
+			take_mtx_i((b[0]!));
+		}
+	`)
+}
+
+// Task parity for the OptionalUnwrap peel + user-`[]` exemption (both sites).
+func TestT0650_UserIndexOptionalTaskUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker_t0650u() int { return 42; }
+		type OptTaskBox {
+			[](int i) Task[int]? { return go worker_t0650u(); }
+		}
+		take_task_i(Task[int] t) {}
+		test() {
+			tb := OptTaskBox();
+			take_task_i(tb[0]!);
+			t := tb[1]!;
+			r := <-t;
+		}
+	`)
+}
+
 // === T0635: enum-variant constructor consume-checks its args even under
 // generics ===
 //

@@ -210,16 +210,14 @@ test_t0647_map_value() `test {
 // must be ownership-equivalent (0 leak, no double-free under the batch
 // harness) — exactly like the proven CallExpr handle-temp tracking it mirrors.
 //
-// The Mutex / Task / MutexGuard variants are intentionally OMITTED: a
-// user-defined non-native `[]` returning a single-owner native handle is
-// wrongly rejected at the ownership pass (`rejectIndexExprSingleOwnerMove`,
-// ownership/expr.go) even though the IDENTICAL plain method compiles, runs,
-// and is 0-leak. That is a separate pre-existing T0647-class asymmetry —
-// tracked as **T0650** — which also makes trackUserIndexResult's
-// AsMutex/AsTask/AsMutexGuard branches unreachable until fixed. Enable those
-// three cases (skeletons in T0650) once T0650 lands. (Mirrors how T0647 itself
-// deferred the T0648-blocked nested-vector-element case: covered there, not
-// here.)
+// The single-owner handles Mutex / Task / MutexGuard are covered in the
+// dedicated T0650 section at the end of this file. They were previously
+// OMITTED because a user-defined non-native `[]` returning a single-owner
+// native handle was wrongly rejected at the ownership pass
+// (`rejectIndexExprSingleOwnerMove`, ownership/expr.go) even though the
+// IDENTICAL plain method compiled, ran, and was 0-leak. T0650 added the
+// ownership exemption (isUserIndexExpr), which also made
+// trackUserIndexResult's AsMutex/AsTask/AsMutexGuard branches reachable.
 take_arc_i(Arc[int] a) int {
   return a.borrow;
 }
@@ -275,3 +273,149 @@ test_t0647_weak_return() `test {
     assert(false, "method weak upgrade should succeed");
   }
 }
+
+// ---------- single-owner native handles (Mutex / Task / MutexGuard) — T0650 ----------
+// A user-defined non-native `[]` returning a single-owner native handle was
+// wrongly rejected at the ownership pass: rejectIndexExprSingleOwnerMove keyed
+// solely on the IndexExpr result type, blind to whether the read was a native
+// container slot-alias (correctly rejected — moving out double-frees at the
+// container drop) or an ordinary user method returning a fresh / `.lock()`-
+// derived owned handle (no slot to alias). The IDENTICAL plain at() method
+// always compiled, ran, and was 0-leak. T0650 added the isUserIndexExpr
+// ownership exemption (mirrors codegen/stmt.go); the codegen side (T0647
+// trackUserIndexResult AsMutex/AsTask/AsMutexGuard + getOrCreateMutexDrop /
+// getOrCreateTaskDrop / MutexGuard.drop) was already shipped and is now
+// reachable. Each `[]` is paired with an IDENTICAL at() baseline; the batch
+// harness enforces 0-leak / no-double-free at runtime.
+worker_t0650() int {
+  return 42;
+}
+take_mtx_i(Mutex[int] m) {
+}
+take_task_i(Task[int] t) {
+}
+
+// Mutex[int] — operator returns a freshly-constructed owned Mutex; must be
+// Mutex-dropped at statement end (temp / fn-arg) and scope exit (binding).
+type MtxBox {
+  int n;
+  [](int i) Mutex[int] {
+    return Mutex[int](this.n + i);
+  }
+  at(int i) Mutex[int] {
+    return Mutex[int](this.n + i);
+  }
+}
+
+test_t0650_mutex_return() `test {
+  b := MtxBox(n: 100);
+  take_mtx_i(b[0]);
+  m := b[1];
+  {
+    use g := m.lock();
+    assert(g.borrow == 101, "operator Mutex binding -> lock");
+  }
+  take_mtx_i(b.at(0));
+}
+
+// MutexGuard[int] — operator returns a guard from this.m.lock(); it must be
+// guard-dropped (unlock) exactly once. Reads are sequential (single underlying
+// Mutex) so no two guards are ever alive simultaneously.
+type MgBox {
+  Mutex[int] m;
+  [](int i) MutexGuard[int] {
+    return this.m.lock();
+  }
+  at(int i) MutexGuard[int] {
+    return this.m.lock();
+  }
+}
+
+test_t0650_mutexguard_return() `test {
+  mgb := MgBox(m: Mutex[int](42));
+  assert(mgb[0].borrow == 42, "operator guard temporary");
+  {
+    g := mgb[0];
+    assert(g.borrow == 42, "operator guard binding");
+  }
+  assert(mgb.at(0).borrow == 42, "method guard baseline");
+}
+
+// Task[int] — operator returns an owned go-spawned Task; must be Task-dropped
+// (G struct + result buffer) exactly once.
+type TaskBox {
+  [](int i) Task[int] {
+    return go worker_t0650();
+  }
+  at(int i) Task[int] {
+    return go worker_t0650();
+  }
+}
+
+test_t0650_task_return() `test(exclude: wasm) {
+  tb := TaskBox();
+  take_task_i(tb[0]);
+  t := tb[1];
+  r := <-t;
+  assert(r == 42, "operator Task awaited");
+  take_task_i(tb.at(0));
+}
+
+// ---------- peel-loop composition over a user `[]` returning a handle ----------
+// rejectIndexExprSingleOwnerMove peels ParenExpr / OptionalUnwrapExpr (T0596 /
+// T0612) before applying the T0650 isUserIndexExpr exemption. The cases above
+// only use the bare `b[i]` shape; these exercise the exemption *through* the
+// peel loop at runtime (an AI agent writes `take((box[i]))` or, for a fallible
+// accessor `[](int i) Mutex[int]?`, `m := box[i]!`). Only the proven-0-leak
+// shapes are live here.
+
+// ParenExpr peel over a plain-handle user `[]` — consume + binding. Proven
+// 0-leak (control row in /tmp/t0650_leak_scope.pr / peel_probe).
+test_t0650_paren_peel() `test {
+  b := MtxBox(n: 500);
+  take_mtx_i((b[0])); // ParenExpr peel, consume site
+  m := (b[1]); // ParenExpr peel, var-decl site
+  {
+    use g := m.lock();
+    assert(g.borrow == 501, "paren-peel binding -> lock");
+  }
+}
+
+// Optional-returning user `[]` at a BINDING site (with and without `!`).
+// Both proven 0-leak: the unwrapped handle becomes a tracked variable whose
+// scope-exit drop frees it exactly once.
+type OptMtxBoxE {
+  int n;
+  [](int i) Mutex[int]? {
+    return Mutex[int](this.n + i);
+  }
+}
+
+test_t0650_optional_bind() `test {
+  b := OptMtxBoxE(n: 700);
+  m := b[0]!; // OptionalUnwrap peel, var-decl site (0-leak)
+  {
+    use g := m.lock();
+    assert(g.borrow == 700, "optional `[]` `!`-bind -> lock");
+  }
+  mo := b[1]; // Optional bind, no unwrap (0-leak)
+  {
+    use g2 := mo!.lock();
+    assert(g2.borrow == 701, "optional `[]` no-unwrap bind -> lock");
+  }
+}
+
+// ---------- DEFERRED behind T0654 (pre-existing codegen leak, NOT T0650) ----------
+// An Optional-returning non-native method/`[]` whose result is `!`-unwrapped
+// at a CONSUME or TEMP site (e.g. `take_mtx_i(b[0]!)`, `use g := b[0]!.lock()`)
+// LEAKS the owned Optional<handle> — the CallExpr/`[]` handle-temp tracking
+// (codegen/expr.go T0555/T0561 + trackUserIndexResult) classifies on the
+// un-peeled `Mutex[int]?` type, so AsMutex/AsTask never fire and the temp is
+// never dropped. The IDENTICAL plain method `at()!` leaks the same, so this is
+// a pre-existing, T0650-independent codegen gap — filed as **T0654**. The
+// binding site (covered live above) is 0-leak. Enable the consume/temp
+// `!`-unwrap rows here once T0654 lands (skeleton/repro in /tmp/t0650_bug_repro.pr,
+// and the Go ownership-pass acceptance is already locked by
+// TestT0650_UserIndexOptionalMutexUnwrapAllowed in ownership_test.go).
+// (Mirrors how this file originally deferred Mutex/Task behind T0650 and how
+// T0647 deferred the T0648 nested-vector case: covered where fixed, not here.)

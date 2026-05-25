@@ -1187,6 +1187,30 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 			if m.Deprecated() != "" {
 				c.warnf(e.Pos(), "use of deprecated method '%s'", e.Field)
 			}
+			// T0627: methods inside a generic type's body access `this` as
+			// *types.Named (not Instance), so the Instance-branch edge
+			// recording is bypassed for `this.method()` calls. Record an
+			// identity-subst edge here so callee clone reqs propagate to the
+			// caller; the eventual concrete call site (Instance branch)
+			// supplies real args and triggers validation in
+			// propagateCloneReqs. Generic-method calls (`this.method[U]()`)
+			// flow through inferAndInstantiateCall and don't need this path.
+			if len(t.TypeParams()) > 0 && len(m.Sig().TypeParams()) == 0 {
+				subst := make(map[*types.TypeParam]types.Type, len(t.TypeParams())+len(parentSubst))
+				for _, tp := range t.TypeParams() {
+					subst[tp] = tp
+				}
+				for k, v := range parentSubst {
+					subst[k] = v
+				}
+				c.info.GenericCallEdges = append(c.info.GenericCallEdges, GenericCallEdge{
+					CallerFunc:   c.curFuncObj,
+					CallerMethod: c.curMethodObj,
+					CalleeMethod: m,
+					Subst:        subst,
+					CallPos:      e.Pos(),
+				})
+			}
 			return types.Substitute(m.Sig(), parentSubst)
 		}
 		c.errorf(e.Pos(), "type %s has no field or method %s", t, e.Field)

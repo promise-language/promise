@@ -124,3 +124,26 @@ test_method_on_generic_arc() `test {
   w2 := w.clone();
   assert(w2.data.len == 2, "Arc element through synth clone");
 }
+
+// --- T0627: method-to-method clone chain through `this` with safe T ---
+// A two-level chain inside a generic type body — `outer_chain` calls
+// `this.inner_chain()`, which calls `data.clone()`. Sema would previously
+// allow this and T0559's codegen backstop would catch only at runtime when
+// T = Task. With T = Arc (refcounted, duplicable), the chain must compile
+// and run leak-free.
+
+type Chainer[T] {
+  Vector[T] data;
+  inner_chain() Vector[T] {
+    return this.data.clone();
+  }
+  outer_chain() Vector[T] {
+    return this.inner_chain();
+  }
+}
+
+test_method_chain_arc() `test {
+  c := Chainer[Arc[int]](data: [Arc[int](1), Arc[int](2)]);
+  v := c.outer_chain();
+  assert(v.len == 2, "method chain arc len");
+}

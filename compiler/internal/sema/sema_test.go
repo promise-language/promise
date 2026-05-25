@@ -15649,6 +15649,242 @@ func TestT0616_MethodInferredTypeArgArcOK(t *testing.T) {
 	`)
 }
 
+// === T0627: method-to-method clone-req propagation through `this` ===
+//
+// Inside a generic type's method body, `this` resolves to *types.Named (not
+// Instance) because resolveMethodSignature sets the receiver to the parametric
+// Named directly. The Instance branch in checkMemberExpr records a
+// GenericCallEdge for `this.method()`; the Named branch did not, so
+// method-to-method chains within a single generic type slipped past the
+// propagation pass. The fix mirrors the Instance branch with an identity
+// substitution for the owner's TypeParams plus the parent-substitution merge.
+
+// Two-level chain inside the same generic type — Task is move-only, must fail
+// at the concrete call site.
+func TestT0627_MethodToMethodTransitiveTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			inner_copy() Vector[T] { return this.data.clone(); }
+			outer_copy() Vector[T] { return this.inner_copy(); }
+		}
+		worker() int { return 42; }
+		test_method_chain() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := w.outer_copy();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Mutex is also a single-owner handle — same chain shape.
+func TestT0627_MethodToMethodTransitiveMutexError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			inner_copy() Vector[T] { return this.data.clone(); }
+			outer_copy() Vector[T] { return this.inner_copy(); }
+		}
+		test_method_chain_mu() {
+			w := Wrapper[Mutex[int]](data: [Mutex[int](5)]);
+			v := w.outer_copy();
+		}
+	`)
+	expectError(t, errs, "Mutex[int] is a single-owner handle")
+}
+
+// Three-level chain — outermost → middle → inner → clone — must still
+// propagate to the user call site.
+func TestT0627_MethodToMethodThreeLevelError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			inner() Vector[T] { return this.data.clone(); }
+			middle() Vector[T] { return this.inner(); }
+			outermost() Vector[T] { return this.middle(); }
+		}
+		worker() int { return 42; }
+		test_three_level() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := w.outermost();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// `this.inherited_method()` on a generic child type calling a generic parent's
+// method that clones — exercises the parentSubst merge path in the fix.
+func TestT0627_MethodToInheritedMethodError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Base[T] {
+			Vector[T] data;
+			inner_copy() Vector[T] { return this.data.clone(); }
+		}
+		type Wrapper[T] is Base[T] {
+			outer_copy() Vector[T] { return this.inner_copy(); }
+		}
+		worker() int { return 42; }
+		test_inherited() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := w.outer_copy();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Same chain shape with Arc — duplicable refcounted handle, must NOT trigger
+// a false rejection.
+func TestT0627_MethodToMethodTransitiveArcOK(t *testing.T) {
+	checkOK(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			inner_copy() Vector[T] { return this.data.clone(); }
+			outer_copy() Vector[T] { return this.inner_copy(); }
+		}
+		test_method_chain_arc() {
+			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			v := w.outer_copy();
+		}
+	`)
+}
+
+// Same chain shape with int — fully Copy type, sanity check.
+func TestT0627_MethodToMethodTransitiveIntOK(t *testing.T) {
+	checkOK(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			inner_copy() Vector[T] { return this.data.clone(); }
+			outer_copy() Vector[T] { return this.inner_copy(); }
+		}
+		test_method_chain_int() {
+			w := Wrapper[int](data: [1, 2, 3]);
+			v := w.outer_copy();
+		}
+	`)
+}
+
+// Outer calls a generic method on `this` (`this.combine[X]()`). The
+// method-TypeParam path flows through inferAndInstantiateCall, not the Named
+// member-access edge — verify the new edge predicate
+// (`len(m.Sig().TypeParams()) == 0`) doesn't break the method-TypeParam case.
+func TestT0627_MethodChainWithMethodTypeParamArcOK(t *testing.T) {
+	checkOK(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			combine[U](U _conv) Vector[T] { return this.data.clone(); }
+			outer(int x) Vector[T] { return this.combine[int](x); }
+		}
+		test_method_param_chain() {
+			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			v := w.outer(42);
+		}
+	`)
+}
+
+// Multi-type-param owner. The identity substitution must include ALL of the
+// type's TypeParams so partial-substitution doesn't smuggle a single-owner
+// handle through. Negative: Pair[int, Task[int]] is rejected.
+func TestT0627_MethodToMethodMultiTypeParamError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Pair[K, V] {
+			Vector[V] values;
+			inner_copy() Vector[V] { return this.values.clone(); }
+			outer_copy() Vector[V] { return this.inner_copy(); }
+		}
+		worker() int { return 42; }
+		test_multi_tp() {
+			p := Pair[int, Task[int]](values: [go worker()]);
+			v := p.outer_copy();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Multi-type-param owner where the FIRST TypeParam is the one cloned —
+// exercises that the edge subst maps every TypeParam, not just the position
+// matching the call's V arg.
+func TestT0627_MethodToMethodMultiTypeParamFirstError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Pair[K, V] {
+			Vector[K] keys;
+			inner_copy() Vector[K] { return this.keys.clone(); }
+			outer_copy() Vector[K] { return this.inner_copy(); }
+		}
+		worker() int { return 42; }
+		test_multi_tp_k() {
+			p := Pair[Task[int], int](keys: [go worker()]);
+			v := p.outer_copy();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Same chain shape but with Map[K, V].clone() — verifies the propagation
+// carries the Map-flavoured opDesc string correctly through method edges.
+func TestT0627_MethodToMethodMapCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			map[string, T] data;
+			inner_copy() map[string, T] { return this.data.clone(); }
+			outer_copy() map[string, T] { return this.inner_copy(); }
+		}
+		worker() int { return 42; }
+		test_map_chain() {
+			d := map[string, Task[int]]();
+			w := Wrapper[Task[int]](data: d);
+			v := w.outer_copy();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Self-recursive method that may either return data.clone() or recurse via
+// this. The propagation pass is fixed-point — self-edges must not loop or
+// drop the requirement. Negative: Task arg must still be caught.
+func TestT0627_SelfRecursiveMethodTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			int n;
+			rec() Vector[T] {
+				if (this.n <= 0) { return this.data.clone(); }
+				return this.rec();
+			}
+		}
+		worker() int { return 42; }
+		test_self_rec() {
+			w := Wrapper[Task[int]](data: [go worker()], n: 0);
+			v := w.rec();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Mutually-recursive methods a→b→a. Each adds an edge; fixed-point iteration
+// must terminate and still propagate the clone req to the concrete call site.
+func TestT0627_MutuallyRecursiveMethodsTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			int n;
+			a() Vector[T] {
+				if (this.n <= 0) { return this.data.clone(); }
+				return this.b();
+			}
+			b() Vector[T] {
+				if (this.n <= 0) { return this.data.clone(); }
+				return this.a();
+			}
+		}
+		worker() int { return 42; }
+		test_mutual_rec() {
+			w := Wrapper[Task[int]](data: [go worker()], n: 0);
+			v := w.a();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
 // === T0482/T0619: implicit structural-clone of a value transitively owning a
 // single-owner handle through a user-type field or enum variant ===
 //

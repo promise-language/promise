@@ -529,6 +529,31 @@ func (c *Checker) findBorrowedNonAliasSafeIdentInBlock(block *ast.Block) *ast.Id
 func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 	c.checkExpr(e.Callee)
 
+	// T0634: An enum-variant constructor call (`EnumType[Args].Variant(arg…)`)
+	// is a constructor, but sema types its callee as a synthetic
+	// *types.Signature (sema/expr.go: the *types.Enum variant branch and
+	// resolveEnumMemberInst both `return types.NewSignature(...)`). It would
+	// therefore otherwise take the permissive function-call path below. When
+	// the variant field type is concrete (non-generic enum), that path happens
+	// to reject a borrowed-parameter arg via isDroppableType; but when the
+	// field type is a bare type parameter (e.g.
+	// `mk_holder[T](T x) Holder[T] { return Holder[T].Wrap(x); }`)
+	// isDroppableType has no *types.TypeParam case → the move is silently
+	// allowed → codegen stores the borrowed value into the variant payload
+	// with no clone → the returned enum and the caller's value alias the same
+	// instance → double-free at scope exit. Route enum-variant-constructor
+	// args through the same tryMoveConsume path used for struct constructors
+	// (and the sig==nil constructor branch below), so a borrowed parameter
+	// yields the standard `add '~'` diagnostic — matching generic/non-generic
+	// struct constructors and the non-generic enum-variant constructor.
+	if c.isEnumVariantConstructorCallee(e.Callee) {
+		for _, arg := range e.Args {
+			c.checkExpr(arg.Value)
+			c.tryMoveConsume(arg.Value)
+		}
+		return
+	}
+
 	sig := c.calleeSignature(e.Callee)
 	if sig != nil {
 		// Function/method call: process args left-to-right.
@@ -947,6 +972,26 @@ func extractEnumForMatch(typ types.Type) *types.Enum {
 		}
 	}
 	return nil
+}
+
+// isEnumVariantConstructorCallee reports whether callee is the callee of an
+// enum-variant constructor call of the form `EnumType[Args].Variant(arg…)`.
+// Both generic and non-generic enums are covered: the member Target's recorded
+// type resolves (via extractEnumForMatch) to a *types.Enum or an enum-origin
+// *types.Instance, and the member Field names a variant of that enum. Enum
+// *methods* (and getters) return false here because LookupVariant does not
+// match a method name, so callee dispatch for `value.method(arg…)` is
+// unaffected. (T0634)
+func (c *Checker) isEnumVariantConstructorCallee(callee ast.Expr) bool {
+	member, ok := callee.(*ast.MemberExpr)
+	if !ok {
+		return false
+	}
+	enum := extractEnumForMatch(c.info.Types[member.Target])
+	if enum == nil {
+		return false
+	}
+	return enum.LookupVariant(member.Field) != nil
 }
 
 func (c *Checker) registerPatternBindings(pat ast.MatchPattern) {

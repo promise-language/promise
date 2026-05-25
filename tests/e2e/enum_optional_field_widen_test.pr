@@ -311,8 +311,14 @@ optional_user_type_none() `test {
 // branch (expr.go) — uncovered by the original T0608 tests, which all
 // construct the variant at a non-generic call site. The bare-widen path is
 // the one that works under typeSubst (explicit `T?` here is tracked by T0630).
+//
+// T0634: the param must be `~T` (owned). A borrowed `T x` moved into a generic
+// enum-variant constructor is now correctly rejected by ownership — it aliased
+// the caller's value into the variant payload, double-freeing droppable inner
+// types (surfaced as `fatal: stack overflow` for T=map[string,int]). The
+// `~T` form is the sound construction; callers pass literals/owned locals.
 
-make_box[T](T x) Box[T] {
+make_box[T](~T x) Box[T] {
   return Box[T].Full(x);
 }
 
@@ -354,6 +360,28 @@ generic_fn_bare_widen_vec() `test {
       if v := s {
         assert(v.len == 2, "generic-fn widened int[]? len 2");
         assert(v[1] == 5, "second element");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// T0634: droppable inner that genuinely frees heap (map[K,V], not a .rodata
+// literal). Before the fix, a borrowed `T x` aliased the caller's map into the
+// variant payload and both were dropped at scope exit → double-free / `fatal:
+// stack overflow`. With `~T` the map is moved (no alias); must run leak-free.
+generic_fn_bare_widen_map() `test {
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
+  Box[map[string, int]] b = make_box(m);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v["a"]! == 1, "generic-fn widened map value a");
+        assert(v["b"]! == 2, "generic-fn widened map value b");
       } else {
         assert(false, "expected present T?");
       }
@@ -572,11 +600,28 @@ generic_fn_explicit_opt_vec() `test {
   }
 }
 
-// Note: a `generic_fn_explicit_opt_map` case (T = `map[K,V]`) is omitted
-// because of T0634 — passing a borrowed `T x` map argument through a generic
-// function body triggers a runtime stack overflow regardless of Optional. The
-// crash is independent of the T0630 fix (reproduces with non-Optional variant
-// fields). Add the map case here once T0634 is resolved.
+// T0634 (resolved): explicit `T? = map[K,V]?` through the `~T?` generic-fn
+// helper. The original double-free (borrowed generic enum-variant ctor arg)
+// is now rejected at the ownership stage; the `~T?` form here is sound and
+// genuinely frees heap, so it locks the leak-free invariant for T=map.
+generic_fn_explicit_opt_map() `test {
+  map[string, int] src = {
+    "k": 9, "j": 8
+  };
+  map[string, int]? o = src;
+  Box[map[string, int]] b = make_box_opt(o);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v["k"]! == 9, "generic-fn explicit map? value k");
+        assert(v["j"]! == 8, "generic-fn explicit map? value j");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
 
 // Explicit `T?` local holding `none` — exercises the non-NoneLit branch under
 // typeSubst (arg.Value is an IdentExpr to an Optional-typed local). Must

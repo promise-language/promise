@@ -5398,6 +5398,117 @@ func TestT0338_VectorLitBorrowedParam(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
 
+// === T0634: generic enum-variant constructor rejects borrowed-param move ===
+
+// `mk_holder[T](T x) Holder[T] { return Holder[T].Wrap(x); }` — sema types the
+// `Holder[T].Wrap` callee as a synthetic *types.Signature, so ownership used to
+// take the permissive function-call path; with T a bare *types.TypeParam,
+// isDroppableType returned false and the borrowed move was silently allowed →
+// codegen aliased the caller's value into the variant payload → double-free
+// (surfaced as `fatal: stack overflow` for T=map[string,int]). The enum-variant
+// constructor must consume its arg like a struct constructor and reject a
+// borrowed parameter.
+func TestT0634_GenericEnumVariantCtorBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Holder[T] { Wrap(T v), Nada, }
+		mk_holder[T](T x) Holder[T] { return Holder[T].Wrap(x); }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'x'")
+}
+
+// The required/correct form: `~T x` transfers ownership to the callee, so the
+// move into the variant is sound. Must compile cleanly.
+func TestT0634_GenericEnumVariantCtorMutParamOK(t *testing.T) {
+	ownerOK(t, `
+		enum Holder[T] { Wrap(T v), Nada, }
+		mk_holder[T](~T x) Holder[T] { return Holder[T].Wrap(x); }
+		test() {}
+	`)
+}
+
+// Regression guard: the non-generic enum-variant constructor was already
+// rejected (concrete arg type → isDroppableType true). The new
+// enum-variant-ctor detector must keep producing the same diagnostic.
+func TestT0634_NonGenericEnumVariantCtorBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Payload { Data(map[string, int] m), Empty, }
+		wrap_it(map[string, int] x) Payload { return Payload.Data(x); }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'x'")
+}
+
+// An owned local consumed into a generic enum-variant constructor is valid:
+// the local is moved into the variant payload (no aliasing). Must compile.
+func TestT0634_GenericEnumVariantCtorOwnedLocalOK(t *testing.T) {
+	ownerOK(t, `
+		enum Holder[T] { Wrap(T v), Nada, }
+		mk_holder[T](~T x) Holder[T] {
+			T local = x;
+			return Holder[T].Wrap(local);
+		}
+		test() {}
+	`)
+}
+
+// The targeted fix must not over-reject generic pass-through (a `return`, not
+// an enum-variant constructor). The rejected blanket
+// isDroppableType(TypeParam)=true alternative broke exactly this shape.
+func TestT0634_GenericPassThroughStillOK(t *testing.T) {
+	ownerOK(t, `
+		identity[T](T val) T { return val; }
+		test() {}
+	`)
+}
+
+// Regression guard for the explicit no-regression claim in
+// isEnumVariantConstructorCallee: an enum *method* call
+// (`enumValue.method(arg…)`) is NOT an enum-variant constructor — the member's
+// Target resolves (via extractEnumForMatch) to the enum, but
+// LookupVariant(methodName) returns nil → the detector returns false → the
+// call takes the normal function-call (Signature) path, not tryMoveConsume.
+// A borrowed argument bound to a *borrowing* enum-method parameter must
+// therefore NOT be rejected. If the detector wrongly matched enum-method
+// callees, this borrowed `s` would be routed through tryMoveConsume and
+// rejected with "cannot move borrowed parameter" — silently breaking all enum
+// method dispatch. Exercises the false outcome of expr.go:994 (the
+// TestT0634_*BorrowedParamRejected cases exercise only the true outcome). (T0634)
+func TestT0634_EnumMethodCallNotTreatedAsVariantCtor(t *testing.T) {
+	ownerOK(t, `
+		enum Tag {
+			A, B,
+			label(&this, string note) string { return note; }
+		}
+		use_method(string s) string {
+			Tag t = Tag.A;
+			return t.label(s);
+		}
+		test() {}
+	`)
+}
+
+// Companion to the above on a *generic* enum instance: the bug was specific to
+// generic enum-variant ctors (arg type is a bare *types.TypeParam). A method
+// call on a generic enum instance must likewise route through normal dispatch
+// (extractEnumForMatch resolves the *types.Instance's Enum origin;
+// LookupVariant(methodName)==nil → false), so a borrowed arg into a borrowing
+// method parameter is accepted. Guards against the detector over-matching
+// generic enum *method* callees. (T0634)
+func TestT0634_GenericEnumMethodCallNotTreatedAsVariantCtor(t *testing.T) {
+	ownerOK(t, `
+		enum Holder[T] {
+			Wrap(T v), Nada,
+			tag_of(&this, string s) string { return s; }
+		}
+		use_it(string label) string {
+			Holder[int] h = Holder[int].Nada;
+			return h.tag_of(label);
+		}
+		test() {}
+	`)
+}
+
 // === T0556: borrowed non-duppable single-owner handles into call args ===
 
 // Mutex[T] has no clone/dup semantics. Without rejection, the callee's

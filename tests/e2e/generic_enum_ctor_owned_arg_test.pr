@@ -1,0 +1,132 @@
+// T0634: Constructing a generic enum variant inside a generic function/method
+// body from an *owned* (`~T`) argument is sound and must run leak-free. The
+// bug: a *borrowed* `T x` moved into `Holder[T].Wrap(x)` aliased the caller's
+// value into the variant payload — the returned enum and the caller's variable
+// both dropped the same instance at scope exit → double-free (it surfaced as
+// `fatal: stack overflow` for T=map[string,int], the first matrix row whose
+// drop genuinely frees heap; string/int[]/int/Pt were false negatives because
+// .rodata literals / trivial drops made the double-free harmless).
+//
+// The fix rejects the borrowed form at the ownership stage (see
+// ownership_test.go TestT0634_*). This file locks the *correct* `~T` form:
+// it must compile and run with zero leaks (T0067 zero-tolerance) across the
+// full inner-type matrix, including the previously-omitted map[K,V] case,
+// using a plain (non-Optional) variant field — independent of T0630.
+enum Holder[T] {
+  Wrap(T v),
+  Nada,
+}
+
+mk_holder[T](~T x) Holder[T] {
+  return Holder[T].Wrap(x);
+}
+
+// --- copy inner (int) ---
+
+owned_arg_int() `test {
+  Holder[int] h = mk_holder(42);
+  match h {
+    Holder.Wrap(v) => assert(v == 42, "int variant holds 42"),
+    Holder.Nada => assert(false, "expected Wrap"),
+  }
+}
+
+// --- droppable inner (string), heap-allocated (not a .rodata literal) ---
+
+owned_arg_string() `test {
+  string s = "ab".to_upper();
+  Holder[string] h = mk_holder(s);
+  match h {
+    Holder.Wrap(v) => assert(v == "AB", "string variant holds AB"),
+    Holder.Nada => assert(false, "expected Wrap"),
+  }
+}
+
+// --- droppable inner (int[]) ---
+
+owned_arg_vec() `test {
+  int[] d = [7, 8, 9];
+  Holder[int[]] h = mk_holder(d);
+  match h {
+    Holder.Wrap(v) => {
+      assert(v.len == 3, "int[] variant len 3");
+      assert(v[0] == 7, "first element");
+      assert(v[2] == 9, "last element");
+    },
+    Holder.Nada => assert(false, "expected Wrap"),
+  }
+}
+
+// --- droppable inner (map[K,V]) — the original crashing case, now sound ---
+
+owned_arg_map() `test {
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
+  Holder[map[string, int]] h = mk_holder(m);
+  match h {
+    Holder.Wrap(v) => {
+      assert(v["a"]! == 1, "map variant value a");
+      assert(v["b"]! == 2, "map variant value b");
+    },
+    Holder.Nada => assert(false, "expected Wrap"),
+  }
+}
+
+// --- user type inner (Pt) ---
+
+type Pt {
+  int x;
+  int y;
+}
+
+owned_arg_user_type() `test {
+  Pt p = Pt(x: 3, y: 4);
+  Holder[Pt] h = mk_holder(p);
+  match h {
+    Holder.Wrap(v) => {
+      assert(v.x == 3, "Pt.x == 3");
+      assert(v.y == 4, "Pt.y == 4");
+    },
+    Holder.Nada => assert(false, "expected Wrap"),
+  }
+}
+
+// --- owned local consumed into a generic enum ctor (no aliasing) ---
+
+mk_holder_local[T](~T x) Holder[T] {
+  T local = x;
+  return Holder[T].Wrap(local);
+}
+
+owned_arg_via_local() `test {
+  map[string, int] m = {
+    "k": 5
+  };
+  Holder[map[string, int]] h = mk_holder_local(m);
+  match h {
+    Holder.Wrap(v) => assert(v["k"]! == 5, "map via local holds 5"),
+    Holder.Nada => assert(false, "expected Wrap"),
+  }
+}
+
+// --- generic METHOD body (owner type generic): owned `~T` into Wrap ---
+
+type Maker[T] {
+  int tag;
+  build(this, ~T x) Holder[T] {
+    return Holder[T].Wrap(x);
+  }
+}
+
+owned_arg_generic_method() `test {
+  Maker[map[string, int]] mk = Maker[map[string, int]](tag: 1);
+  map[string, int] m = {
+    "z": 9
+  };
+  Holder[map[string, int]] h = mk.build(m);
+  match h {
+    Holder.Wrap(v) => assert(v["z"]! == 9, "method-built map holds 9"),
+    Holder.Nada => assert(false, "expected Wrap"),
+  }
+}

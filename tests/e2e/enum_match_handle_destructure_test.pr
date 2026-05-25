@@ -1,0 +1,282 @@
+// T0623: match-destructure of an enum variant whose field transitively owns
+// a single-owner handle (Task/Mutex/MutexGuard) MOVES the subject — the
+// binding takes ownership of the handle and the subject's synth enum drop is
+// suppressed. T0482 conservatively rejected this; T0623 makes it sound.
+// Zero leaks (T0067).
+worker_t0623() int {
+  return 42;
+}
+
+worker_double(int n) int {
+  return n * 2;
+}
+
+// --- Direct Task in a variant — moves and awaits via the binding ---
+
+enum Job {
+  Pending,
+  Running(Task[int] t),
+}
+
+test_match_task_held_moves_and_awaits() `test(exclude: wasm) {
+  job := Job.Running(go worker_t0623());
+  match job {
+    Job.Pending => assert(false, "should not be pending"),
+    Job.Running(t) => {
+      x := <-t;
+      assert(x == 42, "task result through move-out binding");
+    },
+  }
+}
+
+test_match_task_held_drops_without_await() `test(exclude: wasm) {
+  // Move-out binding drops at arm end (Task.drop joins + frees). Zero leaks.
+  job := Job.Running(go worker_t0623());
+  match job {
+    Job.Pending => assert(false, "should not be pending"),
+    Job.Running(t) => assert(true, "binding owns the task; drops at arm end"),
+  }
+}
+
+// --- Mixed variants: one moves, one does not — both arms leak-free ---
+
+enum Event {
+  Stored(string s),
+  Held(Task[int] t),
+}
+
+test_match_mixed_held_path() `test(exclude: wasm) {
+  e := Event.Held(go worker_t0623());
+  match e {
+    Event.Stored(s) => assert(false, "wrong arm"),
+    Event.Held(t) => {
+      n := <-t;
+      assert(n == 42, "held arm awaits");
+    },
+  }
+}
+
+test_match_mixed_stored_path() `test {
+  e := Event.Stored("hi");
+  match e {
+    Event.Stored(s) => assert(s == "hi", "stored arm dups the string"),
+    Event.Held(_) => assert(false, "wrong arm"),
+  }
+}
+
+// --- Mutex in a variant — moves and uses through the binding ---
+
+enum MutexHolder {
+  Empty,
+  Locked(Mutex[int] m),
+}
+
+test_match_mutex_held_moves() `test(exclude: wasm) {
+  h := MutexHolder.Locked(Mutex[int](10));
+  match h {
+    MutexHolder.Empty => assert(false, "wrong arm"),
+    MutexHolder.Locked(m) => {
+      use g := m.lock();
+      assert(g.borrow == 10, "locked through moved mutex");
+      g.borrow = 20;
+      assert(g.borrow == 20, "set via guard");
+    },
+  }
+}
+
+// --- Generic enum variant whose type-param resolves to a handle ---
+
+enum BoxG[T] {
+  Empty,
+  Has(T v),
+}
+
+test_match_generic_box_handle() `test(exclude: wasm) {
+  b := BoxG[Task[int]].Has(go worker_t0623());
+  match b {
+    BoxG.Empty => assert(false, "wrong arm"),
+    BoxG.Has(t) => {
+      n := <-t;
+      assert(n == 42, "generic box task await");
+    },
+  }
+}
+
+// --- Wildcard `_` in the handle slot is NOT a move; subject's drop fires ---
+
+test_match_handle_wildcard_still_drops_subject() `test(exclude: wasm) {
+  job := Job.Running(go worker_t0623());
+  match job {
+    Job.Pending => assert(false, "wrong arm"),
+    Job.Running(_) => assert(true, "wildcard does not move; synth drop frees the Task"),
+  }
+}
+
+// --- Short-form destructure (Held(t) without enum prefix) ---
+
+test_match_short_destructure_form() `test(exclude: wasm) {
+  e := Event.Held(go worker_t0623());
+  match e {
+    Stored(s) => assert(false, "wrong arm"),
+    Held(t) => {
+      n := <-t;
+      assert(n == 42, "short-form destructure moves through");
+    },
+  }
+}
+
+// --- Multiple match-arm shapes on the same subject (sequential matches) ---
+
+enum Pair {
+  None,
+  One(Task[int] a),
+}
+
+test_match_sequential_handles() `test(exclude: wasm) {
+  p1 := Pair.One(go worker_double(5));
+  match p1 {
+    Pair.None => assert(false, "wrong arm"),
+    Pair.One(a) => {
+      n := <-a;
+      assert(n == 10, "first await");
+    },
+  }
+
+  p2 := Pair.One(go worker_double(7));
+  match p2 {
+    Pair.None => assert(false, "wrong arm"),
+    Pair.One(a) => {
+      n := <-a;
+      assert(n == 14, "second await");
+    },
+  }
+}
+
+// --- Multi-field variant with both a dup'd string and a moved handle ---
+// The handle field is null'd in the subject's variant data so the synth enum
+// drop skips it, while the sibling string field is still freed by the synth
+// drop. Without the null-out, either the handle would double-free or the
+// string would leak. Use a heap (non-literal) string so the leak path is real.
+
+enum HeapMulti {
+  Empty,
+  Pair(string s, Task[int] t),
+}
+
+make_heap_string() string {
+  return "hello" + " world";
+}
+
+test_match_multi_field_heap_string() `test(exclude: wasm) {
+  e := HeapMulti.Pair(make_heap_string(), go worker_t0623());
+  match e {
+    HeapMulti.Empty => assert(false, "wrong arm"),
+    HeapMulti.Pair(s, t) => {
+      assert(s == "hello world", "string copy survives");
+      n := <-t;
+      assert(n == 42, "task awaits");
+    },
+  }
+}
+
+// Wildcard in the handle slot of a multi-field variant: NOT a moving arm.
+// The synth drop still frees both the string and the handle.
+
+test_match_multi_field_wildcard_handle() `test(exclude: wasm) {
+  e := HeapMulti.Pair(make_heap_string(), go worker_t0623());
+  match e {
+    HeapMulti.Empty => assert(false, "wrong arm"),
+    HeapMulti.Pair(s, _) => {
+      assert(s == "hello world", "string copy survives");
+    },
+  }
+}
+
+// --- Match in a loop: per-iteration move + drop registration ---
+// Each iteration constructs a fresh Job, moves the Task into the binding, and
+// awaits it. The per-iteration drop binding must be cleaned up correctly so
+// the next iteration starts fresh. Zero leaks across 3 iterations.
+
+test_match_handle_in_loop() `test(exclude: wasm) {
+  int total = 0;
+  for i in 0..3 {
+    job := Job.Running(go worker_t0623());
+    match job {
+      Job.Pending => assert(false, "wrong arm"),
+      Job.Running(t) => {
+        n := <-t;
+        total = total + n;
+      },
+    }
+  }
+  assert(total == 126, "3 iterations * 42");
+}
+
+// --- Two handle fields in one variant: both moved + both null'd ---
+// The moving arm binds both fields; both Tasks transfer ownership to the
+// bindings and both subject slots are null'd so the synth drop skips both.
+
+enum TwoHandles {
+  None,
+  Both(Task[int] a, Task[int] b),
+}
+
+test_match_two_handles_in_variant() `test(exclude: wasm) {
+  p := TwoHandles.Both(go worker_t0623(), go worker_double(21));
+  match p {
+    TwoHandles.None => assert(false, "wrong arm"),
+    TwoHandles.Both(a, b) => {
+      x := <-a;
+      y := <-b;
+      assert(x == 42, "first handle awaited");
+      assert(y == 42, "second handle awaited");
+    },
+  }
+}
+
+// --- Re-initialize the subject after move-out ---
+// After the first match moves `job`, reassigning it must produce a fresh
+// owned binding that the second match can move out again. Tests ownership
+// reset on reassignment and codegen drop-flag reset.
+
+test_match_reinit_after_move() `test(exclude: wasm) {
+  Job job = Job.Running(go worker_t0623());
+  match job {
+    Job.Pending => assert(false, "wrong arm"),
+    Job.Running(t) => {
+      n := <-t;
+      assert(n == 42, "first await");
+    },
+  }
+  job = Job.Running(go worker_double(50));
+  match job {
+    Job.Pending => assert(false, "wrong arm"),
+    Job.Running(t) => {
+      n := <-t;
+      assert(n == 100, "second await after reinit");
+    },
+  }
+}
+
+// --- Early return from a moving arm: scope cleanup correctness ---
+// The moving arm returns immediately after awaiting. Scope-exit cleanup must
+// run the binding's drop (no-op after await consumes the Task) and the
+// subject's synth drop on the null'd variant data (also no-op).
+
+return_from_held(~Job j) int {
+  match j {
+    Job.Pending => {
+      return -1;
+    },
+    Job.Running(t) => {
+      n := <-t;
+      return n;
+    },
+  }
+}
+
+test_match_early_return_from_moving_arm() `test(exclude: wasm) {
+  job := Job.Running(go worker_t0623());
+  r := return_from_held(job);
+  assert(r == 42, "early return from moving arm");
+}

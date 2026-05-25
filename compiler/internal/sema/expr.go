@@ -2599,7 +2599,7 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 		// to EnumVariantMatchPattern/EnumDestructureMatchPattern before checkMatchPattern
 		// would type-check the expression (which would fail for destructure bindings).
 		c.rewriteQualifiedEnumPattern(arm)
-		c.checkMatchPattern(arm.Pattern, subjectType)
+		c.checkMatchPattern(arm.Pattern, e.Subject, subjectType)
 		// B0328: Resolve bare variant names to enum variant patterns.
 		// The parser creates NameMatchPattern for bare identifiers like "Red".
 		// When matching on an enum subject, if the name matches a variant,
@@ -2670,7 +2670,7 @@ func (c *Checker) blockValueType(block *ast.Block) types.Type {
 	return nil
 }
 
-func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type) {
+func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subject ast.Expr, subjectType types.Type) {
 	if pat == nil {
 		return
 	}
@@ -2690,9 +2690,10 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 			c.errorf(p.Pos(), "variant %s.%s has %d fields, got %d bindings",
 				p.Enum, p.Variant, v.NumFields(), len(p.Bindings))
 		}
-		// T0482: a binding that copies out a variant field owning a
-		// single-owner handle double-frees (subject retains the variant).
-		c.checkDestructureNoHandleField(p.Pos(), v, p.Bindings, enumDestructureSubst(subjectType, enum))
+		// T0482/T0623: a binding that copies out a variant field owning a
+		// single-owner handle double-frees unless the subject is an owned
+		// local that can be moved (then the binding takes ownership).
+		c.checkDestructureNoHandleField(p.Pos(), subject, subjectType, v, p.Bindings, enumDestructureSubst(subjectType, enum))
 
 	case *ast.EnumVariantMatchPattern:
 		enum, ok := c.resolveEnumForPattern(p.Module, p.Enum, p.Pos())
@@ -2728,9 +2729,9 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 						c.errorf(p.Pos(), "variant %s has %d fields, got %d bindings",
 							p.Name, v.NumFields(), len(p.Bindings))
 					}
-					// T0482: same handle-copy double-free as the qualified
-					// EnumDestructureMatchPattern form.
-					c.checkDestructureNoHandleField(p.Pos(), v, p.Bindings, enumDestructureSubst(subjectType, enum))
+					// T0482/T0623: same handle-copy double-free / move-out gate as
+					// the qualified EnumDestructureMatchPattern form.
+					c.checkDestructureNoHandleField(p.Pos(), subject, subjectType, v, p.Bindings, enumDestructureSubst(subjectType, enum))
 					return
 				}
 			}

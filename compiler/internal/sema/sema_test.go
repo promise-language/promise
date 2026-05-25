@@ -15985,8 +15985,11 @@ func TestT0482_PushIndexedNamedMutexError(t *testing.T) {
 
 // Match-destructuring a variant that owns a single-owner handle copies the
 // handle while the subject retains its variant → double-free.
+// T0623: an owned-local subject is now allowed — destructure binding takes
+// ownership of the variant's single-owner handle. (Renamed-in-comment from the
+// original T0482 reject; kept TestT0482_* function name for git-blame continuity.)
 func TestT0482_EnumMatchDestructureHandleError(t *testing.T) {
-	errs := checkErrs(t, `
+	checkOK(t, `
 		worker() int { return 42; }
 		enum E { Empty, Held(Task[int] t) }
 		test() {
@@ -15997,13 +16000,11 @@ func TestT0482_EnumMatchDestructureHandleError(t *testing.T) {
 			}
 		}
 	`)
-	expectError(t, errs, "cannot destructure variant Held")
-	expectError(t, errs, "single-owner handle")
 }
 
-// Short-form destructure (Held(tk) without enum prefix) hits the same gate.
+// T0623: short-form destructure on an owned local is likewise allowed.
 func TestT0482_EnumShortDestructureHandleError(t *testing.T) {
-	errs := checkErrs(t, `
+	checkOK(t, `
 		worker() int { return 42; }
 		enum E { Empty, Held(Task[int] t) }
 		test() {
@@ -16014,7 +16015,6 @@ func TestT0482_EnumShortDestructureHandleError(t *testing.T) {
 			}
 		}
 	`)
-	expectError(t, errs, "cannot destructure variant Held")
 }
 
 // `_` binding does NOT copy the field, so it must NOT be gated.
@@ -16173,13 +16173,10 @@ func TestT0482_GenericEnumOriginVariantCloneError(t *testing.T) {
 	expectError(t, errs, "single-owner handle")
 }
 
-// Generic enum match-destructure where the variant field type IS the type
-// param: match on BoxG[Task[int]] binding Has(x) must substitute T→Task[int]
-// and reject. Exercises checkDestructureNoHandleField's subst!=nil branch and
-// enumDestructureSubst returning a non-nil substitution (the existing B4
-// destructure tests all use non-generic enums → subst is always nil).
+// T0623: generic-enum match-destructure on an owned-local subject likewise
+// permitted under the move-out rule (subst flows through to the codegen path).
 func TestT0482_GenericEnumMatchSubstHandleError(t *testing.T) {
-	errs := checkErrs(t, `
+	checkOK(t, `
 		worker() int { return 42; }
 		enum BoxG[T] { Empty, Has(T v) }
 		test() {
@@ -16190,8 +16187,47 @@ func TestT0482_GenericEnumMatchSubstHandleError(t *testing.T) {
 			}
 		}
 	`)
-	expectError(t, errs, "cannot destructure variant Has")
-	expectError(t, errs, "single-owner handle")
+}
+
+// T0623: a borrowed subject (`&E`/`E~`) still cannot be moved out of — the
+// owner retains drop responsibility, so structural-copy would double-free.
+// The tightened reject must point users at the right fix.
+func TestT0623_BorrowedSubjectRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		enum E { Empty, Held(Task[int] t) }
+		consume(E& e) {
+			match e {
+				E.Empty => assert(true, "empty"),
+				E.Held(tk) => assert(true, "held"),
+			}
+		}
+		test() {
+			e := E.Held(go worker());
+			consume(e);
+		}
+	`)
+	expectError(t, errs, "cannot destructure variant Held")
+	expectError(t, errs, "owned local")
+}
+
+// T0623: a non-ident subject (e.g. function-call result) cannot be safely
+// move-out tracked today; the conservative reject persists. Users can bind
+// the result to a local before matching.
+func TestT0623_NonIdentSubjectRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		enum E { Empty, Held(Task[int] t) }
+		make_e() E { return E.Held(go worker()); }
+		test() {
+			match make_e() {
+				E.Empty => assert(true, "empty"),
+				E.Held(tk) => assert(true, "held"),
+			}
+		}
+	`)
+	expectError(t, errs, "cannot destructure variant Held")
+	expectError(t, errs, "owned local")
 }
 
 // Negative: a container-recursive enum with NO handle (JsonValue-shape:
@@ -16244,8 +16280,10 @@ func TestT0482_GenericRecursiveEnumCloneOK(t *testing.T) {
 
 // A match-destructure pattern with MORE bindings than the variant has fields
 // (an arity error) must still run checkDestructureNoHandleField without an
-// index panic: the binding count is clamped to NumFields() and the real
-// handle-owning field is still rejected. Exercises the n>NumFields() clamp.
+// index panic: the binding count is clamped to NumFields(). With T0623's
+// owned-local move-out relaxation, the handle-copy gate no longer fires for
+// this owned-local subject — only the arity error remains. The clamp itself
+// is still exercised (we don't crash indexing past the field count).
 func TestT0482_DestructureExtraBindingsHandleClamp(t *testing.T) {
 	errs := checkErrs(t, `
 		worker() int { return 42; }
@@ -16259,7 +16297,6 @@ func TestT0482_DestructureExtraBindingsHandleClamp(t *testing.T) {
 		}
 	`)
 	expectError(t, errs, "has 1 fields, got 2 bindings")
-	expectError(t, errs, "cannot destructure variant Held")
 }
 
 // The push gate must NOT be bypassable by passing the vector as a `&`

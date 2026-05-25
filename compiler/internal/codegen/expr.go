@@ -5913,7 +5913,7 @@ func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
 		// to prevent double-frees when the enum element is later dropped
 		// (e.g., Slot[K,V] in Map._buckets).
 		enumHasDrop := c.enumInstanceHasDrop(subjectType, enum)
-		return c.genEnumMatch(e, subject, enum, enumLayout, enumHasDrop, subjectType)
+		return c.genEnumMatch(e, e.Subject, subject, enum, enumLayout, enumHasDrop, subjectType)
 	}
 
 	return c.genValueMatch(e, subject, subjectType)
@@ -5935,7 +5935,7 @@ func (c *Compiler) enumInstanceHasDrop(subjectType types.Type, enum *types.Enum)
 }
 
 // genEnumMatch generates a match expression on an enum value using an LLVM switch instruction.
-func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) value.Value {
+func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subjectExpr ast.Expr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) value.Value {
 	// Extract tag from subject
 	var tag value.Value
 	if layout.MaxVariantDataSize == 0 {
@@ -6008,7 +6008,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 				armBorrowedSnapshot[k] = true
 			}
 		}
-		c.bindMatchPattern(arm.Pattern, subject, enum, layout, enumHasDrop, subjectType)
+		c.bindMatchPattern(arm.Pattern, subjectExpr, subject, enum, layout, enumHasDrop, subjectType)
 
 		var armVal value.Value
 		if arm.Body != nil {
@@ -6302,13 +6302,13 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 }
 
 // bindMatchPattern binds pattern variables from a match arm into the current scope.
-func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) {
+func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subjectExpr ast.Expr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) {
 	switch p := pat.(type) {
 	case *ast.EnumDestructureMatchPattern:
-		c.bindEnumDestructure(p.Bindings, p.Variant, subject, enum, layout, enumHasDrop, subjectType)
+		c.bindEnumDestructure(p.Bindings, p.Variant, subjectExpr, subject, enum, layout, enumHasDrop, subjectType)
 
 	case *ast.ShortDestructureMatchPattern:
-		c.bindEnumDestructure(p.Bindings, p.Name, subject, enum, layout, enumHasDrop, subjectType)
+		c.bindEnumDestructure(p.Bindings, p.Name, subjectExpr, subject, enum, layout, enumHasDrop, subjectType)
 
 	case *ast.NameMatchPattern:
 		if p.Name != "_" {
@@ -6331,7 +6331,14 @@ func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subject value.Value, e
 // is dup'd to prevent double-frees when the enum element is later dropped (e.g., Slot
 // elements in Map._buckets). Dup'd bindings get drop flags and scope bindings for
 // proper cleanup in loops and at scope exit.
-func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) {
+//
+// T0623: a destructure arm binding (non-`_`) a variant field whose resolved
+// type transitively owns a single-owner handle (Task/Mutex/MutexGuard) moves
+// out: the binding takes ownership (registered for drop on scope exit) and the
+// subject's synth enum drop flag is cleared so the matched variant is not
+// double-freed. This branch precedes the dup / borrow branches because a
+// single-owner handle is never dup-cloneable.
+func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, subjectExpr ast.Expr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout, enumHasDrop bool, subjectType types.Type) {
 	variant := enum.LookupVariant(variantName)
 	if variant == nil || variant.NumFields() == 0 {
 		return
@@ -6353,6 +6360,16 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	typedDataPtr := c.block.NewBitCast(dataPtr, irtypes.NewPointer(dataType))
 
+	// T0623: compute once whether this arm moves the subject. Used to (a) skip
+	// the dup/borrow path for the handle binding, (b) null out the moved-out
+	// field in the SUBJECT's alloca so the synth enum drop, when it later runs
+	// on the subject, sees a null handle pointer in that slot and skips it
+	// (single-owner-handle drops null-check). Nulling the slot instead of
+	// suppressing the whole synth drop lets other droppable variant fields
+	// (e.g. a sibling string in a Multi(string, Task) variant) still be freed
+	// — clearing the flag would leak them.
+	armMoves, subjectIdent := c.armDestructureMovesSubject(variant, bindings, subjectExpr, subjectType, enum)
+
 	for i, binding := range bindings {
 		if binding == "_" {
 			continue
@@ -6366,6 +6383,23 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 		val := c.block.NewLoad(fieldType, fieldPtr)
 
+		declaredFieldType := variant.Fields()[i].Type()
+		resolved := c.resolveMatchFieldType(declaredFieldType, subjectType, enum)
+
+		// T0623: move-out path for single-owner handles. Owns the handle in the
+		// binding (drop registered, freed on scope exit / consumed via <-t) and
+		// nulls the corresponding slot in the SUBJECT's alloca so the synth
+		// enum drop sees null and skips that slot. Other droppable variant
+		// fields (e.g. a sibling string) are still freed by the synth drop.
+		if armMoves && sema.FirstNestedSingleOwnerHandle(resolved) != nil {
+			bindAlloca := c.createEntryAlloca(fieldType)
+			c.block.NewStore(val, bindAlloca)
+			c.locals[binding] = bindAlloca
+			c.maybeRegisterDrop(binding, bindAlloca, resolved)
+			c.nullSubjectHandleSlot(subjectIdent, internalType, dataType, i, fieldType)
+			continue
+		}
+
 		// B0232/B0236: Dup droppable fields from droppable enums to create independent copies.
 		// Without this, match-extracted values share instance pointers with the enum
 		// data. When the enum element is dropped (e.g., Map._buckets scope exit or
@@ -6376,14 +6410,12 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		// treats TypeParam variant fields as copy (isCopyField(TypeParam)==true) and
 		// emits no explicit .clone() for them, so the substituted concrete type must
 		// go through match-dup to avoid a shallow alias → double-free.
-		declaredFieldType := variant.Fields()[i].Type()
 		if enumHasDrop && c.matchFieldNeedsDup(declaredFieldType, subjectType, enum) {
 			suppress := c.suppressMatchDup
 			if suppress && types.ContainsTypeParam(declaredFieldType) {
 				suppress = false
 			}
 			if !suppress {
-				resolved := c.resolveMatchFieldType(declaredFieldType, subjectType, enum)
 				c.dupMatchBinding(binding, val, fieldType, resolved)
 				continue
 			}
@@ -6400,7 +6432,6 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		// variable as owned and transfer ownership, causing double-free with
 		// the synth enum drop's Optional/Array walk.
 		if enumHasDrop {
-			resolved := c.resolveMatchFieldType(variant.Fields()[i].Type(), subjectType, enum)
 			if c.matchBindingIsBorrow(resolved) {
 				if c.matchBorrowedIdents == nil {
 					c.matchBorrowedIdents = make(map[string]bool)
@@ -6409,6 +6440,57 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 			}
 		}
 	}
+}
+
+// nullSubjectHandleSlot zeroes the moved-out variant-field slot in the
+// SUBJECT's enum-value alloca so the synth enum drop, walking the subject at
+// outer scope exit, sees null in that slot and skips it (single-owner-handle
+// drop functions all null-check before freeing). No-op when the subject ident
+// has no entry in c.locals (defensive — shouldn't happen given the sema gate
+// already required an owned-local ident). (T0623)
+func (c *Compiler) nullSubjectHandleSlot(subjectIdent string, internalType *irtypes.StructType, dataType *irtypes.StructType, fieldIdx int, fieldType irtypes.Type) {
+	if subjectIdent == "" {
+		return
+	}
+	subjAlloca, ok := c.locals[subjectIdent]
+	if !ok {
+		return
+	}
+	subjDataPtr := c.block.NewGetElementPtr(internalType, subjAlloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	subjTypedDataPtr := c.block.NewBitCast(subjDataPtr, irtypes.NewPointer(dataType))
+	subjFieldPtr := c.block.NewGetElementPtr(dataType, subjTypedDataPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+	c.block.NewStore(constant.NewNull(fieldType.(*irtypes.PointerType)), subjFieldPtr)
+}
+
+// armDestructureMovesSubject mirrors the ownership predicate: returns true and
+// the subject ident name when this arm's destructure binds (non-`_`) a variant
+// field whose resolved type transitively owns a single-owner handle AND the
+// subject is an owned-local ident (sema gate already enforced that owned-local
+// invariant; this just discovers the ident name for the null-out store). (T0623)
+func (c *Compiler) armDestructureMovesSubject(variant *types.Variant, bindings []string, subjectExpr ast.Expr, subjectType types.Type, enum *types.Enum) (bool, string) {
+	if variant == nil || subjectExpr == nil {
+		return false, ""
+	}
+	id, ok := subjectExpr.(*ast.IdentExpr)
+	if !ok {
+		return false, ""
+	}
+	n := len(bindings)
+	if n > variant.NumFields() {
+		n = variant.NumFields()
+	}
+	for i := 0; i < n; i++ {
+		if bindings[i] == "_" {
+			continue
+		}
+		ft := c.resolveMatchFieldType(variant.Fields()[i].Type(), subjectType, enum)
+		if sema.FirstNestedSingleOwnerHandle(ft) != nil {
+			return true, id.Name
+		}
+	}
+	return false, ""
 }
 
 // matchBindingIsBorrow reports whether the bound variant-field type holds a

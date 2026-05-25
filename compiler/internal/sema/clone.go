@@ -173,6 +173,12 @@ func isStdNativeContainerNamed(n *types.Named) bool {
 	return false
 }
 
+// FirstNestedSingleOwnerHandle is the exported entry point for cross-package
+// use (codegen / ownership) of the deep single-owner-handle predicate. (T0623)
+func FirstNestedSingleOwnerHandle(typ types.Type) types.Type {
+	return firstNestedSingleOwnerHandle(typ, nil)
+}
+
 // firstNestedSingleOwnerHandle is like firstSingleOwnerHandle but ALSO recurses
 // into *types.Named fields and *types.Enum variant fields (cycle-guarded). It
 // gates the IMPLICIT structural-clone contexts — dupHeapValue /
@@ -364,16 +370,18 @@ func (c *Checker) checkPushNestedHandleArg(e *ast.CallExpr) {
 	}
 }
 
-// checkDestructureNoHandleField rejects a match destructure that binds (copies
-// out) a variant field whose type transitively owns a single-owner handle
-// (Task/Mutex/MutexGuard) — directly or nested in a user-type field. The
-// binding is a structural copy while the subject retains its variant, so both
-// the binding and the subject drop the same handle → double-free. (A `_`
-// binding does not copy the field, so it is safe.) subst is the subject's
-// type-arg substitution for a generic enum instance (may be nil). This is the
-// conservative gate; the fully-correct move-out semantics are tracked
-// separately. (T0482)
-func (c *Checker) checkDestructureNoHandleField(pos ast.Pos, v *types.Variant, bindings []string, subst map[*types.TypeParam]types.Type) {
+// checkDestructureNoHandleField rejects a match destructure that binds out a
+// variant field whose type transitively owns a single-owner handle
+// (Task/Mutex/MutexGuard) when the subject is NOT a movable owned local —
+// i.e. when move-out is not possible, so structural-copy would double-free.
+//
+// T0623 relaxes the T0482 conservative gate: when the subject is an owned
+// local ident (not a borrowed `&E`/`E~`, not a non-ident expression), the
+// binding TAKES OWNERSHIP of the handle (move-out semantics implemented in
+// ownership + codegen). For those forms, no error is emitted here. A `_`
+// binding never copies and is always safe. subst is the subject's type-arg
+// substitution for a generic enum instance (may be nil).
+func (c *Checker) checkDestructureNoHandleField(pos ast.Pos, subject ast.Expr, subjectType types.Type, v *types.Variant, bindings []string, subst map[*types.TypeParam]types.Type) {
 	if v == nil {
 		return
 	}
@@ -381,6 +389,7 @@ func (c *Checker) checkDestructureNoHandleField(pos ast.Pos, v *types.Variant, b
 	if n > v.NumFields() {
 		n = v.NumFields()
 	}
+	movable := c.subjectIsMovableOwnedLocal(subject, subjectType)
 	for i := 0; i < n; i++ {
 		if bindings[i] == "_" {
 			continue
@@ -389,12 +398,44 @@ func (c *Checker) checkDestructureNoHandleField(pos ast.Pos, v *types.Variant, b
 		if subst != nil {
 			ft = types.Substitute(ft, subst)
 		}
-		if off := firstNestedSingleOwnerHandle(ft, nil); off != nil {
-			c.errorf(pos,
-				"cannot destructure variant %s: binding '%s' copies %s, a single-owner handle with no clone() semantics — both the binding and the matched value would drop it (single-owner handles are move-only)",
-				v.Name(), bindings[i], off)
+		off := firstNestedSingleOwnerHandle(ft, nil)
+		if off == nil {
+			continue
 		}
+		if movable {
+			// T0623: move-out — binding takes ownership; ownership marks the
+			// subject as Moved and codegen clears the subject's drop flag.
+			continue
+		}
+		c.errorf(pos,
+			"cannot destructure variant %s: subject must be an owned local to move out %s (binding '%s') — single-owner handles are move-only; assign to a local before matching, or use '_' to skip the field",
+			v.Name(), off, bindings[i])
 	}
+}
+
+// subjectIsMovableOwnedLocal reports whether subject is an owned-local ident
+// whose static type permits move-out (not a borrow). Used by T0623 to gate the
+// relaxed-destructure rule. The owner-resolution mirrors the codegen / ownership
+// idiom — a borrow (`&E`/`E~`) cannot be moved out of (its parent owner still
+// drops it), but a plain ident binding `e := ...` can. Non-ident subjects
+// (function-call return, field access, this) keep the T0482-style reject.
+func (c *Checker) subjectIsMovableOwnedLocal(subject ast.Expr, subjectType types.Type) bool {
+	if subject == nil {
+		return false
+	}
+	id, ok := subject.(*ast.IdentExpr)
+	if !ok {
+		return false
+	}
+	if id.Name == "_" {
+		return false
+	}
+	// Reject borrowed subjects.
+	switch subjectType.(type) {
+	case *types.SharedRef, *types.MutRef:
+		return false
+	}
+	return true
 }
 
 // enumVariantSubst returns the variant lookup and type-arg substitution for a

@@ -8725,3 +8725,114 @@ func TestT0612_OptionalUnwrapIntArrayElementAllowed(t *testing.T) {
 		}
 	`)
 }
+
+// === T0623: match-destructure of single-owner-handle variant moves subject ===
+
+// A destructure arm binding a single-owner-handle variant field consumes the
+// subject — using the subject after the match is a use-after-move.
+func TestT0623_MatchHandleDestructureMovesSubject(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		enum E { Empty, Held(Task[int] t) }
+		test() {
+			e := E.Held(go worker());
+			match e {
+				E.Empty => assert(true, "empty"),
+				E.Held(tk) => assert(true, "held"),
+			}
+			match e {
+				E.Empty => assert(true, "again"),
+				E.Held(_) => assert(true, "again held"),
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'e'")
+}
+
+// Partial match — one arm destructures the handle, another doesn't. The
+// arm-state merge propagates Moved through the non-moving arm too, so the
+// subject is moved after the match overall.
+func TestT0623_MatchPartialMovesSubject(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		enum E { Stored(string s), Held(Task[int] t) }
+		test() {
+			e := E.Held(go worker());
+			match e {
+				E.Stored(s) => assert(s == "x", "stored"),
+				E.Held(tk) => assert(true, "held"),
+			}
+			match e {
+				E.Stored(s) => assert(true, "again stored"),
+				E.Held(_) => assert(true, "again held"),
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'e'")
+}
+
+// Wildcard `_` binding on the handle variant does NOT consume the subject —
+// no move-out, no use-after-move on the second match.
+func TestT0623_MatchHandleWildcardDoesNotMoveSubject(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		enum E { Empty, Held(Task[int] t) }
+		test() {
+			e := E.Held(go worker());
+			match e {
+				E.Empty => assert(true, "empty"),
+				E.Held(_) => assert(true, "held"),
+			}
+			match e {
+				E.Empty => assert(true, "again"),
+				E.Held(_) => assert(true, "again held"),
+			}
+		}
+	`)
+}
+
+// A plain non-Copy `E e` parameter is Borrowed (the caller owns the enum, the
+// callee only reads it). Sema's IdentExpr-with-non-ref-type rule accepts the
+// destructure (the static type is `E`, not `E&`/`E~`), but moving out of a
+// borrowed payload would alias the caller's variant data → double-free at the
+// caller's synth enum drop. Ownership must reject this with a clear error.
+func TestT0623_MatchBorrowedParamSubjectRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		enum E { Empty, Held(Task[int] t) }
+		consume(E e) {
+			match e {
+				E.Empty => assert(true, "empty"),
+				E.Held(t) => assert(true, "held"),
+			}
+		}
+		test() {
+			e := E.Held(go worker());
+			consume(e);
+		}
+	`)
+	expectOwnerError(t, errs, "borrowed 'e'")
+}
+
+// Generic enum instantiated at a handle type (BoxG[Task[int]]) likewise moves
+// the subject. Exercises the BuildSubstMap branch in armMovesSubject — the
+// non-generic tests above use *types.Enum directly and never hit the *Instance
+// + substitution path.
+func TestT0623_MatchGenericEnumHandleMovesSubject(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		enum BoxG[T] { Empty, Has(T v) }
+		test() {
+			b := BoxG[Task[int]].Has(go worker());
+			match b {
+				BoxG.Empty => assert(true, "empty"),
+				BoxG.Has(t) => assert(true, "has"),
+			}
+			match b {
+				BoxG.Empty => assert(true, "again"),
+				BoxG.Has(_) => assert(true, "again has"),
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'b'")
+}

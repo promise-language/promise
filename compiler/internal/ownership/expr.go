@@ -2,6 +2,7 @@ package ownership
 
 import (
 	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/sema"
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
@@ -813,6 +814,8 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 		return
 	}
 
+	subjectType := c.info.Types[e.Subject]
+
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	var states []StateMap
@@ -822,6 +825,23 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 		c.state = savedState.clone()
 		c.borrows = savedBorrows.Clone()
 		c.registerPatternBindings(arm.Pattern)
+		// T0623: a destructure arm binding (non-`_`) a variant field whose
+		// resolved type transitively owns a single-owner handle takes ownership
+		// of the subject's variant payload. Mark the subject as Moved inside
+		// this arm's state — the merge across arms then propagates "subject is
+		// moved after the match" through non-moving arms too (Owned ∧ Moved →
+		// Moved), satisfying the partial-move acceptance criterion.
+		//
+		// A borrowed-parameter subject (plain non-Copy `E e` param — the caller
+		// owns the enum, the callee borrows it) cannot move out: the binding
+		// would alias the caller-owned variant payload, and the caller's drop
+		// at scope exit would double-free. Sema's IdentExpr check accepts the
+		// callee-side ident (the static type is `E`, not `E&`/`E~`); ownership
+		// is the layer with the Borrowed-state info to reject it cleanly.
+		if armMovesSubject(arm.Pattern, subjectType) {
+			c.rejectBorrowedMoveSubject(e.Subject, arm.Pattern)
+			c.tryMove(e.Subject)
+		}
 		if arm.Guard != nil {
 			c.checkExpr(arm.Guard)
 		}
@@ -843,6 +863,90 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 	}
 	c.state = resultState
 	c.borrows = resultBorrows
+}
+
+// armMovesSubject reports whether a match arm's destructure pattern binds out
+// a variant field whose resolved type transitively owns a single-owner handle
+// (Task/Mutex/MutexGuard). Such an arm consumes the subject: the binding takes
+// ownership of the handle and the subject must be marked Moved so subsequent
+// uses (and the synth enum drop) do not double-free. (T0623)
+func armMovesSubject(pat ast.MatchPattern, subjectType types.Type) bool {
+	if pat == nil || subjectType == nil {
+		return false
+	}
+	var bindings []string
+	var variantName string
+	switch p := pat.(type) {
+	case *ast.EnumDestructureMatchPattern:
+		bindings = p.Bindings
+		variantName = p.Variant
+	case *ast.ShortDestructureMatchPattern:
+		bindings = p.Bindings
+		variantName = p.Name
+	default:
+		return false
+	}
+	enum := extractEnumForMatch(subjectType)
+	if enum == nil {
+		return false
+	}
+	v := enum.LookupVariant(variantName)
+	if v == nil {
+		return false
+	}
+	var subst map[*types.TypeParam]types.Type
+	if inst, ok := subjectType.(*types.Instance); ok && len(enum.TypeParams()) > 0 {
+		subst = types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
+	}
+	n := len(bindings)
+	if n > v.NumFields() {
+		n = v.NumFields()
+	}
+	for i := 0; i < n; i++ {
+		if bindings[i] == "_" {
+			continue
+		}
+		ft := v.Fields()[i].Type()
+		if subst != nil {
+			ft = types.Substitute(ft, subst)
+		}
+		if sema.FirstNestedSingleOwnerHandle(ft) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// rejectBorrowedMoveSubject errors when a destructure arm would move out of a
+// Borrowed-state ident (typically a plain non-Copy `E e` parameter — the caller
+// owns the enum, the callee only reads it). Moving out would alias the caller-
+// owned variant payload, and the caller's synth enum drop would double-free
+// the handle the binding now owns. (T0623)
+func (c *Checker) rejectBorrowedMoveSubject(subject ast.Expr, pat ast.MatchPattern) {
+	id, ok := subject.(*ast.IdentExpr)
+	if !ok {
+		return
+	}
+	if c.state[id.Name] != Borrowed {
+		return
+	}
+	c.errorf(pat.Pos(),
+		"cannot destructure a variant owning a single-owner handle from borrowed '%s': move-out would alias the owner's payload and double-free; bind to a local owned variable before matching, or use '_' to skip the handle field",
+		id.Name)
+}
+
+// extractEnumForMatch unwraps an Instance to its *types.Enum origin, or returns
+// a bare *types.Enum directly. Used by armMovesSubject. (T0623)
+func extractEnumForMatch(typ types.Type) *types.Enum {
+	switch t := typ.(type) {
+	case *types.Enum:
+		return t
+	case *types.Instance:
+		if e, ok := t.Origin().(*types.Enum); ok {
+			return e
+		}
+	}
+	return nil
 }
 
 func (c *Checker) registerPatternBindings(pat ast.MatchPattern) {

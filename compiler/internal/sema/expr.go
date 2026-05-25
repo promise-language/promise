@@ -1062,6 +1062,11 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 		return nil
 	}
 
+	// T0482: gate Vector.push of an implicit-clone (non-consuming) source
+	// whose element type transitively owns a single-owner handle nested in a
+	// user-type field / enum variant.
+	c.checkPushNestedHandleArg(e)
+
 	// Same-file getter called as function: greeting() → error
 	if ident, ok := e.Callee.(*ast.IdentExpr); ok {
 		if obj := c.lookup(ident.Name); obj != nil {
@@ -1759,6 +1764,27 @@ func (c *Checker) checkSliceExpr(e *ast.SliceExpr) types.Type {
 
 	if named != nil {
 		if m := named.LookupMethod("[:]"); m != nil {
+			// T0482: slicing always element-dups (the [:] method copies each
+			// element into the new container — there is no move form). If the
+			// element type transitively owns a single-owner handle
+			// (Task/Mutex/MutexGuard) — directly (Vector[Task]) or nested in a
+			// user-type field / enum variant (Vector[Holder] where
+			// Holder{Task}) — the dup shallow-copies the handle pointer and
+			// double-frees at drop. Reject at sema (covers the T0387
+			// polymorphic-slice shape too).
+			var sliceElem types.Type
+			if ev, ok := types.AsVector(target); ok {
+				sliceElem = ev
+			} else if ea, _, ok := types.AsArray(target); ok {
+				sliceElem = ea
+			}
+			if sliceElem != nil {
+				if off := firstNestedSingleOwnerHandle(sliceElem, nil); off != nil {
+					c.errorf(e.Pos(), "%s cannot be sliced: it contains %s, a single-owner handle with no clone() semantics (single-owner handles are move-only)",
+						target, off)
+					return nil
+				}
+			}
 			sig := m.Sig()
 			if subst != nil {
 				sig = types.Substitute(sig, subst).(*types.Signature)
@@ -2640,6 +2666,9 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 			c.errorf(p.Pos(), "variant %s.%s has %d fields, got %d bindings",
 				p.Enum, p.Variant, v.NumFields(), len(p.Bindings))
 		}
+		// T0482: a binding that copies out a variant field owning a
+		// single-owner handle double-frees (subject retains the variant).
+		c.checkDestructureNoHandleField(p.Pos(), v, p.Bindings, enumDestructureSubst(subjectType, enum))
 
 	case *ast.EnumVariantMatchPattern:
 		enum, ok := c.resolveEnumForPattern(p.Module, p.Enum, p.Pos())
@@ -2675,6 +2704,9 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 						c.errorf(p.Pos(), "variant %s has %d fields, got %d bindings",
 							p.Name, v.NumFields(), len(p.Bindings))
 					}
+					// T0482: same handle-copy double-free as the qualified
+					// EnumDestructureMatchPattern form.
+					c.checkDestructureNoHandleField(p.Pos(), v, p.Bindings, enumDestructureSubst(subjectType, enum))
 					return
 				}
 			}

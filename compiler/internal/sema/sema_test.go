@@ -15648,3 +15648,399 @@ func TestT0616_MethodInferredTypeArgArcOK(t *testing.T) {
 		}
 	`)
 }
+
+// === T0482/T0619: implicit structural-clone of a value transitively owning a
+// single-owner handle through a user-type field or enum variant ===
+//
+// firstNestedSingleOwnerHandle extends T0545's shallow predicate to recurse
+// *types.Named fields and *types.Enum variant fields (cycle-guarded). The
+// implicit-clone contexts — native container clone()/filled(), vector slice,
+// push of an indexed (always-duped) element, enum match-destructure binding —
+// would shallow-copy the nested handle pointer and double-free at drop.
+
+// Vector[Holder] where Holder owns a Task via a field: native clone() must be
+// a clean sema error (was a runtime SIGSEGV double-free).
+func TestT0482_VectorNamedHandleFieldCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		type Holder { Task[int] t; }
+		test() {
+			src := [Holder(t: go worker())];
+			c := src.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "single-owner handle")
+}
+
+// Vector[Box] where Box is an enum with a Task variant field: native clone()
+// must be a clean sema error (was a compiler Go-panic pre-T0545, then a
+// residual runtime double-free).
+func TestT0482_VectorEnumVariantHandleCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		enum Box { Empty, Has(Task[int] t) }
+		test() {
+			v := Vector[Box]();
+			v.push(Box.Has(go worker()));
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "single-owner handle")
+}
+
+// .filled() on a Vector of a handle-owning user type is the same unsound dup.
+func TestT0482_VectorNamedHandleFilledError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		type Holder { Task[int] t; }
+		test() {
+			h := Holder(t: go worker());
+			v := Holder[].filled(h, 3);
+		}
+	`)
+	expectError(t, errs, "cannot be filled")
+}
+
+// Slicing a Vector of a handle-owning user type element-dups each element.
+func TestT0482_VectorNamedHandleSliceError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		type Holder { Task[int] t; }
+		test() {
+			src := [Holder(t: go worker())];
+			Holder[] sl = src[0:1];
+		}
+	`)
+	expectError(t, errs, "cannot be sliced")
+	expectError(t, errs, "single-owner handle")
+}
+
+// Pushing an indexed element (always element-duped by codegen, T0376) of a
+// handle-owning user type shares the handle pointer with the source.
+func TestT0482_PushIndexedNamedHandleError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		type Holder { Task[int] t; }
+		test() {
+			src := [Holder(t: go worker())];
+			dest := Holder[]();
+			dest.push(src[0]);
+		}
+	`)
+	expectError(t, errs, "cannot push")
+	expectError(t, errs, "single-owner handle")
+}
+
+// Mutex nested in a user-type field behaves the same as Task.
+func TestT0482_PushIndexedNamedMutexError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder { Mutex[int] m; }
+		test() {
+			src := [Holder(m: Mutex[int](1))];
+			dest := Holder[]();
+			dest.push(src[0]);
+		}
+	`)
+	expectError(t, errs, "cannot push")
+	expectError(t, errs, "single-owner handle")
+}
+
+// Match-destructuring a variant that owns a single-owner handle copies the
+// handle while the subject retains its variant → double-free.
+func TestT0482_EnumMatchDestructureHandleError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		enum E { Empty, Held(Task[int] t) }
+		test() {
+			e := E.Held(go worker());
+			match e {
+				E.Empty => assert(true, "empty"),
+				E.Held(tk) => assert(true, "held"),
+			}
+		}
+	`)
+	expectError(t, errs, "cannot destructure variant Held")
+	expectError(t, errs, "single-owner handle")
+}
+
+// Short-form destructure (Held(tk) without enum prefix) hits the same gate.
+func TestT0482_EnumShortDestructureHandleError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		enum E { Empty, Held(Task[int] t) }
+		test() {
+			e := E.Held(go worker());
+			match e {
+				Empty => assert(true, "empty"),
+				Held(tk) => assert(true, "held"),
+			}
+		}
+	`)
+	expectError(t, errs, "cannot destructure variant Held")
+}
+
+// `_` binding does NOT copy the field, so it must NOT be gated.
+func TestT0482_EnumMatchWildcardHandleOK(t *testing.T) {
+	checkOK(t, `
+		worker() int { return 42; }
+		enum E { Empty, Held(Task[int] t) }
+		test() {
+			e := E.Held(go worker());
+			match e {
+				E.Empty => assert(true, "empty"),
+				E.Held(_) => assert(true, "held"),
+			}
+		}
+	`)
+}
+
+// Negative: a user type owning only a refcounted handle (Arc) is cloneable —
+// the deep predicate must skip the std Arc origin and return nil.
+func TestT0482_VectorArcFieldCloneOK(t *testing.T) {
+	checkOK(t, `
+		type Wrap { Arc[int] a; }
+		test() {
+			v := Vector[Wrap]();
+			v.push(Wrap(a: Arc[int](7)));
+			v2 := v.clone();
+		}
+	`)
+}
+
+// Negative: pushing a freshly-constructed handle-owning value is a move, not
+// an implicit clone — must stay valid (T0508 move semantics preserved).
+func TestT0482_PushFreshNamedHandleOK(t *testing.T) {
+	checkOK(t, `
+		worker() int { return 42; }
+		type Holder { Task[int] t; }
+		test() {
+			dest := Holder[]();
+			dest.push(Holder(t: go worker()));
+		}
+	`)
+}
+
+// Negative: a flat Vector[Task] direct-element push of a fresh task is the
+// T0508 move-only model and must NOT be gated by B3's deep predicate.
+func TestT0482_FlatVectorTaskPushOK(t *testing.T) {
+	checkOK(t, `
+		worker() int { return 42; }
+		test() {
+			v := Vector[Task[int]]();
+			v.push(go worker());
+		}
+	`)
+}
+
+// Negative: a recursive user type with NO handle must clone cleanly — proves
+// firstNestedSingleOwnerHandle's cycle guard terminates without false positive.
+func TestT0482_RecursiveNamedNoHandleCloneOK(t *testing.T) {
+	checkOK(t, `
+		type Node { Node? next; int v; }
+		test() {
+			v := Vector[Node]();
+			v.push(Node(next: none, v: 1));
+			v2 := v.clone();
+		}
+	`)
+}
+
+// Negative: a string-variant enum match-destructure is safe — strings are
+// deep-copied (dupString), so the deep predicate must yield nil for string.
+func TestT0482_EnumMatchStringVariantOK(t *testing.T) {
+	checkOK(t, `
+		enum S { Empty, Has(string v) }
+		test() {
+			s := S.Has("hi");
+			match s {
+				S.Empty => assert(false, "no"),
+				S.Has(x) => assert(x == "hi", "got"),
+			}
+		}
+	`)
+}
+
+// Generic Box[T]{T v} instantiated with Task: the concrete container site
+// (Vector[Box[Task[int]]].clone()) must be gated via the deep predicate's
+// generic-origin field recursion under the type-arg substitution. (An unbound
+// T at the generic decl correctly yields nil — that residual is T0616.)
+func TestT0482_GenericNamedHandleCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		type Box[T] { T v; }
+		test() {
+			b := Box[Task[int]](v: go worker());
+			v := Vector[Box[Task[int]]]();
+			v.push(b);
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "single-owner handle")
+}
+
+// --- T0482 deep-predicate branch coverage (firstNestedSingleOwnerHandle) ---
+
+// Array-typed field that owns a handle: Vector[ArrHolder].clone() must be a
+// clean sema error. Exercises the *types.Array recursion branch of the deep
+// predicate (clone.go) — distinct from the Optional/Tuple/Instance branches
+// covered by the existing TestT0482_* set. Fixed-size arrays element-copy, so
+// a Task[int][2] field shallow-copies the handle pointers → double-free.
+func TestT0482_ArrayFieldHandleCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		type ArrHolder { Task[int][2] arr; }
+		test() {
+			v := Vector[ArrHolder]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "single-owner handle")
+}
+
+// Generic user type whose handle lives in a CONCRETE (non-type-param) field:
+// PairG[int] — TypeArgs=[int] carry no handle, so the predicate must recurse
+// the generic origin's AllFields() under the {A:int} subst and find the
+// concrete Task[int] field. This is the true *types.Instance→*types.Named
+// origin-subst path; TestT0482_GenericNamedHandleCloneError (Box[Task[int]])
+// short-circuits via the TypeArgs recursion before reaching it.
+func TestT0482_GenericNamedOriginFieldCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		type PairG[A] { A first; Task[int] second; }
+		test() {
+			v := Vector[PairG[int]]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "single-owner handle")
+}
+
+// Generic enum whose handle lives in a concrete variant field: BoxG[int] —
+// TypeArgs=[int] carry no handle, so the predicate must recurse the generic
+// *types.Enum origin's variants under the {T:int} subst. Exercises the
+// *types.Instance→*types.Enum origin-subst branch (clone.go).
+func TestT0482_GenericEnumOriginVariantCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		enum BoxG[T] { Empty, Has(T data, Task[int] handle) }
+		test() {
+			v := Vector[BoxG[int]]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "single-owner handle")
+}
+
+// Generic enum match-destructure where the variant field type IS the type
+// param: match on BoxG[Task[int]] binding Has(x) must substitute T→Task[int]
+// and reject. Exercises checkDestructureNoHandleField's subst!=nil branch and
+// enumDestructureSubst returning a non-nil substitution (the existing B4
+// destructure tests all use non-generic enums → subst is always nil).
+func TestT0482_GenericEnumMatchSubstHandleError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		enum BoxG[T] { Empty, Has(T v) }
+		test() {
+			b := BoxG[Task[int]].Has(go worker());
+			match b {
+				BoxG.Empty => assert(false, "no"),
+				BoxG.Has(x) => assert(true, "has"),
+			}
+		}
+	`)
+	expectError(t, errs, "cannot destructure variant Has")
+	expectError(t, errs, "single-owner handle")
+}
+
+// Negative: a container-recursive enum with NO handle (JsonValue-shape:
+// recursion via TreeC[] indirection) must clone cleanly. Proves the deep
+// predicate's *types.Enum cycle guard (seen[origin]) terminates without a
+// false positive or infinite recursion. (A direct TreeC? self-reference is a
+// separate pre-existing codegen layout bug — see B-tracker — so the supported
+// container-indirection form is used, mirroring modules/json JsonValue.)
+func TestT0482_RecursiveEnumContainerNoHandleCloneOK(t *testing.T) {
+	checkOK(t, `
+		enum TreeC { Leaf(int v), Branch(TreeC[] children) }
+		test() {
+			v := Vector[TreeC]();
+			v.push(TreeC.Leaf(1));
+			v2 := v.clone();
+		}
+	`)
+}
+
+// Negative: a user type whose only field is a std Set must clone cleanly —
+// isStdNativeContainerNamed must classify Set (looked up by Obj().Name(),
+// not a Typ* sentinel) as a native container so the predicate does NOT
+// recurse its internals and returns nil.
+func TestT0482_VectorSetFieldCloneOK(t *testing.T) {
+	checkOK(t, `
+		type SetWrap { Set[int] s; }
+		test() {
+			v := Vector[SetWrap]();
+			v2 := v.clone();
+		}
+	`)
+}
+
+// Negative: a GENERIC recursive enum with no handle (GTree[T] recursing via
+// GTree[T][]) must clone cleanly. Exercises the *types.Instance→*types.Enum
+// origin cycle guard (seen[origin] taken-branch) — distinct from the
+// non-generic *types.Enum cycle guard covered by
+// TestT0482_RecursiveEnumContainerNoHandleCloneOK. No false positive, no
+// infinite recursion through the type-arg substitution.
+func TestT0482_GenericRecursiveEnumCloneOK(t *testing.T) {
+	checkOK(t, `
+		enum GTree[T] { Leaf(T v), Branch(GTree[T][] kids) }
+		test() {
+			v := Vector[GTree[int]]();
+			v.push(GTree[int].Leaf(1));
+			v2 := v.clone();
+		}
+	`)
+}
+
+// A match-destructure pattern with MORE bindings than the variant has fields
+// (an arity error) must still run checkDestructureNoHandleField without an
+// index panic: the binding count is clamped to NumFields() and the real
+// handle-owning field is still rejected. Exercises the n>NumFields() clamp.
+func TestT0482_DestructureExtraBindingsHandleClamp(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		enum EH { Empty, Held(Task[int] t) }
+		test() {
+			e := EH.Held(go worker());
+			match e {
+				EH.Empty => assert(false, "no"),
+				EH.Held(a, b) => assert(true, "x"),
+			}
+		}
+	`)
+	expectError(t, errs, "has 1 fields, got 2 bindings")
+	expectError(t, errs, "cannot destructure variant Held")
+}
+
+// The push gate must NOT be bypassable by passing the vector as a `&`
+// shared-ref parameter: checkPushNestedHandleArg must unwrap *types.SharedRef
+// (mirroring the *types.MutRef unwrap) before resolving the element type.
+// Exercises the SharedRef-unwrap branch of checkPushNestedHandleArg.
+func TestT0482_PushThroughSharedRefHandleError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		type Holder { Task[int] t; }
+		helper(Holder[]& dest, Holder[]& src) { dest.push(src[0]); }
+		test() {
+			s := [Holder(t: go worker())];
+			d := Holder[]();
+			helper(d, s);
+		}
+	`)
+	expectError(t, errs, "cannot push")
+	expectError(t, errs, "single-owner handle")
+}

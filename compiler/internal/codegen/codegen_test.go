@@ -24162,3 +24162,30 @@ func TestT0411_ConstructorChannelFieldFromThisDups(t *testing.T) {
 // so the codegen backstop path the test exercised is unreachable for
 // well-formed user code. The compile-fail behavior is verified by
 // TestT0616_VectorCloneInGenericTaskError in the sema package.
+
+// TestT0482_NestedHandleBackstopNoPanic pins the codegen backstop for the
+// nested-Named-handle shape behind generic indirection: a generic function
+// clones a Vector[T] and is instantiated with a user type that owns a Task
+// through a field. Direct user code is now gated by the T0482 sema predicate
+// (firstNestedSingleOwnerHandle), but a generic body is checked with unbound
+// T, so the concrete Holder reaches dupHeapValueFields at codegen. The
+// isOpaqueContainerType skip (compiler.go:dupHeapValueFields) must degrade the
+// nested Task field to a shallow copy without a Go panic (the recursive
+// dupHeapValue would otherwise bitcast an i8* handle to a struct type and
+// crash). The residual runtime double-free behind generic indirection is the
+// separate, tracked T0616 — this test only generates IR, never runs it.
+func TestT0482_NestedHandleBackstopNoPanic(t *testing.T) {
+	ir := generateIR(t, `
+		worker_int() int { return 42; }
+		type Holder { Task[int] t; }
+		dup_holders[T](Vector[T] v) Vector[T] { return v.clone(); }
+		test_nh() {
+			v := Vector[Holder]();
+			v.push(Holder(t: go worker_int()));
+			v2 := dup_holders[Holder](v);
+		}
+	`)
+	// The Holder-instantiated generic dup function must be emitted (proves the
+	// nested-handle backstop path was exercised in codegen, not skipped).
+	assertContains(t, ir, "dup_holders[Holder]")
+}

@@ -89,3 +89,112 @@ test_optional_task_standalone() `test(exclude: wasm) {
   Task[int]? opt = go worker_t0545();
   // opt drops at scope exit — awaits worker and frees G.
 }
+
+// === T0482/T0619: positive runtime controls for the deep non-cloneable
+// predicate (firstNestedSingleOwnerHandle). The negative cases (clone/filled/
+// slice/push/match of a value transitively owning a single-owner handle
+// through a user-type field or enum variant) are clean sema errors pinned in
+// sema_test.go (TestT0482_*). These pin the behavior that must NOT regress:
+// the predicate must yield nil for cloneable shapes, and fresh-temp moves of
+// handle-owning user types must still work. Zero leaks (T0067). ===
+
+type T0482Wrap {
+  Arc[int] a;
+}
+
+// A user type owning only a refcounted handle (Arc) is cloneable — the deep
+// predicate must skip the std Arc origin and return nil, so native vector
+// clone() stays valid and deep-copies independently.
+test_t0482_arc_field_vec_clone() `test {
+  v := Vector[T0482Wrap]();
+  v.push(T0482Wrap(a: Arc[int](7)));
+  v2 := v.clone();
+  assert(v2.len == 1, "arc-field wrap clone len");
+  assert(v2[0].a.borrow == 7, "arc-field wrap clone shares value");
+  assert(v.len == 1, "arc-field wrap src intact");
+}
+
+type T0482Holder {
+  Task[int] t;
+}
+
+// Pushing a freshly-constructed handle-owning value is a MOVE (not an implicit
+// clone) and must stay valid — the vector drops each Holder at scope exit,
+// which drops the owned Task exactly once (no double-free, zero leaks).
+test_t0482_fresh_named_handle_push() `test(exclude: wasm) {
+  dest := Vector[T0482Holder]();
+  dest.push(T0482Holder(t: go worker_t0545()));
+  dest.push(T0482Holder(t: go worker_t0545()));
+  assert(dest.len == 2, "fresh holder push len");
+}
+
+enum T0482Str {
+  Empty, Has(string v),
+}
+
+// A string-variant enum match-destructure is safe — strings are deep-copied
+// (dupString), so the deep predicate yields nil for string. Must compile and
+// run, copying the bound string independently of the subject.
+test_t0482_string_variant_match() `test {
+  s := T0482Str.Has("hello");
+  string got = "";
+  match s {
+    T0482Str.Empty => assert(false, "unexpected empty"),
+    T0482Str.Has(x) => {
+      got = x;
+    },
+  }
+  assert(got == "hello", "string variant copied");
+}
+
+type T0482Node {
+  T0482Node? next;
+  int v;
+}
+
+// A recursive user type with NO handle must clone cleanly inside a native
+// container — proves firstNestedSingleOwnerHandle's cycle guard terminates
+// without a false positive.
+test_t0482_recursive_named_no_handle_clone() `test {
+  v := Vector[T0482Node]();
+  v.push(T0482Node(next: none, v: 1));
+  v2 := v.clone();
+  assert(v2.len == 1, "recursive node clone len");
+  assert(v2[0].v == 1, "recursive node clone value");
+  assert(v.len == 1, "recursive node src intact");
+}
+
+enum T0482IsHeld {
+  Empty, Held(Task[int] t),
+}
+
+// `is`-destructure (vs `match`) does NOT need the T0482 B4 gate: codegen's
+// bindIsDestructureEnum/bindIsDestructureNamed do a plain non-owning load+store
+// for each bound field and register NO drop binding — only the subject drops
+// the handle (exactly once). This pins that structural-safety invariant: if a
+// future change makes `is`-destructure register drop bindings (like `match`'s
+// bindEnumDestructure dup path does) without a corresponding gate, this test
+// catches the resulting double-free / leak. Zero leaks (T0067).
+test_t0482_enum_is_destructure_handle() `test(exclude: wasm) {
+  e := T0482IsHeld.Held(go worker_t0545());
+  if e is Held(tk) {
+    assert(true, "enum is-destructure binds handle non-owningly");
+  }
+  // e drops here: the variant's Task is awaited + freed exactly once.
+}
+
+type T0482IsBox {
+  int kind;
+  Task[int] t;
+}
+
+// Same invariant for a named-type RTTI `is`-destructure binding all fields
+// (including a Task field). The binding `tk` aliases but does not own the
+// handle; only `b` drops it. Zero leaks (T0067).
+test_t0482_named_is_destructure_handle() `test(exclude: wasm) {
+  T0482IsBox b = T0482IsBox(kind: 7, t: go worker_t0545());
+  if b is T0482IsBox(k, tk) {
+    assert(k == 7, "named is-destructure binds handle non-owningly");
+  }
+  // b drops here: its Task is awaited + freed exactly once.
+}

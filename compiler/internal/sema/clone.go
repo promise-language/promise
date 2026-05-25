@@ -151,6 +151,132 @@ func firstSingleOwnerHandle(typ types.Type) types.Type {
 	return nil
 }
 
+// isStdNativeContainerNamed reports whether n is one of the std native
+// container / single-owner-handle origin types (Vector, Map, Set, Arc,
+// Channel, Weak, Task, Mutex, MutexGuard, string). firstNestedSingleOwnerHandle
+// must NOT recurse into the *fields* of these origins: they are `native types
+// with no Promise-level fields, and a refcounted/duplicable container (Arc,
+// Channel, Weak, Vector, string) holding a handle is itself cloneable — the
+// handle is shared by refcount or deep-copied, not double-freed. The TypeArgs
+// recursion (mirroring firstSingleOwnerHandle) still propagates a handle that
+// appears as a *direct* container element (Vector[Task[T]] etc.). (T0482)
+func isStdNativeContainerNamed(n *types.Named) bool {
+	switch n {
+	case types.TypVector, types.TypMap, types.TypArc, types.TypChannel,
+		types.TypWeak, types.TypTask, types.TypMutex, types.TypMutexGuard,
+		types.TypString:
+		return true
+	}
+	if obj := n.Obj(); obj != nil && obj.Name() == "Set" {
+		return true
+	}
+	return false
+}
+
+// firstNestedSingleOwnerHandle is like firstSingleOwnerHandle but ALSO recurses
+// into *types.Named fields and *types.Enum variant fields (cycle-guarded). It
+// gates the IMPLICIT structural-clone contexts — dupHeapValue /
+// dupHeapValueFields / dupEnumElementInPlace — which shallow-copy a nested
+// single-owner-handle pointer (Task/Mutex/MutexGuard) and double-free at drop
+// when both the source and the structural copy are dropped. Unlike
+// firstSingleOwnerHandle (deliberately shallow, relied on by
+// isNestedSingleOwnerContainer / reportContainerSingleOwnerNesting), this
+// predicate sees through user-type and enum field nesting. (T0482/T0619)
+//
+// Recursion mirrors firstSingleOwnerHandle (Instance TypeArgs, Optional, Tuple,
+// Array) PLUS: *types.Named → each AllFields() type; *types.Enum → each variant
+// field type; generic *types.Instance over a user Named/Enum origin → the
+// origin's fields/variants under the type-arg substitution. std native
+// container/handle origins are NOT field-recursed (see
+// isStdNativeContainerNamed) so a cloneable container holding a handle
+// (Arc/Channel/Weak/Vector/string) correctly yields nil. `seen` cycle-guards
+// on the Named/Enum pointer so recursive types (Node{Node? next},
+// JsonValue) terminate. Returns non-nil only for Task/Mutex/MutexGuard.
+func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) types.Type {
+	if typ == nil {
+		return nil
+	}
+	if seen == nil {
+		seen = make(map[types.Type]bool)
+	}
+	switch t := typ.(type) {
+	case *types.Instance:
+		if types.IsTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
+			return t
+		}
+		// TypeArgs recursion — same as firstSingleOwnerHandle (covers a handle
+		// appearing as a direct container element, e.g. Vector[Task[T]]).
+		for _, ta := range t.TypeArgs() {
+			if off := firstNestedSingleOwnerHandle(ta, seen); off != nil {
+				return off
+			}
+		}
+		// Recurse a generic *user* type/enum origin's fields/variants under the
+		// type-arg substitution (e.g. Holder[string] whose Task[int] field is
+		// concrete, not reachable via TypeArgs). Std native containers are
+		// skipped — they have no Promise fields and are cloneable.
+		switch origin := t.Origin().(type) {
+		case *types.Named:
+			if isStdNativeContainerNamed(origin) || seen[origin] {
+				return nil
+			}
+			seen[origin] = true
+			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+			for _, f := range origin.AllFields() {
+				if off := firstNestedSingleOwnerHandle(types.Substitute(f.Type(), subst), seen); off != nil {
+					return off
+				}
+			}
+		case *types.Enum:
+			if seen[origin] {
+				return nil
+			}
+			seen[origin] = true
+			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+			for _, v := range origin.Variants() {
+				for _, f := range v.Fields() {
+					if off := firstNestedSingleOwnerHandle(types.Substitute(f.Type(), subst), seen); off != nil {
+						return off
+					}
+				}
+			}
+		}
+	case *types.Named:
+		if isStdNativeContainerNamed(t) || seen[t] {
+			return nil
+		}
+		seen[t] = true
+		for _, f := range t.AllFields() {
+			if off := firstNestedSingleOwnerHandle(f.Type(), seen); off != nil {
+				return off
+			}
+		}
+	case *types.Enum:
+		if seen[t] {
+			return nil
+		}
+		seen[t] = true
+		for _, v := range t.Variants() {
+			for _, f := range v.Fields() {
+				if off := firstNestedSingleOwnerHandle(f.Type(), seen); off != nil {
+					return off
+				}
+			}
+		}
+	case *types.Optional:
+		return firstNestedSingleOwnerHandle(t.Elem(), seen)
+	case *types.Tuple:
+		for _, e := range t.Elems() {
+			if off := firstNestedSingleOwnerHandle(e, seen); off != nil {
+				return off
+			}
+		}
+	case *types.Array:
+		return firstNestedSingleOwnerHandle(t.Elem(), seen)
+	}
+	return nil
+}
+
 // isNestedSingleOwnerContainer reports whether typ is itself a *container*
 // (Vector / Map / Set instance, or a fixed-size Array) that transitively
 // contains a single-owner handle. Such a container, used as another
@@ -179,13 +305,107 @@ func isNestedSingleOwnerContainer(typ types.Type) bool {
 // (T0545)
 func (c *Checker) checkContainerNotCloneable(pos ast.Pos, containerType types.Type, elemTypes []types.Type, opName string) bool {
 	for _, et := range elemTypes {
-		if off := firstSingleOwnerHandle(et); off != nil {
+		// Deep predicate (T0482/T0619): a container element that transitively
+		// owns a single-owner handle through a user-type field or enum variant
+		// (e.g. Vector[Holder] where Holder{Task[int]}, Vector[Box] where
+		// Box.Has(Task)) is non-cloneable too — the native clone path
+		// shallow-copies the handle pointer and double-frees at drop.
+		if off := firstNestedSingleOwnerHandle(et, nil); off != nil {
 			c.errorf(pos, "%s cannot be %s: it contains %s, a single-owner handle with no clone() semantics (single-owner handles are move-only)",
 				containerType, opName, off)
 			return true
 		}
 	}
 	return false
+}
+
+// checkPushNestedHandleArg rejects `vec.push(arg)` when vec's element type
+// transitively owns a single-owner handle through a user-type field or enum
+// variant (e.g. Vector[Holder] where Holder{Task[int]}) AND arg is an
+// implicit-clone (non-consuming) source. Codegen's push dup decision
+// (expr.go:4866-4934) deep-copies an *ast.IndexExpr source (always-dup, T0376)
+// via dupHeapValue → dupHeapValueFields, which shallow-copies the nested
+// handle pointer → double-free at drop. A *direct* handle element
+// (Vector[Task[T]]) is deliberately NOT gated here — fresh-temp pushes are the
+// T0508 move-only model and borrowed-param pushes are already rejected by
+// T0556/T0586 ownership. The borrowed-ident implicit-clone source is likewise
+// already covered by T0586 (a plain heap user type owning a handle is
+// non-alias-safe), so only the IndexExpr gap remains. (T0482)
+func (c *Checker) checkPushNestedHandleArg(e *ast.CallExpr) {
+	mem, ok := e.Callee.(*ast.MemberExpr)
+	if !ok || mem.Field != "push" || len(e.Args) != 1 {
+		return
+	}
+	recv := c.info.Types[mem.Target]
+	if ref, ok := recv.(*types.MutRef); ok {
+		recv = ref.Elem()
+	}
+	if ref, ok := recv.(*types.SharedRef); ok {
+		recv = ref.Elem()
+	}
+	elem, ok := types.AsVector(recv)
+	if !ok {
+		return
+	}
+	// Direct single-owner handle elements are out of scope (T0508/T0556).
+	if types.IsTask(elem) || types.IsMutex(elem) || types.IsMutexGuard(elem) {
+		return
+	}
+	off := firstNestedSingleOwnerHandle(elem, nil)
+	if off == nil {
+		return
+	}
+	// Implicit-clone source: an index expression is always element-duped by
+	// codegen (T0376), so the pushed copy shares the source's handle pointer.
+	if _, isIdx := e.Args[0].Value.(*ast.IndexExpr); isIdx {
+		c.errorf(e.Args[0].Value.Pos(),
+			"cannot push %s: it transitively contains %s, a single-owner handle with no clone() semantics — indexing copies the element (move-only handles cannot be duplicated); move a freshly-constructed value instead",
+			elem, off)
+	}
+}
+
+// checkDestructureNoHandleField rejects a match destructure that binds (copies
+// out) a variant field whose type transitively owns a single-owner handle
+// (Task/Mutex/MutexGuard) — directly or nested in a user-type field. The
+// binding is a structural copy while the subject retains its variant, so both
+// the binding and the subject drop the same handle → double-free. (A `_`
+// binding does not copy the field, so it is safe.) subst is the subject's
+// type-arg substitution for a generic enum instance (may be nil). This is the
+// conservative gate; the fully-correct move-out semantics are tracked
+// separately. (T0482)
+func (c *Checker) checkDestructureNoHandleField(pos ast.Pos, v *types.Variant, bindings []string, subst map[*types.TypeParam]types.Type) {
+	if v == nil {
+		return
+	}
+	n := len(bindings)
+	if n > v.NumFields() {
+		n = v.NumFields()
+	}
+	for i := 0; i < n; i++ {
+		if bindings[i] == "_" {
+			continue
+		}
+		ft := v.Fields()[i].Type()
+		if subst != nil {
+			ft = types.Substitute(ft, subst)
+		}
+		if off := firstNestedSingleOwnerHandle(ft, nil); off != nil {
+			c.errorf(pos,
+				"cannot destructure variant %s: binding '%s' copies %s, a single-owner handle with no clone() semantics — both the binding and the matched value would drop it (single-owner handles are move-only)",
+				v.Name(), bindings[i], off)
+		}
+	}
+}
+
+// enumVariantSubst returns the variant lookup and type-arg substitution for a
+// destructure pattern over subjectType. (T0482)
+func enumDestructureSubst(subjectType types.Type, enum *types.Enum) map[*types.TypeParam]types.Type {
+	if inst, ok := subjectType.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Enum); ok && origin == enum {
+			return types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+		}
+	}
+	return nil
 }
 
 // reportContainerSingleOwnerNesting reports an error if elemType is itself a

@@ -2892,6 +2892,13 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 // subtype is duplicated correctly (right size + sub-field dup matching the
 // concrete layout). The static path is used otherwise.
 func (c *Compiler) dupHeapValue(val value.Value, resolvedType types.Type) value.Value {
+	// T0545 backstop: single-owner native handles (Task/Mutex/MutexGuard) are
+	// raw i8* handles, not the `{vtable,instance}` value struct this function
+	// assumes (val.Type().(*StructType) would panic). They have no dup
+	// semantics; return unchanged. Sema rejects the user-reachable paths.
+	if isSingleOwnerHandleType(resolvedType) {
+		return val
+	}
 	named := extractNamed(resolvedType)
 	layout := c.lookupTypeLayout(resolvedType)
 	if layout == nil || layout.Instance == nil {

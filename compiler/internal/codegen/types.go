@@ -178,6 +178,26 @@ func isOpaqueContainerType(typ types.Type) bool {
 	return false
 }
 
+// isSingleOwnerHandleType reports whether typ is a single-owner native handle
+// (Task[T] / Mutex[T] / MutexGuard[T]). These are LLVM `i8*` handles with no
+// clone/dup semantics. Sema rejects clone()/filled()/nesting on containers
+// transitively containing them (T0545); this is the codegen backstop so any
+// residual generic-instantiation path degrades to a shallow copy instead of a
+// Go panic (the dupHeapValue `{vtable,instance}` struct assert fails on i8*).
+func isSingleOwnerHandleType(typ types.Type) bool {
+	named := extractNamed(typ)
+	if _, ok := types.AsTask(typ); ok || named == types.TypTask {
+		return true
+	}
+	if _, ok := types.AsMutex(typ); ok || named == types.TypMutex {
+		return true
+	}
+	if _, ok := types.AsMutexGuard(typ); ok || named == types.TypMutexGuard {
+		return true
+	}
+	return false
+}
+
 // isContainerType returns true for Vector and string types,
 // which are represented as i8* pointers (not value structs) in codegen.
 // Map is no longer a container type — it's a user-defined type with value struct layout.

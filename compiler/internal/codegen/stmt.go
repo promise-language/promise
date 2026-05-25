@@ -3764,12 +3764,17 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 		return
 	}
 
-	// T0559: Single-owner native handles (Task/Mutex/MutexGuard) have no clone
-	// semantics — they're move-only with i8* representation. Empty vectors are
-	// trivially cloneable; non-empty would shallow-copy the handle, producing
-	// double-ownership → double-free at scope exit. Emit a length-guarded
-	// runtime panic instead of falling through to dupHeapValue (which panics
-	// at codegen time on the i8* → StructType cast).
+	// T0559 + T0545: single-owner native handles (Task/Mutex/MutexGuard) are
+	// move-only i8* handles with no clone semantics. T0545's sema gate rejects
+	// clone()/filled()/nesting on containers transitively containing them, so
+	// well-formed user code never reaches here. This is the codegen backstop
+	// for the residual generic-indirection path (T0616) — sema checks generic
+	// bodies with unbound T, so dup[T](Vector[T]) instantiated with T=Task can
+	// still reach this. Emit a length-guarded runtime panic (T0559) rather
+	// than a silent shallow-copy: empty vectors clone trivially (no
+	// double-ownership), non-empty would double-free at drop, so panic with a
+	// type-specific message instead of falling through to dupHeapValue (which
+	// Go-panics on the i8* → StructType cast).
 	unclonableTypeName := ""
 	if _, isTask := types.AsTask(elemType); isTask || named == types.TypTask {
 		unclonableTypeName = "Task"
@@ -3889,6 +3894,12 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 // cloneHeapElement clones a single heap user type element by calling its clone()
 // method if available, otherwise falling back to dupHeapValue. B0275.
 func (c *Compiler) cloneHeapElement(elemVal value.Value, elemType types.Type, named *types.Named) value.Value {
+	// T0545 backstop: single-owner native handles have no clone semantics and
+	// are i8* (not the {vtable,instance} struct dupHeapValue expects). Return
+	// the handle unchanged rather than asserting/panicking.
+	if isSingleOwnerHandleType(elemType) {
+		return elemVal
+	}
 	// Resolve clone method name
 	ownerName := c.resolveMethodOwner(named, "clone")
 	if inst, ok := elemType.(*types.Instance); ok {

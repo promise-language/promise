@@ -3555,6 +3555,8 @@ comments := <-t3;
 
 `task[T]` is a first-class type returned by `go` expressions. It can be stored in variables, fields, and collections, passed as arguments, and returned from functions. The `<-` operator receives the result from a task, suspending the current goroutine until the task completes. Concurrency is always a **caller-side decision** — the callee does not know or care whether it runs in a goroutine.
 
+`task[T]` is a **single-owner handle** (like `Mutex[T]`/`MutexGuard[T]`): it is move-only and has no `clone()`. It may be a *direct* element of one collection (`Task[T][]` push/iterate/await/drop is supported), but a type that transitively contains a single-owner handle is **non-cloneable** — `clone()`/`filled()` on such a collection, and nesting one inside another container (`Vector[Vector[Task[T]]]`, `Map[K, Task[T][]]`), are compile errors. Refcounted handles (`Arc[T]`, `Channel[T]`) are duplicable and unaffected.
+
 ### 17.3 Channels
 
 Channels are the primary synchronization primitive for streaming data between goroutines:

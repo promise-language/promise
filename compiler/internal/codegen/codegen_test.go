@@ -21856,13 +21856,20 @@ func TestVectorCloneLoopCallsSafeMapClone(t *testing.T) {
 	assertContains(t, ir, "Map[string, int].clone")
 }
 
-// T0559: Vector[Mutex[T]].clone() must emit a length-guarded runtime panic
-// (Mutex is move-only — shallow-copying handles would double-free at scope exit).
+// T0559 + T0545: Vector[Mutex[T]].clone() must emit a length-guarded runtime
+// panic (Mutex is move-only — shallow-copying handles would double-free at
+// scope exit). T0545 supersedes the *direct* user-code path with a sema error
+// (TestT0545_VectorMutexCloneError), so the retained T0559 codegen backstop is
+// now reached only via generic indirection — sema checks generic bodies with
+// unbound T, so dup_g[T](Vector[T]) instantiated with T=Mutex still lowers the
+// clone loop (T0616). These tests pin that the kept backstop IR is emitted on
+// that residual path.
 func TestVectorCloneLoopMutexPanics(t *testing.T) {
 	ir := generateIR(t, `
+		dup_g[T](Vector[T] v) Vector[T] { return v.clone(); }
 		test() {
 			v := Vector[Mutex[int]]();
-			v2 := v.clone();
+			v2 := dup_g[Mutex[int]](v);
 		}
 	`)
 	assertContains(t, ir, "vecclone.unsup.panic")
@@ -21870,37 +21877,45 @@ func TestVectorCloneLoopMutexPanics(t *testing.T) {
 	assertContains(t, ir, "Vector[Mutex[T]].clone() is not supported")
 }
 
-// T0559: Vector[Task[T]].clone() must emit a length-guarded runtime panic.
+// T0559 + T0545: Vector[Task[T]].clone() backstop emits a length-guarded
+// runtime panic; reached via generic indirection (direct path is now the
+// sema error TestT0545_VectorTaskCloneError).
 func TestVectorCloneLoopTaskPanics(t *testing.T) {
 	ir := generateIR(t, `
+		dup_g[T](Vector[T] v) Vector[T] { return v.clone(); }
 		test() {
 			v := Vector[Task[int]]();
-			v2 := v.clone();
+			v2 := dup_g[Task[int]](v);
 		}
 	`)
 	assertContains(t, ir, "vecclone.unsup.panic")
 	assertContains(t, ir, "Vector[Task[T]].clone() is not supported")
 }
 
-// T0559: Vector[MutexGuard[T]].clone() must emit a length-guarded runtime panic.
+// T0559 + T0545: Vector[MutexGuard[T]].clone() backstop emits a length-guarded
+// runtime panic; reached via generic indirection (direct path is now the sema
+// error TestT0545_VectorMutexGuardCloneError).
 func TestVectorCloneLoopMutexGuardPanics(t *testing.T) {
 	ir := generateIR(t, `
+		dup_g[T](Vector[T] v) Vector[T] { return v.clone(); }
 		test() {
 			v := Vector[MutexGuard[int]]();
-			v2 := v.clone();
+			v2 := dup_g[MutexGuard[int]](v);
 		}
 	`)
 	assertContains(t, ir, "vecclone.unsup.panic")
 	assertContains(t, ir, "Vector[MutexGuard[T]].clone() is not supported")
 }
 
-// T0559: The Mutex element type has no clone() method — verify codegen
-// doesn't try to call Mutex[int].clone (would be a missing-function reference).
+// T0559: The Mutex element type has no clone() method — verify the backstop
+// path doesn't try to call Mutex[int].clone (would be a missing-function
+// reference). Reached via generic indirection (T0545 + T0616).
 func TestVectorCloneLoopMutexDoesNotInvokeClone(t *testing.T) {
 	ir := generateIR(t, `
+		dup_g[T](Vector[T] v) Vector[T] { return v.clone(); }
 		test() {
 			v := Vector[Mutex[int]]();
-			v2 := v.clone();
+			v2 := dup_g[Mutex[int]](v);
 		}
 	`)
 	for _, line := range strings.Split(ir, "\n") {
@@ -24048,4 +24063,30 @@ func TestT0411_ConstructorChannelFieldFromThisDups(t *testing.T) {
 	// dupChannel emits a `chdup.inc` block label and an inline atomicrmw add
 	// to bump the channel's reference count.
 	assertContains(t, cloneFn, "chdup.inc")
+}
+
+// TestT0545_GenericIndirectionBackstopNoPanic pins the T0545 §4 codegen
+// backstop invariant: a generic function that calls Vector.clone() and is
+// instantiated with a single-owner handle (Task) reaches codegen with the
+// concrete element type (sema cannot gate it — generic bodies are checked
+// with unbound T). Before T0545 this hard Go-panicked in dupHeapValue
+// (`interface conversion: *PointerType not *StructType`). The backstop
+// (isSingleOwnerHandleType early-returns in emitVectorElementCloneLoop /
+// cloneHeapElement / dupHeapValue) must degrade to a shallow copy so codegen
+// completes without a Go panic. (The residual runtime double-free is the
+// separate, tracked T0616 — this test only generates IR, never runs it.)
+func TestT0545_GenericIndirectionBackstopNoPanic(t *testing.T) {
+	// generateIR calls Compile directly; a Go panic in codegen fails the test.
+	ir := generateIR(t, `
+		worker_int() int { return 42; }
+		dup_generic[T](Vector[T] v) Vector[T] { return v.clone(); }
+		test_g() {
+			v := Vector[Task[int]]();
+			v.push(go worker_int());
+			v2 := dup_generic[Task[int]](v);
+		}
+	`)
+	// The Task-instantiated generic dup function must be emitted (proves the
+	// backstop path was exercised, not skipped).
+	assertContains(t, ir, "dup_generic[Task[int]]")
 }

@@ -1,0 +1,91 @@
+// T0545: containers transitively containing a single-owner native handle
+// (Task/Mutex/MutexGuard) are non-cloneable. The unsound paths
+// (Vector[Task].clone()/.filled(), Map[K,Task].clone(), nested
+// Vector[Vector[Task]]) are rejected at sema with clean errors — those
+// negative cases live in sema_test.go (TestT0545_*) since a compile-fail
+// cannot be a batch test. This file pins the *positive* runtime behavior
+// that must keep working: T0508 flat move-only handle collections, and
+// clone() on refcounted (Arc/Channel) handle vectors which are duplicable
+// and must NOT be gated. Zero leaks (T0067).
+worker_t0545() int {
+  return 42;
+}
+
+// --- T0508: flat Vector[Task[int]] push / literal / iterate / scope-exit drop
+// (awaiting a vector-held Task then drop is the separate pre-existing T0617) ---
+
+test_flat_task_vec_push() `test(exclude: wasm) {
+  v := Vector[Task[int]]();
+  v.push(go worker_t0545());
+  v.push(go worker_t0545());
+  assert(v.len == 2, "task vec len");
+}
+
+test_flat_task_vec_literal() `test(exclude: wasm) {
+  v := [go worker_t0545(), go worker_t0545()];
+  assert(v.len == 2, "task literal len");
+}
+
+// Iterate a flat Vector[Task] without awaiting (awaiting a vector-held Task
+// then scope-exit drop double-frees — separate pre-existing bug T0617).
+test_flat_task_vec_iterate() `test(exclude: wasm) {
+  v := [go worker_t0545(), go worker_t0545(), go worker_t0545()];
+  int count = 0;
+  for handle in v {
+    count = count + 1;
+  }
+  assert(count == 3, "iterated count");
+}
+
+// Explicit Vector[Task[int]] type annotation (direct handle element OK).
+test_explicit_task_vec_type() `test(exclude: wasm) {
+  Vector[Task[int]] v = Vector[Task[int]]();
+  v.push(go worker_t0545());
+  assert(v.len == 1, "explicit task vec len");
+}
+
+// --- Refcounted handles are duplicable — clone() must NOT be gated ---
+
+test_arc_vec_clone() `test {
+  v := Vector[Arc[int]]();
+  v.push(Arc[int](7));
+  v2 := v.clone();
+  assert(v2.len == 1, "arc clone len");
+  assert(v2[0].borrow == 7, "arc clone shares value");
+  assert(v.len == 1, "arc src intact");
+}
+
+test_channel_vec_clone() `test {
+  v := Vector[Channel[int]]();
+  v.push(Channel[int]());
+  v2 := v.clone();
+  assert(v2.len == 1, "channel clone len");
+  assert(v.len == 1, "channel src intact");
+}
+
+// A tuple element containing only a refcounted handle is duplicable — the
+// non-cloneable rule must NOT over-gate it. firstSingleOwnerHandle recurses
+// the tuple, finds Arc (refcounted, not single-owner), and returns nil.
+test_tuple_arc_vec_clone() `test {
+  v := Vector[(Arc[int], int)]();
+  v.push((Arc[int](7), 1));
+  v2 := v.clone();
+  assert(v2.len == 1, "tuple arc clone len");
+  assert(v.len == 1, "tuple arc src intact");
+}
+
+// A vector whose elements are plain cloneable values still clones deeply.
+test_string_vec_clone_unaffected() `test {
+  v := ["a", "b", "c"];
+  v2 := v.clone();
+  v2.push("d");
+  assert(v2.len == 4, "clone is independent");
+  assert(v.len == 3, "original unchanged");
+}
+
+// --- Optional[Task[T]] standalone (not a container element) — T0558 ---
+
+test_optional_task_standalone() `test(exclude: wasm) {
+  Task[int]? opt = go worker_t0545();
+  // opt drops at scope exit — awaits worker and frees G.
+}

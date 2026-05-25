@@ -440,6 +440,7 @@ func (c *Checker) inferConstructorCall(e *ast.CallExpr, named *types.Named) *typ
 	// Validate constraints.
 	c.validateConstraints(e.Pos(), named, typeArgs)
 	c.validateSendableInstance(e.Pos(), named, typeArgs)
+	c.validateSingleOwnerContainerInstance(e.Pos(), named, typeArgs)
 
 	inst := types.NewInstance(named, typeArgs)
 	c.recordInstance(inst)

@@ -468,6 +468,11 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit, hint types.Type) types.Type {
 		}
 	}
 
+	// T0545: a vector/array literal whose element type transitively contains a
+	// single-owner handle (e.g. [[go f()]] → Vector[Vector[Task]]) forces the
+	// outer container to duplicate the handle on push/clone/realloc — unsound.
+	c.reportContainerSingleOwnerNesting(e.Pos(), elemType)
+
 	// If hint is a fixed-size array type, produce Array instead of Vector
 	if arr, ok := hint.(*types.Array); ok {
 		if int64(len(e.Elements)) != arr.Size() {
@@ -510,6 +515,10 @@ func (c *Checker) checkMapLit(e *ast.MapLit) types.Type {
 		return nil
 	}
 	c.validateConstraints(e.Pos(), types.TypMap, []types.Type{keyType, valType})
+	// T0545: reject map literals whose key/value type nests a single-owner
+	// handle inside another container (e.g. Map[int, Vector[Task]]).
+	c.reportContainerSingleOwnerNesting(e.Pos(), keyType)
+	c.reportContainerSingleOwnerNesting(e.Pos(), valType)
 
 	inst := types.NewMap(keyType, valType)
 	c.recordInstance(inst)
@@ -1235,6 +1244,13 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 
 	case *types.Array:
 		// Arrays delegate to TypVector for field/method lookup
+		// T0545: array.clone() with a single-owner-handle element is unsound
+		// (delegates to the Vector clone path).
+		if e.Field == "clone" {
+			if c.checkContainerNotCloneable(e.Pos(), t, []types.Type{t.Elem()}, "cloned") {
+				return nil
+			}
+		}
 		subst := types.BuildSubstMap(types.TypVector.TypeParams(), []types.Type{t.Elem()})
 		if f := types.TypVector.LookupField(e.Field); f != nil {
 			return types.Substitute(f.Type(), subst)
@@ -1288,6 +1304,22 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 func (c *Checker) resolveInstanceMember(expr ast.Expr, pos ast.Pos, inst *types.Instance, name string) types.Type {
 	switch origin := inst.Origin().(type) {
 	case *types.Named:
+		// T0545: clone()/filled() on a container (Vector/Map/Set) whose
+		// element/key/value type transitively contains a single-owner handle
+		// (Task/Mutex/MutexGuard) is unsound — those handles are move-only with
+		// no clone semantics, and duplicating them double-frees at drop. Reject
+		// at resolution so method-value references are caught too.
+		if name == "clone" || name == "filled" {
+			if elemTypes := singleOwnerContainerElemTypes(origin, inst.TypeArgs()); elemTypes != nil {
+				opName := "cloned"
+				if name == "filled" {
+					opName = "filled"
+				}
+				if c.checkContainerNotCloneable(pos, inst, elemTypes, opName) {
+					return nil
+				}
+			}
+		}
 		subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 		if f := origin.LookupField(name); f != nil {
 			if f.Deprecated() != "" {
@@ -1750,6 +1782,7 @@ func (c *Checker) instantiateFromIndex(e *ast.IndexExpr, origin types.Type, tpar
 
 	c.validateConstraints(e.Pos(), origin, typeArgs)
 	c.validateSendableInstance(e.Pos(), origin, typeArgs)
+	c.validateSingleOwnerContainerInstance(e.Pos(), origin, typeArgs)
 	inst := types.NewInstance(origin, typeArgs)
 	c.recordInstance(inst)
 	return inst

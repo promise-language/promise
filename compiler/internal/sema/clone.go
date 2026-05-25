@@ -113,6 +113,121 @@ func (c *Checker) validateCloneTypes(file *ast.File) {
 	}
 }
 
+// firstSingleOwnerHandle returns the first single-owner native handle
+// (Task[T], Mutex[T], MutexGuard[T]) found in typ, searching transitively
+// through Instance type arguments, Optional, Tuple, and Array element types.
+// Returns nil if typ contains no single-owner handle. (T0545)
+//
+// These handles are LLVM `i8*` native handles with no clone() method, not
+// `copy, and move-only on assignment — `someTask.clone()` is already a sema
+// error. A type that transitively contains one is therefore non-cloneable.
+// Recursion deliberately does NOT descend into *types.Named fields: a user
+// type with a handle field is already covered by validateCloneType (`clone
+// types) or by "no clone() method" (plain types). *types.TypeParam → nil:
+// generic bodies are checked with unbound params; concrete call sites are
+// guarded by the codegen backstop.
+func firstSingleOwnerHandle(typ types.Type) types.Type {
+	switch t := typ.(type) {
+	case *types.Instance:
+		if types.IsTask(t) || types.IsMutex(t) || types.IsMutexGuard(t) {
+			return t
+		}
+		for _, ta := range t.TypeArgs() {
+			if off := firstSingleOwnerHandle(ta); off != nil {
+				return off
+			}
+		}
+	case *types.Optional:
+		return firstSingleOwnerHandle(t.Elem())
+	case *types.Tuple:
+		for _, e := range t.Elems() {
+			if off := firstSingleOwnerHandle(e); off != nil {
+				return off
+			}
+		}
+	case *types.Array:
+		return firstSingleOwnerHandle(t.Elem())
+	}
+	return nil
+}
+
+// isNestedSingleOwnerContainer reports whether typ is itself a *container*
+// (Vector / Map / Set instance, or a fixed-size Array) that transitively
+// contains a single-owner handle. Such a container, used as another
+// container's element/key/value, forces the outer container's
+// literal-lowering / push-dup / clone / realloc paths to duplicate the inner
+// handle — unsound (double-free at drop). A *direct* handle element
+// (Vector[Task[T]]) is fine (T0508 move-only collection), and an
+// Optional/Tuple wrapping a handle is NOT a container and has its own drop
+// handling (T0558), so neither triggers the nesting rule. (T0545)
+func isNestedSingleOwnerContainer(typ types.Type) bool {
+	switch t := typ.(type) {
+	case *types.Array:
+		return firstSingleOwnerHandle(t) != nil
+	case *types.Instance:
+		if singleOwnerContainerElemTypes(t.Origin(), t.TypeArgs()) != nil {
+			return firstSingleOwnerHandle(t) != nil
+		}
+	}
+	return false
+}
+
+// checkContainerNotCloneable reports an error if any of the supplied container
+// element/key/value types transitively contains a single-owner handle, which
+// makes the container non-cloneable / non-fillable. opName is the verb used in
+// the message ("cloned" or "filled"). Returns true if an error was emitted.
+// (T0545)
+func (c *Checker) checkContainerNotCloneable(pos ast.Pos, containerType types.Type, elemTypes []types.Type, opName string) bool {
+	for _, et := range elemTypes {
+		if off := firstSingleOwnerHandle(et); off != nil {
+			c.errorf(pos, "%s cannot be %s: it contains %s, a single-owner handle with no clone() semantics (single-owner handles are move-only)",
+				containerType, opName, off)
+			return true
+		}
+	}
+	return false
+}
+
+// reportContainerSingleOwnerNesting reports an error if elemType is itself a
+// container (Vector/Map/Set/Array) that transitively contains a single-owner
+// handle. A *direct* handle element is permitted (T0508 move-only
+// collections), and Optional/Tuple wrapping a handle is handled separately
+// (T0558) — only a nested *container* forces an unsound duplicate. (T0545)
+func (c *Checker) reportContainerSingleOwnerNesting(pos ast.Pos, elemType types.Type) {
+	if elemType == nil || !isNestedSingleOwnerContainer(elemType) {
+		return
+	}
+	off := firstSingleOwnerHandle(elemType)
+	c.errorf(pos, "%s cannot be a container element: it transitively contains %s, a single-owner handle (single-owner handles may only appear as direct container elements, not nested inside another container)",
+		elemType, off)
+}
+
+// singleOwnerContainerElemTypes returns the element/key/value types that an
+// outer container would have to duplicate, or nil if origin is not a
+// duplicating container (Vector / Map / Set). (T0545)
+func singleOwnerContainerElemTypes(origin types.Type, typeArgs []types.Type) []types.Type {
+	n, ok := origin.(*types.Named)
+	if !ok {
+		return nil
+	}
+	if n == types.TypVector || n == types.TypMap {
+		return typeArgs
+	}
+	if obj := n.Obj(); obj != nil && obj.Name() == "Set" {
+		return typeArgs
+	}
+	return nil
+}
+
+// validateSingleOwnerContainerInstance enforces the nesting rule for an
+// explicitly written or inferred container instance (e.g. Vector[Vector[Task]],
+// Map[K, Vector[Task]]). Called alongside validateSendableInstance. (T0545)
+func (c *Checker) validateSingleOwnerContainerInstance(pos ast.Pos, origin types.Type, typeArgs []types.Type) {
+	for _, et := range singleOwnerContainerElemTypes(origin, typeArgs) {
+		c.reportContainerSingleOwnerNesting(pos, et)
+	}
+}
+
 // typeToTypeRef converts a types.Type to an ast.TypeRef for use in synthesized AST.
 // Handles common cases needed for clone method synthesis.
 func typeToTypeRef(typ types.Type) ast.TypeRef {

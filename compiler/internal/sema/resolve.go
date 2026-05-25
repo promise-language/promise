@@ -175,6 +175,7 @@ func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
 	// Validate type argument constraints
 	c.validateConstraints(r.Pos(), typ, typeArgs)
 	c.validateSendableInstance(r.Pos(), typ, typeArgs)
+	c.validateSingleOwnerContainerInstance(r.Pos(), typ, typeArgs)
 
 	inst := types.NewInstance(typ, typeArgs)
 	c.recordInstance(inst)
@@ -258,6 +259,7 @@ func (c *Checker) resolveQualifiedType(r *ast.QualifiedTypeRef) types.Type {
 
 	c.validateConstraints(r.Pos(), typ, typeArgs)
 	c.validateSendableInstance(r.Pos(), typ, typeArgs)
+	c.validateSingleOwnerContainerInstance(r.Pos(), typ, typeArgs)
 	inst := types.NewInstance(typ, typeArgs)
 	c.recordInstance(inst)
 	return inst

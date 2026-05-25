@@ -14945,3 +14945,244 @@ func TestT0234_MatchTargetIdentArch(t *testing.T) {
 		t.Error("expected aarch64 macos to match 'arm64'")
 	}
 }
+
+// === T0545: single-owner-handle containers are non-cloneable ===
+// A type that transitively contains a single-owner native handle
+// (Task/Mutex/MutexGuard) is non-cloneable — duplicating it would double-free
+// at drop. clone()/filled() on such a container, and nesting one inside
+// another container, are clean sema errors (previously a hard compiler panic
+// / runtime segfault). Direct handle elements (Vector[Task[T]]) stay valid
+// (T0508 move-only collections); refcounted handles (Arc/Channel) are NOT
+// gated.
+
+func TestT0545_VectorTaskCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		test() {
+			v := [go worker()];
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "single-owner handle")
+}
+
+func TestT0545_VectorMutexCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := Vector[Mutex[int]]();
+			v.push(Mutex[int](1));
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+}
+
+func TestT0545_VectorMutexGuardCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := Vector[MutexGuard[int]]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+}
+
+func TestT0545_MapTaskCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		test() {
+			m := Map[int, Task[int]]();
+			m[0] = go worker();
+			m2 := m.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+}
+
+func TestT0545_VectorTaskFilledError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		test() {
+			t := go worker();
+			v := Vector[Task[int]].filled(t, 3);
+		}
+	`)
+	expectError(t, errs, "cannot be filled")
+}
+
+func TestT0545_NestedTaskVectorLiteralError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		test() {
+			v := [[go worker()]];
+		}
+	`)
+	expectError(t, errs, "cannot be a container element")
+	expectError(t, errs, "transitively contains")
+}
+
+func TestT0545_NestedTaskVectorTypeError(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			Vector[Vector[Task[int]]] v = Vector[Vector[Task[int]]]();
+		}
+	`)
+	expectError(t, errs, "cannot be a container element")
+}
+
+func TestT0545_MapVectorTaskValueError(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			m := Map[int, Vector[Task[int]]]();
+		}
+	`)
+	expectError(t, errs, "cannot be a container element")
+}
+
+// Positive: a flat Vector[Task[T]] (direct handle element) stays valid —
+// T0508 move-only collection support must not regress.
+func TestT0545_FlatVectorTaskOK(t *testing.T) {
+	checkOK(t, `
+		worker() int { return 42; }
+		test() {
+			v := Vector[Task[int]]();
+			v.push(go worker());
+			for handle in v {
+				x := <-handle;
+			}
+		}
+	`)
+}
+
+func TestT0545_TaskVectorLiteralOK(t *testing.T) {
+	checkOK(t, `
+		worker() int { return 42; }
+		test() {
+			v := [go worker(), go worker()];
+		}
+	`)
+}
+
+// Positive: Arc/Channel are refcounted (duplicable) — clone must NOT be gated.
+func TestT0545_VectorArcCloneOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := Vector[Arc[int]]();
+			v.push(Arc[int](7));
+			v2 := v.clone();
+		}
+	`)
+}
+
+func TestT0545_VectorChannelCloneOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := Vector[Channel[int]]();
+			v.push(Channel[int]());
+			v2 := v.clone();
+		}
+	`)
+}
+
+// Positive: Optional[Task[T]] standalone (not a container element) stays
+// valid — T0558 drop support must not regress.
+func TestT0545_OptionalTaskStandaloneOK(t *testing.T) {
+	checkOK(t, `
+		worker() int { return 42; }
+		test() {
+			Task[int]? opt = go worker();
+		}
+	`)
+}
+
+// firstSingleOwnerHandle must recurse through Tuple element types: a vector of
+// a tuple containing a Task is non-cloneable (covers the *types.Tuple branch).
+func TestT0545_VectorTupleTaskCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		test() {
+			v := Vector[(Task[int], int)]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "single-owner handle")
+}
+
+// firstSingleOwnerHandle must recurse through Optional element types: a vector
+// inferred as Vector[Task[int]?] from an optional-Task element is
+// non-cloneable (covers the *types.Optional branch).
+func TestT0545_VectorOptionalTaskCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		test() {
+			Task[int]? a = go worker();
+			v := [a];
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "single-owner handle")
+}
+
+// clone() called directly on a fixed-size array whose element is a single-owner
+// handle is unsound — covers the *types.Array clone gate in checkMemberExpr
+// and the *types.Array branch of firstSingleOwnerHandle.
+func TestT0545_FixedArrayTaskCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		test() {
+			Task[int][2] arr = [go worker(), go worker()];
+			c := arr.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "single-owner handle")
+}
+
+func TestT0545_FixedArrayMutexCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			Mutex[int][2] arr = [Mutex[int](1), Mutex[int](2)];
+			c := arr.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+}
+
+// A fixed-size array of handles nested inside a Vector is rejected by the
+// nesting rule — covers the *types.Array case of isNestedSingleOwnerContainer.
+func TestT0545_NestedFixedArrayInVectorError(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			Vector[Task[int][2]] v = Vector[Task[int][2]]();
+		}
+	`)
+	expectError(t, errs, "cannot be a container element")
+	expectError(t, errs, "transitively contains")
+}
+
+// Negative: a tuple containing only a refcounted handle (Arc) is duplicable —
+// firstSingleOwnerHandle must recurse the tuple and return nil, so clone() is
+// NOT gated. Guards against over-restricting refcounted handles in tuples.
+func TestT0545_VectorTupleArcCloneOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := Vector[(Arc[int], int)]();
+			v2 := v.clone();
+		}
+	`)
+}
+
+// Negative: an Optional of a non-handle element is duplicable — the
+// *types.Optional recursion must return nil for Optional[int].
+func TestT0545_VectorOptionalIntCloneOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int? a = 5;
+			v := [a];
+			v2 := v.clone();
+		}
+	`)
+}

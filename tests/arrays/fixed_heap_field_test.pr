@@ -670,6 +670,52 @@ test_slot_to_slot_optional_tuple() `test {
   assert(arr[1] is present, "slot 1 cloned");
 }
 
+// T0597: Optional[Vector] slot-to-slot — original repro for the
+// genAssignStmt IndexExpr-LHS optionalContainerDup gap. Pre-fix this
+// SEGV'd with a double-free on the inner Vector pointer because
+// claimStringTemp(val) at the IndexExpr site sees the wrapped {i1, ptr}
+// struct, not the bare inner-dup pointer that genArrayIndex registered.
+test_slot_to_slot_optional_vector() `test {
+  Vector[int] v0 = Vector[int]();
+  v0.push(1);
+  Vector[int] v1 = Vector[int]();
+  v1.push(2);
+  Vector[int]? a = v0;
+  Vector[int]? b = v1;
+  Vector[int]?[2] arr = [a, b];
+  arr[1] = arr[0];
+  assert(arr[0] is present, "slot 0 preserved");
+  assert(arr[1] is present, "slot 1 cloned");
+}
+
+// T0597: Optional[Channel] slot-to-slot — same code path as Vector via
+// the channel branch of genArrayIndex's container-dup (refcount inc).
+test_slot_to_slot_optional_channel() `test {
+  channel[int] c0 = channel[int](1);
+  c0.send(11);
+  channel[int] c1 = channel[int](1);
+  c1.send(22);
+  channel[int]? a = c0;
+  channel[int]? b = c1;
+  channel[int]?[2] arr = [a, b];
+  arr[1] = arr[0];
+  assert(arr[0] is present, "slot 0 preserved");
+  assert(arr[1] is present, "slot 1 cloned");
+}
+
+// T0597: Optional[Arc] slot-to-slot — exercises the Arc branch of the
+// container dup (atomic refcount inc).
+test_slot_to_slot_optional_arc() `test {
+  Arc[int] a0 = Arc[int](100);
+  Arc[int] a1 = Arc[int](200);
+  Arc[int]? a = a0;
+  Arc[int]? b = a1;
+  Arc[int]?[2] arr = [a, b];
+  arr[1] = arr[0];
+  assert(arr[0] is present, "slot 0 preserved");
+  assert(arr[1] is present, "slot 1 cloned");
+}
+
 // Weak[T] slot-to-slot — exercises the AsWeak branch of the container dup.
 test_slot_to_slot_weak() `test {
   Arc[int] keep0 = Arc[int](10);

@@ -5647,6 +5647,32 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// B0309: When RHS is opt!, neutralize the source optional so its
 			// drop doesn't double-free the inner value now owned by the container.
 			c.neutralizeForceUnwrapSource(s.Value)
+			// T0597: When RHS is an Optional[X] field-read or array-index from a
+			// droppable owner, genFieldAccess/genArrayIndex set these sentinels
+			// to the bare inner-dup pointer. The wrapped {i1, ptr} struct passed
+			// to claimStringTemp/claimHeapTemp above won't match the stmtTempMap
+			// entry (which keys on the inner pointer). Without claiming per
+			// sentinel here, cleanupStmtTemps drops the inner pointer at
+			// statement end, then the container slot's drop at scope exit drops
+			// the same pointer again → double-free. Mirrors T0498's per-arg
+			// claim in constructor field-init and existing claims at
+			// var-decl/return sites.
+			if c.optionalStringDup != nil {
+				c.claimStringTemp(c.optionalStringDup)
+				c.optionalStringDup = nil
+			}
+			if c.optionalContainerDup != nil {
+				c.claimStringTemp(c.optionalContainerDup)
+				c.optionalContainerDup = nil
+			}
+			if c.optionalTupleDup != nil {
+				c.claimHeapTemp(c.optionalTupleDup)
+				c.optionalTupleDup = nil
+			}
+			if c.optionalHeapDup != nil {
+				c.claimHeapTemp(c.optionalHeapDup)
+				c.optionalHeapDup = nil
+			}
 		}
 		// Clear drop flag on index key if it's being stored (e.g., map[key] = val).
 		// The map takes ownership of the key pointer.

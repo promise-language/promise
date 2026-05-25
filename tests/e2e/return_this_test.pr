@@ -168,3 +168,100 @@ test_method_internal_chained_this_iter_heap() `test {
   v := i.use_chain_string();
   assert(v == "world", "chained this.iter() preserves heap field");
 }
+
+// T0582: `return (this);` (paren-wrapped) from a `~this` method must wrap
+// the i8* into the { vtable_ptr, instance_ptr } value struct, same as
+// `return this;`. Without the paren-peel, opt rejects the IR.
+type ParenBoxT0582 {
+  int x;
+}
+type ParenHolderT0582 {
+  ParenBoxT0582 b;
+  eat(~this) ParenHolderT0582 {
+    return (this);
+  }
+  eat_nested(~this) ParenHolderT0582 {
+    return ((this));
+  }
+}
+
+test_return_paren_this() `test {
+  h := ParenHolderT0582(b: ParenBoxT0582(x: 7));
+  x := h.eat();
+  assert(x.b.x == 7, "paren-wrapped return this preserves field");
+}
+
+test_return_double_paren_this() `test {
+  h := ParenHolderT0582(b: ParenBoxT0582(x: 9));
+  x := h.eat_nested();
+  assert(x.b.x == 9, "double-paren return this preserves field");
+}
+
+// T0582 audit: paren-wrapped receiver `(w).self()` must walk chainOriginExpr
+// through the ParenExpr to the IdentExpr root and clear the receiver's drop
+// flag (B0250). Otherwise both w and w2 own the same instance → double-free.
+type ParenWrapperT0582 {
+  int v;
+  self() ParenWrapperT0582 {
+    return this;
+  }
+}
+
+test_paren_receiver_self_call() `test {
+  w := ParenWrapperT0582(v: 1);
+  w2 := (w).self();
+  assert(w2.v == 1, "paren-wrapped receiver self() preserves value");
+}
+
+// T0582 audit: paren-wrapped receiver under chain.
+test_paren_receiver_chained() `test {
+  w := ParenWrapperT0582(v: 2);
+  r := (w).self().self();
+  assert(r.v == 2, "paren-wrapped receiver chained preserves value");
+}
+
+// T0582 audit: paren around inner call — chain walks back through the paren.
+test_chained_paren_inner_call() `test {
+  w := ParenWrapperT0582(v: 3);
+  r := (w.self()).self();
+  assert(r.v == 3, "paren-wrapped inner call chained preserves value");
+}
+
+// T0582 audit: discard statement `(w).self();` — the receiver alias check in
+// trackHeapUserTypeResult must peel the ParenExpr, otherwise the temp's drop
+// flag never gets cleared at runtime → double-free at statement end.
+test_discard_paren_receiver_call() `test {
+  w := ParenWrapperT0582(v: 5);
+  (w).self();
+  assert(w.v == 5, "w preserved after discard of (w).self()");
+}
+
+// T0582 coverage: `return (this);` from a value-type method exercises the
+// value-type branch of wrapThisReturnValue (load value struct from i8*),
+// not the heap-type insertvalue branch covered above. Existing T0582 tests
+// only used heap types.
+type ParenPtT0582 {
+  int x `value;
+  int y `value;
+
+  echo(&this) ParenPtT0582 {
+    return (this);
+  }
+  echo_nested(&this) ParenPtT0582 {
+    return ((this));
+  }
+}
+
+test_return_paren_this_value_type() `test {
+  p := ParenPtT0582(x: 3, y: 4);
+  q := p.echo();
+  assert(q.x == 3, "value-type paren this preserves x");
+  assert(q.y == 4, "value-type paren this preserves y");
+}
+
+test_return_double_paren_this_value_type() `test {
+  p := ParenPtT0582(x: 7, y: 11);
+  q := p.echo_nested();
+  assert(q.x == 7, "value-type double-paren this preserves x");
+  assert(q.y == 11, "value-type double-paren this preserves y");
+}

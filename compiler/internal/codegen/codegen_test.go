@@ -7460,6 +7460,101 @@ func TestReturnThisRootedChainedClearsBindingDropFlag(t *testing.T) {
 	assertContains(t, ir, "this.alias.skip")
 }
 
+// T0582: `return (this);` (paren-wrapped) must take the same wrapping path as
+// `return this;` — codegen must build the { i8*, i8* } value struct, not emit
+// a bare `ret i8* %0` against a `{ ptr, ptr }` return type (which opt rejects).
+func TestReturnParenThisWrapsValueStruct(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { int v; eat(~this) Wrapper { return (this); } }
+		main() { w := Wrapper(v: 1); x := w.eat(); }
+	`)
+	assertContains(t, ir, "insertvalue { i8*, i8* }")
+	body := extractFunction(ir, "Wrapper.eat")
+	assertNotContains(t, body, "ret i8* %")
+}
+
+// T0582: nested parens — `return ((this));` — also takes the wrapping path,
+// confirming the paren-peel iterates.
+func TestReturnDoubleParenThisWrapsValueStruct(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { int v; eat(~this) Wrapper { return ((this)); } }
+		main() { w := Wrapper(v: 1); x := w.eat(); }
+	`)
+	assertContains(t, ir, "insertvalue { i8*, i8* }")
+	body := extractFunction(ir, "Wrapper.eat")
+	assertNotContains(t, body, "ret i8* %")
+}
+
+// T0582: paren-wrapped receiver `(w).self()` must walk through chainOriginExpr
+// to the IdentExpr root `w` and emit the B0250 receiver alias-clear blocks.
+// Without the paren-peel in chainOriginExpr, the chain origin would be a
+// ParenExpr and the switch would miss → no alias-clear → runtime double-free.
+func TestParenReceiverClearsReceiverDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { int v; self() Wrapper { return this; } }
+		main() { w := Wrapper(v: 1); w2 := (w).self(); }
+	`)
+	assertContains(t, ir, "return.this.clear")
+	assertContains(t, ir, "return.this.skip")
+}
+
+// T0582: paren-wrapped receiver under a chain `(w).self().self()` — chain origin
+// must still resolve to `w` after the paren-peel.
+func TestParenReceiverChainedClearsReceiverDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { int v; self() Wrapper { return this; } }
+		main() { w := Wrapper(v: 1); r := (w).self().self(); }
+	`)
+	assertContains(t, ir, "return.this.clear")
+	assertContains(t, ir, "return.this.skip")
+}
+
+// T0582: paren around an inner call `(w.self()).self()` — the outer chain step
+// peels the ParenExpr to reach the inner call, then walks back to `w`.
+func TestChainedParenInnerCallClearsReceiverDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { int v; self() Wrapper { return this; } }
+		main() { w := Wrapper(v: 1); r := (w.self()).self(); }
+	`)
+	assertContains(t, ir, "return.this.clear")
+	assertContains(t, ir, "return.this.skip")
+}
+
+// T0582: paren-wrapped receiver in a discard statement `(w).self();` must hit
+// emitReceiverAliasCheck's IdentExpr arm (via the paren-peel) and emit the
+// recv.alias.clear/skip blocks so the temp's drop flag is cleared at runtime.
+// Without the peel, mem.Target is a ParenExpr → default: return → no check →
+// double-free at statement end.
+func TestParenDiscardReceiverEmitsAliasCheck(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { int v; self() Wrapper { return this; } }
+		main() { w := Wrapper(v: 1); (w).self(); }
+	`)
+	assertContains(t, ir, "recv.alias.clear")
+	assertContains(t, ir, "recv.alias.skip")
+}
+
+// T0582: `return (this);` from a value-type method must take the value-type
+// branch of wrapThisReturnValue (bitcast i8* to value-struct pointer + load),
+// not emit a bare `ret i8* %0` against the value-struct return type.
+// Coverage gap: existing T0582 tests only cover heap-type returns.
+func TestReturnParenThisValueTypeLoads(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+			echo(&this) Pt { return (this); }
+		}
+		main() { p := Pt(x: 3, y: 4); q := p.echo(); }
+	`)
+	body := extractFunction(ir, "Pt.echo")
+	// Value-type branch emits bitcast then load of the value struct.
+	assertContains(t, body, "bitcast i8*")
+	assertContains(t, body, "load %promise_Pt_v")
+	// Must NOT emit a raw i8* return against the value-struct return type.
+	assertNotContains(t, body, "ret i8* %")
+}
+
 func TestOptionalParamWrapping(t *testing.T) {
 	ir := generateIR(t, `
 		foo(int? x) int {

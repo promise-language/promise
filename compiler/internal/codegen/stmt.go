@@ -5044,8 +5044,14 @@ func (c *Compiler) emitReceiverAliasCheck(e *ast.CallExpr, newTempInstancePtr va
 		return
 	}
 
+	// T0582: peel ParenExpr so `(w).self()` and `((w)).self()` resolve to
+	// the underlying IdentExpr/ThisExpr receiver, otherwise the switch
+	// would fall through to `default: return` → no alias check → double-free
+	// on discard statements like `(w).self();`.
+	target := unwrapDestructureParens(mem.Target)
+
 	var recvInstPtr value.Value
-	switch t := mem.Target.(type) {
+	switch t := target.(type) {
 	case *ast.IdentExpr:
 		alloca, isLocal := c.locals[t.Name]
 		if !isLocal {
@@ -6538,7 +6544,9 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 // appropriate value struct when returning from a method. For heap types, builds
 // { vtable_ptr, instance_ptr }. For value types, loads the full value struct from
 // the pointer. No-op if the return expression is not ThisExpr.
+// T0582: peel ParenExpr so `return (this);` takes the same path as `return this;`.
 func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType types.Type) value.Value {
+	expr = unwrapDestructureParens(expr)
 	if _, isThis := expr.(*ast.ThisExpr); !isThis {
 		return val
 	}
@@ -6581,9 +6589,12 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 // `this.f().g()` returns the ThisExpr; for chains rooted in a non-method
 // expression (constructor, free call, field access) returns that expression
 // (which the caller's switch will ignore). T0347.
+// T0582: peel ParenExpr at each step so `(w).f()`, `(w.f()).g()`, and
+// `((w).f()).g()` all resolve to the underlying receiver.
 func chainOriginExpr(call *ast.CallExpr) ast.Expr {
 	var expr ast.Expr = call
 	for {
+		expr = unwrapDestructureParens(expr)
 		c, ok := expr.(*ast.CallExpr)
 		if !ok {
 			return expr

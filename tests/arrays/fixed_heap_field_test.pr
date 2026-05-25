@@ -782,9 +782,9 @@ test_field_arr_slot_to_slot_heap() `test {
 test_field_arr_let_then_overwrite_heap() `test {
   _HolderBox h = _HolderBox(data: [_Box(n: 1), _Box(n: 2)]);
   _Box x = h.data[0];
-  // Note: h.data[0] = _Box(n: 99) panics (T0599 bare→Optional gap doesn't apply
-  // here since data is _Box[2] not _Box?[2], but the test format is symmetric
-  // with the local-arr cases above).
+  // Note: data is non-optional _Box[2] (not _Box?[2]), so the T0599
+  // bare→Optional wrap does not apply here; the overwrite form is covered by
+  // test_field_arr_bare_to_optional_slot below for the Optional case.
   assert(x.n == 1, "x preserved");
   assert(h.data[0].n == 1, "slot 0 still present");
 }
@@ -871,4 +871,117 @@ test_let_then_scope_exit_clone_box() `test {
   _CloneBox[2] arr = [_CloneBox(n: 1), _CloneBox(n: 2)];
   _CloneBox x = arr[0];
   assert(x.n == 1, "x intact");
+}
+
+// --- T0599: bare-T RHS assigned to an Optional[T] fixed-array slot. Pre-fix
+// the IndexExpr-LHS path in genAssignStmt had no Optional-wrap (the MemberExpr
+// and IdentExpr paths did), so `arr[i] = bareValue` panicked at codegen with
+// "store operands are not compatible: src=T; dst={i1,T}*". These exercise the
+// natural form a user writes; zero-leak + PAL double-free guard verify the
+// pre-wrap claimStringTemp / post-wrap claimHeapTemp ownership handoff.
+
+// Heap user type: bare _BoxA → _BoxA? slot. Post-wrap claimHeapTemp must
+// claim the ctor temp via its {i1,{vtable,instance}} struct-extraction path.
+test_bare_heap_user_to_optional_slot() `test {
+  _BoxA? a = _BoxA(n: 7);
+  _BoxA? b = _BoxA(n: 8);
+  _BoxA?[2] arr = [a, b];
+  arr[0] = _BoxA(n: 99);
+  assert(arr[0] is present, "slot 0 present after bare assign");
+  assert(arr[1] is present, "slot 1 untouched");
+}
+
+// String: bare heap-string concat temp → string? slot. The old slot value is
+// dropped via promise_string_drop; the new temp must be claimed BEFORE the
+// Optional wrap (val identity changes after wrapOptional).
+test_bare_string_to_optional_slot() `test {
+  string sa = "al" + "pha";
+  string sb = "be" + "ta";
+  string? oa = sa;
+  string? ob = sb;
+  string?[2] arr = [oa, ob];
+  arr[0] = "ne" + "w";
+  assert(arr[0] is present, "slot 0 present after bare-string assign");
+  assert(arr[1] is present, "slot 1 untouched");
+}
+
+// Container: bare Vector[int] → Vector[int]? slot. Exercises the container
+// branch of the pre-wrap temp claim.
+test_bare_vector_to_optional_slot() `test {
+  Vector[int] v0 = Vector[int]();
+  v0.push(1);
+  Vector[int] v1 = Vector[int]();
+  v1.push(2);
+  Vector[int]? a = v0;
+  Vector[int]? b = v1;
+  Vector[int]?[2] arr = [a, b];
+  Vector[int] v2 = Vector[int]();
+  v2.push(42);
+  arr[0] = v2;
+  assert(arr[0] is present, "slot 0 present after bare-vector assign");
+  assert(arr[1] is present, "slot 1 untouched");
+}
+
+// Regression guard: `arr[i] = none` must keep working (the exprType==TypNone
+// guard skips the wrap; none is handled as zeroinit by genExpr).
+test_none_to_optional_slot() `test {
+  _BoxA? a = _BoxA(n: 1);
+  _BoxA? b = _BoxA(n: 2);
+  _BoxA?[2] arr = [a, b];
+  arr[0] = none;
+  assert(arr[0] is absent, "slot 0 cleared to none");
+  assert(arr[1] is present, "slot 1 untouched");
+}
+
+// Field-array: bare _BoxA → _BoxA? slot via the MemberExpr→IndexExpr LHS form
+// (h.data[0] = ...). Same IndexExpr branch; one fix covers local + field.
+test_field_arr_bare_to_optional_slot() `test {
+  _BoxA? a = _BoxA(n: 7);
+  _BoxA? b = _BoxA(n: 8);
+  _HolderOptBox h = _HolderOptBox(data: [a, b]);
+  h.data[0] = _BoxA(n: 99);
+  assert(h.data[0] is present, "field slot 0 present after bare assign");
+  assert(h.data[1] is present, "field slot 1 untouched");
+}
+
+// Arc: bare Arc → Arc[int]? slot. Exercises the types.IsArc(exprType)
+// disjunct of the T0599 pre-wrap claim (only string & Vector were covered by
+// the cases above). Arc is refcounted — a missed pre-wrap claim would
+// leak/double-decrement; the zero-tolerance leak policy verifies the handoff.
+test_bare_arc_to_optional_slot() `test {
+  Arc[int]? a = Arc[int](1);
+  Arc[int]? b = Arc[int](2);
+  Arc[int]?[2] arr = [a, b];
+  arr[0] = Arc[int](99);
+  assert(arr[0] is present, "arc slot 0 present after bare assign");
+  assert(arr[0]!.borrow == 99, "arc slot 0 value");
+  assert(arr[1] is present, "arc slot 1 untouched");
+}
+
+// Channel: bare channel → channel[int]? slot. Exercises the
+// types.IsChannel(exprType) disjunct of the T0599 pre-wrap claim.
+test_bare_channel_to_optional_slot() `test {
+  channel[int]? a = channel[int]();
+  channel[int]? b = channel[int]();
+  channel[int]?[2] arr = [a, b];
+  arr[0] = channel[int]();
+  assert(arr[0] is present, "chan slot 0 present after bare assign");
+  assert(arr[1] is present, "chan slot 1 untouched");
+}
+
+// Generic typeSubst path: a generic free function whose body assigns a bare
+// T into a T?[N] slot — exercises the `c.typeSubst != nil` branch of the
+// T0599 block (slotType/exprType types.Substitute), which no other case
+// covers. Instantiated with both a primitive (int) and a heap type (string).
+_set_opt_arr_first[T](~T x) bool {
+  T? z0 = none;
+  T? z1 = none;
+  T?[2] a = [z0, z1];
+  a[0] = x;
+  return a[0] is present;
+}
+
+test_bare_generic_typeparam_to_optional_slot() `test {
+  assert(_set_opt_arr_first[int](7), "generic int slot present");
+  assert(_set_opt_arr_first[string]("hi" + "!"), "generic string slot present");
 }

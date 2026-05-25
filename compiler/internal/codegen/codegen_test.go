@@ -5636,6 +5636,45 @@ func TestFixedArrayIndexAssignDropsOldOptionalHeapUser(t *testing.T) {
 	assertContains(t, ir, "call void @_Box.drop")
 }
 
+// T0599: bare-T RHS assigned to an Optional<T> fixed-array slot. The
+// IndexExpr-LHS path in genAssignStmt had no Optional-wrap (the MemberExpr
+// and IdentExpr paths did), so genArrayIndexAssign's NewStore got a bare T
+// against a {i1, T}* slot and panicked with "store operands are not
+// compatible". Pre-fix, generateIR() here panics and fails the test; post-fix
+// the bare _Box is wrapped into the {i1, {i8*, i8*}} Optional before the store.
+func TestFixedArrayIndexAssignBareToOptionalHeapUser(t *testing.T) {
+	ir := generateIR(t, `
+		type _Box { int n; drop(~this) {} }
+		main() {
+			_Box? a = _Box(n: 1);
+			_Box? b = _Box(n: 2);
+			_Box?[2] arr = [a, b];
+			arr[0] = _Box(n: 99);
+		}
+	`)
+	assertContains(t, ir, "arrassign.ok")
+	// The bare _Box ctor result is wrapped into the Optional struct (present
+	// flag set, then the value-struct inserted) before the slot store.
+	assertContains(t, ir, "insertvalue { i1, { i8*, i8* } } undef, i1 true, 0")
+}
+
+// T0599: bare string literal assigned to a string? fixed-array slot — the
+// string-temp claim must run BEFORE the Optional wrap (val identity changes
+// after wrapOptional). Pre-fix this panicked with "store operands are not
+// compatible: src=i8*; dst={i1,i8*}*".
+func TestFixedArrayIndexAssignBareToOptionalString(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? oa = "a";
+			string? ob = "b";
+			string?[2] arr = [oa, ob];
+			arr[0] = "new";
+		}
+	`)
+	assertContains(t, ir, "arrassign.ok")
+	assertContains(t, ir, "insertvalue { i1, i8* } undef, i1 true, 0")
+}
+
 // T0583: Vector element — overwrite must call Vector.drop on the old slot.
 func TestFixedArrayIndexAssignDropsOldVector(t *testing.T) {
 	ir := generateIR(t, `

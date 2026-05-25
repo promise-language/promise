@@ -5641,6 +5641,49 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					}
 				}
 			}
+			// T0599: Wrap bare RHS in Optional when a fixed-size-array slot
+			// type is Optional but the expr is not (mirrors the MemberExpr-LHS
+			// path, stmt.go:5485-5528, and the IdentExpr-LHS path,
+			// stmt.go:5371-5396). Without this, genArrayIndexAssign stores a
+			// bare T into a {i1, T} slot → "store operands are not compatible".
+			//
+			// Gated to *types.Array only: genIndexAssign routes *types.Array to
+			// genArrayIndexAssign (raw NewStore, no coercion) but Vector/Map go
+			// through the []= method whose argument-passing already wraps bare
+			// values into Optional — wrapping here too would double-wrap and
+			// corrupt every Map[K,V?]/Vector[T?] index assign. idxTargetType is
+			// already MutRef/SharedRef-unwrapped above, matching genIndexAssign's
+			// own dispatch (stmt.go:8410-8421). For arrays c.info.Types[target]
+			// is the element type (sema checkIndexExpr returns arr.Elem()), i.e.
+			// directly the slot type.
+			if _, isArr := idxTargetType.(*types.Array); isArr {
+				slotType := c.info.Types[target]
+				exprType := c.info.Types[s.Value]
+				if c.typeSubst != nil {
+					slotType = types.Substitute(slotType, c.typeSubst)
+					exprType = types.Substitute(exprType, c.typeSubst)
+				}
+				if _, isOpt := slotType.(*types.Optional); isOpt && exprType != types.TypNone &&
+					!types.Identical(exprType, slotType) {
+					// T0394/T0111/T0555 pattern: string & native-handle/container
+					// temps are tracked by direct val-identity in stmtTempMap,
+					// which fails to match once val becomes the wrapped struct —
+					// claim BEFORE wrapping. Heap user-type temps are still
+					// claimed correctly post-wrap by claimHeapTemp's
+					// struct-extraction fallback (B0233), so they are excluded.
+					if extractNamed(exprType) == types.TypString ||
+						types.IsVector(exprType) || types.IsChannel(exprType) ||
+						types.IsArc(exprType) || types.IsWeak(exprType) ||
+						types.IsTask(exprType) || types.IsMutex(exprType) ||
+						types.IsMutexGuard(exprType) {
+						c.claimStringTemp(val)
+					}
+					optType := c.resolveType(slotType)
+					if st, ok := optType.(*irtypes.StructType); ok {
+						val = c.wrapOptional(val, st)
+					}
+				}
+			}
 		}
 		c.genIndexAssign(target, s.Op, val)
 		// Clear drop flag on RHS if it's being moved via simple assign

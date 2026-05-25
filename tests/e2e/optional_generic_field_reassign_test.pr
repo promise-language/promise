@@ -146,11 +146,26 @@ test_optional_vector_field_assign_none() `test {
   b.value = none;
 }
 
+test_method_reassign_vector_int() `test {
+  b := Box[Vector[int]](value: [1, 2]);
+  b.set_via_method([3, 4, 5]);
+}
+
+test_method_reassign_vector_string() `test {
+  b := Box[Vector[string]](value: ["a"]);
+  b.set_via_method([(1).to_string(), (2).to_string()]);
+}
+
 // === CHANNEL — simple reassign ===
 
 test_optional_channel_field_assign() `test {
   b := Box[Channel[int]](value: channel[int](2));
   b.value = channel[int](2);
+}
+
+test_method_reassign_channel() `test {
+  b := Box[Channel[int]](value: channel[int](1));
+  b.set_via_method(channel[int](2));
 }
 
 // === HEAP USER TYPE — simple reassign ===
@@ -170,6 +185,11 @@ test_optional_heap_user_field_loop() `test {
   for i in 0..10 {
     b.value = Item(id: i, name: "n");
   }
+}
+
+test_method_reassign_item() `test {
+  b := Box[Item](value: Item(id: 0, name: "init"));
+  b.set_via_method(Item(id: 1, name: "replaced"));
 }
 
 // === INHERITED FIELD — generic parent ===

@@ -5130,6 +5130,86 @@ func TestT0576_InferredVarDeclThisMovedBranch(t *testing.T) {
 	expectOwnerError(t, c.errors, "use of moved variable 'this'")
 }
 
+// --- T0593 ---
+// T0593: `use x = this` in a `~this` method body — the use-binding alloca
+// expects a value struct {i8*, i8*} but `this` is a raw i8* instance pointer;
+// storing it crashes codegen with "store operands are not compatible".
+// Must be rejected at the ownership stage, the same way typed/inferred var
+// decls were guarded by T0576.
+func TestT0593_UseVarDeclMutThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Res {
+			int id;
+			close(~this) {}
+			eat(~this) {
+				use x := this;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0593: same crash on plain `this` (non-mutable) receiver.
+func TestT0593_UseVarDeclPlainThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Res {
+			int id;
+			close(~this) {}
+			read(this) {
+				use x := this;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume 'this'")
+}
+
+// T0593 regression guard: `return this;` from a `~this` method must keep
+// compiling. Codegen's wrapThisReturnValue wraps the i8* into the correct
+// value struct, and maybeClearReceiverDropFlag prevents double-free (B0250).
+func TestT0593_ReturnThisMutStillCompiles(t *testing.T) {
+	ownerOK(t, `
+		type Box { int x; }
+		type Holder {
+			Box b;
+			eat(~this) Holder { return this; }
+		}
+		test() {}
+	`)
+}
+
+// T0593: defense-in-depth — Moved-state branch for use-var-decl path.
+// Mirroring T0576's defense-in-depth tests for typed/inferred var decls.
+func TestT0593_UseVarDeclThisMovedBranch(t *testing.T) {
+	c := newUnitChecker()
+	c.state["this"] = Moved
+	c.checkStmt(&ast.UseVarDecl{Name: "x", Value: &ast.ThisExpr{}})
+	expectOwnerError(t, c.errors, "use of moved variable 'this'")
+}
+
+// T0593: borrow-state branch for use-var-decl path — exercise via unit
+// checker to avoid NLL expiry complexity, mirroring TestT0576_VarDeclThisInBorrowedState.
+func TestT0593_UseVarDeclThisBorrowedBranch(t *testing.T) {
+	c := newUnitChecker()
+	c.borrows = NewBorrowSet()
+	c.borrows.Add(&Borrow{Borrower: "tmp", Origin: "this", Kind: BorrowShared})
+	c.checkStmt(&ast.UseVarDecl{Name: "x", Value: &ast.ThisExpr{}})
+	expectOwnerError(t, c.errors, "cannot move 'this' while it is borrowed")
+}
+
+// T0593: borrow-state branch for tryMove(ThisExpr) — the path reached via
+// ReturnStmt when `this` has an active borrow (e.g., from destructuring
+// this.field). The UseVarDecl guard fires before tryMove, so this unit test
+// exercises the tryMove path directly via a ReturnStmt.
+func TestT0593_ReturnThisBorrowedBranch(t *testing.T) {
+	c := newUnitChecker()
+	c.borrows = NewBorrowSet()
+	c.borrows.Add(&Borrow{Borrower: "tmp", Origin: "this", Kind: BorrowShared})
+	c.checkStmt(&ast.ReturnStmt{Value: &ast.ThisExpr{}})
+	expectOwnerError(t, c.errors, "cannot move 'this' while it is borrowed")
+}
+
 // Copy-type params are unaffected by the borrowed-param check.
 func TestT0338_CopyParamMovable(t *testing.T) {
 	ownerOK(t, `

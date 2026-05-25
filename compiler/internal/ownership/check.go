@@ -52,7 +52,9 @@ func paramInitialState(p *types.Param, consuming bool) VarState {
 		return Owned
 	}
 	if p.Ref() == types.RefMut {
-		// `~T` — caller transfers ownership; callee may consume.
+		// `~T` param — caller transfers ownership; callee may consume.
+		// `~this` receivers also land here (Owned for mutation tracking), but
+		// consumption is still rejected by tryMove/tryMoveConsume (T0569/T0593).
 		return Owned
 	}
 	if p.IsVariadic() {

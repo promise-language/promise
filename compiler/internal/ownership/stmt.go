@@ -51,6 +51,21 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 
 	case *ast.UseVarDecl:
 		c.checkExpr(s.Value)
+		// T0593: `use x := this` would store the raw i8* receiver into a use-binding
+		// alloca that expects a value struct — crashes codegen like the typed/inferred
+		// var-decl cases rejected by T0576. Guard before tryMove (which allows ThisExpr
+		// for the return path).
+		if this, ok := s.Value.(*ast.ThisExpr); ok {
+			if c.state["this"] == Moved {
+				c.errorf(this.Pos(), "use of moved variable 'this'")
+			} else if c.borrows != nil && c.borrows.HasAnyBorrow("this") {
+				c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")
+			} else {
+				c.errorf(this.Pos(),
+					"cannot consume 'this'; the receiver belongs to the caller — call `.clone()` to produce an independent copy, or refactor into a free function taking `~Type`")
+			}
+			break
+		}
 		c.tryMove(s.Value)
 		if s.Name != "_" {
 			c.state[s.Name] = Owned

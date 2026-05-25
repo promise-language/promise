@@ -159,6 +159,10 @@ func (c *Checker) tryMove(expr ast.Expr) {
 	// `this` is a parameter, not a regular tracked variable; no move bookkeeping.
 	// T0548: still reject moves of `this` while a borrow on it is active
 	// (e.g., from `(b, n) := this.pair` registering Origin:"this").
+	// NOTE: `return this` is intentionally allowed here — codegen's
+	// wrapThisReturnValue wraps the i8* into the correct value struct type, and
+	// maybeClearReceiverDropFlag prevents double-free (T0576/B0250).
+	// `use x := this` is guarded separately in checkStmt (T0593).
 	if this, ok := expr.(*ast.ThisExpr); ok {
 		if c.borrows != nil && c.borrows.HasAnyBorrow("this") {
 			c.errorf(this.Pos(), "cannot move 'this' while it is borrowed")

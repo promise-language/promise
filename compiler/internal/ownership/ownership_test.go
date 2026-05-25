@@ -8651,3 +8651,77 @@ func TestT0596_VarDeclFromMutexGuardSlotRejected(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot move MutexGuard[int] out of indexed slot")
 }
+
+// T0612 — Gap B: `arr[i]!` wraps the IndexExpr in an OptionalUnwrapExpr,
+// so the cast in rejectIndexExprSingleOwnerMove's helper used to fail and
+// the move slipped through silently → latent double-free. The peel loop
+// now strips OptionalUnwrapExpr so the inner type (Optional[Mutex]) reaches
+// the rejection. (T0612's gap A — nested-array row moves — is covered by
+// T0545's sema-level rejection of any container that transitively contains
+// a single-owner handle; those types can no longer be constructed.)
+func TestT0612_OptionalUnwrapMutexArrayElementRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int]? m0 = Mutex[int](1);
+			Mutex[int]? m1 = Mutex[int](2);
+			Mutex[int]?[2] arr = [m0, m1];
+			Mutex[int] x = arr[0]!;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int]? out of indexed slot")
+}
+
+// Task[T] parity for the OptionalUnwrap path.
+func TestT0612_OptionalUnwrapTaskArrayElementRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		_make_task() Task[int] { return go { 5 }; }
+		test() {
+			Task[int]? t0 = _make_task();
+			Task[int]? t1 = _make_task();
+			Task[int]?[2] arr = [t0, t1];
+			Task[int] x = arr[0]!;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Task[int]? out of indexed slot")
+}
+
+// Vector slot under OptionalUnwrap — same shape, heap-backed container.
+func TestT0612_OptionalUnwrapVectorMutexElementRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int]? m0 = Mutex[int](1);
+			Mutex[int]? m1 = Mutex[int](2);
+			Vector[Mutex[int]?] v = [m0, m1];
+			Mutex[int] x = v[0]!;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int]? out of indexed slot")
+}
+
+// ParenExpr + OptionalUnwrap composition — `(arr[0]!)` — the peel loop
+// must strip both layers in any order.
+func TestT0612_ParenthesisedOptionalUnwrapRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int]? m0 = Mutex[int](1);
+			Mutex[int]? m1 = Mutex[int](2);
+			Mutex[int]?[2] arr = [m0, m1];
+			Mutex[int] x = (arr[0]!);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int]? out of indexed slot")
+}
+
+// Positive: unwrapping a non-handle Optional slot (e.g. `int?[2]`) must
+// still be allowed — the OptionalUnwrap peel only escalates when the
+// inner IndexExpr's element type is a single-owner native handle.
+func TestT0612_OptionalUnwrapIntArrayElementAllowed(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			int? a = 1;
+			int? b = 2;
+			int?[2] arr = [a, b];
+			int x = arr[0]!;
+		}
+	`)
+}

@@ -921,6 +921,10 @@ func isBorrowedType(typ types.Type) bool {
 // semantics are explicitly undefined (T0508). These cannot be extracted from
 // an array/vector slot because the read would alias the slot's owned pointer
 // → double-free at the container's scope-exit drop. Recurses through Optional.
+// Note: nested containers (e.g. `Mutex[T][N][M]`) do not need an Array arm here
+// because T0545 rejects any container that transitively contains a single-owner
+// handle at sema — those types cannot be constructed, so the ownership pass
+// never sees a row-typed IndexExpr result.
 func isSingleOwnerNativeType(typ types.Type) bool {
 	if typ == nil {
 		return false
@@ -939,10 +943,17 @@ func isSingleOwnerNativeType(typ types.Type) bool {
 // ownership pass with a clear diagnostic. Returns true when rejected so the
 // caller can skip the regular move/state bookkeeping.
 func (c *Checker) rejectIndexExprSingleOwnerMove(expr ast.Expr) bool {
-	// Peel ParenExpr so `(arr[0])` is treated like `arr[0]`.
+	// Peel ParenExpr so `(arr[0])` is treated like `arr[0]`. Also peel
+	// OptionalUnwrapExpr so `arr[i]!` on an `Optional<Mutex>` slot reaches
+	// the inner IndexExpr — without this the cast below fails and the move
+	// slips through (T0612 gap B).
 	for {
 		if p, ok := expr.(*ast.ParenExpr); ok {
 			expr = p.Expr
+			continue
+		}
+		if u, ok := expr.(*ast.OptionalUnwrapExpr); ok {
+			expr = u.Expr
 			continue
 		}
 		break

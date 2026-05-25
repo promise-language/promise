@@ -1,0 +1,79 @@
+// T0628: regression for the directly-recursive-enum stack overflow.
+// Pre-fix, `enum E { ... E? ... }` / `E` / `(E, ...)` / `E[N]` variant fields
+// caused computeEnumInternalType to recurse forever. Sema now rejects those at
+// compile time and steers users to container-indirected forms — which must
+// continue to compile, construct, match, and drop without leaks. This file
+// exercises the supported indirection patterns: `Vector[Enum]`, `map[K, Enum]`,
+// and a `Named` user-type wrapper. (JsonValue in modules/json already covers
+// the deeper Vector+Map case; this is a focused marker.)
+enum TreeV {
+  Leaf(int v),
+  Branch(TreeV[] children),
+}
+
+enum TreeM {
+  Empty,
+  Node(int v, map[int, TreeM] children),
+}
+
+type TreeWrap {
+  TreeN node;
+  int depth;
+}
+
+enum TreeN {
+  Tip,
+  Wrap(TreeWrap w),
+}
+
+count_leaves(TreeV t) int {
+  match t {
+    TreeV.Leaf(_) => {
+      return 1;
+    },
+    TreeV.Branch(cs) => {
+      int total = 0;
+      for c in cs {
+        total += count_leaves(c);
+      }
+      return total;
+    },
+  }
+}
+
+vector_recursion() `test {
+  TreeV t = TreeV.Branch(children: [TreeV.Leaf(v: 1),
+  TreeV.Branch(children: [TreeV.Leaf(v: 2), TreeV.Leaf(v: 3)]),
+  TreeV.Leaf(v: 4),
+  ]);
+  assert(count_leaves(t) == 4, "vector tree leaf count");
+}
+
+map_recursion() `test {
+  map[int, TreeM] empty_children = map[int, TreeM]();
+  map[int, TreeM] inner = {
+    1: TreeM.Empty,
+    2: TreeM.Node(v: 99, children: empty_children),
+  };
+  TreeM t = TreeM.Node(v: 42, children: inner);
+  match t {
+    TreeM.Node(v, _) => {
+      assert(v == 42, "node value");
+    },
+    _ => {
+      assert(false, "expected Node");
+    },
+  }
+}
+
+named_wrapper_recursion() `test {
+  TreeN t = TreeN.Wrap(w: TreeWrap(node: TreeN.Tip, depth: 0));
+  match t {
+    TreeN.Wrap(inner) => {
+      assert(inner.depth == 0, "wrap depth");
+    },
+    _ => {
+      assert(false, "expected Wrap");
+    },
+  }
+}

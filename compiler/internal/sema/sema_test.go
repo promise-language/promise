@@ -16044,3 +16044,102 @@ func TestT0482_PushThroughSharedRefHandleError(t *testing.T) {
 	expectError(t, errs, "cannot push")
 	expectError(t, errs, "single-owner handle")
 }
+
+// T0628: recursive enums whose variant fields reach the enum itself without
+// container/heap indirection must be rejected at sema. Without this, codegen's
+// computeEnumInternalType unboundedly recurses and the Go runtime stack-overflows.
+func TestT0628_EnumDirectSelfRefRejected(t *testing.T) {
+	errs := checkErrs(t, `enum E { V(E v) } main() {}`)
+	expectError(t, errs, "recursive enum E")
+	expectError(t, errs, "variant V")
+	expectError(t, errs, "field 'v'")
+	expectError(t, errs, "without container indirection")
+}
+
+func TestT0628_EnumOptionalSelfRefRejected(t *testing.T) {
+	errs := checkErrs(t, `enum TreeR { Leaf(int v), Branch(TreeR? child) } main() {}`)
+	expectError(t, errs, "recursive enum TreeR")
+	expectError(t, errs, "variant Branch")
+	expectError(t, errs, "field 'child'")
+}
+
+func TestT0628_EnumTupleSelfRefRejected(t *testing.T) {
+	errs := checkErrs(t, `enum E { V((E, int) v) } main() {}`)
+	expectError(t, errs, "recursive enum E")
+	expectError(t, errs, "variant V")
+}
+
+func TestT0628_EnumArraySelfRefRejected(t *testing.T) {
+	errs := checkErrs(t, `enum E { V(E[3] v) } main() {}`)
+	expectError(t, errs, "recursive enum E")
+}
+
+func TestT0628_EnumMutualSelfRefRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		enum A { Va(B b) }
+		enum B { Vb(A a) }
+		main() {}
+	`)
+	expectError(t, errs, "recursive enum A")
+	expectError(t, errs, "recursive enum B")
+}
+
+func TestT0628_EnumGenericSelfRefRejected(t *testing.T) {
+	errs := checkErrs(t, `enum E[T] { V(E[T] inner) } main() {}`)
+	expectError(t, errs, "recursive enum E")
+}
+
+func TestT0628_EnumClassicListPatternRejected(t *testing.T) {
+	errs := checkErrs(t, `enum List[T] { Nil, Cons(T head, List[T] tail) } main() {}`)
+	expectError(t, errs, "recursive enum List")
+	expectError(t, errs, "variant Cons")
+}
+
+// Container-indirected recursive enums must compile: Vector/Map/Set/Named-wrapper
+// types collapse to opaque {i8*, i8*} / i8* in the enum-internal-type computation,
+// terminating the layout recursion.
+func TestT0628_EnumVectorIndirectionAllowed(t *testing.T) {
+	checkOK(t, `enum E { Leaf, Branch(E[] children) } main() {}`)
+}
+
+func TestT0628_EnumMapIndirectionAllowed(t *testing.T) {
+	checkOK(t, `enum E { Leaf, Branch(map[int, E] children) } main() {}`)
+}
+
+func TestT0628_EnumNamedWrapperIndirectionAllowed(t *testing.T) {
+	checkOK(t, `
+		type Wrap { E e; int x; }
+		enum E { V(Wrap w) }
+		main() {}
+	`)
+}
+
+// Generic mutual recursion forces enumReachesItself to enter the *types.Instance
+// arm with origin != target and walk substituted variant fields — the only path
+// that exercises lines 56-62 of the predicate. The non-generic mutual test above
+// hits the *types.Enum arm's t==target early-return instead.
+func TestT0628_EnumGenericMutualSelfRefRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		enum A[T] { Va(B[T] b) }
+		enum B[T] { Vb(A[T] a) }
+		main() {}
+	`)
+	expectError(t, errs, "recursive enum A")
+	expectError(t, errs, "recursive enum B")
+}
+
+// Each recursive variant field must be reported independently — the validator
+// iterates all fields per variant rather than stopping at the first.
+func TestT0628_EnumMultipleFieldsAllFlagged(t *testing.T) {
+	errs := checkErrs(t, `enum E { V(E a, E? b) } main() {}`)
+	expectError(t, errs, "field 'a'")
+	expectError(t, errs, "field 'b'")
+}
+
+// Optional and Tuple nested together — the predicate must compose through both
+// type wrappers to reach the inner enum.
+func TestT0628_EnumNestedOptionalTupleRejected(t *testing.T) {
+	errs := checkErrs(t, `enum E { V((E?, int) x) } main() {}`)
+	expectError(t, errs, "recursive enum E")
+	expectError(t, errs, "field 'x'")
+}

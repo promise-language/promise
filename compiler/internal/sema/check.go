@@ -123,12 +123,13 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 	c.populateUniverseTypes() // Populate non-native universe type pointers (TypError, TypMap, etc.)
 
 	tPass = time.Now()
-	c.define(file)                // Pass 2: resolve types, populate type structures
-	c.propagateDrops(file)        // B0158: auto-synthesize drop for types with droppable fields
-	c.validateCloneTypes(file)    // T0154: validate `clone field types (after all types defined)
-	c.validateSendableTypes(file) // T0158: validate `sendable/`sharable field types
-	c.validateConstructors(file)  // Validate: constructor inheritance (after all types defined)
-	c.validateBuiltins()          // Validate: .pr files declare all required operators/methods/fields
+	c.define(file)                         // Pass 2: resolve types, populate type structures
+	c.propagateDrops(file)                 // B0158: auto-synthesize drop for types with droppable fields
+	c.validateCloneTypes(file)             // T0154: validate `clone field types (after all types defined)
+	c.validateSendableTypes(file)          // T0158: validate `sendable/`sharable field types
+	c.validateEnumNoSelfRefRecursion(file) // T0628: reject directly-recursive enums before codegen stack-overflows
+	c.validateConstructors(file)           // Validate: constructor inheritance (after all types defined)
+	c.validateBuiltins()                   // Validate: .pr files declare all required operators/methods/fields
 	c.info.Timings.Define = time.Since(tPass)
 
 	tPass = time.Now()
@@ -200,13 +201,14 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 	c.info.ScopeOrder = append(c.info.ScopeOrder, c.fileScope)
 	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
 
-	c.declare(file)               // Pass 1: collect all declarations
-	c.populateUniverseTypes()     // Populate non-native universe type pointers (TypError, TypMap, etc.)
-	c.define(file)                // Pass 2: resolve types, populate type structures
-	c.propagateDrops(file)        // B0158: auto-synthesize drop for types with droppable fields
-	c.validateCloneTypes(file)    // T0154: validate `clone field types (after all types defined)
-	c.validateSendableTypes(file) // T0158: validate `sendable/`sharable field types
-	c.validateConstructors(file)  // Validate: constructor inheritance
+	c.declare(file)                        // Pass 1: collect all declarations
+	c.populateUniverseTypes()              // Populate non-native universe type pointers (TypError, TypMap, etc.)
+	c.define(file)                         // Pass 2: resolve types, populate type structures
+	c.propagateDrops(file)                 // B0158: auto-synthesize drop for types with droppable fields
+	c.validateCloneTypes(file)             // T0154: validate `clone field types (after all types defined)
+	c.validateSendableTypes(file)          // T0158: validate `sendable/`sharable field types
+	c.validateEnumNoSelfRefRecursion(file) // T0628: reject directly-recursive enums before codegen stack-overflows
+	c.validateConstructors(file)           // Validate: constructor inheritance
 
 	return c.info, c.errors
 }

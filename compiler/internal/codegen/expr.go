@@ -2462,6 +2462,21 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				// T0100: Claim env temp — closure env is now owned by the struct field.
 				c.claimEnvTemp(val)
 			}
+			// T0498: Claim per-field optionalStringDup / optionalContainerDup for
+			// Optional[X] field-reads from droppable owners. genFieldAccess sets
+			// these to the bare inner-dup pointer; the wrapped {i1, ptr} struct
+			// passed to claimStringTemp above won't match the stmtTempMap entry.
+			// Without claiming per-arg, the next arg's genFieldAccess overwrites
+			// these fields and earlier dups stay live → use-after-free at
+			// cleanupStmtTemps after the constructor.
+			if c.optionalStringDup != nil {
+				c.claimStringTemp(c.optionalStringDup)
+				c.optionalStringDup = nil
+			}
+			if c.optionalContainerDup != nil {
+				c.claimStringTemp(c.optionalContainerDup)
+				c.optionalContainerDup = nil
+			}
 			// T0552: Clear enum ctor temps created during this arg's evaluation —
 			// the field is now the unique owner of the enum's variant data, so the
 			// ctor temp's scope-exit drop must not fire. Without this, the

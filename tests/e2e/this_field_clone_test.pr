@@ -885,3 +885,152 @@ test_t0500_nested_field_arc_downgrade() `test {
     assert(false, "nested downgrade should upgrade");
   }
 }
+
+// --- T0498: Multi-field constructors with Optional[X] field-reads ---
+// Per-field claim of optionalStringDup / optionalContainerDup. Without
+// the fix, the constructor's last arg overwrites the signal, earlier
+// arg's dup is never claimed, cleanupStmtTemps frees it, the new
+// instance's earlier fields point at freed memory.
+
+type _T0498StrHolder {
+  string? a;
+  string? b;
+  drop(~this) {
+  }
+  swap_strs() _T0498StrHolder {
+    return _T0498StrHolder(a: this.b, b: this.a);
+  }
+}
+
+test_t0498_multi_optional_string_field_constructor() `test {
+  // Heap-allocated strings (concat) defeat .rodata static-flag silencing.
+  h := _T0498StrHolder(a: "x" + "1", b: "y" + "2");
+  h2 := h.swap_strs();
+  if s := h2.a {
+    assert(s == "y2", "swapped a");
+  } else {
+    assert(false, "h2.a should have value");
+  }
+  if s := h2.b {
+    assert(s == "x1", "swapped b");
+  } else {
+    assert(false, "h2.b should have value");
+  }
+}
+
+type _T0498RowHolder {
+  int[]? row1;
+  int[]? row2;
+  drop(~this) {
+  }
+  swap_rows() _T0498RowHolder {
+    return _T0498RowHolder(row1: this.row2, row2: this.row1);
+  }
+}
+
+_t0498_mkv(int seed) int[] {
+  v := int[]();
+  for i := 0; i < 100; i++ {
+    v.push(i + seed);
+  }
+  return v;
+}
+
+test_t0498_multi_optional_vector_field_constructor() `test {
+  // Heap vectors (via push loop) defeat .rodata static-flag silencing.
+  h := _T0498RowHolder(row1: _t0498_mkv(0), row2: _t0498_mkv(1000));
+  h2 := h.swap_rows();
+  if v := h2.row1 {
+    assert(v.len == 100, "row1 len");
+    assert(v[0] == 1000, "row1[0] (was row2)");
+    assert(v[50] == 1050, "row1[50]");
+  } else {
+    assert(false, "h2.row1 should have value");
+  }
+  if v := h2.row2 {
+    assert(v.len == 100, "row2 len");
+    assert(v[0] == 0, "row2[0] (was row1)");
+  } else {
+    assert(false, "h2.row2 should have value");
+  }
+}
+
+// Multi-field Optional[Channel]: covers the dupChannel branch in genFieldAccess
+// (expr.go:4048). Without the per-arg claim, the second field's genFieldAccess
+// would overwrite the first channel's optionalContainerDup → use-after-free in
+// the first field of the new instance.
+type _T0498ChHolder {
+  channel[int]? ch_a;
+  channel[int]? ch_b;
+  drop(~this) {
+  }
+  swap_channels() _T0498ChHolder {
+    return _T0498ChHolder(ch_a: this.ch_b, ch_b: this.ch_a);
+  }
+}
+
+test_t0498_multi_optional_channel_field_constructor() `test {
+  ca := channel[int](1);
+  ca.send(11);
+  cb := channel[int](1);
+  cb.send(22);
+  h := _T0498ChHolder(ch_a: ca, ch_b: cb);
+  h2 := h.swap_channels();
+  // The new instance's ch_a should receive cb's value (22) and ch_b should
+  // receive ca's value (11). Both channels must hold valid refcounts.
+  if ch := h2.ch_a {
+    if v := <-ch {
+      assert(v == 22, "swapped ch_a got cb value");
+    } else {
+      assert(false, "ch_a recv should produce value");
+    }
+  } else {
+    assert(false, "h2.ch_a should have value");
+  }
+  if ch := h2.ch_b {
+    if v := <-ch {
+      assert(v == 11, "swapped ch_b got ca value");
+    } else {
+      assert(false, "ch_b recv should produce value");
+    }
+  } else {
+    assert(false, "h2.ch_b should have value");
+  }
+}
+
+// Mixed Optional[string] + Optional[Vector] in same constructor: confirms the
+// per-arg claim handles two distinct signals (optionalStringDup and
+// optionalContainerDup) in alternating iterations without overwrite.
+type _T0498MixedHolder {
+  string? name;
+  int[]? data;
+  drop(~this) {
+  }
+  rebuild() _T0498MixedHolder {
+    return _T0498MixedHolder(name: this.name, data: this.data);
+  }
+}
+
+test_t0498_mixed_optional_string_and_vector_constructor() `test {
+  // Heap-allocated values for both fields defeat .rodata static-flag silencing.
+  h := _T0498MixedHolder(name: "hello" + "-world", data: _t0498_mkv(500));
+  h2 := h.rebuild();
+  if s := h2.name {
+    assert(s == "hello-world", "rebuilt name");
+  } else {
+    assert(false, "h2.name should have value");
+  }
+  if v := h2.data {
+    assert(v.len == 100, "rebuilt data len");
+    assert(v[0] == 500, "rebuilt data[0]");
+    assert(v[99] == 599, "rebuilt data[99]");
+  } else {
+    assert(false, "h2.data should have value");
+  }
+  // Original still owns its independent copies.
+  if s := h.name {
+    assert(s == "hello-world", "original name still valid");
+  } else {
+    assert(false, "h.name should still have value");
+  }
+}

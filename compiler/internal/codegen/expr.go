@@ -6455,6 +6455,19 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 // drop functions all null-check before freeing). No-op when the subject ident
 // has no entry in c.locals (defensive — shouldn't happen given the sema gate
 // already required an owned-local ident). (T0623)
+//
+// T0633: the slot is not always a bare pointer. A direct Task/Mutex/MutexGuard
+// field lowers to i8*, but the predicate (FirstNestedSingleOwnerHandle) also
+// matches a handle nested in a user-type wrapper ({i8*,i8*} value struct), an
+// Optional ({i1,T}), a tuple, or a fixed array ([N x i8*]). zeroinitializer is
+// valid LLVM for every one of those aggregates (and zero-fills all nested
+// pointers to null); a bare pointer slot keeps the exact NewNull idiom so the
+// existing direct-handle IR is byte-identical (no T0623 regression). The
+// subject's synth enum drop then walks the zeroed slot with all instance/
+// element pointers null and skips it — the instance-deref drop branches in
+// emitVariantFieldDrop are null-guarded, and the Optional/array element walks
+// already null-check. (c.zeroValue is not used: its default arm returns an
+// i64 0, which is store-incompatible with an [N x i8*] array slot.)
 func (c *Compiler) nullSubjectHandleSlot(subjectIdent string, internalType *irtypes.StructType, dataType *irtypes.StructType, fieldIdx int, fieldType irtypes.Type) {
 	if subjectIdent == "" {
 		return
@@ -6468,7 +6481,13 @@ func (c *Compiler) nullSubjectHandleSlot(subjectIdent string, internalType *irty
 	subjTypedDataPtr := c.block.NewBitCast(subjDataPtr, irtypes.NewPointer(dataType))
 	subjFieldPtr := c.block.NewGetElementPtr(dataType, subjTypedDataPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-	c.block.NewStore(constant.NewNull(fieldType.(*irtypes.PointerType)), subjFieldPtr)
+	var zero constant.Constant
+	if pt, isPtr := fieldType.(*irtypes.PointerType); isPtr {
+		zero = constant.NewNull(pt)
+	} else {
+		zero = constant.NewZeroInitializer(fieldType)
+	}
+	c.block.NewStore(zero, subjFieldPtr)
 }
 
 // armDestructureMovesSubject mirrors the ownership predicate: returns true and

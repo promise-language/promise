@@ -8570,6 +8570,34 @@ func (c *Compiler) variantFieldNeedsDrop(typ types.Type) bool {
 	return false
 }
 
+// emitNullGuardedVariantDrop runs emitDrop only when `instance` is non-null,
+// branching past it otherwise. T0633: T0623's move-out path
+// (nullSubjectHandleSlot) zero-inits a moved-out user-type wrapper slot in the
+// subject's enum-value alloca, so the subject's synth enum drop later walks
+// that slot with a {null,null} value struct. The user-type drop dispatch
+// branches below dereference the extracted instance ptr (drop-fn call,
+// loadVariantPtr, field loads) and would segfault on null. Skipping the drop
+// when the instance is null is behavior-neutral for normal drops — a
+// constructed heap user type always has a non-null instance ptr; only the
+// Part-1 zero-init'd moved-out slot is skipped. Mirrors the existing B0218
+// null-check idiom further down in emitVariantFieldDrop.
+func (c *Compiler) emitNullGuardedVariantDrop(instance value.Value, emitDrop func()) {
+	ptrType, ok := instance.Type().(*irtypes.PointerType)
+	if !ok {
+		ptrType = irtypes.I8Ptr
+	}
+	isNull := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(ptrType))
+	dropBlock := c.newBlock("varfield.drop")
+	skipBlock := c.newBlock("varfield.skip")
+	c.block.NewCondBr(isNull, skipBlock, dropBlock)
+	c.block = dropBlock
+	emitDrop()
+	if c.block.Term == nil {
+		c.block.NewBr(skipBlock)
+	}
+	c.block = skipBlock
+}
+
 // emitVariantFieldDrop emits a drop call for a single variant field value.
 func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 	if c.typeSubst != nil {
@@ -8642,7 +8670,12 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 		// with the polymorphic clone dispatch in dupHeapValue.
 		if c.needsVtable(named) && !named.IsStructural() && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) {
 			instance := c.extractInstancePtr(fieldVal)
-			c.emitStructuralInstanceDrop(instance)
+			// T0633: a moved-out polymorphic wrapper slot is zero-init'd;
+			// emitStructuralInstanceDrop dereferences instance via
+			// loadVariantPtr with no null-check — guard it.
+			c.emitNullGuardedVariantDrop(instance, func() {
+				c.emitStructuralInstanceDrop(instance)
+			})
 			return
 		}
 		// User type with explicit or synthesized drop: extract instance ptr and call drop.
@@ -8656,14 +8689,19 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 				ownerName = monoName(inst)
 			}
 			mangledName := mangleMethodName(ownerName, "drop", false)
-			if dropFn, ok := c.funcs[mangledName]; ok {
-				c.block.NewCall(dropFn, instance)
-			}
-			// B0257: Explicit (user-written) drops don't free instance memory —
-			// synthesized drops already include pal_free in the generated body.
-			if named.HasDrop() && !named.NeedsSynthDrop() {
-				c.block.NewCall(c.palFree, instance)
-			}
+			// T0633: a moved-out user-type wrapper slot is zero-init'd; the
+			// drop fn and B0257 pal_free both deref the null instance — guard.
+			c.emitNullGuardedVariantDrop(instance, func() {
+				if dropFn, ok := c.funcs[mangledName]; ok {
+					c.block.NewCall(dropFn, instance)
+				}
+				// B0257: Explicit (user-written) drops don't free instance
+				// memory — synthesized drops already include pal_free in the
+				// generated body.
+				if named.HasDrop() && !named.NeedsSynthDrop() {
+					c.block.NewCall(c.palFree, instance)
+				}
+			})
 			return
 		}
 		// B0202: Mono instance with codegen-time synthesized drop
@@ -8671,11 +8709,17 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			mangledName := mangleMethodName(monoName(inst), "drop", false)
 			if dropFn, ok := c.funcs[mangledName]; ok {
 				instance := c.extractInstancePtr(fieldVal)
-				c.block.NewCall(dropFn, instance)
-				// B0257: Explicit (user-written) drops don't free instance memory.
-				if n, ok2 := inst.Origin().(*types.Named); ok2 && n.HasDrop() && !n.NeedsSynthDrop() {
-					c.block.NewCall(c.palFree, instance)
-				}
+				// T0633: a moved-out generic-wrapper slot is zero-init'd; the
+				// drop fn and B0257 pal_free both deref the null instance —
+				// guard.
+				c.emitNullGuardedVariantDrop(instance, func() {
+					c.block.NewCall(dropFn, instance)
+					// B0257: Explicit (user-written) drops don't free instance
+					// memory.
+					if n, ok2 := inst.Origin().(*types.Named); ok2 && n.HasDrop() && !n.NeedsSynthDrop() {
+						c.block.NewCall(c.palFree, instance)
+					}
+				})
 				return
 			}
 		}

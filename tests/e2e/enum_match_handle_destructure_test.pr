@@ -280,3 +280,307 @@ test_match_early_return_from_moving_arm() `test(exclude: wasm) {
   r := return_from_held(job);
   assert(r == 42, "early return from moving arm");
 }
+
+// --- T0633: variant field is a USER-TYPE WRAPPER that transitively owns a
+// single-owner handle (not the handle directly). The wrapper field lowers to
+// the {i8*,i8*} value struct, so the moved-out slot is zero-init'd as
+// {null,null} (not a bare i8* null). The subject's synth enum drop walks that
+// zeroed slot and must null-check the extracted instance ptr before calling
+// the wrapper's drop — otherwise it dereferences null and segfaults. Zero
+// leaks: the binding owns the wrapper (drops it once: inner Task.drop +
+// pal_free), the subject's synth drop skips the zeroed slot.
+
+type TaskWrapper {
+  Task[int] t;
+}
+
+enum Wrap {
+  Empty,
+  Inner(TaskWrapper w),
+}
+
+test_match_nested_wrapper_moves_and_awaits() `test(exclude: wasm) {
+  w := Wrap.Inner(TaskWrapper(t: go worker_t0623()));
+  match w {
+    Wrap.Empty => assert(false, "wrong arm"),
+    Wrap.Inner(wrapper) => {
+      n := <-wrapper.t;
+      assert(n == 42, "task inside wrapped struct");
+    },
+  }
+}
+
+test_match_nested_wrapper_drops_without_await() `test(exclude: wasm) {
+  // Wrapper moves into the binding, the inner Task is never consumed via <-.
+  // The binding's drop (TaskWrapper.drop -> Task.drop joins + frees) runs once
+  // at arm end; the subject's synth Wrap.drop skips the zeroed slot. Zero leaks.
+  w := Wrap.Inner(TaskWrapper(t: go worker_t0623()));
+  match w {
+    Wrap.Empty => assert(false, "wrong arm"),
+    Wrap.Inner(wrapper) => assert(true, "binding owns the wrapper; drops at arm end"),
+  }
+}
+
+// Mixed variant: a sibling heap string plus the handle wrapper. Only the
+// wrapper slot is moved/zeroed; the string must still be freed by the synth
+// enum drop. Without the null-guard the synth drop would segfault on the
+// zeroed wrapper slot before ever reaching the string free.
+
+enum WrapMixed {
+  None,
+  Both(string label, TaskWrapper w),
+}
+
+test_match_nested_wrapper_mixed_field() `test(exclude: wasm) {
+  m := WrapMixed.Both(make_heap_string(), TaskWrapper(t: go worker_t0623()));
+  match m {
+    WrapMixed.None => assert(false, "wrong arm"),
+    WrapMixed.Both(s, wrapper) => {
+      assert(s == "hello world", "sibling string copy survives");
+      n := <-wrapper.t;
+      assert(n == 42, "wrapped task awaited");
+    },
+  }
+}
+
+// Wildcard `_` on the wrapper slot: NOT a moving arm. The constructed wrapper
+// has a non-null instance ptr, so the synth enum drop's null-guard passes
+// through and frees it normally (TaskWrapper.drop -> Task.drop + pal_free).
+
+test_match_nested_wrapper_wildcard() `test(exclude: wasm) {
+  w := Wrap.Inner(TaskWrapper(t: go worker_t0623()));
+  match w {
+    Wrap.Empty => assert(false, "wrong arm"),
+    Wrap.Inner(_) => assert(true, "wildcard: synth drop frees the wrapper"),
+  }
+}
+
+// Generic wrapper (B0202 mono-instance synth-drop branch). Holder[int] is a
+// codegen-time monomorphized type whose synth drop is dispatched by mangled
+// mono name; the same null-guard must protect its instance-deref path.
+
+type Holder[T] {
+  Task[T] handle;
+}
+
+enum GWrap {
+  GEmpty,
+  GInner(Holder[int] h),
+}
+
+test_match_generic_wrapper_moves() `test(exclude: wasm) {
+  g := GWrap.GInner(Holder[int](handle: go worker_t0623()));
+  match g {
+    GWrap.GEmpty => assert(false, "wrong arm"),
+    GWrap.GInner(holder) => {
+      n := <-holder.handle;
+      assert(n == 42, "generic wrapper task await");
+    },
+  }
+}
+
+// --- T0633 (extended): FirstNestedSingleOwnerHandle also matches a handle
+// nested in a fixed array, an Optional, or a tuple — none of which lower to a
+// bare pointer slot. The moved-out slot must be zero-init'd with a correctly
+// typed aggregate zeroinitializer (an `i64 0` would be a type-incompatible
+// store for an `[N x i8*]` array slot). Zero leaks: the binding owns the
+// aggregate, the subject's synth enum drop walks the zeroed slot with all
+// nested handle pointers null (per-handle drops null-check at entry).
+
+enum TaskArr {
+  Empty,
+  Arr(Task[int][2] ts),
+}
+
+// NOTE: this asserts the move-out + drop path only (no `<-ts[i]`). Receiving
+// directly on an indexed handle element (`<-coll[i]`) is a separate
+// pre-existing segfault tracked as T0638 — keep this test independent of it.
+// The T0633 concern here is: the array slot null-out emits a correctly typed
+// `[N x i8*] zeroinitializer` (not the invalid `i64 0` from c.zeroValue's
+// default arm), the binding owns the array (its drop frees both tasks), and
+// the subject's synth enum drop skips the zeroed slot — zero leaks, no
+// double-free, no segfault.
+test_match_array_of_handles_moves() `test(exclude: wasm) {
+  a := TaskArr.Arr([go worker_t0623(), go worker_double(21)]);
+  match a {
+    TaskArr.Empty => assert(false, "wrong arm"),
+    TaskArr.Arr(ts) => {
+      assert(true, "array moved into binding; binding drop frees both tasks");
+    },
+  }
+}
+
+test_match_array_of_handles_wildcard() `test(exclude: wasm) {
+  a := TaskArr.Arr([go worker_t0623(), go worker_t0623()]);
+  match a {
+    TaskArr.Empty => assert(false, "wrong arm"),
+    TaskArr.Arr(_) => assert(true, "wildcard: synth drop frees both tasks"),
+  }
+}
+
+enum TaskOpt {
+  Empty,
+  Held(Task[int]? t),
+}
+
+test_match_optional_handle_moves() `test(exclude: wasm) {
+  o := TaskOpt.Held(go worker_t0623());
+  match o {
+    TaskOpt.Empty => assert(false, "wrong arm"),
+    TaskOpt.Held(t) => {
+      if tt := t {
+        n := <-tt;
+        assert(n == 42, "optional-wrapped task awaited");
+      } else {
+        assert(false, "optional should be present");
+      }
+    },
+  }
+}
+
+test_match_optional_handle_wildcard() `test(exclude: wasm) {
+  o := TaskOpt.Held(go worker_t0623());
+  match o {
+    TaskOpt.Empty => assert(false, "wrong arm"),
+    TaskOpt.Held(_) => assert(true, "wildcard: synth drop frees the optional task"),
+  }
+}
+
+// Array of user-type wrappers — combines the array slot (Part 1) with the
+// per-element user-wrapper drop (Part 2 null-guard) in one path.
+
+enum WrapArr {
+  Empty,
+  Arr(TaskWrapper[2] ws),
+}
+
+test_match_array_of_wrappers_moves() `test(exclude: wasm) {
+  a := WrapArr.Arr([TaskWrapper(t: go worker_t0623()), TaskWrapper(t: go worker_t0623())]);
+  match a {
+    WrapArr.Empty => assert(false, "wrong arm"),
+    WrapArr.Arr(ws) => {
+      n0 := <-ws[0].t;
+      n1 := <-ws[1].t;
+      assert(n0 == 42 && n1 == 42, "both wrapped array tasks awaited");
+    },
+  }
+}
+
+// --- T0633 (extended): variant field is a POLYMORPHIC user-type wrapper.
+// Base has a child (Derived) → needsVtable(Base) is true, so the subject's
+// synth enum drop routes the wrapper-field drop through emitVariantFieldDrop's
+// POLYMORPHIC branch — emitStructuralInstanceDrop, which dispatches Base's
+// drop indirectly via the typeinfo drop_fn_ptr and dereferences the instance
+// ptr (loadVariantPtr) with no null-check. The Part-1 zero-init'd moved-out
+// Base value-struct slot would segfault there without the T0633 null-guard.
+// This branch is distinct from the plain-wrapper (named synth drop) and
+// generic-wrapper (mono synth drop) branches exercised above. Zero leaks: the
+// binding owns the Base (its polymorphic drop frees the inner Task + pal_free),
+// the subject's synth drop skips the zeroed slot via the null-guard.
+
+type PolyBase {
+  Task[int] t;
+  describe() string {
+    return "base";
+  }
+}
+
+type PolyDerived is PolyBase {
+  describe() string {
+    return "derived";
+  }
+}
+
+enum PolyWrap {
+  Empty,
+  Held(PolyBase b),
+}
+
+test_match_polymorphic_wrapper_moves_and_awaits() `test(exclude: wasm) {
+  w := PolyWrap.Held(PolyBase(t: go worker_t0623()));
+  match w {
+    PolyWrap.Empty => assert(false, "wrong arm"),
+    PolyWrap.Held(b) => {
+      n := <-b.t;
+      assert(n == 42, "task inside polymorphic wrapper");
+    },
+  }
+}
+
+test_match_polymorphic_wrapper_drops_without_await() `test(exclude: wasm) {
+  // Wrapper moves into the binding, inner Task never consumed via <-. The
+  // binding's polymorphic drop runs once at arm end; the subject's synth
+  // PolyWrap.drop skips the zeroed slot via the null-guard. Zero leaks.
+  w := PolyWrap.Held(PolyBase(t: go worker_t0623()));
+  match w {
+    PolyWrap.Empty => assert(false, "wrong arm"),
+    PolyWrap.Held(b) => assert(true, "binding owns the polymorphic wrapper; drops at arm end"),
+  }
+}
+
+// Wildcard `_` on the polymorphic wrapper slot: NOT a moving arm. The
+// constructed Base has a non-null instance ptr, so the synth enum drop's
+// null-guard passes through and frees it via the polymorphic
+// emitStructuralInstanceDrop path (typeinfo drop_fn_ptr → Task.drop + pal_free).
+
+test_match_polymorphic_wrapper_wildcard() `test(exclude: wasm) {
+  w := PolyWrap.Held(PolyBase(t: go worker_t0623()));
+  match w {
+    PolyWrap.Empty => assert(false, "wrong arm"),
+    PolyWrap.Held(_) => assert(true, "wildcard: synth drop frees the polymorphic wrapper"),
+  }
+}
+
+// --- T0633 (extended): variant field is a TUPLE that transitively owns a
+// single-owner handle. firstNestedSingleOwnerHandle recurses into
+// *types.Tuple (clone.go:274), so the T0623 move-out path fires. A
+// (Task[int], int) tuple lowers to the MIXED pointer+scalar aggregate
+// `{ i8*, i64 }` — structurally distinct from the {i8*,i8*} value-struct
+// wrapper and the [N x i8*] array slots tested above — so nullSubjectHandleSlot
+// must zero-init it via the else-branch `NewZeroInitializer` (a bare-pointer
+// NewNull or c.zeroValue's `i64 0` default would be a type-incompatible
+// store). The subject's synth enum drop walks the tuple element through the
+// direct Task drop (which null-checks at entry), so the zeroed task ptr is a
+// safe no-op. Zero leaks: the binding owns the tuple (its drop joins+frees the
+// inner Task), the subject's synth drop skips the zeroed task ptr.
+
+enum TupHold {
+  Empty,
+  Pair((Task[int], int) p),
+}
+
+test_match_tuple_handle_moves_and_awaits() `test(exclude: wasm) {
+  h := TupHold.Pair((go worker_t0623(), 7));
+  match h {
+    TupHold.Empty => assert(false, "wrong arm"),
+    TupHold.Pair(p) => {
+      (tk, sib) := p;
+      n := <-tk;
+      assert(n == 42, "task inside tuple variant field");
+      assert(sib == 7, "tuple sibling int survives");
+    },
+  }
+}
+
+test_match_tuple_handle_drops_without_await() `test(exclude: wasm) {
+  // Tuple moves into the binding, inner Task never consumed via <-. The
+  // binding's drop joins+frees the Task once at arm end; the subject's synth
+  // TupHold.drop skips the zeroed task ptr. Zero leaks.
+  h := TupHold.Pair((go worker_t0623(), 9));
+  match h {
+    TupHold.Empty => assert(false, "wrong arm"),
+    TupHold.Pair(p) => assert(true, "binding owns the tuple; drops at arm end"),
+  }
+}
+
+// Wildcard `_` on the tuple slot: NOT a moving arm. The constructed tuple's
+// task ptr is non-null, so the synth enum drop frees it normally
+// (Task[int].drop joins + frees).
+
+test_match_tuple_handle_wildcard() `test(exclude: wasm) {
+  h := TupHold.Pair((go worker_t0623(), 3));
+  match h {
+    TupHold.Empty => assert(false, "wrong arm"),
+    TupHold.Pair(_) => assert(true, "wildcard: synth drop frees the tuple's task"),
+  }
+}

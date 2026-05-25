@@ -145,11 +145,26 @@ fwd_getter_generic[X](GBox[X] &b) int {
   return b.total;
 }
 // String-payload getter variant — sharpens leak enforcement on the getter
-// ref-dispatch path. (A `[]`-returns-string variant is intentionally omitted:
-// a user-defined `[]` returning a heap type leaks via an unrelated
-// pre-existing bug, T0647 — tracked separately, NOT a T0639 regression.)
+// ref-dispatch path.
 getter_string(GBox[string] &b) int {
   return b.total;
+}
+// T0647 (fixed): user-defined non-native `[]` returning a heap type (string)
+// on a `~`/`&` generic-instance receiver. Previously omitted because the owned
+// operator return leaked at the call site — the `[]` read path lacked the
+// post-call heap-temp tracking that ordinary method calls have. Now
+// ownership-equivalent to a plain method call (trackUserIndexResult); the
+// batch harness fails the test on any leaked allocation. Covers both the
+// temporary-use path and the binding path under a ref receiver.
+idx_string_mut(GBox[string] ~b) int {
+  return b[1].len; // temporary-use: s[i] result dropped at stmt end
+}
+idx_string_shared(GBox[string] &b) int {
+  x := b[0]; // binding: claimed into x, dropped at scope exit
+  return x.len;
+}
+fwd_idx_string_generic[X](GBox[X] &b, int i) X {
+  return b[i]; // still-parametric `&` receiver inside a generic fn
 }
 
 test_t0639_via_this_named() `test {
@@ -229,4 +244,15 @@ test_t0639_getter_string_payload_no_leak() `test {
   assert(getter_string(g) == 4, "getter string payload on &");
   assert(fwd_getter_generic[string](GBox[string](d: ["m", "n"])) == 2,
   "getter string payload generic fwd &");
+}
+
+test_t0647_index_string_payload_no_leak() `test {
+  // T0647: user-defined non-native `[]` returning string on a ~/& generic-
+  // instance receiver — temporary-use and binding paths, plus a still-
+  // parametric `&` receiver inside a generic fn. The batch harness fails the
+  // test on any leaked allocation.
+  assert(idx_string_mut(GBox[string](d: ["a", "bb"])) == 2, "[] string on ~ (temp)");
+  assert(idx_string_shared(GBox[string](d: ["ccc", "d"])) == 3, "[] string on & (bind)");
+  assert(fwd_idx_string_generic[string](GBox[string](d: ["zz", "y"]), 0) == "zz",
+  "[] string generic fwd &");
 }

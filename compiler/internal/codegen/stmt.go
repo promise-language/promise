@@ -264,6 +264,43 @@ func (c *Compiler) isGetterCallExpr(expr ast.Expr) bool {
 	return false
 }
 
+// isUserIndexExpr reports whether expr is an IndexExpr that dispatches to a
+// user-defined *non-native* `[]` operator. genIndexExpr compiles such reads via
+// genMethodIndex, which (T0647) returns an *owned* heap temp tracked by
+// trackUserIndexResult and claimed into the LHS by claimStringTemp/claimHeapTemp
+// — exactly like an ordinary method call. Native container/array indexing
+// (genNativeIndex/genVectorIndex/genStringIndex/genArrayIndex) instead returns a
+// borrowed alias into container storage. isStringBorrowExpr treats *all*
+// IndexExprs as borrows, so without this exemption the borrow-RHS drop-flag
+// clearing in genVarDecl/genInferredVarDecl would clear the LHS flag and leak
+// the owned operator return. Mirrors genIndexExpr's dispatch and the analogous
+// isGetterCallExpr / module-getter owned-return exemptions.
+func (c *Compiler) isUserIndexExpr(expr ast.Expr) bool {
+	idx, ok := expr.(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+	targetType := c.info.Types[idx.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
+	}
+	if _, isArr := targetType.(*types.Array); isArr {
+		return false // fixed-size array indexing — borrowed slot
+	}
+	named := extractNamed(targetType)
+	if named == nil {
+		return false
+	}
+	m := named.LookupMethod("[]")
+	return m != nil && !m.IsNative()
+}
+
 // isStringBorrowExpr returns true if the expression borrows an existing value
 // (e.g., container element access, field access) rather than creating a new one.
 // Borrowed values should not be freed by the borrower — the owner retains responsibility.
@@ -1026,6 +1063,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		if !isGetterCall && c.isGetterCallExpr(s.Value) {
 			isGetterCall = true
 		}
+		// T0647: user-defined non-native `[]` returns an owned temp (claimed into
+		// the LHS), not a borrow — keep the LHS drop flag like a method call.
+		if !isGetterCall && c.isUserIndexExpr(s.Value) {
+			isGetterCall = true
+		}
 		if !isGetterCall && !c.isStringFieldDup(s.Value, dropType) {
 			if rhsOldDropFlag != nil {
 				// T0106: Propagate RHS's ownership state at runtime.
@@ -1254,6 +1296,11 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 			}
 		}
 		if !isGetterCall && c.isGetterCallExpr(s.Value) {
+			isGetterCall = true
+		}
+		// T0647: user-defined non-native `[]` returns an owned temp (claimed into
+		// the LHS), not a borrow — keep the LHS drop flag like a method call.
+		if !isGetterCall && c.isUserIndexExpr(s.Value) {
 			isGetterCall = true
 		}
 		if !isGetterCall && !c.isStringFieldDup(s.Value, typ) {

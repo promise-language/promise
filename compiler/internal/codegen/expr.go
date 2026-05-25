@@ -8572,7 +8572,67 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 		}
 	}
 
+	// T0647: A user-defined non-native `[](int i) T` compiles to an ordinary
+	// method whose body returns an *owned* heap value (IR-identical to the
+	// equivalent plain method). The *ast.CallExpr genExpr case tracks such
+	// return temps for cleanup at statement end; the *ast.IndexExpr case does
+	// not, so `s[i]` (→ here) leaked the returned string/vector/Arc/.../heap-
+	// user value while `s.at(i)` did not. Mirror the CallExpr post-call
+	// tracking. This is reached ONLY for user-defined `[]` (genIndexExpr
+	// dispatches native index reads to genNativeIndex/genStringIndex/
+	// genVectorIndex/genArrayIndex, which return borrowed aliases and must NOT
+	// be tracked), so the tracking is correctly scoped to owned operator
+	// returns. The Optional-dup branches above return early and are unaffected.
+	c.trackUserIndexResult(e, result)
 	return result
+}
+
+// trackUserIndexResult mirrors the *ast.CallExpr post-call heap-temp tracking
+// (genExpr) for the user-defined non-native `[]` read path (T0647). All track*
+// helpers self-gate on c.tempTrackingEnabled / c.block.Term / SSA-dedup, so the
+// unconditional calls here faithfully match the CallExpr path. findInnerCallExpr
+// returns nil for *ast.IndexExpr, so trackHeapUserTypeResult performs no
+// receiver-alias check (claimHeapTemp still dedups aliasing).
+func (c *Compiler) trackUserIndexResult(e *ast.IndexExpr, result value.Value) {
+	if result == nil {
+		return
+	}
+	if result.Type() == irtypes.I8Ptr {
+		rt := c.info.Types[e]
+		if c.typeSubst != nil && rt != nil {
+			rt = types.Substitute(rt, c.typeSubst)
+		}
+		if c.selfSubst != nil && rt != nil {
+			rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		if rt != nil {
+			named := extractNamed(rt)
+			if named == types.TypString {
+				c.trackStringTemp(result)
+			} else if named == types.TypVector {
+				if elemType, ok := types.AsVector(rt); ok {
+					c.trackVectorTempWithElemType(result, elemType)
+				} else {
+					c.trackVectorTemp(result)
+				}
+			} else if arcElem, isArc := types.AsArc(rt); isArc {
+				c.trackTempWithDrop(result, c.getOrCreateArcDrop(arcElem))
+			} else if weakElem, isWeak := types.AsWeak(rt); isWeak {
+				c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
+			} else if mutexElem, isMutex := types.AsMutex(rt); isMutex {
+				c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
+			} else if taskElem, isTask := types.AsTask(rt); isTask {
+				c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+			} else if _, isMG := types.AsMutexGuard(rt); isMG {
+				// T0561: MutexGuard.drop is a single non-per-element-type symbol.
+				if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
+					c.trackTempWithDrop(result, dropFn)
+				}
+			}
+		}
+	} else {
+		c.trackHeapUserTypeResult(e, result)
+	}
 }
 
 // genStringIndex implements string byte indexing: s[i] returns the byte at position i

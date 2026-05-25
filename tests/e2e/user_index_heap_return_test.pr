@@ -1,0 +1,277 @@
+// T0647: a user-defined non-native `[](int i) T` returning a heap type
+// previously LEAKED the owned operator return at the call site. genIndexExpr's
+// `[]` read path (genMethodIndex) lacked the post-call heap-temp tracking that
+// the *ast.CallExpr genExpr case applies to ordinary method calls, so `s[i]`
+// leaked where the IDENTICAL `s.at(i)` did not. Fixed by:
+//   (1) trackUserIndexResult — mirrors the CallExpr post-call tracking at the
+//       genMethodIndex tail (string/vector/Arc/.../heap-user owned returns),
+//   (2) isUserIndexExpr — exempts the user `[]` read from the borrow-RHS
+//       drop-flag clearing in genVarDecl/genInferredVarDecl (it returns an
+//       owned temp claimed into the LHS, not a container borrow).
+//
+// Every test is a batch test — the harness fails on ANY leaked allocation
+// (zero-tolerance). Each type pairs the `[]` operator with an IDENTICAL plain
+// `at()` method: the operator must be ownership-equivalent to the method
+// (0 leak, no double-free). Native container indexing (std `Vector[string]`
+// direct `v[0]`) stays a borrow and must NOT be over-tracked.
+// ---------- string element (the core repro) ----------
+type SBox {
+  string[] d;
+  [](int i) string {
+    return this.d[i];
+  }
+  at(int i) string {
+    return this.d[i];
+  }
+}
+
+test_t0647_string_temporary() `test {
+  s := SBox(d: ["a", "bb", "ccc"]);
+  assert(s[1].len == 2, "operator temporary use");
+  assert(s.at(1).len == 2, "method temporary use (baseline)");
+}
+
+test_t0647_string_binding() `test {
+  s := SBox(d: ["a", "bb"]);
+  x := s[1];
+  assert(x.len == 2, "operator result bound to local");
+  y := s.at(0);
+  assert(y.len == 1, "method result bound to local (baseline)");
+}
+
+take_str(string v) int {
+  return v.len;
+}
+
+test_t0647_string_fn_arg() `test {
+  s := SBox(d: ["hello", "hi"]);
+  assert(take_str(s[0]) == 5, "operator result passed as fn arg");
+  assert(take_str(s.at(1)) == 2, "method result passed as fn arg (baseline)");
+}
+
+test_t0647_string_baseline_native_no_overtrack() `test {
+  // std Vector[string] direct index stays a borrow — must not be over-tracked
+  // (would double-free) nor leak. Guards the native-path scoping of the fix.
+  v := ["aa", "bbb", "c"];
+  assert(v[0].len == 2, "native vector index read 1");
+  assert(v[1].len == 3, "native vector index read 2");
+  k := v[2];
+  assert(k.len == 1, "native vector index bound");
+}
+
+// ---------- string via ~ / & receiver ----------
+sbox_idx_mut(SBox ~s) int {
+  return s[1].len; // temporary-use path under a ~ receiver
+}
+sbox_idx_shared(SBox &s) int {
+  x := s[0]; // binding path under a & receiver
+  return x.len;
+}
+
+test_t0647_string_ref_params() `test {
+  assert(sbox_idx_mut(SBox(d: ["q", "wer"])) == 3, "[] via ~ receiver (temp)");
+  assert(sbox_idx_shared(SBox(d: ["zzzz", "y"])) == 4, "[] via & receiver (bind)");
+}
+
+// ---------- generic GBox[T] with string payload ----------
+type GBox[T] {
+  Vector[T] d;
+  [](int i) T {
+    return this.d[i];
+  }
+  at(int i) T {
+    return this.d[i];
+  }
+}
+
+test_t0647_generic_string() `test {
+  g := GBox[string](d: ["a", "bb", "ccc"]);
+  assert(g[2].len == 3, "generic operator temporary");
+  z := g[0];
+  assert(z.len == 1, "generic operator binding");
+  assert(g.at(1).len == 2, "generic method baseline");
+}
+
+gbox_idx_mut[X](GBox[X] ~g, int i) X {
+  return g[i];
+}
+gbox_idx_shared[X](GBox[X] &g, int i) X {
+  v := g[i];
+  return v;
+}
+
+test_t0647_generic_string_fwd() `test {
+  assert(gbox_idx_mut[string](GBox[string](d: ["mm", "n"]), 0) == "mm",
+  "generic [] forward via ~");
+  assert(gbox_idx_shared[string](GBox[string](d: ["p", "qqq"]), 1) == "qqq",
+  "generic [] forward via & (bound)");
+}
+
+// ---------- freshly-constructed Vector[T] return ----------
+// Exercises trackUserIndexResult's vector branch (trackVectorTempWithElemType)
+// with an unambiguously owned vector. (A nested-vector *element* return —
+// `[](int i) Vector[T] { return this.rows[i]; }` over a Vector[Vector[T]]
+// field — is blocked by the pre-existing, unrelated bug T0648, which crashes
+// the IDENTICAL plain method too; covered there, not here.)
+type VBox {
+  int n;
+  [](int i) Vector[int] {
+    return[this.n, i, this.n + i];
+  }
+  at(int i) Vector[int] {
+    return[this.n, i, this.n + i];
+  }
+}
+
+test_t0647_vector_return() `test {
+  v := VBox(n: 10);
+  assert(v[2].len == 3, "operator fresh-vector temporary");
+  r := v[1];
+  assert(r.len == 3, "operator fresh-vector binding");
+  assert(v.at(0).len == 3, "method fresh-vector baseline");
+}
+
+// ---------- aliased whole-field Vector return (double-free risk) ----------
+type WBox {
+  string[] d;
+  [](int i) string[] {
+    return this.d; // returns the WHOLE owned field (aliased)
+  }
+  at(int i) string[] {
+    return this.d;
+  }
+}
+
+test_t0647_whole_field_vector() `test {
+  w := WBox(d: ["x" + "1", "y" + "2", "z" + "3"]);
+  a := w[0];
+  assert(a.len == 3, "operator whole-field read 1");
+  b := w[1];
+  assert(b.len == 3, "operator whole-field read 2 (no double-free)");
+  c := w.at(0);
+  assert(c.len == 3, "method whole-field baseline (no double-free)");
+}
+
+// ---------- heap user type with drop + clone ----------
+type Item {
+  string name;
+  clone(this) Item {
+    return Item(name: this.name);
+  }
+  drop(~this) {
+  }
+}
+type IBox {
+  Item[] items;
+  [](int i) Item {
+    return this.items[i].clone();
+  }
+  at(int i) Item {
+    return this.items[i].clone();
+  }
+}
+
+test_t0647_heap_user_clone() `test {
+  ib := IBox(items: [Item(name: "p" + "q"), Item(name: "r" + "s")]);
+  assert(ib[0].name == "pq", "operator heap-user temporary");
+  it := ib[1];
+  assert(it.name == "rs", "operator heap-user binding");
+  assert(ib.at(0).name == "pq", "method heap-user baseline");
+}
+
+// ---------- Map[K,V] value (force-unwrapped to a bare heap V) ----------
+type MBox {
+  map[string, string] m;
+  [](string k) string {
+    return this.m[k]!;
+  }
+  at(string k) string {
+    return this.m[k]!;
+  }
+}
+
+test_t0647_map_value() `test {
+  map[string, string] mm = {:};
+  mm["k"] = "v" + "1";
+  mb := MBox(m: mm);
+  assert(mb["k"].len == 2, "operator map-value temporary");
+  mv := mb["k"];
+  assert(mv.len == 2, "operator map-value binding");
+  assert(mb.at("k").len == 2, "method map-value baseline");
+}
+
+// ---------- native concurrency handles (Arc / Weak) ----------
+// trackUserIndexResult dispatches an i8* `[]` return through the same
+// AsArc/AsWeak/AsMutex/AsTask/AsMutexGuard branches the *ast.CallExpr genExpr
+// case uses (T0555 / T0561). Those native-handle branches were exercised by
+// NO test for the user-`[]` read path (the original T0647 suite only covered
+// string / vector / heap-user / map). Arc / Weak are covered here; each
+// operator is paired with an IDENTICAL plain at() method, so the `[]` return
+// must be ownership-equivalent (0 leak, no double-free under the batch
+// harness) — exactly like the proven CallExpr handle-temp tracking it mirrors.
+//
+// The Mutex / Task / MutexGuard variants are intentionally OMITTED: a
+// user-defined non-native `[]` returning a single-owner native handle is
+// wrongly rejected at the ownership pass (`rejectIndexExprSingleOwnerMove`,
+// ownership/expr.go) even though the IDENTICAL plain method compiles, runs,
+// and is 0-leak. That is a separate pre-existing T0647-class asymmetry —
+// tracked as **T0650** — which also makes trackUserIndexResult's
+// AsMutex/AsTask/AsMutexGuard branches unreachable until fixed. Enable those
+// three cases (skeletons in T0650) once T0650 lands. (Mirrors how T0647 itself
+// deferred the T0648-blocked nested-vector-element case: covered there, not
+// here.)
+take_arc_i(Arc[int] a) int {
+  return a.borrow;
+}
+
+// Arc[int] — operator returns an owned clone (refcount++); must be Arc-dropped
+// (refcount--) at statement end (temp / fn-arg) and scope exit (binding).
+type ArcBox {
+  Arc[int] a;
+  [](int i) Arc[int] {
+    return this.a.clone();
+  }
+  at(int i) Arc[int] {
+    return this.a.clone();
+  }
+}
+
+test_t0647_arc_return() `test {
+  b := ArcBox(a: Arc[int](7));
+  assert(take_arc_i(b[0]) == 7, "operator Arc as borrow fn-arg (temp)");
+  x := b[1];
+  assert(x.borrow == 7, "operator Arc binding (claimed into x)");
+  assert(take_arc_i(b.at(0)) == 7, "method Arc baseline");
+}
+
+// Weak[int] — operator returns an owned Weak from .downgrade(); must be
+// Weak-dropped.
+type WeakBox {
+  Arc[int] a;
+  [](int i) Weak[int] {
+    return this.a.downgrade();
+  }
+  at(int i) Weak[int] {
+    return this.a.downgrade();
+  }
+}
+
+test_t0647_weak_return() `test {
+  wb := WeakBox(a: Arc[int](9));
+  if u := wb[0].upgrade() {
+    assert(u.borrow == 9, "operator Weak temporary -> upgrade");
+  } else {
+    assert(false, "weak upgrade should succeed (Arc alive)");
+  }
+  w := wb[1];
+  if u := w.upgrade() {
+    assert(u.borrow == 9, "operator Weak binding -> upgrade");
+  } else {
+    assert(false, "weak binding upgrade should succeed");
+  }
+  if u := wb.at(0).upgrade() {
+    assert(u.borrow == 9, "method Weak baseline");
+  } else {
+    assert(false, "method weak upgrade should succeed");
+  }
+}

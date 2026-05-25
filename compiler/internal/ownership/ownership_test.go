@@ -8252,3 +8252,118 @@ func TestT0589_IfLetBorrowedMethodParamRejected(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
 }
+
+// === T0591: Getter var-decl from droppable owner ===
+
+func TestT0591_GetterVarDeclFromDroppableOwnerOK(t *testing.T) {
+	// Getter calls return owned values — not a field move.
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		type Factory {
+			drop(~this) {}
+			get fresh Resource => Resource(id: 42);
+		}
+		test() {
+			Factory f = Factory();
+			Resource r = f.fresh;
+		}
+	`)
+}
+
+func TestT0591_GetterVarDeclInferredFromDroppableOwnerOK(t *testing.T) {
+	// Inferred var-decl from getter on droppable owner.
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		type Factory {
+			drop(~this) {}
+			get fresh Resource => Resource(id: 42);
+		}
+		test() {
+			Factory f = Factory();
+			r := f.fresh;
+		}
+	`)
+}
+
+func TestT0591_GetterReturningDroppableFromDroppableOwnerOK(t *testing.T) {
+	// Getter returning droppable type from droppable owner.
+	ownerOK(t, `
+		type Inner {
+			int v;
+			drop(~this) {}
+		}
+		type Outer {
+			int x;
+			drop(~this) {}
+			get make_inner Inner => Inner(v: this.x);
+		}
+		test() {
+			Outer o = Outer(x: 5);
+			Inner i = o.make_inner;
+		}
+	`)
+}
+
+func TestT0591_EnumGetterFromDroppableEnumOwnerOK(t *testing.T) {
+	// Non-generic enum with drop + getter — exercises *types.Enum path.
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		enum Source {
+			A;
+			B;
+			drop(~this) {}
+			get fresh Resource => Resource(id: 1);
+		}
+		test() {
+			Source s = Source.A;
+			Resource r = s.fresh;
+		}
+	`)
+}
+
+func TestT0591_GenericEnumGetterFromDroppableEnumOwnerOK(t *testing.T) {
+	// Generic enum with drop + getter — exercises *types.Instance/*types.Enum path.
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		enum Container[T] {
+			Some(T value);
+			None;
+			drop(~this) {}
+			get fresh Resource => Resource(id: 1);
+		}
+		test() {
+			Container[int] c = Container[int].Some(value: 42);
+			Resource r = c.fresh;
+		}
+	`)
+}
+
+func TestT0591_FieldMoveFromDroppableOwnerStillRejected(t *testing.T) {
+	// Actual field reads (not getters) must still be rejected.
+	errs := ownerErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		type Owner {
+			Resource r;
+		}
+		test() {
+			Owner o = Owner(r: Resource(id: 1));
+			Resource r2 = o.r;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'r'")
+}

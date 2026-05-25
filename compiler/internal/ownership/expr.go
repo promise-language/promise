@@ -1125,6 +1125,24 @@ func (c *Checker) checkFieldMoveOwnership(e *ast.MemberExpr) {
 	if !isDroppableOwner(ownerType) {
 		return
 	}
+	// Getter calls return owned values — no field move involved (T0591).
+	if n := extractNamedType(ownerType); n != nil {
+		if n.LookupGetter(e.Field) != nil {
+			return
+		}
+	}
+	if inst, ok := ownerType.(*types.Instance); ok {
+		if enum, ok := inst.Origin().(*types.Enum); ok {
+			if enum.LookupGetter(e.Field) != nil {
+				return
+			}
+		}
+	}
+	if enum, ok := ownerType.(*types.Enum); ok {
+		if enum.LookupGetter(e.Field) != nil {
+			return
+		}
+	}
 	if isAutoDupType(fieldType) {
 		return
 	}

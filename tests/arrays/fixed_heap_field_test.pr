@@ -291,6 +291,48 @@ test_local_mutex_array_reassign() `test {
   assert(g.borrow == 3, "mutex reassigned, lock works");
 }
 
+test_local_mutex_array_lock_on_slot() `test {
+  // T0596: positive coverage for `arr[i].lock()`. Method calls on a slot
+  // borrow the value rather than moving it — IndexExpr is the receiver, not
+  // the consumed value, so the ownership-pass rejection does not fire.
+  Mutex[int] m0 = Mutex[int](10);
+  Mutex[int] m1 = Mutex[int](20);
+  Mutex[int][2] arr = [m0, m1];
+  use g0 := arr[0].lock();
+  assert(g0.borrow == 10, "slot 0 lock");
+}
+
+test_local_mutex_vec_lock_on_slot() `test {
+  // T0596: `Vector[Mutex[T]]` slot access via method call. Confirms the
+  // single-owner native handle rejection narrows to moves, not borrows.
+  // Uses push() rather than a literal to avoid a separate vector-literal
+  // codegen issue with Mutex elements (T0602).
+  Vector[Mutex[int]] v = Vector[Mutex[int]]();
+  v.push(Mutex[int](100));
+  v.push(Mutex[int](200));
+  use g0 := v[0].lock();
+  assert(g0.borrow == 100, "vec slot 0 lock");
+}
+
+test_local_task_array_reassign_fresh() `test(exclude: wasm) {
+  // T0596: Task[T] slot overwrite with a fresh `go { … }` task. The RHS is a
+  // GoExpr, not an IndexExpr, so the rejection does not fire and the existing
+  // drop-on-overwrite path releases the old task. Confirm subsequent slot
+  // reads do not SEGV — we don't need the awaited values, just that the
+  // overwritten slot's allocations stay valid through scope exit drop.
+  Task[int] t0 = go {
+    1
+  };
+  Task[int] t1 = go {
+    2
+  };
+  Task[int][2] arr = [t0, t1];
+  arr[1] = go {
+    99
+  };
+  assert(true, "task slot 1 reassigned without SEGV");
+}
+
 test_local_nested_string_array_reassign() `test {
   // Nested fixed-size array — exercises the Array recursion branch in
   // emitVariantFieldDrop (walks each element of the old inner array and

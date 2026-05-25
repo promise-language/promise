@@ -8367,3 +8367,207 @@ func TestT0591_FieldMoveFromDroppableOwnerStillRejected(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot move field 'r'")
 }
+
+// === T0596: indexed-slot move of single-owner native handles rejected ===
+//
+// Mutex[T] / MutexGuard[T] / Task[T] have no dup-on-read path (T0508). Moving
+// them out of an array or vector slot aliases the slot's owned pointer; the
+// container's drop walks both copies → double-free / SEGV. Reject at the
+// ownership pass with a type-driven check on IndexExpr result type.
+
+// Slot-to-slot copy on a fixed-size Mutex array is the original repro (SEGV
+// without the fix). The RHS `arr[0]` is the rejected expression.
+func TestT0596_AssignSlotToSlotMutexRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Mutex[int][2] arr = [m0, m1];
+			arr[1] = arr[0];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int] out of indexed slot")
+}
+
+// Task[T] has the same single-owner semantics (T0508). Slot-to-slot on a
+// fixed-size Task array must be rejected.
+func TestT0596_AssignSlotToSlotTaskRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		_make_task() Task[int] { return go { 5 }; }
+		test() {
+			Task[int] t0 = _make_task();
+			Task[int] t1 = _make_task();
+			Task[int][2] arr = [t0, t1];
+			arr[1] = arr[0];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Task[int] out of indexed slot")
+}
+
+// Vector slot-to-slot: same shape via a heap-backed container. Vector has its
+// own dup-on-read path in codegen for Vector/Channel/Arc/Weak but skips
+// Mutex/MutexGuard/Task — confirmed gap.
+func TestT0596_VectorSlotToSlotMutexRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Vector[Mutex[int]] v = [m0, m1];
+			v[1] = v[0];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int] out of indexed slot")
+}
+
+// Vector[Task[T]] sibling — Task handles share the gap.
+func TestT0596_VectorSlotToSlotTaskRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		_make_task() Task[int] { return go { 5 }; }
+		test() {
+			Task[int] t0 = _make_task();
+			Task[int] t1 = _make_task();
+			Vector[Task[int]] v = [t0, t1];
+			v[1] = v[0];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Task[int] out of indexed slot")
+}
+
+// Var-decl from a Mutex slot (`Mutex[int] x = arr[0];`) aliases the slot's
+// owned pointer just as much as slot-to-slot assignment does — the new local
+// and the array slot both drop the same allocation at scope exit. Catch via
+// tryMove's IndexExpr path.
+func TestT0596_VarDeclFromMutexSlotRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Mutex[int][2] arr = [m0, m1];
+			Mutex[int] x = arr[0];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int] out of indexed slot")
+}
+
+// Inferred var-decl (`x := arr[0];`) walks the same tryMove path. Regression
+// guard that the check fires uniformly across both var-decl forms.
+func TestT0596_InferredVarDeclFromMutexSlotRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Mutex[int][2] arr = [m0, m1];
+			x := arr[0];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int] out of indexed slot")
+}
+
+// Optional wrapping coverage: `Mutex[int]?` slot read still resolves to a
+// single-owner native handle (isSingleOwnerNativeType recurses through
+// Optional). The slot-to-slot UAF shape is identical.
+func TestT0596_VarDeclFromOptionalMutexSlotRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int]? m0 = Mutex[int](1);
+			Mutex[int]? m1 = Mutex[int](2);
+			Mutex[int]?[2] arr = [m0, m1];
+			Mutex[int]? x = arr[0];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int]? out of indexed slot")
+}
+
+// Return statement consume path — `return arr[0];` flows through
+// tryMoveConsume, so the check must fire there too (not just at var-decls).
+func TestT0596_ReturnMutexSlotRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take() Mutex[int] {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Mutex[int][2] arr = [m0, m1];
+			return arr[0];
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int] out of indexed slot")
+}
+
+// Positive: assigning a fresh-from-constructor Mutex to a slot is the
+// intended overwrite path. The RHS is a CallExpr, not an IndexExpr, so the
+// new check doesn't fire.
+func TestT0596_FreshMutexAssignAllowed(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Mutex[int][2] arr = [m0, m1];
+			arr[1] = Mutex[int](3);
+		}
+	`)
+}
+
+// Positive: calling a method on a slot (`arr[0].lock()`) is a borrow, not a
+// move. The IndexExpr is the receiver of a method call, never the consumed
+// value, so tryMove/tryMoveConsume are not called on it.
+func TestT0596_MutexSlotMethodCallAllowed(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Mutex[int][2] arr = [m0, m1];
+			use g := arr[0].lock();
+		}
+	`)
+}
+
+// Positive: parenthesised RHS (`(arr[0])`) — ParenExpr peeling makes the
+// check fire uniformly regardless of surface syntax.
+func TestT0596_ParenthesisedSlotMoveRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Mutex[int][2] arr = [m0, m1];
+			Mutex[int] x = (arr[0]);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move Mutex[int] out of indexed slot")
+}
+
+// Positive: Arc[T] / Vector[T] / Channel[T] / string slots are still
+// duppable (codegen has the matching helpers), so they must not be
+// over-rejected. Regression guard for the type filter.
+func TestT0596_NonSingleOwnerSlotsAllowed(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			Arc[int] a0 = Arc[int](1);
+			Arc[int] a1 = Arc[int](2);
+			Arc[int][2] arr_a = [a0, a1];
+			arr_a[1] = arr_a[0];
+
+			Vector[int] v0 = Vector[int]();
+			Vector[int] v1 = Vector[int]();
+			Vector[int][2] arr_v = [v0, v1];
+			arr_v[1] = arr_v[0];
+		}
+	`)
+}
+
+// MutexGuard[T] is the third single-owner native handle (T0508). It is
+// produced only by `.lock()` and is use-bound, but an indexed slot read
+// whose result type is MutexGuard must still be rejected — exercises the
+// IsMutexGuard arm of isSingleOwnerNativeType end-to-end. (The `[g0]`
+// literal also emits a use-bound-move error; expectOwnerError matches the
+// T0596 message specifically.)
+func TestT0596_VarDeclFromMutexGuardSlotRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			use g0 := m0.lock();
+			MutexGuard[int][1] arr = [g0];
+			MutexGuard[int] x = arr[0];
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move MutexGuard[int] out of indexed slot")
+}

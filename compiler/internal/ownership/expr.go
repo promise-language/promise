@@ -166,6 +166,14 @@ func (c *Checker) tryMove(expr ast.Expr) {
 		return
 	}
 
+	// T0596: reject `arr[i]` / `v[i]` when the slot type is a single-owner
+	// native handle (Mutex/MutexGuard/Task). Dup-on-read is not defined for
+	// these — extracting would alias the slot's owned pointer and the
+	// container's drop walks both copies → double-free / SEGV.
+	if c.rejectIndexExprSingleOwnerMove(expr) {
+		return
+	}
+
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
 		return
@@ -218,6 +226,11 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	if c.isBorrowedExpr(expr) {
 		c.errorf(expr.Pos(),
 			"cannot move out of '.borrow' getter; the parent Arc/Mutex retains ownership — call .clone() to create an independent copy, or assign to a variable to bind a borrow")
+		return
+	}
+	// T0596: reject `arr[i]` / `v[i]` when the slot type is a single-owner
+	// native handle (Mutex/MutexGuard/Task). See tryMove for rationale.
+	if c.rejectIndexExprSingleOwnerMove(expr) {
 		return
 	}
 	// B0341 field-move check delegated to tryMove; inherit it here too.
@@ -897,6 +910,51 @@ func isBorrowedType(typ types.Type) bool {
 		return !isCopyType(t.Elem())
 	}
 	return false
+}
+
+// isSingleOwnerNativeType reports whether typ resolves to one of the
+// single-owner native handle types (Mutex/MutexGuard/Task) for which dup
+// semantics are explicitly undefined (T0508). These cannot be extracted from
+// an array/vector slot because the read would alias the slot's owned pointer
+// → double-free at the container's scope-exit drop. Recurses through Optional.
+func isSingleOwnerNativeType(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	if opt, ok := typ.(*types.Optional); ok {
+		return isSingleOwnerNativeType(opt.Elem())
+	}
+	return types.IsMutex(typ) || types.IsMutexGuard(typ) || types.IsTask(typ)
+}
+
+// rejectIndexExprSingleOwnerMove emits an error if expr is an IndexExpr whose
+// result type is a single-owner native handle (Mutex/MutexGuard/Task or
+// Optional thereof). T0596: dup-on-read is not defined for these container
+// types; moving them out of a slot aliases the slot's owned pointer and the
+// container's drop walks both copies → double-free / SEGV. Reject at the
+// ownership pass with a clear diagnostic. Returns true when rejected so the
+// caller can skip the regular move/state bookkeeping.
+func (c *Checker) rejectIndexExprSingleOwnerMove(expr ast.Expr) bool {
+	// Peel ParenExpr so `(arr[0])` is treated like `arr[0]`.
+	for {
+		if p, ok := expr.(*ast.ParenExpr); ok {
+			expr = p.Expr
+			continue
+		}
+		break
+	}
+	idx, ok := expr.(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+	typ := c.info.Types[idx]
+	if !isSingleOwnerNativeType(typ) {
+		return false
+	}
+	c.errorf(idx.Pos(),
+		"cannot move %s out of indexed slot; this is a single-owner native handle with no copy/clone semantics — use a fresh constructor for the slot, or call a method that returns a borrow (e.g. `.lock()`)",
+		typ.String())
+	return true
 }
 
 // isAutoDupType returns true for types that codegen auto-dups on field read:

@@ -167,3 +167,97 @@ task_drop_generic_function() `test(exclude: wasm) {
   spawn_drop_generic[int](42);
   spawn_drop_generic[string]("hi");
 }
+
+// T0638: `<-coll[i]` where the indexed element IS the Task. The receive frees
+// the G; without nulling the slot, the collection's scope-exit element drop
+// reloads the dangling pointer and Task[int].drop double-frees → segfault.
+// genReceiveTask now nulls the array/Vector element slot so the element drop
+// no-ops. Covers fixed arrays (size 1 and 2, full + partial await) and Vector.
+
+// Single-element fixed array — proves it's not an OOB/length issue.
+task_recv_array_one() `test(exclude: wasm) {
+  Task[int][1] ts = [go worker_int()];
+  x := <-ts[0];
+  assert(x == 42, "array[1] recv");
+}
+
+// Two-element fixed array, both awaited.
+task_recv_array_two_both() `test(exclude: wasm) {
+  Task[int][2] ts = [go worker_int(), go worker_int()];
+  a := <-ts[0];
+  b := <-ts[1];
+  assert(a == 42, "array[2] recv 0");
+  assert(b == 42, "array[2] recv 1");
+}
+
+// Two-element fixed array, only ts[0] awaited — ts[1] must still be
+// scope-dropped (per-slot nulling, not whole-collection). Zero leaks.
+task_recv_array_two_partial() `test(exclude: wasm) {
+  Task[int][2] ts = [go worker_int(), go worker_int()];
+  a := <-ts[0];
+  assert(a == 42, "array[2] partial recv");
+  // ts[1] dropped at scope exit.
+}
+
+// Vector of tasks, single element.
+task_recv_vector_one() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int()];
+  x := <-v[0];
+  assert(x == 42, "vector recv");
+}
+
+// Vector of tasks, both awaited.
+task_recv_vector_two_both() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int(), go worker_int()];
+  a := <-v[0];
+  b := <-v[1];
+  assert(a == 42, "vector recv 0");
+  assert(b == 42, "vector recv 1");
+}
+
+// Vector of tasks, only v[0] awaited — v[1] still scope-dropped, no leak.
+task_recv_vector_two_partial() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int(), go worker_int()];
+  a := <-v[0];
+  assert(a == 42, "vector partial recv");
+  // v[1] dropped at scope exit.
+}
+
+// Regression: `<-coll[i].field` where the element is a struct and the handle
+// is a field. The handle is NOT the indexed element itself; the existing
+// T0560 member-null path covers it. Must keep working.
+type TaskCell {
+  Task[int] t;
+  drop(~this) {
+  }
+}
+
+task_recv_array_struct_field() `test(exclude: wasm) {
+  TaskCell[2] cs = [TaskCell(t: go worker_int()), TaskCell(t: go worker_int())];
+  a := <-cs[0].t;
+  b := <-cs[1].t;
+  assert(a == 42, "struct-field recv 0");
+  assert(b == 42, "struct-field recv 1");
+}
+
+// Non-regression: Channel elements. genReceiveChannel does NOT free the
+// channel, so its slot must stay valid for the scope-exit drop. The T0638
+// slot-null is genReceiveTask-only — these must not double-free / leak.
+channel_producer() Channel[int] {
+  ch := channel[int](capacity: 1);
+  ch.send(99);
+  ch.close();
+  return ch;
+}
+
+channel_recv_vector_index() `test(exclude: wasm) {
+  Vector[Channel[int]] cs = [channel_producer()];
+  v := <-cs[0];
+  assert(v! == 99, "channel vector recv");
+}
+
+channel_recv_array_index() `test(exclude: wasm) {
+  Channel[int][1] cs = [channel_producer()];
+  v := <-cs[0];
+  assert(v! == 99, "channel array recv");
+}

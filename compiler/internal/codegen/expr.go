@@ -8360,6 +8360,61 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 	return val
 }
 
+// genReceiveTaskSlotPtr computes the element l-value slot pointer (i8**) for a
+// `<-coll[i]` task-receive operand, so genReceiveTask can null the slot after
+// it frees the G (T0638). Mirrors the element-pointer computation in
+// genArrayIndex / genVectorIndex WITHOUT a bounds check — the receive's own
+// operand eval already bounds-checked with the same index, so reaching here
+// means the index is in range and c.block is the in-bounds block. Returns
+// (ptr,true) for fixed-array and Vector Task elements; (nil,false) otherwise.
+func (c *Compiler) genReceiveTaskSlotPtr(e *ast.IndexExpr) (value.Value, bool) {
+	targetType := c.info.Types[e.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
+	}
+
+	// Fixed-size array: GEP into the array alloca/field slot.
+	if arr, ok := targetType.(*types.Array); ok {
+		basePtr := c.genArrayBasePtr(e.Target, arr)
+		idx := c.genExpr(e.Index)
+		elemLLVM := c.resolveType(arr.Elem())
+		arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
+		return c.block.NewGetElementPtr(arrType, basePtr,
+			constant.NewInt(irtypes.I32, 0), idx), true
+	}
+
+	// Vector: GEP into the heap data buffer past the fixed-size header. Mirrors
+	// genVectorIndex's read path (genExprAutoPropagate — no COW; Task vectors
+	// are always heap, never .rodata).
+	named := extractNamed(targetType)
+	var elemType types.Type
+	if elem, ok := types.AsVector(targetType); ok {
+		elemType = elem
+	} else if named == types.TypVector && c.typeSubst != nil {
+		tp := named.TypeParams()[0]
+		if elem, ok := c.typeSubst[tp]; ok {
+			elemType = elem
+		}
+	}
+	if elemType != nil {
+		slicePtr := c.genExprAutoPropagate(e.Target) // B0323
+		idx := c.genExpr(e.Index)
+		elemLLVM := c.resolveType(elemType)
+		dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
+			constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+		dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+		return c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx), true
+	}
+
+	return nil, false
+}
+
 // genNativeIndex dispatches native [] implementations for built-in types.
 func (c *Compiler) genNativeIndex(e *ast.IndexExpr, named *types.Named, targetType types.Type) value.Value {
 	if named == types.TypString {
@@ -11900,6 +11955,19 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 		if named := extractNamed(targetType); named != nil && named.LookupField(member.Field) != nil {
 			fieldPtr := c.genFieldPtr(member)
 			c.block.NewStore(constant.NewNull(irtypes.I8Ptr), fieldPtr)
+		}
+	}
+	// T0638: `<-coll[i]` consumes the indexed task. The receive frees the G
+	// (pal_free below); without nulling the slot, the array/Vector scope-exit
+	// element drop reloads the dangling pointer and Task[T].drop's only a
+	// null-check → use-after-free / double-free → segfault. Null the slot so
+	// the element drop no-ops. Mirrors the T0560 `<-h.field` field-null path.
+	// Per-slot (not whole-collection): `Task[int][2]` with only ts[0] received
+	// must still drop ts[1]. genReceiveChannel is intentionally untouched —
+	// channel receive does not free the channel, so its slot must stay valid.
+	if idxExpr, ok := e.Operand.(*ast.IndexExpr); ok {
+		if slotPtr, ok := c.genReceiveTaskSlotPtr(idxExpr); ok {
+			c.block.NewStore(constant.NewNull(irtypes.I8Ptr), slotPtr)
 		}
 	}
 	c.claimStringTemp(gRaw)

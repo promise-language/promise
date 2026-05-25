@@ -1,0 +1,16 @@
+// T0567: Enum explicit drop — reassignment drops old value before storing new.
+enum Color {
+  Red,
+  Green,
+  Blue,
+
+  drop(~this) {
+    print_line("drop Color");
+  }
+}
+
+main() `test(expected: "drop Color\ndrop Color\ndrop Color\n") {
+  Color c = Color.Red;
+  c = Color.Green;
+  c = Color.Blue;
+}

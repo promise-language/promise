@@ -12898,6 +12898,24 @@ func TestDropMonoEnumInstSynthDrop(t *testing.T) {
 	assertContains(t, ir, "call void @Resource.drop(")
 }
 
+// T0567: Explicit drop(~this) on enum — user-defined drop is emitted and called
+func TestDropExplicitEnumMethod(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color {
+			Red,
+			Green,
+			drop(~this) {}
+		}
+		main() {
+			c := Color.Red;
+		}
+	`)
+	// The user's drop method should be declared and called at scope exit
+	assertContains(t, ir, "define void @Color.drop(")
+	assertContains(t, ir, "call void @Color.drop(")
+	assertContains(t, ir, "enum.drop.call")
+}
+
 // T0552: Type with generic-enum field whose TypeParam resolves to a droppable
 // concrete type. monoTypeHasDroppable must see through the generic enum Instance
 // (via monoEnumInstNeedsSynthDrop), and emitFieldDropsFor must drop the enum

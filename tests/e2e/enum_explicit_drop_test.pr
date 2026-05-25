@@ -1,0 +1,34 @@
+// T0567: Explicit drop(~this) on enums — verifies user-defined drop methods
+// on enums are called at scope exit, not silently ignored.
+enum Color {
+  Red,
+  Green,
+  Blue,
+
+  drop(~this) {
+    print_line("drop Color");
+  }
+}
+
+enum Resource {
+  Handle(int id),
+  Empty,
+
+  drop(~this) {
+    print_line("drop Resource");
+  }
+}
+
+take_resource(~Resource r) {
+}
+
+// Basic: explicit drop fires at scope exit, LIFO order
+main() `test(expected: "start\ndrop Color\ndrop Color\nend\ndrop Resource\n") {
+  print_line("start");
+  {
+    Color a = Color.Red;
+    Color b = Color.Blue;
+  }
+  print_line("end");
+  Resource r = Resource.Handle(id: 42);
+}

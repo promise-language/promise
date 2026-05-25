@@ -7331,6 +7331,81 @@ func TestDropMethodAbstract(t *testing.T) {
 	expectError(t, errs, "must not be abstract")
 }
 
+// T0567: Enum explicit drop — valid signature accepted
+func TestEnumDropMethodValid(t *testing.T) {
+	checkOK(t, `
+		enum Resource {
+			Handle(int id),
+			Empty,
+			drop(~this) {}
+		}
+		main() {
+			r := Resource.Handle(id: 1);
+		}
+	`)
+}
+
+// T0567: Enum drop — wrong receiver (value instead of ~this)
+func TestEnumDropMethodWrongReceiver(t *testing.T) {
+	errs := checkErrs(t, `
+		enum E {
+			A,
+			drop(&this) {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "must take ~this")
+}
+
+// T0567: Enum drop — extra parameters
+func TestEnumDropMethodWithParams(t *testing.T) {
+	errs := checkErrs(t, `
+		enum E {
+			A,
+			drop(~this, int x) {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "must have no parameters")
+}
+
+// T0567: Enum drop — non-void return
+func TestEnumDropMethodWithReturn(t *testing.T) {
+	errs := checkErrs(t, `
+		enum E {
+			A,
+			drop(~this) int { return 0; }
+		}
+		main() {}
+	`)
+	expectError(t, errs, "must not return a value")
+}
+
+// T0567: Enum drop — failable
+func TestEnumDropMethodFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		enum E {
+			A,
+			drop!(~this) void { raise error(message: "err"); }
+		}
+		main() {}
+	`)
+	expectError(t, errs, "must not be failable")
+}
+
+// T0567: Enum drop — copy enum cannot have drop
+func TestEnumDropMethodOnCopyEnum(t *testing.T) {
+	errs := checkErrs(t, `
+		enum E `+"`"+`copy {
+			A,
+			B,
+			drop(~this) {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "copy type E cannot have a drop()")
+}
+
 // B0158: Type with droppable field auto-gets HasDrop + NeedsSynthDrop
 func TestDropPropagateToFieldOwner(t *testing.T) {
 	info := checkOK(t, `

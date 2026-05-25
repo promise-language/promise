@@ -662,6 +662,31 @@ func (c *Checker) validateDropMethod(named *types.Named, m *types.Method, d *ast
 	}
 }
 
+// validateEnumDropMethod checks that a drop() method on an enum has the required signature:
+// drop(~this) — mutable borrow receiver, no parameters, no return, not failable.
+func (c *Checker) validateEnumDropMethod(enum *types.Enum, m *types.Method, d *ast.EnumDecl) {
+	sig := m.Sig()
+	if sig == nil {
+		return
+	}
+	pos := d.Pos()
+	if sig.Recv() == nil || sig.Recv().Ref() != types.RefMut {
+		c.errorf(pos, "drop() method on %s must take ~this (mutable borrow receiver)", d.Name)
+	}
+	if len(sig.Params()) != 0 {
+		c.errorf(pos, "drop() method on %s must have no parameters", d.Name)
+	}
+	if sig.Result() != nil && sig.Result() != types.TypVoid {
+		c.errorf(pos, "drop() method on %s must not return a value", d.Name)
+	}
+	if sig.CanError() {
+		c.errorf(pos, "drop() method on %s must not be failable", d.Name)
+	}
+	if enum.IsCopy() {
+		c.errorf(pos, "copy type %s cannot have a drop() method", d.Name)
+	}
+}
+
 // validateNewMethod checks that a new() constructor has a valid signature:
 // new(params) — implicit ~this receiver, no explicit return type.
 // The receiver and return type are implicit; user should not write them.

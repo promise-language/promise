@@ -891,6 +891,11 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 			c.defineEnumMethod(enum, md, d.Name)
 		}
 	}
+	// Validate drop() method if present (after copy processing so IsCopy() is set)
+	if dropMethod := lookupOwnEnumMethod(enum, "drop"); dropMethod != nil {
+		c.validateEnumDropMethod(enum, dropMethod, d)
+		enum.SetHasDrop(true)
+	}
 	if c.hasAnnotation(d.Annotations, "public") {
 		enum.SetExported(true)
 	}

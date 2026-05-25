@@ -1,0 +1,17 @@
+// T0567: Enum explicit drop — move clears drop flag, no double-drop.
+enum Resource {
+  Handle(int id),
+  Empty,
+
+  drop(~this) {
+    print_line("drop Resource");
+  }
+}
+
+take_resource(~Resource r) {
+}
+
+main() `test(expected: "drop Resource\n") {
+  Resource r = Resource.Handle(id: 42);
+  take_resource(r);
+}

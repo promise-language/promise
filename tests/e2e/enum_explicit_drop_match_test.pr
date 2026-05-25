@@ -1,0 +1,22 @@
+// T0567: Explicit enum drop with match this — variant-specific cleanup logic.
+enum Resource {
+  Handle(int id),
+  Empty,
+
+  drop(~this) {
+    match this {
+      Resource.Handle(id) => {
+        print_line("closing handle {id}");
+      },
+      Resource.Empty => {
+        print_line("closing empty");
+      },
+    }
+  }
+}
+
+// LIFO: b drops first, then a
+main() `test(expected: "closing empty\nclosing handle 42\n") {
+  Resource a = Resource.Handle(id: 42);
+  Resource b = Resource.Empty;
+}

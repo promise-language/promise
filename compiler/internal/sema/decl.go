@@ -1155,6 +1155,9 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 			c.info.ExcludeTargets = extractTestExclude(d.Annotations)
 		} else {
 			// `test — unit test function
+			if d.Name == "main" {
+				c.errorf(d.Pos(), "`test on main() requires expected=... (use a non-main name for batch test functions)")
+			}
 			if sig != nil {
 				if len(sig.Params()) > 0 {
 					c.errorf(d.Pos(), "test function '%s' must have no parameters", d.Name)

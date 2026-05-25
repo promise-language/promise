@@ -14887,6 +14887,26 @@ func TestT0234_ExcludeMainWithExpectedAccepted(t *testing.T) {
 	checkOK(t, `main() `+"`test(expected: \"ok\", exclude: wasm) { print_line(\"ok\"); }")
 }
 
+// T0645: bare `test on main() must be rejected — not registered as a batch test
+// (causes runtime SEGV in codegen if accepted).
+func TestT0645_BareTestOnMainRejected(t *testing.T) {
+	errs := checkErrs(t, "main() `test { assert(1 + 1 == 2); }")
+	expectError(t, errs, "`test on main() requires expected=...")
+}
+
+func TestT0645_TestExcludeOnMainRejected(t *testing.T) {
+	errs := checkErrs(t, "main() `test(exclude: wasm) { assert(true); }")
+	expectError(t, errs, "`test on main() requires expected=...")
+}
+
+func TestT0645_SnapshotTestOnMainAccepted(t *testing.T) {
+	checkOK(t, `main() `+"`test(expected: \"hello\") { print_line(\"hello\"); }")
+}
+
+func TestT0645_BatchTestOnNonMainAccepted(t *testing.T) {
+	checkOK(t, "foo() `test { assert(true, \"ok\"); }")
+}
+
 // T0234: non-test annotation before test annotation — covers the ann.Name != "test" continue branch
 // in both extractTestExclude and validateTestExclude.
 func TestT0234_ExcludeWithDocAnnotation(t *testing.T) {

@@ -21575,6 +21575,88 @@ func TestMapLitClearsDropFlagOnKey(t *testing.T) {
 	assertContains(t, ir, "store i1 false, i1* %k.dropflag")
 }
 
+// T0610: A vector literal whose element is a moved local variable of a type
+// Vector.drop's element-walk frees (heap-user-with-drop, string, droppable
+// enum, Mutex/Task, nested vector) must clear the source ident's drop flag —
+// otherwise the source variable's scope-exit drop AND Vector.drop's element
+// walk free the same allocation (double-free / SEGV). Mirrors genTupleLit
+// (B0242) / genMapLit (B0280).
+func TestVectorLitMoveFromVarClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type _Box { string label; drop(~this) {} }
+		main() {
+			_Box b0 = _Box(label: "a");
+			_Box[] v = [b0];
+		}
+	`)
+	// b0 is moved into the vector literal — its drop flag must be cleared so
+	// Vector.drop's element walk becomes the sole owner.
+	assertContains(t, ir, "store i1 false, i1* %b0.dropflag")
+}
+
+// T0610: regression guard — the drop-flag clear must be type-gated to exactly
+// the set emitVectorElementDropLoop walks. Optional[heap-user] elements are
+// stored aliased but Vector.drop does NOT recurse into them; only the source
+// variable's bindingDropOptional frees them. Clearing the flag here would
+// orphan the allocation → leak. So `_Box?[] v = [a]` must NOT clear %a.dropflag.
+func TestVectorLitMoveFromVarOptionalHeapNotCleared(t *testing.T) {
+	ir := generateIR(t, `
+		type _Box { string label; drop(~this) {} }
+		main() {
+			_Box? a = _Box(label: "a");
+			_Box?[] v = [a];
+		}
+	`)
+	// The Optional local has a drop flag (so "not cleared" is a real signal).
+	assertContains(t, ir, "%a.dropflag = alloca i1")
+	// ...but the vector-literal path must NOT clear it (type-gate excludes
+	// Optional — extractNamed does not unwrap it, and it is not a droppable
+	// enum / heap-user / tuple per Vector.drop's element walk).
+	assertNotContains(t, ir, "store i1 false, i1* %a.dropflag")
+}
+
+// T0610: a droppable tuple bound to a *variable* and moved into a vector
+// literal must clear the source ident's drop flag — exercising the
+// tupleNeedsDrop arm of the type-gate. Existing tuple-in-vector-literal
+// tests only use inline tuple constructors (no ident move), so this is the
+// sole IR coverage of the tupleNeedsDrop branch. Without the clear, the
+// tuple field is freed by both the var's bindingDropTuple and Vector.drop's
+// element walk → double-free (verified at runtime against baseline).
+func TestVectorLitMoveFromVarTupleClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type _Box { string label; drop(~this) {} }
+		main() {
+			(int, _Box) t = (1, _Box(label: "a"));
+			(int, _Box)[] v = [t];
+		}
+	`)
+	// The tuple var has its own drop flag (bindingDropTuple, T0371).
+	assertContains(t, ir, "%t.dropflag = alloca i1")
+	// Moved into the vector literal — the tupleNeedsDrop arm must clear it so
+	// Vector.drop's element walk becomes the sole owner of the tuple's _Box.
+	assertContains(t, ir, "store i1 false, i1* %t.dropflag")
+}
+
+// T0610: a plain heap user type with NO drop method (and no droppable
+// fields) moved from a variable into a vector literal must still clear the
+// source ident's drop flag — exercising the "needs pal_free" arm of
+// vecElemNeedsUserTypeDrop (stmt.go:3983). All other T0610 tests use a type
+// WITH an explicit drop; this is the sole coverage of the pal_free-only
+// element path. Without the clear, both the var's scope-exit pal_free and
+// Vector.drop's element walk free the same allocation → double-free
+// (verified at runtime against baseline).
+func TestVectorLitMoveFromVarPlainHeapClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type _Plain { int x; int y; }
+		main() {
+			_Plain p = _Plain(x: 1, y: 2);
+			_Plain[] v = [p];
+		}
+	`)
+	assertContains(t, ir, "%p.dropflag = alloca i1")
+	assertContains(t, ir, "store i1 false, i1* %p.dropflag")
+}
+
 // B0210: Optional[TypeParam] field with none value should not cause mono layout mismatch.
 // The mono layout computes the correct LLVM type for the optional field, but the none
 // value was generated using an unsubstituted TypeParam, producing a type mismatch.

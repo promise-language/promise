@@ -7495,6 +7495,24 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 			constant.NewInt(irtypes.I64, int64(i)))
 		c.block.NewStore(val, elemPtr)
 		if walkEnabled {
+			// T0610: An ident element of a type that Vector.drop's element-walk
+			// frees is *moved* into the vector (ownership marks it Moved). The
+			// vector now owns it, so the source variable's scope-exit drop
+			// binding must be suppressed — otherwise both free the same
+			// allocation (double-free / SEGV for Mutex/Task/heap-user/string/
+			// nested-vector). Mirrors genTupleLit (B0242) / genMapLit (B0280).
+			// Type-gated to exactly the set emitVectorElementDropLoop walks
+			// (stmt.go:3640-3644): clearing for element types it does NOT walk
+			// (e.g. Optional[heap-user]) would orphan the source's allocation
+			// → leak. No-op for Copy/borrow idents (no drop flag).
+			if ident, ok := elemExpr.(*ast.IdentExpr); ok && !isRefType(elem) {
+				if extractNamed(elem) == types.TypString ||
+					c.vecElemNeedsEnumDrop(elem) ||
+					c.vecElemNeedsUserTypeDrop(elem) ||
+					c.tupleNeedsDrop(elem) {
+					c.clearDropFlag(ident.Name)
+				}
+			}
 			// B0233: Claim heap temp — element ownership transferred to vector literal.
 			c.claimHeapTemp(val)
 			// T0366: Also claim string/vector/channel stmt-temps. trackVectorTempWithElemType

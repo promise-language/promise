@@ -1,0 +1,278 @@
+// T0610: Vector literal whose element is a non-Copy single-owner handle (or any
+// type Vector.drop's element-walk frees) read from a *local variable* used to
+// double-free / SEGV. The literal aliased the variable's allocation instead of
+// transferring ownership, so the variable's scope-exit drop and Vector.drop's
+// element-walk both freed the same allocation.
+//
+// Fix: genArrayLit now clears the source ident's drop flag for moved-ident
+// elements, type-gated to exactly the set emitVectorElementDropLoop walks
+// (string / droppable-enum / heap-user-drop / droppable-tuple). Mirrors
+// genTupleLit (B0242) / genMapLit (B0280). The gate must NOT fire for element
+// types Vector.drop does not walk (e.g. Optional[heap-user]) — clearing there
+// would orphan the source variable's allocation → leak (regression guard
+// below + tests/e2e/optional_double_wrap_test.pr::vector_literal_of_optional_heap).
+// --- 1. Mutex[int] single element from a variable (the original SEGV repro). ---
+t0610_mutex_single_ctor_only() `test {
+  Mutex[int] m0 = Mutex[int](1);
+  Mutex[int][] v = [m0];
+  assert(v.len == 1, "mutex single len");
+}
+
+// --- 2. Mutex[int] single element + borrow through the vector slot. ---
+t0610_mutex_single_lock_borrow() `test {
+  Mutex[int] m = Mutex[int](7);
+  Mutex[int][] v = [m];
+  use g := v[0].lock();
+  assert(g.borrow == 7, "mutex single borrow");
+}
+
+// --- 3. Mutex[int] multi element from variables + borrow second slot. ---
+t0610_mutex_multi() `test {
+  Mutex[int] a = Mutex[int](10);
+  Mutex[int] b = Mutex[int](20);
+  Mutex[int][] v = [a, b];
+  assert(v.len == 2, "mutex multi len");
+  use g := v[1].lock();
+  assert(g.borrow == 20, "mutex multi borrow [1]");
+}
+
+// --- 4. Mixed inline-ctor + variable elements (only the var is a moved ident). ---
+t0610_mutex_mixed_inline_and_var() `test {
+  Mutex[int] m = Mutex[int](3);
+  Mutex[int][] v = [Mutex[int](1), m, Mutex[int](2)];
+  assert(v.len == 3, "mutex mixed len");
+  use g := v[1].lock();
+  assert(g.borrow == 3, "mutex mixed var slot borrow");
+}
+
+// --- 5. Heap user type with explicit drop, single element from a var. ---
+type _T0610Box {
+  string label;
+  drop(~this) {
+  }
+}
+
+t0610_box_single() `test {
+  _T0610Box b0 = _T0610Box(label: "a" + "b");
+  _T0610Box[] v = [b0];
+  assert(v.len == 1, "box single len");
+  assert(v[0].label == "ab", "box single label");
+}
+
+// --- 6. Heap user type, multi element from vars. ---
+t0610_box_multi() `test {
+  _T0610Box b0 = _T0610Box(label: "x" + "1");
+  _T0610Box b1 = _T0610Box(label: "y" + "2");
+  _T0610Box[] v = [b0, b1];
+  assert(v.len == 2, "box multi len");
+  assert(v[0].label == "x1", "box multi [0]");
+  assert(v[1].label == "y2", "box multi [1]");
+}
+
+// --- 7. Heap-allocated string from a var (was a latent silent UAF). ---
+t0610_string_from_var() `test {
+  s := "hello" + " world";
+  string[] v = [s];
+  assert(v.len == 1, "string from var len");
+  assert(v[0] == "hello world", "string from var value");
+}
+
+t0610_string_multi_from_var() `test {
+  a := "foo" + "1";
+  b := "bar" + "2";
+  string[] v = [a, b];
+  assert(v[0] == "foo1", "string multi [0]");
+  assert(v[1] == "bar2", "string multi [1]");
+}
+
+// --- 8. Nested Vector[int] element from a var. ---
+t0610_nested_vector_from_var() `test {
+  inner := int[]();
+  inner.push(1);
+  inner.push(2);
+  inner.push(3);
+  int[][] v = [inner];
+  assert(v.len == 1, "nested vec len");
+  assert(v[0].len == 3, "nested vec inner len");
+  assert(v[0][2] == 3, "nested vec inner [2]");
+}
+
+// --- 9. Droppable enum element from a var (vecElemNeedsEnumDrop branch). ---
+enum _T0610Msg {
+  Text(string body),
+  Empty,
+
+  body_or_empty(&this) string {
+    match this {
+      _T0610Msg.Text(b) => {
+        return b;
+      },
+      _T0610Msg.Empty => {
+        return "";
+      },
+    }
+  }
+}
+
+t0610_droppable_enum_from_var() `test {
+  _T0610Msg m = _T0610Msg.Text(body: "he" + "llo");
+  _T0610Msg[] v = [m];
+  assert(v.len == 1, "enum from var len");
+  assert(v[0].body_or_empty() == "hello", "enum from var body");
+}
+
+// --- 10. Task[int] move-from-var + len (no <-v[0]; that hits T0621). ---
+worker_t0610() int {
+  return 99;
+}
+
+t0610_task_from_var() `test(exclude: wasm) {
+  task[int] t = go worker_t0610();
+  task[int][] v = [t];
+  assert(v.len == 1, "task from var len");
+  // Tasks dropped at scope exit (Task[int].drop), no double-free.
+}
+
+// --- 11. REGRESSION GUARD: Optional[heap-user] must NOT have its drop flag
+// cleared (Vector.drop's element-walk does not recurse into Optional, so the
+// source variable's bindingDropOptional is the sole owner). A blanket clear
+// would orphan the allocation → leak. Must stay leak-free. ---
+t0610_optional_heap_regression_guard() `test {
+  _T0610Box? a = _T0610Box(label: "opt" + "A");
+  _T0610Box? b = none;
+  _T0610Box?[] v = [a, b];
+  assert(v.len == 2, "optional heap regression len");
+}
+
+// --- 12. REGRESSION GUARD: Optional[single-owner-handle] from a var. The bug
+// report speculated this case ("Optional thereof"). It is structurally the same
+// negation as test 11 (Optional is *types.Optional — extractNamed does not
+// unwrap it, Vector.drop does not walk it), so the source's optional-drop
+// binding is the sole owner and the type-gate must NOT clear. Extra guard
+// against a future change that makes extractNamed unwrap Optional. ---
+t0610_optional_mutex_regression_guard() `test {
+  Mutex[int]? m = Mutex[int](5);
+  Mutex[int]?[] v = [m];
+  assert(v.len == 1, "optional mutex regression len");
+}
+
+// --- 13. Plain heap user type with NO drop method and NO droppable fields,
+// from a var. Hits the vecElemNeedsUserTypeDrop "needs pal_free" branch
+// (stmt.go:3983) — distinct from tests 5/6 which use a type WITH an explicit
+// drop. Without the type-gate clear, Vector.drop's element walk pal_free's
+// each element AND the source var's scope-exit binding pal_free's it →
+// double-free (verified: SEGV/double-free on baseline without the fix). ---
+type _T0610Plain {
+  int x;
+  int y;
+}
+
+t0610_plain_heap_no_drop_single() `test {
+  _T0610Plain p = _T0610Plain(x: 3, y: 4);
+  _T0610Plain[] v = [p];
+  assert(v.len == 1, "plain heap single len");
+  assert(v[0].x == 3, "plain heap single x");
+  assert(v[0].y == 4, "plain heap single y");
+}
+
+t0610_plain_heap_no_drop_multi() `test {
+  _T0610Plain a = _T0610Plain(x: 1, y: 2);
+  _T0610Plain b = _T0610Plain(x: 5, y: 6);
+  _T0610Plain[] v = [a, b];
+  assert(v.len == 2, "plain heap multi len");
+  assert(v[0].x == 1, "plain heap multi [0].x");
+  assert(v[1].x == 5, "plain heap multi [1].x");
+}
+
+// --- 14. Droppable tuple read from a *variable* into a vector literal
+// (tupleNeedsDrop type-gate branch). Existing tuple-in-vector-literal tests
+// (tests/e2e/tuples_test.pr) only use *inline* tuple constructors, never a
+// tuple bound to a variable — so this is the sole coverage of the
+// tupleNeedsDrop branch from an ident element. Without the fix, the tuple's
+// droppable field is freed by BOTH the var's bindingDropTuple AND
+// Vector.drop's element walk → double-free (verified: t0610_tuple_box_from_var
+// double-frees on baseline without the fix). ---
+t0610_tuple_string_from_var_single() `test {
+  (int, string) t = (7, "ab" + "cd");
+  (int, string)[] v = [t];
+  assert(v.len == 1, "tuple str single len");
+  for e in v {
+    (i, s) := e;
+    assert(i == 7, "tuple str single i");
+    assert(s == "abcd", "tuple str single s");
+  }
+}
+
+t0610_tuple_string_from_var_multi() `test {
+  (int, string) a = (1, "x" + "1");
+  (int, string) b = (2, "y" + "2");
+  (int, string)[] v = [a, b];
+  assert(v.len == 2, "tuple str multi len");
+  int total = 0;
+  for e in v {
+    (i, s) := e;
+    total = total + s.len;
+  }
+  assert(total == 4, "tuple str multi total chars");
+}
+
+// Tuple carrying a heap user type with explicit drop, from a var — the
+// variant that double-frees on baseline (the strongest regression guard).
+type _T0610TupBox {
+  int n;
+  drop(~this) {
+  }
+}
+
+t0610_tuple_box_from_var() `test {
+  (int, _T0610TupBox) t = (3, _T0610TupBox(n: 99));
+  (int, _T0610TupBox)[] v = [t];
+  assert(v.len == 1, "tuple box len");
+  for e in v {
+    (i, b) := e;
+    assert(i == 3, "tuple box i");
+    assert(b.n == 99, "tuple box n");
+  }
+}
+
+// Nested tuple ((int, string), int) with a heap string at depth 1, from a var
+// (tupleNeedsDrop recurses into nested tuples).
+t0610_tuple_nested_from_var() `test {
+  ((int, string), int) t = ((1, "nn" + "mm"), 9);
+  ((int, string), int)[] v = [t];
+  assert(v.len == 1, "tuple nested len");
+  for e in v {
+    (inner, c) := e;
+    (a, s) := inner;
+    assert(a == 1, "tuple nested a");
+    assert(s == "nnmm", "tuple nested s");
+    assert(c == 9, "tuple nested c");
+  }
+}
+
+// --- 15. Generic droppable enum instance from a var. Test 9 uses a
+// NON-generic enum (vecElemNeedsEnumDrop's HasDrop branch); this exercises
+// the generic-instance sub-path (mono drop func lookup) at the array-literal
+// move-from-var call site. ---
+enum _T0610GBox[T] {
+  Val(string tag, T payload),
+  Nil,
+
+  tag_or_empty(&this) string {
+    match this {
+      _T0610GBox.Val(t, p) => {
+        return t;
+      },
+      _T0610GBox.Nil => {
+        return "";
+      },
+    }
+  }
+}
+
+t0610_generic_enum_from_var() `test {
+  _T0610GBox[int] g = _T0610GBox[int].Val(tag: "h" + "i", payload: 5);
+  _T0610GBox[int][] v = [g];
+  assert(v.len == 1, "generic enum from var len");
+  assert(v[0].tag_or_empty() == "hi", "generic enum from var tag");
+}

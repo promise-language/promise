@@ -152,3 +152,35 @@ writer_large_input_test() `test {
   u8[] decoded = gunzip(compressed)?!;
   _assert_eq(decoded, data, "70000-byte round-trip");
 }
+
+finish_to_file_test() `test(exclude: wasm) {
+  string input = "hello from gzip file";
+  u8[] input_bytes = input.bytes();
+  u8[] to_compress = input_bytes.clone();
+  GzipWriter w = GzipWriter();
+  int _n = w.write(to_compress)?!;
+  io.File fw = io.File.create("/tmp/pr_gzip_ftf")?!;
+  w.finish_to(fw)?!;
+  fw.close()?!;
+  io.File fr = io.File.open("/tmp/pr_gzip_ftf", readonly: true)?!;
+  u8[] buf = u8[]();
+  u8[] tmp = u8[].filled(0u8, 4096);
+  bool done = false;
+  while !done {
+    int n = fr.read(tmp)?!;
+    if n == 0 {
+      done = true;
+    } else {
+      int i = 0;
+      while i < n {
+        buf.push(tmp[i]);
+        i = i + 1;
+      }
+    }
+  }
+  fr.close()?!;
+  u8[] decoded = gunzip(buf)?!;
+  _assert_eq(decoded, input_bytes, "finish_to file round-trip");
+  io.File.remove("/tmp/pr_gzip_ftf")? e {
+  };
+}

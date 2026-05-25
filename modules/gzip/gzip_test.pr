@@ -499,6 +499,119 @@ gzip_large_binary_test() `test {
   _gzip_roundtrip(data, "100KB binary");
 }
 
+gunzip_fextra_overflow_test() `test {
+  // FEXTRA with XLEN=7 but only 18 bytes total → pos overruns data.len.
+  // After reading XLEN=7, pos = 10 + 2 + 7 = 19 > data.len (18).
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x04); // FLG = FEXTRA
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  raw.push(0x07); // XLEN lo = 7
+  raw.push(0x00); // XLEN hi = 0
+  raw.push(0x00); // padding to reach 18 bytes
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  assert(_try_gunzip(data), "FEXTRA overflow raises");
+}
+
+gunzip_fname_unterminated_test() `test {
+  // FNAME field with no NUL terminator — _skip_cstring raises.
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x08); // FLG = FNAME
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  // 8 non-NUL bytes — no terminator within the stream
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  u8[] data = _bytes(raw);
+  assert(_try_gunzip(data), "FNAME without NUL raises");
+}
+
+gunzip_fhcrc_truncated_test() `test {
+  // FNAME consumes all 8 bytes after the header (pos=18), then FHCRC needs 2 more
+  // bytes (pos+2=20 > data.len=18) → raises.
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x0A); // FLG = FNAME | FHCRC
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  // FNAME = "AAAAAAA\0" (7 chars + NUL = 8 bytes): pos advances from 10 to 18
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  assert(_try_gunzip(data), "FHCRC truncated raises");
+}
+
+gunzip_header_overruns_trailer_test() `test {
+  // FNAME of 10 bytes pushes pos to 20; trailer_pos = 25-8 = 17; pos (20) > trailer_pos.
+  int[] raw = int[]();
+  raw.push(0x1F);
+  raw.push(0x8B);
+  raw.push(0x08);
+  raw.push(0x08); // FLG = FNAME
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0xFF);
+  // FNAME = "AAAAAAAAA\0" (9 chars + NUL = 10 bytes): pos goes from 10 to 20
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x41);
+  raw.push(0x00);
+  // 5 filler bytes → data.len=25, trailer_pos=17, pos=20 > 17
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  raw.push(0x00);
+  u8[] data = _bytes(raw);
+  assert(_try_gunzip(data), "header overruns trailer raises");
+}
+
 gzip_trailer_isize_test() `test {
   // Verify ISIZE matches input length for a known-size payload.
   string s = "Promise";

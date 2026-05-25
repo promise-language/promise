@@ -108,3 +108,33 @@ bitreader_bytes_remaining_test() `test {
   u32 _v2 = br.read_bits(8)?!;
   assert(br.bytes_remaining == 1, "after two bytes, 1 remains");
 }
+
+bitreader_align_already_aligned_test() `test {
+  // align_to_byte when bit_pos=0 is a no-op (else branch of `if bit_pos != 0`).
+  int[] raw = int[]();
+  raw.push(0xAB);
+  raw.push(0xCD);
+  _BitReader br = _make_reader(raw);
+  // Read 8 bits: bit_pos resets to 0, byte_pos advances to 1.
+  u32 _v = br.read_bits(8)?!;
+  br.align_to_byte(); // no-op: bit_pos already 0
+  u8 b = br.read_aligned_byte()?!;
+  assert(b == 0xCDu8, "aligned byte after no-op align == 0xCD");
+}
+
+_try_read_aligned_byte(_BitReader ~br) bool {
+  u8 _v = br.read_aligned_byte()? e {
+    return true;
+  };
+  return false;
+}
+
+bitreader_aligned_byte_eof_test() `test {
+  // read_aligned_byte at EOF raises (the error branch of `if byte_pos >= data.len`).
+  int[] raw = int[]();
+  raw.push(0x42);
+  _BitReader br = _make_reader(raw);
+  u8 b = br.read_aligned_byte()?!;
+  assert(b == 0x42u8, "first byte read successfully");
+  assert(_try_read_aligned_byte(br), "read_aligned_byte at EOF raises");
+}

@@ -247,6 +247,90 @@ inflate_truncated_test() `test {
   assert(_try_inflate(_bytes(raw)), "truncated stream raises");
 }
 
+inflate_backref_past_output_test() `test {
+  // Fixed-Huffman block: immediately emits length code 257 (length=3) + distance code 0
+  // (distance=1), but output is empty → distance (1) > out.len (0) → raises.
+  // Bit layout:
+  //   bits 0-2: BFINAL=1, BTYPE=01 (fixed)
+  //   bits 3-9: Huffman code 0000001 → symbol 257 (MSB→LSB, read by puff.c decoder)
+  //   bits 10-14: distance code 00000 → dist symbol 0 → distance=1
+  // Byte 0 (bits 0-7): 1,1,0,0,0,0,0,0 = 0x03
+  // Byte 1 (bits 8-15): 0,1,0,0,0,0,0,0 = 0x02
+  int[] raw = int[]();
+  raw.push(0x03);
+  raw.push(0x02);
+  assert(_try_inflate(_bytes(raw)), "back-reference past empty output raises");
+}
+
+inflate_dynamic_hlit_overflow_test() `test {
+  // Dynamic Huffman block header with HLIT=31 → hlit=288 > 286 → raises.
+  // Must provide enough bytes so HDIST and HCLEN reads don't hit EOF first.
+  // Bit layout:
+  //   bits0-2: BFINAL=1, BTYPE=10 (dynamic)
+  //   bits3-7: HLIT=11111=31 → hlit=288 > 286 (in byte 0 = 0xFD)
+  //   bits8-12: HDIST=00000 → hdist=1    (in byte 1 = 0x00)
+  //   bits13-16: HCLEN=0000 → hclen=4   (in bytes 1-2)
+  //   → if hlit (288) > 286 → raises.
+  int[] raw = int[]();
+  raw.push(0xFD); // BFINAL=1, BTYPE=10, HLIT=31
+  raw.push(0x00); // HDIST=0, start of HCLEN
+  raw.push(0x00); // rest of HCLEN
+  assert(_try_inflate(_bytes(raw)), "dynamic HLIT overflow raises");
+}
+
+inflate_dynamic_code18_overflow_test() `test {
+  // Dynamic Huffman block where two code-length code-18 entries (zero-run, each
+  // repeat=138) together overflow the total lit+dist code count (hlit=257 + hdist=1 = 258).
+  // After first repeat: idx=138. After second repeat: idx=276 > 258 → raises at idx=258.
+  //
+  // Tree: only sym=18 with length=1 (canonical code 0).
+  // Header bit layout:
+  //   bits0-2:   BFINAL=1, BTYPE=10
+  //   bits3-7:   HLIT=0 → hlit=257
+  //   bits8-12:  HDIST=0 → hdist=1  (total=258)
+  //   bits13-16: HCLEN=0 → hclen=4
+  //   bits17-19: code_len[sym=16]=0
+  //   bits20-22: code_len[sym=17]=0
+  //   bits23-25: code_len[sym=18]=1
+  //   bits26-28: code_len[sym=0]=0
+  //   bit29=0:   decode → sym=18; bits30-36=1×7: repeat=138, idx→138
+  //   bit37=0:   decode → sym=18; bits38-44=1×7: repeat=138, at idx=258 raises.
+  // Bytes: [0x05, 0x00, 0x80, 0xC0, 0xDF, 0x1F]
+  int[] raw = int[]();
+  raw.push(0x05); // BFINAL=1, BTYPE=10, HLIT=0
+  raw.push(0x00); // HDIST=0, HCLEN=0000[0:3]
+  raw.push(0x80); // HCLEN[3]=0, code_lens[16,17,18lo]=[0,0,1]
+  raw.push(0xC0); // code_lens[18hi,0]=[0,0], first sym=18 decode, repeat[0:1]
+  raw.push(0xDF); // repeat[2:6]=11111, second sym=18 decode, repeat[0:1]=11
+  raw.push(0x1F); // repeat[2:6]=11111 → repeat=138; at idx=258 raises
+  assert(_try_inflate(_bytes(raw)), "code-18 zero-run overflow raises");
+}
+
+inflate_dynamic_code16_at_start_test() `test {
+  // Dynamic Huffman block where the first code-length symbol decoded is 16 (repeat-previous).
+  // idx=0 when sym=16 → raises "code 16 (repeat-previous) at start of code-length sequence".
+  //
+  // Bit layout:
+  //   bit0=1 (BFINAL=1), bits1-2=01 wait...
+  //   bit0=1, bit1=0, bit2=1 → BTYPE=2 (dynamic)
+  //   bits3-7: HLIT=00000 → hlit=257
+  //   bits8-12: HDIST=00000 → hdist=1
+  //   bits13-16: HCLEN=0000 → hclen=4
+  //   bits17-19: code_len_lens[clen_order[0]=16] = 001 → length=1
+  //   bits20-22: code_len_lens[17] = 000 → 0
+  //   bits23-25: code_len_lens[18] = 000 → 0
+  //   bits26-28: code_len_lens[0] = 000 → 0
+  //   Code-length tree: only symbol 16 has length 1. Canonical code: sym16 → bit 0.
+  //   bit29=0 → decodes to symbol 16; idx=0 → raises.
+  // Bytes: [0x05, 0x00, 0x02, 0x00]
+  int[] raw = int[]();
+  raw.push(0x05);
+  raw.push(0x00);
+  raw.push(0x02);
+  raw.push(0x00);
+  assert(_try_inflate(_bytes(raw)), "code-length code 16 at idx=0 raises");
+}
+
 // ---------------------------------------------------------------------------
 // deflate() encoder tests — round-trip through inflate() (the canonical
 // reference) is the strongest check available without external tooling.

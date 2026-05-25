@@ -1607,6 +1607,7 @@ func (c *Compiler) compileTestCoroutine(nameStr string, fd *ast.FuncDecl) *ir.Fu
 	c.heapTempMap = make(map[value.Value]int)
 	c.envTemps = nil
 	c.envTempMap = make(map[value.Value]int)
+	c.enumCtorTemps = nil // B0267
 	c.tempTrackingEnabled = true
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
@@ -9255,6 +9256,7 @@ type compilerState struct {
 	heapTempMap          map[value.Value]int
 	envTemps             []envTemp
 	envTempMap           map[value.Value]int
+	enumCtorTemps        []enumCtorTemp // B0267
 	tempTrackingEnabled  bool
 	panicExitBlock       *ir.Block // T0262: prevent cross-function block references
 	coroutineReturnBlock *ir.Block // T0262: prevent cross-function block references
@@ -9287,6 +9289,7 @@ func (c *Compiler) saveState() compilerState {
 		heapTempMap:          c.heapTempMap,
 		envTemps:             c.envTemps,
 		envTempMap:           c.envTempMap,
+		enumCtorTemps:        c.enumCtorTemps, // B0267
 		tempTrackingEnabled:  c.tempTrackingEnabled,
 		panicExitBlock:       c.panicExitBlock,
 		coroutineReturnBlock: c.coroutineReturnBlock,
@@ -9313,6 +9316,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.heapTempMap = s.heapTempMap
 	c.envTemps = s.envTemps
 	c.envTempMap = s.envTempMap
+	c.enumCtorTemps = s.enumCtorTemps // B0267
 	c.tempTrackingEnabled = s.tempTrackingEnabled
 	c.blockCounter = s.blockCounter
 	c.canError = s.canError

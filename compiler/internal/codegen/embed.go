@@ -26,6 +26,7 @@ func (c *Compiler) defineEmbedGetter(fd *ast.FuncDecl, fn *ir.Func, embed *sema.
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
+	c.enumCtorTemps = nil                     // B0267
 	c.tempTrackingEnabled = false             // T0073
 	c.blockCounter = 0
 

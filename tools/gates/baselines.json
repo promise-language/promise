@@ -15,7 +15,7 @@
       "updated": "2026-04-06"
     },
     "host_test_count": {
-      "value": 5622,
+      "value": 5654,
       "direction": "up",
       "updated": "2026-05-16"
     },
@@ -54,7 +54,7 @@
       "direction": "down"
     },
     "wasm_test_count": {
-      "value": 5145,
+      "value": 5168,
       "direction": "up",
       "updated": "2026-05-16"
     },

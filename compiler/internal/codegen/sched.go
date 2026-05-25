@@ -2243,6 +2243,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.heapTempMap = make(map[value.Value]int) // T0088
 	c.envTemps = nil                          // T0100
 	c.envTempMap = make(map[value.Value]int)  // T0100
+	c.enumCtorTemps = nil                     // B0267
 	c.tempTrackingEnabled = true              // T0100: enable temp tracking in main goroutine
 	c.loopScopeDepth = 0
 	c.inCoroutine = true

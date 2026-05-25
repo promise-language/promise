@@ -9082,6 +9082,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedHeapTempMap := c.heapTempMap                   // T0088
 	savedEnvTemps := c.envTemps                         // T0100
 	savedEnvTempMap := c.envTempMap                     // T0100
+	savedEnumCtorTemps := c.enumCtorTemps               // B0267
 	savedTempTracking := c.tempTrackingEnabled          // T0073
 	savedLocalNameCount := c.localNameCount             // T0261
 	savedPanicExitBlock := c.panicExitBlock             // T0262: clear in lambda (separate function)
@@ -9112,6 +9113,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.heapTempMap = make(map[value.Value]int) // T0088
 	c.envTemps = nil                          // T0100
 	c.envTempMap = make(map[value.Value]int)  // T0100
+	c.enumCtorTemps = nil                     // B0267
 	c.tempTrackingEnabled = true              // B0259: enable temp tracking in lambda bodies
 	c.loopScopeDepth = 0
 	c.lambdaWritebacks = nil
@@ -9223,6 +9225,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.heapTempMap = savedHeapTempMap                   // T0088
 	c.envTemps = savedEnvTemps                         // T0100
 	c.envTempMap = savedEnvTempMap                     // T0100
+	c.enumCtorTemps = savedEnumCtorTemps               // B0267
 	c.tempTrackingEnabled = savedTempTracking          // T0073
 	c.localNameCount = savedLocalNameCount             // T0261
 	c.panicExitBlock = savedPanicExitBlock             // T0262
@@ -11084,6 +11087,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedLocalNameCount := c.localNameCount // T0261
 	savedStmtTemps := c.stmtTemps           // T0594: stmtTemps must not leak from coroutine body into outer function
 	savedStmtTempMap := c.stmtTempMap       // T0594: allocas created inside coroutine body live in a different function
+	savedEnumCtorTemps := c.enumCtorTemps   // B0267: enumCtorTemps must not leak from coroutine body into outer function
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
@@ -11097,6 +11101,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.inCoroutine = true
 	c.stmtTemps = nil                         // T0594: fresh temp state for coroutine body
 	c.stmtTempMap = make(map[value.Value]int) // T0594
+	c.enumCtorTemps = nil                     // B0267
 
 	// 6. Coroutine preamble
 	entry := coroFn.NewBlock(".entry")
@@ -11292,6 +11297,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.localNameCount = savedLocalNameCount // T0261
 	c.stmtTemps = savedStmtTemps           // T0594: restore outer function's temp state
 	c.stmtTempMap = savedStmtTempMap       // T0594
+	c.enumCtorTemps = savedEnumCtorTemps   // B0267
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
 	for name := range capturedDroppablesVB {
@@ -11678,6 +11684,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	savedGoExprFF := c.goExprFireAndForget
 	savedLocalNameCount := c.localNameCount // T0261
+	savedEnumCtorTemps := c.enumCtorTemps   // B0267
 	c.goExprFireAndForget = false           // reset for inner statements (B0109)
 
 	c.fn = coroFn
@@ -11691,6 +11698,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
+	c.enumCtorTemps = nil // B0267
 
 	// --- Coroutine preamble ---
 	entry := coroFn.NewBlock(".entry")
@@ -11879,6 +11887,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
 	c.goExprFireAndForget = savedGoExprFF
 	c.localNameCount = savedLocalNameCount // T0261
+	c.enumCtorTemps = savedEnumCtorTemps   // B0267
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
 	// Ownership has been transferred to the goroutine.

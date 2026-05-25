@@ -1,0 +1,84 @@
+// T0559: Vector.clone() on single-owner native handle elements.
+// Positive controls — clone must still work for cloneable handles.
+// Empty vector cases — trivially cloneable even for non-cloneable T.
+worker_t0559() int {
+  return 17;
+}
+
+test_arc_clone_nonempty() `test {
+  v := Vector[Arc[int]]();
+  v.push(Arc[int](1));
+  v.push(Arc[int](2));
+  v2 := v.clone();
+  assert(v2.len == 2, "arc clone len");
+}
+
+test_weak_clone_nonempty() `test {
+  a := Arc[int](7);
+  v := Vector[Weak[int]]();
+  v.push(a.downgrade());
+  v2 := v.clone();
+  assert(v2.len == 1, "weak clone len");
+}
+
+test_channel_clone_nonempty() `test {
+  v := Vector[Channel[int]]();
+  v.push(Channel[int]());
+  v2 := v.clone();
+  assert(v2.len == 1, "channel clone len");
+}
+
+test_task_empty_clone() `test(exclude: wasm) {
+  v := Vector[Task[int]]();
+  v2 := v.clone();
+  assert(v2.len == 0, "empty task vec clones");
+}
+
+test_mutex_empty_clone() `test {
+  v := Vector[Mutex[int]]();
+  v2 := v.clone();
+  assert(v2.len == 0, "empty mutex vec clones");
+}
+
+test_mutex_guard_empty_clone() `test {
+  v := Vector[MutexGuard[int]]();
+  v2 := v.clone();
+  assert(v2.len == 0, "empty mutex guard vec clones");
+}
+
+// Struct field clone path: dupHeapValueFields → emitVectorElementCloneLoop
+// for an empty Vector[Mutex[T]] field must clone safely (no panic).
+type ContainerWithMutexVec_T0559 `clone {
+  Vector[Mutex[int]] mutexes;
+}
+
+test_struct_field_empty_mutex_vec_clone() `test {
+  c := ContainerWithMutexVec_T0559(mutexes: Vector[Mutex[int]]());
+  c2 := c.clone();
+  assert(c2.mutexes.len == 0, "empty mutex vec field clones");
+}
+
+// Nested vector path: outer.clone() → dupVector → recursive
+// emitVectorElementCloneLoop. With empty inner vectors, the recursive
+// call should hit the length-guard and skip the panic.
+test_nested_vec_empty_inner_clone() `test {
+  inner := Vector[Mutex[int]]();
+  outer := Vector[Vector[Mutex[int]]]();
+  outer.push(inner);
+  o2 := outer.clone();
+  assert(o2.len == 1, "outer len after clone");
+  assert(o2[0].len == 0, "inner len after clone");
+}
+
+// Generic indirection: a generic function calling v.clone() on its
+// parameter must correctly emit the panic-guarded loop after
+// monomorphization with T = Mutex[int].
+dup_vec_t0559[T](Vector[T] &v) Vector[T] {
+  return v.clone();
+}
+
+test_generic_indirection_empty_mutex_vec() `test {
+  v := Vector[Mutex[int]]();
+  v2 := dup_vec_t0559[Mutex[int]](v);
+  assert(v2.len == 0, "empty mutex vec via generic indirection");
+}

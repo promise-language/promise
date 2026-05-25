@@ -1,0 +1,6 @@
+// T0559: Vector[Mutex[T]].clone() panics at runtime (Mutex is move-only).
+main() `test(expected: "panic: Vector[Mutex[T]].clone() is not supported; Mutex is move-only") {
+  v := Vector[Mutex[int]]();
+  v.push(Mutex[int](42));
+  v.clone();
+}

@@ -1,0 +1,7 @@
+// T0559: Vector[MutexGuard[T]].clone() panics at runtime (MutexGuard is move-only).
+main() `test(expected: "panic: Vector[MutexGuard[T]].clone() is not supported; MutexGuard is move-only") {
+  m := Mutex[int](7);
+  v := Vector[MutexGuard[int]]();
+  v.push(m.lock());
+  v.clone();
+}

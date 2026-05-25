@@ -21856,6 +21856,60 @@ func TestVectorCloneLoopCallsSafeMapClone(t *testing.T) {
 	assertContains(t, ir, "Map[string, int].clone")
 }
 
+// T0559: Vector[Mutex[T]].clone() must emit a length-guarded runtime panic
+// (Mutex is move-only — shallow-copying handles would double-free at scope exit).
+func TestVectorCloneLoopMutexPanics(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			v := Vector[Mutex[int]]();
+			v2 := v.clone();
+		}
+	`)
+	assertContains(t, ir, "vecclone.unsup.panic")
+	assertContains(t, ir, "vecclone.unsup.ok")
+	assertContains(t, ir, "Vector[Mutex[T]].clone() is not supported")
+}
+
+// T0559: Vector[Task[T]].clone() must emit a length-guarded runtime panic.
+func TestVectorCloneLoopTaskPanics(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			v := Vector[Task[int]]();
+			v2 := v.clone();
+		}
+	`)
+	assertContains(t, ir, "vecclone.unsup.panic")
+	assertContains(t, ir, "Vector[Task[T]].clone() is not supported")
+}
+
+// T0559: Vector[MutexGuard[T]].clone() must emit a length-guarded runtime panic.
+func TestVectorCloneLoopMutexGuardPanics(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			v := Vector[MutexGuard[int]]();
+			v2 := v.clone();
+		}
+	`)
+	assertContains(t, ir, "vecclone.unsup.panic")
+	assertContains(t, ir, "Vector[MutexGuard[T]].clone() is not supported")
+}
+
+// T0559: The Mutex element type has no clone() method — verify codegen
+// doesn't try to call Mutex[int].clone (would be a missing-function reference).
+func TestVectorCloneLoopMutexDoesNotInvokeClone(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			v := Vector[Mutex[int]]();
+			v2 := v.clone();
+		}
+	`)
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.Contains(line, "Mutex[int].clone") && strings.Contains(line, "= call") {
+			t.Error("T0559: should not call Mutex[int].clone (Mutex is move-only)")
+		}
+	}
+}
+
 // B0281: Enum ctor temps used as map literal values must be claimed.
 // Without the fix, the enum temp is dropped at statement end, double-freeing
 // inner data (both the temp and the map's Slot share the same pointers).

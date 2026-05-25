@@ -3764,6 +3764,40 @@ func (c *Compiler) emitVectorElementCloneLoop(vecPtr value.Value, elemType types
 		return
 	}
 
+	// T0559: Single-owner native handles (Task/Mutex/MutexGuard) have no clone
+	// semantics — they're move-only with i8* representation. Empty vectors are
+	// trivially cloneable; non-empty would shallow-copy the handle, producing
+	// double-ownership → double-free at scope exit. Emit a length-guarded
+	// runtime panic instead of falling through to dupHeapValue (which panics
+	// at codegen time on the i8* → StructType cast).
+	unclonableTypeName := ""
+	if _, isTask := types.AsTask(elemType); isTask || named == types.TypTask {
+		unclonableTypeName = "Task"
+	} else if _, isMutex := types.AsMutex(elemType); isMutex || named == types.TypMutex {
+		unclonableTypeName = "Mutex"
+	} else if _, isMG := types.AsMutexGuard(elemType); isMG || named == types.TypMutexGuard {
+		unclonableTypeName = "MutexGuard"
+	}
+	if unclonableTypeName != "" {
+		headerType := vectorHeaderType()
+		headerPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
+		length := loadVectorLen(c.block, headerPtr)
+		isEmpty := c.block.NewICmp(enum.IPredEQ, length, constant.NewInt(irtypes.I64, 0))
+		okBlock := c.newBlock("vecclone.unsup.ok")
+		panicBlock := c.newBlock("vecclone.unsup.panic")
+		c.block.NewCondBr(isEmpty, okBlock, panicBlock)
+
+		c.block = panicBlock
+		panicMsg := c.makeGlobalString(fmt.Sprintf(
+			"Vector[%s[T]].clone() is not supported; %s is move-only",
+			unclonableTypeName, unclonableTypeName))
+		c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+		c.emitPanicReturn()
+
+		c.block = okBlock
+		return
+	}
+
 	// Determine if element type needs cloning
 	_, isCh := types.AsChannel(elemType)
 	innerElem, isVec := types.AsVector(elemType)

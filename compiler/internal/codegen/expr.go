@@ -52,6 +52,24 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 	case *ast.CallExpr:
 		result := c.genCallExpr(e)
 		c.emitPanicCheck() // T0147: detect panic flag after every call expression
+		// T0649: A borrow return (`T&`/`T~`) hands back a reference into
+		// storage owned elsewhere — the ownership pass guarantees it outlives
+		// the call. It is never an owned temp, so skip all post-call temp
+		// tracking. Tracking it would record a drop for an allocation that
+		// already has a real owner; combined with the binding-site borrow-flag
+		// clear (isBorrowedExpr) the value would end up with no owner (leak).
+		// Resolve the static result type before the I8Ptr split so this also
+		// covers the heap-user `T~` branch (trackHeapUserTypeResult).
+		rt := c.info.Types[e]
+		if c.typeSubst != nil && rt != nil {
+			rt = types.Substitute(rt, c.typeSubst)
+		}
+		if c.selfSubst != nil && rt != nil {
+			rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		if rt != nil && isRefType(rt) {
+			return result
+		}
 		// T0073: Track known-safe string-producing calls (primitive to_string, string methods)
 		// T0109: Also track vector-producing calls (e.g., split()) for cleanup.
 		// T0555: Track native handle (Arc/Weak/Mutex/Task) constructor/call results
@@ -59,13 +77,6 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// `take_arc(Arc[int](99))` leak because the param is borrowed and the
 		// caller has no temp tracking.
 		if result != nil && result.Type() == irtypes.I8Ptr {
-			rt := c.info.Types[e]
-			if c.typeSubst != nil && rt != nil {
-				rt = types.Substitute(rt, c.typeSubst)
-			}
-			if c.selfSubst != nil && rt != nil {
-				rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
-			}
 			if rt != nil {
 				named := extractNamed(rt)
 				if named == types.TypString {
@@ -8607,14 +8618,23 @@ func (c *Compiler) trackUserIndexResult(e *ast.IndexExpr, result value.Value) {
 	if result == nil {
 		return
 	}
+	// T0649: mirror the CallExpr path — a borrow return (`T&`/`T~`) from a
+	// user-defined `[]` operator is a reference into storage owned elsewhere,
+	// not an owned temp. Resolve the static result type before the I8Ptr split
+	// (so the heap-user `T~` branch is covered too) and skip tracking for
+	// borrow results; otherwise the binding-site borrow-flag clear would leave
+	// the value with no owner (leak), exactly as in the plain-method path.
+	rt := c.info.Types[e]
+	if c.typeSubst != nil && rt != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	if c.selfSubst != nil && rt != nil {
+		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if rt != nil && isRefType(rt) {
+		return
+	}
 	if result.Type() == irtypes.I8Ptr {
-		rt := c.info.Types[e]
-		if c.typeSubst != nil && rt != nil {
-			rt = types.Substitute(rt, c.typeSubst)
-		}
-		if c.selfSubst != nil && rt != nil {
-			rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
-		}
 		if rt != nil {
 			named := extractNamed(rt)
 			if named == types.TypString {

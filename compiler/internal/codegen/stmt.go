@@ -6616,8 +6616,15 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// cleanup will free the vector's elements — if the return value borrows
 	// one of those elements, it would become a dangling pointer.
 	// Covers: `return strVar` (IdentExpr) and `return vec[i]` (IndexExpr).
+	// T0649: skip for borrow return types (`string&`/`string~`) — a borrow
+	// return must hand back the actual reference into existing storage (which
+	// the ownership pass guarantees outlives the call), not a fresh copy.
+	// Dup'ing here would leak: the call site treats a borrow result as a
+	// non-owned alias and never frees it. extractNamed unwraps SharedRef/MutRef
+	// so the TypString check alone fires for `string&`, hence the explicit
+	// isRefType guard.
 	needsDup := false
-	if s.Value != nil && val != nil && extractNamed(retType) == types.TypString {
+	if s.Value != nil && val != nil && extractNamed(retType) == types.TypString && !isRefType(retType) {
 		if _, ok := s.Value.(*ast.IdentExpr); ok {
 			needsDup = c.hasVectorStringBinding()
 		} else if idx, ok := s.Value.(*ast.IndexExpr); ok {
@@ -6638,7 +6645,10 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// Scope cleanup drops the dup'd vector (freeing its buffer and all elements) —
 	// the shallow enum copy returned by vec[i] would reference freed data.
 	// Analogous to the B0189 string dup above.
-	if s.Value != nil && val != nil && !needsDup {
+	// T0649: skip for borrow return types (`MyEnum&`/`MyEnum~`) for the same
+	// reason as the string dup — a borrow return must hand back the actual
+	// reference, and cloning here would leak at a binding call site.
+	if s.Value != nil && val != nil && !needsDup && !isRefType(retType) {
 		if idx, ok := s.Value.(*ast.IndexExpr); ok {
 			idxTargetType := c.info.Types[idx.Target]
 			if c.typeSubst != nil {

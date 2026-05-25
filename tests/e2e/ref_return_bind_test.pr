@@ -1,0 +1,308 @@
+// T0649: binding the result of a method/operator with a borrowed-reference
+// return type (`T&` / `T~`) to a local leaked 1 allocation.
+//
+// Root cause: `at(int i) string& { return this.d[i]; }` lowered to a body that
+// strdup'd the element (B0189 string return-dup in genReturnStmt) and returned
+// the fresh owned copy despite the `string&` return type. The call site then
+// temp-tracked that dup as an owned string (extractNamed unwraps SharedRef →
+// TypString); on binding, claimStringTemp cleared the stmt-temp flag while
+// isBorrowedExpr cleared the LHS drop flag — leaving the dup with no owner.
+//
+// Fix (two parts): (1) genReturnStmt skips the B0189 string dup and the sibling
+// enum-clone for `!isRefType(retType)`; (2) the CallExpr post-call tracking and
+// trackUserIndexResult skip tracking when the static result type is a borrow.
+// A `&`/`~` return now hands back the real reference (no allocation) and the
+// caller treats it as a non-owned alias (no track, no free); the actual owner
+// (the receiver's field/vector) frees the data exactly once.
+//
+// Every test is a batch test — the harness fails on ANY leaked allocation
+// (zero-tolerance). Temp-use, bind, and non-ref control are each exercised.
+// ---------- core repro: plain method returning string& ----------
+type PureRef {
+  string[] d;
+  at(int i) string & {
+    return this.d[i];
+  }
+}
+
+test_t0649_method_temp() `test {
+  r := PureRef(d: ["aa" + "x", "bbb" + "y"]);
+  assert(r.at(0).len == 3, "string& temporary use");
+}
+
+test_t0649_method_bind() `test {
+  r := PureRef(d: ["aa" + "x", "bbb" + "y"]);
+  x := r.at(1);
+  assert(x.len == 4, "string& result bound to local");
+}
+
+test_t0649_method_bind_then_use() `test {
+  r := PureRef(d: ["one", "three" + "!"]);
+  a := r.at(0);
+  b := r.at(1);
+  assert(a.len == 3, "first borrow bound");
+  assert(b.len == 6, "second borrow bound");
+}
+
+// ---------- string~ (MutRef) method return ----------
+type MutPureRef {
+  string[] d;
+  at(int i) string ~ {
+    return this.d[i];
+  }
+}
+
+test_t0649_mutref_temp() `test {
+  r := MutPureRef(d: ["pp" + "q", "rr"]);
+  assert(r.at(0).len == 3, "string~ temporary use");
+}
+
+test_t0649_mutref_bind() `test {
+  r := MutPureRef(d: ["pp" + "q", "rrrr" + "s"]);
+  x := r.at(1);
+  assert(x.len == 5, "string~ result bound to local");
+}
+
+// ---------- non-ref control (must stay 0-leak) ----------
+type OwnedRet {
+  string[] d;
+  at(int i) string {
+    return this.d[i];
+  }
+}
+
+test_t0649_nonref_control_bind() `test {
+  r := OwnedRet(d: ["aa" + "x", "bbb" + "y"]);
+  x := r.at(1);
+  assert(x.len == 4, "non-ref return bound to local (control)");
+}
+
+test_t0649_nonref_control_temp() `test {
+  r := OwnedRet(d: ["aa" + "x", "bbb" + "y"]);
+  assert(r.at(0).len == 3, "non-ref return temporary use (control)");
+}
+
+// ---------- user-defined [] operator returning string& ----------
+type IdxRef {
+  string[] d;
+  [](int i) string & {
+    return this.d[i];
+  }
+  at(int i) string & {
+    return this.d[i];
+  }
+}
+
+test_t0649_index_ref_temp() `test {
+  s := IdxRef(d: ["a", "bb" + "b"]);
+  assert(s[1].len == 3, "[]&  operator temporary use");
+  assert(s.at(0).len == 1, "method& baseline temp");
+}
+
+test_t0649_index_ref_bind() `test {
+  s := IdxRef(d: ["a", "bb" + "b"]);
+  x := s[1];
+  assert(x.len == 3, "[]& operator result bound to local");
+  y := s.at(0);
+  assert(y.len == 1, "method& result bound to local (parity)");
+}
+
+take_str(string &v) int {
+  return v.len;
+}
+
+test_t0649_index_ref_fn_arg() `test {
+  s := IdxRef(d: ["hello", "hi"]);
+  assert(take_str(s[0]) == 5, "[]& result passed as fn arg");
+  assert(take_str(s.at(1)) == 2, "method& result passed as fn arg");
+}
+
+// ---------- user-defined [] operator returning a vector borrow ----------
+type RowsRef {
+  string[][] rows;
+  [](int i) string[] & {
+    return this.rows[i];
+  }
+}
+
+test_t0649_index_vec_ref_temp() `test {
+  m := RowsRef(rows: [["a", "bb"], ["ccc"]]);
+  assert(m[0].len == 2, "vector& operator temporary use");
+}
+
+test_t0649_index_vec_ref_bind() `test {
+  m := RowsRef(rows: [["a" + "x", "bb"], ["ccc"]]);
+  row := m[0];
+  assert(row.len == 2, "vector& operator result bound to local");
+  assert(row[0].len == 2, "borrowed row element access");
+}
+
+// ---------- method returning a vector borrow from a vector index ----------
+type GridRef {
+  int[][] g;
+  row(int i) int[] & {
+    return this.g[i];
+  }
+}
+
+test_t0649_method_vec_ref_bind() `test {
+  gr := GridRef(g: [[1, 2, 3], [4, 5]]);
+  r := gr.row(0);
+  assert(r.len == 3, "int[]& method result bound to local");
+  r2 := gr.row(1);
+  assert(r2.len == 2, "second int[]& borrow bound");
+}
+
+// ---------- consistency hardening: droppable-enum element borrow ----------
+// Mirrors the B0189 sibling enum-clone block (cloneEnumValue for a droppable
+// enum loaded from a vector index). Returning `MyEnum&`/`MyEnum~` from such a
+// `return vec[i]` previously would clone the enum and leak it at a binding
+// call site (latent — no prior test).
+//
+// The `clone annotation is LOAD-BEARING, do not remove it: cloneEnumValue
+// only emits a clone when a synthesized `Tagged.clone` exists. A bare enum
+// has no synthesized clone, so the enum-clone block is inert and the
+// `!isRefType` guard is never exercised (the test would pass with OR without
+// the Part 1 enum-clone fix — a false-green). With `clone the clone is
+// genuinely reachable: pre-fix it fires and is orphaned at the binding site
+// (leak); post-fix the guard suppresses it. Only then does the
+// zero-tolerance leak gate actually regression-test the enum-clone guard.
+enum Tagged `clone {
+  Empty,
+  Named(string s),
+  size(&this) int {
+    match this {
+      Empty => {
+        return 0;
+      },
+      Named(n) => {
+        return n.len;
+      },
+    }
+  }
+}
+
+type EnumVecRef {
+  Tagged[] items;
+  at(int i) Tagged & {
+    return this.items[i];
+  }
+  at_mut(int i) Tagged ~ {
+    return this.items[i];
+  }
+}
+
+test_t0649_enum_ref_temp() `test {
+  ev := EnumVecRef(items: [Tagged.Named("ab" + "c"), Tagged.Empty]);
+  assert(ev.at(0).size() == 3, "enum& temporary use");
+  assert(ev.at(1).size() == 0, "enum& empty variant temp");
+}
+
+test_t0649_enum_ref_bind() `test {
+  ev := EnumVecRef(items: [Tagged.Named("ab" + "cd"), Tagged.Empty]);
+  e := ev.at(0);
+  assert(e.size() == 4, "enum& result bound to local");
+}
+
+test_t0649_enum_mutref_bind() `test {
+  ev := EnumVecRef(items: [Tagged.Named("hello" + "!"), Tagged.Empty]);
+  e := ev.at_mut(0);
+  assert(e.size() == 6, "enum~ result bound to local");
+}
+
+test_t0649_enum_ref_bind_then_use() `test {
+  ev := EnumVecRef(items: [Tagged.Named("ab" + "c"), Tagged.Named("de" + "fg")]);
+  a := ev.at(0);
+  b := ev.at(1);
+  assert(a.size() == 3, "first droppable-enum borrow bound");
+  assert(b.size() == 4, "second droppable-enum borrow bound (both alive)");
+}
+
+// ---------- borrow under a ~ / & receiver ----------
+pureref_idx_mut(PureRef ~s) int {
+  return s.at(1).len;
+}
+pureref_idx_shared(PureRef &s) int {
+  x := s.at(0);
+  return x.len;
+}
+
+test_t0649_ref_params() `test {
+  assert(pureref_idx_mut(PureRef(d: ["q", "wer"])) == 3, "string& via ~ receiver (temp)");
+  assert(pureref_idx_shared(PureRef(d: ["zzzz", "y"])) == 4, "string& via & receiver (bind)");
+}
+
+// ---------- generic container with element-borrow accessor ----------
+// Exercises the substitution path: c.currentRetType is `SharedRef(TypeParam
+// T)` and only resolves to `SharedRef(string)` after types.Substitute under
+// the mono subst — the concrete-type cases above never hit that. Highly
+// idiomatic (a Vector[T]-like wrapper handing back element borrows).
+type GBox[T] {
+  T[] d;
+  at(int i) T & {
+    return this.d[i];
+  }
+  get_mut(int i) T ~ {
+    return this.d[i];
+  }
+}
+
+test_t0649_generic_string_ref_bind() `test {
+  b := GBox[string](d: ["aa" + "x", "bbb" + "y"]);
+  x := b.at(1);
+  assert(x.len == 4, "generic T& (string) bound to local");
+  y := b.get_mut(0);
+  assert(y.len == 3, "generic T~ (string) bound to local");
+}
+
+test_t0649_generic_string_ref_temp() `test {
+  b := GBox[string](d: ["aa" + "x", "bbb" + "y"]);
+  assert(b.at(0).len == 3, "generic T& (string) temp use");
+}
+
+test_t0649_generic_int_ref_bind() `test {
+  b := GBox[int](d: [10, 20, 30]);
+  v := b.at(2);
+  assert(v == 30, "generic T& (int) bound to local");
+}
+
+// ---------- generic container of a droppable `clone enum (gate × subst) ----------
+// The intersection the concrete-enum and generic-string cases each miss: the
+// enum-clone B0189 sibling block reached on a *substituted* retType
+// (SharedRef(TypeParam T) → SharedRef(Tag) under the GBox[GTag] mono subst).
+// The `clone annotation is load-bearing here for the same reason as the
+// concrete enum above — without a synthesized GTag.clone the enum-clone block
+// is inert and the guard is a false-green. Verified via the revert experiment:
+// without the Part 1 enum-clone !isRefType guard, the bind forms LEAK while
+// temp-use stays clean.
+enum GTag `clone {
+  Nil,
+  Val(string s),
+  size(&this) int {
+    match this {
+      Nil => {
+        return 0;
+      },
+      Val(n) => {
+        return n.len;
+      },
+    }
+  }
+}
+
+test_t0649_generic_enum_ref_bind() `test {
+  b := GBox[GTag](d: [GTag.Val("ab" + "c"), GTag.Nil]);
+  e := b.at(0);
+  assert(e.size() == 3, "generic T& (droppable `clone enum) bound to local");
+}
+
+test_t0649_generic_enum_ref_temp() `test {
+  b := GBox[GTag](d: [GTag.Val("xy" + "zw"), GTag.Nil]);
+  assert(b.at(0).size() == 4, "generic T& (droppable `clone enum) temp use");
+}
+
+test_t0649_generic_enum_mutref_bind() `test {
+  b := GBox[GTag](d: [GTag.Val("hello" + "!"), GTag.Nil]);
+  e := b.get_mut(0);
+  assert(e.size() == 6, "generic T~ (droppable `clone enum) bound to local");
+}

@@ -253,11 +253,13 @@ func (c *Compiler) isGetterCallExpr(expr ast.Expr) bool {
 	if c.typeSubst != nil && targetType != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
-	named := extractNamed(targetType)
-	if named == nil {
-		return false
+	if named := extractNamed(targetType); named != nil {
+		return named.LookupGetter(member.Field) != nil
 	}
-	return named.LookupGetter(member.Field) != nil
+	if enum := extractEnum(targetType); enum != nil {
+		return enum.LookupGetter(member.Field) != nil
+	}
+	return false
 }
 
 // isStringBorrowExpr returns true if the expression borrows an existing value

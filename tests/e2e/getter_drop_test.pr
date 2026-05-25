@@ -700,3 +700,138 @@ test_channel_getter_for_in_break() `test {
   }
   assert(n == 2, "channel for-in break count");
 }
+
+// T0592: Enum getter var-decl. T0501's `isGetterCallExpr` recognized getters on
+// `*types.Named` targets only — `extractEnum` was missing — so var-decl forms
+// where the receiver was an enum value (`e.fresh`) fell through to the buggy
+// borrow-RHS branch and leaked the cloned allocation. Drop-less enums (no synth
+// drop) keep the buggy branch reachable; the fix extends `isGetterCallExpr` to
+// fall back to `extractEnum` + `Enum.LookupGetter`.
+
+enum EnumArcCell {
+  A,
+  B,
+
+  get fresh Arc[int] `public => Arc[int](42);
+}
+
+test_var_decl_inferred_enum_arc_getter() `test {
+  EnumArcCell e = EnumArcCell.A;
+  s := e.fresh;
+  assert(s.borrow == 42, "enum arc var-decl inferred borrow");
+}
+
+test_var_decl_typed_enum_arc_getter() `test {
+  EnumArcCell e = EnumArcCell.A;
+  Arc[int] s = e.fresh;
+  assert(s.borrow == 42, "enum arc var-decl typed borrow");
+}
+
+enum EnumChanCell {
+  A,
+  B,
+
+  get fresh channel[int] `public => channel[int](2);
+}
+
+test_var_decl_inferred_enum_channel_getter() `test {
+  EnumChanCell e = EnumChanCell.A;
+  s := e.fresh;
+  assert(true, "enum channel var-decl inferred no leak");
+}
+
+test_var_decl_typed_enum_channel_getter() `test {
+  EnumChanCell e = EnumChanCell.A;
+  channel[int] s = e.fresh;
+  assert(true, "enum channel var-decl typed no leak");
+}
+
+// Generic enum target (`*types.Instance` with Enum origin) — the only
+// `extractEnum` branch the four tests above don't reach. Without the fix the
+// allocation also leaks here because the substituted target type is still an
+// Instance whose Origin is Enum, so plain `extractNamed` returns nil.
+enum GenEnumArcCell[T] {
+  Some,
+  None,
+
+  get fresh Arc[int] `public => Arc[int](99);
+}
+
+test_var_decl_inferred_generic_enum_arc_getter() `test {
+  GenEnumArcCell[int] e = GenEnumArcCell[int].Some;
+  s := e.fresh;
+  assert(s.borrow == 99, "generic enum arc var-decl inferred borrow");
+}
+
+test_var_decl_typed_generic_enum_arc_getter() `test {
+  GenEnumArcCell[string] e = GenEnumArcCell[string].None;
+  Arc[int] s = e.fresh;
+  assert(s.borrow == 99, "generic enum arc var-decl typed borrow");
+}
+
+// `this.getter` var-decl inside an enum method body. `member.Target` is a
+// `*ast.ThisExpr` (not `IdentExpr`), and its sema type is the enum receiver —
+// the same code path as the top-level enum tests, but reached from the
+// in-method branch where `tempTrackingEnabled` is set. Mirrors
+// `test_arc_getter_does_not_leak_inside_method` for enums + the var-decl form.
+enum EnumThisCell {
+  A,
+  B,
+
+  get fresh Arc[int] `public => Arc[int](55);
+
+  use_fresh(&this) bool `public {
+    s := this.fresh;
+    return s.borrow == 55;
+  }
+}
+
+test_enum_var_decl_inside_method_this_getter() `test {
+  EnumThisCell e = EnumThisCell.A;
+  assert(e.use_fresh(), "enum this.getter var-decl inside method");
+}
+
+// Generic enum method with `this.getter` var-decl — exercises the
+// `c.typeSubst != nil` substitution path together with the `*types.Instance`
+// branch in `extractEnum`. Inside `GenEnumThisCell[int].use_fresh`, sema
+// records `this`'s type with `T` unbound and codegen substitutes `{T->int}`
+// before the helper runs.
+enum GenEnumThisCell[T] {
+  Some,
+  None,
+
+  get fresh Arc[int] `public => Arc[int](77);
+
+  use_fresh(&this) bool `public {
+    s := this.fresh;
+    return s.borrow == 77;
+  }
+}
+
+test_generic_enum_var_decl_inside_method_this_getter() `test {
+  GenEnumThisCell[int] e = GenEnumThisCell[int].Some;
+  assert(e.use_fresh(), "generic enum this.getter var-decl inside method");
+}
+
+// Chained-target var-decl where the inner field is enum-typed:
+// `outer.field.getter` with `field`'s static type an enum. The MemberExpr
+// target (`outer.field`) is itself a MemberExpr, not an IdentExpr, so the
+// pre-T0592 module-getter check never matched and the buggy borrow-RHS branch
+// fired. Mirrors `test_var_decl_inferred_chain_target_arc_getter` for the
+// enum field case.
+enum EnumChainSrc {
+  A,
+  B,
+
+  get fresh Arc[int] `public => Arc[int](33);
+}
+
+type EnumChainOuter {
+  EnumChainSrc inner;
+}
+
+test_var_decl_inferred_chain_target_enum_arc_getter() `test {
+  EnumChainOuter o = EnumChainOuter(inner: EnumChainSrc.A);
+  s := o.inner.fresh;
+  assert(s.borrow == 33, "chain target enum arc var-decl inferred borrow");
+}

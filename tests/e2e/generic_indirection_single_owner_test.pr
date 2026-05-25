@@ -231,3 +231,110 @@ test_enum_getter_via_this_arc() `test {
   v := b.outer_via_getter();
   assert(v.len == 3, "enum getter via this arc len");
 }
+
+// --- T0637: inherited getter/method/setter from a generic parent ---
+// The bug crashed codegen at monomorphization for any inherited getter/
+// method on a generic parent. Pin the positive Arc runtime behavior for
+// (a) direct inherited-getter access on a concrete instance, (b)
+// inherited-getter access via `this` inside a child-owned method, (c)
+// inherited-method access via `this` inside a child-owned method, and
+// (d) inherited-setter mutation. All must run leak-free (T0067).
+
+type ChildHolder[T] is Holder[T] {
+}
+
+test_getter_inherited_concrete_arc() `test {
+  ch := ChildHolder[Arc[int]](data: [Arc[int](1), Arc[int](2)]);
+  v := ch.cloned;
+  assert(v.len == 2, "inherited getter concrete arc len");
+}
+
+type ChildHolderViaThis[T] is Holder[T] {
+  via_inherited() Vector[T] {
+    return this.cloned;
+  }
+}
+
+test_getter_inherited_via_this_arc() `test {
+  ch := ChildHolderViaThis[Arc[int]](data: [Arc[int](3), Arc[int](4), Arc[int](5)]);
+  v := ch.via_inherited();
+  assert(v.len == 3, "inherited getter via this arc len");
+}
+
+type MethodHolder[T] {
+  Vector[T] data;
+  copy_items() Vector[T] {
+    return this.data.clone();
+  }
+}
+
+type ChildMethodHolder[T] is MethodHolder[T] {
+  via_inherited() Vector[T] {
+    return this.copy_items();
+  }
+}
+
+test_method_inherited_via_this_arc() `test {
+  cm := ChildMethodHolder[Arc[int]](data: [Arc[int](6), Arc[int](7)]);
+  v := cm.via_inherited();
+  assert(v.len == 2, "inherited method via this arc len");
+}
+
+type Mutable[T] {
+  T _val;
+  get current T {
+    return this._val;
+  }
+  set current(T v) {
+    this._val = v;
+  }
+}
+
+type ChildMutable[T] is Mutable[T] {
+}
+
+test_inherited_setter_arc() `test {
+  cm := ChildMutable[int](_val: 10);
+  cm.current = 20;
+  got := cm.current;
+  assert(got == 20, "inherited setter+getter int value");
+}
+
+// Inherited setter assigned via `this` inside a child mono method body —
+// exercises the full T0637 chain (Gaps 1+2+3) plus the `isThis` branch in
+// genSetterCall. Must run leak-free with int payload.
+type ChildMutableViaThis[T] is Mutable[T] {
+  set_via(~T v) {
+    this.current = v;
+  }
+}
+
+test_inherited_setter_via_this_int() `test {
+  cm := ChildMutableViaThis[int](_val: 10);
+  cm.set_via(99);
+  got := cm.current;
+  assert(got == 99, "inherited setter via this updates field");
+}
+
+// Transitive (grandparent-chain) inheritance — exercises the recursive
+// branch of findMonoParentName plus Gap 2's c.typeSubst seeding when the
+// via-`this` access happens inside a Child mono method body.
+type MidHolder[T] is Holder[T] {
+}
+type GrandChildHolder[T] is MidHolder[T] {
+  via_inherited() Vector[T] {
+    return this.cloned;
+  }
+}
+
+test_grandparent_getter_concrete_arc() `test {
+  gc := GrandChildHolder[Arc[int]](data: [Arc[int](1), Arc[int](2)]);
+  v := gc.cloned;
+  assert(v.len == 2, "transitive inherited getter concrete arc len");
+}
+
+test_grandparent_getter_via_this_arc() `test {
+  gc := GrandChildHolder[Arc[int]](data: [Arc[int](7), Arc[int](8), Arc[int](9)]);
+  v := gc.via_inherited();
+  assert(v.len == 3, "transitive inherited getter via this arc len");
+}

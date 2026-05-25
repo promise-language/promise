@@ -6157,7 +6157,10 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 	var mangledName string
 	ownerName := c.resolveMethodOwner(named, target.Field)
 	if ownerName != named.Obj().Name() {
-		mangledName = mangleMethodName(ownerName, target.Field, true)
+		// T0637: Setter inherited from parent. Resolve to mono name if parent
+		// is generic (mirrors genGetterCall / genMethodCall).
+		monoOwner := c.resolveMonoParentName(named, targetType, ownerName)
+		mangledName = mangleMethodName(monoOwner, target.Field, true)
 	} else {
 		mangledName = mangleMethodName(c.resolveTypeName(targetType), target.Field, true)
 	}

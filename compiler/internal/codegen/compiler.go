@@ -9091,9 +9091,11 @@ func (c *Compiler) resolveMethodOwner(named *types.Named, methodName string) str
 			return named.Obj().Name()
 		}
 	}
-	// Walk parents
+	// Walk parents. Use LookupAnyMethod so getters and setters inherited from
+	// parents are routed to the parent's mangled name (T0637) — LookupMethod
+	// skips getters/setters by design.
 	for _, pr := range named.Parents() {
-		if pr.Named.LookupMethod(methodName) != nil {
+		if pr.Named.LookupAnyMethod(methodName) != nil {
 			return c.resolveMethodOwner(pr.Named, methodName)
 		}
 	}
@@ -9181,6 +9183,14 @@ func (c *Compiler) buildTransitiveParentSubst(concrete, iface *types.Named) map[
 func (c *Compiler) resolveMonoParentName(named *types.Named, targetType types.Type, ownerName string) string {
 	// Build a full substitution map from targetType through the parent chain.
 	subst := make(map[*types.TypeParam]types.Type)
+	// T0637: Seed from the active mono substitution first so that inherited
+	// dispatch inside a mono method body (where `this` is typed as the Named
+	// origin, not an Instance) still resolves parent type args correctly.
+	if c.typeSubst != nil {
+		for k, v := range c.typeSubst {
+			subst[k] = v
+		}
+	}
 	if inst, ok := targetType.(*types.Instance); ok {
 		origin, _ := inst.Origin().(*types.Named)
 		if origin != nil {

@@ -1,0 +1,378 @@
+// T0648: returning a `Vector[T]` element of a `Vector[Vector[T]]` field by
+// value from a method / `[]` operator crashed — panic (T=int) or SIGSEGV
+// (T=string). genReturnStmt / the var-decl path set dupContainerFieldAccess
+// for a Vector result; genVectorIndex then evaluated the index *target* (the
+// `this.rows` field read) with that flag still set, so genFieldAccess
+// consumed it to deep-clone the ENTIRE outer container and track the whole
+// clone as a stmt-temp. The index read one element out of that clone,
+// statement-end cleanup dropped the whole clone (incl. the returned element),
+// and the returned inner pointer dangled. Fix: T0500-style save/suppress/
+// restore of dupContainerFieldAccess around the index target eval in
+// genVectorIndex, so the flag reaches the element-level dup (T0383 branch)
+// which makes an owned deep copy of just the indexed inner vector.
+//
+// Every test is a batch test — the harness fails on ANY leaked allocation
+// (zero-tolerance) and any double-free crashes the process. The independence
+// tests additionally prove the returned inner vector is a deep, owned copy.
+// ---------- T = int (was: panic) ----------
+type VI {
+  Vector[int][] rows;
+  at(int i) Vector[int] {
+    return this.rows[i];
+  }
+  at_local(int i) Vector[int] {
+    x := this.rows[i];
+    return x;
+  }
+  [](int i) Vector[int] {
+    return this.rows[i];
+  }
+}
+
+test_t0648_int_method_temporary() `test {
+  v := VI(rows: [[1, 2], [3]]);
+  assert(v.at(0).len == 2, "method temporary use");
+  assert(v.at(1).len == 1, "method temporary use 2");
+}
+
+test_t0648_int_method_binding() `test {
+  v := VI(rows: [[1, 2], [3, 4, 5]]);
+  r := v.at(1);
+  assert(r.len == 3, "method result bound to local");
+  assert(r[0] == 3, "bound copy element 0");
+  assert(r[2] == 5, "bound copy element 2");
+}
+
+test_t0648_int_local_then_return() `test {
+  v := VI(rows: [[1, 2], [3]]);
+  assert(v.at_local(0).len == 2, "local-then-return temporary");
+  r := v.at_local(1);
+  assert(r.len == 1, "local-then-return bound");
+}
+
+test_t0648_int_operator_temporary() `test {
+  v := VI(rows: [[1, 2], [3]]);
+  assert(v[0].len == 2, "operator temporary use");
+  assert(v[1].len == 1, "operator temporary use 2");
+}
+
+test_t0648_int_operator_binding() `test {
+  v := VI(rows: [[9], [8, 7]]);
+  r := v[1];
+  assert(r.len == 2, "operator result bound to local");
+  assert(r[0] == 8, "operator bound copy element");
+}
+
+// ---------- T = string (was: SIGSEGV) ----------
+type VS {
+  Vector[string][] rows;
+  at(int i) Vector[string] {
+    return this.rows[i];
+  }
+  at_local(int i) Vector[string] {
+    x := this.rows[i];
+    return x;
+  }
+  [](int i) Vector[string] {
+    return this.rows[i];
+  }
+}
+
+test_t0648_string_method_temporary() `test {
+  v := VS(rows: [["a", "b"], ["c"]]);
+  assert(v.at(0).len == 2, "string method temporary use");
+  assert(v.at(1).len == 1, "string method temporary use 2");
+}
+
+test_t0648_string_method_binding() `test {
+  v := VS(rows: [["hello", "world"], ["hi"]]);
+  r := v.at(0);
+  assert(r.len == 2, "string method result bound");
+  assert(r[0] == "hello", "bound string copy element 0");
+  assert(r[1] == "world", "bound string copy element 1");
+}
+
+test_t0648_string_local_then_return() `test {
+  v := VS(rows: [["a", "b"], ["c"]]);
+  assert(v.at_local(0).len == 2, "string local-then-return temporary");
+  r := v.at_local(1);
+  assert(r[0] == "c", "string local-then-return bound");
+}
+
+test_t0648_string_operator_temporary() `test {
+  v := VS(rows: [["a", "b"], ["c"]]);
+  assert(v[0].len == 2, "string operator temporary use");
+}
+
+test_t0648_string_operator_binding() `test {
+  v := VS(rows: [["x", "y", "z"], ["w"]]);
+  r := v[0];
+  assert(r.len == 3, "string operator result bound");
+  assert(r[2] == "z", "string operator bound element");
+}
+
+// ---------- direct var-decl from a nested-vector field element ----------
+// (no accessor method — the var-decl path also sets dupContainerFieldAccess)
+test_t0648_direct_field_index_vardecl_int() `test {
+  v := VI(rows: [[10, 20], [30]]);
+  r := v.rows[0];
+  assert(r.len == 2, "direct field-index var-decl (int)");
+  assert(r[1] == 20, "direct field-index var-decl element");
+}
+
+test_t0648_direct_field_index_vardecl_string() `test {
+  v := VS(rows: [["p", "q"], ["r"]]);
+  r := v.rows[1];
+  assert(r.len == 1, "direct field-index var-decl (string)");
+  assert(r[0] == "r", "direct field-index var-decl string element");
+}
+
+// ---------- deeper nest: Vector[Vector[Vector[int]]] ----------
+type VVI {
+  Vector[int][][] cube;
+  at(int i) Vector[int][] {
+    return this.cube[i];
+  }
+}
+
+test_t0648_deeper_nest() `test {
+  c := VVI(cube: [[[1, 2], [3]], [[4]]]);
+  layer := c.at(0);
+  assert(layer.len == 2, "deeper-nest extracted layer length");
+  assert(layer[0].len == 2, "deeper-nest inner-inner length 0");
+  assert(layer[1].len == 1, "deeper-nest inner-inner length 1");
+  assert(c.at(1).len == 1, "deeper-nest temporary use");
+}
+
+// ---------- chained index in the return (nested genVectorIndex recursion) ----------
+// `return this.cube[i][j]` — the outer `[j]` index target is itself an
+// IndexExpr (`this.cube[i]`), so genVectorIndex recurses with the dup flag
+// suppressed: the intermediate inner vector must stay a borrow (no leak) and
+// only the final extracted element is the owned deep copy. A primitive-result
+// chain must dup nothing at all (intermediates borrowed end-to-end).
+type Cube {
+  Vector[int][][] cube;
+  cell(int i, int j) Vector[int] {
+    return this.cube[i][j];
+  }
+  el(int i, int j, int k) int {
+    return this.cube[i][j][k];
+  }
+}
+
+test_t0648_chained_index_vector_return() `test {
+  c := Cube(cube: [[[1, 2], [3]], [[4, 5, 6]]]);
+  r := c.cell(0, 0);
+  assert(r.len == 2, "chained-index vector return length");
+  assert(r[1] == 2, "chained-index vector return element");
+  assert(c.cell(1, 0).len == 3, "chained-index temporary use");
+}
+
+test_t0648_chained_index_primitive_return() `test {
+  c := Cube(cube: [[[1, 2], [3]], [[4, 5, 6]]]);
+  assert(c.el(0, 0, 1) == 2, "chained-index primitive return");
+  assert(c.el(1, 0, 2) == 6, "chained-index primitive return 2");
+}
+
+// ---------- deep-copy independence (mutation isolation) ----------
+// Extract an element copy, mutate the COPY, assert the source is unchanged
+// (the returned inner vector must be an owned deep copy, not an alias). Then
+// mutate the SOURCE outer container and assert the earlier extracted copy is
+// still unaffected. The harness enforces 0-leak / no-double-free at scope
+// exit (the source must still drop cleanly after extraction + mutation).
+test_t0648_independence_int() `test {
+  m := VI(rows: [[1, 2], [3, 4, 5]]);
+  r := m.at(0);
+  assert(r.len == 2, "extracted copy length");
+  r.push(99);
+  assert(r.len == 3, "extracted copy mutated independently");
+  assert(m.at(0).len == 2, "source inner vector unaffected by copy mutation");
+  m.rows.push([7, 8, 9]);
+  assert(m.at(2).len == 3, "source outer mutated");
+  assert(r.len == 3, "extracted copy unaffected by source mutation");
+}
+
+test_t0648_independence_string() `test {
+  m := VS(rows: [["a", "b"], ["c"]]);
+  r := m.at(0);
+  assert(r.len == 2, "extracted string copy length");
+  r.push("z");
+  assert(r.len == 3, "extracted string copy mutated independently");
+  assert(m.at(0).len == 2, "source string inner vector unaffected");
+  assert(m.at(0)[0] == "a", "source string element intact");
+}
+
+// ---------- heap (non-.rodata) string elements — string-free path ----------
+// String LITERALS live in .rodata (T0060) and never hit pal_free, so a
+// regression in the dup'd inner vector's string-element drop would NOT show
+// as a leak in the literal-only tests above. These build the inner vectors
+// from runtime-concatenated (heap) strings so the clone + free path is truly
+// exercised — the harness fails on any leaked allocation (zero-tolerance).
+mk_heap_string(int n) string {
+  b := "v";
+  b = b + n.to_string();
+  return b;
+}
+
+test_t0648_heap_string_binding_no_leak() `test {
+  outer := string[][]();
+  i := 0;
+  while i < 5 {
+    inner := string[]();
+    inner.push(mk_heap_string(i));
+    inner.push(mk_heap_string(i * 10));
+    outer.push(inner);
+    i = i + 1;
+  }
+  v := VS(rows: outer);
+  r := v.at(2);
+  assert(r.len == 2, "heap-string extracted len");
+  assert(r[0] == "v2", "heap-string extracted elem 0");
+  assert(r[1] == "v20", "heap-string extracted elem 1");
+}
+
+test_t0648_heap_string_temporary_no_leak() `test {
+  outer := string[][]();
+  inner := string[]();
+  inner.push(mk_heap_string(7));
+  inner.push(mk_heap_string(8));
+  inner.push(mk_heap_string(9));
+  outer.push(inner);
+  v := VS(rows: outer);
+  // The tracked stmt-temp for `v.at(0)` must drop all 3 heap strings.
+  assert(v.at(0).len == 3, "heap-string temporary use");
+}
+
+// ---------- owned-local regression guards (must keep passing) ----------
+// The fix suppresses dupContainerFieldAccess only across the index target
+// eval. For an owned local the target is an IdentExpr (never a field read),
+// so this path was always correct and must remain identical post-fix.
+make_rows_int() Vector[int] {
+  rows := [[1, 2], [3]];
+  return rows[0];
+}
+
+test_t0648_owned_local_return_guard() `test {
+  r := make_rows_int();
+  assert(r.len == 2, "owned-local return guard");
+  assert(r[0] == 1, "owned-local return element");
+}
+
+test_t0648_owned_local_vardecl_guard() `test {
+  rows := [["a", "b"], ["c"]];
+  r := rows[0];
+  assert(r.len == 2, "owned-local var-decl guard");
+  assert(r[1] == "b", "owned-local var-decl element");
+}
+
+// ---------- other container element types (element-type-agnostic fix) ----------
+// The fix suppresses dupContainerFieldAccess across the index *target* eval
+// regardless of the element type, so it protects EVERY container-element
+// branch in genVectorIndex — not just Vector (expr.go:8771) but also Arc
+// (8793), Weak (8803), and the T0620 Optional branch (8822). Pre-fix, the
+// `this.rows` field read consumed the flag and deep-cloned the whole outer
+// `Vector[X]` for ANY X, dropping the returned element with it (UAF/leak).
+// These lock the fix for the non-Vector element types (0-leak enforced).
+// (The `Vector[Channel[T]]` element variant routes through the same fixed
+// path; its binding form is covered below — the discarded-temporary form is
+// blocked by the separate pre-existing channel-temp leak bug T0653, not by
+// anything in the T0648 fix, so it is intentionally not exercised here.)
+
+type ArcRows {
+  Vector[Arc[int]] rows;
+  at(int i) Arc[int] {
+    return this.rows[i];
+  }
+}
+
+test_t0648_arc_element_method() `test {
+  v := ArcRows(rows: [Arc[int](7), Arc[int](9)]);
+  a := v.at(1);
+  assert(a.borrow == 9, "arc element returned by value (method, bound)");
+  assert(v.at(0).borrow == 7, "arc element method temporary use");
+}
+
+test_t0648_arc_element_vardecl() `test {
+  v := ArcRows(rows: [Arc[int](3), Arc[int](4)]);
+  r := v.rows[0];
+  assert(r.borrow == 3, "arc direct field-index var-decl");
+}
+
+type WeakRows {
+  Vector[Weak[int]] rows;
+  at(int i) Weak[int] {
+    return this.rows[i];
+  }
+}
+
+test_t0648_weak_element_method() `test {
+  a0 := Arc[int](7);
+  a1 := Arc[int](9);
+  v := WeakRows(rows: [a0.downgrade(), a1.downgrade()]);
+  w := v.at(1);
+  u := w.upgrade();
+  assert(u is present, "weak element returned by value upgrades");
+  assert(u!.borrow == 9, "weak upgrade value");
+}
+
+test_t0648_weak_element_vardecl() `test {
+  a := Arc[int](3);
+  v := WeakRows(rows: [a.downgrade(), a.downgrade()]);
+  r := v.rows[0];
+  u := r.upgrade();
+  assert(u!.borrow == 3, "weak direct field-index var-decl");
+}
+
+type OptRows {
+  Vector[string?] rows;
+  at(int i) string? {
+    return this.rows[i];
+  }
+}
+
+make_opt_rows() Vector[string?] {
+  string? a = "a";
+  string? b = none;
+  return[a, b];
+}
+
+test_t0648_optional_element_method() `test {
+  v := OptRows(rows: make_opt_rows());
+  assert(v.at(0) is present, "optional-string element method temporary present");
+  assert(v.at(1) is absent, "optional-string element method temporary none");
+}
+
+test_t0648_optional_element_vardecl() `test {
+  v := OptRows(rows: make_opt_rows());
+  r := v.rows[0];
+  assert(r is present, "optional-string element var-decl present");
+  s := v.rows[1];
+  assert(s is absent, "optional-string element var-decl none");
+}
+
+// Channel element via the BINDING path (leak-free). The discarded-temporary
+// form leaks via the separate pre-existing bug T0653 (not the T0648 fix),
+// so it is deliberately not exercised; bind-then-use is the safe shape and
+// still proves the fix's element-type-agnostic suppression for Channel.
+type ChanRows {
+  Vector[Channel[int]] rows;
+  at(int i) Channel[int] {
+    return this.rows[i];
+  }
+}
+
+test_t0648_channel_element_method_bound() `test {
+  v := ChanRows(rows: [Channel[int](1), Channel[int](1)]);
+  c := v.at(1);
+  c.send(7);
+  r := <-c;
+  assert(r! == 7, "channel element returned by value (method, bound)");
+}
+
+test_t0648_channel_element_vardecl() `test {
+  v := ChanRows(rows: [Channel[int](1), Channel[int](1)]);
+  c := v.rows[0];
+  c.send(42);
+  r := <-c;
+  assert(r! == 42, "channel direct field-index var-decl");
+}

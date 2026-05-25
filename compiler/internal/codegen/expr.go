@@ -8672,7 +8672,19 @@ func (c *Compiler) genStringIndex(e *ast.IndexExpr) value.Value {
 }
 
 func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.Value {
+	// T0648: a vector index only ever wants ONE element. If the target is a
+	// Vector[Vector|Channel|Arc|Weak] field on an owner-droppable type,
+	// genFieldAccess would consume dupContainerFieldAccess to deep-clone the
+	// ENTIRE outer container and track it as a stmt-temp; the index then reads
+	// one element out of that clone, scope cleanup drops the whole clone
+	// (incl. that element), and the returned/bound inner pointer dangles
+	// (panic / SIGSEGV). Suppress the whole-field dup for the target eval so
+	// the element-level dup (the dupContainerFieldAccess branch below, T0383)
+	// makes the owned copy instead. Mirrors the T0500 save/restore pattern.
+	savedDupContainer := c.dupContainerFieldAccess
+	c.dupContainerFieldAccess = false
 	slicePtr := c.genExprAutoPropagate(e.Target) // B0323
+	c.dupContainerFieldAccess = savedDupContainer
 	idx := c.genExpr(e.Index)
 	elemLLVM := c.resolveType(elemType)
 

@@ -12031,6 +12031,19 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 			c.block.NewStore(constant.NewNull(irtypes.I8Ptr), slotPtr)
 		}
 	}
+	// T0617: `<-handle` where `handle` is a for-in loop binding over a
+	// Vector[Task]/Task[N] element loop. genForInVector/genForInArray record
+	// the current iteration's slot address; null it here so the container's
+	// scope-exit element drop reloads null and Task[T].drop no-ops (it null-
+	// checks). Symmetric to the T0638 IndexExpr slot-null above; per-slot, so
+	// un-awaited slots are still dropped once (T0503). genReceiveChannel never
+	// consults this map — channel receive doesn't free the channel.
+	if ident, ok := e.Operand.(*ast.IdentExpr); ok {
+		if slotPtrAlloca, ok := c.forInHandleSlotPtr[ident.Name]; ok {
+			slotPtr := c.block.NewLoad(irtypes.NewPointer(irtypes.I8Ptr), slotPtrAlloca)
+			c.block.NewStore(constant.NewNull(irtypes.I8Ptr), slotPtr)
+		}
+	}
 	c.claimStringTemp(gRaw)
 
 	var innerType types.Type

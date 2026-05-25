@@ -271,3 +271,119 @@ func TestT0621_ChannelFromVarMoveThenVectorRecv(t *testing.T) {
 		t.Errorf("expected `call void @Channel.drop(` scope-exit element drop walk:\n%s", body)
 	}
 }
+
+// T0617: `<-handle` where `handle` is a for-in loop binding over a
+// Vector[Task]/Task[N] element loop. genForInVector/genForInArray bind the
+// loop var by value-copy of the slot's G ptr with no drop binding; the
+// receive frees the G but the T0638 IndexExpr slot-null does NOT fire for the
+// loop-binding IdentExpr operand. Without the new for-in slot-null the
+// container still owns every dangling slot → scope-exit Vector[Task].drop /
+// array element-drop double-frees → segfault. genForInVector/genForInArray
+// now record each iteration's slot in c.forInHandleSlotPtr; genReceiveTask
+// nulls it (symmetric to T0638). The runtime no-double-free / zero-leak
+// guarantee is verified by tests/concurrency/task_drop_test.pr (t0617_*).
+//
+// No textual-ordering assertion: LLVM lays the scope-exit `vecdrop.*`
+// cleanup blocks *before* the `forin.body` loop, so a `strings.Index`
+// ordering check would be brittle (same rationale as
+// TestT0621_TaskFromVarMoveThenVectorRecv).
+
+// TestT0617_VectorForInRecvNullsSlot — `for h in v { x := <-h }` over a
+// `Vector[Task[int]]` must null the current iteration's slot inside the
+// `forin.body` block (the new for-in slot-null), and the scope-exit Vector
+// element drop walk (@"Task[int].drop") must still be wired so the nulled
+// slot is reloaded and Task[int].drop no-ops.
+func TestT0617_VectorForInRecvNullsSlot(t *testing.T) {
+	ir := generateIR(t, `
+		w() int { return 7; }
+		caller() {
+			Vector[Task[int]] v = [go w(), go w()];
+			for h in v { x := <-h; }
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	bodyBlk := blockByPrefixT0638(body, "forin.body")
+	if bodyBlk == "" {
+		t.Fatalf("expected forin.body block (for-in receive operand):\n%s", body)
+	}
+	// The T0617 slot-null: a store of null i8* into the recorded slot,
+	// emitted at the receive site inside the loop body. Absent before the fix.
+	if !strings.Contains(bodyBlk, "store i8* null, i8**") {
+		t.Errorf("expected slot-null `store i8* null, i8**` in forin.body block (T0617):\n%s", bodyBlk)
+	}
+	// The scope-exit Vector element drop walk must still be present — the slot
+	// is nulled per-iteration, not the whole vector, so the drop walk runs and
+	// Task[int].drop null-checks (T0503 preserved).
+	if !strings.Contains(body, `@"Task[int].drop"`) {
+		t.Errorf("expected @\"Task[int].drop\" scope-exit element drop walk:\n%s", body)
+	}
+}
+
+// TestT0617_ArrayForInRecvNullsSlot — same for the fixed-array path:
+// `Task[int][2] ts = [...]; for h in ts { <-h }`.
+func TestT0617_ArrayForInRecvNullsSlot(t *testing.T) {
+	ir := generateIR(t, `
+		w() int { return 7; }
+		caller() {
+			Task[int][2] ts = [go w(), go w()];
+			for h in ts { x := <-h; }
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	bodyBlk := blockByPrefixT0638(body, "forin.body")
+	if bodyBlk == "" {
+		t.Fatalf("expected forin.body block (array for-in receive operand):\n%s", body)
+	}
+	if !strings.Contains(bodyBlk, "store i8* null, i8**") {
+		t.Errorf("expected slot-null `store i8* null, i8**` in forin.body block (T0617 array):\n%s", bodyBlk)
+	}
+	if !strings.Contains(body, `@"Task[int].drop"`) {
+		t.Errorf("expected @\"Task[int].drop\" scope-exit element drop walk:\n%s", body)
+	}
+}
+
+// TestT0617_ForInChannelRecvDoesNotNullSlot — non-regression. genReceiveChannel
+// does NOT free the channel and never consults c.forInHandleSlotPtr, so the
+// channel for-in loop body must NOT null the slot — the slot must stay valid
+// for the scope-exit Vector.drop → Channel.drop (no double-free, no leak).
+func TestT0617_ForInChannelRecvDoesNotNullSlot(t *testing.T) {
+	ir := generateIR(t, `
+		producer() Channel[int] {
+			ch := channel[int](capacity: 1);
+			ch.send(99);
+			ch.close();
+			return ch;
+		}
+		caller() {
+			Vector[Channel[int]] cs = [producer()];
+			for c in cs { x := <-c; }
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	bodyBlk := blockByPrefixT0638(body, "forin.body")
+	if bodyBlk == "" {
+		t.Fatalf("expected forin.body block (channel for-in receive operand):\n%s", body)
+	}
+	if strings.Contains(bodyBlk, "store i8* null, i8**") {
+		t.Errorf("channel for-in body must NOT null the slot "+
+			"(genReceiveChannel does not free the channel; slot needed for "+
+			"scope-exit drop):\n%s", bodyBlk)
+	}
+	// The scope-exit Vector element drop walk must still call Channel.drop on
+	// the still-owned channel (dropped exactly once — no double-free, no leak).
+	if !strings.Contains(body, "call void @Channel.drop(") {
+		t.Errorf("expected `call void @Channel.drop(` scope-exit element drop walk:\n%s", body)
+	}
+}

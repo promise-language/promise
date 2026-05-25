@@ -165,6 +165,13 @@ type Compiler struct {
 	// Drop flag tracking: maps variable name to its drop flag alloca (i1)
 	dropFlags map[string]*ir.InstAlloca
 
+	// T0617: for-in loop binding name → alloca holding the current iteration's
+	// container slot address (i8**), for single-owner-handle (Task) Vector/array
+	// element loops. `<-handle` nulls *slot so the container's scope-exit drop
+	// no-ops the consumed slot (mirrors the T0638 IndexExpr slot-null). Scoped
+	// via per-loop save/restore in genForInVector/genForInArray (self-cleaning).
+	forInHandleSlotPtr map[string]*ir.InstAlloca
+
 	// Drop binding tracking: maps variable name to its scope binding (for reassignment drop)
 	dropBindings map[string]scopeBinding
 
@@ -674,6 +681,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		viewVtables:        make(map[viewVtableKey]*ir.Global),
 		valueTypeRTTI:      make(map[*types.Named]*ir.Global),
 		dropFlags:          make(map[string]*ir.InstAlloca),
+		forInHandleSlotPtr: make(map[string]*ir.InstAlloca),
 		dropBindings:       make(map[string]scopeBinding),
 		stmtTempMap:        make(map[value.Value]int),
 		heapTempMap:        make(map[value.Value]int),
@@ -9254,6 +9262,7 @@ type compilerState struct {
 	locals               map[string]*ir.InstAlloca
 	localNameCount       map[string]int
 	dropFlags            map[string]*ir.InstAlloca
+	forInHandleSlotPtr   map[string]*ir.InstAlloca // T0617
 	dropBindings         map[string]scopeBinding
 	blockCounter         int
 	canError             bool
@@ -9287,6 +9296,7 @@ func (c *Compiler) saveState() compilerState {
 		locals:               c.locals,
 		localNameCount:       c.localNameCount,
 		dropFlags:            c.dropFlags,
+		forInHandleSlotPtr:   c.forInHandleSlotPtr, // T0617
 		dropBindings:         c.dropBindings,
 		blockCounter:         c.blockCounter,
 		canError:             c.canError,
@@ -9325,6 +9335,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.locals = s.locals
 	c.localNameCount = s.localNameCount
 	c.dropFlags = s.dropFlags
+	c.forInHandleSlotPtr = s.forInHandleSlotPtr // T0617
 	c.dropBindings = s.dropBindings
 	c.stmtTemps = s.stmtTemps
 	c.stmtTempMap = s.stmtTempMap

@@ -9238,6 +9238,17 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.dropFlags[s.Binding])
 	}
 
+	// T0617: for a Task-element loop, record the current iteration's slot
+	// address so `<-handle` (genReceiveTask) can null the consumed slot —
+	// otherwise the Vector's scope-exit element drop reloads the freed G
+	// and Task[T].drop double-frees → segfault. Per-iteration (not whole
+	// vector) so un-awaited slots are still dropped once (T0503).
+	isTaskElem := s.Binding != "_" && types.IsTask(elemType)
+	var slotPtrAlloca *ir.InstAlloca
+	if isTaskElem {
+		slotPtrAlloca = c.createEntryAlloca(irtypes.NewPointer(elemLLVM))
+	}
+
 	// Index variable if present
 	if s.Index != "" {
 		indexAlloca := c.createEntryAlloca(irtypes.I64)
@@ -9267,6 +9278,16 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	c.continueTarget = updateBlock
 	c.loopScopeDepth = len(c.scopeBindings)
 
+	// T0617: scope the slot-ptr map entry to this loop (save/restore, like
+	// breakTarget) so nesting (`for x in v1 { for x in v2 {} }`) is safe and
+	// it self-cleans across functions.
+	var prevSlot *ir.InstAlloca
+	var hadPrevSlot bool
+	if isTaskElem {
+		prevSlot, hadPrevSlot = c.forInHandleSlotPtr[s.Binding]
+		c.forInHandleSlotPtr[s.Binding] = slotPtrAlloca
+	}
+
 	c.block = bodyBlock
 
 	// B0277: Drop previous iteration's dup'd string if not moved, then dup new.
@@ -9290,6 +9311,9 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, curCounter)
+	if isTaskElem {
+		c.block.NewStore(elemPtr, slotPtrAlloca) // T0617
+	}
 	var elemVal value.Value = c.block.NewLoad(elemLLVM, elemPtr)
 
 	if dupStrings {
@@ -9325,6 +9349,14 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
+
+	if isTaskElem { // T0617: restore the scoped slot-ptr map entry
+		if hadPrevSlot {
+			c.forInHandleSlotPtr[s.Binding] = prevSlot
+		} else {
+			delete(c.forInHandleSlotPtr, s.Binding)
+		}
+	}
 }
 
 // --- For-in over fixed-size arrays ---
@@ -9352,6 +9384,17 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 	if dupStrings {
 		c.maybeRegisterDrop(s.Binding, elemAlloca, arr.Elem())
 		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.dropFlags[s.Binding])
+	}
+
+	// T0617: for a Task-element loop, record the current iteration's slot
+	// address so `<-handle` (genReceiveTask) can null the consumed slot —
+	// otherwise the array's scope-exit element drop reloads the freed G and
+	// Task[T].drop double-frees → segfault. Per-iteration (not whole array)
+	// so un-awaited slots are still dropped once (T0503).
+	isTaskElem := s.Binding != "_" && types.IsTask(arr.Elem())
+	var slotPtrAlloca *ir.InstAlloca
+	if isTaskElem {
+		slotPtrAlloca = c.createEntryAlloca(irtypes.NewPointer(elemLLVM))
 	}
 
 	// Index variable if present
@@ -9383,6 +9426,15 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 	c.continueTarget = updateBlock
 	c.loopScopeDepth = len(c.scopeBindings)
 
+	// T0617: scope the slot-ptr map entry to this loop (save/restore, like
+	// breakTarget) so nesting is safe and it self-cleans across functions.
+	var prevSlot *ir.InstAlloca
+	var hadPrevSlot bool
+	if isTaskElem {
+		prevSlot, hadPrevSlot = c.forInHandleSlotPtr[s.Binding]
+		c.forInHandleSlotPtr[s.Binding] = slotPtrAlloca
+	}
+
 	c.block = bodyBlock
 
 	// B0279: Drop previous iteration's dup'd string if not moved, then dup new.
@@ -9404,6 +9456,9 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
 	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
 		constant.NewInt(irtypes.I32, 0), curCounter)
+	if isTaskElem {
+		c.block.NewStore(elemPtr, slotPtrAlloca) // T0617
+	}
 	var elem value.Value = c.block.NewLoad(elemLLVM, elemPtr)
 
 	if dupStrings {
@@ -9439,6 +9494,14 @@ func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
+
+	if isTaskElem { // T0617: restore the scoped slot-ptr map entry
+		if hadPrevSlot {
+			c.forInHandleSlotPtr[s.Binding] = prevSlot
+		} else {
+			delete(c.forInHandleSlotPtr, s.Binding)
+		}
+	}
 }
 
 // --- For-in over channels ---

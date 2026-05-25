@@ -398,3 +398,197 @@ t0621_task_string_from_var_partial() `test(exclude: wasm) {
   assert(s == "hello task", "T0621 task[string] partial");
   // v[1] dropped at scope exit (Task[string].drop walks the inner string).
 }
+
+// T0617: `<-handle` where `handle` is a for-in loop binding over a
+// Vector[Task]/Task[N] element loop. genForInVector/genForInArray bind the
+// loop var by value-copy of the slot's G ptr (no drop binding); the receive
+// frees the G but the T0638 IndexExpr slot-null does NOT fire for the
+// loop-binding IdentExpr operand. Without the new for-in slot-null, the
+// container still owns every (now dangling) slot → scope-exit
+// Vector[Task].drop / array element-drop double-frees → SIGSEGV. The fix
+// records each iteration's slot in genForInVector/genForInArray and nulls it
+// at the receive site (symmetric to T0638); per-slot, so un-awaited slots
+// are still dropped once (T0503 preserved).
+
+// Vector[Task[int]], every element awaited via for-in. All slots nulled →
+// scope-exit Vector.drop no-ops each. Zero leaks.
+t0617_vec_iter_await_all() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int(), go worker_int()];
+  total := 0;
+  for h in v {
+    total += <-h;
+  }
+  assert(total == 84, "T0617 vec iter await all");
+}
+
+// Control-flow robustness: await v[0] inside the loop, then `break`. v[0]'s
+// slot is nulled at the receive site (not post-body), so the early exit
+// still leaves it nulled; v[1] is never awaited → Vector.drop drops it
+// exactly once. No double-free, no leak.
+t0617_vec_iter_partial_break() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int(), go worker_int()];
+  for h in v {
+    x := <-h;
+    assert(x == 42, "T0617 vec iter partial break");
+    break;
+  }
+  // v[1] dropped once at scope exit (Task[int].drop).
+}
+
+// Fixed-array path: Task[int][2] iterated + awaited. genForInArray slot-null.
+t0617_arr_iter_await_all() `test(exclude: wasm) {
+  Task[int][2] ts = [go worker_int(), go worker_int()];
+  total := 0;
+  for h in ts {
+    total += <-h;
+  }
+  assert(total == 84, "T0617 arr iter await all");
+}
+
+// T0503 non-regression: iterate without `<-`. No slot is nulled, so the
+// scope-exit Vector.drop must still drop every task exactly once.
+t0617_vec_iter_noawait() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int(), go worker_int()];
+  count := 0;
+  for h in v {
+    count += 1;
+  }
+  assert(count == 2, "T0617 vec iter no await");
+}
+
+// Index variant: `for i, h in v`. The slot-null keys off the value binding
+// (`h`), unaffected by the presence of the index var.
+t0617_vec_iter_index_var() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int(), go worker_int()];
+  total := 0;
+  for i, h in v {
+    total += <-h;
+  }
+  assert(total == 84, "T0617 vec iter index var");
+}
+
+// Droppable-inner: Vector[Task[string]] iterated + awaited. Each awaited
+// result string is owned by the loop-body local `s` and dropped once; the
+// slot-null makes scope-exit Vector.drop → Task[string].drop no-op on the
+// consumed handles (it null-checks), so the inner string is never
+// double-dropped. Zero leaks.
+t0617_task_string_vec_iter() `test(exclude: wasm) {
+  Vector[Task[string]] v = [go worker_string(), go worker_string()];
+  count := 0;
+  for h in v {
+    s := <-h;
+    assert(s == "hello task", "T0617 task[string] vec iter");
+    count += 1;
+  }
+  assert(count == 2, "T0617 task[string] vec iter count");
+}
+
+// Nest-safety: the slot-ptr map entry is save/restore-scoped per loop, so
+// nested Task for-in loops over distinct vectors with distinct bindings each
+// null only their own current slot. Inner fully awaited; `break` after the
+// first outer iteration leaves every `outer` slot un-awaited → Vector.drop
+// drops each `outer` task exactly once (the outer entry was never recorded
+// for receive — no `<-o`). Zero leaks. Exercises the save/restore path the
+// 6 base tests don't (they are all single-level loops).
+t0617_nested_distinct_loops() `test(exclude: wasm) {
+  outer := [go worker_int(), go worker_int()];
+  inner := [go worker_int(), go worker_int()];
+  total := 0;
+  for o in outer {
+    for i in inner {
+      total += <-i;
+    }
+    break;
+  }
+  assert(total == 84, "T0617 nested distinct loops");
+}
+
+// Control-flow robustness beyond `break`: `continue` immediately after the
+// receive. The slot is nulled at the receive site (not post-body), so the
+// early `continue` still leaves it nulled — Vector.drop no-ops every slot.
+t0617_continue_after_recv() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int(), go worker_int()];
+  total := 0;
+  for h in v {
+    total += <-h;
+    continue;
+  }
+  assert(total == 84, "T0617 continue after recv");
+}
+
+// `return` mid-loop after receiving one element: v[0] consumed + slot nulled,
+// v[1] never awaited → dropped exactly once by Vector.drop on the function's
+// scope exit through the early return. No double-free, no leak.
+t0617_return_mid_loop_helper() int {
+  Vector[Task[int]] v = [go worker_int(), go worker_int()];
+  for h in v {
+    return <-h;
+  }
+  return 0;
+}
+t0617_return_mid_loop() `test(exclude: wasm) {
+  assert(t0617_return_mid_loop_helper() == 42, "T0617 return mid loop");
+}
+
+// Per-slot invariant under data-dependent control flow WITH loop completion:
+// await only even-indexed handles, run the loop to the end. The single
+// scope-exit Vector.drop walk must no-op the awaited (nulled) slots AND drop
+// the un-awaited slots exactly once — in the same pass. The base tests only
+// cover all-nulled (await_all) or first-then-exit (break/return); this is the
+// strongest test that the slot-null is genuinely per-iteration, not per-loop.
+// Zero leaks.
+t0617_vec_iter_cond_recv() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int(), go worker_int(), go worker_int(), go worker_int()];
+  total := 0;
+  for i, h in v {
+    if i % 2 == 0 {
+      total += <-h;
+    }
+  }
+  assert(total == 84, "T0617 vec cond recv even-only");
+  // v[1], v[3] (un-awaited) dropped exactly once by Vector.drop; v[0], v[2]
+  // (awaited → slot nulled) no-op'd by Task[int].drop's null-check.
+}
+
+// Fixed-array equivalent: await only odd-indexed handles, loop completes.
+// genForInArray slot-null mixed with un-awaited array slots in one element
+// drop walk. Also exercises the array index-variant (`for i, h in ts`).
+t0617_arr_iter_cond_recv() `test(exclude: wasm) {
+  Task[int][4] ts = [go worker_int(), go worker_int(), go worker_int(), go worker_int()];
+  total := 0;
+  for i, h in ts {
+    if i % 2 == 1 {
+      total += <-h;
+    }
+  }
+  assert(total == 84, "T0617 arr cond recv odd-only");
+}
+
+// Channel for-in non-regression at RUNTIME (the IR-shape side is covered by
+// TestT0617_ForInChannelRecvDoesNotNullSlot). The T0617 fix deliberately does
+// NOT touch genReceiveChannel — a channel receive does not free the channel,
+// so its slot must stay valid for the scope-exit Vector.drop → Channel.drop.
+// `for c in cs { <-c }` over Vector[Channel[int]] then scope-exit drop must
+// drop each channel exactly once: no double-free, no leak. Symmetric to the
+// Task path that IS nulled.
+t0617_chan_vec_iter_noregress() `test(exclude: wasm) {
+  Vector[Channel[int]] cs = [channel_producer(), channel_producer()];
+  total := 0;
+  for c in cs {
+    v := <-c;
+    total += v!;
+  }
+  assert(total == 198, "T0617 channel vec for-in non-regression");
+}
+
+// Channel fixed-array for-in non-regression: Channel[int][N] iterated +
+// received, scope-exit array element drop calls Channel.drop exactly once.
+t0617_chan_arr_iter_noregress() `test(exclude: wasm) {
+  Channel[int][2] cs = [channel_producer(), channel_producer()];
+  total := 0;
+  for c in cs {
+    v := <-c;
+    total += v!;
+  }
+  assert(total == 198, "T0617 channel arr for-in non-regression");
+}

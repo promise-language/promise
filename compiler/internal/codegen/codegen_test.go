@@ -22455,6 +22455,46 @@ func TestArcDropTwoStageDeallocation(t *testing.T) {
 	assertContains(t, ir, "drop_value:")
 }
 
+// T0499: Arc clone/downgrade chain intermediates produce fresh SSA values via ptrtoint+inttoptr
+// so the method result is tracked separately from the constructor stmtTemp.
+func TestArcCloneChainFreshSSA(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			Arc[int] b = Arc[int](42).clone();
+		}
+	`)
+	// The clone result must be a fresh SSA value (ptrtoint+inttoptr) so stmtTemp
+	// dedup doesn't merge it with the constructor's temp — both get dropped.
+	assertContains(t, ir, "ptrtoint")
+	assertContains(t, ir, "inttoptr")
+	assertContains(t, ir, "%b.dropflag")
+}
+
+func TestArcDowngradeChainFreshSSA(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			Weak[int] w = Arc[int](42).downgrade();
+		}
+	`)
+	// Downgrade must also produce a fresh SSA value for chain tracking
+	assertContains(t, ir, "ptrtoint")
+	assertContains(t, ir, "inttoptr")
+	assertContains(t, ir, "%w.dropflag")
+}
+
+func TestWeakCloneChainFreshSSA(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			Arc[int] a = Arc[int](99);
+			Weak[int] w = a.downgrade().clone();
+		}
+	`)
+	// Weak clone in a chain must produce fresh SSA value
+	assertContains(t, ir, "ptrtoint")
+	assertContains(t, ir, "inttoptr")
+	assertContains(t, ir, "%w.dropflag")
+}
+
 // T0157: Weak[T].clone() atomically increments weak_count.
 func TestWeakCloneIR(t *testing.T) {
 	ir := generateIR(t, `

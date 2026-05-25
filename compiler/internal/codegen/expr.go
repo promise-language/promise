@@ -3104,7 +3104,13 @@ func (c *Compiler) genArcMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ele
 		// Atomically increment strong_count and return the same pointer
 		rcPtr := c.block.NewBitCast(arcRaw, irtypes.NewPointer(irtypes.I64))
 		c.emitAtomicAdd(c.block, rcPtr, constant.NewInt(irtypes.I64, 1), irtypes.I64)
-		return arcRaw
+		// T0499: Return a distinct SSA value so the clone result can be tracked
+		// separately from the receiver's stmtTemp. Without this, stmtTemp dedup
+		// causes the constructor intermediate to leak when used in a chain
+		// (e.g., Arc[int](42).clone()). The ptrtoint+inttoptr is a no-op at
+		// runtime — LLVM optimizes it away.
+		tmpInt := c.block.NewPtrToInt(arcRaw, c.ptrIntType())
+		return c.block.NewIntToPtr(tmpInt, irtypes.I8Ptr)
 	case "downgrade":
 		// T0157: Atomically increment weak_count, return same pointer as Weak[T]
 		return c.genArcDowngrade(arcRaw, elemType)
@@ -3122,7 +3128,9 @@ func (c *Compiler) genArcDowngrade(arcRaw value.Value, elemType types.Type) valu
 	wcField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
 	c.emitAtomicAdd(c.block, wcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
-	return arcRaw
+	// T0499: fresh SSA value so downgrade result is tracked separately from receiver stmtTemp
+	tmpInt := c.block.NewPtrToInt(arcRaw, c.ptrIntType())
+	return c.block.NewIntToPtr(tmpInt, irtypes.I8Ptr)
 }
 
 // --- Weak[T] codegen (T0157) ---
@@ -3152,7 +3160,9 @@ func (c *Compiler) genWeakMethodCall(e *ast.CallExpr, member *ast.MemberExpr, el
 		wcField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldWeak))
 		c.emitAtomicAdd(c.block, wcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
-		return weakRaw
+		// T0499: fresh SSA value so clone result is tracked separately from receiver stmtTemp
+		tmpInt := c.block.NewPtrToInt(weakRaw, c.ptrIntType())
+		return c.block.NewIntToPtr(tmpInt, irtypes.I8Ptr)
 	case "upgrade":
 		// CAS loop: atomically try to increment strong_count if > 0
 		return c.genWeakUpgrade(weakRaw, elemType)

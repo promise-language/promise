@@ -1,0 +1,35 @@
+// T0499: Arc/Weak chain intermediate leak tests.
+// Verifies that constructor temps used as chain receivers are properly dropped.
+test_arc_clone_chain() `test {
+  Arc[int] b = Arc[int](42).clone();
+  assert(b.borrow == 42, "clone preserves value");
+}
+
+test_arc_downgrade_chain() `test {
+  Weak[int] w = Arc[int](42).downgrade();
+  // The Arc is dropped at stmt end, so upgrade should fail.
+  // Just verifying no leak — the Arc constructor temp must be cleaned up.
+}
+
+test_arc_borrow_chain() `test {
+  int x = Arc[int](42).borrow;
+  assert(x == 42, "borrow preserves value");
+}
+
+test_arc_clone_unused() `test {
+  Arc[int](42).clone();
+}
+
+test_arc_downgrade_unused() `test {
+  Arc[int](42).downgrade();
+}
+
+test_weak_clone_chain() `test {
+  Arc[int] a = Arc[int](99);
+  Weak[int] w = a.downgrade().clone();
+  if upgraded := w.upgrade() {
+    assert(upgraded.borrow == 99, "weak clone upgrade value");
+  } else {
+    assert(false, "upgrade should succeed");
+  }
+}

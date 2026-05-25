@@ -30,12 +30,33 @@ type InferredCall struct {
 }
 
 // MethodInstance records a concrete instantiation of a generic method.
+// Owner and OwnerEnum are mutually exclusive: exactly one is non-nil,
+// identifying whether the method's origin is a Named type or an Enum.
 type MethodInstance struct {
-	Owner     *types.Named     // origin type owning the method
+	Owner     *types.Named     // origin type owning the method (nil if enum-owned)
+	OwnerEnum *types.Enum      // origin enum owning the method (nil if Named-owned)
 	OwnerInst *types.Instance  // non-nil when owner is a generic instance (e.g., Box[int])
 	Method    *types.Method    // the generic method
 	TypeArgs  []types.Type     // method-level concrete type arguments
 	Sig       *types.Signature // fully substituted signature (no TypeParams)
+}
+
+// OwnerName returns the declared name of the method's origin type,
+// regardless of whether it is a Named type or an Enum (T0636).
+func (mi *MethodInstance) OwnerName() string {
+	if mi.OwnerEnum != nil {
+		return mi.OwnerEnum.Obj().Name()
+	}
+	return mi.Owner.Obj().Name()
+}
+
+// OwnerTypeParams returns the origin type's type parameters,
+// regardless of whether it is a Named type or an Enum (T0636).
+func (mi *MethodInstance) OwnerTypeParams() []*types.TypeParam {
+	if mi.OwnerEnum != nil {
+		return mi.OwnerEnum.TypeParams()
+	}
+	return mi.Owner.TypeParams()
 }
 
 // CloneabilityRequirement is a deferred check that a type expression must not

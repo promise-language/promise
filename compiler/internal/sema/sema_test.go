@@ -16246,6 +16246,71 @@ func TestT0629_EnumGetterViaThisArcOK(t *testing.T) {
 	`)
 }
 
+// === T0636: generic (method-level type param) methods on generic enums ===
+
+// A generic enum method must resolve at the call site: the method-level type
+// param U must resolve (no "undefined type: U") and the signature must carry
+// TypeParams so b.transform[int](5) is not "enum Box[int] has no variant or
+// method transform".
+func TestT0636_EnumGenericMethodResolves(t *testing.T) {
+	checkOK(t, `
+		enum Box[T] {
+			V(Vector[T] d),
+			N,
+			transform[U](U _x) U {
+				match this {
+					V(_) => { return _x; },
+					N => { return _x; },
+				}
+			}
+		}
+		test_resolves() {
+			b := Box[int].V([1, 2, 3]);
+			n := b.transform[string]("hi");
+		}
+	`)
+}
+
+// Symmetry: a generic enum method that clones a Vector[T] must still trigger
+// the T0616 cloneability requirement when instantiated with a single-owner
+// handle (parity with the generic Named twin).
+func TestT0636_EnumGenericMethodCloneReqTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Box[T] {
+			V(Vector[T] d),
+			N,
+			copy_data[U](U _x) Vector[T] {
+				match this {
+					V(d) => { return d.clone(); },
+					N => { return []; },
+				}
+			}
+		}
+		worker() int { return 42; }
+		test_clone_req() {
+			b := Box[Task[int]].V([go worker()]);
+			v := b.copy_data[int](5);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Named twin of the clone-req test — locks the symmetry.
+func TestT0636_NamedGenericMethodCloneReqTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] {
+			Vector[T] d;
+			copy_data[U](U _x) Vector[T] { return this.d.clone(); }
+		}
+		worker() int { return 42; }
+		test_clone_req_named() {
+			b := Box[Task[int]](d: [go worker()]);
+			v := b.copy_data[int](5);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
 // === T0482/T0619: implicit structural-clone of a value transitively owning a
 // single-owner handle through a user-type field or enum variant ===
 //

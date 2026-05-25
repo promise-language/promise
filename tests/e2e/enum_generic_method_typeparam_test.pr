@@ -1,0 +1,227 @@
+// T0636: generic (method-level type parameter) methods on generic enum
+// instances. Before T0636 these failed sema resolution ("enum X has no
+// variant or method Y"); the gap was enum-specific (the same shapes on a
+// generic Named type already worked). This file locks the fix and the
+// Named<->enum symmetry. Batch tests => zero-leak enforced automatically.
+enum Box[T] {
+  V(Vector[T] d),
+  N,
+
+  // Method type param U unused in body — only T is touched (the repro shape).
+  transform[U](U _x) int {
+    match this {
+      V(d) => {
+        return d.len;
+      },
+      N => {
+        return 0;
+      },
+    }
+  }
+
+  // Method type param U appears in params and return type.
+  echo[U](U x) U {
+    return x;
+  }
+
+  // Mixes the enum type param T and the method type param U.
+  combine[U](U _x, T fallback) T {
+    match this {
+      V(d) => {
+        return d[0];
+      },
+      N => {
+        return fallback;
+      },
+    }
+  }
+
+  // Multiple method type params.
+  pair[U, W](U a, W _b) U {
+    return a;
+  }
+
+  // Generic method returning Vector[T] with a clone() — exercises the T0616
+  // cloneability-requirement propagation on the enum-owned generic method.
+  copy_data[U](U _x) Vector[T] {
+    match this {
+      V(d) => {
+        return d.clone();
+      },
+      N => {
+        return[];
+      },
+    }
+  }
+
+  // Generic *generator* method — exercises the defineGeneratorMethod branch
+  // of the enum-owned generic-method-instance path (a capability T0636's
+  // codegen wiring newly enables for enums).
+  emit[U](U _tag) stream[T] {
+    match this {
+      V(d) => {
+        for x in d {
+          yield x;
+        }
+      },
+      N => {
+      },
+    }
+  }
+}
+
+// Named twin: the exact same shapes on a generic Named type. Locks the
+// Named<->enum symmetry the bug report called out.
+type NBox[T] {
+  Vector[T] d;
+  transform[U](U _x) int {
+    return this.d.len;
+  }
+  echo[U](U x) U {
+    return x;
+  }
+  pair[U, W](U a, W _b) U {
+    return a;
+  }
+  copy_data[U](U _x) Vector[T] {
+    return this.d.clone();
+  }
+}
+
+// Cross call from a *concrete* (non-generic) function — in scope for T0636.
+helper() int {
+  return Box[int].V([10, 20, 30]).transform[int](0);
+}
+
+// Cross-resolution: a generic enum method invoked from inside *another generic
+// function*, with the method type arg bound to the caller's own type param.
+// The MethodInstance recorded here is unresolved (TypeArgs contain a TypeParam)
+// until wrap_enum is monomorphized — exercises the OwnerEnum branch of
+// resolveUnresolvedMethodInstances (mono.go) and the c.typeSubst path in
+// genGenericEnumMethodCall. The receiver Box[int] is concrete (so this is in
+// T0636's scope, distinct from T0639's still-parametric receiver).
+wrap_enum[X](X v) X {
+  b := Box[int].V([1, 2, 3]);
+  return b.echo[X](v);
+}
+
+// A *non-generic* enum carrying a droppable payload, with generic
+// (method-type-param) methods. The receiver type is a bare *types.Enum (not a
+// *types.Instance) — exercises the `case *types.Enum` arm of
+// genGenericEnumMethodCall and the bare-enum fresh-temp post-call drop path.
+enum Tagged {
+  Empty,
+  Data(Vector[int] xs),
+
+  pick[U](U _sel) int {
+    match this {
+      Empty => {
+        return -1;
+      },
+      Data(xs) => {
+        return xs.len;
+      },
+    }
+  }
+
+  identity[U](U v) U {
+    return v;
+  }
+}
+
+test_t0636_basic_repro() `test {
+  b := Box[int].V([1, 2, 3]);
+  assert(b.transform[int](5) == 3, "basic repro returns d.len");
+  n := Box[int].N;
+  assert(n.transform[int](5) == 0, "N variant returns 0");
+}
+
+test_t0636_method_typeparam_in_sig() `test {
+  b := Box[int].V([1]);
+  assert(b.echo[string]("hi") == "hi", "echo string");
+  assert(b.echo[bool](true) == true, "echo bool");
+  assert(b.echo[int](42) == 42, "echo int");
+}
+
+test_t0636_mixes_enum_and_method_typeparam() `test {
+  b := Box[int].V([7, 8]);
+  assert(b.combine[string]("x", 99) == 7, "combine returns first element");
+  n := Box[int].N;
+  assert(n.combine[string]("y", 42) == 42, "combine returns fallback");
+}
+
+test_t0636_multiple_method_typeparams() `test {
+  b := Box[int].V([1]);
+  assert(b.pair[int, bool](11, false) == 11, "pair returns first arg");
+  assert(b.pair[string, int]("a", 9) == "a", "pair string variant");
+}
+
+test_t0636_clone_cloneable_t() `test {
+  b := Box[int].V([4, 5, 6]);
+  v := b.copy_data[int](0);
+  assert(v.len == 3, "clone path length");
+  assert(v[2] == 6, "clone path content");
+  e := Box[int].N;
+  ev := e.copy_data[bool](false);
+  assert(ev.len == 0, "clone path empty for N");
+}
+
+test_t0636_multiple_instantiations() `test {
+  bi := Box[int].V([1, 2, 3]);
+  bs := Box[string].V(["a", "b"]);
+  assert(bi.transform[int](0) == 3, "int instance");
+  assert(bs.transform[int](0) == 2, "string instance");
+}
+
+test_t0636_nested_instance() `test {
+  b := Box[Vector[int]].V([[1, 2], [3]]);
+  assert(b.transform[bool](false) == 2, "nested Box[Vector[int]]");
+}
+
+test_t0636_concrete_caller() `test {
+  assert(helper() == 3, "generic enum method via a concrete helper fn");
+}
+
+test_t0636_generic_generator_method() `test {
+  g := Box[int].V([1, 2, 3]);
+  total := 0;
+  for v in g.emit[bool](true) {
+    total = total + v;
+  }
+  assert(total == 6, "generic generator enum method yields all");
+  e := Box[int].N;
+  count := 0;
+  for _ in e.emit[string]("x") {
+    count = count + 1;
+  }
+  assert(count == 0, "N variant yields nothing");
+}
+
+test_t0636_named_twin_symmetry() `test {
+  // Same shapes on the Named twin must behave identically.
+  nb := NBox[int](d: [1, 2, 3, 4]);
+  assert(nb.transform[int](5) == 4, "named transform");
+  assert(nb.echo[string]("z") == "z", "named echo");
+  assert(nb.pair[int, bool](3, true) == 3, "named pair");
+  v := nb.copy_data[int](0);
+  assert(v.len == 4, "named copy_data clone len");
+}
+
+test_t0636_cross_resolution() `test {
+  // Generic enum method called from a generic function, method type arg = the
+  // caller's own type param (unresolved-instance cross-resolution path).
+  assert(wrap_enum[string]("hi") == "hi", "enum xres string");
+  assert(wrap_enum[int](7) == 7, "enum xres int");
+  assert(wrap_enum[bool](true) == true, "enum xres bool");
+}
+
+test_t0636_nongeneric_enum_generic_method() `test {
+  // Bare *types.Enum receiver (non-generic enum) with generic methods.
+  t := Tagged.Data([1, 2, 3, 4]);
+  assert(t.pick[string]("x") == 4, "non-generic enum generic method");
+  assert(Tagged.Empty.pick[bool](false) == -1, "fresh-temp bare enum receiver");
+  // Fresh-temp receiver with a droppable Vector payload — bare-enum post-call
+  // drop path; batch test => zero-leak enforced (must not leak the Vector).
+  assert(Tagged.Data([9, 9]).pick[int](0) == 2, "fresh-temp droppable bare enum");
+  assert(t.identity[string]("yo") == "yo", "non-generic enum echo");
+}

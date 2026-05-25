@@ -945,6 +945,17 @@ func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumNam
 		c.errorf(md.Pos(), "enum method %s.%s cannot be `mono", enumName, md.Name)
 	}
 
+	// Validate: generic enum methods cannot be getters or setters
+	// (parity with the Named path in defineMethod).
+	if len(sig.TypeParams()) > 0 {
+		if md.IsGetter {
+			c.errorf(md.Pos(), "generic method %s.%s cannot be a getter", enumName, md.Name)
+		}
+		if md.IsSetter {
+			c.errorf(md.Pos(), "generic method %s.%s cannot be a setter", enumName, md.Name)
+		}
+	}
+
 	// Methods must have a body
 	if md.Body == nil {
 		c.errorf(md.Pos(), "enum method %s.%s must have a body", enumName, md.Name)
@@ -970,6 +981,22 @@ func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumNam
 }
 
 func (c *Checker) resolveEnumMethodSignature(enum *types.Enum, md *ast.MethodDecl) *types.Signature {
+	// Open type-params scope if generic method and create TypeParam objects.
+	// Mirrors resolveMethodSignature for Named types so method-level type
+	// parameters (e.g. transform[U]) resolve and are carried on the signature.
+	var methodTParams []*types.TypeParam
+	if len(md.TypeParams) > 0 {
+		c.openScope(md, "methodtypeparams:"+md.Name)
+		methodTParams = make([]*types.TypeParam, len(md.TypeParams))
+		for i, tp := range md.TypeParams {
+			tn := types.NewTypeName(tpos(tp.Pos()), tp.Name, nil)
+			methodTParams[i] = types.NewTypeParam(tn, nil, i)
+			c.insert(tn)
+		}
+		c.resolveTypeParamConstraints(md.TypeParams, methodTParams)
+		defer c.closeScope()
+	}
+
 	// Resolve receiver — enum methods receive the enum type, unless factory.
 	isFactory := c.hasAnnotation(md.Annotations, "factory")
 	var recv *types.Param
@@ -1023,6 +1050,9 @@ func (c *Checker) resolveEnumMethodSignature(enum *types.Enum, md *ast.MethodDec
 	}
 
 	sig := types.NewSignature(recv, params, result, canError)
+	if len(methodTParams) > 0 {
+		sig.SetTypeParams(methodTParams)
+	}
 	resultLifetime := extractLifetime(md.Annotations)
 	if resultLifetime != "" {
 		sig.SetResultLifetime(resultLifetime)

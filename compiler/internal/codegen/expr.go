@@ -1953,6 +1953,13 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
+	// T0636: generic method on a generic enum instance (or via `this` inside a
+	// generic enum body). Enums don't have a Named layout, so route to the
+	// enum-specific call path.
+	if extractEnum(targetType) != nil {
+		return c.genGenericEnumMethodCall(e, idx, member, targetType)
+	}
+
 	named := extractNamed(targetType)
 	if named == nil {
 		panic(fmt.Sprintf("codegen: cannot resolve type for generic method call on %T", targetType))
@@ -2029,6 +2036,116 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	result := c.block.NewCall(fn, args...)
 	c.clearVariadicStaticFlags(variadicPTs)
 	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, combined) // B0345/T0418
+	return result
+}
+
+// genGenericEnumMethodCall generates a call to a monomorphized generic method
+// whose receiver is a generic enum instance (T0636). It mirrors the receiver
+// convention of genEnumMethodCall (pass `this` directly; otherwise store to a
+// temp alloca, bitcast to i8*, and enum-drop fresh temporaries after the call)
+// and the mono-name/subst construction of genGenericMethodCall.
+func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, member *ast.MemberExpr, targetType types.Type) value.Value {
+	var enum *types.Enum
+	var enumName string
+	switch t := targetType.(type) {
+	case *types.Enum:
+		enum = t
+		enumName = t.Obj().Name()
+		// Inside a mono enum method body, `this` is the origin enum — use the
+		// monomorphized instance name (mirrors genEnumMethodCall).
+		if c.monoCtx != nil {
+			if origin, ok := c.monoCtx.origin.(*types.Enum); ok && t == origin {
+				enumName = c.monoCtx.name
+			}
+		}
+	case *types.Instance:
+		if en, ok := t.Origin().(*types.Enum); ok {
+			enum = en
+			enumName = monoName(t)
+		}
+	}
+	if enum == nil {
+		panic(fmt.Sprintf("codegen: cannot resolve enum for generic method call on %T", targetType))
+	}
+
+	method := enum.LookupMethod(member.Field)
+	if method == nil {
+		panic(fmt.Sprintf("codegen: no method %s on enum %s", member.Field, enumName))
+	}
+
+	// Build mono method name: EnumMonoName.method[typearg1, typearg2]
+	// (consistent with monoMethodInstanceName).
+	allTypeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
+	mangledName := mangleMethodName(enumName, member.Field, false) + "["
+	for i, argExpr := range allTypeArgExprs {
+		typeArgType := c.info.Types[argExpr]
+		if c.typeSubst != nil && typeArgType != nil {
+			typeArgType = types.Substitute(typeArgType, c.typeSubst)
+		}
+		if i > 0 {
+			mangledName += ", "
+		}
+		mangledName += typeArgStr(typeArgType)
+	}
+	mangledName += "]"
+
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undefined monomorphic enum method %q", mangledName))
+	}
+
+	// Generate receiver using the enum convention (mirrors genEnumMethodCall).
+	var args []value.Value
+	var tempEnumPtr value.Value // non-nil when receiver needs post-call drop
+	if method.Sig().Recv() != nil {
+		prevEnumTemps := len(c.enumCtorTemps)
+		target := c.genExprAutoPropagate(member.Target) // B0323
+		enumCtorTracked := len(c.enumCtorTemps) > prevEnumTemps
+		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+			args = append(args, target)
+		} else {
+			alloca := c.entryBlock.NewAlloca(target.Type())
+			alloca.SetName(c.uniqueLocalName("enum.this"))
+			c.block.NewStore(target, alloca)
+			ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
+			args = append(args, ptr)
+			if isFreshEnumExpr(member.Target) && !enumCtorTracked {
+				tempEnumPtr = ptr
+			}
+		}
+	}
+
+	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
+	origArgVals := argVals // B0345
+	// T0418/T0636: owner-enum subst (Box[int].T → int) merged with the
+	// method-level subst (transform[string].U → string).
+	var ownerSubst map[*types.TypeParam]types.Type
+	if inst, ok := targetType.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Enum); ok && len(origin.TypeParams()) > 0 {
+			ownerSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+		}
+	}
+	methodSubst := c.buildCallTypeArgSubst(method.Sig().TypeParams(), allTypeArgExprs)
+	combined := mergeSubstMaps(ownerSubst, methodSubst)
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, combined)
+	args = append(args, argVals...)
+
+	result := c.block.NewCall(fn, args...)
+	c.clearVariadicStaticFlags(variadicPTs)
+	c.emitReturnAliasCheckSubst(result, method.Sig(), e.Args, origArgVals, combined) // B0345/T0418
+
+	// Drop temp enum receiver if it was a fresh temporary (mirrors genEnumMethodCall).
+	if tempEnumPtr != nil && c.enumInstanceHasDrop(targetType, enum) {
+		dropName := mangleMethodName(enumName, "drop", false)
+		if dropFn, ok := c.funcs[dropName]; ok {
+			c.block.NewCall(dropFn, tempEnumPtr)
+		} else if c.moduleInfos != nil {
+			if dropFn := c.forwardDeclareModuleEnumDrop(enum, enumName, dropName); dropFn != nil {
+				c.block.NewCall(dropFn, tempEnumPtr)
+			}
+		}
+	}
+
 	return result
 }
 

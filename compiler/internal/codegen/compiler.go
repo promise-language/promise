@@ -5652,7 +5652,7 @@ func (c *Compiler) compileModules() {
 			}
 		}
 		for _, mi := range modInfo.SemaInfo.MethodInstances {
-			if !modTypeNames[mi.Owner.Obj().Name()] {
+			if !modTypeNames[mi.OwnerName()] {
 				mainMonoMethodInstances = append(mainMonoMethodInstances, mi)
 			}
 		}

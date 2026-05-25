@@ -905,7 +905,7 @@ func resolveUnresolvedMethodInstances(unresolved []*sema.MethodInstance, subst m
 		// Build the substituted signature
 		methodSubst := map[*types.TypeParam]types.Type{}
 		if resolvedOwnerInst != nil {
-			for k, v := range types.BuildSubstMap(mi.Owner.TypeParams(), resolvedOwnerInst.TypeArgs()) {
+			for k, v := range types.BuildSubstMap(mi.OwnerTypeParams(), resolvedOwnerInst.TypeArgs()) {
 				methodSubst[k] = v
 			}
 		}
@@ -916,6 +916,7 @@ func resolveUnresolvedMethodInstances(unresolved []*sema.MethodInstance, subst m
 
 		resolved := &sema.MethodInstance{
 			Owner:     mi.Owner,
+			OwnerEnum: mi.OwnerEnum,
 			OwnerInst: resolvedOwnerInst,
 			Method:    mi.Method,
 			TypeArgs:  resolvedArgs,
@@ -1134,11 +1135,14 @@ func collectMonoFuncInstances(info *sema.Info, typeInstances ...[]*types.Instanc
 // of methods on types declared in modFile. This handles cross-module generic method
 // calls like iter.map[int](...) in user code where Iterator[T].map is defined in std.
 func collectMonoMethodInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.File, extra []*sema.MethodInstance, typeInstances []*types.Instance) []*sema.MethodInstance {
-	// Build set of type names declared in modFile
+	// Build set of type names declared in modFile (Named types and enums).
 	modTypeNames := make(map[string]bool)
 	for _, decl := range modFile.Decls {
-		if td, ok := decl.(*ast.TypeDecl); ok {
-			modTypeNames[td.Name] = true
+		switch d := decl.(type) {
+		case *ast.TypeDecl:
+			modTypeNames[d.Name] = true
+		case *ast.EnumDecl:
+			modTypeNames[d.Name] = true
 		}
 	}
 
@@ -1153,7 +1157,7 @@ func collectMonoMethodInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.Fi
 	// Skip unresolved instances (TypeParam in TypeArgs/OwnerInst) — these should
 	// have been resolved by the originating module's collectMonoMethodInstances call.
 	for _, mi := range extra {
-		if !modTypeNames[mi.Owner.Obj().Name()] {
+		if !modTypeNames[mi.OwnerName()] {
 			continue
 		}
 		if methodInstanceContainsTypeParam(mi) {
@@ -2624,7 +2628,7 @@ func (c *Compiler) defineMonoEnumMethods(file *ast.File, instances []*types.Inst
 // Example: Box.transform[string]     → "Box.transform[string]"
 // Example: Box[int].transform[string] → "Box[int].transform[string]"
 func monoMethodInstanceName(mi *sema.MethodInstance) string {
-	ownerName := mi.Owner.Obj().Name()
+	ownerName := mi.OwnerName()
 	if mi.OwnerInst != nil {
 		ownerName = monoName(mi.OwnerInst)
 	}
@@ -2702,16 +2706,49 @@ func buildMethodInstanceSubst(mi *sema.MethodInstance) map[*types.TypeParam]type
 	subst := map[*types.TypeParam]types.Type{}
 	// Owner type-level substitution (if on a generic type instance)
 	if mi.OwnerInst != nil {
-		for k, v := range types.BuildSubstMap(mi.Owner.TypeParams(), mi.OwnerInst.TypeArgs()) {
+		for k, v := range types.BuildSubstMap(mi.OwnerTypeParams(), mi.OwnerInst.TypeArgs()) {
 			subst[k] = v
 		}
-		mergeParentSubst(mi.Owner, subst)
+		// Enums have no inheritance, so there are no parent type params to
+		// merge (T0636); only Named owners can have generic parents.
+		if mi.OwnerEnum == nil {
+			mergeParentSubst(mi.Owner, subst)
+		}
 	}
 	// Method-level substitution
 	for k, v := range types.BuildSubstMap(mi.Method.Sig().TypeParams(), mi.TypeArgs) {
 		subst[k] = v
 	}
 	return subst
+}
+
+// monoMethodInstanceDecl finds the AST MethodDecl for a generic method instance,
+// resolving the owner via findTypeDecl or findEnumDecl depending on whether the
+// owner is a Named type or an Enum (T0636).
+func (c *Compiler) monoMethodInstanceDecl(file *ast.File, mi *sema.MethodInstance) *ast.MethodDecl {
+	var methods []*ast.MethodDecl
+	if mi.OwnerEnum != nil {
+		ed := c.findEnumDecl(file, mi.OwnerName())
+		if ed == nil {
+			return nil
+		}
+		methods = ed.Methods
+	} else {
+		td := c.findTypeDecl(file, mi.OwnerName())
+		if td == nil {
+			return nil
+		}
+		methods = td.Methods
+	}
+	for _, m := range methods {
+		if m.Name == mi.Method.Name() && !m.IsGetter && !m.IsSetter {
+			if m.Body == nil {
+				return nil
+			}
+			return m
+		}
+	}
+	return nil
 }
 
 // declareMonoMethodInstances declares LLVM functions for monomorphic generic method instances.
@@ -2722,20 +2759,8 @@ func (c *Compiler) declareMonoMethodInstances(file *ast.File, methodInsts []*sem
 			continue
 		}
 
-		td := c.findTypeDecl(file, mi.Owner.Obj().Name())
-		if td == nil {
-			continue
-		}
-
-		// Find the method decl
-		var md *ast.MethodDecl
-		for _, m := range td.Methods {
-			if m.Name == mi.Method.Name() && !m.IsGetter && !m.IsSetter {
-				md = m
-				break
-			}
-		}
-		if md == nil || md.Body == nil {
+		md := c.monoMethodInstanceDecl(file, mi)
+		if md == nil {
 			continue
 		}
 
@@ -2751,12 +2776,19 @@ func (c *Compiler) declareMonoMethodInstances(file *ast.File, methodInsts []*sem
 			params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 		}
 		retType := irtypes.Type(irtypes.Void)
-		if mi.Method.Sig().Result() != nil {
+		genInfo := c.info.GeneratorFuncs[md]
+		if genInfo != nil {
+			if genInfo.CanError {
+				retType = computeResultType(failableGeneratorValueType())
+			} else {
+				retType = generatorValueType()
+			}
+		} else if mi.Method.Sig().Result() != nil {
 			retType = c.resolveType(mi.Method.Sig().Result())
 		}
 		c.typeSubst = nil
 
-		if mi.Method.Sig().CanError() {
+		if mi.Method.Sig().CanError() && genInfo == nil {
 			retType = computeResultType(retType)
 		}
 
@@ -2776,19 +2808,8 @@ func (c *Compiler) defineMonoMethodInstances(file *ast.File, methodInsts []*sema
 	for _, mi := range methodInsts {
 		name := monoMethodInstanceName(mi)
 
-		td := c.findTypeDecl(file, mi.Owner.Obj().Name())
-		if td == nil {
-			continue
-		}
-
-		var md *ast.MethodDecl
-		for _, m := range td.Methods {
-			if m.Name == mi.Method.Name() && !m.IsGetter && !m.IsSetter {
-				md = m
-				break
-			}
-		}
-		if md == nil || md.Body == nil {
+		md := c.monoMethodInstanceDecl(file, mi)
+		if md == nil {
 			continue
 		}
 
@@ -2798,6 +2819,34 @@ func (c *Compiler) defineMonoMethodInstances(file *ast.File, methodInsts []*sema
 		}
 
 		subst := buildMethodInstanceSubst(mi)
+
+		// T0636: enum-owned generic method instances mirror defineMonoEnumMethods —
+		// the method is looked up on the enum, monoCtx.origin is the enum, and
+		// defineMethodFunc is called with no ownerNamed (enums have no parents).
+		if mi.OwnerEnum != nil {
+			m := c.lookupEnumMethod(mi.OwnerEnum, md)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+			c.typeSubst = subst
+			if mi.OwnerInst != nil {
+				c.monoCtx = &monoContext{
+					inst:   mi.OwnerInst,
+					origin: mi.OwnerEnum,
+					name:   monoName(mi.OwnerInst),
+				}
+			}
+			func() {
+				defer func() { c.typeSubst = nil; c.monoCtx = nil }()
+				if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
+					c.defineGeneratorMethod(md, m, fn, genInfo.ElemType, nil)
+				} else {
+					c.defineMethodFunc(md, m, fn)
+				}
+			}()
+			continue
+		}
+
 		m := c.lookupAnyMethod(mi.Owner, md.Name, false, false)
 		if m == nil {
 			continue

@@ -465,11 +465,14 @@ func (c *Checker) ownerSubstForMethodCall(callee ast.Expr) map[*types.TypeParam]
 	if !ok {
 		return nil
 	}
-	named, ok := inst.Origin().(*types.Named)
-	if !ok {
-		return nil
+	switch origin := inst.Origin().(type) {
+	case *types.Named:
+		return types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+	case *types.Enum:
+		// T0636: generic method on a generic enum instance.
+		return types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 	}
-	return types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+	return nil
 }
 
 // recordInferredCallInstance records a FuncInstance or MethodInstance for
@@ -513,13 +516,20 @@ func (c *Checker) recordInferredCallInstance(e *ast.CallExpr, typeArgs []types.T
 			targetType = ref.Elem()
 		}
 		var owner *types.Named
+		var ownerEnum *types.Enum
 		var ownerInst *types.Instance
 		switch tt := targetType.(type) {
 		case *types.Named:
 			owner = tt
+		case *types.Enum:
+			ownerEnum = tt
 		case *types.Instance:
-			if n, ok := tt.Origin().(*types.Named); ok {
+			switch n := tt.Origin().(type) {
+			case *types.Named:
 				owner = n
+				ownerInst = tt
+			case *types.Enum:
+				ownerEnum = n
 				ownerInst = tt
 			}
 		}
@@ -533,6 +543,17 @@ func (c *Checker) recordInferredCallInstance(e *ast.CallExpr, typeArgs []types.T
 				c.info.MethodInstances = append(c.info.MethodInstances, &MethodInstance{
 					Owner:     defOwner,
 					OwnerInst: defInst,
+					Method:    method,
+					TypeArgs:  typeArgs,
+					Sig:       monoSig,
+				})
+			}
+		} else if ownerEnum != nil {
+			// T0636: inferred-typearg generic method call on a generic enum.
+			if method := ownerEnum.LookupMethod(callee.Field); method != nil {
+				c.info.MethodInstances = append(c.info.MethodInstances, &MethodInstance{
+					OwnerEnum: ownerEnum,
+					OwnerInst: ownerInst,
 					Method:    method,
 					TypeArgs:  typeArgs,
 					Sig:       monoSig,

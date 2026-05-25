@@ -3648,6 +3648,66 @@ func TestGenericEnumMultipleInstantiations(t *testing.T) {
 	assertContains(t, ir, `"Opt[string].has_value"`)
 }
 
+// TestT0636_EnumGenericMethodInstanceMono verifies that a generic
+// (method-level type param) method on a generic enum instance is emitted as a
+// monomorphized function "Box[int].transform[int]", with a separate mono
+// function per (owner, method-type-arg) combination.
+func TestT0636_EnumGenericMethodInstanceMono(t *testing.T) {
+	ir := generateIR(t, `
+		enum Box[T] {
+			V(Vector[T] d),
+			N,
+			transform[U](U _x) int {
+				match this {
+					V(d) => { return d.len; },
+					N => { return 0; },
+				}
+			}
+		}
+		main() {
+			b := Box[int].V([1, 2, 3]);
+			x := b.transform[int](5);
+			s := Box[string].V(["a"]);
+			y := s.transform[bool](true);
+		}
+	`)
+	// Per-(owner, method-type-arg) mono functions.
+	assertContains(t, ir, `"Box[int].transform[int]"`)
+	assertContains(t, ir, `"Box[string].transform[bool]"`)
+	// The call site dispatches to the monomorphized enum method.
+	assertContains(t, ir, `call i64 @"Box[int].transform[int]"`)
+}
+
+// TestT0636_NonGenericEnumGenericMethodMono verifies that a generic
+// (method-level type param) method on a *non-generic* enum is emitted as a
+// monomorphized function named with the bare enum name (no monoName / "[..]"
+// owner suffix), exercising the `case *types.Enum` arm of
+// genGenericEnumMethodCall (enumName = enum.Obj().Name(), distinct from the
+// generic-instance path which uses monoName(inst)).
+func TestT0636_NonGenericEnumGenericMethodMono(t *testing.T) {
+	ir := generateIR(t, `
+		enum Tagged {
+			Empty,
+			Data(Vector[int] xs),
+			pick[U](U _sel) int {
+				match this {
+					Empty => { return -1; },
+					Data(xs) => { return xs.len; },
+				}
+			}
+		}
+		main() {
+			t := Tagged.Data([1, 2, 3, 4]);
+			a := t.pick[string]("x");
+			b := Tagged.Empty.pick[bool](false);
+		}
+	`)
+	// Bare enum name (no "Tagged[..]" owner suffix) + per-method-type-arg mono.
+	assertContains(t, ir, `"Tagged.pick[string]"`)
+	assertContains(t, ir, `"Tagged.pick[bool]"`)
+	assertContains(t, ir, `call i64 @"Tagged.pick[string]"`)
+}
+
 func TestGenericConstructorZeroInit(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] { T value; }

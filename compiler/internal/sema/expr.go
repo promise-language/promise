@@ -2019,13 +2019,20 @@ func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature)
 			targetType = ref.Elem()
 		}
 		var owner *types.Named
+		var ownerEnum *types.Enum
 		var ownerInst *types.Instance
 		switch tt := targetType.(type) {
 		case *types.Named:
 			owner = tt
+		case *types.Enum:
+			ownerEnum = tt
 		case *types.Instance:
-			if n, ok := tt.Origin().(*types.Named); ok {
+			switch n := tt.Origin().(type) {
+			case *types.Named:
 				owner = n
+				ownerInst = tt
+			case *types.Enum:
+				ownerEnum = n
 				ownerInst = tt
 			}
 		}
@@ -2044,6 +2051,19 @@ func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature)
 				c.info.MethodInstances = append(c.info.MethodInstances, &MethodInstance{
 					Owner:     defOwner,
 					OwnerInst: defInst,
+					Method:    method,
+					TypeArgs:  typeArgs,
+					Sig:       monoSig,
+				})
+			}
+		} else if ownerEnum != nil {
+			// T0636: generic method on a generic enum instance (or via `this`
+			// inside a generic enum body). Enums have no inheritance, so there
+			// is no defining-parent resolution to perform.
+			if method := ownerEnum.LookupMethod(t.Field); method != nil {
+				c.info.MethodInstances = append(c.info.MethodInstances, &MethodInstance{
+					OwnerEnum: ownerEnum,
+					OwnerInst: ownerInst,
 					Method:    method,
 					TypeArgs:  typeArgs,
 					Sig:       monoSig,
@@ -2092,16 +2112,28 @@ func (c *Checker) checkExplicitTypeArgsCloneReqs(e *ast.IndexExpr, subst map[*ty
 				targetType = ref.Elem()
 			}
 			var owner *types.Named
+			var ownerEnum *types.Enum
 			switch tt := targetType.(type) {
 			case *types.Named:
 				owner = tt
+			case *types.Enum:
+				ownerEnum = tt
 			case *types.Instance:
-				if n, ok := tt.Origin().(*types.Named); ok {
+				switch n := tt.Origin().(type) {
+				case *types.Named:
 					owner = n
+				case *types.Enum:
+					ownerEnum = n
 				}
 			}
 			if owner != nil {
 				if m := owner.LookupMethod(t.Field); m != nil {
+					method = m
+				}
+			} else if ownerEnum != nil {
+				// T0636: keep T0616 clone-req propagation symmetric for
+				// generic methods on generic enum instances.
+				if m := ownerEnum.LookupMethod(t.Field); m != nil {
 					method = m
 				}
 			}

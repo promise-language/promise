@@ -1,0 +1,18 @@
+// T0547 rePanicBlk path: a captured task whose worker panics. `<-t` inside
+// the closure body re-panics the current goroutine, which (in main) prints
+// the panic message and exits with code 1. The rePanicBlk null-stores
+// prevent env_drop from spinning on a freed G if the unwind reaches the
+// closure variable's drop binding.
+worker_t0547_panic() int {
+  assert(false, "captured task panic");
+  return 0;
+}
+
+main() `test(expected: "panic: captured task panic", exclude: wasm) {
+  task[int] t = go worker_t0547_panic();
+  f := move || -> int {
+    return <-t;
+  };
+  f();
+  print_line("unreachable");
+}

@@ -11517,12 +11517,39 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	loadResultBlk := c.newBlock("task.load_result")
 	c.block.NewCondBr(isPanicked, rePanicBlk, loadResultBlk)
 
+	// T0547: If the operand is a captured task in the current lambda, the
+	// env field still holds the G pointer because emitLambdaWritebacks ran
+	// at return-statement entry (stmt.go:6351) — before this receive — and
+	// wrote local→env. After pal_free(G) the env field would dangle, so
+	// env_drop's Task[T].drop would spin-wait on freed memory (segfault or
+	// infinite spin). Null the local alloca and env field after each pal_free
+	// so env_drop sees null and no-ops. Both Task[T].drop (compiler.go:2793)
+	// and envDropCallFn (expr.go:8855) already null-check.
+	nullCapturedEnvField := func() {
+		ident, ok := e.Operand.(*ast.IdentExpr)
+		if !ok {
+			return
+		}
+		alloca, found := c.locals[ident.Name]
+		if !found {
+			return
+		}
+		for _, wb := range c.lambdaWritebacks {
+			if wb.localAlloca == alloca {
+				c.block.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
+				c.block.NewStore(constant.NewNull(irtypes.I8Ptr), wb.envFieldPtr)
+				return
+			}
+		}
+	}
+
 	// rePanicBlk: goroutine panicked — load panic_msg, free G, re-panic
 	c.block = rePanicBlk
 	panicMsgField := c.block.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
 	panicMsg := c.block.NewLoad(irtypes.I8Ptr, panicMsgField)
 	c.block.NewCall(c.palFree, gRaw)
+	nullCapturedEnvField()
 	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
 	c.emitPanicReturn()
 
@@ -11541,6 +11568,7 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 
 	// Free G struct
 	c.block.NewCall(c.palFree, gRaw)
+	nullCapturedEnvField()
 
 	if isVoid {
 		return nil

@@ -288,3 +288,138 @@ test_mutex_task_setter_reassign_string() `test(exclude: wasm) {
   guard.borrow = go worker_t0560_string();
   // Droppable inner result — old Task[string].drop must run inside emitInnerDrop.
 }
+
+// --- Site 6: captured-task consumed inside closure (T0547) ---
+//
+// emitLambdaWritebacks runs at return-statement entry — before `<-t` evaluates —
+// writing local→env. genReceiveTask then frees G. Without the T0547 null-out,
+// env_drop would load the freed G from the env field and call Task[T].drop on
+// it (spin-wait on freed memory → segfault or infinite spin). Fix nulls the
+// local alloca and env field after each pal_free(G) in genReceiveTask, so
+// env_drop sees null and no-ops.
+
+test_closure_capture_consume_int() `test(exclude: wasm) {
+  task[int] t = go worker_t0560_int();
+  f := move || -> int {
+    return <-t;
+  };
+  int r = f();
+  assert(r == 17, "captured task int");
+}
+
+test_closure_capture_consume_void() `test(exclude: wasm) {
+  task[void] t = go worker_t0560_void();
+  f := move || {
+    <-t;
+  };
+  f();
+  // void sentinel branch of Task[T].drop must not run on freed G.
+}
+
+test_closure_capture_consume_string() `test(exclude: wasm) {
+  task[string] t = go worker_t0560_string();
+  f := move || -> string {
+    return <-t;
+  };
+  string s = f();
+  assert(s == "task result", "captured task string");
+}
+
+test_closure_capture_consume_vector() `test(exclude: wasm) {
+  task[int[]] t = go worker_t0560_vec();
+  f := move || -> int[] {
+    return <-t;
+  };
+  int[] v = f();
+  assert(v.len == 3, "captured task vec");
+  assert(v[0] == 1, "captured task vec[0]");
+}
+
+// Regression guard: closure captures task but does NOT consume it inside.
+// env_drop must still drop the live G (this path was already covered by
+// analyzeEnvCaptureDrop; verifies our null-out doesn't break it).
+test_closure_capture_no_consume() `test(exclude: wasm) {
+  task[int] t = go worker_t0560_int();
+  f := move || -> int {
+    return 1;
+  };
+  int r = f();
+  assert(r == 1, "no-consume branch");
+  // env_drop must Task[int].drop the captured (live) task.
+}
+
+// Conditional consume — when the no-consume branch runs at runtime, env_drop
+// must drop the live task; when the consume branch runs, env_drop must no-op
+// because the env field was nulled by the receive.
+test_closure_capture_consume_branch_taken() `test(exclude: wasm) {
+  task[int] t = go worker_t0560_int();
+  bool flag = true;
+  f := move || -> int {
+    if flag {
+      return <-t;
+    }
+    return 0;
+  };
+  int r = f();
+  assert(r == 17, "consume branch taken");
+}
+
+test_closure_capture_consume_branch_not_taken() `test(exclude: wasm) {
+  task[int] t = go worker_t0560_int();
+  bool flag = false;
+  f := move || -> int {
+    if flag {
+      return <-t;
+    }
+    return 0;
+  };
+  int r = f();
+  assert(r == 0, "consume branch not taken");
+  // captured t still live; env_drop runs Task[int].drop.
+}
+
+// Two captured tasks, consume only one — writeback iteration must find the
+// right entry and leave the other field intact (env_drop drops the second).
+test_closure_capture_multiple_tasks() `test(exclude: wasm) {
+  task[int] t1 = go worker_t0560_int();
+  task[int] t2 = go worker_t0560_int();
+  f := move || -> int {
+    return <-t1;
+  };
+  int r = f();
+  assert(r == 17, "multiple captures, one consumed");
+  // t2 still in env; env_drop must Task[int].drop t2 (not the freed t1).
+}
+
+// Two captured tasks, consume BOTH — each `<-t` invocation runs its own
+// nullCapturedEnvField pass over lambdaWritebacks. Each must find its own
+// matching entry and null only that local/env-field pair. env_drop must
+// then see both env fields null and no-op for both.
+test_closure_capture_consume_both_tasks() `test(exclude: wasm) {
+  task[int] t1 = go worker_t0560_int();
+  task[int] t2 = go worker_t0560_int();
+  f := move || -> int {
+    int a = <-t1;
+    int b = <-t2;
+    return a + b;
+  };
+  int r = f();
+  assert(r == 34, "both captures consumed");
+  // Both env fields nulled; env_drop must no-op for both.
+}
+
+// ExprBody-form lambda — `move || -> <-t` (Promise's expr-body form omits
+// the explicit return type). emitLambdaWritebacks doesn't run on the ExprBody
+// path before the expression evaluates, but the receive's env-field null
+// still defends env_drop. Smoke test for the ExprBody path.
+test_closure_capture_consume_exprbody() `test(exclude: wasm) {
+  task[int] t = go worker_t0560_int();
+  f := move || -> <-t;
+  int r = f();
+  assert(r == 17, "exprbody captured task");
+}
+
+// Note: the rePanicBlk path (captured task whose worker panics, consume +
+// re-panic) is covered by tests/e2e/t0547_panic_test.pr — a separate file is
+// needed because Promise treats files with a `main() \`test(expected: ...)`
+// as snapshot tests and skips batch tests in the same file.

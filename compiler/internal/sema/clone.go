@@ -222,10 +222,155 @@ func singleOwnerContainerElemTypes(origin types.Type, typeArgs []types.Type) []t
 // validateSingleOwnerContainerInstance enforces the nesting rule for an
 // explicitly written or inferred container instance (e.g. Vector[Vector[Task]],
 // Map[K, Vector[Task]]). Called alongside validateSendableInstance. (T0545)
+//
+// T0616: when checking inside a generic body and the nested container's element
+// references a TypeParam, defer the check to the call site via recordCloneReq
+// so generic indirection (`outer[T] { Vector[Vector[T]] v; }` instantiated with
+// T = Task[int]) doesn't slip past the direct nesting gate.
 func (c *Checker) validateSingleOwnerContainerInstance(pos ast.Pos, origin types.Type, typeArgs []types.Type) {
 	for _, et := range singleOwnerContainerElemTypes(origin, typeArgs) {
 		c.reportContainerSingleOwnerNesting(pos, et)
+		if (c.curFuncObj != nil || c.curMethodObj != nil) &&
+			isContainerWithTypeParam(et) {
+			c.recordCloneReq(et, pos, "nested container element")
+		}
 	}
+}
+
+// isContainerWithTypeParam reports whether typ is itself a *container*
+// (Vector/Map/Set instance or Array) whose element/key/value type expression
+// references a TypeParam — meaning substitution at the call site could expose
+// a single-owner handle. (T0616)
+func isContainerWithTypeParam(typ types.Type) bool {
+	switch t := typ.(type) {
+	case *types.Array:
+		return types.ContainsTypeParam(t.Elem())
+	case *types.Instance:
+		if singleOwnerContainerElemTypes(t.Origin(), t.TypeArgs()) != nil {
+			for _, ta := range t.TypeArgs() {
+				if types.ContainsTypeParam(ta) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// recordCloneReq appends a cloneability requirement to the current generic
+// function or method being checked. No-op when not inside a generic body.
+// The requirement is validated when the enclosing function/method is called
+// with concrete type arguments (T0616).
+func (c *Checker) recordCloneReq(typeExpr types.Type, pos ast.Pos, opDesc string) {
+	if typeExpr == nil {
+		return
+	}
+	req := CloneabilityRequirement{TypeExpr: typeExpr, Pos: pos, OpDesc: opDesc}
+	if c.curMethodObj != nil {
+		for _, r := range c.info.MethodCloneReqs[c.curMethodObj] {
+			if r.OpDesc == opDesc && r.Pos == pos && types.Identical(r.TypeExpr, typeExpr) {
+				return
+			}
+		}
+		c.info.MethodCloneReqs[c.curMethodObj] = append(c.info.MethodCloneReqs[c.curMethodObj], req)
+		return
+	}
+	if c.curFuncObj != nil {
+		for _, r := range c.info.FuncCloneReqs[c.curFuncObj] {
+			if r.OpDesc == opDesc && r.Pos == pos && types.Identical(r.TypeExpr, typeExpr) {
+				return
+			}
+		}
+		c.info.FuncCloneReqs[c.curFuncObj] = append(c.info.FuncCloneReqs[c.curFuncObj], req)
+	}
+}
+
+// propagateCloneReqs propagates cloneability requirements transitively across
+// generic call edges. When generic `f[T]` calls generic `g[T]` (or `g[h(T)]`)
+// in its body, any requirement R on g must also become a requirement on f
+// (after substituting g's TypeParams via the call's subst map) so that the
+// eventual concrete call site for f catches single-owner-handle violations
+// that arise from g's internal use.
+//
+// Iterates to a fixed point — when adding a requirement to f grows f's
+// requirement set, callers of f need a fresh pass too. Cycles terminate
+// because new requirements are deduped by (TypeExpr, OpDesc, Pos). Concrete
+// substitutions that expose a single-owner handle emit one error per
+// (CallPos, OpDesc, substituted-type) triple — deduped via emitted-set to
+// avoid double errors when the same edge fires across multiple iterations
+// (T0616).
+func (c *Checker) propagateCloneReqs() {
+	if len(c.info.GenericCallEdges) == 0 {
+		return
+	}
+	emitted := make(map[string]bool)
+	for iter := 0; iter < 64; iter++ {
+		changed := false
+		for _, edge := range c.info.GenericCallEdges {
+			var calleeReqs []CloneabilityRequirement
+			if edge.CalleeFunc != nil {
+				calleeReqs = c.info.FuncCloneReqs[edge.CalleeFunc]
+			} else if edge.CalleeMethod != nil {
+				calleeReqs = c.info.MethodCloneReqs[edge.CalleeMethod]
+			}
+			if len(calleeReqs) == 0 {
+				continue
+			}
+			for _, req := range calleeReqs {
+				substituted := types.Substitute(req.TypeExpr, edge.Subst)
+				if !types.ContainsTypeParam(substituted) {
+					if off := firstSingleOwnerHandle(substituted); off != nil {
+						key := edge.CallPos.String() + "|" + req.OpDesc + "|" + substituted.String()
+						if !emitted[key] {
+							emitted[key] = true
+							c.errorf(edge.CallPos,
+								"cannot instantiate generic with %s: %s is a single-owner handle, but %s (at %s) would duplicate it (single-owner handles are move-only)",
+								substituted, off, req.OpDesc, req.Pos)
+						}
+					}
+					continue
+				}
+				if c.addCloneReq(edge.CallerFunc, edge.CallerMethod,
+					CloneabilityRequirement{
+						TypeExpr: substituted,
+						Pos:      req.Pos,
+						OpDesc:   req.OpDesc,
+					}) {
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			return
+		}
+	}
+}
+
+// addCloneReq appends req to the caller's requirement set if not already
+// present (dedup on TypeExpr/OpDesc/Pos). Returns true if a new requirement
+// was added. (T0616)
+func (c *Checker) addCloneReq(fn *types.Func, method *types.Method, req CloneabilityRequirement) bool {
+	if fn != nil {
+		for _, existing := range c.info.FuncCloneReqs[fn] {
+			if existing.OpDesc == req.OpDesc && existing.Pos == req.Pos &&
+				types.Identical(existing.TypeExpr, req.TypeExpr) {
+				return false
+			}
+		}
+		c.info.FuncCloneReqs[fn] = append(c.info.FuncCloneReqs[fn], req)
+		return true
+	}
+	if method != nil {
+		for _, existing := range c.info.MethodCloneReqs[method] {
+			if existing.OpDesc == req.OpDesc && existing.Pos == req.Pos &&
+				types.Identical(existing.TypeExpr, req.TypeExpr) {
+				return false
+			}
+		}
+		c.info.MethodCloneReqs[method] = append(c.info.MethodCloneReqs[method], req)
+		return true
+	}
+	return false
 }
 
 // typeToTypeRef converts a types.Type to an ast.TypeRef for use in synthesized AST.

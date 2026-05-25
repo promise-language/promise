@@ -1253,6 +1253,11 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 			if c.checkContainerNotCloneable(e.Pos(), t, []types.Type{t.Elem()}, "cloned") {
 				return nil
 			}
+			// T0616: defer the check to the call site when the element type
+			// references a TypeParam (generic indirection bypass).
+			if (c.curFuncObj != nil || c.curMethodObj != nil) && types.ContainsTypeParam(t.Elem()) {
+				c.recordCloneReq(t.Elem(), e.Pos(), "Array[T].clone()")
+			}
 		}
 		subst := types.BuildSubstMap(types.TypVector.TypeParams(), []types.Type{t.Elem()})
 		if f := types.TypVector.LookupField(e.Field); f != nil {
@@ -1321,6 +1326,23 @@ func (c *Checker) resolveInstanceMember(expr ast.Expr, pos ast.Pos, inst *types.
 				if c.checkContainerNotCloneable(pos, inst, elemTypes, opName) {
 					return nil
 				}
+				// T0616: when checking a generic body, record a deferred check
+				// for each element type that references a TypeParam so the
+				// concrete call site can reject `T = Task[..]` / `Mutex[..]` /
+				// `MutexGuard[..]`. The direct gate above only fires when args
+				// are already concrete; generic indirection slips through it
+				// because generic bodies are checked once with unbound params.
+				if c.curFuncObj != nil || c.curMethodObj != nil {
+					originName := "container"
+					if obj := origin.Obj(); obj != nil {
+						originName = obj.Name()
+					}
+					for _, et := range elemTypes {
+						if types.ContainsTypeParam(et) {
+							c.recordCloneReq(et, pos, fmt.Sprintf("%s[...].%s()", originName, name))
+						}
+					}
+				}
 			}
 		}
 		subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -1351,6 +1373,21 @@ func (c *Checker) resolveInstanceMember(expr ast.Expr, pos ast.Pos, inst *types.
 			}
 			if !hasOwnMethod(origin, name) {
 				subst = c.composeParentSubst(origin, inst.TypeArgs(), name, memberMethod)
+			}
+			// T0616: non-generic methods on parametric receivers don't go
+			// through inferAndInstantiateCall, so record the edge here using
+			// the owner's substitution. Methods that have their own
+			// TypeParams are handled by inferAndInstantiateCall, which
+			// merges the owner subst with the method subst — see
+			// checkCallSiteCloneReqs.
+			if len(subst) > 0 && len(m.Sig().TypeParams()) == 0 {
+				c.info.GenericCallEdges = append(c.info.GenericCallEdges, GenericCallEdge{
+					CallerFunc:   c.curFuncObj,
+					CallerMethod: c.curMethodObj,
+					CalleeMethod: m,
+					Subst:        subst,
+					CallPos:      pos,
+				})
 			}
 			return types.Substitute(m.Sig(), subst)
 		}
@@ -1821,6 +1858,10 @@ func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature)
 	subst := types.BuildSubstMap(tparams, typeArgs)
 	monoSig := types.Substitute(sig, subst).(*types.Signature)
 
+	// T0616: validate cloneability requirements for explicit-typearg refs
+	// (e.g. `foo[Task[int]]` as a value or partial application).
+	c.checkExplicitTypeArgsCloneReqs(e, subst)
+
 	// Record instance for monomorphization
 	switch t := e.Target.(type) {
 	case *ast.IdentExpr:
@@ -1895,6 +1936,83 @@ func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature)
 	}
 
 	return monoSig
+}
+
+// checkExplicitTypeArgsCloneReqs records a generic call edge for explicit
+// type-arg refs (e.g. `foo[Task[int]]`) so the propagation post-pass can
+// validate cloneability requirements at the call site (T0616).
+func (c *Checker) checkExplicitTypeArgsCloneReqs(e *ast.IndexExpr, subst map[*types.TypeParam]types.Type) {
+	if len(subst) == 0 {
+		return
+	}
+	var fn *types.Func
+	var method *types.Method
+	switch t := e.Target.(type) {
+	case *ast.IdentExpr:
+		if obj := c.lookup(t.Name); obj != nil {
+			if f, ok := obj.(*types.Func); ok {
+				fn = f
+			}
+		}
+	case *ast.MemberExpr:
+		if ident, ok := t.Target.(*ast.IdentExpr); ok {
+			if obj := c.info.Objects[ident]; obj != nil {
+				if mod, ok := obj.(*types.Module); ok && mod.Scope() != nil {
+					if fnObj := mod.Scope().Lookup(t.Field); fnObj != nil {
+						if f, ok := fnObj.(*types.Func); ok {
+							fn = f
+						}
+					}
+				}
+			}
+		}
+		if fn == nil {
+			targetType := c.info.Types[t.Target]
+			if ref, ok := targetType.(*types.MutRef); ok {
+				targetType = ref.Elem()
+			}
+			if ref, ok := targetType.(*types.SharedRef); ok {
+				targetType = ref.Elem()
+			}
+			var owner *types.Named
+			switch tt := targetType.(type) {
+			case *types.Named:
+				owner = tt
+			case *types.Instance:
+				if n, ok := tt.Origin().(*types.Named); ok {
+					owner = n
+				}
+			}
+			if owner != nil {
+				if m := owner.LookupMethod(t.Field); m != nil {
+					method = m
+				}
+			}
+		}
+	}
+	if fn == nil && method == nil {
+		return
+	}
+	if method != nil {
+		if ownerSubst := c.ownerSubstForMethodCall(e.Target); len(ownerSubst) > 0 {
+			merged := make(map[*types.TypeParam]types.Type, len(subst)+len(ownerSubst))
+			for k, v := range subst {
+				merged[k] = v
+			}
+			for k, v := range ownerSubst {
+				merged[k] = v
+			}
+			subst = merged
+		}
+	}
+	c.info.GenericCallEdges = append(c.info.GenericCallEdges, GenericCallEdge{
+		CallerFunc:   c.curFuncObj,
+		CallerMethod: c.curMethodObj,
+		CalleeFunc:   fn,
+		CalleeMethod: method,
+		Subst:        subst,
+		CallPos:      e.Pos(),
+	})
 }
 
 // findMethodDefiner walks the parent chain to find the Named type that actually

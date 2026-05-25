@@ -1,19 +1,17 @@
-// T0559 / T0545: Vector.clone() on single-owner native handle elements.
+// T0559 / T0545 / T0616: Vector.clone() on single-owner native handle elements.
 //
-// T0545 supersedes T0559's user-facing behavior: Vector[Task|Mutex|
-// MutexGuard].clone() (and nested Vector[Vector[Mutex]]) is now a clean
-// *sema error*, not a runtime panic — T0559's own summary flagged sema-time
-// rejection as the intended follow-up. Those compile-fail cases moved to
-// sema_test.go (TestT0545_*) since a compile error cannot be a batch/snapshot
-// test. T0559's runtime-panic codegen is retained as the backstop for the
-// residual generic-indirection path (sema checks generic bodies with unbound
-// T, so dup[T](Vector[T]) with T=Mutex still reaches codegen — T0616).
+// T0545 made Vector[Task|Mutex|MutexGuard].clone() (and nested
+// Vector[Vector[Mutex]]) a clean *sema error* at direct call sites. T0616
+// closes the residual generic-indirection hole: a generic helper that calls
+// .clone() inside its body is now rejected at the call site when instantiated
+// with a single-owner handle, via deferred cloneability requirements
+// propagated across generic call chains. The codegen-side T0559 runtime panic
+// and T0545 backstop remain as defense-in-depth but are unreachable for
+// well-formed user code. Compile-fail cases live in sema_test.go
+// (TestT0545_* / TestT0616_*) since they cannot be batch tests.
 //
-// This file keeps the still-valid T0559 cases: refcounted handles (Arc/Weak/
-// Channel) ARE duplicable and must NOT be gated, plus generic indirection
-// over an empty Vector[Mutex] — the one path that still reaches the retained
-// T0559 codegen backstop, which must clone safely without a Go/runtime panic.
-// Zero leaks (T0067).
+// This file keeps the still-valid positive cases: refcounted handles (Arc /
+// Weak / Channel) ARE duplicable and must NOT be gated. Zero leaks (T0067).
 test_arc_clone_nonempty() `test {
   v := Vector[Arc[int]]();
   v.push(Arc[int](1));
@@ -41,18 +39,9 @@ test_channel_clone_nonempty() `test {
 // under T0545 — the synthesized clone would call the gated
 // Vector[Mutex].clone() — so the former struct-field clone test is removed;
 // that rejection is the coherent extension of the non-cloneable rule.)
-
-// Generic indirection (T0616): the generic body is sema-checked with unbound
-// T, so v.clone() is not gated; monomorphization with T = Mutex[int] reaches
-// emitVectorElementCloneLoop. With an empty vector the retained T0559
-// length-guard skips the panic and clones cleanly — this pins that the kept
-// T0559 backstop degrades safely on the residual path T0545 cannot gate.
-dup_vec_t0559[T](Vector[T] &v) Vector[T] {
-  return v.clone();
-}
-
-test_generic_indirection_empty_mutex_vec() `test {
-  v := Vector[Mutex[int]]();
-  v2 := dup_vec_t0559[Mutex[int]](v);
-  assert(v2.len == 0, "empty mutex vec via generic indirection");
-}
+//
+// (The former generic-indirection empty-Mutex-vector test is removed:
+// T0616 now rejects `dup[Mutex[int]](v)` at sema, so the path that test
+// pinned — running through the codegen backstop — is unreachable. The kept
+// backstops (T0559 length-guarded runtime panic, isSingleOwnerHandleType
+// early-returns in cloneHeapElement/dupHeapValue) stay as defense-in-depth.)

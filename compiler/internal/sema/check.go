@@ -17,6 +17,8 @@ type Checker struct {
 	fileScope          *types.Scope            // file-level scope (child of globScope, holds user declarations)
 	scope              *types.Scope            // current scope during traversal
 	curFunc            *types.Signature        // current function being checked (for return/raise)
+	curFuncObj         *types.Func             // current function object (for clone-requirement recording, T0616)
+	curMethodObj       *types.Method           // current method object (for clone-requirement recording, T0616)
 	curType            *types.Named            // current type being defined/checked (for Self resolution)
 	inNewBody          bool                    // true when checking a new() constructor body
 	inFactoryBody      bool                    // true when checking a `factory method body
@@ -96,6 +98,8 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 			FilteredDecls:            make(map[ast.Decl]bool),
 			DeclHashes:               make(map[*types.TypeName]string),
 			InferredTypeArgs:         make(map[*ast.CallExpr]*InferredCall),
+			FuncCloneReqs:            make(map[*types.Func][]CloneabilityRequirement),
+			MethodCloneReqs:          make(map[*types.Method][]CloneabilityRequirement),
 		},
 	}
 
@@ -129,6 +133,7 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 
 	tPass = time.Now()
 	c.check(file) // Pass 3: type-check function/method bodies
+	c.propagateCloneReqs()
 	c.info.Timings.Check = time.Since(tPass)
 
 	tPass = time.Now()
@@ -179,6 +184,8 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 			FilteredDecls:            make(map[ast.Decl]bool),
 			DeclHashes:               make(map[*types.TypeName]string),
 			InferredTypeArgs:         make(map[*ast.CallExpr]*InferredCall),
+			FuncCloneReqs:            make(map[*types.Func][]CloneabilityRequirement),
+			MethodCloneReqs:          make(map[*types.Method][]CloneabilityRequirement),
 		},
 	}
 
@@ -306,7 +313,15 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 
 	saved := c.curFunc
 	c.curFunc = sig
-	defer func() { c.curFunc = saved }()
+	savedFuncObj := c.curFuncObj
+	savedMethodObj := c.curMethodObj
+	c.curFuncObj = fn
+	c.curMethodObj = nil
+	defer func() {
+		c.curFunc = saved
+		c.curFuncObj = savedFuncObj
+		c.curMethodObj = savedMethodObj
+	}()
 
 	// Open type-param scope if generic (so T resolves during body checking)
 	if len(sig.TypeParams()) > 0 {
@@ -451,7 +466,15 @@ func lookupMethodByKind(named *types.Named, md *ast.MethodDecl) *types.Method {
 func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.Method) {
 	saved := c.curFunc
 	c.curFunc = m.Sig()
-	defer func() { c.curFunc = saved }()
+	savedFuncObj := c.curFuncObj
+	savedMethodObj := c.curMethodObj
+	c.curFuncObj = nil
+	c.curMethodObj = m
+	defer func() {
+		c.curFunc = saved
+		c.curFuncObj = savedFuncObj
+		c.curMethodObj = savedMethodObj
+	}()
 
 	// Detect generator: return type is stream[T]
 	savedInGenerator := c.inGenerator

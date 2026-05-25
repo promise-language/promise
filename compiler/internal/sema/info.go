@@ -38,6 +38,31 @@ type MethodInstance struct {
 	Sig       *types.Signature // fully substituted signature (no TypeParams)
 }
 
+// CloneabilityRequirement is a deferred check that a type expression must not
+// contain a single-owner handle (Task/Mutex/MutexGuard) after type-parameter
+// substitution. Recorded when a generic function/method body contains a
+// container clone()/filled() whose element type references a TypeParam owned
+// by the enclosing generic; validated at each concrete call site. (T0616)
+type CloneabilityRequirement struct {
+	TypeExpr types.Type // may contain TypeParams; substituted at call site
+	Pos      ast.Pos    // location of the requiring operation (inside the generic body)
+	OpDesc   string     // human-readable op, e.g. "Vector[T].clone()" / "Map[K,V].clone()"
+}
+
+// GenericCallEdge records that a generic caller's body invokes a generic
+// callee with a substitution that maps callee TypeParams (possibly through
+// caller TypeParams). Used by the cloneability requirement propagation pass
+// to forward callee requirements onto the caller. Exactly one of CallerFunc
+// or CallerMethod is non-nil; same for CalleeFunc / CalleeMethod. (T0616)
+type GenericCallEdge struct {
+	CallerFunc   *types.Func
+	CallerMethod *types.Method
+	CalleeFunc   *types.Func
+	CalleeMethod *types.Method
+	Subst        map[*types.TypeParam]types.Type
+	CallPos      ast.Pos
+}
+
 // ForInKind indicates how a for-in loop iterates over a duck-typed iterable.
 type ForInKind int
 
@@ -110,6 +135,21 @@ type Info struct {
 
 	// MethodInstances records all concrete generic method instantiations for later monomorphization.
 	MethodInstances []*MethodInstance
+
+	// FuncCloneReqs accumulates deferred cloneability requirements per generic
+	// function. Populated during Pass 3 body checking when a Vector/Map/Set/Array
+	// clone()/filled() is seen with an element type referencing a TypeParam owned
+	// by the enclosing function. Consumed at each concrete call site to forbid
+	// instantiation with single-owner handle types. (T0616)
+	FuncCloneReqs map[*types.Func][]CloneabilityRequirement
+
+	// MethodCloneReqs is the per-method analogue of FuncCloneReqs. (T0616)
+	MethodCloneReqs map[*types.Method][]CloneabilityRequirement
+
+	// GenericCallEdges records each generic-body call to another generic callee
+	// (when neither caller nor callee is fully concrete). Used by the
+	// cloneability-requirement propagation post-pass. (T0616)
+	GenericCallEdges []GenericCallEdge
 
 	// InferredTypeArgs maps call expressions with inferred type arguments to the
 	// concrete type args. Used by codegen to build monomorphized function names

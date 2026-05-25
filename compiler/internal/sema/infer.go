@@ -284,6 +284,10 @@ func (c *Checker) inferAndInstantiateCall(e *ast.CallExpr, sig *types.Signature)
 	subst := types.BuildSubstMap(tparams, typeArgs)
 	monoSig := types.Substitute(sig, subst).(*types.Signature)
 
+	// T0616: record a generic call edge for the cloneability-requirement
+	// propagation pass to validate after Pass 3 completes.
+	c.checkCallSiteCloneReqs(e, subst)
+
 	// Record instance for monomorphization.
 	c.recordInferredCallInstance(e, typeArgs, monoSig)
 
@@ -347,6 +351,125 @@ func (c *Checker) collectArgTypesForInference(e *ast.CallExpr, params []*types.P
 	// Append variadic args after fixed params.
 	result = append(result, variadicArgs...)
 	return result
+}
+
+// lookupCallee resolves a CallExpr's callee to a (Func, Method) pair so
+// call-site validation (cloneability requirements, etc.) can consult the
+// callee's per-decl bookkeeping. Mirrors the dispatch in
+// recordInferredCallInstance and instantiateGenericFunc.
+func (c *Checker) lookupCallee(e *ast.CallExpr) (*types.Func, *types.Method) {
+	switch callee := e.Callee.(type) {
+	case *ast.IdentExpr:
+		if obj := c.lookup(callee.Name); obj != nil {
+			if fn, ok := obj.(*types.Func); ok {
+				return fn, nil
+			}
+		}
+	case *ast.MemberExpr:
+		// Module-qualified function call: mod.func(args)
+		if ident, ok := callee.Target.(*ast.IdentExpr); ok {
+			if obj := c.info.Objects[ident]; obj != nil {
+				if mod, ok := obj.(*types.Module); ok && mod.Scope() != nil {
+					if fnObj := mod.Scope().Lookup(callee.Field); fnObj != nil {
+						if fn, ok := fnObj.(*types.Func); ok {
+							return fn, nil
+						}
+					}
+				}
+			}
+		}
+		// Method call: obj.method(args)
+		targetType := c.info.Types[callee.Target]
+		if ref, ok := targetType.(*types.MutRef); ok {
+			targetType = ref.Elem()
+		}
+		if ref, ok := targetType.(*types.SharedRef); ok {
+			targetType = ref.Elem()
+		}
+		var owner *types.Named
+		switch tt := targetType.(type) {
+		case *types.Named:
+			owner = tt
+		case *types.Instance:
+			if n, ok := tt.Origin().(*types.Named); ok {
+				owner = n
+			}
+		}
+		if owner != nil {
+			if method := owner.LookupMethod(callee.Field); method != nil {
+				return nil, method
+			}
+		}
+	}
+	return nil, nil
+}
+
+// checkCallSiteCloneReqs records a generic call edge so the propagation pass
+// can carry callee cloneability requirements onto the caller, validate them
+// against the concrete substitution, and emit errors attributed to the call
+// site (T0616). All validation happens in propagateCloneReqs after Pass 3 so
+// forward references and mutual recursion are handled by a single fixed-point
+// iteration without duplicate errors.
+//
+// For method calls on a generic receiver, the owner's substitution is merged
+// into subst so requirements that mix owner and method TypeParams (e.g.
+// `Box[T].combine[U](Vector[(T, U)]) { return v.clone(); }`) resolve fully at
+// the call site.
+func (c *Checker) checkCallSiteCloneReqs(e *ast.CallExpr, subst map[*types.TypeParam]types.Type) {
+	if len(subst) == 0 {
+		return
+	}
+	fn, method := c.lookupCallee(e)
+	if fn == nil && method == nil {
+		return
+	}
+	if method != nil {
+		if ownerSubst := c.ownerSubstForMethodCall(e.Callee); len(ownerSubst) > 0 {
+			merged := make(map[*types.TypeParam]types.Type, len(subst)+len(ownerSubst))
+			for k, v := range subst {
+				merged[k] = v
+			}
+			for k, v := range ownerSubst {
+				merged[k] = v
+			}
+			subst = merged
+		}
+	}
+	c.info.GenericCallEdges = append(c.info.GenericCallEdges, GenericCallEdge{
+		CallerFunc:   c.curFuncObj,
+		CallerMethod: c.curMethodObj,
+		CalleeFunc:   fn,
+		CalleeMethod: method,
+		Subst:        subst,
+		CallPos:      e.Pos(),
+	})
+}
+
+// ownerSubstForMethodCall returns the owner's substitution map when callee is
+// a method on a generic Instance receiver, else nil. Used by
+// checkCallSiteCloneReqs to merge owner TypeParams into the call's method
+// subst (T0616).
+func (c *Checker) ownerSubstForMethodCall(callee ast.Expr) map[*types.TypeParam]types.Type {
+	mem, ok := callee.(*ast.MemberExpr)
+	if !ok {
+		return nil
+	}
+	targetType := c.info.Types[mem.Target]
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
+	}
+	inst, ok := targetType.(*types.Instance)
+	if !ok {
+		return nil
+	}
+	named, ok := inst.Origin().(*types.Named)
+	if !ok {
+		return nil
+	}
+	return types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
 }
 
 // recordInferredCallInstance records a FuncInstance or MethodInstance for

@@ -1,0 +1,126 @@
+// T0616: generic indirection that would otherwise bypass T0545's single-owner
+// handle clone gate is rejected at the call site by sema's per-generic
+// cloneability-requirement propagation. The negative cases (call site of a
+// generic instantiated with Task/Mutex/MutexGuard fails at sema) live in
+// sema_test.go (TestT0616_*) since compile failures cannot be batch tests.
+// This file pins the *positive* runtime behavior that must keep working:
+// generic helpers used with Arc/Channel (refcounted, duplicable) handles, and
+// generic helpers that take handle vectors without ever cloning them. Zero
+// leaks (T0067).
+worker_t0616() int {
+  return 42;
+}
+
+// --- Refcounted handles through generic indirection: clone is valid ---
+// Vector is a reference type — pass by value, the helper clones and returns
+// the new copy; caller can ignore the moved input or rebind it.
+
+dup_vec[T](Vector[T] v) Vector[T] {
+  return v.clone();
+}
+
+test_generic_dup_arc() `test {
+  v := Vector[Arc[int]]();
+  v.push(Arc[int](7));
+  v.push(Arc[int](8));
+  v2 := dup_vec[Arc[int]](v);
+  assert(v2.len == 2, "generic dup arc len");
+}
+
+test_generic_dup_channel() `test {
+  v := Vector[Channel[int]]();
+  v.push(Channel[int]());
+  v2 := dup_vec[Channel[int]](v);
+  assert(v2.len == 1, "generic dup channel len");
+}
+
+// --- Generic helper that takes a vector by value (move) without cloning ---
+// With T = Task, must compile and the input vector is moved into the helper
+// and dropped there (T0508 move-only — flat handle vector OK).
+
+drop_vec[T](Vector[T] v) int {
+  return v.len;
+}
+
+test_generic_drop_task() `test(exclude: wasm) {
+  v := Vector[Task[int]]();
+  v.push(go worker_t0616());
+  v.push(go worker_t0616());
+  n := drop_vec[Task[int]](v);
+  assert(n == 2, "drop_vec len");
+}
+
+// --- Transitive generic chains with refcounted handles stay valid ---
+
+inner_dup[T](Vector[T] v) Vector[T] {
+  return v.clone();
+}
+outer_dup[T](Vector[T] v) Vector[T] {
+  return inner_dup[T](v);
+}
+
+test_transitive_dup_arc() `test {
+  v := Vector[Arc[int]]();
+  v.push(Arc[int](42));
+  v2 := outer_dup[Arc[int]](v);
+  assert(v2.len == 1, "transitive dup arc len");
+}
+
+// --- Plain int/string types through generic helpers still work ---
+
+test_generic_dup_int() `test {
+  v := [1, 2, 3, 4];
+  v2 := dup_vec[int](v);
+  assert(v2.len == 4, "generic dup int len");
+}
+
+test_generic_dup_string() `test {
+  v := ["a", "b", "c"];
+  v2 := dup_vec[string](v);
+  assert(v2.len == 3, "generic dup string len");
+}
+
+// --- Vector[T].filled() through a generic helper, with safe T ---
+
+fill_n[T](T item, int n) Vector[T] {
+  return Vector[T].filled(item, n);
+}
+
+test_generic_fill_int() `test {
+  v := fill_n[int](7, 5);
+  assert(v.len == 5, "fill int len");
+  assert(v[0] == 7, "fill int element");
+  assert(v[4] == 7, "fill int last");
+}
+
+// --- Map clone via generic helper with safe value types ---
+
+dup_map[K: Hashable + Equal, V](Map[K, V] m) Map[K, V] {
+  return m.clone();
+}
+
+test_generic_dup_map_int() `test {
+  m := Map[int, int]();
+  m[0] = 10;
+  m[1] = 20;
+  m2 := dup_map[int, int](m);
+  assert(m2.len == 2, "generic dup map len");
+}
+
+// --- Method on a generic owner type with safe TypeArg ---
+
+type Wrapper[T] `clone {
+  Vector[T] data;
+}
+
+test_method_on_generic_int() `test {
+  w := Wrapper[int](data: [1, 2, 3]);
+  w2 := w.clone();
+  assert(w2.data.len == 3, "method on generic owner clones data");
+}
+
+test_method_on_generic_arc() `test {
+  w := Wrapper[Arc[int]](data: [Arc[int](7), Arc[int](8)]);
+  w2 := w.clone();
+  assert(w2.data.len == 2, "Arc element through synth clone");
+}

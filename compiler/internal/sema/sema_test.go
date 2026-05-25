@@ -15186,3 +15186,465 @@ func TestT0545_VectorOptionalIntCloneOK(t *testing.T) {
 		}
 	`)
 }
+
+// === T0616: generic indirection bypassing the single-owner-handle clone gate ===
+//
+// Generic function/method bodies are checked once with unbound type params, so
+// the T0545 sema gate (`firstSingleOwnerHandle` → error) can only fire when the
+// receiver's element types are concrete. A `Vector[T].clone()` inside a generic
+// helper compiles cleanly under T0545, then segfaults / panics / hangs at
+// runtime when the helper is instantiated with `T = Task` / `Mutex` /
+// `MutexGuard`. T0616 records a deferred cloneability requirement on the
+// generic at the body-check site and validates it at each concrete call site,
+// across transitive generic chains.
+
+func TestT0616_VectorCloneInGenericTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		dup[T](Vector[T] v) Vector[T] { return v.clone(); }
+		test_g() {
+			v := Vector[Task[int]]();
+			v.push(go worker());
+			v2 := dup[Task[int]](v);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+	expectError(t, errs, "Vector[...].clone()")
+}
+
+func TestT0616_VectorCloneInGenericMutexError(t *testing.T) {
+	errs := checkErrs(t, `
+		dup[T](Vector[T] v) Vector[T] { return v.clone(); }
+		test_g() {
+			v := Vector[Mutex[int]]();
+			v.push(Mutex[int](1));
+			v2 := dup[Mutex[int]](v);
+		}
+	`)
+	expectError(t, errs, "Mutex[int] is a single-owner handle")
+}
+
+func TestT0616_VectorCloneInGenericMutexGuardError(t *testing.T) {
+	errs := checkErrs(t, `
+		dup[T](Vector[T] v) Vector[T] { return v.clone(); }
+		test_g() {
+			v := Vector[MutexGuard[int]]();
+			v2 := dup[MutexGuard[int]](v);
+		}
+	`)
+	expectError(t, errs, "MutexGuard[int] is a single-owner handle")
+}
+
+func TestT0616_VectorFilledInGenericMutexError(t *testing.T) {
+	errs := checkErrs(t, `
+		fill_n[T](T item, int n) Vector[T] { return Vector[T].filled(item, n); }
+		test_fm() {
+			m := Mutex[int](1);
+			v := fill_n[Mutex[int]](m, 3);
+		}
+	`)
+	expectError(t, errs, "Mutex[int] is a single-owner handle")
+	expectError(t, errs, "Vector[...].filled()")
+}
+
+func TestT0616_VectorFilledInGenericTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		fill_n[T](T item, int n) Vector[T] { return Vector[T].filled(item, n); }
+		test_ft() {
+			t := go worker();
+			v := fill_n[Task[int]](t, 3);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+func TestT0616_MapCloneInGenericTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		dup_map[K: Hashable+Equal, V](Map[K, V] m) Map[K, V] { return m.clone(); }
+		test_dm() {
+			m := Map[int, Task[int]]();
+			m[0] = go worker();
+			m2 := dup_map[int, Task[int]](m);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+	expectError(t, errs, "Map[...].clone()")
+}
+
+// Transitive: outer[T] forwards to inner[T] which clones — error attributes to
+// the call site of outer when instantiated with Task/Mutex/MutexGuard.
+func TestT0616_TransitiveGenericCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		inner[T](Vector[T] v) Vector[T] { return v.clone(); }
+		outer[T](Vector[T] v) Vector[T] { return inner[T](v); }
+		test_t() {
+			v := Vector[Task[int]]();
+			v.push(go worker());
+			v2 := outer[Task[int]](v);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Three-level transitive chain to exercise multiple propagation iterations.
+func TestT0616_ThreeLevelTransitiveError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		a[T](Vector[T] v) Vector[T] { return v.clone(); }
+		b[T](Vector[T] v) Vector[T] { return a[T](v); }
+		c[T](Vector[T] v) Vector[T] { return b[T](v); }
+		test_chain() {
+			v := Vector[Task[int]]();
+			v.push(go worker());
+			v2 := c[Task[int]](v);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Multi-param generic: only V must be cloneable; instantiating with V=Task fails.
+func TestT0616_MultiParamMapValueTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		dup_kv[K: Hashable+Equal, V](Map[K, V] m) Map[K, V] { return m.clone(); }
+		test_kv() {
+			m := Map[int, Task[int]]();
+			m[0] = go worker();
+			m2 := dup_kv[int, Task[int]](m);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// Fixed-size array clone via generic indirection — covers the *types.Array
+// branch of the deferred recording.
+func TestT0616_ArrayCloneInGenericTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		arr_dup[T](T[2] a) T[2] { return a.clone(); }
+		test_a() {
+			Task[int][2] a = [go worker(), go worker()];
+			b := arr_dup[Task[int]](a);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// === T0616 positives — must NOT regress T0508 (move-only collections) /
+// T0545 (refcounted clones) / regular generic use ===
+
+// Arc / Channel / Weak are refcounted handles — clone is valid even through
+// generic indirection. Must compile cleanly.
+func TestT0616_VectorCloneInGenericArcOK(t *testing.T) {
+	checkOK(t, `
+		dup[T](Vector[T] v) Vector[T] { return v.clone(); }
+		test_arc() {
+			v := Vector[Arc[int]]();
+			v.push(Arc[int](7));
+			v2 := dup[Arc[int]](v);
+		}
+	`)
+}
+
+func TestT0616_VectorCloneInGenericChannelOK(t *testing.T) {
+	checkOK(t, `
+		dup[T](Vector[T] v) Vector[T] { return v.clone(); }
+		test_ch() {
+			v := Vector[Channel[int]]();
+			v.push(Channel[int]());
+			v2 := dup[Channel[int]](v);
+		}
+	`)
+}
+
+// Generic that takes Vector[T] but never clones it — Task instantiation is OK
+// (T0508 move-only collection). Must not trigger any deferred requirement.
+func TestT0616_VectorTaskGenericNoCloneOK(t *testing.T) {
+	checkOK(t, `
+		worker() int { return 42; }
+		take[T](Vector[T] v) T? { return v.pop(); }
+		test_take() {
+			v := Vector[Task[int]]();
+			v.push(go worker());
+			_ := take[Task[int]](v);
+		}
+	`)
+}
+
+// Generic helpers instantiated with plain types stay valid.
+func TestT0616_VectorCloneInGenericIntOK(t *testing.T) {
+	checkOK(t, `
+		dup[T](Vector[T] v) Vector[T] { return v.clone(); }
+		test_int() {
+			v := Vector[int]();
+			v.push(1);
+			v2 := dup[int](v);
+		}
+	`)
+}
+
+// Transitive positive: 3-level chain instantiated with Arc — must compile.
+func TestT0616_ThreeLevelTransitiveArcOK(t *testing.T) {
+	checkOK(t, `
+		a[T](Vector[T] v) Vector[T] { return v.clone(); }
+		b[T](Vector[T] v) Vector[T] { return a[T](v); }
+		c[T](Vector[T] v) Vector[T] { return b[T](v); }
+		test_chain_arc() {
+			v := Vector[Arc[int]]();
+			v.push(Arc[int](1));
+			v2 := c[Arc[int]](v);
+		}
+	`)
+}
+
+// Multi-param: instantiated with int values stays valid.
+func TestT0616_MultiParamMapValueIntOK(t *testing.T) {
+	checkOK(t, `
+		dup_kv[K: Hashable+Equal, V](Map[K, V] m) Map[K, V] { return m.clone(); }
+		test_kv_int() {
+			m := Map[int, int]();
+			m[0] = 42;
+			m2 := dup_kv[int, int](m);
+		}
+	`)
+}
+
+// All existing T0545 direct-gate tests stay green — verified by sema package
+// tests as a whole; not duplicated here.
+
+// Method on a generic owner type (no method-level TypeParams). The method's
+// body calls Vector[T].clone() referencing the owner's TypeParam; the call
+// site `w.copy()` must propagate via the owner's substitution.
+func TestT0616_MethodOnGenericOwnerTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			copy() Vector[T] { return this.data.clone(); }
+		}
+		worker() int { return 42; }
+		test_w() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := w.copy();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+func TestT0616_MethodOnGenericOwnerArcOK(t *testing.T) {
+	checkOK(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			copy() Vector[T] { return this.data.clone(); }
+		}
+		test_w() {
+			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			v := w.copy();
+		}
+	`)
+}
+
+// Method with its OWN TypeParam on a generic owner type, where the
+// requirement mixes owner T and method U (e.g. `Vector[(T, U)].clone()`).
+// Both substitutions must merge at the call site to fully concretize the req.
+func TestT0616_MethodMixedOwnerAndMethodTypeParamOwnerBadError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] {
+			Vector[T] data;
+			combine[U](Vector[(T, U)] pairs) Vector[(T, U)] {
+				return pairs.clone();
+			}
+		}
+		worker() int { return 42; }
+		test_owner_bad() {
+			b := Box[Task[int]](data: [go worker()]);
+			v := b.combine[string]([(go worker(), "a")]);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+func TestT0616_MethodMixedOwnerAndMethodTypeParamMethodBadError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] {
+			Vector[T] data;
+			combine[U](Vector[(T, U)] pairs) Vector[(T, U)] {
+				return pairs.clone();
+			}
+		}
+		worker() int { return 42; }
+		test_method_bad() {
+			b := Box[int](data: [1]);
+			v := b.combine[Task[int]]([(1, go worker())]);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+func TestT0616_MethodMixedOwnerAndMethodTypeParamSafeOK(t *testing.T) {
+	checkOK(t, `
+		type Box[T] {
+			Vector[T] data;
+			combine[U](Vector[(T, U)] pairs) Vector[(T, U)] {
+				return pairs.clone();
+			}
+		}
+		test_safe() {
+			b := Box[int](data: [1]);
+			v := b.combine[string]([(1, "a")]);
+		}
+	`)
+}
+
+// T0616: inferred type arguments — `dup(v)` (no explicit `[T]`) exercises the
+// inferAndInstantiateCall → checkCallSiteCloneReqs → lookupCallee (IdentExpr)
+// path. The explicit-typearg path goes through instantiateGenericFunc /
+// checkExplicitTypeArgsCloneReqs instead. Both must fire the gate.
+func TestT0616_VectorCloneInferredTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		dup[T](Vector[T] v) Vector[T] { return v.clone(); }
+		test_inferred() {
+			v := Vector[Task[int]]();
+			v.push(go worker());
+			v2 := dup(v);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+func TestT0616_VectorCloneInferredArcOK(t *testing.T) {
+	checkOK(t, `
+		dup[T](Vector[T] v) Vector[T] { return v.clone(); }
+		test_inferred_arc() {
+			v := Vector[Arc[int]]();
+			v.push(Arc[int](7));
+			v2 := dup(v);
+		}
+	`)
+}
+
+// T0616: nested container `Vector[Vector[T]]` declared inside a generic body
+// — the inner Vector type expression references T, so substituting T = Task
+// at the call site exposes a single-owner handle nested inside another
+// container, which is unsound. Exercises validateSingleOwnerContainerInstance's
+// TypeParam-deferred branch and isContainerWithTypeParam's Instance branch.
+func TestT0616_NestedContainerInGenericBodyTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		worker() int { return 42; }
+		wrap[T](Vector[T] v) {
+			inner := Vector[Vector[T]]();
+		}
+		test_nested_generic() {
+			v := Vector[Task[int]]();
+			v.push(go worker());
+			wrap[Task[int]](v);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+	expectError(t, errs, "nested container element")
+}
+
+func TestT0616_NestedContainerInGenericBodyArcOK(t *testing.T) {
+	checkOK(t, `
+		wrap[T](Vector[T] v) {
+			inner := Vector[Vector[T]]();
+		}
+		test_nested_arc() {
+			v := Vector[Arc[int]]();
+			wrap[Arc[int]](v);
+		}
+	`)
+}
+
+// T0616: a generic free function that internally calls a generic method on
+// a parametric receiver — exercises the cross-kind propagation edge
+// (FuncCloneReqs → MethodCloneReqs and back through the propagation pass).
+func TestT0616_FunctionCallsGenericMethodTransitiveError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			copy() Vector[T] { return this.data.clone(); }
+		}
+		worker() int { return 42; }
+		dup_via[T](Wrapper[T] w) Vector[T] {
+			return w.copy();
+		}
+		test_func_calls_method() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := dup_via[Task[int]](w);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+// T0616: a method on a generic owner type whose body calls a generic free
+// function — exercises the cross-kind propagation onto a method's
+// CloneReqs map (addCloneReq with method != nil). The free function records
+// the req, the method's call to it adds an edge, and propagation transitively
+// surfaces the req onto the method, then validates at the eventual concrete
+// receiver site.
+func TestT0616_MethodCallsGenericFreeFunctionError(t *testing.T) {
+	errs := checkErrs(t, `
+		clone_helper[T](Vector[T] v) Vector[T] { return v.clone(); }
+		type Wrapper[T] {
+			Vector[T] data;
+			copy_via_helper() Vector[T] { return clone_helper[T](this.data); }
+		}
+		worker() int { return 42; }
+		test_method_calls_helper() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := w.copy_via_helper();
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+func TestT0616_MethodCallsGenericFreeFunctionArcOK(t *testing.T) {
+	checkOK(t, `
+		clone_helper[T](Vector[T] v) Vector[T] { return v.clone(); }
+		type Wrapper[T] {
+			Vector[T] data;
+			copy_via_helper() Vector[T] { return clone_helper[T](this.data); }
+		}
+		test_method_calls_helper_arc() {
+			w := Wrapper[Arc[int]](data: [Arc[int](1)]);
+			v := w.copy_via_helper();
+		}
+	`)
+}
+
+// T0616: method type-arg inference (`obj.method(arg)` with no explicit `[U]`).
+// Promise infers U from a direct param. Exercises lookupCallee's MemberExpr
+// method branch and checkCallSiteCloneReqs's method handling — the
+// IndexExpr/explicit-typearg path goes through checkExplicitTypeArgsCloneReqs
+// instead.
+func TestT0616_MethodInferredTypeArgTaskError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			copy_to[U](U _conv) Vector[T] { return this.data.clone(); }
+		}
+		worker() int { return 42; }
+		test_method_infer_err() {
+			w := Wrapper[Task[int]](data: [go worker()]);
+			v := w.copy_to(42);
+		}
+	`)
+	expectError(t, errs, "Task[int] is a single-owner handle")
+}
+
+func TestT0616_MethodInferredTypeArgArcOK(t *testing.T) {
+	checkOK(t, `
+		type Wrapper[T] {
+			Vector[T] data;
+			copy_to[U](U _conv) Vector[T] { return this.data.clone(); }
+		}
+		test_method_infer_ok() {
+			w := Wrapper[Arc[int]](data: [Arc[int](7)]);
+			v := w.copy_to(42);
+		}
+	`)
+}

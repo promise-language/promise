@@ -261,3 +261,140 @@ channel_recv_array_index() `test(exclude: wasm) {
   v := <-cs[0];
   assert(v! == 99, "channel array recv");
 }
+
+// T0621: `<-v[0]` where the Task/Channel is read out of a *Vector* by index.
+// Originally reported as a `<-` operand codegen defect (no dup-on-read →
+// double-free/SEGV). It is in fact fully covered by the T0610 × T0638 cross-fix:
+//   - T0610 (genArrayLit clears the moved-ident drop flag) makes
+//     `Task[int][] v = [t]` / `Channel[int][] v = [c]` a real move-transfer
+//     (no aliasing double-free between the source var and the vector element).
+//   - T0638 (genReceiveTask nulls the indexed slot after freeing the G) makes
+//     the scope-exit `Vector.drop` element-walk a no-op for the received Task.
+// The genuinely-uncovered intersection is from-*variable* moves into a Vector
+// literal followed by `<-v[i]` (T0638 only covered inline `[go w()]`; T0610's
+// own test deliberately avoids `<-v[0]`). These also use the `Task[int][]` /
+// `Channel[int][]` sugar spelling, complementing T0638's `Vector[...]` form.
+
+// T0610 ident-move into a Vector literal, then T0638 receive via index.
+t0621_task_from_var() `test(exclude: wasm) {
+  Task[int] t = go worker_int();
+  Task[int][] v = [t];
+  x := <-v[0];
+  assert(x == 42, "T0621 task from var");
+}
+
+// Inline element via the `Task[int][]` sugar (complements T0638's
+// `Vector[Task[int]]` spelling; no ident-move involved).
+t0621_task_inline() `test(exclude: wasm) {
+  Task[int][] v = [go worker_int()];
+  x := <-v[0];
+  assert(x == 42, "T0621 task inline");
+}
+
+// Multi-element from-var move; both elements received via index.
+t0621_task_from_var_multi() `test(exclude: wasm) {
+  Task[int] a = go worker_int();
+  Task[int] b = go worker_int();
+  Task[int][] v = [a, b];
+  x := <-v[0];
+  y := <-v[1];
+  assert(x == 42, "T0621 task multi 0");
+  assert(y == 42, "T0621 task multi 1");
+}
+
+// Two-element from-var, only v[0] received — v[1] must still be scope-dropped
+// (per-slot null, not whole-collection). Zero leaks.
+t0621_task_from_var_partial() `test(exclude: wasm) {
+  Task[int] a = go worker_int();
+  Task[int] b = go worker_int();
+  Task[int][] v = [a, b];
+  x := <-v[0];
+  assert(x == 42, "T0621 task partial");
+  // v[1] dropped at scope exit (Task[int].drop), no leak.
+}
+
+// T0610 channel ident-move into a Vector literal, then channel receive via
+// index. genReceiveChannel does NOT free/null the slot — the moved channel
+// must stay valid for the scope-exit Vector.drop → Channel.drop (no
+// double-free, no leak).
+t0621_chan_from_var() `test(exclude: wasm) {
+  Channel[int] c = channel[int](capacity: 1);
+  c.send(9);
+  Channel[int][] v = [c];
+  r := <-v[0];
+  assert(r! == 9, "T0621 channel from var");
+}
+
+// Inline channel element via the `Channel[int][]` sugar (complements T0638's
+// `Vector[Channel[int]]` spelling).
+t0621_chan_inline() `test(exclude: wasm) {
+  Channel[int][] v = [channel_producer()];
+  r := <-v[0];
+  assert(r! == 99, "T0621 channel inline");
+}
+
+// --- T0621 coverage-gap fill ---
+// The above mirrors the Task matrix only partially: Channel had just
+// single-element-fully-received, and EVERY <-v[i] case used Task[int] (a
+// trivial, non-droppable inner result). These four close the two named
+// resource-invariant gaps the existing block leaves open.
+
+// Channel multi from-var, BOTH received. Channel analog of
+// t0621_task_from_var_multi. genReceiveChannel does NOT null the slot, so
+// after both receives the Vector still owns both channels — each must be
+// dropped exactly once at scope exit (Vector.drop → Channel.drop). A receive
+// that aliased/consumed the slot would double-free here.
+t0621_chan_from_var_multi() `test(exclude: wasm) {
+  Channel[int] c1 = channel[int](capacity: 1);
+  c1.send(1);
+  Channel[int] c2 = channel[int](capacity: 1);
+  c2.send(2);
+  Channel[int][] v = [c1, c2];
+  r0 := <-v[0];
+  r1 := <-v[1];
+  assert(r0! == 1, "T0621 channel multi 0");
+  assert(r1! == 2, "T0621 channel multi 1");
+}
+
+// Channel multi from-var, only v[0] received — THE channel double-free/leak
+// invariant the file comment calls out, finally stressed: v[0] is received
+// but the slot is NOT nulled (still vector-owned) AND v[1] is never received.
+// Both must be dropped exactly once via the scope-exit Vector.drop element
+// walk. Channel analog of t0621_task_from_var_partial. Zero leaks.
+t0621_chan_from_var_partial() `test(exclude: wasm) {
+  Channel[int] c1 = channel[int](capacity: 1);
+  c1.send(1);
+  Channel[int] c2 = channel[int](capacity: 1);
+  c2.send(2);
+  Channel[int][] v = [c1, c2];
+  r0 := <-v[0];
+  assert(r0! == 1, "T0621 channel partial");
+  // v[0] (received, not nulled) AND v[1] (never received, still buffered)
+  // both dropped at scope exit via Channel.drop, no double-free, no leak.
+}
+
+// Droppable INNER result via from-var move + <-v[0]. Every other T0621/T0638
+// indexed-receive test uses Task[int] (trivial inner). Task[string].drop must
+// walk the inner string: the T0638 slot-null must null the handle so the
+// scope-exit Vector.drop → Task[string].drop no-ops on v[0], while the
+// received string `s` is owned by the local and dropped exactly once.
+t0621_task_string_from_var() `test(exclude: wasm) {
+  Task[string] t = go worker_string();
+  Task[string][] v = [t];
+  s := <-v[0];
+  assert(s == "hello task", "T0621 task[string] from var");
+}
+
+// Droppable-inner partial: 2-element Task[string][] from var, only v[0]
+// received. v[1] is never awaited — its Task[string].drop runs via the
+// Vector element walk and must spin-wait + drop the un-received task's inner
+// string exactly once (no leak, no double-free). Strongest droppable-inner
+// invariant for the indexed-partial path.
+t0621_task_string_from_var_partial() `test(exclude: wasm) {
+  Task[string] a = go worker_string();
+  Task[string] b = go worker_string();
+  Task[string][] v = [a, b];
+  s := <-v[0];
+  assert(s == "hello task", "T0621 task[string] partial");
+  // v[1] dropped at scope exit (Task[string].drop walks the inner string).
+}

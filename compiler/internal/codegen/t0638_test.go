@@ -155,3 +155,119 @@ func TestT0638_ChannelArrayRecvDoesNotNullSlot(t *testing.T) {
 			"(genReceiveChannel does not free the channel; slot needed for scope-exit drop):\n%s", okBlk)
 	}
 }
+
+// TestT0621_TaskFromVarMoveThenVectorRecv — the T0610 × T0638 cross-fix
+// intersection that T0621's regression suite targets: a Task moved from a
+// *named variable* into a Vector literal, then received via index
+// (`Task[int] t = go w(); Task[int][] v = [t]; x := <-v[0]`). The existing
+// T0638 tests only cover inline `[go w()]` elements; T0610's own test
+// deliberately avoids `<-v[0]`. This locks both halves at the IR level:
+//   - T0610: the moved ident's drop flag is cleared
+//     (`store i1 false, i1* %t.dropflag`) — a real move-transfer into the
+//     vector element, so the source var no longer co-owns the handle. The
+//     *named* SSA value `%t.dropflag` ties this specifically to the from-var
+//     path (inline elements have no source ident / drop flag).
+//   - T0638: the Vector receive-operand in-bounds block (`index.ok`) nulls
+//     the slot (`store i8* null, i8**`) so the scope-exit `Vector.drop`
+//     element-walk reloads null and `Task[int].drop` no-ops.
+//
+// No textual-ordering assertion: LLVM lays the scope-exit `vecdrop.*` cleanup
+// blocks both before and after the `index.ok` receive block, so a
+// `strings.Index` ordering check would be brittle. The runtime
+// no-double-free / zero-leak guarantee is in tests/concurrency/
+// task_drop_test.pr (t0621_task_from_var et al.).
+func TestT0621_TaskFromVarMoveThenVectorRecv(t *testing.T) {
+	ir := generateIR(t, `
+		w() int { return 7; }
+		caller() {
+			Task[int] t = go w();
+			Task[int][] v = [t];
+			x := <-v[0];
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	// T0610: the named source ident `t` has its drop flag cleared at the
+	// move site (move-transfer into the vector literal).
+	if !strings.Contains(body, "store i1 false, i1* %t.dropflag") {
+		t.Errorf("expected T0610 move-transfer drop-flag clear "+
+			"`store i1 false, i1* %%t.dropflag` for the from-var move:\n%s", body)
+	}
+	// T0638: the Vector receive-operand in-bounds block nulls the slot.
+	okBlk := blockByPrefixT0638(body, "index.ok")
+	if okBlk == "" {
+		t.Fatalf("expected index.ok block (Vector receive operand):\n%s", body)
+	}
+	if !strings.Contains(okBlk, "store i8* null, i8**") {
+		t.Errorf("expected T0638 slot-null `store i8* null, i8**` in index.ok block:\n%s", okBlk)
+	}
+	// The scope-exit Vector element drop walk must still be wired — the slot
+	// is nulled, not the whole vector, so the drop walk runs and null-checks.
+	if !strings.Contains(body, `@"Task[int].drop"`) {
+		t.Errorf("expected @\"Task[int].drop\" scope-exit element drop walk:\n%s", body)
+	}
+}
+
+// TestT0621_ChannelFromVarMoveThenVectorRecv — the channel-side IR lock for
+// the T0621 from-var × Vector-receive path, the non-regression counterpart of
+// TestT0621_TaskFromVarMoveThenVectorRecv. The existing
+// TestT0638_ChannelArrayRecvDoesNotNullSlot only covers an *inline* producer
+// into a fixed *array*; this covers a channel moved from a *named variable*
+// into a *Vector literal*, then received via index:
+//   - T0610: the channel source ident `c` has its drop flag cleared
+//     (`store i1 false, i1* %c.dropflag`) — a real move-transfer into the
+//     vector element, so the source var no longer co-owns the channel.
+//   - T0638 non-regression: genReceiveChannel must NOT null the slot (unlike
+//     genReceiveTask) — the channel stays Vector-owned, so the receive-operand
+//     in-bounds block (`index.ok`) must contain no `store i8* null, i8**`.
+//   - The scope-exit Vector element drop walk (`@Channel.drop`) must still be
+//     wired so the still-owned channel is dropped exactly once.
+//
+// This is the IR guarantee behind t0621_chan_from_var / _multi / _partial in
+// tests/concurrency/task_drop_test.pr.
+func TestT0621_ChannelFromVarMoveThenVectorRecv(t *testing.T) {
+	ir := generateIR(t, `
+		producer() Channel[int] {
+			ch := channel[int](capacity: 1);
+			ch.send(99);
+			ch.close();
+			return ch;
+		}
+		caller() {
+			Channel[int] c = producer();
+			Channel[int][] v = [c];
+			x := <-v[0];
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected __user.caller in IR")
+	}
+	// T0610: the named channel source ident `c` has its drop flag cleared at
+	// the move site (move-transfer into the vector literal).
+	if !strings.Contains(body, "store i1 false, i1* %c.dropflag") {
+		t.Errorf("expected T0610 move-transfer drop-flag clear "+
+			"`store i1 false, i1* %%c.dropflag` for the channel from-var move:\n%s", body)
+	}
+	// T0638 non-regression: the Vector receive-operand in-bounds block must
+	// NOT null the slot — genReceiveChannel does not free the channel, so the
+	// slot must stay valid for the scope-exit Vector.drop → Channel.drop.
+	okBlk := blockByPrefixT0638(body, "index.ok")
+	if okBlk == "" {
+		t.Fatalf("expected index.ok block (Vector receive operand):\n%s", body)
+	}
+	if strings.Contains(okBlk, "store i8* null, i8**") {
+		t.Errorf("channel Vector receive operand block must NOT null the slot "+
+			"(genReceiveChannel does not free the channel; slot needed for "+
+			"scope-exit drop):\n%s", okBlk)
+	}
+	// The scope-exit Vector element drop walk must still call Channel.drop on
+	// the still-owned channel (dropped exactly once — no double-free, no leak).
+	if !strings.Contains(body, "call void @Channel.drop(") {
+		t.Errorf("expected `call void @Channel.drop(` scope-exit element drop walk:\n%s", body)
+	}
+}

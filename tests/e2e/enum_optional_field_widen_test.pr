@@ -502,3 +502,279 @@ closure_optional_none() `test {
     CbBox.Nope => assert(false, "expected Hold"),
   }
 }
+
+// --- T0630: generic FUNCTION body, explicit `T?` arg into T? variant field ---
+// Before the fix these panicked with `insertvalue elem type mismatch, expected
+// i64, got { i1, i64 }`: genEnumVariantCallLayout concretized exprType via
+// c.typeSubst but vfType came from resolveMatchFieldType, which short-circuits
+// on the Instance.TypeArgs() identity-map path inside generic bodies. The
+// asymmetric Identical(int?, T?) check returned false → spurious wrapOptional
+// on an already-Optional aggregate. The fix symmetrizes the substitution.
+//
+// The helper uses `~T?` (owned) — required for droppable inner types because
+// of T0635 (sema misses the "cannot move borrowed parameter" check inside
+// generic bodies). With `~T?`, the move is explicit and the caller's drop
+// flag is correctly cleared. The Go IR test exercises the equivalent `T?`
+// (borrowed) shape with Copy inner type, since that avoids T0635 entirely.
+
+make_box_opt[T](~T? x) Box[T] {
+  return Box[T].Full(x);
+}
+
+generic_fn_explicit_opt_int() `test {
+  int? o = 7;
+  Box[int] b = make_box_opt(o);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v == 7, "generic-fn explicit int? holds 7");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// Droppable inner under typeSubst — heap-allocated string (not .rodata literal)
+// so this genuinely exercises drop ownership of the inner string under the
+// generic-fn body's typeSubst.
+generic_fn_explicit_opt_string() `test {
+  string? o = "ab".to_upper();
+  Box[string] b = make_box_opt(o);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v == "AB", "generic-fn explicit string? holds AB");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_fn_explicit_opt_vec() `test {
+  int[] d = [4, 5, 6];
+  int[]? o = d;
+  Box[int[]] b = make_box_opt(o);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v.len == 3, "generic-fn explicit int[]? len 3");
+        assert(v[0] == 4, "first element");
+        assert(v[2] == 6, "last element");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// Note: a `generic_fn_explicit_opt_map` case (T = `map[K,V]`) is omitted
+// because of T0634 — passing a borrowed `T x` map argument through a generic
+// function body triggers a runtime stack overflow regardless of Optional. The
+// crash is independent of the T0630 fix (reproduces with non-Optional variant
+// fields). Add the map case here once T0634 is resolved.
+
+// Explicit `T?` local holding `none` — exercises the non-NoneLit branch under
+// typeSubst (arg.Value is an IdentExpr to an Optional-typed local). Must
+// match-destructure as absent without panic and without leaks.
+generic_fn_explicit_none() `test {
+  int? o = none;
+  Box[int] b = make_box_opt(o);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// Optional-of-user-type under typeSubst — explicit `Pt?` into `Box[Pt]` variant.
+// User type Pt is heap-allocated, exercises the drop chain through the
+// typeSubst-substituted Optional variant data path.
+generic_fn_explicit_opt_pt_user() `test {
+  Pt? p_opt = Pt(x: 3, y: 4);
+  Box[Pt] b = make_box_opt(p_opt);
+  match b {
+    Box.Full(s) => {
+      if pt := s {
+        assert(pt.x == 3, "Pt.x == 3");
+        assert(pt.y == 4, "Pt.y == 4");
+      } else {
+        assert(false, "expected present Pt?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// --- T0630: generic METHOD body (owner type generic), explicit `T?` arg ---
+
+type Wrap[T] {
+  T seed;
+  mk_opt(this, ~T? o) Box[T] {
+    return Box[T].Full(o);
+  }
+}
+
+generic_method_explicit_opt_int() `test {
+  Wrap[int] w = Wrap[int](seed: 5);
+  int? o = 8;
+  Box[int] b = w.mk_opt(o);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v == 8, "generic-method explicit int? holds 8");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_method_explicit_opt_string() `test {
+  Wrap[string] w = Wrap[string](seed: "seed");
+  string? o = "xyz".to_upper();
+  Box[string] b = w.mk_opt(o);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v == "XYZ", "generic-method explicit string? holds XYZ");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_method_explicit_none() `test {
+  Wrap[int] w = Wrap[int](seed: 0);
+  int? o = none;
+  Box[int] b = w.mk_opt(o);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// --- T0630 coverage: `none` LITERAL inside generic fn/method body ---
+// The above `generic_*_explicit_none` cases pass a variable holding none
+// (arg.Value = IdentExpr → else-branch of `if isNone`). These cases pass
+// `none` directly as a literal (arg.Value = *ast.NoneLit → NoneLit branch
+// under c.typeSubst). The NoneLit branch uses zeroValue(fieldLLVM) and
+// bypasses the Identical comparison, but the surrounding *types.Optional
+// type assertion on `vfType` now relies on the T0630 symmetric substitution
+// to recognize `T?` as `*types.Optional` after concretization. Without the
+// fix, an Instance.TypeArgs() identity-map path through resolveMatchFieldType
+// could leave vfType as a partially-substituted form whose Optional structure
+// is still recognized (so this path wasn't the immediate panic source); these
+// tests lock the invariant that the NoneLit branch continues to work for the
+// full droppable-inner matrix under typeSubst.
+
+make_box_none[T]() Box[T] {
+  return Box[T].Full(none);
+}
+
+generic_fn_none_literal_int() `test {
+  Box[int] b = make_box_none[int]();
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_fn_none_literal_string() `test {
+  Box[string] b = make_box_none[string]();
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_fn_none_literal_vec() `test {
+  Box[int[]] b = make_box_none[int[]]();
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_fn_none_literal_map() `test {
+  Box[map[string, int]] b = make_box_none[map[string, int]]();
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_fn_none_literal_pt() `test {
+  Box[Pt] b = make_box_none[Pt]();
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+type WrapNone[T] {
+  T seed;
+  mk_none(this) Box[T] {
+    return Box[T].Full(none);
+  }
+}
+
+generic_method_none_literal_int() `test {
+  WrapNone[int] w = WrapNone[int](seed: 0);
+  Box[int] b = w.mk_none();
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_method_none_literal_string() `test {
+  WrapNone[string] w = WrapNone[string](seed: "x");
+  Box[string] b = w.mk_none();
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}

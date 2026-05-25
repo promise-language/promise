@@ -5744,6 +5744,13 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 						c.info.Types[member.Target], enum)
 				}
 			}
+			// T0630: resolveMatchFieldType only concretizes via the Instance.TypeArgs()
+			// path; inside a generic fn/method body that path produces an identity map
+			// ({T→T}), leaving T? unchanged. Apply c.typeSubst symmetrically with the
+			// exprType substitution below so Identical() compares concrete types.
+			if c.typeSubst != nil && vfType != nil {
+				vfType = types.Substitute(vfType, c.typeSubst)
+			}
 			var val, preWrapVal value.Value
 			if _, isOpt := vfType.(*types.Optional); isOpt {
 				if _, isNone := arg.Value.(*ast.NoneLit); isNone {

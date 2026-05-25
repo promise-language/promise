@@ -1,0 +1,250 @@
+// T0642: generic (method-level type parameter) methods called WITHOUT explicit
+// type-argument brackets — letting U be inferred from the call arguments.
+// Before T0642 codegen panicked ("undeclared method" / "cannot resolve type")
+// because the non-IndexExpr call path built a bare mangled name (Plain.echo)
+// that didn't match the monomorphized instance (Plain.echo[string]). This
+// file locks the explicit-vs-inferred symmetry across all four owner kinds.
+// Batch tests => zero-leak enforced automatically.
+// Non-generic Named owner.
+type Plain {
+  int x;
+  echo[U](U v) U {
+    return v;
+  }
+  pair[U, W](U a, W _b) U {
+    return a;
+  }
+}
+
+// Non-generic enum owner.
+enum EPlain {
+  A,
+  B,
+
+  echo[U](U v) U {
+    return v;
+  }
+  pair[U, W](U a, W _b) U {
+    return a;
+  }
+}
+
+// Generic Named owner — both the owner type param T and method type param U,
+// plus a method whose body uses the outer T via this.val.
+type NBox[T] {
+  T val;
+  echo[U](U v) U {
+    return v;
+  }
+  combine[U](U _x, T fallback) T {
+    return fallback;
+  }
+  // `this.echo(v)` — inferred U inside the owner's own (concrete) body.
+  call_echo[U](U v) U {
+    return this.echo(v);
+  }
+  // Calls into the inferred path with U=T inside a generic body — exercises
+  // the `c.typeSubst` application in buildInferredCallSubst (T → int when
+  // compiling NBox[int].relay).
+  relay(T v) T {
+    return this.echo(v);
+  }
+}
+
+// Generic enum owner — droppable Vector payload to exercise leak enforcement
+// on the fresh-temp receiver post-call drop path.
+enum EBox[T] {
+  V(Vector[T] xs),
+  N,
+
+  echo[U](U v) U {
+    return v;
+  }
+  // `this.echo(v)` — inferred U inside the enum's own body.
+  call_echo[U](U v) U {
+    return this.echo(v);
+  }
+}
+
+test_t0642_non_generic_named_inferred() `test {
+  p := Plain(x: 1);
+  // Explicit form (was already passing).
+  assert(p.echo[string]("hi") == "hi", "explicit string");
+  assert(p.echo[int](42) == 42, "explicit int");
+  // Inferred form (previously panicked).
+  assert(p.echo("hi") == "hi", "inferred string");
+  assert(p.echo(42) == 42, "inferred int");
+  assert(p.echo(true) == true, "inferred bool");
+}
+
+test_t0642_non_generic_named_inferred_multi_typearg() `test {
+  p := Plain(x: 1);
+  assert(p.pair[string, int]("a", 9) == "a", "explicit multi");
+  // Multi-typeparam inference from both args.
+  assert(p.pair("a", 9) == "a", "inferred multi");
+  assert(p.pair(11, false) == 11, "inferred multi int+bool");
+}
+
+test_t0642_non_generic_enum_inferred() `test {
+  e := EPlain.A;
+  assert(e.echo[string]("hi") == "hi", "explicit string");
+  assert(e.echo("hi") == "hi", "inferred string");
+  assert(e.echo(7) == 7, "inferred int");
+  assert(e.pair("k", 9) == "k", "inferred multi");
+}
+
+test_t0642_generic_named_instance_inferred() `test {
+  b := NBox[int](val: 42);
+  assert(b.echo[string]("hi") == "hi", "explicit");
+  assert(b.echo("hi") == "hi", "inferred string");
+  assert(b.echo(7) == 7, "inferred int");
+}
+
+test_t0642_generic_named_mixed_owner_and_method_typeparam() `test {
+  // U inferred from arg, T comes from owner instance (Box[int]).
+  b := NBox[int](val: 42);
+  assert(b.combine("x", 99) == 99, "inferred U, T from owner");
+}
+
+test_t0642_generic_enum_instance_inferred() `test {
+  b := EBox[int].V([1, 2, 3]);
+  assert(b.echo[string]("hi") == "hi", "explicit");
+  assert(b.echo("hi") == "hi", "inferred string");
+  assert(b.echo(7) == 7, "inferred int");
+}
+
+test_t0642_generic_enum_inferred_fresh_temp_droppable() `test {
+  // Fresh-temp receiver with droppable Vector payload — must drop the temp
+  // enum after the call (post-call drop path). Batch test => zero-leak.
+  assert(EBox[int].V([9, 9]).echo("hi") == "hi", "fresh-temp inferred");
+  assert(EBox[string].V(["a"]).echo(42) == 42, "fresh-temp inferred 2");
+}
+
+test_t0642_inferred_this_call_named() `test {
+  // this.echo(v) inside the owner's own (concrete) method body — inferred U
+  // on the bare `this` receiver. Sema synthesizes the owner-self instance
+  // for the MethodInstance (T0642's hook into recordInferredCallInstance).
+  b := NBox[int](val: 1);
+  assert(b.call_echo("hi") == "hi", "this.echo inferred string");
+  assert(b.call_echo(7) == 7, "this.echo inferred int");
+}
+
+test_t0642_inferred_this_call_enum() `test {
+  // Same shape on a generic enum — exercises the OwnerEnum branch of
+  // recordInferredCallInstance.
+  b := EBox[int].V([1]);
+  assert(b.call_echo("hi") == "hi", "enum this.echo inferred string");
+  assert(b.call_echo(true) == true, "enum this.echo inferred bool");
+}
+
+test_t0642_inferred_typearg_equals_outer_typeparam() `test {
+  // U inferred to be the outer T (NBox[int].T → int) — exercises
+  // buildInferredCallSubst's c.typeSubst application when the inferred
+  // type contains a TypeParam.
+  b := NBox[int](val: 1);
+  assert(b.relay(7) == 7, "relay binds U=T (int)");
+  bs := NBox[string](val: "k");
+  assert(bs.relay("z") == "z", "relay binds U=T (string)");
+}
+
+// Inheritance — concrete child of a non-generic parent whose `echo[U]` is
+// generic. Exercises genGenericMethodCall's inheritance branch
+// (`defOwnerName = c.resolveMethodOwner(...)` taking the parent name).
+type ParentEcho {
+  echo[U](U v) U {
+    return v;
+  }
+}
+type ChildEcho is ParentEcho {
+  int extra;
+}
+
+// Inheritance over a generic parent — `ChildG[X] is ParentG[X]` ensures the
+// inferred call resolves to the *parent's* per-instance mono name (via
+// resolveMonoParentName + findParentInstance in sema's MethodInstance).
+type ParentG[X] {
+  X data;
+  echo[U](U v) U {
+    return v;
+  }
+}
+type ChildG[X] is ParentG[X] {
+  int extra;
+}
+
+test_t0642_inferred_inherited_non_generic_parent() `test {
+  c := ChildEcho(extra: 1);
+  assert(c.echo("hi") == "hi", "inferred inherited string");
+  assert(c.echo(42) == 42, "inferred inherited int");
+}
+
+test_t0642_inferred_inherited_generic_parent() `test {
+  c := ChildG[int](data: 10, extra: 1);
+  assert(c.echo("hi") == "hi", "inferred inherited generic-parent string");
+  assert(c.echo(99) == 99, "inferred inherited generic-parent int");
+  cs := ChildG[string](data: "p", extra: 2);
+  assert(cs.echo(true) == true, "inferred inherited generic-parent bool");
+}
+
+// SharedRef receiver — covers the `case *types.SharedRef` ref-unwrap in
+// genGenericEnumMethodCall (and the analogous unwrap path through
+// extractEnum/extractNamed in genGenericMethodCall) on the inferred path.
+ref_named(Plain &p) string {
+  return p.echo("ref_named_inferred");
+}
+ref_enum(EPlain &e) int {
+  return e.echo(33);
+}
+ref_generic_named(NBox[int] &b) string {
+  return b.echo("ref_gen_named");
+}
+ref_generic_enum(EBox[int] &b) int {
+  return b.echo(44);
+}
+
+test_t0642_inferred_shared_ref_receiver() `test {
+  p := Plain(x: 1);
+  e := EPlain.A;
+  b1 := NBox[int](val: 1);
+  b2 := EBox[int].V([1, 2]);
+  assert(ref_named(p) == "ref_named_inferred", "shared-ref named");
+  assert(ref_enum(e) == 33, "shared-ref enum");
+  assert(ref_generic_named(b1) == "ref_gen_named", "shared-ref generic named");
+  assert(ref_generic_enum(b2) == 44, "shared-ref generic enum");
+}
+
+// Inferred generic method returning a structural Iterator that is then
+// consumed by a for-in. Exercises the `claimAllEnvTemps()` branch of the new
+// dispatch arm (heapTemps grows when maybeTrackIterTemp tracks the iterator).
+type IterHolder {
+  Vector[int] xs;
+  pick[U](U _x) Iterator[int] {
+    return this.xs.iter();
+  }
+}
+
+test_t0642_inferred_iterator_return_chained() `test {
+  h := IterHolder(xs: [1, 2, 3, 4]);
+  total := 0;
+  for v in h.pick("ignored") {
+    total = total + v;
+  }
+  assert(total == 10, "inferred iter chained sum");
+}
+
+// Failable inferred generic method — `try_parse![T](T)` with inferred T,
+// propagated via `?!` at the call site. Confirms the failable code path
+// composes with the new dispatch arm.
+type ParserT {
+  try_parse![T](T val) T {
+    return val;
+  }
+}
+
+test_t0642_inferred_failable() `test {
+  p := ParserT();
+  int r = p.try_parse(42)?!;
+  assert(r == 42, "failable inferred int");
+  string s = p.try_parse("hi")?!;
+  assert(s == "hi", "failable inferred string");
+}

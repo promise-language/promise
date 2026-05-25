@@ -3825,6 +3825,76 @@ func TestT0639_RefWrappedGenericInstanceOperatorGetter(t *testing.T) {
 	assertNotContains(t, ir, `@"GBox.total"`)
 }
 
+// TestT0642_InferredGenericMethodOnNonGenericNamed verifies that calling a
+// generic (method-type-param) method on a non-generic Named type WITHOUT
+// explicit type-arg brackets dispatches to the per-method-type-arg mono name
+// inferred from the call argument. Pre-fix this routed through `genMethodCall`,
+// which built the bare mangled name ("Plain.echo") and panicked.
+func TestT0642_InferredGenericMethodOnNonGenericNamed(t *testing.T) {
+	ir := generateIR(t, `
+		type Plain { int x; echo[U](U v) U { return v; } }
+		main() {
+			p := Plain(x: 1);
+			r := p.echo("hi");
+		}
+	`)
+	// Inferred U=string mangles to the same name as the explicit form.
+	assertContains(t, ir, `"Plain.echo[string]"`)
+	assertContains(t, ir, `call i8* @"Plain.echo[string]"`)
+	// Bare-name form (pre-fix mis-dispatch target) must never appear.
+	assertNotContains(t, ir, `@"Plain.echo"(`)
+}
+
+// TestT0642_InferredGenericMethodOnNonGenericEnum exercises the
+// `case *types.Enum` arm of genGenericEnumMethodCall via the inferred path.
+// Pre-fix the inferred call silently dispatched through the bare-name enum
+// path (single overload) which ABI-mismatched on non-`i8*` args.
+func TestT0642_InferredGenericMethodOnNonGenericEnum(t *testing.T) {
+	ir := generateIR(t, `
+		enum EPlain { A, B, echo[U](U v) U { return v; } }
+		main() {
+			p := EPlain.A;
+			r := p.echo("hi");
+		}
+	`)
+	assertContains(t, ir, `"EPlain.echo[string]"`)
+	assertContains(t, ir, `call i8* @"EPlain.echo[string]"`)
+}
+
+// TestT0642_InferredGenericMethodOnGenericNamedInstance verifies the
+// generic-Named-instance owner case routes through the per-instance mono
+// name ("NBox[int].echo[string]"), with U inferred from the call arg.
+func TestT0642_InferredGenericMethodOnGenericNamedInstance(t *testing.T) {
+	ir := generateIR(t, `
+		type NBox[T] { T val; echo[U](U v) U { return v; } }
+		main() {
+			b := NBox[int](val: 42);
+			r := b.echo("hi");
+		}
+	`)
+	assertContains(t, ir, `"NBox[int].echo[string]"`)
+	assertContains(t, ir, `call i8* @"NBox[int].echo[string]"`)
+	// Pre-fix would have mis-dispatched to the bare-owner name.
+	assertNotContains(t, ir, `@"NBox.echo[string]"`)
+}
+
+// TestT0642_InferredGenericMethodOnGenericEnumInstance verifies the
+// generic-enum-instance owner case routes through monoName(instance)
+// + per-method-type-arg suffix on the inferred path (the `*types.Instance`
+// arm of genGenericEnumMethodCall).
+func TestT0642_InferredGenericMethodOnGenericEnumInstance(t *testing.T) {
+	ir := generateIR(t, `
+		enum EBox[T] { V(Vector[T] xs), N, echo[U](U v) U { return v; } }
+		main() {
+			b := EBox[int].V([1, 2, 3]);
+			r := b.echo("hi");
+		}
+	`)
+	assertContains(t, ir, `"EBox[int].echo[string]"`)
+	assertContains(t, ir, `call i8* @"EBox[int].echo[string]"`)
+	assertNotContains(t, ir, `@"EBox.echo[string]"`)
+}
+
 func TestGenericConstructorZeroInit(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] { T value; }

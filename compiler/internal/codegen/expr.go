@@ -1371,6 +1371,23 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				}
 			}
 		}
+		// T0642: Inferred method-level type args. Sema recorded the inferred type
+		// args; route through the generic method path which builds the mono name
+		// + subst. Mirror the IndexExpr-path post-call handling — generic
+		// structural default methods are compiled without selfSubst, so the
+		// iterator's _parent isn't set; don't claim the receiver (B0213).
+		if inferred, ok := c.info.InferredTypeArgs[e]; ok {
+			savedReceiverClaim := c.pendingReceiverClaim
+			c.pendingReceiverClaim = nil
+			result := c.genGenericMethodCall(e, member, inferred.TypeArgs)
+			heapBeforeTrack := len(c.heapTemps)
+			c.maybeTrackIterTemp(e, result)
+			if len(c.heapTemps) > heapBeforeTrack {
+				c.claimAllEnvTemps()
+			}
+			c.pendingReceiverClaim = savedReceiverClaim
+			return result
+		}
 		savedReceiverClaim := c.pendingReceiverClaim // T0130: save across nested calls
 		c.pendingReceiverClaim = nil
 		result := c.genMethodCall(e, member)
@@ -1444,7 +1461,12 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 			}
 			savedReceiverClaim2 := c.pendingReceiverClaim // T0130
 			c.pendingReceiverClaim = nil
-			result := c.genGenericMethodCall(e, idx, member)
+			typeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
+			typeArgs := make([]types.Type, len(typeArgExprs))
+			for i, expr := range typeArgExprs {
+				typeArgs[i] = c.info.Types[expr]
+			}
+			result := c.genGenericMethodCall(e, member, typeArgs)
 			heapBeforeTrack2 := len(c.heapTemps) // B0213: capture before maybeTrackIterTemp
 			c.maybeTrackIterTemp(e, result)
 			// B0213: Don't claim receiver for generic method calls. Generic structural
@@ -1882,7 +1904,11 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 // genGenericMethodCall generates a call to a monomorphized generic method.
 // Example: box.transform[string](fn) → "Box.transform[string]"(this, fn)
 // Example: box.transform[string](fn) where box is Box[int] → "Box[int].transform[string]"(this, fn)
-func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, member *ast.MemberExpr) value.Value {
+//
+// typeArgs are the concrete method-level type arguments (already extracted from
+// either an explicit IndexExpr or sema's InferredTypeArgs). c.typeSubst is
+// applied to each arg before mangling.
+func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, member *ast.MemberExpr, typeArgs []types.Type) value.Value {
 	targetType := c.info.Types[member.Target]
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
@@ -1892,7 +1918,7 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	// generic enum body). Enums don't have a Named layout, so route to the
 	// enum-specific call path.
 	if extractEnum(targetType) != nil {
-		return c.genGenericEnumMethodCall(e, idx, member, targetType)
+		return c.genGenericEnumMethodCall(e, member, typeArgs, targetType)
 	}
 
 	named := extractNamed(targetType)
@@ -1914,17 +1940,15 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	} else {
 		defOwnerName = c.resolveTypeName(targetType)
 	}
-	allTypeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
 	mangledName := mangleMethodName(defOwnerName, member.Field, false) + "["
-	for i, argExpr := range allTypeArgExprs {
-		typeArgType := c.info.Types[argExpr]
-		if c.typeSubst != nil && typeArgType != nil {
-			typeArgType = types.Substitute(typeArgType, c.typeSubst)
+	for i, ta := range typeArgs {
+		if c.typeSubst != nil && ta != nil {
+			ta = types.Substitute(ta, c.typeSubst)
 		}
 		if i > 0 {
 			mangledName += ", "
 		}
-		mangledName += typeArgStr(typeArgType)
+		mangledName += typeArgStr(ta)
 	}
 	mangledName += "]"
 
@@ -1963,7 +1987,7 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	// T0418: Combine owner-type subst (Box[int].T → int + parents) with
 	// method-level subst (transform[string].T → string).
 	ownerSubst := c.buildOwnerTypeArgSubst(targetType)
-	methodSubst := c.buildCallTypeArgSubst(method.Sig().TypeParams(), allTypeArgExprs)
+	methodSubst := c.buildInferredCallSubst(method.Sig().TypeParams(), typeArgs)
 	combined := mergeSubstMaps(ownerSubst, methodSubst)
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, combined)
 	args = append(args, argVals...)
@@ -1979,15 +2003,19 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 // convention of genEnumMethodCall (pass `this` directly; otherwise store to a
 // temp alloca, bitcast to i8*, and enum-drop fresh temporaries after the call)
 // and the mono-name/subst construction of genGenericMethodCall.
-func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, member *ast.MemberExpr, targetType types.Type) value.Value {
+//
+// typeArgs are the concrete method-level type arguments (already extracted from
+// either an explicit IndexExpr or sema's InferredTypeArgs). c.typeSubst is
+// applied to each arg before mangling.
+func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, typeArgs []types.Type, targetType types.Type) value.Value {
 	// T0639: a ~/& generic-enum-instance receiver arrives wrapped in a
 	// MutRef/SharedRef; unwrap so the enum + monoName resolve instead of
 	// hitting the "cannot resolve enum" panic.
 	if ref, ok := targetType.(*types.MutRef); ok {
-		return c.genGenericEnumMethodCall(e, idx, member, ref.Elem())
+		return c.genGenericEnumMethodCall(e, member, typeArgs, ref.Elem())
 	}
 	if ref, ok := targetType.(*types.SharedRef); ok {
-		return c.genGenericEnumMethodCall(e, idx, member, ref.Elem())
+		return c.genGenericEnumMethodCall(e, member, typeArgs, ref.Elem())
 	}
 	var enum *types.Enum
 	var enumName string
@@ -2019,17 +2047,15 @@ func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, idx *ast.IndexExpr,
 
 	// Build mono method name: EnumMonoName.method[typearg1, typearg2]
 	// (consistent with monoMethodInstanceName).
-	allTypeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
 	mangledName := mangleMethodName(enumName, member.Field, false) + "["
-	for i, argExpr := range allTypeArgExprs {
-		typeArgType := c.info.Types[argExpr]
-		if c.typeSubst != nil && typeArgType != nil {
-			typeArgType = types.Substitute(typeArgType, c.typeSubst)
+	for i, ta := range typeArgs {
+		if c.typeSubst != nil && ta != nil {
+			ta = types.Substitute(ta, c.typeSubst)
 		}
 		if i > 0 {
 			mangledName += ", "
 		}
-		mangledName += typeArgStr(typeArgType)
+		mangledName += typeArgStr(ta)
 	}
 	mangledName += "]"
 
@@ -2069,7 +2095,7 @@ func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, idx *ast.IndexExpr,
 			ownerSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 		}
 	}
-	methodSubst := c.buildCallTypeArgSubst(method.Sig().TypeParams(), allTypeArgExprs)
+	methodSubst := c.buildInferredCallSubst(method.Sig().TypeParams(), typeArgs)
 	combined := mergeSubstMaps(ownerSubst, methodSubst)
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params(), e.Args, combined)
 	args = append(args, argVals...)

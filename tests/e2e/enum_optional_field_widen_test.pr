@@ -1,0 +1,504 @@
+// T0608: Constructing an enum variant whose field is `T?` (Optional) by
+// passing a bare non-optional value (implicit `T` -> `T?` widening) or a
+// `none` literal must work, mirroring the struct-constructor Optional path.
+// Covers copy inner (int) and droppable inner (string, int[], map[K,V]),
+// the bare-widen / none-literal / explicit-`T?` construction paths, plus a
+// generic enum `Box[T]` with a `T?` field. Match-destructures each and
+// asserts the value; runs under leak enforcement (must report 0 leaks).
+enum MaybeInt {
+  Slot(int? v),
+  Empty,
+}
+
+enum MaybeStr {
+  Slot(string? v),
+  Empty,
+}
+
+enum MaybeVec {
+  Slot(int[]? v),
+  Empty,
+}
+
+enum MaybeMap {
+  Slot(map[string, int]? v),
+  Empty,
+}
+
+enum Box[T] {
+  Full(T? v),
+  Vacant,
+}
+
+type Pt {
+  int x;
+  int y;
+}
+
+enum Mixed {
+  Pair(int? a, string b),
+  Boxed(Pt? p),
+  Nada,
+}
+
+// --- copy inner (int): bare-value widening ---
+
+int_bare_widen() `test {
+  MaybeInt j = MaybeInt.Slot(5);
+  match j {
+    MaybeInt.Slot(s) => {
+      if v := s {
+        assert(v == 5, "bare-widened int? holds 5");
+      } else {
+        assert(false, "expected present int?");
+      }
+    },
+    MaybeInt.Empty => assert(false, "expected Slot"),
+  }
+}
+
+// --- copy inner (int): none literal ---
+
+int_none_literal() `test {
+  MaybeInt j = MaybeInt.Slot(none);
+  match j {
+    MaybeInt.Slot(s) => {
+      if v := s {
+        assert(false, "expected absent int?");
+      }
+    },
+    MaybeInt.Empty => assert(false, "expected Slot"),
+  }
+}
+
+// --- copy inner (int): explicit T? arg (must stay unwrapped, no regression) ---
+
+int_explicit_optional() `test {
+  int? o = 7;
+  MaybeInt j = MaybeInt.Slot(o);
+  match j {
+    MaybeInt.Slot(s) => {
+      if v := s {
+        assert(v == 7, "explicit int? holds 7");
+      } else {
+        assert(false, "expected present int?");
+      }
+    },
+    MaybeInt.Empty => assert(false, "expected Slot"),
+  }
+}
+
+// --- droppable inner (string): bare-value widening ---
+
+string_bare_widen() `test {
+  MaybeStr j = MaybeStr.Slot("hello");
+  match j {
+    MaybeStr.Slot(s) => {
+      if v := s {
+        assert(v == "hello", "bare-widened string? holds hello");
+      } else {
+        assert(false, "expected present string?");
+      }
+    },
+    MaybeStr.Empty => assert(false, "expected Slot"),
+  }
+}
+
+// --- droppable inner (string): expression temp must not leak/double-free ---
+
+string_expr_temp() `test {
+  MaybeStr j = MaybeStr.Slot("ab".to_upper());
+  match j {
+    MaybeStr.Slot(s) => {
+      if v := s {
+        assert(v == "AB", "string? holds AB");
+      } else {
+        assert(false, "expected present string?");
+      }
+    },
+    MaybeStr.Empty => assert(false, "expected Slot"),
+  }
+}
+
+// --- droppable inner (string): none literal ---
+
+string_none_literal() `test {
+  MaybeStr j = MaybeStr.Slot(none);
+  match j {
+    MaybeStr.Slot(s) => {
+      if v := s {
+        assert(false, "expected absent string?");
+      }
+    },
+    MaybeStr.Empty => assert(false, "expected Slot"),
+  }
+}
+
+// --- droppable inner (int[]): bare-value widening ---
+
+vec_bare_widen() `test {
+  int[] data = [1, 2, 3];
+  MaybeVec j = MaybeVec.Slot(data);
+  match j {
+    MaybeVec.Slot(s) => {
+      if v := s {
+        assert(v.len == 3, "bare-widened int[]? has 3 elements");
+        assert(v[0] == 1, "first element");
+        assert(v[2] == 3, "last element");
+      } else {
+        assert(false, "expected present int[]?");
+      }
+    },
+    MaybeVec.Empty => assert(false, "expected Slot"),
+  }
+}
+
+// --- droppable inner (int[]): none literal ---
+
+vec_none_literal() `test {
+  MaybeVec j = MaybeVec.Slot(none);
+  match j {
+    MaybeVec.Slot(s) => {
+      if v := s {
+        assert(false, "expected absent int[]?");
+      }
+    },
+    MaybeVec.Empty => assert(false, "expected Slot"),
+  }
+}
+
+// --- droppable inner (map[K,V]): bare-value widening ---
+
+map_bare_widen() `test {
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
+  MaybeMap j = MaybeMap.Slot(m);
+  match j {
+    MaybeMap.Slot(s) => {
+      if v := s {
+        assert(v["a"]! == 1, "bare-widened map value a");
+        assert(v["b"]! == 2, "bare-widened map value b");
+      } else {
+        assert(false, "expected present map?");
+      }
+    },
+    MaybeMap.Empty => assert(false, "expected Slot"),
+  }
+}
+
+// --- droppable inner (map[K,V]): none literal ---
+
+map_none_literal() `test {
+  MaybeMap j = MaybeMap.Slot(none);
+  match j {
+    MaybeMap.Slot(s) => {
+      if v := s {
+        assert(false, "expected absent map?");
+      }
+    },
+    MaybeMap.Empty => assert(false, "expected Slot"),
+  }
+}
+
+// --- generic enum Box[T] with T? field: copy inner ---
+
+generic_int_bare_widen() `test {
+  Box[int] b = Box[int].Full(42);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v == 42, "generic Box[int] bare-widened holds 42");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_int_none_literal() `test {
+  Box[int] b = Box[int].Full(none);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// --- generic enum Box[T] with T? field: droppable inner ---
+
+generic_string_bare_widen() `test {
+  Box[string] b = Box[string].Full("gen");
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v == "gen", "generic Box[string] bare-widened holds gen");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_string_none_literal() `test {
+  Box[string] b = Box[string].Full(none);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(false, "expected absent T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// --- multi-field variant: mix Optional (bare widen) + non-Optional field ---
+
+multi_field_mixed() `test {
+  Mixed e = Mixed.Pair(9, "tag");
+  match e {
+    Mixed.Pair(a, b) => {
+      if v := a {
+        assert(v == 9, "widened int? field a holds 9");
+      } else {
+        assert(false, "expected present a");
+      }
+      assert(b == "tag", "non-optional field b holds tag");
+    },
+    Mixed.Boxed(p) => assert(false, "expected Pair"),
+    Mixed.Nada => assert(false, "expected Pair"),
+  }
+}
+
+// --- Optional-of-user-type variant field: bare widen ---
+
+optional_user_type_bare_widen() `test {
+  Mixed e = Mixed.Boxed(Pt(x: 3, y: 4));
+  match e {
+    Mixed.Boxed(p) => {
+      if pt := p {
+        assert(pt.x == 3, "Pt.x == 3");
+        assert(pt.y == 4, "Pt.y == 4");
+      } else {
+        assert(false, "expected present Pt?");
+      }
+    },
+    Mixed.Pair(a, b) => assert(false, "expected Boxed"),
+    Mixed.Nada => assert(false, "expected Boxed"),
+  }
+}
+
+optional_user_type_none() `test {
+  Mixed e = Mixed.Boxed(none);
+  match e {
+    Mixed.Boxed(p) => {
+      if pt := p {
+        assert(false, "expected absent Pt?");
+      }
+    },
+    Mixed.Pair(a, b) => assert(false, "expected Boxed"),
+    Mixed.Nada => assert(false, "expected Boxed"),
+  }
+}
+
+// --- generic FUNCTION body: bare TypeParam arg widened into T? variant field
+// Exercises the genEnumVariantCallLayout `c.typeSubst != nil` substitution
+// branch (expr.go) — uncovered by the original T0608 tests, which all
+// construct the variant at a non-generic call site. The bare-widen path is
+// the one that works under typeSubst (explicit `T?` here is tracked by T0630).
+
+make_box[T](T x) Box[T] {
+  return Box[T].Full(x);
+}
+
+generic_fn_bare_widen_int() `test {
+  Box[int] b = make_box(99);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v == 99, "generic-fn widened int? holds 99");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// Droppable inner under typeSubst — exercises the preWrapVal leak-safety
+// claims (claimStringTemp) inside a monomorphized generic-fn body.
+generic_fn_bare_widen_string() `test {
+  Box[string] b = make_box("zz");
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v == "zz", "generic-fn widened string? holds zz");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+generic_fn_bare_widen_vec() `test {
+  int[] d = [4, 5];
+  Box[int[]] b = make_box(d);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v.len == 2, "generic-fn widened int[]? len 2");
+        assert(v[1] == 5, "second element");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// --- generic METHOD body (owner type generic): bare this.field into T? field
+
+type Holder[T] {
+  T seed;
+  boxed(this) Box[T] {
+    return Box[T].Full(this.seed);
+  }
+}
+
+generic_method_bare_widen() `test {
+  Holder[int] h = Holder[int](seed: 5);
+  Box[int] b = h.boxed();
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v == 5, "generic-method widened int? holds 5");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// --- generic enum, explicit T? at a NON-generic call site ---
+// Distinct from int_explicit_optional (non-generic enum): here the enum is
+// generic but the construction site has typeSubst==nil, so vfType resolves
+// concretely via the Instance branch of resolveMatchFieldType and the
+// explicit arg stays unwrapped (Identical) — must not regress.
+
+generic_enum_explicit_optional() `test {
+  int? o = 3;
+  Box[int] b = Box[int].Full(o);
+  match b {
+    Box.Full(s) => {
+      if v := s {
+        assert(v == 3, "generic-enum explicit int? holds 3");
+      } else {
+        assert(false, "expected present T?");
+      }
+    },
+    Box.Vacant => assert(false, "expected Full"),
+  }
+}
+
+// --- Optional field in a NON-first position (`i`-indexing of the new code) ---
+
+enum Tagged {
+  Rec(string name, int? code),
+  Plain,
+}
+
+non_first_optional_widen() `test {
+  Tagged t = Tagged.Rec("svc", 42);
+  match t {
+    Tagged.Rec(name, code) => {
+      assert(name == "svc", "non-optional first field holds svc");
+      if c := code {
+        assert(c == 42, "widened int? second field holds 42");
+      } else {
+        assert(false, "expected present code");
+      }
+    },
+    Tagged.Plain => assert(false, "expected Rec"),
+  }
+}
+
+non_first_optional_none() `test {
+  Tagged t = Tagged.Rec("svc", none);
+  match t {
+    Tagged.Rec(name, code) => {
+      assert(name == "svc", "non-optional first field holds svc");
+      if c := code {
+        assert(false, "expected absent code");
+      }
+    },
+    Tagged.Plain => assert(false, "expected Rec"),
+  }
+}
+
+// --- two Optional fields in one variant, both bare-widened ---
+
+enum TwoOpt {
+  Both(int? a, string? b),
+  Neither,
+}
+
+two_optional_widen() `test {
+  TwoOpt t = TwoOpt.Both(1, "two");
+  match t {
+    TwoOpt.Both(a, b) => {
+      if av := a {
+        assert(av == 1, "first opt field holds 1");
+      } else {
+        assert(false, "expected present a");
+      }
+      if bv := b {
+        assert(bv == "two", "second opt field holds two");
+      } else {
+        assert(false, "expected present b");
+      }
+    },
+    TwoOpt.Neither => assert(false, "expected Both"),
+  }
+}
+
+// --- closure-typed Optional inner: exercises claimEnvTemp(preWrapVal) ---
+// A bare lambda widened into a `((int)->int)?` variant field. The env
+// allocation must transfer to the enum (no leak / no double-free).
+
+enum CbBox {
+  Hold(((int) -> int)? cb),
+  Nope,
+}
+
+closure_optional_bare_widen() `test {
+  CbBox c = CbBox.Hold(|int n| -> n + 1);
+  match c {
+    CbBox.Hold(s) => {
+      if f := s {
+        assert(f(10) == 11, "widened closure? adds 1");
+      } else {
+        assert(false, "expected present cb");
+      }
+    },
+    CbBox.Nope => assert(false, "expected Hold"),
+  }
+}
+
+closure_optional_none() `test {
+  CbBox c = CbBox.Hold(none);
+  match c {
+    CbBox.Hold(s) => {
+      if f := s {
+        assert(false, "expected absent cb");
+      }
+    },
+    CbBox.Nope => assert(false, "expected Hold"),
+  }
+}

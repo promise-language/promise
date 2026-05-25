@@ -5727,7 +5727,53 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		typedDataPtr := c.block.NewBitCast(dataPtr, irtypes.NewPointer(dataType))
 		for i, arg := range e.Args {
-			val := c.genCallArgExpr(arg.Value)
+			// T0608: Coerce the arg to the declared variant field type before
+			// storing. Mirrors the struct-constructor Optional widening path:
+			// when the variant field is `T?` and the argument is a bare `T`
+			// (or `none`), build the `{i1, payload}` Optional aggregate before
+			// NewStore. Without this the store operands are incompatible
+			// (src=payload; dst={i1,payload}*).
+			fieldLLVM := dataType.Fields[i]
+			// Resolve the declared variant field Promise type via the same
+			// helper match-destructure uses (handles generic enums / typeSubst
+			// identically). Falls back to the unresolved type if not found.
+			var vfType types.Type
+			if enum := extractEnum(c.info.Types[member.Target]); enum != nil {
+				if variant := enum.LookupVariant(member.Field); variant != nil && i < variant.NumFields() {
+					vfType = c.resolveMatchFieldType(variant.Fields()[i].Type(),
+						c.info.Types[member.Target], enum)
+				}
+			}
+			var val, preWrapVal value.Value
+			if _, isOpt := vfType.(*types.Optional); isOpt {
+				if _, isNone := arg.Value.(*ast.NoneLit); isNone {
+					// B0210: generate the none value directly from the layout's
+					// already-monomorphized LLVM type rather than resolveType,
+					// which may mis-lower under partial TypeParam substitution.
+					val = c.zeroValue(fieldLLVM)
+					preWrapVal = val
+				} else {
+					savedTarget := c.targetType
+					c.targetType = vfType
+					preWrapVal = c.genCallArgExpr(arg.Value)
+					c.targetType = savedTarget
+					val = preWrapVal
+					exprType := c.info.Types[arg.Value]
+					if c.typeSubst != nil && exprType != nil {
+						exprType = types.Substitute(exprType, c.typeSubst)
+					}
+					// Leave an explicit `T?` arg unwrapped (Identical) — that
+					// path already stored a matching aggregate before T0608.
+					if exprType != types.TypNone && !types.Identical(exprType, vfType) {
+						if st, ok := fieldLLVM.(*irtypes.StructType); ok {
+							val = c.wrapOptional(preWrapVal, st)
+						}
+					}
+				}
+			} else {
+				val = c.genCallArgExpr(arg.Value)
+				preWrapVal = val
+			}
 			fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 			c.block.NewStore(val, fieldPtr)
@@ -5770,6 +5816,17 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 			// would free the instance, leaving a dangling pointer in the enum.
 			c.claimHeapTemp(val)
 			c.claimEnvTemp(val) // B0278: claim env temp for closure args in enum variants
+			// T0608: For Optional variant fields with droppable inner types
+			// (string?, int[]?, map[K,V]?), the wrapped {i1, ptr} aggregate
+			// won't match the stmtTemp/heap/env maps keyed on the bare inner
+			// pointer. Claim the pre-wrap value too so the inner allocation
+			// isn't dropped at statement end while the enum still owns it
+			// (T0067 zero-tolerance double-free/leak).
+			if preWrapVal != val {
+				c.claimStringTemp(preWrapVal)
+				c.claimHeapTemp(preWrapVal)
+				c.claimEnvTemp(preWrapVal)
+			}
 		}
 	}
 

@@ -743,7 +743,73 @@ test_t0485_optional_array_in_enum_with_match() `test {
   }
 }
 
-// T0512 (filed): nested if-let on a borrowed Optional<Optional<HeapUser>> from
-// a match binding segfaults — the inner if-let's bound local is not propagated
-// as borrow, so its scope drop double-frees with the synth enum drop. A test
-// for this case will be added when T0512 is fixed.
+// T0512: nested if-let on a borrowed Optional<Optional<HeapUser>> from a match
+// destructure. The outer `if first := opt_opt` propagates opt_opt's borrow
+// marker to `first`, so the inner `if r := first` does NOT transfer ownership
+// — the synth enum drop's nested-Optional walk frees the Row exactly once
+// (before the fix this double-freed → SIGSEGV at 0x0).
+test_t0512_nested_optional_match() `test {
+  _T0485Row? inner = _T0485Row(name: "deep".to_string());
+  _T0485Row?? outer = inner;
+  w := _T0485NestedOptWrapper.Some(outer);
+  match w {
+    _T0485NestedOptWrapper.Some(opt_opt) => {
+      if first := opt_opt {
+        if r := first {
+          assert(r.name == "deep", "deep");
+        }
+      }
+    },
+    _T0485NestedOptWrapper.Empty => assert(false, "expected Some"),
+  }
+}
+
+// T0512: same nested unwrap but with else branches on both if-lets. The borrow
+// marker for the unwrapped binding is reverted before the else block is
+// generated, so the else path is unaffected.
+test_t0512_nested_optional_if_else() `test {
+  _T0485Row? inner = _T0485Row(name: "deep2".to_string());
+  _T0485Row?? outer = inner;
+  w := _T0485NestedOptWrapper.Some(outer);
+  match w {
+    _T0485NestedOptWrapper.Some(opt_opt) => {
+      if first := opt_opt {
+        if r := first {
+          assert(r.name == "deep2", "deep2");
+        } else {
+          assert(false, "inner expected Some");
+        }
+      } else {
+        assert(false, "outer expected Some");
+      }
+    },
+    _T0485NestedOptWrapper.Empty => assert(false, "expected Some"),
+  }
+}
+
+// T0512: symmetric while-let path through genWhileUnwrapStmt. The outer
+// `while first := opt_opt` propagates the borrow marker to `first`; the inner
+// while-let / if-let on `first` must not transfer ownership.
+test_t0512_nested_optional_while_let() `test {
+  _T0485Row? inner = _T0485Row(name: "deep3".to_string());
+  _T0485Row?? outer = inner;
+  w := _T0485NestedOptWrapper.Some(outer);
+  match w {
+    _T0485NestedOptWrapper.Some(opt_opt) => {
+      int iters = 0;
+      while first := opt_opt {
+        while r := first {
+          assert(r.name == "deep3", "deep3 wl");
+          break;
+        }
+        if r2 := first {
+          assert(r2.name == "deep3", "deep3 if");
+        }
+        iters = iters + 1;
+        break;
+      }
+      assert(iters == 1, "looped once");
+    },
+    _T0485NestedOptWrapper.Empty => assert(false, "expected Some"),
+  }
+}

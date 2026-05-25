@@ -7416,6 +7416,10 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	unwrapScopeLen := len(c.scopeBindings)
 	savedDropFlag, hadDropFlag := c.dropFlags[s.Binding]
 	savedDropBinding, hadDropBinding := c.dropBindings[s.Binding]
+	// T0512: Snapshot the match-borrow marker for this binding so a marker
+	// propagated through this if-let (below) is reverted at body end —
+	// same lifetime as the drop flag/binding save/restore. Safe on nil map.
+	savedBorrowMark, hadBorrowMark := c.matchBorrowedIdents[s.Binding]
 	initType := c.info.Types[s.Init]
 	if c.typeSubst != nil {
 		initType = types.Substitute(initType, c.typeSubst)
@@ -7468,6 +7472,15 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		}
 	}
 
+	// T0512: A match-borrowed source means the unwrapped binding still
+	// aliases variant-owned memory (the synth enum drop walks the full
+	// nested Optional chain). Mark it borrowed so a further if-let/while-let
+	// on this binding does not transfer ownership and double-free.
+	if ident, isIdent := s.Init.(*ast.IdentExpr); isIdent &&
+		c.matchBorrowedIdents != nil && c.matchBorrowedIdents[ident.Name] {
+		c.matchBorrowedIdents[s.Binding] = true
+	}
+
 	c.genBlock(s.Body)
 
 	// B0215: Emit drop for the unwrapped value on the fall-through path.
@@ -7499,6 +7512,13 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		c.dropBindings[s.Binding] = savedDropBinding
 	} else {
 		delete(c.dropBindings, s.Binding)
+	}
+	// T0512: Revert the borrow marker propagated for this binding (scoped to
+	// the if-let body, same lifetime as the drop flag/binding state above).
+	if hadBorrowMark {
+		c.matchBorrowedIdents[s.Binding] = savedBorrowMark
+	} else if c.matchBorrowedIdents != nil {
+		delete(c.matchBorrowedIdents, s.Binding)
 	}
 
 	// Else (optional)
@@ -7624,6 +7644,9 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	unwrapScopeLen := len(c.scopeBindings)
 	savedDropFlag, hadDropFlag := c.dropFlags[s.Binding]
 	savedDropBinding, hadDropBinding := c.dropBindings[s.Binding]
+	// T0512: Snapshot the match-borrow marker (see genIfUnwrapStmt). Reverted
+	// at body end so the marker does not leak past the loop. Safe on nil map.
+	savedBorrowMark, hadBorrowMark := c.matchBorrowedIdents[s.Binding]
 	valType := c.info.Types[s.Value]
 	if c.typeSubst != nil {
 		valType = types.Substitute(valType, c.typeSubst)
@@ -7667,6 +7690,14 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 		}
 	}
 
+	// T0512: A match-borrowed source means the unwrapped binding still
+	// aliases variant-owned memory; mark it borrowed so a further
+	// if-let/while-let on this binding does not transfer ownership.
+	if ident, isIdent := s.Value.(*ast.IdentExpr); isIdent &&
+		c.matchBorrowedIdents != nil && c.matchBorrowedIdents[ident.Name] {
+		c.matchBorrowedIdents[s.Binding] = true
+	}
+
 	c.genBlock(s.Body)
 
 	// B0215: Emit drop for the unwrapped value at iteration end (fall-through).
@@ -7696,6 +7727,12 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 		c.dropBindings[s.Binding] = savedDropBinding
 	} else {
 		delete(c.dropBindings, s.Binding)
+	}
+	// T0512: Revert the borrow marker propagated for this binding.
+	if hadBorrowMark {
+		c.matchBorrowedIdents[s.Binding] = savedBorrowMark
+	} else if c.matchBorrowedIdents != nil {
+		delete(c.matchBorrowedIdents, s.Binding)
 	}
 
 	c.breakTarget = savedBreak

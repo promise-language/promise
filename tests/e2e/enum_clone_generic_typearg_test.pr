@@ -1,0 +1,271 @@
+// T0551: Cloning a generic `clone enum whose TypeArg is droppable (map, vector,
+// user type with drop) must deep-copy the variant payload. The synthesized enum
+// clone treats a TypeParam variant field as copy (isCopyField(TypeParam)==true)
+// so it emits no explicit .clone(); codegen's match-dup must therefore kick in
+// for the substituted concrete type. Before the fix the payload was shallow-
+// aliased and dropped twice → segfault. Both the original and the clone are
+// consumed via match below so both drop paths are exercised (double-free repro).
+enum MaybeMap[T] `clone {
+  Just(T val),
+  Nothing,
+}
+
+// Droppable TypeArg: map[K,V] (the original repro).
+test_clone_typearg_map() `test {
+  map[string, string] src = map[string, string]();
+  src["a"] = "b";
+  src["c"] = "d";
+  MaybeMap[map[string, string]] j = MaybeMap[map[string, string]].Just(src);
+  MaybeMap[map[string, string]] c = j.clone();
+  // Consume the clone.
+  match c {
+    MaybeMap.Just(v) => {
+      assert(v.len == 2, "clone has 2 entries");
+      assert(v.get_or("a", "") == "b", "clone a=b");
+      assert(v.get_or("c", "") == "d", "clone c=d");
+    },
+    MaybeMap.Nothing => assert(false, "expected Just (clone)"),
+  }
+  // Consume the original — must still be intact and independently droppable.
+  match j {
+    MaybeMap.Just(v) => {
+      assert(v.len == 2, "original still has 2 entries");
+      assert(v.get_or("a", "") == "b", "original a=b");
+    },
+    MaybeMap.Nothing => assert(false, "expected Just (original)"),
+  }
+}
+
+// Droppable TypeArg: string[] (vector of heap strings).
+test_clone_typearg_string_vec() `test {
+  string[] data = ["x", "y", "z"];
+  MaybeMap[string[]] j = MaybeMap[string[]].Just(data);
+  MaybeMap[string[]] c = j.clone();
+  match c {
+    MaybeMap.Just(v) => {
+      assert(v.len == 3, "clone vec len 3");
+      assert(v[0] == "x", "clone[0]");
+      assert(v[2] == "z", "clone[2]");
+    },
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+  match j {
+    MaybeMap.Just(v) => assert(v.len == 3, "original vec len 3"),
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+}
+
+// TypeArg: int[] (vector of copy scalars).
+test_clone_typearg_int_vec() `test {
+  int[] nums = [1, 2, 3, 4];
+  MaybeMap[int[]] j = MaybeMap[int[]].Just(nums);
+  MaybeMap[int[]] c = j.clone();
+  match c {
+    MaybeMap.Just(v) => {
+      assert(v.len == 4, "clone len 4");
+      assert(v[3] == 4, "clone[3]==4");
+    },
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+  match j {
+    MaybeMap.Just(v) => assert(v.len == 4, "original len 4"),
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+}
+
+// TypeArg: string (heap, but bit-63 literal flag makes single-drop benign;
+// double consume still validated).
+test_clone_typearg_string() `test {
+  MaybeMap[string] j = MaybeMap[string].Just("hello");
+  MaybeMap[string] c = j.clone();
+  match c {
+    MaybeMap.Just(v) => assert(v == "hello", "clone string"),
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+  match j {
+    MaybeMap.Just(v) => assert(v == "hello", "original string"),
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+}
+
+// TypeArg: int (pure copy — no dup needed, behavior must be unchanged).
+test_clone_typearg_int() `test {
+  MaybeMap[int] j = MaybeMap[int].Just(42);
+  MaybeMap[int] c = j.clone();
+  match c {
+    MaybeMap.Just(v) => assert(v == 42, "clone int"),
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+  match j {
+    MaybeMap.Just(v) => assert(v == 42, "original int"),
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+}
+
+// TypeArg: a user `clone type wrapping a droppable map field — exercises the
+// nested clone-of-clone path.
+type Bag `clone {
+  map[string, int] counts;
+}
+
+test_clone_typearg_user_clone_type() `test {
+  map[string, int] m = map[string, int]();
+  m["apples"] = 3;
+  Bag b = Bag(counts: m);
+  MaybeMap[Bag] j = MaybeMap[Bag].Just(b);
+  MaybeMap[Bag] c = j.clone();
+  match c {
+    MaybeMap.Just(v) => {
+      assert(v.counts.len == 1, "clone bag len 1");
+      assert(v.counts.get_or("apples", 0) == 3, "clone apples==3");
+    },
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+  match j {
+    MaybeMap.Just(v) => {
+      assert(v.counts.len == 1, "original bag len 1");
+      assert(v.counts.get_or("apples", 0) == 3, "original apples==3");
+    },
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+}
+
+// Cloning the fieldless variant must not crash and must stay independent.
+test_clone_nothing_variant() `test {
+  MaybeMap[map[string, string]] j = MaybeMap[map[string, string]].Nothing;
+  MaybeMap[map[string, string]] c = j.clone();
+  match c {
+    MaybeMap.Just(v) => assert(false, "expected Nothing"),
+    MaybeMap.Nothing => {
+    },
+  }
+  match j {
+    MaybeMap.Just(v) => assert(false, "expected Nothing"),
+    MaybeMap.Nothing => {
+    },
+  }
+}
+
+// Mutating the clone must not affect the original (true deep copy).
+test_clone_map_independence() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v1";
+  MaybeMap[map[string, string]] j = MaybeMap[map[string, string]].Just(src);
+  MaybeMap[map[string, string]] c = j.clone();
+  match c {
+    MaybeMap.Just(v) => {
+      v["k"] = "mutated";
+      v["extra"] = "new";
+      assert(v.len == 2, "clone mutated to 2 entries");
+    },
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+  match j {
+    MaybeMap.Just(v) => {
+      assert(v.len == 1, "original unaffected: still 1 entry");
+      assert(v.get_or("k", "") == "v1", "original value untouched");
+    },
+    MaybeMap.Nothing => assert(false, "expected Just"),
+  }
+}
+
+// A SINGLE variant carrying BOTH a concrete non-copy field (string — B0285 path:
+// suppression stays in effect, the synth body's explicit .clone() does the one
+// copy) AND a TypeParam field (T — T0551 path: suppression lifted, match-dup
+// deep-copies the substituted concrete type). Exercises the per-field scoping of
+// the B0285 suppression: if it were per-variant instead of per-field, the string
+// would double-clone (leak) or the map would shallow-alias (double-free).
+enum Mixed[T] `clone {
+  Both(string label, T payload),
+  None,
+}
+
+test_clone_mixed_concrete_and_typeparam_field() `test {
+  map[string, int] m = map[string, int]();
+  m["k"] = 7;
+  Mixed[map[string, int]] j = Mixed[map[string, int]].Both("tag", m);
+  Mixed[map[string, int]] c = j.clone();
+  match c {
+    Mixed.Both(lbl, p) => {
+      assert(lbl == "tag", "clone concrete-string field intact");
+      assert(p.len == 1, "clone TypeParam-map field deep-copied");
+      assert(p.get_or("k", 0) == 7, "clone map k==7");
+    },
+    Mixed.None => assert(false, "expected Both"),
+  }
+  match j {
+    Mixed.Both(lbl, p) => {
+      assert(lbl == "tag", "original label intact");
+      assert(p.len == 1, "original map independent and intact");
+    },
+    Mixed.None => assert(false, "expected Both"),
+  }
+}
+
+// Two type params, both droppable, each in its own variant. The synth clone must
+// resolve T->concrete per-variant (Left uses L, Right uses R) — exercises
+// resolveMatchFieldType across multiple type params under the genMatchExpr
+// monoCtx->instance resolution.
+enum Either[L, R] `clone {
+  Left(L lv),
+  Right(R rv),
+}
+
+test_clone_two_typeparams_both_droppable() `test {
+  string[] sv = ["a", "b"];
+  Either[string[], map[string, int]] el = Either[string[], map[string, int]].Left(sv);
+  Either[string[], map[string, int]] elc = el.clone();
+  match elc {
+    Either.Left(v) => assert(v.len == 2, "Left clone len 2"),
+    Either.Right(m) => assert(false, "expected Left"),
+  }
+  match el {
+    Either.Left(v) => assert(v.len == 2, "Left original len 2"),
+    Either.Right(m) => assert(false, "expected Left"),
+  }
+  map[string, int] mm = map[string, int]();
+  mm["z"] = 3;
+  Either[string[], map[string, int]] er = Either[string[], map[string, int]].Right(mm);
+  Either[string[], map[string, int]] erc = er.clone();
+  match erc {
+    Either.Left(v) => assert(false, "expected Right"),
+    Either.Right(m) => assert(m.get_or("z", 0) == 3, "Right clone z==3"),
+  }
+  match er {
+    Either.Left(v) => assert(false, "expected Right"),
+    Either.Right(m) => assert(m.len == 1, "Right original intact"),
+  }
+}
+
+// Nested generic `clone enums: Outer[T] wraps Inner[T], droppable T. The synth
+// Outer.clone must recursively dup the Inner[T] payload, which itself recursively
+// dups its T payload — exercises the monoCtx->instance resolution at nested depth
+// and recursive cloneEnumValue dispatch.
+enum Inner[T] `clone {
+  Has(T v),
+  Not,
+}
+enum Outer[T] `clone {
+  Wrap(Inner[T] inner),
+  Bare,
+}
+
+test_clone_nested_generic_enum() `test {
+  string[] sv = ["p", "q", "r"];
+  Outer[string[]] j = Outer[string[]].Wrap(Inner[string[]].Has(sv));
+  Outer[string[]] c = j.clone();
+  match c {
+    Outer.Wrap(inn) => match inn {
+      Inner.Has(v) => assert(v.len == 3, "nested clone len 3"),
+      Inner.Not => assert(false, "expected Has"),
+    },
+    Outer.Bare => assert(false, "expected Wrap"),
+  }
+  match j {
+    Outer.Wrap(inn) => match inn {
+      Inner.Has(v) => assert(v.len == 3, "nested original len 3"),
+      Inner.Not => assert(false, "expected Has"),
+    },
+    Outer.Bare => assert(false, "expected Wrap"),
+  }
+}

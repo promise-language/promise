@@ -5783,6 +5783,20 @@ func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
 	if c.typeSubst != nil {
 		subjectType = types.Substitute(subjectType, c.typeSubst)
 	}
+	// T0551: Inside a monomorphized generic enum method, `match this` records the
+	// receiver as the bare generic *types.Enum (TypeParams live in variant fields,
+	// not the enum head, so types.Substitute leaves it unchanged). Resolve it to the
+	// concrete instance so droppable-TypeArg detection (enumInstanceHasDrop) and
+	// variant-field type resolution (resolveMatchFieldType) operate on the real
+	// substituted types — otherwise a generic `clone enum with a droppable TypeArg
+	// (e.g. MaybeMap[map[..]]) shallow-aliases the payload and double-frees.
+	if c.monoCtx != nil && c.monoCtx.inst != nil {
+		if subjEnum, ok := subjectType.(*types.Enum); ok {
+			if origin, ok := c.monoCtx.origin.(*types.Enum); ok && subjEnum == origin {
+				subjectType = c.monoCtx.inst
+			}
+		}
+	}
 
 	if enumLayout := c.lookupEnumLayout(subjectType); enumLayout != nil {
 		enum := extractEnum(subjectType)
@@ -6261,10 +6275,21 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		// Map destruction), the shared value would be double-freed.
 		// B0285: Skip dup inside enum clone methods — the synthesized body explicitly
 		// calls .clone() on non-copy fields, so match-dup would double-clone.
-		if enumHasDrop && !c.suppressMatchDup && c.matchFieldNeedsDup(variant.Fields()[i].Type(), subjectType, enum) {
-			resolved := c.resolveMatchFieldType(variant.Fields()[i].Type(), subjectType, enum)
-			c.dupMatchBinding(binding, val, fieldType, resolved)
-			continue
+		// T0551: Suppression is scoped to non-TypeParam-declared fields. The synth
+		// treats TypeParam variant fields as copy (isCopyField(TypeParam)==true) and
+		// emits no explicit .clone() for them, so the substituted concrete type must
+		// go through match-dup to avoid a shallow alias → double-free.
+		declaredFieldType := variant.Fields()[i].Type()
+		if enumHasDrop && c.matchFieldNeedsDup(declaredFieldType, subjectType, enum) {
+			suppress := c.suppressMatchDup
+			if suppress && types.ContainsTypeParam(declaredFieldType) {
+				suppress = false
+			}
+			if !suppress {
+				resolved := c.resolveMatchFieldType(declaredFieldType, subjectType, enum)
+				c.dupMatchBinding(binding, val, fieldType, resolved)
+				continue
+			}
 		}
 
 		bindAlloca := c.createEntryAlloca(fieldType)

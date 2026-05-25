@@ -12308,6 +12308,96 @@ func TestEnumCloneNoDoubleClone(t *testing.T) {
 	}
 }
 
+// T0551: Cloning a generic `clone enum whose TypeArg is droppable (map[K,V])
+// must deep-copy the variant payload. The synth body treats the TypeParam
+// variant field as copy (isCopyField(TypeParam)==true) so it emits no explicit
+// .clone(); codegen's match-dup must therefore call the substituted concrete
+// type's clone. Before the fix the synth body shallow-aliased the Map fat
+// pointer (no clone call) → double-free segfault. Assert the mono clone body
+// contains a Map[..].clone call inside the Just arm.
+func TestGenericEnumCloneDroppableTypeArg(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum MaybeMap[T] `clone {\n"+
+		"  Just(T val),\n"+
+		"  Nothing,\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, string] src = map[string, string]();\n"+
+		"  MaybeMap[map[string, string]] j = MaybeMap[map[string, string]].Just(src);\n"+
+		"  MaybeMap[map[string, string]] c = j.clone();\n"+
+		"}\n")
+	// The mono enum clone body must deep-copy the Map payload.
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawMapClone := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, "MaybeMap[Map[string, string]].clone") {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if inClone && strings.Contains(line, `@"Map[string, string].clone"`) {
+			sawMapClone = true
+		}
+	}
+	if !sawMapClone {
+		t.Errorf("T0551: MaybeMap[Map[string, string]].clone() body must call Map[string, string].clone (deep-copy the droppable TypeArg payload); got shallow alias")
+	}
+}
+
+// T0551/B0285 coexistence: a SINGLE variant carrying both a concrete non-copy
+// field (string) and a TypeParam field (T) must apply the B0285 suppression
+// per-field, not per-variant. The concrete `string label` keeps suppression
+// (synth body's explicit .clone() does the one copy → exactly 1 strdup block,
+// not 2). The TypeParam `T payload` lifts suppression (T0551) so match-dup
+// deep-copies the substituted Map (→ a Map[..].clone call). Asserting both
+// invariants in the same mono clone body pins the per-field scoping that
+// neither TestGenericEnumCloneDroppableTypeArg (pure TypeParam) nor
+// TestEnumCloneNoDoubleClone (pure concrete, non-generic) checks jointly.
+func TestEnumCloneMixedConcreteAndTypeParamField(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum Mixed[T] `clone {\n"+
+		"  Both(string label, T payload),\n"+
+		"  None,\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, int] m = map[string, int]();\n"+
+		"  Mixed[map[string, int]] j = Mixed[map[string, int]].Both(\"tag\", m);\n"+
+		"  Mixed[map[string, int]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawMapClone := false
+	strdupBlocks := 0
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, "Mixed[Map[string, int]].clone") {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if !inClone {
+			continue
+		}
+		if strings.Contains(line, `@"Map[string, int].clone"`) {
+			sawMapClone = true
+		}
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "strdup.copy.") && strings.HasSuffix(trimmed, ":") {
+			strdupBlocks++
+		}
+	}
+	if !sawMapClone {
+		t.Errorf("T0551: Mixed[Map[string, int]].clone() must call Map[string, int].clone for the TypeParam `payload` field (deep-copy); got shallow alias")
+	}
+	if strdupBlocks != 1 {
+		t.Errorf("B0285: Mixed[Map[string, int]].clone() must clone the concrete `label` string exactly once (per-field suppression), got %d strdup blocks", strdupBlocks)
+	}
+}
+
 // B0237/B0242: Match destructure of droppable enum dups string fields and
 // registers them for arm-scope cleanup with a drop flag. The drop flag is
 // cleared at move sites (PHI, push, etc.), so consumed bindings are not

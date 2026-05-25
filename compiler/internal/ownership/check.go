@@ -18,6 +18,16 @@ type Checker struct {
 	inUnsafe int
 	pinned   map[string]bool // use-bound variables that cannot be moved
 
+	// T0652: for-in loop binding names whose iterable is a native container
+	// (Vector/Array/Map-value) of single-owner native handles (Mutex/MutexGuard/
+	// Task). Moves of such bindings (`x := h`, `foo(h)`, `use x := h`, `return h`)
+	// are rejected by tryMove/tryMoveConsume because the binding aliases the
+	// container's slot — moving it leaves the container with a dangling pointer
+	// that double-frees / hangs at scope-exit container drop. `<-h` direct
+	// receive is unaffected (UnaryExpr does not go through tryMove; T0617
+	// codegen already nulls the slot).
+	forInSingleOwnerBindings map[string]bool
+
 	// Drop ordering: tracks declaration order for LIFO drop-order validation.
 	// Variables are dropped in reverse declaration order at scope exit.
 	// If a borrower is declared before its origin, the origin is dropped first
@@ -121,6 +131,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedParams := c.params
 	savedSig := c.curSig
 	savedPinned := c.pinned
+	savedForInSingleOwner := c.forInSingleOwnerBindings
 	savedDeclOrder := c.declOrder
 	savedNextOrder := c.nextOrder
 	savedVarTypes := c.varTypes
@@ -131,6 +142,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.params = make(map[string]bool)
 	c.curSig = sig
 	c.pinned = make(map[string]bool)
+	c.forInSingleOwnerBindings = make(map[string]bool)
 	c.declOrder = make(map[string]int)
 	c.nextOrder = 0
 	c.varTypes = make(map[string]types.Type)
@@ -153,6 +165,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.borrows = savedBorrows
 	c.params = savedParams
 	c.pinned = savedPinned
+	c.forInSingleOwnerBindings = savedForInSingleOwner
 	c.curSig = savedSig
 	c.declOrder = savedDeclOrder
 	c.nextOrder = savedNextOrder
@@ -230,6 +243,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedParams := c.params
 	savedSig := c.curSig
 	savedPinned := c.pinned
+	savedForInSingleOwner := c.forInSingleOwnerBindings
 	savedDeclOrder := c.declOrder
 	savedNextOrder := c.nextOrder
 	savedVarTypes := c.varTypes
@@ -240,6 +254,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.params = make(map[string]bool)
 	c.curSig = m.Sig()
 	c.pinned = make(map[string]bool)
+	c.forInSingleOwnerBindings = make(map[string]bool)
 	c.declOrder = make(map[string]int)
 	c.nextOrder = 0
 	c.varTypes = make(map[string]types.Type)
@@ -270,6 +285,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.params = savedParams
 	c.curSig = savedSig
 	c.pinned = savedPinned
+	c.forInSingleOwnerBindings = savedForInSingleOwner
 	c.declOrder = savedDeclOrder
 	c.nextOrder = savedNextOrder
 	c.varTypes = savedVarTypes

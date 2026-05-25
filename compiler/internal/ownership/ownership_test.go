@@ -9369,3 +9369,341 @@ func TestT0635_ThisIntoVariantConstructorRejected(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot consume 'this'")
 }
+
+// === T0652: move of a for-in loop binding over a native container of
+// single-owner native handles must be rejected (sibling of T0596 for the
+// loop-binding shape; T0617 fixed direct `<-h` codegen but `x := h; <-x`
+// still SIGSEGV'd/hung because the value-copy aliases the slot).
+
+// Inferred var-decl from the loop binding (`x := h`) is the canonical T0652
+// repro shape. Without the fix this codegens, runs, then double-frees the
+// Vector's slot at scope-exit (Task.drop hangs spinning on freed G).
+func TestT0652_VectorForInBindingVarDeclRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		test() {
+			Vector[Task[int]] v = [go worker(), go worker()];
+			for h in v {
+				x := h;
+				_ = <-x;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// Typed var-decl form (`Task[int] x = h;`) — same tryMove path, distinct
+// surface syntax.
+func TestT0652_VectorForInBindingTypedVarDeclRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		test() {
+			Vector[Task[int]] v = [go worker(), go worker()];
+			for h in v {
+				Task[int] x = h;
+				_ = <-x;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// Assignment RHS — `other = h;` flows through tryMove on the RHS.
+func TestT0652_VectorForInBindingAssignRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		test() {
+			Vector[Task[int]] v = [go worker(), go worker()];
+			Task[int] other = go worker();
+			for h in v {
+				other = h;
+			}
+			_ = <-other;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// Passing the binding to a `~T` callee — tryMoveConsume path.
+func TestT0652_VectorForInBindingConsumeArgRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		take(~Task[int] t) int { return <-t; }
+		test() {
+			Vector[Task[int]] v = [go worker(), go worker()];
+			for h in v {
+				_ = take(h);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// `return h;` from inside a for-in over a for-in.
+func TestT0652_VectorForInBindingReturnRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		first(~Vector[Task[int]] v) Task[int] {
+			for h in v {
+				return h;
+			}
+			return go worker();
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// Fixed-size Array iteration — same aliasing shape, different lowering.
+func TestT0652_ArrayForInBindingVarDeclRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		test() {
+			Task[int][2] arr = [go worker(), go worker()];
+			for h in arr {
+				x := h;
+				_ = <-x;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// Map value-position iteration (`for k, h in m { x := h }`) — Map value
+// slots have the same aliasing shape; only the value binding is flagged.
+func TestT0652_MapForInBindingVarDeclRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		test() {
+			Map[int, Task[int]] m = {0: go worker(), 1: go worker()};
+			for k, h in m {
+				x := h;
+				_ = <-x;
+				_ = k;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// Mutex element type (different single-owner native handle).
+func TestT0652_MutexVecForInBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			Mutex[int] m1 = Mutex[int](2);
+			Vector[Mutex[int]] v = [m0, m1];
+			for h in v {
+				x := h;
+				_ = x;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// MutexGuard is single-owner too (use-bound, but the move check still
+// applies before the use-bound check fires). Exercises the IsMutexGuard
+// arm of isSingleOwnerNativeType for the for-in shape.
+func TestT0652_MutexGuardVecForInBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			Mutex[int] m0 = Mutex[int](1);
+			use g0 := m0.lock();
+			MutexGuard[int][1] arr = [g0];
+			for h in arr {
+				x := h;
+				_ = x;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// Optional wrapping coverage: `Vector[Task[int]?]` slot still resolves to
+// single-owner (isSingleOwnerNativeType recurses through Optional).
+func TestT0652_OptionalTaskVecForInBindingRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		test() {
+			Task[int]? t0 = go worker();
+			Task[int]? t1 = go worker();
+			Vector[Task[int]?] v = [t0, t1];
+			for h in v {
+				x := h;
+				_ = x;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// Parenthesised binding move — `x := (h)` — ParenExpr peel must fire.
+func TestT0652_ParenthesisedBindingMoveRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		test() {
+			Vector[Task[int]] v = [go worker(), go worker()];
+			for h in v {
+				x := (h);
+				_ = <-x;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// OptionalUnwrap peel — `x := h!` for `Vector[Task[int]?]` reaches the
+// inner IdentExpr through the peel loop.
+func TestT0652_OptionalUnwrapBindingMoveRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		test() {
+			Task[int]? t0 = go worker();
+			Task[int]? t1 = go worker();
+			Vector[Task[int]?] v = [t0, t1];
+			for h in v {
+				x := h!;
+				_ = <-x;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding 'h'")
+}
+
+// Sibling for-in loops reusing the same binding name: the first loop sets
+// the flag on `h`, the second loop iterates a non-single-owner vector and
+// must NOT inherit the flag from the prior loop. Verifies the delete-on-exit
+// cleanup path in checkForInStmt.
+func TestT0652_SiblingForInClearsFlag(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		test() {
+			Vector[Task[int]] v1 = [go worker(), go worker()];
+			Vector[int] v2 = [1, 2, 3];
+			total := 0;
+			for h in v1 {
+				total = total + (<-h);
+			}
+			for h in v2 {
+				x := h;
+				total = total + x;
+			}
+			_ = total;
+		}
+	`)
+}
+
+// --- Positive (allow) regression guards ---
+
+// `<-h` direct receive on the loop binding is the T0617 fixed path:
+// UnaryExpr does NOT go through tryMove, so the new check must NOT
+// over-reject it.
+func TestT0652_DirectReceiveAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		test() {
+			Vector[Task[int]] v = [go worker(), go worker()];
+			total := 0;
+			for h in v {
+				total = total + (<-h);
+			}
+			_ = total;
+		}
+	`)
+}
+
+// Vector[int] iteration — int is Copy, no aliasing concern; the new
+// check must not fire.
+func TestT0652_VectorIntForInAllowed(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			Vector[int] v = [1, 2, 3];
+			total := 0;
+			for h in v {
+				x := h;
+				total = total + x;
+			}
+		}
+	`)
+}
+
+// Vector[string] iteration — string has dup-on-yield (codegen handles
+// the per-iteration ownership transfer); single-owner check must not fire.
+func TestT0652_VectorStringForInMoveAllowed(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			Vector[string] v = ["a", "b"];
+			for h in v {
+				x := h;
+				_ = x;
+			}
+		}
+	`)
+}
+
+// User heap type (non-single-owner-native) — current behavior unchanged;
+// the new check is type-driven on single-owner natives only.
+func TestT0652_VectorBoxForInMoveAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box { int v; }
+		test() {
+			Box b0 = Box(v: 1);
+			Box b1 = Box(v: 2);
+			Vector[Box] v = [b0, b1];
+			for h in v {
+				x := h;
+				_ = x;
+			}
+		}
+	`)
+}
+
+// Range iteration — Range elements are Copy, no aliasing concern.
+func TestT0652_RangeForInAllowed(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			total := 0;
+			for i in 0..3 {
+				x := i;
+				total = total + x;
+			}
+		}
+	`)
+}
+
+// No-body-consume — for-in over Vector[Task] where the body doesn't move
+// the binding. Must not error; T0503 unchanged.
+func TestT0652_NoBodyConsumeAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		test() {
+			Vector[Task[int]] v = [go worker(), go worker()];
+			count := 0;
+			for h in v {
+				count = count + 1;
+			}
+			_ = count;
+		}
+	`)
+}
+
+// Iterator-chain regression guard — `for h in v.iter()` over Vector[Task]
+// goes through a different lowering (custom-iter / generator path) and the
+// iterable's static type is _FnIter[T] (or similar), NOT Vector/Array/Map.
+// `forInAliasingElementType` returns nil for those shapes, so the binding
+// must NOT be flagged. Move of `h` inside the body is allowed (subject to
+// the iterator's own per-yield ownership semantics, which are unchanged).
+func TestT0652_IteratorChainAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		test() {
+			Vector[Task[int]] v = [go worker(), go worker()];
+			total := 0;
+			for h in v.iter() {
+				total = total + (<-h);
+			}
+			_ = total;
+		}
+	`)
+}

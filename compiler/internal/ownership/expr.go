@@ -184,6 +184,12 @@ func (c *Checker) tryMove(expr ast.Expr) {
 		return
 	}
 
+	// T0652: reject moves of a for-in loop binding whose iterable element is a
+	// single-owner native handle (sibling of T0596 for the loop-binding shape).
+	if c.rejectForInSingleOwnerBindingMove(expr) {
+		return
+	}
+
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
 		return
@@ -241,6 +247,11 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	// T0596: reject `arr[i]` / `v[i]` when the slot type is a single-owner
 	// native handle (Mutex/MutexGuard/Task). See tryMove for rationale.
 	if c.rejectIndexExprSingleOwnerMove(expr) {
+		return
+	}
+	// T0652: reject moves of a for-in loop binding whose iterable element is a
+	// single-owner native handle. See tryMove for rationale.
+	if c.rejectForInSingleOwnerBindingMove(expr) {
 		return
 	}
 	// B0341 field-move check delegated to tryMove; inherit it here too.
@@ -1087,6 +1098,65 @@ func isSingleOwnerNativeType(typ types.Type) bool {
 		return isSingleOwnerNativeType(opt.Elem())
 	}
 	return types.IsMutex(typ) || types.IsMutexGuard(typ) || types.IsTask(typ)
+}
+
+// forInAliasingElementType returns the element type of an iterable used in a
+// for-in whose loop binding *aliases* the container's backing storage (a slot
+// pointer / map value pointer). For these shapes, moving the binding out
+// without updating the container leaves a dangling slot that double-frees at
+// scope-exit. Returns nil for shapes that yield owned values per iteration
+// (Range, Channel, custom Iterator/Stream via .iter()/.next(), strings) —
+// those don't introduce aliasing and must NOT be flagged.
+//
+// Restricted to the three native shapes the codegen lowers via genForInVector
+// / genForInArray / genForInMap. Iterator-based for-ins go through
+// genForInCustomIter/genForInGenerator (yield-based) and produce owned values.
+func forInAliasingElementType(typ types.Type) types.Type {
+	if typ == nil {
+		return nil
+	}
+	if arr, ok := typ.(*types.Array); ok {
+		return arr.Elem()
+	}
+	if elem, ok := types.AsVector(typ); ok {
+		return elem
+	}
+	if _, val, ok := types.AsMap(typ); ok {
+		return val
+	}
+	return nil
+}
+
+// rejectForInSingleOwnerBindingMove emits an error if expr is an IdentExpr
+// whose name is a recorded for-in loop binding over a native container of
+// single-owner native handles. Mirrors rejectIndexExprSingleOwnerMove for
+// the loop-binding operand shape. Peels ParenExpr / OptionalUnwrapExpr so
+// `(h)` and `h!` (on Optional<Mutex> bindings) both reach the IdentExpr.
+// Returns true when rejected so the caller can skip move bookkeeping.
+func (c *Checker) rejectForInSingleOwnerBindingMove(expr ast.Expr) bool {
+	for {
+		if p, ok := expr.(*ast.ParenExpr); ok {
+			expr = p.Expr
+			continue
+		}
+		if u, ok := expr.(*ast.OptionalUnwrapExpr); ok {
+			expr = u.Expr
+			continue
+		}
+		break
+	}
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return false
+	}
+	if !c.forInSingleOwnerBindings[ident.Name] {
+		return false
+	}
+	typ := c.info.Types[ident]
+	c.errorf(ident.Pos(),
+		"cannot move for-in loop binding '%s' (%s); the binding aliases the container's slot — moving it would leave the container with a dangling pointer that double-frees at scope exit. Use `<-%s` to receive the value directly, or call `.pop()` / `.remove()` on the container to take ownership of an element",
+		ident.Name, typ.String(), ident.Name)
+	return true
 }
 
 // isUserIndexExpr reports whether idx dispatches to a user-defined *non-native*

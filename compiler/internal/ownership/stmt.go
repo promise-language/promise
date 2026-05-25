@@ -959,11 +959,36 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	if s.Index != "" && s.Index != "_" {
 		c.state[s.Index] = Owned
 	}
+
+	// T0652: for native Vector/Array/Map iteration whose element type is a
+	// single-owner native handle, mark the binding so moves (x := h, foo(h),
+	// use x := h, return h) are rejected — the binding aliases the slot.
+	// Save/restore for nested-loop safety (e.g., `for x in v1 { for x in v2 {} }`).
+	var prevSingleOwner bool
+	var hadPrevSingleOwner bool
+	flaggedSingleOwner := false
+	if s.Binding != "_" {
+		iterType := c.info.Types[s.Iterable]
+		if elem := forInAliasingElementType(iterType); elem != nil && isSingleOwnerNativeType(elem) {
+			prevSingleOwner, hadPrevSingleOwner = c.forInSingleOwnerBindings[s.Binding]
+			c.forInSingleOwnerBindings[s.Binding] = true
+			flaggedSingleOwner = true
+		}
+	}
+
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
 	c.state = merge(savedState, c.state)
 	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
+
+	if flaggedSingleOwner {
+		if hadPrevSingleOwner {
+			c.forInSingleOwnerBindings[s.Binding] = prevSingleOwner
+		} else {
+			delete(c.forInSingleOwnerBindings, s.Binding)
+		}
+	}
 }
 
 func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {

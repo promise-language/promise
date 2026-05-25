@@ -592,3 +592,33 @@ t0617_chan_arr_iter_noregress() `test(exclude: wasm) {
   }
   assert(total == 198, "T0617 channel arr for-in non-regression");
 }
+
+// T0652: the for-in-binding move shape — `for h in v { x := h; <-x; }` over
+// Vector[Task] — is now a compile-time error (sibling of T0596 for the loop-
+// binding alias). Documenting the two workable patterns here for positive
+// runtime coverage of the user-facing API surface.
+
+// Workaround 1: receive on the loop binding directly (the T0617-fixed path).
+// Same coverage as t0617_vec_iter_await_all but explicitly tagged for T0652
+// traceability so a future regression search lands here.
+t0652_workaround_direct_receive() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int(), go worker_int()];
+  total := 0;
+  for h in v {
+    total += <-h;
+  }
+  assert(total == 84, "T0652 workaround: direct <-h receive");
+}
+
+// Workaround 2: pop the handle out of the container first, then receive.
+// `.pop()` transfers ownership of the Task to the local; the slot leaves the
+// container entirely, so scope-exit Vector.drop has nothing to double-free.
+t0652_workaround_pop_then_receive() `test(exclude: wasm) {
+  Vector[Task[int]] v = [go worker_int(), go worker_int()];
+  total := 0;
+  while v.len > 0 {
+    Task[int] t = v.pop()!;
+    total += <-t;
+  }
+  assert(total == 84, "T0652 workaround: pop then receive");
+}

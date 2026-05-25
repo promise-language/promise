@@ -100,6 +100,15 @@ func (r *CompileResult) SemaInfo() *sema.Info {
 	return r.compiler.rootInfo
 }
 
+// CoverageEnabled reports whether this compilation instrumented for coverage.
+// Used by main.go to isolate coverage instance .bc files from normal-build
+// cache entries (T0574): coverage globals are externally linked, so a
+// non-coverage build reusing a cached coverage instance .bc would hit an
+// undefined-symbol link error (and vice versa would silently undercount).
+func (r *CompileResult) CoverageEnabled() bool {
+	return r.compiler.coverageEnabled
+}
+
 // primitiveRawType returns the raw LLVM type, C type string, and signedness
 // for a primitive Named type. Returns nil/""/false for non-primitives.
 func primitiveRawType(n *types.Named) (irtypes.Type, string, bool) {

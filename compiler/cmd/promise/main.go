@@ -2655,7 +2655,15 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	// Cache keys are derived from the type declaration hash, making them stable across
 	// unrelated source changes.
 	instIRs := result.InstanceIRs()
-	instMetas := buildInstCacheMetas(result.SemaInfo(), compilerHash, target, buildModeStr(releaseMode))
+	// Coverage builds emit externally-linked counter globals (T0574), so a
+	// coverage instance .bc must never be reused in a non-coverage build
+	// (undefined-symbol link error) or vice versa (silent undercount). Mark
+	// the instance cache mode so the two never share a build cache entry.
+	instMode := buildModeStr(releaseMode)
+	if result.CoverageEnabled() {
+		instMode += "+cov"
+	}
+	instMetas := buildInstCacheMetas(result.SemaInfo(), compilerHash, target, instMode)
 
 	type instObj struct {
 		name    string

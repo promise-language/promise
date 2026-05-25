@@ -1053,6 +1053,20 @@ func TestInstanceCacheKeyAllDistinct(t *testing.T) {
 	}
 }
 
+// TestInstanceCacheKeyCoverageMode locks the T0574 isolation contract: a
+// coverage instance .bc (externally-linked counter globals) must never share a
+// cache entry with a non-coverage build of the same instance. compileAndLinkSeparate
+// passes "debug+cov" as the build mode when coverage is enabled; this asserts
+// that flows through to a distinct key.
+func TestInstanceCacheKeyCoverageMode(t *testing.T) {
+	mc := []string{"std"}
+	plain := InstanceCacheKey("pfx", "Box[int]", "decl", "cmp", "linux", "debug", mc)
+	cov := InstanceCacheKey("pfx", "Box[int]", "decl", "cmp", "linux", "debug+cov", mc)
+	if plain == cov {
+		t.Errorf("coverage and non-coverage instance cache keys must differ, both = %q", plain)
+	}
+}
+
 // === Embed hash functions (T0032) ===
 
 func TestIsGlobPattern(t *testing.T) {

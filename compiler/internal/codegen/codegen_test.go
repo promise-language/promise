@@ -19637,6 +19637,99 @@ func TestCoverageEnumMatchArms(t *testing.T) {
 	}
 }
 
+// TestCoverageGenericMethodInstanceShared is the T0574 regression test.
+// A monomorphized generic method's body lives in a per-instance .bc while the
+// coverage reporter reads the counter from the main IR's test main. The counter
+// global must therefore be a single externally-linked symbol: defined once in
+// the main IR and an external declaration (with the increment) in the instance
+// .bc. Private linkage would split it into independent per-translation-unit
+// copies, so the always-zero main copy would be read → "not covered" (the bug).
+func TestCoverageGenericMethodInstanceShared(t *testing.T) {
+	file, info := parseWithStd(t, `
+		type Box[T] {
+			T x;
+			inc(this) T { return this.x; }
+		}
+		test_inc() `+"`test"+` {
+			b := Box[int](x: 7);
+			int r = b.inc();
+			assert(r == 7, "expected 7");
+		}
+	`)
+	result := CompileWithOptions(file, info, "", &CompileOptions{CoverageEnabled: true})
+	result.GenerateTestMain(info.Tests, nil)
+
+	// Locate the coverage region for the monomorphized method Box[int].inc.
+	idx := -1
+	for i, r := range result.CoverageRegions {
+		if r.FuncName == "Box[int].inc" && r.Kind == "method" {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		t.Fatalf("no coverage region for Box[int].inc method; regions: %+v", result.CoverageRegions)
+	}
+	g := fmt.Sprintf("@__promise_cov_%d", idx)
+
+	// Main IR keeps the single externally-visible definition (not private).
+	mainIR, _ := result.SplitModuleIRs()
+	assertContains(t, mainIR, g+" = global i64 0")
+	assertNotContains(t, mainIR, g+" = private global")
+
+	// The Box[int] instance .bc owns the method body (with the increment) and
+	// references the counter as an external declaration — no private/own copy.
+	instIRs := result.InstanceIRs()
+	instIR, ok := instIRs["Box[int]"]
+	if !ok {
+		t.Fatalf("missing Box[int] in instance IRs, keys: %v", mapKeys(instIRs))
+	}
+	assertContains(t, instIR, g+" = external global")
+	// The increment (load/add/store) must land in the instance .bc.
+	hasStore := false
+	for _, line := range strings.Split(instIR, "\n") {
+		if strings.Contains(line, "store") && strings.Contains(line, g) {
+			hasStore = true
+			break
+		}
+	}
+	if !hasStore {
+		t.Errorf("Box[int] instance IR must contain the coverage increment store to %s (T0574)", g)
+	}
+	// No duplicate / private definition in the instance .bc.
+	assertNotContains(t, instIR, g+" = global i64 0")
+	assertNotContains(t, instIR, g+" = private global")
+}
+
+// TestCompileResultCoverageEnabled locks the T0574 cache-isolation contract at
+// the accessor level. compileAndLinkSeparate appends "+cov" to the instance
+// build-mode iff result.CoverageEnabled() is true, keeping coverage and
+// non-coverage instance .bc files in separate build-cache entries (externally-
+// linked counter globals would otherwise cause undefined-symbol link errors or
+// silent undercount across the two build kinds). The accessor must therefore
+// faithfully reflect CompileOptions.CoverageEnabled — including the default
+// (nil opts / Compile) case, which must report false.
+func TestCompileResultCoverageEnabled(t *testing.T) {
+	src := `
+		foo() int { return 42; }
+		main() {}
+	`
+	file, info := parseWithStd(t, src)
+	if got := CompileWithOptions(file, info, "", &CompileOptions{CoverageEnabled: true}).CoverageEnabled(); !got {
+		t.Errorf("CoverageEnabled() = false, want true when CompileOptions.CoverageEnabled is set")
+	}
+
+	file2, info2 := parseWithStd(t, src)
+	if got := CompileWithOptions(file2, info2, "", &CompileOptions{CoverageEnabled: false}).CoverageEnabled(); got {
+		t.Errorf("CoverageEnabled() = true, want false when CompileOptions.CoverageEnabled is explicitly false")
+	}
+
+	file3, info3 := parseWithStd(t, src)
+	if got := Compile(file3, info3, "").CoverageEnabled(); got {
+		t.Errorf("CoverageEnabled() = true, want false for a default (nil opts) compile")
+	}
+}
+
 // B0134: generic error type constructor inside generic function body
 // must be collected for monomorphization via func instance substitution.
 func TestGenericErrorTypeInGenericFuncBody(t *testing.T) {

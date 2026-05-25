@@ -5,7 +5,6 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
-	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 )
 
@@ -31,8 +30,16 @@ func (c *Compiler) addCoverageRegion(file string, startLine, endLine int, funcNa
 		Kind:      kind,
 	})
 
+	// Default (LinkageNone) linkage — serialized as an externally-visible
+	// definition (`@__promise_cov_N = global i64 0`). This is essential for
+	// generic-method coverage (T0574): a monomorphized method's body lives in
+	// a per-instance .bc while the reporter reads the counter from the main
+	// IR's test main. stripGlobals externalizes non-private globals in every
+	// split IR, so the increment (instance .bc) and the reporter read (main
+	// IR) resolve to the single definition kept in the main IR. Private
+	// linkage would instead produce independent per-translation-unit copies,
+	// so the always-zero main copy would be read → "not covered".
 	g := c.module.NewGlobalDef(fmt.Sprintf("__promise_cov_%d", idx), constant.NewInt(irtypes.I64, 0))
-	g.Linkage = enum.LinkagePrivate
 	c.coverageGlobals = append(c.coverageGlobals, g)
 	return idx
 }

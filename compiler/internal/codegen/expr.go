@@ -10533,6 +10533,8 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	savedGoExprFF := c.goExprFireAndForget
 	savedLocalNameCount := c.localNameCount // T0261
+	savedStmtTemps := c.stmtTemps           // T0594: stmtTemps must not leak from coroutine body into outer function
+	savedStmtTempMap := c.stmtTempMap       // T0594: allocas created inside coroutine body live in a different function
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
@@ -10544,6 +10546,8 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
+	c.stmtTemps = nil                         // T0594: fresh temp state for coroutine body
+	c.stmtTempMap = make(map[value.Value]int) // T0594
 
 	// 6. Coroutine preamble
 	entry := coroFn.NewBlock(".entry")
@@ -10643,7 +10647,14 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 		rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
 		typedRP := c.block.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
 		c.block.NewStore(result, typedRP)
+		// T0594: claim the result stmtTemp — ownership transferred to G.result_ptr.
+		c.claimStringTemp(result)
 	}
+
+	// T0594: Clean up any remaining stmtTemps from the coroutine body before restoring
+	// the outer function's context. Without this, temps created by genExpr (e.g., string
+	// return values tracked by trackStringTemp) would be orphaned inside the coroutine.
+	c.cleanupStmtTemps()
 
 	// B0163: Emit cleanup for captured channel drop bindings.
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > 0 {
@@ -10730,6 +10741,8 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
 	c.goExprFireAndForget = savedGoExprFF
 	c.localNameCount = savedLocalNameCount // T0261
+	c.stmtTemps = savedStmtTemps           // T0594: restore outer function's temp state
+	c.stmtTempMap = savedStmtTempMap       // T0594
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
 	for name := range capturedDroppablesVB {

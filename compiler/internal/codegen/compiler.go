@@ -2817,6 +2817,13 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 	c.entryBlock = entry
 	c.block = readyBlk
 
+	// T0594: hoist G.panicked load so the non-void result path can skip loading
+	// uninitialized result_ptr contents when the goroutine panicked before writing.
+	panickedField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
+	panickedVal := c.block.NewLoad(irtypes.I8, panickedField)
+	isPanicked := c.block.NewICmp(enum.IPredNE, panickedVal, constant.NewInt(irtypes.I8, 0))
+
 	rpField := c.block.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
 	rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
@@ -2828,11 +2835,22 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 		sentinelInt := c.block.NewPtrToInt(rpVal, c.ptrIntType())
 		isSentinel := c.block.NewICmp(enum.IPredULE, sentinelInt,
 			constant.NewInt(c.ptrIntType(), 1))
-		freeResultBlk := c.newBlock("task.drop.free_result")
+		notSentinelBlk := c.newBlock("task.drop.not_sentinel")
+		freeBufOnlyBlk := c.newBlock("task.drop.free_buf_only")
+		dropAndFreeBlk := c.newBlock("task.drop.drop_and_free")
 		afterResultBlk := c.newBlock("task.drop.after_result")
-		c.block.NewCondBr(isSentinel, afterResultBlk, freeResultBlk)
+		c.block.NewCondBr(isSentinel, afterResultBlk, notSentinelBlk)
 
-		c.block = freeResultBlk
+		// T0594: panicked goroutine never wrote result_ptr — split into free-only
+		// (panicked) vs drop-then-free (normal) to avoid walking uninitialized memory.
+		c.block = notSentinelBlk
+		c.block.NewCondBr(isPanicked, freeBufOnlyBlk, dropAndFreeBlk)
+
+		c.block = freeBufOnlyBlk
+		c.block.NewCall(c.palFree, rpVal)
+		c.block.NewBr(afterResultBlk)
+
+		c.block = dropAndFreeBlk
 		typedRP := c.block.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
 		loadedVal := c.block.NewLoad(resultLLVM, typedRP)
 		c.emitVariantFieldDrop(loadedVal, elemType)
@@ -2844,9 +2862,7 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 	// Void task: result_ptr is the sentinel 0x1 — never freed.
 
 	// Free panic_msg if heap-allocated (panicked == 2).
-	panickedField := c.block.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
-	panickedVal := c.block.NewLoad(irtypes.I8, panickedField)
+	// T0594: reuse the hoisted panickedVal rather than reloading G.panicked.
 	isHeapMsg := c.block.NewICmp(enum.IPredEQ, panickedVal,
 		constant.NewInt(irtypes.I8, int64(gPanickedHeapMsg)))
 	freePanicBlk := c.newBlock("task.drop.free_panic")

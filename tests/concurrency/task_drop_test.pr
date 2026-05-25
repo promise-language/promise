@@ -116,6 +116,29 @@ task_drop_unawaited_panicked() `test(exclude: wasm) {
   // Task.drop must spin-wait, free panic_msg (heap), free G.
 }
 
+// T0594: task[string] + panic — Task.drop must NOT load result_ptr contents
+// (uninitialized because the goroutine panicked before writing). Must still
+// free the buffer to avoid a leak.
+panicking_string_worker() string {
+  assert(false, "panic during string task");
+  return "never";
+}
+
+task_drop_unawaited_panicked_string() `test(exclude: wasm) {
+  task[string] t = go panicking_string_worker();
+}
+
+// T0594: same gap for droppable containers — Vector.drop on a garbage
+// {len, cap, ptr} would call pal_free on a wild pointer.
+panicking_vector_worker() int[] {
+  assert(false, "panic during vector task");
+  return[];
+}
+
+task_drop_unawaited_panicked_vector() `test(exclude: wasm) {
+  task[int[]] t = go panicking_vector_worker();
+}
+
 // Closure captures task[T] by move but does not consume it inside the body.
 // Exercises analyzeEnvCaptureDrop's Task branch: when the closure env is
 // freed, it must call Task[T].drop on the captured task field.

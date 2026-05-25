@@ -2429,6 +2429,16 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
 			blk.NewCall(dropFn, innerGuard)
 		}
+	case named != nil && (types.IsTask(elemType) || named == types.TypTask):
+		// T0546: Task is an opaque container — slot type is i8*, not userValueType.
+		// Load the G handle and call the per-T Task drop, which spin-waits then frees.
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
+		innerTask := blk.NewLoad(irtypes.I8Ptr, valField)
+		if taskElem, ok := types.AsTask(elemType); ok {
+			innerDropFn := c.getOrCreateTaskDrop(taskElem)
+			blk.NewCall(innerDropFn, innerTask)
+		}
 	case named != nil && (named.HasDrop() || named.NeedsSynthDrop()):
 		// User type with explicit or synthesized drop
 		valField := blk.NewGetElementPtr(structTy, typedPtr,

@@ -306,3 +306,179 @@ test_t0649_generic_enum_mutref_bind() `test {
   e := b.get_mut(0);
   assert(e.size() == 6, "generic T~ (droppable `clone enum) bound to local");
 }
+
+// ---------- T0660: borrowed enum receiver must NOT drop the synth temp -------
+// A droppable `clone enum returned by `&`/`~` from a Vector, then used as the
+// receiver of an enum method/generic-method/getter call, synthesized an
+// `enum.this`/`enum.getter` receiver temp that was DROPPED post-call —
+// @T0660Tag.drop freed the `Named(string)` payload that the vector still owns,
+// so the scope-exit Vector.drop freed it AGAIN: `fatal: invalid free (bad
+// header magic)` / segfault. T0649 fixed the call-site temp-track and the
+// method-body return-clone but missed this third, independent
+// enum-receiver-drop mechanism (genEnumMethodCall /
+// genGenericEnumMethodCall / genEnumGetterAccess).
+//
+// The single-read T0649 enum forms above are heap-layout false-greens in
+// isolation. Reading the SAME borrowed element MULTIPLE times forces the
+// pre-fix free-then-reuse: pre-fix these segfault deterministically; post-fix
+// they pass with the zero-tolerance leak gate green. All three modified
+// codegen sites + the substituted-generic path + `&`/`~` are covered.
+enum T0660Tag `clone {
+  Empty,
+  Named(string s),
+  size(&this) int {
+    match this {
+      Empty => {
+        return 0;
+      },
+      Named(n) => {
+        return n.len;
+      },
+    }
+  }
+  // site 1: generic enum method (genGenericEnumMethodCall)
+  scaled[U](&this, U _marker, int extra) int {
+    match this {
+      Empty => {
+        return extra;
+      },
+      Named(n) => {
+        return n.len + extra;
+      },
+    }
+  }
+  // site 2: enum getter (genEnumGetterAccess)
+  get tag_len int {
+    match this {
+      Empty => {
+        return 0;
+      },
+      Named(n) => {
+        return n.len;
+      },
+    }
+  }
+}
+
+type T0660Vec {
+  T0660Tag[] items;
+  at(int i) T0660Tag & {
+    return this.items[i];
+  }
+  at_mut(int i) T0660Tag ~ {
+    return this.items[i];
+  }
+  // owned by-value accessor → T0649 owned-return path clones the element, so
+  // the caller holds an INDEPENDENT droppable enum with no other owner. The
+  // synthesized receiver temp of a method/getter call on `ev.at_own(0)` MUST
+  // be dropped (the cloned `Named(string)` payload has no other owner). This
+  // is the precision/leak direction of T0660: if the `!isBorrowedExpr` gate
+  // were over-broad it would suppress this drop and the zero-tolerance leak
+  // gate would fail. Pairs the IR precision controls
+  // (TestT0660_Owned*ReceiverStillDrops) with a runtime 0-leak check.
+  at_own(int i) T0660Tag {
+    return this.items[i];
+  }
+}
+
+// site 3: non-generic method on a concrete enum, `&` receiver
+test_t0660_borrowed_enum_recv_no_double_free() `test {
+  ev := T0660Vec(items: [T0660Tag.Named("ab" + "c"), T0660Tag.Empty]);
+  a := ev.at(0).size();
+  b := ev.at(0).size(); // pre-fix: UAF on the already-freed payload
+  c := ev.at(0).size();
+  assert(a == 3 && b == 3 && c == 3, "borrowed enum& receiver must not be dropped");
+  assert(ev.at(1).size() == 0, "empty-variant borrow still valid after re-reads");
+}
+
+// site 3: non-generic method on a concrete enum, `~` receiver
+test_t0660_borrowed_enum_mutref_recv_no_double_free() `test {
+  ev := T0660Vec(items: [T0660Tag.Named("hello" + "!"), T0660Tag.Empty]);
+  a := ev.at_mut(0).size();
+  b := ev.at_mut(0).size();
+  c := ev.at_mut(0).size();
+  assert(a == 6 && b == 6 && c == 6, "borrowed enum~ receiver must not be dropped");
+}
+
+// site 1: generic enum method on a borrowed `&` receiver
+test_t0660_borrowed_enum_generic_method_no_double_free() `test {
+  ev := T0660Vec(items: [T0660Tag.Named("ab" + "cd"), T0660Tag.Empty]);
+  a := ev.at(0).scaled[int](0, 10);
+  b := ev.at(0).scaled[int](0, 10);
+  c := ev.at(0).scaled[int](0, 10);
+  assert(a == 14 && b == 14 && c == 14, "borrowed receiver of generic enum method must not be dropped");
+}
+
+// site 2: enum getter on a borrowed `&` receiver
+test_t0660_borrowed_enum_getter_no_double_free() `test {
+  ev := T0660Vec(items: [T0660Tag.Named("xy" + "zzz"), T0660Tag.Empty]);
+  a := ev.at(0).tag_len;
+  b := ev.at(0).tag_len;
+  c := ev.at(0).tag_len;
+  assert(a == 5 && b == 5 && c == 5, "borrowed enum getter receiver must not be dropped");
+}
+
+// generic container (substituted SharedRef path) of a droppable `clone enum
+type T0660GBox[T] {
+  T[] d;
+  at(int i) T & {
+    return this.d[i];
+  }
+  get_mut(int i) T ~ {
+    return this.d[i];
+  }
+}
+
+// site 3 under substitution: SharedRef(TypeParam T) → SharedRef(T0660Tag), `&`
+test_t0660_generic_borrowed_enum_recv_no_double_free() `test {
+  b := T0660GBox[T0660Tag](d: [T0660Tag.Named("ab" + "c"), T0660Tag.Empty]);
+  x := b.at(0).size();
+  y := b.at(0).size();
+  z := b.at(0).size();
+  assert(x == 3 && y == 3 && z == 3, "generic borrowed enum& receiver must not be dropped");
+}
+
+// site 3 under substitution, `~` receiver
+test_t0660_generic_borrowed_enum_mutref_recv_no_double_free() `test {
+  b := T0660GBox[T0660Tag](d: [T0660Tag.Named("hello" + "!"), T0660Tag.Empty]);
+  x := b.get_mut(0).size();
+  y := b.get_mut(0).size();
+  z := b.get_mut(0).size();
+  assert(x == 6 && y == 6 && z == 6, "generic borrowed enum~ receiver must not be dropped");
+}
+
+// ---------- T0660 precision/leak direction: OWNED receiver MUST drop --------
+// The tests above pin the borrow direction (suppress the receiver-temp drop).
+// These pin the inverse: an OWNED (by-value, cloned) droppable-enum receiver
+// of a method/generic-method/getter call MUST still drop the synthesized
+// receiver temp. Pre-T0660 these already worked; their value is regression
+// protection against the gate becoming over-broad — over-suppression here
+// leaks the cloned `Named(string)` payload and the zero-tolerance leak gate
+// fails. They give site 1 (genGenericEnumMethodCall) its first runtime
+// owned-receiver coverage (the IR if-true body was count-0 across the whole
+// codegen suite before the matching Go controls).
+
+// site 3 owned: non-generic method on a fresh owned concrete enum
+test_t0660_owned_enum_recv_drops_no_leak() `test {
+  ev := T0660Vec(items: [T0660Tag.Named("ab" + "c"), T0660Tag.Empty]);
+  a := ev.at_own(0).size();
+  b := ev.at_own(0).size();
+  assert(a == 3 && b == 3, "owned enum receiver method result");
+  assert(ev.at_own(1).size() == 0, "owned empty-variant receiver");
+}
+
+// site 1 owned: generic enum method on a fresh owned concrete enum
+test_t0660_owned_enum_generic_method_drops_no_leak() `test {
+  ev := T0660Vec(items: [T0660Tag.Named("ab" + "cd"), T0660Tag.Empty]);
+  a := ev.at_own(0).scaled[int](0, 10);
+  b := ev.at_own(0).scaled[int](0, 10);
+  assert(a == 14 && b == 14, "owned receiver of generic enum method result");
+}
+
+// site 2 owned: enum getter on a fresh owned concrete enum
+test_t0660_owned_enum_getter_drops_no_leak() `test {
+  ev := T0660Vec(items: [T0660Tag.Named("xy" + "zzz"), T0660Tag.Empty]);
+  a := ev.at_own(0).tag_len;
+  b := ev.at_own(0).tag_len;
+  assert(a == 5 && b == 5, "owned enum getter receiver result");
+}

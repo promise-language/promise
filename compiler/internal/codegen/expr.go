@@ -2090,7 +2090,11 @@ func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, member *ast.MemberE
 			c.block.NewStore(target, alloca)
 			ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
 			args = append(args, ptr)
-			if isFreshEnumExpr(member.Target) && !enumCtorTracked {
+			// T0660: a borrow-return receiver (`Tagged&`/`Tagged~`) aliases
+			// the owner's payload (e.g. `ev.at(0)` shares ev.items[0]'s
+			// string); dropping the synthesized receiver temp would
+			// double-free what the owner still frees at scope exit.
+			if isFreshEnumExpr(member.Target) && !enumCtorTracked && !c.isBorrowedExpr(member.Target) {
 				tempEnumPtr = ptr
 			}
 		}
@@ -4406,7 +4410,10 @@ func (c *Compiler) genEnumGetterAccess(e *ast.MemberExpr, targetType types.Type,
 		alloca.SetName(c.uniqueLocalName("enum.getter"))
 		c.block.NewStore(target, alloca)
 		ptr = c.block.NewBitCast(alloca, irtypes.I8Ptr)
-		if isFreshEnumExpr(e.Target) && !enumCtorTracked {
+		// T0660: a borrow-return receiver (`Tagged&`/`Tagged~`) aliases the
+		// owner's payload; dropping the synthesized getter receiver temp
+		// would double-free what the owner still frees at scope exit.
+		if isFreshEnumExpr(e.Target) && !enumCtorTracked && !c.isBorrowedExpr(e.Target) {
 			tempEnumPtr = ptr
 		}
 	}
@@ -4499,7 +4506,10 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 			// Track for post-call drop if target produces a fresh value not already
 			// tracked by enumCtorTemps. IdentExpr targets share heap data with
 			// their binding's alloca — dropping the shallow copy would double-free.
-			if isFreshEnumExpr(member.Target) && !enumCtorTracked {
+			// T0660: a borrow-return receiver (`Tagged&`/`Tagged~`, e.g.
+			// `ev.at(0)`) likewise aliases the owner's payload — dropping it
+			// double-frees what the owner (the vector) still frees at exit.
+			if isFreshEnumExpr(member.Target) && !enumCtorTracked && !c.isBorrowedExpr(member.Target) {
 				tempEnumPtr = ptr
 			}
 		}

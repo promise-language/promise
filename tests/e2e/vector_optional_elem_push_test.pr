@@ -1,0 +1,261 @@
+// T0658: pushing a bare (non-optional) value into a Vector[T?] / T?[].
+//
+// Pre-fix, genVectorMethodCall's `push` case generated the argument with
+// genCallArgExpr and stored the raw scalar/pointer straight into the
+// {i1, T} element alloca, panicking "store operands are not compatible:
+// src=i64; dst={ i1, i64 }*". `v.push(none)` panicked similarly because
+// c.targetType was never set so genNoneLit returned the i1 0 "void
+// optional fallback" instead of a zero {i1,T} struct.
+//
+// This is the push-side analog of T0615 (genVectorIndexAssign). The fix
+// sets c.targetType to the resolved Optional element type around argument
+// generation and wraps a bare RHS into the Optional struct via
+// wrapOptional, gated by the same predicate as T0615
+// (argExprType != none && !Identical(argExprType, resolvedElem)).
+//
+// Droppable-inner ownership for Vector[T?] was already delivered by T0620;
+// the string-literal case here is a leak-checked smoke of that machinery.
+// (1) Primary repro — bare int literals into int?[].
+test_push_bare_int_into_optional_vector() `test {
+  int?[] v = [];
+  v.push(1);
+  v.push(2);
+  assert(v.len == 2, "two elements pushed");
+  int? g0 = v[0];
+  int? g1 = v[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is present, "slot 1 present");
+  int a0 = g0!;
+  int a1 = g1!;
+  assert(a0 == 1, "slot 0 value");
+  assert(a1 == 2, "slot 1 value");
+}
+
+// (2) `v.push(none)` — c.targetType makes genNoneLit emit a zero {i1,T}.
+test_push_none_into_optional_vector() `test {
+  int?[] v = [];
+  v.push(none);
+  assert(v.len == 1, "one element pushed");
+  int? g = v[0];
+  assert(g is absent, "slot 0 absent");
+}
+
+// (3) Interleaved bare and none pushes.
+test_push_mixed_bare_and_none() `test {
+  int?[] v = [];
+  v.push(7);
+  v.push(none);
+  v.push(9);
+  assert(v.len == 3, "three elements pushed");
+  int? g0 = v[0];
+  int? g1 = v[1];
+  int? g2 = v[2];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  assert(g2 is present, "slot 2 present");
+  int a0 = g0!;
+  int a2 = g2!;
+  assert(a0 == 7, "slot 0 value");
+  assert(a2 == 9, "slot 2 value");
+}
+
+// (4) Regression guard — pushing an already-typed int? must NOT double-wrap
+// (skipped via the !types.Identical predicate). This was the only working
+// case pre-fix; the new wrap predicate must preserve it.
+test_push_explicit_optional_still_works() `test {
+  int? x = 5;
+  int? y = none;
+  int?[] v = [];
+  v.push(x);
+  v.push(y);
+  assert(v.len == 2, "two elements pushed");
+  int? g0 = v[0];
+  int? g1 = v[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  int a0 = g0!;
+  assert(a0 == 5, "slot 0 value");
+}
+
+// (5) Other bare value-type element types: f64?, bool?, char?.
+test_push_bare_f64_into_optional_vector() `test {
+  f64?[] v = [];
+  v.push(3.5);
+  v.push(none);
+  assert(v.len == 2, "two elements pushed");
+  f64? g0 = v[0];
+  f64? g1 = v[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  f64 a0 = g0!;
+  assert(a0 == 3.5, "slot 0 value");
+}
+
+test_push_bare_bool_into_optional_vector() `test {
+  bool?[] v = [];
+  v.push(true);
+  v.push(none);
+  v.push(false);
+  assert(v.len == 3, "three elements pushed");
+  bool? g0 = v[0];
+  bool? g1 = v[1];
+  bool? g2 = v[2];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  assert(g2 is present, "slot 2 present");
+  bool a0 = g0!;
+  bool a2 = g2!;
+  assert(a0, "slot 0 value true");
+  assert(!a2, "slot 2 value false");
+}
+
+test_push_bare_char_into_optional_vector() `test {
+  char?[] v = [];
+  v.push('x');
+  v.push(none);
+  assert(v.len == 2, "two elements pushed");
+  char? g0 = v[0];
+  char? g1 = v[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+  char a0 = g0!;
+  assert(a0 == 'x', "slot 0 value");
+}
+
+// (6) Droppable-inner smoke — string literal into string?[]. Relies on
+// T0620's emitVectorElementDropLoop / vecElemNeedsOptionalDrop for inner
+// payload cleanup; zero-leak is enforced by the test harness. String
+// literals are .rodata (bit-63 literal flag → drop no-op).
+test_push_string_literal_into_optional_vector() `test {
+  string?[] v = [];
+  v.push("hi");
+  v.push(none);
+  assert(v.len == 2, "two elements pushed");
+  string? g0 = v[0];
+  string? g1 = v[1];
+  assert(g0 is present, "slot 0 present");
+  assert(g1 is absent, "slot 1 absent");
+}
+
+// (7) Droppable-inner ownership — bare droppable values newly enabled by
+// the wrap (pre-fix these panicked). These exercise the ownership-transfer
+// paths (claimStringTemp / clearDropFlag / claimHeapTemp B0233 struct
+// extraction) combined with T0620's Optional-element drop walk. Zero-leak
+// is enforced by the test harness — a regression in any of those paths
+// would surface here as a leak, not a failed assertion.
+type _BxT0658 {
+  int id;
+  drop(~this) {
+  }
+}
+
+// Bare heap user-type constructor + variable into _BxT0658?[].
+test_push_bare_heap_user_into_optional_vector() `test {
+  _BxT0658?[] v = [];
+  v.push(_BxT0658(id: 1));
+  v.push(none);
+  _BxT0658 b = _BxT0658(id: 3);
+  v.push(b);
+  assert(v.len == 3, "three elements pushed");
+  _BxT0658? g0 = v[0];
+  _BxT0658? g2 = v[2];
+  assert(g0 is present, "slot 0 present");
+  assert(g2 is present, "slot 2 present");
+}
+
+// Bare heap string VARIABLE (not .rodata literal) — exercises the
+// clearDropFlag-on-source ownership transfer (distinct from the literal
+// path in test (6), which is a drop no-op).
+test_push_bare_string_var_into_optional_vector() `test {
+  string s = "he" + "llo";
+  string?[] v = [];
+  v.push(s);
+  v.push(none);
+  assert(v.len == 2, "two elements pushed");
+  string? g0 = v[0];
+  assert(g0 is present, "slot 0 present");
+}
+
+// Bare nested vector into int[]?[].
+test_push_bare_nested_vector_into_optional_vector() `test {
+  int[]?[] v = [];
+  v.push([1, 2, 3]);
+  v.push(none);
+  assert(v.len == 2, "two elements pushed");
+  int[]? g0 = v[0];
+  assert(g0 is present, "slot 0 present");
+}
+
+// (8) Generic path — exercises the c.typeSubst substitution of
+// resolvedElem / argExprType inside _push_opt[int].
+_push_opt_t0658[T](~T x) int {
+  T?[] v = [];
+  v.push(x);
+  return v.len;
+}
+
+test_push_bare_into_generic_optional_vector() `test {
+  assert(_push_opt_t0658[int](42) == 1, "generic int instantiation");
+  assert(_push_opt_t0658[bool](true) == 1, "generic bool instantiation");
+}
+
+// (9) Native-handle claim-before-wrap branches. The wrap block claims the
+// arg as a string temp BEFORE wrapping for string / Vector / Channel / Arc
+// / Weak / Task / Mutex / MutexGuard, because their stmtTempMap tracking is
+// by val-identity and is lost once the value is wrapped into the {i1,T}
+// aggregate. String + Vector are covered by tests (6),(7); these close the
+// remaining reachable branches (IsChannel/IsArc/IsMutex/IsWeak). All four
+// share the exact same `||` chain / claimStringTemp call as the IsTask
+// branch, so the Task path is covered transitively. A regression in any one
+// claim would surface here as a leak (zero-leak is enforced by the test
+// harness), not a failed assertion.
+//
+// IsMutexGuard is intentionally NOT covered: pushing a MutexGuard into any
+// vector segfaults at runtime — a pre-existing single-owner-native-handle
+// escape bug independent of T0658, filed as T0665.
+//
+// IsTask is intentionally NOT covered by a dedicated test: pushing an
+// un-awaited Task into a container that is dropped without being awaited
+// deadlocks the single-threaded WASM scheduler (reproduces even with a
+// plain non-optional Task[int][], so it is independent of T0658 and the
+// Optional-wrap) — a pre-existing WASM scheduler / Task-drop bug, filed as
+// T0668. The IsTask claim-before-wrap branch is covered transitively by the
+// channel/arc/mutex/weak tests below (identical `||` chain).
+//
+// These assert only `v.len` and rely on zero-leak enforcement: the value is
+// NOT read back out of the slot because single-owner native handles
+// (Mutex/Channel) cannot be moved out of an indexed slot (correct ownership
+// behavior). The claim-before-wrap leak path is what is under test — a
+// regression leaks the handle's temp-tracked allocation.
+test_push_bare_channel_into_optional_vector() `test {
+  channel[int]?[] v = [];
+  channel[int] c = channel[int]();
+  v.push(c);
+  v.push(none);
+  assert(v.len == 2, "channel + none pushed");
+}
+
+test_push_bare_arc_into_optional_vector() `test {
+  Arc[int]?[] v = [];
+  Arc[int] a = Arc[int](5);
+  v.push(a);
+  v.push(none);
+  assert(v.len == 2, "arc + none pushed");
+}
+
+test_push_bare_mutex_into_optional_vector() `test {
+  Mutex[int]?[] v = [];
+  Mutex[int] m = Mutex[int](5);
+  v.push(m);
+  v.push(none);
+  assert(v.len == 2, "mutex + none pushed");
+}
+
+test_push_bare_weak_into_optional_vector() `test {
+  Arc[int] a = Arc[int](7);
+  Weak[int]?[] v = [];
+  Weak[int] w = a.downgrade();
+  v.push(w);
+  v.push(none);
+  assert(v.len == 2, "weak + none pushed");
+}

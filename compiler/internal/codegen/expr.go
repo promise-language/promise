@@ -4943,6 +4943,24 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 
 	switch method {
 	case "push":
+		// T0658: Hoist resolvedElem (was computed redundantly further down)
+		// so the Optional-wrap below and the existing droppable-element dup
+		// logic share one resolution.
+		resolvedElem := elemType
+		if c.typeSubst != nil {
+			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+		}
+		_, elemIsOpt := resolvedElem.(*types.Optional)
+
+		// T0658: Set targetType to the resolved Optional element type so a
+		// bare `none` arg lowers to a zero {i1,T} struct via genNoneLit
+		// (mirrors the genAssignStmt index-assign path, stmt.go:5309-5316).
+		// The push path never set this, so `v.push(none)` into a T?[] used
+		// to return the i1 0 "void optional fallback".
+		savedTarget := c.targetType
+		if elemIsOpt {
+			c.targetType = resolvedElem
+		}
 		// T0388: When the source is a field read on a droppable owner
 		// (e.g. v.push(h.arr) where arr is a Vector/Channel/Arc/Weak/
 		// Optional[these] field), set dupContainerFieldAccess so
@@ -4962,6 +4980,36 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		}
 		argVal := c.genCallArgExpr(e.Args[0].Value)
 		c.dupContainerFieldAccess = false
+		c.targetType = savedTarget
+
+		// T0658: Wrap a bare RHS into the Optional element struct when the
+		// vector element type is Optional but the pushed expr is not (e.g.
+		// `int?[] v = []; v.push(1)`). This is the push-side analog of T0615
+		// (genVectorIndexAssign). Without it the raw scalar/pointer is stored
+		// straight into the {i1,T} slot → "store operands are not compatible".
+		// Predicate mirrors stmt.go:5832-5851 exactly, including
+		// claim-before-wrap for string/native-handle/container temps whose
+		// stmtTempMap tracking is by val-identity (lost once val is wrapped).
+		// Heap user-type temps are still claimed correctly post-wrap by
+		// claimHeapTemp's struct-extraction fallback (B0233), so excluded.
+		if elemIsOpt {
+			argExprType := c.info.Types[e.Args[0].Value]
+			if c.typeSubst != nil && argExprType != nil {
+				argExprType = types.Substitute(argExprType, c.typeSubst)
+			}
+			if argExprType != types.TypNone && !types.Identical(argExprType, resolvedElem) {
+				if extractNamed(argExprType) == types.TypString ||
+					types.IsVector(argExprType) || types.IsChannel(argExprType) ||
+					types.IsArc(argExprType) || types.IsWeak(argExprType) ||
+					types.IsTask(argExprType) || types.IsMutex(argExprType) ||
+					types.IsMutexGuard(argExprType) {
+					c.claimStringTemp(argVal)
+				}
+				if st, ok := elemLLVM.(*irtypes.StructType); ok {
+					argVal = c.wrapOptional(argVal, st)
+				}
+			}
+		}
 
 		// B0189: For string elements, dup before push to ensure exclusive ownership.
 		// Each vector must independently own its string elements so that the element
@@ -4972,10 +5020,6 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		// Vector.filled) creates aliased pointers — the element-level drop on the outer
 		// vector frees the same data N times (double/triple-free). Duplication ensures
 		// each element is independently owned, matching the B0189 string pattern.
-		resolvedElem := elemType
-		if c.typeSubst != nil {
-			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
-		}
 		if extractNamed(resolvedElem) == types.TypString {
 			argVal = c.dupString(argVal)
 			// Don't clear source drop flag — source retains its string.

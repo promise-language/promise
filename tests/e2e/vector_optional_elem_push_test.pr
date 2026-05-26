@@ -214,13 +214,14 @@ test_push_bare_into_generic_optional_vector() `test {
 // vector segfaults at runtime — a pre-existing single-owner-native-handle
 // escape bug independent of T0658, filed as T0665.
 //
-// IsTask is intentionally NOT covered by a dedicated test: pushing an
-// un-awaited Task into a container that is dropped without being awaited
-// deadlocks the single-threaded WASM scheduler (reproduces even with a
-// plain non-optional Task[int][], so it is independent of T0658 and the
-// Optional-wrap) — a pre-existing WASM scheduler / Task-drop bug, filed as
-// T0668. The IsTask claim-before-wrap branch is covered transitively by the
-// channel/arc/mutex/weak tests below (identical `||` chain).
+// IsTask: pushing an un-awaited Task into a container dropped without being
+// awaited previously deadlocked the single-threaded WASM scheduler (T0668 —
+// reproduced even with a plain non-optional Task[int][], independent of T0658
+// and the Optional-wrap). T0668 fixed it by routing every coroutine-reachable
+// Task-drop site through a cooperative park-suspend join. The dedicated test
+// below (test_push_bare_task_into_optional_vector) is now restored and must
+// pass on host AND --target wasm32-wasi with zero leaks. See
+// tests/concurrency/task_drop_wasm_test.pr for the full T0668 matrix.
 //
 // These assert only `v.len` and rely on zero-leak enforcement: the value is
 // NOT read back out of the slot because single-owner native handles
@@ -258,4 +259,22 @@ test_push_bare_weak_into_optional_vector() `test {
   v.push(w);
   v.push(none);
   assert(v.len == 2, "weak + none pushed");
+}
+
+// T0668: a bare un-awaited Task pushed into Task[int]?[] and dropped at scope
+// exit (the vector + its un-awaited Task element). Pre-T0668 this deadlocked
+// the single-threaded WASM cooperative scheduler; the cooperative park-suspend
+// join at the Task-drop site fixes it. Must pass on host AND wasm32-wasi with
+// zero leaks. Uses explicit-type binding + `go worker()` (no `:=`, no value
+// `go {<expr>}` + await) to avoid the orthogonal T0682/T0683 defects.
+_t0668_worker_int() int {
+  return 42;
+}
+
+test_push_bare_task_into_optional_vector() `test {
+  Task[int]?[] v = [];
+  task[int] t = go _t0668_worker_int();
+  v.push(t);
+  v.push(none);
+  assert(v.len == 2, "task + none pushed");
 }

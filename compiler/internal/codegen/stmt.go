@@ -2571,6 +2571,13 @@ func (c *Compiler) emitOptionalLocalValueDrop(optVal value.Value, elemType types
 			c.block.NewStore(innerVal, tmpAlloca)
 			ptr := c.block.NewBitCast(tmpAlloca, irtypes.I8Ptr)
 			c.block.NewCall(b.dropFunc, ptr)
+		} else if _, isTask := types.AsTask(elemType); (isTask || b.named == types.TypTask) &&
+			c.emitTaskJoinAndFreeByDropFn(innerVal, b.dropFunc) {
+			// T0668: `task[T]? o` local — cooperative park-suspend join in a
+			// coroutine body (test body / WASM main / go {}) so the
+			// single-threaded WASM scheduler can run the pending goroutine;
+			// emitTaskJoinAndFreeByDropFn falls back to the legacy spin
+			// (returns true) when not in a coroutine.
 		} else if isContainerType(elemType) || b.named == types.TypString {
 			// String, vector, channel: inner is i8*, call drop directly
 			c.block.NewCall(b.dropFunc, innerVal)
@@ -3648,6 +3655,20 @@ func (c *Compiler) emitStringDropCall(b scopeBinding) {
 	// B0189: Drop vector elements before freeing the buffer.
 	c.emitVectorElementDrops(b, ptr)
 
+	// T0668: a direct `task[T] t = go {…}` binding reuses this bindingDropString
+	// path (same i8* alloca + void(i8*) drop shape). In a coroutine body (test
+	// body / WASM main / go {}) route the un-awaited-Task scope-exit drop
+	// through the cooperative park-suspend join so the single-threaded WASM
+	// scheduler can run the pending goroutine instead of livelocking.
+	if _, isTask := types.AsTask(valType); (isTask || (b.named != nil && b.named == types.TypTask)) &&
+		c.emitTaskJoinAndFreeByDropFn(ptr, b.dropFunc) {
+		c.block.NewBr(doneBlock)
+		c.block = doneBlock
+		c.block.NewBr(skipBlock)
+		c.block = skipBlock
+		return
+	}
+
 	c.block.NewCall(b.dropFunc, ptr)
 	c.block.NewBr(doneBlock)
 
@@ -4563,7 +4584,15 @@ func (c *Compiler) cleanupStmtTemps() {
 		if temp.elemType != nil {
 			c.emitVectorElementDropLoop(ptr, temp.elemType)
 		}
-		c.block.NewCall(temp.dropFunc, ptr)
+		// T0668: a discarded Task statement-expr temp (e.g. `obj.task_getter;`
+		// or `compute_task();`) reaches here un-awaited. In a coroutine body
+		// route through the cooperative join so the single-threaded WASM
+		// scheduler can run the pending goroutine; emitTaskJoinAndFreeByDropFn
+		// returns false for non-Task temps (string/vector/channel) — those
+		// keep the direct drop call.
+		if !c.emitTaskJoinAndFreeByDropFn(ptr, temp.dropFunc) {
+			c.block.NewCall(temp.dropFunc, ptr)
+		}
 		c.block.NewBr(doneBlock)
 
 		c.block = doneBlock
@@ -4616,7 +4645,10 @@ func (c *Compiler) emitStmtTempCleanupForErrorPath() {
 		if temp.elemType != nil {
 			c.emitVectorElementDropLoop(ptr, temp.elemType)
 		}
-		c.block.NewCall(temp.dropFunc, ptr)
+		// T0668: cooperative Task join (coroutine) — see cleanupStmtTemps.
+		if !c.emitTaskJoinAndFreeByDropFn(ptr, temp.dropFunc) {
+			c.block.NewCall(temp.dropFunc, ptr)
+		}
 		c.block.NewBr(doneBlock)
 
 		c.block = doneBlock
@@ -6214,14 +6246,15 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 					if c.typeSubst != nil {
 						resolvedElem = types.Substitute(taskElem, c.typeSubst)
 					}
-					dropFunc := c.getOrCreateTaskDrop(resolvedElem)
 					oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
 					isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
 					dropBlock := c.newBlock("field.taskdrop")
 					mergeBlock := c.newBlock("field.taskdrop.done")
 					c.block.NewCondBr(isSame, mergeBlock, dropBlock)
 					c.block = dropBlock
-					c.block.NewCall(dropFunc, oldVal)
+					// T0668: cooperative join in a coroutine body (this runs in
+					// user code, often a test body / go {}); legacy spin otherwise.
+					c.emitTaskJoinAndFree(oldVal, resolvedElem)
 					c.block.NewBr(mergeBlock)
 					c.block = mergeBlock
 				}

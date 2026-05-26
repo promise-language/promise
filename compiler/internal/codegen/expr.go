@@ -12237,59 +12237,14 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	// Wait for G to complete
 	c.block = waitBlk
 	if c.inCoroutine {
-		// Goroutine-mode: use sched.done_lock to protect done + done_waiters
-		// atomically. Hold the lock across coro.suspend via G.park_mutex so
-		// the scheduler releases it after suspend completes — this prevents
-		// the enqueue-before-suspend race.
-		currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
-		currentGPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
-
-		// Load and lock sched.done_lock
-		schedTy := schedStructType()
-		doneLockField := c.block.NewGetElementPtr(schedTy, c.schedGlobal,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
-		doneLock := c.block.NewLoad(irtypes.I8Ptr, doneLockField)
-		c.block.NewCall(c.palMutexLock, doneLock)
-
-		// Re-check G.done under lock
-		recheckDone := c.block.NewLoad(irtypes.I8, doneField)
-		recheckIsDone := c.block.NewICmp(enum.IPredNE, recheckDone, constant.NewInt(irtypes.I8, 0))
-		doneUnderLockBlk := c.newBlock("task.done_under_lock")
-		parkBlk := c.newBlock("task.park")
-		c.block.NewCondBr(recheckIsDone, doneUnderLockBlk, parkBlk)
-
-		// task.done_under_lock: target already done — unlock and proceed
-		c.block = doneUnderLockBlk
-		c.block.NewCall(c.palMutexUnlock, doneLock)
-		c.block.NewBr(readyBlk)
-
-		// task.park: set status = waiting, prepend to done_waiters, park_mutex = done_lock, suspend
-		c.block = parkBlk
-		curStatusField := c.block.NewGetElementPtr(gTy, currentGPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
-		c.block.NewStore(constant.NewInt(irtypes.I8, gStatusWaiting), curStatusField)
-
-		// Prepend current G to target G's done_waiters list
-		dwField := c.block.NewGetElementPtr(gTy, gPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldDoneWaiters)))
-		oldHead := c.block.NewLoad(irtypes.I8Ptr, dwField)
-		curWaitNextField := c.block.NewGetElementPtr(gTy, currentGPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldWaitNext)))
-		c.block.NewStore(oldHead, curWaitNextField)
-		c.block.NewStore(currentG, dwField)
-
-		// Store done_lock as park_mutex — scheduler will release after suspend
-		pmField := c.block.NewGetElementPtr(gTy, currentGPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
-		c.block.NewStore(doneLock, pmField)
-
-		// Suspend (lock held — scheduler releases it)
-		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
-		resumeBlk := c.newBlock("task.resume")
-		c.block.NewSwitch(suspResult, c.coroSuspendBlk,
-			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
-			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
-		resumeBlk.NewBr(readyBlk)
+		// T0668: shared cooperative park-suspend emitter — re-check G.done
+		// under sched.done_lock, park the current G on the target G's
+		// done_waiters (woken by promise_goroutine_exit), hold the lock across
+		// coro.suspend via G.park_mutex (scheduler releases it after suspend —
+		// prevents the enqueue-before-suspend race). The un-awaited Task-drop
+		// join (emitTaskJoinAndFree) uses the same emitter, so the
+		// receive-join and the drop-join cannot diverge.
+		c.emitCoroTaskParkSuspendWait(gPtr, doneField, readyBlk)
 	} else {
 		// Thread-blocking mode: poll G.done in a loop.
 		// goroutine_exit sets G.done = 1 atomically; we just spin until we see it.

@@ -1,0 +1,211 @@
+// T0668: Dropping a container/binding that holds a live, never-awaited Task[T]
+// handle must not deadlock the single-threaded WASM cooperative scheduler.
+//
+// Before T0668, Task[T].drop busy-spun on G.done via a usleep that is a no-op
+// on WASM; the pending `go {…}` G sat in P0's run queue and never ran because
+// the test coroutine never yielded → livelock (host passed because another M
+// ran the G). The fix routes every coroutine-reachable Task-drop site through
+// a cooperative park-suspend join (mirroring `<-t`) and pumps the cooperative
+// scheduler from the legacy callable Task[T].drop spin on WASM for genuinely
+// non-coroutine drop bodies (synthesized struct/enum field drops, Map.drop).
+//
+// These are batch tests with NO `exclude: wasm` — they must pass on the host
+// AND `--target wasm32-wasi`. Zero-leak enforcement also applies on both.
+worker_int() int {
+  return 42;
+}
+
+worker_void() {
+  // side-effect-only goroutine
+}
+
+worker_string() string {
+  return "hello task";
+}
+
+panicking_void() {
+  assert(false, "task panic");
+}
+
+// (1) Direct `task[int] t = go {…}` binding dropped un-awaited inside the test
+// coroutine — the originally reported root case (bindingDropString path).
+t0668_direct_task() `test {
+  task[int] t = go worker_int();
+  // No <-t: cooperative join at scope exit.
+}
+
+// (2) The exact reported repro: a plain non-optional Task[int][] holding an
+// un-awaited task, dropped at scope exit (emitVariantFieldDrop Vector arm).
+t0668_task_vector_push() `test {
+  Task[int][] v = [];
+  task[int] t = go worker_int();
+  v.push(t);
+  assert(v.len == 1, "task pushed into vector");
+}
+
+// (3) Fixed-size array of un-awaited tasks (emitVariantFieldDrop array arm).
+t0668_task_array() `test {
+  Task[int][2] ts = [go worker_int(), go worker_int()];
+  assert(ts.len == 2, "task array len");
+}
+
+// (4) Tuple containing an un-awaited task (emitVariantFieldDrop tuple arm).
+// Not destructured — the tuple itself is dropped at scope exit with the task
+// still inside, exercising the tuple-element Task drop.
+t0668_task_tuple() `test {
+  int sentinel = 7;
+  (int, Task[int]) tup = (sentinel, go worker_int());
+  assert(sentinel == 7, "tuple holds un-awaited task; dropped at scope exit");
+}
+
+// (5) Optional task local dropped un-awaited (emitOptionalLocalValueDrop).
+// Not unwrapped — the optional is dropped with the task still inside.
+t0668_task_optional() `test {
+  int sentinel = 5;
+  Task[int]? o = go worker_int();
+  assert(sentinel == 5, "optional holds un-awaited task; dropped at scope exit");
+}
+
+// (6) Struct field holding an un-awaited task. The struct's synthesized drop is
+// a plain (non-coroutine) function → exercises the WASM cooperative-step spin
+// pump in the legacy callable Task[int].drop (Part 2).
+type TaskHolder {
+  Task[int] t;
+  drop(~this) {
+  }
+}
+
+t0668_task_struct_field() `test {
+  TaskHolder h = TaskHolder(t: go worker_int());
+  // h dropped at scope exit → TaskHolder.drop → Task[int].drop (Part 2 pump).
+}
+
+// (7) Map[string, Task[int]] — monomorphized Promise Map.drop is a plain
+// function (non-coroutine) → also exercises the Part 2 cooperative-step pump.
+t0668_task_map() `test {
+  map[string, Task[int]] m = {:};
+  m["a"] = go worker_int();
+  m["b"] = go worker_int();
+  assert(m.len == 2, "map of tasks len");
+}
+
+// (8) task[void] — result_ptr is the void sentinel 0x1 (must not be freed, G
+// must be freed); join still required.
+t0668_task_void() `test {
+  task[void] t = go worker_void();
+}
+
+// (9) Nested: a `go {}` body that itself drops an un-awaited task. The inner
+// goroutine body is a coroutine too, so its scope-exit Task drop also takes
+// the cooperative join — exercises the nested-pump path. Uses the explicit
+// `task[void]` + void-block form and `go worker()` call form to avoid the
+// unrelated pre-existing `:=`/`go{<expr>}` defects (T0682, T0683).
+t0668_nested_go_drops_task() `test {
+  task[void] outer = go {
+    task[int] inner = go worker_int();
+    // inner dropped at the goroutine body's scope exit (cooperative join).
+  };
+  <-outer;
+}
+
+// (10) Panicking task body dropped un-awaited — Task[void].drop /
+// free_after_done must free the heap panic_msg + G after the join.
+t0668_task_panicked() `test {
+  task[void] t = go panicking_void();
+  // No <-t. Goroutine panics (panicked=2, heap panic_msg).
+}
+
+// (11) task[string] — droppable inner result. free_after_done must walk the
+// inner string before freeing result_ptr (no leak).
+t0668_task_string_inner() `test {
+  Task[string][] v = [go worker_string()];
+  assert(v.len == 1, "task[string] pushed");
+}
+
+// (12) Mixed: some tasks awaited, others dropped — the cooperative join must
+// coexist with `<-t` (which clears the drop flag) with no double-free.
+t0668_mixed_await_and_drop() `test {
+  task[int] a = go worker_int();
+  task[int] b = go worker_int();
+  int ra = <-a;
+  assert(ra == 42, "awaited a");
+  // b dropped un-awaited at scope exit.
+}
+
+// (13) Struct field of type `Task[int]?` holding an un-awaited task, dropped at
+// scope exit. The struct's synthesized field cleanup goes through
+// emitOptionalFieldDrop → emitOptionalValueDrop (the haveTaskJoin arm) inside a
+// plain (non-coroutine) drop body → exercises the Part-2 WASM coop-step pump.
+// Distinct caller path from the optional *local* (case 5,
+// emitOptionalLocalValueDrop) and the Vector-of-optional e2e test.
+type OptTaskHolder {
+  Task[int]? t;
+  drop(~this) {
+  }
+}
+
+t0668_optional_task_struct_field() `test {
+  OptTaskHolder h = OptTaskHolder(t: go worker_int());
+  assert(true, "Task[int]? struct field holds un-awaited task; dropped at exit");
+}
+
+// (14) Reassigning a `Task[int]?` field that already holds an un-awaited task
+// (to `none`) — emitOptionalFieldReassignDrop must join+free the old task. The
+// reassignment runs in the test body, which is a coroutine on WASM → exercises
+// the cooperative park-suspend join.
+type OptTaskBox {
+  Task[int]? t;
+  drop(~this) {
+  }
+}
+
+t0668_optional_task_field_reassign() `test {
+  OptTaskBox b = OptTaskBox(t: go worker_int());
+  b.t = none;
+  assert(true, "old un-awaited Task[int]? joined on field reassign");
+}
+
+// (15) Reassigning a non-optional `Task[int]` field that already holds an
+// un-awaited task — genMemberAssign must join+free the old task before the
+// store. Reassignment in the (WASM-coroutine) test body → cooperative join;
+// the replacement task is then dropped at scope exit via TaskReassignBox.drop.
+type TaskReassignBox {
+  Task[int] t;
+  drop(~this) {
+  }
+}
+
+t0668_task_field_reassign() `test {
+  TaskReassignBox b = TaskReassignBox(t: go worker_int());
+  b.t = go worker_int();
+  assert(true, "old un-awaited Task[int] joined on field reassign");
+}
+
+// (16) Enum variant carrying an un-awaited `Task[int]` payload, dropped at
+// scope exit WITHOUT being matched — exercises the emitVariantFieldDrop
+// enum-variant arm (cases 2-4/11 cover only the Vector/array/tuple arms).
+enum TaskBag {
+  Has(Task[int] t),
+  Empty,
+}
+
+t0668_enum_variant_task() `test {
+  TaskBag e = TaskBag.Has(t: go worker_int());
+  assert(true, "enum variant holds un-awaited task; dropped un-matched at exit");
+}
+
+// (17) Discarded Task statement-expression temp (a getter result used as a bare
+// statement) — cleanupStmtTemps must cooperatively join the tracked temp. The
+// Go IR test (TestT0668_TrackedTempTaskInCoroutineUsesJoin) locks the IR shape;
+// this is the runtime / zero-leak counterpart on host AND wasm32-wasi. The
+// error-propagation sibling (emitStmtTempCleanupForErrorPath) emits the
+// identical emitTaskJoinAndFreeByDropFn call and is covered transitively.
+type TaskTempSrc {
+  get make_task task[int] => go worker_int();
+}
+
+t0668_discarded_task_stmt_temp() `test {
+  TaskTempSrc s = TaskTempSrc();
+  s.make_task;
+  assert(true, "discarded Task stmt-expr temp joined at statement end");
+}

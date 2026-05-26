@@ -366,6 +366,14 @@ type Compiler struct {
 	coroCleanupBlk       *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
 	coroSuspendBlk       *ir.Block  // coroutine suspend block (suspend path: coro.end + ret)
 
+	// T0668: maps each Task[T].drop func to its paired Task[T].free_after_done
+	// func so temp/binding drop sites that only know the drop func can route
+	// through the cooperative park-suspend join (emitTaskJoinAndFreeByDropFn).
+	taskFreeAfterDone map[*ir.Func]*ir.Func
+	// T0668: shared private deadlock message global for the WASM Task[T].drop
+	// cooperative-step spin pump (created once, reused across instantiations).
+	taskDeadlockMsgGlobal *ir.Global
+
 	// Main function AST — saved so wrapMainWithScheduler can compile it inline
 	mainDecl *ast.FuncDecl
 
@@ -687,6 +695,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		heapTempMap:        make(map[value.Value]int),
 		envTempMap:         make(map[value.Value]int),
 		thunks:             make(map[string]*ir.Func),
+		taskFreeAfterDone:  make(map[*ir.Func]*ir.Func), // T0668
 		file:               file,
 		moduleFuncs:        make(map[string]*ir.Func),
 		moduleExterns:      make(map[string]*ExternFunc),
@@ -1935,6 +1944,7 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineSchedInitFunc()
 	c.defineSchedRunUntilMainFunc()
 	if c.isWasm {
+		c.defineSchedCoopStepFunc() // T0668: must precede coop_run (and Task[T].drop)
 		c.defineSchedCoopRunFunc()
 	}
 	c.defineSchedShutdownFunc()
@@ -2517,13 +2527,23 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		}
 	case named != nil && (types.IsTask(elemType) || named == types.TypTask):
 		// T0546: Task is an opaque container — slot type is i8*, not userValueType.
-		// Load the G handle and call the per-T Task drop, which spin-waits then frees.
+		// Load the G handle and join+free the un-awaited task.
 		valField := blk.NewGetElementPtr(structTy, typedPtr,
 			constant.NewInt(irtypes.I32, 0), fi)
 		innerTask := blk.NewLoad(irtypes.I8Ptr, valField)
 		if taskElem, ok := types.AsTask(elemType); ok {
-			innerDropFn := c.getOrCreateTaskDrop(taskElem)
-			blk.NewCall(innerDropFn, innerTask)
+			// T0668: route through emitTaskJoinAndFree. emitInnerDrop runs in a
+			// synthesized struct/enum field-drop body (c.inCoroutine == false),
+			// so this takes the legacy callable Task[T].drop path — identical
+			// IR to before; WASM coverage for these non-coroutine bodies comes
+			// from defineTaskDropBody's cooperative-step spin pump (Part 2).
+			savedFn, savedEntry, savedBlock := c.fn, c.entryBlock, c.block
+			c.fn = blk.Parent
+			c.entryBlock = blk.Parent.Blocks[0]
+			c.block = blk
+			c.emitTaskJoinAndFree(innerTask, taskElem)
+			blk = c.block
+			c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
 		}
 	case named != nil && (named.HasDrop() || named.NeedsSynthDrop()):
 		// User type with explicit or synthesized drop
@@ -2833,12 +2853,14 @@ func (c *Compiler) defineMutexDropBody(fn *ir.Func, elemType types.Type) {
 // G.result_ptr (skipping the void sentinel 0x1), panic_msg (if heap-allocated),
 // and the G struct itself.
 //
-// Spin-wait note: thread-spin via palUsleep(100) is the only portable choice
-// for a callable drop function (cannot be a presplitcoroutine). Default
-// scheduler uses NumCPU Ms so the awaited G runs on another M. A single-P/
-// single-M scheduler config can deadlock if the awaited G is enqueued behind
-// the spinning caller on the same P — acceptable for the default config; a
-// coroutine-aware inline path is left as a future refactor.
+// T0668: Task[T].drop is split into a spin-wait shell + Task[T].free_after_done
+// (the spin-free post-done cleanup). Coroutine-reachable drop sites instead use
+// the cooperative park-suspend join (emitTaskJoinAndFree), mirroring the proven
+// `<-t` await path so the single-threaded WASM scheduler can run the pending
+// goroutine. This legacy callable Task[T].drop remains the fallback for
+// genuinely non-coroutine drop bodies (synthesized struct/enum/Arc field drops,
+// monomorphized Promise Map[K,Task].drop); on WASM its spin pumps the
+// cooperative scheduler one step per iteration instead of a no-op usleep.
 func (c *Compiler) getOrCreateTaskDrop(elemType types.Type) *ir.Func {
 	elemName := "void"
 	if elemType != nil {
@@ -2847,10 +2869,13 @@ func (c *Compiler) getOrCreateTaskDrop(elemType types.Type) *ir.Func {
 	funcName := "Task[" + elemName + "].drop"
 
 	if fn, ok := c.funcs[funcName]; ok {
-		if len(fn.Blocks) > 0 {
-			return fn
+		if len(fn.Blocks) == 0 {
+			c.defineTaskDropBody(fn, elemType)
 		}
-		c.defineTaskDropBody(fn, elemType)
+		// T0668: keep the drop→free_after_done mapping populated even on the
+		// already-defined / declared-only fast paths (used by the by-drop-fn
+		// temp/binding join route).
+		c.taskFreeAfterDone[fn] = c.getOrCreateTaskFreeAfterDone(elemType)
 		return fn
 	}
 
@@ -2861,17 +2886,22 @@ func (c *Compiler) getOrCreateTaskDrop(elemType types.Type) *ir.Func {
 	c.defineTaskDropBody(fn, elemType)
 
 	c.funcs[funcName] = fn
+	c.taskFreeAfterDone[fn] = c.getOrCreateTaskFreeAfterDone(elemType)
 	return fn
 }
 
-// defineTaskDropBody generates the Task[T].drop body:
-// null-check → spin-wait on G.done → drop result T (if any, and not the void
-// sentinel 0x1) → free result_ptr (when non-sentinel) → free panic_msg if
-// heap-allocated → free the G struct.
+// defineTaskDropBody generates the legacy callable Task[T].drop body:
+// null-check → spin-wait on G.done → Task[T].free_after_done(this).
+//
+// T0668: On the single-threaded WASM cooperative scheduler a busy usleep spin
+// never lets the pending goroutine run (livelock). WASM therefore pumps one
+// promise_sched_coop_step() per spin iteration; if a step makes no progress and
+// G is still not done the program is genuinely deadlocked → terminal message +
+// exit(2), matching promise_sched_coop_run's deadlock block. The host path is
+// unchanged (usleep; another M runs the awaited G).
 func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 	gTy := goroutineStructType()
 	thisParam := fn.Params[0]
-	isVoid := (elemType == nil || elemType == types.TypVoid)
 
 	entry := fn.NewBlock(".entry")
 
@@ -2897,8 +2927,93 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 	isDone := checkBlk.NewICmp(enum.IPredNE, doneVal, constant.NewInt(irtypes.I8, 0))
 	checkBlk.NewCondBr(isDone, readyBlk, spinBlk)
 
-	spinBlk.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
-	spinBlk.NewBr(checkBlk)
+	if c.isWasm {
+		// T0668: pump the cooperative scheduler one step instead of a no-op
+		// usleep. promise_sched_coop_step() returns i8: non-zero = ran/advanced
+		// a G (progress possible), 0 = no runnable G.
+		stepFn := c.funcs["promise_sched_coop_step"]
+		stepR := spinBlk.NewCall(stepFn)
+		madeProgress := spinBlk.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
+		coopRecheckBlk := fn.NewBlock("task.drop.coop_recheck")
+		deadlockBlk := fn.NewBlock("task.drop.deadlock")
+		spinBlk.NewCondBr(madeProgress, checkBlk, coopRecheckBlk)
+
+		// No runnable G — re-check G.done. If the awaited G is still not done it
+		// can never complete (nothing left to run) → genuine deadlock.
+		rdLoad := coopRecheckBlk.NewLoad(irtypes.I8, doneField)
+		rdLoad.Atomic = true
+		rdLoad.Ordering = enum.AtomicOrderingAcquire
+		rdLoad.Align = 1
+		rdDone := coopRecheckBlk.NewICmp(enum.IPredNE, rdLoad, constant.NewInt(irtypes.I8, 0))
+		coopRecheckBlk.NewCondBr(rdDone, checkBlk, deadlockBlk)
+
+		msg := c.getTaskDeadlockMsgGlobal()
+		msgPtr := deadlockBlk.NewGetElementPtr(msg.ContentType, msg,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		deadlockBlk.NewCall(c.palWrite, constant.NewInt(irtypes.I32, 2), msgPtr,
+			constant.NewInt(irtypes.I64, 45))
+		deadlockBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 2))
+		deadlockBlk.NewUnreachable()
+	} else {
+		spinBlk.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
+		spinBlk.NewBr(checkBlk)
+	}
+
+	// ready: G is done — defer the post-done cleanup to Task[T].free_after_done.
+	readyBlk.NewCall(c.getOrCreateTaskFreeAfterDone(elemType), thisParam)
+	readyBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+}
+
+// getOrCreateTaskFreeAfterDone returns or creates Task[T].free_after_done — the
+// spin-free post-done cleanup extracted from the old Task[T].drop (T0668).
+// Assumes the goroutine G is already done. Used by both the legacy spin shell
+// (after the wait) and the cooperative park-suspend join (emitTaskJoinAndFree),
+// so the post-done IR exists in exactly one place.
+func (c *Compiler) getOrCreateTaskFreeAfterDone(elemType types.Type) *ir.Func {
+	elemName := "void"
+	if elemType != nil {
+		elemName = typeArgStr(elemType)
+	}
+	funcName := "Task[" + elemName + "].free_after_done"
+
+	if fn, ok := c.funcs[funcName]; ok {
+		if len(fn.Blocks) == 0 {
+			c.defineTaskFreeAfterDoneBody(fn, elemType)
+		}
+		return fn
+	}
+
+	thisParam := ir.NewParam("this", irtypes.I8Ptr)
+	fn := c.module.NewFunc(funcName, irtypes.Void, thisParam)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	c.defineTaskFreeAfterDoneBody(fn, elemType)
+
+	c.funcs[funcName] = fn
+	return fn
+}
+
+// defineTaskFreeAfterDoneBody generates the Task[T].free_after_done body
+// (T0668): null-check → drop result T (if any, and not the void sentinel 0x1)
+// → free result_ptr (when non-sentinel) → free panic_msg if heap-allocated →
+// free the G struct. This is the old Task[T].drop post-done logic moved
+// verbatim; the only structural change is the leading null check (callers may
+// pass a consumed / zero-initialized handle) and the entry→ready wiring.
+func (c *Compiler) defineTaskFreeAfterDoneBody(fn *ir.Func, elemType types.Type) {
+	gTy := goroutineStructType()
+	thisParam := fn.Params[0]
+	isVoid := (elemType == nil || elemType == types.TypVoid)
+
+	entry := fn.NewBlock(".entry")
+	readyBlk := fn.NewBlock("task.fad.ready")
+	doneBlk := fn.NewBlock("done")
+
+	// Null check — callers (Task[T].drop ready path, the cooperative join, and
+	// consumed/zero-initialized slots) may pass a null handle.
+	isNull := entry.NewICmp(enum.IPredEQ, thisParam, constant.NewNull(irtypes.I8Ptr))
+	entry.NewCondBr(isNull, doneBlk, readyBlk)
 
 	// ready: drop result, then free result_ptr, panic_msg, G.
 	// emitVariantFieldDrop uses c.fn/c.entryBlock/c.block; save and restore so
@@ -2907,6 +3022,8 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 	c.fn = fn
 	c.entryBlock = entry
 	c.block = readyBlk
+
+	gPtr := c.block.NewBitCast(thisParam, irtypes.NewPointer(gTy))
 
 	// T0594: hoist G.panicked load so the non-void result path can skip loading
 	// uninitialized result_ptr contents when the goroutine panicked before writing.
@@ -2972,6 +3089,22 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 	doneBlk.NewRet(nil)
 
 	c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
+}
+
+// getTaskDeadlockMsgGlobal returns the shared private deadlock-message global
+// used by the WASM Task[T].drop cooperative-step spin pump (T0668). Created
+// once and reused across all Task[T].drop instantiations to avoid emitting one
+// duplicate 45-byte global per element type.
+func (c *Compiler) getTaskDeadlockMsgGlobal() *ir.Global {
+	if c.taskDeadlockMsgGlobal != nil {
+		return c.taskDeadlockMsgGlobal
+	}
+	msg := constant.NewCharArrayFromString("fatal: all goroutines are asleep - deadlock!\n")
+	g := c.module.NewGlobalDef(".str.deadlock.taskdrop", msg)
+	g.Immutable = true
+	g.Linkage = enum.LinkagePrivate
+	c.taskDeadlockMsgGlobal = g
+	return g
 }
 
 // dupHeapValue duplicates a heap user type value struct by allocating a new
@@ -7540,6 +7673,12 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 
 	// Determine cleanup needed for the inner type.
 	var dropFunc *ir.Func
+	// T0668: when set, the inner type is Task[taskJoinElem] and the un-awaited
+	// task is dropped via the cooperative join (emitTaskJoinAndFree) instead of
+	// the bare legacy spin — fixes the single-threaded WASM scheduler livelock
+	// for `task[T]?` fields/locals dropped inside a coroutine body.
+	var taskJoinElem types.Type
+	haveTaskJoin := false
 	isHeapUser := false
 
 	switch {
@@ -7584,7 +7723,11 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 				}
 			}
 		}
+		// T0668: keep dropFunc non-nil so the has-value branch is still reached,
+		// but emit the cooperative join at the drop site instead of this spin.
 		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem)
+		taskJoinElem = resolvedTaskElem
+		haveTaskJoin = true
 	case types.IsArc(elem) || innerNamed == types.TypArc:
 		// T0573: Optional[Arc[T]] field scope-exit — per-instantiation drop
 		// decrements the refcount, drops the payload + frees the box on last ref.
@@ -7706,6 +7849,11 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 
 		c.block = skipFreeBlock
 		c.block.NewBr(skipBlock)
+	} else if haveTaskJoin {
+		// T0668: Optional[Task[T]] — cooperative park-suspend join in a
+		// coroutine body (test body / WASM main / go {}); legacy spin otherwise.
+		c.emitTaskJoinAndFree(innerVal, taskJoinElem)
+		c.block.NewBr(skipBlock)
 	} else {
 		// T0354: For Vector inner type, iterate elements and drop heap elements
 		// (strings, enums, user types, tuples) before freeing the buffer. Without
@@ -7736,6 +7884,9 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 
 	// Determine what cleanup is needed for the inner type.
 	var dropFunc *ir.Func
+	// T0668: Task[taskJoinElem] reassignment → cooperative join (coroutine).
+	var taskJoinElem types.Type
+	haveTaskJoin := false
 	needsFreeOnly := false
 
 	switch {
@@ -7782,6 +7933,8 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 			}
 		}
 		dropFunc = c.getOrCreateTaskDrop(resolvedTaskElem)
+		taskJoinElem = resolvedTaskElem
+		haveTaskJoin = true
 	case types.IsArc(elem) || innerNamed == types.TypArc:
 		// T0573: Optional[Arc[T]] field reassignment — per-instantiation drop
 		// decrements the refcount on the old value. Without this case, dispatch
@@ -7914,8 +8067,14 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 		if elemType, isVec := types.AsVector(elem); isVec {
 			c.emitVectorElementDropLoop(innerVal, elemType)
 		}
-		// String/container/task/Arc/Weak/Mutex/MutexGuard: inner is i8*, call drop directly.
-		c.block.NewCall(dropFunc, innerVal)
+		if haveTaskJoin {
+			// T0668: Optional[Task[T]] reassignment — cooperative join in a
+			// coroutine body; legacy spin otherwise.
+			c.emitTaskJoinAndFree(innerVal, taskJoinElem)
+		} else {
+			// String/container/Arc/Weak/Mutex/MutexGuard: inner is i8*, call drop directly.
+			c.block.NewCall(dropFunc, innerVal)
+		}
 	} else {
 		// User type: inner is value struct {vtable*, instance*}.
 		instancePtr := c.extractInstancePtr(innerVal)
@@ -8762,6 +8921,146 @@ func (c *Compiler) emitNullGuardedVariantDrop(instance value.Value, emitDrop fun
 	c.block = skipBlock
 }
 
+// emitCoroTaskParkSuspendWait emits the cooperative park-suspend join for an
+// un-awaited Task handle (T0668). It is the single shared park-suspend emitter
+// also used by genReceiveTask's `<-t` await path, so the drop-join and the
+// receive-join cannot diverge.
+//
+// Precondition: c.inCoroutine && c.coroSuspendBlk != nil; c.block is the block
+// where it is not yet known whether G is done (the "wait" block). gPtr is the
+// target G* (handle bitcast); doneField is the GEP to target G.done. The join
+// re-checks G.done under sched.done_lock and, if still not done, parks the
+// current G on the target G's done_waiters list (woken by
+// promise_goroutine_exit) and coro.suspends. Both the under-lock-done path and
+// the post-resume path branch to readyBlk (where G.done is guaranteed set).
+// Mirrors genReceiveTask's c.inCoroutine branch exactly.
+func (c *Compiler) emitCoroTaskParkSuspendWait(gPtr, doneField value.Value, readyBlk *ir.Block) {
+	gTy := goroutineStructType()
+
+	// Goroutine-mode: use sched.done_lock to protect done + done_waiters
+	// atomically. Hold the lock across coro.suspend via G.park_mutex so the
+	// scheduler releases it after suspend completes — prevents the
+	// enqueue-before-suspend race.
+	currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+	currentGPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
+
+	schedTy := schedStructType()
+	doneLockField := c.block.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
+	doneLock := c.block.NewLoad(irtypes.I8Ptr, doneLockField)
+	c.block.NewCall(c.palMutexLock, doneLock)
+
+	// Re-check G.done under lock
+	recheckDone := c.block.NewLoad(irtypes.I8, doneField)
+	recheckIsDone := c.block.NewICmp(enum.IPredNE, recheckDone, constant.NewInt(irtypes.I8, 0))
+	doneUnderLockBlk := c.newBlock("task.done_under_lock")
+	parkBlk := c.newBlock("task.park")
+	c.block.NewCondBr(recheckIsDone, doneUnderLockBlk, parkBlk)
+
+	// task.done_under_lock: target already done — unlock and proceed
+	c.block = doneUnderLockBlk
+	c.block.NewCall(c.palMutexUnlock, doneLock)
+	c.block.NewBr(readyBlk)
+
+	// task.park: set status = waiting, prepend to done_waiters, park_mutex = done_lock, suspend
+	c.block = parkBlk
+	curStatusField := c.block.NewGetElementPtr(gTy, currentGPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+	c.block.NewStore(constant.NewInt(irtypes.I8, gStatusWaiting), curStatusField)
+
+	// Prepend current G to target G's done_waiters list
+	dwField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldDoneWaiters)))
+	oldHead := c.block.NewLoad(irtypes.I8Ptr, dwField)
+	curWaitNextField := c.block.NewGetElementPtr(gTy, currentGPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldWaitNext)))
+	c.block.NewStore(oldHead, curWaitNextField)
+	c.block.NewStore(currentG, dwField)
+
+	// Store done_lock as park_mutex — scheduler will release after suspend
+	pmField := c.block.NewGetElementPtr(gTy, currentGPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+	c.block.NewStore(doneLock, pmField)
+
+	// Suspend (lock held — scheduler releases it)
+	suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+	resumeBlk := c.newBlock("task.resume")
+	c.block.NewSwitch(suspResult, c.coroSuspendBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
+	resumeBlk.NewBr(readyBlk)
+}
+
+// emitCoroTaskJoinAndFree emits, in the current coroutine block, an un-awaited
+// Task handle join+cleanup (T0668): null-check handle → fast G.done check →
+// cooperative park-suspend wait → freeAfterDoneFn(handle). Precondition:
+// c.inCoroutine && c.coroSuspendBlk != nil. On return c.block is a fresh
+// continuation block.
+func (c *Compiler) emitCoroTaskJoinAndFree(handle value.Value, freeAfterDoneFn *ir.Func) {
+	gTy := goroutineStructType()
+
+	isNull := c.block.NewICmp(enum.IPredEQ, handle, constant.NewNull(irtypes.I8Ptr))
+	notNullBlk := c.newBlock("taskjoin.notnull")
+	contBlk := c.newBlock("taskjoin.cont")
+	c.block.NewCondBr(isNull, contBlk, notNullBlk)
+
+	c.block = notNullBlk
+	gPtr := c.block.NewBitCast(handle, irtypes.NewPointer(gTy))
+	doneField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldDone)))
+	doneVal := c.block.NewLoad(irtypes.I8, doneField)
+	isDone := c.block.NewICmp(enum.IPredNE, doneVal, constant.NewInt(irtypes.I8, 0))
+	fastDoneBlk := c.newBlock("taskjoin.fastdone")
+	waitBlk := c.newBlock("taskjoin.wait")
+	readyBlk := c.newBlock("taskjoin.ready")
+	c.block.NewCondBr(isDone, fastDoneBlk, waitBlk)
+
+	fastDoneBlk.NewBr(readyBlk)
+
+	c.block = waitBlk
+	c.emitCoroTaskParkSuspendWait(gPtr, doneField, readyBlk)
+
+	c.block = readyBlk
+	c.block.NewCall(freeAfterDoneFn, handle)
+	c.block.NewBr(contBlk)
+
+	c.block = contBlk
+}
+
+// emitTaskJoinAndFree drops an un-awaited Task handle (T0668). In a coroutine
+// body (test bodies, WASM main, every go {} body) it emits the cooperative
+// park-suspend join + Task[T].free_after_done so the single-threaded WASM
+// scheduler can run the pending goroutine. Otherwise it falls back to the
+// legacy callable Task[T].drop (busy spin on host; cooperative-step pump on
+// WASM for genuinely non-coroutine drop bodies).
+func (c *Compiler) emitTaskJoinAndFree(handle value.Value, elemType types.Type) {
+	if c.inCoroutine && c.coroSuspendBlk != nil {
+		c.emitCoroTaskJoinAndFree(handle, c.getOrCreateTaskFreeAfterDone(elemType))
+		return
+	}
+	c.block.NewCall(c.getOrCreateTaskDrop(elemType), handle)
+}
+
+// emitTaskJoinAndFreeByDropFn is the temp/binding-site variant of
+// emitTaskJoinAndFree (T0668): the call site only knows the Task[T].drop func
+// (stored on a stmtTemp/scopeBinding), not the element type. The
+// drop→free_after_done pairing recorded by getOrCreateTaskDrop recovers the
+// cooperative path. dropFn must be a Task[T].drop produced by
+// getOrCreateTaskDrop; returns false (caller emits its own legacy call) if the
+// pairing is unknown.
+func (c *Compiler) emitTaskJoinAndFreeByDropFn(handle value.Value, dropFn *ir.Func) bool {
+	faf, ok := c.taskFreeAfterDone[dropFn]
+	if !ok {
+		return false
+	}
+	if c.inCoroutine && c.coroSuspendBlk != nil {
+		c.emitCoroTaskJoinAndFree(handle, faf)
+		return true
+	}
+	c.block.NewCall(dropFn, handle)
+	return true
+}
+
 // emitVariantFieldDrop emits a drop call for a single variant field value.
 func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 	if c.typeSubst != nil {
@@ -8825,8 +9124,12 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			return
 		}
 		if taskElem, isTask := types.AsTask(typ); isTask || named == types.TypTask {
-			dropFn := c.getOrCreateTaskDrop(taskElem)
-			c.block.NewCall(dropFn, fieldVal)
+			// T0668: central chokepoint for Vector/array/tuple element loops and
+			// enum-variant drops. Route through the cooperative join so an
+			// un-awaited Task in a container dropped inside a coroutine (test
+			// body / WASM main / go {}) parks instead of livelocking the
+			// single-threaded WASM scheduler.
+			c.emitTaskJoinAndFree(fieldVal, taskElem)
 			return
 		}
 		// T0387: Polymorphic heap user type — dispatch through typeinfo's

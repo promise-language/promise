@@ -2481,11 +2481,22 @@ func (c *Compiler) defineSchedRunUntilMainFunc() {
 
 // --- Cooperative scheduler (WASM) ---
 
-// defineSchedCoopRunFunc emits @promise_sched_coop_run() → void
-// Single-threaded cooperative event loop for WASM. No threads, no stealing, no sysmon.
-// Runs goroutines until main completes. Deadlocks if no runnable G and main not done.
-func (c *Compiler) defineSchedCoopRunFunc() {
-	fn := c.module.NewFunc("promise_sched_coop_run", irtypes.Void)
+// defineSchedCoopStepFunc emits @promise_sched_coop_step() → i8 (T0668)
+// One iteration of the single-threaded cooperative scheduler: find a runnable
+// G, resume it, and handle its coro.done / park / yield result. Returns 1 if a
+// G ran (progress possible), 0 if no runnable G was found. Factored out of
+// promise_sched_coop_run so the legacy callable Task[T].drop spin (reached from
+// genuinely non-coroutine drop bodies on WASM — synthesized struct/enum/Arc
+// field drops, Promise Map[K,Task].drop) can pump the scheduler instead of a
+// no-op usleep livelock.
+//
+// Re-entrancy: this may be called from within a running goroutine's call stack
+// (Task[T].drop spin nested under that goroutine), so the incoming TLS
+// current_g/current_p are saved on entry and restored on every return path —
+// when called from promise_sched_coop_run's loop they are null, so this is a
+// no-op there and preserves the original loop semantics exactly.
+func (c *Compiler) defineSchedCoopStepFunc() {
+	fn := c.module.NewFunc("promise_sched_coop_step", irtypes.I8)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	schedTy := schedStructType()
@@ -2493,7 +2504,6 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 	pTy := processorStructType()
 
 	entry := fn.NewBlock(".entry")
-	loop := fn.NewBlock("loop")
 	foundG := fn.NewBlock("found_g")
 	noG := fn.NewBlock("no_g")
 	afterResume := fn.NewBlock("after_resume")
@@ -2502,8 +2512,12 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 	releaseMtxBlk := fn.NewBlock("release_park_mutex")
 	yieldReenqueueBlk := fn.NewBlock("yield_reenqueue")
 	afterReleaseBlk := fn.NewBlock("after_release")
-	doneBlk := fn.NewBlock("done")
-	deadlockBlk := fn.NewBlock("deadlock")
+	ranGBlk := fn.NewBlock("ran_g")
+
+	// Save incoming TLS current_g/current_p for re-entrant callers (restored
+	// on every return path so a nested pump doesn't clobber the outer G).
+	savedG := entry.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+	savedP := entry.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
 
 	// Get P0 from sched.allPs[0]
 	psField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -2512,19 +2526,14 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 	// P0 is the first element — cast to P* then back to i8*
 	psTyped := entry.NewBitCast(psRaw, irtypes.NewPointer(pTy))
 	p0 := entry.NewBitCast(psTyped, irtypes.I8Ptr)
-	entry.NewBr(loop)
 
-	// loop: find runnable G via find_runnable (tries local queue, global queue, steal)
-	gRaw := loop.NewCall(c.funcs["promise_sched_find_runnable"], p0)
-	gNull := loop.NewICmp(enum.IPredEQ, gRaw, constant.NewNull(irtypes.I8Ptr))
-	loop.NewCondBr(gNull, noG, foundG)
+	// find runnable G via find_runnable (tries local queue, global queue, steal)
+	gRaw := entry.NewCall(c.funcs["promise_sched_find_runnable"], p0)
+	gNull := entry.NewICmp(enum.IPredEQ, gRaw, constant.NewNull(irtypes.I8Ptr))
+	entry.NewCondBr(gNull, noG, foundG)
 
-	// noG: check if main is done
-	mdField := noG.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDone)))
-	mainDone := noG.NewLoad(irtypes.I8, mdField)
-	mainIsDone := noG.NewICmp(enum.IPredNE, mainDone, constant.NewInt(irtypes.I8, 0))
-	noG.NewCondBr(mainIsDone, doneBlk, deadlockBlk)
+	// noG: no runnable G — return 0 (current_g/current_p untouched).
+	noG.NewRet(constant.NewInt(irtypes.I8, 0))
 
 	// foundG: set current_g/current_p, set G.status=running, resume coroutine
 	foundG.NewStore(gRaw, c.currentGGlobal)
@@ -2565,16 +2574,14 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 	isDoneCoro := afterResume.NewCall(c.coroDone, coroHandle2)
 	afterResume.NewCondBr(isDoneCoro, coroDoneBlk, coroSuspendedBlk)
 
-	// coroDone: goroutine finished — clear P.current_g, call goroutine_exit, clear TLS
+	// coroDone: goroutine finished — clear P.current_g, call goroutine_exit
 	pRaw2 := coroDoneBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
 	pPtr2 := coroDoneBlk.NewBitCast(pRaw2, irtypes.NewPointer(pTy))
 	pCurGField2 := coroDoneBlk.NewGetElementPtr(pTy, pPtr2,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
 	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGField2)
 	coroDoneBlk.NewCall(c.funcs["promise_goroutine_exit"], gRaw2)
-	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
-	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
-	coroDoneBlk.NewBr(loop)
+	coroDoneBlk.NewBr(ranGBlk)
 
 	// coroSuspended: check park_mutex to distinguish park vs yield
 	pmField := coroSuspendedBlk.NewGetElementPtr(gTy, gPtr2,
@@ -2596,19 +2603,56 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
 	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGFieldY)
 	yieldReenqueueBlk.NewCall(c.funcs["promise_sched_enqueue"], gRaw2)
-	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
-	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
-	yieldReenqueueBlk.NewBr(loop)
+	yieldReenqueueBlk.NewBr(ranGBlk)
 
-	// after_release: parked path — clear P.current_g and TLS, loop back
+	// after_release: parked path — clear P.current_g, then ran-a-G return
 	pRaw3 := afterReleaseBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
 	pPtr3 := afterReleaseBlk.NewBitCast(pRaw3, irtypes.NewPointer(pTy))
 	pCurGField3 := afterReleaseBlk.NewGetElementPtr(pTy, pPtr3,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
 	afterReleaseBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGField3)
-	afterReleaseBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
-	afterReleaseBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
-	afterReleaseBlk.NewBr(loop)
+	afterReleaseBlk.NewBr(ranGBlk)
+
+	// ran_g: a G ran (done/parked/yielded) — restore the saved TLS context for
+	// re-entrant callers (null when called from coop_run's loop) and return 1.
+	ranGBlk.NewStore(savedG, c.currentGGlobal)
+	ranGBlk.NewStore(savedP, c.currentPGlobal)
+	ranGBlk.NewRet(constant.NewInt(irtypes.I8, 1))
+
+	c.funcs["promise_sched_coop_step"] = fn
+}
+
+// defineSchedCoopRunFunc emits @promise_sched_coop_run() → void
+// Single-threaded cooperative event loop for WASM. No threads, no stealing, no sysmon.
+// Runs goroutines until main completes. Deadlocks if no runnable G and main not done.
+// T0668: the per-step work is factored into promise_sched_coop_step(); this is
+// the thin driver loop. Semantics are unchanged — keep running Gs while one is
+// runnable, and only when none is runnable check main_done (exit) vs deadlock.
+func (c *Compiler) defineSchedCoopRunFunc() {
+	fn := c.module.NewFunc("promise_sched_coop_run", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	schedTy := schedStructType()
+
+	entry := fn.NewBlock(".entry")
+	loop := fn.NewBlock("loop")
+	noG := fn.NewBlock("no_g")
+	doneBlk := fn.NewBlock("done")
+	deadlockBlk := fn.NewBlock("deadlock")
+
+	entry.NewBr(loop)
+
+	// loop: run one cooperative step. 1 = ran a G (keep going), 0 = nothing runnable.
+	stepR := loop.NewCall(c.funcs["promise_sched_coop_step"])
+	ranG := loop.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
+	loop.NewCondBr(ranG, loop, noG)
+
+	// noG: no runnable G — exit if main completed, else deadlock.
+	mdField := noG.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDone)))
+	mainDone := noG.NewLoad(irtypes.I8, mdField)
+	mainIsDone := noG.NewICmp(enum.IPredNE, mainDone, constant.NewInt(irtypes.I8, 0))
+	noG.NewCondBr(mainIsDone, doneBlk, deadlockBlk)
 
 	// done: main completed
 	doneBlk.NewRet(nil)

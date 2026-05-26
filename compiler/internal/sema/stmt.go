@@ -211,6 +211,16 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 		return
 	}
 
+	// T0682: A void-typed RHS produces no value, so there is nothing to bind.
+	// This includes `r := void_func()` and `r := <-void_task`. Without this
+	// check codegen would emit `alloca void` / `store nil` (LLVM error or a
+	// nil-pointer panic). To await a void task or run a void call for effect,
+	// use the expression as a statement (`<-task;` / `foo();`) instead.
+	if types.Identical(valType, types.TypVoid) {
+		c.errorf(s.Pos(), "cannot bind void to variable '%s': expression produces no value; use it as a statement instead", s.Name)
+		return
+	}
+
 	// Track factory-created locals for `final field write restriction
 	if c.inFactoryBody && s.Name != "_" && isConstructorCallExpr(s.Value) {
 		c.factoryLocals[s.Name] = true

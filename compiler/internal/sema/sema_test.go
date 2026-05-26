@@ -3990,6 +3990,75 @@ func TestVoidFunctionTypeCallResult(t *testing.T) {
 	expectError(t, errs, "cannot")
 }
 
+// T0682: binding `<-void_task` (awaiting a void task) to an inferred
+// variable previously crashed codegen with a nil-pointer panic
+// (alloca void / store nil). Sema must reject it with a clear error.
+func TestInferredVarDeclVoidTaskReceive(t *testing.T) {
+	errs := checkErrs(t, `
+		t() {
+			outer := go { };
+			r := <-outer;
+		}
+	`)
+	expectError(t, errs, "cannot bind void to variable 'r'")
+}
+
+// T0682: nested go-block repro from the bug report — block-form go bound
+// to an inferred var, then its void result awaited into another var.
+func TestInferredVarDeclVoidTaskReceiveNested(t *testing.T) {
+	errs := checkErrs(t, `
+		worker_int() int { return 42; }
+		t() {
+			outer := go {
+				task[int] inner = go worker_int();
+			};
+			r := <-outer;
+		}
+	`)
+	expectError(t, errs, "expression produces no value")
+}
+
+// T0682: binding a plain void function call to an inferred variable is
+// the same class of error (previously surfaced as an LLVM "void type"
+// error). Sema should catch it uniformly.
+func TestInferredVarDeclVoidFunctionCall(t *testing.T) {
+	errs := checkErrs(t, `
+		do_nothing() { }
+		t() {
+			r := do_nothing();
+		}
+	`)
+	expectError(t, errs, "cannot bind void to variable 'r'")
+}
+
+// T0682: discarding into `_` is also a void bind — there is nothing to
+// discard, the statement form is the one obvious way.
+func TestInferredVarDeclVoidDiscard(t *testing.T) {
+	errs := checkErrs(t, `
+		do_nothing() { }
+		t() {
+			_ := do_nothing();
+		}
+	`)
+	expectError(t, errs, "expression produces no value")
+}
+
+// T0682: the valid forms must still type-check — awaiting a void task as
+// a statement, binding the task handle itself, and binding a non-void
+// task's awaited result.
+func TestVoidTaskValidForms(t *testing.T) {
+	checkOK(t, `
+		worker_int() int { return 42; }
+		t() {
+			outer := go { };
+			<-outer;
+			handle := go { };
+			n := go worker_int();
+			v := <-n;
+		}
+	`)
+}
+
 // --- Match Exhaustiveness Tests ---
 
 func TestMatchExhaustiveEnum(t *testing.T) {

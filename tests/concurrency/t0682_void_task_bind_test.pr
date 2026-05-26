@@ -1,0 +1,74 @@
+// T0682: binding the void result of awaiting a void task (`r := <-outer`
+// where `outer : task[void]`) — or any void-typed expression — to a
+// variable crashed the compiler with a nil-pointer panic in
+// genInferredVarDecl (alloca void / store nil). The bug report's title
+// blamed `x := go { block }`, but the block-bind itself is fine; the
+// trigger is the *subsequent* `r := <-outer` line awaiting a void task.
+//
+// The fix rejects binding a void expression to a variable at sema time
+// with a clear error (see the Go TestInferredVarDeclVoid* tests). The
+// one obvious way to await a void task is the statement form `<-outer;`.
+//
+// These batch tests pin the *valid* shapes — including the exact nested
+// go-block structure from the bug report rewritten correctly — so the
+// legitimate path keeps working end-to-end (host + wasm, zero-leak). No
+// `exclude: wasm`: `<-task` await uses the same cooperative-join path as
+// t0683_go_block_value_test.
+worker_int() int {
+  return 42;
+}
+
+// (1) The exact bug-report repro, written the one obvious way: the
+// inferred void go-block bound to `outer`, its inner non-void task
+// awaited into a value, and the outer void task awaited as a statement.
+t0682_nested_go_block_void_await() `test {
+  outer := go {
+    task[int] inner = go worker_int();
+    n := <-inner;
+    assert(n == 42, "inner non-void task result");
+  };
+  <-outer;
+  assert(true, "nested void go-block awaited as a statement: no crash, no leak");
+}
+
+// (2) Inferred bind of an empty void go-block, statement-form await.
+t0682_inferred_empty_void_block() `test {
+  outer := go {
+  };
+  <-outer;
+  assert(true, "inferred empty void block awaited as statement");
+}
+
+// (3) Inferred bind of a void go-block that runs a void call for effect.
+t0682_inferred_void_effect_block() `test {
+  ch := channel[int](capacity: 1);
+  outer := go {
+    ch.send(7);
+  };
+  <-outer;
+  got := <-ch;
+  if v := got {
+    assert(v == 7, "void effect block ran before await returned");
+  }
+}
+
+// (4) Binding a non-void task's awaited result to an inferred var is
+// still valid (the void check must not over-trigger).
+t0682_inferred_non_void_task_result() `test {
+  n := go worker_int();
+  v := <-n;
+  assert(v == 42, "inferred bind of non-void awaited task result");
+}
+
+// (5) Many inferred void blocks awaited as statements in a loop — a
+// per-iteration G/buffer leak would trip the zero-tolerance alloc check.
+t0682_inferred_void_block_loop() `test {
+  i := 0;
+  while i < 25 {
+    w := go {
+    };
+    <-w;
+    i = i + 1;
+  }
+  assert(i == 25, "many inferred void blocks awaited in loop: no leak");
+}

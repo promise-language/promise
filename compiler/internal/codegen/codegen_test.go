@@ -15363,6 +15363,21 @@ func TestTaskReceiveParksGoroutine(t *testing.T) {
 	assertContains(t, ir, "promise_sched_enqueue")
 }
 
+func TestTaskDropDoneLoadIsAcquire(t *testing.T) {
+	// T0669: G.done spin-wait in Task.drop must use an atomic acquire load so the
+	// LLVM optimizer cannot hoist or cache it across loop iterations on Windows.
+	ir := generateIR(t, `
+		compute() int { return 42; }
+		main() {
+			t := go compute();
+			v := <-t;
+		}
+	`)
+	// The Task drop function must contain an atomic acquire load on G.done (i8).
+	assertContains(t, ir, "load atomic i8")
+	assertContains(t, ir, "acquire")
+}
+
 // --- Phase 5c gap-filling tests ---
 
 func TestTaskReceiveInCoroutine(t *testing.T) {

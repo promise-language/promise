@@ -2882,10 +2882,15 @@ func (c *Compiler) defineTaskDropBody(fn *ir.Func, elemType types.Type) {
 
 	gPtr := checkBlk.NewBitCast(thisParam, irtypes.NewPointer(gTy))
 
-	// Spin-wait loop: re-load G.done; if 0, brief usleep(100) and recheck.
+	// Spin-wait loop: re-load G.done atomically (acquire) so the LLVM optimizer
+	// cannot hoist or cache the load across iterations (T0669).
 	doneField := checkBlk.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldDone)))
-	doneVal := checkBlk.NewLoad(irtypes.I8, doneField)
+	doneLoad := checkBlk.NewLoad(irtypes.I8, doneField)
+	doneLoad.Atomic = true
+	doneLoad.Ordering = enum.AtomicOrderingAcquire
+	doneLoad.Align = 1
+	doneVal := doneLoad
 	isDone := checkBlk.NewICmp(enum.IPredNE, doneVal, constant.NewInt(irtypes.I8, 0))
 	checkBlk.NewCondBr(isDone, readyBlk, spinBlk)
 

@@ -480,6 +480,9 @@ expression
     // Precedence 12 (lowest): Elvis
     | expression QUESTION_COLON expression                     # elvisExpr
 
+    // Non-left-recursive: generic constructor call with optional type args (e.g. Vector[string?]())
+    | IDENT typeArgs LPAREN args RPAREN                        # typeInstCallExpr
+
     // Primary atoms (not left-recursive — always highest precedence)
     | primary                                                  # primaryExpr
     ;

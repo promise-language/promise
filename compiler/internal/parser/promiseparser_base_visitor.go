@@ -375,6 +375,10 @@ func (v *BasePromiseParserVisitor) VisitBitwiseNotExpr(ctx *BitwiseNotExprContex
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitTypeInstCallExpr(ctx *TypeInstCallExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitErrorPanicExpr(ctx *ErrorPanicExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }

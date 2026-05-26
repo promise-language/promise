@@ -36,6 +36,7 @@ const (
 	tagArrayLit           = 30
 	tagMapLit             = 31
 	tagAutoCloneExpr      = 32 // T0605: synth-only; never serialized (defensive)
+	tagTypeRefExpr        = 33 // T0670: typeInstCallExpr wrapper for optional/function type args
 
 	// Statements (51-80)
 	tagBlock              = 51

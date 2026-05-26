@@ -335,6 +335,11 @@ func (d *decoder) expr() ast.Expr {
 			n.Entries[i] = en
 		}
 		return n
+	case tagTypeRefExpr:
+		n := &ast.TypeRefExpr{}
+		d.setPosEnd(n)
+		n.Ref = d.typeRef()
+		return n
 	default:
 		d.err = fmt.Errorf("unknown expr tag %d at offset %d", tag, d.off-1)
 		return nil

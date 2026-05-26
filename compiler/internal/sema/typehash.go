@@ -605,6 +605,9 @@ func hExpr(h hash.Hash, e ast.Expr) {
 			hExpr(h, entry.Value)
 		}
 		wb(h, 0xFE)
+	case *ast.TypeRefExpr:
+		wb(h, 51)
+		hTypeRef(h, ex.Ref)
 	default:
 		panic(fmt.Sprintf("typehash: unhandled Expr %T", e))
 	}

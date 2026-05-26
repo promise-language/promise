@@ -102,6 +102,16 @@ type CastExpr struct {
 
 func (*CastExpr) exprTag() {}
 
+// TypeRefExpr wraps a TypeRef for use as an Expr inside IndexExpr.Index /
+// ExtraIndices when the type argument came from the typeInstCallExpr grammar
+// rule (e.g. Vector[string?]() or identity[int?](42)).
+type TypeRefExpr struct {
+	nodeBase
+	Ref TypeRef
+}
+
+func (*TypeRefExpr) exprTag() {}
+
 // ErrorPropagateExpr represents explicit error propagation: expr?^
 type ErrorPropagateExpr struct {
 	nodeBase

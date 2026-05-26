@@ -1,0 +1,56 @@
+// Tests for constructor calls with optional type arguments (T0670).
+// Verifies that Vector[T?](), Channel[T?](), Map[K, V?]() parse correctly.
+vec_optional() `test {
+  v := Vector[string?]();
+  string s = "he" + "llo";
+  string? a = s;
+  string? b = none;
+  v.push(a);
+  v.push(b);
+  assert(v.len == 2, "len 2");
+  assert(v[0] is present, "slot 0 present");
+  assert(v[1] is absent, "slot 1 absent");
+}
+
+map_optional_value() `test {
+  m := Map[string, int?]();
+  int? v = 1;
+  m["key"] = v;
+  assert(m.len == 1, "len 1");
+  assert(m.contains("key"), "key present");
+}
+
+channel_optional() `test {
+  ch := Channel[int?](capacity: 2);
+  int? x = 42;
+  int? y = none;
+  ch.send(x);
+  ch.send(y);
+  ch.close();
+}
+
+nested_optional_type_arg() `test {
+  v := Vector[Vector[int?]]();
+  inner := Vector[int?]();
+  int? a = 1;
+  int? b = none;
+  inner.push(a);
+  inner.push(b);
+  v.push(inner);
+  assert(v.len == 1, "outer len");
+  assert(v[0].len == 2, "inner len");
+}
+
+// Regression: the typeInstCallExpr rule fires for any `IDENT[T](args)` shape.
+// Confirms that plain (non-optional) type args still produce the same AST as
+// the pre-T0670 left-recursive parse, so existing instantiation patterns and
+// value subscripts in the surrounding code keep working.
+plain_type_arg_with_value_subscript() `test {
+  v := Vector[string]();
+  v.push("alpha");
+  v.push("beta");
+  i := 0;
+  assert(v[i].len == 5, "alpha len");
+  i = 1;
+  assert(v[i].len == 4, "beta len");
+}

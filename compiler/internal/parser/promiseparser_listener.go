@@ -283,6 +283,9 @@ type PromiseParserListener interface {
 	// EnterBitwiseNotExpr is called when entering the bitwiseNotExpr production.
 	EnterBitwiseNotExpr(c *BitwiseNotExprContext)
 
+	// EnterTypeInstCallExpr is called when entering the typeInstCallExpr production.
+	EnterTypeInstCallExpr(c *TypeInstCallExprContext)
+
 	// EnterErrorPanicExpr is called when entering the errorPanicExpr production.
 	EnterErrorPanicExpr(c *ErrorPanicExprContext)
 
@@ -759,6 +762,9 @@ type PromiseParserListener interface {
 
 	// ExitBitwiseNotExpr is called when exiting the bitwiseNotExpr production.
 	ExitBitwiseNotExpr(c *BitwiseNotExprContext)
+
+	// ExitTypeInstCallExpr is called when exiting the typeInstCallExpr production.
+	ExitTypeInstCallExpr(c *TypeInstCallExprContext)
 
 	// ExitErrorPanicExpr is called when exiting the errorPanicExpr production.
 	ExitErrorPanicExpr(c *ErrorPanicExprContext)

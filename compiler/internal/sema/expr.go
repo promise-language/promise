@@ -292,6 +292,9 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	case *ast.UnsafeExpr:
 		typ = c.checkUnsafeExpr(e)
 
+	case *ast.TypeRefExpr:
+		typ = c.resolveType(e.Ref)
+
 	default:
 		c.errorf(expr.Pos(), "unsupported expression type")
 	}
@@ -2249,6 +2252,13 @@ func (c *Checker) resolveTypeRef(expr ast.Expr) types.Type {
 		c.recordType(expr, typ)
 		c.recordObject(ident, obj)
 		return typ
+	}
+	if tre, ok := expr.(*ast.TypeRefExpr); ok {
+		t := c.resolveType(tre.Ref)
+		if t != nil {
+			c.recordType(expr, t)
+		}
+		return t
 	}
 	// Fallback: check the expression normally
 	return c.checkExpr(expr)

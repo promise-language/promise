@@ -572,6 +572,12 @@ func (s *BasePromiseParserListener) EnterBitwiseNotExpr(ctx *BitwiseNotExprConte
 // ExitBitwiseNotExpr is called when production bitwiseNotExpr is exited.
 func (s *BasePromiseParserListener) ExitBitwiseNotExpr(ctx *BitwiseNotExprContext) {}
 
+// EnterTypeInstCallExpr is called when production typeInstCallExpr is entered.
+func (s *BasePromiseParserListener) EnterTypeInstCallExpr(ctx *TypeInstCallExprContext) {}
+
+// ExitTypeInstCallExpr is called when production typeInstCallExpr is exited.
+func (s *BasePromiseParserListener) ExitTypeInstCallExpr(ctx *TypeInstCallExprContext) {}
+
 // EnterErrorPanicExpr is called when production errorPanicExpr is entered.
 func (s *BasePromiseParserListener) EnterErrorPanicExpr(ctx *ErrorPanicExprContext) {}
 

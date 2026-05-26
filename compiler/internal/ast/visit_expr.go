@@ -607,6 +607,64 @@ func (b *Builder) VisitUnsafeBlock(ctx *parser.UnsafeBlockContext) interface{} {
 	}
 }
 
+func (b *Builder) VisitTypeInstCallExpr(ctx *parser.TypeInstCallExprContext) interface{} {
+	tac := ctx.TypeArgs().(*parser.TypeArgsContext)
+	refs := tac.AllTypeRef()
+	indices := make([]Expr, len(refs))
+	for i, tr := range refs {
+		indices[i] = typeRefAsIndexExpr(b.visitTypeRef(tr))
+	}
+	callee := &IndexExpr{
+		nodeBase:     b.baseFromContext(ctx),
+		Target:       &IdentExpr{nodeBase: b.baseFromContext(ctx), Name: ctx.IDENT().GetText()},
+		Index:        indices[0],
+		ExtraIndices: indices[1:],
+	}
+	return &CallExpr{
+		nodeBase: b.baseFromContext(ctx),
+		Callee:   callee,
+		Args:     b.visitArgs(ctx.Args()),
+	}
+}
+
+// typeRefAsIndexExpr maps a TypeRef to its expression-equivalent form so the
+// IndexExpr inside a typeInstCallExpr behaves identically to the original
+// left-recursive `expression LBRACKET expression RBRACKET` parse (which always
+// produced IdentExpr/IndexExpr/MemberExpr indices). Forms that cannot be
+// expressed as a value expression (`T?`, function types, refs, slices, arrays)
+// are wrapped in TypeRefExpr so sema's resolveTypeRef can recover the type.
+func typeRefAsIndexExpr(ref TypeRef) Expr {
+	base := nodeBase{pos: ref.Pos(), end: ref.End()}
+	switch r := ref.(type) {
+	case *NamedTypeRef:
+		ident := &IdentExpr{nodeBase: base, Name: r.Name}
+		if len(r.TypeArgs) == 0 {
+			return ident
+		}
+		argExprs := make([]Expr, len(r.TypeArgs))
+		for i, sub := range r.TypeArgs {
+			argExprs[i] = typeRefAsIndexExpr(sub)
+		}
+		return &IndexExpr{nodeBase: base, Target: ident, Index: argExprs[0], ExtraIndices: argExprs[1:]}
+	case *QualifiedTypeRef:
+		mem := &MemberExpr{
+			nodeBase: base,
+			Target:   &IdentExpr{nodeBase: base, Name: r.Module},
+			Field:    r.Name,
+		}
+		if len(r.TypeArgs) == 0 {
+			return mem
+		}
+		argExprs := make([]Expr, len(r.TypeArgs))
+		for i, sub := range r.TypeArgs {
+			argExprs[i] = typeRefAsIndexExpr(sub)
+		}
+		return &IndexExpr{nodeBase: base, Target: mem, Index: argExprs[0], ExtraIndices: argExprs[1:]}
+	default:
+		return &TypeRefExpr{nodeBase: base, Ref: ref}
+	}
+}
+
 // Argument helpers
 
 func (b *Builder) visitArgs(ctx parser.IArgsContext) []*Arg {

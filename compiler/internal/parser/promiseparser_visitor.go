@@ -283,6 +283,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#bitwiseNotExpr.
 	VisitBitwiseNotExpr(ctx *BitwiseNotExprContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#typeInstCallExpr.
+	VisitTypeInstCallExpr(ctx *TypeInstCallExprContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#errorPanicExpr.
 	VisitErrorPanicExpr(ctx *ErrorPanicExprContext) interface{}
 

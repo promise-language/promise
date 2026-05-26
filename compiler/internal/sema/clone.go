@@ -806,6 +806,24 @@ func (c *Checker) synthesizeEnumCloneMethod(enum *types.Enum, d *ast.EnumDecl) *
 			bindings[i] = bindName
 			fieldType := f.Type()
 
+			// T0607: a variant field whose declared type contains a TypeParam
+			// can't be classified copy/non-copy at synth time —
+			// isCopyField(TypeParam) and isCopyField(Optional[TypeParam])/
+			// Array[TypeParam] are optimistically true, so a `T?`/`[N]T`/`T`
+			// field would be a bare shallow alias and double-freed at mono
+			// codegen for a droppable TypeArg. Defer to codegen via the synth-
+			// only AutoCloneExpr intrinsic (mirrors synthesizeCloneMethod /
+			// T0605); it lowers type-directed once the concrete substitution is
+			// known. Concrete fields keep their exact existing path (zero
+			// regression surface).
+			if types.ContainsTypeParam(fieldType) {
+				args = append(args, &ast.Arg{
+					Name:  f.Name(),
+					Value: &ast.AutoCloneExpr{Expr: ident(bindName)},
+				})
+				continue
+			}
+
 			// Optional non-copy: if-let unwrap + clone
 			if opt, isOpt := fieldType.(*types.Optional); isOpt && !isCopyField(opt.Elem()) {
 				localName := "_clone_" + bindName

@@ -12689,13 +12689,15 @@ func TestEnumCloneNoDoubleClone(t *testing.T) {
 	}
 }
 
-// T0551: Cloning a generic `clone enum whose TypeArg is droppable (map[K,V])
-// must deep-copy the variant payload. The synth body treats the TypeParam
-// variant field as copy (isCopyField(TypeParam)==true) so it emits no explicit
-// .clone(); codegen's match-dup must therefore call the substituted concrete
-// type's clone. Before the fix the synth body shallow-aliased the Map fat
-// pointer (no clone call) → double-free segfault. Assert the mono clone body
-// contains a Map[..].clone call inside the Just arm.
+// T0551/T0607: Cloning a generic `clone enum whose TypeArg is droppable
+// (map[K,V]) must deep-copy the variant payload. isCopyField(TypeParam) is
+// optimistically true, so the synth body can't classify the `T val` field at
+// synth time; it emits the synth-only AutoCloneExpr intrinsic (T0607 unified
+// the T0551 plain-T path onto the same mechanism), lowered type-directed at
+// mono codegen to the substituted concrete type's clone. Before the fix the
+// synth body shallow-aliased the Map fat pointer (no clone call) → double-free
+// segfault. Assert the mono clone body contains a Map[..].clone call inside
+// the Just arm (AutoClone → cloneByType → cloneResolvedValue → Map.clone).
 func TestGenericEnumCloneDroppableTypeArg(t *testing.T) {
 	ir := generateIR(t, ""+
 		"enum MaybeMap[T] `clone {\n"+
@@ -12728,14 +12730,166 @@ func TestGenericEnumCloneDroppableTypeArg(t *testing.T) {
 	}
 }
 
-// T0551/B0285 coexistence: a SINGLE variant carrying both a concrete non-copy
-// field (string) and a TypeParam field (T) must apply the B0285 suppression
-// per-field, not per-variant. The concrete `string label` keeps suppression
-// (synth body's explicit .clone() does the one copy → exactly 1 strdup block,
-// not 2). The TypeParam `T payload` lifts suppression (T0551) so match-dup
-// deep-copies the substituted Map (→ a Map[..].clone call). Asserting both
-// invariants in the same mono clone body pins the per-field scoping that
-// neither TestGenericEnumCloneDroppableTypeArg (pure TypeParam) nor
+// T0607: Cloning a generic `clone enum whose variant field is *declared* as
+// `T?` (Optional[TypeParam]) with a droppable TypeArg (map[K,V]) must deep-copy
+// the Optional payload. isCopyField(Optional[TypeParam])==true at synth time,
+// so the synth body used to pass the field through bare → the constructor
+// stored the inner Map fat pointer into the Optional slot (compile panic, then
+// after T0608/T0630's coercion: shallow alias → double-free segfault). The fix
+// routes the ContainsTypeParam field through the synth-only AutoCloneExpr
+// intrinsic, lowered by cloneByType: an Optional none-check (autoclone.some /
+// autoclone.merge blocks) that deep-clones the unwrapped concrete payload
+// (Map[..].clone) and rewraps. Assert both the none-check structure and the
+// inner Map clone are present in the OptVal arm (not a bare {i1,payload}
+// passthrough).
+func TestGenericEnumCloneOptionalTypeParamField(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum Wrap[T] `clone {\n"+
+		"  OptVal(T? maybe),\n"+
+		"  Nothing,\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, string] src = map[string, string]();\n"+
+		"  Wrap[map[string, string]] j = Wrap[map[string, string]].OptVal(src);\n"+
+		"  Wrap[map[string, string]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawMapClone := false
+	sawAutoCloneSome := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `Wrap[Map[string, string]].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if !inClone {
+			continue
+		}
+		if strings.Contains(line, `@"Map[string, string].clone"`) {
+			sawMapClone = true
+		}
+		if strings.Contains(line, "autoclone.some") {
+			sawAutoCloneSome = true
+		}
+	}
+	if !sawMapClone {
+		t.Errorf("T0607: Wrap[Map[string, string]].clone() body must call Map[string, string].clone to deep-copy the Optional[TypeParam] payload; got shallow alias")
+	}
+	if !sawAutoCloneSome {
+		t.Errorf("T0607: Wrap[Map[string, string]].clone() body must lower the `T? maybe` field via AutoClone (autoclone.some none-check block), not a bare {i1,payload} passthrough")
+	}
+}
+
+// T0607: Cloning a generic `clone enum whose variant field is an enum-Instance
+// carrying the TypeParam (`Inner[T] inner`) with a droppable TypeArg must deep-
+// copy the nested enum. extractNamed is nil for enum Instances, so before the
+// fix isAutoCloneBitCopy treated `Inner[Map]` as a bit copy (non-named →
+// bitwise) → cloneByType returned the value unchanged → shallow alias →
+// double-free. The fix adds an extractEnum branch to isAutoCloneBitCopy so the
+// nested `clone enum routes through cloneResolvedValue→cloneEnumValue. Assert
+// Outer's clone body calls the inner enum's clone (which itself deep-copies
+// the Map), not a bare aggregate copy.
+func TestGenericEnumCloneNestedEnumTypeParamField(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum Inner[T] `clone {\n"+
+		"  Has(T v),\n"+
+		"  Not,\n"+
+		"}\n"+
+		"enum Outer[T] `clone {\n"+
+		"  Box(Inner[T] inner),\n"+
+		"  Bare,\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, string] src = map[string, string]();\n"+
+		"  Outer[map[string, string]] j = Outer[map[string, string]].Box(Inner[map[string, string]].Has(src));\n"+
+		"  Outer[map[string, string]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawInnerClone := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `Outer[Map[string, string]].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if inClone && strings.Contains(line, `@"Inner[Map[string, string]].clone"`) {
+			sawInnerClone = true
+		}
+	}
+	if !sawInnerClone {
+		t.Errorf("T0607: Outer[Map[string, string]].clone() body must call Inner[Map[string, string]].clone to deep-copy the nested enum-Instance field; got shallow bit-copy alias (isAutoCloneBitCopy enum gap)")
+	}
+}
+
+// T0607: a multi-TypeParam `clone enum with a variant carrying BOTH params
+// (each a distinct droppable substitution) must deep-clone each independently.
+// The synth emits AutoCloneExpr per ContainsTypeParam field; buildMethodInstance
+// subst must resolve K and V separately so each AutoClone lowers to the correct
+// concrete clone (K=Vector[string] → Vector clone w/ string element loop;
+// V=Map[string,int] → Map.clone). Pins the two-param substitution path that the
+// single-TypeParam Wrap[T] tests don't exercise.
+func TestGenericEnumCloneMultiTypeParamFields(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum KV2[K, V] `clone {\n"+
+		"  Pair(K key, V val),\n"+
+		"  Empty,\n"+
+		"}\n"+
+		"test() {\n"+
+		"  string[] k = [\"a\"];\n"+
+		"  map[string, int] v = map[string, int]();\n"+
+		"  KV2[string[], map[string, int]] j = KV2[string[], map[string, int]].Pair(k, v);\n"+
+		"  KV2[string[], map[string, int]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawVecClone := false
+	sawMapClone := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `KV2[Vector[string], Map[string, int]].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if !inClone {
+			continue
+		}
+		// K=Vector[string] deep clone: dupVector (vecdup.copy block) + the
+		// per-element string-clone loop (vecdup_str.* blocks). A shallow alias
+		// would emit neither. The element loop is the strongest signal.
+		if strings.Contains(line, "vecdup_str.") || strings.Contains(line, "vecdup.copy") {
+			sawVecClone = true
+		}
+		// V=Map[string,int] deep clone.
+		if strings.Contains(line, `@"Map[string, int].clone"`) {
+			sawMapClone = true
+		}
+	}
+	if !sawVecClone {
+		t.Errorf("T0607: KV2[Vector[string], Map[string, int]].clone() must deep-copy the `K key` field (Vector[string] clone / element loop); got shallow alias — multi-param subst resolved K wrong")
+	}
+	if !sawMapClone {
+		t.Errorf("T0607: KV2[Vector[string], Map[string, int]].clone() must call Map[string, int].clone for the `V val` field; got shallow alias — multi-param subst resolved V wrong")
+	}
+}
+
+// T0607/B0285 coexistence: a SINGLE variant carrying both a concrete non-copy
+// field (string) and a TypeParam field (T) must clone each independently. The
+// concrete `string label` takes the synth body's explicit .clone() path with
+// B0285 match-dup suppression in effect → exactly 1 strdup block, not 2. The
+// TypeParam `T payload` takes the synth-only AutoCloneExpr path (T0607) which
+// lowers to a deep-copy of the substituted Map (→ a Map[..].clone call); B0285
+// suppression uniformly stands inside the clone body (T0607 removed the T0551
+// per-field un-suppression). Asserting both invariants in the same mono clone
+// body pins the per-field handling that neither
+// TestGenericEnumCloneDroppableTypeArg (pure TypeParam) nor
 // TestEnumCloneNoDoubleClone (pure concrete, non-generic) checks jointly.
 func TestEnumCloneMixedConcreteAndTypeParamField(t *testing.T) {
 	ir := generateIR(t, ""+

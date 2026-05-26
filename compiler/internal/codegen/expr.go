@@ -6529,21 +6529,16 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		// Without this, match-extracted values share instance pointers with the enum
 		// data. When the enum element is dropped (e.g., Map._buckets scope exit or
 		// Map destruction), the shared value would be double-freed.
-		// B0285: Skip dup inside enum clone methods — the synthesized body explicitly
-		// calls .clone() on non-copy fields, so match-dup would double-clone.
-		// T0551: Suppression is scoped to non-TypeParam-declared fields. The synth
-		// treats TypeParam variant fields as copy (isCopyField(TypeParam)==true) and
-		// emits no explicit .clone() for them, so the substituted concrete type must
-		// go through match-dup to avoid a shallow alias → double-free.
-		if enumHasDrop && c.matchFieldNeedsDup(declaredFieldType, subjectType, enum) {
-			suppress := c.suppressMatchDup
-			if suppress && types.ContainsTypeParam(declaredFieldType) {
-				suppress = false
-			}
-			if !suppress {
-				c.dupMatchBinding(binding, val, fieldType, resolved)
-				continue
-			}
+		// B0285: Skip dup inside enum clone methods — the synthesized body
+		// explicitly clones every non-copy variant field: concrete fields via
+		// .clone()/if-let, and any TypeParam-containing field (`T`, `T?`, `T[]`,
+		// `[N]T`) via the synth-only AutoCloneExpr intrinsic (T0607). Match-dup
+		// here would therefore double-clone. suppressMatchDup is set true only
+		// inside enum clone method bodies; elsewhere it is false and match-dup is
+		// unaffected.
+		if enumHasDrop && !c.suppressMatchDup && c.matchFieldNeedsDup(declaredFieldType, subjectType, enum) {
+			c.dupMatchBinding(binding, val, fieldType, resolved)
+			continue
 		}
 
 		bindAlloca := c.createEntryAlloca(fieldType)
@@ -7051,6 +7046,21 @@ func (c *Compiler) isAutoCloneBitCopy(t types.Type) bool {
 	}
 	named := extractNamed(t)
 	if named == nil {
+		// T0607: an enum may own heap data via droppable variant payloads and
+		// expose a clone() — it is NOT a bit copy; cloneByType must route it to
+		// cloneResolvedValue→cloneEnumValue for an independent deep copy (else
+		// AutoClone shallow-aliases the source enum → double-free, e.g. an
+		// `Inner[T] inner` variant field). extractNamed is nil for enums (their
+		// origin is *types.Enum), so this must precede the non-named scalar
+		// fallthrough. Mirrors typeNeedsMatchDup's enum branch (inverted):
+		// bit-copy-safe iff no clone func and not `clone (a pure copy enum with
+		// no heap).
+		if enum := extractEnum(t); enum != nil {
+			if _, exists := c.funcs[c.enumCloneFuncName(enum, t)]; exists {
+				return false
+			}
+			return !enum.IsClone()
+		}
 		// Non-named: scalars (int/float/bool/char), refs, function pointers,
 		// scalar tuples — bitwise copy is correct (no shared heap).
 		return true

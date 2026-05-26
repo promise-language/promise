@@ -1,0 +1,615 @@
+// T0607: a generic `clone enum whose variant field is *declared* as `T?`
+// (Optional[TypeParam]), `T[]` (Vector[TypeParam]), a nested `Inner[T]`
+// (enum-Instance carrying the TypeParam), or the plain TypeParam `T`, must
+// deep-copy the variant payload when instantiated with a droppable TypeArg
+// (map, vector, user `clone type). isCopyField(TypeParam) and
+// isCopyField(Optional[TypeParam]) are optimistically true at synth time, so
+// the synthesized enum clone used to pass these fields through bare → shallow
+// alias → double-free segfault. The fix routes any ContainsTypeParam variant
+// field through the synth-only AutoCloneExpr intrinsic (mirrors the T0605
+// type-level fix), lowered type-directed at mono codegen. Both the original
+// and the clone are kept live to scope exit and consumed via match so both
+// drop paths run (the double-free repro). Zero allow_leaks.
+//
+// NOTE: a fixed-array `T[N]` variant field is a separate, pre-existing
+// codegen gap (cloneResolvedValue has no *types.Array case — affects the
+// T0605 type-level path too); tracked as T0662, intentionally not covered
+// here.
+//
+// NOTE: instantiating with a TypeArg that is a *non-`clone enum with heap
+// variant data and no clone() method* (e.g. `enum H { Word(string s) }`)
+// still double-frees — isAutoCloneBitCopy returns !IsClone()==true for it
+// so cloneByType bit-copies the alias. Separate pre-existing gap (also
+// segfaults on the T0605 type-level path and on master without T0607);
+// tracked as T0666, intentionally not covered here. The covered TypeArgs
+// are all `clone/copy/heap-container/user-`clone types, which route to a
+// correct deep clone.
+//
+// NOTE: a tuple variant field carrying the TypeParam (e.g. `(T, int) pr`)
+// with a droppable TypeArg also double-frees — ContainsTypeParam recurses
+// into *types.Tuple so the synth emits AutoClone, but isAutoCloneBitCopy
+// treats every tuple as a bit-copy "scalar tuple" and cloneResolvedValue
+// has no *types.Tuple case. Separate pre-existing gap (also segfaults on
+// the T0605 type-level path); tracked as T0667, intentionally not covered
+// here — exactly parallel to the T0662 array gap.
+enum Wrap[T] `clone {
+  OptVal(T? maybe),
+  VecVal(T[] items),
+  Plain(T val),
+  Nothing,
+}
+
+// ---- OptVal(T? maybe) — the original repro shape ----
+
+// Droppable TypeArg: map[K,V], some payload.
+test_optval_map_some() `test {
+  map[string, string] m = map[string, string]();
+  m["k"] = "v";
+  m["a"] = "b";
+  Wrap[map[string, string]] j = Wrap[map[string, string]].OptVal(m);
+  Wrap[map[string, string]] c = j.clone();
+  match c {
+    Wrap.OptVal(cm) => {
+      if cm2 := cm {
+        assert(cm2.len == 2, "clone map len 2");
+        assert(cm2.get_or("k", "") == "v", "clone k=v");
+      } else {
+        assert(false, "clone OptVal should be some");
+      }
+    },
+    _ => assert(false, "clone should be OptVal"),
+  }
+  match j {
+    Wrap.OptVal(jm) => {
+      if jm2 := jm {
+        assert(jm2.len == 2, "original map len 2 (independent)");
+        assert(jm2.get_or("a", "") == "b", "original a=b");
+      } else {
+        assert(false, "original OptVal should be some");
+      }
+    },
+    _ => assert(false, "original should be OptVal"),
+  }
+}
+
+// Droppable TypeArg: map, none payload.
+test_optval_map_none() `test {
+  map[string, string]? empty = none;
+  Wrap[map[string, string]] j = Wrap[map[string, string]].OptVal(empty);
+  Wrap[map[string, string]] c = j.clone();
+  match c {
+    Wrap.OptVal(cm) => {
+      if cm2 := cm {
+        assert(false, "clone OptVal should be none");
+      } else {
+        assert(true, "clone none ok");
+      }
+    },
+    _ => assert(false, "clone should be OptVal"),
+  }
+  match j {
+    Wrap.OptVal(jm) => {
+      if jm2 := jm {
+        assert(false, "original OptVal should be none");
+      } else {
+        assert(true, "original none ok");
+      }
+    },
+    _ => assert(false, "original should be OptVal"),
+  }
+}
+
+// Droppable TypeArg: string[] (vector of heap strings) wrapped in Optional.
+test_optval_string_vec_some() `test {
+  string[] data = ["x", "y", "z"];
+  Wrap[string[]] j = Wrap[string[]].OptVal(data);
+  Wrap[string[]] c = j.clone();
+  match c {
+    Wrap.OptVal(cv) => {
+      if cv2 := cv {
+        assert(cv2.len == 3, "clone vec len 3");
+        assert(cv2[0] == "x", "clone[0]=x");
+        assert(cv2[2] == "z", "clone[2]=z");
+      } else {
+        assert(false, "clone should be some");
+      }
+    },
+    _ => assert(false, "clone should be OptVal"),
+  }
+  match j {
+    Wrap.OptVal(jv) => {
+      if jv2 := jv {
+        assert(jv2.len == 3, "original vec len 3 (independent)");
+        assert(jv2[1] == "y", "original[1]=y");
+      } else {
+        assert(false, "original should be some");
+      }
+    },
+    _ => assert(false, "original should be OptVal"),
+  }
+}
+
+// Copy TypeArg: int wrapped in Optional — bit-copy path, must still work.
+test_optval_int_some() `test {
+  int? n = 42;
+  Wrap[int] j = Wrap[int].OptVal(n);
+  Wrap[int] c = j.clone();
+  match c {
+    Wrap.OptVal(cn) => {
+      if cn2 := cn {
+        assert(cn2 == 42, "clone int 42");
+      } else {
+        assert(false, "clone should be some");
+      }
+    },
+    _ => assert(false, "clone should be OptVal"),
+  }
+  match j {
+    Wrap.OptVal(jn) => {
+      if jn2 := jn {
+        assert(jn2 == 42, "original int 42");
+      } else {
+        assert(false, "original should be some");
+      }
+    },
+    _ => assert(false, "original should be OptVal"),
+  }
+}
+
+// ---- VecVal(T[] items) — Vector[TypeParam] ----
+
+// Droppable TypeArg: map elements inside a vector.
+test_vecval_map_elements() `test {
+  map[string, int] a = map[string, int]();
+  a["one"] = 1;
+  map[string, int] b = map[string, int]();
+  b["two"] = 2;
+  b["three"] = 3;
+  map[string, int][] v = [a, b];
+  Wrap[map[string, int]] j = Wrap[map[string, int]].VecVal(v);
+  Wrap[map[string, int]] c = j.clone();
+  match c {
+    Wrap.VecVal(cv) => {
+      assert(cv.len == 2, "clone vec len 2");
+      assert(cv[0].get_or("one", 0) == 1, "clone[0][one]=1");
+      assert(cv[1].get_or("three", 0) == 3, "clone[1][three]=3");
+    },
+    _ => assert(false, "clone should be VecVal"),
+  }
+  match j {
+    Wrap.VecVal(jv) => {
+      assert(jv.len == 2, "original vec len 2 (independent)");
+      assert(jv[1].get_or("two", 0) == 2, "original[1][two]=2");
+    },
+    _ => assert(false, "original should be VecVal"),
+  }
+}
+
+// Droppable TypeArg: string[] elements inside the vector (Vector[Vector[string]]).
+test_vecval_string_vec_elements() `test {
+  string[] p = ["p", "q"];
+  string[] r = ["r", "s", "t"];
+  string[][] v = [p, r];
+  Wrap[string[]] j = Wrap[string[]].VecVal(v);
+  Wrap[string[]] c = j.clone();
+  match c {
+    Wrap.VecVal(cv) => {
+      assert(cv.len == 2, "clone outer len 2");
+      assert(cv[0].len == 2, "clone[0] len 2");
+      assert(cv[1][2] == "t", "clone[1][2]=t");
+    },
+    _ => assert(false, "clone should be VecVal"),
+  }
+  match j {
+    Wrap.VecVal(jv) => {
+      assert(jv.len == 2, "original outer len 2 (independent)");
+      assert(jv[0][1] == "q", "original[0][1]=q");
+    },
+    _ => assert(false, "original should be VecVal"),
+  }
+}
+
+// ---- Plain(T val) — T0551 path, now unified through AutoClone ----
+
+test_plain_map() `test {
+  map[string, string] src = map[string, string]();
+  src["a"] = "b";
+  src["c"] = "d";
+  Wrap[map[string, string]] j = Wrap[map[string, string]].Plain(src);
+  Wrap[map[string, string]] c = j.clone();
+  match c {
+    Wrap.Plain(cm) => {
+      assert(cm.len == 2, "clone plain map len 2");
+      assert(cm.get_or("a", "") == "b", "clone a=b");
+    },
+    _ => assert(false, "clone should be Plain"),
+  }
+  match j {
+    Wrap.Plain(jm) => {
+      assert(jm.len == 2, "original plain map len 2 (independent)");
+      assert(jm.get_or("c", "") == "d", "original c=d");
+    },
+    _ => assert(false, "original should be Plain"),
+  }
+}
+
+// ---- Fieldless variant ----
+
+test_nothing_variant() `test {
+  Wrap[map[string, string]] j = Wrap[map[string, string]].Nothing;
+  Wrap[map[string, string]] c = j.clone();
+  match c {
+    Wrap.Nothing => assert(true, "clone Nothing"),
+    _ => assert(false, "clone should be Nothing"),
+  }
+  match j {
+    Wrap.Nothing => assert(true, "original Nothing"),
+    _ => assert(false, "original should be Nothing"),
+  }
+}
+
+// ---- Mutation independence (true deep copy) ----
+
+test_optval_map_mutation_independence() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v1";
+  Wrap[map[string, string]] j = Wrap[map[string, string]].OptVal(src);
+  Wrap[map[string, string]] c = j.clone();
+  match c {
+    Wrap.OptVal(cm) => {
+      if cm2 := cm {
+        cm2["k"] = "mutated";
+        cm2["extra"] = "new";
+        assert(cm2.len == 2, "clone mutated to 2 entries");
+      } else {
+        assert(false, "clone should be some");
+      }
+    },
+    _ => assert(false, "clone should be OptVal"),
+  }
+  match j {
+    Wrap.OptVal(jm) => {
+      if jm2 := jm {
+        assert(jm2.len == 1, "original unaffected: still 1 entry");
+        assert(jm2.get_or("k", "") == "v1", "original value untouched");
+      } else {
+        assert(false, "original should be some");
+      }
+    },
+    _ => assert(false, "original should be OptVal"),
+  }
+}
+
+// Outer-vector independence: pushing onto the clone's vector must not grow
+// the original's. (Per-element deep independence is proven implicitly by the
+// read tests above — both original and clone are dropped at scope exit, so a
+// shallow element alias would double-free / leak there. Nested-element
+// mutation `cv[0].push(...)` is a separate codegen gap, T0595.)
+test_vecval_outer_independence() `test {
+  string[] data = ["a", "b"];
+  string[][] v = [data];
+  Wrap[string[]] j = Wrap[string[]].VecVal(v);
+  Wrap[string[]] c = j.clone();
+  match c {
+    Wrap.VecVal(cv) => {
+      cv.push(["x", "y"]);
+      cv.push(["z"]);
+      assert(cv.len == 3, "clone outer grew to 3");
+    },
+    _ => assert(false, "clone should be VecVal"),
+  }
+  match j {
+    Wrap.VecVal(jv) => {
+      assert(jv.len == 1, "original outer unaffected: still 1");
+      assert(jv[0].len == 2, "original[0] still 2 elements");
+      assert(jv[0][1] == "b", "original[0][1]=b untouched");
+    },
+    _ => assert(false, "original should be VecVal"),
+  }
+}
+
+// ---- Nested optional: T?? variant field ----
+
+enum DeepOpt[T] `clone {
+  Deep(T?? doubled),
+  Empty,
+}
+
+test_nested_optional_some() `test {
+  string[] sv = ["m", "n"];
+  string[]? inner = sv;
+  string[]?? outer = inner;
+  DeepOpt[string[]] j = DeepOpt[string[]].Deep(outer);
+  DeepOpt[string[]] c = j.clone();
+  match c {
+    DeepOpt.Deep(cd) => {
+      if lvl1 := cd {
+        if lvl2 := lvl1 {
+          assert(lvl2.len == 2, "clone deep vec len 2");
+          assert(lvl2[1] == "n", "clone deep[1]=n");
+        } else {
+          assert(false, "clone inner should be some");
+        }
+      } else {
+        assert(false, "clone outer should be some");
+      }
+    },
+    DeepOpt.Empty => assert(false, "clone should be Deep"),
+  }
+  match j {
+    DeepOpt.Deep(jd) => {
+      if lvl1 := jd {
+        if lvl2 := lvl1 {
+          assert(lvl2.len == 2, "original deep vec len 2 (independent)");
+        } else {
+          assert(false, "original inner should be some");
+        }
+      } else {
+        assert(false, "original outer should be some");
+      }
+    },
+    DeepOpt.Empty => assert(false, "original should be Deep"),
+  }
+}
+
+// ---- Nested generic enum: Outer[T] wraps Inner[T] (enum-Instance field
+// carrying the TypeParam — regression guard for the isAutoCloneBitCopy enum
+// gap: extractNamed is nil for enum Instances, so an `Inner[T] inner` field
+// must NOT be treated as a bit copy). ----
+
+enum Inner2[T] `clone {
+  Has(T v),
+  Not,
+}
+enum Outer2[T] `clone {
+  Box(Inner2[T] inner),
+  Bare,
+}
+
+test_nested_generic_enum_map() `test {
+  map[string, string] m = map[string, string]();
+  m["deep"] = "value";
+  Outer2[map[string, string]] j = Outer2[map[string, string]].Box(Inner2[map[string, string]].Has(m));
+  Outer2[map[string, string]] c = j.clone();
+  match c {
+    Outer2.Box(ci) => match ci {
+      Inner2.Has(cm) => {
+        assert(cm.len == 1, "clone nested map len 1");
+        assert(cm.get_or("deep", "") == "value", "clone deep=value");
+      },
+      Inner2.Not => assert(false, "clone expected Has"),
+    },
+    Outer2.Bare => assert(false, "clone expected Box"),
+  }
+  match j {
+    Outer2.Box(ji) => match ji {
+      Inner2.Has(jm) => {
+        assert(jm.len == 1, "original nested map len 1 (independent)");
+        assert(jm.get_or("deep", "") == "value", "original deep=value");
+      },
+      Inner2.Not => assert(false, "original expected Has"),
+    },
+    Outer2.Bare => assert(false, "original expected Box"),
+  }
+}
+
+// ---- User `clone type as the droppable TypeArg ----
+
+type Bag2 `clone {
+  map[string, int] counts;
+}
+
+test_optval_user_clone_type() `test {
+  map[string, int] m = map[string, int]();
+  m["apples"] = 3;
+  Bag2 b = Bag2(counts: m);
+  Wrap[Bag2] j = Wrap[Bag2].OptVal(b);
+  Wrap[Bag2] c = j.clone();
+  match c {
+    Wrap.OptVal(cb) => {
+      if cb2 := cb {
+        assert(cb2.counts.len == 1, "clone bag len 1");
+        assert(cb2.counts.get_or("apples", 0) == 3, "clone apples==3");
+      } else {
+        assert(false, "clone should be some");
+      }
+    },
+    _ => assert(false, "clone should be OptVal"),
+  }
+  match j {
+    Wrap.OptVal(jb) => {
+      if jb2 := jb {
+        assert(jb2.counts.len == 1, "original bag len 1 (independent)");
+        assert(jb2.counts.get_or("apples", 0) == 3, "original apples==3");
+      } else {
+        assert(false, "original should be some");
+      }
+    },
+    _ => assert(false, "original should be OptVal"),
+  }
+}
+
+// ---- Plain(T val) with a bare-string TypeArg ----
+// Exercises the cloneResolvedValue `named == TypString` (dupString) arm via
+// AutoClone — the OptVal/VecVal/Plain map/vec/int tests above reach the
+// vector/heap-user/bit-copy arms but not the plain-string arm.
+
+test_plain_string_typearg() `test {
+  Wrap[string] j = Wrap[string].Plain("hello world this is a heap string");
+  Wrap[string] c = j.clone();
+  match c {
+    Wrap.Plain(cs) => assert(cs == "hello world this is a heap string", "clone string value"),
+    _ => assert(false, "clone should be Plain"),
+  }
+  match j {
+    Wrap.Plain(js) => assert(js.len == 33, "original string len (independent)"),
+    _ => assert(false, "original should be Plain"),
+  }
+}
+
+// ---- Nested optional T?? — outer-none / inner-none / fieldless Empty arm.
+// `test_nested_optional_some` above only covers some(some); these cover the
+// Optional none-check false branch (phi `val` incoming from entryBlock at
+// both nesting levels) and the fieldless `Empty` arm of a generic clone
+// enum instantiated with a droppable TypeArg. ----
+
+test_nested_optional_outer_none() `test {
+  string[]?? outer = none;
+  DeepOpt[string[]] j = DeepOpt[string[]].Deep(outer);
+  DeepOpt[string[]] c = j.clone();
+  match c {
+    DeepOpt.Deep(cd) => {
+      if lvl1 := cd {
+        assert(false, "clone outer should be none");
+      } else {
+        assert(true, "clone outer none ok");
+      }
+    },
+    DeepOpt.Empty => assert(false, "clone should be Deep"),
+  }
+  match j {
+    DeepOpt.Deep(jd) => {
+      if lvl1 := jd {
+        assert(false, "original outer should be none");
+      } else {
+        assert(true, "original outer none ok");
+      }
+    },
+    DeepOpt.Empty => assert(false, "original should be Deep"),
+  }
+}
+
+test_nested_optional_inner_none() `test {
+  string[]? inner = none;
+  string[]?? outer = inner;
+  DeepOpt[string[]] j = DeepOpt[string[]].Deep(outer);
+  DeepOpt[string[]] c = j.clone();
+  match c {
+    DeepOpt.Deep(cd) => {
+      if lvl1 := cd {
+        if lvl2 := lvl1 {
+          assert(false, "clone inner should be none");
+        } else {
+          assert(true, "clone inner none ok");
+        }
+      } else {
+        assert(false, "clone outer should be some");
+      }
+    },
+    DeepOpt.Empty => assert(false, "clone should be Deep"),
+  }
+  match j {
+    DeepOpt.Deep(jd) => {
+      if lvl1 := jd {
+        if lvl2 := lvl1 {
+          assert(false, "original inner should be none");
+        } else {
+          assert(true, "original inner none ok");
+        }
+      } else {
+        assert(false, "original outer should be some");
+      }
+    },
+    DeepOpt.Empty => assert(false, "original should be Deep"),
+  }
+}
+
+test_deepopt_empty_variant_droppable_typearg() `test {
+  DeepOpt[map[string, string]] j = DeepOpt[map[string, string]].Empty;
+  DeepOpt[map[string, string]] c = j.clone();
+  match c {
+    DeepOpt.Empty => assert(true, "clone Empty"),
+    DeepOpt.Deep(_) => assert(false, "clone should be Empty"),
+  }
+  match j {
+    DeepOpt.Empty => assert(true, "original Empty"),
+    DeepOpt.Deep(_) => assert(false, "original should be Empty"),
+  }
+}
+
+// ---- Nested generic enum with a COPY TypeArg (Outer2[int]).
+// `test_nested_generic_enum_map` above covers the droppable-TypeArg case;
+// this pins the isAutoCloneBitCopy enum branch "clone func exists → false"
+// path with trivial copy element data (must still produce a valid clone,
+// not crash, with no leak). ----
+
+test_nested_generic_enum_copy_typearg() `test {
+  Outer2[int] j = Outer2[int].Box(Inner2[int].Has(42));
+  Outer2[int] c = j.clone();
+  match c {
+    Outer2.Box(ci) => match ci {
+      Inner2.Has(cv) => assert(cv == 42, "clone inner 42"),
+      Inner2.Not => assert(false, "clone expected Has"),
+    },
+    Outer2.Bare => assert(false, "clone expected Box"),
+  }
+  match j {
+    Outer2.Box(ji) => match ji {
+      Inner2.Has(jv) => assert(jv == 42, "original inner 42"),
+      Inner2.Not => assert(false, "original expected Has"),
+    },
+    Outer2.Bare => assert(false, "original expected Box"),
+  }
+}
+
+// ---- Multi-TypeParam `clone enum: per-field ContainsTypeParam gate +
+// buildMethodInstanceSubst with two type params, both droppable, a variant
+// carrying both, and a partial variant carrying one. Not covered by the
+// single-TypeParam Wrap[T]/DeepOpt[T] enums above. ----
+
+enum KV2[K, V] `clone {
+  Pair(K key, V val),
+  KeyOnly(K key),
+  Empty,
+}
+
+test_multi_typeparam_both_droppable() `test {
+  string[] k = ["a", "b"];
+  map[string, int] v = map[string, int]();
+  v["x"] = 1;
+  KV2[string[], map[string, int]] j = KV2[string[], map[string, int]].Pair(k, v);
+  KV2[string[], map[string, int]] c = j.clone();
+  match c {
+    KV2.Pair(ck, cv) => {
+      assert(ck.len == 2, "clone key vec len 2");
+      assert(ck[0] == "a", "clone key[0]=a");
+      assert(cv.len == 1, "clone val map len 1");
+      assert(cv.get_or("x", 0) == 1, "clone val x=1");
+    },
+    _ => assert(false, "clone should be Pair"),
+  }
+  match j {
+    KV2.Pair(jk, jv) => {
+      assert(jk.len == 2, "original key vec len 2 (independent)");
+      assert(jv.get_or("x", 0) == 1, "original val x=1 (independent)");
+    },
+    _ => assert(false, "original should be Pair"),
+  }
+}
+
+test_multi_typeparam_partial_variant() `test {
+  string[] k = ["solo"];
+  KV2[string[], map[string, int]] j = KV2[string[], map[string, int]].KeyOnly(k);
+  KV2[string[], map[string, int]] c = j.clone();
+  match c {
+    KV2.KeyOnly(ck) => assert(ck[0] == "solo", "clone KeyOnly[0]=solo"),
+    _ => assert(false, "clone should be KeyOnly"),
+  }
+  match j {
+    KV2.KeyOnly(jk) => assert(jk.len == 1, "original KeyOnly len 1 (independent)"),
+    _ => assert(false, "original should be KeyOnly"),
+  }
+}
+
+test_multi_typeparam_fieldless() `test {
+  KV2[string[], map[string, int]] j = KV2[string[], map[string, int]].Empty;
+  KV2[string[], map[string, int]] c = j.clone();
+  match c {
+    KV2.Empty => assert(true, "clone Empty"),
+    _ => assert(false, "clone should be Empty"),
+  }
+  match j {
+    KV2.Empty => assert(true, "original Empty"),
+    _ => assert(false, "original should be Empty"),
+  }
+}

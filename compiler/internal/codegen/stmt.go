@@ -1423,6 +1423,27 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 		c.block.NewStore(c.block.NewExtractValue(tupleVal, uint64(i)), alloca)
 		if name != "_" {
 			c.locals[name] = alloca
+			// T0672: Record the borrow status of each destructured local so a
+			// downstream Optional unwrap (`if mm := m` / `while mm := m` / `m!`)
+			// does not transfer ownership. When the source is a borrow (struct
+			// field / container index — srcOwned=false), the local aliases heap
+			// owned by the parent/container; without this marker
+			// isOwnedOptionalExpr would treat `m` as owned and give the
+			// unwrapped binding an owning drop binding → double-free with the
+			// parent's drop (segfault for multi-word aggregates like
+			// map/Vector). Mirrors the match-destructure marking at
+			// expr.go:6618; the if/while-let propagation (stmt.go ~7751) carries
+			// the mark to chained unwraps. Delete (not skip) for owned sources
+			// so a re-destructure / shadow into the same name with an owned
+			// source clears any stale borrow mark.
+			if !srcOwned {
+				if c.matchBorrowedIdents == nil {
+					c.matchBorrowedIdents = make(map[string]bool)
+				}
+				c.matchBorrowedIdents[name] = true
+			} else {
+				delete(c.matchBorrowedIdents, name)
+			}
 		}
 		// T0371: Register drop tracking so destructured locals own and free
 		// their pieces. Skipped when the source is a borrow (ident without a

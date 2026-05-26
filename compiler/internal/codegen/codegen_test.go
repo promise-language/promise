@@ -13222,6 +13222,53 @@ func TestGenericTypeCloneTupleHeapMemberNonZeroIndex(t *testing.T) {
 	}
 }
 
+// T0672: Destructuring a struct field of tuple type with an
+// Optional[aggregate] element (`(map[K,V]?, int) pr`) then unwrapping the
+// destructured local via if-let must NOT give the unwrapped binding an owning
+// drop flag. `(m, n) := h.pr` sources from a MemberExpr → srcOwned=false, so
+// `m`/`n` get no drop bindings and correctly alias the Holder-owned heap
+// (T0371 borrow model). The bug: nothing recorded that `m` is a borrow, so a
+// later `if mm := m` saw a plain ident, isOwnedOptionalExpr returned true, and
+// `mm` got an owning `store i1 true, i1* %mm.dropflag` → `mm` and Holder.drop
+// both freed the same map → double-free → SIGSEGV. The fix marks each
+// borrow-sourced destructured local in matchBorrowedIdents (mirrors the
+// T0485/T0512 match-destructure mechanism) so isOwnedOptionalExpr returns
+// false and no owning drop binding is registered for `mm`; the map is freed
+// exactly once, by Holder.drop. Companion e2e:
+// tests/e2e/destructure_field_tuple_optional_test.pr.
+func TestDestructureFieldTupleOptionalAggregateNoOwnDrop(t *testing.T) {
+	ir := generateIR(t, ""+
+		"type Holder { (map[string, string]?, int) pr; }\n"+
+		"test() {\n"+
+		"  map[string, string] src = map[string, string]();\n"+
+		"  map[string, string]? mo = src;\n"+
+		"  Holder h = Holder(pr: (mo, 5));\n"+
+		"  (m, n) := h.pr;\n"+
+		"  if mm := m { int z = mm.len; }\n"+
+		"}\n")
+	fnStart := strings.Index(ir, "define void @__user.test()")
+	if fnStart < 0 {
+		t.Fatalf("T0672: could not find @__user.test() in IR")
+	}
+	fnEnd := strings.Index(ir[fnStart:], "\n}\n")
+	testIR := ir[fnStart : fnStart+fnEnd+3]
+	// The if-let binding `mm` must NOT get an owning drop flag — the map is
+	// owned by Holder and freed by Holder.drop. An owning `mm` drop binding
+	// (the buggy behavior) double-frees the map.
+	if strings.Contains(testIR, "%mm.dropflag") {
+		t.Errorf("T0672: if-let binding `mm` got an owning drop flag (%%mm.dropflag) — the destructured `m` aliases Holder-owned heap (MemberExpr borrow source) and must not transfer ownership; this double-frees the map with Holder.drop")
+	}
+	// The destructured local `m` itself must stay a borrow (field-sourced
+	// destructure registers no drop binding — existing T0371 behavior).
+	if strings.Contains(testIR, "%m.dropflag") {
+		t.Errorf("T0672: destructured local `m` unexpectedly got a drop flag — a struct-field-sourced tuple destructure must stay a borrow (no drop binding)")
+	}
+	// Holder.drop must still be the sole owner that frees the map.
+	if !strings.Contains(testIR, "call void @Holder.drop") {
+		t.Errorf("T0672: Holder.drop must be called to free the field-owned map exactly once")
+	}
+}
+
 // B0237/B0242: Match destructure of droppable enum dups string fields and
 // registers them for arm-scope cleanup with a drop flag. The drop flag is
 // cleared at move sites (PHI, push, etc.), so consumed bindings are not

@@ -37,14 +37,19 @@
 // the type-level `TupBox[T]` shapes in
 // tests/e2e/type_clone_generic_typearg_test.pr.
 //
-// NOTE: destructuring a struct field of tuple type whose element is
-// Optional[aggregate] (`(T?, int)` with T=map/vector) is a *separate*
-// pre-existing crash, T0672 — independent of the T0667 clone fix (the clone
-// deep-copy / double-drop path is correct; only the field destructure
-// segfaults). The `(T?, int)` clone recursion is therefore covered at the
-// type level via clone+double-drop (no destructure) plus the Go codegen test
-// TestGenericTypeCloneTupleOptionalTypeParamField, not by a destructure-based
-// e2e here.
+// T0672 (FIXED): destructuring a struct field of tuple type whose element is
+// Optional[aggregate] (`(T?, int)` with T=map/vector) used to segfault — a
+// *separate* issue from the T0667 clone fix (the clone deep-copy / double-drop
+// path was always correct; only the field destructure double-freed). Fixed by
+// marking borrow-sourced destructured locals in matchBorrowedIdents so a later
+// if-let/while-let/force-unwrap does not transfer ownership. The struct-field
+// `(T?, int)` destructure shape is now covered with real destructure+unwrap
+// assertions by tests/e2e/destructure_field_tuple_optional_test.pr and the
+// type-level test_clone_tupbox_optional_* tests in
+// tests/e2e/type_clone_generic_typearg_test.pr (Go IR:
+// TestDestructureFieldTupleOptionalAggregateNoOwnDrop). The `(T?, int)` clone
+// recursion remains covered by Go test
+// TestGenericTypeCloneTupleOptionalTypeParamField.
 enum Wrap[T] `clone {
   OptVal(T? maybe),
   VecVal(T[] items),

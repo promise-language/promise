@@ -315,27 +315,49 @@ test_clone_tupbox_nested_tuple() `test {
 }
 
 // Tuple-of-optional `(T?, int)`: exercises cloneByType's Optional arm reached
-// *through* the per-element tuple recursion (the T0667 concern). Both `j` and
-// `c` are kept live to scope exit (double-free repro). NOT destructured here:
-// destructuring a struct field of tuple type with an Optional[aggregate]
-// element is a separate pre-existing crash, T0672 — the clone deep-copy /
-// double-drop path (this test) is correct; only the field destructure is
-// blocked. IR-level proof of the Map.clone-through-Optional-through-tuple
-// recursion is in Go test TestGenericTypeCloneTupleOptionalTypeParamField.
+// *through* the per-element tuple recursion (the T0667 concern) AND the
+// T0672 destructure path — destructuring a struct field of tuple type with an
+// Optional[aggregate] element (now fixed: borrow-sourced destructured locals
+// are marked in matchBorrowedIdents so a later if-let does not transfer
+// ownership). Both `j` and `c` are kept live and destructured to scope exit
+// (the double-free repro: a wrong clone OR a wrong destructure-unwrap
+// double-frees the map). IR-level proof of the
+// Map.clone-through-Optional-through-tuple recursion is in Go test
+// TestGenericTypeCloneTupleOptionalTypeParamField; the destructure-borrow IR
+// is in TestDestructureFieldTupleOptionalAggregateNoOwnDrop.
 test_clone_tupbox_optional_some() `test {
   map[string, string] src = map[string, string]();
   src["k"] = "v1";
   map[string, string]? mo = src;
   TupBoxO[map[string, string]] j = TupBoxO[map[string, string]](pr: (mo, 5));
   TupBoxO[map[string, string]] c = j.clone();
-  assert(true, "cloned; both j and c drop independently at scope exit");
+  (cm, cn) := c.pr;
+  assert(cn == 5, "clone tuple int 5");
+  if cmm := cm {
+    assert(cmm.len == 1, "clone optional map len 1");
+    assert(cmm.get_or("k", "") == "v1", "clone k=v1");
+  } else {
+    assert(false, "clone should be some");
+  }
+  (jm, jn) := j.pr;
+  if jmm := jm {
+    assert(jmm.len == 1, "original optional map len 1 (independent)");
+  } else {
+    assert(false, "original should be some");
+  }
 }
 
 test_clone_tupbox_optional_none() `test {
   map[string, string]? mo = none;
   TupBoxO[map[string, string]] j = TupBoxO[map[string, string]](pr: (mo, 0));
   TupBoxO[map[string, string]] c = j.clone();
-  assert(true, "none cloned; both drop");
+  (cm, cn) := c.pr;
+  assert(cn == 0, "clone tuple int 0");
+  if cmm := cm {
+    assert(false, "clone should be none");
+  } else {
+    assert(true, "clone none ok");
+  }
 }
 
 // Mutating the clone's tuple map must not affect the original (true deep copy).

@@ -1,0 +1,304 @@
+// T0672: Destructuring a struct field of tuple type whose element is an
+// Optional containing a multi-word value aggregate (`map[K,V]` value
+// `{i8*,i8*}`, `T[]`/`Vector[T]`) used to segfault at runtime.
+//
+// `(m, n) := h.pr` sources from a MemberExpr → genDestructureVarDecl's
+// srcOwned switch is false, so `m`/`n` get NO drop bindings and correctly
+// alias the heap owned by the enclosing struct (the T0371/T0570 borrow
+// model). The bug: nothing recorded that `m`/`n` are borrows, so a later
+// `if mm := m` (or `while mm := m`, or `m!`) saw `m` as a plain ident,
+// isOwnedOptionalExpr returned true, and the unwrapped binding got an
+// owning drop flag → it and the struct's drop both freed the same
+// map/vector → double-free → SIGSEGV (macOS guard-page handler prints
+// "fatal: stack overflow"). `Optional[string]`/`Optional[int]` "worked"
+// only because their drop is a single-ptr/no-op (no real double-free of
+// distinct heap). The fix marks each borrow-sourced destructured local in
+// matchBorrowedIdents (mirrors the T0485/T0512 match-destructure
+// mechanism), so the inner heap is freed exactly once, by the struct's
+// drop. Relies on T0067 leak/double-free enforcement — a double-free or
+// leak fails the run. Go IR counterpart:
+// TestDestructureFieldTupleOptionalAggregateNoOwnDrop.
+type HMap {
+  (map[string, string]?, int) pr;
+}
+type HVec {
+  (string[]?, int) pr;
+}
+type HStr {
+  (string?, int) pr;
+}
+type HInt {
+  (int?, int) pr;
+}
+type GBox[T] {
+  (T?, int) pr;
+}
+
+// The exact repro from the bug report: plain non-generic type,
+// map[string,string]? tuple element, destructure + if-let.
+test_repro_map_some_if_let() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v";
+  map[string, string]? mo = src;
+  HMap h = HMap(pr: (mo, 5));
+  (m, n) := h.pr;
+  assert(n == 5, "n == 5");
+  if mm := m {
+    assert(mm.len == 1, "map len 1");
+    assert(mm.get_or("k", "") == "v", "k=v");
+  } else {
+    assert(false, "should be some");
+  }
+}
+
+test_repro_map_none_if_let() `test {
+  map[string, string]? mo = none;
+  HMap h = HMap(pr: (mo, 9));
+  (m, n) := h.pr;
+  assert(n == 9, "n == 9");
+  if mm := m {
+    assert(false, "should be none");
+  } else {
+    assert(true, "none ok");
+  }
+}
+
+// while-let on the destructured borrow local.
+test_map_while_let() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v";
+  map[string, string]? mo = src;
+  HMap h = HMap(pr: (mo, 2));
+  (m, n) := h.pr;
+  assert(n == 2, "n == 2");
+  int iters = 0;
+  while mm := m {
+    assert(mm.len == 1, "while map len 1");
+    iters = iters + 1;
+    if iters >= 2 {
+      break;
+    }
+  }
+  assert(iters == 2, "looped twice");
+}
+
+// Force-unwrap (`!`) of the destructured borrow local.
+test_map_force_unwrap() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v";
+  map[string, string]? mo = src;
+  HMap h = HMap(pr: (mo, 4));
+  (m, n) := h.pr;
+  assert(n == 4, "n == 4");
+  assert(m!.len == 1, "force-unwrap len 1");
+}
+
+// string[]? element — the other multi-word aggregate that segfaulted.
+test_vec_some_if_let() `test {
+  string[] data = ["x", "y", "z"];
+  string[]? vo = data;
+  HVec h = HVec(pr: (vo, 3));
+  (v, n) := h.pr;
+  assert(n == 3, "n == 3");
+  if vv := v {
+    assert(vv.len == 3, "vec len 3");
+    assert(vv[0] == "x", "vec[0]=x");
+    assert(vv[2] == "z", "vec[2]=z");
+  } else {
+    assert(false, "vec should be some");
+  }
+}
+
+test_vec_none_if_let() `test {
+  string[]? vo = none;
+  HVec h = HVec(pr: (vo, 1));
+  (v, n) := h.pr;
+  assert(n == 1, "n == 1");
+  if vv := v {
+    assert(false, "vec should be none");
+  } else {
+    assert(true, "vec none ok");
+  }
+}
+
+// string? element — single-ptr; must keep working (regression guard).
+test_str_some_if_let() `test {
+  string s = "a" + "b";
+  string? so = s;
+  HStr h = HStr(pr: (so, 7));
+  (x, n) := h.pr;
+  assert(n == 7, "n == 7");
+  if xx := x {
+    assert(xx == "ab", "xx == ab");
+  } else {
+    assert(false, "str should be some");
+  }
+}
+
+// int? element — scalar; must keep working (regression guard).
+test_int_some_if_let() `test {
+  int? io = 42;
+  HInt h = HInt(pr: (io, 8));
+  (x, n) := h.pr;
+  assert(n == 8, "n == 8");
+  if xx := x {
+    assert(xx == 42, "xx == 42");
+  } else {
+    assert(false, "int should be some");
+  }
+}
+
+// Generic type with `(T?, int)` field instantiated with a droppable TypeArg
+// — the same fix must hold through monomorphization.
+test_generic_map_some_if_let() `test {
+  map[string, string] src = map[string, string]();
+  src["g"] = "v";
+  map[string, string]? mo = src;
+  GBox[map[string, string]] g = GBox[map[string, string]](pr: (mo, 6));
+  (m, n) := g.pr;
+  assert(n == 6, "n == 6");
+  if mm := m {
+    assert(mm.len == 1, "generic map len 1");
+    assert(mm.get_or("g", "") == "v", "g=v");
+  } else {
+    assert(false, "generic should be some");
+  }
+}
+
+// The destructured local + its if-let unwrap are a true borrow alias of the
+// struct-owned map (no clone, no own drop binding); the struct's drop remains
+// the single owner and frees the map exactly once at scope exit. A regression
+// to the bug double-frees here (T0067 enforcement fails the run).
+test_borrow_alias_then_struct_drop() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v1";
+  map[string, string]? mo = src;
+  HMap h = HMap(pr: (mo, 0));
+  (m, n) := h.pr;
+  assert(n == 0, "n == 0");
+  if mm := m {
+    assert(mm.len == 1, "alias sees len 1");
+  } else {
+    assert(false, "should be some");
+  }
+  // h drops here; the map is freed exactly once (no double-free with mm).
+}
+
+// --- Container-index borrow source (*ast.IndexExpr) ---
+// genDestructureVarDecl's srcOwned switch treats *ast.IndexExpr and
+// *ast.MemberExpr identically (srcOwned=false → no drop bindings → the fix
+// marks the locals borrowed). The struct-field (MemberExpr) half is covered
+// above; these cover the container-index half — a distinct source kind and a
+// distinct runtime load (vector-element vs struct-field). Without the fix
+// these double-free exactly like the field case (verified: SIGSEGV when the
+// stmt.go borrow-mark block is reverted).
+
+// Vector of `(map[K,V]?, int)` tuples, indexed then destructured + if-let.
+test_index_map_some_if_let() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v";
+  map[string, string]? mo = src;
+  (map[string, string]?, int)[] vec = [(mo, 5)];
+  (m, n) := vec[0];
+  assert(n == 5, "index n == 5");
+  if mm := m {
+    assert(mm.len == 1, "index map len 1");
+    assert(mm.get_or("k", "") == "v", "index k=v");
+  } else {
+    assert(false, "index should be some");
+  }
+}
+
+// Vector of `(string[]?, int)` tuples, index source, none arm.
+test_index_vec_none_if_let() `test {
+  string[]? vo = none;
+  (string[]?, int)[] vec = [(vo, 1)];
+  (v, n) := vec[0];
+  assert(n == 1, "index n == 1");
+  if vv := v {
+    assert(false, "index vec should be none");
+  } else {
+    assert(true, "index vec none ok");
+  }
+}
+
+// Force-unwrap (`!`) of an index-sourced destructured borrow local — the
+// other isOwnedOptionalExpr consumer paired with the container-index source.
+test_index_map_force_unwrap() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v";
+  map[string, string]? mo = src;
+  (map[string, string]?, int)[] vec = [(mo, 7)];
+  (m, n) := vec[0];
+  assert(n == 7, "index n == 7");
+  assert(m!.len == 1, "index force-unwrap len 1");
+}
+
+// --- srcOwned=true (else/delete) arm: owned re-bind after a sibling-scope
+// borrow-bind of the same name ---
+// matchBorrowedIdents is keyed by name and persists for the whole function
+// compilation (not scope-cleared). Block A borrow-binds `m` (MemberExpr
+// source → fix marks `m`); block B then OWNED-binds the same name `m` via a
+// call result (srcOwned=true → the new code's else/`delete` arm runs). This
+// exercises the fix's owned arm with a pre-existing borrow mark on the name
+// and asserts the owned `(map?, int)` is freed exactly once (no leak, no
+// double-free) with both blocks live in one function.
+// NOTE (honest scope): the `delete` itself is defense-in-depth, not
+// e2e-observable here — an owned destructure always gives the local its own
+// drop binding (srcOwned=true → maybeRegisterDrop), which is the actual
+// safety net, so a stale borrow mark only suppresses `mm`'s redundant owning
+// drop (already covered by `m`'s drop). Verified: mutating `delete` → no-op
+// keeps this test green. Block A uses a SAFE single-ptr `(string?, int)`
+// field (no double-free even pre-fix per the bug scope table) so block A is
+// not itself a double-free guard — the IndexExpr/MemberExpr tests above are.
+_make_owned_map()(map[string, string]?, int) {
+  map[string, string] s = map[string, string]();
+  s["x"] = "y";
+  map[string, string]? o = s;
+  return (o, 9);
+}
+test_owned_rebind_after_sibling_borrow_bind() `test {
+  {
+    string s = "a" + "b";
+    string? so = s;
+    HStr h = HStr(pr: (so, 1));
+    (m, n) := h.pr; // borrow source → fix marks `m` borrowed
+    assert(n == 1, "A n == 1");
+    if mm := m {
+      assert(mm == "ab", "A borrow sees ab");
+    } else {
+      assert(false, "A should be some");
+    }
+  }
+  {
+    (m, q) := _make_owned_map(); // owned source → else/delete arm
+    assert(q == 9, "B q == 9");
+    if mm := m {
+      assert(mm.len == 1, "B owned map len 1");
+      assert(mm.get_or("x", "") == "y", "B owned x=y");
+    } else {
+      assert(false, "B should be some");
+    }
+    // `m`'s owned map is freed exactly once here (by `m`'s own drop binding).
+  }
+}
+
+// --- `_` discard slot alongside a borrow-marked sibling ---
+// `(m, _) := vec[0]`: the `_` slot is skipped by the fix's `if name != "_"`
+// guard (defensive — `_` is not referenceable); the genuine guard here is
+// that `m` (IndexExpr borrow source) is still marked borrowed so the if-let
+// does not double-free the container-owned map (crashes pre-fix, like the
+// IndexExpr tests above). Distinct shape: discard slot present in a
+// borrow-sourced tuple destructure (T0481 `_`-slot path × the T0672 fix).
+test_discard_slot_borrow() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v";
+  map[string, string]? mo = src;
+  (map[string, string]?, int)[] vec = [(mo, 3)];
+  (m, _) := vec[0];
+  if mm := m {
+    assert(mm.len == 1, "discard-sibling len 1");
+  } else {
+    assert(false, "should be some");
+  }
+}

@@ -183,7 +183,7 @@ type Compiler struct {
 	tempTrackingEnabled     bool                // T0084: true in free functions + user method bodies
 	dupStringFieldAccess    bool                // T0095: when true, genFieldAccess dups string fields from droppable types
 	dupContainerFieldAccess bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
-	matchBorrowedIdents     map[string]bool     // T0485: tracks idents bound by match destructure as borrows (no drop binding); if-let unwrap must not transfer ownership
+	matchBorrowedIdents     map[string]bool     // T0485: idents bound by match destructure as borrows (no drop binding); T0672: also tuple-destructure locals from a borrow source (struct field / container index); if-let/while-let/force-unwrap must not transfer ownership
 	dupTupleFieldAccess     bool                // T0370: when true, genVectorIndex dups droppable tuple elements on read
 	dupHeapUserFieldAccess  bool                // T0398: when true, genVectorIndex deep-clones heap user-type elements on read
 	optionalStringDup       value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap

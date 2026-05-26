@@ -10547,6 +10547,23 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 				} else {
 					c.trackVectorTemp(result)
 				}
+			} else if arcElem, isArc := types.AsArc(innerType); isArc {
+				c.trackTempWithDrop(result, c.getOrCreateArcDrop(arcElem))
+			} else if weakElem, isWeak := types.AsWeak(innerType); isWeak {
+				c.trackTempWithDrop(result, c.getOrCreateWeakDrop(weakElem))
+			} else if mutexElem, isMutex := types.AsMutex(innerType); isMutex {
+				// T0654: Optional<Mutex[T]> from a non-binding-site unwrap leaked
+				// because the inner i8* fell through with no tracking. The
+				// binding-site claim (stmt.go) is a no-op when no temp exists.
+				c.trackTempWithDrop(result, c.getOrCreateMutexDrop(mutexElem))
+			} else if taskElem, isTask := types.AsTask(innerType); isTask {
+				c.trackTempWithDrop(result, c.getOrCreateTaskDrop(taskElem))
+			} else if _, isMG := types.AsMutexGuard(innerType); isMG {
+				if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
+					c.trackTempWithDrop(result, dropFn)
+				}
+			} else if chElem, isCh := types.AsChannel(innerType); isCh {
+				c.trackChannelTempWithElemType(result, chElem)
 			}
 		}
 	}

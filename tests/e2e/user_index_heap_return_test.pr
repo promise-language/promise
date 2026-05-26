@@ -405,17 +405,100 @@ test_t0650_optional_bind() `test {
   }
 }
 
-// ---------- DEFERRED behind T0654 (pre-existing codegen leak, NOT T0650) ----------
-// An Optional-returning non-native method/`[]` whose result is `!`-unwrapped
-// at a CONSUME or TEMP site (e.g. `take_mtx_i(b[0]!)`, `use g := b[0]!.lock()`)
-// LEAKS the owned Optional<handle> — the CallExpr/`[]` handle-temp tracking
-// (codegen/expr.go T0555/T0561 + trackUserIndexResult) classifies on the
-// un-peeled `Mutex[int]?` type, so AsMutex/AsTask never fire and the temp is
-// never dropped. The IDENTICAL plain method `at()!` leaks the same, so this is
-// a pre-existing, T0650-independent codegen gap — filed as **T0654**. The
-// binding site (covered live above) is 0-leak. Enable the consume/temp
-// `!`-unwrap rows here once T0654 lands (skeleton/repro in /tmp/t0650_bug_repro.pr,
-// and the Go ownership-pass acceptance is already locked by
-// TestT0650_UserIndexOptionalMutexUnwrapAllowed in ownership_test.go).
-// (Mirrors how this file originally deferred Mutex/Task behind T0650 and how
-// T0647 deferred the T0648 nested-vector case: covered where fixed, not here.)
+// ---------- T0654: Optional<single-owner/ref-counted-handle> `!`-unwrap at
+// consume/temp sites ----------
+// genOptionalForceUnwrap's post-extract i8* tracking only covered string and
+// vector — the Mutex/Task/MutexGuard/Arc/Weak/Channel arms were missing, so the
+// unwrapped handle from a non-binding-site `!` (call arg, method receiver,
+// getter receiver) fell through with no statement-end drop. The binding site
+// (`m := f()!`) was always 0-leak because the var-decl native-handle claim is
+// a no-op when no temp was registered. T0654 added the missing arms in
+// genOptionalForceUnwrap (mirroring the CallExpr post-call tracking).
+//
+// The IDENTICAL plain method `at()!` leaked the same (the bug is independent of
+// the user-`[]` ownership exemption from T0650), so each `[]`-spelling test is
+// paired with a plain-method analogue via the `Src` type below — proving the
+// fix is method-spelling-agnostic.
+
+// Plain-method analogues (no `[]`). Reach genOptionalForceUnwrap via
+// OptionalUnwrap(CallExpr(MemberExpr)) — never touches trackUserIndexResult.
+worker_t0654() int {
+  return 7;
+}
+type Src {
+  Mutex[int] held;
+  at_mtx(int i) Mutex[int]? {
+    return Mutex[int](i);
+  }
+  at_task(int i) Task[int]? {
+    return go worker_t0654();
+  }
+  at_guard(int i) MutexGuard[int]? {
+    return this.held.lock();
+  }
+  at_arc(int i) Arc[int]? {
+    return Arc[int](i + 100);
+  }
+}
+
+take_arc_i_t0654(Arc[int] a) int {
+  return a.borrow;
+}
+
+// Mutex — consume site (call-arg) on both spellings.
+test_t0654_mtx_consume_unwrap() `test {
+  s := Src(held: Mutex[int](0));
+  take_mtx_i(s.at_mtx(1)!); // method spelling
+  b := OptMtxBoxE(n: 800);
+  take_mtx_i(b[0]!); // `[]` spelling
+}
+
+// Mutex — temp/method-receiver site on both spellings.
+test_t0654_mtx_temp_unwrap() `test {
+  s := Src(held: Mutex[int](0));
+  {
+    use g := s.at_mtx(2)!.lock();
+    assert(g.borrow == 2, "method-spelling temp `!` -> lock");
+  }
+  b := OptMtxBoxE(n: 900);
+  {
+    use g := b[0]!.lock();
+    assert(g.borrow == 900, "`[]` spelling temp `!` -> lock");
+  }
+}
+
+// Task — consume site (call-arg). Method spelling only; the `[]` Task case
+// would need a fresh type (no OptTaskBoxE in this file) and the plain method
+// already exercises the same genOptionalForceUnwrap arm.
+test_t0654_task_consume_unwrap() `test(exclude: wasm) {
+  s := Src(held: Mutex[int](0));
+  take_task_i(s.at_task(0)!);
+}
+
+// MutexGuard — temp/getter-receiver site. The guard is consumed by the
+// `.borrow` getter, never bound, so the unwrapped guard must be a tracked
+// stmt-temp dropped via @MutexGuard.drop at statement end.
+test_t0654_guard_temp_unwrap() `test {
+  s := Src(held: Mutex[int](42));
+  n := s.at_guard(0)!.borrow;
+  assert(n == 42, "method-spelling guard temp `!.borrow`");
+}
+
+// Arc — consume site (call-arg). Arc is reachable through Optional unwrap; the
+// pre-fix AsArc/AsWeak arms in genOptionalForceUnwrap simply did not exist.
+test_t0654_arc_consume_unwrap() `test {
+  s := Src(held: Mutex[int](0));
+  assert(take_arc_i_t0654(s.at_arc(0)!) == 100, "method-spelling Arc consume `!`");
+}
+
+// Binding-site control row — must remain 0-leak (the new tracking is claimed
+// into the var binding's drop slot via the existing native-handle claim path).
+// Guards against double-free at the binding site.
+test_t0654_mtx_bind_unwrap_control() `test {
+  s := Src(held: Mutex[int](0));
+  m := s.at_mtx(3)!;
+  {
+    use g := m.lock();
+    assert(g.borrow == 3, "binding-site `!` (control) still 0-leak");
+  }
+}

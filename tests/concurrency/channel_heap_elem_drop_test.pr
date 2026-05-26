@@ -127,9 +127,9 @@ chan_string_wraparound_drop() `test {
 // recv advances head / decrements count, so received items leave the
 // [head, head+count) window the element-drop walk scans — the unwrapped
 // locals own them and drop them at scope exit, the channel walk sees
-// count 0 (nothing to drop, no double free). Manual recv is used because
-// for-in over a heap-element channel has an unrelated pre-existing leak
-// (T0671); manual `<-` is the documented working form.
+// count 0 (nothing to drop, no double free). Both manual `<-` and the
+// for-in form (see chan_string_forin_drained below) are leak-safe as of
+// T0671 — for-in is no longer the only-leaks form.
 chan_string_drained_clean() `test {
   c := channel[string](capacity: 3);
   c.send(mk_str(1));
@@ -143,6 +143,26 @@ chan_string_drained_clean() `test {
     assert(v == "v2", "drained second");
   }
   // channel drops empty; a, b drop at scope exit — no leak, no double free
+}
+
+// T0671 for-in companion to chan_string_drained_clean: `for s in c` over a
+// closed, fully drained channel[string]. Before T0671 genForInChannel never
+// registered a drop binding for the loop variable, so every received heap
+// element leaked (one alloc per item). Now the per-iteration loop variable is
+// dropped at the end of each iteration (flag-guarded) — zero leak, and the
+// channel drops empty so no double-free vs. Channel[string].drop (T0663).
+chan_string_forin_drained() `test {
+  c := channel[string](capacity: 3);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  c.send(mk_str(3));
+  c.close();
+  acc := "";
+  for s in c {
+    acc = acc + s; // `+` borrows s (no move) → loop must drop s each iteration
+  }
+  assert(acc == "v1v2v3", "forin drained content");
+  // each received string dropped at end of iteration; acc dropped at scope exit
 }
 
 // Regression: value-element channel (no element-drop loop emitted).
@@ -291,4 +311,234 @@ chan_optional_field_reassign_buffered_drop() `test {
   c2 := channel[string](capacity: 1);
   c2.send(mk_str(3));
   h.ch = c2; // old c1 (2 buffered heap strings) dropped by the optional reassign
+}
+
+// ----------------------------------------------------------------------------
+// T0671: for-in over a heap-element channel must drop the per-iteration loop
+// variable. genForInChannel memcpys each item out of the ring buffer (a real
+// move — head/count advanced) into the loop-var alloca, so the loop variable
+// owns the only copy. Before T0671 no drop binding was registered, leaking one
+// allocation per received heap item. The fix registers a per-iteration drop at
+// loopScopeDepth, covering normal iteration end, break, continue, the `_`
+// discard, the moved-out (flag-clear) case, and early return. Each test below
+// leaked pre-T0671 and is zero-leak post-fix; the break/early-return cases also
+// confirm no double-free vs. Channel[T].drop's buffered-remainder walk (T0663).
+// ----------------------------------------------------------------------------
+
+// Channel[Vector[int]]: heap vector loop variable dropped each iteration.
+chan_vector_forin_drained() `test {
+  c := channel[Vector[int]](capacity: 2);
+  a := Vector[int]();
+  a.push(1);
+  a.push(2);
+  b := Vector[int]();
+  b.push(3);
+  b.push(4);
+  c.send(a);
+  c.send(b);
+  c.close();
+  total := 0;
+  for v in c {
+    for x in v {
+      total = total + x;
+    }
+  }
+  // v (a heap Vector) dropped at end of each iteration → zero leak
+  assert(total == 10, "forin vector sum");
+}
+
+// Channel[Box]: user-heap loop variable pal_free'd each iteration.
+chan_user_forin_drained() `test {
+  c := channel[Box](capacity: 3);
+  c.send(Box(10));
+  c.send(Box(20));
+  c.send(Box(30));
+  c.close();
+  total := 0;
+  for b in c {
+    total = total + b.v;
+  }
+  // each Box instance pal_free'd at end of iteration → zero leak
+  assert(total == 60, "forin user sum");
+}
+
+// `break` with items still buffered: received items dropped by the loop
+// (the break path runs emitScopeCleanup(loopScopeDepth) which includes the
+// loop variable), the buffered remainder dropped by Channel[string].drop
+// (T0663). Disjoint windows → zero leak, no double-free.
+chan_string_forin_break() `test {
+  c := channel[string](capacity: 4);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  c.send(mk_str(3));
+  c.send(mk_str(4));
+  // not closed — we break before draining
+  count := 0;
+  for s in c {
+    count = count + s.len;
+    if count >= 4 {
+      break; // 2 received (dropped by loop), 2 remain buffered
+    }
+  }
+  assert(count == 4, "forin break count");
+  // 2 buffered remainder dropped by Channel[string].drop when c drops
+}
+
+// `continue` skips even iterations; the skipped loop variable must still be
+// dropped via the continue path's emitScopeCleanup(loopScopeDepth).
+chan_string_forin_continue() `test {
+  c := channel[string](capacity: 4);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  c.send(mk_str(3));
+  c.send(mk_str(4));
+  c.close();
+  kept := 0;
+  i := 0;
+  for s in c {
+    i = i + 1;
+    if i % 2 == 0 {
+      continue; // s dropped here via continue cleanup, not end-of-body
+    }
+    kept = kept + s.len;
+  }
+  assert(kept == 4, "forin continue kept"); // items 1 and 3 → 2+2
+  // all 4 received dropped (via continue or normal end) → zero leak
+}
+
+// `for _ in c`: heap elements are still moved out of the ring buffer, so the
+// discard binding must still be dropped (unlike genForInVector's container-
+// retains-ownership dup-skip). Zero leak.
+chan_string_forin_discard() `test {
+  c := channel[string](capacity: 3);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  c.send(mk_str(3));
+  c.close();
+  n := 0;
+  for _ in c {
+    n = n + 1;
+  }
+  assert(n == 3, "forin discard count");
+}
+
+// Body moves the loop variable into a Vector[string] (push). The move-site
+// clearDropFlag zeros the per-iteration drop flag so the loop does NOT drop
+// it; the vector owns the strings and Vector[string].drop frees them. No
+// double-free, no leak.
+chan_string_forin_move() `test {
+  c := channel[string](capacity: 3);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  c.send(mk_str(3));
+  c.close();
+  dst := Vector[string]();
+  for s in c {
+    dst.push(s); // moves s → drop flag cleared → loop skips drop
+  }
+  assert(dst.len == 3, "forin move count");
+  assert(dst[0] == "v1", "forin move first");
+  // dst owns the 3 strings → Vector[string].drop frees them at scope exit
+}
+
+// Failable helper returns out of the for-in loop mid-drain. The in-flight loop
+// variable is dropped via function unwind (emitScopeCleanup(0) at the return),
+// the buffered remainder by Channel[string].drop when the caller's c drops.
+drain_until!(channel[string] c, int limit) int {
+  total := 0;
+  for s in c {
+    total = total + s.len;
+    if total >= limit {
+      return total; // s dropped via function unwind
+    }
+  }
+  return total;
+}
+
+chan_string_forin_early_return() `test {
+  c := channel[string](capacity: 4);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  c.send(mk_str(3));
+  c.send(mk_str(4));
+  // not closed; helper returns after the byte limit (2 items) is reached
+  r := drain_until(c, 4)?!;
+  assert(r == 4, "forin early return total");
+  // 2 received dropped (1 end-of-iter, 1 via return unwind); 2 buffered
+  // remainder dropped by Channel[string].drop when c drops in this scope
+}
+
+// ----------------------------------------------------------------------------
+// T0671 /coverage gaps: the 8 tests above all run the for-in in the
+// thread-blocking (non-coroutine) path with at least one iteration. The
+// genForInChannel fix also reasons explicitly about (a) the goroutine
+// (`c.inCoroutine`) path — where the per-iteration drop binding coexists with
+// coro.suspend / cleanup blocks — and (b) the zero-iteration closed+empty path
+// (recvNone → exitBlock; loop-var binding popped at codegen time → "no spurious
+// drop, no uninitialized read"). Neither was exercised by any test in the suite
+// (all goroutine for-in channel consumers use Channel[int], a value element
+// where maybeRegisterDrop no-ops). Added below; each leaked / was unverified
+// pre-T0671 and is zero-leak post-fix.
+// ----------------------------------------------------------------------------
+
+// Goroutine-mode for-in over a heap-element channel: a worker drains a
+// channel[string] via `for s in jobs` *inside* a `go {}` block, exercising
+// genForInChannel's c.inCoroutine branch (park on recv_waiters + coro.suspend).
+// The per-iteration drop binding must still drop each received string across
+// suspend/resume. Joined deterministically via `done` so the leak check is
+// stable. Mirrors goroutine_workpool.pr's pattern but with a heap element.
+chan_string_forin_goroutine_drain() `test {
+  jobs := channel[string](capacity: 6);
+  done := channel[int](capacity: 1);
+  for i in 0..6 {
+    jobs.send(mk_str(i));
+  }
+  jobs.close();
+  go {
+    total := 0;
+    for s in jobs {
+      total = total + s.len; // s borrowed; loop drops s each iteration
+    }
+    done.send(total);
+  };
+  r := <-done; // join: unblocks only after the goroutine fully drains jobs
+  if v := r {
+    assert(v == 12, "goroutine forin drained total"); // 6 strings x len 2
+  }
+  // every received string dropped per-iteration inside the coroutine; jobs
+  // drained empty → Channel[string].drop walks nothing → zero leak, no dbl-free
+}
+
+// Zero-iteration: for-in over an already-closed, never-sent channel[string].
+// recv.check sees count==0 && closed → recvNone → unlock → exitBlock; bodyBlock
+// is never entered, and the loop-var drop binding is popped from scopeBindings
+// at codegen time. Must NOT drop the uninitialized elemAlloca (no spurious
+// string_drop on garbage) and must not leak.
+chan_string_forin_closed_empty() `test {
+  c := channel[string](capacity: 2);
+  c.close(); // closed, nothing ever sent
+  n := 0;
+  for s in c {
+    n = n + s.len; // unreachable — 0 iterations
+  }
+  assert(n == 0, "forin closed-empty zero iterations");
+  // no body entered, no spurious drop of an uninitialized alloca, no leak
+}
+
+// Arc[int] element: for-in drains a channel[Arc[int]]. Each loop variable is
+// an Arc handle; the per-iteration drop must run Arc[int].drop (atomic refcount
+// decrement → frees the control block at 0), a distinct drop path from the
+// string/Vector/user-heap cases above. Zero leak (every handle is the last ref).
+chan_arc_forin_drained() `test {
+  c := channel[Arc[int]](capacity: 3);
+  c.send(Arc[int](7));
+  c.send(Arc[int](8));
+  c.send(Arc[int](9));
+  c.close();
+  total := 0;
+  for a in c {
+    total = total + a.borrow; // a.borrow reads inner int; a dropped each iter
+  }
+  assert(total == 24, "forin arc sum");
+  // each Arc[int] handle dropped per-iteration (refcount 1→0) → zero leak
 }

@@ -15054,6 +15054,30 @@ func TestChannelForIn(t *testing.T) {
 	assertContains(t, ir, "forin_ch.exit")
 }
 
+// T0671: for-in over a heap-element channel must drop the per-iteration loop
+// variable. genForInChannel memcpys each item out of the ring buffer (a real
+// move) into the loop-var alloca, so the loop owns it and must register a
+// flag-guarded drop binding (string -> promise_string_drop). Pre-fix no drop
+// binding was emitted, leaking one allocation per received heap item.
+func TestT0671ForInChannelDropsHeapLoopVar(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[string](capacity: 2);
+			ch.send("a");
+			ch.close();
+			for s in ch {
+				int n = s.bytes().len;
+			}
+		}
+	`)
+	// for-in over channel[string]: the loop body must drop the moved-out
+	// loop variable each iteration (flag-guarded promise_string_drop).
+	assertContains(t, ir, "forin_ch.body")
+	assertContains(t, ir, "strdrop.call")
+	assertContains(t, ir, "strdrop.skip")
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
 func TestChannelSendClosedPanic(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

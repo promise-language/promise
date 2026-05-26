@@ -9756,11 +9756,26 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
+	// T0671: the received element is moved out of the ring buffer (recv advanced
+	// head / decremented count), so the loop variable owns it. Register a drop
+	// binding at loopScopeDepth so a heap element (string/Vector/user/Arc/Optional…)
+	// is dropped on every exit: normal iteration end (below), break/continue
+	// (genBreak/ContinueStmt → emitScopeCleanup(loopScopeDepth)), and early
+	// return/raise (function unwind). maybeRegisterDrop no-ops for value elems
+	// (Channel[int] unchanged). Disjoint from T0663's Channel.drop, which only
+	// walks still-buffered [head,head+count) items (received items already left it).
+	bodyScopeStart := len(c.scopeBindings) // == c.loopScopeDepth
+	c.maybeRegisterDrop(s.Binding, elemAlloca, elemType)
 	c.genBlock(s.Body)
-	if c.block.Term == nil {
+	if c.block != nil && c.block.Term == nil {
+		if len(c.scopeBindings) > bodyScopeStart {
+			cap := c.emitScopeCleanup(bodyScopeStart, false)
+			c.emitCloseErrCheck(cap)
+		}
 		c.emitYieldCheck()
 		c.block.NewBr(headerBlock)
 	}
+	c.scopeBindings = c.scopeBindings[:bodyScopeStart] // unconditional codegen-time pop
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue

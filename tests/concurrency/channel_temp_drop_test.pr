@@ -1,0 +1,103 @@
+// T0653: Channel[T] value used as a discarded statement-expression temporary
+// must be dropped at statement end. Without the call/constructor-result
+// tracker in genExpr's CallExpr arm, these would each leak ~5 allocations
+// (channel struct + ring buffer + mutex + cond + ...).
+fresh_buf() Channel[int] {
+  return Channel[int](1);
+}
+fresh_unbuf() Channel[int] {
+  return Channel[int]();
+}
+
+// Bare constructor used as statement-expression — no binding, no claim.
+bare_buf_ctor() `test {
+  Channel[int](1);
+}
+bare_unbuf_ctor() `test {
+  Channel[int]();
+}
+
+// Function-returned channel discarded as a statement.
+discarded_fn_return() `test {
+  fresh_buf();
+}
+discarded_unbuf_return() `test {
+  fresh_unbuf();
+}
+
+// Function-returned channel used as a temp receiver for a borrowing call,
+// then discarded. send()/close() borrow the receiver, so cleanupStmtTemps
+// must drop the inner fresh_buf() temp at statement end.
+discarded_method_recv() `test {
+  fresh_buf().send(9);
+}
+discarded_close_recv() `test {
+  fresh_buf().close();
+}
+
+// Element-type coverage: confirm the branch is element-type-agnostic
+// (Channel.drop is a single non-per-element symbol).
+fresh_str() Channel[string] {
+  return Channel[string](1);
+}
+bare_str_ctor() `test {
+  Channel[string](1);
+}
+discarded_str_return() `test {
+  fresh_str();
+}
+
+fresh_nest() Channel[Channel[int]] {
+  return Channel[Channel[int]](1);
+}
+bare_nest_ctor() `test {
+  Channel[Channel[int]](1);
+}
+discarded_nest_return() `test {
+  fresh_nest();
+}
+
+bare_vec_ctor() `test {
+  Channel[Vector[int]](1);
+}
+
+// Negative controls — must remain leak-free post-fix.
+// Bound: scope-exit drop binding owns the channel; claimStringTemp
+// at bind site clears the temp tracker.
+bound_channel() `test {
+  c := fresh_buf();
+  c.send(1);
+}
+
+// Move-into-arg: callee takes ownership; claimStringTemp at arg site
+// fires (val-identity, type-agnostic).
+take_buf(~Channel[int] c) {
+  c.close();
+}
+move_into_arg() `test {
+  take_buf(fresh_buf());
+}
+take_unbuf(~Channel[int] c) {
+  c.close();
+}
+move_into_arg_unbuf() `test {
+  take_unbuf(fresh_unbuf());
+}
+
+// AST-shape coverage: method on a user type returning Channel — the CallExpr
+// arm fires uniformly regardless of callee shape (free fn vs. method), but
+// this is a realistic user pattern (see tests/e2e/nested_vector_element_return_test.pr).
+type ChanFactory {
+  int seed;
+  make(this) Channel[int] {
+    return Channel[int](1);
+  }
+}
+discarded_method_ctor_return() `test {
+  f := ChanFactory(seed: 1);
+  f.make();
+}
+discarded_method_then_send() `test {
+  f := ChanFactory(seed: 1);
+  f.make().send(7);
+}

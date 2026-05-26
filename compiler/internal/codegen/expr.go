@@ -103,6 +103,14 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
 						c.trackTempWithDrop(result, dropFn)
 					}
+				} else if types.IsChannel(rt) || named == types.TypChannel {
+					// T0653: Channel[T] call/constructor result is a heap-allocated
+					// channel struct + ring buffer + mutex + cond. Without tracking,
+					// a discarded statement-expression temporary (e.g. `Channel[int](1);`,
+					// `fresh();`, `fresh().send(9);`) leaks ~5 allocations because the
+					// existing field-dup (B0219), element-dup (T0383/T0648), and
+					// getter-result (T0486) trackers don't cover the call-result path.
+					c.trackChannelTemp(result)
 				}
 			}
 		} else {

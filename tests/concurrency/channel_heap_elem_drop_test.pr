@@ -1,0 +1,294 @@
+// T0663: Channel[T].drop must drop heap-allocated buffered items.
+//
+// Before the fix, Channel.drop freed the ring buffer as raw bytes without
+// dropping the un-received items inside it — leaking one allocation per
+// buffered heap element. These tests send more items than they receive so
+// the channel is dropped while still holding owned heap items; the test
+// harness's zero-leak enforcement is the actual assertion.
+type Box {
+  int v;
+  new(~this, int v) {
+    this.v = v;
+  }
+}
+
+mk_str(int n) string {
+  return "v" + n.to_string();
+}
+
+// Channel[string]: heap strings left buffered at drop.
+chan_string_buffered_drop() `test {
+  c := channel[string](capacity: 3);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  c.send(mk_str(3));
+  r := <-c; // receive one — two remain buffered
+  if v := r {
+    assert(v == "v1", "first received");
+  }
+  // c dropped with 2 heap strings still in the ring buffer → must not leak
+}
+
+// Channel[Vector[int]]: heap vectors left buffered at drop.
+chan_vector_buffered_drop() `test {
+  c := channel[Vector[int]](capacity: 2);
+  a := Vector[int]();
+  a.push(1);
+  a.push(2);
+  b := Vector[int]();
+  b.push(3);
+  c.send(a);
+  c.send(b);
+  // none received — both vectors dropped via the per-element walk
+}
+
+// Channel[Box]: user heap type left buffered at drop.
+chan_user_type_buffered_drop() `test {
+  c := channel[Box](capacity: 3);
+  c.send(Box(10));
+  c.send(Box(20));
+  c.send(Box(30));
+  r := <-c;
+  if b := r {
+    assert(b.v == 10, "first box");
+  }
+  // 2 Box instances still buffered → pal_free'd by the element walk
+}
+
+// Channel[Arc[int]]: Arc handles left buffered at drop.
+chan_arc_buffered_drop() `test {
+  c := channel[Arc[int]](capacity: 2);
+  c.send(Arc[int](7));
+  c.send(Arc[int](8));
+  // none received — Arc[int].drop runs for each buffered handle
+}
+
+// Nested Channel[Channel[string]]: inner channel (with its own buffered
+// heap strings) left buffered when the outer channel drops.
+chan_nested_channel_drop() `test {
+  outer := channel[channel[string]](capacity: 1);
+  inner := channel[string](capacity: 2);
+  inner.send(mk_str(1));
+  inner.send(mk_str(2));
+  outer.send(inner);
+  // outer dropped with an un-received inner channel that itself holds 2
+  // un-received heap strings → recursive element drop must free all 3 allocs
+}
+
+// Channel[string] as a user-type field, dropped with heap items buffered.
+// Exercises the synthesized-field-drop call site (emitVariantFieldDrop).
+type StrChanHolder {
+  channel[string] ch;
+}
+
+chan_string_field_buffered_drop() `test {
+  c := channel[string](capacity: 2);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  h := StrChanHolder(ch: c);
+  // h dropped → synthesized StrChanHolder.drop → Channel[string].drop walks
+  // and frees the 2 buffered heap strings
+  assert(true, "field-held channel buffered drop");
+}
+
+// Channel[string] shared with a goroutine and dropped with buffered heap
+// items: the fan-out scenario where a worker exits early. Refcounted drop
+// must still run the element walk exactly once (on the last reference).
+chan_string_shared_buffered_drop() `test(exclude: wasm) {
+  c := channel[string](capacity: 3);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  c.send(mk_str(3));
+  go {
+    r := <-c; // goroutine drains exactly one
+    if v := r {
+      assert(v == "v1", "goroutine got first");
+    }
+  };
+  <-c; // main drains one more — one remains buffered
+  // both owners drop c; last-ref drop walks the 1 remaining heap string
+}
+
+// Ring-buffer wraparound: head advances past 0, buffered items straddle the
+// wrap boundary. Exercises slot = (head + idx) % capacity.
+chan_string_wraparound_drop() `test {
+  c := channel[string](capacity: 2);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  r := <-c; // head -> 1, count 1
+  if v := r {
+    assert(v == "v1", "wrap first");
+  }
+  c.send(mk_str(3)); // wraps: tail -> 0, count 2 (slots 1 and 0 occupied)
+  // dropped with 2 items spanning the wrap boundary → both freed
+}
+
+// Regression: fully drained channel must not double-free received items.
+// recv advances head / decrements count, so received items leave the
+// [head, head+count) window the element-drop walk scans — the unwrapped
+// locals own them and drop them at scope exit, the channel walk sees
+// count 0 (nothing to drop, no double free). Manual recv is used because
+// for-in over a heap-element channel has an unrelated pre-existing leak
+// (T0671); manual `<-` is the documented working form.
+chan_string_drained_clean() `test {
+  c := channel[string](capacity: 3);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  a := <-c;
+  b := <-c;
+  if v := a {
+    assert(v == "v1", "drained first");
+  }
+  if v := b {
+    assert(v == "v2", "drained second");
+  }
+  // channel drops empty; a, b drop at scope exit — no leak, no double free
+}
+
+// Regression: value-element channel (no element-drop loop emitted).
+chan_int_value_regression() `test {
+  c := channel[int](capacity: 4);
+  c.send(1);
+  c.send(2);
+  c.send(3);
+  r := <-c;
+  if v := r {
+    assert(v == 1, "int first");
+  }
+  // 2 ints still buffered — value type, nothing to drop, no leak
+}
+
+// ----------------------------------------------------------------------------
+// Coverage gaps (added during T0663 /coverage): the tests above exercise the
+// local-var scope-binding and synthesized-field drop sites. The sites below
+// were unexercised — each leaked the buffered heap items pre-T0663 and is
+// zero-leak post-fix. Confirmed by stash-and-rebuild on clean master.
+// ----------------------------------------------------------------------------
+
+mk_chan_with_two() Channel[string]? {
+  c := channel[string](capacity: 2);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  return c;
+}
+
+// Optional[Channel[string]] local dropped WITHOUT unwrapping — exercises
+// maybeRegisterOptionalDrop's Channel branch (per-element-type inner drop).
+chan_optional_buffered_drop() `test {
+  oc := mk_chan_with_two(); // Optional holding a channel with 2 buffered strings
+  assert(true, "optional channel dropped without unwrap");
+  // oc drops here → optional-inner Channel[string].drop walks the 2 strings
+}
+
+// Optional[Channel[string]] unwrapped, partially drained, remainder dropped —
+// the unwrapped binding's scope-exit drop must still walk the leftover item.
+chan_optional_unwrap_partial_drop() `test {
+  oc := mk_chan_with_two();
+  if ch := oc {
+    r := <-ch; // drain 1, 1 stays buffered when ch drops at if-scope exit
+    if v := r {
+      assert(v == "v1", "optional unwrap first");
+    }
+  }
+}
+
+// Channel struct-field reassignment — the displaced old channel (still holding
+// buffered heap strings) must drop. Exercises genMemberAssign's Channel branch.
+type StrChanCell {
+  channel[string] ch;
+}
+chan_field_reassign_buffered_drop() `test {
+  c1 := channel[string](capacity: 2);
+  c1.send(mk_str(1));
+  c1.send(mk_str(2));
+  cell := StrChanCell(ch: c1);
+  c2 := channel[string](capacity: 2);
+  c2.send(mk_str(3));
+  cell.ch = c2; // old c1 (2 buffered heap strings) dropped by the reassign
+}
+
+// channel[Box] field reassignment — same site as above but a user-heap element
+// type, so the element walk must pal_free each displaced Box instance.
+type BoxChanCell {
+  channel[Box] ch;
+}
+chan_box_field_reassign_buffered_drop() `test {
+  c1 := channel[Box](capacity: 2);
+  c1.send(Box(1));
+  c1.send(Box(2));
+  cell := BoxChanCell(ch: c1);
+  c2 := channel[Box](capacity: 1);
+  c2.send(Box(3));
+  cell.ch = c2; // old c1's 2 buffered Box instances must be freed
+}
+
+// Channel moved into a move-closure env; the closure env drop must run the
+// per-element-type walk. Exercises analyzeEnvCaptureDrop's Channel branch.
+chan_closure_capture_buffered_drop() `test {
+  c := channel[string](capacity: 2);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  f := move || -> int {
+    c.close(); // reference forces a move-capture of c into the closure env
+    return 0;
+  };
+  x := f();
+  assert(x == 0, "closure ran");
+  // f's env owns c → env drop → Channel[string].drop walks the 2 strings
+}
+
+// Generic type holding a channel[T] field, dropped in monomorphized context —
+// exercises the c.typeSubst-active path in maybeRegisterDrop / emitFieldDropsFor
+// (resolvedElem substitution before getOrCreateChannelDrop).
+type ChanWrapper[T] {
+  channel[T] ch;
+  new(~this, ~channel[T] ch) {
+    this.ch = ch;
+  }
+}
+chan_generic_field_buffered_drop() `test {
+  c := channel[string](capacity: 2);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  w := ChanWrapper[string](c);
+  assert(true, "generic channel field dropped");
+  // w drops → mono ChanWrapper[string].drop → Channel[string].drop walk
+}
+
+// Arc[Channel[string]] — when the Arc refcount hits 0 its inner-drop must run
+// the channel's per-element walk. Exercises emitInnerDrop's Channel branch.
+chan_arc_wrapped_buffered_drop() `test {
+  c := channel[string](capacity: 2);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  a := Arc[Channel[string]](c);
+  assert(true, "arc-wrapped channel dropped");
+  // a drops → Arc inner drop → Channel[string].drop walks the 2 strings
+}
+
+// Channel[string]? as a struct FIELD (vs. the local-var optional above) —
+// dropped via the holder's synthesized drop. Exercises emitOptionalValueDrop's
+// Channel branch (distinct from maybeRegisterOptionalDrop's local-var path).
+type OptChanHolder {
+  Channel[string]? ch;
+}
+chan_optional_field_buffered_drop() `test {
+  c := channel[string](capacity: 2);
+  c.send(mk_str(1));
+  c.send(mk_str(2));
+  h := OptChanHolder(ch: c);
+  assert(true, "optional channel field dropped");
+  // h drops → synth OptChanHolder.drop → optional-inner Channel[string].drop
+}
+
+// Reassigning an Optional[Channel[string]] field whose old value held buffered
+// heap strings. Exercises emitOptionalFieldReassignDrop's Channel branch.
+chan_optional_field_reassign_buffered_drop() `test {
+  c1 := channel[string](capacity: 2);
+  c1.send(mk_str(1));
+  c1.send(mk_str(2));
+  h := OptChanHolder(ch: c1);
+  c2 := channel[string](capacity: 1);
+  c2.send(mk_str(3));
+  h.ch = c2; // old c1 (2 buffered heap strings) dropped by the optional reassign
+}

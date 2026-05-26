@@ -486,7 +486,7 @@ type scopeBinding struct {
 type stmtTemp struct {
 	alloca   *ir.InstAlloca // entry-block i8* alloca, initialized to null
 	dropFlag *ir.InstAlloca // entry-block i1, initialized to false
-	dropFunc *ir.Func       // B0219: drop function to call (promise_string_drop, Vector.drop, Channel.drop)
+	dropFunc *ir.Func       // B0219: drop function to call (promise_string_drop, Vector.drop, Channel[T].drop)
 	elemType types.Type     // T0109: vector element type for string-element drops (nil for non-vectors)
 }
 
@@ -1869,7 +1869,8 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineVectorContainsFunc()
 	c.defineVectorRemoveFunc()
 	c.defineVectorDropFunc()
-	c.defineChannelDropFunc() // B0163: channel scope-exit drop
+	// T0663: Channel[T].drop is created lazily per element type by
+	// getOrCreateChannelDrop (mirrors Arc/Mutex/Task) — no eager definition.
 	// T0285: MutexGuard close/drop moved after scheduler functions (needs waiter_dequeue + sched_enqueue)
 	c.defineVectorCOWFunc()
 
@@ -2474,8 +2475,10 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		valField := blk.NewGetElementPtr(structTy, typedPtr,
 			constant.NewInt(irtypes.I32, 0), fi)
 		chVal := blk.NewLoad(irtypes.I8Ptr, valField)
-		if dropFn, ok := c.funcs["Channel.drop"]; ok {
-			blk.NewCall(dropFn, chVal)
+		if chElem, ok := types.AsChannel(elemType); ok {
+			// T0663: per-element-type drop walks any un-received buffered items.
+			innerDropFn := c.getOrCreateChannelDrop(chElem)
+			blk.NewCall(innerDropFn, chVal)
 		}
 	case named != nil && (types.IsArc(elemType) || named == types.TypArc):
 		// Nested Arc: load i8* and call the inner Arc's drop
@@ -4750,14 +4753,49 @@ func (c *Compiler) defineVectorDropFunc() {
 	c.funcs["Vector.drop"] = fn
 }
 
-// defineChannelDropFunc emits @Channel.drop(i8* %this) → void.
-// Atomically decrements the channel's reference count. When refcount reaches 0,
-// frees the ring buffer, mutex, 2 cond vars, and the channel struct itself.
-// B0163: Channel scope-exit drop with reference counting.
-func (c *Compiler) defineChannelDropFunc() {
-	thisParam := ir.NewParam("this", irtypes.I8Ptr)
-	fn := c.module.NewFunc("Channel.drop", irtypes.Void, thisParam)
+// getOrCreateChannelDrop lazily creates a per-element-type drop function for
+// Channel[T]: @"Channel[<T>].drop"(i8* %this) → void. T0663: the ring buffer
+// can still hold un-received, owned items when the channel is dropped
+// (refcount→0, no live receivers). The per-element-type body walks the buffered
+// items and drops each T before freeing the ring buffer as raw bytes — without
+// this, any Channel[T] with a heap T (string/Vector/user-heap/Arc/Weak/Mutex/
+// Task/nested-Channel) leaks one allocation per un-received item.
+//
+// Mirrors getOrCreateArcDrop / getOrCreateMutexDrop / getOrCreateTaskDrop. The
+// stub is registered in c.funcs before its body is defined so a self-referential
+// type (Channel[Node] where Node has a Channel[Node] field) finds the
+// declared-but-empty stub and emits a recursive call instead of recursing
+// forever in codegen.
+func (c *Compiler) getOrCreateChannelDrop(elemType types.Type) *ir.Func {
+	elemName := "void"
+	if elemType != nil {
+		elemName = typeArgStr(elemType)
+	}
+	funcName := "Channel[" + elemName + "].drop"
 
+	if fn, ok := c.funcs[funcName]; ok {
+		if len(fn.Blocks) > 0 {
+			return fn // already defined (or in-progress — recursive type)
+		}
+		c.defineChannelDropBody(fn, elemType)
+		return fn
+	}
+
+	thisParam := ir.NewParam("this", irtypes.I8Ptr)
+	fn := c.module.NewFunc(funcName, irtypes.Void, thisParam)
+	// Register before defining the body (recursion-safety, see doc above).
+	c.funcs[funcName] = fn
+	c.defineChannelDropBody(fn, elemType)
+	return fn
+}
+
+// defineChannelDropBody generates the body of a Channel[T].drop function.
+// Atomically decrements the channel's reference count. When refcount reaches 0:
+// drops any un-received buffered T items (T0663), then frees the ring buffer,
+// mutex, 2 cond vars, and the channel struct itself.
+// B0163: Channel scope-exit drop with reference counting.
+func (c *Compiler) defineChannelDropBody(fn *ir.Func, elemType types.Type) {
+	thisParam := fn.Params[0]
 	chanType := channelStructType()
 
 	entry := fn.NewBlock(".entry")
@@ -4776,6 +4814,19 @@ func (c *Compiler) defineChannelDropFunc() {
 	wasOne := decrcBlk.NewICmp(enum.IPredEQ, oldRC, constant.NewInt(irtypes.I64, 1))
 	freeBlk := fn.NewBlock("free")
 	decrcBlk.NewCondBr(wasOne, freeBlk, doneBlk)
+
+	// T0663: Drop un-received buffered elements before freeing the ring buffer
+	// as raw bytes. Refcount reached 0 → no live receivers → remaining items in
+	// [head, head+count) mod capacity are unowned and must be dropped. Skipped
+	// entirely for value elements (Channel[int] etc.) — keeps today's codegen
+	// for the overwhelmingly common case and avoids a needless loop.
+	if elemType != nil && c.variantFieldNeedsDrop(elemType) {
+		savedFn, savedEntry, savedBlock := c.fn, c.entryBlock, c.block
+		c.fn, c.entryBlock, c.block = fn, entry, freeBlk
+		c.emitChannelElementDropLoop(chPtr, chanType, elemType)
+		freeBlk = c.block
+		c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
+	}
 
 	// Free ring buffer (field 0: i8*)
 	bufField := freeBlk.NewGetElementPtr(chanType, chPtr,
@@ -4806,8 +4857,60 @@ func (c *Compiler) defineChannelDropFunc() {
 	freeBlk.NewBr(doneBlk)
 
 	doneBlk.NewRet(nil)
+}
 
-	c.funcs["Channel.drop"] = fn
+// emitChannelElementDropLoop emits a loop over the channel's un-received
+// buffered items and drops each one via emitVariantFieldDrop. T0663. The ring
+// buffer holds `count` items starting at logical index `head`; item k lives at
+// physical slot (head + k) mod capacity, byte offset slot*elem_size — the same
+// indexing as the recv read path (stmt.go execRecv). Uses c.block/c.fn/
+// c.entryBlock — the caller (defineChannelDropBody) swaps them to the drop
+// function's context so emitVariantFieldDrop's sub-blocks land here.
+func (c *Compiler) emitChannelElementDropLoop(chPtr value.Value, chanType *irtypes.StructType, elemType types.Type) {
+	elemLLVM := c.resolveType(elemType)
+
+	field := func(idx int) value.Value {
+		return c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
+	}
+	// Load buffer geometry once — drop runs on the last reference so these are
+	// stable for the duration of the walk.
+	buf := c.block.NewLoad(irtypes.I8Ptr, field(chanFieldBuffer))
+	elemSize := c.block.NewLoad(irtypes.I64, field(chanFieldElemSize))
+	capacity := c.block.NewLoad(irtypes.I64, field(chanFieldCapacity))
+	count := c.block.NewLoad(irtypes.I64, field(chanFieldCount))
+	head := c.block.NewLoad(irtypes.I64, field(chanFieldHead))
+
+	loopHead := c.newBlock("chdrop.head")
+	loopBody := c.newBlock("chdrop.body")
+	loopDone := c.newBlock("chdrop.done")
+
+	idxAlloca := c.createEntryAlloca(irtypes.I64)
+	idxAlloca.SetName(c.uniqueLocalName("chdrop.idx"))
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), idxAlloca)
+	c.block.NewBr(loopHead)
+
+	// Loop head: while idx < count
+	c.block = loopHead
+	idx := c.block.NewLoad(irtypes.I64, idxAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, idx, count)
+	c.block.NewCondBr(cond, loopBody, loopDone)
+
+	// Loop body: slot = (head + idx) % capacity; drop buffer[slot]
+	c.block = loopBody
+	idx2 := c.block.NewLoad(irtypes.I64, idxAlloca)
+	slot := c.block.NewURem(c.block.NewAdd(head, idx2), capacity)
+	byteOff := c.block.NewMul(slot, elemSize)
+	elemPtr := c.block.NewGetElementPtr(irtypes.I8, buf, byteOff)
+	typedPtr := c.block.NewBitCast(elemPtr, irtypes.NewPointer(elemLLVM))
+	elemVal := c.block.NewLoad(elemLLVM, typedPtr)
+	c.emitVariantFieldDrop(elemVal, elemType)
+
+	nextIdx := c.block.NewAdd(idx2, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(nextIdx, idxAlloca)
+	c.block.NewBr(loopHead)
+
+	c.block = loopDone
 }
 
 // defineVectorCOWFunc emits promise_vector_cow(i8* slice, i64 elem_size) -> i8*.
@@ -7259,6 +7362,21 @@ func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) 
 			continue
 		}
 
+		// T0663: Channel fields — per-element-type drop walks any un-received
+		// buffered items before freeing the channel. Pre-T0663 this fell through
+		// to the resolveDropOwner path which looked up the single "Channel.drop"
+		// symbol; that symbol no longer exists (drop is per element type now), so
+		// an explicit branch is required or channel fields leak entirely.
+		if chanElem, ok := types.AsChannel(fieldType); ok {
+			resolvedElem := chanElem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(chanElem, c.typeSubst)
+			}
+			dropFn := c.getOrCreateChannelDrop(resolvedElem)
+			c.block.NewCall(dropFn, fieldInstance)
+			continue
+		}
+
 		// Resolve and call field type's drop() method.
 		// T0132/B0202: For generic field instances with synthesized drops
 		// (sema-time or mono-time), use the monomorphized name. Check the resolved
@@ -7429,8 +7547,24 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 		dropFunc = c.funcs["promise_string_drop"]
 	case innerNamed == types.TypVector:
 		dropFunc = c.funcs["Vector.drop"]
-	case innerNamed == types.TypChannel:
-		dropFunc = c.funcs["Channel.drop"]
+	case types.IsChannel(elem) || innerNamed == types.TypChannel:
+		// T0663: Optional[Channel[T]] field scope-exit — per-element-type drop
+		// walks any un-received buffered items before freeing the channel.
+		var resolvedChanElem types.Type
+		if chanElem, ok := types.AsChannel(elem); ok {
+			resolvedChanElem = chanElem
+			if c.typeSubst != nil {
+				resolvedChanElem = types.Substitute(chanElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypChannel && c.typeSubst != nil {
+			if tp := types.TypChannel.TypeParams(); len(tp) > 0 {
+				resolvedChanElem = c.typeSubst[tp[0]]
+				if resolvedChanElem != nil {
+					resolvedChanElem = types.Substitute(resolvedChanElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateChannelDrop(resolvedChanElem)
 	case types.IsTask(elem) || innerNamed == types.TypTask:
 		// T0560: Optional[Task[T]] field scope-exit — per-instantiation drop
 		// blocks on goroutine completion, drops result, frees result_ptr/G.
@@ -7609,8 +7743,24 @@ func (c *Compiler) emitOptionalFieldReassignDrop(opt *types.Optional, field *typ
 		dropFunc = c.funcs["promise_string_drop"]
 	case types.IsVector(elem):
 		dropFunc = c.funcs["Vector.drop"]
-	case types.IsChannel(elem):
-		dropFunc = c.funcs["Channel.drop"]
+	case types.IsChannel(elem) || innerNamed == types.TypChannel:
+		// T0663: Optional[Channel[T]] field reassignment — per-element-type drop
+		// walks any un-received buffered items before freeing the channel.
+		var resolvedChanElem types.Type
+		if chanElem, ok := types.AsChannel(elem); ok {
+			resolvedChanElem = chanElem
+			if c.typeSubst != nil {
+				resolvedChanElem = types.Substitute(chanElem, c.typeSubst)
+			}
+		} else if innerNamed == types.TypChannel && c.typeSubst != nil {
+			if tp := types.TypChannel.TypeParams(); len(tp) > 0 {
+				resolvedChanElem = c.typeSubst[tp[0]]
+				if resolvedChanElem != nil {
+					resolvedChanElem = types.Substitute(resolvedChanElem, c.typeSubst)
+				}
+			}
+		}
+		dropFunc = c.getOrCreateChannelDrop(resolvedChanElem)
 	case types.IsTask(elem) || innerNamed == types.TypTask:
 		// T0560: Optional[Task[T]] field reassignment — per-instantiation drop
 		// blocks on goroutine completion, drops result, frees result_ptr/G.
@@ -8640,10 +8790,12 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			}
 			return
 		}
-		// Channel: call Channel.drop
-		if _, isCh := types.AsChannel(typ); isCh || named == types.TypChannel {
-			if dropFn, ok := c.funcs["Channel.drop"]; ok {
-				c.block.NewCall(dropFn, fieldVal)
+		// Channel: per-element-type drop walks any un-received buffered items.
+		// T0663: nested Channel[Channel[T]] terminates because the inner element
+		// narrows (Channel[int] → int, value, no further loop).
+		if chElem, isCh := types.AsChannel(typ); isCh || named == types.TypChannel {
+			if chElem != nil {
+				c.block.NewCall(c.getOrCreateChannelDrop(chElem), fieldVal)
 			}
 			return
 		}

@@ -566,7 +566,9 @@ func (c *Compiler) dropDiscardedAutoPropagate(expr ast.Expr, val value.Value) {
 			c.block.NewCall(dropFn, val)
 		}
 	case named == types.TypChannel || types.IsChannel(exprType):
-		if dropFn := c.funcs["Channel.drop"]; dropFn != nil {
+		if elemType, ok := types.AsChannel(exprType); ok {
+			// T0663: per-element-type drop walks any un-received buffered items.
+			dropFn := c.getOrCreateChannelDrop(elemType)
 			c.block.NewCall(dropFn, val)
 		}
 	case types.IsArc(exprType) || named == types.TypArc:
@@ -1985,28 +1987,40 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 	}
 
 	// Channel drop (B0163): same i8* alloca + void(i8*) drop pattern as string/vector.
-	// Channel.drop frees the ring buffer, mutex, cond vars, and the struct itself.
-	// Drop flag semantics handle moves: cleared when channel is passed to go blocks
-	// or functions, so only the last owner frees.
-	if _, ok := types.AsChannel(typ); ok || named == types.TypChannel {
-		dropFlag := c.createEntryAlloca(irtypes.I1)
-		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
-		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
-		c.dropFlags[varName] = dropFlag
-
-		dropFunc := c.funcs["Channel.drop"]
-		binding := scopeBinding{
-			kind:     bindingDropString, // reuse: same i8* alloca + void(i8*) drop pattern
-			alloca:   alloca,
-			named:    named,
-			valType:  typ,
-			dropFlag: dropFlag,
-			dropFunc: dropFunc,
-			varName:  varName,
+	// T0663: Channel[T].drop is per-element-type — it drops any un-received
+	// buffered items before freeing the ring buffer, mutex, cond vars, and the
+	// struct itself. Drop flag semantics handle moves: cleared when the channel
+	// is passed to go blocks or functions, so only the last owner frees.
+	if elemType, ok := types.AsChannel(typ); ok || named == types.TypChannel {
+		resolvedElem := elemType
+		if resolvedElem == nil && named == types.TypChannel && c.typeSubst != nil {
+			if tp := types.TypChannel.TypeParams(); len(tp) > 0 {
+				resolvedElem = c.typeSubst[tp[0]]
+			}
 		}
-		c.scopeBindings = append(c.scopeBindings, binding)
-		c.dropBindings[varName] = binding
-		return
+		if c.typeSubst != nil && resolvedElem != nil {
+			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+		}
+		if resolvedElem != nil {
+			dropFlag := c.createEntryAlloca(irtypes.I1)
+			dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+			c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+			c.dropFlags[varName] = dropFlag
+
+			dropFunc := c.getOrCreateChannelDrop(resolvedElem)
+			binding := scopeBinding{
+				kind:     bindingDropString, // reuse: same i8* alloca + void(i8*) drop pattern
+				alloca:   alloca,
+				named:    named,
+				valType:  typ,
+				dropFlag: dropFlag,
+				dropFunc: dropFunc,
+				varName:  varName,
+			}
+			c.scopeBindings = append(c.scopeBindings, binding)
+			c.dropBindings[varName] = binding
+			return
+		}
 	}
 
 	// Arc drop (T0155): same i8* alloca + void(i8*) drop pattern as string/vector/channel.
@@ -2690,7 +2704,14 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 	case innerNamed != nil && (func() bool { _, ok := types.AsVector(elem); return ok }() || innerNamed == types.TypVector):
 		dropFunc = c.funcs["Vector.drop"]
 	case innerNamed != nil && (func() bool { _, ok := types.AsChannel(elem); return ok }() || innerNamed == types.TypChannel):
-		dropFunc = c.funcs["Channel.drop"]
+		// T0663: Channel inner drop — resolve element type and get per-element-type drop
+		if chanElem, ok := types.AsChannel(elem); ok {
+			resolvedChanElem := chanElem
+			if c.typeSubst != nil {
+				resolvedChanElem = types.Substitute(chanElem, c.typeSubst)
+			}
+			dropFunc = c.getOrCreateChannelDrop(resolvedChanElem)
+		}
 	case innerNamed != nil && (func() bool { _, ok := types.AsArc(elem); return ok }() || innerNamed == types.TypArc):
 		// T0155: Arc inner drop — resolve element type and get per-instantiation drop
 		if arcElem, ok := types.AsArc(elem); ok {
@@ -3387,8 +3408,15 @@ func (c *Compiler) dropDiscardedOptional(expr ast.Expr, result value.Value) {
 		dropFunc = c.funcs["Vector.drop"]
 		isContainer = true
 	case innerNamed != nil && (func() bool { _, ok := types.AsChannel(elem); return ok }() || innerNamed == types.TypChannel):
-		dropFunc = c.funcs["Channel.drop"]
-		isContainer = true
+		// T0663: Channel inner drop — per-element-type drop walks buffered items.
+		if chanElem, ok := types.AsChannel(elem); ok {
+			resolvedChanElem := chanElem
+			if c.typeSubst != nil {
+				resolvedChanElem = types.Substitute(chanElem, c.typeSubst)
+			}
+			dropFunc = c.getOrCreateChannelDrop(resolvedChanElem)
+			isContainer = true
+		}
 	case innerNamed != nil && (func() bool { _, ok := types.AsArc(elem); return ok }() || innerNamed == types.TypArc):
 		// T0155: Arc inner drop
 		if arcElem, ok := types.AsArc(elem); ok {
@@ -4390,10 +4418,21 @@ func (c *Compiler) trackVectorTempWithElemType(val value.Value, elemType types.T
 	}
 }
 
-// trackChannelTemp registers a channel temporary for cleanup at statement end.
-// B0219: Used for channel field-read dups from droppable types.
-func (c *Compiler) trackChannelTemp(val value.Value) {
-	c.trackTempWithDrop(val, c.funcs["Channel.drop"])
+// trackChannelTempWithElemType registers a channel temporary for cleanup at
+// statement end. B0219: used for channel field-read dups from droppable types.
+// T0663: unlike trackVectorTempWithElemType (which patches stmtTemp.elemType so
+// cleanupStmtTemps walks elements), the per-element-type Channel[T].drop already
+// walks any un-received buffered items itself — so the element type only needs
+// to select the right drop function. elemType is substituted here so callers
+// can pass the raw channel element type.
+func (c *Compiler) trackChannelTempWithElemType(val value.Value, elemType types.Type) {
+	if elemType == nil {
+		return
+	}
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	c.trackTempWithDrop(val, c.getOrCreateChannelDrop(elemType))
 }
 
 // trackTempWithDrop registers a heap-allocated temporary (string/vector/channel)
@@ -6066,19 +6105,19 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 						c.block = mergeBlock
 					}
 				}
-				// B0219: Channel: call Channel.drop (handles null + refcount).
-				if types.IsChannel(fieldType) {
-					if dropFunc, ok := c.funcs["Channel.drop"]; ok {
-						oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
-						isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
-						dropBlock := c.newBlock("field.chdrop")
-						mergeBlock := c.newBlock("field.chdrop.done")
-						c.block.NewCondBr(isSame, mergeBlock, dropBlock)
-						c.block = dropBlock
-						c.block.NewCall(dropFunc, oldVal)
-						c.block.NewBr(mergeBlock)
-						c.block = mergeBlock
-					}
+				// B0219/T0663: Channel: per-element-type drop (handles null +
+				// refcount, and walks any un-received buffered items).
+				if chanElem, isCh := types.AsChannel(fieldType); isCh {
+					dropFunc := c.getOrCreateChannelDrop(chanElem)
+					oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
+					isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
+					dropBlock := c.newBlock("field.chdrop")
+					mergeBlock := c.newBlock("field.chdrop.done")
+					c.block.NewCondBr(isSame, mergeBlock, dropBlock)
+					c.block = dropBlock
+					c.block.NewCall(dropFunc, oldVal)
+					c.block.NewBr(mergeBlock)
+					c.block = mergeBlock
 				}
 				// T0155: Arc: call per-instantiation Arc drop (handles null + refcount).
 				if arcElem, isArc := types.AsArc(fieldType); isArc {
@@ -8032,7 +8071,13 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		// cleanupStmtTemps doesn't free the channel mid-loop and the channel
 		// is reliably dropped on all exit paths.
 		if idx, isTracked := c.stmtTempMap[chPtr]; isTracked && idx >= 0 {
-			if dropFn, ok := c.funcs["Channel.drop"]; ok {
+			resolvedChanElem := elem
+			if c.typeSubst != nil && resolvedChanElem != nil {
+				resolvedChanElem = types.Substitute(resolvedChanElem, c.typeSubst)
+			}
+			if resolvedChanElem != nil {
+				// T0663: per-element-type drop walks any un-received buffered items.
+				dropFn := c.getOrCreateChannelDrop(resolvedChanElem)
 				tmpName := c.uniqueLocalName("__forin_ch_tmp")
 				tmpAlloca := c.createEntryAlloca(irtypes.I8Ptr)
 				tmpAlloca.SetName(tmpName)

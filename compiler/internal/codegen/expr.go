@@ -103,14 +103,15 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 					if dropFn, ok := c.funcs["MutexGuard.drop"]; ok {
 						c.trackTempWithDrop(result, dropFn)
 					}
-				} else if types.IsChannel(rt) || named == types.TypChannel {
+				} else if chElem, isCh := types.AsChannel(rt); isCh || named == types.TypChannel {
 					// T0653: Channel[T] call/constructor result is a heap-allocated
 					// channel struct + ring buffer + mutex + cond. Without tracking,
 					// a discarded statement-expression temporary (e.g. `Channel[int](1);`,
 					// `fresh();`, `fresh().send(9);`) leaks ~5 allocations because the
 					// existing field-dup (B0219), element-dup (T0383/T0648), and
 					// getter-result (T0486) trackers don't cover the call-result path.
-					c.trackChannelTemp(result)
+					// T0663: per-element-type drop also walks any un-received buffered items.
+					c.trackChannelTempWithElemType(result, chElem)
 				}
 			}
 		} else {
@@ -4154,10 +4155,10 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 				c.trackVectorTempWithElemType(dup, elemType)
 				return dup
 			}
-			if types.IsChannel(fType) {
+			if chElem, isCh := types.AsChannel(fType); isCh {
 				c.dupContainerFieldAccess = false // consume the flag
 				dup := c.dupChannel(val)
-				c.trackChannelTemp(dup)
+				c.trackChannelTempWithElemType(dup, chElem) // T0663
 				return dup
 			}
 			if arcElem, ok := types.AsArc(fType); ok {
@@ -4200,11 +4201,11 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 					c.optionalContainerDup = dup
 					return c.block.NewInsertValue(val, dup, 1)
 				}
-				if types.IsChannel(elem) {
+				if chElem, isCh := types.AsChannel(elem); isCh {
 					c.dupContainerFieldAccess = false
 					innerCh := c.block.NewExtractValue(val, 1)
 					dup := c.dupChannel(innerCh)
-					c.trackChannelTemp(dup)
+					c.trackChannelTempWithElemType(dup, chElem) // T0663
 					c.optionalContainerDup = dup
 					return c.block.NewInsertValue(val, dup, 1)
 				}
@@ -4738,10 +4739,11 @@ func (c *Compiler) trackGetterResult(e *ast.MemberExpr, getter *types.Method, ta
 			} else {
 				c.trackVectorTemp(result)
 			}
-		} else if types.IsChannel(retType) || named == types.TypChannel {
+		} else if chElem, isCh := types.AsChannel(retType); isCh || named == types.TypChannel {
 			// T0486: Channel[T] getter result owns a heap allocation; without
 			// tracking the cloned channel pointer leaks at statement end.
-			c.trackChannelTemp(result)
+			// T0663: per-element-type drop walks any un-received buffered items.
+			c.trackChannelTempWithElemType(result, chElem)
 		} else if arcElem, isArc := types.AsArc(retType); isArc {
 			// T0486: Arc[T] getter result owns a heap allocation; without
 			// tracking the cloned Arc leaks at statement end. arcElem is
@@ -8349,10 +8351,10 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 			c.trackVectorTemp(dup)
 			return dup
 		}
-		if _, isCh := types.AsChannel(elemType); isCh || extractNamed(elemType) == types.TypChannel {
+		if chElem, isCh := types.AsChannel(elemType); isCh {
 			c.dupContainerFieldAccess = false
 			dup := c.dupChannel(val)
-			c.trackChannelTemp(dup)
+			c.trackChannelTempWithElemType(dup, chElem) // T0663
 			return dup
 		}
 		if arcElem, isArc := types.AsArc(elemType); isArc {
@@ -8395,11 +8397,11 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 				c.optionalContainerDup = dup
 				return c.block.NewInsertValue(val, dup, 1)
 			}
-			if types.IsChannel(inner) {
+			if chElem, isCh := types.AsChannel(inner); isCh {
 				c.dupContainerFieldAccess = false
 				innerCh := c.block.NewExtractValue(val, 1)
 				dup := c.dupChannel(innerCh)
-				c.trackChannelTemp(dup)
+				c.trackChannelTempWithElemType(dup, chElem) // T0663
 				c.optionalContainerDup = dup
 				return c.block.NewInsertValue(val, dup, 1)
 			}
@@ -8886,10 +8888,10 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 			c.trackVectorTemp(dup)
 			return dup
 		}
-		if _, isCh := types.AsChannel(elemType); isCh || extractNamed(elemType) == types.TypChannel {
+		if chElem, isCh := types.AsChannel(elemType); isCh {
 			c.dupContainerFieldAccess = false
 			dup := c.dupChannel(val)
-			c.trackChannelTemp(dup)
+			c.trackChannelTempWithElemType(dup, chElem) // T0663
 			return dup
 		}
 		if arcElem, isArc := types.AsArc(elemType); isArc {
@@ -9444,9 +9446,10 @@ func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
 			return envFieldDrop{envDropCallFn, fn}
 		}
 	}
-	if _, ok := types.AsChannel(typ); ok || (named != nil && named == types.TypChannel) {
-		if fn := c.funcs["Channel.drop"]; fn != nil {
-			return envFieldDrop{envDropCallFn, fn}
+	if elemType, ok := types.AsChannel(typ); ok || (named != nil && named == types.TypChannel) {
+		// T0663: per-element-type drop walks any un-received buffered items.
+		if ok {
+			return envFieldDrop{envDropCallFn, c.getOrCreateChannelDrop(elemType)}
 		}
 	}
 	// Arc/Weak/Mutex/MutexGuard → call per-element-type drop function (i8* field, same pattern as string/vector/channel)
@@ -9989,9 +9992,12 @@ func (c *Compiler) dropTempOptionalInner(expr ast.Expr, optVal value.Value, flag
 		if _, isVec := types.AsVector(elem); isVec || innerNamed == types.TypVector {
 			dropFunc = c.funcs["Vector.drop"]
 			isContainer = true
-		} else if _, isCh := types.AsChannel(elem); isCh || innerNamed == types.TypChannel {
-			dropFunc = c.funcs["Channel.drop"]
-			isContainer = true
+		} else if chElem, isCh := types.AsChannel(elem); isCh || innerNamed == types.TypChannel {
+			// T0663: per-element-type drop walks any un-received buffered items.
+			if chElem != nil {
+				dropFunc = c.getOrCreateChannelDrop(chElem)
+				isContainer = true
+			}
 		} else if innerNamed.HasDrop() || innerNamed.NeedsSynthDrop() {
 			// B0288: User type with explicit drop() or synthesized drop.
 			ownerName := innerNamed.Obj().Name()

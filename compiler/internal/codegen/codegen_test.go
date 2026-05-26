@@ -5801,7 +5801,8 @@ func TestFixedArrayFieldChannelElement(t *testing.T) {
 			c := _ChArr(data: [c0, c1]);
 		}
 	`)
-	assertContains(t, ir, "call void @Channel.drop")
+	// T0663: Channel.drop is per-element-type — Channel[int].drop here.
+	assertContains(t, ir, `call void @"Channel[int].drop"`)
 }
 
 // T0579: Array field with heap user type that has no explicit drop —
@@ -10340,7 +10341,8 @@ func TestDropVectorStandaloneHasDrop(t *testing.T) {
 	assertContains(t, ir, "call void @Vector.drop(")
 }
 
-// B0163: Channel scope-exit drop — standalone channel gets drop flag and Channel.drop call
+// B0163/T0663: Channel scope-exit drop — standalone channel gets drop flag and
+// per-element-type Channel[int].drop call.
 func TestDropChannelStandaloneHasDrop(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -10348,17 +10350,17 @@ func TestDropChannelStandaloneHasDrop(t *testing.T) {
 		}
 	`)
 	assertContains(t, ir, "%ch.dropflag")
-	assertContains(t, ir, "call void @Channel.drop(")
+	assertContains(t, ir, `call void @"Channel[int].drop"(`)
 }
 
-// B0163: Channel.drop function body uses refcount — frees only when refcount drops to 0
+// B0163/T0663: Channel[T].drop body uses refcount — frees only when refcount drops to 0
 func TestChannelDropFuncBody(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			ch := channel[int](capacity: 5);
 		}
 	`)
-	assertContains(t, ir, "define void @Channel.drop(i8* %this)")
+	assertContains(t, ir, `define void @"Channel[int].drop"(i8* %this)`)
 	// Refcount decrement (atomicrmw or load+add for WASM)
 	assertContains(t, ir, "i64 -1")
 	assertContains(t, ir, "call void @pal_free(")
@@ -10366,7 +10368,7 @@ func TestChannelDropFuncBody(t *testing.T) {
 	assertContains(t, ir, "call void @pal_cond_destroy(")
 }
 
-// B0163: Channel refcount initialized to 1 in promise_channel_new
+// B0163/T0663: Channel refcount initialized to 1 in promise_channel_new
 func TestChannelRefcountInit(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -10375,27 +10377,27 @@ func TestChannelRefcountInit(t *testing.T) {
 	`)
 	// promise_channel_new should store refcount = 1
 	assertContains(t, ir, "define i8* @promise_channel_new(")
-	// Channel.drop should use atomicrmw add with -1 (refcount decrement)
-	assertContains(t, ir, "define void @Channel.drop(")
+	// Channel[int].drop should use atomicrmw add with -1 (refcount decrement)
+	assertContains(t, ir, `define void @"Channel[int].drop"(`)
 }
 
-// B0163: Channel drop null-checks the pointer (zero-initialized channels from error paths)
+// B0163/T0663: Channel drop null-checks the pointer (zero-initialized channels from error paths)
 func TestChannelDropNullCheck(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			ch := channel[int](capacity: 1);
 		}
 	`)
-	// Channel.drop body should have null check (icmp eq ... null)
-	dropFn := extractFunction(ir, "Channel.drop")
+	// Channel[int].drop body should have null check (icmp eq ... null)
+	dropFn := extractFunction(ir, `"Channel[int].drop"`)
 	if dropFn == "" {
-		t.Fatal("expected Channel.drop function in IR")
+		t.Fatal("expected Channel[int].drop function in IR")
 	}
 	assertContains(t, dropFn, "icmp eq")
 	assertContains(t, dropFn, "null")
 }
 
-// B0163: Channel drop flag cleared on move (borrow detection)
+// B0163/T0663: Channel drop flag cleared on move (borrow detection)
 func TestChannelDropFlagInDroppableContainer(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
@@ -10405,7 +10407,7 @@ func TestChannelDropFlagInDroppableContainer(t *testing.T) {
 	`)
 	// isDroppableContainerOrString should recognize channels
 	assertContains(t, ir, "%ch.dropflag")
-	assertContains(t, ir, "call void @Channel.drop(")
+	assertContains(t, ir, `call void @"Channel[int].drop"(`)
 }
 
 // Non-droppable type: no drop flag or call generated for that variable
@@ -12216,12 +12218,13 @@ func TestSynthDropChannelField(t *testing.T) {
 		}
 	`)
 	assertContains(t, ir, "define void @WithChan.drop")
-	// Synthesized drop should call Channel.drop on the channel field
+	// T0663: synthesized drop calls the per-element-type Channel[int].drop on
+	// the channel field (was the single @Channel.drop symbol pre-T0663).
 	withChanDrop := extractFunction(ir, "WithChan.drop")
 	if withChanDrop == "" {
 		t.Fatal("expected WithChan.drop function in IR")
 	}
-	assertContains(t, withChanDrop, "call void @Channel.drop(")
+	assertContains(t, withChanDrop, `call void @"Channel[int].drop"(`)
 }
 
 // B0192: Non-droppable heap user type fields inside synthesized drop get pal_free
@@ -21605,8 +21608,8 @@ func TestOptionalGenericFieldReassignChannelEmitsDropAndOptdrop(t *testing.T) {
 	`)
 	assertContains(t, ir, "field.optdrop")
 	assertContains(t, ir, "tmp.drop")
-	// Channel.drop is generic — operates on i8*, not monomorphised per-T.
-	assertContains(t, ir, "@Channel.drop")
+	// T0663: Channel.drop is now per-element-type — Channel[int].drop here.
+	assertContains(t, ir, `@"Channel[int].drop"`)
 }
 
 // T0513: Force-unwrap of an Optional[string] field on a generic-type instance

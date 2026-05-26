@@ -223,8 +223,9 @@ func TestT0621_TaskFromVarMoveThenVectorRecv(t *testing.T) {
 //   - T0638 non-regression: genReceiveChannel must NOT null the slot (unlike
 //     genReceiveTask) — the channel stays Vector-owned, so the receive-operand
 //     in-bounds block (`index.ok`) must contain no `store i8* null, i8**`.
-//   - The scope-exit Vector element drop walk (`@Channel.drop`) must still be
-//     wired so the still-owned channel is dropped exactly once.
+//   - The scope-exit Vector element drop walk (`@"Channel[int].drop"`, T0663
+//     per-element-type) must still be wired so the still-owned channel is
+//     dropped exactly once.
 //
 // This is the IR guarantee behind t0621_chan_from_var / _multi / _partial in
 // tests/concurrency/task_drop_test.pr.
@@ -255,7 +256,7 @@ func TestT0621_ChannelFromVarMoveThenVectorRecv(t *testing.T) {
 	}
 	// T0638 non-regression: the Vector receive-operand in-bounds block must
 	// NOT null the slot — genReceiveChannel does not free the channel, so the
-	// slot must stay valid for the scope-exit Vector.drop → Channel.drop.
+	// slot must stay valid for the scope-exit Vector.drop → Channel[int].drop.
 	okBlk := blockByPrefixT0638(body, "index.ok")
 	if okBlk == "" {
 		t.Fatalf("expected index.ok block (Vector receive operand):\n%s", body)
@@ -265,10 +266,11 @@ func TestT0621_ChannelFromVarMoveThenVectorRecv(t *testing.T) {
 			"(genReceiveChannel does not free the channel; slot needed for "+
 			"scope-exit drop):\n%s", okBlk)
 	}
-	// The scope-exit Vector element drop walk must still call Channel.drop on
-	// the still-owned channel (dropped exactly once — no double-free, no leak).
-	if !strings.Contains(body, "call void @Channel.drop(") {
-		t.Errorf("expected `call void @Channel.drop(` scope-exit element drop walk:\n%s", body)
+	// T0663: the scope-exit Vector element drop walk must still call the
+	// per-element-type Channel[int].drop on the still-owned channel (dropped
+	// exactly once — no double-free, no leak).
+	if !strings.Contains(body, `call void @"Channel[int].drop"(`) {
+		t.Errorf("expected `call void @\"Channel[int].drop\"(` scope-exit element drop walk:\n%s", body)
 	}
 }
 
@@ -353,7 +355,7 @@ func TestT0617_ArrayForInRecvNullsSlot(t *testing.T) {
 // TestT0617_ForInChannelRecvDoesNotNullSlot — non-regression. genReceiveChannel
 // does NOT free the channel and never consults c.forInHandleSlotPtr, so the
 // channel for-in loop body must NOT null the slot — the slot must stay valid
-// for the scope-exit Vector.drop → Channel.drop (no double-free, no leak).
+// for the scope-exit Vector.drop → Channel[int].drop (no double-free, no leak).
 func TestT0617_ForInChannelRecvDoesNotNullSlot(t *testing.T) {
 	ir := generateIR(t, `
 		producer() Channel[int] {
@@ -381,9 +383,10 @@ func TestT0617_ForInChannelRecvDoesNotNullSlot(t *testing.T) {
 			"(genReceiveChannel does not free the channel; slot needed for "+
 			"scope-exit drop):\n%s", bodyBlk)
 	}
-	// The scope-exit Vector element drop walk must still call Channel.drop on
-	// the still-owned channel (dropped exactly once — no double-free, no leak).
-	if !strings.Contains(body, "call void @Channel.drop(") {
-		t.Errorf("expected `call void @Channel.drop(` scope-exit element drop walk:\n%s", body)
+	// T0663: the scope-exit Vector element drop walk must still call the
+	// per-element-type Channel[int].drop on the still-owned channel (dropped
+	// exactly once — no double-free, no leak).
+	if !strings.Contains(body, `call void @"Channel[int].drop"(`) {
+		t.Errorf("expected `call void @\"Channel[int].drop\"(` scope-exit element drop walk:\n%s", body)
 	}
 }

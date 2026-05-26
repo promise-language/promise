@@ -15560,6 +15560,73 @@ func TestGoBlockEnqueuesG(t *testing.T) {
 	assertContains(t, ir, "call void @promise_sched_enqueue(")
 }
 
+// T0683: a non-void value-returning go-block (`go { …; <expr> }` → task[T])
+// awaited via `<-x` must store the trailing value into G.result_ptr, and the
+// caller must allocate a heap result buffer — not the void sentinel 0x1,
+// which `<-x` would dereference as a wild pointer (SIGSEGV, mislabeled
+// "fatal: stack overflow" by the macOS signal handler).
+func TestGoBlockValueResultStored(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			task[int] x = go { 42 };
+			r := <-x;
+		}
+	`)
+	// Coroutine body stores the trailing value into G.result_ptr via the
+	// B0109 null-check store pattern.
+	assertContains(t, ir, "store_result:")
+	assertContains(t, ir, "after_store:")
+	assertContains(t, ir, "store i64 42, i64*")
+	// Caller allocates a heap result buffer for the non-void task.
+	assertContains(t, ir, "@pal_alloc")
+	// The bug stored the void sentinel 0x1 into result_ptr for this
+	// non-void task — there must be no such sentinel now.
+	assertNotContains(t, ir, "inttoptr i64 1 to i8*")
+}
+
+// T0683 regression guard: the void go-block path is unchanged — it still
+// stores the 0x1 sentinel into G.result_ptr and emits no value-store block.
+func TestGoBlockVoidStillUsesSentinel(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			task[void] x = go { int n = 10; };
+			<-x;
+		}
+	`)
+	assertContains(t, ir, "inttoptr i64 1 to i8*")
+	assertNotContains(t, ir, "store_result:")
+}
+
+// T0683: a value-returning go-block inside a *generic* function exercises
+// genGoBlock's `c.typeSubst` monomorphization branch — the trailing value's
+// type must be Substitute'd so the coroutine's result store and the caller's
+// result-buffer size match the `<-x` receive side (symmetric with
+// genReceiveTask). For `mk[int]`, T resolves to int: the monomorphized
+// coroutine must store an i64 into G.result_ptr (not a TypeParam-typed or
+// sentinel value). Guards the plan's key symmetry, which had no direct
+// codegen coverage (the other two tests use only the concrete non-generic
+// path).
+func TestGoBlockValueResultMonomorphized(t *testing.T) {
+	ir := generateIR(t, `
+		mk[T](T v) Task[T] {
+			return go { v };
+		}
+		main() {
+			task[int] x = mk[int](42);
+			r := <-x;
+		}
+	`)
+	// The generic function was monomorphized for int.
+	assertContains(t, ir, `@"mk[int]"`)
+	// The value path was taken inside the monomorphized go-block coroutine
+	// (store into G.result_ptr), the caller allocated a real result buffer,
+	// and no void sentinel was used for this non-void monomorphized task.
+	assertContains(t, ir, "store_result:")
+	assertContains(t, ir, "after_store:")
+	assertContains(t, ir, "@pal_alloc")
+	assertNotContains(t, ir, "inttoptr i64 1 to i8*")
+}
+
 func TestChannelSendInCoroutineSuspends(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

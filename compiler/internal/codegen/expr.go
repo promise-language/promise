@@ -10953,7 +10953,7 @@ func (c *Compiler) genGoExpr(e *ast.GoExpr) value.Value {
 		return c.genGoCallExpr(callExpr)
 	}
 	// go { block } form
-	return c.genGoBlock(e.Block)
+	return c.genGoBlock(e)
 }
 
 // genGoCallExpr handles `go func(args...)` — the common case.
@@ -11822,7 +11822,26 @@ func collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca)
 
 // genGoBlock handles `go { block }` — wraps the block in a void function and spawns it.
 // Captures outer local variables referenced in the block and passes them through the arg pack.
-func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
+func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
+	block := e.Block
+
+	// T0683: Resolve the task's result type. sema types `go { …; <expr> }`
+	// as task[T] where T is the trailing ExprStmt's type; a void block is
+	// task[void]. Substitute typeSubst so the buffer/store type matches the
+	// `<-task` receive side under monomorphization (symmetric with
+	// genReceiveTask). A value-returning block must store its trailing value
+	// into G.result_ptr; the void path is unchanged.
+	goResultType := c.info.Types[e]
+	if c.typeSubst != nil && goResultType != nil {
+		goResultType = types.Substitute(goResultType, c.typeSubst)
+	}
+	goElem, goHasElem := types.AsTask(goResultType)
+	goIsVoid := !goHasElem || goElem == nil || goElem == types.TypVoid
+	var goResultLLVM irtypes.Type = irtypes.Void
+	if !goIsVoid {
+		goResultLLVM = c.resolveType(goElem)
+	}
+
 	// Collect outer variables referenced in the block
 	captureNames := collectBlockIdents(block, c.locals)
 
@@ -11897,7 +11916,18 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	savedGoExprFF := c.goExprFireAndForget
 	savedLocalNameCount := c.localNameCount // T0261
 	savedEnumCtorTemps := c.enumCtorTemps   // B0267
+	savedStmtTemps := c.stmtTemps           // T0683/T0594: isolate coro-body temps from the outer fn
+	savedStmtTempMap := c.stmtTempMap       // T0683/T0594
 	c.goExprFireAndForget = false           // reset for inner statements (B0109)
+
+	// T0683: Only a non-void, awaited (`<-task`) block needs its trailing
+	// value stored into G.result_ptr. A void block has no value; a
+	// fire-and-forget value block (`go { 42 };` as a bare statement) has its
+	// value discarded — both take the unchanged void genBlock path, whose
+	// per-statement temp cleanup frees a heap trailing value (no leak), and
+	// the caller leaves result_ptr null/sentinel as before. This keeps the
+	// void path byte-for-byte identical to pre-T0683.
+	useGoBlockValuePath := !goIsVoid && !savedGoExprFF
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -11911,6 +11941,12 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
 	c.enumCtorTemps = nil // B0267
+	if useGoBlockValuePath {
+		// T0683/T0594: fresh temp state for the coroutine body so its temps
+		// (which reference coroFn allocas) cannot leak into the outer fn.
+		c.stmtTemps = nil
+		c.stmtTempMap = make(map[value.Value]int)
+	}
 
 	// --- Coroutine preamble ---
 	entry := coroFn.NewBlock(".entry")
@@ -12010,7 +12046,48 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.panicExitBlock = goPanicExitBlk2
 	c.coroutineReturnBlock = finalSuspBlk // B0353
 
-	c.genBlock(block)
+	if !useGoBlockValuePath {
+		// Void or fire-and-forget: discard the trailing value. genBlock's
+		// per-statement genStmt cleanup frees a heap trailing value, so a
+		// fire-and-forget value block (`go { "x"+"y" };`) does not leak.
+		c.genBlock(block)
+	} else {
+		// T0683: non-void awaited block — capture the trailing-expression
+		// value and store it into the caller-allocated G.result_ptr buffer.
+		// genBlockValue claims `result` and drops block locals after, so the
+		// value is safe to store here.
+		result := c.genBlockValue(block)
+		if result != nil && c.block != nil && c.block.Term == nil {
+			// B0109 null-check store pattern (mirrors genGoCallExpr): the
+			// caller allocates result_ptr for an awaited task. The null
+			// check is defensive — symmetric with the working call form.
+			gTy := goroutineStructType()
+			currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+			gPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
+			rpField := c.block.NewGetElementPtr(gTy, gPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+			rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
+			rpNotNull := c.block.NewICmp(enum.IPredNE, rpVal, constant.NewNull(irtypes.I8Ptr))
+			storeResultBlk := coroFn.NewBlock("store_result")
+			afterStoreBlk := coroFn.NewBlock("after_store")
+			c.block.NewCondBr(rpNotNull, storeResultBlk, afterStoreBlk)
+
+			typedRP := storeResultBlk.NewBitCast(rpVal, irtypes.NewPointer(goResultLLVM))
+			storeResultBlk.NewStore(result, typedRP)
+			storeResultBlk.NewBr(afterStoreBlk)
+
+			c.block = afterStoreBlk
+		}
+		// T0594: ownership of `result` transferred to G.result_ptr — claim
+		// so the coroutine body's stmt-temp cleanup doesn't free it, then
+		// drop any orphaned temps from the trailing expression.
+		// claimStringTemp emits a flag store, so skip it on a dead block
+		// (e.g. trailing expr panicked); cleanupStmtTemps self-guards.
+		if c.block != nil && c.block.Term == nil {
+			c.claimStringTemp(result)
+		}
+		c.cleanupStmtTemps()
+	}
 
 	// Clear panic exit block and coroutine return block after body generation
 	c.panicExitBlock = nil
@@ -12100,6 +12177,10 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.goExprFireAndForget = savedGoExprFF
 	c.localNameCount = savedLocalNameCount // T0261
 	c.enumCtorTemps = savedEnumCtorTemps   // B0267
+	if useGoBlockValuePath {
+		c.stmtTemps = savedStmtTemps     // T0683/T0594: restore outer fn temp state
+		c.stmtTempMap = savedStmtTempMap // T0683/T0594
+	}
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
 	// Ownership has been transferred to the goroutine.
@@ -12112,18 +12193,31 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	gRaw := c.block.NewCall(c.funcs["promise_g_new"], handle)
 
 	if !c.goExprFireAndForget {
-		// Task: set result_ptr to sentinel (0x1) so goroutine_exit knows
-		// the receiver will free G (via <-task). Without this, goroutine_exit
-		// would free the G and the receiver would access freed memory.
 		gTy := goroutineStructType()
 		gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
 		rpField := c.block.NewGetElementPtr(gTy, gPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
-		sentinel := c.block.NewIntToPtr(constant.NewInt(c.ptrIntType(), 1), irtypes.I8Ptr)
-		c.block.NewStore(sentinel, rpField)
+		if goIsVoid {
+			// Void task: set result_ptr to sentinel (0x1) so goroutine_exit
+			// knows the receiver will free G (via <-task). Without this,
+			// goroutine_exit would free the G and the receiver would access
+			// freed memory.
+			sentinel := c.block.NewIntToPtr(constant.NewInt(c.ptrIntType(), 1), irtypes.I8Ptr)
+			c.block.NewStore(sentinel, rpField)
+		} else {
+			// T0683: non-void task — allocate the result buffer the
+			// coroutine body stores into and the <-task receiver loads +
+			// frees (mirrors genGoCallExpr). result_ptr != null also tells
+			// goroutine_exit not to free G (the receiver owns it).
+			resultSize := constant.NewInt(irtypes.I64, int64(c.typeSize(goResultLLVM)))
+			resultBuf := c.block.NewCall(c.palAlloc, resultSize)
+			c.block.NewStore(resultBuf, rpField)
+		}
 	}
-	// Fire-and-forget: result_ptr stays null (from promise_g_new),
-	// so goroutine_exit frees the G struct when the goroutine completes.
+	// Fire-and-forget (void or non-void): result_ptr stays null (from
+	// promise_g_new), so goroutine_exit frees the G struct when the
+	// goroutine completes. The non-void value is discarded by the void
+	// genBlock path above (no buffer, no leak).
 
 	c.block.NewCall(c.funcs["promise_sched_enqueue"], gRaw)
 

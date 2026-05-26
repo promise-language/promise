@@ -1,0 +1,241 @@
+// T0683: a value-returning `go { …; <expr> }` block bound to a variable and
+// awaited via `<-x` overflowed the stack at runtime. Root cause: genGoBlock
+// only ever emitted a void coroutine — it discarded the trailing-expression
+// value and stored the void sentinel 0x1 into G.result_ptr; `<-x` on the
+// sema-typed task[T] then loaded from address 0x1 (SIGSEGV, mislabeled
+// "fatal: stack overflow" by the macOS signal handler). The fix stores the
+// trailing value into a caller-allocated result buffer.
+//
+// Batch tests with NO `exclude: wasm` — `<-task` await works under the WASM
+// cooperative scheduler (same join path as task_drop_wasm_test). Zero-leak
+// enforcement applies on the host AND `--target wasm32-wasi`.
+// (1) The exact reported repro: int value block awaited.
+t0683_basic_int() `test {
+  task[int] x = go {
+    42
+  };
+  r := <-x;
+  assert(r == 42, "value block int result");
+}
+
+// (2) Multi-statement block with locals — the trailing expression is the
+// block value; preceding statements are run for effect.
+t0683_multi_stmt_locals() `test {
+  task[int] x = go {
+    a := 20;
+    b := 22;
+    a + b
+  };
+  assert((<-x) == 42, "multi-statement value block");
+}
+
+// (3) Heap (string) result — exercises ownership transfer of the result into
+// G.result_ptr (claimStringTemp) and the receiver taking ownership. A leak
+// here would fail the zero-tolerance policy.
+t0683_string_result() `test {
+  task[string] x = go {
+    "he" + "llo"
+  };
+  string r = <-x;
+  assert(r == "hello", "value block string result");
+}
+
+// (4) Block capturing an outer variable, then producing a value from it.
+t0683_capture_outer() `test {
+  base := 40;
+  task[int] x = go {
+    base + 2
+  };
+  assert((<-x) == 42, "value block over captured var");
+}
+
+// (5) Nested value block: an inner value block awaited inside an outer one.
+t0683_nested_value_block() `test {
+  task[int] outer = go {
+    task[int] inner = go {
+      21
+    };
+    (<-inner) * 2
+  };
+  assert((<-outer) == 42, "nested value blocks");
+}
+
+// (6) Other result types for breadth.
+t0683_bool_result() `test {
+  task[bool] x = go {
+    1 + 1 == 2
+  };
+  assert(<-x, "value block bool result");
+}
+
+t0683_float_result() `test {
+  task[f64] x = go {
+    1.5 + 2.0
+  };
+  f64 r = <-x;
+  assert(r == 3.5, "value block f64 result");
+}
+
+// (7) Void block awaited still works alongside the value path (regression).
+t0683_void_block_awaited() `test {
+  task[void] v = go {
+    int n = 10;
+  };
+  <-v;
+  assert(true, "void block still awaitable");
+}
+
+// (8) Fire-and-forget value block as a bare statement — value discarded.
+// Must not crash and must not leak: the void genBlock path drops a heap
+// trailing value via per-statement cleanup; the caller allocates no buffer.
+t0683_fire_and_forget_value() `test {
+  go {
+    1
+  };
+  go {
+    "discarded" + " heap string"
+  };
+  go {
+    a := 7;
+    a * 6
+  };
+  assert(true, "fire-and-forget value blocks: no crash, no leak");
+}
+
+// (9) The behavior the fix actually changed: a non-void value block bound to
+// a variable but NEVER awaited (dropped at scope exit). Before T0683 this
+// stored the void sentinel 0x1 (Task[T].drop freed G only); after the fix it
+// stores a real pal_alloc buffer that Task[T].drop's free_after_done path
+// (defineTaskFreeAfterDoneBody) must free. Zero-tolerance leak regression
+// guard — int (trivial drop) and string (heap drop of the result T).
+t0683_value_block_dropped_int() `test {
+  task[int] t = go {
+    42
+  };
+  assert(true, "int value-block task dropped, not awaited: no leak");
+}
+
+t0683_value_block_dropped_string() `test {
+  task[string] t = go {
+    "heap" + " result"
+  };
+  assert(true, "string value-block task dropped, not awaited: no leak");
+}
+
+// (10) Many dropped value-block tasks in a loop — exercises the drop path
+// repeatedly; a per-iteration buffer/G leak would trip the alloc-delta check.
+t0683_value_block_dropped_loop() `test {
+  i := 0;
+  while i < 30 {
+    task[int] n = go {
+      i * 2
+    };
+    task[string] s = go {
+      "x" + "y"
+    };
+    i = i + 1;
+  }
+  assert(i == 30, "many value-block tasks dropped in loop: no leak");
+}
+
+// (11) Value-block tasks stored in a Vector and never awaited — container
+// scope-exit drop routes each element through Task[T].drop. Confirms the
+// real result buffer is freed via the container-drop path, not just the
+// direct-variable path.
+t0683_value_block_in_vector_dropped() `test {
+  ts := Task[int][]();
+  ts.push(go {
+    1
+  });
+  ts.push(go {
+    2
+  });
+  ts.push(go {
+    3
+  });
+  assert(ts.len == 3, "value-block tasks in vector, none awaited: no leak");
+}
+
+// (12) Mixed: value-block tasks in a Vector, all awaited via for-in. The
+// receive nulls each slot so the container's element drop no-ops — confirms
+// the await + slot-null interplay produces the right sum and no double-free.
+t0683_value_block_in_vector_all_awaited() `test {
+  ts := Task[int][]();
+  ts.push(go {
+    10
+  });
+  ts.push(go {
+    20
+  });
+  ts.push(go {
+    12
+  });
+  total := 0;
+  for t in ts {
+    total = total + (<-t);
+  }
+  assert(total == 42, "value-block tasks in vector, all awaited via for-in");
+}
+
+// (13) Enum result — a value-block result type with variant/tag layout,
+// distinct from the primitive/string/bool/f64 results above (none of which
+// exercised an enum). Covers genGoBlock's resolveType / result-buffer
+// sizing for an enum value struct.
+enum T0683Color {
+  Red,
+  Green,
+  Blue,
+}
+
+t0683_enum_result() `test {
+  task[T0683Color] x = go {
+    T0683Color.Green
+  };
+  c := <-x;
+  ok := match c {
+    T0683Color.Green => true,
+    _ => false,
+  };
+  assert(ok, "value block enum result");
+}
+
+// (14) Generic pure value-type result — `Point[int]` (all-`value` fields,
+// embedded Value layout, no heap, no drop) as the value-block result.
+// Distinct layout/typeSize path from primitives and enums.
+t0683_value_type_result() `test {
+  task[Point[int]] x = go {
+    Point[int](x: 3, y: 4)
+  };
+  p := <-x;
+  assert(p.x == 3 && p.y == 4, "value block value-type (Point) result");
+}
+
+// (15) Generic function builds the value-block task and returns it; the
+// caller awaits it in the top-level test G. Exercises genGoBlock's
+// `c.typeSubst` monomorphization Substitute branch (the plan's key symmetry
+// with genReceiveTask so the buffer/store type matches the receive side).
+// Non-heap T — the generic-mono shape that is safe across host + wasm.
+t0683_mk_int[T](T v) Task[T] {
+  return go {
+    v
+  };
+}
+
+t0683_generic_returned_task_int() `test {
+  task[int] x = t0683_mk_int[int](42);
+  assert((<-x) == 42, "generic-fn-built value-block task, int, awaited in test G");
+}
+
+// (16) Value-block capturing a heap LOCAL string as its trailing value,
+// awaited in the same scope — the ownership-safe sibling of the captured
+// case: confirms claimStringTemp + the B0354 outer-drop-flag clear
+// correctly transfer the captured local's buffer with no leak / no
+// double-free. (t0683_capture_outer above only captures an int.)
+t0683_capture_local_string() `test {
+  s := "he" + "llo";
+  task[string] x = go {
+    s
+  };
+  string r = <-x;
+  assert(r == "hello", "value block returning captured heap local string");
+}

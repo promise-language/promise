@@ -7034,6 +7034,27 @@ func (c *Compiler) cloneResolvedValue(val value.Value, resolvedType types.Type) 
 		}
 	} else if isChan || named == types.TypChannel {
 		dupVal = c.dupChannel(val)
+	} else if tup, isTup := resolvedType.(*types.Tuple); isTup {
+		// T0667: deep-clone each element so heap members become independent.
+		// cloneByType handles bit-copy elements (scalars pass through
+		// unchanged), Optional elements (none-check), and recurses for
+		// string/vector/channel/enum/heap-user/nested-tuple. A bare bit copy
+		// would alias the heap members → double-free when both original and
+		// clone drop. Covers T0605 (type) and T0607 (enum) tuple shapes
+		// uniformly (both lower through cloneByType→cloneResolvedValue).
+		result := val
+		for i, elemType := range tup.Elems() {
+			resolvedElem := elemType
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+			}
+			elemVal := c.block.NewExtractValue(result, uint64(i))
+			clonedElem := c.cloneByType(elemVal, resolvedElem)
+			if clonedElem != nil && clonedElem != elemVal {
+				result = c.block.NewInsertValue(result, clonedElem, uint64(i))
+			}
+		}
+		dupVal = result
 	} else if cloned, ok := c.cloneEnumValue(val, resolvedType); ok {
 		// B0244: Enum with clone — deep-copy via clone method.
 		dupVal = cloned
@@ -7107,6 +7128,20 @@ func (c *Compiler) isAutoCloneBitCopy(t types.Type) bool {
 	// the T0605 double-free one level deeper).
 	if opt, isOpt := t.(*types.Optional); isOpt {
 		return c.isAutoCloneBitCopy(opt.Elem())
+	}
+	// T0667: a tuple is a bit copy iff every element is — recurse so a tuple
+	// carrying a heap member (string/vector/map/enum/heap-user/nested-tuple)
+	// is NOT bit-copied by cloneByType's short-circuit (that would alias the
+	// member → double-free when both original and clone drop). A pure scalar
+	// tuple stays a bit copy (preserves the prior non-named-fallthrough
+	// behavior). Mirrors the *types.Optional recursion above.
+	if tup, isTup := t.(*types.Tuple); isTup {
+		for _, elem := range tup.Elems() {
+			if !c.isAutoCloneBitCopy(elem) {
+				return false
+			}
+		}
+		return true
 	}
 	named := extractNamed(t)
 	if named == nil {

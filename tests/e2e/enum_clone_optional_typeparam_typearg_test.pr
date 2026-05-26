@@ -25,13 +25,26 @@
 // are all `clone/copy/heap-container/user-`clone types, which route to a
 // correct deep clone.
 //
-// NOTE: a tuple variant field carrying the TypeParam (e.g. `(T, int) pr`)
-// with a droppable TypeArg also double-frees — ContainsTypeParam recurses
-// into *types.Tuple so the synth emits AutoClone, but isAutoCloneBitCopy
-// treats every tuple as a bit-copy "scalar tuple" and cloneResolvedValue
-// has no *types.Tuple case. Separate pre-existing gap (also segfaults on
-// the T0605 type-level path); tracked as T0667, intentionally not covered
-// here — exactly parallel to the T0662 array gap.
+// T0667 (FIXED, covered below): a tuple variant field carrying the TypeParam
+// (e.g. `(T, int) pr`) with a droppable TypeArg used to double-free —
+// ContainsTypeParam recurses into *types.Tuple so the synth emitted AutoClone,
+// but isAutoCloneBitCopy treated every tuple as a bit-copy "scalar tuple" and
+// cloneResolvedValue had no *types.Tuple case. The fix added a *types.Tuple
+// recursion to isAutoCloneBitCopy + a per-element extract/cloneByType/insert
+// arm to cloneResolvedValue (exactly parallel to the T0662 array gap, same
+// family as the T0607 isAutoCloneBitCopy enum-branch fix). Covered by the
+// `enum TupWrap[T]` / `enum TupKV[K, V]` tests at the end of this file and by
+// the type-level `TupBox[T]` shapes in
+// tests/e2e/type_clone_generic_typearg_test.pr.
+//
+// NOTE: destructuring a struct field of tuple type whose element is
+// Optional[aggregate] (`(T?, int)` with T=map/vector) is a *separate*
+// pre-existing crash, T0672 — independent of the T0667 clone fix (the clone
+// deep-copy / double-drop path is correct; only the field destructure
+// segfaults). The `(T?, int)` clone recursion is therefore covered at the
+// type level via clone+double-drop (no destructure) plus the Go codegen test
+// TestGenericTypeCloneTupleOptionalTypeParamField, not by a destructure-based
+// e2e here.
 enum Wrap[T] `clone {
   OptVal(T? maybe),
   VecVal(T[] items),
@@ -610,6 +623,165 @@ test_multi_typeparam_fieldless() `test {
   }
   match j {
     KV2.Empty => assert(true, "original Empty"),
+    _ => assert(false, "original should be Empty"),
+  }
+}
+
+// ---- T0667: tuple variant field carrying the TypeParam (`(T, int) pr`).
+// The synth emits AutoClone for the ContainsTypeParam tuple field; the fix
+// (isAutoCloneBitCopy *types.Tuple recursion + cloneResolvedValue *types.Tuple
+// per-element arm) deep-clones the tuple's heap member so the clone and the
+// original own independent copies. Both kept live + match-consumed (the
+// double-free repro). Parallel to the T0605 type-level `TupBox[T]` shapes. ----
+
+enum TupWrap[T] `clone {
+  Pair((T, int) pr),
+  Nope,
+}
+enum TupKV[K, V] `clone {
+  Both((K, V) kv),
+  Empty,
+}
+
+// Exact T0667 bug repro: droppable map TypeArg, match-consume both.
+test_tupwrap_map() `test {
+  map[string, string] m = map[string, string]();
+  m["k"] = "v";
+  TupWrap[map[string, string]] j = TupWrap[map[string, string]].Pair((m, 7));
+  TupWrap[map[string, string]] c = j.clone();
+  match c {
+    TupWrap.Pair(cp) => {
+      (cm, cn) := cp;
+      assert(cm.len == 1, "clone map len 1");
+      assert(cn == 7, "clone int 7");
+    },
+    _ => assert(false, "clone should be Pair"),
+  }
+  match j {
+    TupWrap.Pair(jp) => {
+      (jm, jn) := jp;
+      assert(jm.len == 1, "original map len 1 (independent)");
+    },
+    _ => assert(false, "original should be Pair"),
+  }
+}
+
+// Droppable TypeArg: string[] inside the tuple variant.
+test_tupwrap_string_vec() `test {
+  string[] sv = ["a", "b", "c"];
+  TupWrap[string[]] j = TupWrap[string[]].Pair((sv, 3));
+  TupWrap[string[]] c = j.clone();
+  match c {
+    TupWrap.Pair(cp) => {
+      (cv, cn) := cp;
+      assert(cv.len == 3, "clone vec len 3");
+      assert(cv[2] == "c", "clone[2]=c");
+    },
+    _ => assert(false, "clone should be Pair"),
+  }
+  match j {
+    TupWrap.Pair(jp) => {
+      (jv, jn) := jp;
+      assert(jv.len == 3, "original vec len 3 (independent)");
+    },
+    _ => assert(false, "original should be Pair"),
+  }
+}
+
+// User `clone type (Bag2, defined above) as the droppable TypeArg.
+test_tupwrap_user_clone() `test {
+  map[string, int] mm = map[string, int]();
+  mm["x"] = 1;
+  Bag2 b = Bag2(counts: mm);
+  TupWrap[Bag2] j = TupWrap[Bag2].Pair((b, 9));
+  TupWrap[Bag2] c = j.clone();
+  match c {
+    TupWrap.Pair(cp) => {
+      (cb, cn) := cp;
+      assert(cb.counts.len == 1, "clone bag len 1");
+    },
+    _ => assert(false, "clone should be Pair"),
+  }
+  match j {
+    TupWrap.Pair(jp) => {
+      (jb, jn) := jp;
+      assert(jb.counts.get_or("x", 0) == 1, "original x=1 (independent)");
+    },
+    _ => assert(false, "original should be Pair"),
+  }
+}
+
+// Copy TypeArg: int — pure scalar tuple, must stay a correct bit copy.
+test_tupwrap_int() `test {
+  TupWrap[int] j = TupWrap[int].Pair((42, 7));
+  TupWrap[int] c = j.clone();
+  match c {
+    TupWrap.Pair(cp) => {
+      (ci, cn) := cp;
+      assert(ci == 42, "clone first 42");
+      assert(cn == 7, "clone second 7");
+    },
+    _ => assert(false, "clone should be Pair"),
+  }
+  match j {
+    TupWrap.Pair(jp) => {
+      (ji, jn) := jp;
+      assert(ji == 42, "original first 42");
+    },
+    _ => assert(false, "original should be Pair"),
+  }
+}
+
+// Fieldless variant of a generic clone enum instantiated with a droppable
+// TypeArg — must clone cleanly with no leak.
+test_tupwrap_nope_variant() `test {
+  TupWrap[map[string, string]] j = TupWrap[map[string, string]].Nope;
+  TupWrap[map[string, string]] c = j.clone();
+  match c {
+    TupWrap.Nope => assert(true, "clone Nope"),
+    _ => assert(false, "clone should be Nope"),
+  }
+  match j {
+    TupWrap.Nope => assert(true, "original Nope"),
+    _ => assert(false, "original should be Nope"),
+  }
+}
+
+// Multi-TypeParam tuple variant `Both((K, V) kv)` — each element resolves its
+// own concrete substitution; both droppable, deep-cloned independently.
+test_tupkv_multi_typeparam() `test {
+  string[] k = ["a", "b"];
+  map[string, int] v = map[string, int]();
+  v["x"] = 1;
+  TupKV[string[], map[string, int]] j = TupKV[string[], map[string, int]].Both((k, v));
+  TupKV[string[], map[string, int]] c = j.clone();
+  match c {
+    TupKV.Both(ckv) => {
+      (ck, cv) := ckv;
+      assert(ck.len == 2, "clone key len 2");
+      assert(cv.get_or("x", 0) == 1, "clone val x=1");
+    },
+    _ => assert(false, "clone should be Both"),
+  }
+  match j {
+    TupKV.Both(jkv) => {
+      (jk, jv) := jkv;
+      assert(jk.len == 2, "original key len 2 (independent)");
+      assert(jv.get_or("x", 0) == 1, "original val x=1 (independent)");
+    },
+    _ => assert(false, "original should be Both"),
+  }
+}
+
+test_tupkv_empty() `test {
+  TupKV[string[], map[string, int]] j = TupKV[string[], map[string, int]].Empty;
+  TupKV[string[], map[string, int]] c = j.clone();
+  match c {
+    TupKV.Empty => assert(true, "clone Empty"),
+    _ => assert(false, "clone should be Empty"),
+  }
+  match j {
+    TupKV.Empty => assert(true, "original Empty"),
     _ => assert(false, "original should be Empty"),
   }
 }

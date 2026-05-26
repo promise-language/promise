@@ -12985,6 +12985,243 @@ func TestGenericTypeCloneDroppableTypeArg(t *testing.T) {
 	}
 }
 
+// T0667: a generic `clone enum whose variant field is a TUPLE carrying the
+// TypeParam (`(T, int) pr`) with a droppable TypeArg (map[K,V]) must deep-copy
+// the tuple's heap member. types.ContainsTypeParam recurses into *types.Tuple
+// so the synth already emits AutoCloneExpr, but before the fix
+// isAutoCloneBitCopy classified every tuple as a bit-copy "scalar tuple" (non-
+// named fallthrough) and cloneResolvedValue had no *types.Tuple arm → the
+// inner Map fat pointer was shallow-aliased → double-free segfault. The fix
+// adds a *types.Tuple recursion to isAutoCloneBitCopy + a per-element
+// extract/cloneByType/insert arm to cloneResolvedValue. Assert the mono clone
+// body calls Map[..].clone inside the tuple-field clone (per-element deep-
+// clone), not a bare aggregate copy. Parallel to the T0662 array gap.
+func TestGenericEnumCloneTupleTypeParamField(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum TupWrap[T] `clone {\n"+
+		"  Pair((T, int) pr),\n"+
+		"  Nope,\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, string] src = map[string, string]();\n"+
+		"  TupWrap[map[string, string]] j = TupWrap[map[string, string]].Pair((src, 7));\n"+
+		"  TupWrap[map[string, string]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawMapClone := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `TupWrap[Map[string, string]].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if inClone && strings.Contains(line, `@"Map[string, string].clone"`) {
+			sawMapClone = true
+		}
+	}
+	if !sawMapClone {
+		t.Errorf("T0667: TupWrap[Map[string, string]].clone() body must call Map[string, string].clone to deep-copy the tuple `(T, int)` field's heap member; got shallow alias (isAutoCloneBitCopy tuple gap / no cloneResolvedValue *types.Tuple arm)")
+	}
+}
+
+// T0667: the type-level sibling of TestGenericEnumCloneTupleTypeParamField — a
+// generic `clone TYPE (not enum) whose field is a TUPLE carrying the TypeParam
+// (`(T, int) pr`) with a droppable TypeArg must deep-copy the tuple's heap
+// member. Same root cause and fix as the enum case (both lower through
+// cloneByType→cloneResolvedValue). Assert the mono clone body calls
+// Map[..].clone inside the tuple-field clone (per-element deep-clone), not a
+// bare aggregate copy. Parallel to TestGenericTypeCloneDroppableTypeArg.
+func TestGenericTypeCloneTupleTypeParamField(t *testing.T) {
+	ir := generateIR(t, ""+
+		"type TupBox[T] `clone {\n"+
+		"  (T, int) pr;\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, string] src = map[string, string]();\n"+
+		"  TupBox[map[string, string]] j = TupBox[map[string, string]](pr: (src, 7));\n"+
+		"  TupBox[map[string, string]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawMapClone := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `TupBox[Map[string, string]].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if inClone && strings.Contains(line, `@"Map[string, string].clone"`) {
+			sawMapClone = true
+		}
+	}
+	if !sawMapClone {
+		t.Errorf("T0667: TupBox[Map[string, string]].clone() body must call Map[string, string].clone to deep-copy the tuple `(T, int)` field's heap member; got shallow alias (isAutoCloneBitCopy tuple gap / no cloneResolvedValue *types.Tuple arm)")
+	}
+}
+
+// T0667: a `(T?, int)` tuple field — the per-element cloneByType call must
+// recurse from the *types.Tuple arm into the *types.Optional arm so the heap
+// payload is deep-cloned behind a none-check (autoclone.some block + inner
+// Map[..].clone), not bit-copied. Pins the tuple→optional→heap recursion at
+// the IR level (the runtime e2e equivalent is blocked by the *separate*
+// pre-existing field-destructure crash T0672, so the type-level e2e covers
+// this shape via clone+double-drop without destructure). Mirrors
+// TestGenericEnumCloneOptionalTypeParamField's two-signal assertion.
+func TestGenericTypeCloneTupleOptionalTypeParamField(t *testing.T) {
+	ir := generateIR(t, ""+
+		"type TupBoxO[T] `clone {\n"+
+		"  (T?, int) pr;\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, string] src = map[string, string]();\n"+
+		"  map[string, string]? mo = src;\n"+
+		"  TupBoxO[map[string, string]] j = TupBoxO[map[string, string]](pr: (mo, 5));\n"+
+		"  TupBoxO[map[string, string]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawMapClone := false
+	sawAutoCloneSome := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `TupBoxO[Map[string, string]].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if !inClone {
+			continue
+		}
+		if strings.Contains(line, `@"Map[string, string].clone"`) {
+			sawMapClone = true
+		}
+		if strings.Contains(line, "autoclone.some") {
+			sawAutoCloneSome = true
+		}
+	}
+	if !sawMapClone {
+		t.Errorf("T0667: TupBoxO[Map[string, string]].clone() must call Map[string, string].clone for the `(T?, int)` field's Optional payload (tuple→optional→heap recursion); got shallow alias")
+	}
+	if !sawAutoCloneSome {
+		t.Errorf("T0667: TupBoxO[Map[string, string]].clone() must lower the Optional element of the `(T?, int)` tuple via the cloneByType Optional none-check (autoclone.some block); got a bare bit copy (tuple arm did not recurse into the Optional arm)")
+	}
+}
+
+// T0667 (zero-regression guard): a PURE SCALAR tuple field (`(T, int)` with
+// T=int → `(int, int)`) must stay a plain bit copy. This is the other arm of
+// the isAutoCloneBitCopy tuple recursion: the loop finds every element
+// bit-copy and falls through to `return true` (expr.go:7144) so cloneByType
+// short-circuits without per-element deep-clone machinery. Without this guard
+// the only coverage of the `return true` arm is the e2e runtime tests — a
+// future change that wrongly routes scalar tuples through cloneResolvedValue
+// (extra allocs / churn, or worse) would slip past Go-level tests. Asserts the
+// mono clone body contains NO nested `.clone` call and NO `autoclone.` block
+// (the two signatures of the deep path) — the inverse of the heap-member
+// siblings above. Mirrors the bit-copy regression guards elsewhere (e.g. the
+// copy/value TypeArg expectations).
+func TestGenericTypeCloneScalarTupleStaysBitCopy(t *testing.T) {
+	ir := generateIR(t, ""+
+		"type TupBox[T] `clone {\n"+
+		"  (T, int) pr;\n"+
+		"}\n"+
+		"test() {\n"+
+		"  TupBox[int] j = TupBox[int](pr: (42, 7));\n"+
+		"  TupBox[int] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawNestedClone := false
+	sawAutoCloneBlock := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `TupBox[int].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if !inClone {
+			continue
+		}
+		if strings.Contains(line, "call ") && strings.Contains(line, `.clone"`) {
+			sawNestedClone = true
+		}
+		if strings.Contains(line, "autoclone.") {
+			sawAutoCloneBlock = true
+		}
+	}
+	if !inClone {
+		t.Fatalf("T0667: TupBox[int].clone define not found in IR")
+	}
+	if sawNestedClone {
+		t.Errorf("T0667: TupBox[int].clone() must NOT emit a nested `.clone` call for a pure scalar `(int, int)` tuple field — the scalar tuple must stay a bit copy (isAutoCloneBitCopy tuple loop → return true at expr.go:7144 → cloneByType short-circuit)")
+	}
+	if sawAutoCloneBlock {
+		t.Errorf("T0667: TupBox[int].clone() must NOT emit an autoclone.* block for a pure scalar `(int, int)` tuple field — got deep-clone machinery where a bit copy is required (regression in the isAutoCloneBitCopy tuple `return true` arm)")
+	}
+}
+
+// T0667 (index-correctness guard): a heap member at a NON-ZERO tuple index
+// (`(int, T)` with T=map) must be deep-cloned and NewInsertValue'd back at
+// that same index. The cloneResolvedValue loop carries the element index `i`
+// through both NewExtractValue and NewInsertValue; the existing `(T, int)`
+// siblings only ever insert at index 0 (heap element is first), so a
+// regression that hard-codes index 0 in the re-insert (or drops the index)
+// would pass them yet silently corrupt this shape. Asserts the mono clone
+// body both calls Map[..].clone AND re-inserts via an `insertvalue ..., 1`
+// (the cloned heap member written back at the non-zero index). The runtime
+// counterpart is e2e test_clone_tupboxr_map_nonzero_index (mutation
+// independence proves the deep copy is real, not just present).
+func TestGenericTypeCloneTupleHeapMemberNonZeroIndex(t *testing.T) {
+	ir := generateIR(t, ""+
+		"type TupBoxR[T] `clone {\n"+
+		"  (int, T) r;\n"+
+		"}\n"+
+		"test() {\n"+
+		"  map[string, string] src = map[string, string]();\n"+
+		"  TupBoxR[map[string, string]] j = TupBoxR[map[string, string]](r: (9, src));\n"+
+		"  TupBoxR[map[string, string]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	sawMapClone := false
+	sawInsertAtIndex1 := false
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `TupBoxR[Map[string, string]].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if !inClone {
+			continue
+		}
+		if strings.Contains(line, `@"Map[string, string].clone"`) {
+			sawMapClone = true
+		}
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "insertvalue") && strings.HasSuffix(trimmed, ", 1") {
+			sawInsertAtIndex1 = true
+		}
+	}
+	if !inClone {
+		t.Fatalf("T0667: TupBoxR[Map[string, string]].clone define not found in IR")
+	}
+	if !sawMapClone {
+		t.Errorf("T0667: TupBoxR[Map[string, string]].clone() must call Map[string, string].clone for the heap member at tuple index 1 of `(int, T)`; got shallow alias")
+	}
+	if !sawInsertAtIndex1 {
+		t.Errorf("T0667: TupBoxR[Map[string, string]].clone() must re-insert the cloned heap member at tuple index 1 (`insertvalue ..., 1`) — the cloneResolvedValue loop must carry the element index into NewInsertValue, not hard-code 0")
+	}
+}
+
 // B0237/B0242: Match destructure of droppable enum dups string fields and
 // registers them for arm-scope cleanup with a drop flag. The drop flag is
 // cleared at move sites (PHI, push, etc.), so consumed bindings are not

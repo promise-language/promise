@@ -205,3 +205,223 @@ test_clone_nested_optional_none() `test {
   assert(c.val is absent, "clone nested-optional absent");
   assert(j.val is absent, "original nested-optional absent");
 }
+
+// T0667: a TUPLE field carrying the TypeParam (`(T, int) pr`). ContainsTypeParam
+// recurses into *types.Tuple so the synth emits AutoCloneExpr, but before the
+// fix isAutoCloneBitCopy classified every tuple as a bit-copy "scalar tuple"
+// (non-named fallthrough) and cloneResolvedValue had no *types.Tuple arm → the
+// inner heap member was shallow-aliased → double-free segfault when both `j`
+// and `c` drop. The fix adds a *types.Tuple recursion to isAutoCloneBitCopy +
+// a per-element extract/cloneByType/insert arm to cloneResolvedValue. Both `j`
+// and `c` are kept live to scope exit (the double-free repro). 0 leaks.
+// Parallel to the T0662 array gap. Covers the same family as the enum-level
+// shapes in enum_clone_optional_typeparam_typearg_test.pr.
+type TupBox[T] `clone {
+  (T, int) pr;
+}
+type TupBoxN[T] `clone {
+  ((T, int), int) pr;
+}
+type TupBoxO[T] `clone {
+  (T?, int) pr;
+}
+// T0667 coverage: heap member at a NON-ZERO tuple index, preceded by a scalar.
+// The cloneResolvedValue loop must skip element 0 (`int` → cloneByType returns
+// it unchanged, clonedElem == elemVal, no insert) and then deep-clone +
+// NewInsertValue at index 1. The existing `(T, int)` shapes only ever
+// insert-then-skip; `(K, V)` only ever insert-then-insert — neither exercises
+// the skip-then-insert ordering nor a heap clone re-inserted at index > 0.
+type TupBoxR[T] `clone {
+  (int, T) r;
+}
+// T0667 coverage: 3-element tuple, leading scalar then TWO non-contiguous heap
+// members — exercises the per-element loop iterating past index 1 with inserts
+// at indices 1 and 2 after a skip at index 0.
+type TupBox3[T] `clone {
+  (int, T, T) tr;
+}
+
+// Droppable TypeArg: map[K,V] — the exact T0667 type-level repro.
+test_clone_tupbox_map() `test {
+  map[string, string] src = map[string, string]();
+  src["a"] = "b";
+  TupBox[map[string, string]] j = TupBox[map[string, string]](pr: (src, 7));
+  TupBox[map[string, string]] c = j.clone();
+  (cm, cn) := c.pr;
+  assert(cm.len == 1, "clone tuple map len 1");
+  assert(cm.get_or("a", "") == "b", "clone a=b");
+  assert(cn == 7, "clone tuple int 7");
+  (jm, jn) := j.pr;
+  assert(jm.len == 1, "original tuple map len 1 (independent)");
+  assert(jn == 7, "original tuple int 7");
+}
+
+// Droppable TypeArg: string[] (vector of heap strings) inside the tuple.
+test_clone_tupbox_string_vec() `test {
+  string[] data = ["x", "y", "z"];
+  TupBox[string[]] j = TupBox[string[]](pr: (data, 3));
+  TupBox[string[]] c = j.clone();
+  (cv, cn) := c.pr;
+  assert(cv.len == 3, "clone vec len 3");
+  assert(cv[2] == "z", "clone[2]=z");
+  (jv, jn) := j.pr;
+  assert(jv.len == 3, "original vec len 3 (independent)");
+}
+
+// User `clone type (Bag, defined above) as the droppable TypeArg — exercises
+// the nested clone-of-clone path inside the tuple per-element clone.
+test_clone_tupbox_user_clone_type() `test {
+  map[string, int] m = map[string, int]();
+  m["apples"] = 3;
+  Bag b = Bag(counts: m);
+  TupBox[Bag] j = TupBox[Bag](pr: (b, 9));
+  TupBox[Bag] c = j.clone();
+  (cb, cn) := c.pr;
+  assert(cb.counts.len == 1, "clone bag len 1");
+  assert(cb.counts.get_or("apples", 0) == 3, "clone apples==3");
+  (jb, jn) := j.pr;
+  assert(jb.counts.len == 1, "original bag len 1 (independent)");
+}
+
+// Copy TypeArg: int — pure scalar tuple, must stay a correct bit copy
+// (isAutoCloneBitCopy still returns true: every element is bit-copy).
+test_clone_tupbox_int() `test {
+  TupBox[int] j = TupBox[int](pr: (42, 7));
+  TupBox[int] c = j.clone();
+  (ci, cn) := c.pr;
+  assert(ci == 42, "clone first 42");
+  assert(cn == 7, "clone second 7");
+  (ji, jn) := j.pr;
+  assert(ji == 42, "original first 42");
+}
+
+// Nested-tuple element `((T, int), int) pr` — exercises cloneByType's
+// recursion into a nested *types.Tuple element (the heap member is two tuple
+// levels deep).
+test_clone_tupbox_nested_tuple() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v";
+  TupBoxN[map[string, string]] j = TupBoxN[map[string, string]](pr: ((src, 1), 2));
+  TupBoxN[map[string, string]] c = j.clone();
+  (cinner, co) := c.pr;
+  (cm, ci) := cinner;
+  assert(cm.len == 1, "clone nested map len 1");
+  assert(cm.get_or("k", "") == "v", "clone k=v");
+  assert(ci == 1, "clone inner int 1");
+  assert(co == 2, "clone outer int 2");
+  (jinner, jo) := j.pr;
+  (jm, ji) := jinner;
+  assert(jm.len == 1, "original nested map len 1 (independent)");
+}
+
+// Tuple-of-optional `(T?, int)`: exercises cloneByType's Optional arm reached
+// *through* the per-element tuple recursion (the T0667 concern). Both `j` and
+// `c` are kept live to scope exit (double-free repro). NOT destructured here:
+// destructuring a struct field of tuple type with an Optional[aggregate]
+// element is a separate pre-existing crash, T0672 — the clone deep-copy /
+// double-drop path (this test) is correct; only the field destructure is
+// blocked. IR-level proof of the Map.clone-through-Optional-through-tuple
+// recursion is in Go test TestGenericTypeCloneTupleOptionalTypeParamField.
+test_clone_tupbox_optional_some() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v1";
+  map[string, string]? mo = src;
+  TupBoxO[map[string, string]] j = TupBoxO[map[string, string]](pr: (mo, 5));
+  TupBoxO[map[string, string]] c = j.clone();
+  assert(true, "cloned; both j and c drop independently at scope exit");
+}
+
+test_clone_tupbox_optional_none() `test {
+  map[string, string]? mo = none;
+  TupBoxO[map[string, string]] j = TupBoxO[map[string, string]](pr: (mo, 0));
+  TupBoxO[map[string, string]] c = j.clone();
+  assert(true, "none cloned; both drop");
+}
+
+// Mutating the clone's tuple map must not affect the original (true deep copy).
+test_clone_tupbox_map_independence() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v1";
+  TupBox[map[string, string]] j = TupBox[map[string, string]](pr: (src, 1));
+  TupBox[map[string, string]] c = j.clone();
+  (cm, cn) := c.pr;
+  cm["k"] = "mutated";
+  cm["extra"] = "new";
+  assert(cm.len == 2, "clone mutated to 2 entries");
+  (jm, jn) := j.pr;
+  assert(jm.len == 1, "original unaffected: still 1 entry");
+  assert(jm.get_or("k", "") == "v1", "original value untouched");
+}
+
+// T0667: heap member at NON-ZERO tuple index `(int, T)` with T=map. The clone
+// loop must leave element 0 (`int`) as a bit copy (skip) and deep-clone +
+// re-insert the heap map at index 1. Both `j` and `c` kept live to scope exit
+// (double-free repro); mutation-independence asserts a true deep copy. 0 leaks.
+test_clone_tupboxr_map_nonzero_index() `test {
+  map[string, string] src = map[string, string]();
+  src["k"] = "v1";
+  TupBoxR[map[string, string]] j = TupBoxR[map[string, string]](r: (9, src));
+  TupBoxR[map[string, string]] c = j.clone();
+  (cn, cm) := c.r;
+  assert(cn == 9, "clone leading int 9 (bit copy)");
+  assert(cm.len == 1, "clone map len 1");
+  assert(cm.get_or("k", "") == "v1", "clone k=v1");
+  cm["k"] = "mutated";
+  cm["x"] = "y";
+  assert(cm.len == 2, "clone mutated to 2 entries");
+  (jn, jm) := j.r;
+  assert(jn == 9, "original leading int 9");
+  assert(jm.len == 1, "original map unaffected: still 1 entry (deep copy)");
+  assert(jm.get_or("k", "") == "v1", "original value untouched");
+}
+
+// T0667: same shape with a user `clone TypeArg at the non-zero index — the
+// per-element clone-of-clone path re-inserted at index 1.
+test_clone_tupboxr_user_clone() `test {
+  map[string, int] m = map[string, int]();
+  m["apples"] = 3;
+  Bag b = Bag(counts: m);
+  TupBoxR[Bag] j = TupBoxR[Bag](r: (1, b));
+  TupBoxR[Bag] c = j.clone();
+  (cn, cb) := c.r;
+  assert(cn == 1, "clone leading int 1");
+  assert(cb.counts.len == 1, "clone bag len 1");
+  cb.counts["pears"] = 2;
+  (jn, jb) := j.r;
+  assert(jb.counts.len == 1, "original bag unaffected: still 1 entry");
+}
+
+// T0667: 3-element tuple `(int, T, T)` — leading scalar (skip at index 0) then
+// two non-contiguous heap members deep-cloned + re-inserted at indices 1 and 2.
+test_clone_tupbox3_three_elements() `test {
+  map[string, string] a = map[string, string]();
+  a["a"] = "1";
+  map[string, string] b = map[string, string]();
+  b["b"] = "2";
+  b["c"] = "3";
+  TupBox3[map[string, string]] j = TupBox3[map[string, string]](tr: (7, a, b));
+  TupBox3[map[string, string]] c = j.clone();
+  (cn, cm1, cm2) := c.tr;
+  assert(cn == 7, "clone leading int 7");
+  assert(cm1.len == 1, "clone map1 len 1");
+  assert(cm2.len == 2, "clone map2 len 2");
+  cm1["extra"] = "z";
+  cm2["d"] = "4";
+  (jn, jm1, jm2) := j.tr;
+  assert(jm1.len == 1, "original map1 unaffected (deep copy at index 1)");
+  assert(jm2.len == 2, "original map2 unaffected (deep copy at index 2)");
+}
+
+// T0667: pure scalar `(int, T)` with T=int — every element bit-copy, the
+// isAutoCloneBitCopy tuple loop returns true (no deep machinery). Runtime
+// counterpart of the Go guard TestGenericTypeCloneScalarTupleStaysBitCopy.
+test_clone_tupboxr_int_scalar() `test {
+  TupBoxR[int] j = TupBoxR[int](r: (5, 99));
+  TupBoxR[int] c = j.clone();
+  (cn, ci) := c.r;
+  assert(cn == 5, "clone first 5");
+  assert(ci == 99, "clone second 99");
+  (jn, ji) := j.r;
+  assert(jn == 5, "original first 5");
+  assert(ji == 99, "original second 99");
+}

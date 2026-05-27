@@ -496,6 +496,30 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 func (c *Compiler) genAutoPropagate(expr ast.Expr) {
 	result := c.genExpr(expr)
 	calleeResultType := result.Type().(*irtypes.StructType)
+	c.emitFailableResultPropagation(result)
+
+	// Ok path: drop discarded success value, then continue (B0261).
+	if !isVoidResult(calleeResultType) {
+		okVal := c.block.NewExtractValue(result, 1)
+		c.dropDiscardedAutoPropagate(expr, okVal)
+	}
+}
+
+// propagateIfFailable wraps a setter-style call result in auto-propagation when
+// the call returns a failable result struct ({i1, ...}). For non-failable void
+// returns this is a no-op. T0708.
+func (c *Compiler) propagateIfFailable(result value.Value) {
+	if _, isStruct := result.Type().(*irtypes.StructType); isStruct {
+		c.emitFailableResultPropagation(result)
+	}
+}
+
+// emitFailableResultPropagation emits the auto.propagate / auto.ok branch for
+// a failable LLVM call result. After this returns, c.block is the auto.ok block
+// and the caller can continue emitting code (the ok-value, if any, is unused
+// by this helper). T0708.
+func (c *Compiler) emitFailableResultPropagation(result value.Value) {
+	calleeResultType := result.Type().(*irtypes.StructType)
 
 	tag := c.block.NewExtractValue(result, 0)
 
@@ -519,12 +543,7 @@ func (c *Compiler) genAutoPropagate(expr ast.Expr) {
 		c.block.NewRet(c.wrapError(errVal, callerResultType))
 	}
 
-	// Ok path: drop discarded success value, then continue (B0261).
 	c.block = okBlock
-	if !isVoidResult(calleeResultType) {
-		okVal := c.block.NewExtractValue(result, 1)
-		c.dropDiscardedAutoPropagate(expr, okVal)
-	}
 }
 
 // dropDiscardedAutoPropagate drops a discarded success value from an auto-propagated
@@ -5546,7 +5565,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					current := c.block.NewCall(getterFn)
 					val = c.genCompoundOp(s.Op, c.info.Types[target], current, val)
 				}
-				c.block.NewCall(setterFn, val)
+				setterCall := c.block.NewCall(setterFn, val)
+				c.propagateIfFailable(setterCall) // T0708
 				if s.Op == ast.OpAssign {
 					if rhsIdent, ok := s.Value.(*ast.IdentExpr); ok {
 						c.clearDropFlag(rhsIdent.Name)
@@ -6344,7 +6364,8 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 		if !ok {
 			panic(fmt.Sprintf("codegen: undeclared global setter %s", mangledName))
 		}
-		c.block.NewCall(fn, val)
+		call := c.block.NewCall(fn, val)
+		c.propagateIfFailable(call) // T0708
 		return
 	}
 
@@ -6382,7 +6403,8 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 		args = append(args, c.extractInstancePtr(recv))
 	}
 	args = append(args, val)
-	c.block.NewCall(fn, args...)
+	call := c.block.NewCall(fn, args...)
+	c.propagateIfFailable(call) // T0708
 }
 
 // genVirtualSetterCall emits an indirect setter call through the vtable.
@@ -6422,7 +6444,8 @@ func (c *Compiler) genVirtualSetterCall(target *ast.MemberExpr, named *types.Nam
 	funcType := irtypes.NewFunc(retType, paramTypes...)
 	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 
-	c.block.NewCall(fnTyped, instance, val)
+	call := c.block.NewCall(fnTyped, instance, val)
+	c.propagateIfFailable(call) // T0708
 }
 
 // genModuleSetterAssign handles assignment to a module-level setter property.
@@ -6445,7 +6468,8 @@ func (c *Compiler) genModuleSetterAssign(target *ast.MemberExpr, moduleName stri
 		val = c.genCompoundOp(op, c.info.Types[target], current, val)
 	}
 
-	c.block.NewCall(setterFn, val)
+	call := c.block.NewCall(setterFn, val)
+	c.propagateIfFailable(call) // T0708
 }
 
 // genCompoundOp applies a compound assignment operator through the type system.
@@ -6633,7 +6657,8 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 			c.block = okBlock
 			current := c.block.NewExtractValue(optVal, 1)
 			result := c.emitNativeOp(named, op, current, nil)
-			c.block.NewCall(setFn, instancePtr, keyVal, result)
+			setCall := c.block.NewCall(setFn, instancePtr, keyVal, result)
+			c.propagateIfFailable(setCall) // T0708
 		} else {
 			panic(fmt.Sprintf("codegen: inc/dec on index of type %s without []/[]= methods", indexTargetType))
 		}
@@ -8855,7 +8880,8 @@ func (c *Compiler) genMethodIndexAssign(target *ast.IndexExpr, targetType types.
 		instancePtr = c.extractInstancePtr(targetVal)
 	}
 
-	c.block.NewCall(fn, instancePtr, keyVal, val)
+	call := c.block.NewCall(fn, instancePtr, keyVal, val)
+	c.propagateIfFailable(call) // T0708
 	// B0232: Claim string/heap temps for the key — ownership transfers to the []= method.
 	// Without this, temporary keys (e.g., "a".repeat(2)) are freed at statement end
 	// while still stored in the container, causing dangling pointers.
@@ -9078,7 +9104,8 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 		c.emitStringDropOldValue(current, result)
 	}
 
-	c.block.NewCall(setFn, instancePtr, keyVal, result)
+	call := c.block.NewCall(setFn, instancePtr, keyVal, result)
+	c.propagateIfFailable(call) // T0708
 }
 
 // compoundElemType returns the element type that compound assignment on a
@@ -9186,7 +9213,8 @@ func (c *Compiler) genSliceAssign(target *ast.SliceExpr, val value.Value) {
 		c.storeBackSlicePtr(target.Target, instancePtr)
 	}
 
-	c.block.NewCall(fn, instancePtr, low, high, val)
+	call := c.block.NewCall(fn, instancePtr, low, high, val)
+	c.propagateIfFailable(call) // T0708
 }
 
 // --- lookupLocalType resolves the declared type for a TypedVarDecl ---

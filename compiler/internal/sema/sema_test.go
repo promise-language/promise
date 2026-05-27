@@ -10878,6 +10878,175 @@ func TestGlobalSetterAllowed(t *testing.T) {
 		"}\n")
 }
 
+// TestFailableSetterRequiresFailableScope: T0708. A failable setter assignment
+// in a non-failable function must be rejected at sema with the same shape as
+// every other "failable call must be handled" error.
+func TestFailableSetterRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+			set count!(int v) { if v < 0 { raise error("neg"); } this.x = v; }
+		}
+		main() {
+			f := Foo(x: 0);
+			f.count = -5;
+		}
+	`)
+	expectError(t, errs, "failable setter assignment must be in a failable function")
+}
+
+// TestFailableSetterInFailableScopeOk: T0708. The same call site in a failable
+// function is valid (auto-propagates).
+func TestFailableSetterInFailableScopeOk(t *testing.T) {
+	checkOK(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+			set count!(int v) { if v < 0 { raise error("neg"); } this.x = v; }
+		}
+		main!() {
+			f := Foo(x: 0);
+			f.count = -5;
+		}
+	`)
+}
+
+// TestFailableGlobalSetterRequiresFailableScope: T0708. `global failable setters
+// (T0703 + T0708 combined) follow the same rule.
+func TestFailableGlobalSetterRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, "type Foo {\n"+
+		"int x;\n"+
+		"get count int `global { return 0; }\n"+
+		"set count!(int v) `global { if v < 0 { raise error(\"neg\"); } }\n"+
+		"}\n"+
+		"main() {\n"+
+		"Foo.count = -5;\n"+
+		"}\n")
+	expectError(t, errs, "failable setter assignment must be in a failable function")
+}
+
+// TestFailableIndexSetterRequiresFailableScope: T0708. []= variant.
+func TestFailableIndexSetterRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box {
+			int x;
+			[](int k) int { return this.x; }
+			[]=!(int k, int v) { if v < 0 { raise error("neg"); } this.x = v; }
+		}
+		main() {
+			b := Box(x: 0);
+			b[0] = -5;
+		}
+	`)
+	expectError(t, errs, "failable setter assignment must be in a failable function")
+}
+
+// TestFailableModuleSetterRequiresFailableScope: T0708. mod.value = v where
+// the module-level setter is failable. Covers the `*ast.MemberExpr` →
+// `*types.Module` → `scope.Lookup(name+"$set")` branch of
+// assignmentSetterCanError.
+func TestFailableModuleSetterRequiresFailableScope(t *testing.T) {
+	getterSig := types.NewSignature(nil, nil, types.TypInt, false)
+	setterSig := types.NewSignature(nil,
+		[]*types.Param{types.NewParam("v", types.TypInt, 0)},
+		types.TypVoid, true) // canError = true
+	modScope := makeModuleScope(t, map[string]*types.Signature{
+		"value":     getterSig,
+		"value$set": setterSig,
+	})
+	// Mark getter / setter so module member resolution finds them.
+	if obj := modScope.Lookup("value"); obj != nil {
+		if fn, ok := obj.(*types.Func); ok {
+			fn.SetGetter(true)
+		}
+	}
+	if obj := modScope.Lookup("value$set"); obj != nil {
+		if fn, ok := obj.(*types.Func); ok {
+			fn.SetSetter(true)
+		}
+	}
+	_, errs := checkWithModules(t, `
+		use mymod;
+		main() {
+			mymod.value = -5;
+		}
+	`, map[string]*types.Scope{"mymod": modScope})
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "failable setter assignment must be in a failable function") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected failable-setter error, got: %v", errs)
+	}
+}
+
+// TestFailableModuleSetterInFailableScopeOk: T0708. Positive case for the
+// module-setter branch.
+func TestFailableModuleSetterInFailableScopeOk(t *testing.T) {
+	getterSig := types.NewSignature(nil, nil, types.TypInt, false)
+	setterSig := types.NewSignature(nil,
+		[]*types.Param{types.NewParam("v", types.TypInt, 0)},
+		types.TypVoid, true)
+	modScope := makeModuleScope(t, map[string]*types.Signature{
+		"value":     getterSig,
+		"value$set": setterSig,
+	})
+	if obj := modScope.Lookup("value"); obj != nil {
+		if fn, ok := obj.(*types.Func); ok {
+			fn.SetGetter(true)
+		}
+	}
+	if obj := modScope.Lookup("value$set"); obj != nil {
+		if fn, ok := obj.(*types.Func); ok {
+			fn.SetSetter(true)
+		}
+	}
+	_, errs := checkWithModules(t, `
+		use mymod;
+		main!() {
+			mymod.value = -5;
+		}
+	`, map[string]*types.Scope{"mymod": modScope})
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+// TestFailableIdentSetterRequiresFailableScope: T0708. Same-file IdentExpr
+// setter (`counter = v`) covers the `*ast.IdentExpr` branch of
+// assignmentSetterCanError.
+func TestFailableIdentSetterRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		int _backing = 0;
+		get value int { return _backing; }
+		set value!(int v) { if v < 0 { raise error("neg"); } _backing = v; }
+		main() {
+			value = -3;
+		}
+	`)
+	expectError(t, errs, "failable setter assignment must be in a failable function")
+}
+
+// TestFailableSliceSetterRequiresFailableScope: T0708. [:]= variant.
+func TestFailableSliceSetterRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box {
+			int x;
+			[:](int? low, int? high) int { return this.x; }
+			[:]=!(int? low, int? high, int v) { if v < 0 { raise error("neg"); } this.x = v; }
+		}
+		main() {
+			b := Box(x: 0);
+			b[1:2] = -5;
+		}
+	`)
+	expectError(t, errs, "failable setter assignment must be in a failable function")
+}
+
 func TestMonoSetterNotAllowed(t *testing.T) {
 	// T0703: `mono setters remain disallowed (symmetric with the `mono getter ban).
 	errs := checkErrs(t, "type Box[T] {\n"+

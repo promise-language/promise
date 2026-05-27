@@ -455,6 +455,13 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		c.checkSliceAssignAvailable(sl)
 	}
 
+	// T0708: A failable setter / []= / [:]= silently dropped its error before;
+	// reject the assignment unless the enclosing function is failable, in which
+	// case codegen auto-propagates the call result via propagateIfFailable.
+	if c.assignmentSetterCanError(s) && (c.curFunc == nil || !c.curFunc.CanError()) {
+		c.errorf(s.Pos(), "failable setter assignment must be in a failable function: mark the enclosing function with `!`")
+	}
+
 	switch s.Op {
 	case ast.OpAssign:
 		if !types.AssignableTo(valType, targetType) {
@@ -610,6 +617,108 @@ func (c *Checker) checkSliceAssignAvailable(sl *ast.SliceExpr) {
 	if named.LookupMethod("[:]=") == nil {
 		c.errorf(sl.Pos(), "type %s does not support slice assignment", targetType)
 	}
+}
+
+// assignmentSetterCanError reports whether the assignment statement's effective
+// setter (property setter, module-level setter, []=, or [:]=) can raise. T0708.
+func (c *Checker) assignmentSetterCanError(s *ast.AssignStmt) bool {
+	switch tgt := s.Target.(type) {
+	case *ast.MemberExpr:
+		// Module-level setter: mod.prop = v → setter stored as "prop$set"
+		if ident, ok := tgt.Target.(*ast.IdentExpr); ok {
+			if obj := c.lookup(ident.Name); obj != nil {
+				if mod, ok := obj.(*types.Module); ok {
+					if scope := mod.Scope(); scope != nil {
+						if setterObj := scope.Lookup(tgt.Field + "$set"); setterObj != nil {
+							if fn, ok := setterObj.(*types.Func); ok {
+								if sig, ok := fn.Type().(*types.Signature); ok {
+									return sig.CanError()
+								}
+							}
+						}
+					}
+					return false
+				}
+			}
+		}
+		// Instance setter
+		targetType := c.info.Types[tgt.Target]
+		if targetType == nil {
+			return false
+		}
+		var named *types.Named
+		switch t := targetType.(type) {
+		case *types.Named:
+			named = t
+		case *types.Instance:
+			if n, ok := t.Origin().(*types.Named); ok {
+				named = n
+			}
+		}
+		if named == nil {
+			return false
+		}
+		if setter := named.LookupSetter(tgt.Field); setter != nil {
+			return setter.Sig().CanError()
+		}
+		return false
+
+	case *ast.IdentExpr:
+		// Same-file / glob-import getter assignment: counter = 10
+		if obj := c.lookup(tgt.Name + "$set"); obj != nil {
+			if fn, ok := obj.(*types.Func); ok {
+				if sig, ok := fn.Type().(*types.Signature); ok {
+					return sig.CanError()
+				}
+			}
+		}
+		return false
+
+	case *ast.IndexExpr:
+		targetType := c.info.Types[tgt.Target]
+		if ref, ok := targetType.(*types.MutRef); ok {
+			targetType = ref.Elem()
+		}
+		if ref, ok := targetType.(*types.SharedRef); ok {
+			targetType = ref.Elem()
+		}
+		var named *types.Named
+		switch t := targetType.(type) {
+		case *types.Named:
+			named = t
+		case *types.Instance:
+			if n, ok := t.Origin().(*types.Named); ok {
+				named = n
+			}
+		}
+		if named == nil {
+			return false
+		}
+		if m := named.LookupMethod("[]="); m != nil {
+			return m.Sig().CanError()
+		}
+		return false
+
+	case *ast.SliceExpr:
+		targetType := c.info.Types[tgt.Target]
+		var named *types.Named
+		switch t := targetType.(type) {
+		case *types.Named:
+			named = t
+		case *types.Instance:
+			if n, ok := t.Origin().(*types.Named); ok {
+				named = n
+			}
+		}
+		if named == nil {
+			return false
+		}
+		if m := named.LookupMethod("[:]="); m != nil {
+			return m.Sig().CanError()
+		}
+		return false
+	}
+	return false
 }
 
 func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {

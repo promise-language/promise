@@ -18160,6 +18160,104 @@ func TestGlobalSetterCompoundAssignIR(t *testing.T) {
 	assertContains(t, ir, "call void @Foo.count$set(i64")
 }
 
+// TestFailableSetterInstanceNonVirtualIR verifies that a `set name!(...)`
+// setter call site auto-propagates the failable result in a failable enclosing
+// function. T0708.
+func TestFailableSetterInstanceNonVirtualIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+			set count!(int v) {
+				if v < 0 { raise error("negative"); }
+				this.x = v;
+			}
+		}
+		main!() {
+			f := Foo(x: 0);
+			f.count = -5;
+		}
+	`)
+	// The setter is defined with a failable result type.
+	assertContains(t, ir, "define { i1, i8* } @Foo.count$set")
+	// Call site captures the result and routes through auto-propagation.
+	assertContains(t, ir, "call { i1, i8* } @Foo.count$set")
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+	assertContains(t, ir, "extractvalue { i1, i8* }")
+}
+
+// TestFailableGlobalSetterIR — `global failable setter (T0703 + T0708).
+func TestFailableGlobalSetterIR(t *testing.T) {
+	ir := generateIR(t, "type Foo {\n"+
+		"int x;\n"+
+		"get count int `global { return 0; }\n"+
+		"set count!(int v) `global { if v < 0 { raise error(\"neg\"); } }\n"+
+		"}\n"+
+		"main!() {\n"+
+		"Foo.count = -5;\n"+
+		"}\n")
+	assertContains(t, ir, "define { i1, i8* } @Foo.count$set(i64 %v)")
+	assertContains(t, ir, "call { i1, i8* } @Foo.count$set(i64")
+	assertContains(t, ir, "auto.propagate")
+}
+
+// TestFailableIndexSetterIR — a failable []= method's call site auto-propagates.
+func TestFailableIndexSetterIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			int x;
+			[](int k) int { return this.x; }
+			[]=!(int k, int v) { if v < 0 { raise error("neg"); } this.x = v; }
+		}
+		main!() {
+			b := Box(x: 0);
+			b[0] = -5;
+		}
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "extractvalue { i1, i8* }")
+}
+
+// TestFailableSliceSetterIR — a failable [:]= method's call site auto-propagates.
+func TestFailableSliceSetterIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			int x;
+			[:](int? low, int? high) int { return this.x; }
+			[:]=!(int? low, int? high, int v) { if v < 0 { raise error("neg"); } this.x = v; }
+		}
+		main!() {
+			b := Box(x: 0);
+			b[1:2] = -5;
+		}
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "extractvalue { i1, i8* }")
+}
+
+// TestFailableSetterCompoundAssignIR — `f.count += v` reads via getter then
+// writes via setter; if either is failable both must propagate. This test
+// covers the setter side.
+func TestFailableSetterCompoundAssignIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+			set count!(int v) {
+				if v < 0 { raise error("neg"); }
+				this.x = v;
+			}
+		}
+		main!() {
+			f := Foo(x: 0);
+			f.count += 5;
+		}
+	`)
+	assertContains(t, ir, "call { i1, i8* } @Foo.count$set")
+	assertContains(t, ir, "auto.propagate")
+}
+
 func TestGenericInheritanceNonGenericChild(t *testing.T) {
 	ir := generateIR(t, `
 		type Holder[T] { T value; }

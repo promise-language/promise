@@ -1,0 +1,128 @@
+// T0708: Failable property setter calls auto-propagate the error to the
+// enclosing failable function. Before T0708 the call result was silently
+// discarded, so `raise` from inside the setter never reached the caller.
+type Counter {
+  int x;
+  get value int {
+    return this.x;
+  }
+  set value!(int v) {
+    if v < 0 {
+      raise error(message: "negative");
+    }
+    this.x = v;
+  }
+}
+
+// --- instance property setter ----------------------------------------------
+
+set_instance!(Counter ~c, int v) {
+  c.value = v;
+}
+
+try_set_instance_ok() bool {
+  c := Counter(x: 0);
+  set_instance(c, 7)? e {
+    return false;
+  };
+  return c.value == 7;
+}
+
+try_set_instance_fail() bool {
+  c := Counter(x: 0);
+  set_instance(c, -1)? e {
+    // Error must reach this handler; state must NOT have advanced.
+    return e.message == "negative" && c.value == 0;
+  };
+  return false;
+}
+
+test_failable_setter_ok() `test {
+  assert(try_set_instance_ok(), "failable setter succeeds when guard passes");
+}
+
+test_failable_setter_propagates() `test {
+  assert(try_set_instance_fail(), "failable setter raise reaches caller (T0708)");
+}
+
+// --- compound assignment through a failable setter -------------------------
+
+bump!(Counter ~c, int delta) {
+  c.value += delta;
+}
+
+try_compound_propagates() bool {
+  c := Counter(x: 3);
+  // The current value is 3; adding -10 lowers it to -7 which the setter
+  // rejects, so the compound assignment must surface the error.
+  bump(c, -10)? e {
+    return e.message == "negative" && c.value == 3;
+  };
+  return false;
+}
+
+test_failable_setter_compound_propagates() `test {
+  assert(try_compound_propagates(), "failable setter compound += propagates (T0708)");
+}
+
+// --- failable []= index setter ---------------------------------------------
+
+type Slot {
+  int x;
+  [](int k) int {
+    return this.x;
+  }
+  []= !(int k, int v) {
+    if v < 0 {
+      raise error(message: "neg index");
+    }
+    this.x = v;
+  }
+}
+
+set_index!(Slot ~s, int v) {
+  s[0] = v;
+}
+
+try_index_propagates() bool {
+  s := Slot(x: 0);
+  set_index(s, -3)? e {
+    return e.message == "neg index" && s.x == 0;
+  };
+  return false;
+}
+
+test_failable_index_setter_propagates() `test {
+  assert(try_index_propagates(), "failable []= propagates raise (T0708)");
+}
+
+// --- failable [:]= slice setter --------------------------------------------
+
+type Span {
+  int x;
+  [:](int? low, int? high) int {
+    return this.x;
+  }
+  [:]= !(int? low, int? high, int v) {
+    if v < 0 {
+      raise error(message: "neg slice");
+    }
+    this.x = v;
+  }
+}
+
+set_slice!(Span ~s, int v) {
+  s[0:1] = v;
+}
+
+try_slice_propagates() bool {
+  s := Span(x: 0);
+  set_slice(s, -1)? e {
+    return e.message == "neg slice" && s.x == 0;
+  };
+  return false;
+}
+
+test_failable_slice_setter_propagates() `test {
+  assert(try_slice_propagates(), "failable [:]= propagates raise (T0708)");
+}

@@ -7464,20 +7464,22 @@ Promise project. Use ` + "`promise guide`" + ` for the full language reference.
 ## Quick Start
 
 ` + "```" + `bash
-promise run main.pr         # build and run
-promise build main.pr       # build only
-promise test file_test.pr   # run tests
-promise exec 'print_line("hi")'  # run a one-liner
-promise doc <module>        # show module API docs
+promise run                     # build and run
+promise build                   # build only
+promise test                    # run tests
+promise exec 'print_line("hi")' # run a one-liner
+promise doc <module>            # show module API docs
 ` + "```" + `
 
 ## Error Handling
 
 ` + "```" + `
-main!() { ... }             # failable main — errors auto-propagate
-result := do_thing()!;      # explicit propagation — raise error to caller
-result := do_thing()?;      # catch — result is error if it failed
-value := try_thing() ? { fallback(); };  # catch with recovery block
+main!() {   # ! marks main failable (can return error)
+  f();      # unhandled errors raise to caller
+  f()?^;    # explicit propagation - raise error to caller
+  f()?!;    # panic on error
+  v := f() ? { fallback(); };  # catch with recovery block
+}
 ` + "```" + `
 
 ## Module Rules

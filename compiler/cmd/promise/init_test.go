@@ -64,9 +64,22 @@ func TestRunInitCreatesFiles(t *testing.T) {
 		"Error Handling",
 		"Module Rules",
 		"Available Modules",
+		"f()?^",
+		"f()?!",
+		"f() ? {",
 	} {
 		if !strings.Contains(string(claude), want) {
 			t.Errorf("CLAUDE.md missing %q", want)
+		}
+	}
+	// T0692: ensure stale/incorrect error-handling forms are not present.
+	for _, unwanted := range []string{
+		"do_thing()!",
+		"do_thing()?",
+		"try_thing()",
+	} {
+		if strings.Contains(string(claude), unwanted) {
+			t.Errorf("CLAUDE.md contains stale error-handling example %q", unwanted)
 		}
 	}
 }

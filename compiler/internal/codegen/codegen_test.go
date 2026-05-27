@@ -23005,6 +23005,211 @@ func TestT0736MapLitClaimsHeapStringValueTemp(t *testing.T) {
 		`(?s)call void @"Map\[string, string\]\.\[\]="\([^\n]*\)\n\s*store i1 false, i1\*`)
 }
 
+// T0735: A map literal used directly as a borrowed function argument must
+// register a stmt-temp drop binding so the map instance + its _buckets vector
+// are freed at statement end. Pre-fix, genMapConstructor never called
+// trackHeapTemp, so unclaimed map literal temps leaked 2 allocations.
+// The fix mirrors genConstructorCallMono (T0135 + T0345): trackHeapTemp with
+// palFree as the safe default, then updateConstructorTempDrop swaps in the
+// type's full synth drop after new() completes.
+func TestT0735_MapLitArgTracksHeapTemp(t *testing.T) {
+	ir := generateIR(t, `
+		borrow_map(Map[string, int] m) int { return 0; }
+		main() {
+			int x = borrow_map({"a": 1, "b": 2});
+		}
+	`)
+	start := strings.Index(ir, "define i8* @.goroutine.main")
+	if start < 0 {
+		t.Fatal("expected .goroutine.main")
+	}
+	rest := ir[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("expected closing brace")
+	}
+	body := rest[:end+2]
+	// After the borrow_map call, the unclaimed map temp must flow through a
+	// heap.drop block that calls Map[string, int].drop (the synthesized drop
+	// walks _buckets and pal_frees the instance — without the swap, just a
+	// pal_free of the instance would leak the buckets vector buffer).
+	assertContains(t, body, "call i64 @__user.borrow_map(")
+	assertContains(t, body, "heap.drop")
+	assertContains(t, body, "heap.exec")
+	assertContains(t, body, `call void @"Map[string, int].drop"`)
+}
+
+// T0735: A map literal used as a method-call receiver (rvalue temp) — same
+// stmt-temp drop registration must apply. `{...}.len` returns a primitive but
+// the receiver map still needs cleanup.
+func TestT0735_MapLitMethodReceiverTracksHeapTemp(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int n = {"a": 1, "b": 2}.len;
+		}
+	`)
+	start := strings.Index(ir, "define i8* @.goroutine.main")
+	if start < 0 {
+		t.Fatal("expected .goroutine.main")
+	}
+	rest := ir[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("expected closing brace")
+	}
+	body := rest[:end+2]
+	assertContains(t, body, `call i64 @"Map[string, int].len"`)
+	assertContains(t, body, "heap.drop")
+	assertContains(t, body, `call void @"Map[string, int].drop"`)
+}
+
+// T0735: Map literal bound to a local first must still work — the local's
+// regular bindingDrop (registered by genAssignment) handles the cleanup, and
+// claimHeapTemp at the assignment site clears the heap-temp flag so the
+// instance isn't double-freed. Verifies the existing local-binding path is
+// undisturbed by the new stmt-temp registration.
+func TestT0735_MapLitLocalStillDropped(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			map[string, int] m = {"a": 1, "b": 2};
+		}
+	`)
+	start := strings.Index(ir, "define i8* @.goroutine.main")
+	if start < 0 {
+		t.Fatal("expected .goroutine.main")
+	}
+	rest := ir[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("expected closing brace")
+	}
+	body := rest[:end+2]
+	// The local m's drop still fires (via bindingDrop), so Map.drop must
+	// appear in the body. The heap-temp flag should also be cleared at the
+	// assignment site so the heap.drop path doesn't double-free.
+	assertContains(t, body, `call void @"Map[string, int].drop"`)
+	assertContains(t, body, "heap.claim")
+}
+
+// T0735: When a map literal is passed as a borrowed arg to a CONSTRUCTOR, the
+// constructor claims the heap temp into the field (heap.claim block). The
+// stmt-temp drop is cleared, ownership transfers to the new instance's drop.
+func TestT0735_MapLitInCtorFieldClaimed(t *testing.T) {
+	ir := generateIR(t, `
+		type _Box { Map[string, int] m; }
+		main() {
+			_Box b = _Box(m: {"a": 1});
+		}
+	`)
+	start := strings.Index(ir, "define i8* @.goroutine.main")
+	if start < 0 {
+		t.Fatal("expected .goroutine.main")
+	}
+	rest := ir[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("expected closing brace")
+	}
+	body := rest[:end+2]
+	// The map literal heap-temp flag is cleared (claimed) when stored into the
+	// _Box.m field — the _Box's drop takes over ownership. Asserting inside the
+	// user's main body (not anywhere in the module IR) avoids false positives
+	// from std-library heap.claim blocks.
+	assertContains(t, body, "heap.claim")
+}
+
+// T0735: A map literal passed to a `~Map` parameter (consume-arg) must be
+// claimed at the call site — the callee owns and drops, so the caller's
+// heap-temp drop flag must be cleared to avoid double-free. Verifies the
+// claim path on the move-arg ABI.
+func TestT0735_MapLitMoveArgClaimed(t *testing.T) {
+	ir := generateIR(t, `
+		consume(~Map[string, int] m) int { return m.len; }
+		main() {
+			int x = consume({"a": 1});
+		}
+	`)
+	start := strings.Index(ir, "define i8* @.goroutine.main")
+	if start < 0 {
+		t.Fatal("expected .goroutine.main")
+	}
+	rest := ir[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("expected closing brace")
+	}
+	body := rest[:end+2]
+	assertContains(t, body, "call i64 @__user.consume(")
+	// claim must fire before the call returns so the heap.drop at statement
+	// end sees flag=false; callee runs Map.drop itself.
+	assertContains(t, body, "heap.claim")
+}
+
+// T0735: A map literal used as the trailing return expression must be claimed
+// at the return path so the caller takes ownership. Without the claim, the
+// callee's heap-temp drop would run before return and the caller would receive
+// a dangling pointer (or the callee leaks if cleanup is missed).
+func TestT0735_MapLitReturnValueClaimed(t *testing.T) {
+	ir := generateIR(t, `
+		make_map() Map[string, int] { return {"x": 9}; }
+		main() {}
+	`)
+	// The function emitted from `make_map` is the user function (not a
+	// .goroutine wrapper); it has its own IR body containing the literal.
+	start := strings.Index(ir, `define { i8*, i8* } @__user.make_map(`)
+	if start < 0 {
+		t.Fatal("expected __user.make_map")
+	}
+	rest := ir[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("expected closing brace")
+	}
+	body := rest[:end+2]
+	// pal_alloc for the map literal must happen, the heap temp must be tracked,
+	// and then claimed before the ret so the caller takes ownership.
+	assertContains(t, body, "call i8* @pal_alloc(")
+	assertContains(t, body, `call void @"Map[string, int].new"`)
+	assertContains(t, body, "heap.claim")
+	assertContains(t, body, "ret { i8*, i8* }")
+}
+
+// T0735: Two map literals in the same statement must each get their own
+// heap-temp drop flag (independent allocas) and each must be cleaned up
+// independently at statement end. Tests stack discipline of the heap-temp
+// stack — if both literals shared a flag, one's drop would clobber the other's.
+func TestT0735_TwoMapLitsInSameStmtBothTracked(t *testing.T) {
+	ir := generateIR(t, `
+		borrow_a(Map[string, int] m) int { return m.len; }
+		borrow_b(Map[string, int] m) int { return m.len; }
+		main() {
+			int x = borrow_a({"a": 1}) + borrow_b({"b": 2});
+		}
+	`)
+	start := strings.Index(ir, "define i8* @.goroutine.main")
+	if start < 0 {
+		t.Fatal("expected .goroutine.main")
+	}
+	rest := ir[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("expected closing brace")
+	}
+	body := rest[:end+2]
+	// Both borrow_a and borrow_b calls present.
+	assertContains(t, body, "call i64 @__user.borrow_a(")
+	assertContains(t, body, "call i64 @__user.borrow_b(")
+	// Two distinct pal_alloc calls for the two map instances.
+	if c := strings.Count(body, "call i8* @pal_alloc("); c < 2 {
+		t.Fatalf("expected at least 2 pal_alloc calls (one per map literal), got %d", c)
+	}
+	// Two distinct Map.drop calls at statement end — one per heap-temp flag.
+	dropCount := strings.Count(body, `call void @"Map[string, int].drop"`)
+	if dropCount < 2 {
+		t.Fatalf("expected at least 2 Map.drop calls in main body, got %d", dropCount)
+	}
+}
+
 // T0610: A vector literal whose element is a moved local variable of a type
 // Vector.drop's element-walk frees (heap-user-with-drop, string, droppable
 // enum, Mutex/Task, nested vector) must clear the source ident's drop flag —

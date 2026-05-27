@@ -9134,6 +9134,13 @@ func (c *Compiler) genMapConstructor(inst *types.Instance) value.Value {
 	rawPtr := c.block.NewCall(c.palAlloc, size)
 	typedPtr := c.block.NewBitCast(rawPtr, instancePtrType)
 
+	// T0735: Track allocation as heap temp so unclaimed map literals used as rvalue
+	// temporaries (function args, method-call receivers) are dropped at statement end.
+	// Registered with palFree as the safe default; updateConstructorTempDrop below
+	// swaps it for Map[K,V].drop after new() completes. Mirrors genConstructorCallMono
+	// (T0135 + T0345).
+	c.trackHeapTemp(rawPtr, c.palFree)
+
 	// Store type info pointer in _variant slot (field 0)
 	variantFieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -9162,6 +9169,11 @@ func (c *Compiler) genMapConstructor(inst *types.Instance) value.Value {
 		panic(fmt.Sprintf("codegen: undeclared new() for map type %s (mangled: %s)", inst, mangledName))
 	}
 	c.block.NewCall(fn, typedPtr)
+
+	// T0735: Swap dropFn palFree → Map[K,V].drop (synthesized; walks _buckets vector,
+	// then pal_frees the instance). Without this, cleanupHeapTemps would just pal_free
+	// the instance and leak the _buckets vector buffer.
+	c.updateConstructorTempDrop(rawPtr, origin, inst)
 
 	// Build value struct { vtable_ptr, instance_ptr }
 	var vtablePtr value.Value

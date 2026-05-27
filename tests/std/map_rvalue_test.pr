@@ -1,0 +1,215 @@
+// T0735: Map literal used directly as an rvalue temporary (function argument
+// or method-call receiver) must be dropped at statement end. Pre-fix,
+// `genMapConstructor` never called `trackHeapTemp`, so unclaimed map literals
+// leaked their instance struct + their `_buckets` vector buffer (the constant
+// "2 allocations" reported by the leak detector). Vector literals and regular
+// heap-user-type constructors used as rvalue temps don't leak — the bug was
+// specific to Map (and would have applied to Set, but Set has no literal
+// syntax).
+//
+// The fix mirrors `genConstructorCallMono` (T0135 + T0345): register the
+// allocation as a heap temp with palFree as the safe default, then swap in
+// the type's full synth drop (which walks `_buckets`) after `new()` returns.
+borrow_map_int(Map[string, int] m) int {
+  if v := m["a"] {
+    return v;
+  }
+  return 0;
+}
+
+borrow_map_str(Map[string, string] m) int {
+  return m.len;
+}
+
+borrow_map_int_to_str(Map[int, string] m) int {
+  return m.len;
+}
+
+borrow_map_vec_value(Map[string, Vector[int]] m) int {
+  return m.len;
+}
+
+borrow_map_of_map(Map[string, Map[string, int]] m) int {
+  return m.len;
+}
+
+consume_map(~Map[string, int] m) int {
+  return m.len;
+}
+
+make_map_literal() Map[string, int] {
+  return {
+    "x": 9, "y": 10
+  };
+}
+
+type _T0735Box {
+  Map[string, int] m;
+  new(~this, ~Map[string, int] m) {
+    this.m = m;
+  }
+}
+
+// (1) map literal as borrowed argument with primitive K + V — no leak
+t0735_map_lit_arg_int() `test {
+  assert(borrow_map_int( {
+    "a": 1, "b": 2
+  }) == 1, "string→int arg");
+}
+
+// (2) map literal with heap V (string) — exercises Map.drop walking _buckets
+// with a string-valued slot type, freeing every element string.
+t0735_map_lit_arg_heap_value() `test {
+  assert(borrow_map_str( {
+    "a": "x", "b": "y"
+  }) == 2, "string→string arg");
+}
+
+// (3) int K + heap V — exercises Map.drop with non-string K
+t0735_map_lit_arg_int_key_heap_value() `test {
+  assert(borrow_map_int_to_str( {
+    1: "x", 2: "y"
+  }) == 2, "int→string arg");
+}
+
+// (4) map literal as method-call receiver (returns primitive)
+t0735_map_lit_method_receiver_len() `test {
+  int n = {
+    "a": 1, "b": 2
+  }.len;
+  assert(n == 2, "rvalue method len");
+}
+
+// (5) map literal as method-call receiver (contains returns bool)
+t0735_map_lit_method_receiver_contains() `test {
+  assert( {
+    "a": 1, "b": 2
+  }.contains("a"), "rvalue method contains");
+}
+
+// (6) Per-iteration tight loop — leak detector flags any per-iteration leak,
+// so 50 iterations of an rvalue map literal must stay flat.
+t0735_map_lit_loop_no_leak() `test {
+  for i in 0..50 {
+    assert(borrow_map_int( {
+      "a": 1, "b": 2
+    }) == 1, "loop");
+  }
+}
+
+// (7) Regression guard for the local-binding path — must still work after
+// the new stmt-temp registration. `genAssignment` claims the heap temp; only
+// the local's bindingDrop fires at scope exit.
+t0735_map_lit_local_still_works() `test {
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
+  assert(borrow_map_int(m) == 1, "local");
+}
+
+// (8) Map literal passed to a constructor that consumes it — the new()
+// claims the heap temp into the field; no double-drop.
+t0735_map_lit_in_ctor_field() `test {
+  _T0735Box b = _T0735Box(m: {
+    "a": 1, "b": 2
+  });
+  assert(b.m.len == 2, "ctor field");
+}
+
+// (9) Map literal passed to a `~Map` parameter (ownership transfer at call
+// site) — caller claims the heap temp; the callee owns and drops.
+t0735_map_lit_move_arg() `test {
+  assert(consume_map( {
+    "a": 1, "b": 2
+  }) == 2, "move arg");
+}
+
+// (10) Map literal as a function's return expression — the heap temp must be
+// claimed by the return path so the caller takes ownership. Without the claim,
+// the function would double-drop (heap-temp drop AND the returned-into-caller
+// drop), or leak if the heap-temp drop never fired.
+t0735_map_lit_as_return_value() `test {
+  map[string, int] m = make_map_literal();
+  assert(m.len == 2, "return value");
+  if v := m["x"] {
+    assert(v == 9, "return value x");
+  } else {
+    assert(false, "missing key x");
+  }
+}
+
+// (11) Two map literals in the same statement — each must get its own heap-temp
+// drop flag; both must fire at statement end. If the stack discipline were
+// broken, one literal's flag would clobber the other and we'd see either a
+// leak or a double-free.
+t0735_two_map_lits_in_same_stmt() `test {
+  int n = borrow_map_int( {
+    "a": 1
+  }) + borrow_map_int( {
+    "b": 2, "c": 3
+  });
+  assert(n == 1, "two literals same stmt");
+}
+
+// (12) Map literal with Vector[int] value — exercises Map.drop walking
+// _buckets and recursively dropping each Vector slot via Vector.drop. If
+// Map.drop only freed the instance/buckets and forgot per-slot drops, this
+// would leak per-vector.
+t0735_map_lit_vector_value() `test {
+  assert(borrow_map_vec_value( {
+    "a": [1, 2, 3], "b": [4, 5]
+  }) == 2, "vector value");
+}
+
+// (13) Nested map literal as a value — `{"outer": {"inner": 1}}`. The inner
+// map literal is itself an rvalue temp consumed by the outer's Map.[]= (which
+// moves it into the slot). Outer drops normally walk into slots and drop the
+// inner map. If the inner heap-temp drop weren't cleared on consume, we'd
+// double-free.
+t0735_nested_map_lit() `test {
+  assert(borrow_map_of_map( {
+    "a": {
+      "a1": 1, "a2": 2
+    }, "b": {
+      "b1": 9
+    }
+  }) == 2, "nested literal");
+}
+
+// (14) Map literal as the receiver of a method call inside an if condition.
+// The heap temp must be cleaned up after the condition is evaluated, before
+// entering the then/else branches.
+t0735_map_lit_in_if_cond() `test {
+  int x = 0;
+  if {
+    "a": 1, "b": 2
+  }.contains("a") {
+    x = 5;
+  } else {
+    x = 7;
+  }
+  assert(x == 5, "if cond");
+}
+
+// (15) Map literal as the receiver of `to_string()` which returns a new
+// heap-allocated string. Both the receiver map and the returned string must
+// have their own lifetimes — the map dropped at receiver-temp end, the
+// string flowing into the local for full lifetime.
+t0735_map_lit_to_string_chain() `test {
+  string s = {
+    "a": 1
+  }.to_string();
+  assert(s.len > 0, "to_string chain");
+}
+
+// (16) Two consume-map calls in the same statement — both literals get
+// claimed (no heap.drop runs at statement end) and the callees do the drops.
+// Stack discipline check for the claim path.
+t0735_two_consume_args_same_stmt() `test {
+  int n = consume_map( {
+    "a": 1
+  }) + consume_map( {
+    "b": 2, "c": 3
+  });
+  assert(n == 3, "two consume args");
+}

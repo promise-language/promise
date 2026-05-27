@@ -1,0 +1,32 @@
+// T0687 (coverage hardening): when a task panics and is awaited from a
+// non-coroutine helper, the helper's `<-task` receive must:
+//   1. Complete the pump-based spin (WASM) / usleep spin (host),
+//   2. Observe `G.panicked == 1` in readyBlk,
+//   3. Re-panic so the panic propagates out of the helper to the test harness.
+//
+// The existing `t0687_await_in_helper_test.pr` covers the success path
+// exhaustively, and `panic_recovery_task.pr` covers panic-via-receive but only
+// from a coroutine context (`main` is wrapped by wrapMainWithScheduler).
+// Neither exercises the combination of (a) panicking goroutine, (b) non-
+// coroutine helper await, (c) WASM pump-spin. This snapshot test fills that
+// gap on host AND `--target wasm32-wasi`.
+//
+// Excluded on windows for the same reason as panic_recovery_task.pr (panic
+// message routing through the Windows runtime).
+panicking_worker() int {
+  assert(false, "boom from worker");
+  return 0;
+}
+
+// Non-coroutine helper that awaits a panicking task. On WASM this exercises
+// the new pump-spin path; on host the usleep spin. In both cases the receive
+// must re-panic, terminating the process via promise_panic.
+helper_await_panicking() int {
+  task[int] x = go panicking_worker();
+  return <-x;
+}
+
+main() `test(expected: "panic: boom from worker", exclude: windows) {
+  helper_await_panicking();
+  print_line("unreachable — helper should have re-panicked");
+}

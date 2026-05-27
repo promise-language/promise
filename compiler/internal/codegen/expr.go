@@ -12497,23 +12497,63 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	} else {
 		// Thread-blocking mode: poll G.done in a loop.
 		// goroutine_exit sets G.done = 1 atomically; we just spin until we see it.
-		// A brief usleep(100) avoids burning CPU in a tight loop.
+		// On host: a brief usleep(100) avoids burning CPU in a tight loop.
+		// T0687: On WASM (single-threaded cooperative scheduler), pal_usleep is a
+		// no-op — the pending `go {…}` G sits in P0's run queue and never runs,
+		// causing a permanent deadlock. Mirror the T0668 fix to Task[T].drop:
+		// pump promise_sched_coop_step() instead, and terminate genuine deadlocks
+		// (no runnable G AND target G still not done) with the shared message.
 		checkBlk := c.newBlock("task.check")
 		spinBlk := c.newBlock("task.spin")
 		doneBlk := c.newBlock("task.threaddone")
 
 		c.block.NewBr(checkBlk)
 
-		// check: reload done flag
+		// check: reload done flag (atomic acquire on WASM — T0669 parity:
+		// prevents LLVM from hoisting the load above promise_sched_coop_step
+		// and converging the spin into an infinite loop).
 		c.block = checkBlk
-		doneVal2 := c.block.NewLoad(irtypes.I8, doneField)
-		isDone2 := c.block.NewICmp(enum.IPredNE, doneVal2, constant.NewInt(irtypes.I8, 0))
+		doneLoad2 := c.block.NewLoad(irtypes.I8, doneField)
+		if c.isWasm {
+			doneLoad2.Atomic = true
+			doneLoad2.Ordering = enum.AtomicOrderingAcquire
+			doneLoad2.Align = 1
+		}
+		isDone2 := c.block.NewICmp(enum.IPredNE, doneLoad2, constant.NewInt(irtypes.I8, 0))
 		c.block.NewCondBr(isDone2, doneBlk, spinBlk)
 
-		// spin: brief sleep then recheck
 		c.block = spinBlk
-		c.block.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
-		c.block.NewBr(checkBlk)
+		if c.isWasm {
+			// T0687: pump the cooperative scheduler one step. Returns i8:
+			// non-zero = ran/advanced a G (progress possible), 0 = no runnable G.
+			stepFn := c.funcs["promise_sched_coop_step"]
+			stepR := c.block.NewCall(stepFn)
+			madeProgress := c.block.NewICmp(enum.IPredNE, stepR, constant.NewInt(irtypes.I8, 0))
+			coopRecheckBlk := c.newBlock("task.coop_recheck")
+			deadlockBlk := c.newBlock("task.deadlock")
+			c.block.NewCondBr(madeProgress, checkBlk, coopRecheckBlk)
+
+			// No runnable G — re-check G.done. If the awaited G is still not
+			// done it can never complete (nothing left to run) → genuine deadlock.
+			rdLoad := coopRecheckBlk.NewLoad(irtypes.I8, doneField)
+			rdLoad.Atomic = true
+			rdLoad.Ordering = enum.AtomicOrderingAcquire
+			rdLoad.Align = 1
+			rdDone := coopRecheckBlk.NewICmp(enum.IPredNE, rdLoad, constant.NewInt(irtypes.I8, 0))
+			coopRecheckBlk.NewCondBr(rdDone, checkBlk, deadlockBlk)
+
+			msg := c.getTaskDeadlockMsgGlobal()
+			msgPtr := deadlockBlk.NewGetElementPtr(msg.ContentType, msg,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			deadlockBlk.NewCall(c.palWrite, constant.NewInt(irtypes.I32, 2), msgPtr,
+				constant.NewInt(irtypes.I64, 45))
+			deadlockBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 2))
+			deadlockBlk.NewUnreachable()
+		} else {
+			// host: brief sleep then recheck
+			c.block.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
+			c.block.NewBr(checkBlk)
+		}
 
 		c.block = doneBlk
 		c.block.NewBr(readyBlk)

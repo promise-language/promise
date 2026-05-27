@@ -1,0 +1,124 @@
+// T0687: Awaiting a task via `<-x` from a regular (non-coroutine) callee
+// function on the WASM target deadlocked at runtime — the spin emitted by
+// genReceiveTask's non-coroutine branch used pal_usleep, which is a no-op on
+// the single-threaded WASM cooperative scheduler, so the pending `go {…}` G
+// never ran. Fix mirrors T0668: on WASM the non-coroutine spin pumps
+// promise_sched_coop_step() instead.
+//
+// These are batch tests with NO `exclude: wasm` — they must pass on the host
+// AND `--target wasm32-wasi`. Zero-leak enforcement also applies on both.
+worker() int {
+  return 42;
+}
+
+worker_string() string {
+  return "hello";
+}
+
+// (1) Call form — the exact bug repro from the report.
+helper_call() int {
+  task[int] x = go worker();
+  return <-x;
+}
+
+t0687_call_form_helper() `test {
+  assert(helper_call() == 42, "call-form await in non-coroutine helper");
+}
+
+// (2) Block form — `go { expr }` captures a local; same receive site.
+helper_block() int {
+  y := 9;
+  task[int] x = go {
+    y
+  };
+  return <-x;
+}
+
+t0687_block_form_helper() `test {
+  assert(helper_block() == 9, "block-form await in non-coroutine helper");
+}
+
+// (3) Generic helper — monomorphized non-coroutine body must also pump.
+gwrap[T](T v) T {
+  task[T] x = go {
+    v
+  };
+  return <-x;
+}
+
+t0687_generic_helper() `test {
+  assert(gwrap(42) == 42, "generic helper await — int");
+  assert(gwrap("hi") == "hi", "generic helper await — string");
+}
+
+// (4) Param capture — non-coroutine helper that captures a param into go-block.
+nonpoly(int v) int {
+  task[int] x = go {
+    v + 1
+  };
+  return <-x;
+}
+
+t0687_param_capture_helper() `test {
+  assert(nonpoly(7) == 8, "param-capture await in non-coroutine helper");
+}
+
+// (5) Nested non-coroutine helper chain — verifies re-entrancy of
+// promise_sched_coop_step (TLS save/restore of current_g/current_p).
+inner_helper() int {
+  task[int] x = go worker();
+  return <-x;
+}
+
+outer_helper() int {
+  return inner_helper() + 1;
+}
+
+t0687_nested_helper_chain() `test {
+  assert(outer_helper() == 43, "nested non-coroutine helper chain awaits");
+}
+
+// (6) Helper called from inside a `go {}` coroutine — the pump is invoked
+// while the calling coroutine itself is being run by the scheduler. Exercises
+// the TLS save/restore (current_g/current_p) in promise_sched_coop_step.
+t0687_helper_called_from_go_block() `test {
+  task[int] outer = go {
+    helper_call()
+  };
+  r := <-outer;
+  assert(r == 42, "helper awaited from inside go-block coroutine");
+}
+
+// (7) Loop — leak guard for the new IR pattern. Run the helper many times in
+// a single test so any per-call leak (allocation not freed) shows up loudly.
+t0687_loop_helper_no_leak() `test {
+  int sum = 0;
+  for i in 0..50 {
+    sum = sum + helper_call();
+  }
+  assert(sum == 42 * 50, "50 helper calls — sum and zero leak");
+}
+
+// (8) Result discarded — non-coroutine helper that awaits and discards the
+// result still needs the pump to make progress; result_ptr cleanup must run.
+helper_discard() {
+  task[int] x = go worker();
+  int _r = <-x;
+}
+
+t0687_discarded_result() `test {
+  helper_discard();
+  assert(true, "non-coroutine helper that discards the awaited result");
+}
+
+// (9) Task[string] — droppable inner result; free_after_done must walk the
+// inner string before freeing result_ptr (no leak) inside a non-coroutine
+// helper that pumps coop_step.
+helper_string() string {
+  task[string] x = go worker_string();
+  return <-x;
+}
+
+t0687_string_inner_helper() `test {
+  assert(helper_string() == "hello", "Task[string] awaited in helper — no leak");
+}

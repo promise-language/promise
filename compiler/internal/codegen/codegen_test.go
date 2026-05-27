@@ -15804,6 +15804,50 @@ func TestT0688_BareCapturedHeapUserTypeDups(t *testing.T) {
 	assertContains(t, ngboxIR, "call i8* @.goroutine.")
 }
 
+// T0732: Map[K,V] dispatch branch in dupBorrowedCaptureForResult. Map/Set are
+// heap user types excluded from isDroppableHeapUserType / isHeapUserNoDropPalFree
+// by T0440, so the T0688 fix missed them — a bare-captured borrowed Map param
+// returned from a value-block segfaulted (double-free of the dangling stmt-temp).
+// The fix routes Map through dupHeapValue (memcpy + field-wise deep dup), which
+// emits the heapdup.copy / heapdup.merge labels in the spawning function.
+func TestT0688_BareCapturedMapParamDups(t *testing.T) {
+	ir := generateIR(t, `
+		ngmap(Map[string, int] m) Task[Map[string, int]] {
+			return go { m };
+		}
+		main() {
+			task[Map[string, int]] x = ngmap({"a": 1});
+			r := <-x;
+		}
+	`)
+	ngmapIR := extractFunction(ir, "__user.ngmap")
+	assertContains(t, ngmapIR, "heapdup.copy")
+	assertContains(t, ngmapIR, "heapdup.merge")
+	assertContains(t, ngmapIR, "call i8* @.goroutine.")
+}
+
+// T0732: Set[T] dispatch branch in dupBorrowedCaptureForResult. Like Map, Set
+// is excluded from the T0440-gated predicates; the fix recognizes it via
+// isMapOrSetType and routes it through dupHeapValue, whose static path
+// recursively deep-dups Set's nested Map[T,bool] field.
+func TestT0688_BareCapturedSetParamDups(t *testing.T) {
+	ir := generateIR(t, `
+		ngset(Set[int] s) Task[Set[int]] {
+			return go { s };
+		}
+		main() {
+			Set[int] s = Set[int]();
+			s.add(1);
+			task[Set[int]] x = ngset(s);
+			r := <-x;
+		}
+	`)
+	ngsetIR := extractFunction(ir, "__user.ngset")
+	assertContains(t, ngsetIR, "heapdup.copy")
+	assertContains(t, ngsetIR, "heapdup.merge")
+	assertContains(t, ngsetIR, "call i8* @.goroutine.")
+}
+
 // T0688: regression guard — Copy-type param (int) must NOT trigger any
 // dup. The eligibility predicate goElemNeedsBorrowedCaptureDup returns
 // false for primitives, so the spawning function has zero dup overhead.

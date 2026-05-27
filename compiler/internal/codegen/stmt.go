@@ -4309,6 +4309,25 @@ func isDroppableHeapUserType(typ types.Type) bool {
 	return true
 }
 
+// isMapOrSetType reports whether typ is the standard-library Map[K,V] or Set[T]
+// heap container. These are heap user types deliberately excluded from
+// isDroppableHeapUserType / isHeapUserNoDropPalFree (T0440), so callers that
+// want to treat them as ordinary heap user types — e.g. the T0732 spawn-side
+// deep dup via dupHeapValue — must recognize them explicitly.
+func isMapOrSetType(typ types.Type) bool {
+	named := extractNamed(typ)
+	if named == nil {
+		return false
+	}
+	if named == types.TypMap {
+		return true
+	}
+	if named.Obj() != nil && named.Obj().Name() == "Set" {
+		return true
+	}
+	return false
+}
+
 // isHeapUserNoDropPalFree returns true for heap user types that are heap-
 // allocated (and thus need pal_free at scope exit) but have no explicit `drop()`
 // or synthesized drop — i.e., types excluded by `isDroppableHeapUserType` for

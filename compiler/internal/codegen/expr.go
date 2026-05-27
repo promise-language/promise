@@ -11874,6 +11874,17 @@ func goElemNeedsBorrowedCaptureDup(goElem types.Type) bool {
 	if _, ok := types.AsVector(goElem); ok || named == types.TypVector {
 		return true
 	}
+	// T0732: Map[K,V] and Set[T] are heap user types but are excluded from
+	// isDroppableHeapUserType / isHeapUserNoDropPalFree by T0440's early
+	// returns. That gating targets the dup-on-read clone() path
+	// (cloneHeapElement), whose Promise-level clone() can be shallow for
+	// nested-heap value args. The spawn-side T0688 dup does NOT use clone() —
+	// it uses dupHeapValue (memcpy + field-wise deep dup), which correctly
+	// deep-copies Map (vector of Slot enums via dupEnumElementInPlace) and Set
+	// (recursive Map dup). So they ARE eligible here.
+	if isMapOrSetType(goElem) {
+		return true
+	}
 	if isDroppableHeapUserType(goElem) || isHeapUserNoDropPalFree(goElem) {
 		return true
 	}
@@ -11904,6 +11915,12 @@ func (c *Compiler) dupBorrowedCaptureForResult(val value.Value, goElem types.Typ
 		// `Vector` without type args is usually rejected by sema, but mirrors
 		// the existing pattern in compiler.go).
 		return c.dupVector(val, 0)
+	case isMapOrSetType(goElem):
+		// T0732: Map/Set deep-copy via dupHeapValue (memcpy + field-wise dup),
+		// NOT the Promise clone() method. dupHeapValue walks the instance:
+		// Map's _buckets vector clones each Slot enum element (key+value) via
+		// dupEnumElementInPlace; Set's _map field recurses through dupHeapValue.
+		return c.dupHeapValue(val, goElem)
 	case isDroppableHeapUserType(goElem) || isHeapUserNoDropPalFree(goElem):
 		return c.dupHeapValue(val, goElem)
 	}

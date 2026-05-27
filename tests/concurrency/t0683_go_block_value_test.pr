@@ -375,3 +375,208 @@ t0688_bare_vec_string_param() `test {
   assert(r.len == 2, "vec[string] len");
   assert(r[0] == "ab" && r[1] == "cd", "vec[string] elements (deep clone)");
 }
+
+// T0732: the gap T0688 missed — Map[K,V] and Set[T] are heap user types
+// excluded from the T0688 eligibility predicate by T0440's early returns in
+// isDroppableHeapUserType / isHeapUserNoDropPalFree. So a bare-captured
+// borrowed Map/Set param returned via a task crashed with
+// `fatal: segmentation fault at 0x0`: the caller's stmt-temp was dropped
+// immediately after the spawning function returned, the awaiter loaded the
+// dangling instance pointer into G.result_ptr, and the receiver double-freed.
+// The fix recognizes Map/Set via isMapOrSetType and deep-dups them at spawn
+// time through dupHeapValue — Map deep-copies its _buckets vector of Slot
+// enums (key+value) via dupEnumElementInPlace; Set recurses through its nested
+// Map[T,bool]. dupHeapValue (memcpy + field-wise dup), not the Promise clone()
+// method, so the T0440 shallow-clone gating does not apply here.
+//
+// The map arguments are built by factory functions (the idiomatic "factory
+// returning a task[Map] computed from its argument" pattern from the bug
+// report) rather than passing a map literal directly: a map literal used
+// directly as an rvalue argument hits an ORTHOGONAL pre-existing leak (its
+// stmt-temp gets no drop binding) tracked separately as T0735 — unrelated to
+// the go-block dup this test covers.
+t0688_mkmap_si() Map[string, int] {
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
+  return m;
+}
+
+t0688_ngmake_map(Map[string, int] m) Task[Map[string, int]] {
+  return go {
+    m
+  };
+}
+
+t0688_bare_map_param() `test {
+  task[Map[string, int]] x = t0688_ngmake_map(t0688_mkmap_si());
+  Map[string, int] r = <-x;
+  if v := r["a"] {
+    assert(v == 1, "map a");
+  }
+  if v := r["b"] {
+    assert(v == 2, "map b");
+  }
+}
+
+// T0732: Map with heap VALUE type (string) — exercises dupEnumElementInPlace
+// deep-cloning both the heap key and the heap value of each Slot. Without the
+// deep clone the dup'd map's value-string pointers would alias the original
+// and the receiver's drop would double-free them.
+//
+// The factory builds the map via the []= setter (not a map literal): a map
+// literal with a heap value, e.g. `{"k": "va" + "lue"}`, double-frees the
+// value — an orthogonal pre-existing bug tracked as T0736, unrelated to the
+// go-block dup this test covers.
+t0688_mkmap_ss() Map[string, string] {
+  Map[string, string] m = Map[string, string]();
+  string v = "va" + "lue";
+  m["k"] = v;
+  return m;
+}
+
+t0688_ngmake_map_str(Map[string, string] m) Task[Map[string, string]] {
+  return go {
+    m
+  };
+}
+
+t0688_bare_map_heap_val_param() `test {
+  task[Map[string, string]] x = t0688_ngmake_map_str(t0688_mkmap_ss());
+  Map[string, string] r = <-x;
+  if v := r["k"] {
+    assert(v == "value", "map[string,string] heap value deep clone");
+  }
+}
+
+// T0732: Set[int] — the factory pattern from the bug report. Set is a wrapper
+// around Map[T,bool]; dupHeapValue recurses through the nested _map field.
+t0688_mkset_int() Set[int] {
+  Set[int] s = Set[int]();
+  s.add(1);
+  s.add(2);
+  s.add(3);
+  return s;
+}
+
+t0688_ngmake_set(Set[int] s) Task[Set[int]] {
+  return go {
+    s
+  };
+}
+
+t0688_bare_set_param() `test {
+  task[Set[int]] x = t0688_ngmake_set(t0688_mkset_int());
+  Set[int] r = <-x;
+  assert(r.contains(1) && r.contains(2) && r.contains(3), "set[int] contains");
+}
+
+// T0732: Set with heap element type (string) — the nested Map[string,bool]'s
+// Slot keys are heap strings, deep-cloned via dupEnumElementInPlace through
+// the recursive dupHeapValue path.
+t0688_mkset_string() Set[string] {
+  Set[string] s = Set[string]();
+  s.add("a" + "b");
+  s.add("c" + "d");
+  return s;
+}
+
+t0688_ngmake_set_str(Set[string] s) Task[Set[string]] {
+  return go {
+    s
+  };
+}
+
+t0688_bare_set_string_param() `test {
+  task[Set[string]] x = t0688_ngmake_set_str(t0688_mkset_string());
+  Set[string] r = <-x;
+  assert(r.contains("ab") && r.contains("cd"), "set[string] contains (deep clone)");
+}
+
+// T0732: 50-iteration leak guards — a per-iteration buffer/instance leak in
+// the Map/Set dup path would trip the zero-tolerance alloc-delta check.
+t0688_loop_map_no_leak() `test {
+  i := 0;
+  while i < 50 {
+    task[Map[string, int]] x = t0688_ngmake_map(t0688_mkmap_si());
+    Map[string, int] r = <-x;
+    if v := r["a"] {
+      assert(v == 1, "loop map iteration");
+    }
+    i = i + 1;
+  }
+}
+
+t0688_loop_set_no_leak() `test {
+  i := 0;
+  while i < 50 {
+    task[Set[int]] x = t0688_ngmake_set(t0688_mkset_int());
+    Set[int] r = <-x;
+    assert(r.contains(2), "loop set iteration");
+    i = i + 1;
+  }
+}
+
+// T0732 (coverage): Map with a heap-CONTAINER value (Vector[int]) — exercises a
+// distinct branch of the Slot deep-clone. The committed Map tests use a scalar
+// value (int) or a heap-scalar value (string), both of which hit the dupString
+// path in emitVariantFieldDup; a Vector value instead hits the dupVector +
+// emitVectorElementCloneLoop branch (compiler.go). Without the deep clone the
+// dup'd map's value-vector buffers would alias the original and the receiver's
+// drop would double-free them.
+//
+// Built via the []= setter (not a map literal with a Vector value, which would
+// hit the T0735 map-literal stmt-temp leak), mirroring t0688_mkmap_ss.
+t0688_mkmap_sv() Map[string, Vector[int]] {
+  Map[string, Vector[int]] m = Map[string, Vector[int]]();
+  Vector[int] a = [1, 2, 3];
+  m["a"] = a;
+  Vector[int] b = [4, 5];
+  m["b"] = b;
+  return m;
+}
+
+t0688_ngmake_map_vec(Map[string, Vector[int]] m) Task[Map[string, Vector[int]]] {
+  return go {
+    m
+  };
+}
+
+t0688_bare_map_vec_val_param() `test {
+  task[Map[string, Vector[int]]] x = t0688_ngmake_map_vec(t0688_mkmap_sv());
+  Map[string, Vector[int]] r = <-x;
+  if v := r["a"] {
+    assert(v.len == 3 && v[0] == 1 && v[2] == 3, "map[string,vec] a deep clone");
+  }
+  if v := r["b"] {
+    assert(v.len == 2 && v[0] == 4 && v[1] == 5, "map[string,vec] b deep clone");
+  }
+}
+
+// T0732 (coverage): dropped-not-awaited cleanup invariant for the spawn-side
+// dup. The factory dups the borrowed Map/Set into the goroutine's result; if
+// the task is dropped WITHOUT `<-`, Task[T].drop must free that dup exactly
+// once — no leak, no double-free. The existing dropped tests
+// (t0683_value_block_dropped_string) use a DIRECT trailing value with no
+// spawn-side dup, so they don't exercise the dupBorrowedCaptureForResult path.
+t0688_dropped_map_no_await() `test {
+  task[Map[string, int]] t = t0688_ngmake_map(t0688_mkmap_si());
+  assert(true, "dropped map task (spawn-side dup), not awaited: no leak");
+}
+
+t0688_dropped_set_no_await() `test {
+  task[Set[int]] t = t0688_ngmake_set(t0688_mkset_int());
+  assert(true, "dropped set task (spawn-side dup), not awaited: no leak");
+}
+
+// Loop variant — a per-iteration leak in the dropped-dup cleanup path would
+// trip the zero-tolerance alloc-delta check.
+t0688_dropped_map_set_loop_no_leak() `test {
+  i := 0;
+  while i < 30 {
+    task[Map[string, int]] m = t0688_ngmake_map(t0688_mkmap_si());
+    task[Set[int]] s = t0688_ngmake_set(t0688_mkset_int());
+    i = i + 1;
+  }
+  assert(i == 30, "dropped map/set tasks in loop: no leak");
+}

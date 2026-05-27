@@ -368,7 +368,36 @@ func idlToSnake(s string) string {
 		}
 		prev = r
 	}
-	return b.String()
+	return sanitizeIdent(b.String())
+}
+
+// promiseKeywords are reserved words that cannot appear as identifiers in
+// generated Promise code. WebIDL freely uses some of these as parameter, member,
+// and operation names (e.g. `type`), which would otherwise emit verbatim and fail
+// to parse. sanitizeIdent rewrites any colliding identifier (T0724).
+// Keep in sync with the keyword tokens in compiler/grammar/PromiseLexer.g4.
+// `get`/`set` are contextual (getter/setter syntax) but are sanitized too to avoid
+// ambiguity with a method/field of that name.
+var promiseKeywords = map[string]bool{
+	"absent": true, "as": true, "break": true, "continue": true, "else": true,
+	"enum": true, "false": true, "for": true, "go": true, "if": true,
+	"in": true, "is": true, "match": true, "move": true, "none": true,
+	"present": true, "raise": true, "return": true, "select": true, "this": true,
+	"true": true, "type": true, "unsafe": true, "use": true, "while": true,
+	"yield": true, "get": true, "set": true,
+}
+
+// sanitizeIdent rewrites an identifier that collides with a Promise keyword by
+// prefixing it with "_" (e.g. `type` -> `_type`). Applied inside idlToSnake so it
+// covers every generated identifier position (params, dictionary fields,
+// attribute/operation names). Type names stay PascalCase and never collide; extern
+// link names and WASM import names derive from the raw IDL / PascalCase names, so
+// wrapper, extern, and JS glue stay consistent.
+func sanitizeIdent(s string) string {
+	if promiseKeywords[s] {
+		return "_" + s
+	}
+	return s
 }
 
 // idlEnumValueToPascal converts WebIDL string enum values to PascalCase.

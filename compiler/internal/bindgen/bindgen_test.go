@@ -287,9 +287,12 @@ func TestCodegenRecord(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type Point `public `value {")
-	assertContains(t, out, "f64 x `value;")
-	assertContains(t, out, "f64 y `value;")
+	// Records are plain types — `value is never valid on a type declaration, and
+	// records can hold non-copy fields (T0724).
+	assertContains(t, out, "type Point `public {")
+	assertContains(t, out, "f64 x;")
+	assertContains(t, out, "f64 y;")
+	assertNotContains(t, out, "`value")
 }
 
 func TestCodegenEnum(t *testing.T) {
@@ -347,7 +350,8 @@ func TestCodegenFlags(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type OpenFlags `public `value {")
+	// Flags are pure value types: `value on the _bits field, not the type (T0724).
+	assertContains(t, out, "type OpenFlags `public {")
 	assertContains(t, out, "int _bits `value;")
 	assertContains(t, out, "get read OpenFlags `public `global `doc(\"Flag: read\") {")
 	assertContains(t, out, "return OpenFlags(_bits: 1);")
@@ -902,7 +906,7 @@ func TestCodegenRecordDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type Point `public `value `doc(\"A 2D point.\") {")
+	assertContains(t, out, "type Point `public `doc(\"A 2D point.\") {")
 }
 
 func TestCodegenEnumDoc(t *testing.T) {
@@ -1053,10 +1057,12 @@ interface types {
 	modules := WitToIR(file)
 	out := GeneratePromise(modules, "wasi")
 
-	// Verify key constructs are present
+	// Verify key constructs are present. Records are plain types; flags are value
+	// types via `value on the single _bits field, not the type decl (T0724).
 	assertContains(t, out, "enum DescriptorType `public {")
-	assertContains(t, out, "type DescriptorStat `public `value {")
-	assertContains(t, out, "type OpenFlags `public `value {")
+	assertContains(t, out, "type DescriptorStat `public {")
+	assertContains(t, out, "type OpenFlags `public {")
+	assertContains(t, out, "int _bits `value;")
 	assertContains(t, out, "type Descriptor `public `target(wasi) {")
 	assertContains(t, out, "drop(~this) {")
 	assertContains(t, out, "open_at!(string path, OpenFlags flags) Descriptor `public `target(wasi) {")
@@ -1954,7 +1960,7 @@ func TestCodegenFlagsDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "type Perms `public `value `doc(\"Permission flags.\") {")
+	assertContains(t, out, "type Perms `public `doc(\"Permission flags.\") {")
 }
 
 func TestCodegenTypeAliasDoc(t *testing.T) {
@@ -3086,14 +3092,14 @@ func TestWebIdlBindElementConstructs(t *testing.T) {
 	modules := WebIdlToIR(file)
 	prCode := GeneratePromise(modules, "web")
 
-	// Dictionary → `value type with Option-wrapped optional fields.
-	if !strings.Contains(prCode, "type CheckVisibilityOptions `public `value {") {
-		t.Errorf("expected CheckVisibilityOptions value type, got:\n%s", prCode)
+	// Dictionary → plain type with Option-wrapped optional fields (T0724).
+	if !strings.Contains(prCode, "type CheckVisibilityOptions `public {") {
+		t.Errorf("expected CheckVisibilityOptions plain type, got:\n%s", prCode)
 	}
-	if !strings.Contains(prCode, "bool? check_opacity `value;") {
+	if !strings.Contains(prCode, "bool? check_opacity;") {
 		t.Error("expected optional dict member check_opacity to be Option-wrapped (bool?)")
 	}
-	if !strings.Contains(prCode, "bool? content_visibility_auto `value;") {
+	if !strings.Contains(prCode, "bool? content_visibility_auto;") {
 		t.Error("expected ext-attr dict member content_visibility_auto to be parsed and Option-wrapped")
 	}
 	// Enum → Promise enum.

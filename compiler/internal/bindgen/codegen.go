@@ -140,11 +140,17 @@ func (g *generator) emitType(t Type, importModule string) {
 	}
 }
 
+// emitRecord emits a WebIDL dictionary as a plain Promise type. Dictionaries are
+// NOT value types: their members include non-copy types (string, sequences, and
+// JsValue?, where JsValue cannot be `copy because its Str(string) variant holds a
+// non-copy string). `value is also never valid on a type declaration, and a mixed
+// value/instance type is unsupported by codegen. A plain heap type is the only
+// representation that compiles for arbitrary dictionary field types (T0724).
 func (g *generator) emitRecord(t Type) {
-	g.line("type %s `public `value%s {", t.Name, docAnnot(t.Doc))
+	g.line("type %s `public%s {", t.Name, docAnnot(t.Doc))
 	g.indent++
 	for _, f := range t.Fields {
-		g.line("%s %s `value;", promiseType(f.Type), f.Name)
+		g.line("%s %s;", promiseType(f.Type), f.Name)
 	}
 	g.indent--
 	g.line("}")
@@ -174,8 +180,12 @@ func (g *generator) emitVariant(t Type) {
 	g.line("}")
 }
 
+// emitFlags emits a WIT flags type as a pure value type. `value is never valid on
+// a type declaration; a pure value type is detected from all fields being `value.
+// A flags type has a single copy `int _bits field, so it is a valid value type
+// (T0724).
 func (g *generator) emitFlags(t Type) {
-	g.line("type %s `public `value%s {", t.Name, docAnnot(t.Doc))
+	g.line("type %s `public%s {", t.Name, docAnnot(t.Doc))
 	g.indent++
 	g.line("int _bits `value;")
 	g.blank()

@@ -466,12 +466,61 @@ func TestPromiseExternType(t *testing.T) {
 		{TypeRef{Kind: BuiltinKind, Builtin: "string"}, "string"},
 		{TypeRef{Kind: NamedKind, Name: "Element"}, "i32"},
 		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: NamedKind, Name: "Element"}}, "i32"},
-		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "string"}}, "string?"},
+		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "string"}}, "string"},
+		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u32"}}, "u32"},
+		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "bool"}}, "bool"},
+		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "f64"}}, "f64"},
+		// Option<List<T>> is not specially lowered — falls through to the raw
+		// promiseType form (which would still fail at codegen, but that's a
+		// separate gap; see T0701 follow-up for resource/exotic option lowering).
+		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: ListKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "u8"}}}, "u8[]?"},
 	}
 	for _, tt := range tests {
 		got := promiseExternType(tt.ref)
 		if got != tt.want {
 			t.Errorf("promiseExternType(%v) = %q, want %q", tt.ref.Kind, got, tt.want)
+		}
+	}
+}
+
+// TestLowerOptionExternArg covers the T0698 FFI-boundary sentinel for each
+// built-in family. The default-literal table must stay in sync — any new
+// built-in added to witBuiltinToPromise should grow a corresponding entry
+// in builtinZeroLiteral, and this table is the canonical guard.
+func TestLowerOptionExternArg(t *testing.T) {
+	opt := func(b string) TypeRef {
+		return TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: b}}
+	}
+	tests := []struct {
+		ref  TypeRef
+		want string
+	}{
+		{opt("string"), `msg ?: ""`},
+		{opt("u8"), "msg ?: 0u8"},
+		{opt("u16"), "msg ?: 0u16"},
+		{opt("u32"), "msg ?: 0u32"},
+		{opt("u64"), "msg ?: 0u64"},
+		{opt("s8"), "msg ?: 0i8"},
+		{opt("s16"), "msg ?: 0i16"},
+		{opt("s32"), "msg ?: 0i32"},
+		{opt("s64"), "msg ?: 0i64"},
+		{opt("f32"), "msg ?: 0.0f32"},
+		{opt("f64"), "msg ?: 0.0"},
+		{opt("bool"), "msg ?: false"},
+		{opt("char"), `msg ?: '\0'`},
+		// Non-option / non-builtin passes through unchanged.
+		{TypeRef{Kind: BuiltinKind, Builtin: "string"}, "msg"},
+		{TypeRef{Kind: NamedKind, Name: "Element"}, "msg"},
+		{TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: NamedKind, Name: "Element"}}, "msg"},
+		// Unknown builtin name → defensive `0` fallback in builtinZeroLiteral.
+		// Witnesses the default branch in case a new WIT builtin is added to
+		// witBuiltinToPromise without being added here.
+		{opt("not_a_real_builtin"), "msg ?: 0"},
+	}
+	for _, tt := range tests {
+		got := lowerOptionExternArg("msg", tt.ref)
+		if got != tt.want {
+			t.Errorf("lowerOptionExternArg(msg, %+v) = %q, want %q", tt.ref, got, tt.want)
 		}
 	}
 }
@@ -3919,9 +3968,18 @@ func TestWebIdlDOMExceptionGeneratesValidPromise(t *testing.T) {
 	if strings.Contains(out, "`static") {
 		t.Errorf("generated source still contains `static:\n%s", out)
 	}
-	// Constructor uses Promise's new(~this, ...) shape.
+	// Constructor uses Promise's new(~this, ...) shape. The wrapper signature
+	// keeps `string?` (T0698: caller-side option semantics preserved), but the
+	// call site lowers each option to its zero-value sentinel before crossing
+	// the FFI boundary so the extern doesn't have to carry an Option.
 	assertContains(t, out, "new(~this, string? message, string? name) `public {")
-	assertContains(t, out, "this._handle = _dom_exception_constructor(message, name);")
+	assertContains(t, out, `this._handle = _dom_exception_constructor(message ?: "", name ?: "");`)
+	// The extern declaration uses bare `string`, not `string?` — option-of-builtin
+	// is not a representable extern-param ABI (T0698).
+	assertContains(t, out, "_dom_exception_constructor(string message, string name) i32")
+	if strings.Contains(out, "_dom_exception_constructor(string? ") {
+		t.Errorf("extern declaration still uses string? param:\n%s", out)
+	}
 	// Const member is emitted as a receiver-less `global method.
 	assertContains(t, out, "`public `global")
 	// Snake-case is acronym-aware: DOMException -> dom_exception, not d_o_m_exception.

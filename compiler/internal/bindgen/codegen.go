@@ -370,12 +370,15 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 		raise = "^"
 	}
 
-	// Build extern call args: this._handle, then params (._handle for resources)
+	// Build extern call args: this._handle, then params (._handle for resources,
+	// elvis-default for Option<Builtin> — see lowerOptionExternArg)
 	var callArgs []string
 	callArgs = append(callArgs, "this._handle")
 	for _, p := range m.Params {
 		if !g.canonicalABI && isRefType(p.Type) {
 			callArgs = append(callArgs, p.Name+"._handle")
+		} else if !g.canonicalABI && isOptionOfBuiltin(p.Type) {
+			callArgs = append(callArgs, lowerOptionExternArg(p.Name, p.Type))
 		} else {
 			callArgs = append(callArgs, p.Name)
 		}
@@ -565,6 +568,8 @@ func (g *generator) formatExternCallArgs(params []Param) string {
 	for _, p := range params {
 		if !g.canonicalABI && isRefType(p.Type) {
 			parts = append(parts, p.Name+"._handle")
+		} else if !g.canonicalABI && isOptionOfBuiltin(p.Type) {
+			parts = append(parts, lowerOptionExternArg(p.Name, p.Type))
 		} else {
 			parts = append(parts, p.Name)
 		}
@@ -665,7 +670,9 @@ func promiseType(ref TypeRef) string {
 
 // promiseExternType converts a TypeRef to a Promise type for extern declarations.
 // Resource types (NamedKind) become i32 (handle), optional resource types become i32
-// (0 = null). All other types use the normal promiseType conversion.
+// (0 = null). Optional built-ins (e.g. `string?`, `u32?`) are unwrapped to the bare
+// built-in — the wrapper supplies a zero-value sentinel at the call site via
+// lowerOptionExternArg. All other types use the normal promiseType conversion.
 // Handles are i32 on WASM (32-bit ref table indices), not int (which is i64).
 func promiseExternType(ref TypeRef) string {
 	switch ref.Kind {
@@ -675,9 +682,66 @@ func promiseExternType(ref TypeRef) string {
 		if ref.Elem != nil && ref.Elem.Kind == NamedKind {
 			return "i32"
 		}
+		if ref.Elem != nil && ref.Elem.Kind == BuiltinKind {
+			return promiseType(*ref.Elem)
+		}
 		return promiseType(ref)
 	default:
 		return promiseType(ref)
+	}
+}
+
+// isOptionOfBuiltin reports whether ref is an Option wrapping a built-in scalar
+// (string, integer, float, bool, char). Resource options (Option<NamedKind>) and
+// nested options (Option<Option<T>>) return false.
+func isOptionOfBuiltin(ref TypeRef) bool {
+	return ref.Kind == OptionKind && ref.Elem != nil && ref.Elem.Kind == BuiltinKind
+}
+
+// lowerOptionExternArg returns the wrapper-side call-site expression that lowers
+// an Option<Builtin> parameter to its bare built-in form using the elvis operator
+// with a zero-value default. This is the FFI-boundary sentinel: callers retain
+// `T?` semantics in the wrapper signature, but `none` collapses to the type's
+// zero value before the extern call (T0698).
+func lowerOptionExternArg(name string, ref TypeRef) string {
+	if !isOptionOfBuiltin(ref) {
+		return name
+	}
+	return name + " ?: " + builtinZeroLiteral(ref.Elem.Builtin)
+}
+
+// builtinZeroLiteral returns a Promise literal for the zero value of a WIT
+// built-in. Used to seed the elvis default in lowerOptionExternArg.
+func builtinZeroLiteral(builtin string) string {
+	switch builtin {
+	case "string":
+		return `""`
+	case "u8":
+		return "0u8"
+	case "u16":
+		return "0u16"
+	case "u32":
+		return "0u32"
+	case "u64":
+		return "0u64"
+	case "s8":
+		return "0i8"
+	case "s16":
+		return "0i16"
+	case "s32":
+		return "0i32"
+	case "s64":
+		return "0i64"
+	case "f32":
+		return "0.0f32"
+	case "f64":
+		return "0.0"
+	case "bool":
+		return "false"
+	case "char":
+		return `'\0'`
+	default:
+		return "0"
 	}
 }
 

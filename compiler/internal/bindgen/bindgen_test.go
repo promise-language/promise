@@ -45,7 +45,10 @@ func TestToSnake(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"Descriptor", "descriptor"},
 		{"DescriptorStat", "descriptor_stat"},
-		{"ABC", "a_b_c"},
+		{"ABC", "abc"},
+		{"DOMException", "dom_exception"},
+		{"getURL", "get_url"},
+		{"URLParser", "url_parser"},
 	}
 	for _, tt := range tests {
 		got := toSnake(tt.in)
@@ -346,7 +349,7 @@ func TestCodegenFlags(t *testing.T) {
 	out := GeneratePromise(modules, "wasi")
 	assertContains(t, out, "type OpenFlags `public `value {")
 	assertContains(t, out, "int _bits `value;")
-	assertContains(t, out, "get read OpenFlags `public `static {")
+	assertContains(t, out, "get read OpenFlags `public `global {")
 	assertContains(t, out, "return OpenFlags(_bits: 1);")
 	assertContains(t, out, "return OpenFlags(_bits: 2);")
 	assertContains(t, out, "return OpenFlags(_bits: 4);")
@@ -542,10 +545,31 @@ func TestCodegenConstructorWrapper(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "create(string path) Descriptor `public `static {")
-	assertContains(t, out, "handle := _descriptor_constructor(path);")
-	assertContains(t, out, "return Descriptor(_handle: handle);")
+	assertContains(t, out, "new(~this, string path) `public {")
+	assertContains(t, out, "this._handle = _descriptor_constructor(path);")
 	assertContains(t, out, "`wasm_import(\"wasi:fs/types\", \"[constructor]descriptor\")")
+}
+
+// TestCodegenConstructorWrapperNoParams covers the no-argument constructor path
+// where the `thisParam` builder stays as bare `~this` (params == "").
+// Without this, the empty-params branch is not exercised by the other constructor tests.
+func TestCodegenConstructorWrapperNoParams(t *testing.T) {
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "wasi:fs/types",
+		Resources: []Resource{{
+			Name: "Descriptor",
+			Drop: true,
+			Methods: []Func{{
+				Name:       "constructor",
+				Kind:       FuncConstructor,
+				ImportName: "[constructor]descriptor",
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "wasi")
+	assertContains(t, out, "new(~this) `public {")
+	assertContains(t, out, "this._handle = _descriptor_constructor();")
 }
 
 func TestCodegenConstructorWrapperFailable(t *testing.T) {
@@ -565,8 +589,8 @@ func TestCodegenConstructorWrapperFailable(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "create!(string path) Descriptor `public `static {")
-	assertContains(t, out, "handle := _descriptor_constructor(path)^;")
+	assertContains(t, out, "new!(~this, string path) `public {")
+	assertContains(t, out, "this._handle = _descriptor_constructor(path)^;")
 }
 
 func TestCodegenStaticWrapper(t *testing.T) {
@@ -586,7 +610,7 @@ func TestCodegenStaticWrapper(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "open(string path) u32 `public `static {")
+	assertContains(t, out, "open(string path) u32 `public `global {")
 	assertContains(t, out, "return _descriptor_open(path);")
 	assertContains(t, out, "`wasm_import(\"wasi:fs/types\", \"[static]descriptor.open\")")
 }
@@ -608,7 +632,7 @@ func TestCodegenStaticWrapperFailable(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "open!(string path) u32 `public `static {")
+	assertContains(t, out, "open!(string path) u32 `public `global {")
 	assertContains(t, out, "return _descriptor_open(path)^;")
 }
 
@@ -628,7 +652,7 @@ func TestCodegenStaticWrapperVoid(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "reset() `public `static {")
+	assertContains(t, out, "reset() `public `global {")
 	assertContains(t, out, "_descriptor_reset();")
 }
 
@@ -3619,7 +3643,7 @@ func TestCodegenStaticWrapperResourceReturn(t *testing.T) {
 		},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "open_file(string path) File `public `static {")
+	assertContains(t, out, "open_file(string path) File `public `global {")
 	assertContains(t, out, "handle := _dir_open_file(path);")
 	assertContains(t, out, "return File(_handle: handle);")
 }
@@ -3640,7 +3664,7 @@ func TestCodegenStaticWrapperOptionalResourceReturn(t *testing.T) {
 		},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "find_file(string name) File? `public `static {")
+	assertContains(t, out, "find_file(string name) File? `public `global {")
 	assertContains(t, out, "handle := _dir_find_file(name);")
 	assertContains(t, out, "if handle == 0 { return none; }")
 	assertContains(t, out, "return File(_handle: handle);")
@@ -3869,4 +3893,43 @@ func TestIdlCamelCaseConsecutiveUnderscores(t *testing.T) {
 	if got != "aB" {
 		t.Errorf("idlCamelCase(%q) = %q, want %q", "a__b", got, "aB")
 	}
+}
+
+// TestWebIdlDOMExceptionGeneratesValidPromise — regression test for T0695.
+// The DOMException interface exercises three things that used to produce invalid Promise:
+//   - a `constructor(...)` member (used to emit `create(...) ... `public `static`,
+//     which is doubly invalid: `static is not a Promise meta, and Promise
+//     constructors are named `new` with a `~this` first parameter).
+//   - a `const unsigned short` member (used to emit `... `public `static {`).
+//   - the interface name `DOMException` itself, which the old non-acronym-aware
+//     `toSnake` mangled into `d_o_m_exception_*`.
+func TestWebIdlDOMExceptionGeneratesValidPromise(t *testing.T) {
+	src := `interface DOMException {
+		constructor(optional DOMString message = "", optional DOMString name = "Error");
+		const unsigned short INDEX_SIZE_ERR = 1;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	webidl.Merge(file)
+	out := GeneratePromise(WebIdlToIR(file), "web")
+
+	// No `static remains anywhere in the generated source.
+	if strings.Contains(out, "`static") {
+		t.Errorf("generated source still contains `static:\n%s", out)
+	}
+	// Constructor uses Promise's new(~this, ...) shape.
+	assertContains(t, out, "new(~this, string? message, string? name) `public {")
+	assertContains(t, out, "this._handle = _dom_exception_constructor(message, name);")
+	// Const member is emitted as a receiver-less `global method.
+	assertContains(t, out, "`public `global")
+	// Snake-case is acronym-aware: DOMException -> dom_exception, not d_o_m_exception.
+	assertContains(t, out, "_dom_exception_constructor")
+	if strings.Contains(out, "_d_o_m_exception") {
+		t.Errorf("snake_case is not acronym-aware:\n%s", out)
+	}
+	// The wasm import name preserves the original IDL identifier verbatim —
+	// the snake-case change only affects internal Promise aliases.
+	assertContains(t, out, "`wasm_import(\"promise_env\", \"DOMException.constructor\")")
 }

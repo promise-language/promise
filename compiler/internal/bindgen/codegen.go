@@ -200,7 +200,7 @@ func (g *generator) emitFlags(t Type) {
 	// Named flag constants as static methods
 	for i, f := range t.Fields {
 		g.line("`doc \"Flag: %s\"", f.Name)
-		g.line("get %s %s `public `static {", f.Name, t.Name)
+		g.line("get %s %s `public `global {", f.Name, t.Name)
 		g.indent++
 		g.line("return %s(_bits: %d);", t.Name, 1<<uint(i))
 		g.indent--
@@ -293,19 +293,22 @@ func (g *generator) emitConstructorWrapper(m Func, resourceName, importModule st
 	externName := fmt.Sprintf("_%s_constructor", toSnake(resourceName))
 	externParams := g.formatExternCallArgs(m.Params)
 
-	if isFailable(m.Results) {
-		g.line("create!(%s) %s `public `static {", params, resourceName)
-		g.indent++
-		g.line("handle := %s(%s)^;", externName, externParams)
-		g.line("return %s(_handle: handle);", resourceName)
-		g.indent--
-	} else {
-		g.line("create(%s) %s `public `static {", params, resourceName)
-		g.indent++
-		g.line("handle := %s(%s);", externName, externParams)
-		g.line("return %s(_handle: handle);", resourceName)
-		g.indent--
+	thisParam := "~this"
+	if params != "" {
+		thisParam = "~this, " + params
 	}
+
+	failMark := ""
+	raise := ""
+	if isFailable(m.Results) {
+		failMark = "!"
+		raise = "^"
+	}
+
+	g.line("new%s(%s) `public {", failMark, thisParam)
+	g.indent++
+	g.line("this._handle = %s(%s)%s;", externName, externParams, raise)
+	g.indent--
 	g.line("}")
 }
 
@@ -328,25 +331,25 @@ func (g *generator) emitStaticWrapper(m Func, resourceName, importModule string)
 	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
 
 	if !g.canonicalABI && isResReturn {
-		g.line("%s%s(%s) %s `public `static {", m.Name, failMark, params, retType)
+		g.line("%s%s(%s) %s `public `global {", m.Name, failMark, params, retType)
 		g.indent++
 		g.line("handle := %s(%s)%s;", externName, externParams, raise)
 		g.line("return %s(_handle: handle);", resReturn)
 		g.indent--
 	} else if !g.canonicalABI && isOptResReturn {
-		g.line("%s%s(%s) %s `public `static {", m.Name, failMark, params, retType)
+		g.line("%s%s(%s) %s `public `global {", m.Name, failMark, params, retType)
 		g.indent++
 		g.line("handle := %s(%s)%s;", externName, externParams, raise)
 		g.line("if handle == 0 { return none; }")
 		g.line("return %s(_handle: handle);", optResReturn)
 		g.indent--
 	} else if retType != "" {
-		g.line("%s%s(%s) %s `public `static {", m.Name, failMark, params, retType)
+		g.line("%s%s(%s) %s `public `global {", m.Name, failMark, params, retType)
 		g.indent++
 		g.line("return %s(%s)%s;", externName, externParams, raise)
 		g.indent--
 	} else {
-		g.line("%s%s(%s) `public `static {", m.Name, failMark, params)
+		g.line("%s%s(%s) `public `global {", m.Name, failMark, params)
 		g.indent++
 		g.line("%s(%s)%s;", externName, externParams, raise)
 		g.indent--
@@ -753,29 +756,30 @@ func isFailable(results []TypeRef) bool {
 	return false
 }
 
-// toSnake converts PascalCase to snake_case
+// toSnake converts PascalCase to snake_case, acronym-aware.
+// "DOMException" -> "dom_exception", "getURL" -> "get_url".
 func toSnake(s string) string {
-	var b strings.Builder
-	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteRune(r + 32) // toLower
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+	return splitOnCase(s, '_')
 }
 
-// toKebab converts PascalCase to kebab-case
+// toKebab converts PascalCase to kebab-case, acronym-aware.
+// "DOMException" -> "dom-exception".
 func toKebab(s string) string {
+	return splitOnCase(s, '-')
+}
+
+// splitOnCase inserts sep before each uppercase letter that begins a new word.
+// A new word starts when the previous rune was lowercase, or when the next rune
+// is lowercase (collapsing runs of uppercase letters as acronyms).
+func splitOnCase(s string, sep byte) string {
 	var b strings.Builder
-	for i, r := range s {
+	runes := []rune(s)
+	for i, r := range runes {
 		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('-')
+			prevLower := i > 0 && runes[i-1] >= 'a' && runes[i-1] <= 'z'
+			nextLower := i+1 < len(runes) && runes[i+1] >= 'a' && runes[i+1] <= 'z'
+			if i > 0 && (prevLower || nextLower) {
+				b.WriteByte(sep)
 			}
 			b.WriteRune(r + 32) // toLower
 		} else {

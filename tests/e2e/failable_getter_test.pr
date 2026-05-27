@@ -1,0 +1,153 @@
+// T0709: A compound assignment / inc-dec reads the current value via a getter
+// before applying the operator. When that read getter is failable, the error
+// must auto-propagate to the enclosing failable function. Before T0709 the
+// failable result struct was fed straight into the arithmetic op (malformed IR)
+// and the `raise` was silently lost.
+type Gauge {
+  int x;
+  get value! int {
+    if this.x < 0 {
+      raise error(message: "neg");
+    }
+    return this.x;
+  }
+  set value(int v) {
+    this.x = v;
+  }
+}
+
+// --- compound assignment through a failable property getter ----------------
+
+bump!(Gauge ~g, int delta) {
+  g.value += delta;
+}
+
+try_getter_compound_ok() bool {
+  g := Gauge(x: 5);
+  bump(g, 3)? e {
+    return false;
+  };
+  return g.x == 8;
+}
+
+try_getter_compound_propagates() bool {
+  g := Gauge(x: -1);
+  // The read getter raises before the setter runs, so the error must surface
+  // and the receiver state must be unchanged.
+  bump(g, 5)? e {
+    return e.message == "neg" && g.x == -1;
+  };
+  return false;
+}
+
+test_failable_getter_compound_ok() `test {
+  assert(try_getter_compound_ok(), "failable getter compound succeeds when guard passes");
+}
+
+test_failable_getter_compound_propagates() `test {
+  assert(try_getter_compound_propagates(), "failable getter compound read propagates raise (T0709)");
+}
+
+// --- compound / inc-dec through a failable [] index getter -----------------
+
+type Cell {
+  int x;
+  []!(int k) int {
+    if this.x < 0 {
+      raise error(message: "neg cell");
+    }
+    return this.x;
+  }
+  []=(int k, int v) {
+    this.x = v;
+  }
+}
+
+bump_cell!(Cell ~c, int delta) {
+  c[0] += delta;
+}
+
+inc_cell!(Cell ~c) {
+  c[0]++;
+}
+
+try_index_compound_ok() bool {
+  c := Cell(x: 5);
+  bump_cell(c, 3)? e {
+    return false;
+  };
+  return c.x == 8;
+}
+
+try_index_compound_propagates() bool {
+  c := Cell(x: -1);
+  bump_cell(c, 5)? e {
+    return e.message == "neg cell" && c.x == -1;
+  };
+  return false;
+}
+
+try_index_incdec_propagates() bool {
+  c := Cell(x: -1);
+  inc_cell(c)? e {
+    return e.message == "neg cell" && c.x == -1;
+  };
+  return false;
+}
+
+test_failable_index_getter_compound_ok() `test {
+  assert(try_index_compound_ok(), "failable [] compound succeeds when guard passes");
+}
+
+test_failable_index_getter_compound_propagates() `test {
+  assert(try_index_compound_propagates(), "failable [] compound read propagates raise (T0709)");
+}
+
+test_failable_index_getter_incdec_propagates() `test {
+  assert(try_index_incdec_propagates(), "failable [] inc/dec read propagates raise (T0709)");
+}
+
+// --- failable getter compound inside a monomorphized generic method ---------
+
+type Box[T] {
+  T payload;
+  int counter;
+  get count! int {
+    if this.counter < 0 {
+      raise error(message: "neg");
+    }
+    return this.counter;
+  }
+  set count(int v) {
+    this.counter = v;
+  }
+  bump!() {
+    // The compound read goes through the failable getter while T is substituted
+    // (this method is mono'd per instantiation) — exercises the typeSubst path.
+    this.count += 1;
+  }
+}
+
+try_generic_compound_ok() bool {
+  b := Box[int](payload: 0, counter: 10);
+  b.bump()? e {
+    return false;
+  };
+  return b.counter == 11;
+}
+
+try_generic_compound_propagates() bool {
+  b := Box[int](payload: 0, counter: -1);
+  b.bump()? e {
+    return e.message == "neg" && b.counter == -1;
+  };
+  return false;
+}
+
+test_failable_generic_getter_compound_ok() `test {
+  assert(try_generic_compound_ok(), "failable getter compound in generic method succeeds");
+}
+
+test_failable_generic_getter_compound_propagates() `test {
+  assert(try_generic_compound_propagates(), "failable getter compound in generic method propagates raise (T0709)");
+}

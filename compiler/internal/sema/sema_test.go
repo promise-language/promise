@@ -11160,6 +11160,220 @@ func TestFailableSliceSetterRequiresFailableScope(t *testing.T) {
 	expectError(t, errs, "failable setter assignment must be in a failable function")
 }
 
+// --- T0709: failable getter read in compound assignment / inc-dec ----------
+
+// TestFailableGetterCompoundRequiresFailableScope: a compound assignment reads
+// the current value via a failable getter, so a non-failable scope is rejected.
+func TestFailableGetterCompoundRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			get count! int { if this.x < 0 { raise error("neg"); } return this.x; }
+			set count(int v) { this.x = v; }
+		}
+		main() {
+			f := Foo(x: 0);
+			f.count += 5;
+		}
+	`)
+	expectError(t, errs, "failable getter read in compound assignment must be in a failable function")
+}
+
+// TestFailableGetterCompoundInFailableScopeOk: the same compound in a failable
+// function is valid (auto-propagates).
+func TestFailableGetterCompoundInFailableScopeOk(t *testing.T) {
+	checkOK(t, `
+		type Foo {
+			int x;
+			get count! int { if this.x < 0 { raise error("neg"); } return this.x; }
+			set count(int v) { this.x = v; }
+		}
+		main!() {
+			f := Foo(x: 0);
+			f.count += 5;
+		}
+	`)
+}
+
+// TestFailableGetterPlainAssignNoError: a plain (non-compound) assignment does
+// NOT read the getter, so a failable getter with a non-failable setter is fine.
+func TestFailableGetterPlainAssignNoError(t *testing.T) {
+	checkOK(t, `
+		type Foo {
+			int x;
+			get count! int { if this.x < 0 { raise error("neg"); } return this.x; }
+			set count(int v) { this.x = v; }
+		}
+		main() {
+			f := Foo(x: 0);
+			f.count = 5;
+		}
+	`)
+}
+
+// TestFailableSetterCompoundSingleError: a failable setter + non-failable getter
+// in a compound assignment must emit exactly one error (the setter message),
+// confirming the else-if guard against a duplicate diagnostic.
+func TestFailableSetterCompoundSingleError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+			set count!(int v) { if v < 0 { raise error("neg"); } this.x = v; }
+		}
+		main() {
+			f := Foo(x: 0);
+			f.count += 5;
+		}
+	`)
+	n := 0
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "must be in a failable function") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("expected exactly 1 failable-scope error, got %d: %v", n, errs)
+	}
+	expectError(t, errs, "failable setter assignment must be in a failable function")
+}
+
+// TestFailableIdentGetterCompoundRequiresFailableScope: same-file IdentExpr
+// getter (`counter += v`) covers the `*ast.IdentExpr` branch of
+// assignmentGetterCanError.
+func TestFailableIdentGetterCompoundRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		int _backing = 0;
+		get counter! int { if _backing < 0 { raise error("neg"); } return _backing; }
+		set counter(int v) { _backing = v; }
+		main() {
+			counter += 3;
+		}
+	`)
+	expectError(t, errs, "failable getter read in compound assignment must be in a failable function")
+}
+
+// TestFailableIndexGetterCompoundRequiresFailableScope: `m[k] += v` reads via a
+// failable [] getter — covers the IndexExpr branch via indexGetterCanError.
+func TestFailableIndexGetterCompoundRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box {
+			int x;
+			[]!(int k) int { if this.x < 0 { raise error("neg"); } return this.x; }
+			[]=(int k, int v) { this.x = v; }
+		}
+		main() {
+			b := Box(x: 0);
+			b[0] += 5;
+		}
+	`)
+	expectError(t, errs, "failable getter read in compound assignment must be in a failable function")
+}
+
+// TestFailableIndexGetterIncDecRequiresFailableScope: `b[0]++` reads via a
+// failable [] getter — covers the checkIncDecStmt path.
+func TestFailableIndexGetterIncDecRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box {
+			int x;
+			[]!(int k) int { if this.x < 0 { raise error("neg"); } return this.x; }
+			[]=(int k, int v) { this.x = v; }
+		}
+		main() {
+			b := Box(x: 0);
+			b[0]++;
+		}
+	`)
+	expectError(t, errs, "failable index read in inc/dec must be in a failable function")
+}
+
+// TestFailableIndexGetterIncDecInFailableScopeOk: positive case for inc/dec.
+func TestFailableIndexGetterIncDecInFailableScopeOk(t *testing.T) {
+	checkOK(t, `
+		type Box {
+			int x;
+			[]!(int k) int { if this.x < 0 { raise error("neg"); } return this.x; }
+			[]=(int k, int v) { this.x = v; }
+		}
+		main!() {
+			b := Box(x: 0);
+			b[0]++;
+		}
+	`)
+}
+
+// TestFailableModuleGetterCompoundRequiresFailableScope: `mod.value += v` where
+// the module-level getter is failable. Covers the MemberExpr → Module branch of
+// assignmentGetterCanError.
+func TestFailableModuleGetterCompoundRequiresFailableScope(t *testing.T) {
+	getterSig := types.NewSignature(nil, nil, types.TypInt, true) // canError = true
+	setterSig := types.NewSignature(nil,
+		[]*types.Param{types.NewParam("v", types.TypInt, 0)},
+		types.TypVoid, false)
+	modScope := makeModuleScope(t, map[string]*types.Signature{
+		"value":     getterSig,
+		"value$set": setterSig,
+	})
+	if obj := modScope.Lookup("value"); obj != nil {
+		if fn, ok := obj.(*types.Func); ok {
+			fn.SetGetter(true)
+		}
+	}
+	if obj := modScope.Lookup("value$set"); obj != nil {
+		if fn, ok := obj.(*types.Func); ok {
+			fn.SetSetter(true)
+		}
+	}
+	_, errs := checkWithModules(t, `
+		use mymod;
+		main() {
+			mymod.value += 5;
+		}
+	`, map[string]*types.Scope{"mymod": modScope})
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "failable getter read in compound assignment must be in a failable function") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected failable-getter error, got: %v", errs)
+	}
+}
+
+// TestFailableModuleGetterCompoundInFailableScopeOk: positive case for the
+// module-getter compound branch.
+func TestFailableModuleGetterCompoundInFailableScopeOk(t *testing.T) {
+	getterSig := types.NewSignature(nil, nil, types.TypInt, true)
+	setterSig := types.NewSignature(nil,
+		[]*types.Param{types.NewParam("v", types.TypInt, 0)},
+		types.TypVoid, false)
+	modScope := makeModuleScope(t, map[string]*types.Signature{
+		"value":     getterSig,
+		"value$set": setterSig,
+	})
+	if obj := modScope.Lookup("value"); obj != nil {
+		if fn, ok := obj.(*types.Func); ok {
+			fn.SetGetter(true)
+		}
+	}
+	if obj := modScope.Lookup("value$set"); obj != nil {
+		if fn, ok := obj.(*types.Func); ok {
+			fn.SetSetter(true)
+		}
+	}
+	_, errs := checkWithModules(t, `
+		use mymod;
+		main!() {
+			mymod.value += 5;
+		}
+	`, map[string]*types.Scope{"mymod": modScope})
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
 func TestMonoSetterNotAllowed(t *testing.T) {
 	// T0703: `mono setters remain disallowed (symmetric with the `mono getter ban).
 	errs := checkErrs(t, "type Box[T] {\n"+

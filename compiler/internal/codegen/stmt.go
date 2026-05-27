@@ -514,6 +514,28 @@ func (c *Compiler) propagateIfFailable(result value.Value) {
 	}
 }
 
+// unwrapFailableCompoundRead unwraps a getter call result used as the "current"
+// value in a compound assignment, propagating the error when the getter is
+// failable. operandType is the (sema, pre-subst) value type of the compound
+// target — the result is unwrapped only when its LLVM type is exactly the
+// failable-result shape {i1, operandLLVM, i8*}. A non-failable value-type/Map
+// getter returns {i8*, ...} (field0 = i8*) and won't match; a non-failable
+// scalar getter returns a non-struct. T0709.
+func (c *Compiler) unwrapFailableCompoundRead(current value.Value, operandType types.Type) value.Value {
+	st, ok := current.Type().(*irtypes.StructType)
+	if !ok {
+		return current
+	}
+	inner := operandType
+	if c.typeSubst != nil {
+		inner = types.Substitute(inner, c.typeSubst)
+	}
+	if st.Equal(computeResultType(c.resolveType(inner))) {
+		return c.genAutoPropagateValue(current)
+	}
+	return current
+}
+
 // emitFailableResultPropagation emits the auto.propagate / auto.ok branch for
 // a failable LLVM call result. After this returns, c.block is the auto.ok block
 // and the caller can continue emitting code (the ok-value, if any, is unused
@@ -5580,7 +5602,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					if !ok {
 						panic(fmt.Sprintf("codegen: compound assignment to setter %s but no getter found", target.Name))
 					}
-					current := c.block.NewCall(getterFn)
+					var current value.Value = c.block.NewCall(getterFn)
+					current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
 					val = c.genCompoundOp(s.Op, c.info.Types[target], current, val)
 				}
 				setterCall := c.block.NewCall(setterFn, val)
@@ -6136,6 +6159,7 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 					panic(fmt.Sprintf("codegen: compound assignment to setter %s.%s but no getter found", named, target.Field))
 				}
 				current := c.genGetterCall(target, targetType, named, getter)
+				current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
 				val = c.genCompoundOp(op, c.info.Types[target], current, val)
 			}
 			c.genSetterCall(target, targetType, named, setter, val)
@@ -6482,7 +6506,8 @@ func (c *Compiler) genModuleSetterAssign(target *ast.MemberExpr, moduleName stri
 		if !ok {
 			panic(fmt.Sprintf("codegen: compound assignment to module setter %s.%s but no getter found", moduleName, target.Field))
 		}
-		current := c.block.NewCall(getterFn)
+		var current value.Value = c.block.NewCall(getterFn)
+		current = c.unwrapFailableCompoundRead(current, c.info.Types[target]) // T0709
 		val = c.genCompoundOp(op, c.info.Types[target], current, val)
 	}
 
@@ -6661,19 +6686,27 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 				instancePtr = c.extractInstancePtr(targetVal)
 			}
 			// Read, inc/dec, write
-			optVal := c.block.NewCall(getFn, instancePtr, keyVal)
-			hasVal := c.block.NewExtractValue(optVal, 0)
-			okBlock := c.newBlock("incdec.method.ok")
-			panicBlock := c.newBlock("incdec.method.panic")
-			c.block.NewCondBr(hasVal, okBlock, panicBlock)
+			var optVal value.Value = c.block.NewCall(getFn, instancePtr, keyVal)
+			if indexMethod.Sig().CanError() { // T0709: failable [] read propagates
+				optVal = c.genAutoPropagateValue(optVal)
+			}
+			var current value.Value
+			if _, isOpt := indexMethod.Sig().Result().(*types.Optional); isOpt {
+				hasVal := c.block.NewExtractValue(optVal, 0)
+				okBlock := c.newBlock("incdec.method.ok")
+				panicBlock := c.newBlock("incdec.method.panic")
+				c.block.NewCondBr(hasVal, okBlock, panicBlock)
 
-			c.block = panicBlock
-			panicMsg := c.makeGlobalString("inc/dec on missing key")
-			c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-			c.emitPanicReturn()
+				c.block = panicBlock
+				panicMsg := c.makeGlobalString("inc/dec on missing key")
+				c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+				c.emitPanicReturn()
 
-			c.block = okBlock
-			current := c.block.NewExtractValue(optVal, 1)
+				c.block = okBlock
+				current = c.block.NewExtractValue(optVal, 1)
+			} else {
+				current = optVal
+			}
 			result := c.emitNativeOp(named, op, current, nil)
 			setCall := c.block.NewCall(setFn, instancePtr, keyVal, result)
 			c.propagateIfFailable(setCall) // T0708
@@ -9093,21 +9126,39 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 	}
 
 	// Call [] to get current value (returns V? for maps)
-	optVal := c.block.NewCall(getFn, instancePtr, keyVal)
+	var optVal value.Value = c.block.NewCall(getFn, instancePtr, keyVal)
 
-	// Check has_value flag (field 0 of optional struct)
-	hasVal := c.block.NewExtractValue(optVal, 0)
-	okBlock := c.newBlock("mapcomp.ok")
-	panicBlock := c.newBlock("mapcomp.panic")
-	c.block.NewCondBr(hasVal, okBlock, panicBlock)
+	// T0709: a failable [] read propagates its error before the value is used.
+	var indexMethod *types.Method
+	if n := extractNamed(targetType); n != nil {
+		indexMethod = n.LookupMethod("[]")
+	}
+	isOpt := true // existing behavior: [] returns V? (optional presence)
+	if indexMethod != nil {
+		if indexMethod.Sig().CanError() {
+			optVal = c.genAutoPropagateValue(optVal)
+		}
+		_, isOpt = indexMethod.Sig().Result().(*types.Optional)
+	}
 
-	c.block = panicBlock
-	panicMsg := c.makeGlobalString("compound assignment on missing key")
-	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-	c.emitPanicReturn()
+	var current value.Value
+	if isOpt {
+		// Check has_value flag (field 0 of optional struct)
+		hasVal := c.block.NewExtractValue(optVal, 0)
+		okBlock := c.newBlock("mapcomp.ok")
+		panicBlock := c.newBlock("mapcomp.panic")
+		c.block.NewCondBr(hasVal, okBlock, panicBlock)
 
-	c.block = okBlock
-	current := c.block.NewExtractValue(optVal, 1)
+		c.block = panicBlock
+		panicMsg := c.makeGlobalString("compound assignment on missing key")
+		c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+		c.emitPanicReturn()
+
+		c.block = okBlock
+		current = c.block.NewExtractValue(optVal, 1)
+	} else {
+		current = optVal
+	}
 	// Compound op operates on V (the unwrapped element type from V?). For maps,
 	// V is the second type argument; for other containers, derive from the []=
 	// method's value parameter.

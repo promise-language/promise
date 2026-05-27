@@ -18258,6 +18258,118 @@ func TestFailableSetterCompoundAssignIR(t *testing.T) {
 	assertContains(t, ir, "auto.propagate")
 }
 
+// TestFailableGetterCompoundAssignIR — `f.count += v` reads the current value
+// via a failable getter; the read must auto-propagate and the arithmetic must
+// operate on the extracted ok value, not the failable result struct. T0709.
+func TestFailableGetterCompoundAssignIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			int x;
+			get count! int {
+				if this.x < 0 { raise error("neg"); }
+				return this.x;
+			}
+			set count(int v) { this.x = v; }
+		}
+		main!() {
+			f := Foo(x: 0);
+			f.count += 5;
+		}
+	`)
+	// Getter is defined with a failable result type.
+	assertContains(t, ir, "define { i1, i64, i8* } @Foo.count")
+	// Read routes through auto-propagation and the op uses the ok payload (field 1).
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+	assertContains(t, ir, "extractvalue { i1, i64, i8* }")
+	// The arithmetic must NOT be applied to the raw failable struct (the old bug).
+	assertNotContains(t, ir, "add { i1, i64, i8* }")
+}
+
+// TestFailableIndexGetterCompoundIR — `b[0] += v` reads via a failable [] getter
+// (non-optional return), which must auto-propagate before the op. T0709.
+func TestFailableIndexGetterCompoundIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			int x;
+			[]!(int k) int {
+				if this.x < 0 { raise error("neg"); }
+				return this.x;
+			}
+			[]=(int k, int v) { this.x = v; }
+		}
+		main!() {
+			b := Box(x: 0);
+			b[0] += 5;
+		}
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "extractvalue { i1, i64, i8* }")
+	assertNotContains(t, ir, "add { i1, i64, i8* }")
+}
+
+// TestFailableIndexGetterIncDecIR — `b[0]++` reads via a failable [] getter,
+// which must auto-propagate before the increment. T0709.
+func TestFailableIndexGetterIncDecIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			int x;
+			[]!(int k) int {
+				if this.x < 0 { raise error("neg"); }
+				return this.x;
+			}
+			[]=(int k, int v) { this.x = v; }
+		}
+		main!() {
+			b := Box(x: 0);
+			b[0]++;
+		}
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "extractvalue { i1, i64, i8* }")
+	assertNotContains(t, ir, "add { i1, i64, i8* }")
+}
+
+// TestMapCompoundAssignUnchangedIR — non-failable [] (Map) compound assignment
+// keeps the optional-presence shape untouched by the T0709 change.
+func TestMapCompoundAssignUnchangedIR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			map[string, int] m = {"a": 1};
+			m["a"] += 5;
+		}
+	`)
+	// Map [] is non-failable: the presence-check path (not auto.propagate) is used.
+	assertContains(t, ir, "mapcomp.ok")
+	assertNotContains(t, ir, "add { i1, i64, i8* }")
+}
+
+// TestFailableGetterCompoundInGenericMethodIR — a failable getter compound inside
+// a monomorphized generic method body exercises unwrapFailableCompoundRead's
+// typeSubst path (c.typeSubst != nil). The operand is a concrete int field, so
+// the native += is valid while the method itself is mono'd per instantiation. T0709.
+func TestFailableGetterCompoundInGenericMethodIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T payload;
+			int counter;
+			get count! int {
+				if this.counter < 0 { raise error("neg"); }
+				return this.counter;
+			}
+			set count(int v) { this.counter = v; }
+			bump!() { this.count += 1; }
+		}
+		main!() {
+			b := Box[int](payload: 0, counter: 10);
+			b.bump();
+		}
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "extractvalue { i1, i64, i8* }")
+	assertNotContains(t, ir, "add { i1, i64, i8* }")
+}
+
 func TestGenericInheritanceNonGenericChild(t *testing.T) {
 	ir := generateIR(t, `
 		type Holder[T] { T value; }

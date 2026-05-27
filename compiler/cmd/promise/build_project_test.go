@@ -242,10 +242,10 @@ func TestEmitIRProjectMultiFile(t *testing.T) {
 // *fatal parse error* on line 1 that masked the whole file. This drives the real
 // CLI path (bind → emit-ir) and asserts those ANTLR parse diagnostics are gone.
 //
-// It deliberately does NOT require a clean (exit 0) compile: the JsValue enum is
-// still mis-lowered as a resource handle (T0723), a separate codegen layer, so
-// emit-ir currently exits non-zero with a *sema* error. This test stays green
-// both now and once T0723 lands (when there are no diagnostics at all).
+// It deliberately scopes itself to the *parse* layer (exit code ignored): the
+// clean-compile (exit 0) acceptance now lives in TestBindWebIdlUnionAttrCompilesClean
+// since T0723 landed the JsValue FFI lowering. Kept as the focused parse-diagnostic
+// guard so a future regression in the `doc form is attributed here, not to codegen.
 func TestBindWebIdlJsValueDocParses(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping bind+emit-ir integration test in short mode")
@@ -281,6 +281,50 @@ interface Element {
 	for _, bad := range []string{"extraneous input '`'", "no viable alternative at input 'doc"} {
 		if strings.Contains(output, bad) {
 			t.Errorf("doc annotations failed to parse (%q):\n%s", bad, output)
+		}
+	}
+}
+
+// TestBindWebIdlUnionAttrCompilesClean is the end-to-end acceptance for T0723:
+// `promise bind webidl` on an IDL with a union-typed (JsValue) attribute, then
+// `promise emit-ir -target wasm32-web`, must compile cleanly (exit 0). Before the
+// fix, JsValue was mislowered as a resource handle (`JsValue(_handle:)` /
+// `value._handle`), producing two sema errors. This is the compile-clean
+// counterpart to TestBindWebIdlJsValueDocParses (which only guards the parse layer).
+func TestBindWebIdlUnionAttrCompilesClean(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	idlPath := filepath.Join(dir, "element.idl")
+	idl := `[Exposed=Window]
+interface Element {
+	attribute (TrustedHTML or DOMString) innerHTML;
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "idl", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	prPath := filepath.Join(outDir, "idl.pr")
+	emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-web", prPath)
+	out, err := emitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("emit-ir -target wasm32-web failed (want exit 0): %v\n%s", err, out)
+	}
+	// Guard against the two specific T0723 sema diagnostics regressing.
+	output := string(out)
+	for _, bad := range []string{"cannot construct enum JsValue", "has no variant or method _handle"} {
+		if strings.Contains(output, bad) {
+			t.Errorf("T0723 sema error resurfaced (%q):\n%s", bad, output)
 		}
 	}
 }

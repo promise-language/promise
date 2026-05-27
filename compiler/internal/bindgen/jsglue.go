@@ -323,6 +323,14 @@ func isStringType(ref TypeRef) bool {
 }
 
 // isRefType checks if a TypeRef maps to a JS object reference (handle).
+//
+// This intentionally returns true for *every* NamedKind, including JsValue. On the
+// JS side a JsValue genuinely IS a ref-table handle (a JS value is stored/loaded via
+// _refStore/_refLoad, identical to a resource), so the existing read/write glue is
+// correct for it here. The Promise (WASM) side is where JsValue diverges from a
+// resource — it marshals to/from the JsValue *enum* rather than an `i32 _handle`
+// field; that asymmetry is handled in codegen.go (isJsValueRef and friends, T0723).
+// Do NOT exclude JsValue here, or the JS-side conversion will break.
 func isRefType(ref TypeRef) bool {
 	if ref.Kind == NamedKind {
 		return true

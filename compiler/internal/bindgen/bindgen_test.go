@@ -3687,6 +3687,206 @@ func TestWebIdlAttributeResourceTyped(t *testing.T) {
 	assertContains(t, out, "_element_set_parent(i32 handle, i32 value)")
 }
 
+// TestWebIdlJsValueAttributeMarshalsViaRef verifies that a union-typed (JsValue)
+// attribute marshals via the opaque JS-ref representation, NOT the resource-handle
+// path: the getter lifts the extern's i32 into JsValue.Object, the setter lowers
+// via _to_ref(), and the enum gains the internal _to_ref method. Regression for
+// T0723 (JsValue was mislowered as a resource `_handle`). The negative asserts are
+// scoped to `value._handle` / `JsValue(_handle:` — a bare `._handle` legitimately
+// appears as `this._handle` (the Element resource's own handle).
+func TestWebIdlJsValueAttributeMarshalsViaRef(t *testing.T) {
+	src := `interface Element {
+		attribute (TrustedHTML or DOMString) v;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	out := GeneratePromise(modules, "web")
+
+	// Getter: i32 ref lifted into a JsValue.Object (not handle→resource construction).
+	assertContains(t, out, "get v JsValue `public {")
+	assertContains(t, out, "ref := _element_v(this._handle);")
+	assertContains(t, out, "return JsValue.Object(_js_ref: ref as int);")
+
+	// Setter: JsValue lowered via _to_ref() (not value._handle).
+	assertContains(t, out, "set v(JsValue value) `public {")
+	assertContains(t, out, "_element_set_v(this._handle, value._to_ref());")
+
+	// Enum carries the internal write-marshalling method.
+	assertContains(t, out, "_to_ref(this) i32 {")
+
+	// Externs stay i32 handles (JS ref-table indices).
+	assertContains(t, out, "_element_v(i32 handle) i32")
+	assertContains(t, out, "_element_set_v(i32 handle, i32 value)")
+
+	// The resource-handle path must NOT be used for JsValue.
+	assertNotContains(t, out, "JsValue(_handle:")
+	assertNotContains(t, out, "value._handle")
+}
+
+// TestWebIdlJsValueMethodParamAndResult verifies JsValue marshalling on a regular
+// method: an `any` param lowers via _to_ref() and an `any` result lifts into
+// JsValue.Object — the method-wrapper counterpart to the attribute path (T0723).
+func TestWebIdlJsValueMethodParamAndResult(t *testing.T) {
+	src := `interface Foo {
+		any wrap(any x);
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	out := GeneratePromise(modules, "web")
+
+	assertContains(t, out, "wrap(this, JsValue x) JsValue `public {")
+	assertContains(t, out, "ref := _foo_wrap(this._handle, x._to_ref());")
+	assertContains(t, out, "return JsValue.Object(_js_ref: ref as int);")
+	assertContains(t, out, "_foo_wrap(i32 handle, i32 x) i32")
+	assertNotContains(t, out, "x._handle")
+}
+
+// TestResourceReturnTypeExcludesJsValue verifies the predicate split between
+// resources and JsValue: a JsValue result is NOT a resource return but IS a
+// jsValueReturnType, while a genuine resource name still classifies as a resource.
+// The same split holds for the optional forms (T0723).
+func TestResourceReturnTypeExcludesJsValue(t *testing.T) {
+	jsv := []TypeRef{{Kind: NamedKind, Name: "JsValue"}}
+	if name, ok := resourceReturnType(jsv); ok {
+		t.Errorf("resourceReturnType(JsValue) = (%q, true), want (\"\", false)", name)
+	}
+	if !jsValueReturnType(jsv) {
+		t.Error("jsValueReturnType(JsValue) = false, want true")
+	}
+
+	res := []TypeRef{{Kind: NamedKind, Name: "Node"}}
+	if name, ok := resourceReturnType(res); !ok || name != "Node" {
+		t.Errorf("resourceReturnType(Node) = (%q, %v), want (\"Node\", true)", name, ok)
+	}
+	if jsValueReturnType(res) {
+		t.Error("jsValueReturnType(Node) = true, want false")
+	}
+
+	optJsv := []TypeRef{{Kind: OptionKind, Elem: &TypeRef{Kind: NamedKind, Name: "JsValue"}}}
+	if name, ok := optionResourceReturnType(optJsv); ok {
+		t.Errorf("optionResourceReturnType(Option<JsValue>) = (%q, true), want (\"\", false)", name)
+	}
+	if !optionJsValueReturnType(optJsv) {
+		t.Error("optionJsValueReturnType(Option<JsValue>) = false, want true")
+	}
+
+	optRes := []TypeRef{{Kind: OptionKind, Elem: &TypeRef{Kind: NamedKind, Name: "Node"}}}
+	if name, ok := optionResourceReturnType(optRes); !ok || name != "Node" {
+		t.Errorf("optionResourceReturnType(Option<Node>) = (%q, %v), want (\"Node\", true)", name, ok)
+	}
+	if optionJsValueReturnType(optRes) {
+		t.Error("optionJsValueReturnType(Option<Node>) = true, want false")
+	}
+}
+
+// TestFreeFuncJsValueResult verifies the free-function wrapper lifts a JsValue
+// result via JsValue.Object. Built by hand because neither frontend emits a free
+// function returning JsValue today (T0723).
+func TestFreeFuncJsValueResult(t *testing.T) {
+	modules := []*Module{{
+		Name:         "web",
+		ImportModule: "web:dom/api",
+		HasJsValue:   true,
+		Functions: []Func{{
+			Name:       "make_thing",
+			Kind:       FuncFree,
+			ImportName: "make-thing",
+			Results:    []TypeRef{{Kind: NamedKind, Name: "JsValue"}},
+		}},
+	}}
+	out := GeneratePromise(modules, "web")
+	assertContains(t, out, "make_thing() JsValue `public `target(web) {")
+	assertContains(t, out, "ref := _make_thing();")
+	assertContains(t, out, "return JsValue.Object(_js_ref: ref as int);")
+	assertNotContains(t, out, "JsValue(_handle:")
+}
+
+// TestStaticWrapperJsValueParamAndResult covers the JsValue paths in the static
+// method wrapper: a static op with a JsValue param (lowered via formatExternCallArgs)
+// and a JsValue result (lifted into JsValue.Object). Built by hand because the
+// WebIDL frontend does not emit a static operation with union-typed param/result
+// today. Closes the emitStaticWrapper jsValueReturnType + formatExternCallArgs
+// isJsValueRef coverage gap (T0723).
+func TestStaticWrapperJsValueParamAndResult(t *testing.T) {
+	modules := []*Module{{
+		Name:         "web",
+		ImportModule: "web:dom/api",
+		HasJsValue:   true,
+		Resources: []Resource{{
+			Name: "Thing",
+			Methods: []Func{{
+				Name:       "wrap_static",
+				Kind:       FuncStatic,
+				ImportName: "wrap-static",
+				Params:     []Param{{Name: "x", Type: TypeRef{Kind: NamedKind, Name: "JsValue"}}},
+				Results:    []TypeRef{{Kind: NamedKind, Name: "JsValue"}},
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "web")
+
+	assertContains(t, out, "wrap_static(JsValue x) JsValue `public `global {")
+	// Param lowered via _to_ref() (formatExternCallArgs), result lifted to JsValue.Object.
+	assertContains(t, out, "ref := _thing_wrap_static(x._to_ref());")
+	assertContains(t, out, "return JsValue.Object(_js_ref: ref as int);")
+	// Extern is a plain i32→i32 (JS ref handles), not a resource handle.
+	assertContains(t, out, "_thing_wrap_static(i32 x) i32")
+	assertNotContains(t, out, "x._handle")
+}
+
+// TestOptionJsValueResultWrappers covers the Option<JsValue> result branch in all
+// four wrapper kinds — getter, method, static, and free function — which the
+// WebIDL frontend does not currently produce (nullable unions don't reach IR as
+// Option<JsValue>). Each wrapper takes the i32 ref, returns none on 0, else lifts
+// into JsValue.Object. The per-wrapper `ref := _thing_<name>(...)` / `_maybe_thing()`
+// lines uniquely identify each branch's emission (T0723).
+func TestOptionJsValueResultWrappers(t *testing.T) {
+	optJsValue := []TypeRef{{Kind: OptionKind, Elem: &TypeRef{Kind: NamedKind, Name: "JsValue"}}}
+	modules := []*Module{{
+		Name:         "web",
+		ImportModule: "web:dom/api",
+		HasJsValue:   true,
+		Resources: []Resource{{
+			Name: "Thing",
+			Methods: []Func{
+				{Name: "cached", Kind: FuncMethod, Accessor: AccessorGetter, ImportName: "cached", Results: optJsValue},
+				{Name: "lookup", Kind: FuncMethod, ImportName: "lookup", Results: optJsValue},
+				{Name: "find_static", Kind: FuncStatic, ImportName: "find-static", Results: optJsValue},
+			},
+		}},
+		Functions: []Func{
+			{Name: "maybe_thing", Kind: FuncFree, ImportName: "maybe-thing", Results: optJsValue},
+		},
+	}}
+	out := GeneratePromise(modules, "web")
+
+	// Getter (emitGetterWrapper Option<JsValue> branch).
+	assertContains(t, out, "get cached JsValue? `public {")
+	assertContains(t, out, "ref := _thing_cached(this._handle);")
+	// Method (emitMethodWrapper Option<JsValue> branch).
+	assertContains(t, out, "lookup(this) JsValue? `public {")
+	assertContains(t, out, "ref := _thing_lookup(this._handle);")
+	// Static (emitStaticWrapper Option<JsValue> branch).
+	assertContains(t, out, "find_static() JsValue? `public `global {")
+	assertContains(t, out, "ref := _thing_find_static();")
+	// Free function (emitFreeFunc Option<JsValue> branch).
+	assertContains(t, out, "maybe_thing() JsValue? `public `target(web) {")
+	assertContains(t, out, "ref := _maybe_thing();")
+	// All four share the none-on-0 / lift-to-Object marshalling.
+	assertContains(t, out, "if ref == 0 { return none; }")
+	assertContains(t, out, "return JsValue.Object(_js_ref: ref as int);")
+	// Never the resource-handle path.
+	assertNotContains(t, out, "JsValue(_handle:")
+}
+
 // TestWebIdlAttributeNullableResource exercises the option-resource-return
 // branch in `emitGetterWrapper` (extern returns i32, 0 → none).
 func TestWebIdlAttributeNullableResource(t *testing.T) {

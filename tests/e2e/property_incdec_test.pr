@@ -1,0 +1,119 @@
+// T0712: inc/dec (`x++` / `x--`) on a getter/setter property (no backing field)
+// must read via the getter, apply the op, and write via the setter. Before T0712
+// this panicked codegen with "no field count on type Foo". With failable
+// accessors, the getter read and setter write auto-propagate the error to the
+// enclosing failable function.
+type Counter {
+  int x;
+  get value int {
+    return this.x;
+  }
+  set value(int v) {
+    this.x = v;
+  }
+}
+
+// --- non-failable property inc/dec -----------------------------------------
+
+test_property_incdec() `test {
+  c := Counter(x: 5);
+  c.value++;
+  assert(c.value == 6, "property ++ reads getter, writes setter");
+  c.value--;
+  c.value--;
+  assert(c.value == 4, "property -- decrements through the setter");
+}
+
+// --- failable property inc/dec ----------------------------------------------
+
+type Guarded {
+  int x;
+  get amount! int {
+    if this.x < 0 {
+      raise error(message: "negative read");
+    }
+    return this.x;
+  }
+  set amount!(int v) {
+    if v < 0 {
+      raise error(message: "negative write");
+    }
+    this.x = v;
+  }
+}
+
+// The getter read (x=1 >= 0) and setter write (2 >= 0) both succeed.
+bump_failable!(Guarded ~g) {
+  g.amount++;
+}
+
+// x starts at 0; the getter read succeeds (0 >= 0) but -- drives the new value
+// to -1, which the setter rejects — the error must propagate.
+drop_failable!(Guarded ~g) {
+  g.amount--;
+}
+
+try_failable_incdec_ok() bool {
+  g := Guarded(x: 1);
+  bump_failable(g)? e {
+    return false;
+  };
+  return g.x == 2;
+}
+
+try_failable_incdec_propagates() bool {
+  g := Guarded(x: 0);
+  drop_failable(g)? e {
+    // Error must reach this handler AND the state must NOT have advanced past
+    // the raise (the setter raises before assigning).
+    return e.message == "negative write" && g.x == 0;
+  };
+  return false;
+}
+
+test_failable_property_incdec_ok() `test {
+  assert(try_failable_incdec_ok(), "failable property ++ succeeds when guards pass");
+}
+
+test_failable_property_incdec_propagates() `test {
+  assert(try_failable_incdec_propagates(), "failable property setter raise reaches caller (T0712)");
+}
+
+// --- generic-type property inc/dec ------------------------------------------
+
+type Box[T] {
+  T v;
+  int count;
+  get total int {
+    return this.count;
+  }
+  set total(int x) {
+    this.count = x;
+  }
+  // `this.total++` inside a generic method body exercises codegen's receiver-type
+  // substitution (Box[T] -> Box[int]) for the property dispatch.
+  bump() {
+    this.total++;
+  }
+}
+
+test_generic_property_incdec() `test {
+  b := Box[int](v: 5, count: 10);
+  b.bump();
+  assert(b.total == 11, "property ++ inside a generic method dispatches through mono accessors");
+  b.total--;
+  b.total--;
+  assert(b.total == 9, "generic property -- at the call site dispatches through mono accessors");
+}
+
+// --- property inc/dec through a borrowed receiver ---------------------------
+
+bump_through_ref(Counter ~c) {
+  c.value++;
+}
+
+test_property_incdec_through_mut_ref() `test {
+  c := Counter(x: 10);
+  bump_through_ref(c);
+  assert(c.value == 11, "property ++ through a mutable borrow reaches the setter");
+}

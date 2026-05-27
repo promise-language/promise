@@ -1497,6 +1497,56 @@ func (c *Checker) checkIncDecStmt(s *ast.IncDecStmt) {
 	if c.indexGetterCanError(s.Target) && (c.curFunc == nil || !c.curFunc.CanError()) {
 		c.errorf(s.Pos(), "failable index read in inc/dec must be in a failable function: mark the enclosing function with `!`")
 	}
+
+	// Inc/dec is a write: validate the target is assignable, mirroring
+	// checkAssignStmt. Without this a read-only property / `final field / type
+	// without []= reaches codegen and panics (or silently mutates a final). T0712.
+	switch tgt := s.Target.(type) {
+	case *ast.MemberExpr:
+		c.checkSetterAvailable(tgt)
+		// T0712: inc/dec on a property reads via the getter and writes via the
+		// setter. If either accessor is failable, the read/write propagates, so
+		// require a failable enclosing function (previously a hard codegen panic).
+		if c.incDecPropertyCanError(tgt) && (c.curFunc == nil || !c.curFunc.CanError()) {
+			c.errorf(s.Pos(), "failable property inc/dec must be in a failable function: mark the enclosing function with `!`")
+		}
+	case *ast.IndexExpr:
+		c.checkIndexAssignAvailable(tgt)
+	}
+}
+
+// incDecPropertyCanError reports whether inc/dec on a property reads or writes
+// via a failable getter or setter. Mirrors assignmentSetterCanError's MemberExpr
+// branch. T0712.
+func (c *Checker) incDecPropertyCanError(me *ast.MemberExpr) bool {
+	targetType := c.info.Types[me.Target]
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
+	}
+	var named *types.Named
+	switch t := targetType.(type) {
+	case *types.Named:
+		named = t
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			named = n
+		}
+	}
+	if named == nil {
+		return false
+	}
+	setter := named.LookupSetter(me.Field)
+	if setter == nil {
+		return false // direct field — no accessor failability
+	}
+	if setter.Sig().CanError() {
+		return true
+	}
+	getter := named.LookupGetter(me.Field)
+	return getter != nil && getter.Sig().CanError()
 }
 
 func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {

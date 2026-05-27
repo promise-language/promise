@@ -11025,6 +11025,175 @@ func TestFailableSetterInFailableScopeOk(t *testing.T) {
 	`)
 }
 
+// TestPropertyIncDecOk: T0712. Inc/dec on a non-failable property is valid in a
+// non-failable scope.
+func TestPropertyIncDecOk(t *testing.T) {
+	checkOK(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+			set count(int v) { this.x = v; }
+		}
+		main() {
+			f := Foo(x: 0);
+			f.count++;
+		}
+	`)
+}
+
+// TestFailablePropertyIncDecRequiresFailableScope: T0712. A failable setter
+// property inc/dec must be in a failable function (codegen propagates the error).
+func TestFailablePropertyIncDecRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+			set count!(int v) { if v < 0 { raise error("neg"); } this.x = v; }
+		}
+		main() {
+			f := Foo(x: 0);
+			f.count++;
+		}
+	`)
+	expectError(t, errs, "failable property inc/dec must be in a failable function")
+}
+
+// TestFailablePropertyIncDecInFailableScopeOk: T0712. The same inc/dec in a
+// failable function is valid (auto-propagates).
+func TestFailablePropertyIncDecInFailableScopeOk(t *testing.T) {
+	checkOK(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+			set count!(int v) { if v < 0 { raise error("neg"); } this.x = v; }
+		}
+		main!() {
+			f := Foo(x: 0);
+			f.count++;
+		}
+	`)
+}
+
+// TestFailableGetterPropertyIncDecRequiresFailableScope: T0712. A failable
+// *getter* (with a non-failable setter) also requires a failable scope, since
+// inc/dec reads the current value via the getter.
+func TestFailableGetterPropertyIncDecRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			get count! int { if this.x < 0 { raise error("neg"); } return this.x; }
+			set count(int v) { this.x = v; }
+		}
+		main() {
+			f := Foo(x: 0);
+			f.count++;
+		}
+	`)
+	expectError(t, errs, "failable property inc/dec must be in a failable function")
+}
+
+// TestReadOnlyPropertyIncDecRejected: T0712. Inc/dec on a getter-only property
+// (no setter) is a write to an unwritable target — must error in sema, not
+// panic in codegen.
+func TestReadOnlyPropertyIncDecRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+		}
+		main() {
+			f := Foo(x: 1);
+			f.count++;
+		}
+	`)
+	expectError(t, errs, "property 'count' has no setter")
+}
+
+// TestFinalFieldIncDecRejected: T0712. Inc/dec on a `final field is a mutation
+// and must be rejected, mirroring compound assignment.
+func TestFinalFieldIncDecRejected(t *testing.T) {
+	errs := checkErrs(t, "type Foo { int x `final; }\n"+
+		"main() {\n"+
+		"f := Foo(x: 1);\n"+
+		"f.x++;\n"+
+		"}\n")
+	expectError(t, errs, "cannot assign to `final field 'x'")
+}
+
+// TestIndexIncDecWithoutAssignRejected: T0712. Inc/dec on an index of a type
+// with [] but no []= must error in sema, not panic in codegen.
+func TestIndexIncDecWithoutAssignRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box {
+			int v;
+			[](int k) int { return this.v; }
+		}
+		main() {
+			b := Box(v: 1);
+			b[0]++;
+		}
+	`)
+	expectError(t, errs, "does not support index assignment")
+}
+
+// TestGenericPropertyIncDecOk: T0712. Inc/dec on a property of a generic type
+// instance type-checks (exercises incDecPropertyCanError's *types.Instance branch).
+func TestGenericPropertyIncDecOk(t *testing.T) {
+	checkOK(t, `
+		type Box[T] {
+			T v;
+			get item T { return this.v; }
+			set item(T x) { this.v = x; }
+		}
+		main() {
+			b := Box[int](v: 5);
+			b.item++;
+		}
+	`)
+}
+
+// TestFailablePropertyIncDecThroughMutRefRequiresFailableScope: T0712. A failable
+// property accessed through a mutable borrow (`~c`) still requires a failable
+// scope — exercises incDecPropertyCanError's MutRef unwrap.
+func TestFailablePropertyIncDecThroughMutRefRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Counter {
+			int n;
+			get value int { return this.n; }
+			set value!(int v) { if v < 0 { raise error("neg"); } this.n = v; }
+		}
+		bump(Counter ~c) {
+			c.value++;
+		}
+		main() {
+			c := Counter(n: 0);
+			bump(c);
+		}
+	`)
+	expectError(t, errs, "failable property inc/dec must be in a failable function")
+}
+
+// TestFailablePropertyIncDecThroughSharedRefRequiresFailableScope: T0712. Same
+// through a shared borrow (`&c`) — exercises incDecPropertyCanError's SharedRef
+// unwrap.
+func TestFailablePropertyIncDecThroughSharedRefRequiresFailableScope(t *testing.T) {
+	errs := checkErrs(t, `
+		type Counter {
+			int n;
+			get value int { return this.n; }
+			set value!(int v) { if v < 0 { raise error("neg"); } this.n = v; }
+		}
+		bump(Counter &c) {
+			c.value++;
+		}
+		main() {
+			c := Counter(n: 0);
+			bump(c);
+		}
+	`)
+	expectError(t, errs, "failable property inc/dec must be in a failable function")
+}
+
 // TestFailableGlobalSetterRequiresFailableScope: T0708. `global failable setters
 // (T0703 + T0708 combined) follow the same rule.
 func TestFailableGlobalSetterRequiresFailableScope(t *testing.T) {

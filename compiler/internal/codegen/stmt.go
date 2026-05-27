@@ -6604,6 +6604,33 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 		result := c.emitNativeOp(named, op, current, nil)
 		c.block.NewStore(result, alloca)
 	case *ast.MemberExpr:
+		// T0712: property getter/setter dispatch. genFieldPtr panics ("no field")
+		// for a property with no backing field; read via the getter, apply the op,
+		// and write via the setter — mirroring genMemberAssign's compound path.
+		recvType := c.info.Types[t.Target]
+		if c.typeSubst != nil {
+			recvType = types.Substitute(recvType, c.typeSubst)
+		}
+		if recvNamed := extractNamed(recvType); recvNamed != nil {
+			if setter := recvNamed.LookupSetter(t.Field); setter != nil {
+				getter := recvNamed.LookupGetter(t.Field)
+				if getter == nil {
+					panic(fmt.Sprintf("codegen: inc/dec on property %s.%s but no getter found", recvNamed, t.Field))
+				}
+				current := c.genGetterCall(t, recvType, recvNamed, getter)
+				// A failable getter returns {i1, T, i8*}; unwrap + propagate the
+				// error. Safe detector: an inc/dec operand is always a numeric
+				// scalar, so a non-failable getter returns a scalar (non-struct);
+				// only a failable one returns a struct. genSetterCall already
+				// auto-propagates the setter result via propagateIfFailable (T0708).
+				if _, isStruct := current.Type().(*irtypes.StructType); isStruct {
+					current = c.genAutoPropagateValue(current)
+				}
+				result := c.emitNativeOp(named, op, current, nil)
+				c.genSetterCall(t, recvType, recvNamed, setter, result)
+				return
+			}
+		}
 		// Load field, apply op, store back
 		fieldPtr := c.genFieldPtr(t)
 		fieldType := c.info.Types[target]

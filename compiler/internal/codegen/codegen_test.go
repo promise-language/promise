@@ -18370,6 +18370,94 @@ func TestFailableGetterCompoundInGenericMethodIR(t *testing.T) {
 	assertNotContains(t, ir, "add { i1, i64, i8* }")
 }
 
+// TestPropertyIncDecIR: T0712. `f.count++` on a getter/setter property (no
+// backing field) must read via the getter and write via the setter, not panic
+// in genFieldPtr.
+func TestPropertyIncDecIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+			set count(int v) { this.x = v; }
+		}
+		main() {
+			f := Foo(x: 1);
+			f.count++;
+		}
+	`)
+	assertContains(t, ir, "call i64 @Foo.count(")
+	assertContains(t, ir, "add i64")
+	assertContains(t, ir, "call void @Foo.count$set(")
+}
+
+// TestPropertyDecIR: T0712. `f.count--` lowers to a subtraction.
+func TestPropertyDecIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			int x;
+			get count int { return this.x; }
+			set count(int v) { this.x = v; }
+		}
+		main() {
+			f := Foo(x: 1);
+			f.count--;
+		}
+	`)
+	assertContains(t, ir, "call i64 @Foo.count(")
+	assertContains(t, ir, "sub i64")
+	assertContains(t, ir, "call void @Foo.count$set(")
+}
+
+// TestFailablePropertyIncDecIR: T0712. With a failable getter and setter, the
+// getter result is unwrapped (extractvalue from {i1, i64, i8*}) before the op,
+// and the setter result auto-propagates — no malformed `add { i1` on the struct.
+func TestFailablePropertyIncDecIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			int x;
+			get count! int { if this.x < 0 { raise error("neg"); } return this.x; }
+			set count!(int v) { if v < 0 { raise error("neg"); } this.x = v; }
+		}
+		main!() {
+			f := Foo(x: 0);
+			f.count++;
+		}
+	`)
+	assertContains(t, ir, "define { i1, i64, i8* } @Foo.count(")
+	assertContains(t, ir, "extractvalue { i1, i64, i8* }")
+	assertContains(t, ir, "call { i1, i8* } @Foo.count$set")
+	assertContains(t, ir, "auto.propagate")
+	assertNotContains(t, ir, "add { i1")
+}
+
+// TestGenericPropertyIncDecIR: T0712. Inc/dec on a property of a generic type
+// must dispatch through the monomorphized getter/setter. `this.total++` inside a
+// generic method body exercises the receiver-type substitution branch
+// (c.typeSubst) in genIncDecTarget — the receiver type is Box[T] and must be
+// substituted to Box[int] before the accessor lookup.
+func TestGenericPropertyIncDecIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T v;
+			int count;
+			get total int { return this.count; }
+			set total(int x) { this.count = x; }
+			bump() { this.total++; }
+		}
+		main() {
+			b := Box[int](v: 5, count: 10);
+			b.bump();
+			b.total--;
+		}
+	`)
+	// Inside the monomorphized bump(): this.total++ dispatches through mono accessors.
+	assertContains(t, ir, `call i64 @"Box[int].total"(`)
+	assertContains(t, ir, "add i64")
+	assertContains(t, ir, `call void @"Box[int].total$set"(`)
+	// At main's call site: b.total-- (concrete-instance receiver, no typeSubst).
+	assertContains(t, ir, "sub i64")
+}
+
 func TestGenericInheritanceNonGenericChild(t *testing.T) {
 	ir := generateIR(t, `
 		type Holder[T] { T value; }

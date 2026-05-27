@@ -9080,6 +9080,18 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 			// in the map's Slot enum data.
 			c.claimHeapTemp(valVal)
 			c.claimHeapTemp(keyVal)
+			// T0736: Also claim string/vector stmt-temps for the moved key/value.
+			// trackStringTemp / trackVectorTempWithElemType (string concat,
+			// to_string(), split(), vector-returning calls) register in stmtTemps,
+			// NOT heapTemps — claimHeapTemp doesn't see them. The []= method moves
+			// ~K key / ~V value into the map, so without claiming, the caller's
+			// stmt-temp cleanup drops the string/vector while the map's scope-exit
+			// drop also drops it → double-free ("invalid free (bad header magic)").
+			// Only the ident path above is currently covered; a bare heap
+			// sub-expression ({"k": a + b}) needs this. Mirrors the genArrayLit
+			// element path (T0366).
+			c.claimStringTemp(valVal)
+			c.claimStringTemp(keyVal)
 			// B0281: Clear enum ctor temps created during this entry's evaluation.
 			// Map.[]= copies the enum value by LLVM value into the map's Slot.
 			// Both the temp alloca and the Slot share the same inner pointers

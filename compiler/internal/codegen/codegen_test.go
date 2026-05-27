@@ -22926,6 +22926,41 @@ func TestMapLitClearsDropFlagOnKey(t *testing.T) {
 	assertContains(t, ir, "store i1 false, i1* %k.dropflag")
 }
 
+// T0736: A map literal whose value is a bare heap sub-expression (string concat,
+// to_string(), split(), ...) registers a string/vector *stmt-temp*, not a heap
+// temp. genMapLit must claim that stmt-temp (clear its drop flag) after the []=
+// move — otherwise the caller's stmt-temp cleanup drops the string while the
+// map's scope-exit drop drops it again → double-free ("invalid free"). The
+// ident-`clearDropFlag` (B0280) and `claimHeapTemp` paths don't cover stmt-temps.
+func TestT0736MapLitClaimsHeapStringValueTemp(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			map[string, string] m = {"k": "a" + "b"};
+		}
+	`)
+	// Scope to the user's main goroutine body — the stdlib also defines and
+	// calls Map[string, string].[]= elsewhere. The call site of .goroutine.main
+	// (in the entry main) precedes its definition, so locate the definition
+	// directly rather than via extractFunction.
+	start := strings.Index(ir, "define i8* @.goroutine.main")
+	if start < 0 {
+		t.Fatal("expected .goroutine.main")
+	}
+	rest := ir[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("expected closing brace")
+	}
+	body := rest[:end+2]
+	assertContains(t, body, "call i8* @promise_string_concat")
+	// The concat value is moved into the map via []=, then its stmt-temp drop
+	// flag is cleared (claimed) — the []= call is immediately followed by a
+	// flag-clearing store. Without the fix the next line is instead the
+	// `store { i8*, i8* } ... %m` map binding (no claim), and this fails.
+	assertContainsMatch(t, body,
+		`(?s)call void @"Map\[string, string\]\.\[\]="\([^\n]*\)\n\s*store i1 false, i1\*`)
+}
+
 // T0610: A vector literal whose element is a moved local variable of a type
 // Vector.drop's element-walk frees (heap-user-with-drop, string, droppable
 // enum, Mutex/Task, nested vector) must clear the source ident's drop flag —

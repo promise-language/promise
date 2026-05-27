@@ -12,6 +12,20 @@ type Resource {
   }
 }
 
+// A Hashable+Equal heap user type usable as a map KEY (has a droppable string
+// field, so it must be claimed when moved into the map via a bare-ctor literal).
+type HeapKey {
+  string name;
+  get hash int {
+    return this.name.hash;
+  }
+  == (this, HeapKey other) bool {
+    return this.name == other.name;
+  }
+  drop(~this) {
+  }
+}
+
 // B0280: Enum variable moved into map literal must not be double-dropped.
 test_enum_value_moved_into_map() `test {
   Animal a = Animal.Cat(name: "Luna");
@@ -57,6 +71,153 @@ test_user_type_value_moved_into_map() `test {
   Resource r = Resource(label: "db");
   map[string, Resource] m = {
     "res": r
+  };
+  assert(m.len == 1, "map has 1 entry");
+}
+
+// T0736: A map literal whose VALUE is a bare heap sub-expression (string concat,
+// to_string(), split(), ...) registers a string/vector stmt-temp, NOT a heap
+// temp — claimHeapTemp doesn't see it. genMapLit must claim that stmt-temp after
+// the []= move (claimStringTemp), otherwise the caller's stmt-temp cleanup drops
+// the value while the map's scope-exit drop drops it again → double-free
+// ("invalid free (bad header magic)"). Only the ident path (B0280) was covered.
+
+// T0736 repro #1: heap string value, bound to a local, construct-only (was CRASH).
+test_heap_string_value_construct_only() `test {
+  map[string, string] m = {
+    "k": "va" + "lue"
+  };
+  assert(m.len == 1, "map has 1 entry");
+}
+
+// T0736 repro #2: heap string value, read back (was CRASH).
+test_heap_string_value_read_back() `test {
+  map[string, string] m = {
+    "k": "va" + "lue"
+  };
+  if v := m["k"] {
+    assert(v == "value", "value round-trips");
+  } else {
+    assert(false, "key missing");
+  }
+}
+
+// T0736: value produced by to_string() — another string stmt-temp kind.
+test_heap_value_to_string() `test {
+  map[string, string] m = {
+    "k": 42.to_string()
+  };
+  if v := m["k"] {
+    assert(v == "42", "to_string value round-trips");
+  } else {
+    assert(false, "key missing");
+  }
+}
+
+// T0736: heap KEY produced by concat — the key stmt-temp is claimed too.
+test_heap_key_concat() `test {
+  map[string, int] m = {
+    ("a" + "b"): 7
+  };
+  if v := m["ab"] {
+    assert(v == 7, "heap-key value round-trips");
+  } else {
+    assert(false, "key missing");
+  }
+}
+
+// T0736: both heap KEY and heap VALUE stmt-temps in one entry.
+test_heap_key_and_value() `test {
+  map[string, string] m = {
+    ("a" + "b"): "c" + "d"
+  };
+  if v := m["ab"] {
+    assert(v == "cd", "heap key+value round-trips");
+  } else {
+    assert(false, "key missing");
+  }
+}
+
+// T0736: Vector value via split() — a vector stmt-temp claimed via claimStringTemp.
+test_vector_value_stmt_temp() `test {
+  map[string, Vector[string]] m = {
+    "k": "a,b,c".split(",")
+  };
+  if v := m["k"] {
+    assert(v.len == 3, "vector value has 3 entries");
+  } else {
+    assert(false, "key missing");
+  }
+}
+
+// T0736: 50-iteration loop building a heap-value map literal — per-iteration leak guard.
+test_heap_value_loop_no_leak() `test {
+  int i = 0;
+  while i < 50 {
+    map[string, string] m = {
+      "k": "va" + "lue"
+    };
+    assert(m.len == 1, "iteration map has 1 entry");
+    i = i + 1;
+  }
+}
+
+// T0736: multi-entry literal with a heap-string value in EACH entry. The
+// claimStringTemp claim sits inside genMapLit's per-entry loop, so this guards
+// that it runs for every entry, not just the first (was CRASH without the fix).
+test_heap_value_multi_entry() `test {
+  map[string, string] m = {
+    "a": "x" + "1",
+    "b": "y" + "2",
+    "c": "z" + "3"
+  };
+  assert(m.len == 3, "map has 3 entries");
+  if v := m["b"] {
+    assert(v == "y2", "middle entry round-trips");
+  } else {
+    assert(false, "key missing");
+  }
+}
+
+// Coverage gap surfaced while auditing T0736: the sibling `claimHeapTemp(valVal)`
+// line (B0280) guards bare heap *values* in a map literal, but no test covered
+// the value position — `test_user_type_value_moved_into_map` above uses an IDENT
+// (protected by clearDropFlag), so it passes even if claimHeapTemp regresses.
+// The two tests below crash ("invalid free (bad header magic)") if
+// claimHeapTemp(valVal) is removed, while claimStringTemp does NOT cover them.
+
+// Bare heap-user-type constructor as a map-literal value (not an ident) — a heap
+// temp claimed by claimHeapTemp, distinct from the string/vector stmt-temp path.
+test_bare_ctor_user_type_value() `test {
+  map[string, Resource] m = {
+    "r": Resource(label: "db")
+  };
+  assert(m.len == 1, "map has 1 entry");
+}
+
+// Non-const Vector[int] literal as a map-literal value — tracked as a heap temp
+// (claimHeapTemp), unlike split()'s Vector[string] result which is a stmt-temp
+// (claimStringTemp). Non-const elements force a heap allocation (not rodata).
+test_vector_literal_value() `test {
+  int a = 1;
+  int b = 2;
+  map[string, Vector[int]] m = {
+    "k": [a, b, a + b]
+  };
+  if v := m["k"] {
+    assert(v.len == 3, "vector value has 3 entries");
+  } else {
+    assert(false, "key missing");
+  }
+}
+
+// Symmetric to the value case: a bare heap-user-type constructor as a map-literal
+// KEY is claimed by claimHeapTemp(keyVal). No prior test covered the heap KEY
+// position — test_string_key_moved_into_map uses an ident, and test_heap_key_concat
+// is a string stmt-temp (claimStringTemp). Crashes if claimHeapTemp(keyVal) regresses.
+test_bare_ctor_user_type_key() `test {
+  map[HeapKey, int] m = {
+    HeapKey(name: "a"): 1
   };
   assert(m.len == 1, "map has 1 entry");
 }

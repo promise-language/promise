@@ -15686,6 +15686,147 @@ func TestGoBlockValueResultMonomorphized(t *testing.T) {
 	assertNotContains(t, ir, "inttoptr i64 1 to i8*")
 }
 
+// T0688: a value-returning go-block whose trailing expression is a bare
+// reference to a captured BORROWED heap parameter (no outer drop binding)
+// must dup the value at spawn time. Without the dup, the coroutine reads
+// the param after the caller's stmt-temp has been dropped — UAF / double-free.
+// The dup is emitted in the spawning function's IR (outside the coroutine),
+// while the param is still valid, before the goroutine is enqueued.
+func TestT0688_BareCapturedHeapParamDups(t *testing.T) {
+	ir := generateIR(t, `
+		ngmake(string v) Task[string] {
+			return go { v };
+		}
+		main() {
+			task[string] x = ngmake("a" + "b");
+			r := <-x;
+		}
+	`)
+	// The spawning function (ngmake) dups its borrowed string param via
+	// promise_string_new before passing the value to the goroutine ramp.
+	// The dup IR lives between ngmake's load of v.addr and the call to
+	// .goroutine.N.
+	ngmakeIR := extractFunction(ir, "__user.ngmake")
+	assertContains(t, ngmakeIR, "@promise_string_new(")
+	assertContains(t, ngmakeIR, "call i8* @.goroutine.")
+}
+
+// T0688: a value-returning go-block capturing a heap LOCAL (already owned by
+// the outer scope, has a drop binding) must NOT add an extra dup — the
+// existing B0354 ownership-transfer machinery handles it correctly. Adding a
+// dup here would leak the original.
+func TestT0688_BareCapturedLocalNoExtraDup(t *testing.T) {
+	ir := generateIR(t, `
+		m() Task[string] {
+			s := "x" + "y";
+			return go { s };
+		}
+		main() {
+			task[string] x = m();
+			r := <-x;
+		}
+	`)
+	mIR := extractFunction(ir, "__user.m")
+	// m allocates the concat result via promise_string_concat — that's the
+	// captured local. There must NOT be an additional promise_string_new
+	// for a dup of the captured local.
+	assertContains(t, mIR, "@promise_string_concat(")
+	assertNotContains(t, mIR, "@promise_string_new(")
+}
+
+// T0688: a value-returning go-block whose trailing expression is DERIVED
+// from a borrowed param (e.g. `v + "!"`) already produces a fresh heap value
+// inside the coroutine. The spawning function must NOT dup the param — the
+// dup is only required for bare-ident trailing values where the loaded
+// pointer would alias the caller's stmt-temp.
+func TestT0688_DerivedTrailingNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		ngmake(string v) Task[string] {
+			return go { v + "!" };
+		}
+		main() {
+			task[string] x = ngmake("hi");
+			r := <-x;
+		}
+	`)
+	ngmakeIR := extractFunction(ir, "__user.ngmake")
+	// No spawn-side dup: the only string allocations in the coroutine flow
+	// of ngmake should be from the goroutine call path, not a pre-spawn
+	// promise_string_new of the borrowed param.
+	assertNotContains(t, ngmakeIR, "@promise_string_new(")
+}
+
+// T0688: Vector[T] dispatch branch in dupBorrowedCaptureForResult. The
+// spawning function must emit a vector dup (pal_alloc + memcpy of header +
+// data) before passing the value to the goroutine — without it the awaiter
+// would store the dangling vector pointer into G.result_ptr.
+func TestT0688_BareCapturedVectorParamDups(t *testing.T) {
+	ir := generateIR(t, `
+		ngvec(Vector[int] v) Task[Vector[int]] {
+			return go { v };
+		}
+		main() {
+			task[Vector[int]] x = ngvec([1, 2, 3]);
+			r := <-x;
+		}
+	`)
+	ngvecIR := extractFunction(ir, "__user.ngvec")
+	// dupVector emits vecdup.copy / vecdup.merge labels — the spawning
+	// function must contain them before the goroutine call.
+	assertContains(t, ngvecIR, "vecdup.copy")
+	assertContains(t, ngvecIR, "vecdup.merge")
+	assertContains(t, ngvecIR, "call i8* @.goroutine.")
+}
+
+// T0688: heap user type dispatch branch in dupBorrowedCaptureForResult. The
+// spawning function must emit a heapdup (pal_alloc + memcpy of the instance
+// plus deep-clone of any droppable sub-fields like nested strings) before
+// passing the value to the goroutine.
+func TestT0688_BareCapturedHeapUserTypeDups(t *testing.T) {
+	ir := generateIR(t, `
+		type T0688DupBox {
+			string name;
+			int value;
+		}
+		ngbox(T0688DupBox b) Task[T0688DupBox] {
+			return go { b };
+		}
+		main() {
+			task[T0688DupBox] x = ngbox(T0688DupBox(name: "n", value: 1));
+			r := <-x;
+		}
+	`)
+	ngboxIR := extractFunction(ir, "__user.ngbox")
+	// dupHeapValue emits heapdup.copy / heapdup.merge labels — the spawning
+	// function must contain them before the goroutine call.
+	assertContains(t, ngboxIR, "heapdup.copy")
+	assertContains(t, ngboxIR, "heapdup.merge")
+	assertContains(t, ngboxIR, "call i8* @.goroutine.")
+}
+
+// T0688: regression guard — Copy-type param (int) must NOT trigger any
+// dup. The eligibility predicate goElemNeedsBorrowedCaptureDup returns
+// false for primitives, so the spawning function has zero dup overhead.
+func TestT0688_CopyParamNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		ngint(int v) Task[int] {
+			return go { v };
+		}
+		main() {
+			task[int] x = ngint(42);
+			r := <-x;
+		}
+	`)
+	ngintIR := extractFunction(ir, "__user.ngint")
+	// No dup of any kind should be emitted (no vecdup, no heapdup, no string
+	// dup). The capture is the bare i64 value, passed directly to the
+	// goroutine.
+	assertNotContains(t, ngintIR, "vecdup.copy")
+	assertNotContains(t, ngintIR, "heapdup.copy")
+	assertNotContains(t, ngintIR, "@promise_string_new(")
+	assertContains(t, ngintIR, "call i8* @.goroutine.")
+}
+
 func TestChannelSendInCoroutineSuspends(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

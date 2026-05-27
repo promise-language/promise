@@ -11841,6 +11841,63 @@ func collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca)
 	return names
 }
 
+// goElemNeedsBorrowedCaptureDup reports whether a value-block trailing value
+// whose source is a borrowed captured parameter (no outer drop binding) must
+// be dup'd before being stored into G.result_ptr. Without the dup, the loaded
+// pointer aliases the caller's stmt-temp; the caller drops the temp
+// immediately after spawning the goroutine, so the awaiter would load freed
+// memory and the receiver's owned drop would double-free (T0688).
+// Eligible heap types: string, Vector, droppable/no-drop heap user types.
+// Excluded: Copy types (int/bool/...), Channel/Arc/Weak (refcounted — share
+// is fine), Task/Mutex/MutexGuard (single-owner handles with no dup
+// semantics), value types (embedded data, no heap aliasing).
+func goElemNeedsBorrowedCaptureDup(goElem types.Type) bool {
+	if goElem == nil {
+		return false
+	}
+	named := extractNamed(goElem)
+	if named == types.TypString {
+		return true
+	}
+	if _, ok := types.AsVector(goElem); ok || named == types.TypVector {
+		return true
+	}
+	if isDroppableHeapUserType(goElem) || isHeapUserNoDropPalFree(goElem) {
+		return true
+	}
+	return false
+}
+
+// dupBorrowedCaptureForResult emits a dup of a borrowed-captured trailing
+// value for the value-block path of `go { v }` (T0688). Dispatches by element
+// type and uses c.block for IR emission (the dup helpers update c.block to a
+// post-dup merge block, which the caller uses for the subsequent store).
+// Vector[T] uses dupVector + emitVectorElementCloneLoop for a deep copy
+// (heap element types like string would otherwise alias the original).
+func (c *Compiler) dupBorrowedCaptureForResult(val value.Value, goElem types.Type) value.Value {
+	named := extractNamed(goElem)
+	switch {
+	case named == types.TypString:
+		return c.dupString(val)
+	case types.IsVector(goElem):
+		// extractNamed returns TypVector for both Vector[T] Instance AND bare
+		// TypVector — check IsVector first so we use the right element size.
+		vecElem, _ := types.AsVector(goElem)
+		elemSize := int64(c.typeSize(c.resolveType(vecElem)))
+		dup := c.dupVector(val, elemSize)
+		c.emitVectorElementCloneLoop(dup, vecElem)
+		return dup
+	case named == types.TypVector:
+		// Bare TypVector (element type unknown — rarely reached here since
+		// `Vector` without type args is usually rejected by sema, but mirrors
+		// the existing pattern in compiler.go).
+		return c.dupVector(val, 0)
+	case isDroppableHeapUserType(goElem) || isHeapUserNoDropPalFree(goElem):
+		return c.dupHeapValue(val, goElem)
+	}
+	return val
+}
+
 // genGoBlock handles `go { block }` — wraps the block in a void function and spawns it.
 // Captures outer local variables referenced in the block and passes them through the arg pack.
 func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
@@ -11904,6 +11961,42 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		}
 		if binding, ok := c.dropBindings[name]; ok {
 			capturedDroppables[name] = binding.valType
+		}
+	}
+
+	// T0688: when a non-void awaited value-block's trailing expression is a
+	// bare reference to a captured BORROWED heap parameter (no outer drop
+	// binding), the loaded pointer aliases the caller's stmt-temp. The caller
+	// drops the stmt-temp immediately after spawning the goroutine — long
+	// before the awaiter resumes the coroutine — so the body would read freed
+	// memory and the receiver's owned drop would double-free. Dup the
+	// borrowed value HERE (in the outer block, before the caller's stmt-temp
+	// is dropped) and pass the dup as the capture. The goroutine then owns
+	// its own copy; we add it to capturedDroppables so the existing B0354
+	// ownership-transfer machinery registers a goroutine-side drop binding
+	// (cleared by genBlockValue's clearDropFlag at the trailing ident) and
+	// the outer clearDropFlag below is a harmless no-op (no outer flag).
+	useGoBlockValuePathOuter := !goIsVoid && !c.goExprFireAndForget
+	if useGoBlockValuePathOuter && len(block.Stmts) > 0 {
+		if es, ok := block.Stmts[len(block.Stmts)-1].(*ast.ExprStmt); ok {
+			if ident, ok := es.Expr.(*ast.IdentExpr); ok {
+				name := ident.Name
+				idx := -1
+				for i, n := range captureNames {
+					if n == name {
+						idx = i
+						break
+					}
+				}
+				if idx >= 0 {
+					_, hasDroppable := capturedDroppables[name]
+					_, hasChan := capturedChanTypes[name]
+					if !hasDroppable && !hasChan && goElemNeedsBorrowedCaptureDup(goElem) {
+						captureVals[idx] = c.dupBorrowedCaptureForResult(captureVals[idx], goElem)
+						capturedDroppables[name] = goElem
+					}
+				}
+			}
 		}
 	}
 

@@ -239,3 +239,139 @@ t0683_capture_local_string() `test {
   string r = <-x;
   assert(r == "hello", "value block returning captured heap local string");
 }
+
+// T0688: the bug T0683 missed — a value-block whose trailing expression is a
+// bare reference to a captured BORROWED heap parameter, with the task
+// `return`ed out of the defining function and awaited by the caller.
+// Without the fix, the caller's stmt-temp for `"a" + "b"` was dropped
+// immediately after the call returned, freeing the buffer before the
+// goroutine resumed; the body then loaded a dangling pointer into
+// G.result_ptr and the receiver double-freed it. The fix dups the borrowed
+// value at spawn time (in the spawning function, while the param is still
+// valid) and passes the dup as the capture, so the goroutine owns its own
+// copy.
+t0688_ngmake_string(string v) Task[string] {
+  return go {
+    v
+  };
+}
+
+t0688_bare_string_param() `test {
+  task[string] x = t0688_ngmake_string("a" + "b");
+  string r = <-x;
+  assert(r == "ab", "bare borrowed-string param returned via task");
+}
+
+// T0688: same pattern under a loop — catches any per-iteration leak that
+// would slip past a single-call test.
+t0688_loop_no_leak() `test {
+  i := 0;
+  while i < 50 {
+    task[string] x = t0688_ngmake_string("x" + "y");
+    string r = <-x;
+    assert(r == "xy", "loop iteration");
+    i = i + 1;
+  }
+}
+
+// T0688: heap user type variant. Before the fix, this crashed with
+// `fatal: segmentation fault at 0x0` (the borrowed instance pointer
+// freed by the caller's stmt-temp before the goroutine resumed,
+// then re-loaded into G.result_ptr). The fix dispatches via
+// dupHeapValue, which deep-copies the instance + nested droppable
+// sub-fields (the inner string).
+type T0688Box {
+  string name;
+  int value;
+}
+
+t0688_ngmake_box(T0688Box b) Task[T0688Box] {
+  return go {
+    b
+  };
+}
+
+t0688_bare_heap_user_type_param() `test {
+  task[T0688Box] x = t0688_ngmake_box(T0688Box(name: "hello", value: 42));
+  T0688Box r = <-x;
+  assert(r.value == 42, "box value");
+  assert(r.name == "hello", "box nested string");
+}
+
+// T0688: regression guard — Copy-type param (int) needs no dup; the fix
+// must skip the dup so we don't bloat the IR with no-ops.
+t0688_ngmake_int(int v) Task[int] {
+  return go {
+    v
+  };
+}
+
+t0688_int_param_control() `test {
+  task[int] x = t0688_ngmake_int(7);
+  assert((<-x) == 7, "Copy-type param: no dup, no UAF");
+}
+
+// T0688: regression guard — derived trailing expression (`v + "!"`) builds
+// a fresh allocation inside the coroutine, so no spawn-side dup is needed.
+// (The fresh result is owned by the goroutine and transferred to the
+// receiver via the existing T0683 path.)
+t0688_ngmake_derived(string v) Task[string] {
+  return go {
+    v + "!"
+  };
+}
+
+t0688_derived_trailing_param() `test {
+  task[string] x = t0688_ngmake_derived("hi");
+  string r = <-x;
+  assert(r == "hi!", "derived trailing skips dup");
+}
+
+// T0688: regression guard — captured heap LOCAL with an outer drop binding
+// must still take the T0683 ownership-transfer path (B0354), NOT the new
+// spawn-side dup path. Adding a dup here would leak the original local.
+t0688_ngmake_local() Task[string] {
+  s := "ab" + "cd";
+  return go {
+    s
+  };
+}
+
+t0688_local_string_no_extra_dup() `test {
+  task[string] x = t0688_ngmake_local();
+  string r = <-x;
+  assert(r == "abcd", "captured local still works after T0688 fix");
+}
+
+// T0688: Vector[T] param variant. Trips two distinct codegen paths in the
+// dup dispatch: (a) element-size computation for the dup'd data buffer
+// (without this, dupVector would allocate header-only and the elements
+// would be garbage) and (b) per-element deep clone when the element type is
+// itself heap (string here) — otherwise the dup'd vector's element pointers
+// would alias the original and the receiver's drop would double-free each
+// element.
+t0688_ngmake_vec_int(Vector[int] v) Task[Vector[int]] {
+  return go {
+    v
+  };
+}
+
+t0688_bare_vec_int_param() `test {
+  task[Vector[int]] x = t0688_ngmake_vec_int([1, 2, 3]);
+  Vector[int] r = <-x;
+  assert(r.len == 3, "vec[int] len");
+  assert(r[0] == 1 && r[1] == 2 && r[2] == 3, "vec[int] elements");
+}
+
+t0688_ngmake_vec_string(Vector[string] v) Task[Vector[string]] {
+  return go {
+    v
+  };
+}
+
+t0688_bare_vec_string_param() `test {
+  task[Vector[string]] x = t0688_ngmake_vec_string(["a" + "b", "c" + "d"]);
+  Vector[string] r = <-x;
+  assert(r.len == 2, "vec[string] len");
+  assert(r[0] == "ab" && r[1] == "cd", "vec[string] elements (deep clone)");
+}

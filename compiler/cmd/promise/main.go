@@ -7617,11 +7617,15 @@ func runInit(args []string) {
 
 	// Generate main.pr if it doesn't exist
 	if _, err := os.Stat(j("main.pr")); err != nil {
-		mainContent := `use io;
-use os;
-
-main!() {
-    print_line("Hello from Promise!");
+		mainContent := "use io;\n" +
+			"use os;\n" +
+			"\n" +
+			"greet(string name) string `public `doc(\"Returns a friendly greeting for the given name.\") {\n" +
+			"    return \"Hello, {name}!\";\n" +
+			"}\n" +
+			"\n" +
+			`main!() {
+    print_line(greet("Promise"));
 
     // Module-qualified access, auto-propagated errors (!), string interpolation
     cwd := os.working_dir;

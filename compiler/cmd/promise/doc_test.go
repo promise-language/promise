@@ -1448,3 +1448,139 @@ func TestDocUsageContainsModules(t *testing.T) {
 		t.Errorf("expected 'Examples:' section, got:\n%s", out)
 	}
 }
+
+// === T0699: module-name resolution for local directories ===
+
+func TestResolveLocalModuleNameFromToml(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
+		[]byte("[module]\nname = \"my_module\"\nepoch = \"2026.0\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := resolveLocalModuleName(dir)
+	if got != "my_module" {
+		t.Errorf("expected 'my_module' from promise.toml, got %q", got)
+	}
+}
+
+func TestResolveLocalModuleNameFromBasename(t *testing.T) {
+	// Directory without promise.toml — falls back to absolute-path basename.
+	dir := t.TempDir() // e.g. /tmp/TestResolveLocal.../001
+	base := filepath.Base(dir)
+	got := resolveLocalModuleName(dir)
+	if got != base {
+		t.Errorf("expected %q (basename), got %q", base, got)
+	}
+}
+
+func TestResolveLocalModuleNameDotResolvesToCwdBasename(t *testing.T) {
+	// "." should resolve to the cwd's basename, never the literal "." string.
+	dir := t.TempDir()
+	orig, _ := os.Getwd()
+	defer os.Chdir(orig)
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	got := resolveLocalModuleName(".")
+	if got == "." || got == "" {
+		t.Errorf("expected basename, got %q", got)
+	}
+	// Use EvalSymlinks because t.TempDir() on macOS may return a /var/folders
+	// path whose absolute form goes through /private; the dir argument is "."
+	// so filepath.Abs(".") and the original `dir` may differ in symlink form.
+	wantAbs, _ := filepath.EvalSymlinks(dir)
+	want := filepath.Base(wantAbs)
+	if got != want {
+		t.Errorf("expected %q (cwd basename), got %q", want, got)
+	}
+}
+
+func TestDocModuleInDirUsesResolvedHeading(t *testing.T) {
+	// Sanity check: runDocModuleInDir honors the displayName passed in,
+	// independent of the directory path. This is the contract runDocModule relies on.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "x.pr"),
+		[]byte("hello() `public `doc(\"says hi\") { }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	runDocModuleInDir(&buf, "resolved_name", dir, docOpts{publicOnly: true})
+	out := buf.String()
+	assertContainsDoc(t, out, "# resolved_name")
+	assertNotContainsDoc(t, out, "planned but not yet implemented")
+}
+
+// TestRunInitDocRegression is the T0699 acceptance-criteria regression: a
+// freshly-initialized project must produce non-empty docs when run through
+// `promise doc <path>`, with a heading that uses the resolved module name
+// (not the literal "." / ".." passed on the CLI) and at least one declaration
+// from the init template.
+func TestRunInitDocRegression(t *testing.T) {
+	parent := t.TempDir()
+	projectName := "myproj_t0699"
+	projectDir := filepath.Join(parent, projectName)
+
+	// Silence stdout during init.
+	oldStdout := os.Stdout
+	devnull, _ := os.Open(os.DevNull)
+	os.Stdout = devnull
+	runInit([]string{projectDir})
+	os.Stdout = oldStdout
+	devnull.Close()
+
+	// Verify the template includes a documented public declaration.
+	mainPr, err := os.ReadFile(filepath.Join(projectDir, "main.pr"))
+	if err != nil {
+		t.Fatalf("main.pr not created: %v", err)
+	}
+	if !strings.Contains(string(mainPr), "greet") || !strings.Contains(string(mainPr), "`public") || !strings.Contains(string(mainPr), "`doc(") {
+		t.Fatalf("init template missing documented public function; got:\n%s", string(mainPr))
+	}
+
+	// Run promise doc against the project from multiple path forms; each
+	// must produce a non-stub heading derived from promise.toml + render greet.
+	cases := []struct {
+		label string
+		setup func(t *testing.T) (target string, cleanup func())
+	}{
+		{
+			label: "absolute path",
+			setup: func(t *testing.T) (string, func()) { return projectDir, func() {} },
+		},
+		{
+			label: "dot from inside",
+			setup: func(t *testing.T) (string, func()) {
+				orig, _ := os.Getwd()
+				if err := os.Chdir(projectDir); err != nil {
+					t.Fatal(err)
+				}
+				return ".", func() { os.Chdir(orig) }
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			target, cleanup := tc.setup(t)
+			defer cleanup()
+
+			var buf bytes.Buffer
+			runDocModule(&buf, target, docOpts{publicOnly: true})
+			out := buf.String()
+
+			// Heading uses the resolved module name from promise.toml,
+			// never the raw CLI argument.
+			assertContainsDoc(t, out, "# "+projectName)
+			assertNotContainsDoc(t, out, "# .\n")
+			assertNotContainsDoc(t, out, "# ..\n")
+
+			// Init template's documented public function is rendered.
+			assertContainsDoc(t, out, "### greet")
+			assertContainsDoc(t, out, "Returns a friendly greeting for the given name.")
+
+			// The stub fallback must NOT fire — there are real source decls here.
+			assertNotContainsDoc(t, out, "planned but not yet implemented")
+			assertNotContainsDoc(t, out, "Planned module")
+		})
+	}
+}

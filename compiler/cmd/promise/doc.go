@@ -213,6 +213,7 @@ func docFrontend(filename string) (*ast.File, *sema.Info) {
 func runDocModule(w io.Writer, name string, opts docOpts) {
 	// Try catalog first
 	var modDir string
+	displayName := name
 
 	if len(embeddedCatalog) > 0 {
 		cat, err := module.ParseCatalog(embeddedCatalog)
@@ -237,17 +238,35 @@ func runDocModule(w io.Writer, name string, opts docOpts) {
 		}
 	}
 
-	// If not found in catalog, try as a local directory
+	// If not found in catalog, try as a local directory.
+	// Resolve the displayed module name from promise.toml (preferred) or the
+	// absolute path's basename — never echo the raw CLI arg ("." / "..").
 	if modDir == "" {
 		if info, err := os.Stat(name); err == nil && info.IsDir() {
 			modDir = name
+			displayName = resolveLocalModuleName(name)
 		} else {
 			fmt.Fprintf(os.Stderr, "error: '%s' is not a known catalog module or directory\n", name)
 			os.Exit(1)
 		}
 	}
 
-	runDocModuleInDir(w, name, modDir, opts)
+	runDocModuleInDir(w, displayName, modDir, opts)
+}
+
+// resolveLocalModuleName picks a friendly module heading for a local directory:
+// prefer the `name` field from promise.toml when present, otherwise fall back
+// to the basename of the absolute path. The raw `dir` string ("." or "..") is
+// only used as a last resort if absolute-path resolution itself fails.
+func resolveLocalModuleName(dir string) string {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		absDir = dir
+	}
+	if cfg, err := module.ParseConfig(filepath.Join(absDir, "promise.toml")); err == nil && cfg.Name != "" {
+		return cfg.Name
+	}
+	return filepath.Base(absDir)
 }
 
 // runDocModuleInDir generates documentation for a module given its resolved directory.

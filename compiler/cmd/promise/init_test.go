@@ -52,6 +52,17 @@ func TestRunInitCreatesFiles(t *testing.T) {
 			t.Errorf("main.pr missing %q", want)
 		}
 	}
+	// T0699: template includes a documented public function so `promise doc`
+	// against a freshly-initialized project renders non-empty output.
+	for _, want := range []string{
+		"greet(string name) string `public",
+		"`doc(\"Returns a friendly greeting for the given name.\")",
+		`greet("Promise")`,
+	} {
+		if !strings.Contains(string(mainPr), want) {
+			t.Errorf("main.pr missing T0699 template fragment %q", want)
+		}
+	}
 
 	// Check CLAUDE.md content.
 	claude, _ := os.ReadFile(filepath.Join(target, "CLAUDE.md"))

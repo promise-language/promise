@@ -832,6 +832,8 @@ promise doc io               # browse the io module (File, Dir, etc.)
 promise doc json             # browse the json module
 promise doc <module>         # any catalog module
 promise doc file.pr          # documentation for a source file
+promise doc .                # documentation for the project in the current dir
+promise doc <path>           # documentation for a local project directory
 promise -help                # quick start guide with examples
 promise doc                  # list all available modules
 promise targets              # list supported compile targets

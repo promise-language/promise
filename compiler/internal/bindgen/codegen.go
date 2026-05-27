@@ -278,6 +278,15 @@ func (g *generator) emitResourceMethod(m Func, resourceName, importModule string
 		g.line("`doc \"%s\"", escapeDoc(m.Doc))
 	}
 
+	if m.Accessor == AccessorGetter {
+		g.emitGetterWrapper(m, resourceName, importModule)
+		return
+	}
+	if m.Accessor == AccessorSetter {
+		g.emitSetterWrapper(m, resourceName, importModule)
+		return
+	}
+
 	switch m.Kind {
 	case FuncConstructor:
 		g.emitConstructorWrapper(m, resourceName, importModule)
@@ -357,6 +366,118 @@ func (g *generator) emitStaticWrapper(m Func, resourceName, importModule string)
 	g.line("}")
 }
 
+// externNameSuffix returns the method-name portion of the generated extern
+// symbol. Setters get a "set_" infix so `attribute X foo` produces both
+// `_iface_foo` (getter) and `_iface_set_foo` (setter) externs.
+func externNameSuffix(m Func) string {
+	if m.Accessor == AccessorSetter {
+		return "set_" + m.Name
+	}
+	return m.Name
+}
+
+// staticSetterFallbackName returns the wrapper-method name used when emitting
+// a static IDL-attribute setter as a paired-function method instead of the
+// `set <name>(...)` accessor syntax. Required because sema currently rejects
+// `set ... `global` (T0703); once that's lifted, this fallback can be deleted
+// and emitSetterWrapper can emit `global setters directly.
+func staticSetterFallbackName(m Func) string {
+	return "set_" + m.Name
+}
+
+func (g *generator) emitGetterWrapper(m Func, resourceName, importModule string) {
+	_ = importModule
+	externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), externNameSuffix(m))
+	retType := g.formatReturnType(m.Results)
+	failable := isFailable(m.Results)
+
+	failMark := ""
+	raise := ""
+	if failable {
+		failMark = "!"
+		raise = "^"
+	}
+
+	// Extern call args: instance getters pass this._handle; static getters take none.
+	externArgs := ""
+	if m.Kind != FuncStatic {
+		externArgs = "this._handle"
+	}
+
+	annotations := "`public"
+	if m.Kind == FuncStatic {
+		annotations += " `global"
+	}
+
+	resReturn, isResReturn := resourceReturnType(m.Results)
+	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
+
+	g.line("get %s%s %s %s {", m.Name, failMark, retType, annotations)
+	g.indent++
+	switch {
+	case !g.canonicalABI && isResReturn:
+		g.line("handle := %s(%s)%s;", externName, externArgs, raise)
+		g.line("return %s(_handle: handle);", resReturn)
+	case !g.canonicalABI && isOptResReturn:
+		g.line("handle := %s(%s)%s;", externName, externArgs, raise)
+		g.line("if handle == 0 { return none; }")
+		g.line("return %s(_handle: handle);", optResReturn)
+	default:
+		g.line("return %s(%s)%s;", externName, externArgs, raise)
+	}
+	g.indent--
+	g.line("}")
+}
+
+func (g *generator) emitSetterWrapper(m Func, resourceName, importModule string) {
+	_ = importModule
+	externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), externNameSuffix(m))
+	failable := isFailable(m.Results)
+
+	failMark := ""
+	raise := ""
+	if failable {
+		failMark = "!"
+		raise = "^"
+	}
+
+	// Setters always have exactly one Param (value).
+	var p Param
+	if len(m.Params) > 0 {
+		p = m.Params[0]
+	}
+	paramSig := fmt.Sprintf("%s %s", promiseType(p.Type), p.Name)
+
+	// Lower the value param at the FFI boundary (resource → handle, Option<Builtin> → elvis-default).
+	var valueArg string
+	switch {
+	case !g.canonicalABI && isRefType(p.Type):
+		valueArg = p.Name + "._handle"
+	case !g.canonicalABI && isOptionOfBuiltin(p.Type):
+		valueArg = lowerOptionExternArg(p.Name, p.Type)
+	default:
+		valueArg = p.Name
+	}
+
+	if m.Kind == FuncStatic {
+		// T0703: sema rejects `global setters. Fall back to a paired `set_<name>`
+		// global function so static IDL attributes still compile.
+		g.line("%s%s(%s) `public `global {", staticSetterFallbackName(m), failMark, paramSig)
+		g.indent++
+		g.line("%s(%s)%s;", externName, valueArg, raise)
+		g.indent--
+		g.line("}")
+		return
+	}
+
+	externArgs := "this._handle, " + valueArg
+	g.line("set %s%s(%s) `public {", m.Name, failMark, paramSig)
+	g.indent++
+	g.line("%s(%s)%s;", externName, externArgs, raise)
+	g.indent--
+	g.line("}")
+}
+
 func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string) {
 	params := g.formatParams(m.Params)
 	externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), m.Name)
@@ -433,12 +554,12 @@ func (g *generator) emitResourceMethodExtern(m Func, resourceName, importModule 
 		}
 		g.line("%s(%s) %s", externName, params, retSig)
 	case FuncStatic:
-		externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), m.Name)
+		externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), externNameSuffix(m))
 		params := g.formatExternParamsWithRetPtr(m.Params, m.Results)
 		retSig := g.formatExternReturnSig(m.Results)
 		g.line("%s(%s)%s", externName, params, retSig)
 	default:
-		externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), m.Name)
+		externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), externNameSuffix(m))
 		// Method extern takes handle (i32) as first param — handles are
 		// 32-bit ref table indices on all WASM targets.
 		handleParam := "i32 handle"
@@ -451,7 +572,7 @@ func (g *generator) emitResourceMethodExtern(m Func, resourceName, importModule 
 		g.line("%s(%s)%s", externName, allParams, retSig)
 	}
 	g.indent++
-	externLinkName := toSnake(resourceName) + "_" + m.Name
+	externLinkName := toSnake(resourceName) + "_" + externNameSuffix(m)
 	if m.Kind == FuncConstructor {
 		externLinkName = toSnake(resourceName) + "_constructor"
 	}

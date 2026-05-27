@@ -53,7 +53,8 @@ type Func struct {
 	Results    []TypeRef
 	ImportName string // WASM import name
 	Kind       FuncKind
-	OwnerType  string // for methods/constructors/statics
+	Accessor   AccessorKind // for WebIDL attributes — orthogonal to Kind
+	OwnerType  string       // for methods/constructors/statics
 	Doc        string
 }
 
@@ -65,6 +66,17 @@ const (
 	FuncMethod
 	FuncConstructor
 	FuncStatic
+)
+
+// AccessorKind marks a Func as a property getter or setter. Orthogonal to
+// FuncKind: an accessor can be either a FuncMethod (instance) or a FuncStatic
+// (static). Only WebIDL attributes produce non-None accessors.
+type AccessorKind int
+
+const (
+	AccessorNone AccessorKind = iota
+	AccessorGetter
+	AccessorSetter
 )
 
 // Param is a named function parameter.

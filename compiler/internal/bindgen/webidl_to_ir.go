@@ -140,6 +140,7 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 			getter := Func{
 				Name:       idlToSnake(m.Name),
 				Kind:       FuncMethod,
+				Accessor:   AccessorGetter,
 				OwnerType:  iface.Name,
 				ImportName: iface.Name + "." + m.Name + ".get",
 				Results:    []TypeRef{convertWebIdlTypeRef(m.Type)},
@@ -153,8 +154,9 @@ func (c *webidlConverter) convertInterface(iface *webidl.Interface) Resource {
 			// Setter (unless readonly)
 			if !m.Readonly {
 				setter := Func{
-					Name:       "set_" + idlToSnake(m.Name),
+					Name:       idlToSnake(m.Name),
 					Kind:       FuncMethod,
+					Accessor:   AccessorSetter,
 					OwnerType:  iface.Name,
 					ImportName: iface.Name + "." + m.Name + ".set",
 					Params:     []Param{{Name: "value", Type: convertWebIdlTypeRef(m.Type)}},

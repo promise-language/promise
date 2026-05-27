@@ -2811,10 +2811,16 @@ func TestWebIdlToIRReadWriteAttribute(t *testing.T) {
 		t.Fatalf("expected 2 methods for read-write attribute, got %d", len(res.Methods))
 	}
 	if res.Methods[0].Name != "name" {
-		t.Errorf("expected getter 'name', got %q", res.Methods[0].Name)
+		t.Errorf("expected getter name 'name', got %q", res.Methods[0].Name)
 	}
-	if res.Methods[1].Name != "set_name" {
-		t.Errorf("expected setter 'set_name', got %q", res.Methods[1].Name)
+	if res.Methods[0].Accessor != AccessorGetter {
+		t.Errorf("expected getter Accessor=AccessorGetter, got %d", res.Methods[0].Accessor)
+	}
+	if res.Methods[1].Name != "name" {
+		t.Errorf("expected setter name 'name' (no set_ prefix), got %q", res.Methods[1].Name)
+	}
+	if res.Methods[1].Accessor != AccessorSetter {
+		t.Errorf("expected setter Accessor=AccessorSetter, got %d", res.Methods[1].Accessor)
 	}
 }
 
@@ -3309,13 +3315,15 @@ func TestGenerateJSGlueAttributeSetter(t *testing.T) {
 				{
 					Name:       "text_content",
 					Kind:       FuncMethod,
+					Accessor:   AccessorGetter,
 					OwnerType:  "Element",
 					ImportName: "Element.textContent.get",
 					Results:    []TypeRef{{Kind: BuiltinKind, Builtin: "string"}},
 				},
 				{
-					Name:       "set_text_content",
+					Name:       "text_content",
 					Kind:       FuncMethod,
+					Accessor:   AccessorSetter,
 					OwnerType:  "Element",
 					ImportName: "Element.textContent.set",
 					Params:     []Param{{Name: "value", Type: TypeRef{Kind: BuiltinKind, Builtin: "string"}}},
@@ -3483,6 +3491,176 @@ func TestWebIdlToIRVoidReturn(t *testing.T) {
 	}
 }
 
+// TestWebIdlAttributeGeneratesGetterSetterSyntax verifies that `attribute`
+// declarations in Web IDL emit Promise's first-class `get`/`set` syntax
+// rather than paired `name(this) T` / `set_name(this, T value)` methods (T0696).
+func TestWebIdlAttributeGeneratesGetterSetterSyntax(t *testing.T) {
+	src := `interface Element {
+		attribute DOMString className;
+		readonly attribute DOMString tagName;
+		static attribute DOMString defaultNs;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	out := GeneratePromise(modules, "web")
+
+	// Instance read-write attribute: both getter and setter wrappers.
+	assertContains(t, out, "get class_name string `public {")
+	assertContains(t, out, "set class_name(string value) `public {")
+	assertContains(t, out, "return _element_class_name(this._handle);")
+	assertContains(t, out, "_element_set_class_name(this._handle, value);")
+
+	// Readonly attribute: only getter, no setter.
+	assertContains(t, out, "get tag_name string `public {")
+	if strings.Contains(out, "set tag_name(") {
+		t.Error("readonly attribute should not emit a setter")
+	}
+
+	// Static attribute getter uses `get` syntax with `global; static setter
+	// falls back to a paired `set_<name>(...) `global` function because sema
+	// currently rejects `set ... `global` (T0703).
+	assertContains(t, out, "get default_ns string `public `global {")
+	assertContains(t, out, "set_default_ns(string value) `public `global {")
+	assertContains(t, out, "return _element_default_ns();")
+	assertContains(t, out, "_element_set_default_ns(value);")
+
+	// Paired-function method form must be gone. Match the full wrapper
+	// signature shape — both the extern declaration and the extern call site
+	// legitimately contain `_element_set_class_name(this._handle,`, so we
+	// look for the unique paired-method signature that the old code emitted.
+	if strings.Contains(out, "set_class_name(this, string value)") {
+		t.Error("paired-function setter `set_class_name(this, string value)` should not be emitted")
+	}
+	if strings.Contains(out, "class_name(this) string") {
+		t.Error("paired-function getter `class_name(this) string` should not be emitted")
+	}
+
+	// Extern declarations: getters reuse the attribute name, setters get a `set_` infix.
+	assertContains(t, out, "_element_class_name(i32 handle) string")
+	assertContains(t, out, "_element_set_class_name(i32 handle, string value)")
+	assertContains(t, out, "_element_default_ns() string")
+	assertContains(t, out, "_element_set_default_ns(string value)")
+	// The wasm_import side keeps the canonical `.get`/`.set` suffix.
+	assertContains(t, out, `"Element.className.get"`)
+	assertContains(t, out, `"Element.className.set"`)
+}
+
+// TestWebIdlAttributeResourceTyped exercises the resource-handle paths in
+// both `emitGetterWrapper` (resource return → construct from handle) and
+// `emitSetterWrapper` (resource param → lower to `value._handle`).
+func TestWebIdlAttributeResourceTyped(t *testing.T) {
+	src := `interface Node {};
+	interface Element {
+		attribute Node parent;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	out := GeneratePromise(modules, "web")
+
+	// Getter: handle-to-resource construction.
+	assertContains(t, out, "get parent Node `public {")
+	assertContains(t, out, "handle := _element_parent(this._handle);")
+	assertContains(t, out, "return Node(_handle: handle);")
+
+	// Setter: resource value passed as handle.
+	assertContains(t, out, "set parent(Node value) `public {")
+	assertContains(t, out, "_element_set_parent(this._handle, value._handle);")
+
+	// Externs: resource params/returns are i32 handles on the FFI boundary.
+	assertContains(t, out, "_element_parent(i32 handle) i32")
+	assertContains(t, out, "_element_set_parent(i32 handle, i32 value)")
+}
+
+// TestWebIdlAttributeNullableResource exercises the option-resource-return
+// branch in `emitGetterWrapper` (extern returns i32, 0 → none).
+func TestWebIdlAttributeNullableResource(t *testing.T) {
+	src := `interface Node {};
+	interface Element {
+		readonly attribute Node? parent;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	out := GeneratePromise(modules, "web")
+
+	assertContains(t, out, "get parent Node? `public {")
+	assertContains(t, out, "handle := _element_parent(this._handle);")
+	assertContains(t, out, "if handle == 0 { return none; }")
+	assertContains(t, out, "return Node(_handle: handle);")
+}
+
+// TestWebIdlAttributeNullableBuiltinSetter exercises the Option<Builtin>
+// lowering branch in `emitSetterWrapper` — `string? value` → `value ?: ""`.
+func TestWebIdlAttributeNullableBuiltinSetter(t *testing.T) {
+	src := `interface Element {
+		attribute DOMString? title;
+	};`
+	file, errs := webidl.Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	modules := WebIdlToIR(file)
+	out := GeneratePromise(modules, "web")
+
+	assertContains(t, out, "set title(string? value) `public {")
+	assertContains(t, out, `_element_set_title(this._handle, value ?: "");`)
+	// Extern signature collapses the Option<string> to a bare string.
+	assertContains(t, out, "_element_set_title(i32 handle, string value)")
+}
+
+// TestEmitGetterSetterFailable directly constructs an accessor pair with
+// failable return (result<T, _>) to exercise the `!` / `^` branches in
+// `emitGetterWrapper` and `emitSetterWrapper`. The WebIDL → IR converter
+// never marks attributes failable today, so this path is only reachable via
+// a hand-built IR fixture.
+func TestEmitGetterSetterFailable(t *testing.T) {
+	stringOk := TypeRef{Kind: BuiltinKind, Builtin: "string"}
+	stringErr := TypeRef{Kind: BuiltinKind, Builtin: "string"}
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Element",
+			Drop: false,
+			Methods: []Func{
+				{
+					Name:       "value",
+					Kind:       FuncMethod,
+					Accessor:   AccessorGetter,
+					OwnerType:  "Element",
+					ImportName: "Element.value.get",
+					Results:    []TypeRef{{Kind: ResultKind, Ok: &stringOk, Err: &stringErr}},
+				},
+				{
+					Name:       "value",
+					Kind:       FuncMethod,
+					Accessor:   AccessorSetter,
+					OwnerType:  "Element",
+					ImportName: "Element.value.set",
+					Params:     []Param{{Name: "value", Type: stringOk}},
+					Results:    []TypeRef{{Kind: ResultKind, Ok: nil, Err: &stringErr}},
+				},
+			},
+		}},
+	}}
+	out := GeneratePromise(modules, "web")
+
+	// Failable getter: `get name! Type` (BANG between name and type — new syntax).
+	assertContains(t, out, "get value! string `public {")
+	assertContains(t, out, "return _element_value(this._handle)^;")
+	// Failable setter: `set name!(Type value)`.
+	assertContains(t, out, "set value!(string value) `public {")
+	assertContains(t, out, "_element_set_value(this._handle, value)^;")
+}
+
 func TestWebIdlToIRStaticAttribute(t *testing.T) {
 	src := `interface Foo {
 		static attribute DOMString name;
@@ -3500,8 +3678,14 @@ func TestWebIdlToIRStaticAttribute(t *testing.T) {
 	if res.Methods[0].Kind != FuncStatic {
 		t.Errorf("expected static getter")
 	}
+	if res.Methods[0].Accessor != AccessorGetter {
+		t.Errorf("expected Accessor=AccessorGetter on static getter, got %d", res.Methods[0].Accessor)
+	}
 	if res.Methods[1].Kind != FuncStatic {
 		t.Errorf("expected static setter")
+	}
+	if res.Methods[1].Accessor != AccessorSetter {
+		t.Errorf("expected Accessor=AccessorSetter on static setter, got %d", res.Methods[1].Accessor)
 	}
 }
 

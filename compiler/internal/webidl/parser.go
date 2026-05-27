@@ -248,6 +248,9 @@ func (p *Parser) parseDictionary() *Dictionary {
 }
 
 func (p *Parser) parseDictMember() *DictMember {
+	// Skip extended attributes on dictionary members, e.g.
+	// [RuntimeEnabled=Foo] boolean contentVisibilityAuto = false;
+	p.tryParseExtAttrs()
 	pos := p.peek().Pos
 	m := &DictMember{Pos: pos}
 
@@ -641,6 +644,12 @@ func (p *Parser) readDefaultValue() string {
 		// Could be "true", "false", "null", "undefined", or an enum value
 		p.next()
 		return tok.Value
+	case TokenLBrace:
+		// Empty dictionary default: {}  (an empty sequence default [] is
+		// already lexed as a single "[]" ident token, handled above).
+		p.next()
+		p.match(TokenRBrace)
+		return "{}"
 	default:
 		// Skip complex default values
 		p.next()
@@ -662,6 +671,10 @@ func (p *Parser) parseTypeRef() *TypeRef {
 }
 
 func (p *Parser) parseSingleType() *TypeRef {
+	// Skip an inline extended attribute preceding a type, e.g. the
+	// [LegacyNullToEmptyString] in (TrustedHTML or [LegacyNullToEmptyString] DOMString).
+	// A "[...]" ident is never a valid type name, so this is safe.
+	p.tryParseExtAttrs()
 	tok := p.peek()
 
 	// Parenthesized union type: (Type or Type)

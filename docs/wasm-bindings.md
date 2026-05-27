@@ -336,6 +336,20 @@ interface Document : Node {
 };
 ```
 
+#### Supported subset
+
+Top-level constructs: `interface` (with inheritance), `interface mixin` / standalone `mixin`, `dictionary` (with inheritance), `enum`, `typedef`, `callback`, `partial interface`, `partial mixin`, `partial dictionary`, and `includes` statements. `partial`/`mixin`/`includes` are merged into their targets by `webidl.Merge` before IR conversion.
+
+Member-level features:
+
+- **Extended attributes** (`[Exposed=Window]`, `[CEReactions]`, `[RuntimeEnabled=Foo]`, …) are accepted and skipped at every position they may appear: top level, before interface/dictionary members, and **inline before a type** (e.g. `(TrustedHTML or [LegacyNullToEmptyString] DOMString)`). They are parsed for structure but do not affect generated bindings.
+- **Dictionary members** support `required`, default values, and leading extended attributes. Non-`required` members map to `T?` (Promise optional).
+- **Default values** cover string/number/boolean/identifier literals, the empty sequence `[]`, and the **empty dictionary `{}`** (e.g. `optional SetHTMLOptions options = {}`). Default values are parsed but not yet materialized into the generated bindings.
+- **Operation members**: regular, `static`, `getter`/`setter`/`deleter`, `stringifier`, `constructor`, `iterable<…>`, and `async` operations.
+- **Types**: all WebIDL primitives, `sequence<T>`, `FrozenArray<T>`, `ObservableArray<T>`, `Promise<T>`, `record<K,V>`, parenthesized union types, nullable `T?`, and the typed-array/buffer family.
+
+Known coverage gaps (tracked, would currently fail or be dropped): `maplike`/`setlike` declarations (T0718), `callback interface` (parsed then discarded, T0719), `namespace` / `partial namespace` (T0720), and `inherit attribute` (T0721). `callback` function-type aliases are parsed but not yet emitted to the IR (they need lambda types). Generated `JsValue`-bearing bindings currently emit malformed `` `doc `` annotations (T0717).
+
 ### Promise Code Generator
 
 The shared code generator (`compiler/internal/bindgen/codegen.go`) traverses the binding IR and emits `.pr` source files. It handles:

@@ -3010,6 +3010,65 @@ func TestWebIdlEndToEnd(t *testing.T) {
 	}
 }
 
+// TestWebIdlBindElementConstructs covers T0713 end-to-end: a fixture mirroring
+// the real element.idl constructs that previously broke the parser — a
+// dictionary with extended-attribute members and a `{}` default, an enum, and
+// an interface with a union-typed attribute and an optional `{}`-default param.
+// Asserts the file binds without parse errors and that the generated Promise
+// maps the dictionary to a `value type (with Option-wrapped optional fields)
+// and the enum to a Promise enum.
+func TestWebIdlBindElementConstructs(t *testing.T) {
+	src := `
+	dictionary CheckVisibilityOptions {
+		boolean checkOpacity = false;
+		[RuntimeEnabled=CheckVisibilityExtraProperties] boolean contentVisibilityAuto = false;
+	};
+
+	enum SanitizerPresets { "default" };
+
+	dictionary SetHTMLUnsafeOptions {
+		(Sanitizer or SanitizerConfig or SanitizerPresets) sanitizer = {};
+		boolean runScripts = false;
+	};
+
+	[Exposed=Window]
+	interface Element {
+		attribute (TrustedHTML or [LegacyNullToEmptyString] DOMString) innerHTML;
+		boolean checkVisibility(optional CheckVisibilityOptions options);
+		void setHTML(DOMString html, optional SetHTMLUnsafeOptions options = {});
+	};
+	`
+	file, errs := webidl.Parse(src, "element.idl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	prCode := GeneratePromise(modules, "web")
+
+	// Dictionary → `value type with Option-wrapped optional fields.
+	if !strings.Contains(prCode, "type CheckVisibilityOptions `public `value {") {
+		t.Errorf("expected CheckVisibilityOptions value type, got:\n%s", prCode)
+	}
+	if !strings.Contains(prCode, "bool? check_opacity `value;") {
+		t.Error("expected optional dict member check_opacity to be Option-wrapped (bool?)")
+	}
+	if !strings.Contains(prCode, "bool? content_visibility_auto `value;") {
+		t.Error("expected ext-attr dict member content_visibility_auto to be parsed and Option-wrapped")
+	}
+	// Enum → Promise enum.
+	if !strings.Contains(prCode, "enum SanitizerPresets `public {") {
+		t.Error("expected SanitizerPresets Promise enum")
+	}
+	if !strings.Contains(prCode, "Default,") {
+		t.Error("expected enum value Default")
+	}
+	// Interface with union-typed attribute parsed (union → JsValue).
+	if !strings.Contains(prCode, "Element") {
+		t.Error("expected Element resource")
+	}
+}
+
 // --- Coverage gap tests: WebIDL-to-IR ---
 
 func TestWebIdlToIRTypedef(t *testing.T) {

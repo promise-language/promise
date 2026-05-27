@@ -1254,6 +1254,140 @@ func TestParseDictMemberDefault(t *testing.T) {
 	}
 }
 
+// TestParseDictMemberExtAttr covers T0713: a dictionary member with a leading
+// extended attribute. The ext-attr must be skipped so the type/name/default
+// parse correctly (real IDL: element.idl CheckVisibilityOptions).
+func TestParseDictMemberExtAttr(t *testing.T) {
+	src := `dictionary CheckVisibilityOptions {
+		[RuntimeEnabled=CheckVisibilityExtraProperties] boolean contentVisibilityAuto = false;
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	m := file.Dictionaries[0].Members[0]
+	if m.Name != "contentVisibilityAuto" {
+		t.Errorf("expected name 'contentVisibilityAuto', got %q", m.Name)
+	}
+	if m.Type == nil || m.Type.Builtin != "boolean" {
+		t.Errorf("expected boolean type, got %+v", m.Type)
+	}
+	if m.Default != "false" {
+		t.Errorf("expected default 'false', got %q", m.Default)
+	}
+}
+
+// TestParseDictMemberEmptyDictDefault covers T0713: an empty-dictionary default
+// value `{}` on a dictionary member (real IDL: element.idl SetHTMLUnsafeOptions).
+func TestParseDictMemberEmptyDictDefault(t *testing.T) {
+	src := `dictionary SetHTMLUnsafeOptions {
+		(Sanitizer or SanitizerConfig) sanitizer = {};
+		boolean runScripts = false;
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	members := file.Dictionaries[0].Members
+	if len(members) != 2 {
+		t.Fatalf("expected 2 members, got %d", len(members))
+	}
+	if members[0].Default != "{}" {
+		t.Errorf("expected default '{}', got %q", members[0].Default)
+	}
+	if members[1].Default != "false" {
+		t.Errorf("expected default 'false', got %q", members[1].Default)
+	}
+}
+
+// TestReadDefaultValueComplexFallback covers the lenient `default:` recovery
+// branch in readDefaultValue (touched by T0713): a default value whose leading
+// token is none of string/number/identifier/`{}` is consumed as a single token
+// rather than aborting the parse. Documents the intentional "skip complex
+// default values" leniency.
+func TestReadDefaultValueComplexFallback(t *testing.T) {
+	// '(' is not a recognized default-value start, so the fallback consumes it.
+	src := `dictionary D {
+		boolean flag = ( ;
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(file.Dictionaries) != 1 || len(file.Dictionaries[0].Members) != 1 {
+		t.Fatalf("expected 1 dictionary with 1 member, got %+v (errs: %v)", file.Dictionaries, errs)
+	}
+	if got := file.Dictionaries[0].Members[0].Default; got != "(" {
+		t.Errorf("expected fallback default '(', got %q", got)
+	}
+}
+
+// TestParseParamEmptyDictDefault covers T0713: an empty-dictionary default `{}`
+// on an optional operation parameter (real IDL: element.idl setHTML).
+func TestParseParamEmptyDictDefault(t *testing.T) {
+	src := `interface Element {
+		void setHTML(DOMString html, optional SetHTMLOptions options = {});
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	op := file.Interfaces[0].Members[0].(*Operation)
+	if len(op.Params) != 2 {
+		t.Fatalf("expected 2 params, got %d", len(op.Params))
+	}
+	last := op.Params[1]
+	if !last.Optional {
+		t.Error("expected last param to be optional (has default)")
+	}
+	if last.Default != "{}" {
+		t.Errorf("expected default '{}', got %q", last.Default)
+	}
+}
+
+// TestParseUnionInlineExtAttr covers T0713: an inline extended attribute before
+// a type inside a union, e.g. (TrustedHTML or [LegacyNullToEmptyString] DOMString).
+// The ext-attr must be skipped so both union members parse.
+func TestParseUnionInlineExtAttr(t *testing.T) {
+	src := `interface Element {
+		attribute (TrustedHTML or [LegacyNullToEmptyString] DOMString) innerHTML;
+	};`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	attr := file.Interfaces[0].Members[0].(*Attribute)
+	if attr.Name != "innerHTML" {
+		t.Errorf("expected name 'innerHTML', got %q", attr.Name)
+	}
+	if attr.Type.Kind != UnionType {
+		t.Fatalf("expected UnionType, got %d", attr.Type.Kind)
+	}
+	if len(attr.Type.Members) != 2 {
+		t.Fatalf("expected 2 union members, got %d", len(attr.Type.Members))
+	}
+	if attr.Type.Members[1].Name != "DOMString" && attr.Type.Members[1].Builtin != "DOMString" {
+		t.Errorf("expected second union member to be DOMString, got %+v", attr.Type.Members[1])
+	}
+}
+
+// TestParseEnumOnly covers the user's "possibly enum" suspicion in T0713: a
+// standalone enum (with a quoted reserved-word value) parses to a Promise enum.
+func TestParseEnumOnly(t *testing.T) {
+	src := `enum SanitizerPresets { "default" };`
+	file, errs := Parse(src, "test.webidl")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(file.Enums) != 1 {
+		t.Fatalf("expected 1 enum, got %d", len(file.Enums))
+	}
+	e := file.Enums[0]
+	if e.Name != "SanitizerPresets" {
+		t.Errorf("expected 'SanitizerPresets', got %q", e.Name)
+	}
+	if len(e.Values) != 1 || e.Values[0] != "default" {
+		t.Errorf("expected values [default], got %v", e.Values)
+	}
+}
+
 func TestParseEnumInvalidToken(t *testing.T) {
 	// Non-string token in enum body produces a parse error
 	src := `enum Foo { 123 };`

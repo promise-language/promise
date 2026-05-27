@@ -6333,6 +6333,42 @@ func TestTestFuncAllowLeaks(t *testing.T) {
 	}
 }
 
+// T0689 — memory_limit annotation parses and records the raw size string.
+func TestTestFuncMemoryLimitValid(t *testing.T) {
+	info, _ := checkSource(t, `myTest() `+"`test(memory_limit: \"256MB\")"+` {}`)
+	if len(info.TestMemoryLimits) != 1 {
+		t.Fatalf("expected 1 test memory limit, got %d", len(info.TestMemoryLimits))
+	}
+	if info.TestMemoryLimits["myTest"] != "256MB" {
+		t.Fatalf("expected memory_limit '256MB', got %q", info.TestMemoryLimits["myTest"])
+	}
+}
+
+// T0689 — memory_limit with an invalid (no-unit) value emits a sema error.
+func TestTestFuncMemoryLimitInvalid(t *testing.T) {
+	errs := checkErrs(t, `myTest() `+"`test(memory_limit: \"512\")"+` {}`)
+	expectError(t, errs, "invalid memory_limit")
+}
+
+// T0689 — annotation can combine memory_limit with timeout/allow_leaks.
+func TestTestFuncMemoryLimitWithTimeout(t *testing.T) {
+	info, _ := checkSource(t, `myTest() `+"`test(timeout: \"5s\", memory_limit: \"1GB\")"+` {}`)
+	if info.TestMemoryLimits["myTest"] != "1GB" {
+		t.Fatalf("expected memory_limit '1GB', got %q", info.TestMemoryLimits["myTest"])
+	}
+	if info.TestTimeouts["myTest"] != "5s" {
+		t.Fatalf("expected timeout '5s', got %q", info.TestTimeouts["myTest"])
+	}
+}
+
+// T0689 — "0" is a valid opt-out value for memory_limit.
+func TestTestFuncMemoryLimitZero(t *testing.T) {
+	info, _ := checkSource(t, `myTest() `+"`test(memory_limit: \"0\")"+` {}`)
+	if info.TestMemoryLimits["myTest"] != "0" {
+		t.Fatalf("expected memory_limit '0', got %q", info.TestMemoryLimits["myTest"])
+	}
+}
+
 func TestTestFuncAllowLeaksDefault(t *testing.T) {
 	info, _ := checkSource(t, `myTest() `+"`test"+` {}`)
 	if info.TestAllowLeaks["myTest"] {

@@ -204,6 +204,12 @@ type Info struct {
 	// Values are Go-style duration strings (e.g., "500ms", "2s", "1m").
 	TestTimeouts map[string]string
 
+	// TestMemoryLimits maps test function names to their memory-limit size strings.
+	// Parsed from `test(memory_limit: "512MB") annotations (T0689). Values are
+	// size-with-unit strings parsed by parseMemoryLimitArg in cmd/promise/main.go
+	// (e.g. "256MB", "2GB", "0" for opt-out).
+	TestMemoryLimits map[string]string
+
 	// TestAllowLeaks maps test function names that have `test(allow_leaks: true).
 	// Tests with this flag report leaks as warnings but do not cause test failure.
 	TestAllowLeaks map[string]bool

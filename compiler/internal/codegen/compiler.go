@@ -405,14 +405,15 @@ type Compiler struct {
 	structuralDrop *ir.Func // @__promise_structural_drop(i8*) → void (B0270: RTTI-based drop for structural iface instances)
 
 	// Target triple and platform flags
-	target           string     // LLVM target triple
-	isWasm           bool       // true if targeting wasm32
-	isWasmWeb        bool       // true if targeting wasm32-web (browser/Node host, no WASI)
-	isWindows        bool       // true if targeting windows-msvc
-	debugAllocator   bool       // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection (debug builds)
-	needsNetpoll     bool       // true if net module imported — netpoll_init needed at startup (T0071)
-	netpollBatchLock *ir.Global // @__netpoll_batch_lock — held by reactor during event processing; close waits on it (B0324)
-	nextDebugID      int        // counter for emitDebugPrint global names
+	target                string     // LLVM target triple
+	isWasm                bool       // true if targeting wasm32
+	isWasmWeb             bool       // true if targeting wasm32-web (browser/Node host, no WASI)
+	isWindows             bool       // true if targeting windows-msvc
+	debugAllocator        bool       // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection (debug builds)
+	memoryLimitAccounting bool       // T0689: emit memory-limit counter + helpers (test binaries with -memory-limit > 0)
+	needsNetpoll          bool       // true if net module imported — netpoll_init needed at startup (T0071)
+	netpollBatchLock      *ir.Global // @__netpoll_batch_lock — held by reactor during event processing; close waits on it (B0324)
+	nextDebugID           int        // counter for emitDebugPrint global names
 
 	// Global constants for print/panic functions
 	newlineGlobal     *ir.Global // "\n" (1 byte)
@@ -630,9 +631,10 @@ func MonoName(inst *types.Instance) string {
 
 // CompileOptions configures optional compilation behavior.
 type CompileOptions struct {
-	CachedInstances map[string]bool // mono instance names whose .bc is already cached
-	CoverageEnabled bool            // instrument code for test coverage (T0030)
-	DebugAllocator  bool            // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection (debug builds)
+	CachedInstances       map[string]bool // mono instance names whose .bc is already cached
+	CoverageEnabled       bool            // instrument code for test coverage (T0030)
+	DebugAllocator        bool            // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection (debug builds)
+	MemoryLimitAccounting bool            // T0689: emit memory-limit counter + accounting bodies + helpers (test builds with -memory-limit > 0)
 }
 
 // CompileWithCache is like Compile but skips method body codegen for instances
@@ -712,6 +714,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		c.cachedInstances = opts.CachedInstances
 		c.coverageEnabled = opts.CoverageEnabled
 		c.debugAllocator = opts.DebugAllocator
+		c.memoryLimitAccounting = opts.MemoryLimitAccounting
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -1080,6 +1083,19 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			timeoutNs = testTimeouts[nameStr]
 		}
 		timeoutConst := constant.NewInt(irtypes.I64, timeoutNs)
+
+		// T0689: snapshot start counter and set memory limit before each test.
+		// Only emitted when accounting is enabled (the helper symbol is only
+		// declared by pal.EmitMemoryLimitHelpers in that case).
+		if c.memoryLimitAccounting && r.testMemoryLimits != nil {
+			limitBytes := r.testMemoryLimits[nameStr]
+			for _, f := range c.module.Funcs {
+				if f.Name() == "__promise_memory_set_test_state" {
+					entry.NewCall(f, constant.NewInt(irtypes.I64, limitBytes))
+					break
+				}
+			}
+		}
 
 		// T0275: Reset panic type before each test to prevent stale type=2 from
 		// a previous timed-out test from adjusting the leak delta incorrectly.
@@ -1792,17 +1808,30 @@ func (c *Compiler) declareIntrinsics() {
 		switch pp := p.(type) {
 		case *pal.PosixPAL:
 			pp.DebugAllocator = true
+			pp.MemoryLimitAccounting = c.memoryLimitAccounting
 		case *pal.WindowsPAL:
 			pp.DebugAllocator = true
+			pp.MemoryLimitAccounting = c.memoryLimitAccounting
 		case *pal.WasmPAL:
 			pp.DebugAllocator = true
+			pp.MemoryLimitAccounting = c.memoryLimitAccounting
 		case *pal.WasmWebPAL:
 			pp.DebugAllocator = true
+			pp.MemoryLimitAccounting = c.memoryLimitAccounting
 		}
 	}
 	c.palAlloc = p.EmitAlloc(c.module)
 	c.palFree = p.EmitFree(c.module)
 	c.palRealloc = p.EmitRealloc(c.module)
+	// T0689: emit memory-limit helpers when accounting is enabled. These are
+	// only referenced by GenerateTestMain (per-test set_test_state calls) when
+	// memoryLimitAccounting is on; non-test builds never emit these symbols.
+	// Atomic only on multi-threaded targets — WASM (both wasi and web) is
+	// single-threaded and uses plain load/store, matching what the existing
+	// __promise_alloc_count tracking already does on WASM.
+	if c.memoryLimitAccounting {
+		pal.EmitMemoryLimitHelpers(c.module, !c.isWasm)
+	}
 
 	// PAL: emit threading primitives (Phase 5 — needed by go/receive codegen)
 	c.palThreadCreate = p.EmitThreadCreate(c.module)

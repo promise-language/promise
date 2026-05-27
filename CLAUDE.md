@@ -82,6 +82,11 @@ bin/promise test -timeout-scale 0.5 tests/...            # halve all timeouts
 bin/promise test -timeout-max 5s tests/...               # clamp all timeouts to 5s max
 bin/promise test -timeout-min 1s -timeout-max 10s tests/...  # min/max clamps
 
+# Per-test memory limit (T0689) — defaults to 2 GiB; require unit suffix
+bin/promise test -memory-limit 512MB tests/...           # cap each test process at 512 MiB
+bin/promise test -memory-limit 4GB tests/...             # raise the cap (heavy tests)
+bin/promise test -memory-limit 0 tests/...               # opt-out — no global limit
+
 # Stress testing (flaky test detection)
 bin/promise test -stress tests/...                       # run until Ctrl+C
 bin/promise test -stress 100 tests/concurrency/...       # run 100 iterations
@@ -112,7 +117,9 @@ FAIL (0.003s) test_broken
   panic: assertion failed: expected 3, got 4   # panic context shown under FAIL
 TIMEOUT (0.100s) test_stuck                    # per-test timeout exceeded (T0023)
   timeout: exceeded 60s limit                  # timeout context
-pass (0.001s) test_other                       # subsequent tests still run after panic/timeout
+MEMLIMIT (-) <aborted>                         # memory limit exceeded (T0689)
+  memory limit: exceeded (test process aborted; subsequent tests not run)
+pass (0.001s) test_other                       # subsequent tests still run after panic/timeout (but NOT after MEMLIMIT)
 
 2 passed, 1 failed, 1 leaked, 1 timed out (0.423s)
 FAILED:
@@ -120,7 +127,7 @@ FAILED:
   test_broken
   test_stuck
 ```
-Visual hierarchy: `pass` (lowercase) for success, `FAIL`/`LEAK`/`TIMEOUT` (UPPER CASE) for failures. Each failure type has indented context on the next line. Leaked tests are NOT double-counted in passed; timed-out tests are NOT double-counted in failed.
+Visual hierarchy: `pass` (lowercase) for success, `FAIL`/`LEAK`/`TIMEOUT`/`MEMLIMIT` (UPPER CASE) for failures. Each failure type has indented context on the next line. Leaked tests are NOT double-counted in passed; timed-out tests are NOT double-counted in failed. **MEMLIMIT** aborts the whole test process (the PAL emits `fatal: memory limit exceeded` and calls `exit(134)`), so any tests that hadn't started yet in the same batch do not run; this is the intentional safety trade-off versus letting a runaway test exhaust machine RAM.
 
 Multi-file output (compact — one line per file):
 ```
@@ -370,6 +377,8 @@ The standard library (`modules/std/`, 40 files) is auto-imported via `use std as
   The cost of running tests is dominated by how many binaries are compiled — test execution itself is practically instant. Batch tests minimize binary count.
 
   Both styles support a `timeout` annotation parameter for per-test timeout control: `` `test(timeout: "5s") `` or `` `test(expected: "...", timeout: "2s") ``. Duration uses Go syntax (`500ms`, `2s`, `1m`). Tests without a timeout annotation use the CLI `-timeout` default (60s). The CLI also supports `-timeout-scale`, `-timeout-min`, `-timeout-max` to modify all timeouts uniformly.
+
+  Both styles also support a `memory_limit` annotation parameter (T0689): `` `test(memory_limit: "256MB") `` or `` `test(timeout: "5s", memory_limit: "1GB") ``. Size requires an explicit unit (`B`, `KB`, `MB`, `GB`, or the binary `KiB`/`MiB`/`GiB`; bare numbers other than `"0"` are rejected). `"0"` opts out of the per-test limit. The CLI default is `2 GiB` per test process; override with `-memory-limit 512MB` or disable entirely with `-memory-limit 0`. Exceeding the limit aborts the whole test process with `fatal: memory limit exceeded` and surfaces a `MEMLIMIT` outcome (see "Test output format" above) — the safety trade-off versus letting a runaway test exhaust machine RAM.
 
   **Memory leak enforcement** (T0067): Tests that leak memory (alloc count delta > 0) cause test failure. **ZERO TOLERANCE POLICY: The repo has 0 leaks and 0 `allow_leaks` tags. Any leak is a regression. Never add `allow_leaks: true` to any test. Never treat any leak as preexisting. Changes that introduce memory leaks will not be pushed.**
 

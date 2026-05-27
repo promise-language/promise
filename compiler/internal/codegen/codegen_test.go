@@ -8136,6 +8136,65 @@ func TestGenerateTestMainReservesGID0(t *testing.T) {
 	assertContains(t, ir, "atomicrmw add i64*")
 }
 
+// T0689: When MemoryLimitAccounting=false (run/exec/build, or test with
+// -memory-limit 0), the accounting allocator globals and helpers must be
+// entirely absent from the IR — hard zero-overhead requirement.
+func TestNoMemoryLimitGlobalsByDefault(t *testing.T) {
+	result := compileResult(t, `
+		main() { v := [1, 2, 3]; }
+	`)
+	ir := result.Module.String()
+	assertNotContains(t, ir, "__promise_memory_used_bytes")
+	assertNotContains(t, ir, "__promise_memory_limit_bytes")
+	assertNotContains(t, ir, "__promise_memory_set_test_state")
+	assertNotContains(t, ir, "fatal: memory limit exceeded")
+}
+
+// T0689: With CompileOptions.MemoryLimitAccounting=true, the accounting
+// globals and the set_test_state helper are emitted, and pal_alloc's body
+// references the used-bytes counter.
+func TestMemoryLimitGlobalsEmittedWhenEnabled(t *testing.T) {
+	file, info := parseWithStd(t, `
+		myTest() `+"`test"+` { }
+	`)
+	result := CompileWithOptions(file, info, "", &CompileOptions{
+		DebugAllocator:        true,
+		MemoryLimitAccounting: true,
+	})
+	result.SetTestMemoryLimits(map[string]int64{"myTest": 1 << 20})
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+	assertContains(t, ir, "@__promise_memory_used_bytes")
+	assertContains(t, ir, "@__promise_memory_limit_bytes")
+	assertContains(t, ir, "define void @__promise_memory_set_test_state(i64 %new_limit)")
+	assertContains(t, ir, "fatal: memory limit exceeded")
+	// Per-test set_test_state call must be emitted before each test runs
+	assertContains(t, ir, "call void @__promise_memory_set_test_state")
+}
+
+// T0689: When MemoryLimitAccounting is on but the per-test map is nil (no
+// per-test limits set), set_test_state calls are not emitted in main. The
+// globals + helpers still exist so the per-test path can later be activated,
+// but the harness simply doesn't drive it.
+func TestMemoryLimitNoSetCallsWithoutPerTestMap(t *testing.T) {
+	file, info := parseWithStd(t, `
+		myTest() `+"`test"+` { }
+	`)
+	result := CompileWithOptions(file, info, "", &CompileOptions{
+		DebugAllocator:        true,
+		MemoryLimitAccounting: true,
+	})
+	// Deliberately do NOT call SetTestMemoryLimits.
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+	// Helper symbol declared (so other code could call it):
+	assertContains(t, ir, "define void @__promise_memory_set_test_state(i64 %new_limit)")
+	// But no per-test invocation inside main():
+	if strings.Contains(ir, "call void @__promise_memory_set_test_state") {
+		t.Error("expected no set_test_state calls when testMemoryLimits is nil")
+	}
+}
+
 // T0262: WASM batch tests compile test bodies as coroutines and run them
 // through the cooperative scheduler instead of spawning threads.
 func TestGenerateTestMainWasmCoopScheduler(t *testing.T) {

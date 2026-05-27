@@ -12,8 +12,9 @@ import (
 
 // PosixPAL implements PAL for POSIX systems (macOS, Linux) using libc write/exit.
 type PosixPAL struct {
-	target         string // LLVM target triple (needed for platform-specific constants)
-	DebugAllocator bool   // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
+	target                string // LLVM target triple (needed for platform-specific constants)
+	DebugAllocator        bool   // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
+	MemoryLimitAccounting bool   // T0689: enable @__promise_memory_used_bytes accounting + memory-limit abort
 }
 
 // EmitWrite declares libc @write and defines @pal_write as a thin wrapper.
@@ -58,20 +59,20 @@ func (p *PosixPAL) EmitExit(module *ir.Module) *ir.Func {
 
 func (p *PosixPAL) EmitAlloc(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitLibcAllocDebug(module)
+		return emitLibcAllocDebug(module, p.MemoryLimitAccounting, "write", false)
 	}
 	return emitLibcAlloc(module)
 }
 func (p *PosixPAL) EmitFree(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
 		// POSIX libc 'write' returns ssize_t (i64).
-		return emitLibcFreeDebug(module, "write", false)
+		return emitLibcFreeDebug(module, "write", false, p.MemoryLimitAccounting)
 	}
 	return emitLibcFree(module)
 }
 func (p *PosixPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitLibcReallocDebug(module, "write", false)
+		return emitLibcReallocDebug(module, "write", false, p.MemoryLimitAccounting)
 	}
 	return emitLibcRealloc(module)
 }

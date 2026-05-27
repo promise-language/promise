@@ -291,6 +291,179 @@ func getOrCreateAllocCountGlobal(module *ir.Module) *ir.Global {
 	return g
 }
 
+// Memory limit accounting (T0689).
+//
+// When MemoryLimitAccounting is enabled (used by test binaries with -memory-limit > 0),
+// each pal_alloc atomically adds its requested size to @__promise_memory_used_bytes;
+// if the new total minus @__promise_memory_start_bytes exceeds @__promise_memory_limit_bytes
+// (when non-zero), the process prints "fatal: memory limit exceeded\n" to stderr and
+// calls exit(134).
+//
+// Reuses the debug allocator's existing 8-byte requested_size field at internal+8;
+// no new per-allocation bookkeeping. Accounting code is emitted only when the flag
+// is on — non-test builds (run/exec/build) emit the plain allocator with zero overhead.
+//
+// Snapshot semantics: each test snapshots `used` into `start` before running; the
+// effective per-test usage is `used - start`. This lets a tight per-test limit
+// (e.g. 1MB) work despite a multi-MB scheduler baseline.
+
+const (
+	memLimitGlobalUsed     = "__promise_memory_used_bytes"
+	memLimitGlobalLimit    = "__promise_memory_limit_bytes"
+	memLimitGlobalStart    = "__promise_memory_start_bytes"
+	memLimitGlobalAborting = "__promise_memory_aborting"
+)
+
+func getOrCreateMemoryLimitGlobals(module *ir.Module) (used, limit, start, aborting *ir.Global) {
+	for _, g := range module.Globals {
+		switch g.Name() {
+		case memLimitGlobalUsed:
+			used = g
+		case memLimitGlobalLimit:
+			limit = g
+		case memLimitGlobalStart:
+			start = g
+		case memLimitGlobalAborting:
+			aborting = g
+		}
+	}
+	if used == nil {
+		used = module.NewGlobal(memLimitGlobalUsed, irtypes.I64)
+		used.Init = constant.NewInt(irtypes.I64, 0)
+	}
+	if limit == nil {
+		limit = module.NewGlobal(memLimitGlobalLimit, irtypes.I64)
+		limit.Init = constant.NewInt(irtypes.I64, 0)
+	}
+	if start == nil {
+		start = module.NewGlobal(memLimitGlobalStart, irtypes.I64)
+		start.Init = constant.NewInt(irtypes.I64, 0)
+	}
+	if aborting == nil {
+		aborting = module.NewGlobal(memLimitGlobalAborting, irtypes.I32)
+		aborting.Init = constant.NewInt(irtypes.I32, 0)
+	}
+	return
+}
+
+// MemoryLimitConfig parameterises memory-limit accounting per-target.
+//
+// Atomic: true on multi-threaded targets (POSIX, Windows) so concurrent allocs
+// from M threads race correctly. false on single-threaded targets (wasm32-wasi)
+// — plain load/store mirrors what the existing __promise_alloc_count tracking
+// already does on WASM.
+//
+// EmitAbort emits the platform-specific fatal-print + exit sequence at the end
+// of blk; the block is terminated with `unreachable` after the call. The msg
+// is "fatal: memory limit exceeded\n". Exit code 134 (mirrors SIGABRT semantics
+// for parity with the stack-overflow path).
+type MemoryLimitConfig struct {
+	Atomic    bool
+	EmitAbort func(module *ir.Module, blk *ir.Block, key, msg string)
+}
+
+// EmitMemoryLimitHelpers emits @__promise_memory_set_test_state. Takes an i64
+// limit, snapshots the current `used` into `start`, then stores the limit.
+//
+// atomic=true selects atomic RMW (POSIX, Windows). atomic=false selects plain
+// load/store (wasm32-wasi, wasm32-web — both single-threaded).
+//
+// Only called when memory-limit accounting is enabled; otherwise these symbols
+// don't exist and the test runner shouldn't reference them.
+func EmitMemoryLimitHelpers(module *ir.Module, atomic bool) {
+	used, limit, start, _ := getOrCreateMemoryLimitGlobals(module)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+
+	setFn := module.NewFunc("__promise_memory_set_test_state", irtypes.Void,
+		ir.NewParam("new_limit", irtypes.I64))
+	setFn.FuncAttrs = append(setFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	setEntry := setFn.NewBlock(".entry")
+	if atomic {
+		// snapshot = atomic_load(used); atomic_store(start, snapshot)
+		usedVal := setEntry.NewAtomicRMW(enum.AtomicOpAdd, used, zero64, enum.AtomicOrderingMonotonic)
+		setEntry.NewAtomicRMW(enum.AtomicOpXChg, start, usedVal, enum.AtomicOrderingMonotonic)
+		setEntry.NewAtomicRMW(enum.AtomicOpXChg, limit, setFn.Params[0], enum.AtomicOrderingMonotonic)
+	} else {
+		usedVal := setEntry.NewLoad(irtypes.I64, used)
+		setEntry.NewStore(usedVal, start)
+		setEntry.NewStore(setFn.Params[0], limit)
+	}
+	setEntry.NewRet(nil)
+}
+
+// emitMemoryLimitCheck emits, after a size has been added to
+// @__promise_memory_used_bytes, the check `(new_used - start) > limit &&
+// limit != 0` and, when true, prints "fatal: memory limit exceeded\n" to
+// stderr and exits with code 134. Returns the block where control resumes
+// (the "no abort" path).
+//
+// newUsed is the i64 value of `used` AFTER the increment (before + size on
+// allocation, before + delta on realloc grow). cfg selects atomics + abort
+// path per target.
+func emitMemoryLimitCheck(
+	module *ir.Module, fn *ir.Func, blk *ir.Block, newUsed value.Value,
+	cfg MemoryLimitConfig,
+) *ir.Block {
+	_, limit, start, aborting := getOrCreateMemoryLimitGlobals(module)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+
+	var limitVal, startVal value.Value
+	if cfg.Atomic {
+		limitVal = blk.NewAtomicRMW(enum.AtomicOpAdd, limit, zero64, enum.AtomicOrderingMonotonic)
+		startVal = blk.NewAtomicRMW(enum.AtomicOpAdd, start, zero64, enum.AtomicOrderingMonotonic)
+	} else {
+		limitVal = blk.NewLoad(irtypes.I64, limit)
+		startVal = blk.NewLoad(irtypes.I64, start)
+	}
+
+	limitActive := blk.NewICmp(enum.IPredNE, limitVal, zero64)
+	delta := blk.NewSub(newUsed, startVal)
+	crossed := blk.NewICmp(enum.IPredSGT, delta, limitVal)
+	shouldAbort := blk.NewAnd(limitActive, crossed)
+
+	abortCandidateBlk := fn.NewBlock(".memlimit.abort_candidate")
+	continueBlk := fn.NewBlock(".memlimit.ok")
+	blk.NewCondBr(shouldAbort, abortCandidateBlk, continueBlk)
+
+	if cfg.Atomic {
+		// One-shot CAS guard so only the first thread to cross prints + exits.
+		// Loser exits with 134 directly without printing.
+		cas := abortCandidateBlk.NewCmpXchg(aborting,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1),
+			enum.AtomicOrderingMonotonic, enum.AtomicOrderingMonotonic)
+		won := abortCandidateBlk.NewExtractValue(cas, 1)
+
+		winnerBlk := fn.NewBlock(".memlimit.winner")
+		loserBlk := fn.NewBlock(".memlimit.loser")
+		abortCandidateBlk.NewCondBr(won, winnerBlk, loserBlk)
+
+		cfg.EmitAbort(module, winnerBlk, "memory_limit_exceeded",
+			"fatal: memory limit exceeded\n")
+
+		exitFn := getOrDeclareFunc(module, "exit", irtypes.Void,
+			ir.NewParam("status", irtypes.I32))
+		addFuncAttr(exitFn, enum.FuncAttrNoReturn)
+		loserBlk.NewCall(exitFn, constant.NewInt(irtypes.I32, 134))
+		loserBlk.NewUnreachable()
+	} else {
+		// Single-threaded: no CAS needed. abortCandidateBlk is the abort path.
+		cfg.EmitAbort(module, abortCandidateBlk, "memory_limit_exceeded",
+			"fatal: memory limit exceeded\n")
+	}
+
+	return continueBlk
+}
+
+// emitAbortLibcFactory adapts emitDebugAbortCallLibc to the
+// MemoryLimitConfig.EmitAbort signature for POSIX/Windows (write/_write + exit).
+// Used by emitLibcAllocDebug/emitLibcReallocDebug to build a per-target abort
+// callback for emitMemoryLimitCheck.
+func emitAbortLibcFactory(writeName string, writeReturnsI32 bool) func(*ir.Module, *ir.Block, string, string) {
+	return func(module *ir.Module, blk *ir.Block, key, msg string) {
+		emitDebugAbortCallLibc(module, blk, key, msg, writeName, writeReturnsI32)
+	}
+}
+
 // emitLibcAlloc declares libc @malloc and defines @pal_alloc as a wrapper.
 // Shared by all PALs that use libc for allocation.
 // Includes allocation count tracking for leak detection (T0020).
@@ -511,7 +684,12 @@ func emitHeaderValidationLibc(
 // with 0xAA so reads of uninitialized memory show a recognizable pattern.
 //
 // Pairs with emitLibcFreeDebug, which validates the header on free.
-func emitLibcAllocDebug(module *ir.Module) *ir.Func {
+//
+// When memoryLimitAccounting is true (T0689), additionally atomically adds the
+// requested size to @__promise_memory_used_bytes and aborts with
+// "fatal: memory limit exceeded\n" if (used - start) > limit. writeName /
+// writeReturnsI32 select the libc write fn for the abort path.
+func emitLibcAllocDebug(module *ir.Module, memoryLimitAccounting bool, writeName string, writeReturnsI32 bool) *ir.Func {
 	mallocSize := ir.NewParam("size", irtypes.I64)
 	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
 	mallocFn := getOrDeclareFunc(module, "malloc", irtypes.I8Ptr, mallocSize)
@@ -562,12 +740,23 @@ func emitLibcAllocDebug(module *ir.Module) *ir.Func {
 
 	// Bump alloc count
 	headerBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
-	headerBlk.NewBr(doneBlk)
+
+	// T0689: memory limit accounting. Atomically add the requested size to
+	// __promise_memory_used_bytes and abort if (used - start) > limit.
+	resumeBlk := headerBlk
+	if memoryLimitAccounting {
+		used, _, _, _ := getOrCreateMemoryLimitGlobals(module)
+		before := resumeBlk.NewAtomicRMW(enum.AtomicOpAdd, used, fn.Params[0], enum.AtomicOrderingMonotonic)
+		newUsed := resumeBlk.NewAdd(before, fn.Params[0])
+		cfg := MemoryLimitConfig{Atomic: true, EmitAbort: emitAbortLibcFactory(writeName, writeReturnsI32)}
+		resumeBlk = emitMemoryLimitCheck(module, fn, resumeBlk, newUsed, cfg)
+	}
+	resumeBlk.NewBr(doneBlk)
 
 	// On null malloc, return null. Otherwise, return user_ptr.
 	retPhi := doneBlk.NewPhi(
 		&ir.Incoming{X: constant.NewNull(irtypes.I8Ptr), Pred: entry},
-		&ir.Incoming{X: userPtr, Pred: headerBlk},
+		&ir.Incoming{X: userPtr, Pred: resumeBlk},
 	)
 	doneBlk.NewRet(retPhi)
 	return fn
@@ -582,7 +771,11 @@ func emitLibcAllocDebug(module *ir.Module) *ir.Func {
 //
 // writeName: libc write fn ("write" on POSIX, "_write" on Windows UCRT).
 // writeReturnsI32: true for Windows (i32-return _write), false for POSIX i64.
-func emitLibcFreeDebug(module *ir.Module, writeName string, writeReturnsI32 bool) *ir.Func {
+//
+// When memoryLimitAccounting is true (T0689), atomically subtracts the validated
+// requested_size from @__promise_memory_used_bytes so per-test alloc/free churn
+// under a tight limit doesn't trip.
+func emitLibcFreeDebug(module *ir.Module, writeName string, writeReturnsI32 bool, memoryLimitAccounting bool) *ir.Func {
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
@@ -622,6 +815,11 @@ func emitLibcFreeDebug(module *ir.Module, writeName string, writeReturnsI32 bool
 
 	// Decrement count and free internal pointer.
 	validated.NewAtomicRMW(enum.AtomicOpSub, allocCount, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	// T0689: memory limit accounting — subtract the requested size from used.
+	if memoryLimitAccounting {
+		used, _, _, _ := getOrCreateMemoryLimitGlobals(module)
+		validated.NewAtomicRMW(enum.AtomicOpSub, used, size, enum.AtomicOrderingMonotonic)
+	}
 	validated.NewCall(freeFn, hdrPtr)
 	validated.NewBr(doneBlk)
 
@@ -696,7 +894,10 @@ func emitLibcRealloc(module *ir.Module) *ir.Func {
 // The old `requested_size` is read from the validated header — no need for
 // libc's malloc_usable_size, and grown bytes are scribbled with 0xAA using
 // the exact old size as the lower bound.
-func emitLibcReallocDebug(module *ir.Module, writeName string, writeReturnsI32 bool) *ir.Func {
+//
+// When memoryLimitAccounting is true (T0689), adjusts @__promise_memory_used_bytes
+// by (new_size - old_size) and checks the limit when growing.
+func emitLibcReallocDebug(module *ir.Module, writeName string, writeReturnsI32 bool, memoryLimitAccounting bool) *ir.Func {
 	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	reallocSz := ir.NewParam("size", irtypes.I64)
@@ -769,10 +970,29 @@ func emitLibcReallocDebug(module *ir.Module, writeName string, writeReturnsI32 b
 	newTailStore := resizeOkBlk.NewStore(constant.NewInt(irtypes.I64, debugMagicTail), newTailSlot)
 	newTailStore.Align = 1
 
+	// T0689: adjust the memory-limit counter by (new - old) and abort if the
+	// post-resize usage crosses the limit. Signed delta: fetch_add accepts
+	// negative values. Only check the limit when growing — shrinking can't trip.
+	postAccBlk := resizeOkBlk
+	if memoryLimitAccounting {
+		used, _, _, _ := getOrCreateMemoryLimitGlobals(module)
+		delta := postAccBlk.NewSub(fn.Params[1], oldSize)
+		before := postAccBlk.NewAtomicRMW(enum.AtomicOpAdd, used, delta, enum.AtomicOrderingMonotonic)
+		newUsed := postAccBlk.NewAdd(before, delta)
+		grew := postAccBlk.NewICmp(enum.IPredSGT, delta, constant.NewInt(irtypes.I64, 0))
+		checkBlk := fn.NewBlock(".dbg.resize_memlimit_check")
+		skipCheckBlk := fn.NewBlock(".dbg.resize_memlimit_skip")
+		postAccBlk.NewCondBr(grew, checkBlk, skipCheckBlk)
+		cfg := MemoryLimitConfig{Atomic: true, EmitAbort: emitAbortLibcFactory(writeName, writeReturnsI32)}
+		afterCheck := emitMemoryLimitCheck(module, fn, checkBlk, newUsed, cfg)
+		afterCheck.NewBr(skipCheckBlk)
+		postAccBlk = skipCheckBlk
+	}
+
 	// If new size > old size, scribble the grown region [user+old, user+new) with 0xAA.
-	hasGrown := resizeOkBlk.NewICmp(enum.IPredUGT, fn.Params[1], oldSize)
+	hasGrown := postAccBlk.NewICmp(enum.IPredUGT, fn.Params[1], oldSize)
 	scribbleBlk := fn.NewBlock(".dbg.scribble_grown")
-	resizeOkBlk.NewCondBr(hasGrown, scribbleBlk, doneBlk)
+	postAccBlk.NewCondBr(hasGrown, scribbleBlk, doneBlk)
 
 	scribbleStart := scribbleBlk.NewGetElementPtr(irtypes.I8, newUserPtr, oldSize)
 	scribbleLen := scribbleBlk.NewSub(fn.Params[1], oldSize)
@@ -784,7 +1004,7 @@ func emitLibcReallocDebug(module *ir.Module, writeName string, writeReturnsI32 b
 		&ir.Incoming{X: allocResult, Pred: allocLikeBlk},
 		&ir.Incoming{X: nullPtr, Pred: freeLikeBlk},
 		&ir.Incoming{X: nullPtr, Pred: validatedBlk},
-		&ir.Incoming{X: newUserPtr, Pred: resizeOkBlk},
+		&ir.Incoming{X: newUserPtr, Pred: postAccBlk},
 		&ir.Incoming{X: newUserPtr, Pred: scribbleBlk},
 	)
 	doneBlk.NewRet(retPhi)

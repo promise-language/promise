@@ -489,7 +489,9 @@ func TestEmitFreeDebug(t *testing.T) {
 		}
 	})
 
-	// WasmWeb: propagates DebugAllocator to inner WasmPAL
+	// WasmWeb: propagates DebugAllocator to inner WasmPAL with WebTarget=true,
+	// so the abort path uses promise_env imports instead of WASI fd_write/proc_exit
+	// (the JS harness only provides promise_env.*, not wasi_snapshot_preview1.*).
 	t.Run("WasmWeb", func(t *testing.T) {
 		module := ir.NewModule()
 		p := &WasmWebPAL{DebugAllocator: true}
@@ -503,8 +505,14 @@ func TestEmitFreeDebug(t *testing.T) {
 		if strings.Contains(out, "@malloc_usable_size(") {
 			t.Error("WasmWeb debug pal_free should NOT call @malloc_usable_size")
 		}
-		if !strings.Contains(out, "@fd_write(") {
-			t.Error("WasmWeb debug pal_free abort path should call @fd_write")
+		if strings.Contains(out, "@fd_write(") {
+			t.Error("WasmWeb debug pal_free abort path should NOT call WASI @fd_write — use promise_env")
+		}
+		if !strings.Contains(out, "@promise_env_write(") {
+			t.Error("WasmWeb debug pal_free abort path should call @promise_env_write")
+		}
+		if !strings.Contains(out, "@promise_env_exit(") {
+			t.Error("WasmWeb debug pal_free abort path should call @promise_env_exit")
 		}
 	})
 
@@ -4067,4 +4075,157 @@ func TestReactorGlobalsReusedWindows(t *testing.T) {
 	if defCount != 1 {
 		t.Errorf("expected exactly 1 __reactor_pollfds definition, got %d", defCount)
 	}
+}
+
+// T0689 — direct pal-level tests for memory-limit accounting.
+//
+// These cover the bodies of getOrCreateMemoryLimitGlobals, EmitMemoryLimitHelpers,
+// and emitMemoryLimitCheck (which are otherwise only exercised via codegen
+// integration tests, so the pal/ package's coverage% for these functions is 0).
+
+// TestMemoryLimitGlobals exercises getOrCreateMemoryLimitGlobals — both the
+// create path and the "globals already exist, reuse" path.
+func TestMemoryLimitGlobals(t *testing.T) {
+	module := ir.NewModule()
+	used1, limit1, start1, abort1 := getOrCreateMemoryLimitGlobals(module)
+	if used1 == nil || limit1 == nil || start1 == nil || abort1 == nil {
+		t.Fatal("expected all four globals to be created")
+	}
+	// Second call must return the same globals (no duplicates).
+	used2, limit2, start2, abort2 := getOrCreateMemoryLimitGlobals(module)
+	if used1 != used2 || limit1 != limit2 || start1 != start2 || abort1 != abort2 {
+		t.Error("getOrCreateMemoryLimitGlobals duplicated existing globals")
+	}
+	out := module.String()
+	for _, name := range []string{
+		"@__promise_memory_used_bytes",
+		"@__promise_memory_limit_bytes",
+		"@__promise_memory_start_bytes",
+		"@__promise_memory_aborting",
+	} {
+		if strings.Count(out, name+" = global") != 1 {
+			t.Errorf("expected exactly one definition of %s; out=%s", name, out)
+		}
+	}
+}
+
+// TestEmitMemoryLimitHelpers_Atomic checks the POSIX/Windows (atomic) variant
+// of __promise_memory_set_test_state.
+func TestEmitMemoryLimitHelpers_Atomic(t *testing.T) {
+	module := ir.NewModule()
+	EmitMemoryLimitHelpers(module, true)
+	out := module.String()
+	assertContains(t, out, "define void @__promise_memory_set_test_state(i64 %new_limit)", "set_test_state defined")
+	// Atomic mode uses atomicrmw for the start snapshot + limit store.
+	if !strings.Contains(out, "atomicrmw") {
+		t.Error("expected atomicrmw operations in atomic variant")
+	}
+}
+
+// TestEmitMemoryLimitHelpers_Plain checks the WASM (non-atomic) variant uses
+// plain load/store — single-threaded targets must not emit atomic ops.
+func TestEmitMemoryLimitHelpers_Plain(t *testing.T) {
+	module := ir.NewModule()
+	EmitMemoryLimitHelpers(module, false)
+	out := module.String()
+	assertContains(t, out, "define void @__promise_memory_set_test_state(i64 %new_limit)", "set_test_state defined")
+	// Plain mode reads via load + writes via store — no atomicrmw on the
+	// helpers (the test-state setter must not assume threading on WASM).
+	helperFn := extractFuncBody(out, "__promise_memory_set_test_state")
+	if strings.Contains(helperFn, "atomicrmw") {
+		t.Errorf("plain variant should not use atomicrmw; body:\n%s", helperFn)
+	}
+}
+
+// TestPosixPALMemoryLimitAlloc covers the libc debug allocator's accounting
+// path: the alloc body must add the requested size to @__promise_memory_used_bytes
+// and emit the abort/check branch.
+func TestPosixPALMemoryLimitAlloc(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{target: "x86_64-unknown-linux-gnu", DebugAllocator: true, MemoryLimitAccounting: true}
+	p.EmitAlloc(module)
+	out := module.String()
+	assertContains(t, out, "@__promise_memory_used_bytes", "used counter referenced")
+	assertContains(t, out, "@__promise_memory_limit_bytes", "limit referenced")
+	assertContains(t, out, "fatal: memory limit exceeded", "fatal message present")
+	// The atomic variant uses cmpxchg for the one-shot abort guard.
+	if !strings.Contains(out, "cmpxchg") {
+		t.Error("expected cmpxchg for one-shot abort guard in atomic variant")
+	}
+}
+
+// TestWasmPALMemoryLimitAlloc verifies the WASM allocator emits the accounting
+// counter via plain load/store and uses proc_exit for the abort.
+func TestWasmPALMemoryLimitAlloc(t *testing.T) {
+	module := ir.NewModule()
+	p := &WasmPAL{DebugAllocator: true, MemoryLimitAccounting: true}
+	p.EmitAlloc(module)
+	out := module.String()
+	assertContains(t, out, "@__promise_memory_used_bytes", "used counter referenced")
+	assertContains(t, out, "fatal: memory limit exceeded", "fatal message present")
+	// WASM is single-threaded — no cmpxchg in the abort path.
+	allocBody := extractFuncBody(out, "pal_alloc")
+	if strings.Contains(allocBody, "cmpxchg") {
+		t.Errorf("WASM variant should not use cmpxchg; body:\n%s", allocBody)
+	}
+	// WASM abort goes through WASI proc_exit instead of libc exit.
+	if !strings.Contains(out, "proc_exit") {
+		t.Error("expected proc_exit in WASM abort path")
+	}
+}
+
+// TestWasmWebPALMemoryLimitAlloc verifies the wasm32-web variant emits the
+// memory-limit abort with promise_env imports (NOT WASI fd_write/proc_exit).
+func TestWasmWebPALMemoryLimitAlloc(t *testing.T) {
+	module := ir.NewModule()
+	p := &WasmWebPAL{DebugAllocator: true, MemoryLimitAccounting: true}
+	p.EmitAlloc(module)
+	out := module.String()
+	assertContains(t, out, "@__promise_memory_used_bytes", "used counter referenced")
+	assertContains(t, out, "fatal: memory limit exceeded", "fatal message present")
+	if !strings.Contains(out, "@promise_env_write(") {
+		t.Error("WasmWeb memory-limit abort should call @promise_env_write")
+	}
+	if !strings.Contains(out, "@promise_env_exit(") {
+		t.Error("WasmWeb memory-limit abort should call @promise_env_exit")
+	}
+}
+
+// TestNoMemoryLimitWhenFlagOff verifies the zero-overhead requirement at the
+// PAL level: with MemoryLimitAccounting=false (the default), the allocator
+// must not emit any of the memory-limit globals or message strings.
+func TestNoMemoryLimitWhenFlagOff(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{target: "x86_64-unknown-linux-gnu", DebugAllocator: true /* MemoryLimitAccounting omitted = false */}
+	p.EmitAlloc(module)
+	p.EmitFree(module)
+	p.EmitRealloc(module)
+	out := module.String()
+	for _, marker := range []string{
+		"__promise_memory_used_bytes",
+		"__promise_memory_limit_bytes",
+		"fatal: memory limit exceeded",
+	} {
+		if strings.Contains(out, marker) {
+			t.Errorf("unexpected %q in IR when MemoryLimitAccounting=false", marker)
+		}
+	}
+}
+
+// extractFuncBody returns the IR text of a named function, from its `define`
+// header up to (but not including) the closing `}` line. Used by memlimit
+// tests to scope substring searches to a specific function body.
+func extractFuncBody(ir, name string) string {
+	defineMarker := "@" + name + "("
+	idx := strings.Index(ir, defineMarker)
+	if idx < 0 {
+		return ""
+	}
+	// Walk forward to the closing }.
+	rest := ir[idx:]
+	end := strings.Index(rest, "\n}")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }

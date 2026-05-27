@@ -1,0 +1,36 @@
+// T0689: Tests for the `test(memory_limit: "...") per-test annotation.
+//
+// These tests should all pass within their declared per-test limit. The
+// runaway-allocation case is exercised separately as a CLI-driven test
+// (it has to abort the process, so it can't be batched).
+// Test passes well under its limit (each iteration's vector is freed
+// before the next allocation, so peak per-test usage is tiny).
+test_alloc_free_churn() `test(memory_limit: "1MB") {
+  for i in 0..1000 {
+    v := Vector[int]();
+    v.push(i);
+    v.push(i + 1);
+    assert(v.len == 2, "vec len");
+  }
+}
+
+// Test without memory_limit annotation (uses CLI default — currently 2GB).
+test_no_memory_limit_annotation() `test {
+  v := [1, 2, 3];
+  assert(v.len == 3, "vec len");
+}
+
+// Larger per-test limit — comfortably above the test's actual usage.
+test_higher_limit() `test(memory_limit: "256MB") {
+  s := "hello world";
+  assert(s.len == 11, "string len");
+}
+
+// "0" disables the per-test limit (process limit, if any, still applies).
+test_disabled_limit() `test(memory_limit: "0") {
+  v := Vector[int]();
+  for i in 0..100 {
+    v.push(i);
+  }
+  assert(v.len == 100, "vec len");
+}

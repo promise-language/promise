@@ -1140,6 +1140,21 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 				c.info.TestTimeouts[d.Name] = timeoutStr
 			}
 		}
+		// T0689: extract and validate memory_limit annotation if present.
+		// The actual size grammar is parsed by parseMemoryLimitArg in
+		// cmd/promise/main.go — we do a syntactic well-formedness check here
+		// (must be non-empty string with a unit suffix or be "0") so the user
+		// gets a sema-time error instead of failing later in the test harness.
+		if memStr, hasMem := extractTestMemoryLimit(d.Annotations); hasMem {
+			if !isValidMemoryLimitLiteral(memStr) {
+				c.errorf(d.Pos(), "invalid memory_limit %q: require a size with unit (e.g. \"256MB\", \"2GB\") or \"0\" to disable", memStr)
+			} else {
+				if c.info.TestMemoryLimits == nil {
+					c.info.TestMemoryLimits = make(map[string]string)
+				}
+				c.info.TestMemoryLimits[d.Name] = memStr
+			}
+		}
 
 		c.validateTestExclude(d.Annotations)
 		if expected, ok := extractTestExpected(d.Annotations); ok {

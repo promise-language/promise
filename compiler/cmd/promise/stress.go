@@ -201,7 +201,12 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 				os.Exit(1)
 			}
 			tmp.Close()
-			result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{DebugAllocator: true})
+			testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
+			result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
+				DebugAllocator:        true,
+				MemoryLimitAccounting: testMemoryLimits != nil, // T0689
+			})
+			result.SetTestMemoryLimits(testMemoryLimits)
 			testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 			result.GenerateTestMain(info.Tests, testTimeouts)
 			compileAndLink(result, tmp.Name(), target, f, false)
@@ -305,7 +310,12 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 				tests:    []string{strings.TrimSuffix(filepath.Base(f), ".pr")},
 			})
 		} else if len(info.Tests) > 0 {
-			result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{DebugAllocator: true})
+			testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
+			result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
+				DebugAllocator:        true,
+				MemoryLimitAccounting: testMemoryLimits != nil, // T0689
+			})
+			result.SetTestMemoryLimits(testMemoryLimits)
 			testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 			result.GenerateTestMain(info.Tests, testTimeouts)
 			compileAndLink(result, tmp.Name(), target, f, false)

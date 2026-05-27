@@ -9,7 +9,8 @@ import (
 // WasmWebPAL implements PAL for WebAssembly targeting browser environments.
 // Imports from "promise_env" (JS glue module) instead of "wasi_snapshot_preview1".
 type WasmWebPAL struct {
-	DebugAllocator bool // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
+	DebugAllocator        bool // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
+	MemoryLimitAccounting bool // T0689: enable @__promise_memory_used_bytes accounting + memory-limit abort
 }
 
 // EmitWrite declares a JS-provided write function and defines @pal_write.
@@ -59,12 +60,19 @@ func (p *WasmWebPAL) EmitExit(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// Alloc/Free/Realloc — same as WasmPAL (linked from wasm_alloc.o).
-func (p *WasmWebPAL) EmitAlloc(module *ir.Module) *ir.Func { return (&WasmPAL{}).EmitAlloc(module) }
-func (p *WasmWebPAL) EmitFree(module *ir.Module) *ir.Func {
-	return (&WasmPAL{DebugAllocator: p.DebugAllocator}).EmitFree(module)
+// Alloc/Free/Realloc — same as WasmPAL (linked from wasm_alloc.o), but with
+// WebTarget=true so the debug allocator's fatal-abort path (double-free,
+// bad-magic, tail-corrupt, T0689 memory limit) emits promise_env.write +
+// .exit imports instead of WASI fd_write + proc_exit.
+func (p *WasmWebPAL) EmitAlloc(module *ir.Module) *ir.Func {
+	return (&WasmPAL{DebugAllocator: p.DebugAllocator, MemoryLimitAccounting: p.MemoryLimitAccounting, WebTarget: true}).EmitAlloc(module)
 }
-func (p *WasmWebPAL) EmitRealloc(module *ir.Module) *ir.Func { return (&WasmPAL{}).EmitRealloc(module) }
+func (p *WasmWebPAL) EmitFree(module *ir.Module) *ir.Func {
+	return (&WasmPAL{DebugAllocator: p.DebugAllocator, MemoryLimitAccounting: p.MemoryLimitAccounting, WebTarget: true}).EmitFree(module)
+}
+func (p *WasmWebPAL) EmitRealloc(module *ir.Module) *ir.Func {
+	return (&WasmPAL{DebugAllocator: p.DebugAllocator, MemoryLimitAccounting: p.MemoryLimitAccounting, WebTarget: true}).EmitRealloc(module)
+}
 
 // Stubs — same as WasmPAL (no file I/O, threading, etc. in browser).
 func (p *WasmWebPAL) EmitFileOpen(module *ir.Module) *ir.Func  { return emitStubFileOpen(module) }

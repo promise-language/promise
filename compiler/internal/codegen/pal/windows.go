@@ -12,7 +12,8 @@ import (
 // Threading uses CRITICAL_SECTION (mutexes) and CONDITION_VARIABLE (condition vars).
 // All Win32 functions are declared as LLVM externals resolved by the linker from kernel32.lib/ucrt.
 type WindowsPAL struct {
-	DebugAllocator bool // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
+	DebugAllocator        bool // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
+	MemoryLimitAccounting bool // T0689: enable @__promise_memory_used_bytes accounting + memory-limit abort
 }
 
 // EmitWrite declares Win32 GetStdHandle/WriteFile and defines @pal_write.
@@ -87,20 +88,20 @@ func (p *WindowsPAL) EmitExit(module *ir.Module) *ir.Func {
 // Windows UCRT provides libc-compatible malloc/free/realloc.
 func (p *WindowsPAL) EmitAlloc(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitLibcAllocDebug(module)
+		return emitLibcAllocDebug(module, p.MemoryLimitAccounting, "_write", true)
 	}
 	return emitLibcAlloc(module)
 }
 func (p *WindowsPAL) EmitFree(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
 		// UCRT _write returns int (i32) and takes count as unsigned int (i32).
-		return emitLibcFreeDebug(module, "_write", true)
+		return emitLibcFreeDebug(module, "_write", true, p.MemoryLimitAccounting)
 	}
 	return emitLibcFree(module)
 }
 func (p *WindowsPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitLibcReallocDebug(module, "_write", true)
+		return emitLibcReallocDebug(module, "_write", true, p.MemoryLimitAccounting)
 	}
 	return emitLibcRealloc(module)
 }

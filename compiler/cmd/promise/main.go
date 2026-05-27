@@ -867,22 +867,33 @@ func execRunBinary(path string) {
 	}
 }
 
-// testTimeoutConfig holds CLI timeout configuration for per-test timeout computation.
+// defaultMemoryLimitBytes is the conservative ceiling applied per-test process
+// when -memory-limit is not specified (T0689). 2 GB is comfortably above what
+// any legitimate test in the suite needs while still being far below total RAM,
+// so a runaway allocation fails the offending test rather than driving the
+// machine into swap. Lower this value once the suite peak has been measured.
+const defaultMemoryLimitBytes int64 = 2 << 30 // 2 GiB
+
+// testTimeoutConfig holds CLI timeout/memory-limit configuration for per-test
+// resolution.
 type testTimeoutConfig struct {
-	defaultTimeout time.Duration // -timeout (default 60s)
-	scale          float64       // -timeout-scale (default 1.0)
-	min            time.Duration // -timeout-min (0 = no minimum)
-	max            time.Duration // -timeout-max (0 = no maximum)
-	compileTimeout time.Duration // -compile-timeout (default 10m) — backstop for hung compilation
+	defaultTimeout      time.Duration // -timeout (default 60s)
+	scale               float64       // -timeout-scale (default 1.0)
+	min                 time.Duration // -timeout-min (0 = no minimum)
+	max                 time.Duration // -timeout-max (0 = no maximum)
+	compileTimeout      time.Duration // -compile-timeout (default 10m) — backstop for hung compilation
+	defaultMemoryBytes  int64         // -memory-limit (default 2 GiB; 0 = disabled)
+	memoryLimitExplicit bool          // true if -memory-limit was passed on the CLI
 }
 
 // cacheString returns a stable string representation of the timeout config
 // for inclusion in cache keys. Per-test timeouts are baked into test binaries
 // at compile time, so the cache key must change when timeout config changes.
 func (c testTimeoutConfig) cacheString() string {
-	return fmt.Sprintf("timeout:%d,scale:%.10g,min:%d,max:%d",
+	return fmt.Sprintf("timeout:%d,scale:%.10g,min:%d,max:%d,memlimit:%d",
 		c.defaultTimeout.Nanoseconds(), c.scale,
-		c.min.Nanoseconds(), c.max.Nanoseconds())
+		c.min.Nanoseconds(), c.max.Nanoseconds(),
+		c.defaultMemoryBytes)
 }
 
 // computeTestTimeouts computes the final per-test timeout in nanoseconds for each test.
@@ -904,6 +915,39 @@ func computeTestTimeouts(tests []*types.Func, info *sema.Info, cfg testTimeoutCo
 			final = cfg.max
 		}
 		result[t.Name()] = final.Nanoseconds()
+	}
+	return result
+}
+
+// computeTestMemoryLimits computes the final per-test memory limit in bytes
+// for each test. Resolution: annotation ?: cfg.defaultMemoryBytes. Returns nil
+// if memory limit accounting is disabled (cfg.defaultMemoryBytes == 0 AND no
+// test in the file has a memory_limit annotation). T0689.
+func computeTestMemoryLimits(tests []*types.Func, info *sema.Info, cfg testTimeoutConfig) map[string]int64 {
+	// First pass: determine whether any test opts in via annotation.
+	anyAnnotation := false
+	if info.TestMemoryLimits != nil {
+		for _, t := range tests {
+			if _, ok := info.TestMemoryLimits[t.Name()]; ok {
+				anyAnnotation = true
+				break
+			}
+		}
+	}
+	if cfg.defaultMemoryBytes == 0 && !anyAnnotation {
+		return nil
+	}
+	result := make(map[string]int64, len(tests))
+	for _, t := range tests {
+		limit := cfg.defaultMemoryBytes
+		if info.TestMemoryLimits != nil {
+			if raw, ok := info.TestMemoryLimits[t.Name()]; ok {
+				if v, err := parseMemoryLimitArg(raw); err == nil {
+					limit = v
+				}
+			}
+		}
+		result[t.Name()] = limit
 	}
 	return result
 }
@@ -935,12 +979,14 @@ func runTest(args []string) {
 	var timeoutMin time.Duration // 0 = no minimum
 	var timeoutMax time.Duration // 0 = no maximum
 	var stressMode bool
-	var stressCount int                // 0 = unlimited
-	var stressDuration time.Duration   // 0 = unlimited
-	var targetTriple string            // empty = host target
-	var outputFile string              // stress report output file
-	var coverageMode bool              // T0030: coverage instrumentation
-	compileTimeout := 10 * time.Minute // -compile-timeout (backstop for hung compilation)
+	var stressCount int                         // 0 = unlimited
+	var stressDuration time.Duration            // 0 = unlimited
+	var targetTriple string                     // empty = host target
+	var outputFile string                       // stress report output file
+	var coverageMode bool                       // T0030: coverage instrumentation
+	compileTimeout := 10 * time.Minute          // -compile-timeout (backstop for hung compilation)
+	memoryLimitBytes := defaultMemoryLimitBytes // T0689: default 2 GiB ceiling per test process
+	memoryLimitExplicit := false                // whether -memory-limit was passed
 	var remaining []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-timeout" && i+1 < len(args) {
@@ -1011,6 +1057,15 @@ func runTest(args []string) {
 			}
 			compileTimeout = d
 			i++
+		} else if args[i] == "-memory-limit" && i+1 < len(args) {
+			n, err := parseMemoryLimitArg(args[i+1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error: "+err.Error())
+				os.Exit(1)
+			}
+			memoryLimitBytes = n
+			memoryLimitExplicit = true
+			i++
 		} else if args[i] == "-coverage" {
 			coverageMode = true
 		} else if args[i] == "-time-phases" {
@@ -1055,11 +1110,13 @@ func runTest(args []string) {
 	}
 
 	cfg := testTimeoutConfig{
-		defaultTimeout: timeout,
-		scale:          timeoutScale,
-		min:            timeoutMin,
-		max:            timeoutMax,
-		compileTimeout: compileTimeout,
+		defaultTimeout:      timeout,
+		scale:               timeoutScale,
+		min:                 timeoutMin,
+		max:                 timeoutMax,
+		compileTimeout:      compileTimeout,
+		defaultMemoryBytes:  memoryLimitBytes,
+		memoryLimitExplicit: memoryLimitExplicit,
 	}
 
 	if stressMode {
@@ -1106,7 +1163,8 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 			return
 		}
 		testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
-		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, filename, testTimeouts)
+		testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
+		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, filename, testTimeouts, testMemoryLimits)
 		defer os.Remove(binaryPath)
 		var totalNs int64
 		for _, ns := range testTimeouts {
@@ -1180,7 +1238,8 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 	}
 
 	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
-	binaryPath := compileTestBinary(file, info, targetTriple, filename, testTimeouts)
+	testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
+	binaryPath := compileTestBinary(file, info, targetTriple, filename, testTimeouts, testMemoryLimits)
 
 	if timePhases {
 		timePhase("total", time.Since(compileStart), "")
@@ -1236,7 +1295,8 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 			return
 		}
 		testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
-		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, modDir, testTimeouts)
+		testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
+		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, modDir, testTimeouts, testMemoryLimits)
 		defer os.Remove(binaryPath)
 		var totalNs int64
 		for _, ns := range testTimeouts {
@@ -1321,7 +1381,8 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 	}
 
 	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
-	binaryPath := compileTestBinary(file, info, targetTriple, modDir, testTimeouts)
+	testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
+	binaryPath := compileTestBinary(file, info, targetTriple, modDir, testTimeouts, testMemoryLimits)
 
 	defer os.Remove(binaryPath)
 	// Process-level timeout: sum of per-test timeouts + 30s buffer.
@@ -1352,15 +1413,19 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 
 // compileTestBinary runs codegen + link for a test file and returns the binary path.
 // testTimeouts maps test function names to their computed timeout in nanoseconds.
-func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile string, testTimeouts map[string]int64) string {
+// testMemoryLimits (nil = no accounting) maps test function names to memory
+// limits in bytes (T0689).
+func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile string, testTimeouts map[string]int64, testMemoryLimits map[string]int64) string {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
 	tCodegen := time.Now()
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
-		DebugAllocator: true, // tests always use debug mode
+		DebugAllocator:        true,                    // tests always use debug mode
+		MemoryLimitAccounting: testMemoryLimits != nil, // T0689: emit accounting allocator + helpers when any per-test limit is set
 	})
+	result.SetTestMemoryLimits(testMemoryLimits)
 	result.GenerateTestMain(info.Tests, testTimeouts)
 	timePhase("codegen", time.Since(tCodegen), "")
 
@@ -1403,17 +1468,37 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 		os.Exit(1)
 	}
 
+	// T0689: detect the structured `fatal: memory limit exceeded` stderr line
+	// emitted by the accounting allocator on abort. When present, the child
+	// process called exit(134) mid-batch — no summary was printed. We synthesize
+	// a MEMLIMIT line and a summary so the user sees a clean classification.
+	memlimitTripped := strings.Contains(string(output), "fatal: memory limit exceeded")
+
 	// Print output: format raw "PASS <ns> <name>" lines and replace summary with timed version
 	targetSuffix := ""
 	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
 		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
 	}
 	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
+	sawSummary := false
+	passedCount := 0
+	failedCount := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
 		}
+		// T0689: filter out raw PAL fatal lines — we'll emit a synthetic
+		// MEMLIMIT report block at the end.
+		if memlimitTripped && strings.HasPrefix(line, "fatal: memory limit exceeded") {
+			continue
+		}
+		if strings.HasPrefix(line, "pass ") {
+			passedCount++
+		} else if strings.HasPrefix(line, "FAIL ") {
+			failedCount++
+		}
 		if m := summaryRe.FindStringSubmatch(line); m != nil {
+			sawSummary = true
 			fmt.Println() // empty line before summary
 			summary := fmt.Sprintf("%s passed, %s failed", m[1], m[2])
 			if m[3] != "" {
@@ -1432,11 +1517,24 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 				summary += fmt.Sprintf(", %s stale allow_leaks", m[7])
 			}
 			fmt.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
-		} else if targetSuffix != "" && (strings.HasPrefix(line, "pass ") || strings.HasPrefix(line, "FAIL ") || strings.HasPrefix(line, "LEAK ") || strings.HasPrefix(line, "TIMEOUT ")) {
+		} else if targetSuffix != "" && (strings.HasPrefix(line, "pass ") || strings.HasPrefix(line, "FAIL ") || strings.HasPrefix(line, "LEAK ") || strings.HasPrefix(line, "TIMEOUT ") || strings.HasPrefix(line, "MEMLIMIT ")) {
 			fmt.Printf("%s%s\n", line, targetSuffix)
 		} else {
 			fmt.Println(line)
 		}
+	}
+
+	if memlimitTripped {
+		// Synthesize a MEMLIMIT line + summary if the child aborted before
+		// emitting its own summary line.
+		fmt.Printf("MEMLIMIT (-) <aborted>%s\n", targetSuffix)
+		fmt.Println("  memory limit: exceeded (test process aborted; subsequent tests not run)")
+		if !sawSummary {
+			fmt.Println()
+			fmt.Printf("%d passed, %d failed, 1 memlimit (%.3fs)%s\n",
+				passedCount, failedCount, elapsed.Seconds(), targetSuffix)
+		}
+		os.Exit(1)
 	}
 
 	if runErr != nil {
@@ -1450,15 +1548,17 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 
 // compileTestBinaryWithCoverage compiles a test binary with coverage instrumentation enabled.
 // Returns the binary path and the coverage region metadata for report formatting.
-func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple, sourceFile string, testTimeouts map[string]int64) (string, []codegen.CoverageRegion) {
+func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple, sourceFile string, testTimeouts map[string]int64, testMemoryLimits map[string]int64) (string, []codegen.CoverageRegion) {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
 	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
-		CoverageEnabled: true,
-		DebugAllocator:  true, // tests always use debug mode
+		CoverageEnabled:       true,
+		DebugAllocator:        true,                    // tests always use debug mode
+		MemoryLimitAccounting: testMemoryLimits != nil, // T0689
 	})
+	result.SetTestMemoryLimits(testMemoryLimits)
 	result.GenerateTestMain(info.Tests, testTimeouts)
 
 	ext := binaryExtension(target)
@@ -1943,12 +2043,13 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 
 	// Print results in file order, streaming as each slot completes.
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) timed out)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?(?:, (\d+) memlimit)?`)
 	failLineRe := regexp.MustCompile(`^FAIL \([\d.]+s\)(?: (.+))?$`)
 	leakLineRe := regexp.MustCompile(`^LEAK \([\d.]+s\)(?: (.+))?$`)
 	timeoutLineRe := regexp.MustCompile(`^TIMEOUT \([\d.]+s\)(?: (.+))?$`)
+	memlimitLineRe := regexp.MustCompile(`^MEMLIMIT \([^)]+\)(?: (.+))?$`) // T0689
 	passLineRe := regexp.MustCompile(`^pass \([\d.]+s\)`)
-	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:|leak:|warning:|fatal:|signal:|timeout:)`)
+	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:|leak:|warning:|fatal:|signal:|timeout:|memory limit:)`)
 
 	type failureInfo struct {
 		name    string
@@ -1960,6 +2061,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	totalSkipped := 0
 	totalLeaked := 0
 	totalTimedOut := 0
+	totalMemlimited := 0 // T0689
 	totalIgnored := 0
 	totalStale := 0
 	totalFiles := 0
@@ -2037,6 +2139,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 
 		fileLeaked := 0
 		fileTimedOut := 0
+		fileMemlimited := 0 // T0689
 		var summaryMatch []string
 		for i := 0; i < len(lines); i++ {
 			line := lines[i]
@@ -2084,6 +2187,21 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				if detail != "" {
 					failDetails = append(failDetails, detail)
 				}
+			} else if m := memlimitLineRe.FindStringSubmatch(line); m != nil {
+				// T0689: MEMLIMIT outcome (synthetic) — the test process aborted.
+				fileMemlimited++
+				detail := m[1]
+				for i+1 < len(lines) && panicContextRe.MatchString(lines[i+1]) {
+					i++
+					if detail == "" {
+						detail = strings.TrimSpace(lines[i])
+					} else {
+						detail += "\n" + lines[i]
+					}
+				}
+				if detail != "" {
+					failDetails = append(failDetails, detail)
+				}
 			} else if sm := summaryRe.FindStringSubmatch(line); sm != nil {
 				summaryMatch = sm
 			}
@@ -2096,7 +2214,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			// (meaning the test harness completed), treat as a pass — the crash is
 			// in the shutdown path, not in user code. B0230.
 			// Without a summary line, the subprocess crashed mid-test (B0300).
-			if filePassed > 0 && fileFailed == 0 && fileLeaked == 0 && fileTimedOut == 0 && summaryMatch != nil {
+			if filePassed > 0 && fileFailed == 0 && fileLeaked == 0 && fileTimedOut == 0 && fileMemlimited == 0 && summaryMatch != nil {
 				relPath, relErr := filepath.Rel(baseDir, r.file)
 				if relErr != nil {
 					relPath = r.file
@@ -2118,6 +2236,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				}
 				if len(m) > 7 && m[7] != "" {
 					totalStale += atoi(m[7])
+				}
+				if len(m) > 8 && m[8] != "" {
+					totalMemlimited += atoi(m[8])
 				}
 				totalFiles++
 				testCount := ""
@@ -2160,6 +2281,10 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				if len(m) > 7 && m[7] != "" {
 					totalStale += atoi(m[7])
 				}
+				if len(m) > 8 && m[8] != "" {
+					totalMemlimited += atoi(m[8])
+					fileMemlimited = atoi(m[8])
+				}
 			} else if fileFailed > 0 || filePassed > 0 {
 				totalPassed += filePassed
 				totalFailed += fileFailed
@@ -2178,13 +2303,16 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				continue
 			}
 
-			totalTests := filePassed + fileFailed + fileLeaked + fileTimedOut
-			if fileFailed == 0 && fileLeaked > 0 && fileTimedOut == 0 {
+			totalTests := filePassed + fileFailed + fileLeaked + fileTimedOut + fileMemlimited
+			if fileFailed == 0 && fileLeaked > 0 && fileTimedOut == 0 && fileMemlimited == 0 {
 				fmt.Printf("FAIL (%.3fs) %s (%d leaked)%s\n", r.elapsed.Seconds(), relPath, fileLeaked, targetSuffix)
-			} else if fileFailed == 0 && fileTimedOut > 0 && fileLeaked == 0 {
+			} else if fileFailed == 0 && fileTimedOut > 0 && fileLeaked == 0 && fileMemlimited == 0 {
 				fmt.Printf("FAIL (%.3fs) %s (%d timed out)%s\n", r.elapsed.Seconds(), relPath, fileTimedOut, targetSuffix)
+			} else if fileFailed == 0 && fileMemlimited > 0 && fileLeaked == 0 && fileTimedOut == 0 {
+				// T0689: pure memlimit abort — process didn't run all tests.
+				fmt.Printf("FAIL (%.3fs) %s (memory limit exceeded)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 			} else if totalTests > 0 {
-				failCount := fileFailed + fileLeaked + fileTimedOut
+				failCount := fileFailed + fileLeaked + fileTimedOut + fileMemlimited
 				fmt.Printf("FAIL (%.3fs) %s (%d/%d failed)%s\n", r.elapsed.Seconds(), relPath, failCount, totalTests, targetSuffix)
 			} else {
 				fmt.Printf("FAIL (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
@@ -2241,6 +2369,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			if len(m) > 7 && m[7] != "" {
 				totalStale += atoi(m[7])
 			}
+			if len(m) > 8 && m[8] != "" {
+				totalMemlimited += atoi(m[8])
+			}
 		}
 
 		// Parse stale allow_leaks tests from output
@@ -2278,6 +2409,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 	if totalTimedOut > 0 {
 		summary += fmt.Sprintf(", %d timed out", totalTimedOut)
+	}
+	if totalMemlimited > 0 {
+		summary += fmt.Sprintf(", %d memlimit", totalMemlimited)
 	}
 	if totalIgnored > 0 {
 		summary += fmt.Sprintf(", %d allowed leaks", totalIgnored)
@@ -2336,7 +2470,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	// The B0230 workaround (line ~1466) treats crash-during-shutdown as PASS
 	// when filePassed > 0 && fileFailed == 0, but this also swallows leak-only
 	// exits. Rather than changing that logic, enforce leaks at the final gate.
-	if totalFailed > 0 || totalLeaked > 0 || totalTimedOut > 0 || failedFiles > 0 {
+	if totalFailed > 0 || totalLeaked > 0 || totalTimedOut > 0 || totalMemlimited > 0 || failedFiles > 0 {
 		os.Exit(1)
 	}
 }
@@ -2501,6 +2635,59 @@ func parseTimeoutArg(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid timeout: %s (use duration like '60s' or seconds like '60')", s)
 	}
 	return time.Duration(secs) * time.Second, nil
+}
+
+// parseMemoryLimitArg parses a memory-limit string. Requires an explicit unit
+// suffix (B/KB/MB/GB or KiB/MiB/GiB, case-insensitive). "0" without a unit is a
+// special opt-out value. Negative numbers and bare numbers (non-zero) are
+// rejected to prevent ambiguity (T0689).
+//
+// Returns bytes as int64. Allowed grammar (regex-ish):
+//
+//	"0"                       → 0 (opt-out)
+//	N + ("b" | "kb" | "mb" | "gb")     → decimal multipliers (1000)
+//	N + ("kib" | "mib" | "gib")        → binary multipliers (1024)
+//
+// We use binary multipliers for KB/MB/GB by convention (matches user
+// expectations for "256MB" = 256 * 1024^2 bytes, consistent with how memory
+// is colloquially counted).
+func parseMemoryLimitArg(s string) (int64, error) {
+	if s == "" {
+		return 0, fmt.Errorf("invalid memory limit: empty string")
+	}
+	if s == "0" {
+		return 0, nil
+	}
+	lower := strings.ToLower(s)
+	var mult int64
+	var numPart string
+	switch {
+	case strings.HasSuffix(lower, "gib"):
+		mult, numPart = 1<<30, strings.TrimSuffix(lower, "gib")
+	case strings.HasSuffix(lower, "mib"):
+		mult, numPart = 1<<20, strings.TrimSuffix(lower, "mib")
+	case strings.HasSuffix(lower, "kib"):
+		mult, numPart = 1<<10, strings.TrimSuffix(lower, "kib")
+	case strings.HasSuffix(lower, "gb"):
+		mult, numPart = 1<<30, strings.TrimSuffix(lower, "gb")
+	case strings.HasSuffix(lower, "mb"):
+		mult, numPart = 1<<20, strings.TrimSuffix(lower, "mb")
+	case strings.HasSuffix(lower, "kb"):
+		mult, numPart = 1<<10, strings.TrimSuffix(lower, "kb")
+	case strings.HasSuffix(lower, "b"):
+		mult, numPart = 1, strings.TrimSuffix(lower, "b")
+	default:
+		return 0, fmt.Errorf("invalid memory limit: %q (require unit B/KB/MB/GB, e.g. '256MB' or '2GB'; or '0' to disable)", s)
+	}
+	numPart = strings.TrimSpace(numPart)
+	n, err := strconv.ParseInt(numPart, 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid memory limit: %q (numeric part must be a non-negative integer)", s)
+	}
+	if n > (1<<62)/mult {
+		return 0, fmt.Errorf("invalid memory limit: %q (overflows int64)", s)
+	}
+	return n * mult, nil
 }
 
 // compileAndLink writes the IR to a temp file and links it into the output binary.

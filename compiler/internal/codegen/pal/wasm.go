@@ -10,7 +10,13 @@ import (
 
 // WasmPAL implements PAL for WebAssembly using WASI (WebAssembly System Interface).
 type WasmPAL struct {
-	DebugAllocator bool // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
+	DebugAllocator        bool // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection
+	MemoryLimitAccounting bool // T0689: enable @__promise_memory_used_bytes accounting + memory-limit abort
+	// WebTarget selects the abort-path imports for the debug allocator's
+	// fatal-print sequence: false → WASI (wasm_snapshot_preview1.fd_write +
+	// .proc_exit), true → JS-provided promise_env.write + .exit. Set by
+	// WasmWebPAL when it delegates Alloc/Free/Realloc emission to WasmPAL.
+	WebTarget bool
 }
 
 // EmitWrite declares WASI fd_write and defines @pal_write.
@@ -99,7 +105,7 @@ func (p *WasmPAL) EmitExit(module *ir.Module) *ir.Func {
 // Includes allocation count tracking for leak detection (T0020).
 func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitWasmAllocDebug(module)
+		return emitWasmAllocDebug(module, p.MemoryLimitAccounting, p.WebTarget)
 	}
 
 	// declare noalias i8* @malloc(i32 noundef) nounwind
@@ -137,10 +143,59 @@ func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// emitWasmDebugAbortCall emits a fd_write(2, msg) + proc_exit(134) + unreachable
-// sequence into blk for the WASM debug allocator (T0365). Each call site uses
-// its own private message global; ciovec is built on the stack via alloca.
-func emitWasmDebugAbortCall(module *ir.Module, blk *ir.Block, key, msg string) {
+// EmitWasmDebugAbort is the exported alias of emitWasmDebugAbortCall for
+// wasm32-wasi (WASI imports). For wasm32-web, use EmitWasmWebDebugAbort.
+func EmitWasmDebugAbort(module *ir.Module, blk *ir.Block, key, msg string) {
+	emitWasmDebugAbortCall(module, blk, key, msg, false)
+}
+
+// EmitWasmWebDebugAbort is the wasm32-web variant — fatal-print + exit via the
+// JS-provided promise_env.write / promise_env.exit imports instead of WASI.
+// Suitable for use as a MemoryLimitConfig.EmitAbort callback on wasm-web.
+func EmitWasmWebDebugAbort(module *ir.Module, blk *ir.Block, key, msg string) {
+	emitWasmDebugAbortCall(module, blk, key, msg, true)
+}
+
+// emitWasmDebugAbortCall emits a write(2, msg) + exit(134) + unreachable
+// sequence into blk for the WASM debug allocator (T0365). webTarget selects
+// JS-provided promise_env imports (wasm32-web) over WASI imports
+// (wasm32-wasi). Each call site uses its own private message global.
+//
+// On wasm32-wasi: writes via fd_write (ciovec built on stack), exits via
+// proc_exit. Both imported from wasi_snapshot_preview1.
+//
+// On wasm32-web: writes via promise_env.write (raw fd/buf/len, same shape
+// as pal_write), exits via promise_env.exit. The JS harness handles routing
+// to console.error and process termination.
+func emitWasmDebugAbortCall(module *ir.Module, blk *ir.Block, key, msg string, webTarget bool) {
+	g := getOrCreateDebugMsgGlobal(module, "wasm_"+key, msg)
+	msgPtr := blk.NewBitCast(g, irtypes.I8Ptr)
+	stderrFd := constant.NewInt(irtypes.I32, 2)
+
+	if webTarget {
+		// promise_env.write(fd, buf, len) → i64 ; promise_env.exit(code) → !void
+		envWrite := getOrDeclareFunc(module, "promise_env_write", irtypes.I64,
+			ir.NewParam("fd", irtypes.I32),
+			ir.NewParam("buf", irtypes.I8Ptr),
+			ir.NewParam("len", irtypes.I64))
+		envWrite.FuncAttrs = append(envWrite.FuncAttrs,
+			ir.AttrPair{Key: "wasm-import-module", Value: "promise_env"},
+			ir.AttrPair{Key: "wasm-import-name", Value: "write"})
+
+		envExit := getOrDeclareFunc(module, "promise_env_exit", irtypes.Void,
+			ir.NewParam("code", irtypes.I32))
+		addFuncAttr(envExit, enum.FuncAttrNoReturn)
+		envExit.FuncAttrs = append(envExit.FuncAttrs,
+			ir.AttrPair{Key: "wasm-import-module", Value: "promise_env"},
+			ir.AttrPair{Key: "wasm-import-name", Value: "exit"})
+
+		blk.NewCall(envWrite, stderrFd, msgPtr, constant.NewInt(irtypes.I64, int64(len(msg))))
+		blk.NewCall(envExit, constant.NewInt(irtypes.I32, 134))
+		blk.NewUnreachable()
+		return
+	}
+
+	// wasm32-wasi: fd_write with a ciovec, then proc_exit.
 	ciovecType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32)
 	fdWrite := getOrDeclareFunc(module, "fd_write", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32),
@@ -158,9 +213,6 @@ func emitWasmDebugAbortCall(module *ir.Module, blk *ir.Block, key, msg string) {
 		ir.AttrPair{Key: "wasm-import-module", Value: "wasi_snapshot_preview1"},
 		ir.AttrPair{Key: "wasm-import-name", Value: "proc_exit"})
 
-	g := getOrCreateDebugMsgGlobal(module, "wasm_"+key, msg)
-	msgPtr := blk.NewBitCast(g, irtypes.I8Ptr)
-
 	iov := blk.NewAlloca(ciovecType)
 	iovBufField := blk.NewGetElementPtr(ciovecType, iov,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -170,7 +222,7 @@ func emitWasmDebugAbortCall(module *ir.Module, blk *ir.Block, key, msg string) {
 	blk.NewStore(constant.NewInt(irtypes.I32, int64(len(msg))), iovLenField)
 
 	nwrittenPtr := blk.NewAlloca(irtypes.I32)
-	blk.NewCall(fdWrite, constant.NewInt(irtypes.I32, 2), iov,
+	blk.NewCall(fdWrite, stderrFd, iov,
 		constant.NewInt(irtypes.I32, 1), nwrittenPtr)
 	blk.NewCall(procExit, constant.NewInt(irtypes.I32, 134))
 	blk.NewUnreachable()
@@ -180,9 +232,13 @@ func emitWasmDebugAbortCall(module *ir.Module, blk *ir.Block, key, msg string) {
 // WASM (i32 internal sizes, i64 magic words). Mirrors emitHeaderValidationLibc
 // — checks MAGIC_FREED at BOTH offset 0 and offset 8 to make double-free
 // detection survive offset-0 reuse by the wasm allocator.
+//
+// webTarget=true selects promise_env.write+exit imports for the fatal-abort
+// paths (wasm32-web); false uses WASI fd_write+proc_exit (wasm32-wasi).
 func emitHeaderValidationWasm(
 	module *ir.Module,
 	fn *ir.Func, blk *ir.Block, userPtr value.Value,
+	webTarget bool,
 ) (sizeVal value.Value, headerPtr value.Value, validatedBlk *ir.Block) {
 	negHeader := constant.NewInt(irtypes.I32, -debugHeaderSize)
 	hdrPtr := blk.NewGetElementPtr(irtypes.I8, userPtr, negHeader)
@@ -221,11 +277,11 @@ func emitHeaderValidationWasm(
 	tailOkBlk.NewCondBr(tailOk, postValidatedBlk, tailAbortBlk)
 
 	emitWasmDebugAbortCall(module, freedAbortBlk, "double_free",
-		"fatal: double free\n")
+		"fatal: double free\n", webTarget)
 	emitWasmDebugAbortCall(module, badMagicAbortBlk, "bad_magic",
-		"fatal: invalid free (bad header magic)\n")
+		"fatal: invalid free (bad header magic)\n", webTarget)
 	emitWasmDebugAbortCall(module, tailAbortBlk, "tail_corrupt",
-		"fatal: heap corruption (tail sentinel mismatch)\n")
+		"fatal: heap corruption (tail sentinel mismatch)\n", webTarget)
 
 	return sizeOrFreedTag, hdrPtr, postValidatedBlk
 }
@@ -238,7 +294,12 @@ func emitHeaderValidationWasm(
 // Note on alignment: the WASM allocator (wasm_alloc.c) returns 8-byte aligned
 // pointers for double. After a 16-byte header, the user pointer is still
 // 8-byte aligned — sufficient for all current Promise types.
-func emitWasmAllocDebug(module *ir.Module) *ir.Func {
+//
+// When memoryLimitAccounting is true (T0689), additionally adds the requested
+// size to @__promise_memory_used_bytes (plain load/store — both WASM targets
+// are single-threaded) and aborts via fd_write+proc_exit (wasm32-wasi) or
+// promise_env.write+exit (wasm32-web, when webTarget=true) on overflow.
+func emitWasmAllocDebug(module *ir.Module, memoryLimitAccounting bool, webTarget bool) *ir.Func {
 	mallocSize := ir.NewParam("size", irtypes.I32)
 	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
 	mallocFn := getOrDeclareFunc(module, "malloc", irtypes.I8Ptr, mallocSize)
@@ -286,11 +347,27 @@ func emitWasmAllocDebug(module *ir.Module) *ir.Func {
 
 	old := headerBlk.NewLoad(irtypes.I64, allocCount)
 	headerBlk.NewStore(headerBlk.NewAdd(old, constant.NewInt(irtypes.I64, 1)), allocCount)
-	headerBlk.NewBr(doneBlk)
+
+	// T0689: memory-limit accounting on WASM uses plain load/store + WASI
+	// abort (single-threaded wasm32-wasi). Mirrors the libc-allocator path.
+	resumeBlk := headerBlk
+	if memoryLimitAccounting {
+		used, _, _, _ := getOrCreateMemoryLimitGlobals(module)
+		oldUsed := resumeBlk.NewLoad(irtypes.I64, used)
+		newUsed := resumeBlk.NewAdd(oldUsed, fn.Params[0])
+		resumeBlk.NewStore(newUsed, used)
+		abort := EmitWasmDebugAbort
+		if webTarget {
+			abort = EmitWasmWebDebugAbort
+		}
+		cfg := MemoryLimitConfig{Atomic: false, EmitAbort: abort}
+		resumeBlk = emitMemoryLimitCheck(module, fn, resumeBlk, newUsed, cfg)
+	}
+	resumeBlk.NewBr(doneBlk)
 
 	retPhi := doneBlk.NewPhi(
 		&ir.Incoming{X: constant.NewNull(irtypes.I8Ptr), Pred: entry},
-		&ir.Incoming{X: userPtr, Pred: headerBlk},
+		&ir.Incoming{X: userPtr, Pred: resumeBlk},
 	)
 	doneBlk.NewRet(retPhi)
 	return fn
@@ -300,7 +377,7 @@ func emitWasmAllocDebug(module *ir.Module) *ir.Func {
 // Includes allocation count tracking for leak detection (T0020).
 func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitWasmFreeDebug(module)
+		return emitWasmFreeDebug(module, p.MemoryLimitAccounting, p.WebTarget)
 	}
 
 	// declare void @free(i8* nocapture noundef) nounwind
@@ -336,7 +413,11 @@ func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
 // emitWasmFreeDebug defines @pal_free with header + tail validation. Detects
 // double-free, free-of-invalid-pointer, and tail-sentinel corruption via the
 // T0365 sentinel scheme on WASM. Mirrors emitLibcFreeDebug.
-func emitWasmFreeDebug(module *ir.Module) *ir.Func {
+//
+// When memoryLimitAccounting is true (T0689), subtracts the validated
+// requested_size from @__promise_memory_used_bytes (plain load/store).
+// webTarget selects the abort import set (WASI vs promise_env).
+func emitWasmFreeDebug(module *ir.Module, memoryLimitAccounting bool, webTarget bool) *ir.Func {
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
@@ -359,7 +440,7 @@ func emitWasmFreeDebug(module *ir.Module) *ir.Func {
 	doneBlk := fn.NewBlock(".done")
 	entry.NewCondBr(nonnull, checkBlk, doneBlk)
 
-	size, hdrPtr, validated := emitHeaderValidationWasm(module, fn, checkBlk, fn.Params[0])
+	size, hdrPtr, validated := emitHeaderValidationWasm(module, fn, checkBlk, fn.Params[0], webTarget)
 
 	// Poison-fill user region: memset(user_ptr, 0xDE, requested_size).
 	// memset on WASM takes i32 size — truncate the i64 size from header.
@@ -376,6 +457,12 @@ func emitWasmFreeDebug(module *ir.Module) *ir.Func {
 	// Decrement count and free internal pointer.
 	old := validated.NewLoad(irtypes.I64, allocCount)
 	validated.NewStore(validated.NewSub(old, constant.NewInt(irtypes.I64, 1)), allocCount)
+	// T0689: also subtract size from the memory-limit counter.
+	if memoryLimitAccounting {
+		used, _, _, _ := getOrCreateMemoryLimitGlobals(module)
+		oldUsed := validated.NewLoad(irtypes.I64, used)
+		validated.NewStore(validated.NewSub(oldUsed, size), used)
+	}
 	validated.NewCall(freeFn, hdrPtr)
 	validated.NewBr(doneBlk)
 
@@ -387,7 +474,7 @@ func emitWasmFreeDebug(module *ir.Module) *ir.Func {
 // Includes allocation count tracking for leak detection (T0066).
 func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	if p.DebugAllocator {
-		return emitWasmReallocDebug(module)
+		return emitWasmReallocDebug(module, p.MemoryLimitAccounting, p.WebTarget)
 	}
 
 	// declare noalias i8* @realloc(i8* nocapture noundef, i32 noundef) nounwind
@@ -445,7 +532,11 @@ func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
 // re-construction (T0365). Mirrors emitLibcReallocDebug but uses i32 sizes
 // for the WASM allocator. Delegates the malloc-like (NULL, n) and free-like
 // (p, 0) cases to pal_alloc / pal_free for header consistency.
-func emitWasmReallocDebug(module *ir.Module) *ir.Func {
+//
+// When memoryLimitAccounting is true (T0689), adjusts the memory counter by
+// (newSize - oldSize) and aborts on overflow when growing. webTarget selects
+// the abort import set (WASI vs promise_env).
+func emitWasmReallocDebug(module *ir.Module, memoryLimitAccounting bool, webTarget bool) *ir.Func {
 	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	reallocSize := ir.NewParam("size", irtypes.I32)
@@ -488,7 +579,7 @@ func emitWasmReallocDebug(module *ir.Module) *ir.Func {
 	freeLikeBlk.NewCall(palFreeFn, fn.Params[0])
 	freeLikeBlk.NewBr(doneBlk)
 
-	oldSize, hdrPtr, validatedBlk := emitHeaderValidationWasm(module, fn, resizeBlk, fn.Params[0])
+	oldSize, hdrPtr, validatedBlk := emitHeaderValidationWasm(module, fn, resizeBlk, fn.Params[0], webTarget)
 
 	newSize32 := validatedBlk.NewTrunc(fn.Params[1], irtypes.I32)
 	newTotal := validatedBlk.NewAdd(newSize32, constant.NewInt(irtypes.I32, debugSlackSize))
@@ -508,9 +599,33 @@ func emitWasmReallocDebug(module *ir.Module) *ir.Func {
 	newTailStore := resizeOkBlk.NewStore(constant.NewInt(irtypes.I64, debugMagicTail), newTailSlot)
 	newTailStore.Align = 1
 
-	hasGrown := resizeOkBlk.NewICmp(enum.IPredUGT, fn.Params[1], oldSize)
+	// T0689: adjust the memory-limit counter by (newSize - oldSize). Plain
+	// load/store — wasm32-wasi is single-threaded. Only check the limit when
+	// growing — shrinking can't trip.
+	postAccBlk := resizeOkBlk
+	if memoryLimitAccounting {
+		used, _, _, _ := getOrCreateMemoryLimitGlobals(module)
+		delta := postAccBlk.NewSub(fn.Params[1], oldSize)
+		oldUsed := postAccBlk.NewLoad(irtypes.I64, used)
+		newUsed := postAccBlk.NewAdd(oldUsed, delta)
+		postAccBlk.NewStore(newUsed, used)
+		grew := postAccBlk.NewICmp(enum.IPredSGT, delta, constant.NewInt(irtypes.I64, 0))
+		checkBlk := fn.NewBlock(".dbg.resize_memlimit_check")
+		skipCheckBlk := fn.NewBlock(".dbg.resize_memlimit_skip")
+		postAccBlk.NewCondBr(grew, checkBlk, skipCheckBlk)
+		abort := EmitWasmDebugAbort
+		if webTarget {
+			abort = EmitWasmWebDebugAbort
+		}
+		cfg := MemoryLimitConfig{Atomic: false, EmitAbort: abort}
+		afterCheck := emitMemoryLimitCheck(module, fn, checkBlk, newUsed, cfg)
+		afterCheck.NewBr(skipCheckBlk)
+		postAccBlk = skipCheckBlk
+	}
+
+	hasGrown := postAccBlk.NewICmp(enum.IPredUGT, fn.Params[1], oldSize)
 	scribbleBlk := fn.NewBlock(".dbg.scribble_grown")
-	resizeOkBlk.NewCondBr(hasGrown, scribbleBlk, doneBlk)
+	postAccBlk.NewCondBr(hasGrown, scribbleBlk, doneBlk)
 
 	oldSize32 := scribbleBlk.NewTrunc(oldSize, irtypes.I32)
 	scribbleStart := scribbleBlk.NewGetElementPtr(irtypes.I8, newUserPtr, oldSize32)
@@ -522,7 +637,7 @@ func emitWasmReallocDebug(module *ir.Module) *ir.Func {
 		&ir.Incoming{X: allocResult, Pred: allocLikeBlk},
 		&ir.Incoming{X: nullPtr, Pred: freeLikeBlk},
 		&ir.Incoming{X: nullPtr, Pred: validatedBlk},
-		&ir.Incoming{X: newUserPtr, Pred: resizeOkBlk},
+		&ir.Incoming{X: newUserPtr, Pred: postAccBlk},
 		&ir.Incoming{X: newUserPtr, Pred: scribbleBlk},
 	)
 	doneBlk.NewRet(retPhi)

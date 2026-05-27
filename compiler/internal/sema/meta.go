@@ -406,6 +406,57 @@ func extractTestTimeout(annotations []*ast.MetaAnnotation) (string, bool) {
 	return "", false
 }
 
+// extractTestMemoryLimit extracts the memory-limit size string from a
+// `test(memory_limit: "256MB") annotation (T0689). Returns the raw string
+// and true if the annotation has a memory_limit parameter.
+func extractTestMemoryLimit(annotations []*ast.MetaAnnotation) (string, bool) {
+	for _, ann := range annotations {
+		if ann.Name != "test" {
+			continue
+		}
+		for _, p := range ann.Params {
+			if p.Name == "memory_limit" {
+				return evalStringLit(p.Value), true
+			}
+		}
+	}
+	return "", false
+}
+
+// isValidMemoryLimitLiteral returns true if s is a syntactically well-formed
+// memory limit literal: "0" (opt-out) or a non-negative integer followed by a
+// unit suffix (B/KB/MB/GB/KiB/MiB/GiB, case-insensitive). Used by sema for
+// early validation of `test(memory_limit: "...") annotations (T0689). The
+// authoritative parser is parseMemoryLimitArg in cmd/promise/main.go.
+func isValidMemoryLimitLiteral(s string) bool {
+	if s == "" {
+		return false
+	}
+	if s == "0" {
+		return true
+	}
+	lower := strings.ToLower(s)
+	suffixes := []string{"gib", "mib", "kib", "gb", "mb", "kb", "b"}
+	var numPart string
+	matched := false
+	for _, suf := range suffixes {
+		if strings.HasSuffix(lower, suf) {
+			numPart = strings.TrimSpace(strings.TrimSuffix(lower, suf))
+			matched = true
+			break
+		}
+	}
+	if !matched || numPart == "" {
+		return false
+	}
+	for _, ch := range numPart {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // extractTestExclude extracts the exclude target identifiers from a `test(exclude: wasm) annotation.
 // The value may be a single identifier or an || expression of identifiers.
 func extractTestExclude(annotations []*ast.MetaAnnotation) []string {

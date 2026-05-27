@@ -86,12 +86,23 @@ type ExternFunc struct {
 
 // CompileResult bundles the output of compilation for downstream consumers.
 type CompileResult struct {
-	Module          *ir.Module
-	Layouts         map[*types.Named]*TypeDeclLayout
-	EnumLayouts     map[*types.Enum]*TypeDeclLayout
-	Externs         []*ExternFunc
-	CoverageRegions []CoverageRegion // coverage region metadata (populated when coverage is enabled)
-	compiler        *Compiler        // internal reference for GenerateTestMain
+	Module           *ir.Module
+	Layouts          map[*types.Named]*TypeDeclLayout
+	EnumLayouts      map[*types.Enum]*TypeDeclLayout
+	Externs          []*ExternFunc
+	CoverageRegions  []CoverageRegion // coverage region metadata (populated when coverage is enabled)
+	testMemoryLimits map[string]int64 // T0689: per-test memory limit in bytes (nil = no accounting)
+	compiler         *Compiler        // internal reference for GenerateTestMain
+}
+
+// SetTestMemoryLimits attaches per-test memory limits (in bytes) to the
+// compile result. Called by the test harness before GenerateTestMain when
+// memory-limit accounting is enabled (T0689). A nil or empty map disables
+// per-test set_test_state emission; the compiler still needs to be built
+// with CompileOptions.MemoryLimitAccounting=true for the accounting allocator
+// to be active.
+func (r *CompileResult) SetTestMemoryLimits(m map[string]int64) {
+	r.testMemoryLimits = m
 }
 
 // SemaInfo returns the main sema.Info used for this compilation.

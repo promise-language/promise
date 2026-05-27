@@ -146,6 +146,7 @@ Commands:
   use       Set the active epoch (e.g., promise use 2026.0)
   bind      Generate Promise bindings from WIT or WebIDL definitions
   doctor    Check the local Promise environment for issues
+  targets   List supported compile targets (e.g. -target wasm32-wasi)
   version   Print compiler version
 
 Options (build):
@@ -312,6 +313,9 @@ func main() {
 		runBind(os.Args[2:])
 	case "doctor":
 		runDoctor(os.Args[2:])
+		return
+	case "targets":
+		runTargets(os.Args[2:])
 		return
 	default:
 		// Try treating as a filename for backwards compatibility

@@ -37,6 +37,7 @@ func TestPrintHelp(t *testing.T) {
 		"promise build",
 		"promise run",
 		"promise test",
+		"promise targets",
 		"print_line",
 		"?^",
 		"?!",

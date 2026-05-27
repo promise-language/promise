@@ -834,7 +834,25 @@ promise doc <module>         # any catalog module
 promise doc file.pr          # documentation for a source file
 promise -help                # quick start guide with examples
 promise doc                  # list all available modules
+promise targets              # list supported compile targets
 ```
+
+## Compilation Targets
+
+By default, `promise build` / `run` / `test` compile for the host platform. The `-target <triple>` flag cross-compiles to one of the supported triples. List them with:
+
+```sh
+promise targets         # text output, marks the native target
+promise targets -json   # machine-readable
+```
+
+Today's supported set:
+
+- **host triple** (default) — the platform `promise` is running on (Linux x86_64/arm64, macOS x86_64/arm64, Windows x86_64/arm64).
+- **`wasm32-wasi`** — WebAssembly + WASI; runs in `wasmtime` / `wasmer` / `wasmedge`.
+- **`wasm32-web`** — WebAssembly for browsers / Node.js; emits a bootstrap `.js` loader alongside the `.wasm`.
+
+Cross-compile to a non-host OS (e.g. Linux → Windows binary) is not yet wired up — that work is tracked separately.
 
 ## Common Mistakes
 

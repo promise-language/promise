@@ -74,6 +74,50 @@ func hostShortName(triple string) string {
 	return triple
 }
 
+// isSupportedTarget reports whether s is the empty string (meaning "use the
+// host default") or matches a triple in supportedTargets().
+func isSupportedTarget(s string) bool {
+	if s == "" {
+		return true
+	}
+	for _, t := range supportedTargets() {
+		if s == t.Triple {
+			return true
+		}
+	}
+	return false
+}
+
+// invalidTargetMessage builds the user-facing error for an unsupported
+// -target value. Output is a single block ending in a trailing newline; the
+// caller writes it to stderr and exits non-zero.
+func invalidTargetMessage(bad string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "error: invalid target '%s'\n", bad)
+	fmt.Fprintln(&b, "supported targets:")
+	for _, t := range supportedTargets() {
+		if t.Native {
+			fmt.Fprintf(&b, "  %s  (native)\n", t.Triple)
+		} else {
+			fmt.Fprintf(&b, "  %s\n", t.Triple)
+		}
+	}
+	fmt.Fprintln(&b, "Run `promise targets` for details.")
+	return b.String()
+}
+
+// checkTargetFlag validates a user-supplied -target value. On a bad value it
+// writes the formatted error to stderr and terminates the process with exit
+// code 1. Call once, immediately after the surrounding subcommand has
+// finished argument parsing — before any frontend or module loading work.
+func checkTargetFlag(target string) {
+	if isSupportedTarget(target) {
+		return
+	}
+	fmt.Fprint(os.Stderr, invalidTargetMessage(target))
+	os.Exit(1)
+}
+
 // runTargets implements `promise targets`.
 func runTargets(args []string) {
 	jsonOut := false

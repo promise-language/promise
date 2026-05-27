@@ -409,6 +409,7 @@ func runEmitIR(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: promise emit-ir [-target triple] <file.pr>")
 		os.Exit(1)
 	}
+	checkTargetFlag(target)
 	var file *ast.File
 	var info *sema.Info
 	if stat, err := os.Stat(filename); err == nil && stat.IsDir() {
@@ -578,6 +579,8 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 		os.Exit(1)
 	}
 
+	checkTargetFlag(target)
+
 	// Auto-discover main file: no arg → CWD, directory arg → that dir (T0115).
 	// When the directory contains a promise.toml, switch to project mode and
 	// compile every .pr file in the tree as a single program (T0492).
@@ -743,6 +746,11 @@ func runRun(args []string) {
 	// Parse args locally to compute the cache key before invoking buildToFile.
 	// buildToFile reparses the same args on cache miss; that's cheap.
 	filename, target, releaseMode := parseRunArgs(args)
+
+	// Validate -target here so we reject bogus values before acquiring the
+	// build-cache lock, computing a cache key, or creating a temp file (which
+	// os.Exit would leak — it doesn't run deferreds).
+	checkTargetFlag(target)
 
 	// Resolve the target binary to what buildToFile would actually compile so the
 	// cache key matches across invocations (T0115 auto-discovery, T0492 project mode).
@@ -1016,6 +1024,8 @@ func runTest(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-compile-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] [-time-phases] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
+
+	checkTargetFlag(targetTriple)
 
 	// Expand all targets into a flat file list.
 	var allFiles []string
@@ -6576,6 +6586,8 @@ func runExec(args []string) {
 			remaining = append(remaining, args[i])
 		}
 	}
+
+	checkTargetFlag(target)
 
 	var source string
 

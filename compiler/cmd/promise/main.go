@@ -144,6 +144,8 @@ Commands:
   epochs    List installed epochs
   remove    Remove an installed epoch
   use       Set the active epoch (e.g., promise use 2026.0)
+  bind      Generate Promise bindings from WIT or WebIDL definitions
+  doctor    Check the local Promise environment for issues
   version   Print compiler version
 
 Options (build):

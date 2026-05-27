@@ -78,6 +78,7 @@ Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 
   promise examples        Browse and run example programs
   promise doc <module>    API docs for a module (e.g., promise doc io, promise doc std.vector)
   promise doctor          Check environment health (--json, --fix, --network)
+  promise bind <format>   Generate bindings from WIT or WebIDL (e.g., promise bind wit api.wit)
   promise version         Compiler version
   promise build file.pr   Compile to executable
   promise run file.pr     Compile and run

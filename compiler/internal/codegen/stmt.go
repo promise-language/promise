@@ -6336,6 +6336,18 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 // genSetterCall emits a call to a setter method.
 // Uses virtual dispatch through the vtable when the static type needs it.
 func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, named *types.Named, setter *types.Method, val value.Value) {
+	// Global setter (T0703): no receiver, just call the function directly with the value.
+	// Mirrors the `global getter path in genGetterCall.
+	if setter.Sig().Recv() == nil {
+		mangledName := mangleMethodName(c.resolveTypeName(targetType), target.Field, true)
+		fn, ok := c.funcs[mangledName]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undeclared global setter %s", mangledName))
+		}
+		c.block.NewCall(fn, val)
+		return
+	}
+
 	// Virtual dispatch for setter when static type needs vtable
 	if c.needsVtable(named) && !setter.IsNative() {
 		c.genVirtualSetterCall(target, named, setter, val)

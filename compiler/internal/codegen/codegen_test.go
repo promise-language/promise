@@ -18101,6 +18101,65 @@ func TestGlobalMethodIR(t *testing.T) {
 	assertNotContains(t, ir, "Counter.create(i8*")
 }
 
+// TestGlobalSetterIR verifies that `global setters (T0703) emit a function
+// with no receiver param and that `Type.name = v` lowers to a direct call
+// passing only the value argument. Uses a matching `global getter because
+// setter-only properties don't currently parse as l-value targets (sema
+// looks them up through LookupGetter).
+func TestGlobalSetterIR(t *testing.T) {
+	ir := generateIR(t, "type Foo {\n"+
+		"int x;\n"+
+		"get count int `global { return 0; }\n"+
+		"set count(int v) `global { }\n"+
+		"}\n"+
+		"main() {\n"+
+		"Foo.count = 7;\n"+
+		"}\n")
+	// Setter is defined with the $set mangle suffix and a single i64 param (no this).
+	assertContains(t, ir, "define void @Foo.count$set(i64 %v)")
+	assertNotContains(t, ir, "@Foo.count$set(i8*")
+	// Call site lowers to a direct call with the value only.
+	assertContains(t, ir, "call void @Foo.count$set(i64 7)")
+}
+
+// TestGlobalGetterSetterPairIR verifies that a `global getter and setter on
+// the same name coexist (the setter mangles with `$set` so there's no clash)
+// and dispatch correctly from `Type.name` reads and `Type.name = v` writes.
+func TestGlobalGetterSetterPairIR(t *testing.T) {
+	ir := generateIR(t, "type Foo {\n"+
+		"int x;\n"+
+		"get count int `global { return 0; }\n"+
+		"set count(int v) `global { }\n"+
+		"}\n"+
+		"main() {\n"+
+		"Foo.count = 3;\n"+
+		"n := Foo.count;\n"+
+		"}\n")
+	assertContains(t, ir, "define i64 @Foo.count()")
+	assertContains(t, ir, "define void @Foo.count$set(i64 %v)")
+	assertContains(t, ir, "call void @Foo.count$set(i64 3)")
+	assertContains(t, ir, "call i64 @Foo.count()")
+}
+
+// TestGlobalSetterCompoundAssignIR verifies that compound assignment
+// (`Type.name += v`) on a `global getter/setter pair reads through the
+// global getter, applies the op, and writes through the global setter.
+// Exercises the interaction between genGetterCall's and genSetterCall's
+// global branches via genMemberAssign's compound-op path.
+func TestGlobalSetterCompoundAssignIR(t *testing.T) {
+	ir := generateIR(t, "type Foo {\n"+
+		"int x;\n"+
+		"get count int `global { return 0; }\n"+
+		"set count(int v) `global { }\n"+
+		"}\n"+
+		"main() {\n"+
+		"Foo.count += 5;\n"+
+		"}\n")
+	// Compound assignment lowers to: load via global getter, add, store via global setter.
+	assertContains(t, ir, "call i64 @Foo.count()")
+	assertContains(t, ir, "call void @Foo.count$set(i64")
+}
+
 func TestGenericInheritanceNonGenericChild(t *testing.T) {
 	ir := generateIR(t, `
 		type Holder[T] { T value; }

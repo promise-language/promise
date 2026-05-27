@@ -100,3 +100,26 @@ test_mono_self() `test {
   assert(p.a == 0, "mono self a");
   assert(p.b == 0, "mono self b");
 }
+
+// --- `global getter + setter (T0703) ---
+
+type Knob {
+  int x;
+
+  get value int `global {
+    return 7;
+  }
+
+  set value(int v) `global {
+    assert(v == 42, "global setter received correct value");
+  }
+}
+
+test_global_getter() `test {
+  n := Knob.value;
+  assert(n == 7, "global getter returns constant");
+}
+
+test_global_setter() `test {
+  Knob.value = 42;
+}

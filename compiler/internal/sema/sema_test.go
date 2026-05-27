@@ -10862,10 +10862,27 @@ func TestGlobalGetterAllowed(t *testing.T) {
 		"}\n")
 }
 
-func TestGlobalSetterNotAllowed(t *testing.T) {
-	errs := checkErrs(t, "type Foo {\n"+
+func TestGlobalSetterAllowed(t *testing.T) {
+	// T0703: `global setters are now allowed and callable as Type.field = value.
+	// Setter-only properties don't currently parse as l-value targets (sema's
+	// LookupGetter is the entry point for `Type.field`), so the test uses a
+	// matching `global getter — that is the canonical WebIDL `attribute` shape
+	// the bug was filed for.
+	checkOK(t, "type Foo {\n"+
 		"int x;\n"+
+		"get count int `global { return 0; }\n"+
 		"set count(int v) `global { }\n"+
+		"}\n"+
+		"main() {\n"+
+		"Foo.count = 5;\n"+
+		"}\n")
+}
+
+func TestMonoSetterNotAllowed(t *testing.T) {
+	// T0703: `mono setters remain disallowed (symmetric with the `mono getter ban).
+	errs := checkErrs(t, "type Box[T] {\n"+
+		"T value;\n"+
+		"set count(int v) `mono { }\n"+
 		"}\n"+
 		"main() {}\n")
 	expectError(t, errs, "cannot be a setter")

@@ -3519,13 +3519,18 @@ func TestWebIdlAttributeGeneratesGetterSetterSyntax(t *testing.T) {
 		t.Error("readonly attribute should not emit a setter")
 	}
 
-	// Static attribute getter uses `get` syntax with `global; static setter
-	// falls back to a paired `set_<name>(...) `global` function because sema
-	// currently rejects `set ... `global` (T0703).
+	// Static attribute uses `get`/`set` syntax with `global on both halves (T0703).
 	assertContains(t, out, "get default_ns string `public `global {")
-	assertContains(t, out, "set_default_ns(string value) `public `global {")
+	assertContains(t, out, "set default_ns(string value) `public `global {")
 	assertContains(t, out, "return _element_default_ns();")
 	assertContains(t, out, "_element_set_default_ns(value);")
+	// The paired-function fallback `set_default_ns(...)` must be gone — that
+	// shape was only emitted while T0703 forced static setters off the `set`
+	// accessor syntax. The extern declaration still carries `_element_set_default_ns`
+	// (verified below) — that's the FFI symbol name, not a Promise wrapper.
+	if strings.Contains(out, "set_default_ns(string value) `public `global") {
+		t.Error("paired-function fallback `set_default_ns(...) `public `global` should not be emitted")
+	}
 
 	// Paired-function method form must be gone. Match the full wrapper
 	// signature shape — both the extern declaration and the extern call site

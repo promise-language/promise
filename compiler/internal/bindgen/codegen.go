@@ -376,15 +376,6 @@ func externNameSuffix(m Func) string {
 	return m.Name
 }
 
-// staticSetterFallbackName returns the wrapper-method name used when emitting
-// a static IDL-attribute setter as a paired-function method instead of the
-// `set <name>(...)` accessor syntax. Required because sema currently rejects
-// `set ... `global` (T0703); once that's lifted, this fallback can be deleted
-// and emitSetterWrapper can emit `global setters directly.
-func staticSetterFallbackName(m Func) string {
-	return "set_" + m.Name
-}
-
 func (g *generator) emitGetterWrapper(m Func, resourceName, importModule string) {
 	_ = importModule
 	externName := fmt.Sprintf("_%s_%s", toSnake(resourceName), externNameSuffix(m))
@@ -459,19 +450,14 @@ func (g *generator) emitSetterWrapper(m Func, resourceName, importModule string)
 		valueArg = p.Name
 	}
 
+	externArgs := valueArg
+	annotations := "`public"
 	if m.Kind == FuncStatic {
-		// T0703: sema rejects `global setters. Fall back to a paired `set_<name>`
-		// global function so static IDL attributes still compile.
-		g.line("%s%s(%s) `public `global {", staticSetterFallbackName(m), failMark, paramSig)
-		g.indent++
-		g.line("%s(%s)%s;", externName, valueArg, raise)
-		g.indent--
-		g.line("}")
-		return
+		annotations += " `global"
+	} else {
+		externArgs = "this._handle, " + valueArg
 	}
-
-	externArgs := "this._handle, " + valueArg
-	g.line("set %s%s(%s) `public {", m.Name, failMark, paramSig)
+	g.line("set %s%s(%s) %s {", m.Name, failMark, paramSig, annotations)
 	g.indent++
 	g.line("%s(%s)%s;", externName, externArgs, raise)
 	g.indent--

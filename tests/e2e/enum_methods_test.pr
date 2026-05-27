@@ -439,3 +439,70 @@ test_enum_method_via_function() `test {
   assert(check_warmth(Color.Red) == true, "Red warm via function");
   assert(check_warmth(Color.Blue) == false, "Blue not warm via function");
 }
+
+// T0725: `this is Variant` inside an enum method/getter previously emitted
+// malformed IR (extractvalue/icmp on the i8* `this` receiver). Covers the
+// JsValue-style mixed-payload enum (the WebIDL binder pattern), a fieldless
+// enum, and the `if this is Variant(v)` destructure-binding form.
+enum Dynamic {
+  Nothing,
+  Flag(bool value),
+  Num(int value),
+
+  get is_nothing bool {
+    return this is Nothing;
+  }
+
+  is_flag(this) bool {
+    return this is Flag;
+  }
+
+  // Destructure-bind on the `this` receiver inside an enum method.
+  flag_or_false(this) bool {
+    if this is Flag(v) {
+      return v;
+    }
+    return false;
+  }
+
+  num_or_zero(this) int {
+    if this is Num(n) {
+      return n;
+    }
+    return 0;
+  }
+}
+
+test_this_is_variant_getter_mixed() `test {
+  assert(Dynamic.Nothing.is_nothing == true, "Nothing.is_nothing");
+  assert(Dynamic.Flag(value: true).is_nothing == false, "Flag.is_nothing false");
+  assert(Dynamic.Num(value: 7).is_nothing == false, "Num.is_nothing false");
+}
+
+test_this_is_variant_method_mixed() `test {
+  assert(Dynamic.Flag(value: false).is_flag() == true, "Flag.is_flag");
+  assert(Dynamic.Nothing.is_flag() == false, "Nothing not flag");
+}
+
+test_if_this_is_variant_bind() `test {
+  assert(Dynamic.Flag(value: true).flag_or_false() == true, "Flag(true) bind");
+  assert(Dynamic.Flag(value: false).flag_or_false() == false, "Flag(false) bind");
+  assert(Dynamic.Nothing.flag_or_false() == false, "Nothing falls through");
+  assert(Dynamic.Num(value: 42).num_or_zero() == 42, "Num(42) bind");
+  assert(Dynamic.Nothing.num_or_zero() == 0, "Nothing num falls through");
+}
+
+// Fieldless enum: the value IS the tag (i32) — `this is Variant` must load the
+// i32 from the i8* `this` rather than icmp-ing the pointer.
+enum Light {
+  Off, On,
+
+  get is_off bool {
+    return this is Off;
+  }
+}
+
+test_this_is_variant_fieldless() `test {
+  assert(Light.Off.is_off == true, "Off.is_off");
+  assert(Light.On.is_off == false, "On.is_off false");
+}

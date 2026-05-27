@@ -10137,11 +10137,32 @@ func (c *Compiler) genIsOptionalType(expr ast.Expr, typeName string, opt *types.
 	return phi
 }
 
+// enumThisSubject converts a `this` enum receiver (an i8* pointer returned by
+// genThisExpr inside an enum method/getter) into the by-value enum value that
+// tag extraction and destructuring expect. Any non-i8* subject (a by-value enum
+// from a local or parameter) is returned unchanged. Mirrors the i8*-handling in
+// genMatchExpr.
+func (c *Compiler) enumThisSubject(subject value.Value, layout *TypeDeclLayout) value.Value {
+	if !subject.Type().Equal(irtypes.I8Ptr) {
+		return subject
+	}
+	var loadType irtypes.Type
+	if layout.MaxVariantDataSize == 0 {
+		loadType = irtypes.I32 // fieldless enum: tag only
+	} else {
+		loadType = layout.EnumInternalType // data enum: {i32 tag, [N x i8] data}
+	}
+	typedPtr := c.block.NewBitCast(subject, irtypes.NewPointer(loadType))
+	return c.block.NewLoad(loadType, typedPtr)
+}
+
 func (c *Compiler) genIsEnumVariant(expr ast.Expr, variantName string, layout *TypeDeclLayout) value.Value {
 	if _, ok := layout.VariantTag[variantName]; !ok {
 		panic(fmt.Sprintf("codegen: unknown enum variant %s", variantName))
 	}
 	subject := c.genExpr(expr)
+	// A `this` enum receiver is an i8* pointer — load the value before tag extraction.
+	subject = c.enumThisSubject(subject, layout)
 	// Extract tag
 	var tag value.Value
 	if layout.MaxVariantDataSize == 0 {

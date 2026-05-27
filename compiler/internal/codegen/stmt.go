@@ -7574,6 +7574,10 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 		if enumLayout == nil {
 			panic(fmt.Sprintf("codegen: no enum layout for %s", targetType))
 		}
+		// A `this` enum receiver is an i8* pointer — load the value so both the tag
+		// check below and the field binding in bindIsDestructureEnum operate on the
+		// by-value enum. (Non-enum/RTTI branch keeps the raw i8* `this`.)
+		subject = c.enumThisSubject(subject, enumLayout)
 		var tag value.Value
 		if enumLayout.MaxVariantDataSize == 0 {
 			tag = subject // fieldless enum: value IS the tag

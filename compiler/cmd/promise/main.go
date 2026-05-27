@@ -125,28 +125,33 @@ Commands:
   examples  Browse and run example programs
   build     Compile a Promise source file to an executable
   run       Compile and run a Promise source file
+  exec      Execute inline Promise code (auto-wraps in failable main)
+  clean     Remove build cache (-global also clears module cache)
+  
+  doc       Print documentation (file.pr or module name)
+  catalog   Catalog operations (list)
+
+  format    Format Promise source files
   test      Discover and run test functions
   check     Run semantic analysis (type checking)
-  emit-ir   Print generated LLVM IR to stdout
-  doc       Generate documentation (file.pr or module name)
-  ast       Print the AST
-  exec      Execute inline Promise code (auto-wraps in failable main)
-  init      Initialize a new Promise project (creates promise.toml)
+  ast       Print Promise AST
+  emit-ir   Print LLVM IR to stdout
+
+  init      Initialize a new Promise project or module (creates promise.toml)
   add       Add a dependency by catalog name or git URL
   search    Search the catalog for modules by keyword
   update    Update dependency commits to latest (all or one)
   pin       Pin a remote module to a specific commit
-  catalog   Catalog operations (list)
-  format    Format Promise source files
-  clean     Remove build cache (-global also clears module cache)
+
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
   sync      Download and install a compiler epoch from GitHub releases
   epochs    List installed epochs
   remove    Remove an installed epoch
   use       Set the active epoch (e.g., promise use 2026.0)
-  bind      Generate Promise bindings from WIT or WebIDL definitions
+
   doctor    Check the local Promise environment for issues
   targets   List supported compile targets (e.g. -target wasm32-wasi)
+  bind      Generate Promise bindings from WIT or WebIDL definitions
   version   Print compiler version
 
 Options (build):

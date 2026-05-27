@@ -858,6 +858,15 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	c.dupHeapUserFieldAccess = false
 	c.targetType = nil
 
+	// T0685: Defensive — if the RHS produced no value (e.g., a type expression
+	// like bare `T[]` slipped past sema), bail out with a diagnostic panic
+	// rather than nil-storing through llir. Sema should have already rejected
+	// these inputs, but this guard prevents future sema gaps from showing up
+	// as opaque SIGSEGVs deep in github.com/llir/llvm.
+	if val == nil {
+		panic(fmt.Sprintf("codegen: nil value for typed var decl %q at %v (likely a sema gap — type expression used in value position)", s.Name, s.Pos()))
+	}
+
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
 	if c.info.AutoPropagateExprs[s.Value] {
 		val = c.genAutoPropagateValue(val)
@@ -1196,6 +1205,15 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.dupContainerFieldAccess = false
 	c.dupTupleFieldAccess = false
 	c.dupHeapUserFieldAccess = false
+
+	// T0685: Defensive — if the RHS produced no value (e.g., a type expression
+	// like bare `T[]` slipped past sema), bail out with a diagnostic panic
+	// rather than nil-storing through llir. Sema should have already rejected
+	// these inputs, but this guard prevents future sema gaps from showing up
+	// as opaque SIGSEGVs deep in github.com/llir/llvm.
+	if val == nil {
+		panic(fmt.Sprintf("codegen: nil value for inferred var decl %q at %v (likely a sema gap — type expression used in value position)", s.Name, s.Pos()))
+	}
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
 	if c.info.AutoPropagateExprs[s.Value] {

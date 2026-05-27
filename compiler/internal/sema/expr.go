@@ -154,6 +154,14 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	hint := c.typeHint
 	c.typeHint = nil
 
+	// T0685: Same save/clear pattern for the slice-type-ref permission. A bare
+	// `T[]` is a type expression, only legitimate as a CallExpr.Callee or
+	// MemberExpr.Target — granted by those two call sites and consumed below
+	// by the SliceTypeExpr case. Cleared here so the permission cannot leak
+	// across unrelated sub-expressions.
+	allowSliceType := c.sliceTypeAllowed
+	c.sliceTypeAllowed = false
+
 	var typ types.Type
 
 	switch e := expr.(type) {
@@ -251,7 +259,11 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 		typ = c.checkSliceExpr(e)
 
 	case *ast.SliceTypeExpr:
+		// T0685: Re-publish the snapshotted permission so checkSliceTypeExpr
+		// (which is the consumer) can see it. Clear after so it doesn't leak.
+		c.sliceTypeAllowed = allowSliceType
 		typ = c.checkSliceTypeExpr(e)
+		c.sliceTypeAllowed = false
 
 	case *ast.OptionalChainExpr:
 		typ = c.checkOptionalChainExpr(e)
@@ -1060,6 +1072,10 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 		return c.checkSuperCall(e)
 	}
 
+	// T0685: Bare `T[]` is a legitimate type ref when it's the callee
+	// (e.g., `int[]()` empty-vector construction). Grant the permission
+	// before recursing; checkExpr snapshots+clears it so it doesn't leak.
+	c.sliceTypeAllowed = true
 	calleeType := c.checkExpr(e.Callee)
 	if calleeType == nil {
 		return nil
@@ -1150,6 +1166,10 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 		}
 	}
 
+	// T0685: Bare `T[]` is a legitimate type ref when it's a MemberExpr
+	// target (e.g., `int[].filled(...)` static factory). Grant the
+	// permission before recursing; checkExpr snapshots+clears it.
+	c.sliceTypeAllowed = true
 	target := c.checkExpr(e.Target)
 	if target == nil {
 		return nil
@@ -1811,8 +1831,36 @@ func (c *Checker) isTypeRefExpr(e ast.Expr) bool {
 
 // checkSliceTypeExpr handles T[] in expression position — desugars to Vector[T].
 func (c *Checker) checkSliceTypeExpr(e *ast.SliceTypeExpr) types.Type {
-	inner := c.checkExpr(e.Inner)
+	// T0685: `T[]` is a type expression, not a value. It's only legitimate
+	// as the Callee of a CallExpr (`int[]()`) or the Target of a MemberExpr
+	// (`int[].filled(...)`). Anywhere else (var decl RHS, function arg,
+	// return value, tuple element, etc.) is a sema error. Without this
+	// guard, codegen returns nil for the bare form and panics with a nil
+	// store. The permission is granted by checkCallExpr/checkMemberExpr
+	// before recursing into Callee/Target.
+	if !c.sliceTypeAllowed {
+		// Still resolve the Inner so its symbols are recorded for downstream
+		// passes. Use resolveTypeRef (not checkExpr) so a nested SliceTypeExpr
+		// in Inner (e.g., `int[][]` bare) doesn't re-trigger this same error
+		// — we already know the outer is wrong; one error is enough.
+		c.resolveTypeRef(e.Inner)
+		c.errorf(e.Pos(), "bare 'T[]' is not a value; use 'T[]()' to construct an empty vector, or 'T[].filled(...)' for a prefilled one")
+		return nil
+	}
+
+	// T0685: Inner of a SliceTypeExpr is, by definition, a type ref. Route
+	// through resolveTypeRef so nested type-only shapes (SliceTypeExpr,
+	// TupleLit, IndexExpr-as-instantiation) propagate the permission
+	// uniformly instead of relying on the checkExpr snapshot chain (which
+	// loses the flag when crossing a TupleLit element boundary).
+	inner := c.resolveTypeRef(e.Inner)
 	if inner == nil {
+		// resolveTypeRef's IdentExpr branch is intentionally quiet for some
+		// pre-existing callers (instantiateFromIndex etc.). For `T[]` with
+		// an undefined T (e.g., `Undefined[]()`), re-run checkExpr so the
+		// user sees `undefined: Undefined` instead of a silent sema pass
+		// that then crashes codegen.
+		c.checkExpr(e.Inner)
 		return nil
 	}
 
@@ -2259,6 +2307,44 @@ func (c *Checker) resolveTypeRef(expr ast.Expr) types.Type {
 			c.recordType(expr, t)
 		}
 		return t
+	}
+	// T0685: SliceTypeExpr (`T[]`) is a valid type ref. Grant the
+	// per-position slice-type permission so checkSliceTypeExpr's
+	// bare-value guard doesn't fire when we're explicitly resolving
+	// a type (e.g., `Wrap[string[]]` type arg, or the Inner of an
+	// outer SliceTypeExpr).
+	if slice, ok := expr.(*ast.SliceTypeExpr); ok {
+		prev := c.sliceTypeAllowed
+		c.sliceTypeAllowed = true
+		typ := c.checkSliceTypeExpr(slice)
+		c.sliceTypeAllowed = prev
+		if typ != nil {
+			c.recordType(expr, typ)
+		}
+		return typ
+	}
+	// T0685: TupleLit in a type-ref position is a tuple type. Recurse
+	// element-wise through resolveTypeRef so each element retains
+	// type-ref semantics (e.g., `(string[], int)` as a type ref).
+	if tup, ok := expr.(*ast.TupleLit); ok && len(tup.Elements) > 0 {
+		elems := make([]types.Type, len(tup.Elements))
+		allTypeRef := true
+		for i, el := range tup.Elements {
+			elems[i] = c.resolveTypeRef(el)
+			if elems[i] == nil {
+				return nil
+			}
+			if !c.isTypeRefExpr(el) {
+				allTypeRef = false
+			}
+		}
+		if allTypeRef {
+			t := types.NewTuple(elems)
+			c.recordType(expr, t)
+			return t
+		}
+		// Not all elements were type refs — fall through to checkExpr so the
+		// usual value-tuple semantics + error reporting apply.
 	}
 	// Fallback: check the expression normally
 	return c.checkExpr(expr)

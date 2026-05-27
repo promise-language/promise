@@ -8140,6 +8140,119 @@ func TestSliceTypeExprRejectsCallResult(t *testing.T) {
 	expectError(t, errs, "expected type name before []")
 }
 
+// T0685: Bare `T[]` (no parens) in value position is a type expression and
+// must be rejected by sema. Without these checks the bare form reaches
+// codegen with a nil value and panics with a SIGSEGV in llir/NewStore.
+
+func TestSliceTypeExprBareInInferredVarDecl(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			xs := int[];
+		}
+	`)
+	expectError(t, errs, "bare 'T[]' is not a value")
+}
+
+func TestSliceTypeExprBareInTypedVarDecl(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int[] xs = int[];
+		}
+	`)
+	expectError(t, errs, "bare 'T[]' is not a value")
+}
+
+func TestSliceTypeExprBareInFunctionArg(t *testing.T) {
+	errs := checkErrs(t, `
+		take(int[] xs) {}
+		test() {
+			take(int[]);
+		}
+	`)
+	expectError(t, errs, "bare 'T[]' is not a value")
+}
+
+func TestSliceTypeExprBareInReturn(t *testing.T) {
+	errs := checkErrs(t, `
+		mk() int[] { return int[]; }
+		test() {
+			xs := mk();
+		}
+	`)
+	expectError(t, errs, "bare 'T[]' is not a value")
+}
+
+func TestSliceTypeExprBareNestedGeneric(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			xs := int[][];
+		}
+	`)
+	expectError(t, errs, "bare 'T[]' is not a value")
+}
+
+func TestSliceTypeExprBareInBinaryExpr(t *testing.T) {
+	// Ensures the snapshot/clear in checkExpr doesn't leak the permission
+	// across unrelated sub-expressions: even though `int[]` would be a valid
+	// callee of `.len`, it appears here as a bare value on the LHS of `==`.
+	errs := checkErrs(t, `
+		test() {
+			b := (int[]) == (int[]);
+		}
+	`)
+	expectError(t, errs, "bare 'T[]' is not a value")
+}
+
+// T0685: Positive — slice type as a generic type argument resolves through
+// resolveTypeRef's SliceTypeExpr case. Locks in the behavior that the
+// six previously-failing e2e tests rely on (Wrap[string[]] etc.).
+func TestSliceTypeExprAsTypeArgument(t *testing.T) {
+	checkOK(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int[]] b = Box[int[]](value: int[]());
+		}
+	`)
+}
+
+// T0685: Positive — slice type inside a tuple-of-types resolves through
+// resolveTypeRef's TupleLit case. Mirrors the `(string[], int)[]()` shape
+// from tests/e2e/vector_droppable_slice_assign_test.pr.
+func TestSliceTypeExprInsideTupleType(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := (string[], int)[]();
+		}
+	`)
+}
+
+// T0685: An undefined element type in `T[]()` must report `undefined: T`
+// at sema, not silently pass and crash codegen. Locks in the fallback
+// re-walk in checkSliceTypeExpr (resolveTypeRef's IdentExpr branch is
+// intentionally quiet for pre-existing callers; we re-run checkExpr to
+// surface the diagnostic).
+func TestSliceTypeExprUndefinedElement(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := Undefined[]();
+		}
+	`)
+	expectError(t, errs, "undefined: Undefined")
+}
+
+// T0685: An undefined element inside a tuple-of-types
+// (`(Undefined, int)[]()`) hits the `elems[i] == nil` early-return in
+// resolveTypeRef's TupleLit case, and the subsequent fallback re-walk
+// emits the diagnostic. Locks in coverage for that branch.
+func TestSliceTypeExprTupleWithUndefinedElement(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := (Undefined, int)[]();
+		}
+	`)
+	expectError(t, errs, "undefined: Undefined")
+}
+
 func TestTaskReceiveReturnsBareType(t *testing.T) {
 	// <-task[int] returns int (not int?) — contrast with channel
 	checkOK(t, `

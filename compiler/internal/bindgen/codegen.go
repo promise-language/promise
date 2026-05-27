@@ -77,8 +77,7 @@ func (g *generator) emitModule(m *Module) {
 // emitJsValueEnum emits the JsValue enum type used to represent dynamic
 // JavaScript values (any, object, Promise<T>, record<K,V>, unions, etc.).
 func (g *generator) emitJsValueEnum() {
-	g.line("`doc \"Represents a dynamic JavaScript value.\"")
-	g.line("enum JsValue `public {")
+	g.line("enum JsValue `public%s {", docAnnot("Represents a dynamic JavaScript value."))
 	g.indent++
 	g.line("Undefined,")
 	g.line("Null,")
@@ -89,36 +88,31 @@ func (g *generator) emitJsValueEnum() {
 	g.line("Array(int _js_ref),")
 	g.line("Function(int _js_ref),")
 	g.blank()
-	g.line("`doc \"Returns true if this value is undefined.\"")
-	g.line("get is_undefined bool `public {")
+	g.line("get is_undefined bool `public%s {", docAnnot("Returns true if this value is undefined."))
 	g.indent++
 	g.line("return this is Undefined;")
 	g.indent--
 	g.line("}")
 	g.blank()
-	g.line("`doc \"Returns true if this value is null.\"")
-	g.line("get is_null bool `public {")
+	g.line("get is_null bool `public%s {", docAnnot("Returns true if this value is null."))
 	g.indent++
 	g.line("return this is Null;")
 	g.indent--
 	g.line("}")
 	g.blank()
-	g.line("`doc \"Returns the bool value, or none if not a Bool.\"")
-	g.line("as_bool(this) bool? `public {")
+	g.line("as_bool(this) bool? `public%s {", docAnnot("Returns the bool value, or none if not a Bool."))
 	g.indent++
 	g.line("return match this { Bool(v) => v, _ => none };")
 	g.indent--
 	g.line("}")
 	g.blank()
-	g.line("`doc \"Returns the number value, or none if not a Number.\"")
-	g.line("as_number(this) f64? `public {")
+	g.line("as_number(this) f64? `public%s {", docAnnot("Returns the number value, or none if not a Number."))
 	g.indent++
 	g.line("return match this { Number(v) => v, _ => none };")
 	g.indent--
 	g.line("}")
 	g.blank()
-	g.line("`doc \"Returns the string value, or none if not a Str.\"")
-	g.line("as_string(this) string? `public {")
+	g.line("as_string(this) string? `public%s {", docAnnot("Returns the string value, or none if not a Str."))
 	g.indent++
 	g.line("return match this { Str(v) => v, _ => none };")
 	g.indent--
@@ -147,10 +141,7 @@ func (g *generator) emitType(t Type, importModule string) {
 }
 
 func (g *generator) emitRecord(t Type) {
-	if t.Doc != "" {
-		g.line("`doc \"%s\"", escapeDoc(t.Doc))
-	}
-	g.line("type %s `public `value {", t.Name)
+	g.line("type %s `public `value%s {", t.Name, docAnnot(t.Doc))
 	g.indent++
 	for _, f := range t.Fields {
 		g.line("%s %s `value;", promiseType(f.Type), f.Name)
@@ -160,10 +151,7 @@ func (g *generator) emitRecord(t Type) {
 }
 
 func (g *generator) emitEnum(t Type) {
-	if t.Doc != "" {
-		g.line("`doc \"%s\"", escapeDoc(t.Doc))
-	}
-	g.line("enum %s `public {", t.Name)
+	g.line("enum %s `public%s {", t.Name, docAnnot(t.Doc))
 	g.indent++
 	for _, c := range t.Cases {
 		g.line("%s,", c.Name)
@@ -173,10 +161,7 @@ func (g *generator) emitEnum(t Type) {
 }
 
 func (g *generator) emitVariant(t Type) {
-	if t.Doc != "" {
-		g.line("`doc \"%s\"", escapeDoc(t.Doc))
-	}
-	g.line("enum %s `public {", t.Name)
+	g.line("enum %s `public%s {", t.Name, docAnnot(t.Doc))
 	g.indent++
 	for _, c := range t.Cases {
 		if c.Type != nil {
@@ -190,17 +175,13 @@ func (g *generator) emitVariant(t Type) {
 }
 
 func (g *generator) emitFlags(t Type) {
-	if t.Doc != "" {
-		g.line("`doc \"%s\"", escapeDoc(t.Doc))
-	}
-	g.line("type %s `public `value {", t.Name)
+	g.line("type %s `public `value%s {", t.Name, docAnnot(t.Doc))
 	g.indent++
 	g.line("int _bits `value;")
 	g.blank()
 	// Named flag constants as static methods
 	for i, f := range t.Fields {
-		g.line("`doc \"Flag: %s\"", f.Name)
-		g.line("get %s %s `public `global {", f.Name, t.Name)
+		g.line("get %s %s `public `global%s {", f.Name, t.Name, docAnnot("Flag: "+f.Name))
 		g.indent++
 		g.line("return %s(_bits: %d);", t.Name, 1<<uint(i))
 		g.indent--
@@ -208,16 +189,14 @@ func (g *generator) emitFlags(t Type) {
 		g.blank()
 	}
 	// has method
-	g.line("`doc \"Check if a flag is set.\"")
-	g.line("has(this, %s flag) bool `public {", t.Name)
+	g.line("has(this, %s flag) bool `public%s {", t.Name, docAnnot("Check if a flag is set."))
 	g.indent++
 	g.line("return (this._bits & flag._bits) != 0;")
 	g.indent--
 	g.line("}")
 	g.blank()
 	// set method (returns new flags with flag set)
-	g.line("`doc \"Return a copy with the given flag set.\"")
-	g.line("set(this, %s flag) %s `public {", t.Name, t.Name)
+	g.line("set(this, %s flag) %s `public%s {", t.Name, t.Name, docAnnot("Return a copy with the given flag set."))
 	g.indent++
 	g.line("return %s(_bits: this._bits | flag._bits);", t.Name)
 	g.indent--
@@ -227,10 +206,7 @@ func (g *generator) emitFlags(t Type) {
 }
 
 func (g *generator) emitResource(r Resource, importModule string) {
-	if r.Doc != "" {
-		g.line("`doc \"%s\"", escapeDoc(r.Doc))
-	}
-	g.line("type %s `public `target(%s) {", r.Name, g.target)
+	g.line("type %s `public `target(%s)%s {", r.Name, g.target, docAnnot(r.Doc))
 	g.indent++
 	g.line("i32 _handle;")
 	g.blank()
@@ -274,10 +250,6 @@ func (g *generator) emitResource(r Resource, importModule string) {
 }
 
 func (g *generator) emitResourceMethod(m Func, resourceName, importModule string) {
-	if m.Doc != "" {
-		g.line("`doc \"%s\"", escapeDoc(m.Doc))
-	}
-
 	if m.Accessor == AccessorGetter {
 		g.emitGetterWrapper(m, resourceName, importModule)
 		return
@@ -314,7 +286,7 @@ func (g *generator) emitConstructorWrapper(m Func, resourceName, importModule st
 		raise = "^"
 	}
 
-	g.line("new%s(%s) `public {", failMark, thisParam)
+	g.line("new%s(%s) `public%s {", failMark, thisParam, docAnnot(m.Doc))
 	g.indent++
 	g.line("this._handle = %s(%s)%s;", externName, externParams, raise)
 	g.indent--
@@ -340,25 +312,25 @@ func (g *generator) emitStaticWrapper(m Func, resourceName, importModule string)
 	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
 
 	if !g.canonicalABI && isResReturn {
-		g.line("%s%s(%s) %s `public `global {", m.Name, failMark, params, retType)
+		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("handle := %s(%s)%s;", externName, externParams, raise)
 		g.line("return %s(_handle: handle);", resReturn)
 		g.indent--
 	} else if !g.canonicalABI && isOptResReturn {
-		g.line("%s%s(%s) %s `public `global {", m.Name, failMark, params, retType)
+		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("handle := %s(%s)%s;", externName, externParams, raise)
 		g.line("if handle == 0 { return none; }")
 		g.line("return %s(_handle: handle);", optResReturn)
 		g.indent--
 	} else if retType != "" {
-		g.line("%s%s(%s) %s `public `global {", m.Name, failMark, params, retType)
+		g.line("%s%s(%s) %s `public `global%s {", m.Name, failMark, params, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("return %s(%s)%s;", externName, externParams, raise)
 		g.indent--
 	} else {
-		g.line("%s%s(%s) `public `global {", m.Name, failMark, params)
+		g.line("%s%s(%s) `public `global%s {", m.Name, failMark, params, docAnnot(m.Doc))
 		g.indent++
 		g.line("%s(%s)%s;", externName, externParams, raise)
 		g.indent--
@@ -403,7 +375,7 @@ func (g *generator) emitGetterWrapper(m Func, resourceName, importModule string)
 	resReturn, isResReturn := resourceReturnType(m.Results)
 	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
 
-	g.line("get %s%s %s %s {", m.Name, failMark, retType, annotations)
+	g.line("get %s%s %s %s%s {", m.Name, failMark, retType, annotations, docAnnot(m.Doc))
 	g.indent++
 	switch {
 	case !g.canonicalABI && isResReturn:
@@ -457,7 +429,7 @@ func (g *generator) emitSetterWrapper(m Func, resourceName, importModule string)
 	} else {
 		externArgs = "this._handle, " + valueArg
 	}
-	g.line("set %s%s(%s) %s {", m.Name, failMark, paramSig, annotations)
+	g.line("set %s%s(%s) %s%s {", m.Name, failMark, paramSig, annotations, docAnnot(m.Doc))
 	g.indent++
 	g.line("%s(%s)%s;", externName, externArgs, raise)
 	g.indent--
@@ -502,25 +474,25 @@ func (g *generator) emitMethodWrapper(m Func, resourceName, importModule string)
 	optResReturn, isOptResReturn := optionResourceReturnType(m.Results)
 
 	if !g.canonicalABI && isResReturn {
-		g.line("%s%s(%s) %s `public {", m.Name, failMark, thisParam, retType)
+		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("handle := %s(%s)%s;", externName, externCallArgs, raise)
 		g.line("return %s(_handle: handle);", resReturn)
 		g.indent--
 	} else if !g.canonicalABI && isOptResReturn {
-		g.line("%s%s(%s) %s `public {", m.Name, failMark, thisParam, retType)
+		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("handle := %s(%s)%s;", externName, externCallArgs, raise)
 		g.line("if handle == 0 { return none; }")
 		g.line("return %s(_handle: handle);", optResReturn)
 		g.indent--
 	} else if retType != "" {
-		g.line("%s%s(%s) %s `public {", m.Name, failMark, thisParam, retType)
+		g.line("%s%s(%s) %s `public%s {", m.Name, failMark, thisParam, retType, docAnnot(m.Doc))
 		g.indent++
 		g.line("return %s(%s)%s;", externName, externCallArgs, raise)
 		g.indent--
 	} else {
-		g.line("%s%s(%s) `public {", m.Name, failMark, thisParam)
+		g.line("%s%s(%s) `public%s {", m.Name, failMark, thisParam, docAnnot(m.Doc))
 		g.indent++
 		g.line("%s(%s)%s;", externName, externCallArgs, raise)
 		g.indent--
@@ -593,11 +565,8 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 	externCallArgs := g.formatCanonicalCallArgs(f.Params, useRetPtr)
 
 	// Public wrapper
-	if f.Doc != "" {
-		g.line("`doc \"%s\"", escapeDoc(f.Doc))
-	}
 	if retType != "" {
-		g.line("%s%s(%s) %s `public `target(%s) {", f.Name, failMark, params, retType, g.target)
+		g.line("%s%s(%s) %s `public `target(%s)%s {", f.Name, failMark, params, retType, g.target, docAnnot(f.Doc))
 		g.indent++
 		if useRetPtr && g.canonicalABI {
 			// Call extern (writes to retarea), then lift result
@@ -617,7 +586,7 @@ func (g *generator) emitFreeFunc(f Func, importModule string) {
 		}
 		g.indent--
 	} else {
-		g.line("%s%s(%s) `public `target(%s) {", f.Name, failMark, params, g.target)
+		g.line("%s%s(%s) `public `target(%s)%s {", f.Name, failMark, params, g.target, docAnnot(f.Doc))
 		g.indent++
 		if useRetPtr && g.canonicalABI && failable {
 			g.line("%s(%s);", externName, externCallArgs)
@@ -965,6 +934,20 @@ func escapeDoc(s string) string {
 	s = strings.ReplaceAll(s, "\"", "\\\"")
 	s = strings.ReplaceAll(s, "\n", " ")
 	return s
+}
+
+// docAnnot returns a trailing ` `doc("...") ` metaAnnotation for the given doc
+// text, with a leading space so it can be appended after a declaration's other
+// annotations and before the opening brace. Returns "" when doc is empty so
+// callers can append it unconditionally. The parenthesized form is the only one
+// the Promise grammar accepts (PromiseParser.g4 metaAnnotation rule); the space
+// form `doc "..." does not parse, and an annotation is only valid after the
+// declared name, never on a preceding line.
+func docAnnot(doc string) string {
+	if doc == "" {
+		return ""
+	}
+	return " `doc(\"" + escapeDoc(doc) + "\")"
 }
 
 // emitCanonicalABIHelpers emits private extern declarations for canonical ABI

@@ -234,3 +234,53 @@ func TestEmitIRProjectMultiFile(t *testing.T) {
 		t.Errorf("expected IR to reference main; got:\n%s", output)
 	}
 }
+
+// TestBindWebIdlJsValueDocParses is the end-to-end regression for T0717: an IDL
+// whose interface has a union-typed attribute flips HasJsValue, so `promise bind
+// webidl` emits the JsValue enum. That enum carries `doc annotations that, prior
+// to the fix, were written in the invalid space form on a preceding line — a
+// *fatal parse error* on line 1 that masked the whole file. This drives the real
+// CLI path (bind → emit-ir) and asserts those ANTLR parse diagnostics are gone.
+//
+// It deliberately does NOT require a clean (exit 0) compile: the JsValue enum is
+// still mis-lowered as a resource handle (T0723), a separate codegen layer, so
+// emit-ir currently exits non-zero with a *sema* error. This test stays green
+// both now and once T0723 lands (when there are no diagnostics at all).
+func TestBindWebIdlJsValueDocParses(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping bind+emit-ir integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	idlPath := filepath.Join(dir, "element.idl")
+	idl := `[Exposed=Window]
+interface Element {
+	attribute (TrustedHTML or DOMString) innerHTML;
+};
+`
+	if err := os.WriteFile(idlPath, []byte(idl), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, "out")
+	bindCmd := exec.Command(bin, "bind", "webidl", "-name", "idl", "-o", outDir, idlPath)
+	if out, err := bindCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bind webidl failed: %v\n%s", err, out)
+	}
+
+	prPath := filepath.Join(outDir, "idl.pr")
+	if _, err := os.Stat(prPath); err != nil {
+		t.Fatalf("expected generated %s: %v", prPath, err)
+	}
+
+	emitCmd := exec.Command(bin, "emit-ir", "-target", "wasm32-web", prPath)
+	out, _ := emitCmd.CombinedOutput() // exit code ignored — see T0723 note above
+	output := string(out)
+	// The invalid `doc form surfaced as these ANTLR diagnostics; they must be gone.
+	for _, bad := range []string{"extraneous input '`'", "no viable alternative at input 'doc"} {
+		if strings.Contains(output, bad) {
+			t.Errorf("doc annotations failed to parse (%q):\n%s", bad, output)
+		}
+	}
+}

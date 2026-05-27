@@ -349,11 +349,11 @@ func TestCodegenFlags(t *testing.T) {
 	out := GeneratePromise(modules, "wasi")
 	assertContains(t, out, "type OpenFlags `public `value {")
 	assertContains(t, out, "int _bits `value;")
-	assertContains(t, out, "get read OpenFlags `public `global {")
+	assertContains(t, out, "get read OpenFlags `public `global `doc(\"Flag: read\") {")
 	assertContains(t, out, "return OpenFlags(_bits: 1);")
 	assertContains(t, out, "return OpenFlags(_bits: 2);")
 	assertContains(t, out, "return OpenFlags(_bits: 4);")
-	assertContains(t, out, "has(this, OpenFlags flag) bool `public {")
+	assertContains(t, out, "has(this, OpenFlags flag) bool `public `doc(\"Check if a flag is set.\") {")
 }
 
 func TestCodegenResource(t *testing.T) {
@@ -572,7 +572,7 @@ func TestCodegenDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "`doc \"Greet someone by name.\"")
+	assertContains(t, out, "greet(string name) `public `target(wasi) `doc(\"Greet someone by name.\") {")
 }
 
 // --- Coverage gap tests ---
@@ -902,8 +902,7 @@ func TestCodegenRecordDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "`doc \"A 2D point.\"")
-	assertContains(t, out, "type Point `public `value {")
+	assertContains(t, out, "type Point `public `value `doc(\"A 2D point.\") {")
 }
 
 func TestCodegenEnumDoc(t *testing.T) {
@@ -920,8 +919,7 @@ func TestCodegenEnumDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "`doc \"Basic colors.\"")
-	assertContains(t, out, "enum Color `public {")
+	assertContains(t, out, "enum Color `public `doc(\"Basic colors.\") {")
 }
 
 func TestCodegenVariantDoc(t *testing.T) {
@@ -938,8 +936,7 @@ func TestCodegenVariantDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "`doc \"A shape variant.\"")
-	assertContains(t, out, "enum Shape `public {")
+	assertContains(t, out, "enum Shape `public `doc(\"A shape variant.\") {")
 }
 
 func TestCodegenMethodWrapperVoid(t *testing.T) {
@@ -1014,7 +1011,7 @@ func TestCodegenResourceMethodDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "`doc \"Read bytes from the file.\"")
+	assertContains(t, out, "read(this, u64 len) u32 `public `doc(\"Read bytes from the file.\") {")
 }
 
 // --- Round-trip test ---
@@ -1957,7 +1954,7 @@ func TestCodegenFlagsDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "`doc \"Permission flags.\"")
+	assertContains(t, out, "type Perms `public `value `doc(\"Permission flags.\") {")
 }
 
 func TestCodegenTypeAliasDoc(t *testing.T) {
@@ -1986,7 +1983,50 @@ func TestCodegenResourceDoc(t *testing.T) {
 		}},
 	}}
 	out := GeneratePromise(modules, "wasi")
-	assertContains(t, out, "`doc \"A file handle.\"")
+	assertContains(t, out, "type File `public `target(wasi) `doc(\"A file handle.\") {")
+}
+
+// TestCodegenJsValueEnumDocForm verifies the unconditionally-emitted JsValue
+// enum (T0717) uses the parenthesized, trailing `doc(...) form the Promise
+// grammar accepts — not the space form on a preceding line, which fails to parse.
+func TestCodegenJsValueEnumDocForm(t *testing.T) {
+	modules := []*Module{{
+		Name:         "web",
+		ImportModule: "web:dom/api",
+		HasJsValue:   true,
+	}}
+	out := GeneratePromise(modules, "web")
+	// Enum declaration carries the doc as a trailing parenthesized annotation.
+	assertContains(t, out, "enum JsValue `public `doc(\"Represents a dynamic JavaScript value.\") {")
+	// A getter and a method inside the enum likewise use the paren form.
+	assertContains(t, out, "get is_undefined bool `public `doc(\"Returns true if this value is undefined.\") {")
+	assertContains(t, out, "as_bool(this) bool? `public `doc(\"Returns the bool value, or none if not a Bool.\") {")
+	// The invalid space form must be completely absent from the output.
+	assertNotContains(t, out, "`doc \"")
+}
+
+// TestCodegenJsValueFromWebIdlUnion verifies that a union-typed attribute in
+// WebIDL flips HasJsValue (via WebIdlToIR/moduleHasJsValue) and that the
+// generated JsValue enum is emitted in the valid parenthesized doc form (T0717).
+func TestCodegenJsValueFromWebIdlUnion(t *testing.T) {
+	src := `
+	[Exposed=Window]
+	interface Element {
+		attribute (TrustedHTML or DOMString) innerHTML;
+	};
+	`
+	file, errs := webidl.Parse(src, "element.idl")
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	webidl.Merge(file)
+	modules := WebIdlToIR(file)
+	if !modules[0].HasJsValue {
+		t.Fatal("expected HasJsValue=true for union-typed attribute")
+	}
+	out := GeneratePromise(modules, "web")
+	assertContains(t, out, "enum JsValue `public `doc(\"Represents a dynamic JavaScript value.\") {")
+	assertNotContains(t, out, "`doc \"")
 }
 
 func TestCodegenResourceNoDrop(t *testing.T) {
@@ -3678,6 +3718,34 @@ func TestWebIdlAttributeNullableBuiltinSetter(t *testing.T) {
 	assertContains(t, out, `_element_set_title(this._handle, value ?: "");`)
 	// Extern signature collapses the Option<string> to a bare string.
 	assertContains(t, out, "_element_set_title(i32 handle, string value)")
+}
+
+// TestCodegenMethodWrapperOptionBuiltinParam exercises the Option<Builtin>
+// param-lowering branch in `emitMethodWrapper` (codegen.go:459-460): a regular
+// method keeps the `T?` signature but lowers `none` to the type's zero value at
+// the FFI boundary via the elvis default. The setter path was covered, but the
+// method path was not.
+func TestCodegenMethodWrapperOptionBuiltinParam(t *testing.T) {
+	optString := TypeRef{Kind: OptionKind, Elem: &TypeRef{Kind: BuiltinKind, Builtin: "string"}}
+	modules := []*Module{{
+		Name:         "test",
+		ImportModule: "promise_env",
+		Resources: []Resource{{
+			Name: "Element",
+			Methods: []Func{{
+				Name:       "update",
+				Kind:       FuncMethod,
+				OwnerType:  "Element",
+				ImportName: "Element.update",
+				Params:     []Param{{Name: "value", Type: optString}},
+			}},
+		}},
+	}}
+	out := GeneratePromise(modules, "web")
+	assertContains(t, out, "update(this, string? value) `public {")
+	assertContains(t, out, `_element_update(this._handle, value ?: "");`)
+	// Extern signature collapses the Option<string> to a bare string.
+	assertContains(t, out, "_element_update(i32 handle, string value)")
 }
 
 // TestEmitGetterSetterFailable directly constructs an accessor pair with

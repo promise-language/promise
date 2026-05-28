@@ -20,7 +20,7 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 **IMPORTANT: Always run `bin/verify --wasm` before committing changes.** This formats Go and Promise code, runs `go vet`, and executes the full test suite (including WASM target). Build tools default to a local cache directory (`.promise-home/`); use `--shared` to opt into the shared `~/.promise` cache. Do not commit if verify fails.
 
-**Bootstrap (once per clone):** `./make` — compiles all Go build tools to `bin/` and enables git hooks. See `docs/build-tools.md` for the full architecture. It also builds the workflow **flow** binaries (`flows/*` → `bin/flow/`, e.g. `bin/flow/do`), fetching the flow SDK on demand into `flow-sdk/` (gitignored, not a git submodule); the `flows/` module has its own Go tests (`cd flows && go test ./...`) and is not covered by `bin/verify`.
+**Bootstrap (once per clone):** `./make` — compiles all Go build tools to `bin/` and enables git hooks. See `docs/build-tools.md` for the full architecture. It also builds the workflow **flow** binaries (`flows/*` → `bin/flow/`, e.g. `bin/flow/do`), fetching the flow SDK on demand into `flow-sdk/` (gitignored, not a git submodule); the flows are only rebuilt when the `flows/` or `flow-sdk/` source hash changes (tracked in `bin/flow/.flows.hash`; `-force` rebuilds them anyway). The `flows/` module has its own Go tests (`cd flows && go test ./...`) and is not covered by `bin/verify`.
 
 ```bash
 # Bootstrap (first time or after tools/ source changes):

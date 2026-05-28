@@ -101,15 +101,15 @@ func main() {
 		common.InvalidateGateValues(root)
 	}
 
-	// Flow binaries (flows/ → bin/flow/) build on demand regardless of the tools
-	// up-to-date check: their source and the flow SDK are independent of the tools
-	// hash, and `go build` is incremental, so this is a no-op when nothing changed.
-	if err := buildFlows(root); err != nil {
+	// Flow binaries (flows/ → bin/flow/) are independent of the tools hash, so they
+	// keep their own up-to-date check (bin/flow/.flows.hash over flows/ + flow-sdk/).
+	// buildFlows skips the rebuild when neither changed; -force rebuilds them too.
+	if err := buildFlows(root, force); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("\ndone (%s)\n", time.Since(start).Round(time.Millisecond))
+	fmt.Printf("done (%s)\n", time.Since(start).Round(time.Millisecond))
 }
 
 // buildTools compiles every discovered build tool into bin/. It returns an error
@@ -159,7 +159,12 @@ const flowSDKRepo = "ssh://hfe/git/tracker_flow_sdk.git"
 // succeeded, so ./make warns and skips the flows rather than breaking the whole
 // build for someone with no access to the SDK host. A genuine flow COMPILE error
 // (SDK present) is fatal — that is a real regression in committed flow source.
-func buildFlows(root string) error {
+//
+// The flow binaries are only (re)built when the flow source or the fetched SDK
+// changed: their combined hash is compared against bin/flow/.flows.hash and the
+// go-build loop is skipped on a match (unless force). The hash is computed AFTER
+// the SDK fetch so an SDK update is detected.
+func buildFlows(root string, force bool) error {
 	flowsDir := filepath.Join(root, "flows")
 	if !common.Exists(filepath.Join(flowsDir, "go.mod")) {
 		return nil // no flows module — nothing to build
@@ -175,25 +180,58 @@ func buildFlows(root string) error {
 		return fmt.Errorf("mkdir bin/flow: %w", err)
 	}
 
+	// Discover the flow packages (subdirs of flows/ that contain .go files); a
+	// stray non-package directory is skipped rather than failing the build.
 	entries, err := os.ReadDir(flowsDir)
 	if err != nil {
 		return fmt.Errorf("read flows/: %w", err)
 	}
-	built := 0
+	var names []string
 	for _, e := range entries {
-		if !e.IsDir() || !hasGoFiles(filepath.Join(flowsDir, e.Name())) {
-			continue
+		if e.IsDir() && hasGoFiles(filepath.Join(flowsDir, e.Name())) {
+			names = append(names, e.Name())
 		}
-		name := e.Name()
+	}
+	if len(names) == 0 {
+		return nil // no flow packages — nothing to build
+	}
+
+	// Up-to-date check: skip the go-build loop when neither flows/ nor flow-sdk/
+	// changed and every expected binary is present. Mirrors the .tools.hash
+	// short-circuit in main, so a no-op ./make (run before every flow spawn) does
+	// not pay a per-flow go-build each time.
+	hash, herr := common.FlowsSourceHash(root)
+	hashFile := filepath.Join(binFlow, ".flows.hash")
+	if !force && herr == nil {
+		if stored, rerr := os.ReadFile(hashFile); rerr == nil && strings.TrimSpace(string(stored)) == hash {
+			allExist := true
+			for _, name := range names {
+				if !common.Exists(filepath.Join(binFlow, name+common.ExeSuffix())) {
+					allExist = false
+					break
+				}
+			}
+			if allExist {
+				fmt.Printf("Flows up to date (%d flows, hash: %s..)\n", len(names), hash[:12])
+				return nil
+			}
+		}
+	}
+
+	for _, name := range names {
 		out := filepath.Join(binFlow, name+common.ExeSuffix())
 		if err := common.RunIn(flowsDir, "go", "build", "-o", out, "./"+name); err != nil {
 			return fmt.Errorf("build flow %s: %w", name, err)
 		}
 		fmt.Printf("  flow/%-7s built\n", name)
-		built++
 	}
-	if built > 0 {
-		fmt.Printf("%d flow binary(ies) built\n", built)
+	fmt.Printf("%d flows built\n", len(names))
+
+	// Record the hash only after a fully successful build, so a mid-way failure
+	// forces a retry next run rather than being masked by a matching sidecar. If
+	// hashing failed, skip writing — next run recomputes and rebuilds.
+	if herr == nil {
+		_ = os.WriteFile(hashFile, []byte(hash+"\n"), 0o644)
 	}
 	return nil
 }
@@ -217,7 +255,8 @@ func ensureFlowSDK(root string) error {
 		fmt.Printf("Fetching flow SDK (%s) -> flow-sdk/\n", flowSDKRepo)
 		return runGit(root, "clone", flowSDKRepo, sdk)
 	}
-	if err := runGit(sdk, "pull", "--ff-only"); err != nil {
+	// -q suppresses git's "Already up to date." chatter on a no-op fast-forward.
+	if err := runGit(sdk, "pull", "--ff-only", "-q"); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: flow SDK fast-forward failed (using existing checkout): %v\n", err)
 	}
 	return nil

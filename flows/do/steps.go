@@ -313,12 +313,12 @@ func (f *flow) stepCoverage() flowsdk.InvocationResult {
 // remote. A rebase conflict the flow can't resolve fails the step (the tracker
 // retries, then parks via the step ceiling).
 func (f *flow) stepCommit() flowsdk.InvocationResult {
-	gate, err := f.rn.Gate(f.ctx, flowsdk.GateRequest{GateCmd: verifyCmd, Timeout: verifyTimeout})
+	valid, err := f.rn.Validate(f.ctx, flowsdk.ValidateRequest{Cmd: verifyCmd, Timeout: verifyTimeout})
 	if err != nil {
-		return f.fail(flowsdk.ArtifactCommit, "gate: "+err.Error())
+		return f.fail(flowsdk.ArtifactCommit, "validate: "+err.Error())
 	}
-	if !gate.Success {
-		return f.fail(flowsdk.ArtifactCommit, "verify failed: "+truncate(gate.Output+gate.Error, 400))
+	if !valid.Success {
+		return f.fail(flowsdk.ArtifactCommit, "verify failed: "+truncate(valid.Output+valid.Error, 400))
 	}
 	commit, err := f.rn.Commit(f.ctx, commitMessage(f.item))
 	if err != nil {
@@ -347,11 +347,11 @@ func (f *flow) stepCommit() flowsdk.InvocationResult {
 
 // stepPush is the DUMB push (flow-driven, no rebase): when ahead, re-verify the
 // exact state about to be pushed (bin/verify --wasm) and then push. The pre-push
-// gate is the last, agent-proof line of defense — NOTHING that fails verify
+// verification is the last, agent-proof line of defense — NOTHING that fails verify
 // reaches origin, and because this step runs no agent turn there is no way to
 // "get smart" and route around it. The commit step verified BEFORE its rebase, so
-// this gate is what actually confirms the rebased merge. "Nothing to push"
-// (already up-to-date) is success. On a failed gate OR a rejected push the flow
+// this verification is what actually confirms the rebased merge. "Nothing to push"
+// (already up-to-date) is success. On a failed verify OR a rejected push the flow
 // marks the commit artifact STALE so the tracker re-runs the SMART rebase+commit
 // step and then re-runs this push; persistent failure parks via the retry ceiling
 // / runaway guard.
@@ -361,12 +361,12 @@ func (f *flow) stepPush() flowsdk.InvocationResult {
 		return f.fail(flowsdk.ArtifactPush, "could not read git status")
 	}
 	if st.Ahead > 0 {
-		gate, err := f.rn.Gate(f.ctx, flowsdk.GateRequest{GateCmd: verifyCmd, Timeout: verifyTimeout})
+		valid, err := f.rn.Validate(f.ctx, flowsdk.ValidateRequest{Cmd: verifyCmd, Timeout: verifyTimeout})
 		if err != nil {
-			return f.pushFailedReSync("pre-push gate: " + err.Error())
+			return f.pushFailedReSync("pre-push validate: " + err.Error())
 		}
-		if !gate.Success {
-			return f.pushFailedReSync("pre-push verify failed: " + truncate(gate.Output+gate.Error, 300))
+		if !valid.Success {
+			return f.pushFailedReSync("pre-push verify failed: " + truncate(valid.Output+valid.Error, 300))
 		}
 		res, err := f.rn.Push(f.ctx)
 		if err != nil {
@@ -385,7 +385,7 @@ func (f *flow) stepPush() flowsdk.InvocationResult {
 	return f.ok(flowsdk.ArtifactPush)
 }
 
-// pushFailedReSync handles a push step that could not land (a failed pre-push gate
+// pushFailedReSync handles a push step that could not land (a failed pre-push verify
 // or a rejected push): mark the commit artifact STALE to reactivate the smart
 // rebase+commit step, then fail so the tracker re-dispatches (commit re-runs →
 // re-verify + rebase onto the advanced remote + re-commit → push retries).

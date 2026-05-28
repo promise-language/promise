@@ -27,7 +27,7 @@ type harness struct {
 	agentResp   flowsdk.RunAgentResponse
 	gitStatus   flowsdk.GitStatus
 	statusFn    func() flowsdk.GitStatus // optional: vary status across calls
-	gateOK      bool
+	verifyOK    bool
 	pushOK      bool
 	rebaseOK    bool
 	onAgentTurn func() // optional: simulate the agent's tracker-side MCP work during a turn
@@ -49,7 +49,7 @@ func newHarness(t *testing.T) *harness {
 			Success: true, LastText: "did the work", SessionID: "s1",
 		},
 		gitStatus: flowsdk.GitStatus{Branch: "master", Clean: false, LastCommit: "base1", Ahead: 0},
-		gateOK:    true,
+		verifyOK:  true,
 		pushOK:    true,
 		rebaseOK:  true,
 	}
@@ -240,8 +240,8 @@ func (h *harness) runnerHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(flowsdk.ArenaResult{Success: h.pushOK, Error: pushErr(h.pushOK)})
 	case strings.HasSuffix(p, "/arena/rebase"):
 		json.NewEncoder(w).Encode(flowsdk.ArenaResult{Success: h.rebaseOK, Error: rebaseErr(h.rebaseOK)})
-	case strings.HasSuffix(p, "/arena/gate"):
-		json.NewEncoder(w).Encode(flowsdk.ArenaResult{Success: h.gateOK, Output: "verify", Error: gateErr(h.gateOK)})
+	case strings.HasSuffix(p, "/arena/validate"):
+		json.NewEncoder(w).Encode(flowsdk.ArenaResult{Success: h.verifyOK, Output: "verify", Error: verifyErr(h.verifyOK)})
 	case strings.HasSuffix(p, "/arena/capture-patch"):
 		h.item.Patches = append(h.item.Patches, flowsdk.ItemPatch{Hash: "p1"})
 		json.NewEncoder(w).Encode(flowsdk.ArenaResult{Success: true})
@@ -257,7 +257,7 @@ func pushErr(ok bool) string {
 	}
 	return "push rejected"
 }
-func gateErr(ok bool) string {
+func verifyErr(ok bool) string {
 	if ok {
 		return ""
 	}
@@ -591,15 +591,15 @@ func TestStepCommit_HappyPath(t *testing.T) {
 	}
 }
 
-func TestStepCommit_GateFails(t *testing.T) {
+func TestStepCommit_VerifyFails(t *testing.T) {
 	h := newHarness(t)
-	h.gateOK = false
+	h.verifyOK = false
 	res := h.f.stepCommit()
 	if res.Status != flowsdk.StepFailed {
 		t.Fatalf("status = %q, want failed when verify fails", res.Status)
 	}
 	if h.item.CommitHash != "" {
-		t.Error("must not commit when the gate fails")
+		t.Error("must not commit when verify fails")
 	}
 }
 
@@ -650,23 +650,23 @@ func TestStepPush_RejectedMarksCommitStale(t *testing.T) {
 	}
 }
 
-func TestStepPush_GateFailsReactivatesCommit(t *testing.T) {
+func TestStepPush_VerifyFailsReactivatesCommit(t *testing.T) {
 	h := newHarness(t)
 	h.gitStatus.Ahead = 1
 	h.gitStatus.LastCommit = "abc"
-	h.gateOK = false // bin/verify --wasm fails on the rebased state — must NOT reach origin
+	h.verifyOK = false // bin/verify --wasm fails on the rebased state — must NOT reach origin
 	h.item.CommitHash = "abc"
 	h.item.Artifacts = []flowsdk.ItemArtifact{{Key: flowsdk.ArtifactCommit, Required: true}}
 
 	res := h.f.stepPush()
 	if res.Status != flowsdk.StepFailed {
-		t.Fatalf("status = %q, want failed when the pre-push gate fails", res.Status)
+		t.Fatalf("status = %q, want failed when the pre-push verify fails", res.Status)
 	}
 	if a := h.item.Artifact(flowsdk.ArtifactCommit); a == nil || !a.Stale {
-		t.Error("a failed pre-push gate must reactivate the commit step (mark it stale)")
+		t.Error("a failed pre-push verify must reactivate the commit step (mark it stale)")
 	}
 	if h.item.PushedHash != "" {
-		t.Error("must not push (or record a push) when the pre-push gate fails")
+		t.Error("must not push (or record a push) when the pre-push verify fails")
 	}
 }
 

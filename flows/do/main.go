@@ -36,9 +36,21 @@ import (
 	flowsdk "djabi.dev/go/flow_sdk"
 	"djabi.dev/go/flow_sdk/runner"
 	"djabi.dev/go/flow_sdk/tracker"
+
+	"github.com/p5e-ia/promise-lang/flows/internal/srchash"
 )
 
+// sourceHash is the flow source hash baked in at build time by ./make
+// (-ldflags "-X main.sourceHash=..."). It stays "dev" for `go run` / dlv debug
+// builds, which skip the staleness check. See srchash.CheckStale.
+var sourceHash = "dev"
+
 func main() {
+	// Refuse to run a stale binary, exactly like the other bin/ tools: if flow
+	// source (flows/ or flow-sdk/) changed since this binary was built, tell the
+	// user to ./make rather than silently running outdated logic.
+	srchash.CheckStale(sourceHash)
+
 	args := os.Args[1:]
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: do <lease|run|release|status> [args]")

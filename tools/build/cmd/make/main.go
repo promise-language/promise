@@ -180,17 +180,32 @@ func buildFlows(root string, force bool) error {
 		return fmt.Errorf("mkdir bin/flow: %w", err)
 	}
 
-	// Discover the flow packages (subdirs of flows/ that contain .go files); a
-	// stray non-package directory is skipped rather than failing the build.
+	// Compute the flow source hash to bake into each binary, so it can detect at
+	// runtime when flows/ or flow-sdk/ changed since it was built — the same
+	// staleness self-check the other bin/ tools have. The flows module is separate
+	// (it depends on the on-demand flow SDK), so make cannot import its hasher; it
+	// runs the flows module's own buildhash helper instead, guaranteeing the
+	// build-time and runtime hashes are computed by identical code. ldflags omits
+	// -s -w so the flow binaries stay debuggable (see .vscode launch config).
+	flowHash, err := common.RunOutputIn(flowsDir, "go", "run", "./internal/buildhash")
+	if err != nil {
+		return fmt.Errorf("compute flow source hash: %w", err)
+	}
+	ldflags := "-X main.sourceHash=" + flowHash
+
+	// Discover the flow packages (subdirs of flows/ that contain .go files); the
+	// internal/ helper packages and any stray non-package directory are skipped
+	// rather than built as flow binaries.
 	entries, err := os.ReadDir(flowsDir)
 	if err != nil {
 		return fmt.Errorf("read flows/: %w", err)
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() && hasGoFiles(filepath.Join(flowsDir, e.Name())) {
-			names = append(names, e.Name())
+		if !e.IsDir() || e.Name() == "internal" || !hasGoFiles(filepath.Join(flowsDir, e.Name())) {
+			continue
 		}
+		names = append(names, e.Name())
 	}
 	if len(names) == 0 {
 		return nil // no flow packages — nothing to build
@@ -220,7 +235,7 @@ func buildFlows(root string, force bool) error {
 
 	for _, name := range names {
 		out := filepath.Join(binFlow, name+common.ExeSuffix())
-		if err := common.RunIn(flowsDir, "go", "build", "-o", out, "./"+name); err != nil {
+		if err := common.RunIn(flowsDir, "go", "build", "-ldflags", ldflags, "-o", out, "./"+name); err != nil {
 			return fmt.Errorf("build flow %s: %w", name, err)
 		}
 		fmt.Printf("  flow/%-7s built\n", name)

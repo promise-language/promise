@@ -30,6 +30,7 @@ type harness struct {
 	verifyOK    bool
 	pushOK      bool
 	rebaseOK    bool
+	captureNoOp bool   // capture-patch returns success but attaches no patch (empty diff / runner no-op)
 	onAgentTurn func() // optional: simulate the agent's tracker-side MCP work during a turn
 
 	patched      []map[string]json.RawMessage // recorded PATCH bodies
@@ -243,7 +244,11 @@ func (h *harness) runnerHandler(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(p, "/arena/validate"):
 		json.NewEncoder(w).Encode(flowsdk.ArenaResult{Success: h.verifyOK, Output: "verify", Error: verifyErr(h.verifyOK)})
 	case strings.HasSuffix(p, "/arena/capture-patch"):
-		h.item.Patches = append(h.item.Patches, flowsdk.ItemPatch{Hash: "p1"})
+		// captureNoOp models a runner that reports success but attaches no non-empty
+		// patch (empty worktree diff / silent no-op) — the implement step must catch it.
+		if !h.captureNoOp {
+			h.item.Patches = append(h.item.Patches, flowsdk.ItemPatch{Hash: "p1"})
+		}
 		json.NewEncoder(w).Encode(flowsdk.ArenaResult{Success: true})
 	default:
 		io.Copy(io.Discard, r.Body)
@@ -362,6 +367,26 @@ func TestStepImplementation_CapturesPatch(t *testing.T) {
 	}
 	if !h.item.ArtifactPresent(flowsdk.ArtifactImplementation) {
 		t.Error("implementation artifact should be present (a captured non-empty patch)")
+	}
+}
+
+// TestStepImplementation_CaptureNoPatchFails guards the stuck-loop regression: a
+// capture-patch that succeeds but attaches no non-empty patch must FAIL the step
+// (so the tracker retries/parks), not report done with the artifact still absent —
+// which would make derivation re-pick `implementation` forever.
+func TestStepImplementation_CaptureNoPatchFails(t *testing.T) {
+	h := newHarness(t)
+	h.item.Plan = "the plan"
+	h.captureNoOp = true // runner reports success but attaches nothing
+	res := h.f.stepImplementation()
+	if res.Status != flowsdk.StepFailed {
+		t.Fatalf("status = %q, want failed when no patch lands", res.Status)
+	}
+	if h.item.ArtifactPresent(flowsdk.ArtifactImplementation) {
+		t.Error("implementation artifact must NOT be present when no patch landed")
+	}
+	if !strings.Contains(res.Error, "did not land") {
+		t.Errorf("error = %q, want it to explain the artifact did not land", res.Error)
 	}
 }
 

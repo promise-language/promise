@@ -182,8 +182,30 @@ func (f *flow) stepImplementation() flowsdk.InvocationResult {
 	if _, err := f.tr.SetStatus(f.ctx, f.id, flowsdk.StatusDone); err != nil {
 		return f.fail(flowsdk.ArtifactImplementation, "set status done: "+err.Error())
 	}
-	if _, err := f.rn.CapturePatch(f.ctx, flowsdk.CapturePatchRequest{Step: string(flowsdk.ArtifactImplementation)}); err != nil {
+	capRes, err := f.rn.CapturePatch(f.ctx, flowsdk.CapturePatchRequest{Step: string(flowsdk.ArtifactImplementation)})
+	if err != nil {
 		return f.fail(flowsdk.ArtifactImplementation, "capture-patch: "+err.Error())
+	}
+	if capRes != nil && !capRes.Success {
+		return f.fail(flowsdk.ArtifactImplementation, "capture-patch failed: "+truncate(capRes.Output+capRes.Error, 300))
+	}
+	// Confirm the implementation artifact actually LANDED before reporting the step
+	// done. The artifact is a captured NON-EMPTY patch (Item.hasNonEmptyPatch); a
+	// capture that returns success but attaches nothing (an empty worktree diff, or a
+	// runner that no-ops) would otherwise leave the step "done" while the artifact
+	// stays absent — derivation then re-picks `implementation` on every dispatch, so
+	// `do status` is stuck on it and `do run` loops forever, reporting done each time.
+	// Re-fetch and verify so a non-landing capture fails LOUDLY (the tracker retries,
+	// then parks via the step ceiling) instead of looping silently.
+	it, err := f.tr.GetItem(f.ctx, f.id)
+	if err != nil {
+		return f.fail(flowsdk.ArtifactImplementation, "confirm implementation artifact: "+err.Error())
+	}
+	f.item = it
+	if !it.ArtifactPresent(flowsdk.ArtifactImplementation) {
+		return f.fail(flowsdk.ArtifactImplementation,
+			"capture-patch reported success but no non-empty patch is attached — the implementation artifact did not land "+
+				"(the worktree diff may be empty, or the runner attached nothing)")
 	}
 	// A (re-)implementation supersedes any previously-produced downstream output.
 	f.markPresentStale(flowsdk.ArtifactReview, flowsdk.ArtifactCoverage,

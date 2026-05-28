@@ -351,11 +351,20 @@ func (f *flow) stepCommit() flowsdk.InvocationResult {
 	}
 	// Smart rebase: fetch + rebase onto origin (the runner refuses on a dirty tree,
 	// and the work is now committed, so this is safe). Makes the next push a
-	// fast-forward; a conflict fails the step for retry/park.
-	if rb, err := f.rn.Rebase(f.ctx); err != nil {
+	// fast-forward. The runner's rebase primitive cannot resolve conflicts on its
+	// own, so when it stops on one (the rebase is left in progress with unmerged
+	// paths) the flow drives an agent turn to resolve the conflicts, finish the
+	// rebase, and re-verify the merged result. A non-conflict rebase failure — or a
+	// conflict the agent cannot resolve within the attempt budget — fails the step
+	// for retry/park.
+	rb, err := f.rn.Rebase(f.ctx)
+	if err != nil {
 		return f.fail(flowsdk.ArtifactCommit, "rebase: "+err.Error())
-	} else if !rb.Success {
-		return f.fail(flowsdk.ArtifactCommit, "rebase: "+truncate(rb.Output+rb.Error, 400))
+	}
+	if !rb.Success {
+		if res, resolved := f.resolveRebaseConflict(rb); !resolved {
+			return res
+		}
 	}
 	st, err := f.rn.Status(f.ctx)
 	if err != nil || st == nil || st.LastCommit == "" {
@@ -365,6 +374,124 @@ func (f *flow) stepCommit() flowsdk.InvocationResult {
 		return f.fail(flowsdk.ArtifactCommit, "set commit: "+err.Error())
 	}
 	return f.ok(flowsdk.ArtifactCommit)
+}
+
+// maxRebaseResolveAttempts bounds how many agent turns the commit step spends
+// resolving rebase conflicts (and getting verify green on the merged result)
+// before parking: the initial resolution turn plus up to (max-1) reprompts.
+const maxRebaseResolveAttempts = 3
+
+// resolveRebaseConflict handles a non-success rebase from the smart commit step.
+// The runner's rebase cannot resolve conflicts itself; when it stops on one it
+// leaves the rebase IN PROGRESS in the worktree (unmerged paths). This drives an
+// agent turn to resolve the conflicts, finish the rebase (`git rebase --continue`),
+// and get `bin/verify --wasm` green on the merged result — reprompting in the same
+// session until the rebase is complete and verified, or the attempt budget is
+// exhausted (→ park).
+//
+// It returns resolved=true once the rebase is finished and verify passed; the
+// caller then proceeds to record the commit. It returns resolved=false with the
+// result the step should return at once: a plain failure when the rebase failure
+// is NOT a conflict (e.g. no upstream — not something an agent should paper over),
+// the park result when the conflict can't be resolved in budget, or an agent
+// early-exit (a question / a terminal domain state set via the MCP).
+func (f *flow) resolveRebaseConflict(rb *flowsdk.ArenaResult) (flowsdk.InvocationResult, bool) {
+	st, err := f.rn.Status(f.ctx)
+	if err != nil || st == nil {
+		return f.fail(flowsdk.ArtifactCommit,
+			"rebase failed and worktree status is unreadable: "+truncate(rb.Output+rb.Error, 300)), false
+	}
+	if !isRebaseConflict(st) {
+		// A non-conflict rebase failure (no in-progress rebase / no unmerged paths):
+		// nothing for an agent to resolve — fail with the original rebase output.
+		return f.fail(flowsdk.ArtifactCommit, "rebase: "+truncate(rb.Output+rb.Error, 400)), false
+	}
+
+	// Only accept a verify the resolving agent runs DURING this step: clear any prior
+	// marker so a stale pass can't satisfy the post-resolution gate (the merge is new
+	// code that must be proven green on its own).
+	f.clearVerifyMark()
+
+	resp, res, done := f.agentTurn(flowsdk.ArtifactCommit, rebaseConflictPrompt(f.item, rb))
+	if done {
+		return res, false
+	}
+	if t := f.refresh(flowsdk.ArtifactCommit); t != nil {
+		return *t, false
+	}
+	session := resp.SessionID
+
+	for attempt := 1; ; attempt++ {
+		ok, why := f.rebaseResolved()
+		if ok {
+			// Fold any residual fixup changes the agent left uncommitted (e.g. a
+			// post-merge fix to keep verify green) into a commit so they reach origin.
+			// A clean tree no-ops ("nothing to commit"); only a real commit failure fails.
+			if c, err := f.rn.Commit(f.ctx, commitMessage(f.item)); err == nil && c != nil &&
+				!c.Success && !isNothingToCommit(c) {
+				return f.fail(flowsdk.ArtifactCommit, "commit after conflict resolution: "+c.Error), false
+			}
+			return flowsdk.InvocationResult{}, true
+		}
+		if attempt >= maxRebaseResolveAttempts {
+			return f.parkRebaseConflict(why), false
+		}
+		resp, res, done = f.agentTurnResume(flowsdk.ArtifactCommit, fixRebaseConflictPrompt(f.item, why), session)
+		if done {
+			return res, false
+		}
+		if t := f.refresh(flowsdk.ArtifactCommit); t != nil {
+			return *t, false
+		}
+		if resp.SessionID != "" {
+			session = resp.SessionID
+		}
+	}
+}
+
+// isRebaseConflict reports whether a failed rebase stopped on a conflict the agent
+// can resolve in place — the runner leaves the rebase in progress (GitInProgress)
+// with unmerged paths (Conflicts). Any other rebase failure has no in-flight state.
+func isRebaseConflict(st *flowsdk.GitStatus) bool {
+	return st.Conflicts || st.GitInProgress != ""
+}
+
+// rebaseResolved reports whether the conflict-resolution turn has finished the
+// rebase AND left verify green, with a human reason when it has not. The git-state
+// checks come first so an unfinished rebase reprompts cheaply without paying for a
+// full verify run; only a completed, conflict-free rebase reaches the verify gate.
+func (f *flow) rebaseResolved() (bool, string) {
+	st, err := f.rn.Status(f.ctx)
+	if err != nil || st == nil {
+		return false, "could not read worktree status after conflict resolution"
+	}
+	if st.GitInProgress != "" {
+		return false, "a git " + st.GitInProgress + " is still in progress — resolve the conflicts, " +
+			"`git add` them, and `git rebase --continue` until it finishes"
+	}
+	if st.Conflicts {
+		return false, "the worktree still has unresolved merge conflicts"
+	}
+	return f.verifyPassed()
+}
+
+// parkRebaseConflict parks the item after the commit step exhausted its attempts to
+// resolve a rebase conflict and get verify green: a diagnosed, non-transient work
+// failure that needs resolution. The lease is kept so the partial resolution is
+// preserved; the commit artifact stays absent (the step is not done). Returns a
+// failed result to Emit.
+func (f *flow) parkRebaseConflict(why string) flowsdk.InvocationResult {
+	reason := fmt.Sprintf("rebase conflict unresolved after %d attempts — %s",
+		maxRebaseResolveAttempts, why)
+	if _, err := f.tr.Park(f.ctx, f.id, f.agent, flowsdk.ParkRequest{
+		Kind:         flowsdk.FlowFailureStep,
+		Transient:    false,
+		ReleaseLease: false,
+		Reason:       flowsdk.Markdown(reason),
+	}); err != nil {
+		return f.fail(flowsdk.ArtifactCommit, reason+" (park request failed: "+err.Error()+")")
+	}
+	return f.fail(flowsdk.ArtifactCommit, reason)
 }
 
 // stepPush is the DUMB push (flow-driven, no rebase): when ahead, re-verify the

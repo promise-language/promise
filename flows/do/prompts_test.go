@@ -88,6 +88,34 @@ func TestFixVerifyPrompt(t *testing.T) {
 	}
 }
 
+func TestRebaseConflictPrompt(t *testing.T) {
+	it := &flowsdk.Item{ID: "T0042", Type: flowsdk.ItemTask, Title: "Fix the widget"}
+	rb := &flowsdk.ArenaResult{Output: "CONFLICT (content): merge conflict in foo.pr"}
+	p := rebaseConflictPrompt(it, rb)
+	for _, want := range []string{
+		"T0042", "Fix the widget", "CONFLICT (content): merge conflict in foo.pr",
+		"git rebase --continue", "bin/verify --wasm", "allow_leaks",
+		"git rebase --abort", // must tell the agent NOT to abort the rebase
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("rebaseConflictPrompt missing %q", want)
+		}
+	}
+}
+
+func TestFixRebaseConflictPrompt(t *testing.T) {
+	it := &flowsdk.Item{ID: "T0042", Title: "t"}
+	p := fixRebaseConflictPrompt(it, "a git rebase is still in progress")
+	for _, want := range []string{
+		"T0042", "a git rebase is still in progress", "git rebase --continue",
+		"bin/verify --wasm", "allow_leaks", "git rebase --abort",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("fixRebaseConflictPrompt missing %q", want)
+		}
+	}
+}
+
 func TestItemHeader_OmitsEmptyDescription(t *testing.T) {
 	withDesc := itemHeader(&flowsdk.Item{ID: "T1", Title: "t", Description: "d"})
 	if !strings.Contains(withDesc, "Description:") {

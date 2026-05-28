@@ -746,15 +746,73 @@ func TestStepPush_VerifyFailsReactivatesCommit(t *testing.T) {
 	}
 }
 
-func TestStepCommit_RebaseConflictFails(t *testing.T) {
+// TestStepCommit_RebaseFailsNonConflict covers a rebase that fails WITHOUT leaving
+// an in-flight conflict (no in-progress rebase / no unmerged paths) — e.g. no
+// upstream. Nothing for an agent to resolve, so the step fails directly with no
+// agent turn.
+func TestStepCommit_RebaseFailsNonConflict(t *testing.T) {
 	h := newHarness(t)
-	h.rebaseOK = false // rebase onto origin conflicts — the flow can't resolve it
+	h.rebaseOK = false // rebase fails, but the worktree shows no conflict state
 	res := h.f.stepCommit()
 	if res.Status != flowsdk.StepFailed {
-		t.Fatalf("status = %q, want failed on a rebase conflict", res.Status)
+		t.Fatalf("status = %q, want failed on a non-conflict rebase failure", res.Status)
 	}
 	if h.item.CommitHash != "" {
 		t.Error("commit artifact must not be recorded when the rebase fails")
+	}
+	if h.agentCalls != 0 {
+		t.Errorf("agentCalls = %d, want 0 — a non-conflict rebase failure must not spend an agent turn", h.agentCalls)
+	}
+}
+
+// TestStepCommit_RebaseConflictResolved covers the smart-resolution path: the rebase
+// stops on a conflict (in-progress rebase + unmerged paths), and the agent turn
+// resolves it, finishes the rebase, and re-verifies. The step then records the commit.
+func TestStepCommit_RebaseConflictResolved(t *testing.T) {
+	h := newHarness(t)
+	h.rebaseOK = false
+	h.gitStatus.Conflicts = true
+	h.gitStatus.GitInProgress = "rebase" // the runner left the rebase in progress
+	// The resolving agent turn finishes the rebase and re-verifies: clear the conflict
+	// state and write a passing verify marker.
+	h.onAgentTurn = func() {
+		h.gitStatus.Conflicts = false
+		h.gitStatus.GitInProgress = ""
+		h.writeVerifyMark(true)
+	}
+	res := h.f.stepCommit()
+	if res.Status != flowsdk.StepDone {
+		t.Fatalf("status = %q (%s), want done after the conflict was resolved", res.Status, res.Error)
+	}
+	if h.agentCalls == 0 {
+		t.Error("a rebase conflict must drive an agent turn to resolve it")
+	}
+	if h.item.CommitHash == "" {
+		t.Error("commit artifact must be recorded after a resolved rebase conflict")
+	}
+}
+
+// TestStepCommit_RebaseConflictUnresolvedParks covers a conflict the agent never
+// resolves: the in-flight rebase state persists across every attempt. The step
+// exhausts its budget, parks the item, and records no commit.
+func TestStepCommit_RebaseConflictUnresolvedParks(t *testing.T) {
+	h := newHarness(t)
+	h.rebaseOK = false
+	h.gitStatus.Conflicts = true
+	h.gitStatus.GitInProgress = "rebase"
+	h.onAgentTurn = func() {} // the agent never resolves it — conflict state persists
+	res := h.f.stepCommit()
+	if res.Status != flowsdk.StepFailed {
+		t.Fatalf("status = %q, want failed when the conflict can't be resolved", res.Status)
+	}
+	if h.parked == nil {
+		t.Error("an unresolvable rebase conflict must park the item")
+	}
+	if h.item.CommitHash != "" {
+		t.Error("commit artifact must not be recorded when the conflict is unresolved")
+	}
+	if h.agentCalls != maxRebaseResolveAttempts {
+		t.Errorf("agentCalls = %d, want %d (one initial turn + reprompts)", h.agentCalls, maxRebaseResolveAttempts)
 	}
 }
 

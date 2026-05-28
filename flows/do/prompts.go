@@ -141,6 +141,53 @@ zero-leak policy is absolute; never add `+"`allow_leaks: true`"+`).
 `, it.ID, why)
 }
 
+// rebaseConflictPrompt drives the smart conflict-resolution turn of the commit
+// step. The flow already committed the work and rebased onto the latest origin, and
+// the rebase stopped on merge conflicts (the runner cannot resolve them). It mirrors
+// the commit skill's conflict guidance ("resolve them carefully and continue the
+// rebase", then re-verify with the zero-leak check). `rb` carries the rebase output.
+func rebaseConflictPrompt(it *flowsdk.Item, rb *flowsdk.ArenaResult) string {
+	return itemHeader(it) + `
+Your committed change for this item was rebased onto the latest origin, and the
+rebase STOPPED ON MERGE CONFLICTS. Resolve them so the rebase completes on top of the
+remote.
+
+Rebase output:
+` + truncate(strings.TrimSpace(rb.Output+"\n"+rb.Error), 800) + `
+
+- Run ` + "`git status`" + ` to see the in-progress rebase and the conflicted files.
+- Resolve each conflict carefully: read the whole file, integrate BOTH sides (keep the
+  intent of your change AND the incoming changes from origin). Do NOT blindly pick one
+  side or delete code to make the markers (` + "`<<<<<<<`/`=======`/`>>>>>>>`" + `) go away.
+- ` + "`git add`" + ` each resolved file, then ` + "`git rebase --continue`" + `. Repeat until the
+  rebase is fully applied (it may stop on several commits).
+- Then run ` + "`bin/verify --wasm`" + ` and make it pass on the merged result — a rebase can
+  introduce SEMANTIC conflicts git did not flag. It must show 0 test failures and 0
+  leaks (zero-leak policy is absolute; never add ` + "`allow_leaks: true`" + `). If you changed
+  Promise/stdlib modules, run ` + "`bin/build`" + ` first to re-embed them.
+- Leave the worktree clean and the rebase complete. Do NOT ` + "`git push`" + ` (a later step
+  pushes) and do NOT ` + "`git rebase --abort`" + ` (that throws away the rebase progress).
+` + askGuidance
+}
+
+// fixRebaseConflictPrompt re-prompts the resolving agent (same session) when the
+// rebase is not yet finished cleanly: still in progress / unresolved conflicts, or
+// verify is not green on the merged result. `why` is the flow's reason.
+func fixRebaseConflictPrompt(it *flowsdk.Item, why string) string {
+	return fmt.Sprintf(`The rebase for %s is NOT finished cleanly yet: %s
+
+Keep going. The step is complete only when the rebase is fully applied (no rebase in
+progress, no remaining conflict markers) and `+"`bin/verify --wasm`"+` passes on the merged
+result — 0 failures and 0 leaks (never add `+"`allow_leaks: true`"+`).
+
+- Run `+"`git status`"+`; if a rebase is still in progress, resolve the remaining conflicts,
+  `+"`git add`"+` them, and `+"`git rebase --continue`"+` until it completes.
+- Then run `+"`bin/verify --wasm`"+` in the foreground and wait for it; fix any failures or
+  leaks the merge introduced (run `+"`bin/build`"+` first if you changed modules).
+- Do NOT `+"`git push`"+` or `+"`git rebase --abort`"+`.
+`, it.ID, why)
+}
+
 func reviewPrompt(it *flowsdk.Item) string {
 	if it.Type == flowsdk.ItemPlan {
 		return itemHeader(it) + `

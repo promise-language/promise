@@ -9237,6 +9237,35 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 		return
 	}
 
+	// T0739: Closure (function value) field — a fat pointer {fn_ptr, env_ptr}.
+	// A capturing closure heap-allocates its env struct; drop it via
+	// emitEnvDropOrFree (loads the env's field-0 drop fn and calls it — dropping
+	// captured values — else pal_free). A no-capture closure has a null env, so
+	// null-check and skip. Reached by: a Task[T] result (Task[T].drop), a Vector
+	// element (emitVectorElementDropLoop), and a Tuple/Array element (the Tuple
+	// and Array branches below recurse here unconditionally). Without it, a
+	// closure in any of those leaks its env (e.g. a dropped-not-awaited
+	// `go { || -> base + 2 }`).
+	// NOTE: closures in an *enum* payload, an *optional*, or a plain struct
+	// closure *field* with heap captures are NOT reached/correctly freed here —
+	// those paths (variantFieldNeedsDrop, emitOptionalValueDrop,
+	// emitFuncFieldEnvFree's shallow pal_free) need separate fixes tracked in
+	// T0741. Do not assume this case alone covers every aggregate.
+	if _, ok := typ.(*types.Signature); ok {
+		if st, isStruct := fieldVal.Type().(*irtypes.StructType); isStruct && len(st.Fields) == 2 {
+			envPtr := c.block.NewExtractValue(fieldVal, 1)
+			isNull := c.block.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
+			freeBlk := c.newBlock("closure.env.free")
+			skipBlk := c.newBlock("closure.env.skip")
+			c.block.NewCondBr(isNull, skipBlk, freeBlk)
+			c.block = freeBlk
+			c.emitEnvDropOrFree(envPtr)
+			c.block.NewBr(skipBlk)
+			c.block = skipBlk
+		}
+		return
+	}
+
 	// Tuple field: extract and drop each droppable element.
 	// B0264: Vector[(string, int)] leaks because tuple elements were never dropped.
 	if tup, ok := typ.(*types.Tuple); ok {

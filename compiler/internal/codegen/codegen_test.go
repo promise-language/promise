@@ -15719,6 +15719,33 @@ func TestT0686_VectorResultNoTokenLoad(t *testing.T) {
 	assertContains(t, ir, "@pal_alloc")
 }
 
+// T0739: a value-returning go-block whose trailing expression is a CAPTURING
+// closure (≥1 capture → heap env struct) is the envTemps sibling of the T0686
+// heapTemps bug. Edits 1–4 isolate the coroutine's env temp from the outer fn
+// (fixes the WASM `%0`-is-coro.id-token compile failure — guarded by the e2e
+// run, since generateIR of the closure case doesn't reproduce the `%0` misuse).
+// Edit 5 teaches emitVariantFieldDrop a *types.Signature case so the
+// dropped-not-awaited form (`task[() -> int] x = go { || -> base + 2 };` with
+// no `<-x`) frees the closure's heap env via Task[() -> int].drop instead of
+// leaking it. The `closure.env.free` block is absent on buggy master and proves
+// edit 5 is wired into the Task drop path.
+func TestT0739_ClosureResultDropFreesEnv(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			base := 1;
+			task[() -> int] x = go { || -> base + 2 };
+		}
+	`)
+	// Edit 5: the dropped Task[() -> int] routes its closure result through
+	// emitVariantFieldDrop's new *types.Signature case → emitEnvDropOrFree,
+	// which emits the closure.env.free block. Absent on buggy master.
+	assertContains(t, ir, "closure.env.free")
+	// Positive value-path guards: the closure is still stored into G.result_ptr
+	// inside the inner coroutine, and the caller allocates a real result buffer.
+	assertContains(t, ir, "store_result:")
+	assertContains(t, ir, "@pal_alloc")
+}
+
 func TestGoBlockVoidStillUsesSentinel(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

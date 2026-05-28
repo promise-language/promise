@@ -12075,6 +12075,8 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	savedStmtTempMap := c.stmtTempMap       // T0683/T0594
 	savedHeapTemps := c.heapTemps           // T0686: isolate coro-body heap temps from the outer fn
 	savedHeapTempMap := c.heapTempMap       // T0686
+	savedEnvTemps := c.envTemps             // T0739: isolate coro-body closure env temps from the outer fn
+	savedEnvTempMap := c.envTempMap         // T0739
 	c.goExprFireAndForget = false           // reset for inner statements (B0109)
 
 	// T0683: Only a non-void, awaited (`<-task`) block needs its trailing
@@ -12110,6 +12112,12 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		// `%0` (the coro.id token) in the outer cleanupHeapTemps.
 		c.heapTemps = nil
 		c.heapTempMap = make(map[value.Value]int)
+		// T0739: same isolation for closure env temps — a capturing-closure
+		// trailing value (e.g. `go { || -> base + 2 }`) would otherwise leak
+		// its coroFn env alloca/dropFlag into the outer fn and serialize as
+		// `%0` (the coro.id token) in the outer cleanupEnvTemps.
+		c.envTemps = nil
+		c.envTempMap = make(map[value.Value]int)
 	}
 
 	// --- Coroutine preamble ---
@@ -12252,11 +12260,18 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 			// T0686: a heap-struct result is moved into G.result_ptr — claim it
 			// so the coroutine body's heap-temp cleanup below doesn't free it.
 			c.claimHeapTemp(result)
+			// T0739: a capturing-closure result is moved into G.result_ptr —
+			// claim its env temp so the coroutine body's env-temp cleanup below
+			// doesn't free it (claimEnvTemp extracts field 1 of the fat pointer).
+			c.claimEnvTemp(result)
 		}
 		c.cleanupStmtTemps()
 		// T0686: drop any orphaned trailing-expr heap intermediates inside the
 		// coroutine (self-guards on a dead block).
 		c.cleanupHeapTemps()
+		// T0739: drop any orphaned trailing-expr closure env intermediates
+		// inside the coroutine (self-guards on a dead block).
+		c.cleanupEnvTemps()
 	}
 
 	// Clear panic exit block and coroutine return block after body generation
@@ -12352,6 +12367,8 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		c.stmtTempMap = savedStmtTempMap // T0683/T0594
 		c.heapTemps = savedHeapTemps     // T0686: restore outer fn heap temp state
 		c.heapTempMap = savedHeapTempMap // T0686
+		c.envTemps = savedEnvTemps       // T0739: restore outer fn closure env temp state
+		c.envTempMap = savedEnvTempMap   // T0739
 	}
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.

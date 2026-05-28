@@ -816,3 +816,174 @@ t0686_enum_heap_payload_loop_no_leak() `test {
   }
   assert(matched == 30, "enum heap-payload loop: all matched, no leak");
 }
+
+// ===========================================================================
+// T0739: capturing-closure trailing value — the envTemps sibling of the T0686
+// heapTemps bug. genGoBlock's value path (genBlockValue) saved/reset/restored
+// stmtTemps (T0683) and heapTemps (T0686) but NOT envTemps. A capturing closure
+// as the trailing value (`go { || -> base + 2 }`) heap-allocates an env struct
+// and registers an env temp whose alloca/dropFlag belong to the *coroutine*;
+// without isolation it leaked into the outer (awaiting/dropping) fn's env-temp
+// cleanup and serialized as `%0` (the coro.id token) → `opt` rejected it on
+// WASM (every WASM fn is a presplitcoroutine). The fix isolates envTemps in
+// genGoBlock (edits 1-4) AND teaches emitVariantFieldDrop to drop a closure
+// (edit 5) so the dropped-not-awaited form frees the env via Task[T].drop.
+//
+// These batch tests have NO `exclude: wasm`: the WASM batch run is the
+// empirically-confirmed compile-failure regression guard (it fails `opt` on
+// regression), and zero-leak enforcement on host AND `--target wasm32-wasi`
+// guards edit 5. The received closure is NOT called — calling returns a wrong
+// captured value due to T0740 (a separate, non-blocking bug: collectBlockIdents
+// skips lambda bodies); the env is still allocated, so the leak/compile paths
+// are fully exercised by await + drop.
+
+// (m) Capturing closure value-block AWAITED, then closure dropped at scope exit
+// (env freed via the awaited variable's bindingFreeEnv). The exact `%0`
+// compile-failure shape on WASM before edits 1-4.
+t0739_closure_capture_awaited() `test {
+  base := 40;
+  task[() -> int] x = go {
+    || -> base + 2
+  };
+  f := <-x;
+  assert(true, "capturing-closure value-block awaited + dropped at scope exit");
+}
+
+// (n) Capturing closure value-block DROPPED-not-awaited (the bug report's exact
+// repro). Task[() -> int].drop must free the closure's heap env via edit 5's
+// new *types.Signature case — without it, host + WASM leak 1 allocation.
+t0739_closure_capture_dropped() `test {
+  base := 40;
+  task[() -> int] x = go {
+    || -> base + 2
+  };
+  assert(true, "capturing-closure value-block dropped-not-awaited");
+}
+
+// (o) No-capture closure value-block (null env). Guards the null-env branch of
+// both claimEnvTemp (fat-pointer extract) and edit 5's null-check: a no-capture
+// closure has a null env ptr and must NOT be freed. Dropped + awaited.
+t0739_closure_nocapture() `test {
+  task[() -> int] dropped = go {
+    || -> 42
+  };
+  task[() -> int] x = go {
+    || -> 7
+  };
+  f := <-x;
+  assert(true, "no-capture closure value-block, dropped + awaited (null env)");
+}
+
+// (p) Heap-capture closure: `move || -> s.len` move-captures a string into the
+// env. Edit 5 → emitEnvDropOrFree loads the env's field-0 drop fn (non-null
+// because the env holds a droppable string) and deep-drops the captured string
+// before freeing the env. A shallow pal_free would leak the string. Dropped +
+// awaited.
+t0739_closure_heap_capture() `test {
+  s1 := "hello" + " world";
+  task[() -> int] dropped = go {
+    move || -> s1.len
+  };
+  s2 := "second" + " string";
+  task[() -> int] x = go {
+    move || -> s2.len
+  };
+  f := <-x;
+  assert(true, "heap-capture (string) closure deep-drops env, dropped + awaited");
+}
+
+// (q) Multi-capture closure dropped — several copy captures in one env struct.
+t0739_closure_multi_capture() `test {
+  a := 10;
+  b := 20;
+  c := 12;
+  task[() -> int] x = go {
+    || -> a + b + c
+  };
+  assert(true, "multi-capture closure value-block dropped");
+}
+
+// (r) 30-iteration loop leak guard: dropped + awaited capturing closures. A
+// per-iteration leak of the env, the result buffer, or the captured value would
+// trip the zero-tolerance alloc-delta check.
+t0739_closure_loop_no_leak() `test {
+  i := 0;
+  while i < 30 {
+    base := i;
+    task[() -> int] dropped = go {
+      || -> base + 1
+    };
+    task[() -> int] x = go {
+      || -> base + 2
+    };
+    f := <-x;
+    i = i + 1;
+  }
+  assert(i == 30, "capturing-closure loop: 30 iterations, no leak");
+}
+
+// (s) Edit 5 generalizes beyond Task[T].drop: a closure stored in ANY container
+// that routes drops through emitVariantFieldDrop was a latent leak before this
+// fix. A Vector[() -> int] of capturing closures, dropped, reaches the new
+// *types.Signature case via emitVectorElementDropLoop (a different route into
+// emitVariantFieldDrop than Task[T].drop) — each element's env must be freed.
+t0739_vector_of_closures_dropped() `test {
+  base := 5;
+  v := [|| -> base + 1, || -> base + 2, || -> base + 3];
+  assert(v.len == 3, "vector of capturing closures dropped, no leak");
+}
+
+// (t) Vector of move-string-capturing closures dropped — each element's env
+// holds a droppable string, so emitEnvDropOrFree must deep-drop the captured
+// string per element (a shallow pal_free would leak every captured string).
+t0739_vector_of_heap_closures_dropped() `test {
+  s1 := "a" + "x";
+  s2 := "b" + "y";
+  v := [move || -> s1.len, move || -> s2.len];
+  assert(v.len == 2, "vector of heap-capturing closures dropped, no leak");
+}
+
+// ===========================================================================
+// T0739 (coverage, found in /coverage): edit 5's *types.Signature case in
+// emitVariantFieldDrop generalizes beyond Task[T].drop. emitVariantFieldDrop's
+// Tuple and Array branches recurse *unconditionally* into each element, so a
+// closure nested in a tuple/array that is dropped via emitVariantFieldDrop
+// (e.g. a Vector element) reaches the Signature case and frees its env. These
+// tests lock that in. NO `exclude: wasm`; zero-leak on host + wasm.
+//
+// NOTE: closures nested in an *enum* payload or an *optional*, and plain struct
+// closure *fields* with heap captures, are NOT correctly dropped — they route
+// through paths that lack a Signature case (variantFieldNeedsDrop /
+// emitOptionalValueDrop) or shallow-free the env (emitFuncFieldEnvFree). Those
+// are pre-existing leaks/dangling-pointer bugs tracked in T0741 (edit 5's
+// comment overclaims enum/optional). Tests for those land with the T0741 fix.
+
+// (u) Tuple element closure: a Vector[(int, () -> int)] dropped routes each
+// element through emitVariantFieldDrop's tuple branch (unconditional recursion)
+// -> Signature case. Heap-capture (move string) so a missed drop would leak the
+// captured string, not just the env — a stronger guard.
+t0739_vector_of_tuple_closures_dropped() `test {
+  s := "tup" + "le";
+  v := [(1, move || -> s.len)];
+  assert(v.len == 1, "vector of (int, closure) tuples dropped, no leak");
+}
+
+// (v) Local fixed-array of capturing closures, dropped at scope exit. A leak
+// guard for the local-array path (closures freed via stmt-end env cleanup). The
+// container-nested fixed-array path (array as a struct field / Vector element)
+// is the latent case tracked in T0741.
+t0739_local_array_of_closures_dropped() `test {
+  base := 5;
+  (() -> int)[2] arr = [|| -> base + 1, || -> base + 2];
+  assert(true, "local fixed array of capturing closures dropped, no leak");
+}
+
+// (w) Local fixed-array of heap-capturing (move string) closures — guards that
+// the per-element env deep-drops its captured string (a shallow free would leak
+// each string).
+t0739_local_array_of_heap_closures_dropped() `test {
+  s1 := "arr" + " one";
+  s2 := "arr" + " two";
+  (() -> int)[2] arr = [move || -> s1.len, move || -> s2.len];
+  assert(true, "local fixed array of heap-capturing closures dropped, no leak");
+}

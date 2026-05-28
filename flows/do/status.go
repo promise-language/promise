@@ -36,6 +36,11 @@ func buildFlowStatus(it *flowsdk.Item) flowsdk.FlowStatus {
 			st.Reason = "not required"
 		case it.ArtifactPresent(key) && !(a != nil && a.Stale):
 			st.State = flowsdk.StepStateCompleted
+		case it.FinalizedFlag:
+			// Permanent finalized gate set → remaining required-but-missing steps
+			// are skipped (the flow will not run them).
+			st.State = flowsdk.StepStateSkipped
+			st.Reason = "finalized"
 		case key == first && terminal == "":
 			st.State = flowsdk.StepStateNext
 			if a != nil && a.Stale {
@@ -60,6 +65,8 @@ func buildFlowStatus(it *flowsdk.Item) flowsdk.FlowStatus {
 	}
 	if terminal != "" {
 		status.Terminal = terminal
+	} else if it.FinalizedFlag {
+		status.Terminal = "finalized: flag set (remaining required steps skipped)"
 	} else if first == "" {
 		status.Terminal = "finalized: all required artifacts present"
 	}

@@ -305,6 +305,25 @@ func TestRun_Finalized(t *testing.T) {
 	}
 }
 
+// TestRun_FinalizedFlagRefuses confirms the tracker's permanent finalized flag
+// makes the flow refuse to run a step (skip), even when the flow's own artifact
+// view still has required steps missing and no agent turn is taken.
+func TestRun_FinalizedFlagRefuses(t *testing.T) {
+	h := newHarness(t)
+	h.item.Plan = "the plan" // only plan present; implementation onward "missing"
+	for _, k := range taskSteps {
+		h.item.Artifacts = append(h.item.Artifacts, flowsdk.ItemArtifact{Key: k, Required: true})
+	}
+	h.item.FinalizedFlag = true
+	res := h.f.run()
+	if res.Status != flowsdk.StepSkipped {
+		t.Fatalf("finalized-flag run = %+v, want skipped (refused)", res)
+	}
+	if h.agentCalls != 0 {
+		t.Errorf("agent turns = %d, want 0 (must not run a step when finalized)", h.agentCalls)
+	}
+}
+
 func TestStepPlan_RecordsPlan(t *testing.T) {
 	h := newHarness(t)
 	h.agentResp.LastText = "the plan text"

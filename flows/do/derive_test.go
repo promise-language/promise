@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	flowsdk "djabi.dev/go/flow_sdk"
@@ -81,6 +82,21 @@ func TestDeriveNext_Finalized(t *testing.T) {
 	}
 	if !it.Finalized() {
 		t.Fatal("expected item Finalized()")
+	}
+}
+
+func TestDeriveNext_FinalizedFlag(t *testing.T) {
+	// The tracker's permanent finalized gate refuses further runs even when the
+	// flow's own artifact view still sees required steps missing (e.g. no patch
+	// captured) — the flag is authoritative over firstPending.
+	it := itemWith(flowsdk.ArtifactPlan) // implementation onward still "missing"
+	it.FinalizedFlag = true
+	next, term := deriveNext(it)
+	if next != "" {
+		t.Fatalf("expected no next step when FinalizedFlag set, got %q", next)
+	}
+	if !strings.Contains(term, "finalized: flag set") {
+		t.Fatalf("terminal = %q, want the flag-set finalized reason", term)
 	}
 }
 

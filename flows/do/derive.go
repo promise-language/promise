@@ -99,6 +99,11 @@ func deriveNext(it *flowsdk.Item) (flowsdk.ArtifactKey, string) {
 	if r := terminalReason(it); r != "" {
 		return "", r
 	}
+	if it.FinalizedFlag {
+		// The permanent finalized gate is set: every remaining required-but-missing
+		// step is skipped, so there is nothing left for the flow to run.
+		return "", "finalized: flag set — remaining required steps skipped"
+	}
 	next := firstPending(it)
 	if next == "" {
 		return "", "finalized: all required artifacts present"

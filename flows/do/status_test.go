@@ -64,6 +64,29 @@ func TestBuildFlowStatus_Finalized(t *testing.T) {
 	}
 }
 
+func TestBuildFlowStatus_FinalizedFlag(t *testing.T) {
+	// FinalizedFlag set while the flow's artifact view still sees steps missing:
+	// present steps stay completed, every remaining required step is skipped
+	// ("finalized"), no step is next, and Terminal names the flag gate.
+	it := itemWith(flowsdk.ArtifactPlan)
+	it.FinalizedFlag = true
+	s := buildFlowStatus(it)
+	if got := stateOf(s, flowsdk.ArtifactPlan); got != flowsdk.StepStateCompleted {
+		t.Errorf("plan = %q, want completed", got)
+	}
+	if got := stateOf(s, flowsdk.ArtifactImplementation); got != flowsdk.StepStateSkipped {
+		t.Errorf("implementation = %q, want skipped (finalized flag)", got)
+	}
+	for _, st := range s.Steps {
+		if st.State == flowsdk.StepStateNext {
+			t.Errorf("step %s marked next while finalized flag is set", st.Step)
+		}
+	}
+	if !strings.Contains(s.Terminal, "finalized: flag set") {
+		t.Errorf("Terminal = %q, want flag-set finalized reason", s.Terminal)
+	}
+}
+
 func TestBuildFlowStatus_TerminalMarksBlocked(t *testing.T) {
 	it := itemWith(flowsdk.ArtifactPlan)
 	it.Questions = []flowsdk.Question{{ID: "q1", AgentQuestion: flowsdk.AgentQuestion{Text: "?"}}}

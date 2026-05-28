@@ -15645,6 +15645,80 @@ func TestGoBlockValueResultStored(t *testing.T) {
 
 // T0683 regression guard: the void go-block path is unchanged — it still
 // stores the 0x1 sentinel into G.result_ptr and emits no value-store block.
+// T0686 regression guard: a value-returning `go { Box(...) }` whose result is
+// a heap user-struct (Instance layout + generated drop), awaited via `<-x`,
+// must NOT leak the coroutine's heap temp into the awaiting presplitcoroutine.
+// Before the fix, genGoBlock's value path isolated stmtTemps but not heapTemps
+// (unlike genBlock, which isolates heapTemps via T0088). The orphaned Box heap
+// temp's coroFn alloca/dropFlag were cleaned up in the OUTER `.goroutine.main`,
+// where those values are unnumbered, so they serialized as `%0` (the coro.id
+// token): `load i1, i1* %0` / `load i8*, i8** %0` ('%0' is type 'token') makes
+// opt verification fail. Guard: `.goroutine.main` (a presplitcoroutine, so its
+// `%0` IS the token) must contain no `i1* %0` / `i8** %0` load. `%0` cannot
+// false-match `%10`/`%20` (those put a digit between `%` and `0`); the only
+// legit `%0` use is `token %0`.
+func TestT0686_StructResultNoTokenLoad(t *testing.T) {
+	ir := generateIR(t, `
+		type Box { int v; string s; }
+		main() {
+			task[Box] x = go { Box(v: 42, s: "a" + "b") };
+			b := <-x;
+		}
+	`)
+	// The awaiting function is `.goroutine.main` (concurrency wraps main into a
+	// coroutine). Its `%0` is `call token @llvm.coro.id(...)` — a heap drop-flag
+	// or heap-pointer load from `%0` is the exact malformed-IR bug. Extract from
+	// the `define` (extractFunction would match the call site inside @main first).
+	defStart := strings.Index(ir, "define i8* @.goroutine.main(")
+	if defStart < 0 {
+		t.Fatal("expected a .goroutine.main coroutine definition in the IR")
+	}
+	body := ir[defStart:]
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
+		body = body[:end+2]
+	}
+	assertContains(t, body, "call token @llvm.coro.id") // %0 is the token
+	assertNotContains(t, body, "i1* %0")                // no heap drop-flag load from the token
+	assertNotContains(t, body, "i8** %0")               // no heap pointer load from the token
+	// Positive guards: the Box value is still stored into G.result_ptr inside the
+	// inner coroutine, and the caller allocates a real result buffer.
+	assertContains(t, ir, "store_result:")
+	assertContains(t, ir, "@pal_alloc")
+}
+
+// T0686 (/coverage follow-up): the heapTemps non-isolation bug fired for ANY
+// trailing expression that registers a heap temp, not just user structs. A
+// VECTOR LITERAL with non-const elements registers a heap temp via the T0369
+// path (`elemType != nil`), which is a DIFFERENT branch of cleanupHeapTemps
+// (element-walk + buffer free) than the struct dropFunc path covered above. This
+// guards that the distinct vector heap-temp path is also isolated to the inner
+// coroutine — the awaiting `.goroutine.main` presplitcoroutine must not load its
+// `%0` (the coro.id token) as a heap drop-flag (i1*) or heap pointer (i8**).
+func TestT0686_VectorResultNoTokenLoad(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			n := 3;
+			task[int[]] x = go { [n, n + 1, n + 2] };
+			r := <-x;
+		}
+	`)
+	defStart := strings.Index(ir, "define i8* @.goroutine.main(")
+	if defStart < 0 {
+		t.Fatal("expected a .goroutine.main coroutine definition in the IR")
+	}
+	body := ir[defStart:]
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
+		body = body[:end+2]
+	}
+	assertContains(t, body, "call token @llvm.coro.id") // %0 is the token
+	assertNotContains(t, body, "i1* %0")                // no heap drop-flag load from the token
+	assertNotContains(t, body, "i8** %0")               // no heap pointer load from the token
+	// Positive guards: the vector result is still stored into G.result_ptr inside
+	// the inner coroutine, and the caller allocates a real result buffer.
+	assertContains(t, ir, "store_result:")
+	assertContains(t, ir, "@pal_alloc")
+}
+
 func TestGoBlockVoidStillUsesSentinel(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

@@ -1,0 +1,27 @@
+// T0686: host-only end-to-end guard for the `.goroutine.main` presplitcoroutine
+// failure mode. A value-returning `go { Box(...) }` whose result is a heap
+// user-struct (Instance layout + generated drop), awaited via `<-x` in `main()`,
+// emitted `load i1, i1* %0` (where %0 is the coro.id token) and failed `opt`
+// verification — `bin/promise run` errored with a raw opt diagnostic (exit 1),
+// with no pointer at the user code.
+//
+// A host batch `` `test `` wrapper is NOT a presplitcoroutine, so the batch tests
+// in t0683_go_block_value_test.pr cannot reproduce the host failure; only a
+// `main()` (wrapped into the `.goroutine.main` coroutine) does. This snapshot
+// test is the justified-exception coverage for that host path (per CLAUDE.md:
+// snapshot when exercising the host presplitcoroutine path is required). The
+// WASM regression is covered by the co-located batch tests (every WASM function
+// is a presplitcoroutine).
+type T0686MainBox {
+  int v;
+  string s;
+}
+
+main() `test(expected: "42") {
+  task[T0686MainBox] x = go {
+    T0686MainBox(v: 42, s: "hi" + "!")
+  };
+  b := <-x;
+  assert(b.s == "hi!", "heap string field round-trips");
+  print_line(b.v.to_string());
+}

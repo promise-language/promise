@@ -580,3 +580,239 @@ t0688_dropped_map_set_loop_no_leak() `test {
   }
   assert(i == 30, "dropped map/set tasks in loop: no leak");
 }
+
+// T0686: the T0683 regression a /coverage audit found — a value-returning
+// `go { Box(...) }` whose result is a HEAP user-struct (Instance layout +
+// generated drop), awaited via `<-x`, emitted malformed IR (`load i1, i1* %0`
+// where %0 is the coro.id token) and failed `opt` verification on every WASM
+// function and in host `main()`. Root cause: genGoBlock's value path isolated
+// stmtTemps but NOT heapTemps (unlike genBlock, which isolates heapTemps via
+// T0088), so the trailing constructor's heap temp — whose alloca/dropFlag
+// belong to the coroutine fn — leaked into the OUTER (awaiting) presplit-
+// coroutine, where its cleanupHeapTemps loaded from the unnumbered %0 token.
+// The fix saves/resets/restores heapTemps around the coroutine body and claims
+// the result so the body's own cleanup doesn't free the transferred struct.
+//
+// Batch tests with NO `exclude: wasm` — every WASM function is a presplit-
+// coroutine, so the WASM run is the host-equivalent regression guard (a host
+// batch `` `test `` wrapper is NOT a presplitcoroutine, so the bug was benign
+// there; the host `main()` snapshot in t0686_*_main_test.pr covers that path).
+// Zero-leak on host AND `--target wasm32-wasi`.
+type T0686Box {
+  int v;
+  string s;
+}
+
+// (a) The exact reported repro: heap struct with a string field, awaited.
+t0686_struct_string_field_result() `test {
+  task[T0686Box] x = go {
+    T0686Box(v: 1, s: "a" + "b")
+  };
+  b := <-x;
+  assert(b.v == 1, "struct int field");
+  assert(b.s == "ab", "struct heap string field");
+}
+
+// (b) All-int heap struct — no heap field, but still an Instance layout with a
+// generated drop flag (the minimal trigger per the bug's matrix).
+type T0686P {
+  int a;
+  int b;
+}
+
+t0686_all_int_struct_result() `test {
+  task[T0686P] x = go {
+    T0686P(a: 40, b: 2)
+  };
+  p := <-x;
+  assert(p.a == 40 && p.b == 2, "all-int struct result");
+}
+
+// (c) Multi-statement value block whose trailing expression builds a heap
+// struct from heap locals — preceding statements run for effect, the trailing
+// constructor consumes the locals (exercises coroutine-body heap cleanup).
+t0686_multi_stmt_struct_result() `test {
+  task[T0686Box] x = go {
+    n := 21;
+    label := "v" + "al";
+    T0686Box(v: n * 2, s: label)
+  };
+  b := <-x;
+  assert(b.v == 42, "multi-stmt struct int field");
+  assert(b.s == "val", "multi-stmt struct string field");
+}
+
+// (d) Nested struct-from-struct — the trailing expression builds a heap struct
+// whose field is itself a heap struct (nested instance + nested string). The
+// result transfer + ownership must handle the nested heap case with no leak /
+// no double-free.
+type T0686Nested {
+  T0686Box inner;
+  int tag;
+}
+
+t0686_nested_struct_result() `test {
+  task[T0686Nested] x = go {
+    T0686Nested(inner: T0686Box(v: 7, s: "hi" + "!"), tag: 9)
+  };
+  n := <-x;
+  assert(n.tag == 9, "nested outer field");
+  assert(n.inner.v == 7, "nested inner int field");
+  assert(n.inner.s == "hi!", "nested inner string field");
+}
+
+// (e) Loop variant — a per-iteration buffer/instance/string leak in the new
+// heapTemps isolation path would trip the zero-tolerance alloc-delta check.
+t0686_struct_result_loop_no_leak() `test {
+  i := 0;
+  total := 0;
+  while i < 30 {
+    task[T0686Box] x = go {
+      T0686Box(v: i, s: "x" + "y")
+    };
+    b := <-x;
+    total = total + b.v;
+    assert(b.s == "xy", "loop struct string field");
+    i = i + 1;
+  }
+  assert(total == 435, "sum 0..29 == 435; no leak across iterations");
+}
+
+// (f) Dropped-not-awaited heap-struct result — the same genGoBlock defect fires
+// regardless of await (the outer statement cleanup runs either way; on WASM the
+// outer fn is a presplitcoroutine so the bad token-load broke compilation).
+// Additionally exercises Task[T].drop's free_after_done path freeing the result
+// buffer AND dropping the contained struct (its nested string) exactly once.
+t0686_struct_result_dropped_no_await() `test {
+  task[T0686Box] t = go {
+    T0686Box(v: 5, s: "drop" + "me")
+  };
+  assert(true, "heap-struct value-block task dropped, not awaited: no leak");
+}
+
+// T0686 (follow-up /coverage audit): the (a)-(f) tests above only exercise the
+// USER-STRUCT heap-temp drop path (`cleanupHeapTemps` with `elemType == nil` →
+// a single `dropFunc` call). But `genGoBlock`'s heapTemps isolation bug fired
+// for ANY trailing expression that registers a heap temp — and the heap-temp
+// machinery has other drop paths the struct tests never reach. Each case below
+// was confirmed to FAIL `opt` (the `%0` coro.id token-load) with the fix
+// reverted, and the trailing expression must be a FRESH heap allocation (a bare
+// variable reference like `v := [..]; v` claims a drop binding instead of
+// registering a heap temp, so it never triggered the bug). NO `exclude: wasm` —
+// the WASM run is the presplitcoroutine regression guard. Zero-leak both targets.
+type T0686GBox[T] {
+  T v;
+  string tag;
+}
+
+// (g) Vector LITERAL with non-const int elements as the trailing expression.
+// Routes through the T0369 vector heap-temp path (`elemType != nil`), which is a
+// DIFFERENT branch of `cleanupHeapTemps` than the struct `dropFunc` path: it
+// runs `emitVectorElementDropLoop` before freeing the buffer. int elements have
+// no per-element drop, so this isolates the element-walk plumbing itself.
+t0686_vector_int_literal_result() `test {
+  n := 3;
+  task[int[]] x = go {
+    [n, n + 1, n + 2]
+  };
+  r := <-x;
+  assert(r.len == 3, "vec<int> literal len");
+  assert(r[0] == 3 && r[1] == 4 && r[2] == 5, "vec<int> literal values");
+}
+
+// (h) Vector LITERAL with non-const STRING elements — the FULL T0369 path: the
+// element-walk drops each heap string before freeing the buffer. If the vector
+// heap temp leaked into the outer fn (the bug), the per-element string drops
+// would run there too; the receiver also owns + drops the result, so any
+// mismatch shows up as a leak or double-free under the zero-tolerance check.
+t0686_vector_string_literal_result() `test {
+  a := "a";
+  b := "b";
+  task[string[]] x = go {
+    [a + "1", b + "2"]
+  };
+  r := <-x;
+  assert(r.len == 2, "vec<string> literal len");
+  assert(r[0] == "a1" && r[1] == "b2", "vec<string> literal values");
+}
+
+// (i) GENERIC struct constructor as the trailing expression — the heap temp is a
+// monomorphized `T0686GBox__int` (Instance layout + generated drop synthesized
+// per-instantiation). Confirms the isolation works on the mono codegen path, not
+// just for non-generic user structs.
+t0686_generic_struct_result() `test {
+  task[T0686GBox[int]] x = go {
+    T0686GBox[int](v: 42, tag: "t" + "g")
+  };
+  b := <-x;
+  assert(b.v == 42, "generic struct int field");
+  assert(b.tag == "tg", "generic struct string field");
+}
+
+// (j) Map produced by a FRESH `.clone()` call as the trailing expression — a
+// container heap temp whose drop frees both the buckets vector and the Map
+// instance. Exercises the heap-temp isolation for a stdlib generic container
+// result (distinct from the user-struct and vector cases above).
+t0686_map_clone_result() `test {
+  map[string, int] base = {
+    "k": 7
+  };
+  task[map[string, int]] x = go {
+    base.clone()
+  };
+  r := <-x;
+  assert(r.len == 1, "map clone len");
+  if v := r["k"] {
+    assert(v == 7, "map clone value");
+  }
+}
+
+// (k) Enum variant carrying a HEAP (string) payload as the trailing expression.
+// Complements (g)-(j): this routes through the enumCtorTemps path (B0267, reset
+// unconditionally in genGoBlock — independent of the T0686 heapTemps fix, since
+// an enum instance is RTTI-only and registers no heap temp) PLUS the string
+// payload's stmtTemp (T0683). The (13) `t0683_enum_result` test above only used
+// a PAYLOAD-LESS variant (`Color.Green`); a droppable payload was previously
+// only verified ad-hoc with no persistent guard. The payload string must be
+// transferred into the result and dropped exactly once (no leak / no double-free).
+enum T0686EnumPayload {
+  Wrapped(string s),
+  Empty,
+}
+
+t0686_enum_heap_payload_result() `test {
+  task[T0686EnumPayload] x = go {
+    T0686EnumPayload.Wrapped(s: "hi" + "!")
+  };
+  e := <-x;
+  ok := match e {
+    T0686EnumPayload.Wrapped(s) => s == "hi!",
+    T0686EnumPayload.Empty => false,
+  };
+  assert(ok, "enum heap-payload value-block result");
+}
+
+// (l) Loop variant of (k) — a per-iteration leak of the payload string, the
+// result buffer, or the enum data would trip the zero-tolerance alloc-delta
+// check. Also covers the dropped-then-awaited lifecycle across iterations.
+t0686_enum_heap_payload_loop_no_leak() `test {
+  i := 0;
+  matched := 0;
+  while i < 30 {
+    task[T0686EnumPayload] x = go {
+      T0686EnumPayload.Wrapped(s: "v" + "al")
+    };
+    e := <-x;
+    match e {
+      T0686EnumPayload.Wrapped(s) => {
+        if s == "val" {
+          matched = matched + 1;
+        }
+      },
+      T0686EnumPayload.Empty => {
+      },
+    }
+    i = i + 1;
+  }
+  assert(matched == 30, "enum heap-payload loop: all matched, no leak");
+}

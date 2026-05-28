@@ -12073,6 +12073,8 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	savedEnumCtorTemps := c.enumCtorTemps   // B0267
 	savedStmtTemps := c.stmtTemps           // T0683/T0594: isolate coro-body temps from the outer fn
 	savedStmtTempMap := c.stmtTempMap       // T0683/T0594
+	savedHeapTemps := c.heapTemps           // T0686: isolate coro-body heap temps from the outer fn
+	savedHeapTempMap := c.heapTempMap       // T0686
 	c.goExprFireAndForget = false           // reset for inner statements (B0109)
 
 	// T0683: Only a non-void, awaited (`<-task`) block needs its trailing
@@ -12101,6 +12103,13 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		// (which reference coroFn allocas) cannot leak into the outer fn.
 		c.stmtTemps = nil
 		c.stmtTempMap = make(map[value.Value]int)
+		// T0686: same isolation for heap-instance temps — genBlockValue does
+		// not save/restore heapTemps the way genBlock does (T0088), so a
+		// heap-struct trailing value (e.g. `go { Box(...) }`) would otherwise
+		// leak its coroFn alloca/dropFlag into the outer fn and serialize as
+		// `%0` (the coro.id token) in the outer cleanupHeapTemps.
+		c.heapTemps = nil
+		c.heapTempMap = make(map[value.Value]int)
 	}
 
 	// --- Coroutine preamble ---
@@ -12240,8 +12249,14 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 		// (e.g. trailing expr panicked); cleanupStmtTemps self-guards.
 		if c.block != nil && c.block.Term == nil {
 			c.claimStringTemp(result)
+			// T0686: a heap-struct result is moved into G.result_ptr — claim it
+			// so the coroutine body's heap-temp cleanup below doesn't free it.
+			c.claimHeapTemp(result)
 		}
 		c.cleanupStmtTemps()
+		// T0686: drop any orphaned trailing-expr heap intermediates inside the
+		// coroutine (self-guards on a dead block).
+		c.cleanupHeapTemps()
 	}
 
 	// Clear panic exit block and coroutine return block after body generation
@@ -12335,6 +12350,8 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	if useGoBlockValuePath {
 		c.stmtTemps = savedStmtTemps     // T0683/T0594: restore outer fn temp state
 		c.stmtTempMap = savedStmtTempMap // T0683/T0594
+		c.heapTemps = savedHeapTemps     // T0686: restore outer fn heap temp state
+		c.heapTempMap = savedHeapTempMap // T0686
 	}
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.

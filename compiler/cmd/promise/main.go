@@ -871,7 +871,9 @@ func execRunBinary(path string) {
 // when -memory-limit is not specified (T0689). 2 GB is comfortably above what
 // any legitimate test in the suite needs while still being far below total RAM,
 // so a runaway allocation fails the offending test rather than driving the
-// machine into swap. Lower this value once the suite peak has been measured.
+// machine into swap. The suite passes clean at 2 GiB; lower this once the
+// suite peak has been measured (multi-file forwarding fixed in T0738, so a
+// future bracketing run via -memory-limit can measure it accurately).
 const defaultMemoryLimitBytes int64 = 2 << 30 // 2 GiB
 
 // testTimeoutConfig holds CLI timeout/memory-limit configuration for per-test
@@ -1911,6 +1913,46 @@ func firstLines(s string, n int) string {
 	return strings.Join(lines, " | ")
 }
 
+// buildChildTestArgs constructs the argument list (excluding the trailing test
+// file path) for a child `promise test` process spawned by runTestFiles. It is
+// extracted from the inline construction so the flag-forwarding logic — notably
+// the T0738 -memory-limit forwarding — is unit-testable.
+func buildChildTestArgs(cfg testTimeoutConfig, targetTriple string, coverageMode, timePhases bool) []string {
+	testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", cfg.defaultTimeout.Seconds())}
+	if cfg.scale != 1.0 {
+		testArgs = append(testArgs, "-timeout-scale", fmt.Sprintf("%g", cfg.scale))
+	}
+	if cfg.min > 0 {
+		testArgs = append(testArgs, "-timeout-min", cfg.min.String())
+	}
+	if cfg.max > 0 {
+		testArgs = append(testArgs, "-timeout-max", cfg.max.String())
+	}
+	if targetTriple != "" {
+		testArgs = append(testArgs, "-target", targetTriple)
+	}
+	if coverageMode {
+		testArgs = append(testArgs, "-coverage")
+	}
+	if timePhases {
+		testArgs = append(testArgs, "-time-phases")
+	}
+	if cfg.compileTimeout != 10*time.Minute {
+		testArgs = append(testArgs, "-compile-timeout", cfg.compileTimeout.String())
+	}
+	// T0738: forward -memory-limit only when it was explicitly set on the
+	// parent CLI. Without this, every child re-parses its own args, sees no
+	// -memory-limit, and applies its own 2 GiB default — silently dropping an
+	// explicit tighten/raise/0-opt-out in multi-file runs. %dB round-trips
+	// byte-exact through the child's parseMemoryLimitArg (the opt-out forwards
+	// as "0B" → 0). When not explicit, omit it so each child applies its own
+	// default (which equals the parent's default).
+	if cfg.memoryLimitExplicit {
+		testArgs = append(testArgs, "-memory-limit", fmt.Sprintf("%dB", cfg.defaultMemoryBytes))
+	}
+	return testArgs
+}
+
 // runTestFiles runs tests from a list of .pr files, printing per-file results
 // and a combined summary at the end. Tests are compiled and run concurrently
 // up to the parallel limit. Results are printed in file order.
@@ -2007,28 +2049,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			parentTimeout := computeParentTimeout(cfg, targetTriple)
 			ctx, cancel := context.WithTimeout(context.Background(), parentTimeout)
 			defer cancel()
-			testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", cfg.defaultTimeout.Seconds())}
-			if cfg.scale != 1.0 {
-				testArgs = append(testArgs, "-timeout-scale", fmt.Sprintf("%g", cfg.scale))
-			}
-			if cfg.min > 0 {
-				testArgs = append(testArgs, "-timeout-min", cfg.min.String())
-			}
-			if cfg.max > 0 {
-				testArgs = append(testArgs, "-timeout-max", cfg.max.String())
-			}
-			if targetTriple != "" {
-				testArgs = append(testArgs, "-target", targetTriple)
-			}
-			if coverageMode {
-				testArgs = append(testArgs, "-coverage")
-			}
-			if timePhases {
-				testArgs = append(testArgs, "-time-phases")
-			}
-			if cfg.compileTimeout != 10*time.Minute {
-				testArgs = append(testArgs, "-compile-timeout", cfg.compileTimeout.String())
-			}
+			testArgs := buildChildTestArgs(cfg, targetTriple, coverageMode, timePhases)
 			testArgs = append(testArgs, r.file)
 			cmd := exec.CommandContext(ctx, selfExe, testArgs...)
 			setupProcessGroupKill(cmd)
@@ -2645,7 +2666,7 @@ func parseTimeoutArg(s string) (time.Duration, error) {
 // Returns bytes as int64. Allowed grammar (regex-ish):
 //
 //	"0"                       → 0 (opt-out)
-//	N + ("b" | "kb" | "mb" | "gb")     → decimal multipliers (1000)
+//	N + ("b" | "kb" | "mb" | "gb")     → binary multipliers (1024)
 //	N + ("kib" | "mib" | "gib")        → binary multipliers (1024)
 //
 // We use binary multipliers for KB/MB/GB by convention (matches user

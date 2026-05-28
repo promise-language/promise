@@ -106,6 +106,38 @@ func TestExtractCrashReason_PanicPlusSignal(t *testing.T) {
 	}
 }
 
+// T0689/T0711: a memory-limit abort prints `fatal: memory limit exceeded` and
+// exit(134) (a normal exit, not a signal). extractCrashReason must classify it
+// structurally instead of falling through to a bare "exit code 134".
+
+func TestExtractCrashReason_MemoryLimitStderr(t *testing.T) {
+	reason := extractCrashReason("", "fatal: memory limit exceeded\n", nil)
+	if reason != "memory limit exceeded" {
+		t.Errorf("got %q", reason)
+	}
+}
+
+func TestExtractCrashReason_MemoryLimitStdout(t *testing.T) {
+	reason := extractCrashReason("pass (0.001s) test_a\nfatal: memory limit exceeded\n", "", nil)
+	if reason != "memory limit exceeded" {
+		t.Errorf("got %q", reason)
+	}
+}
+
+func TestExtractCrashReason_MemoryLimitPreferredOverExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exit-code tests require Unix")
+	}
+	// The PAL aborts via exit(134) — a real ExitError, not a signal. The fatal
+	// line in stderr must take precedence over the "exit code 134" fallback.
+	cmd := exec.Command("sh", "-c", "exit 134")
+	err := cmd.Run()
+	reason := extractCrashReason("", "fatal: memory limit exceeded\n", err)
+	if reason != "memory limit exceeded" {
+		t.Errorf("got %q (expected memory-limit classification to win over exit code)", reason)
+	}
+}
+
 // extractSignal
 
 func TestExtractSignal_NilError(t *testing.T) {

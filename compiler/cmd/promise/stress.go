@@ -878,6 +878,15 @@ func failReason(expected, actual string) string {
 // Searches both stdout and stderr for panic messages, and extracts the
 // signal name if the process was killed by a signal.
 func extractCrashReason(stdout, stderr string, err error) string {
+	// T0689/T0711: a memory-limit abort prints the structured fatal line
+	// `fatal: memory limit exceeded` then exit(134) — a normal exit, not a
+	// signal. Classify it explicitly instead of falling through to a bare
+	// "exit code 134" (mirrors the non-stress runner's detection in main.go).
+	if strings.Contains(stderr, "fatal: memory limit exceeded") ||
+		strings.Contains(stdout, "fatal: memory limit exceeded") {
+		return "memory limit exceeded"
+	}
+
 	// Check if killed by signal (SIGSEGV, SIGABRT, etc.)
 	sig := extractSignal(err)
 

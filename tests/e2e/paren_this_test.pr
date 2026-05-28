@@ -1,0 +1,478 @@
+// T0613: `(this).method()` and the rest of the paren-wrapped-`this` receiver
+// family used to emit `extractvalue i8* ...` (invalid IR rejected by opt),
+// because ~20 AST-shape dispatch gates in codegen matched `*ast.ThisExpr`
+// directly and fell through for `*ast.ParenExpr{ThisExpr}`. genExpr already
+// evaluates ParenExpr transparently, so the receiver *value* was correct — only
+// the gate that decides "pass raw i8* vs. extractvalue from a value struct" was
+// wrong. The fix peels ParenExpr at each gate via isThisReceiver().
+//
+// Each test pairs a `this.X` baseline with the `(this).X` and `((this)).X`
+// variants, asserting identical results. Heap/string/optional fields surface any
+// missed ownership handling as a leak (zero-tolerance) or double-free segfault.
+// ---------------- method call (heap type) ----------------
+type MBox {
+  int x;
+  peek(this) int {
+    return this.x;
+  }
+  via(this) int {
+    return (this).peek();
+  }
+  via_nested(this) int {
+    return ((this)).peek();
+  }
+}
+
+test_paren_this_method_call() `test {
+  b := MBox(x: 42);
+  assert(b.peek() == 42, "baseline this.peek()");
+  assert(b.via() == 42, "(this).peek() returns same value");
+  assert(b.via_nested() == 42, "((this)).peek() returns same value");
+}
+
+// `~this` method returning `this` through a paren-wrapped self call — the
+// repro from the bug report. Heap field exercises the alias-clear path.
+type SelfBox {
+  string s;
+  self(~this) SelfBox {
+    return this;
+  }
+  driver(~this) SelfBox {
+    r := (this).self();
+    return r;
+  }
+}
+
+test_paren_this_self_chain() `test {
+  b := SelfBox(s: "hel" + "lo");
+  r := b.driver();
+  assert(r.s == "hello", "(this).self() preserves heap field, no double-free");
+}
+
+// ---------------- field read (heap + value type) ----------------
+type FBoxHeap {
+  string s;
+  read(this) string {
+    return (this).s;
+  }
+  read_nested(this) string {
+    return ((this)).s;
+  }
+}
+
+test_paren_this_field_read_heap() `test {
+  b := FBoxHeap(s: "wor" + "ld");
+  assert(b.read() == "world", "(this).s on heap type");
+  assert(b.read_nested() == "world", "((this)).s on heap type");
+}
+
+type FBoxVal {
+  int x `value;
+  int y `value;
+  read_x(this) int {
+    return (this).x;
+  }
+  read_y(this) int {
+    return ((this)).y;
+  }
+}
+
+test_paren_this_field_read_value() `test {
+  p := FBoxVal(x: 3, y: 4);
+  assert(p.read_x() == 3, "(this).x on value type");
+  assert(p.read_y() == 4, "((this)).y on value type");
+}
+
+// ---------------- setter (direct + virtual) ----------------
+type SetBox {
+  int n;
+  get value int {
+    return this.n;
+  }
+  set value(int v) {
+    this.n = v;
+  }
+  set_via(~this, int v) {
+    (this).value = v;
+  }
+}
+
+test_paren_this_setter_direct() `test {
+  b := SetBox(n: 0);
+  b.set_via(9);
+  assert(b.n == 9, "(this).value = v through direct setter");
+}
+
+// Plain field assignment through paren-this (lvalue field-ptr path, not a
+// custom setter).
+type PlainSetBox {
+  int n;
+  bump(~this, int v) {
+    (this).n = v;
+  }
+}
+
+test_paren_this_field_assign() `test {
+  b := PlainSetBox(n: 0);
+  b.bump(7);
+  assert(b.n == 7, "(this).n = v plain field assign");
+}
+
+// Virtual setter: base with a child makes the setter virtual; the default
+// method `scale_via` calls `(this).value = v` → genVirtualSetterCall.
+type VSetBase {
+  int n;
+  get value int {
+    return this.n;
+  }
+  set value(int v) {
+    this.n = v;
+  }
+  scale_via(~this, int v) {
+    (this).value = v;
+  }
+}
+
+type VSetDerived is VSetBase {
+}
+
+test_paren_this_setter_virtual() `test {
+  d := VSetDerived(n: 0);
+  d.scale_via(11);
+  assert(d.n == 11, "(this).value = v through virtual setter");
+}
+
+// ---------------- getter (direct + virtual) ----------------
+type GetBox {
+  int n;
+  get value int {
+    return this.n;
+  }
+  get_via(this) int {
+    return (this).value;
+  }
+}
+
+test_paren_this_getter_direct() `test {
+  b := GetBox(n: 5);
+  assert(b.get_via() == 5, "(this).value through direct getter");
+}
+
+type VGetBase {
+  int n;
+  get value int {
+    return this.n;
+  }
+  get_via(this) int {
+    return (this).value;
+  }
+}
+
+type VGetDerived is VGetBase {
+}
+
+test_paren_this_getter_virtual() `test {
+  d := VGetDerived(n: 13);
+  assert(d.get_via() == 13, "(this).value through virtual getter");
+}
+
+// ---------------- virtual method (abstract dispatch) ----------------
+type Shape {
+  area(this) int `abstract;
+  area_via(this) int {
+    return (this).area();
+  }
+}
+
+type Square is Shape {
+  int side;
+  area(this) int {
+    return this.side * this.side;
+  }
+}
+
+test_paren_this_virtual_method() `test {
+  s := Square(side: 5);
+  assert(s.area_via() == 25, "(this).area() virtual dispatch");
+}
+
+// ---------------- is check (RTTI) ----------------
+type Animal {
+  string name;
+  speak(&this) string `abstract;
+  am_i_dog(this) bool {
+    return (this) is Dog;
+  }
+}
+
+type Dog is Animal {
+  speak(&this) string {
+    return "Woof";
+  }
+}
+
+type Cat is Animal {
+  speak(&this) string {
+    return "Meow";
+  }
+}
+
+test_paren_this_is_check() `test {
+  Animal d = Dog(name: "Rex");
+  Animal c = Cat(name: "Tom");
+  assert(d.am_i_dog(), "(this) is Dog true for Dog");
+  assert(!c.am_i_dog(), "(this) is Dog false for Cat");
+}
+
+// ---------------- operator (value type) ----------------
+type V2 {
+  int x `value;
+  int y `value;
+  +(V2 other) V2 {
+    return V2(x: this.x + other.x, y: this.y + other.y);
+  }
+  add_via(this, V2 other) V2 {
+    return (this) + other;
+  }
+}
+
+test_paren_this_operator() `test {
+  a := V2(x: 1, y: 2);
+  b := V2(x: 3, y: 4);
+  c := a.add_via(b);
+  assert(c.x == 4, "(this) + other operator receiver x");
+  assert(c.y == 6, "(this) + other operator receiver y");
+}
+
+// ---------------- generic method ----------------
+// NOTE: payload is `int` (not a droppable like string) to avoid T0746, a
+// pre-existing double-free when a generic method returns a `this` string field
+// by value. The gate under test (genGenericMethodCall, the `(this).method()`
+// dispatch) is exercised regardless of payload type.
+type GBox[T] {
+  T val;
+  peek(this) T {
+    return this.val;
+  }
+  via(this) T {
+    return (this).peek();
+  }
+  via_nested(this) T {
+    return ((this)).peek();
+  }
+}
+
+test_paren_this_generic_method() `test {
+  i := GBox[int](val: 99);
+  assert(i.via() == 99, "(this).peek() in generic method");
+  assert(i.via_nested() == 99, "((this)).peek() in generic method");
+  b := GBox[bool](val: true);
+  assert(b.via() == true, "(this).peek() generic bool");
+}
+
+// ---------------- enum method / getter ----------------
+enum Color {
+  Red, Green, Blue,
+
+  describe(&this) string {
+    match this {
+      Color.Red => {
+        return "red";
+      },
+      Color.Green => {
+        return "green";
+      },
+      Color.Blue => {
+        return "blue";
+      },
+    }
+  }
+
+  describe_via(&this) string {
+    return (this).describe();
+  }
+
+  get opposite Color {
+    match this {
+      Color.Red => {
+        return Color.Green;
+      },
+      Color.Green => {
+        return Color.Blue;
+      },
+      Color.Blue => {
+        return Color.Red;
+      },
+    }
+  }
+
+  opposite_via(&this) Color {
+    return (this).opposite;
+  }
+}
+
+test_paren_this_enum_method() `test {
+  assert(Color.Red.describe_via() == "red", "(this).describe() enum method");
+  match Color.Red.opposite_via() {
+    Color.Green => {
+      assert(true, "ok");
+    },
+    _ => {
+      assert(false, "(this).opposite should be Green");
+    },
+  }
+}
+
+// ---------------- force unwrap of optional field (Tier-2 dup/neutralize) --------
+// `~this` method owning a droppable optional field; `(this).field!` must dup or
+// neutralize correctly so neither the optional's scope-exit drop nor the new
+// binding double-frees, and nothing leaks.
+type Inner613 {
+  string s;
+}
+
+type OptHolder {
+  Inner613? maybe;
+  take(~this) string {
+    v := (this).maybe!;
+    return v.s;
+  }
+  take_nested(~this) string {
+    v := ((this)).maybe!;
+    return v.s;
+  }
+}
+
+test_paren_this_force_unwrap() `test {
+  h := OptHolder(maybe: Inner613(s: "in" + "ner"));
+  assert(h.take() == "inner", "(this).field! on ~this owner");
+  h2 := OptHolder(maybe: Inner613(s: "deep" + "er"));
+  assert(h2.take_nested() == "deeper", "((this)).field! on ~this owner");
+}
+
+// ---------------- operator with `(this)` as the right-hand argument ----------
+// Distinct from `(this) + other` above: here `this` is the operator *argument*,
+// not the receiver, so the genBinaryExpr `e.Right` "this-as-arg" gate fires.
+// Heap type (the value-type form of this gate is broken bare-or-paren — T0748).
+type CmpBox {
+  int x;
+  < (CmpBox other) bool {
+    return this.x < other.x;
+  }
+  // `other < (this)` -> left=other, right=(this) -> e.Right gate peels paren.
+  gt_via(this, CmpBox other) bool {
+    return other < (this);
+  }
+  gt_via_nested(this, CmpBox other) bool {
+    return other < ((this));
+  }
+}
+
+test_paren_this_operator_arg() `test {
+  assert(CmpBox(x: 5).gt_via(CmpBox(x: 2)), "other(2) < (this)(5) == true");
+  assert(!CmpBox(x: 2).gt_via(CmpBox(x: 5)), "other(5) < (this)(2) == false");
+  assert(CmpBox(x: 9).gt_via_nested(CmpBox(x: 1)), "((this)) arg == true");
+}
+
+// ---------------- virtual binary operator receiver ----------------
+// Base has a child, so the operator dispatches through the vtable
+// (genVirtualBinaryOp), a different gate from the direct operator above.
+type VOpBase {
+  int n;
+  +(VOpBase other) VOpBase {
+    return VOpBase(n: this.n + other.n);
+  }
+  add_via(this, VOpBase other) VOpBase {
+    return (this) + other;
+  }
+}
+
+type VOpDerived is VOpBase {
+}
+
+test_paren_this_virtual_operator() `test {
+  assert(VOpBase(n: 1).add_via(VOpBase(n: 2)).n == 3, "(this) + other virtual dispatch");
+}
+
+// ---------------- generic enum method / getter ----------------
+// Generic enum routes method calls through genGenericEnumMethodCall — a
+// separate gate from the non-generic enum method covered above.
+enum GOpt[T] {
+  Some(T value),
+  None,
+
+  has(&this) bool {
+    match this {
+      GOpt.Some(v) => {
+        return true;
+      },
+      GOpt.None => {
+        return false;
+      },
+    }
+  }
+  has_via(&this) bool {
+    return (this).has();
+  }
+  has_via_nested(&this) bool {
+    return ((this)).has();
+  }
+}
+
+test_paren_this_generic_enum_method() `test {
+  s := GOpt[int].Some(5);
+  n := GOpt[int].None;
+  assert(s.has_via(), "(this).has() generic enum Some -> true");
+  assert(!n.has_via(), "(this).has() generic enum None -> false");
+  assert(s.has_via_nested(), "((this)).has() generic enum -> true");
+}
+
+// ---------------- `is` against a resolved generic type ----------------
+// `(this) is IBox[int]` resolves to a concrete generic instance, routing
+// through genIsResolvedType (distinct from the non-generic genIsNamedType
+// covered by the Dog/Cat test above).
+type GShape {
+  area(&this) int `abstract;
+  is_intbox(&this) bool {
+    return (this) is IBox[int];
+  }
+  is_intbox_nested(&this) bool {
+    return ((this)) is IBox[int];
+  }
+}
+
+type IBox[T] is GShape {
+  T value;
+  area(&this) int {
+    return 1;
+  }
+}
+
+test_paren_this_is_generic() `test {
+  GShape si = IBox[int](value: 5);
+  GShape ss = IBox[string](value: "x");
+  assert(si.is_intbox(), "(this) is IBox[int] true for IBox[int]");
+  assert(!ss.is_intbox(), "(this) is IBox[int] false for IBox[string]");
+  assert(si.is_intbox_nested(), "((this)) is IBox[int] true for IBox[int]");
+}
+
+// NOTE: `this[i]` (read) and `this[i] = v` (write) on a type's *own*
+// user-defined `[]`/`[]=` operator are NOT covered here. Both bare and
+// paren-wrapped forms emit invalid IR (extractvalue from i8*) because
+// genMethodIndex / genMethodIndexAssign gate on isContainerType with no `this`
+// branch at all — a pre-existing latent bug independent of paren peeling. Filed
+// separately as T0745 (do not expand T0613). Once T0745 is fixed, add the
+// `(this)[i]` read/write cases here.
+//
+// NOTE: Two more `this`-receiver gates touched by T0613's paren-peel are NOT
+// covered here because the underlying feature is broken for BOTH bare and
+// paren `this` (so the peel is correct but un-exercisable end-to-end):
+//   - `(this) as T` / `(this) as! T` RTTI cast on a `this` receiver — the cast
+//     *result* is mishandled (returns the raw i8* / stores it into a value-struct
+//     slot). Bare `this as! T` fails identically. Filed as T0747.
+//   - value-type binary operator with `this` as the right-hand *argument*
+//     (`other < this` where `<` is on a value type) — the arg-wrap stores the
+//     i8* into an embedded data field. Bare `other < this` fails identically.
+//     Filed as T0748. (The heap-type form of this gate IS covered above by
+//     test_paren_this_operator_arg.)
+// Once T0747 / T0748 are fixed, add the corresponding `(this)` cases here.

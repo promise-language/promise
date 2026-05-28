@@ -26011,3 +26011,344 @@ func TestT0482_NestedHandleBackstopNoPanic(t *testing.T) {
 	// nested-handle backstop path was exercised in codegen, not skipped).
 	assertContains(t, ir, "dup_holders[Holder]")
 }
+
+// --- T0613: paren-wrapped `this` as a method/field/operator/RTTI receiver ---
+//
+// genExpr already evaluates ParenExpr transparently, so the receiver *value* for
+// `(this)` is byte-identical to bare `this` (a raw i8* instance pointer). The bug
+// was in the AST-shape dispatch gates that matched `*ast.ThisExpr` directly: for
+// `*ast.ParenExpr{ThisExpr}` they fell through and ran `extractvalue i8* %p, 1`
+// on the raw pointer, which opt rejects ("extractvalue operand must be aggregate
+// type"). The fix peels ParenExpr at each gate via isThisReceiver(). The
+// universal invariant below — valid IR never extracts a field from an `i8*` — is
+// the cheap cross-cutting assertion for every category.
+
+func TestParenThisMethodCallPassesReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type T0613MBox {
+			int x;
+			self(~this) T0613MBox { return this; }
+			driver(~this) T0613MBox { r := (this).self(); return r; }
+		}
+		main() { b := T0613MBox(x: 1); r := b.driver(); }
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	driver := extractFunction(ir, "T0613MBox.driver")
+	if driver == "" {
+		t.Fatal("expected T0613MBox.driver in IR")
+	}
+	// The paren-wrapped `this` receiver is passed directly as the i8* receiver.
+	assertContains(t, driver, "@T0613MBox.self(i8*")
+}
+
+func TestParenThisFieldReadNoExtractFromPtr(t *testing.T) {
+	// Heap type field read through (this).
+	irHeap := generateIR(t, `
+		type T0613FHeap {
+			string s;
+			read(this) string { return (this).s; }
+		}
+		main() { b := T0613FHeap(s: "x"); v := b.read(); }
+	`)
+	assertNotContains(t, irHeap, "extractvalue i8*")
+	if extractFunction(irHeap, "T0613FHeap.read") == "" {
+		t.Fatal("expected T0613FHeap.read in IR")
+	}
+	// Value type field read through (this) and ((this)).
+	irVal := generateIR(t, `
+		type T0613FVal {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+			read_x(this) int { return (this).x; }
+			read_y(this) int { return ((this)).y; }
+		}
+		main() { p := T0613FVal(x: 3, y: 4); a := p.read_x(); b := p.read_y(); }
+	`)
+	assertNotContains(t, irVal, "extractvalue i8*")
+	if extractFunction(irVal, "T0613FVal.read_x") == "" {
+		t.Fatal("expected T0613FVal.read_x in IR")
+	}
+}
+
+func TestParenThisSetterNoExtractFromPtr(t *testing.T) {
+	// Direct setter through (this), plus plain field assignment through (this).
+	irDirect := generateIR(t, `
+		type T0613SBox {
+			int n;
+			get value int { return this.n; }
+			set value(int v) { this.n = v; }
+			set_via(~this, int v) { (this).value = v; }
+			bump(~this, int v) { (this).n = v; }
+		}
+		main() { b := T0613SBox(n: 0); b.set_via(9); b.bump(7); }
+	`)
+	assertNotContains(t, irDirect, "extractvalue i8*")
+	if extractFunction(irDirect, "T0613SBox.set_via") == "" {
+		t.Fatal("expected T0613SBox.set_via in IR")
+	}
+	// Virtual setter (base has a child → vtable dispatch) through (this).
+	irVirtual := generateIR(t, `
+		type T0613VSBase {
+			int n;
+			get value int { return this.n; }
+			set value(int v) { this.n = v; }
+			scale_via(~this, int v) { (this).value = v; }
+		}
+		type T0613VSDerived is T0613VSBase {}
+		main() { d := T0613VSDerived(n: 0); d.scale_via(11); }
+	`)
+	assertNotContains(t, irVirtual, "extractvalue i8*")
+}
+
+func TestParenThisGetterNoExtractFromPtr(t *testing.T) {
+	// Direct getter through (this).
+	irDirect := generateIR(t, `
+		type T0613GBox {
+			int n;
+			get value int { return this.n; }
+			get_via(this) int { return (this).value; }
+		}
+		main() { b := T0613GBox(n: 5); v := b.get_via(); }
+	`)
+	assertNotContains(t, irDirect, "extractvalue i8*")
+	if extractFunction(irDirect, "T0613GBox.get_via") == "" {
+		t.Fatal("expected T0613GBox.get_via in IR")
+	}
+	// Virtual getter (base has a child → vtable dispatch) through (this).
+	irVirtual := generateIR(t, `
+		type T0613VGBase {
+			int n;
+			get value int { return this.n; }
+			get_via(this) int { return (this).value; }
+		}
+		type T0613VGDerived is T0613VGBase {}
+		main() { d := T0613VGDerived(n: 13); v := d.get_via(); }
+	`)
+	assertNotContains(t, irVirtual, "extractvalue i8*")
+}
+
+func TestParenThisVirtualMethodNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0613Shape {
+			area(this) int `+"`abstract"+`;
+			area_via(this) int { return (this).area(); }
+		}
+		type T0613Square is T0613Shape {
+			int side;
+			area(this) int { return this.side * this.side; }
+		}
+		main() { s := T0613Square(side: 5); a := s.area_via(); }
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0613Shape.area_via") == "" {
+		t.Fatal("expected T0613Shape.area_via in IR")
+	}
+}
+
+func TestParenThisIsCheckNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0613Animal {
+			string name;
+			speak(&this) string `+"`abstract"+`;
+			am_i_dog(this) bool { return (this) is T0613Dog; }
+		}
+		type T0613Dog is T0613Animal { speak(&this) string { return "Woof"; } }
+		main() {
+			T0613Animal d = T0613Dog(name: "Rex");
+			b := d.am_i_dog();
+		}
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0613Animal.am_i_dog") == "" {
+		t.Fatal("expected T0613Animal.am_i_dog in IR")
+	}
+}
+
+func TestParenThisOperatorNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0613V2 {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+			+(T0613V2 other) T0613V2 { return T0613V2(x: this.x + other.x, y: this.y + other.y); }
+			add_via(this, T0613V2 other) T0613V2 { return (this) + other; }
+		}
+		main() {
+			a := T0613V2(x: 1, y: 2);
+			b := T0613V2(x: 3, y: 4);
+			c := a.add_via(b);
+		}
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0613V2.add_via") == "" {
+		t.Fatal("expected T0613V2.add_via in IR")
+	}
+}
+
+func TestParenThisGenericMethodNoExtractFromPtr(t *testing.T) {
+	// int payload avoids T0746 (pre-existing double-free on generic string field
+	// return); the (this).peek() dispatch gate is exercised regardless of payload.
+	ir := generateIR(t, `
+		type T0613GenBox[T] {
+			T val;
+			peek(this) T { return this.val; }
+			via(this) T { return (this).peek(); }
+		}
+		main() { b := T0613GenBox[int](val: 99); v := b.via(); }
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	// The monomorphized instance method body is emitted into the (unsplit) module.
+	assertContains(t, ir, "T0613GenBox[int].via")
+}
+
+func TestParenThisEnumMethodNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		enum T0613Color {
+			Red, Green, Blue,
+			describe(&this) string {
+				match this {
+					T0613Color.Red => { return "red"; },
+					T0613Color.Green => { return "green"; },
+					T0613Color.Blue => { return "blue"; },
+				}
+			}
+			describe_via(&this) string { return (this).describe(); }
+			get opposite T0613Color {
+				match this {
+					T0613Color.Red => { return T0613Color.Green; },
+					T0613Color.Green => { return T0613Color.Blue; },
+					T0613Color.Blue => { return T0613Color.Red; },
+				}
+			}
+			opposite_via(&this) T0613Color { return (this).opposite; }
+		}
+		main() {
+			s := T0613Color.Red.describe_via();
+			o := T0613Color.Red.opposite_via();
+		}
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0613Color.describe_via") == "" {
+		t.Fatal("expected T0613Color.describe_via in IR")
+	}
+}
+
+// --- T0613: additional dispatch gates surfaced during coverage analysis ---
+//
+// Each of the gates below is a distinct receiver-dispatch site converted to
+// isThisReceiver() that is NOT exercised by the categories above (operator
+// receiver, method call, field access, etc.). All five emit valid IR with the
+// peel and panic/emit-invalid-IR without it; the universal "no extractvalue from
+// i8*" invariant guards the IR shape.
+
+// genBinaryExpr `e.Right` "this-as-argument" gate: `other < (this)` passes the
+// paren-wrapped `this` as the operator *argument* (not the receiver). Heap type
+// — the value-type form of this gate is a separate pre-existing bug (T0748).
+func TestParenThisOperatorArgNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0613CmpBox {
+			int x;
+			<(T0613CmpBox other) bool { return this.x < other.x; }
+			gt_via(this, T0613CmpBox other) bool { return other < (this); }
+		}
+		main() {
+			a := T0613CmpBox(x: 5);
+			b := T0613CmpBox(x: 2);
+			r := a.gt_via(b);
+		}
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0613CmpBox.gt_via") == "" {
+		t.Fatal("expected T0613CmpBox.gt_via in IR")
+	}
+}
+
+// genVirtualBinaryOp gate: a base type with a child dispatches its operator
+// through the vtable, so `(this) + other` hits the virtual-operator receiver
+// gate rather than the direct genBinaryExpr gate.
+func TestParenThisVirtualOperatorNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0613VOpBase {
+			int n;
+			+(T0613VOpBase other) T0613VOpBase { return T0613VOpBase(n: this.n + other.n); }
+			add_via(this, T0613VOpBase other) T0613VOpBase { return (this) + other; }
+		}
+		type T0613VOpDerived is T0613VOpBase {}
+		main() {
+			a := T0613VOpBase(n: 1);
+			b := T0613VOpBase(n: 2);
+			c := a.add_via(b);
+		}
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0613VOpBase.add_via") == "" {
+		t.Fatal("expected T0613VOpBase.add_via in IR")
+	}
+}
+
+// genGenericEnumMethodCall gate: a generic enum routes method calls through a
+// dedicated path distinct from the non-generic enum method gate.
+func TestParenThisGenericEnumMethodNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		enum T0613GOpt[T] {
+			Some(T value), None,
+			has(&this) bool {
+				match this { T0613GOpt.Some(v) => { return true; }, T0613GOpt.None => { return false; } }
+			}
+			has_via(&this) bool { return (this).has(); }
+		}
+		main() {
+			s := T0613GOpt[int].Some(5);
+			r := s.has_via();
+		}
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	assertContains(t, ir, "T0613GOpt[int].has_via")
+}
+
+// genIsResolvedType gate: `(this) is IBox[int]` resolves to a concrete generic
+// instance and routes through genIsResolvedType (distinct from the non-generic
+// genIsNamedType gate covered by TestParenThisIsCheck...).
+func TestParenThisIsGenericNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0613GShape {
+			area(&this) int `+"`abstract"+`;
+			is_intbox(&this) bool { return (this) is T0613IBox[int]; }
+		}
+		type T0613IBox[T] is T0613GShape {
+			T value;
+			area(&this) int { return 1; }
+		}
+		main() {
+			T0613GShape s = T0613IBox[int](value: 5);
+			b := s.is_intbox();
+		}
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0613GShape.is_intbox") == "" {
+		t.Fatal("expected T0613GShape.is_intbox in IR")
+	}
+}
+
+// genFieldPtr value-type lvalue gate (compound assign through `(this)`):
+// `(this).x += d` on a value type takes the field-ptr lvalue path. Without the
+// peel this panics ("value type field assignment requires addressable target"),
+// so the test passing at all (generateIR not panicking) is the regression guard.
+// Runtime mutation is a no-op (value types are copy semantics), so this is an
+// IR-shape test only — no runtime e2e companion.
+func TestParenThisValueFieldPtrLvalueNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0613VTField {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+			bump(~this, int d) { (this).x += d; }
+		}
+		main() {
+			v := T0613VTField(x: 1, y: 2);
+			v.bump(5);
+		}
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0613VTField.bump") == "" {
+		t.Fatal("expected T0613VTField.bump in IR")
+	}
+}

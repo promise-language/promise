@@ -1402,6 +1402,18 @@ func unwrapDestructureParens(e ast.Expr) ast.Expr {
 	}
 }
 
+// isThisReceiver reports whether expr is a `this` reference, seeing through any
+// number of parenthesization wrappers ((this), ((this)), ...). genExpr already
+// evaluates ParenExpr transparently, so the receiver *value* is correct; this
+// only fixes the AST-shape dispatch gates that decide how the receiver is passed
+// (raw i8* for `this` vs. extractvalue from a value struct). Without the peel,
+// `(this).method()` etc. fall through to the value-struct path and emit
+// `extractvalue i8* ...`, which opt rejects. (T0613)
+func isThisReceiver(expr ast.Expr) bool {
+	_, ok := unwrapDestructureParens(expr).(*ast.ThisExpr)
+	return ok
+}
+
 // genDestructureVarDecl handles tuple destructuring: (a, b) := expr
 func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 	if c.info.FailableDestructures[s] {
@@ -5925,7 +5937,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// the bare Named owner without TypeArgs bound. Use c.monoCtx.inst
 			// (the concrete Instance) so types.AsVector succeeds and the
 			// per-element string-dup fires inside Vector[T].[:]=.
-			if _, isThis := target.Target.(*ast.ThisExpr); isThis && c.monoCtx != nil {
+			if isThisReceiver(target.Target) && c.monoCtx != nil {
 				idxTargetType = c.monoCtx.inst
 			}
 			if c.typeSubst != nil {
@@ -6454,7 +6466,7 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 
 	var args []value.Value
 	recv := c.genExpr(target.Target)
-	if _, isThis := target.Target.(*ast.ThisExpr); isThis {
+	if isThisReceiver(target.Target) {
 		args = append(args, recv)
 	} else if isContainerType(targetType) {
 		args = append(args, recv)
@@ -6473,7 +6485,7 @@ func (c *Compiler) genVirtualSetterCall(target *ast.MemberExpr, named *types.Nam
 	receiverVal := c.genExpr(target.Target)
 
 	var vtableRaw, instance value.Value
-	if _, isThis := target.Target.(*ast.ThisExpr); isThis {
+	if isThisReceiver(target.Target) {
 		instance = receiverVal
 		variantPtr := c.loadVariantPtr(receiverVal)
 		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)

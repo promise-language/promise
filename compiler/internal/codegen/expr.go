@@ -1071,7 +1071,7 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 
 	var args []value.Value
 	if method.Sig().Recv() != nil {
-		if _, isThis := e.Left.(*ast.ThisExpr); isThis {
+		if isThisReceiver(e.Left) {
 			args = append(args, left)
 		} else if named.IsValueType() {
 			args = append(args, c.valueTypeReceiverPtr(left, leftType))
@@ -1083,7 +1083,7 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	// value struct, wrap it as {null_vtable, instance_ptr}. This happens in synthesized default
 	// method bodies like Priority.> containing "other < this", where 'this' appears as an
 	// argument rather than the receiver.
-	if _, isThis := e.Right.(*ast.ThisExpr); isThis {
+	if isThisReceiver(e.Right) {
 		var paramIdx int
 		if method.Sig().Recv() != nil {
 			paramIdx = 1
@@ -1117,7 +1117,7 @@ func (c *Compiler) genVirtualBinaryOp(e *ast.BinaryExpr, named *types.Named,
 
 	// Extract vtable and instance from left operand
 	var vtableRaw, instance value.Value
-	if _, isThis := e.Left.(*ast.ThisExpr); isThis {
+	if isThisReceiver(e.Left) {
 		instance = left
 		variantPtr := c.loadVariantPtr(left)
 		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
@@ -1985,7 +1985,7 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 		// (combinator). Terminal operations (count, collect, find) don't capture the
 		// receiver, so the heap temp should be freed at statement end.
 		c.pendingReceiverClaim = target
-		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+		if isThisReceiver(member.Target) {
 			args = append(args, target)
 		} else if isContainerType(targetType) {
 			args = append(args, target)
@@ -2091,7 +2091,7 @@ func (c *Compiler) genGenericEnumMethodCall(e *ast.CallExpr, member *ast.MemberE
 		prevEnumTemps := len(c.enumCtorTemps)
 		target := c.genExprAutoPropagate(member.Target) // B0323
 		enumCtorTracked := len(c.enumCtorTemps) > prevEnumTemps
-		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+		if isThisReceiver(member.Target) {
 			args = append(args, target)
 		} else {
 			alloca := c.entryBlock.NewAlloca(target.Type())
@@ -4060,7 +4060,7 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		}
 		targetVal := c.genExprAutoPropagate(e.Target) // B0323
 		// `this` in value type methods is an i8* pointing to value struct
-		if _, isThis := e.Target.(*ast.ThisExpr); isThis {
+		if isThisReceiver(e.Target) {
 			valuePtrType := irtypes.NewPointer(layout.Value.LLVMType)
 			typedPtr := c.block.NewBitCast(targetVal, valuePtrType)
 			fieldPtr := c.block.NewGetElementPtr(layout.Value.LLVMType, typedPtr,
@@ -4079,7 +4079,7 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 	targetVal := c.genExprAutoPropagate(e.Target) // B0323
 	// `this` in methods is already an i8* instance pointer, not a value struct
 	var instance value.Value
-	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
+	if isThisReceiver(e.Target) {
 		instance = targetVal
 	} else {
 		instance = c.extractInstancePtr(targetVal)
@@ -4341,7 +4341,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		// Primitive scalars (int, f64, bool, char, etc.) are raw values — pass directly.
 		// Value types: store to temp alloca, pass pointer (value semantics).
 		// Regular user types are value structs — extract the instance pointer.
-		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+		if isThisReceiver(member.Target) {
 			args = append(args, target)
 		} else if isContainerType(targetType) {
 			args = append(args, target)
@@ -4412,7 +4412,7 @@ func (c *Compiler) genEnumGetterAccess(e *ast.MemberExpr, targetType types.Type,
 	var ptr value.Value
 	var tempEnumPtr value.Value
 	// `this` inside an enum method is already i8* pointing to the enum alloca — pass directly.
-	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
+	if isThisReceiver(e.Target) {
 		ptr = target
 	} else {
 		alloca := c.entryBlock.NewAlloca(target.Type())
@@ -4502,7 +4502,7 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 		target := c.genExprAutoPropagate(member.Target) // B0323
 		enumCtorTracked := len(c.enumCtorTemps) > prevEnumTemps
 		// `this` inside an enum method is already i8* pointing to the enum alloca — pass directly.
-		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+		if isThisReceiver(member.Target) {
 			args = append(args, target)
 		} else {
 			// Store the enum value to a temp alloca and pass pointer as i8*.
@@ -4613,7 +4613,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 
 	var args []value.Value
 	target := c.genExprAutoPropagate(e.Target) // B0323
-	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
+	if isThisReceiver(e.Target) {
 		args = append(args, target)
 	} else if isContainerType(targetType) {
 		args = append(args, target)
@@ -4638,7 +4638,7 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 	receiverVal := c.genExprAutoPropagate(e.Target) // B0323
 
 	var vtableRaw, instance value.Value
-	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
+	if isThisReceiver(e.Target) {
 		instance = receiverVal
 		variantPtr := c.loadVariantPtr(receiverVal)
 		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
@@ -4778,7 +4778,7 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 
 	// 2. Extract vtable and instance
 	var vtableRaw, instance value.Value
-	if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+	if isThisReceiver(member.Target) {
 		// `this` is already i8* — load vtable from typeinfo chain
 		instance = receiverVal
 		variantPtr := c.loadVariantPtr(receiverVal)
@@ -5692,7 +5692,7 @@ func (c *Compiler) genFieldPtr(target *ast.MemberExpr) value.Value {
 			panic(fmt.Sprintf("codegen: field %s not in value layout for %s", field.Name(), named))
 		}
 		valuePtrType := irtypes.NewPointer(layout.Value.LLVMType)
-		if _, isThis := target.Target.(*ast.ThisExpr); isThis {
+		if isThisReceiver(target.Target) {
 			// this is an i8* pointing to the value struct
 			thisVal := c.genExpr(target.Target)
 			typedPtr := c.block.NewBitCast(thisVal, valuePtrType)
@@ -5717,7 +5717,7 @@ func (c *Compiler) genFieldPtr(target *ast.MemberExpr) value.Value {
 
 	obj := c.genExpr(target.Target)
 	var instance value.Value
-	if _, isThis := target.Target.(*ast.ThisExpr); isThis {
+	if isThisReceiver(target.Target) {
 		instance = obj
 	} else {
 		instance = c.extractInstancePtr(obj)
@@ -10215,7 +10215,7 @@ func (c *Compiler) genIsNamedType(expr ast.Expr, typeName string) value.Value {
 		exprType = types.Substitute(exprType, c.typeSubst)
 	}
 	var instance value.Value
-	if _, isThis := expr.(*ast.ThisExpr); isThis {
+	if isThisReceiver(expr) {
 		instance = c.extractInstancePtrForThis(subject)
 	} else {
 		instance = c.instancePtrForRTTI(subject, exprType)
@@ -10243,7 +10243,7 @@ func (c *Compiler) genIsResolvedType(expr ast.Expr, resolved types.Type) value.V
 		exprType = types.Substitute(exprType, c.typeSubst)
 	}
 	var instance value.Value
-	if _, isThis := expr.(*ast.ThisExpr); isThis {
+	if isThisReceiver(expr) {
 		instance = c.extractInstancePtrForThis(subject)
 	} else {
 		instance = c.instancePtrForRTTI(subject, exprType)
@@ -10425,7 +10425,7 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		srcType = types.Substitute(srcType, c.typeSubst)
 	}
 	var instance value.Value
-	if _, isThis := e.Expr.(*ast.ThisExpr); isThis {
+	if isThisReceiver(e.Expr) {
 		instance = c.extractInstancePtrForThis(subject)
 	} else {
 		instance = c.instancePtrForRTTI(subject, srcType)
@@ -10571,7 +10571,7 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	// can't clear the present flag on a borrowed receiver), so both the caller's
 	// synth drop and the new variable get independent copies to free.
 	if member, ok := expr.(*ast.MemberExpr); ok {
-		if _, isThis := member.Target.(*ast.ThisExpr); isThis && !c.thisRecvIsOwned {
+		if isThisReceiver(member.Target) && !c.thisRecvIsOwned {
 			innerType := c.info.Types[expr]
 			if c.typeSubst != nil {
 				innerType = types.Substitute(innerType, c.typeSubst)
@@ -10745,12 +10745,15 @@ func (c *Compiler) neutralizeMemberOptionalField(m *ast.MemberExpr) {
 	// T0428 Case 2: Walk the MemberExpr chain to find the root variable.
 	// chain[i] = step i from root toward leaf. chain[0].Target is the root.
 	// chain[last] = m (the final Optional field access).
+	// T0613: peel ParenExpr at each chain step so paren-wrapped roots/links
+	// ((this).field!, (outer).inner.field!) resolve to the IdentExpr/ThisExpr
+	// the switch below handles, rather than falling through to the default arm.
 	chain := []*ast.MemberExpr{m}
-	cur := ast.Expr(m.Target)
+	cur := ast.Expr(unwrapDestructureParens(m.Target))
 	for {
 		if me, ok := cur.(*ast.MemberExpr); ok {
 			chain = append([]*ast.MemberExpr{me}, chain...)
-			cur = me.Target
+			cur = unwrapDestructureParens(me.Target)
 		} else {
 			break
 		}

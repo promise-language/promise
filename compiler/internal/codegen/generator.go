@@ -9,8 +9,8 @@ import (
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // generatorValueType returns the struct type used for non-failable generator values: {i8*, i8*}.

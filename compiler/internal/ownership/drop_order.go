@@ -1,6 +1,6 @@
 package ownership
 
-import "djabi.dev/go/promise_lang/internal/types"
+import "github.com/promise-language/promise/compiler/internal/types"
 
 // trackDeclOrder records the declaration order of a variable and its type.
 // Called when variables are declared (typed, inferred, use, destructure) and

@@ -8,11 +8,11 @@ import (
 	"sync"
 	"testing"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/parser"
-	"djabi.dev/go/promise_lang/internal/testutil"
-	"djabi.dev/go/promise_lang/internal/types"
 	antlr "github.com/antlr4-go/antlr/v4"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/parser"
+	"github.com/promise-language/promise/compiler/internal/testutil"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // --- Test helpers ---

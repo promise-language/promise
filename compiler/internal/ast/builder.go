@@ -3,8 +3,8 @@ package ast
 import (
 	"fmt"
 
-	"djabi.dev/go/promise_lang/internal/parser"
 	antlr "github.com/antlr4-go/antlr/v4"
+	"github.com/promise-language/promise/compiler/internal/parser"
 )
 
 // Builder converts an ANTLR4 parse tree into an AST.

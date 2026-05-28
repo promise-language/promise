@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/module"
+	"github.com/promise-language/promise/compiler/internal/module"
 )
 
 // exampleEntry represents a single example file.

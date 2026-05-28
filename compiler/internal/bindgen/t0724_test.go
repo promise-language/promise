@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"djabi.dev/go/promise_lang/internal/webidl"
+	"github.com/promise-language/promise/compiler/internal/webidl"
 )
 
 // T0724 Pass 1: the WebIDL binder must (1) rewrite identifiers that collide with

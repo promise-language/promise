@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/module"
+	"github.com/promise-language/promise/compiler/internal/module"
 )
 
 // shimExcludedCommands are commands that always run on the current binary,

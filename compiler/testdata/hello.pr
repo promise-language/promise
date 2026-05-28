@@ -1,4 +1,4 @@
-use io "github.com/promise-lang/std/io/1";
+use io "github.com/promise-language/std/io/1";
 
 type Greeter {
   String name;

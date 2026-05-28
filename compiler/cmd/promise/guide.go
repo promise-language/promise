@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/module"
+	"github.com/promise-language/promise/compiler/internal/module"
 )
 
 func runGuide(args []string) {

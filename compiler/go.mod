@@ -1,4 +1,4 @@
-module djabi.dev/go/promise_lang
+module github.com/promise-language/promise/compiler
 
 go 1.25.6
 

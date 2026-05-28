@@ -51,7 +51,7 @@ func (c *Catalog) Lookup(name string) *CatalogEntry {
 //	description = "Console and file I/O"
 //
 //	[modules.json]
-//	url = "https://github.com/promise-lang/json"
+//	url = "https://github.com/promise-language/json"
 //	commit = "a1b2c3d"
 //	description = "JSON parsing and serialization"
 func ParseCatalog(data []byte) (*Catalog, error) {

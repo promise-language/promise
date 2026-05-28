@@ -1,7 +1,7 @@
 package codegen
 
 import (
-	"djabi.dev/go/promise_lang/internal/sema"
+	"github.com/promise-language/promise/compiler/internal/sema"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"

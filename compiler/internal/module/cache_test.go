@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 func TestHashModuleSources(t *testing.T) {

@@ -743,7 +743,7 @@ via `use <name>;` — user code cannot tell the difference.
 ```toml
 # catalog.toml
 [modules.some_lib]
-url = "https://github.com/promise-lang/some-lib"
+url = "https://github.com/promise-language/some-lib"
 commit = "a1b2c3d"
 description = "Some library"
 ```

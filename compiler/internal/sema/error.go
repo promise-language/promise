@@ -3,7 +3,7 @@ package sema
 import (
 	"fmt"
 
-	"djabi.dev/go/promise_lang/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/ast"
 )
 
 // Error represents a semantic error with source position.

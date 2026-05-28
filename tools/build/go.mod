@@ -1,4 +1,4 @@
-module github.com/p5e-ia/promise-lang/tools/build
+module github.com/promise-language/promise/tools/build
 
 go 1.25.6
 

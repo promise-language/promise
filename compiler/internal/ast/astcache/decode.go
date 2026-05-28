@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"djabi.dev/go/promise_lang/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/ast"
 )
 
 // decoder deserializes an AST File from binary format.

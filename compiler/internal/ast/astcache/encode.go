@@ -3,7 +3,7 @@ package astcache
 import (
 	"encoding/binary"
 
-	"djabi.dev/go/promise_lang/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/ast"
 )
 
 // encoder serializes an AST File to a binary format.

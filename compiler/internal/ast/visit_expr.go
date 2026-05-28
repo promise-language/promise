@@ -3,8 +3,8 @@ package ast
 import (
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/parser"
 	antlr "github.com/antlr4-go/antlr/v4"
+	"github.com/promise-language/promise/compiler/internal/parser"
 )
 
 // Binary expression visitors

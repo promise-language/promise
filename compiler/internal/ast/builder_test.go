@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"djabi.dev/go/promise_lang/internal/parser"
 	antlr "github.com/antlr4-go/antlr/v4"
+	"github.com/promise-language/promise/compiler/internal/parser"
 )
 
 func parseAndBuild(t *testing.T, src string) *File {

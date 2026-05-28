@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/ownership"
-	"djabi.dev/go/promise_lang/internal/sema"
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/ownership"
+	"github.com/promise-language/promise/compiler/internal/sema"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 func TestMainFuncRe(t *testing.T) {

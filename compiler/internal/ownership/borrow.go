@@ -1,6 +1,6 @@
 package ownership
 
-import "djabi.dev/go/promise_lang/internal/ast"
+import "github.com/promise-language/promise/compiler/internal/ast"
 
 // BorrowKind represents the kind of borrow.
 type BorrowKind int

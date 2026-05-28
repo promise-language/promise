@@ -1,8 +1,8 @@
 package sema
 
 import (
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // hintf records a hint message at the given position.

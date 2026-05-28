@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"djabi.dev/go/promise_lang/internal/codegen"
-	"djabi.dev/go/promise_lang/internal/module"
-	"djabi.dev/go/promise_lang/internal/sema"
+	"github.com/promise-language/promise/compiler/internal/codegen"
+	"github.com/promise-language/promise/compiler/internal/module"
+	"github.com/promise-language/promise/compiler/internal/sema"
 )
 
 // --- Stress test types ---

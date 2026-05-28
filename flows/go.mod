@@ -1,4 +1,4 @@
-module github.com/p5e-ia/promise-lang/flows
+module github.com/promise-language/promise/flows
 
 go 1.25.6
 

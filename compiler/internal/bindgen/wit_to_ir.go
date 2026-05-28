@@ -5,7 +5,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"djabi.dev/go/promise_lang/internal/wit"
+	"github.com/promise-language/promise/compiler/internal/wit"
 )
 
 // WitToIR converts a parsed WIT file into a slice of binding IR modules.

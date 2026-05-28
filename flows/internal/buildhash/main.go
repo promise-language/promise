@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/p5e-ia/promise-lang/flows/internal/srchash"
+	"github.com/promise-language/promise/flows/internal/srchash"
 )
 
 func main() {

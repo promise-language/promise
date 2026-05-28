@@ -7,7 +7,7 @@ import (
 	"hash"
 	"hash/fnv"
 
-	"djabi.dev/go/promise_lang/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/ast"
 )
 
 // HashTypeDecl returns a deterministic hash of a TypeDecl's content.

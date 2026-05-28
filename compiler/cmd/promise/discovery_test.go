@@ -13,7 +13,7 @@ const testCatalogTOML = `[catalog]
 epoch = "2026.0"
 
 [modules.json]
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 description = "JSON parsing and serialization"
 
@@ -21,7 +21,7 @@ description = "JSON parsing and serialization"
 description = "Console and file I/O"
 
 [modules.strings]
-url = "https://github.com/promise-lang/strings"
+url = "https://github.com/promise-language/strings"
 commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 description = "Extended string utilities"
 `

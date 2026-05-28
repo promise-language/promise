@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/p5e-ia/promise-lang/tools/build/common"
+	"github.com/promise-language/promise/tools/build/common"
 )
 
 func TestTokenize(t *testing.T) {

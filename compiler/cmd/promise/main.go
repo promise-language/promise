@@ -22,14 +22,14 @@ import (
 
 	"github.com/antlr4-go/antlr/v4"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/ast/astcache"
-	"djabi.dev/go/promise_lang/internal/codegen"
-	"djabi.dev/go/promise_lang/internal/module"
-	"djabi.dev/go/promise_lang/internal/ownership"
-	"djabi.dev/go/promise_lang/internal/parser"
-	"djabi.dev/go/promise_lang/internal/sema"
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/ast/astcache"
+	"github.com/promise-language/promise/compiler/internal/codegen"
+	"github.com/promise-language/promise/compiler/internal/module"
+	"github.com/promise-language/promise/compiler/internal/ownership"
+	"github.com/promise-language/promise/compiler/internal/parser"
+	"github.com/promise-language/promise/compiler/internal/sema"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // normalizeArgs canonicalizes CLI flag arguments so that both -/-- prefixes

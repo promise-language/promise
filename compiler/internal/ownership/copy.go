@@ -1,6 +1,6 @@
 package ownership
 
-import "djabi.dev/go/promise_lang/internal/types"
+import "github.com/promise-language/promise/compiler/internal/types"
 
 // isCopyType returns true if the given type is implicitly copied on assignment
 // rather than moved. Primitives (int, float, bool, char, none, void) are copy.

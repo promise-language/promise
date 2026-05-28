@@ -5,7 +5,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
 
-	"djabi.dev/go/promise_lang/internal/codegen/pal"
+	"github.com/promise-language/promise/compiler/internal/codegen/pal"
 )
 
 // defineNetPALBodies adds LLVM IR function bodies to networking extern declarations

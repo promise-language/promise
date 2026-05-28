@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/p5e-ia/promise-lang/tools/build/common"
+	"github.com/promise-language/promise/tools/build/common"
 )
 
 func main() {

@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/bindgen"
-	"djabi.dev/go/promise_lang/internal/webidl"
-	"djabi.dev/go/promise_lang/internal/wit"
+	"github.com/promise-language/promise/compiler/internal/bindgen"
+	"github.com/promise-language/promise/compiler/internal/webidl"
+	"github.com/promise-language/promise/compiler/internal/wit"
 )
 
 func runBind(args []string) {

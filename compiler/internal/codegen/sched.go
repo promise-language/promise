@@ -1,12 +1,12 @@
 package codegen
 
 import (
-	"djabi.dev/go/promise_lang/internal/types"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // --- G (Goroutine) struct ---

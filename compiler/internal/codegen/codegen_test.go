@@ -9,13 +9,13 @@ import (
 	"sync"
 	"testing"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/parser"
-	"djabi.dev/go/promise_lang/internal/sema"
-	"djabi.dev/go/promise_lang/internal/testutil"
-	"djabi.dev/go/promise_lang/internal/types"
 	antlr "github.com/antlr4-go/antlr/v4"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/parser"
+	"github.com/promise-language/promise/compiler/internal/sema"
+	"github.com/promise-language/promise/compiler/internal/testutil"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // stdAll provides all builtin type declarations needed by tests.

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/formatter"
+	"github.com/promise-language/promise/compiler/internal/formatter"
 )
 
 func runFmt(args []string) {

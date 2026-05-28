@@ -30,8 +30,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/p5e-ia/promise-lang/tools/build/common"
-	"github.com/p5e-ia/promise-lang/tools/build/internal/context"
+	"github.com/promise-language/promise/tools/build/common"
+	"github.com/promise-language/promise/tools/build/internal/context"
 )
 
 var sourceHash = "dev"

@@ -3,7 +3,7 @@ package ast
 import (
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/parser"
+	"github.com/promise-language/promise/compiler/internal/parser"
 )
 
 func (b *Builder) VisitCompilationUnit(ctx *parser.CompilationUnitContext) interface{} {

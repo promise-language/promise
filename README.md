@@ -121,7 +121,7 @@ Copies the binary to `~/.promise/bin/` and extracts the embedded standard librar
 ## Project Structure
 
 ```
-promise_lang/
+promise/
 ├── compiler/                    # Go compiler (single binary)
 │   ├── go.mod
 │   ├── cmd/promise/             # CLI entry point (build, run, exec, install)

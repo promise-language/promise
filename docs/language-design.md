@@ -3608,8 +3608,8 @@ main() {
 ## 18. Complete Example
 
 ```promise
-use io "github.com/promise-lang/std/io/1"
-use json "github.com/promise-lang/std/json/1"
+use io "github.com/promise-language/std/io/1"
+use json "github.com/promise-language/std/json/1"
 
 type Todo `serializable {
   int id `json(name: "id");

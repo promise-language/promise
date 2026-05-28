@@ -6,9 +6,9 @@ import (
 	"github.com/llir/llvm/ir"
 	irtypes "github.com/llir/llvm/ir/types"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/sema"
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/sema"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // LayoutKind classifies the type for layout computation.

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"djabi.dev/go/promise_lang/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/ast"
 )
 
 // ResolveEmbeds resolves embed paths relative to sourceDir, reads the files,

@@ -1,8 +1,8 @@
 package ast
 
 import (
-	"djabi.dev/go/promise_lang/internal/parser"
 	antlr "github.com/antlr4-go/antlr/v4"
+	"github.com/promise-language/promise/compiler/internal/parser"
 )
 
 func (b *Builder) visitExpr(ctx parser.IExpressionContext) Expr {

@@ -5,7 +5,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"djabi.dev/go/promise_lang/internal/webidl"
+	"github.com/promise-language/promise/compiler/internal/webidl"
 )
 
 // WebIdlToIR converts a parsed WebIDL file into a slice of binding IR modules.

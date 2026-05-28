@@ -8,7 +8,7 @@ import (
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // lookupLayout resolves a TypeDeclLayout for any Promise type (named or enum).

@@ -1,6 +1,6 @@
 package ast
 
-import "djabi.dev/go/promise_lang/internal/parser"
+import "github.com/promise-language/promise/compiler/internal/parser"
 
 func (b *Builder) VisitNamedType(ctx *parser.NamedTypeContext) interface{} {
 	node := &NamedTypeRef{

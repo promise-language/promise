@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/ast"
 )
 
 // HostTargetInfo returns a TargetInfo for the current host platform.

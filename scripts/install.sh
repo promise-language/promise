@@ -2,10 +2,10 @@
 # Promise language installer — for end users downloading a release binary.
 #
 # Remote install (latest stable):
-#   curl -sSf https://promise-lang.dev/install.sh | sh
+#   curl -sSf https://promise-lang.org/install.sh | sh
 #
 # Remote install (pinned epoch):
-#   curl -sSf https://promise-lang.dev/install.sh | sh -s -- --epoch 2026.0
+#   curl -sSf https://promise-lang.org/install.sh | sh -s -- --epoch 2026.0
 #
 # Local install (from this repo, after building locally):
 #   bin/install.sh
@@ -16,7 +16,7 @@
 
 set -eu
 
-GITHUB_REPO="promise-lang/promise"
+GITHUB_REPO="promise-language/promise"
 PROMISE_HOME="${PROMISE_HOME:-$HOME/.promise}"
 
 # ── argument parsing ────────────────────────────────────────────────────────

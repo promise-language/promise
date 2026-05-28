@@ -3,7 +3,7 @@ package ownership
 import (
 	"fmt"
 
-	"djabi.dev/go/promise_lang/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/ast"
 )
 
 // Error represents an ownership violation with source position.

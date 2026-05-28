@@ -5,7 +5,7 @@ import (
 	"io"
 	"sort"
 
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // GenerateHeader writes a C header file defining all struct types and extern

@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/module"
+	"github.com/promise-language/promise/compiler/internal/module"
 )
 
 type doctorStatus int

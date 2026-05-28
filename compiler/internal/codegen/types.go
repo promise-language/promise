@@ -1,8 +1,8 @@
 package codegen
 
 import (
-	"djabi.dev/go/promise_lang/internal/types"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // TypeCategory classifies Named types for native method dispatch.

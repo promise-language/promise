@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // CacheKind identifies what artifact a CacheMeta sidecar describes.

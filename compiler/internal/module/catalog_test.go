@@ -28,7 +28,7 @@ func TestParseCatalogBasic(t *testing.T) {
 epoch = "2026.0"
 
 [modules.json]
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 commit = "a1b2c3d"
 description = "JSON parsing and serialization"
 `)
@@ -49,7 +49,7 @@ description = "JSON parsing and serialization"
 	if entry.Name != "json" {
 		t.Errorf("expected name json, got %s", entry.Name)
 	}
-	if entry.URL != "https://github.com/promise-lang/json" {
+	if entry.URL != "https://github.com/promise-language/json" {
 		t.Errorf("expected URL, got %s", entry.URL)
 	}
 	if entry.Commit != "a1b2c3d" {
@@ -66,15 +66,15 @@ func TestParseCatalogMultiple(t *testing.T) {
 epoch = "2026.0"
 
 [modules.json]
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 commit = "a1b2c3d"
 
 [modules.http]
-url = "https://github.com/promise-lang/http"
+url = "https://github.com/promise-language/http"
 commit = "e4f5a6b"
 
 [modules.crypto]
-url = "git@github.com:promise-lang/crypto.git"
+url = "git@github.com:promise-language/crypto.git"
 commit = "7c8d9e0"
 `)
 	cat, err := ParseCatalog(data)
@@ -90,7 +90,7 @@ commit = "7c8d9e0"
 		}
 	}
 	// Verify SSH URL preserved
-	if cat.Modules["crypto"].URL != "git@github.com:promise-lang/crypto.git" {
+	if cat.Modules["crypto"].URL != "git@github.com:promise-language/crypto.git" {
 		t.Errorf("expected SSH URL, got %s", cat.Modules["crypto"].URL)
 	}
 }
@@ -118,7 +118,7 @@ func TestParseCatalogURLWithoutCommit(t *testing.T) {
 epoch = "2026.0"
 
 [modules.json]
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 `)
 	_, err := ParseCatalog(data)
 	if err == nil {
@@ -168,7 +168,7 @@ epoch = "2026.0"
 description = "Console and file I/O"
 
 [modules.json]
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 commit = "a1b2c3d"
 description = "JSON parsing and serialization"
 `)
@@ -204,7 +204,7 @@ func TestCatalogLookup(t *testing.T) {
 epoch = "2026.0"
 
 [modules.json]
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 commit = "a1b2c3d"
 `)
 	cat, err := ParseCatalog(data)
@@ -241,7 +241,7 @@ epoch = "2026.0"
 
 # JSON module
 [modules.json]
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 commit = "a1b2c3d"
 # description is optional
 `)
@@ -261,7 +261,7 @@ epoch = "2026.0"
 future_key = "ignored"
 
 [modules.json]
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 commit = "a1b2c3d"
 future_field = "also ignored"
 `)
@@ -280,7 +280,7 @@ func TestParseCatalogEmptyModuleName(t *testing.T) {
 epoch = "2026.0"
 
 [modules.]
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 commit = "a1b2c3d"
 `)
 	_, err := ParseCatalog(data)
@@ -298,7 +298,7 @@ func TestParseCatalogInvalidSectionHeader(t *testing.T) {
 epoch = "2026.0"
 
 [modules.json
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 `)
 	_, err := ParseCatalog(data)
 	if err == nil {

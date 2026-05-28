@@ -11,9 +11,9 @@ import (
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/sema"
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/sema"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // genBlock generates LLVM IR for a block of statements.

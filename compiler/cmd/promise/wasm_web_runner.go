@@ -12,7 +12,7 @@ import (
 	"runtime"
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/module"
+	"github.com/promise-language/promise/compiler/internal/module"
 )
 
 // embeddedWasmWebHarness is the Node.js script that runs wasm32-web binaries.

@@ -3,8 +3,8 @@ package sema
 import (
 	"time"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // SemaTimings records per-pass durations within a single sema run.

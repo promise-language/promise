@@ -370,6 +370,6 @@ Each phase is independently shippable. Phase 1 alone is useful (cleaner layout).
 
 3. **Minimum supported epochs**: Should there be a way to express "this project works with any epoch >= 2026.2"? Or is exact-match-only the right default for simplicity?
 
-4. **GitHub release URL**: The plan hardcodes `github.com/promise-lang/promise`. Should this be configurable for corporate mirrors / air-gapped environments?
+4. **GitHub release URL**: The plan hardcodes `github.com/promise-language/promise`. Should this be configurable for corporate mirrors / air-gapped environments?
 
 5. **Remote module cache**: Git-fetched remote modules (`[require]` entries) live at `epochs/<epoch>/cache/modules/`. Should these be shared across epochs instead? Two epochs using the same remote module at the same commit would duplicate the git clone. On the other hand, per-epoch keeps removal simple.

@@ -9,9 +9,9 @@ import (
 
 	"github.com/antlr4-go/antlr/v4"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/parser"
-	"djabi.dev/go/promise_lang/internal/sema"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/parser"
+	"github.com/promise-language/promise/compiler/internal/sema"
 )
 
 // docFromSource parses a .pr source string, injects std, runs DeclareAndDefine,

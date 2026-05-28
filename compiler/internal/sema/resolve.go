@@ -3,8 +3,8 @@ package sema
 import (
 	"strconv"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // resolveType converts an ast.TypeRef to a types.Type using the current scope.

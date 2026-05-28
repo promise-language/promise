@@ -3,8 +3,8 @@ package sema
 import (
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/ast"
-	"djabi.dev/go/promise_lang/internal/types"
+	"github.com/promise-language/promise/compiler/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/types"
 )
 
 // MetaTarget represents the kind of declaration a meta annotation is attached to.

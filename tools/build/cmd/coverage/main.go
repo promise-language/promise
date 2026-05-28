@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/p5e-ia/promise-lang/tools/build/common"
+	"github.com/promise-language/promise/tools/build/common"
 )
 
 var sourceHash = "dev"

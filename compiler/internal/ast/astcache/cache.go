@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"djabi.dev/go/promise_lang/internal/ast"
+	"github.com/promise-language/promise/compiler/internal/ast"
 )
 
 const (

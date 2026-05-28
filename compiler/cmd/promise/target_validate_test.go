@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"djabi.dev/go/promise_lang/internal/codegen"
+	"github.com/promise-language/promise/compiler/internal/codegen"
 )
 
 func TestIsSupportedTarget(t *testing.T) {

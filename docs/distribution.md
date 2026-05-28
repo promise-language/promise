@@ -21,7 +21,7 @@ No system dependencies are required beyond the OS itself (Linux) or Xcode Comman
 ### 2.1 Linux & macOS — install script
 
 ```sh
-curl -sSf https://promise-lang.dev/install.sh | sh
+curl -sSf https://promise-lang.org/install.sh | sh
 ```
 
 This downloads `scripts/install.sh` from the CDN (backed by the GitHub release for the latest stable epoch). The script:
@@ -35,7 +35,7 @@ This downloads `scripts/install.sh` from the CDN (backed by the GitHub release f
 To install a specific epoch:
 
 ```sh
-curl -sSf https://promise-lang.dev/install.sh | sh -s -- --epoch 2026.0
+curl -sSf https://promise-lang.org/install.sh | sh -s -- --epoch 2026.0
 ```
 
 ### 2.2 Direct download
@@ -44,7 +44,7 @@ The install script is a thin wrapper. Users can also install manually:
 
 ```sh
 # Linux amd64
-curl -LO https://github.com/promise-lang/promise/releases/latest/download/promise-linux-amd64
+curl -LO https://github.com/promise-language/promise/releases/latest/download/promise-linux-amd64
 chmod +x promise-linux-amd64
 ./promise-linux-amd64 install
 ```
@@ -90,7 +90,7 @@ build.bat
 
 ## 3. Release Artifacts
 
-Each release publishes to **GitHub Releases** at `github.com/promise-lang/promise`, tagged `epoch-YYYY.N`.
+Each release publishes to **GitHub Releases** at `github.com/promise-language/promise`, tagged `epoch-YYYY.N`.
 
 | Binary | Platform |
 |--------|----------|
@@ -145,7 +145,7 @@ Two install scripts exist with different purposes:
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/install.sh` | **End-user installer.** Downloads a release binary from GitHub and runs `promise install`. Served at `promise-lang.dev/install.sh`. |
+| `scripts/install.sh` | **End-user installer.** Downloads a release binary from GitHub and runs `promise install`. Served at `promise-lang.org/install.sh`. |
 | `bin/install.sh` | **Developer installer.** Builds a release binary from source (`./build --release`) then runs `promise install`. Used when iterating on the compiler itself. |
 
 Both scripts ultimately delegate to `promise install` for the actual filesystem setup.
@@ -160,7 +160,7 @@ The standard install script works in CI:
 # GitHub Actions example
 - name: Install Promise
   run: |
-    curl -sSf https://promise-lang.dev/install.sh | sh -s -- --epoch 2026.0
+    curl -sSf https://promise-lang.org/install.sh | sh -s -- --epoch 2026.0
     echo "$HOME/.promise/bin" >> $GITHUB_PATH
 ```
 
@@ -187,7 +187,7 @@ This section describes the GitHub repository setup, CI, and release process. The
 ### 7.1 Repository
 
 ```
-github.com/promise-lang/promise
+github.com/promise-language/promise
 ```
 
 | Branch | Purpose |

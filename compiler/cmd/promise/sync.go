@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/module"
+	"github.com/promise-language/promise/compiler/internal/module"
 )
 
 // Default GitHub release repository. Override with PROMISE_RELEASE_REPO env var

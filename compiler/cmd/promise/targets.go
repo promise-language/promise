@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"djabi.dev/go/promise_lang/internal/codegen"
+	"github.com/promise-language/promise/compiler/internal/codegen"
 )
 
 // targetSpec describes one compile target offered by `promise targets`.

@@ -37,7 +37,7 @@ import (
 	"djabi.dev/go/flow_sdk/runner"
 	"djabi.dev/go/flow_sdk/tracker"
 
-	"github.com/p5e-ia/promise-lang/flows/internal/srchash"
+	"github.com/promise-language/promise/flows/internal/srchash"
 )
 
 // sourceHash is the flow source hash baked in at build time by ./make

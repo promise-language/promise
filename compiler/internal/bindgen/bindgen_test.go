@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"djabi.dev/go/promise_lang/internal/webidl"
-	"djabi.dev/go/promise_lang/internal/wit"
+	"github.com/promise-language/promise/compiler/internal/webidl"
+	"github.com/promise-language/promise/compiler/internal/wit"
 )
 
 // --- Name conversion tests ---

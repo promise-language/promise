@@ -68,7 +68,7 @@ The **catalog** is a curated, tested, mono-versioned set of modules that constit
 The catalog manifest (`catalog.toml`) lives in the **compiler repository** alongside the compiler source and standard library. It is embedded into the compiler binary via `go:embed`, just like `std/*.pr`. This means a compiler binary IS an epoch — it contains the compiler, the standard library, and the catalog manifest that pins every community module. Tagged compiler commits are **epochs** — stable release points.
 
 ```
-promise_lang/
+promise/
   compiler/
     cmd/promise/              # CLI entry point
     internal/                 # compiler source
@@ -111,12 +111,12 @@ description = "Numeric functions and constants"
 # External modules — source lives in a separate git repository.
 # Fetched on first use, cached locally.
 [modules.json]
-url = "https://github.com/promise-lang/json"
+url = "https://github.com/promise-language/json"
 commit = "a1b2c3d"
 description = "JSON parsing and serialization"
 
 [modules.crypto]
-url = "git@github.com:promise-lang/crypto.git"
+url = "git@github.com:promise-language/crypto.git"
 commit = "7c8d9e0"
 description = "Cryptographic primitives"
 ```
@@ -336,9 +336,9 @@ Local and remote imports share the same grammar rule — the compiler disambigua
 
 **Why catalog modules don't use location strings:**
 
-1. **URLs encode hosting, not identity.** If `github.com/promise-lang/json` moves to another host, catalog imports (`use json`) are unaffected.
+1. **URLs encode hosting, not identity.** If `github.com/promise-language/json` moves to another host, catalog imports (`use json`) are unaffected.
 2. **Version in the URL is redundant.** The epoch determines the version. A URL with a version creates two sources of truth.
-3. **`use json` is clearer than `use json "github.com/promise-lang/json/1"`.** The URL adds no information the catalog doesn't already provide.
+3. **`use json` is clearer than `use json "github.com/promise-language/json/1"`.** The URL adds no information the catalog doesn't already provide.
 4. **AI agents can enumerate catalog names.** A flat namespace (`json`, `http`, `crypto`) is predictable and discoverable. URLs are not.
 
 **Why sourced modules DO use location strings:**
@@ -552,7 +552,7 @@ The current `promise install` creates `~/.promise/bin/` and `~/.promise/lib/std/
       ...
   cache/
     modules/                # all git-fetched modules (catalog + remote), keyed by normalized URL
-      github.com/promise-lang/json/
+      github.com/promise-language/json/
         repo.git/           # bare clone
         a1b2c3d4e5f6/       # source checkout (first 12 chars of commit)
       github.com/someone/promise-parser/
@@ -581,7 +581,7 @@ This means you can work on multiple projects targeting different epochs without 
 
 ```bash
 # Install Promise for the first time — downloads a single self-contained binary
-curl -sSf https://promise-lang.dev/install.sh | sh
+curl -sSf https://promise-lang.org/install.sh | sh
 
 # The binary includes everything: compiler, std, catalog, LLVM tools
 # No `promise sync` needed on first install
@@ -1097,7 +1097,7 @@ This section documents end-to-end workflows for the three primary personas inter
 
 ```bash
 # Download and install Promise (self-contained ~61MB binary)
-curl -sSf https://promise-lang.dev/install.sh | sh
+curl -sSf https://promise-lang.org/install.sh | sh
 
 # The install script places the binary at ~/.promise/bin/promise
 # and adds it to PATH. The binary embeds:
@@ -1378,7 +1378,7 @@ When the module is stable, well-tested, and generally useful:
 #### Day-to-day development
 
 ```bash
-cd promise_lang/compiler
+cd promise/compiler
 
 # The catalog manifest lives in the repo alongside the compiler and std lib:
 #   compiler/resources/catalog.toml
@@ -1448,7 +1448,7 @@ bin/verify.sh                   # compiler tests + promise tests + e2e
 git tag epoch-2026.4
 git push --tags
 # CI builds release binaries for linux-amd64, darwin-amd64, darwin-arm64
-# Publishes to https://promise-lang.dev/download/
+# Publishes to https://promise-lang.org/download/
 ```
 
 #### The epoch lifecycle

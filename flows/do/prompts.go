@@ -51,7 +51,7 @@ const askGuidance = "\nIf you need a decision or clarification from the user, ca
 
 func planPrompt(it *flowsdk.Item) string {
 	return itemHeader(it) + `
-Produce a concrete implementation plan for this Promise item.
+Produce a concrete implementation plan for this item.
 
 - Read the item's notes and attachments and the relevant source to understand
   current behavior. For compiler changes, trace the pipeline stage

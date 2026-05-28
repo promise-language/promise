@@ -53,7 +53,8 @@ func (f *flow) step(key flowsdk.ArtifactKey) flowsdk.InvocationResult {
 // enumerate the agent's created tasks, so the agent sets the plan's phases via
 // the MCP; the flow re-fetches and verifies the artifact landed.
 func (f *flow) stepPhases() flowsdk.InvocationResult {
-	_, res, done := f.agentTurn(flowsdk.ArtifactPhases, phasesPrompt(f.item))
+	prompt := phasesPrompt(f.item)
+	_, res, done := f.agentTurn(flowsdk.ArtifactPhases, prompt)
 	if done {
 		return res
 	}
@@ -70,7 +71,8 @@ func (f *flow) stepPhases() flowsdk.InvocationResult {
 // closed the item (infeasible/blocked) or asked a question, the flow exits and
 // the tracker handles it.
 func (f *flow) stepPlan() flowsdk.InvocationResult {
-	resp, res, done := f.agentTurn(flowsdk.ArtifactPlan, planPrompt(f.item))
+	prompt := planPrompt(f.item)
+	resp, res, done := f.agentTurn(flowsdk.ArtifactPlan, prompt)
 	if done {
 		return res
 	}
@@ -120,7 +122,8 @@ func (f *flow) stepImplementation() flowsdk.InvocationResult {
 	// the step complete with no fresh verification, defeating the gate.
 	f.clearVerifyMark()
 
-	resp, res, done := f.agentTurn(flowsdk.ArtifactImplementation, implementPrompt(f.item))
+	prompt := implementPrompt(f.item)
+	resp, res, done := f.agentTurn(flowsdk.ArtifactImplementation, prompt)
 	if done {
 		return res
 	}
@@ -258,7 +261,8 @@ func (f *flow) parkImplementVerify(why string) flowsdk.InvocationResult {
 // changed code.
 func (f *flow) stepReview() flowsdk.InvocationResult {
 	before, _ := f.rn.Status(f.ctx)
-	resp, res, done := f.agentTurn(flowsdk.ArtifactReview, reviewPrompt(f.item))
+	prompt := reviewPrompt(f.item)
+	resp, res, done := f.agentTurn(flowsdk.ArtifactReview, prompt)
 	if done {
 		return res
 	}
@@ -281,7 +285,8 @@ func (f *flow) stepReview() flowsdk.InvocationResult {
 // change.
 func (f *flow) stepCoverage() flowsdk.InvocationResult {
 	before, _ := f.rn.Status(f.ctx)
-	resp, res, done := f.agentTurn(flowsdk.ArtifactCoverage, coveragePrompt(f.item))
+	prompt := coveragePrompt(f.item)
+	resp, res, done := f.agentTurn(flowsdk.ArtifactCoverage, prompt)
 	if done {
 		return res
 	}
@@ -392,7 +397,8 @@ func (f *flow) pushFailedReSync(why string) flowsdk.InvocationResult {
 // stepInspection drives the independent inspection turn, parses the verdict (and
 // any follow-up suggestions), and records them. Once present, the item finalizes.
 func (f *flow) stepInspection() flowsdk.InvocationResult {
-	resp, res, done := f.agentTurn(flowsdk.ArtifactInspection, inspectPrompt(f.item))
+	prompt := inspectPrompt(f.item)
+	resp, res, done := f.agentTurn(flowsdk.ArtifactInspection, prompt)
 	if done {
 		return res
 	}

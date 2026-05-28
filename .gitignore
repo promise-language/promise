@@ -92,3 +92,4 @@ bin/flow/
 
 # Per-worktree flow lease + worktree-root marker (.flow/context.json, .flow/root)
 .flow/
+flows/do/__debug_bin*

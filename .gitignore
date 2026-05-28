@@ -82,3 +82,13 @@ bin/clean.exe~
 bin/pin-prebuilts
 bin/pin-prebuilts.exe
 bin/pin-prebuilts.exe~
+
+# Flow binaries (built on demand by ./make from flows/) — never committed
+bin/flow/
+
+# Flow SDK: fetched on demand by ./make (NOT a git submodule), wired via the
+# flows module's local replace. The flow SOURCE under flows/ IS committed.
+/flow-sdk/
+
+# Per-worktree flow lease + worktree-root marker (.flow/context.json, .flow/root)
+.flow/

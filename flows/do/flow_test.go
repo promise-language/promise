@@ -324,6 +324,38 @@ func TestRun_FinalizedFlagRefuses(t *testing.T) {
 	}
 }
 
+// TestRun_PreflightRefusesForeignFlow confirms the generic ownership preflight
+// makes the flow step aside (clean skip, no work, no checklist seeding) when the
+// item selected a different flow.
+func TestRun_PreflightRefusesForeignFlow(t *testing.T) {
+	h := newHarness(t)
+	h.item.Flow = "some-other-flow"
+	res := h.f.run()
+	if res.Status != flowsdk.StepSkipped {
+		t.Fatalf("foreign-flow run = %+v, want skipped", res)
+	}
+	if h.agentCalls != 0 {
+		t.Errorf("agent turns = %d, want 0 (must not work on a foreign-flow item)", h.agentCalls)
+	}
+	if len(h.item.Artifacts) != 0 {
+		t.Errorf("checklist seeded (%d entries) — preflight must refuse before any write", len(h.item.Artifacts))
+	}
+}
+
+// TestRun_PreflightRefusesFlowNone confirms an item opted out of flow processing
+// (FlowNone) is left untouched.
+func TestRun_PreflightRefusesFlowNone(t *testing.T) {
+	h := newHarness(t)
+	h.item.Flow = flowsdk.FlowNone
+	res := h.f.run()
+	if res.Status != flowsdk.StepSkipped {
+		t.Fatalf("FlowNone run = %+v, want skipped", res)
+	}
+	if h.agentCalls != 0 {
+		t.Errorf("agent turns = %d, want 0 (FlowNone opts out)", h.agentCalls)
+	}
+}
+
 func TestStepPlan_RecordsPlan(t *testing.T) {
 	h := newHarness(t)
 	h.agentResp.LastText = "the plan text"

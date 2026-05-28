@@ -34,6 +34,15 @@ func (f *flow) run() flowsdk.InvocationResult {
 	}
 	f.item = it
 
+	// Generic ownership preflight (shared SDK gate): refuse to touch an item that
+	// selected a DIFFERENT flow, or opted out of flow processing (FlowNone). Runs
+	// FIRST — before the checklist seeding below, which is itself a tracker write —
+	// so a mismatched dispatch leaves durable state untouched. The refusal is a
+	// clean StepSkipped; the tracker re-dispatches the correct flow.
+	if res := flowsdk.Preflight(f.item, flowName, f.inv); res != nil {
+		return *res
+	}
+
 	// Seed the checklist once (flow responsibility, not the tracker's): declare
 	// the artifacts this item must have to finalize. The set is type-specific — a
 	// plan only plans + files phases; a task/bug runs the full code lifecycle.

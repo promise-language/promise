@@ -5,7 +5,7 @@
 // changed since the binary was built.
 //
 // The flow binaries are a SEPARATE Go module from the build tools (they depend on
-// the on-demand, gitignored flow SDK), so they cannot import tools/build/common.
+// the flow SDK and OSS flow submodules), so they cannot import tools/build/common.
 // This package is the flows-side counterpart: the single source of truth for the
 // flow source hash, used both by each flow binary at runtime (CheckStale) and by
 // ./make at build time (the internal/buildhash helper prints Hash) — so the
@@ -22,16 +22,17 @@ import (
 )
 
 // flowSourceDirs are the directories (relative to the repo root) whose contents
-// determine a flow binary's behavior: the flows module itself and the flow SDK it
-// is built against (wired in via flows/go.mod's local replace). A change in either
-// must mark a built flow binary stale.
-var flowSourceDirs = []string{"flows", "flow-sdk"}
+// determine a flow binary's behavior: the flows module itself, the tracker-backend
+// flow SDK (flow-sdk/), and the OSS flow substrate (flow/) — both wired in via
+// flows/go.mod's local replaces. A change in any of them must mark a built flow
+// binary stale.
+var flowSourceDirs = []string{"flows", "flow-sdk", "flow"}
 
 // Hash computes an FNV-128a hash of every .go / go.mod / go.sum file under the
 // flow source directories, relative to root. A missing source dir contributes
 // nothing (so deleting flow-sdk/ changes the hash → stale), and .git directories
-// are skipped (flow-sdk/ is a git clone). The result is stable for a given tree
-// and changes whenever any covered file is added, removed, or edited.
+// are skipped (flow-sdk/ and flow/ are git submodules). The result is stable for a
+// given tree and changes whenever any covered file is added, removed, or edited.
 func Hash(root string) (string, error) {
 	var rels []string
 	for _, dir := range flowSourceDirs {

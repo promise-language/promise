@@ -14,6 +14,7 @@ func TestPrompts_IncludeItemContext(t *testing.T) {
 		"implement": implementPrompt(it),
 		"review":    reviewPrompt(it),
 		"coverage":  coveragePrompt(it),
+		"summary":   summaryPrompt(it),
 		"inspect":   inspectPrompt(it),
 	}
 	for name, p := range prompts {
@@ -41,18 +42,48 @@ func TestImplementPrompt_IncludesPlan(t *testing.T) {
 	if !strings.Contains(p, "do the thing") {
 		t.Error("implement prompt should include the saved plan")
 	}
-	// The "derive from the description" fallback was removed: a missing plan is a
-	// fail-fast precondition in stepImplementation, not something the prompt papers over.
-	if strings.Contains(p, "no saved plan") {
-		t.Error("implement prompt must not carry a missing-plan fallback")
+	// The implement step no longer writes the resolution summary — that moved to the
+	// dedicated post-push summary step. The prompt must say so rather than ask the
+	// agent to end with a resolution summary.
+	if !strings.Contains(p, "dedicated step produces it") {
+		t.Error("implement prompt should tell the agent the summary is a later step")
+	}
+}
+
+func TestImplementFixPrompt_CarriesVerifyOutput(t *testing.T) {
+	it := &flowsdk.Item{ID: "T7", Title: "fix it", Plan: "p"}
+	out := "bin/verify --wasm\n--- FAIL: TestThing\nsome failure detail"
+	p := implementFixPrompt(it, out)
+	if !strings.Contains(p, "T7") {
+		t.Error("fix prompt should carry the item id")
+	}
+	if !strings.Contains(p, "bin/verify --wasm") {
+		t.Error("fix prompt should reference bin/verify --wasm")
+	}
+	if !strings.Contains(p, "TestThing") {
+		t.Error("fix prompt should embed the verify output so the agent sees the failures")
+	}
+}
+
+func TestRebaseConflictPrompt_ListsConflicts(t *testing.T) {
+	it := &flowsdk.Item{ID: "T9", Title: "merge", Plan: "p"}
+	p := rebaseConflictPrompt(it, []string{"a.go", "b.pr"}, "CONFLICT (content): Merge conflict in a.go")
+	if !strings.Contains(p, "a.go, b.pr") {
+		t.Error("rebase conflict prompt should list the conflicted files")
+	}
+	if !strings.Contains(p, "git rebase --continue") {
+		t.Error("rebase conflict prompt should instruct to continue the rebase")
+	}
+	if !strings.Contains(p, "bin/verify --wasm") {
+		t.Error("rebase conflict prompt should re-verify the merged result")
 	}
 }
 
 // TestPrompts_CarryEssentialSkillContent guards against the flow prompts drifting
 // away from the substantive guidance in .claude/skills/* (the flow is the canonical
-// executor, so the prompts must not silently lose essential skill content). The
-// expected tokens are Promise-specific: the verify gate is `bin/verify --wasm`, and
-// the build re-embeds modules via `bin/build`.
+// executor, so the prompts must not silently lose essential skill content). These
+// are the Promise-specific markers — the compiler pipeline, the zero-leak policy,
+// and Promise's build/verify/test commands.
 func TestPrompts_CarryEssentialSkillContent(t *testing.T) {
 	it := &flowsdk.Item{ID: "T1", Type: flowsdk.ItemTask, Title: "t", Plan: "p"}
 	prompts := map[string]string{
@@ -60,13 +91,15 @@ func TestPrompts_CarryEssentialSkillContent(t *testing.T) {
 		"implement": implementPrompt(it),
 		"review":    reviewPrompt(it),
 		"coverage":  coveragePrompt(it),
+		"summary":   summaryPrompt(it),
 		"inspect":   inspectPrompt(it),
 	}
 	musts := map[string][]string{
 		"plan":      {"reproduce", "blocked_by", "wontfix", "needs-attention", "parser → sema → ownership → codegen"},
-		"implement": {"bin/build", "bin/verify --wasm", "allow_leaks", "mcp__tracker__create"},
-		"review":    {"in full", "concurrency", "mcp__tracker__create", "bin/verify --wasm"},
+		"implement": {"bin/verify --wasm", "allow_leaks", "bin/build", "mcp__tracker__create"},
+		"review":    {"in full", "concurrency", "mcp__tracker__create", "bin/verify --wasm", "zero tolerance"},
 		"coverage":  {"go tool cover", "bin/promise test -coverage", "mcp__tracker__create"},
+		"summary":   {"READ-ONLY", "committed, and pushed"},
 		"inspect":   {"read-only", "do NOT run", "file and line"},
 	}
 	for name, want := range musts {
@@ -78,41 +111,14 @@ func TestPrompts_CarryEssentialSkillContent(t *testing.T) {
 	}
 }
 
-func TestFixVerifyPrompt(t *testing.T) {
-	it := &flowsdk.Item{ID: "T0042", Title: "t"}
-	p := fixVerifyPrompt(it, "no successful bin/verify run found")
-	for _, want := range []string{"T0042", "no successful bin/verify run found", "bin/verify --wasm", "allow_leaks", "Do NOT commit"} {
-		if !strings.Contains(p, want) {
-			t.Errorf("fixVerifyPrompt missing %q", want)
-		}
+func TestReviewPrompt_PlanItemVariant(t *testing.T) {
+	plan := reviewPrompt(&flowsdk.Item{ID: "P1", Type: flowsdk.ItemPlan, Title: "a plan"})
+	if !strings.Contains(plan, "review THIS PLAN") {
+		t.Error("plan-item review should critique the plan itself")
 	}
-}
-
-func TestRebaseConflictPrompt(t *testing.T) {
-	it := &flowsdk.Item{ID: "T0042", Type: flowsdk.ItemTask, Title: "Fix the widget"}
-	rb := &flowsdk.ArenaResult{Output: "CONFLICT (content): merge conflict in foo.pr"}
-	p := rebaseConflictPrompt(it, rb)
-	for _, want := range []string{
-		"T0042", "Fix the widget", "CONFLICT (content): merge conflict in foo.pr",
-		"git rebase --continue", "bin/verify --wasm", "allow_leaks",
-		"git rebase --abort", // must tell the agent NOT to abort the rebase
-	} {
-		if !strings.Contains(p, want) {
-			t.Errorf("rebaseConflictPrompt missing %q", want)
-		}
-	}
-}
-
-func TestFixRebaseConflictPrompt(t *testing.T) {
-	it := &flowsdk.Item{ID: "T0042", Title: "t"}
-	p := fixRebaseConflictPrompt(it, "a git rebase is still in progress")
-	for _, want := range []string{
-		"T0042", "a git rebase is still in progress", "git rebase --continue",
-		"bin/verify --wasm", "allow_leaks", "git rebase --abort",
-	} {
-		if !strings.Contains(p, want) {
-			t.Errorf("fixRebaseConflictPrompt missing %q", want)
-		}
+	task := reviewPrompt(&flowsdk.Item{ID: "T1", Type: flowsdk.ItemTask, Title: "a task"})
+	if strings.Contains(task, "review THIS PLAN") {
+		t.Error("task-item review should be the code review, not the plan review")
 	}
 }
 

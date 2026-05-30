@@ -109,30 +109,11 @@ func TestGitChanged(t *testing.T) {
 	}
 }
 
-func TestCommitPushResultHelpers(t *testing.T) {
-	if !isNothingToCommit(&flowsdk.ArenaResult{Error: "nothing to commit, working tree clean"}) {
-		t.Error("should detect nothing-to-commit")
-	}
-	if isNothingToCommit(&flowsdk.ArenaResult{Error: "fatal: bad object"}) {
-		t.Error("real error is not nothing-to-commit")
-	}
-	if !isUpToDate(&flowsdk.ArenaResult{Output: "Everything up-to-date"}) {
-		t.Error("should detect up-to-date push")
-	}
-}
-
 func TestTruncate(t *testing.T) {
 	if got := truncate("  hello  ", 100); got != "hello" {
 		t.Errorf("truncate trim = %q", got)
 	}
 	if got := truncate("abcdef", 3); got != "abc…" {
 		t.Errorf("truncate clip = %q", got)
-	}
-}
-
-func TestCommitMessage(t *testing.T) {
-	it := &flowsdk.Item{ID: "T0042", Title: "Fix the widget"}
-	if got := commitMessage(it); got != "T0042: Fix the widget" {
-		t.Errorf("commitMessage = %q, want \"T0042: Fix the widget\"", got)
 	}
 }

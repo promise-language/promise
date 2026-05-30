@@ -48,18 +48,19 @@ func ToolsSourceHash(root string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-// FlowsSourceHash computes an FNV-1a hash of the flow source (flows/) and the
-// fetched flow SDK (flow-sdk/). ./make (and make.cmd, which runs the same
-// meta-builder) uses it to skip rebuilding the flow binaries when neither the
-// flow source nor the SDK has changed. Only .go, go.mod, and go.sum files are
-// hashed; an SDK .git directory is skipped (its contents churn on every fetch
-// and are not build inputs). A missing tree is simply omitted from the hash.
+// FlowsSourceHash computes an FNV-1a hash of the flow source (flows/), the
+// tracker-backend flow SDK (flow-sdk/), and the OSS flow substrate (flow/).
+// ./make (and make.cmd, which runs the same meta-builder) uses it to skip
+// rebuilding the flow binaries when none of those trees have changed. Only .go,
+// go.mod, and go.sum files are hashed; a submodule .git directory is skipped (its
+// contents churn and are not build inputs). A missing tree is simply omitted from
+// the hash.
 func FlowsSourceHash(root string) (string, error) {
 	h := fnv.New128a()
 	// Each tree is hashed under its directory label so a file can't collide
 	// across trees on an identical relative path, and so the digest changes if a
-	// file moves between flows/ and flow-sdk/.
-	for _, dir := range []string{"flows", "flow-sdk"} {
+	// file moves between flows/, flow-sdk/, and flow/.
+	for _, dir := range []string{"flows", "flow-sdk", "flow"} {
 		base := filepath.Join(root, dir)
 		if !Exists(base) {
 			continue

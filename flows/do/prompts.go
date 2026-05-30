@@ -7,14 +7,6 @@ import (
 	flowsdk "djabi.dev/go/flow_sdk"
 )
 
-// flowName is this flow binary's name. It must match the build target
-// (./bin/flow/do) and the item.Flow value the tracker dispatches against.
-const flowName flowsdk.FlowName = "do"
-
-// defaultAgent is the attribution identity recorded on the flow's domain writes
-// (notes, artifacts) when the context file carries no explicit agent.
-const defaultAgent flowsdk.AgentName = "flow-do"
-
 // prompts.go builds the per-step instructions the flow drives the agent with.
 // They carry the ESSENTIAL content of the Promise project's .claude/skills/{plan,
 // implement,review,coverage,inspect}; the lifecycle/harness mechanics those skills
@@ -100,11 +92,12 @@ Plan:
   re-embed updated modules (NEVER run ` + "`go build`" + ` directly — it produces a broken
   binary).
 - NEVER work around a compiler/language bug or test-infra issue — if you hit a
-  limitation, file it with mcp__tracker__create and stop.
+  limitation, resolve it inline or file it with mcp__tracker__create and stop.
 - Watch for silent systemic bugs in code you touch: MEMORY LEAKS (zero tolerance —
   the repo has 0 leaks and 0 ` + "`allow_leaks`" + ` tags; every droppable/heap-allocating
-  type needs a drop path), missing scope cleanup, concurrency races (lock ordering,
-  park/wake, channel close), and resource waste. File any at critical priority.
+  type needs a drop path), double free, use after free, missing scope cleanup,
+  concurrency races (lock ordering, park/wake, channel close), and resource waste.
+  File any at critical priority.
 - Write tests for every behavioral change. Go: ` + "`generateIR`" + `+` + "`assertContains`" + ` (codegen),
   ` + "`checkErrs`" + `+` + "`expectError`" + ` (sema), ` + "`ownerOK`" + `/` + "`ownerErrs`" + ` (ownership). Promise:
   batch tests (` + "`test`" + ` annotation + ` + "`assert()`" + `) co-located as ` + "`*_test.pr`" + `, unless
@@ -112,19 +105,21 @@ Plan:
 - Run ` + "`bin/verify --wasm`" + ` and ensure it passes (it can take many minutes — wait for
   it). The output must show 0 leaks; any leak is a regression you must fix. NEVER add
   ` + "`allow_leaks: true`" + `.
-- Do NOT commit or push — a later step handles that.
-- End with a concise resolution summary of what you changed and why — it is recorded
-  as the item's Resolution Summary for the user and the later inspection step.
+- Do NOT commit or push — a later step handles that. You do NOT need to write the
+  resolution summary either: a dedicated step produces it after the work is merged.
 ` + askGuidance
 }
 
-// fixVerifyPrompt re-prompts the implementing agent (in the same session) when the
-// implementation step has not yet left a passing `bin/verify` marker. `why` is the
-// flow's reason (marker missing, or a failing/leaking metric). The agent must keep
-// working until `bin/verify --wasm` passes cleanly — the step is not complete until
-// then.
-func fixVerifyPrompt(it *flowsdk.Item, why string) string {
-	return fmt.Sprintf(`The implementation for %s is NOT complete: %s
+// implementFixPrompt re-prompts the implementing agent (in the same session) when
+// the flow's `bin/verify --wasm` gate failed on the worktree. `verifyOutput` is
+// the tail of the verify run (stdout+stderr) so the agent sees exactly what
+// failed. The agent must keep working until the changes pass verify cleanly — the
+// step is not complete until then.
+func implementFixPrompt(it *flowsdk.Item, verifyOutput string) string {
+	return fmt.Sprintf(`The implementation for %s is NOT complete: `+"`bin/verify --wasm`"+` did not pass.
+
+Verify output (tail):
+%s
 
 Continue working on the implementation. The step is complete only when `+"`bin/verify --wasm`"+`
 passes cleanly on the current changes — 0 test failures and 0 leaks (the repo's
@@ -138,22 +133,30 @@ zero-leak policy is absolute; never add `+"`allow_leaks: true`"+`).
 - Do NOT commit or push — a later step handles that.
 - If the work is genuinely infeasible or you need a user decision, use the tracker MCP
   (close as not-feasible, or mcp__tracker__ask_user_question) and stop.
-`, it.ID, why)
+`, it.ID, truncate(strings.TrimSpace(verifyOutput), 2000))
 }
 
 // rebaseConflictPrompt drives the smart conflict-resolution turn of the commit
-// step. The flow already committed the work and rebased onto the latest origin, and
-// the rebase stopped on merge conflicts (the runner cannot resolve them). It mirrors
-// the commit skill's conflict guidance ("resolve them carefully and continue the
-// rebase", then re-verify with the zero-leak check). `rb` carries the rebase output.
-func rebaseConflictPrompt(it *flowsdk.Item, rb *flowsdk.ArenaResult) string {
+// step. The flow already committed the work and rebased onto the latest origin,
+// and the rebase stopped on merge conflicts (the runner cannot resolve them). It
+// mirrors the commit skill's conflict guidance ("resolve them carefully and
+// continue the rebase", then re-verify with the zero-leak check). `conflicts` is
+// the list of conflicted paths the runner reported; `rebaseOutput` is the raw
+// rebase output.
+func rebaseConflictPrompt(it *flowsdk.Item, conflicts []string, rebaseOutput string) string {
+	conflictList := "(see rebase output)"
+	if len(conflicts) > 0 {
+		conflictList = strings.Join(conflicts, ", ")
+	}
 	return itemHeader(it) + `
 Your committed change for this item was rebased onto the latest origin, and the
 rebase STOPPED ON MERGE CONFLICTS. Resolve them so the rebase completes on top of the
 remote.
 
+Conflicted files: ` + conflictList + `
+
 Rebase output:
-` + truncate(strings.TrimSpace(rb.Output+"\n"+rb.Error), 800) + `
+` + truncate(strings.TrimSpace(rebaseOutput), 800) + `
 
 - Run ` + "`git status`" + ` to see the in-progress rebase and the conflicted files.
 - Resolve each conflict carefully: read the whole file, integrate BOTH sides (keep the
@@ -168,24 +171,6 @@ Rebase output:
 - Leave the worktree clean and the rebase complete. Do NOT ` + "`git push`" + ` (a later step
   pushes) and do NOT ` + "`git rebase --abort`" + ` (that throws away the rebase progress).
 ` + askGuidance
-}
-
-// fixRebaseConflictPrompt re-prompts the resolving agent (same session) when the
-// rebase is not yet finished cleanly: still in progress / unresolved conflicts, or
-// verify is not green on the merged result. `why` is the flow's reason.
-func fixRebaseConflictPrompt(it *flowsdk.Item, why string) string {
-	return fmt.Sprintf(`The rebase for %s is NOT finished cleanly yet: %s
-
-Keep going. The step is complete only when the rebase is fully applied (no rebase in
-progress, no remaining conflict markers) and `+"`bin/verify --wasm`"+` passes on the merged
-result — 0 failures and 0 leaks (never add `+"`allow_leaks: true`"+`).
-
-- Run `+"`git status`"+`; if a rebase is still in progress, resolve the remaining conflicts,
-  `+"`git add`"+` them, and `+"`git rebase --continue`"+` until it completes.
-- Then run `+"`bin/verify --wasm`"+` in the foreground and wait for it; fix any failures or
-  leaks the merge introduced (run `+"`bin/build`"+` first if you changed modules).
-- Do NOT `+"`git push`"+` or `+"`git rebase --abort`"+`.
-`, it.ID, why)
 }
 
 func reviewPrompt(it *flowsdk.Item) string {
@@ -240,6 +225,26 @@ Analyze and fill test-coverage gaps for the changes on this item.
   missing language feature), file a tracker item (mcp__tracker__create) instead.
 - End your message with a single line stating the resulting coverage, exactly:
   COVERAGE: adequate     (or)  COVERAGE: insufficient     (or)  COVERAGE: none
+` + askGuidance
+}
+
+// summaryPrompt drives the dedicated post-push resolution-summary turn. It runs
+// from the SAME continuing session as the work (the doer holds the full narrative)
+// AFTER the change is committed and pushed, so the recap describes the merged
+// result rather than a mid-implementation intention. Read-only by contract.
+func summaryPrompt(it *flowsdk.Item) string {
+	return itemHeader(it) + `
+The work for this item is implemented, committed, and pushed. Write the resolution
+summary — a short, factual recap of WHAT changed and WHY.
+
+- Base it on the actual changes you made this session (the merged diff), not on the
+  original plan's intentions.
+- Keep it concise: a TLDR an engineer can read in seconds. Lead with the user-visible
+  effect or the bug fixed, then the key implementation points (which pipeline stage or
+  module changed, any notable design decision).
+- This is READ-ONLY: do NOT touch the worktree, do NOT run the build or tests, and do
+  NOT propose follow-up work — the independent inspection step handles follow-ups.
+- Output the resolution summary as your final message in Markdown.
 ` + askGuidance
 }
 

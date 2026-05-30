@@ -86,9 +86,9 @@ bin/pin-prebuilts.exe~
 # Flow binaries (built on demand by ./make from flows/) — never committed
 bin/flow/
 
-# Flow SDK: fetched on demand by ./make (NOT a git submodule), wired via the
-# flows module's local replace. The flow SOURCE under flows/ IS committed.
-/flow-sdk/
+# flow-sdk/ (tracker backend) and flow/ (OSS flow substrate) are git submodules
+# wired into the flows module via local replaces — they are NOT gitignored. See
+# .gitmodules. The flow SOURCE under flows/ IS committed.
 
 # Per-worktree flow lease + worktree-root marker (.flow/context.json, .flow/root)
 .flow/

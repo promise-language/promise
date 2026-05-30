@@ -2,13 +2,13 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "bin/flow/do run",
+      "name": "bin/flow/do run-step",
       "type": "go",
       "request": "launch",
       "mode": "auto",
       "program": "${workspaceFolder}/flows/do",
       "args": [
-        "run",
+        "run-step",
       ],
       "env": {}
     },

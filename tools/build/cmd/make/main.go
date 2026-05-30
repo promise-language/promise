@@ -10,8 +10,9 @@
 //
 // It also builds the project's flow binaries (the stateless per-step workflow
 // executables under flows/) into bin/flow/ — see buildFlows. The flows live in
-// their own Go module and depend on the flow SDK, which is fetched on demand
-// into flow-sdk/ (gitignored, not a git submodule).
+// their own Go module and depend on two git submodules wired in via local
+// replaces: flow-sdk/ (the tracker backend) and flow/ (the OSS flow substrate);
+// ./make checks them out with `git submodule update --init`.
 package main
 
 import (
@@ -102,8 +103,8 @@ func main() {
 	}
 
 	// Flow binaries (flows/ → bin/flow/) are independent of the tools hash, so they
-	// keep their own up-to-date check (bin/flow/.flows.hash over flows/ + flow-sdk/).
-	// buildFlows skips the rebuild when neither changed; -force rebuilds them too.
+	// keep their own up-to-date check (bin/flow/.flows.hash over flows/ + flow-sdk/
+	// + flow/). buildFlows skips the rebuild when none changed; -force rebuilds them.
 	if err := buildFlows(root, force); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -145,32 +146,28 @@ func buildTools(root, binDir string, tools []string, hash string) error {
 	return nil
 }
 
-// flowSDKRepo is the git URL of the flow SDK (djabi.dev/go/flow_sdk). Its vanity
-// module path has no public proxy / go-get resolver, so it is fetched on demand
-// into <root>/flow-sdk and wired in via the flows module's local replace (see
-// flows/go.mod) — NOT a git submodule. flow-sdk/ is gitignored.
-const flowSDKRepo = "ssh://hfe/git/tracker_flow_sdk.git"
-
 // buildFlows builds each flow binary under flows/ into bin/flow/<name>. The flows
-// are a separate Go module (flows/go.mod) depending on the flow SDK, which is
-// fetched on demand into flow-sdk/. Both flow-sdk/ and bin/flow/ are gitignored.
+// are a separate Go module (flows/go.mod) depending on two local submodules wired
+// in via replaces: flow-sdk/ (the tracker backend) and flow/ (the OSS flow
+// substrate). bin/flow/ is gitignored; the submodules are not.
 //
-// A missing/unfetchable SDK is non-fatal: the core tool build above already
+// Unavailable submodules are non-fatal: the core tool build above already
 // succeeded, so ./make warns and skips the flows rather than breaking the whole
-// build for someone with no access to the SDK host. A genuine flow COMPILE error
-// (SDK present) is fatal — that is a real regression in committed flow source.
+// build for someone with no access to the submodule hosts. A genuine flow COMPILE
+// error (submodules present) is fatal — that is a real regression in committed
+// flow source.
 //
-// The flow binaries are only (re)built when the flow source or the fetched SDK
+// The flow binaries are only (re)built when the flow source or either submodule
 // changed: their combined hash is compared against bin/flow/.flows.hash and the
 // go-build loop is skipped on a match (unless force). The hash is computed AFTER
-// the SDK fetch so an SDK update is detected.
+// the submodule checkout so a submodule pin bump is detected.
 func buildFlows(root string, force bool) error {
 	flowsDir := filepath.Join(root, "flows")
 	if !common.Exists(filepath.Join(flowsDir, "go.mod")) {
 		return nil // no flows module — nothing to build
 	}
-	if err := ensureFlowSDK(root); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: skipping flow binaries — flow SDK unavailable: %v\n", err)
+	if err := ensureFlowSubmodules(root); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: skipping flow binaries — flow submodules unavailable: %v\n", err)
 		return nil
 	}
 	writeFlowRootMarker(root) // best-effort: lets hand-run flows locate the worktree root
@@ -180,22 +177,10 @@ func buildFlows(root string, force bool) error {
 		return fmt.Errorf("mkdir bin/flow: %w", err)
 	}
 
-	// Compute the flow source hash to bake into each binary, so it can detect at
-	// runtime when flows/ or flow-sdk/ changed since it was built — the same
-	// staleness self-check the other bin/ tools have. The flows module is separate
-	// (it depends on the on-demand flow SDK), so make cannot import its hasher; it
-	// runs the flows module's own buildhash helper instead, guaranteeing the
-	// build-time and runtime hashes are computed by identical code. ldflags omits
-	// -s -w so the flow binaries stay debuggable (see .vscode launch config).
-	flowHash, err := common.RunOutputIn(flowsDir, "go", "run", "./internal/buildhash")
-	if err != nil {
-		return fmt.Errorf("compute flow source hash: %w", err)
-	}
-	ldflags := "-X main.sourceHash=" + flowHash
-
 	// Discover the flow packages (subdirs of flows/ that contain .go files); the
 	// internal/ helper packages and any stray non-package directory are skipped
-	// rather than built as flow binaries.
+	// rather than built as flow binaries. This is pure directory reading — no `go`
+	// invocation — so it is safe to do before the up-to-date short-circuit.
 	entries, err := os.ReadDir(flowsDir)
 	if err != nil {
 		return fmt.Errorf("read flows/: %w", err)
@@ -211,10 +196,11 @@ func buildFlows(root string, force bool) error {
 		return nil // no flow packages — nothing to build
 	}
 
-	// Up-to-date check: skip the go-build loop when neither flows/ nor flow-sdk/
-	// changed and every expected binary is present. Mirrors the .tools.hash
-	// short-circuit in main, so a no-op ./make (run before every flow spawn) does
-	// not pay a per-flow go-build each time.
+	// Up-to-date check FIRST — before any `go` invocation (tidy, buildhash, build).
+	// Skip the rebuild when none of flows/, flow-sdk/, flow/ changed and every
+	// expected binary is present. Mirrors the .tools.hash short-circuit in main, so
+	// a no-op ./make (run before every flow spawn) pays neither `go mod tidy` nor a
+	// per-flow go-build each time.
 	hash, herr := common.FlowsSourceHash(root)
 	hashFile := filepath.Join(binFlow, ".flows.hash")
 	if !force && herr == nil {
@@ -233,6 +219,32 @@ func buildFlows(root string, force bool) error {
 		}
 	}
 
+	// A rebuild is needed. Tidy go.mod/go.sum before any `go build`/`go run` in the
+	// flows module: a freshly added (or removed) import in committed flow source
+	// leaves go.mod stale, and `go build` then refuses with "updates to go.mod
+	// needed; to update it: go mod tidy", breaking the one-command ./make bootstrap.
+	// Running tidy here keeps ./make self-contained. It must precede the buildhash
+	// run (which is itself a `go run` and would hit the same staleness error) and
+	// the hash recompute below, so the stored hash reflects the tidied go.mod/go.sum
+	// and stays stable across runs (otherwise tidy's edits would invalidate the
+	// sidecar every time and force a perpetual rebuild).
+	if err := common.RunIn(flowsDir, "go", "mod", "tidy"); err != nil {
+		return fmt.Errorf("go mod tidy (flows): %w", err)
+	}
+
+	// Compute the flow source hash to bake into each binary, so it can detect at
+	// runtime when flows/, flow-sdk/, or flow/ changed since it was built — the same
+	// staleness self-check the other bin/ tools have. The flows module is separate
+	// (it depends on the flow-sdk/ and flow/ submodules), so make cannot import its
+	// hasher; it runs the flows module's own buildhash helper instead, guaranteeing
+	// the build-time and runtime hashes are computed by identical code. ldflags omits
+	// -s -w so the flow binaries stay debuggable (see .vscode launch config).
+	flowHash, err := common.RunOutputIn(flowsDir, "go", "run", "./internal/buildhash")
+	if err != nil {
+		return fmt.Errorf("compute flow source hash: %w", err)
+	}
+	ldflags := "-X main.sourceHash=" + flowHash
+
 	for _, name := range names {
 		out := filepath.Join(binFlow, name+common.ExeSuffix())
 		if err := common.RunIn(flowsDir, "go", "build", "-ldflags", ldflags, "-o", out, "./"+name); err != nil {
@@ -243,44 +255,53 @@ func buildFlows(root string, force bool) error {
 	fmt.Printf("%d flows built\n", len(names))
 
 	// Record the hash only after a fully successful build, so a mid-way failure
-	// forces a retry next run rather than being masked by a matching sidecar. If
-	// hashing failed, skip writing — next run recomputes and rebuilds.
-	if herr == nil {
-		_ = os.WriteFile(hashFile, []byte(hash+"\n"), 0o644)
+	// forces a retry next run rather than being masked by a matching sidecar.
+	// Recompute it AFTER tidy so it reflects the tidied go.mod/go.sum — the same
+	// tree the next up-to-date check will hash. If hashing failed, skip writing —
+	// next run recomputes and rebuilds.
+	if finalHash, ferr := common.FlowsSourceHash(root); ferr == nil {
+		_ = os.WriteFile(hashFile, []byte(finalHash+"\n"), 0o644)
 	}
 	return nil
 }
 
-// ensureFlowSDK makes the flow SDK available at <root>/flow-sdk. It clones it on
-// first use; when already present it does a best-effort fast-forward (warn, never
-// fail) so the flows track SDK changes without breaking an offline build. It only
-// returns an error when the SDK is absent AND the clone fails (so buildFlows can
-// skip the flows entirely rather than break the core build).
-func ensureFlowSDK(root string) error {
-	sdk := filepath.Join(root, "flow-sdk")
-	if !common.Exists(filepath.Join(sdk, "go.mod")) {
-		// A stray/partial flow-sdk/ (e.g. an interrupted clone) has no go.mod and
-		// would make `git clone` fail forever ("destination path already exists and
-		// is not empty"), wedging flow builds. Clear it so the clone can recover.
-		if common.Exists(sdk) {
-			if err := os.RemoveAll(sdk); err != nil {
-				return fmt.Errorf("remove stale flow-sdk/: %w", err)
-			}
+// ensureFlowSubmodules makes the flow submodules available at <root>/flow-sdk
+// (tracker backend) and <root>/flow (OSS flow substrate), wired into the flows
+// module via flows/go.mod's local replaces. It runs `git submodule update --init`
+// for both, which on a fresh clone registers and checks them out, and otherwise
+// checks out the pinned gitlink commit (a no-op, no network, when already at it).
+//
+// Submodules are PINNED — update deliberately checks out the recorded commit
+// rather than fast-forwarding, so the flow-sdk/flow pair stays the tested,
+// reproducible combination until the gitlink is intentionally bumped.
+//
+// It returns an error only when a submodule is absent AND the checkout fails (no
+// access to the host, offline), so buildFlows can warn and skip the flows rather
+// than break the core build. When both are already present it is fast and never
+// fails the build.
+func ensureFlowSubmodules(root string) error {
+	const sdk, oss = "flow-sdk", "flow"
+	haveSDK := common.Exists(filepath.Join(root, sdk, "go.mod"))
+	haveOSS := common.Exists(filepath.Join(root, oss, "go.mod"))
+	if haveSDK && haveOSS {
+		// Both checked out — refresh to the pinned commits (cheap, offline-safe:
+		// no fetch when the gitlink already matches the checkout). A failure here
+		// (e.g. a dirty submodule) is non-fatal; the existing checkout is used.
+		if err := runGit(root, "submodule", "update", "--init", "--", sdk, oss); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: flow submodule refresh failed (using existing checkout): %v\n", err)
 		}
-		fmt.Printf("Fetching flow SDK (%s) -> flow-sdk/\n", flowSDKRepo)
-		return runGit(root, "clone", flowSDKRepo, sdk)
+		return nil
 	}
-	// -q suppresses git's "Already up to date." chatter on a no-op fast-forward.
-	if err := runGit(sdk, "pull", "--ff-only", "-q"); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: flow SDK fast-forward failed (using existing checkout): %v\n", err)
-	}
-	return nil
+	// At least one is missing — initialize and fetch it. A failure here IS
+	// returned so buildFlows skips the flows (the caller treats it as a warning).
+	fmt.Println("Initializing flow submodules (flow-sdk/, flow/)")
+	return runGit(root, "submodule", "update", "--init", "--", sdk, oss)
 }
 
-// gitTimeout bounds each flow-SDK git operation. The runner runs ./make before
-// every flow spawn, so an UNBOUNDED git network hang here (hfe partitioned, not
-// refused) would stall flow dispatch indefinitely — re-introducing the very stall
-// class the flow redesign removes. A bounded op fails loudly instead.
+// gitTimeout bounds each flow submodule git operation. The runner runs ./make
+// before every flow spawn, so an UNBOUNDED git network hang here (a host
+// partitioned, not refused) would stall flow dispatch indefinitely. A bounded op
+// fails loudly instead.
 const gitTimeout = 90 * time.Second
 
 // runGit runs `git args...` in dir with stdout/stderr attached, bounded by

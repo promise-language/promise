@@ -30,6 +30,8 @@
 
 ## Infrastructure
 
+- [../CONTRIBUTING.md](../CONTRIBUTING.md) — Contributor/maintainer onboarding: build the compiler, run tests, verify, and gates.
+- [build-tools.md](build-tools.md) — Build tooling architecture and the `bin/` tool inventory.
 - [gate-system.md](gate-system.md) — Four-class regression prevention gates (tests, memory, stability, size, performance).
 - [epoch-versioned-installs.md](epoch-versioned-installs.md) — Side-by-side multi-epoch compiler installations.
 - [platform-documentation.md](platform-documentation.md) — `promise doc` system for extracting `doc()` meta tags.

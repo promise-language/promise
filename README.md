@@ -162,6 +162,7 @@ promise/
 
 ## Documentation
 
+- [Contributing](CONTRIBUTING.md) — building the compiler, running tests & gates (start here to work on the project)
 - [Language Guide](docs/language-guide.md) — concise reference for writing Promise code
 - [Language Design](docs/language-design.md) — full language specification (types, ownership, errors, concurrency, generics)
 - [Standard Library](docs/standard-library.md) — module inventory and API reference

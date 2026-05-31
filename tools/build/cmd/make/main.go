@@ -219,17 +219,10 @@ func buildFlows(root string, force bool) error {
 		}
 	}
 
-	// A rebuild is needed. Tidy go.mod/go.sum before any `go build`/`go run` in the
-	// flows module: a freshly added (or removed) import in committed flow source
-	// leaves go.mod stale, and `go build` then refuses with "updates to go.mod
-	// needed; to update it: go mod tidy", breaking the one-command ./make bootstrap.
-	// Running tidy here keeps ./make self-contained. It must precede the buildhash
-	// run (which is itself a `go run` and would hit the same staleness error) and
-	// the hash recompute below, so the stored hash reflects the tidied go.mod/go.sum
-	// and stays stable across runs (otherwise tidy's edits would invalidate the
-	// sidecar every time and force a perpetual rebuild).
-	if err := common.RunIn(flowsDir, "go", "mod", "tidy"); err != nil {
-		return fmt.Errorf("go mod tidy (flows): %w", err)
+	// A rebuild is needed. Heal flows/go.mod only on genuine import-graph drift —
+	// never mutate it on every build (T0750). See tidyFlowsIfDrift.
+	if err := tidyFlowsIfDrift(flowsDir); err != nil {
+		return err
 	}
 
 	// Compute the flow source hash to bake into each binary, so it can detect at
@@ -239,7 +232,7 @@ func buildFlows(root string, force bool) error {
 	// hasher; it runs the flows module's own buildhash helper instead, guaranteeing
 	// the build-time and runtime hashes are computed by identical code. ldflags omits
 	// -s -w so the flow binaries stay debuggable (see .vscode launch config).
-	flowHash, err := common.RunOutputIn(flowsDir, "go", "run", "./internal/buildhash")
+	flowHash, err := common.RunOutputIn(flowsDir, "go", "run", "-mod=readonly", "./internal/buildhash")
 	if err != nil {
 		return fmt.Errorf("compute flow source hash: %w", err)
 	}
@@ -247,7 +240,10 @@ func buildFlows(root string, force bool) error {
 
 	for _, name := range names {
 		out := filepath.Join(binFlow, name+common.ExeSuffix())
-		if err := common.RunIn(flowsDir, "go", "build", "-ldflags", ldflags, "-o", out, "./"+name); err != nil {
+		// -mod=readonly makes the build immune to whatever GOFLAGS the runner sets
+		// and guarantees it can never silently mutate go.mod/go.sum (T0750).
+		if err := common.RunIn(flowsDir, "go", "build", "-mod=readonly", "-ldflags", ldflags, "-o", out, "./"+name); err != nil {
+			dumpFlowsBuildContext(flowsDir) // best-effort: make a recurrence self-explaining
 			return fmt.Errorf("build flow %s: %w", name, err)
 		}
 		fmt.Printf("  flow/%-7s built\n", name)
@@ -256,13 +252,65 @@ func buildFlows(root string, force bool) error {
 
 	// Record the hash only after a fully successful build, so a mid-way failure
 	// forces a retry next run rather than being masked by a matching sidecar.
-	// Recompute it AFTER tidy so it reflects the tidied go.mod/go.sum — the same
-	// tree the next up-to-date check will hash. If hashing failed, skip writing —
-	// next run recomputes and rebuilds.
+	// Recompute it AFTER the drift-gated tidy so it reflects any heal it applied —
+	// the same tree the next up-to-date check will hash (in the common clean case
+	// nothing was mutated, so this just re-hashes the unchanged tree). If hashing
+	// failed, skip writing — next run recomputes and rebuilds.
 	if finalHash, ferr := common.FlowsSourceHash(root); ferr == nil {
 		_ = os.WriteFile(hashFile, []byte(finalHash+"\n"), 0o644)
 	}
 	return nil
+}
+
+// tidyFlowsIfDrift brings flows/go.mod and go.sum into a buildable state WITHOUT
+// mutating them in the common case. The committed flows/go.mod is the source of
+// truth and, for the pinned flow/flow-sdk submodules, is already complete (do
+// reaches only stdlib + the two locally-replaced modules; flow/go.mod's
+// go-github/yaml are pruned out). In that case `go mod tidy -diff` writes nothing
+// and exits 0 (offline-clean, no network), so the subsequent readonly build runs
+// hermetically and identically on every platform.
+//
+// Only a submodule bump that genuinely changes the import graph makes go.mod
+// drift; -diff detects that and exits non-zero, and we self-heal with a real
+// `go mod tidy`. An old Go without the -diff flag also exits non-zero and falls
+// through to the real tidy, preserving prior behavior on that rare path.
+//
+// This replaced an UNCONDITIONAL build-time `go mod tidy` (T0750): on the Windows
+// gate that tidy rewrote go.mod into a state the readonly `go build` then rejected
+// ("updates to go.mod needed; to update it: go mod tidy"), and it dirtied the
+// worktree (triggering orchestrator "worktree is dirty" skips).
+func tidyFlowsIfDrift(flowsDir string) error {
+	if _, diffErr := common.RunOutputIn(flowsDir, "go", "mod", "tidy", "-diff"); diffErr != nil {
+		if err := common.RunIn(flowsDir, "go", "mod", "tidy"); err != nil {
+			return fmt.Errorf("go mod tidy (flows): %w", err)
+		}
+	}
+	return nil
+}
+
+// dumpFlowsBuildContext prints, to stderr, the environment and module state that
+// most often explains a flows `go build` failure (T0750): the relevant `go env`
+// knobs, the current flows/go.mod, and `go mod tidy -diff` output. It is
+// best-effort — every probe's error is swallowed — so a recurrence is
+// self-explaining instead of a bare `exit status 1`, especially on CI runners
+// (e.g. Windows) we cannot reproduce locally.
+func dumpFlowsBuildContext(flowsDir string) {
+	fmt.Fprintln(os.Stderr, "--- flows build failed; dumping context (T0750) ---")
+	if env, err := common.RunOutputIn(flowsDir, "go", "env", "GOFLAGS", "GOPROXY", "GOTOOLCHAIN", "GOMODCACHE"); err == nil {
+		fmt.Fprintf(os.Stderr, "go env GOFLAGS/GOPROXY/GOTOOLCHAIN/GOMODCACHE:\n%s\n", env)
+	}
+	if mod, err := os.ReadFile(filepath.Join(flowsDir, "go.mod")); err == nil {
+		fmt.Fprintf(os.Stderr, "flows/go.mod:\n%s\n", mod)
+	}
+	// `go mod tidy -diff` exits non-zero on drift (and on an old Go without the
+	// flag), so capture combined output directly — the diff text is exactly what
+	// we want printed even when the command exits non-zero.
+	diffCmd := exec.Command("go", "mod", "tidy", "-diff")
+	diffCmd.Dir = flowsDir
+	if diff, _ := diffCmd.CombinedOutput(); len(diff) > 0 {
+		fmt.Fprintf(os.Stderr, "go mod tidy -diff:\n%s\n", diff)
+	}
+	fmt.Fprintln(os.Stderr, "--- end flows build context ---")
 }
 
 // ensureFlowSubmodules makes the flow submodules available at <root>/flow-sdk

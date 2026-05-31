@@ -1,6 +1,8 @@
 package common
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -494,5 +496,121 @@ func TestParseTestEntries_CompilationTimeoutOutcome(t *testing.T) {
 	}
 	if e.File != "tests/big.pr" {
 		t.Errorf("File = %q", e.File)
+	}
+}
+
+// T0749: under wasm32-wasi, passing batch tests must carry both file and test
+// name (via the runner's -report-json sidecar), passing snapshot tests must stay
+// file-only, and failing-test serialization must be unchanged.
+func TestMergePassingTestNames_WasmSchema(t *testing.T) {
+	reportPath := filepath.Join(t.TempDir(), "report.json")
+	report := `{
+  "passing": [
+    {"file": "std/bool_test.pr", "test": "test_and", "elapsed": 0.009},
+    {"file": "std/bool_test.pr", "test": "test_or", "elapsed": 0.001}
+  ]
+}`
+	if err := os.WriteFile(reportPath, []byte(report), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := []GateTestEntry{
+		// Passing batch file: parser records it file-only (no test name).
+		{Target: "wasm32-wasi", File: "std/bool_test.pr", Outcome: "pass", Elapsed: 0.012},
+		// Passing snapshot file: also file-only, but absent from the report.
+		{Target: "wasm32-wasi", File: "e2e/snapshot.pr", Outcome: "pass", Elapsed: 0.230},
+		// A failing test already carries its name and must be left untouched.
+		{Target: "wasm32-wasi", File: "e2e/strings.pr", Test: "test_split", Outcome: "FAIL", Context: "panic: assertion failed"},
+	}
+
+	got := MergePassingTestNames("wasm32-wasi", entries, reportPath)
+
+	// 2 expanded batch entries + 1 snapshot (unchanged) + 1 FAIL (unchanged).
+	if len(got) != 4 {
+		t.Fatalf("expected 4 entries, got %d: %+v", len(got), got)
+	}
+
+	for i, want := range []struct {
+		test    string
+		elapsed float64
+	}{{"test_and", 0.009}, {"test_or", 0.001}} {
+		e := got[i]
+		if e.File != "std/bool_test.pr" || e.Test != want.test || e.Outcome != "pass" ||
+			e.Target != "wasm32-wasi" || e.Elapsed != want.elapsed {
+			t.Errorf("got[%d] = %+v, want file=std/bool_test.pr test=%s pass wasm32-wasi elapsed=%v",
+				i, e, want.test, want.elapsed)
+		}
+	}
+
+	if snap := got[2]; snap.File != "e2e/snapshot.pr" || snap.Test != "" || snap.Outcome != "pass" {
+		t.Errorf("snapshot entry must stay file-only, got %+v", snap)
+	}
+
+	if fail := got[3]; fail != entries[2] {
+		t.Errorf("failing entry changed: got %+v want %+v", fail, entries[2])
+	}
+}
+
+func TestMergePassingTestNames_MissingReport(t *testing.T) {
+	entries := []GateTestEntry{
+		{Target: "wasm32-wasi", File: "std/bool_test.pr", Outcome: "pass", Elapsed: 0.012},
+	}
+	got := MergePassingTestNames("wasm32-wasi", entries, filepath.Join(t.TempDir(), "missing.json"))
+	if len(got) != 1 || got[0] != entries[0] {
+		t.Fatalf("missing report should return entries unchanged, got %+v", got)
+	}
+}
+
+func TestMergePassingTestNames_EmptyPath(t *testing.T) {
+	entries := []GateTestEntry{{Target: "wasm32-wasi", File: "x.pr", Outcome: "pass"}}
+	got := MergePassingTestNames("wasm32-wasi", entries, "")
+	if len(got) != 1 || got[0] != entries[0] {
+		t.Fatalf("empty report path should return entries unchanged, got %+v", got)
+	}
+}
+
+func TestMergePassingTestNames_MalformedReport(t *testing.T) {
+	// A corrupt sidecar (e.g. a runner killed mid-write) must degrade safely to
+	// "no expansion", never fail the gate or panic.
+	reportPath := filepath.Join(t.TempDir(), "report.json")
+	if err := os.WriteFile(reportPath, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries := []GateTestEntry{{Target: "wasm32-wasi", File: "std/bool_test.pr", Outcome: "pass", Elapsed: 0.012}}
+	got := MergePassingTestNames("wasm32-wasi", entries, reportPath)
+	if len(got) != 1 || got[0] != entries[0] {
+		t.Fatalf("malformed report should return entries unchanged, got %+v", got)
+	}
+}
+
+func TestMergePassingTestNames_EmptyPassing(t *testing.T) {
+	// A well-formed report with no passing records (e.g. an all-failing run)
+	// leaves the file-only pass entry untouched rather than dropping it.
+	reportPath := filepath.Join(t.TempDir(), "report.json")
+	if err := os.WriteFile(reportPath, []byte(`{"passing": []}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries := []GateTestEntry{{Target: "wasm32-wasi", File: "std/bool_test.pr", Outcome: "pass", Elapsed: 0.012}}
+	got := MergePassingTestNames("wasm32-wasi", entries, reportPath)
+	if len(got) != 1 || got[0] != entries[0] {
+		t.Fatalf("empty passing list should return entries unchanged, got %+v", got)
+	}
+}
+
+// T0752: a file present in the report but whose gate entry is FAIL (its own
+// failing sibling shadows the file-level entry) must not be expanded into pass
+// entries — only file-only "pass" entries are rewritten.
+func TestMergePassingTestNames_FailingFileNotExpanded(t *testing.T) {
+	reportPath := filepath.Join(t.TempDir(), "report.json")
+	report := `{"passing": [{"file": "std/mixed_test.pr", "test": "test_ok", "elapsed": 0.003}]}`
+	if err := os.WriteFile(reportPath, []byte(report), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries := []GateTestEntry{
+		{Target: "wasm32-wasi", File: "std/mixed_test.pr", Test: "test_broken", Outcome: "FAIL", Context: "panic"},
+	}
+	got := MergePassingTestNames("wasm32-wasi", entries, reportPath)
+	if len(got) != 1 || got[0] != entries[0] {
+		t.Fatalf("FAIL entry for a reported file must be left untouched, got %+v", got)
 	}
 }

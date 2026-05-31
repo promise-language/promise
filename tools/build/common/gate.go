@@ -75,18 +75,32 @@ func runGateTest(root string, args []string) error {
 
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
+	// T0749: sidecar paths for the runner's passing-test reports. They let the
+	// gate expand file-only pass entries into per-(file, test) records so the
+	// tracker can correlate test identity across runs (passing batch tests are
+	// otherwise recorded as file-only, unlike failing tests which carry names).
+	hostReport := filepath.Join(os.TempDir(), "promise_gate_report_host.json")
+	wasmReport := filepath.Join(os.TempDir(), "promise_gate_report_wasm.json")
+	// Remove any stale report left by a prior hard-killed run so that if this
+	// run's runner is itself killed before writing, MergePassingTestNames reads
+	// nothing (a safe no-op) rather than stale (file, test) data from another run.
+	os.Remove(hostReport)
+	os.Remove(wasmReport)
+	defer os.Remove(hostReport)
+	defer os.Remove(wasmReport)
+
 	// Run host tests — tee to stderr so stdout is clean for JSON. Filter out
 	// passing-test lines from the console; the captured output retains them
 	// so the JSON envelope still records every test (T0323).
 	fmt.Fprintf(os.Stderr, "Running promise tests (%s)...\n", hostTarget)
-	hostOutput, hostErr := RunPromiseTestsCaptureFiltered(root, "")
+	hostOutput, hostErr := RunPromiseTestsCaptureFiltered(root, "", hostReport)
 
 	// Run wasm tests if requested.
 	var wasmOutput string
 	var wasmErr error
 	if wasm {
 		fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-wasi)...\n")
-		wasmOutput, wasmErr = RunPromiseTestsCaptureFiltered(root, "wasm32-wasi")
+		wasmOutput, wasmErr = RunPromiseTestsCaptureFiltered(root, "wasm32-wasi", wasmReport)
 	}
 
 	// Collect gate values.
@@ -113,10 +127,11 @@ func runGateTest(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	// Build per-test entries for the gate output.
-	entries := ParseTestEntries(hostTarget, hostOutput)
+	// Build per-test entries for the gate output. T0749: merge the runner's
+	// passing-test report so passing batch tests carry their (file, test) name.
+	entries := MergePassingTestNames(hostTarget, ParseTestEntries(hostTarget, hostOutput), hostReport)
 	if wasm {
-		entries = append(entries, ParseTestEntries("wasm32-wasi", wasmOutput)...)
+		entries = append(entries, MergePassingTestNames("wasm32-wasi", ParseTestEntries("wasm32-wasi", wasmOutput), wasmReport)...)
 	}
 
 	// Output GateOutput JSON to stdout (machine-readable).
@@ -172,11 +187,18 @@ func runGateWasmTests(root string, args []string) error {
 
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
+	// T0749: sidecar path for the runner's passing-test report (see runGateTest).
+	wasmReport := filepath.Join(os.TempDir(), "promise_gate_report_wasm.json")
+	// Remove any stale report up-front so a runner killed before writing reads
+	// nothing (safe no-op) rather than stale data from another run.
+	os.Remove(wasmReport)
+	defer os.Remove(wasmReport)
+
 	// Run wasm tests only — tee to stderr so stdout is clean for JSON. Filter
 	// out passing-test lines from the console; captured output retains them
 	// for the JSON envelope (T0323).
 	fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-wasi)...\n")
-	wasmOutput, wasmErr := RunPromiseTestsCaptureFiltered(root, "wasm32-wasi")
+	wasmOutput, wasmErr := RunPromiseTestsCaptureFiltered(root, "wasm32-wasi", wasmReport)
 
 	// Collect gate values.
 	gv := &GateValues{
@@ -195,8 +217,9 @@ func runGateWasmTests(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	// Build per-test entries for the gate output.
-	wasmEntries := ParseTestEntries("wasm32-wasi", wasmOutput)
+	// Build per-test entries for the gate output. T0749: merge the runner's
+	// passing-test report so passing batch tests carry their (file, test) name.
+	wasmEntries := MergePassingTestNames("wasm32-wasi", ParseTestEntries("wasm32-wasi", wasmOutput), wasmReport)
 
 	// Output GateOutput JSON to stdout (machine-readable).
 	out := &GateOutput{Metrics: gv.Values, Tests: wasmEntries, Complete: "wasm-test"}

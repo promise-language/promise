@@ -1,6 +1,9 @@
 package common
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -153,4 +156,73 @@ func parseTestOutput(output string) []testResult {
 	}
 
 	return results
+}
+
+// reportTestRecord mirrors one entry of the test runner's -report-json sidecar
+// (written by compiler/cmd/promise): a passing batch test identified by
+// (file, test). T0749.
+type reportTestRecord struct {
+	File    string  `json:"file"`
+	Test    string  `json:"test"`
+	Elapsed float64 `json:"elapsed"`
+}
+
+// testReportFile is the -report-json envelope written by the test runner.
+type testReportFile struct {
+	Passing []reportTestRecord `json:"passing"`
+}
+
+// MergePassingTestNames expands passing batch-test file-only entries into one
+// entry per (file, test) using the runner's -report-json sidecar written during
+// the same test run. The compact test stdout the gate parses records a passing
+// batch file as a single file-only entry (no test name), while failing tests
+// already carry their names — so without this, a test that recovers from failing
+// to passing changes identity and the tracker can't correlate the two runs.
+//
+// Snapshot/E2E passes (absent from the report — they have no test-function name)
+// and every non-pass entry are left untouched, so failing-test serialization is
+// unchanged. A missing, empty, or unreadable report returns entries unchanged.
+// T0749.
+func MergePassingTestNames(target string, entries []GateTestEntry, reportPath string) []GateTestEntry {
+	if reportPath == "" {
+		return entries
+	}
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		// Missing report (e.g. a single-file run that writes none, or a crashed
+		// runner): leave entries as-is rather than failing the gate.
+		fmt.Fprintf(os.Stderr, "warning: cannot read test report %s: %v\n", reportPath, err)
+		return entries
+	}
+	var rep testReportFile
+	if err := json.Unmarshal(data, &rep); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot parse test report %s: %v\n", reportPath, err)
+		return entries
+	}
+	if len(rep.Passing) == 0 {
+		return entries
+	}
+	byFile := make(map[string][]reportTestRecord, len(rep.Passing))
+	for _, rec := range rep.Passing {
+		byFile[rec.File] = append(byFile[rec.File], rec)
+	}
+	out := make([]GateTestEntry, 0, len(entries))
+	for _, e := range entries {
+		recs, ok := byFile[e.File]
+		if e.Outcome == "pass" && e.Test == "" && ok {
+			// Replace the file-only pass entry with one entry per passing test.
+			for _, rec := range recs {
+				out = append(out, GateTestEntry{
+					Target:  target,
+					File:    e.File,
+					Test:    rec.Test,
+					Outcome: "pass",
+					Elapsed: rec.Elapsed,
+				})
+			}
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }

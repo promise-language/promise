@@ -145,12 +145,19 @@ func IsPromisePassLine(line string) bool {
 // RunPromiseTestsCaptureFiltered is like RunPromiseTestsCapture but suppresses
 // passing-test lines from the stderr stream the user sees. The full stdout is
 // still captured and returned so callers can build complete JSON output.
-func RunPromiseTestsCaptureFiltered(root, target string) (string, error) {
+// When reportJSON is non-empty, the runner also writes a machine-readable
+// passing-test report to that path (T0749) so the caller can recover per-test
+// names for passing batch tests, which the compact stdout omits.
+func RunPromiseTestsCaptureFiltered(root, target, reportJSON string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
-	args := []string{"test", "-timeout", "10", "tests/...", "modules/...", "examples/..."}
+	args := []string{"test", "-timeout", "10"}
 	if target != "" {
-		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...")
+		args = append(args, "-target", target)
 	}
+	if reportJSON != "" {
+		args = append(args, "-report-json", reportJSON)
+	}
+	args = append(args, "tests/...", "modules/...", "examples/...")
 	keep := func(line string) bool { return !IsPromisePassLine(line) }
 	return RunTeeStderrFiltered(root, promiseBin, keep, args...)
 }

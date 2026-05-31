@@ -6,6 +6,7 @@ import (
 	"context"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -986,6 +987,7 @@ func runTest(args []string) {
 	var targetTriple string                     // empty = host target
 	var outputFile string                       // stress report output file
 	var coverageMode bool                       // T0030: coverage instrumentation
+	var reportJSON string                       // T0749: passing-test report path (parent-only)
 	compileTimeout := 10 * time.Minute          // -compile-timeout (backstop for hung compilation)
 	memoryLimitBytes := defaultMemoryLimitBytes // T0689: default 2 GiB ceiling per test process
 	memoryLimitExplicit := false                // whether -memory-limit was passed
@@ -1070,6 +1072,9 @@ func runTest(args []string) {
 			i++
 		} else if args[i] == "-coverage" {
 			coverageMode = true
+		} else if args[i] == "-report-json" && i+1 < len(args) {
+			reportJSON = args[i+1]
+			i++
 		} else if args[i] == "-time-phases" {
 			timePhases = true
 		} else {
@@ -1078,7 +1083,7 @@ func runTest(args []string) {
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-compile-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] [-time-phases] <file.pr | dir | dir/...> ...")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-compile-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] [-report-json file] [-time-phases] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
 
@@ -1131,7 +1136,7 @@ func runTest(args []string) {
 	if len(allFiles) == 1 {
 		runTestFile(allFiles[0], cfg, targetTriple, coverageMode)
 	} else {
-		runTestFiles(allFiles, cfg, targetTriple, parallel, coverageMode)
+		runTestFiles(allFiles, cfg, targetTriple, parallel, coverageMode, reportJSON)
 	}
 }
 
@@ -1955,6 +1960,69 @@ func buildChildTestArgs(cfg testTimeoutConfig, targetTriple string, coverageMode
 	return testArgs
 }
 
+// passingTest is a single passing batch test recovered from a child test
+// process's stdout (T0749).
+type passingTest struct {
+	name    string
+	elapsed float64
+}
+
+// reportTestRecord is one entry in the -report-json sidecar: a passing batch
+// test identified by (file, test). Snapshot/E2E tests have no test-function
+// name and are intentionally absent (identified by file alone). T0749.
+type reportTestRecord struct {
+	File    string  `json:"file"`
+	Test    string  `json:"test"`
+	Elapsed float64 `json:"elapsed"`
+}
+
+// testReport is the envelope written by -report-json. The schema may grow;
+// "passing" lists per-(file, test) records for passing batch tests. T0749.
+type testReport struct {
+	Passing []reportTestRecord `json:"passing"`
+}
+
+// passingTestLineRe matches a passing batch-test line from a single-file child's
+// output, e.g. "pass (0.009s) test_and" (host) or "pass (0.009s) test_and
+// [wasm32-wasi]" (cross-target). A test name is a single whitespace-free
+// identifier, so capturing one non-space token naturally drops any trailing
+// " [target]" suffix. Snapshot/E2E files print uppercase "PASS (Xs)" with no
+// name and do not match.
+var passingTestLineRe = regexp.MustCompile(`^pass \(([\d.]+)s\) (\S+)`)
+
+// extractPassingTestNames returns the passing batch tests recorded in a
+// single-file child's captured output. Lines whose name contains ".pr" (e.g. an
+// aggregated file-level line) are skipped defensively. T0749.
+func extractPassingTestNames(childOutput string) []passingTest {
+	var out []passingTest
+	for _, line := range strings.Split(childOutput, "\n") {
+		m := passingTestLineRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		name := m[2]
+		if name == "" || strings.Contains(name, ".pr") {
+			continue
+		}
+		elapsed, _ := strconv.ParseFloat(m[1], 64)
+		out = append(out, passingTest{name: name, elapsed: elapsed})
+	}
+	return out
+}
+
+// writeTestReport writes the passing-test report to path. Best-effort: a marshal
+// or write error warns on stderr and never fails the test run. T0749.
+func writeTestReport(path string, records []reportTestRecord) {
+	data, err := json.MarshalIndent(testReport{Passing: records}, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot marshal test report: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot write test report %s: %v\n", path, err)
+	}
+}
+
 // runTestFiles runs tests from a list of .pr files, printing per-file results
 // and a combined summary at the end. Tests are compiled and run concurrently
 // up to the parallel limit. Results are printed in file order.
@@ -1966,7 +2034,7 @@ func buildChildTestArgs(cfg testTimeoutConfig, targetTriple string, coverageMode
 //     individual uses sum-of-per-test-timeouts + 30s. Both are safety nets only.
 //   - Parallelism: batch runs multiple files concurrently (resource contention
 //     possible under heavy load); individual runs one file at a time.
-func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, parallel int, coverageMode bool) {
+func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, parallel int, coverageMode bool, reportJSON string) {
 	unlock := module.LockBuildDirShared()
 	defer unlock()
 
@@ -2091,6 +2159,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	failedFiles := 0
 	var failures []failureInfo
 	var staleTests []string
+	var reportRecords []reportTestRecord // T0749: passing batch tests for -report-json
 
 	// Coverage aggregation: collect per-file stats from subprocess formatted output.
 	// Each subprocess prints "total: X% (Y/Z blocks)" which we parse.
@@ -2227,6 +2296,21 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				}
 			} else if sm := summaryRe.FindStringSubmatch(line); sm != nil {
 				summaryMatch = sm
+			}
+		}
+
+		// T0749: record passing batch-test names so the gate's -report-json
+		// sidecar can give each passing test a stable (file, test) identity.
+		// Snapshot/E2E files print uppercase "PASS" with no name and contribute
+		// nothing here, so they remain file-identified. relPath matches the file
+		// key the gate parses from the compact pass line printed below.
+		if reportJSON != "" {
+			for _, pt := range extractPassingTestNames(r.output) {
+				reportRecords = append(reportRecords, reportTestRecord{
+					File:    relPath,
+					Test:    pt.name,
+					Elapsed: pt.elapsed,
+				})
 			}
 		}
 
@@ -2413,6 +2497,12 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		} else {
 			fmt.Printf("pass (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 		}
+	}
+
+	// T0749: emit the machine-readable passing-test report (parent-only) before
+	// any exit path so the gate can correlate test identity by (file, test).
+	if reportJSON != "" {
+		writeTestReport(reportJSON, reportRecords)
 	}
 
 	if totalFiles == 0 {

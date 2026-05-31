@@ -26352,3 +26352,82 @@ func TestParenThisValueFieldPtrLvalueNoExtractFromPtr(t *testing.T) {
 		t.Fatal("expected T0613VTField.bump in IR")
 	}
 }
+
+// --- T0747: `this as!/as T` RTTI cast on a `this` receiver ---
+//
+// genExpr(this) yields a bare instance i8*, not the {vtable, instance} value
+// struct that the cast result paths assume. Before the fix, `(this as! T).field`
+// emitted `extractvalue i8* %p, 1` (opt-rejected) and `d := this as! T` /
+// `T? o = this as T` panicked in codegen storing the i8* into a value-struct
+// slot. The fix rebuilds the cast result as a {vtable, instance} value struct
+// (vtable loaded from the object's typeinfo chain, mirroring genVirtualBinaryOp).
+// The "no extractvalue from i8*" invariant guards the IR shape; the optional
+// case additionally guards against the codegen panic (generateIR would panic).
+
+// Forced cast + inline field access through `this`, both bare and paren subject.
+// The reconstruction (insertvalue into {i8*, i8*}) is what lets the downstream
+// field access extract from an aggregate instead of `extractvalue i8* ...`.
+func TestThisCastForcedFieldNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0747Base {
+			int n;
+			whoami(&this) string `+"`abstract"+`;
+			as_n(&this) int { return (this as! T0747Derived).n; }
+			as_n_bare(&this) int { return ((this) as! T0747Derived).n; }
+		}
+		type T0747Derived is T0747Base { whoami(&this) string { return "d"; } }
+		main() { T0747Base b = T0747Derived(n: 7); _ := b.as_n(); _ := b.as_n_bare(); }
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	asN := extractFunction(ir, "T0747Base.as_n")
+	if asN == "" {
+		t.Fatal("expected T0747Base.as_n in IR")
+	}
+	// The cast result is rebuilt as a {i8*, i8*} value struct (the fix); without
+	// it the function returned the raw i8* and the field read extracted from it.
+	assertContains(t, asN, "insertvalue { i8*, i8* }")
+}
+
+// Forced cast bound to a local, then a virtual method call on the cast result.
+// Before the fix this panicked in codegen (store i8* into {i8*,i8*}* var slot).
+// The reconstructed value struct carries the real vtable (loaded from typeinfo),
+// so the method call on the local dispatches correctly.
+func TestThisCastForcedLocalNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0747LBase {
+			int n;
+			whoami(&this) string `+"`abstract"+`;
+			as_str(&this) string { d := (this) as! T0747LDerived; return d.whoami(); }
+			as_str_bare(&this) string { d := this as! T0747LDerived; return d.whoami(); }
+		}
+		type T0747LDerived is T0747LBase { whoami(&this) string { return "d"; } }
+		main() { T0747LBase b = T0747LDerived(n: 7); _ := b.as_str(); _ := b.as_str_bare(); }
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0747LBase.as_str") == "" {
+		t.Fatal("expected T0747LBase.as_str in IR")
+	}
+}
+
+// Optional cast (`this as T`) through `this`. Before the fix this panicked in
+// codegen inside wrapOptional ("store operands are not compatible: src=i8*;
+// dst={ i8*, i8* }*"). generateIR not panicking is itself the regression guard.
+func TestThisCastOptionalNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0747OBase {
+			int n;
+			whoami(&this) string `+"`abstract"+`;
+			is_der(&this) bool {
+				T0747ODerived? o = this as T0747ODerived;
+				if o { return true; }
+				return false;
+			}
+		}
+		type T0747ODerived is T0747OBase { whoami(&this) string { return "d"; } }
+		main() { T0747OBase b = T0747ODerived(n: 7); _ := b.is_der(); }
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0747OBase.is_der") == "" {
+		t.Fatal("expected T0747OBase.is_der in IR")
+	}
+}

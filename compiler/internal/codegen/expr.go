@@ -10436,6 +10436,28 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
 	isMatch := c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
 
+	// T0747: For a `this` receiver, genExpr produced a bare instance i8*, not a
+	// {vtable, instance} value struct, so the result paths below (return /
+	// wrapOptional / downstream field access) would get an i8* where a value
+	// struct is required → invalid IR or a codegen panic. Rebuild the value
+	// struct, loading the vtable from the object's typeinfo chain — the same
+	// reconstruction used for virtual dispatch on a `this` receiver
+	// (genVirtualBinaryOp). RTTI casts apply only to reference types (value types
+	// have no `is` parents, so `this as! T` in a value-type method is
+	// sema-rejected); the value-type guard keeps that unreachable path untouched.
+	castResult := subject
+	if isThisReceiver(e.Expr) && (c.currentNamed == nil || !c.currentNamed.IsValueType()) {
+		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
+		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		vtableRaw := c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+		var vs value.Value = constant.NewUndef(userValueType())
+		vs = c.block.NewInsertValue(vs, vtableRaw, 0)
+		vs = c.block.NewInsertValue(vs, instance, 1) // instance == this i8* for reference types
+		castResult = vs
+	}
+
 	if e.Force {
 		// as! — panic if no match, return the value struct directly
 		okBlock := c.newBlock("cast.ok")
@@ -10448,7 +10470,7 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		c.emitPanicReturn()
 
 		c.block = okBlock
-		return subject // same value struct, type is verified
+		return castResult // same value struct, type is verified
 	}
 
 	// as — wrap in Optional { i1, { i8*, i8* } }. User types use value struct representation.
@@ -10459,7 +10481,7 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 
 	c.block = someBlock
 	optType := irtypes.NewStruct(irtypes.I1, userValueType())
-	someResult := c.wrapOptional(subject, optType)
+	someResult := c.wrapOptional(castResult, optType)
 	c.block.NewBr(mergeBlock)
 	someEnd := c.block
 

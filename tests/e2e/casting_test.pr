@@ -160,3 +160,62 @@ test_type_check_loop() `test {
   assert(squares == 1, "1 square");
   assert(triangles == 1, "1 triangle");
 }
+
+// --- RTTI downcast (as! / as) binding to a local: must not double-free (T0747) ---
+// `d := <borrow> as!/as T` is a non-consuming *view* — the ownership pass never
+// moves the subject, so the subject keeps ownership and the cast local must NOT
+// get its own drop binding. The inherited `name` string field (heap) surfaces a
+// missed clear as a double-free segfault or a leak. Casting an *owned temp*
+// (factory result) instead legitimately transfers ownership to the local.
+
+helper_param_downcast(Shape s) f64 {
+  // s is a borrowed parameter; the cast aliases it.
+  c := s as! Circle;
+  return c.radius;
+}
+
+make_circle() Shape {
+  return Circle(name: "made", radius: 9.0);
+}
+
+test_downcast_local_owned_subject() `test {
+  // Owned local subject, cast result bound to a local.
+  Shape s = Circle(name: "circle", radius: 5.0);
+  c := s as! Circle;
+  assert(c.radius == 5.0, "downcast owned-local subject, bound to local");
+  assert(c.name == "circle", "downcast local reads inherited heap field, no double-free");
+}
+
+test_downcast_borrowed_param_subject() `test {
+  Shape s = Circle(name: "circle", radius: 2.5);
+  assert(helper_param_downcast(s) == 2.5, "downcast borrowed param, bound to local");
+}
+
+test_downcast_inline_field() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  assert((s as! Square).side == 3.0, "inline downcast field access (no local binding)");
+}
+
+test_downcast_owned_temp_subject() `test {
+  // Owned-temp subject (factory result): the local owns the freshly made value.
+  c := make_circle() as! Circle;
+  assert(c.radius == 9.0, "downcast owned-temp subject keeps ownership");
+  assert(c.name == "made", "downcast owned-temp reads heap field, no leak");
+}
+
+test_downcast_optional_presence() `test {
+  Shape s = Circle(name: "circle", radius: 1.0);
+  // Presence narrowing only — unwrapping a borrow-holding optional is T0753.
+  Circle? o = s as Circle;
+  bool present = false;
+  if o {
+    present = true;
+  }
+  assert(present, "optional downcast present when subject matches");
+  Square? sq = s as Square;
+  bool absent = true;
+  if sq {
+    absent = false;
+  }
+  assert(absent, "optional downcast absent when subject does not match");
+}

@@ -456,6 +456,91 @@ test_paren_this_is_generic() `test {
   assert(si.is_intbox_nested(), "((this)) is IBox[int] true for IBox[int]");
 }
 
+// ---------------- RTTI cast (as! / as) on a `this` receiver (T0747) ----------
+// genExpr(this) yields a bare instance i8*, not a {vtable, instance} value
+// struct, so the cast *result* was mishandled: `(this as! T).field` emitted
+// invalid IR (extractvalue from i8*) and `d := this as! T` / `T? o = this as T`
+// panicked in codegen. The fix rebuilds the cast result as a value struct
+// (vtable loaded from the object's typeinfo chain) and, for a cast of a borrow
+// bound to a local, clears the local's drop flag so it doesn't double-free the
+// aliased instance. String fields surface any missed ownership as a leak or a
+// double-free segfault. Cast methods live on the abstract base, so `this` is
+// statically `CShape` and the downcast is a real RTTI query.
+type CShape {
+  int sides;
+  kind(&this) string `abstract;
+  // forced cast + inline field access (int field), bare and paren `this`.
+  csq_sides(&this) int {
+    return (this as! CSquare).sides;
+  }
+  csq_sides_p(&this) int {
+    return ((this) as! CSquare).sides;
+  }
+  // forced cast + inline virtual method call (exercises reconstructed vtable).
+  csq_kind(&this) string {
+    return (this as! CSquare).kind();
+  }
+  // forced cast bound to a local, then method call / string-field read.
+  csq_local(&this) string {
+    s := this as! CSquare;
+    return s.kind();
+  }
+  csq_paren_local(&this) string {
+    s := (this) as! CSquare;
+    return s.kind();
+  }
+  csq_local_field(&this) string {
+    s := this as! CSquare;
+    return s.label;
+  }
+  // optional cast: presence narrowing only (no unwrap — unwrapping a
+  // borrow-holding optional is the separate T0753 double-free).
+  csq_is_square(&this) bool {
+    CSquare? o = this as CSquare;
+    if o {
+      return true;
+    }
+    return false;
+  }
+}
+type CSquare is CShape {
+  string label;
+  kind(&this) string {
+    return "square";
+  }
+}
+type CTriangle is CShape {
+  string label;
+  kind(&this) string {
+    return "triangle";
+  }
+}
+
+test_this_cast_forced_field() `test {
+  CShape s = CSquare(sides: 4, label: "sq");
+  assert(s.csq_sides() == 4, "(this as! CSquare).sides");
+  assert(s.csq_sides_p() == 4, "((this) as! CSquare).sides");
+}
+
+test_this_cast_forced_method() `test {
+  CShape s = CSquare(sides: 4, label: "sq");
+  assert(s.csq_kind() == "square", "(this as! CSquare).kind() via reconstructed vtable");
+}
+
+test_this_cast_forced_local() `test {
+  CShape s = CSquare(sides: 4, label: "sq");
+  assert(s.csq_local() == "square", "bare local: s := this as! CSquare; s.kind()");
+  assert(s.csq_paren_local() == "square", "paren local: s := (this) as! CSquare; s.kind()");
+  assert(s.csq_local_field() == "sq", "local cast then string field read, no double-free");
+}
+
+test_this_cast_optional_present() `test {
+  CShape s = CSquare(sides: 4, label: "sq");
+  CShape t = CTriangle(sides: 3, label: "tri");
+  assert(s.csq_is_square(), "this as CSquare present when this is CSquare");
+  assert(!t.csq_is_square(), "this as CSquare absent when this is CTriangle");
+}
+
 // NOTE: `this[i]` (read) and `this[i] = v` (write) on a type's *own*
 // user-defined `[]`/`[]=` operator are NOT covered here. Both bare and
 // paren-wrapped forms emit invalid IR (extractvalue from i8*) because
@@ -464,15 +549,15 @@ test_paren_this_is_generic() `test {
 // separately as T0745 (do not expand T0613). Once T0745 is fixed, add the
 // `(this)[i]` read/write cases here.
 //
-// NOTE: Two more `this`-receiver gates touched by T0613's paren-peel are NOT
-// covered here because the underlying feature is broken for BOTH bare and
-// paren `this` (so the peel is correct but un-exercisable end-to-end):
-//   - `(this) as T` / `(this) as! T` RTTI cast on a `this` receiver — the cast
-//     *result* is mishandled (returns the raw i8* / stores it into a value-struct
-//     slot). Bare `this as! T` fails identically. Filed as T0747.
-//   - value-type binary operator with `this` as the right-hand *argument*
-//     (`other < this` where `<` is on a value type) — the arg-wrap stores the
-//     i8* into an embedded data field. Bare `other < this` fails identically.
-//     Filed as T0748. (The heap-type form of this gate IS covered above by
-//     test_paren_this_operator_arg.)
-// Once T0747 / T0748 are fixed, add the corresponding `(this)` cases here.
+// NOTE: `(this) as!/as T` RTTI cast on a `this` receiver — FIXED (T0747) and
+// covered above by the test_this_cast_* family (forced field/method, forced
+// local binding, optional presence). Optional casts are exercised only via
+// presence narrowing (`if o { }`): *unwrapping* an optional that holds a borrow
+// (e.g. `(this as T)? _ { ... }`) double-frees — a separate, deeper pre-existing
+// bug filed as T0753. Once T0753 is fixed, add unwrap-based optional cast cases.
+//
+// NOTE: value-type binary operator with `this` as the right-hand *argument*
+// (`other < this` where `<` is on a value type) is still broken for BOTH bare
+// and paren `this` — the arg-wrap stores the i8* into an embedded data field.
+// Filed as T0748. (The heap-type form of this gate IS covered above by
+// test_paren_this_operator_arg.) Once T0748 is fixed, add the `(this)` case here.

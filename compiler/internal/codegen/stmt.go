@@ -240,6 +240,45 @@ func (c *Compiler) isBorrowedExpr(expr ast.Expr) bool {
 	return false
 }
 
+// isRttiCastBorrow reports whether expr is a user-type RTTI downcast (`x as T` /
+// `x as! T`) whose subject is a non-owning reference (this / variable / field /
+// element access). Such a cast is a non-consuming *view*: the ownership pass
+// never moves the subject (ownership/expr.go's CastExpr case only recurses into
+// the subject, it never calls tryMoveConsume), so the cast result aliases the
+// subject's instance. Binding it to a local must therefore NOT give that local
+// its own drop binding — otherwise both the subject's owner and the cast local
+// free the same instance (T0747 double-free). Excludes:
+//   - optional-unwrap casts (`opt as! T`): those extract and own the inner value.
+//   - primitive scalar casts (`x as i32`): those produce a fresh value (and carry
+//     no drop binding anyway).
+//   - casts of owned temps (factory()/constructor results): the local legitimately
+//     claims ownership of the freshly produced instance via claimHeapTemp, so its
+//     flag must stay set.
+func (c *Compiler) isRttiCastBorrow(expr ast.Expr) bool {
+	cast, ok := unwrapDestructureParens(expr).(*ast.CastExpr)
+	if !ok {
+		return false
+	}
+	subj := unwrapDestructureParens(cast.Expr)
+	switch subj.(type) {
+	case *ast.ThisExpr, *ast.IdentExpr, *ast.MemberExpr, *ast.IndexExpr:
+		// borrow-producing subject — the cast aliases it
+	default:
+		return false
+	}
+	srcType := c.info.Types[subj]
+	if c.typeSubst != nil && srcType != nil {
+		srcType = types.Substitute(srcType, c.typeSubst)
+	}
+	if _, isOpt := srcType.(*types.Optional); isOpt {
+		return false // optional-unwrap — owns the extracted inner value
+	}
+	if srcNamed := extractNamed(srcType); srcNamed != nil && isPrimitiveScalar(srcNamed) {
+		return false // scalar conversion — fresh value, not an alias
+	}
+	return true
+}
+
 // isGetterCallExpr reports whether expr is a MemberExpr whose Field resolves
 // to a getter method on its target's type. Getters return owned values
 // (tracked via trackGetterResult/claimStringTemp), so the LHS of
@@ -1156,6 +1195,12 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if c.isBorrowedExpr(s.Value) {
 		c.clearDropFlag(s.Name)
 	}
+	// T0747: a user-type RTTI cast of a borrow (`d := x as!/as T`) is a
+	// non-consuming view — the subject keeps ownership. Clear the LHS drop flag
+	// so the cast local doesn't double-free the aliased instance at scope exit.
+	if c.isRttiCastBorrow(s.Value) {
+		c.clearDropFlag(s.Name)
+	}
 	c.maybeRegisterEnvFree(s.Name, alloca, dropType)
 }
 
@@ -1381,6 +1426,12 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// is a non-owning reference. Clear the drop flag so scope cleanup
 	// doesn't double-free with the owner's drop.
 	if c.isBorrowedExpr(s.Value) {
+		c.clearDropFlag(s.Name)
+	}
+	// T0747: a user-type RTTI cast of a borrow (`d := x as!/as T`) is a
+	// non-consuming view — the subject keeps ownership. Clear the LHS drop flag
+	// so the cast local doesn't double-free the aliased instance at scope exit.
+	if c.isRttiCastBorrow(s.Value) {
 		c.clearDropFlag(s.Name)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ)

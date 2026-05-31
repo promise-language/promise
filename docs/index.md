@@ -23,7 +23,8 @@
 
 ## Platform Targets
 
-- [distribution.md](distribution.md) — Self-contained binaries for Linux/macOS, multi-epoch toolchain management.
+- [distribution.md](distribution.md) — Install model: thin/full binaries, content-addressed dependency store, the Promise stub, epoch dispatch.
+- [release-automation.md](release-automation.md) — GitHub release pipeline: prebuilt blobs, hash-embedded manifest, thin/full + stub builds, publishing.
 - [windows-support.md](windows-support.md) — Native MSVC ABI, Windows SDK, self-contained compiler binary.
 - [wasm-bindings.md](wasm-bindings.md) — WIT/WebIDL ingestion for safe WASM host bindings.
 - [size-optimization.md](size-optimization.md) — Binary size tracking and regression prevention across all targets.

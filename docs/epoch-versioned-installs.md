@@ -1,5 +1,7 @@
 # D0007: Epoch-Versioned Side-by-Side Installs
 
+> **Updated by the distribution model (2026-05-30).** Two parts of this plan are superseded by [distribution.md](distribution.md): (1) per-epoch `bin/llvm/` copies are replaced by a **shared content-addressed blob store** (`~/.promise/cache/blobs/`) that dedups dependencies across epochs and targets — epoch dirs reference blobs by hash rather than copying them ([distribution.md](distribution.md) §1.3, §4); (2) the Phase 2 *shim-in-binary* is the **current** implementation, but the **target** is a dedicated tiny **stub** (written in Promise, extracted at install, forward-only) — see [distribution.md](distribution.md) §2.5. The per-epoch dispatch *semantics* below remain correct; only the mechanism (shim-in-binary → extracted stub) and the dependency layout (per-epoch copy → shared blob store) change. Inline notes below mark the affected sections.
+
 ## Context
 
 Promise uses a mono-versioned catalog system where each "epoch" (e.g., `2026.0`) is an atomic release of the entire platform: compiler + standard library + catalog modules + LLVM tools. The compiler binary is self-contained (~61MB), embedding everything via `go:embed`.
@@ -18,25 +20,29 @@ This plan implements the multi-epoch layout already designed in `docs/module-sys
 
 ### Directory layout
 
+> **Layout note (superseded).** The per-epoch `bin/llvm/` and `lib/crt/` copies shown below are replaced by the shared content-addressed blob store (`~/.promise/cache/blobs/sha256/<hash>`) — each epoch *references* the LLVM/CRT blobs it needs by hash instead of holding its own copy. The target layout is in [distribution.md](distribution.md) §2.4 / §4. The original per-epoch layout is retained here for historical context:
+
 ```
 ~/.promise/
-  bin/promise               # stub (copy of binary, becomes shim in Phase 2)
+  bin/promise               # stub (copy of binary, becomes shim in Phase 2; TARGET: tiny extracted stub)
   active                    # single line: "2026.0" (the default epoch)
+  cache/
+    blobs/sha256/<hash>     # TARGET: shared content-addressed dependency store (LLVM, CRT, wasm runner, sysroots)
   epochs/
-    dev/                    # local dev builds (via ./build + bin/install.sh)
+    dev/                    # local dev builds (via bin/build + install)
       bin/promise
-      bin/llvm/
+      bin/llvm/             # SUPERSEDED → referenced from cache/blobs/ by hash
       lib/std/
-      lib/crt/
+      lib/crt/              # SUPERSEDED → referenced from cache/blobs/ by hash
       lib/modules/
       cache/
         build/
         modules/
-    2026.0/                 # release epoch (via promise sync or promise install)
+    2026.0/                 # release epoch (via promise update/sync or promise install)
       bin/promise           # compiler binary for this epoch
-      bin/llvm/             # extracted LLVM tools (release builds)
+      bin/llvm/             # SUPERSEDED → referenced from cache/blobs/ by hash
       lib/std/              # extracted standard library
-      lib/crt/              # musl CRT (Linux)
+      lib/crt/              # SUPERSEDED → referenced from cache/blobs/ by hash
       lib/modules/          # extracted catalog modules (io, json, etc.)
       cache/
         build/              # build cache for this epoch (compiled .o, test binaries)
@@ -97,9 +103,11 @@ No changes needed — the existing "sibling of binary" search (`filepath.Dir(os.
 
 **Goal**: Replace the stub at `~/.promise/bin/promise` with dispatch logic that reads the project epoch and delegates to the correct epoch's compiler.
 
-### Design: shim-in-binary
+> **Mechanism superseded — shim-in-binary is the *current* implementation, a dedicated stub is the *target*.** The shim-in-binary design below is what ships today ([shim.go](../compiler/cmd/promise/shim.go)). The target is a **separate tiny stub** (written in Promise, ~20 KB; extracted at install; forward-only updated) that `exec`-replaces itself with the epoch compiler — see [distribution.md](distribution.md) §2.5 for the rationale (delete all trampoline logic from the compiler; same-PID `exec` for correct signal/PID semantics; "you get what you run" when invoking the compiler directly, with epoch mismatch a *warning* not a silent hand-off). The dispatch *semantics* in this section (epoch resolution order, excluded commands, single-file fallback) carry over to the stub unchanged.
 
-The shim is **not** a separate program. It's a fast-path check at the top of `main()` in the existing compiler. This avoids maintaining a separate binary.
+### Design: shim-in-binary (current)
+
+The shim is **not** a separate program. It's a fast-path check at the top of `main()` in the existing compiler. This avoids maintaining a separate binary. *(Target: move this logic out into the dedicated Promise stub and remove `shimDispatch`/`PROMISE_NO_SHIM`/`.promise.shim` from the compiler entirely.)*
 
 ### New file: `compiler/cmd/promise/shim.go`
 

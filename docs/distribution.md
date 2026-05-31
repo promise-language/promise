@@ -1,451 +1,228 @@
 # Distribution & Installation
 
-> The self-contained binary model is implemented for Linux (amd64) and macOS (arm64 + amd64). Linux embeds LLVM tools + musl CRT for fully static binaries. macOS embeds LLVM tools (opt, llc, lld, libLLVM.dylib) but still requires Xcode Command Line Tools for the macOS SDK (sysroot for `-lSystem`). Windows support is in progress — PAL threading, linker, and SDK discovery implemented; needs end-to-end testing (see `docs/windows-support.md`). Multi-epoch toolchain management (`promise sync`, shim) is described in `docs/module-system.md` Section 7.
+> **Status (2026-05-30).** This document describes the **target** distribution architecture. Some of it is implemented today, some is planned; each section is marked. The headline change from the original model is twofold: (1) heavy dependencies (LLVM tools, wasm runner, CRTs, target sysroots) move from *embedded-in-the-binary* to a *content-addressed cache fetched on demand*, so the compiler ships in **thin** and **full** variants that behave identically; and (2) the on-`PATH` entry point becomes a **tiny stub** (written in Promise, extracted at install) instead of a full copy of the compiler. See §1 for the model, §7 / [release-automation.md](release-automation.md) for how releases are built and published.
+>
+> **Implemented today:** self-contained `--release` binary (embeds *everything* — LLVM, musl CRT, stdlib) on Linux (amd64) and macOS (arm64 + amd64); `promise install` with the epoch layout; epoch dispatch via *shim-in-binary*; `promise sync` to fetch epochs. **Planned:** thin/full split + content-addressed dependency store (§1, §4); the embedded Promise stub replacing shim-in-binary (§2.5); `promise update` self-update rename (§2.6); Windows zero-dependency install (§5.2). Windows compiler support itself is in progress (see [windows-support.md](windows-support.md)).
 
 ---
 
 ## 1. Design
 
-The Promise binary is fully self-contained. A single executable contains:
-- The compiler
-- The standard library (`std/*.pr`)
-- The LLVM toolchain (`opt`, `llc`, `lld`, compressed via `go:embed`)
-- The musl CRT (Linux static builds)
+Promise is distributed as **one downloadable artifact per platform** — the compiler binary. That single artifact is simultaneously:
 
-No system dependencies are required beyond the OS itself (Linux) or Xcode Command Line Tools (macOS). Users download the binary and run `promise install`, which sets everything up.
+- the **installer** (`promise install`),
+- the source of the on-`PATH` **stub** (extracted at install time),
+- the **compiler / tool / package manager**, and
+- the **self-updater** (`promise update`).
+
+These are *logically one thing* — you download one file — but the stub is *physically a separate, tiny program* carried inside the compiler and extracted during install (§2.5). This is the resolution of "same binary vs different binaries": ship one, extract the small piece.
+
+### 1.1 What is always in the binary vs fetched on demand
+
+The original model embedded **everything** in the binary (~61 MB on Linux, more on macOS). That does not scale: a single binary cannot carry every dependency for every *cross-compilation target*. The target model separates two classes of payload:
+
+| Class | Examples | How it's carried |
+|-------|----------|------------------|
+| **Always embedded** (small, always needed) | Compiler frontend + codegen, standard library source, the tiny stub, the **dependency manifest** | Compiled in / `go:embed` |
+| **Fetched on demand** (large, target-specific) | LLVM host tools (`opt`, `llc`, `lld`, `libLLVM`), wasm runner (`wasmtime`/Node harness), CRTs (musl), target sysroots | Content-addressed cache (§4) |
+
+The binary embeds a **manifest** — a list of `(logical name, sha256, size, fetch coordinates)` for every heavy dependency it might need. At the moment a dependency is required, the compiler looks it up in the shared content-addressed cache (`~/.promise/cache/blobs/sha256/<hash>`); if present it is used, if absent it is fetched from the release, **verified against the embedded hash**, cached, and used. The hash in the binary is the **trust anchor** — a fetched blob needs no separate signature, only a hash match.
+
+### 1.2 Thin and full variants
+
+Because dependencies are addressed by hash rather than embedded, every release produces two variants per platform:
+
+| Variant | Size (approx.) | Behavior |
+|---------|---------------|----------|
+| **thin** | ~20 MB | Embeds only the manifest. Fetches host toolchain blobs on first use. Needs the network once per (epoch, dependency). |
+| **full** | ~150 MB | Same binary, but ships the host-workflow blobs pre-staged into the cache (or embedded and extracted at install). Needs no network for the host's default workflow. The archival / air-gapped / "must still work in 5 years" choice. |
+
+Both behave identically — the only difference is the disk-vs-network tradeoff. `promise build hello.pr` on a thin binary fetches host LLVM the first time and is identical thereafter; the full binary never needs to.
+
+**"Full" means full for the host's default workflow — not for every target.** You cannot embed every target's toolchain, so **cross-target dependencies are always fetched on demand**, even on a full binary. Targeting `wasm32-wasi` or `linux-arm64` from a macOS host fetches those target blobs on first use regardless of variant.
+
+### 1.3 Why content-addressing (not per-epoch copies)
+
+A content-addressed store **deduplicates across epochs and targets**. Two installed epochs built on the same LLVM 22 share **one** cached copy keyed by hash, instead of each epoch carrying its own `bin/llvm/`. Epoch directories shrink to *references* (which blob hashes they need); `promise remove <epoch>` becomes "drop references, GC unreferenced blobs." This supersedes the per-epoch `bin/llvm/` layout in [epoch-versioned-installs.md](epoch-versioned-installs.md) — see §4.
 
 ---
 
 ## 2. Installation
 
-### 2.1 Linux & macOS — install script
+### 2.1 Linux & macOS — install script *(implemented; download semantics unchanged)*
 
 ```sh
 curl -sSf https://promise-lang.org/install.sh | sh
 ```
 
-This downloads `scripts/install.sh` from the CDN (backed by the GitHub release for the latest stable epoch). The script:
-
-1. Detects OS and architecture
-2. Downloads the matching binary from GitHub Releases
-3. Verifies the SHA256 checksum
-4. Runs `./binary install` — which does the actual setup (see §2.3)
-5. Prints PATH instructions
-
-To install a specific epoch:
+The script ([scripts/install.sh](../scripts/install.sh)) detects OS/arch, downloads the matching binary (thin by default) from GitHub Releases, verifies its SHA256 against `SHA256SUMS`, and runs `./binary install` (§2.4). Pin an epoch or pick the full variant:
 
 ```sh
 curl -sSf https://promise-lang.org/install.sh | sh -s -- --epoch 2026.0
+curl -sSf https://promise-lang.org/install.sh | sh -s -- --full
 ```
 
-### 2.2 Direct download
+### 2.2 Windows — install script *(planned)*
 
-The install script is a thin wrapper. Users can also install manually:
+Windows needs **two one-liners**, one per shell, because the PowerShell idiom does not work in `cmd.exe` (`irm`/`iex` are PowerShell cmdlets — pasting them into `cmd.exe` yields `'irm' is not recognized`). This mirrors the Claude CLI installer:
+
+```powershell
+# PowerShell
+irm https://promise-lang.org/install.ps1 | iex
+```
+
+```bat
+:: cmd.exe (curl.exe ships with Windows 10 1803+)
+curl -fsSL https://promise-lang.org/install.cmd -o install.cmd && install.cmd && del install.cmd
+```
+
+`install.ps1` is the real implementation (platform/arch detection, download, checksum, `promise install`, **User `PATH` via `[Environment]::SetEnvironmentVariable(..., 'User')`**). `install.cmd` is a **thin shim** that re-invokes PowerShell (`powershell -ExecutionPolicy Bypass -Command "irm … | iex"`) so there is a single real implementation. Direct download (§2.3) is the no-script fallback for locked-down environments.
+
+**Zero local dependencies is the bar.** The Windows artifact must embed the Windows SDK / UCRT link surface (`.lib` stubs) the same way macOS will embed its SDK stubs (§5) — installing on a fresh Windows machine must "just work" with no "install Visual Studio Build Tools ≥ version X first." See §5.2.
+
+### 2.3 Direct download *(implemented)*
 
 ```sh
-# Linux amd64
+# Linux amd64, thin
 curl -LO https://github.com/promise-language/promise/releases/latest/download/promise-linux-amd64
 chmod +x promise-linux-amd64
 ./promise-linux-amd64 install
 ```
 
-`promise install` handles everything from here.
+`promise install` handles everything from here. Append `-full` to the asset name for the full variant.
 
-### 2.3 What `promise install` does
+### 2.4 What `promise install` does *(install flow updated for the stub + blob model)*
 
-`promise install` (`runInstall()` in `cmd/promise/main.go`) copies and extracts itself into the Promise home directory (default `~/.promise/`, overridable via `PROMISE_HOME`):
+`promise install` (`runInstall()` in [cmd/promise/main.go](../compiler/cmd/promise/main.go)) installs into the Promise home directory (default `~/.promise/`, overridable via `PROMISE_HOME`):
+
+1. **Determine the embedded epoch** from the embedded catalog.
+2. **Install the compiler** → `~/.promise/epochs/<epoch>/bin/promise` (move/copy self).
+3. **Stage dependencies**: a *full* binary unpacks its bundled blobs into the content-addressed cache (`~/.promise/cache/blobs/sha256/<hash>`); a *thin* binary records the manifest so they are fetched on first use.
+4. **Extract the stub — forward-only** → `~/.promise/bin/promise`. The stub is replaced **only if the embedded stub's version is newer** than the installed one (§2.5). Stubs are never downgraded.
+5. **Write `~/.promise/active`** with the current epoch.
+6. **Set `PATH`**: print the export line (Unix) or set the User `PATH` env var (Windows).
+
+Resulting layout:
 
 ```
 ~/.promise/
   bin/
-    promise          ← the binary (copied from the downloaded file)
-    llvm/            ← LLVM tools extracted from the binary (Linux + macOS)
-  lib/
-    std/             ← embedded standard library source
-    crt/             ← musl CRT objects (Linux only)
+    promise              ← the tiny stub (Promise-compiled, forward-updated)
+  active                 ← "2026.0"
+  epochs/
+    2026.0/bin/promise   ← the real compiler for this epoch
+  cache/
+    blobs/sha256/<hash>  ← content-addressed dependency store (shared)
+    build/               ← compile cache
 ```
 
-It then prints the PATH export line. Users add `~/.promise/bin` to their `PATH` once; all future `promise` invocations use the installed binary.
+### 2.5 The stub (launcher) *(planned — replaces shim-in-binary)*
 
-### 2.4 Updating
+The on-`PATH` `~/.promise/bin/promise` is the **stub**: the thing the user runs, which does *not* compile anything itself — it locates the correct epoch's real compiler and hands off to it. (Synonyms seen elsewhere: *shim*, *launcher*, *trampoline*; they all mean this one object.)
 
-Re-running `promise install` with a newer binary replaces the installation in place. For epoch upgrades, `promise sync` (described in `docs/module-system.md` §7) downloads the correct binary for a given epoch and calls the equivalent of `promise install` on it. Until multi-epoch support is implemented, re-running the install script with `--epoch` is the update mechanism.
+**Today** this is *shim-in-binary*: `~/.promise/bin/promise` is a full copy of the compiler that detects its stub role via a `.promise.shim` marker and re-execs the epoch binary ([shim.go](../compiler/cmd/promise/shim.go)). **The target** is a dedicated tiny stub. The difference is not only disk and cold-start — it is a real simplification and reliability win:
 
-### 2.5 Windows
+- **The compiler stops being a trampoline.** Delete `shimDispatch()`, the `PROMISE_NO_SHIM` recursion guard, the `.promise.shim` marker, and every "am I a stub or the compiler?" branch from the compiler. **You get what you run**: invoking the big binary directly always runs the compiler, full stop — no surprise hand-off. If the directly-invoked compiler's epoch differs from the project's pinned epoch, that is a **warning, not a silent trampoline** to something unexpected.
+- **The stub `exec`-replaces itself** with the real compiler (Unix `execve`; Windows uses the closest available, see caveat). Same process, same PID. This eliminates a whole class of bugs: record-the-PID / run / kill-the-PID no longer leaves the real compiler alive as an orphan, and signals reach the compiler directly. (Under shim-in-binary's child-process model the stub and compiler are two processes — killing one stranded the other.)
+- **Written in Promise.** A hello-world Promise binary is ~20 KB versus ~3 MB for the equivalent Go binary. The stub is tiny, dogfoods the language ("our launcher is written in Promise"), and compiles to a standalone native executable that needs no toolchain to run. It is built per target by the compiler at release time.
 
-Windows support uses native MSVC ABI (`x86_64-pc-windows-msvc`). The compiler binary `promise.exe` is built on Windows and produces Windows executables by compiling LLVM IR through `opt` → `llc` → `lld-link`, linking against the Windows SDK and UCRT.
+**Stub responsibilities (deliberately minimal):**
+1. Resolve the target epoch: `PROMISE_EPOCH` → project `promise.toml` `[module].epoch` → `~/.promise/active`.
+2. `exec` `~/.promise/epochs/<epoch>/bin/promise`, forwarding all args.
+3. If that epoch is not installed → clear error (`run: promise update <epoch>`).
 
-**Prerequisites:** Visual Studio Build Tools (provides MSVC libs + Windows SDK) and LLVM 22+. See `docs/windows-support.md` for full details.
+The stub knows only the *epoch-resolution contract* (the `active` file format and the `promise.toml` epoch key) — a small, stable surface, not the full install layout. Because it does so little, **newer stubs are guaranteed to support older compilers**, which is what makes the forward-only update rule (§2.4 step 4) safe.
 
-**Build from source:**
-```batch
-build.bat
-```
+> **Windows `exec` caveat.** Windows has no true `execve`; the stub there does `CreateProcess` + wait + propagate the child's exit code. The same-PID guarantee holds only on Unix. Documented so the PID/signal reasoning above is not assumed on Windows.
 
-**Install:** `bin\promise.exe install` sets up `%USERPROFILE%\.promise\` with the binary and stdlib.
+### 2.6 Updating *(naming change: `update` becomes self-update)*
 
-**Status:** PAL threading (CreateThread, CRITICAL_SECTION, CONDITION_VARIABLE), linker support (lld-link), and SDK discovery are implemented. Needs end-to-end testing on Windows.
+- **`promise update`** *(planned rename)* — update **Promise itself**: download the newer compiler for the target epoch/channel and run its `install` (which forward-updates the stub and stages blobs). Today this capability lives partly in `promise sync`.
+- **Dependency updates move to the package-manager namespace.** `promise update` *currently* updates `[require]` entries in `promise.toml` ([main.go:7446](../compiler/cmd/promise/main.go#L7446)); that behavior moves under a package-manager verb (e.g. `promise pkg update`) so the bare `update` can mean "update the toolchain." This is a CLI rename to schedule alongside the stub work.
+
+Re-running install with a newer binary replaces the installation in place and forward-updates the stub.
 
 ---
 
-## 3. Release Artifacts
+## 3. Release Artifacts *(thin/full + prebuilt blobs)*
 
-Each release publishes to **GitHub Releases** at `github.com/promise-language/promise`, tagged `epoch-YYYY.N`.
+Each release publishes to **GitHub Releases** at `github.com/promise-language/promise`, tagged `epoch-YYYY.N`. See [release-automation.md](release-automation.md) for the full pipeline.
 
-| Binary | Platform |
-|--------|----------|
-| `promise-linux-amd64` | Linux x86_64, fully static (musl). Implemented. |
-| `promise-linux-arm64` | Linux ARM64. Planned. |
-| `promise-darwin-amd64` | macOS Intel. Needs Xcode CLT. Implemented. |
-| `promise-darwin-arm64` | macOS Apple Silicon. Needs Xcode CLT. Implemented. |
-| `promise-windows-amd64.exe` | Windows x86_64. Needs VS Build Tools. In progress. |
+| Asset | Platform / role |
+|-------|-----------------|
+| `promise-linux-amd64` / `promise-linux-amd64-full` | Linux x86_64 (musl static). thin + full. |
+| `promise-darwin-arm64` / `…-full` | macOS Apple Silicon. thin + full. |
+| `promise-darwin-amd64` / `…-full` | macOS Intel. thin + full. |
+| `promise-windows-amd64.exe` / `…-full.exe` | Windows x86_64. thin + full. *(planned)* |
+| `blobs/<hash>` | Prebuilt dependency blobs (host LLVM, wasm runner, CRTs, sysroots), addressed by hash. Fetched on demand by thin binaries. |
+| `SHA256SUMS` | Checksums for the top-level binary artifacts. Verified by the install scripts. |
 
-Each release also includes a `SHA256SUMS` file. `scripts/install.sh` verifies the checksum before running `promise install`.
+The install script downloads only the top-level binary (and `SHA256SUMS`); everything else is fetched-by-hash at runtime against the embedded manifest.
 
 ---
 
-## 4. macOS Notes
+## 4. The dependency store *(content-addressed cache — planned)*
 
-The macOS release binary embeds LLVM tools (`opt`, `llc`, `lld`, `libLLVM.dylib`) using the same gzip + `go:embed` pattern as Linux. This eliminates the need for `brew install llvm`. However, the macOS SDK is still required for linking (provides `-lSystem`).
-
-**Requirement:** Install Xcode Command Line Tools:
-
-```sh
-xcode-select --install
+```
+~/.promise/cache/blobs/
+  sha256/
+    3f9a…/opt           ← a specific LLVM opt build
+    7c21…/wasmtime
+    a0e4…/libLLVM.dylib
 ```
 
-This provides the macOS SDK sysroot. The embedded `ld64.lld` (a symlink to the bundled `lld`) handles Mach-O linking — the system `ld` is not needed.
+**Fetch flow** when the compiler needs dependency `X`:
+1. Resolve `X` → `sha256` from the embedded manifest.
+2. Hit `~/.promise/cache/blobs/sha256/<hash>` → use it if present.
+3. Miss → download from the release's `blobs/<hash>`, **verify the hash**, store, use.
 
-**Build a release binary on macOS:**
+**Offline & air-gapped.** A thin binary needs the network on first use of each dependency. Provide `promise fetch` (a.k.a. *warm*) to pre-stage the host workflow's blobs while online, and a clear error when offline and uncached ("host toolchain not cached and no network; install the `-full` build or run `promise fetch` while online"). The **full** variant is the offline guarantee.
 
-```sh
-# Requires: brew install llvm (22+) — used at build time to bundle tools
-./build --release
-```
+**Garbage collection.** The store grows as epochs/targets come and go; an LRU/`promise gc` keeps it bounded. Because blobs are referenced by hash from epoch manifests, GC removes only blobs no installed epoch references.
 
-This runs `make llvm-bundle-darwin`, which finds Homebrew LLVM (and separately the `lld` formula), gzip-compresses `opt`, `llc`, `lld`, `libLLVM.dylib`, all `liblld*.dylib` libraries, and any transitive non-system Homebrew dependencies (e.g., `libz3`, `libzstd`), then builds with `-tags embed_llvm`. Platform-specific embed files (`llvm_darwin_arm64.go` / `llvm_darwin_amd64.go`) include the compressed tools via `go:embed`.
-
-**Runtime extraction:** On first use, embedded tools are extracted to `~/.promise/cache/llvm/darwin-{arm64,amd64}/`. After extraction, Mach-O binaries are patched:
-1. `install_name_tool -add_rpath @loader_path` — so tools find dylibs in their own directory
-2. `install_name_tool -change` — rewrites absolute Homebrew paths (`/opt/homebrew/...`) to `@rpath/<name>`
-3. `install_name_tool -id @rpath/<name>` — patches dylib install names
-4. `codesign --force --sign -` — ad-hoc re-signing (required after Mach-O modification on macOS)
-
-`DYLD_LIBRARY_PATH` is set when running extracted tools so they can find `libLLVM.dylib` and transitive dependencies (e.g., `libz3`, `libzstd`).
-
-**Non-release builds** (dev builds without `--release`) continue to use Homebrew LLVM or system tools from PATH, same as before.
-
-**Planned: zero-dependency macOS binary.** The current macOS release binary still requires Xcode Command Line Tools for the macOS SDK sysroot (needed by `ld64.lld` for `-lSystem`). A future improvement could bundle the minimal SDK surface — `libSystem.tbd` stubs and essential headers — directly in the binary, similar to how Go ships its own linker and doesn't require system tools. This would make the macOS binary fully self-contained: download and run with no prerequisites.
+**Build-order consequence.** A thin binary embeds the *hashes* of its prebuilts, so the prebuilts must be built and hashed **before** the compiler binary is finalized. This ordering is the central constraint of the release pipeline ([release-automation.md](release-automation.md)).
 
 ---
 
-## 5. Install Script Location
+## 5. Platform notes
 
-Two install scripts exist with different purposes:
+### 5.1 macOS
 
-| Script | Purpose |
-|--------|---------|
-| `scripts/install.sh` | **End-user installer.** Downloads a release binary from GitHub and runs `promise install`. Served at `promise-lang.org/install.sh`. |
-| `bin/install.sh` | **Developer installer.** Builds a release binary from source (`./build --release`) then runs `promise install`. Used when iterating on the compiler itself. |
+The compiler fetches LLVM tools (`opt`, `llc`, `lld`, `libLLVM.dylib`) as content-addressed blobs (full builds pre-stage them). On extraction, Mach-O blobs are patched and re-signed: `install_name_tool -add_rpath @loader_path`, `-change` to rewrite absolute Homebrew paths to `@rpath/<name>`, `-id @rpath/<name>`, then `codesign --force --sign -` (ad-hoc). `DYLD_LIBRARY_PATH` points the tools at the extracted dylibs.
 
-Both scripts ultimately delegate to `promise install` for the actual filesystem setup.
+**SDK requirement → target: zero-dep.** macOS still needs the macOS SDK sysroot for `-lSystem` (today via Xcode Command Line Tools, `xcode-select --install`). The zero-dependency goal is to bundle the minimal SDK surface (`libSystem.tbd` stubs + essential headers) as a fetched blob — like Go shipping its own linker — so a fresh macOS machine needs no prerequisites.
+
+### 5.2 Windows
+
+Native MSVC ABI (`x86_64-pc-windows-msvc`); `opt` → `llc` → `lld-link` against the Windows SDK + UCRT. See [windows-support.md](windows-support.md) for compiler internals.
+
+**Zero local dependencies is required** (your install must not depend on a separately-installed, correctly-configured Visual Studio Build Tools of the right version). The Windows artifact embeds — or fetches as content-addressed blobs — the link surface it needs: UCRT/MSVC `.lib` stubs and the Windows SDK import libraries. This is the Windows analogue of the macOS SDK-stub bundling above and is a prerequisite for advertising the §2.2 one-liners.
+
+### 5.3 Linux
+
+Fully static via musl. The musl CRT objects are a fetched blob (full builds pre-stage them). No system dependencies beyond the kernel.
 
 ---
 
-## 6. CI/CD
+## 6. CI / building & publishing releases
 
-The standard install script works in CI:
+The pull-request CI matrix (build + test per platform) and the tag-triggered release pipeline are described in **[release-automation.md](release-automation.md)**. That doc covers the new-model specifics the original §7 did not: building the prebuilt dependency **blobs**, hashing them, embedding the manifest (the build-order constraint), producing **thin + full** variants, building the **Promise stub** per target, and publishing everything to a GitHub Release on an `epoch-*` tag.
+
+CI usage stays a one-liner:
 
 ```yaml
-# GitHub Actions example
 - name: Install Promise
   run: |
     curl -sSf https://promise-lang.org/install.sh | sh -s -- --epoch 2026.0
     echo "$HOME/.promise/bin" >> $GITHUB_PATH
 ```
 
-For Docker, copy the binary into the image directly — no install script needed:
+For Docker, prefer the **full** variant so the image needs no network at build time:
 
 ```dockerfile
 FROM ubuntu:24.04
-COPY promise-linux-amd64 /usr/local/bin/promise
+COPY promise-linux-amd64-full /usr/local/bin/promise
 RUN promise install
 ```
 
-`promise doctor` (planned — T0174) can be used in CI to verify the environment before running builds or tests:
-
-```yaml
-- run: promise doctor --json   # exits non-zero if any required component is missing
-```
-
----
-
-## 7. GitHub Infrastructure
-
-This section describes the GitHub repository setup, CI, and release process. The project is currently on a local git server; these workflows are ready to drop in when it moves to GitHub.
-
-### 7.1 Repository
-
-```
-github.com/promise-language/promise
-```
-
-| Branch | Purpose |
-|--------|---------|
-| `main` | Main development branch. All PRs target main. |
-| `next` | Pre-release staging. Used to validate the next epoch before cutting. |
-
-Tags follow the format `epoch-YYYY.N` (e.g., `epoch-2026.0`). A tag on main is a release. Nothing else triggers a release.
-
-### 7.2 CI Workflow
-
-Runs on every push to `main` and every pull request. Tests on all currently supported platforms.
-
-`.github/workflows/ci.yml`:
-
-```yaml
-name: CI
-
-on:
-  push:
-    branches: [main, next]
-  pull_request:
-    branches: [main, next]
-
-jobs:
-  test:
-    name: Test (${{ matrix.name }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-amd64
-            runner: ubuntu-24.04
-          - name: darwin-arm64
-            runner: macos-latest
-          - name: darwin-amd64
-            runner: macos-13
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: compiler/go.mod
-          cache: true
-          cache-dependency-path: compiler/go.sum
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-
-      - name: Cache ANTLR JAR
-        uses: actions/cache@v4
-        with:
-          path: compiler/tools/antlr-4.13.1-complete.jar
-          key: antlr-4.13.1
-
-      # LLVM 22+ is required. ubuntu-24.04 ships LLVM 18; install 22 from apt.llvm.org.
-      - name: Install LLVM + musl (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
-          sudo apt-get install -y musl-dev
-
-      # macOS runners have Xcode CLT pre-installed. PROMISE_USE_CLANG=1 uses
-      # clang as the driver, avoiding a ~5min `brew install llvm` in CI.
-      # Release builds use the full LLVM pipeline (see release workflow).
-      - name: Build
-        run: ./build
-        env:
-          PROMISE_USE_CLANG: ${{ runner.os == 'macOS' && '1' || '' }}
-
-      - name: Go tests
-        working-directory: compiler
-        run: go test ./... -count=1
-
-      - name: Promise tests
-        run: bin/test.sh promise
-        env:
-          PROMISE_USE_CLANG: ${{ runner.os == 'macOS' && '1' || '' }}
-```
-
-**Platform notes:**
-- **Linux**: LLVM 22 installed from `apt.llvm.org`. `musl-dev` provides the musl CRT objects that get embedded in the binary by `make musl-crt`.
-- **macOS**: `PROMISE_USE_CLANG=1` uses Xcode's bundled clang as the compilation driver, avoiding the `brew install llvm` overhead. This tests the same compiler frontend and codegen — only the backend driver differs.
-- **Windows**: In progress. PAL, linker, and `promise install` are implemented. Add `windows-latest` to the CI matrix after end-to-end validation on a Windows machine. Requires VS Build Tools + LLVM 22+ on the runner.
-
-### 7.3 Release Workflow
-
-Triggered by a tag push matching `epoch-*`. Builds one binary per platform, collects them in a final job, generates `SHA256SUMS`, and creates the GitHub Release.
-
-`.github/workflows/release.yml`:
-
-```yaml
-name: Release
-
-on:
-  push:
-    tags:
-      - 'epoch-*'
-
-permissions:
-  contents: write   # needed for gh release create
-
-jobs:
-  # ── per-platform builds ──────────────────────────────────────────────────
-
-  build-linux-amd64:
-    name: Build linux-amd64
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: compiler/go.mod
-          cache: true
-          cache-dependency-path: compiler/go.sum
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-      - name: Cache ANTLR JAR
-        uses: actions/cache@v4
-        with:
-          path: compiler/tools/antlr-4.13.1-complete.jar
-          key: antlr-4.13.1
-      - name: Install LLVM + musl
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
-          sudo apt-get install -y musl-dev
-      # Release build: embeds LLVM tools + musl CRT → fully self-contained ~61MB binary.
-      - name: Build (release)
-        run: ./build --release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: promise-linux-amd64
-          path: bin/promise
-
-  build-darwin-arm64:
-    name: Build darwin-arm64
-    runs-on: macos-latest    # Apple Silicon
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: compiler/go.mod
-          cache: true
-          cache-dependency-path: compiler/go.sum
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-      - name: Cache ANTLR JAR
-        uses: actions/cache@v4
-        with:
-          path: compiler/tools/antlr-4.13.1-complete.jar
-          key: antlr-4.13.1
-      - name: Install LLVM
-        run: brew install llvm
-      # macOS release binary: embeds LLVM tools (opt, llc, lld, libLLVM.dylib).
-      # Requires Xcode CLT at runtime for macOS SDK (sysroot).
-      - name: Build (release)
-        run: ./build --release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: promise-darwin-arm64
-          path: bin/promise
-
-  build-darwin-amd64:
-    name: Build darwin-amd64
-    runs-on: macos-13         # Intel
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: compiler/go.mod
-          cache: true
-          cache-dependency-path: compiler/go.sum
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-      - name: Cache ANTLR JAR
-        uses: actions/cache@v4
-        with:
-          path: compiler/tools/antlr-4.13.1-complete.jar
-          key: antlr-4.13.1
-      - name: Install LLVM
-        run: brew install llvm
-      - name: Build (release)
-        run: ./build --release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: promise-darwin-amd64
-          path: bin/promise
-
-  # ── collect + publish ────────────────────────────────────────────────────
-
-  release:
-    name: Publish release
-    needs: [build-linux-amd64, build-darwin-arm64, build-darwin-amd64]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all binaries
-        uses: actions/download-artifact@v4
-        with:
-          path: dist/
-
-      # Artifacts are unpacked into dist/<artifact-name>/<filename>.
-      # Rename each to its final release name.
-      - name: Rename binaries
-        run: |
-          mv dist/promise-linux-amd64/promise  dist/promise-linux-amd64
-          mv dist/promise-darwin-arm64/promise dist/promise-darwin-arm64
-          mv dist/promise-darwin-amd64/promise dist/promise-darwin-amd64
-          chmod +x dist/promise-linux-amd64 dist/promise-darwin-arm64 dist/promise-darwin-amd64
-
-      - name: Generate SHA256SUMS
-        working-directory: dist/
-        run: sha256sum promise-linux-amd64 promise-darwin-arm64 promise-darwin-amd64 > SHA256SUMS
-
-      - name: Create GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          EPOCH="${GITHUB_REF_NAME#epoch-}"
-          gh release create "$GITHUB_REF_NAME" \
-            --title "Promise epoch ${EPOCH}" \
-            --notes "See [changelog](docs/changelog.md) for what changed in this epoch." \
-            dist/promise-linux-amd64 \
-            dist/promise-darwin-arm64 \
-            dist/promise-darwin-amd64 \
-            dist/SHA256SUMS
-```
-
-### 7.4 Cutting a Release
-
-When the codebase is ready for a new epoch:
-
-```sh
-# 1. Verify everything passes locally
-bin/verify.sh
-
-# 2. Tag the commit
-git tag epoch-2026.0
-git push origin epoch-2026.0
-```
-
-That's it. The tag push triggers the release workflow, which builds all platform binaries and creates the GitHub Release automatically. No manual binary uploads, no manual SHA256 computation.
-
-### 7.5 Planned Platform Additions
-
-| Platform | Blocker | Notes |
-|----------|---------|-------|
-| `linux-arm64` | Cross-compile + arm64 runner | Go cross-compiles fine. Musl CRT arm64 objects needed. `embed_llvm` needs arm64 LLVM tools bundled. |
-| `windows-amd64` | End-to-end testing on Windows | PAL threading, linker (lld-link), SDK discovery, `promise install` implemented. Needs testing on Windows machine, then add `build-windows-amd64` CI job on `windows-latest`. See `docs/windows-support.md`. |
-| macOS zero-dep | Bundle macOS SDK stubs | Currently requires Xcode CLT for `-lSystem` sysroot. Could embed minimal SDK surface (`libSystem.tbd` + headers) like Go embeds its own linker. Would make macOS binary fully self-contained (download and run, no prerequisites). |
+`promise doctor` (T0174) verifies the environment (toolchain blobs present, SDK reachable, PATH set) and exits non-zero on a missing component — useful as a CI preflight.

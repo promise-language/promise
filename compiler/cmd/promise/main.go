@@ -1814,9 +1814,11 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 	elapsed := time.Since(start)
 
 	if ctx.Err() == context.DeadlineExceeded {
-		fmt.Printf("FAIL (timeout) %s%s\n", name, targetSuffix)
-		fmt.Printf("0 passed, 1 failed\n")
-		fmt.Printf("\nFAILED:\n  %s\n", name)
+		// T0742: emit TIMEOUT so the multi-file parent classifies as fileTimedOut.
+		fmt.Printf("TIMEOUT (%.3fs) %s%s\n", timeout.Seconds(), name, targetSuffix)
+		fmt.Printf("  timeout: exceeded %s limit\n", timeout)
+		fmt.Printf("\n0 passed, 0 failed, 1 timed out (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		fmt.Printf("\nFAILED:\n  %s (timed out after %s)\n", name, timeout)
 		os.Exit(1)
 	}
 

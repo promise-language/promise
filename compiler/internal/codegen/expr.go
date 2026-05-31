@@ -11277,7 +11277,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	syntheticBlock := &ast.Block{
 		Stmts: []ast.Stmt{&ast.ExprStmt{Expr: callExpr}},
 	}
-	captureNames := collectBlockIdents(syntheticBlock, c.locals)
+	captureNames := c.collectBlockIdents(syntheticBlock, c.locals)
 
 	// 3. Load captured values in caller scope
 	var captureVals []value.Value
@@ -11640,7 +11640,7 @@ func (c *Compiler) genGoExternWrapper(ext *ExternFunc, argLLVMTypes []irtypes.Ty
 
 // collectBlockIdents walks an AST block and collects all IdentExpr names referenced.
 // Returns a sorted, deduplicated list of names that exist in outerLocals.
-func collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca) []string {
+func (c *Compiler) collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca) []string {
 	seen := make(map[string]bool)
 	var walkExpr func(e ast.Expr)
 	var walkStmt func(s ast.Stmt)
@@ -11750,7 +11750,22 @@ func collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca)
 				}
 			}
 		case *ast.LambdaExpr:
-			// Lambda captures are handled separately; skip inner references
+			// T0740: a lambda inside a `go { }` block is compiled into a *separate*
+			// coroutine function, so any outer-function local the lambda captures
+			// must first be passed into the coroutine arg pack — otherwise
+			// genLambdaExpr finds no alloca for the name and zero-initializes the
+			// capture. Sema already computed the lambda's capture set (transitively
+			// including nested-lambda captures via checkLambdaExpr's propagation);
+			// collect those whose name is an outer local. We do NOT recurse into the
+			// lambda body: sema's no-shadow rule guarantees bound names never alias
+			// an outerLocals name, and block-locals are excluded by the outerLocals
+			// filter (they are already in scope inside the coroutine).
+			for _, cv := range c.info.LambdaCaptures[e] {
+				name := cv.Obj.Name()
+				if _, ok := outerLocals[name]; ok {
+					seen[name] = true
+				}
+			}
 		case *ast.ParenExpr:
 			walkExpr(e.Expr)
 		case *ast.UnsafeExpr:
@@ -11965,7 +11980,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	}
 
 	// Collect outer variables referenced in the block
-	captureNames := collectBlockIdents(block, c.locals)
+	captureNames := c.collectBlockIdents(block, c.locals)
 
 	// Load captured values and collect their types BEFORE switching context
 	var captureVals []value.Value

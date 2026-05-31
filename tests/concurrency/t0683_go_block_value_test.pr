@@ -832,10 +832,10 @@ t0686_enum_heap_payload_loop_no_leak() `test {
 // These batch tests have NO `exclude: wasm`: the WASM batch run is the
 // empirically-confirmed compile-failure regression guard (it fails `opt` on
 // regression), and zero-leak enforcement on host AND `--target wasm32-wasi`
-// guards edit 5. The received closure is NOT called — calling returns a wrong
-// captured value due to T0740 (a separate, non-blocking bug: collectBlockIdents
-// skips lambda bodies); the env is still allocated, so the leak/compile paths
-// are fully exercised by await + drop.
+// guards edit 5. These tests await + drop the closure without calling it; the
+// value correctness of a called closure is covered by the T0740 tests below
+// (T0740 fixed the wrong-captured-value defect — the trailing closure can now
+// be called and value-asserted).
 
 // (m) Capturing closure value-block AWAITED, then closure dropped at scope exit
 // (env freed via the awaited variable's bindingFreeEnv). The exact `%0`
@@ -986,4 +986,113 @@ t0739_local_array_of_heap_closures_dropped() `test {
   s2 := "arr" + " two";
   (() -> int)[2] arr = [move || -> s1.len, move || -> s2.len];
   assert(true, "local fixed array of heap-capturing closures dropped, no leak");
+}
+
+// ===========================================================================
+// T0740: a value-returning `go { ... }` block whose trailing value is a
+// *capturing closure* read any outer variable referenced ONLY inside that
+// closure as zero. Root cause: collectBlockIdents (the walk that gathers which
+// outer locals a go-block must thread into its coroutine arg pack) skipped
+// lambda bodies — true for a lambda in an ordinary function (the enclosing fn
+// already holds the var) but false inside `go { }`, because the coroutine is a
+// *separate* function. The fix consults sema's per-lambda capture set
+// (transitively including nested-lambda captures) and adds those outer-local
+// names to the coroutine's captures. These tests CALL the received closure and
+// value-assert the result (the T0739 tests above only await + drop it).
+//
+// NO `exclude: wasm`: zero-leak enforcement applies on host AND wasm32-wasi,
+// and the go-block coroutine path is exercised on both.
+
+// (a) The exact bug repro, value-asserted: `base` is referenced only inside the
+// nested closure, so before the fix it was captured as 0 and f() returned 2.
+t0740_capture_value() `test {
+  base := 40;
+  task[() -> int] x = go {
+    || -> base + 2
+  };
+  f := <-x;
+  assert(f() == 42, "outer var used only inside closure captures real value");
+}
+
+// (b) Multiple outer vars referenced only inside the closure.
+t0740_multiple_captures() `test {
+  a := 5;
+  b := 10;
+  task[() -> int] x = go {
+    || -> a * b
+  };
+  f := <-x;
+  assert(f() == 50, "multiple outer vars threaded into coroutine");
+}
+
+// (c) Nested lambda-within-lambda: the outer (trailing) lambda has a block body
+// containing a named inner lambda that captures `base`. Exercises sema's
+// transitive capture propagation (checkLambdaExpr) flowing through the outer
+// lambda's capture set into the coroutine. Named-inner form (not an IIFE — see
+// T0751).
+t0740_nested_lambda_capture() `test {
+  base := 40;
+  task[() -> int] x = go {
+    || -> int {
+      g := || -> base + 2;
+      return g();
+    }
+  };
+  f := <-x;
+  assert(f() == 42, "nested lambda transitive capture into coroutine");
+}
+
+// (d) Move-captured heap string referenced only inside the closure. Exercises
+// the droppable-capture transfer into the coroutine plus zero-leak: the env
+// holds an owned string and must be deep-dropped when the closure is dropped.
+t0740_move_string_capture() `test {
+  s := "hello" + " world";
+  task[() -> int] x = go {
+    move || -> s.len
+  };
+  f := <-x;
+  assert(f() == 11, "move-captured heap string captured into coroutine, no leak");
+}
+
+// (e) No-capture closure value-block (null env) — guards that the fix does not
+// disturb the null-env path: the closure captures nothing and f() returns 7.
+t0740_no_capture() `test {
+  task[() -> int] x = go {
+    || -> 7
+  };
+  f := <-x;
+  assert(f() == 7, "no-capture closure value-block unaffected");
+}
+
+// (f) Lambda captures a MIX of an outer-function local (`base`) and a
+// block-local declared inside the `go { }` (`inner`). The outer local must be
+// threaded into the coroutine arg pack; the block-local must NOT (it is already
+// a coroutine local, in scope inside the coroutine). This locks the
+// `outerLocals` filter on the new lambda path: if the filter were absent,
+// `inner` would be both a coroutine parameter and a block-local declaration —
+// the (a)-(e) tests never have the lambda capture a block-local, so only this
+// test exercises that boundary. Verified to fail (f() == 100) without the fix.
+t0740_mixed_outer_and_block_local() `test {
+  base := 40;
+  task[() -> int] x = go {
+    inner := 100;
+    || -> base + inner
+  };
+  f := <-x;
+  assert(f() == 140, "outer threaded into coroutine, block-local resolved in-coroutine");
+}
+
+// (g) The closure is INVOKED inside the coroutine and the block returns a plain
+// `int` (task[int], not task[() -> int]) — a distinct result shape from (a)-(f),
+// which all return the closure itself. `base` is referenced only inside the
+// lambda `g`, so it must still be threaded into the coroutine for the in-coroutine
+// call to see the real value. Verified to fail (returns 2) without the fix.
+t0740_closure_invoked_in_coroutine() `test {
+  base := 40;
+  task[int] x = go {
+    g := || -> base + 2;
+    g()
+  };
+  r := <-x;
+  assert(r == 42, "closure invoked inside coroutine sees real captured value");
 }

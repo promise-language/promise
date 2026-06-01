@@ -219,3 +219,61 @@ test_downcast_optional_presence() `test {
   }
   assert(absent, "optional downcast absent when subject does not match");
 }
+
+// --- RTTI downcast of an OWNED-returning subject: must keep ownership (T0747) ---
+// A getter or user-defined `[]` that returns an owned value produces a *fresh*
+// instance, not an alias. The cast result therefore OWNS it and the bound local
+// must keep its drop flag — clearing it (as the borrow case does) leaks the
+// freshly produced instance (the inherited `name` heap string surfaces it).
+
+type ShapeFactory {
+  // Getter returning an owned heap user-type value.
+  get make Shape {
+    return Circle(name: "from-getter", radius: 4.0);
+  }
+}
+
+type ShapeBox {
+  // User-defined `[]` operator returning an owned heap user-type value.
+  [](&this, int i) Shape {
+    return Circle(name: "from-index", radius: 6.0);
+  }
+}
+
+test_downcast_owned_getter_subject() `test {
+  f := ShapeFactory();
+  c := f.make as! Circle;
+  assert(c.radius == 4.0, "downcast owned getter result keeps ownership");
+  assert(c.name == "from-getter", "downcast owned getter reads heap field, no leak");
+}
+
+test_downcast_owned_user_index_subject() `test {
+  b := ShapeBox();
+  c := b[0] as! Circle;
+  assert(c.radius == 6.0, "downcast owned user-index result keeps ownership");
+  assert(c.name == "from-index", "downcast owned user-index reads heap field, no leak");
+}
+
+test_downcast_reassign_local_from_borrow() `test {
+  // Reassigning an existing local from a cast-of-borrow (`c = s as! T`, not a
+  // var decl) is also a non-consuming view — the old value is dropped on
+  // reassignment and the new aliased value must NOT be dropped again at scope
+  // exit. Without clearing the target's re-armed drop flag this double-frees.
+  Shape s = Circle(name: "src", radius: 7.5);
+  Circle c = Circle(name: "init", radius: 0.0);
+  c = s as! Circle;
+  assert(c.radius == 7.5, "reassigned local from cast-of-borrow");
+  assert(c.name == "src", "reassigned local reads inherited heap field, no double-free");
+}
+
+test_downcast_reassign_local_from_owned_temp() `test {
+  // Contrast with the borrow case above: reassigning a local from a cast of an
+  // *owned temp* (factory result) — the subject is a fresh value, so the assign
+  // path must NOT clear the target's drop flag. The local owns the new value;
+  // failing to keep its flag would leak it (the inherited heap `name` surfaces
+  // the leak). Exercises the isRttiCastBorrow default branch in genAssignStmt.
+  Circle c = Circle(name: "init", radius: 0.0);
+  c = make_circle() as! Circle;
+  assert(c.radius == 9.0, "reassigned local from owned-temp cast keeps ownership");
+  assert(c.name == "made", "reassigned owned-temp reads heap field, no leak");
+}

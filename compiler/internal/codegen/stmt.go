@@ -254,6 +254,10 @@ func (c *Compiler) isBorrowedExpr(expr ast.Expr) bool {
 //   - casts of owned temps (factory()/constructor results): the local legitimately
 //     claims ownership of the freshly produced instance via claimHeapTemp, so its
 //     flag must stay set.
+//   - casts of an owned-returning getter (`obj.getter as! T`) or user-defined `[]`
+//     operator (`obj[k] as! T`): those subjects produce a *fresh owned* value (not
+//     an alias), so the cast local owns it and must keep its drop flag — mirrors
+//     the owned-return exemptions (isGetterCallExpr/isUserIndexExpr) elsewhere.
 func (c *Compiler) isRttiCastBorrow(expr ast.Expr) bool {
 	cast, ok := unwrapDestructureParens(expr).(*ast.CastExpr)
 	if !ok {
@@ -264,6 +268,11 @@ func (c *Compiler) isRttiCastBorrow(expr ast.Expr) bool {
 	case *ast.ThisExpr, *ast.IdentExpr, *ast.MemberExpr, *ast.IndexExpr:
 		// borrow-producing subject — the cast aliases it
 	default:
+		return false
+	}
+	// A getter call or user-defined `[]` operator returns a fresh owned value
+	// (unless it returns a borrow), so the cast owns it — not an alias.
+	if (c.isGetterCallExpr(subj) || c.isUserIndexExpr(subj)) && !c.isBorrowedExpr(subj) {
 		return false
 	}
 	srcType := c.info.Types[subj]
@@ -5807,6 +5816,14 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// the reassigned local's drop and the owner's drop free the same
 			// inner value.
 			if c.isBorrowedExpr(s.Value) {
+				c.clearDropFlag(target.Name)
+			}
+			// T0747: a user-type RTTI cast of a borrow (`target = x as!/as T`) is a
+			// non-consuming view — the subject keeps ownership. Clear the target's
+			// drop flag (re-armed to 1 above when the old value was dropped) so the
+			// reassigned local doesn't double-free the aliased instance at scope
+			// exit. Mirrors the same clear in genTypedVarDecl/genInferredVarDecl.
+			if c.isRttiCastBorrow(s.Value) {
 				c.clearDropFlag(target.Name)
 			}
 			// T0073: Claim string temp — ownership transferred to this variable.

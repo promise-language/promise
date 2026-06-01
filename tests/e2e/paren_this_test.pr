@@ -493,6 +493,16 @@ type CShape {
     s := this as! CSquare;
     return s.label;
   }
+  // reassign an *owned* local from a cast of `this` (the assign path, not a var
+  // decl): combines the value-struct reconstruction (this is a bare i8*) with
+  // genAssignStmt's drop-flag clear. The owned "init" CSquare is dropped on
+  // reassignment; the new value aliases `this` and must NOT be dropped again at
+  // scope exit. Missing the assign-path clear double-frees `this`'s instance.
+  csq_reassign_local(&this) string {
+    CSquare local = CSquare(sides: 9, label: "init");
+    local = this as! CSquare;
+    return local.label;
+  }
   // optional cast: presence narrowing only (no unwrap — unwrapping a
   // borrow-holding optional is the separate T0753 double-free).
   csq_is_square(&this) bool {
@@ -532,6 +542,7 @@ test_this_cast_forced_local() `test {
   assert(s.csq_local() == "square", "bare local: s := this as! CSquare; s.kind()");
   assert(s.csq_paren_local() == "square", "paren local: s := (this) as! CSquare; s.kind()");
   assert(s.csq_local_field() == "sq", "local cast then string field read, no double-free");
+  assert(s.csq_reassign_local() == "sq", "reassign owned local from this-cast, no double-free");
 }
 
 test_this_cast_optional_present() `test {

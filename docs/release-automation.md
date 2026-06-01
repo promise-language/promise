@@ -81,37 +81,52 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64,  runner: ubuntu-24.04 }
-          - { name: darwin-arm64, runner: macos-latest }
-          - { name: darwin-amd64, runner: macos-13 }
-          # - { name: windows-amd64, runner: windows-latest }   # add after E2E validation
+          - { name: linux-amd64,   runner: ubuntu-24.04 }
+          - { name: darwin-arm64,  runner: macos-latest }
+          - { name: windows-amd64, runner: windows-latest }
+          # - { name: darwin-amd64, runner: macos-13 }   # deferred — Intel macOS unverifiable (no working Xcode CLT); see §7
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with: { submodules: false }   # see "Submodules" below — do NOT switch to recursive
       - uses: actions/setup-go@v5
         with: { go-version-file: compiler/go.mod, cache: true, cache-dependency-path: compiler/go.sum }
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 21 }
-      - name: Cache ANTLR JAR
-        uses: actions/cache@v4
-        with: { path: compiler/tools/antlr-4.13.1-complete.jar, key: antlr-4.13.1 }
+      # No Java/ANTLR step: the generated parser (compiler/internal/parser/*.go) is committed.
       - name: Install LLVM + musl (Linux)
         if: runner.os == 'Linux'
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
           sudo apt-get install -y musl-dev
-      - name: Build
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows'
+        run: choco install llvm -y   # 22+; windows-latest already ships VS Build Tools (MSVC + Windows SDK)
+      - name: Install wasmtime (runtime for the wasm32-wasi tests)
+        uses: bytecodealliance/actions/wasmtime/setup@v1   # cross-platform; puts wasmtime on PATH
+      # bin/ is gitignored — bootstrap the forge dev tools (bin/build, bin/test, …) before using them.
+      - name: Bootstrap dev tools (Unix)
+        if: runner.os != 'Windows'
+        run: ./make
+      - name: Bootstrap dev tools (Windows)
+        if: runner.os == 'Windows'
+        run: .\make.cmd
+      - name: Build compiler
         run: bin/build
         env: { PROMISE_USE_CLANG: "${{ runner.os == 'macOS' && '1' || '' }}" }
-      - name: Go tests
-        working-directory: compiler
-        run: go test ./... -count=1
-      - name: Promise tests
-        run: bin/test promise
+      - name: Test — Go + Promise + WASM
+        # Always bin/test [go|promise|all] — never `go test ./...` directly: bin/test
+        # builds and embeds (stdlib, catalog) first, which raw `go test` skips.
+        run: bin/test --wasm all
         env: { PROMISE_USE_CLANG: "${{ runner.os == 'macOS' && '1' || '' }}" }
 ```
 
-**Platform notes:** Linux installs LLVM 22 from `apt.llvm.org` and `musl-dev`. macOS uses `PROMISE_USE_CLANG=1` (Xcode clang as driver) to skip a ~5 min `brew install llvm` — it exercises the same frontend/codegen, only the backend driver differs. Windows is added to the matrix after end-to-end validation (see [windows-support.md](windows-support.md)).
+**Platform notes:** **Bootstrap first.** `bin/` is gitignored — the dev tools (`bin/build`, `bin/gate`, `bin/release`) are [forge](https://github.com/promise-language/forge) tools compiled by `./make` (`.\make.cmd` on Windows), which also bakes the repo root into each binary and refuses to run a stale/un-bootstrapped tool. So every job runs `./make` before invoking any `bin/*` tool (see [build-tools.md](build-tools.md)). **No Java/ANTLR step** — the generated parser (`compiler/internal/parser/*.go`) is committed, so neither CI nor a release regenerates it. Whoever edits the grammar (`grammar/*.g4`) regenerates and commits the generated source in the same change (rare now). Linux installs LLVM 22 from `apt.llvm.org` and `musl-dev`. macOS uses `PROMISE_USE_CLANG=1` (Xcode clang as driver) to skip a ~5 min `brew install llvm` — same frontend/codegen, only the backend driver differs. **wasmtime** is installed on every runner (via the bytecode-alliance setup action) to run the `wasm32-wasi` tests. **Windows is a full matrix member** (no longer gated on validation): it builds with the native MSVC toolchain (`opt` → `llc` → `lld-link`, no clang), LLVM 22 via `choco`, with VS Build Tools (MSVC + Windows SDK) preinstalled on `windows-latest`, and passes the full suite (`bin/test --wasm all`) — see [windows-support.md](windows-support.md).
+
+**Submodules — intentionally not checked out.** The workflow *trigger* (`on: pull_request`) has nothing to do with submodules; submodule checkout is controlled solely by `actions/checkout`'s `submodules` input, which defaults to `false`. We keep it `false` on purpose:
+- The `flow`/`flow-sdk` submodules are **not used** to build the compiler or run the gates ([build-tools.md](build-tools.md)); they back the tracker automation only.
+- `./make` **warn-skips** the flow binaries when the submodules are absent, so the bootstrap succeeds without them.
+- `flow-sdk` is hosted on an **internal host** (`ssh://hfe/…`) that GitHub-hosted runners cannot reach — `submodules: recursive` would make checkout *fail*, not help.
+
+So: leave checkout at `submodules: false` on every job. (`flow` is public on GitHub; only `flow-sdk` is unreachable — but since neither is needed for CI, don't fetch either.)
 
 ---
 
@@ -131,12 +146,23 @@ jobs:
   # 1–2. Prebuilt blobs (cached; rebuilt only when a dependency version changes).
   blobs:
     strategy:
-      matrix: { include: [ {host: linux-amd64, runner: ubuntu-24.04},
-                           {host: darwin-arm64, runner: macos-latest},
-                           {host: darwin-amd64, runner: macos-13} ] }
+      matrix: { include: [ {host: linux-amd64,   runner: ubuntu-24.04},
+                           {host: darwin-arm64,  runner: macos-latest},
+                           {host: windows-amd64, runner: windows-latest} ] }
+                           # darwin-amd64 (macos-13) deferred — see §7
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: compiler/go.mod }
+      # bin/ is gitignored — bootstrap forge tools (bin/release) before use.
+      # (Same checkout + setup-go + ./make prelude precedes `compiler` and `publish`; omitted there for brevity.)
+      - name: Bootstrap dev tools (Unix)
+        if: runner.os != 'Windows'
+        run: ./make
+      - name: Bootstrap dev tools (Windows)
+        if: runner.os == 'Windows'
+        run: .\make.cmd
       - name: Build/collect dependency blobs (LLVM, wasm runner, CRT, sysroot stubs)
         run: bin/release blobs --host ${{ matrix.host }} --out dist/blobs
       - name: Package + generate manifest
@@ -151,9 +177,10 @@ jobs:
   compiler:
     needs: [blobs]
     strategy:
-      matrix: { include: [ {host: linux-amd64, runner: ubuntu-24.04},
-                           {host: darwin-arm64, runner: macos-latest},
-                           {host: darwin-amd64, runner: macos-13} ] }
+      matrix: { include: [ {host: linux-amd64,   runner: ubuntu-24.04},
+                           {host: darwin-arm64,  runner: macos-latest},
+                           {host: windows-amd64, runner: windows-latest} ] }
+                           # darwin-amd64 (macos-13) deferred — see §7
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -185,19 +212,23 @@ jobs:
         run: cd dist && sha256sum promise-* > SHA256SUMS
       - name: Create GitHub Release
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        # The install scripts are committed (scripts/install.*, present via the checkout
+        # prelude) and attached verbatim — nothing generates them. Users fetch them at
+        # releases/latest/download/install.sh (distribution.md §2.1).
         run: |
           EPOCH="${GITHUB_REF_NAME#epoch-}"
           gh release create "$GITHUB_REF_NAME" \
             --title "Promise epoch ${EPOCH}" \
             --notes "See docs/changelog.md for this epoch." \
-            dist/promise-* dist/deps/* dist/SHA256SUMS   # deps/ = packaged blobs and/or archives
+            dist/promise-* dist/deps/* dist/SHA256SUMS \
+            scripts/install.sh scripts/install.ps1 scripts/install.cmd   # the installers themselves
 ```
 
 Notes:
 - `bin/release` is the (planned) release driver that wraps the build-order steps; today the equivalent is `bin/build --release` producing a single embed-everything binary.
 - The **stub** is compiled *by the just-built compiler* (step 5), then embedded back into the compiler so `promise install` can extract it ([distribution.md](distribution.md) §2.5). Cross-compiling the stub per target is done by the host compiler.
 - `SHA256SUMS` covers only the top-level binaries — dependency blobs are self-verifying via their content `sha256` in the embedded manifest, regardless of how they are packaged (direct files or archives).
-- `windows-amd64` is added as additional `blobs`/`compiler` matrix entries once Windows is validated.
+- `windows-amd64` is a **full matrix member** in both `blobs` and `compiler` (CI already builds and passes the gates on it). Its top-level artifacts carry `.exe` (`promise-windows-amd64.exe`, `…-full.exe`); `bin/release` appends the extension for Windows hosts. The Windows compiler still builds via `opt` → `llc` → `lld-link` (no LTO yet — T0049).
 - The **all** variant ([distribution.md](distribution.md) §1.2) is the same "assemble" step with *every* supported target's blobs in the pre-stage set instead of just the host's — no new runtime code. It is deferred until cross-compilation works (no cross-target blobs exist yet), so first releases publish thin + full only.
 
 ---
@@ -223,11 +254,12 @@ The tag push triggers §5. No manual binary uploads, no manual checksum computat
 |------|-------|
 | `bin/release` driver | Implement the blob/hash/manifest/thin/full/stub steps as a Go build tool alongside `bin/build`. |
 | Blob hosting & packaging | Decide acquisition `sources` ([distribution.md](distribution.md) §4.1): one-file-per-hash release assets vs few compressed archives vs upstream-vendor archives; release assets vs dedicated CDN/bucket; the `PROMISE_BLOB_MIRROR` base-URL override for mirrors / air-gap ([epoch-versioned-installs.md](epoch-versioned-installs.md) §3). Manifest carries a *ranked* source list so the private→public transition can add/promote a public source without changing content hashes (§1 private-repo caveat). |
-| Private→public release access | While the repo is private, dependency sources need authenticated access (e.g. `gh` token) or a separate public bucket; the install scripts also can't pull private release assets. Resolve before advertising the public install (§1). |
+| Private→public release access | While the repo is private, **nothing in the install path is anonymously fetchable**: the install scripts are themselves release assets (`releases/latest/download/install.sh`), and the binaries + dependency blobs they pull are too — all need auth or a public mirror. Resolve before advertising the public install (§1, [distribution.md](distribution.md) §2.1). |
 | Manifest integrity gate | `bin/release verify-manifest` — resolve every entry against the packaged artifacts (extract `archive_path`, check `sha256`) and **fail the release** on any mismatch, so a bogus entry never reaches users ([distribution.md](distribution.md) §4.3). |
 | Mismatch telemetry (opt-in) | Decide whether to ship the opt-in integrity-mismatch signal ([distribution.md](distribution.md) §4.4): what it sends (dependency, source, expected/actual hash, epoch, platform), the disclosure/opt-in UX, and where it reports. Integrity-only, never general usage. |
 | Blob caching across releases | Skip rebuild/upload when a dependency version (hence hash) is unchanged. |
-| `windows-amd64` | Add to the `blobs` + `compiler` matrices after end-to-end validation ([windows-support.md](windows-support.md)). |
+| Windows release artifact | CI is done — `windows-amd64` is a full matrix member passing the gates. Remaining for *releases*: embed LLVM into `promise.exe` (T0056) and the Windows SDK / UCRT `.lib` stubs for the zero-dep goal ([distribution.md](distribution.md) §5.2), plus LTO (T0049). The thin/full split makes the LLVM-embed less urgent (it becomes a fetched blob), but the SDK stubs are still needed for "no VS Build Tools required" ([windows-support.md](windows-support.md)). |
+| `darwin-amd64` (Intel) — **deferred** | Dropped from the CI/release matrices: the maintainer can't run a working Xcode CLT on available Intel hardware, so the target can't be verified. The build code exists; revisit if a verifiable Intel runner/host is available (GitHub's `macos-13` Intel runner could validate it in CI even without local hardware — reconsider before deletion). |
 | `linux-arm64` | Cross-compile + arm64 runner; arm64 LLVM blobs + musl CRT. |
 | Stub cross-build | Confirm the host compiler can emit the stub for every shipped target. |
 | `all` variant | Add once cross-compilation works: extend the "assemble" step to pre-stage every supported target's blobs ([distribution.md](distribution.md) §1.2). Release-packaging only — no runtime change. Gated on cross-compilation landing. |

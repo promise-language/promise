@@ -2,7 +2,7 @@
 
 > **Status (2026-05-30).** This document describes the **target** distribution architecture. Some of it is implemented today, some is planned; each section is marked. The headline change from the original model is twofold: (1) heavy dependencies (LLVM tools, wasm runner, CRTs, target sysroots) move from *embedded-in-the-binary* to a *content-addressed cache fetched on demand*, so the compiler ships in **thin** and **full** variants that behave identically; and (2) the on-`PATH` entry point becomes a **tiny stub** (written in Promise, extracted at install) instead of a full copy of the compiler. See §1 for the model, §7 / [release-automation.md](release-automation.md) for how releases are built and published.
 >
-> **Implemented today:** self-contained `--release` binary (embeds *everything* — LLVM, musl CRT, stdlib) on Linux (amd64) and macOS (arm64 + amd64); `promise install` with the epoch layout; epoch dispatch via *shim-in-binary*; `promise sync` to fetch epochs. **Planned:** thin/full split + content-addressed dependency store (§1, §4); the embedded Promise stub replacing shim-in-binary (§2.5); `promise update` self-update rename (§2.6); Windows zero-dependency install (§5.2). Windows compiler support itself is in progress (see [windows-support.md](windows-support.md)).
+> **Implemented today:** self-contained `--release` binary (embeds *everything* — LLVM, musl CRT, stdlib) on Linux (amd64) and macOS arm64 (Intel/amd64 builds exist but are **deferred** — unverifiable without working Xcode CLT); `promise install` with the epoch layout; epoch dispatch via *shim-in-binary*; `promise sync` to fetch epochs. **Planned:** thin/full split + content-addressed dependency store (§1, §4); the embedded Promise stub replacing shim-in-binary (§2.5); `promise update` self-update rename (§2.6); Windows zero-dependency install (§5.2). Windows compiler support itself is in progress (see [windows-support.md](windows-support.md)).
 
 ---
 
@@ -55,14 +55,17 @@ A content-addressed store **deduplicates across epochs and targets**. Two instal
 ### 2.1 Linux & macOS — install script *(implemented; download semantics unchanged)*
 
 ```sh
-curl -sSf https://promise-lang.org/install.sh | sh
+curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh
 ```
 
-The script ([scripts/install.sh](../scripts/install.sh)) detects OS/arch, downloads the matching binary (**thin** by default) from GitHub Releases, verifies its SHA256 against `SHA256SUMS`, and runs `./binary install` (§2.4). It supports `--epoch` today; the `--full` / `--all` variant flags (which select the `-full` / `-all` asset suffixes, §2.3) are planned:
+**Where the script comes from.** The install scripts are **published as GitHub release assets** by the release pipeline ([release-automation.md](release-automation.md) §5) — they are the committed `scripts/install.*` files, attached to every release (nothing *generates* them). `releases/latest/download/install.sh` is GitHub's stable redirect to the newest release's copy; a `promise-lang.org/install.sh` vanity redirect can front it later. Anonymous fetch requires the repo to be public — the same gate as the binaries (§1).
+
+The script ([scripts/install.sh](../scripts/install.sh)) detects OS/arch, downloads the matching binary (**thin** by default) from the same release, verifies its SHA256 against `SHA256SUMS`, and runs `./binary install` (§2.4). It supports `--epoch` today; the `--full` / `--all` variant flags (which select the `-full` / `-all` asset suffixes, §2.3) are planned:
 
 ```sh
-curl -sSf https://promise-lang.org/install.sh | sh -s -- --epoch 2026.0
-curl -sSf https://promise-lang.org/install.sh | sh -s -- --full      # planned (selects the -full asset)
+BASE=https://github.com/promise-language/promise/releases/latest/download
+curl -sSfL $BASE/install.sh | sh -s -- --epoch 2026.0
+curl -sSfL $BASE/install.sh | sh -s -- --full      # planned (selects the -full asset)
 ```
 
 ### 2.2 Windows — install script *(planned)*
@@ -71,13 +74,15 @@ Windows needs **two one-liners**, one per shell, because the PowerShell idiom do
 
 ```powershell
 # PowerShell
-irm https://promise-lang.org/install.ps1 | iex
+irm https://github.com/promise-language/promise/releases/latest/download/install.ps1 | iex
 ```
 
 ```bat
 :: cmd.exe (curl.exe ships with Windows 10 1803+)
-curl -fsSL https://promise-lang.org/install.cmd -o install.cmd && install.cmd && del install.cmd
+curl -fsSL https://github.com/promise-language/promise/releases/latest/download/install.cmd -o install.cmd && install.cmd && del install.cmd
 ```
+
+(Same hosting as §2.1 — `install.ps1` / `install.cmd` are committed in `scripts/` and attached to each release; a `promise-lang.org` vanity redirect can front them later.)
 
 `install.ps1` is the real implementation (platform/arch detection, download, checksum, `promise install`, **User `PATH` via `[Environment]::SetEnvironmentVariable(..., 'User')`**). `install.cmd` is a **thin shim** that re-invokes PowerShell (`powershell -ExecutionPolicy Bypass -Command "irm … | iex"`) so there is a single real implementation. Direct download (§2.3) is the no-script fallback for locked-down environments.
 
@@ -174,7 +179,7 @@ Each release publishes to **GitHub Releases** at `github.com/promise-language/pr
 |-------|-----------------|
 | `promise-linux-amd64` / `-full` / `-all` | Linux x86_64 (musl static). thin + full; all *(planned)*. |
 | `promise-darwin-arm64` / `-full` / `-all` | macOS Apple Silicon. thin + full; all *(planned)*. |
-| `promise-darwin-amd64` / `-full` / `-all` | macOS Intel. thin + full; all *(planned)*. |
+| `promise-darwin-amd64` | macOS Intel — *deferred* (unverifiable without working Xcode CLT; see [release-automation.md](release-automation.md) §7). |
 | `promise-windows-amd64.exe` / `-full.exe` / `-all.exe` | Windows x86_64 *(platform in progress)*. thin + full; all *(planned)*. |
 | dependency blobs | Prebuilt dependencies (host LLVM, wasm runner, CRTs, sysroots) referenced by content `sha256` in the manifest. Acquired on demand by thin binaries. **How they're packaged is an acquisition detail** — one-file-per-hash assets, or a few compressed archives that each yield many blobs (§4). Not assumed to be one named download per hash. |
 | `SHA256SUMS` | Checksums for the top-level binary artifacts. Verified by the install scripts. |
@@ -292,7 +297,7 @@ CI usage stays a one-liner:
 ```yaml
 - name: Install Promise
   run: |
-    curl -sSf https://promise-lang.org/install.sh | sh -s -- --epoch 2026.0
+    curl -sSfL https://github.com/promise-language/promise/releases/latest/download/install.sh | sh -s -- --epoch 2026.0
     echo "$HOME/.promise/bin" >> $GITHUB_PATH
 ```
 

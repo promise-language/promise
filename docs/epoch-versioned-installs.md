@@ -53,7 +53,7 @@ This plan implements the multi-epoch layout already designed in `docs/module-sys
 
 **All builds use the epoch layout** — dev, next, and stable all install into `epochs/<name>/` with identical structure. This eliminates the need for a separate shared cache codepath. The compiler always runs from an epoch directory and finds its cache, modules, and tools relative to its own epoch root.
 
-**Per-epoch cache rationale**: Since cache keys include `compilerHash`, entries from different epochs never match. Keeping build cache inside the epoch directory means `promise remove <epoch>` is a single `rm -rf epochs/<epoch>/` with no orphaned entries.
+**Per-epoch cache rationale**: Since cache keys include `compilerHash`, entries from different epochs never match. Keeping build cache inside the epoch directory means `promise remove <epoch>` is a single `rm -rf epochs/<epoch>/` with no orphaned entries. *(Holds for the per-epoch **build** cache, which stays in the epoch dir. The shared content-addressed **blob** store is separate and shared: removing an epoch additionally requires dropping its refs and GC'ing blobs referenced by no remaining epoch — see [distribution.md](distribution.md) §4 GC. `rm -rf` reclaims the epoch dir but not its now-unreferenced shared blobs.)*
 
 ### New file: `compiler/internal/module/epoch.go`
 
@@ -325,7 +325,7 @@ For repo-local `bin/promise` (quick iteration without install), the compiler fal
 ### Per-epoch build cache
 
 Each epoch's build cache lives at `epochs/<name>/cache/build/`. This means:
-- `promise remove <epoch>` is a clean `rm -rf epochs/<name>/` — no orphaned cache entries anywhere
+- `promise remove <epoch>` is a clean `rm -rf epochs/<name>/` for the epoch's own dir (build cache included) — but the shared **blob** store needs the union-rooted GC step (drop refs, then sweep blobs no remaining epoch references; [distribution.md](distribution.md) §4 GC), not just `rm -rf`
 - No need to scan/filter shared cache when cleaning up an epoch
 - Repo-local `bin/promise` (quick iteration) uses `~/.promise/cache/build/` as fallback
 

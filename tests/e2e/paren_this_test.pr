@@ -552,13 +552,149 @@ test_this_cast_optional_present() `test {
   assert(!t.csq_is_square(), "this as CSquare absent when this is CTriangle");
 }
 
-// NOTE: `this[i]` (read) and `this[i] = v` (write) on a type's *own*
-// user-defined `[]`/`[]=` operator are NOT covered here. Both bare and
-// paren-wrapped forms emit invalid IR (extractvalue from i8*) because
-// genMethodIndex / genMethodIndexAssign gate on isContainerType with no `this`
-// branch at all — a pre-existing latent bug independent of paren peeling. Filed
-// separately as T0745 (do not expand T0613). Once T0745 is fixed, add the
-// `(this)[i]` read/write cases here.
+// ---------------- index/slice operator on a `this` receiver (T0745) ----------
+// `this[i]` (read), `this[i] = v` (write), and the slice forms `this[lo:hi]` /
+// `this[lo:hi] = v` on a type's *own* user-defined `[]`/`[]=`/`[:]`/`[:]=`
+// operator used to emit invalid IR (extractvalue from i8*) because
+// genMethodIndex / genSliceExpr / genMethodIndexAssign / genSliceAssign gated on
+// isContainerType with no `this` branch — so the raw i8* receiver fell through to
+// extractInstancePtr. Both bare and paren-wrapped forms were affected. The fix
+// peels ParenExpr via isThisReceiver() and uses the i8* receiver directly.
+// String payloads surface any missed ownership as a leak or double-free.
+type IdxBox {
+  int[] xs;
+  [](int i) int {
+    return this.xs[i];
+  }
+  []=(int i, int v) {
+    this.xs[i] = v;
+  }
+  first(this) int {
+    return this[0];
+  }
+  first_p(this) int {
+    return (this)[0];
+  }
+  first_pn(this) int {
+    return ((this))[0];
+  }
+  set_bare(~this, int i, int v) {
+    this[i] = v;
+  }
+  set_paren(~this, int i, int v) {
+    (this)[i] = v;
+  }
+}
+
+test_this_index_read() `test {
+  b := IdxBox(xs: [10, 20]);
+  assert(b.first() == 10, "bare this[0] read");
+  assert(b.first_p() == 10, "(this)[0] read");
+  assert(b.first_pn() == 10, "((this))[0] read");
+}
+
+test_this_index_write() `test {
+  b := IdxBox(xs: [10, 20]);
+  b.set_bare(0, 99);
+  assert(b[0] == 99, "bare this[i] = v write");
+  b.set_paren(1, 77);
+  assert(b[1] == 77, "(this)[i] = v write");
+}
+
+// Generic + heap (string) repro from the report — exercises monomorphization and
+// string ownership (a missed move surfaces as a leak/double-free under the
+// zero-tolerance policy).
+type StrGrid[T] {
+  T[] cells;
+  [](int i) T {
+    return this.cells[i];
+  }
+  []=(int i, ~T v) {
+    this.cells[i] = v;
+  }
+  at_bare(this, int i) T {
+    return this[i];
+  }
+  set_bare(~this, int i, ~T v) {
+    this[i] = v;
+  }
+}
+
+test_this_index_generic_heap() `test {
+  g := StrGrid[string](cells: ["a", "b", "c"]);
+  assert(g.at_bare(0) == "a", "generic bare this[i] read");
+  g.set_bare(1, "x" + "y");
+  assert(g[1] == "xy", "generic bare this[i] = v write");
+}
+
+// Slice operators (`[:]` / `[:]=`) on a `this` receiver.
+type SliceBox {
+  int[] xs;
+  [](int i) int {
+    return this.xs[i];
+  }
+  [:](int? lo, int? hi) int[] {
+    return this.xs[lo: hi];
+  }
+  [:]=(int? lo, int? hi, ~int[] v) {
+    this.xs[lo: hi] = v;
+  }
+  head2(this) int[] {
+    return this[0:2];
+  }
+  head2_p(this) int[] {
+    return (this)[0:2];
+  }
+  replace01(~this, ~int[] v) {
+    this[0:2] = v;
+  }
+  replace01_p(~this, ~int[] v) {
+    (this)[0:2] = v;
+  }
+}
+
+test_this_slice_read() `test {
+  b := SliceBox(xs: [1, 2, 3, 4]);
+  h := b.head2();
+  assert(h.len == 2, "bare this[0:2] slice read len");
+  assert(h[0] == 1 && h[1] == 2, "bare this[0:2] slice read values");
+  hp := b.head2_p();
+  assert(hp[0] == 1 && hp[1] == 2, "(this)[0:2] slice read values");
+}
+
+test_this_slice_write() `test {
+  b := SliceBox(xs: [1, 2, 3, 4]);
+  b.replace01([9, 8]);
+  assert(b[0] == 9 && b[1] == 8, "bare this[0:2] = v slice write");
+  c := SliceBox(xs: [1, 2, 3, 4]);
+  c.replace01_p([7, 6]);
+  assert(c[0] == 7 && c[1] == 6, "(this)[0:2] = v slice write");
+}
+
+// Value-type `this[i]` read — previously panicked in valueTypeReceiverPtr because
+// the `this` receiver is a raw i8* (value-struct ptr), not a value struct.
+type VPair {
+  int a `value;
+  int b `value;
+  [](int i) int {
+    if i == 0 {
+      return this.a;
+    }
+    return this.b;
+  }
+  first(this) int {
+    return this[0];
+  }
+  first_p(this) int {
+    return (this)[1];
+  }
+}
+
+test_this_index_value_type() `test {
+  p := VPair(a: 5, b: 7);
+  assert(p.first() == 5, "value-type bare this[0] read");
+  assert(p.first_p() == 7, "value-type (this)[1] read");
+}
 //
 // NOTE: `(this) as!/as T` RTTI cast on a `this` receiver — FIXED (T0747) and
 // covered above by the test_this_cast_* family (forced field/method, forced

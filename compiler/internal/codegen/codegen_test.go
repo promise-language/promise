@@ -26431,3 +26431,102 @@ func TestThisCastOptionalNoExtractFromPtr(t *testing.T) {
 		t.Fatal("expected T0747OBase.is_der in IR")
 	}
 }
+
+// --- T0745: `this[i]` / `this[i]=v` (and slice forms) on a user index operator ---
+//
+// genExpr(this) yields a bare instance i8* (value-struct ptr for value types),
+// not a value struct. The four subscript/slice dispatch gates (genMethodIndex,
+// genSliceExpr, genMethodIndexAssign, genSliceAssign) gated on isContainerType
+// with no `this` branch, so the raw i8* fell through to extractInstancePtr and
+// emitted `extractvalue i8* ..., 1` (opt-rejected); the value-type read path
+// additionally panicked. The fix adds an isThisReceiver() branch (peels
+// ParenExpr) that uses the i8* receiver directly. These tests guard the IR shape
+// via the "no extractvalue from i8*" invariant and check the operator fn takes an
+// i8* receiver.
+
+// Read: bare `this[i]`, `(this)[i]`, `((this))[i]` on a user `[]` operator.
+func TestT0745ThisIndexReadNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0745IdxBox {
+			int[] xs;
+			[](int i) int { return this.xs[i]; }
+			first(this) int { return this[0]; }
+			first_p(this) int { return (this)[0]; }
+			first_pn(this) int { return ((this))[0]; }
+		}
+		main() { b := T0745IdxBox(xs: [10, 20]); _ := b.first(); _ := b.first_p(); _ := b.first_pn(); }
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	first := extractFunction(ir, "T0745IdxBox.first")
+	if first == "" {
+		t.Fatal("expected T0745IdxBox.first in IR")
+	}
+	// The operator method is invoked with the i8* `this` receiver directly.
+	assertContains(t, first, `@"T0745IdxBox.[]"(i8*`)
+}
+
+// Write: bare `this[i] = v` and `(this)[i] = v` on a user `[]=` operator.
+func TestT0745ThisIndexWriteNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0745WBox {
+			int[] xs;
+			[](int i) int { return this.xs[i]; }
+			[]=(int i, int v) { this.xs[i] = v; }
+			set_bare(~this, int i, int v) { this[i] = v; }
+			set_paren(~this, int i, int v) { (this)[i] = v; }
+		}
+		main() { b := T0745WBox(xs: [10, 20]); b.set_bare(0, 99); b.set_paren(1, 77); }
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	setBare := extractFunction(ir, "T0745WBox.set_bare")
+	if setBare == "" {
+		t.Fatal("expected T0745WBox.set_bare in IR")
+	}
+	assertContains(t, setBare, `@"T0745WBox.[]="(i8*`)
+}
+
+// Slice read/write: `this[lo:hi]` and `this[lo:hi] = v` on user `[:]`/`[:]=`.
+func TestT0745ThisSliceNoExtractFromPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type T0745SliceBox {
+			int[] xs;
+			[:](int? lo, int? hi) int[] { return this.xs[lo:hi]; }
+			[:]=(int? lo, int? hi, int[] v) { this.xs[lo:hi] = v; }
+			head2(this) int[] { return this[0:2]; }
+			head2_p(this) int[] { return (this)[0:2]; }
+			replace01(~this, int[] v) { this[0:2] = v; }
+			replace01_p(~this, int[] v) { (this)[0:2] = v; }
+		}
+		main() {
+			b := T0745SliceBox(xs: [1, 2, 3, 4]);
+			_ := b.head2(); _ := b.head2_p();
+			b.replace01([9, 8]); b.replace01_p([7, 6]);
+		}
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0745SliceBox.head2") == "" {
+		t.Fatal("expected T0745SliceBox.head2 in IR")
+	}
+	if extractFunction(ir, "T0745SliceBox.replace01") == "" {
+		t.Fatal("expected T0745SliceBox.replace01 in IR")
+	}
+}
+
+// Value-type `this[i]` read — previously panicked in valueTypeReceiverPtr.
+// generateIR not panicking is itself the regression guard.
+func TestT0745ThisIndexValueType(t *testing.T) {
+	ir := generateIR(t, `
+		type T0745VPair {
+			int a `+"`value"+`;
+			int b `+"`value"+`;
+			[](int i) int { if i == 0 { return this.a; } return this.b; }
+			first(this) int { return this[0]; }
+			first_p(this) int { return (this)[1]; }
+		}
+		main() { p := T0745VPair(a: 5, b: 7); _ := p.first(); _ := p.first_p(); }
+	`)
+	assertNotContains(t, ir, "extractvalue i8*")
+	if extractFunction(ir, "T0745VPair.first") == "" {
+		t.Fatal("expected T0745VPair.first in IR")
+	}
+}

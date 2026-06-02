@@ -9055,9 +9055,13 @@ func (c *Compiler) genMethodIndexAssign(target *ast.IndexExpr, targetType types.
 	}
 
 	var instancePtr value.Value
-	if isContainerType(targetType) {
+	switch {
+	case isThisReceiver(target.Target):
+		// T0745: `this` (incl. paren-wrapped) is already the i8* receiver ptr.
 		instancePtr = targetVal
-	} else {
+	case isContainerType(targetType):
+		instancePtr = targetVal
+	default:
 		instancePtr = c.extractInstancePtr(targetVal)
 	}
 
@@ -9395,9 +9399,13 @@ func (c *Compiler) genSliceAssign(target *ast.SliceExpr, val value.Value) {
 	}
 
 	var instancePtr value.Value
-	if isContainerType(targetType) {
+	switch {
+	case isThisReceiver(target.Target):
+		// T0745: `this` (incl. paren-wrapped) is already the i8* receiver ptr.
 		instancePtr = targetVal
-	} else {
+	case isContainerType(targetType):
+		instancePtr = targetVal
+	default:
 		instancePtr = c.extractInstancePtr(targetVal)
 	}
 

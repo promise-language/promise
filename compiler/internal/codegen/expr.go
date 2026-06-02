@@ -8160,11 +8160,15 @@ func (c *Compiler) genSliceExpr(e *ast.SliceExpr) value.Value {
 	}
 
 	var instancePtr value.Value
-	if isContainerType(targetType) {
+	switch {
+	case isThisReceiver(e.Target):
+		// T0745: `this` (incl. paren-wrapped) is already the i8* receiver ptr.
 		instancePtr = target
-	} else if named != nil && named.IsValueType() {
+	case isContainerType(targetType):
+		instancePtr = target
+	case named != nil && named.IsValueType():
 		instancePtr = c.valueTypeReceiverPtr(target, targetType)
-	} else {
+	default:
 		instancePtr = c.extractInstancePtr(target)
 	}
 
@@ -8600,11 +8604,17 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 	// value types store to temp alloca, regular user types extract instance ptr.
 	named := extractNamed(targetType)
 	var instancePtr value.Value
-	if isContainerType(targetType) {
+	switch {
+	case isThisReceiver(e.Target):
+		// T0745: `this` (incl. paren-wrapped) is already the i8* receiver ptr the
+		// operator method expects — must precede the value-type branch, which
+		// would otherwise panic trying to take a value-struct ptr of a raw i8*.
 		instancePtr = target
-	} else if named != nil && named.IsValueType() {
+	case isContainerType(targetType):
+		instancePtr = target
+	case named != nil && named.IsValueType():
 		instancePtr = c.valueTypeReceiverPtr(target, targetType)
-	} else {
+	default:
 		instancePtr = c.extractInstancePtr(target)
 	}
 

@@ -1,15 +1,16 @@
-// Command do is the Promise project's tracker "flow" binary: a stateless,
-// per-step workflow executable implementing the task/bug lifecycle as steps —
-// plan → implementation → review → coverage → commit → push → summary →
-// inspection. It is built on the OSS flow SDK's declarative cli.Run(cli.App{...})
-// shape; the tracker-server-backed Backend / Agent / Worktree / Telemetry
-// surfaces live in flow-sdk/pkg/backend/tracker.
+// Command do is the Promise project's tracker "flow" binary: the per-step
+// task/bug lifecycle — plan → implement → review → coverage → land
+// (commit+push) → summary → inspection.
 //
-// It is the Promise counterpart of the tracker repo's reference `do` flow: the
-// step machine and lease/status plumbing are project-agnostic (owned by the OSS
-// cli package), but the per-step agent prompts and the verify gate are
-// Promise-specific (see prompts.go and steps.go) — Promise has its own skills,
-// build, and test commands (bin/build, bin/verify --wasm, bin/promise test).
+// The step machine, push-lease / smart-rebase logic, artifact set, flow
+// definitions, and the push-lease/e2e test suite are SHARED with the tracker
+// project via the importable flow-sdk/doflow package. This binary is a thin
+// shim: it supplies the Promise-specific seam — the verify command
+// (bin/verify --wasm), the implement / land step timeouts, and the agent prompt
+// builders (see prompts.go) — as a doflow.Config and calls doflow.BuildApp.
+// The Promise prompt bodies stay here because their text references
+// Promise-specific build/test mechanics; the domain-agnostic prompt skeleton
+// comes from the shared flow/prompt package (used by prompts.go).
 //
 // CLI (provided by the OSS cli package):
 //
@@ -17,6 +18,7 @@
 //	do list                list items this flow can process
 //	do claim <id>          acquire a claim on an item (alias: do lease <id>)
 //	do run-step            advance ONE lifecycle item (one prompt → one artifact)
+//	do resolve [<id>]      run ALL steps until finalized or parked
 //	do status [<id>]       read-only lifecycle checklist
 //	do grant <key> ...     extend a parked step's budget
 //	do release             drop the claim
@@ -31,8 +33,8 @@ import (
 	"os"
 	"time"
 
+	"djabi.dev/go/flow_sdk/doflow"
 	trackerbackend "djabi.dev/go/flow_sdk/pkg/backend/tracker"
-	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/cli"
 
 	"github.com/promise-language/promise/flows/internal/srchash"
@@ -45,12 +47,23 @@ const flowBinaryName = "do"
 
 // verifyCmd is Promise's pre-commit / pre-push gate: format + vet + the full
 // host+WASM test suite (CLAUDE.md: "Always run `bin/verify --wasm` before
-// committing"). It is the flow's agent-proof line of defense — the
-// implement/commit/push steps only proceed once it passes on the worktree.
-// Configured ONCE here as cli.App.VerifyCmd; step handlers read it via
-// StepCtx.VerifyCmd() to run the gate AND feed it into prompt context (so the
-// shared, project-agnostic prompt fragments refer to the same command).
+// committing"). It is the flow's agent-proof line of defense — the implement and
+// land steps only proceed once it passes on the worktree. Configured ONCE here
+// (doflow.Config.VerifyCmd → cli.App.VerifyCmd); step handlers read it via
+// StepCtx.VerifyCmd() to run the gate AND feed it into the prompt builders, so
+// the bodies and the shared prompt fragments refer to the same command.
 const verifyCmd = "bin/verify --wasm"
+
+// implementTimeout and landTimeout bound the two steps that run the full
+// `bin/verify --wasm` gate through the flow. The host+WASM suite is slow (the
+// pre-OSS Promise flow budgeted 45m for a single verify run), so both get a
+// generous cap well above the OSS 30m DefaultStepBudget, to keep the step
+// deadline from cutting verify short and parking the step. (The tracker omits a
+// land-step timeout — no-hidden-timeouts — but Promise's slow gate warrants one.)
+const (
+	implementTimeout = 60 * time.Minute
+	landTimeout      = 60 * time.Minute
+)
 
 // sourceHash is the flow source hash baked in at build time by ./make
 // (-ldflags "-X main.sourceHash=..."). It stays "dev" for `go run` / dlv debug
@@ -71,82 +84,30 @@ func main() {
 		fmt.Fprintln(os.Stderr, "do: backend init:", err)
 		os.Exit(1)
 	}
-	os.Exit(cli.Run(buildApp(backend)))
+	os.Exit(cli.Run(doflow.BuildApp(promiseConfig(), backend)))
 }
 
-// buildApp constructs the cli.App for the do binary. Extracted from main so a
-// test can build the same App against a Backend pointed at a fake tracker +
-// runner. A single function is the single source of truth for the artifact set,
-// the flow definitions, and the preflight chain.
-func buildApp(backend *trackerbackend.Backend) cli.App {
-	artifacts := []flow.ArtifactDef{
-		flow.Artifact("plan", flow.ArtifactMarkdown),
-		flow.Artifact("phases", flow.ArtifactJSON),
-		flow.Artifact("implementation", flow.ArtifactPatch),
-		flow.Artifact("review", flow.ArtifactMarkdown),
-		flow.Artifact("coverage", flow.ArtifactMarkdown),
-		flow.Artifact("commit", flow.ArtifactCommitHash),
-		flow.Artifact("push", flow.ArtifactCommitHash),
-		flow.Artifact("summary", flow.ArtifactMarkdown),
-		flow.Artifact("inspection", flow.ArtifactJSON),
-	}
-
-	// do-task: the full code lifecycle for task/bug items. The implement step's
-	// MaxPromptsPerInvocation caps the verify-fix loop — the metered Agent refuses
-	// the Nth prompt within one invocation, surfacing ErrBudgetExhausted that
-	// cli.RunOne translates to a park. The resolution summary is produced by the
-	// dedicated post-push summary step (after push, before inspect) so it reflects
-	// the merged result rather than a mid-implementation guess.
-	doTask := flow.NewFlow("do-task", []flow.ItemType{"task", "bug"})
-	doTask.AddStep("create plan", "plan", makeStepPlan(backend), flow.Required)
-	doTask.AddStep("implement", "implementation", makeStepImplementation(backend),
-		flow.Required,
-		flow.MaxPromptsPerInvocation(defaultImplementVerifyMaxRounds),
-		flow.Timeout(verifyStepTimeout),
-	)
-	doTask.AddStep("review and fix issues", "review", makeStepReview(backend), flow.Required)
-	doTask.AddStep("fill coverage gaps", "coverage", makeStepCoverage(backend), flow.Required)
-	// commit and push both run the full `bin/verify --wasm` gate via the flow, so
-	// they take the same generous timeout as implement (see verifyStepTimeout) —
-	// the default 30m StepBudget would cut the slow host+WASM suite short.
-	doTask.AddStep("commit to local", "commit", makeStepCommit(backend), flow.Required, flow.Timeout(verifyStepTimeout))
-	doTask.AddStep("push to origin", "push", makeStepPush(backend), flow.Required, flow.Timeout(verifyStepTimeout))
-	doTask.AddStep("summarize resolution", "summary", makeStepSummary(backend), flow.Required)
-	doTask.AddStep("inspect", "inspection", makeStepInspection(backend), flow.Required)
-
-	// do-plan: plan items don't write code — they break themselves into child task
-	// items and exit. Review still runs (the plan IS the work product) but phases
-	// replaces every code-touching step.
-	doPlan := flow.NewFlow("do-plan", []flow.ItemType{"plan"})
-	doPlan.AddStep("plan", "plan", makeStepPlan(backend), flow.Required)
-	doPlan.AddStep("review and fix issues", "review", makeStepReview(backend), flow.Required)
-	doPlan.AddStep("file phase tasks", "phases", makeStepPhases(backend), flow.Required)
-
-	return cli.App{
-		Name:      flowBinaryName,
-		Backend:   backend,
-		Agent:     trackerbackend.NewAgent(backend),
-		Telemetry: trackerbackend.NewTelemetry(backend),
-		Preflight: backend.PreflightAll(),
-		Artifacts: artifacts,
-		Flows:     []*flow.Flow{doTask, doPlan},
-		VerifyCmd: verifyCmd,
+// promiseConfig is the per-project seam handed to doflow.BuildApp: the verify
+// command, the implement / land step timeouts, and the Promise-specific agent
+// prompt builders (prompts.go). CommitMessage is left nil — doflow's
+// DefaultCommitMessage ("<ID>: <Title>" + a model-tagged Co-Authored-By trailer)
+// is exactly Promise's convention.
+func promiseConfig() doflow.Config {
+	return doflow.Config{
+		FlowBinaryName:   flowBinaryName,
+		VerifyCmd:        verifyCmd,
+		ImplementTimeout: implementTimeout,
+		StepTimeout:      landTimeout,
+		Prompts: doflow.Prompts{
+			Plan:           planPrompt,
+			Phases:         phasesPrompt,
+			Implement:      implementPrompt,
+			ImplementFix:   implementFixPrompt,
+			Review:         reviewPrompt,
+			Coverage:       coveragePrompt,
+			RebaseConflict: rebaseConflictPrompt,
+			Summary:        summaryPrompt,
+			Inspect:        inspectPrompt,
+		},
 	}
 }
-
-// verifyStepTimeout bounds the steps that run the full `bin/verify --wasm` gate
-// through the flow (implement, commit, push). The host+WASM suite is slow — the
-// pre-OSS Promise flow budgeted 45m for a single verify run — so these steps get a
-// generous cap, well above the 30m DefaultStepBudget, to keep the OSS step
-// deadline from cutting verify short and parking the step. Steps that do not run a
-// flow-driven verify keep the default budget.
-const verifyStepTimeout = 60 * time.Minute
-
-// defaultImplementVerifyMaxRounds bounds the implement step's verify-fix loop at
-// 3 rounds by default. Maps to OSS's MaxPromptsPerInvocation(3): after 3
-// Agent.Run calls within a single invocation, the metered agent returns
-// ErrBudgetExhausted and cli.RunOne parks the step with an axis=prompts budget
-// exhaustion. A follow-up invocation re-enters with a fresh per-invocation
-// prompt budget. Operators can pass `do grant implementation --prompts <N>` to
-// extend the cap once.
-const defaultImplementVerifyMaxRounds = 3

@@ -151,3 +151,14 @@ func summaryPrompt(it *flowsdk.Item, verifyCmd string) string {
 func inspectPrompt(it *flowsdk.Item, verifyCmd string) string {
 	return render("inspect.tmpl", baseContext(it, verifyCmd))
 }
+
+// truncate clips s to at most n characters, appending an ellipsis. Used to bound
+// the verify/rebase output embedded in the implement-fix and rebase-conflict
+// prompts.
+func truncate(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}

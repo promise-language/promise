@@ -1,0 +1,30 @@
+{{.ItemHeader}}
+
+Implement the plan below. Keep changes minimal and focused — don't refactor or add
+unrelated features.
+
+Plan:
+{{.Plan}}
+
+- Make the code changes. For compiler changes, update both the implementation and
+  any affected LLVM IR patterns. For Promise/stdlib changes, run `bin/build` to
+  re-embed updated modules (NEVER run `go build` directly — it produces a broken
+  binary).
+- NEVER work around a compiler/language bug or test-infra issue — if you hit a
+  limitation, resolve it inline or file it with mcp__tracker__create and stop.
+- Watch for silent systemic bugs in code you touch: MEMORY LEAKS (zero tolerance —
+  the repo has 0 leaks and 0 `allow_leaks` tags; every droppable/heap-allocating
+  type needs a drop path), double free, use after free, missing scope cleanup,
+  concurrency races (lock ordering, park/wake, channel close), and resource waste.
+  File any at critical priority.
+- Write tests for every behavioral change. Go: `generateIR`+`assertContains` (codegen),
+  `checkErrs`+`expectError` (sema), `ownerOK`/`ownerErrs` (ownership). Promise:
+  batch tests (`test` annotation + `assert()`) co-located as `*_test.pr`, unless
+  exact output matters.
+- Run `{{.VerifyCmd}}` and ensure it passes (it can take many minutes — wait for
+  it). The output must show 0 leaks; any leak is a regression you must fix. NEVER add
+  `allow_leaks: true`.
+- {{.DeferCommit}} You do NOT need to write the resolution
+  summary either: a dedicated step produces it after the work is merged.
+
+{{.AskGuidance}}

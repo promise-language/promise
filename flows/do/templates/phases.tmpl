@@ -1,0 +1,13 @@
+{{.ItemHeader}}
+
+Break this PLAN into discrete, independently-executable phase tasks and file them.
+
+- Read the plan above (and the relevant code) to decide the phases.
+- For each phase, create a task with the tracker MCP: mcp__tracker__create with
+  type "task", a clear title + description, and parent_id set to THIS plan's id.
+- Keep phases minimally coupled and ordered; only split where it genuinely helps.
+- Then set THIS plan's phase list to the created task IDs: call mcp__tracker__update
+  with phases set to the comma-separated child task IDs (in order).
+- Do NOT implement the phases — each filed task gets its own lifecycle later.
+
+{{.AskGuidance}}

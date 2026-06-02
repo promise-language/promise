@@ -43,6 +43,15 @@ import (
 // items of this type.
 const flowBinaryName = "do"
 
+// verifyCmd is Promise's pre-commit / pre-push gate: format + vet + the full
+// host+WASM test suite (CLAUDE.md: "Always run `bin/verify --wasm` before
+// committing"). It is the flow's agent-proof line of defense — the
+// implement/commit/push steps only proceed once it passes on the worktree.
+// Configured ONCE here as cli.App.VerifyCmd; step handlers read it via
+// StepCtx.VerifyCmd() to run the gate AND feed it into prompt context (so the
+// shared, project-agnostic prompt fragments refer to the same command).
+const verifyCmd = "bin/verify --wasm"
+
 // sourceHash is the flow source hash baked in at build time by ./make
 // (-ldflags "-X main.sourceHash=..."). It stays "dev" for `go run` / dlv debug
 // builds, which skip the staleness check. See srchash.CheckStale.
@@ -121,6 +130,7 @@ func buildApp(backend *trackerbackend.Backend) cli.App {
 		Preflight: backend.PreflightAll(),
 		Artifacts: artifacts,
 		Flows:     []*flow.Flow{doTask, doPlan},
+		VerifyCmd: verifyCmd,
 	}
 }
 

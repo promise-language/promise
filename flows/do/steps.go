@@ -34,12 +34,6 @@ import (
 	"github.com/promise-language/flow"
 )
 
-// verifyCmd is Promise's pre-commit / pre-push gate: format + vet + the full
-// host+WASM test suite (CLAUDE.md: "Always run `bin/verify --wasm` before
-// committing"). The flow runs it as the agent-proof line of defense — the
-// implement/commit/push steps only proceed once it passes on the worktree.
-const verifyCmd = "bin/verify --wasm"
-
 // mustJSON marshals v to a json.RawMessage; falls back to a JSON null on error
 // (the input shapes are local structs we control, so an error here would be a
 // programmer mistake — not a runtime condition the caller could handle).
@@ -89,7 +83,7 @@ func makeStepPlan(b *trackerbackend.Backend) func(flow.StepCtx) error {
 			return err
 		}
 		resp, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
-			Prompt:         planPrompt(it),
+			Prompt:         planPrompt(it, ctx.VerifyCmd()),
 			PermissionMode: string(flowsdk.PermissionAuto),
 			Model:          string(it.Model),
 			Effort:         string(it.Effort),
@@ -132,7 +126,7 @@ func makeStepPhases(b *trackerbackend.Backend) func(flow.StepCtx) error {
 			return err
 		}
 		if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
-			Prompt:         phasesPrompt(it),
+			Prompt:         phasesPrompt(it, ctx.VerifyCmd()),
 			PermissionMode: string(flowsdk.PermissionAuto),
 			Model:          string(it.Model),
 			Effort:         string(it.Effort),
@@ -188,7 +182,7 @@ func makeStepImplementation(b *trackerbackend.Backend) func(flow.StepCtx) error 
 				return ctx.ResolvePatch(flow.PatchBody{})
 			}
 		}
-		prompt := implementPrompt(it)
+		prompt := implementPrompt(it, ctx.VerifyCmd())
 		round := 0
 		for {
 			round++
@@ -212,7 +206,7 @@ func makeStepImplementation(b *trackerbackend.Backend) func(flow.StepCtx) error 
 				return ctx.Skip("agent drove the item to a terminal state during the implement loop")
 			}
 			ctx.Notify("implementation", fmt.Sprintf("running verify (round %d)", round))
-			gate, err := b.Validate(ctx.Context(), verifyCmd)
+			gate, err := b.Validate(ctx.Context(), ctx.VerifyCmd())
 			if err != nil {
 				return fmt.Errorf("verify: %w: %w", err, flow.ErrTransient)
 			}
@@ -231,7 +225,7 @@ func makeStepImplementation(b *trackerbackend.Backend) func(flow.StepCtx) error 
 			if refreshed, _ := b.GetItem(ctx.Context(), flowsdk.ItemID(ctx.Item().ID)); refreshed != nil {
 				it = refreshed
 			}
-			prompt = implementFixPrompt(it, gate.Output+gate.Error)
+			prompt = implementFixPrompt(it, ctx.VerifyCmd(), gate.Output+gate.Error)
 		}
 		// Verify passed. Re-check the LIVE item one more time before recording the
 		// implementation: the agent may have driven the item to a terminal state
@@ -317,7 +311,7 @@ func makeStepReview(b *trackerbackend.Backend) func(flow.StepCtx) error {
 		}
 		before, _ := b.Status(ctx.Context())
 		resp, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
-			Prompt:         reviewPrompt(it),
+			Prompt:         reviewPrompt(it, ctx.VerifyCmd()),
 			PermissionMode: string(flowsdk.PermissionAuto),
 			Model:          string(it.Model),
 			Effort:         string(it.Effort),
@@ -364,7 +358,7 @@ func makeStepCoverage(b *trackerbackend.Backend) func(flow.StepCtx) error {
 		}
 		before, _ := b.Status(ctx.Context())
 		resp, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
-			Prompt:         coveragePrompt(it),
+			Prompt:         coveragePrompt(it, ctx.VerifyCmd()),
 			PermissionMode: string(flowsdk.PermissionAuto),
 			Model:          string(it.Model),
 			Effort:         string(it.Effort),
@@ -418,7 +412,7 @@ func makeStepCommit(b *trackerbackend.Backend) func(flow.StepCtx) error {
 		hasUncommitted := st.Modified > 0 || st.Staged > 0
 		if hasUncommitted {
 			ctx.Notify("commit", "running verify")
-			gate, err := b.Validate(ctx.Context(), verifyCmd)
+			gate, err := b.Validate(ctx.Context(), ctx.VerifyCmd())
 			if err != nil {
 				return fmt.Errorf("verify: %w: %w", err, flow.ErrTransient)
 			}
@@ -498,7 +492,7 @@ func smartRebase(ctx flow.StepCtx, b *trackerbackend.Backend, it *flowsdk.Item) 
 		}
 		ctx.Notify("commit", fmt.Sprintf("resolving rebase conflicts (round %d)", round))
 		_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
-			Prompt:         rebaseConflictPrompt(it, conflicts, rb.Output+rb.Error),
+			Prompt:         rebaseConflictPrompt(it, ctx.VerifyCmd(), conflicts, rb.Output+rb.Error),
 			PermissionMode: string(flowsdk.PermissionAuto),
 			Model:          string(it.Model),
 			Effort:         string(it.Effort),
@@ -608,7 +602,7 @@ func prePushVerify(ctx flow.StepCtx, b *trackerbackend.Backend, it *flowsdk.Item
 		return nil
 	}
 	ctx.Notify("push", label)
-	gate, err := b.Validate(ctx.Context(), verifyCmd)
+	gate, err := b.Validate(ctx.Context(), ctx.VerifyCmd())
 	if err != nil {
 		return pushReSync(b, ctx, label+": "+err.Error())
 	}
@@ -800,7 +794,7 @@ func makeStepSummary(b *trackerbackend.Backend) func(flow.StepCtx) error {
 			return err
 		}
 		resp, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
-			Prompt:         summaryPrompt(it),
+			Prompt:         summaryPrompt(it, ctx.VerifyCmd()),
 			PermissionMode: string(flowsdk.PermissionAuto),
 			Model:          string(it.Model),
 			Effort:         string(it.Effort),
@@ -839,7 +833,7 @@ func makeStepInspection(b *trackerbackend.Backend) func(flow.StepCtx) error {
 			return err
 		}
 		resp, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
-			Prompt:         inspectPrompt(it),
+			Prompt:         inspectPrompt(it, ctx.VerifyCmd()),
 			PermissionMode: string(flowsdk.PermissionAuto),
 			Model:          string(it.Model),
 			Effort:         string(it.Effort),

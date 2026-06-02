@@ -1,0 +1,18 @@
+{{.ItemHeader}}
+
+Produce a concrete implementation plan for this item.
+
+- Read the item's notes and attachments and the relevant source to understand
+  current behavior. For compiler changes, trace the pipeline stage
+  (parser → sema → ownership → codegen). For Promise/stdlib changes, read the
+  module source (modules/) and its tests. If this is a bug, reproduce it first
+  (a minimal failing test or command).
+- Identify which files change and what the change is; prefer the simplest approach.
+  Follow the implementation philosophy: prefer Promise over hand-written IR, full
+  English words in APIs, getters for side-effect-free parameterless access, `doc`
+  annotations on `public` declarations.
+
+{{.PlanStepResolution}}
+- Otherwise, output the implementation plan as your final message in Markdown.
+
+{{.AskGuidance}}

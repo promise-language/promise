@@ -1,0 +1,20 @@
+{{.ItemHeader}}
+
+Analyze and fill test-coverage gaps for the changes on this item.
+
+- For Go code: from `compiler/`, run
+  `go test ./<package>/ -coverprofile=/tmp/cov.out -count=1` then
+  `go tool cover -func=/tmp/cov.out` to find low-coverage functions.
+- For Promise code: run `bin/promise test -coverage <file-or-dir>` (e.g.
+  `bin/promise test -coverage tests/e2e/...`) to get block-level coverage.
+- Add missing tests (error paths, edge cases, state transitions) following existing
+  patterns, and run them to make sure they pass. Prefer batch tests for Promise.
+- Audit resource invariants, not just line coverage: every heap-allocating type
+  should have a test that confirms cleanup (no leak); concurrency code should have a
+  stress test. File a critical bug for any leak source with no drop path.
+- For genuinely untestable code (needs claude / network / external processes, or a
+  missing language feature), file a tracker item (mcp__tracker__create) instead.
+- End your message with a single line stating the resulting coverage, exactly:
+  COVERAGE: adequate     (or)  COVERAGE: insufficient     (or)  COVERAGE: none
+
+{{.AskGuidance}}

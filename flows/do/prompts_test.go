@@ -105,7 +105,7 @@ func TestPrompts_CarryEssentialSkillContent(t *testing.T) {
 		"inspect":   inspectPrompt(it, testVerifyCmd),
 	}
 	musts := map[string][]string{
-		"plan":      {"reproduce", "blocked_by", "wontfix", "needs-attention", "parser → sema → ownership → codegen"},
+		"plan":      {"reproduce", "wontfix", "needs-attention", "parser → sema → ownership → codegen"},
 		"implement": {"bin/verify --wasm", "allow_leaks", "bin/build", "mcp__tracker__create"},
 		"review":    {"in full", "concurrency", "mcp__tracker__create", "bin/verify --wasm", "zero tolerance"},
 		"coverage":  {"go tool cover", "bin/promise test -coverage", "mcp__tracker__create"},
@@ -122,12 +122,14 @@ func TestPrompts_CarryEssentialSkillContent(t *testing.T) {
 }
 
 // TestPlanPrompt_AlreadyImplementedGuard verifies the plan prompt carries the
-// shared already-implemented/duplicate resolution branch — the fix for the stall
-// where a "it's already done" plan with no close-out leaves the implement step
-// producing an empty diff on every retry.
+// shared proof-gated already-implemented resolution branch — the fix for the stall
+// where a "it's already done" plan with no close-out left the implement step
+// producing an empty diff on every retry. The shared partial now requires PROOF to
+// close (rather than producing a plan), which both fixes the stall and prevents
+// false-closes.
 func TestPlanPrompt_AlreadyImplementedGuard(t *testing.T) {
 	p := planPrompt(&flowsdk.Item{ID: "T1", Type: flowsdk.ItemTask, Title: "t"}, testVerifyCmd)
-	for _, want := range []string{"ALREADY IMPLEMENTED", "do NOT produce a plan", "empty diff"} {
+	for _, want := range []string{"ALREADY IMPLEMENTED", "do NOT produce a plan", "PROOF"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("plan prompt missing already-implemented guidance %q", want)
 		}

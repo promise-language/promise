@@ -22,6 +22,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,30 @@ func mustJSON(v any) json.RawMessage {
 		return json.RawMessage("null")
 	}
 	return b
+}
+
+// maybeParkRemoteUnreachable inspects a git/arena result for a transport-layer
+// failure signature (the runner classifies these via classifyRemoteError and
+// stamps RemoteUnreachable+RemoteHost on the ArenaResult). When set, raises a
+// transient remote-unreachable park so the tracker's remote-down state machine
+// pauses dispatch + auto-resumes on probe success — instead of burning the
+// task's retry budget on what is purely an infrastructure outage. Returns a
+// flow.ErrTransient when it parks, or nil to signal "no transport problem,
+// continue with normal error handling". T0455.
+func maybeParkRemoteUnreachable(ctx flow.StepCtx, b *trackerbackend.Backend, step string, res *flowsdk.ArenaResult) error {
+	if res == nil || !res.RemoteUnreachable {
+		return nil
+	}
+	host := res.RemoteHost
+	if host == "" {
+		host = "(unknown)"
+	}
+	reason := fmt.Sprintf("git remote %s unreachable — waiting for the tracker's remote-down probe ticker to confirm recovery", host)
+	details := truncate(res.Error+"\n"+res.Output, 600)
+	if perr := b.ParkRemoteUnreachable(ctx.Context(), ctx.Claim(), host, reason, details); perr != nil {
+		fmt.Fprintf(os.Stderr, "do %s: park remote-unreachable: %v\n", step, perr)
+	}
+	return fmt.Errorf("%s: %w", reason, flow.ErrTransient)
 }
 
 // makeStepPlan drives the planning turn. Reads the item, runs the agent with the
@@ -366,19 +391,20 @@ func makeStepCoverage(b *trackerbackend.Backend) func(flow.StepCtx) error {
 	}
 }
 
-// makeStepCommit is the smart commit:
+// makeStepCommit is the DUMB local commit (T0464: the smart rebase moved to
+// the push step, which holds the push lease so fetch→rebase→push is atomic at
+// the tip):
 //
 //  1. If the worktree has uncommitted work (modified/staged != 0), verify
 //     in-place then commit it.
-//  2. If the worktree is clean (a previous run already committed), skip straight
-//     to step 3 — the LastCommit is what we record.
-//  3. Smart rebase onto origin/master with bounded agent-driven conflict
-//     resolution (TRACKER_REBASE_RESOLVE_MAX_ROUNDS).
-//  4. Record the resulting commit hash.
+//  2. If the worktree is clean (a previous run already committed), the
+//     LastCommit is what we record.
+//  3. Record the resulting commit hash and stamp the verify-marker (HEAD) so
+//     the push step can skip a redundant pre-push verify.
 //
-// Step 1's "dirty or clean" branch is what makes the step idempotent on re-runs:
-// the previous run's commit is preserved and we still go through the rebase to
-// make sure the commit sits on top of the current remote.
+// No rebase here — a behind/diverged commit is rebased onto the tip by the
+// push step under the push lease, not speculatively here (which raced other
+// arenas and re-verified needlessly).
 func makeStepCommit(b *trackerbackend.Backend) func(flow.StepCtx) error {
 	return func(ctx flow.StepCtx) error {
 		it, err := fetchItem(ctx, b)
@@ -404,24 +430,35 @@ func makeStepCommit(b *trackerbackend.Backend) func(flow.StepCtx) error {
 			if err != nil {
 				return fmt.Errorf("commit: %w: %w", err, flow.ErrTransient)
 			}
+			if pe := maybeParkRemoteUnreachable(ctx, b, "commit", res); pe != nil {
+				return pe
+			}
 			if res != nil && !res.Success && !trackerbackend.IsNothingToCommit(res) {
 				return fmt.Errorf("commit: %s", truncate(res.Output+res.Error, 400))
 			}
+			// Re-read status so VerifiedCommit is keyed on the post-commit
+			// HEAD (the SHA we just verified clean).
+			st, err = b.Status(ctx.Context())
+			if err != nil || st == nil {
+				return fmt.Errorf("commit: read git status after commit: %w: %w", err, flow.ErrTransient)
+			}
+			if st.LastCommit != "" {
+				// Best-effort marker write. A failure is logged but does not
+				// fail the step — the worst case is a redundant pre-push verify.
+				if _, verr := b.SetVerifiedCommit(ctx.Context(), it.ID, flowsdk.GitHash(st.LastCommit)); verr != nil {
+					fmt.Fprintf(os.Stderr, "do commit %s: set verified_commit=%s: %v\n", it.ID, st.LastCommit, verr)
+				}
+			}
 		}
-		// Smart rebase (always — even when there was nothing new to commit, since
-		// upstream may have advanced).
-		if res := smartRebase(ctx, b, it); res != nil {
-			return *res
-		}
-		st, err = b.Status(ctx.Context())
-		if err != nil || st == nil || st.LastCommit == "" {
-			return errors.New("could not read commit hash after commit+rebase")
+		if st == nil || st.LastCommit == "" {
+			return errors.New("could not read commit hash after commit")
 		}
 		return ctx.ResolveCommitHash(st.LastCommit)
 	}
 }
 
-// smartRebase drives the rebase loop in the commit step. On a clean rebase
+// smartRebase drives the rebase loop, invoked by the push step on a
+// non-fast-forward rejection (T0464: moved out of the commit step). On a clean rebase
 // returns nil. On a conflict drives an agent turn with rebaseConflictPrompt, then
 // calls RebaseContinue. Loops up to rebaseResolveMaxRounds(); on cap or
 // non-conflict failure aborts the rebase and returns a step failure.
@@ -436,6 +473,12 @@ func smartRebase(ctx flow.StepCtx, b *trackerbackend.Backend, it *flowsdk.Item) 
 	}
 	if rb.Success {
 		return nil
+	}
+	// T0455: a fetch/transport error during the rebase is infrastructure,
+	// not a stale-commit conflict — park transient so the task isn't blamed
+	// for a network outage (smartRebase runs in the push step's non-ff retry).
+	if pe := maybeParkRemoteUnreachable(ctx, b, "commit", rb); pe != nil {
+		return &pe
 	}
 	conflicts := trackerbackend.ParseRebaseConflicts(rb.Output)
 	if len(conflicts) == 0 {
@@ -470,6 +513,11 @@ func smartRebase(ctx flow.StepCtx, b *trackerbackend.Backend, it *flowsdk.Item) 
 			abortRebase(ctx, b, "rebase-continue transport error")
 			e := fmt.Errorf("rebase-continue: %w: %w", cerr, flow.ErrTransient)
 			return &e
+		}
+		// T0455: remote-unreachable during rebase-continue is infra, not a
+		// task fault — park transient instead of failing the step.
+		if pe := maybeParkRemoteUnreachable(ctx, b, "commit", cont); pe != nil {
+			return &pe
 		}
 		if cont.Success {
 			return nil
@@ -515,48 +563,212 @@ func rebaseResolveMaxRounds() int {
 	return defaultRebaseResolveMaxRounds
 }
 
-// makeStepPush is the DUMB push (no rebase here — the smart rebase landed in the
-// commit step). When the local is ahead of upstream: re-verify the exact state,
-// push, record the pushed hash. On a rejected push or a failed pre-push verify,
-// mark the commit artifact stale so the smart-rebase commit step re-runs first.
+// defaultPushRebaseMaxRounds bounds the push step's optimistic-push →
+// (non-fast-forward) → fetch+rebase → retry loop. Default 1: we attempt a
+// single rebase onto the tip and one retry; if the push still can't
+// fast-forward, the step FAILS and the lease is released, and we rely on the
+// orchestrator to re-dispatch the push step later (or park it once the step's
+// retry budget is spent). We deliberately do NOT loop rebases within one
+// invocation: the rebase rounds are not budget-tracked the way step retries
+// and the agent prompt budget are, so a >1 cap would let a single invocation
+// stack rebases (and, multiplied by the step retry budget, many smart
+// attempts). Because the push runs under the exclusive (repoURL, branch)
+// lease, one rebase is normally enough anyway. Override with
+// TRACKER_PUSH_REBASE_MAX_ROUNDS (0 = unlimited).
+const defaultPushRebaseMaxRounds = 1
+
+// pushRebaseMaxRounds resolves the push-retry-after-rebase cap from
+// TRACKER_PUSH_REBASE_MAX_ROUNDS. Non-negative int overrides the default
+// (0 = unlimited, N>0 = at most N rebase rounds). Invalid / negative falls
+// back to defaultPushRebaseMaxRounds. When the cap fires the step failure
+// reason names the env var (no-hidden-timeouts contract).
+func pushRebaseMaxRounds() int {
+	if v := strings.TrimSpace(os.Getenv("TRACKER_PUSH_REBASE_MAX_ROUNDS")); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return defaultPushRebaseMaxRounds
+}
+
+// prePushVerify runs the project verify command against the worktree as it
+// stands, UNLESS the verify-marker fast-path applies (HEAD ==
+// Item.VerifiedCommit AND worktree clean), in which case the commit step
+// already verified this exact tree and we skip. On verify failure it routes
+// through pushReSync — the committed tree does not pass verify, so the commit
+// step "did not do its job" and must re-run. On success it refreshes the
+// marker so a subsequent push re-attempt can skip the (expensive) verify.
+// `label` is the Notify detail so the journal can tell the initial verify from
+// a post-rebase re-verify.
+func prePushVerify(ctx flow.StepCtx, b *trackerbackend.Backend, it *flowsdk.Item, st *flowsdk.GitStatus, label string) error {
+	if st.LastCommit != "" && st.LastCommit == string(it.VerifiedCommit) &&
+		st.Modified == 0 && st.Staged == 0 {
+		ctx.Notify("push", "skip "+label+" (marker matches HEAD, worktree clean)")
+		return nil
+	}
+	ctx.Notify("push", label)
+	gate, err := b.Validate(ctx.Context(), verifyCmd)
+	if err != nil {
+		return pushReSync(b, ctx, label+": "+err.Error())
+	}
+	if !gate.Success {
+		return pushReSync(b, ctx, label+" failed: "+truncate(gate.Output+gate.Error, 300))
+	}
+	// Verify passed — refresh the marker so a subsequent push re-attempt can
+	// skip verify even if VerifiedCommit was cleared earlier.
+	if _, verr := b.SetVerifiedCommit(ctx.Context(), it.ID, flowsdk.GitHash(st.LastCommit)); verr != nil {
+		fmt.Fprintf(os.Stderr, "do push %s: refresh verified_commit=%s: %v\n", it.ID, st.LastCommit, verr)
+	}
+	return nil
+}
+
+// resolvePushAndFlipStatus is the common tail of the push step: flip the item's
+// status to done (unless the agent already drove it to a terminal state) and
+// resolve the push artifact with the pushed hash. done == "real and merged":
+// the open→done flip happens HERE, the single status-transition point of the
+// flow — the work is now committed AND pushed to origin.
+func resolvePushAndFlipStatus(ctx flow.StepCtx, b *trackerbackend.Backend, hash string) error {
+	if fresh, _ := b.GetItem(ctx.Context(), flowsdk.ItemID(ctx.Item().ID)); fresh == nil || !agentEndedFlow(fresh) {
+		if _, err := b.SetItemStatus(ctx.Context(), flowsdk.ItemID(ctx.Item().ID), flowsdk.StatusDone); err != nil {
+			return fmt.Errorf("push: set status done: %w", err)
+		}
+	}
+	return ctx.ResolveCommitHash(hash)
+}
+
+// makeStepPush pushes the committed work to origin under the durable
+// tracker-side push lease keyed by (repoURL, branch) — T0464.
+//
+// Lock discipline: the expensive pre-push verify runs LOCK-FREE — it is
+// read-only, so holding the lease across a multi-minute verify would
+// needlessly block every other arena targeting this branch. The lease is
+// acquired immediately BEFORE the push, so the critical section is just the
+// push (+ a fetch+rebase retry if origin moved).
+//
+// Concurrency model: we do NOT pre-check "behind" before pushing (that needs a
+// fetch and races other arenas, and a stale local origin ref made the old
+// commit-step pre-rebase loop bounce push→commit until the budget parked it).
+// Instead we push optimistically; only a genuine non-fast-forward rejection
+// triggers fetch → rebase onto the tip → re-verify → retry. Because we hold the
+// EXCLUSIVE lease, no other arena can move origin between our rebase and our
+// retry, so the retry is guaranteed to fast-forward. A failed verify, or a
+// rejection that is NOT a non-fast-forward (auth / hook / protected branch),
+// still routes through pushReSync (re-run the commit step) — fetch+rebase
+// cannot help those.
 func makeStepPush(b *trackerbackend.Backend) func(flow.StepCtx) error {
 	return func(ctx flow.StepCtx) error {
 		st, err := b.Status(ctx.Context())
 		if err != nil || st == nil {
 			return fmt.Errorf("push: read git status: %w: %w", err, flow.ErrTransient)
 		}
-		if st.Ahead > 0 {
-			ctx.Notify("push", "pre-push verify")
-			gate, err := b.Validate(ctx.Context(), verifyCmd)
-			if err != nil {
-				return pushReSync(b, ctx, "pre-push verify: "+err.Error())
+		if st.Ahead <= 0 {
+			// Nothing to push — record the existing hash.
+			if st.LastCommit == "" {
+				return errors.New("could not read pushed hash")
 			}
-			if !gate.Success {
-				return pushReSync(b, ctx, "pre-push verify failed: "+truncate(gate.Output+gate.Error, 300))
+			return resolvePushAndFlipStatus(ctx, b, st.LastCommit)
+		}
+
+		it, err := fetchItem(ctx, b)
+		if err != nil {
+			return err
+		}
+		// Re-read the item so any HEAD-mutating side effect between commit and
+		// here is reflected in the verify-marker check below.
+		if fresh, _ := b.GetItem(ctx.Context(), it.ID); fresh != nil {
+			it = fresh
+		}
+
+		// Pre-push verify — LOCK-FREE (see the lock-discipline note above).
+		if err := prePushVerify(ctx, b, it, st, "pre-push verify"); err != nil {
+			return err
+		}
+
+		// Acquire the (repoURL, branch) push lease HERE — immediately before
+		// the push, so the critical section is only the push (+ a rebase
+		// retry). Blocks under the tracker's long-poll until granted (or ctx
+		// cancels). Idempotent on the holder so a retry is safe.
+		repoURL, branch, err := b.PushTarget(ctx.Context())
+		if err != nil {
+			return fmt.Errorf("push: read remote: %w: %w", err, flow.ErrTransient)
+		}
+		itemID := string(ctx.Item().ID)
+		if err := b.AcquirePushLease(ctx.Context(), repoURL, branch, itemID, ctx.Notify); err != nil {
+			return fmt.Errorf("push lease: %w: %w", err, flow.ErrTransient)
+		}
+		// Best-effort release. Use a fresh background context so a ctx-cancel
+		// mid-step does not skip the release POST. The reconciler is the safety net.
+		defer func() {
+			if rerr := b.ReleasePushLease(context.Background(), repoURL, branch, itemID); rerr != nil {
+				fmt.Fprintf(os.Stderr, "do push %s: release push lease: %v\n", itemID, rerr)
 			}
+		}()
+
+		// Optimistic push under the lease; rebase-and-retry only on a real
+		// non-fast-forward rejection (origin moved before we held the lease).
+		maxRounds := pushRebaseMaxRounds()
+		for round := 1; ; round++ {
 			ctx.Notify("push", "pushing")
 			res, err := b.Push(ctx.Context())
 			if err != nil {
 				return pushReSync(b, ctx, "push: "+err.Error())
 			}
-			if res != nil && !res.Success && !trackerbackend.IsUpToDate(res) {
+			// T0455: remote-unreachable is infrastructure, not "stale commit
+			// needs re-syncing". Transient remote-unreachable park BEFORE
+			// pushReSync so the commit artifact stays valid (no MarkStale).
+			if pe := maybeParkRemoteUnreachable(ctx, b, "push", res); pe != nil {
+				return pe
+			}
+			if res == nil || res.Success || trackerbackend.IsUpToDate(res) {
+				break // pushed (or already current)
+			}
+			// Push was rejected. A non-fast-forward means origin moved before
+			// we took the lease; everything else (auth/hook/etc.) is not
+			// fixable by fetch+rebase → re-run the commit step. IsNonFastForward
+			// lives in the shared flow package (string-based) so both do-flows
+			// classify push rejections identically.
+			if !flow.IsNonFastForward(res.Output + " " + res.Error) {
 				return pushReSync(b, ctx, "push rejected: "+truncate(res.Output+res.Error, 300))
 			}
-			st, _ = b.Status(ctx.Context())
+			if maxRounds > 0 && round > maxRounds {
+				return fmt.Errorf(
+					"push: still non-fast-forward after %d rebase round(s) — cap TRACKER_PUSH_REBASE_MAX_ROUNDS=%d reached (last: %s)",
+					round-1, maxRounds, truncate(res.Output+res.Error, 200))
+			}
+			ctx.Notify("push", fmt.Sprintf("push rejected (non-fast-forward) — fetch + rebase onto tip (round %d)", round))
+			// We hold the exclusive lease: fetch + rebase onto the tip,
+			// re-verify the rebased tree, then loop to retry the push.
+			if fresh, _ := b.GetItem(ctx.Context(), it.ID); fresh != nil {
+				it = fresh
+			}
+			if rerr := smartRebase(ctx, b, it); rerr != nil {
+				return *rerr
+			}
+			// Rebase moved HEAD ⇒ the verify-marker no longer applies and the
+			// rebased tree is unverified. Clear the marker, re-read item +
+			// status, and re-verify UNDER the lease (releasing to verify would
+			// reopen the race).
+			if _, verr := b.SetVerifiedCommit(ctx.Context(), it.ID, flowsdk.GitHash("")); verr != nil {
+				fmt.Fprintf(os.Stderr, "do push %s: clear verified_commit after rebase: %v\n", itemID, verr)
+			}
+			if fresh, _ := b.GetItem(ctx.Context(), it.ID); fresh != nil {
+				it = fresh
+			}
+			st, err = b.Status(ctx.Context())
+			if err != nil || st == nil {
+				return fmt.Errorf("push: read git status after rebase: %w: %w", err, flow.ErrTransient)
+			}
+			if err := prePushVerify(ctx, b, it, st, "re-verify after rebase"); err != nil {
+				return err
+			}
 		}
+
+		st, _ = b.Status(ctx.Context())
 		if st == nil || st.LastCommit == "" {
 			return errors.New("could not read pushed hash")
 		}
-		// done == "real and merged": the open→done flip happens HERE, the single
-		// status-transition point of the flow. The work is now committed AND pushed
-		// to origin. Guard against an item the agent drove to a terminal state so a
-		// late push can never resurrect an abandoned/blocked item.
-		if fresh, _ := b.GetItem(ctx.Context(), flowsdk.ItemID(ctx.Item().ID)); fresh == nil || !agentEndedFlow(fresh) {
-			if _, err := b.SetItemStatus(ctx.Context(), flowsdk.ItemID(ctx.Item().ID), flowsdk.StatusDone); err != nil {
-				return fmt.Errorf("push: set status done: %w", err)
-			}
-		}
-		return ctx.ResolveCommitHash(st.LastCommit)
+		return resolvePushAndFlipStatus(ctx, b, st.LastCommit)
 	}
 }
 

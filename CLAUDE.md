@@ -402,6 +402,7 @@ The standard library (`modules/std/`, 40 files) is auto-imported via `use std as
 ## Conventions
 
 - **Document workarounds immediately.** When you encounter a compiler bug, language limitation, or missing feature, file it in the `tracker` MCP server right away (type: `bug`). Include: what the bug is, any workaround, and the priority. Do not leave undocumented workarounds in the code.
+- **Working with the `flow` / `flow-sdk` submodules — read `docs/working-with-submodules.md` first.** The superproject pins each submodule by a **gitlink** (a recorded commit SHA), which is the source of truth. Three rules: (1) the moment you advance a submodule, **`git add` the gitlink** — `./make` reads the SHA from the index, so an *unstaged* committed-advance is silently reverted; (2) **push the submodule before the superproject** (a gitlink pointing at an unpushed commit is unfetchable — `push.recurseSubmodules=check`, applied by `./make`, guards this); (3) gates/CI restore to the *recorded* gitlink, development advances it explicitly. Resolve a rebase gitlink conflict by checking out the desired submodule SHA and `git add`-ing it — there are no markers to edit.
 - Compiler errors are accumulated (not fatal on first error) and printed together
 - `extractNamed(typ)` unwraps Instance/SharedRef/MutRef to get underlying `*types.Named`
 - `needsVtable(named)` returns true if type has children or is abstract → virtual dispatch

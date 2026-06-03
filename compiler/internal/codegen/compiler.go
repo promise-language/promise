@@ -7437,6 +7437,34 @@ func (c *Compiler) emitFieldDropsFor(named *types.Named, fields []*types.Field) 
 			continue
 		}
 
+		// T0460: Structural interface field (non-value-type). The LLVM slot
+		// holds the value struct {i8* vtable, i8* instance}; load it, extract
+		// the instance pointer, and dispatch through __promise_structural_drop
+		// which reads typeinfo.drop_fn_ptr via RTTI and calls it (or pal_free
+		// if no drop is defined). The concrete drop type is unknown at compile
+		// time, so RTTI dispatch is required.
+		if fieldNamed.IsStructural() && !fieldNamed.IsValueType() {
+			fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
+			if !ok {
+				continue
+			}
+			fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+			instancePtr := c.extractInstancePtr(fieldVal)
+			if c.structuralDrop != nil {
+				nullCheck := c.block.NewICmp(enum.IPredEQ, instancePtr, constant.NewNull(irtypes.I8Ptr))
+				dropBlk := c.newBlock("sfield.drop")
+				contBlk := c.newBlock("sfield.cont")
+				c.block.NewCondBr(nullCheck, contBlk, dropBlk)
+				c.block = dropBlk
+				c.block.NewCall(c.structuralDrop, instancePtr)
+				c.block.NewBr(contBlk)
+				c.block = contBlk
+			}
+			continue
+		}
+
 		// B0202: Check if the field is a mono instance with a synthesized drop
 		// detected at codegen time (TypeParam fields → droppable concrete types).
 		// Only match instances that specifically need B0202 mono synth drops — not
@@ -7843,6 +7871,32 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 		// T0573: Optional[MutexGuard] field scope-exit — MutexGuard.drop is a
 		// single T-independent symbol (T0156), so look it up by name.
 		dropFunc = c.funcs["MutexGuard.drop"]
+	case innerNamed != nil && innerNamed.IsStructural() && !innerNamed.IsValueType():
+		// T0460: Optional[StructuralInterface] field — branch on has-value,
+		// then dispatch through __promise_structural_drop via RTTI. The
+		// concrete type is unknown at compile time; typeinfo.drop_fn_ptr
+		// resolves the right drop (or pal_free when none defined).
+		if c.structuralDrop == nil {
+			return
+		}
+		hasVal := c.block.NewExtractValue(optVal, 0)
+		dropBlock := c.newBlock("optfield.drop")
+		skipBlock := c.newBlock("optfield.skip")
+		c.block.NewCondBr(hasVal, dropBlock, skipBlock)
+
+		c.block = dropBlock
+		innerVal := c.block.NewExtractValue(optVal, 1)
+		instancePtr := c.extractInstancePtr(innerVal)
+		nullCheck := c.block.NewICmp(enum.IPredEQ, instancePtr, constant.NewNull(irtypes.I8Ptr))
+		execBlock := c.newBlock("optfield.struct.exec")
+		c.block.NewCondBr(nullCheck, skipBlock, execBlock)
+
+		c.block = execBlock
+		c.block.NewCall(c.structuralDrop, instancePtr)
+		c.block.NewBr(skipBlock)
+
+		c.block = skipBlock
+		return
 	case innerNamed != nil && !innerNamed.IsValueType() && !innerNamed.IsCopy() &&
 		!isPrimitiveScalar(innerNamed) && !innerNamed.IsStructural() &&
 		!isOpaqueContainerType(elem):

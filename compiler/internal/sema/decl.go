@@ -516,9 +516,12 @@ func fieldTypeHasDrop(typ types.Type) bool {
 			return true
 		}
 		// B0192: Non-droppable heap user types still need pal_free.
-		// Value types have inline data (no heap pointer), and structural
-		// interfaces aren't concrete instances.
-		return !t.IsValueType() && !t.IsStructural() && !isPrimitive(t)
+		// Value types have inline data (no heap pointer).
+		// T0460: Structural interface fields hold a value struct
+		// {vtable, instance}; the instance is heap-allocated and is dropped
+		// via __promise_structural_drop at runtime (RTTI dispatch through the
+		// typeinfo drop_fn_ptr).
+		return !t.IsValueType() && !isPrimitive(t)
 	case *types.Enum:
 		return t.HasDrop()
 	case *types.Instance:
@@ -529,8 +532,8 @@ func fieldTypeHasDrop(typ types.Type) bool {
 			if n.HasDrop() {
 				return true
 			}
-			// B0192: Same as above for generic instances.
-			return !n.IsValueType() && !n.IsStructural() && !isPrimitive(n)
+			// B0192/T0460: Same as above for generic instances.
+			return !n.IsValueType() && !isPrimitive(n)
 		}
 		if e, ok := t.Origin().(*types.Enum); ok {
 			return e.HasDrop()

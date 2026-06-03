@@ -1,0 +1,153 @@
+// T0460: Types with a structural-interface field must drop the underlying
+// concrete instance when the wrapper is dropped. The synthesized drop walks
+// each field and dispatches structural fields through __promise_structural_drop
+// (RTTI: typeinfo.drop_fn_ptr → concrete type's drop, or pal_free if none).
+type WriterWrap `public {
+  Writer _w;
+
+  new(~this, ~Writer w) {
+    this._w = w;
+  }
+
+  write!(~this, u8[] ~buf) int {
+    return this._w.write(buf)?!;
+  }
+}
+
+type WriterWrapExplicit `public {
+  Writer _w;
+
+  new(~this, ~Writer w) {
+    this._w = w;
+  }
+
+  // Empty explicit drop forces the post-body field walk path; the structural
+  // field must still be dropped via the synthesized fragment that runs after
+  // the user-defined drop body.
+  drop(~this) {
+  }
+}
+
+type WriterWrapOptional `public {
+  Writer? _w;
+
+  new(~this, ~Writer? w) {
+    this._w = w;
+  }
+}
+
+make_writer() Writer {
+  return Builder();
+}
+
+// Synthesized drop: the wrapper has no explicit drop, but the structural field
+// requires NeedsSynthDrop=true so a drop is generated.
+synth_drop_field() `test {
+  Builder b = Builder();
+  WriterWrap mw = WriterWrap(b);
+  u8[] data = u8[]();
+  data.push(0x41u8);
+  mw.write(data)?!;
+}
+
+// Explicit-drop wrapper: the post-body field walk must drop the structural field
+// even though the user supplied an empty drop body.
+explicit_drop_field() `test {
+  Builder b = Builder();
+  WriterWrapExplicit mw = WriterWrapExplicit(b);
+  // mw is dropped at scope exit — Builder must be freed too.
+}
+
+// Optional<Structural> field: the synthesized drop must branch on has-value
+// and dispatch through RTTI when present.
+optional_structural_field_some() `test {
+  Writer? maybe = none;
+  maybe = make_writer();
+  WriterWrapOptional mw = WriterWrapOptional(maybe);
+}
+
+optional_structural_field_none() `test {
+  Writer? maybe = none;
+  WriterWrapOptional mw = WriterWrapOptional(maybe);
+}
+
+// Reassignment of a structural field: the old value must be dropped before the
+// new one takes its place — no double-free, no leak. We rely on the moved-from
+// source being neutralized by the existing move tracking; this exercises the
+// drop path on the wrapper.
+multi_use_wrap() `test {
+  Builder b1 = Builder();
+  WriterWrap w1 = WriterWrap(b1);
+  u8[] data = u8[]();
+  data.push(0x58u8);
+  w1.write(data)?!;
+
+  Builder b2 = Builder();
+  WriterWrap w2 = WriterWrap(b2);
+  u8[] data2 = u8[]();
+  data2.push(0x59u8);
+  w2.write(data2)?!;
+}
+
+// Concrete type satisfying a minimal structural interface with its own
+// user-defined drop. RTTI must dispatch to Tracked.drop via
+// typeinfo.drop_fn_ptr — not fall back to pal_free. The Builder cases only
+// exercise the pal_free path of __promise_structural_drop (Builder has no
+// user-defined drop). A minimal local Sink interface is used here so the
+// stdlib Writer's chained default methods aren't required.
+type Sink `public `structural {
+  put!(~this, u8 b) int `abstract;
+}
+
+type Tracked `public {
+  u8[] log;
+
+  new(~this) {
+    this.log = u8[]();
+  }
+
+  put!(~this, u8 b) int {
+    this.log.push(b);
+    return 1;
+  }
+
+  drop(~this) {
+    // Empty body; presence alone forces drop_fn_ptr != null so RTTI dispatches
+    // here. The contained `log` vector must still be freed by the synthesized
+    // post-body field walk.
+  }
+}
+
+type SinkWrap `public {
+  Sink _s;
+  new(~this, ~Sink s) { this._s = s; }
+}
+
+structural_field_user_drop() `test {
+  Tracked tw = Tracked();
+  SinkWrap mw = SinkWrap(tw);
+}
+
+// Generic wrapper with a structural field. Exercises the `*types.Instance`
+// branch in sema.fieldTypeHasDrop — the relaxed structural check must
+// propagate so each instantiation (Box[int], Box[string]) gets a synthesized
+// drop that dispatches the structural field through RTTI.
+type StructuralBox[T] `public {
+  Writer _w;
+  T value;
+
+  new(~this, ~Writer w, ~T v) {
+    this._w = w;
+    this.value = v;
+  }
+}
+
+generic_wrap_int_value() `test {
+  Builder b = Builder();
+  StructuralBox[int] sb = StructuralBox[int](b, 7);
+}
+
+generic_wrap_string_value() `test {
+  Builder b = Builder();
+  StructuralBox[string] sb = StructuralBox[string](b, "hello");
+}

@@ -7657,6 +7657,37 @@ func TestDropPropagateFuncField(t *testing.T) {
 	t.Fatal("could not find Executor type")
 }
 
+// T0460: Type with a structural-interface field gets synthesized drop so the
+// codegen field walk can dispatch the structural field through __promise_structural_drop.
+func TestDropPropagateStructuralField(t *testing.T) {
+	info := checkOK(t, `
+		type W `+"`"+`structural {
+			write!(u8[] ~buf) int `+"`"+`abstract;
+		}
+		type Wrap {
+			W _w;
+			new(~this, ~W w) { this._w = w; }
+		}
+		main() {}
+	`)
+	for _, scope := range info.ScopeOrder {
+		if obj := scope.Lookup("Wrap"); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if named, ok := tn.Type().(*types.Named); ok {
+					if !named.HasDrop() {
+						t.Error("Wrap should have HasDrop() == true")
+					}
+					if !named.NeedsSynthDrop() {
+						t.Error("Wrap should have NeedsSynthDrop() == true")
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("could not find Wrap type")
+}
+
 // T0102: Enum with string variant gets synthesized drop
 func TestEnumDropPropagateString(t *testing.T) {
 	info := checkOK(t, `

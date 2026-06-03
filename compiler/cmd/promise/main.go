@@ -65,6 +65,20 @@ var version string
 // timePhases enables per-phase compilation timing output on stderr (--time-phases).
 var timePhases bool
 
+// jsonMode makes `promise test` emit newline-delimited JSON test records on
+// stdout (one per eligible test) instead of human-readable output, which goes
+// to stderr. Set by --json. Only the top-level invocation runs in this mode;
+// it fans out children with -child-roster (NOT --json) so children never
+// re-enter the parent fan-out — see childRoster. T0763.
+var jsonMode bool
+
+// childRoster is the internal flag the JSON-mode parent passes to each child
+// (single-file) process. It makes the child print a roster marker line up
+// front (so the parent can attribute excluded/not-run tests) but otherwise run
+// the normal single-file path. It deliberately does NOT trigger jsonMode, so a
+// child never recurses into the multi-file fan-out. T0763.
+var childRoster bool
+
 // timePhase prints a single phase timing line to stderr if --time-phases is active.
 func timePhase(name string, elapsed time.Duration, extra string) {
 	if !timePhases {
@@ -1077,6 +1091,10 @@ func runTest(args []string) {
 			i++
 		} else if args[i] == "-time-phases" {
 			timePhases = true
+		} else if args[i] == "--json" || args[i] == "-json" {
+			jsonMode = true
+		} else if args[i] == "-child-roster" {
+			childRoster = true
 		} else {
 			remaining = append(remaining, args[i])
 		}
@@ -1133,7 +1151,8 @@ func runTest(args []string) {
 
 	// Single file: use simple runner (no directory summary).
 	// Multiple files: combined summary at the end.
-	if len(allFiles) == 1 {
+	// JSON mode always uses the multi-file runner — it owns the JSONL emission.
+	if len(allFiles) == 1 && !jsonMode {
 		runTestFile(allFiles[0], cfg, targetTriple, coverageMode)
 	} else {
 		runTestFiles(allFiles, cfg, targetTriple, parallel, coverageMode, reportJSON)
@@ -1169,6 +1188,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 			fmt.Println("no tests found")
 			return
 		}
+		emitRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
 		testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 		testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
 		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, filename, testTimeouts, testMemoryLimits)
@@ -1203,9 +1223,13 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 				timeout = cfg.defaultTimeout*time.Duration(len(meta.Tests)) + 30*time.Second
 			}
 			if meta != nil && meta.E2E {
+				emitRoster("e2e", []string{"main"}, nil, meta.ExcludeTargets, target)
 				executeE2EBinary(cachedBin, meta.ExpectedOutput, meta.ExcludeTargets,
 					filename, timeout, start, targetTriple)
 			} else {
+				if meta != nil {
+					emitRoster("batch", meta.Tests, meta.TestExcludes, nil, target)
+				}
 				runTestBinary(cachedBin, timeout, start, targetTriple)
 			}
 			return
@@ -1234,6 +1258,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 	file, info := compileFrontendForTarget(filename, targetTriple)
 
 	if info.HasExpectOutput {
+		emitRoster("e2e", []string{"main"}, nil, info.ExcludeTargets, target)
 		e2eTimeout := computeE2ETimeout(info, cfg)
 		runE2ETest(file, info, filename, e2eTimeout, start, targetTriple, cacheDir, cacheKey, compileStart)
 		return
@@ -1243,6 +1268,8 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 		fmt.Println("no tests found")
 		return
 	}
+
+	emitRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
 
 	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 	testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
@@ -1301,6 +1328,7 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 			fmt.Println("no tests found")
 			return
 		}
+		emitRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
 		testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 		testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
 		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, modDir, testTimeouts, testMemoryLimits)
@@ -1349,10 +1377,14 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(modDir), cacheKey[:16])
 			}
 			timeout := cfg.defaultTimeout
-			if meta := module.LoadTestBinaryMeta(cacheDir, cacheKey); meta != nil && meta.ProcessTimeoutNs > 0 {
+			meta := module.LoadTestBinaryMeta(cacheDir, cacheKey)
+			if meta != nil && meta.ProcessTimeoutNs > 0 {
 				timeout = time.Duration(meta.ProcessTimeoutNs)
 			} else if meta != nil && len(meta.Tests) > 1 {
 				timeout = cfg.defaultTimeout*time.Duration(len(meta.Tests)) + 30*time.Second
+			}
+			if meta != nil {
+				emitRoster("batch", meta.Tests, meta.TestExcludes, nil, target)
 			}
 			runTestBinary(cachedBin, timeout, start, targetTriple)
 			return
@@ -1387,6 +1419,8 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 		return
 	}
 
+	emitRoster("batch", testNames(info.Tests), info.TestExcludes, nil, target)
+
 	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
 	testMemoryLimits := computeTestMemoryLimits(info.Tests, info, cfg)
 	binaryPath := compileTestBinary(file, info, targetTriple, modDir, testTimeouts, testMemoryLimits)
@@ -1403,14 +1437,19 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 	if cacheDir != "" {
 		module.SaveTestBinaryCache(cacheDir, cacheKey, binaryPath)
 		var names []string
+		testExcludes := map[string][]string{}
 		for _, t := range info.Tests {
 			names = append(names, t.Name())
+			if excludes, ok := info.TestExcludes[t.Name()]; ok {
+				testExcludes[t.Name()] = excludes
+			}
 		}
 		module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.CacheMeta{
 			Kind:             module.CacheKindBinary,
 			Name:             modDir,
 			CacheKey:         cacheKey,
 			Tests:            names,
+			TestExcludes:     testExcludes,
 			ProcessTimeoutNs: processTimeout.Nanoseconds(),
 		})
 	}
@@ -1944,6 +1983,12 @@ func buildChildTestArgs(cfg testTimeoutConfig, targetTriple string, coverageMode
 	if timePhases {
 		testArgs = append(testArgs, "-time-phases")
 	}
+	if jsonMode {
+		// Children emit a roster marker but run the single-file path — they must
+		// NOT receive --json, which would make them re-enter the fan-out (a fork
+		// bomb). The parent owns JSONL emission. T0763.
+		testArgs = append(testArgs, "-child-roster")
+	}
 	if cfg.compileTimeout != 10*time.Minute {
 		testArgs = append(testArgs, "-compile-timeout", cfg.compileTimeout.String())
 	}
@@ -2131,6 +2176,26 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			r.elapsed = time.Since(fileStart)
 			close(r.done)
 		}(i)
+	}
+
+	// T0763: JSON mode — emit one newline-delimited record per eligible test to
+	// stdout (the gate's authoritative source), bypassing the human aggregation
+	// below. A brief summary still goes to stderr.
+	if jsonMode {
+		counts := map[string]int{}
+		for i := range results {
+			<-results[i].done
+			r := &results[i]
+			recs := buildTestRecords(absPath(r.file), r.output, r.cmdErr != nil || r.timedOut)
+			writeTestRecords(os.Stdout, recs)
+			for _, rec := range recs {
+				counts[rec.Status]++
+			}
+		}
+		fmt.Fprintf(os.Stderr, "json: %d pass, %d fail, %d timeout, %d leak, %d memory, %d excluded, %d not-run (%d files, %.3fs)\n",
+			counts["pass"], counts["fail"], counts["timeout"], counts["leak"], counts["memory"],
+			counts["excluded"], counts["not-run"], len(results), time.Since(totalStart).Seconds())
+		return
 	}
 
 	// Print results in file order, streaming as each slot completes.

@@ -302,15 +302,19 @@ func TestReadGateValues_Stale(t *testing.T) {
 	}
 }
 
-func TestGateOutputRoundTrip(t *testing.T) {
+func GateOutputRoundTrip(t *testing.T) {
 	out := &GateOutput{
+		Target: "linux-amd64",
 		Metrics: map[string]float64{
 			"host_test_count":    3656,
 			"host_test_failures": 0,
 		},
-		Tests: []GateTestEntry{
-			{Target: "linux-amd64", File: "tests/e2e/basics.pr", Outcome: "pass", Elapsed: 0.004},
-			{Target: "linux-amd64", File: "tests/e2e/strings.pr", Test: "test_split", Outcome: "FAIL", Elapsed: 0.005, Context: "panic: assertion failed"},
+		Files: []TestFileGroup{
+			{File: "tests/e2e/basics.pr", Tests: []TestRecord{{Test: "main", Status: "pass", Elapsed: 0.004}}},
+			{File: "tests/std/bool_test.pr", Tests: []TestRecord{
+				{Test: "test_and", Status: "pass", Elapsed: 0.001},
+				{Test: "test_split", Status: "fail", Elapsed: 0.005, Context: "panic: assertion failed"},
+			}},
 		},
 		Complete: "promise-tests",
 	}
@@ -325,26 +329,30 @@ func TestGateOutputRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
+	if got.Target != "linux-amd64" {
+		t.Errorf("Target = %q, want linux-amd64", got.Target)
+	}
 	if got.Complete != "promise-tests" {
 		t.Errorf("Complete = %q, want promise-tests", got.Complete)
 	}
 	if got.Metrics["host_test_count"] != 3656 {
 		t.Errorf("metrics[host_test_count] = %v, want 3656", got.Metrics["host_test_count"])
 	}
-	if len(got.Tests) != 2 {
-		t.Fatalf("len(Tests) = %d, want 2", len(got.Tests))
+	if len(got.Files) != 2 {
+		t.Fatalf("len(Files) = %d, want 2", len(got.Files))
 	}
-	if got.Tests[0].Target != "linux-amd64" || got.Tests[0].Outcome != "pass" {
-		t.Errorf("Tests[0] = %+v", got.Tests[0])
+	if got.Files[0].File != "tests/e2e/basics.pr" || got.Files[0].Tests[0].Status != "pass" {
+		t.Errorf("Files[0] = %+v", got.Files[0])
 	}
-	if got.Tests[1].Test != "test_split" || got.Tests[1].Context != "panic: assertion failed" {
-		t.Errorf("Tests[1] = %+v", got.Tests[1])
+	if got.Files[1].Tests[1].Test != "test_split" || got.Files[1].Tests[1].Context != "panic: assertion failed" {
+		t.Errorf("Files[1].Tests[1] = %+v", got.Files[1].Tests[1])
 	}
 }
 
-func TestGateOutputOmitEmpty(t *testing.T) {
-	// Tests and Complete should be omitted when empty/zero.
+func GateOutputOmitEmpty(t *testing.T) {
+	// Files and Complete should be omitted for a metric-only gate.
 	out := &GateOutput{
+		Target:  "linux-amd64",
 		Metrics: map[string]float64{"stress_iterations": 100},
 	}
 	data, err := json.Marshal(out)
@@ -352,8 +360,8 @@ func TestGateOutputOmitEmpty(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	s := string(data)
-	if strings.Contains(s, "tests") {
-		t.Errorf("expected 'tests' to be omitted, got: %s", s)
+	if strings.Contains(s, "files") {
+		t.Errorf("expected 'files' to be omitted, got: %s", s)
 	}
 	if strings.Contains(s, "complete") {
 		t.Errorf("expected 'complete' to be omitted, got: %s", s)

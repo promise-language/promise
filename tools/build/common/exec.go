@@ -76,6 +76,22 @@ func RunTeeStderr(dir, name string, args ...string) (string, error) {
 	return strings.TrimSpace(buf.String()), nil
 }
 
+// RunCaptureStdout runs a command in dir, capturing stdout (returned even when
+// the command exits non-zero) while leaving stderr connected to os.Stderr.
+// Unlike RunOutputIn it preserves the captured stdout on failure — needed for
+// `promise test --json`, which streams JSONL records on stdout AND exits
+// non-zero when any test fails. Stdout is NOT teed anywhere, so structured
+// output stays clean.
+func RunCaptureStdout(dir, name string, args ...string) (string, error) {
+	var buf bytes.Buffer
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = &buf
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	return buf.String(), err
+}
+
 // lineFilterWriter buffers stdout into lines and forwards each complete line
 // to fwd only when keep(line) returns true. Every byte written is also copied
 // verbatim into capture, regardless of filter result.

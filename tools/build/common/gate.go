@@ -17,7 +17,7 @@ import (
 // gate values to stdout; progress messages go to stderr.
 func RunGate(root string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values")
+		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  schema      print the test-output JSON schema (docs/gate-output.md)")
 	}
 	switch args[0] {
 	case "test":
@@ -32,29 +32,40 @@ func RunGate(root string, args []string) error {
 		return runGateStress(root, args[1:])
 	case "coverage":
 		return runGateCoverage(root, args[1:])
+	case "schema":
+		return runGateSchema(root)
 	default:
-		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, wasm-test, wasm-size, go-test, stress, coverage", args[0])
+		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, wasm-test, wasm-size, go-test, stress, coverage, schema", args[0])
 	}
+}
+
+// runGateSchema prints the test-output JSON schema (docs/gate-output.md) so the
+// tracker (or anyone ingesting the gate output) can read the contract without
+// running a gate. The doc is the single source of truth. T0763.
+func runGateSchema(root string) error {
+	path := filepath.Join(root, "docs", "gate-output.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read schema doc %s: %w", path, err)
+	}
+	fmt.Print(string(data))
+	return nil
 }
 
 // runGateTest runs Promise tests and writes structured JSON gate values to stdout.
 // Test progress is written to stderr so stdout is clean JSON.
 func runGateTest(root string, args []string) error {
 	args = NormalizeArgs(args)
-	wasm := slices.Contains(args, "-wasm")
 	shared := slices.Contains(args, "-shared")
 
+	// bin/gate test is host-only. wasm tests are `bin/gate wasm-test` — a
+	// separate single-target gate. Reject any unknown argument (incl. -wasm).
 	for _, arg := range args {
 		switch arg {
-		case "-wasm", "-shared", "-local":
+		case "-shared", "-local":
 		default:
-			return fmt.Errorf("usage: bin/gate test [-wasm] [-shared]")
+			return fmt.Errorf("usage: bin/gate test [-shared] (use `bin/gate wasm-test` for wasm)")
 		}
-	}
-
-	// Fail fast on missing wasmtime before running any tests.
-	if wasm && Which("wasmtime") == "" {
-		return fmt.Errorf("wasmtime not found — install with: bin/prereqs -wasm")
 	}
 
 	if !shared {
@@ -75,78 +86,36 @@ func runGateTest(root string, args []string) error {
 
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
-	// T0749: sidecar paths for the runner's passing-test reports. They let the
-	// gate expand file-only pass entries into per-(file, test) records so the
-	// tracker can correlate test identity across runs (passing batch tests are
-	// otherwise recorded as file-only, unlike failing tests which carry names).
-	hostReport := filepath.Join(os.TempDir(), "promise_gate_report_host.json")
-	wasmReport := filepath.Join(os.TempDir(), "promise_gate_report_wasm.json")
-	// Remove any stale report left by a prior hard-killed run so that if this
-	// run's runner is itself killed before writing, MergePassingTestNames reads
-	// nothing (a safe no-op) rather than stale (file, test) data from another run.
-	os.Remove(hostReport)
-	os.Remove(wasmReport)
-	defer os.Remove(hostReport)
-	defer os.Remove(wasmReport)
-
-	// Run host tests — tee to stderr so stdout is clean for JSON. Filter out
-	// passing-test lines from the console; the captured output retains them
-	// so the JSON envelope still records every test (T0323).
+	// Run host tests with --json. The runner streams one JSON record per
+	// eligible test to stdout (captured here) and human progress to stderr.
+	// T0763: this stream is the single authoritative source of test identity —
+	// no human-output scraping.
 	fmt.Fprintf(os.Stderr, "Running promise tests (%s)...\n", hostTarget)
-	hostOutput, hostErr := RunPromiseTestsCaptureFiltered(root, "", hostReport)
+	hostJSONL, hostErr := RunPromiseTestsJSON(root, "")
 
-	// Run wasm tests if requested.
-	var wasmOutput string
-	var wasmErr error
-	if wasm {
-		fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-wasi)...\n")
-		wasmOutput, wasmErr = RunPromiseTestsCaptureFiltered(root, "wasm32-wasi", wasmReport)
-	}
+	// Build the single-target host envelope (relativizes file paths against the
+	// repo root, groups by file, derives metrics from the records).
+	out := BuildGateOutput(root, hostTarget, "host", "promise-tests", hostJSONL)
 
-	// Collect gate values.
+	// Write gate-values.json sidecar so bin/commitgate can read the metrics.
 	gv := &GateValues{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Platform:  hostTarget,
-		Values:    make(map[string]float64),
+		Values:    out.Metrics,
 	}
-	if s := ParseTestSummaryLine(hostOutput); s != nil {
-		gv.Values["host_test_count"] = float64(s.Passed)
-		gv.Values["host_leak_count"] = float64(s.Leaked)
-		gv.Values["host_test_failures"] = float64(s.Failed)
-	}
-	if wasm {
-		if s := ParseTestSummaryLine(wasmOutput); s != nil {
-			gv.Values["wasm_test_count"] = float64(s.Passed)
-			gv.Values["wasm_leak_count"] = float64(s.Leaked)
-			gv.Values["wasm_test_failures"] = float64(s.Failed)
-		}
-	}
-
-	// Write gate-values.json sidecar so bin/commitgate can read it.
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	// Build per-test entries for the gate output. T0749: merge the runner's
-	// passing-test report so passing batch tests carry their (file, test) name.
-	entries := MergePassingTestNames(hostTarget, ParseTestEntries(hostTarget, hostOutput), hostReport)
-	if wasm {
-		entries = append(entries, MergePassingTestNames("wasm32-wasi", ParseTestEntries("wasm32-wasi", wasmOutput), wasmReport)...)
-	}
-
-	// Output GateOutput JSON to stdout (machine-readable).
-	out := &GateOutput{Metrics: gv.Values, Tests: entries, Complete: "promise-tests"}
+	// Output the two-level GateOutput JSON to stdout (machine-readable).
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal gate values: %w", err)
+		return fmt.Errorf("marshal gate output: %w", err)
 	}
 	fmt.Println(string(data))
 
 	if hostErr != nil {
 		return fmt.Errorf("promise tests (host) failed")
-	}
-	if wasmErr != nil {
-		return fmt.Errorf("promise tests (wasm32-wasi) failed")
 	}
 	return nil
 }
@@ -187,45 +156,30 @@ func runGateWasmTests(root string, args []string) error {
 
 	hostTarget := strings.ToLower(runtime.GOOS) + "-" + runtime.GOARCH
 
-	// T0749: sidecar path for the runner's passing-test report (see runGateTest).
-	wasmReport := filepath.Join(os.TempDir(), "promise_gate_report_wasm.json")
-	// Remove any stale report up-front so a runner killed before writing reads
-	// nothing (safe no-op) rather than stale data from another run.
-	os.Remove(wasmReport)
-	defer os.Remove(wasmReport)
-
-	// Run wasm tests only — tee to stderr so stdout is clean for JSON. Filter
-	// out passing-test lines from the console; captured output retains them
-	// for the JSON envelope (T0323).
+	// Run wasm tests with --json (single-target wasm gate). The runner streams
+	// one JSON record per eligible test to stdout; human progress to stderr.
 	fmt.Fprintf(os.Stderr, "Running promise tests (wasm32-wasi)...\n")
-	wasmOutput, wasmErr := RunPromiseTestsCaptureFiltered(root, "wasm32-wasi", wasmReport)
+	wasmJSONL, wasmErr := RunPromiseTestsJSON(root, "wasm32-wasi")
 
-	// Collect gate values.
+	// Build the single-target wasm envelope.
+	out := BuildGateOutput(root, "wasm32-wasi", "wasm", "wasm-test", wasmJSONL)
+
+	// Write gate-values.json sidecar so bin/commitgate can read the metrics.
+	// Platform is the host (where the gate ran); the metrics carry the wasm_
+	// prefix and the envelope's target records the test target.
 	gv := &GateValues{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Platform:  hostTarget,
-		Values:    make(map[string]float64),
+		Values:    out.Metrics,
 	}
-	if s := ParseTestSummaryLine(wasmOutput); s != nil {
-		gv.Values["wasm_test_count"] = float64(s.Passed)
-		gv.Values["wasm_leak_count"] = float64(s.Leaked)
-		gv.Values["wasm_test_failures"] = float64(s.Failed)
-	}
-
-	// Write gate-values.json sidecar so bin/commitgate can read it.
 	if err := WriteGateValues(root, gv); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	// Build per-test entries for the gate output. T0749: merge the runner's
-	// passing-test report so passing batch tests carry their (file, test) name.
-	wasmEntries := MergePassingTestNames("wasm32-wasi", ParseTestEntries("wasm32-wasi", wasmOutput), wasmReport)
-
-	// Output GateOutput JSON to stdout (machine-readable).
-	out := &GateOutput{Metrics: gv.Values, Tests: wasmEntries, Complete: "wasm-test"}
+	// Output the two-level GateOutput JSON to stdout (machine-readable).
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal gate values: %w", err)
+		return fmt.Errorf("marshal gate output: %w", err)
 	}
 	fmt.Println(string(data))
 
@@ -270,7 +224,7 @@ func runGateGoTest(root string, args []string) error {
 	output, testErr := RunTeeStderr(compilerDir, "go", "test", "-v", "-count=1", "./...")
 
 	passed, failed := ParseGoTestOutput(output)
-	goTests := ParseGoTestEntries(hostTarget, output)
+	goFiles := ParseGoTestGroups(output)
 
 	gv := &GateValues{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -284,11 +238,11 @@ func runGateGoTest(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	// Output GateOutput JSON to stdout (machine-readable).
-	out := &GateOutput{Metrics: gv.Values, Tests: goTests, Complete: "go-tests"}
+	// Output the two-level GateOutput JSON to stdout (machine-readable).
+	out := &GateOutput{Target: hostTarget, Metrics: gv.Values, Files: goFiles, Complete: "go-tests"}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal gate values: %w", err)
+		return fmt.Errorf("marshal gate output: %w", err)
 	}
 	fmt.Println(string(data))
 
@@ -342,11 +296,11 @@ func runGateStress(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	// Output GateOutput JSON to stdout (machine-readable).
-	out := &GateOutput{Metrics: gv.Values}
+	// Output the unified GateOutput envelope (metric-only; no files).
+	out := &GateOutput{Target: hostTarget, Metrics: gv.Values, Complete: "stress"}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal gate values: %w", err)
+		return fmt.Errorf("marshal gate output: %w", err)
 	}
 	fmt.Println(string(data))
 
@@ -419,11 +373,11 @@ func runGateCoverage(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	// Output GateOutput JSON to stdout (machine-readable).
-	out := &GateOutput{Metrics: gv.Values}
+	// Output the unified GateOutput envelope (metric-only; no files).
+	out := &GateOutput{Target: hostTarget, Metrics: gv.Values, Complete: "coverage"}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal gate values: %w", err)
+		return fmt.Errorf("marshal gate output: %w", err)
 	}
 	fmt.Println(string(data))
 
@@ -447,52 +401,70 @@ func ParseGoTestOutput(output string) (passed, failed int) {
 	return
 }
 
-var goTestResultRe = regexp.MustCompile(`^--- (PASS|FAIL): (\S+) \((\d+\.\d+)s\)`)
+var goTestResultRe = regexp.MustCompile(`^--- (PASS|FAIL|SKIP): (\S+) \((\d+\.\d+)s\)`)
 var goTestPkgRe = regexp.MustCompile(`^(ok|FAIL)\s+(\S+)\s+`)
 
-// ParseGoTestEntries extracts per-test GateTestEntry records from `go test -v` output.
-func ParseGoTestEntries(target, output string) []GateTestEntry {
+// goModulePrefix is the repository's VCS-root import prefix. Go package paths
+// are import paths (e.g. github.com/promise-language/promise/compiler/internal/
+// codegen); stripping this yields the repo-relative directory (compiler/
+// internal/codegen), matching the file identity used for Promise tests so the
+// tracker sees one path convention across all gates. T0763.
+const goModulePrefix = "github.com/promise-language/promise/"
+
+// goPkgToRepoRel strips the repo module prefix from a Go import path, leaving a
+// repo-relative directory. Paths without the prefix (e.g. third-party) are kept.
+func goPkgToRepoRel(pkg string) string {
+	if rel, ok := strings.CutPrefix(pkg, goModulePrefix); ok {
+		return rel
+	}
+	return pkg
+}
+
+// ParseGoTestGroups parses `go test -v` output into per-package file groups
+// (repo-relative path) with one TestRecord per test function, so go-test emits
+// the same two-level shape as the Promise test gates. Status is normalized to
+// the gate vocabulary: pass | fail | excluded (Go SKIP). T0763.
+func ParseGoTestGroups(output string) []TestFileGroup {
 	lines := strings.Split(output, "\n")
-	var result []GateTestEntry
-	var pending []GateTestEntry
+	var groups []TestFileGroup
+	var pending []TestRecord
 	var contextLines []string
 	collectingContext := false
 
+	flushContext := func() {
+		if collectingContext && len(pending) > 0 {
+			pending[len(pending)-1].Context = strings.Join(contextLines, "\n")
+		}
+		collectingContext = false
+		contextLines = nil
+	}
+
 	for _, line := range lines {
-		// Package summary line — flush pending entries with package path.
+		// Package summary line — close the group with its package path.
 		if m := goTestPkgRe.FindStringSubmatch(line); m != nil {
-			if collectingContext && len(pending) > 0 {
-				pending[len(pending)-1].Context = strings.Join(contextLines, "\n")
-				collectingContext = false
-				contextLines = nil
+			flushContext()
+			if len(pending) > 0 {
+				groups = append(groups, TestFileGroup{
+					File:  goPkgToRepoRel(m[2]),
+					Tests: append([]TestRecord(nil), pending...),
+				})
+				pending = pending[:0]
 			}
-			pkg := m[2]
-			for i := range pending {
-				pending[i].File = pkg
-			}
-			result = append(result, pending...)
-			pending = pending[:0]
 			continue
 		}
 
 		// Test result line.
 		if m := goTestResultRe.FindStringSubmatch(line); m != nil {
-			if collectingContext && len(pending) > 0 {
-				pending[len(pending)-1].Context = strings.Join(contextLines, "\n")
-				collectingContext = false
-				contextLines = nil
-			}
-			outcome := m[1]
-			if outcome == "PASS" {
-				outcome = "pass"
+			flushContext()
+			status := "pass"
+			switch m[1] {
+			case "FAIL":
+				status = "fail"
+			case "SKIP":
+				status = "excluded"
 			}
 			elapsed, _ := strconv.ParseFloat(m[3], 64)
-			pending = append(pending, GateTestEntry{
-				Target:  target,
-				Test:    m[2],
-				Outcome: outcome,
-				Elapsed: elapsed,
-			})
+			pending = append(pending, TestRecord{Test: m[2], Status: status, Elapsed: elapsed})
 			if m[1] == "FAIL" {
 				collectingContext = true
 				contextLines = nil
@@ -505,21 +477,19 @@ func ParseGoTestEntries(target, output string) []GateTestEntry {
 			if strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "    ") {
 				contextLines = append(contextLines, strings.TrimSpace(line))
 			} else {
-				if len(pending) > 0 {
-					pending[len(pending)-1].Context = strings.Join(contextLines, "\n")
-				}
-				collectingContext = false
-				contextLines = nil
+				flushContext()
 			}
 		}
 	}
 
-	// Flush remaining pending entries.
-	if collectingContext && len(pending) > 0 {
-		pending[len(pending)-1].Context = strings.Join(contextLines, "\n")
+	// Flush any trailing tests with no package summary (truncated output): we
+	// can't identify the package, so report them under an empty file rather than
+	// dropping them silently.
+	flushContext()
+	if len(pending) > 0 {
+		groups = append(groups, TestFileGroup{Tests: append([]TestRecord(nil), pending...)})
 	}
-	result = append(result, pending...)
-	return result
+	return groups
 }
 
 var stressIterRe = regexp.MustCompile(`(\d+) iterations over`)

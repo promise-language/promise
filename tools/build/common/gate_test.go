@@ -145,7 +145,17 @@ func TestParseGoTestOutput_Empty(t *testing.T) {
 	}
 }
 
-func TestParseGoTestEntries_MixedResults(t *testing.T) {
+// firstTest returns the t-th test record across all groups in order (helper for
+// the grouped go-test parser tests).
+func flatTests(groups []TestFileGroup) []TestRecord {
+	var out []TestRecord
+	for _, g := range groups {
+		out = append(out, g.Tests...)
+	}
+	return out
+}
+
+func TestParseGoTestGroups_MixedResults(t *testing.T) {
 	output := `=== RUN   TestFoo
 --- PASS: TestFoo (0.001s)
 === RUN   TestBar
@@ -157,136 +167,151 @@ FAIL	github.com/user/pkg/bar	0.010s
 === RUN   TestBaz
 --- PASS: TestBaz (0.002s)
 ok  	github.com/user/pkg/foo	0.005s`
-	entries := ParseGoTestEntries("linux-amd64", output)
-	if len(entries) != 3 {
-		t.Fatalf("len(entries) = %d, want 3", len(entries))
+	groups := ParseGoTestGroups(output)
+	if len(groups) != 2 {
+		t.Fatalf("len(groups) = %d, want 2", len(groups))
 	}
-	// Entry 0: TestFoo pass in bar package
-	if entries[0].Test != "TestFoo" || entries[0].Outcome != "pass" || entries[0].File != "github.com/user/pkg/bar" {
-		t.Errorf("entry 0: %+v", entries[0])
+	// Group 0: bar package with TestFoo (pass) + TestBar (fail).
+	if groups[0].File != "github.com/user/pkg/bar" || len(groups[0].Tests) != 2 {
+		t.Fatalf("group 0: %+v", groups[0])
 	}
-	if entries[0].Target != "linux-amd64" {
-		t.Errorf("entry 0 target = %q", entries[0].Target)
+	if groups[0].Tests[0].Test != "TestFoo" || groups[0].Tests[0].Status != "pass" || groups[0].Tests[0].Elapsed != 0.001 {
+		t.Errorf("group0 test0: %+v", groups[0].Tests[0])
 	}
-	if entries[0].Elapsed != 0.001 {
-		t.Errorf("entry 0 elapsed = %v", entries[0].Elapsed)
+	if groups[0].Tests[1].Test != "TestBar" || groups[0].Tests[1].Status != "fail" {
+		t.Errorf("group0 test1: %+v", groups[0].Tests[1])
 	}
-	// Entry 1: TestBar fail with context
-	if entries[1].Test != "TestBar" || entries[1].Outcome != "FAIL" {
-		t.Errorf("entry 1: %+v", entries[1])
+	if !strings.Contains(groups[0].Tests[1].Context, "expected 1, got 2") ||
+		!strings.Contains(groups[0].Tests[1].Context, "extra context") {
+		t.Errorf("group0 test1 context = %q", groups[0].Tests[1].Context)
 	}
-	if !strings.Contains(entries[1].Context, "expected 1, got 2") {
-		t.Errorf("entry 1 context = %q", entries[1].Context)
-	}
-	if !strings.Contains(entries[1].Context, "extra context") {
-		t.Errorf("entry 1 missing second context line: %q", entries[1].Context)
-	}
-	// Entry 2: TestBaz pass in foo package
-	if entries[2].Test != "TestBaz" || entries[2].Outcome != "pass" || entries[2].File != "github.com/user/pkg/foo" {
-		t.Errorf("entry 2: %+v", entries[2])
+	// Group 1: foo package with TestBaz (pass).
+	if groups[1].File != "github.com/user/pkg/foo" || groups[1].Tests[0].Test != "TestBaz" || groups[1].Tests[0].Status != "pass" {
+		t.Errorf("group 1: %+v", groups[1])
 	}
 }
 
-func TestParseGoTestEntries_AllPass(t *testing.T) {
+// TestParseGoTestGroups_RepoRelative verifies the repo module prefix is stripped
+// so go-test file identity is repo-relative, matching the Promise test gates.
+func TestParseGoTestGroups_RepoRelative(t *testing.T) {
+	output := `--- PASS: TestX (0.00s)
+ok  	github.com/promise-language/promise/compiler/internal/codegen	0.05s`
+	groups := ParseGoTestGroups(output)
+	if len(groups) != 1 || groups[0].File != "compiler/internal/codegen" {
+		t.Fatalf("repo-relative strip failed: %+v", groups)
+	}
+}
+
+// TestParseGoTestGroups_Skip maps Go SKIP to the gate's excluded status.
+func TestParseGoTestGroups_Skip(t *testing.T) {
+	output := `--- SKIP: TestSkipped (0.00s)
+    foo_test.go:3: not on this platform
+ok  	example.com/pkg	0.01s`
+	groups := ParseGoTestGroups(output)
+	if len(groups) != 1 || len(groups[0].Tests) != 1 || groups[0].Tests[0].Status != "excluded" {
+		t.Fatalf("SKIP not mapped to excluded: %+v", groups)
+	}
+}
+
+func TestParseGoTestGroups_AllPass(t *testing.T) {
 	output := `--- PASS: TestA (0.00s)
 ok  	example.com/pkg1	0.05s
 --- PASS: TestB (0.01s)
 ok  	example.com/pkg2	0.06s`
-	entries := ParseGoTestEntries("linux-amd64", output)
-	if len(entries) != 2 {
-		t.Fatalf("len(entries) = %d, want 2", len(entries))
+	groups := ParseGoTestGroups(output)
+	if len(groups) != 2 {
+		t.Fatalf("len(groups) = %d, want 2", len(groups))
 	}
-	if entries[0].File != "example.com/pkg1" || entries[1].File != "example.com/pkg2" {
-		t.Errorf("packages: %q, %q", entries[0].File, entries[1].File)
+	if groups[0].File != "example.com/pkg1" || groups[1].File != "example.com/pkg2" {
+		t.Errorf("packages: %q, %q", groups[0].File, groups[1].File)
 	}
-	for i, e := range entries {
-		if e.Outcome != "pass" {
-			t.Errorf("entry %d outcome = %q", i, e.Outcome)
+	for _, e := range flatTests(groups) {
+		if e.Status != "pass" {
+			t.Errorf("test %q status = %q", e.Test, e.Status)
 		}
 	}
 }
 
-func TestParseGoTestEntries_Empty(t *testing.T) {
-	entries := ParseGoTestEntries("linux-amd64", "")
-	if len(entries) != 0 {
-		t.Errorf("len = %d, want 0", len(entries))
+func TestParseGoTestGroups_Empty(t *testing.T) {
+	if groups := ParseGoTestGroups(""); len(groups) != 0 {
+		t.Errorf("len = %d, want 0", len(groups))
 	}
 }
 
-func TestParseGoTestEntries_Subtests(t *testing.T) {
+func TestParseGoTestGroups_Subtests(t *testing.T) {
 	output := `--- PASS: TestFoo (0.00s)
 --- PASS: TestFoo/sub1 (0.00s)
 --- PASS: TestFoo/sub2 (0.00s)
 ok  	example.com/pkg	0.01s`
-	entries := ParseGoTestEntries("linux-amd64", output)
-	if len(entries) != 3 {
-		t.Fatalf("len = %d, want 3", len(entries))
+	tests := flatTests(ParseGoTestGroups(output))
+	if len(tests) != 3 {
+		t.Fatalf("len = %d, want 3", len(tests))
 	}
-	if entries[1].Test != "TestFoo/sub1" || entries[2].Test != "TestFoo/sub2" {
-		t.Errorf("subtest names: %q, %q", entries[1].Test, entries[2].Test)
+	if tests[1].Test != "TestFoo/sub1" || tests[2].Test != "TestFoo/sub2" {
+		t.Errorf("subtest names: %q, %q", tests[1].Test, tests[2].Test)
 	}
 }
 
-func TestParseGoTestEntries_ContextTerminatedByPackage(t *testing.T) {
+func TestParseGoTestGroups_ContextTerminatedByPackage(t *testing.T) {
 	// Package summary directly follows context (no bare FAIL line).
 	output := `--- FAIL: TestY (0.01s)
     y_test.go:5: boom
 FAIL	example.com/pkg	0.02s`
-	entries := ParseGoTestEntries("linux-amd64", output)
-	if len(entries) != 1 {
-		t.Fatalf("len = %d, want 1", len(entries))
+	groups := ParseGoTestGroups(output)
+	if len(groups) != 1 || len(groups[0].Tests) != 1 {
+		t.Fatalf("groups = %+v", groups)
 	}
-	if !strings.Contains(entries[0].Context, "boom") {
-		t.Errorf("context = %q", entries[0].Context)
+	if !strings.Contains(groups[0].Tests[0].Context, "boom") {
+		t.Errorf("context = %q", groups[0].Tests[0].Context)
 	}
-	if entries[0].File != "example.com/pkg" {
-		t.Errorf("file = %q", entries[0].File)
+	if groups[0].File != "example.com/pkg" {
+		t.Errorf("file = %q", groups[0].File)
 	}
 }
 
-func TestParseGoTestEntries_ContextTerminatedByNextTest(t *testing.T) {
+func TestParseGoTestGroups_ContextTerminatedByNextTest(t *testing.T) {
 	// A new --- PASS/FAIL line arrives while collectingContext is still true.
 	output := `--- FAIL: TestA (0.01s)
     a_test.go:1: err
 --- PASS: TestB (0.02s)
 ok  	example.com/pkg	0.03s`
-	entries := ParseGoTestEntries("linux-amd64", output)
-	if len(entries) != 2 {
-		t.Fatalf("len = %d, want 2", len(entries))
+	tests := flatTests(ParseGoTestGroups(output))
+	if len(tests) != 2 {
+		t.Fatalf("len = %d, want 2", len(tests))
 	}
-	if !strings.Contains(entries[0].Context, "err") {
-		t.Errorf("entry 0 context = %q", entries[0].Context)
+	if !strings.Contains(tests[0].Context, "err") {
+		t.Errorf("test 0 context = %q", tests[0].Context)
 	}
-	if entries[1].Context != "" {
-		t.Errorf("entry 1 should have no context: %q", entries[1].Context)
+	if tests[1].Context != "" {
+		t.Errorf("test 1 should have no context: %q", tests[1].Context)
 	}
 }
 
-func TestParseGoTestEntries_EOFWhileCollectingContext(t *testing.T) {
+func TestParseGoTestGroups_EOFWhileCollectingContext(t *testing.T) {
 	// EOF reached while still collecting context (no package summary at all).
 	output := `--- FAIL: TestZ (0.01s)
     z_test.go:9: dangling context`
-	entries := ParseGoTestEntries("linux-amd64", output)
-	if len(entries) != 1 {
-		t.Fatalf("len = %d, want 1", len(entries))
+	tests := flatTests(ParseGoTestGroups(output))
+	if len(tests) != 1 {
+		t.Fatalf("len = %d, want 1", len(tests))
 	}
-	if !strings.Contains(entries[0].Context, "dangling context") {
-		t.Errorf("context = %q", entries[0].Context)
+	if !strings.Contains(tests[0].Context, "dangling context") {
+		t.Errorf("context = %q", tests[0].Context)
 	}
 }
 
-func TestParseGoTestEntries_FailContext(t *testing.T) {
+func TestParseGoTestGroups_FailContext(t *testing.T) {
 	output := `--- FAIL: TestX (0.01s)
     x_test.go:10: line1
     x_test.go:11: line2
 FAIL
 FAIL	example.com/pkg	0.02s`
-	entries := ParseGoTestEntries("linux-amd64", output)
-	if len(entries) != 1 {
-		t.Fatalf("len = %d, want 1", len(entries))
+	tests := flatTests(ParseGoTestGroups(output))
+	if len(tests) != 1 {
+		t.Fatalf("len = %d, want 1", len(tests))
 	}
-	if !strings.Contains(entries[0].Context, "line1") || !strings.Contains(entries[0].Context, "line2") {
-		t.Errorf("context = %q", entries[0].Context)
+	if !strings.Contains(tests[0].Context, "line1") || !strings.Contains(tests[0].Context, "line2") {
+		t.Errorf("context = %q", tests[0].Context)
 	}
 }
 

@@ -112,8 +112,8 @@ func runGateWasmSize(root string, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write gate values: %v\n", err)
 	}
 
-	// Output GateOutput JSON to stdout.
-	out := &GateOutput{Metrics: gv.Values, Complete: "wasm-size"}
+	// Output the unified GateOutput envelope (metric-only; no files).
+	out := &GateOutput{Target: hostTarget, Metrics: gv.Values, Complete: "wasm-size"}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal gate output: %w", err)

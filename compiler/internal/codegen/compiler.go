@@ -654,6 +654,28 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	return compile(file, info, target, nil)
 }
 
+// WasmLinkerMajorVersion, when set, returns the major LLVM version of the wasm
+// LTO linker (wasm-ld). cmd/promise installs this so the emitted wasm32
+// DataLayout can match the linker's expectations (T0764). Codegen never shells
+// out to LLVM tools itself; this hook lets the version flow in from the CLI.
+// Nil or a 0 return falls back to the long-standing pre-LLVM-23 layout.
+var WasmLinkerMajorVersion func() int
+
+// wasmDataLayout returns the wasm32 target DataLayout string matching the wasm
+// LTO linker's LLVM major version. LLVM 23 added reference-type address spaces
+// (p10=funcref, p20=externref), i128:128, and a non-integral pointer spec
+// (ni:1:10:20) to the wasm32 target; its wasm-ld LTO backend aborts with
+// "Target-incompatible DataLayout" if the module's layout lacks them. LLVM 22
+// and earlier use the narrower layout and in turn reject the LLVM-23 string, so
+// the two cannot share one layout — select by detected linker version (T0764).
+// An unknown version (0) keeps the pre-23 layout.
+func wasmDataLayout(llvmMajor int) string {
+	if llvmMajor >= 23 {
+		return "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"
+	}
+	return "e-m:e-p:32:32-i64:64-n32:64-S128"
+}
+
 func compile(file *ast.File, info *sema.Info, target string, opts *CompileOptions) *CompileResult {
 	module := ir.NewModule()
 	if target == "" {
@@ -661,7 +683,11 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	}
 	module.TargetTriple = target
 	if strings.Contains(target, "wasm32") {
-		module.DataLayout = "e-m:e-p:32:32-i64:64-n32:64-S128"
+		major := 0
+		if WasmLinkerMajorVersion != nil {
+			major = WasmLinkerMajorVersion()
+		}
+		module.DataLayout = wasmDataLayout(major)
 	}
 
 	c := &Compiler{

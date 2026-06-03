@@ -3747,6 +3747,31 @@ func llvmToolVersion(toolPath string) int {
 	return 0
 }
 
+var (
+	wasmLinkerVersionOnce   sync.Once
+	wasmLinkerVersionCached int
+)
+
+// detectWasmLinkerMajor returns the major LLVM version of the wasm LTO linker
+// (wasm-ld), cached after the first call. Returns 0 if it cannot be determined.
+// Used to pick a wasm32 DataLayout compatible with the linker (T0764). Lazy so
+// non-wasm builds never probe for wasm-ld.
+func detectWasmLinkerMajor() int {
+	wasmLinkerVersionOnce.Do(func() {
+		p, err := findLLVMTool("wasm-ld")
+		if err != nil {
+			return
+		}
+		wasmLinkerVersionCached = llvmToolVersion(p)
+	})
+	return wasmLinkerVersionCached
+}
+
+func init() {
+	// Let codegen pick a wasm32 DataLayout matching the wasm-ld version (T0764).
+	codegen.WasmLinkerMajorVersion = detectWasmLinkerMajor
+}
+
 // checkLLVMToolVersion verifies an LLVM tool meets the minimum version requirement.
 func checkLLVMToolVersion(toolPath string) {
 	v := llvmToolVersion(toolPath)

@@ -120,7 +120,9 @@ type Tracked `public {
 
 type SinkWrap `public {
   Sink _s;
-  new(~this, ~Sink s) { this._s = s; }
+  new(~this, ~Sink s) {
+    this._s = s;
+  }
 }
 
 structural_field_user_drop() `test {

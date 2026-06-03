@@ -13,11 +13,21 @@ Review your recent changes for this item (start from `git diff` / `git diff --ca
 - MEMORY (zero tolerance): every heap-allocating type must have a drop path; any leak
   in verify output is a regression. Shared mutable state must be mutex-protected. Flag
   `allow_leaks: true` anywhere as a blocking issue.
-- Check conventions (full English API names, getters, `doc` annotations) and that
-  every behavioral change has a test.
+- Resource lifecycle & performance: every opened file/socket must be closeable and
+  every spawned goroutine reachable by shutdown; flag allocations hoistable out of
+  loops, quadratic algorithms on collections, and redundant copies of large data.
+- Check conventions (full English API names, getters, `doc` annotations, no hidden
+  effects / action-at-a-distance) and that every behavioral change has a test.
+- Single source of truth — watch for duplicated state (two values kept in sync;
+  collapse to one source, or an explicit cache with a clear owner and defined
+  invalidation) and copy-pasted logic with minor variations (extract one reused
+  implementation). Fix inline where you can (preferred); otherwise flag it.
 - Fix issues directly; for anything you can't fix (compiler limitation, design
   question), file a tracker item (mcp__tracker__create).
 - After fixing, confirm it still builds and tests pass (`{{.VerifyCmd}}`).
+- Do NOT commit, push, or invoke the `/commit`, `/do`, `/push`, or `/review`
+  skills — the flow commits, pushes, and finalizes in a later step. Leave your
+  fixes uncommitted in the worktree.
 - End with a concise review summary (what you reviewed, what you fixed, what you filed).
 
 {{.AskGuidance}}

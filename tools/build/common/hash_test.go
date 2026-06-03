@@ -64,6 +64,28 @@ func TestFlowsSourceHash_DeterministicAndSensitive(t *testing.T) {
 	if h4 == h3 {
 		t.Error("flow-sdk/ change did not affect hash")
 	}
+
+	// A prompt-template (.tmpl) edit changes the hash — flow binaries go:embed their
+	// prompts, so ./make must rebuild on a prompt-only change. This MUST stay in
+	// lockstep with flows/internal/srchash; if it doesn't, ./make reports "up to
+	// date" while the rebuilt binary's runtime check reports "stale" (rebuild
+	// deadlock).
+	writeFlowFile(t, root, "flows/do/templates/implement.tmpl", "implement {{.Plan}}\n")
+	h5, err := FlowsSourceHash(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h5 == h4 {
+		t.Error("adding a .tmpl prompt template did not affect hash")
+	}
+	writeFlowFile(t, root, "flows/do/templates/implement.tmpl", "implement {{.Plan}} — prefer batch tests\n")
+	h6, err := FlowsSourceHash(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h6 == h5 {
+		t.Error("editing a .tmpl prompt template did not affect hash")
+	}
 }
 
 // TestFlowsSourceHash_IgnoresGitAndNonSource confirms a fetched SDK's .git

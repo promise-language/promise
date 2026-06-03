@@ -28,8 +28,8 @@ import (
 // binary stale.
 var flowSourceDirs = []string{"flows", "flow-sdk", "flow"}
 
-// Hash computes an FNV-128a hash of every .go / go.mod / go.sum file under the
-// flow source directories, relative to root. A missing source dir contributes
+// Hash computes an FNV-128a hash of every .go / .tmpl / go.mod / go.sum file under
+// the flow source directories, relative to root. A missing source dir contributes
 // nothing (so deleting flow-sdk/ changes the hash → stale), and .git directories
 // are skipped (flow-sdk/ and flow/ are git submodules). The result is stable for a
 // given tree and changes whenever any covered file is added, removed, or edited.
@@ -78,8 +78,17 @@ func Hash(root string) (string, error) {
 }
 
 // isSourceFile reports whether a filename contributes to the flow source hash.
+// .tmpl is included because the flow binaries `go:embed` their prompt templates
+// (flows/do/templates/*.tmpl and flow/prompt/partials/*.tmpl): a prompt-only edit
+// changes a binary's behavior, so it must mark a built binary stale — otherwise
+// `./make` sees no .go change, skips the rebuild, and the binary serves the OLD
+// embedded prompts.
 func isSourceFile(name string) bool {
-	return filepath.Ext(name) == ".go" || name == "go.mod" || name == "go.sum"
+	switch filepath.Ext(name) {
+	case ".go", ".tmpl":
+		return true
+	}
+	return name == "go.mod" || name == "go.sum"
 }
 
 // CheckStale compares the compiled-in source hash against the current flow source

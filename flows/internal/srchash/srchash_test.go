@@ -85,8 +85,31 @@ func TestHashSensitiveToNewFile(t *testing.T) {
 	}
 }
 
-// TestHashIgnoresNonSourceFiles confirms only .go/go.mod/go.sum count — a stray
-// README or binary in the tree must not flip the hash.
+// TestHashSensitiveToTemplateChange confirms a prompt-template (.tmpl) edit flips
+// the hash — flow binaries go:embed their prompt templates, so a prompt-only change
+// must mark a built binary stale (otherwise ./make skips the rebuild and the binary
+// serves the old embedded prompts).
+func TestHashSensitiveToTemplateChange(t *testing.T) {
+	root := fixtureRoot(t)
+	tmpl := filepath.Join(root, "flows/do/templates/implement.tmpl")
+	if err := os.MkdirAll(filepath.Dir(tmpl), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmpl, []byte("implement {{.Plan}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := Hash(root)
+	if err := os.WriteFile(tmpl, []byte("implement {{.Plan}} — now prefer batch tests\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := Hash(root)
+	if before == after {
+		t.Fatal("hash did not change after editing a .tmpl prompt template")
+	}
+}
+
+// TestHashIgnoresNonSourceFiles confirms only .go/.tmpl/go.mod/go.sum count — a
+// stray README or binary in the tree must not flip the hash.
 func TestHashIgnoresNonSourceFiles(t *testing.T) {
 	root := fixtureRoot(t)
 	before, _ := Hash(root)

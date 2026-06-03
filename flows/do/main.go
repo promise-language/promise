@@ -54,6 +54,14 @@ const flowBinaryName = "do"
 // the bodies and the shared prompt fragments refer to the same command.
 const verifyCmd = "bin/verify --wasm"
 
+// formatCmd is the formatter the LAND step runs to normalize the worktree
+// BEFORE committing (CLAUDE.md: bin/format formats Go + Promise — the SAME
+// files bin/verify formats). Running it first makes the to-be-committed tree
+// canonical, so the pre-push verify can never strand a format diff in the
+// worktree after the commit (T0767). Threaded via doflow.Config.FormatCmd into
+// stepCommitPush; unlike verifyCmd it is not surfaced to any prompt.
+const formatCmd = "bin/format"
+
 // implementTimeout and landTimeout bound the two steps that run the full
 // `bin/verify --wasm` gate through the flow. The host+WASM suite is slow (the
 // pre-OSS Promise flow budgeted 45m for a single verify run), so both get a
@@ -96,6 +104,7 @@ func promiseConfig() doflow.Config {
 	return doflow.Config{
 		FlowBinaryName:   flowBinaryName,
 		VerifyCmd:        verifyCmd,
+		FormatCmd:        formatCmd,
 		ImplementTimeout: implementTimeout,
 		StepTimeout:      landTimeout,
 		Prompts: doflow.Prompts{

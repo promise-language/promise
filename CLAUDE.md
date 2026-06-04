@@ -392,8 +392,9 @@ The standard library (`modules/std/`, 40 files) is auto-imported via `use std as
 
 **All bugs, tasks, and deferred items are managed via the `tracker` MCP server.** The tracker auto-assigns IDs by type: `B0001` for bugs, `T0001` for tasks, `D0001` for deferred items. These IDs are stable and can be referenced from code comments, commit messages, and conversations.
 
-- **Filing bugs:** Use `mcp__tracker__create` with `type: "bug"`. Include a clear title, description (what the bug is, any workaround), priority, and relevant tags (e.g., `codegen`, `parser`, `ownership`, `formatter`, `scheduler`).
+- **Filing bugs:** Use `mcp__tracker__create` with `type: "bug"`. Include a clear title, description (what the bug is, any workaround), priority, and relevant tags.
 - **Filing tasks:** Use `type: "task"` for planned work items. Use `type: "deferred"` for items that are not yet scheduled.
+- **Tagging:** Tags must come from the canonical namespace in **[docs/tracker-tags.md](docs/tracker-tags.md)** — lowercase `kebab-case`, 2–5 per item, ≥1 subsystem/area tag (and exactly one quality/kind tag for bugs), canonical spellings only (`macos` not `darwin`, `build-tools` not `tooling`, `memory-leak` not `leak`). Consult that doc before coining a new tag.
 - **Querying:** Use `mcp__tracker__list` to filter by type, status, priority, or tag. Use `mcp__tracker__search` for free-text search.
 - **Updating:** Use `mcp__tracker__update` to change status (`open` → `in_progress` → `done`/`wontfix`), add notes, or update priority.
 - **Reference in code:** Use tracker IDs in code comments (e.g., `// B0030: workaround for optional user type in constructor`) and commit messages.

@@ -81,6 +81,47 @@ func ParseTestJSONL(jsonl string) []jsonlRecord {
 	return out
 }
 
+// Context bounds for a single test record (T0777). A failure's context is
+// joined into one string that JSON-encodes onto ONE line in the gate's stdout
+// envelope. The gate runner drains that stdout with a 1MB-capped bufio.Scanner
+// over an UNBUFFERED pipe — a line larger than the cap silently aborts the
+// drain (bufio.ErrTooLong), the gate then blocks forever writing into the
+// stalled pipe, and the whole gate is killed at its wall-clock timeout and
+// recorded as an "infra" run-timed-out. Codegen tests dump the full generated
+// IR on failure (assertContains), which can exceed 1MB, so an unbounded context
+// turns a quick FAIL into a 15-minute hang that also masks the real failure.
+// Bounding the context keeps it diagnostic (the panic/assertion head is what
+// matters) while guaranteeing the gate JSON never carries a pathological line.
+// The full output still reaches the gate's stderr/console log, untouched.
+const (
+	maxContextLines = 50
+	maxContextBytes = 4096
+)
+
+// clampContext bounds ctx to maxContextLines lines and maxContextBytes bytes,
+// appending a marker when it trims. It is a no-op on already-small contexts and
+// is applied at every site that builds a TestRecord's Context, so no gate
+// subcommand can emit a context line large enough to deadlock the runner drain.
+func clampContext(ctx string) string {
+	if ctx == "" {
+		return ctx
+	}
+	truncated := false
+	if lines := strings.Split(ctx, "\n"); len(lines) > maxContextLines {
+		ctx = strings.Join(lines[:maxContextLines], "\n")
+		truncated = true
+	}
+	if len(ctx) > maxContextBytes {
+		// Trim to a valid UTF-8 boundary so the marker reads cleanly.
+		ctx = strings.ToValidUTF8(ctx[:maxContextBytes], "")
+		truncated = true
+	}
+	if truncated {
+		ctx += "\n… (truncated; full output in the gate log)"
+	}
+	return ctx
+}
+
 // BuildGateOutput parses the runner's JSONL, relativizes file paths against
 // root, groups records by file (preserving stream order), and derives metrics
 // named with the given prefix (e.g. "host" → host_test_count). metricKeys lists
@@ -109,7 +150,7 @@ func BuildGateOutput(root, target, metricPrefix, complete, jsonl string) *GateOu
 			Test:    r.Test,
 			Status:  r.Status,
 			Elapsed: r.Elapsed,
-			Context: r.Context,
+			Context: clampContext(r.Context),
 		})
 		if suffix, ok := statusMetricSuffix[r.Status]; ok {
 			metrics[metricPrefix+"_"+suffix]++

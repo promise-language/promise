@@ -1,6 +1,7 @@
 package common
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -312,6 +313,90 @@ FAIL	example.com/pkg	0.02s`
 	}
 	if !strings.Contains(tests[0].Context, "line1") || !strings.Contains(tests[0].Context, "line2") {
 		t.Errorf("context = %q", tests[0].Context)
+	}
+}
+
+// runnerScannerCap mirrors the gate runner's per-line bufio.Scanner limit
+// (cmd/runner/actions.go in the tracker repo). The gate's stdout must never
+// carry a line at/above this, or the runner's drain aborts (bufio.ErrTooLong)
+// and the unbuffered pipe deadlocks the gate to its wall-clock timeout (T0777).
+const runnerScannerCap = 1024 * 1024
+
+// maxJSONLine returns the longest single line of v's indented JSON encoding —
+// what the gate prints to stdout and the runner reads line by line.
+func maxJSONLine(t *testing.T, v any) int {
+	t.Helper()
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	max := 0
+	for _, ln := range strings.Split(string(data), "\n") {
+		if len(ln) > max {
+			max = len(ln)
+		}
+	}
+	return max
+}
+
+// TestParseGoTestGroups_ContextBounded is the T0777 regression guard: a failing
+// test that dumps a huge body (e.g. assertContains printing the full IR) must
+// NOT produce a context that JSON-encodes onto a line large enough to deadlock
+// the runner drain. The context is bounded and marked truncated; the resulting
+// GateOutput's longest line stays well under the runner's scanner cap.
+func TestParseGoTestGroups_ContextBounded(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("--- FAIL: TestBigIR (0.50s)\n")
+	for i := 0; i < 40000; i++ { // ~2MB of indented "IR" if left unbounded
+		b.WriteString("    ")
+		b.WriteString(strings.Repeat("x", 48))
+		b.WriteString("\n")
+	}
+	b.WriteString("FAIL\n")
+	b.WriteString("FAIL\tgithub.com/promise-language/promise/compiler/internal/codegen\t0.50s\n")
+
+	groups := ParseGoTestGroups(b.String())
+	tests := flatTests(groups)
+	if len(tests) != 1 {
+		t.Fatalf("len = %d, want 1", len(tests))
+	}
+	ctx := tests[0].Context
+	if len(ctx) > maxContextBytes+len("\n… (truncated; full output in the gate log)") {
+		t.Errorf("context not bounded: %d bytes", len(ctx))
+	}
+	if !strings.Contains(ctx, "truncated") {
+		t.Errorf("expected truncation marker, got %q", ctx[:min(80, len(ctx))])
+	}
+	if !strings.HasPrefix(ctx, "x") {
+		t.Errorf("context should keep the head of the failure, got %q", ctx[:min(40, len(ctx))])
+	}
+
+	out := &GateOutput{Target: "darwin-arm64", Metrics: map[string]float64{}, Files: groups, Complete: "go-tests"}
+	if got := maxJSONLine(t, out); got >= runnerScannerCap {
+		t.Errorf("gate JSON has a %d-byte line (>= runner cap %d): would deadlock the runner drain", got, runnerScannerCap)
+	}
+}
+
+// TestClampContext covers the bounding helper directly.
+func TestClampContext(t *testing.T) {
+	if got := clampContext(""); got != "" {
+		t.Errorf("empty: got %q", got)
+	}
+	small := "panic: assertion failed\n  expected 3, got 4"
+	if got := clampContext(small); got != small {
+		t.Errorf("small context altered: %q", got)
+	}
+	manyLines := strings.Repeat("line\n", maxContextLines+50)
+	got := clampContext(manyLines)
+	if n := strings.Count(got, "\n"); n > maxContextLines+1 {
+		t.Errorf("line bound exceeded: %d newlines", n)
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Error("expected truncation marker on over-long context")
+	}
+	big := strings.Repeat("z", maxContextBytes*4)
+	if got := clampContext(big); len(got) > maxContextBytes+64 {
+		t.Errorf("byte bound exceeded: %d bytes", len(got))
 	}
 }
 

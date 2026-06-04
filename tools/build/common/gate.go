@@ -433,7 +433,10 @@ func ParseGoTestGroups(output string) []TestFileGroup {
 
 	flushContext := func() {
 		if collectingContext && len(pending) > 0 {
-			pending[len(pending)-1].Context = strings.Join(contextLines, "\n")
+			// Bound the context so a failing test that dumps the full IR
+			// (assertContains) can't produce a >1MB JSON line that deadlocks
+			// the gate runner's drain — see clampContext (T0777).
+			pending[len(pending)-1].Context = clampContext(strings.Join(contextLines, "\n"))
 		}
 		collectingContext = false
 		contextLines = nil

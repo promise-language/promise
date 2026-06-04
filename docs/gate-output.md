@@ -89,7 +89,7 @@ Go test-function name (subtests use `TestFoo/sub`). Go `SKIP` maps to status
 | status     | meaning |
 |------------|---------|
 | `pass`     | the test ran and passed |
-| `fail`     | the test ran and failed (assertion/panic); `context` carries detail |
+| `fail`     | the test ran and failed (assertion/panic); `context` carries (bounded) detail |
 | `timeout`  | the test exceeded its per-test timeout |
 | `leak`     | the test leaked memory (alloc count delta > 0) |
 | `memory`   | the test tripped the per-test memory limit (process aborted) |
@@ -135,3 +135,10 @@ termination, since only a trailing partial line can be lost. Each line carries a
 **absolute** `file`, plus `test`, `status`, `elapsed`, and optional `context`.
 The gate parses these, relativizes the paths, groups by file, and derives the
 metrics above.
+
+A record's `context` is bounded (≈50 lines / 4 KB, with a `… (truncated)`
+marker) before it enters the envelope. A failure that dumps a large body (e.g. a
+Go test printing the full generated IR) would otherwise JSON-encode onto a
+single multi-MB line, which the runner's line-oriented drain cannot consume —
+deadlocking the gate to its wall-clock timeout (T0777). The full, untruncated
+output still reaches the gate's stderr/console log.

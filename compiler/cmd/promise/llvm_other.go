@@ -11,5 +11,3 @@ const hasEmbeddedLLVM = false
 var embeddedLLVMFiles []string
 
 const llvmEmbedPrefix = ""
-const llvmCacheSubdir = ""
-const llvmLibEnvKey = "LD_LIBRARY_PATH"

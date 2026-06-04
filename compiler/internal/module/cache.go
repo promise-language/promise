@@ -694,22 +694,33 @@ func CleanEmbeddedModuleCache() error {
 	return os.RemoveAll(filepath.Join(home, "cache", "embedded_modules"))
 }
 
-// CleanLLVMCache removes all cached LLVM tool extractions.
+// CleanLLVMCache removes all cached LLVM tool extractions, including the
+// content-addressed view dirs (T0769). The CAS blobs themselves are
+// content-addressed and never stale, so they are intentionally NOT removed here.
 func CleanLLVMCache() error {
 	home, err := PromiseHome()
 	if err != nil {
 		return err
 	}
-	return os.RemoveAll(filepath.Join(home, "cache", "llvm"))
+	err = os.RemoveAll(filepath.Join(home, "cache", "llvm"))
+	if e := os.RemoveAll(filepath.Join(home, "cache", "llvm-view")); e != nil && err == nil {
+		err = e
+	}
+	return err
 }
 
-// CleanCRTCache removes all cached CRT extractions (musl, WASM).
+// CleanCRTCache removes all cached CRT extractions (musl, WASM), including the
+// content-addressed view dirs (T0769). CAS blobs are left intact.
 func CleanCRTCache() error {
 	home, err := PromiseHome()
 	if err != nil {
 		return err
 	}
-	return os.RemoveAll(filepath.Join(home, "cache", "crt"))
+	err = os.RemoveAll(filepath.Join(home, "cache", "crt"))
+	if e := os.RemoveAll(filepath.Join(home, "cache", "crt-view")); e != nil && err == nil {
+		err = e
+	}
+	return err
 }
 
 // CleanBuildCache removes all entries from the build cache.

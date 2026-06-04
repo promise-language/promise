@@ -113,6 +113,16 @@ func RunBuild(root string, args []string) error {
 		if err := BundleLLVM(root, manifest, extractedRoots["llvm"]); err != nil {
 			return fmt.Errorf("bundle LLVM: %w", err)
 		}
+		// Emit the runtime dependency manifest (T0769) from the same extracted
+		// prebuilts, so the binary embeds real content hashes + upstream sources.
+		epoch, eerr := ParseEpoch(root)
+		if eerr != nil {
+			return fmt.Errorf("parse epoch for runtime manifest: %w", eerr)
+		}
+		fmt.Println("Generating runtime dependency manifest...")
+		if err := GenerateRuntimeManifest(root, manifest, extractedRoots["llvm"], target, epoch); err != nil {
+			return fmt.Errorf("generate runtime manifest: %w", err)
+		}
 		buildTags = "-tags=embed_llvm"
 	}
 

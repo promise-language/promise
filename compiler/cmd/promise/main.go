@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"embed"
 	"encoding/hex"
@@ -25,6 +23,7 @@ import (
 
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/ast/astcache"
+	"github.com/promise-language/promise/compiler/internal/blobstore"
 	"github.com/promise-language/promise/compiler/internal/codegen"
 	"github.com/promise-language/promise/compiler/internal/module"
 	"github.com/promise-language/promise/compiler/internal/ownership"
@@ -3450,32 +3449,21 @@ func ensureCacheValid() {
 	})
 }
 
-// --- Embedded LLVM tool extraction ---
+// --- Embedded LLVM tool delivery (T0769) ---
+//
+// Heavy LLVM blobs are no longer extracted to a flat cache dir. Full-variant
+// builds embed gzipped blobs that `promise install` stages into the
+// content-addressed store (stageEmbeddedLLVMBlobs); the runtime materializes a
+// per-target view dir from the CAS (resolveLLVMView in llvm_cas.go). The macOS
+// Mach-O patch+re-sign lives in internal/blobstore. The embed FS and
+// embeddedLLVMFiles list below are retained as the full-variant blob source.
 
-// llvmExtractOnce ensures embedded LLVM tools are extracted at most once per process.
-var llvmExtractOnce sync.Once
-
-// llvmCacheDir is set by ensureEmbeddedLLVM after successful extraction.
-var llvmCacheDir string
-
-// embeddedLLVMFiles is defined per-platform in llvm_*.go files.
-// The base names (without .gz) become executables in the cache dir.
-
-// embeddedLLVMSymlinks maps symlink name → target for lld mode selection.
+// embeddedLLVMSymlinks maps lld-mode alias name → target ("lld") for the view dir.
 var embeddedLLVMSymlinks = map[string]string{
 	"ld.lld":   "lld",
 	"ld64.lld": "lld",
 	"lld-link": "lld",
 	"wasm-ld":  "lld",
-}
-
-// llvmCacheDirPath returns the path where embedded LLVM tools are extracted.
-func llvmCacheDirPath() (string, error) {
-	home, err := module.PromiseHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "cache", "llvm", llvmCacheSubdir), nil
 }
 
 // llvmEmbeddedFiles returns all .gz files in the embedded LLVM FS.
@@ -3499,168 +3487,18 @@ func llvmEmbeddedFiles() []string {
 	return files
 }
 
-// llvmCacheComplete checks if all expected LLVM tools exist in the cache dir.
-func llvmCacheComplete(dir string) bool {
-	for _, gz := range llvmEmbeddedFiles() {
-		name := strings.TrimSuffix(gz, ".gz")
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			return false
-		}
-	}
-	// Also check lld mode aliases (symlinks on Unix, copies on Windows)
-	for link := range embeddedLLVMSymlinks {
-		name := link
-		if runtime.GOOS == "windows" {
-			name = link + ".exe"
-		}
-		if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
-			return false
-		}
-	}
-	return true
-}
-
-// ensureEmbeddedLLVM extracts compressed LLVM tools from the embedded FS to the cache dir.
-// Called at most once per process via llvmExtractOnce.
-func ensureEmbeddedLLVM() {
-	if !hasEmbeddedLLVM {
-		return
-	}
-
-	// Ensure stale caches from a different compiler binary are cleared first.
-	ensureCacheValid()
-
-	dir, err := llvmCacheDirPath()
-	if err != nil {
-		return
-	}
-
-	// Check if cache is already complete
-	if llvmCacheComplete(dir) {
-		llvmCacheDir = dir
-		return
-	}
-
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot create LLVM cache dir %s: %v\n", dir, err)
-		os.Exit(1)
-	}
-
-	fmt.Fprintf(os.Stderr, "Extracting embedded LLVM tools to %s...\n", dir)
-	extractCompressedLLVM(dir)
-	llvmCacheDir = dir
-}
-
-// extractCompressedLLVM decompresses embedded LLVM tools to the given directory.
-// Used by both ensureEmbeddedLLVM (cache) and runInstall (install dir).
-func extractCompressedLLVM(destDir string) {
-	prefix := llvmEmbedPrefix
-	gzFiles := llvmEmbeddedFiles()
-	for _, gz := range gzFiles {
-		data, err := embeddedLLVM.ReadFile(prefix + "/" + gz)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: cannot read embedded %s: %v\n", gz, err)
-			os.Exit(1)
-		}
-
-		gr, err := gzip.NewReader(bytes.NewReader(data))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: cannot decompress %s: %v\n", gz, err)
-			os.Exit(1)
-		}
-
-		name := strings.TrimSuffix(gz, ".gz")
-		outPath := filepath.Join(destDir, name)
-		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-		if err != nil {
-			gr.Close()
-			fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", outPath, err)
-			os.Exit(1)
-		}
-
-		if _, err := io.Copy(out, gr); err != nil {
-			out.Close()
-			gr.Close()
-			fmt.Fprintf(os.Stderr, "error: cannot decompress %s: %v\n", gz, err)
-			os.Exit(1)
-		}
-		out.Close()
-		gr.Close()
-	}
-
-	// Create lld mode aliases — symlinks on Unix, file copies on Windows
-	// (symlinks require admin privileges on Windows)
-	for link, target := range embeddedLLVMSymlinks {
-		if runtime.GOOS == "windows" {
-			link = link + ".exe"
-			target = target + ".exe"
-		}
-		linkPath := filepath.Join(destDir, link)
-		os.Remove(linkPath)
-		if runtime.GOOS == "windows" {
-			targetPath := filepath.Join(destDir, target)
-			copyFile(targetPath, linkPath, 0755)
-		} else {
-			if err := os.Symlink(target, linkPath); err != nil {
-				fmt.Fprintf(os.Stderr, "error: cannot create symlink %s → %s: %v\n", link, target, err)
-				os.Exit(1)
-			}
-		}
-	}
-
-	// On macOS, patch extracted Mach-O binaries to find dylibs in the same directory.
-	// Homebrew tools have @rpath set to @loader_path/../lib and may have hardcoded
-	// absolute paths to Homebrew dylibs. We:
-	// 1. Add @loader_path as an rpath so tools find dylibs in their own directory
-	// 2. Change absolute Homebrew dylib references to @rpath/name.dylib
-	// 3. Change dylib install names to @rpath/name.dylib (so other binaries find them)
-	// 4. Re-sign with ad-hoc signature (install_name_tool invalidates code signatures)
-	if runtime.GOOS == "darwin" {
-		for _, gz := range gzFiles {
-			name := strings.TrimSuffix(gz, ".gz")
-			filePath := filepath.Join(destDir, name)
-
-			if strings.HasSuffix(name, ".dylib") {
-				// Patch dylib install name to @rpath/<name>
-				exec.Command("install_name_tool", "-id", "@rpath/"+name, filePath).CombinedOutput()
-				// Also add @loader_path rpath for dylibs that load other dylibs
-				exec.Command("install_name_tool", "-add_rpath", "@loader_path", filePath).CombinedOutput()
-			} else {
-				// Patch executable: add @loader_path to rpath
-				exec.Command("install_name_tool", "-add_rpath", "@loader_path", filePath).CombinedOutput()
-			}
-
-			// Rewrite any absolute Homebrew dylib references to @rpath/<name>
-			out, err := exec.Command("otool", "-L", filePath).Output()
-			if err == nil {
-				for _, line := range strings.Split(string(out), "\n") {
-					line = strings.TrimSpace(line)
-					// Match absolute paths like /opt/homebrew/.../*.dylib
-					if (strings.HasPrefix(line, "/opt/homebrew/") || strings.HasPrefix(line, "/usr/local/opt/")) && strings.Contains(line, ".dylib") {
-						if idx := strings.Index(line, " (compatibility"); idx > 0 {
-							oldPath := line[:idx]
-							newName := "@rpath/" + filepath.Base(oldPath)
-							exec.Command("install_name_tool", "-change", oldPath, newName, filePath).CombinedOutput()
-						}
-					}
-				}
-			}
-
-			// Re-sign with ad-hoc signature (install_name_tool invalidates code signatures)
-			exec.Command("codesign", "--force", "--sign", "-", filePath).CombinedOutput()
-		}
-	}
-}
-
 // --- LLVM tool pipeline ---
 
 // findLLVMTool locates an LLVM tool (opt, llc, ld.lld, ld64.lld) by searching:
-// 1. Sibling directory of the promise binary
-// 2. Environment variable override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD, PROMISE_LD64LLD)
-// 3. Embedded LLVM cache (<PROMISE_HOME>/cache/llvm/<platform>/)
-// 4. Homebrew LLVM (macOS)
-// 5. Versioned names on PATH (e.g., opt-22, llc-22, ld.lld-22) from newest to minLLVMMajor
-// 6. Unversioned names on PATH (e.g., opt, llc, ld.lld)
+//  1. Sibling directory of the promise binary
+//  2. Environment variable override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD, PROMISE_LD64LLD)
+//  3. Content-addressed store — a pre-staged toolchain view (CAS hit only, no
+//     network), preferred over a system LLVM so full builds stay deterministic
+//  4. Homebrew LLVM (macOS)
+//  5. Versioned names on PATH (e.g., opt-22, llc-22, ld.lld-22) from newest to minLLVMMajor
+//  6. Unversioned names on PATH (e.g., opt, llc, ld.lld)
+//  7. Content-addressed store — fetch the host toolchain on demand (last resort;
+//     surfaces the §4.4 offline / broken-release error)
 func findLLVMTool(name string) (string, error) {
 	envMap := map[string]string{
 		"opt":      "PROMISE_OPT",
@@ -3700,15 +3538,13 @@ func findLLVMTool(name string) (string, error) {
 		}
 	}
 
-	// 3. Embedded LLVM cache (extract on first access)
-	if hasEmbeddedLLVM {
-		llvmExtractOnce.Do(ensureEmbeddedLLVM)
-		if llvmCacheDir != "" {
-			for _, n := range searchNames {
-				p := filepath.Join(llvmCacheDir, n)
-				if _, err := os.Stat(p); err == nil {
-					return p, nil
-				}
+	// 3. Content-addressed store — pre-staged toolchain view, CAS hit only (no
+	//    network). Prefer it over a system LLVM so full builds are deterministic.
+	if viewDir, _ := resolveLLVMView(false); viewDir != "" {
+		for _, n := range searchNames {
+			p := filepath.Join(viewDir, n)
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
 			}
 		}
 	}
@@ -3741,8 +3577,22 @@ func findLLVMTool(name string) (string, error) {
 		return path, nil
 	}
 
+	// 7. Content-addressed store — fetch the host toolchain from the manifest
+	//    sources (last resort). A fetch failure surfaces the §4.4 offline /
+	//    broken-release error directly.
+	if viewDir, ferr := resolveLLVMView(true); viewDir != "" {
+		for _, n := range searchNames {
+			p := filepath.Join(viewDir, n)
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
+		}
+	} else if ferr != nil {
+		return "", ferr
+	}
+
 	envName := envMap[name]
-	hint := fmt.Sprintf("%s not found\n  searched: sibling of promise binary, $%s, embedded cache, Homebrew LLVM, PATH (%s-{%d..%d}, %s)\n  install LLVM %d+",
+	hint := fmt.Sprintf("%s not found\n  searched: sibling of promise binary, $%s, dependency cache, Homebrew LLVM, PATH (%s-{%d..%d}, %s)\n  install LLVM %d+",
 		name, envName, name, maxLLVMSearch, minLLVMMajor, name, minLLVMMajor)
 	if runtime.GOOS == "darwin" {
 		hint += " (brew install llvm lld)"
@@ -3754,15 +3604,16 @@ func findLLVMTool(name string) (string, error) {
 
 // runLLVMCmd creates an exec.Cmd for an LLVM tool, setting the platform-appropriate
 // library path env var so dynamically-linked tools can find libLLVM when running
-// from the cache dir. Uses LD_LIBRARY_PATH on Linux, DYLD_LIBRARY_PATH on macOS.
+// from the content-addressed view dir. Uses LD_LIBRARY_PATH on Linux,
+// DYLD_LIBRARY_PATH on macOS (where it points at the patched+signed dylib copy).
 func runLLVMCmd(toolPath string, args ...string) *exec.Cmd {
 	cmd := exec.Command(toolPath, args...)
 	detachFromConsole(cmd)
-	// If the tool is in the embedded cache, ensure the library path includes that dir
-	// so it can find libLLVM alongside it.
+	// If the tool is in the CAS view dir, ensure the library path includes that
+	// dir so it can find libLLVM alongside it.
 	toolDir := filepath.Dir(toolPath)
-	if llvmCacheDir != "" && toolDir == llvmCacheDir && llvmLibEnvKey != "" {
-		envKey := llvmLibEnvKey
+	envKey := llvmLibEnvKeyRuntime()
+	if llvmViewDir != "" && toolDir == llvmViewDir && envKey != "" {
 		env := os.Environ()
 		ldPath := os.Getenv(envKey)
 		if ldPath != "" {
@@ -4423,15 +4274,23 @@ func findMuslCRT(target string) (string, error) {
 		return cacheDir, nil
 	}
 
-	// 4. Extract embedded CRT to cache
-	if !hasEmbeddedMuslCRT {
-		return "", fmt.Errorf("musl CRT not available for %s\n  this binary was not built with embedded musl CRT\n  set PROMISE_USE_CLANG=1 to use clang with system glibc instead", arch)
+	// 4. Content-addressed store — resolve musl CRT blobs into a per-arch view
+	//    dir, but only when the manifest carries musl entries (forward-looking;
+	//    T0530 will host them). Returns "" otherwise so we fall through.
+	if viewDir, verr := resolveMuslCRTView(arch); verr != nil {
+		return "", verr
+	} else if viewDir != "" {
+		return viewDir, nil
 	}
 
+	// 5. Extract the embedded musl CRT to the cache dir (the working path until
+	//    musl blobs are hosted; Linux binaries always embed the CRT).
+	if !hasEmbeddedMuslCRT {
+		return "", fmt.Errorf("musl CRT not available for %s\n  this binary was not built with embedded musl CRT and the manifest has no musl blobs\n  set PROMISE_USE_CLANG=1 to use clang with system glibc instead", arch)
+	}
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return "", fmt.Errorf("cannot create CRT cache dir %s: %v", cacheDir, err)
 	}
-
 	prefix := "resources/crt/" + arch
 	for _, name := range muslCRTFiles {
 		data, err := embeddedMuslCRT.ReadFile(prefix + "/" + name)
@@ -4442,7 +4301,6 @@ func findMuslCRT(target string) (string, error) {
 			return "", fmt.Errorf("cannot write %s to cache: %v", name, err)
 		}
 	}
-
 	return cacheDir, nil
 }
 
@@ -7998,7 +7856,10 @@ func runInstall(args []string) {
 		extractEmbedded(embeddedModules, "resources/modules/"+name, modDest)
 	}
 
-	// Extract embedded musl CRT (if available).
+	// Extract embedded musl CRT into the epoch lib dir (Linux). musl has no
+	// public blob host yet (T0530), so it stays embedded-delivered; the CAS
+	// musl path (resolveMuslCRTView) activates once the manifest carries musl
+	// entries.
 	if hasEmbeddedMuslCRT {
 		arch := "x86_64-linux-musl"
 		if runtime.GOARCH == "arm64" {
@@ -8012,14 +7873,33 @@ func runInstall(args []string) {
 		extractEmbedded(embeddedMuslCRT, "resources/crt/"+arch, crtDest)
 	}
 
-	// Extract embedded LLVM tools (if available).
+	// Stage heavy dependencies into the content-addressed store and record the
+	// epoch's blob references (T0769, §2.4 step 3 / §4.4). A full-variant binary
+	// (hasEmbeddedLLVM) unpacks its bundled LLVM blobs into the shared CAS so the
+	// host workflow runs offline; a thin binary stages nothing and fetches on
+	// first use. Either way blobs.refs is derived from the embedded manifest
+	// without executing any epoch binary, so GC (T0771) can compute roots from
+	// epochs/*/blobs.refs alone.
+	manifest, mErr := loadEmbeddedManifest()
+	if mErr != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot parse embedded manifest: %v\n", mErr)
+		os.Exit(1)
+	}
+	store, sErr := blobstore.NewStore()
+	if sErr != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot open dependency cache: %v\n", sErr)
+		os.Exit(1)
+	}
+	stagedBlobs := false
 	if hasEmbeddedLLVM {
-		llvmDest := filepath.Join(epochBinDir, "llvm")
-		if err := os.MkdirAll(llvmDest, 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", llvmDest, err)
+		if err := stageEmbeddedLLVMBlobs(store); err != nil {
+			fmt.Fprintf(os.Stderr, "error staging LLVM blobs: %v\n", err)
 			os.Exit(1)
 		}
-		extractCompressedLLVM(llvmDest)
+		stagedBlobs = true
+	}
+	if err := blobstore.WriteEpochRefs(epochDir, manifest); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write blobs.refs: %v\n", err)
 	}
 
 	// Write active epoch file.
@@ -8033,12 +7913,10 @@ func runInstall(args []string) {
 	fmt.Printf("  stub:    %s\n", filepath.Join(stubBinDir, binaryName))
 	fmt.Printf("  std:     %s\n", epochStdDest)
 	fmt.Printf("  modules: %s\n", filepath.Join(epochLibDir, "modules"))
-	if hasEmbeddedLLVM {
-		fmt.Printf("  llvm:    %s\n", filepath.Join(epochBinDir, "llvm"))
+	if stagedBlobs {
+		fmt.Printf("  blobs:   %s\n", filepath.Join(store.Root(), "blobs", "sha256"))
 	}
-	if hasEmbeddedMuslCRT {
-		fmt.Printf("  crt:     %s\n", filepath.Join(epochLibDir, "crt"))
-	}
+	fmt.Printf("  refs:    %s\n", filepath.Join(epochDir, "blobs.refs"))
 	fmt.Printf("  cache:   %s\n", epochCacheDir)
 	fmt.Printf("  active:  %s\n", epoch)
 	if runtime.GOOS == "windows" {

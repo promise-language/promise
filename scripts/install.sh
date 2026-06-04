@@ -22,17 +22,29 @@ PROMISE_HOME="${PROMISE_HOME:-$HOME/.promise}"
 # ── argument parsing ────────────────────────────────────────────────────────
 
 EPOCH="latest"
+# VARIANT selects the asset suffix: "" = thin (default), "-full" = host workflow
+# pre-staged (offline), "-all" = every target's blobs (deferred, T0774).
+VARIANT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --epoch)  EPOCH="$2"; shift 2 ;;
     --epoch=*) EPOCH="${1#--epoch=}"; shift ;;
+    --full)   VARIANT="-full"; shift ;;
+    --all)    VARIANT="-all"; shift ;;
     -h|--help)
-      echo "Usage: install.sh [--epoch EPOCH]"
+      echo "Usage: install.sh [--epoch EPOCH] [--full | --all]"
       echo "  --epoch EPOCH   Install a specific epoch (default: latest stable)"
+      echo "  --full          Install the full variant (host toolchain pre-staged; offline)"
+      echo "  --all           Install the all variant (every target pre-staged; deferred)"
       exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+
+if [ "$VARIANT" = "-all" ]; then
+  echo "note: the 'all' variant is deferred — no cross-target blobs exist yet (T0774);" >&2
+  echo "      requesting it anyway in case this release provides it." >&2
+fi
 
 # ── platform detection ──────────────────────────────────────────────────────
 
@@ -57,7 +69,8 @@ case "$ARCH" in
     exit 1 ;;
 esac
 
-BINARY_NAME="promise-${PLATFORM}-${ARCH}"
+# Asset naming: promise-<os>-<arch>[-<variant>]; bare = thin.
+BINARY_NAME="promise-${PLATFORM}-${ARCH}${VARIANT}"
 
 # ── resolve release tag ─────────────────────────────────────────────────────
 

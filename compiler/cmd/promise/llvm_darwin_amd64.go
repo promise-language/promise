@@ -12,5 +12,3 @@ const hasEmbeddedLLVM = true
 var embeddedLLVMFiles = []string{"opt.gz", "llc.gz", "lld.gz", "libLLVM.dylib.gz"}
 
 const llvmEmbedPrefix = "resources/llvm/darwin-amd64"
-const llvmCacheSubdir = "darwin-amd64"
-const llvmLibEnvKey = "DYLD_LIBRARY_PATH"

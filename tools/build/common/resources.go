@@ -90,7 +90,24 @@ func EmbedResources(root string) error {
 		return fmt.Errorf("compute .sources.sha256: %w", err)
 	}
 
+	// manifest.json — the always-embedded runtime dependency manifest (T0769).
+	// Debug/thin builds get an empty-entries placeholder (host LLVM is resolved
+	// from PATH/Homebrew). Release/full builds overwrite this with real entries
+	// via GenerateRuntimeManifest after prebuilts are fetched.
+	if err := ensureRuntimeManifest(res); err != nil {
+		return fmt.Errorf("write manifest.json: %w", err)
+	}
+
 	return nil
+}
+
+// ensureRuntimeManifest (re)writes the empty placeholder runtime manifest so the
+// `//go:embed resources/manifest.json` directive always resolves, and so a debug
+// build after a release never embeds a stale release manifest. Release builds
+// overwrite this afterward via GenerateRuntimeManifest (build.go step 6).
+func ensureRuntimeManifest(resDir string) error {
+	path := filepath.Join(resDir, "manifest.json")
+	return os.WriteFile(path, []byte("{\n  \"schema\": 1,\n  \"epoch\": \"\",\n  \"entries\": []\n}\n"), 0o644)
 }
 
 // EmbedMuslCRT copies musl C runtime objects (Linux only).

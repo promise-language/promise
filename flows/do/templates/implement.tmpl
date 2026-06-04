@@ -36,9 +36,8 @@ Plan:
   it). The output must show 0 leaks; any leak is a regression you must fix. NEVER add
   `allow_leaks: true`.
 - {{.DeferCommit}} Concretely: do NOT run `git commit`/`git push`, and do NOT
-  invoke the `/commit`, `/do`, `/push`, or `/review` skills — they commit/push and
-  would pre-empt the flow's own land step. Leave every change uncommitted in the
-  worktree.
+  invoke the `/commit` skill — it commits/pushes and would pre-empt the flow's own
+  land step. Leave every change uncommitted in the worktree.
 - You do NOT need to write the resolution summary either:
   a dedicated step produces it after the work is merged.
 

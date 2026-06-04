@@ -19,9 +19,8 @@ Analyze and fill test-coverage gaps for the changes on this item.
   stress test. File a critical bug for any leak source with no drop path.
 - For genuinely untestable code (needs claude / network / external processes, or a
   missing language feature), file a tracker item (mcp__tracker__create) instead.
-- Do NOT commit, push, or invoke the `/commit`, `/do`, `/push`, or `/review`
-  skills — the flow commits, pushes, and finalizes in a later step. Leave your
-  new tests uncommitted in the worktree.
+- Do NOT commit, push, or invoke the `/commit` skill — the flow commits, pushes,
+  and finalizes in a later step. Leave your new tests uncommitted in the worktree.
 - End your message with a single line stating the resulting coverage, exactly:
   COVERAGE: adequate     (or)  COVERAGE: insufficient     (or)  COVERAGE: none
 

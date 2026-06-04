@@ -179,6 +179,42 @@ func TestEnsureBareRepoAndCheckout(t *testing.T) {
 	}
 }
 
+// TestGitOpsUnderSafeBareRepositoryExplicit is the T0779 regression guard:
+// Promise's own cache bare repos must stay fetchable/archivable even when git's
+// safe.bareRepository=explicit hardening is in effect. Without the
+// `-c safe.bareRepository=all` trust flag in runGit/runGitPiped, the cwd-based
+// `git fetch` in ensureBareRepo is refused: "cannot use bare repository ...
+// (safe.bareRepository is 'explicit')". The setting is forced on here so the
+// guard is deterministic everywhere (CI does not normally set it).
+func TestGitOpsUnderSafeBareRepositoryExplicit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	bareRepo, commitHash := createTestRepo(t, "hardened")
+
+	// Force the hardening on for the production git calls below. Set AFTER the
+	// fixture is built so only ensureBareRepo/ensureCheckout run under explicit.
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'safe.bareRepository=explicit'")
+
+	cloneDir := filepath.Join(t.TempDir(), "clone.git")
+	if err := ensureBareRepo(cloneDir, bareRepo); err != nil {
+		t.Fatalf("ensureBareRepo (clone) under explicit: %v", err)
+	}
+	// Second call takes the fetch path — the operation that broke (T0779).
+	if err := ensureBareRepo(cloneDir, bareRepo); err != nil {
+		t.Fatalf("ensureBareRepo (fetch) under explicit: %v", err)
+	}
+	// ensureCheckout exercises the `git archive` (runGitPiped) path.
+	checkoutDir := filepath.Join(t.TempDir(), "checkout")
+	if err := ensureCheckout(cloneDir, checkoutDir, commitHash); err != nil {
+		t.Fatalf("ensureCheckout under explicit: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(checkoutDir, "promise.toml")); err != nil {
+		t.Fatal("expected promise.toml in checkout under explicit")
+	}
+}
+
 func TestResolveRemoteModuleLocalRepo(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")

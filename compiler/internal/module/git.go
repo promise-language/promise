@@ -199,7 +199,10 @@ func ensureCheckout(repoDir, checkoutDir, commitHash string) error {
 
 // runGitPiped runs `git archive <commit> | tar x` in checkoutDir.
 func runGitPiped(repoDir, checkoutDir, commitHash string) (string, error) {
-	archive := exec.Command("git", "--git-dir="+repoDir, "archive", "--format=tar", commitHash)
+	// --git-dir already satisfies safe.bareRepository=explicit, but pass the
+	// trust flag too so every bare-repo op in this file is uniformly robust.
+	archiveArgs := append(append([]string{}, gitTrustBareRepo...), "--git-dir="+repoDir, "archive", "--format=tar", commitHash)
+	archive := exec.Command("git", archiveArgs...)
 	untar := exec.Command("tar", "xf", "-")
 	untar.Dir = checkoutDir
 
@@ -239,9 +242,18 @@ func requireGit() error {
 	return nil
 }
 
+// gitTrustBareRepo trusts the bare repos Promise creates in its own module
+// cache. git's safe.bareRepository=explicit hardening (≥2.38) refuses to use a
+// bare repo discovered from the cwd unless its git dir is named explicitly —
+// which breaks `git fetch` run with the bare repo as the working directory.
+// Promise owns these cache repos, so we re-allow them per-invocation. The -c is
+// scoped to this one git process (it does NOT change the user's config) and
+// overrides an injected GIT_CONFIG_PARAMETERS=...=explicit (B/T0779).
+var gitTrustBareRepo = []string{"-c", "safe.bareRepository=all"}
+
 // runGit runs a git command and returns its combined output.
 func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", append(append([]string{}, gitTrustBareRepo...), args...)...)
 	if dir != "" {
 		cmd.Dir = dir
 	}

@@ -503,14 +503,30 @@ type CShape {
     local = this as! CSquare;
     return local.label;
   }
-  // optional cast: presence narrowing only (no unwrap — unwrapping a
-  // borrow-holding optional is the separate T0753 double-free).
+  // optional cast: presence narrowing only (no unwrap).
   csq_is_square(&this) bool {
     CSquare? o = this as CSquare;
     if o {
       return true;
     }
     return false;
+  }
+  // T0753: unwrap a borrow-holding optional (from `this as CSquare`) via the
+  // handler form and read an int field. The extracted value is a borrow of
+  // `this`'s instance — must NOT be tracked as an owned temp. Present case
+  // returns the real `sides`; absent case takes the handler fallback (-1).
+  csq_unwrap_sides(&this) int {
+    CSquare? o = this as CSquare;
+    return (o? _ {
+      return -1;
+    }).sides;
+  }
+  // Same, but calling a virtual method on the unwrapped borrow value.
+  csq_unwrap_kind(&this) string {
+    CSquare? o = this as CSquare;
+    return (o? _ {
+      return "none";
+    }).kind();
   }
 }
 type CSquare is CShape {
@@ -550,6 +566,18 @@ test_this_cast_optional_present() `test {
   CShape t = CTriangle(sides: 3, label: "tri");
   assert(s.csq_is_square(), "this as CSquare present when this is CSquare");
   assert(!t.csq_is_square(), "this as CSquare absent when this is CTriangle");
+}
+
+// T0753: unwrapping a borrow-holding optional (from `this as CSquare`) via the
+// handler form must not double-free. Present case reads the real field/method;
+// absent case (CTriangle) takes the handler fallback. Both must be leak-free.
+test_this_cast_optional_unwrap() `test {
+  CShape s = CSquare(sides: 4, label: "sq");
+  CShape t = CTriangle(sides: 3, label: "tri");
+  assert(s.csq_unwrap_sides() == 4, "unwrap borrow-optional, read int field (present)");
+  assert(t.csq_unwrap_sides() == -1, "unwrap borrow-optional fallback (absent)");
+  assert(s.csq_unwrap_kind() == "square", "unwrap borrow-optional, virtual method (present)");
+  assert(t.csq_unwrap_kind() == "none", "unwrap borrow-optional fallback method (absent)");
 }
 
 // ---------------- index/slice operator on a `this` receiver (T0745) ----------
@@ -698,10 +726,10 @@ test_this_index_value_type() `test {
 //
 // NOTE: `(this) as!/as T` RTTI cast on a `this` receiver — FIXED (T0747) and
 // covered above by the test_this_cast_* family (forced field/method, forced
-// local binding, optional presence). Optional casts are exercised only via
-// presence narrowing (`if o { }`): *unwrapping* an optional that holds a borrow
-// (e.g. `(this as T)? _ { ... }`) double-frees — a separate, deeper pre-existing
-// bug filed as T0753. Once T0753 is fixed, add unwrap-based optional cast cases.
+// local binding, optional presence + unwrap). Unwrapping an optional that holds
+// a borrow (e.g. `(this as T)? _ { ... }`) used to double-free — fixed in T0753
+// (the optional-handler unwrap on an ident source no longer tracks the extracted
+// value as an owned temp) and now covered by test_this_cast_optional_unwrap.
 //
 // NOTE: value-type binary operator with `this` as the right-hand *argument*
 // (`other < this` where `<` is on a value type) is still broken for BOTH bare

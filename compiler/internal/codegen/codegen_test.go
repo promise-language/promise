@@ -11726,6 +11726,37 @@ func TestInlineOptionalUnwrapNoTempTrack(t *testing.T) {
 	`)
 }
 
+// T0753: the optional-handler unwrap `(o? _ { ... })` on an ident source must
+// NOT register the extracted inner value as an owned heap temp. The source
+// optional `o` already owns the inner allocation — its own scope drop binding
+// frees it exactly once (for an owned optional) or deliberately not at all (for
+// a borrow-holding optional, once T0747's isRttiCastBorrow clears o's flag).
+// Tracking the extracted heap value as a statement temp double-frees at scope
+// exit (`fatal: invalid free (bad header magic)`). Symmetric to the existing
+// OptionalUnwrapExpr ident-skip guard (B0287/T0343).
+func TestOptionalHandlerUnwrapIdentNoHeapTemp(t *testing.T) {
+	ir := generateIR(t, `
+		type HBox { int n; drop(~this) {} }
+		tfn() int {
+			HBox? o = HBox(n: 5);
+			return (o? _ { return -1; }).n;
+		}
+		main() { _ := tfn(); }
+	`)
+	fn := extractFunction(ir, "__user.tfn")
+	// Legitimate HBox.drop call sites in tfn (4 total): the construction temp's
+	// cleanup (dead — flag cleared when moved into o) emitted on both the normal
+	// and the unwrap-panic edges (2), plus o's optional-drop emitted on each of
+	// the two return edges — the some path and the handler path (2). The extracted
+	// inner from the handler must add NO further drop call site — without the fix
+	// it tracks a spurious owned temp, raising the count to 5.
+	got := strings.Count(fn, "call void @HBox.drop")
+	if got != 4 {
+		t.Fatalf("expected 4 HBox.drop call sites (no spurious heap temp for the "+
+			"handler-extracted inner), got %d:\n%s", got, fn)
+	}
+}
+
 // T0095: Constructor with borrowed string param (no drop flag) dups the string
 func TestConstructorDupBorrowedString(t *testing.T) {
 	ir := generateIR(t, `

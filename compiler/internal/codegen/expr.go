@@ -229,8 +229,9 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 			named := extractNamed(exprType)
 			// B0287: For optional unwrap on ident source, the optional's
 			// drop binding owns the inner. Don't track as a statement temp —
-			// that would cause a double-free at scope exit.
-			_, isIdentSource := e.Expr.(*ast.IdentExpr)
+			// that would cause a double-free at scope exit. Peels ParenExpr so
+			// `(o)!` is recognized like `o!` (otherwise `((o)!).field` double-frees).
+			isIdentSource := isIdentOptionalUnwrapSource(e.Expr)
 			if named == types.TypString {
 				if c.optionalFieldString {
 					c.optionalFieldString = false
@@ -267,13 +268,22 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 				exprType = types.Substitute(exprType, c.typeSubst)
 			}
 			named := extractNamed(exprType)
+			// T0753: For the optional-handler unwrap (`o? _ { ... }`) on an ident
+			// source, the source optional's own drop binding owns the inner
+			// string/vector. Tracking the extracted i8* as a statement temp
+			// double-frees at scope exit (mirrors the OptionalUnwrapExpr branch).
+			isIdentSource := isIdentOptionalUnwrapSource(e.Expr)
 			if named == types.TypString {
-				c.trackStringTemp(result)
+				if !isIdentSource {
+					c.trackStringTemp(result)
+				}
 			} else if named == types.TypVector {
-				if elemType, ok := types.AsVector(exprType); ok {
-					c.trackVectorTempWithElemType(result, elemType)
-				} else {
-					c.trackVectorTemp(result)
+				if !isIdentSource {
+					if elemType, ok := types.AsVector(exprType); ok {
+						c.trackVectorTempWithElemType(result, elemType)
+					} else {
+						c.trackVectorTemp(result)
+					}
 				}
 			}
 		} else {
@@ -10681,6 +10691,27 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	}
 
 	return result
+}
+
+// isIdentOptionalUnwrapSource reports whether expr — the source of an optional
+// unwrap (`opt!` or `opt? _ { ... }`) — is ultimately a bare identifier, peeling
+// ParenExpr wrappers so `(o)!` / `((o))? _ { ... }` are recognized exactly like
+// `o!` / `o? _ { ... }`. When true, the source optional has its own scope drop
+// binding that governs the inner allocation's lifetime, so the unwrap-extracted
+// inner must NOT be registered as an owned statement temp — doing so double-frees
+// at scope exit (`fatal: invalid free`). genExpr already sees through ParenExpr
+// (it recurses), so the peel only fixes the AST-shape check here; mirrors the
+// ParenExpr peeling in neutralizeForceUnwrapSource (T0577).
+func isIdentOptionalUnwrapSource(expr ast.Expr) bool {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	_, isIdent := expr.(*ast.IdentExpr)
+	return isIdent
 }
 
 // neutralizeForceUnwrapSource sets the present flag to false in the source

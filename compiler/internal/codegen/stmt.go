@@ -5379,8 +5379,20 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 	}
 	// B0287 / T0343: For optional unwrap on ident source, the optional's drop
 	// binding owns the inner allocation. Tracking would double-free at scope exit.
+	// isIdentOptionalUnwrapSource peels ParenExpr so `(o)!` skips like `o!`.
 	if opt, isOpt := expr.(*ast.OptionalUnwrapExpr); isOpt {
-		if _, isIdent := opt.Expr.(*ast.IdentExpr); isIdent {
+		if isIdentOptionalUnwrapSource(opt.Expr) {
+			return
+		}
+	}
+	// T0753: Same for the optional-handler unwrap (`o? _ { ... }`) on an ident
+	// source. The handler extracts the inner value as an aliasing extractvalue;
+	// the source optional's own drop binding governs the inner allocation's
+	// lifetime (frees it for an owned optional; deliberately does NOT free it for
+	// a borrow-holding optional once isRttiCastBorrow clears o's drop flag).
+	// Tracking the extracted heap value as an owned temp double-frees.
+	if eh, isEH := expr.(*ast.ErrorHandlerExpr); isEH {
+		if isIdentOptionalUnwrapSource(eh.Expr) {
 			return
 		}
 	}

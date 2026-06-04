@@ -1,0 +1,130 @@
+// T0753: Unwrapping an Optional via the optional-handler form (`o? _ { ... }`)
+// must not double-free the inner value.
+//
+// The handler extracts the inner value as an aliasing `extractvalue` — no dup,
+// no neutralize. When the source is an *ident*, the source optional already has
+// its own scope drop binding that owns the inner allocation (frees it once for
+// an owned optional; deliberately a no-op for a borrow-holding optional once
+// T0747's isRttiCastBorrow clears the drop flag). So the extracted value must
+// NOT be registered as an owned statement temp — doing so double-frees.
+//
+// This was a pre-existing double-free for the heap-user-type result even on a
+// plain owned optional; the borrow-holding case (RTTI cast) is covered in
+// tests/e2e/paren_this_test.pr. All values here are HEAP (non-literal) so the
+// leak/double-free detector is live; with literal strings/vectors the bit-63
+// static-flag no-op guard would mask the double-free.
+//
+// The non-ident-source counterparts (a call returning T?/string?/T[]?) lock in
+// the no-regression guarantee: there the source optional is a temporary with no
+// scope drop binding, so the extracted inner MUST stay tracked and freed.
+type HBox {
+  int n;
+  string label;
+}
+
+mk_hbox() HBox? {
+  return HBox(n: 9, label: "x" + "y");
+}
+
+mk_str() string? {
+  return "xy".to_upper();
+}
+
+mk_vec() int[]? {
+  return[3, 4, 5].clone();
+}
+
+// --- owned optional, ident source: must NOT track the extracted inner ---------
+
+owned_heap_user_handler_unwrap() `test {
+  HBox? o = HBox(n: 5, label: "heap" + "-label");
+  v := (o? _ {
+    return;
+  }).n;
+  assert(v == 5, "owned heap user-type handler unwrap reads field");
+}
+
+owned_string_handler_unwrap() `test {
+  string? o = "abc".to_upper();
+  n := (o? _ {
+    return;
+  }).len;
+  assert(n == 3, "owned string handler unwrap reads len");
+}
+
+owned_vector_handler_unwrap() `test {
+  int[]? o = [1, 2].clone();
+  n := (o? _ {
+    return;
+  }).len;
+  assert(n == 2, "owned vector handler unwrap reads len");
+}
+
+// --- parenthesized ident source: peeled to the ident, must NOT track ----------
+// `(o)? _ {}` / `((o))!` are the same owned-ident unwrap as `o? _ {}` / `o!`;
+// the temp-tracking skip peels ParenExpr (isIdentOptionalUnwrapSource) so the
+// extracted inner is not double-freed. The heap-user-type field access
+// `((o)!).n` crashed before the peel (the value-struct result routes through
+// trackHeapUserTypeResult in stmt.go, which the peel fixed).
+//
+// NOTE: the i8*-inner *force-unwrap* paren form `((o)!).len` for `string?`/`T[]?`
+// is a SEPARATE pre-existing double-free (T0776) — genOptionalForceUnwrap's own
+// temp-tracking site does not peel ParenExpr, so it is intentionally NOT covered
+// here yet. The handler form `((o)? _ {}).len` below IS clean (no equivalent
+// internal tracking site) and exercises the genExpr ErrorHandlerExpr i8* peel.
+
+owned_paren_handler_unwrap() `test {
+  HBox? o = HBox(n: 11, label: "p" + "q");
+  v := ((o)? _ {
+    return;
+  }).n;
+  assert(v == 11, "parenthesized ident handler unwrap, no double-free");
+}
+
+// Parenthesized ident source through the i8* (string/vector) handler path: the
+// peel must reach the genExpr ErrorHandlerExpr branch's isIdentSource skip so the
+// extracted i8* is not tracked as an owned temp (heap values → free is live).
+owned_paren_string_handler_unwrap() `test {
+  string? o = "ab".to_upper();
+  n := ((o)? _ {
+    return;
+  }).len;
+  assert(n == 2, "parenthesized ident string handler unwrap, no double-free");
+}
+
+owned_paren_vector_handler_unwrap() `test {
+  int[]? o = [7, 8, 9].clone();
+  n := ((o)? _ {
+    return;
+  }).len;
+  assert(n == 3, "parenthesized ident vector handler unwrap, no double-free");
+}
+
+owned_paren_force_unwrap() `test {
+  HBox? o = HBox(n: 13, label: "r" + "s");
+  v := ((o)!).n;
+  assert(v == 13, "parenthesized ident force-unwrap, no double-free");
+}
+
+// --- non-ident source: the extracted inner MUST stay tracked (no regression) --
+
+nonident_heap_user_handler_unwrap() `test {
+  v := (mk_hbox()? _ {
+    return;
+  }).n;
+  assert(v == 9, "non-ident heap user-type handler unwrap, no leak");
+}
+
+nonident_string_handler_unwrap() `test {
+  n := (mk_str()? _ {
+    return;
+  }).len;
+  assert(n == 2, "non-ident string handler unwrap, no leak");
+}
+
+nonident_vector_handler_unwrap() `test {
+  n := (mk_vec()? _ {
+    return;
+  }).len;
+  assert(n == 3, "non-ident vector handler unwrap, no leak");
+}

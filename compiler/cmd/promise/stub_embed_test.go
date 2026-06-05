@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -119,7 +120,9 @@ func TestWriteFileAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0755 {
+	// Windows does not model Unix permission bits — os.Stat reports 0666/0444
+	// based solely on the read-only attribute, so skip the exact-mode check there.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0755 {
 		t.Fatalf("expected mode 0755, got %v", info.Mode().Perm())
 	}
 	// Overwrite atomically — no leftover temp files in the dir.

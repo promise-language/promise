@@ -905,6 +905,10 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		// If-unwrap: if val := expr { }
 		c.openScope(s.Body, "if-unwrap")
 		initType := c.checkExpr(s.Init)
+		// T0770: a failable scrutinee (e.g. `if e := load()` where `load!() T?`)
+		// auto-propagates its error in a failable function, leaving the `T?` to
+		// unwrap; in a non-failable function it must be handled explicitly.
+		c.checkVarDeclFailable(s.Init)
 		if initType != nil {
 			c.checkNoShadow(s.Binding, s.Pos())
 			opt, ok := initType.(*types.Optional)
@@ -1253,6 +1257,9 @@ func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 
 func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	valType := c.checkExpr(s.Value)
+	// T0770: a failable scrutinee auto-propagates its error (failable function)
+	// or must be handled explicitly (non-failable), same as the if-unwrap form.
+	c.checkVarDeclFailable(s.Value)
 
 	c.inLoop++
 	c.openScope(s.Body, "while-unwrap")

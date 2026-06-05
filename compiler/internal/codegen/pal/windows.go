@@ -1514,6 +1514,89 @@ func (p *WindowsPAL) EmitSpawn(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitExecReplace defines @pal_exec_replace(i8* path, i8** argv) → i32 on Windows.
+// Windows has no true execve (§2.5 caveat): CreateProcessA launches path as a
+// child (inheriting the console/std handles), waits for it, and ExitProcess()es
+// with the child's exit code — so the same-PID/signal guarantee holds only on
+// Unix. Returns -1 only when the process cannot be launched (T0770).
+func (p *WindowsPAL) EmitExecReplace(module *ir.Module) *ir.Func {
+	closeHandle := winDeclareCloseHandle(module)
+	createProcessA := winDeclareCreateProcessA(module)
+	argvToCmdline := emitArgvToCmdline(module)
+	palFree := getOrDeclareFunc(module, "pal_free", irtypes.Void,
+		ir.NewParam("ptr", irtypes.I8Ptr))
+	waitForSingleObject := getOrDeclareFunc(module, "WaitForSingleObject", irtypes.I32,
+		ir.NewParam("hHandle", irtypes.I8Ptr),
+		ir.NewParam("dwMilliseconds", irtypes.I32))
+	getExitCodeProcess := getOrDeclareFunc(module, "GetExitCodeProcess", irtypes.I32,
+		ir.NewParam("hProcess", irtypes.I8Ptr),
+		ir.NewParam("lpExitCode", irtypes.NewPointer(irtypes.I32)))
+	exitProcess := getOrDeclareFunc(module, "ExitProcess", irtypes.Void,
+		ir.NewParam("uExitCode", irtypes.I32))
+	addFuncAttr(exitProcess, enum.FuncAttrNoReturn)
+
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
+	fn := module.NewFunc("pal_exec_replace", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+
+	// Build command line from argv (argv[0] is the program path).
+	cmdline := entry.NewCall(argvToCmdline, fn.Params[1])
+
+	// Zeroed STARTUPINFOA with cb set. No STARTF_USESTDHANDLES → the child
+	// inherits the parent's console/std handles, which is what a launcher wants.
+	siAlloca := entry.NewAlloca(irtypes.NewArray(uint64(startupInfoSize), irtypes.I8))
+	winEmitMemset(module, entry, siAlloca, startupInfoSize)
+	winStoreI32AtOffset(entry, siAlloca, 0, constant.NewInt(irtypes.I32, startupInfoSize))
+
+	piAlloca := entry.NewAlloca(irtypes.NewArray(uint64(processInfoSize), irtypes.I8))
+	winEmitMemset(module, entry, piAlloca, processInfoSize)
+
+	siPtr := entry.NewBitCast(siAlloca, irtypes.I8Ptr)
+	piPtr := entry.NewBitCast(piAlloca, irtypes.I8Ptr)
+	cpRet := entry.NewCall(createProcessA,
+		constant.NewNull(irtypes.I8Ptr), // lpApplicationName
+		cmdline,                         // lpCommandLine
+		constant.NewNull(irtypes.I8Ptr), // lpProcessAttributes
+		constant.NewNull(irtypes.I8Ptr), // lpThreadAttributes
+		constant.NewInt(irtypes.I32, 1), // bInheritHandles = TRUE
+		constant.NewInt(irtypes.I32, 0), // dwCreationFlags
+		constant.NewNull(irtypes.I8Ptr), // lpEnvironment (inherit)
+		constant.NewNull(irtypes.I8Ptr), // lpCurrentDirectory (inherit)
+		siPtr,
+		piPtr)
+
+	cpFailed := entry.NewICmp(enum.IPredEQ, cpRet, constant.NewInt(irtypes.I32, 0))
+	cpOkBlk := fn.NewBlock(".cp_ok")
+	cpErrBlk := fn.NewBlock(".cp_err")
+	entry.NewCondBr(cpFailed, cpErrBlk, cpOkBlk)
+
+	// Launch failed: free cmdline, return -1.
+	cpErrBlk.NewCall(palFree, cmdline)
+	cpErrBlk.NewRet(negOne32)
+
+	// Wait for the child, then exit with its code (never returns to caller).
+	cpOkBlk.NewCall(palFree, cmdline)
+	hThread := winLoadI8PtrAtOffset(cpOkBlk, piAlloca, 8)
+	cpOkBlk.NewCall(closeHandle, hThread)
+	hProcess := winLoadI8PtrAtOffset(cpOkBlk, piAlloca, 0)
+	cpOkBlk.NewCall(waitForSingleObject, hProcess, constant.NewInt(irtypes.I32, -1))
+	exitCodePtr := cpOkBlk.NewAlloca(irtypes.I32)
+	cpOkBlk.NewStore(constant.NewInt(irtypes.I32, 0), exitCodePtr)
+	cpOkBlk.NewCall(getExitCodeProcess, hProcess, exitCodePtr)
+	exitCode := cpOkBlk.NewLoad(irtypes.I32, exitCodePtr)
+	cpOkBlk.NewCall(closeHandle, hProcess)
+	cpOkBlk.NewCall(exitProcess, exitCode)
+	cpOkBlk.NewUnreachable()
+
+	return fn
+}
+
 // EmitReadPipe defines @pal_read_pipe on Windows using ReadFile.
 // Signature: @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
 // Reads pipe handle to EOF, stores malloc'd buffer + length. Caller must free.

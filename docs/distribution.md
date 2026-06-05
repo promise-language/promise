@@ -138,18 +138,20 @@ Resulting layout:
     build/               ← compile cache
 ```
 
-### 2.5 The stub (launcher) *(planned — replaces shim-in-binary)*
+### 2.5 The stub (launcher) *(implemented — replaced shim-in-binary, T0770)*
 
 The on-`PATH` `~/.promise/bin/promise` is the **stub**: the thing the user runs, which does *not* compile anything itself — it locates the correct epoch's real compiler and hands off to it. (Synonyms seen elsewhere: *shim*, *launcher*, *trampoline*; they all mean this one object.)
 
-**Today** this is *shim-in-binary*: `~/.promise/bin/promise` is a full copy of the compiler that detects its stub role via a `.promise.shim` marker and re-execs the epoch binary ([shim.go](../compiler/cmd/promise/shim.go)). **The target** is a dedicated tiny stub. The difference is not only disk and cold-start — it is a real simplification and reliability win:
+The stub is a tiny Promise-written binary ([tools/stub/main.pr](../tools/stub/main.pr)), built per target by the just-built compiler at release time (T0773). The previous *shim-in-binary* design — a full compiler copy that detected its stub role via a `.promise.shim` marker and re-exec'd the epoch binary — has been removed (`shimDispatch`, the `PROMISE_NO_SHIM` recursion guard, and the marker are all gone). The difference is not only disk and cold-start — it is a real simplification and reliability win:
 
-- **The compiler stops being a trampoline.** Delete `shimDispatch()`, the `PROMISE_NO_SHIM` recursion guard, the `.promise.shim` marker, and every "am I a stub or the compiler?" branch from the compiler. **You get what you run**: invoking the big binary directly always runs the compiler, full stop — no surprise hand-off. If the directly-invoked compiler's epoch differs from the project's pinned epoch, that is a **warning, not a silent trampoline** to something unexpected.
+> **Dev builds.** The per-target stub is a release artifact, so `bin/build` dev binaries have no embedded stub; `promise install` then places the compiler itself at the launcher path (it simply runs as the compiler — there is no shim to mediate). Multi-epoch dispatch only matters for released installs.
+
+- **The compiler stopped being a trampoline.** `shimDispatch()`, the `PROMISE_NO_SHIM` recursion guard, the `.promise.shim` marker, and every "am I a stub or the compiler?" branch are gone. **You get what you run**: invoking the big binary directly always runs the compiler, full stop — no surprise hand-off. If the directly-invoked compiler's epoch differs from the project's pinned epoch, that is a **warning** ([epoch_warn.go](../compiler/cmd/promise/epoch_warn.go)), not a silent trampoline to something unexpected (suppress with `PROMISE_NO_EPOCH_WARN`).
 - **The stub `exec`-replaces itself** with the real compiler (Unix `execve`; Windows uses the closest available, see caveat). Same process, same PID. This eliminates a whole class of bugs: record-the-PID / run / kill-the-PID no longer leaves the real compiler alive as an orphan, and signals reach the compiler directly. (Under shim-in-binary's child-process model the stub and compiler are two processes — killing one stranded the other.)
 - **Written in Promise.** A hello-world Promise binary is ~20 KB versus ~3 MB for the equivalent Go binary. The stub is tiny, dogfoods the language ("our launcher is written in Promise"), and compiles to a standalone native executable that needs no toolchain to run. It is built per target by the compiler at release time.
 
 **Stub responsibilities (deliberately minimal):**
-1. **Check its reserved env vars first.** If `PROMISE_STUB_VERSION` is set, the stub prints its own version and exits; `PROMISE_STUB_INFO` additionally prints the resolved epoch and the target binary it *would* exec. These are checked *before* epoch resolution. Using an **env var, not a flag**, keeps the stub a pure pass-through that **never parses args** — it forwards every argument untouched — and matches how it already reads `PROMISE_EPOCH` / `PROMISE_NO_SHIM`. So `promise --version` still trampolines to the active compiler, as users expect; you opt into stub introspection explicitly via the env var.
+1. **Check its reserved env vars first.** If `PROMISE_STUB_VERSION` is set, the stub prints its own version and exits; `PROMISE_STUB_INFO` additionally prints the resolved epoch and the target binary it *would* exec. These are checked *before* epoch resolution. Using an **env var, not a flag**, keeps the stub a pure pass-through that **never parses args** — it forwards every argument untouched — and matches how it reads `PROMISE_EPOCH`. So `promise --version` still trampolines to the active compiler, as users expect; you opt into stub introspection explicitly via the env var.
 2. Resolve the target epoch: `PROMISE_EPOCH` → project `promise.toml` `[module].epoch` → `~/.promise/active`.
 3. `exec` `~/.promise/epochs/<epoch>/bin/promise`, forwarding all args.
 4. If that epoch is not installed → clear error (`run: promise update <epoch>`).
@@ -162,10 +164,10 @@ The stub knows only the *epoch-resolution contract* (the `active` file format an
 
 > **Windows `exec` caveat.** Windows has no true `execve`; the stub there does `CreateProcess` + wait + propagate the child's exit code. The same-PID guarantee holds only on Unix. Documented so the PID/signal reasoning above is not assumed on Windows.
 
-### 2.6 Updating *(naming change: `update` becomes self-update)*
+### 2.6 Updating *(implemented: `update` is self-update, T0770)*
 
-- **`promise update`** *(planned rename)* — update **Promise itself**: download the newer compiler for the target epoch/channel and run its `install` (which forward-updates the stub and stages blobs). Today this capability lives partly in `promise sync`.
-- **Dependency updates move to the package-manager namespace.** `promise update` *currently* updates `[require]` entries in `promise.toml` ([main.go:7446](../compiler/cmd/promise/main.go#L7446)); that behavior moves under a package-manager verb (e.g. `promise pkg update`) so the bare `update` can mean "update the toolchain." This is a CLI rename to schedule alongside the stub work.
+- **`promise update [epoch|next]`** — update **Promise itself**: download the newer compiler for the target epoch/channel (default: the active epoch) and run its `install`, which forward-updates the stub and stages blobs. The shared download+verify+install machinery lives in [sync.go](../compiler/cmd/promise/sync.go) (`downloadAndInstall`), reused by `promise sync`. `update` advances the toolchain **in place**; `sync` installs an additional epoch **side-by-side**.
+- **Dependency updates moved to the package-manager namespace.** The old `promise update` behavior — updating `[require]` git-dependency pins in `promise.toml` — is now `promise pkg update [name|url]` (`runPkgUpdate`), so the bare `update` means "update the toolchain." The broader `pkg` fetch/resolve/lock surface is tracked under T0175.
 
 Re-running install with a newer binary replaces the installation in place and forward-updates the stub.
 

@@ -86,6 +86,9 @@ func (c *Compiler) defineOSBodies() {
 	if fn, ok := irFuncByName["promise_os_kill"]; ok {
 		c.defineKillBody(fn)
 	}
+	if fn, ok := irFuncByName["promise_os_exec_replace"]; ok {
+		c.defineExecReplaceBody(fn)
+	}
 	if fn, ok := irFuncByName["promise_os_get_environ"]; ok {
 		c.defineGetEnvironBody(fn)
 	}
@@ -460,6 +463,110 @@ func (c *Compiler) defineSpawnBody(fn *ir.Func) {
 	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to spawn process")
 	c.storeFailableError(errorBlk, sret, errInst, resultType)
 	errorBlk.NewRet(nil)
+}
+
+// defineExecReplaceBody: void @promise_os_exec_replace(i8* sret, i8* program, i8* arguments)
+// Converts program + arguments to a C argv and calls pal_exec_replace, which on
+// Unix replaces the process image (never returns) and on Windows runs the child,
+// waits, and exits with its code (also never returns). Control only reaches the
+// code after the call on failure, so this stores an int! error after freeing the
+// argv C strings. The success path never returns, so it leaks nothing (T0770).
+func (c *Compiler) defineExecReplaceBody(fn *ir.Func) {
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	ptrSize := constant.NewInt(irtypes.I64, int64(c.ptrSize()))
+	headerSize := constant.NewInt(irtypes.I64, vectorHeaderSize)
+	vectorHdrType := vectorHeaderType()
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	programParam := fn.Params[1]
+	argsParam := fn.Params[2] // string[] vector pointer (i8*)
+
+	// Failable result type: {i1, intValueType, i8*} for int!
+	innerType := c.resolveType(types.TypInt)
+	resultType := computeResultType(innerType)
+
+	// Convert program string to C string.
+	programCStr := c.stringToCStr(entry, programParam)
+
+	// Load vector length from header (masked — bit 63 is static flag).
+	hdrPtr := entry.NewBitCast(argsParam, irtypes.NewPointer(vectorHdrType))
+	argsCount := loadVectorLen(entry, hdrPtr)
+
+	// Allocate argv array: (1 + argsCount + 1) * ptrSize.
+	totalSlots := entry.NewAdd(argsCount, constant.NewInt(irtypes.I64, 2))
+	argvSize := entry.NewMul(totalSlots, ptrSize)
+	argvRaw := entry.NewCall(c.palAlloc, argvSize)
+	argv := entry.NewBitCast(argvRaw, i8PtrPtrType)
+
+	// argv[0] = program C string.
+	argv0Ptr := entry.NewGetElementPtr(irtypes.I8Ptr, argv, zero64)
+	entry.NewStore(programCStr, argv0Ptr)
+
+	// Loop: convert each vector element to C string and store in argv.
+	hasArgs := entry.NewICmp(enum.IPredSGT, argsCount, zero64)
+	loopHdr := fn.NewBlock(".argv_loop_hdr")
+	loopDone := fn.NewBlock(".argv_loop_done")
+	entry.NewCondBr(hasArgs, loopHdr, loopDone)
+
+	loopBody := fn.NewBlock(".argv_loop_body")
+	iPhi := loopHdr.NewPhi(ir.NewIncoming(zero64, entry))
+	cond := loopHdr.NewICmp(enum.IPredSLT, iPhi, argsCount)
+	loopHdr.NewCondBr(cond, loopBody, loopDone)
+
+	elemOff := loopBody.NewMul(iPhi, ptrSize)
+	elemOff2 := loopBody.NewAdd(headerSize, elemOff)
+	elemPtr := loopBody.NewGetElementPtr(irtypes.I8, argsParam, elemOff2)
+	elemPtrTyped := loopBody.NewBitCast(elemPtr, irtypes.NewPointer(irtypes.I8Ptr))
+	strInst := loopBody.NewLoad(irtypes.I8Ptr, elemPtrTyped)
+	argCStr := c.stringInstanceToCStr(loopBody, strInst)
+
+	argIdx := loopBody.NewAdd(iPhi, one64)
+	argvSlotPtr := loopBody.NewGetElementPtr(irtypes.I8Ptr, argv, argIdx)
+	loopBody.NewStore(argCStr, argvSlotPtr)
+
+	iNext := loopBody.NewAdd(iPhi, one64)
+	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, loopBody))
+	loopBody.NewBr(loopHdr)
+
+	// Null terminator at argv[argsCount + 1].
+	nullIdx := loopDone.NewAdd(argsCount, one64)
+	nullSlotPtr := loopDone.NewGetElementPtr(irtypes.I8Ptr, argv, nullIdx)
+	loopDone.NewStore(constant.NewNull(irtypes.I8Ptr), nullSlotPtr)
+
+	// Call pal_exec_replace. On success it never returns; on failure it returns
+	// -1 and control falls through to the cleanup + error path below.
+	loopDone.NewCall(c.palExecReplace, programCStr, argv)
+
+	// Free argv C strings: argv[1..argsCount].
+	hasFreeArgs := loopDone.NewICmp(enum.IPredSGT, argsCount, zero64)
+	freeLoopHdr := fn.NewBlock(".free_loop_hdr")
+	freeDone := fn.NewBlock(".free_done")
+	loopDone.NewCondBr(hasFreeArgs, freeLoopHdr, freeDone)
+
+	freeLoopBody := fn.NewBlock(".free_loop_body")
+	jPhi := freeLoopHdr.NewPhi(ir.NewIncoming(zero64, loopDone))
+	freeCond := freeLoopHdr.NewICmp(enum.IPredSLT, jPhi, argsCount)
+	freeLoopHdr.NewCondBr(freeCond, freeLoopBody, freeDone)
+
+	freeIdx := freeLoopBody.NewAdd(jPhi, one64)
+	freeSlotPtr := freeLoopBody.NewGetElementPtr(irtypes.I8Ptr, argv, freeIdx)
+	freeStr := freeLoopBody.NewLoad(irtypes.I8Ptr, freeSlotPtr)
+	freeLoopBody.NewCall(c.palFree, freeStr)
+	jNext := freeLoopBody.NewAdd(jPhi, one64)
+	jPhi.Incs = append(jPhi.Incs, ir.NewIncoming(jNext, freeLoopBody))
+	freeLoopBody.NewBr(freeLoopHdr)
+
+	// Free program C string and argv array.
+	freeDone.NewCall(c.palFree, programCStr)
+	freeDone.NewCall(c.palFree, argvRaw)
+
+	// Failure: construct error, store failable error.
+	errInst := c.constructErrorFromGlobalStr(freeDone, "failed to exec program")
+	c.storeFailableError(freeDone, sret, errInst, resultType)
+	freeDone.NewRet(nil)
 }
 
 // defineSpawnStdoutFdBody: void @promise_os_spawn_stdout_fd(i8* sret)

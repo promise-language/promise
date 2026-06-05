@@ -112,60 +112,118 @@ func runSync(args []string) {
 		}
 	}
 
-	// Determine platform binary name.
-	binaryName := platformBinaryName()
+	if err := downloadAndInstall(release, epoch); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
-	// Find the binary asset and SHA256SUMS asset in the release.
-	binaryURL, shaURL, err := findAssets(release, binaryName)
+	fmt.Printf("epoch %s installed.\n", epoch)
+}
+
+// runUpdate implements `promise update [epoch|next]` — self-update of the
+// toolchain (§2.6). It downloads the newer compiler for the target epoch/channel
+// and runs its `install`, which forward-updates the on-PATH stub and stages
+// blobs. This is distinct from `promise sync` (install an additional epoch
+// side-by-side): `update` advances the toolchain in place. Dependency `[require]`
+// pin updates live under `promise pkg update` (T0770).
+//
+// Usage:
+//
+//	promise update          newer compiler for the active epoch (or latest stable)
+//	promise update 2026.0   newer compiler for a specific epoch
+//	promise update next     latest pre-release build
+func runUpdate(args []string) {
+	target := ""
+	if len(args) > 0 {
+		target = args[0]
+	}
+	if len(args) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: promise update [epoch|next]")
+		os.Exit(1)
+	}
+
+	cfg := resolveSyncConfig()
+
+	// Default (no arg): update the currently active epoch in place.
+	if target == "" {
+		if active, err := module.ActiveEpoch(); err == nil && active != "" && active != "next" {
+			target = active
+		}
+	}
+
+	var release *ghRelease
+	var epoch string
+	var err error
+
+	switch {
+	case target == "next":
+		release, err = findNextRelease(cfg)
+		epoch = "next"
+	case target == "":
+		release, epoch, err = findLatestStableRelease(cfg)
+	default:
+		epoch = target
+		release, err = findSpecificRelease(cfg, target)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Download to a temp directory.
-	tmpDir, err := os.MkdirTemp("", "promise-sync-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot create temp directory: %v\n", err)
+	fmt.Fprintf(os.Stderr, "updating toolchain to epoch %s...\n", epoch)
+	if err := downloadAndInstall(release, epoch); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	fmt.Printf("epoch %s installed.\n", epoch)
+}
+
+// downloadAndInstall downloads the platform binary for a release, verifies its
+// SHA256, and runs the downloaded binary's `install` (which installs into
+// epochs/<epoch>/, forward-updates the stub, and stages blobs). Shared by
+// `promise sync` and `promise update` (T0770).
+func downloadAndInstall(release *ghRelease, epoch string) error {
+	binaryName := platformBinaryName()
+
+	binaryURL, shaURL, err := findAssets(release, binaryName)
+	if err != nil {
+		return err
+	}
+
+	tmpDir, err := os.MkdirTemp("", "promise-update-*")
+	if err != nil {
+		return fmt.Errorf("cannot create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Download binary.
 	binaryPath := filepath.Join(tmpDir, binaryName)
 	fmt.Fprintf(os.Stderr, "downloading %s...\n", binaryName)
 	if err := downloadFile(binaryURL, binaryPath); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
-	// Download and verify SHA256.
 	if shaURL != "" {
 		fmt.Fprintf(os.Stderr, "verifying checksum...\n")
 		if err := verifySHA256(shaURL, binaryPath, binaryName); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 	}
 
-	// chmod +x on Unix.
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(binaryPath, 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "error: cannot make binary executable: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("cannot make binary executable: %w", err)
 		}
 	}
 
-	// Run `<binary> install` to install into epochs/<epoch>/.
 	fmt.Fprintf(os.Stderr, "installing epoch %s...\n", epoch)
 	installCmd := exec.Command(binaryPath, "install")
 	installCmd.Stdout = os.Stdout
 	installCmd.Stderr = os.Stderr
 	if err := installCmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: install failed: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("install failed: %w", err)
 	}
-
-	fmt.Printf("epoch %s installed.\n", epoch)
+	return nil
 }
 
 // findNextRelease finds the pre-release tagged "epoch-next".

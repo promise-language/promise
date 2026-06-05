@@ -127,6 +127,19 @@ test_execute_captures_stderr() `test(exclude: wasm) `target(!windows) {
   assert(result.standard_error.starts_with("err"), "stderr should contain err");
 }
 
+// exec_replace replaces the process image on success (never returns), so a batch
+// test can only verify the failure path: launching a missing program raises an
+// error rather than replacing the process. (T0770)
+test_exec_replace_missing_raises() `test(exclude: wasm) {
+  bool raised = false;
+  int rc = exec_replace("/nonexistent/promise/exec/target", [])? e {
+    raised = true;
+    -1
+  };
+  assert(raised, "exec_replace of a missing program raises");
+  assert(rc == -1, "recovery yields the sentinel");
+}
+
 test_execute_multiple_args() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("echo", ["a", "b", "c"])?!;
   assert(result.standard_output.starts_with("a b c"), "echo should join arguments with spaces");

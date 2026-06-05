@@ -111,6 +111,7 @@ func (p *WasmWebPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 	return emitStubSpawnStreamingEnv(module)
 }
 func (p *WasmWebPAL) EmitKill(module *ir.Module) *ir.Func        { return emitStubKill(module) }
+func (p *WasmWebPAL) EmitExecReplace(module *ir.Module) *ir.Func { return emitStubExecReplace(module) }
 func (p *WasmWebPAL) EmitGetEnviron(module *ir.Module) *ir.Func  { return emitStubGetEnviron(module) }
 func (p *WasmWebPAL) EmitGetUserInfo(module *ir.Module) *ir.Func { return emitStubGetUserInfo(module) }
 func (p *WasmWebPAL) EmitGetHostname(module *ir.Module) *ir.Func { return emitStubGetHostname(module) }

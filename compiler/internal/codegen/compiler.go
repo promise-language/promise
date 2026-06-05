@@ -299,6 +299,7 @@ type Compiler struct {
 	palSpawnEnv                *ir.Func // @pal_spawn_env(i8* program, i8** argv, i8** envp, i8* cwd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
 	palSpawnStreamingEnv       *ir.Func // @pal_spawn_streaming_env(..., i8** envp, i8* cwd, ...) → i32
 	palKill                    *ir.Func // @pal_kill(i32 pid, i32 signal) → i32
+	palExecReplace             *ir.Func // @pal_exec_replace(i8* path, i8** argv) → i32 (T0770)
 	palGetEnviron              *ir.Func // @pal_get_environ() → i8**
 	palGetUserInfo             *ir.Func // @pal_get_user_info(i8** out_name, i8** out_dir, i32* out_uid, i32* out_gid) → i32
 	palGetHostname             *ir.Func // @pal_get_hostname(i8* buf, i64 len) → i8*
@@ -2044,6 +2045,7 @@ func (c *Compiler) declareIntrinsics() {
 	c.palSpawnEnv = p.EmitSpawnEnv(c.module)
 	c.palSpawnStreamingEnv = p.EmitSpawnStreamingEnv(c.module)
 	c.palKill = p.EmitKill(c.module)
+	c.palExecReplace = p.EmitExecReplace(c.module)
 	c.palGetEnviron = p.EmitGetEnviron(c.module)
 	c.palGetUserInfo = p.EmitGetUserInfo(c.module)
 	c.palGetHostname = p.EmitGetHostname(c.module)

@@ -67,6 +67,10 @@ _os_pipe_close(int fd) int `extern("promise_os_pipe_close");
 // Sends SIGKILL to a process. Returns 0 on success, -1 on error.
 _os_kill(int pid) int `extern("promise_os_kill");
 
+// Replaces the current process image with program, forwarding args (Unix execv).
+// Never returns on success; raises an error only if the program cannot be launched.
+_os_exec_replace!(string program, string[] args) int `extern("promise_os_exec_replace");
+
 // Returns all environment variables as a string[] of "KEY=VALUE" entries.
 _os_get_environ() string[] `extern("promise_os_get_environ");
 
@@ -316,6 +320,10 @@ get working_dir! string `public `doc("Returns the absolute path of the current w
 
 exit_process(int code) `public `doc("Terminates the process immediately with the given exit code. Does not return. Does not run destructors or cleanup.") {
   _os_exit(code);
+}
+
+exec_replace!(string program, string[] args) int `public `doc("Replaces the current process image with the given program, forwarding args (which become the new program's argv after program itself). On Unix this is execv: same PID, signals and exit status flow to the new program, and it does not return on success. On Windows there is no true execve — the program runs as a child, this waits for it, and the process then exits with the child's exit code. Raises an error only if the program cannot be launched.") {
+  return _os_exec_replace(program, args);
 }
 
 get args string[] `public `doc("Returns the command-line arguments passed to the program, excluding the executable path. Returns an empty list if no arguments were provided.") {

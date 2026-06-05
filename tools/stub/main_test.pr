@@ -1,0 +1,116 @@
+// tools/stub/main_test.pr — batch tests for the launcher stub's pure helpers
+// (T0770). These exercise the epoch-resolution string logic — the riskiest
+// hand-rolled part of the stub — without touching the process model.
+//
+// NOTE: the stub lives under tools/, which the default `bin/verify` /
+// `bin/test` Promise sweep (tests/, modules/, examples/) does NOT cover. Run
+// these explicitly with `bin/promise test tools/stub/`. They compile alongside
+// main.pr (same module), so the file-private helpers are in scope.
+stub_version_is_one() `test {
+  // Must stay in lockstep with stubVersion in stub_default.go (the installer
+  // compares its embedded version against the sidecar for forward-only updates).
+  assert(STUB_VERSION() == 1, "stub contract version is 1");
+}
+
+extract_quoted_basic() `test {
+  if q := extract_quoted("epoch = \"2026.0\"") {
+    assert(q == "2026.0", "extracts the quoted epoch");
+  } else {
+    assert(false, "expected a quoted value");
+  }
+}
+
+extract_quoted_empty() `test {
+  if q := extract_quoted("x = \"\"") {
+    assert(q == "", "extracts an empty quoted value");
+  } else {
+    assert(false, "expected an (empty) quoted value");
+  }
+}
+
+extract_quoted_none_when_unquoted() `test {
+  if q := extract_quoted("epoch = 2026.0") {
+    assert(false, "no quotes means no value");
+  } else {
+    assert(true, "unquoted line yields none");
+  }
+}
+
+extract_quoted_none_when_single_quote() `test {
+  // One quote but no closing quote → none (no complete run).
+  if q := extract_quoted("epoch = \"2026.0") {
+    assert(false, "an unterminated quote yields no value");
+  } else {
+    assert(true, "unterminated quote yields none");
+  }
+}
+
+parse_epoch_basic() `test {
+  string toml = "[module]\nname = \"p\"\nepoch = \"2026.0\"\n";
+  if e := parse_epoch_from_toml(toml) {
+    assert(e == "2026.0", "parses the epoch line");
+  } else {
+    assert(false, "expected an epoch");
+  }
+}
+
+parse_epoch_with_whitespace() `test {
+  // Leading indentation and spacing around `=` must be tolerated.
+  string toml = "[module]\n    epoch   =   \"2027.1\"  \n";
+  if e := parse_epoch_from_toml(toml) {
+    assert(e == "2027.1", "tolerates whitespace around the epoch key");
+  } else {
+    assert(false, "expected an epoch");
+  }
+}
+
+parse_epoch_absent() `test {
+  string toml = "[module]\nname = \"p\"\n";
+  if e := parse_epoch_from_toml(toml) {
+    assert(false, "no epoch key present");
+  } else {
+    assert(true, "missing epoch key yields none");
+  }
+}
+
+parse_epoch_ignores_other_keys() `test {
+  // A key that merely starts with "epoch"-like text on another line should not
+  // false-match; only a line whose trimmed start is `epoch` then `=` counts.
+  string toml = "[module]\nname = \"epochal\"\nversion = \"1\"\nepoch = \"2026.0\"\n";
+  if e := parse_epoch_from_toml(toml) {
+    assert(e == "2026.0", "matches the real epoch key, not the name value");
+  } else {
+    assert(false, "expected an epoch");
+  }
+}
+
+parent_dir_basic() `test {
+  if p := parent_dir("/a/b/c") {
+    assert(p == "/a/b", "parent of /a/b/c is /a/b");
+  } else {
+    assert(false, "expected a parent");
+  }
+}
+
+parent_dir_root_child() `test {
+  // A direct child of root returns the root itself ("/").
+  if p := parent_dir("/abc") {
+    assert(p == "/", "parent of /abc is /");
+  } else {
+    assert(false, "expected the root");
+  }
+}
+
+parent_dir_no_separator() `test {
+  // A bare name with no separator has no parent.
+  if p := parent_dir("relative") {
+    assert(false, "a separator-less path has no parent");
+  } else {
+    assert(true, "no separator yields none");
+  }
+}
+
+binary_name_nonempty() `test {
+  // Platform-specific, but always a non-empty file name.
+  assert(binary_name().len > 0, "binary name is non-empty");
+}

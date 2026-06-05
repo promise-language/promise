@@ -122,6 +122,12 @@ type PAL interface {
 	// EmitKill defines @pal_kill(i32 pid, i32 signal) → i32
 	// Sends a signal to a process. Returns 0 on success, -1 on error.
 	EmitKill(module *ir.Module) *ir.Func
+	// EmitExecReplace defines @pal_exec_replace(i8* path, i8** argv) → i32
+	// Replaces the current process image with path (T0770, the stub launcher).
+	// Unix: execv(path, argv) — same PID, never returns on success; -1 on failure.
+	// Windows: no true execve — CreateProcess + wait + ExitProcess(child code);
+	// never returns on success, -1 only if the process cannot be launched.
+	EmitExecReplace(module *ir.Module) *ir.Func
 
 	// Directory listing primitives (Phase D)
 	// EmitDirOpen defines @pal_dir_open(i8* path) → i8* (DIR*/handle or null)
@@ -1328,6 +1334,18 @@ func emitStubSpawn(module *ir.Module) *ir.Func {
 	entry := fn.NewBlock(".entry")
 	entry.NewStore(constant.NewInt(irtypes.I32, -1), fn.Params[2])
 	entry.NewStore(constant.NewInt(irtypes.I32, -1), fn.Params[3])
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubExecReplace returns -1 (no process model on WASM targets, T0770).
+func emitStubExecReplace(module *ir.Module) *ir.Func {
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	fn := module.NewFunc("pal_exec_replace", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, -1))
 	return fn
 }

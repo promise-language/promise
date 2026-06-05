@@ -7908,6 +7908,15 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	c.dupTupleFieldAccess = false
 	c.dupHeapUserFieldAccess = false
 
+	// T0770: When the scrutinee is a failable call (e.g. `if e := load()` where
+	// `load!() T?`), auto-propagate the error first so optVal is the unwrapped
+	// success value (the `T?` optional), not the raw failable result struct.
+	// Without this the if-let reads the failable result's error flag as the
+	// optional's present flag and binds the whole optional as the inner value.
+	if c.info.AutoPropagateExprs[s.Init] {
+		optVal = c.genAutoPropagateValue(optVal)
+	}
+
 	// Guard: if the expression is not an optional struct (e.g., post-narrowing
 	// made it a plain value), treat the if as always-true with no unwrapping.
 	// Bind the value directly to the unwrap variable name.
@@ -8173,6 +8182,11 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	optVal := c.genExpr(s.Value)
 	c.dupTupleFieldAccess = false
 	c.dupHeapUserFieldAccess = false
+	// T0770: auto-propagate a failable scrutinee so optVal is the unwrapped `T?`
+	// optional, not the raw failable result struct (mirrors genIfUnwrapStmt).
+	if c.info.AutoPropagateExprs[s.Value] {
+		optVal = c.genAutoPropagateValue(optVal)
+	}
 	flag := c.block.NewExtractValue(optVal, 0)
 	c.block.NewCondBr(flag, bodyBlock, exitBlock)
 

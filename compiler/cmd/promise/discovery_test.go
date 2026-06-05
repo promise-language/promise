@@ -255,7 +255,7 @@ description = "Test module"
 	}
 }
 
-// --- runUpdate tests ---
+// --- runPkgUpdate tests (dependency [require]-pin updating, `promise pkg update`) ---
 
 func TestUpdateNoEntries(t *testing.T) {
 	dir := t.TempDir()
@@ -267,7 +267,7 @@ func TestUpdateNoEntries(t *testing.T) {
 
 	out := captureStdout(t, func() {
 		captureStderr(func() {
-			runUpdate(nil)
+			runPkgUpdate(nil)
 		})
 	})
 	if !strings.Contains(out, "No [require] entries") {
@@ -294,7 +294,7 @@ sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 	out := captureStdout(t, func() {
 		captureStderr(func() {
-			runUpdate(nil)
+			runPkgUpdate(nil)
 		})
 	})
 	if !strings.Contains(out, "skipped (non-git source)") {
@@ -308,7 +308,7 @@ func TestUpdateNotFound(t *testing.T) {
 		dir := t.TempDir()
 		os.Chdir(dir)
 		os.WriteFile(filepath.Join(dir, "promise.toml"), []byte("[module]\nname = \"test\"\nepoch = \"2026.0\"\n"), 0644)
-		runUpdate([]string{"nonexistent"})
+		runPkgUpdate([]string{"nonexistent"})
 		return
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=TestUpdateNotFound")
@@ -375,7 +375,7 @@ func TestUpdateURLKeyedEntry(t *testing.T) {
 
 	out := captureStdout(t, func() {
 		captureStderr(func() {
-			runUpdate(nil)
+			runPkgUpdate(nil)
 		})
 	})
 	if !strings.Contains(out, headHash[:12]) {
@@ -433,7 +433,7 @@ func TestUpdateSpecificTarget(t *testing.T) {
 
 	out := captureStdout(t, func() {
 		captureStderr(func() {
-			runUpdate([]string{bareDir})
+			runPkgUpdate([]string{bareDir})
 		})
 	})
 	if !strings.Contains(out, "already up to date") {
@@ -569,7 +569,7 @@ func TestUpdateNamedEntry(t *testing.T) {
 
 	out := captureStdout(t, func() {
 		captureStderr(func() {
-			runUpdate(nil)
+			runPkgUpdate(nil)
 		})
 	})
 	if !strings.Contains(out, headHash[:12]) {
@@ -631,7 +631,7 @@ func TestUpdateAlreadyCurrent(t *testing.T) {
 
 	out := captureStdout(t, func() {
 		captureStderr(func() {
-			runUpdate(nil)
+			runPkgUpdate(nil)
 		})
 	})
 	if !strings.Contains(out, "already up to date") {
@@ -662,7 +662,7 @@ func TestAddUsageError(t *testing.T) {
 func TestUpdateUsageError(t *testing.T) {
 	// runUpdate with more than one arg calls os.Exit(1). Test via subprocess.
 	if os.Getenv("TEST_UPDATE_USAGE") == "1" {
-		runUpdate([]string{"a", "b"})
+		runPkgUpdate([]string{"a", "b"})
 		return
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=TestUpdateUsageError")
@@ -671,7 +671,7 @@ func TestUpdateUsageError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-zero exit")
 	}
-	if !strings.Contains(string(out), "usage: promise update") {
+	if !strings.Contains(string(out), "usage: promise pkg update") {
 		t.Errorf("expected usage message, got: %s", string(out))
 	}
 }
@@ -681,7 +681,7 @@ func TestUpdateNoPromiseToml(t *testing.T) {
 	if os.Getenv("TEST_UPDATE_NO_TOML") == "1" {
 		dir := t.TempDir()
 		os.Chdir(dir)
-		runUpdate(nil)
+		runPkgUpdate(nil)
 		return
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=TestUpdateNoPromiseToml")

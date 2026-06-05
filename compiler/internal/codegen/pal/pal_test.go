@@ -2931,6 +2931,39 @@ func TestEmitSpawn(t *testing.T) {
 	}
 }
 
+func TestEmitExecReplace(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+		{"WasmWeb", &WasmWebPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitExecReplace(module)
+			if fn.Name() != "pal_exec_replace" {
+				t.Errorf("expected pal_exec_replace, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitExecReplacePosix(t *testing.T) {
+	p := &PosixPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitExecReplace(module)
+	out := module.String()
+	assertContains(t, out, "define i32 @pal_exec_replace(i8* %path, i8** %argv)", "defines pal_exec_replace")
+	assertContains(t, out, "@execv(", "declares execv() (same-PID replace, no fork)")
+	// No fork on the exec-replace path — it replaces the current image.
+	if strings.Contains(out, "@fork(") {
+		t.Error("pal_exec_replace must not fork — it replaces the process image")
+	}
+}
+
 func TestEmitSpawnPosix(t *testing.T) {
 	p := &PosixPAL{}
 	module := newModuleWithAlloc(p)

@@ -7400,6 +7400,20 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	c.emitHeapTempCleanupForErrorPath()
 	errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
 
+	// T0770: For the regular (non-optional-wrapping) recovery path, the recovery
+	// body yields the recovered type directly. Expose it as the target type so a
+	// bare `none` recovery (`expr? e { none }` on a `T?`-typed failable) lowers to
+	// the full optional struct, not a bare i1. The optional-recovery path (which
+	// wraps the body's inner T) must not see this, so it is left nil there.
+	var recoveredTargetType types.Type
+	if !c.info.OptionalRecoveryHandlers[e] {
+		rt := c.info.Types[e]
+		if rt != nil && c.typeSubst != nil {
+			rt = types.Substitute(rt, c.typeSubst)
+		}
+		recoveredTargetType = rt
+	}
+
 	var noMatchVal value.Value
 	var noMatchEnd *ir.Block
 
@@ -7451,7 +7465,12 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 				c.block.NewStore(elseValStruct, alloca)
 				c.registerErrorDrop("_else_err_tmp", alloca, types.TypError)
 			}
+			savedTarget := c.targetType
+			if recoveredTargetType != nil {
+				c.targetType = recoveredTargetType
+			}
 			noMatchVal = c.genBlockValue(e.ElseBody)
+			c.targetType = savedTarget
 			elseDiverged := c.block.Term != nil
 			if !elseDiverged {
 				if len(c.scopeBindings) > savedElseScope {
@@ -7521,7 +7540,12 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		c.block.NewStore(valStruct, alloca)
 		c.registerErrorDrop("_err_tmp", alloca, errorDropType)
 	}
+	savedHandlerTarget := c.targetType
+	if recoveredTargetType != nil {
+		c.targetType = recoveredTargetType
+	}
 	handlerVal := c.genBlockValue(e.Body)
+	c.targetType = savedHandlerTarget
 	// Emit drop for the error binding after handler body (scope cleanup).
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedHandlerScope {
 		c.emitScopeCleanup(savedHandlerScope, false)

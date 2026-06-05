@@ -154,11 +154,12 @@ Commands:
   init      Initialize a new Promise project or module (creates promise.toml)
   add       Add a dependency by catalog name or git URL
   search    Search the catalog for modules by keyword
-  update    Update dependency commits to latest (all or one)
+  pkg       Package-manager commands (pkg update: update dependency pins)
   pin       Pin a remote module to a specific commit
 
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
-  sync      Download and install a compiler epoch from GitHub releases
+  update    Update Promise itself (download newer compiler, run its install)
+  sync      Install an additional compiler epoch side-by-side from releases
   epochs    List installed epochs
   remove    Remove an installed epoch
   use       Set the active epoch (e.g., promise use 2026.0)
@@ -198,10 +199,17 @@ Test discovery:
   promise test dir/             Scan directory for test files
   promise test dir/...          Scan directory recursively for test files
 
-Sync:
-  promise sync                    Download latest stable epoch
-  promise sync 2026.0             Download specific epoch
-  promise sync next               Download latest pre-release build
+Toolchain:
+  promise update                  Update Promise itself (active epoch, in place)
+  promise update 2026.0           Update to a specific epoch
+  promise update next             Update to the latest pre-release build
+  promise sync                    Install latest stable epoch side-by-side
+  promise sync 2026.0             Install a specific epoch side-by-side
+  promise sync next               Install the latest pre-release build
+
+Packages:
+  promise pkg update              Update [require] dependency pins (all)
+  promise pkg update <name|url>   Update one dependency pin
 
 Inline execution:
   promise exec 'print_line("hello")'
@@ -225,8 +233,6 @@ func printVersion() {
 }
 
 func main() {
-	shimDispatch()
-
 	if len(os.Args) < 2 {
 		// If stdin is piped, treat as inline exec
 		if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice == 0 {
@@ -255,6 +261,12 @@ func main() {
 	if strings.HasPrefix(cmd, "-") {
 		runLegacy(os.Args[1:])
 		return
+	}
+
+	// Direct-invoke epoch-mismatch warning (T0770): the compiler is no longer a
+	// trampoline, so a project-operating command run on the wrong epoch warns.
+	if warnEpochCommands[cmd] {
+		warnEpochMismatch()
 	}
 
 	switch cmd {
@@ -316,6 +328,8 @@ func main() {
 		runSearch(os.Args[2:])
 	case "update":
 		runUpdate(os.Args[2:])
+	case "pkg":
+		runPkg(os.Args[2:])
 	case "install":
 		runInstall(os.Args[2:])
 	case "sync":
@@ -7481,11 +7495,32 @@ func runSearch(args []string) {
 	fmt.Printf("\n%d matching modules\n", len(matches))
 }
 
-// runUpdate implements the `promise update [name|url]` subcommand.
-// Re-resolves the latest commit for require entries and updates promise.toml.
-func runUpdate(args []string) {
+// runPkg dispatches package-manager subcommands. Today it hosts `pkg update`
+// (the dependency [require]-pin updater moved out of bare `update` so that
+// `promise update` can mean toolchain self-update — T0770). Broader fetch/
+// resolve/lock work is tracked under T0175.
+func runPkg(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: promise pkg <subcommand>")
+		fmt.Fprintln(os.Stderr, "  update [name|url]   Update [require] dependency pins in promise.toml")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "update":
+		runPkgUpdate(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown pkg subcommand: %s\n", args[0])
+		fmt.Fprintln(os.Stderr, "usage: promise pkg update [name|url]")
+		os.Exit(1)
+	}
+}
+
+// runPkgUpdate updates git-dependency [require]/[require.NAME] pins in
+// promise.toml. Previously the body of `promise update`; moved under
+// `promise pkg update` (T0770).
+func runPkgUpdate(args []string) {
 	if len(args) > 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise update [name|url]")
+		fmt.Fprintln(os.Stderr, "usage: promise pkg update [name|url]")
 		fmt.Fprintln(os.Stderr, "  With no arguments, updates all [require] entries.")
 		fmt.Fprintln(os.Stderr, "  With a name or URL, updates only that entry.")
 		os.Exit(1)
@@ -7807,7 +7842,7 @@ func runInstall(args []string) {
 	epochStdDest := filepath.Join(epochLibDir, "std")
 	epochCacheDir := filepath.Join(epochDir, "cache", "build")
 
-	// Stub shim directory at top-level ~/.promise/bin/.
+	// Launcher stub directory at top-level ~/.promise/bin/.
 	stubBinDir := filepath.Join(promiseDir, "bin")
 
 	// Create all directories.
@@ -7827,12 +7862,35 @@ func runInstall(args []string) {
 	}
 	copyFile(execPath, filepath.Join(epochBinDir, binaryName), 0755)
 
-	// Copy binary to stub shim location (~/.promise/bin/promise).
-	copyFile(execPath, filepath.Join(stubBinDir, binaryName), 0755)
-
-	// Write shim marker so shimDispatch() knows this is an installed binary (B0251).
-	if err := os.WriteFile(filepath.Join(stubBinDir, ".promise.shim"), []byte("shim\n"), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not write shim marker: %v\n", err)
+	// Install the launcher stub at ~/.promise/bin/promise (T0770). The stub is
+	// the Promise-built launcher (§2.5) that exec-replaces into the resolved
+	// epoch's compiler. Update it FORWARD-ONLY: replace it only when this
+	// installer's embedded stub is newer than the installed one, decided by a
+	// plain read of the sidecar — never by executing the stub (§2.4 step 4).
+	stubLabel := "launcher (dev: compiler copy)"
+	stubPath := filepath.Join(stubBinDir, binaryName)
+	if hasEmbeddedStub {
+		stubLabel = "stub"
+		if stubVersion > readInstalledStubVersion(stubBinDir) {
+			if err := writeStubAndSidecar(stubBinDir, binaryName); err != nil {
+				fmt.Fprintf(os.Stderr, "error installing stub: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	} else {
+		// Dev fallback: no Promise stub is embedded (it is a release-time
+		// per-target artifact, T0773). Place the compiler itself at the launcher
+		// path so PATH works — with the shim retired, a directly-run compiler
+		// just runs as the compiler. Refresh the copy when the launcher is absent
+		// or is itself a dev launcher (sidecar version 0) so PATH does not diverge
+		// from the freshly installed epoch binary; but NEVER overwrite a real stub
+		// (version > 0) — that would downgrade it to a non-dispatching compiler.
+		_, statErr := os.Stat(stubPath)
+		if os.IsNotExist(statErr) || readInstalledStubVersion(stubBinDir) == 0 {
+			copyFile(execPath, stubPath, 0755)
+			_ = writeFileAtomic(filepath.Join(stubBinDir, stubVersionSidecar), []byte("0\n"), 0644)
+			fmt.Fprintln(os.Stderr, "note: dev build has no Promise stub; installed the compiler at the launcher path")
+		}
 	}
 
 	// Extract embedded std files.
@@ -7910,7 +7968,7 @@ func runInstall(args []string) {
 
 	fmt.Printf("Installed Promise epoch %s to %s\n", epoch, epochDir)
 	fmt.Printf("  binary:  %s\n", filepath.Join(epochBinDir, binaryName))
-	fmt.Printf("  stub:    %s\n", filepath.Join(stubBinDir, binaryName))
+	fmt.Printf("  %-7s %s\n", stubLabel+":", stubPath)
 	fmt.Printf("  std:     %s\n", epochStdDest)
 	fmt.Printf("  modules: %s\n", filepath.Join(epochLibDir, "modules"))
 	if stagedBlobs {

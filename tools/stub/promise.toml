@@ -1,0 +1,4 @@
+[module]
+name = "stub"
+epoch = "2026.0"
+main = "main.pr"

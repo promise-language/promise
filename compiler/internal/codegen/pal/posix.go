@@ -1073,6 +1073,31 @@ func (p *PosixPAL) EmitSpawn(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitExecReplace defines @pal_exec_replace(i8* path, i8** argv) → i32.
+// Replaces the current process image via execv — same PID, signals and exit
+// status flow to the new program. execv only returns on failure, in which case
+// pal_exec_replace returns -1. On success it never returns (T0770).
+func (p *PosixPAL) EmitExecReplace(module *ir.Module) *ir.Func {
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+
+	// declare i32 @execv(i8*, i8**) nounwind
+	execvFn := getOrDeclareFunc(module, "execv", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType))
+
+	fn := module.NewFunc("pal_exec_replace", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	entry.NewCall(execvFn, fn.Params[0], fn.Params[1])
+	// execv only returns on error.
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	return fn
+}
+
 // EmitReadPipe defines @pal_read_pipe: reads an fd to EOF into malloc'd buffer, then closes fd.
 // Signature: @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
 // Caller must free out_buf after use.

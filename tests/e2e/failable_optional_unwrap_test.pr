@@ -1,0 +1,84 @@
+// Regression tests for failable functions returning optionals (T0780, T0781).
+//
+// Before the fix, `if/while x := <failable-call-returning-optional>()` misread
+// the failable result struct (binding the whole optional as the inner value),
+// and `expr? e { none }` recovery on an optional-typed failable lowered `none`
+// to a bare i1. Both produced malformed IR / codegen panics.
+// Failable AND optional-returning — the trigger shape.
+loadf!(string key) string? {
+  if key == "boom" {
+    raise error(message: "load failed");
+  }
+  if key == "a" {
+    return "A";
+  }
+  return none;
+}
+
+// if-unwrap of a failable-optional call (T0780): `v` must bind to the inner
+// string, not the whole optional. Auto-propagates loadf's error.
+get_or!(string key) string {
+  if v := loadf(key) {
+    return v;
+  }
+  return "default";
+}
+
+// while-unwrap of a failable-optional call (T0780): `dec` is a failable
+// optional-returning call used as the loop scrutinee.
+dec!(int n) int? {
+  if n <= 0 {
+    return none;
+  }
+  return n - 1;
+}
+
+count_down!(int start) int {
+  int c = start;
+  int steps = 0;
+  while next := dec(c) {
+    c = next;
+    steps = steps + 1;
+  }
+  return steps;
+}
+
+// `none` recovery on an optional-typed failable (T0781).
+recover_none!(string key) string? {
+  return loadf(key)? e {
+    none
+  };
+}
+
+if_unwrap_failable_optional() `test {
+  assert(get_or("a")?! == "A", "present key unwraps to inner value");
+  assert(get_or("missing")?! == "default", "absent key falls through");
+}
+
+while_unwrap_failable_optional() `test {
+  assert(count_down(0)?! == 0, "empty counter takes no steps");
+  assert(count_down(3)?! == 3, "counter drains in n steps");
+}
+
+none_recovery_on_optional_failable() `test {
+  // loadf("boom") raises → recovered to none.
+  string[] got = [];
+  if r := recover_none("boom")?! {
+    got.push(r);
+  }
+  assert(got.len == 0, "raised call recovers to none");
+
+  // loadf("a") → some("A"), passes through the recovery untouched.
+  if r := recover_none("a")?! {
+    assert(r == "A", "successful call yields the value");
+  } else {
+    assert(false, "expected a value for key 'a'");
+  }
+
+  // loadf("missing") → none, also none after recovery.
+  if r := recover_none("missing")?! {
+    assert(false, "expected none for missing key");
+  } else {
+    assert(true, "missing key recovers to none");
+  }
+}

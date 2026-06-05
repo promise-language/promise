@@ -1,0 +1,186 @@
+// tools/stub/main.pr — the Promise-written launcher stub (T0770).
+//
+// This is the tiny (~20 KB) binary installed at `~/.promise/bin/promise` and
+// placed on PATH. It does NOT compile anything: it resolves the project's epoch
+// and `exec`-replaces itself with that epoch's real compiler
+// (`~/.promise/epochs/<epoch>/bin/promise`), forwarding every argument
+// untouched. On Unix the exec keeps the same PID, so signals and exit status
+// flow straight to the compiler. See docs/distribution.md §2.5.
+//
+// The stub knows ONLY the epoch-resolution contract (the `active` file format
+// and the `promise.toml` `[module].epoch` key) plus its own `PROMISE_STUB_*`
+// env vars — a small, stable surface. That is what makes a newer stub safe to
+// run against an older compiler, and the install-time forward-only update rule
+// (§2.4 step 4) sound.
+use io;
+use os;
+
+// The stub launcher's contract version. Keep in lockstep with `stubVersion` in
+// compiler/cmd/promise/stub_default.go — the installer compares its embedded
+// version against the `.promise-stub-version` sidecar to decide forward-only
+// updates, and never executes the stub to learn its version.
+STUB_VERSION() int `doc("The stub launcher's contract version.") => 1;
+
+// binary_name returns the compiler binary file name for this platform.
+binary_name() string `target(windows) `doc("Compiler binary name on Windows.") {
+  return "promise.exe";
+}
+binary_name() string `target(!windows) `doc("Compiler binary name on POSIX.") {
+  return "promise";
+}
+
+// promise_home returns the Promise home directory: PROMISE_HOME if set,
+// otherwise <home>/.promise (mirrors module.PromiseHome).
+promise_home() string `doc("Resolves the Promise home directory.") {
+  if v := os.get_env_var("PROMISE_HOME") {
+    if v.len > 0 {
+      return v;
+    }
+  }
+  return os.home_dir + Platform.path_separator + ".promise";
+}
+
+// parent_dir returns the parent of an absolute path, or absent at the root.
+parent_dir(string path) string? `doc("Returns the parent directory of path, or absent at the filesystem root.") {
+  int i = path.len - 1;
+  while i >= 0 {
+    if Platform.is_path_separator(path[i]) {
+      if i == 0 {
+        return path[0:1];
+      }
+      return path[0:i];
+    }
+    i = i - 1;
+  }
+  return none;
+}
+
+// extract_quoted returns the contents of the first double-quoted run in s.
+extract_quoted(string s) string? `doc("Returns the contents of the first double-quoted substring in s.") {
+  if a := s.index_of("\"") {
+    string after = s[a + 1:s.len];
+    if b := after.index_of("\"") {
+      return after[0:b];
+    }
+  }
+  return none;
+}
+
+// parse_epoch_from_toml scans a promise.toml's text for `epoch = "..."`.
+// Only the key/format is the stable contract (§2.5), so a minimal hand-rolled
+// line scan is enough — the stub deliberately does not depend on a TOML parser.
+parse_epoch_from_toml(string content) string? `doc("Extracts the [module].epoch value from promise.toml text.") {
+  string[] lines = content.split("\n");
+  for line in lines {
+    string t = line.trim();
+    if t.starts_with("epoch") {
+      string rest = t[5:t.len].trim();
+      if rest.starts_with("=") {
+        if q := extract_quoted(rest) {
+          return q;
+        }
+      }
+    }
+  }
+  return none;
+}
+
+// epoch_from_project walks up from the current directory looking for the first
+// promise.toml that declares an epoch.
+epoch_from_project!() string? `doc("Finds the pinned epoch by walking up from the working directory.") {
+  string dir = os.working_dir;
+  while true {
+    // Pass copies to the consuming calls so dir survives for parent_dir below.
+    string toml = dir[0:dir.len] + Platform.path_separator + "promise.toml";
+    if io.File.exists(toml[0:toml.len]) {
+      string content = io.File.read_content(toml);
+      if e := parse_epoch_from_toml(content) {
+        return e;
+      }
+    }
+    if p := parent_dir(dir[0:dir.len]) {
+      if p == dir {
+        return none;
+      }
+      dir = p;
+    } else {
+      return none;
+    }
+  }
+  return none;
+}
+
+// resolve_epoch determines the target epoch using the contract priority:
+//   1. PROMISE_EPOCH env var
+//   2. project promise.toml [module].epoch (walking up from cwd)
+//   3. <home>/active
+resolve_epoch!(string home) string `doc("Resolves the target epoch from env, project config, then the active file.") {
+  if e := os.get_env_var("PROMISE_EPOCH") {
+    if e.len > 0 {
+      return e;
+    }
+  }
+  if e := epoch_from_project() {
+    return e;
+  }
+  string active = home + Platform.path_separator + "active";
+  if io.File.exists(active[0:active.len]) {
+    string data = io.File.read_content(active);
+    string e = data.trim();
+    if e.len > 0 {
+      return e;
+    }
+  }
+  raise error(message: "no epoch configured");
+}
+
+main!() {
+  // 1. Env-first introspection — checked BEFORE epoch resolution, never parses
+  //    args. PROMISE_STUB_VERSION prints the stub version; PROMISE_STUB_INFO
+  //    additionally prints the resolved epoch and the target it would exec.
+  bool want_version = false;
+  if v := os.get_env_var("PROMISE_STUB_VERSION") {
+    want_version = true;
+  }
+  if want_version {
+    int ver = STUB_VERSION();
+    print_line("{ver}");
+    os.exit_process(0);
+  }
+
+  bool want_info = false;
+  if v := os.get_env_var("PROMISE_STUB_INFO") {
+    want_info = true;
+  }
+
+  // 2. Resolve home + epoch + target binary. Pass a copy of home to
+  //    resolve_epoch so home survives for the target path below.
+  string home = promise_home();
+  string epoch = resolve_epoch(home[0:home.len])? e {
+    print_line("error: {e.message}. run: promise update");
+    os.exit_process(1);
+    ""
+  };
+  string sep = Platform.path_separator;
+  string target = home + sep + "epochs" + Platform.path_separator + epoch[0:epoch.len] + Platform.path_separator + "bin" + Platform.path_separator + binary_name();
+
+  if want_info {
+    print_line("epoch: {epoch}");
+    print_line("target: {target}");
+    os.exit_process(0);
+  }
+
+  // 3. Missing epoch → clear, actionable error.
+  if !io.File.exists(target[0:target.len]) {
+    print_line("error: epoch {epoch} is not installed. run: promise update {epoch}");
+    os.exit_process(1);
+  }
+
+  // 4. exec-replace into the real compiler, forwarding all args untouched.
+  //    On success this never returns; it only returns/raises on failure.
+  int rc = os.exec_replace(target[0:target.len], os.args)? e {
+    -1
+  };
+  print_line("error: cannot exec {target} (code {rc})");
+  os.exit_process(1);
+}

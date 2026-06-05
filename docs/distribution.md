@@ -212,13 +212,16 @@ Each manifest entry separates *what the blob is* from *where/how to get it*. The
   "sha256": "3f9a…",               // content address of the EXTRACTED blob — cache key + integrity
   "size":   41234567,              // extracted size, bytes
   "sources": [                     // ranked; first that verifies wins
-    { "archive": "https://…/llvm-22-darwin-arm64.tar.zst",
-      "archive_path": "bin/opt",   // path to extract from *inside* the archive
-      "archive_sha256": "1b7c…" }, // optional: verify the archive before extracting
-    { "blob": "https://…/3f9a…" }
+    { "blob": "https://github.com/promise-language/promise/releases/download/epoch-2026.0/3f9a…" },
+                                   // primary: GitHub release asset named by content sha256
+    { "archive": "https://…/LLVM-22.1.0-macOS-ARM64.tar.xz",
+      "archive_path": "bin/opt",   // fallback: path to extract from *inside* the upstream archive
+      "archive_sha256": "1b7c…" }  // optional: verify the archive before extracting
   ]
 }
 ```
+
+This is exactly the shape the producer `bin/release manifest` emits (T0773): the primary source is a **GitHub release asset** on `github.com/promise-language/promise`, named by the blob's content `sha256`; the pinned upstream vendor archive is the ranked fallback (so a not-yet-published release still resolves, and the thin compiler can bootstrap LLVM straight from upstream).
 
 **Do not assume one `sha256` == one download named by that hash.** Several blobs may share a single archive (one LLVM tarball yields `opt`, `llc`, `lld`, `libLLVM`): the resolver downloads such an archive **once** and extracts each needed `archive_path` from it. A blob may also be sourced directly. The packaging is free to change per release without touching the compiler, because the compiler only ever asserts on the content `sha256`.
 

@@ -49,6 +49,10 @@ type runtimeSource struct {
 // llvmCacheDir is FetchAll's returned root for "llvm" (flat `out` files). When
 // it is empty (no LLVM target for this host), the placeholder manifest written
 // by EmbedResources is left in place.
+//
+// This is the bootstrap producer used by `bin/build --release`. The full forge
+// driver `bin/release` (release.go) reuses buildLLVMEntries to add a ranked
+// GitHub-release-asset blob source ahead of the upstream archive.
 func GenerateRuntimeManifest(root string, pm *PrebuiltsManifest, llvmCacheDir, target, epoch string) error {
 	if llvmCacheDir == "" {
 		return nil
@@ -62,42 +66,76 @@ func GenerateRuntimeManifest(root string, pm *PrebuiltsManifest, llvmCacheDir, t
 		return nil // no buildable LLVM for this host → keep placeholder
 	}
 
-	// Kind marks macOS LLVM blobs (patched + ad-hoc re-signed on materialize,
-	// §5.1); other targets need no such handling. The runtime view builder
-	// dispatches on its own host GOOS, so Kind is documentary — but keep it
-	// honest per-target so the embedded manifest reflects reality.
-	kind := "blob"
-	if strings.HasPrefix(target, "darwin-") {
-		kind = "macho-llvm"
+	// Bootstrap producer: upstream archive is the only source (no published
+	// release-asset blob yet). nil blobSource ⇒ archive-only entries.
+	entries, err := buildLLVMEntries(llvmCacheDir, tEntry, target, nil)
+	if err != nil {
+		return err
 	}
+	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: epoch, Entries: entries}
+	out := filepath.Join(root, "compiler", "cmd", "promise", "resources", "manifest.json")
+	return writeRuntimeManifest(out, &m)
+}
 
-	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: epoch}
+// llvmKindForTarget returns the manifest Kind for LLVM blobs on target. macOS
+// blobs are KindMachOLLVM (patched + ad-hoc re-signed on materialize, §5.1);
+// other targets are plain blobs. The runtime view builder dispatches on its own
+// host GOOS, so Kind is documentary — but kept honest per-target so the embedded
+// manifest reflects reality.
+func llvmKindForTarget(target string) string {
+	if strings.HasPrefix(target, "darwin-") {
+		return "macho-llvm"
+	}
+	return "blob"
+}
+
+// buildLLVMEntries hashes each LLVM tool listed in tEntry.Files under dir (a flat
+// directory of `out`-named extracted binaries — the FetchPrebuilt cache dir or a
+// `bin/release blobs` output dir) and builds one manifest entry per tool, named
+// "llvm-<out>" (the logical name resolveLLVMView asks for).
+//
+// blobSource, when non-nil, is invoked with each tool's extracted sha256 to
+// produce the primary (higher-ranked) acquisition URL — the published
+// release-asset blob. The pinned upstream LLVM tarball (`archive`+`archive_path`)
+// is always appended as the fallback source, so a not-yet-published release still
+// resolves from upstream (this is what lets the thin bootstrap compile the stub).
+func buildLLVMEntries(dir string, tEntry *TargetEntry, target string, blobSource func(hash string) string) ([]runtimeManifestEntry, error) {
+	kind := llvmKindForTarget(target)
+	var entries []runtimeManifestEntry
 	for _, f := range tEntry.Files {
-		blobPath := filepath.Join(llvmCacheDir, f.Out)
+		blobPath := filepath.Join(dir, f.Out)
 		hash, size, err := hashAndSize(blobPath)
 		if err != nil {
-			return fmt.Errorf("hash %s: %w", blobPath, err)
+			return nil, fmt.Errorf("hash %s: %w", blobPath, err)
 		}
-		m.Entries = append(m.Entries, runtimeManifestEntry{
-			Name:   "llvm-" + f.Out,
-			SHA256: hash,
-			Size:   size,
-			Kind:   kind,
-			Sources: []runtimeSource{{
-				Archive:       tEntry.URL,
-				ArchivePath:   f.Src,
-				ArchiveSHA256: tEntry.SHA256,
-			}},
+		var sources []runtimeSource
+		if blobSource != nil {
+			sources = append(sources, runtimeSource{Blob: blobSource(hash)})
+		}
+		sources = append(sources, runtimeSource{
+			Archive:       tEntry.URL,
+			ArchivePath:   f.Src,
+			ArchiveSHA256: tEntry.SHA256,
+		})
+		entries = append(entries, runtimeManifestEntry{
+			Name:    "llvm-" + f.Out,
+			SHA256:  hash,
+			Size:    size,
+			Kind:    kind,
+			Sources: sources,
 		})
 	}
+	return entries, nil
+}
 
-	data, err := json.MarshalIndent(&m, "", "  ")
+// writeRuntimeManifest marshals m as indented JSON (trailing newline) to path.
+func writeRuntimeManifest(path string, m *runtimeManifest) error {
+	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	out := filepath.Join(root, "compiler", "cmd", "promise", "resources", "manifest.json")
-	return os.WriteFile(out, data, 0o644)
+	return os.WriteFile(path, data, 0o644)
 }
 
 func hashAndSize(path string) (string, int64, error) {

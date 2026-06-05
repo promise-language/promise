@@ -186,11 +186,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { name: blobs-${{ matrix.host }}, path: dist/ }
-      - name: Build thin compiler (embed manifest)
+      - name: Build thin compiler (embed manifest + stub)
+        # `bin/release build` is itself the build-order: it builds a bootstrap
+        # compiler, compiles tools/stub/main.pr WITH that compiler, then rebuilds
+        # with the stub embedded back in (3 internal phases). The published thin
+        # binary therefore already carries the stub for install-time extraction.
         run: bin/release build --variant thin --manifest dist/manifest-${{ matrix.host }}.json --out dist/promise-${{ matrix.host }}
-      - name: Build the Promise stub for this target
-        run: dist/promise-${{ matrix.host }} build --release tools/stub/main.pr -o dist/stub-${{ matrix.host }}
-        # the stub is embedded back into the compiler for extraction at install time
       - name: Assemble full variant (pre-stage host blobs)
         run: bin/release build --variant full --manifest dist/manifest-${{ matrix.host }}.json --blobs dist/blobs --out dist/promise-${{ matrix.host }}-full
       - uses: actions/upload-artifact@v4
@@ -225,8 +226,9 @@ jobs:
 ```
 
 Notes:
-- `bin/release` is the (planned) release driver that wraps the build-order steps; today the equivalent is `bin/build --release` producing a single embed-everything binary.
-- The **stub** is compiled *by the just-built compiler* (step 5), then embedded back into the compiler so `promise install` can extract it ([distribution.md](distribution.md) §2.5). Cross-compiling the stub per target is done by the host compiler.
+- `bin/release` (T0773) is the release driver implementing the build-order. Subcommands: `blobs --host <t> --out <dir>` (collect host dependency blobs), `manifest <blobsdir> --host <t> --pack <dir> --out <m> [--tag <tag>]` (hash+size, pack hash-named upload artifacts, emit the ranked-sources manifest), `build --variant {thin|full} --manifest <m> --out <bin> [--blobs <dir>]` (the 3-phase compiler+stub build), and `verify-manifest <m>... --against <dir>` (the integrity gate). `bin/build --release` remains a shortcut that produces an embed-everything (full-equivalent) binary without the stub.
+- The **stub** is compiled *by the just-built compiler* inside `bin/release build` (an internal phase), then embedded back into the compiler so `promise install` can extract it ([distribution.md](distribution.md) §2.5). Cross-compiling the stub per target is gated on cross-compilation (T0524); first releases build the host stub only.
+- **Hosting:** each manifest entry's primary `source` is a **GitHub release asset** on `github.com/promise-language/promise`, named by the blob's content `sha256` (content-addressed → an unchanged dependency reuses the same asset across releases, no re-upload). The pinned upstream vendor archive (e.g. the LLVM tarball) is a ranked fallback source. A CDN/R2 mirror ([T0523](#)) is a deferred, optional future source — ranked sources + `PROMISE_BLOB_MIRROR` make adding it non-breaking (no content hashes change).
 - `SHA256SUMS` covers only the top-level binaries — dependency blobs are self-verifying via their content `sha256` in the embedded manifest, regardless of how they are packaged (direct files or archives).
 - `windows-amd64` is a **full matrix member** in both `blobs` and `compiler` (CI already builds and passes the gates on it). Its top-level artifacts carry `.exe` (`promise-windows-amd64.exe`, `…-full.exe`); `bin/release` appends the extension for Windows hosts. The Windows compiler still builds via `opt` → `llc` → `lld-link` (no LTO yet — T0049).
 - The **all** variant ([distribution.md](distribution.md) §1.2) is the same "assemble" step with *every* supported target's blobs in the pre-stage set instead of just the host's — no new runtime code. It is deferred until cross-compilation works (no cross-target blobs exist yet), so first releases publish thin + full only.
@@ -252,12 +254,12 @@ The tag push triggers §5. No manual binary uploads, no manual checksum computat
 
 | Item | Notes |
 |------|-------|
-| `bin/release` driver | Implement the blob/hash/manifest/thin/full/stub steps as a Go build tool alongside `bin/build`. |
-| Blob hosting & packaging | Decide acquisition `sources` ([distribution.md](distribution.md) §4.1): one-file-per-hash release assets vs few compressed archives vs upstream-vendor archives; release assets vs dedicated CDN/bucket; the `PROMISE_BLOB_MIRROR` base-URL override for mirrors / air-gap ([epoch-versioned-installs.md](epoch-versioned-installs.md) §3). Manifest carries a *ranked* source list so the private→public transition can add/promote a public source without changing content hashes (§1 private-repo caveat). |
+| ~~`bin/release` driver~~ (done, T0773) | The blob/hash/manifest/thin/full/stub steps + `verify-manifest` gate are implemented as a Go build tool alongside `bin/build` (`tools/build/cmd/release`, `tools/build/common/release*.go`). |
+| Blob hosting & packaging | **Decided (T0773):** primary `source` is a one-file-per-hash **GitHub release asset** (named by content `sha256`); the upstream vendor archive is a ranked fallback. A dedicated CDN/bucket ([T0523](#)) is a deferred optional source. `PROMISE_BLOB_MIRROR` base-URL override ([epoch-versioned-installs.md](epoch-versioned-installs.md) §3) and the *ranked* source list let the private→public transition add/promote a public source without changing content hashes (§1 private-repo caveat). |
 | Private→public release access | While the repo is private, **nothing in the install path is anonymously fetchable**: the install scripts are themselves release assets (`releases/latest/download/install.sh`), and the binaries + dependency blobs they pull are too — all need auth or a public mirror. Resolve before advertising the public install (§1, [distribution.md](distribution.md) §2.1). |
-| Manifest integrity gate | `bin/release verify-manifest` — resolve every entry against the packaged artifacts (extract `archive_path`, check `sha256`) and **fail the release** on any mismatch, so a bogus entry never reaches users ([distribution.md](distribution.md) §4.3). |
+| ~~Manifest integrity gate~~ (done, T0773) | `bin/release verify-manifest <m>... --against <dir>` resolves every entry against the packaged artifacts (hashing a blob asset, or extracting `archive_path` from an archive) and **fails the release** on any `sha256` mismatch or missing artifact, so a bogus entry never reaches users ([distribution.md](distribution.md) §4.3). |
 | Mismatch telemetry (opt-in) | Decide whether to ship the opt-in integrity-mismatch signal ([distribution.md](distribution.md) §4.4): what it sends (dependency, source, expected/actual hash, epoch, platform), the disclosure/opt-in UX, and where it reports. Integrity-only, never general usage. |
-| Blob caching across releases | Skip rebuild/upload when a dependency version (hence hash) is unchanged. |
+| ~~Blob caching across releases~~ (done, T0773) | Content-addressed packaging: `bin/release manifest` names each upload artifact by its `sha256`, so an unchanged dependency version (hence unchanged hash) is left untouched in the pack dir — no rebuild/re-upload. (Steps 1–2 also reuse the prebuilts cache's unchanged-hash skip.) |
 | Windows release artifact | CI is done — `windows-amd64` is a full matrix member passing the gates. Remaining for *releases*: embed LLVM into `promise.exe` (T0056) and the Windows SDK / UCRT `.lib` stubs for the zero-dep goal ([distribution.md](distribution.md) §5.2), plus LTO (T0049). The thin/full split makes the LLVM-embed less urgent (it becomes a fetched blob), but the SDK stubs are still needed for "no VS Build Tools required" ([windows-support.md](windows-support.md)). |
 | `darwin-amd64` (Intel) — **deferred** | Dropped from the CI/release matrices: the maintainer can't run a working Xcode CLT on available Intel hardware, so the target can't be verified. The build code exists; revisit if a verifiable Intel runner/host is available (GitHub's `macos-13` Intel runner could validate it in CI even without local hardware — reconsider before deletion). |
 | `linux-arm64` | Cross-compile + arm64 runner; arm64 LLVM blobs + musl CRT. |

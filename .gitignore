@@ -84,6 +84,9 @@ bin/clean.exe~
 bin/pin-prebuilts
 bin/pin-prebuilts.exe
 bin/pin-prebuilts.exe~
+bin/release
+bin/release.exe
+bin/release.exe~
 
 # Flow binaries (built on demand by ./make from flows/) — never committed
 bin/flow/

@@ -69,7 +69,7 @@ const formatCmd = "bin/format"
 // deadline from cutting verify short and parking the step. (The tracker omits a
 // land-step timeout — no-hidden-timeouts — but Promise's slow gate warrants one.)
 const (
-	implementTimeout = 60 * time.Minute
+	implementTimeout = 120 * time.Minute
 	landTimeout      = 60 * time.Minute
 )
 

@@ -34,10 +34,10 @@ jobs:
           # - { host: linux-arm64,  runner: <arm64> }   # arm64 runner + arm64 LLVM blobs (T0524/T0530) + musl CRT.
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: false   # see ci.yml / docs/release-automation.md §4 — flow-sdk is unreachable from runners.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: compiler/go.mod
           cache: true
@@ -95,10 +95,10 @@ jobs:
           - { host: windows-amd64, runner: windows-latest, ext: '.exe' }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: compiler/go.mod
           cache: true
@@ -113,19 +113,24 @@ jobs:
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
           sudo apt-get install -y llvm-22 lld-22 musl-dev
-      - name: Install LLVM (Windows)
+      - name: Install LLVM 22 (Windows)
         if: runner.os == 'Windows'
-        # choco updates the machine PATH but not this job's shell — add the bin dir.
+        shell: pwsh
+        # The runner preinstalls LLVM 20 (too old; need 22-25) and choco won't
+        # upgrade. Extract the official LLVM 22.1.0 release into %USERPROFILE%\LLVM,
+        # which FindLLVM checks after the stale %ProgramFiles%\LLVM.
         run: |
-          choco install llvm -y
-          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-pc-windows-msvc.tar.xz"
+          curl.exe -L --retry 3 -o "$env:RUNNER_TEMP\llvm.tar.xz" $url
+          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\LLVM" | Out-Null
+          tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C "$env:RUNNER_TEMP"
+          Move-Item "$env:RUNNER_TEMP\clang+llvm-22.1.0-x86_64-pc-windows-msvc\*" "$env:USERPROFILE\LLVM\"
+          & "$env:USERPROFILE\LLVM\bin\opt.exe" --version
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
-        # opt is required on every platform (no clang-only path); phase B's stub
-        # compile needs a host LLVM backend on PATH.
-        run: |
-          brew install llvm
-          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+        # opt from llvm@22; ld64.lld from the separate `lld` formula (FindLLVM looks
+        # for /opt/homebrew/opt/lld/bin/ld64.lld). Phase B's stub compile needs them.
+        run: brew install llvm@22 lld
       - name: Bootstrap dev tools (Unix)
         if: runner.os != 'Windows'
         run: ./make
@@ -165,10 +170,10 @@ jobs:
     needs: [compiler]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: false   # needed only to attach the committed scripts/install.*
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: compiler/go.mod
           cache: true

@@ -1,15 +1,31 @@
-# Pull-request / push CI (docs/release-automation.md §4).
+# Build + test CI (docs/release-automation.md §4) — MANUAL DISPATCH ONLY.
 #
-# Builds and tests the compiler per platform on every PR and every push to
-# `main`/`next`. It does NOT produce release artifacts — that is release.yml,
-# triggered by an `epoch-*` tag.
+# This does NOT run on every push/PR. The project's internal gates already cover
+# correctness: `bin/verify` is mandatory before every push, and periodic gates run
+# stress + cross-platform checks. At 20-80 commits/day on a private repo (where
+# Actions minutes are metered and macOS bills 10x), per-commit CI is not feasible.
+# This workflow exists to validate that the build+test toolchain works on GitHub
+# runners for the release pipeline (release.yml). Dispatch it on demand, picking a
+# single platform to control cost. It does NOT produce release artifacts — that is
+# release.yml, triggered by an `epoch-*` tag.
 name: CI
 
 on:
-  push:
-    branches: [main, next]
-  pull_request:
-    branches: [main, next]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Platform to build + test"
+        type: choice
+        default: all
+        options:
+          - all
+          - linux-amd64
+          - darwin-arm64
+          - windows-amd64
+      run_tests:
+        description: "Run the full test suite (false = build only — a cheap toolchain check; the suite is slow and macOS bills 10x)"
+        type: boolean
+        default: true
 
 # CI only builds and tests — it never writes to the repo. Pin the GITHUB_TOKEN to
 # read-only (least privilege); release.yml is the only workflow that needs write.
@@ -19,6 +35,9 @@ permissions:
 jobs:
   test:
     name: ${{ matrix.name }}
+    # Run only the dispatch-selected platform(s); a non-selected matrix entry is
+    # skipped and consumes no runner minutes (macOS bills 10x).
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == matrix.name }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +50,7 @@ jobs:
           # - { name: linux-arm64,  runner: <arm64> }     # needs arm64 runner + arm64 LLVM blobs (T0524/T0530) + musl CRT.
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Keep submodules OFF. The flow/flow-sdk submodules are NOT used to build
           # the compiler or run the gates (they back the tracker automation only),
@@ -40,7 +59,7 @@ jobs:
           # Rationale also in CLAUDE.md / docs/release-automation.md §4 (NOT build-tools.md).
           submodules: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: compiler/go.mod
           cache: true
@@ -57,23 +76,29 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
           sudo apt-get install -y llvm-22 lld-22 musl-dev
 
-      - name: Install LLVM (Windows)
+      - name: Install LLVM 22 (Windows)
         if: runner.os == 'Windows'
-        # windows-latest already ships VS Build Tools (MSVC + Windows SDK); only LLVM
-        # (opt/llc/lld-link) is missing. choco updates the machine PATH but not this
-        # job's shell, so add the bin dir to GITHUB_PATH for the build step.
+        shell: pwsh
+        # windows-latest ships VS Build Tools (MSVC + Windows SDK) but preinstalls
+        # LLVM 20 in %ProgramFiles%\LLVM — too old (we need 22-25 for llvm.coro.end)
+        # and choco won't upgrade it. Extract the official LLVM 22.1.0 release (the
+        # exact build pinned in tools/build/prebuilts.toml) into %USERPROFILE%\LLVM,
+        # which FindLLVM (platform.go) checks AFTER the stale %ProgramFiles%\LLVM.
         run: |
-          choco install llvm -y
-          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-pc-windows-msvc.tar.xz"
+          curl.exe -L --retry 3 -o "$env:RUNNER_TEMP\llvm.tar.xz" $url
+          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\LLVM" | Out-Null
+          tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C "$env:RUNNER_TEMP"
+          Move-Item "$env:RUNNER_TEMP\clang+llvm-22.1.0-x86_64-pc-windows-msvc\*" "$env:USERPROFILE\LLVM\"
+          & "$env:USERPROFILE\LLVM\bin\opt.exe" --version
 
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
-        # opt/llc/lld are required on EVERY platform — the M:N scheduler's coroutine
-        # lowering runs in `opt`, so there is no clang-only path. Install LLVM and
-        # put it on PATH (brew's llvm is within the supported range).
-        run: |
-          brew install llvm
-          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+        # FindLLVM (platform.go) discovers opt at /opt/homebrew/opt/llvm@22/bin and
+        # ld64.lld from the SEPARATE `lld` formula at /opt/homebrew/opt/lld/bin — so
+        # install both. opt is required on every platform (the M:N scheduler's
+        # coroutine lowering runs in opt; there is no clang-only path).
+        run: brew install llvm@22 lld
 
       - name: Install wasmtime (runtime for the wasm32-wasi tests)
         uses: bytecodealliance/actions/wasmtime/setup@v1
@@ -94,6 +119,7 @@ jobs:
         run: bin/build
 
       - name: Test — Go + Promise
+        if: ${{ inputs.run_tests }}
         shell: bash
         # Always bin/test [go|promise|all] — never `go test ./...` directly: bin/test
         # builds and embeds the stdlib/catalog modules first, which raw `go test` skips.

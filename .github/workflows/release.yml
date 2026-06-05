@@ -88,7 +88,7 @@ jobs:
       # blobs step (below) reads PROMISE_PREBUILTS_CACHE; `runner` context is not
       # allowed in job-level env, so it is set per-step.
       - name: Cache prebuilt LLVM blobs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/prebuilts
           key: prebuilts-${{ runner.os }}-${{ hashFiles('tools/build/prebuilts.toml') }}
@@ -115,7 +115,7 @@ jobs:
             --pack dist/deps \
             --out dist/manifest-${{ matrix.host }}.json \
             --tag "${{ github.ref_name }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-blobs-${{ matrix.host }}
           path: |
@@ -175,7 +175,7 @@ jobs:
         if: runner.os == 'Windows'
         run: .\make.cmd
       - name: Download blobs + manifest
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-blobs-${{ matrix.host }}
           path: dist
@@ -194,7 +194,7 @@ jobs:
             --out dist/bin/promise-${{ matrix.host }}-full${{ matrix.ext }}
       # Publish needs the binaries + content-addressed deps + the manifest — NOT the
       # raw blobs/. Content-hash names make deps/ collision-free when merged.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-bin-${{ matrix.host }}
           path: |
@@ -220,7 +220,7 @@ jobs:
       - name: Bootstrap dev tools
         run: ./make
       - name: Download all compiler artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           # merge-multiple flattens every release-bin-<host> into one dist/ tree
           # (v4 otherwise nests each artifact in its own subdir). Content-addressed

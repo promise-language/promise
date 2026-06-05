@@ -88,6 +88,10 @@ bin/release
 bin/release.exe
 bin/release.exe~
 
+# Release-build output: `bin/release blobs/manifest/build` write here (bin/, blobs/,
+# deps/, manifest-*.json). Scratch — produced in CI and by local runs, never committed.
+/dist/
+
 # Flow binaries (built on demand by ./make from flows/) — never committed
 bin/flow/
 

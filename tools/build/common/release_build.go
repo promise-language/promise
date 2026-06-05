@@ -53,6 +53,15 @@ func runReleaseBuild(root string, args []string) error {
 		return fmt.Errorf("build: cross-target builds (%s on host %s) are not supported yet (T0524)", *host, CurrentBuildTarget())
 	}
 
+	// Resolve --out to an absolute path. goBuildCompiler runs `go build` with
+	// cwd=<root>/compiler, so a RELATIVE -o (e.g. release.yml's `dist/bin/...`)
+	// would land under compiler/ while MkdirAll + the sha256 hash resolve it from
+	// the process CWD — the phase-C "open dist/bin/...: no such file" mismatch.
+	outBin, err := filepath.Abs(*out)
+	if err != nil {
+		return fmt.Errorf("resolve --out path: %w", err)
+	}
+
 	// Standard prelude (mirrors RunBuild steps 2–4).
 	fmt.Println("Checking parser...")
 	if err := GenerateParser(root, false); err != nil {
@@ -117,20 +126,20 @@ func runReleaseBuild(root string, args []string) error {
 	if full {
 		finalTags = append(finalTags, "embed_llvm")
 	}
-	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outBin), 0o755); err != nil {
 		return err
 	}
 	fmt.Printf("Building final %s compiler (phase C)...\n", *variant)
-	if err := goBuildCompiler(root, *out, version, finalTags); err != nil {
+	if err := goBuildCompiler(root, outBin, version, finalTags); err != nil {
 		return fmt.Errorf("phase C go build: %w", err)
 	}
 
 	// Write the sha256 sidecar next to the artifact (release publishing checksum).
-	hash, err := binarySHA256(*out)
+	hash, err := binarySHA256(outBin)
 	if err != nil {
 		return fmt.Errorf("hash binary: %w", err)
 	}
-	if err := os.WriteFile(*out+".sha256", []byte(hash+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(outBin+".sha256", []byte(hash+"\n"), 0o644); err != nil {
 		return fmt.Errorf("write sha256 sidecar: %w", err)
 	}
 

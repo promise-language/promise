@@ -131,7 +131,11 @@ download "$SUMS_URL" "$TMP_SUMS"
 
 # ── checksum verification ───────────────────────────────────────────────────
 
-EXPECTED=$(grep "${BINARY_NAME}" "$TMP_SUMS" | awk '{print $1}')
+# Match the filename field EXACTLY ($2): SHA256SUMS lists both the thin
+# (promise-linux-amd64) and full (promise-linux-amd64-full) binaries, so a
+# substring/prefix grep on the thin name would also match the full line and
+# yield two hashes (→ a guaranteed checksum "mismatch").
+EXPECTED=$(awk -v name="$BINARY_NAME" '$2 == name { print $1 }' "$TMP_SUMS")
 if [ -z "$EXPECTED" ]; then
   echo "error: ${BINARY_NAME} not found in SHA256SUMS" >&2
   exit 1

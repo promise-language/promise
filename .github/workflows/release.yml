@@ -1,0 +1,215 @@
+# Tag-triggered release pipeline (docs/release-automation.md §5).
+#
+# Triggered by an `epoch-*` tag (e.g. `epoch-2026.0`, or `epoch-next` for the
+# pre-release channel). Mirrors the build order of §2 via T0773's `bin/release`
+# driver: blobs → manifest → thin → stub (internal to `build`) → full →
+# verify-manifest → publish.
+#
+# Three jobs:
+#   blobs    (matrix per host) — collect dependency blobs + emit the manifest
+#   compiler (matrix per host) — build the thin + full compiler variants
+#   publish  (single runner)   — integrity-gate, checksum, and cut the Release
+name: Release
+
+on:
+  push:
+    tags: ['epoch-*']   # covers epoch-YYYY.N (stable) and epoch-next (pre-release)
+
+permissions:
+  contents: write
+
+jobs:
+  # 1–2. Prebuilt blobs + manifest (cached; the LLVM download is the expensive part).
+  blobs:
+    name: blobs ${{ matrix.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: linux-amd64,   runner: ubuntu-24.04 }
+          - { host: darwin-arm64,  runner: macos-latest }
+          - { host: windows-amd64, runner: windows-latest }
+          # Deferred (docs/release-automation.md §7):
+          # - { host: darwin-amd64, runner: macos-13 }  # Intel macOS — unverifiable (no working Xcode CLT).
+          # - { host: linux-arm64,  runner: <arm64> }   # arm64 runner + arm64 LLVM blobs (T0524/T0530) + musl CRT.
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false   # see ci.yml / docs/release-automation.md §4 — flow-sdk is unreachable from runners.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: compiler/go.mod
+          cache: true
+          cache-dependency-path: compiler/go.sum
+      # Pin the forge prebuilts cache to a stable path so actions/cache can persist
+      # the ~200 MB LLVM download that `bin/release blobs` (FetchAll) pulls. Only the
+      # blobs step (below) reads PROMISE_PREBUILTS_CACHE; `runner` context is not
+      # allowed in job-level env, so it is set per-step.
+      - name: Cache prebuilt LLVM blobs
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/prebuilts
+          key: prebuilts-${{ runner.os }}-${{ hashFiles('tools/build/prebuilts.toml') }}
+      # bin/ is gitignored — bootstrap the forge tools (bin/release) before use.
+      - name: Bootstrap dev tools (Unix)
+        if: runner.os != 'Windows'
+        run: ./make
+      - name: Bootstrap dev tools (Windows)
+        if: runner.os == 'Windows'
+        run: .\make.cmd
+      - name: Collect dependency blobs (host LLVM tools)
+        shell: bash
+        env:
+          PROMISE_PREBUILTS_CACHE: ${{ runner.temp }}/prebuilts
+        run: bin/release blobs --host ${{ matrix.host }} --out dist/blobs
+      - name: Package blobs + generate manifest
+        shell: bash
+        # --tag is passed explicitly so the embedded primary-source URLs point at the
+        # ACTUAL tag (critical for epoch-next, where the catalog default epoch-<epoch>
+        # would be wrong).
+        run: |
+          bin/release manifest dist/blobs \
+            --host ${{ matrix.host }} \
+            --pack dist/deps \
+            --out dist/manifest-${{ matrix.host }}.json \
+            --tag "${{ github.ref_name }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-blobs-${{ matrix.host }}
+          path: |
+            dist/blobs
+            dist/deps
+            dist/manifest-${{ matrix.host }}.json
+
+  # 3–6. Per-host thin + full compiler, manifest embedded, stub compiled+embedded.
+  compiler:
+    name: compiler ${{ matrix.host }}
+    needs: [blobs]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: linux-amd64,   runner: ubuntu-24.04,   ext: '',     use_clang: '' }
+          - { host: darwin-arm64,  runner: macos-latest,   ext: '',     use_clang: '1' }
+          - { host: windows-amd64, runner: windows-latest, ext: '.exe', use_clang: '' }
+    runs-on: ${{ matrix.runner }}
+    env:
+      # macOS: Xcode clang driver for phase B's stub compile (skips brew install llvm).
+      PROMISE_USE_CLANG: ${{ matrix.use_clang }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: compiler/go.mod
+          cache: true
+          cache-dependency-path: compiler/go.sum
+      # `bin/release build` phase B runs `promise build -release` to compile the stub,
+      # which needs a host LLVM backend — install it the same way ci.yml does. (The
+      # forge prebuilts cache is a SEPARATE cache from the compiler's CAS, so it does
+      # not satisfy phase B's findLLVMTool discovery; system/PATH LLVM does.)
+      - name: Install LLVM 22 + musl (Linux)
+        if: runner.os == 'Linux'
+        # opt-22/llc-22 (llvm-22), ld.lld-22 (lld-22), musl CRT — phase B's stub compile.
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
+          sudo apt-get install -y llvm-22 lld-22 musl-dev
+      - name: Install LLVM 22 (Windows)
+        if: runner.os == 'Windows'
+        run: choco install llvm -y
+      # macOS: PROMISE_USE_CLANG=1 (set above) — no LLVM install.
+      - name: Bootstrap dev tools (Unix)
+        if: runner.os != 'Windows'
+        run: ./make
+      - name: Bootstrap dev tools (Windows)
+        if: runner.os == 'Windows'
+        run: .\make.cmd
+      - name: Download blobs + manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: release-blobs-${{ matrix.host }}
+          path: dist
+      - name: Build thin compiler (manifest + stub embedded)
+        shell: bash
+        run: |
+          bin/release build --variant thin \
+            --manifest dist/manifest-${{ matrix.host }}.json \
+            --out dist/bin/promise-${{ matrix.host }}${{ matrix.ext }}
+      - name: Build full compiler (host blobs pre-staged)
+        shell: bash
+        run: |
+          bin/release build --variant full \
+            --manifest dist/manifest-${{ matrix.host }}.json \
+            --blobs dist/blobs \
+            --out dist/bin/promise-${{ matrix.host }}-full${{ matrix.ext }}
+      # Publish needs the binaries + content-addressed deps + the manifest — NOT the
+      # raw blobs/. Content-hash names make deps/ collision-free when merged.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bin-${{ matrix.host }}
+          path: |
+            dist/bin
+            dist/deps
+            dist/manifest-${{ matrix.host }}.json
+
+  # 7. Integrity gate, checksum, and cut the Release.
+  publish:
+    needs: [compiler]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false   # needed only to attach the committed scripts/install.*
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: compiler/go.mod
+          cache: true
+          cache-dependency-path: compiler/go.sum
+      - name: Bootstrap dev tools
+        run: ./make
+      - name: Download all compiler artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # merge-multiple flattens every release-bin-<host> into one dist/ tree
+          # (v4 otherwise nests each artifact in its own subdir). Content-addressed
+          # deps/ names make the cross-host merge collision-free.
+          pattern: release-bin-*
+          merge-multiple: true
+          path: dist
+      - name: Verify manifest resolves (fail the release on any mismatch)
+        run: bin/release verify-manifest dist/manifest-*.json --against dist/deps
+      - name: Generate SHA256SUMS (top-level binaries only)
+        # Drop the per-binary .sha256 sidecars `bin/release build` wrote so the glob
+        # below covers only the published binaries, and SHA256SUMS has no sidecar lines.
+        run: |
+          cd dist/bin
+          rm -f ./*.sha256
+          sha256sum promise-* > ../SHA256SUMS
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # The install scripts are committed (scripts/install.*) and attached verbatim —
+        # nothing generates them. epoch-next cuts a GitHub pre-release (next channel).
+        run: |
+          if [ "$GITHUB_REF_NAME" = "epoch-next" ]; then
+            PRERELEASE="--prerelease"
+            TITLE="Promise epoch-next (pre-release)"
+            # epoch-next is a MOVING channel tag, re-cut on every push (§6). A prior
+            # run already created its release, and `gh release create` refuses to
+            # clobber an existing one — so delete it first. `gh release delete` keeps
+            # the git tag by default (no --cleanup-tag), and the tag is the trigger,
+            # so it must survive. `|| true` covers the first-ever run (no release yet).
+            gh release delete "$GITHUB_REF_NAME" --yes 2>/dev/null || true
+          else
+            PRERELEASE=""
+            TITLE="Promise epoch ${GITHUB_REF_NAME#epoch-}"
+          fi
+          gh release create "$GITHUB_REF_NAME" $PRERELEASE \
+            --title "$TITLE" \
+            --notes "See docs/changelog.md for this epoch." \
+            dist/bin/promise-* \
+            dist/deps/* \
+            dist/SHA256SUMS \
+            scripts/install.sh scripts/install.ps1 scripts/install.cmd

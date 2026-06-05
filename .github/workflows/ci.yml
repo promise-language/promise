@@ -1,0 +1,95 @@
+# Pull-request / push CI (docs/release-automation.md §4).
+#
+# Builds and tests the compiler per platform on every PR and every push to
+# `main`/`next`. It does NOT produce release artifacts — that is release.yml,
+# triggered by an `epoch-*` tag.
+name: CI
+
+on:
+  push:
+    branches: [main, next]
+  pull_request:
+    branches: [main, next]
+
+# CI only builds and tests — it never writes to the repo. Pin the GITHUB_TOKEN to
+# read-only (least privilege); release.yml is the only workflow that needs write.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64,   runner: ubuntu-24.04,   use_clang: '' }
+          - { name: darwin-arm64,  runner: macos-latest,   use_clang: '1' }
+          - { name: windows-amd64, runner: windows-latest, use_clang: '' }
+          # Deferred matrix members (docs/release-automation.md §7):
+          # - { name: darwin-amd64, runner: macos-13 }    # Intel macOS — unverifiable (no working Xcode CLT). Build code exists; macos-13 could validate in CI — reconsider before deleting the path.
+          # - { name: linux-arm64,  runner: <arm64> }     # needs arm64 runner + arm64 LLVM blobs (T0524/T0530) + musl CRT.
+    runs-on: ${{ matrix.runner }}
+    env:
+      # macOS uses the Xcode clang driver instead of a ~5-min `brew install llvm`
+      # (same frontend/codegen, only the backend driver differs). Empty elsewhere
+      # is equivalent to unset (the compiler checks `== "1"`).
+      PROMISE_USE_CLANG: ${{ matrix.use_clang }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Keep submodules OFF. The flow/flow-sdk submodules are NOT used to build
+          # the compiler or run the gates (they back the tracker automation only),
+          # and flow-sdk lives on an internal host (ssh://hfe/…) unreachable from
+          # GitHub runners — `submodules: recursive` would make checkout FAIL.
+          # Rationale also in CLAUDE.md / docs/release-automation.md §4 (NOT build-tools.md).
+          submodules: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: compiler/go.mod
+          cache: true
+          cache-dependency-path: compiler/go.sum
+
+      # No Java/ANTLR step: the generated parser (compiler/internal/parser/*.go) is
+      # committed, so neither CI nor a release regenerates it.
+
+      - name: Install LLVM 22 + musl (Linux)
+        if: runner.os == 'Linux'
+        # llvm.sh adds the apt.llvm.org repo; install the specific tools the codegen
+        # pipeline needs (opt-22/llc-22 from llvm-22, ld.lld-22 from lld-22) + musl CRT.
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
+          sudo apt-get install -y llvm-22 lld-22 musl-dev
+
+      - name: Install LLVM 22 (Windows)
+        if: runner.os == 'Windows'
+        # windows-latest already ships VS Build Tools (MSVC + Windows SDK); only LLVM
+        # (opt/llc/lld-link) is missing.
+        run: choco install llvm -y
+
+      # macOS: no LLVM install — PROMISE_USE_CLANG=1 (set above) uses the Xcode clang driver.
+
+      - name: Install wasmtime (runtime for the wasm32-wasi tests)
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+
+      # bin/ is gitignored — the forge dev tools (bin/build, bin/test, …) are compiled
+      # by ./make and refuse to run stale, so bootstrap them before any bin/* use.
+      - name: Bootstrap dev tools (Unix)
+        if: runner.os != 'Windows'
+        run: ./make
+      - name: Bootstrap dev tools (Windows)
+        if: runner.os == 'Windows'
+        run: .\make.cmd
+
+      # shell: bash on all platforms so `bin/build` resolves uniformly (Git Bash on
+      # windows-latest appends .exe → bin/build.exe).
+      - name: Build compiler
+        shell: bash
+        run: bin/build
+
+      - name: Test — Go + Promise + WASM
+        shell: bash
+        # Always bin/test [go|promise|all] — never `go test ./...` directly: bin/test
+        # builds and embeds the stdlib/catalog modules first, which raw `go test` skips.
+        run: bin/test --wasm all

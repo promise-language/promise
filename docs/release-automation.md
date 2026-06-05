@@ -2,7 +2,7 @@
 
 > How Promise releases are built and published on GitHub. This is the pipeline behind the artifacts in [distribution.md](distribution.md) §3. It covers the new-model specifics the original distribution §7 did not: building the prebuilt dependency **blobs**, hashing them, embedding the manifest under a strict **build order**, producing **thin + full** binary variants, building the **Promise stub** per target, and publishing on an `epoch-*` tag.
 >
-> **Status (2026-06-01).** The repository now lives on GitHub at [`github.com/promise-language/promise`](https://github.com/promise-language/promise) (currently **private**, default branch `main`). The workflows below are **not yet committed** — there is no `.github/workflows/` directory, no `epoch-*` tag, and no published release yet, so the thin/full + blob + stub pipeline is entirely **target state**. The only release-related piece that exists today is the local self-contained build (`bin/build --release`). The YAML here is the design to drop into `.github/workflows/` once the pipeline (and the `bin/release` driver, §7) is built.
+> **Status (2026-06-05).** The repository now lives on GitHub at [`github.com/promise-language/promise`](https://github.com/promise-language/promise) (currently **private**, default branch `main`). The CI and release workflows are **committed** at [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and [`.github/workflows/release.yml`](../.github/workflows/release.yml) (T0774) and wrap the `bin/release` driver (§7, T0773). They have **not yet been exercised end-to-end** — no `epoch-*` tag has been cut and no release is published yet, so the thin/full + blob + stub pipeline is validated by design + local `bin/release` runs, with the first `epoch-next` pre-release as the planned acceptance trigger (§6). The committed workflow files are the **source of truth**; the YAML excerpts below are the design rationale, kept in sync with them. The only release-related piece exercised today is the local self-contained build (`bin/build --release`).
 
 ---
 
@@ -68,7 +68,7 @@ Blobs are produced by their own infrequently-run workflow (or a cached job), key
 
 Runs on every push to `main`/`next` and every PR. Builds and tests per platform — it does **not** produce release artifacts.
 
-`.github/workflows/ci.yml` (essentials):
+Committed at [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (the authoritative copy). Essentials:
 
 ```yaml
 name: CI
@@ -134,7 +134,7 @@ So: leave checkout at `submodules: false` on every job. (`flow` is public on Git
 
 Triggered by an `epoch-*` tag. Implements the build order of §2: resolve/build blobs → generate manifest → build thin compiler → build stub → assemble full → publish.
 
-`.github/workflows/release.yml` (shape):
+Committed at [`.github/workflows/release.yml`](../.github/workflows/release.yml) (the authoritative copy). The as-built workflow differs from the shape below in a few mechanical ways the sketch glosses over — they are intentional and noted under the YAML: the `compiler` job installs the host LLVM toolchain (phase B's stub `-release` compile needs a backend); artifacts land under `dist/bin/`, `dist/blobs/`, `dist/deps/` to keep the `SHA256SUMS` glob off the `deps/` blobs and the per-binary `.sha256` sidecars; the manifest step passes `--tag <ref>`; and Windows binary names carry `.exe` supplied by the workflow (not by `bin/release`). Shape:
 
 ```yaml
 name: Release
@@ -168,10 +168,13 @@ jobs:
       - name: Package + generate manifest
         # hashes each blob's extracted content, packages for upload (direct files
         # and/or compressed archives), and records ranked acquisition sources.
+        # --tag pins the embedded asset URLs to the ACTUAL ref (so epoch-next does
+        # not bake in the catalog default epoch-<epoch>).
         run: bin/release manifest dist/blobs --host ${{ matrix.host }} \
-               --pack dist/deps --out dist/manifest-${{ matrix.host }}.json   # name→sha256→size→ranked sources
+               --pack dist/deps --out dist/manifest-${{ matrix.host }}.json \
+               --tag ${{ github.ref_name }}   # name→sha256→size→ranked sources
       - uses: actions/upload-artifact@v4
-        with: { name: blobs-${{ matrix.host }}, path: dist/ }
+        with: { name: release-blobs-${{ matrix.host }}, path: dist/ }
 
   # 3–6. Per-platform compiler (thin) + stub + full, with the manifest embedded.
   compiler:
@@ -184,44 +187,59 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      # The as-built job also installs the host LLVM toolchain here (apt.llvm.org /
+      # choco / PROMISE_USE_CLANG on macOS) — phase B compiles the stub via
+      # `promise build -release`, which needs a backend; the forge prebuilts cache
+      # is a DIFFERENT cache and does not satisfy it. ${{ matrix.ext }} is '' / '.exe'.
       - uses: actions/download-artifact@v4
-        with: { name: blobs-${{ matrix.host }}, path: dist/ }
+        with: { name: release-blobs-${{ matrix.host }}, path: dist/ }
       - name: Build thin compiler (embed manifest + stub)
         # `bin/release build` is itself the build-order: it builds a bootstrap
         # compiler, compiles tools/stub/main.pr WITH that compiler, then rebuilds
         # with the stub embedded back in (3 internal phases). The published thin
         # binary therefore already carries the stub for install-time extraction.
-        run: bin/release build --variant thin --manifest dist/manifest-${{ matrix.host }}.json --out dist/promise-${{ matrix.host }}
+        run: bin/release build --variant thin --manifest dist/manifest-${{ matrix.host }}.json --out dist/bin/promise-${{ matrix.host }}${{ matrix.ext }}
       - name: Assemble full variant (pre-stage host blobs)
-        run: bin/release build --variant full --manifest dist/manifest-${{ matrix.host }}.json --blobs dist/blobs --out dist/promise-${{ matrix.host }}-full
+        run: bin/release build --variant full --manifest dist/manifest-${{ matrix.host }}.json --blobs dist/blobs --out dist/bin/promise-${{ matrix.host }}-full${{ matrix.ext }}
       - uses: actions/upload-artifact@v4
-        with: { name: compiler-${{ matrix.host }}, path: dist/ }
+        with: { name: release-bin-${{ matrix.host }}, path: dist/ }
 
   # 7. Collect everything, checksum, publish.
   publish:
     needs: [compiler]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4   # needed to attach the committed scripts/install.*
+      # ... + setup-go + ./make bootstrap (bin/release is a forge tool) ...
       - uses: actions/download-artifact@v4
-        with: { path: dist/ }
+        # merge-multiple flattens every release-bin-<host> into one dist/ tree;
+        # content-addressed deps/ names make the cross-host merge collision-free.
+        with: { pattern: release-bin-*, merge-multiple: true, path: dist/ }
       - name: Verify manifest resolves (fail the release on any mismatch)
         # For every manifest entry, confirm a packaged source yields bytes whose
         # sha256 matches — extracting archive_path where applicable. Catches bogus
         # entries here so users never download-and-discard at runtime (distribution.md §4.3).
         run: bin/release verify-manifest dist/manifest-*.json --against dist/deps
       - name: Generate SHA256SUMS (top-level binaries only)
-        run: cd dist && sha256sum promise-* > SHA256SUMS
+        # Drop the per-binary .sha256 sidecars `bin/release build` wrote so the glob
+        # covers only the binaries and SHA256SUMS has no sidecar lines.
+        run: cd dist/bin && rm -f ./*.sha256 && sha256sum promise-* > ../SHA256SUMS
       - name: Create GitHub Release
-        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
         # The install scripts are committed (scripts/install.*, present via the checkout
         # prelude) and attached verbatim — nothing generates them. Users fetch them at
-        # releases/latest/download/install.sh (distribution.md §2.1).
+        # releases/latest/download/install.sh (distribution.md §2.1). epoch-next cuts a
+        # GitHub pre-release (the `next` channel).
         run: |
-          EPOCH="${GITHUB_REF_NAME#epoch-}"
-          gh release create "$GITHUB_REF_NAME" \
-            --title "Promise epoch ${EPOCH}" \
+          if [ "$GITHUB_REF_NAME" = "epoch-next" ]; then
+            PRERELEASE="--prerelease"; TITLE="Promise epoch-next (pre-release)"
+          else
+            PRERELEASE=""; TITLE="Promise epoch ${GITHUB_REF_NAME#epoch-}"
+          fi
+          gh release create "$GITHUB_REF_NAME" $PRERELEASE \
+            --title "$TITLE" \
             --notes "See docs/changelog.md for this epoch." \
-            dist/promise-* dist/deps/* dist/SHA256SUMS \
+            dist/bin/promise-* dist/deps/* dist/SHA256SUMS \
             scripts/install.sh scripts/install.ps1 scripts/install.cmd   # the installers themselves
 ```
 
@@ -230,7 +248,7 @@ Notes:
 - The **stub** is compiled *by the just-built compiler* inside `bin/release build` (an internal phase), then embedded back into the compiler so `promise install` can extract it ([distribution.md](distribution.md) §2.5). Cross-compiling the stub per target is gated on cross-compilation (T0524); first releases build the host stub only.
 - **Hosting:** each manifest entry's primary `source` is a **GitHub release asset** on `github.com/promise-language/promise`, named by the blob's content `sha256` (content-addressed → an unchanged dependency reuses the same asset across releases, no re-upload). The pinned upstream vendor archive (e.g. the LLVM tarball) is a ranked fallback source. A CDN/R2 mirror ([T0523](#)) is a deferred, optional future source — ranked sources + `PROMISE_BLOB_MIRROR` make adding it non-breaking (no content hashes change).
 - `SHA256SUMS` covers only the top-level binaries — dependency blobs are self-verifying via their content `sha256` in the embedded manifest, regardless of how they are packaged (direct files or archives).
-- `windows-amd64` is a **full matrix member** in both `blobs` and `compiler` (CI already builds and passes the gates on it). Its top-level artifacts carry `.exe` (`promise-windows-amd64.exe`, `…-full.exe`); `bin/release` appends the extension for Windows hosts. The Windows compiler still builds via `opt` → `llc` → `lld-link` (no LTO yet — T0049).
+- `windows-amd64` is a **full matrix member** in both `blobs` and `compiler` (CI already builds and passes the gates on it). Its top-level artifacts carry `.exe` (`promise-windows-amd64.exe`, `…-full.exe`). The extension is supplied **by the workflow** (a `matrix.ext` field appended to `--out`), **not** by `bin/release` — the driver writes `--out` verbatim. The Windows compiler still builds via `opt` → `llc` → `lld-link` (no LTO yet — T0049).
 - The **all** variant ([distribution.md](distribution.md) §1.2) is the same "assemble" step with *every* supported target's blobs in the pre-stage set instead of just the host's — no new runtime code. It is deferred until cross-compilation works (no cross-target blobs exist yet), so first releases publish thin + full only.
 
 ---
@@ -246,7 +264,25 @@ git tag epoch-2026.0
 git push origin epoch-2026.0
 ```
 
-The tag push triggers §5. No manual binary uploads, no manual checksum computation. To stage a pre-release for the `next` channel, push `epoch-next` (marked as a GitHub pre-release).
+The tag push triggers §5. No manual binary uploads, no manual checksum computation.
+
+### `next` staging branch + `epoch-next` pre-release channel
+
+The `next` branch validates the upcoming epoch before it is cut. It is created **once** by the maintainer (a remote git action, not done by any workflow):
+
+```sh
+git branch next main
+git push -u origin next        # CI (§4) now runs on next pushes + PRs targeting next
+```
+
+To stage a pre-release on the `next` channel, push the `epoch-next` tag — `release.yml` runs the same blobs→manifest→thin→full→verify→publish pipeline and marks the result a GitHub **pre-release** (the `publish` job detects `epoch-next` and passes `--prerelease`):
+
+```sh
+git tag -f epoch-next next      # -f: epoch-next is a moving channel tag
+git push -f origin epoch-next
+```
+
+Because `epoch-next` is a moving tag, force-push is expected. The `epoch-next` pre-release is the **safe first end-to-end trigger** for the pipeline — run it before cutting the first stable `epoch-2026.0`.
 
 ---
 
@@ -256,7 +292,7 @@ The tag push triggers §5. No manual binary uploads, no manual checksum computat
 |------|-------|
 | ~~`bin/release` driver~~ (done, T0773) | The blob/hash/manifest/thin/full/stub steps + `verify-manifest` gate are implemented as a Go build tool alongside `bin/build` (`tools/build/cmd/release`, `tools/build/common/release*.go`). |
 | Blob hosting & packaging | **Decided (T0773):** primary `source` is a one-file-per-hash **GitHub release asset** (named by content `sha256`); the upstream vendor archive is a ranked fallback. A dedicated CDN/bucket ([T0523](#)) is a deferred optional source. `PROMISE_BLOB_MIRROR` base-URL override ([epoch-versioned-installs.md](epoch-versioned-installs.md) §3) and the *ranked* source list let the private→public transition add/promote a public source without changing content hashes (§1 private-repo caveat). |
-| Private→public release access | While the repo is private, **nothing in the install path is anonymously fetchable**: the install scripts are themselves release assets (`releases/latest/download/install.sh`), and the binaries + dependency blobs they pull are too — all need auth or a public mirror. Resolve before advertising the public install (§1, [distribution.md](distribution.md) §2.1). |
+| Private→public release access (**T0786**) | While the repo is private, **nothing in the install path is anonymously fetchable**: the install scripts are themselves release assets (`releases/latest/download/install.sh`), and the binaries + dependency blobs they pull are too — all need auth or a public mirror. Resolve before advertising the public install (§1, [distribution.md](distribution.md) §2.1). Tracked as the standalone release-readiness blocker **T0786** (`needs-attention`); ties to T0523's public-origin requirement. |
 | ~~Manifest integrity gate~~ (done, T0773) | `bin/release verify-manifest <m>... --against <dir>` resolves every entry against the packaged artifacts (hashing a blob asset, or extracting `archive_path` from an archive) and **fails the release** on any `sha256` mismatch or missing artifact, so a bogus entry never reaches users ([distribution.md](distribution.md) §4.3). |
 | Mismatch telemetry (opt-in) | Decide whether to ship the opt-in integrity-mismatch signal ([distribution.md](distribution.md) §4.4): what it sends (dependency, source, expected/actual hash, epoch, platform), the disclosure/opt-in UX, and where it reports. Integrity-only, never general usage. |
 | ~~Blob caching across releases~~ (done, T0773) | Content-addressed packaging: `bin/release manifest` names each upload artifact by its `sha256`, so an unchanged dependency version (hence unchanged hash) is left untouched in the pack dir — no rebuild/re-upload. (Steps 1–2 also reuse the prebuilts cache's unchanged-hash skip.) |

@@ -68,7 +68,9 @@ curl -sSfL $BASE/install.sh | sh -s -- --epoch 2026.0
 curl -sSfL $BASE/install.sh | sh -s -- --full      # planned (selects the -full asset)
 ```
 
-### 2.2 Windows — install script *(planned)*
+### 2.2 Windows — install script *(scripts committed; anonymous fetch gated on private→public)*
+
+> The committed [`scripts/install.ps1`](../scripts/install.ps1) (real implementation) and [`scripts/install.cmd`](../scripts/install.cmd) (thin shim) are attached to every release by the pipeline ([release-automation.md](release-automation.md) §5). As with §2.1, the `irm … | iex` one-liner only works for outside users once the repo (or a releases-only mirror) is public — the scripts and the binaries they fetch are release assets that currently require auth.
 
 Windows needs **two one-liners**, one per shell, because the PowerShell idiom does not work in `cmd.exe` (`irm`/`iex` are PowerShell cmdlets — pasting them into `cmd.exe` yields `'irm' is not recognized`). This mirrors the Claude CLI installer:
 

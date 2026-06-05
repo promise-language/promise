@@ -322,6 +322,43 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	c.state[ident.Name] = Moved
 }
 
+// tryMoveConsumeCastSubject peels ParenExpr / CastExpr from expr and runs
+// tryMoveConsume on the inner subject. Called at owning-slot stores
+// (field/element assignment, constructor field-init) so an `x as!/as T`
+// wrapper does not bypass the move-consume that the plain `= x` form
+// already performs. The wrapper itself is a no-op in tryMoveConsume (CastExpr
+// is not handled there), so the outer call this complements has already
+// silently returned without consuming the subject — T0754.
+//
+// Scope is intentionally narrow: only owning-slot stores (no per-binding drop
+// flag) need the peel. Local var-decl and local-IdentExpr reassignment keep
+// T0747's view semantics (codegen's isRttiCastBorrow clears the local's drop
+// flag); broadening to tryMoveConsume universally would silently reject those
+// existing accepted shapes.
+func (c *Checker) tryMoveConsumeCastSubject(expr ast.Expr) {
+	// Peel any number of ParenExpr.
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	cast, ok := expr.(*ast.CastExpr)
+	if !ok {
+		return
+	}
+	inner := cast.Expr
+	for {
+		p, ok := inner.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		inner = p.Expr
+	}
+	c.tryMoveConsume(inner)
+}
+
 // --- Call expressions ---
 
 // paramBorrowKind determines whether a parameter is a borrow parameter by
@@ -561,6 +598,9 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 		for _, arg := range e.Args {
 			c.checkExpr(arg.Value)
 			c.tryMoveConsume(arg.Value)
+			// T0754: peel `as!/as T` so the cast subject is consumed too —
+			// enum-variant payload owns the value, no per-arg drop flag.
+			c.tryMoveConsumeCastSubject(arg.Value)
 		}
 		return
 	}
@@ -637,6 +677,10 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 					// arg must not be a borrowed parameter — the outer caller
 					// still drops the original at scope exit.
 					c.tryMoveConsume(arg.Value)
+					// T0754: peel `as!/as T` so the cast subject is consumed too —
+					// the `~` callee takes ownership, no per-arg drop flag at this
+					// site for the cast wrapper.
+					c.tryMoveConsumeCastSubject(arg.Value)
 				} else {
 					c.createBorrowWithKind(arg.Value, kind, e.Pos())
 				}
@@ -649,6 +693,9 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 		for _, arg := range e.Args {
 			c.checkExpr(arg.Value)
 			c.tryMoveConsume(arg.Value)
+			// T0754: peel `as!/as T` so the cast subject is consumed too —
+			// constructor field-init owns the value, no per-arg drop flag.
+			c.tryMoveConsumeCastSubject(arg.Value)
 		}
 	}
 }

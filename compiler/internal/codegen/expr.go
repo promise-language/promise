@@ -2185,6 +2185,12 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// T0754: clear cast subject's drop flag — ownership moves it at
+			// the owning-slot store (super()'s parent constructor takes the
+			// arg into the parent's field), so the subject must not also drop.
+			if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
+				c.clearDropFlag(ident.Name)
+			}
 		}
 		newMethod := parent.LookupMethod("new")
 		if newMethod != nil {
@@ -2238,6 +2244,12 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 		if arg.Name != "" {
 			provided[arg.Name] = c.genCallArgExpr(arg.Value)
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+			// T0754: clear cast subject's drop flag — ownership moves it at
+			// the owning-slot store (parent implicit-ctor field-init), so
+			// the subject must not also drop at scope exit.
+			if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
 				c.clearDropFlag(ident.Name)
 			}
 		}
@@ -2367,6 +2379,12 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			}
 			if !skipClear {
 				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+					c.clearDropFlag(ident.Name)
+				}
+				// T0754: clear cast subject's drop flag — ownership moves it
+				// at the owning-slot store, so the subject's scope-exit drop
+				// must not fire on the same allocation new() now owns.
+				if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
 					c.clearDropFlag(ident.Name)
 				}
 				// B0301: Neutralize source optional for opt! args in new() constructors.
@@ -2566,6 +2584,13 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				}
 			}
 			if isStringField {
+				// T0754: clear cast subject's drop flag — for string field
+				// init via `name as! S` shapes, ownership moves the subject at
+				// this owning-slot store. The branches below handle bare ident
+				// RHS; cover the cast-RHS shape here.
+				if castIdent := c.castSubjectMovableIdent(arg.Value); castIdent != nil {
+					c.clearDropFlag(castIdent.Name)
+				}
 				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 					if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
 						// Has drop flag: move ownership (existing behavior)
@@ -2594,6 +2619,12 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				c.block.NewStore(val, fieldPtr)
 				// Clear drop flag: field value is moved into the constructor
 				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+					c.clearDropFlag(ident.Name)
+				}
+				// T0754: clear cast subject's drop flag — ownership moves it
+				// at the owning-slot store, so the subject's scope-exit drop
+				// must not fire on the same allocation the field now owns.
+				if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
 					c.clearDropFlag(ident.Name)
 				}
 				// B0301: When arg is opt! (force-unwrap), neutralize the source optional's
@@ -5589,6 +5620,12 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// T0754: a cast subject is consumed by ownership at `~`-param sites
+			// — clear the subject's drop flag so it doesn't double-free with the
+			// callee's consume drop. Mirrors the IdentExpr branch above.
+			if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
+				c.clearDropFlag(ident.Name)
+			}
 			c.claimStringTemp(v)
 			c.claimHeapTemp(v) // B0201: prevent double-free for vector literals passed to ~ params
 			// T0522: When the arg is a field-access dup wrapped in an Optional
@@ -5982,6 +6019,13 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 					movedDroppable = true
 				}
 				c.clearDropFlag(ident.Name)
+			} else if castIdent := c.castSubjectMovableIdent(arg.Value); castIdent != nil {
+				// T0754: ownership moves the cast subject into the variant
+				// payload — clear the subject's drop flag so it doesn't double-
+				// free at scope exit with the enum's variant drop. Also marks
+				// movedDroppable so the enum's stmt-temp drop is skipped.
+				movedDroppable = true
+				c.clearDropFlag(castIdent.Name)
 			} else if !movedDroppable {
 				// B0286: Function/method calls returning droppable values
 				// transfer ownership to the enum variant. Skip B0267 temp

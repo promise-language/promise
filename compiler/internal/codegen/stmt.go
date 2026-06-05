@@ -288,6 +288,35 @@ func (c *Compiler) isRttiCastBorrow(expr ast.Expr) bool {
 	return true
 }
 
+// castSubjectMovableIdent peels ParenExpr/CastExpr from expr. If the
+// underlying subject is an IdentExpr that has a tracked drop flag (a movable
+// owned local), returns it. Otherwise returns nil. Used at owning-slot stores
+// (struct field, container element, constructor argument): ownership now
+// moves the cast subject at those sites (T0754), so codegen must
+// symmetrically clear the subject's drop flag — otherwise the subject's
+// scope-exit drop fires on the same allocation the slot now owns and produces
+// a double-free.
+//
+// Borrowed params (no drop flag), ThisExpr, MemberExpr / IndexExpr (handled
+// by the existing dup-on-read paths), and non-cast expressions all return
+// nil: the existing per-shape codegen paths already handle them safely.
+func (c *Compiler) castSubjectMovableIdent(expr ast.Expr) *ast.IdentExpr {
+	expr = unwrapDestructureParens(expr)
+	cast, ok := expr.(*ast.CastExpr)
+	if !ok {
+		return nil
+	}
+	subj := unwrapDestructureParens(cast.Expr)
+	ident, ok := subj.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	if _, hasFlag := c.dropFlags[ident.Name]; !hasFlag {
+		return nil
+	}
+	return ident
+}
+
 // isGetterCallExpr reports whether expr is a MemberExpr whose Field resolves
 // to a getter method on its target's type. Getters return owned values
 // (tracked via trackGetterResult/claimStringTemp), so the LHS of
@@ -5581,9 +5610,32 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	// `b = m[k]!`) — same dup-on-read need as the var-decl path (T0440).
 	if s.Op == ast.OpAssign {
 		isIdxRhs := false
-		if _, ok := s.Value.(*ast.IndexExpr); ok {
+		// T0754: peel ParenExpr / CastExpr so `field = v[i] as! T` reaches the
+		// same dup-on-read path as `field = v[i]`. Ownership now moves the
+		// cast subject at owning-slot stores, but the IndexExpr subject still
+		// returns an alias of the container slot — without the dup, the cast
+		// result would alias the source vector's element and double-free.
+		probe := s.Value
+		for {
+			p, ok := probe.(*ast.ParenExpr)
+			if !ok {
+				break
+			}
+			probe = p.Expr
+		}
+		if cast, ok := probe.(*ast.CastExpr); ok {
+			probe = cast.Expr
+			for {
+				p, ok := probe.(*ast.ParenExpr)
+				if !ok {
+					break
+				}
+				probe = p.Expr
+			}
+		}
+		if _, ok := probe.(*ast.IndexExpr); ok {
 			isIdxRhs = true
-		} else if unwrap, ok := s.Value.(*ast.OptionalUnwrapExpr); ok {
+		} else if unwrap, ok := probe.(*ast.OptionalUnwrapExpr); ok {
 			if _, ok := unwrap.Expr.(*ast.IndexExpr); ok {
 				isIdxRhs = true
 			}
@@ -5998,6 +6050,12 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// T0754: clear cast subject's drop flag — ownership moves it at
+			// the owning-slot store, so the subject's scope-exit drop must
+			// not fire on the same allocation the field now owns.
+			if ident := c.castSubjectMovableIdent(s.Value); ident != nil {
+				c.clearDropFlag(ident.Name)
+			}
 			// B0168: Claim string temp — ownership transferred to field.
 			c.claimStringTemp(val)
 			// B0233: Claim heap temp — ownership transferred to field.
@@ -6119,6 +6177,12 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 		// Clear drop flag on RHS if it's being moved via simple assign
 		if s.Op == ast.OpAssign {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+			// T0754: clear cast subject's drop flag — ownership moves it at
+			// the owning-slot store, so the subject's scope-exit drop must
+			// not fire on the same allocation the container element now owns.
+			if ident := c.castSubjectMovableIdent(s.Value); ident != nil {
 				c.clearDropFlag(ident.Name)
 			}
 			// B0168: Claim string temp — ownership transferred to container.

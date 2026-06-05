@@ -277,3 +277,169 @@ test_downcast_reassign_local_from_owned_temp() `test {
   assert(c.radius == 9.0, "reassigned local from owned-temp cast keeps ownership");
   assert(c.name == "made", "reassigned owned-temp reads heap field, no leak");
 }
+
+// --- RTTI downcast into an owning slot: must move subject (T0754) ---
+// obj.field / v[i] / Holder(held: …) have no per-binding drop flag, so the
+// per-local T0747 clear cannot reach them. Owning-slot stores must consume
+// the cast subject, just like the equivalent non-cast assignment. Assertions
+// read the inherited heap `name` field to surface a missed move as a use-
+// after-free / double-free; the radius is also checked to confirm the new
+// value reached the slot.
+
+type Holder {
+  Shape held;
+}
+
+test_downcast_field_target_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 2.0);
+  h := Holder(held: Circle(name: "init", radius: 0.0));
+  h.held = s as! Circle;
+  assert((h.held as! Circle).radius == 2.0, "field target from cast-of-owned-local radius");
+  assert(h.held.name == "src", "field target from cast-of-owned-local name (UAF probe)");
+}
+
+test_downcast_element_target_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 3.0);
+  Shape[] v = [];
+  v.push(Circle(name: "init", radius: 0.0));
+  v[0] = s as! Circle;
+  assert((v[0] as! Circle).radius == 3.0, "element target from cast-of-owned-local radius");
+  assert(v[0].name == "src", "element target from cast-of-owned-local name (UAF probe)");
+}
+
+test_downcast_ctor_arg_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 4.0);
+  h := Holder(held: s as! Circle);
+  assert((h.held as! Circle).radius == 4.0, "ctor arg from cast-of-owned-local radius");
+  assert(h.held.name == "src", "ctor arg from cast-of-owned-local name (UAF probe)");
+}
+
+test_downcast_field_target_from_owned_temp() `test {
+  // Regression: owned-temp factory subject — must still pass after T0754.
+  h := Holder(held: Circle(name: "init", radius: 0.0));
+  h.held = make_circle() as! Circle;
+  assert((h.held as! Circle).radius == 9.0, "field target from cast-of-owned-temp radius");
+  assert(h.held.name == "made", "field target from cast-of-owned-temp name");
+}
+
+test_downcast_element_target_from_vector_index() `test {
+  // Cast subject is v[i] — exercises the isIdxRhs paren/cast peel in stmt.go.
+  Shape[] src = [];
+  src.push(Circle(name: "src", radius: 5.0));
+  Shape[] dst = [];
+  dst.push(Circle(name: "init", radius: 0.0));
+  dst[0] = src[0] as! Circle;
+  assert((dst[0] as! Circle).radius == 5.0, "element target from cast-of-indexed radius");
+  assert(dst[0].name == "src", "element target from cast-of-indexed name (UAF probe)");
+}
+
+// --- RTTI downcast as a `~` callee arg / enum-variant constructor arg (T0754) ---
+// Sibling owning contexts to obj.field / v[i] / Holder(held: …) — the callee
+// (`~Circle`) or the enum variant payload takes ownership of the cast result.
+// Without clearing the subject's drop flag at the call site, the subject and the
+// new owner both drop the same allocation → double-free at scope exit.
+
+consume_circle(~Circle c) f64 {
+  return c.radius;
+}
+
+test_downcast_tilde_param_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 2.0);
+  f64 r = consume_circle(s as! Circle);
+  assert(r == 2.0, "~ param from cast-of-owned-local");
+}
+
+enum DowncastVariant {
+  Wrap(Circle c),
+}
+
+test_downcast_enum_variant_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 6.5);
+  DowncastVariant v = DowncastVariant.Wrap(s as! Circle);
+  match v {
+    Wrap(c) => {
+      assert(c.radius == 6.5, "enum variant from cast-of-owned-local radius");
+      assert(c.name == "src", "enum variant from cast-of-owned-local name (UAF probe)");
+    },
+  }
+}
+
+// --- RTTI downcast into an explicit `new()` constructor / super() (T0754) ---
+// The implicit-constructor sites (Holder(held: …)) above exercise the field-init
+// path in genConstructorCallMono. An EXPLICIT `new()` method routes through a
+// distinct codegen branch (the new-method args loop), as does `super(...)` from a
+// child constructor. Both need the same cast-subject drop-flag clear or the
+// inherited heap field is double-freed at scope exit.
+
+type HolderExplicit {
+  Circle held;
+  new(~this, ~Circle c) {
+    this.held = c;
+  }
+}
+
+test_downcast_explicit_new_arg_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 4.5);
+  h := HolderExplicit(c: s as! Circle);
+  assert(h.held.radius == 4.5, "explicit new() arg from cast-of-owned-local radius");
+  assert(h.held.name == "src", "explicit new() arg from cast-of-owned-local name (UAF probe)");
+}
+
+// Parent has explicit new() — super() call routes through the parent-has-new
+// branch in genSuperCall.
+type AnimalBase {
+  Circle avatar;
+  new(~this, ~Circle a) {
+    this.avatar = a;
+  }
+}
+
+type Pet is AnimalBase {
+  new(~this, ~Shape s) {
+    super(a: s as! Circle);
+  }
+}
+
+test_downcast_super_arg_explicit_parent_new() `test {
+  Shape s = Circle(name: "src", radius: 7.0);
+  p := Pet(s: s);
+  assert(p.avatar.radius == 7.0, "super-arg cast (explicit parent new) radius");
+  assert(p.avatar.name == "src", "super-arg cast (explicit parent new) name (UAF probe)");
+}
+
+// Parent has implicit constructor — super() call routes through the
+// parent-implicit-ctor branch in genSuperCall.
+type SimpleHolder {
+  Circle held;
+}
+
+type ChildHolder is SimpleHolder {
+  new(~this, ~Shape s) {
+    super(held: s as! Circle);
+  }
+}
+
+test_downcast_super_arg_implicit_parent() `test {
+  Shape s = Circle(name: "src", radius: 8.0);
+  c := ChildHolder(s: s);
+  assert(c.held.radius == 8.0, "super-arg cast (implicit parent ctor) radius");
+  assert(c.held.name == "src", "super-arg cast (implicit parent ctor) name (UAF probe)");
+}
+
+// Paren-wrapped subjects exercise the unwrapDestructureParens / inner-paren-peel
+// branch in both ownership/expr.go (tryMoveConsumeCastSubject) and
+// codegen/stmt.go (castSubjectMovableIdent).
+
+test_downcast_field_target_paren_wrapped_subject() `test {
+  Shape s = Circle(name: "src", radius: 9.5);
+  h := Holder(held: Circle(name: "init", radius: 0.0));
+  h.held = (s) as! Circle;
+  assert(h.held.name == "src", "paren-wrapped subject inside cast — name (UAF probe)");
+}
+
+test_downcast_field_target_paren_wrapped_cast() `test {
+  Shape s = Circle(name: "src", radius: 10.5);
+  h := Holder(held: Circle(name: "init", radius: 0.0));
+  h.held = (s as! Circle);
+  assert(h.held.name == "src", "paren-wrapped whole cast expr — name (UAF probe)");
+}

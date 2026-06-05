@@ -558,6 +558,20 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		}
 	}
 
+	// T0754: an RTTI cast (`x as T` / `x as! T`) into an owning slot — a struct
+	// field or container element — must consume its subject. tryMoveConsume
+	// above is a no-op on CastExpr (the CastExpr case in checkExpr only
+	// recurses), so without this peel the cast wrapper silently aliases the
+	// subject into the field/element and both scopes double-free. IdentExpr
+	// targets keep T0747's view semantics (codegen clears the local's drop
+	// flag); only owning slots without per-binding drop flags need the peel.
+	if s.Op == ast.OpAssign {
+		switch s.Target.(type) {
+		case *ast.MemberExpr, *ast.IndexExpr:
+			c.tryMoveConsumeCastSubject(s.Value)
+		}
+	}
+
 	// Simple assignment resurrects the target variable.
 	if s.Op == ast.OpAssign {
 		if ident, ok := s.Target.(*ast.IdentExpr); ok {

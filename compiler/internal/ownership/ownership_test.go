@@ -9707,3 +9707,209 @@ func TestT0652_IteratorChainAllowed(t *testing.T) {
 		}
 	`)
 }
+
+// === T0754: RTTI cast into an owning slot consumes the subject ===
+//
+// An `x as!/as T` flowing into an owning slot (field / element / constructor
+// arg) must move-consume its subject — owning slots have no per-binding drop
+// flag, so without consumption the cast wrapper aliases the subject's
+// instance and both scopes double-free. Ownership now propagates the same
+// rejects through the cast wrapper that the plain `= x` assignment already
+// triggers.
+
+// Borrowed param subject — must reject with the standard `~` affordance.
+func TestT0754_CastIntoFieldFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		type Holder { Shape held; }
+		helper(Shape s) {
+			h := Holder(held: Circle(name: "init", radius: 0.0));
+			h.held = s as! Circle;
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			helper(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// MemberExpr cast subject from a droppable owner — must reject via the
+// existing B0341 field-move check the plain `= outer.s` would hit.
+func TestT0754_CastIntoFieldFromMemberRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		type Holder { Shape held; }
+		type Outer { Shape s; }
+		test() {
+			o := Outer(s: Circle(name: "src", radius: 2.0));
+			h := Holder(held: Circle(name: "init", radius: 0.0));
+			h.held = o.s as! Circle;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 's' out of")
+}
+
+// Owned-local cast subject — accepted, but the subject becomes Moved so a
+// subsequent use errors. Confirms the ownership pass marks the subject Moved
+// at the owning-slot store.
+func TestT0754_CastIntoFieldFromOwnedLocalMarksMoved(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		type Holder { Shape held; }
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			h := Holder(held: Circle(name: "init", radius: 0.0));
+			h.held = s as! Circle;
+			Shape t = s;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Element-target (IndexExpr) shape — same propagation through the cast at
+// the v[i] LHS owning slot.
+func TestT0754_CastIntoElementFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper(Shape s) {
+			Shape[] v = [];
+			v.push(Circle(name: "init", radius: 0.0));
+			v[0] = s as! Circle;
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			helper(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Constructor-arg shape — `Holder(held: s as! Circle)` likewise consumes.
+func TestT0754_CastIntoCtorArgFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		type Holder { Shape held; }
+		helper(Shape s) Holder {
+			return Holder(held: s as! Circle);
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			h := helper(s);
+			_ = h;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// `~`-param call-arg shape — the explicit `~Circle` consume param triggers the
+// sig != nil + RefMut branch (ownership/expr.go:679). The plain `consume(s)`
+// already errors with the same diagnostic; the cast wrapper must not bypass it.
+func TestT0754_CastIntoTildeParamFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		consume_it(~Circle c) {
+			_ = c;
+		}
+		helper(Shape s) {
+			consume_it(s as! Circle);
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			helper(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Enum-variant constructor shape — the variant-constructor branch
+// (ownership/expr.go:597) consumes args. The cast wrapper must not bypass it
+// or the borrowed instance is silently stored in the variant payload.
+func TestT0754_CastIntoEnumVariantFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		enum Wrap { Hold(Circle c) }
+		helper(Shape s) Wrap {
+			return Wrap.Hold(s as! Circle);
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			w := helper(s);
+			_ = w;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Inner-paren-peel coverage — a paren-wrapped cast subject `(s) as! Circle`
+// exercises the second peel loop inside tryMoveConsumeCastSubject. The
+// behavior must match the unwrapped form.
+func TestT0754_CastIntoFieldFromBorrowedParamRejectedParenSubject(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		type Holder { Shape held; }
+		helper(Shape s) {
+			h := Holder(held: Circle(name: "init", radius: 0.0));
+			h.held = (s) as! Circle;
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			helper(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Outer-paren-peel coverage — `h.held = (s as! Circle)` wraps the whole cast
+// in parens, exercising the first peel loop (outer ParenExpr removal).
+func TestT0754_CastIntoFieldFromBorrowedParamRejectedParenCast(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		type Holder { Shape held; }
+		helper(Shape s) {
+			h := Holder(held: Circle(name: "init", radius: 0.0));
+			h.held = (s as! Circle);
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			helper(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}

@@ -14,24 +14,65 @@ name: Release
 on:
   push:
     tags: ['epoch-*']   # covers epoch-YYYY.N (stable) and epoch-next (pre-release)
+  # Manual dispatch for TESTING the pipeline without cutting a tag: pick a host (or
+  # all) and whether to actually publish. With publish=false it builds + uploads the
+  # binaries as run artifacts but creates NO GitHub release — a cheap way to validate
+  # artifact creation on a single platform (e.g. linux only, 1x) without burning the
+  # macOS 10x / Windows 2x multipliers.
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Host(s) to build"
+        type: choice
+        default: all
+        options:
+          - all
+          - linux-amd64
+          - darwin-arm64
+          - windows-amd64
+      publish:
+        description: "Create the GitHub release (off = build + upload artifacts only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
+  # Resolve the host(s) to build into the blobs + compiler matrices. On a tag push
+  # there is no `platform` input → defaults to all 3. On workflow_dispatch it honors
+  # the selection, so non-selected hosts never spin up a runner (a job-level `if`
+  # cannot see `matrix`, hence this setup job).
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      blobs: ${{ steps.pick.outputs.blobs }}
+      compiler: ${{ steps.pick.outputs.compiler }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          PLATFORM: ${{ github.event.inputs.platform }}
+        run: |
+          P="${PLATFORM:-all}"
+          blobs='[{"host":"linux-amd64","runner":"ubuntu-24.04"},{"host":"darwin-arm64","runner":"macos-latest"},{"host":"windows-amd64","runner":"windows-latest"}]'
+          compiler='[{"host":"linux-amd64","runner":"ubuntu-24.04","ext":""},{"host":"darwin-arm64","runner":"macos-latest","ext":""},{"host":"windows-amd64","runner":"windows-latest","ext":".exe"}]'
+          # Deferred (docs/release-automation.md §7): darwin-amd64 (macos-13), linux-arm64.
+          if [ "$P" = "all" ]; then
+            echo "blobs={\"include\":$blobs}" >> "$GITHUB_OUTPUT"
+            echo "compiler={\"include\":$compiler}" >> "$GITHUB_OUTPUT"
+          else
+            echo "blobs={\"include\":$(echo "$blobs" | jq -c --arg h "$P" '[.[]|select(.host==$h)]')}" >> "$GITHUB_OUTPUT"
+            echo "compiler={\"include\":$(echo "$compiler" | jq -c --arg h "$P" '[.[]|select(.host==$h)]')}" >> "$GITHUB_OUTPUT"
+          fi
+
   # 1–2. Prebuilt blobs + manifest (cached; the LLVM download is the expensive part).
   blobs:
     name: blobs ${{ matrix.host }}
+    needs: setup
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { host: linux-amd64,   runner: ubuntu-24.04 }
-          - { host: darwin-arm64,  runner: macos-latest }
-          - { host: windows-amd64, runner: windows-latest }
-          # Deferred (docs/release-automation.md §7):
-          # - { host: darwin-amd64, runner: macos-13 }  # Intel macOS — unverifiable (no working Xcode CLT).
-          # - { host: linux-arm64,  runner: <arm64> }   # arm64 runner + arm64 LLVM blobs (T0524/T0530) + musl CRT.
+      matrix: ${{ fromJSON(needs.setup.outputs.blobs) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -85,14 +126,10 @@ jobs:
   # 3–6. Per-host thin + full compiler, manifest embedded, stub compiled+embedded.
   compiler:
     name: compiler ${{ matrix.host }}
-    needs: [blobs]
+    needs: [setup, blobs]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { host: linux-amd64,   runner: ubuntu-24.04,   ext: '' }
-          - { host: darwin-arm64,  runner: macos-latest,   ext: '' }
-          - { host: windows-amd64, runner: windows-latest, ext: '.exe' }
+      matrix: ${{ fromJSON(needs.setup.outputs.compiler) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
@@ -165,9 +202,11 @@ jobs:
             dist/deps
             dist/manifest-${{ matrix.host }}.json
 
-  # 7. Integrity gate, checksum, and cut the Release.
+  # 7. Integrity gate, checksum, and cut the Release. Skipped on a build-only
+  # dispatch (publish=false); runs on a tag push, or a dispatch with publish=true.
   publish:
     needs: [compiler]
+    if: ${{ github.event_name == 'push' || inputs.publish }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6

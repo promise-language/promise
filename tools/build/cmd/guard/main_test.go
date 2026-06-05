@@ -1,7 +1,10 @@
 package main
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/promise-language/promise/tools/build/common"
@@ -104,7 +107,7 @@ func TestCheckGit(t *testing.T) {
 		{"reset --soft", []string{"git", "reset", "--soft", "HEAD~1"}, false},
 	}
 	for _, tt := range tests {
-		reason := checkGit(tt.tokens)
+		reason := checkGit(tt.tokens, "")
 		if tt.blocked && reason == "" {
 			t.Errorf("%s: expected blocked", tt.name)
 		}
@@ -149,7 +152,7 @@ func TestCheckSingle(t *testing.T) {
 		"apt install vim",
 	}
 	for _, cmd := range blocked {
-		if checkSingle(cmd) == "" {
+		if checkSingle(cmd, "") == "" {
 			t.Errorf("expected %q to be blocked", cmd)
 		}
 	}
@@ -161,17 +164,17 @@ func TestCheckSingle(t *testing.T) {
 		"rm file.txt",
 	}
 	for _, cmd := range allowed {
-		if reason := checkSingle(cmd); reason != "" {
+		if reason := checkSingle(cmd, ""); reason != "" {
 			t.Errorf("expected %q to be allowed, got: %s", cmd, reason)
 		}
 	}
 }
 
 func TestCheckAll(t *testing.T) {
-	if checkAll("echo hi && git push") == "" {
+	if checkAll("echo hi && git push", "") == "" {
 		t.Error("expected chain with git push to be blocked")
 	}
-	if checkAll("git status && echo ok") != "" {
+	if checkAll("git status && echo ok", "") != "" {
 		t.Error("expected safe chain to be allowed")
 	}
 }
@@ -201,10 +204,10 @@ func TestHasSubcommand(t *testing.T) {
 }
 
 func TestBashRecurse(t *testing.T) {
-	if checkSingle(`bash -c "git push"`) == "" {
+	if checkSingle(`bash -c "git push"`, "") == "" {
 		t.Error("expected bash -c git push to be blocked")
 	}
-	if checkSingle(`sh -c "echo hello"`) != "" {
+	if checkSingle(`sh -c "echo hello"`, "") != "" {
 		t.Error("expected sh -c echo hello to be allowed")
 	}
 }
@@ -557,6 +560,209 @@ func TestIsAllowedCopyDest(t *testing.T) {
 		t.Run(tt.dest, func(t *testing.T) {
 			if got := isAllowedCopyDest(tt.dest); got != tt.want {
 				t.Errorf("isAllowedCopyDest(%q) = %v, want %v", tt.dest, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckGitBranchTargets covers the string-level branch-hygiene decisions
+// that short-circuit before any git invocation (creation flags, `--`, `-`,
+// `main`, path-like targets, branch listing/deletion). The ancestry- and
+// branch-resolution paths that shell out to git are covered by
+// TestCheckGitCheckoutAncestry against a real repo.
+func TestCheckGitBranchTargets(t *testing.T) {
+	tests := []struct {
+		name    string
+		fn      func([]string, string) string
+		tokens  []string
+		blocked bool
+	}{
+		// switch: creation and non-main switching blocked; main allowed.
+		{"switch -c", checkGitSwitch, []string{"git", "switch", "-c", "foo"}, true},
+		{"switch --create", checkGitSwitch, []string{"git", "switch", "--create", "foo"}, true},
+		{"switch --orphan", checkGitSwitch, []string{"git", "switch", "--orphan", "foo"}, true},
+		{"switch -", checkGitSwitch, []string{"git", "switch", "-"}, true},
+		{"switch main", checkGitSwitch, []string{"git", "switch", "main"}, false},
+		{"switch origin/main", checkGitSwitch, []string{"git", "switch", "origin/main"}, false},
+		// checkout: branch creation blocked; file/main/path forms allowed.
+		{"checkout -b", checkGitCheckout, []string{"git", "checkout", "-b", "foo"}, true},
+		{"checkout -B", checkGitCheckout, []string{"git", "checkout", "-B", "foo"}, true},
+		{"checkout --orphan", checkGitCheckout, []string{"git", "checkout", "--orphan", "foo"}, true},
+		{"checkout -", checkGitCheckout, []string{"git", "checkout", "-"}, true},
+		{"checkout main", checkGitCheckout, []string{"git", "checkout", "main"}, false},
+		{"checkout -- file", checkGitCheckout, []string{"git", "checkout", "--", "f.txt"}, false},
+		{"checkout main -- file", checkGitCheckout, []string{"git", "checkout", "main", "--", "f.txt"}, false},
+		{"checkout path-like", checkGitCheckout, []string{"git", "checkout", "src/main.go"}, false},
+		{"checkout dotted path", checkGitCheckout, []string{"git", "checkout", "file.txt"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := tt.fn(tt.tokens, "")
+			if tt.blocked && reason == "" {
+				t.Errorf("expected blocked, got allowed")
+			}
+			if !tt.blocked && reason != "" {
+				t.Errorf("expected allowed, got: %s", reason)
+			}
+		})
+	}
+}
+
+// TestCheckGitBranchCreate covers `git branch`: listing/deletion/move are
+// allowed, creating a non-main branch is blocked, (force-)moving main is
+// allowed. None of these shell out to git.
+func TestCheckGitBranchCreate(t *testing.T) {
+	tests := []struct {
+		name    string
+		tokens  []string
+		blocked bool
+	}{
+		{"list", []string{"git", "branch"}, false},
+		{"list -a", []string{"git", "branch", "-a"}, false},
+		{"list -v", []string{"git", "branch", "-v"}, false},
+		{"delete", []string{"git", "branch", "-d", "foo"}, false},
+		{"force delete", []string{"git", "branch", "-D", "foo"}, false},
+		{"rename", []string{"git", "branch", "-m", "a", "b"}, false},
+		{"show-current", []string{"git", "branch", "--show-current"}, false},
+		{"set main upstream", []string{"git", "branch", "-f", "main", "origin/main"}, false},
+		{"create non-main", []string{"git", "branch", "feature"}, true},
+		{"create main", []string{"git", "branch", "main"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := checkGitBranch(tt.tokens)
+			if tt.blocked && reason == "" {
+				t.Errorf("expected blocked, got allowed")
+			}
+			if !tt.blocked && reason != "" {
+				t.Errorf("expected allowed, got: %s", reason)
+			}
+		})
+	}
+}
+
+func TestEffectiveGitDir(t *testing.T) {
+	tests := []struct {
+		tokens []string
+		cwd    string
+		want   string
+	}{
+		{[]string{"git", "status"}, "/repo", "/repo"},
+		{[]string{"git", "-C", "sub", "status"}, "/repo", "/repo/sub"},
+		{[]string{"git", "-C", "/abs/sub", "status"}, "/repo", "/abs/sub"},
+		{[]string{"git", "-c", "k=v", "checkout", "main"}, "/repo", "/repo"},
+		{[]string{"git", "--git-dir", "x", "status"}, "/repo", "/repo"},
+	}
+	for _, tt := range tests {
+		if got := effectiveGitDir(tt.tokens, tt.cwd); got != tt.want {
+			t.Errorf("effectiveGitDir(%v, %q) = %q, want %q", tt.tokens, tt.cwd, got, tt.want)
+		}
+	}
+}
+
+func TestInManagedRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root, err := common.FindRoot()
+	if err != nil {
+		t.Fatalf("find root: %v", err)
+	}
+	if !inManagedRepo(root) {
+		t.Errorf("expected repo root %q to be managed", root)
+	}
+	if !inManagedRepo(filepath.Join(root, "tools", "build")) {
+		t.Errorf("expected a subdir of the repo to be managed")
+	}
+	// A fresh non-git temp dir outside the project tree is exempt.
+	if tmp := t.TempDir(); inManagedRepo(tmp) {
+		t.Errorf("expected non-repo temp dir %q to be exempt", tmp)
+	}
+}
+
+// TestCheckGitCheckoutAncestry exercises the git-backed paths (local-branch
+// detection and origin/HEAD ancestry) against a real repo with a remote: an
+// ancestor commit may be detached onto, a commit ahead of origin/HEAD may not,
+// a non-main branch switch is blocked, and file checkouts pass through.
+func TestCheckGitCheckoutAncestry(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	remote := t.TempDir()
+
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "f"), []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if out, err := exec.Command("git", "init", "--bare", remote).CombinedOutput(); err != nil {
+		t.Fatalf("init bare: %v\n%s", err, out)
+	}
+	git("init", "-b", "main")
+	git("config", "user.email", "t@example.com")
+	git("config", "user.name", "Tester")
+	write("1")
+	git("add", "-A")
+	git("commit", "-m", "c1")
+	c1 := git("rev-parse", "HEAD")
+	write("2")
+	git("add", "-A")
+	git("commit", "-m", "c2")
+	git("remote", "add", "origin", remote)
+	git("push", "-u", "origin", "main")
+	git("remote", "set-head", "origin", "main")
+	// A commit ahead of origin/main, reachable only via a side branch.
+	git("checkout", "-b", "feature")
+	write("3")
+	git("add", "-A")
+	git("commit", "-m", "c3")
+	c3 := git("rev-parse", "HEAD")
+	git("checkout", "main")
+
+	cases := []struct {
+		name    string
+		tokens  []string
+		blocked bool
+	}{
+		{"ancestor sha allowed", []string{"git", "checkout", c1}, false},
+		{"main allowed", []string{"git", "checkout", "main"}, false},
+		{"ahead sha blocked", []string{"git", "checkout", c3}, true},
+		{"feature branch blocked", []string{"git", "checkout", "feature"}, true},
+		{"file checkout allowed", []string{"git", "checkout", "--", "f"}, false},
+		{"file from main allowed", []string{"git", "checkout", "main", "--", "f"}, false},
+		{"unknown ref blocked", []string{"git", "checkout", "no-such-thing"}, true},
+		{"detach ancestor allowed", []string{"git", "switch", "--detach", c1}, false},
+		{"detach ahead blocked", []string{"git", "switch", "--detach", c3}, true},
+		{"switch feature blocked", []string{"git", "switch", "feature"}, true},
+		{"switch main allowed", []string{"git", "switch", "main"}, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			var reason string
+			switch tt.tokens[1] {
+			case "checkout":
+				reason = checkGitCheckout(tt.tokens, dir)
+			case "switch":
+				reason = checkGitSwitch(tt.tokens, dir)
+			}
+			if tt.blocked && reason == "" {
+				t.Errorf("expected blocked, got allowed")
+			}
+			if !tt.blocked && reason != "" {
+				t.Errorf("expected allowed, got: %s", reason)
 			}
 		})
 	}

@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -120,7 +121,7 @@ func main() {
 			printDeny("guard: could not extract command from hook input")
 			return
 		}
-		if reason := checkAll(input.ToolInput.Command); reason != "" {
+		if reason := checkAll(input.ToolInput.Command, input.CWD); reason != "" {
 			printDeny(reason)
 		} else {
 			notifyContext(input, tool, true)
@@ -458,13 +459,29 @@ func splitCommands(cmd string) []string {
 }
 
 // checkAll checks all sub-commands. Returns the first deny reason, or "".
-func checkAll(cmd string) string {
+//
+// cwd is the shell's working directory; a leading `cd <path>` in the chain
+// updates it for subsequent sub-commands so per-command checks (e.g. git
+// branch hygiene, which is scoped to the super/submodule the command runs in)
+// see the directory the command would actually execute under.
+func checkAll(cmd, cwd string) string {
 	for _, part := range splitCommands(cmd) {
 		trimmed := strings.TrimSpace(part)
-		if trimmed != "" {
-			if reason := checkSingle(trimmed); reason != "" {
-				return reason
+		if trimmed == "" {
+			continue
+		}
+		// Track `cd <path>` so the next sub-command's cwd is correct (e.g.
+		// `cd flow && git checkout <sha>` must resolve git in the submodule).
+		tokens := tokenize(trimmed)
+		if len(tokens) >= 2 && tokens[0] == "cd" {
+			target := stripQuotes(tokens[1])
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(cwd, target)
 			}
+			cwd = filepath.Clean(target)
+		}
+		if reason := checkSingle(trimmed, cwd); reason != "" {
+			return reason
 		}
 	}
 	return ""
@@ -473,7 +490,7 @@ func checkAll(cmd string) string {
 // ── Single command check ────────────────────────────────────────────────────
 
 // checkSingle checks a single command (no shell operators) for dangerous patterns.
-func checkSingle(cmd string) string {
+func checkSingle(cmd, cwd string) string {
 	tokens := tokenize(cmd)
 	if len(tokens) == 0 {
 		return ""
@@ -490,11 +507,11 @@ func checkSingle(cmd string) string {
 	if (program == "bash" || program == "sh") && len(args) >= 3 && args[1] == "-c" {
 		inner := strings.Join(args[2:], " ")
 		inner = stripQuotes(inner)
-		return checkAll(inner)
+		return checkAll(inner, cwd)
 	}
 
 	if program == "git" {
-		return checkGit(args)
+		return checkGit(args, cwd)
 	}
 
 	if program == "rm" {
@@ -517,7 +534,7 @@ func checkSingle(cmd string) string {
 	pkgInstallers := map[string]bool{
 		"npm": true, "pip": true, "pip3": true,
 		"cargo": true,
-		"apt": true, "apt-get": true,
+		"apt":   true, "apt-get": true,
 	}
 	if pkgInstallers[program] && hasSubcommand(args, "install") {
 		return fmt.Sprintf("blocked: '%s install' (unreviewed package installation)", program)
@@ -528,7 +545,7 @@ func checkSingle(cmd string) string {
 
 // ── Git checks ──────────────────────────────────────────────────────────────
 
-func checkGit(tokens []string) string {
+func checkGit(tokens []string, cwd string) string {
 	subcommand := findGitSubcommand(tokens)
 	hasForce, hasHard, hasShortF := false, false, false
 
@@ -553,7 +570,302 @@ func checkGit(tokens []string) string {
 		return "blocked: 'git reset --hard' (can destroy uncommitted work)"
 	}
 
+	// Branch hygiene: this project works ONLY on `main` (tracking origin/main).
+	// Ad-hoc branches strand work that never reaches origin/main — when the flow
+	// pushes `main`, anything committed on another branch is lost in the local
+	// clone. So block branch creation and switching to any branch other than
+	// `main`. A *detached* checkout is allowed only onto origin/HEAD or an
+	// ancestor of it (e.g. positioning a submodule gitlink) — never onto a
+	// commit ahead of / diverged from the pushed history. File checkouts
+	// (`git checkout -- <file>` / `git checkout main -- <file>`), branch
+	// listing, rebase, and worktrees are all still allowed.
+	//
+	// This only applies inside the superproject and its submodules — the clones
+	// whose state the flow pushes. Temporary repos and worktrees outside the
+	// project tree are exempt. When ancestry can't be verified we fail closed.
+	switch subcommand {
+	case "switch", "checkout", "branch":
+		if !inManagedRepo(effectiveGitDir(tokens, cwd)) {
+			return ""
+		}
+	}
+	gitDir := effectiveGitDir(tokens, cwd)
+	switch subcommand {
+	case "switch":
+		return checkGitSwitch(tokens, gitDir)
+	case "checkout":
+		return checkGitCheckout(tokens, gitDir)
+	case "branch":
+		return checkGitBranch(tokens)
+	}
+
 	return ""
+}
+
+// isMainRef reports whether a ref token names the one branch this project works
+// on. `main` (local) and `origin/main` (its upstream) are the only allowed
+// switch/branch targets.
+func isMainRef(s string) bool { return s == "main" || s == "origin/main" }
+
+// gitSubArgs returns the tokens that follow the git subcommand, skipping the
+// `git` program token and any global flags (including the value-taking ones).
+func gitSubArgs(tokens []string) []string {
+	i := 1
+	for i < len(tokens) {
+		t := tokens[i]
+		switch t {
+		case "-c", "-C", "--git-dir", "--work-tree":
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "-") {
+			i++
+			continue
+		}
+		return tokens[i+1:] // tokens after the subcommand itself
+	}
+	return nil
+}
+
+// checkGitSwitch blocks `git switch` that creates a branch (-c/-C/--orphan) or
+// switches to any branch other than `main`. A detached switch (`--detach
+// <commit>`) is allowed only onto origin/HEAD or an ancestor of it.
+func checkGitSwitch(tokens []string, gitDir string) string {
+	args := gitSubArgs(tokens)
+	detach := false
+	for _, a := range args {
+		if a == "-c" || a == "-C" || a == "--create" || a == "--orphan" {
+			return "blocked: 'git switch -c/--create' creates a branch. This project works only on main (tracking origin/main)."
+		}
+		if a == "-d" || a == "--detach" {
+			detach = true
+		}
+	}
+	for _, a := range args {
+		if a == "-" { // switch to previous branch — not guaranteed to be main
+			return "blocked: 'git switch -' switches off main; only 'main' is allowed (work stays on main tracking origin/main)."
+		}
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		if isMainRef(a) {
+			return ""
+		}
+		if detach {
+			return checkDetachTarget(gitDir, a)
+		}
+		return fmt.Sprintf("blocked: 'git switch %s' — only 'main' is allowed (work stays on main tracking origin/main).", a)
+	}
+	return ""
+}
+
+// checkGitCheckout blocks `git checkout` that creates a branch (-b/-B/--orphan)
+// or switches to a non-main branch, while still allowing file checkouts and
+// detaching onto origin/HEAD-or-ancestor commits. A `--` separator or a
+// path-like target (contains '/', '.', or '~') is treated as a file operation
+// and allowed. A bare token is resolved: a local branch other than `main` is a
+// branch switch (blocked); otherwise it is treated as a commit-ish and allowed
+// only if it is origin/HEAD or an ancestor of it.
+func checkGitCheckout(tokens []string, gitDir string) string {
+	args := gitSubArgs(tokens)
+	for _, a := range args {
+		if a == "-b" || a == "-B" || a == "--orphan" {
+			return "blocked: 'git checkout -b/-B' creates a branch. This project works only on main (tracking origin/main)."
+		}
+		if a == "--" {
+			return "" // explicit file mode
+		}
+	}
+	for _, a := range args {
+		if a == "-" {
+			return "blocked: 'git checkout -' switches off main; only 'main' is allowed."
+		}
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		if isMainRef(a) {
+			return "" // switching to main, or `git checkout main -- <file>`
+		}
+		if strings.ContainsAny(a, "/.~") {
+			return "" // path-like → file checkout
+		}
+		if isLocalBranch(gitDir, a) {
+			return fmt.Sprintf("blocked: 'git checkout %s' switches to a non-main branch. This project works only on main; commit on main so the flow can push it.", a)
+		}
+		// Not a local branch → treat as a commit-ish (sha/tag). Allow only if it
+		// is origin/HEAD or an ancestor (e.g. positioning a submodule gitlink).
+		return checkDetachTarget(gitDir, a)
+	}
+	return ""
+}
+
+// checkGitBranch blocks `git branch` that CREATES (or copies) a branch other
+// than `main`. Listing (`git branch`, `-a`, `-v`, …), deletion (`-d`/`-D`),
+// move/rename (`-m`/`-M`), and force-moving `main` itself (`git branch -f main
+// origin/main`) are all allowed — only the creation of a non-main branch is
+// blocked.
+func checkGitBranch(tokens []string) string {
+	args := gitSubArgs(tokens)
+	for _, a := range args {
+		switch {
+		case a == "-d" || a == "-D" || a == "--delete" ||
+			a == "-m" || a == "-M" || a == "--move" ||
+			a == "--list" || a == "-a" || a == "--all" ||
+			a == "-r" || a == "--remotes" || a == "--show-current" ||
+			a == "--unset-upstream" || a == "--edit-description":
+			return "" // not a plain create
+		case strings.HasPrefix(a, "--contains") || strings.HasPrefix(a, "--merged") ||
+			strings.HasPrefix(a, "--no-merged") || strings.HasPrefix(a, "--points-at") ||
+			strings.HasPrefix(a, "--set-upstream-to") || strings.HasPrefix(a, "--sort") ||
+			strings.HasPrefix(a, "--format"):
+			return "" // informational/query form
+		}
+	}
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		if isMainRef(a) {
+			return "" // creating/force-moving 'main' is allowed
+		}
+		return fmt.Sprintf("blocked: 'git branch %s' creates a branch. This project works only on main (tracking origin/main).", a)
+	}
+	return ""
+}
+
+// checkDetachTarget allows a detached checkout of ref only when ref resolves to
+// origin/HEAD or an ancestor of it (keeping the super/submodule clone on the
+// already-pushed history). Fails closed: an unresolvable ref or unknown
+// origin/HEAD is blocked.
+func checkDetachTarget(gitDir, ref string) string {
+	allowed, resolved := ancestryVerdict(gitDir, ref)
+	if allowed {
+		return ""
+	}
+	if !resolved {
+		return fmt.Sprintf("blocked: 'git checkout %s' — '%s' is not main, a verifiable commit, or an explicit file. For a file use 'git checkout -- %s'; to change branches use 'git switch main'.", ref, ref, ref)
+	}
+	return fmt.Sprintf("blocked: 'git checkout %s' — a detached checkout is only allowed onto origin/HEAD or an ancestor of it (keeps this super/submodule clone on the pushed history). '%s' is ahead of, or diverged from, origin/HEAD (or origin/HEAD could not be resolved).", ref, ref)
+}
+
+// effectiveGitDir resolves the directory the git command would run in: the
+// value of a `-C <dir>` global flag (relative to cwd) if present, else cwd.
+func effectiveGitDir(tokens []string, cwd string) string {
+	dir := cwd
+	i := 1
+	for i < len(tokens) {
+		t := tokens[i]
+		if t == "-C" && i+1 < len(tokens) {
+			d := tokens[i+1]
+			if !filepath.IsAbs(d) {
+				d = filepath.Join(dir, d)
+			}
+			dir = filepath.Clean(d)
+			i += 2
+			continue
+		}
+		if (t == "-c" || t == "--git-dir" || t == "--work-tree") && i+1 < len(tokens) {
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(t, "-") {
+			i++
+			continue
+		}
+		break
+	}
+	return dir
+}
+
+// guardProjectRoot returns the superproject working-tree root: $CLAUDE_PROJECT_DIR
+// (set in every PreToolUse hook env) or, failing that, the root derived from the
+// guard binary's own location. Returns "" when neither resolves.
+func guardProjectRoot() string {
+	if d := os.Getenv("CLAUDE_PROJECT_DIR"); d != "" {
+		return filepath.Clean(d)
+	}
+	if r, err := common.FindRoot(); err == nil {
+		return filepath.Clean(r)
+	}
+	return ""
+}
+
+// inManagedRepo reports whether gitDir belongs to the superproject or one of
+// its submodules — the clones whose committed state the flow pushes to origin.
+// Worktrees and throwaway clones outside the project tree are exempt. When the
+// project root can't be determined we fail closed (enforce).
+func inManagedRepo(gitDir string) bool {
+	root := guardProjectRoot()
+	if root == "" {
+		return true // can't scope → enforce (fail closed)
+	}
+	top, ok := gitOutput(gitDir, "rev-parse", "--show-toplevel")
+	if !ok {
+		return false // not a git repo → nothing to strand → exempt
+	}
+	if filepath.Clean(top) == root {
+		return true // anywhere inside the superproject working tree
+	}
+	if super, ok := gitOutput(gitDir, "rev-parse", "--show-superproject-working-tree"); ok && super != "" {
+		return filepath.Clean(super) == root // a submodule of this project
+	}
+	return false
+}
+
+// isLocalBranch reports whether name is an existing local branch in gitDir.
+func isLocalBranch(gitDir, name string) bool {
+	return gitOK(gitDir, "show-ref", "--verify", "--quiet", "refs/heads/"+name)
+}
+
+// originHead resolves the commit this repo's pushed default branch points at,
+// trying origin/HEAD then the common default-branch upstreams. Returns
+// ("", false) when none resolve (callers fail closed). Submodule clones often
+// lack the origin/HEAD symref, so the explicit fallbacks matter there.
+func originHead(gitDir string) (string, bool) {
+	for _, ref := range []string{"origin/HEAD", "origin/main", "origin/master"} {
+		if c, ok := gitOutput(gitDir, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); ok {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+// ancestryVerdict resolves ref and reports whether it is origin/HEAD or an
+// ancestor of it. resolved is false when ref does not name a commit at all
+// (likely a file path); allowed is false (with resolved true) when origin/HEAD
+// can't be determined — i.e. ancestry is unverifiable and we fail closed.
+func ancestryVerdict(gitDir, ref string) (allowed, resolved bool) {
+	target, ok := gitOutput(gitDir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if !ok {
+		return false, false
+	}
+	origin, ok := originHead(gitDir)
+	if !ok {
+		return false, true // can't verify ancestry → fail closed
+	}
+	return gitOK(gitDir, "merge-base", "--is-ancestor", target, origin), true
+}
+
+// gitOutput runs git in dir and returns trimmed stdout, ok=false on any error.
+func gitOutput(dir string, args ...string) (string, bool) {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+// gitOK runs git in dir and reports whether it exited zero.
+func gitOK(dir string, args ...string) bool {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	return cmd.Run() == nil
 }
 
 // findGitSubcommand skips global flags that take arguments.

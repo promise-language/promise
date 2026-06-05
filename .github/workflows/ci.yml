@@ -23,18 +23,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64,   runner: ubuntu-24.04,   use_clang: '' }
-          - { name: darwin-arm64,  runner: macos-latest,   use_clang: '1' }
-          - { name: windows-amd64, runner: windows-latest, use_clang: '' }
+          - { name: linux-amd64,   runner: ubuntu-24.04 }
+          - { name: darwin-arm64,  runner: macos-latest }
+          - { name: windows-amd64, runner: windows-latest }
           # Deferred matrix members (docs/release-automation.md §7):
           # - { name: darwin-amd64, runner: macos-13 }    # Intel macOS — unverifiable (no working Xcode CLT). Build code exists; macos-13 could validate in CI — reconsider before deleting the path.
           # - { name: linux-arm64,  runner: <arm64> }     # needs arm64 runner + arm64 LLVM blobs (T0524/T0530) + musl CRT.
     runs-on: ${{ matrix.runner }}
-    env:
-      # macOS uses the Xcode clang driver instead of a ~5-min `brew install llvm`
-      # (same frontend/codegen, only the backend driver differs). Empty elsewhere
-      # is equivalent to unset (the compiler checks `== "1"`).
-      PROMISE_USE_CLANG: ${{ matrix.use_clang }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,13 +57,23 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
           sudo apt-get install -y llvm-22 lld-22 musl-dev
 
-      - name: Install LLVM 22 (Windows)
+      - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
         # windows-latest already ships VS Build Tools (MSVC + Windows SDK); only LLVM
-        # (opt/llc/lld-link) is missing.
-        run: choco install llvm -y
+        # (opt/llc/lld-link) is missing. choco updates the machine PATH but not this
+        # job's shell, so add the bin dir to GITHUB_PATH for the build step.
+        run: |
+          choco install llvm -y
+          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
 
-      # macOS: no LLVM install — PROMISE_USE_CLANG=1 (set above) uses the Xcode clang driver.
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        # opt/llc/lld are required on EVERY platform — the M:N scheduler's coroutine
+        # lowering runs in `opt`, so there is no clang-only path. Install LLVM and
+        # put it on PATH (brew's llvm is within the supported range).
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
 
       - name: Install wasmtime (runtime for the wasm32-wasi tests)
         uses: bytecodealliance/actions/wasmtime/setup@v1
@@ -88,8 +93,10 @@ jobs:
         shell: bash
         run: bin/build
 
-      - name: Test — Go + Promise + WASM
+      - name: Test — Go + Promise
         shell: bash
         # Always bin/test [go|promise|all] — never `go test ./...` directly: bin/test
         # builds and embeds the stdlib/catalog modules first, which raw `go test` skips.
-        run: bin/test --wasm all
+        # NOTE: no --wasm here. Running the full suite on wasm32-wasi ~doubles CI cost,
+        # so the wasm target is covered by a separate periodic workflow, not per-PR CI.
+        run: bin/test all

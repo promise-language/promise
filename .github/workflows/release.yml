@@ -90,13 +90,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { host: linux-amd64,   runner: ubuntu-24.04,   ext: '',     use_clang: '' }
-          - { host: darwin-arm64,  runner: macos-latest,   ext: '',     use_clang: '1' }
-          - { host: windows-amd64, runner: windows-latest, ext: '.exe', use_clang: '' }
+          - { host: linux-amd64,   runner: ubuntu-24.04,   ext: '' }
+          - { host: darwin-arm64,  runner: macos-latest,   ext: '' }
+          - { host: windows-amd64, runner: windows-latest, ext: '.exe' }
     runs-on: ${{ matrix.runner }}
-    env:
-      # macOS: Xcode clang driver for phase B's stub compile (skips brew install llvm).
-      PROMISE_USE_CLANG: ${{ matrix.use_clang }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,10 +113,19 @@ jobs:
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
           sudo apt-get install -y llvm-22 lld-22 musl-dev
-      - name: Install LLVM 22 (Windows)
+      - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
-        run: choco install llvm -y
-      # macOS: PROMISE_USE_CLANG=1 (set above) — no LLVM install.
+        # choco updates the machine PATH but not this job's shell — add the bin dir.
+        run: |
+          choco install llvm -y
+          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        # opt is required on every platform (no clang-only path); phase B's stub
+        # compile needs a host LLVM backend on PATH.
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
       - name: Bootstrap dev tools (Unix)
         if: runner.os != 'Windows'
         run: ./make

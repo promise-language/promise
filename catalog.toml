@@ -34,14 +34,14 @@ description = "TCP networking: TcpListener, TcpStream with reactor-based non-blo
 [modules.gzip]
 description = "RFC 1951 (DEFLATE) and RFC 1952 (gzip) compression and decompression in pure Promise: gzip_encode, gunzip, deflate, inflate, crc32, GzipWriter, GunzipReader, gunzip_from, DecompressError"
 
-[modules.wasi]
-url = "ssh://hfe/git/promise_wasi.git"
-commit = "0acbef489f67a2825542e4554d1c41f9eb120b81"
+[modules.wasi_preview_1]
+url = "https://github.com/promise-language/wasi_preview_1.git"
+commit = "c6437c59c3649f545b6ad032556811d718d20412"
 description = "WASI Preview 1 raw bindings: errno/flags/enums plus extern function declarations (target(wasi) only; function calls pending T0283)"
 
 [modules.wasi_preview_2]
-url = "ssh://hfe/git/promise_wasi_preview_2.git"
-commit = "7dcc0af400480f67d56710056ca5423227ae1c4c"
+url = "https://github.com/promise-language/wasi_preview_2.git"
+commit = "34f145d947b09e0428a3fc3bb8305e69690439be"
 description = "WASI Preview 2 bindings: random, clocks, I/O, CLI, filesystem (target(wasi) only)"
 
 # Planned modules — not yet implemented, design in modules/<name>/plan.md

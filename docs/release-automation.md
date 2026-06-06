@@ -238,16 +238,19 @@ jobs:
         # sha256 matches — extracting archive_path where applicable. Catches bogus
         # entries here so users never download-and-discard at runtime (distribution.md §4.3).
         run: bin/release verify-manifest dist/manifest-*.json --against dist/deps
-      - name: Generate SHA256SUMS (top-level binaries only)
-        # Drop the per-binary .sha256 sidecars `bin/release build` wrote so the glob
-        # covers only the binaries and SHA256SUMS has no sidecar lines.
-        run: cd dist/bin && rm -f ./*.sha256 && sha256sum promise-* > ../SHA256SUMS
+      - name: Compress binaries with gzip (T0796 — published assets are .gz only)
+        # `-9` for max ratio; `-n` strips the embedded mtime so re-runs of the same
+        # commit produce byte-identical artifacts. Drop the .sha256 sidecars first so
+        # the glob only catches binaries.
+        run: cd dist/bin && rm -f ./*.sha256 && for f in promise-*; do gzip -9 -n "$f"; done
+      - name: Generate SHA256SUMS (over the .gz assets — what users download)
+        run: cd dist/bin && sha256sum promise-*.gz > ../SHA256SUMS
       - name: Create GitHub Release
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
         # The install scripts are committed (scripts/install.*, present via the checkout
         # prelude) and attached verbatim — nothing generates them. Users fetch them at
         # releases/latest/download/install.sh (distribution.md §2.1). epoch-next cuts a
-        # GitHub pre-release (the `next` channel).
+        # GitHub pre-release (the `next` channel). Only .gz assets are published — no raw.
         run: |
           if [ "$GITHUB_REF_NAME" = "epoch-next" ]; then
             PRERELEASE="--prerelease"; TITLE="Promise epoch-next (pre-release)"
@@ -257,7 +260,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" $PRERELEASE \
             --title "$TITLE" \
             --notes "See docs/changelog.md for this epoch." \
-            dist/bin/promise-* dist/deps/* dist/SHA256SUMS \
+            dist/bin/promise-*.gz dist/deps/* dist/SHA256SUMS \
             scripts/install.sh scripts/install.ps1 scripts/install.cmd   # the installers themselves
 ```
 
@@ -265,6 +268,8 @@ Notes:
 - `bin/release` (T0773) is the release driver implementing the build-order. Subcommands: `blobs --host <t> --out <dir>` (collect host dependency blobs), `manifest <blobsdir> --host <t> --pack <dir> --out <m> [--tag <tag>]` (hash+size, pack hash-named upload artifacts, emit the ranked-sources manifest), `build --variant {thin|full} --manifest <m> --out <bin> [--blobs <dir>]` (the 3-phase compiler+stub build), and `verify-manifest <m>... --against <dir>` (the integrity gate). `bin/build --release` remains a shortcut that produces an embed-everything (full-equivalent) binary without the stub.
 - The **stub** is compiled *by the just-built compiler* inside `bin/release build` (an internal phase), then embedded back into the compiler so `promise install` can extract it ([distribution.md](distribution.md) §2.5). Cross-compiling the stub per target is gated on cross-compilation (T0524); first releases build the host stub only.
 - **Hosting:** each manifest entry's primary `source` is a **GitHub release asset** on `github.com/promise-language/promise`, named by the blob's content `sha256` (content-addressed → an unchanged dependency reuses the same asset across releases, no re-upload). The pinned upstream vendor archive (e.g. the LLVM tarball) is a ranked fallback source. A CDN/R2 mirror ([T0523](#)) is a deferred, optional future source — ranked sources + `PROMISE_BLOB_MIRROR` make adding it non-breaking (no content hashes change).
+- **Install binaries are gzip-compressed only** (T0796). Each `promise-*` binary is published as `promise-*[.exe].gz` — no raw asset. Gzip is the universal floor: `gunzip` ships on every POSIX system, and Windows decompresses via `System.IO.Compression.GzipStream`. Brotli/zstd/xz can't bootstrap the *first* install (the decompressor lives inside the promise binary that doesn't exist yet); the brotli-11 path in §3 is for dependency blobs the already-installed compiler fetches at runtime — a different problem.
+- **`SHA256SUMS` is computed over the `.gz` assets** — the bytes that are actually downloaded. All three consumers (`install.sh`, `install.ps1`, `promise update`/`sync`) verify the checksum before decompressing. This verifies HTTP/CDN integrity (catches a truncated/corrupted download immediately) and mirrors the normal `sha256sum *.gz` convention.
 - `SHA256SUMS` covers only the top-level binaries — dependency blobs are self-verifying via their content `sha256` in the embedded manifest, regardless of how they are packaged (direct files or archives).
 - `windows-amd64` is a **full matrix member** in both `blobs` and `compiler` (CI already builds and passes the gates on it). Its top-level artifacts carry `.exe` (`promise-windows-amd64.exe`, `…-full.exe`). The extension is supplied **by the workflow** (a `matrix.ext` field appended to `--out`), **not** by `bin/release` — the driver writes `--out` verbatim. The Windows compiler still builds via `opt` → `llc` → `lld-link` (no LTO yet — T0049).
 - The **all** variant ([distribution.md](distribution.md) §1.2) is the same "assemble" step with *every* supported target's blobs in the pre-stage set instead of just the host's — no new runtime code. It is deferred until cross-compilation works (no cross-target blobs exist yet), so first releases publish thin + full only.

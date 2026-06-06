@@ -207,10 +207,12 @@ func sortedKeys(m map[string]bool) []string {
 // ── installer checksum-extraction (the T0774 fix) ───────────────────────────
 
 // TestInstallChecksumExactMatch guards the documented installer fix: SHA256SUMS
-// lists BOTH the thin (`promise-linux-amd64`) and full (`promise-linux-amd64-full`)
-// binaries, so the old substring `grep "$BINARY_NAME"` matched two lines and
-// produced a guaranteed "checksum mismatch". The scripts now match the filename
-// field EXACTLY (install.sh: awk `$2 == name`; install.ps1: `-eq $BinaryName`).
+// lists BOTH the thin (`promise-linux-amd64.gz`) and full
+// (`promise-linux-amd64-full.gz`) assets, so the old substring `grep
+// "$BINARY_NAME"` matched two lines and produced a guaranteed "checksum
+// mismatch". The scripts now match the filename field EXACTLY (install.sh: awk
+// `$2 == name`; install.ps1: `-eq $AssetName`). Asset names carry a `.gz`
+// suffix since T0796 (compression-only publishing).
 func TestInstallChecksumExactMatch(t *testing.T) {
 	const (
 		hashThin    = "1111111111111111111111111111111111111111111111111111111111111111"
@@ -219,9 +221,9 @@ func TestInstallChecksumExactMatch(t *testing.T) {
 	)
 	// Order matters: the thin line is a strict prefix of the full filename, the
 	// exact case the fix targets.
-	sums := hashThin + "  promise-linux-amd64\n" +
-		hashFull + "  promise-linux-amd64-full\n" +
-		hashWindows + "  promise-windows-amd64.exe\n"
+	sums := hashThin + "  promise-linux-amd64.gz\n" +
+		hashFull + "  promise-linux-amd64-full.gz\n" +
+		hashWindows + "  promise-windows-amd64.exe.gz\n"
 
 	// The old buggy behavior, made executable: a substring match on the thin name
 	// hits BOTH the thin and full lines (so awk/grep would emit two hashes).
@@ -239,13 +241,13 @@ func TestInstallChecksumExactMatch(t *testing.T) {
 	if _, err := exec.LookPath("awk"); err != nil {
 		t.Skip("awk not available; skipping awk-semantics check")
 	}
-	got := runAwkExtract(t, sums, "promise-linux-amd64")
+	got := runAwkExtract(t, sums, "promise-linux-amd64.gz")
 	if got != hashThin {
-		t.Errorf("awk exact-match for promise-linux-amd64 = %q, want the thin hash %q (a substring match would have returned two hashes)", got, hashThin)
+		t.Errorf("awk exact-match for promise-linux-amd64.gz = %q, want the thin hash %q (a substring match would have returned two hashes)", got, hashThin)
 	}
 	// The full name must resolve to its own hash, not the thin one.
-	if got := runAwkExtract(t, sums, "promise-linux-amd64-full"); got != hashFull {
-		t.Errorf("awk exact-match for promise-linux-amd64-full = %q, want %q", got, hashFull)
+	if got := runAwkExtract(t, sums, "promise-linux-amd64-full.gz"); got != hashFull {
+		t.Errorf("awk exact-match for promise-linux-amd64-full.gz = %q, want %q", got, hashFull)
 	}
 }
 
@@ -280,8 +282,11 @@ func TestInstallScriptsUseExactMatch(t *testing.T) {
 	}
 
 	ps1 := readScript(t, root, "install.ps1")
-	if !strings.Contains(ps1, "-eq $BinaryName") {
-		t.Error("install.ps1 no longer uses the exact `-eq $BinaryName` filename match")
+	// T0796 renamed `$BinaryName` → `$AssetName` (the .gz published asset; the
+	// runtime .exe is `$RuntimeName`). Either name satisfies the guard — what
+	// matters is the exact `-eq` match, not the variable identifier.
+	if !strings.Contains(ps1, "-eq $AssetName") && !strings.Contains(ps1, "-eq $BinaryName") {
+		t.Error("install.ps1 no longer uses an exact `-eq $AssetName` (or legacy `-eq $BinaryName`) filename match")
 	}
 }
 
@@ -293,4 +298,89 @@ func readScript(t *testing.T, root, name string) string {
 		t.Skipf("read %s: %v", p, err)
 	}
 	return string(data)
+}
+
+// ── T0796: gzip publish + decompress wiring ─────────────────────────────────
+
+// TestReleaseWorkflowCompressesAssets pins the T0796 publish format: every
+// platform binary must be gzipped before SHA256SUMS is generated and only the
+// .gz assets get attached to the release. The three checks form a single
+// contract — gzip with reproducible flags, hash the .gz, publish only .gz —
+// and a regression in any one would silently break either reproducibility,
+// the install scripts, or `promise update`.
+func TestReleaseWorkflowCompressesAssets(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skipf("find root: %v", err)
+	}
+	wf := filepath.Join(root, ".github", "workflows", "release.yml")
+	data, err := os.ReadFile(wf)
+	if err != nil {
+		t.Skipf("read %s: %v", wf, err)
+	}
+	content := string(data)
+
+	// 1. gzip step exists and uses `-9 -n`. `-n` strips the embedded mtime so
+	// re-running the workflow on the same commit produces byte-identical
+	// artifacts (and therefore stable SHA256SUMS).
+	if !strings.Contains(content, "gzip -9 -n") {
+		t.Error("release.yml no longer runs `gzip -9 -n` — reproducible builds depend on `-n` stripping the mtime")
+	}
+
+	// 2. SHA256SUMS is computed over the .gz assets (what the user downloads),
+	// not the uncompressed binaries.
+	if !strings.Contains(content, "sha256sum promise-*.gz") {
+		t.Error("release.yml no longer hashes the .gz assets — install.sh / install.ps1 / promise update all verify over the compressed download")
+	}
+	if strings.Contains(content, "sha256sum promise-* >") {
+		t.Error("release.yml is still hashing the uncompressed binaries — that breaks the documented `verify the downloaded asset` invariant")
+	}
+
+	// 3. Only the .gz artifacts get attached to the release; no raw binary is
+	// published (compression-only, per T0796 acceptance).
+	if !strings.Contains(content, "dist/bin/promise-*.gz") {
+		t.Error("release.yml no longer publishes `dist/bin/promise-*.gz`")
+	}
+	if strings.Contains(content, "dist/bin/promise-* \\") {
+		t.Error("release.yml is still uploading raw uncompressed `dist/bin/promise-*` — T0796 mandates compression-only publishing")
+	}
+}
+
+// TestInstallScriptsDecompressGzip pins T0796's consumer wiring: both shell
+// scripts must download a `.gz` asset and decompress it before installing.
+// The exact-match check in TestInstallScriptsUseExactMatch already validates
+// SHA256SUMS lookup; this test validates the decompress step that the
+// "compression-only" publishing requires every consumer to handle.
+func TestInstallScriptsDecompressGzip(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skipf("find root: %v", err)
+	}
+
+	// install.sh: must form a `.gz` URL and gunzip after verification.
+	sh := readScript(t, root, "install.sh")
+	if !strings.Contains(sh, ".gz") {
+		t.Error("install.sh does not reference .gz assets — compression-only publishing requires the script to download the .gz")
+	}
+	if !strings.Contains(sh, "gunzip") {
+		t.Error("install.sh does not call gunzip — the downloaded .gz must be decompressed before install")
+	}
+	// Belt-and-suspenders: the runtime/asset naming separation introduced in
+	// T0796 is what makes the verify-before-decompress order work.
+	if !strings.Contains(sh, "ASSET_NAME") || !strings.Contains(sh, "RUNTIME_NAME") {
+		t.Error("install.sh no longer separates ASSET_NAME (download/verify) from RUNTIME_NAME (decompressed binary) — verify-over-.gz invariant depends on it")
+	}
+
+	// install.ps1: must use the in-process GzipStream (no external gzip CLI on
+	// Windows, per the design note in the T0796 description).
+	ps1 := readScript(t, root, "install.ps1")
+	if !strings.Contains(ps1, ".gz") {
+		t.Error("install.ps1 does not reference .gz assets")
+	}
+	if !strings.Contains(ps1, "GzipStream") {
+		t.Error("install.ps1 no longer uses System.IO.Compression.GzipStream — a regression to an external gzip dependency would break the fresh-machine install path on Windows")
+	}
+	if !strings.Contains(ps1, "$AssetName") || !strings.Contains(ps1, "$RuntimeName") {
+		t.Error("install.ps1 no longer separates $AssetName from $RuntimeName")
+	}
 }

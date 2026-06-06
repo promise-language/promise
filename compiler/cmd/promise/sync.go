@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -180,13 +181,15 @@ func runUpdate(args []string) {
 }
 
 // downloadAndInstall downloads the platform binary for a release, verifies its
-// SHA256, and runs the downloaded binary's `install` (which installs into
-// epochs/<epoch>/, forward-updates the stub, and stages blobs). Shared by
-// `promise sync` and `promise update` (T0770).
+// SHA256, decompresses it (assets are gzip-compressed — T0796), and runs the
+// downloaded binary's `install` (which installs into epochs/<epoch>/,
+// forward-updates the stub, and stages blobs). Shared by `promise sync` and
+// `promise update` (T0770).
 func downloadAndInstall(release *ghRelease, epoch string) error {
-	binaryName := platformBinaryName()
+	assetName := platformAssetName()    // promise-<os>-<arch>[.exe].gz
+	runtimeName := platformBinaryName() // promise-<os>-<arch>[.exe]
 
-	binaryURL, shaURL, err := findAssets(release, binaryName)
+	assetURL, shaURL, err := findAssets(release, assetName)
 	if err != nil {
 		return err
 	}
@@ -197,17 +200,26 @@ func downloadAndInstall(release *ghRelease, epoch string) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	binaryPath := filepath.Join(tmpDir, binaryName)
-	fmt.Fprintf(os.Stderr, "downloading %s...\n", binaryName)
-	if err := downloadFile(binaryURL, binaryPath); err != nil {
+	gzPath := filepath.Join(tmpDir, assetName)
+	binaryPath := filepath.Join(tmpDir, runtimeName)
+
+	fmt.Fprintf(os.Stderr, "downloading %s...\n", assetName)
+	if err := downloadFile(assetURL, gzPath); err != nil {
 		return err
 	}
 
 	if shaURL != "" {
+		// SHA256SUMS is computed over the .gz asset (what was downloaded) — verify
+		// the compressed file, not the decompressed binary.
 		fmt.Fprintf(os.Stderr, "verifying checksum...\n")
-		if err := verifySHA256(shaURL, binaryPath, binaryName); err != nil {
+		if err := verifySHA256(shaURL, gzPath, assetName); err != nil {
 			return err
 		}
+	}
+
+	fmt.Fprintf(os.Stderr, "decompressing...\n")
+	if err := gunzipFile(gzPath, binaryPath); err != nil {
+		return err
 	}
 
 	if runtime.GOOS != "windows" {
@@ -222,6 +234,29 @@ func downloadAndInstall(release *ghRelease, epoch string) error {
 	installCmd.Stderr = os.Stderr
 	if err := installCmd.Run(); err != nil {
 		return fmt.Errorf("install failed: %w", err)
+	}
+	return nil
+}
+
+// gunzipFile decompresses a gzip file at src to dst.
+func gunzipFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", src, err)
+	}
+	defer in.Close()
+	gz, err := gzip.NewReader(in)
+	if err != nil {
+		return fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gz.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("creating %s: %w", dst, err)
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, gz); err != nil {
+		return fmt.Errorf("decompressing: %w", err)
 	}
 	return nil
 }
@@ -329,7 +364,8 @@ func httpGetJSON(url string) (*http.Response, error) {
 	return http.DefaultClient.Do(req)
 }
 
-// platformBinaryName returns the expected release binary name for the current platform.
+// platformBinaryName returns the runtime binary name for the current platform —
+// what the file is called after decompression and what gets executed.
 // Format: promise-<os>-<arch>[.exe]
 func platformBinaryName() string {
 	name := fmt.Sprintf("promise-%s-%s", runtime.GOOS, runtime.GOARCH)
@@ -339,20 +375,27 @@ func platformBinaryName() string {
 	return name
 }
 
-// findAssets locates the binary and SHA256SUMS assets in a release.
-func findAssets(release *ghRelease, binaryName string) (binaryURL, shaURL string, err error) {
+// platformAssetName returns the published GitHub release asset name for the
+// current platform. Assets are gzip-compressed (T0796) — the .gz suffix is
+// appended to the runtime binary name.
+func platformAssetName() string {
+	return platformBinaryName() + ".gz"
+}
+
+// findAssets locates the named release asset and the SHA256SUMS asset.
+func findAssets(release *ghRelease, assetName string) (assetURL, shaURL string, err error) {
 	for _, a := range release.Assets {
 		switch a.Name {
-		case binaryName:
-			binaryURL = a.BrowserDownloadURL
+		case assetName:
+			assetURL = a.BrowserDownloadURL
 		case "SHA256SUMS":
 			shaURL = a.BrowserDownloadURL
 		}
 	}
-	if binaryURL == "" {
+	if assetURL == "" {
 		return "", "", fmt.Errorf("no binary available for %s-%s in release %s", runtime.GOOS, runtime.GOARCH, release.TagName)
 	}
-	return binaryURL, shaURL, nil
+	return assetURL, shaURL, nil
 }
 
 // downloadFile downloads a URL to a local file, printing progress to stderr.

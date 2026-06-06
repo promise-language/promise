@@ -69,8 +69,11 @@ case "$ARCH" in
     exit 1 ;;
 esac
 
-# Asset naming: promise-<os>-<arch>[-<variant>]; bare = thin.
-BINARY_NAME="promise-${PLATFORM}-${ARCH}${VARIANT}"
+# Asset naming: promise-<os>-<arch>[-<variant>].gz; bare prefix = thin. Published
+# assets are gzip-compressed (T0796) — no raw binary is uploaded. RUNTIME_NAME is
+# the decompressed binary; ASSET_NAME is what we download and verify.
+RUNTIME_NAME="promise-${PLATFORM}-${ARCH}${VARIANT}"
+ASSET_NAME="${RUNTIME_NAME}.gz"
 
 # ── resolve release tag ─────────────────────────────────────────────────────
 
@@ -100,16 +103,17 @@ fi
 echo "Installing Promise ${TAG} (${PLATFORM}-${ARCH})..."
 
 BASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${TAG}"
-DOWNLOAD_URL="${BASE_URL}/${BINARY_NAME}"
+DOWNLOAD_URL="${BASE_URL}/${ASSET_NAME}"
 SUMS_URL="${BASE_URL}/SHA256SUMS"
 
 # ── download ────────────────────────────────────────────────────────────────
 
+TMP_GZ=$(mktemp)
 TMP_BIN=$(mktemp)
 TMP_SUMS=$(mktemp)
 # Ensure cleanup on exit (including error exit)
 # shellcheck disable=SC2064
-trap "rm -f '$TMP_BIN' '$TMP_SUMS'" EXIT
+trap "rm -f '$TMP_GZ' '$TMP_BIN' '$TMP_SUMS'" EXIT
 
 download() {
   url="$1"; dest="$2"
@@ -123,28 +127,29 @@ download() {
   fi
 }
 
-echo "Downloading ${BINARY_NAME}..."
-download "$DOWNLOAD_URL" "$TMP_BIN"
+echo "Downloading ${ASSET_NAME}..."
+download "$DOWNLOAD_URL" "$TMP_GZ"
 
 echo "Downloading SHA256SUMS..."
 download "$SUMS_URL" "$TMP_SUMS"
 
 # ── checksum verification ───────────────────────────────────────────────────
 
-# Match the filename field EXACTLY ($2): SHA256SUMS lists both the thin
-# (promise-linux-amd64) and full (promise-linux-amd64-full) binaries, so a
-# substring/prefix grep on the thin name would also match the full line and
-# yield two hashes (→ a guaranteed checksum "mismatch").
-EXPECTED=$(awk -v name="$BINARY_NAME" '$2 == name { print $1 }' "$TMP_SUMS")
+# Match the filename field EXACTLY ($2): SHA256SUMS lists the thin
+# (promise-linux-amd64.gz) and full (promise-linux-amd64-full.gz) assets, so
+# a substring/prefix grep on the thin name would also match the full line
+# and yield two hashes (→ a guaranteed checksum "mismatch"). SHA256SUMS is
+# computed over the .gz asset (what's downloaded) — verify before decompressing.
+EXPECTED=$(awk -v name="$ASSET_NAME" '$2 == name { print $1 }' "$TMP_SUMS")
 if [ -z "$EXPECTED" ]; then
-  echo "error: ${BINARY_NAME} not found in SHA256SUMS" >&2
+  echo "error: ${ASSET_NAME} not found in SHA256SUMS" >&2
   exit 1
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL=$(sha256sum "$TMP_BIN" | awk '{print $1}')
+  ACTUAL=$(sha256sum "$TMP_GZ" | awk '{print $1}')
 elif command -v shasum >/dev/null 2>&1; then
-  ACTUAL=$(shasum -a 256 "$TMP_BIN" | awk '{print $1}')
+  ACTUAL=$(shasum -a 256 "$TMP_GZ" | awk '{print $1}')
 else
   echo "warning: no sha256 tool found, skipping checksum verification" >&2
   ACTUAL="$EXPECTED"
@@ -157,7 +162,12 @@ if [ "$EXPECTED" != "$ACTUAL" ]; then
   exit 1
 fi
 
-echo "Checksum verified."
+echo "Checksum verified. Decompressing..."
+
+# ── decompress ──────────────────────────────────────────────────────────────
+
+# gunzip ships on every POSIX system (Linux/macOS/BSD), so no fallback path.
+gunzip -c "$TMP_GZ" > "$TMP_BIN"
 
 # ── install ─────────────────────────────────────────────────────────────────
 

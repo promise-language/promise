@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -57,6 +59,250 @@ func TestPlatformBinaryName(t *testing.T) {
 	}
 	if name != expected {
 		t.Fatalf("expected %s, got %s", expected, name)
+	}
+}
+
+// T0796: published assets are gzip-compressed. platformAssetName must append
+// .gz to the runtime binary name so findAssets matches the published name.
+func TestPlatformAssetName(t *testing.T) {
+	asset := platformAssetName()
+	expected := platformBinaryName() + ".gz"
+	if asset != expected {
+		t.Fatalf("expected %s, got %s", expected, asset)
+	}
+	if !strings.HasSuffix(asset, ".gz") {
+		t.Fatalf("asset name must end in .gz, got %s", asset)
+	}
+}
+
+// T0796: downloadAndInstall pipes the download through gunzipFile to recover
+// the runtime binary — verify it round-trips arbitrary bytes correctly.
+func TestGunzipFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	gzPath := filepath.Join(tmpDir, "input.gz")
+	binPath := filepath.Join(tmpDir, "output")
+
+	original := []byte("the quick brown fox jumps over the lazy dog\x00\x01\x02")
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gzPath, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := gunzipFile(gzPath, binPath); err != nil {
+		t.Fatalf("gunzipFile: %v", err)
+	}
+	got, err := os.ReadFile(binPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("round-trip mismatch: got %q, want %q", got, original)
+	}
+}
+
+func TestGunzipFileCorrupt(t *testing.T) {
+	tmpDir := t.TempDir()
+	gzPath := filepath.Join(tmpDir, "bad.gz")
+	binPath := filepath.Join(tmpDir, "out")
+
+	if err := os.WriteFile(gzPath, []byte("not a gzip stream"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := gunzipFile(gzPath, binPath); err == nil {
+		t.Fatal("expected error on corrupt gzip input")
+	}
+}
+
+// T0796: gunzipFile must surface a clear error when the source can't be opened
+// (a downloaded asset was deleted/quarantined between download and decompress).
+func TestGunzipFileMissingSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	err := gunzipFile(filepath.Join(tmpDir, "does-not-exist.gz"), filepath.Join(tmpDir, "out"))
+	if err == nil {
+		t.Fatal("expected error on missing source file")
+	}
+	if !strings.Contains(err.Error(), "opening") {
+		t.Fatalf("expected wrapped 'opening' error, got: %v", err)
+	}
+}
+
+// T0796: gunzipFile must surface a clear error when the destination can't be
+// created (e.g. read-only tmp dir or path through a missing parent).
+func TestGunzipFileBadDest(t *testing.T) {
+	tmpDir := t.TempDir()
+	gzPath := filepath.Join(tmpDir, "input.gz")
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	_, _ = gw.Write([]byte("hello"))
+	_ = gw.Close()
+	if err := os.WriteFile(gzPath, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A path through a missing parent directory makes os.Create fail.
+	badDst := filepath.Join(tmpDir, "missing-parent-dir", "out")
+	err := gunzipFile(gzPath, badDst)
+	if err == nil {
+		t.Fatal("expected error on uncreatable dest")
+	}
+	if !strings.Contains(err.Error(), "creating") {
+		t.Fatalf("expected wrapped 'creating' error, got: %v", err)
+	}
+}
+
+// T0796: gunzipFile must surface an error when the gzip stream is truncated
+// mid-body (an interrupted/partial download that nevertheless has a valid
+// header). Distinct from TestGunzipFileCorrupt: header is OK, body is short.
+func TestGunzipFileTruncated(t *testing.T) {
+	tmpDir := t.TempDir()
+	gzPath := filepath.Join(tmpDir, "trunc.gz")
+	binPath := filepath.Join(tmpDir, "out")
+
+	// Build a valid gzip stream of non-trivial size, then chop off the trailer.
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(bytes.Repeat([]byte("payload-bytes-"), 1024)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	// Keep header (~10 bytes) + some compressed body but drop the CRC/length
+	// trailer and most of the body — gzip.Reader detects the short read.
+	if err := os.WriteFile(gzPath, raw[:20], 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := gunzipFile(gzPath, binPath); err == nil {
+		t.Fatal("expected error on truncated gzip stream")
+	}
+}
+
+// T0796 end-to-end: simulate the full publish→download→verify→decompress
+// pipeline against an httptest server. SHA256 is computed over the .gz asset
+// (the documented invariant) and verified BEFORE decompression. This ties the
+// individual pieces (findAssets + downloadFile + verifySHA256 + gunzipFile)
+// together so a future refactor that reorders them or changes the hashed
+// artifact will fail.
+func TestDownloadVerifyDecompressPipeline(t *testing.T) {
+	original := []byte("this is the real promise binary payload\x00\x01\x02\x03")
+
+	// Build the gzip-compressed asset and its sha256 (over the compressed bytes).
+	var gzBuf bytes.Buffer
+	gw := gzip.NewWriter(&gzBuf)
+	if _, err := gw.Write(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	gzBytes := gzBuf.Bytes()
+	h := sha256.Sum256(gzBytes)
+	assetHash := hex.EncodeToString(h[:])
+
+	const assetName = "promise-linux-amd64.gz"
+	// Include a strict-prefix asset to keep the exact-match property honest end-to-end.
+	sums := assetHash + "  " + assetName + "\n" +
+		"0000000000000000000000000000000000000000000000000000000000000000  promise-linux-amd64-full.gz\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + assetName:
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(gzBytes)))
+			_, _ = w.Write(gzBytes)
+		case "/SHA256SUMS":
+			_, _ = w.Write([]byte(sums))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	release := &ghRelease{
+		TagName: "epoch-2026.0",
+		Assets: []ghAsset{
+			{Name: assetName, BrowserDownloadURL: srv.URL + "/" + assetName},
+			{Name: "SHA256SUMS", BrowserDownloadURL: srv.URL + "/SHA256SUMS"},
+		},
+	}
+
+	assetURL, shaURL, err := findAssets(release, assetName)
+	if err != nil {
+		t.Fatalf("findAssets: %v", err)
+	}
+	if shaURL == "" {
+		t.Fatal("SHA256SUMS asset not found")
+	}
+
+	tmpDir := t.TempDir()
+	gzPath := filepath.Join(tmpDir, assetName)
+	if err := downloadFile(assetURL, gzPath); err != nil {
+		t.Fatalf("downloadFile: %v", err)
+	}
+
+	// Verify over the .gz (matches downloadAndInstall's order).
+	if err := verifySHA256(shaURL, gzPath, assetName); err != nil {
+		t.Fatalf("verifySHA256 (over .gz): %v", err)
+	}
+
+	binPath := filepath.Join(tmpDir, "promise-linux-amd64")
+	if err := gunzipFile(gzPath, binPath); err != nil {
+		t.Fatalf("gunzipFile: %v", err)
+	}
+	got, err := os.ReadFile(binPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("pipeline output mismatch: got %q, want %q", got, original)
+	}
+}
+
+// T0796 negative end-to-end: if SHA256SUMS lists a hash of the *decompressed*
+// binary, verification (which runs over the .gz) must fail. This pins down the
+// "checksum over compressed asset" invariant — a future change that
+// accidentally hashed the decompressed file would silently pass the positive
+// pipeline test but break this one.
+func TestDownloadVerifyRejectsDecompressedHash(t *testing.T) {
+	original := []byte("payload that gets hashed wrong")
+
+	var gzBuf bytes.Buffer
+	gw := gzip.NewWriter(&gzBuf)
+	_, _ = gw.Write(original)
+	_ = gw.Close()
+	gzBytes := gzBuf.Bytes()
+
+	// Hash of DECOMPRESSED bytes — wrong relative to the .gz asset.
+	wrongHash := sha256.Sum256(original)
+	const assetName = "promise-linux-amd64.gz"
+	sums := hex.EncodeToString(wrongHash[:]) + "  " + assetName + "\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + assetName:
+			_, _ = w.Write(gzBytes)
+		case "/SHA256SUMS":
+			_, _ = w.Write([]byte(sums))
+		}
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	gzPath := filepath.Join(tmpDir, assetName)
+	if err := downloadFile(srv.URL+"/"+assetName, gzPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySHA256(srv.URL+"/SHA256SUMS", gzPath, assetName); err == nil {
+		t.Fatal("expected checksum mismatch when SHA256SUMS hashes the decompressed bytes")
 	}
 }
 

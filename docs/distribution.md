@@ -92,22 +92,28 @@ curl -fsSL https://github.com/promise-language/promise/releases/latest/download/
 
 ### 2.3 Direct download *(implemented)*
 
-Asset names follow **`promise-<os>-<arch>[-<variant>][.exe]`**. The **bare** name is the **thin** variant; the variant suffix goes *after* the target triple (and before any `.exe`):
+Published assets are **gzip-compressed** (T0796) — the `.gz` suffix follows the variant and any `.exe`. The decompressed binary name is the same `promise-<os>-<arch>[-<variant>][.exe]` shape (the **bare** name is the **thin** variant; the variant suffix goes *after* the target triple and before any `.exe`):
 
-| Variant | Linux example | Windows example |
-|---------|---------------|-----------------|
-| thin (default) | `promise-linux-amd64` | `promise-windows-amd64.exe` |
-| full | `promise-linux-amd64-full` | `promise-windows-amd64-full.exe` |
-| all *(planned, §1.2)* | `promise-linux-amd64-all` | `promise-windows-amd64-all.exe` |
+| Variant | Linux asset / runtime name | Windows asset / runtime name |
+|---------|----------------------------|------------------------------|
+| thin (default) | `promise-linux-amd64.gz` / `promise-linux-amd64` | `promise-windows-amd64.exe.gz` / `promise-windows-amd64.exe` |
+| full | `promise-linux-amd64-full.gz` / `promise-linux-amd64-full` | `promise-windows-amd64-full.exe.gz` / `promise-windows-amd64-full.exe` |
+| all *(planned, §1.2)* | `promise-linux-amd64-all.gz` | `promise-windows-amd64-all.exe.gz` |
+
+`SHA256SUMS` is computed over the **`.gz` asset** — the bytes that are downloaded — and the install scripts / `promise update` verify the checksum before decompressing.
+
+Gzip is the universal compressor: `gunzip` ships on every POSIX system, and Windows decompresses via the built-in `System.IO.Compression.GzipStream`. Brotli/zstd/xz would chicken-and-egg the bootstrap (the decompressor lives *inside* the promise binary, which is what we're trying to install). The brotli-11 compression in §4 / [release-automation.md](release-automation.md) §3 is a different path — for dependency blobs the *already-installed* promise binary fetches at runtime.
 
 ```sh
 # thin (default — smallest; fetches the host toolchain on first use)
-curl -LO https://github.com/promise-language/promise/releases/latest/download/promise-linux-amd64
+curl -LO https://github.com/promise-language/promise/releases/latest/download/promise-linux-amd64.gz
+gunzip promise-linux-amd64.gz
 chmod +x promise-linux-amd64
 ./promise-linux-amd64 install
 
 # full (offline for the host workflow) — note the -full suffix AFTER the target
-curl -LO https://github.com/promise-language/promise/releases/latest/download/promise-linux-amd64-full
+curl -LO https://github.com/promise-language/promise/releases/latest/download/promise-linux-amd64-full.gz
+gunzip promise-linux-amd64-full.gz
 chmod +x promise-linux-amd64-full
 ./promise-linux-amd64-full install
 ```
@@ -177,16 +183,16 @@ Re-running install with a newer binary replaces the installation in place and fo
 
 ## 3. Release Artifacts *(thin/full + prebuilt blobs)*
 
-Each release publishes to **GitHub Releases** at `github.com/promise-language/promise`, tagged `epoch-YYYY.N`. See [release-automation.md](release-automation.md) for the full pipeline. Asset names follow `promise-<os>-<arch>[-<variant>][.exe]` — bare = **thin**, `-full`, `-all` (variant suffix after the target; see §2.3).
+Each release publishes to **GitHub Releases** at `github.com/promise-language/promise`, tagged `epoch-YYYY.N`. See [release-automation.md](release-automation.md) for the full pipeline. Asset names follow `promise-<os>-<arch>[-<variant>][.exe].gz` — bare prefix = **thin**, `-full`, `-all` (variant suffix after the target; see §2.3). Binaries are **gzip-compressed only** (no raw asset is published — T0796).
 
-| Asset (bare = thin / `-full` / `-all`) | Platform / role |
+| Asset (bare prefix = thin / `-full` / `-all`) | Platform / role |
 |-------|-----------------|
-| `promise-linux-amd64` / `-full` / `-all` | Linux x86_64 (musl static). thin + full; all *(planned)*. |
-| `promise-darwin-arm64` / `-full` / `-all` | macOS Apple Silicon. thin + full; all *(planned)*. |
-| `promise-darwin-amd64` | macOS Intel — *deferred* (unverifiable without working Xcode CLT; see [release-automation.md](release-automation.md) §7). |
-| `promise-windows-amd64.exe` / `-full.exe` / `-all.exe` | Windows x86_64 *(platform in progress)*. thin + full; all *(planned)*. |
+| `promise-linux-amd64.gz` / `-full.gz` / `-all.gz` | Linux x86_64 (musl static). thin + full; all *(planned)*. |
+| `promise-darwin-arm64.gz` / `-full.gz` / `-all.gz` | macOS Apple Silicon. thin + full; all *(planned)*. |
+| `promise-darwin-amd64.gz` | macOS Intel — *deferred* (unverifiable without working Xcode CLT; see [release-automation.md](release-automation.md) §7). |
+| `promise-windows-amd64.exe.gz` / `-full.exe.gz` / `-all.exe.gz` | Windows x86_64 *(platform in progress)*. thin + full; all *(planned)*. |
 | dependency blobs | Prebuilt dependencies (host LLVM, wasm runner, CRTs, sysroots) referenced by content `sha256` in the manifest. Acquired on demand by thin binaries. **How they're packaged is an acquisition detail** — one-file-per-hash assets, or a few compressed archives that each yield many blobs (§4). Not assumed to be one named download per hash. |
-| `SHA256SUMS` | Checksums for the top-level binary artifacts. Verified by the install scripts. |
+| `SHA256SUMS` | Checksums for the top-level **`.gz` assets** (what's downloaded — verified before decompressing). |
 
 The install script downloads only the top-level binary (and `SHA256SUMS`); every dependency is acquired at runtime against the embedded manifest and verified by content `sha256` (§4).
 

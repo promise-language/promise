@@ -51,8 +51,11 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
     }
 }
 
-# Asset naming: promise-windows-<arch>[-<variant>].exe; bare = thin.
-$BinaryName = "promise-windows-${Arch}${Variant}.exe"
+# Asset naming: promise-windows-<arch>[-<variant>].exe.gz; bare prefix = thin.
+# Published assets are gzip-compressed (T0796) — no raw binary is uploaded.
+# $RuntimeName is the decompressed .exe; $AssetName is what we download/verify.
+$RuntimeName = "promise-windows-${Arch}${Variant}.exe"
+$AssetName   = "${RuntimeName}.gz"
 
 # ── resolve release tag ─────────────────────────────────────────────────────
 
@@ -77,17 +80,18 @@ if ($Epoch -eq "latest") {
 Write-Host "Installing Promise ${Tag} (windows-${Arch})..."
 
 $BaseUrl     = "https://github.com/${GitHubRepo}/releases/download/${Tag}"
-$DownloadUrl = "${BaseUrl}/${BinaryName}"
+$DownloadUrl = "${BaseUrl}/${AssetName}"
 $SumsUrl     = "${BaseUrl}/SHA256SUMS"
 
 # ── download ────────────────────────────────────────────────────────────────
 
+$TmpGz   = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".gz")
 $TmpBin  = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".exe")
 $TmpSums = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".sums")
 
 try {
-    Write-Host "Downloading ${BinaryName}..."
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpBin
+    Write-Host "Downloading ${AssetName}..."
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpGz
 
     Write-Host "Downloading SHA256SUMS..."
     Invoke-WebRequest -Uri $SumsUrl -OutFile $TmpSums
@@ -95,22 +99,32 @@ try {
     # ── checksum verification ───────────────────────────────────────────────
 
     # Match the filename field EXACTLY (last whitespace-delimited token): SHA256SUMS
-    # lists both the thin (promise-windows-amd64.exe) and full
-    # (promise-windows-amd64-full.exe) binaries — an exact compare avoids any
+    # lists both the thin (promise-windows-amd64.exe.gz) and full
+    # (promise-windows-amd64-full.exe.gz) assets — an exact compare avoids any
     # substring overlap between the two names (mirrors install.sh's awk $2 match).
-    $sumLine = Get-Content $TmpSums | Where-Object { ($_ -split '\s+')[-1] -eq $BinaryName } | Select-Object -First 1
+    # SHA256SUMS is computed over the .gz asset (what's downloaded) — verify
+    # before decompressing.
+    $sumLine = Get-Content $TmpSums | Where-Object { ($_ -split '\s+')[-1] -eq $AssetName } | Select-Object -First 1
     if (-not $sumLine) {
-        Write-Error "${BinaryName} not found in SHA256SUMS"
+        Write-Error "${AssetName} not found in SHA256SUMS"
         exit 1
     }
     $Expected = ($sumLine -split '\s+')[0]
-    $Actual   = (Get-FileHash -Algorithm SHA256 -Path $TmpBin).Hash
+    $Actual   = (Get-FileHash -Algorithm SHA256 -Path $TmpGz).Hash
 
     if ($Expected -ne $Actual) {
         Write-Error "checksum mismatch`n  expected: $Expected`n  actual:   $Actual"
         exit 1
     }
-    Write-Host "Checksum verified."
+    Write-Host "Checksum verified. Decompressing..."
+
+    # ── decompress ──────────────────────────────────────────────────────────
+
+    # GzipStream is built into .NET — no external gzip CLI required.
+    $in  = [System.IO.File]::OpenRead($TmpGz)
+    $gz  = New-Object System.IO.Compression.GzipStream($in, [System.IO.Compression.CompressionMode]::Decompress)
+    $out = [System.IO.File]::Create($TmpBin)
+    try { $gz.CopyTo($out) } finally { $out.Dispose(); $gz.Dispose(); $in.Dispose() }
 
     # ── install ─────────────────────────────────────────────────────────────
 
@@ -122,7 +136,7 @@ try {
         exit $LASTEXITCODE
     }
 } finally {
-    Remove-Item -Force -ErrorAction SilentlyContinue $TmpBin, $TmpSums
+    Remove-Item -Force -ErrorAction SilentlyContinue $TmpGz, $TmpBin, $TmpSums
 }
 
 # ── PATH setup (User scope) ──────────────────────────────────────────────────

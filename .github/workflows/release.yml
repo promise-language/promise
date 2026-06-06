@@ -230,13 +230,23 @@ jobs:
           path: dist
       - name: Verify manifest resolves (fail the release on any mismatch)
         run: bin/release verify-manifest dist/manifest-*.json --against dist/deps
-      - name: Generate SHA256SUMS (top-level binaries only)
+      - name: Compress binaries with gzip (T0796)
+        # gzip every published `promise-*` binary; the install scripts and `promise
+        # update`/`sync` download `.gz` only — no raw asset is published. `-9` for
+        # max ratio; `-n` strips the embedded mtime so re-runs of the same commit
+        # produce byte-identical artifacts. `gzip` is preinstalled on ubuntu-24.04.
         # Drop the per-binary .sha256 sidecars `bin/release build` wrote so the glob
-        # below covers only the published binaries, and SHA256SUMS has no sidecar lines.
+        # only sees binaries.
         run: |
           cd dist/bin
           rm -f ./*.sha256
-          sha256sum promise-* > ../SHA256SUMS
+          for f in promise-*; do
+            gzip -9 -n "$f"
+          done
+      - name: Generate SHA256SUMS (over the .gz assets — what users download)
+        run: |
+          cd dist/bin
+          sha256sum promise-*.gz > ../SHA256SUMS
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -259,7 +269,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" $PRERELEASE \
             --title "$TITLE" \
             --notes "See docs/changelog.md for this epoch." \
-            dist/bin/promise-* \
+            dist/bin/promise-*.gz \
             dist/deps/* \
             dist/SHA256SUMS \
             scripts/install.sh scripts/install.ps1 scripts/install.cmd

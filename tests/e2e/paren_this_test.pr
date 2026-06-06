@@ -528,6 +528,21 @@ type CShape {
       return "none";
     }).kind();
   }
+  // T0778 no-regression: non-diverging handler returning a fresh owned
+  // CSquare on a borrow-holding optional. The result is a user-type
+  // value-struct (NOT i8*), so it routes through trackHeapUserTypeResult,
+  // whose ident-skip still applies. The T0778 i8* tracking added inside
+  // genOptionalHandlerExpr must NOT fire here (named is not string/vector).
+  // Present case (CSquare): phi reads the borrow's sides (4). Absent case
+  // (CTriangle): phi is the fresh CSquare(sides: -1, label: "fb"+"x"),
+  // which is correctly owned and dropped at scope exit. Heap label exercises
+  // the leak gate; expected `sides` value tracks the present runtime.
+  csq_unwrap_sides_nondiverging(&this) int {
+    CSquare? o = this as CSquare;
+    return (o? _ {
+      CSquare(sides: -1, label: "fb" + "x")
+    }).sides;
+  }
 }
 type CSquare is CShape {
   string label;
@@ -578,6 +593,11 @@ test_this_cast_optional_unwrap() `test {
   assert(t.csq_unwrap_sides() == -1, "unwrap borrow-optional fallback (absent)");
   assert(s.csq_unwrap_kind() == "square", "unwrap borrow-optional, virtual method (present)");
   assert(t.csq_unwrap_kind() == "none", "unwrap borrow-optional fallback method (absent)");
+  // T0778 no-regression: non-diverging handler on borrow-holding optional
+  // with user-type (non-i8*) recovery. Must NOT route through the new T0778
+  // i8* tracking path; heap-user-type path's ident-skip applies.
+  assert(s.csq_unwrap_sides_nondiverging() == 4, "non-diverging borrow-optional, present");
+  assert(t.csq_unwrap_sides_nondiverging() == -1, "non-diverging borrow-optional, absent fallback");
 }
 
 // ---------------- index/slice operator on a `this` receiver (T0745) ----------

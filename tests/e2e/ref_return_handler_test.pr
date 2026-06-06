@@ -1,0 +1,88 @@
+// T0659: failable borrow returns (`T&`/`T~`) consumed via the unwrap forms
+// (`?!`, `?^`, `? e ...`). A borrow return hands back a reference into
+// storage owned elsewhere — it is never an owned temp, so the post-call
+// temp-tracking branches in genExpr must NOT register the i8* as a string
+// or vector temp at statement end. T0649 added the `isRefType` guard to
+// the CallExpr post-call branch; this file exercises the corresponding
+// guards added to *ast.ErrorPropagateExpr / *ast.ErrorPanicExpr /
+// *ast.ErrorHandlerExpr so that a future change reintroducing an
+// allocation on a borrow path fails closed.
+//
+// Today (after T0649 Part 1) the source `at!` does not allocate, so these
+// would still pass without the guards — but the guards are the
+// system's last line of defense and need test coverage so a future
+// regression is caught immediately.
+//
+// Recovery-runtime handler tests are intentionally omitted: combining a
+// failable `T&` return with a handler whose recovery body reads an i8*
+// borrow source leaks 1 alloc (T0792, a separate pre-existing bug).
+// Present-runtime handler tests below are clean and exercise the
+// `isRefType` guard on the ok-path through the ErrorHandlerExpr branch.
+type RefRet {
+  string[] d;
+  at!(int i) string & {
+    if i < 0 {
+      raise error("bad");
+    }
+    return this.d[i];
+  }
+}
+
+// --- `?!` (panic): transient and bind forms over the ErrorPanicExpr branch's
+// `isRefType` guard.
+
+at_qbang_temp() `test {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  n := r.at(0)?!.len;
+  assert(n == 3, "qbang on borrow return, transient len");
+}
+
+at_qbang_bind() `test {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  x := r.at(0)?!;
+  assert(x.len == 3, "qbang on borrow return, bound to local");
+}
+
+// --- `?^` (propagate): requires the enclosing call to be failable. Wrap in
+// `_helper!()` so the guard fires on the ErrorPropagateExpr branch.
+
+_qhat_temp_helper!() int {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  return r.at(0)?^.len;
+}
+
+_qhat_bind_helper!() int {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  string &x = r.at(0)?^;
+  return x.len;
+}
+
+at_qhat_temp() `test {
+  n := _qhat_temp_helper()?!;
+  assert(n == 3, "qhat on borrow return, transient len");
+}
+
+at_qhat_bind() `test {
+  n := _qhat_bind_helper()?!;
+  assert(n == 3, "qhat on borrow return, bound to local");
+}
+
+// --- `? e {}` (handler): present-runtime only — the recovery path triggers
+// T0792 (a separate pre-existing leak). The ok-path still exercises the
+// ErrorHandlerExpr branch's `isRefType` guard.
+
+at_qhandler_present_temp() `test {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  n := (r.at(0)? e {
+    r.d[0]
+  }).len;
+  assert(n == 3, "handler on borrow return, transient len, present");
+}
+
+at_qhandler_present_bind() `test {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  string &x = r.at(0)? e {
+    r.d[0]
+  };
+  assert(x.len == 3, "handler on borrow return, bound to local, present");
+}

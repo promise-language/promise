@@ -43,7 +43,20 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		result := c.genBinaryExpr(e)
 		// B0168: Track string concatenation temporaries. Only string + returns
 		// i8* from genBinaryExpr; comparisons return i1.
+		// T0659: Defensive — borrow returns are never owned temps. Today only
+		// string-concat hits I8Ptr here, but a future T&-returning user `+`
+		// would; mirror the T0649 CallExpr guard.
 		if result != nil && result.Type() == irtypes.I8Ptr {
+			rt := c.info.Types[e]
+			if c.typeSubst != nil && rt != nil {
+				rt = types.Substitute(rt, c.typeSubst)
+			}
+			if c.selfSubst != nil && rt != nil {
+				rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+			}
+			if rt != nil && isRefType(rt) {
+				return result
+			}
 			c.trackStringTemp(result)
 		}
 		return result
@@ -134,11 +147,21 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// claimed (e.g., by push which dups the string). Without this,
 		// synthesized serializable decode methods leak decoded strings.
 		// T0350: Same gap for Vector results — i8* falls through with no tracking.
+		// T0659: Defensive — failable borrow returns (`T&`/`T~` via `?`)
+		// reach here only if the source allocates (T0649 Part 1 removed that
+		// today). Mirror the T0649 CallExpr guard so future regressions on a
+		// borrow-return path fail closed.
+		exprType := c.info.Types[e]
+		if c.typeSubst != nil && exprType != nil {
+			exprType = types.Substitute(exprType, c.typeSubst)
+		}
+		if c.selfSubst != nil && exprType != nil {
+			exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		if exprType != nil && isRefType(exprType) {
+			return result
+		}
 		if result != nil && result.Type() == irtypes.I8Ptr {
-			exprType := c.info.Types[e]
-			if c.typeSubst != nil && exprType != nil {
-				exprType = types.Substitute(exprType, c.typeSubst)
-			}
 			named := extractNamed(exprType)
 			if named == types.TypString {
 				if c.optionalFieldString {
@@ -163,11 +186,20 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// When func()?! returns a string, the unwrapped i8* is a heap-allocated
 		// temp that must be freed at statement end if not claimed by a variable.
 		// T0350: Same gap for Vector results — i8* falls through with no tracking.
+		// T0659: Defensive — failable borrow returns via `?!` reach here only
+		// if the source allocates (T0649 Part 1 removed that today). Mirror the
+		// T0649 CallExpr guard so future regressions fail closed.
+		exprType := c.info.Types[e]
+		if c.typeSubst != nil && exprType != nil {
+			exprType = types.Substitute(exprType, c.typeSubst)
+		}
+		if c.selfSubst != nil && exprType != nil {
+			exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		if exprType != nil && isRefType(exprType) {
+			return result
+		}
 		if result != nil && result.Type() == irtypes.I8Ptr {
-			exprType := c.info.Types[e]
-			if c.typeSubst != nil && exprType != nil {
-				exprType = types.Substitute(exprType, c.typeSubst)
-			}
 			named := extractNamed(exprType)
 			if named == types.TypString {
 				if c.optionalFieldString {
@@ -192,14 +224,20 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// synth clone()-CallExpr result temp-tracking so the enclosing
 		// Self(...) constructor claims ownership (no leak; no double-drop with
 		// the owner's synth drop of the field).
+		// T0659: Defensive — borrow returns are never owned temps. Auto-clone
+		// of a borrow today produces a fresh value, but mirror the T0649 guard
+		// for consistency with the other post-call tracking branches.
+		rt := c.info.Types[e]
+		if c.typeSubst != nil && rt != nil {
+			rt = types.Substitute(rt, c.typeSubst)
+		}
+		if c.selfSubst != nil && rt != nil {
+			rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		if rt != nil && isRefType(rt) {
+			return result
+		}
 		if result != nil && result.Type() == irtypes.I8Ptr {
-			rt := c.info.Types[e]
-			if c.typeSubst != nil && rt != nil {
-				rt = types.Substitute(rt, c.typeSubst)
-			}
-			if c.selfSubst != nil && rt != nil {
-				rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
-			}
 			named := extractNamed(rt)
 			if named == types.TypString {
 				c.trackStringTemp(result)
@@ -221,11 +259,20 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// droppable type (signaled by optionalFieldString). The owner's drop
 		// handles the string's lifetime.
 		// T0350: Same gap for Vector results — i8* falls through with no tracking.
+		// T0659: Defensive — borrow returns are never owned temps. Mirror the
+		// T0649 CallExpr guard so future regressions on a borrow-return path
+		// (e.g., a failable `T&` unwrapped with `!`) fail closed.
+		exprType := c.info.Types[e]
+		if c.typeSubst != nil && exprType != nil {
+			exprType = types.Substitute(exprType, c.typeSubst)
+		}
+		if c.selfSubst != nil && exprType != nil {
+			exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		if exprType != nil && isRefType(exprType) {
+			return result
+		}
 		if result != nil && result.Type() == irtypes.I8Ptr {
-			exprType := c.info.Types[e]
-			if c.typeSubst != nil && exprType != nil {
-				exprType = types.Substitute(exprType, c.typeSubst)
-			}
 			named := extractNamed(exprType)
 			// B0287: For optional unwrap on ident source, the optional's
 			// drop binding owns the inner. Don't track as a statement temp —
@@ -262,11 +309,20 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// called trackStringTemp for any i8* — for Vector[T] results this only
 		// happened to free the buffer (because Vector and string share the bit-63
 		// literal flag and pal_free path) but never dropped element strings.
+		// T0659: Defensive — failable borrow returns via `? e { ... }` reach
+		// here only if the source allocates (T0649 Part 1 removed that today).
+		// Mirror the T0649 CallExpr guard so future regressions fail closed.
+		exprType := c.info.Types[e]
+		if c.typeSubst != nil && exprType != nil {
+			exprType = types.Substitute(exprType, c.typeSubst)
+		}
+		if c.selfSubst != nil && exprType != nil {
+			exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		if exprType != nil && isRefType(exprType) {
+			return result
+		}
 		if result != nil && result.Type() == irtypes.I8Ptr {
-			exprType := c.info.Types[e]
-			if c.typeSubst != nil && exprType != nil {
-				exprType = types.Substitute(exprType, c.typeSubst)
-			}
 			named := extractNamed(exprType)
 			// T0753: For the optional-handler unwrap (`o? _ { ... }`) on an ident
 			// source, the source optional's own drop binding owns the inner
@@ -305,10 +361,19 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// T0133: Track string slice results as temps. String slicing allocates a
 		// new heap string (via native [:] method). Without tracking, the slice
 		// result leaks when used as an intermediate in concatenation or comparison.
+		// T0659: Defensive — a future borrow-returning user-defined `[:]` would
+		// reach here as i8*. Mirror the T0649 CallExpr guard so future regressions
+		// fail closed.
 		if result != nil && result.Type() == irtypes.I8Ptr {
 			rt := c.info.Types[e]
 			if c.typeSubst != nil && rt != nil {
 				rt = types.Substitute(rt, c.typeSubst)
+			}
+			if c.selfSubst != nil && rt != nil {
+				rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+			}
+			if rt != nil && isRefType(rt) {
+				return result
 			}
 			if rt != nil && extractNamed(rt) == types.TypString {
 				c.trackStringTemp(result)
@@ -10609,6 +10674,39 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	// Some path: extract inner value
 	c.block = someBlock
 	okVal := c.block.NewExtractValue(optVal, 1)
+
+	// T0778: Non-diverging handler on an ident-source optional whose inner is
+	// i8* (string/vector). The phi values are:
+	//   - present runtime: okVal (aliases the source optional's owned inner)
+	//   - absent  runtime: handler recovery (claimed by genBlockValue → its
+	//     drop flag is cleared in noneBlock)
+	// With the T0753 ident-skip leaving the phi untracked (see genExpr's
+	// *ast.ErrorHandlerExpr branch), the absent-runtime recovery leaks. Fix:
+	// neutralize the source ident's present flag here in someBlock (so the
+	// optional's scope drop is a no-op in the present runtime), then track
+	// the merged phi as an owned statement temp at mergeBlock. The i8*
+	// restriction keeps this off the borrow-holding optional path: borrow-
+	// holding requires a user-type inner via RTTI cast (isRttiCastBorrow only
+	// matches *types.Named user types), so borrow-holding + string/vector is
+	// impossible. Diverging handlers stay covered by the existing T0753 skip:
+	// the phi degenerates to okVal aliasing the source's inner and stays
+	// untracked, with the optional's drop binding governing the lifetime.
+	var trackPhiI8Type types.Type
+	if !handlerDiverged && isIdentOptionalUnwrapSource(e.Expr) {
+		rt := c.info.Types[e]
+		if c.typeSubst != nil && rt != nil {
+			rt = types.Substitute(rt, c.typeSubst)
+		}
+		if c.selfSubst != nil && rt != nil {
+			rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		named := extractNamed(rt)
+		if named == types.TypString || named == types.TypVector {
+			trackPhiI8Type = rt
+			c.neutralizeForceUnwrapSource(e)
+		}
+	}
+
 	c.block.NewBr(mergeBlock)
 	someEnd := c.block
 
@@ -10621,10 +10719,23 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 
 	// Both paths reach merge - phi merge the values
 	if handlerVal != nil && okVal != nil {
-		return c.block.NewPhi(
+		phi := c.block.NewPhi(
 			&ir.Incoming{X: okVal, Pred: someEnd},
 			&ir.Incoming{X: handlerVal, Pred: handlerEnd},
 		)
+		if trackPhiI8Type != nil {
+			named := extractNamed(trackPhiI8Type)
+			if named == types.TypString {
+				c.trackStringTemp(phi)
+			} else if named == types.TypVector {
+				if elemType, ok := types.AsVector(trackPhiI8Type); ok {
+					c.trackVectorTempWithElemType(phi, elemType)
+				} else {
+					c.trackVectorTemp(phi)
+				}
+			}
+		}
+		return phi
 	}
 	return okVal
 }

@@ -128,3 +128,263 @@ nonident_vector_handler_unwrap() `test {
   }).len;
   assert(n == 3, "non-ident vector handler unwrap, no leak");
 }
+
+// T0778: non-diverging handler on an ident-source optional with a fresh
+// owned i8* recovery (string / vector) used to LEAK in the absent runtime:
+// genBlockValue claims the recovery temp's drop flag, and the T0753
+// ident-skip on the ErrorHandlerExpr branch left the merged phi untracked.
+// genOptionalHandlerExpr now neutralizes the source's present flag in the
+// some-block and tracks the merged phi as an owned temp at the merge block.
+// All recovery values are HEAP (non-literal) so the leak gate is live.
+
+// --- transient (intermediate) use: `.len` on the phi -------------------------
+
+nondiverging_string_absent() `test {
+  string? o = none;
+  n := (o? _ {
+    "x" + "y"
+  }).len;
+  assert(n == 2, "absent runtime: handler recovery consumed transiently");
+}
+
+nondiverging_string_present() `test {
+  string? o = "ab".to_upper();
+  n := (o? _ {
+    "x" + "y"
+  }).len;
+  assert(n == 2, "present runtime: source inner consumed transiently");
+}
+
+nondiverging_vector_absent() `test {
+  int[]? o = none;
+  n := (o? _ {
+    [1, 2].clone()
+  }).len;
+  assert(n == 2, "absent runtime: vector recovery consumed transiently");
+}
+
+nondiverging_vector_present() `test {
+  int[]? o = [3, 4, 5].clone();
+  n := (o? _ {
+    [1, 2].clone()
+  }).len;
+  assert(n == 3, "present runtime: vector inner consumed transiently");
+}
+
+// --- bound to a new owner: `string r = o? _ { ... }` -------------------------
+// The bind site's B0293 path neutralizes the source ident and claims the phi.
+// With T0778, our someBlock neutralize stores the same i1 0 redundantly and
+// the bind-site claim still clears the temp — no double-handling.
+
+nondiverging_string_bind_absent() `test {
+  string? o = none;
+  string r = o? _ {
+    "x".to_upper()
+  };
+  assert(r.len == 1, "absent runtime: handler recovery bound to a new owner");
+}
+
+nondiverging_string_bind_present() `test {
+  string? o = "ab".to_upper();
+  string r = o? _ {
+    "x".to_upper()
+  };
+  assert(r.len == 2, "present runtime: source inner bound to a new owner");
+}
+
+nondiverging_vector_bind_absent() `test {
+  int[]? o = none;
+  int[] r = o? _ {
+    [1, 2].clone()
+  };
+  assert(r.len == 2, "absent runtime: vector recovery bound to a new owner");
+}
+
+nondiverging_vector_bind_present() `test {
+  int[]? o = [3, 4, 5].clone();
+  int[] r = o? _ {
+    [1, 2].clone()
+  };
+  assert(r.len == 3, "present runtime: vector inner bound to a new owner");
+}
+
+// --- heap-user-type recovery (no-regression): uses heapTemps, not stmtTemps --
+// trackHeapUserTypeResult's ident-skip covers this path; the T0778 fix doesn't
+// touch the value-struct (non-i8*) result branch. Both constructor recovery and
+// call-result recovery exercised, transient and bind forms.
+
+nondiverging_heap_ctor_absent() `test {
+  HBox? o = none;
+  v := (o? _ {
+    HBox(n: -1, label: "ab" + "cd")
+  }).n;
+  assert(v == -1, "absent runtime: constructor recovery, transient field");
+}
+
+nondiverging_heap_ctor_present() `test {
+  HBox? o = HBox(n: 7, label: "p" + "q");
+  v := (o? _ {
+    HBox(n: -1, label: "ab" + "cd")
+  }).n;
+  assert(v == 7, "present runtime: source inner, transient field");
+}
+
+nondiverging_heap_call_absent() `test {
+  HBox? o = none;
+  v := (o? _ {
+    mk_hbox()!
+  }).n;
+  assert(v == 9, "absent runtime: call-result recovery, transient field");
+}
+
+nondiverging_heap_call_present() `test {
+  HBox? o = HBox(n: 7, label: "p" + "q");
+  v := (o? _ {
+    mk_hbox()!
+  }).n;
+  assert(v == 7, "present runtime: source inner, transient field");
+}
+
+nondiverging_heap_ctor_bind_absent() `test {
+  HBox? o = none;
+  HBox r = o? _ {
+    HBox(n: -1, label: "ab" + "cd")
+  };
+  assert(r.n == -1, "absent runtime: constructor recovery bound to new owner");
+}
+
+nondiverging_heap_ctor_bind_present() `test {
+  HBox? o = HBox(n: 7, label: "p" + "q");
+  HBox r = o? _ {
+    HBox(n: -1, label: "ab" + "cd")
+  };
+  assert(r.n == 7, "present runtime: source inner bound to new owner");
+}
+
+// --- paren-wrapped ident source + non-diverging recovery --------------------
+// T0778's neutralize+track path uses isIdentOptionalUnwrapSource, which peels
+// ParenExpr; neutralizeForceUnwrapSource peels ParenExpr too (T0577). These
+// tests lock the parity: `(o)? _ {fresh}` must behave identically to the bare
+// `o? _ {fresh}` form on both runtimes. The existing paren tests
+// (owned_paren_string_handler_unwrap etc.) all use a DIVERGING `return;` body —
+// they exercise the T0753 ident-skip but not T0778's neutralize+track. A future
+// removal of the paren-peel in either helper would silently regress this path
+// because the leak gate would still see no diverging-case leak.
+
+nondiverging_paren_string_absent() `test {
+  string? o = none;
+  n := ((o)? _ {
+    "x" + "y"
+  }).len;
+  assert(n == 2, "paren ident source, absent runtime, transient");
+}
+
+nondiverging_paren_string_present() `test {
+  string? o = "ab".to_upper();
+  n := ((o)? _ {
+    "x" + "y"
+  }).len;
+  assert(n == 2, "paren ident source, present runtime, transient");
+}
+
+nondiverging_paren_vector_absent() `test {
+  int[]? o = none;
+  n := ((o)? _ {
+    [1, 2].clone()
+  }).len;
+  assert(n == 2, "paren ident source, vector absent, transient");
+}
+
+nondiverging_paren_vector_present() `test {
+  int[]? o = [3, 4, 5].clone();
+  n := ((o)? _ {
+    [1, 2].clone()
+  }).len;
+  assert(n == 3, "paren ident source, vector present, transient");
+}
+
+// Nested paren — covers the loop in both helpers (each peels iteratively).
+nondiverging_nested_paren_string_absent() `test {
+  string? o = none;
+  n := ((((o)))? _ {
+    "x" + "y"
+  }).len;
+  assert(n == 2, "nested paren ident source, absent runtime");
+}
+
+// Bind form with paren — verifies the bind-site neutralize and our someBlock
+// neutralize co-operate when source is paren-wrapped.
+nondiverging_paren_string_bind_absent() `test {
+  string? o = none;
+  string r = (o)? _ {
+    "x".to_upper()
+  };
+  assert(r.len == 1, "paren ident source, absent runtime, bind");
+}
+
+nondiverging_paren_string_bind_present() `test {
+  string? o = "ab".to_upper();
+  string r = (o)? _ {
+    "x".to_upper()
+  };
+  assert(r.len == 2, "paren ident source, present runtime, bind");
+}
+
+nondiverging_paren_vector_bind_absent() `test {
+  int[]? o = none;
+  int[] r = (o)? _ {
+    [1, 2].clone()
+  };
+  assert(r.len == 2, "paren ident source, vector absent, bind");
+}
+
+nondiverging_paren_vector_bind_present() `test {
+  int[]? o = [3, 4, 5].clone();
+  int[] r = (o)? _ {
+    [1, 2].clone()
+  };
+  assert(r.len == 3, "paren ident source, vector present, bind");
+}
+
+// --- generic method context: c.typeSubst != nil at the T0778 site -----------
+// The T0778 fix substitutes type params before classifying the result kind
+// (string / vector / other) — that branch is uncovered by the bare top-level
+// tests above (c.typeSubst is nil there). When the optional-handler unwrap is
+// inside a generic method body specialized for T=string or T=int[], rt comes
+// in as the TypeParam and only becomes string/vector after Substitute. Without
+// this, a generic monomorphization of the same shape would silently leak.
+
+type GHolder[T] {
+  T? o;
+  // Reads with a fresh owned recovery — exercises T0778's neutralize+track
+  // inside a monomorphized method body (c.typeSubst != nil).
+  read_with(this, ~T recovery) T {
+    return (this.o)? _ {
+      recovery
+    };
+  }
+}
+
+nondiverging_generic_string_absent() `test {
+  h := GHolder[string](o: none);
+  r := h.read_with("ab".to_upper());
+  assert(r.len == 2, "generic method, T=string, absent runtime");
+}
+
+nondiverging_generic_string_present() `test {
+  h := GHolder[string](o: "ab".to_upper());
+  r := h.read_with("xy".to_upper());
+  assert(r.len == 2, "generic method, T=string, present runtime");
+}
+
+nondiverging_generic_vector_absent() `test {
+  h := GHolder[int[]](o: none);
+  r := h.read_with([1, 2].clone());
+  assert(r.len == 2, "generic method, T=int[], absent runtime");
+}
+
+nondiverging_generic_vector_present() `test {
+  h := GHolder[int[]](o: [3, 4, 5].clone());
+  r := h.read_with([1, 2].clone());
+  assert(r.len == 3, "generic method, T=int[], present runtime");
+}

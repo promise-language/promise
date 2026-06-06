@@ -62,6 +62,23 @@ Each blob is a dependency artifact identified by the `sha256` of its extracted c
 
 Blobs are produced by their own infrequently-run workflow (or a cached job), keyed so that an unchanged LLVM version reuses the previous hash and is not rebuilt or re-uploaded.
 
+**Compression — per-blob brotli (quality 11)** (T0795). Each blob is published *independently* brotli-compressed (pure-Go `github.com/andybalholm/brotli`, compiled into the compiler so it can always decode its own dependencies). The runtime resolver brotli-decompresses fetched bytes, then verifies the **uncompressed** content `sha256` (still the cache key and the file that runs) — so the content-addressed identity is unchanged; compression is purely a transport layer. The manifest source carries a `compression: "brotli"` field.
+
+**`compression` → asset-suffix map.** A `blob` source's `compression` field selects the published asset's name. The stem is always the *uncompressed* content `<sha256>` (the cache key + what the runtime verifies after decompressing); the suffix encodes the transport codec. The resolver keys off the `compression` **field**, not the suffix; the suffix is for non-resolver consumers (`verify-manifest`, mirrors, humans). The local CAS file is always the bare, decompressed `<sha256>` regardless of codec.
+
+| `compression` | published asset | codec |
+|---------------|-----------------|-------|
+| omitted / `"none"` | `<sha256>` | none (raw bytes) |
+| `"brotli"` | `<sha256>.br` | brotli (RFC 7932) |
+
+Only `none` and `brotli` are emitted today (brotli-11 for every fetched dependency blob). A future codec must extend this map with its conventional suffix — `"gzip"`→`.gz`, `"zstd"`→`.zst`, `"xz"`→`.xz` — kept in sync between the producer (`bin/release manifest`) and the resolver/`verify-manifest`.
+
+Why brotli-11 and why per-blob:
+- **brotli-11** won a Go-library benchmark on the LLVM tool blobs (3 darwin-arm64 blobs, 377 MB → **77 MB, 4.87×**; decompress ~1.2 s). It beats LZMA/xz (92 MB, 6.4 s decompress), bzip2, and gzip on *both* ratio and decompress, and beats `zstd --best` (96 MB) on ratio. Its only cost is slow compression (~10 min single-threaded for the LLVM set), which is acceptable because **compression is rare** (only on a new dependency version) **and cacheable** (unchanged content-hash → reuse the compressed asset, never recompress), while **download size recurs for every user/install** and is the metric to minimize.
+- **Per-blob, not one combined archive:** bumping a single dependency (e.g. musl CRT) must not invalidate or force recompression of the others (e.g. all of LLVM). Each blob compresses/uploads/caches on its own content hash.
+
+This applies to everything Promise *fetches as a dependency*. It does **not** apply to the initial `promise` binary install download, which cannot use brotli (no decompressor exists on a fresh target system before the binary is installed) — see [distribution.md](distribution.md) §2.3.
+
 ---
 
 ## 4. PR CI

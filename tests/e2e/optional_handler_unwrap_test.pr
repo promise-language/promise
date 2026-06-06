@@ -65,13 +65,9 @@ owned_vector_handler_unwrap() `test {
 // the temp-tracking skip peels ParenExpr (isIdentOptionalUnwrapSource) so the
 // extracted inner is not double-freed. The heap-user-type field access
 // `((o)!).n` crashed before the peel (the value-struct result routes through
-// trackHeapUserTypeResult in stmt.go, which the peel fixed).
-//
-// NOTE: the i8*-inner *force-unwrap* paren form `((o)!).len` for `string?`/`T[]?`
-// is a SEPARATE pre-existing double-free (T0776) — genOptionalForceUnwrap's own
-// temp-tracking site does not peel ParenExpr, so it is intentionally NOT covered
-// here yet. The handler form `((o)? _ {}).len` below IS clean (no equivalent
-// internal tracking site) and exercises the genExpr ErrorHandlerExpr i8* peel.
+// trackHeapUserTypeResult in stmt.go, which the peel fixed). T0776 extended the
+// peel to genOptionalForceUnwrap's i8*-inner temp-tracking site so the
+// string?/T[]? force-unwrap paren form `((o)!).len` is clean too.
 
 owned_paren_handler_unwrap() `test {
   HBox? o = HBox(n: 11, label: "p" + "q");
@@ -387,4 +383,50 @@ nondiverging_generic_vector_present() `test {
   h := GHolder[int[]](o: [3, 4, 5].clone());
   r := h.read_with([1, 2].clone());
   assert(r.len == 3, "generic method, T=int[], present runtime");
+}
+
+// T0776: `((o)!).len` on a string? / T[]? ident source must NOT double-free —
+// genOptionalForceUnwrap was tracking the extracted inner as an owned statement
+// temp for parenthesized sources, racing the source optional's scope drop.
+owned_paren_string_force_unwrap() `test {
+  string? o = "abc".to_upper();
+  n := ((o)!).len;
+  assert(n == 3, "parenthesized ident string force-unwrap, no double-free");
+}
+
+owned_paren_vector_force_unwrap() `test {
+  int[]? o = [1, 2].clone();
+  n := ((o)!).len;
+  assert(n == 2, "parenthesized ident vector force-unwrap, no double-free");
+}
+
+// No-regression: non-ident source must still track and free the extracted inner.
+nonident_string_force_unwrap() `test {
+  n := (mk_str()!).len;
+  assert(n == 2, "non-ident string force-unwrap, no leak");
+}
+
+nonident_vector_force_unwrap() `test {
+  n := (mk_vec()!).len;
+  assert(n == 3, "non-ident vector force-unwrap, no leak");
+}
+
+// T0776: exercise the trackTempWithDrop branch (Arc/Weak/Mutex/Task/Channel)
+// of the type-aware temp tracker at runtime — the string/vector tests above
+// cover trackStringTemp / trackVectorTempWithElemType. Without the ParenExpr
+// peel, the extracted Arc handle would be registered as a stmt-temp; at
+// scope exit both the source optional and the temp would call
+// `Arc[int].drop` on the same handle → atomic refcount goes to zero twice
+// → use-after-free of the freed Arc allocation. Arc represents the i8*
+// opaque-handle class (the same gate covers Weak/Mutex/Task/Channel).
+owned_paren_arc_force_unwrap() `test {
+  Arc[int]? o = Arc[int](42);
+  n := ((o)!).borrow;
+  assert(n == 42, "parenthesized ident Arc force-unwrap, no double-free");
+}
+
+owned_paren_mutex_force_unwrap() `test {
+  Mutex[int]? o = Mutex[int](7);
+  use g := ((o)!).lock();
+  assert(g.borrow == 7, "parenthesized ident Mutex force-unwrap, no double-free");
 }

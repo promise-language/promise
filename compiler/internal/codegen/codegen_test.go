@@ -11757,6 +11757,155 @@ func TestOptionalHandlerUnwrapIdentNoHeapTemp(t *testing.T) {
 	}
 }
 
+// T0776: `((o)!).len` on a string? ident source must NOT register the extracted
+// i8* inner as an owned statement temp. The source optional `o` already owns
+// the inner allocation via its scope drop binding; tracking the extracted ptr
+// as a temp emits a second @promise_string_drop call site against the same
+// pointer (double-free at runtime). Without the ParenExpr peel in
+// genOptionalForceUnwrap, `(o)!` is a *ParenExpr (not *IdentExpr), the
+// isIdent check fails, and the spurious temp tracking fires. Mirror of
+// TestOptionalHandlerUnwrapIdentNoHeapTemp for the i8*-inner force-unwrap
+// branch (the handler form uses a separate site that T0753 already covers).
+func TestT0776ParenForceUnwrapStringNoTemp(t *testing.T) {
+	ir := generateIR(t, `
+		tfn() int {
+			string? o = "abc".to_upper();
+			return ((o)!).len;
+		}
+		main() { _ := tfn(); }
+	`)
+	fn := extractFunction(ir, "__user.tfn")
+	if fn == "" {
+		t.Fatal("expected __user.tfn in IR")
+	}
+	// Legitimate @promise_string_drop call sites in tfn (3): the to_upper temp's
+	// cleanup (dead — flag cleared when moved into o) on the normal path (1),
+	// plus o's optional-drop on each of the two return edges (some path and the
+	// unwrap-panic edge) (2). The extracted inner from the paren force-unwrap
+	// must add NO further drop call site — without the ParenExpr peel a
+	// spurious temp tracker fires, raising the count to 4.
+	got := strings.Count(fn, "call void @promise_string_drop")
+	if got != 3 {
+		t.Fatalf("expected 3 @promise_string_drop call sites in tfn (no spurious "+
+			"temp for the paren force-unwrap extracted inner), got %d:\n%s", got, fn)
+	}
+}
+
+// T0776: `((o)!).len` on an int[]? (Vector[int]) ident source must NOT register
+// the extracted i8* inner as an owned statement temp. Symmetric to the string
+// case; covers the TypVector branch of the type-aware temp tracker.
+func TestT0776ParenForceUnwrapVectorNoTemp(t *testing.T) {
+	ir := generateIR(t, `
+		tfn() int {
+			int[]? o = [1, 2].clone();
+			return ((o)!).len;
+		}
+		main() { _ := tfn(); }
+	`)
+	fn := extractFunction(ir, "__user.tfn")
+	if fn == "" {
+		t.Fatal("expected __user.tfn in IR")
+	}
+	// The codegen test harness uses an un-monomorphized stdlib stub, so the call
+	// target is @Vector.drop (in real builds it's Vector__int.drop). The expected
+	// count mirrors the string case: 1 clone-temp cleanup + 2 optional-drops on
+	// the two return edges = 3. Without the ParenExpr peel a spurious temp
+	// tracker would add a 4th call site.
+	got := strings.Count(fn, "call void @Vector.drop")
+	if got != 3 {
+		t.Fatalf("expected 3 @Vector.drop call sites in tfn (no spurious "+
+			"temp for the paren force-unwrap extracted inner), got %d:\n%s", got, fn)
+	}
+}
+
+// T0776 no-regression: a non-ident source (call returning string?) MUST still
+// track the extracted inner as a statement temp — there is no source optional
+// alloca with its own scope drop to own the allocation, so without the temp
+// the inner leaks. Symmetric to the ident-tracking guard at the call site of
+// `(mk_str()!).len` — the peel must not over-broaden the skip.
+func TestT0776NonIdentForceUnwrapStringStillTracks(t *testing.T) {
+	ir := generateIR(t, `
+		mk_str() string? { return "ab".to_upper(); }
+		tfn() int {
+			return (mk_str()!).len;
+		}
+		main() { _ := tfn(); }
+	`)
+	fn := extractFunction(ir, "__user.tfn")
+	if fn == "" {
+		t.Fatal("expected __user.tfn in IR")
+	}
+	// With a non-ident source there is no source optional alloca → the
+	// extracted inner is the *only* owner. trackStringTemp must emit at least
+	// one statement-end drop for it; count >= 1 is enough to confirm the gate
+	// did not over-broaden to skip non-ident sources too.
+	got := strings.Count(fn, "call void @promise_string_drop")
+	if got < 1 {
+		t.Fatalf("expected >=1 @promise_string_drop call site in tfn (non-ident "+
+			"source must still track the extracted inner), got %d:\n%s", got, fn)
+	}
+}
+
+// T0776: `((o)!).borrow` on an Arc[int]? ident source exercises the
+// trackTempWithDrop branch of genOptionalForceUnwrap's type-aware temp tracker
+// (the path the string/vector tests above do NOT cover — those hit
+// trackStringTemp / trackVectorTempWithElemType). Without the ParenExpr peel,
+// the extracted i8* Arc handle gets registered as a NEW stmt-temp via
+// trackTempWithDrop after `unwrap.ok`, with a tmp.exec / Arc[int].drop
+// cleanup racing the source optional's own scope-drop on the same handle —
+// atomic refcount goes to zero twice → use-after-free. Mirrors
+// TestT0654_OptionalArcUnwrapConsumeTracked's discriminator (which asserts
+// the OPPOSITE — non-ident sources MUST register the temp) by checking the
+// IR slice AFTER `unwrap.ok`: no new tmp.exec / Arc drop pair must appear
+// there. Covers Arc/Weak/Mutex/Task/Channel as a class — all five hit the
+// same outer gate via trackTempWithDrop.
+func TestT0776ParenForceUnwrapArcNoTemp(t *testing.T) {
+	ir := generateIR(t, `
+		tfn() int {
+			Arc[int]? o = Arc[int](42);
+			return ((o)!).borrow;
+		}
+		main() { _ := tfn(); }
+	`)
+	fn := extractFunction(ir, "__user.tfn")
+	if fn == "" {
+		t.Fatal("expected __user.tfn in IR")
+	}
+	// Find the actual `unwrap.ok.<N>:` block LABEL (not the `%unwrap.ok.<N>`
+	// reference inside the preceding tmp.skip branch instruction — which would
+	// pull tmp.exec.<M> into the post slice and trigger a false positive).
+	unwrapLabel := regexp.MustCompile(`(?m)^\s*unwrap\.ok\.\d+:`)
+	loc := unwrapLabel.FindStringIndex(fn)
+	if loc == nil {
+		t.Fatalf("expected unwrap.ok.<N>: block label from "+
+			"genOptionalForceUnwrap:\n%s", fn)
+	}
+	// The slice after `unwrap.ok.<N>:` is where genOptionalForceUnwrap would
+	// emit the spurious tmp.exec / Arc[int].drop pair if the ParenExpr peel
+	// were missing. After `unwrap.ok`, the only legitimate Arc[int].drop call
+	// sites are the source optional's `optdrop.inner.*` blocks (one per
+	// return edge); those live INSIDE `optdrop.inner.*`, not `tmp.exec.*`.
+	post := fn[loc[0]:]
+	postLines := strings.Split(post, "\n")
+	inTmpExec := false
+	for _, line := range postLines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "tmp.exec") && strings.HasSuffix(trimmed, ":") {
+			inTmpExec = true
+			continue
+		}
+		if strings.HasSuffix(trimmed, ":") && !strings.HasPrefix(trimmed, "tmp.exec") {
+			inTmpExec = false
+		}
+		if inTmpExec && strings.Contains(line, `@"Arc[int].drop"`) {
+			t.Fatalf("found spurious @\"Arc[int].drop\" call in a tmp.exec "+
+				"block AFTER unwrap.ok — the ParenExpr peel in "+
+				"genOptionalForceUnwrap should skip temp tracking for "+
+				"`((o)!)` because the source optional already owns the Arc:\n%s", fn)
+		}
+	}
+}
+
 // T0095: Constructor with borrowed string param (no drop flag) dups the string
 func TestConstructorDupBorrowedString(t *testing.T) {
 	ir := generateIR(t, `

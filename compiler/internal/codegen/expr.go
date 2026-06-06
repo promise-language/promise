@@ -10830,7 +10830,10 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	// T0354: Same for optionalFieldVector — vector field on droppable type.
 	// T0350: Type-aware tracking — strings via promise_string_drop, vectors via
 	// Vector.drop with element type so heap elements (e.g., string[]) are dropped.
-	if _, isIdent := expr.(*ast.IdentExpr); !isIdent && c.tempTrackingEnabled && !c.optionalFieldString && !c.optionalFieldVector {
+	// T0776: peel ParenExpr so `(o)!` is recognized like `o!` and the source
+	// optional's drop owns the inner (mirrors expr.go:234, stmt.go
+	// trackHeapUserTypeResult).
+	if !isIdentOptionalUnwrapSource(expr) && c.tempTrackingEnabled && !c.optionalFieldString && !c.optionalFieldVector {
 		if result.Type().Equal(irtypes.I8Ptr) {
 			innerType := c.info.Types[expr]
 			if opt, ok := innerType.(*types.Optional); ok {

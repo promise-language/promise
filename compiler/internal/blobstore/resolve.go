@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/andybalholm/brotli"
 )
 
 // OfflineError is the exact §4.4 message emitted when a dependency is uncached
@@ -173,9 +175,14 @@ func (r *Resolver) fetch(entry *ManifestEntry) (string, error) {
 }
 
 // fetchBlob downloads a direct blob source to a temp file, aborting if the
-// stream overshoots the manifest size (cheap defense, §4.3).
+// stream overshoots the manifest size (cheap defense, §4.3). A compressed source
+// is transparently decompressed before the caller verifies the uncompressed
+// content sha256.
 func (r *Resolver) fetchBlob(entry *ManifestEntry, src Source) (string, error) {
 	u := r.rewrite(src.Blob)
+	if src.Compression == compressionBrotli {
+		return r.fetchBlobBrotli(entry, u)
+	}
 	tmp, err := os.CreateTemp(r.tmpDir, "blob-*")
 	if err != nil {
 		return "", err
@@ -191,6 +198,54 @@ func (r *Resolver) fetchBlob(entry *ManifestEntry, src Source) (string, error) {
 		return "", err
 	}
 	return tmpName, nil
+}
+
+// fetchBlobBrotli downloads a brotli-compressed blob and decompresses it into a
+// fresh temp file the caller then hashes against the uncompressed content
+// sha256. The compressed download is uncapped (compressed < uncompressed), but
+// the decompressed output is bounded to entry.Size (+1 to detect overshoot) as a
+// decompression-bomb defense, preserving the §4.3 overshoot guarantee.
+func (r *Resolver) fetchBlobBrotli(entry *ManifestEntry, u string) (string, error) {
+	comp, err := os.CreateTemp(r.tmpDir, "blobz-*")
+	if err != nil {
+		return "", err
+	}
+	compName := comp.Name()
+	comp.Close()
+	defer os.Remove(compName)
+	if _, err := downloadLimited(u, compName, 0); err != nil {
+		return "", err
+	}
+
+	in, err := os.Open(compName)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	out, err := os.CreateTemp(r.tmpDir, "blob-*")
+	if err != nil {
+		return "", err
+	}
+	outName := out.Name()
+	n, err := io.Copy(out, io.LimitReader(brotli.NewReader(in), entry.Size+1))
+	if err != nil {
+		out.Close()
+		os.Remove(outName)
+		return "", fmt.Errorf("brotli-decompress %s: %w", u, err)
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(outName)
+		return "", err
+	}
+	if n > entry.Size {
+		os.Remove(outName)
+		return "", fmt.Errorf("decompressed blob overshoots manifest size %d for %s", entry.Size, u)
+	}
+	if err := os.Chmod(outName, 0o755); err != nil {
+		os.Remove(outName)
+		return "", err
+	}
+	return outName, nil
 }
 
 // fetchFromArchive obtains the shared archive once per pass and extracts the

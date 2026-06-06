@@ -183,8 +183,9 @@ jobs:
       - name: Build/collect dependency blobs (LLVM, wasm runner, CRT, sysroot stubs)
         run: bin/release blobs --host ${{ matrix.host }} --out dist/blobs
       - name: Package + generate manifest
-        # hashes each blob's extracted content, packages for upload (direct files
-        # and/or compressed archives), and records ranked acquisition sources.
+        # hashes each blob's extracted content, packages for upload (direct
+        # blob files are brotli-compressed to `<sha256>.br`, per §3; archives ride
+        # as-is), and records ranked acquisition sources.
         # --tag pins the embedded asset URLs to the ACTUAL ref (so epoch-next does
         # not bake in the catalog default epoch-<epoch>).
         run: bin/release manifest dist/blobs --host ${{ matrix.host }} \

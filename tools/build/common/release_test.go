@@ -99,28 +99,35 @@ func TestReleaseManifest(t *testing.T) {
 	if opt.Kind != "blob" {
 		t.Fatalf("linux opt kind = %q, want blob", opt.Kind)
 	}
-	// Ranked sources: GitHub release-asset blob first, upstream archive second.
+	// Ranked sources: GitHub release-asset blob first (brotli-compressed, so its
+	// URL carries the .br suffix and the source declares the codec), upstream
+	// archive second (uncompressed, no codec).
 	if len(opt.Sources) != 2 {
 		t.Fatalf("expected 2 ranked sources, got %d", len(opt.Sources))
 	}
-	wantBlob := githubAssetURL("epoch-2026.0", wantHash)
+	wantBlob := githubAssetURL("epoch-2026.0", wantHash) + ".br"
 	if opt.Sources[0].Blob != wantBlob {
 		t.Fatalf("source[0].Blob = %q, want %q", opt.Sources[0].Blob, wantBlob)
 	}
+	if opt.Sources[0].Compression != compressionBrotli {
+		t.Fatalf("source[0].Compression = %q, want %q", opt.Sources[0].Compression, compressionBrotli)
+	}
 	s1 := opt.Sources[1]
 	if s1.Archive != "https://example.test/LLVM-22.1.0-Linux-X64.tar.xz" || s1.ArchivePath != "bin/opt" ||
-		s1.ArchiveSHA256 != "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0" {
+		s1.ArchiveSHA256 != "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0" ||
+		s1.Compression != "" {
 		t.Fatalf("source[1] = %+v", s1)
 	}
 
-	// packDir holds the hash-named upload artifacts with matching content.
-	packed := filepath.Join(packDir, wantHash)
-	data, err := os.ReadFile(packed)
+	// packDir holds the brotli-compressed upload artifact named "<hash>.br";
+	// decompressing it must reproduce the uncompressed content sha256.
+	packed := filepath.Join(packDir, wantHash+".br")
+	got, err := hashBlobArtifact(packed, compressionBrotli)
 	if err != nil {
-		t.Fatalf("packed artifact missing: %v", err)
+		t.Fatalf("packed artifact missing/undecodable: %v", err)
 	}
-	if string(data) != "OPT" {
-		t.Fatalf("packed artifact content = %q", string(data))
+	if got != wantHash {
+		t.Fatalf("packed artifact decompresses to %s, want %s", got, wantHash)
 	}
 }
 
@@ -133,7 +140,7 @@ func TestReleaseManifestCachingIdempotent(t *testing.T) {
 	if err := runReleaseManifest(root, args); err != nil {
 		t.Fatal(err)
 	}
-	packed := filepath.Join(packDir, sha256Hex([]byte("OPT")))
+	packed := filepath.Join(packDir, sha256Hex([]byte("OPT"))+".br")
 	info1, err := os.Stat(packed)
 	if err != nil {
 		t.Fatal(err)
@@ -183,10 +190,15 @@ func TestReleaseVerifyManifestCorrupt(t *testing.T) {
 	if err := runReleaseManifest(root, []string{blobsDir, "--host", "linux-amd64", "--pack", packDir, "--out", manifestOut}); err != nil {
 		t.Fatal(err)
 	}
-	// Deliberately corrupt one packed artifact (the bytes no longer hash to the
-	// manifest's content address) — the integrity gate must fail loudly.
-	corrupt := filepath.Join(packDir, sha256Hex([]byte("OPT")))
-	if err := os.WriteFile(corrupt, []byte("TAMPERED"), 0o755); err != nil {
+	// Replace one packed artifact with VALID brotli of different content: it
+	// decompresses cleanly but to bytes that no longer hash to the manifest's
+	// content address — the integrity gate must catch the mismatch.
+	corrupt := filepath.Join(packDir, sha256Hex([]byte("OPT"))+".br")
+	tampered := filepath.Join(root, "tampered")
+	if err := os.WriteFile(tampered, []byte("TAMPERED"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressFileBrotli(tampered, corrupt); err != nil {
 		t.Fatal(err)
 	}
 	err := runReleaseVerifyManifest(root, []string{manifestOut, "--against", packDir})
@@ -195,6 +207,89 @@ func TestReleaseVerifyManifestCorrupt(t *testing.T) {
 	}
 	if !containsAll(err.Error(), "llvm-opt", "mismatch") {
 		t.Fatalf("error should name the entry and the mismatch, got: %v", err)
+	}
+}
+
+// TestReleaseVerifyManifestInvalidBrotli covers the OTHER compressed-artifact
+// failure mode: a packaged .br asset that is not valid brotli at all (truncated
+// upload, wrong codec) must fail the gate with a decode error, not silently pass.
+func TestReleaseVerifyManifestInvalidBrotli(t *testing.T) {
+	root, blobsDir := fakeReleaseRoot(t, map[string]string{"opt": "OPT", "llc": "LLC"})
+	packDir := filepath.Join(root, "pack")
+	manifestOut := filepath.Join(root, "manifest.json")
+	if err := runReleaseManifest(root, []string{blobsDir, "--host", "linux-amd64", "--pack", packDir, "--out", manifestOut}); err != nil {
+		t.Fatal(err)
+	}
+	garbage := filepath.Join(packDir, sha256Hex([]byte("OPT"))+".br")
+	if err := os.WriteFile(garbage, []byte("not brotli at all"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := runReleaseVerifyManifest(root, []string{manifestOut, "--against", packDir})
+	if err == nil {
+		t.Fatal("verify-manifest must fail on an undecodable .br artifact")
+	}
+	if !containsAll(err.Error(), "llvm-opt") {
+		t.Fatalf("error should name the entry, got: %v", err)
+	}
+}
+
+// TestHashBlobArtifact unit-tests the integrity gate's content hasher directly,
+// covering the three codec branches: uncompressed ("" / "none") hashes the raw
+// bytes, "brotli" hashes the decompressed bytes (so a compressed artifact maps
+// back to its uncompressed content address), and an unknown codec is rejected.
+func TestHashBlobArtifact(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("the opt binary")
+	want := sha256Hex(content)
+
+	raw := filepath.Join(dir, "raw")
+	if err := os.WriteFile(raw, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, codec := range []string{"", "none"} {
+		got, err := hashBlobArtifact(raw, codec)
+		if err != nil {
+			t.Fatalf("codec %q: %v", codec, err)
+		}
+		if got != want {
+			t.Fatalf("codec %q: hash = %s, want %s", codec, got, want)
+		}
+	}
+
+	// A brotli artifact hashes to the UNCOMPRESSED content address.
+	comp := filepath.Join(dir, "comp.br")
+	if err := compressFileBrotli(raw, comp); err != nil {
+		t.Fatal(err)
+	}
+	got, err := hashBlobArtifact(comp, compressionBrotli)
+	if err != nil {
+		t.Fatalf("brotli: %v", err)
+	}
+	if got != want {
+		t.Fatalf("brotli artifact hashes to %s, want uncompressed %s", got, want)
+	}
+
+	// Unknown codec is rejected loudly.
+	if _, err := hashBlobArtifact(raw, "lz4"); err == nil {
+		t.Fatal("expected error for unknown codec")
+	}
+}
+
+// TestCompressFileBrotliErrors covers compressFileBrotli's failure paths: a
+// missing source and an unwritable destination both surface an error rather than
+// producing a silent partial artifact.
+func TestCompressFileBrotliErrors(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressFileBrotli(filepath.Join(dir, "does-not-exist"), filepath.Join(dir, "out.br")); err == nil {
+		t.Fatal("expected error opening a missing source")
+	}
+	// Destination inside a nonexistent directory → os.Create fails.
+	if err := compressFileBrotli(src, filepath.Join(dir, "no-such-dir", "out.br")); err == nil {
+		t.Fatal("expected error creating dst under a missing directory")
 	}
 }
 
@@ -343,6 +438,12 @@ func TestRuntimeManifestValidate(t *testing.T) {
 		{"archive without path", runtimeManifest{Schema: 1, Entries: []runtimeManifestEntry{
 			{Name: "n", SHA256: "h", Sources: []runtimeSource{{Archive: "a.tgz"}}},
 		}}, "archive without archive_path"},
+		{"compression on archive", runtimeManifest{Schema: 1, Entries: []runtimeManifestEntry{
+			{Name: "n", SHA256: "h", Sources: []runtimeSource{{Archive: "a.tgz", ArchivePath: "bin/x", Compression: "brotli"}}},
+		}}, "compression only applies to blob"},
+		{"unknown codec", runtimeManifest{Schema: 1, Entries: []runtimeManifestEntry{
+			{Name: "n", SHA256: "h", Sources: []runtimeSource{{Blob: "u", Compression: "lz4"}}},
+		}}, "unknown compression codec"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -356,9 +457,11 @@ func TestRuntimeManifestValidate(t *testing.T) {
 		})
 	}
 
-	// A well-formed manifest with both source kinds validates clean.
+	// A well-formed manifest with all source shapes validates clean: a plain
+	// blob, a brotli-compressed blob, and an (uncompressed) archive.
 	good := runtimeManifest{Schema: 1, Entries: []runtimeManifestEntry{
 		{Name: "blobby", SHA256: "h", Sources: []runtimeSource{okSource}},
+		{Name: "compressed", SHA256: "h", Sources: []runtimeSource{{Blob: "u.br", Compression: compressionBrotli}}},
 		{Name: "archivey", SHA256: "h", Sources: []runtimeSource{{Archive: "a.tgz", ArchivePath: "bin/x"}}},
 	}}
 	if err := good.validate(); err != nil {

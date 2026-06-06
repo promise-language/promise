@@ -34,9 +34,33 @@ type runtimeManifestEntry struct {
 
 type runtimeSource struct {
 	Blob          string `json:"blob,omitempty"`
+	Compression   string `json:"compression,omitempty"` // transport codec of the Blob asset ("" / "brotli")
 	Archive       string `json:"archive,omitempty"`
 	ArchivePath   string `json:"archive_path,omitempty"`
 	ArchiveSHA256 string `json:"archive_sha256,omitempty"`
+}
+
+// compressionBrotli is the only transport codec emitted today (brotli-11 per
+// blob; docs/release-automation.md §3). The content sha256 is always over the
+// UNCOMPRESSED bytes — compression is purely a transport layer. This must stay
+// in lockstep with blobstore.compressionBrotli in the compiler (separate Go
+// module).
+const compressionBrotli = "brotli"
+
+// assetSuffix returns the published-asset filename suffix for a blob source's
+// compression codec. The asset stem is always the uncompressed content
+// <sha256>; the suffix encodes transport. An unknown codec is rejected so a
+// typo fails loudly at produce/verify time rather than shipping garbage. Keep
+// the map in sync with blobstore.assetSuffix in the compiler.
+func assetSuffix(compression string) (string, error) {
+	switch compression {
+	case "", "none":
+		return "", nil
+	case compressionBrotli:
+		return ".br", nil
+	default:
+		return "", fmt.Errorf("unknown compression codec %q", compression)
+	}
 }
 
 // GenerateRuntimeManifest writes compiler/cmd/promise/resources/manifest.json
@@ -95,11 +119,12 @@ func llvmKindForTarget(target string) string {
 // "llvm-<out>" (the logical name resolveLLVMView asks for).
 //
 // blobSource, when non-nil, is invoked with each tool's extracted sha256 to
-// produce the primary (higher-ranked) acquisition URL — the published
-// release-asset blob. The pinned upstream LLVM tarball (`archive`+`archive_path`)
-// is always appended as the fallback source, so a not-yet-published release still
-// resolves from upstream (this is what lets the thin bootstrap compile the stub).
-func buildLLVMEntries(dir string, tEntry *TargetEntry, target string, blobSource func(hash string) string) ([]runtimeManifestEntry, error) {
+// produce the primary (higher-ranked) acquisition source — the published
+// release-asset blob (carrying its URL and transport compression). The pinned
+// upstream LLVM tarball (`archive`+`archive_path`) is always appended as the
+// fallback source, so a not-yet-published release still resolves from upstream
+// (this is what lets the thin bootstrap compile the stub).
+func buildLLVMEntries(dir string, tEntry *TargetEntry, target string, blobSource func(hash string) runtimeSource) ([]runtimeManifestEntry, error) {
 	kind := llvmKindForTarget(target)
 	var entries []runtimeManifestEntry
 	for _, f := range tEntry.Files {
@@ -110,7 +135,7 @@ func buildLLVMEntries(dir string, tEntry *TargetEntry, target string, blobSource
 		}
 		var sources []runtimeSource
 		if blobSource != nil {
-			sources = append(sources, runtimeSource{Blob: blobSource(hash)})
+			sources = append(sources, blobSource(hash))
 		}
 		sources = append(sources, runtimeSource{
 			Archive:       tEntry.URL,

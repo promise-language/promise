@@ -60,10 +60,18 @@ const (
 // persistently cache across runs (§4.2 Archive reuse).
 type Source struct {
 	Blob          string `json:"blob,omitempty"`
+	Compression   string `json:"compression,omitempty"` // transport codec of the Blob asset ("" / "brotli")
 	Archive       string `json:"archive,omitempty"`
 	ArchivePath   string `json:"archive_path,omitempty"`
 	ArchiveSHA256 string `json:"archive_sha256,omitempty"`
 }
+
+// compressionBrotli is the only transport codec understood today (brotli-11 per
+// blob; docs/release-automation.md §3). The content sha256 is always over the
+// UNCOMPRESSED bytes — compression is purely a transport layer the resolver
+// decodes before verifying. Kept in lockstep with common.compressionBrotli in
+// the build tools (separate Go module).
+const compressionBrotli = "brotli"
 
 // IsArchive reports whether the source extracts a path from a compressed archive.
 func (s Source) IsArchive() bool { return s.Archive != "" }
@@ -106,6 +114,14 @@ func (m *Manifest) validate() error {
 			}
 			if s.Archive != "" && s.ArchivePath == "" {
 				return fmt.Errorf("entry %q source[%d]: archive without archive_path", e.Name, j)
+			}
+			if s.Archive != "" && s.Compression != "" {
+				return fmt.Errorf("entry %q source[%d]: compression only applies to blob sources", e.Name, j)
+			}
+			switch s.Compression {
+			case "", "none", compressionBrotli:
+			default:
+				return fmt.Errorf("entry %q source[%d]: unknown compression codec %q", e.Name, j, s.Compression)
 			}
 		}
 	}

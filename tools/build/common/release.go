@@ -1,13 +1,18 @@
 package common
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/andybalholm/brotli"
 )
 
 // release.go implements `bin/release` — the forge driver that produces the
@@ -212,26 +217,35 @@ func runReleaseManifest(root string, args []string) error {
 		return err
 	}
 
-	entries, err := buildLLVMEntries(blobsDir, tEntry, *host, func(hash string) string {
-		return githubAssetURL(relTag, hash)
+	// Published dependency blobs are brotli-compressed (T0795): the asset URL is
+	// the uncompressed content <hash> plus the codec suffix, and the source
+	// carries the codec so the resolver decompresses before verifying the
+	// uncompressed sha256.
+	suffix, err := assetSuffix(compressionBrotli)
+	if err != nil {
+		return err
+	}
+	entries, err := buildLLVMEntries(blobsDir, tEntry, *host, func(hash string) runtimeSource {
+		return runtimeSource{Blob: githubAssetURL(relTag, hash) + suffix, Compression: compressionBrotli}
 	})
 	if err != nil {
 		return err
 	}
 
-	// Pack each blob under its content hash. Content-addressed names make this
-	// idempotent across releases: an unchanged dependency hashes the same, so the
-	// artifact already exists and is left untouched (no rebuild/re-upload).
+	// Pack each blob brotli-compressed under "<content hash><suffix>".
+	// Content-addressed names make this idempotent across releases: an unchanged
+	// dependency hashes the same, so the (already-compressed) artifact exists and
+	// is left untouched — never recompressed (brotli-11 is slow; §3).
 	if err := os.MkdirAll(*pack, 0o755); err != nil {
 		return err
 	}
 	for i, f := range tEntry.Files {
 		src := filepath.Join(blobsDir, f.Out)
-		dst := filepath.Join(*pack, entries[i].SHA256)
+		dst := filepath.Join(*pack, entries[i].SHA256+suffix)
 		if Exists(dst) {
 			continue // same hash already packed — caching skip
 		}
-		if err := copyFilePreservingMode(src, dst); err != nil {
+		if err := compressFileBrotli(src, dst); err != nil {
 			return fmt.Errorf("pack %s: %w", f.Out, err)
 		}
 	}
@@ -299,7 +313,9 @@ func verifyManifestEntry(e runtimeManifestEntry, againstDir string) error {
 				continue
 			}
 			found = true
-			got, _, err := hashAndSize(artifact)
+			// The packaged artifact may be transport-compressed; the integrity
+			// gate hashes the DECOMPRESSED bytes against the content sha256.
+			got, err := hashBlobArtifact(artifact, s.Compression)
 			if err != nil {
 				return fmt.Errorf("entry %q: %w", e.Name, err)
 			}
@@ -329,6 +345,55 @@ func verifyManifestEntry(e runtimeManifestEntry, againstDir string) error {
 		return fmt.Errorf("entry %q: no packaged artifact found in %s", e.Name, againstDir)
 	}
 	return nil
+}
+
+// compressFileBrotli streams src → dst brotli-compressed at the maximum quality
+// (level 11; docs/release-automation.md §3). Slow but rare (only on a new
+// dependency version) and content-cacheable; the resolver decompresses on fetch.
+func compressFileBrotli(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	bw := brotli.NewWriterLevel(out, brotli.BestCompression)
+	if _, err := io.Copy(bw, in); err != nil {
+		bw.Close()
+		return err
+	}
+	if err := bw.Close(); err != nil {
+		return err
+	}
+	return out.Close()
+}
+
+// hashBlobArtifact returns the sha256 of a packaged blob artifact's UNCOMPRESSED
+// content, decompressing first when the source declares a transport codec. This
+// is the integrity gate's counterpart to the resolver's decompress-then-verify.
+func hashBlobArtifact(artifact, compression string) (string, error) {
+	switch compression {
+	case "", "none":
+		h, _, err := hashAndSize(artifact)
+		return h, err
+	case compressionBrotli:
+		in, err := os.Open(artifact)
+		if err != nil {
+			return "", err
+		}
+		defer in.Close()
+		h := sha256.New()
+		if _, err := io.Copy(h, brotli.NewReader(in)); err != nil {
+			return "", fmt.Errorf("brotli-decompress %s: %w", filepath.Base(artifact), err)
+		}
+		return hex.EncodeToString(h.Sum(nil)), nil
+	default:
+		return "", fmt.Errorf("unknown compression codec %q", compression)
+	}
 }
 
 // hashArchiveMember extracts member from archive into a temp dir (tolerating a
@@ -399,6 +464,12 @@ func (m *runtimeManifest) validate() error {
 			}
 			if s.Archive != "" && s.ArchivePath == "" {
 				return fmt.Errorf("entry %q source[%d]: archive without archive_path", e.Name, j)
+			}
+			if s.Archive != "" && s.Compression != "" {
+				return fmt.Errorf("entry %q source[%d]: compression only applies to blob sources", e.Name, j)
+			}
+			if _, err := assetSuffix(s.Compression); err != nil {
+				return fmt.Errorf("entry %q source[%d]: %w", e.Name, j, err)
 			}
 		}
 	}

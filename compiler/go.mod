@@ -3,6 +3,7 @@ module github.com/promise-language/promise/compiler
 go 1.25.6
 
 require (
+	github.com/andybalholm/brotli v1.2.1
 	github.com/antlr4-go/antlr/v4 v4.13.1
 	github.com/llir/llvm v0.3.6
 	golang.org/x/sys v0.37.0

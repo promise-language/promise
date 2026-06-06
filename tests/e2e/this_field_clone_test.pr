@@ -311,6 +311,103 @@ test_t0411_generic_owner_string_field_clone() `test {
   assert(h2.payload == 7, "clone payload");
 }
 
+// --- T0778: borrowed-field return where the FIELD TYPE is a TypeParam that
+// substitutes to a droppable type (string / Vector) ---
+//
+// In a monomorphized method body the receiver surfaces as the bare generic
+// Named (e.g. TPHolder[T]), so ownerHasOrSynthDrop took the non-Instance path
+// and saw NeedsSynthDrop()==false (the field type still contains a TypeParam).
+// The field-access dup was therefore skipped, so `return this.payload` /
+// `this.opt!` / `(this.opt)? _ {...}` handed back an alias into the owner's
+// storage — both the owner's synth drop and the returned value freed the same
+// inner buffer (`fatal: invalid free`). Fixed by resolving ownerHasOrSynthDrop
+// through the active mono context. All values are HEAP (concat / push loop) so
+// a double-free actually crashes and a leak is caught.
+
+type _T0778TPHolder[T] {
+  T payload;
+  T? opt;
+  drop(~this) {
+  }
+
+  // Plain `return this.field` for a TypeParam field (gen_field repro).
+  read_payload(this) T {
+    return this.payload;
+  }
+
+  // Force-unwrap `return this.opt!` for a TypeParam optional field.
+  read_opt_force(this) T {
+    return this.opt!;
+  }
+
+  // Optional-handler unwrap `return (this.opt)? _ { recovery }` — present path
+  // returns the borrowed inner; the absent path returns the fresh recovery.
+  read_opt_handler(this, ~T recovery) T {
+    return (this.opt)? _ {
+      recovery
+    };
+  }
+}
+
+test_t0778_generic_typeparam_string_field_return() `test {
+  h := _T0778TPHolder[string](payload: "ab".to_upper(), opt: "cd".to_upper());
+  r := h.read_payload();
+  assert(r.len == 2, "plain payload return");
+  // Original still owns an independent copy.
+  assert(h.payload.len == 2, "orig payload still readable");
+}
+
+test_t0778_generic_typeparam_string_optional_force() `test {
+  h := _T0778TPHolder[string](payload: "ab".to_upper(), opt: "cd".to_upper());
+  r := h.read_opt_force();
+  assert(r.len == 2, "force unwrap return, T=string");
+  assert(h.payload.len == 2, "orig still readable");
+}
+
+test_t0778_generic_typeparam_string_optional_handler_present() `test {
+  h := _T0778TPHolder[string](payload: "ab".to_upper(), opt: "cd".to_upper());
+  r := h.read_opt_handler("zz".to_upper());
+  assert(r.len == 2, "handler present, T=string");
+  assert(h.payload.len == 2, "orig still readable");
+}
+
+test_t0778_generic_typeparam_string_optional_handler_absent() `test {
+  h := _T0778TPHolder[string](payload: "ab".to_upper(), opt: none);
+  r := h.read_opt_handler("zzz".to_upper());
+  assert(r.len == 3, "handler absent → recovery, T=string");
+}
+
+_t0778_mkv(int seed) int[] {
+  v := int[]();
+  for i := 0; i < 100; i++ {
+    v.push(i + seed);
+  }
+  return v;
+}
+
+test_t0778_generic_typeparam_vector_field_return() `test {
+  h := _T0778TPHolder[int[]](payload: _t0778_mkv(0), opt: _t0778_mkv(1000));
+  r := h.read_payload();
+  assert(r.len == 100, "plain vector payload return");
+  assert(r[0] == 0, "vector[0]");
+  assert(h.payload.len == 100, "orig payload still readable");
+}
+
+test_t0778_generic_typeparam_vector_optional_handler_present() `test {
+  h := _T0778TPHolder[int[]](payload: _t0778_mkv(0), opt: _t0778_mkv(1000));
+  r := h.read_opt_handler(_t0778_mkv(5000));
+  assert(r.len == 100, "handler present, T=int[]");
+  assert(r[0] == 1000, "vector handler present[0]");
+  assert(h.payload.len == 100, "orig still readable");
+}
+
+test_t0778_generic_typeparam_vector_optional_handler_absent() `test {
+  h := _T0778TPHolder[int[]](payload: _t0778_mkv(0), opt: none);
+  r := h.read_opt_handler(_t0778_mkv(5000));
+  assert(r.len == 100, "handler absent → recovery, T=int[]");
+  assert(r[0] == 5000, "vector handler absent[0]");
+}
+
 // --- Explicit `&this` receiver auto-dup (T0413) ---
 //
 // T0411's auto-dup fires whenever the owner has drop, regardless of

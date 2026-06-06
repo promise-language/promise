@@ -4146,6 +4146,23 @@ func (c *Compiler) ownerHasOrSynthDrop(typ types.Type, named *types.Named) bool 
 	if inst, ok := typ.(*types.Instance); ok {
 		return monoInstNeedsSynthDrop(inst)
 	}
+	// T0778: Inside a monomorphized method body the receiver type can surface as
+	// the bare generic Named (e.g. GH[T]) rather than a concrete Instance, so the
+	// Instance branch above is skipped. NeedsSynthDrop on the generic Named is
+	// false — its field types still contain TypeParams (sema's fieldTypeHasDrop
+	// returns false for TypeParam). Resolve through the active mono context: if
+	// `named` is the origin of the instance currently being specialized, ask
+	// whether THAT instance needs a synth drop (its substituted fields are
+	// droppable). Without this, a borrowed-field read in a generic method whose
+	// field substitutes to a droppable type (`return this.s`, `this.o!`,
+	// `(this.o)? _ {...}` for string/vector) skips the field-access dup, so the
+	// owner's synth drop and the returned alias both free the inner → double-free
+	// (`fatal: invalid free`). Mirrors the monoCtx fallback in lookupTypeLayout.
+	if c.monoCtx != nil && c.monoCtx.inst != nil && named != nil {
+		if origin, ok := c.monoCtx.origin.(*types.Named); ok && origin == named {
+			return monoInstNeedsSynthDrop(c.monoCtx.inst)
+		}
+	}
 	return false
 }
 
@@ -10655,6 +10672,20 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 // Checks the optional flag, runs the handler on none, extracts inner value on some.
 func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	optVal := c.genExpr(e.Expr)
+	// T0778: Capture any per-field dup created while evaluating the source (a
+	// droppable-owner optional field like `(this.o)? _ {...}` — genFieldAccess
+	// makes an INDEPENDENT dup of the inner string/vector and tracks it as a
+	// statement temp). Capture it NOW, before the handler body's genBlockValue
+	// runs cleanupStmtTemps and nils these fields. The dup is claimed in
+	// someBlock below — see the comment there.
+	srcStringDup := c.optionalStringDup
+	srcContainerDup := c.optionalContainerDup
+	// Clear so the handler body's genBlockValue (evaluated next, in noneBlock)
+	// does not wrongly claim the SOURCE's dup in the none path — that dup is the
+	// present-path value and must be claimed in someBlock instead. genBlockValue
+	// is free to set/claim its own dup for a field-access recovery value.
+	c.optionalStringDup = nil
+	c.optionalContainerDup = nil
 	flag := c.block.NewExtractValue(optVal, 0)
 
 	noneBlock := c.newBlock("opt.none")
@@ -10674,6 +10705,28 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	// Some path: extract inner value
 	c.block = someBlock
 	okVal := c.block.NewExtractValue(optVal, 1)
+
+	// T0778: Droppable-owner field source — `(owner.field)? _ { ... }` where the
+	// optional lives in a field of a droppable owner (e.g. borrowed `this.o`).
+	// genFieldAccess already made an INDEPENDENT dup of the inner string/vector
+	// (srcStringDup/srcContainerDup captured above) — because the owner's own
+	// drop still frees the original — and tracked that dup as a statement temp;
+	// the present-path okVal IS that dup. Claim the dup's temp slot here in
+	// someBlock so the PRESENT runtime keeps it (its drop flag is cleared in this
+	// block, which only executes when present; the absent runtime's dup is null,
+	// so its statement-end cleanup drop is a null no-op). The merged phi is then
+	// tracked EXACTLY ONCE by genExpr's *ast.ErrorHandlerExpr branch (non-ident
+	// source ⇒ it trackStringTemp's the phi) and is the sole owner. Without this,
+	// the dup is freed at statement end AND aliased by the returned phi →
+	// double-free (`fatal: invalid free`). Mirrors genOptionalForceUnwrap's
+	// optionalStringDup consumption; ident sources never reach here with a dup
+	// (genFieldAccess is not involved → the captured fields are nil).
+	if srcStringDup != nil {
+		c.claimStringTemp(srcStringDup)
+	}
+	if srcContainerDup != nil {
+		c.claimStringTemp(srcContainerDup)
+	}
 
 	// T0778: Non-diverging handler on an ident-source optional whose inner is
 	// i8* (string/vector). The phi values are:

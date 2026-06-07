@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -319,21 +320,32 @@ func runReleaseManifest(root string, args []string) error {
 	return nil
 }
 
-// runReleaseManifestFromCatalog projects `tools/build/blobs.json` into the
-// per-epoch runtime manifest for `host`. Each LLVM file in prebuilts.toml is
-// looked up in the catalog by (dependency, version, target, name) — the catalog
-// must have an entry, since `blobs.json` is the committed source of truth for
-// hosted blobs. The runtime manifest entries are named `llvm-<out>` (matching
-// the bootstrap producer's convention), with the catalog-resolved deps release
-// asset as the primary source and the upstream archive as the ranked fallback.
+// errCatalogMissForHost is the sentinel BuildRuntimeManifestFromCatalog returns
+// when blobs.json has no entry for the host's pinned (dep, version, target).
+// `bin/build` checks for it via errors.Is to fall back to the empty placeholder
+// (so a developer who hasn't yet published their host's blobs can still build);
+// the `bin/release manifest --from-catalog` CLI surfaces the wrapped error
+// directly because the catalog miss is the actionable condition for that
+// command.
+var errCatalogMissForHost = errors.New("blobs.json has no entry for host")
+
+// BuildRuntimeManifestFromCatalog projects `tools/build/blobs.json` into the
+// per-epoch runtime manifest for `target`. Each LLVM file in prebuilts.toml is
+// looked up in the catalog by (dependency, version, target, name). The catalog
+// must have an entry — when it does not, the function returns a wrapped
+// errCatalogMissForHost so callers can react (the manifest CLI bubbles the
+// error to the user; `bin/build` falls back to the empty placeholder).
 //
-// The release tag is ALWAYS the catalog-derived `deps-<dep>-<version>` — the
-// CLI rejects --tag in from-catalog mode because the deps release is where
-// the blobs actually live; overriding would produce unfetchable URLs.
-func runReleaseManifestFromCatalog(root, host, outPath string) error {
-	pm, tEntry, err := llvmTargetEntry(root, host)
+// The release tag is ALWAYS the catalog-derived `deps-<dep>-<version>`; the
+// caller cannot override it (overriding would produce a manifest whose blob
+// URLs point at a release that does not host them).
+//
+// Single source of truth for the projection — both the `manifest --from-catalog`
+// CLI and the `bin/build` debug+release manifest population call this.
+func BuildRuntimeManifestFromCatalog(root, target, epoch string) (*runtimeManifest, error) {
+	pm, tEntry, err := llvmTargetEntry(root, target)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	llvm := pm.Binaries["llvm"]
 	dep, version := "llvm", llvm.Version
@@ -341,24 +353,20 @@ func runReleaseManifestFromCatalog(root, host, outPath string) error {
 
 	catalog, err := LoadBlobsCatalog(root)
 	if err != nil {
-		return err
-	}
-	epoch, err := ParseEpoch(root)
-	if err != nil {
-		return err
+		return nil, err
 	}
 
-	kind := llvmKindForTarget(host)
+	kind := llvmKindForTarget(target)
 	entries := make([]runtimeManifestEntry, 0, len(tEntry.Files))
 	for _, f := range tEntry.Files {
-		be, ok := catalog.Lookup(dep, version, host, f.Out)
+		be, ok := catalog.Lookup(dep, version, target, f.Out)
 		if !ok {
-			return fmt.Errorf("blobs.json has no entry for %s/%s/%s/%s — run `bin/release publish-blobs --dependency %s --host %s` first",
-				dep, version, host, f.Out, dep, host)
+			return nil, fmt.Errorf("%w: %s/%s/%s/%s — run `bin/release publish-blobs --dependency %s --host %s` first",
+				errCatalogMissForHost, dep, version, target, f.Out, dep, target)
 		}
 		assetURL, err := BlobAssetURL(tag, be.SHA256, be.Compression)
 		if err != nil {
-			return fmt.Errorf("entry %s: %w", blobIdent(*be), err)
+			return nil, fmt.Errorf("entry %s: %w", blobIdent(*be), err)
 		}
 		entries = append(entries, runtimeManifestEntry{
 			Name:   "llvm-" + f.Out,
@@ -371,15 +379,38 @@ func runReleaseManifestFromCatalog(root, host, outPath string) error {
 			},
 		})
 	}
+	return &runtimeManifest{Schema: runtimeManifestSchema, Epoch: epoch, Entries: entries}, nil
+}
 
-	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: epoch, Entries: entries}
+// runReleaseManifestFromCatalog is the thin CLI wrapper around
+// BuildRuntimeManifestFromCatalog: it loads the epoch from catalog.toml,
+// projects, and writes to outPath. The catalog-miss sentinel is bubbled
+// verbatim because the CLI's purpose is to surface that condition to the
+// user (the dev/CI build path's fallback lives in `bin/build`).
+func runReleaseManifestFromCatalog(root, host, outPath string) error {
+	epoch, err := ParseEpoch(root)
+	if err != nil {
+		return err
+	}
+	m, err := BuildRuntimeManifestFromCatalog(root, host, epoch)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return err
 	}
-	if err := writeRuntimeManifest(outPath, &m); err != nil {
+	if err := writeRuntimeManifest(outPath, m); err != nil {
 		return err
 	}
-	fmt.Printf("Projected %d entries from blobs.json into %s (tag %s)\n", len(entries), outPath, tag)
+	// BuildRuntimeManifestFromCatalog already validated prebuilts.toml above; a
+	// second LoadPrebuiltsManifest just to fish out the version for the status
+	// line is cheap, and any failure here can only mean a TOCTOU manifest swap
+	// — surface it rather than printing a fake "deps-llvm-unknown" tag.
+	pm, err := LoadPrebuiltsManifest(root)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Projected %d entries from blobs.json into %s (tag %s)\n", len(m.Entries), outPath, DepsReleaseTag("llvm", pm.Binaries["llvm"].Version))
 	return nil
 }
 

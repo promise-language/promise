@@ -1,6 +1,9 @@
 package common
 
 import (
+	"encoding/json"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -91,4 +94,98 @@ func TestBundleLLVM_NoEntry(t *testing.T) {
 			t.Errorf("unsupported reason not surfaced; got: %v", err)
 		}
 	})
+}
+
+// TestBuildRuntimeManifestFromCatalog_PopulatesWithCatalogHit covers T0798's
+// debug-build behavior: BuildRuntimeManifestFromCatalog must project an
+// entry for every prebuilts.toml file when the catalog has them all, with
+// the slim-blob source first and the upstream-archive fallback second. This
+// is the path `bin/build` (both debug + release) takes to populate the
+// embedded runtime manifest.
+func TestBuildRuntimeManifestFromCatalog_PopulatesWithCatalogHit(t *testing.T) {
+	root, _ := fakeReleaseRoot(t, nil)
+	cat := &BlobsCatalog{Schema: BlobsCatalogSchema, Blobs: []BlobEntry{
+		{Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "opt",
+			SHA256: "1111111111111111111111111111111111111111111111111111111111111111",
+			Size: 10, Compression: compressionBrotli, CompressedSize: 5},
+		{Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "llc",
+			SHA256: "2222222222222222222222222222222222222222222222222222222222222222",
+			Size: 20, Compression: compressionBrotli, CompressedSize: 8},
+	}}
+	if err := WriteBlobsCatalog(root, cat); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := BuildRuntimeManifestFromCatalog(root, "linux-amd64", "2026.0")
+	if err != nil {
+		t.Fatalf("BuildRuntimeManifestFromCatalog: %v", err)
+	}
+	if m.Schema != runtimeManifestSchema || m.Epoch != "2026.0" {
+		t.Fatalf("schema/epoch = %d/%q", m.Schema, m.Epoch)
+	}
+	if len(m.Entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(m.Entries))
+	}
+	byName := map[string]runtimeManifestEntry{}
+	for _, e := range m.Entries {
+		byName[e.Name] = e
+	}
+	opt, ok := byName["llvm-opt"]
+	if !ok {
+		t.Fatal("missing llvm-opt entry")
+	}
+	if len(opt.Sources) != 2 {
+		t.Fatalf("expected 2 ranked sources (blob then archive), got %d", len(opt.Sources))
+	}
+	wantBlob := releaseAssetBase + "/deps-llvm-22.1.0/" + opt.SHA256 + ".br"
+	if opt.Sources[0].Blob != wantBlob {
+		t.Errorf("source[0].Blob = %q, want %q", opt.Sources[0].Blob, wantBlob)
+	}
+	if opt.Sources[0].Compression != compressionBrotli {
+		t.Errorf("source[0].Compression = %q", opt.Sources[0].Compression)
+	}
+	if opt.Sources[1].Archive == "" || opt.Sources[1].ArchivePath != "bin/opt" {
+		t.Errorf("source[1] (archive fallback) malformed: %+v", opt.Sources[1])
+	}
+
+	// Re-serialize and re-parse to prove the projected manifest validates
+	// against the same shape blobstore.Manifest will read at runtime — this
+	// is what `bin/build` writes to resources/manifest.json.
+	tmp := filepath.Join(t.TempDir(), "manifest.json")
+	if err := writeRuntimeManifest(tmp, m); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := loadRuntimeManifest(tmp)
+	if err != nil {
+		t.Fatalf("emitted manifest fails its own loader: %v", err)
+	}
+	if got, err := json.Marshal(rt); err != nil || len(got) == 0 {
+		t.Fatalf("re-emitted manifest empty (err=%v)", err)
+	}
+}
+
+// TestBuildRuntimeManifestFromCatalog_MissingEntrySignalsSentinel covers the
+// other side of the contract: when blobs.json has no entry for the host,
+// the function returns the sentinel error so `bin/build` can fall back to
+// the placeholder instead of failing the build outright (a developer who
+// hasn't published blobs for their host still needs to build).
+func TestBuildRuntimeManifestFromCatalog_MissingEntrySignalsSentinel(t *testing.T) {
+	root, _ := fakeReleaseRoot(t, nil)
+	// Empty catalog → every Lookup misses.
+	_, err := BuildRuntimeManifestFromCatalog(root, "linux-amd64", "2026.0")
+	if err == nil {
+		t.Fatal("expected an error for empty catalog")
+	}
+	// The sentinel lets `bin/build` distinguish a recoverable miss (placeholder
+	// fallback) from a genuine failure (e.g. malformed prebuilts.toml). The
+	// sentinel is wrapped with `%w`, so errors.Is is the contract `bin/build`
+	// itself uses.
+	if !errors.Is(err, errCatalogMissForHost) {
+		t.Errorf("error should wrap errCatalogMissForHost so bin/build can detect it, got: %v", err)
+	}
+	// And the message must reference publish-blobs so a maintainer knows the
+	// remediation.
+	if !strings.Contains(err.Error(), "publish-blobs") {
+		t.Errorf("error should mention publish-blobs as remediation, got: %v", err)
+	}
 }

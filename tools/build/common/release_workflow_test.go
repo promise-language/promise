@@ -434,6 +434,66 @@ func TestReleaseWorkflowCompressesAssets(t *testing.T) {
 	}
 }
 
+// TestWorkflowsDropLLVMInstall pins T0798: ci.yml AND release.yml's compiler
+// job must NOT carry the per-OS `Install LLVM …` shim. `bin/build`/
+// `bin/release build` self-fetch the pinned LLVM from the slim blob catalog;
+// re-introducing an apt-get / brew install / extract-into-USERPROFILE step
+// would (a) waste minutes of runner time the slim cache already saves, and
+// (b) silently shadow the catalog-driven build with a system LLVM that may be
+// at a different version (the exact drift T0790 originated from).
+func TestWorkflowsDropLLVMInstall(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skipf("find root: %v", err)
+	}
+	cases := []struct {
+		wf       string
+		sentinel []string
+	}{
+		{
+			wf: filepath.Join(root, ".github", "workflows", "ci.yml"),
+			sentinel: []string{
+				"apt.llvm.org",
+				"apt-get install -y llvm",
+				"brew install llvm",
+				"clang+llvm-22.1.0-x86_64-pc-windows",
+				"USERPROFILE\\LLVM",
+			},
+		},
+		{
+			wf: filepath.Join(root, ".github", "workflows", "release.yml"),
+			sentinel: []string{
+				"apt.llvm.org",
+				"apt-get install -y llvm",
+				"brew install llvm",
+				"clang+llvm-22.1.0-x86_64-pc-windows",
+				"USERPROFILE\\LLVM",
+			},
+		},
+	}
+	for _, tc := range cases {
+		data, err := os.ReadFile(tc.wf)
+		if err != nil {
+			t.Skipf("read %s: %v", tc.wf, err)
+			continue
+		}
+		content := string(data)
+		for _, s := range tc.sentinel {
+			if strings.Contains(content, s) {
+				t.Errorf("%s still contains %q — T0798 removed system-LLVM install steps; `bin/build` self-fetches the pinned LLVM from the slim blob catalog",
+					filepath.Base(tc.wf), s)
+			}
+		}
+		// Belt-and-suspenders: the bootstrap step (`./make` or `.\make.cmd`)
+		// MUST still be present — without it, the slim fetch path has no
+		// `bin/build` to run.
+		if !strings.Contains(content, "./make") && !strings.Contains(content, `.\make.cmd`) {
+			t.Errorf("%s no longer bootstraps via ./make or .\\make.cmd — the slim-blob fetch path runs from bin/build",
+				filepath.Base(tc.wf))
+		}
+	}
+}
+
 // TestInstallScriptsDecompressGzip pins T0796's consumer wiring: both shell
 // scripts must download a `.gz` asset and decompress it before installing.
 // The exact-match check in TestInstallScriptsUseExactMatch already validates

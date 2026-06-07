@@ -87,37 +87,19 @@ jobs:
       # No Java/ANTLR step: the generated parser (compiler/internal/parser/*.go) is
       # committed, so neither CI nor a release regenerates it.
 
-      - name: Install LLVM 22 + musl (Linux)
+      # No LLVM install step either: `bin/build` self-fetches the pinned LLVM
+      # (opt/llc/lld) from the `deps-llvm-<version>` release the maintainer
+      # pre-staged locally (T0798). The blobs are content-addressed brotli-11
+      # slices — ~3-4× smaller than the upstream tarball, cached in the
+      # host-stable prebuilts cache, and used identically by debug + release
+      # builds. The `PROMISE_LLVM` env var still works for offline / air-gapped
+      # CI; the fallback path in FindLLVM honors it before any network access.
+
+      - name: Install musl (Linux)
         if: runner.os == 'Linux'
-        # llvm.sh adds the apt.llvm.org repo; install the specific tools the codegen
-        # pipeline needs (opt-22/llc-22 from llvm-22, ld.lld-22 from lld-22) + musl CRT.
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
-          sudo apt-get install -y llvm-22 lld-22 musl-dev
-
-      - name: Install LLVM 22 (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        # windows-latest ships VS Build Tools (MSVC + Windows SDK) but preinstalls
-        # LLVM 20 in %ProgramFiles%\LLVM — too old (we need 22-25 for llvm.coro.end)
-        # and choco won't upgrade it. Extract the official LLVM 22.1.0 release (the
-        # exact build pinned in tools/build/prebuilts.toml) into %USERPROFILE%\LLVM,
-        # which FindLLVM (platform.go) checks AFTER the stale %ProgramFiles%\LLVM.
-        run: |
-          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-pc-windows-msvc.tar.xz"
-          curl.exe -L --retry 3 -o "$env:RUNNER_TEMP\llvm.tar.xz" $url
-          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\LLVM" | Out-Null
-          tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C "$env:RUNNER_TEMP"
-          Move-Item "$env:RUNNER_TEMP\clang+llvm-22.1.0-x86_64-pc-windows-msvc\*" "$env:USERPROFILE\LLVM\"
-          & "$env:USERPROFILE\LLVM\bin\opt.exe" --version
-
-      - name: Install LLVM (macOS)
-        if: runner.os == 'macOS'
-        # FindLLVM (platform.go) discovers opt at /opt/homebrew/opt/llvm@22/bin and
-        # ld64.lld from the SEPARATE `lld` formula at /opt/homebrew/opt/lld/bin — so
-        # install both. opt is required on every platform (the M:N scheduler's
-        # coroutine lowering runs in opt; there is no clang-only path).
-        run: brew install llvm@22 lld
+        # Linux still needs the musl CRT for static-linked output. LLVM itself
+        # is fetched by `bin/build` (no apt llvm-22 / lld-22 install).
+        run: sudo apt-get install -y musl-dev
 
       - name: Install wasmtime (runtime for the wasm32-wasi tests)
         uses: bytecodealliance/actions/wasmtime/setup@v1

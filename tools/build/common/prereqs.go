@@ -9,7 +9,7 @@ import (
 // RunPrereqs checks and reports on build prerequisites.
 // On macOS/Linux it provides install guidance; actual installation
 // still uses the platform-specific scripts for privileged operations.
-func RunPrereqs(root string, args []string) error {
+func RunPrereqs(root string, _ []string) error {
 	fmt.Println("=== Promise Compiler Prerequisites ===")
 	fmt.Printf("Platform: %s/%s\n\n", runtime.GOOS, runtime.GOARCH)
 
@@ -34,7 +34,7 @@ func RunPrereqs(root string, args []string) error {
 	}
 
 	// LLVM
-	llvm, err := FindLLVM()
+	llvm, err := FindLLVM(root)
 	if err != nil {
 		fmt.Printf("❌ llvm:     NOT FOUND — %v\n", err)
 		ok = false

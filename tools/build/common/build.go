@@ -2,6 +2,7 @@ package common
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -82,58 +83,87 @@ func RunBuild(root string, args []string) error {
 		}
 	}
 
-	// 5. Verify LLVM (host scan still used by debug runtime; T0520 will retire this)
+	// 5. Project per-host runtime dependency manifest from blobs.json (T0798).
+	// Done for BOTH debug and release builds — without it, a debug binary on a
+	// machine with no system LLVM would have no way to self-fetch at runtime
+	// (the resolver's last-resort step needs manifest entries). A catalog miss
+	// for the host (blobs not yet published) is non-fatal: EmbedResources's
+	// placeholder is left in place so the build still completes.
+	target := CurrentBuildTarget()
+	prebuiltsManifest, perr := LoadPrebuiltsManifest(root)
+	if perr != nil {
+		return fmt.Errorf("load prebuilts manifest: %w", perr)
+	}
+	epoch, eerr := ParseEpoch(root)
+	if eerr != nil {
+		return fmt.Errorf("parse epoch for runtime manifest: %w", eerr)
+	}
+	manifestFromCatalog := false
+	{
+		m, err := BuildRuntimeManifestFromCatalog(root, target, epoch)
+		switch {
+		case err == nil:
+			out := filepath.Join(root, "compiler", "cmd", "promise", "resources", "manifest.json")
+			if werr := writeRuntimeManifest(out, m); werr != nil {
+				return fmt.Errorf("write runtime manifest: %w", werr)
+			}
+			manifestFromCatalog = true
+		case errors.Is(err, errCatalogMissForHost):
+			fmt.Printf("  blobs.json has no entry for %s — runtime manifest stays empty (placeholder); set up via `bin/release publish-blobs --dependency llvm --host %s`\n",
+				target, target)
+		default:
+			return fmt.Errorf("project runtime manifest from catalog: %w", err)
+		}
+	}
+
+	// 6. Verify LLVM (host scan still used by debug runtime; T0520 will retire this)
 	fmt.Println("Detecting LLVM...")
-	llvm, err := FindLLVM()
+	llvm, err := FindLLVM(root)
 	if err != nil {
 		if !release {
 			return err
 		}
 		// Release builds don't need a host LLVM — they fetch the pinned
-		// upstream tarball into the prebuilts cache. Continue without it.
+		// upstream tarball / slim blobs into the prebuilts cache. Continue.
 		fmt.Printf("  no host LLVM found (%v); release build will use prebuilts\n", err)
 	} else {
 		fmt.Printf("  LLVM %d: opt=%s lld=%s\n", llvm.Version, llvm.OptPath, llvm.LLDPath)
 	}
 
-	// 6. Release: fetch + bundle LLVM tools from the pinned prebuilt tarball.
+	// 7. Release: fetch + bundle LLVM tools. Prefer the slim brotli blobs
+	// (~3-4× smaller than the upstream tarball, T0798); fall back to the full
+	// tarball when blobs.json has no entry for the host.
 	buildTags := ""
 	if release {
-		manifest, err := LoadPrebuiltsManifest(root)
-		if err != nil {
-			return fmt.Errorf("load prebuilts manifest: %w", err)
-		}
-		target := CurrentBuildTarget()
-		fmt.Println("Fetching prebuilts...")
-		extractedRoots, err := FetchAll(manifest, target, nil)
-		if err != nil {
-			return fmt.Errorf("fetch prebuilts: %w", err)
+		llvmCacheDir, lerr := EnsureLLVMBlobs(root, target)
+		if lerr != nil {
+			return fmt.Errorf("fetch LLVM blobs: %w", lerr)
 		}
 		fmt.Println("Bundling LLVM tools for release...")
-		if err := BundleLLVM(root, manifest, extractedRoots["llvm"]); err != nil {
+		if err := BundleLLVM(root, prebuiltsManifest, llvmCacheDir); err != nil {
 			return fmt.Errorf("bundle LLVM: %w", err)
 		}
-		// Emit the runtime dependency manifest (T0769) from the same extracted
-		// prebuilts, so the binary embeds real content hashes + upstream sources.
-		epoch, eerr := ParseEpoch(root)
-		if eerr != nil {
-			return fmt.Errorf("parse epoch for runtime manifest: %w", eerr)
-		}
-		fmt.Println("Generating runtime dependency manifest...")
-		if err := GenerateRuntimeManifest(root, manifest, extractedRoots["llvm"], target, epoch); err != nil {
-			return fmt.Errorf("generate runtime manifest: %w", err)
+		// When the catalog projection above didn't run (host has no blobs yet),
+		// fall back to the bootstrap producer so a release build still ships a
+		// usable manifest. The catalog path is preferred because it embeds the
+		// brotli-blob source URL (smaller download for users).
+		if !manifestFromCatalog {
+			fmt.Println("Generating runtime dependency manifest (bootstrap, no catalog)...")
+			if err := GenerateRuntimeManifest(root, prebuiltsManifest, llvmCacheDir, target, epoch); err != nil {
+				return fmt.Errorf("generate runtime manifest: %w", err)
+			}
 		}
 		buildTags = "-tags=embed_llvm"
 	}
 
-	// 7. Compute version
+	// 8. Compute version
 	version, err := BuildVersion(root, release)
 	if err != nil {
 		return fmt.Errorf("version: %w", err)
 	}
 	ldflags := "-X main.version=" + version
 
-	// 8. Build
+	// 9. Build
 	binaryPath := filepath.Join(binDir, BinaryName())
 	fmt.Printf("Building %s (version: %s)...\n", BinaryName(), version)
 
@@ -147,7 +177,7 @@ func RunBuild(root string, args []string) error {
 		return fmt.Errorf("go build: %w", err)
 	}
 
-	// 9. Write hash sidecar
+	// 10. Write hash sidecar
 	hash, err := binarySHA256(binaryPath)
 	if err != nil {
 		return fmt.Errorf("hash binary: %w", err)
@@ -157,11 +187,11 @@ func RunBuild(root string, args []string) error {
 		return fmt.Errorf("write hash: %w", err)
 	}
 
-	// 10. Write buildinfo for up-to-date check
+	// 11. Write buildinfo for up-to-date check
 	infoFile := filepath.Join(binDir, ".promise.buildinfo")
 	os.WriteFile(infoFile, []byte(version+"\n"), 0o644)
 
-	// 11. Invalidate gate values — compiler changed, prior verify results are stale
+	// 12. Invalidate gate values — compiler changed, prior verify results are stale
 	InvalidateGateValues(root)
 
 	elapsed := time.Since(start).Round(time.Millisecond)

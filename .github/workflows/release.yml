@@ -87,34 +87,18 @@ jobs:
           go-version-file: compiler/go.mod
           cache: true
           cache-dependency-path: compiler/go.sum
-      # `bin/release build` phase B runs `promise build -release` to compile the stub,
-      # which needs a host LLVM backend — install it the same way ci.yml does. (The
-      # forge prebuilts cache is a SEPARATE cache from the compiler's CAS, so it does
-      # not satisfy phase B's findLLVMTool discovery; system/PATH LLVM does.)
-      - name: Install LLVM 22 + musl (Linux)
+      # No LLVM install step here either (T0798): `bin/build`/`bin/release
+      # build` self-fetch the pinned LLVM (opt/llc/lld) from
+      # `deps-llvm-<version>` via the slim brotli blob catalog — the same blobs
+      # the runtime resolver fetches for end users. The forge prebuilts cache is
+      # populated by EnsureLLVMBlobs and reused by phase B's findLLVMTool
+      # (via the PROMISE_LLVM fallback chain). The maintainer pre-stages blobs
+      # locally on a dep bump via `bin/release publish-blobs`; nothing in this
+      # job has to install or extract a 700 MB upstream tarball.
+      - name: Install musl (Linux)
         if: runner.os == 'Linux'
-        # opt-22/llc-22 (llvm-22), ld.lld-22 (lld-22), musl CRT — phase B's stub compile.
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
-          sudo apt-get install -y llvm-22 lld-22 musl-dev
-      - name: Install LLVM 22 (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        # The runner preinstalls LLVM 20 (too old; need 22-25) and choco won't
-        # upgrade. Extract the official LLVM 22.1.0 release into %USERPROFILE%\LLVM,
-        # which FindLLVM checks after the stale %ProgramFiles%\LLVM.
-        run: |
-          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang+llvm-22.1.0-x86_64-pc-windows-msvc.tar.xz"
-          curl.exe -L --retry 3 -o "$env:RUNNER_TEMP\llvm.tar.xz" $url
-          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\LLVM" | Out-Null
-          tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C "$env:RUNNER_TEMP"
-          Move-Item "$env:RUNNER_TEMP\clang+llvm-22.1.0-x86_64-pc-windows-msvc\*" "$env:USERPROFILE\LLVM\"
-          & "$env:USERPROFILE\LLVM\bin\opt.exe" --version
-      - name: Install LLVM (macOS)
-        if: runner.os == 'macOS'
-        # opt from llvm@22; ld64.lld from the separate `lld` formula (FindLLVM looks
-        # for /opt/homebrew/opt/lld/bin/ld64.lld). Phase B's stub compile needs them.
-        run: brew install llvm@22 lld
+        # Linux static link still needs musl-dev. No llvm-22 / lld-22 install.
+        run: sudo apt-get install -y musl-dev
       - name: Bootstrap dev tools (Unix)
         if: runner.os != 'Windows'
         run: ./make

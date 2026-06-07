@@ -24,11 +24,27 @@ type LLVMInfo struct {
 	Dir     string // LLVM base directory (for bundling)
 }
 
-// FindLLVM searches for LLVM tools on the current platform.
-func FindLLVM() (*LLVMInfo, error) {
-	info := &LLVMInfo{}
+// FindLLVM searches for LLVM tools on the current platform. The lookup order
+// is: (1) explicit PROMISE_LLVM directory override, (2) system discovery
+// (Homebrew/PATH/Program Files), (3) fetch the pinned LLVM from the slim
+// blob catalog into the host-stable prebuilts cache (T0798). `root` is the
+// repo root, used by the slim-fetch fallback to read prebuilts.toml +
+// blobs.json. When the slim fetch fails (no network, no catalog entry, …) the
+// error message lists every path tried so a developer can see why.
+func FindLLVM(root string) (*LLVMInfo, error) {
+	// 1. Explicit override — PROMISE_LLVM points at a directory holding the
+	// per-prebuilts.toml `out` files (opt/llc/lld[.exe]). Wins outright so a
+	// developer can run against an air-gapped toolchain or a corporate
+	// prebuild without touching code.
+	if dir := strings.TrimSpace(os.Getenv("PROMISE_LLVM")); dir != "" {
+		if info, ok := llvmInfoFromDir(dir); ok {
+			return info, nil
+		}
+		return nil, fmt.Errorf("PROMISE_LLVM=%q: no opt/llc/lld found under that directory", dir)
+	}
 
-	// Find opt (and determine version + directory)
+	// 2. System discovery — Homebrew, /usr/lib/llvm-N, Program Files.
+	info := &LLVMInfo{}
 	switch runtime.GOOS {
 	case "darwin":
 		findLLVMDarwin(info)
@@ -37,20 +53,59 @@ func FindLLVM() (*LLVMInfo, error) {
 	default: // linux and others
 		findLLVMLinux(info)
 	}
+	if info.OptPath != "" {
+		if info.LLDPath == "" {
+			info.LLDPath = findLLD(info)
+		}
+		if info.LLDPath != "" {
+			return info, nil
+		}
+	}
+
+	// 3. Slim blob fallback — fetch pinned LLVM into the host-stable prebuilts
+	// cache. This is what removes the "system LLVM required" setup step.
+	if root != "" {
+		if cacheDir, err := EnsureLLVMBlobs(root, CurrentBuildTarget()); err == nil {
+			if info, ok := llvmInfoFromDir(cacheDir); ok {
+				return info, nil
+			}
+		} else {
+			return nil, fmt.Errorf("LLVM %d-%d not found in system search and slim-blob fetch failed: %w (set PROMISE_LLVM=<dir> to point at a local install)", LLVMMinVersion, LLVMMaxVersion, err)
+		}
+	}
 
 	if info.OptPath == "" {
-		return nil, fmt.Errorf("LLVM %d-%d not found (need opt in PATH or Homebrew)", LLVMMinVersion, LLVMMaxVersion)
+		return nil, fmt.Errorf("LLVM %d-%d not found (need opt in PATH, Homebrew, or set PROMISE_LLVM)", LLVMMinVersion, LLVMMaxVersion)
 	}
+	return nil, fmt.Errorf("lld not found (need lld in PATH or Homebrew, or set PROMISE_LLVM)")
+}
 
-	// Find lld
-	if info.LLDPath == "" {
-		info.LLDPath = findLLD(info)
+// llvmInfoFromDir builds an LLVMInfo from a flat directory containing the
+// per-prebuilts.toml `out` names (opt/llc/lld, plus the `.exe` variants on
+// Windows). Used by both the PROMISE_LLVM override and the slim-fetch
+// fallback. Returns (nil, false) when opt isn't present so the caller can
+// surface a clear error.
+func llvmInfoFromDir(dir string) (*LLVMInfo, bool) {
+	suffix := ExeSuffix()
+	opt := filepath.Join(dir, "opt"+suffix)
+	if !Exists(opt) {
+		return nil, false
+	}
+	info := &LLVMInfo{
+		OptPath: opt,
+		Dir:     dir,
+		Version: parseLLVMVersion(opt),
+	}
+	if llc := filepath.Join(dir, "llc"+suffix); Exists(llc) {
+		info.LLCPath = llc
+	}
+	if lld := filepath.Join(dir, "lld"+suffix); Exists(lld) {
+		info.LLDPath = lld
 	}
 	if info.LLDPath == "" {
-		return nil, fmt.Errorf("lld not found (need lld in PATH or Homebrew)")
+		return nil, false
 	}
-
-	return info, nil
+	return info, true
 }
 
 func findLLVMDarwin(info *LLVMInfo) {

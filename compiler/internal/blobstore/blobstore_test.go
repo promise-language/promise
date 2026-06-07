@@ -285,6 +285,19 @@ func TestMirrorRewrite(t *testing.T) {
 	}
 }
 
+// TestMirrorRewriteBlob pins the FLAT CAS mirror for blob sources: a
+// content-addressed blob's GitHub URL maps to <mirror>/<sha>.br (basename only),
+// not the GitHub /owner/repo/releases/download/<tag>/ path. The mirror bucket is
+// a flat sha-keyed namespace.
+func TestMirrorRewriteBlob(t *testing.T) {
+	t.Setenv("PROMISE_BLOB_MIRROR", "https://prebuilts.example.org")
+	got := rewriteBlobSource("https://github.com/promise-language/promise/releases/download/deps-llvm-22.1.0/abc123def456.br")
+	want := "https://prebuilts.example.org/abc123def456.br"
+	if got != want {
+		t.Fatalf("rewriteBlobSource = %q, want %q", got, want)
+	}
+}
+
 func TestWriteEpochRefs(t *testing.T) {
 	archiveHash := sha256hex([]byte("arc"))
 	m := mustManifest(t,

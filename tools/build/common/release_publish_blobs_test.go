@@ -65,14 +65,37 @@ func (s *stubReleaseUploader) UploadAsset(tag, localPath string) error {
 	return nil
 }
 
-// withStubUploader swaps the package-level uploader for the duration of the
-// test, restoring it on cleanup.
+// stubBlobMirror records R2 Put calls so the --r2-bucket path is exercised
+// without shelling out to `npx wrangler`.
+type stubBlobMirror struct {
+	mu   sync.Mutex
+	puts map[string]string // R2 key → uploaded file basename
+}
+
+func (s *stubBlobMirror) Put(key, localPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.puts == nil {
+		s.puts = map[string]string{}
+	}
+	s.puts[key] = filepath.Base(localPath)
+	return nil
+}
+
+// withStubUploader swaps the package-level GitHub uploader for the duration of
+// the test, restoring it on cleanup. It ALSO stubs the R2 mirror: --r2-bucket
+// defaults to "prebuilts", so without this an upload test would shell out to
+// `npx wrangler`. Tests asserting R2 behavior install their own mirror stub on
+// top (LIFO cleanup restores this one first).
 func withStubUploader(t *testing.T) *stubReleaseUploader {
 	t.Helper()
 	stub := newStubReleaseUploader()
 	prev := defaultReleaseUploader
 	defaultReleaseUploader = stub
 	t.Cleanup(func() { defaultReleaseUploader = prev })
+	prevMirror := newBlobMirror
+	newBlobMirror = func(string) blobMirror { return &stubBlobMirror{} }
+	t.Cleanup(func() { newBlobMirror = prevMirror })
 	return stub
 }
 
@@ -364,6 +387,59 @@ func TestPublishBlobsUploadAssetError(t *testing.T) {
 	}
 }
 
+// TestPublishBlobsR2Mirror pins the --r2-bucket path (defaulting to "prebuilts"):
+// each blob uploaded to the GitHub deps release is ALSO mirrored to R2 as a FLAT
+// CAS object keyed by <sha>.br (no path), which is what the resolver's flat blob
+// mirror (rewriteBlobSource) fetches. With no --r2-bucket on the args, the
+// default must apply.
+func TestPublishBlobsR2Mirror(t *testing.T) {
+	stub := withStubUploader(t) // also stubs the mirror; we override it below to capture puts
+	mirror := &stubBlobMirror{}
+	var gotBucket string
+	prevMirror := newBlobMirror
+	newBlobMirror = func(bucket string) blobMirror { gotBucket = bucket; return mirror }
+	t.Cleanup(func() { newBlobMirror = prevMirror })
+
+	root, shas := publishBlobsTestRoot(t, map[string]string{"opt": "OPT_BYTES", "llc": "LLC_BYTES"})
+	if err := runReleasePublishBlobs(root, []string{"--host", "linux-amd64"}); err != nil {
+		t.Fatalf("publish-blobs: %v", err)
+	}
+	if gotBucket != "prebuilts" {
+		t.Fatalf("default R2 bucket = %q, want prebuilts", gotBucket)
+	}
+	tag := DepsReleaseTag("llvm", "22.1.0")
+	for name, sha := range shas {
+		asset := sha + ".br"
+		// Mirrored to R2 as a flat CAS object: key == <sha>.br, no path.
+		if got := mirror.puts[asset]; got != asset {
+			t.Errorf("%s: expected flat R2 put %q, got puts=%v", name, asset, mirror.puts)
+		}
+		// Still uploaded to GitHub too (dual publish, not either/or).
+		if !sliceContains(stub.uploadedAssets[tag], asset) {
+			t.Errorf("%s: GitHub upload missing, got %v", name, stub.uploadedAssets[tag])
+		}
+	}
+}
+
+// TestPublishBlobsR2Disabled pins that --r2-bucket="" turns OFF mirroring: the
+// mirror is never constructed (no `npx wrangler` call), so a maintainer without
+// wrangler can still publish to GitHub alone.
+func TestPublishBlobsR2Disabled(t *testing.T) {
+	_ = withStubUploader(t)
+	called := false
+	prevMirror := newBlobMirror
+	newBlobMirror = func(string) blobMirror { called = true; return &stubBlobMirror{} }
+	t.Cleanup(func() { newBlobMirror = prevMirror })
+
+	root, _ := publishBlobsTestRoot(t, map[string]string{"opt": "OPT", "llc": "LLC"})
+	if err := runReleasePublishBlobs(root, []string{"--host", "linux-amd64", "--r2-bucket", ""}); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal(`--r2-bucket="" must disable R2 mirroring (newBlobMirror must not be constructed)`)
+	}
+}
+
 // ── manifest --from-catalog ────────────────────────────────────────────────
 
 func TestReleaseManifestFromCatalogHit(t *testing.T) {
@@ -372,10 +448,10 @@ func TestReleaseManifestFromCatalogHit(t *testing.T) {
 	cat := &BlobsCatalog{Schema: 1, Blobs: []BlobEntry{
 		{Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "opt",
 			SHA256: "1111111111111111111111111111111111111111111111111111111111111111",
-			Size: 100, Compression: compressionBrotli, CompressedSize: 50},
+			Size:   100, Compression: compressionBrotli, CompressedSize: 50},
 		{Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "llc",
 			SHA256: "2222222222222222222222222222222222222222222222222222222222222222",
-			Size: 200, Compression: compressionBrotli, CompressedSize: 99},
+			Size:   200, Compression: compressionBrotli, CompressedSize: 99},
 	}}
 	if err := WriteBlobsCatalog(root, cat); err != nil {
 		t.Fatal(err)

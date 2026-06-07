@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -179,7 +180,7 @@ func (r *Resolver) fetch(entry *ManifestEntry) (string, error) {
 // is transparently decompressed before the caller verifies the uncompressed
 // content sha256.
 func (r *Resolver) fetchBlob(entry *ManifestEntry, src Source) (string, error) {
-	u := r.rewrite(src.Blob)
+	u := r.rewriteBlob(src.Blob)
 	if src.Compression == compressionBrotli {
 		return r.fetchBlobBrotli(entry, u)
 	}
@@ -437,10 +438,19 @@ func (r *Resolver) copyOut(srcPath string) (string, error) {
 	return tmpName, nil
 }
 
-// rewrite applies the PROMISE_BLOB_MIRROR base-URL override (§4.1): the scheme +
-// host of every source URL is replaced with the mirror base, preserving the
-// path. Enables corporate mirrors / air-gapped installs without a rebuild.
+// rewrite applies the PROMISE_BLOB_MIRROR base-URL override (§4.1) to an ARCHIVE
+// source: scheme + host are replaced with the mirror base, preserving the path
+// (archives are upstream vendor files, not content-addressed). Blob sources use
+// rewriteBlob — a flat CAS layout. Enables corporate mirrors / air-gapped
+// installs without a rebuild.
 func (r *Resolver) rewrite(rawURL string) string { return rewriteSource(rawURL) }
+
+// rewriteBlob applies PROMISE_BLOB_MIRROR to a content-addressed blob source as a
+// FLAT CAS object: <mirror>/<sha>.br. A blob's basename IS its content sha256 (+
+// codec suffix), so the mirror is a flat sha-keyed store needing no path — unlike
+// the GitHub primary, whose /<owner>/<repo>/releases/download/<tag>/ path is
+// forced by GitHub's release-asset URLs, not by us.
+func (r *Resolver) rewriteBlob(rawURL string) string { return rewriteBlobSource(rawURL) }
 
 func rewriteSource(rawURL string) string {
 	base := strings.TrimSpace(os.Getenv("PROMISE_BLOB_MIRROR"))
@@ -461,11 +471,26 @@ func rewriteSource(rawURL string) string {
 	return u.String()
 }
 
+// rewriteBlobSource maps a blob URL to <mirror>/<basename> — the basename being
+// the content-addressed <sha>.br — so the mirror bucket is a flat CAS namespace
+// (no /<owner>/<repo>/releases/download/<tag>/ path).
+func rewriteBlobSource(rawURL string) string {
+	base := strings.TrimSpace(os.Getenv("PROMISE_BLOB_MIRROR"))
+	if base == "" || rawURL == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return strings.TrimRight(base, "/") + "/" + path.Base(u.Path)
+}
+
 func sourceURL(s Source) string {
 	if s.IsArchive() {
 		return rewriteSource(s.Archive)
 	}
-	return rewriteSource(s.Blob)
+	return rewriteBlobSource(s.Blob)
 }
 
 func sourceKey(s Source) string {

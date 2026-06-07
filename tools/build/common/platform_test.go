@@ -164,7 +164,8 @@ func TestFindLLVM_EmptyRoot_NoSystem_NoSlimFallback(t *testing.T) {
 	}
 	t.Setenv("PROMISE_LLVM", "")
 	t.Setenv("PATH", "")
-	_, err := FindLLVM("") // root=="" → skip slim fallback
+	t.Setenv("HOMEBREW_PREFIX", t.TempDir()) // empty prefix → hide a macOS Homebrew LLVM (probed directly, not via PATH)
+	_, err := FindLLVM("")                   // root=="" → skip slim fallback
 	if err == nil {
 		t.Fatal("expected error: no system LLVM and no slim fallback")
 	}
@@ -186,6 +187,7 @@ func TestFindLLVM_SlimFetchError_WrapsCleanly(t *testing.T) {
 	}
 	t.Setenv("PROMISE_LLVM", "")
 	t.Setenv("PATH", "")
+	t.Setenv("HOMEBREW_PREFIX", t.TempDir()) // hide a macOS Homebrew LLVM (probed directly, not via PATH)
 	// Pass a root that has no tools/build/prebuilts.toml → LoadPrebuiltsManifest
 	// inside EnsureLLVMBlobs fails, so FindLLVM hits the slim-fetch error branch.
 	_, err := FindLLVM(t.TempDir())
@@ -231,7 +233,8 @@ func TestFindLLVM_PromiseLLVMOverride_TrimsWhitespace(t *testing.T) {
 		t.Skip("PATH-stripping is awkward on Windows")
 	}
 	t.Setenv("PROMISE_LLVM", "   ")
-	t.Setenv("PATH", "") // force system discovery to fail
+	t.Setenv("PATH", "")                     // force system discovery to fail
+	t.Setenv("HOMEBREW_PREFIX", t.TempDir()) // hide a macOS Homebrew LLVM (probed directly, not via PATH)
 	// Use a non-existent root so the slim fallback also fails — we want to
 	// reach the bottom of FindLLVM and confirm the whitespace-only override
 	// didn't shortcut us with a PROMISE_LLVM-specific error.

@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "blobs": [
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "darwin-arm64",
+      "name": "llc",
+      "sha256": "ee443288bd0f05f124b3708f453039d3f1e6a216e79ebc335aa2f2337312ef45",
+      "size": 126758864,
+      "compression": "brotli",
+      "compressed_size": 25722186,
+      "compressed_sha256": "ebc1e183c45f2e1d1786018978766ddb271feaf3e5441b8e78f3edc6a9a3aa95"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "darwin-arm64",
+      "name": "lld",
+      "sha256": "9cda305fdb24f70c3f20f56aa42a61f083f2adfb2d46dc02ee86dae1dc453dc5",
+      "size": 137789488,
+      "compression": "brotli",
+      "compressed_size": 28565915,
+      "compressed_sha256": "ca587c4873ee9fdd1b62c08925795fdf3e9813a447c4f51f477131f50a06f065"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "darwin-arm64",
+      "name": "opt",
+      "sha256": "435a56e23669cfda0f78e9f47fb31d9036de8fa9d312460b85363fc4f7e0a74b",
+      "size": 131144352,
+      "compression": "brotli",
+      "compressed_size": 26925902,
+      "compressed_sha256": "96210683fc390e053c811d9ba9c8b2a540ae2db1de64923b3ea64146df8aada1"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "linux-amd64",
+      "name": "llc",
+      "sha256": "fe3e12e046b1556901f02e9dc63fe69ddd574f6dd136b7cc80953b1a8ddecaf1",
+      "size": 180509448,
+      "compression": "brotli",
+      "compressed_size": 34960903,
+      "compressed_sha256": "c239daa02a663d5192ecbad01d6a8cc845e231b1015ff36d842c6f04e5b3c9f2"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "linux-amd64",
+      "name": "lld",
+      "sha256": "1e86ce1fb669b01662225c1c05c5a1b2d91928d854f7197531fb9bd22f727972",
+      "size": 200219632,
+      "compression": "brotli",
+      "compressed_size": 39422666,
+      "compressed_sha256": "23c55db5264b86f076652233a22409d913890314fe9cccfaa92a14edbb9d60cb"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "linux-amd64",
+      "name": "opt",
+      "sha256": "254570408b4ccf0f336987e6331f3567232e9e0717d445216b84c932cf01702c",
+      "size": 189418056,
+      "compression": "brotli",
+      "compressed_size": 37083115,
+      "compressed_sha256": "1ca1c539485376babbaa8ae31642a32d4df2c30538ee40b4f8ddd68983751715"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "windows-amd64",
+      "name": "llc.exe",
+      "sha256": "9b103980a0cd3ac543827c25017ebd5e88b00c2a0801253d60ee4815a37afb28",
+      "size": 65875968,
+      "compression": "brotli",
+      "compressed_size": 18065728,
+      "compressed_sha256": "74d56e9c5c60a2b393bced73df0eeee71113b724a03657f5e758d2dc615a40a0"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "windows-amd64",
+      "name": "lld.exe",
+      "sha256": "fa38c6b3fe96400ad5313fb5ea7c68f0f9c6c3dc9a837874f46272848bee48c4",
+      "size": 72396800,
+      "compression": "brotli",
+      "compressed_size": 20117741,
+      "compressed_sha256": "93eee6329ad544cbebd05bb49512d6b3de5ebc84a1c1d73513cfe0cc4c151059"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "windows-amd64",
+      "name": "opt.exe",
+      "sha256": "ec34cfb5a79574b02eab1b1a3dfb5a6b12cbc745a9181cf26f92bbd4f705b5d8",
+      "size": 65803264,
+      "compression": "brotli",
+      "compressed_size": 18027712,
+      "compressed_sha256": "4ce0afbf54dd235aac6f73f9498ce1d1043d1c433ace74abdc7285d36d8849a0"
+    }
+  ]
+}

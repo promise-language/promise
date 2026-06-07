@@ -101,6 +101,40 @@ func (ghCLIUploader) UploadAsset(tag, localPath string) error {
 	return nil
 }
 
+// blobMirror mirrors a content-addressed blob to a SECONDARY public host
+// (Cloudflare R2) at the SAME key path as the GitHub release asset, so the
+// runtime's PROMISE_BLOB_MIRROR override (a scheme+host swap that preserves the
+// path) resolves to it with NO manifest change. This is the public backstop
+// while the GitHub repo is private (T0786) — and how the whole fetch path is
+// tested without GitHub direct download.
+type blobMirror interface {
+	// Put uploads localPath under key. Overwrite is acceptable (content-
+	// addressed: a given key always maps to the same bytes).
+	Put(key, localPath string) error
+}
+
+// newBlobMirror builds the production R2 mirror; tests swap it for a stub.
+var newBlobMirror = func(bucket string) blobMirror { return wranglerR2Mirror{bucket: bucket} }
+
+// wranglerR2Mirror uploads to a Cloudflare R2 bucket via `npx wrangler r2 object
+// put`. The maintainer authenticates wrangler once (`wrangler login`, or the
+// CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID env). Blobs upload as OPAQUE
+// bytes (no Content-Encoding) — the resolver downloads the raw `<sha>.br` and
+// brotli-decompresses in-process; an HTTP-level `br` encoding would
+// double-decompress and break the uncompressed-sha256 check.
+type wranglerR2Mirror struct{ bucket string }
+
+func (m wranglerR2Mirror) Put(key, localPath string) error {
+	target := m.bucket + "/" + key
+	cmd := exec.Command("npx", "wrangler", "r2", "object", "put", target, "--file", localPath, "--remote")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("wrangler r2 object put %s: %w", target, err)
+	}
+	return nil
+}
+
 // publishBlobAction is the outcome row reported per file in the summary table.
 type publishBlobAction string
 
@@ -120,6 +154,7 @@ func runReleasePublishBlobs(root string, args []string) error {
 	host := fs.String("host", "", "target to publish blobs for (required)")
 	dryRun := fs.Bool("dry-run", false, "print what would happen, no catalog write, no upload")
 	noUpload := fs.Bool("no-upload", false, "record in catalog but skip gh upload (testing without GH access)")
+	r2Bucket := fs.String("r2-bucket", "prebuilts", "Cloudflare R2 bucket to also mirror each uploaded blob into via `npx wrangler`, at the SAME key path as the GitHub asset — the public backstop for PROMISE_BLOB_MIRROR while the repo is private (T0786). Empty string disables R2 mirroring.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -275,12 +310,23 @@ func runReleasePublishBlobs(root string, args []string) error {
 				return err
 			}
 		}
+		var mirror blobMirror
+		if *r2Bucket != "" {
+			mirror = newBlobMirror(*r2Bucket)
+		}
 		for _, p := range planned {
 			if p.action != publishActionUpload {
 				continue
 			}
 			if err := uploader.UploadAsset(tag, p.brPath); err != nil {
 				return err
+			}
+			if mirror != nil {
+				key := filepath.Base(p.brPath) // flat CAS object: <sha>.br, no path
+				fmt.Printf("Mirroring %s → R2 bucket %s...\n", key, *r2Bucket)
+				if err := mirror.Put(key, p.brPath); err != nil {
+					return err
+				}
 			}
 		}
 	}

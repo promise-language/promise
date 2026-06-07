@@ -30,6 +30,9 @@ compiler/grammar/.antlr/PromiseParser.tokens
 # Build cache
 **/.DS_Store
 .claude/settings.local.json
+
+# Wrangler (Cloudflare CLI) local state — created by `npx wrangler` during blob publishing
+.wrangler/
 # Transient Claude Code lock files (e.g. scheduled_tasks.lock) — never committed
 .claude/*.lock
 .runner-*

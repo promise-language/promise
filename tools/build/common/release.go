@@ -47,10 +47,13 @@ subcommands:
         project tools/build/blobs.json into a per-epoch runtime manifest. No
         blobs need to be staged locally — sha/size/sources come from the catalog,
         and the deps-<dep>-<version> tag is derived from blobs.json (no --tag).
-  publish-blobs --dependency <dep> --host <target> [--dry-run] [--no-upload]
+  publish-blobs --dependency <dep> --host <target> [--dry-run] [--no-upload] [--r2-bucket <name>]
         produce (extract + brotli-11 compress + hash), record in blobs.json, and
         upload to the deps-<dep>-<version> release. Idempotent: blobs already in
-        the catalog with the matching hash are skipped.
+        the catalog with the matching hash are skipped. Also mirrors each blob to
+        Cloudflare R2 via npx wrangler (--r2-bucket, default "prebuilts"; ""
+        disables) at the same key path as the GitHub asset — the public backstop
+        for PROMISE_BLOB_MIRROR while the repo is private.
   fetch-blobs --manifest <m> --out <dir> [--keep-compressed]
         download + brotli-decompress each manifest entry's primary blob source
         into <dir>. --keep-compressed leaves the <sha>.br alongside (for

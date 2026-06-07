@@ -108,8 +108,21 @@ func llvmInfoFromDir(dir string) (*LLVMInfo, bool) {
 	return info, true
 }
 
+// darwinBrewPrefixes returns the Homebrew "opt" prefixes to probe for LLVM/lld.
+// Honors HOMEBREW_PREFIX (exported by `brew shellenv`) so non-standard installs
+// resolve — and so a test can point it at an empty dir to simulate "no system
+// LLVM" (these paths are probed directly, bypassing PATH, so stripping PATH
+// alone does not hide a Homebrew LLVM). Unset → the standard Apple-silicon and
+// Intel locations.
+func darwinBrewPrefixes() []string {
+	if p := strings.TrimSpace(os.Getenv("HOMEBREW_PREFIX")); p != "" {
+		return []string{filepath.Join(p, "opt")}
+	}
+	return []string{"/opt/homebrew/opt", "/usr/local/opt"}
+}
+
 func findLLVMDarwin(info *LLVMInfo) {
-	brewPrefixes := []string{"/opt/homebrew/opt", "/usr/local/opt"}
+	brewPrefixes := darwinBrewPrefixes()
 
 	// Try versioned Homebrew installs (highest first)
 	for v := LLVMMaxVersion; v >= LLVMMinVersion; v-- {
@@ -254,7 +267,7 @@ func findLLD(info *LLVMInfo) string {
 }
 
 func findLLDDarwin(info *LLVMInfo) string {
-	brewPrefixes := []string{"/opt/homebrew/opt", "/usr/local/opt"}
+	brewPrefixes := darwinBrewPrefixes()
 
 	// Check if lld is in the LLVM directory we already found
 	if info.Dir != "" {

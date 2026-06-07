@@ -1,5 +1,5 @@
 #!/bin/sh
-# Promise language installer — for end users downloading a release binary.
+# Promise language installer - for end users downloading a release binary.
 #
 # Remote install (latest stable):
 #   curl -sSf https://promise-lang.org/install.sh | sh
@@ -19,7 +19,7 @@ set -eu
 GITHUB_REPO="promise-language/promise"
 PROMISE_HOME="${PROMISE_HOME:-$HOME/.promise}"
 
-# ── argument parsing ────────────────────────────────────────────────────────
+# -- argument parsing --------------------------------------------------------
 
 EPOCH="latest"
 # VARIANT selects the asset suffix: "" = thin (default), "-full" = host workflow
@@ -42,11 +42,11 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$VARIANT" = "-all" ]; then
-  echo "note: the 'all' variant is deferred — no cross-target blobs exist yet (T0774);" >&2
+  echo "note: the 'all' variant is deferred - no cross-target blobs exist yet (T0774);" >&2
   echo "      requesting it anyway in case this release provides it." >&2
 fi
 
-# ── platform detection ──────────────────────────────────────────────────────
+# -- platform detection ------------------------------------------------------
 
 OS=$(uname -s)
 ARCH=$(uname -m)
@@ -70,12 +70,12 @@ case "$ARCH" in
 esac
 
 # Asset naming: promise-<os>-<arch>[-<variant>].gz; bare prefix = thin. Published
-# assets are gzip-compressed (T0796) — no raw binary is uploaded. RUNTIME_NAME is
+# assets are gzip-compressed (T0796) - no raw binary is uploaded. RUNTIME_NAME is
 # the decompressed binary; ASSET_NAME is what we download and verify.
 RUNTIME_NAME="promise-${PLATFORM}-${ARCH}${VARIANT}"
 ASSET_NAME="${RUNTIME_NAME}.gz"
 
-# ── resolve release tag ─────────────────────────────────────────────────────
+# -- resolve release tag -----------------------------------------------------
 
 resolve_latest() {
   API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
@@ -98,7 +98,7 @@ if [ -n "${PROMISE_BASE_URL:-}" ]; then
   if [ "$EPOCH" != "latest" ]; then
     echo "note: --epoch is ignored under PROMISE_BASE_URL (the dist bucket is unversioned)" >&2
   fi
-  echo "note: using PROMISE_BASE_URL override ($BASE_URL) — skipping GitHub release resolution (T0803/T0804)" >&2
+  echo "note: using PROMISE_BASE_URL override ($BASE_URL) - skipping GitHub release resolution (T0803/T0804)" >&2
   echo "Installing Promise (${PLATFORM}-${ARCH}) from ${BASE_URL}..."
 else
   if [ "$EPOCH" = "latest" ]; then
@@ -118,7 +118,7 @@ fi
 DOWNLOAD_URL="${BASE_URL}/${ASSET_NAME}"
 SUMS_URL="${BASE_URL}/SHA256SUMS"
 
-# ── download ────────────────────────────────────────────────────────────────
+# -- download ----------------------------------------------------------------
 
 TMP_GZ=$(mktemp)
 TMP_BIN=$(mktemp)
@@ -145,13 +145,13 @@ download "$DOWNLOAD_URL" "$TMP_GZ"
 echo "Downloading SHA256SUMS..."
 download "$SUMS_URL" "$TMP_SUMS"
 
-# ── checksum verification ───────────────────────────────────────────────────
+# -- checksum verification ---------------------------------------------------
 
 # Match the filename field EXACTLY ($2): SHA256SUMS lists the thin
 # (promise-linux-amd64.gz) and full (promise-linux-amd64-full.gz) assets, so
 # a substring/prefix grep on the thin name would also match the full line
-# and yield two hashes (→ a guaranteed checksum "mismatch"). SHA256SUMS is
-# computed over the .gz asset (what's downloaded) — verify before decompressing.
+# and yield two hashes (-> a guaranteed checksum "mismatch"). SHA256SUMS is
+# computed over the .gz asset (what's downloaded) - verify before decompressing.
 EXPECTED=$(awk -v name="$ASSET_NAME" '$2 == name { print $1 }' "$TMP_SUMS")
 if [ -z "$EXPECTED" ]; then
   echo "error: ${ASSET_NAME} not found in SHA256SUMS" >&2
@@ -176,12 +176,12 @@ fi
 
 echo "Checksum verified. Decompressing..."
 
-# ── decompress ──────────────────────────────────────────────────────────────
+# -- decompress --------------------------------------------------------------
 
 # gunzip ships on every POSIX system (Linux/macOS/BSD), so no fallback path.
 gunzip -c "$TMP_GZ" > "$TMP_BIN"
 
-# ── install ─────────────────────────────────────────────────────────────────
+# -- install -----------------------------------------------------------------
 
 chmod +x "$TMP_BIN"
 
@@ -189,7 +189,7 @@ chmod +x "$TMP_BIN"
 # musl CRT (Linux), and LLVM tools. All embedded in the binary.
 "$TMP_BIN" install
 
-# ── PATH reminder ────────────────────────────────────────────────────────────
+# -- PATH reminder ------------------------------------------------------------
 
 PROMISE_BIN="${PROMISE_HOME}/bin"
 

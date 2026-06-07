@@ -1,11 +1,11 @@
-# Promise language installer (Windows / PowerShell) — for end users downloading a
+# Promise language installer (Windows / PowerShell) - for end users downloading a
 # release binary. This is the real implementation; install.cmd is a thin shim that
 # re-invokes it. Mirrors scripts/install.sh.
 #
 # Remote install (latest stable):
 #   irm https://github.com/promise-language/promise/releases/latest/download/install.ps1 | iex
 #
-# Remote install (pinned epoch / full variant) — download then run with parameters:
+# Remote install (pinned epoch / full variant) - download then run with parameters:
 #   $s = irm https://github.com/promise-language/promise/releases/latest/download/install.ps1
 #   & ([scriptblock]::Create($s)) -Epoch 2026.0
 #   & ([scriptblock]::Create($s)) -Full
@@ -36,11 +36,11 @@ if ($Full) { $Variant = "-full" }
 if ($All)  { $Variant = "-all" }
 
 if ($Variant -eq "-all") {
-    Write-Warning "the 'all' variant is deferred — no cross-target blobs exist yet (T0774);"
+    Write-Warning "the 'all' variant is deferred - no cross-target blobs exist yet (T0774);"
     Write-Warning "      requesting it anyway in case this release provides it."
 }
 
-# ── platform detection ──────────────────────────────────────────────────────
+# -- platform detection ------------------------------------------------------
 
 switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { $Arch = "amd64" }
@@ -52,12 +52,12 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
 }
 
 # Asset naming: promise-windows-<arch>[-<variant>].exe.gz; bare prefix = thin.
-# Published assets are gzip-compressed (T0796) — no raw binary is uploaded.
+# Published assets are gzip-compressed (T0796) - no raw binary is uploaded.
 # $RuntimeName is the decompressed .exe; $AssetName is what we download/verify.
 $RuntimeName = "promise-windows-${Arch}${Variant}.exe"
 $AssetName   = "${RuntimeName}.gz"
 
-# ── resolve release tag ─────────────────────────────────────────────────────
+# -- resolve release tag -----------------------------------------------------
 
 # T0804: remove this PROMISE_BASE_URL override when the repo goes public.
 # When PROMISE_BASE_URL is set, download the assets directly from that base URL
@@ -68,7 +68,7 @@ if ($env:PROMISE_BASE_URL) {
     if ($Epoch -ne "latest") {
         Write-Warning "-Epoch is ignored under PROMISE_BASE_URL (the dist bucket is unversioned)"
     }
-    Write-Host "note: using PROMISE_BASE_URL override ($BaseUrl) — skipping GitHub release resolution (T0803/T0804)"
+    Write-Host "note: using PROMISE_BASE_URL override ($BaseUrl) - skipping GitHub release resolution (T0803/T0804)"
     Write-Host "Installing Promise (windows-${Arch}) from ${BaseUrl}..."
 } else {
     if ($Epoch -eq "latest") {
@@ -95,7 +95,7 @@ if ($env:PROMISE_BASE_URL) {
 $DownloadUrl = "${BaseUrl}/${AssetName}"
 $SumsUrl     = "${BaseUrl}/SHA256SUMS"
 
-# ── download ────────────────────────────────────────────────────────────────
+# -- download ----------------------------------------------------------------
 
 $TmpGz   = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".gz")
 $TmpBin  = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".exe")
@@ -108,13 +108,13 @@ try {
     Write-Host "Downloading SHA256SUMS..."
     Invoke-WebRequest -Uri $SumsUrl -OutFile $TmpSums
 
-    # ── checksum verification ───────────────────────────────────────────────
+    # -- checksum verification -----------------------------------------------
 
     # Match the filename field EXACTLY (last whitespace-delimited token): SHA256SUMS
     # lists both the thin (promise-windows-amd64.exe.gz) and full
-    # (promise-windows-amd64-full.exe.gz) assets — an exact compare avoids any
+    # (promise-windows-amd64-full.exe.gz) assets - an exact compare avoids any
     # substring overlap between the two names (mirrors install.sh's awk $2 match).
-    # SHA256SUMS is computed over the .gz asset (what's downloaded) — verify
+    # SHA256SUMS is computed over the .gz asset (what's downloaded) - verify
     # before decompressing.
     $sumLine = Get-Content $TmpSums | Where-Object { ($_ -split '\s+')[-1] -eq $AssetName } | Select-Object -First 1
     if (-not $sumLine) {
@@ -130,15 +130,15 @@ try {
     }
     Write-Host "Checksum verified. Decompressing..."
 
-    # ── decompress ──────────────────────────────────────────────────────────
+    # -- decompress ----------------------------------------------------------
 
-    # GzipStream is built into .NET — no external gzip CLI required.
+    # GzipStream is built into .NET - no external gzip CLI required.
     $in  = [System.IO.File]::OpenRead($TmpGz)
     $gz  = New-Object System.IO.Compression.GzipStream($in, [System.IO.Compression.CompressionMode]::Decompress)
     $out = [System.IO.File]::Create($TmpBin)
     try { $gz.CopyTo($out) } finally { $out.Dispose(); $gz.Dispose(); $in.Dispose() }
 
-    # ── install ─────────────────────────────────────────────────────────────
+    # -- install -------------------------------------------------------------
 
     # promise install copies itself to %USERPROFILE%\.promise\bin\promise.exe,
     # extracts stdlib and LLVM tools. All embedded in the binary.
@@ -151,7 +151,7 @@ try {
     Remove-Item -Force -ErrorAction SilentlyContinue $TmpGz, $TmpBin, $TmpSums
 }
 
-# ── PATH setup (User scope) ──────────────────────────────────────────────────
+# -- PATH setup (User scope) --------------------------------------------------
 
 $PromiseBin = Join-Path $PromiseHome "bin"
 $UserPath   = [Environment]::GetEnvironmentVariable("Path", "User")

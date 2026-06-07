@@ -6061,6 +6061,46 @@ func TestFixedArrayIndexAssignSlotToSlotDupsHeapUser(t *testing.T) {
 	assertContains(t, ir, "call i8* @pal_alloc(")
 }
 
+// T0802: `s = obj.field` reassignment of a heap string field must clone-on-read,
+// exactly like the var-decl path. Before the fix, genAssignStmt only set the
+// dup-on-read flags for an IndexExpr RHS, so a MemberExpr (field-access) RHS
+// aliased the field pointer into s with s's drop flag set — both s and obj's drop
+// then freed the same allocation (double-free, latent on linux / SIGABRT on
+// macOS). genFieldAccess emits the clone via dupString (promise_string_new).
+func TestReassignStringFieldClones(t *testing.T) {
+	ir := generateIR(t, `
+		type _T { int id; string label; drop(~this) {} }
+		probe() {
+			_T t = _T(id: 1, label: "lit");
+			string s = "";
+			s = t.label;
+		}
+		main() { probe(); }
+	`)
+	// Isolate the user code (string literals are .rodata, so the only
+	// promise_string_new in probe() is the field-read clone).
+	probeIR := extractFunction(ir, "__user.probe")
+	assertContains(t, probeIR, "call i8* @promise_string_new(")
+}
+
+// T0802 control: a reassignment whose RHS is NOT a field read must not emit the
+// field-clone helper — proves the dup is driven by the MemberExpr RHS, not always.
+func TestReassignNonFieldRhsNoClone(t *testing.T) {
+	ir := generateIR(t, `
+		type _T { int id; string label; drop(~this) {} }
+		probe() {
+			_T t = _T(id: 1, label: "lit");
+			string s = "";
+			s = "other";
+		}
+		main() { probe(); }
+	`)
+	probeIR := extractFunction(ir, "__user.probe")
+	if strings.Contains(probeIR, "call i8* @promise_string_new(") {
+		t.Errorf("expected no field-clone for non-field RHS reassignment, got:\n%s", probeIR)
+	}
+}
+
 // T0590 coverage additions: confirm each remaining dup branch in genArrayIndex
 // actually emits the per-type dup helper. The original 6 tests covered string,
 // heap user, Optional<heap user>, Vector, and the primitive negative case; the

@@ -5633,11 +5633,19 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				probe = p.Expr
 			}
 		}
+		// T0802: also recognize a field-access RHS (`x = obj.field` and the
+		// unwrapped `x = obj.field!`) so the heap-string / Optional[string] field
+		// is cloned on read — see the memberRhs branch below.
+		var memberRhs *ast.MemberExpr
 		if _, ok := probe.(*ast.IndexExpr); ok {
 			isIdxRhs = true
+		} else if m, ok := probe.(*ast.MemberExpr); ok {
+			memberRhs = m
 		} else if unwrap, ok := probe.(*ast.OptionalUnwrapExpr); ok {
 			if _, ok := unwrap.Expr.(*ast.IndexExpr); ok {
 				isIdxRhs = true
+			} else if m, ok := unwrap.Expr.(*ast.MemberExpr); ok {
+				memberRhs = m
 			}
 		}
 		if isIdxRhs {
@@ -5733,6 +5741,28 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					}
 				}
 			}
+		} else if memberRhs != nil {
+			// T0802: `x = obj.field` (and the unwrapped `x = obj.field!`)
+			// reassignment of a heap string / Optional[string] (or container)
+			// field must clone-on-read, exactly like the var-decl path
+			// (genDeclStmt) already does. Without this the field's heap pointer is
+			// stored into x as a raw alias with x's drop flag set, so both x and the
+			// field's owner drop the same allocation → double-free (latent on linux,
+			// SIGABRT on macOS). Scoped to MemberExpr RHS only so the intentional
+			// Vector slot-to-slot aliasing in the isIdxRhs branch (T0490/T0590) is
+			// untouched. Heap-user / tuple field moves are deliberately excluded —
+			// the ownership checker already rejects those, and an ungated clone here
+			// risks orphan-clone leaks (same gating reason as the decl path).
+			//
+			// s.Value's resolved type is the field type for a bare `obj.field` and
+			// the unwrapped inner type for `obj.field!`; setDupFlagsForFieldAccess
+			// covers both (string and Optional[string] map to dupStringFieldAccess,
+			// which genFieldAccess honors for the inner Optional[string] field too).
+			rhsType := c.info.Types[s.Value]
+			if c.typeSubst != nil && rhsType != nil {
+				rhsType = types.Substitute(rhsType, c.typeSubst)
+			}
+			c.setDupFlagsForFieldAccess(rhsType)
 		}
 	}
 	val := c.genExpr(s.Value)
@@ -5741,6 +5771,21 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	c.dupTupleFieldAccess = false
 	c.dupStringFieldAccess = false
 	c.dupContainerFieldAccess = false
+
+	// T0802: When the RHS is an Optional[string]/Optional[container] field read
+	// (`opt = obj.field`), genFieldAccess clones the inner value and tracks it via
+	// optionalStringDup/optionalContainerDup. The clone is stored into the LHS, so
+	// claim it here to suppress the leftover stmt-temp drop — otherwise the clone is
+	// freed while the LHS still references it → double-free. Mirrors genDeclStmt
+	// (the var-decl path) which performs the same claim before optional wrapping.
+	if c.optionalStringDup != nil {
+		c.claimStringTemp(c.optionalStringDup)
+		c.optionalStringDup = nil
+	}
+	if c.optionalContainerDup != nil {
+		c.claimStringTemp(c.optionalContainerDup)
+		c.optionalContainerDup = nil
+	}
 
 	// Auto-propagate failable call in assignment RHS.
 	if c.info.AutoPropagateExprs[s.Value] {

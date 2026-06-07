@@ -1,0 +1,157 @@
+// T0802: `x = obj.field` (and the unwrapped `x = obj.field!`) reassignment of a
+// heap string / Optional[string] field must clone-on-read, exactly like the
+// var-decl path. Before the fix, the field's heap pointer was aliased into `x`
+// with `x`'s drop flag set, so both `x` and the field's owner freed the same
+// allocation → double-free (latent on linux, SIGABRT on macOS). The reassigned
+// `x` is read back as a UAF probe; combined with the suite's no-leak enforcement
+// and the at-scope-exit drop of the source container, this catches the regression.
+// Note: `for k in v` over a Vector consumes `v`, so the source cannot be read
+// after the loop — the asserts probe the reassigned clone instead.
+type FCTag is Equal {
+  int id;
+  string label;
+  get hash int {
+    return this.id;
+  }
+  == (Self other) bool {
+    return this.id == other.id;
+  }
+}
+
+type FCNote {
+  int id;
+  string? note;
+}
+
+type FCBox {
+  int id;
+  int[]? items;
+}
+
+type FCVec {
+  int id;
+  int[] items;
+}
+
+type FCGen[T] {
+  int id;
+  T value;
+  drop(~this) {
+  }
+}
+
+// Heap string field reassigned from a borrowed loop variable clones on read.
+fc_string_field_reassign() `test {
+  FCTag[] v = [];
+  // Computed (heap) strings, not literals — a literal would mask the bug via the
+  // bit-63 static-string flag (no real allocation to double-free).
+  v.push(FCTag(id: 1, label: "a" + "b"));
+  v.push(FCTag(id: 2, label: "c" + "d"));
+  string saw = "";
+  for k in v {
+    saw = k.label;
+  }
+  assert(saw == "cd", "reassigned clone readable (last element's label)");
+}
+
+// Optional[string] field reassigned via force-unwrap clones on read.
+fc_optional_string_unwrap_reassign() `test {
+  FCNote[] v = [];
+  v.push(FCNote(id: 1, note: "x" + "1"));
+  v.push(FCNote(id: 2, note: "y" + "2"));
+  string s = "";
+  for k in v {
+    s = k.note!;
+  }
+  assert(s == "y2", "reassigned unwrapped clone readable (last element's note)");
+}
+
+// Optional[string] field reassigned into an optional LHS (no unwrap) clones.
+fc_optional_string_reassign() `test {
+  FCNote[] v = [];
+  v.push(FCNote(id: 1, note: "p" + "1"));
+  v.push(FCNote(id: 2, note: "q" + "2"));
+  string? s = none;
+  for k in v {
+    s = k.note;
+  }
+  assert(s! == "q2", "optional reassigned clone readable (last element's note)");
+}
+
+// Optional[container] field reassigned into an optional LHS clones (claims the
+// inner container dup so it isn't dropped as a leftover temp).
+fc_optional_container_reassign() `test {
+  FCBox[] v = [];
+  v.push(FCBox(id: 1, items: [1, 2, 3]));
+  v.push(FCBox(id: 2, items: [4, 5]));
+  int[]? got = none;
+  for k in v {
+    got = k.items;
+  }
+  assert(got!.len == 2, "optional container reassigned clone readable");
+}
+
+// Map key user-type heap string field reassigned in a keys() loop clones.
+fc_map_key_field_reassign() `test {
+  map[FCTag, string] m = {:};
+  m[FCTag(id: 1, label: "k" + "1")] = "v1";
+  string s = "";
+  for k in m.keys() {
+    s = k.label;
+  }
+  assert(s == "k1", "map key label reassigned clone readable");
+}
+
+// Map value user-type heap string field reassigned in a values() loop clones.
+fc_map_value_field_reassign() `test {
+  map[int, FCTag] m = {:};
+  m[1] = FCTag(id: 9, label: "w" + "9");
+  string s = "";
+  for val in m.values() {
+    s = val.label;
+  }
+  assert(s == "w9", "map value label reassigned clone readable");
+}
+
+// Non-optional container field reassigned clones on read — exercises the direct
+// `types.IsVector` branch of setDupFlagsForFieldAccess (dupContainerFieldAccess),
+// distinct from the Optional[container] branch above.
+fc_container_field_reassign() `test {
+  FCVec[] v = [];
+  v.push(FCVec(id: 1, items: [1, 2, 3]));
+  v.push(FCVec(id: 2, items: [4, 5]));
+  int[] got = [];
+  for k in v {
+    got = k.items;
+  }
+  assert(got.len == 2, "non-optional container field reassigned clone readable");
+}
+
+// Optional[container] field reassigned via force-unwrap into a non-optional LHS —
+// exercises the OptionalUnwrapExpr→MemberExpr path together with the container dup.
+fc_unwrap_container_field_reassign() `test {
+  FCBox[] v = [];
+  v.push(FCBox(id: 1, items: [1, 2, 3]));
+  v.push(FCBox(id: 2, items: [4, 5]));
+  int[] got = [];
+  for k in v {
+    got = k.items!;
+  }
+  assert(got.len == 2, "container unwrap field reassigned clone readable");
+}
+
+// Generic field whose type parameter resolves to `string` — exercises the
+// `c.typeSubst != nil` substitution branch: the RHS resolved type is the unbound
+// TypeParam `T`, which must be substituted to `string` before setDupFlags fires.
+// Without the substitution no clone is emitted and the string instantiation
+// double-frees.
+fc_generic_field_reassign() `test {
+  FCGen[string][] v = [];
+  v.push(FCGen[string](id: 1, value: "a" + "b"));
+  v.push(FCGen[string](id: 2, value: "c" + "d"));
+  string saw = "";
+  for k in v {
+    saw = k.value;
+  }
+  assert(saw == "cd", "generic T=string field reassigned clone readable");
+}

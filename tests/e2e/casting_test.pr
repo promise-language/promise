@@ -443,3 +443,207 @@ test_downcast_field_target_paren_wrapped_cast() `test {
   h.held = (s as! Circle);
   assert(h.held.name == "src", "paren-wrapped whole cast expr — name (UAF probe)");
 }
+
+// --- RTTI downcast into remaining owning slots (T0784) ---
+// Siblings of T0754: array/tuple/map literals, native Arc/Mutex/channel
+// constructors and ch.send, raise, and select-send. All move the cast subject
+// into a new owner — without clearing the subject's drop flag the source and
+// the new owner both drop the same allocation → double-free / SEGV.
+// Each test asserts both the new field (functional) and the inherited heap
+// `name` string (UAF probe so a missed move surfaces as a runtime crash, not
+// a silently-passing test).
+
+test_downcast_array_lit_element_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 2.0);
+  Circle[] v = [s as! Circle];
+  assert(v[0].radius == 2.0, "array-lit element from cast-of-owned-local radius");
+  assert(v[0].name == "src", "array-lit element from cast-of-owned-local name (UAF probe)");
+}
+
+test_downcast_tuple_lit_element_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 3.5);
+  (int, Circle) t = (7, s as! Circle);
+  (n, c) := t;
+  assert(n == 7, "tuple-lit first element");
+  assert(c.radius == 3.5, "tuple-lit element from cast-of-owned-local radius");
+  assert(c.name == "src", "tuple-lit element from cast-of-owned-local name (UAF probe)");
+}
+
+test_downcast_map_lit_value_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 4.25);
+  map[string, Circle] m = {
+    "k": s as! Circle
+  };
+  if c := m["k"] {
+    assert(c.radius == 4.25, "map-lit value from cast-of-owned-local radius");
+    assert(c.name == "src", "map-lit value from cast-of-owned-local name (UAF probe)");
+  } else {
+    assert(false, "map missing 'k'");
+  }
+}
+
+// Map-lit *key* path — Shape doesn't satisfy Hashable + Equal, so this
+// uses a dedicated Hashable + Equal hierarchy. Exercises the
+// `castSubjectMovableIdent(entry.Key)` codegen branch (adjacent to the
+// value branch above) end-to-end so a regression that only drops the
+// key clear surfaces as a runtime double-free, not a silently-passing test.
+type T0784Tag is Equal {
+  int id;
+  string label;
+  get hash int {
+    return this.id;
+  }
+  == (Self other) bool {
+    return this.id == other.id;
+  }
+}
+type T0784NumberedTag is T0784Tag {
+  int extra;
+  == (Self other) bool {
+    return this.id == other.id;
+  }
+}
+
+test_downcast_map_lit_key_from_owned_local() `test {
+  T0784Tag t = T0784NumberedTag(id: 7, label: "src", extra: 42);
+  map[T0784NumberedTag, string] m = {
+    (t as! T0784NumberedTag): "v"
+  };
+  // Look up by an equal-but-distinct probe so the lookup exercises the
+  // stored key's heap fields (label) — a UAF on the stored key would
+  // misbehave on hash/equal or read garbage.
+  if v := m[T0784NumberedTag(id: 7, label: "probe", extra: 999)] {
+    assert(v == "v", "map-lit key from cast-of-owned-local — value");
+  } else {
+    assert(false, "map-lit key from cast-of-owned-local — lookup missed");
+  }
+  // Walk the stored keys via .keys() to read the heap label field stored
+  // in the map slot (UAF probe — a freed key would crash here).
+  string saw_label = "";
+  for k in m.keys() {
+    saw_label = k.label;
+  }
+  assert(saw_label == "src", "map-lit key from cast-of-owned-local — stored label (UAF probe)");
+}
+
+test_downcast_arc_ctor_arg_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 5.5);
+  Arc[Circle] a = Arc[Circle](s as! Circle);
+  assert(a.borrow.radius == 5.5, "arc ctor arg from cast-of-owned-local radius");
+  assert(a.borrow.name == "src", "arc ctor arg from cast-of-owned-local name (UAF probe)");
+}
+
+test_downcast_mutex_ctor_arg_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 6.5);
+  Mutex[Circle] m = Mutex[Circle](s as! Circle);
+  use g := m.lock();
+  assert(g.borrow.radius == 6.5, "mutex ctor arg from cast-of-owned-local radius");
+  assert(g.borrow.name == "src", "mutex ctor arg from cast-of-owned-local name (UAF probe)");
+}
+
+test_downcast_channel_send_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 7.5);
+  channel[Circle] ch = channel[Circle](capacity: 1);
+  ch.send(s as! Circle);
+  if c := <-ch {
+    assert(c.radius == 7.5, "channel send from cast-of-owned-local radius");
+    assert(c.name == "src", "channel send from cast-of-owned-local name (UAF probe)");
+  } else {
+    assert(false, "channel receive failed");
+  }
+  ch.close();
+}
+
+type T0784MyError is error {
+}
+type T0784SpecialError is T0784MyError {
+  int code;
+}
+
+_t0784_fail!() int {
+  T0784MyError e = T0784SpecialError(code: 42, message: "src-err");
+  raise e as! T0784SpecialError;
+}
+
+_t0784_handle() string {
+  int v = _t0784_fail()? e {
+    return e.message;
+  };
+  return "unreached";
+}
+
+test_downcast_raise_from_owned_local() `test {
+  string m = _t0784_handle();
+  assert(m == "src-err", "raise cast-of-owned-local — message (UAF probe)");
+}
+
+test_downcast_select_send_from_owned_local() `test {
+  Shape s = Circle(name: "src", radius: 8.5);
+  channel[Circle] ch = channel[Circle](capacity: 1);
+  select {
+    ch.send(s as! Circle):
+      {
+      }
+  }
+  if c := <-ch {
+    assert(c.radius == 8.5, "select-send from cast-of-owned-local radius");
+    assert(c.name == "src", "select-send from cast-of-owned-local name (UAF probe)");
+  } else {
+    assert(false, "channel receive failed");
+  }
+  ch.close();
+}
+
+// The bug description calls `yield s as! Circle` "apparently safe" — the
+// for-in-generator binding is a non-owning alias, so the consumer does not
+// drop. But the ownership pass still marks the subject Moved at `yield`
+// (T0784) so a future change to the generator-binding model surfaces as an
+// ownership error instead of a silent UAF. This test pins down the apparent-
+// safe runtime behavior so a regression in either direction (ownership-pass
+// move-out + double-drop) fails loudly.
+_t0784_gen_yield_cast() stream[Circle] {
+  Shape s = Circle(name: "src", radius: 9.5);
+  yield s as! Circle;
+}
+
+test_downcast_yield_from_owned_local() `test {
+  string saw_name = "";
+  f64 saw_radius = 0.0;
+  int count = 0;
+  for c in _t0784_gen_yield_cast() {
+    saw_name = c.name;
+    saw_radius = c.radius;
+    count = count + 1;
+  }
+  assert(count == 1, "yield-of-cast — yielded exactly once");
+  assert(saw_radius == 9.5, "yield-of-cast radius");
+  assert(saw_name == "src", "yield-of-cast name (UAF probe)");
+}
+
+// `yield * inner` — outer delegates to an inner generator whose body uses
+// `yield x as! T`. The ownership change at YieldDelegateStmt (T0784) covers
+// the cast-of-stream-value case, which is unusual; this test exercises the
+// more common nested case where the inner yield-of-cast site (T0784 yield)
+// is reached via a yield-delegate chain.
+_t0784_inner_yield_cast() stream[Circle] {
+  Shape s = Circle(name: "del", radius: 11.5);
+  yield s as! Circle;
+}
+
+_t0784_outer_delegate() stream[Circle] {
+  yield * _t0784_inner_yield_cast();
+}
+
+test_downcast_yield_delegate_inner_cast_from_owned_local() `test {
+  string saw_name = "";
+  f64 saw_radius = 0.0;
+  int count = 0;
+  for c in _t0784_outer_delegate() {
+    saw_name = c.name;
+    saw_radius = c.radius;
+    count = count + 1;
+  }
+  assert(count == 1, "yield-delegate inner-cast — yielded exactly once");
+  assert(saw_radius == 11.5, "yield-delegate inner-cast radius");
+  assert(saw_name == "del", "yield-delegate inner-cast name (UAF probe)");
+}

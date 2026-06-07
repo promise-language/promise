@@ -114,20 +114,24 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 		for _, elem := range e.Elements {
 			c.checkExpr(elem)
 			c.tryMoveConsume(elem)
+			c.tryMoveConsumeCastSubject(elem) // T0784
 		}
 
 	case *ast.ArrayLit:
 		for _, elem := range e.Elements {
 			c.checkExpr(elem)
 			c.tryMoveConsume(elem)
+			c.tryMoveConsumeCastSubject(elem) // T0784
 		}
 
 	case *ast.MapLit:
 		for _, entry := range e.Entries {
 			c.checkExpr(entry.Key)
 			c.tryMoveConsume(entry.Key)
+			c.tryMoveConsumeCastSubject(entry.Key) // T0784
 			c.checkExpr(entry.Value)
 			c.tryMoveConsume(entry.Value)
+			c.tryMoveConsumeCastSubject(entry.Value) // T0784
 		}
 
 	// Literals have no sub-expressions to walk.

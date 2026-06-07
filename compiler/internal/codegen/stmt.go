@@ -7338,6 +7338,12 @@ func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 	if ident, ok := s.Value.(*ast.IdentExpr); ok {
 		c.clearDropFlag(ident.Name)
 	}
+	// T0784: same for `raise x as!/as T` — the cast is a view, so without
+	// this clear the subject's scope-exit drop fires on the same allocation
+	// the error slot now owns → double-free.
+	if ident := c.castSubjectMovableIdent(s.Value); ident != nil {
+		c.clearDropFlag(ident.Name)
+	}
 
 	// Emit close() for all active use bindings before raising
 	if len(c.scopeBindings) > 0 {
@@ -10691,6 +10697,17 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 	// Helper: generate send execution code for a case
 	execSend := func(ci selectCaseInfo, prefix string) {
 		argVal := c.genExpr(ci.sendValueExpr)
+		// T0784: `select { case ch <- x as!/as T: ... }` — the cast is a view
+		// over an owned local, so without clearing the subject's drop flag
+		// the source variable and the channel buffer both drop the same
+		// allocation → double-free / SEGV. Ownership marks the subject
+		// Moved at the select-send site (T0784 ownership change), so this
+		// codegen clear is the symmetric drop-flag suppression. The bare
+		// IdentExpr variant (`select { ch.send(s): ... }` without a cast)
+		// has the same double-free shape — tracked separately as T0799.
+		if ident := c.castSubjectMovableIdent(ci.sendValueExpr); ident != nil {
+			c.clearDropFlag(ident.Name)
+		}
 		argAlloca := c.createEntryAlloca(ci.elemLLVM)
 		c.block.NewStore(argVal, argAlloca)
 		argAsI8 := c.block.NewBitCast(argAlloca, i8PtrTy)

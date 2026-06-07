@@ -3287,6 +3287,12 @@ func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) valu
 	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
 		c.clearDropFlag(ident.Name)
 	}
+	// T0784: also clear when the arg is `x as!/as T` over an owned local —
+	// the cast is a non-consuming view, so without this the subject and the
+	// new Arc both drop the same allocation.
+	if ident := c.castSubjectMovableIdent(e.Args[0].Value); ident != nil {
+		c.clearDropFlag(ident.Name)
+	}
 	c.neutralizeForceUnwrapSource(e.Args[0].Value)
 	c.claimStringTemp(val)
 	c.claimEnvTemp(val)
@@ -3549,6 +3555,10 @@ func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) va
 	c.claimHeapTemp(val)
 	// T0273: Clear drop flag — value is moved into Mutex, caller must not double-drop.
 	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+	// T0784: also clear when the arg is `x as!/as T` over an owned local.
+	if ident := c.castSubjectMovableIdent(e.Args[0].Value); ident != nil {
 		c.clearDropFlag(ident.Name)
 	}
 	c.neutralizeForceUnwrapSource(e.Args[0].Value)
@@ -3874,6 +3884,10 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	argVal := c.genCallArgExpr(e.Args[0].Value)
 	// Clear drop flag: value is moved into the channel buffer
 	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+	// T0784: also clear when the arg is `x as!/as T` over an owned local.
+	if ident := c.castSubjectMovableIdent(e.Args[0].Value); ident != nil {
 		c.clearDropFlag(ident.Name)
 	}
 	// B0170: claim string temp — ownership transfers to channel buffer
@@ -7842,6 +7856,11 @@ func (c *Compiler) genTupleLit(e *ast.TupleLit) value.Value {
 		if ident, ok := elem.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		}
+		// T0784: same for `x as!/as T` element — cast subject is moved into
+		// the tuple slot, so suppress its scope-exit drop binding.
+		if ident := c.castSubjectMovableIdent(elem); ident != nil {
+			c.clearDropFlag(ident.Name)
+		}
 		// T0371: Claim heap-tracked field temps so they are not double-freed at
 		// stmt end (their ownership is now in the tuple slot). Mirrors the
 		// pattern used in genArrayLit / genMapLit. Without these claims:
@@ -8064,6 +8083,20 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 					c.tupleNeedsDrop(elem) ||
 					c.vecElemNeedsOptionalDrop(elem) {
 					c.clearDropFlag(ident.Name)
+				}
+			}
+			// T0784: same gating for `x as!/as T` element — Vector.drop walks the
+			// element-type and would free the slot, so the cast subject's
+			// scope-exit drop binding must be suppressed to avoid a double-free.
+			if !isRefType(elem) {
+				if extractNamed(elem) == types.TypString ||
+					c.vecElemNeedsEnumDrop(elem) ||
+					c.vecElemNeedsUserTypeDrop(elem) ||
+					c.tupleNeedsDrop(elem) ||
+					c.vecElemNeedsOptionalDrop(elem) {
+					if ident := c.castSubjectMovableIdent(elemExpr); ident != nil {
+						c.clearDropFlag(ident.Name)
+					}
 				}
 			}
 			// B0233: Claim heap temp — element ownership transferred to vector literal.
@@ -9242,6 +9275,14 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 				c.clearDropFlag(ident.Name)
 			}
 			if ident, ok := entry.Key.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+			// T0784: same for `x as!/as T` key/value — cast subject is moved
+			// into the map slot via []=, so suppress its scope-exit drop.
+			if ident := c.castSubjectMovableIdent(entry.Value); ident != nil {
+				c.clearDropFlag(ident.Name)
+			}
+			if ident := c.castSubjectMovableIdent(entry.Key); ident != nil {
 				c.clearDropFlag(ident.Name)
 			}
 			// Claim heap temps: user type instances passed as map values

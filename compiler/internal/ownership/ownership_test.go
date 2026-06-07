@@ -9913,3 +9913,177 @@ func TestT0754_CastIntoFieldFromBorrowedParamRejectedParenCast(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
+
+// === T0784: tryMoveConsumeCastSubject for raise/yield/yield-delegate/select-send/
+// tuple-lit/array-lit/map-lit owning-slot stores ===
+// Each site already rejects the plain `<stmt> s` form for a borrowed param via
+// T0349's tryMoveConsume call. T0784 adds tryMoveConsumeCastSubject so the
+// cast-wrapper `<stmt> s as! T` does not silently bypass the move-consume.
+
+// TupleLit element with cast wrapper — borrowed param must be rejected.
+func TestT0784_TupleLitElementCastFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper(Shape s) (int, Circle) {
+			return (1, s as! Circle);
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			_ = helper(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// ArrayLit element with cast wrapper — borrowed param must be rejected.
+func TestT0784_ArrayLitElementCastFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper(Shape s) Circle[] {
+			return [s as! Circle];
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			_ = helper(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// MapLit value with cast wrapper — borrowed param must be rejected.
+func TestT0784_MapLitValueCastFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper(Shape s) map[string, Circle] {
+			return {"k": s as! Circle};
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			_ = helper(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// raise with cast wrapper — borrowed param must be rejected.
+func TestT0784_RaiseCastFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type MyError is error {}
+		type SpecialError is MyError { int code; }
+		forward!(MyError e) int {
+			raise e as! SpecialError;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'e'")
+}
+
+// yield with cast wrapper — borrowed param must be rejected.
+func TestT0784_YieldCastFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		gen(Shape s) stream[Circle] {
+			yield s as! Circle;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// select-send with cast wrapper — borrowed param must be rejected.
+func TestT0784_SelectSendCastFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper(channel[Circle] ch, Shape s) {
+			select {
+				ch.send(s as! Circle):
+				default:
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Owned-local cast subject for yield — accepted, but Moved → subsequent use
+// errors.
+// (No analogous test for raise: control flow terminates at `raise`, so a use
+// after the move is unreachable-code, not an observable move error. The
+// borrowed-param-rejection test above already proves the cast subject
+// reaches tryMoveConsume at the raise site.)
+func TestT0784_YieldCastFromOwnedLocalMarksMoved(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		gen() stream[Circle] {
+			Shape s = Circle(name: "src", radius: 2.0);
+			yield s as! Circle;
+			_ = s;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// MapLit *key* with cast wrapper — borrowed param must be rejected. The
+// MapLit-value test above exercises the second of the two adjacent
+// tryMoveConsumeCastSubject calls; this one pins the first (key) branch so
+// a future refactor that drops the Key call doesn't regress silently.
+// Uses a Hashable + Equal hierarchy so the map's K constraint is satisfied.
+func TestT0784_MapLitKeyCastFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape is Equal {
+			int id;
+			get hash int { return this.id; }
+			== (Self other) bool { return this.id == other.id; }
+		}
+		type Circle is Shape { f64 radius; }
+		helper(Shape s) map[Circle, int] {
+			return {s as! Circle: 1};
+		}
+		test() {
+			Shape s = Circle(id: 1, radius: 2.0);
+			_ = helper(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Paren-wrapped cast subject at a T0784 site — regression guard for the
+// peel in tryMoveConsumeCastSubject (mirrors T0754's paren tests for the
+// field-init site). Uses raise as the representative site; the helper
+// is shared across all T0784 sites.
+func TestT0784_RaiseParenWrappedCastFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type MyError is error {}
+		type SpecialError is MyError { int code; }
+		forward!(MyError e) int {
+			raise (e as! SpecialError);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'e'")
+}

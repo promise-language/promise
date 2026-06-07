@@ -417,11 +417,20 @@ func runReleaseFetchBlobs(root string, args []string) error {
 	if *manifestPath == "" || *out == "" {
 		return fmt.Errorf("fetch-blobs: --manifest and --out are required\n%s", releaseUsage)
 	}
-	m, err := loadRuntimeManifest(*manifestPath)
+	return fetchManifestBlobs(*manifestPath, *out, *keepCompressed)
+}
+
+// fetchManifestBlobs walks each manifest entry's primary blob source, downloads
+// the asset, brotli-decompresses to <out>/<name>, and verifies sha256 against
+// the manifest. Shared by the `bin/release fetch-blobs` CLI and the
+// `publish-install` full-variant staging step (which needs the host blobs to
+// pre-stage offline).
+func fetchManifestBlobs(manifestPath, out string, keepCompressed bool) error {
+	m, err := loadRuntimeManifest(manifestPath)
 	if err != nil {
 		return fmt.Errorf("load manifest: %w", err)
 	}
-	if err := os.MkdirAll(*out, 0o755); err != nil {
+	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
 	}
 
@@ -438,22 +447,22 @@ func runReleaseFetchBlobs(root string, args []string) error {
 			return fmt.Errorf("fetch-blobs: entry %q has no blob source", e.Name)
 		}
 		assetName := path.Base(blobSrc.Blob)
-		brPath := filepath.Join(*out, assetName)
+		brPath := filepath.Join(out, assetName)
 		if err := fetcher.FetchAsset(parseReleaseTagFromURL(blobSrc.Blob), assetName, brPath); err != nil {
 			return fmt.Errorf("fetch %s: %w", e.Name, err)
 		}
 
 		fileName := strings.TrimPrefix(e.Name, "llvm-")
-		dstPath := filepath.Join(*out, fileName)
+		dstPath := filepath.Join(out, fileName)
 		if err := decompressAndVerify(brPath, dstPath, blobSrc.Compression, e.SHA256); err != nil {
 			return fmt.Errorf("decompress %s: %w", e.Name, err)
 		}
-		if !*keepCompressed {
+		if !keepCompressed {
 			_ = os.Remove(brPath)
 		}
 		fmt.Printf("  fetched %s (%d bytes uncompressed)\n", e.Name, e.Size)
 	}
-	fmt.Printf("Fetched %d blobs into %s\n", len(m.Entries), *out)
+	fmt.Printf("Fetched %d blobs into %s\n", len(m.Entries), out)
 	return nil
 }
 

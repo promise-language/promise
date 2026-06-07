@@ -89,20 +89,32 @@ resolve_latest() {
   fi | grep '"tag_name"' | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
 }
 
-if [ "$EPOCH" = "latest" ]; then
-  echo "Fetching latest release..."
-  TAG=$(resolve_latest)
-  if [ -z "$TAG" ]; then
-    echo "error: could not determine latest release from GitHub API" >&2
-    exit 1
+# T0804: remove this PROMISE_BASE_URL override when the repo goes public.
+# When PROMISE_BASE_URL is set, download the assets directly from that base URL
+# (skipping GitHub "latest" release resolution). Used by the install gate (T0803)
+# to point at the prebuilts dist bucket while the repo is still private.
+if [ -n "${PROMISE_BASE_URL:-}" ]; then
+  BASE_URL="${PROMISE_BASE_URL%/}"
+  if [ "$EPOCH" != "latest" ]; then
+    echo "note: --epoch is ignored under PROMISE_BASE_URL (the dist bucket is unversioned)" >&2
   fi
+  echo "note: using PROMISE_BASE_URL override ($BASE_URL) — skipping GitHub release resolution (T0803/T0804)" >&2
+  echo "Installing Promise (${PLATFORM}-${ARCH}) from ${BASE_URL}..."
 else
-  TAG="epoch-${EPOCH}"
+  if [ "$EPOCH" = "latest" ]; then
+    echo "Fetching latest release..."
+    TAG=$(resolve_latest)
+    if [ -z "$TAG" ]; then
+      echo "error: could not determine latest release from GitHub API" >&2
+      exit 1
+    fi
+  else
+    TAG="epoch-${EPOCH}"
+  fi
+  echo "Installing Promise ${TAG} (${PLATFORM}-${ARCH})..."
+  BASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${TAG}"
 fi
 
-echo "Installing Promise ${TAG} (${PLATFORM}-${ARCH})..."
-
-BASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${TAG}"
 DOWNLOAD_URL="${BASE_URL}/${ASSET_NAME}"
 SUMS_URL="${BASE_URL}/SHA256SUMS"
 

@@ -286,6 +286,33 @@ Notes:
 
 ---
 
+## 5a. End-to-end install gate staging (temporary, private-repo phase — T0803/T0804)
+
+The end-to-end install gate (`bin/gate install --variant {thin|full}`, [gate-system.md](gate-system.md) §Class 3) validates the **real** user install path: it fetches the published install script, runs it (download → verify checksum → decompress → `promise install`), sanity-checks the install, then runs the full test suite through the freshly **installed** distribution. While the repo is private, GitHub "latest" resolution is broken (the API resolves to a `deps-llvm-*` blob release), so the gate points `PROMISE_BASE_URL` at a temporary **prebuilts dist bucket** — `https://prebuilts.promise-lang.org/dist`.
+
+`bin/release publish-install` stages that bucket. For the host platform it:
+
+1. projects the runtime manifest from the catalog (`manifest-<host>.json`),
+2. builds the **thin** and **full** compiler variants (reusing `bin/release build`'s three-phase logic),
+3. gzips each binary to its published asset name (`promise-<os>-<arch>[-full][.exe].gz`),
+4. computes a **merge-aware** `SHA256SUMS` over the `.gz` assets, and
+5. uploads the assets + `SHA256SUMS` + the `install.{sh,ps1,cmd}` scripts to `dist/` in the R2 bucket via `npx wrangler` (the same mechanism `publish-blobs` uses).
+
+```sh
+# Run once per platform. Stage all hosts into the SAME --out so SHA256SUMS
+# accumulates every platform's lines (R2 has no read-modify-write, so the merge
+# happens locally in --out before upload).
+bin/release publish-install --host darwin-arm64  --out dist
+bin/release publish-install --host linux-amd64   --out dist
+bin/release publish-install --host windows-amd64 --out dist
+```
+
+Flags: `--out` (staging dir, default `<root>/dist`), `--r2-bucket` (default `prebuilts`, `""` disables upload), `--dry-run` / `--no-upload` (build + stage but skip upload). Host-only for now (cross-build gated on T0524) — the maintainer runs it on each platform, like `publish-blobs`.
+
+**T0804 removes this** when the repo goes public: once anonymous "latest" resolution works, the gate fetches straight from GitHub releases and `publish-install` + the `PROMISE_BASE_URL` override are obsolete.
+
+---
+
 ## 6. Cutting a release
 
 ```sh

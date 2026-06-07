@@ -64,7 +64,12 @@ subcommands:
         LLVM blobs for offline use.
   verify-manifest <manifest>... --against <dir>
         fail the release if any manifest entry's packaged artifact in <dir> does
-        not yield matching sha256 bytes.`
+        not yield matching sha256 bytes.
+  publish-install [--host <target>] [--out <dir>] [--r2-bucket <name>] [--dry-run] [--no-upload]
+        TEMPORARY (T0803/T0804): build the host's thin+full variants, gzip them
+        to the published asset names, compute a merge-aware SHA256SUMS, and
+        upload the assets + install scripts to the prebuilts R2 bucket under
+        dist/. Backs the end-to-end install gate while the repo is private.`
 
 // RunRelease dispatches a `bin/release` subcommand.
 func RunRelease(root string, args []string) error {
@@ -83,6 +88,8 @@ func RunRelease(root string, args []string) error {
 		return runReleaseFetchBlobs(root, rest)
 	case "build":
 		return runReleaseBuild(root, rest)
+	case "publish-install":
+		return runReleasePublishInstall(root, rest)
 	case "verify-manifest":
 		return runReleaseVerifyManifest(root, rest)
 	case "-h", "--help", "help":

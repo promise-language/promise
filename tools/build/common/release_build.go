@@ -26,7 +26,9 @@ import (
 // §4.4) — that is why `bin/release blobs`+`manifest` run first and their output is
 // passed in via --manifest.
 
-// runReleaseBuild builds the thin or full compiler variant.
+// runReleaseBuild builds the thin or full compiler variant. Thin arg-parser
+// around buildReleaseVariant (which both this CLI and `bin/release
+// publish-install` call).
 func runReleaseBuild(root string, args []string) error {
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	variant := fs.String("variant", "", "thin|full (required)")
@@ -37,27 +39,35 @@ func runReleaseBuild(root string, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *variant != "thin" && *variant != "full" {
+	return buildReleaseVariant(root, *variant, *manifestPath, *out, *blobsDir, *host)
+}
+
+// buildReleaseVariant builds the thin|full compiler variant with the runtime
+// manifest embedded (and host LLVM blobs pre-staged for full), writing the
+// finished binary + sha256 sidecar to `out`. Validation lives here so both the
+// `bin/release build` CLI and `publish-install` get identical guarantees.
+func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host string) error {
+	if variant != "thin" && variant != "full" {
 		return fmt.Errorf("build: --variant must be thin or full\n%s", releaseUsage)
 	}
-	if *manifestPath == "" || *out == "" {
+	if manifestPath == "" || out == "" {
 		return fmt.Errorf("build: --manifest and --out are required\n%s", releaseUsage)
 	}
-	full := *variant == "full"
-	if full && *blobsDir == "" {
+	full := variant == "full"
+	if full && blobsDir == "" {
 		return fmt.Errorf("build: --variant full requires --blobs\n%s", releaseUsage)
 	}
-	if *host != CurrentBuildTarget() {
+	if host != CurrentBuildTarget() {
 		// Cross-building the compiler + stub for another target is gated on
 		// cross-compilation (T0524); the `all` variant is deferred (T0774).
-		return fmt.Errorf("build: cross-target builds (%s on host %s) are not supported yet (T0524)", *host, CurrentBuildTarget())
+		return fmt.Errorf("build: cross-target builds (%s on host %s) are not supported yet (T0524)", host, CurrentBuildTarget())
 	}
 
 	// Resolve --out to an absolute path. goBuildCompiler runs `go build` with
 	// cwd=<root>/compiler, so a RELATIVE -o (e.g. release.yml's `dist/bin/...`)
 	// would land under compiler/ while MkdirAll + the sha256 hash resolve it from
 	// the process CWD — the phase-C "open dist/bin/...: no such file" mismatch.
-	outBin, err := filepath.Abs(*out)
+	outBin, err := filepath.Abs(out)
 	if err != nil {
 		return fmt.Errorf("resolve --out path: %w", err)
 	}
@@ -80,14 +90,14 @@ func runReleaseBuild(root string, args []string) error {
 
 	// Embed the prebuilt manifest, overwriting EmbedResources' empty placeholder.
 	resManifest := filepath.Join(root, "compiler", "cmd", "promise", "resources", "manifest.json")
-	if err := copyFile(*manifestPath, resManifest); err != nil {
+	if err := copyFile(manifestPath, resManifest); err != nil {
 		return fmt.Errorf("embed manifest: %w", err)
 	}
 
 	// full: pre-stage the host LLVM blobs into the embed dir so the final binary
 	// stages them into the CAS at install time (offline host workflow).
 	if full {
-		if err := bundleReleaseLLVM(root, *host, *blobsDir); err != nil {
+		if err := bundleReleaseLLVM(root, host, blobsDir); err != nil {
 			return err
 		}
 	}
@@ -110,7 +120,7 @@ func runReleaseBuild(root string, args []string) error {
 	}
 
 	// Phase B — compile the Promise stub for the host with the bootstrap compiler.
-	stubDir := filepath.Join(root, "compiler", "cmd", "promise", "resources", "stub", *host)
+	stubDir := filepath.Join(root, "compiler", "cmd", "promise", "resources", "stub", host)
 	if err := os.MkdirAll(stubDir, 0o755); err != nil {
 		return err
 	}
@@ -129,7 +139,7 @@ func runReleaseBuild(root string, args []string) error {
 	if err := os.MkdirAll(filepath.Dir(outBin), 0o755); err != nil {
 		return err
 	}
-	fmt.Printf("Building final %s compiler (phase C)...\n", *variant)
+	fmt.Printf("Building final %s compiler (phase C)...\n", variant)
 	if err := goBuildCompiler(root, outBin, version, finalTags); err != nil {
 		return fmt.Errorf("phase C go build: %w", err)
 	}
@@ -143,8 +153,8 @@ func runReleaseBuild(root string, args []string) error {
 		return fmt.Errorf("write sha256 sidecar: %w", err)
 	}
 
-	if info, err := os.Stat(*out); err == nil {
-		fmt.Printf("Built %s variant %s (%.1f MB)\n", *variant, *out, float64(info.Size())/(1024*1024))
+	if info, err := os.Stat(out); err == nil {
+		fmt.Printf("Built %s variant %s (%.1f MB)\n", variant, out, float64(info.Size())/(1024*1024))
 	}
 	return nil
 }

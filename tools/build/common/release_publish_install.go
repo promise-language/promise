@@ -1,0 +1,183 @@
+package common
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+// release_publish_install.go implements `bin/release publish-install` — the
+// TEMPORARY private-repo staging helper for the end-to-end install gate (T0803).
+// It builds the host's thin + full compiler variants, gzips them to the
+// published asset names, computes a (multi-host-merge-aware) SHA256SUMS over the
+// `.gz` assets, and uploads the assets + the install scripts to the prebuilts R2
+// bucket under a `dist/` prefix (the same wrangler mechanism `publish-blobs`
+// uses). The install gate then points PROMISE_BASE_URL at
+// https://prebuilts.promise-lang.org/dist.
+//
+// T0804: remove this subcommand when the repo goes public — once "latest"
+// release resolution works against the public repo, the gate downloads straight
+// from GitHub releases and this dist-bucket staging path is obsolete.
+
+// installDistPrefix is the R2 key prefix the dist assets live under. The gate's
+// PROMISE_BASE_URL (https://prebuilts.promise-lang.org/dist) resolves to it.
+const installDistPrefix = "dist"
+
+// installAssetName returns the published gzip asset name for a target+variant,
+// matching ASSET_NAME in scripts/install.sh / install.ps1 EXACTLY (the install
+// scripts and the gate verify against this name, so any drift breaks the
+// checksum lookup). variant is "" (thin) or "full". Windows assets carry a
+// `.exe` before the `.gz`.
+func installAssetName(target, variant string) string {
+	goos, arch, _ := strings.Cut(target, "-")
+	suffix := ""
+	if variant == "full" {
+		suffix = "-full"
+	}
+	name := "promise-" + goos + "-" + arch + suffix
+	if goos == "windows" {
+		name += ".exe"
+	}
+	return name + ".gz"
+}
+
+// runReleasePublishInstall implements `bin/release publish-install`. Host-only
+// (cross-build is gated on T0524); the maintainer runs it once per platform,
+// staging into a shared --out so SHA256SUMS accumulates all hosts' assets.
+func runReleasePublishInstall(root string, args []string) error {
+	fs := flag.NewFlagSet("publish-install", flag.ContinueOnError)
+	host := fs.String("host", CurrentBuildTarget(), "target to build+publish install assets for (host-only; T0524)")
+	out := fs.String("out", "", "staging dir for dist artifacts (default <root>/dist)")
+	r2Bucket := fs.String("r2-bucket", "prebuilts", "Cloudflare R2 bucket to upload the dist/ assets to via `npx wrangler` (empty string disables upload)")
+	dryRun := fs.Bool("dry-run", false, "build + stage assets but do not upload")
+	noUpload := fs.Bool("no-upload", false, "build + stage assets but skip the R2 upload (testing without wrangler)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *host != CurrentBuildTarget() {
+		return fmt.Errorf("publish-install: cross-target staging (%s on host %s) is not supported yet (T0524)", *host, CurrentBuildTarget())
+	}
+
+	outDir := *out
+	if outDir == "" {
+		outDir = filepath.Join(root, installDistPrefix)
+	}
+	binDir := filepath.Join(outDir, "bin")
+	blobsDir := filepath.Join(outDir, "blobs")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return err
+	}
+
+	epoch, err := ParseEpoch(root)
+	if err != nil {
+		return err
+	}
+
+	// 1 — project the runtime manifest for the host from the blobs catalog.
+	manifest, err := BuildRuntimeManifestFromCatalog(root, *host, epoch)
+	if err != nil {
+		return fmt.Errorf("build manifest: %w", err)
+	}
+	manifestPath := filepath.Join(outDir, "manifest-"+*host+".json")
+	if err := writeRuntimeManifest(manifestPath, manifest); err != nil {
+		return fmt.Errorf("write manifest: %w", err)
+	}
+
+	// 2 — build the thin variant.
+	thinBin := filepath.Join(binDir, "promise-"+*host+ExeSuffix())
+	fmt.Printf("Building thin variant for %s...\n", *host)
+	if err := buildReleaseVariant(root, "thin", manifestPath, thinBin, "", *host); err != nil {
+		return fmt.Errorf("build thin: %w", err)
+	}
+
+	// 3 — fetch the host blobs (needed to pre-stage the offline full variant).
+	fmt.Printf("Fetching host LLVM blobs for the full variant...\n")
+	if err := fetchManifestBlobs(manifestPath, blobsDir, false); err != nil {
+		return fmt.Errorf("fetch blobs: %w", err)
+	}
+
+	// 4 — build the full variant (host blobs pre-staged).
+	fullBin := filepath.Join(binDir, "promise-"+*host+"-full"+ExeSuffix())
+	fmt.Printf("Building full variant for %s...\n", *host)
+	if err := buildReleaseVariant(root, "full", manifestPath, fullBin, blobsDir, *host); err != nil {
+		return fmt.Errorf("build full: %w", err)
+	}
+
+	// 5 — gzip each binary to its published asset name.
+	thinAsset := filepath.Join(outDir, installAssetName(*host, ""))
+	fullAsset := filepath.Join(outDir, installAssetName(*host, "full"))
+	for _, g := range []struct{ src, dst string }{{thinBin, thinAsset}, {fullBin, fullAsset}} {
+		fmt.Printf("Compressing %s → %s...\n", filepath.Base(g.src), filepath.Base(g.dst))
+		if err := gzipFile(g.src, g.dst); err != nil {
+			return fmt.Errorf("gzip %s: %w", filepath.Base(g.src), err)
+		}
+		printSize(g.dst)
+	}
+
+	// 6 — compute SHA256SUMS over the .gz assets (merge-aware so multiple hosts
+	//     staged into one --out coexist in a single SHA256SUMS).
+	if err := writeInstallSums(outDir, []string{thinAsset, fullAsset}); err != nil {
+		return fmt.Errorf("write SHA256SUMS: %w", err)
+	}
+	sumsPath := filepath.Join(outDir, "SHA256SUMS")
+
+	// 7 — upload the assets + SHA256SUMS + install scripts to the dist bucket.
+	if *dryRun || *noUpload || *r2Bucket == "" {
+		fmt.Printf("\npublish-install staged %s assets in %s (upload skipped)\n", *host, outDir)
+		return nil
+	}
+	mirror := newBlobMirror(*r2Bucket)
+	uploads := []string{thinAsset, fullAsset, sumsPath,
+		filepath.Join(root, "scripts", "install.sh"),
+		filepath.Join(root, "scripts", "install.ps1"),
+		filepath.Join(root, "scripts", "install.cmd"),
+	}
+	for _, p := range uploads {
+		key := installDistPrefix + "/" + filepath.Base(p)
+		fmt.Printf("Uploading %s → R2 %s/%s...\n", filepath.Base(p), *r2Bucket, key)
+		if err := mirror.Put(key, p); err != nil {
+			return fmt.Errorf("upload %s: %w", key, err)
+		}
+	}
+	fmt.Printf("\npublish-install: uploaded %d dist objects for %s to bucket %s\n", len(uploads), *host, *r2Bucket)
+	return nil
+}
+
+// writeInstallSums computes the sha256 of each .gz asset in assetPaths and
+// writes/merges them into <dir>/SHA256SUMS (sha256sum format: "<sha>␣␣<name>").
+// Existing lines for assets NOT in this set are PRESERVED — each host runs
+// publish-install separately, so staging all three into one --out accumulates
+// every platform's sums in a single file (install.sh's exact-match `awk
+// '$2==name'` reads any line). Lines for the assets in this set are replaced.
+func writeInstallSums(dir string, assetPaths []string) error {
+	sumsPath := filepath.Join(dir, "SHA256SUMS")
+	sums := map[string]string{} // asset name → sha256
+	if data, err := os.ReadFile(sumsPath); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				sums[fields[len(fields)-1]] = fields[0]
+			}
+		}
+	}
+	for _, p := range assetPaths {
+		h, _, err := hashAndSize(p)
+		if err != nil {
+			return err
+		}
+		sums[filepath.Base(p)] = h
+	}
+	names := make([]string, 0, len(sums))
+	for n := range sums {
+		names = append(names, n)
+	}
+	sort.Strings(names) // deterministic ordering
+	var b strings.Builder
+	for _, n := range names {
+		fmt.Fprintf(&b, "%s  %s\n", sums[n], n)
+	}
+	return os.WriteFile(sumsPath, []byte(b.String()), 0o644)
+}

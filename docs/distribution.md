@@ -68,6 +68,23 @@ curl -sSfL $BASE/install.sh | sh -s -- --epoch 2026.0
 curl -sSfL $BASE/install.sh | sh -s -- --full      # planned (selects the -full asset)
 ```
 
+**`PROMISE_BASE_URL` override (temporary, private-repo testing — T0803/T0804).** When the
+env var `PROMISE_BASE_URL` is set, both `install.sh` and `install.ps1` **skip** GitHub
+"latest" release resolution and download the assets (`<asset>.gz`, `SHA256SUMS`) directly
+from that base URL. This sidesteps the currently-broken private-repo "latest" resolution
+(the GitHub API `releases/latest` resolves to a `deps-llvm-*` blob release, not an epoch
+release) and lets the end-to-end install gate ([release-automation.md](release-automation.md)
+§5a) point at the prebuilts dist bucket:
+
+```sh
+PROMISE_BASE_URL=https://prebuilts.promise-lang.org/dist sh install.sh --full
+```
+
+`--epoch` is ignored under the override (the dist bucket is unversioned). **This override
+must be removed when the repo goes public (T0804)** — once anonymous "latest" resolution
+works, the default GitHub-releases path is sufficient. `install.cmd` does **not** honor it
+(it always fetches `install.ps1` from GitHub); the gate invokes `install.ps1` directly.
+
 ### 2.2 Windows — install script *(scripts committed; anonymous fetch gated on private→public)*
 
 > The committed [`scripts/install.ps1`](../scripts/install.ps1) (real implementation) and [`scripts/install.cmd`](../scripts/install.cmd) (thin shim) are attached to every release by the pipeline ([release-automation.md](release-automation.md) §5). As with §2.1, the `irm … | iex` one-liner only works for outside users once the repo (or a releases-only mirror) is public — the scripts and the binaries they fetch are release assets that currently require auth.

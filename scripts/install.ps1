@@ -59,27 +59,39 @@ $AssetName   = "${RuntimeName}.gz"
 
 # ── resolve release tag ─────────────────────────────────────────────────────
 
-if ($Epoch -eq "latest") {
-    Write-Host "Fetching latest release..."
-    $api = "https://api.github.com/repos/${GitHubRepo}/releases/latest"
-    try {
-        $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "promise-install" }
-        $Tag = $release.tag_name
-    } catch {
-        Write-Error "could not determine latest release from GitHub API: $_"
-        exit 1
+# T0804: remove this PROMISE_BASE_URL override when the repo goes public.
+# When PROMISE_BASE_URL is set, download the assets directly from that base URL
+# (skipping GitHub "latest" release resolution). Used by the install gate (T0803)
+# to point at the prebuilts dist bucket while the repo is still private.
+if ($env:PROMISE_BASE_URL) {
+    $BaseUrl = $env:PROMISE_BASE_URL.TrimEnd('/')
+    if ($Epoch -ne "latest") {
+        Write-Warning "-Epoch is ignored under PROMISE_BASE_URL (the dist bucket is unversioned)"
     }
-    if (-not $Tag) {
-        Write-Error "could not determine latest release from GitHub API"
-        exit 1
-    }
+    Write-Host "note: using PROMISE_BASE_URL override ($BaseUrl) — skipping GitHub release resolution (T0803/T0804)"
+    Write-Host "Installing Promise (windows-${Arch}) from ${BaseUrl}..."
 } else {
-    $Tag = "epoch-${Epoch}"
+    if ($Epoch -eq "latest") {
+        Write-Host "Fetching latest release..."
+        $api = "https://api.github.com/repos/${GitHubRepo}/releases/latest"
+        try {
+            $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "promise-install" }
+            $Tag = $release.tag_name
+        } catch {
+            Write-Error "could not determine latest release from GitHub API: $_"
+            exit 1
+        }
+        if (-not $Tag) {
+            Write-Error "could not determine latest release from GitHub API"
+            exit 1
+        }
+    } else {
+        $Tag = "epoch-${Epoch}"
+    }
+    Write-Host "Installing Promise ${Tag} (windows-${Arch})..."
+    $BaseUrl = "https://github.com/${GitHubRepo}/releases/download/${Tag}"
 }
 
-Write-Host "Installing Promise ${Tag} (windows-${Arch})..."
-
-$BaseUrl     = "https://github.com/${GitHubRepo}/releases/download/${Tag}"
 $DownloadUrl = "${BaseUrl}/${AssetName}"
 $SumsUrl     = "${BaseUrl}/SHA256SUMS"
 

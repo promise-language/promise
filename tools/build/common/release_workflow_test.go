@@ -182,8 +182,10 @@ func TestReleaseWorkflowInvocationsMatchCLI(t *testing.T) {
 		}
 	}
 
-	// 3. The whole build order must be present (blobs→manifest→thin/full→verify).
-	for _, sub := range []string{"blobs", "manifest", "build", "verify-manifest"} {
+	// 3. The whole build order must be present (manifest→thin/full→verify).
+	// T0797 removed the per-epoch `blobs` job (it is now local-only); blobs
+	// are pulled from the deps release via `fetch-blobs` instead.
+	for _, sub := range []string{"manifest", "build", "fetch-blobs", "verify-manifest"} {
 		if !seenSubs[sub] {
 			t.Errorf("release.yml never invokes `bin/release %s` — the pipeline build order is incomplete", sub)
 		}
@@ -301,6 +303,92 @@ func readScript(t *testing.T, root, name string) string {
 }
 
 // ── T0796: gzip publish + decompress wiring ─────────────────────────────────
+
+// TestReleaseWorkflowT0797Shape pins the structural changes T0797 makes to
+// release.yml: the per-epoch `blobs` matrix job is gone (it's local-only now),
+// `compiler` projects the manifest from the committed blobs catalog instead of
+// hashing local blobs, both `compiler` and `publish` use `fetch-blobs` to pull
+// pre-hosted blobs from the deps release on demand, and `dist/deps/*` is no
+// longer attached to the epoch GitHub release. A regression in any one would
+// silently re-introduce the 10-min brotli-11 and 700 MB LLVM download per
+// release that the task description called out.
+func TestReleaseWorkflowT0797Shape(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skipf("find root: %v", err)
+	}
+	wf := filepath.Join(root, ".github", "workflows", "release.yml")
+	data, err := os.ReadFile(wf)
+	if err != nil {
+		t.Skipf("read %s: %v", wf, err)
+	}
+	content := string(data)
+
+	// 1. No `blobs:` job key. Match `\n  blobs:\n` so prose mentions of the
+	// word "blobs" don't trigger a false positive.
+	if strings.Contains(content, "\n  blobs:\n") {
+		t.Error("release.yml still defines a top-level `blobs:` job — T0797 moved blob production off the per-epoch path")
+	}
+	// And the `compiler` job must NOT need [setup, blobs].
+	if strings.Contains(content, "needs: [setup, blobs]") {
+		t.Error("compiler job still `needs: [setup, blobs]` — the blobs job is gone")
+	}
+
+	// 2. Manifest is projected from the catalog (no positional <blobsdir>, the
+	// `--from-catalog` switch is the marker).
+	if !strings.Contains(content, "manifest --from-catalog") {
+		t.Error("release.yml does not project the manifest via `manifest --from-catalog` — without it, the workflow still relies on a deleted blobs matrix")
+	}
+	// Conversely: the legacy `bin/release manifest dist/blobs ...` invocation
+	// is no longer used (its blobs dir came from the deleted job).
+	if strings.Contains(content, "bin/release manifest dist/blobs") {
+		t.Error("release.yml still invokes legacy `bin/release manifest dist/blobs ...` — that input dir disappeared with the blobs job")
+	}
+
+	// 3. fetch-blobs runs in both compiler and publish.
+	if !strings.Contains(content, "bin/release fetch-blobs") {
+		t.Error("release.yml does not invoke `bin/release fetch-blobs` — the full variant and verify-manifest both depend on it")
+	}
+	// publish must use --keep-compressed so verify-manifest's --against dir
+	// holds the <sha>.br assets it hashes.
+	if !strings.Contains(content, "--keep-compressed") {
+		t.Error("publish job's fetch-blobs is missing --keep-compressed — verify-manifest hashes the compressed bytes")
+	}
+
+	// 4. The epoch GitHub release no longer attaches `dist/deps/*` (those are
+	// the LLVM blobs that now live in deps-<dep>-<version>).
+	if strings.Contains(content, "dist/deps/*") {
+		t.Error("release.yml still attaches `dist/deps/*` to the epoch release — those blobs live in deps-<dep>-<version> now (T0797)")
+	}
+	// And the `release-blobs-<host>` artifact (uploaded by the deleted blobs
+	// job) is no longer downloaded.
+	if strings.Contains(content, "release-blobs-") {
+		t.Error("release.yml still references `release-blobs-<host>` artifacts — those came from the deleted blobs job")
+	}
+
+	// 5. The from-catalog projection MUST NOT pass --tag. Doing so would
+	// override the catalog-derived deps-<dep>-<version> tag with the epoch
+	// tag, making the manifest's blob URLs point at a release that does not
+	// host them — every fetch-blobs call would 404. Locate the projection
+	// step's `run:` block and assert no --tag inside it.
+	const startMarker = "manifest --from-catalog"
+	idx := strings.Index(content, startMarker)
+	if idx < 0 {
+		t.Fatal("could not locate `manifest --from-catalog` step to inspect for stray --tag")
+	}
+	// Bound the search to the bash heredoc-style run block: from the marker
+	// until either the next `- name:`/`- uses:` step OR end of file.
+	tail := content[idx:]
+	stepEnd := len(tail)
+	for _, terminator := range []string{"\n      - name:", "\n      - uses:"} {
+		if i := strings.Index(tail, terminator); i > 0 && i < stepEnd {
+			stepEnd = i
+		}
+	}
+	if strings.Contains(tail[:stepEnd], "--tag") {
+		t.Error("the `manifest --from-catalog` step passes --tag — the deps release tag is catalog-derived; an override (e.g. ${{ github.ref_name }}) would yield a manifest whose URLs fetch-blobs cannot resolve")
+	}
+}
 
 // TestReleaseWorkflowCompressesAssets pins the T0796 publish format: every
 // platform binary must be gzipped before SHA256SUMS is generated and only the

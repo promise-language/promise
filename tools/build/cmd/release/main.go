@@ -7,10 +7,13 @@
 //
 //	bin/release blobs --host <target> --out <dir>
 //	bin/release manifest <blobsdir> --host <target> --pack <dir> --out <manifest> [--tag <tag>]
+//	bin/release manifest --from-catalog --host <target> --out <manifest>
+//	bin/release publish-blobs --dependency <dep> --host <target> [--dry-run] [--no-upload]
+//	bin/release fetch-blobs --manifest <m> --out <dir> [--keep-compressed]
 //	bin/release build --variant {thin|full} --manifest <m> --out <bin> [--blobs <dir>]
 //	bin/release verify-manifest <manifest>... --against <dir>
 //
-// See docs/release-automation.md §2 (build-order) and T0773.
+// See docs/release-automation.md §2 (build-order) and T0773, T0797.
 package main
 
 import (

@@ -2,11 +2,16 @@
 #
 # Triggered by an `epoch-*` tag (e.g. `epoch-2026.0`, or `epoch-next` for the
 # pre-release channel). Mirrors the build order of §2 via T0773's `bin/release`
-# driver: blobs → manifest → thin → stub (internal to `build`) → full →
-# verify-manifest → publish.
+# driver — but per T0797 the **per-epoch blobs job is gone**. Prebuilt dependency
+# blobs (LLVM opt/llc/lld) are content-addressed, immutable, and change only on a
+# dep version bump; they are produced + uploaded LOCALLY (T0797) by a
+# maintainer into a dedicated `deps-<dep>-<version>` release, recorded in
+# `tools/build/blobs.json`. Each per-epoch run projects the catalog into a
+# runtime manifest (`bin/release manifest --from-catalog`) and pulls the
+# pre-hosted blobs on demand (`bin/release fetch-blobs`), saving ~10 min of
+# brotli-11 and ~700 MB of upstream LLVM download on every release.
 #
-# Three jobs:
-#   blobs    (matrix per host) — collect dependency blobs + emit the manifest
+# Two jobs:
 #   compiler (matrix per host) — build the thin + full compiler variants
 #   publish  (single runner)   — integrity-gate, checksum, and cut the Release
 name: Release
@@ -39,14 +44,13 @@ permissions:
   contents: write
 
 jobs:
-  # Resolve the host(s) to build into the blobs + compiler matrices. On a tag push
-  # there is no `platform` input → defaults to all 3. On workflow_dispatch it honors
-  # the selection, so non-selected hosts never spin up a runner (a job-level `if`
+  # Resolve the host(s) to build into the compiler matrix. On a tag push there is
+  # no `platform` input → defaults to all 3. On workflow_dispatch it honors the
+  # selection, so non-selected hosts never spin up a runner (a job-level `if`
   # cannot see `matrix`, hence this setup job).
   setup:
     runs-on: ubuntu-24.04
     outputs:
-      blobs: ${{ steps.pick.outputs.blobs }}
       compiler: ${{ steps.pick.outputs.compiler }}
     steps:
       - id: pick
@@ -55,78 +59,21 @@ jobs:
           PLATFORM: ${{ github.event.inputs.platform }}
         run: |
           P="${PLATFORM:-all}"
-          blobs='[{"host":"linux-amd64","runner":"ubuntu-24.04"},{"host":"darwin-arm64","runner":"macos-latest"},{"host":"windows-amd64","runner":"windows-latest"}]'
           compiler='[{"host":"linux-amd64","runner":"ubuntu-24.04","ext":""},{"host":"darwin-arm64","runner":"macos-latest","ext":""},{"host":"windows-amd64","runner":"windows-latest","ext":".exe"}]'
           # Deferred (docs/release-automation.md §7): darwin-amd64 (macos-13), linux-arm64.
           if [ "$P" = "all" ]; then
-            echo "blobs={\"include\":$blobs}" >> "$GITHUB_OUTPUT"
             echo "compiler={\"include\":$compiler}" >> "$GITHUB_OUTPUT"
           else
-            echo "blobs={\"include\":$(echo "$blobs" | jq -c --arg h "$P" '[.[]|select(.host==$h)]')}" >> "$GITHUB_OUTPUT"
             echo "compiler={\"include\":$(echo "$compiler" | jq -c --arg h "$P" '[.[]|select(.host==$h)]')}" >> "$GITHUB_OUTPUT"
           fi
 
-  # 1–2. Prebuilt blobs + manifest (cached; the LLVM download is the expensive part).
-  blobs:
-    name: blobs ${{ matrix.host }}
-    needs: setup
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.setup.outputs.blobs) }}
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: false   # see ci.yml / docs/release-automation.md §4 — flow-sdk is unreachable from runners.
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: compiler/go.mod
-          cache: true
-          cache-dependency-path: compiler/go.sum
-      # Pin the forge prebuilts cache to a stable path so actions/cache can persist
-      # the ~200 MB LLVM download that `bin/release blobs` (FetchAll) pulls. Only the
-      # blobs step (below) reads PROMISE_PREBUILTS_CACHE; `runner` context is not
-      # allowed in job-level env, so it is set per-step.
-      - name: Cache prebuilt LLVM blobs
-        uses: actions/cache@v5
-        with:
-          path: ${{ runner.temp }}/prebuilts
-          key: prebuilts-${{ runner.os }}-${{ hashFiles('tools/build/prebuilts.toml') }}
-      # bin/ is gitignored — bootstrap the forge tools (bin/release) before use.
-      - name: Bootstrap dev tools (Unix)
-        if: runner.os != 'Windows'
-        run: ./make
-      - name: Bootstrap dev tools (Windows)
-        if: runner.os == 'Windows'
-        run: .\make.cmd
-      - name: Collect dependency blobs (host LLVM tools)
-        shell: bash
-        env:
-          PROMISE_PREBUILTS_CACHE: ${{ runner.temp }}/prebuilts
-        run: bin/release blobs --host ${{ matrix.host }} --out dist/blobs
-      - name: Package blobs + generate manifest
-        shell: bash
-        # --tag is passed explicitly so the embedded primary-source URLs point at the
-        # ACTUAL tag (critical for epoch-next, where the catalog default epoch-<epoch>
-        # would be wrong).
-        run: |
-          bin/release manifest dist/blobs \
-            --host ${{ matrix.host }} \
-            --pack dist/deps \
-            --out dist/manifest-${{ matrix.host }}.json \
-            --tag "${{ github.ref_name }}"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-blobs-${{ matrix.host }}
-          path: |
-            dist/blobs
-            dist/deps
-            dist/manifest-${{ matrix.host }}.json
-
-  # 3–6. Per-host thin + full compiler, manifest embedded, stub compiled+embedded.
+  # 1–6. Per-host thin + full compiler. Manifest is projected from the committed
+  # blobs catalog (T0797), full's dependency blobs are pulled from the
+  # deps-<dep>-<version> release the maintainer pre-staged locally — no in-job
+  # blob production.
   compiler:
     name: compiler ${{ matrix.host }}
-    needs: [setup, blobs]
+    needs: setup
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.compiler) }}
@@ -174,17 +121,34 @@ jobs:
       - name: Bootstrap dev tools (Windows)
         if: runner.os == 'Windows'
         run: .\make.cmd
-      - name: Download blobs + manifest
-        uses: actions/download-artifact@v8
-        with:
-          name: release-blobs-${{ matrix.host }}
-          path: dist
+      - name: Project per-epoch manifest from blobs catalog
+        shell: bash
+        # The runtime manifest is a projection of `tools/build/blobs.json` (the
+        # committed catalog of every hosted blob across versions, T0797) into the
+        # epoch's pinned dep version. No blobs need to be staged in this job — the
+        # manifest's blob source URLs point at the pre-hosted `deps-<dep>-<version>`
+        # release. No --tag here: the deps release tag is catalog-derived (passing
+        # ${{ github.ref_name }} would make fetch-blobs 404 on every entry).
+        run: |
+          mkdir -p dist
+          bin/release manifest --from-catalog \
+            --host ${{ matrix.host }} \
+            --out dist/manifest-${{ matrix.host }}.json
       - name: Build thin compiler (manifest + stub embedded)
         shell: bash
         run: |
           bin/release build --variant thin \
             --manifest dist/manifest-${{ matrix.host }}.json \
             --out dist/bin/promise-${{ matrix.host }}${{ matrix.ext }}
+      - name: Fetch dependency blobs for full variant
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Pulls each manifest entry's primary blob source from the deps release
+        # and brotli-decompresses to `dist/blobs/<file>`. Used as `--blobs` for
+        # `bin/release build --variant full`. Auth via GH_TOKEN so the private-repo
+        # flow works pre-T0786.
+        run: bin/release fetch-blobs --manifest dist/manifest-${{ matrix.host }}.json --out dist/blobs
       - name: Build full compiler (host blobs pre-staged)
         shell: bash
         run: |
@@ -192,14 +156,14 @@ jobs:
             --manifest dist/manifest-${{ matrix.host }}.json \
             --blobs dist/blobs \
             --out dist/bin/promise-${{ matrix.host }}-full${{ matrix.ext }}
-      # Publish needs the binaries + content-addressed deps + the manifest — NOT the
-      # raw blobs/. Content-hash names make deps/ collision-free when merged.
+      # Publish needs the binaries + the manifest. Compressed deps are NOT attached
+      # to the epoch release any more — they live in the `deps-<dep>-<version>`
+      # release that the maintainer pre-staged (T0797).
       - uses: actions/upload-artifact@v7
         with:
           name: release-bin-${{ matrix.host }}
           path: |
             dist/bin
-            dist/deps
             dist/manifest-${{ matrix.host }}.json
 
   # 7. Integrity gate, checksum, and cut the Release. Skipped on a build-only
@@ -223,11 +187,21 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           # merge-multiple flattens every release-bin-<host> into one dist/ tree
-          # (v4 otherwise nests each artifact in its own subdir). Content-addressed
-          # deps/ names make the cross-host merge collision-free.
+          # (v4 otherwise nests each artifact in its own subdir).
           pattern: release-bin-*
           merge-multiple: true
           path: dist
+      - name: Fetch dependency blobs (for integrity gate)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Pull each manifest's blobs into dist/deps with the compressed `<sha>.br`
+        # retained — verify-manifest hashes the DECOMPRESSED bytes and asserts the
+        # sha matches the manifest's CAS hash.
+        run: |
+          mkdir -p dist/deps
+          for m in dist/manifest-*.json; do
+            bin/release fetch-blobs --manifest "$m" --out dist/deps --keep-compressed
+          done
       - name: Verify manifest resolves (fail the release on any mismatch)
         run: bin/release verify-manifest dist/manifest-*.json --against dist/deps
       - name: Compress binaries with gzip (T0796)
@@ -252,6 +226,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # The install scripts are committed (scripts/install.*) and attached verbatim —
         # nothing generates them. epoch-next cuts a GitHub pre-release (next channel).
+        # Dependency blobs are NOT attached here — they live in deps-<dep>-<version>
+        # (T0797).
         run: |
           if [ "$GITHUB_REF_NAME" = "epoch-next" ]; then
             PRERELEASE="--prerelease"
@@ -270,6 +246,5 @@ jobs:
             --title "$TITLE" \
             --notes "See docs/changelog.md for this epoch." \
             dist/bin/promise-*.gz \
-            dist/deps/* \
             dist/SHA256SUMS \
             scripts/install.sh scripts/install.ps1 scripts/install.cmd

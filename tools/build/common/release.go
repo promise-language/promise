@@ -42,6 +42,18 @@ subcommands:
   manifest <blobsdir> --host <target> --pack <dir> --out <manifest> [--tag <tag>]
         hash+size each blob, pack hash-named artifacts into <dir>, and write the
         embedded manifest with ranked sources to <manifest>.
+  manifest --from-catalog --host <target> --out <manifest>
+        project tools/build/blobs.json into a per-epoch runtime manifest. No
+        blobs need to be staged locally — sha/size/sources come from the catalog,
+        and the deps-<dep>-<version> tag is derived from blobs.json (no --tag).
+  publish-blobs --dependency <dep> --host <target> [--dry-run] [--no-upload]
+        produce (extract + brotli-11 compress + hash), record in blobs.json, and
+        upload to the deps-<dep>-<version> release. Idempotent: blobs already in
+        the catalog with the matching hash are skipped.
+  fetch-blobs --manifest <m> --out <dir> [--keep-compressed]
+        download + brotli-decompress each manifest entry's primary blob source
+        into <dir>. --keep-compressed leaves the <sha>.br alongside (for
+        verify-manifest).
   build --variant {thin|full} --manifest <m> --out <bin> [--blobs <dir>] [--host <target>]
         build the compiler with the manifest embedded; compile the Promise stub
         with the just-built compiler and embed it back. full also pre-stages host
@@ -61,6 +73,10 @@ func RunRelease(root string, args []string) error {
 		return runReleaseBlobs(root, rest)
 	case "manifest":
 		return runReleaseManifest(root, rest)
+	case "publish-blobs":
+		return runReleasePublishBlobs(root, rest)
+	case "fetch-blobs":
+		return runReleaseFetchBlobs(root, rest)
 	case "build":
 		return runReleaseBuild(root, rest)
 	case "verify-manifest":
@@ -182,21 +198,62 @@ func runReleaseBlobs(root string, args []string) error {
 
 // runReleaseManifest hashes the collected blobs, packs hash-named artifacts for
 // upload, and writes the embedded manifest with ranked sources (§2 steps 2–3).
+//
+// With --from-catalog (T0797), the mode flips: no blobs need to be staged
+// locally. Sha/size/sources come straight from `tools/build/blobs.json` (the
+// committed catalog of every blob hosted across versions). Per-epoch CI runs in
+// seconds — no 700 MB LLVM download, no 10-minute brotli-11. The per-epoch
+// runtime manifest is a projection of `blobs.json` for the epoch's pinned
+// versions.
 func runReleaseManifest(root string, args []string) error {
-	positionals, flags := splitPositionalFlags(args)
+	// `--from-catalog` is the only boolean flag in the manifest CLI; the
+	// shared splitPositionalFlags helper assumes every flag takes a value
+	// (it consumes the next token), so peek for the boolean here and strip
+	// it before splitting positionals from flags.
+	fromCatalog := false
+	stripped := args[:0:0]
+	for _, a := range args {
+		if a == "--from-catalog" || a == "-from-catalog" || a == "--from-catalog=true" || a == "-from-catalog=true" {
+			fromCatalog = true
+			continue
+		}
+		stripped = append(stripped, a)
+	}
+	positionals, flags := splitPositionalFlags(stripped)
 	fs := flag.NewFlagSet("manifest", flag.ContinueOnError)
 	host := fs.String("host", CurrentBuildTarget(), "target the blobs are for")
-	pack := fs.String("pack", "", "directory to write hash-named upload artifacts (required)")
+	pack := fs.String("pack", "", "directory to write hash-named upload artifacts (required without --from-catalog)")
 	out := fs.String("out", "", "manifest output path (required)")
-	tag := fs.String("tag", "", "release tag for asset URLs (default epoch-<epoch>)")
+	tag := fs.String("tag", "", "release tag for asset URLs (default epoch-<epoch>) — not allowed with --from-catalog (tag derived from blobs.json)")
+	_ = fs.Bool("from-catalog", false, "project tools/build/blobs.json into the manifest (no local blobs needed)") // documentation-only; pre-stripped above
 	if err := fs.Parse(flags); err != nil {
 		return err
+	}
+	if *out == "" {
+		return fmt.Errorf("manifest: --out is required\n%s", releaseUsage)
+	}
+	if fromCatalog {
+		if len(positionals) != 0 {
+			return fmt.Errorf("manifest --from-catalog: no positional <blobsdir> argument (the catalog provides hashes)\n%s", releaseUsage)
+		}
+		if *pack != "" {
+			return fmt.Errorf("manifest --from-catalog: --pack is not supported (nothing to pack locally)\n%s", releaseUsage)
+		}
+		// The catalog determines the deps release tag (deps-<dep>-<version>);
+		// overriding it would point the manifest's blob URLs at a release that
+		// does not host the blobs, so fetch-blobs would 404 on every entry.
+		// Reject rather than silently ignore so a stale --tag flag in a
+		// workflow fails loudly instead of producing an unfetchable manifest.
+		if *tag != "" {
+			return fmt.Errorf("manifest --from-catalog: --tag is not supported (the deps-<dep>-<version> tag is derived from blobs.json)\n%s", releaseUsage)
+		}
+		return runReleaseManifestFromCatalog(root, *host, *out)
 	}
 	if len(positionals) != 1 {
 		return fmt.Errorf("manifest: expected exactly one <blobsdir> argument\n%s", releaseUsage)
 	}
 	blobsDir := positionals[0]
-	if *pack == "" || *out == "" {
+	if *pack == "" {
 		return fmt.Errorf("manifest: --pack and --out are required\n%s", releaseUsage)
 	}
 	relTag := *tag
@@ -259,6 +316,70 @@ func runReleaseManifest(root string, args []string) error {
 	}
 	fmt.Printf("Wrote manifest with %d entries to %s (packed into %s, tag %s)\n",
 		len(entries), *out, *pack, relTag)
+	return nil
+}
+
+// runReleaseManifestFromCatalog projects `tools/build/blobs.json` into the
+// per-epoch runtime manifest for `host`. Each LLVM file in prebuilts.toml is
+// looked up in the catalog by (dependency, version, target, name) — the catalog
+// must have an entry, since `blobs.json` is the committed source of truth for
+// hosted blobs. The runtime manifest entries are named `llvm-<out>` (matching
+// the bootstrap producer's convention), with the catalog-resolved deps release
+// asset as the primary source and the upstream archive as the ranked fallback.
+//
+// The release tag is ALWAYS the catalog-derived `deps-<dep>-<version>` — the
+// CLI rejects --tag in from-catalog mode because the deps release is where
+// the blobs actually live; overriding would produce unfetchable URLs.
+func runReleaseManifestFromCatalog(root, host, outPath string) error {
+	pm, tEntry, err := llvmTargetEntry(root, host)
+	if err != nil {
+		return err
+	}
+	llvm := pm.Binaries["llvm"]
+	dep, version := "llvm", llvm.Version
+	tag := DepsReleaseTag(dep, version)
+
+	catalog, err := LoadBlobsCatalog(root)
+	if err != nil {
+		return err
+	}
+	epoch, err := ParseEpoch(root)
+	if err != nil {
+		return err
+	}
+
+	kind := llvmKindForTarget(host)
+	entries := make([]runtimeManifestEntry, 0, len(tEntry.Files))
+	for _, f := range tEntry.Files {
+		be, ok := catalog.Lookup(dep, version, host, f.Out)
+		if !ok {
+			return fmt.Errorf("blobs.json has no entry for %s/%s/%s/%s — run `bin/release publish-blobs --dependency %s --host %s` first",
+				dep, version, host, f.Out, dep, host)
+		}
+		assetURL, err := BlobAssetURL(tag, be.SHA256, be.Compression)
+		if err != nil {
+			return fmt.Errorf("entry %s: %w", blobIdent(*be), err)
+		}
+		entries = append(entries, runtimeManifestEntry{
+			Name:   "llvm-" + f.Out,
+			SHA256: be.SHA256,
+			Size:   be.Size,
+			Kind:   kind,
+			Sources: []runtimeSource{
+				{Blob: assetURL, Compression: be.Compression},
+				{Archive: tEntry.URL, ArchivePath: f.Src, ArchiveSHA256: tEntry.SHA256},
+			},
+		})
+	}
+
+	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: epoch, Entries: entries}
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		return err
+	}
+	if err := writeRuntimeManifest(outPath, &m); err != nil {
+		return err
+	}
+	fmt.Printf("Projected %d entries from blobs.json into %s (tag %s)\n", len(entries), outPath, tag)
 	return nil
 }
 

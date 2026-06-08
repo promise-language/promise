@@ -71,6 +71,28 @@ func runReleasePublishInstall(root string, args []string) error {
 		return err
 	}
 
+	// When we will upload, seed the local SHA256SUMS from the bucket's current one
+	// FIRST — before the (expensive) build — so (a) a host where wrangler is not
+	// authenticated fails fast WITH login guidance instead of after minutes of
+	// compiling, and (b) the later writeInstallSums merge PRESERVES other hosts'
+	// entries (e.g. darwin's, staged from another machine) rather than clobbering
+	// them when this host uploads its SHA256SUMS.
+	willUpload := !*dryRun && !*noUpload && *r2Bucket != ""
+	var mirror blobMirror
+	if willUpload {
+		mirror = newBlobMirror(*r2Bucket)
+		sumsKey := installDistPrefix + "/SHA256SUMS"
+		found, err := mirror.Get(sumsKey, filepath.Join(outDir, "SHA256SUMS"))
+		if err != nil {
+			return fmt.Errorf("seed SHA256SUMS from R2 (is wrangler authenticated on this host?): %w", err)
+		}
+		if found {
+			fmt.Printf("Seeded SHA256SUMS from R2 %s/%s (other hosts' entries preserved)\n", *r2Bucket, sumsKey)
+		} else {
+			fmt.Printf("No existing SHA256SUMS in R2 %s/%s — starting fresh\n", *r2Bucket, sumsKey)
+		}
+	}
+
 	epoch, err := ParseEpoch(root)
 	if err != nil {
 		return err
@@ -117,19 +139,19 @@ func runReleasePublishInstall(root string, args []string) error {
 		printSize(g.dst)
 	}
 
-	// 6 — compute SHA256SUMS over the .gz assets (merge-aware so multiple hosts
-	//     staged into one --out coexist in a single SHA256SUMS).
+	// 6 — compute SHA256SUMS over the .gz assets. Merges this host's two assets
+	//     into the (possibly bucket-seeded) SHA256SUMS so every platform's sums
+	//     coexist in one file.
 	if err := writeInstallSums(outDir, []string{thinAsset, fullAsset}); err != nil {
 		return fmt.Errorf("write SHA256SUMS: %w", err)
 	}
 	sumsPath := filepath.Join(outDir, "SHA256SUMS")
 
 	// 7 — upload the assets + SHA256SUMS + install scripts to the dist bucket.
-	if *dryRun || *noUpload || *r2Bucket == "" {
+	if !willUpload {
 		fmt.Printf("\npublish-install staged %s assets in %s (upload skipped)\n", *host, outDir)
 		return nil
 	}
-	mirror := newBlobMirror(*r2Bucket)
 	uploads := []string{thinAsset, fullAsset, sumsPath,
 		filepath.Join(root, "scripts", "install.sh"),
 		filepath.Join(root, "scripts", "install.ps1"),

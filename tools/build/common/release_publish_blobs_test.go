@@ -70,6 +70,9 @@ func (s *stubReleaseUploader) UploadAsset(tag, localPath string) error {
 type stubBlobMirror struct {
 	mu   sync.Mutex
 	puts map[string]string // R2 key → uploaded file basename
+	// getContent simulates objects already in the bucket: R2 key → file content.
+	// A Get for a key not present returns found=false (the "start fresh" path).
+	getContent map[string]string
 }
 
 func (s *stubBlobMirror) Put(key, localPath string) error {
@@ -80,6 +83,19 @@ func (s *stubBlobMirror) Put(key, localPath string) error {
 	}
 	s.puts[key] = filepath.Base(localPath)
 	return nil
+}
+
+func (s *stubBlobMirror) Get(key, localPath string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	content, ok := s.getContent[key]
+	if !ok {
+		return false, nil
+	}
+	if err := os.WriteFile(localPath, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // withStubUploader swaps the package-level GitHub uploader for the duration of
@@ -898,4 +914,63 @@ func sliceContains(s []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestLooksLikeWranglerAuthError pins the auth-failure detection that gates the
+// login guidance: real wrangler auth errors match (so a host where wrangler is
+// not logged in gets actionable instructions), while unrelated failures (e.g. a
+// missing object, a network blip) do not falsely trigger the help text.
+func TestLooksLikeWranglerAuthError(t *testing.T) {
+	authy := []string{
+		"You are not authenticated. Please run `wrangler login`.",
+		"In a non-interactive environment, it's necessary to set a CLOUDFLARE_API_TOKEN environment variable",
+		"Authentication error [code: 10000]",
+		"The request is unauthorized",
+		"request could not be authenticated",
+	}
+	for _, s := range authy {
+		if !looksLikeWranglerAuthError(s) {
+			t.Errorf("looksLikeWranglerAuthError(%q) = false, want true", s)
+		}
+	}
+	notAuthy := []string{
+		"The specified key does not exist.",
+		"NoSuchKey: the object was not found",
+		"dial tcp: lookup api.cloudflare.com: no such host",
+		"",
+	}
+	for _, s := range notAuthy {
+		if looksLikeWranglerAuthError(s) {
+			t.Errorf("looksLikeWranglerAuthError(%q) = true, want false", s)
+		}
+	}
+}
+
+// TestStubMirrorGetSeeds verifies the mirror Get contract the seed step relies
+// on: a key present in the bucket is written to localPath (found=true); an
+// absent key yields found=false with no file (the "start fresh" path).
+func TestStubMirrorGetSeeds(t *testing.T) {
+	dir := t.TempDir()
+	m := &stubBlobMirror{getContent: map[string]string{
+		"dist/SHA256SUMS": "abc123  promise-darwin-arm64.gz\n",
+	}}
+
+	dst := filepath.Join(dir, "SHA256SUMS")
+	found, err := m.Get("dist/SHA256SUMS", dst)
+	if err != nil || !found {
+		t.Fatalf("Get(existing) = (%v, %v), want (true, nil)", found, err)
+	}
+	data, _ := os.ReadFile(dst)
+	if !strings.Contains(string(data), "promise-darwin-arm64.gz") {
+		t.Errorf("seeded file = %q, want the darwin entry", data)
+	}
+
+	missing := filepath.Join(dir, "missing")
+	found, err = m.Get("dist/absent", missing)
+	if err != nil || found {
+		t.Fatalf("Get(absent) = (%v, %v), want (false, nil)", found, err)
+	}
+	if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
+		t.Errorf("Get(absent) must not create the destination file")
+	}
 }

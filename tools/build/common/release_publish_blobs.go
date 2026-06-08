@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
@@ -111,6 +112,10 @@ type blobMirror interface {
 	// Put uploads localPath under key. Overwrite is acceptable (content-
 	// addressed: a given key always maps to the same bytes).
 	Put(key, localPath string) error
+	// Get downloads key into localPath. found is false (with a nil error) when
+	// the object does not exist in the bucket — the caller treats that as "start
+	// fresh", distinct from a real (e.g. auth/network) failure.
+	Get(key, localPath string) (found bool, err error)
 }
 
 // newBlobMirror builds the production R2 mirror; tests swap it for a stub.
@@ -126,14 +131,85 @@ type wranglerR2Mirror struct{ bucket string }
 
 func (m wranglerR2Mirror) Put(key, localPath string) error {
 	target := m.bucket + "/" + key
-	cmd := exec.Command("npx", "wrangler", "r2", "object", "put", target, "--file", localPath, "--remote")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if _, err := runWranglerR2([]string{"put", target, "--file", localPath, "--remote"}); err != nil {
 		return fmt.Errorf("wrangler r2 object put %s: %w", target, err)
 	}
 	return nil
 }
+
+func (m wranglerR2Mirror) Get(key, localPath string) (bool, error) {
+	target := m.bucket + "/" + key
+	stderr, err := runWranglerR2([]string{"get", target, "--file", localPath, "--remote"})
+	if err != nil {
+		// A missing object is an expected, non-fatal outcome (first publish for
+		// this bucket) — distinguish it from auth/network failures.
+		s := strings.ToLower(stderr)
+		for _, m := range []string{"does not exist", "not found", "no such key", "404"} {
+			if strings.Contains(s, m) {
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("wrangler r2 object get %s: %w", target, err)
+	}
+	return true, nil
+}
+
+// runWranglerR2 runs `npx wrangler r2 object <args...>`, forwarding wrangler's
+// output to stderr and returning its captured stderr for the caller to classify.
+// On an auth-shaped failure it prints actionable login/permission guidance, so a
+// maintainer on a host where wrangler is not logged in gets a clear next step
+// rather than a bare non-zero exit.
+func runWranglerR2(args []string) (string, error) {
+	var errBuf bytes.Buffer
+	cmd := exec.Command("npx", append([]string{"wrangler", "r2", "object"}, args...)...)
+	cmd.Stdout = os.Stderr // keep our stdout clean; wrangler progress → stderr
+	cmd.Stderr = io.MultiWriter(os.Stderr, &errBuf)
+	err := cmd.Run()
+	if err != nil && looksLikeWranglerAuthError(errBuf.String()) {
+		fmt.Fprint(os.Stderr, wranglerAuthHelp)
+	}
+	return errBuf.String(), err
+}
+
+// looksLikeWranglerAuthError heuristically detects a missing/invalid Cloudflare
+// credential failure from wrangler's stderr, so we only print the (verbose) auth
+// guidance when it is actually relevant.
+func looksLikeWranglerAuthError(stderr string) bool {
+	s := strings.ToLower(stderr)
+	for _, marker := range []string{
+		"not authenticated",
+		"cloudflare_api_token",
+		"authentication error",
+		"unauthorized",
+		"[code: 10000]",
+		"wrangler login",
+		"you need to login",
+		"in a non-interactive environment",
+		"could not be authenticated",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// wranglerAuthHelp is printed when a wrangler R2 call fails for auth reasons.
+const wranglerAuthHelp = `
+wrangler could not authenticate to Cloudflare R2. To fix on this host:
+
+  Interactive (machine with a browser):
+    npx wrangler login
+
+  Headless / CI (no browser) — set both env vars, then re-run:
+    export CLOUDFLARE_API_TOKEN=<api-token>
+    export CLOUDFLARE_ACCOUNT_ID=<account-id>
+
+The API token needs R2 read+write on this account. Create one at:
+  Cloudflare dashboard -> My Profile -> API Tokens -> Create Token
+  Use a Custom Token granting "Workers R2 Storage: Edit" (account-scoped),
+  or the "Edit Cloudflare Workers" template. Then re-run the command.
+`
 
 // publishBlobAction is the outcome row reported per file in the summary table.
 type publishBlobAction string

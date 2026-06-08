@@ -10619,6 +10619,20 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		panic(fmt.Sprintf("codegen: undefined type %s in cast", targetRef.Name))
 	}
 
+	// T0761: RTTI cast whose subject is itself an Optional (`opt as! Subtype` /
+	// `opt as Target`). genExpr yields the `{ i1, {i8*,i8*} }` optional
+	// representation, not the bare `{vtable, instance}` value struct the result
+	// paths below assume — unwrap the inner value first. (The same-type
+	// `T? as! T` unwrap is short-circuited above.)
+	if srcType := c.info.Types[e.Expr]; srcType != nil {
+		if c.typeSubst != nil {
+			srcType = types.Substitute(srcType, c.typeSubst)
+		}
+		if opt, ok := srcType.(*types.Optional); ok {
+			return c.genOptionalCastExpr(e, opt, targetNamed)
+		}
+	}
+
 	subject := c.genExpr(e.Expr)
 
 	// Primitive scalar casts (numeric, char, bool) — compile-time conversions, no RTTI needed
@@ -10707,6 +10721,301 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		&ir.Incoming{X: noneResult, Pred: noneEnd},
 	)
 	return phi
+}
+
+// genOptionalCastExpr generates code for an RTTI cast whose subject is itself an
+// Optional: `opt as! Subtype` (force) or `opt as Target` (optional). T0761.
+//
+// genExpr(e.Expr) yields the `{ i1, {i8*,i8*} }` optional representation. RTTI
+// casts apply only to reference types, so the inner (field 1) is always the
+// `{i8*,i8*}` userValueType() value struct. We extract it, give the cast result
+// a clean ownership story for the inner across every source shape (see the
+// ownership block below), then mirror the non-optional cast paths:
+//
+//   - Force (`as!`): on none OR type mismatch → panic; otherwise return the
+//     inner value struct (its view-vtable dispatches correctly, like the
+//     non-optional `as!` path).
+//   - Optional (`as`): on none OR mismatch → none; otherwise move the inner into
+//     `some` and neutralize the source inside the match-only block.
+//
+// Inner-ownership is reconciled by three coordinated pieces, keyed on the source
+// shape so exactly one of them frees the inner on every (present×match) path:
+//   - aliasing sources (container element `v[i]`, borrowed `this.field`): the
+//     inner is borrowed from an external owner the cast cannot neutralize, so we
+//     dup it into an owned copy up front (the external owner still frees the
+//     original).
+//   - owned sources (the duped copy above, or a call-result temp): the result
+//     owns the inner; the `as` path registers it as a heap temp so it is freed
+//     on present+mismatch (claimed by the binding on match).
+//   - local ident/member sources: the source's own drop binding owns the inner;
+//     neutralizeOptionalCastSource (as) / neutralizeForceUnwrapSource at the
+//     binding (force, B0293) clears it on the match path only.
+func (c *Compiler) genOptionalCastExpr(e *ast.CastExpr, opt *types.Optional, targetNamed *types.Named) value.Value {
+	// T0761: scalar optional subject (`int? as f64` / `char? as! int`). The inner
+	// (optional field 1) is a bare scalar, not a `{vtable,instance}` value struct,
+	// so the RTTI path below would extractvalue a non-aggregate and panic. Mirror
+	// the non-optional scalar path (emitScalarCast): unwrap, convert, (re)wrap.
+	elem := opt.Elem()
+	if c.typeSubst != nil {
+		elem = types.Substitute(elem, c.typeSubst)
+	}
+	if elemNamed := extractNamed(elem); elemNamed != nil &&
+		isPrimitiveScalar(elemNamed) && isPrimitiveScalar(targetNamed) {
+		return c.genOptionalScalarCastExpr(e, elemNamed, targetNamed)
+	}
+
+	targetID := c.assignTypeID(targetNamed)
+
+	// T0761: Take full ownership control of the subject's inner rather than
+	// relying on the binding context's ambient field/index dup (which fires only
+	// for an Optional[heap-user-type] LHS and only dups *some* source shapes —
+	// container elements but not synth-drop fields — making ownership of `inner`
+	// unpredictable from here). Suppress the ambient heap-user-type dup so genExpr
+	// yields the raw aliased inner, then dup aliasing sources uniformly below.
+	savedDupHeap := c.dupHeapUserFieldAccess
+	c.dupHeapUserFieldAccess = false
+	optVal := c.genExpr(e.Expr)
+	c.dupHeapUserFieldAccess = savedDupHeap
+
+	flag := c.block.NewExtractValue(optVal, 0)
+	var inner value.Value = c.block.NewExtractValue(optVal, 1) // {i8*,i8*} value struct
+
+	// For an aliasing source — a container element (`v[i]`) or a borrowed
+	// `this.field` — `inner` is borrowed from an external owner that the cast
+	// neither moves nor neutralizes (the container/caller still frees it). Dup it
+	// so the cast result owns an independent copy, mirroring genOptionalForceUnwrap's
+	// borrowed-`this.field` dup. Local-rooted ident/member sources are neutralized
+	// instead (B0293), and owned temps (call results) own their inner outright, so
+	// neither is duped. dupHeapValue is null-safe, so this is correct even when the
+	// optional is none (the dup is a no-op on a null instance).
+	if c.optionalCastSourceAliasesExternalOwner(e.Expr) {
+		elem := opt.Elem()
+		if c.typeSubst != nil {
+			elem = types.Substitute(elem, c.typeSubst)
+		}
+		if named := extractNamed(elem); named != nil && !named.IsValueType() &&
+			!named.IsCopy() && !isPrimitiveScalar(named) && named != types.TypString &&
+			!types.IsVector(elem) && !types.IsChannel(elem) && !named.IsStructural() &&
+			!isOpaqueContainerType(elem) {
+			inner = c.dupHeapValue(inner, elem)
+		}
+	}
+
+	if e.Force {
+		// as! — panic on none, then panic on type mismatch, else return inner.
+		presentBlock := c.newBlock("optcast.present")
+		nonePanicBlock := c.newBlock("optcast.nonepanic")
+		c.block.NewCondBr(flag, presentBlock, nonePanicBlock)
+
+		c.block = nonePanicBlock
+		nonePanicMsg := c.makeGlobalString("cast failed: optional is none")
+		c.block.NewCall(c.funcs["promise_panic"], nonePanicMsg)
+		c.emitPanicReturn()
+
+		c.block = presentBlock
+		instance := c.instancePtrForRTTI(inner, opt.Elem())
+		variantPtr := c.loadVariantPtr(instance)
+		result := c.block.NewCall(c.funcs["promise_type_is"],
+			variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
+		isMatch := c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+
+		okBlock := c.newBlock("optcast.ok")
+		mismatchBlock := c.newBlock("optcast.mismatch")
+		c.block.NewCondBr(isMatch, okBlock, mismatchBlock)
+
+		c.block = mismatchBlock
+		mismatchMsg := c.makeGlobalString("cast failed: as! type mismatch")
+		c.block.NewCall(c.funcs["promise_panic"], mismatchMsg)
+		c.emitPanicReturn()
+
+		c.block = okBlock
+		return inner // value struct, type verified; source neutralized (ident/member) or duped (aliasing) above
+	}
+
+	// as — none on absent OR mismatch, conditionally move inner into some.
+	optType := irtypes.NewStruct(irtypes.I1, userValueType())
+	checkBlock := c.newBlock("optcast.check")
+	someBlock := c.newBlock("optcast.some")
+	noneBlock := c.newBlock("optcast.none")
+	mergeBlock := c.newBlock("optcast.merge")
+	c.block.NewCondBr(flag, checkBlock, noneBlock)
+
+	c.block = checkBlock
+	instance := c.instancePtrForRTTI(inner, opt.Elem())
+	variantPtr := c.loadVariantPtr(instance)
+	result := c.block.NewCall(c.funcs["promise_type_is"],
+		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
+	isMatch := c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+	// T0761: When the cast result owns `inner` (an owned-temp call result, or an
+	// aliasing source we duped above) there is no external owner to free it on the
+	// present+mismatch path → leak. Register `inner` as a heap temp here (we are in
+	// checkBlock, so the present flag is known true and `inner`'s instance is
+	// valid): claimHeapTemp at the binding transfers ownership on match, and
+	// cleanupHeapTemps frees it on mismatch — exactly the non-optional cast's
+	// behavior. Ident/local-member sources are skipped: their inner is owned by the
+	// source's own drop binding (neutralized only on the match path), so tracking
+	// here would double-free.
+	if c.optionalCastResultOwnsInner(e.Expr) {
+		elem := opt.Elem()
+		if c.typeSubst != nil {
+			elem = types.Substitute(elem, c.typeSubst)
+		}
+		if dropFunc := c.resolveDropFuncForTemp(extractNamed(elem), elem); dropFunc != nil {
+			instPtr := c.extractInstancePtr(inner)
+			if instPtr.Type() != irtypes.I8Ptr {
+				instPtr = c.block.NewBitCast(instPtr, irtypes.I8Ptr)
+			}
+			c.trackHeapTemp(instPtr, dropFunc)
+		}
+	}
+	c.block.NewCondBr(isMatch, someBlock, noneBlock)
+
+	c.block = someBlock
+	// Conditional move: only on present+match does the result take ownership of
+	// the inner; clear the source optional's present flag so its drop becomes a
+	// no-op. On none/mismatch the source keeps & frees the inner.
+	c.neutralizeOptionalCastSource(e.Expr)
+	someResult := c.wrapOptional(inner, optType)
+	c.block.NewBr(mergeBlock)
+	someEnd := c.block
+
+	c.block = noneBlock
+	noneResult := constant.NewZeroInitializer(optType)
+	c.block.NewBr(mergeBlock)
+	noneEnd := c.block
+
+	c.block = mergeBlock
+	phi := c.block.NewPhi(
+		&ir.Incoming{X: someResult, Pred: someEnd},
+		&ir.Incoming{X: noneResult, Pred: noneEnd},
+	)
+	return phi
+}
+
+// genOptionalScalarCastExpr lowers a scalar-to-scalar cast whose subject is an
+// Optional (`int? as f64` force, or `int? as f64` optional). T0761. Scalars are
+// “ `copy “ with no drop, so there is no ownership/neutralization to do — the
+// inner is a bare scalar (optional field 1), not a value struct.
+//
+//   - Force (`as!`): panic on none, else convert and return the scalar.
+//   - Optional (`as`): none on absent; present → some(convert(inner)).
+func (c *Compiler) genOptionalScalarCastExpr(e *ast.CastExpr, srcNamed, targetNamed *types.Named) value.Value {
+	optVal := c.genExpr(e.Expr)
+	flag := c.block.NewExtractValue(optVal, 0)
+	inner := c.block.NewExtractValue(optVal, 1) // bare scalar (not a value struct)
+
+	if e.Force {
+		presentBlock := c.newBlock("optcast.present")
+		nonePanicBlock := c.newBlock("optcast.nonepanic")
+		c.block.NewCondBr(flag, presentBlock, nonePanicBlock)
+
+		c.block = nonePanicBlock
+		nonePanicMsg := c.makeGlobalString("cast failed: optional is none")
+		c.block.NewCall(c.funcs["promise_panic"], nonePanicMsg)
+		c.emitPanicReturn()
+
+		c.block = presentBlock
+		return c.emitScalarCast(inner, srcNamed, targetNamed)
+	}
+
+	// as — none on absent; present → some(convert(inner)).
+	optType := irtypes.NewStruct(irtypes.I1, llvmNamedType(targetNamed))
+	someBlock := c.newBlock("optcast.some")
+	noneBlock := c.newBlock("optcast.none")
+	mergeBlock := c.newBlock("optcast.merge")
+	c.block.NewCondBr(flag, someBlock, noneBlock)
+
+	c.block = someBlock
+	converted := c.emitScalarCast(inner, srcNamed, targetNamed)
+	someResult := c.wrapOptional(converted, optType)
+	c.block.NewBr(mergeBlock)
+	someEnd := c.block
+
+	c.block = noneBlock
+	noneResult := constant.NewZeroInitializer(optType)
+	c.block.NewBr(mergeBlock)
+	noneEnd := c.block
+
+	c.block = mergeBlock
+	return c.block.NewPhi(
+		&ir.Incoming{X: someResult, Pred: someEnd},
+		&ir.Incoming{X: noneResult, Pred: noneEnd},
+	)
+}
+
+// neutralizeOptionalCastSource clears the present flag of an Optional cast
+// source (`opt as Target`) so the source's drop skips the inner value once the
+// cast result has taken ownership of it (T0761). Shared with the force-unwrap
+// path: handles owned-ident and owned-member sources (peeling ParenExpr),
+// reusing neutralizeMemberOptionalField for the member case. Temp/call-result
+// sources fall through as a no-op (their inner stays owned by their own temp
+// tracking), identical to the existing opt!-on-temp behavior.
+func (c *Compiler) neutralizeOptionalCastSource(expr ast.Expr) {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	switch src := expr.(type) {
+	case *ast.IdentExpr:
+		alloca, ok := c.locals[src.Name]
+		if !ok {
+			return
+		}
+		optType, ok := alloca.ElemType.(*irtypes.StructType)
+		if !ok || len(optType.Fields) < 2 {
+			return
+		}
+		flagPtr := c.block.NewGetElementPtr(optType, alloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), flagPtr)
+	case *ast.MemberExpr:
+		c.neutralizeMemberOptionalField(src)
+	}
+}
+
+// optionalCastSourceAliasesExternalOwner reports whether an Optional cast
+// subject's inner is borrowed from an external owner that the cast neither moves
+// nor neutralizes, so genOptionalCastExpr must dup the inner to give the result
+// an independent copy (otherwise both the external owner and the result free it
+// → double-free). Two such shapes, mirroring genOptionalForceUnwrap's dup cases:
+//   - a container-element access (`v[i]`): the container's drop frees the
+//     element; neutralizeOptionalCastSource doesn't handle IndexExpr.
+//   - a borrowed-`this.field` access inside a `&this` method (T0428 Case 3B):
+//     neutralizeMemberOptionalField deliberately skips it (can't clear a present
+//     flag through a borrowed receiver), so the caller still owns the original.
+//
+// Local-rooted ident/member sources are neutralized instead (their owner's drop
+// is skipped on the match path), and owned temps (call results) own their inner
+// outright, so none of those is duped. ParenExpr is peeled. T0761.
+func (c *Compiler) optionalCastSourceAliasesExternalOwner(expr ast.Expr) bool {
+	switch e := unwrapDestructureParens(expr).(type) {
+	case *ast.IndexExpr:
+		return true
+	case *ast.MemberExpr:
+		return isThisReceiver(e.Target) && !c.thisRecvIsOwned
+	}
+	return false
+}
+
+// optionalCastResultOwnsInner reports whether the cast result owns `inner` (so
+// the `as` path must free it on the present+mismatch branch via a heap temp).
+// The result owns `inner` for every source EXCEPT a local-rooted ident or member
+// optional, whose own drop binding frees the inner (neutralized only on the
+// match path). Aliasing sources (index / borrowed-`this.field`) are duped into an
+// owned copy by genOptionalCastExpr, and owned temps (call results) own their
+// inner outright — both are owned. ParenExpr is peeled. T0761.
+func (c *Compiler) optionalCastResultOwnsInner(expr ast.Expr) bool {
+	switch e := unwrapDestructureParens(expr).(type) {
+	case *ast.IdentExpr:
+		return false
+	case *ast.MemberExpr:
+		// Borrowed-`this.field` is duped (owned); a local-owner field is neutralized.
+		return isThisReceiver(e.Target) && !c.thisRecvIsOwned
+	}
+	return true
 }
 
 // genOptionalHandlerExpr generates code for `optExpr ? { recovery }`.
@@ -11169,27 +11478,11 @@ func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
 		}
 		break
 	}
-	switch src := inner.(type) {
-	case *ast.IdentExpr:
-		alloca, ok := c.locals[src.Name]
-		if !ok {
-			return
-		}
-		optType, ok := alloca.ElemType.(*irtypes.StructType)
-		if !ok || len(optType.Fields) < 2 {
-			return
-		}
-		// Set present flag (field 0) to false — optional drop will skip inner free.
-		flagPtr := c.block.NewGetElementPtr(optType, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		c.block.NewStore(constant.NewInt(irtypes.I1, 0), flagPtr)
-	case *ast.MemberExpr:
-		// T0392: Force-unwrap of an optional field on an owned variable
-		// (`v.field!`). The owner's drop will visit this field via
-		// emitOptionalFieldDrop and double-free the inner value unless we
-		// clear the present flag in the owner's instance memory.
-		c.neutralizeMemberOptionalField(src)
-	}
+	// Clear the source optional's present flag (ident) or the owner's optional
+	// field flag (member) — shared with the optional-cast move path (T0761). The
+	// MemberExpr arm (T0392) clears the present flag in the owner's instance
+	// memory so the owner's drop skips the field rather than double-freeing.
+	c.neutralizeOptionalCastSource(inner)
 }
 
 // neutralizeMemberOptionalField clears the present flag of an Optional[heap-user-type]

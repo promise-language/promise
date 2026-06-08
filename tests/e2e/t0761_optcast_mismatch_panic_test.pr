@@ -1,0 +1,25 @@
+// T0761: forced RTTI cast (`as!`) whose subject is a PRESENT optional but whose
+// dynamic type does not match the target must panic with the type-mismatch
+// message — exercises genOptionalCastExpr's optcast.mismatch block at runtime
+// (the Go test only asserts the block exists in IR).
+type Base {
+  string name;
+  tag(&this) string `abstract;
+}
+type Der is Base {
+  tag(&this) string {
+    return "d";
+  }
+}
+type Other is Base {
+  tag(&this) string {
+    return "o";
+  }
+}
+
+main() `test(expected: """panic: cast failed: as! type mismatch""") {
+  Base b = Der(name: "x");
+  Base? oo = b;
+  d := oo as! Other;
+  print_line(d.name);
+}

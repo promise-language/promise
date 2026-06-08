@@ -1,0 +1,8 @@
+// T0761: forced SCALAR cast (`as!`) whose subject is a NONE scalar optional must
+// panic with the cast-none message — exercises genOptionalScalarCastExpr's
+// optcast.nonepanic block at runtime (the scalar path, distinct from the RTTI one).
+main() `test(expected: """panic: cast failed: optional is none""") {
+  int? x = none;
+  f := x as! f64;
+  print_line(f.to_string());
+}

@@ -150,6 +150,35 @@ func extractFunction(ir, name string) string {
 	return rest[:end+2]
 }
 
+// extractDefine returns the body of the `define ... @name(...)` *definition*,
+// anchoring on the `define` keyword. Unlike extractFunction (which matches the
+// first `@name(` anywhere), this is safe for argless functions like
+// `.goroutine.main()` whose name also appears as a call operand inside @main —
+// where extractFunction can latch onto the reference and extract @main instead.
+func extractDefine(ir, name string) string {
+	needle := "@" + name + "("
+	for idx := 0; ; {
+		d := strings.Index(ir[idx:], "define")
+		if d < 0 {
+			return ""
+		}
+		d += idx
+		nl := strings.Index(ir[d:], "\n")
+		if nl < 0 {
+			return ""
+		}
+		if strings.Contains(ir[d:d+nl], needle) {
+			rest := ir[d:]
+			end := strings.Index(rest, "\n}\n")
+			if end < 0 {
+				return rest
+			}
+			return rest[:end+2]
+		}
+		idx = d + len("define")
+	}
+}
+
 // --- Literal tests ---
 
 func TestIntLiteral(t *testing.T) {
@@ -2686,6 +2715,250 @@ func TestFailableConditionalRaiseReturn(t *testing.T) {
 	assertContains(t, ir, "i1 true")
 	assertContains(t, ir, "i1 false")
 	assertContains(t, ir, "ret { i1, i64, i8* }")
+}
+
+// T0761: RTTI cast whose subject is itself an Optional. genCastExpr used to
+// treat the {i1,{i8*,i8*}} optional as a bare value struct and panic; it now
+// branches to genOptionalCastExpr, which unwraps field 1 before promise_type_is.
+func TestOptionalSubjectForceCast(t *testing.T) {
+	ir := generateIR(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		main() {
+			Base b = Der(name: "x");
+			Base? ob = b;
+			d := ob as! Der;
+			_ := d.tag();
+		}
+	`)
+	// Compiled without panic, took the optional-subject path (present/panic
+	// blocks) and queried RTTI after unwrapping the inner value struct.
+	assertContains(t, ir, "optcast.present")
+	assertContains(t, ir, "optcast.nonepanic")
+	assertContains(t, ir, "call i32 @promise_type_is(")
+}
+
+func TestOptionalSubjectOptionalCast(t *testing.T) {
+	ir := generateIR(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		main() {
+			Base b = Der(name: "x");
+			Base? ob = b;
+			Der? d = ob as Der;
+			if d { }
+		}
+	`)
+	// Optional-subject `as` path: presence check, RTTI check, some/none merge.
+	assertContains(t, ir, "optcast.check")
+	assertContains(t, ir, "optcast.some")
+	assertContains(t, ir, "optcast.none")
+	assertContains(t, ir, "optcast.merge")
+	assertContains(t, ir, "call i32 @promise_type_is(")
+}
+
+// T0761: an Optional cast whose subject is a container element (`v[i]`) aliases
+// the vector's bucket, so genOptionalCastExpr must dup the inner — otherwise both
+// the cast result and the vector free it (double-free) / the result leaks. The
+// dup emits a heapdup.copy block before the cast's RTTI check.
+func TestOptionalSubjectIndexCastDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		main() {
+			Base?[] v = [];
+			Base b = Der(name: "x");
+			v.push(b);
+			d := v[0] as! Der;
+			_ := d.tag();
+		}
+	`)
+	// Aliasing source is duped into an owned copy before the RTTI dispatch.
+	// Scoped to @main: the stdAll clone funcs always emit heapdup.copy, so a
+	// whole-IR check would be trivially true.
+	assertContains(t, extractDefine(ir, ".goroutine.main"), "heapdup.copy")
+	assertContains(t, ir, "optcast.present")
+}
+
+// T0761: a scalar optional subject (`int? as f64`) has a bare scalar inner, not a
+// value struct — genOptionalCastExpr must take the scalar path (emitScalarCast),
+// not the RTTI path (which would extractvalue a non-aggregate and panic).
+func TestOptionalSubjectScalarCast(t *testing.T) {
+	// Force: unwrap (panic on none) then sitofp the inner int to f64.
+	irForce := generateIR(t, `
+		main() {
+			int? x = 5;
+			f := x as! f64;
+			_ := f;
+		}
+	`)
+	assertContains(t, irForce, "optcast.present")
+	assertContains(t, irForce, "sitofp") // scalar conversion, not an RTTI dispatch
+	// Optional: present → some(convert); absent → none.
+	irOpt := generateIR(t, `
+		main() {
+			int? x = 5;
+			f64? f = x as f64;
+			if f { }
+		}
+	`)
+	assertContains(t, irOpt, "optcast.some")
+	assertContains(t, irOpt, "optcast.none")
+	assertContains(t, irOpt, "sitofp") // scalar conversion, not an RTTI dispatch
+}
+
+// T0761: an Optional cast whose subject is an OWNED-LOCAL member field
+// (`h.slot as Der`, h a local — not `this`). This is the MemberExpr arm that
+// returns the *non*-aliasing/*non*-owned verdict in all three helpers:
+// optionalCastSourceAliasesExternalOwner=false (no dup), optionalCastResultOwnsInner=false
+// (no heap temp), and neutralizeOptionalCastSource clears the owner's field flag
+// on the match path. Distinct from the borrowed-`this` and ident shapes.
+func TestOptionalSubjectOwnedMemberCast(t *testing.T) {
+	src := `
+		type Base { string name; tag(&this) string ` + "`" + `abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		type Holder { Base? slot; drop(~this) {} }
+		main() {
+			Base b = Der(name: "x");
+			Holder h = Holder(slot: b);
+			%s
+		}
+	`
+	// Optional: owned-member source is neutralized (not duped) on match.
+	// (heapdup.copy is scoped to @main — the stdAll clone funcs always emit it.)
+	irOpt := generateIR(t, fmt.Sprintf(src, `Der? d = h.slot as Der; if d { }`))
+	assertContains(t, irOpt, "optcast.check")
+	assertContains(t, irOpt, "optcast.some")
+	assertContains(t, irOpt, "call i32 @promise_type_is(")
+	assertNotContains(t, extractDefine(irOpt, ".goroutine.main"), "heapdup.copy") // owned-local member is NOT duped
+	// Force: same source shape via the `as!` path.
+	irForce := generateIR(t, fmt.Sprintf(src, `d := h.slot as! Der; _ := d.tag();`))
+	assertContains(t, irForce, "optcast.present")
+	assertContains(t, irForce, "optcast.nonepanic")
+	assertNotContains(t, extractDefine(irForce, ".goroutine.main"), "heapdup.copy")
+}
+
+// T0761: an Optional cast whose subject is a borrowed-`this.field` inside a
+// `&this` method. The MemberExpr arm here takes the aliasing/owned-true verdict:
+// the caller still owns the field, so the inner is duped (heapdup.copy) and the
+// `as` path registers it as a heap temp. Mirrors the index-source dup path but
+// through the member shape.
+func TestOptionalSubjectBorrowedThisCast(t *testing.T) {
+	src := `
+		type Base { string name; tag(&this) string ` + "`" + `abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		type Holder {
+			Base? slot;
+			%s
+			drop(~this) {}
+		}
+		main() {
+			Base b = Der(name: "x");
+			Holder h = Holder(slot: b);
+			_ := h.probe();
+		}
+	`
+	// Force through borrowed this: inner is duped before the RTTI dispatch.
+	// (heapdup.copy is scoped to the probe method — stdAll clone funcs also emit it.)
+	irForce := generateIR(t, fmt.Sprintf(src,
+		`probe(&this) string { c := this.slot as! Der; return c.tag(); }`))
+	assertContains(t, extractFunction(irForce, "Holder.probe"), "heapdup.copy")
+	assertContains(t, irForce, "optcast.present")
+	// Optional through borrowed this: duped AND registered as a heap temp (result
+	// owns the duped inner; freed on present+mismatch).
+	irOpt := generateIR(t, fmt.Sprintf(src,
+		`probe(&this) bool { Der? d = this.slot as Der; if d { return true; } return false; }`))
+	assertContains(t, extractFunction(irOpt, "Holder.probe"), "heapdup.copy")
+	assertContains(t, irOpt, "optcast.check")
+	assertContains(t, irOpt, "optcast.some")
+}
+
+// T0761: an Optional `as` cast on a call-result TEMP source. The temp owns its
+// inner outright (no source binding to neutralize), so optionalCastResultOwnsInner
+// returns true via the default arm and the `as` path registers the inner as a heap
+// temp inside checkBlock — freed on present+mismatch, claimed by the binding on
+// match. (The only other Go `as` test uses an ident source, which skips this block.)
+func TestOptionalSubjectTempOptionalCast(t *testing.T) {
+	ir := generateIR(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		make_opt(~string n) Base? { Base s = Der(name: n); return s; }
+		main() {
+			Der? d = make_opt("x") as Der;
+			if d { }
+		}
+	`)
+	assertContains(t, ir, "optcast.check")
+	assertContains(t, ir, "optcast.some")
+	assertContains(t, ir, "optcast.none")
+	// Temp source is owned outright — no dup (scoped to @main; stdAll clone funcs
+	// emit heapdup.copy elsewhere), but heap-temp tracked for present+mismatch.
+	assertNotContains(t, extractDefine(ir, ".goroutine.main"), "heapdup.copy")
+}
+
+// T0761: an Optional cast inside a GENERIC function body. The body is codegen'd
+// with c.typeSubst active (monomorphization), exercising genOptionalCastExpr's
+// type-substitution branches. The optional source is a LOCAL (a parameter source
+// hits the pre-existing T0811 parameter segfault). Both `as` and `as!` paths.
+func TestOptionalSubjectGenericBodyCast(t *testing.T) {
+	src := `
+		type Base { string name; tag(&this) string ` + "`" + `abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		gcast[T](T marker) %s {
+			_ := marker;
+			Base b = Der(name: "g");
+			Base? oo = b;
+			%s
+		}
+		main() { %s }
+	`
+	// Optional: monomorphized gcast__int emits the optcast some/none/merge path.
+	irOpt := generateIR(t, fmt.Sprintf(src, "Der?", `return oo as Der;`,
+		`Der? d = gcast(0); if d { }`))
+	assertContains(t, irOpt, "optcast.check")
+	assertContains(t, irOpt, "optcast.some")
+	assertContains(t, irOpt, "call i32 @promise_type_is(")
+	// Force: monomorphized gcast__int emits the present/panic path.
+	irForce := generateIR(t, fmt.Sprintf(src, "string",
+		`d := oo as! Der; return d.name;`, `_ := gcast(0);`))
+	assertContains(t, irForce, "optcast.present")
+	assertContains(t, irForce, "optcast.nonepanic")
+	// Generic body + aliasing (index) source: the dup and heap-temp registration
+	// both run their `c.typeSubst != nil` substitution branches.
+	irIndex := generateIR(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		gidx[T](T marker) Der? {
+			_ := marker;
+			Base?[] v = [];
+			Base b = Der(name: "g");
+			v.push(b);
+			return v[0] as Der;
+		}
+		main() { Der? d = gidx(0); if d { } }
+	`)
+	assertContains(t, irIndex, "optcast.check")
+	assertContains(t, irIndex, "heapdup.copy") // duped aliasing source inside the generic body
+}
+
+// T0761: a paren-wrapped Optional cast source (`(oo) as Der`). The `as` move
+// path's neutralizeOptionalCastSource must peel the ParenExpr before clearing the
+// underlying ident's present flag (otherwise the source's drop double-frees the
+// inner). Compiles cleanly and takes the optcast path.
+func TestOptionalSubjectParenSourceCast(t *testing.T) {
+	ir := generateIR(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		main() {
+			Base b = Der(name: "x");
+			Base? oo = b;
+			Der? d = (oo) as Der;
+			if d { }
+		}
+	`)
+	assertContains(t, ir, "optcast.check")
+	assertContains(t, ir, "optcast.some")
+	assertContains(t, ir, "call i32 @promise_type_is(")
 }
 
 // --- Typed Error Handler Tests ---

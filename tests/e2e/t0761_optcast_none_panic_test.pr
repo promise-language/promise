@@ -1,0 +1,18 @@
+// T0761: forced RTTI cast (`as!`) whose subject is a NONE optional reference must
+// panic with the cast-none message — exercises genOptionalCastExpr's
+// optcast.nonepanic block at runtime (the Go test only asserts the block exists).
+type Base {
+  string name;
+  tag(&this) string `abstract;
+}
+type Der is Base {
+  tag(&this) string {
+    return "d";
+  }
+}
+
+main() `test(expected: """panic: cast failed: optional is none""") {
+  Base? n = none;
+  d := n as! Der;
+  print_line(d.name);
+}

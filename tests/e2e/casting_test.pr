@@ -647,3 +647,331 @@ test_downcast_yield_delegate_inner_cast_from_owned_local() `test {
   assert(saw_radius == 11.5, "yield-delegate inner-cast radius");
   assert(saw_name == "del", "yield-delegate inner-cast name (UAF probe)");
 }
+
+// --- T0761: RTTI cast whose SUBJECT is itself an Optional ---
+// `opt as! Subtype` (force) and `opt as Target` (optional). genCastExpr used to
+// treat the {i1,{i8*,i8*}} optional as a bare value struct and crash; it now
+// unwraps the inner value first. The `name` heap field surfaces leaks/double-frees.
+
+// Force downcast on a present optional that matches: unwrap + downcast, no leak.
+// The bound local `c` owns the inner; the source optional is neutralized.
+test_optional_subject_force_match() `test {
+  Shape o = Circle(name: "ofm", radius: 2.0);
+  Shape? oo = o;
+  c := oo as! Circle;
+  assert(c.name == "ofm", "optional-subject as! name");
+  assert(c.radius == 2.0, "optional-subject as! radius");
+}
+
+// Inline force downcast with no binding — the source's scope drop owns the
+// inner; no double-free from a stray temp.
+test_optional_subject_force_inline() `test {
+  Shape o = Circle(name: "ofi", radius: 1.0);
+  Shape? oo = o;
+  assert((oo as! Circle).name == "ofi", "optional-subject inline as! name");
+}
+
+// Optional downcast, present + match: moves the inner into `some`; no double-free.
+test_optional_subject_optional_match() `test {
+  Shape o = Circle(name: "oom", radius: 3.0);
+  Shape? oo = o;
+  Circle? c = oo as Circle;
+  bool present = false;
+  if c {
+    present = true;
+    assert(c.radius == 3.0, "optional-subject as radius");
+    assert(c.name == "oom", "optional-subject as name");
+  }
+  assert(present, "optional-subject as present+match");
+}
+
+// Optional downcast, present + mismatch: result is none, and the source's Circle
+// is freed exactly once (no leak) — exercises the no-neutralize none path.
+test_optional_subject_optional_mismatch() `test {
+  Shape o = Circle(name: "oox", radius: 3.0);
+  Shape? oo = o;
+  Square? sq = oo as Square;
+  bool present = false;
+  if sq {
+    present = true;
+  }
+  assert(!present, "optional-subject mismatch -> none");
+}
+
+// Optional downcast on a none source: result is none, no crash.
+test_optional_subject_optional_none() `test {
+  Shape? n = none;
+  Circle? c = n as Circle;
+  bool present = false;
+  if c {
+    present = true;
+  }
+  assert(!present, "optional-subject none -> none");
+}
+
+// --- T0761: non-ident Optional cast subjects (call result / index / borrowed this) ---
+// genOptionalCastExpr must account for ownership of the unwrapped inner across all
+// source shapes, not just local idents. Each `name` heap field surfaces leaks; the
+// borrowed-`this` cases are called twice to surface use-after-free.
+
+make_optional_shape(~string n) Shape? {
+  Shape s = Circle(name: n, radius: 4.0);
+  return s;
+}
+
+// Call-result temp source: the result owns the inner (no source binding). On
+// mismatch the inner must be freed exactly once (no leak); on match it transfers.
+test_optional_subject_temp_optional_match() `test {
+  Circle? c = make_optional_shape("tom") as Circle;
+  bool present = false;
+  if c {
+    present = true;
+    assert(c.name == "tom", "temp opt name");
+  }
+  assert(present, "temp opt present");
+}
+test_optional_subject_temp_optional_mismatch() `test {
+  Square? sq = make_optional_shape("tox") as Square;
+  bool present = false;
+  if sq {
+    present = true;
+  }
+  assert(!present, "temp opt mismatch -> none");
+}
+test_optional_subject_temp_force() `test {
+  c := make_optional_shape("tf") as! Circle;
+  assert(c.name == "tf", "temp force name");
+}
+
+// Container-element source: indexing an Optional[Shape] element aliases the
+// vector's bucket, so the cast must dup it; the vector keeps & frees the original.
+test_optional_subject_index_optional_match() `test {
+  Shape?[] v = [];
+  Shape s = Circle(name: "iom", radius: 5.0);
+  v.push(s);
+  Circle? c = v[0] as Circle;
+  bool present = false;
+  if c {
+    present = true;
+    assert(c.name == "iom", "index opt name");
+  }
+  assert(present, "index opt present");
+}
+test_optional_subject_index_optional_mismatch() `test {
+  Shape?[] v = [];
+  Shape s = Circle(name: "iox", radius: 5.0);
+  v.push(s);
+  Square? sq = v[0] as Square;
+  bool present = false;
+  if sq {
+    present = true;
+  }
+  assert(!present, "index opt mismatch -> none");
+}
+test_optional_subject_index_force() `test {
+  Shape?[] v = [];
+  Shape s = Circle(name: "if", radius: 5.0);
+  v.push(s);
+  c := v[0] as! Circle;
+  assert(c.name == "if", "index force name");
+}
+
+// Borrowed-`this.field` source inside a `&this` method: the caller still owns the
+// field, so the cast must dup. Called twice to surface use-after-free.
+type OptHolder {
+  Shape? slot;
+  probe_force(&this) string {
+    c := this.slot as! Circle;
+    return c.name;
+  }
+  probe_optional(&this) bool {
+    Circle? c = this.slot as Circle;
+    bool present = false;
+    if c {
+      present = true;
+    }
+    return present;
+  }
+  probe_mismatch(&this) bool {
+    Square? sq = this.slot as Square;
+    bool present = false;
+    if sq {
+      present = true;
+    }
+    return present;
+  }
+  drop(~this) {
+  }
+}
+test_optional_subject_borrowed_this_force() `test {
+  Shape s = Circle(name: "btf", radius: 6.0);
+  OptHolder h = OptHolder(slot: s);
+  assert(h.probe_force() == "btf", "borrowed-this force 1");
+  assert(h.probe_force() == "btf", "borrowed-this force 2");
+}
+test_optional_subject_borrowed_this_optional_match() `test {
+  Shape s = Circle(name: "bto", radius: 6.0);
+  OptHolder h = OptHolder(slot: s);
+  assert(h.probe_optional(), "borrowed-this opt match 1");
+  assert(h.probe_optional(), "borrowed-this opt match 2");
+}
+test_optional_subject_borrowed_this_optional_mismatch() `test {
+  Shape s = Circle(name: "btx", radius: 6.0);
+  OptHolder h = OptHolder(slot: s);
+  assert(!h.probe_mismatch(), "borrowed-this opt mismatch 1");
+  assert(!h.probe_mismatch(), "borrowed-this opt mismatch 2");
+}
+
+// --- T0761: SCALAR optional cast subject (`int? as f64` / `int? as! f64`) ---
+// The inner is a bare scalar, not a value struct, so genOptionalCastExpr takes
+// the scalar path (emitScalarCast) rather than RTTI. Scalars are `copy`/no-drop,
+// so there is nothing to leak — these just verify correct unwrap + conversion.
+test_optional_subject_scalar_force() `test {
+  int? x = 5;
+  f := x as! f64;
+  assert(f == 5.0, "scalar optional as! converts inner");
+}
+test_optional_subject_scalar_optional_present() `test {
+  int? x = 7;
+  f64? f = x as f64;
+  bool present = false;
+  if f {
+    present = true;
+    assert(f == 7.0, "scalar optional as inner value");
+  }
+  assert(present, "scalar optional as present");
+}
+test_optional_subject_scalar_optional_none() `test {
+  int? x = none;
+  f64? f = x as f64;
+  bool present = false;
+  if f {
+    present = true;
+  }
+  assert(!present, "scalar optional as none -> none");
+}
+
+// --- T0761: Optional cast in a GENERIC body + paren-wrapped source ---
+// Exercises genOptionalCastExpr's `c.typeSubst != nil` substitution branches
+// (active during monomorphized generic body codegen) and neutralizeOptionalCastSource's
+// ParenExpr peel. The optional source is a LOCAL inside the generic body — a
+// PARAMETER source hits the pre-existing T0811 segfault (out of scope here).
+
+generic_optional_cast[T](T marker) Circle? {
+  _ := marker;
+  Shape s = Circle(name: "gl", radius: 2.0);
+  Shape? oo = s;
+  return oo as Circle;
+}
+generic_optional_force[T](T marker) string {
+  _ := marker;
+  Shape s = Circle(name: "gf", radius: 2.0);
+  Shape? oo = s;
+  c := oo as! Circle;
+  return c.name;
+}
+generic_optional_mismatch[T](T marker) bool {
+  _ := marker;
+  Shape s = Circle(name: "gm", radius: 2.0);
+  Shape? oo = s;
+  Square? sq = oo as Square;
+  bool present = false;
+  if sq {
+    present = true;
+  }
+  return present;
+}
+
+test_optional_subject_generic_optional_match() `test {
+  Circle? c = generic_optional_cast(0);
+  bool present = false;
+  if c {
+    present = true;
+    assert(c.name == "gl", "generic-body opt cast name");
+  }
+  assert(present, "generic-body opt cast present");
+}
+test_optional_subject_generic_force() `test {
+  assert(generic_optional_force(0) == "gf", "generic-body force name");
+}
+test_optional_subject_generic_mismatch() `test {
+  assert(!generic_optional_mismatch(0), "generic-body mismatch -> none");
+}
+
+// Paren-wrapped optional source: neutralizeOptionalCastSource peels the ParenExpr
+// before clearing the local's present flag (no double-free on the heap `name`).
+test_optional_subject_paren_optional_match() `test {
+  Shape s = Circle(name: "pom", radius: 3.0);
+  Shape? oo = s;
+  Circle? c = (oo) as Circle;
+  bool present = false;
+  if c {
+    present = true;
+    assert(c.name == "pom", "paren opt cast name");
+  }
+  assert(present, "paren opt cast present");
+}
+test_optional_subject_paren_force() `test {
+  Shape s = Circle(name: "pf", radius: 3.0);
+  Shape? oo = s;
+  c := (oo) as! Circle;
+  assert(c.name == "pf", "paren force name");
+}
+
+// Generic body + aliasing (index) source: exercises the dup + heap-temp
+// neutralization under an active type substitution (generic × owned-source).
+generic_index_cast[T](T marker) Circle? {
+  _ := marker;
+  Shape?[] v = [];
+  Shape s = Circle(name: "gic", radius: 1.0);
+  v.push(s);
+  return v[0] as Circle;
+}
+test_optional_subject_generic_index_match() `test {
+  Circle? c = generic_index_cast(0);
+  bool present = false;
+  if c {
+    present = true;
+    assert(c.name == "gic", "generic-index opt cast name");
+  }
+  assert(present, "generic-index opt cast present");
+}
+
+// --- T0761: owned-LOCAL member field as the Optional cast subject ---
+// `h.slot as Der` where `h` is an owned local accessed directly (NOT through
+// `this`). This is the MemberExpr arm that neutralizes the owner's field flag on
+// match (no dup, no heap temp) — distinct from the borrowed-`this` shape, which
+// dups. Only IR-covered before (Go TestOptionalSubjectOwnedMemberCast); these add
+// runtime leak/double-free verification across match / mismatch / force.
+type OwnedHolder {
+  Shape? slot;
+  drop(~this) {
+  }
+}
+test_optional_subject_owned_member_optional_match() `test {
+  Shape s = Circle(name: "omm", radius: 7.0);
+  OwnedHolder h = OwnedHolder(slot: s);
+  Circle? c = h.slot as Circle;
+  bool present = false;
+  if c {
+    present = true;
+    assert(c.name == "omm", "owned-member opt name");
+  }
+  assert(present, "owned-member opt match present");
+}
+test_optional_subject_owned_member_optional_mismatch() `test {
+  Shape s = Circle(name: "omx", radius: 7.0);
+  OwnedHolder h = OwnedHolder(slot: s);
+  Square? sq = h.slot as Square;
+  bool present = false;
+  if sq {
+    present = true;
+  }
+  assert(!present, "owned-member opt mismatch -> none");
+}
+test_optional_subject_owned_member_force() `test {
+  Shape s = Circle(name: "omf", radius: 7.0);
+  OwnedHolder h = OwnedHolder(slot: s);
+  c := h.slot as! Circle;
+  assert(c.name == "omf", "owned-member force name");
+}

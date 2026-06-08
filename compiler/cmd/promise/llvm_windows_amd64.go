@@ -9,6 +9,6 @@ var embeddedLLVM embed.FS
 
 const hasEmbeddedLLVM = true
 
-var embeddedLLVMFiles = []string{"opt.exe.gz", "llc.exe.gz", "lld.exe.gz"}
+var embeddedLLVMFiles = []string{"opt.exe.br", "llc.exe.br", "lld.exe.br"}
 
 const llvmEmbedPrefix = "resources/llvm/windows-amd64"

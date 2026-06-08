@@ -116,8 +116,11 @@ func runReleasePublishInstall(root string, args []string) error {
 	}
 
 	// 3 — fetch the host blobs (needed to pre-stage the offline full variant).
+	//     keepCompressed=true so the already-brotli-compressed <sha>.br blobs
+	//     survive for bundleReleaseLLVM to embed directly (T0807) — no gzip
+	//     recompress round trip.
 	fmt.Printf("Fetching host LLVM blobs for the full variant...\n")
-	if err := fetchManifestBlobs(manifestPath, blobsDir, false); err != nil {
+	if err := fetchManifestBlobs(manifestPath, blobsDir, true); err != nil {
 		return fmt.Errorf("fetch blobs: %w", err)
 	}
 

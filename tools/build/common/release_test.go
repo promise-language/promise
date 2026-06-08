@@ -567,7 +567,7 @@ func TestReleaseManifestArgValidation(t *testing.T) {
 // is exercised by the release pipeline integration run).
 func TestBundleReleaseLLVMBadTarget(t *testing.T) {
 	root, blobsDir := fakeReleaseRoot(t, map[string]string{"opt": "OPT"})
-	if err := bundleReleaseLLVM(root, "plan9-foo", blobsDir); err == nil {
+	if err := bundleReleaseLLVM(root, "plan9-foo", blobsDir, filepath.Join(root, "m.json")); err == nil {
 		t.Fatal("expected error bundling for an unknown target")
 	}
 }

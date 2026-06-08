@@ -97,7 +97,7 @@ func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host string
 	// full: pre-stage the host LLVM blobs into the embed dir so the final binary
 	// stages them into the CAS at install time (offline host workflow).
 	if full {
-		if err := bundleReleaseLLVM(root, host, blobsDir); err != nil {
+		if err := bundleReleaseLLVM(root, host, blobsDir, manifestPath); err != nil {
 			return err
 		}
 	}
@@ -159,11 +159,12 @@ func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host string
 	return nil
 }
 
-// bundleReleaseLLVM gzips the collected host LLVM blobs into the embed dir
-// (resources/llvm/<target>/) for the full variant. blobsDir is the flat
-// `out`-named directory produced by `bin/release blobs` — the same layout
-// BundleFromCache consumes.
-func bundleReleaseLLVM(root, target, blobsDir string) error {
+// bundleReleaseLLVM stages the already-brotli-compressed host LLVM blobs into
+// the embed dir (resources/llvm/<target>/) for the full variant, byte-identical
+// to the dist CAS asset (T0807). blobsDir is the keep-compressed fetch output
+// (holds the <sha>.br alongside the decompressed copy); manifestPath provides
+// the out→<sha>.br mapping.
+func bundleReleaseLLVM(root, target, blobsDir, manifestPath string) error {
 	pm, tEntry, err := llvmTargetEntry(root, target)
 	if err != nil {
 		return err
@@ -171,7 +172,7 @@ func bundleReleaseLLVM(root, target, blobsDir string) error {
 	llvmEntry := pm.Binaries["llvm"]
 	dst := filepath.Join(root, llvmEntry.BundleDir, target)
 	fmt.Printf("Bundling LLVM blobs for full variant (%s)...\n", target)
-	return BundleFromCache(blobsDir, dst, tEntry.Files)
+	return BundleBrotliFromManifest(manifestPath, blobsDir, dst, tEntry.Files)
 }
 
 // goBuildCompiler runs `go build` for ./cmd/promise with the given build tags and

@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -603,6 +604,58 @@ func BundleFromCache(cacheDir, dstDir string, files []PrebuiltFile) error {
 		dst := filepath.Join(dstDir, f.Out+".gz")
 		if err := gzipFile(src, dst); err != nil {
 			return fmt.Errorf("gzip %s: %w", f.Out, err)
+		}
+		printSize(dst)
+	}
+	return nil
+}
+
+// BundleBrotliFromManifest stages the already-brotli-compressed <sha>.br blobs
+// from blobsDir (the keep-compressed fetchManifestBlobs output) into dstDir as
+// "<out>.br", byte-identical to the dist CAS asset (T0807). The manifest
+// provides the out→<sha>.br mapping; only brotli-codec entries are accepted —
+// the catalog emits brotli-11 for every LLVM blob, so a non-brotli entry is a
+// hard error rather than a silent gzip fallback. The runtime brotli-
+// decompresses these in stageEmbeddedLLVMBlobs (no gzip recompress round trip).
+//
+// Unlike BundleFromCache/BundleFromExtracted (the local-Homebrew / upstream-
+// tarball gzip paths, which have no .br source), this is the dist-CAS path.
+func BundleBrotliFromManifest(manifestPath, blobsDir, dstDir string, files []PrebuiltFile) error {
+	m, err := loadRuntimeManifest(manifestPath)
+	if err != nil {
+		return fmt.Errorf("load manifest: %w", err)
+	}
+	// Key entries by their `out` name (manifest logical name minus "llvm-"),
+	// mirroring fetchManifestBlobs.
+	byOut := make(map[string]*runtimeManifestEntry, len(m.Entries))
+	for i := range m.Entries {
+		byOut[strings.TrimPrefix(m.Entries[i].Name, "llvm-")] = &m.Entries[i]
+	}
+	if err := wipeBundleDir(dstDir); err != nil {
+		return err
+	}
+	for _, f := range files {
+		e, ok := byOut[f.Out]
+		if !ok {
+			return fmt.Errorf("bundle-brotli: no manifest entry for %q", f.Out)
+		}
+		var blobSrc *runtimeSource
+		for i := range e.Sources {
+			if e.Sources[i].Blob != "" {
+				blobSrc = &e.Sources[i]
+				break
+			}
+		}
+		if blobSrc == nil {
+			return fmt.Errorf("bundle-brotli: entry %q has no blob source", e.Name)
+		}
+		if blobSrc.Compression != compressionBrotli {
+			return fmt.Errorf("bundle-brotli: entry %q has compression %q, expected %q", e.Name, blobSrc.Compression, compressionBrotli)
+		}
+		src := filepath.Join(blobsDir, path.Base(blobSrc.Blob))
+		dst := filepath.Join(dstDir, f.Out+".br")
+		if err := copyFile(src, dst); err != nil {
+			return fmt.Errorf("copy %s: %w", f.Out, err)
 		}
 		printSize(dst)
 	}

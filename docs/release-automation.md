@@ -211,9 +211,11 @@ jobs:
         run: bin/release build --variant thin --manifest dist/manifest-${{ matrix.host }}.json --out dist/bin/promise-${{ matrix.host }}${{ matrix.ext }}
       - name: Fetch dependency blobs for full variant
         # Pull each manifest entry's blob source from the pre-staged
-        # deps-<dep>-<version> release and brotli-decompress to dist/blobs.
+        # deps-<dep>-<version> release and brotli-decompress to dist/blobs,
+        # keeping the compressed <sha>.br alongside (--keep-compressed) so the
+        # full build embeds the brotli blob directly, no gzip recompress (T0807).
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
-        run: bin/release fetch-blobs --manifest dist/manifest-${{ matrix.host }}.json --out dist/blobs
+        run: bin/release fetch-blobs --manifest dist/manifest-${{ matrix.host }}.json --out dist/blobs --keep-compressed
       - name: Assemble full variant (pre-stage host blobs)
         run: bin/release build --variant full --manifest dist/manifest-${{ matrix.host }}.json --blobs dist/blobs --out dist/bin/promise-${{ matrix.host }}-full${{ matrix.ext }}
       - uses: actions/upload-artifact@v4
@@ -293,7 +295,7 @@ The end-to-end install gate (`bin/gate install --variant {thin|full}`, [gate-sys
 `bin/release publish-install` stages that bucket. For the host platform it:
 
 1. projects the runtime manifest from the catalog (`manifest-<host>.json`),
-2. builds the **thin** and **full** compiler variants (reusing `bin/release build`'s three-phase logic),
+2. builds the **thin** and **full** compiler variants (reusing `bin/release build`'s three-phase logic). The **full** variant embeds the already-brotli `<sha>.br` blobs fetched from the dist CAS *directly* — byte-identical to the CAS asset, no gzip recompress round trip (T0807); the runtime brotli-decompresses them into the CAS at `promise install` (`decompressEmbeddedLLVM`),
 3. gzips each binary to its published asset name (`promise-<os>-<arch>[-full][.exe].gz`),
 4. computes a **merge-aware** `SHA256SUMS` over the `.gz` assets, and
 5. uploads the assets + `SHA256SUMS` + the `install.{sh,ps1,cmd}` scripts to `dist/` in the R2 bucket via `npx wrangler` (the same mechanism `publish-blobs` uses).

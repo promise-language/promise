@@ -9,6 +9,6 @@ var embeddedLLVM embed.FS
 
 const hasEmbeddedLLVM = true
 
-var embeddedLLVMFiles = []string{"opt.gz", "llc.gz", "lld.gz", "libLLVM.dylib.gz"}
+var embeddedLLVMFiles = []string{"opt.br", "llc.br", "lld.br"}
 
 const llvmEmbedPrefix = "resources/llvm/darwin-arm64"

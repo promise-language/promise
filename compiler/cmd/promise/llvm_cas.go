@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/andybalholm/brotli"
 	"github.com/promise-language/promise/compiler/internal/blobstore"
 	"github.com/promise-language/promise/compiler/internal/module"
 )
@@ -236,29 +237,48 @@ func makeLLDAliases(viewDir string) error {
 	return nil
 }
 
-// stageEmbeddedLLVMBlobs gunzips each embedded LLVM blob (full-variant builds)
-// and stores it into the CAS by content hash (§2.4 step 3). The raw extracted
-// bytes hash to the manifest entry's sha256 (the generator hashed the same raw
-// files), so resolveLLVMView later finds them as CAS hits — no network.
+// stageEmbeddedLLVMBlobs decompresses each embedded LLVM blob (full-variant
+// builds) and stores it into the CAS by content hash (§2.4 step 3). The codec is
+// self-describing via the embedded file's extension: the dist-CAS publish path
+// embeds the brotli <sha>.br directly (.br — T0807, byte-identical to the CAS
+// asset, the smaller shipped artifact), while the dev/slim and Homebrew bundle
+// paths embed .gz. The decompressed bytes hash to the manifest entry's sha256
+// (the generator hashed the same raw files), so resolveLLVMView later finds them
+// as CAS hits — no network.
 func stageEmbeddedLLVMBlobs(store *blobstore.Store) error {
 	if !hasEmbeddedLLVM {
 		return nil
 	}
 	prefix := llvmEmbedPrefix
-	for _, gz := range llvmEmbeddedFiles() {
-		data, err := embeddedLLVM.ReadFile(prefix + "/" + gz)
+	for _, name := range llvmEmbeddedFiles() {
+		data, err := embeddedLLVM.ReadFile(prefix + "/" + name)
 		if err != nil {
-			return fmt.Errorf("read embedded %s: %w", gz, err)
+			return fmt.Errorf("read embedded %s: %w", name, err)
 		}
-		raw, err := gunzipBytes(data)
+		raw, err := decompressEmbeddedLLVM(name, data)
 		if err != nil {
-			return fmt.Errorf("gunzip %s: %w", gz, err)
+			return fmt.Errorf("decompress %s: %w", name, err)
 		}
 		if _, err := store.StageBlob(raw); err != nil {
-			return fmt.Errorf("stage %s: %w", gz, err)
+			return fmt.Errorf("stage %s: %w", name, err)
 		}
 	}
 	return nil
+}
+
+// decompressEmbeddedLLVM decompresses an embedded LLVM blob, dispatching on the
+// file's extension (the codec is self-describing): .br → brotli (publish path),
+// .gz → gzip (dev/slim + Homebrew bundle paths). An unknown extension is a hard
+// error so a new bundler codec can't silently ship an undecodable blob.
+func decompressEmbeddedLLVM(name string, data []byte) ([]byte, error) {
+	switch {
+	case strings.HasSuffix(name, ".br"):
+		return unbrotliBytes(data)
+	case strings.HasSuffix(name, ".gz"):
+		return gunzipBytes(data)
+	default:
+		return nil, fmt.Errorf("unknown embedded blob codec for %q", name)
+	}
 }
 
 // resolveMuslCRTView materializes the musl CRT objects from the CAS into a
@@ -315,6 +335,11 @@ func resolveMuslCRTView(arch string) (string, error) {
 		copyFile(blobPath, dst, 0o644)
 	}
 	return viewDir, nil
+}
+
+// unbrotliBytes decompresses a brotli byte slice.
+func unbrotliBytes(data []byte) ([]byte, error) {
+	return io.ReadAll(brotli.NewReader(bytes.NewReader(data)))
 }
 
 // gunzipBytes decompresses a gzip byte slice.

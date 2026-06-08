@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/andybalholm/brotli"
 	"github.com/promise-language/promise/compiler/internal/blobstore"
 )
 
@@ -37,6 +38,27 @@ func TestBlobSetKeyOrderIndependentAndContentSensitive(t *testing.T) {
 	}
 }
 
+// TestUnbrotliBytesRoundTrip verifies unbrotliBytes decompresses what brotli
+// produces and rejects non-brotli input.
+func TestUnbrotliBytesRoundTrip(t *testing.T) {
+	want := []byte("the raw opt binary bytes")
+	var buf bytes.Buffer
+	bw := brotli.NewWriterLevel(&buf, brotli.BestCompression)
+	bw.Write(want)
+	bw.Close()
+
+	got, err := unbrotliBytes(buf.Bytes())
+	if err != nil {
+		t.Fatalf("unbrotliBytes: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("round-trip mismatch")
+	}
+	if _, err := unbrotliBytes([]byte("not brotli at all, definitely not")); err == nil {
+		t.Fatal("expected error on non-brotli input")
+	}
+}
+
 // TestGunzipBytesRoundTrip verifies gunzipBytes decompresses what gzip produces
 // and rejects non-gzip input.
 func TestGunzipBytesRoundTrip(t *testing.T) {
@@ -55,6 +77,52 @@ func TestGunzipBytesRoundTrip(t *testing.T) {
 	}
 	if _, err := gunzipBytes([]byte("not gzip")); err == nil {
 		t.Fatal("expected error on non-gzip input")
+	}
+}
+
+// TestDecompressEmbeddedLLVMDispatch verifies the embedded-blob decompressor
+// dispatches on the file extension: .br → brotli (publish path), .gz → gzip
+// (dev/slim path), and rejects an unknown codec.
+func TestDecompressEmbeddedLLVMDispatch(t *testing.T) {
+	want := []byte("the raw opt binary bytes")
+
+	var brBuf bytes.Buffer
+	bw := brotli.NewWriterLevel(&brBuf, brotli.BestCompression)
+	bw.Write(want)
+	bw.Close()
+
+	var gzBuf bytes.Buffer
+	gw := gzip.NewWriter(&gzBuf)
+	gw.Write(want)
+	gw.Close()
+
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"opt.br", brBuf.Bytes()},
+		{"opt.exe.br", brBuf.Bytes()},
+		{"opt.gz", gzBuf.Bytes()},
+		{"opt.exe.gz", gzBuf.Bytes()},
+	}
+	for _, c := range cases {
+		got, err := decompressEmbeddedLLVM(c.name, c.data)
+		if err != nil {
+			t.Fatalf("decompressEmbeddedLLVM(%q): %v", c.name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("decompressEmbeddedLLVM(%q) round-trip mismatch", c.name)
+		}
+	}
+
+	// Cross-codec mismatch (brotli bytes named .gz) must error, not silently
+	// return garbage.
+	if _, err := decompressEmbeddedLLVM("opt.gz", brBuf.Bytes()); err == nil {
+		t.Fatal("expected error decoding brotli bytes as gzip")
+	}
+	// Unknown extension is a hard error.
+	if _, err := decompressEmbeddedLLVM("opt.raw", want); err == nil {
+		t.Fatal("expected error on unknown embedded blob codec")
 	}
 }
 

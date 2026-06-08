@@ -3466,11 +3466,14 @@ func ensureCacheValid() {
 // --- Embedded LLVM tool delivery (T0769) ---
 //
 // Heavy LLVM blobs are no longer extracted to a flat cache dir. Full-variant
-// builds embed gzipped blobs that `promise install` stages into the
+// builds embed compressed blobs that `promise install` stages into the
 // content-addressed store (stageEmbeddedLLVMBlobs); the runtime materializes a
-// per-target view dir from the CAS (resolveLLVMView in llvm_cas.go). The macOS
-// Mach-O patch+re-sign lives in internal/blobstore. The embed FS and
-// embeddedLLVMFiles list below are retained as the full-variant blob source.
+// per-target view dir from the CAS (resolveLLVMView in llvm_cas.go). The codec
+// is self-describing via the file extension: the dist-CAS publish path embeds
+// the brotli <sha>.br directly (.br — T0807, smaller shipped artifact), while
+// the dev/slim and Homebrew bundle paths embed .gz. The macOS Mach-O
+// patch+re-sign lives in internal/blobstore. The embed FS and embeddedLLVMFiles
+// list below are retained as the full-variant blob source.
 
 // embeddedLLVMSymlinks maps lld-mode alias name → target ("lld") for the view dir.
 var embeddedLLVMSymlinks = map[string]string{
@@ -3480,7 +3483,9 @@ var embeddedLLVMSymlinks = map[string]string{
 	"wasm-ld":  "lld",
 }
 
-// llvmEmbeddedFiles returns all .gz files in the embedded LLVM FS.
+// llvmEmbeddedFiles returns all compressed blobs in the embedded LLVM FS — the
+// brotli .br (publish path) or gzip .gz (dev/slim + Homebrew path); the runtime
+// dispatches on the extension (decompressEmbeddedLLVM).
 func llvmEmbeddedFiles() []string {
 	if !hasEmbeddedLLVM || llvmEmbedPrefix == "" {
 		return embeddedLLVMFiles
@@ -3491,7 +3496,10 @@ func llvmEmbeddedFiles() []string {
 	}
 	var files []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".gz") {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".br") || strings.HasSuffix(e.Name(), ".gz") {
 			files = append(files, e.Name())
 		}
 	}

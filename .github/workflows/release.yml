@@ -129,10 +129,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Pulls each manifest entry's primary blob source from the deps release
-        # and brotli-decompresses to `dist/blobs/<file>`. Used as `--blobs` for
-        # `bin/release build --variant full`. Auth via GH_TOKEN so the private-repo
-        # flow works pre-T0786.
-        run: bin/release fetch-blobs --manifest dist/manifest-${{ matrix.host }}.json --out dist/blobs
+        # and brotli-decompresses to `dist/blobs/<file>`, keeping the compressed
+        # `<sha>.br` alongside (--keep-compressed) so the full build can embed the
+        # brotli blob directly with no gzip recompress (T0807). Used as `--blobs`
+        # for `bin/release build --variant full`. Auth via GH_TOKEN so the
+        # private-repo flow works pre-T0786.
+        run: bin/release fetch-blobs --manifest dist/manifest-${{ matrix.host }}.json --out dist/blobs --keep-compressed
       - name: Build full compiler (host blobs pre-staged)
         shell: bash
         run: |

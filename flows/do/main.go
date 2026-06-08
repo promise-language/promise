@@ -6,7 +6,7 @@
 // definitions, and the push-lease/e2e test suite are SHARED with the tracker
 // project via the importable flow-sdk/doflow package. This binary is a thin
 // shim: it supplies the Promise-specific seam — the verify command
-// (bin/verify --wasm), the implement / land step timeouts, and the agent prompt
+// (bin/verify --wasm), the implement / land step budgets, and the agent prompt
 // builders (see prompts.go) — as a doflow.Config and calls doflow.BuildApp.
 // The Promise prompt bodies stay here because their text references
 // Promise-specific build/test mechanics; the domain-agnostic prompt skeleton
@@ -35,6 +35,7 @@ import (
 
 	"djabi.dev/go/flow_sdk/doflow"
 	trackerbackend "djabi.dev/go/flow_sdk/pkg/backend/tracker"
+	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/cli"
 
 	"github.com/promise-language/promise/flows/internal/srchash"
@@ -62,17 +63,6 @@ const verifyCmd = "bin/verify --wasm"
 // stepCommitPush; unlike verifyCmd it is not surfaced to any prompt.
 const formatCmd = "bin/format"
 
-// implementTimeout and landTimeout bound the two steps that run the full
-// `bin/verify --wasm` gate through the flow. The host+WASM suite is slow (the
-// pre-OSS Promise flow budgeted 45m for a single verify run), so both get a
-// generous cap well above the OSS 30m DefaultStepBudget, to keep the step
-// deadline from cutting verify short and parking the step. (The tracker omits a
-// land-step timeout — no-hidden-timeouts — but Promise's slow gate warrants one.)
-const (
-	implementTimeout = 120 * time.Minute
-	landTimeout      = 60 * time.Minute
-)
-
 // sourceHash is the flow source hash baked in at build time by ./make
 // (-ldflags "-X main.sourceHash=..."). It stays "dev" for `go run` / dlv debug
 // builds, which skip the staleness check. See srchash.CheckStale.
@@ -96,17 +86,53 @@ func main() {
 }
 
 // promiseConfig is the per-project seam handed to doflow.BuildApp: the verify
-// command, the implement / land step timeouts, and the Promise-specific agent
-// prompt builders (prompts.go). CommitMessage is left nil — doflow's
-// DefaultCommitMessage ("<ID>: <Title>" + a model-tagged Co-Authored-By trailer)
-// is exactly Promise's convention.
+// command, the per-step budgets, and the Promise-specific agent prompt builders
+// (prompts.go). CommitMessage is left nil — doflow's DefaultCommitMessage
+// ("<ID>: <Title>" + a model-tagged Co-Authored-By trailer) is exactly
+// Promise's convention.
+//
+// The budgets are a balancing act between two competing objectives on the
+// autonomous production line: parking more than ~3 items stalls production (a
+// park needs operator attention), which we want to avoid — so budgets must be
+// generous enough that a healthy step finishes within them rather than tripping
+// a premature park. At the same time the caps must be tight enough to prevent
+// runaway resource waste when a step genuinely misbehaves.
+//
+// DefaultStepBudget sets the baseline every step inherits per-axis: 30m, 3
+// invocations, 2 prompts/invocation, $10. The 2 prompts/invocation is the
+// load-bearing default — it gives the implement and land steps their one
+// verify-fix retry (re-prompt the agent with the verify failure); at the flow
+// SDK's own default of 1 they could never fix a failed gate. Per-step overrides
+// raise only the axes where a step is heavier than the baseline (unset axes
+// keep the default): plan can be complex and expensive (1h, $20); implementation
+// runs the slow `bin/verify --wasm` gate and the largest changes (3h, $30);
+// review and land each get 1h (land sometimes does a complex smart rebase). The
+// remaining steps (phases, coverage, summary, inspection) run on the baseline.
 func promiseConfig() doflow.Config {
 	return doflow.Config{
-		FlowBinaryName:   flowBinaryName,
-		VerifyCmd:        verifyCmd,
-		FormatCmd:        formatCmd,
-		ImplementTimeout: implementTimeout,
-		StepTimeout:      landTimeout,
+		FlowBinaryName: flowBinaryName,
+		VerifyCmd:      verifyCmd,
+		FormatCmd:      formatCmd,
+		DefaultStepBudget: flow.StepBudget{
+			Timeout:                 30 * time.Minute,
+			MaxInvocations:          3,
+			MaxPromptsPerInvocation: 2,
+			MaxCostUSD:              10,
+		},
+		PlanBudget: flow.StepBudget{
+			Timeout:    1 * time.Hour,
+			MaxCostUSD: 20, // planning can sometimes be quite complex and expensive
+		},
+		ImplementationBudget: flow.StepBudget{
+			Timeout:    3 * time.Hour,
+			MaxCostUSD: 30, // allow for larger complex task execution
+		},
+		ReviewBudget: flow.StepBudget{
+			Timeout: 1 * time.Hour,
+		},
+		LandBudget: flow.StepBudget{
+			Timeout: 1 * time.Hour, // land sometimes needs to do a complex smart rebase
+		},
 		Prompts: doflow.Prompts{
 			Plan:           planPrompt,
 			Phases:         phasesPrompt,

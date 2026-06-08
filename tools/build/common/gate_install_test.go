@@ -70,7 +70,7 @@ func TestBuildInstallGateOutputMissingArtifacts(t *testing.T) {
 	work := t.TempDir() // empty — no artifacts
 
 	out := buildInstallGateOutput(root, "linux-amd64", "full", work)
-	for _, p := range installPhases {
+	for _, p := range installPhasesFor("full") {
 		if got := out.Metrics["install_full_"+p+"_ok"]; got != 0 {
 			t.Errorf("missing-artifact phase %s_ok = %v, want 0", p, got)
 		}
@@ -202,5 +202,50 @@ func TestDownloadFile(t *testing.T) {
 	// Unreachable host → transport error.
 	if err := downloadFile("http://127.0.0.1:1/install.sh", filepath.Join(t.TempDir(), "y")); err == nil {
 		t.Error("downloadFile(unreachable) = nil, want error")
+	}
+}
+
+// TestInstallTestFailures verifies the test-phase verdict logic: because
+// `promise test --json` exits 0 even when tests fail, the gate must count
+// failures from the records. Any status other than "pass"/"excluded" (fail,
+// leak, timeout, memory, not-run) is a failure; blank/malformed lines are
+// skipped. This is the fix for the gate previously reporting "all phases passed"
+// off the (always-0) --json exit code.
+func TestInstallTestFailures(t *testing.T) {
+	jsonl := `{"file":"a.pr","test":"ok","status":"pass","elapsed":0.01}
+{"file":"a.pr","test":"skipped","status":"excluded","elapsed":0}
+{"file":"a.pr","test":"broke","status":"fail","elapsed":0.02,"context":"boom"}
+{"file":"a.pr","test":"leaky","status":"leak","elapsed":0.01}
+{"file":"a.pr","test":"slow","status":"timeout","elapsed":10}
+{"file":"a.pr","test":"hungry","status":"memory","elapsed":0.5}
+{"file":"a.pr","test":"missed","status":"not-run","elapsed":0}
+
+{not valid json}
+`
+	if got := installTestFailures([]byte(jsonl)); got != 5 {
+		t.Errorf("installTestFailures = %d, want 5 (fail+leak+timeout+memory+not-run; pass/excluded/blank/malformed excluded)", got)
+	}
+
+	allPass := `{"file":"a.pr","test":"x","status":"pass","elapsed":0.01}
+{"file":"a.pr","test":"y","status":"excluded","elapsed":0}
+`
+	if got := installTestFailures([]byte(allPass)); got != 0 {
+		t.Errorf("installTestFailures(all pass/excluded) = %d, want 0", got)
+	}
+
+	if got := installTestFailures(nil); got != 0 {
+		t.Errorf("installTestFailures(empty) = %d, want 0", got)
+	}
+}
+
+// TestInstallPhasesFor: the full variant adds an "offline" phase (self-contained
+// compile+run under network blackhole) that the thin variant omits, since thin
+// fetches blobs on first compile and makes no offline guarantee.
+func TestInstallPhasesFor(t *testing.T) {
+	if got := strings.Join(installPhasesFor("thin"), ","); got != "fetch,install,sanity,test" {
+		t.Errorf("thin phases = %q, want fetch,install,sanity,test", got)
+	}
+	if got := strings.Join(installPhasesFor("full"), ","); got != "fetch,install,sanity,test,offline" {
+		t.Errorf("full phases = %q, want fetch,install,sanity,test,offline", got)
 	}
 }

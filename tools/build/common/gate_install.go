@@ -40,9 +40,19 @@ import (
 // releases and the override goes away.
 const defaultInstallBaseURL = "https://prebuilts.promise-lang.org/dist"
 
-// installPhases are the gate phases recorded in phases.json, in execution order.
-// Each maps to an `install_<variant>_<phase>_ok` ∈ {0,1} metric in the envelope.
-var installPhases = []string{"fetch", "install", "sanity", "test"}
+// installPhasesFor lists the gate phases recorded in phases.json for a variant,
+// in execution order. Each maps to an `install_<variant>_<phase>_ok` ∈ {0,1}
+// metric in the envelope. The full variant adds an "offline" phase: a
+// self-contained compile+run with the network blackholed, proving the host LLVM
+// toolchain blobs are pre-staged. The thin variant has no such guarantee (it
+// fetches blobs on first compile), so it omits the phase.
+func installPhasesFor(variant string) []string {
+	phases := []string{"fetch", "install", "sanity", "test"}
+	if variant == "full" {
+		phases = append(phases, "offline")
+	}
+	return phases
+}
 
 // runGateInstall runs the end-to-end install gate for one variant (thin|full)
 // and writes the structured JSON gate envelope to stdout. Phase progress goes to
@@ -121,7 +131,10 @@ func runGateInstall(root string, args []string) error {
 // not-ok rather than leaving the envelope empty. Returns the first phase error,
 // or nil if every phase passed.
 func runInstallPhases(root, work, variant, baseURL string, system bool) error {
-	phases := map[string]string{"fetch": "fail", "install": "fail", "sanity": "fail", "test": "fail"}
+	phases := map[string]string{}
+	for _, p := range installPhasesFor(variant) {
+		phases[p] = "fail"
+	}
 	logf := func(format string, a ...any) {
 		fmt.Fprintf(os.Stderr, "[gate-install:%s] %s\n", variant, fmt.Sprintf(format, a...))
 	}
@@ -146,12 +159,13 @@ func runInstallPhases(root, work, variant, baseURL string, system bool) error {
 	overrides := map[string]string{}
 	var promiseHome string
 	if !system {
-		home := filepath.Join(work, "home")
-		if err := os.MkdirAll(home, 0o755); err != nil {
-			return fmt.Errorf("sandbox home: %w", err)
-		}
-		promiseHome = filepath.Join(home, ".promise")
-		overrides[homeKey] = home
+		// Clean-slate isolation overrides PROMISE_HOME only - NOT $HOME. The goal
+		// is to never touch the developer's real ~/.promise, which is governed
+		// entirely by PROMISE_HOME; overriding $HOME as well would break tests
+		// that legitimately assert os.home_dir == $HOME (os.home_dir reads the
+		// passwd DB, which ignores an overridden $HOME), so $HOME stays real and
+		// PROMISE_HOME points into the scratch dir.
+		promiseHome = filepath.Join(work, ".promise")
 		overrides["PROMISE_HOME"] = promiseHome
 		// Scrub PATH to a minimal toolchain set on POSIX so the gate doesn't lean
 		// on the dev environment. On Windows PowerShell needs the inherited PATH,
@@ -159,7 +173,7 @@ func runInstallPhases(root, work, variant, baseURL string, system bool) error {
 		if runtime.GOOS != "windows" {
 			overrides["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
 		}
-		logf("clean-slate sandbox: %s=%s PROMISE_HOME=%s", homeKey, home, promiseHome)
+		logf("clean-slate sandbox: PROMISE_HOME=%s (real %s preserved)", promiseHome, homeKey)
 	} else {
 		promiseHome = os.Getenv("PROMISE_HOME")
 		if promiseHome == "" {
@@ -231,26 +245,18 @@ func runInstallPhases(root, work, variant, baseURL string, system bool) error {
 	}
 	phases["sanity"] = "pass"
 
-	// ── phase: run the full suite through the INSTALLED stub ──────────────────
+	// ── phase: run the full suite through the INSTALLED stub (always online) ───
+	// The suite runs WITH network for both variants: some tests legitimately
+	// fetch external catalog modules (e.g. wasi_preview_2 via git), which is a
+	// user-program dependency, not a compiler one. The full variant's offline
+	// guarantee (host LLVM toolchain pre-staged) is validated separately by the
+	// "offline" phase below, on a self-contained program.
 	logf("running full suite through installed stub (source=%s)", root)
-	testEnv := baseEnv
-	if variant == "full" {
-		// A full binary pre-stages host blobs at install, so the compile/test step
-		// must never reach the network. Go's net/http honors these proxy vars, so
-		// any blob/archive fetch fails fast. (An arena may also wrap this in
-		// `unshare -n` for a hard guarantee; the proxy is the portable path.)
-		logf("full variant: enforcing offline (proxy blackhole)")
-		testEnv = envWith(baseEnv, map[string]string{
-			"HTTPS_PROXY": "http://127.0.0.1:1",
-			"HTTP_PROXY":  "http://127.0.0.1:1",
-			"ALL_PROXY":   "http://127.0.0.1:1",
-		})
-	}
 	// examples are the floor; tests/ + modules/ are the target. stdout = the
 	// --json record stream (captured to tests.jsonl); stderr = human progress.
 	testCmd := exec.Command(promiseBin, "test", "-timeout", "10", "--json", "examples/...", "tests/...", "modules/...")
 	testCmd.Dir = root
-	testCmd.Env = testEnv
+	testCmd.Env = baseEnv
 	testCmd.Stderr = os.Stderr
 	var buf bytes.Buffer
 	testCmd.Stdout = &buf
@@ -258,13 +264,65 @@ func runInstallPhases(root, work, variant, baseURL string, system bool) error {
 	if werr := os.WriteFile(filepath.Join(work, "tests.jsonl"), buf.Bytes(), 0o644); werr != nil {
 		logf("warning: write tests.jsonl: %v", werr)
 	}
+	// `promise test --json` is a data-emission mode: it reports each test's
+	// outcome in the records and exits 0 regardless of failures. So the verdict
+	// comes from the parsed records, NOT testErr. A non-zero testErr is still a
+	// failure - it means the runner itself could not complete (e.g. the installed
+	// stub or compiler crashed), which must never be masked.
 	if testErr != nil {
-		logf("test phase failed: %v", testErr)
-		return fmt.Errorf("test: %w", testErr)
+		logf("test phase failed: test runner error: %v", testErr)
+		return fmt.Errorf("test: runner error: %w", testErr)
+	}
+	if n := installTestFailures(buf.Bytes()); n > 0 {
+		logf("test phase failed: %d non-passing test(s)", n)
+		return fmt.Errorf("test: %d non-passing test(s)", n)
 	}
 	phases["test"] = "pass"
+
+	// ── phase: offline smoke (full variant only) ──────────────────────────────
+	// Prove the full binary's host toolchain is genuinely pre-staged: compile AND
+	// run a SELF-CONTAINED program (no external module deps) with the network
+	// blackholed. The only thing that could need the network is a missing LLVM
+	// blob - which a correct full install has staged. Go's net/http honors these
+	// proxy vars, so any blob/archive fetch fails fast.
+	if variant == "full" {
+		logf("offline smoke: compile+run a self-contained program with network blackholed")
+		offlineEnv := envWith(baseEnv, map[string]string{
+			"HTTPS_PROXY": "http://127.0.0.1:1",
+			"HTTP_PROXY":  "http://127.0.0.1:1",
+			"ALL_PROXY":   "http://127.0.0.1:1",
+		})
+		smoke := exec.Command(promiseBin, "exec", `print_line("offline ok")`)
+		smoke.Env = offlineEnv
+		smokeOut, smokeErr := smoke.Output()
+		if got := strings.TrimSpace(string(smokeOut)); smokeErr != nil || got != "offline ok" {
+			logf("offline smoke failed: produced %q (want \"offline ok\"): %v", got, smokeErr)
+			return fmt.Errorf("offline: self-contained compile/run failed under network blackhole")
+		}
+		logf("offline smoke passed: full binary compiled+ran with no network")
+		phases["offline"] = "pass"
+	}
+
 	logf("all phases passed")
 	return nil
+}
+
+// installTestFailures counts non-passing test records in the gate's --json
+// output. `promise test --json` exits 0 regardless of outcomes, so the test
+// phase verdict must come from the records: any status other than "pass" or
+// "excluded" (fail, leak, timeout, memory, not-run, or anything unexpected) is
+// counted as a failure, matching BuildGateOutput's classification.
+func installTestFailures(jsonl []byte) int {
+	n := 0
+	for _, r := range ParseTestJSONL(string(jsonl)) {
+		switch r.Status {
+		case "pass", "excluded":
+			// not a failure
+		default:
+			n++
+		}
+	}
+	return n
 }
 
 // envWith returns base with the given key=value pairs applied — any existing
@@ -323,7 +381,7 @@ func buildInstallGateOutput(root, hostTarget, variant, work string) *GateOutput 
 	out := BuildGateOutput(root, hostTarget, metricPrefix, "install-"+variant, string(jsonl))
 
 	phases := readInstallPhases(filepath.Join(work, "phases.json"))
-	for _, p := range installPhases {
+	for _, p := range installPhasesFor(variant) {
 		ok := 0.0
 		if phases[p] == "pass" {
 			ok = 1

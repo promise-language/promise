@@ -1,0 +1,152 @@
+// T0799: Bare-ident send in a select case double-frees.
+//
+// `select { ch.send(s): ... }` where `s` is a bare owned local (no `as!/as T`
+// cast wrapper) used to double-free: the value's bits are memcpy'd into the
+// channel buffer AND the source variable's scope-exit drop both freed the same
+// allocation → SEGV. The codegen `execSend` now clears the source local's drop
+// flag, mirroring `genChannelSend` (the non-select path).
+//
+// Each test asserts both the moved value (functional) and an inherited/heap
+// field (UAF probe) so a missed clear surfaces as a runtime crash rather than a
+// silently-passing test.
+type Shape {
+  string name;
+}
+type Circle is Shape {
+  f64 radius;
+}
+
+// Heap user type with an inherited field. The inherited `name` doubles as a
+// use-after-free probe: if the source local's drop frees the buffer copy too,
+// reading `c.name` after receive reads freed memory.
+test_select_send_bare_ident_heap_user_type() `test(exclude: wasm) {
+  Circle s = Circle(name: "src", radius: 5.0);
+  channel[Circle] ch = channel[Circle](capacity: 1);
+  select {
+    ch.send(s):
+      {
+      }
+  }
+  if c := <-ch {
+    assert(c.radius == 5.0, "r");
+    assert(c.name == "src", "UAF probe");
+  } else {
+    assert(false, "expected a value from ch");
+  }
+  ch.close();
+}
+
+// Non-literal owned string (built via concatenation so it is heap-allocated,
+// not a `.rodata` literal). A missed drop-flag clear double-frees the heap
+// string buffer.
+test_select_send_bare_ident_string() `test(exclude: wasm) {
+  string s = "src" + "-payload";
+  channel[string] ch = channel[string](capacity: 1);
+  select {
+    ch.send(s):
+      {
+      }
+  }
+  if c := <-ch {
+    assert(c == "src-payload", "string content / UAF probe");
+  } else {
+    assert(false, "expected a value from ch");
+  }
+  ch.close();
+}
+
+// Owned vector. A missed drop-flag clear double-frees the vector's heap buffer.
+test_select_send_bare_ident_vector() `test(exclude: wasm) {
+  int[] s = [10, 20, 30];
+  channel[int[]] ch = channel[int[]](capacity: 1);
+  select {
+    ch.send(s):
+      {
+      }
+  }
+  if c := <-ch {
+    assert(c.len == 3, "vector length / UAF probe");
+    assert(c[0] == 10, "elem 0");
+    assert(c[1] == 20, "elem 1");
+    assert(c[2] == 30, "elem 2");
+  } else {
+    assert(false, "expected a value from ch");
+  }
+  ch.close();
+}
+
+// A freshly produced send value (not a named local) is a tracked statement temp,
+// not a bare IdentExpr. Its bits are copied into the channel buffer, so ownership
+// must transfer to the channel — otherwise cleanupStmtTemps frees the buffer copy
+// at select-statement end (use-after-free). Mirrors genChannelSend's B0170/B0233
+// temp claims.
+test_select_send_temp_string() `test(exclude: wasm) {
+  channel[string] ch = channel[string](capacity: 1);
+  select {
+    ch.send("src" + "-payload"):
+      {
+      }
+  }
+  if c := <-ch {
+    assert(c == "src-payload", "string temp content / UAF probe");
+  } else {
+    assert(false, "expected a value from ch");
+  }
+  ch.close();
+}
+
+// Non-static vector temp (built from variables, so it is heap-allocated rather
+// than a `.rodata` static vector). A missed temp claim double-frees its buffer.
+test_select_send_temp_vector() `test(exclude: wasm) {
+  int a = 10;
+  int b = 20;
+  channel[int[]] ch = channel[int[]](capacity: 1);
+  select {
+    ch.send([a, b, a + b]):
+      {
+      }
+  }
+  if c := <-ch {
+    assert(c.len == 3, "vector temp length / UAF probe");
+    assert(c[0] == 10, "elem 0");
+    assert(c[1] == 20, "elem 1");
+    assert(c[2] == 30, "elem 2");
+  } else {
+    assert(false, "expected a value from ch");
+  }
+  ch.close();
+}
+
+// Multi-case select-send: `execSend` clears the drop flag only inside the
+// fired case's block (it runs per-case, in the taken branch). The send value
+// of the NON-fired case is never transferred, so its drop flag must remain set
+// and it must be dropped at scope exit — otherwise it leaks. `ready` (capacity
+// 1, empty) is send-ready; `blocked` (capacity 0, no receiver) is not, so the
+// `ready` case fires deterministically and `unsent` is left to drop normally.
+//
+// This asserts the symmetric invariant to the double-free tests: the fired
+// value transfers (no leak from it being dropped twice / not at all) AND the
+// non-fired value is reclaimed (no leak). The batch leak checker fails the test
+// if either side mishandles ownership.
+test_select_send_multi_case_non_fired_drops() `test(exclude: wasm) {
+  Circle sent = Circle(name: "sent", radius: 1.0);
+  Circle unsent = Circle(name: "unsent", radius: 2.0);
+  channel[Circle] ready = channel[Circle](capacity: 1);
+  channel[Circle] blocked = channel[Circle](capacity: 0);
+  select {
+    ready.send(sent):
+      {
+      }
+    blocked.send(unsent):
+      {
+      }
+  }
+  if c := <-ready {
+    assert(c.radius == 1.0, "fired-case radius");
+    assert(c.name == "sent", "fired-case name (UAF probe)");
+  } else {
+    assert(false, "expected a value from the ready channel");
+  }
+  ready.close();
+  blocked.close();
+}

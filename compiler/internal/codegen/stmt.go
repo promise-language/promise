@@ -10742,17 +10742,31 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 	// Helper: generate send execution code for a case
 	execSend := func(ci selectCaseInfo, prefix string) {
 		argVal := c.genExpr(ci.sendValueExpr)
-		// T0784: `select { case ch <- x as!/as T: ... }` — the cast is a view
-		// over an owned local, so without clearing the subject's drop flag
-		// the source variable and the channel buffer both drop the same
-		// allocation → double-free / SEGV. Ownership marks the subject
-		// Moved at the select-send site (T0784 ownership change), so this
-		// codegen clear is the symmetric drop-flag suppression. The bare
-		// IdentExpr variant (`select { ch.send(s): ... }` without a cast)
-		// has the same double-free shape — tracked separately as T0799.
+		// The send value's bits are memcpy'd into the channel buffer below,
+		// transferring ownership. Ownership marks the send value Moved at the
+		// select-send site (B0341 / T0784 ownership changes), so static
+		// use-after-move is rejected — but ownership does not touch the runtime
+		// drop flag. Without clearing it here, the source local's scope-exit
+		// drop and the channel buffer both free the same allocation →
+		// double-free / SEGV. Mirror genChannelSend, which clears both the bare
+		// IdentExpr and the cast-subject cases.
+		//
+		// T0799: bare IdentExpr send (`select { ch.send(s): ... }` with no cast).
+		if ident, ok := ci.sendValueExpr.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+		// T0784: cast-of-borrow send (`select { ch.send(x as!/as T): ... }`) —
+		// the cast is a view over an owned local with the same double-free shape.
 		if ident := c.castSubjectMovableIdent(ci.sendValueExpr); ident != nil {
 			c.clearDropFlag(ident.Name)
 		}
+		// T0799: a freshly produced send value (`select { ch.send("a" + "b"): ... }`)
+		// is a tracked statement temp. Its bits are memcpy'd into the buffer below,
+		// so ownership transfers to the channel — claim it (mirror genChannelSend's
+		// B0170/B0233 claims) or cleanupStmtTemps would free the buffer copy at
+		// select-statement end → use-after-free / double-free.
+		c.claimStringTemp(argVal)
+		c.claimHeapTemp(argVal)
 		argAlloca := c.createEntryAlloca(ci.elemLLVM)
 		c.block.NewStore(argVal, argAlloca)
 		argAsI8 := c.block.NewBitCast(argAlloca, i8PtrTy)

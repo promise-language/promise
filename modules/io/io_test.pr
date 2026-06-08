@@ -958,7 +958,7 @@ metadata_is_writable() `test(exclude: wasm) {
   File.remove("/tmp/pr_iot_mdw")?!;
 }
 
-metadata_is_executable() `test(exclude: wasm) {
+metadata_is_executable() `test(exclude: wasm) `target(!windows) {
   // /bin/sh is universally executable on POSIX systems
   Metadata m = File.metadata("/bin/sh")?!;
   assert(m.is_executable, "/bin/sh is executable");

@@ -645,14 +645,21 @@ func (c *Compiler) defineDirOpenBody(fn *ir.Func) {
 	c.storeIntResult(okBlk, sret, handleI64)
 	okBlk.NewRet(nil)
 
-	// Error: return -errno
+	// Error: return -errno. Guard against a zero/positive result: a null PAL
+	// handle ALWAYS means failure, so the returned value must be strictly
+	// negative — otherwise the caller (`if handle < 0`) mistakes it for a valid
+	// handle and dereferences a bogus pointer. errno can legitimately be 0 here
+	// on a PAL whose error path doesn't set it; clamp such cases to -1 (generic).
 	errnoLocFn := c.findErrnoLocationFn()
 	if errnoLocFn != nil {
 		errnoPtr := errBlk.NewCall(errnoLocFn)
 		errnoVal := errBlk.NewLoad(irtypes.I32, errnoPtr)
 		errnoI64 := errBlk.NewSExt(errnoVal, irtypes.I64)
 		negErrno := errBlk.NewSub(constant.NewInt(irtypes.I64, 0), errnoI64)
-		c.storeIntResult(errBlk, sret, negErrno)
+		// rc = negErrno < 0 ? negErrno : -1
+		isNeg := errBlk.NewICmp(enum.IPredSLT, negErrno, constant.NewInt(irtypes.I64, 0))
+		rc := errBlk.NewSelect(isNeg, negErrno, constant.NewInt(irtypes.I64, -1))
+		c.storeIntResult(errBlk, sret, rc)
 	} else {
 		c.storeIntResult(errBlk, sret, constant.NewInt(irtypes.I64, -1))
 	}

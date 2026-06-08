@@ -856,6 +856,15 @@ func (p *WindowsPAL) EmitDirOpen(module *ir.Module) *ir.Func {
 	palFree := lookupFunc(module, "pal_free")
 	strlenFn := getOrDeclareFunc(module, "strlen", irtypes.I64,
 		ir.NewParam("s", irtypes.I8Ptr))
+	// T0808: FindFirstFileA reports failure via GetLastError, NOT the CRT errno — unlike
+	// the UCRT-based file ops (_open etc.) which set errno natively. The bridge
+	// (promise_io_dir_open) returns -errno on a null handle, so we must translate
+	// the Win32 error into errno here. Without this, errno stays 0, the bridge
+	// returns 0, and the caller mistakes 0 for a valid handle → null-pointer deref
+	// in pal_dir_next_name. (_dosmaperr would do this, but it's an internal CRT
+	// symbol absent from the import lib, so we map the common cases inline.)
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
+	errnoFn := p.getOrDeclareErrnoFn(module)
 
 	fn := module.NewFunc("pal_dir_open", irtypes.I8Ptr,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -891,6 +900,8 @@ func (p *WindowsPAL) EmitDirOpen(module *ir.Module) *ir.Func {
 	findDataPtr := entry.NewGetElementPtr(irtypes.I8, state,
 		constant.NewInt(irtypes.I64, winDirFindDataOffset))
 	hFind := entry.NewCall(findFirst, pattern, findDataPtr)
+	// Capture the Win32 error immediately — before pal_free, which could clobber it.
+	winErr := entry.NewCall(getLastError)
 
 	// Free pattern
 	entry.NewCall(palFree, pattern)
@@ -902,7 +913,22 @@ func (p *WindowsPAL) EmitDirOpen(module *ir.Module) *ir.Func {
 	failBlk := fn.NewBlock(".fail")
 	entry.NewCondBr(isInvalid, failBlk, okBlk)
 
-	// Failure: free state, return null
+	// Failure: translate the Win32 error to errno (so the bridge returns -errno
+	// rather than -0), free state, return null. Map the cases that matter for a
+	// directory open: not-found → ENOENT(2), access-denied → EACCES(13),
+	// path-is-a-file → ENOTDIR(20); anything else → EINVAL(22).
+	//   ERROR_FILE_NOT_FOUND=2, ERROR_PATH_NOT_FOUND=3, ERROR_ACCESS_DENIED=5,
+	//   ERROR_DIRECTORY=267.
+	errnoPtr := failBlk.NewCall(errnoFn)
+	isErr2 := failBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 2))
+	isErr3 := failBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 3))
+	isNotFound := failBlk.NewOr(isErr2, isErr3)
+	isDenied := failBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 5))
+	isNotDir := failBlk.NewICmp(enum.IPredEQ, winErr, constant.NewInt(irtypes.I32, 267))
+	mapped := failBlk.NewSelect(isNotDir, constant.NewInt(irtypes.I32, 20), constant.NewInt(irtypes.I32, 22))
+	mapped = failBlk.NewSelect(isDenied, constant.NewInt(irtypes.I32, 13), mapped)
+	mapped = failBlk.NewSelect(isNotFound, constant.NewInt(irtypes.I32, 2), mapped)
+	failBlk.NewStore(mapped, errnoPtr)
 	failBlk.NewCall(palFree, state)
 	failBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 

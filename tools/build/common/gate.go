@@ -17,7 +17,7 @@ import (
 // gate values to stdout; progress messages go to stderr.
 func RunGate(root string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--system])\n  schema      print the test-output JSON schema (docs/gate-output.md)")
+		return fmt.Errorf("usage: bin/gate <subcommand> [flags]\nSubcommands:\n  test        run Promise tests and output JSON gate values\n  wasm-test   run only WASM target tests and output JSON gate values\n  wasm-size   compile WASM canaries and report binary sizes\n  go-test     run Go tests and output JSON gate values\n  stress      run stress tests and output JSON gate values\n  coverage    run coverage analysis and output JSON gate values\n  install     run the end-to-end install gate (--variant {thin|full} [--system])\n  schema      print the test-output JSON schema (see docs/gate-system.md)")
 	}
 	switch args[0] {
 	case "test":
@@ -35,22 +35,20 @@ func RunGate(root string, args []string) error {
 	case "coverage":
 		return runGateCoverage(root, args[1:])
 	case "schema":
-		return runGateSchema(root)
+		return runGateSchema()
 	default:
 		return fmt.Errorf("unknown subcommand %q\nSubcommands: test, wasm-test, wasm-size, go-test, stress, coverage, install, schema", args[0])
 	}
 }
 
-// runGateSchema prints the test-output JSON schema (docs/gate-output.md) so the
-// tracker (or anyone ingesting the gate output) can read the contract without
-// running a gate. The doc is the single source of truth. T0763.
-func runGateSchema(root string) error {
-	path := filepath.Join(root, "docs", "gate-output.md")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read schema doc %s: %w", path, err)
-	}
-	fmt.Print(string(data))
+// runGateSchema prints the test-output JSON schema so the tracker (or anyone
+// ingesting the gate output) can read the contract without running a gate. The
+// contract is embedded (GateOutputSchema) rather than read from a doc file, so
+// the command is independent of the working directory and never depends on a
+// doc path existing on disk. The human-facing narrative lives in
+// docs/gate-system.md ("Gate Output Schema"). T0763.
+func runGateSchema() error {
+	fmt.Print(GateOutputSchema)
 	return nil
 }
 

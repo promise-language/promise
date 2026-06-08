@@ -124,7 +124,7 @@ type seenResult struct {
 // test for the given repo-relative file. crashed indicates the child process
 // exited non-zero. The function is pure (no I/O) so it is unit-testable.
 //
-// Edge attribution (documented in docs/gate-output.md):
+// Edge attribution (documented in docs/gate-system.md, "Gate Output Schema"):
 //   - MEMLIMIT aborts the whole process without naming the offending test, so
 //     the first roster test with no result is marked "memory" and the rest
 //     "not-run".

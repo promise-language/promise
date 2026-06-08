@@ -5413,6 +5413,15 @@ func (c *Compiler) trackHeapUserTypeResult(expr ast.Expr, result value.Value) {
 		if isIdentOptionalUnwrapSource(opt.Expr) {
 			return
 		}
+		// T0775: member source on an owner-with-drop (`owner.field!`) used as a
+		// temporary. The extracted inner aliases the owned field; the owner's drop
+		// frees it. Skip temp-tracking (mirrors the ident skip) — tracking would
+		// double-free at scope exit. EXCLUDE borrowed-`this`: genOptionalForceUnwrap
+		// (T0428 Case 3B) makes an INDEPENDENT dup there, which DOES need tracking.
+		if c.isOwnerGovernedMemberOptionalUnwrapSource(opt.Expr) &&
+			!c.isBorrowedThisMemberSource(opt.Expr) {
+			return
+		}
 	}
 	// T0753: Same for the optional-handler unwrap (`o? _ { ... }`) on an ident
 	// source. The handler extracts the inner value as an aliasing extractvalue;

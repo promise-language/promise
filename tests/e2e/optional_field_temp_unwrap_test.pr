@@ -1,0 +1,437 @@
+// T0775: Unwrapping an Optional *field* on an owner-with-drop (member source,
+// `owner.field! ` / `owner.field? _ { ... }`) and using the result as a
+// TEMPORARY (immediate field/method access — no binding) must not double-free.
+//
+// The unwrap extracts the field's inner as an aliasing value; the field's owner
+// also frees it via its own drop. For the force-unwrap form the extracted inner
+// is left owned by the field (temp-tracking is skipped — the owner frees it,
+// mirroring the ident skip of T0753/B0287). For the handler form the present
+// arm is DUP'd so the result owns an independent copy and the owner keeps &
+// frees the original — uniform across temporary and binding contexts, and the
+// field stays reusable (no neutralize).
+//
+// This is the member-source counterpart of the ident-source skips covered in
+// tests/e2e/optional_handler_unwrap_test.pr (T0753/T0778). All values here are
+// HEAP (non-literal) so the leak/double-free detector is live; with literal
+// strings/vectors the bit-63 static-flag no-op guard would mask the bug.
+//
+// Matrix: {force-unwrap, diverging handler, non-diverging handler} ×
+// {heap-user, string, string[] (heap elements)} field, on a droppable owner,
+// reached via an owned local, an owned `~this`, a borrowed `this`, and a
+// borrowed `&owner` parameter. Reuse-after-unwrap locks in that the unwrap does
+// not consume the field. A non-member tail re-asserts the no-regression
+// guarantee: a call-source unwrap (no owner) MUST stay tracked/freed.
+type HBox {
+  int n;
+  drop(~this) {
+  }
+}
+
+type Holder {
+  HBox? hb;
+  string? s;
+  string[]? v;
+  drop(~this) {
+  }
+
+  // owned `~this` receiver: `this` owns the fields; its scope drop frees them.
+  owned_hu_fu(~this) int {
+    return (this.hb!).n;
+  }
+  owned_hu_hd(~this) int {
+    return (this.hb? _ {
+      return -1;
+    }).n;
+  }
+  owned_hu_hn(~this) int {
+    return (this.hb? _ {
+      HBox(n: -1)
+    }).n;
+  }
+  owned_s_hn(~this) int {
+    return (this.s? _ {
+      "z".to_upper()
+    }).len;
+  }
+  owned_v_hn(~this) int {
+    return (this.v? _ {
+      ["z".to_upper()]
+    }).len;
+  }
+
+  // borrowed `this` receiver: the caller owns the fields; the present arm dup
+  // gives the result an independent copy.
+  borrow_hu_fu(this) int {
+    return (this.hb!).n;
+  }
+  borrow_hu_hd(this) int {
+    return (this.hb? _ {
+      return -1;
+    }).n;
+  }
+  borrow_hu_hn(this) int {
+    return (this.hb? _ {
+      HBox(n: -1)
+    }).n;
+  }
+  borrow_s_hn(this) int {
+    return (this.s? _ {
+      "z".to_upper()
+    }).len;
+  }
+  borrow_v_hn(this) int {
+    return (this.v? _ {
+      ["z".to_upper()]
+    }).len;
+  }
+}
+
+mk_holder(int n) Holder {
+  return Holder(hb: HBox(n: n), s: "abc".to_upper(), v: ["x".to_upper(), "y".to_upper()]);
+}
+
+// borrowed `&owner` parameter: the caller owns the Holder; the result must be
+// independent (force-unwrap leaves the alias owned by the caller).
+ref_hu_fu(Holder &h) int {
+  return (h.hb!).n;
+}
+ref_hu_hd(Holder &h) int {
+  return (h.hb? _ {
+    return -1;
+  }).n;
+}
+ref_hu_hn(Holder &h) int {
+  return (h.hb? _ {
+    HBox(n: -1)
+  }).n;
+}
+ref_s_hn(Holder &h) int {
+  return (h.s? _ {
+    "z".to_upper()
+  }).len;
+}
+ref_v_hn(Holder &h) int {
+  return (h.v? _ {
+    ["z".to_upper()]
+  }).len;
+}
+
+// --- owned local, heap-user field --------------------------------------------
+
+owned_local_heap_user() `test {
+  h := mk_holder(42);
+  assert((h.hb!).n == 42, "force-unwrap heap-user field, temp");
+}
+
+owned_local_heap_user_diverging() `test {
+  h := mk_holder(7);
+  assert((h.hb? _ {
+    return;
+  }).n == 7, "diverging handler heap-user field, temp");
+}
+
+owned_local_heap_user_nondiverging() `test {
+  h := mk_holder(5);
+  assert((h.hb? _ {
+    HBox(n: -1)
+  }).n == 5, "non-diverging handler heap-user field, temp");
+}
+
+// --- owned local, string field -----------------------------------------------
+
+owned_local_string() `test {
+  h := mk_holder(1);
+  assert((h.s!).len == 3, "force-unwrap string field, temp");
+}
+
+owned_local_string_diverging() `test {
+  h := mk_holder(1);
+  assert((h.s? _ {
+    return;
+  }).len == 3, "diverging handler string field, temp");
+}
+
+owned_local_string_nondiverging() `test {
+  h := mk_holder(1);
+  assert((h.s? _ {
+    "zz".to_upper()
+  }).len == 3, "non-diverging handler string field, temp");
+}
+
+// --- owned local, string[] field (heap elements) -----------------------------
+
+owned_local_vector() `test {
+  h := mk_holder(1);
+  assert((h.v!).len == 2, "force-unwrap vector field, temp");
+}
+
+owned_local_vector_diverging() `test {
+  h := mk_holder(1);
+  assert((h.v? _ {
+    return;
+  }).len == 2, "diverging handler vector field, temp");
+}
+
+owned_local_vector_nondiverging() `test {
+  h := mk_holder(1);
+  assert((h.v? _ {
+    ["z".to_upper()]
+  }).len == 2, "non-diverging handler vector field, temp");
+}
+
+// --- owned `~this` receiver ---------------------------------------------------
+
+owned_this_receiver() `test {
+  assert(mk_holder(11).owned_hu_fu() == 11, "owned this force-unwrap heap-user");
+  assert(mk_holder(12).owned_hu_hd() == 12, "owned this diverging handler heap-user");
+  assert(mk_holder(13).owned_hu_hn() == 13, "owned this non-diverging handler heap-user");
+  assert(mk_holder(1).owned_s_hn() == 3, "owned this non-diverging handler string");
+  assert(mk_holder(1).owned_v_hn() == 2, "owned this non-diverging handler vector");
+}
+
+// --- borrowed `this` receiver -------------------------------------------------
+
+borrowed_this_receiver() `test {
+  h := mk_holder(21);
+  assert(h.borrow_hu_fu() == 21, "borrowed this force-unwrap heap-user");
+  assert(h.borrow_hu_hd() == 21, "borrowed this diverging handler heap-user");
+  assert(h.borrow_hu_hn() == 21, "borrowed this non-diverging handler heap-user");
+  assert(h.borrow_s_hn() == 3, "borrowed this non-diverging handler string");
+  assert(h.borrow_v_hn() == 2, "borrowed this non-diverging handler vector");
+}
+
+// --- borrowed `&owner` parameter ----------------------------------------------
+
+borrowed_ref_param() `test {
+  h := mk_holder(31);
+  assert(ref_hu_fu(h) == 31, "borrowed ref force-unwrap heap-user");
+  assert(ref_hu_hd(h) == 31, "borrowed ref diverging handler heap-user");
+  assert(ref_hu_hn(h) == 31, "borrowed ref non-diverging handler heap-user");
+  assert(ref_s_hn(h) == 3, "borrowed ref non-diverging handler string");
+  assert(ref_v_hn(h) == 2, "borrowed ref non-diverging handler vector");
+}
+
+// --- reuse-after-unwrap: the unwrap must NOT consume the field ----------------
+
+reuse_force_unwrap() `test {
+  h := mk_holder(5);
+  a := (h.hb!).n;
+  b := (h.hb!).n;
+  assert(a + b == 10, "force-unwrap does not consume the field (reusable)");
+}
+
+reuse_diverging_handler() `test {
+  h := mk_holder(5);
+  a := (h.hb? _ {
+    return;
+  }).n;
+  b := (h.hb? _ {
+    return;
+  }).n;
+  assert(a + b == 10, "diverging handler does not consume the field (reusable)");
+}
+
+reuse_nondiverging_handler() `test {
+  h := mk_holder(21);
+  // Both reads must see the LIVE field (21), not the fallback — the field is
+  // not consumed/neutralized by the handler unwrap.
+  a := (h.hb? _ {
+    HBox(n: -1)
+  }).n;
+  b := (h.hb? _ {
+    HBox(n: -1)
+  }).n;
+  assert(a + b == 42, "non-diverging handler reads live field both times");
+}
+
+// --- binding context (no regression): the bound LHS owns the result ----------
+
+bind_heap_user_force_unwrap() `test {
+  h := mk_holder(9);
+  HBox b = h.hb!;
+  assert(b.n == 9, "force-unwrap heap-user field bound to a new owner");
+}
+
+bind_heap_user_handler() `test {
+  h := mk_holder(8);
+  HBox b = h.hb? _ {
+    HBox(n: -1)
+  };
+  assert(b.n == 8, "handler heap-user field bound to a new owner");
+}
+
+bind_string_handler() `test {
+  h := mk_holder(1);
+  string b = h.s? _ {
+    "z".to_upper()
+  };
+  assert(b.len == 3, "handler string field bound to a new owner");
+}
+
+bind_vector_handler() `test {
+  h := mk_holder(1);
+  string[] b = h.v? _ {
+    ["z".to_upper()]
+  };
+  assert(b.len == 2, "handler vector field bound to a new owner");
+}
+
+// --- non-member source (no-regression): a call-source unwrap has no owner, so
+// the extracted inner MUST stay tracked and freed (no leak) -------------------
+
+mk_hbox() HBox? {
+  return HBox(n: 9);
+}
+mk_str() string? {
+  return "abc".to_upper();
+}
+mk_vec() string[]? {
+  return["x".to_upper(), "y".to_upper()];
+}
+
+nonmember_heap_user() `test {
+  assert((mk_hbox()? _ {
+    return;
+  }).n == 9, "non-member heap-user handler unwrap, no leak");
+  assert((mk_hbox()? _ {
+    HBox(n: -1)
+  }).n == 9, "non-member heap-user non-diverging, no leak");
+}
+
+nonmember_string() `test {
+  assert((mk_str()? _ {
+    return;
+  }).len == 3, "non-member string handler unwrap, no leak");
+  assert((mk_str()? _ {
+    "z".to_upper()
+  }).len == 3, "non-member string non-diverging, no leak");
+}
+
+nonmember_vector() `test {
+  assert((mk_vec()? _ {
+    return;
+  }).len == 2, "non-member vector handler unwrap, no leak");
+  assert((mk_vec()? _ {
+    ["z".to_upper()]
+  }).len == 2, "non-member vector non-diverging, no leak");
+}
+
+// --- refcounted / opaque-container fields (Arc / Channel): the handler-temp
+// result of these types is NOT taken into independent ownership downstream (the
+// owner's drop is the sole free, the temp merely reads/aliases it), so the
+// present arm must NOT be dup'd — a dup would incref/copy with no matching free
+// and leak. The force-unwrap form aliases the field and is freed by the owner.
+// Binding context for these stays covered by genFieldAccess's container dup. ---
+
+type ArcHolder {
+  Arc[int]? a;
+  channel[int]? c;
+  drop(~this) {
+  }
+}
+
+mk_arc_holder() ArcHolder {
+  return ArcHolder(a: Arc[int](5), c: channel[int](2));
+}
+
+arc_field_force_unwrap_temp() `test {
+  h := mk_arc_holder();
+  assert((h.a!).borrow == 5, "force-unwrap Arc field temp, no leak/double-free");
+}
+
+arc_field_handler_temp() `test {
+  h := mk_arc_holder();
+  assert((h.a? _ {
+    Arc[int](-1)
+  }).borrow == 5, "non-diverging handler Arc field temp, no leak");
+  assert((h.a? _ {
+    return;
+  }).borrow == 5, "diverging handler Arc field temp, no leak");
+}
+
+channel_field_handler_temp() `test {
+  h := mk_arc_holder();
+  (h.c? _ {
+    channel[int](1)
+  }).send(9);
+  assert(true, "non-diverging handler channel field temp, no leak");
+}
+
+arc_field_handler_bind() `test {
+  h := mk_arc_holder();
+  Arc[int] b = h.a? _ {
+    Arc[int](-1)
+  };
+  assert(b.borrow == 5, "handler Arc field bound to a new owner, no leak");
+}
+
+// --- paren-wrapped member source: `(owner.field)!` / `(owner.field)? _ {}` -----
+// The unwrap-source detectors peel ParenExpr, so a paren directly around the
+// member is recognized exactly like the bare member form (force-unwrap skips the
+// dup, handler dups). No double-free, no leak.
+
+paren_member_force_unwrap() `test {
+  h := mk_holder(42);
+  assert((h.hb)!.n == 42, "paren-wrapped member force-unwrap, temp");
+}
+
+paren_member_handler_diverging() `test {
+  h := mk_holder(7);
+  assert((h.hb)? _ {
+    return;
+  }.n == 7, "paren-wrapped member diverging handler, temp");
+}
+
+paren_member_handler_nondiverging() `test {
+  h := mk_holder(5);
+  assert((h.hb)? _ {
+    HBox(n: -1)
+  }.n == 5, "paren-wrapped member non-diverging handler, temp");
+}
+
+// --- generic owner type: the dup/skip logic resolves the field's inner type
+// through type substitution (concrete instantiation + generic method body) -----
+
+type GHolder[T] {
+  T? item;
+  drop(~this) {
+  }
+
+  // Unwrap used as a TEMPORARY (arg to a generic sink) from INSIDE a generic
+  // method body — the result type is the TypeParam, resolved via typeSubst at
+  // monomorphization. The owner keeps & frees the original; the dup'd temp is
+  // consumed by `sink`.
+  feed_handler(this, T fb) {
+    sink[T]((this.item? _ {
+      fb
+    }));
+  }
+  feed_diverging(this) {
+    sink[T]((this.item? _ {
+      return;
+    }));
+  }
+}
+
+sink[T](T x) {
+}
+
+mk_gholder(int n) GHolder[HBox] {
+  return GHolder[HBox](item: HBox(n: n));
+}
+
+generic_owner_concrete_temp() `test {
+  g := mk_gholder(77);
+  assert((g.item!).n == 77, "generic owner (concrete) force-unwrap temp");
+  assert((g.item? _ {
+    HBox(n: -1)
+  }).n == 77, "generic owner (concrete) handler temp");
+}
+
+generic_method_body_temp() `test {
+  g := mk_gholder(33);
+  g.feed_handler(HBox(n: -1));
+  g.feed_diverging();
+  // Field stays live — the generic-method handler temps dup'd, never consumed it.
+  assert((g.item!).n == 33, "field live after generic-method-body handler temps");
+}

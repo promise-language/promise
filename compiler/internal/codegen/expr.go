@@ -10745,7 +10745,7 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 
 	// Some path: extract inner value
 	c.block = someBlock
-	okVal := c.block.NewExtractValue(optVal, 1)
+	var okVal value.Value = c.block.NewExtractValue(optVal, 1)
 
 	// T0778: Droppable-owner field source — `(owner.field)? _ { ... }` where the
 	// optional lives in a field of a droppable owner (e.g. borrowed `this.o`).
@@ -10767,6 +10767,65 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	}
 	if srcContainerDup != nil {
 		c.claimStringTemp(srcContainerDup)
+	}
+
+	// T0775: Member-source optional handler (`owner.field? _ { ... }`) where the
+	// owner has a drop that governs the field's inner allocation. The extracted
+	// okVal ALIASES the owned field's inner; without a dup it would be freed BOTH
+	// by the result's owner (the statement temp at statement end, or the bound LHS
+	// at scope end) AND by the owner's drop → double-free (heap-user) or
+	// use-after-free crash (vector). Dup the present inner so the result owns an
+	// INDEPENDENT copy and the field's owner keeps & frees the original. This is
+	// uniform across temporary and binding contexts: neutralizeForceUnwrapSource
+	// deliberately does NOT neutralize the field for member-source handlers (see
+	// the ErrorHandlerExpr case there), so the owner always frees the original and
+	// the dup is the result's sole owner — which also keeps the field reusable
+	// (`(h.f? _ {}).x` twice reads the live field both times). Gated to no per-field
+	// dup already produced by genFieldAccess (srcStringDup/srcContainerDup — the
+	// T0778 binding/borrowed-this path, which makes its own independent copy). The
+	// dup is NOT tracked here; genExpr's ErrorHandlerExpr branch tracks the merged
+	// phi (non-diverging) or the diverging okVal exactly once as the sole owner.
+	//
+	// LIMITED to the three types whose handler result is actually taken into
+	// independent ownership downstream: string + vector (tracked by genExpr's
+	// ErrorHandlerExpr i8* branch via trackStringTemp / trackVectorTemp) and
+	// heap-user (tracked by trackHeapUserTypeResult). For refcounted/opaque
+	// containers (Arc/Weak/Channel/Mutex/...) the handler result is NOT tracked as
+	// an owned temp (the i8* branch only tracks string/vector; trackHeapUserTypeResult
+	// early-returns on containers), so the aliasing okVal is already safe — the
+	// owner's drop is the sole free and the temp merely reads it. Dup'ing those
+	// here would incref/copy with no matching free → leak (the binding context for
+	// those is instead covered by genFieldAccess's T0366/T0498 dup, gated above via
+	// srcContainerDup).
+	if srcStringDup == nil && srcContainerDup == nil &&
+		c.isOwnerGovernedMemberOptionalUnwrapSource(e.Expr) {
+		rt := c.info.Types[e]
+		if c.typeSubst != nil && rt != nil {
+			rt = types.Substitute(rt, c.typeSubst)
+		}
+		if c.selfSubst != nil && rt != nil {
+			rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+		}
+		named := extractNamed(rt)
+		switch {
+		case named == types.TypString:
+			okVal = c.dupString(okVal)
+		case types.IsVector(rt):
+			if elemType, ok := types.AsVector(rt); ok {
+				elemLLVM := c.resolveType(elemType)
+				elemSize := int64(c.typeSize(elemLLVM))
+				dup := c.dupVector(okVal, elemSize)
+				// T0540: deep-clone droppable elements so the dup owns them.
+				c.emitVectorElementCloneLoop(dup, elemType)
+				okVal = dup
+			}
+		case named != nil && !named.IsValueType() && !named.IsCopy() &&
+			!isPrimitiveScalar(named) && !named.IsStructural() && !isOpaqueContainerType(rt):
+			// Heap user type — okVal is the `{vtable, instance}` value struct;
+			// dupHeapValue returns an independent value struct. isOpaqueContainerType
+			// already excludes Vector/Channel/Arc/Weak/Mutex/MutexGuard/Task.
+			okVal = c.dupHeapValue(okVal, rt)
+		}
 	}
 
 	// T0778: Non-diverging handler on an ident-source optional whose inner is
@@ -10990,6 +11049,62 @@ func isIdentOptionalUnwrapSource(expr ast.Expr) bool {
 	return isIdent
 }
 
+// isOwnerGovernedMemberOptionalUnwrapSource reports whether src — the source of
+// an optional unwrap (`owner.field!` / `owner.field? _ { ... }`) — is a member
+// access `owner.field` whose owner type has a (possibly synthesized) drop that
+// governs the field's inner allocation's lifetime (T0775). When true, an unwrap
+// used as a temporary must NOT register the extracted inner as an owned
+// statement temp (force-unwrap path) — the owner's drop already frees it, so a
+// statement-temp drop double-frees. Peels ParenExpr so `(owner.field)!` is
+// recognized exactly like `owner.field!`. Mirrors the ident skip
+// (isIdentOptionalUnwrapSource) for the member-source case.
+func (c *Compiler) isOwnerGovernedMemberOptionalUnwrapSource(src ast.Expr) bool {
+	for {
+		p, ok := src.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		src = p.Expr
+	}
+	mem, ok := src.(*ast.MemberExpr)
+	if !ok {
+		return false
+	}
+	ownerType := c.info.Types[mem.Target]
+	if c.typeSubst != nil && ownerType != nil {
+		ownerType = types.Substitute(ownerType, c.typeSubst)
+	}
+	if c.selfSubst != nil && ownerType != nil {
+		ownerType = types.SubstituteSelf(ownerType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	ownerNamed := extractNamed(ownerType)
+	if ownerNamed == nil {
+		return false
+	}
+	return c.ownerHasOrSynthDrop(ownerType, ownerNamed)
+}
+
+// isBorrowedThisMemberSource reports whether src (peeling ParenExpr) is a member
+// access on a borrowed `this` receiver (`this.field` inside a non-`~this`
+// method). For force-unwrap (T0428 Case 3B) genOptionalForceUnwrap makes an
+// INDEPENDENT dup of the inner there — the caller still owns the original — so
+// that dup DOES need statement-temp tracking and must be excluded from the
+// T0775 member skip. (T0775)
+func (c *Compiler) isBorrowedThisMemberSource(src ast.Expr) bool {
+	for {
+		p, ok := src.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		src = p.Expr
+	}
+	mem, ok := src.(*ast.MemberExpr)
+	if !ok {
+		return false
+	}
+	return isThisReceiver(mem.Target) && !c.thisRecvIsOwned
+}
+
 // neutralizeForceUnwrapSource sets the present flag to false in the source
 // optional's alloca when a force-unwrap result is consumed by an assignment.
 // T0111: Prevents double-free when both the new variable and the source optional
@@ -11024,7 +11139,14 @@ func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
 	case *ast.ErrorHandlerExpr:
 		// B0293: optional handler (p? _ { fallback }) also extracts inner value.
 		if _, isOpt := c.info.Types[e.Expr].(*types.Optional); isOpt {
-			inner = e.Expr
+			// T0775: member-source handlers (`owner.field? _ { ... }`) are made
+			// independent by the present-arm dup in genOptionalHandlerExpr — the
+			// owner keeps & frees the original, so the field must NOT be neutralized
+			// (neutralizing would orphan the original → leak; not neutralizing keeps
+			// the field reusable). Ident sources have no dup and still neutralize.
+			if !c.isOwnerGovernedMemberOptionalUnwrapSource(e.Expr) {
+				inner = e.Expr
+			}
 		}
 	}
 	if inner == nil {

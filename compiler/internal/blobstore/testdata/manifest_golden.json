@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "epoch": "2026.01",
+  "entries": [
+    {
+      "name": "llvm-opt",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 12345678,
+      "kind": "blob",
+      "sources": [
+        {
+          "blob": "https://example.com/blobs/aaaa.br",
+          "compression": "brotli"
+        },
+        {
+          "archive": "https://example.com/llvm-linux.tar.xz",
+          "archive_path": "bin/opt",
+          "archive_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ]
+    },
+    {
+      "name": "llvm-lld",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "size": 9876543,
+      "kind": "macho-llvm",
+      "sources": [
+        {
+          "archive": "https://example.com/llvm-darwin.tar.xz",
+          "archive_path": "bin/lld",
+          "archive_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    }
+  ]
+}

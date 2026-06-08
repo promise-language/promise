@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -139,6 +140,59 @@ func TestGenerateRuntimeManifestMissingLLVMBinary(t *testing.T) {
 	pm := &PrebuiltsManifest{Schema: PrebuiltsManifestSchema, Binaries: map[string]*PrebuiltEntry{}}
 	if err := GenerateRuntimeManifest(root, pm, llvmCache, "darwin-arm64", "2026.0"); err == nil {
 		t.Fatal("expected error when [binaries.llvm] is missing")
+	}
+}
+
+func TestHashAndSizeRejectsNonExistentFile(t *testing.T) {
+	_, _, err := hashAndSize(filepath.Join(t.TempDir(), "does-not-exist"))
+	if err == nil {
+		t.Fatal("expected error for non-existent file")
+	}
+}
+
+func TestBuildLLVMEntriesMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	// Declare a file that does not exist in dir — hashAndSize should fail.
+	tEntry := &TargetEntry{
+		URL:    "https://example/LLVM.tar.xz",
+		SHA256: "abc",
+		Files:  []PrebuiltFile{{Src: "bin/opt", Out: "opt"}},
+	}
+	_, err := buildLLVMEntries(dir, tEntry, "linux-amd64", nil)
+	if err == nil {
+		t.Fatal("expected error when file listed in manifest is absent")
+	}
+	if !strings.Contains(err.Error(), "opt") {
+		t.Errorf("error should name the missing file, got %q", err.Error())
+	}
+}
+
+func TestGenerateRuntimeManifestHashFailure(t *testing.T) {
+	root := t.TempDir()
+	resDir := filepath.Join(root, "compiler", "cmd", "promise", "resources")
+	if err := os.MkdirAll(resDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Create the cache dir but omit the declared file so hashAndSize fails.
+	llvmCache := filepath.Join(root, "cache", "llvm")
+	if err := os.MkdirAll(llvmCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pm := &PrebuiltsManifest{
+		Schema: PrebuiltsManifestSchema,
+		Binaries: map[string]*PrebuiltEntry{
+			"llvm": {Version: "22.1.0", BundleDir: "x", Targets: map[string]*TargetEntry{
+				"linux-amd64": {
+					URL:    "https://example/LLVM-linux.tar.xz",
+					SHA256: "deadbeef",
+					Files:  []PrebuiltFile{{Src: "bin/opt", Out: "opt"}},
+				},
+			}},
+		},
+	}
+	// File "opt" is missing from llvmCache → buildLLVMEntries fails → GenerateRuntimeManifest returns error.
+	if err := GenerateRuntimeManifest(root, pm, llvmCache, "linux-amd64", "2026.0"); err == nil {
+		t.Fatal("expected error when LLVM binary is missing from cache dir")
 	}
 }
 

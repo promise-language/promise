@@ -378,6 +378,55 @@ func (c *Compiler) isUserIndexExpr(expr ast.Expr) bool {
 	return m != nil && !m.IsNative()
 }
 
+// isClosureAggregateBorrow reports whether expr reads a closure (function value)
+// out of an *owning aggregate* — a struct/optional closure field (`h.cb`,
+// `h.cb!`) or a container element (`v[0]`). Such a read copies the closure's fat
+// pointer `{fn, env}` by value while the aggregate retains ownership of the heap
+// env (closures aren't Cloneable, so there is no env dup on read, and ownership
+// treats the read as a copy/alias rather than a move). Registering an owning
+// env-free binding for the local would therefore double-free the env at scope
+// exit against the aggregate's own drop (T0812). Returning true here suppresses
+// that binding — the local borrows, the aggregate keeps sole ownership, mirroring
+// the borrow handling in isBorrowedExpr/isRttiCastBorrow.
+//
+// Excludes owned-return shapes whose local legitimately owns a *fresh* closure:
+//   - getter returning a closure by value (isGetterCallExpr);
+//   - user-defined non-native `[]` returning a closure (isUserIndexExpr).
+//
+// An *ast.IdentExpr source (`f := g`, `f := o!` on a local) is not matched: a
+// plain move/unwrap of a local transfers ownership (the RHS drop flag / optional
+// present flag is cleared), so the local must keep its owning binding.
+func (c *Compiler) isClosureAggregateBorrow(expr ast.Expr) bool {
+	if expr == nil {
+		return false
+	}
+	e := unwrapDestructureParens(expr)
+	// Peel a force-unwrap of an optional closure field: `h.cb!` or `h.cb as! (...)`.
+	if unwrap, ok := e.(*ast.OptionalUnwrapExpr); ok {
+		e = unwrapDestructureParens(unwrap.Expr)
+	} else if cast, ok := e.(*ast.CastExpr); ok && cast.Force {
+		subj := unwrapDestructureParens(cast.Expr)
+		subjType := c.info.Types[subj]
+		if c.typeSubst != nil && subjType != nil {
+			subjType = types.Substitute(subjType, c.typeSubst)
+		}
+		if _, isOpt := subjType.(*types.Optional); isOpt {
+			e = subj
+		}
+	}
+	switch e.(type) {
+	case *ast.MemberExpr, *ast.IndexExpr:
+		// struct/optional closure field, or container element — aliasing read
+	default:
+		return false
+	}
+	// Owned-return shapes: the local owns a fresh closure, keep its binding.
+	if c.isGetterCallExpr(e) || c.isUserIndexExpr(e) {
+		return false
+	}
+	return true
+}
+
 // isStringBorrowExpr returns true if the expression borrows an existing value
 // (e.g., container element access, field access) rather than creating a new one.
 // Borrowed values should not be freed by the borrower — the owner retains responsibility.
@@ -1239,7 +1288,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if c.isRttiCastBorrow(s.Value) {
 		c.clearDropFlag(s.Name)
 	}
-	c.maybeRegisterEnvFree(s.Name, alloca, dropType)
+	c.maybeRegisterEnvFree(s.Name, alloca, dropType, s.Value)
 }
 
 func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
@@ -1472,7 +1521,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if c.isRttiCastBorrow(s.Value) {
 		c.clearDropFlag(s.Name)
 	}
-	c.maybeRegisterEnvFree(s.Name, alloca, typ)
+	c.maybeRegisterEnvFree(s.Name, alloca, typ, s.Value)
 }
 
 // unwrapDestructureParens peels any number of *ast.ParenExpr wrappers from a
@@ -5576,8 +5625,16 @@ func hasStructuralParam(sig *types.Signature, typeSubst map[*types.TypeParam]typ
 
 // maybeRegisterEnvFree registers a scope binding to free the closure's env struct
 // at scope exit. Only applies to variables whose type is *types.Signature (function values).
-func (c *Compiler) maybeRegisterEnvFree(varName string, alloca *ir.InstAlloca, typ types.Type) {
+func (c *Compiler) maybeRegisterEnvFree(varName string, alloca *ir.InstAlloca, typ types.Type, valueExpr ast.Expr) {
 	if _, ok := typ.(*types.Signature); !ok {
+		return
+	}
+	// T0812: reading a closure out of an owning aggregate (struct/optional field,
+	// container element) aliases the aggregate's heap env — it does not transfer
+	// ownership. Registering an owning env-free binding here would double-free the
+	// env at scope exit against the aggregate's own drop. The aggregate retains
+	// ownership; the local borrows.
+	if c.isClosureAggregateBorrow(valueExpr) {
 		return
 	}
 	dropFlag := c.createEntryAlloca(irtypes.I1)

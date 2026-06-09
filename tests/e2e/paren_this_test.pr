@@ -245,10 +245,6 @@ test_paren_this_operator() `test {
 }
 
 // ---------------- generic method ----------------
-// NOTE: payload is `int` (not a droppable like string) to avoid T0746, a
-// pre-existing double-free when a generic method returns a `this` string field
-// by value. The gate under test (genGenericMethodCall, the `(this).method()`
-// dispatch) is exercised regardless of payload type.
 type GBox[T] {
   T val;
   peek(this) T {
@@ -268,6 +264,14 @@ test_paren_this_generic_method() `test {
   assert(i.via_nested() == 99, "((this)).peek() in generic method");
   b := GBox[bool](val: true);
   assert(b.via() == true, "(this).peek() generic bool");
+  // T0746: a droppable (string) payload returned by value through the type
+  // parameter must be dup'd on return so the owner's field-drop and the
+  // returned value's drop don't free the same heap allocation. Use a
+  // concatenation so the value is heap-allocated (not a `.rodata` literal),
+  // which is the path that double-freed.
+  s := GBox[string](val: "gen" + "eric");
+  assert(s.via() == "generic", "(this).peek() generic string payload");
+  assert(s.via_nested() == "generic", "((this)).peek() generic string payload");
 }
 
 // ---------------- enum method / getter ----------------

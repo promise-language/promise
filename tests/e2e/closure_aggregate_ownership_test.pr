@@ -11,11 +11,11 @@
 // double-free guard for the fixed-array-literal claim path. Each loops 30x so a
 // per-iteration leak shows up as a 30+ allocation delta.
 //
-// NOTE: escape-then-invoke with a *heap-capturing* closure read back out of an
-// aggregate field into a local (e.g. `f := h.cb; f()`) is blocked by a separate
-// pre-existing ownership bug (T0812: closure field reads alias the env without
-// dup/move-tracking → double-free). No-capture invoke (null env) is covered here
-// since it has no env to double-free.
+// T0812: escape-then-invoke with a *heap-capturing* closure read back out of an
+// aggregate field into a local (e.g. `f := h.cb; f()`) is now memory-safe. The
+// read aliases (borrows) the aggregate's heap env rather than registering an
+// owning env-free binding for the local, so the env is freed exactly once by the
+// aggregate's own drop. See the "escape-then-invoke (T0812)" section below.
 enum Cb {
   holds(() -> int cb), empty,
 }
@@ -281,4 +281,146 @@ invoke_no_capture_from_array_field() `test {
   h := ArrCb(cbs: [|| -> 4, || -> 8]);
   f := h.cbs[0];
   assert(f() == 4, "");
+}
+
+// --- escape-then-invoke (T0812) ---
+//
+// Read a *heap-capturing* closure out of an owning aggregate into a local, then
+// invoke it. The read borrows the aggregate's heap env (no owning env-free
+// binding for the local), so the aggregate's drop frees the env exactly once —
+// no double-free / use-after-free. The leak-sensitive cases loop 30x so a
+// per-iteration leak surfaces as a 30+ allocation delta (zero-leak enforced).
+
+make_struct_cb(int n) StructCb {
+  s := "cap" + "tured"; // heap string captured by the closure's env
+  return StructCb(cb: move || -> s.len + n);
+}
+
+invoke_heap_capture_from_struct_field() `test {
+  i := 0;
+  while i < 30 {
+    h := make_struct_cb(5);
+    f := h.cb; // copies {fn,env}; f borrows h's env (no owning binding)
+    assert(f() == 13, ""); // "captured".len (8) + 5
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+invoke_heap_capture_from_optional_field() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    h := OptCb(cb: move || -> s.len + 2);
+    f := h.cb!; // force-unwrap of an optional closure field — still a borrow
+    assert(f() == 10, ""); // 8 + 2
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+invoke_heap_capture_from_vector_index() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    v := [move || -> s.len + 1];
+    f := v[0]; // container element read — borrows v's element env
+    assert(f() == 9, ""); // 8 + 1
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Double-read of the same struct field — both locals borrow the single env, and
+// only h's drop frees it. Before T0812 each local got an owning env-free binding,
+// double-(triple-)freeing the env.
+invoke_same_field_twice() `test {
+  i := 0;
+  while i < 30 {
+    h := make_struct_cb(0);
+    f := h.cb;
+    g := h.cb;
+    assert(f() == 8, ""); // "captured".len
+    assert(g() == 8, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// move-captured int-only closure: the env is still heap-allocated (capturing any
+// value forces a heap env) but holds no captured heap data. Reading it out and
+// invoking exercises the env-only-heap double-free path.
+invoke_copy_capture_from_struct_field() `test {
+  i := 0;
+  while i < 30 {
+    n := 7;
+    h := StructCb(cb: move || -> n + 100);
+    f := h.cb;
+    assert(f() == 107, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Forced cast of an optional closure field (`h.cb as! (() -> int)`) — the cast
+// form of the optional-field unwrap. isClosureAggregateBorrow peels the forced
+// CastExpr whose subject is an Optional, so this read is classified as a borrow
+// exactly like the `h.cb!` form above. (Covers the CastExpr-peel branch.)
+invoke_heap_capture_from_optional_field_as_cast() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    h := OptCb(cb: move || -> s.len + 3);
+    f := h.cb as!(() -> int); // forced cast unwrap — borrows h's env
+    assert(f() == 11, ""); // 8 + 3
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// --- owned-return exclusions (T0812) ---
+//
+// A getter or user-defined `[]` that *returns a fresh closure by value* yields an
+// OWNED closure the local must free — isClosureAggregateBorrow must NOT treat
+// these as borrows (else the fresh env leaks). These confirm the local keeps its
+// owning env-free binding and frees the env exactly once (zero-leak enforced).
+
+type CbFactory {
+  int base;
+  // getter building a fresh heap-capturing closure each call
+  get build() -> int {
+    s := "fac" + "tory";
+    return move || -> s.len;
+  }
+}
+
+type CbIndexBox {
+  int unused;
+  // user-defined non-native `[]` building a fresh heap-capturing closure
+  [](this, int k)() -> int {
+    s := "ind" + "exed";
+    return move || -> s.len + k;
+  }
+}
+
+owned_closure_from_getter() `test {
+  i := 0;
+  while i < 30 {
+    fac := CbFactory(base: 0);
+    f := fac.build; // getter returns a fresh OWNED closure; f frees its env
+    assert(f() == 7, ""); // "factory".len
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+owned_closure_from_user_index() `test {
+  i := 0;
+  while i < 30 {
+    b := CbIndexBox(unused: 0);
+    f := b[2]; // user `[]` returns a fresh OWNED closure; f frees its env
+    assert(f() == 9, ""); // "indexed".len (7) + 2
+    i = i + 1;
+  }
+  assert(i == 30, "");
 }

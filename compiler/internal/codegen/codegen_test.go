@@ -5085,6 +5085,32 @@ func TestLambdaEnvTempClaimedForVariable(t *testing.T) {
 	assertContains(t, ir, "env.claim")
 }
 
+// T0812: reading a closure out of an owning aggregate (struct/optional field,
+// container element) borrows the aggregate's heap env — the local must NOT get an
+// owning env-free binding, otherwise both the local and the aggregate's drop free
+// the same env (double-free / UAF). A fresh closure literal still owns its env.
+func TestClosureFieldReadBorrowsEnvNoFree(t *testing.T) {
+	ir := generateIR(t, `
+		type CbHolder { () -> int cb; }
+		read_field(CbHolder h) int {
+			f := h.cb;
+			return f();
+		}
+		fresh_local() int {
+			s := "a" + "b";
+			g := move || -> s.len;
+			return g();
+		}
+		main() {}
+	`)
+	// The field-read local `f` gets no drop flag and no env-free binding —
+	// it borrows h's env (h.drop frees it exactly once).
+	assertNotContains(t, ir, "%f.dropflag")
+	// A fresh closure literal still owns its env: drop flag + env.free binding.
+	assertContains(t, ir, "%g.dropflag")
+	assertContains(t, ir, "env.free")
+}
+
 func TestNamedFuncRefThunk(t *testing.T) {
 	ir := generateIR(t, `
 		add(int x) int { return x + 1; }
@@ -23332,6 +23358,40 @@ func TestGenericDirectStringFieldReadDups(t *testing.T) {
 	assertContains(t, testFn, "promise_string_new")
 }
 
+// T0746: a generic method that returns a `this`-owned string field by value
+// must dup it on return (clone-on-return) so the owner's field-drop and the
+// returned value's drop don't free the same allocation. The VarDecl-site dup
+// is covered by TestGenericDirectStringFieldReadDups; this covers the
+// method-return site (genReturnStmt -> setDupFlagsForFieldAccess ->
+// genFieldAccess with `this` as the target, under c.typeSubst {T->string}).
+func TestGenericMethodReturnStringFieldDups(t *testing.T) {
+	ir := generateIR(t, `
+		type GBox[T] { T val; peek(this) T { return this.val; } }
+		main() { b := GBox[string](val: "hi"); s := b.peek(); }
+	`)
+	fn := extractFunction(ir, `"GBox[string].peek"`)
+	if fn == "" {
+		t.Fatal("expected GBox[string].peek in IR")
+	}
+	assertContains(t, fn, "strdup.copy")
+	assertContains(t, fn, "promise_string_new")
+}
+
+// T0746 (`&this` receiver form): the bug reported the borrowed-receiver
+// variant double-freed identically, so the dup-on-return must fire there too.
+func TestGenericMethodReturnStringFieldDupsBorrowedReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type GBox[T] { T val; peek(&this) T { return this.val; } }
+		main() { b := GBox[string](val: "hi"); s := b.peek(); }
+	`)
+	fn := extractFunction(ir, `"GBox[string].peek"`)
+	if fn == "" {
+		t.Fatal("expected GBox[string].peek in IR")
+	}
+	assertContains(t, fn, "strdup.copy")
+	assertContains(t, fn, "promise_string_new")
+}
+
 // T0513 (maybeEnableDupForMutRefArg generic owner): passing a generic
 // owner's field to a `~` (consuming) param must auto-dup the field so the
 // callee's consume-drop and the owner's drop don't double-free. Exercises
@@ -26769,19 +26829,19 @@ func TestParenThisOperatorNoExtractFromPtr(t *testing.T) {
 }
 
 func TestParenThisGenericMethodNoExtractFromPtr(t *testing.T) {
-	// int payload avoids T0746 (pre-existing double-free on generic string field
-	// return); the (this).peek() dispatch gate is exercised regardless of payload.
+	// T0746: a droppable (string) payload exercises the generic-method
+	// return-by-value dup path in addition to the (this).peek() dispatch gate.
 	ir := generateIR(t, `
 		type T0613GenBox[T] {
 			T val;
 			peek(this) T { return this.val; }
 			via(this) T { return (this).peek(); }
 		}
-		main() { b := T0613GenBox[int](val: 99); v := b.via(); }
+		main() { b := T0613GenBox[string](val: "hi"); v := b.via(); }
 	`)
 	assertNotContains(t, ir, "extractvalue i8*")
 	// The monomorphized instance method body is emitted into the (unsplit) module.
-	assertContains(t, ir, "T0613GenBox[int].via")
+	assertContains(t, ir, "T0613GenBox[string].via")
 }
 
 func TestParenThisEnumMethodNoExtractFromPtr(t *testing.T) {

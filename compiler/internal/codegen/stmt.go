@@ -2758,6 +2758,13 @@ func (c *Compiler) emitOptionalLocalValueDrop(optVal value.Value, elemType types
 			typ = types.Substitute(typ, c.typeSubst)
 		}
 		c.emitVariantFieldDrop(innerVal, typ)
+	} else if _, isSig := elemType.(*types.Signature); isSig {
+		// T0814: closure inner — free the fat pointer's env (deep-drop captures).
+		typ := elemType
+		if c.typeSubst != nil {
+			typ = types.Substitute(typ, c.typeSubst)
+		}
+		c.emitVariantFieldDrop(innerVal, typ)
 	} else if b.rttiDrop {
 		// B0243: RTTI-based drop dispatch for Optional[StructuralInterface].
 		// The concrete type is unknown at compile time — dispatch through typeinfo.
@@ -2894,6 +2901,26 @@ func (c *Compiler) emitArrayDropCall(b scopeBinding) {
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock
+}
+
+// registerValTypeOptionalDrop registers a bindingDropOptional that carries no
+// dropFunc — emitOptionalLocalValueDrop dispatches on valType (immediateElem)
+// instead. Shared by the Tuple (T0397) and closure/Signature (T0814) inner-type
+// cases, whose drop is driven entirely by emitVariantFieldDrop on the inner value.
+func (c *Compiler) registerValTypeOptionalDrop(varName string, alloca *ir.InstAlloca, immediateElem types.Type) {
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.dropFlags[varName] = dropFlag
+	binding := scopeBinding{
+		kind:     bindingDropOptional,
+		alloca:   alloca,
+		valType:  immediateElem,
+		dropFlag: dropFlag,
+		varName:  varName,
+	}
+	c.scopeBindings = append(c.scopeBindings, binding)
+	c.dropBindings[varName] = binding
 }
 
 // maybeRegisterOptionalDrop registers a bindingDropOptional for an explicitly declared
@@ -3071,19 +3098,14 @@ func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAllo
 		// T0397: Tuple inner type — register binding without dropFunc. The
 		// emitOptionalLocalValueDrop Tuple branch dispatches via emitVariantFieldDrop
 		// on the inner tuple value (walks fields, drops droppable elements).
-		dropFlag := c.createEntryAlloca(irtypes.I1)
-		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
-		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
-		c.dropFlags[varName] = dropFlag
-		binding := scopeBinding{
-			kind:     bindingDropOptional,
-			alloca:   alloca,
-			valType:  immediateElem,
-			dropFlag: dropFlag,
-			varName:  varName,
-		}
-		c.scopeBindings = append(c.scopeBindings, binding)
-		c.dropBindings[varName] = binding
+		c.registerValTypeOptionalDrop(varName, alloca, immediateElem)
+		return
+	case func() bool { _, isSig := elem.(*types.Signature); return isSig }():
+		// T0814: Optional[closure] local — the inner fat pointer {fn,env} owns a heap
+		// env. Register an optional drop; emitOptionalLocalValueDrop frees the env
+		// (deep-drops captures) when present. Same machinery as string?/vector? so
+		// move-tracking (g := o) and reassignment (o = ...) clear/re-arm the flag.
+		c.registerValTypeOptionalDrop(varName, alloca, immediateElem)
 		return
 	default:
 		return // inner type not droppable
@@ -5287,6 +5309,13 @@ func (c *Compiler) claimEnvTemp(val value.Value) {
 	// For closure fat pointers {i8*, i8*}: extract env (field 1) and compare at runtime
 	if st, ok := val.Type().(*irtypes.StructType); ok && len(st.Fields) == 2 {
 		envPtr := c.block.NewExtractValue(val, 1)
+		// T0814: Optional-wrapped closure {present, {fn,env}} — field 1 is the closure
+		// fat pointer, not the bare env i8*. Recurse so the env temp is claimed
+		// (otherwise cleanupEnvTemps frees it early → dangling env in the optional).
+		if _, isStruct := envPtr.Type().(*irtypes.StructType); isStruct {
+			c.claimEnvTemp(envPtr)
+			return
+		}
 		if envPtr.Type() != irtypes.I8Ptr {
 			return
 		}

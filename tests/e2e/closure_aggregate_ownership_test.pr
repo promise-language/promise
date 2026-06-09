@@ -166,6 +166,139 @@ local_optional_closure_binding() `test {
   assert(i == 30, "");
 }
 
+// T0814: Force-unwrap a LOCAL optional closure into a new local (`f := o!`) and
+// invoke it. The unwrap transfers the heap env from `o` to `f`; `o`'s present
+// flag is cleared so only `f` owns/frees the env. Heap-capturing closure.
+unwrap_local_optional_closure() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    (() -> int)? o = move || -> s.len;
+    f := o!;
+    assert(f() == 8, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// T0814: drop-only path — `f := o!` with no invoke. Crashed identically on
+// master (double-free of the env at scope exit), proving it is a drop/ownership
+// bug, not an invoke bug.
+unwrap_local_optional_closure_no_invoke() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    (() -> int)? o = move || -> s.len;
+    f := o!;
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// T0814: reassign the local optional closure (case H) before unwrapping. The
+// reassignment drops the old env and re-arms the drop flag; the new env is
+// claimed by `o` and transferred to `f`.
+reassign_local_optional_closure() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    t := "re" + "armed!";
+    (() -> int)? o = move || -> s.len;
+    o = move || -> t.len;
+    f := o!;
+    assert(f() == 8, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// T0814: move the local optional closure into another local (`g := o`) — the
+// move clears `o`'s optional drop flag so only `g` owns the env. Invoke via `g`.
+move_local_optional_closure() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    (() -> int)? o = move || -> s.len;
+    g := o;
+    f := g!;
+    assert(f() == 8, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// T0814: `move`-captured int-only closure — a heap env that captures no heap
+// data (the env-free path with a no-op env drop fn). Force-unwrap and invoke.
+unwrap_local_optional_closure_int_capture() `test {
+  i := 0;
+  while i < 30 {
+    n := 41;
+    (() -> int)? o = move || -> n + 1;
+    f := o!;
+    assert(f() == 42, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// T0814: absent (`none`) typed optional closure — the optdrop binding is still
+// registered for the Signature inner type, but with the present flag false the
+// drop must skip the inner env free (no crash, no leak on an empty optional).
+none_local_optional_closure() `test {
+  i := 0;
+  while i < 30 {
+    (() -> int)? o = none;
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// T0814: conditionally-present optional closure — exercises the *runtime*
+// present-flag branch in emitOptionalLocalValueDrop's Signature case: half the
+// iterations `o` holds a heap env (drop frees it), half it stays `none` (skip).
+conditional_local_optional_closure() `test {
+  i := 0;
+  while i < 30 {
+    (() -> int)? o = none;
+    if i % 2 == 0 {
+      s := "cap" + "tured";
+      o = move || -> s.len;
+    }
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// T0814: reassign a *present* optional closure to `none` — the reassign must
+// drop the old env (present=true old value) and leave the optional absent, so
+// scope exit frees nothing more. Distinct from the present->present reassign.
+reassign_local_optional_closure_to_none() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    (() -> int)? o = move || -> s.len;
+    o = none;
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// T0814: closure capturing a *vector* (not a string) — force-unwrap and invoke.
+// Exercises deep-drop of a non-string heap capture through the Signature env
+// path (the env drop fn must release the captured vector's backing buffer).
+unwrap_local_optional_closure_vector_capture() `test {
+  i := 0;
+  while i < 30 {
+    v := [1, 2, 3];
+    v.push(4);
+    (() -> int)? o = move || -> v.len;
+    f := o!;
+    assert(f() == 4, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
 array_closure_field() `test {
   i := 0;
   while i < 30 {

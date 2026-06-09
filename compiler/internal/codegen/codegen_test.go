@@ -12018,6 +12018,31 @@ func TestDropOptionalClosureField(t *testing.T) {
 	assertContains(t, ir, "env.deep_drop")
 }
 
+// T0814: force-unwrapping a LOCAL optional closure into a new local (`f := o!`)
+// transfers the heap env from `o` to `f`. The fix has two halves:
+//  1. claimEnvTemp recurses into the optional-wrapped fat pointer so the lambda's
+//     env temp is claimed by `o` (no early env.tmp.drop of the lambda env), and
+//  2. neutralizeForceUnwrapSource clears `o`'s present flag (`store i1 false`)
+//     so `o`'s optional drop is skipped and only `f` frees the env once.
+func TestUnwrapLocalOptionalClosure(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "cap" + "tured";
+			(() -> int)? o = move || -> s.len;
+			f := o!;
+		}
+	`)
+	// The unwrap path is taken and the source optional's present flag is cleared.
+	assertContains(t, ir, "unwrap.ok")
+	assertContains(t, ir, "store i1 false")
+	// f owns the env and frees it exactly once at scope exit.
+	assertContains(t, ir, "env.free")
+	// The optdrop for o is registered for the Signature inner case (the env is
+	// freed via the closure-env path when present, not leaked).
+	assertContains(t, ir, "optdrop.inner")
+	assertContains(t, ir, "closure.env.free")
+}
+
 // T0741: cloning a closure-containing enum aggregate must NOT shallow-copy the
 // closure env (that would alias one env between two droppable owners →
 // double-free). emitVariantFieldDup's Signature case nulls the cloned variant's

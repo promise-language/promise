@@ -1,6 +1,7 @@
 package common
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,14 +19,19 @@ func TestBuildInstallGateOutput(t *testing.T) {
 	root := t.TempDir()
 	work := t.TempDir()
 
-	// Two tests in one file: one pass, one fail. The runner emits absolute
-	// paths; on Windows those contain backslashes that must be JSON-escaped or
-	// the record lines are not valid JSON (and parse to zero records).
+	// Two tests in one file: one pass, one fail. Build the fixture with
+	// json.Marshal (not string concatenation) so the OS-native path is escaped
+	// correctly — on Windows the path contains backslashes (e.g. C:\Users\...),
+	// which would form invalid JSON escapes inside a raw string literal (T0823).
 	f := filepath.Join(root, "tests", "e2e", "basics.pr")
-	fJSON := strings.ReplaceAll(f, `\`, `\\`)
-	jsonl := `{"file":"` + fJSON + `","test":"add","status":"pass","elapsed":0.01}
-{"file":"` + fJSON + `","test":"broken","status":"fail","elapsed":0.02,"context":"assertion failed"}
-`
+	mk := func(test, status, ctx string, elapsed float64) string {
+		b, _ := json.Marshal(jsonlRecord{
+			File: f, Test: test, Status: status, Elapsed: elapsed, Context: ctx,
+		})
+		return string(b)
+	}
+	jsonl := mk("add", "pass", "", 0.01) + "\n" +
+		mk("broken", "fail", "assertion failed", 0.02) + "\n"
 	if err := os.WriteFile(filepath.Join(work, "tests.jsonl"), []byte(jsonl), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +68,26 @@ func TestBuildInstallGateOutput(t *testing.T) {
 	}
 	if len(out.Files[0].Tests) != 2 {
 		t.Errorf("expected 2 tests in group, got %d", len(out.Files[0].Tests))
+	}
+}
+
+// TestInstallFixtureBackslashPath proves the T0823 fix without a Windows host:
+// a record whose file path contains backslashes (as it would on Windows) must
+// survive the json.Marshal → ParseTestJSONL round-trip. The old raw-concat
+// fixture produced invalid JSON escapes (e.g. \U, \t) for such paths, so
+// ParseTestJSONL silently dropped every line and the metrics/groups came out 0.
+func TestInstallFixtureBackslashPath(t *testing.T) {
+	win := `C:\Users\runner\tests\e2e\basics.pr`
+	b, err := json.Marshal(jsonlRecord{File: win, Test: "add", Status: "pass", Elapsed: 0.01})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs := ParseTestJSONL(string(b) + "\n")
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record from backslash-path fixture, got %d", len(recs))
+	}
+	if recs[0].File != win {
+		t.Errorf("round-tripped file = %q, want %q", recs[0].File, win)
 	}
 }
 

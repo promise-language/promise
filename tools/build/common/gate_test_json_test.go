@@ -104,6 +104,34 @@ func TestBuildGateOutputZeroMetricsPresent(t *testing.T) {
 	}
 }
 
+// TestParseTestJSONLSkipsIncompleteRecords: a line that is valid JSON but lacks
+// the required identity fields (test and/or status) is dropped, same as a blank
+// or malformed line. This is the silent-drop class that masked T0823 — there the
+// drop came from invalid escapes, here from missing fields — so the parser must
+// keep only records carrying both a test name and a status, and pass through the
+// fully-populated ones unchanged.
+func TestParseTestJSONLSkipsIncompleteRecords(t *testing.T) {
+	jsonl := strings.Join([]string{
+		`{"file":"a.pr","test":"ok","status":"pass","elapsed":0.01}`,
+		`{"file":"a.pr","test":"no_status","elapsed":0.02}`,    // missing status → dropped
+		`{"file":"a.pr","status":"pass","elapsed":0.03}`,       // missing test → dropped
+		`{"file":"a.pr","test":"","status":"pass"}`,            // empty test → dropped
+		`{"file":"a.pr","test":"empty_status","status":""}`,    // empty status → dropped
+		`{"elapsed":0.04}`,                                     // neither → dropped
+		`{"file":"a.pr","test":"also_ok","status":"fail"}`,
+	}, "\n")
+	recs := ParseTestJSONL(jsonl)
+	if len(recs) != 2 {
+		t.Fatalf("want 2 surviving records, got %d: %+v", len(recs), recs)
+	}
+	if recs[0].Test != "ok" || recs[0].Status != "pass" {
+		t.Errorf("record[0] = %+v, want test=ok status=pass", recs[0])
+	}
+	if recs[1].Test != "also_ok" || recs[1].Status != "fail" {
+		t.Errorf("record[1] = %+v, want test=also_ok status=fail", recs[1])
+	}
+}
+
 func TestBuildGateOutputPathOutsideRootKept(t *testing.T) {
 	root := t.TempDir()
 	// A record whose file is not under root is kept verbatim (forward-slashed),

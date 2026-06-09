@@ -189,6 +189,12 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		if c.rejectBorrowedIdentVarDecl(s.Value, s.Type) {
 			return
 		}
+		// T0811: `Plain p = o!` / `Der? d = o as Der` etc. — see
+		// checkInferredVarDecl. Reject the wrapper-consume of a borrowed
+		// droppable Optional parameter before tryMove.
+		if c.rejectBorrowedOptionalUnwrapConsume(s.Value) {
+			return
+		}
 		c.tryMove(s.Value)
 	}
 	if s.Name != "_" {
@@ -354,6 +360,12 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	// Inferred decls cannot have implicit Optional wrap (LHS type is the RHS
 	// type), so no LHS TypeRef is needed for the wrap-depth carve-out.
 	if c.rejectBorrowedIdentVarDecl(s.Value, nil) {
+		return
+	}
+	// T0811: `p := o!` / `d := o as! T` / `d := o as T` binding the unwrapped
+	// inner of a borrowed droppable Optional parameter double-frees (callee
+	// binding-drop + caller drop). Reject before tryMove, like the if-let form.
+	if c.rejectBorrowedOptionalUnwrapConsume(s.Value) {
 		return
 	}
 	c.tryMove(s.Value)
@@ -548,6 +560,11 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		// because the caller still drops the original. tryMoveConsume rejects them
 		// at compile time (matches T0338/T0349 pattern for raise/yield/select-send).
 		c.tryMoveConsume(s.Value)
+		// T0811: `p = o!` / `p = o as! T` — reassigning a slot from the unwrapped
+		// inner of a borrowed droppable Optional parameter double-frees. The
+		// carve-out (isVarDeclAliasSafeType) keeps string/vector field stores
+		// allowed, matching verified runtime safety.
+		c.rejectBorrowedOptionalUnwrapConsume(s.Value)
 	} else if _, ok := s.Target.(*ast.MemberExpr); ok {
 		// T0382: `obj.field = a.borrow` for a non-ref-typed field stores an
 		// alias to the source's inner buffer. Fields have no per-slot
@@ -852,6 +869,109 @@ func (c *Checker) findBorrowedDroppableOptionalIfletSource(expr ast.Expr) *ast.I
 		}
 	}
 	return nil
+}
+
+// borrowedOptionalUnwrapConsumeSubject reports the borrowed-parameter ident
+// surfaced as the subject of a force-unwrap (`o!`) or optional cast
+// (`o as! T` / `o as T`) whose extracted inner is a droppable, non-alias-safe
+// type (heap/generic user type, Map, Set). Binding such an extraction takes
+// ownership of the caller-owned inner → callee binding-drop + caller drop
+// double-free (T0811). Mirrors rejectBorrowedIdentVarDecl (T0568) /
+// findBorrowedDroppableOptionalIfletSource (T0589); same "add '~'" affordance.
+//
+// Only optional-subject casts force-unwrap (`opt as! T` / `opt as T`); a cast
+// whose subject is a non-optional value keeps T0747 view semantics (codegen
+// clears the local's drop flag) and must NOT be rejected here. The inner-type
+// carve-out matches T0568: string/vector/handle inners are auto-dup-safe at
+// the binding site and stay allowed — only genuinely-unsafe heap-user inners
+// surface a double-free.
+func (c *Checker) borrowedOptionalUnwrapConsumeSubject(expr ast.Expr) *ast.IdentExpr {
+	// Peel ParenExpr on the wrapper.
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	var subject ast.Expr
+	var innerType types.Type
+	switch e := expr.(type) {
+	case *ast.OptionalUnwrapExpr:
+		subject = e.Expr
+		innerType = c.info.Types[e]
+	case *ast.CastExpr:
+		// Only optional-subject casts perform the force-unwrap that takes
+		// ownership of the inner. A non-optional downcast keeps view semantics.
+		if _, ok := c.info.Types[e.Expr].(*types.Optional); !ok {
+			return nil
+		}
+		subject = e.Expr
+		if e.Force {
+			innerType = c.info.Types[e]
+		} else if opt, ok := c.info.Types[e].(*types.Optional); ok {
+			innerType = opt.Elem()
+		} else {
+			innerType = c.info.Types[e]
+		}
+	default:
+		return nil
+	}
+	// Peel ParenExpr on the subject.
+	for {
+		p, ok := subject.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		subject = p.Expr
+	}
+	ident, ok := subject.(*ast.IdentExpr)
+	if !ok {
+		return nil
+	}
+	if !c.params[ident.Name] {
+		return nil
+	}
+	if state, tracked := c.state[ident.Name]; !tracked || state != Borrowed {
+		return nil
+	}
+	if _, ok := c.info.Types[ident].(*types.Optional); !ok {
+		return nil
+	}
+	if innerType == nil || isCopyType(innerType) || isVarDeclAliasSafeType(innerType) || !isDroppableType(innerType) {
+		return nil
+	}
+	return ident
+}
+
+// isForceUnwrapForm reports whether expr (after peeling ParenExpr) is a bare
+// force-unwrap `o!`. Used at call-arg sites where the cast form `o as! T` is
+// already rejected by the adjacent tryMoveConsumeCastSubject — guarding to the
+// force-unwrap shape avoids a duplicate T0811 diagnostic.
+func isForceUnwrapForm(expr ast.Expr) bool {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	_, ok := expr.(*ast.OptionalUnwrapExpr)
+	return ok
+}
+
+// rejectBorrowedOptionalUnwrapConsume errors and returns true when `expr` is a
+// force-unwrap / optional-cast consume of a borrowed droppable-inner Optional
+// parameter (the T0811 double-free shape). Callers short-circuit on true,
+// mirroring rejectBorrowedIdentVarDecl.
+func (c *Checker) rejectBorrowedOptionalUnwrapConsume(expr ast.Expr) bool {
+	if ident := c.borrowedOptionalUnwrapConsumeSubject(expr); ident != nil {
+		c.errorf(ident.Pos(),
+			"cannot consume borrowed parameter '%s' via force-unwrap/cast; add '~' to the parameter declaration to consume the Optional",
+			ident.Name)
+		return true
+	}
+	return false
 }
 
 // findBorrowedDroppableOptionalIfletInBlock inspects a block's trailing

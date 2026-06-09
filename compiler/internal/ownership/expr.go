@@ -605,6 +605,12 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 			// T0754: peel `as!/as T` so the cast subject is consumed too —
 			// enum-variant payload owns the value, no per-arg drop flag.
 			c.tryMoveConsumeCastSubject(arg.Value)
+			// T0811: `Enum.Variant(o!)` — force-unwrap of a borrowed droppable
+			// Optional param. The cast form is handled above; reject the
+			// force-unwrap shape here.
+			if isForceUnwrapForm(arg.Value) {
+				c.rejectBorrowedOptionalUnwrapConsume(arg.Value)
+			}
 		}
 		return
 	}
@@ -685,6 +691,12 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 					// the `~` callee takes ownership, no per-arg drop flag at this
 					// site for the cast wrapper.
 					c.tryMoveConsumeCastSubject(arg.Value)
+					// T0811: `g(o!)` into a `~` slot — force-unwrap of a borrowed
+					// droppable Optional param. The cast form is rejected by
+					// tryMoveConsumeCastSubject above; reject the force-unwrap shape.
+					if isForceUnwrapForm(arg.Value) {
+						c.rejectBorrowedOptionalUnwrapConsume(arg.Value)
+					}
 				} else {
 					c.createBorrowWithKind(arg.Value, kind, e.Pos())
 				}
@@ -700,6 +712,12 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 			// T0754: peel `as!/as T` so the cast subject is consumed too —
 			// constructor field-init owns the value, no per-arg drop flag.
 			c.tryMoveConsumeCastSubject(arg.Value)
+			// T0811: `T(field: o!)` — force-unwrap of a borrowed droppable
+			// Optional param. The cast form is handled above; reject the
+			// force-unwrap shape here.
+			if isForceUnwrapForm(arg.Value) {
+				c.rejectBorrowedOptionalUnwrapConsume(arg.Value)
+			}
 		}
 	}
 }

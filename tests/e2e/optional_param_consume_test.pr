@@ -1,0 +1,115 @@
+// T0811: consuming the inner of an owned (`~`) Optional parameter of a heap
+// user type via force-unwrap (`o!`) or RTTI cast (`o as! T` / `o as T`) must
+// run correctly with zero leaks. The borrowed (non-`~`) forms are rejected at
+// compile time (see internal/ownership T0811 tests); these exercise the
+// genuinely-safe `~` consume paths plus the always-allowed inline/move-out
+// forms on a borrowed parameter.
+type Plain {
+  string name;
+  drop(~this) {
+  }
+}
+
+type Base {
+  string name;
+  tag(&this) string `abstract;
+  drop(~this) {
+  }
+}
+
+type Der is Base {
+  string extra;
+  tag(&this) string {
+    return "der";
+  }
+}
+
+// `~Plain?` consume param, bound force-unwrap.
+consume_force_unwrap(~Plain? o) string {
+  p := o!;
+  return p.name;
+}
+
+// `~Plain?` consume param, typed-bound force-unwrap.
+consume_typed_unwrap(~Plain? o) string {
+  Plain p = o!;
+  return p.name;
+}
+
+// `~Base?` consume param, bound force cast.
+consume_force_cast(~Base? o) string {
+  d := o as! Der;
+  return d.name;
+}
+
+// `~Base?` consume param, optional (non-force) cast.
+consume_opt_cast(~Base? o) bool {
+  Der? d = o as Der;
+  if d {
+    return true;
+  }
+  return false;
+}
+
+// Borrowed param, inline force-unwrap (no binding) — always allowed.
+inline_unwrap(Plain? o) string {
+  return o!.name;
+}
+
+// Borrowed param, move the inner out — always allowed.
+move_out(Plain? o) Plain {
+  return o!;
+}
+
+// Local Optional source (not a parameter) — the binding owns it outright, so
+// the force-unwrap consume is genuinely safe (the documented "what works"
+// contrast). Must run with zero leaks.
+local_source_unwrap() string {
+  Plain x = Plain(name: "eta");
+  Plain? oo = x;
+  p := oo!;
+  return p.name;
+}
+
+consume_force_unwrap_runs() `test {
+  Plain x = Plain(name: "alpha");
+  Plain? o = x;
+  assert(consume_force_unwrap(o) == "alpha", "force-unwrap consume");
+}
+
+consume_typed_unwrap_runs() `test {
+  Plain x = Plain(name: "beta");
+  Plain? o = x;
+  assert(consume_typed_unwrap(o) == "beta", "typed force-unwrap consume");
+}
+
+consume_force_cast_runs() `test {
+  Der d = Der(name: "gamma", extra: "e");
+  Base b = d;
+  Base? o = b;
+  assert(consume_force_cast(o) == "gamma", "force cast consume");
+}
+
+consume_opt_cast_runs() `test {
+  Der d = Der(name: "delta", extra: "e");
+  Base b = d;
+  Base? o = b;
+  assert(consume_opt_cast(o), "optional cast consume");
+}
+
+inline_unwrap_runs() `test {
+  Plain x = Plain(name: "epsilon");
+  Plain? o = x;
+  assert(inline_unwrap(o) == "epsilon", "inline unwrap");
+}
+
+move_out_runs() `test {
+  Plain x = Plain(name: "zeta");
+  Plain? o = x;
+  p := move_out(o);
+  assert(p.name == "zeta", "move out");
+}
+
+local_source_unwrap_runs() `test {
+  assert(local_source_unwrap() == "eta", "local source unwrap");
+}

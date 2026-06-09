@@ -8444,6 +8444,302 @@ func TestT0589_IfLetBorrowedMethodParamRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot consume borrowed parameter 'a' via if-let")
 }
 
+// --- T0811 ---
+// T0811: binding the force-unwrapped (`o!`) or optional-cast (`o as! T` /
+// `o as T`) inner of a borrowed droppable Optional *parameter* double-frees
+// with the caller (callee binding-drop + caller drop). The bare/if-let/call-arg
+// consume forms are already rejected (T0568/T0589/T0586); this closes the
+// wrapper-consume gap. Carve-out matches T0568: scalar / string / vector inners
+// stay allowed; `~T?` consume params stay allowed.
+
+// Inferred var-decl: `p := o!` on a heap-user Optional param.
+func TestT0811_InferredForceUnwrapBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		take(_Box? o) {
+			p := o!;
+			_ = p;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Typed var-decl: `_Box p = o!`.
+func TestT0811_TypedForceUnwrapBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		take(_Box? o) {
+			_Box p = o!;
+			_ = p;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Assignment: `p = o!` into a local slot.
+func TestT0811_AssignForceUnwrapBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		take(_Box? o, _Box p) {
+			p = o!;
+			_ = p;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Inferred var-decl via force cast: `d := o as! Der`.
+func TestT0811_InferredForceCastBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(&this) string { return "d"; } }
+		take(Base? o) {
+			d := o as! Der;
+			_ = d;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Typed var-decl via force cast: `Der d = o as! Der`.
+func TestT0811_TypedForceCastBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(&this) string { return "d"; } }
+		take(Base? o) {
+			Der d = o as! Der;
+			_ = d;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Typed-optional var-decl via non-force cast: `Der? d = o as Der`.
+func TestT0811_OptionalCastBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(&this) string { return "d"; } }
+		take(Base? o) {
+			Der? d = o as Der;
+			_ = d;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Call-arg into `~` param: `g(o!)`.
+func TestT0811_ForceUnwrapCallArgConsumeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		g(~_Box p) { _ = p; }
+		take(_Box? o) {
+			g(o!);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Call-arg with a paren-wrapped force-unwrap: `g((o!))` — parens must not
+// defeat the reject. Exercises isForceUnwrapForm's ParenExpr peel.
+func TestT0811_ParenWrappedForceUnwrapCallArgRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		g(~_Box p) { _ = p; }
+		take(_Box? o) {
+			g((o!));
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Constructor field-init: `Wrap(p: o!)`.
+func TestT0811_ForceUnwrapConstructorArgRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		type Wrap { _Box p; drop(~this){} }
+		take(_Box? o) Wrap {
+			return Wrap(p: o!);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Carve-out: inline use `o!.name` is not a binding — stays allowed.
+func TestT0811_InlineForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { string name; drop(~this){} }
+		take(_Box? o) string {
+			return o!.name;
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: `return o!` moves the inner out of the function — allowed.
+func TestT0811_ReturnForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { string name; drop(~this){} }
+		take(_Box? o) _Box {
+			return o!;
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: scalar inner `int?` — int isn't droppable, predicate skips it.
+func TestT0811_ScalarForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(int? o) int {
+			v := o!;
+			return v;
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: string inner — auto-dup-safe at the binding site.
+func TestT0811_StringForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(string? o) string {
+			s := o!;
+			return s;
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: vector inner — auto-dup-safe.
+func TestT0811_VectorForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(int[]? o) int {
+			v := o!;
+			return v.len;
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: string inner into a `~string` call-arg — auto-dup-safe.
+func TestT0811_StringForceUnwrapCallArgAllowed(t *testing.T) {
+	ownerOK(t, `
+		g(~string s) { _ = s; }
+		take(string? o) {
+			g(o!);
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: `~_Box?` consume param + `p := o!` — owner is the callee, allowed.
+func TestT0811_ConsumeParamForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { string name; drop(~this){} }
+		take(~_Box? o) string {
+			p := o!;
+			return p.name;
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: `~Base?` consume param + force cast — allowed.
+func TestT0811_ConsumeParamForceCastAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(&this) string { return "d"; } }
+		take(~Base? o) string {
+			d := o as! Der;
+			return d.name;
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: non-optional-subject downcast keeps T0747 view semantics — must
+// NOT be rejected. `b` is a borrowed Base param (non-optional), `b as! Der`.
+func TestT0811_NonOptionalCastViewAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; drop(~this){} }
+		type Der is Base { tag(&this) string { return "d"; } }
+		take(Base b) string {
+			d := b as! Der;
+			return d.name;
+		}
+		test() {}
+	`)
+}
+
+// Method-param form: the reject also fires inside a method body.
+func TestT0811_ForceUnwrapMethodParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		type Holder {
+			int x;
+			take(_Box? o) {
+				p := o!;
+				_ = p;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
+// Carve-out: the source Optional is a LOCAL, not a parameter — the binding
+// owns it outright, so consuming its inner is safe (the documented "what
+// works" contrast from the bug). Exercises the `!c.params` guard.
+func TestT0811_LocalForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { string name; drop(~this){} }
+		take() string {
+			_Box x = _Box(name: "a");
+			_Box? oo = x;
+			p := oo!;
+			return p.name;
+		}
+		test() {}
+	`)
+}
+
+// Carve-out: subject is not a bare ident (a member-expr Optional field). The
+// surfaced subject isn't a tracked parameter ident, so the reject must not
+// fire. Exercises the "subject not IdentExpr" / member-source path.
+func TestT0811_MemberSourceForceUnwrapAllowed(t *testing.T) {
+	ownerOK(t, `
+		type _Box { string name; drop(~this){} }
+		type Holder { _Box? slot; drop(~this){} }
+		take(~Holder h) string {
+			p := h.slot!;
+			return p.name;
+		}
+		test() {}
+	`)
+}
+
+// Paren-wrapped force-unwrap `p := (o!)` on a borrowed param is still rejected
+// — parens must not defeat the consume check. Exercises the wrapper ParenExpr
+// peel.
+func TestT0811_ParenWrappedForceUnwrapRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type _Box { string name; drop(~this){} }
+		take(_Box? o) {
+			p := (o!);
+			_ = p;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot consume borrowed parameter 'o' via force-unwrap/cast")
+}
+
 // === T0591: Getter var-decl from droppable owner ===
 
 func TestT0591_GetterVarDeclFromDroppableOwnerOK(t *testing.T) {

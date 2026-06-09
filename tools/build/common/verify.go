@@ -286,6 +286,12 @@ func acquireVerifyLock(root string) (func(), error) {
 
 func acquireVerifyLockIn(lockPath, root string) (func(), error) {
 	fl := flock.New(lockPath)
+	// Holder metadata lives in a sibling file, NOT lockPath itself: on Windows
+	// flock takes a mandatory byte-range lock on byte 0 of lockPath, so a
+	// concurrent read/write of lockPath while the lock is held fails (the
+	// repo-dir write would be silently lost and waiters couldn't read it). The
+	// .owner sibling is unaffected by the lock and readable on every platform.
+	ownerPath := lockPath + ".owner"
 
 	// Try non-blocking first to detect contention.
 	locked, err := fl.TryLock()
@@ -295,7 +301,7 @@ func acquireVerifyLockIn(lockPath, root string) (func(), error) {
 	if !locked {
 		// Read the lock holder's repo directory before blocking.
 		msg := "Waiting for another verify run to finish..."
-		if data, err := os.ReadFile(lockPath); err == nil {
+		if data, err := os.ReadFile(ownerPath); err == nil {
 			if dir := strings.TrimSpace(string(data)); dir != "" {
 				msg = fmt.Sprintf("Waiting for verify run in %s to finish...", dir)
 			}
@@ -307,10 +313,10 @@ func acquireVerifyLockIn(lockPath, root string) (func(), error) {
 	}
 
 	// Record our repo directory for other waiters.
-	os.WriteFile(lockPath, []byte(root+"\n"), 0o644)
+	os.WriteFile(ownerPath, []byte(root+"\n"), 0o644)
 
 	return func() {
-		os.WriteFile(lockPath, nil, 0o644)
+		os.Remove(ownerPath)
 		fl.Unlock()
 	}, nil
 }

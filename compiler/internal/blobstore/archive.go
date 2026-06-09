@@ -27,7 +27,10 @@ func extractArchive(archive, dst string) error {
 	// Run tar in the archive's directory and pass only the basename as -f so that
 	// GNU tar 1.35 (Git's tar on Windows) does not misparse a colon-containing
 	// path like C:\... as the [user@]host:path remote-archive syntax (T0809).
-	cmd := exec.Command("tar", "-xf", filepath.Base(archive), "-C", dst)
+	// The -C target must use forward slashes: GNU tar mangles a backslash path
+	// (`C:\x` → `C\:\x: Cannot open`) but accepts the forward-slash `C:/x` form
+	// (and POSIX relative paths) unchanged (T0820).
+	cmd := exec.Command("tar", "-xf", filepath.Base(archive), "-C", filepath.ToSlash(dst))
 	cmd.Dir = filepath.Dir(archive)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tar -xf %s: %v\n%s", archive, err, out)
@@ -57,7 +60,12 @@ func extractZip(archive, dst string) error {
 	defer r.Close()
 	for _, f := range r.File {
 		name := filepath.Clean(f.Name)
-		if strings.HasPrefix(name, "..") || filepath.IsAbs(name) {
+		// Reject escaping entries. filepath.IsAbs alone is insufficient on
+		// Windows: a unix-absolute entry like "/etc/passwd" is not IsAbs there
+		// (no drive letter) yet Clean yields the rooted "\etc\passwd", so also
+		// refuse any name that begins with a path separator (T0820). Kept in
+		// lockstep with the build-side copy in tools/build/common/prebuilts.go.
+		if strings.HasPrefix(name, "..") || filepath.IsAbs(name) || os.IsPathSeparator(name[0]) {
 			return fmt.Errorf("zip: refusing to extract escaping path %q", f.Name)
 		}
 		path := filepath.Join(dst, name)

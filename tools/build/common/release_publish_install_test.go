@@ -95,6 +95,111 @@ func TestWriteInstallSums(t *testing.T) {
 	}
 }
 
+// TestCopyInstallScriptLF verifies the publish-install staging guard (T0820):
+// a CRLF install.sh must be normalized to LF (no `\r` bytes survive), and an
+// already-LF file must be copied unchanged.
+func TestCopyInstallScriptLF(t *testing.T) {
+	dir := t.TempDir()
+
+	// CRLF input → LF output, no carriage returns.
+	crlfSrc := filepath.Join(dir, "crlf.sh")
+	mustWrite(t, crlfSrc, "#!/bin/sh\r\nset -eu\r\necho hi\r\n")
+	crlfDst := filepath.Join(dir, "out-crlf.sh")
+	if err := copyInstallScriptLF(crlfSrc, crlfDst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(crlfDst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsRune(string(got), '\r') {
+		t.Errorf("copyInstallScriptLF left a carriage return in output: %q", got)
+	}
+	if string(got) != "#!/bin/sh\nset -eu\necho hi\n" {
+		t.Errorf("CRLF→LF content = %q, want LF form", got)
+	}
+
+	// Already-LF input is unchanged.
+	lf := "#!/bin/sh\nset -eu\necho hi\n"
+	lfSrc := filepath.Join(dir, "lf.sh")
+	mustWrite(t, lfSrc, lf)
+	lfDst := filepath.Join(dir, "out-lf.sh")
+	if err := copyInstallScriptLF(lfSrc, lfDst); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(lfDst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != lf {
+		t.Errorf("LF input changed: got %q, want %q", got, lf)
+	}
+}
+
+// TestCopyInstallScriptCRLF verifies the publish-install staging guard (T0820):
+// install.ps1/install.cmd must be normalized to CRLF regardless of the source's
+// line endings, so a Linux host (LF working tree) and a Windows host publish
+// byte-identical artifacts. Normalization must be idempotent on CRLF input.
+func TestCopyInstallScriptCRLF(t *testing.T) {
+	dir := t.TempDir()
+
+	// LF input → CRLF output (every \n becomes \r\n, no lone \n survives).
+	lfSrc := filepath.Join(dir, "lf.ps1")
+	mustWrite(t, lfSrc, "param()\nWrite-Host hi\n")
+	lfDst := filepath.Join(dir, "out-lf.ps1")
+	if err := copyInstallScriptCRLF(lfSrc, lfDst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(lfDst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "param()\r\nWrite-Host hi\r\n" {
+		t.Errorf("LF→CRLF content = %q, want CRLF form", got)
+	}
+	if strings.Contains(strings.ReplaceAll(string(got), "\r\n", ""), "\n") {
+		t.Errorf("copyInstallScriptCRLF left a lone \\n in output: %q", got)
+	}
+
+	// Already-CRLF input is unchanged (idempotent — no doubled \r).
+	crlf := "param()\r\nWrite-Host hi\r\n"
+	crlfSrc := filepath.Join(dir, "crlf.ps1")
+	mustWrite(t, crlfSrc, crlf)
+	crlfDst := filepath.Join(dir, "out-crlf.ps1")
+	if err := copyInstallScriptCRLF(crlfSrc, crlfDst); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(crlfDst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != crlf {
+		t.Errorf("CRLF input changed: got %q, want %q", got, crlf)
+	}
+}
+
+// TestCopyInstallScript_MissingSource verifies both staging helpers surface the
+// read error (rather than silently producing an empty dst) when the source
+// script is absent — the staging step in runReleasePublishInstall wraps this
+// into a "stage install.sh: ..." failure so a misconfigured tree aborts the
+// publish instead of uploading a truncated installer (T0820).
+func TestCopyInstallScript_MissingSource(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "does-not-exist.sh")
+	dst := filepath.Join(dir, "out.sh")
+
+	if err := copyInstallScriptLF(missing, dst); err == nil {
+		t.Error("copyInstallScriptLF with missing source = nil, want error")
+	}
+	if err := copyInstallScriptCRLF(missing, dst); err == nil {
+		t.Error("copyInstallScriptCRLF with missing source = nil, want error")
+	}
+	// Nothing should have been written for the failed copies.
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("dst should not exist after failed copy, stat err = %v", err)
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

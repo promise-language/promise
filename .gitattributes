@@ -3,3 +3,11 @@ tests/embed/*.bin -text
 tests/embed/*.sql -text
 tests/embed/*.md -text
 tests/embed/glob_fixtures/** -text
+
+# Shell scripts must stay LF — they are published verbatim (bin/release
+# publish-install reads the working tree) and run by POSIX sh. A CRLF copy
+# breaks `set -eu` etc. on the dist bucket (T0820).
+*.sh text eol=lf
+# Windows scripts keep CRLF.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

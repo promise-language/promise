@@ -56,8 +56,9 @@ case "$OS" in
   Darwin) PLATFORM="darwin" ;;
   *)
     echo "error: unsupported OS: $OS" >&2
-    echo "  Windows support is planned but not yet available." >&2
-    echo "  Windows users can use WSL2 to run the Linux binary." >&2
+    echo "  On Windows, use the PowerShell installer instead:" >&2
+    echo "    powershell -ExecutionPolicy Bypass -File install.ps1   (or install.cmd)" >&2
+    echo "  Or use WSL2 to run the Linux binary." >&2
     exit 1 ;;
 esac
 

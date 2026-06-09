@@ -60,14 +60,16 @@ func TestAcquireVerifyLock_WritesRepoDir(t *testing.T) {
 	}
 	defer unlock()
 
-	// Lock file should contain the repo directory.
-	data, err := os.ReadFile(lockPath)
+	// Holder metadata is recorded in the sibling .owner file (see
+	// acquireVerifyLockIn — lockPath itself carries a mandatory byte-0 lock on
+	// Windows and cannot be read while held).
+	data, err := os.ReadFile(lockPath + ".owner")
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := strings.TrimSpace(string(data))
 	if got != "/home/user/my-repo" {
-		t.Errorf("lock file = %q, want %q", got, "/home/user/my-repo")
+		t.Errorf("owner file = %q, want %q", got, "/home/user/my-repo")
 	}
 }
 
@@ -80,14 +82,10 @@ func TestAcquireVerifyLock_ClearsOnUnlock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Unlock should clear the file.
+	// Unlock should clear the holder metadata.
 	unlock()
 
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(data) != 0 {
-		t.Errorf("lock file after unlock = %q, want empty", string(data))
+	if _, err := os.Stat(lockPath + ".owner"); !os.IsNotExist(err) {
+		t.Errorf("owner file should be removed after unlock, stat err = %v", err)
 	}
 }

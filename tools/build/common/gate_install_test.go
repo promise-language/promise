@@ -18,10 +18,13 @@ func TestBuildInstallGateOutput(t *testing.T) {
 	root := t.TempDir()
 	work := t.TempDir()
 
-	// Two tests in one file: one pass, one fail.
+	// Two tests in one file: one pass, one fail. The runner emits absolute
+	// paths; on Windows those contain backslashes that must be JSON-escaped or
+	// the record lines are not valid JSON (and parse to zero records).
 	f := filepath.Join(root, "tests", "e2e", "basics.pr")
-	jsonl := `{"file":"` + f + `","test":"add","status":"pass","elapsed":0.01}
-{"file":"` + f + `","test":"broken","status":"fail","elapsed":0.02,"context":"assertion failed"}
+	fJSON := strings.ReplaceAll(f, `\`, `\\`)
+	jsonl := `{"file":"` + fJSON + `","test":"add","status":"pass","elapsed":0.01}
+{"file":"` + fJSON + `","test":"broken","status":"fail","elapsed":0.02,"context":"assertion failed"}
 `
 	if err := os.WriteFile(filepath.Join(work, "tests.jsonl"), []byte(jsonl), 0o644); err != nil {
 		t.Fatal(err)

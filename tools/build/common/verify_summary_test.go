@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -249,14 +250,28 @@ func TestInvalidateGateValues_PermissionError(t *testing.T) {
 	if err := WriteGateValues(root, gv); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	os.Chmod(dir, 0o555) // read+exec only — Remove will fail
-	defer os.Chmod(dir, 0o755)
+	// Arrange for os.Remove to fail with a non-IsNotExist error so the warning
+	// path runs and the file survives. The mechanism is platform-specific:
+	// POSIX honors directory permissions for unlink; Windows does not (chmod
+	// only toggles a per-file read-only bit), so there we instead hold an open
+	// handle — os.Open's share mode omits FILE_SHARE_DELETE, making os.Remove
+	// fail with a sharing violation.
+	path := filepath.Join(dir, gateValuesFile)
+	if runtime.GOOS == "windows" {
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("open to block removal: %v", err)
+		}
+		defer f.Close()
+	} else {
+		os.Chmod(dir, 0o555) // read+exec only — Remove will fail
+		defer os.Chmod(dir, 0o755)
+	}
 
 	// Should not panic; prints warning to stderr.
 	InvalidateGateValues(root)
 
 	// File should still exist since removal was denied.
-	path := filepath.Join(dir, gateValuesFile)
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("file should still exist after failed removal: %v", err)
 	}

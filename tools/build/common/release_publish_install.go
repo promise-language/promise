@@ -155,11 +155,27 @@ func runReleasePublishInstall(root string, args []string) error {
 		fmt.Printf("\npublish-install staged %s assets in %s (upload skipped)\n", *host, outDir)
 		return nil
 	}
-	uploads := []string{thinAsset, fullAsset, sumsPath,
-		filepath.Join(root, "scripts", "install.sh"),
-		filepath.Join(root, "scripts", "install.ps1"),
-		filepath.Join(root, "scripts", "install.cmd"),
+	// Stage the install scripts into outDir before uploading, normalizing line
+	// endings so every publishing host emits byte-identical artifacts regardless
+	// of its core.autocrlf setting or .gitattributes checkout (T0820). install.sh
+	// is forced to LF: POSIX `sh` chokes on a trailing `\r` ("set: -<CR>: invalid
+	// option"), so a CRLF copy breaks every `curl … | sh` user. install.ps1 and
+	// install.cmd are forced to CRLF: they are Windows scripts (cmd.exe in
+	// particular is sensitive to bare-LF line endings), and forcing CRLF means a
+	// Linux host (LF working tree) and a Windows host publish the same bytes.
+	stagedSh := filepath.Join(outDir, "install.sh")
+	if err := copyInstallScriptLF(filepath.Join(root, "scripts", "install.sh"), stagedSh); err != nil {
+		return fmt.Errorf("stage install.sh: %w", err)
 	}
+	stagedPs1 := filepath.Join(outDir, "install.ps1")
+	if err := copyInstallScriptCRLF(filepath.Join(root, "scripts", "install.ps1"), stagedPs1); err != nil {
+		return fmt.Errorf("stage install.ps1: %w", err)
+	}
+	stagedCmd := filepath.Join(outDir, "install.cmd")
+	if err := copyInstallScriptCRLF(filepath.Join(root, "scripts", "install.cmd"), stagedCmd); err != nil {
+		return fmt.Errorf("stage install.cmd: %w", err)
+	}
+	uploads := []string{thinAsset, fullAsset, sumsPath, stagedSh, stagedPs1, stagedCmd}
 	for _, p := range uploads {
 		key := installDistPrefix + "/" + filepath.Base(p)
 		fmt.Printf("Uploading %s → R2 %s/%s...\n", filepath.Base(p), *r2Bucket, key)
@@ -169,6 +185,42 @@ func runReleasePublishInstall(root string, args []string) error {
 	}
 	fmt.Printf("\npublish-install: uploaded %d dist objects for %s to bucket %s\n", len(uploads), *host, *r2Bucket)
 	return nil
+}
+
+// copyInstallScriptLF copies src to dst stripping carriage returns (CRLF→LF;
+// bare `\n` is left untouched). install.sh is published verbatim and run by
+// POSIX `sh`, which rejects a trailing `\r` on `set -eu` etc. — see T0820. A
+// belt-and-suspenders guard so a host with core.autocrlf=true (Windows) can
+// never publish a CRLF install.sh even if .gitattributes was bypassed.
+func copyInstallScriptLF(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	lf := strings.ReplaceAll(string(data), "\r", "")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, []byte(lf), 0o644)
+}
+
+// copyInstallScriptCRLF copies src to dst normalizing every line ending to CRLF
+// (T0820). It first strips all `\r` (collapsing CRLF→LF) then rewrites each `\n`
+// as `\r\n`, so the result is the same whether the source was checked out LF
+// (Linux host) or CRLF (Windows host) — publish-install reads the working tree,
+// and install.ps1/install.cmd are Windows scripts that want CRLF. Idempotent:
+// applying it to already-CRLF input yields identical bytes.
+func copyInstallScriptCRLF(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	lf := strings.ReplaceAll(string(data), "\r", "")
+	crlf := strings.ReplaceAll(lf, "\n", "\r\n")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, []byte(crlf), 0o644)
 }
 
 // writeInstallSums computes the sha256 of each .gz asset in assetPaths and

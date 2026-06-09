@@ -183,26 +183,47 @@ func TestResolveFromZipArchive(t *testing.T) {
 }
 
 // TestExtractZipRejectsEscapingPath verifies the zip extractor refuses members
-// whose path escapes the destination dir (zip-slip defense).
+// whose path escapes the destination dir (zip-slip defense). Covers the three
+// rejection branches: parent-relative (`..`), deep parent escape, and a
+// unix-absolute entry. The last is the T0820 case: "/etc/passwd" is not
+// filepath.IsAbs on Windows (no drive letter) yet Clean yields a rooted
+// "\etc\passwd", so the os.IsPathSeparator(name[0]) guard catches it.
 func TestExtractZipRejectsEscapingPath(t *testing.T) {
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	w, _ := zw.Create("../escape.txt")
-	w.Write([]byte("pwned"))
-	zw.Close()
+	cases := []struct {
+		name      string
+		entryName string
+	}{
+		{"parent escape", "../escape.txt"},
+		{"deep parent escape", "sub/../../../../etc/passwd"},
+		{"absolute unix", "/etc/passwd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			zw := zip.NewWriter(&buf)
+			w, _ := zw.Create(tc.entryName)
+			w.Write([]byte("pwned"))
+			zw.Close()
 
-	dir := t.TempDir()
-	archivePath := filepath.Join(dir, "evil.zip")
-	if err := os.WriteFile(archivePath, buf.Bytes(), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !isZip(archivePath) {
-		t.Fatal("crafted file should be detected as zip")
-	}
-	dest := filepath.Join(dir, "out")
-	err := extractZip(archivePath, dest)
-	if err == nil || !strings.Contains(err.Error(), "escaping path") {
-		t.Fatalf("expected escaping-path rejection, got: %v", err)
+			dir := t.TempDir()
+			archivePath := filepath.Join(dir, "evil.zip")
+			if err := os.WriteFile(archivePath, buf.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if !isZip(archivePath) {
+				t.Fatal("crafted file should be detected as zip")
+			}
+			dest := filepath.Join(dir, "out")
+			err := extractZip(archivePath, dest)
+			if err == nil || !strings.Contains(err.Error(), "escaping path") {
+				t.Fatalf("expected escaping-path rejection for %q, got: %v", tc.entryName, err)
+			}
+			// Confirm the payload was not written outside dest.
+			outside := filepath.Join(filepath.Dir(dest), "etc", "passwd")
+			if _, statErr := os.Stat(outside); statErr == nil {
+				t.Errorf("file written outside dest at %s — escape!", outside)
+			}
+		})
 	}
 }
 

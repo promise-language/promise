@@ -11,10 +11,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/module"
 )
 
 func TestResolveSyncConfigDefault(t *testing.T) {
@@ -754,4 +757,546 @@ func TestFindAssetsPrefersAPIURLWithToken(t *testing.T) {
 			t.Fatalf("expected fallback to browser url, got %s", bin)
 		}
 	})
+}
+
+// --- T0825: channel/update model — assetSHAFromSums, shortBuildID,
+// update check, and use download-on-demand. ---
+
+func TestAssetSHAFromSums(t *testing.T) {
+	const assetName = "promise-linux-amd64.gz"
+	want := "1111111111111111111111111111111111111111111111111111111111111111"
+	sums := want + "  " + assetName + "\n" +
+		"0000000000000000000000000000000000000000000000000000000000000000  promise-linux-amd64-full.gz\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(sums))
+	}))
+	defer srv.Close()
+
+	got, err := assetSHAFromSums(srv.URL, assetName)
+	if err != nil {
+		t.Fatalf("assetSHAFromSums: %v", err)
+	}
+	if got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestAssetSHAFromSumsMissing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("abc  promise-other.gz\n"))
+	}))
+	defer srv.Close()
+
+	_, err := assetSHAFromSums(srv.URL, "promise-linux-amd64.gz")
+	if err == nil {
+		t.Fatal("expected error for missing asset entry")
+	}
+	if !strings.Contains(err.Error(), "no checksum found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestShortBuildID(t *testing.T) {
+	if got := shortBuildID(""); got != "(none)" {
+		t.Errorf("empty: got %q, want (none)", got)
+	}
+	if got := shortBuildID("abc"); got != "abc" {
+		t.Errorf("short: got %q, want abc", got)
+	}
+	long := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	if got := shortBuildID(long); got != long[:7] {
+		t.Errorf("long: got %q, want %q", got, long[:7])
+	}
+}
+
+// stableReleasesServer serves a GitHub releases list with the given stable
+// epoch tags (no prereleases).
+func stableReleasesServer(t *testing.T, tags ...string) *httptest.Server {
+	t.Helper()
+	var releases []ghRelease
+	for _, tag := range tags {
+		releases = append(releases, ghRelease{TagName: tag})
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(releases)
+	}))
+}
+
+func TestRunUpdateCheckStableAvailable(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("GITHUB_TOKEN", "")
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := stableReleasesServer(t, "epoch-2026.0", "epoch-2026.2")
+	defer srv.Close()
+	t.Setenv("PROMISE_RELEASE_URL", srv.URL)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() { runUpdateCheck(nil) })
+	})
+	if !strings.Contains(out, "Update available: epoch 2026.0 -> 2026.2") {
+		t.Errorf("expected stable update-available message, got: %s", out)
+	}
+}
+
+func TestRunUpdateCheckStableUpToDate(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("GITHUB_TOKEN", "")
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := stableReleasesServer(t, "epoch-2026.0", "epoch-2026.2")
+	defer srv.Close()
+	t.Setenv("PROMISE_RELEASE_URL", srv.URL)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() { runUpdateCheck(nil) })
+	})
+	if !strings.Contains(out, "Up to date (epoch 2026.2)") {
+		t.Errorf("expected up-to-date message, got: %s", out)
+	}
+}
+
+// TestRunUpdateCheckStableNumericOrder pins the latent-bug fix end-to-end: with
+// 2026.9 active and 2026.10 published, check must report an update (lexicographic
+// ordering would wrongly call 2026.9 newer).
+func TestRunUpdateCheckStableNumericOrder(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("GITHUB_TOKEN", "")
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.9\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := stableReleasesServer(t, "epoch-2026.9", "epoch-2026.10")
+	defer srv.Close()
+	t.Setenv("PROMISE_RELEASE_URL", srv.URL)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() { runUpdateCheck(nil) })
+	})
+	if !strings.Contains(out, "Update available: epoch 2026.9 -> 2026.10") {
+		t.Errorf("expected 2026.10 to rank above 2026.9, got: %s", out)
+	}
+}
+
+func TestRunUpdateCheckJSONShape(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("GITHUB_TOKEN", "")
+	if err := os.WriteFile(filepath.Join(tmp, "active"), []byte("2026.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := stableReleasesServer(t, "epoch-2026.0", "epoch-2026.2")
+	defer srv.Close()
+	t.Setenv("PROMISE_RELEASE_URL", srv.URL)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() { runUpdateCheck([]string{"--json"}) })
+	})
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("output is not valid JSON (%v): %s", err, out)
+	}
+	if res["channel"] != "stable" || res["active"] != "2026.0" || res["latest"] != "2026.2" {
+		t.Fatalf("unexpected JSON fields: %v", res)
+	}
+	if res["updateAvailable"] != true {
+		t.Fatalf("expected updateAvailable=true, got: %v", res)
+	}
+}
+
+// nextReleasesServer serves a releases list containing an epoch-next prerelease
+// whose SHA256SUMS lists remoteSHA for the current platform asset.
+func nextReleasesServer(t *testing.T, remoteSHA string) *httptest.Server {
+	t.Helper()
+	asset := platformAssetName()
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/SHA256SUMS":
+			_, _ = w.Write([]byte(remoteSHA + "  " + asset + "\n"))
+		default:
+			releases := []ghRelease{
+				{TagName: "epoch-next", Prerelease: true, Assets: []ghAsset{
+					{Name: asset, BrowserDownloadURL: srv.URL + "/" + asset},
+					{Name: "SHA256SUMS", BrowserDownloadURL: srv.URL + "/SHA256SUMS"},
+				}},
+			}
+			_ = json.NewEncoder(w).Encode(releases)
+		}
+	}))
+	return srv
+}
+
+func TestRunUpdateCheckNextAvailable(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("GITHUB_TOKEN", "")
+	if err := module.WriteUpdateChannel(module.ChannelNext); err != nil {
+		t.Fatal(err)
+	}
+	local := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	remote := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if err := module.WriteEpochBuildID("next", local); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := nextReleasesServer(t, remote)
+	defer srv.Close()
+	t.Setenv("PROMISE_RELEASE_URL", srv.URL)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() { runUpdateCheck(nil) })
+	})
+	// 7-char shortening in human output; full hashes must NOT appear.
+	if !strings.Contains(out, "Update available: build "+local[:7]+" -> "+remote[:7]) {
+		t.Errorf("expected shortened next update message, got: %s", out)
+	}
+	if strings.Contains(out, local) || strings.Contains(out, remote) {
+		t.Errorf("human output must not contain full hashes, got: %s", out)
+	}
+}
+
+func TestRunUpdateCheckNextUpToDate(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("GITHUB_TOKEN", "")
+	if err := module.WriteUpdateChannel(module.ChannelNext); err != nil {
+		t.Fatal(err)
+	}
+	same := "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	if err := module.WriteEpochBuildID("next", same); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := nextReleasesServer(t, same)
+	defer srv.Close()
+	t.Setenv("PROMISE_RELEASE_URL", srv.URL)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() { runUpdateCheck(nil) })
+	})
+	if !strings.Contains(out, "Up to date (build "+same[:7]+")") {
+		t.Errorf("expected up-to-date next message, got: %s", out)
+	}
+}
+
+func TestRunUpdateCheckNextJSONFullHash(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+	t.Setenv("GITHUB_TOKEN", "")
+	if err := module.WriteUpdateChannel(module.ChannelNext); err != nil {
+		t.Fatal(err)
+	}
+	local := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd0"
+	remote := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee1"
+	if err := module.WriteEpochBuildID("next", local); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := nextReleasesServer(t, remote)
+	defer srv.Close()
+	t.Setenv("PROMISE_RELEASE_URL", srv.URL)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() { runUpdateCheck([]string{"--json"}) })
+	})
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("output is not valid JSON (%v): %s", err, out)
+	}
+	// JSON carries the FULL hashes (not shortened).
+	if res["localBuild"] != local || res["remoteBuild"] != remote {
+		t.Fatalf("expected full build hashes in JSON, got: %v", res)
+	}
+	if res["updateAvailable"] != true {
+		t.Fatalf("expected updateAvailable=true, got: %v", res)
+	}
+}
+
+// TestRunUseDownloadsOnDemand: `promise use <epoch>` on a missing epoch now
+// downloads from releases instead of erroring "Run: promise sync" (T0825).
+// Run in a subprocess (runUse calls os.Exit). The mock server 404s the tag so
+// the download fails before the exec-install step — enough to prove the attempt.
+func TestRunUseDownloadsOnDemand(t *testing.T) {
+	if os.Getenv("TEST_USE_ONDEMAND") == "1" {
+		runUse([]string{"9999.9"})
+		return
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunUseDownloadsOnDemand")
+	cmd.Env = append(os.Environ(),
+		"TEST_USE_ONDEMAND=1",
+		"PROMISE_HOME="+tmp,
+		"PROMISE_RELEASE_URL="+srv.URL,
+		"GITHUB_TOKEN=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit when on-demand download fails")
+	}
+	s := string(out)
+	if !strings.Contains(s, "downloading from") {
+		t.Errorf("expected an on-demand download attempt, got: %s", s)
+	}
+	if !strings.Contains(s, "not available") {
+		t.Errorf("expected 'not available' download failure, got: %s", s)
+	}
+	if strings.Contains(s, "promise sync") {
+		t.Errorf("stale 'promise sync' hint should be gone, got: %s", s)
+	}
+}
+
+// TestDownloadAndInstallNoAsset: downloadAndInstall must fail fast (before any
+// download or exec) when the release carries no asset for the current platform.
+// This is the only downloadAndInstall path reachable without executing a real
+// downloaded binary; the success tail is integration-level.
+func TestDownloadAndInstallNoAsset(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	release := &ghRelease{
+		TagName: "epoch-2026.0",
+		Assets:  []ghAsset{{Name: "some-other-platform.gz", BrowserDownloadURL: "https://example.com/x"}},
+	}
+	err := downloadAndInstall(release, "2026.0")
+	if err == nil {
+		t.Fatal("expected error when no platform asset is present")
+	}
+	if !strings.Contains(err.Error(), "no binary available") {
+		t.Fatalf("expected 'no binary available' error, got: %v", err)
+	}
+}
+
+// TestDoUpdateNoStableRelease: bare `promise update` on the (default) stable
+// channel resolves the latest stable release; when the release list has none it
+// must error and exit 1 rather than proceed. Exercises doUpdate's channel read +
+// stable resolution + error handling (the success tail execs a downloaded
+// binary, which is integration-level). Run in a subprocess (doUpdate exits).
+func TestDoUpdateNoStableRelease(t *testing.T) {
+	if os.Getenv("TEST_DO_UPDATE_NO_STABLE") == "1" {
+		runUpdate(nil)
+		return
+	}
+
+	// A releases list with only non-epoch tags → no stable epoch found.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]ghRelease{{TagName: "v1.0.0"}})
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestDoUpdateNoStableRelease")
+	cmd.Env = append(os.Environ(),
+		"TEST_DO_UPDATE_NO_STABLE=1",
+		"PROMISE_HOME="+tmp,
+		"PROMISE_RELEASE_URL="+srv.URL,
+		"GITHUB_TOKEN=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit when no stable release is found")
+	}
+	s := string(out)
+	// The status line names the resolved channel (stable by default).
+	if !strings.Contains(s, "channel: stable") {
+		t.Errorf("expected stable channel in status line, got: %s", s)
+	}
+	if !strings.Contains(s, "no stable epoch releases found") {
+		t.Errorf("expected 'no stable epoch releases found' error, got: %s", s)
+	}
+}
+
+// TestRunUpdateChannelPrint: `promise update channel` (no arg) prints the
+// current channel without mutating anything. Covers the no-arg branch of
+// runUpdateChannel directly (the set branch calls doUpdate which exits).
+func TestRunUpdateChannelPrint(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	// Default with no channel file → "stable".
+	out := captureStdout(t, func() {
+		captureStderr(func() { runUpdateChannel(nil) })
+	})
+	if strings.TrimSpace(out) != module.ChannelStable {
+		t.Errorf("expected %q, got %q", module.ChannelStable, strings.TrimSpace(out))
+	}
+
+	// After persisting "next" it must print "next".
+	if err := module.WriteUpdateChannel(module.ChannelNext); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t, func() {
+		captureStderr(func() { runUpdateChannel(nil) })
+	})
+	if strings.TrimSpace(out) != module.ChannelNext {
+		t.Errorf("expected %q, got %q", module.ChannelNext, strings.TrimSpace(out))
+	}
+}
+
+// TestRunUpdateDispatchChannel: `promise update channel` routes through the
+// runUpdate dispatcher to runUpdateChannel (covers the "channel" case of the
+// dispatcher's switch, the no-arg print path being side-effect-free).
+func TestRunUpdateDispatchChannel(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	out := captureStdout(t, func() {
+		captureStderr(func() { runUpdate([]string{"channel"}) })
+	})
+	if strings.TrimSpace(out) != module.ChannelStable {
+		t.Errorf("expected dispatcher to print current channel %q, got %q", module.ChannelStable, strings.TrimSpace(out))
+	}
+}
+
+// TestRunUpdateChannelInvalid: `promise update channel beta` rejects an
+// unknown channel name and exits 1 without persisting anything. Run in a
+// subprocess (runUpdateChannel calls os.Exit on the WriteUpdateChannel error).
+func TestRunUpdateChannelInvalid(t *testing.T) {
+	if os.Getenv("TEST_UPDATE_CHANNEL_INVALID") == "1" {
+		runUpdateChannel([]string{"beta"})
+		return
+	}
+	tmp := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunUpdateChannelInvalid")
+	cmd.Env = append(os.Environ(),
+		"TEST_UPDATE_CHANNEL_INVALID=1",
+		"PROMISE_HOME="+tmp,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit for invalid channel name")
+	}
+	if !strings.Contains(string(out), "invalid update channel") {
+		t.Errorf("expected invalid-channel error, got: %s", string(out))
+	}
+	// Nothing persisted.
+	if _, statErr := os.Stat(filepath.Join(tmp, "channel")); !os.IsNotExist(statErr) {
+		t.Errorf("expected no channel file after invalid write, stat err: %v", statErr)
+	}
+}
+
+// TestRunUpdateChannelTooManyArgs: `promise update channel a b` is a usage
+// error (exactly zero or one argument). Run in a subprocess (it exits 1).
+func TestRunUpdateChannelTooManyArgs(t *testing.T) {
+	if os.Getenv("TEST_UPDATE_CHANNEL_ARGS") == "1" {
+		runUpdateChannel([]string{"stable", "extra"})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunUpdateChannelTooManyArgs")
+	cmd.Env = append(os.Environ(), "TEST_UPDATE_CHANNEL_ARGS=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit for too many channel args")
+	}
+	if !strings.Contains(string(out), "usage: promise update channel") {
+		t.Errorf("expected channel usage message, got: %s", string(out))
+	}
+}
+
+// TestRunUpdateCheckBadFlag: `promise update check --bogus` is a usage error.
+// Run in a subprocess (runUpdateCheck exits 1 on an unknown flag).
+func TestRunUpdateCheckBadFlag(t *testing.T) {
+	if os.Getenv("TEST_UPDATE_CHECK_FLAG") == "1" {
+		runUpdateCheck([]string{"--bogus"})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunUpdateCheckBadFlag")
+	cmd.Env = append(os.Environ(), "TEST_UPDATE_CHECK_FLAG=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit for unknown check flag")
+	}
+	if !strings.Contains(string(out), "usage: promise update check") {
+		t.Errorf("expected check usage message, got: %s", string(out))
+	}
+}
+
+// TestRunUpdateCheckNextNoSums: on the next channel, if the epoch-next release
+// has the platform asset but NO SHA256SUMS asset, `update check` cannot
+// determine a build identity and must error out clearly rather than silently
+// claim "up to date". Run in a subprocess (runUpdateCheck exits 1).
+func TestRunUpdateCheckNextNoSums(t *testing.T) {
+	if os.Getenv("TEST_UPDATE_CHECK_NOSUMS") == "1" {
+		runUpdateCheck(nil)
+		return
+	}
+
+	// Server: an epoch-next prerelease with the platform asset but no SHA256SUMS.
+	asset := platformAssetName()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		releases := []ghRelease{
+			{TagName: "epoch-next", Prerelease: true, Assets: []ghAsset{
+				{Name: asset, BrowserDownloadURL: "https://example.com/" + asset},
+			}},
+		}
+		_ = json.NewEncoder(w).Encode(releases)
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	// Persist the next channel into the shared PROMISE_HOME the subprocess reads.
+	t.Setenv("PROMISE_HOME", tmp)
+	if err := module.WriteUpdateChannel(module.ChannelNext); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunUpdateCheckNextNoSums")
+	cmd.Env = append(os.Environ(),
+		"TEST_UPDATE_CHECK_NOSUMS=1",
+		"PROMISE_HOME="+tmp,
+		"PROMISE_RELEASE_URL="+srv.URL,
+		"GITHUB_TOKEN=",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit when next release has no SHA256SUMS")
+	}
+	if !strings.Contains(string(out), "no SHA256SUMS asset") {
+		t.Errorf("expected 'no SHA256SUMS asset' error, got: %s", string(out))
+	}
+}
+
+// TestRunUseRejectsNext: `promise use next` is a category error — "next" is a
+// rolling release channel, not a concrete epoch, and following it activates the
+// real YYYY.N epoch the next branch carries (there is no epochs/next/ install).
+// `use next` must reject and point at `promise update channel next` rather than
+// leave a dangling active pointer (T0825). Run in a subprocess (runUse exits).
+func TestRunUseRejectsNext(t *testing.T) {
+	if os.Getenv("TEST_USE_NEXT_REJECT") == "1" {
+		runUse([]string{"next"})
+		return
+	}
+
+	tmp := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunUseRejectsNext")
+	cmd.Env = append(os.Environ(),
+		"TEST_USE_NEXT_REJECT=1",
+		"PROMISE_HOME="+tmp,
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected non-zero exit for `use next`")
+	}
+	s := string(out)
+	if !strings.Contains(s, "release channel, not an epoch") {
+		t.Errorf("expected channel-not-epoch rejection, got: %s", s)
+	}
+	if !strings.Contains(s, "promise update channel next") {
+		t.Errorf("expected pointer to `update channel next`, got: %s", s)
+	}
+	// Must not have written a dangling active="next" pointer.
+	if data, rerr := os.ReadFile(filepath.Join(tmp, "active")); rerr == nil {
+		t.Errorf("use next must not write the active file, got: %q", string(data))
+	}
 }

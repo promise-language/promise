@@ -115,120 +115,65 @@ type ghAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
-// runSync implements `promise sync [epoch|next]`.
+// runUpdate implements `promise update` and its subverbs (T0825) — self-update
+// of the toolchain (§2.6). The update channel (what `update` follows) is
+// orthogonal to the active epoch (which compiler runs builds): the channel is
+// persisted in <PromiseHome>/channel and selected with `update channel`, while
+// the active epoch is selected with `promise use`. Dependency `[require]` pin
+// updates live under `promise pkg update` (T0770).
 //
 // Usage:
 //
-//	promise sync              latest stable epoch (latest non-prerelease tagged release)
-//	promise sync 2026.0       specific stable epoch
-//	promise sync next         latest pre-release build
-func runSync(args []string) {
-	target := ""
+//	promise update                        follow the channel: install its latest + activate
+//	promise update check [--json]         report whether an update is available (no changes)
+//	promise update channel                print the current update channel
+//	promise update channel <stable|next>  set the channel and immediately follow it
+func runUpdate(args []string) {
 	if len(args) > 0 {
-		target = args[0]
-	}
-	if len(args) > 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise sync [epoch|next]")
-		os.Exit(1)
-	}
-
-	cfg := resolveSyncConfig()
-	fmt.Fprintf(os.Stderr, "Checking %s for Promise releases...\n", cfg.describe())
-
-	var release *ghRelease
-	var epoch string
-	var err error
-
-	switch {
-	case target == "next":
-		// Find the pre-release tagged epoch-next.
-		release, err = findNextRelease(cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		epoch = "next"
-
-	case target == "":
-		// Latest stable: find the latest non-prerelease epoch-* tag.
-		release, epoch, err = findLatestStableRelease(cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-
-	default:
-		// Specific epoch: look for tag epoch-<target>.
-		epoch = target
-		release, err = findSpecificRelease(cfg, target)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	// For stable epochs (not "next"), check if already installed.
-	if epoch != "next" {
-		if isEpochInstalled(epoch) {
-			fmt.Printf("epoch %s is already installed.\n", epoch)
+		switch args[0] {
+		case "check":
+			runUpdateCheck(args[1:])
 			return
+		case "channel":
+			runUpdateChannel(args[1:])
+			return
+		default:
+			// `update` no longer takes an epoch argument — a specific epoch is now
+			// `promise use <epoch>` (which downloads on demand). This removes the old
+			// update-vs-sync target ambiguity.
+			fmt.Fprintf(os.Stderr, "promise update no longer takes an epoch argument.\n"+
+				"  promise update                        follow the update channel (install + activate latest)\n"+
+				"  promise update check [--json]         report whether an update is available\n"+
+				"  promise update channel [stable|next]  show or set the update channel\n"+
+				"  promise use <epoch>                   activate a specific epoch (downloads on demand)\n")
+			os.Exit(1)
 		}
 	}
+	doUpdate()
+}
 
-	if err := downloadAndInstall(release, epoch); err != nil {
+// doUpdate follows the persisted update channel: it resolves the channel's
+// latest release, downloads and installs it, and the child `install`
+// auto-activates the freshly installed epoch (decision #2 — otherwise a
+// `promise use <epoch>` would freeze updates forever).
+func doUpdate() {
+	cfg := resolveSyncConfig()
+	channel, err := module.UpdateChannel()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("epoch %s installed.\n", epoch)
-}
-
-// runUpdate implements `promise update [epoch|next]` — self-update of the
-// toolchain (§2.6). It downloads the newer compiler for the target epoch/channel
-// and runs its `install`, which forward-updates the on-PATH stub and stages
-// blobs. This is distinct from `promise sync` (install an additional epoch
-// side-by-side): `update` advances the toolchain in place. Dependency `[require]`
-// pin updates live under `promise pkg update` (T0770).
-//
-// Usage:
-//
-//	promise update          newer compiler for the active epoch (or latest stable)
-//	promise update 2026.0   newer compiler for a specific epoch
-//	promise update next     latest pre-release build
-func runUpdate(args []string) {
-	target := ""
-	if len(args) > 0 {
-		target = args[0]
-	}
-	if len(args) > 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise update [epoch|next]")
-		os.Exit(1)
-	}
-
-	cfg := resolveSyncConfig()
-
-	// Default (no arg): update the currently active epoch in place.
-	if target == "" {
-		if active, err := module.ActiveEpoch(); err == nil && active != "" && active != "next" {
-			target = active
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "Checking %s for Promise releases...\n", cfg.describe())
+	fmt.Fprintf(os.Stderr, "Checking %s for Promise releases (channel: %s)...\n", cfg.describe(), channel)
 
 	var release *ghRelease
 	var epoch string
-	var err error
-
-	switch {
-	case target == "next":
+	switch channel {
+	case module.ChannelNext:
 		release, err = findNextRelease(cfg)
 		epoch = "next"
-	case target == "":
+	default: // stable
 		release, epoch, err = findLatestStableRelease(cfg)
-	default:
-		epoch = target
-		release, err = findSpecificRelease(cfg, target)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -244,11 +189,155 @@ func runUpdate(args []string) {
 	fmt.Printf("epoch %s installed.\n", epoch)
 }
 
+// runUpdateChannel implements `promise update channel [name]`. With no argument
+// it prints the current channel; with an argument it persists the new channel
+// and immediately follows it (set + install + activate, decision #4).
+func runUpdateChannel(args []string) {
+	if len(args) == 0 {
+		ch, err := module.UpdateChannel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(ch)
+		return
+	}
+	if len(args) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: promise update channel [stable|next]")
+		os.Exit(1)
+	}
+	if err := module.WriteUpdateChannel(args[0]); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("update channel set to %s\n", args[0])
+	doUpdate()
+}
+
+// updateCheckResult is the report produced by `promise update check`. Build ids
+// carry the full sha256 in JSON; any human-facing rendering shortens them to 7
+// chars (decision #3).
+type updateCheckResult struct {
+	Channel         string `json:"channel"`
+	Active          string `json:"active"`
+	Latest          string `json:"latest,omitempty"`
+	UpdateAvailable bool   `json:"updateAvailable"`
+	LocalBuild      string `json:"localBuild,omitempty"`
+	RemoteBuild     string `json:"remoteBuild,omitempty"`
+}
+
+// runUpdateCheck implements `promise update check [--json]` — it reports whether
+// an update is available on the current channel without mutating anything.
+//
+//	stable: compare the latest tagged epoch to the active epoch (numeric).
+//	next:   compare the remote platform asset's sha256 (from the release's
+//	        SHA256SUMS) to the locally recorded build-id. A rolling channel has
+//	        no epoch identity, so the asset sha is the build identity.
+func runUpdateCheck(args []string) {
+	jsonOut := false
+	for _, a := range args {
+		switch a {
+		case "--json", "-json":
+			jsonOut = true
+		default:
+			fmt.Fprintln(os.Stderr, "usage: promise update check [--json]")
+			os.Exit(1)
+		}
+	}
+
+	cfg := resolveSyncConfig()
+	channel, err := module.UpdateChannel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	active, _ := module.ActiveEpoch()
+
+	res := updateCheckResult{Channel: channel, Active: active}
+
+	switch channel {
+	case module.ChannelNext:
+		release, err := findNextRelease(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		_, shaURL, err := findAssets(release, platformAssetName())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		// The next channel's build identity IS the platform asset's sha256, read
+		// from the release's SHA256SUMS. Without it there is no way to tell new
+		// from current — report that rather than silently claiming "up to date".
+		if shaURL == "" {
+			fmt.Fprintf(os.Stderr, "error: the %s release has no SHA256SUMS asset; cannot determine the next build identity\n", release.TagName)
+			os.Exit(1)
+		}
+		remote, err := assetSHAFromSums(shaURL, platformAssetName())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		local, _ := module.ReadEpochBuildID("next")
+		res.Latest = "next"
+		res.LocalBuild = local
+		res.RemoteBuild = remote
+		// An unrecorded local build (empty) counts as "update available".
+		res.UpdateAvailable = remote != "" && remote != local
+	default: // stable
+		_, latest, err := findLatestStableRelease(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		res.Latest = latest
+		res.UpdateAvailable = active == "" || module.CompareEpochs(latest, active) > 0
+	}
+
+	if jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(res)
+		return
+	}
+
+	fmt.Printf("Update channel: %s\n", res.Channel)
+	if res.Channel == module.ChannelNext {
+		if res.UpdateAvailable {
+			fmt.Printf("Update available: build %s -> %s\n", shortBuildID(res.LocalBuild), shortBuildID(res.RemoteBuild))
+		} else {
+			fmt.Printf("Up to date (build %s)\n", shortBuildID(res.LocalBuild))
+		}
+		return
+	}
+	fmt.Printf("Active epoch: %s\n", res.Active)
+	if res.UpdateAvailable {
+		fmt.Printf("Update available: epoch %s -> %s\n", res.Active, res.Latest)
+	} else {
+		fmt.Printf("Up to date (epoch %s)\n", res.Active)
+	}
+}
+
+// shortBuildID renders a sha256 build identity as its first 7 hex chars
+// (git-short-sha convention) for human-facing output. An empty id renders as a
+// placeholder; the full hash is on-disk/comparison only.
+func shortBuildID(sha string) string {
+	if sha == "" {
+		return "(none)"
+	}
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
 // downloadAndInstall downloads the platform binary for a release, verifies its
 // SHA256, decompresses it (assets are gzip-compressed — T0796), and runs the
 // downloaded binary's `install` (which installs into epochs/<epoch>/,
-// forward-updates the stub, and stages blobs). Shared by `promise sync` and
-// `promise update` (T0770).
+// forward-updates the stub, and stages blobs). It then records the verified
+// asset sha256 as the epoch's build-id (T0825). Shared by `promise update` and
+// `promise use` download-on-demand.
 func downloadAndInstall(release *ghRelease, epoch string) error {
 	assetName := platformAssetName()    // promise-<os>-<arch>[.exe].gz
 	runtimeName := platformBinaryName() // promise-<os>-<arch>[.exe]
@@ -298,6 +387,16 @@ func downloadAndInstall(release *ghRelease, epoch string) error {
 	installCmd.Stderr = os.Stderr
 	if err := installCmd.Run(); err != nil {
 		return fmt.Errorf("install failed: %w", err)
+	}
+
+	// Persist the build identity (the asset's sha256) so `update check` can
+	// detect a new rolling-channel build (T0825). The .gz asset's sha is exactly
+	// what SHA256SUMS lists and what `check` compares against — the same artifact
+	// on both ends. Computed from the (verified) downloaded asset.
+	if sum, sumErr := fileSHA256(gzPath); sumErr == nil {
+		if wErr := module.WriteEpochBuildID(epoch, sum); wErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not record build id for %s: %v\n", epoch, wErr)
+		}
 	}
 	return nil
 }
@@ -360,9 +459,13 @@ func findLatestStableRelease(cfg syncConfig) (*ghRelease, string, error) {
 		return nil, "", fmt.Errorf("no stable epoch releases found")
 	}
 
-	// Sort by tag name descending (lexicographic works for YYYY.N format).
+	// Sort by epoch descending (numeric — lexicographic would rank "2026.10"
+	// below "2026.9", the latent bug fixed in T0825).
 	sort.Slice(stable, func(i, j int) bool {
-		return stable[i].TagName > stable[j].TagName
+		return module.CompareEpochs(
+			strings.TrimPrefix(stable[i].TagName, "epoch-"),
+			strings.TrimPrefix(stable[j].TagName, "epoch-"),
+		) > 0
 	})
 
 	tag := stable[0].TagName
@@ -548,53 +651,64 @@ func downloadFile(url, destPath string) error {
 	return nil
 }
 
-// verifySHA256 downloads SHA256SUMS and verifies the binary's checksum.
-func verifySHA256(shaURL, binaryPath, binaryName string) error {
-	// Download SHA256SUMS.
+// assetSHAFromSums downloads a SHA256SUMS file and returns the hex sha256 listed
+// for assetName. Shared by verifySHA256 (the download checksum check) and
+// `update check` (the rolling next channel's remote build identity, T0825).
+func assetSHAFromSums(shaURL, assetName string) (string, error) {
 	resp, err := httpGetRaw(shaURL)
 	if err != nil {
-		return fmt.Errorf("cannot download SHA256SUMS: %w", err)
+		return "", fmt.Errorf("cannot download SHA256SUMS: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return githubError(shaURL, resp)
+		return "", githubError(shaURL, resp)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("reading SHA256SUMS: %w", err)
+		return "", fmt.Errorf("reading SHA256SUMS: %w", err)
 	}
 
 	// Parse SHA256SUMS: each line is "<hash>  <filename>" or "<hash> <filename>".
-	expectedHash := ""
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		parts := strings.Fields(line)
-		if len(parts) >= 2 && parts[1] == binaryName {
-			expectedHash = parts[0]
-			break
+		if len(parts) >= 2 && parts[1] == assetName {
+			return parts[0], nil
 		}
 	}
-	if expectedHash == "" {
-		return fmt.Errorf("no checksum found for %s in SHA256SUMS", binaryName)
-	}
+	return "", fmt.Errorf("no checksum found for %s in SHA256SUMS", assetName)
+}
 
-	// Compute actual hash.
-	f, err := os.Open(binaryPath)
+// fileSHA256 returns the hex-encoded sha256 of a file's contents.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("opening binary for checksum: %w", err)
+		return "", err
 	}
 	defer f.Close()
-
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// verifySHA256 downloads SHA256SUMS and verifies the binary's checksum.
+func verifySHA256(shaURL, binaryPath, binaryName string) error {
+	expectedHash, err := assetSHAFromSums(shaURL, binaryName)
+	if err != nil {
+		return err
+	}
+
+	actualHash, err := fileSHA256(binaryPath)
+	if err != nil {
 		return fmt.Errorf("computing checksum: %w", err)
 	}
-	actualHash := hex.EncodeToString(h.Sum(nil))
 
 	if !strings.EqualFold(actualHash, expectedHash) {
 		return fmt.Errorf("checksum verification failed — download may be corrupted (expected %s, got %s)", expectedHash, actualHash)

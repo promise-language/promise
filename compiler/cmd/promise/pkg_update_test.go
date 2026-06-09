@@ -10,7 +10,7 @@ import (
 
 // runPkg dispatch (T0770): the package-manager namespace that now hosts the
 // dependency [require]-pin updater moved out of bare `update`. Bare `update`
-// is toolchain self-update (sync.go); `pkg update` is the old behavior.
+// is toolchain self-update (update.go); `pkg update` is the old behavior.
 
 // TestRunPkgNoArgs: `promise pkg` with no subcommand prints usage and exits 1.
 func TestRunPkgNoArgs(t *testing.T) {
@@ -73,20 +73,26 @@ func TestRunPkgUpdateDispatch(t *testing.T) {
 	}
 }
 
-// TestRunUpdateUsageError: `promise update` (toolchain self-update) accepts at
-// most one positional arg; more than one is a usage error and exits 1.
-func TestRunUpdateUsageError(t *testing.T) {
+// TestRunUpdateRejectsEpochArg: `promise update` (toolchain self-update) no
+// longer takes an epoch argument (T0825) — a specific epoch is now
+// `promise use <epoch>`. A stray positional arg is a usage error that points at
+// `promise use` and exits 1.
+func TestRunUpdateRejectsEpochArg(t *testing.T) {
 	if os.Getenv("TEST_TOOLCHAIN_UPDATE_USAGE") == "1" {
-		runUpdate([]string{"2026.0", "extra"})
+		runUpdate([]string{"2026.0"})
 		return
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestRunUpdateUsageError")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunUpdateRejectsEpochArg")
 	cmd.Env = append(os.Environ(), "TEST_TOOLCHAIN_UPDATE_USAGE=1")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
-		t.Fatal("expected non-zero exit for `update` with two args")
+		t.Fatal("expected non-zero exit for `update` with an epoch arg")
 	}
-	if !strings.Contains(string(out), "usage: promise update [epoch|next]") {
-		t.Errorf("expected update usage message, got: %s", string(out))
+	s := string(out)
+	if !strings.Contains(s, "no longer takes an epoch argument") {
+		t.Errorf("expected epoch-arg rejection message, got: %s", s)
+	}
+	if !strings.Contains(s, "promise use <epoch>") {
+		t.Errorf("expected pointer to `promise use`, got: %s", s)
 	}
 }

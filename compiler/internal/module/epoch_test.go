@@ -218,6 +218,90 @@ func TestEpochDirRemoval(t *testing.T) {
 	}
 }
 
+func TestCompareEpochs(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		// The latent lexicographic bug: "2026.10" must rank ABOVE "2026.9".
+		{"2026.10", "2026.9", 1},
+		{"2026.9", "2026.10", -1},
+		// Year rollover.
+		{"2027.0", "2026.5", 1},
+		{"2026.5", "2027.0", -1},
+		// Equality.
+		{"2026.0", "2026.0", 0},
+		// Minor compare within a year.
+		{"2026.1", "2026.0", 1},
+		// Non-numeric epochs fall back to string compare (never panic).
+		{"next", "next", 0},
+		{"2026.0", "next", strings_compare("2026.0", "next")},
+	}
+	for _, c := range cases {
+		got := CompareEpochs(c.a, c.b)
+		// Normalize sign for the non-numeric fallback case.
+		if normSign(got) != normSign(c.want) {
+			t.Errorf("CompareEpochs(%q, %q) = %d, want sign of %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// strings_compare mirrors strings.Compare for the fallback expectation without
+// importing strings into the test's expectation literal.
+func strings_compare(a, b string) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func normSign(n int) int {
+	switch {
+	case n < 0:
+		return -1
+	case n > 0:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func TestEpochBuildIDRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	// Unrecorded build-id → empty, no error (treated as "update available").
+	id, err := ReadEpochBuildID("next")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "" {
+		t.Fatalf("expected empty build-id when unrecorded, got %q", id)
+	}
+
+	const sha = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	if err := WriteEpochBuildID("next", sha); err != nil {
+		t.Fatalf("WriteEpochBuildID: %v", err)
+	}
+	got, err := ReadEpochBuildID("next")
+	if err != nil {
+		t.Fatalf("ReadEpochBuildID: %v", err)
+	}
+	if got != sha {
+		t.Fatalf("build-id round-trip mismatch: wrote %q, read %q", sha, got)
+	}
+
+	// The file lives under the epoch directory.
+	dir, _ := EpochDir("next")
+	if _, statErr := os.Stat(filepath.Join(dir, "build-id")); statErr != nil {
+		t.Fatalf("expected build-id file under epoch dir: %v", statErr)
+	}
+}
+
 func TestActiveEpochDevName(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmp)

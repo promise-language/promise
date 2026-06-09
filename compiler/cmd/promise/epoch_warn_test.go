@@ -130,7 +130,7 @@ func TestWarnEpochCommandsSet(t *testing.T) {
 			t.Errorf("expected %q to be a warn-eligible command", cmd)
 		}
 	}
-	for _, cmd := range []string{"install", "sync", "use", "epochs", "remove", "update", "pkg", "version"} {
+	for _, cmd := range []string{"install", "use", "epochs", "remove", "update", "pkg", "version"} {
 		if warnEpochCommands[cmd] {
 			t.Errorf("expected %q NOT to be warn-eligible", cmd)
 		}

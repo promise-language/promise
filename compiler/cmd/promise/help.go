@@ -87,6 +87,7 @@ Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 
   promise exec '<code>'   Run inline code (failable main, ?^ works)
   promise add <name>      Add a dependency (catalog name or git URL)
   promise search <keyword>  Search the catalog for modules
-  promise update [name]   Update dependencies to latest commits
+  promise update          Update Promise (follow channel; also update check/channel)
+  promise pkg update      Update dependency pins to latest commits
 `)
 }

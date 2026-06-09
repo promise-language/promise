@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -65,6 +66,82 @@ func WriteActiveEpoch(epoch string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(home, "active"), []byte(epoch+"\n"), 0644)
+}
+
+// WriteEpochBuildID records the build identity (the verified release asset's
+// SHA-256) for an installed epoch at <EpochDir>/build-id. For the rolling
+// "next" channel this is the only reliable identity of "the binary I'd
+// download" — the commit hash has no trustworthy remote counterpart (T0825).
+func WriteEpochBuildID(epoch, sha string) error {
+	dir, err := EpochDir(epoch)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "build-id"), []byte(sha+"\n"), 0644)
+}
+
+// ReadEpochBuildID reads the recorded build identity for an epoch. Returns
+// ("", nil) when no build-id has been recorded — callers treat an unknown local
+// build as "update available".
+func ReadEpochBuildID(epoch string) (string, error) {
+	dir, err := EpochDir(epoch)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "build-id"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// CompareEpochs orders two "YYYY.N" epoch strings numerically, returning -1, 0,
+// or +1 (like strings.Compare). Splitting on "." and comparing each half as an
+// integer fixes the lexicographic bug where "2026.10" sorted below "2026.9".
+// Non-numeric epochs (e.g. "next", "dev") fall back to a string compare so the
+// comparison never panics.
+func CompareEpochs(a, b string) int {
+	ay, an, aok := splitEpoch(a)
+	by, bn, bok := splitEpoch(b)
+	if !aok || !bok {
+		return strings.Compare(a, b)
+	}
+	switch {
+	case ay != by:
+		return cmpInt(ay, by)
+	case an != bn:
+		return cmpInt(an, bn)
+	default:
+		return 0
+	}
+}
+
+// splitEpoch parses a "YYYY.N" epoch into its year and minor components. ok is
+// false when the string is not two dot-separated integers.
+func splitEpoch(s string) (year, minor int, ok bool) {
+	parts := strings.SplitN(s, ".", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	y, err1 := strconv.Atoi(parts[0])
+	m, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return y, m, true
+}
+
+func cmpInt(a, b int) int {
+	if a < b {
+		return -1
+	}
+	return 1
 }
 
 // InstalledEpochs returns a sorted list of epoch names found under

@@ -2,7 +2,7 @@
 
 > **Status (2026-05-30).** This document describes the **target** distribution architecture. Some of it is implemented today, some is planned; each section is marked. The headline change from the original model is twofold: (1) heavy dependencies (LLVM tools, wasm runner, CRTs, target sysroots) move from *embedded-in-the-binary* to a *content-addressed cache fetched on demand*, so the compiler ships in **thin** and **full** variants that behave identically; and (2) the on-`PATH` entry point becomes a **tiny stub** (written in Promise, extracted at install) instead of a full copy of the compiler. See §1 for the model, §7 / [release-automation.md](release-automation.md) for how releases are built and published.
 >
-> **Implemented today:** self-contained `--release` binary (embeds *everything* — LLVM, musl CRT, stdlib) on Linux (amd64) and macOS arm64 (Intel/amd64 builds exist but are **deferred** — unverifiable without working Xcode CLT); `promise install` with the epoch layout; epoch dispatch via *shim-in-binary*; `promise sync` to fetch epochs. **Planned:** thin/full split + content-addressed dependency store (§1, §4); the embedded Promise stub replacing shim-in-binary (§2.5); `promise update` self-update rename (§2.6); Windows zero-dependency install (§5.2). Windows compiler support itself is in progress (see [windows-support.md](windows-support.md)).
+> **Implemented today:** self-contained `--release` binary (embeds *everything* — LLVM, musl CRT, stdlib) on Linux (amd64) and macOS arm64 (Intel/amd64 builds exist but are **deferred** — unverifiable without working Xcode CLT); `promise install` with the epoch layout; epoch dispatch via *shim-in-binary*; `promise update`/`promise use` to fetch and activate epochs. **Planned:** thin/full split + content-addressed dependency store (§1, §4); the embedded Promise stub replacing shim-in-binary (§2.5); `promise update` self-update rename (§2.6); Windows zero-dependency install (§5.2). Windows compiler support itself is in progress (see [windows-support.md](windows-support.md)).
 
 ---
 
@@ -189,9 +189,26 @@ The stub knows only the *epoch-resolution contract* (the `active` file format an
 
 > **Windows `exec` caveat.** Windows has no true `execve`; the stub there does `CreateProcess` + wait + propagate the child's exit code. The same-PID guarantee holds only on Unix. Documented so the PID/signal reasoning above is not assumed on Windows.
 
-### 2.6 Updating *(implemented: `update` is self-update, T0770)*
+### 2.6 Updating *(implemented: `update` is self-update, T0770; channel model, T0825)*
 
-- **`promise update [epoch|next]`** — update **Promise itself**: download the newer compiler for the target epoch/channel (default: the active epoch) and run its `install`, which forward-updates the stub and stages blobs. The shared download+verify+install machinery lives in [sync.go](../compiler/cmd/promise/sync.go) (`downloadAndInstall`), reused by `promise sync`. `update` advances the toolchain **in place**; `sync` installs an additional epoch **side-by-side**.
+The update channel (which release stream `update` follows) is **orthogonal** to the
+active epoch (which compiler runs builds). The channel is persisted in
+`~/.promise/channel` (default `stable`); the active epoch in `~/.promise/active` (T0825).
+
+- **`promise update`** — update **Promise itself**: follow the persisted channel
+  (`stable` → latest tagged `epoch-*`; `next` → the rolling `epoch-next` pre-release),
+  download the channel's latest compiler, run its `install` (forward-updates the stub,
+  stages blobs), and **auto-activate** the freshly installed epoch.
+- **`promise update check [--json]`** — report whether an update is available without
+  mutating anything. Stable staleness compares epoch tags numerically; the rolling
+  `next` channel compares the platform asset's sha256 (recorded at install as
+  `epochs/<epoch>/build-id`) against the remote `SHA256SUMS`.
+- **`promise update channel [stable|next]`** — print the channel, or set it and
+  immediately follow it.
+- **`promise use <epoch>`** — activate a specific/historical epoch, **downloading it on
+  demand** if not installed. The shared download+verify+install machinery lives in
+  [update.go](../compiler/cmd/promise/update.go) (`downloadAndInstall`), reused by both
+  `update` and `use`. (`sync` is deleted — no separate side-by-side install command.)
 - **Dependency updates moved to the package-manager namespace.** The old `promise update` behavior — updating `[require]` git-dependency pins in `promise.toml` — is now `promise pkg update [name|url]` (`runPkgUpdate`), so the bare `update` means "update the toolchain." The broader `pkg` fetch/resolve/lock surface is tracked under T0175.
 
 Re-running install with a newer binary replaces the installation in place and forward-updates the stub.

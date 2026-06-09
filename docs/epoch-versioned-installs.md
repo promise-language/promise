@@ -10,7 +10,7 @@ Currently, `promise install` creates a single flat installation at `~/.promise/`
 
 This plan implements the multi-epoch layout already designed in `docs/module-system.md` Section 7, balancing two audiences:
 - **Platform developers** (compiler/stdlib/module authors) who iterate with `./build` and need escape hatches
-- **Platform users** who `promise sync` and expect automatic epoch dispatch per project
+- **Platform users** who `promise update`/`promise use` and expect automatic epoch dispatch per project
 
 ---
 
@@ -38,7 +38,7 @@ This plan implements the multi-epoch layout already designed in `docs/module-sys
       cache/
         build/
         modules/
-    2026.0/                 # release epoch (via promise update/sync or promise install)
+    2026.0/                 # release epoch (via promise update/use or promise install)
       bin/promise           # compiler binary for this epoch
       bin/llvm/             # SUPERSEDED → referenced from cache/blobs/ by hash
       lib/std/              # extracted standard library
@@ -47,7 +47,7 @@ This plan implements the multi-epoch layout already designed in `docs/module-sys
       cache/
         build/              # build cache for this epoch (compiled .o, test binaries)
         modules/            # git-fetched remote modules
-    next/                   # pre-release epoch (via promise sync next)
+    next/                   # pre-release epoch (via promise update on the next channel)
       ...                   # same layout as above
 ```
 
@@ -123,14 +123,14 @@ The shim is **not** a separate program. It's a fast-path check at the top of `ma
 4. If desired == my epoch → return (proceed normally)
 5. Check ~/.promise/epochs/<desired>/bin/promise exists
    a. Yes → syscall.Exec into it with PROMISE_NO_SHIM=1
-   b. No → print "epoch <desired> is not installed. Run: promise sync <desired>" → exit 1
+   b. No → print "epoch <desired> is not installed. Run: promise use <desired>" → exit 1
 ```
 
 ### Commands excluded from dispatch
 
 These always run on the current binary (check `os.Args[1]` before dispatch):
 - `install` — installing the current binary
-- `sync` — downloading another epoch
+- `update` / `use` — downloading and activating epochs
 - `epochs` / `use` — managing epochs
 - `init` — creating new project (uses current epoch)
 
@@ -159,60 +159,98 @@ When no `promise.toml` is found, falls through to `ActiveEpoch()`. This preserve
 
 ---
 
-## Phase 3: `promise sync`
+## Phase 3: `promise update` and the update channel (T0825)
 
-**Goal**: Download compiler binaries for target epochs from GitHub releases.
+**Goal**: Download compiler binaries from GitHub releases, decoupling *which release
+stream you follow* from *which installed compiler runs builds*.
 
-### New file: `compiler/cmd/promise/sync.go`
+### Two orthogonal axes
+
+The old `promise sync` conflated two independent concepts. They are now separately
+persisted:
+
+| Axis | What it controls | Selected by | File |
+|---|---|---|---|
+| **Active epoch** | Which installed compiler runs builds right now. | `promise use <epoch>` (+ project `promise.toml [module].epoch`) | `~/.promise/active` |
+| **Update channel** | Which release stream `promise update` follows. | `promise update channel <name>` | `~/.promise/channel` (default `stable`) |
+
+Channels are `stable` (the latest tagged `epoch-*` release) and `next` (the rolling
+`epoch-next` pre-release). Default is `stable`. `sync` is **deleted** — installing a
+specific/historical epoch is now `promise use <epoch>`, which downloads on demand.
+
+### Command surface (`compiler/cmd/promise/update.go`)
 
 ```
-promise sync                  # latest stable epoch (tagged release)
-promise sync 2026.0           # specific stable epoch
-promise sync next             # latest pre-release build (next branch)
+promise update                        # follow the channel: install its latest + ACTIVATE
+promise update check [--json]         # report availability; NO mutation
+promise update channel                # print the current channel
+promise update channel <stable|next>  # set the channel AND immediately follow it
+
+promise use <epoch>                   # activate an epoch; DOWNLOAD from releases if missing
 ```
+
+`update` **auto-activates** the freshly installed epoch (the child `install` writes
+`~/.promise/active`) — otherwise a `promise use <epoch>` would freeze updates forever.
 
 ### Release channels
 
 | Channel | What it is | Who uses it | Mutability |
 |---------|-----------|-------------|------------|
-| **Stable** (`promise sync` / `promise sync 2026.0`) | Tagged GitHub release (`epoch-2026.0`). Immutable — same binary forever. | Platform users, CI, production. | Never changes once tagged. |
-| **Next** (`promise sync next`) | Latest build from the `next` branch. Pre-release GitHub release tagged `epoch-next`. | Module authors testing against upcoming epoch. Early adopters. | Updated on every push to `next`. Re-running `promise sync next` gets the latest build. |
+| **Stable** (`channel stable`, the default) | Latest tagged GitHub release (`epoch-2026.0`). Immutable — same binary forever. | Platform users, CI, production. | Never changes once tagged. |
+| **Next** (`channel next`) | The rolling `next` branch build. Pre-release GitHub release tagged `epoch-next`. | Module authors testing against the upcoming epoch. Early adopters. | Updated on every push to `next`. Re-running `promise update` on the next channel gets the latest build. |
 | **Dev** (`bin/install.sh`) | Local build installed into `epochs/dev/`. | People working on the compiler itself. | Changes with every `bin/install.sh` run. |
 
-**Coexistence**: All three channels install into `epochs/` with the same layout. Dev builds go to `epochs/dev/`, next to `epochs/next/`, stable to `epochs/2026.0/`. Quick iteration with `./build && bin/promise ...` also works without installing — the repo-local binary uses a shared cache fallback.
+**Coexistence**: All channels install into `epochs/` with the same layout. Quick
+iteration with `./build && bin/promise ...` also works without installing — the
+repo-local binary uses a shared cache fallback.
 
-**Lifecycle of an epoch**:
-```
-Local dev (./build) → push to next branch → promise sync next → tag epoch-2026.4 → promise sync 2026.4
-```
+### Build identity for the rolling `next` channel
 
-When `2026.4` is tagged, `promise sync next` starts tracking the *next* upcoming epoch. Users on `next` who want stability switch to `promise use 2026.4`.
+`stable` staleness is decided by comparing epoch tags numerically (the epoch *is* the
+identity — see `module.CompareEpochs`, which splits `YYYY.N` and compares each half as
+an integer so `2026.10` correctly ranks above `2026.9`). The `next` channel is rolling
+and has no epoch identity, so `update check` needs a build identity.
+
+**Chosen: the platform asset's SHA-256.** We already download `SHA256SUMS` to verify the
+asset, so the platform asset's sha256 is free and is the exact identity of "the binary
+I'd download." The commit hash is unreliable end-to-end (the release `target_commitish`
+frequently returns a branch name, not a resolved SHA), so it is never the comparison key.
+
+- **Persist**: after a successful release install, `downloadAndInstall` records the
+  verified asset sha256 at `~/.promise/epochs/<epoch>/build-id`.
+- **Check (next)**: fetch the `epoch-next` release's `SHA256SUMS`, read the platform
+  line, and compare to the local `build-id`. Differ (or no local build-id) ⇒ update
+  available.
+- **Display**: any build id shown to a human is shortened to its first 7 hex chars
+  (git-short-sha convention); the full 64-char hash is on-disk/JSON/comparison only.
 
 ### Version discovery
 
-Use GitHub Releases API once the repository is published. The URL pattern will be `GET https://api.github.com/repos/<org>/<repo>/releases`, filtering by `epoch-*` tag prefix. Parse tag `epoch-2026.0` to get epoch string. For `next`, look for the release tagged `epoch-next` (pre-release flag set).
-
-The release repository URL should be configurable — stored in the embedded catalog or a separate config — so it can point to the actual repo once created, or to corporate mirrors.
+GitHub Releases API: `GET https://api.github.com/repos/<org>/<repo>/releases`, filtering
+by the `epoch-*` tag prefix. Parse tag `epoch-2026.0` to get the epoch string. For
+`next`, look for the release tagged `epoch-next` (pre-release flag set). The release
+repository is configurable via `PROMISE_RELEASE_REPO` / `PROMISE_RELEASE_URL` so it can
+point at the real repo or a corporate mirror.
 
 ### Download flow
 
-1. Resolve target epoch (latest tag = stable, pre-release = next, or specific)
-2. Check if already installed → skip
-3. Determine platform binary: `promise-<os>-<arch>` (e.g., `promise-darwin-arm64`)
-4. Download binary + `SHA256SUMS` from the release
-5. Verify SHA256 checksum
-6. `chmod +x` the downloaded binary
-7. Run `<downloaded-binary> install` → Phase 1 logic installs into `epochs/<epoch>/`
-8. Print success: `epoch 2026.0 installed. Active epoch: 2026.0`
+1. Resolve the target release (channel `stable` → latest epoch tag; `next` → `epoch-next`; or the specific tag for `promise use <epoch>`)
+2. Determine platform asset: `promise-<os>-<arch>[.exe].gz`
+3. Download asset + `SHA256SUMS` from the release
+4. Verify SHA256 over the `.gz` asset (what was downloaded)
+5. Decompress and `chmod +x` the binary
+6. Run `<downloaded-binary> install` → Phase 1 logic installs into `epochs/<epoch>/` and activates it
+7. Record the verified asset sha256 as `epochs/<epoch>/build-id`
+8. Print success: `epoch 2026.0 installed.`
 
 ### Progress
 
-Print download progress to stderr: `downloading promise-darwin-arm64... 45.2/61.0 MB`
+Print download progress to stderr: `downloading promise-darwin-arm64.gz... 45.2/61.0 MB`
 
 ### Error handling
 
-`sync`/`update` first print the source being queried (once, to stderr) so failures
-say *where* they looked: `Checking github.com/promise-language/promise for Promise releases...`.
+`update` first prints the source being queried (once, to stderr) so failures
+say *where* they looked: `Checking github.com/promise-language/promise for Promise releases (channel: stable)...`.
 
 - Network failure → "cannot reach github.com/promise-language/promise (check your connection): ..."
 - Non-2xx from the API → the request URL, the HTTP status, GitHub's own message, and an
@@ -231,9 +269,10 @@ to fetch assets from a private repository. The token is dropped on the cross-dom
 redirect to the CDN, so it never leaks to `objects.githubusercontent.com`.
 
 ### Verification
-- `promise sync 2026.0` downloads and installs into `epochs/2026.0/`
+- `promise use 2026.0` (when missing) downloads and installs into `epochs/2026.0/`
 - `promise epochs` shows it
-- `promise sync 2026.0` again → "already installed"
+- `promise update channel next && promise update` installs the `epoch-next` build and records its `build-id`
+- `promise update check` reports up-to-date / available without mutating anything
 
 ---
 
@@ -273,8 +312,8 @@ The developer escape hatch. Values:
 | Installing dev build for project testing | `bin/install.sh` → installs into `epochs/dev/`, sets active to `dev` |
 | Testing dev build against epoch-pinned project | `cd ~/myproject && PROMISE_EPOCH=dev promise build main.pr` |
 | Switching back to released epoch | `promise use 2026.0` → changes active epoch |
-| Restoring official release after dev override | `promise sync 2026.0` → re-downloads the release binary |
-| Module author testing against next epoch | `promise sync next && promise use next` → uses pre-release compiler |
+| Restoring official release after dev override | `promise use 2026.0` → re-downloads the release binary on demand |
+| Module author testing against next epoch | `promise update channel next` → sets the channel and installs+activates the pre-release compiler |
 | Multiple projects, different epochs | No action needed — shim reads each project's `promise.toml` epoch |
 
 ### How the three channels coexist
@@ -284,16 +323,25 @@ The developer escape hatch. Values:
   epochs/
     dev/bin/promise         # local dev build (via bin/install.sh)
     2026.2/bin/promise      # old stable (still installed for legacy project)
-    2026.3/bin/promise      # current stable
-    next/bin/promise        # pre-release (updated by `promise sync next`)
-  active                    # "dev" or "2026.0" (default for scripts without promise.toml)
+    2026.3/bin/promise      # current stable / latest next build (the next branch
+                            #   carries a concrete YYYY.N — its install lands here)
+    next/build-id           # next channel record only (NOT an install dir): the
+                            #   sha256 `update check` compares; no bin/ here
+  active                    # "dev" or "2026.3" (default for scripts without promise.toml)
+  channel                   # "stable" (default) or "next" — what `update` follows
 ```
 
+Following the `next` channel does NOT create an `epochs/next/` install — the
+downloaded `epoch-next` binary's `install` activates the concrete `YYYY.N` epoch it
+carries. `epochs/next/build-id` is just the channel's build identity for `update
+check`. (This is why `promise use next` is rejected: `next` is a channel, not an
+epoch — follow it with `promise update channel next`.)
+
 A developer can:
-1. Have projects pinned to `dev`, `2026.2`, `2026.3`, or `next` — the shim handles dispatch
+1. Have projects pinned to `dev`, `2026.2`, or `2026.3` — the shim handles dispatch
 2. Run `bin/install.sh` to push their local build into `epochs/dev/`
 3. Run `promise use 2026.3` to switch back to a release epoch
-4. Run `promise sync 2026.3` to re-download the official release if needed
+4. Run `promise use 2026.3` to re-download the official release on demand if needed
 
 ### `./build` itself is unchanged
 
@@ -374,7 +422,7 @@ Each phase is independently shippable. Phase 1 alone is useful (cleaner layout).
 | `compiler/internal/module/epoch.go` | **New** — CompilerEpoch, EpochDir, ActiveEpoch, InstalledEpochs |
 | `compiler/internal/module/home.go` | Unchanged — PromiseHome() still returns `~/.promise/` |
 | `compiler/cmd/promise/shim.go` | **New** — shimDispatch() logic |
-| `compiler/cmd/promise/sync.go` | **New** — runSync(), GitHub release download |
+| `compiler/cmd/promise/update.go` | **New** — runUpdate() + check/channel subverbs, GitHub release download, build-id persistence (T0825) |
 | `compiler/cmd/promise/main.go` | Modify: runInstall() epoch layout, add shim call in main(), new commands (use, epochs, remove) |
 | `compiler/internal/module/cache.go` | Minor: adjust extractEmbeddedModule() to check epoch-local lib first |
 | `compiler/internal/module/catalog.go` | Unchanged (already has Epoch field) |
@@ -386,7 +434,7 @@ Each phase is independently shippable. Phase 1 alone is useful (cleaner layout).
 
 ## Open Questions for Discussion
 
-1. **Should `promise sync` set the new epoch as active automatically?** The plan assumes yes (latest synced = active). Alternative: always require explicit `promise use <epoch>`.
+1. **Should `promise update` set the new epoch as active automatically?** Resolved (T0825): yes — `update` auto-activates the freshly installed epoch, otherwise a `promise use <epoch>` would freeze updates forever. A specific epoch is selected explicitly with `promise use <epoch>`.
 
 2. **Epoch mismatch behavior**: Currently a warning. With the shim, mismatches are auto-resolved. Should the compiler still warn when `PROMISE_EPOCH=local` overrides a project's pinned epoch?
 

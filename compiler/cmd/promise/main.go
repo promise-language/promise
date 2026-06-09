@@ -158,11 +158,10 @@ Commands:
   pin       Pin a remote module to a specific commit
 
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
-  update    Update Promise itself (download newer compiler, run its install)
-  sync      Install an additional compiler epoch side-by-side from releases
+  update    Update Promise (follow channel); also: update check, update channel
   epochs    List installed epochs
   remove    Remove an installed epoch
-  use       Set the active epoch (e.g., promise use 2026.0)
+  use       Activate an epoch (downloads from releases if not installed)
 
   doctor    Check the local Promise environment for issues
   targets   List supported compile targets (e.g. -target wasm32-wasi)
@@ -200,12 +199,11 @@ Test discovery:
   promise test dir/...          Scan directory recursively for test files
 
 Toolchain:
-  promise update                  Update Promise itself (active epoch, in place)
-  promise update 2026.0           Update to a specific epoch
-  promise update next             Update to the latest pre-release build
-  promise sync                    Install latest stable epoch side-by-side
-  promise sync 2026.0             Install a specific epoch side-by-side
-  promise sync next               Install the latest pre-release build
+  promise update                        Follow the update channel: install + activate its latest
+  promise update check [--json]         Report whether an update is available (no changes)
+  promise update channel                Print the current update channel
+  promise update channel <stable|next>  Set the channel and immediately follow it
+  promise use <epoch>                   Activate a specific epoch (downloads on demand)
 
 Packages:
   promise pkg update              Update [require] dependency pins (all)
@@ -332,8 +330,6 @@ func main() {
 		runPkg(os.Args[2:])
 	case "install":
 		runInstall(os.Args[2:])
-	case "sync":
-		runSync(os.Args[2:])
 	case "catalog":
 		runCatalog(os.Args[2:])
 	case "epochs":
@@ -8047,6 +8043,18 @@ func runUse(args []string) {
 	}
 	epoch := args[0]
 
+	// "next" is a rolling release *channel*, not a concrete epoch (T0825).
+	// Following it installs whatever YYYY.N epoch the next branch currently
+	// carries — the downloaded binary's `install` activates that real epoch, and
+	// there is no epochs/next/ install directory. Activating the literal "next"
+	// here would leave a dangling active pointer at a non-existent install, so
+	// direct the user to the channel command instead.
+	if epoch == module.ChannelNext {
+		fmt.Fprintf(os.Stderr, "%q is a release channel, not an epoch.\n"+
+			"  To follow the next pre-release stream: promise update channel next\n", epoch)
+		os.Exit(1)
+	}
+
 	// Validate that the epoch is installed.
 	epochDir, err := module.EpochDir(epoch)
 	if err != nil {
@@ -8058,8 +8066,22 @@ func runUse(args []string) {
 		binPath += ".exe"
 	}
 	if _, err := os.Stat(binPath); err != nil {
-		fmt.Fprintf(os.Stderr, "epoch %q is not installed. Run: promise sync %s\n", epoch, epoch)
-		os.Exit(1)
+		// Not installed — download it from releases on demand (T0825). This
+		// replaces the old "Run: promise sync" hint now that sync is gone: a
+		// specific/historical epoch is fetched here rather than by a separate
+		// command. The child `install` stages it into epochs/<epoch>/ and
+		// activates it; the WriteActiveEpoch below re-affirms the same epoch.
+		cfg := resolveSyncConfig()
+		fmt.Fprintf(os.Stderr, "epoch %s is not installed; downloading from %s...\n", epoch, cfg.describe())
+		release, derr := findSpecificRelease(cfg, epoch)
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", derr)
+			os.Exit(1)
+		}
+		if derr := downloadAndInstall(release, epoch); derr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", derr)
+			os.Exit(1)
+		}
 	}
 
 	if err := module.WriteActiveEpoch(epoch); err != nil {

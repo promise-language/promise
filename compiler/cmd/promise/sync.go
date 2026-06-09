@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,11 +22,11 @@ import (
 // Default GitHub release repository. Override with PROMISE_RELEASE_REPO env var
 // (e.g., "myorg/promise-mirror") or PROMISE_RELEASE_URL for the full API base
 // (e.g., "https://git.corp.com/api/v3/repos/myorg/promise").
-const defaultReleaseRepo = "nicois/promise"
+const defaultReleaseRepo = "promise-language/promise"
 
 // syncConfig holds the resolved release API configuration.
 type syncConfig struct {
-	apiBase string // e.g., "https://api.github.com/repos/nicois/promise"
+	apiBase string // e.g., "https://api.github.com/repos/promise-language/promise"
 }
 
 // resolveSyncConfig determines the GitHub release API base URL.
@@ -40,6 +41,65 @@ func resolveSyncConfig() syncConfig {
 	return syncConfig{apiBase: "https://api.github.com/repos/" + repo}
 }
 
+// describe returns a human-readable name for the release source, used in the
+// "checking ..." status line and in error messages so a failure says *where* it
+// was looking, not just that it failed.
+func (c syncConfig) describe() string {
+	const ghPrefix = "https://api.github.com/repos/"
+	if rest, ok := strings.CutPrefix(c.apiBase, ghPrefix); ok {
+		return "github.com/" + rest
+	}
+	return c.apiBase
+}
+
+// tokenHint returns advice about GITHUB_TOKEN tailored to whether one is already
+// set — shown on 404/auth failures, the common case when the repository is
+// private.
+func tokenHint() string {
+	if os.Getenv("GITHUB_TOKEN") != "" {
+		return "GITHUB_TOKEN is set — confirm it has 'repo' scope and read access to this repository."
+	}
+	return "If the repository is private, set GITHUB_TOKEN to a personal access token with 'repo' scope."
+}
+
+// githubError builds a contextual error for a non-2xx GitHub response. It surfaces
+// the URL that was requested, the HTTP status, any message GitHub returned in the
+// body, and an actionable hint for the most common failures (private repo, bad
+// token, rate limit).
+func githubError(url string, resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	var payload struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(body, &payload)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "request to %s failed with HTTP %d", url, resp.StatusCode)
+	if payload.Message != "" {
+		fmt.Fprintf(&b, " (%s)", payload.Message)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		b.WriteString("\n  The repository or release could not be found. Likely causes:")
+		b.WriteString("\n    - the repository is private and the request is unauthenticated or lacks access, or")
+		b.WriteString("\n    - the release/epoch does not exist yet.")
+		fmt.Fprintf(&b, "\n  %s", tokenHint())
+	case http.StatusUnauthorized:
+		b.WriteString("\n  Authentication failed — GITHUB_TOKEN is missing or invalid.")
+	case http.StatusForbidden:
+		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+			b.WriteString("\n  GitHub API rate limit exceeded.")
+			if os.Getenv("GITHUB_TOKEN") == "" {
+				b.WriteString(" Set GITHUB_TOKEN to raise the limit.")
+			}
+		} else {
+			b.WriteString("\n  Access forbidden — the token may lack permission for this repository.")
+		}
+	}
+	return errors.New(b.String())
+}
+
 // ghRelease represents the subset of GitHub Release API response we need.
 type ghRelease struct {
 	TagName    string    `json:"tag_name"`
@@ -51,6 +111,7 @@ type ghRelease struct {
 // ghAsset represents a single asset in a GitHub release.
 type ghAsset struct {
 	Name               string `json:"name"`
+	URL                string `json:"url"` // API asset URL — required for authenticated (private-repo) downloads
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
@@ -72,6 +133,7 @@ func runSync(args []string) {
 	}
 
 	cfg := resolveSyncConfig()
+	fmt.Fprintf(os.Stderr, "Checking %s for Promise releases...\n", cfg.describe())
 
 	var release *ghRelease
 	var epoch string
@@ -151,6 +213,8 @@ func runUpdate(args []string) {
 			target = active
 		}
 	}
+
+	fmt.Fprintf(os.Stderr, "Checking %s for Promise releases...\n", cfg.describe())
 
 	var release *ghRelease
 	var epoch string
@@ -312,15 +376,17 @@ func findSpecificRelease(cfg syncConfig, epoch string) (*ghRelease, error) {
 	url := cfg.apiBase + "/releases/tags/" + tag
 	resp, err := httpGetJSON(url)
 	if err != nil {
-		return nil, fmt.Errorf("cannot reach GitHub releases. Check your connection: %w", err)
+		return nil, fmt.Errorf("cannot reach %s (check your connection): %w", cfg.describe(), err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 404 {
-		return nil, fmt.Errorf("epoch %s is not available. Run `promise sync` for latest", epoch)
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("epoch %s is not available in %s.\n"+
+			"  Either the release tag does not exist, or the repository is private and you lack access.\n"+
+			"  %s", epoch, cfg.describe(), tokenHint())
 	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GitHub API returned status %d for tag %s", resp.StatusCode, tag)
+		return nil, githubError(url, resp)
 	}
 
 	var release ghRelease
@@ -335,12 +401,12 @@ func fetchReleases(cfg syncConfig) ([]ghRelease, error) {
 	url := cfg.apiBase + "/releases?per_page=100"
 	resp, err := httpGetJSON(url)
 	if err != nil {
-		return nil, fmt.Errorf("cannot reach GitHub releases. Check your connection: %w", err)
+		return nil, fmt.Errorf("cannot reach %s (check your connection): %w", cfg.describe(), err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+		return nil, githubError(url, resp)
 	}
 
 	var releases []ghRelease
@@ -358,6 +424,25 @@ func httpGetJSON(url string) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return http.DefaultClient.Do(req)
+}
+
+// httpGetRaw performs a GET for binary asset downloads. It requests the raw bytes
+// (Accept: application/octet-stream — required when downloading an asset from a
+// private repository via its API URL) and authenticates when GITHUB_TOKEN is set.
+// GitHub redirects asset downloads from api.github.com to a signed CDN URL on a
+// different domain (objects.githubusercontent.com); Go's http.Client drops the
+// Authorization header when a redirect target is not the same domain or a
+// subdomain of the origin, so the token is never leaked to the CDN.
+func httpGetRaw(url string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/octet-stream")
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -383,13 +468,25 @@ func platformAssetName() string {
 }
 
 // findAssets locates the named release asset and the SHA256SUMS asset.
+//
+// When GITHUB_TOKEN is set, the API asset URL is preferred over the
+// browser_download_url: downloading an asset from a *private* repository only
+// works through the authenticated API URL (with Accept: application/octet-stream).
+// For public repositories the browser URL is used (no token required).
 func findAssets(release *ghRelease, assetName string) (assetURL, shaURL string, err error) {
+	useAPI := os.Getenv("GITHUB_TOKEN") != ""
+	pick := func(a ghAsset) string {
+		if useAPI && a.URL != "" {
+			return a.URL
+		}
+		return a.BrowserDownloadURL
+	}
 	for _, a := range release.Assets {
 		switch a.Name {
 		case assetName:
-			assetURL = a.BrowserDownloadURL
+			assetURL = pick(a)
 		case "SHA256SUMS":
-			shaURL = a.BrowserDownloadURL
+			shaURL = pick(a)
 		}
 	}
 	if assetURL == "" {
@@ -400,14 +497,14 @@ func findAssets(release *ghRelease, assetName string) (assetURL, shaURL string, 
 
 // downloadFile downloads a URL to a local file, printing progress to stderr.
 func downloadFile(url, destPath string) error {
-	resp, err := http.Get(url)
+	resp, err := httpGetRaw(url)
 	if err != nil {
-		return fmt.Errorf("cannot reach GitHub releases. Check your connection: %w", err)
+		return fmt.Errorf("cannot download release asset (check your connection): %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return githubError(url, resp)
 	}
 
 	f, err := os.Create(destPath)
@@ -454,14 +551,14 @@ func downloadFile(url, destPath string) error {
 // verifySHA256 downloads SHA256SUMS and verifies the binary's checksum.
 func verifySHA256(shaURL, binaryPath, binaryName string) error {
 	// Download SHA256SUMS.
-	resp, err := http.Get(shaURL)
+	resp, err := httpGetRaw(shaURL)
 	if err != nil {
 		return fmt.Errorf("cannot download SHA256SUMS: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("SHA256SUMS download failed with status %d", resp.StatusCode)
+		return githubError(shaURL, resp)
 	}
 
 	body, err := io.ReadAll(resp.Body)

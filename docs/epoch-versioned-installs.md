@@ -211,10 +211,24 @@ Print download progress to stderr: `downloading promise-darwin-arm64... 45.2/61.
 
 ### Error handling
 
-- Network failure → "cannot reach GitHub releases. Check your connection."
-- Unknown epoch → "epoch 2026.1 is not available. Run `promise sync` for latest."
+`sync`/`update` first print the source being queried (once, to stderr) so failures
+say *where* they looked: `Checking github.com/promise-language/promise for Promise releases...`.
+
+- Network failure → "cannot reach github.com/promise-language/promise (check your connection): ..."
+- Non-2xx from the API → the request URL, the HTTP status, GitHub's own message, and an
+  actionable hint keyed on the status: 404 → repo private / release missing (with
+  `GITHUB_TOKEN` guidance), 401 → bad token, 403 → rate limit.
+- Unknown epoch (404 on a specific tag) → "epoch 2026.1 is not available in
+  github.com/promise-language/promise. Either the release tag does not exist, or the
+  repository is private and you lack access." + `GITHUB_TOKEN` hint.
 - Checksum mismatch → "checksum verification failed — download may be corrupted"
 - Platform not available → "no binary available for linux-arm64 in epoch 2026.0"
+
+**Private-repo / authenticated access**: API calls send `GITHUB_TOKEN` as a Bearer
+token when set. When a token is present, asset downloads use the GitHub *API asset URL*
+(`Accept: application/octet-stream`) rather than `browser_download_url` — the only way
+to fetch assets from a private repository. The token is dropped on the cross-domain
+redirect to the CDN, so it never leaks to `objects.githubusercontent.com`.
 
 ### Verification
 - `promise sync 2026.0` downloads and installs into `epochs/2026.0/`

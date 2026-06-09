@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,7 +21,7 @@ func TestResolveSyncConfigDefault(t *testing.T) {
 	t.Setenv("PROMISE_RELEASE_URL", "")
 	t.Setenv("PROMISE_RELEASE_REPO", "")
 	cfg := resolveSyncConfig()
-	if cfg.apiBase != "https://api.github.com/repos/nicois/promise" {
+	if cfg.apiBase != "https://api.github.com/repos/promise-language/promise" {
 		t.Fatalf("unexpected apiBase: %s", cfg.apiBase)
 	}
 }
@@ -580,4 +581,177 @@ func TestDownloadFile(t *testing.T) {
 	if string(got) != string(content) {
 		t.Fatalf("content mismatch")
 	}
+}
+
+// --- T0818 follow-up: source description, contextual GitHub errors, and
+// authenticated (private-repo) asset downloads. ---
+
+func TestDescribe(t *testing.T) {
+	cases := []struct{ apiBase, want string }{
+		// github.com API base renders as a friendly owner/repo.
+		{"https://api.github.com/repos/promise-language/promise", "github.com/promise-language/promise"},
+		// A custom (e.g. GitHub Enterprise) base is passed through verbatim.
+		{"https://git.corp.com/api/v3/repos/myorg/promise", "https://git.corp.com/api/v3/repos/myorg/promise"},
+	}
+	for _, c := range cases {
+		got := syncConfig{apiBase: c.apiBase}.describe()
+		if got != c.want {
+			t.Errorf("describe(%q) = %q, want %q", c.apiBase, got, c.want)
+		}
+	}
+}
+
+func TestTokenHint(t *testing.T) {
+	t.Run("no token suggests setting one", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "")
+		if got := tokenHint(); !strings.Contains(got, "set GITHUB_TOKEN") {
+			t.Fatalf("expected hint to suggest setting a token, got: %s", got)
+		}
+	})
+	t.Run("token set acknowledges it", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "x")
+		if got := tokenHint(); !strings.Contains(got, "GITHUB_TOKEN is set") {
+			t.Fatalf("expected hint to acknowledge the token, got: %s", got)
+		}
+	})
+}
+
+// fakeResp builds a minimal *http.Response for githubError tests.
+func fakeResp(status int, body string, header http.Header) *http.Response {
+	if header == nil {
+		header = http.Header{}
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     header,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestGithubError404NoToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	url := "https://api.github.com/repos/promise-language/promise/releases"
+	err := githubError(url, fakeResp(http.StatusNotFound, `{"message":"Not Found"}`, nil))
+	msg := err.Error()
+	for _, want := range []string{url, "HTTP 404", "Not Found", "private", "set GITHUB_TOKEN"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("404 error missing %q; got:\n%s", want, msg)
+		}
+	}
+}
+
+func TestGithubError404WithToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	err := githubError("https://api.github.com/x", fakeResp(http.StatusNotFound, `{"message":"Not Found"}`, nil))
+	if !strings.Contains(err.Error(), "GITHUB_TOKEN is set") {
+		t.Fatalf("expected token-set hint, got:\n%s", err.Error())
+	}
+}
+
+func TestGithubErrorRateLimit(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	h := http.Header{}
+	h.Set("X-RateLimit-Remaining", "0")
+	err := githubError("https://api.github.com/x", fakeResp(http.StatusForbidden, `{"message":"API rate limit exceeded"}`, h))
+	msg := err.Error()
+	if !strings.Contains(msg, "rate limit") || !strings.Contains(msg, "Set GITHUB_TOKEN to raise") {
+		t.Fatalf("expected rate-limit hint, got:\n%s", msg)
+	}
+}
+
+func TestGithubErrorForbiddenNonRateLimit(t *testing.T) {
+	err := githubError("https://api.github.com/x", fakeResp(http.StatusForbidden, `{"message":"Resource not accessible"}`, nil))
+	if !strings.Contains(err.Error(), "Access forbidden") {
+		t.Fatalf("expected forbidden hint, got:\n%s", err.Error())
+	}
+}
+
+func TestGithubErrorUnauthorized(t *testing.T) {
+	err := githubError("https://api.github.com/x", fakeResp(http.StatusUnauthorized, `{"message":"Bad credentials"}`, nil))
+	if !strings.Contains(err.Error(), "Authentication failed") {
+		t.Fatalf("expected auth hint, got:\n%s", err.Error())
+	}
+}
+
+func TestHttpGetRawHeaders(t *testing.T) {
+	var gotAccept, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAccept = r.Header.Get("Accept")
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	t.Run("with token sends bearer + octet-stream", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "secret")
+		resp, err := httpGetRaw(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if gotAccept != "application/octet-stream" {
+			t.Errorf("Accept = %q, want application/octet-stream", gotAccept)
+		}
+		if gotAuth != "Bearer secret" {
+			t.Errorf("Authorization = %q, want Bearer secret", gotAuth)
+		}
+	})
+
+	t.Run("without token sends no authorization", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "")
+		resp, err := httpGetRaw(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if gotAuth != "" {
+			t.Errorf("Authorization = %q, want empty", gotAuth)
+		}
+	})
+}
+
+func TestFindAssetsPrefersAPIURLWithToken(t *testing.T) {
+	release := &ghRelease{
+		TagName: "epoch-2026.0",
+		Assets: []ghAsset{
+			{Name: "promise-linux-amd64", URL: "https://api.github.com/assets/1", BrowserDownloadURL: "https://example.com/dl/1"},
+			{Name: "SHA256SUMS", URL: "https://api.github.com/assets/2", BrowserDownloadURL: "https://example.com/dl/2"},
+		},
+	}
+
+	t.Run("with token uses API url", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "tok")
+		bin, sha, err := findAssets(release, "promise-linux-amd64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bin != "https://api.github.com/assets/1" || sha != "https://api.github.com/assets/2" {
+			t.Fatalf("expected API urls, got bin=%s sha=%s", bin, sha)
+		}
+	})
+
+	t.Run("without token uses browser url", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "")
+		bin, sha, err := findAssets(release, "promise-linux-amd64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bin != "https://example.com/dl/1" || sha != "https://example.com/dl/2" {
+			t.Fatalf("expected browser urls, got bin=%s sha=%s", bin, sha)
+		}
+	})
+
+	t.Run("token set but API url missing falls back to browser", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "tok")
+		rel := &ghRelease{TagName: "epoch-2026.0", Assets: []ghAsset{
+			{Name: "promise-linux-amd64", BrowserDownloadURL: "https://example.com/only-browser"},
+		}}
+		bin, _, err := findAssets(rel, "promise-linux-amd64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bin != "https://example.com/only-browser" {
+			t.Fatalf("expected fallback to browser url, got %s", bin)
+		}
+	})
 }

@@ -55,6 +55,13 @@ const flowBinaryName = "do"
 // the bodies and the shared prompt fragments refer to the same command.
 const verifyCmd = "bin/verify --wasm"
 
+// verifyCmdWindows is the Windows form of verifyCmd (doflow.Command.Windows).
+// The flow runner shells the verify command through cmd.exe on Windows, which
+// cannot resolve the forward-slash path "bin/verify" ("'bin' is not
+// recognized") — it needs a backslash path to the actual executable (T0827).
+// doflow.Command.Resolve substitutes this for verifyCmd when the host is Windows.
+const verifyCmdWindows = `bin\verify.exe --wasm`
+
 // formatCmd is the formatter the LAND step runs to normalize the worktree
 // BEFORE committing (CLAUDE.md: bin/format formats Go + Promise — the SAME
 // files bin/verify formats). Running it first makes the to-be-committed tree
@@ -62,6 +69,11 @@ const verifyCmd = "bin/verify --wasm"
 // worktree after the commit (T0767). Threaded via doflow.Config.FormatCmd into
 // stepCommitPush; unlike verifyCmd it is not surfaced to any prompt.
 const formatCmd = "bin/format"
+
+// formatCmdWindows is the Windows form of formatCmd, for the same cmd.exe
+// forward-slash reason as verifyCmdWindows (T0827). The LAND step runs the
+// formatter through the same runner shell.
+const formatCmdWindows = `bin\format.exe`
 
 // sourceHash is the flow source hash baked in at build time by ./make
 // (-ldflags "-X main.sourceHash=..."). It stays "dev" for `go run` / dlv debug
@@ -111,8 +123,8 @@ func main() {
 func promiseConfig() doflow.Config {
 	return doflow.Config{
 		FlowBinaryName: flowBinaryName,
-		VerifyCmd:      verifyCmd,
-		FormatCmd:      formatCmd,
+		VerifyCmd:      doflow.Command{Default: verifyCmd, Windows: verifyCmdWindows},
+		FormatCmd:      doflow.Command{Default: formatCmd, Windows: formatCmdWindows},
 		DefaultStepBudget: flow.StepBudget{
 			Timeout:                 30 * time.Minute,
 			MaxInvocations:          3,

@@ -1,0 +1,57 @@
+// T0817: Directly invoking a force-unwrapped optional closure `o!()` used to
+// panic codegen ("unsupported callee type *ast.OptionalUnwrapExpr") because
+// genCallExpr did not recognize an OptionalUnwrapExpr callee. The fix adds a
+// general non-ident closure-call branch: when the callee's static type is a
+// function Signature, materialize the {fn, env} fat pointer via genExpr and
+// dispatch through genIndirectCall. All tests must run leak-free.
+// Case 1: direct invoke, no args, capturing closure (env is non-null).
+direct_invoke_no_args() `test {
+  s := "cap" + "tured";
+  (() -> int)? o = move || -> s.len;
+  assert(o!() == 8, "direct o!()");
+}
+
+// Case 2: direct invoke with an argument.
+direct_invoke_with_arg() `test {
+  s := "cap" + "tured";
+  ((int) -> int)? o = move |int x| -> s.len + x;
+  assert(o!(2) == 10, "o!(2)");
+}
+
+// Case 3: parenthesized source — (o)!().
+direct_invoke_parenthesized() `test {
+  s := "cap" + "tured";
+  (() -> int)? o = move || -> s.len;
+  assert((o)!() == 8, "(o)!()");
+}
+
+// Case 4: non-capturing closure — env is null, exercises the env-null path.
+direct_invoke_no_capture() `test {
+  (() -> int)? o = || -> 42;
+  assert(o!() == 42, "non-capturing o!()");
+}
+
+// Case 5: generic/mono context — an optional closure field is force-unwrapped
+// and invoked inside a monomorphized generic method (`this.f!()`). The callee's
+// static type is `() -> T`; the new branch must apply `c.typeSubst` so the
+// Signature resolves to the concrete `() -> int` before genIndirectCall.
+type Box[T] {
+  (() -> T)? f;
+  run(~this) T {
+    return this.f!();
+  }
+}
+generic_field_invoke() `test {
+  s := "cap" + "tured";
+  b := Box[int](f: move || -> s.len);
+  assert(b.run() == 8, "generic field this.f!()");
+}
+
+// Case 6: bare parenthesized closure call `(f)()` — a ParenExpr callee whose
+// type is a Signature (not an OptionalUnwrapExpr), exercising the same
+// non-ident closure-call branch.
+direct_invoke_paren_no_unwrap() `test {
+  s := "cap" + "tured";
+  f := move || -> s.len;
+  assert((f)() == 8, "(f)()");
+}

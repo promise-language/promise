@@ -1596,6 +1596,29 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		return result
 	}
 
+	// T0817: Closure call through a non-ident callee whose static type is a
+	// function signature — e.g. a force-unwrapped optional closure `o!()`, or a
+	// parenthesized `(expr)()`. genExpr materializes the fat pointer {fn, env};
+	// dispatch it through the same indirect-call path as any other closure. Ident
+	// callees fall through to the locals-based lambda path below (it loads the fat
+	// pointer from the alloca and handles return-alias checks).
+	if _, isIdent := e.Callee.(*ast.IdentExpr); !isIdent {
+		calleeType := c.info.Types[e.Callee]
+		if c.typeSubst != nil {
+			calleeType = types.Substitute(calleeType, c.typeSubst)
+		}
+		if sig, ok := calleeType.(*types.Signature); ok {
+			closure := c.genExpr(e.Callee)
+			var argVals []value.Value
+			for _, arg := range e.Args {
+				argVals = append(argVals, c.genCallArgExpr(arg.Value))
+			}
+			result := c.genIndirectCall(closure, sig, argVals)
+			c.emitReturnAliasCheck(result, sig, e.Args, argVals) // T0331
+			return result
+		}
+	}
+
 	// Resolve callee first to detect MutRef params (B0149)
 	ident, ok := e.Callee.(*ast.IdentExpr)
 	if !ok {

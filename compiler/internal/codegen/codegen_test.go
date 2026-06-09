@@ -7184,6 +7184,22 @@ func TestOptionalForceUnwrapBang(t *testing.T) {
 	assertContains(t, ir, "promise_panic")
 }
 
+// T0817: Directly invoking a force-unwrapped optional closure `o!()` must
+// compile (no "unsupported callee type *ast.OptionalUnwrapExpr" panic) and
+// emit an indirect call through the materialized {fn, env} fat pointer.
+func TestT0817OptionalUnwrapClosureCall(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "cap" + "tured";
+			(() -> int)? o = move || -> s.len;
+			int n = o!();
+		}
+	`)
+	// Indirect call through a loaded function pointer (fat-pointer dispatch),
+	// not a named direct call.
+	assertContains(t, ir, "call i64 %")
+}
+
 func TestOptionalForceUnwrapAsBang(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

@@ -7,13 +7,9 @@ compiler/tools/antlr-*.jar
 compiler/internal/parser/*.interp
 compiler/internal/parser/*.tokens
 
-# Compiler: binary + hash sidecar
-bin/promise
-bin/promise.exe
-bin/promise.exe~
-bin/.promise.hash
-bin/.promise.buildinfo
-bin/.tools.hash
+# bin/ holds only build artifacts — the compiler binary, hash sidecars, and all Go
+# build/flow tools compiled by ./make. Nothing under bin/ is ever committed.
+bin/
 compiler/grammar/.antlr/PromiseLexer.interp
 compiler/grammar/.antlr/PromiseLexer.java
 compiler/grammar/.antlr/PromiseLexer.tokens
@@ -38,65 +34,9 @@ compiler/grammar/.antlr/PromiseParser.tokens
 .runner-*
 .runner.*
 
-# Build tools (Go binaries compiled by ./make)
-bin/build
-bin/build.exe
-bin/build.exe~
-bin/coverage
-bin/coverage.exe
-bin/coverage.exe~
-bin/format
-bin/format.exe
-bin/format.exe~
-bin/prereqs
-bin/prereqs.exe
-bin/prereqs.exe~
-bin/setup
-bin/setup.exe
-bin/setup.exe~
-bin/stress
-bin/stress.exe
-bin/stress.exe~
-bin/test
-bin/test.exe
-bin/test.exe~
-bin/verify
-bin/verify.exe
-bin/verify.exe~
-bin/vet
-bin/vet.exe
-bin/vet.exe~
-bin/guard
-bin/guard.exe
-bin/guard.exe~
-bin/precommit
-bin/precommit.exe
-bin/precommit.exe~
-bin/commitgate
-bin/commitgate.exe
-bin/commitgate.exe~
-bin/gate
-bin/gate.exe
-bin/gate.exe~
-bin/audit-exceptions
-bin/audit-exceptions.exe
-bin/audit-exceptions.exe~
-bin/clean
-bin/clean.exe
-bin/clean.exe~
-bin/pin-prebuilts
-bin/pin-prebuilts.exe
-bin/pin-prebuilts.exe~
-bin/release
-bin/release.exe
-bin/release.exe~
-
 # Release-build output: `bin/release blobs/manifest/build` write here (bin/, blobs/,
 # deps/, manifest-*.json). Scratch — produced in CI and by local runs, never committed.
 /dist/
-
-# Flow binaries (built on demand by ./make from flows/) — never committed
-bin/flow/
 
 # flow-sdk/ (tracker backend) and flow/ (OSS flow substrate) are git submodules
 # wired into the flows module via local replaces — they are NOT gitignored. See

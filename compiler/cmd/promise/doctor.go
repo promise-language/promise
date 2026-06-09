@@ -51,6 +51,7 @@ type doctorFlags struct {
 	jsonOutput bool
 	fix        bool
 	network    bool
+	dev        bool
 }
 
 func runDoctor(args []string) {
@@ -63,6 +64,8 @@ func runDoctor(args []string) {
 			flags.fix = true
 		case "-network":
 			flags.network = true
+		case "-dev":
+			flags.dev = true
 		}
 	}
 
@@ -78,12 +81,19 @@ func runDoctor(args []string) {
 		doctorCheckModuleCache(flags.network),
 		doctorCheckPromiseHome(),
 		doctorCheckEpochs(),
-		doctorCheckJava(),
-		doctorCheckWasmtime(),
-		doctorCheckNode(),
 	)
 	if runtime.GOOS == "darwin" {
 		checks = append(checks, doctorCheckXcodeCLT())
+	}
+	// Dev-only checks (compiler development / non-native targets) are gated behind
+	// -dev. They are never required to build/run/test native Promise programs from a
+	// release binary, so a fresh end-user install should not warn about them (T0819).
+	if flags.dev {
+		checks = append(checks,
+			doctorCheckJava(),
+			doctorCheckWasmtime(),
+			doctorCheckNode(),
+		)
 	}
 	checks = append(checks, doctorCheckPath())
 

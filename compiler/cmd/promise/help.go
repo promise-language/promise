@@ -77,7 +77,7 @@ Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 
   promise guide           Full language reference (~800 lines, pipe into LLM context)
   promise examples        Browse and run example programs
   promise doc <module>    API docs for a module (e.g., promise doc io, promise doc std.vector)
-  promise doctor          Check environment health (--json, --fix, --network)
+  promise doctor          Check environment health (-json, -fix, -network, -dev)
   promise bind <format>   Generate bindings from WIT or WebIDL (e.g., promise bind wit api.wit)
   promise targets         List supported compile targets (e.g. -target wasm32-wasi)
   promise version         Compiler version

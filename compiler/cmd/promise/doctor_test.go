@@ -37,8 +37,8 @@ func TestDoctorJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &report); err != nil {
 		t.Fatalf("invalid JSON: %v\noutput: %s", err, output)
 	}
-	if len(report.Checks) < 8 {
-		t.Errorf("expected at least 8 checks, got %d", len(report.Checks))
+	if len(report.Checks) < 7 {
+		t.Errorf("expected at least 7 checks, got %d", len(report.Checks))
 	}
 
 	// Verify all checks have valid status values
@@ -52,8 +52,9 @@ func TestDoctorJSON(t *testing.T) {
 }
 
 func TestDoctorFixFlag(t *testing.T) {
+	// Java is a dev-only check, reachable only via -dev.
 	output := captureStdout(t, func() {
-		runDoctor([]string{"-fix"})
+		runDoctor([]string{"-dev", "-fix"})
 	})
 
 	// Java is typically missing in CI — the fix hint should appear with -fix
@@ -61,6 +62,77 @@ func TestDoctorFixFlag(t *testing.T) {
 		if !strings.Contains(output, "Fix:") {
 			t.Error("expected Fix hint with -fix flag for missing Java")
 		}
+	}
+}
+
+func TestDoctorDefaultExcludesDevChecks(t *testing.T) {
+	// A fresh end-user install must not warn about compiler-development tools.
+	output := captureStdout(t, func() {
+		runDoctor(nil)
+	})
+	for _, name := range []string{"Java", "wasmtime", "node"} {
+		if strings.Contains(output, name) {
+			t.Errorf("default doctor output should not mention dev-only check %q", name)
+		}
+	}
+}
+
+func TestDoctorDevFlagIncludesDevChecks(t *testing.T) {
+	output := captureStdout(t, func() {
+		runDoctor([]string{"-dev"})
+	})
+	for _, name := range []string{"Java (optional", "wasmtime (optional", "node (optional"} {
+		if !strings.Contains(output, name) {
+			t.Errorf("-dev doctor output should mention dev-only check %q", name)
+		}
+	}
+}
+
+func TestDoctorDevGatingJSON(t *testing.T) {
+	// Assert gating at the structured-report level (not just rendered text):
+	// dev-only checks must be entirely absent from report.Checks by default, so
+	// a missing Java/Node/wasmtime never inflates report.Warnings on a fresh
+	// end-user install (T0819). With -dev they appear, in addition to the
+	// default set (i.e. the dev flag is purely additive).
+	devNames := map[string]bool{
+		"Java (optional — compiler development only)": true,
+		"wasmtime (optional — wasm32-wasi target)":    true,
+		"node (optional — wasm32-web target tests)":   true,
+	}
+
+	parse := func(args []string) doctorReport {
+		t.Helper()
+		out := captureStdout(t, func() { runDoctor(args) })
+		var r doctorReport
+		if err := json.Unmarshal([]byte(out), &r); err != nil {
+			t.Fatalf("invalid JSON for args %v: %v\noutput: %s", args, err, out)
+		}
+		return r
+	}
+
+	def := parse([]string{"-json"})
+	for _, c := range def.Checks {
+		if devNames[c.Name] {
+			t.Errorf("default report should not contain dev-only check %q", c.Name)
+		}
+	}
+
+	dev := parse([]string{"-json", "-dev"})
+	seen := map[string]bool{}
+	for _, c := range dev.Checks {
+		if devNames[c.Name] {
+			seen[c.Name] = true
+		}
+	}
+	for name := range devNames {
+		if !seen[name] {
+			t.Errorf("-dev report should contain dev-only check %q", name)
+		}
+	}
+
+	// Additive: -dev adds exactly the three dev checks, nothing removed.
+	if got, want := len(dev.Checks), len(def.Checks)+len(devNames); got != want {
+		t.Errorf("-dev check count = %d, want default(%d)+%d = %d", got, len(def.Checks), len(devNames), want)
 	}
 }
 

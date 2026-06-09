@@ -3914,7 +3914,10 @@ func (c *Compiler) emitVectorElementDropLoop(vecPtr value.Value, elemType types.
 	// are also dropped via pal_free or their drop method. Vector elements are the sole
 	// owner of user-type instances — constructors transfer ownership to push, and
 	// sort temps clear their drop flags when moved back into the vector.
-	if extractNamed(elemType) != types.TypString {
+	// T0741: closure (function value) elements own a heap env struct that
+	// emitVariantFieldDrop's Signature case frees.
+	_, isSig := elemType.(*types.Signature)
+	if extractNamed(elemType) != types.TypString && !isSig {
 		if !c.vecElemNeedsEnumDrop(elemType) && !c.vecElemNeedsUserTypeDrop(elemType) && !c.tupleNeedsDrop(elemType) && !c.vecElemNeedsOptionalDrop(elemType) {
 			return
 		}
@@ -4306,6 +4309,12 @@ func (c *Compiler) typeNeedsFieldDrop(typ types.Type) bool {
 	}
 	if opt, ok := typ.(*types.Optional); ok {
 		return c.typeNeedsFieldDrop(opt.Elem())
+	}
+	// T0741: Closure fields own a heap env struct that must be deep-dropped.
+	// Covers tuple/array struct fields carrying a closure via tupleNeedsDrop /
+	// arrayFieldNeedsDrop.
+	if _, ok := typ.(*types.Signature); ok {
+		return true
 	}
 	if named := extractNamed(typ); named != nil {
 		if named == types.TypString || named.HasDrop() || named.NeedsSynthDrop() {

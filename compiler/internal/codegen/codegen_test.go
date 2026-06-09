@@ -11925,6 +11925,97 @@ func TestDropSynthesizedMultipleFuncFields(t *testing.T) {
 	assertContains(t, ir, "funcfield.env.free")
 }
 
+// T0741 Part B: a struct closure field with heap captures must deep-drop its
+// env (drop captured values via the env's field-0 drop fn) instead of a shallow
+// pal_free. emitFuncFieldEnvFree now routes through emitEnvDropOrFree, which
+// emits the env.deep_drop / env.shallow_free branch.
+func TestDropClosureStructFieldDeepDrops(t *testing.T) {
+	ir := generateIR(t, `
+		type CbHolder {
+			() -> int cb;
+		}
+		make_cb(int n) CbHolder {
+			s := "cap" + "tured";
+			return CbHolder(cb: move || -> s.len + n);
+		}
+		main() {
+			h := make_cb(5);
+		}
+	`)
+	assertContains(t, ir, "define void @CbHolder.drop")
+	assertContains(t, ir, "funcfield.env.free")
+	// Deep drop: load the env's field-0 drop fn and call it (drops captures),
+	// else fall back to pal_free. The presence of these blocks (not a bare
+	// pal_free in funcfield.env.free) is the Part-B fix.
+	assertContains(t, ir, "env.deep_drop")
+	assertContains(t, ir, "env.shallow_free")
+}
+
+// T0741 Part A: an enum variant whose payload is a closure must drop the
+// closure's env in the synthesized enum drop. variantFieldNeedsDrop now returns
+// true for *types.Signature, so emitVariantFieldDrop's closure case runs.
+func TestDropEnumVariantClosurePayload(t *testing.T) {
+	ir := generateIR(t, `
+		enum Callback {
+			holds(() -> int cb),
+			empty,
+		}
+		main() {
+			s := "enum" + " payload";
+			c := Callback.holds(cb: move || -> s.len);
+		}
+	`)
+	assertContains(t, ir, "define void @Callback.drop")
+	assertContains(t, ir, "closure.env.free")
+	assertContains(t, ir, "env.deep_drop")
+}
+
+// T0741 Part C: an optional closure struct field must drop its env.
+// emitOptionalValueDrop now has a *types.Signature case that branches on the
+// has-value flag and deep-drops the inner closure's env.
+func TestDropOptionalClosureField(t *testing.T) {
+	ir := generateIR(t, `
+		type OptCb {
+			(() -> int)? cb;
+		}
+		make_holder(int n) OptCb {
+			s := "cap" + "tured";
+			return OptCb(cb: move || -> s.len + n);
+		}
+		main() {
+			h := make_holder(5);
+		}
+	`)
+	assertContains(t, ir, "define void @OptCb.drop")
+	assertContains(t, ir, "optfield.drop")
+	assertContains(t, ir, "closure.env.free")
+	assertContains(t, ir, "env.deep_drop")
+}
+
+// T0741: cloning a closure-containing enum aggregate must NOT shallow-copy the
+// closure env (that would alias one env between two droppable owners →
+// double-free). emitVariantFieldDup's Signature case nulls the cloned variant's
+// closure slot instead, so only the source owns the env. Verify the dup path
+// stores a zeroed fat pointer rather than copying the source closure value.
+func TestDupEnumVariantClosureNullsSlot(t *testing.T) {
+	ir := generateIR(t, `
+		enum Cb {
+			holds(() -> int cb),
+			empty,
+		}
+		main() {
+			v := Vector[Cb]();
+			s := "shared" + " env";
+			v.push(Cb.holds(cb: move || -> s.len));
+			v2 := v.clone();
+		}
+	`)
+	// The cloned variant's {fn,env} closure slot is zero-initialized (nulled),
+	// not a copy of the source env — the memory-safe degradation for the
+	// non-cloneable closure env.
+	assertContains(t, ir, "store { i8*, i8* } zeroinitializer")
+}
+
 // B0216: String field reassignment drops old value before storing new.
 func TestStringFieldReassignDrop(t *testing.T) {
 	ir := generateIR(t, `

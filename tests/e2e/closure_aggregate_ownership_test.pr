@@ -1,0 +1,284 @@
+// T0741: Closure (function-value) ownership in aggregates.
+//
+// A closure is a fat pointer {fn, env} whose env is a heap struct that may
+// itself own captured strings/vectors/nested closures. When a closure is stored
+// in an aggregate (enum payload, struct field, optional, fixed array, tuple,
+// vector) the aggregate becomes the sole owner of that env and must deep-drop it
+// exactly once at the owner's drop. Before T0741 several aggregate kinds either
+// skipped the env entirely (leak) or shallow-freed it (captured values leaked).
+//
+// These are construct-and-drop leak guards (zero-leak enforced) plus the
+// double-free guard for the fixed-array-literal claim path. Each loops 30x so a
+// per-iteration leak shows up as a 30+ allocation delta.
+//
+// NOTE: escape-then-invoke with a *heap-capturing* closure read back out of an
+// aggregate field into a local (e.g. `f := h.cb; f()`) is blocked by a separate
+// pre-existing ownership bug (T0812: closure field reads alias the env without
+// dup/move-tracking → double-free). No-capture invoke (null env) is covered here
+// since it has no env to double-free.
+enum Cb {
+  holds(() -> int cb), empty,
+}
+enum OptCbEnum {
+  holds((() -> int)? cb), empty,
+}
+type StructCb {
+  () -> int cb;
+}
+type OptCb {
+  (() -> int)? cb;
+}
+type ArrCb {
+  (() -> int)[2] cbs;
+}
+type TupCb {
+  (int, () -> int) pair;
+}
+
+// --- Enum payload (Part A) ---
+
+enum_payload_no_capture() `test {
+  i := 0;
+  while i < 30 {
+    c := Cb.holds(cb: || -> 1);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+enum_payload_copy_capture() `test {
+  i := 0;
+  while i < 30 {
+    n := i;
+    c := Cb.holds(cb: move || -> n + 1);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+enum_payload_heap_capture() `test {
+  i := 0;
+  while i < 30 {
+    s := "enum" + " payload"; // heap string captured by move
+    c := Cb.holds(cb: move || -> s.len);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+optional_of_enum_with_closure() `test {
+  i := 0;
+  while i < 30 {
+    s := "x" + "y";
+    Cb? o = Cb.holds(cb: move || -> s.len);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+vector_of_enum_with_closure() `test {
+  i := 0;
+  while i < 30 {
+    v := Vector[Cb]();
+    s := "vv" + "ww";
+    v.push(Cb.holds(cb: move || -> s.len)); // enum-with-closure moved into vector
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Optional closure as an *enum variant payload* `(() -> int)?` — exercises
+// emitOptionalValueDrop's Signature case reached via emitVariantFieldDrop's
+// optional branch in the synthesized enum drop. Some-case (heap capture) and
+// none-case (no env), both leak-free.
+enum_variant_optional_closure_some() `test {
+  i := 0;
+  while i < 30 {
+    s := "a" + "b";
+    e := OptCbEnum.holds(cb: move || -> s.len);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+enum_variant_optional_closure_none() `test {
+  i := 0;
+  while i < 30 {
+    OptCbEnum e = OptCbEnum.holds(cb: none);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// --- Struct closure field (Part B) ---
+
+struct_field_heap_capture() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    h := StructCb(cb: move || -> s.len); // struct owns env + captured string
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+struct_field_no_capture() `test {
+  i := 0;
+  while i < 30 {
+    h := StructCb(cb: || -> 7);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+struct_field_copy_only_capture() `test {
+  i := 0;
+  while i < 30 {
+    n := i;
+    h := StructCb(cb: move || -> n + 1);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// --- Optional / array closure struct field (Part C) ---
+
+optional_closure_field() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    h := OptCb(cb: move || -> s.len);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Local `Optional[closure]` binding (not a struct field) — exercises the
+// optional binding's drop path directly via emitOptionalValueDrop's Signature
+// case, independent of OptCb's field drop.
+local_optional_closure_binding() `test {
+  i := 0;
+  while i < 30 {
+    s := "cap" + "tured";
+    (() -> int)? o = move || -> s.len;
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+array_closure_field() `test {
+  i := 0;
+  while i < 30 {
+    s := "a" + "b";
+    t := "c" + "d";
+    h := ArrCb(cbs: [move || -> s.len, move || -> t.len]);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Untyped `[...]` of closures — infers as Vector[() -> int] (genArrayLit), NOT a
+// fixed array. Guards the vector-literal claim path (claimEnvTemp per element).
+local_vector_literal_of_closures() `test {
+  i := 0;
+  while i < 30 {
+    s := "a" + "b";
+    arr := [move || -> s.len, || -> 2];
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// Explicitly-typed local fixed-array binding of closures — the literal Part-A
+// double-free guard: the LOCAL array binding's element drop (bindingDropArray)
+// now fires, so genFixedArrayLit's claim site must claim each closure env
+// exactly once (no `fatal: invalid free (bad header magic)`). Distinct drop
+// site from the ArrCb struct field (array_closure_field, via arrayFieldNeedsDrop).
+local_fixed_array_binding_of_closures() `test {
+  i := 0;
+  while i < 30 {
+    s := "a" + "b";
+    (() -> int)[2] arr = [move || -> s.len, || -> 2];
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// --- Tuple-nested closure ---
+
+tuple_nested_closure_field() `test {
+  i := 0;
+  while i < 30 {
+    s := "t" + "u";
+    h := TupCb(pair: (3, move || -> s.len));
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// --- Vector[closure] literal + push + remove ---
+
+vector_closure_literal_and_push() `test {
+  i := 0;
+  while i < 30 {
+    s := "v" + "c";
+    v := [move || -> s.len];
+    t := "p" + "q";
+    v.push(move || -> t.len);
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+vector_closure_remove() `test {
+  i := 0;
+  while i < 30 {
+    s := "v" + "c";
+    v := [move || -> s.len, || -> 7];
+    v.remove(0); // removed element's env must be dropped, not leaked
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// --- Clone of an enum-with-closure container (T0813 memory-safety guard) ---
+//
+// Cloning a closure-containing aggregate is semantically meaningless (a closure
+// env can't be deep-cloned) and is tracked for a sema rejection in T0813. Until
+// then, enabling closure drop in enum variants (Part A) must NOT turn the
+// pre-existing clone *leak* into a *double-free*: emitVariantFieldDup nulls the
+// cloned variant's closure slot so only the source owns the env. This guards
+// that the clone neither crashes nor leaks (the source env is dropped once).
+clone_vector_of_enum_with_closure_is_memory_safe() `test {
+  i := 0;
+  while i < 30 {
+    s := "shared" + " env";
+    v := Vector[Cb]();
+    v.push(Cb.holds(cb: move || -> s.len));
+    v2 := v.clone(); // cloned variant's closure slot is nulled — no shared env
+    assert(v.len == 1, "");
+    assert(v2.len == 1, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// --- No-capture invoke (null env — has nothing to double-free) ---
+
+invoke_no_capture_from_vector() `test {
+  v := [|| -> 11, || -> 22];
+  f := v[0];
+  assert(f() == 11, "");
+}
+
+invoke_no_capture_from_optional_field() `test {
+  h := OptCb(cb: || -> 9);
+  f := h.cb!;
+  assert(f() == 9, "");
+}
+
+invoke_no_capture_from_array_field() `test {
+  h := ArrCb(cbs: [|| -> 4, || -> 8]);
+  f := h.cbs[0];
+  assert(f() == 4, "");
+}

@@ -2706,6 +2706,11 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				c.claimHeapTemp(val)
 				// T0100: Claim env temp — closure env is now owned by the struct field.
 				c.claimEnvTemp(val)
+				// T0741: For an optional-closure field `(() -> T)? cb`, val is the
+				// wrapped {i1, {fn,env}} optional, which claimEnvTemp can't match —
+				// claim the bare pre-wrap closure {fn,env} so its env is owned by
+				// the field (otherwise cleanupEnvTemps frees it early → dangling).
+				c.claimEnvTemp(preWrapVal)
 			}
 			// T0498: Claim per-field optionalStringDup / optionalContainerDup for
 			// Optional[X] field-reads from droppable owners. genFieldAccess sets
@@ -5135,6 +5140,13 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		if _, isMember := e.Args[0].Value.(*ast.MemberExpr); isMember {
 			c.dupContainerFieldAccess = true
 		}
+		// T0741: track enum ctor temps created while evaluating the pushed
+		// element. When the element is moved (not dup'd) into the vector, the
+		// vector becomes the sole owner, so these temps must be cleared — else
+		// the temp's stmt-end synth drop and the vector element drop both free
+		// the variant data (e.g. a closure env in a Vector[enum-with-closure]
+		// element → double-free). Mirrors genVectorLit / genFixedArrayLit.
+		savedEnumTemps := len(c.enumCtorTemps)
 		argVal := c.genCallArgExpr(e.Args[0].Value)
 		c.dupContainerFieldAccess = false
 		c.targetType = savedTarget
@@ -5261,6 +5273,18 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 			c.claimStringTemp(argVal)
 			// B0233: claim heap temp — ownership transfers to vector
 			c.claimHeapTemp(argVal)
+			// T0741: claim closure env — ownership transfers to vector; the
+			// vector's element-drop loop now frees each pushed closure's env.
+			c.claimEnvTemp(argVal)
+			// T0741: when moved (not dup'd) into the vector, clear enum ctor
+			// temps created during arg eval so the temp's synth drop doesn't
+			// also free the variant data the vector element now owns.
+			if !dupped {
+				for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
+					c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.enumCtorTemps[j].dropFlag)
+				}
+				c.enumCtorTemps = c.enumCtorTemps[:savedEnumTemps]
+			}
 		}
 		// COW: if static (.rodata), copy to heap first (T0062)
 		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
@@ -7870,6 +7894,7 @@ func (c *Compiler) genTupleLit(e *ast.TupleLit) value.Value {
 		//     again when the tuple is consumed (case A double-free).
 		c.claimStringTemp(elemVal) // strings, vectors, channels, arcs, mutexes
 		c.claimHeapTemp(elemVal)   // heap user-type instances
+		c.claimEnvTemp(elemVal)    // T0741: closure env (tuple owns it now)
 		// Clear enum ctor temps created during this element's evaluation so
 		// the tuple is the unique owner of the enum's variant data.
 		for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {
@@ -8107,6 +8132,9 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 			// the caller's stmt-temp cleanup runs Vector.drop while the gather buffer (owned
 			// by the variadic callee) also drops each element → double-free.
 			c.claimStringTemp(val)
+			// T0741: claim closure env — element ownership transferred to vector;
+			// the vector's element-drop loop now frees each closure's env.
+			c.claimEnvTemp(val)
 			// B0281: Clear enum ctor temps created during this element's evaluation.
 			// Same issue as map literals: the enum value is stored by LLVM value,
 			// so both the temp alloca and the vector slot share inner pointers.
@@ -8300,6 +8328,7 @@ func (c *Compiler) genFixedArrayLit(e *ast.ArrayLit, arr *types.Array) value.Val
 		}
 		c.claimStringTemp(val) // strings, vectors, channels, arcs, mutexes
 		c.claimHeapTemp(val)   // heap user-type instances
+		c.claimEnvTemp(val)    // T0741: closure env (array owns it now)
 		// Clear enum ctor temps created during this element's evaluation so
 		// the array is the unique owner of the enum's variant data.
 		for j := savedEnumTemps; j < len(c.enumCtorTemps); j++ {

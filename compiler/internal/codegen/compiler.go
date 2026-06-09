@@ -3521,6 +3521,21 @@ func (c *Compiler) emitVariantFieldDup(fieldVal value.Value, fieldPtr value.Valu
 		return
 	}
 
+	// T0741: Closure (function value) field. variantFieldNeedsDrop now returns
+	// true for closures (for the drop path), so the dup/clone gate reaches here.
+	// A closure env CANNOT be deep-cloned (the captured frame is opaque), and a
+	// shallow copy would alias the source's env between two now-droppable owners
+	// → double-free at drop (the leak→double-free hazard from this ticket's
+	// CAUTION, surfacing via native container clone, e.g. Vector[EnumWithClosure]
+	// .clone()). Null the cloned slot instead: the source keeps sole ownership of
+	// its env (dropped exactly once), the clone holds an empty (uncallable)
+	// closure. This is a memory-safe degradation until sema rejects cloning a
+	// closure-containing aggregate outright (T0813).
+	if _, ok := typ.(*types.Signature); ok {
+		c.block.NewStore(constant.NewZeroInitializer(fieldVal.Type()), fieldPtr)
+		return
+	}
+
 	// Nested enum field: dup in place
 	if extractEnum(typ) != nil {
 		c.dupEnumElementInPlace(fieldPtr, typ)
@@ -7728,6 +7743,25 @@ func (c *Compiler) emitOptionalValueDrop(optVal value.Value, opt *types.Optional
 		return
 	}
 
+	// T0741: Closure inner — Optional<() -> T>. Branch on has-value, then drop
+	// the inner closure's env via emitVariantFieldDrop's Signature case (null-
+	// checks the env and emitEnvDropOrFree). Covers optional-closure struct
+	// fields and optional-closure enum-variant fields.
+	if _, ok := elem.(*types.Signature); ok {
+		hasVal := c.block.NewExtractValue(optVal, 0)
+		dropBlock := c.newBlock("optfield.drop")
+		skipBlock := c.newBlock("optfield.skip")
+		c.block.NewCondBr(hasVal, dropBlock, skipBlock)
+		c.block = dropBlock
+		innerVal := c.block.NewExtractValue(optVal, 1)
+		c.emitVariantFieldDrop(innerVal, elem)
+		if c.block.Term == nil {
+			c.block.NewBr(skipBlock)
+		}
+		c.block = skipBlock
+		return
+	}
+
 	// T0572: Enum inner — Optional<EnumT>. Branch on has-value, then drop the
 	// loaded enum value via emitVariantFieldDrop, which already dispatches to
 	// the right drop name (plain / mono / cross-module forward-declared). The
@@ -8242,7 +8276,11 @@ func (c *Compiler) emitFuncFieldEnvFree(f *types.Field, layout *TypeDeclLayout, 
 	c.block.NewCondBr(isNull, skipBlock, freeBlock)
 
 	c.block = freeBlock
-	c.block.NewCall(c.palFree, envPtr)
+	// T0741 Part B: deep-drop the env (drops captured strings/vectors/nested
+	// closures via the env's field-0 drop fn) instead of a shallow pal_free,
+	// which would leak heap captures. The struct's drop is the sole owner of
+	// this field's env, so the deep drop runs exactly once.
+	c.emitEnvDropOrFree(envPtr)
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock
@@ -8961,6 +8999,13 @@ func (c *Compiler) variantFieldNeedsDrop(typ types.Type) bool {
 	if arr, ok := typ.(*types.Array); ok {
 		return c.variantFieldNeedsDrop(arr.Elem())
 	}
+	// T0741: Closure (function value) fields own a heap env struct (+ captured
+	// values) that must be deep-dropped. emitVariantFieldDrop's Signature case
+	// frees the env. Paired with claimEnvTemp at every aggregate construction
+	// site so the env is owned exactly once.
+	if _, ok := typ.(*types.Signature); ok {
+		return true
+	}
 	named := extractNamed(typ)
 	if named != nil {
 		if named == types.TypString || named == types.TypVector || named == types.TypChannel {
@@ -9328,11 +9373,12 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 	// and Array branches below recurse here unconditionally). Without it, a
 	// closure in any of those leaks its env (e.g. a dropped-not-awaited
 	// `go { || -> base + 2 }`).
-	// NOTE: closures in an *enum* payload, an *optional*, or a plain struct
-	// closure *field* with heap captures are NOT reached/correctly freed here —
-	// those paths (variantFieldNeedsDrop, emitOptionalValueDrop,
-	// emitFuncFieldEnvFree's shallow pal_free) need separate fixes tracked in
-	// T0741. Do not assume this case alone covers every aggregate.
+	// T0741: closures in an *enum* payload, an *optional*, or a plain struct
+	// closure *field* with heap captures are now handled too — enum payloads via
+	// variantFieldNeedsDrop's Signature case (reaching this case), optionals via
+	// emitOptionalValueDrop's Signature case, and struct closure fields via
+	// emitFuncFieldEnvFree (now a deep emitEnvDropOrFree). Each is paired with a
+	// claimEnvTemp at its construction site so the env is owned exactly once.
 	if _, ok := typ.(*types.Signature); ok {
 		if st, isStruct := fieldVal.Type().(*irtypes.StructType); isStruct && len(st.Fields) == 2 {
 			envPtr := c.block.NewExtractValue(fieldVal, 1)

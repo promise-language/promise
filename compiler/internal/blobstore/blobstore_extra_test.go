@@ -365,6 +365,79 @@ func TestIntegrityTelemetryOptIn(t *testing.T) {
 	reportIntegrityMismatch("llvm-opt", "https://x/opt", "aa", "bb", "2026.0")
 }
 
+// TestExtractArchiveColonPath verifies extractArchive works when the archive's
+// directory path contains a colon (simulating a Windows C:\... drive prefix).
+// GNU tar 1.35 misparses the -f operand as [user@]host:path when it contains a
+// colon; the fix passes only filepath.Base(archive) with cmd.Dir set to the
+// archive's directory (T0809).
+func TestExtractArchiveColonPath(t *testing.T) {
+	parent := t.TempDir()
+	colonDir := filepath.Join(parent, "C:")
+	if err := os.Mkdir(colonDir, 0o755); err != nil {
+		t.Skipf("filesystem does not support colon in directory name: %v", err)
+	}
+	content := []byte("tool-binary-data")
+	archiveBytes := makeTar(map[string][]byte{"bin/tool": content})
+	archivePath := filepath.Join(colonDir, sha256hex(archiveBytes))
+	if err := os.WriteFile(archivePath, archiveBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(parent, "out")
+	if err := extractArchive(archivePath, dst); err != nil {
+		t.Fatalf("extractArchive with colon in path: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "bin", "tool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatal("wrong bytes after extraction with colon-containing path")
+	}
+}
+
+// TestExtractArchiveTarFailure verifies that a corrupt (non-zip) file passed
+// to extractArchive surfaces the tar exit-status error rather than silently
+// succeeding or panicking.
+func TestExtractArchiveTarFailure(t *testing.T) {
+	dir := t.TempDir()
+	corrupt := filepath.Join(dir, "bad.tar")
+	if err := os.WriteFile(corrupt, []byte("this is not a valid tar archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "out")
+	err := extractArchive(corrupt, dst)
+	if err == nil {
+		t.Fatal("expected error from extractArchive with corrupt tar, got nil")
+	}
+}
+
+// TestIsZipShortFile verifies isZip returns false for a file shorter than the
+// 4-byte magic prefix — exercises the io.ReadFull short-read error path.
+func TestIsZipShortFile(t *testing.T) {
+	dir := t.TempDir()
+	short := filepath.Join(dir, "short.bin")
+	if err := os.WriteFile(short, []byte("PK"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if isZip(short) {
+		t.Fatal("short file should not be detected as zip")
+	}
+}
+
+// TestExtractZipCorruptData verifies extractZip rejects non-zip bytes and
+// returns the zip.OpenReader error (not a nil or panic).
+func TestExtractZipCorruptData(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "notazip.zip")
+	if err := os.WriteFile(bad, []byte("definitely not a zip file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := extractZip(bad, filepath.Join(dir, "out"))
+	if err == nil {
+		t.Fatal("expected error from extractZip with non-zip content, got nil")
+	}
+}
+
 // TestStageBlobThenResolveIsCASHit verifies a staged (full-variant) blob is a
 // CAS hit on resolution — no network — matching the install-staging acceptance
 // criterion.

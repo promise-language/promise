@@ -732,6 +732,41 @@ func TestExtractArchive_UnsupportedFormat(t *testing.T) {
 	}
 }
 
+// TestExtractArchive_ColonInPath verifies ExtractArchive works when the archive
+// path contains a colon in its directory component (simulating a Windows
+// C:\... drive prefix). GNU tar 1.35 misparses the -f operand as
+// [user@]host:path when it contains a colon; the fix runs tar in the archive
+// directory with only its basename (T0809).
+func TestExtractArchive_ColonInPath(t *testing.T) {
+	parent := t.TempDir()
+	colonDir := filepath.Join(parent, "C:")
+	if err := os.Mkdir(colonDir, 0o755); err != nil {
+		t.Skipf("filesystem does not support colon in directory name: %v", err)
+	}
+	tarBytes, err := makeTarGzContent(map[string]string{"bin/opt": "OPT_CONTENT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(colonDir, "archive.tar.gz")
+	if err := os.WriteFile(archivePath, tarBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(parent, "out")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ExtractArchive(archivePath, dst); err != nil {
+		t.Fatalf("ExtractArchive with colon in path: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "bin", "opt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "OPT_CONTENT" {
+		t.Errorf("got %q, want OPT_CONTENT", got)
+	}
+}
+
 // TestSingleTopLevelDir covers the three cases: exactly one subdir (the LLVM
 // tarball shape), multiple subdirs, and zero subdirs.
 func TestSingleTopLevelDir(t *testing.T) {

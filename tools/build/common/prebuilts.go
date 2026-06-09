@@ -693,8 +693,10 @@ func ExtractArchive(archive, dst string) error {
 	case strings.HasSuffix(lower, ".tar.xz"),
 		strings.HasSuffix(lower, ".tar.gz"),
 		strings.HasSuffix(lower, ".tgz"):
-		// `tar` autodetects compression on every modern platform's tar.
-		return RunIn(dst, "tar", "-xf", archive)
+		// Run tar in the archive's directory and pass only the basename as -f so
+		// that GNU tar 1.35 (Git's tar on Windows) does not misparse a
+		// colon-containing path like C:\... as [user@]host:path (T0809).
+		return RunIn(filepath.Dir(archive), "tar", "-xf", filepath.Base(archive), "-C", dst)
 	case strings.HasSuffix(lower, ".zip"):
 		return extractZip(archive, dst)
 	default:

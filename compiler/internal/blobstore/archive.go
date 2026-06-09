@@ -24,7 +24,11 @@ func extractArchive(archive, dst string) error {
 		return extractZip(archive, dst)
 	}
 	// Everything else: hand to system tar, which autodetects gz/xz/zst/plain.
-	cmd := exec.Command("tar", "-xf", archive, "-C", dst)
+	// Run tar in the archive's directory and pass only the basename as -f so that
+	// GNU tar 1.35 (Git's tar on Windows) does not misparse a colon-containing
+	// path like C:\... as the [user@]host:path remote-archive syntax (T0809).
+	cmd := exec.Command("tar", "-xf", filepath.Base(archive), "-C", dst)
+	cmd.Dir = filepath.Dir(archive)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tar -xf %s: %v\n%s", archive, err, out)
 	}

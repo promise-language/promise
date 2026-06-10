@@ -1,6 +1,8 @@
 package ownership
 
 import (
+	"fmt"
+
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/sema"
 	"github.com/promise-language/promise/compiler/internal/types"
@@ -30,6 +32,12 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 
 	case *ast.UnaryExpr:
 		c.checkExpr(e.Operand)
+		// T0837: `<-(borrowed.tsk!)` consumes/frees the G through a shared borrow.
+		// The receive does not flow through tryMove/tryMoveConsume, so reject the
+		// out-of-borrow consume here. No-op for channel receives (not single-owner).
+		if e.Op == ast.UnaryReceive {
+			c.rejectMemberHandleMoveOutOfBorrow(e.Operand)
+		}
 
 	case *ast.IndexExpr:
 		c.checkExpr(e.Target)
@@ -160,6 +168,14 @@ func (c *Checker) checkIdentUse(e *ast.IdentExpr) {
 // reads stay legal — but consuming contexts (call to `~` param, etc.) must
 // use tryMoveConsume to enforce the T0338 check.
 func (c *Checker) tryMove(expr ast.Expr) {
+	// T0837: reject moving a single-owner native handle field out of a shared
+	// borrow before the MemberExpr branch (this helper peels paren/unwrap
+	// wrappers, so `borrowed.field!` is caught here where checkFieldMoveOwnership
+	// — which only sees a bare MemberExpr — would miss it).
+	if c.rejectMemberHandleMoveOutOfBorrow(expr) {
+		return
+	}
+
 	// B0341: check field reads from droppable owners before ident handling.
 	if member, ok := expr.(*ast.MemberExpr); ok {
 		c.checkFieldMoveOwnership(member)
@@ -256,6 +272,11 @@ func (c *Checker) tryMoveConsume(expr ast.Expr) {
 	// T0652: reject moves of a for-in loop binding whose iterable element is a
 	// single-owner native handle. See tryMove for rationale.
 	if c.rejectForInSingleOwnerBindingMove(expr) {
+		return
+	}
+	// T0837: reject consuming a single-owner native handle field out of a shared
+	// borrow (e.g. passing `borrowed.mtx!` to a `~` parameter). See tryMove.
+	if c.rejectMemberHandleMoveOutOfBorrow(expr) {
 		return
 	}
 	// B0341 field-move check delegated to tryMove; inherit it here too.
@@ -1290,6 +1311,115 @@ func (c *Checker) rejectIndexExprSingleOwnerMove(expr ast.Expr) bool {
 	c.errorf(idx.Pos(),
 		"cannot move %s out of indexed slot; this is a single-owner native handle with no copy/clone semantics — use a fresh constructor for the slot, or call a method that returns a borrow (e.g. `.lock()`)",
 		typ.String())
+	return true
+}
+
+// peelToMemberSource peels ParenExpr / OptionalUnwrapExpr wrappers off expr and
+// returns the underlying MemberExpr (e.g. the `owner.field` inside `(owner.field!)`),
+// or nil when the peeled expression is not a member access.
+func peelToMemberSource(expr ast.Expr) *ast.MemberExpr {
+	for {
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			expr = e.Expr
+		case *ast.OptionalUnwrapExpr:
+			expr = e.Expr
+		default:
+			if m, ok := expr.(*ast.MemberExpr); ok {
+				return m
+			}
+			return nil
+		}
+	}
+}
+
+// memberChainRoot walks a (possibly chained, paren-wrapped) MemberExpr down to
+// its root IdentExpr / ThisExpr and returns the root expr plus its variable name
+// ("this" for a ThisExpr). The bool is false when the chain bottoms out on a
+// non-variable target (call result, index, literal) — transient owners this
+// check does not reason about.
+func (c *Checker) memberChainRoot(m *ast.MemberExpr) (ast.Expr, string, bool) {
+	target := m.Target
+	for {
+		switch t := target.(type) {
+		case *ast.ParenExpr:
+			target = t.Expr
+		case *ast.MemberExpr:
+			target = t.Target
+		case *ast.ThisExpr:
+			return t, "this", true
+		case *ast.IdentExpr:
+			if obj := c.info.Objects[t]; obj != nil {
+				if _, isVar := obj.(*types.Var); isVar {
+					return t, t.Name, true
+				}
+			}
+			return nil, "", false
+		default:
+			return nil, "", false
+		}
+	}
+}
+
+// rejectMemberHandleMoveOutOfBorrow rejects moving or consuming a single-owner
+// native handle field (Mutex/MutexGuard/Task) out of a *shared-borrow* owner
+// (T0837). Shapes like `Mutex[int] m = borrowed.mtx!` or `<-(borrowed.tsk!)`
+// alias the handle's i8* while the real owner (in the caller) still drops it →
+// double-free. Heap-user-type fields are masked by T0428 Case 3B's independent
+// dup; single-owner handles have no copy/clone semantics, so the move/consume
+// must be rejected here. Owned owners (`~this`, owned local, `~` param) keep
+// the field live and are correctly handled by codegen's neutralize/temp-tracking
+// (T0806), so they are NOT rejected. Returns true when rejected so the caller
+// can skip the regular move/state bookkeeping.
+func (c *Checker) rejectMemberHandleMoveOutOfBorrow(expr ast.Expr) bool {
+	member := peelToMemberSource(expr)
+	if member == nil {
+		return false
+	}
+	if !isSingleOwnerNativeType(c.info.Types[member]) {
+		return false
+	}
+	// Getter calls return freshly produced owned values — no field move involved
+	// (mirrors checkFieldMoveOwnership's getter guard).
+	ownerType := c.info.Types[member.Target]
+	if n := extractNamedType(ownerType); n != nil {
+		if n.LookupGetter(member.Field) != nil {
+			return false
+		}
+	}
+	root, rootName, ok := c.memberChainRoot(member)
+	if !ok {
+		return false
+	}
+	// Borrow discriminator: reject only when the owner is a shared borrow.
+	// `&this` receivers, plain non-`~`/`&` borrowed params, and Borrowed-state
+	// locals carry Borrowed state. Explicit `&owner` params/locals carry an Owned
+	// state (the SharedRef itself is Copy), so check the static type too. A
+	// `~`/RefMut owner is owned by the callee → not a borrow → not rejected.
+	borrowed := c.state[rootName] == Borrowed
+	if !borrowed {
+		if _, isShared := c.info.Types[root].(*types.SharedRef); isShared {
+			borrowed = true
+		}
+	}
+	if !borrowed {
+		return false
+	}
+	// Tailor the remedy to the handle: a Mutex can be read in place via the
+	// borrowing `.lock()`, but a Task has no in-place read (the only operation,
+	// `<-`, consumes it) — so for a Task only the take-ownership remedy applies.
+	// Peel the Optional wrapper (`Task[int]?`) before the Task check.
+	handleType := c.info.Types[member]
+	if opt, ok := handleType.(*types.Optional); ok {
+		handleType = opt.Elem()
+	}
+	remedy := "take ownership with a `~this` receiver / `~` parameter"
+	if !types.IsTask(handleType) {
+		remedy = fmt.Sprintf("read it in place through a borrow (e.g. `(%s.%s!).lock()`), or %s", rootName, member.Field, remedy)
+	}
+	c.errorf(member.Pos(),
+		"cannot move single-owner handle field '%s' (%s) out of borrowed '%s'; the real owner still drops it, so moving/consuming the handle here would double-free — %s",
+		member.Field, c.info.Types[member].String(), rootName, remedy)
 	return true
 }
 

@@ -35,10 +35,10 @@
 //   - MutexGuard.close codegen panic when the guard originates from an unwrapped
 //     optional-field mutex (missing mono-method declaration).
 //   - Move/consume a single-owner handle OUT OF A SHARED BORROW
-//     (`<-(borrowed.tsk!)`, `Handle h = borrowed.field!`) is not rejected by
-//     ownership and double-frees — an ownership-analysis hole, not a codegen
-//     temp-tracking gap. Hence the borrowed rows below use the BORROWING `.lock()`
-//     (Mutex) only, never a consuming await/move.
+//     (`<-(borrowed.tsk!)`, `Handle h = borrowed.field!`) was an ownership hole
+//     that double-freed — now REJECTED at the ownership pass (T0837, see the
+//     TestT0837_* Go tests). Hence the borrowed rows below use the BORROWING
+//     `.lock()` (Mutex) only, never a consuming await/move.
 use std as _;
 
 worker_t0806() int {
@@ -371,4 +371,31 @@ t0838_mtx_generic_method_handler_binding() `test {
     return;
   };
   assert(m.lock().borrow == 44, "generic-method mtx handler-binding");
+}
+
+// ---------------------------------------------------------------------------
+// T0837 acceptance (runtime no-leak / no-double-free): a getter that *returns*
+// a freshly-constructed single-owner handle is not a field move — the getter
+// produces an owned value, so binding it out of a BORROWED owner is safe and
+// must run cleanly (mirrors the ownership-level getter guard). The borrowed
+// holder owns no handle storage of its own, so there is no aliasing.
+// ---------------------------------------------------------------------------
+
+type MtxGetterHolder {
+  drop(~this) {
+  }
+  // Getter producing a fresh owned Mutex per access.
+  get fresh_mtx Mutex[int]? {
+    return Mutex[int](21);
+  }
+}
+
+t0806_mtx_getter_fresh_out_of_borrow(MtxGetterHolder &h) int {
+  Mutex[int] m = h.fresh_mtx!;
+  return m.lock().borrow;
+}
+
+t0806_mtx_getter_fresh_handle() `test {
+  h := MtxGetterHolder();
+  assert(t0806_mtx_getter_fresh_out_of_borrow(h) == 21, "getter fresh handle out of borrow");
 }

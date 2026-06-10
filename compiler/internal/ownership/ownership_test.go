@@ -10004,6 +10004,188 @@ func TestT0652_IteratorChainAllowed(t *testing.T) {
 	`)
 }
 
+// === T0837: moving/consuming a single-owner handle field out of a shared
+// borrow must be rejected ===
+//
+// Force-unwrapping a `Mutex[T]?` / `Task[T]?` field on a *borrowed* owner and
+// then MOVING (binding) or CONSUMING (`<-`) the handle aliases the underlying
+// i8* while the real owner (in the caller) still drops it → double-free. The
+// owned counterparts (`~this`, owned local, `~` param) keep the field live and
+// stay accepted (T0806). The borrowing `.lock()` temp also stays accepted.
+
+// Shape 1: Mutex binding move-out of `&this`.
+func TestT0837_MutexBindingMoveOutOfBorrowedThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type MtxHolder {
+			Mutex[int]? mtx;
+			drop(~this) {}
+			steal(&this) int {
+				Mutex[int] m = this.mtx!;
+				return m.lock().borrow;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Shape 2: Task consuming await `<-(this.tsk!)` out of `&this`.
+func TestT0837_TaskAwaitOutOfBorrowedThisRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		type TskHolder {
+			Task[int]? tsk;
+			drop(~this) {}
+			await_borrow(&this) int {
+				return <-(this.tsk!);
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Shape 3a: Mutex binding move-out of a free-function `&owner` parameter
+// (SharedRef root carries Owned state — exercises the type-based discriminator).
+func TestT0837_MutexBindingMoveOutOfSharedRefParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type MtxH { Mutex[int]? mtx; drop(~this) {} }
+		steal(MtxH &h) int {
+			Mutex[int] m = h.mtx!;
+			return m.lock().borrow;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Shape 3b: Task await out of a free-function `&owner` parameter.
+func TestT0837_TaskAwaitOutOfSharedRefParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		type TskH { Task[int]? tsk; drop(~this) {} }
+		await_it(TskH &h) int {
+			return <-(h.tsk!);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Chained `outer.inner.mtx!` out of a borrowed root.
+func TestT0837_ChainedMoveOutOfBorrowedRootRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { Mutex[int]? mtx; drop(~this) {} }
+		type Outer { Inner inner; drop(~this) {} }
+		grab(Outer &o) int {
+			Mutex[int] m = o.inner.mtx!;
+			return m.lock().borrow;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Acceptance: `~this` binding move-out keeps the field live (callee owns it).
+func TestT0837_MutexBindingMoveOutOfOwnedThisAllowed(t *testing.T) {
+	ownerOK(t, `
+		type MtxHolder {
+			Mutex[int]? mtx;
+			drop(~this) {}
+			steal(~this) int {
+				Mutex[int] m = this.mtx!;
+				return m.lock().borrow;
+			}
+		}
+		test() {}
+	`)
+}
+
+// Acceptance: owned-local binding move-out.
+func TestT0837_MutexBindingMoveOutOfOwnedLocalAllowed(t *testing.T) {
+	ownerOK(t, `
+		type MtxHolder { Mutex[int]? mtx; drop(~this) {} }
+		test() {
+			h := MtxHolder(mtx: Mutex[int](5));
+			Mutex[int] m = h.mtx!;
+			_ = m.lock().borrow;
+		}
+	`)
+}
+
+// Acceptance: owned-local consuming await `<-(h.tsk!)`.
+func TestT0837_TaskAwaitOutOfOwnedLocalAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		type TskHolder { Task[int]? tsk; drop(~this) {} }
+		test() {
+			h := TskHolder(tsk: go worker());
+			_ = <-(h.tsk!);
+		}
+	`)
+}
+
+// Acceptance: the borrowing `.lock()` temp on `&this` — `.lock()` borrows, never
+// moves, so it must NOT be rejected.
+func TestT0837_BorrowingLockTempOnBorrowedThisAllowed(t *testing.T) {
+	ownerOK(t, `
+		type MtxHolder {
+			Mutex[int]? mtx;
+			drop(~this) {}
+			peek(&this) int {
+				return (this.mtx!).lock().borrow;
+			}
+		}
+		test() {}
+	`)
+}
+
+// Acceptance: a `~` parameter move-out — the callee owns the handle.
+func TestT0837_MutexMoveOutOfMutParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		type MtxH { Mutex[int]? mtx; drop(~this) {} }
+		steal(MtxH ~h) int {
+			Mutex[int] m = h.mtx!;
+			return m.lock().borrow;
+		}
+		test() {}
+	`)
+}
+
+// Paren-wrapped member target out of a borrowed root must still be rejected —
+// `(o.inner).mtx!` peels through the ParenExpr in memberChainRoot's chain walk,
+// so wrapping the owner in parens is not an evasion of the check.
+func TestT0837_ParenWrappedMemberTargetRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { Mutex[int]? mtx; drop(~this) {} }
+		type Outer { Inner inner; drop(~this) {} }
+		grab(Outer &o) int {
+			Mutex[int] m = (o.inner).mtx!;
+			return m.lock().borrow;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Acceptance: a getter named like a field that *returns* a freshly-constructed
+// single-owner handle is NOT a field move — the getter produces an owned value,
+// so moving it out of a borrowed owner is safe and must not be rejected
+// (exercises the getter guard, mirroring checkFieldMoveOwnership).
+func TestT0837_GetterReturningHandleOutOfBorrowAllowed(t *testing.T) {
+	ownerOK(t, `
+		type MtxH {
+			drop(~this) {}
+			get fresh_mtx Mutex[int]? { return Mutex[int](9); }
+		}
+		grab(MtxH &h) int {
+			Mutex[int] m = h.fresh_mtx!;
+			return m.lock().borrow;
+		}
+		test() {}
+	`)
+}
+
 // === T0754: RTTI cast into an owning slot consumes the subject ===
 //
 // An `x as!/as T` flowing into an owning slot (field / element / constructor

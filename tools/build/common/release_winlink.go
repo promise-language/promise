@@ -87,17 +87,34 @@ func runReleaseWinlink(root string, args []string) error {
 }
 
 // resolveWinlinkDllTool locates llvm-dlltool for build-time import-lib
-// generation. It prefers the slim LLVM prebuilt cache (so a prebuilt-only or CI
-// host with no system LLVM resolves it once T0833 ships llvm-dlltool in the slim
-// set), then falls back to a PATH/system install. Non-fetching and best-effort:
-// returns "" when nothing is found so the caller surfaces a clear error.
+// generation. It prefers an already-populated slim LLVM prebuilt cache, then a
+// PATH/system install, and finally fetches the slim blobs (T0833 ships
+// llvm-dlltool in the slim set for every host) so a prebuilt-only host with no
+// system LLVM still resolves it. The fetch is necessary because winlink
+// generation runs during EmbedResources, *before* FindLLVM populates the slim
+// cache — so a non-fetching probe would spuriously fail on such hosts.
+// Best-effort: returns "" when nothing is found and the fetch fails, so the
+// caller surfaces a clear error.
 func resolveWinlinkDllTool(root string) string {
-	if dir, ok := SlimLLVMCacheDir(root, CurrentBuildTarget()); ok {
+	target := CurrentBuildTarget()
+	if dir, ok := SlimLLVMCacheDir(root, target); ok {
 		if p := filepath.Join(dir, "llvm-dlltool"+ExeSuffix()); Exists(p) {
 			return p
 		}
 	}
-	return Which("llvm-dlltool")
+	if p := Which("llvm-dlltool"); p != "" {
+		return p
+	}
+	// Nothing cached and not on PATH — fetch the slim blobs (includes the
+	// build-only llvm-dlltool) and re-check the cache.
+	if root != "" {
+		if dir, err := EnsureLLVMBlobs(root, target); err == nil {
+			if p := filepath.Join(dir, "llvm-dlltool"+ExeSuffix()); Exists(p) {
+				return p
+			}
+		}
+	}
+	return ""
 }
 
 // ensureWinlinkLibs generates the Windows import libraries from the .def symbol

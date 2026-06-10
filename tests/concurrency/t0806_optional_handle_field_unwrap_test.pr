@@ -39,6 +39,13 @@
 //     that double-freed — now REJECTED at the ownership pass (T0837, see the
 //     TestT0837_* Go tests). Hence the borrowed rows below use the BORROWING
 //     `.lock()` (Mutex) only, never a consuming await/move.
+//   - Move/consume a single-owner handle OUT OF A TRANSIENT owner (a call result
+//     / constructor literal, `Handle h = make_h().field!`, `<-(make_h().tsk!)`)
+//     was the sibling ownership hole — the temporary owner is dropped at end of
+//     the full expression while the move/await also takes ownership → double-free.
+//     Now REJECTED at the ownership pass (T0841, see the TestT0841_* Go tests).
+//     The accepted REMEDIES (bind the transient to an owned local first, or read
+//     the Mutex in place through `.lock()`) run cleanly — see the t0841_* rows.
 use std as _;
 
 worker_t0806() int {
@@ -398,4 +405,39 @@ t0806_mtx_getter_fresh_out_of_borrow(MtxGetterHolder &h) int {
 t0806_mtx_getter_fresh_handle() `test {
   h := MtxGetterHolder();
   assert(t0806_mtx_getter_fresh_out_of_borrow(h) == 21, "getter fresh handle out of borrow");
+}
+
+// ---------------------------------------------------------------------------
+// T0841 acceptance (runtime no-leak / no-double-free): moving/consuming a
+// single-owner handle out of a TRANSIENT owner (call result) is now an
+// ownership error, so it cannot appear at runtime. The accepted REMEDIES must
+// run cleanly. Constructors of single-owner-handle holders, returned by value.
+// ---------------------------------------------------------------------------
+
+make_mtx_holder_t0841() MtxHolder {
+  return MtxHolder(mtx: Mutex[int](7));
+}
+make_tsk_holder_t0841() TskHolder {
+  return TskHolder(tsk: go worker_t0806());
+}
+
+// Remedy 1: bind the transient to an owned local first, then move the Mutex
+// field out of the owned local (the standard "bind to a local" affordance).
+t0841_mtx_transient_local_then_move() `test {
+  h := make_mtx_holder_t0841();
+  Mutex[int] m = h.mtx!;
+  assert(m.lock().borrow == 7, "mtx transient bound to local then moved");
+}
+
+// Remedy 1 (Task): bind the transient to an owned local, then consume `<-(h.tsk!)`.
+t0841_tsk_transient_local_then_await() `test {
+  h := make_tsk_holder_t0841();
+  assert(<-(h.tsk!) == 42, "tsk transient bound to local then awaited");
+}
+
+// Remedy 2 (Mutex only): read the handle IN PLACE through the borrowing
+// `.lock()` directly on the call result — no binding, no move out of the
+// transient, so the temporary owner frees it exactly once at end of expression.
+t0841_mtx_transient_read_in_place() `test {
+  assert(make_mtx_holder_t0841().mtx!.lock().borrow == 7, "mtx transient read in place");
 }

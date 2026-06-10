@@ -1333,11 +1333,24 @@ func peelToMemberSource(expr ast.Expr) *ast.MemberExpr {
 	}
 }
 
-// memberChainRoot walks a (possibly chained, paren-wrapped) MemberExpr down to
-// its root IdentExpr / ThisExpr and returns the root expr plus its variable name
-// ("this" for a ThisExpr). The bool is false when the chain bottoms out on a
-// non-variable target (call result, index, literal) — transient owners this
-// check does not reason about.
+// memberChainRoot walks a (possibly chained, paren-wrapped, indexed) MemberExpr
+// down to its root IdentExpr / ThisExpr and returns the root expr plus its
+// variable name ("this" for a ThisExpr). The bool is false when the chain bottoms
+// out on a non-variable target (call result, literal) — a transient owner. The
+// root expr is still returned in that case (so the caller can classify the
+// transient owner for diagnostics); only the bool and name reflect variable-ness.
+// Index hops are walked through to the indexed container's root: a container
+// element rooted in a variable (`cs[0].t`) is owned storage governed by that
+// variable, not a transient, so it resolves to the same variable-root logic
+// rather than the unconditional transient reject. This keeps the legitimate
+// owned-container Task case working (the *non-optional* `<-cs[0].t`, made safe by
+// genReceiveTask's T0638 slot-null). NOTE two remaining gaps that this walk-through
+// exposes but does NOT fix (both pre-existing, latent double-frees, neither
+// papered over here): (a) a *moved* (non-Task) handle field out of an owned
+// container element has no slot-null — see T0842; (b) awaiting an *optional* Task
+// field out of an owned container element (`<-(cs[0].tsk!)`) — the T0638 slot-null
+// does not reach through the OptionalUnwrap+index to the element's optional slot —
+// see T0843.
 func (c *Checker) memberChainRoot(m *ast.MemberExpr) (ast.Expr, string, bool) {
 	target := m.Target
 	for {
@@ -1345,6 +1358,8 @@ func (c *Checker) memberChainRoot(m *ast.MemberExpr) (ast.Expr, string, bool) {
 		case *ast.ParenExpr:
 			target = t.Expr
 		case *ast.MemberExpr:
+			target = t.Target
+		case *ast.IndexExpr:
 			target = t.Target
 		case *ast.ThisExpr:
 			return t, "this", true
@@ -1354,9 +1369,9 @@ func (c *Checker) memberChainRoot(m *ast.MemberExpr) (ast.Expr, string, bool) {
 					return t, t.Name, true
 				}
 			}
-			return nil, "", false
+			return t, "", false
 		default:
-			return nil, "", false
+			return target, "", false
 		}
 	}
 }
@@ -1387,9 +1402,34 @@ func (c *Checker) rejectMemberHandleMoveOutOfBorrow(expr ast.Expr) bool {
 			return false
 		}
 	}
-	root, rootName, ok := c.memberChainRoot(member)
-	if !ok {
-		return false
+	root, rootName, isVar := c.memberChainRoot(member)
+	// Peel the Optional wrapper (`Task[int]?`) before the Task check below; both
+	// branches use handleType to tailor the remedy.
+	handleType := c.info.Types[member]
+	if opt, ok := handleType.(*types.Optional); ok {
+		handleType = opt.Elem()
+	}
+	if !isVar {
+		// T0841: transient / non-variable owner (call result, constructor literal,
+		// ...). The owner is dropped at the end of the full expression, so
+		// moving/consuming the single-owner handle out of it aliases the i8* the
+		// owner will free → double-free. Unlike the variable case there is no
+		// owned-local escape hatch for a temporary, so reject unconditionally.
+		// (Indexed owners rooted in a variable, e.g. `cs[0].t`, are owned storage
+		// and were already walked through to their variable root in
+		// memberChainRoot — they never reach this branch.)
+		ownerDesc := "a temporary"
+		if _, isCall := root.(*ast.CallExpr); isCall {
+			ownerDesc = "a call result"
+		}
+		remedy := "bind the owner to a local first, then move the field"
+		if !types.IsTask(handleType) {
+			remedy = fmt.Sprintf("read it in place through a borrow (e.g. `(...%s!).lock()`), or %s", member.Field, remedy)
+		}
+		c.errorf(member.Pos(),
+			"cannot move single-owner handle field '%s' (%s) out of %s; it is dropped at the end of this expression, so moving/consuming the handle here would double-free — %s",
+			member.Field, c.info.Types[member].String(), ownerDesc, remedy)
+		return true
 	}
 	// Borrow discriminator: reject only when the owner is a shared borrow.
 	// `&this` receivers, plain non-`~`/`&` borrowed params, and Borrowed-state
@@ -1408,11 +1448,6 @@ func (c *Checker) rejectMemberHandleMoveOutOfBorrow(expr ast.Expr) bool {
 	// Tailor the remedy to the handle: a Mutex can be read in place via the
 	// borrowing `.lock()`, but a Task has no in-place read (the only operation,
 	// `<-`, consumes it) — so for a Task only the take-ownership remedy applies.
-	// Peel the Optional wrapper (`Task[int]?`) before the Task check.
-	handleType := c.info.Types[member]
-	if opt, ok := handleType.(*types.Optional); ok {
-		handleType = opt.Elem()
-	}
 	remedy := "take ownership with a `~this` receiver / `~` parameter"
 	if !types.IsTask(handleType) {
 		remedy = fmt.Sprintf("read it in place through a borrow (e.g. `(%s.%s!).lock()`), or %s", rootName, member.Field, remedy)

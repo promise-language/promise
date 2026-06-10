@@ -10186,6 +10186,143 @@ func TestT0837_GetterReturningHandleOutOfBorrowAllowed(t *testing.T) {
 	`)
 }
 
+// === T0841: moving/consuming a single-owner handle out of a TRANSIENT owner ===
+//
+// Sibling hole to T0837: the same move/consume out of a transient owner (a
+// function/method/constructor call result — no variable at the root of the member
+// chain) must also be rejected. The temporary owns the parent struct and drops it
+// at end of the full expression, while the move/`<-` also takes ownership of the
+// handle's i8* → double-free → segfault. There is no owned-local escape hatch for a
+// temporary, so the non-variable root is rejected unconditionally.
+
+// Mutex binding move-out of a call result.
+func TestT0841_MutexBindingMoveOutOfCallResultRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type MtxH { Mutex[int]? mtx; drop(~this) {} }
+		make_h() MtxH { return MtxH(mtx: Mutex[int](7)); }
+		grab() int {
+			Mutex[int] m = make_h().mtx!;
+			return m.lock().borrow;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Task consuming await `<-(make_h().tsk!)` out of a call result.
+func TestT0841_TaskAwaitOutOfCallResultRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 5; }
+		type TskH { Task[int]? tsk; drop(~this) {} }
+		make_h() TskH { return TskH(tsk: go worker()); }
+		grab() int { return <-(make_h().tsk!); }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Mutex binding move-out of a constructor literal (non-call transient root).
+func TestT0841_MutexBindingMoveOutOfConstructorLiteralRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type MtxH { Mutex[int]? mtx; drop(~this) {} }
+		grab() int {
+			Mutex[int] m = MtxH(mtx: Mutex[int](7)).mtx!;
+			return m.lock().borrow;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Chained `make_outer().inner.mtx!` — chained member on a call result.
+func TestT0841_ChainedMoveOutOfCallResultRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { Mutex[int]? mtx; drop(~this) {} }
+		type Outer { Inner inner; drop(~this) {} }
+		make_outer() Outer { return Outer(inner: Inner(mtx: Mutex[int](7))); }
+		grab() int {
+			Mutex[int] m = make_outer().inner.mtx!;
+			return m.lock().borrow;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Acceptance: a getter that *returns* a freshly-constructed handle on a call
+// result is not a field move — the getter produces an owned value, so it is safe.
+func TestT0841_GetterReturningHandleOutOfCallResultAllowed(t *testing.T) {
+	ownerOK(t, `
+		type MtxH {
+			drop(~this) {}
+			get fresh_mtx Mutex[int]? { return Mutex[int](9); }
+		}
+		make_h() MtxH { return MtxH(); }
+		grab() int {
+			Mutex[int] m = make_h().fresh_mtx!;
+			return m.lock().borrow;
+		}
+		test() {}
+	`)
+}
+
+// Acceptance: the recommended remedy — bind the transient to an owned local first,
+// then move the field out of the owned local.
+func TestT0841_TransientBoundToLocalThenMovedAllowed(t *testing.T) {
+	ownerOK(t, `
+		type MtxH { Mutex[int]? mtx; drop(~this) {} }
+		make_h() MtxH { return MtxH(mtx: Mutex[int](7)); }
+		grab() int {
+			h := make_h();
+			Mutex[int] m = h.mtx!;
+			return m.lock().borrow;
+		}
+		test() {}
+	`)
+}
+
+// Index hop through a *variable*-rooted owned container (`cs[0].tsk!`) is owned
+// storage governed by `cs`, not a transient — the IndexExpr hop in
+// memberChainRoot walks through to the variable root, so the unconditional
+// transient reject does NOT fire (ownership accepts it).
+//
+// NOTE: ownership accepting this is currently UNSAFE for the optional-unwrap
+// shape: `<-(cs[0].tsk!)` double-frees at runtime — the T0638 genReceiveTask
+// slot-null does not reach through the OptionalUnwrap+IndexExpr to the owned
+// element's optional slot (the plain non-optional `<-cs[0].t` IS safe — see
+// task_drop_test.pr task_recv_array_struct_field). That double-free is the
+// separate, latent bug T0843; this test only pins the ownership-pass decision
+// (accepted, routed through the IndexExpr→variable-root branch), not runtime
+// safety. Do NOT add a runtime .pr counterpart until T0843 is fixed.
+func TestT0841_IndexHopThroughOwnedContainerTaskAwaitAcceptedT0843(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 5; }
+		type TskH { Task[int]? tsk; drop(~this) {} }
+		grab() int {
+			cs := [TskH(tsk: go worker())];
+			return <-(cs[0].tsk!);
+		}
+		test() {}
+	`)
+}
+
+// Index hop through a *call-result* container (`make_vec()[0].tsk!`) — the
+// IndexExpr hop bottoms out on a CallExpr, so memberChainRoot returns a
+// non-variable (transient) root and the unconditional transient reject fires.
+// The temporary vector is dropped at end of expression while the await also
+// consumes the G → double-free, so it must be rejected. (Exercises the IndexExpr
+// branch walking through to a transient call-result root.)
+func TestT0841_IndexHopThroughCallResultTaskAwaitRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 5; }
+		type TskH { Task[int]? tsk; drop(~this) {} }
+		make_vec() TskH[] { return [TskH(tsk: go worker())]; }
+		grab() int { return <-(make_vec()[0].tsk!); }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
 // === T0754: RTTI cast into an owning slot consumes the subject ===
 //
 // An `x as!/as T` flowing into an owning slot (field / element / constructor

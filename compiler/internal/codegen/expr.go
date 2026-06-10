@@ -11347,7 +11347,16 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	// T0776: peel ParenExpr so `(o)!` is recognized like `o!` and the source
 	// optional's drop owns the inner (mirrors expr.go:234, stmt.go
 	// trackHeapUserTypeResult).
-	if !isIdentOptionalUnwrapSource(expr) && c.tempTrackingEnabled && !c.optionalFieldString && !c.optionalFieldVector {
+	// T0806: For a native-handle field (`Mutex[T]?` / `Task[T]?`) on a
+	// droppable owner used as a temporary (`(h.mtx!).lock()`), the owner's
+	// (possibly synthesized) drop already governs the handle. Registering the
+	// extracted i8* as an owned statement temp double-frees it (statement-end
+	// free + owner drop) → segfault. The string/vector siblings are guarded by
+	// optionalFieldString/optionalFieldVector above; native handles have no
+	// such flag, so skip via the same owner-governed member-source predicate
+	// the heap-user case uses (isOwnerGovernedMemberOptionalUnwrapSource, T0775).
+	if !isIdentOptionalUnwrapSource(expr) && c.tempTrackingEnabled && !c.optionalFieldString && !c.optionalFieldVector &&
+		!c.isOwnerGovernedMemberOptionalUnwrapSource(expr) {
 		if result.Type().Equal(irtypes.I8Ptr) {
 			innerType := c.info.Types[expr]
 			if opt, ok := innerType.(*types.Optional); ok {
@@ -11717,9 +11726,17 @@ func (c *Compiler) neutralizeMemberOptionalField(m *ast.MemberExpr) {
 			types.IsArc(innerElem) || types.IsWeak(innerElem) {
 			return
 		}
+		// T0806: Mutex[T]/Task[T] are single-owner opaque i8* handles that
+		// genFieldAccess does NOT dup (unlike Arc/Weak refcount-dups). Moving one
+		// out of an owner's optional field (binding force-unwrap, or `<-(h.tsk!)`
+		// which consumes the task) must clear the owner's present flag so the
+		// owner's drop does not double-free the handle we already took ownership
+		// of. So let these two through the opaque-container skip below.
+		_, isMutexField := types.AsMutex(innerElem)
+		_, isTaskField := types.AsTask(innerElem)
 		if innerNamed == nil || innerNamed.IsValueType() || innerNamed.IsCopy() ||
 			isPrimitiveScalar(innerNamed) || innerNamed.IsStructural() ||
-			isOpaqueContainerType(innerElem) {
+			(isOpaqueContainerType(innerElem) && !isMutexField && !isTaskField) {
 			return
 		}
 
@@ -13258,6 +13275,39 @@ func (c *Compiler) genReceiveExpr(e *ast.UnaryExpr) value.Value {
 	return c.genReceiveTask(e, inst)
 }
 
+// unwrapTaskOptionalMemberSource peels a `<-` operand of the shape
+// `(member.field!)` or `(member.field? _ { ... })` down to the underlying
+// `*ast.MemberExpr` field access, returning nil for any other shape. Used by
+// genReceiveTask (T0806) to clear the owner's optional present flag after the
+// receive consumes (frees) the task handle extracted from the optional field.
+func unwrapTaskOptionalMemberSource(expr ast.Expr) *ast.MemberExpr {
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	var inner ast.Expr
+	switch e := expr.(type) {
+	case *ast.OptionalUnwrapExpr:
+		inner = e.Expr
+	case *ast.ErrorHandlerExpr:
+		inner = e.Expr
+	default:
+		return nil
+	}
+	for {
+		p, ok := inner.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		inner = p.Expr
+	}
+	mem, _ := inner.(*ast.MemberExpr)
+	return mem
+}
+
 // genReceiveTask generates code for `<-task` — waits for goroutine G to complete, returns T.
 // The task handle is now a G pointer (i8*). Checks G.done and loads from G.result_ptr.
 func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.Value {
@@ -13310,6 +13360,14 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 			slotPtr := c.block.NewLoad(irtypes.NewPointer(irtypes.I8Ptr), slotPtrAlloca)
 			c.block.NewStore(constant.NewNull(irtypes.I8Ptr), slotPtr)
 		}
+	}
+	// T0806: `<-(h.tsk!)` / `<-(h.tsk? _ { ... })` consumes the task extracted
+	// from an optional field on a droppable owner. The receive frees the G
+	// below; without clearing the owner's optional present flag, the owner's
+	// (synthesized) drop reloads and frees the same G → double-free → segfault.
+	// Mirrors the T0560 `<-h.field` field-null path for the optional-field shape.
+	if inner := unwrapTaskOptionalMemberSource(e.Operand); inner != nil {
+		c.neutralizeMemberOptionalField(inner)
 	}
 	c.claimStringTemp(gRaw)
 

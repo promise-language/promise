@@ -1,0 +1,251 @@
+// T0806: Force-unwrapping (or optional-handling) a single-owner native-handle
+// optional FIELD (`Mutex[T]?` / `Task[T]?`) on a droppable owner and using the
+// result as a TEMPORARY double-freed the underlying i8* handle → segfault.
+//
+// This is the i8*-handle sibling of T0775 ({i8*,i8*}-shaped heap/string/vector
+// cases). Mutex[T]/Task[T] are opaque single-owner i8* handles tracked by a
+// different codegen branch than T0775 touched. Three distinct gaps were fixed
+// (all in compiler/internal/codegen/expr.go):
+//   - Fix A: genOptionalForceUnwrap's i8* temp-tracking now skips owner-governed
+//     member sources (the owner's drop already frees the handle), so a borrowing
+//     temp like `(h.mtx!).lock()` no longer registers a duplicate statement temp.
+//   - Fix B: genReceiveTask now clears the owner's optional present flag for a
+//     consuming `<-(h.tsk!)` / `<-(h.tsk? _ {...})` await (the receive already
+//     frees the G; the owner's drop must skip it).
+//   - Fix C: neutralizeMemberOptionalField now lets Mutex/Task through the
+//     opaque-container skip so a binding force-unwrap `Mutex[int] m = h.mtx!`
+//     moves the handle out of the owner's optional field cleanly. (The bug's
+//     documented "bind to a local first" workaround actually double-freed on a
+//     clean tree; Fix C makes it clean.)
+//
+// All-heap handles so the zero-leak/double-free detector is live. Mutex `.lock()`
+// BORROWS (owner keeps ownership); Task `<-` CONSUMES (ownership transfers).
+// These run on the host AND `--target wasm32-wasi` (Task await works under the
+// cooperative scheduler); zero-leak enforcement applies on both.
+//
+// Out of scope (filed as separate follow-up bugs):
+//   - Handler-BINDING double-free `Mutex[int] m = h.mtx? _ {...}` (genOptional-
+//     HandlerExpr makes no dup for opaque containers) — distinct path.
+//   - MutexGuard.close codegen panic when the guard originates from an unwrapped
+//     optional-field mutex (missing mono-method declaration).
+//   - Move/consume a single-owner handle OUT OF A SHARED BORROW
+//     (`<-(borrowed.tsk!)`, `Handle h = borrowed.field!`) is not rejected by
+//     ownership and double-frees — an ownership-analysis hole, not a codegen
+//     temp-tracking gap. Hence the borrowed rows below use the BORROWING `.lock()`
+//     (Mutex) only, never a consuming await/move.
+use std as _;
+
+worker_t0806() int {
+  return 42;
+}
+
+type MtxHolder {
+  Mutex[int]? mtx;
+  drop(~this) {
+  }
+
+  // Owned ~this: force-unwrap a self field temp.
+  peek_owned(~this) int {
+    return (this.mtx!).lock().borrow;
+  }
+  // Borrowed &this: `.lock()` only borrows — owner stays sole owner.
+  peek_borrow(&this) int {
+    return (this.mtx!).lock().borrow;
+  }
+}
+
+type TskHolder {
+  Task[int]? tsk;
+  drop(~this) {
+  }
+
+  // Owned ~this: await a self field temp.
+  await_owned(~this) int {
+    return <-(this.tsk!);
+  }
+}
+
+// Borrowed &owner: `.lock()` borrows — real owner (caller) keeps ownership.
+fn_borrow_mtx(MtxHolder &h) int {
+  return (h.mtx!).lock().borrow;
+}
+
+// Free functions returning the optional handle directly — no owner governs the
+// extracted handle, so the statement-temp tracking MUST still fire (no-regression
+// control for Fix A's owner-governed skip).
+make_opt_mutex() Mutex[int]? {
+  return Mutex[int](11);
+}
+make_opt_task() Task[int]? {
+  return go worker_t0806();
+}
+
+// Nested droppable owner: the optional handle lives two field-hops deep
+// (`outer.inner.mtx!`). Exercises the MemberExpr CHAIN-WALK in
+// neutralizeMemberOptionalField (T0428 Case 2) for the Mutex/Task path — the
+// flat single-field rows above only reach the one-hop root resolution.
+type NestedInner {
+  Mutex[int]? mtx;
+  Task[int]? tsk;
+  drop(~this) {
+  }
+}
+type NestedOuter {
+  NestedInner inner;
+  drop(~this) {
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mutex — force-unwrap temp (`(owner.mtx!).lock().borrow`), all owner contexts.
+// ---------------------------------------------------------------------------
+
+t0806_mtx_fu_owned_local() `test {
+  h := MtxHolder(mtx: Mutex[int](5));
+  assert((h.mtx!).lock().borrow == 5, "mtx fu owned local");
+}
+
+t0806_mtx_fu_owned_this() `test {
+  h := MtxHolder(mtx: Mutex[int](6));
+  assert(h.peek_owned() == 6, "mtx fu owned ~this");
+}
+
+t0806_mtx_fu_borrow_this() `test {
+  h := MtxHolder(mtx: Mutex[int](7));
+  assert(h.peek_borrow() == 7, "mtx fu borrowed this");
+}
+
+t0806_mtx_fu_borrow_owner() `test {
+  h := MtxHolder(mtx: Mutex[int](8));
+  assert(fn_borrow_mtx(h) == 8, "mtx fu borrowed &owner");
+}
+
+// ---------------------------------------------------------------------------
+// Mutex — handler temp (diverging + non-diverging), present value taken.
+// ---------------------------------------------------------------------------
+
+t0806_mtx_handler_diverge_temp() `test {
+  h := MtxHolder(mtx: Mutex[int](9));
+  assert((h.mtx? _ {
+    return;
+  }).lock().borrow == 9, "mtx diverging handler temp");
+}
+
+t0806_mtx_handler_nondiverge_temp() `test {
+  h := MtxHolder(mtx: Mutex[int](10));
+  // Fallback Mutex is never constructed at runtime (value present), but the
+  // none-branch codegen path is exercised.
+  assert((h.mtx? _ {
+    Mutex[int](0)
+  }).lock().borrow == 10, "mtx non-diverging handler temp");
+}
+
+// ---------------------------------------------------------------------------
+// Mutex — binding force-unwrap (Fix C regression: the bug's "workaround").
+// ---------------------------------------------------------------------------
+
+t0806_mtx_binding_fu() `test {
+  h := MtxHolder(mtx: Mutex[int](12));
+  Mutex[int] m = h.mtx!;
+  assert(m.lock().borrow == 12, "mtx binding force-unwrap (owned)");
+}
+
+// ---------------------------------------------------------------------------
+// Mutex — reuse after a borrowing temp unwrap: the owner KEEPS the field live
+// (Fix A only skips temp tracking; it never neutralizes a borrow).
+// ---------------------------------------------------------------------------
+
+t0806_mtx_reuse_after_temp() `test {
+  h := MtxHolder(mtx: Mutex[int](13));
+  assert((h.mtx!).lock().borrow == 13, "mtx reuse 1");
+  assert((h.mtx!).lock().borrow == 13, "mtx reuse 2");
+}
+
+// ---------------------------------------------------------------------------
+// Task — await temp (`<-(owner.tsk!)`), owned contexts (consume transfers
+// ownership; borrowed-owner await is the out-of-scope ownership hole).
+// ---------------------------------------------------------------------------
+
+t0806_tsk_await_owned_local() `test {
+  h := TskHolder(tsk: go worker_t0806());
+  assert(<-(h.tsk!) == 42, "tsk await owned local");
+}
+
+t0806_tsk_await_owned_this() `test {
+  h := TskHolder(tsk: go worker_t0806());
+  assert(h.await_owned() == 42, "tsk await owned ~this");
+}
+
+t0806_tsk_handler_diverge_temp() `test {
+  h := TskHolder(tsk: go worker_t0806());
+  assert(<-(h.tsk? _ {
+    return;
+  }) == 42, "tsk diverging handler temp");
+}
+
+// ---------------------------------------------------------------------------
+// Task — binding force-unwrap then await (Fix C regression).
+// ---------------------------------------------------------------------------
+
+t0806_tsk_binding_fu() `test {
+  h := TskHolder(tsk: go worker_t0806());
+  Task[int] t = h.tsk!;
+  assert(<-t == 42, "tsk binding force-unwrap (owned)");
+}
+
+// ---------------------------------------------------------------------------
+// No-owner control: call-source unwrap — the temp has no governing owner, so
+// statement-temp tracking must still fire (Fix A's skip must NOT regress this).
+// ---------------------------------------------------------------------------
+
+t0806_ctrl_call_mutex_temp() `test {
+  assert((make_opt_mutex()!).lock().borrow == 11, "call-source mutex temp tracked/freed");
+}
+
+t0806_ctrl_call_task_temp() `test {
+  assert(<-(make_opt_task()!) == 42, "call-source task temp consumed");
+}
+
+// ---------------------------------------------------------------------------
+// Nested-owner chain walk (`outer.inner.field!`) — exercises the MemberExpr
+// chain resolution in neutralizeMemberOptionalField for native handles, which
+// the flat one-hop rows above never reach. Binding force-unwrap (Mutex, Fix C)
+// and consuming await (Task, Fix B + Fix C).
+// ---------------------------------------------------------------------------
+
+t0806_mtx_nested_binding_fu() `test {
+  o := NestedOuter(inner: NestedInner(mtx: Mutex[int](14), tsk: none));
+  Mutex[int] m = o.inner.mtx!;
+  assert(m.lock().borrow == 14, "mtx nested binding force-unwrap");
+}
+
+t0806_tsk_nested_await() `test {
+  o := NestedOuter(inner: NestedInner(mtx: none, tsk: go worker_t0806()));
+  assert(<-(o.inner.tsk!) == 42, "tsk nested await temp");
+}
+
+// ---------------------------------------------------------------------------
+// Inner-paren peel: `<-((h.tsk)!)` — the unwrap source itself is paren-wrapped,
+// so unwrapTaskOptionalMemberSource must peel the inner ParenExpr (distinct from
+// the outer `<-(...)` peel the flat rows exercise) before it finds the field.
+// ---------------------------------------------------------------------------
+
+t0806_tsk_await_inner_paren() `test {
+  h := TskHolder(tsk: go worker_t0806());
+  assert(<-((h.tsk)!) == 42, "tsk await inner-paren-wrapped source");
+}
+
+// ---------------------------------------------------------------------------
+// Task — non-diverging handler temp (`<-(h.tsk? _ { fallback })`): exercises
+// genReceiveTask's ErrorHandlerExpr neutralize on the non-diverging handler
+// path (the diverging row above leaves the merge degenerate; here both arms
+// reach merge). Fallback task is never awaited at runtime (value present), but
+// the none-branch codegen path is generated.
+// ---------------------------------------------------------------------------
+
+t0806_tsk_handler_nondiverge_temp() `test {
+  h := TskHolder(tsk: go worker_t0806());
+  assert(<-(h.tsk? _ {
+    go worker_t0806()
+  }) == 42, "tsk non-diverging handler temp");
+}

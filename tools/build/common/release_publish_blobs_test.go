@@ -184,6 +184,23 @@ func TestPublishBlobsHappyPath(t *testing.T) {
 		if be.Size <= 0 || be.CompressedSize <= 0 || be.CompressedSHA256 == "" {
 			t.Errorf("%s metadata incomplete: %+v", name, be)
 		}
+		// Source provenance is populated (T0836).
+		if be.Source == nil {
+			t.Errorf("%s: Source is nil — expected provenance to be populated", name)
+		} else {
+			wantURL := "https://example.test/LLVM-22.1.0-Linux-X64.tar.xz"
+			if be.Source.ArchiveURL != wantURL {
+				t.Errorf("%s: Source.ArchiveURL = %q, want %q", name, be.Source.ArchiveURL, wantURL)
+			}
+			wantSHA := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0"
+			if be.Source.ArchiveSHA256 != wantSHA {
+				t.Errorf("%s: Source.ArchiveSHA256 = %q, want %q", name, be.Source.ArchiveSHA256, wantSHA)
+			}
+			wantMember := map[string]string{"opt": "bin/opt", "llc": "bin/llc"}
+			if got := be.Source.Member; got != wantMember[name] {
+				t.Errorf("%s: Source.Member = %q, want %q", name, got, wantMember[name])
+			}
+		}
 		// Upload happened with the asset name `<sha>.br`.
 		want := sha + ".br"
 		if !sliceContains(stub.uploadedAssets[tag], want) {
@@ -233,6 +250,15 @@ func TestPublishBlobsNoUpload(t *testing.T) {
 	}
 	if len(stub.uploadedAssets) != 0 || len(stub.ensuredTags) != 0 {
 		t.Fatalf("--no-upload still talked to gh: ensures=%v uploads=%v", stub.ensuredTags, stub.uploadedAssets)
+	}
+	// Source provenance must be populated even when --no-upload skips the gh
+	// upload step — the catalog write happens before the upload decision (T0836).
+	for _, be := range cat.Blobs {
+		if be.Source == nil {
+			t.Errorf("--no-upload: Source is nil for %s — provenance must be set regardless of upload mode", be.Name)
+		} else if be.Source.ArchiveURL == "" || be.Source.ArchiveSHA256 == "" || be.Source.Member == "" {
+			t.Errorf("--no-upload: Source has empty fields for %s: %+v", be.Name, be.Source)
+		}
 	}
 }
 

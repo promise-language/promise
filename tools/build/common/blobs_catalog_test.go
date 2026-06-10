@@ -376,6 +376,145 @@ func TestLoadBlobsCatalogReadError(t *testing.T) {
 	}
 }
 
+// TestBlobsCatalogSourceRoundTrip verifies that a BlobEntry with a fully
+// populated BlobSource survives a WriteBlobsCatalog → LoadBlobsCatalog round-
+// trip with all three fields (ArchiveURL, ArchiveSHA256, Member) intact (T0836).
+func TestBlobsCatalogSourceRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	src := &BlobSource{
+		ArchiveURL:    "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/LLVM-22.1.0-Linux-X64.tar.xz",
+		ArchiveSHA256: "8d662e425e46c48b45f5f970770b5e37f323607c8c2cbc371593fc9c4ba1e7b3",
+		Member:        "bin/opt",
+	}
+	e := testBlobEntry("llvm", "22.1.0", "linux-amd64", "opt")
+	e.Source = src
+	c := &BlobsCatalog{Schema: 1, Blobs: []BlobEntry{e}}
+	if err := WriteBlobsCatalog(root, c); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := LoadBlobsCatalog(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.Blobs) != 1 {
+		t.Fatalf("round-trip Blobs len = %d, want 1", len(rt.Blobs))
+	}
+	got := rt.Blobs[0].Source
+	if got == nil {
+		t.Fatal("round-trip Source is nil — JSON round-trip dropped the source field")
+	}
+	if got.ArchiveURL != src.ArchiveURL {
+		t.Errorf("ArchiveURL = %q, want %q", got.ArchiveURL, src.ArchiveURL)
+	}
+	if got.ArchiveSHA256 != src.ArchiveSHA256 {
+		t.Errorf("ArchiveSHA256 = %q, want %q", got.ArchiveSHA256, src.ArchiveSHA256)
+	}
+	if got.Member != src.Member {
+		t.Errorf("Member = %q, want %q", got.Member, src.Member)
+	}
+}
+
+// TestBlobsCatalogUpsertUpdatesSource covers the backfill scenario from T0836:
+// an entry already in the catalog with nil Source gets Upserted with the same
+// identity/sha/size but now a populated Source — the Source must be written to
+// the catalog (not silently dropped because the entry "already exists").
+func TestBlobsCatalogUpsertUpdatesSource(t *testing.T) {
+	c := &BlobsCatalog{Schema: 1}
+	// Insert without Source (as if the entry pre-dates T0836).
+	e := testBlobEntry("llvm", "22.1.0", "linux-amd64", "opt")
+	if err := c.Upsert(e); err != nil {
+		t.Fatal(err)
+	}
+	if c.Blobs[0].Source != nil {
+		t.Fatal("initial entry should have nil Source")
+	}
+	// Upsert same identity/sha/size, but now with Source populated (backfill).
+	e2 := e
+	e2.Source = &BlobSource{
+		ArchiveURL:    "https://example.com/LLVM-22.1.0-Linux-X64.tar.xz",
+		ArchiveSHA256: "deadbeef",
+		Member:        "bin/opt",
+	}
+	if err := c.Upsert(e2); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Blobs) != 1 {
+		t.Fatalf("Upsert must not duplicate; len = %d", len(c.Blobs))
+	}
+	got := c.Blobs[0].Source
+	if got == nil {
+		t.Fatal("Upsert(backfill) must update Source; got nil")
+	}
+	if got.Member != "bin/opt" {
+		t.Errorf("Source.Member = %q, want bin/opt", got.Member)
+	}
+}
+
+// TestWriteBlobsCatalogWriteFileError covers the WriteFile error path in
+// WriteBlobsCatalog: when the tmp file location is unwritable (here simulated
+// by creating blobs.json.tmp as a directory), the function must return an error
+// rather than silently producing a partial or missing catalog.
+func TestWriteBlobsCatalogWriteFileError(t *testing.T) {
+	root := t.TempDir()
+	// Pre-create tools/build/ so MkdirAll succeeds, then block the tmp path.
+	catDir := filepath.Join(root, "tools", "build")
+	if err := os.MkdirAll(catDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Make the .tmp path a directory — os.WriteFile will fail.
+	tmpPath := filepath.Join(catDir, "blobs.json.tmp")
+	if err := os.Mkdir(tmpPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &BlobsCatalog{Schema: 1, Blobs: []BlobEntry{testBlobEntry("llvm", "22.1.0", "linux-amd64", "opt")}}
+	if err := WriteBlobsCatalog(root, c); err == nil {
+		t.Fatal("WriteBlobsCatalog must fail when the tmp file path is unwritable")
+	}
+	// The final blobs.json must not exist (the rename never happened).
+	if Exists(blobsCatalogPath(root)) {
+		t.Fatal("a write failure must not leave blobs.json in place")
+	}
+}
+
+// TestWriteBlobsCatalogMkdirAllError covers the MkdirAll error path in
+// WriteBlobsCatalog: when the catalog directory cannot be created (here
+// simulated by creating the "tools" path element as a file), the function must
+// return an error and not write any catalog data.
+func TestWriteBlobsCatalogMkdirAllError(t *testing.T) {
+	root := t.TempDir()
+	// Create "tools" as a FILE so os.MkdirAll("tools/build") fails.
+	toolsFile := filepath.Join(root, "tools")
+	if err := os.WriteFile(toolsFile, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := &BlobsCatalog{Schema: 1, Blobs: []BlobEntry{testBlobEntry("llvm", "22.1.0", "linux-amd64", "opt")}}
+	if err := WriteBlobsCatalog(root, c); err == nil {
+		t.Fatal("WriteBlobsCatalog must fail when the catalog directory cannot be created")
+	}
+}
+
+// TestBlobsCatalogSourceBackcompat verifies that a blobs.json entry without a
+// "source" field parses without error and leaves Source nil (T0836 back-compat).
+func TestBlobsCatalogSourceBackcompat(t *testing.T) {
+	root := t.TempDir()
+	path := blobsCatalogPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schema":1,"blobs":[
+{"dependency":"llvm","version":"22.1.0","target":"linux-amd64","name":"opt","sha256":"abc","size":1,"compression":"brotli"}
+]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := LoadBlobsCatalog(root)
+	if err != nil {
+		t.Fatalf("LoadBlobsCatalog must succeed for entry without source: %v", err)
+	}
+	if cat.Blobs[0].Source != nil {
+		t.Fatalf("Source should be nil for entry without source field, got %+v", cat.Blobs[0].Source)
+	}
+}
+
 func TestDepsReleaseTagAndBlobAssetURL(t *testing.T) {
 	if got := DepsReleaseTag("llvm", "23.1.0"); got != "deps-llvm-23.1.0" {
 		t.Fatalf("DepsReleaseTag = %q", got)

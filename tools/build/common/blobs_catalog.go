@@ -41,6 +41,16 @@ type BlobsCatalog struct {
 	Blobs  []BlobEntry `json:"blobs"`
 }
 
+// BlobSource records the upstream archive a blob was sliced from (T0836).
+// All three fields are content-derived and deterministic — re-publishing a
+// byte-identical blob produces an identical entry so blobs.json stays
+// reproducible.
+type BlobSource struct {
+	ArchiveURL    string `json:"archive_url"`
+	ArchiveSHA256 string `json:"archive_sha256"`
+	Member        string `json:"member"`
+}
+
 // BlobEntry is one hosted prebuilt blob: a per-platform extracted artifact
 // (e.g. `opt` for `linux-amd64` at `llvm 23.1.0`) identified by the 4-tuple
 // `(Dependency, Version, Target, Name)`, plus the hash + size of the
@@ -75,6 +85,9 @@ type BlobEntry struct {
 	// CompressedSHA256 is an OPTIONAL cheap pre-decompress integrity check.
 	// Authoritative verification remains the uncompressed `SHA256`.
 	CompressedSHA256 string `json:"compressed_sha256,omitempty"`
+	// Source records the upstream archive this blob was sliced from (T0836).
+	// Optional — entries written before T0836 will have nil Source.
+	Source *BlobSource `json:"source,omitempty"`
 }
 
 // blobsCatalogPath returns the on-disk path of the catalog under root.

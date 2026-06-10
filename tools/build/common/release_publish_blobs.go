@@ -352,6 +352,11 @@ func runReleasePublishBlobs(root string, args []string) error {
 			Compression:      compressionBrotli,
 			CompressedSize:   compressedSize,
 			CompressedSHA256: compressedSHA,
+			Source: &BlobSource{
+				ArchiveURL:    tEntry.URL,
+				ArchiveSHA256: tEntry.SHA256,
+				Member:        f.Src,
+			},
 		}
 		if err := catalog.Upsert(be); err != nil {
 			return fmt.Errorf("catalog upsert %s: %w", blobIdent(be), err)

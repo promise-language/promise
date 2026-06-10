@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReadInstalledStubVersionMissing(t *testing.T) {
@@ -151,6 +153,101 @@ func TestWriteFileAtomicBadDir(t *testing.T) {
 	}
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {
 		t.Fatal("no file should be created when the directory is missing")
+	}
+}
+
+// TestRenameWithRetryNonRetryableFailsFast: a non-retryable rename error (here a
+// nonexistent source, which is real on every platform) must short-circuit
+// immediately rather than spin through the full backoff budget (~0.55s). This
+// proves the retry loop only burns wall-clock on transient Windows lock errors.
+func TestRenameWithRetryNonRetryableFailsFast(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "does-not-exist")
+	dst := filepath.Join(dir, "dst")
+	start := time.Now()
+	err := renameWithRetry(src, dst)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected an error renaming a nonexistent source")
+	}
+	if elapsed >= 50*time.Millisecond {
+		t.Fatalf("non-retryable error should fail fast, took %v", elapsed)
+	}
+}
+
+// errRetryable is a stand-in for the transient Windows sharing/lock errors that
+// isRetryableRenameError matches; the predicate below treats only it as retryable.
+var errRetryable = errors.New("sharing violation")
+
+func retryablePredicate(err error) bool { return errors.Is(err, errRetryable) }
+func noBackoff(int) time.Duration       { return 0 }
+
+// TestRenameRetryingSucceedsAfterTransient: the loop keeps retrying while the
+// rename returns a retryable error and succeeds once the (simulated) lock clears.
+// This is the Windows happy path that the T0793 fix targets, exercised on any OS.
+func TestRenameRetryingSucceedsAfterTransient(t *testing.T) {
+	calls := 0
+	rename := func(src, dst string) error {
+		calls++
+		if calls < 4 { // fail the first 3, succeed on the 4th
+			return errRetryable
+		}
+		return nil
+	}
+	if err := renameRetrying(rename, retryablePredicate, noBackoff, "s", "d"); err != nil {
+		t.Fatalf("expected success after transient errors, got %v", err)
+	}
+	if calls != 4 {
+		t.Fatalf("expected 4 rename attempts, got %d", calls)
+	}
+}
+
+// TestRenameRetryingExhausts: when every attempt returns a retryable error, the
+// loop gives up after exactly renameAttempts tries and returns the last error —
+// it never spins forever and never swallows the failure.
+func TestRenameRetryingExhausts(t *testing.T) {
+	calls := 0
+	rename := func(src, dst string) error {
+		calls++
+		return errRetryable
+	}
+	err := renameRetrying(rename, retryablePredicate, noBackoff, "s", "d")
+	if !errors.Is(err, errRetryable) {
+		t.Fatalf("expected the last retryable error, got %v", err)
+	}
+	if calls != renameAttempts {
+		t.Fatalf("expected exactly %d attempts on exhaustion, got %d", renameAttempts, calls)
+	}
+}
+
+// TestRenameRetryingNonRetryable: a non-retryable error short-circuits after a
+// single attempt — no retries, the error propagates verbatim.
+func TestRenameRetryingNonRetryable(t *testing.T) {
+	fatal := errors.New("no such file")
+	calls := 0
+	rename := func(src, dst string) error {
+		calls++
+		return fatal
+	}
+	err := renameRetrying(rename, retryablePredicate, noBackoff, "s", "d")
+	if !errors.Is(err, fatal) {
+		t.Fatalf("expected the non-retryable error, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 attempt for a non-retryable error, got %d", calls)
+	}
+}
+
+// TestRenameRetryingFirstTry: the common case — rename succeeds immediately, so
+// the loop returns nil without consulting the retryable predicate or backoff.
+func TestRenameRetryingFirstTry(t *testing.T) {
+	calls := 0
+	rename := func(src, dst string) error { calls++; return nil }
+	if err := renameRetrying(rename, retryablePredicate, noBackoff, "s", "d"); err != nil {
+		t.Fatalf("expected immediate success, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 attempt, got %d", calls)
 	}
 }
 

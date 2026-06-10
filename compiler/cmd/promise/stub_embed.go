@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // stubVersionSidecar is the file, written next to the installed stub, that
@@ -61,7 +62,43 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.Chmod(tmpName, perm); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	return renameWithRetry(tmpName, path)
+}
+
+// renameAttempts bounds the retry loop; renameBackoff yields the pause before
+// attempt i+1. Both are package-level so tests can drive the loop deterministically
+// (zero backoff) without sleeping through the ~0.45s production budget.
+const renameAttempts = 10
+
+func renameBackoff(i int) time.Duration { return time.Duration(i+1) * 10 * time.Millisecond }
+
+// renameWithRetry renames src→dst, retrying briefly on transient errors.
+// On Windows, MoveFileEx can fail with ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION
+// when an antivirus or the search indexer momentarily holds the file open; a short
+// backoff lets the lock clear. On other platforms rename(2) is atomic and never
+// retries (isRetryableRenameError always returns false there).
+func renameWithRetry(src, dst string) error {
+	return renameRetrying(os.Rename, isRetryableRenameError, renameBackoff, src, dst)
+}
+
+// renameRetrying is the testable core of renameWithRetry with its dependencies
+// (the rename syscall, the retryable-error predicate, and the backoff schedule)
+// injected, so the retry/exhaustion path — unreachable on non-Windows where
+// isRetryableRenameError is always false — can be exercised on any platform.
+func renameRetrying(rename func(src, dst string) error, retryable func(error) bool, backoff func(int) time.Duration, src, dst string) error {
+	var err error
+	for i := 0; i < renameAttempts; i++ {
+		if err = rename(src, dst); err == nil {
+			return nil
+		}
+		if !retryable(err) {
+			return err
+		}
+		if i < renameAttempts-1 { // no point sleeping after the final attempt
+			time.Sleep(backoff(i))
+		}
+	}
+	return err
 }
 
 // writeStubAndSidecar atomically installs the embedded stub binary and its

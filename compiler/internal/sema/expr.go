@@ -1855,12 +1855,9 @@ func (c *Checker) checkSliceTypeExpr(e *ast.SliceTypeExpr) types.Type {
 	// loses the flag when crossing a TupleLit element boundary).
 	inner := c.resolveTypeRef(e.Inner)
 	if inner == nil {
-		// resolveTypeRef's IdentExpr branch is intentionally quiet for some
-		// pre-existing callers (instantiateFromIndex etc.). For `T[]` with
-		// an undefined T (e.g., `Undefined[]()`), re-run checkExpr so the
-		// user sees `undefined: Undefined` instead of a silent sema pass
-		// that then crashes codegen.
-		c.checkExpr(e.Inner)
+		// T0710: resolveTypeRef now self-reports for an undefined inner ident
+		// (and bad slice/tuple shapes), so a nil here always implies an error
+		// was already accumulated. No re-walk needed.
 		return nil
 	}
 
@@ -1965,18 +1962,36 @@ func (c *Checker) checkSliceExpr(e *ast.SliceExpr) types.Type {
 	return nil
 }
 
+// resolveTypeArg resolves a generic type argument and guarantees a sema error
+// is accumulated on failure. resolveTypeRef self-reports for every nil-return
+// path it currently has (undefined ident, bad slice/tuple shape, value-tuple
+// fallback, etc.). This wrapper is a defensive backstop (T0710): if some future
+// resolveTypeRef path ever returns nil quietly, we still surface a sema error
+// here — guaranteeing os.Exit(1) before codegen — instead of letting a nil type
+// flow into monomorphization and panic at typeArgStr ("nil type in generic type
+// argument"). The len(c.errors) check ensures we never double-report on top of
+// a specific diagnostic already emitted downstream (e.g. "undefined: X").
+func (c *Checker) resolveTypeArg(expr ast.Expr) types.Type {
+	n := len(c.errors)
+	typ := c.resolveTypeRef(expr)
+	if typ == nil && len(c.errors) == n {
+		c.errorf(expr.Pos(), "cannot resolve type argument")
+	}
+	return typ
+}
+
 // instantiateFromIndex handles Type[Arg] or Type[A, B] in expression context as generic instantiation.
 // The index expressions are reinterpreted as type arguments.
 func (c *Checker) instantiateFromIndex(e *ast.IndexExpr, origin types.Type, tparams []*types.TypeParam) types.Type {
 	// Collect all type arguments: Index + ExtraIndices
 	var typeArgs []types.Type
-	typeArg := c.resolveTypeRef(e.Index)
+	typeArg := c.resolveTypeArg(e.Index)
 	if typeArg == nil {
 		return nil
 	}
 	typeArgs = append(typeArgs, typeArg)
 	for _, extra := range e.ExtraIndices {
-		arg := c.resolveTypeRef(extra)
+		arg := c.resolveTypeArg(extra)
 		if arg == nil {
 			return nil
 		}
@@ -2001,16 +2016,14 @@ func (c *Checker) instantiateFromIndex(e *ast.IndexExpr, origin types.Type, tpar
 func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature) types.Type {
 	// Collect all type arguments: Index + ExtraIndices
 	var typeArgs []types.Type
-	typeArg := c.resolveTypeRef(e.Index)
+	typeArg := c.resolveTypeArg(e.Index)
 	if typeArg == nil {
-		c.errorf(e.Index.Pos(), "cannot resolve type argument")
 		return nil
 	}
 	typeArgs = append(typeArgs, typeArg)
 	for _, extra := range e.ExtraIndices {
-		arg := c.resolveTypeRef(extra)
+		arg := c.resolveTypeArg(extra)
 		if arg == nil {
-			c.errorf(extra.Pos(), "cannot resolve type argument")
 			return nil
 		}
 		typeArgs = append(typeArgs, arg)
@@ -2294,6 +2307,13 @@ func (c *Checker) resolveTypeRef(expr ast.Expr) types.Type {
 	if ident, ok := expr.(*ast.IdentExpr); ok {
 		obj := c.lookup(ident.Name)
 		if obj == nil {
+			// T0710: a type argument naming an undefined identifier must be a
+			// hard sema error. resolveTypeRef is the single chokepoint every
+			// type-arg path funnels through, so reporting here guarantees
+			// os.Exit(1) before codegen (which would otherwise panic with
+			// "nil type in generic type argument"). Mirrors checkIdentExpr.
+			c.errorf(ident.Pos(), "undefined: %s", ident.Name)
+			c.suggestForUndefinedIdent(ident.Pos(), ident.Name)
 			return nil
 		}
 		typ := obj.Type()

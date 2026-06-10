@@ -8258,10 +8258,9 @@ func TestSliceTypeExprInsideTupleType(t *testing.T) {
 }
 
 // T0685: An undefined element type in `T[]()` must report `undefined: T`
-// at sema, not silently pass and crash codegen. Locks in the fallback
-// re-walk in checkSliceTypeExpr (resolveTypeRef's IdentExpr branch is
-// intentionally quiet for pre-existing callers; we re-run checkExpr to
-// surface the diagnostic).
+// at sema, not silently pass and crash codegen. Since T0710 the diagnostic
+// originates directly in resolveTypeRef's IdentExpr branch (the single
+// chokepoint for all type-arg resolution), not a checkSliceTypeExpr re-walk.
 func TestSliceTypeExprUndefinedElement(t *testing.T) {
 	errs := checkErrs(t, `
 		test() {
@@ -8273,14 +8272,48 @@ func TestSliceTypeExprUndefinedElement(t *testing.T) {
 
 // T0685: An undefined element inside a tuple-of-types
 // (`(Undefined, int)[]()`) hits the `elems[i] == nil` early-return in
-// resolveTypeRef's TupleLit case, and the subsequent fallback re-walk
-// emits the diagnostic. Locks in coverage for that branch.
+// resolveTypeRef's TupleLit case. Since T0710 the IdentExpr branch reports
+// `undefined: Undefined` directly. Locks in coverage for that branch.
 func TestSliceTypeExprTupleWithUndefinedElement(t *testing.T) {
 	errs := checkErrs(t, `
 		test() {
 			v := (Undefined, int)[]();
 		}
 	`)
+	expectError(t, errs, "undefined: Undefined")
+}
+
+// T0710: A generic instantiation in expression position whose type argument
+// is an undefined identifier must emit `undefined: X` at sema, not silently
+// pass and crash codegen with "nil type in generic type argument".
+func TestVectorUndefinedTypeArg(t *testing.T) { // instantiateFromIndex, single arg
+	errs := checkErrs(t, `test() { v := Vector[Undefined](); }`)
+	expectError(t, errs, "undefined: Undefined")
+}
+
+func TestMapUndefinedTypeArg(t *testing.T) { // instantiateFromIndex, multi-arg / ExtraIndices
+	errs := checkErrs(t, `test() { m := Map[string, Undefined](); }`)
+	expectError(t, errs, "undefined: Undefined")
+}
+
+func TestUserGenericUndefinedTypeArg(t *testing.T) { // instantiateFromIndex on user *Named
+	errs := checkErrs(t, `
+		type Box[T] { T value; }
+		test() { b := Box[Undefined](value: 1); }`)
+	expectError(t, errs, "undefined: Undefined")
+}
+
+func TestGenericFuncUndefinedTypeArg(t *testing.T) { // instantiateGenericFunc, single arg
+	errs := checkErrs(t, `
+		foo[T]() int { return 1; }
+		test() { x := foo[Undefined](); }`)
+	expectError(t, errs, "undefined: Undefined")
+}
+
+func TestGenericFuncUndefinedExtraTypeArg(t *testing.T) { // instantiateGenericFunc, ExtraIndices
+	errs := checkErrs(t, `
+		foo[A, B]() int { return 1; }
+		test() { x := foo[int, Undefined](); }`)
 	expectError(t, errs, "undefined: Undefined")
 }
 

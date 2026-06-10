@@ -1,0 +1,118 @@
+// T0839: `MutexGuard[T].close()` had no codegen dispatch and panicked
+// ("undeclared method MutexGuard[int].close"). The fix routes close through the
+// canonical unlock+free body and suppresses the automatic guard drop so the
+// explicit close does not double-free/double-unlock. These tests pin every
+// source shape (bound var, optional-field unwrap, temp chain) as well as the
+// unlock semantics (a closed guard releases the mutex so it can be relocked).
+// Plain mutex, explicit close, then relock — proves close unlocks (not just
+// frees) and the mutex value survives.
+test_close_then_relock() `test {
+  m := Mutex[int](5);
+  g := m.lock();
+  g.close();
+  g2 := m.lock();
+  assert(g2.borrow == 5, "relock after close sees the value");
+}
+
+// Optional-field source — the original ticket repro.
+type MtxHolder {
+  Mutex[int]? mtx;
+  drop(~this) {
+  }
+}
+
+test_close_from_optional_field() `test {
+  h := MtxHolder(mtx: Mutex[int](5));
+  g := (h.mtx!).lock();
+  g.close();
+}
+
+// Temp-chain source (no binding) — confirms source-independence.
+test_close_temp_chain_plain() `test {
+  m := Mutex[int](7);
+  m.lock().close();
+  g := m.lock();
+  assert(g.borrow == 7, "relock after temp-chain close");
+}
+
+test_close_temp_chain_optional_field() `test {
+  h := MtxHolder(mtx: Mutex[int](9));
+  (h.mtx!).lock().close();
+}
+
+// Set borrow before close — close writes through to the mutex's value, so a
+// subsequent relock observes the mutation.
+test_set_borrow_then_close() `test {
+  m := Mutex[int](1);
+  g := m.lock();
+  g.borrow = 7;
+  g.close();
+  g2 := m.lock();
+  assert(g2.borrow == 7, "write before close persists through relock");
+}
+
+// Conditional close (branch taken) — close's eager drop-flag clear lives inside
+// the if-block, so the scope-exit drop is suppressed only on the path that ran
+// close. No double-unlock/double-free at scope exit.
+test_conditional_close_taken() `test {
+  m := Mutex[int](5);
+  g := m.lock();
+  if true {
+    g.close();
+  }
+}
+
+// Conditional close (branch skipped) — close did not run, so the drop flag
+// stays set and the scope-exit drop must unlock+free the guard (no leak).
+test_conditional_close_skipped() `test {
+  m := Mutex[int](5);
+  g := m.lock();
+  if false {
+    g.close();
+  }
+}
+
+// Close a fresh guard each loop iteration — every iteration relocks, mutates,
+// and explicitly closes; the final relock observes the last write. Exercises
+// the drop-flag clear on a re-bound name across back-edges.
+test_close_in_loop() `test {
+  m := Mutex[int](0);
+  i := 0;
+  while i < 3 {
+    g := m.lock();
+    g.borrow = i;
+    g.close();
+    i = i + 1;
+  }
+  g := m.lock();
+  assert(g.borrow == 2, "last loop write persists");
+}
+
+// Concurrent explicit close — N goroutines each lock a shared mutex, increment,
+// then explicitly `.close()` (not `use`). Proves the scheduler-aware unlock in
+// MutexGuard.drop fires correctly off the explicit-close path under contention,
+// so every goroutine's increment is serialized and observed.
+test_concurrent_explicit_close() `test {
+  shared := Arc[Mutex[int]](Mutex[int](0));
+  done := channel[bool]();
+  n := 8;
+  i := 0;
+  while i < n {
+    c := shared.clone();
+    go {
+      g := c.borrow.lock();
+      g.borrow = g.borrow + 1;
+      g.close();
+      done.send(true);
+    };
+    i = i + 1;
+  }
+  i = 0;
+  while i < n {
+    <-done;
+    i = i + 1;
+  }
+  done.close();
+  g := shared.borrow.lock();
+  assert(g.borrow == 8, "8 goroutines each +1 via explicit-close unlock");
+}

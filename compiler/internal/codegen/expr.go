@@ -3624,6 +3624,31 @@ func (c *Compiler) genMutexMethodCall(e *ast.CallExpr, member *ast.MemberExpr, e
 	}
 }
 
+// genMutexGuardMethodCall dispatches native method calls on MutexGuard[T] (T0839).
+// close(~this): unlock the mutex and free the guard via the canonical unlock+free
+// body (MutexGuard.drop), then suppress the automatic scope-exit/stmt-temp drop so
+// the guard isn't double-freed/double-unlocked.
+func (c *Compiler) genMutexGuardMethodCall(e *ast.CallExpr, member *ast.MemberExpr, method string) value.Value {
+	switch method {
+	case "close":
+		guardRaw := c.genExprAutoPropagate(member.Target) // B0323
+		// Same body as MutexGuard.drop: scheduler-aware unlock + free guard (T0156).
+		// It null-checks internally, so an already-null guard is safe.
+		c.block.NewCall(c.funcs["MutexGuard.drop"], guardRaw)
+		// The guard is consumed. Suppress later automatic cleanup:
+		//  - bound source (`g := m.lock(); g.close();`): clear the drop binding flag.
+		//  - temp/chain source (`m.lock().close()`, `(h.mtx!).lock().close()`): release
+		//    the stmt-temp tracking. Both calls are no-ops when not applicable.
+		if ident, ok := member.Target.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+		c.claimStringTemp(guardRaw)
+		return nil // close(~this) returns void (cf. genChannelClose)
+	default:
+		panic(fmt.Sprintf("codegen: unknown MutexGuard method %q", method))
+	}
+}
+
 // genMutexLock generates Mutex.lock() — scheduler-aware lock, returns a MutexGuard.
 // T0285: Coroutine path uses goroutine park/wake; non-coroutine path uses cond_wait.
 // Guard layout: {i8* mutex_alloc_ptr}.
@@ -5100,6 +5125,16 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 		if elem := c.resolveTypeParam(types.TypMutex.TypeParams()[0]); elem != nil {
 			return c.genMutexMethodCall(e, member, elem, methodName), true
 		}
+	}
+
+	// MutexGuard methods: close (T0839). The `borrow` get/set are getter/setter
+	// property accesses handled in genMemberExpr, not method calls; drop is
+	// automatic. close is the only user-callable method reachable here.
+	if _, ok := types.AsMutexGuard(unwrapped); ok {
+		return c.genMutexGuardMethodCall(e, member, methodName), true
+	}
+	if named == types.TypMutexGuard {
+		return c.genMutexGuardMethodCall(e, member, methodName), true
 	}
 
 	// String native methods: trim, split (contains/starts_with/ends_with/index_of are now pure Promise)

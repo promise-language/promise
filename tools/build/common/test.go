@@ -110,9 +110,9 @@ func RunGoTests(root string) error {
 // Returns captured stdout (even on failure) and any error.
 func RunPromiseTests(root, target string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
-	args := []string{"test", "-timeout", "10", "tests/...", "modules/...", "examples/..."}
+	args := []string{"test", "-timeout", "10", "tests/...", "modules/...", "examples/...", "tools/stub/..."}
 	if target != "" {
-		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...")
+		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...", "tools/stub/...")
 	}
 	return RunTee(root, promiseBin, args...)
 }
@@ -121,9 +121,9 @@ func RunPromiseTests(root, target string) (string, error) {
 // instead of stdout, keeping stdout clean for structured output (e.g. JSON).
 func RunPromiseTestsCapture(root, target string) (string, error) {
 	promiseBin := filepath.Join(root, "bin", BinaryName())
-	args := []string{"test", "-timeout", "10", "tests/...", "modules/...", "examples/..."}
+	args := []string{"test", "-timeout", "10", "tests/...", "modules/...", "examples/...", "tools/stub/..."}
 	if target != "" {
-		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...")
+		args = append([]string{"test", "-timeout", "10", "-target", target}, "tests/...", "modules/...", "examples/...", "tools/stub/...")
 	}
 	return RunTeeStderr(root, promiseBin, args...)
 }
@@ -139,7 +139,7 @@ func RunPromiseTestsJSON(root, target string) (string, error) {
 	if target != "" {
 		args = append(args, "-target", target)
 	}
-	args = append(args, "tests/...", "modules/...", "examples/...")
+	args = append(args, "tests/...", "modules/...", "examples/...", "tools/stub/...")
 	return RunCaptureStdout(root, promiseBin, args...)
 }
 

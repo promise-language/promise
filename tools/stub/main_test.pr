@@ -2,10 +2,9 @@
 // (T0770). These exercise the epoch-resolution string logic — the riskiest
 // hand-rolled part of the stub — without touching the process model.
 //
-// NOTE: the stub lives under tools/, which the default `bin/verify` /
-// `bin/test` Promise sweep (tests/, modules/, examples/) does NOT cover. Run
-// these explicitly with `bin/promise test tools/stub/`. They compile alongside
-// main.pr (same module), so the file-private helpers are in scope.
+// These tests are included in the gate sweep via `bin/verify` (T0782).
+// They compile alongside main.pr (same module), so the file-private helpers
+// are in scope.
 stub_version_is_one() `test {
   // Must stay in lockstep with stubVersion in stub_default.go (the installer
   // compares its embedded version against the sidecar for forward-only updates).
@@ -113,4 +112,44 @@ parent_dir_no_separator() `test {
 binary_name_nonempty() `test {
   // Platform-specific, but always a non-empty file name.
   assert(binary_name().len > 0, "binary name is non-empty");
+}
+
+parse_epoch_key_prefix_no_match() `test {
+  // A key that starts with "epoch" but continues with more letters before "="
+  // must NOT match (e.g. `epoch_version = "foo"`). Only bare `epoch` counts.
+  string toml = "epoch_version = \"1.0\"\n";
+  if e := parse_epoch_from_toml(toml) {
+    assert(false, "epoch_version should not match as the epoch key");
+  } else {
+    assert(true, "epoch_version is not the epoch key");
+  }
+}
+
+parse_epoch_first_match_wins() `test {
+  // When two valid epoch lines appear, the first one is returned.
+  string toml = "epoch = \"2025.0\"\nepoch = \"2026.0\"\n";
+  if e := parse_epoch_from_toml(toml) {
+    assert(e == "2025.0", "first epoch line wins");
+  } else {
+    assert(false, "expected an epoch");
+  }
+}
+
+extract_quoted_returns_first() `test {
+  // When multiple quoted sections appear on one line, the first is returned.
+  if q := extract_quoted("a = \"first\" b = \"second\"") {
+    assert(q == "first", "returns the first quoted value");
+  } else {
+    assert(false, "expected a quoted value");
+  }
+}
+
+parent_dir_trailing_slash() `test {
+  // A path ending with a separator treats the separator as the end of the last
+  // component, so the parent is the path up to that separator.
+  if p := parent_dir("/a/b/") {
+    assert(p == "/a/b", "trailing slash: parent is the prefix before it");
+  } else {
+    assert(false, "expected a parent");
+  }
 }

@@ -8144,14 +8144,19 @@ func extractEmbedded(fsys embed.FS, prefix, destDir string) {
 	}
 }
 
-// copyFile copies a single file from src to dst with the given permissions.
+// copyFile copies a single file from src to dst with the given permissions via a
+// temp file in dst's directory followed by an atomic rename, so the destination
+// always lands on a FRESH inode (T0722). This is the standard safe-replace: the
+// installed binary can never inherit poisoned vnode/kernel state attached to a
+// prior inode at dst (the macOS amfid-wedge failure), and overwriting a running
+// executable cannot hit ETXTBSY or expose a partially written binary.
 func copyFile(src, dst string, perm os.FileMode) {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", src, err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile(dst, data, perm); err != nil {
+	if err := writeFileAtomic(dst, data, perm); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing %s: %v\n", dst, err)
 		os.Exit(1)
 	}

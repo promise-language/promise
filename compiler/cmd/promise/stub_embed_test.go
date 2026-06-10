@@ -138,3 +138,52 @@ func TestWriteFileAtomic(t *testing.T) {
 		t.Fatalf("expected exactly 1 file (no temp leftovers), got %d", len(entries))
 	}
 }
+
+// TestWriteFileAtomicBadDir: when the destination directory does not exist,
+// os.CreateTemp fails and writeFileAtomic returns that error (rather than
+// panicking or silently succeeding) and writes nothing. writeStubAndSidecar
+// relies on this error being propagated so a failed stub install aborts cleanly.
+func TestWriteFileAtomicBadDir(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "does-not-exist", "thing")
+	if err := writeFileAtomic(missing, []byte("data"), 0644); err == nil {
+		t.Fatal("expected an error writing into a nonexistent directory")
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatal("no file should be created when the directory is missing")
+	}
+}
+
+// TestCopyFileContentAndPerm: copyFile reproduces the source bytes, applies the
+// requested permissions, and leaves no temp files behind in the destination dir.
+func TestCopyFileContentAndPerm(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+	if err := os.WriteFile(src, []byte("payload"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	copyFile(src, dst, 0755)
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "payload" {
+		t.Fatalf("expected 'payload', got %q", string(data))
+	}
+	// Windows does not model Unix permission bits (see TestWriteFileAtomic).
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0755 {
+			t.Fatalf("expected mode 0755, got %v", info.Mode().Perm())
+		}
+	}
+	// No leftover temp files: just src and dst remain.
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 2 {
+		t.Fatalf("expected exactly 2 files (src, dst; no temp leftovers), got %d", len(entries))
+	}
+}

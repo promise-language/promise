@@ -10286,14 +10286,15 @@ func TestT0841_TransientBoundToLocalThenMovedAllowed(t *testing.T) {
 // memberChainRoot walks through to the variable root, so the unconditional
 // transient reject does NOT fire (ownership accepts it).
 //
-// NOTE: ownership accepting this is currently UNSAFE for the optional-unwrap
-// shape: `<-(cs[0].tsk!)` double-frees at runtime — the T0638 genReceiveTask
-// slot-null does not reach through the OptionalUnwrap+IndexExpr to the owned
-// element's optional slot (the plain non-optional `<-cs[0].t` IS safe — see
-// task_drop_test.pr task_recv_array_struct_field). That double-free is the
-// separate, latent bug T0843; this test only pins the ownership-pass decision
-// (accepted, routed through the IndexExpr→variable-root branch), not runtime
-// safety. Do NOT add a runtime .pr counterpart until T0843 is fixed.
+// Accepting this is also runtime-safe (T0843): the T0638 genReceiveTask slot-null
+// does not reach through the OptionalUnwrap+IndexExpr to the owned element's
+// optional slot, but neutralizeMemberOptionalField now clears that optional present
+// flag for the `<-(cs[0].tsk!)` shape, so the container's element drop no longer
+// double-frees the consumed G (the plain non-optional `<-cs[0].t` was already safe
+// via the slot-null). This test pins the ownership-pass decision (accepted, routed
+// through the IndexExpr→variable-root branch); the runtime no-double-free
+// counterparts live in task_drop_test.pr (task_recv_array_struct_optional_field /
+// task_recv_vector_struct_optional_field).
 func TestT0841_IndexHopThroughOwnedContainerTaskAwaitAcceptedT0843(t *testing.T) {
 	ownerOK(t, `
 		worker() int { return 5; }

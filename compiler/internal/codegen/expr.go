@@ -11610,6 +11610,10 @@ func (c *Compiler) neutralizeMemberOptionalField(m *ast.MemberExpr) {
 	var ownerType types.Type // used for layout lookup (ident-rooted chains)
 	var ownerNamed *types.Named
 	var rootIsThis bool
+	// T0843: when the chain root is a container element (`cs[0].tsk!`), there is
+	// no alloca for the element — we GEP/extract the heap instance pointer
+	// directly and stash it here so the post-switch code uses it as-is.
+	var precomputedInstance value.Value
 
 	switch root := cur.(type) {
 	case *ast.IdentExpr:
@@ -11669,18 +11673,68 @@ func (c *Compiler) neutralizeMemberOptionalField(m *ast.MemberExpr) {
 		}
 		ownerType = ownerNamed
 		rootIsThis = true
+	case *ast.IndexExpr:
+		// T0843: optional single-owner handle field (Task[T]?/Mutex[T]?) on an
+		// element of an OWNED container, consumed by an await (`<-(cs[0].tsk!)`) or
+		// taken by a binding move (`Mutex[int] m = cs[0].mtx!`). The unwrap takes the
+		// handle out; clear the element's optional present flag so the container's
+		// scope-exit element drop does not double-free it. Mirrors the IdentExpr
+		// owned-local path. Reached from both genReceiveTask (await) and
+		// neutralizeForceUnwrapSource (binding move) — so this also covers the
+		// optional-Mutex half of T0842. The non-optional `<-cs[0].t` is already covered
+		// by the T0638 genReceiveTaskSlotPtr slot-null; the non-optional Mutex move
+		// `cs[0].m` (no `!`) has neither slot-null nor optional flag and is the open
+		// T0842 gap.
+		containerType := c.info.Types[root.Target]
+		if c.typeSubst != nil {
+			containerType = types.Substitute(containerType, c.typeSubst)
+		}
+		// Don't neutralize through a borrowed container.
+		if _, isShared := containerType.(*types.SharedRef); isShared {
+			return
+		}
+		if _, isMut := containerType.(*types.MutRef); isMut {
+			return
+		}
+		elemType := c.info.Types[root] // type of cs[0] = element type
+		if c.typeSubst != nil {
+			elemType = types.Substitute(elemType, c.typeSubst)
+		}
+		ownerNamed = extractNamed(elemType)
+		if ownerNamed == nil {
+			return
+		}
+		if ownerNamed.IsValueType() || ownerNamed.IsStructural() {
+			return
+		}
+		if !ownerNamed.HasDrop() && !ownerNamed.NeedsSynthDrop() {
+			if inst, ok := elemType.(*types.Instance); ok {
+				if !monoInstNeedsSynthDrop(inst) {
+					return
+				}
+			} else {
+				return
+			}
+		}
+		ownerType = elemType
+		precomputedInstance = c.extractInstancePtr(c.genExpr(root))
 	default:
 		return
 	}
 
 	// Load the root instance pointer.
-	ownerVal := c.block.NewLoad(ownerAlloca.ElemType, ownerAlloca)
 	var rootInstance value.Value
-	if rootIsThis {
-		// ~this: the alloca holds an i8* instance pointer directly.
-		rootInstance = ownerVal
+	if precomputedInstance != nil {
+		// T0843: container element — heap instance ptr already computed above.
+		rootInstance = precomputedInstance
 	} else {
-		rootInstance = c.extractInstancePtr(ownerVal)
+		ownerVal := c.block.NewLoad(ownerAlloca.ElemType, ownerAlloca)
+		if rootIsThis {
+			// ~this: the alloca holds an i8* instance pointer directly.
+			rootInstance = ownerVal
+		} else {
+			rootInstance = c.extractInstancePtr(ownerVal)
+		}
 	}
 
 	// Walk the chain. For each step, GEP through the instance to the field.

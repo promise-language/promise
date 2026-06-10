@@ -441,3 +441,38 @@ t0841_tsk_transient_local_then_await() `test {
 t0841_mtx_transient_read_in_place() `test {
   assert(make_mtx_holder_t0841().mtx!.lock().borrow == 7, "mtx transient read in place");
 }
+
+// ---------------------------------------------------------------------------
+// T0843 acceptance (runtime no-leak / no-double-free): moving a single-owner
+// handle out of an OPTIONAL field of an OWNED CONTAINER ELEMENT
+// (`cs[0].mtx!`). The IndexExpr root branch in neutralizeMemberOptionalField
+// (reached here via neutralizeForceUnwrapSource) clears the element's optional
+// present flag, so the container's scope-exit element drop does not double-free
+// the handle the binding already took ownership of. This incidentally fixes the
+// *optional* half of T0842; the Task await counterparts live in
+// task_drop_test.pr (task_recv_array/vector_struct_optional_field). The
+// *non-optional* move `cs[0].m` (no `!`) remains the open T0842 gap and is NOT
+// exercised here (it still double-frees).
+// ---------------------------------------------------------------------------
+
+t0843_mtx_opt_out_of_owned_vector() `test {
+  cs := [MtxHolder(mtx: Mutex[int](7))];
+  Mutex[int] m = cs[0].mtx!;
+  assert(m.lock().borrow == 7, "mtx opt out of owned vector element");
+}
+
+t0843_mtx_opt_out_of_owned_array() `test {
+  MtxHolder[2] cs = [MtxHolder(mtx: Mutex[int](7)), MtxHolder(mtx: Mutex[int](8))];
+  Mutex[int] a = cs[0].mtx!;
+  Mutex[int] b = cs[1].mtx!;
+  assert(a.lock().borrow == 7, "mtx opt array elem 0");
+  assert(b.lock().borrow == 8, "mtx opt array elem 1");
+}
+
+// Partial move: only one element's handle is taken; the other element's handle
+// must still be dropped exactly once by the container (no leak, no double-free).
+t0843_mtx_opt_partial_owned_array() `test {
+  MtxHolder[2] cs = [MtxHolder(mtx: Mutex[int](7)), MtxHolder(mtx: Mutex[int](8))];
+  Mutex[int] a = cs[0].mtx!;
+  assert(a.lock().borrow == 7, "mtx opt partial owned array");
+}

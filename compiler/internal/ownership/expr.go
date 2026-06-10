@@ -1344,13 +1344,17 @@ func peelToMemberSource(expr ast.Expr) *ast.MemberExpr {
 // variable, not a transient, so it resolves to the same variable-root logic
 // rather than the unconditional transient reject. This keeps the legitimate
 // owned-container Task case working (the *non-optional* `<-cs[0].t`, made safe by
-// genReceiveTask's T0638 slot-null). NOTE two remaining gaps that this walk-through
-// exposes but does NOT fix (both pre-existing, latent double-frees, neither
-// papered over here): (a) a *moved* (non-Task) handle field out of an owned
-// container element has no slot-null — see T0842; (b) awaiting an *optional* Task
-// field out of an owned container element (`<-(cs[0].tsk!)`) — the T0638 slot-null
-// does not reach through the OptionalUnwrap+index to the element's optional slot —
-// see T0843.
+// genReceiveTask's T0638 slot-null). Awaiting an *optional* Task field, and moving
+// an *optional* Mutex/Task field, out of an owned container element
+// (`<-(cs[0].tsk!)`, `Mutex[int] m = cs[0].mtx!`) is likewise safe: the T0638
+// slot-null does not reach through the OptionalUnwrap+index, but
+// neutralizeMemberOptionalField now clears the element's optional present flag for
+// that shape (T0843 — which thereby also covers the *optional* half of T0842),
+// parallel to the non-optional slot-null. NOTE one remaining gap this walk-through
+// exposes but does NOT fix (pre-existing, latent double-free, not papered over
+// here): moving a NON-optional handle field out of an owned container element
+// (`Mutex[int] m = cs[0].m`, no `!`) has neither a slot-null nor an optional present
+// flag to clear — see T0842.
 func (c *Checker) memberChainRoot(m *ast.MemberExpr) (ast.Expr, string, bool) {
 	target := m.Target
 	for {

@@ -240,6 +240,50 @@ task_recv_array_struct_field() `test(exclude: wasm) {
   assert(b == 42, "struct-field recv 1");
 }
 
+// T0843: optional Task handle field on an element of an OWNED container.
+// `<-(cs[i].tsk!)` consumes the handle; the element-drop must not double-free
+// the consumed G. neutralizeMemberOptionalField clears the element's optional
+// present flag for the OptionalUnwrap+IndexExpr shape (the non-optional
+// `<-cs[0].t` above is covered by the T0638 slot-null instead).
+type TaskOptCell {
+  Task[int]? tsk;
+  drop(~this) {
+  }
+}
+
+task_recv_array_struct_optional_field() `test(exclude: wasm) {
+  TaskOptCell[2] cs = [TaskOptCell(tsk: go worker_int()), TaskOptCell(tsk: go worker_int())];
+  a := <-(cs[0].tsk!);
+  b := <-(cs[1].tsk!);
+  assert(a == 42, "opt struct-field recv 0");
+  assert(b == 42, "opt struct-field recv 1");
+}
+
+task_recv_vector_struct_optional_field() `test(exclude: wasm) {
+  cs := [TaskOptCell(tsk: go worker_int())];
+  a := <-(cs[0].tsk!);
+  assert(a == 42, "opt struct-field vector recv");
+}
+
+// Partial consume (fixed array): only cs[0].tsk is awaited (flag cleared);
+// cs[1].tsk's flag stays live and its G must be dropped exactly once by the
+// container at scope exit — no double-free of cs[0], no leak of cs[1].
+task_recv_array_struct_optional_field_partial() `test(exclude: wasm) {
+  TaskOptCell[2] cs = [TaskOptCell(tsk: go worker_int()), TaskOptCell(tsk: go worker_int())];
+  a := <-(cs[0].tsk!);
+  assert(a == 42, "opt struct-field array partial recv");
+  // cs[1].tsk dropped at scope exit.
+}
+
+// Partial consume (vector): mirrors the array case for the COW/dynamic
+// container element-drop path.
+task_recv_vector_struct_optional_field_partial() `test(exclude: wasm) {
+  cs := [TaskOptCell(tsk: go worker_int()), TaskOptCell(tsk: go worker_int())];
+  a := <-(cs[0].tsk!);
+  assert(a == 42, "opt struct-field vector partial recv");
+  // cs[1].tsk dropped at scope exit.
+}
+
 // Non-regression: Channel elements. genReceiveChannel does NOT free the
 // channel, so its slot must stay valid for the scope-exit drop. The T0638
 // slot-null is genReceiveTask-only — these must not double-free / leak.

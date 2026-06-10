@@ -723,6 +723,11 @@ func ExtractArchive(archive, dst string) error {
 		// target must use forward slashes: GNU tar mangles a backslash path
 		// (`C:\x` → `C\:\x: Cannot open`) but accepts the forward-slash `C:/x`
 		// form (and POSIX relative paths) unchanged (T0820).
+		// tar's -C does not create its target — make dst (and parents) first so a
+		// missing extract dir is honored rather than failing with "could not chdir".
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			return err
+		}
 		return RunIn(filepath.Dir(archive), "tar", "-xf", filepath.Base(archive), "-C", filepath.ToSlash(dst))
 	case strings.HasSuffix(lower, ".zip"):
 		return extractZip(archive, dst)

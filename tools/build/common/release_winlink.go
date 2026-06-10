@@ -132,5 +132,8 @@ func ensureWinlinkLibs(root string) error {
 	if libs, _ := filepath.Glob(filepath.Join(outDir, "*.lib")); len(libs) > 0 {
 		return nil
 	}
+	// The .lib are absent → run llvm-dlltool. resolveWinlinkDllTool (invoked by
+	// runReleaseWinlink) seeds the slim LLVM cache with the build-only
+	// llvm-dlltool (T0833/T0840) when it isn't already on PATH or in the cache.
 	return runReleaseWinlink(root, nil)
 }

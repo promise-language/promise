@@ -726,10 +726,10 @@ func TestExtractZip_HappyPath(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "test.zip")
 	if err := writeZipArchive(zipPath, map[string]string{
-		"top.txt":         "TOP",
-		"sub/inner.txt":   "INNER",
-		"sub/deep/x.txt":  "DEEP",
-		"empty/":          "", // directory entry with trailing slash
+		"top.txt":        "TOP",
+		"sub/inner.txt":  "INNER",
+		"sub/deep/x.txt": "DEEP",
+		"empty/":         "", // directory entry with trailing slash
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -884,6 +884,32 @@ func TestExtractArchive_CreatesDstRelativeBranch(t *testing.T) {
 	}
 	if _, err := os.ReadFile(filepath.Join(dst, "x", "y")); err != nil {
 		t.Fatalf("second member not extracted: %v", err)
+	}
+}
+
+// TestExtractArchive_DstMkdirFails covers the error branch of the dst MkdirAll
+// added in the tar path (T0840): when dst cannot be created — here because a
+// path component is an existing regular file — ExtractArchive surfaces the
+// MkdirAll error rather than proceeding into a doomed tar invocation.
+func TestExtractArchive_DstMkdirFails(t *testing.T) {
+	parent := t.TempDir()
+	tarBytes, err := makeTarGzContent(map[string]string{"bin/opt": "OPT_CONTENT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(parent, "a.tar.gz")
+	if err := os.WriteFile(archivePath, tarBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file stands where a dst parent dir would need to be, so
+	// MkdirAll(dst) fails with ENOTDIR.
+	blocker := filepath.Join(parent, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(blocker, "out")
+	if err := ExtractArchive(archivePath, dst); err == nil {
+		t.Fatal("expected error when dst cannot be created")
 	}
 }
 

@@ -101,9 +101,13 @@ jobs:
         run: sudo apt-get install -y musl-dev
       - name: Bootstrap dev tools (Unix)
         if: runner.os != 'Windows'
+        env:
+          PROMISE_SKIP_FLOWS: "1"
         run: ./make
       - name: Bootstrap dev tools (Windows)
         if: runner.os == 'Windows'
+        env:
+          PROMISE_SKIP_FLOWS: "1"
         run: .\make.cmd
       - name: Project per-epoch manifest from blobs catalog
         shell: bash
@@ -168,6 +172,8 @@ jobs:
           cache: true
           cache-dependency-path: compiler/go.sum
       - name: Bootstrap dev tools
+        env:
+          PROMISE_SKIP_FLOWS: "1"
         run: ./make
       - name: Download all compiler artifacts
         uses: actions/download-artifact@v8

@@ -162,6 +162,9 @@ func buildTools(root, binDir string, tools []string, hash string) error {
 // go-build loop is skipped on a match (unless force). The hash is computed AFTER
 // the submodule checkout so a submodule pin bump is detected.
 func buildFlows(root string, force bool) error {
+	if os.Getenv("PROMISE_SKIP_FLOWS") != "" {
+		return nil // CI runners set this to avoid the doomed flow-sdk SSH fetch (T0788)
+	}
 	flowsDir := filepath.Join(root, "flows")
 	if !common.Exists(filepath.Join(flowsDir, "go.mod")) {
 		return nil // no flows module — nothing to build

@@ -126,6 +126,24 @@ func TestBuildFlowsLeavesWorktreeClean(t *testing.T) {
 	}
 }
 
+// TestBuildFlowsSkippedByEnvVar verifies that PROMISE_SKIP_FLOWS=1 causes
+// buildFlows to return immediately without touching the network (T0788).
+// force=true bypasses the hash-file short-circuit, so without the env var the
+// function would reach ensureFlowSubmodules and attempt a git fetch.
+func TestBuildFlowsSkippedByEnvVar(t *testing.T) {
+	root, err := common.FindRoot()
+	if err != nil {
+		t.Skip("repo root not found (running outside the worktree)")
+	}
+	if !common.Exists(filepath.Join(root, "flows", "go.mod")) {
+		t.Skip("flows/ module not present")
+	}
+	t.Setenv("PROMISE_SKIP_FLOWS", "1")
+	if err := buildFlows(root, true); err != nil {
+		t.Errorf("buildFlows with PROMISE_SKIP_FLOWS=1 returned error: %v", err)
+	}
+}
+
 // writeFile writes content to path, creating any missing parent directories.
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()

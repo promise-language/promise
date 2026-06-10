@@ -108,9 +108,13 @@ jobs:
       # by ./make and refuse to run stale, so bootstrap them before any bin/* use.
       - name: Bootstrap dev tools (Unix)
         if: runner.os != 'Windows'
+        env:
+          PROMISE_SKIP_FLOWS: "1"
         run: ./make
       - name: Bootstrap dev tools (Windows)
         if: runner.os == 'Windows'
+        env:
+          PROMISE_SKIP_FLOWS: "1"
         run: .\make.cmd
 
       # shell: bash on all platforms so `bin/build` resolves uniformly (Git Bash on

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -333,7 +334,12 @@ func TestDetectTool(t *testing.T) {
 }
 
 func TestIsRepoMakeChain(t *testing.T) {
-	root := "/repo"
+	// Use real, platform-native absolute dirs so the test holds on Windows
+	// (where POSIX-absolute literals like "/repo" are not absolute).
+	root := t.TempDir()
+	elsewhere := t.TempDir()
+	other := t.TempDir()
+	sub := filepath.Join(root, "tools")
 	tests := []struct {
 		name string
 		cmd  string
@@ -346,22 +352,22 @@ func TestIsRepoMakeChain(t *testing.T) {
 		{"./make in pipe at root", "./make 2>&1 | tail", root, true},
 		{"./make.exe at root", "./make.exe", root, true},
 		// Allowed: cd into root then make.
-		{"cd root && ./make", "cd " + root + " && ./make", "/elsewhere", true},
-		{"cd root && ./make --force", "cd " + root + " && ./make --force", "/elsewhere", true},
+		{"cd root && ./make", "cd " + root + " && ./make", elsewhere, true},
+		{"cd root && ./make --force", "cd " + root + " && ./make --force", elsewhere, true},
 		// Allowed: absolute path to root/make.
-		{"abs path", root + "/make", "/elsewhere", true},
-		{"abs path with args", root + "/make --force", "/elsewhere", true},
+		{"abs path", filepath.Join(root, "make"), elsewhere, true},
+		{"abs path with args", filepath.Join(root, "make") + " --force", elsewhere, true},
 
 		// Blocked: cwd has drifted, ./make resolves elsewhere.
-		{"./make from subdir", "./make", root + "/tools", false},
-		{"./make from /tmp", "./make", "/tmp", false},
+		{"./make from subdir", "./make", sub, false},
+		{"./make from other", "./make", other, false},
 		// Blocked: cd into a non-root dir, then ./make.
-		{"cd /tmp && ./make", "cd /tmp && ./make", root, false},
-		{"cd subdir && ./make", "cd " + root + "/tools && ./make", root, false},
+		{"cd other && ./make", "cd " + other + " && ./make", root, false},
+		{"cd subdir && ./make", "cd " + sub + " && ./make", root, false},
 		// Blocked: bare 'make' (no ./) is not a recognized invocation.
 		{"bare make", "make", root, false},
 		// Blocked: a stray ./make that's not the repo's.
-		{"./make in /tmp via cd", "cd /tmp && ./make foo", root, false},
+		{"./make in other via cd", "cd " + other + " && ./make foo", root, false},
 		// Blocked: empty cwd — can't verify.
 		{"empty cwd", "./make", "", false},
 		// Blocked: empty command.
@@ -472,21 +478,22 @@ func TestCheckGo(t *testing.T) {
 }
 
 func TestCheckCopy(t *testing.T) {
+	tmp := os.TempDir()
 	tests := []struct {
 		name    string
 		program string
 		tokens  []string
 		blocked bool
 	}{
-		{"cp to /tmp", "cp", []string{"cp", "a.txt", "/tmp/a.txt"}, false},
+		{"cp to tmp", "cp", []string{"cp", "a.txt", filepath.Join(tmp, "a.txt")}, false},
 		{"cp to outside", "cp", []string{"cp", "a.txt", "/etc/a.txt"}, true},
-		{"mv to /tmp", "mv", []string{"mv", "a.txt", "/tmp/a.txt"}, false},
+		{"mv to tmp", "mv", []string{"mv", "a.txt", filepath.Join(tmp, "a.txt")}, false},
 		{"mv to outside", "mv", []string{"mv", "a.txt", "/usr/local/a.txt"}, true},
 		{"cp no dest", "cp", []string{"cp", "a.txt"}, false},
 		{"cp flags only", "cp", []string{"cp", "-r", "a/"}, false},
-		{"cp with -t /tmp", "cp", []string{"cp", "-t", "/tmp", "a.txt"}, false},
+		{"cp with -t tmp", "cp", []string{"cp", "-t", tmp, "a.txt"}, false},
 		{"cp with -t outside", "cp", []string{"cp", "-t", "/etc", "a.txt"}, true},
-		{"cp with --target-directory=", "cp", []string{"cp", "--target-directory=/tmp", "a.txt"}, false},
+		{"cp with --target-directory=", "cp", []string{"cp", "--target-directory=" + tmp, "a.txt"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -545,12 +552,13 @@ func TestContextFields(t *testing.T) {
 }
 
 func TestIsAllowedCopyDest(t *testing.T) {
+	tmp := os.TempDir()
 	tests := []struct {
 		dest string
 		want bool
 	}{
-		{"/tmp", true},
-		{"/tmp/foo", true},
+		{tmp, true},
+		{filepath.Join(tmp, "foo"), true},
 		{"/etc/passwd", false},
 		{"~/.promise", true},
 		{"~/.promise/cache", true},
@@ -562,6 +570,30 @@ func TestIsAllowedCopyDest(t *testing.T) {
 				t.Errorf("isAllowedCopyDest(%q) = %v, want %v", tt.dest, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestIsAllowedCopyDestCwd covers the repo-directory (cwd) branch: a relative
+// destination resolves under the current working directory and is allowed.
+func TestIsAllowedCopyDestCwd(t *testing.T) {
+	if !isAllowedCopyDest("guard_cwd_dest.txt") {
+		t.Errorf("isAllowedCopyDest(relative path under cwd) = false, want true")
+	}
+}
+
+// TestIsAllowedCopyDestTmpFallback covers the POSIX-only /tmp fallback: even
+// when $TMPDIR (and thus os.TempDir()) points elsewhere, a literal /tmp
+// destination is still accepted. On Windows /tmp is not special, so the
+// fallback is skipped and the path is blocked.
+func TestIsAllowedCopyDestTmpFallback(t *testing.T) {
+	// Point os.TempDir() away from /tmp so the first allow-check misses and
+	// the /tmp fallback branch is exercised.
+	t.Setenv("TMPDIR", t.TempDir())
+
+	got := isAllowedCopyDest("/tmp/promise_guard_fallback")
+	want := runtime.GOOS != "windows"
+	if got != want {
+		t.Errorf("isAllowedCopyDest(/tmp/...) = %v, want %v (GOOS=%s)", got, want, runtime.GOOS)
 	}
 }
 
@@ -642,20 +674,28 @@ func TestCheckGitBranchCreate(t *testing.T) {
 }
 
 func TestEffectiveGitDir(t *testing.T) {
+	cwd := filepath.Clean(string(filepath.Separator) + "repo") // "/repo" or "\repo"
+	absArg, err := filepath.Abs(filepath.Join("abs", "sub"))   // platform-absolute
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		tokens []string
-		cwd    string
 		want   string
 	}{
-		{[]string{"git", "status"}, "/repo", "/repo"},
-		{[]string{"git", "-C", "sub", "status"}, "/repo", "/repo/sub"},
-		{[]string{"git", "-C", "/abs/sub", "status"}, "/repo", "/abs/sub"},
-		{[]string{"git", "-c", "k=v", "checkout", "main"}, "/repo", "/repo"},
-		{[]string{"git", "--git-dir", "x", "status"}, "/repo", "/repo"},
+		{[]string{"git", "status"}, cwd},
+		{[]string{"git", "-C", "sub", "status"}, filepath.Join(cwd, "sub")},
+		{[]string{"git", "-C", absArg, "status"}, absArg},
+		{[]string{"git", "-c", "k=v", "checkout", "main"}, cwd},
+		{[]string{"git", "--git-dir", "x", "status"}, cwd},
+		// Generic flags (not -C/-c/--git-dir/--work-tree) are skipped without
+		// consuming an argument, leaving the dir unchanged.
+		{[]string{"git", "--no-pager", "status"}, cwd},
+		{[]string{"git", "-C", "sub", "--no-pager", "status"}, filepath.Join(cwd, "sub")},
 	}
 	for _, tt := range tests {
-		if got := effectiveGitDir(tt.tokens, tt.cwd); got != tt.want {
-			t.Errorf("effectiveGitDir(%v, %q) = %q, want %q", tt.tokens, tt.cwd, got, tt.want)
+		if got := effectiveGitDir(tt.tokens, cwd); got != tt.want {
+			t.Errorf("effectiveGitDir(%v, %q) = %q, want %q", tt.tokens, cwd, got, tt.want)
 		}
 	}
 }

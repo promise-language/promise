@@ -1016,7 +1016,16 @@ func checkCopy(program string, tokens []string) string {
 	return ""
 }
 
-// isAllowedCopyDest checks if a destination path is within the repo, /tmp, or ~/.promise.
+// isWithin reports whether target equals base or is a descendant of it,
+// using OS-correct path separators.
+func isWithin(base, target string) bool {
+	base = filepath.Clean(base)
+	target = filepath.Clean(target)
+	return target == base || strings.HasPrefix(target, base+string(filepath.Separator))
+}
+
+// isAllowedCopyDest checks if a destination path is within the repo, the
+// platform temp dir, or ~/.promise.
 func isAllowedCopyDest(dest string) bool {
 	// Expand ~ prefix.
 	home, _ := os.UserHomeDir()
@@ -1028,26 +1037,24 @@ func isAllowedCopyDest(dest string) bool {
 	if err != nil {
 		return false
 	}
-	abs = filepath.Clean(abs)
 
-	// Allow /tmp.
-	if strings.HasPrefix(abs, "/tmp/") || abs == "/tmp" {
+	// Platform temp dir (os.TempDir() → %TEMP% on Windows, /tmp or $TMPDIR
+	// on POSIX). Also accept the conventional /tmp on POSIX regardless of
+	// $TMPDIR, preserving prior behavior.
+	if isWithin(os.TempDir(), abs) {
+		return true
+	}
+	if runtime.GOOS != "windows" && isWithin("/tmp", abs) {
 		return true
 	}
 
 	// Allow ~/.promise.
-	promiseDir := filepath.Join(home, ".promise")
-	if strings.HasPrefix(abs, promiseDir+"/") || abs == promiseDir {
+	if home != "" && isWithin(filepath.Join(home, ".promise"), abs) {
 		return true
 	}
 
 	// Allow repo directory (cwd).
-	cwd, err := os.Getwd()
-	if err != nil {
-		return false
-	}
-	cwd = filepath.Clean(cwd)
-	if strings.HasPrefix(abs, cwd+"/") || abs == cwd {
+	if cwd, err := os.Getwd(); err == nil && isWithin(cwd, abs) {
 		return true
 	}
 

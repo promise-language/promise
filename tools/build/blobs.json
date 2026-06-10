@@ -27,6 +27,17 @@
       "dependency": "llvm",
       "version": "22.1.0",
       "target": "darwin-arm64",
+      "name": "llvm-dlltool",
+      "sha256": "7657d5cfd89b7be8bbbef86416f580d7013f6ee08112071ae5e5a062f6f75023",
+      "size": 40836240,
+      "compression": "brotli",
+      "compressed_size": 5736282,
+      "compressed_sha256": "89f5ffd415a61d479e2cd7ebb6758b49e121cb819cb19eb212f712309a895f37"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "darwin-arm64",
       "name": "opt",
       "sha256": "435a56e23669cfda0f78e9f47fb31d9036de8fa9d312460b85363fc4f7e0a74b",
       "size": 131144352,
@@ -60,6 +71,17 @@
       "dependency": "llvm",
       "version": "22.1.0",
       "target": "linux-amd64",
+      "name": "llvm-dlltool",
+      "sha256": "f4969ec822529cb07f55dd58299a7d0681b76cba0e5269376181cd068a1fc06d",
+      "size": 52385704,
+      "compression": "brotli",
+      "compressed_size": 7334839,
+      "compressed_sha256": "7eee792645570acfc4a15fb78b8498b27e4014e9db2141b827643abc993060cf"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "linux-amd64",
       "name": "opt",
       "sha256": "254570408b4ccf0f336987e6331f3567232e9e0717d445216b84c932cf01702c",
       "size": 189418056,
@@ -88,6 +110,17 @@
       "compression": "brotli",
       "compressed_size": 20117741,
       "compressed_sha256": "93eee6329ad544cbebd05bb49512d6b3de5ebc84a1c1d73513cfe0cc4c151059"
+    },
+    {
+      "dependency": "llvm",
+      "version": "22.1.0",
+      "target": "windows-amd64",
+      "name": "llvm-dlltool.exe",
+      "sha256": "7929e0803f4ebbb93e54122a2f353e3fc46ab58995293599f098248abf67a2d8",
+      "size": 18496512,
+      "compression": "brotli",
+      "compressed_size": 3334369,
+      "compressed_sha256": "192f0e5d5e5817c3af013aa087a6dfe3b4d3ae0015b9cbd517c2f11da61d3d7d"
     },
     {
       "dependency": "llvm",

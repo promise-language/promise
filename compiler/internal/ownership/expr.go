@@ -723,7 +723,19 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 				}
 			}
 		}
-		c.checkReceiverBorrow(e.Callee, sig, e.Pos())
+		if member, ok := e.Callee.(*ast.MemberExpr); ok &&
+			isConsumingNativeMethod(c.info.Types[member.Target], member.Field) {
+			// T0846: close(~this) on a MutexGuard unlocks AND pal_free's the guard
+			// (its body is @MutexGuard.drop, T0839). Treat the call as a consume so
+			// any later use of the receiver is rejected at compile time
+			// ("use of moved variable") instead of becoming a use-after-free — the
+			// same machinery as the T0837 single-owner-handle guards. tryMoveConsume
+			// routes member/index/borrowed-param/transient shapes through their
+			// existing rejections; a bare ident receiver is marked Moved.
+			c.tryMoveConsume(member.Target)
+		} else {
+			c.checkReceiverBorrow(e.Callee, sig, e.Pos())
+		}
 		c.checkBorrowConflicts(e, sig)
 	} else {
 		// Constructor or unresolved call — all args are consumed.
@@ -820,6 +832,16 @@ func (c *Checker) createBorrowWithKind(expr ast.Expr, kind BorrowKind, pos ast.P
 	}
 
 	c.borrows.Add(&Borrow{Origin: name, FieldPath: path, Kind: kind, Pos: pos})
+}
+
+// isConsumingNativeMethod reports whether a native method frees its `~this`
+// receiver, so ownership must treat the call as a consume (mark the receiver
+// Moved) rather than a mutable borrow. Currently only MutexGuard.close: its
+// body is @MutexGuard.drop, which unlocks AND pal_free's the guard (T0839), so
+// any later use of the receiver is a use-after-free (T0846). Extend this list
+// if another free-on-`~this` native method is added.
+func isConsumingNativeMethod(recvType types.Type, methodName string) bool {
+	return methodName == "close" && types.IsMutexGuard(recvType)
 }
 
 // checkReceiverBorrow creates a borrow for method calls with &this or ~this receivers.

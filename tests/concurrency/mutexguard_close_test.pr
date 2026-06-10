@@ -88,6 +88,25 @@ test_close_in_loop() `test {
   assert(g.borrow == 2, "last loop write persists");
 }
 
+// T0846: close(~this) frees the guard, so ownership now treats it as a consume
+// (reusing a guard after close is a compile-time "use of moved variable", no
+// longer a use-after-free). This test pins that the legitimate single-close
+// path is unaffected at runtime: lock → mutate → close, then relock a fresh
+// guard, read, mutate, and close again. Both guards are consumed exactly once.
+test_close_consume_relock_close() `test {
+  m := Mutex[int](1);
+  g := m.lock();
+  g.borrow = 10;
+  g.close();
+  g2 := m.lock();
+  assert(g2.borrow == 10, "first close persisted the write");
+  g2.borrow = 20;
+  g2.close();
+  g3 := m.lock();
+  assert(g3.borrow == 20, "second close persisted the write");
+  g3.close();
+}
+
 // Concurrent explicit close — N goroutines each lock a shared mutex, increment,
 // then explicitly `.close()` (not `use`). Proves the scheduler-aware unlock in
 // MutexGuard.drop fires correctly off the explicit-close path under contention,

@@ -1121,6 +1121,18 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 		return nil
 	}
 
+	// T0846: `drop` is the compiler-managed destructor — a reserved name with a
+	// fixed `drop(~this)` signature (validateDropMethod). It runs automatically
+	// at scope exit; calling it explicitly double-frees (user/heap types) or
+	// panics codegen (Vector/MutexGuard). Reject it uniformly here, before
+	// codegen. A receiver with no drop method never reaches this point: the
+	// `.drop` member fails to resolve in checkMemberExpr and we already returned
+	// nil above, so the normal "no member" path is preserved.
+	if mem, ok := e.Callee.(*ast.MemberExpr); ok && mem.Field == "drop" && sig.Recv() != nil {
+		c.errorf(e.Pos(), "cannot call 'drop' explicitly; drop runs automatically at scope exit — to release early, let the value go out of scope, move it into a `~` parameter, or use `close()` where available")
+		return nil
+	}
+
 	// Build call description for error messages.
 	callDesc := "function"
 	if ident, ok := e.Callee.(*ast.IdentExpr); ok {

@@ -65,6 +65,11 @@ subcommands:
   verify-manifest <manifest>... --against <dir>
         fail the release if any manifest entry's packaged artifact in <dir> does
         not yield matching sha256 bytes.
+  winlink [--llvm-dlltool <path>] [--def-dir <dir>] [--out <dir>]
+        (re)generate the Windows zero-dependency import libraries (T0772) from
+        the .def symbol lists in tools/build/winlink/def/ via llvm-dlltool,
+        writing them to the embedded resources dir. The .def files are the
+        source of truth; the .lib files are reproducible build artifacts.
   publish-install [--host <target>] [--out <dir>] [--r2-bucket <name>] [--dry-run] [--no-upload]
         TEMPORARY (T0803/T0804): build the host's thin+full variants, gzip them
         to the published asset names, compute a merge-aware SHA256SUMS, and
@@ -92,6 +97,8 @@ func RunRelease(root string, args []string) error {
 		return runReleasePublishInstall(root, rest)
 	case "verify-manifest":
 		return runReleaseVerifyManifest(root, rest)
+	case "winlink":
+		return runReleaseWinlink(root, rest)
 	case "-h", "--help", "help":
 		fmt.Println(releaseUsage)
 		return nil

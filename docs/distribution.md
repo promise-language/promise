@@ -105,7 +105,12 @@ curl -fsSL https://github.com/promise-language/promise/releases/latest/download/
 
 `install.ps1` is the real implementation (platform/arch detection, download, checksum, `promise install`, **User `PATH` via `[Environment]::SetEnvironmentVariable(..., 'User')`**). `install.cmd` is a **thin shim** that re-invokes PowerShell (`powershell -ExecutionPolicy Bypass -Command "irm … | iex"`) so there is a single real implementation. Direct download (§2.3) is the no-script fallback for locked-down environments.
 
-**Zero local dependencies is the bar.** The Windows artifact must embed the Windows SDK / UCRT link surface (`.lib` stubs) the same way macOS will embed its SDK stubs (§5) — installing on a fresh Windows machine must "just work" with no "install Visual Studio Build Tools ≥ version X first." See §5.2.
+**Zero local dependencies is the bar — met on Windows (T0772).** The Windows
+compiler embeds its own self-generated link surface (own import libs from
+license-clean `.def` symbol lists + codegen-emitted crt0/TLS/`__chkstk`), so
+installing on a fresh Windows machine "just works" with no "install Visual Studio
+Build Tools ≥ version X first" and no Microsoft `.lib` redistribution. macOS will
+embed its SDK stubs the analogous way (§5). See §5.2.
 
 ### 2.3 Direct download *(implemented)*
 
@@ -325,9 +330,24 @@ The compiler fetches LLVM tools (`opt`, `llc`, `lld`, `libLLVM.dylib`) as conten
 
 ### 5.2 Windows
 
-Native MSVC ABI (`x86_64-pc-windows-msvc`); `opt` → `llc` → `lld-link` against the Windows SDK + UCRT. See [windows-support.md](windows-support.md) for compiler internals.
+Native MSVC ABI (`x86_64-pc-windows-msvc`); `opt` → `llc` → `lld-link` against a
+**self-generated link surface**. See [windows-support.md](windows-support.md) §3.3
+for compiler internals.
 
-**Zero local dependencies is required** (your install must not depend on a separately-installed, correctly-configured Visual Studio Build Tools of the right version). The Windows artifact embeds — or fetches as content-addressed blobs — the link surface it needs: UCRT/MSVC `.lib` stubs and the Windows SDK import libraries. This is the Windows analogue of the macOS SDK-stub bundling above and is a prerequisite for advertising the §2.2 one-liners.
+**Zero local dependencies — done (T0772).** Installing on a fresh Windows machine
+with **no Visual Studio Build Tools and no Windows SDK** links runnable `.exe`s.
+Rather than re-host Microsoft's `.lib` files (licensing-unclear, fetch-dependent),
+Promise **generates its own link surface**: MSVC-ABI import libraries for
+kernel32 / advapi32 / ws2_32 / ucrtbase, built from license-clean symbol-list
+`.def` files via `llvm-dlltool` (symbol→DLL mappings are not copyrightable, so the
+`.lib`s are freely re-hostable), plus a codegen-emitted crt0 (`@__promise_start`),
+TLS directory (`_tls_used`), `__chkstk`, and `_fltused`. The import libs are tiny
+(~21 KiB) and `go:embed`-ed into the compiler (extracted to the cache at link
+time), like the embedded musl CRT objects on Linux. The audit showed ~95% of the
+external surface is always-present OS DLLs + dynamically-linkable ucrtbase.dll;
+only the program entry and the thread launcher needed the static MSVC CRT, and
+both are self-supplied. No Microsoft toolchain file is re-hosted, repackaged, or
+fetched. (x86_64 first; arm64 is a follow-up.)
 
 ### 5.3 Linux
 

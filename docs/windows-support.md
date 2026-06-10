@@ -62,29 +62,50 @@ aarch64-pc-windows-msvc   (arm64, future)
 
 Note: No LTO yet on Windows (unlike Linux/macOS which use bitcode → linker with `--lto-O1`). See T0049.
 
-### 3.3 Linking
+### 3.3 Linking — self-generated zero-dependency surface (T0772)
 
-`lld-link` (LLD's COFF/MSVC mode) links against:
+`lld-link` (LLD's COFF/MSVC mode) links against a **self-generated link surface**
+that needs **no Visual Studio Build Tools, no Windows SDK, and re-hosts no
+Microsoft `.lib`**. The audit of `codegen/pal/windows.go` + `codegen/windows.go`
+showed the compiler barely touches the static MSVC CRT, so the entire surface is
+self-suppliable:
 
-| Library | Source | Purpose |
-|---------|--------|---------|
-| `libucrt.lib` | Windows SDK | C runtime (malloc, free, printf) |
-| `libcmt.lib` | MSVC/VS Build Tools | C runtime startup (mainCRTStartup) |
-| `libvcruntime.lib` | MSVC/VS Build Tools | C runtime support (memcpy, etc.) |
-| `kernel32.lib` | Windows SDK | Win32 API (CreateThread, GetStdHandle, etc.) |
+| Component | Source | Purpose |
+|-----------|--------|---------|
+| `kernel32.lib` | self-generated import lib (always-present DLL) | Win32 API: CreateThread, GetStdHandle, CRITICAL_SECTION, etc. |
+| `advapi32.lib` | self-generated import lib (always-present DLL) | GetUserNameA |
+| `ws2_32.lib` | self-generated import lib (always-present DLL) | sockets (net module) |
+| `ucrtbase.lib` | self-generated import lib (ships with Windows 10+) | C runtime: malloc/free, _open/_read, math libcalls, app-init |
+| `@__promise_start` | codegen-emitted IR | program entry (replaces `mainCRTStartup`) |
+| `_tls_used` / `_tls_index` | codegen-emitted IR | TLS directory for `__declspec(thread)` globals (tlssup replacement) |
+| `__chkstk` | codegen-emitted IR (naked asm) | stack-probe helper (compiler-rt's Windows lib lacks it; no DLL exports it) |
+| `_fltused` | codegen-emitted IR | MSVC floating-point marker |
 
-**Entry point:** `mainCRTStartup` (standard MSVC entry). The CRT calls `main()`, which Promise defines.
+The import libs are produced from license-clean **symbol-list `.def` files**
+(`tools/build/winlink/def/`) via `llvm-dlltool` — symbol→DLL mappings are not
+copyrightable, so the generated `.lib`s are freely re-hostable. They are
+committed under `compiler/cmd/promise/resources/winlink/windows-amd64/` and
+embedded (`go:embed`) into the compiler binary (~21 KiB total), then extracted to
+`<PROMISE_HOME>/cache/winlink/<arch>/` at link time (mirroring the embedded musl
+CRT objects). Regenerate with `bin/release winlink`.
 
-### 3.4 Windows SDK Discovery
+**Entry point:** `@__promise_start` (codegen-emitted; named in `/entry:`). It runs
+the minimal UCRT app-init (`_configure_narrow_argv` + `_initialize_narrow_environment`,
+which parse the command line and populate `_environ`), reads argc/argv via
+`__p___argc`/`__p___argv`, calls `@main(argc, argv)`, then `ExitProcess`. ucrtbase's
+own DllMain initializes the heap and per-thread errno on load and on each
+`DLL_THREAD_ATTACH`, so no further app-level CRT init is required — even on bare
+`CreateThread` worker threads.
 
-`findWindowsSDK()` probes in order:
+x86_64 only for now (single calling convention, no name decoration); arm64
+Windows import-lib generation is a follow-up.
 
-1. **`LIB` env var** — VS Developer Command Prompt sets this
-2. **`WindowsSdkDir` + `WindowsSDKVersion` env vars**
-3. **`VCToolsInstallDir` env var**
-4. **Common SDK paths** — `C:\Program Files (x86)\Windows Kits\10\Lib\` versions
-5. **vswhere.exe** — `vswhere -latest -property installationPath`
-6. **Common VS paths** — `C:\Program Files\Microsoft Visual Studio\2022\{edition}\VC\Tools\MSVC\`
+### 3.4 No SDK discovery
+
+The old `findWindowsSDK()` probe (VS env vars, Windows Kits paths, `vswhere.exe`)
+is **removed**. A fresh Windows machine needs no probe hit and no Microsoft files
+on disk — the surface above is entirely self-contained. `buildWindowsLinkArgs`
+points `/libpath:` at the extracted import-lib dir and `/entry:__promise_start`.
 
 ---
 
@@ -99,7 +120,7 @@ The WindowsPAL in `codegen/pal/windows.go` emits LLVM IR that calls Win32 API fu
 | Memory | `pal_alloc`, `pal_free`, `pal_realloc` | UCRT malloc/free/realloc |
 | I/O | `pal_write` | GetStdHandle + WriteFile |
 | Exit | `pal_exit` | ExitProcess |
-| Threading | `pal_thread_create` | `_beginthreadex` (2MB stack) + trampoline |
+| Threading | `pal_thread_create` | `CreateThread` (2MB stack) + trampoline |
 | Threading | `pal_thread_join` | WaitForSingleObject + CloseHandle |
 | Mutexes | `pal_mutex_init/lock/unlock/destroy` | CRITICAL_SECTION (40 bytes) |
 | Condvars | `pal_cond_init/wait/signal/broadcast/destroy` | CONDITION_VARIABLE (8 bytes) |
@@ -109,7 +130,15 @@ The WindowsPAL in `codegen/pal/windows.go` emits LLVM IR that calls Win32 API fu
 | Env | `pal_getenv/setenv/unsetenv/getcwd/chdir/get_environ` | UCRT getenv/_putenv_s etc. |
 | User | `pal_get_user_info`, `pal_get_hostname` | GetUserNameEx, GetComputerNameEx |
 
-**Thread trampoline:** `_beginthreadex` expects `unsigned (__stdcall *)(void*)` returning `i32`. PAL signature is `i8*(i8*)`. The WindowsPAL emits a trampoline adapter. `_beginthreadex` is used instead of `CreateThread` because the CRT per-thread data must be initialized for `__intrinsic_setjmp`/`longjmp` to work.
+**Thread trampoline:** `CreateThread` expects `DWORD (*)(LPVOID)` (= `i32(i8*)`).
+PAL signature is `i8*(i8*)`. The WindowsPAL emits a trampoline adapter. As of
+T0772, `pal_thread_create` uses kernel32 **`CreateThread`** rather than the UCRT
+`_beginthreadex` — part of the zero-dependency surface (kernel32 is always
+present). This is safe because Promise's panic recovery uses **TLS-flag
+propagation, not `setjmp`/`longjmp`** (T0146–T0148), so no CRT per-thread state is
+needed; the dynamically-linked `ucrtbase.dll` still initializes per-thread errno
+via its `DLL_THREAD_ATTACH` callback on bare `CreateThread` threads. (The earlier
+`_beginthreadex` rationale below in §8 is obsolete.)
 
 ### 4.2 Stubbed (5/52 methods)
 
@@ -236,10 +265,10 @@ Phase 6 (Full Parity & Polish)  ← needs all above
 ## 8. Key Design Decisions
 
 - **MSVC ABI, not MinGW**: Native Windows experience. MSVC ABI is what Windows developers and tools expect.
-- **Visual Studio Build Tools required**: Analogous to Xcode CLT on macOS. Provides the Windows SDK and MSVC runtime libraries. Long-term: embed minimal `.lib` files to eliminate this dependency.
+- **No Visual Studio Build Tools / Windows SDK required (T0772)**: Superseded the original "Build Tools required" decision. The link surface is self-generated (own import libs from license-clean `.def` symbol lists + codegen-emitted crt0/TLS/`__chkstk`/`_fltused`), so a fresh machine links runnable `.exe`s with zero local dependencies and no Microsoft `.lib` redistribution. See §3.3.
 - **lld-link, not link.exe**: LLD ships with LLVM, is open-source, and works identically across platforms.
 - **CRITICAL_SECTION, not SRWLock**: Safer match for `pthread_mutex_t` semantics (recursive, owning).
-- **_beginthreadex, not CreateThread**: CRT per-thread data must be initialized for `__intrinsic_setjmp`/`longjmp` to work correctly on worker threads.
-- **`__intrinsic_setjmp`, not `_setjmp`**: MSVC `_setjmp` is a macro that calls `__intrinsic_setjmp(buf, __builtin_frame_address(0))`. We call the intrinsic directly with `@llvm.frameaddress(i32 0)`.
+- **CreateThread, not _beginthreadex (T0772)**: Superseded the original `_beginthreadex` decision. kernel32 `CreateThread` keeps the worker-thread surface on an always-present DLL. Safe because panic recovery uses TLS-flag propagation, not `setjmp`/`longjmp` (T0146–T0148), so no CRT per-thread state is required; ucrtbase's `DLL_THREAD_ATTACH` still initializes per-thread errno on bare `CreateThread` threads.
+- **No `setjmp`/`longjmp` (obsolete decision)**: Panic recovery once used `__intrinsic_setjmp`; as of T0146–T0148 it is TLS-flag propagation instead, so no `setjmp`/`longjmp` is emitted on any target. This is what makes the `CreateThread` switch (above) safe.
 - **`Platform.line_separator`**: `\r\n` on Windows, `\n` elsewhere. Correct for console output. Test harness must normalize.
-- **No TLS changes needed**: LLVM `thread_local` compiles to Windows TLS on MSVC targets automatically.
+- **Self-supplied TLS directory (T0772)**: LLVM `thread_local` compiles to Windows TLS on MSVC targets automatically, but the loader only allocates per-thread storage when the PE has a TLS directory (`_tls_used`). The MSVC CRT (tlssup) normally supplies it; since we link no CRT, codegen emits `_tls_used`/`_tls_index` + the `.tls` start/end markers itself (see `emitWindowsTLSSupport`).

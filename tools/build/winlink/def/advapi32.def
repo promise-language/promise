@@ -1,0 +1,5 @@
+; advapi32.dll import surface for the Promise Windows zero-dependency link
+; surface (T0772). See kernel32.def header. Regenerate with: bin/release winlink
+LIBRARY advapi32.dll
+EXPORTS
+GetUserNameA

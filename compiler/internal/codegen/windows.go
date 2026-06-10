@@ -82,6 +82,165 @@ func (c *Compiler) buildWindowsNanotimeBody(entry *ir.Block) {
 	entry.NewRet(nanos)
 }
 
+// emitWindowsEntry emits the self-contained Windows program entry: the
+// `@__promise_start` crt0 (used as the lld-link `/entry:`) plus the runtime
+// support symbols (`__chkstk`, `_fltused`, and the `_tls_used` TLS directory)
+// that the MSVC static CRT would normally supply. This is what lets a Promise
+// `.exe` link against ONLY the self-generated import libs + ucrtbase.dll, with
+// no Visual Studio Build Tools / Windows SDK present (T0772).
+//
+// Idempotent: safe to call from both the program (wrapMainWithScheduler) and
+// test-binary (GenerateTestMain) entry paths — only one runs per compile, but
+// the guard prevents accidental duplicate-symbol emission.
+func (c *Compiler) emitWindowsEntry(mainFn *ir.Func) {
+	if c.windowsRuntimeEmitted {
+		return
+	}
+	c.windowsRuntimeEmitted = true
+	c.emitWindowsTLSSupport()
+	c.emitWindowsChkstk()
+	c.emitWindowsStart(mainFn)
+}
+
+// emitWindowsStart emits `@__promise_start`, the program entry point named in
+// the lld-link `/entry:` flag (replacing the MSVC CRT's `mainCRTStartup`). It
+// runs the minimal UCRT app-init sequence — `_configure_narrow_argv` +
+// `_initialize_narrow_environment` — which parses the command line and populates
+// `__argc`/`__argv`/`_environ` (the loader already initialized ucrtbase's heap +
+// per-thread errno in its own DllMain, so nothing else is required). It then
+// reads argc/argv via `__p___argc`/`__p___argv`, calls the scheduler-wrapped
+// `@main(argc, argv)`, and exits via `pal_exit` (ExitProcess) with main's code.
+// Initializing the narrow environment here is also what makes os.env work
+// (pal_get_environ reads `__p__environ`).
+func (c *Compiler) emitWindowsStart(mainFn *ir.Func) {
+	i32 := irtypes.I32
+	i8PtrPtr := irtypes.NewPointer(irtypes.I8Ptr) // char**
+	i8PtrPtrPtr := irtypes.NewPointer(i8PtrPtr)   // char***
+	i32Ptr := irtypes.NewPointer(i32)
+
+	// int  _configure_narrow_argv(int mode)   — mode 1 = unexpanded (no globbing)
+	// int  _initialize_narrow_environment()
+	// int* __p___argc()                       — &__argc
+	// char*** __p___argv()                    — &__argv
+	configArgv := c.getOrDeclareFunc("_configure_narrow_argv", i32,
+		ir.NewParam("mode", i32))
+	initEnv := c.getOrDeclareFunc("_initialize_narrow_environment", i32)
+	pArgc := c.getOrDeclareFunc("__p___argc", i32Ptr)
+	pArgv := c.getOrDeclareFunc("__p___argv", i8PtrPtrPtr)
+
+	start := c.module.NewFunc("__promise_start", irtypes.Void)
+	start.FuncAttrs = append(start.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := start.NewBlock(".entry")
+
+	entry.NewCall(configArgv, constant.NewInt(i32, 1))
+	entry.NewCall(initEnv)
+
+	argcPtr := entry.NewCall(pArgc)
+	argc := entry.NewLoad(i32, argcPtr)
+	argvPtr := entry.NewCall(pArgv)
+	argv := entry.NewLoad(i8PtrPtr, argvPtr)
+
+	ret := entry.NewCall(mainFn, argc, argv)
+	entry.NewCall(c.palExit, ret)
+	entry.NewUnreachable()
+}
+
+// emitWindowsTLSSupport emits the `_tls_used` IMAGE_TLS_DIRECTORY (plus
+// `_tls_index`, the `.tls` start/end markers, and the empty TLS-callback array)
+// that the Windows loader needs to allocate per-thread storage for
+// `__declspec(thread)` globals — the scheduler's current-G/P/M pointers and the
+// panic-recovery flags. The MSVC CRT (tlssup) normally supplies these; without
+// them the PE has no TLS directory and thread-locals read shared/zero storage.
+// Also emits `_fltused`, the MSVC marker the linker requires once any floating
+// point is used. Mirrors what `clang --target=x86_64-pc-windows-msvc` emits for
+// a hand-written tlssup.c (verified byte-for-byte).
+func (c *Compiler) emitWindowsTLSSupport() {
+	i8 := irtypes.I8
+	i32 := irtypes.I32
+	i64 := irtypes.I64
+
+	mkMarker := func(name, section string) *ir.Global {
+		g := c.module.NewGlobalDef(name, constant.NewInt(i8, 0))
+		g.Section = section
+		g.Align = ir.Align(1)
+		return g
+	}
+	tlsStart := mkMarker("_tls_start", ".tls")
+	tlsEnd := mkMarker("_tls_end", ".tls$ZZZ")
+
+	// TLS callback array bounds — both null (we register no TLS callbacks); the
+	// loader stops at the first null entry, so this is an empty array.
+	mkCallback := func(name, section string) *ir.Global {
+		g := c.module.NewGlobalDef(name, constant.NewNull(irtypes.I8Ptr))
+		g.Immutable = true
+		g.Section = section
+		g.Align = ir.Align(8)
+		return g
+	}
+	xlA := mkCallback("__xl_a", ".CRT$XLA")
+	mkCallback("__xl_z", ".CRT$XLZ")
+
+	tlsIndex := c.module.NewGlobalDef("_tls_index", constant.NewInt(i32, 0))
+	tlsIndex.Align = ir.Align(4)
+
+	// IMAGE_TLS_DIRECTORY64: { StartAddressOfRawData, EndAddressOfRawData,
+	// AddressOfIndex, AddressOfCallBacks (all u64), SizeOfZeroFill,
+	// Characteristics (u32) }. lld-link roots `_tls_used` and emits the PE TLS
+	// directory from it.
+	tlsDirTy := irtypes.NewStruct(i64, i64, i64, i64, i32, i32)
+	tlsUsed := c.module.NewGlobalDef("_tls_used", constant.NewStruct(tlsDirTy,
+		constant.NewPtrToInt(tlsStart, i64),
+		constant.NewPtrToInt(tlsEnd, i64),
+		constant.NewPtrToInt(tlsIndex, i64),
+		constant.NewPtrToInt(xlA, i64),
+		constant.NewInt(i32, 0),
+		constant.NewInt(i32, 0)))
+	tlsUsed.Immutable = true
+	tlsUsed.Section = ".rdata$T"
+	tlsUsed.Align = ir.Align(4)
+
+	fltused := c.module.NewGlobalDef("_fltused", constant.NewInt(i32, 0))
+	fltused.Align = ir.Align(4)
+}
+
+// emitWindowsChkstk emits `__chkstk`, the stack-probe helper the LLVM MSVC x64
+// backend calls in the prologue of any function whose frame exceeds one page
+// (4 KiB). It walks the frame in 4 KiB steps touching each page so the guard
+// page faults in order. compiler-rt's Windows builtins lib does NOT provide it
+// and no Windows DLL exports it, so we supply the standard probe-only
+// implementation (preserves RAX/RCX; the caller does `sub rsp, rax`). Emitted as
+// a `naked` function with a single inline-asm body so LLVM adds no prologue that
+// would violate the register/stack contract.
+func (c *Compiler) emitWindowsChkstk() {
+	fn := c.module.NewFunc("__chkstk", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, rawFuncAttr("naked"), enum.FuncAttrNoUnwind)
+	blk := fn.NewBlock(".entry")
+
+	// AT&T syntax. `$$` is a literal '$' (immediate prefix); real \n/\t are
+	// escaped to \0A/\09 by the IR string quoter. Labels 1/2 are local.
+	asmStr := "push %rcx\n\t" +
+		"push %rax\n\t" +
+		"cmp $$0x1000, %rax\n\t" +
+		"lea 0x18(%rsp), %rcx\n\t" +
+		"jb 2f\n" +
+		"1:\n\t" +
+		"sub $$0x1000, %rcx\n\t" +
+		"orq $$0, (%rcx)\n\t" +
+		"sub $$0x1000, %rax\n\t" +
+		"cmp $$0x1000, %rax\n\t" +
+		"ja 1b\n" +
+		"2:\n\t" +
+		"sub %rax, %rcx\n\t" +
+		"orq $$0, (%rcx)\n\t" +
+		"pop %rax\n\t" +
+		"pop %rcx\n\t" +
+		"ret"
+	asmFn := ir.NewInlineAsm(irtypes.NewPointer(irtypes.NewFunc(irtypes.Void)), asmStr, "")
+	asmFn.SideEffect = true
+	blk.NewCall(asmFn)
+	blk.NewUnreachable()
+}
+
 // buildWindowsSleepNanosBody emits the body of promise_sleep_nanos for Windows.
 // Converts nanoseconds to milliseconds and calls Win32 Sleep.
 func (c *Compiler) buildWindowsSleepNanosBody(entry *ir.Block, ns value.Value) {

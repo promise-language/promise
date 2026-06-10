@@ -410,6 +410,7 @@ type Compiler struct {
 	isWasm                bool       // true if targeting wasm32
 	isWasmWeb             bool       // true if targeting wasm32-web (browser/Node host, no WASI)
 	isWindows             bool       // true if targeting windows-msvc
+	windowsRuntimeEmitted bool       // T0772: guards one-time emission of the Windows crt0 + TLS/chkstk/_fltused support
 	debugAllocator        bool       // scribble malloc'd (0xAA) + poison freed (0xDE) memory for UAF / uninit-read detection (debug builds)
 	memoryLimitAccounting bool       // T0689: emit memory-limit counter + helpers (test binaries with -memory-limit > 0)
 	needsNetpoll          bool       // true if net module imported — netpoll_init needed at startup (T0071)
@@ -1627,6 +1628,12 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		if !hasEntry {
 			c.emitWasmStart(mainFn)
 		}
+	}
+
+	// Windows: emit the self-contained crt0 entry + CRT-replacement runtime
+	// support so test binaries link with no MSVC/SDK files (T0772).
+	if c.isWindows && !c.isWasm {
+		c.emitWindowsEntry(mainFn)
 	}
 }
 

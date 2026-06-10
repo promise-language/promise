@@ -1,0 +1,50 @@
+; ucrtbase.dll import surface for the Promise Windows zero-dependency link
+; surface (T0772). ucrtbase.dll ships with Windows 10+ and is the dynamically
+; linkable Universal CRT — it name-exports the C library entry points the PAL
+; uses plus the narrow app-init (_configure_narrow_argv /
+; _initialize_narrow_environment, with __p___argc/__p___argv/__p__environ) the
+; self-supplied crt0 entry calls to populate argc/argv/_environ.
+; See kernel32.def header. Regenerate with: bin/release winlink
+LIBRARY ucrtbase.dll
+EXPORTS
+__p___argc
+__p___argv
+__p__environ
+_configure_narrow_argv
+_initialize_narrow_environment
+_access
+_chdir
+_close
+_errno
+_getcwd
+_lseeki64
+_mkdir
+_open
+_pipe
+_putenv_s
+_read
+_rmdir
+_stat64
+_unlink
+_write
+ceil
+cos
+exit
+exp
+floor
+fmod
+free
+getenv
+log
+malloc
+memcmp
+memcpy
+memmove
+memset
+pow
+realloc
+round
+sin
+strlen
+tan
+trunc

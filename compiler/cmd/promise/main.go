@@ -4908,186 +4908,128 @@ func linkLinuxMulti(objFiles []string, target, outputFile string, useLTO bool) {
 
 // --- Windows linking via lld-link (MSVC-compatible COFF linker) ---
 
-// windowsSDKInfo holds paths to Windows SDK and MSVC libraries.
-type windowsSDKInfo struct {
-	ucrtLibDir string // e.g. C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\ucrt\x64
-	umLibDir   string // e.g. C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\um\x64
-	msvcLibDir string // e.g. C:\...\VC\Tools\MSVC\14.40.33807\lib\x64
+// winLinkFiles lists the self-generated Windows import libraries that make up
+// the entire external link surface (T0772). Combined with the codegen-emitted
+// crt0 (@__promise_start), TLS directory, __chkstk, and _fltused, these let a
+// Promise .exe link with NO Visual Studio Build Tools / Windows SDK present and
+// no Microsoft .lib redistribution. All resolve at runtime against DLLs that
+// ship with every Windows install (kernel32/advapi32/ws2_32 are always present;
+// ucrtbase.dll ships with Windows 10+).
+var winLinkFiles = []string{"kernel32.lib", "advapi32.lib", "ws2_32.lib", "ucrtbase.lib"}
+
+// winLinkArchDir returns the import-lib subdirectory for the given target
+// triple. Only x86_64 is supported today (arm64 Windows is a follow-up).
+func winLinkArchDir(target string) string {
+	return "windows-amd64"
 }
 
-// findWindowsSDK locates the Windows SDK and MSVC lib directories.
-// Probes environment variables (set by VS Developer Command Prompt), then common paths.
-func findWindowsSDK() (*windowsSDKInfo, error) {
-	arch := "x64"
-	if runtime.GOARCH == "arm64" {
-		arch = "arm64"
-	}
-
-	info := &windowsSDKInfo{}
-
-	// Try environment variables first (set by vcvarsall.bat / VS Developer Prompt)
-	if libPath := os.Getenv("LIB"); libPath != "" {
-		// LIB contains semicolon-separated paths with all needed lib dirs
-		for _, dir := range strings.Split(libPath, ";") {
-			dir = strings.TrimSpace(dir)
-			if dir == "" {
-				continue
-			}
-			if info.ucrtLibDir == "" && containsFile(dir, "libucrt.lib") {
-				info.ucrtLibDir = dir
-			}
-			if info.umLibDir == "" && containsFile(dir, "kernel32.lib") {
-				info.umLibDir = dir
-			}
-			if info.msvcLibDir == "" && containsFile(dir, "libcmt.lib") {
-				info.msvcLibDir = dir
-			}
-		}
-		if info.ucrtLibDir != "" && info.umLibDir != "" && info.msvcLibDir != "" {
-			return info, nil
+// winLinkComplete reports whether every import lib exists in dir.
+func winLinkComplete(dir string) bool {
+	for _, name := range winLinkFiles {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			return false
 		}
 	}
-
-	// Try WindowsSdkDir + WindowsSDKVersion environment variables
-	sdkDir := os.Getenv("WindowsSdkDir")
-	sdkVer := os.Getenv("WindowsSDKVersion")
-	if sdkDir != "" && sdkVer != "" {
-		sdkVer = strings.TrimRight(sdkVer, `\`)
-		ucrt := filepath.Join(sdkDir, "Lib", sdkVer, "ucrt", arch)
-		um := filepath.Join(sdkDir, "Lib", sdkVer, "um", arch)
-		if containsFile(ucrt, "libucrt.lib") {
-			info.ucrtLibDir = ucrt
-		}
-		if containsFile(um, "kernel32.lib") {
-			info.umLibDir = um
-		}
-	}
-
-	// Try VCToolsInstallDir for MSVC libs
-	if vcDir := os.Getenv("VCToolsInstallDir"); vcDir != "" {
-		msvcLib := filepath.Join(vcDir, "lib", arch)
-		if containsFile(msvcLib, "libcmt.lib") {
-			info.msvcLibDir = msvcLib
-		}
-	}
-
-	if info.ucrtLibDir != "" && info.umLibDir != "" && info.msvcLibDir != "" {
-		return info, nil
-	}
-
-	// Probe common installation paths
-	programFilesX86 := os.Getenv("ProgramFiles(x86)")
-	if programFilesX86 == "" {
-		programFilesX86 = `C:\Program Files (x86)`
-	}
-	programFiles := os.Getenv("ProgramFiles")
-	if programFiles == "" {
-		programFiles = `C:\Program Files`
-	}
-
-	// Find Windows SDK (newest version)
-	if info.ucrtLibDir == "" || info.umLibDir == "" {
-		sdkRoot := filepath.Join(programFilesX86, "Windows Kits", "10", "Lib")
-		if versions, err := os.ReadDir(sdkRoot); err == nil {
-			// Iterate in reverse to find newest version first
-			for i := len(versions) - 1; i >= 0; i-- {
-				ver := versions[i]
-				if !ver.IsDir() || !strings.HasPrefix(ver.Name(), "10.") {
-					continue
-				}
-				ucrt := filepath.Join(sdkRoot, ver.Name(), "ucrt", arch)
-				um := filepath.Join(sdkRoot, ver.Name(), "um", arch)
-				if info.ucrtLibDir == "" && containsFile(ucrt, "libucrt.lib") {
-					info.ucrtLibDir = ucrt
-				}
-				if info.umLibDir == "" && containsFile(um, "kernel32.lib") {
-					info.umLibDir = um
-				}
-				if info.ucrtLibDir != "" && info.umLibDir != "" {
-					break
-				}
-			}
-		}
-	}
-
-	// Find MSVC libs via vswhere.exe or common paths
-	if info.msvcLibDir == "" {
-		// Try vswhere.exe (ships with VS 2017+ and Build Tools)
-		vswhere := filepath.Join(programFilesX86, "Microsoft Visual Studio", "Installer", "vswhere.exe")
-		if _, err := os.Stat(vswhere); err == nil {
-			out, err := exec.Command(vswhere, "-products", "*", "-latest", "-property", "installationPath").Output()
-			if err == nil {
-				vsPath := strings.TrimSpace(string(out))
-				msvcRoot := filepath.Join(vsPath, "VC", "Tools", "MSVC")
-				if versions, err := os.ReadDir(msvcRoot); err == nil {
-					for i := len(versions) - 1; i >= 0; i-- {
-						dir := filepath.Join(msvcRoot, versions[i].Name(), "lib", arch)
-						if containsFile(dir, "libcmt.lib") {
-							info.msvcLibDir = dir
-							break
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Probe common VS paths as fallback (both Program Files and Program Files (x86))
-	if info.msvcLibDir == "" {
-		probeDirs := []string{programFiles}
-		if programFilesX86 != programFiles {
-			probeDirs = append(probeDirs, programFilesX86)
-		}
-		for _, pf := range probeDirs {
-			for _, edition := range []string{"BuildTools", "Community", "Professional", "Enterprise"} {
-				vsRoot := filepath.Join(pf, "Microsoft Visual Studio", "2022", edition, "VC", "Tools", "MSVC")
-				if versions, err := os.ReadDir(vsRoot); err == nil {
-					for i := len(versions) - 1; i >= 0; i-- {
-						dir := filepath.Join(vsRoot, versions[i].Name(), "lib", arch)
-						if containsFile(dir, "libcmt.lib") {
-							info.msvcLibDir = dir
-							break
-						}
-					}
-				}
-				if info.msvcLibDir != "" {
-					break
-				}
-			}
-			if info.msvcLibDir != "" {
-				break
-			}
-		}
-	}
-
-	// Validate
-	var missing []string
-	if info.ucrtLibDir == "" {
-		missing = append(missing, "Windows SDK ucrt libs (libucrt.lib)")
-	}
-	if info.umLibDir == "" {
-		missing = append(missing, "Windows SDK um libs (kernel32.lib)")
-	}
-	if info.msvcLibDir == "" {
-		missing = append(missing, "MSVC libs (libcmt.lib)")
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("Windows SDK/MSVC libraries not found: %s\n  install Visual Studio Build Tools: https://visualstudio.microsoft.com/downloads/\n  or run from a VS Developer Command Prompt",
-			strings.Join(missing, ", "))
-	}
-
-	return info, nil
+	return true
 }
 
-// containsFile checks if a file exists in a directory.
-func containsFile(dir, name string) bool {
-	_, err := os.Stat(filepath.Join(dir, name))
-	return err == nil
+// winLinkValid checks that cached import libs match the embedded versions by
+// size (cheap staleness check, mirroring muslCRTValid).
+func winLinkValid(dir, arch string) bool {
+	if !hasEmbeddedWinLink {
+		return winLinkComplete(dir)
+	}
+	prefix := "resources/winlink/" + arch
+	entries, err := embeddedWinLink.ReadDir(prefix)
+	if err != nil {
+		return false
+	}
+	embeddedSizes := make(map[string]int64, len(entries))
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			return false
+		}
+		embeddedSizes[e.Name()] = info.Size()
+	}
+	for _, name := range winLinkFiles {
+		cached, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			return false
+		}
+		embSize, ok := embeddedSizes[name]
+		if !ok || cached.Size() != embSize {
+			return false
+		}
+	}
+	return true
 }
 
-// buildWindowsLinkArgs builds the lld-link argument list for COFF linking.
+// findWindowsLinkSurface locates (extracting the embedded import libs to the
+// cache on first use) the directory holding the self-generated Windows import
+// libraries. Discovery order mirrors findMuslCRT: sibling of the binary,
+// installed location, cache dir, then the embedded copy.
+func findWindowsLinkSurface(target string) (string, error) {
+	// Only x86_64 import libs are generated today (arm64 is a follow-up). Reject
+	// an arm64 Windows triple here with a clear message rather than silently
+	// handing lld-link the amd64 libs, which would fail with an opaque machine-
+	// type mismatch against the arm64 objects (T0772).
+	if strings.HasPrefix(target, "aarch64") || strings.HasPrefix(target, "arm64") {
+		return "", fmt.Errorf("arm64 Windows is not yet supported by the self-generated link surface (T0772); only x86_64-pc-windows-msvc is available")
+	}
+	ensureCacheValid()
+	arch := winLinkArchDir(target)
+
+	// 1. Sibling of the promise binary: {exe_dir}/winlink/{arch}/
+	if execPath, err := os.Executable(); err == nil {
+		dir := filepath.Join(filepath.Dir(execPath), "winlink", arch)
+		if winLinkComplete(dir) {
+			return dir, nil
+		}
+	}
+
+	promiseHome, err := module.PromiseHome()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine Promise home: %v", err)
+	}
+
+	// 2. Installed location (<PROMISE_HOME>/lib/winlink/{arch}/)
+	installDir := filepath.Join(promiseHome, "lib", "winlink", arch)
+	if winLinkComplete(installDir) {
+		return installDir, nil
+	}
+
+	// 3. Cache dir (<PROMISE_HOME>/cache/winlink/{arch}/)
+	cacheDir := filepath.Join(promiseHome, "cache", "winlink", arch)
+	if winLinkValid(cacheDir, arch) {
+		return cacheDir, nil
+	}
+
+	// 4. Extract the embedded import libs to the cache dir.
+	if !hasEmbeddedWinLink {
+		return "", fmt.Errorf("Windows import libraries not available for %s\n  this binary was not built with the embedded Windows link surface", arch)
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create winlink cache dir %s: %v", cacheDir, err)
+	}
+	prefix := "resources/winlink/" + arch
+	for _, name := range winLinkFiles {
+		data, err := embeddedWinLink.ReadFile(prefix + "/" + name)
+		if err != nil {
+			return "", fmt.Errorf("cannot read embedded %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(cacheDir, name), data, 0644); err != nil {
+			return "", fmt.Errorf("cannot write %s to cache: %v", name, err)
+		}
+	}
+	return cacheDir, nil
+}
+
+// buildWindowsLinkArgs builds the lld-link argument list for COFF linking
+// against the self-generated zero-dependency surface (T0772). Entry is the
+// codegen-emitted @__promise_start (replacing the MSVC CRT's mainCRTStartup).
 func buildWindowsLinkArgs(target string, objFiles []string, outputFile string) []string {
-	sdk, err := findWindowsSDK()
+	libDir, err := findWindowsLinkSurface(target)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -5095,21 +5037,12 @@ func buildWindowsLinkArgs(target string, objFiles []string, outputFile string) [
 
 	args := []string{
 		"/nologo",
-		"/entry:mainCRTStartup",
+		"/entry:__promise_start",
 		"/subsystem:console",
 		"/out:" + outputFile,
-		// Library search paths
-		"/libpath:" + sdk.ucrtLibDir,
-		"/libpath:" + sdk.umLibDir,
-		"/libpath:" + sdk.msvcLibDir,
-		// Required libraries
-		"libucrt.lib",
-		"libvcruntime.lib",
-		"libcmt.lib",
-		"kernel32.lib",
-		"advapi32.lib",
-		"ws2_32.lib",
+		"/libpath:" + libDir,
 	}
+	args = append(args, winLinkFiles...)
 	args = append(args, objFiles...)
 	return args
 }

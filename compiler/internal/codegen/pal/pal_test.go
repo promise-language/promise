@@ -931,14 +931,19 @@ func TestStubThreadCreateCallsSynchronously(t *testing.T) {
 	}
 }
 
-func TestWindowsThreadCreateUsesBeginthreadex(t *testing.T) {
+func TestWindowsThreadCreateUsesCreateThread(t *testing.T) {
 	module := newModuleWithAlloc(&WindowsPAL{})
 	(&WindowsPAL{}).EmitThreadCreate(module)
 	out := module.String()
 
-	// Should declare _beginthreadex (not CreateThread — CRT init required for TLS)
-	if !strings.Contains(out, "@_beginthreadex") {
-		t.Error("missing _beginthreadex declaration")
+	// Should declare kernel32 CreateThread — the zero-dependency surface (T0772);
+	// must NOT use the UCRT _beginthreadex (panic recovery is TLS-flag-based, not
+	// setjmp/longjmp, so no CRT per-thread init is needed).
+	if !strings.Contains(out, "@CreateThread") {
+		t.Error("missing CreateThread declaration")
+	}
+	if strings.Contains(out, "_beginthreadex") {
+		t.Error("should not use _beginthreadex (replaced by CreateThread)")
 	}
 	// Should emit trampoline function
 	if !strings.Contains(out, "@__pal_thread_trampoline") {
@@ -955,10 +960,10 @@ func TestWindowsThreadCreateDetails(t *testing.T) {
 	(&WindowsPAL{}).EmitThreadCreate(module)
 	out := module.String()
 
-	// 2MB stack size constant passed to _beginthreadex (0x200000 = 2097152)
-	// _beginthreadex takes i32 stack_size (not i64 like CreateThread)
-	if !strings.Contains(out, "i32 u0x200000") {
-		t.Error("missing 2MB stack size constant (i32 u0x200000) in _beginthreadex call")
+	// 2MB stack size constant passed to CreateThread (0x200000 = 2097152).
+	// CreateThread takes dwStackSize as SIZE_T (i64), not i32 like _beginthreadex.
+	if !strings.Contains(out, "i64 u0x200000") {
+		t.Error("missing 2MB stack size constant (i64 u0x200000) in CreateThread call")
 	}
 	// Allocate 16-byte struct to pack fn+arg for trampoline
 	if !strings.Contains(out, "call i8* @pal_alloc(i64 16)") {

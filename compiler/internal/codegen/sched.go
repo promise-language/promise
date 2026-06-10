@@ -2432,6 +2432,12 @@ func (c *Compiler) wrapMainWithScheduler() {
 	} else {
 		entry.NewRet(constant.NewInt(irtypes.I32, 0))
 	}
+
+	// Windows: emit the self-contained crt0 entry + CRT-replacement runtime
+	// support so the linker needs no MSVC/SDK files (T0772).
+	if c.isWindows && !c.isWasm {
+		c.emitWindowsEntry(mainFn)
+	}
 }
 
 // defineSchedRunUntilMainFunc emits @promise_sched_run_until_main(i8* %g0) → void

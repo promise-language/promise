@@ -850,6 +850,43 @@ func TestExtractArchive_ColonInPath(t *testing.T) {
 	}
 }
 
+// TestExtractArchive_CreatesDstRelativeBranch verifies the tar branch (T0772
+// refinement of T0809): ExtractArchive creates a not-yet-existing dst, then
+// runs tar with cwd=dst and the archive as a forward-slash path relative to
+// dst (colon-free even when the temp path carries a Windows `C:` drive letter).
+// Runs on every platform — on Windows it validates the real-host invocation.
+func TestExtractArchive_CreatesDstRelativeBranch(t *testing.T) {
+	parent := t.TempDir()
+	tarBytes, err := makeTarGzContent(map[string]string{"bin/opt": "OPT_CONTENT", "x/y": "Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Archive in a sibling dir so the relative path includes a `..` component.
+	archiveDir := filepath.Join(parent, "archives")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(archiveDir, "a.tar.gz")
+	if err := os.WriteFile(archivePath, tarBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// dst and its parents do not exist — ExtractArchive must create them.
+	dst := filepath.Join(parent, "deep", "out")
+	if err := ExtractArchive(archivePath, dst); err != nil {
+		t.Fatalf("ExtractArchive into missing dst: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "bin", "opt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "OPT_CONTENT" {
+		t.Errorf("got %q, want OPT_CONTENT", got)
+	}
+	if _, err := os.ReadFile(filepath.Join(dst, "x", "y")); err != nil {
+		t.Fatalf("second member not extracted: %v", err)
+	}
+}
+
 // TestSingleTopLevelDir covers the three cases: exactly one subdir (the LLVM
 // tarball shape), multiple subdirs, and zero subdirs.
 func TestSingleTopLevelDir(t *testing.T) {

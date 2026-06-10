@@ -416,6 +416,61 @@ func TestExtractArchiveColonPath(t *testing.T) {
 	}
 }
 
+// TestExtractArchiveRelativePathBranch exercises the common tar branch (T0772
+// refinement of T0809): extractArchive runs tar with cwd=dst and the archive
+// passed as a forward-slash path *relative* to dst, with no -C. On Windows the
+// temp paths carry a `C:` drive letter, so this validates the colon-free
+// relative-path invocation on the real host where GNU tar 1.35 would otherwise
+// misparse the drive letter as a remote host. Runs on every platform.
+func TestExtractArchiveRelativePathBranch(t *testing.T) {
+	parent := t.TempDir()
+	content := []byte("tool-binary-data")
+	archiveBytes := makeTar(map[string][]byte{"bin/tool": content, "lib/data.txt": []byte("xyz")})
+	// Archive lives in a sibling of dst so the relative path includes a `..`
+	// component — the realistic CAS layout (archives/ next to the extract dir).
+	archiveDir := filepath.Join(parent, "archives")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(archiveDir, sha256hex(archiveBytes))
+	if err := os.WriteFile(archivePath, archiveBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(parent, "out")
+	if err := extractArchive(archivePath, dst); err != nil {
+		t.Fatalf("extractArchive: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "bin", "tool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatal("wrong bytes after extraction")
+	}
+	if _, err := os.ReadFile(filepath.Join(dst, "lib", "data.txt")); err != nil {
+		t.Fatalf("second member not extracted: %v", err)
+	}
+}
+
+// TestExtractArchiveCreatesDst verifies extractArchive creates a not-yet-existing
+// destination directory before invoking tar (cmd.Dir = dst requires it to exist).
+func TestExtractArchiveCreatesDst(t *testing.T) {
+	parent := t.TempDir()
+	archiveBytes := makeTar(map[string][]byte{"f": []byte("data")})
+	archivePath := filepath.Join(parent, sha256hex(archiveBytes))
+	if err := os.WriteFile(archivePath, archiveBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// dst does not exist yet, and neither do its parents.
+	dst := filepath.Join(parent, "a", "b", "out")
+	if err := extractArchive(archivePath, dst); err != nil {
+		t.Fatalf("extractArchive into missing dst: %v", err)
+	}
+	if _, err := os.ReadFile(filepath.Join(dst, "f")); err != nil {
+		t.Fatalf("member not extracted into created dst: %v", err)
+	}
+}
+
 // TestExtractArchiveTarFailure verifies that a corrupt (non-zip) file passed
 // to extractArchive surfaces the tar exit-status error rather than silently
 // succeeding or panicking.

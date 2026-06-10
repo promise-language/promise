@@ -1,0 +1,42 @@
+; kernel32.dll import surface for the Promise Windows zero-dependency link
+; surface (T0772). Symbol→DLL mappings are not copyrightable; this list is the
+; minimum the codegen/PAL audit references (compiler/internal/codegen/pal/windows.go,
+; compiler/internal/codegen/windows.go). Regenerate import libs with:
+;   bin/release winlink
+LIBRARY kernel32.dll
+EXPORTS
+AddVectoredExceptionHandler
+CloseHandle
+CreatePipe
+CreateProcessA
+CreateThread
+DeleteCriticalSection
+EnterCriticalSection
+ExitProcess
+FindClose
+FindFirstFileA
+FindNextFileA
+GenerateConsoleCtrlEvent
+GetComputerNameA
+GetCurrentProcessId
+GetEnvironmentVariableA
+GetExitCodeProcess
+GetFileAttributesA
+GetLastError
+GetStdHandle
+GetSystemInfo
+InitializeConditionVariable
+InitializeCriticalSection
+LeaveCriticalSection
+QueryPerformanceCounter
+QueryPerformanceFrequency
+ReadFile
+SetConsoleCtrlHandler
+SetHandleInformation
+Sleep
+SleepConditionVariableCS
+TerminateProcess
+WaitForSingleObject
+WakeAllConditionVariable
+WakeConditionVariable
+WriteFile

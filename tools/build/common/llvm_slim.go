@@ -148,6 +148,23 @@ func EnsureLLVMBlobs(root, target string) (string, error) {
 	return cacheDir, nil
 }
 
+// SlimLLVMCacheDir returns the host-stable slim-cache directory for the pinned
+// LLVM version + target WITHOUT fetching anything. ok is false when the
+// prebuilts manifest can't be read or has no [binaries.llvm] entry. The
+// directory may not exist yet (nothing fetched) — callers that need a tool
+// present must Exists-check it. Mirrors the cacheDir layout in EnsureLLVMBlobs.
+func SlimLLVMCacheDir(root, target string) (string, bool) {
+	pm, err := LoadPrebuiltsManifest(root)
+	if err != nil || pm.Binaries["llvm"] == nil {
+		return "", false
+	}
+	cacheRoot, err := PrebuiltsCacheRoot()
+	if err != nil {
+		return "", false
+	}
+	return filepath.Join(cacheRoot, "llvm-slim", pm.Binaries["llvm"].Version, target), true
+}
+
 // slimToolsDigest is the cache identity for one (version, target, [(out, sha,
 // size, compression), ...]) tuple. Mirrors manifestToolsDigest's role for the
 // upstream-tarball cache.

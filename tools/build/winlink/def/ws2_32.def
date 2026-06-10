@@ -1,0 +1,24 @@
+; ws2_32.dll import surface for the Promise Windows zero-dependency link
+; surface (T0772). Modern ws2_32.dll name-exports the legacy WinSock entry
+; points, so a name-based .def is sufficient on x86_64. See kernel32.def header.
+LIBRARY ws2_32.dll
+EXPORTS
+WSAGetLastError
+WSAPoll
+WSAStartup
+accept
+bind
+closesocket
+connect
+freeaddrinfo
+getaddrinfo
+getsockname
+getsockopt
+inet_pton
+ioctlsocket
+listen
+recv
+send
+setsockopt
+shutdown
+socket

@@ -775,9 +775,11 @@ func TestReleaseManifestFromCatalogRejectsTag(t *testing.T) {
 // `<sha>.br` basename), so fetch-blobs runs without `gh` or HTTP.
 type stubBlobFetcher struct {
 	assets map[string][]byte // asset name → file bytes
+	calls  int               // number of FetchAsset invocations (cache-skip assertions)
 }
 
 func (s *stubBlobFetcher) FetchAsset(tag, asset, dst string) error {
+	s.calls++
 	data, ok := s.assets[asset]
 	if !ok {
 		return os.ErrNotExist
@@ -788,11 +790,13 @@ func (s *stubBlobFetcher) FetchAsset(tag, asset, dst string) error {
 	return os.WriteFile(dst, data, 0o644)
 }
 
-func withStubFetcher(t *testing.T, assets map[string][]byte) {
+func withStubFetcher(t *testing.T, assets map[string][]byte) *stubBlobFetcher {
 	t.Helper()
+	stub := &stubBlobFetcher{assets: assets}
 	prev := defaultBlobFetcher
-	defaultBlobFetcher = &stubBlobFetcher{assets: assets}
+	defaultBlobFetcher = stub
 	t.Cleanup(func() { defaultBlobFetcher = prev })
+	return stub
 }
 
 // brotliBytes returns the brotli-11 compressed form of `data`. Used to build
@@ -885,6 +889,258 @@ func TestFetchBlobsKeepCompressed(t *testing.T) {
 	}
 	if !Exists(filepath.Join(outDir, "opt")) {
 		t.Error("decompressed file missing")
+	}
+}
+
+// TestFetchBlobsCachedSkipsDownload pins T0844: a second fetch into the same
+// --out dir must NOT re-download when the decompressed output already matches
+// the manifest sha. The second run installs an EMPTY fetcher whose FetchAsset
+// would error (os.ErrNotExist) on any call — so success proves the download was
+// skipped, and calls==0 makes it exact.
+func TestFetchBlobsCachedSkipsDownload(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "m.json")
+	content := []byte("OPT_CACHED")
+	sha := sha256Hex(content)
+	br := brotliBytes(t, content)
+	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: "2026.0", Entries: []runtimeManifestEntry{
+		{Name: "llvm-opt", SHA256: sha, Size: int64(len(content)), Kind: "blob",
+			Sources: []runtimeSource{{Blob: releaseAssetBase + "/deps-llvm-22.1.0/" + sha + ".br", Compression: compressionBrotli}}},
+	}}
+	if err := writeRuntimeManifest(manifestPath, &m); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+
+	// First run populates the cache.
+	first := withStubFetcher(t, map[string][]byte{sha + ".br": br})
+	if err := runReleaseFetchBlobs(dir, []string{"--manifest", manifestPath, "--out", outDir}); err != nil {
+		t.Fatalf("first fetch-blobs: %v", err)
+	}
+	if first.calls != 1 {
+		t.Fatalf("first run made %d FetchAsset calls, want 1", first.calls)
+	}
+
+	// Second run with an EMPTY fetcher: a cache miss would call FetchAsset and
+	// fail with os.ErrNotExist. Success + calls==0 proves the download was skipped.
+	second := withStubFetcher(t, map[string][]byte{})
+	if err := runReleaseFetchBlobs(dir, []string{"--manifest", manifestPath, "--out", outDir}); err != nil {
+		t.Fatalf("second fetch-blobs (cached) must succeed without download: %v", err)
+	}
+	if second.calls != 0 {
+		t.Fatalf("cached run made %d FetchAsset calls, want 0", second.calls)
+	}
+	got, err := os.ReadFile(filepath.Join(outDir, "opt"))
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("cached output = %q (err %v), want %q", got, err, content)
+	}
+}
+
+// TestFetchBlobsKeepCompressedCached pins the --keep-compressed cache path: a
+// second run must skip the download AND leave both the decompressed file and
+// the <sha>.br intact (publish-install needs the .br to survive).
+func TestFetchBlobsKeepCompressedCached(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "m.json")
+	content := []byte("OPT_KEEP_CACHED")
+	sha := sha256Hex(content)
+	br := brotliBytes(t, content)
+	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: "2026.0", Entries: []runtimeManifestEntry{
+		{Name: "llvm-opt", SHA256: sha, Size: int64(len(content)), Kind: "blob",
+			Sources: []runtimeSource{{Blob: releaseAssetBase + "/deps-llvm-22.1.0/" + sha + ".br", Compression: compressionBrotli}}},
+	}}
+	if err := writeRuntimeManifest(manifestPath, &m); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	args := []string{"--manifest", manifestPath, "--out", outDir, "--keep-compressed"}
+
+	first := withStubFetcher(t, map[string][]byte{sha + ".br": br})
+	if err := runReleaseFetchBlobs(dir, args); err != nil {
+		t.Fatalf("first keep-compressed fetch: %v", err)
+	}
+	if first.calls != 1 {
+		t.Fatalf("first run made %d FetchAsset calls, want 1", first.calls)
+	}
+
+	second := withStubFetcher(t, map[string][]byte{})
+	if err := runReleaseFetchBlobs(dir, args); err != nil {
+		t.Fatalf("second keep-compressed fetch (cached) must succeed: %v", err)
+	}
+	if second.calls != 0 {
+		t.Fatalf("cached keep-compressed run made %d FetchAsset calls, want 0", second.calls)
+	}
+	if !Exists(filepath.Join(outDir, sha+".br")) {
+		t.Error("cached keep-compressed run must preserve the <sha>.br")
+	}
+	if !Exists(filepath.Join(outDir, "opt")) {
+		t.Error("cached keep-compressed run must preserve the decompressed file")
+	}
+}
+
+// TestFetchBlobsCorruptCacheRefetches pins the stale-cache path: a corrupt
+// decompressed file (right name, wrong bytes) must NOT be mistaken for a hit —
+// the run must re-fetch from the populated fetcher and end with correct content.
+func TestFetchBlobsCorruptCacheRefetches(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "m.json")
+	content := []byte("OPT_REAL")
+	sha := sha256Hex(content)
+	br := brotliBytes(t, content)
+	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: "2026.0", Entries: []runtimeManifestEntry{
+		{Name: "llvm-opt", SHA256: sha, Size: int64(len(content)), Kind: "blob",
+			Sources: []runtimeSource{{Blob: releaseAssetBase + "/deps-llvm-22.1.0/" + sha + ".br", Compression: compressionBrotli}}},
+	}}
+	if err := writeRuntimeManifest(manifestPath, &m); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-write a corrupt decompressed file with the right name but wrong bytes.
+	if err := os.WriteFile(filepath.Join(outDir, "opt"), []byte("CORRUPT"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := withStubFetcher(t, map[string][]byte{sha + ".br": br})
+	if err := runReleaseFetchBlobs(dir, []string{"--manifest", manifestPath, "--out", outDir}); err != nil {
+		t.Fatalf("fetch-blobs must re-fetch over a corrupt cache: %v", err)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("corrupt-cache run made %d FetchAsset calls, want 1 (re-fetch)", stub.calls)
+	}
+	got, err := os.ReadFile(filepath.Join(outDir, "opt"))
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("re-fetched output = %q (err %v), want %q", got, err, content)
+	}
+}
+
+// TestFetchBlobsKeepCompressedMissingBrRefetches pins the keepCompressed
+// no-.br branch of blobCacheHit: a valid decompressed file with NO surviving
+// <sha>.br is not a hit (publish-install needs the .br), so the run must
+// re-fetch and restore both outputs. We seed the cache with a plain (non-keep)
+// run, which removes the .br, then re-run with --keep-compressed.
+func TestFetchBlobsKeepCompressedMissingBrRefetches(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "m.json")
+	content := []byte("OPT_NO_BR")
+	sha := sha256Hex(content)
+	br := brotliBytes(t, content)
+	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: "2026.0", Entries: []runtimeManifestEntry{
+		{Name: "llvm-opt", SHA256: sha, Size: int64(len(content)), Kind: "blob",
+			Sources: []runtimeSource{{Blob: releaseAssetBase + "/deps-llvm-22.1.0/" + sha + ".br", Compression: compressionBrotli}}},
+	}}
+	if err := writeRuntimeManifest(manifestPath, &m); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+
+	// Plain run leaves a valid decompressed file but removes the .br.
+	first := withStubFetcher(t, map[string][]byte{sha + ".br": br})
+	if err := runReleaseFetchBlobs(dir, []string{"--manifest", manifestPath, "--out", outDir}); err != nil {
+		t.Fatalf("first (plain) fetch: %v", err)
+	}
+	if first.calls != 1 {
+		t.Fatalf("first run made %d FetchAsset calls, want 1", first.calls)
+	}
+	if Exists(filepath.Join(outDir, sha+".br")) {
+		t.Fatal("plain run must not keep the .br (precondition for this test)")
+	}
+
+	// --keep-compressed run: dst is valid but the .br is gone → must re-fetch.
+	second := withStubFetcher(t, map[string][]byte{sha + ".br": br})
+	if err := runReleaseFetchBlobs(dir, []string{"--manifest", manifestPath, "--out", outDir, "--keep-compressed"}); err != nil {
+		t.Fatalf("keep-compressed fetch over missing .br: %v", err)
+	}
+	if second.calls != 1 {
+		t.Fatalf("missing-.br run made %d FetchAsset calls, want 1 (re-fetch)", second.calls)
+	}
+	if !Exists(filepath.Join(outDir, sha+".br")) {
+		t.Error("re-fetch must restore the <sha>.br")
+	}
+	got, err := os.ReadFile(filepath.Join(outDir, "opt"))
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("output = %q (err %v), want %q", got, err, content)
+	}
+}
+
+// TestFetchBlobsKeepCompressedCorruptBrRefetches pins the keepCompressed
+// corrupt-.br branch of blobCacheHit: a valid decompressed file alongside a
+// .br that fails decompress-verify is not a hit — both outputs are dropped and
+// the run re-fetches.
+func TestFetchBlobsKeepCompressedCorruptBrRefetches(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "m.json")
+	content := []byte("OPT_BAD_BR")
+	sha := sha256Hex(content)
+	br := brotliBytes(t, content)
+	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: "2026.0", Entries: []runtimeManifestEntry{
+		{Name: "llvm-opt", SHA256: sha, Size: int64(len(content)), Kind: "blob",
+			Sources: []runtimeSource{{Blob: releaseAssetBase + "/deps-llvm-22.1.0/" + sha + ".br", Compression: compressionBrotli}}},
+	}}
+	if err := writeRuntimeManifest(manifestPath, &m); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Valid decompressed file (right sha) but a garbage .br that won't decompress.
+	if err := os.WriteFile(filepath.Join(outDir, "opt"), content, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, sha+".br"), []byte("NOT_BROTLI"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := withStubFetcher(t, map[string][]byte{sha + ".br": br})
+	if err := runReleaseFetchBlobs(dir, []string{"--manifest", manifestPath, "--out", outDir, "--keep-compressed"}); err != nil {
+		t.Fatalf("keep-compressed fetch over corrupt .br: %v", err)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("corrupt-.br run made %d FetchAsset calls, want 1 (re-fetch)", stub.calls)
+	}
+	got, err := os.ReadFile(filepath.Join(outDir, "opt"))
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("output = %q (err %v), want %q", got, err, content)
+	}
+}
+
+// TestFetchBlobsCacheValidationError pins the fileSHA256 error path in
+// blobCacheHit: when dstPath exists but cannot be hashed (here it is a
+// directory, which os.Stat-Exists treats as present but io.Copy cannot read),
+// the validation error must abort the run loudly rather than silently
+// re-fetching or skipping.
+func TestFetchBlobsCacheValidationError(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "m.json")
+	content := []byte("OPT_DIR")
+	sha := sha256Hex(content)
+	br := brotliBytes(t, content)
+	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: "2026.0", Entries: []runtimeManifestEntry{
+		{Name: "llvm-opt", SHA256: sha, Size: int64(len(content)), Kind: "blob",
+			Sources: []runtimeSource{{Blob: releaseAssetBase + "/deps-llvm-22.1.0/" + sha + ".br", Compression: compressionBrotli}}},
+	}}
+	if err := writeRuntimeManifest(manifestPath, &m); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dir, "out")
+	// Make dstPath (out/opt) a directory so fileSHA256 fails to read it.
+	if err := os.MkdirAll(filepath.Join(outDir, "opt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := withStubFetcher(t, map[string][]byte{sha + ".br": br})
+	err := runReleaseFetchBlobs(dir, []string{"--manifest", manifestPath, "--out", outDir})
+	if err == nil {
+		t.Fatal("fetch-blobs must fail when the cached output cannot be validated")
+	}
+	if !strings.Contains(err.Error(), "validate cached") {
+		t.Fatalf("error should mention cache validation, got: %v", err)
+	}
+	if stub.calls != 0 {
+		t.Fatalf("validation error must abort before any download, made %d calls", stub.calls)
 	}
 }
 

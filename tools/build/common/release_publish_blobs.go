@@ -536,12 +536,30 @@ func fetchManifestBlobs(manifestPath, out string, keepCompressed bool) error {
 		}
 		assetName := path.Base(blobSrc.Blob)
 		brPath := filepath.Join(out, assetName)
+		fileName := strings.TrimPrefix(e.Name, "llvm-")
+		dstPath := filepath.Join(out, fileName)
+
+		// Cache pre-check: skip the (dominant-cost) network download when a valid
+		// local copy already exists. The blobs are content-addressed and the
+		// uncompressed bytes are sha256-verified against e.SHA256, so a matching
+		// local copy is guaranteed byte-identical to a fresh fetch (T0844).
+		//
+		// The runtime manifest carries no compressed digest (the asset stem is the
+		// UNCOMPRESSED sha256, see runtime_manifest.go), so the only sound no-network
+		// validation of a cached .br is to decompress-and-verify it. The slim cache
+		// (EnsureLLVMBlobs) can use a cheaper tools.ok sentinel because it records a
+		// separate digest; we deliberately don't mirror that here.
+		if cached, err := blobCacheHit(brPath, dstPath, blobSrc.Compression, e.SHA256, keepCompressed); err != nil {
+			return fmt.Errorf("validate cached %s: %w", e.Name, err)
+		} else if cached {
+			fmt.Printf("  cached %s (%d bytes uncompressed, skipped download)\n", e.Name, e.Size)
+			continue
+		}
+
 		if err := fetcher.FetchAsset(parseReleaseTagFromURL(blobSrc.Blob), assetName, brPath); err != nil {
 			return fmt.Errorf("fetch %s: %w", e.Name, err)
 		}
 
-		fileName := strings.TrimPrefix(e.Name, "llvm-")
-		dstPath := filepath.Join(out, fileName)
 		if err := decompressAndVerify(brPath, dstPath, blobSrc.Compression, e.SHA256); err != nil {
 			return fmt.Errorf("decompress %s: %w", e.Name, err)
 		}
@@ -552,6 +570,49 @@ func fetchManifestBlobs(manifestPath, out string, keepCompressed bool) error {
 	}
 	fmt.Printf("Fetched %d blobs into %s\n", len(m.Entries), out)
 	return nil
+}
+
+// blobCacheHit reports whether the local outputs for a manifest entry are
+// already present and valid, so the network download can be skipped (T0844).
+//
+//   - The decompressed dstPath must exist and its sha256 must equal wantSHA.
+//   - When keepCompressed is set, brPath must also exist and decompress to the
+//     same wantSHA (publish-install needs the <sha>.br to survive for
+//     bundleReleaseLLVM/BundleBrotliFromManifest, which copies it raw).
+//
+// A stale/corrupt cached file (hash mismatch, undecompressable .br) is NOT a
+// hit: the offending files are removed and the caller re-fetches. A genuine
+// validation error (e.g. an I/O failure) is returned to abort loudly.
+func blobCacheHit(brPath, dstPath, compression, wantSHA string, keepCompressed bool) (bool, error) {
+	if !Exists(dstPath) {
+		return false, nil
+	}
+	got, err := fileSHA256(dstPath)
+	if err != nil {
+		return false, err
+	}
+	if !strings.EqualFold(got, wantSHA) {
+		// Stale decompressed output — drop it and re-fetch.
+		_ = os.Remove(dstPath)
+		_ = os.Remove(brPath)
+		return false, nil
+	}
+	if !keepCompressed {
+		return true, nil
+	}
+	// keepCompressed also requires a valid <sha>.br. The manifest has no
+	// compressed digest, so validate by decompress-verify (no network). This
+	// regenerates dstPath as a byte-identical side effect.
+	if !Exists(brPath) {
+		return false, nil
+	}
+	if err := decompressAndVerify(brPath, dstPath, compression, wantSHA); err != nil {
+		// Corrupt/stale .br — drop both outputs and re-fetch.
+		_ = os.Remove(brPath)
+		_ = os.Remove(dstPath)
+		return false, nil
+	}
+	return true, nil
 }
 
 // parseReleaseTagFromURL extracts the deps release tag from a release-asset

@@ -1,0 +1,92 @@
+// T0746 regression: a generic (monomorphized) method or getter that returns a
+// `this`-owned `string` field by value must dup the string on return
+// (clone-on-return), so the owner's field-drop and the returned value's drop do
+// not free the same heap allocation. Before the fix the mono path skipped the
+// dup, aliasing the field's allocation and double-freeing it at runtime:
+//   `fatal: invalid free (bad header magic)`.
+//
+// The Go IR tests (TestGenericMethodReturnStringFieldDups and its `&this`
+// sibling) pin the `strdup.copy` emission at the IR level; this file pins the
+// runtime behavior — every assertion runs under the harness's zero-tolerance
+// leak detection, so a missing dup would surface as a double-free / LEAK here.
+//
+// All payloads use string concatenation (`"gen" + "eric"`) so the value is
+// heap-allocated, not a `.rodata` literal — that is the path that double-freed.
+type GBox[T] {
+  T val;
+  // Owning receiver: the exact shape from the bug's minimal repro.
+  peek(this) T {
+    return this.val;
+  }
+  // Borrowed receiver: the bug reported this variant double-freed identically.
+  borrow_peek(&this) T {
+    return this.val;
+  }
+  // Getter form returning the field through the type parameter.
+  get field T {
+    return this.val;
+  }
+}
+
+// Two type parameters, so the return path must resolve the correct substituted
+// field type per method (A vs B) rather than the first/only one.
+type GPair[A, B] {
+  A first;
+  B second;
+  get_first(this) A {
+    return this.first;
+  }
+  get_second(this) B {
+    return this.second;
+  }
+}
+
+// Owning-receiver `return this.<string-field>` — minimal repro shape.
+generic_method_owning_receiver() `test {
+  b := GBox[string](val: "gen" + "eric");
+  assert(b.peek() == "generic", "owning receiver peek()");
+}
+
+// Borrowed-receiver `&this` form — failed identically before the fix.
+generic_method_borrowed_receiver() `test {
+  b := GBox[string](val: "gen" + "eric");
+  assert(b.borrow_peek() == "generic", "borrowed receiver peek()");
+}
+
+// Generic getter returning the owned string field.
+generic_getter_string_field() `test {
+  b := GBox[string](val: "gen" + "eric");
+  assert(b.field == "generic", "generic getter field");
+}
+
+// Repeated calls must each yield an independent heap copy; the owner keeps its
+// own. If any call aliased the field, dropping one copy would corrupt the others
+// (or the owner) and trip the bad-header-magic free.
+generic_method_repeated_calls_independent() `test {
+  b := GBox[string](val: "gen" + "eric");
+  x := b.peek();
+  y := b.peek();
+  z := b.peek();
+  assert(x == "generic", "repeated call copy x");
+  assert(y == "generic", "repeated call copy y");
+  assert(z == "generic", "repeated call copy z");
+  assert(x == y, "repeated copies equal x==y");
+  assert(y == z, "repeated copies equal y==z");
+  // Owner still intact after handing out three copies.
+  assert(b.peek() == "generic", "owner intact after repeated peeks");
+}
+
+// Two-type-param, both string: each accessor must dup its own field.
+generic_pair_both_string() `test {
+  p := GPair[string, string](first: "fi" + "rst", second: "sec" + "ond");
+  assert(p.get_first() == "first", "pair first string");
+  assert(p.get_second() == "second", "pair second string");
+}
+
+// Two-type-param, mixed: only the string limb is droppable; the int limb must
+// not be dup'd (int is not droppable) while the string limb is.
+generic_pair_mixed_int_string() `test {
+  p := GPair[int, string](first: 7, second: "se" + "ven");
+  assert(p.get_first() == 7, "pair first int");
+  assert(p.get_second() == "seven", "pair second string");
+}

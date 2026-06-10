@@ -23464,6 +23464,22 @@ func TestGenericMethodReturnStringFieldDupsBorrowedReceiver(t *testing.T) {
 	assertContains(t, fn, "promise_string_new")
 }
 
+// T0746 (generic getter form): a getter returning a `this`-owned string field
+// through the type parameter is a distinct codegen path from a method (getter
+// vs method dispatch), but the return-by-value dup must fire identically.
+func TestGenericGetterReturnStringFieldDups(t *testing.T) {
+	ir := generateIR(t, `
+		type GBox[T] { T val; get field T { return this.val; } }
+		main() { b := GBox[string](val: "hi"); s := b.field; }
+	`)
+	fn := extractFunction(ir, `"GBox[string].field"`)
+	if fn == "" {
+		t.Fatal("expected GBox[string].field in IR")
+	}
+	assertContains(t, fn, "strdup.copy")
+	assertContains(t, fn, "promise_string_new")
+}
+
 // T0513 (maybeEnableDupForMutRefArg generic owner): passing a generic
 // owner's field to a `~` (consuming) param must auto-dup the field so the
 // callee's consume-drop and the owner's drop don't double-free. Exercises

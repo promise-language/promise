@@ -403,6 +403,128 @@ func TestPublishBlobsUploadAssetError(t *testing.T) {
 	}
 }
 
+// TestGhCLIUploaderAlreadyExists pins the idempotency fix: when `gh release
+// upload` exits non-zero with "asset under the same name already exists",
+// UploadAsset must return nil (same-name content-addressed asset = same bytes
+// = genuine no-op). Without the fix it would propagate the error and abort
+// the whole publish-blobs run, leaving R2 out of sync.
+func TestGhCLIUploaderAlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho 'asset under the same name already exists: [sha.br]' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	if err := (ghCLIUploader{}).UploadAsset("some-tag", "/tmp/sha.br"); err != nil {
+		t.Fatalf("UploadAsset must return nil for 'already exists', got: %v", err)
+	}
+}
+
+// TestPublishBlobsGHAlreadyExistsStillMirrorsR2 is the end-to-end regression
+// test for T0834: when GitHub returns "asset under the same name already
+// exists", the whole publish-blobs run must still succeed AND the R2 mirror
+// Put must still be called for every blob. Before the fix, the error aborted
+// the loop before mirror.Put was reached.
+func TestPublishBlobsGHAlreadyExistsStillMirrorsR2(t *testing.T) {
+	// Fake gh: view exits 0 with empty output (so ListAssets returns no assets
+	// → blob enters the upload path), upload exits 1 with "already exists".
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"release\" ]; then\n" +
+		"  case \"$2\" in\n" +
+		"    view)   echo \"\"; exit 0;;\n" +
+		"    upload) echo \"asset under the same name already exists\" >&2; exit 1;;\n" +
+		"  esac\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	prev := defaultReleaseUploader
+	defaultReleaseUploader = &ghCLIUploader{}
+	t.Cleanup(func() { defaultReleaseUploader = prev })
+
+	mirror := &stubBlobMirror{}
+	prevMirror := newBlobMirror
+	newBlobMirror = func(string) blobMirror { return mirror }
+	t.Cleanup(func() { newBlobMirror = prevMirror })
+
+	root, shas := publishBlobsTestRoot(t, map[string]string{"opt": "OPT_BYTES", "llc": "LLC_BYTES"})
+	if err := runReleasePublishBlobs(root, []string{"--host", "linux-amd64"}); err != nil {
+		t.Fatalf("publish-blobs must succeed when GitHub returns 'already exists': %v", err)
+	}
+	for _, sha := range shas {
+		asset := sha + ".br"
+		if mirror.puts[asset] != asset {
+			t.Errorf("R2 mirror Put not called for %q (puts=%v)", asset, mirror.puts)
+		}
+	}
+}
+
+// TestGhCLIUploaderSuccess exercises the success path of ghCLIUploader.UploadAsset:
+// when `gh release upload` exits 0 the function must return nil.
+func TestGhCLIUploaderSuccess(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	if err := (ghCLIUploader{}).UploadAsset("some-tag", "/tmp/sha.br"); err != nil {
+		t.Fatalf("UploadAsset must return nil on success, got: %v", err)
+	}
+}
+
+// TestGhCLIUploaderRealError exercises the non-idempotent error path: when `gh
+// release upload` exits non-zero with an error that is NOT "already exists"
+// (e.g. a network failure), UploadAsset must propagate the error so the caller
+// notices the partial publish.
+func TestGhCLIUploaderRealError(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho 'network timeout' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	err := (ghCLIUploader{}).UploadAsset("some-tag", "/tmp/sha.br")
+	if err == nil {
+		t.Fatal("UploadAsset must return an error for a real gh failure")
+	}
+	if !strings.Contains(err.Error(), "gh release upload") {
+		t.Fatalf("error should mention 'gh release upload', got: %v", err)
+	}
+}
+
+// errBlobMirror is a blobMirror stub whose Put always fails, to exercise the
+// R2 mirror error return in runReleasePublishBlobs.
+type errBlobMirror struct{}
+
+func (errBlobMirror) Put(key, localPath string) error {
+	return fmt.Errorf("simulated R2 Put failure for %s", key)
+}
+func (errBlobMirror) Get(key, localPath string) (bool, error) { return false, nil }
+
+// TestPublishBlobsR2PutError pins that a mirror.Put failure aborts the run and
+// surfaces a hard error — the caller needs to know the mirrors are out of sync
+// so they can retry, instead of silently succeeding with R2 missing the blob.
+func TestPublishBlobsR2PutError(t *testing.T) {
+	_ = withStubUploader(t) // stubs gh uploader (succeeds) + default mirror
+	// Override the mirror with one that always fails.
+	prevMirror := newBlobMirror
+	newBlobMirror = func(string) blobMirror { return errBlobMirror{} }
+	t.Cleanup(func() { newBlobMirror = prevMirror })
+
+	root, _ := publishBlobsTestRoot(t, map[string]string{"opt": "OPT", "llc": "LLC"})
+	err := runReleasePublishBlobs(root, []string{"--host", "linux-amd64"})
+	if err == nil {
+		t.Fatal("expected publish-blobs to fail when R2 mirror.Put errors")
+	}
+	if !strings.Contains(err.Error(), "R2 Put") {
+		t.Fatalf("error should mention 'R2 Put', got: %v", err)
+	}
+}
+
 // TestPublishBlobsR2Mirror pins the --r2-bucket path (defaulting to "prebuilts"):
 // each blob uploaded to the GitHub deps release is ALSO mirrored to R2 as a FLAT
 // CAS object keyed by <sha>.br (no path), which is what the resolver's flat blob

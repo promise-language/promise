@@ -93,10 +93,17 @@ func (ghCLIUploader) UploadAsset(tag, localPath string) error {
 	// `--clobber=false` is the default; we want gh to refuse to overwrite an
 	// existing asset (the catalog's "already hosted → skip" path handles
 	// dedup before we get here).
+	var errBuf bytes.Buffer
 	cmd := exec.Command("gh", "release", "upload", tag, localPath)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = io.MultiWriter(os.Stderr, &errBuf)
 	if err := cmd.Run(); err != nil {
+		// Content-addressed blobs: same <sha>.br name always means same bytes,
+		// so an existing asset is a genuine no-op. Implement the idempotency
+		// the interface contract promises (lines 51-54).
+		if strings.Contains(errBuf.String(), "asset under the same name already exists") {
+			return nil
+		}
 		return fmt.Errorf("gh release upload %s %s: %w", tag, localPath, err)
 	}
 	return nil

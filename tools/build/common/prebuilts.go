@@ -522,11 +522,19 @@ func copyFilePreservingMode(src, dst string) error {
 }
 
 // acquireCacheLock takes an OS file lock at <cacheDir>/.lock. Mirrors the
-// stale-safe pattern in acquireVerifyLock (verify.go): TryLock first, on
-// contention print "Waiting for ..." then block on Lock. The OS releases the
-// lock on process death so stale locks are impossible.
+// stale-safe pattern in acquireVerifyLockIn (verify.go, the canonical reference
+// for this idiom): TryLock first, on contention print "Waiting for ..." then
+// block on Lock. The OS releases the lock on process death so stale locks are
+// impossible.
+//
+// Holder metadata lives in a sibling <lock>.owner file, NOT lockPath itself: on
+// Windows flock takes a mandatory byte-range lock on byte 0 of lockPath, so a
+// concurrent read/write of lockPath while the lock is held fails (the identity
+// write would be silently lost and waiters couldn't read it). The .owner
+// sibling is unaffected by the lock and readable on every platform.
 func acquireCacheLock(cacheDir, identityHint string) (func(), error) {
 	lockPath := filepath.Join(cacheDir, lockFile)
+	ownerPath := lockPath + ".owner"
 	fl := flock.New(lockPath)
 	locked, err := fl.TryLock()
 	if err != nil {
@@ -534,7 +542,7 @@ func acquireCacheLock(cacheDir, identityHint string) (func(), error) {
 	}
 	if !locked {
 		msg := fmt.Sprintf("Waiting for prebuilts cache lock at %s...", cacheDir)
-		if data, err := os.ReadFile(lockPath); err == nil {
+		if data, err := os.ReadFile(ownerPath); err == nil {
 			if holder := strings.TrimSpace(string(data)); holder != "" {
 				msg = fmt.Sprintf("Waiting for %s in %s to finish...", holder, cacheDir)
 			}
@@ -544,9 +552,9 @@ func acquireCacheLock(cacheDir, identityHint string) (func(), error) {
 			return nil, fmt.Errorf("acquire lock %s: %w", lockPath, err)
 		}
 	}
-	_ = os.WriteFile(lockPath, []byte(identityHint+"\n"), 0o644)
+	_ = os.WriteFile(ownerPath, []byte(identityHint+"\n"), 0o644)
 	return func() {
-		_ = os.WriteFile(lockPath, nil, 0o644)
+		_ = os.Remove(ownerPath)
 		_ = fl.Unlock()
 	}, nil
 }

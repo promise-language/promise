@@ -137,14 +137,22 @@ func (s *Store) StageBlob(data []byte) (string, error) {
 }
 
 // Lock takes the CAS-wide exclusive lock (cache/.lock), shared with
-// install/fetch/gc. Mirrors prebuilts.acquireCacheLock: TryLock, then announce
+// install/fetch/gc. Mirrors prebuilts.acquireCacheLock and the canonical
+// acquireVerifyLockIn (tools/build/common/verify.go): TryLock, then announce
 // + block. The OS releases the lock on process death, so stale locks are
 // impossible. Returns an unlock func.
+//
+// Holder metadata lives in a sibling <lock>.owner file, NOT lockPath itself: on
+// Windows the file lock is a mandatory byte-range lock on byte 0 of lockPath, so
+// a concurrent read/write of lockPath while held fails (the identity write would
+// be silently lost and waiters couldn't read it). The .owner sibling is
+// unaffected by the lock and readable on every platform.
 func (s *Store) Lock(identityHint string) (func(), error) {
 	if err := os.MkdirAll(s.root, 0o755); err != nil {
 		return nil, err
 	}
 	lockPath := filepath.Join(s.root, ".lock")
+	ownerPath := lockPath + ".owner"
 	fl := newFileLock(lockPath)
 	locked, err := fl.tryLock()
 	if err != nil {
@@ -152,7 +160,7 @@ func (s *Store) Lock(identityHint string) (func(), error) {
 	}
 	if !locked {
 		msg := fmt.Sprintf("Waiting for dependency cache lock at %s...", s.root)
-		if data, err := os.ReadFile(lockPath); err == nil {
+		if data, err := os.ReadFile(ownerPath); err == nil {
 			if holder := strings.TrimSpace(string(data)); holder != "" {
 				msg = fmt.Sprintf("Waiting for %s to finish...", holder)
 			}
@@ -162,9 +170,9 @@ func (s *Store) Lock(identityHint string) (func(), error) {
 			return nil, fmt.Errorf("acquire lock %s: %w", lockPath, err)
 		}
 	}
-	_ = os.WriteFile(lockPath, []byte(identityHint+"\n"), 0o644)
+	_ = os.WriteFile(ownerPath, []byte(identityHint+"\n"), 0o644)
 	return func() {
-		_ = os.WriteFile(lockPath, nil, 0o644)
+		_ = os.Remove(ownerPath)
 		_ = fl.unlock()
 	}, nil
 }

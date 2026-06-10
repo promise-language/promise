@@ -300,10 +300,12 @@ func TestLockContention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The holder hint is written so a waiter can name who it's blocked on.
-	data, _ := os.ReadFile(filepath.Join(store.Root(), ".lock"))
+	// The holder hint is written to the sibling .owner file (NOT the flock'd
+	// lock file itself — on Windows that carries a mandatory byte-0 lock; T0830)
+	// so a waiter can name who it's blocked on.
+	data, _ := os.ReadFile(filepath.Join(store.Root(), ".lock.owner"))
 	if !strings.Contains(string(data), "first-holder") {
-		t.Fatalf("lock file should record holder, got %q", string(data))
+		t.Fatalf("owner file should record holder, got %q", string(data))
 	}
 
 	got := make(chan struct{})
@@ -538,5 +540,46 @@ func TestStageBlobThenResolveIsCASHit(t *testing.T) {
 	}
 	if p != store.BlobPath(hash) {
 		t.Fatalf("resolved path %q != CAS path", p)
+	}
+}
+
+// TestStoreLock_WritesOwner verifies holder identity is recorded in the sibling
+// <lock>.owner file, NOT the flock'd lock file itself (on Windows the file lock
+// is a mandatory byte-0 lock that would silently drop the write; T0830).
+func TestStoreLock_WritesOwner(t *testing.T) {
+	root := t.TempDir()
+	store := &Store{root: root}
+
+	unlock, err := store.Lock("my-hint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	ownerPath := filepath.Join(root, ".lock.owner")
+	data, err := os.ReadFile(ownerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "my-hint" {
+		t.Errorf("owner file = %q, want %q", got, "my-hint")
+	}
+}
+
+// TestStoreLock_ClearsOnUnlock verifies the .owner sibling is removed on unlock
+// (T0830).
+func TestStoreLock_ClearsOnUnlock(t *testing.T) {
+	root := t.TempDir()
+	store := &Store{root: root}
+
+	unlock, err := store.Lock("my-hint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+
+	ownerPath := filepath.Join(root, ".lock.owner")
+	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
+		t.Errorf("owner file should be removed after unlock, stat err = %v", err)
 	}
 }

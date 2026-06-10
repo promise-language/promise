@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestLoadPrebuiltsManifest_Real parses the actual tools/build/prebuilts.toml
@@ -1164,4 +1165,84 @@ func readGzipped(path string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// TestAcquireCacheLock_WritesOwner verifies holder identity is recorded in the
+// sibling <lock>.owner file (NOT the flock'd lock file itself — see
+// acquireCacheLock and the canonical acquireVerifyLockIn for why; T0830).
+func TestAcquireCacheLock_WritesOwner(t *testing.T) {
+	cacheDir := t.TempDir()
+
+	unlock, err := acquireCacheLock(cacheDir, "my-hint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	ownerPath := filepath.Join(cacheDir, lockFile) + ".owner"
+	data, err := os.ReadFile(ownerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "my-hint" {
+		t.Errorf("owner file = %q, want %q", got, "my-hint")
+	}
+}
+
+// TestAcquireCacheLock_ClearsOnUnlock verifies the .owner sibling is removed on
+// unlock (T0830).
+func TestAcquireCacheLock_ClearsOnUnlock(t *testing.T) {
+	cacheDir := t.TempDir()
+
+	unlock, err := acquireCacheLock(cacheDir, "my-hint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+
+	ownerPath := filepath.Join(cacheDir, lockFile) + ".owner"
+	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
+		t.Errorf("owner file should be removed after unlock, stat err = %v", err)
+	}
+}
+
+// TestAcquireCacheLock_Contention verifies a second acquireCacheLock blocks until
+// the first is released, and that it reads the named holder from the sibling
+// .owner file before blocking (T0830: the contention branch of acquireCacheLock).
+func TestAcquireCacheLock_Contention(t *testing.T) {
+	cacheDir := t.TempDir()
+
+	unlock1, err := acquireCacheLock(cacheDir, "first-holder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Confirm the owner file is written before the second locker attempts.
+	ownerPath := filepath.Join(cacheDir, lockFile) + ".owner"
+	data, _ := os.ReadFile(ownerPath)
+	if !strings.Contains(string(data), "first-holder") {
+		t.Fatalf("owner file should record first holder, got %q", string(data))
+	}
+
+	got := make(chan struct{})
+	go func() {
+		unlock2, err := acquireCacheLock(cacheDir, "second-holder")
+		if err == nil {
+			unlock2()
+		}
+		close(got)
+	}()
+
+	// The second locker must NOT acquire while the first holds it.
+	select {
+	case <-got:
+		t.Fatal("second acquireCacheLock acquired while first still held")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	unlock1()
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second acquireCacheLock did not acquire after first released")
+	}
 }

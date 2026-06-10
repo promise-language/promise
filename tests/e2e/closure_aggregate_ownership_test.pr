@@ -374,21 +374,45 @@ vector_closure_remove() `test {
   assert(i == 30, "");
 }
 
-// --- Clone of an enum-with-closure container (T0813 memory-safety guard) ---
+// --- Implicit dup of an enum-with-closure container (T0813 memory-safety guard) ---
 //
-// Cloning a closure-containing aggregate is semantically meaningless (a closure
-// env can't be deep-cloned) and is tracked for a sema rejection in T0813. Until
-// then, enabling closure drop in enum variants (Part A) must NOT turn the
-// pre-existing clone *leak* into a *double-free*: emitVariantFieldDup nulls the
-// cloned variant's closure slot so only the source owns the env. This guards
-// that the clone neither crashes nor leaks (the source env is dropped once).
-clone_vector_of_enum_with_closure_is_memory_safe() `test {
+// Duplicating a closure-containing aggregate is semantically meaningless (a
+// closure env can't be deep-cloned). T0813 makes the *explicit* container
+// clone()/filled() of such a type a compile error, but residual *implicit* dup
+// paths (a vector slice `v[:]`) still reach the codegen element-clone loop. That
+// path must NOT turn the pre-existing leak into a *double-free*: enabling closure
+// drop in enum variants (Part A) means emitVariantFieldDup nulls the cloned
+// variant's closure slot so only the source owns the env. This guards that the
+// implicit dup neither crashes nor leaks (the source env is dropped once).
+slice_vector_of_enum_with_closure_is_memory_safe() `test {
   i := 0;
   while i < 30 {
     s := "shared" + " env";
     v := Vector[Cb]();
     v.push(Cb.holds(cb: move || -> s.len));
-    v2 := v.clone(); // cloned variant's closure slot is nulled — no shared env
+    v2 := v[:]; // implicit dup: cloned variant's closure slot is nulled — no shared env
+    assert(v.len == 1, "");
+    assert(v2.len == 1, "");
+    i = i + 1;
+  }
+  assert(i == 30, "");
+}
+
+// --- Implicit dup of a struct-with-closure-field container (T0813) ---
+//
+// The struct heap-user-type dup path (dupHeapValueFields, reached by a vector
+// slice over a Vector[StructCb]) memcpy's the element instance, aliasing the
+// closure field's env pointer into both vectors. The struct's synthesized drop
+// frees that env, so on master this double-frees. T0813 nulls the cloned slot in
+// dupHeapValueFields so the source keeps sole ownership (dropped exactly once).
+// Guards that the implicit dup neither crashes (double-free) nor leaks.
+slice_vector_of_struct_with_closure_is_memory_safe() `test {
+  i := 0;
+  while i < 30 {
+    s := "shared" + " env";
+    v := Vector[StructCb]();
+    v.push(StructCb(cb: move || -> s.len));
+    v2 := v[:]; // implicit dup: cloned struct's closure slot is nulled — no shared env
     assert(v.len == 1, "");
     assert(v2.len == 1, "");
     i = i + 1;

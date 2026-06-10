@@ -16487,6 +16487,272 @@ func TestT0616_MethodInferredTypeArgArcOK(t *testing.T) {
 	`)
 }
 
+// === T0813: closure-containing containers are non-cloneable ===
+// A closure value is a fat pointer {fn, env} whose env (captured frame) is
+// opaque and cannot be deep-cloned. A container whose element transitively owns
+// a closure field is therefore non-cloneable — native clone()/filled() would
+// shallow-copy the env pointer into two droppable owners → double-free (struct
+// field) / silently-empty clone (enum variant). These are now clean sema errors.
+
+func TestT0813_VectorStructClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		type StructCb { () -> int cb; }
+		test() {
+			v := Vector[StructCb]();
+			v.push(StructCb(cb: move || -> 1));
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
+func TestT0813_VectorEnumClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Cb { holds(() -> int cb), empty, }
+		test() {
+			v := Vector[Cb]();
+			v.push(Cb.holds(cb: move || -> 1));
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
+func TestT0813_MapStructClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		type StructCb { () -> int cb; }
+		test() {
+			m := Map[int, StructCb]();
+			m[0] = StructCb(cb: move || -> 1);
+			m2 := m.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
+func TestT0813_SetStructClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		type StructCb { () -> int cb; }
+		test() {
+			s := Set[StructCb]();
+			s2 := s.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
+func TestT0813_ArrayStructClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		type StructCb { () -> int cb; }
+		test() {
+			a := [StructCb(cb: move || -> 1)];
+			a2 := a.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
+func TestT0813_VectorStructClosureFilledError(t *testing.T) {
+	errs := checkErrs(t, `
+		type StructCb { () -> int cb; }
+		test() {
+			c := StructCb(cb: move || -> 1);
+			v := Vector[StructCb].filled(c, 3);
+		}
+	`)
+	expectError(t, errs, "cannot be filled")
+	expectError(t, errs, "closure")
+}
+
+// Nested: the closure is reachable only through TypeArgs recursion into a std
+// container field of the element struct.
+func TestT0813_NestedContainerClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		type StructCb { () -> int cb; }
+		type Holder { Vector[StructCb] inner; }
+		test() {
+			v := Vector[Holder]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
+// Generic indirection: the closure is exposed only at the concrete call site.
+func TestT0813_GenericIndirectionClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		type StructCb { () -> int cb; }
+		f[T](T x) Vector[T] {
+			v := Vector[T]();
+			v.push(x);
+			return v.clone();
+		}
+		test() {
+			r := f[StructCb](StructCb(cb: move || -> 1));
+		}
+	`)
+	expectError(t, errs, "closure")
+}
+
+// Negative: a closure-free container is still cloneable.
+func TestT0813_VectorNonClosureCloneOK(t *testing.T) {
+	checkOK(t, `
+		type Point { int x; int y; }
+		test() {
+			v := Vector[Point]();
+			v.push(Point(x: 1, y: 2));
+			v2 := v.clone();
+		}
+	`)
+}
+
+// Negative: pushing a freshly-constructed closure into a Vector (move) is still
+// allowed — only clone()/filled() of the container is gated.
+func TestT0813_VectorPushClosureOK(t *testing.T) {
+	checkOK(t, `
+		type StructCb { () -> int cb; }
+		test() {
+			v := Vector[StructCb]();
+			v.push(StructCb(cb: move || -> 1));
+		}
+	`)
+}
+
+// Negative (regression): a closure-containing struct that provides its OWN
+// clone() method is cloneable — the native container clone path calls that
+// clone() (cloneHeapElement) rather than shallow-copying the env, and the
+// hand-written clone() reconstructs the closure. The gate must NOT flag it.
+func TestT0813_VectorStructClosureWithCloneMethodOK(t *testing.T) {
+	checkOK(t, `
+		type StructCb {
+			() -> int cb;
+			clone() Self `+"`"+`public { return StructCb(cb: || -> 0); }
+		}
+		test() {
+			v := Vector[StructCb]();
+			v.push(StructCb(cb: move || -> 1));
+			v2 := v.clone();
+		}
+	`)
+}
+
+// Negative (regression): same escape hatch for an enum with a manual clone().
+func TestT0813_VectorEnumClosureWithCloneMethodOK(t *testing.T) {
+	checkOK(t, `
+		enum Cb {
+			holds(() -> int cb), empty,
+			clone() Cb `+"`"+`public {
+				match this {
+					Cb.holds(c) => { return Cb.empty; },
+					Cb.empty => { return Cb.empty; },
+				}
+			}
+		}
+		test() {
+			v := Vector[Cb]();
+			v.push(Cb.holds(cb: move || -> 1));
+			v2 := v.clone();
+		}
+	`)
+}
+
+// Negative (regression): the clone() escape hatch also protects a closure
+// reached only through a nested container field of the element struct
+// (Holder { Vector[StructCb] } where StructCb has clone()).
+func TestT0813_NestedContainerClosureWithCloneMethodOK(t *testing.T) {
+	checkOK(t, `
+		type StructCb {
+			() -> int cb;
+			clone() Self `+"`"+`public { return StructCb(cb: || -> 0); }
+		}
+		type Holder { Vector[StructCb] inner; }
+		test() {
+			v := Vector[Holder]();
+			v2 := v.clone();
+		}
+	`)
+}
+
+// Closure reached through a GENERIC struct instance's non-type-arg field
+// (exercises firstNestedClosure's *types.Instance-with-Named-origin field
+// recursion under the type-arg subst — distinct from the bare-Named path, since
+// the closure is NOT in the type args).
+func TestT0813_GenericStructInstanceFieldClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T val; () -> int cb; }
+		test() {
+			v := Vector[Box[int]]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
+// Closure reached through a GENERIC enum instance's variant field (exercises
+// firstNestedClosure's *types.Instance-with-Enum-origin variant-field recursion
+// under the type-arg subst — the closure is NOT in the type args).
+func TestT0813_GenericEnumInstanceVariantClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum GBox[T] { holds(T val, () -> int cb), empty, }
+		test() {
+			v := Vector[GBox[int]]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
+// Closure reached through a TUPLE element (exercises firstNestedClosure's
+// *types.Tuple recursion).
+func TestT0813_TupleElementClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := Vector[(int, () -> int)]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
+// Closure reached through a NESTED fixed-size array field (exercises
+// firstNestedClosure's *types.Array recursion — distinct from the top-level
+// Array.clone() path, which decomposes to the element type before recursing).
+func TestT0813_NestedArrayClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder { (() -> int)[2] cbs; }
+		test() {
+			v := Vector[Holder]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
+// Recursive type with a closure field: the `seen` cycle-guard must terminate the
+// field descent (NOT via a clone() early-return — Node has none) and still find
+// the closure reached past the self-referential field.
+func TestT0813_RecursiveTypeClosureCloneError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Node { Node? next; () -> int cb; }
+		test() {
+			v := Vector[Node]();
+			v2 := v.clone();
+		}
+	`)
+	expectError(t, errs, "cannot be cloned")
+	expectError(t, errs, "closure")
+}
+
 // === T0627: method-to-method clone-req propagation through `this` ===
 //
 // Inside a generic type's method body, `this` resolves to *types.Named (not

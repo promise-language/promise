@@ -283,6 +283,111 @@ func firstNestedSingleOwnerHandle(typ types.Type, seen map[types.Type]bool) type
 	return nil
 }
 
+// firstNestedClosure returns the first closure (*types.Signature) found in typ,
+// searching transitively through Instance type arguments, user-type fields, enum
+// variant fields, Optional, Tuple, and Array element types (cycle-guarded).
+// Returns nil if typ contains no closure. (T0813)
+//
+// A closure value is a fat pointer {fn, env} whose env is a heap struct that may
+// own captured strings/vectors/nested closures. The env CANNOT be deep-cloned —
+// the captured frame is opaque. Native container clone()/filled() (and the
+// heap-user-type dup path) shallow-copy element bytes, aliasing the same env
+// pointer into both the source and the clone → double-free / silently-empty
+// clone at drop. A type that transitively contains a closure is therefore
+// non-cloneable. The recursion shape exactly mirrors firstNestedSingleOwnerHandle
+// (Instance TypeArgs + user Named/Enum fields under the type-arg subst, Optional,
+// Tuple, Array; std native container origins are NOT field-recursed). Mirroring
+// the handle predicate means a refcounted container of a closure (e.g.
+// Arc[() -> int]) is conservatively rejected too — acceptable, since cloning a
+// closure-containing container is semantically meaningless.
+//
+// Unlike the single-owner-handle predicate, recursion STOPS at any user
+// type/enum that provides its own clone() method: the native dup path
+// (cloneHeapElement / emitVariantFieldDup) calls that clone() instead of
+// shallow-copying, and a hand-written clone() is responsible for reconstructing
+// its own closure fields (a closure env can't be deep-copied, but the author
+// can rebuild the closure). So a clone()-bearing type is cloneable regardless of
+// what it transitively holds — mirroring isCloneableField. (A single-owner
+// handle has no such escape: no clone() can duplicate a Task, so that predicate
+// always descends.)
+func firstNestedClosure(typ types.Type, seen map[types.Type]bool) *types.Signature {
+	if typ == nil {
+		return nil
+	}
+	if seen == nil {
+		seen = make(map[types.Type]bool)
+	}
+	switch t := typ.(type) {
+	case *types.Signature:
+		return t
+	case *types.Instance:
+		for _, ta := range t.TypeArgs() {
+			if sig := firstNestedClosure(ta, seen); sig != nil {
+				return sig
+			}
+		}
+		switch origin := t.Origin().(type) {
+		case *types.Named:
+			if isStdNativeContainerNamed(origin) || origin.LookupMethod("clone") != nil || seen[origin] {
+				return nil
+			}
+			seen[origin] = true
+			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+			for _, f := range origin.AllFields() {
+				if sig := firstNestedClosure(types.Substitute(f.Type(), subst), seen); sig != nil {
+					return sig
+				}
+			}
+		case *types.Enum:
+			if origin.LookupMethod("clone") != nil || seen[origin] {
+				return nil
+			}
+			seen[origin] = true
+			subst := types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+			for _, v := range origin.Variants() {
+				for _, f := range v.Fields() {
+					if sig := firstNestedClosure(types.Substitute(f.Type(), subst), seen); sig != nil {
+						return sig
+					}
+				}
+			}
+		}
+	case *types.Named:
+		if isStdNativeContainerNamed(t) || t.LookupMethod("clone") != nil || seen[t] {
+			return nil
+		}
+		seen[t] = true
+		for _, f := range t.AllFields() {
+			if sig := firstNestedClosure(f.Type(), seen); sig != nil {
+				return sig
+			}
+		}
+	case *types.Enum:
+		if t.LookupMethod("clone") != nil || seen[t] {
+			return nil
+		}
+		seen[t] = true
+		for _, v := range t.Variants() {
+			for _, f := range v.Fields() {
+				if sig := firstNestedClosure(f.Type(), seen); sig != nil {
+					return sig
+				}
+			}
+		}
+	case *types.Optional:
+		return firstNestedClosure(t.Elem(), seen)
+	case *types.Tuple:
+		for _, e := range t.Elems() {
+			if sig := firstNestedClosure(e, seen); sig != nil {
+				return sig
+			}
+		}
+	case *types.Array:
+		return firstNestedClosure(t.Elem(), seen)
+	}
+	return nil
+}
+
 // isNestedSingleOwnerContainer reports whether typ is itself a *container*
 // (Vector / Map / Set instance, or a fixed-size Array) that transitively
 // contains a single-owner handle. Such a container, used as another
@@ -319,6 +424,16 @@ func (c *Checker) checkContainerNotCloneable(pos ast.Pos, containerType types.Ty
 		if off := firstNestedSingleOwnerHandle(et, nil); off != nil {
 			c.errorf(pos, "%s cannot be %s: it contains %s, a single-owner handle with no clone() semantics (single-owner handles are move-only)",
 				containerType, opName, off)
+			return true
+		}
+		// T0813: a container element that transitively owns a closure
+		// (*types.Signature) is non-cloneable too — the env (captured frame) is
+		// opaque and cannot be deep-cloned, so the native clone path shallow-
+		// copies the env pointer and double-frees (struct field) / silently
+		// empties the clone (enum variant) at drop.
+		if sig := firstNestedClosure(et, nil); sig != nil {
+			c.errorf(pos, "%s cannot be %s: it contains a closure field (%s), and closure environments cannot be duplicated",
+				containerType, opName, sig)
 			return true
 		}
 	}
@@ -587,6 +702,19 @@ func (c *Checker) propagateCloneReqs() {
 							c.errorf(edge.CallPos,
 								"cannot instantiate generic with %s: %s is a single-owner handle, but %s (at %s) would duplicate it (single-owner handles are move-only)",
 								substituted, off, req.OpDesc, req.Pos)
+						}
+					}
+					// T0813: the concrete substitution may also expose a closure
+					// field (e.g. f[T]() { Vector[T]().clone() } instantiated with
+					// T = StructWithClosure) — reject at the concrete call edge,
+					// mirroring the single-owner-handle case above.
+					if sig := firstNestedClosure(substituted, nil); sig != nil {
+						key := edge.CallPos.String() + "|closure|" + req.OpDesc + "|" + substituted.String()
+						if !emitted[key] {
+							emitted[key] = true
+							c.errorf(edge.CallPos,
+								"cannot instantiate generic with %s: it contains a closure field (%s), but %s (at %s) would duplicate the closure environment, which cannot be cloned",
+								substituted, sig, req.OpDesc, req.Pos)
 						}
 					}
 					continue

@@ -6294,6 +6294,24 @@ func TestFixedArrayIndexDupsHeapUser(t *testing.T) {
 	assertContains(t, ir, "call void @llvm.memcpy")
 }
 
+// T0813: a struct with a closure (function-value) field reaches
+// dupHeapValueFields via a non-sema-gated implicit dup path (fixed-array index
+// dup here). The closure env cannot be deep-cloned, so the cloned slot must be
+// nulled (zeroinitializer store) rather than left aliasing the source's env —
+// otherwise both droppable owners free the same env → double-free.
+func TestFixedArrayIndexNullsClosureField(t *testing.T) {
+	ir := generateIR(t, `
+		type _Cb { () -> int cb; drop(~this) {} }
+		main() {
+			_Cb[2] arr = [_Cb(cb: move || -> 1), _Cb(cb: move || -> 2)];
+			_Cb x = arr[0];
+		}
+	`)
+	// dupHeapValueFields: memcpy the instance, then null the closure slot.
+	assertContains(t, ir, "call void @llvm.memcpy")
+	assertContains(t, ir, "store { i8*, i8* } zeroinitializer, { i8*, i8* }*")
+}
+
 func TestFixedArrayIndexDupsOptionalHeapUser(t *testing.T) {
 	ir := generateIR(t, `
 		type _B { int n; drop(~this) {} }
@@ -12059,11 +12077,14 @@ func TestUnwrapLocalOptionalClosure(t *testing.T) {
 	assertContains(t, ir, "closure.env.free")
 }
 
-// T0741: cloning a closure-containing enum aggregate must NOT shallow-copy the
-// closure env (that would alias one env between two droppable owners →
+// T0741/T0813: dup-ing a closure-containing enum aggregate must NOT shallow-copy
+// the closure env (that would alias one env between two droppable owners →
 // double-free). emitVariantFieldDup's Signature case nulls the cloned variant's
-// closure slot instead, so only the source owns the env. Verify the dup path
-// stores a zeroed fat pointer rather than copying the source closure value.
+// closure slot instead, so only the source owns the env. T0813 makes sema reject
+// the explicit Vector[Cb].clone() repro outright, so this exercises the null-dup
+// via a non-gated implicit dup path (vector slice → emitVectorElementCloneLoop →
+// dupEnumElementInPlace → emitVariantFieldDup). Verify the dup path stores a
+// zeroed fat pointer rather than copying the source closure value.
 func TestDupEnumVariantClosureNullsSlot(t *testing.T) {
 	ir := generateIR(t, `
 		enum Cb {
@@ -12071,15 +12092,17 @@ func TestDupEnumVariantClosureNullsSlot(t *testing.T) {
 			empty,
 		}
 		main() {
-			v := Vector[Cb]();
 			s := "shared" + " env";
+			v := Vector[Cb]();
 			v.push(Cb.holds(cb: move || -> s.len));
-			v2 := v.clone();
+			v2 := v[:];
 		}
 	`)
-	// The cloned variant's {fn,env} closure slot is zero-initialized (nulled),
+	// The element dup reaches the enum variant dup switch (enumdup.holds), where
+	// the cloned variant's {fn,env} closure slot is zero-initialized (nulled),
 	// not a copy of the source env — the memory-safe degradation for the
 	// non-cloneable closure env.
+	assertContains(t, ir, "enumdup.holds")
 	assertContains(t, ir, "store { i8*, i8* } zeroinitializer")
 }
 

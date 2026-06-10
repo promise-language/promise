@@ -3313,14 +3313,28 @@ func (c *Compiler) dupHeapValueFields(named *types.Named, resolvedType types.Typ
 		if subst != nil {
 			fType = types.Substitute(fType, subst)
 		}
+
+		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedNewPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		fieldLLVMType := layout.Instance.Fields[fieldIdx].LLVMType
+
+		if _, isSig := fType.(*types.Signature); isSig {
+			// T0813: a closure env cannot be deep-cloned (the captured frame is
+			// opaque); null the cloned slot so the source keeps sole ownership of
+			// the env (dropped exactly once), mirroring emitVariantFieldDup's
+			// Signature case. Defense-in-depth — sema now rejects clone()/filled()
+			// of closure-containing aggregates, but residual implicit-dup paths
+			// (polymorphic slice, etc.) still reach here and would otherwise alias
+			// the env pointer between two droppable owners → double-free.
+			c.block.NewStore(constant.NewZeroInitializer(fieldLLVMType), fieldPtr)
+			continue
+		}
+
 		fNamed := extractNamed(fType)
 		if fNamed == nil {
 			continue
 		}
 
-		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedNewPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-		fieldLLVMType := layout.Instance.Fields[fieldIdx].LLVMType
 		fieldVal := c.block.NewLoad(fieldLLVMType, fieldPtr)
 
 		if fNamed == types.TypString {
@@ -3529,8 +3543,9 @@ func (c *Compiler) emitVariantFieldDup(fieldVal value.Value, fieldPtr value.Valu
 	// CAUTION, surfacing via native container clone, e.g. Vector[EnumWithClosure]
 	// .clone()). Null the cloned slot instead: the source keeps sole ownership of
 	// its env (dropped exactly once), the clone holds an empty (uncallable)
-	// closure. This is a memory-safe degradation until sema rejects cloning a
-	// closure-containing aggregate outright (T0813).
+	// closure. T0813 makes sema reject the explicit clone()/filled() repro
+	// outright; this remains defense-in-depth for residual implicit dup paths
+	// (polymorphic slice, vector element clone loop) that still reach here.
 	if _, ok := typ.(*types.Signature); ok {
 		c.block.NewStore(constant.NewZeroInitializer(fieldVal.Type()), fieldPtr)
 		return

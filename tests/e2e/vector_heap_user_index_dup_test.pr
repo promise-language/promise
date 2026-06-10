@@ -394,3 +394,128 @@ test_t0403_inferred_generic_call() `test {
   b := v[0];
   assert(b.label == "v1", "v[0] survives inferred call");
 }
+
+// --- 24. T0847: container element as constructor field-init owning slot. ---
+// `Holder(held: v[0])` previously aliased v's element pointer into the new
+// instance's owning field — both v (element walk) and the holder (synth field
+// drop) freed the same instance → double-free SEGV. The constructor field-init
+// path now dups-on-read via maybeEnableDupForConstructorArg's IndexExpr branch,
+// symmetric with the assignment path (h.held = v[0]) and the ~-param call path.
+type _T0847Shape {
+  string name;
+  drop(~this) {
+  }
+}
+
+type _T0847Circle is _T0847Shape {
+  f64 radius;
+}
+
+type _T0847CircHolder {
+  _T0847Circle held;
+  drop(~this) {
+  }
+}
+
+// Non-cast repro: Circle[] element directly into an owning field slot.
+test_t0847_ctor_index_nocast() `test {
+  _T0847Circle[] v = [];
+  v.push(_T0847Circle(name: "n" + "1", radius: 1.0));
+  h := _T0847CircHolder(held: v[0]);
+  assert(h.held.radius == 1.0, "held radius");
+  assert(h.held.name == "n1", "held name");
+  // v[0] must still be readable — only its dup was consumed.
+  b := v[0];
+  assert(b.radius == 1.0, "v[0] survives ctor");
+}
+
+// Single-cast over a polymorphic Shape[] holding a Circle — runtime clone_fn
+// dispatch must produce a correct concrete copy.
+type _T0847ShapeHolder {
+  _T0847Shape held;
+  drop(~this) {
+  }
+}
+
+test_t0847_ctor_index_cast() `test {
+  _T0847Shape[] v = [];
+  v.push(_T0847Circle(name: "c" + "1", radius: 2.0));
+  h := _T0847ShapeHolder(held: v[0] as! _T0847Circle);
+  assert((h.held as! _T0847Circle).radius == 2.0, "held radius via cast");
+  assert(h.held.name == "c1", "held name");
+  b := v[0];
+  assert((b as! _T0847Circle).radius == 2.0, "v[0] survives cast ctor");
+}
+
+// Two-field holder reading two distinct elements — confirms the per-arg
+// dup-flag reset (the second arg's evaluation must not inherit the flag).
+type _T0847TwoHolder {
+  _T0847Circle first;
+  _T0847Circle second;
+  drop(~this) {
+  }
+}
+
+test_t0847_ctor_two_index_args() `test {
+  _T0847Circle[] v = [];
+  v.push(_T0847Circle(name: "a" + "1", radius: 3.0));
+  v.push(_T0847Circle(name: "b" + "2", radius: 4.0));
+  h := _T0847TwoHolder(first: v[0], second: v[1]);
+  assert(h.first.radius == 3.0, "first radius");
+  assert(h.second.radius == 4.0, "second radius");
+  assert(h.first.name == "a1", "first name");
+  assert(h.second.name == "b2", "second name");
+  // Both elements survive.
+  b0 := v[0];
+  b1 := v[1];
+  assert(b0.radius == 3.0, "v[0] survives");
+  assert(b1.radius == 4.0, "v[1] survives");
+}
+
+// Parenthesized index ctor arg — the ParenExpr peel must reach the IndexExpr
+// subject so the dup-on-read still fires.
+test_t0847_ctor_index_paren() `test {
+  _T0847Circle[] v = [];
+  v.push(_T0847Circle(name: "p" + "1", radius: 5.0));
+  h := _T0847CircHolder(held: (v[0]));
+  assert(h.held.radius == 5.0, "held radius via paren");
+  assert(h.held.name == "p1", "held name");
+  b := v[0];
+  assert(b.radius == 5.0, "v[0] survives paren ctor");
+}
+
+// Chained cast `v[0] as! Circle as! Shape` (upcast) — the cast-peel loop must
+// run twice to reach the IndexExpr. Sibling of the T0800 chained-cast family;
+// confirms no double-free at runtime when multiple non-consuming view layers
+// wrap the container element.
+test_t0847_ctor_index_chained_cast() `test {
+  _T0847Shape[] v = [];
+  v.push(_T0847Circle(name: "ch" + "1", radius: 6.0));
+  h := _T0847ShapeHolder(held: v[0] as! _T0847Circle as! _T0847Shape);
+  assert((h.held as! _T0847Circle).radius == 6.0, "held radius via chained cast");
+  assert(h.held.name == "ch1", "held name");
+  b := v[0];
+  assert((b as! _T0847Circle).radius == 6.0, "v[0] survives chained-cast ctor");
+}
+
+// Generic holder constructed from a vector element inside a monomorphized
+// function body — the dup-on-read must fire under type substitution (the arg
+// and target types are TypeParams that only resolve to concrete heap-user /
+// Vector types after the mono subst is applied).
+type _T0847GBox[T] {
+  T held;
+  drop(~this) {
+  }
+}
+
+_t0847_make_box[T](Vector[T] v) _T0847GBox[T] {
+  return _T0847GBox[T](held: v[0]);
+}
+
+test_t0847_ctor_generic_index() `test {
+  _T0847Circle[] v = [];
+  v.push(_T0847Circle(name: "g" + "1", radius: 7.0));
+  h := _t0847_make_box[_T0847Circle](v);
+  assert(h.held.radius == 7.0, "generic held radius");
+  assert(h.held.name == "g1", "generic held name");
+}

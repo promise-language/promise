@@ -2637,6 +2637,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 					val = c.genCallArgExpr(arg.Value)
 					c.dupStringFieldAccess = false
 					c.dupContainerFieldAccess = false
+					c.dupHeapUserFieldAccess = false // T0847
 					c.targetType = nil
 				}
 			} else {
@@ -2646,6 +2647,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				val = c.genCallArgExpr(arg.Value)
 				c.dupStringFieldAccess = false
 				c.dupContainerFieldAccess = false
+				c.dupHeapUserFieldAccess = false // T0847
 			}
 			// T0101: Save pre-wrap value for string temp claiming on optional fields
 			preWrapVal := val
@@ -5724,6 +5726,39 @@ func (c *Compiler) maybeEnableDupForMutRefArg(arg ast.Expr, paramType types.Type
 // maybeEnableDupForMutRefArg (T0366) for the constructor field-init path.
 // T0411.
 func (c *Compiler) maybeEnableDupForConstructorArg(arg ast.Expr, fieldType types.Type) {
+	// T0847: peel parens + single/chained casts to find a container-element
+	// IndexExpr subject, then dup-on-read for `Holder(held: v[0])` /
+	// `Holder(held: v[0] as! C)`. Each cast layer is a non-consuming view.
+	// Mirrors the IndexExpr branch of maybeEnableDupForMutRefArg (T0403) and
+	// the assignment path's cast peel in genAssignStmt.
+	probe := arg
+	for {
+		if p, ok := probe.(*ast.ParenExpr); ok {
+			probe = p.Expr
+			continue
+		}
+		if cast, ok := probe.(*ast.CastExpr); ok {
+			probe = cast.Expr
+			continue
+		}
+		break
+	}
+	if idx, ok := probe.(*ast.IndexExpr); ok {
+		argType := c.info.Types[idx]
+		if c.typeSubst != nil && argType != nil {
+			argType = types.Substitute(argType, c.typeSubst)
+		}
+		if isDroppableHeapUserType(argType) {
+			targetType := c.info.Types[idx.Target]
+			if c.typeSubst != nil && targetType != nil {
+				targetType = types.Substitute(targetType, c.typeSubst)
+			}
+			if _, isVec := types.AsVector(targetType); isVec {
+				c.dupHeapUserFieldAccess = true
+				return
+			}
+		}
+	}
 	mem, ok := arg.(*ast.MemberExpr)
 	if !ok {
 		return

@@ -26754,6 +26754,88 @@ func TestT0411_ConstructorVectorFieldFromThisDups(t *testing.T) {
 	assertContains(t, cloneFn, "vecdup.copy")
 }
 
+// T0847: Constructor field-init that reads a Vector element directly into an
+// owning (non-borrow) field slot (`Holder(held: v[0])`) must dup-on-read.
+// Without the dup, the element pointer is aliased into the new instance's
+// owning field — both v (element walk in Vector.drop) and the holder (synth
+// field drop) free the same instance → double-free SEGV. Mirrors T0403 (the
+// ~-param call-arg path); maybeEnableDupForConstructorArg's IndexExpr branch
+// sets dupHeapUserFieldAccess, consumed by genVectorIndex → cloneHeapElement.
+func TestT0847_ConstructorVectorElementDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Item { string label; drop(~this) {} }
+		type Holder { Item held; drop(~this) {} }
+		test_t0847() {
+			v := Item[]();
+			v.push(Item(label: "x"));
+			h := Holder(held: v[0]);
+		}
+	`)
+	// cloneHeapElement → dupHeapValue: allocate a new instance and memcpy the
+	// data. Without the fix the element would be a direct aliasing store.
+	assertContains(t, ir, "call i8* @pal_alloc")
+	assertContains(t, ir, "call void @llvm.memcpy")
+}
+
+// T0847 (cast variant): `Holder(held: v[0] as! Circle)` over a polymorphic
+// Shape[] must peel the cast to reach the IndexExpr subject and still dup.
+func TestT0847_ConstructorCastVectorElementDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { string name; drop(~this) {} }
+		type Circle is Shape { int radius; }
+		type Holder { Shape held; drop(~this) {} }
+		test_t0847_cast() {
+			v := Shape[]();
+			v.push(Circle(name: "c", radius: 1));
+			h := Holder(held: v[0] as! Circle);
+		}
+	`)
+	// Cast peel reaches the IndexExpr → dup-on-read fires (allocate + memcpy).
+	assertContains(t, ir, "call i8* @pal_alloc")
+	assertContains(t, ir, "call void @llvm.memcpy")
+}
+
+// T0847 (generic/mono variant): the constructor field-init dup-on-read must
+// fire under monomorphization, where the arg/target types are TypeParams that
+// only resolve after substitution. This exercises maybeEnableDupForConstructorArg's
+// typeSubst branches (argType/targetType Substitute) — `Holder[T](held: v[0])`
+// inside a generic function body where T=Item is bound by the mono context.
+func TestT0847_ConstructorGenericVectorElementDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Item { string label; drop(~this) {} }
+		type Holder[T] { T held; drop(~this) {} }
+		make_holder[T](Vector[T] v) Holder[T] {
+			return Holder[T](held: v[0]);
+		}
+		test_t0847_generic() {
+			v := Item[]();
+			v.push(Item(label: "x"));
+			h := make_holder[Item](v);
+		}
+	`)
+	// Under mono (T=Item), the dup still fires: allocate + memcpy the element.
+	assertContains(t, ir, "call i8* @pal_alloc")
+	assertContains(t, ir, "call void @llvm.memcpy")
+}
+
+// T0847 (paren variant): a parenthesized container-element ctor arg
+// `Holder(held: (v[0]))` must peel the ParenExpr to reach the IndexExpr and
+// still dup-on-read. Exercises maybeEnableDupForConstructorArg's ParenExpr peel.
+func TestT0847_ConstructorParenVectorElementDups(t *testing.T) {
+	ir := generateIR(t, `
+		type Item { string label; drop(~this) {} }
+		type Holder { Item held; drop(~this) {} }
+		test_t0847_paren() {
+			v := Item[]();
+			v.push(Item(label: "x"));
+			h := Holder(held: (v[0]));
+		}
+	`)
+	// Paren peel reaches the IndexExpr → dup-on-read fires (allocate + memcpy).
+	assertContains(t, ir, "call i8* @pal_alloc")
+	assertContains(t, ir, "call void @llvm.memcpy")
+}
+
 // T0411: Channel field auto-dup via constructor field-init from `this.field`.
 // Channel dup is a refcount increment via promise_channel_incref.
 func TestT0411_ConstructorChannelFieldFromThisDups(t *testing.T) {

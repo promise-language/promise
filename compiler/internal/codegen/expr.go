@@ -11454,6 +11454,28 @@ func (c *Compiler) isOwnerGovernedMemberOptionalUnwrapSource(src ast.Expr) bool 
 	return c.ownerHasOrSynthDrop(ownerType, ownerNamed)
 }
 
+// handlerResultIsNativeHandle reports whether an optional handler's unwrapped
+// result type is a single-owner native handle (Mutex[T]/Task[T]) — opaque i8*
+// handles that genOptionalHandlerExpr does NOT dup. T0838: such member-source
+// handler bindings must neutralize the owner's optional field to avoid a
+// double-free between the bound local and the owner's drop. The
+// typeSubst/selfSubst resolution mirrors genOptionalHandlerExpr so it works
+// inside monomorphized generic and structural-default method bodies.
+func (c *Compiler) handlerResultIsNativeHandle(e *ast.ErrorHandlerExpr) bool {
+	rt := c.info.Types[e]
+	if c.typeSubst != nil && rt != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	if c.selfSubst != nil && rt != nil {
+		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if _, ok := types.AsMutex(rt); ok {
+		return true
+	}
+	_, ok := types.AsTask(rt)
+	return ok
+}
+
 // isBorrowedThisMemberSource reports whether src (peeling ParenExpr) is a member
 // access on a borrowed `this` receiver (`this.field` inside a non-`~this`
 // method). For force-unwrap (T0428 Case 3B) genOptionalForceUnwrap makes an
@@ -11514,7 +11536,16 @@ func (c *Compiler) neutralizeForceUnwrapSource(expr ast.Expr) {
 			// owner keeps & frees the original, so the field must NOT be neutralized
 			// (neutralizing would orphan the original → leak; not neutralizing keeps
 			// the field reusable). Ident sources have no dup and still neutralize.
-			if !c.isOwnerGovernedMemberOptionalUnwrapSource(e.Expr) {
+			//
+			// T0838 EXCEPTION: Mutex[T]/Task[T] are single-owner opaque i8*
+			// handles that genOptionalHandlerExpr does NOT dup (opaque containers
+			// can't be deep-copied — see its !isOpaqueContainerType gate). So a
+			// handler BINDING `Mutex[int] m = h.mtx? _ {...}` would leave both the
+			// bound local and the owner's optional field owning the same handle →
+			// double-free. Neutralize the owner field for these, mirroring T0806
+			// Fix C for the force-unwrap binding. neutralizeMemberOptionalField
+			// applies the same Mutex/Task carve-out (T0806) when clearing the flag.
+			if !c.isOwnerGovernedMemberOptionalUnwrapSource(e.Expr) || c.handlerResultIsNativeHandle(e) {
 				inner = e.Expr
 			}
 		}

@@ -23,9 +23,15 @@
 // These run on the host AND `--target wasm32-wasi` (Task await works under the
 // cooperative scheduler); zero-leak enforcement applies on both.
 //
+// T0838 (RESOLVED, see rows below): Handler-BINDING `Mutex[int] m = h.mtx? _
+// {...}` / `Task[int] t = h.tsk? _ {...}` was the error-handler sibling of Fix C.
+// genOptionalHandlerExpr makes no dup for opaque containers (handles can't be
+// deep-copied), so the binding double-freed the handle. Fixed by extending
+// neutralizeForceUnwrapSource's ErrorHandlerExpr arm to neutralize the owner's
+// optional field for Mutex/Task member sources (handlerResultIsNativeHandle),
+// reusing the same Mutex/Task carve-out in neutralizeMemberOptionalField.
+//
 // Out of scope (filed as separate follow-up bugs):
-//   - Handler-BINDING double-free `Mutex[int] m = h.mtx? _ {...}` (genOptional-
-//     HandlerExpr makes no dup for opaque containers) — distinct path.
 //   - MutexGuard.close codegen panic when the guard originates from an unwrapped
 //     optional-field mutex (missing mono-method declaration).
 //   - Move/consume a single-owner handle OUT OF A SHARED BORROW
@@ -248,4 +254,121 @@ t0806_tsk_handler_nondiverge_temp() `test {
   assert(<-(h.tsk? _ {
     go worker_t0806()
   }) == 42, "tsk non-diverging handler temp");
+}
+
+// ---------------------------------------------------------------------------
+// T0838: handler-BINDING of a single-owner native-handle optional field.
+// `Mutex[int] m = h.mtx? _ {...}` (and `Task[int] t = ...`) moves the handle
+// out of the owner's optional field. genOptionalHandlerExpr makes no dup for
+// opaque containers, so without neutralizing the owner field both the bound
+// local and the owner's drop would free the same handle → double-free.
+// ---------------------------------------------------------------------------
+
+// Mutex handler-binding (explicit type), value present — owner field neutralized.
+t0838_mtx_handler_binding_typed() `test {
+  h := MtxHolder(mtx: Mutex[int](5));
+  Mutex[int] m = h.mtx? _ {
+    return;
+  };
+  assert(m.lock().borrow == 5, "mtx handler-binding typed");
+}
+
+// Mutex handler-binding via `:=` inference.
+t0838_mtx_handler_binding_infer() `test {
+  h := MtxHolder(mtx: Mutex[int](15));
+  m := h.mtx? _ {
+    return;
+  };
+  assert(m.lock().borrow == 15, "mtx handler-binding :=");
+}
+
+// None/recovery path: field absent → handler runs and supplies a fallback Mutex.
+// No spurious neutralization/leak of the (absent) field; the recovery value is
+// the sole owner.
+t0838_mtx_handler_binding_recovery() `test {
+  h := MtxHolder(mtx: none);
+  Mutex[int] m = h.mtx? _ {
+    Mutex[int](99)
+  };
+  assert(m.lock().borrow == 99, "mtx handler-binding recovery");
+}
+
+// Task handler-binding then consume via `<-` (ownership transfers to the local).
+t0838_tsk_handler_binding_typed() `test {
+  h := TskHolder(tsk: go worker_t0806());
+  Task[int] t = h.tsk? _ {
+    return;
+  };
+  assert(<-t == 42, "tsk handler-binding typed");
+}
+
+// Task handler-binding via `:=` inference.
+t0838_tsk_handler_binding_infer() `test {
+  h := TskHolder(tsk: go worker_t0806());
+  t := h.tsk? _ {
+    return;
+  };
+  assert(<-t == 42, "tsk handler-binding :=");
+}
+
+// Nested-owner chain walk for the handler binding (`outer.inner.mtx? _ {...}`).
+t0838_mtx_nested_handler_binding() `test {
+  o := NestedOuter(inner: NestedInner(mtx: Mutex[int](16), tsk: none));
+  Mutex[int] m = o.inner.mtx? _ {
+    return;
+  };
+  assert(m.lock().borrow == 16, "mtx nested handler-binding");
+}
+
+// Heap-user-type regression guard (T0775 must still hold): a handler binding of
+// a heap-user optional field MUST dup (not neutralize) — the owner keeps & frees
+// the original, the bound local owns the dup. Must NOT double-free OR leak.
+type Payload {
+  int v;
+  drop(~this) {
+  }
+}
+type PayloadHolder {
+  Payload? p;
+  drop(~this) {
+  }
+}
+
+t0838_heap_user_handler_binding_guard() `test {
+  h := PayloadHolder(p: Payload(v: 21));
+  Payload got = h.p? _ {
+    Payload(v: 0)
+  };
+  assert(got.v == 21, "heap-user handler-binding dup (got)");
+  // Owner field is still live (dup, not move) — re-read it.
+  assert((h.p? _ {
+    Payload(v: 0)
+  }).v == 21, "heap-user handler-binding owner field reusable");
+}
+
+// Handler binding INSIDE a generic method body — the unwrapped result type is
+// `Mutex[T]` with T unbound at type-check time, so neutralization runs in the
+// MONOMORPHIZED body. Exercises handlerResultIsNativeHandle's typeSubst
+// resolution (the flat rows above all resolve to a concrete `Mutex[int]` at the
+// use site, never with typeSubst active). Without the fix this double-frees the
+// handle inside the mono body → stack overflow / segfault.
+type GenMtxHolder[T] {
+  Mutex[T]? mtx;
+  drop(~this) {
+  }
+
+  take!(~this) Mutex[T] {
+    Mutex[T] m = this.mtx? _ {
+      raise error("absent");
+    };
+    return m;
+  }
+}
+
+t0838_mtx_generic_method_handler_binding() `test {
+  h := GenMtxHolder[int](mtx: Mutex[int](44));
+  Mutex[int] m = h.take()? _ {
+    return;
+  };
+  assert(m.lock().borrow == 44, "generic-method mtx handler-binding");
 }

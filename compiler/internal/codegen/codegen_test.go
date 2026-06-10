@@ -128,6 +128,14 @@ func assertNotContains(t *testing.T, ir, substr string) {
 	}
 }
 
+func assertNotContainsMatch(t *testing.T, ir, pattern string) {
+	t.Helper()
+	re := regexp.MustCompile(pattern)
+	if re.MatchString(ir) {
+		t.Errorf("expected IR to NOT match %q\ngot:\n%s", pattern, ir)
+	}
+}
+
 // extractFunction returns the IR text for a named function (from "define" to the closing "}").
 func extractFunction(ir, name string) string {
 	// Find "define ... @name("
@@ -25385,6 +25393,75 @@ func TestMutexGuardBorrowSetterCompoundAssign(t *testing.T) {
 	`)
 	// Compound assignment loads current value and adds
 	assertContains(t, ir, "add i64")
+}
+
+// T0838: Binding the result of an error-handler unwrap of a single-owner
+// native-handle optional field (`Mutex[int] m = h.mtx? _ {...}`) on an owned
+// owner must neutralize the owner's optional present flag — genOptionalHandlerExpr
+// makes NO dup for opaque containers (Mutex/Task are i8* handles that can't be
+// deep-copied), so without the neutralization both the bound local and the
+// owner's drop would free the same handle → double-free. The fix routes the
+// handler binding through neutralizeMemberOptionalField (T0806 Fix C carve-out),
+// emitting a `store i1 false` into the owner instance's optional flag.
+func TestT0838MutexHandlerBindingNeutralizesOwnerField(t *testing.T) {
+	ir := generateIR(t, `
+		type MtxHolder { Mutex[int]? mtx; drop(~this) {} }
+		main() {
+			h := MtxHolder(mtx: Mutex[int](5));
+			Mutex[int] m = h.mtx? _ { return; };
+		}
+	`)
+	gmain := extractDefine(ir, ".goroutine.main")
+	// The owner's `Mutex[int]?` field is laid out as the optional struct
+	// `{ i1, i8* }` (present flag + opaque handle). Neutralization GEPs into that
+	// struct's field 0 and stores `false`, so the owner's drop skips the handle
+	// the binding now owns. (Generic drop-flag clears target named allocas, not a
+	// GEP into `{ i1, i8* }`, so this pattern is specific to the field move-out.)
+	assertContainsMatch(t, gmain,
+		`getelementptr \{ i1, i8\* \}, \{ i1, i8\* \}\* %\d+, i32 0, i32 0\s*\n\s*store i1 false`)
+}
+
+// T0838 regression guard: a handler binding of a HEAP-USER optional field must
+// NOT neutralize the owner field — genOptionalHandlerExpr makes an independent
+// dup (T0775), so the owner keeps & frees the original and the bound local owns
+// the dup. handlerResultIsNativeHandle returns false for heap-user types, so the
+// T0775 dup-and-don't-neutralize contract is preserved (no `store i1 false`).
+func TestT0838HeapUserHandlerBindingPreservesDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Payload { int v; drop(~this) {} }
+		type PayloadHolder { Payload? p; drop(~this) {} }
+		main() {
+			h := PayloadHolder(p: Payload(v: 21));
+			Payload got = h.p? _ { Payload(v: 0) };
+		}
+	`)
+	gmain := extractDefine(ir, ".goroutine.main")
+	// handlerResultIsNativeHandle is false for heap-user types, so the T0775
+	// dup-and-don't-neutralize contract holds: genOptionalHandlerExpr makes an
+	// independent dup (the binding's sole owner) and the owner's optional field
+	// is NOT neutralized — the owner keeps & frees the original. So there is no
+	// GEP-into-optional-struct present-flag clear in the goroutine body.
+	assertNotContainsMatch(t, gmain,
+		`getelementptr \{ i1, [^}]*\}, \{ i1, [^}]*\}\* %\d+, i32 0, i32 0\s*\n\s*store i1 false`)
+}
+
+// T0838: Task[T]? sibling of the Mutex case — covers handlerResultIsNativeHandle's
+// types.AsTask branch (reached only when the result is NOT a Mutex). Task is the
+// other single-owner opaque i8* handle genOptionalHandlerExpr does not dup, so a
+// handler binding `Task[int] t = h.tsk? _ {...}` must likewise neutralize the
+// owner's optional present flag (same `{ i1, i8* }` GEP + `store i1 false`).
+func TestT0838TaskHandlerBindingNeutralizesOwnerField(t *testing.T) {
+	ir := generateIR(t, `
+		worker() int { return 42; }
+		type TskHolder { Task[int]? tsk; drop(~this) {} }
+		main() {
+			h := TskHolder(tsk: go worker());
+			Task[int] t = h.tsk? _ { return; };
+		}
+	`)
+	gmain := extractDefine(ir, ".goroutine.main")
+	assertContainsMatch(t, gmain,
+		`getelementptr \{ i1, i8\* \}, \{ i1, i8\* \}\* %\d+, i32 0, i32 0\s*\n\s*store i1 false`)
 }
 
 // T0367: Assigning Arc[T].borrow to a variable must clear the variable's drop

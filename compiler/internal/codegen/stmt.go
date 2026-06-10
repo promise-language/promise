@@ -258,12 +258,23 @@ func (c *Compiler) isBorrowedExpr(expr ast.Expr) bool {
 //     operator (`obj[k] as! T`): those subjects produce a *fresh owned* value (not
 //     an alias), so the cast local owns it and must keep its drop flag — mirrors
 //     the owned-return exemptions (isGetterCallExpr/isUserIndexExpr) elsewhere.
+//
+// T0800: a chained cast (`(x as! A) as! B`) wraps another CastExpr; this recurses
+// to the innermost subject so the borrow check (and every exemption above) is
+// re-evaluated against that subject's own type.
 func (c *Compiler) isRttiCastBorrow(expr ast.Expr) bool {
 	cast, ok := unwrapDestructureParens(expr).(*ast.CastExpr)
 	if !ok {
 		return false
 	}
 	subj := unwrapDestructureParens(cast.Expr)
+	// T0800: a chained cast (`(x as! A) as! B`) is a view-of-a-view — the outer
+	// cast aliases the inner cast, which aliases x. Recurse to the innermost
+	// subject and re-run the borrow check there (each layer's optional/scalar
+	// exemptions apply against its own subject type).
+	if _, isCast := subj.(*ast.CastExpr); isCast {
+		return c.isRttiCastBorrow(subj)
+	}
 	switch subj.(type) {
 	case *ast.ThisExpr, *ast.IdentExpr, *ast.MemberExpr, *ast.IndexExpr:
 		// borrow-producing subject — the cast aliases it
@@ -300,6 +311,9 @@ func (c *Compiler) isRttiCastBorrow(expr ast.Expr) bool {
 // Borrowed params (no drop flag), ThisExpr, MemberExpr / IndexExpr (handled
 // by the existing dup-on-read paths), and non-cast expressions all return
 // nil: the existing per-shape codegen paths already handle them safely.
+//
+// T0800: a chained cast (`(x as! A) as! B`) wraps another CastExpr; this recurses
+// to the innermost subject's IdentExpr.
 func (c *Compiler) castSubjectMovableIdent(expr ast.Expr) *ast.IdentExpr {
 	expr = unwrapDestructureParens(expr)
 	cast, ok := expr.(*ast.CastExpr)
@@ -307,6 +321,11 @@ func (c *Compiler) castSubjectMovableIdent(expr ast.Expr) *ast.IdentExpr {
 		return nil
 	}
 	subj := unwrapDestructureParens(cast.Expr)
+	// T0800: a chained cast moves the innermost subject at owning-slot stores,
+	// so recurse to yield that subject's IdentExpr.
+	if _, isCast := subj.(*ast.CastExpr); isCast {
+		return c.castSubjectMovableIdent(subj)
+	}
 	ident, ok := subj.(*ast.IdentExpr)
 	if !ok {
 		return nil
@@ -5727,7 +5746,17 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			probe = p.Expr
 		}
-		if cast, ok := probe.(*ast.CastExpr); ok {
+		// T0800: peel *chained* casts (`(v[i] as! A) as! B`). Each layer is a
+		// non-consuming view, so loop until the innermost subject is reached —
+		// otherwise the dup-on-read below would not fire for an IndexExpr/
+		// MemberExpr subject behind two casts and the stored value would alias
+		// the source slot → double-free. Mirrors the recursion in
+		// isRttiCastBorrow / castSubjectMovableIdent / tryMoveConsumeCastSubject.
+		for {
+			cast, ok := probe.(*ast.CastExpr)
+			if !ok {
+				break
+			}
 			probe = cast.Expr
 			for {
 				p, ok := probe.(*ast.ParenExpr)

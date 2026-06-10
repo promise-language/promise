@@ -381,6 +381,12 @@ func (c *Checker) tryMoveConsumeCastSubject(expr ast.Expr) {
 		}
 		inner = p.Expr
 	}
+	// T0800: a chained cast wraps another CastExpr — recurse so the innermost
+	// subject (x) is consumed, not the inner cast (a no-op in tryMoveConsume).
+	if _, isCast := inner.(*ast.CastExpr); isCast {
+		c.tryMoveConsumeCastSubject(inner)
+		return
+	}
 	c.tryMoveConsume(inner)
 }
 

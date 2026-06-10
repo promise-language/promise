@@ -10797,3 +10797,76 @@ func TestT0784_RaiseParenWrappedCastFromBorrowedParamRejected(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot move borrowed parameter 'e'")
 }
+
+// === T0800: chained RTTI cast (`(x as! A) as! B`) is a view-of-a-view ===
+//
+// tryMoveConsumeCastSubject recurses through nested CastExpr to the innermost
+// subject. Without the recursion the outer cast's subject is itself a CastExpr,
+// tryMoveConsume on which is a no-op — so a chained cast over a borrowed param
+// into an owning slot would silently pass (and double-free at runtime). These
+// mirror the single-layer T0754 tests with one extra cast layer.
+
+// Chained cast over a borrowed param into a field slot — still rejected: the
+// recursion must reach the innermost subject `s`.
+func TestT0800_ChainedCastIntoFieldFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		type Holder { Shape held; }
+		helper(Shape s) {
+			h := Holder(held: Circle(name: "init", radius: 0.0));
+			h.held = (s as! Circle) as! Circle;
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			helper(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}
+
+// Chained cast over an owned local into a field slot — accepted, but the
+// innermost subject `s` becomes Moved, so a later use errors. Confirms the
+// recursion consumes the innermost subject (not the inner CastExpr).
+func TestT0800_ChainedCastIntoFieldFromOwnedLocalMarksMoved(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		type Holder { Shape held; }
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			h := Holder(held: Circle(name: "init", radius: 0.0));
+			h.held = (s as! Circle) as! Circle;
+			Shape t = s;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// Chained cast over a borrowed param into a constructor arg — same propagation
+// through both cast layers at the ctor-arg owning slot.
+func TestT0800_ChainedCastIntoCtorArgFromBorrowedParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		type Holder { Shape held; }
+		helper(Shape s) Holder {
+			return Holder(held: (s as! Circle) as! Circle);
+		}
+		test() {
+			Shape s = Circle(name: "src", radius: 2.0);
+			h := helper(s);
+			_ = h;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
+}

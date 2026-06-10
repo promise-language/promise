@@ -975,3 +975,102 @@ test_optional_subject_owned_member_force() `test {
   c := h.slot as! Circle;
   assert(c.name == "omf", "owned-member force name");
 }
+
+// --- T0800: chained RTTI cast over an owned local is a view-of-a-view ---
+// `(s as! Circle) as! Circle` — the outer cast's subject is itself a CastExpr.
+// Each layer is a non-consuming view aliasing s, so the rebind/owning-slot must
+// NOT give the destination its own drop binding (and ownership must move the
+// innermost subject at owning-slot stores). Before T0800 the single-layer
+// helpers (isRttiCastBorrow / castSubjectMovableIdent / tryMoveConsumeCastSubject)
+// peeled exactly one cast layer and missed the inner CastExpr -> double-free
+// at scope exit (SEGV). Each test reads the inherited heap `name` field as a
+// use-after-free / double-free probe.
+
+test_chained_cast_local_rebind() `test {
+  // var-decl form
+  Shape s = Circle(name: "src", radius: 4.0);
+  Circle a = (s as! Circle) as! Circle;
+  assert(a.radius == 4.0, "chained cast local rebind radius");
+  assert(a.name == "src", "chained cast local rebind name (UAF probe)");
+  // assign-to-existing-local form
+  Shape s2 = Circle(name: "src2", radius: 5.0);
+  Circle b = Circle(name: "init", radius: 0.0);
+  b = (s2 as! Circle) as! Circle;
+  assert(b.radius == 5.0, "chained cast local reassign radius");
+  assert(b.name == "src2", "chained cast local reassign name (UAF probe)");
+}
+
+test_chained_cast_field_target() `test {
+  Shape s = Circle(name: "src", radius: 6.0);
+  h := Holder(held: (s as! Circle) as! Circle);
+  assert((h.held as! Circle).radius == 6.0, "chained cast ctor-arg field radius");
+  assert(h.held.name == "src", "chained cast ctor-arg field name (UAF probe)");
+  // assign-to-existing-field form
+  Shape s2 = Circle(name: "src2", radius: 7.0);
+  h.held = (s2 as! Circle) as! Circle;
+  assert((h.held as! Circle).radius == 7.0, "chained cast field target radius");
+  assert(h.held.name == "src2", "chained cast field target name (UAF probe)");
+}
+
+test_chained_cast_owning_arg() `test {
+  Shape s = Circle(name: "src", radius: 8.0);
+  Arc[Circle] a = Arc[Circle]((s as! Circle) as! Circle);
+  assert(a.borrow.radius == 8.0, "chained cast arc ctor-arg radius");
+  assert(a.borrow.name == "src", "chained cast arc ctor-arg name (UAF probe)");
+}
+
+// T0800: chained cast over a CONTAINER-ELEMENT subject assigned into an owning
+// field slot. The innermost subject is an IndexExpr that aliases the source
+// vector's element, so the dup-on-read peel in genAssignStmt must recurse
+// through *both* cast layers — otherwise the stored value aliases v[0] and both
+// v and the field drop it (SEGV). The single-layer form already worked; this
+// covers the chained mirror gap in the dup-on-read peel.
+test_chained_cast_index_field_assign() `test {
+  Shape[] v = [];
+  v.push(Circle(name: "elem", radius: 9.0));
+  h := Holder(held: Circle(name: "init", radius: 0.0));
+  h.held = (v[0] as! Circle) as! Circle;
+  assert((h.held as! Circle).radius == 9.0, "chained cast index field-assign radius");
+  assert(h.held.name == "elem", "chained cast index field-assign name (UAF probe)");
+}
+
+// T0800: chained cast over a MEMBER-FIELD subject rebound into a LOCAL. The
+// innermost subject is a MemberExpr (`src.held`); each cast layer is a view, so
+// isRttiCastBorrow must recurse to that MemberExpr and treat the result as a
+// borrow — the local is then dup-on-read cloned (T0802), NOT aliased. (Assigning
+// a member-cast into an owning field slot is separately rejected as a move out
+// of a field, so the local target is the valid shape here.) The source slot must
+// stay alive after the clone. Exercises the MemberExpr innermost-subject arm,
+// distinct from the IdentExpr/IndexExpr cases above.
+test_chained_cast_member_local_rebind() `test {
+  // var-decl form
+  Holder src = Holder(held: Circle(name: "msrc", radius: 11.0));
+  Circle c = (src.held as! Circle) as! Circle;
+  assert(c.radius == 11.0, "chained cast member local-rebind radius");
+  assert(c.name == "msrc", "chained cast member local-rebind name (UAF probe)");
+  assert(src.held.name == "msrc", "chained cast member source still alive (UAF probe)");
+  // assign-to-existing-local form
+  Holder src2 = Holder(held: Circle(name: "msrc2", radius: 14.0));
+  Circle d = Circle(name: "init", radius: 0.0);
+  d = (src2.held as! Circle) as! Circle;
+  assert(d.radius == 14.0, "chained cast member reassign radius");
+  assert(d.name == "msrc2", "chained cast member reassign name (UAF probe)");
+  assert(src2.held.name == "msrc2", "chained cast member source2 still alive (UAF probe)");
+}
+
+// T0800: a THREE-layer chain. The view-of-a-view recursion in isRttiCastBorrow /
+// castSubjectMovableIdent / tryMoveConsumeCastSubject (and the dup-on-read peel
+// loop) must descend to arbitrary depth — a "peel exactly twice" mis-fix would
+// still leave the innermost subject mishandled here. Each layer aliases s, so
+// the rebind local must not get its own drop binding -> no double-free.
+test_chained_cast_triple_layer() `test {
+  Shape s = Circle(name: "triple", radius: 12.0);
+  Circle a = ((s as! Circle) as! Circle) as! Circle;
+  assert(a.radius == 12.0, "triple cast local rebind radius");
+  assert(a.name == "triple", "triple cast local rebind name (UAF probe)");
+  // owning ctor-arg form at triple depth
+  Shape s2 = Circle(name: "triple2", radius: 13.0);
+  Arc[Circle] arc = Arc[Circle](((s2 as! Circle) as! Circle) as! Circle);
+  assert(arc.borrow.radius == 13.0, "triple cast arc ctor-arg radius");
+  assert(arc.borrow.name == "triple2", "triple cast arc ctor-arg name (UAF probe)");
+}

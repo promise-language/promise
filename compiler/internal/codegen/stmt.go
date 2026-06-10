@@ -488,6 +488,19 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					// Block arms don't contribute typed results to match phis;
 					// only expression arms (arm.Body) produce match result values.
 					c.genAutoPropagate(es.Expr)
+				} else if c.borrowBlockResult {
+					// T0792: result consumed as a borrow (`T&`/`T~`) — the last expr
+					// aliases storage owned elsewhere, so do not dup or track it. The
+					// inner expr's natural type (`r.d[0]` → `string`) would otherwise
+					// set dupStringFieldAccess and allocate a copy that the borrow bind
+					// site never takes ownership of. Reset across the genExpr call so a
+					// nested block/if/match keeps its normal owning semantics.
+					savedBorrow := c.borrowBlockResult
+					c.borrowBlockResult = false
+					c.dupStringFieldAccess = false
+					c.dupContainerFieldAccess = false
+					result = c.genExpr(es.Expr)
+					c.borrowBlockResult = savedBorrow
 				} else {
 					// T0095/B0219/B0310/T0487: Signal genFieldAccess to dup string,
 					// Vector|Channel|Arc|Weak, and Optional[...] fields for block

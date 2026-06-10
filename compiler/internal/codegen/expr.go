@@ -7671,6 +7671,13 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		recoveredTargetType = rt
 	}
 
+	// T0792: when the recovery/else body's result is consumed as a borrow
+	// (`T&`/`T~`), genBlockValue must read the last expr as a pure alias — no
+	// dup, no owned-temp tracking. Otherwise the inner expr's natural owned type
+	// (e.g. `r.d[0]` → `string`) sets dupStringFieldAccess and allocates a copy
+	// that the borrow bind site never takes ownership of → leak.
+	borrowRecovery := recoveredTargetType != nil && isRefType(recoveredTargetType)
+
 	var noMatchVal value.Value
 	var noMatchEnd *ir.Block
 
@@ -7726,7 +7733,10 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			if recoveredTargetType != nil {
 				c.targetType = recoveredTargetType
 			}
+			savedBorrow := c.borrowBlockResult
+			c.borrowBlockResult = borrowRecovery
 			noMatchVal = c.genBlockValue(e.ElseBody)
+			c.borrowBlockResult = savedBorrow
 			c.targetType = savedTarget
 			elseDiverged := c.block.Term != nil
 			if !elseDiverged {
@@ -7801,7 +7811,10 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	if recoveredTargetType != nil {
 		c.targetType = recoveredTargetType
 	}
+	savedHandlerBorrow := c.borrowBlockResult
+	c.borrowBlockResult = borrowRecovery
 	handlerVal := c.genBlockValue(e.Body)
+	c.borrowBlockResult = savedHandlerBorrow
 	c.targetType = savedHandlerTarget
 	// Emit drop for the error binding after handler body (scope cleanup).
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedHandlerScope {

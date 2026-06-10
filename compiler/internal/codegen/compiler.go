@@ -183,6 +183,7 @@ type Compiler struct {
 	tempTrackingEnabled     bool                // T0084: true in free functions + user method bodies
 	dupStringFieldAccess    bool                // T0095: when true, genFieldAccess dups string fields from droppable types
 	dupContainerFieldAccess bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
+	borrowBlockResult       bool                // T0792: when true, genBlockValue treats its last expr as a borrow (no dup, no own) — set for error-handler recovery/else bodies whose result type is a ref (`T&`/`T~`)
 	matchBorrowedIdents     map[string]bool     // T0485: idents bound by match destructure as borrows (no drop binding); T0672: also tuple-destructure locals from a borrow source (struct field / container index); if-let/while-let/force-unwrap must not transfer ownership
 	dupTupleFieldAccess     bool                // T0370: when true, genVectorIndex dups droppable tuple elements on read
 	dupHeapUserFieldAccess  bool                // T0398: when true, genVectorIndex deep-clones heap user-type elements on read

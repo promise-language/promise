@@ -13,14 +13,25 @@
 // system's last line of defense and need test coverage so a future
 // regression is caught immediately.
 //
-// Recovery-runtime handler tests are intentionally omitted: combining a
-// failable `T&` return with a handler whose recovery body reads an i8*
-// borrow source leaks 1 alloc (T0792, a separate pre-existing bug).
-// Present-runtime handler tests below are clean and exercise the
-// `isRefType` guard on the ok-path through the ErrorHandlerExpr branch.
+// T0792: the recovery-runtime handler cases below exercise a handler whose
+// recovery body reads an i8* borrow source (`r.d[0]`). Before the fix,
+// genBlockValue dup'd the last expr using its natural owned type (`string`)
+// while the `string &`/`string ~` bind site took no ownership → 1 leaked
+// alloc. The `borrowBlockResult` gate in genErrorHandlerExpr suppresses that
+// dup; these tests run under the zero-leak gate and lock the fix.
+type MyErr is error {
+  int code;
+}
+
 type RefRet {
   string[] d;
   at!(int i) string & {
+    if i < 0 {
+      raise error("bad");
+    }
+    return this.d[i];
+  }
+  atm!(int i) string ~ {
     if i < 0 {
       raise error("bad");
     }
@@ -67,9 +78,8 @@ at_qhat_bind() `test {
   assert(n == 3, "qhat on borrow return, bound to local");
 }
 
-// --- `? e {}` (handler): present-runtime only — the recovery path triggers
-// T0792 (a separate pre-existing leak). The ok-path still exercises the
-// ErrorHandlerExpr branch's `isRefType` guard.
+// --- `? e {}` (handler): present-runtime exercises the ErrorHandlerExpr
+// branch's `isRefType` guard on the ok-path.
 
 at_qhandler_present_temp() `test {
   r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
@@ -85,4 +95,59 @@ at_qhandler_present_bind() `test {
     r.d[0]
   };
   assert(x.len == 3, "handler on borrow return, bound to local, present");
+}
+
+// --- `? e {}` (handler): recovery-runtime — the recovery body reads an i8*
+// borrow source (`r.d[0]`). T0792: the `borrowBlockResult` gate suppresses the
+// spurious dup so the borrow bind site leaves nothing leaked.
+
+at_qhandler_recovery_temp() `test {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  n := (r.at(-1)? e {
+    r.d[0]
+  }).len;
+  assert(n == 3, "handler on borrow return, transient len, recovery");
+}
+
+at_qhandler_recovery_bind() `test {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  string &x = r.at(-1)? e {
+    r.d[0]
+  };
+  assert(x.len == 3, "handler on borrow return, bound to local, recovery");
+}
+
+at_qhandler_recovery_mut() `test {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  string ~x = r.atm(-1)? e {
+    r.d[0]
+  };
+  assert(x.len == 3, "handler on mut-borrow return, bound to local, recovery");
+}
+
+// --- `? e is X { } else { }` (typed handler with else): the borrow-recovery
+// gate also wraps the *else* body's last expr. `at(-1)` raises a base `error`,
+// which does not match `MyErr`, so the else body runs and yields the borrow
+// `r.d[1]`. Before the fix this leaked exactly like the main-body case; the
+// else-path `borrowBlockResult` assignment is its own code path (a distinct
+// genBlockValue call from the handler body) and needs its own gate.
+
+at_qhandler_else_borrow_bind() `test {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  string &x = r.at(-1)? e is MyErr {
+    r.d[0]
+  } else {
+    r.d[1]
+  };
+  assert(x.len == 4, "typed handler else-body borrow recovery, bound to local");
+}
+
+at_qhandler_else_borrow_temp() `test {
+  r := RefRet(d: ["aa" + "x", "bbb" + "y"]);
+  n := (r.at(-1)? e is MyErr {
+    r.d[0]
+  } else {
+    r.d[1]
+  }).len;
+  assert(n == 4, "typed handler else-body borrow recovery, transient len");
 }

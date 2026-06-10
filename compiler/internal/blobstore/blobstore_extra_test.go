@@ -309,7 +309,9 @@ func TestLockContention(t *testing.T) {
 	}
 
 	got := make(chan struct{})
+	started := make(chan struct{})
 	go func() {
+		close(started)
 		unlock2, err := store.Lock("second-holder")
 		if err == nil {
 			unlock2()
@@ -317,7 +319,153 @@ func TestLockContention(t *testing.T) {
 		close(got)
 	}()
 
-	// The second locker must NOT acquire while the first holds it.
+	// Wait for the goroutine to be scheduled and about to attempt the lock, so
+	// the negative window below measures real blocking rather than a not-yet-run
+	// goroutine.
+	<-started
+
+	// Negative-confirmation window: the second locker must NOT acquire while the
+	// first holds it. Correctness of "blocked while held" is guaranteed by the OS
+	// mandatory lock (store.go), not by this timer — the window only catches an
+	// erroneous early acquire.
+	select {
+	case <-got:
+		t.Fatal("second Lock acquired while first still held")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	unlock1()
+	// Failure-detection ceiling only: on success this returns the instant `got`
+	// closes (~150 ms). The generous 10 s absorbs Windows CI lock-wake +
+	// scheduler + file-I/O latency under load.
+	select {
+	case <-got:
+	case <-time.After(10 * time.Second):
+		t.Fatal("second Lock did not acquire after first released")
+	}
+}
+
+// TestFileLock_TryContendsAndReleases exercises the fileLock primitive directly
+// (the layer under Store.Lock that TestLockContention drives end-to-end). Two
+// independent open file descriptions on the same path must contend: while the
+// first holds the exclusive lock, the second's tryLock reports contention
+// (false, nil) — never an error and never a false acquire. After the first
+// unlocks, the second's tryLock succeeds. This pins the per-handle exclusivity
+// guarantee deterministically, with no goroutine or timer.
+func TestFileLock_TryContendsAndReleases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".lock")
+
+	a := newFileLock(path)
+	gotA, err := a.tryLock()
+	if err != nil {
+		t.Fatalf("first tryLock: %v", err)
+	}
+	if !gotA {
+		t.Fatal("first tryLock should acquire an uncontended lock")
+	}
+
+	b := newFileLock(path)
+	gotB, err := b.tryLock()
+	if err != nil {
+		t.Fatalf("contended tryLock should report (false, nil), got err: %v", err)
+	}
+	if gotB {
+		t.Fatal("second tryLock acquired while first still held")
+	}
+
+	if err := a.unlock(); err != nil {
+		t.Fatalf("unlock first: %v", err)
+	}
+
+	gotB, err = b.tryLock()
+	if err != nil {
+		t.Fatalf("tryLock after release: %v", err)
+	}
+	if !gotB {
+		t.Fatal("second tryLock should acquire after first released")
+	}
+	if err := b.unlock(); err != nil {
+		t.Fatalf("unlock second: %v", err)
+	}
+}
+
+// TestFileLock_UnlockBeforeOpen verifies unlock is a no-op when the lock was
+// never opened (l.f == nil) — the early-return guard. Store.Lock's returned
+// closure must be safe even on a fileLock that never reached flockTry.
+func TestFileLock_UnlockBeforeOpen(t *testing.T) {
+	l := newFileLock(filepath.Join(t.TempDir(), ".lock"))
+	if err := l.unlock(); err != nil {
+		t.Fatalf("unlock before open should be a no-op, got %v", err)
+	}
+}
+
+// TestFileLock_BlockingAcquireAfterRelease drives the blocking lock() path (not
+// just tryLock): one holder, a waiter that blocks in lock() until the holder
+// releases. Mirrors Store.Lock's contended branch at the primitive level.
+func TestFileLock_BlockingAcquireAfterRelease(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".lock")
+
+	holder := newFileLock(path)
+	got, err := holder.tryLock()
+	if err != nil || !got {
+		t.Fatalf("holder tryLock: got=%v err=%v", got, err)
+	}
+
+	acquired := make(chan error, 1)
+	started := make(chan struct{})
+	waiter := newFileLock(path)
+	go func() {
+		close(started)
+		acquired <- waiter.lock() // blocks until holder releases
+	}()
+	<-started
+
+	select {
+	case <-acquired:
+		t.Fatal("waiter acquired blocking lock while holder still held")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if err := holder.unlock(); err != nil {
+		t.Fatalf("holder unlock: %v", err)
+	}
+
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("waiter blocking lock: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("waiter did not acquire after holder released")
+	}
+	if err := waiter.unlock(); err != nil {
+		t.Fatalf("waiter unlock: %v", err)
+	}
+}
+
+// TestStoreLock_WaitingMessageNamesHolder verifies the contended branch of
+// Store.Lock reads the sibling .owner file and the second locker still
+// acquires once the first releases — covering the "Waiting for <holder> to
+// finish..." path that reads the identity hint.
+func TestStoreLock_WaitingMessageNamesHolder(t *testing.T) {
+	store := newTestStore(t)
+	unlock1, err := store.Lock("alpha-holder")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan struct{})
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		unlock2, err := store.Lock("beta-holder")
+		if err == nil {
+			unlock2()
+		}
+		close(got)
+	}()
+	<-started
+
 	select {
 	case <-got:
 		t.Fatal("second Lock acquired while first still held")
@@ -327,7 +475,7 @@ func TestLockContention(t *testing.T) {
 	unlock1()
 	select {
 	case <-got:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("second Lock did not acquire after first released")
 	}
 }

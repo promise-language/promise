@@ -112,6 +112,51 @@ func TestEnsureLLVMBlobs_CatalogHit(t *testing.T) {
 	}
 }
 
+// TestEnsureLLVMBlobs_FetchesBuildOnly confirms the build host's slim cache
+// includes build-only tools (T0833): EnsureLLVMBlobs iterates the full Files
+// list (not ClientFiles), so llvm-dlltool lands in the slim cache alongside
+// opt/llc for the winlink generator to use on a prebuilt-only host.
+func TestEnsureLLVMBlobs_FetchesBuildOnly(t *testing.T) {
+	root, _ := fakeReleaseRoot(t, nil)
+	// Rewrite prebuilts.toml to declare a build-only llvm-dlltool.
+	prebuilts := `schema = 1
+[binaries.llvm]
+version = "22.1.0"
+bundle_dir = "compiler/cmd/promise/resources/llvm"
+[binaries.llvm.targets.linux-amd64]
+url = "https://example.test/LLVM.tar.xz"
+sha256 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0"
+files = [
+  { src = "bin/opt", out = "opt" },
+  { src = "bin/llvm-dlltool", out = "llvm-dlltool", build_only = true },
+]
+`
+	if err := os.WriteFile(filepath.Join(root, "tools", "build", "prebuilts.toml"), []byte(prebuilts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, brs := seedSlimCatalog(t, root, map[string]string{"opt": "OPT_BYTES", "llvm-dlltool": "DLLTOOL_BYTES"})
+
+	cacheRoot := t.TempDir()
+	t.Setenv("PROMISE_PREBUILTS_CACHE", cacheRoot)
+	prev := defaultBlobFetcher
+	defaultBlobFetcher = &countingBlobFetcher{assets: brs}
+	t.Cleanup(func() { defaultBlobFetcher = prev })
+
+	dir, err := EnsureLLVMBlobs(root, "linux-amd64")
+	if err != nil {
+		t.Fatalf("EnsureLLVMBlobs: %v", err)
+	}
+	for name, want := range map[string]string{"opt": "OPT_BYTES", "llvm-dlltool": "DLLTOOL_BYTES"} {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s from slim cache: %v", name, err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestEnsureLLVMBlobs_FastPath(t *testing.T) {
 	root, _ := fakeReleaseRoot(t, nil)
 	_, brs := seedSlimCatalog(t, root, map[string]string{"opt": "OPT", "llc": "LLC"})

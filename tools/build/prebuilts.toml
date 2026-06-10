@@ -14,6 +14,13 @@
 # The `out` field is the cache-relative file name *without* the .gz suffix.
 # At build time, the file is gzipped into the embed dir as "<out>.gz". At
 # runtime / in the prebuilts cache, it lives as "<out>" (raw, executable).
+#
+# A file marked `build_only = true` is sliced into the build-host slim cache and
+# hosted as a blob (so a prebuilt-only dev/CI host can use it), but is NOT
+# embedded into the shipped client binary and NOT projected into the client
+# runtime manifest. Used for build-time tools — e.g. llvm-dlltool, which
+# regenerates the Windows winlink import libraries at `bin/build` time and is
+# never invoked by `promise build` on a client (T0772/T0833).
 
 schema = 1
 
@@ -37,6 +44,8 @@ files = [
   { src = "bin/opt", out = "opt" },
   { src = "bin/llc", out = "llc" },
   { src = "bin/lld", out = "lld" },
+  # Build-only: regenerates the Windows winlink import libs (T0772/T0833).
+  { src = "bin/llvm-dlltool", out = "llvm-dlltool", build_only = true },
 ]
 
 [binaries.llvm.targets.darwin-arm64]
@@ -49,6 +58,8 @@ files = [
   { src = "bin/opt", out = "opt" },
   { src = "bin/llc", out = "llc" },
   { src = "bin/lld", out = "lld" },
+  # Build-only: regenerates the Windows winlink import libs (T0772/T0833).
+  { src = "bin/llvm-dlltool", out = "llvm-dlltool", build_only = true },
 ]
 
 [binaries.llvm.targets.darwin-amd64]
@@ -70,4 +81,6 @@ files = [
   { src = "bin/llc.exe", out = "llc.exe" },
   # Codegen aliases lld.exe to lld-link at runtime (see llvm_windows_amd64.go).
   { src = "bin/lld.exe", out = "lld.exe" },
+  # Build-only: regenerates the Windows winlink import libs (T0772/T0833).
+  { src = "bin/llvm-dlltool.exe", out = "llvm-dlltool.exe", build_only = true },
 ]

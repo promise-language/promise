@@ -3,6 +3,7 @@ package common
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -187,5 +188,59 @@ func TestBuildRuntimeManifestFromCatalog_MissingEntrySignalsSentinel(t *testing.
 	// remediation.
 	if !strings.Contains(err.Error(), "publish-blobs") {
 		t.Errorf("error should mention publish-blobs as remediation, got: %v", err)
+	}
+}
+
+// TestBuildRuntimeManifestFromCatalog_ExcludesBuildOnly is the T0833 regression
+// guard for the projection side of constraint #2: a build-only tool declared in
+// prebuilts.toml must NOT appear in the client runtime manifest, and — crucially
+// — its absence from blobs.json must NOT trip the catalog-miss sentinel (the
+// build host hosts/uses the build-only blob out of band, not via this client
+// projection). The client tools (opt/llc) are present in the catalog and project
+// normally.
+func TestBuildRuntimeManifestFromCatalog_ExcludesBuildOnly(t *testing.T) {
+	root, _ := fakeReleaseRoot(t, nil)
+	// Rewrite prebuilts.toml to add a build-only llvm-dlltool alongside opt/llc.
+	prebuilts := `schema = 1
+[binaries.llvm]
+version = "22.1.0"
+bundle_dir = "compiler/cmd/promise/resources/llvm"
+[binaries.llvm.targets.linux-amd64]
+url = "https://example.test/LLVM-22.1.0-Linux-X64.tar.xz"
+sha256 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0"
+files = [
+  { src = "bin/opt", out = "opt" },
+  { src = "bin/llc", out = "llc" },
+  { src = "bin/llvm-dlltool", out = "llvm-dlltool", build_only = true },
+]
+`
+	if err := os.WriteFile(filepath.Join(root, "tools", "build", "prebuilts.toml"), []byte(prebuilts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Catalog has only the client tools — llvm-dlltool is intentionally absent
+	// (it would normally be hosted by publish-blobs, out of band).
+	cat := &BlobsCatalog{Schema: BlobsCatalogSchema, Blobs: []BlobEntry{
+		{Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "opt",
+			SHA256: "1111111111111111111111111111111111111111111111111111111111111111",
+			Size: 10, Compression: compressionBrotli, CompressedSize: 5},
+		{Dependency: "llvm", Version: "22.1.0", Target: "linux-amd64", Name: "llc",
+			SHA256: "2222222222222222222222222222222222222222222222222222222222222222",
+			Size: 20, Compression: compressionBrotli, CompressedSize: 8},
+	}}
+	if err := WriteBlobsCatalog(root, cat); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := BuildRuntimeManifestFromCatalog(root, "linux-amd64", "2026.0")
+	if err != nil {
+		t.Fatalf("BuildRuntimeManifestFromCatalog (build-only excluded): %v", err)
+	}
+	if len(m.Entries) != 2 {
+		t.Fatalf("expected 2 client entries (opt, llc), got %d", len(m.Entries))
+	}
+	for _, e := range m.Entries {
+		if e.Name == "llvm-llvm-dlltool" {
+			t.Errorf("build-only llvm-dlltool leaked into the client manifest: %+v", e)
+		}
 	}
 }

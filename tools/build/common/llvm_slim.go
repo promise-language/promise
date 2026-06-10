@@ -12,9 +12,12 @@ import (
 )
 
 // llvm_slim.go is the build-tool counterpart of compiler/internal/blobstore's
-// runtime resolver. It lets `bin/build` (and CI) obtain LLVM (opt/llc/lld) from
-// the per-blob brotli-11 `deps-llvm-<version>` GitHub release — the same blobs
-// shipped consumers fetch — instead of requiring a system-installed LLVM. The
+// runtime resolver. It lets `bin/build` (and CI) obtain LLVM (opt/llc/lld, plus
+// the build-only llvm-dlltool, T0833) from the per-blob brotli-11
+// `deps-llvm-<version>` GitHub release — the same blobs shipped consumers fetch
+// — instead of requiring a system-installed LLVM. Unlike the client-facing
+// tools, llvm-dlltool stays on the build host only (it regenerates the Windows
+// winlink import libs at build time; clients never invoke it). The
 // cache layout mirrors PrebuiltsCacheRoot's flat per-target dir but lives under
 // `<cacheRoot>/llvm-slim/<version>/<target>/` so it never collides with the
 // existing `<cacheRoot>/llvm/<version>/<target>/` archive-extract cache.
@@ -32,8 +35,11 @@ type slimPlanFile struct {
 }
 
 // EnsureLLVMBlobs returns a host-stable per-target directory whose flat
-// contents are `opt`/`llc`/`lld` (per prebuilts.toml `out` names) for the
-// given target. Uses the catalog's brotli-11 slim blobs when present; falls
+// contents are `opt`/`llc`/`lld` (plus the build-only `llvm-dlltool`, T0833)
+// per prebuilts.toml `out` names for the given target. The build host fetches
+// every prebuilts.toml file — including build-only tools — into the slim cache;
+// only the client embed/manifest paths exclude them (TargetEntry.ClientFiles).
+// Uses the catalog's brotli-11 slim blobs when present; falls
 // back to the upstream tarball (~700 MB) when blobs.json has no entry for the
 // host, printing a one-line `note:` so a maintainer can backfill via
 // `bin/release publish-blobs`.

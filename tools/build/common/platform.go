@@ -21,7 +21,12 @@ type LLVMInfo struct {
 	OptPath string // path to opt
 	LLCPath string // path to llc (may be empty on non-Windows)
 	LLDPath string // path to lld/ld.lld/ld64.lld/lld-link
-	Dir     string // LLVM base directory (for bundling)
+	// DlltoolPath is the path to llvm-dlltool when resolved from the slim cache /
+	// PROMISE_LLVM override (the prebuilts.toml build-only entry, T0833). Empty
+	// when not present — it is optional (only the winlink import-lib generator
+	// needs it) and never required for the (info, true) resolution contract.
+	DlltoolPath string
+	Dir         string // LLVM base directory (for bundling)
 }
 
 // FindLLVM searches for LLVM tools on the current platform. The lookup order
@@ -82,9 +87,13 @@ func FindLLVM(root string) (*LLVMInfo, error) {
 
 // llvmInfoFromDir builds an LLVMInfo from a flat directory containing the
 // per-prebuilts.toml `out` names (opt/llc/lld, plus the `.exe` variants on
-// Windows). Used by both the PROMISE_LLVM override and the slim-fetch
-// fallback. Returns (nil, false) when opt isn't present so the caller can
-// surface a clear error.
+// Windows, and the optional build-only llvm-dlltool). Used by both the
+// PROMISE_LLVM override and the slim-fetch fallback. Returns (nil, false) when
+// opt or lld isn't present so the caller can surface a clear error.
+//
+// llvm-dlltool is optional: it only ships as a build-only slim-cache entry on a
+// prebuilt-only host (T0833) and is unrelated to the opt+lld resolution
+// contract, so a missing dlltool leaves DlltoolPath empty without failing.
 func llvmInfoFromDir(dir string) (*LLVMInfo, bool) {
 	suffix := ExeSuffix()
 	opt := filepath.Join(dir, "opt"+suffix)
@@ -101,6 +110,9 @@ func llvmInfoFromDir(dir string) (*LLVMInfo, bool) {
 	}
 	if lld := filepath.Join(dir, "lld"+suffix); Exists(lld) {
 		info.LLDPath = lld
+	}
+	if dt := filepath.Join(dir, "llvm-dlltool"+suffix); Exists(dt) {
+		info.DlltoolPath = dt
 	}
 	if info.LLDPath == "" {
 		return nil, false

@@ -113,8 +113,9 @@ func llvmKindForTarget(target string) string {
 	return "blob"
 }
 
-// buildLLVMEntries hashes each LLVM tool listed in tEntry.Files under dir (a flat
-// directory of `out`-named extracted binaries — the FetchPrebuilt cache dir or a
+// buildLLVMEntries hashes each client-shipped LLVM tool (tEntry.ClientFiles(),
+// which excludes build-only tools like llvm-dlltool) under dir (a flat directory
+// of `out`-named extracted binaries — the FetchPrebuilt cache dir or a
 // `bin/release blobs` output dir) and builds one manifest entry per tool, named
 // "llvm-<out>" (the logical name resolveLLVMView asks for).
 //
@@ -127,7 +128,10 @@ func llvmKindForTarget(target string) string {
 func buildLLVMEntries(dir string, tEntry *TargetEntry, target string, blobSource func(hash string) runtimeSource) ([]runtimeManifestEntry, error) {
 	kind := llvmKindForTarget(target)
 	var entries []runtimeManifestEntry
-	for _, f := range tEntry.Files {
+	// Build-only tools (e.g. llvm-dlltool) are not shipped to clients, so they
+	// never appear in the client runtime manifest (T0833). The pack loop in
+	// runReleaseManifest iterates ClientFiles() too, keeping indices aligned.
+	for _, f := range tEntry.ClientFiles() {
 		blobPath := filepath.Join(dir, f.Out)
 		hash, size, err := hashAndSize(blobPath)
 		if err != nil {

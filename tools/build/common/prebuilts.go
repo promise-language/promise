@@ -70,6 +70,30 @@ type PrebuiltFile struct {
 	Src            string `toml:"src"`
 	Out            string `toml:"out"`
 	ResolveSymlink bool   `toml:"resolve_symlink"`
+	// BuildOnly marks a file that the build host needs (it is fetched into the
+	// slim cache by EnsureLLVMBlobs and hosted as a blob by publish-blobs) but
+	// that is NOT embedded into the shipped client binary and NOT projected into
+	// the client runtime manifest. Used for build-time tools — e.g. llvm-dlltool,
+	// which regenerates the Windows winlink import libraries (T0772/T0833) at
+	// `bin/build` time but is never invoked by `promise build` on a client.
+	BuildOnly bool `toml:"build_only"`
+}
+
+// ClientFiles returns the subset of t.Files that is shipped to clients: every
+// file except build-only tools (BuildOnly). It is the single source of truth
+// for the build-only exclusion — every client-facing consumer (the release
+// embed bundle and the projected runtime manifest) iterates ClientFiles(),
+// while build-host consumers (slim cache fetch, blob publishing) iterate the
+// full Files list. See PrebuiltFile.BuildOnly (T0833).
+func (t *TargetEntry) ClientFiles() []PrebuiltFile {
+	out := make([]PrebuiltFile, 0, len(t.Files))
+	for _, f := range t.Files {
+		if f.BuildOnly {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 // LoadPrebuiltsManifest parses tools/build/prebuilts.toml under root.

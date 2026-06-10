@@ -121,6 +121,61 @@ func TestGenerateRuntimeManifestLinuxKindIsBlob(t *testing.T) {
 	}
 }
 
+// TestGenerateRuntimeManifest_ExcludesBuildOnly is the T0833 regression guard
+// for the non-catalog release-build manifest path (the catalog path is covered
+// by TestBuildRuntimeManifestFromCatalog_ExcludesBuildOnly). A build-only tool
+// declared in prebuilts.toml must NOT be projected into the client runtime
+// manifest. The assertion is doubly strong: llvm-dlltool is deliberately ABSENT
+// from the cache dir, so if buildLLVMEntries hashed it (i.e. iterated Files
+// instead of ClientFiles) generation would error on the missing file. Success +
+// no llvm-dlltool entry proves the build-only exclusion.
+func TestGenerateRuntimeManifest_ExcludesBuildOnly(t *testing.T) {
+	root := t.TempDir()
+	resDir := filepath.Join(root, "compiler", "cmd", "promise", "resources")
+	if err := os.MkdirAll(resDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	llvmCache := filepath.Join(root, "cache", "llvm")
+	if err := os.MkdirAll(llvmCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Only the client tools are present on disk — llvm-dlltool is intentionally
+	// missing to prove the build-only path is never hashed.
+	for name, content := range map[string]string{"opt": "OPT", "llc": "LLC"} {
+		if err := os.WriteFile(filepath.Join(llvmCache, name), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pm := &PrebuiltsManifest{
+		Schema: PrebuiltsManifestSchema,
+		Binaries: map[string]*PrebuiltEntry{
+			"llvm": {Version: "22.1.0", BundleDir: "compiler/cmd/promise/resources/llvm", Targets: map[string]*TargetEntry{
+				"linux-amd64": {URL: "https://example/LLVM-linux.tar.xz", SHA256: "deadbeef", Files: []PrebuiltFile{
+					{Src: "bin/opt", Out: "opt"},
+					{Src: "bin/llc", Out: "llc"},
+					{Src: "bin/llvm-dlltool", Out: "llvm-dlltool", BuildOnly: true},
+				}},
+			}},
+		},
+	}
+	if err := GenerateRuntimeManifest(root, pm, llvmCache, "linux-amd64", "2026.0"); err != nil {
+		t.Fatalf("GenerateRuntimeManifest should skip the (absent) build-only tool, got: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(resDir, "manifest.json"))
+	var m runtimeManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Entries) != 2 {
+		t.Fatalf("expected 2 client entries (opt, llc), got %d: %+v", len(m.Entries), m.Entries)
+	}
+	for _, e := range m.Entries {
+		if e.Name == "llvm-llvm-dlltool" {
+			t.Errorf("build-only llvm-dlltool leaked into the client runtime manifest: %+v", e)
+		}
+	}
+}
+
 func TestGenerateRuntimeManifestNoLLVMKeepsPlaceholder(t *testing.T) {
 	root := t.TempDir()
 	pm := &PrebuiltsManifest{Schema: PrebuiltsManifestSchema, Binaries: map[string]*PrebuiltEntry{"llvm": {Version: "1", BundleDir: "x"}}}

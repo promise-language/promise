@@ -33,7 +33,10 @@ func BundleLLVM(root string, manifest *PrebuiltsManifest, cacheDir string) error
 	dst := filepath.Join(root, llvmEntry.BundleDir, target)
 
 	fmt.Printf("Bundling LLVM %s (%s) from %s...\n", llvmEntry.Version, target, cacheDir)
-	return BundleFromCache(cacheDir, dst, tEntry.Files)
+	// ClientFiles() excludes build-only tools (e.g. llvm-dlltool) — they live in
+	// the slim cache for build-time use but are never embedded into the client
+	// binary (T0833).
+	return BundleFromCache(cacheDir, dst, tEntry.ClientFiles())
 }
 
 // singleTopLevelDir returns the unique top-level subdirectory of root, or

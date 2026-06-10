@@ -195,7 +195,10 @@ func runReleaseBlobs(root string, args []string) error {
 	if cacheDir == "" {
 		return fmt.Errorf("no LLVM prebuilt fetched for %s", *host)
 	}
-	for _, f := range tEntry.Files {
+	// Only client-shipped blobs are staged for the (non-catalog) manifest flow;
+	// build-only tools are hosted via publish-blobs, not this path (T0833).
+	clientFiles := tEntry.ClientFiles()
+	for _, f := range clientFiles {
 		src := filepath.Join(cacheDir, f.Out)
 		dst := filepath.Join(*out, f.Out)
 		if err := copyFilePreservingMode(src, dst); err != nil {
@@ -203,7 +206,7 @@ func runReleaseBlobs(root string, args []string) error {
 		}
 		printSize(dst)
 	}
-	fmt.Printf("Collected %d blobs into %s\n", len(tEntry.Files), *out)
+	fmt.Printf("Collected %d blobs into %s\n", len(clientFiles), *out)
 	return nil
 }
 
@@ -307,7 +310,10 @@ func runReleaseManifest(root string, args []string) error {
 	if err := os.MkdirAll(*pack, 0o755); err != nil {
 		return err
 	}
-	for i, f := range tEntry.Files {
+	// Iterate ClientFiles() so the index stays aligned with `entries`, which
+	// buildLLVMEntries also builds from ClientFiles() (build-only tools are
+	// excluded from the client manifest, T0833).
+	for i, f := range tEntry.ClientFiles() {
 		src := filepath.Join(blobsDir, f.Out)
 		dst := filepath.Join(*pack, entries[i].SHA256+suffix)
 		if Exists(dst) {
@@ -367,8 +373,12 @@ func BuildRuntimeManifestFromCatalog(root, target, epoch string) (*runtimeManife
 	}
 
 	kind := llvmKindForTarget(target)
-	entries := make([]runtimeManifestEntry, 0, len(tEntry.Files))
-	for _, f := range tEntry.Files {
+	// Build-only tools (e.g. llvm-dlltool) are never projected into the client
+	// runtime manifest — exclude them so a not-yet-published build-only blob
+	// doesn't trip the catalog-miss sentinel for the whole host (T0833).
+	clientFiles := tEntry.ClientFiles()
+	entries := make([]runtimeManifestEntry, 0, len(clientFiles))
+	for _, f := range clientFiles {
 		be, ok := catalog.Lookup(dep, version, target, f.Out)
 		if !ok {
 			return nil, fmt.Errorf("%w: %s/%s/%s/%s — run `bin/release publish-blobs --dependency %s --host %s` first",

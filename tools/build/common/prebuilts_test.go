@@ -70,6 +70,89 @@ func TestLoadPrebuiltsManifest_Real(t *testing.T) {
 	}
 }
 
+// TestPrebuiltsManifest_DlltoolBuildOnly asserts every supported LLVM target in
+// the real prebuilts.toml carries an `llvm-dlltool[.exe]` entry flagged
+// build_only (T0833): the winlink import-lib generator needs it in the slim
+// cache on a prebuilt-only host, but it must never be embedded into the client
+// binary.
+func TestPrebuiltsManifest_DlltoolBuildOnly(t *testing.T) {
+	root, err := FindRoot()
+	if err != nil {
+		t.Skipf("find root: %v", err)
+	}
+	m, err := LoadPrebuiltsManifest(root)
+	if err != nil {
+		t.Fatalf("LoadPrebuiltsManifest: %v", err)
+	}
+	llvm := m.Binaries["llvm"]
+	if llvm == nil {
+		t.Fatal("manifest has no [binaries.llvm] entry")
+	}
+	for target, te := range llvm.Targets {
+		if te.Unsupported != "" {
+			continue // placeholder target (e.g. darwin-amd64) carries no files
+		}
+		wantOut := "llvm-dlltool" + targetExeSuffix(target)
+		var found *PrebuiltFile
+		for i := range te.Files {
+			if te.Files[i].Out == wantOut {
+				found = &te.Files[i]
+				break
+			}
+		}
+		if found == nil {
+			t.Errorf("target %s: missing %q file entry", target, wantOut)
+			continue
+		}
+		if !found.BuildOnly {
+			t.Errorf("target %s: %q must be build_only (it must not embed into the client binary)", target, wantOut)
+		}
+		// And it must be excluded from the client-facing file set.
+		for _, f := range te.ClientFiles() {
+			if f.Out == wantOut {
+				t.Errorf("target %s: %q leaked into ClientFiles()", target, wantOut)
+			}
+		}
+	}
+}
+
+// targetExeSuffix returns ".exe" for windows-* targets, "" otherwise. Unlike
+// ExeSuffix() (which keys off the host), this keys off the manifest target so
+// the structural test holds regardless of which host runs it.
+func targetExeSuffix(target string) string {
+	if strings.HasPrefix(target, "windows-") {
+		return ".exe"
+	}
+	return ""
+}
+
+// TestTargetEntry_ClientFiles covers the build-only exclusion in isolation: the
+// full Files list keeps build-only tools (for the slim cache / blob publishing),
+// while ClientFiles() drops them (for the client embed / runtime manifest).
+func TestTargetEntry_ClientFiles(t *testing.T) {
+	te := &TargetEntry{Files: []PrebuiltFile{
+		{Src: "bin/opt", Out: "opt"},
+		{Src: "bin/lld", Out: "lld"},
+		{Src: "bin/llvm-dlltool", Out: "llvm-dlltool", BuildOnly: true},
+	}}
+	if len(te.Files) != 3 {
+		t.Fatalf("Files = %d, want 3 (build-only tools stay in the full list)", len(te.Files))
+	}
+	client := te.ClientFiles()
+	if len(client) != 2 {
+		t.Fatalf("ClientFiles() = %d, want 2 (build-only excluded)", len(client))
+	}
+	for _, f := range client {
+		if f.BuildOnly {
+			t.Errorf("ClientFiles() returned a build-only file: %q", f.Out)
+		}
+	}
+	// Empty target → empty (not nil-panicking) slice.
+	if got := (&TargetEntry{}).ClientFiles(); len(got) != 0 {
+		t.Errorf("empty TargetEntry.ClientFiles() = %d, want 0", len(got))
+	}
+}
+
 // TestPrebuiltsManifest_ValidateRejectsBadFiles ensures the validator catches
 // FileOps with both src and glob set, or neither, and missing required fields.
 func TestPrebuiltsManifest_ValidateRejectsBadFiles(t *testing.T) {
@@ -871,6 +954,59 @@ files = [
 		if got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
+	}
+}
+
+// TestBundleLLVM_SkipsBuildOnly is the regression guard for T0833 constraint #2:
+// a build-only tool present in the prebuilts cache must NOT be gzipped into the
+// client embed dir (the client never runs llvm-dlltool). opt/llc still bundle.
+func TestBundleLLVM_SkipsBuildOnly(t *testing.T) {
+	cacheDir := t.TempDir()
+	for name, content := range map[string]string{
+		"opt":          "OPT_FETCHED",
+		"llvm-dlltool": "DLLTOOL_FETCHED",
+	} {
+		if err := os.WriteFile(filepath.Join(cacheDir, name), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	root := t.TempDir()
+	manifestDir := filepath.Join(root, "tools", "build")
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := CurrentBuildTarget()
+	manifestText := `schema = 1
+[binaries.llvm]
+version = "22.1.0"
+bundle_dir = "compiler/cmd/promise/resources/llvm"
+[binaries.llvm.targets.` + target + `]
+url = "https://example/llvm.tar.xz"
+sha256 = "deadbeef"
+files = [
+  { src = "bin/opt", out = "opt" },
+  { src = "bin/llvm-dlltool", out = "llvm-dlltool", build_only = true },
+]
+`
+	if err := os.WriteFile(filepath.Join(manifestDir, "prebuilts.toml"), []byte(manifestText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadPrebuiltsManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := BundleLLVM(root, m, cacheDir); err != nil {
+		t.Fatalf("BundleLLVM: %v", err)
+	}
+	dst := filepath.Join(root, "compiler/cmd/promise/resources/llvm", target)
+	// opt is bundled...
+	if got, err := readGzipped(filepath.Join(dst, "opt.gz")); err != nil || got != "OPT_FETCHED" {
+		t.Errorf("opt.gz = %q (err %v), want OPT_FETCHED", got, err)
+	}
+	// ...but the build-only tool is not.
+	if Exists(filepath.Join(dst, "llvm-dlltool.gz")) {
+		t.Error("llvm-dlltool.gz must NOT be embedded into the client binary (build_only)")
 	}
 }
 

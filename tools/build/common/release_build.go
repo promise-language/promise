@@ -172,7 +172,10 @@ func bundleReleaseLLVM(root, target, blobsDir, manifestPath string) error {
 	llvmEntry := pm.Binaries["llvm"]
 	dst := filepath.Join(root, llvmEntry.BundleDir, target)
 	fmt.Printf("Bundling LLVM blobs for full variant (%s)...\n", target)
-	return BundleBrotliFromManifest(manifestPath, blobsDir, dst, tEntry.Files)
+	// ClientFiles() excludes build-only tools — they are absent from the client
+	// runtime manifest, so a build-only entry here would fail the manifest
+	// lookup inside BundleBrotliFromManifest (T0833).
+	return BundleBrotliFromManifest(manifestPath, blobsDir, dst, tEntry.ClientFiles())
 }
 
 // goBuildCompiler runs `go build` for ./cmd/promise with the given build tags and

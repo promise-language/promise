@@ -285,3 +285,35 @@ func TestLLVMInfoFromDir(t *testing.T) {
 		t.Error("expected !ok for dir missing lld")
 	}
 }
+
+// TestLLVMInfoFromDir_Dlltool covers the optional build-only llvm-dlltool probe
+// (T0833): present → DlltoolPath populated; absent → DlltoolPath empty WITHOUT
+// failing resolution (only opt+lld are required for the (info, true) contract).
+func TestLLVMInfoFromDir_Dlltool(t *testing.T) {
+	suffix := ExeSuffix()
+
+	// stubLLVMDir has opt/llc/lld but no llvm-dlltool — resolution still succeeds
+	// and DlltoolPath stays empty.
+	noDlltool := stubLLVMDir(t)
+	info, ok := llvmInfoFromDir(noDlltool)
+	if !ok {
+		t.Fatal("expected ok even without llvm-dlltool (it is optional)")
+	}
+	if info.DlltoolPath != "" {
+		t.Errorf("DlltoolPath = %q, want empty when llvm-dlltool absent", info.DlltoolPath)
+	}
+
+	// Add llvm-dlltool → DlltoolPath resolves to it.
+	withDlltool := stubLLVMDir(t)
+	dt := filepath.Join(withDlltool, "llvm-dlltool"+suffix)
+	if err := os.WriteFile(dt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	info, ok = llvmInfoFromDir(withDlltool)
+	if !ok {
+		t.Fatal("expected ok with llvm-dlltool present")
+	}
+	if info.DlltoolPath != dt {
+		t.Errorf("DlltoolPath = %q, want %q", info.DlltoolPath, dt)
+	}
+}

@@ -1,14 +1,19 @@
 #!/bin/sh
-# Promise language installer - for end users downloading a release binary.
+# Promise language installer (EARLY ACCESS) - for end users while the GitHub repo
+# is still private (T0804). This is the TEMPORARY companion to install.sh: the
+# install flow is identical, but it skips GitHub "latest" release resolution and
+# fetches the pre-built assets straight from the public prebuilts dist bucket
+# (https://prebuilts.promise-lang.org/dist, which is public-read). No
+# PROMISE_BASE_URL needed - the bucket is baked in.
 #
-# Remote install (latest stable):
-#   curl -sSf https://promise-lang.org/install.sh | sh
+# Delete this script once the repo goes public and install.sh resolves "latest"
+# anonymously from GitHub releases (T0804).
 #
-# Remote install (pinned epoch):
-#   curl -sSf https://promise-lang.org/install.sh | sh -s -- --epoch 2026.0
+# Remote install (early access):
+#   curl -sSf https://promise-lang.org/install-early.sh | sh
 #
-# Local install (from this repo, after building locally):
-#   bin/install.sh
+# Remote install (full variant - host toolchain pre-staged, offline):
+#   curl -sSf https://promise-lang.org/install-early.sh | sh -s -- --full
 #
 # This script downloads the pre-built Promise binary for your platform,
 # verifies its checksum, and runs `promise install` which sets up ~/.promise/.
@@ -16,24 +21,24 @@
 
 set -eu
 
-GITHUB_REPO="promise-language/promise"
 PROMISE_HOME="${PROMISE_HOME:-$HOME/.promise}"
+
+# Early access always pulls from the public prebuilts dist bucket - no GitHub
+# release resolution, no PROMISE_BASE_URL override (T0803/T0804). The dist bucket
+# is unversioned, so there is no --epoch flag (unlike install.sh).
+BASE_URL="https://prebuilts.promise-lang.org/dist"
 
 # -- argument parsing --------------------------------------------------------
 
-EPOCH="latest"
 # VARIANT selects the asset suffix: "" = thin (default), "-full" = host workflow
 # pre-staged (offline), "-all" = every target's blobs (deferred, T0774).
 VARIANT=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --epoch)  EPOCH="$2"; shift 2 ;;
-    --epoch=*) EPOCH="${1#--epoch=}"; shift ;;
     --full)   VARIANT="-full"; shift ;;
     --all)    VARIANT="-all"; shift ;;
     -h|--help)
-      echo "Usage: install.sh [--epoch EPOCH] [--full | --all]"
-      echo "  --epoch EPOCH   Install a specific epoch (default: latest stable)"
+      echo "Usage: install-early.sh [--full | --all]"
       echo "  --full          Install the full variant (host toolchain pre-staged; offline)"
       echo "  --all           Install the all variant (every target pre-staged; deferred)"
       exit 0 ;;
@@ -57,7 +62,7 @@ case "$OS" in
   *)
     echo "error: unsupported OS: $OS" >&2
     echo "  On Windows, use the PowerShell installer instead:" >&2
-    echo "    powershell -ExecutionPolicy Bypass -File install.ps1   (or install.cmd)" >&2
+    echo "    powershell -ExecutionPolicy Bypass -File install-early.ps1   (or install-early.cmd)" >&2
     echo "  Or use WSL2 to run the Linux binary." >&2
     exit 1 ;;
 esac
@@ -76,60 +81,7 @@ esac
 RUNTIME_NAME="promise-${PLATFORM}-${ARCH}${VARIANT}"
 ASSET_NAME="${RUNTIME_NAME}.gz"
 
-# -- resolve release tag -----------------------------------------------------
-
-resolve_latest() {
-  API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
-  # -f fails (empty body, nonzero exit) on any HTTP error; we deliberately drop
-  # curl's -S so it does NOT print "curl: (22) ... 404" - an empty TAG is handled
-  # by the generic "not launched yet" message below, which covers a 404, a network
-  # error, or an empty body uniformly (T0804). Same intent for wget's -q.
-  if command -v curl >/dev/null 2>&1; then
-    curl -sf "$API_URL"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO- "$API_URL"
-  else
-    echo "error: curl or wget is required" >&2
-    exit 1
-  fi | grep '"tag_name"' | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'
-}
-
-# T0804: remove this PROMISE_BASE_URL override when the repo goes public.
-# When PROMISE_BASE_URL is set, download the assets directly from that base URL
-# (skipping GitHub "latest" release resolution). Used by the install gate (T0803)
-# to point at the prebuilts dist bucket while the repo is still private.
-if [ -n "${PROMISE_BASE_URL:-}" ]; then
-  BASE_URL="${PROMISE_BASE_URL%/}"
-  if [ "$EPOCH" != "latest" ]; then
-    echo "note: --epoch is ignored under PROMISE_BASE_URL (the dist bucket is unversioned)" >&2
-  fi
-  echo "note: using PROMISE_BASE_URL override ($BASE_URL) - skipping GitHub release resolution (T0803/T0804)" >&2
-  echo "Installing Promise (${PLATFORM}-${ARCH}) from ${BASE_URL}..."
-else
-  if [ "$EPOCH" = "latest" ]; then
-    echo "Fetching latest release..."
-    TAG=$(resolve_latest)
-    if [ -z "$TAG" ]; then
-      # T0804: remove this "not launched yet" messaging once the repo is public.
-      # While https://github.com/promise-language/promise is private, the GitHub
-      # "latest release" lookup fails (404, network error, or empty body), so a
-      # missing TAG almost always means Promise has not launched publicly yet
-      # rather than a problem on the user's machine. Keep the guidance generic -
-      # any resolution failure (not just a GitHub 404) lands here.
-      echo "error: could not find a published Promise release." >&2
-      echo "" >&2
-      echo "  You don't have access to" >&2
-      echo "  https://github.com/promise-language/promise. The project is not" >&2
-      echo "  live - nothing is wrong on your end. Please try again once the" >&2
-      echo "  launch is announced." >&2
-      exit 1
-    fi
-  else
-    TAG="epoch-${EPOCH}"
-  fi
-  echo "Installing Promise ${TAG} (${PLATFORM}-${ARCH})..."
-  BASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${TAG}"
-fi
+echo "Installing Promise (early access, ${PLATFORM}-${ARCH}) from ${BASE_URL}..."
 
 DOWNLOAD_URL="${BASE_URL}/${ASSET_NAME}"
 SUMS_URL="${BASE_URL}/SHA256SUMS"

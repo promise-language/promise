@@ -1,13 +1,18 @@
-# Promise language installer (Windows / PowerShell) - for end users downloading a
-# release binary. This is the real implementation; install.cmd is a thin shim that
-# re-invokes it. Mirrors scripts/install.sh.
+# Promise language installer (EARLY ACCESS, Windows / PowerShell) - for end users
+# while the GitHub repo is still private (T0804). This is the TEMPORARY companion
+# to install.ps1: the install flow is identical, but it skips GitHub "latest"
+# release resolution and fetches the pre-built assets straight from the public
+# prebuilts dist bucket (https://prebuilts.promise-lang.org/dist, which is
+# public-read). No PROMISE_BASE_URL needed - the bucket is baked in.
 #
-# Remote install (latest stable):
-#   irm https://promise-lang.org/install.ps1 | iex
+# Delete this script once the repo goes public and install.ps1 resolves "latest"
+# anonymously from GitHub releases (T0804). Mirrors scripts/early-access/install-early.sh.
 #
-# Remote install (pinned epoch / full variant) - download then run with parameters:
-#   $s = irm https://promise-lang.org/install.ps1
-#   & ([scriptblock]::Create($s)) -Epoch 2026.0
+# Remote install (early access):
+#   irm https://promise-lang.org/install-early.ps1 | iex
+#
+# Remote install (full variant) - download then run with parameters:
+#   $s = irm https://promise-lang.org/install-early.ps1
 #   & ([scriptblock]::Create($s)) -Full
 #
 # Downloads the pre-built Promise binary for your platform, verifies its checksum,
@@ -16,8 +21,6 @@
 
 [CmdletBinding()]
 param(
-    # Install a specific epoch (default: latest stable).
-    [string]$Epoch = "latest",
     # Install the full variant (host toolchain pre-staged; offline).
     [switch]$Full,
     # Install the all variant (every target pre-staged; deferred).
@@ -26,8 +29,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$GitHubRepo  = "promise-language/promise"
 $PromiseHome = if ($env:PROMISE_HOME) { $env:PROMISE_HOME } else { Join-Path $env:USERPROFILE ".promise" }
+
+# Early access always pulls from the public prebuilts dist bucket - no GitHub
+# release resolution, no PROMISE_BASE_URL override (T0803/T0804). The dist bucket
+# is unversioned, so there is no -Epoch parameter (unlike install.ps1).
+$BaseUrl = "https://prebuilts.promise-lang.org/dist"
 
 # VARIANT selects the asset suffix: "" = thin (default), "-full" = host workflow
 # pre-staged (offline), "-all" = every target's blobs (deferred, T0774).
@@ -57,50 +64,7 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
 $RuntimeName = "promise-windows-${Arch}${Variant}.exe"
 $AssetName   = "${RuntimeName}.gz"
 
-# -- resolve release tag -----------------------------------------------------
-
-# T0804: remove this PROMISE_BASE_URL override when the repo goes public.
-# When PROMISE_BASE_URL is set, download the assets directly from that base URL
-# (skipping GitHub "latest" release resolution). Used by the install gate (T0803)
-# to point at the prebuilts dist bucket while the repo is still private.
-if ($env:PROMISE_BASE_URL) {
-    $BaseUrl = $env:PROMISE_BASE_URL.TrimEnd('/')
-    if ($Epoch -ne "latest") {
-        Write-Warning "-Epoch is ignored under PROMISE_BASE_URL (the dist bucket is unversioned)"
-    }
-    Write-Host "note: using PROMISE_BASE_URL override ($BaseUrl) - skipping GitHub release resolution (T0803/T0804)"
-    Write-Host "Installing Promise (windows-${Arch}) from ${BaseUrl}..."
-} else {
-    if ($Epoch -eq "latest") {
-        Write-Host "Fetching latest release..."
-        $api = "https://api.github.com/repos/${GitHubRepo}/releases/latest"
-        try {
-            $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "promise-install" }
-            $Tag = $release.tag_name
-        } catch {
-            $Tag = $null
-        }
-        if (-not $Tag) {
-            # T0804: remove this "not launched yet" messaging once the repo is public.
-            # While https://github.com/promise-language/promise is private, the GitHub
-            # "latest release" lookup fails (404, network error, or empty body), so a
-            # missing tag almost always means Promise has not launched publicly yet
-            # rather than a problem on the user's machine. Keep the guidance generic -
-            # any resolution failure (not just a GitHub 404) lands here.
-            Write-Host "error: could not find a published Promise release." -ForegroundColor Red
-            Write-Host ""
-            Write-Host "  You don't have access to"
-            Write-Host "  https://github.com/promise-language/promise. The project is not"
-            Write-Host "  live - nothing is wrong on your end. Please try again once the"
-            Write-Host "  launch is announced."
-            exit 1
-        }
-    } else {
-        $Tag = "epoch-${Epoch}"
-    }
-    Write-Host "Installing Promise ${Tag} (windows-${Arch})..."
-    $BaseUrl = "https://github.com/${GitHubRepo}/releases/download/${Tag}"
-}
+Write-Host "Installing Promise (early access, windows-${Arch}) from ${BaseUrl}..."
 
 $DownloadUrl = "${BaseUrl}/${AssetName}"
 $SumsUrl     = "${BaseUrl}/SHA256SUMS"
@@ -123,7 +87,7 @@ try {
     # Match the filename field EXACTLY (last whitespace-delimited token): SHA256SUMS
     # lists both the thin (promise-windows-amd64.exe.gz) and full
     # (promise-windows-amd64-full.exe.gz) assets - an exact compare avoids any
-    # substring overlap between the two names (mirrors install.sh's awk $2 match).
+    # substring overlap between the two names (mirrors install-early.sh's awk $2 match).
     # SHA256SUMS is computed over the .gz asset (what's downloaded) - verify
     # before decompressing.
     $sumLine = Get-Content $TmpSums | Where-Object { ($_ -split '\s+')[-1] -eq $AssetName } | Select-Object -First 1

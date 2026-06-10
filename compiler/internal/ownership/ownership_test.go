@@ -10324,6 +10324,100 @@ func TestT0841_IndexHopThroughCallResultTaskAwaitRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move single-owner handle field")
 }
 
+// === T0842: field move out of an OWNED container element double-frees ===
+//
+// Moving a droppable, non-auto-dup field out of an element of an *owned*
+// variable-rooted container (`cs[0].m`) flows through tryMove →
+// checkFieldMoveOwnership — the same path that already rejects the owned-local
+// analog `c.m`. The only gap was isValueTarget peeling MemberExpr but not
+// IndexExpr, so a container-element target bottomed out on the IndexExpr and
+// returned false (not a value target) → no reject → the moved handle aliased
+// the element slot and the container's element drop double-freed it. Peeling
+// through IndexExpr closes the gap.
+
+// Non-optional Mutex field moved out of an owned fixed array element.
+func TestT0842_NonOptionalMutexFieldMoveOutOfOwnedArrayRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type MtxCell { Mutex[int] m; drop(~this) {} }
+		test() {
+			MtxCell[2] cs = [MtxCell(m: Mutex[int](7)), MtxCell(m: Mutex[int](8))];
+			Mutex[int] a = cs[0].m;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'm'")
+}
+
+// Non-optional Mutex field moved out of an owned vector element.
+func TestT0842_NonOptionalMutexFieldMoveOutOfOwnedVectorRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type MtxCell { Mutex[int] m; drop(~this) {} }
+		test() {
+			MtxCell[] cs = [MtxCell(m: Mutex[int](7))];
+			Mutex[int] a = cs[0].m;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'm'")
+}
+
+// The same gap closed for a plain heap-user-type field (not a native handle):
+// `cs[0].b` out of an owned array element also double-freed before the fix.
+func TestT0842_HeapUserFieldMoveOutOfOwnedContainerRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int n; drop(~this) {} }
+		type Cell { Box b; drop(~this) {} }
+		test() {
+			Cell[2] cs = [Cell(b: Box(n: 1)), Cell(b: Box(n: 2))];
+			Box x = cs[0].b;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'b'")
+}
+
+// Nested field move through a mixed member/index chain (`cs[0].inner.m`):
+// isValueTarget peels MemberExpr -> MemberExpr -> IndexExpr -> ident, so a
+// handle two members deep inside an owned array element is rejected too. Pins
+// that the peel loop iterates through more than a single level (the array/vector
+// repros above each have just one MemberExpr directly over the IndexExpr).
+func TestT0842_NestedMutexFieldMoveThroughMemberIndexChainRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner { Mutex[int] m; drop(~this) {} }
+		type Outer { Inner inner; drop(~this) {} }
+		test() {
+			Outer[2] cs = [Outer(inner: Inner(m: Mutex[int](7))), Outer(inner: Inner(m: Mutex[int](8)))];
+			Mutex[int] a = cs[0].inner.m;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'm'")
+}
+
+// Guard: an auto-dup field (Vector) moved out of an owned container element is
+// still ACCEPTED — the isAutoDupType escape in checkFieldMoveOwnership runs
+// before the reject, so the read is a copy, not a move. Pins that the IndexExpr
+// peeling does not over-reject auto-dup fields.
+func TestT0842_AutoDupFieldMoveOutOfOwnedContainerAccepted(t *testing.T) {
+	ownerOK(t, `
+		type Cell { int[] v; }
+		test() {
+			Cell[2] cs = [Cell(v: [1, 2]), Cell(v: [3, 4])];
+			int[] x = cs[0].v;
+		}
+	`)
+}
+
+// Guard: the same field move out of a PAREN-WRAPPED owned local (`(c).m`) is
+// rejected too — isValueTarget peels ParenExpr to reach the variable root, so a
+// paren wrapper can't smuggle past the B0341 field-move reject.
+func TestT0842_MutexFieldMoveOutOfParenWrappedOwnedLocalRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type MtxCell { Mutex[int] m; drop(~this) {} }
+		test() {
+			c := MtxCell(m: Mutex[int](7));
+			Mutex[int] a = (c).m;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move field 'm'")
+}
+
 // === T0754: RTTI cast into an owning slot consumes the subject ===
 //
 // An `x as!/as T` flowing into an owning slot (field / element / constructor

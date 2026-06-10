@@ -476,3 +476,31 @@ t0843_mtx_opt_partial_owned_array() `test {
   Mutex[int] a = cs[0].mtx!;
   assert(a.lock().borrow == 7, "mtx opt partial owned array");
 }
+
+// ---------------------------------------------------------------------------
+// T0842 (ownership reject + supported remedy): moving a NON-OPTIONAL
+// single-owner handle field out of an OWNED CONTAINER ELEMENT (`cs[0].m`, no
+// `!`) is now a compile error (see TestT0842_* Go ownership tests) — there is
+// no slot-null/neutralize path for a plain field move out of an element, so it
+// would otherwise double-free the handle the container's element drop also
+// frees. The supported pattern is to read the handle IN PLACE through the
+// borrowing `.lock()`: the element keeps ownership, the container drops both
+// elements exactly once (no leak, no double-free under the zero-leak policy).
+// ---------------------------------------------------------------------------
+
+type T0842MtxCell {
+  Mutex[int] m;
+  drop(~this) {
+  }
+}
+
+t0842_mtx_read_in_place_owned_array() `test {
+  T0842MtxCell[2] cs = [T0842MtxCell(m: Mutex[int](7)), T0842MtxCell(m: Mutex[int](8))];
+  assert(cs[0].m.lock().borrow == 7, "mtx read in place owned array elem 0");
+  assert(cs[1].m.lock().borrow == 8, "mtx read in place owned array elem 1");
+}
+
+t0842_mtx_read_in_place_owned_vector() `test {
+  cs := [T0842MtxCell(m: Mutex[int](7))];
+  assert(cs[0].m.lock().borrow == 7, "mtx read in place owned vector elem");
+}

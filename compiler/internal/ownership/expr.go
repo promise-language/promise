@@ -1635,12 +1635,21 @@ func enumInstanceHasDroppableField(inst *types.Instance) bool {
 func (c *Checker) isValueTarget(e *ast.MemberExpr) bool {
 	target := e.Target
 	for {
-		if me, ok := target.(*ast.MemberExpr); ok {
-			target = me.Target
-		} else {
-			break
+		switch t := target.(type) {
+		case *ast.MemberExpr:
+			target = t.Target
+		case *ast.IndexExpr:
+			// T0842: a container element (`cs[0].m`) is itself an owned value —
+			// peel through to the container's root so an element-field move out
+			// of an owned container is rejected like an owned-local field move.
+			target = t.Target
+		case *ast.ParenExpr:
+			target = t.Expr
+		default:
+			goto rooted
 		}
 	}
+rooted:
 	// Function calls return owned temporaries — field reads from them
 	// have the same double-drop risk as field reads from variables (B0351).
 	if _, ok := target.(*ast.CallExpr); ok {

@@ -16385,6 +16385,49 @@ func TestMainWrappedAsG0(t *testing.T) {
 	assertNotContains(t, ir, "__promise_user_main")
 }
 
+// T0858: an explicit `return;` in a void, non-failable main() must be lowered
+// to branch to the coroutine's final-suspend block, NOT emit a bare `ret void`
+// against `.goroutine.main`'s i8* result type (which fails LLVM verification).
+func TestMainExplicitReturnNoVoidRet(t *testing.T) {
+	ir := generateIR(t, `
+		main() { return; }
+	`)
+	body := extractDefine(ir, ".goroutine.main")
+	assertNotContains(t, body, "ret void")
+	assertContains(t, body, "br label %final.suspend")
+}
+
+// T0858: a conditional early `return;` in main() must lower the same way.
+func TestMainConditionalReturnNoVoidRet(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			if true { return; }
+			print_line("x");
+		}
+	`)
+	body := extractDefine(ir, ".goroutine.main")
+	assertNotContains(t, body, "ret void")
+	assertContains(t, body, "br label %final.suspend")
+}
+
+// T0858: an early `return;` in main() must still run scope cleanup for heap
+// locals allocated before it. The bare-return path branches to the coroutine
+// final-suspend block via emitScopeCleanup — verify the string drop is emitted
+// (and no bare ret void) so the early-return path can never leak.
+func TestMainEarlyReturnRunsScopeCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "abcdef".repeat(50);
+			if s.len > 0 { return; }
+			print_line(s);
+		}
+	`)
+	body := extractDefine(ir, ".goroutine.main")
+	assertNotContains(t, body, "ret void")
+	assertContains(t, body, "br label %final.suspend")
+	assertContains(t, body, "promise_string_drop")
+}
+
 func TestSchedulerGlobals(t *testing.T) {
 	ir := generateIR(t, `
 		main() { }

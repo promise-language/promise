@@ -1,0 +1,13 @@
+// T0858: a conditional early `return;` in main() must compile and skip the
+// rest of the body — "before" prints, "after" does not. The heap-allocated
+// local `s` is created before the return, so this also exercises the scope
+// cleanup (string drop) emitted on the early-return path that branches to the
+// coroutine's final-suspend block — it must not leak or emit a bare ret void.
+main() `test(expected: "before") {
+  s := "abcdef".repeat(50);
+  print_line("before");
+  if s.len > 0 {
+    return;
+  }
+  print_line(s);
+}

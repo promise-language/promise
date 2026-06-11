@@ -1,0 +1,6 @@
+// T0858: an explicit bare `return;` in a void, non-failable main() must
+// compile (it was mislowered to `ret void` against the coroutine's i8*
+// result type) and the binary must exit cleanly.
+main() `test(expected: "") {
+  return;
+}

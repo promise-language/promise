@@ -2291,6 +2291,11 @@ func (c *Compiler) wrapMainWithScheduler() {
 	cleanupBlk := coroFn.NewBlock("cleanup")
 	doneBlk := coroFn.NewBlock("coro.done")
 
+	// T0858: create finalSuspBlk early so an explicit `return;` in the main
+	// body can branch here (via c.coroutineReturnBlock) instead of emitting
+	// a bare `ret void` against the coroutine's i8* result type.
+	finalSuspBlk := coroFn.NewBlock("final.suspend")
+
 	initSuspBlk.NewSwitch(initResult, suspendBlk,
 		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
 		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
@@ -2333,7 +2338,9 @@ func (c *Compiler) wrapMainWithScheduler() {
 
 		c.block = okBlk
 	} else {
+		c.coroutineReturnBlock = finalSuspBlk // T0858
 		c.genBlock(c.mainDecl.Body)
+		c.coroutineReturnBlock = nil // T0858
 	}
 
 	// Clear panic exit block — main body generation is done
@@ -2370,8 +2377,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 		mainPanicExitBlk.NewUnreachable()
 	}
 
-	// Final suspend: yield back to scheduler
-	finalSuspBlk := coroFn.NewBlock("final.suspend")
+	// Final suspend: yield back to scheduler (finalSuspBlk created earlier, T0858)
 	if c.block != nil && c.block.Term == nil {
 		c.block.NewBr(finalSuspBlk)
 	}

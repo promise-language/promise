@@ -2765,6 +2765,73 @@ func TestOptionalSubjectOptionalCast(t *testing.T) {
 	assertContains(t, ir, "call i32 @promise_type_is(")
 }
 
+// T0850: an `Arc[T?]` (or `Mutex[T?]`) whose element is an Optional must drop
+// the inner optional's heap payload when the last reference is released. The
+// Arc/Mutex inner-drop path (emitInnerDrop) dispatched on extractNamed, which is
+// nil for an Optional, so no case fired and the held value leaked. The fix adds
+// an Optional case that drops the present inner — here @Box.drop on the held Box.
+func TestArcOptionalElementInnerDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Box { string s; }
+		main() {
+			Box? init = Box(s: "x");
+			a := Arc[Box?](init);
+			_ := a;
+		}
+	`)
+	arcDrop := extractDefine(ir, `"Arc[Box?].drop"`)
+	assertContains(t, arcDrop, "call void @Box.drop(")
+}
+
+// T0850: an RTTI optional cast whose subject is a BORROWED optional (`T?&`,
+// here `Arc[Base?].borrow`) used to crash codegen — the non-optional RTTI path
+// fed the loaded `{i1,{i8*,i8*}}` optional to wrapOptional → insertvalue/store
+// type mismatch panic. The fix peels the SharedRef/MutRef and routes through
+// genOptionalCastExpr (borrowSource): it must no longer panic, must emit the
+// optcast blocks (proving it took the optional-subject path), and must dup the
+// inner (heapdup.copy) since the borrow aliases the Arc's external-owned payload.
+func TestBorrowedOptionalSubjectCast(t *testing.T) {
+	ir := generateIR(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		main() {
+			Base b = Der(name: "x");
+			Base? ob = b;
+			a := Arc[Base?](ob);
+			Der? d = a.borrow as Der;
+			if d { }
+		}
+	`)
+	// Routed through the optional-subject `as` path (not the bare-value path).
+	assertContains(t, ir, "optcast.check")
+	assertContains(t, ir, "optcast.some")
+	assertContains(t, ir, "optcast.none")
+	assertContains(t, ir, "optcast.merge")
+	assertContains(t, ir, "call i32 @promise_type_is(")
+	// The borrowed inner is duped into an owned copy before the RTTI dispatch.
+	assertContains(t, extractDefine(ir, ".goroutine.main"), "heapdup.copy")
+}
+
+// T0850: a forced borrowed-optional cast (`Arc[T?].borrow as! U`) takes the
+// optional-subject force path (panic on none/mismatch, return the duped inner).
+func TestBorrowedOptionalSubjectForceCast(t *testing.T) {
+	ir := generateIR(t, `
+		type Base { string name; tag(&this) string `+"`"+`abstract; }
+		type Der is Base { tag(&this) string { return "d"; } }
+		main() {
+			Base b = Der(name: "x");
+			Base? ob = b;
+			a := Arc[Base?](ob);
+			d := a.borrow as! Der;
+			_ := d.tag();
+		}
+	`)
+	assertContains(t, ir, "optcast.present")
+	assertContains(t, ir, "optcast.nonepanic")
+	assertContains(t, ir, "optcast.mismatch")
+	assertContains(t, extractDefine(ir, ".goroutine.main"), "heapdup.copy")
+}
+
 // T0761: an Optional cast whose subject is a container element (`v[i]`) aliases
 // the vector's bucket, so genOptionalCastExpr must dup the inner — otherwise both
 // the cast result and the vector free it (double-free) / the result leaks. The

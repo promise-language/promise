@@ -1,0 +1,128 @@
+// T0850: an RTTI optional cast `x as U` / `x as! U` whose subject `x` is a
+// BORROWED optional (`T?&` — e.g. `Arc[T?].borrow`, or a `Mutex[T?]` guard's
+// `.borrow`) used to crash codegen (`wrapOptional` store/insertvalue type
+// mismatch). The fix routes a SharedRef/MutRef-of-Optional subject through the
+// optional-subject cast path, dups the inner (owned by the external Arc/Mutex
+// payload) into an owned copy, and keeps the result's drop flag so the cast
+// local frees its copy while the owner frees the original — no panic, no leak,
+// no double-free. Also covers the if-unwrap of a borrowed optional (`if x :=
+// a.borrow {}`), previously rejected by sema, now auto-derefs to a Borrowed view.
+type Shape {
+  string name;
+  area(&this) f64 `abstract;
+}
+type Circle is Shape {
+  f64 radius;
+  area(&this) f64 {
+    return this.radius;
+  }
+}
+type Square is Shape {
+  f64 side;
+  area(&this) f64 {
+    return this.side;
+  }
+}
+
+// `as` on a borrowed Arc optional, matching subtype → some; read back the value.
+arc_optional_cast_match() `test {
+  Circle? init = Circle(name: "c", radius: 1.5);
+  Arc[Circle?] a = Arc[Circle?](init);
+  Circle? cc = a.borrow as Circle;
+  f64 r = 0.0;
+  if cc {
+    r = cc.radius;
+  }
+  assert(r == 1.5, "matching cast should read back the held value");
+}
+
+// `as` on a borrowed Arc optional whose held value is `none` → none. Exercises
+// the borrowSource none path at runtime (present flag false → `optcast.none`
+// directly, the up-front inner dup is a null no-op, nothing leaks): the prior
+// tests all hold a present optional, so this is the only coverage of the
+// none-subject branch reached through a reference.
+arc_optional_cast_none() `test {
+  Circle? init = none;
+  Arc[Circle?] a = Arc[Circle?](init);
+  Circle? cc = a.borrow as Circle;
+  bool present = false;
+  if cc {
+    present = true;
+  }
+  assert(!present, "none subject should yield none");
+}
+
+// `as` on a borrowed Arc optional, non-matching subtype → none.
+arc_optional_cast_mismatch() `test {
+  Circle? init = Circle(name: "c", radius: 1.5);
+  Arc[Circle?] a = Arc[Circle?](init);
+  Square? sq = a.borrow as Square;
+  bool present = false;
+  if sq {
+    present = true;
+  }
+  assert(!present, "mismatched cast should yield none");
+}
+
+// `as!` (force) on a borrowed Arc optional, matching subtype → inner value.
+arc_optional_force_cast() `test {
+  Circle? init = Circle(name: "c", radius: 2.5);
+  Arc[Circle?] a = Arc[Circle?](init);
+  Circle c = a.borrow as! Circle;
+  assert(c.radius == 2.5, "force cast should return the held value");
+}
+
+// `as` on a borrowed Mutex[T?] guard (MutRef-of-Optional) → some.
+mutex_guard_optional_cast() `test {
+  Circle? init = Circle(name: "m", radius: 3.5);
+  Mutex[Circle?] m = Mutex[Circle?](init);
+  MutexGuard[Circle?] g = m.lock();
+  Circle? cc = g.borrow as Circle;
+  f64 r = 0.0;
+  if cc {
+    r = cc.area();
+  }
+  assert(r == 3.5, "mutex guard cast should read back the held value");
+}
+
+// if-unwrap of a borrowed Arc optional (secondary T0850 fix) — binds a borrow.
+arc_optional_if_unwrap() `test {
+  Circle? init = Circle(name: "c", radius: 4.5);
+  Arc[Circle?] a = Arc[Circle?](init);
+  f64 r = 0.0;
+  if x := a.borrow {
+    r = x.radius;
+  }
+  assert(r == 4.5, "if-unwrap of a borrowed optional should bind the inner");
+}
+
+// if-unwrap of a borrowed Mutex[T?] guard (MutRef-of-Optional) — exercises the
+// MutRef arm of the if-unwrap auto-deref (sema) and the Borrowed-binding gate
+// (ownership), the sibling of the Arc/SharedRef `arc_optional_if_unwrap` above.
+mutex_guard_if_unwrap() `test {
+  Circle? init = Circle(name: "m", radius: 7.5);
+  Mutex[Circle?] m = Mutex[Circle?](init);
+  MutexGuard[Circle?] g = m.lock();
+  f64 r = 0.0;
+  if x := g.borrow {
+    r = x.radius;
+  }
+  assert(r == 7.5, "mutex guard if-unwrap should bind the inner");
+}
+
+// Two strong Arc references kept alive across a borrowed cast — exercises the
+// dup-vs-owner split (the cast local owns its copy; both Arc refs free the one
+// shared payload exactly once).
+arc_shared_borrowed_cast() `test {
+  Circle? init = Circle(name: "s", radius: 6.5);
+  Arc[Circle?] a = Arc[Circle?](init);
+  Arc[Circle?] b = a.clone();
+  Circle? cc = a.borrow as Circle;
+  f64 r = 0.0;
+  if cc {
+    r = cc.radius;
+  }
+  Circle c2 = b.borrow as! Circle;
+  assert(r == 6.5, "first borrow read");
+  assert(c2.radius == 6.5, "second borrow read");
+}

@@ -290,6 +290,16 @@ func (c *Compiler) isRttiCastBorrow(expr ast.Expr) bool {
 	if c.typeSubst != nil && srcType != nil {
 		srcType = types.Substitute(srcType, c.typeSubst)
 	}
+	// T0850: peel a SharedRef/MutRef layer so a borrowed optional (`T?&`, e.g.
+	// `Arc[T?].borrow`) is recognized as the optional-unwrap case below — its cast
+	// dups the inner into an owned copy (genOptionalCastExpr borrowSource path), so
+	// the cast local owns it and must keep its drop flag, not be treated as a view.
+	switch ref := srcType.(type) {
+	case *types.SharedRef:
+		srcType = ref.Elem()
+	case *types.MutRef:
+		srcType = ref.Elem()
+	}
 	if _, isOpt := srcType.(*types.Optional); isOpt {
 		return false // optional-unwrap — owns the extracted inner value
 	}

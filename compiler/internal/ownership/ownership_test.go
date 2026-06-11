@@ -3986,6 +3986,40 @@ func TestDestructureFromFieldNLLNarrowing(t *testing.T) {
 	`)
 }
 
+// T0850: an if-unwrap of a borrowed optional (`Arc[T?].borrow`) binds a
+// non-owning view (Borrowed state), so reading it is fine but moving it out
+// into an owned var-decl must be rejected — otherwise the moved-out copy and
+// the Arc payload would both free the same instance (double-free).
+func TestIfUnwrapBorrowedOptionalReadOK(t *testing.T) {
+	ownerOK(t, `
+		type Shape { string name; area(&this) f64 `+"`"+`abstract; }
+		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		test() {
+			Circle? init = Circle(name: "c", radius: 1.0);
+			a := Arc[Circle?](init);
+			if x := a.borrow {
+				_ := x.radius;
+			}
+		}
+	`)
+}
+
+func TestIfUnwrapBorrowedOptionalMoveRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Shape { string name; area(&this) f64 `+"`"+`abstract; }
+		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		test() {
+			Circle? init = Circle(name: "c", radius: 1.0);
+			a := Arc[Circle?](init);
+			if x := a.borrow {
+				Circle owned = x;
+				_ := owned.radius;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'x'")
+}
+
 // Destructure-from-field then move the destructured local into a consume
 // site — must reject. Mirrors the existing T0338 "cannot move borrowed value"
 // path: the local is in Borrowed state so tryMoveConsume rejects.

@@ -2523,6 +2523,26 @@ func (c *Compiler) emitInnerDrop(blk *ir.Block, typedPtr value.Value, structTy *
 		return blk
 	}
 
+	// T0850: Optional element (`Arc[T?]` / `Mutex[T?]`) — load the `{i1, inner}`
+	// optional value and delegate to emitVariantFieldDrop, whose Optional branch
+	// (emitOptionalValueDrop) drops the present inner. Without this, extractNamed
+	// returns nil for an Optional, no case below fires, and the inner heap payload
+	// leaks. Same save/restore pattern as the Tuple case — emitOptionalValueDrop
+	// creates present/none sub-blocks.
+	if opt, ok := elemType.(*types.Optional); ok {
+		valField := blk.NewGetElementPtr(structTy, typedPtr,
+			constant.NewInt(irtypes.I32, 0), fi)
+		optVal := blk.NewLoad(c.resolveType(opt), valField)
+		savedFn, savedEntry, savedBlock := c.fn, c.entryBlock, c.block
+		c.fn = blk.Parent
+		c.entryBlock = blk.Parent.Blocks[0]
+		c.block = blk
+		c.emitVariantFieldDrop(optVal, opt)
+		blk = c.block
+		c.fn, c.entryBlock, c.block = savedFn, savedEntry, savedBlock
+		return blk
+	}
+
 	switch {
 	case named != nil && isPrimitiveScalar(named):
 		// Copy type — no inner drop needed

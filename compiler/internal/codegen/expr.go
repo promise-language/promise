@@ -10820,8 +10820,26 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		if c.typeSubst != nil {
 			srcType = types.Substitute(srcType, c.typeSubst)
 		}
+		// T0850: a borrowed optional (`T?&` — e.g. `Arc[T?].borrow` or a
+		// `Mutex[T?]` guard's `.borrow`) has srcType SharedRef/MutRef-of-Optional.
+		// genExpr auto-derefs the borrow to the loaded `{i1,{i8*,i8*}}` optional, so
+		// it must route through the optional-subject path too — otherwise the
+		// non-optional RTTI path feeds the optional value to wrapOptional and panics
+		// with an insertvalue/store type mismatch. The inner is owned by the external
+		// owner (the Arc/Mutex payload), so flag borrowSource → dup, no neutralize.
+		borrowSource := false
+		switch ref := srcType.(type) {
+		case *types.SharedRef:
+			if opt, ok := ref.Elem().(*types.Optional); ok {
+				srcType, borrowSource = opt, true
+			}
+		case *types.MutRef:
+			if opt, ok := ref.Elem().(*types.Optional); ok {
+				srcType, borrowSource = opt, true
+			}
+		}
 		if opt, ok := srcType.(*types.Optional); ok {
-			return c.genOptionalCastExpr(e, opt, targetNamed)
+			return c.genOptionalCastExpr(e, opt, targetNamed, borrowSource)
 		}
 	}
 
@@ -10956,7 +10974,15 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 //   - local ident/member sources: the source's own drop binding owns the inner;
 //     neutralizeOptionalCastSource (as) / neutralizeForceUnwrapSource at the
 //     binding (force, B0293) clears it on the match path only.
-func (c *Compiler) genOptionalCastExpr(e *ast.CastExpr, opt *types.Optional, targetNamed *types.Named) value.Value {
+//
+// T0850: borrowSource is set when the subject is a borrowed optional (`T?&`,
+// e.g. `Arc[T?].borrow`). A borrow's inner is owned by an external owner (the
+// Arc/Mutex payload) the cast can neither move nor neutralize, so all three
+// ownership decisions collapse to the aliasing case: dup the inner up front,
+// never neutralize the source (a borrow getter is a MemberExpr whose leaf is a
+// getter — neutralizing would mis-resolve it as a field), and let the result own
+// the dup (heap-temp tracked so present+mismatch frees it, match claims it).
+func (c *Compiler) genOptionalCastExpr(e *ast.CastExpr, opt *types.Optional, targetNamed *types.Named, borrowSource bool) value.Value {
 	// T0761: scalar optional subject (`int? as f64` / `char? as! int`). The inner
 	// (optional field 1) is a bare scalar, not a `{vtable,instance}` value struct,
 	// so the RTTI path below would extractvalue a non-aggregate and panic. Mirror
@@ -10994,7 +11020,7 @@ func (c *Compiler) genOptionalCastExpr(e *ast.CastExpr, opt *types.Optional, tar
 	// instead (B0293), and owned temps (call results) own their inner outright, so
 	// neither is duped. dupHeapValue is null-safe, so this is correct even when the
 	// optional is none (the dup is a no-op on a null instance).
-	if c.optionalCastSourceAliasesExternalOwner(e.Expr) {
+	if borrowSource || c.optionalCastSourceAliasesExternalOwner(e.Expr) {
 		elem := opt.Elem()
 		if c.typeSubst != nil {
 			elem = types.Substitute(elem, c.typeSubst)
@@ -11061,7 +11087,7 @@ func (c *Compiler) genOptionalCastExpr(e *ast.CastExpr, opt *types.Optional, tar
 	// behavior. Ident/local-member sources are skipped: their inner is owned by the
 	// source's own drop binding (neutralized only on the match path), so tracking
 	// here would double-free.
-	if c.optionalCastResultOwnsInner(e.Expr) {
+	if borrowSource || c.optionalCastResultOwnsInner(e.Expr) {
 		elem := opt.Elem()
 		if c.typeSubst != nil {
 			elem = types.Substitute(elem, c.typeSubst)
@@ -11080,7 +11106,11 @@ func (c *Compiler) genOptionalCastExpr(e *ast.CastExpr, opt *types.Optional, tar
 	// Conditional move: only on present+match does the result take ownership of
 	// the inner; clear the source optional's present flag so its drop becomes a
 	// no-op. On none/mismatch the source keeps & frees the inner.
-	c.neutralizeOptionalCastSource(e.Expr)
+	// T0850: a borrowed optional has no local present flag to clear (the inner was
+	// duped above; the external owner keeps & frees the original), so skip.
+	if !borrowSource {
+		c.neutralizeOptionalCastSource(e.Expr)
+	}
 	someResult := c.wrapOptional(inner, optType)
 	c.block.NewBr(mergeBlock)
 	someEnd := c.block

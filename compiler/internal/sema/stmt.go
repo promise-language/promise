@@ -911,7 +911,21 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		c.checkVarDeclFailable(s.Init)
 		if initType != nil {
 			c.checkNoShadow(s.Binding, s.Pos())
-			opt, ok := initType.(*types.Optional)
+			// T0850: a borrowed optional (`T?&` / `T?~`, e.g. `Arc[T?].borrow` or a
+			// `Mutex[T?]` guard's `.borrow`) auto-derefs — unwrap the ref so the
+			// scrutinee is treated as an optional. The inner is borrowed from the
+			// external owner (the Arc/Mutex payload), so the binding is a non-owning
+			// borrow: codegen registers no drop for it (the drop registration is
+			// gated on a bare Optional), and the ownership pass marks it Borrowed so
+			// it cannot be moved out (which would double-free with the owner).
+			optType := initType
+			switch ref := initType.(type) {
+			case *types.SharedRef:
+				optType = ref.Elem()
+			case *types.MutRef:
+				optType = ref.Elem()
+			}
+			opt, ok := optType.(*types.Optional)
 			if !ok {
 				c.errorf(s.Init.Pos(), "if-unwrap requires optional type, got %s", initType)
 				c.insert(types.NewVar(tpos(s.Pos()), s.Binding, initType))

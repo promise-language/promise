@@ -14197,6 +14197,23 @@ func TestLevenshteinBasic(t *testing.T) {
 	}
 }
 
+// T0850: if-unwrap of a borrowed optional (`T?&`, here `Arc[T?].borrow`) is
+// accepted — sema auto-derefs the SharedRef/MutRef and binds the inner. Was
+// previously rejected with "if-unwrap requires optional type, got Circle?&".
+func TestIfUnwrapBorrowedOptional(t *testing.T) {
+	checkOK(t, `
+		type Shape { string name; area(&this) f64 `+"`"+`abstract; }
+		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		test() {
+			Circle? init = Circle(name: "c", radius: 1.0);
+			a := Arc[Circle?](init);
+			if x := a.borrow {
+				_ := x.radius;
+			}
+		}
+	`)
+}
+
 // T0155: Arc[T] constructor requires exactly 1 argument.
 func TestArcConstructorOneArg(t *testing.T) {
 	checkOK(t, `

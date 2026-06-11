@@ -10758,6 +10758,113 @@ func TestT0784_YieldCastFromOwnedLocalMarksMoved(t *testing.T) {
 	expectOwnerError(t, errs, "use of moved variable 's'")
 }
 
+// === T0783: returning an RTTI cast of an owned local moves the subject ===
+// `return s as! Circle` aliases s's instance into the returned value; ownership
+// now calls tryMoveCastSubject at ReturnStmt so the subject is moved (mirroring
+// T0754/T0784). The move itself is not separately observable via a later use
+// (a return terminates flow), so these are ownerOK guards: the change must NOT
+// over-reject the valid owned-param / owned-local / chained / borrow-typed
+// return-cast shapes. The double-free regression is guarded by the codegen
+// drop-flag test (TestT0783_ReturnCastClearsSubjectDropFlag) and the e2e
+// casting_test.pr suite.
+
+// Owned `~`-param return-cast (the repro) must type-check cleanly — the new
+// tryMoveCastSubject must not introduce a spurious error.
+func TestT0783_ReturnCastFromOwnedParamOK(t *testing.T) {
+	ownerOK(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper(~Shape s) Circle { return s as! Circle; }
+		test() {}
+	`)
+}
+
+// Owned-local return-cast must type-check cleanly.
+func TestT0783_ReturnCastFromOwnedLocalOK(t *testing.T) {
+	ownerOK(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper() Circle {
+			Shape s = Circle(name: "src", radius: 2.0);
+			return s as! Circle;
+		}
+		test() {}
+	`)
+}
+
+// Chained return-cast (T0800 sibling on the return path) must type-check cleanly:
+// tryMoveCastSubject recurses through the nested CastExpr to the innermost
+// subject without rejecting it.
+func TestT0783_ReturnChainedCastOK(t *testing.T) {
+	ownerOK(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper(~Shape s) Circle { return (s as! Circle) as! Circle; }
+		test() {}
+	`)
+}
+
+// Borrow-typed return-cast must NOT be rejected — this pins the deliberate
+// choice of tryMove over tryMoveConsume at the return. A borrowed parameter
+// returned as a cast under a borrow-typed result is valid; tryMove short-circuits
+// on Borrowed state, whereas tryMoveConsumeCastSubject would wrongly reject it
+// ("cannot move out of '.borrow' getter" / "cannot move borrowed parameter").
+func TestT0783_ReturnCastBorrowedParamNotRejected(t *testing.T) {
+	ownerOK(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper(Shape &s) Circle & { return s as! Circle &; }
+		test() {}
+	`)
+}
+
+// Paren-wrapped return-cast (`return (s as! Circle);`) must type-check cleanly.
+// This pins tryMoveCastSubject's *outer* ParenExpr peel loop: the whole return
+// value is a ParenExpr wrapping the CastExpr, so the cast is only reached after
+// stripping the leading paren(s). (The chained test exercises the *inner* paren
+// peel — between two casts — but never the outer one.)
+func TestT0783_ReturnParenWrappedCastOK(t *testing.T) {
+	ownerOK(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper(~Shape s) Circle { return (s as! Circle); }
+		test() {}
+	`)
+}
+
+// Optional `as` return-cast (`return s as Circle;`, result `Circle?`) must
+// type-check cleanly AND must NOT move the subject at ownership level — it is a
+// *conditional* move (None on a failed downcast). This pins tryMoveCastSubject's
+// `!cast.Force` early return: the subject stays Owned so its scope-exit drop is
+// preserved (clearing it would leak on the failure path). Tracked separately as
+// T0849 (runtime-outcome-conditioned drop).
+func TestT0783_ReturnOptionalCastOK(t *testing.T) {
+	ownerOK(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape {
+			f64 radius;
+			area(&this) f64 { return this.radius; }
+		}
+		helper(~Shape s) Circle? { return s as Circle; }
+		test() {}
+	`)
+}
+
 // MapLit *key* with cast wrapper — borrowed param must be rejected. The
 // MapLit-value test above exercises the second of the two adjacent
 // tryMoveConsumeCastSubject calls; this one pins the first (key) branch so

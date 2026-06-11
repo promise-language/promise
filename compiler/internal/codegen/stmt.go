@@ -7252,6 +7252,22 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	if s.Value != nil && !needsDup {
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
+		} else if cast, ok := unwrapDestructureParens(s.Value).(*ast.CastExpr); ok && cast.Force {
+			// T0783: `return x as! T` aliases x's instance into the returned
+			// value; ownership now moves x at the return, so clear x's drop flag
+			// to keep codegen symmetric — otherwise x's scope-exit drop fires on
+			// the same allocation the caller now owns (double-free).
+			//
+			// Gated on the outermost cast's Force: only the unconditional `as!`
+			// form is an unconditional move. The optional `as` form (Force ==
+			// false) yields `T?` and is a *conditional* move (None on a failed
+			// downcast); clearing the flag there would leak the subject on the
+			// failure path. That conditional-move case (and its owning-slot
+			// sibling) is tracked as T0849 — it needs runtime-outcome-conditioned
+			// drop handling rather than an unconditional clear here.
+			if ident := c.castSubjectMovableIdent(s.Value); ident != nil {
+				c.clearDropFlag(ident.Name)
+			}
 		}
 	}
 	// T0108: Clean up statement temps before returning. The return expression may

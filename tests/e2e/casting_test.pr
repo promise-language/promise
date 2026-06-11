@@ -1074,3 +1074,86 @@ test_chained_cast_triple_layer() `test {
   assert(arc.borrow.radius == 13.0, "triple cast arc ctor-arg radius");
   assert(arc.borrow.name == "triple2", "triple cast arc ctor-arg name (UAF probe)");
 }
+
+// --- T0783: returning an RTTI cast of an owned local/`~`-param must move the
+// subject ---
+// `return s as! Circle` aliases s's heap instance into the returned value. The
+// caller's binding owns it; without moving s at the return, s's scope-exit drop
+// fires on the same allocation -> double-free / SEGV. The return path was outside
+// T0754's owning-slot scope: ownership now calls tryMoveCastSubject at ReturnStmt
+// and codegen clears the cast subject's drop flag via castSubjectMovableIdent.
+// Sibling of T0747 (local rebind) / T0754 (owning slot) / T0800 (chained).
+t0783_circle_from_shape(~Shape s) Circle {
+  return s as! Circle;
+}
+
+test_t0783_return_cast_param() `test {
+  Shape s = Circle(name: "src", radius: 2.0);
+  Circle c = t0783_circle_from_shape(s);
+  assert(c.radius == 2.0, "return-cast param radius (double-free probe)");
+  assert(c.name == "src", "return-cast param name (UAF probe)");
+}
+
+// Owned local (not a param) cast-returned: the subject is declared inside the
+// callee, so the per-binding drop flag must be cleared by the return.
+t0783_owned_local() Circle {
+  Shape s = Circle(name: "local", radius: 5.0);
+  return s as! Circle;
+}
+
+test_t0783_return_cast_owned_local() `test {
+  Circle c = t0783_owned_local();
+  assert(c.radius == 5.0, "return-cast owned-local radius (double-free probe)");
+  assert(c.name == "local", "return-cast owned-local name (UAF probe)");
+}
+
+// Chained cast on the return path (T0800 sibling): the move/drop-flag-clear must
+// recurse through nested CastExpr to the innermost subject.
+t0783_chained(~Shape s) Circle {
+  return (s as! Circle) as! Circle;
+}
+
+test_t0783_return_cast_chained() `test {
+  Shape s = Circle(name: "chain", radius: 7.0);
+  Circle c = t0783_chained(s);
+  assert(c.radius == 7.0, "return-cast chained radius (double-free probe)");
+  assert(c.name == "chain", "return-cast chained name (UAF probe)");
+}
+
+// Paren-wrapped return-cast (`return (s as! Circle);`): the whole return value
+// is wrapped in parens, so both ownership (tryMoveCastSubject's outer paren peel)
+// and codegen (unwrapDestructureParens) must strip the leading paren before
+// reaching the cast — otherwise the move/drop-flag-clear is skipped and s
+// double-frees at scope exit.
+t0783_paren_wrapped(~Shape s) Circle {
+  return (s as! Circle);
+}
+
+test_t0783_return_cast_paren_wrapped() `test {
+  Shape s = Circle(name: "paren", radius: 9.0);
+  Circle c = t0783_paren_wrapped(s);
+  assert(c.radius == 9.0, "return paren-wrapped cast radius (double-free probe)");
+  assert(c.name == "paren", "return paren-wrapped cast name (UAF probe)");
+}
+
+// T0783's drop-flag clear is gated on the *outermost* cast's Force, so the
+// optional `as` form (`return s as Circle`, result `Circle?`) is deliberately
+// left alone — it is a *conditional* move (None on a failed downcast). This
+// guards that gate on the FAILURE path: the downcast fails, the result is None,
+// and the owned subject `s` must still be dropped at scope exit (a spurious
+// drop-flag clear here would leak `s`). The conditional-move double-free on the
+// *success* path is the separate, pre-existing T0849 (not in T0783's scope), so
+// this only exercises the leak-free failure path.
+t0783_try_circle_optional(~Shape s) Circle? {
+  return s as Circle;
+}
+
+test_t0783_return_optional_cast_failure_no_leak() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  Circle? c = t0783_try_circle_optional(s);
+  bool absent = true;
+  if c {
+    absent = false;
+  }
+  assert(absent, "failed downcast -> none; subject must drop, not leak (T0783 Force gate)");
+}

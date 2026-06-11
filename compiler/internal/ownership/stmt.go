@@ -82,6 +82,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 		if s.Value != nil {
 			c.checkExpr(s.Value)
 			c.tryMove(s.Value)
+			c.tryMoveCastSubject(s.Value) // T0783
 			c.checkReturnRefSafety(s)
 		}
 

@@ -27419,6 +27419,82 @@ func TestThisCastOptionalNoExtractFromPtr(t *testing.T) {
 	}
 }
 
+// --- T0783: `return x as! T` clears the cast subject's drop flag ---
+//
+// `return s as! Circle` aliases s's heap instance into the returned value; the
+// caller's binding owns it. genReturnStmt now peels the cast via
+// castSubjectMovableIdent and clears the subject's drop flag (the same helper
+// T0754/T0800 use at owning-slot stores) so s's scope-exit drop does not fire
+// on the same allocation -> double-free. The IR signature is a
+// `store i1 false, i1* %s.dropflag` on the cast-success path before the return;
+// without the fix that clear is absent and the conditional drop executes.
+func TestT0783_ReturnCastClearsSubjectDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		helper(int dummy) Circle {
+			Shape s = Circle(name: "src", radius: 2.0);
+			return s as! Circle;
+		}
+		main() { _ := helper(0); }
+	`)
+	fn := extractFunction(ir, "__user.helper")
+	if fn == "" {
+		t.Fatal("expected __user.helper in IR")
+	}
+	// The cast subject's drop flag must be cleared (moved out via the return).
+	assertContains(t, fn, "store i1 false, i1* %s.dropflag")
+}
+
+// Chained cast on the return path (T0800 sibling): castSubjectMovableIdent
+// recurses through the nested CastExpr to the innermost subject, so its drop
+// flag is still cleared.
+func TestT0783_ReturnChainedCastClearsSubjectDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		helper(int dummy) Circle {
+			Shape s = Circle(name: "src", radius: 2.0);
+			return (s as! Circle) as! Circle;
+		}
+		main() { _ := helper(0); }
+	`)
+	fn := extractFunction(ir, "__user.helper")
+	if fn == "" {
+		t.Fatal("expected __user.helper in IR")
+	}
+	assertContains(t, fn, "store i1 false, i1* %s.dropflag")
+}
+
+// The optional `as` form (Force == false, result `Circle?`) is a *conditional*
+// move: the subject is aliased into the result only on a successful downcast; on
+// failure the result is None and the subject must still be dropped. So the
+// return-path drop-flag clear is gated on the outermost cast's Force — for `as`
+// the subject's flag must NOT be cleared (clearing it would leak the subject on
+// the failure path). The conditional-move double-free (success) / leak (failure)
+// is tracked as T0849. This pins the Force gate at the IR level: s keeps its
+// conditional scope-exit drop (the flag is loaded, never force-cleared).
+func TestT0783_ReturnOptionalCastDoesNotClearSubjectDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		helper(int dummy) Circle? {
+			Shape s = Circle(name: "src", radius: 2.0);
+			return s as Circle;
+		}
+		main() { _ := helper(0); }
+	`)
+	fn := extractFunction(ir, "__user.helper")
+	if fn == "" {
+		t.Fatal("expected __user.helper in IR")
+	}
+	// s retains its conditional drop (flag loaded at scope exit) ...
+	assertContains(t, fn, "load i1, i1* %s.dropflag")
+	// ... and the flag is NOT force-cleared by the return (would leak on a
+	// failed downcast). `as` is not in T0783's scope — see T0849.
+	assertNotContains(t, fn, "store i1 false, i1* %s.dropflag")
+}
+
 // --- T0745: `this[i]` / `this[i]=v` (and slice forms) on a user index operator ---
 //
 // genExpr(this) yields a bare instance i8* (value-struct ptr for value types),

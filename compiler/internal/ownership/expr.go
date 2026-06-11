@@ -390,6 +390,63 @@ func (c *Checker) tryMoveConsumeCastSubject(expr ast.Expr) {
 	c.tryMoveConsume(inner)
 }
 
+// tryMoveCastSubject peels ParenExpr / CastExpr from expr and runs tryMove (not
+// tryMoveConsume) on the inner subject. Called at ReturnStmt so a
+// `return x as! T` wrapper does not bypass the move that the plain `return x`
+// form already performs (the wrapper itself is a no-op in tryMove — CastExpr is
+// not handled there). T0783.
+//
+// tryMove (the weaker form) is deliberate: the return path uses tryMove, so a
+// borrowed parameter returned as a cast under a borrow-typed result must not be
+// rejected — tryMove short-circuits on Borrowed state, whereas
+// tryMoveConsumeCastSubject would wrongly reject it. The unsound
+// borrow-returned-as-owned case is handled separately by checkReturnRefSafety.
+//
+// Only the *unconditional* `as!` cast (Force == true) moves its subject. The
+// optional `as` form (Force == false) yields `T?` and is a *conditional* move:
+// the subject is aliased into the result only when the downcast succeeds; on
+// failure the result is None and the subject must still be dropped. Moving it
+// unconditionally here would desync from codegen (which, mirrored on Force,
+// declines to clear the drop flag) and misrepresent the subject's state. The
+// `as` conditional-move double-free (success) / leak (failure) — present at the
+// return path and at owning-slot stores alike — is tracked separately (T0849);
+// it needs runtime-outcome-conditioned drop handling, not an unconditional
+// move. The gate is on the *outermost* cast only: once an `as!` wrapper is
+// established, peel through any nested casts to the innermost subject (mirrors
+// codegen's castSubjectMovableIdent) so a chained `(x as! A) as! B` still moves x.
+func (c *Checker) tryMoveCastSubject(expr ast.Expr) {
+	// Peel any number of ParenExpr.
+	for {
+		p, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = p.Expr
+	}
+	cast, ok := expr.(*ast.CastExpr)
+	if !ok {
+		return
+	}
+	if !cast.Force {
+		return // T0783/T0849: `as` is a conditional move — not handled here.
+	}
+	// Peel through any number of nested casts / parens to the innermost subject.
+	// T0800: a chained cast `(x as! A) as! B` wraps another CastExpr.
+	inner := cast.Expr
+	for {
+		if p, ok := inner.(*ast.ParenExpr); ok {
+			inner = p.Expr
+			continue
+		}
+		if nested, ok := inner.(*ast.CastExpr); ok {
+			inner = nested.Expr
+			continue
+		}
+		break
+	}
+	c.tryMove(inner)
+}
+
 // --- Call expressions ---
 
 // paramBorrowKind determines whether a parameter is a borrow parameter by

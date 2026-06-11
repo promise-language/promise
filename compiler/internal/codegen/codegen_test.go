@@ -27526,6 +27526,44 @@ func TestT0849_OwningSlotOptionalCastConditionalDrop(t *testing.T) {
 	assertNotContains(t, fn, "store i1 false, i1* %s.dropflag")
 }
 
+// T0849 (wasm exposure): a closure call must coerce its arguments to the
+// signature's parameter types the same way a regular call does. An optional
+// param `int?` typed the indirect-call function pointer as `(i8*, {i1, i64})`,
+// but the bare `none` / `5` argument was passed uncoerced as the scalar
+// discriminant. The resulting type-mismatched call was tolerated by the x86
+// backend but lowered to invalid WebAssembly. The fix routes closure args
+// through coerceCallArgs (optional wrapping), so the call passes the full
+// `{i1, i64}` aggregate.
+func TestT0849ClosureCallCoercesOptionalArg(t *testing.T) {
+	ir := generateIR(t, `
+		none_arg() bool {
+			apply := |int? x| -> bool { return true; };
+			return apply(none);
+		}
+		bare_arg() bool {
+			apply := |int? x| -> bool { return true; };
+			return apply(5);
+		}
+		main() { _ := none_arg(); _ := bare_arg(); }
+	`)
+	none := extractFunction(ir, "__user.none_arg")
+	if none == "" {
+		t.Fatal("expected __user.none_arg in IR")
+	}
+	// `none` → zeroinitialized `{i1,i64}` aggregate passed to the closure call.
+	// Before the fix this was a bare `i1 false`, mismatching the `{i1,i64}` param.
+	assertContains(t, none, "{ i1, i64 } zeroinitializer)")
+
+	bare := extractFunction(ir, "__user.bare_arg")
+	if bare == "" {
+		t.Fatal("expected __user.bare_arg in IR")
+	}
+	// `5` → wrapped `{i1 true, i64 5}` aggregate (insertvalue chain), not a bare i64.
+	assertContainsMatch(t, bare, `insertvalue \{ i1, i64 \} %\w+, i64 5, 1`)
+	// The closure call receives the aggregate, never a bare scalar second arg.
+	assertContainsMatch(t, bare, `call i1 %\w+\(i8\* %\w+, \{ i1, i64 \} %\w+\)`)
+}
+
 // --- T0745: `this[i]` / `this[i]=v` (and slice forms) on a user index operator ---
 //
 // genExpr(this) yields a bare instance i8* (value-struct ptr for value types),

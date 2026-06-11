@@ -1460,8 +1460,10 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					for _, arg := range e.Args {
 						argVals = append(argVals, c.genCallArgExpr(arg.Value))
 					}
+					origArgVals := argVals // T0331: pre-coercion for alias check
+					argVals = c.coerceIndirectCallArgs(sig, e.Args, argVals)
 					result := c.genIndirectCall(closure, sig, argVals)
-					c.emitReturnAliasCheck(result, sig, e.Args, argVals) // T0331
+					c.emitReturnAliasCheck(result, sig, e.Args, origArgVals) // T0331
 					return result
 				}
 			}
@@ -1629,8 +1631,10 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 			for _, arg := range e.Args {
 				argVals = append(argVals, c.genCallArgExpr(arg.Value))
 			}
+			origArgVals := argVals // T0331: pre-coercion for alias check
+			argVals = c.coerceIndirectCallArgs(sig, e.Args, argVals)
 			result := c.genIndirectCall(closure, sig, argVals)
-			c.emitReturnAliasCheck(result, sig, e.Args, argVals) // T0331
+			c.emitReturnAliasCheck(result, sig, e.Args, origArgVals) // T0331
 			return result
 		}
 	}
@@ -1673,6 +1677,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		if sig, ok := calleeType.(*types.Signature); ok {
 			closure := c.block.NewLoad(alloca.ElemType, alloca)
 			origArgVals := argVals // T0331: pre-coercion for alias check
+			argVals = c.coerceIndirectCallArgs(sig, e.Args, argVals)
 			result := c.genIndirectCall(closure, sig, argVals)
 			c.clearVariadicStaticFlags(variadicPTs)
 			c.emitReturnAliasCheck(result, sig, e.Args, origArgVals) // T0331
@@ -10245,6 +10250,26 @@ func (c *Compiler) genIndirectCall(closure value.Value, sig *types.Signature, ar
 	callArgs = append(callArgs, envPtr)
 	callArgs = append(callArgs, args...)
 	return c.block.NewCall(typedFnPtr, callArgs...)
+}
+
+// coerceIndirectCallArgs applies the same param-type coercion to closure-call
+// arguments that regular calls get via coerceCallArgs — most importantly,
+// optional wrapping (bare `T` → `{i1,T}`, and `none` → zeroinitialized `{i1,T}`).
+// Without it, an optional argument would be passed as a bare scalar while
+// genIndirectCall types the function pointer with the `{i1,T}` aggregate param,
+// producing a type-mismatched call that LLVM's x86 backend tolerates but the
+// WASM backend lowers to invalid code (T0849).
+func (c *Compiler) coerceIndirectCallArgs(sig *types.Signature, args []*ast.Arg, argVals []value.Value) []value.Value {
+	if sig == nil || len(argVals) == 0 {
+		return argVals
+	}
+	argTypes := make([]types.Type, len(argVals))
+	for i := range argVals {
+		if i < len(args) {
+			argTypes[i] = c.info.Types[args[i].Value]
+		}
+	}
+	return c.coerceCallArgs(argVals, argTypes, sig.Params(), args, nil)
 }
 
 // getOrCreateThunk returns a trampoline function with the env-first ABI that

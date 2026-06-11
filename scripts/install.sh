@@ -25,17 +25,24 @@ EPOCH="latest"
 # VARIANT selects the asset suffix: "" = thin (default), "-full" = host workflow
 # pre-staged (offline), "-all" = every target's blobs (deferred, T0774).
 VARIANT=""
+# THIN_INSTALL=1 installs only the compiler and skips the install-time toolchain
+# pre-fetch (passed through to `promise install --no-fetch-toolchain`). The
+# toolchain then downloads lazily on the first compile. No effect with --full
+# (that binary already carries the toolchain).
+THIN_INSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --epoch)  EPOCH="$2"; shift 2 ;;
     --epoch=*) EPOCH="${1#--epoch=}"; shift ;;
     --full)   VARIANT="-full"; shift ;;
     --all)    VARIANT="-all"; shift ;;
+    --thin)   THIN_INSTALL=1; shift ;;
     -h|--help)
-      echo "Usage: install.sh [--epoch EPOCH] [--full | --all]"
+      echo "Usage: install.sh [--epoch EPOCH] [--full | --all] [--thin]"
       echo "  --epoch EPOCH   Install a specific epoch (default: latest stable)"
       echo "  --full          Install the full variant (host toolchain pre-staged; offline)"
       echo "  --all           Install the all variant (every target pre-staged; deferred)"
+      echo "  --thin          Install only the compiler; download the toolchain on first build"
       exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -157,6 +164,21 @@ download() {
   fi
 }
 
+# Like download() but renders a progress bar to stderr — the binary is ~60-70 MB
+# and the wait is long enough that silence reads as a hang. Still quiet about the
+# HTTP status itself (no curl -S) so a 404 is handled by the caller's messaging.
+download_progress() {
+  url="$1"; dest="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --progress-bar "$url" -o "$dest"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --show-progress -O "$dest" "$url"
+  else
+    echo "error: curl or wget is required" >&2
+    exit 1
+  fi
+}
+
 # Best-effort HTTP status for $1 on stdout (empty on a connection/DNS failure).
 # Only called on a download failure, so the extra request is cheap (a 404 body
 # is tiny). Follows redirects (-L) - GitHub asset URLs redirect to a CDN.
@@ -196,8 +218,14 @@ no_prebuilt_for_platform() {
   exit 1
 }
 
-echo "Downloading ${ASSET_NAME}..."
-if ! download "$DOWNLOAD_URL" "$TMP_GZ"; then
+# Size hint depends on the variant: the default (thin) binary is ~13-20 MB; the
+# -full binary embeds the LLVM toolchain (~60-70 MB).
+case "$VARIANT" in
+  "")      echo "Downloading ${ASSET_NAME} (~20 MB)..." ;;
+  "-full") echo "Downloading ${ASSET_NAME} (~60-70 MB; this can take a minute)..." ;;
+  *)       echo "Downloading ${ASSET_NAME}..." ;;
+esac
+if ! download_progress "$DOWNLOAD_URL" "$TMP_GZ"; then
   STATUS=$(http_status "$DOWNLOAD_URL")
   if [ "$STATUS" = "404" ]; then
     no_prebuilt_for_platform
@@ -251,9 +279,15 @@ gunzip -c "$TMP_GZ" > "$TMP_BIN"
 
 chmod +x "$TMP_BIN"
 
-# promise install copies itself to ~/.promise/bin/promise, extracts stdlib,
-# musl CRT (Linux), and LLVM tools. All embedded in the binary.
-"$TMP_BIN" install
+# promise install copies itself to ~/.promise/bin/promise, extracts stdlib and
+# musl CRT (Linux), and — unless --thin — pre-fetches the host LLVM toolchain so
+# the first build is instant instead of blocking for minutes. A full binary
+# stages its embedded toolchain regardless.
+if [ "$THIN_INSTALL" = "1" ]; then
+  "$TMP_BIN" install --no-fetch-toolchain
+else
+  "$TMP_BIN" install
+fi
 
 # -- PATH reminder ------------------------------------------------------------
 

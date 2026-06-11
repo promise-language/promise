@@ -41,7 +41,29 @@ type Resolver struct {
 	satisfied map[string]bool
 
 	tmpDir string // staging dir on the CAS filesystem (rename is atomic)
+
+	// progress, when non-nil, receives streaming network-download events for user
+	// feedback (set via SetProgress; nil = silent). Only the wire transfer is
+	// reported — local decompression and archive extraction are not.
+	progress DownloadProgress
 }
+
+// DownloadProgress receives streaming-download events so a CLI front-end can
+// render user feedback (a progress bar). Methods are called serially from the
+// resolving goroutine, one Start…Done span per blob/archive fetched.
+type DownloadProgress interface {
+	// Start begins reporting for one item. total is the number of bytes expected
+	// over the wire (the HTTP Content-Length); total <= 0 means unknown.
+	Start(label string, total int64)
+	// Advance reports n additional bytes received.
+	Advance(n int64)
+	// Done finishes the current item (success or failure).
+	Done()
+}
+
+// SetProgress attaches a DownloadProgress sink (nil disables reporting). Set it
+// before calling Resolve.
+func (r *Resolver) SetProgress(p DownloadProgress) { r.progress = p }
 
 // NewResolver builds a Resolver for a manifest against a store.
 func NewResolver(store *Store, m *Manifest) *Resolver {
@@ -190,7 +212,7 @@ func (r *Resolver) fetchBlob(entry *ManifestEntry, src Source) (string, error) {
 	}
 	tmpName := tmp.Name()
 	tmp.Close()
-	if _, err := downloadLimited(u, tmpName, entry.Size); err != nil {
+	if _, err := r.downloadLimited(u, tmpName, entry.Size, entry.Name); err != nil {
 		os.Remove(tmpName)
 		return "", err
 	}
@@ -214,7 +236,7 @@ func (r *Resolver) fetchBlobBrotli(entry *ManifestEntry, u string) (string, erro
 	compName := comp.Name()
 	comp.Close()
 	defer os.Remove(compName)
-	if _, err := downloadLimited(u, compName, 0); err != nil {
+	if _, err := r.downloadLimited(u, compName, 0, entry.Name); err != nil {
 		return "", err
 	}
 
@@ -329,7 +351,7 @@ func (r *Resolver) obtainArchive(src Source, archiveURL string) (string, error) 
 	}
 	tmpName := tmp.Name()
 	tmp.Close()
-	got, err := downloadLimited(archiveURL, tmpName, 0)
+	got, err := r.downloadLimited(archiveURL, tmpName, 0, "archive "+filepath.Base(archiveURL))
 	if err != nil {
 		os.Remove(tmpName)
 		return "", err
@@ -508,8 +530,10 @@ func loudMismatch(name, srcURL, expected, got string, bytesWasted int64) {
 }
 
 // downloadLimited streams url → dst hashing in one pass, aborting if the stream
-// overshoots sizeLimit (when > 0). Returns the lowercase hex sha256.
-func downloadLimited(rawURL, dst string, sizeLimit int64) (string, error) {
+// overshoots sizeLimit (when > 0). Returns the lowercase hex sha256. When the
+// Resolver has a progress sink, label identifies the item and the wire transfer
+// is reported byte-by-byte for user feedback.
+func (r *Resolver) downloadLimited(rawURL, dst string, sizeLimit int64, label string) (string, error) {
 	resp, err := http.Get(rawURL)
 	if err != nil {
 		return "", &netError{err}
@@ -530,6 +554,11 @@ func downloadLimited(rawURL, dst string, sizeLimit int64) (string, error) {
 		// truncated.
 		reader = io.LimitReader(resp.Body, sizeLimit+1)
 	}
+	if r.progress != nil {
+		r.progress.Start(label, resp.ContentLength)
+		reader = &progressReader{r: reader, p: r.progress}
+		defer r.progress.Done()
+	}
 	n, err := io.Copy(io.MultiWriter(h, f), reader)
 	if err != nil {
 		return "", err
@@ -541,6 +570,21 @@ func downloadLimited(rawURL, dst string, sizeLimit int64) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// progressReader forwards the byte count of each Read to a DownloadProgress sink
+// so the caller can render a live progress bar over the wire transfer.
+type progressReader struct {
+	r io.Reader
+	p DownloadProgress
+}
+
+func (pr *progressReader) Read(b []byte) (int, error) {
+	n, err := pr.r.Read(b)
+	if n > 0 {
+		pr.p.Advance(int64(n))
+	}
+	return n, err
 }
 
 // netError marks a transport-level failure (DNS/connection), used to choose the

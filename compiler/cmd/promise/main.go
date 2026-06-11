@@ -7750,13 +7750,23 @@ main!() {   # ! marks main failable (can return error)
 }
 
 func runInstall(args []string) {
-	// Parse -dev flag: install into epochs/dev/ instead of epochs/<epoch>/
+	// Parse flags:
+	//   -dev                  install into epochs/dev/ instead of epochs/<epoch>/
+	//   --no-fetch-toolchain  skip the install-time host-toolchain pre-fetch
+	//                         (the install script's --thin); the toolchain then
+	//                         downloads lazily on the first compile. A full
+	//                         binary embeds the toolchain, so the pre-fetch is a
+	//                         no-network view build either way.
 	devMode := false
+	fetchToolchain := true
 	for _, arg := range args {
-		if arg == "-dev" {
+		switch arg {
+		case "-dev":
 			devMode = true
-		} else {
-			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise install [-dev]\n", arg)
+		case "--no-fetch-toolchain", "-no-fetch-toolchain":
+			fetchToolchain = false
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise install [-dev] [--no-fetch-toolchain]\n", arg)
 			os.Exit(1)
 		}
 	}
@@ -7920,6 +7930,16 @@ func runInstall(args []string) {
 		os.Exit(1)
 	}
 
+	// Pre-fetch the host LLVM toolchain as part of setup (unless --thin /
+	// --no-fetch-toolchain, or a -dev install which shouldn't reach out). This
+	// moves the one-time multi-minute download here — where progress is expected
+	// — instead of ambushing the user on their first `promise exec`. A full
+	// binary already staged its blobs above, so this is just a fast view build.
+	var toolchainView string
+	if fetchToolchain && !devMode {
+		toolchainView = prefetchHostToolchain()
+	}
+
 	fmt.Printf("Installed Promise epoch %s to %s\n", epoch, epochDir)
 	fmt.Printf("  binary:  %s\n", filepath.Join(epochBinDir, binaryName))
 	fmt.Printf("  %-7s %s\n", stubLabel+":", stubPath)
@@ -7927,6 +7947,9 @@ func runInstall(args []string) {
 	fmt.Printf("  modules: %s\n", filepath.Join(epochLibDir, "modules"))
 	if stagedBlobs {
 		fmt.Printf("  blobs:   %s\n", filepath.Join(store.Root(), "blobs", "sha256"))
+	}
+	if toolchainView != "" {
+		fmt.Printf("  toolchain: %s\n", toolchainView)
 	}
 	fmt.Printf("  refs:    %s\n", filepath.Join(epochDir, "blobs.refs"))
 	fmt.Printf("  cache:   %s\n", epochCacheDir)

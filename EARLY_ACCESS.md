@@ -34,15 +34,39 @@ Windows (PowerShell):
 powershell -ExecutionPolicy Bypass -Command "irm https://promise-lang.org/install-early.ps1 | iex"
 ```
 
-Installs to `~/.promise/bin` (Windows: `%USERPROFILE%\.promise\bin`). Prefer to
-read before you pipe? The script is at <https://promise-lang.org/install-early.sh>.
+Installs to `~/.promise/bin` (Windows: `%USERPROFILE%\.promise\bin`). The
+installer downloads a small (~20 MB) compiler and then sets up the LLVM toolchain
+it builds with — a one-time download (a couple of minutes, with a progress bar),
+after which everything is cached under `~/.promise` and your builds are instant.
+Prefer to read before you pipe? The script is at
+<https://promise-lang.org/install-early.sh>.
 
 The `promise` compiler must be on your PATH — the agent step below can't find it
 otherwise, and (with no prior knowledge of the language) has nothing to fall back
 on.
 
-**macOS / Linux — you must add it yourself** (the installer doesn't). Run this now,
-and add the same line to `~/.zshrc` or `~/.bashrc` to make it permanent:
+**macOS / Linux — you must add it to PATH yourself** (the installer doesn't). This
+is two steps, and **both matter** — the common trip-up is doing only the first:
+
+**1. Make it permanent.** Append the line to your shell's startup file so *every
+new terminal — and any coding agent, which starts its own fresh shell* — sees it.
+This matters specifically for the agent step below: a coding-agent CLI runs its
+commands in shells it spawns itself, and it needs `promise` on the PATH in those
+shells to do the two things the whole exercise depends on — *learn the language*
+(`promise --help`, `promise guide`) and *build and run* what it writes. A
+persistent PATH entry is what those spawned shells inherit; a one-off `export` in
+your current terminal is **not** enough — a new window won't have it, and the
+agent will fail with `promise: command not found`.
+
+```sh
+# zsh (the macOS default):
+echo 'export PATH="$HOME/.promise/bin:$PATH"' >> ~/.zshrc
+# bash:
+echo 'export PATH="$HOME/.promise/bin:$PATH"' >> ~/.bashrc
+```
+
+**2. Load it into the shell you're in right now** (the startup file only applies to
+terminals opened *after* step 1). Either open a brand-new terminal, or run:
 
 ```sh
 export PATH="$HOME/.promise/bin:$PATH"
@@ -57,8 +81,12 @@ Confirm it's found (this both smoke-tests the compiler and proves PATH is set):
 promise exec 'print_line("hi")'      # Windows:  promise exec print_line(\"hi\")
 ```
 
+This should print `hi` quickly — the installer already set up the toolchain, so
+there's no first-compile wait.
+
 If that prints `hi`, you're set. If it says `promise: command not found`, the PATH
-step above didn't take — fix that before the agent step, or the agent will be stuck.
+step above didn't take (most likely you skipped step 1, or opened the agent in a
+new terminal) — fix that before the agent step, or the agent will be stuck.
 
 Then run a file of your own — save this as `hello.pr`:
 
@@ -106,6 +134,19 @@ Promises.)
 
 Did it compile? Does the code read the way the prompt implies? That's the thesis,
 tested on your own setup.
+
+## Already on my list (no need to report these)
+
+A couple of things I already know are rough — flagging them so you can look past
+them, and so you don't spend feedback here. Neither affects correctness:
+
+- **Compile speed isn't optimized yet.** Compiled programs run at native speed,
+  but the *compile step* in `promise exec` / `promise run` takes a few seconds,
+  and there's no build caching for those two yet — every invocation recompiles
+  from scratch. There's a lot of headroom here; it'll get significantly faster.
+- **Memory use isn't optimized yet.** The current focus is correctness, not
+  footprint. Both the compiler and the programs it generates use more memory than
+  they need to — many optimizations are planned.
 
 ## What I'd love your take on
 

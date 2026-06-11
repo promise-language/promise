@@ -24,7 +24,10 @@ param(
     # Install the full variant (host toolchain pre-staged; offline).
     [switch]$Full,
     # Install the all variant (every target pre-staged; deferred).
-    [switch]$All
+    [switch]$All,
+    # Install only the compiler; download the toolchain on first build (skips the
+    # install-time pre-fetch). No effect with -Full (it carries the toolchain).
+    [switch]$Thin
 )
 
 $ErrorActionPreference = "Stop"
@@ -94,7 +97,13 @@ $TmpBin  = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRan
 $TmpSums = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + ".sums")
 
 try {
-    Write-Host "Downloading ${AssetName}..."
+    # Size hint depends on the variant: the default (thin) binary is ~13-20 MB;
+    # the -full binary embeds the LLVM toolchain (~60-70 MB).
+    switch ($Variant) {
+        ""      { Write-Host "Downloading ${AssetName} (~20 MB)..." }
+        "-full" { Write-Host "Downloading ${AssetName} (~60-70 MB; this can take a minute)..." }
+        default { Write-Host "Downloading ${AssetName}..." }
+    }
     try {
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpGz
     } catch {
@@ -142,8 +151,9 @@ try {
     # -- install -------------------------------------------------------------
 
     # promise install copies itself to %USERPROFILE%\.promise\bin\promise.exe,
-    # extracts stdlib and LLVM tools. All embedded in the binary.
-    & $TmpBin install
+    # extracts stdlib, and — unless -Thin — pre-fetches the host LLVM toolchain so
+    # the first build is instant instead of blocking for minutes.
+    if ($Thin) { & $TmpBin install --no-fetch-toolchain } else { & $TmpBin install }
     if ($LASTEXITCODE -ne 0) {
         Write-Error "promise install failed (exit code $LASTEXITCODE)"
         exit $LASTEXITCODE

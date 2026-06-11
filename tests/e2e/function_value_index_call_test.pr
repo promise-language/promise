@@ -1,0 +1,84 @@
+// T0674: Calling a function value retrieved by index from a container.
+// Regression test for the codegen panic `undefined monomorphic function "fns[int]"`
+// (free-function form) and `no method fns on type Holder` (member-field form).
+//
+// A subscript that yields a callable — e.g. fns[0](x) where fns is a
+// Vector[(int) -> int] — is NOT a generic instantiation. genCallExpr must route it
+// through the closure-value call path (load the {fn, env} fat pointer and dispatch
+// indirectly), not the generic-function/method mangling path.
+type Holder {
+  Vector[(int) -> int] fns;
+}
+
+// --- Literal index on a locally-built vector ---
+test_call_by_literal_index() `test {
+  fns := Vector[(int) -> int]();
+  fns.push(|int x| -> x + 1);
+  assert(fns[0](10) == 11, "fns[0](10) == 11");
+}
+
+// --- Variable index ---
+test_call_by_variable_index() `test {
+  fns := Vector[(int) -> int]();
+  fns.push(|int x| -> x * 2);
+  i := 0;
+  assert(fns[i](10) == 20, "fns[i](10) == 20");
+}
+
+// --- Vector-literal construction ---
+test_call_from_vector_literal() `test {
+  fs := [|int x| -> x + 21];
+  assert(fs[0](21) == 42, "fs[0](21) == 42");
+}
+
+// --- Multiple functions, distinct indices ---
+test_call_multiple_indices() `test {
+  fns := Vector[(int) -> int]();
+  fns.push(|int x| -> x + 1);
+  fns.push(|int x| -> x - 1);
+  assert(fns[0](10) == 11, "fns[0](10) == 11");
+  assert(fns[1](10) == 9, "fns[1](10) == 9");
+}
+
+// --- Passed as a parameter (Vector[(int) -> int] arg) ---
+run_first(Vector[(int) -> int] fs, int x) int {
+  return fs[0](x);
+}
+
+test_call_through_parameter() `test {
+  fns := Vector[(int) -> int]();
+  fns.push(|int x| -> x + 21);
+  assert(run_first(fns, 21) == 42, "run_first == 42");
+}
+
+// --- Member-field form: h.fns[0](x) ---
+test_call_member_field_index() `test {
+  h := Holder(fns: Vector[(int) -> int]());
+  h.fns.push(|int x| -> x + 1);
+  assert(h.fns[0](10) == 11, "h.fns[0](10) == 11");
+}
+
+// --- Captured closures stored in the vector ---
+test_call_captured_closure_index() `test {
+  int base = 100;
+  fns := Vector[(int) -> int]();
+  fns.push(move |int x| -> base + x);
+  assert(fns[0](5) == 105, "captured closure via index");
+}
+
+// --- Index on a function-call result: produce()[0](x) ---
+// idx.Target is a CallExpr (neither IdentExpr nor MemberExpr). Pre-fix this still
+// hit the non-member genGenericFuncCall branch and panicked; the type gate routes
+// it through the closure-value path because the target's type is a Vector.
+produce() Vector[(int) -> int] {
+  fns := Vector[(int) -> int]();
+  fns.push(|int x| -> x + 21);
+  return fns;
+}
+
+test_call_on_call_result_index() `test {
+  assert(produce()[0](21) == 42, "produce()[0](21) == 42");
+}
+
+main() {
+}

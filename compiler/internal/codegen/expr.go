@@ -1544,39 +1544,55 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		}
 	}
 
-	// Generic function/method call: callee is IndexExpr (identity[int](42) or obj.method[int](42))
+	// Generic function/method call: callee is IndexExpr (identity[int](42) or obj.method[int](42)).
+	// T0674: Only route to the generic-instantiation path when the indexed target's
+	// recorded type is a generic Signature (mirrors sema's rule in checkIndexExpr:
+	// `[...]` is a type-argument list only when the target is a generic func/method).
+	// A value subscript that yields a callable — e.g. fns[0](x) where fns is a
+	// Vector[(int) -> int], or h.fns[0](x) for a function-typed field — is NOT a
+	// generic instantiation; it falls through to the closure-value call path below
+	// (T0817), which materializes the {fn, env} fat pointer and dispatches indirectly.
+	// Without this gate, fns[0](x) mangled a bogus generic name ("fns[int]") and
+	// panicked, and h.fns[0](x) mis-routed to genGenericMethodCall ("no method fns").
 	if idx, ok := e.Callee.(*ast.IndexExpr); ok {
-		if member, ok := idx.Target.(*ast.MemberExpr); ok {
-			// Check if this is a module-qualified generic function call (json.encode_string[Config](...))
-			// vs. an instance generic method call (box.transform[string](...))
-			if ident, ok := member.Target.(*ast.IdentExpr); ok {
-				if c.resolveModuleName(ident) != "" {
-					return c.genModuleGenericFuncCall(e, idx, member.Field)
-				}
-			}
-			savedReceiverClaim2 := c.pendingReceiverClaim // T0130
-			c.pendingReceiverClaim = nil
-			typeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
-			typeArgs := make([]types.Type, len(typeArgExprs))
-			for i, expr := range typeArgExprs {
-				typeArgs[i] = c.info.Types[expr]
-			}
-			result := c.genGenericMethodCall(e, member, typeArgs)
-			heapBeforeTrack2 := len(c.heapTemps) // B0213: capture before maybeTrackIterTemp
-			c.maybeTrackIterTemp(e, result)
-			// B0213: Don't claim receiver for generic method calls. Generic structural
-			// default methods (map[R], zip[U], flat_map[R]) are compiled without selfSubst,
-			// so _parent is not set on the returned _FnIter. The receiver stays as an
-			// unclaimed heapTemp and is cleaned independently at statement end.
-			// B0213: Only claim env temps when THIS call's result was tracked as a new
-			// heapTemp (not when the receiver evaluation created heapTemps).
-			if len(c.heapTemps) > heapBeforeTrack2 {
-				c.claimAllEnvTemps()
-			}
-			c.pendingReceiverClaim = savedReceiverClaim2 // T0130
-			return result
+		targetType := c.info.Types[idx.Target]
+		if c.typeSubst != nil && targetType != nil {
+			targetType = types.Substitute(targetType, c.typeSubst)
 		}
-		return c.genGenericFuncCall(e, idx)
+		sig, isSig := targetType.(*types.Signature)
+		if isSig && len(sig.TypeParams()) > 0 {
+			if member, ok := idx.Target.(*ast.MemberExpr); ok {
+				// Check if this is a module-qualified generic function call (json.encode_string[Config](...))
+				// vs. an instance generic method call (box.transform[string](...))
+				if ident, ok := member.Target.(*ast.IdentExpr); ok {
+					if c.resolveModuleName(ident) != "" {
+						return c.genModuleGenericFuncCall(e, idx, member.Field)
+					}
+				}
+				savedReceiverClaim2 := c.pendingReceiverClaim // T0130
+				c.pendingReceiverClaim = nil
+				typeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
+				typeArgs := make([]types.Type, len(typeArgExprs))
+				for i, expr := range typeArgExprs {
+					typeArgs[i] = c.info.Types[expr]
+				}
+				result := c.genGenericMethodCall(e, member, typeArgs)
+				heapBeforeTrack2 := len(c.heapTemps) // B0213: capture before maybeTrackIterTemp
+				c.maybeTrackIterTemp(e, result)
+				// B0213: Don't claim receiver for generic method calls. Generic structural
+				// default methods (map[R], zip[U], flat_map[R]) are compiled without selfSubst,
+				// so _parent is not set on the returned _FnIter. The receiver stays as an
+				// unclaimed heapTemp and is cleaned independently at statement end.
+				// B0213: Only claim env temps when THIS call's result was tracked as a new
+				// heapTemp (not when the receiver evaluation created heapTemps).
+				if len(c.heapTemps) > heapBeforeTrack2 {
+					c.claimAllEnvTemps()
+				}
+				c.pendingReceiverClaim = savedReceiverClaim2 // T0130
+				return result
+			}
+			return c.genGenericFuncCall(e, idx)
+		}
 	}
 
 	// Inferred generic function call: sema recorded the inferred type args.

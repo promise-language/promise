@@ -4403,6 +4403,57 @@ func TestGenericMethodCallsGenericMethod(t *testing.T) {
 	assertContains(t, ir, "define i64 @\"Foo.echo[int]\"")
 }
 
+// T0674 (item 2): calling a function value retrieved by index — fns[0](x) where
+// fns is a Vector[(int) -> int] — must NOT be mistaken for a generic-function
+// instantiation. Before the fix, genCallExpr unconditionally routed an IndexExpr
+// callee to genGenericFuncCall, which mangled a bogus name ("fns[int]") from the
+// index's *type* and panicked with `undefined monomorphic function "fns[int]"`.
+// The gate now checks the indexed target's recorded type: only a generic Signature
+// routes to the generic path; a value subscript yielding a callable falls through
+// to the closure-value (indirect fat-pointer) call path. Assert: no panic, no bogus
+// "fns[int]" symbol, and an indirect call through the loaded {fn, env} pointer.
+func TestFunctionValueIndexCall(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			fns := Vector[(int) -> int]();
+			fns.push(|int x| -> x + 1);
+			int r = fns[0](10);
+		}
+	`)
+	// The bogus generic mangling must never appear.
+	assertNotContains(t, ir, "fns[int]")
+	assertNotContains(t, ir, "undefined monomorphic")
+	// Closure dispatch: load the function pointer out of the {fn, env} fat pointer
+	// and call indirectly (env passed as the first arg).
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
+// T0674 (item 2, member-field form): the SAME routing bug had a second face —
+// h.fns[0](x) where fns is a Vector[(int) -> int] field. Because idx.Target is a
+// MemberExpr (h.fns), the pre-fix code unconditionally routed it into
+// genGenericMethodCall, which looked for a method named "fns" on Holder and
+// panicked `codegen: no method fns on type Holder`. The type-gated routing now
+// sees idx.Target's recorded type is a Vector (not a generic Signature), so it
+// falls through to the closure-value call path exactly like the free-function
+// form. This pins the second panic at the IR level (the free-function form is
+// pinned by TestFunctionValueIndexCall; only the runtime e2e batch test exercised
+// the member form before).
+func TestFunctionValueMemberFieldIndexCall(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder { Vector[(int) -> int] fns; }
+		main() {
+			h := Holder(fns: Vector[(int) -> int]());
+			h.fns.push(|int x| -> x + 1);
+			int r = h.fns[0](10);
+		}
+	`)
+	// Neither the bogus generic mangling nor a "no method" mis-route may appear.
+	assertNotContains(t, ir, "fns[int]")
+	assertNotContains(t, ir, "no method")
+	// Same indirect closure dispatch through the loaded {fn, env} fat pointer.
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
 // B0099: Type-instance resolution (generic type method calls generic free function).
 func TestGenericTypeMethodCallsFreeFunc(t *testing.T) {
 	ir := generateIR(t, `
@@ -13568,6 +13619,59 @@ func TestGenericEnumCloneNestedEnumTypeParamField(t *testing.T) {
 	}
 	if !sawInnerClone {
 		t.Errorf("T0607: Outer[Map[string, string]].clone() body must call Inner[Map[string, string]].clone to deep-copy the nested enum-Instance field; got shallow bit-copy alias (isAutoCloneBitCopy enum gap)")
+	}
+}
+
+// T0674 (item 1): the nested generic `clone enum `Wrap(Inner[T])` shape must call
+// the inner enum's clone EXACTLY ONCE — not twice. An earlier inspection (T0551)
+// worried that lifting B0285 match-dup suppression for TypeParam fields would, for
+// a variant field declared as a non-bare TypeParam-containing type the synth treats
+// as non-copy (Inner[T] → clone.go emits an explicit .clone()), cause BOTH the
+// lifted suppression AND the synth's .clone() to fire → a redundant double deep-
+// clone. T0607 superseded that: it removed the per-field un-suppression entirely
+// (uniform c.suppressMatchDup inside enum clone bodies) and routes every
+// TypeParam-containing field through the synth-only AutoCloneExpr intrinsic. So a
+// TypeParam-containing variant field is cloned through exactly one mechanism, never
+// two. This pins single-clone and guards against any future change that re-broadens
+// match-dup suppression back into a double-clone.
+//
+// IMPORTANT: do NOT narrow clone.go's `ContainsTypeParam(fieldType)` gate (the one
+// that diverts TypeParam-containing fields to AutoCloneExpr) to mirror `isCopyField`
+// instead — `isCopyField(TypeParam)==true` optimistically, so a bare `T` field would
+// regress onto the shallow-copy path and reintroduce the T0607/T0605 double-free for
+// droppable TypeArgs (e.g. map). The ContainsTypeParam predicate is intentional.
+func TestGenericEnumCloneNestedSingleCloneCall(t *testing.T) {
+	ir := generateIR(t, ""+
+		"enum Inner[T] `clone {\n"+
+		"  Has(T v),\n"+
+		"  Not,\n"+
+		"}\n"+
+		"enum Outer[T] `clone {\n"+
+		"  Wrap(Inner[T] inner),\n"+
+		"  Bare,\n"+
+		"}\n"+
+		"test() {\n"+
+		"  string[] src = [\"a\"];\n"+
+		"  Outer[string[]] j = Outer[string[]].Wrap(Inner[string[]].Has(src));\n"+
+		"  Outer[string[]] c = j.clone();\n"+
+		"}\n")
+	lines := strings.Split(ir, "\n")
+	inClone := false
+	innerCloneCalls := 0
+	for _, line := range lines {
+		if strings.Contains(line, "define ") && strings.Contains(line, `Outer[Vector[string]].clone`) {
+			inClone = true
+			continue
+		}
+		if inClone && strings.HasPrefix(strings.TrimSpace(line), "define ") {
+			break
+		}
+		if inClone && strings.Contains(line, "call ") && strings.Contains(line, `@"Inner[Vector[string]].clone"`) {
+			innerCloneCalls++
+		}
+	}
+	if innerCloneCalls != 1 {
+		t.Errorf("T0674: Outer[Vector[string]].clone() body must call Inner[Vector[string]].clone EXACTLY ONCE (single deep-clone of the Wrap(Inner[T]) field); got %d calls (a double-clone is the efficiency regression T0607 eliminated)", innerCloneCalls)
 	}
 }
 

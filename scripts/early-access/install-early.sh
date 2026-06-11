@@ -98,7 +98,9 @@ trap "rm -f '$TMP_GZ' '$TMP_BIN' '$TMP_SUMS'" EXIT
 download() {
   url="$1"; dest="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl -sSfL "$url" -o "$dest"
+    # Quiet on HTTP errors (no -S): the caller inspects the status and prints a
+    # tailored message, so curl's own "curl: (22) ... 404" would just be noise.
+    curl -sfL "$url" -o "$dest"
   elif command -v wget >/dev/null 2>&1; then
     wget -qO "$dest" "$url"
   else
@@ -107,8 +109,58 @@ download() {
   fi
 }
 
+# Best-effort HTTP status for $1 on stdout (empty on a connection/DNS failure).
+# Only called on a download failure, so the extra request is cheap (a 404 body
+# is tiny). Follows redirects (-L).
+http_status() {
+  url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -sL -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true
+  elif command -v wget >/dev/null 2>&1; then
+    wget -S --spider -q "$url" 2>&1 | awk 'tolower($1) ~ /http\// {c=$2} END {print c}' || true
+  fi
+}
+
+# Emitted when the platform asset is absent (HTTP 404). Early access ships
+# prebuilt binaries only for darwin-arm64, linux-amd64, and windows-amd64; any
+# other platform - notably Intel macOS (x86_64) and Linux on ARM - has no asset
+# and 404s. Give a precise, non-scary reason.
+no_prebuilt_for_platform() {
+  echo "error: no prebuilt Promise binary is available for your platform (${PLATFORM}-${ARCH})." >&2
+  echo "" >&2
+  if [ "$PLATFORM" = "darwin" ] && [ "$ARCH" = "amd64" ]; then
+    if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = "1" ]; then
+      # Apple Silicon Mac, but this shell runs under Rosetta (x86_64 emulation),
+      # so uname reported x86_64 and we asked for the Intel asset. The arm64
+      # build exists - they just need to run from a native shell.
+      echo "  You're on an Apple Silicon Mac, but this terminal is running under" >&2
+      echo "  Rosetta (x86_64 emulation), so the installer asked for the Intel build" >&2
+      echo "  - which doesn't exist. The Apple Silicon build is available; just run" >&2
+      echo "  the installer from a native arm64 shell:" >&2
+      echo "" >&2
+      echo "    arch -arm64 /bin/zsh        # then re-run the install command" >&2
+    else
+      echo "  Promise early access provides macOS binaries for Apple Silicon (arm64)" >&2
+      echo "  only. Intel Macs (x86_64) are not supported." >&2
+    fi
+  fi
+  echo "" >&2
+  echo "  Supported platforms: macOS (Apple Silicon / arm64), Linux (x86_64), Windows (x86_64)." >&2
+  echo "  Questions? email early@promise-lang.org" >&2
+  exit 1
+}
+
 echo "Downloading ${ASSET_NAME}..."
-download "$DOWNLOAD_URL" "$TMP_GZ"
+if ! download "$DOWNLOAD_URL" "$TMP_GZ"; then
+  STATUS=$(http_status "$DOWNLOAD_URL")
+  if [ "$STATUS" = "404" ]; then
+    no_prebuilt_for_platform
+  fi
+  echo "error: failed to download ${ASSET_NAME} from ${DOWNLOAD_URL}" >&2
+  echo "  HTTP status: ${STATUS:-unknown (network error?)}" >&2
+  echo "  Check your network connection and try again." >&2
+  exit 1
+fi
 
 echo "Downloading SHA256SUMS..."
 download "$SUMS_URL" "$TMP_SUMS"

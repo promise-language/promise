@@ -64,6 +64,24 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
 $RuntimeName = "promise-windows-${Arch}${Variant}.exe"
 $AssetName   = "${RuntimeName}.gz"
 
+# Shown when the platform asset is absent (HTTP 404). Early access publishes a
+# Windows binary for x64 (amd64) only; ARM64 has no native build yet (Windows 11
+# on ARM transparently runs the x64 build under emulation). Give a precise reason
+# rather than letting the raw 404 surface.
+function Show-NoPrebuiltForPlatform {
+    Write-Host "error: no prebuilt Promise binary is available for your platform (windows-${Arch})." -ForegroundColor Red
+    Write-Host ""
+    if ($Arch -eq "arm64") {
+        Write-Host "  Promise early access provides a Windows binary for x64 (amd64) only -"
+        Write-Host "  there is no native ARM64 build yet. Windows 11 on ARM transparently"
+        Write-Host "  runs x64 binaries under emulation; native ARM64 support is planned."
+    }
+    Write-Host ""
+    Write-Host "  Supported platforms: Windows (x64), macOS (Apple Silicon), Linux (x64)."
+    Write-Host "  Questions? email early@promise-lang.org"
+    exit 1
+}
+
 Write-Host "Installing Promise (early access, windows-${Arch}) from ${BaseUrl}..."
 
 $DownloadUrl = "${BaseUrl}/${AssetName}"
@@ -77,7 +95,16 @@ $TmpSums = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRan
 
 try {
     Write-Host "Downloading ${AssetName}..."
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpGz
+    try {
+        Invoke-WebRequest -Uri $DownloadUrl -OutFile $TmpGz
+    } catch {
+        # A 404 means the asset for this platform isn't published (e.g. ARM64
+        # Windows) - report it meaningfully instead of a raw web exception.
+        $code = $null
+        try { if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } } catch { }
+        if ($code -eq 404) { Show-NoPrebuiltForPlatform }
+        throw
+    }
 
     Write-Host "Downloading SHA256SUMS..."
     Invoke-WebRequest -Uri $SumsUrl -OutFile $TmpSums

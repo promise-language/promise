@@ -86,6 +86,18 @@ func runReleasePublishInstall(root string, args []string) error {
 	// entries (e.g. darwin's, staged from another machine) rather than clobbering
 	// them when this host uploads its SHA256SUMS.
 	willUpload := !*dryRun && !*noUpload && *r2Bucket != ""
+	// When actually publishing, HEAD must be on origin/main and not ahead of it:
+	// the install gate on another host fetches the binary's stamped build commit
+	// from origin to pin its test sources to what the binary was built from
+	// (T0854). A commit that is ahead of — or off — origin/main is unfetchable
+	// there, so the gate could never set up. Checked before the (expensive) build
+	// and the SHA256SUMS round-trip so it fails fast. Skipped for
+	// --dry-run/--no-upload local builds, which publish nothing.
+	if willUpload {
+		if err := requireHeadOnOriginMain(root); err != nil {
+			return err
+		}
+	}
 	var mirror blobMirror
 	if willUpload {
 		mirror = newBlobMirror(*r2Bucket)
@@ -192,6 +204,28 @@ func runReleasePublishInstall(root string, args []string) error {
 		}
 	}
 	fmt.Printf("\npublish-install: uploaded %d dist objects for %s to bucket %s\n", len(uploads), *host, *r2Bucket)
+	return nil
+}
+
+// requireHeadOnOriginMain fails unless local HEAD is contained in origin/main —
+// i.e. pushed and not ahead of it. The install gate (running on a different
+// host) fetches the binary's stamped build commit from origin to pin its test
+// sources (T0854); a commit that is ahead of, or off, origin/main is unfetchable
+// there. It fetches origin/main first so the ancestry check reflects the
+// remote's real tip rather than a stale local tracking ref.
+func requireHeadOnOriginMain(root string) error {
+	if _, err := RunOutputIn(root, "git", "fetch", "--quiet", "origin", "main"); err != nil {
+		return fmt.Errorf("publish-install: git fetch origin main (needed to verify HEAD is published): %w", err)
+	}
+	head, err := RunOutputIn(root, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("publish-install: git rev-parse HEAD: %w", err)
+	}
+	// `merge-base --is-ancestor` exits 0 when HEAD is reachable from origin/main
+	// (on-branch and not ahead), non-zero otherwise.
+	if err := RunSilent("git", "-C", root, "merge-base", "--is-ancestor", "HEAD", "origin/main"); err != nil {
+		return fmt.Errorf("publish-install: HEAD (%s) is not on origin/main — push to main before publishing (the install gate fetches the stamped build commit from origin/main to build its test worktree)", head)
+	}
 	return nil
 }
 

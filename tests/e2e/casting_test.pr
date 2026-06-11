@@ -1136,14 +1136,13 @@ test_t0783_return_cast_paren_wrapped() `test {
   assert(c.name == "paren", "return paren-wrapped cast name (UAF probe)");
 }
 
-// T0783's drop-flag clear is gated on the *outermost* cast's Force, so the
-// optional `as` form (`return s as Circle`, result `Circle?`) is deliberately
-// left alone — it is a *conditional* move (None on a failed downcast). This
-// guards that gate on the FAILURE path: the downcast fails, the result is None,
-// and the owned subject `s` must still be dropped at scope exit (a spurious
-// drop-flag clear here would leak `s`). The conditional-move double-free on the
-// *success* path is the separate, pre-existing T0849 (not in T0783's scope), so
-// this only exercises the leak-free failure path.
+// The optional `as` form (`return s as Circle`, result `Circle?`) is a
+// *conditional* move of the subject: the heap instance is aliased into the
+// result only on a successful downcast; on failure the result is None and the
+// subject is untouched. T0849 makes the subject's scope-exit drop conditional on
+// the runtime outcome (`drop iff !isMatch`, via consumeCastSubjectDropFlag) — a
+// success no longer double-frees (was SEGV) and a failure no longer leaks. This
+// helper drives the return path; both outcomes are exercised below.
 t0783_try_circle_optional(~Shape s) Circle? {
   return s as Circle;
 }
@@ -1155,5 +1154,466 @@ test_t0783_return_optional_cast_failure_no_leak() `test {
   if c {
     absent = false;
   }
-  assert(absent, "failed downcast -> none; subject must drop, not leak (T0783 Force gate)");
+  assert(absent, "failed downcast -> none; subject must drop, not leak (T0849 failure)");
+}
+
+// --- T0849: optional `as` of an owned local is a CONDITIONAL move ---
+// `x as T` (Force == false, result `T?`) aliases x's heap instance into the
+// result only when the downcast succeeds. When the result flows into a consuming
+// context (return / owning-slot store), the subject's drop must be conditioned on
+// the runtime outcome: drop iff the cast failed (None). Before T0849 the return
+// path double-freed on success (SEGV) and the owning-slot path leaked on failure.
+// Each shape is exercised on BOTH the matching (success) and non-matching
+// (failure) dynamic type. This is the `as` sibling of the `as!` suites above
+// (T0747 local rebind / T0754 owning slot / T0783 return / T0800 chained).
+
+// An owning slot whose field type is Circle?. present() re-casts the borrowed
+// field to read its presence without moving it (member access does not narrow).
+type T0849Box {
+  Circle? c;
+  present(&this) bool {
+    Circle? cc = this.c as Circle;
+    bool p = false;
+    if cc {
+      p = true;
+    }
+    return p;
+  }
+}
+
+// Return path, SUCCESS: matching dynamic type -> Some holding the aliased
+// instance. The returned optional owns it; the callee's subject must NOT also
+// drop it (was a double-free / SEGV). Inner name/radius reads also probe UAF.
+test_t0849_return_optional_success() `test {
+  Shape s = Circle(name: "rs", radius: 2.0);
+  Circle? c = t0783_try_circle_optional(s);
+  bool present = false;
+  if c {
+    present = true;
+    assert(c.radius == 2.0, "return as success radius (double-free probe)");
+    assert(c.name == "rs", "return as success name (UAF probe)");
+  }
+  assert(present, "return as success -> some");
+}
+
+// Owning slot via field-init constructor arg (`T0849Box(c: s as Circle)`).
+test_t0849_ctor_field_init_success() `test {
+  Shape s = Circle(name: "cs", radius: 4.0);
+  T0849Box b = T0849Box(c: s as Circle);
+  assert(b.present(), "ctor field-init as success -> some (double-free probe)");
+}
+test_t0849_ctor_field_init_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  T0849Box b = T0849Box(c: s as Circle);
+  assert(!b.present(), "ctor field-init as failure -> none (leak probe)");
+}
+
+// Owning slot via field assignment (`b.c = s as Circle`).
+test_t0849_field_assign_success() `test {
+  Shape s = Circle(name: "fs", radius: 5.0);
+  T0849Box b = T0849Box(c: none);
+  b.c = s as Circle;
+  assert(b.present(), "field-assign as success -> some (double-free probe)");
+}
+test_t0849_field_assign_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  T0849Box b = T0849Box(c: none);
+  b.c = s as Circle;
+  assert(!b.present(), "field-assign as failure -> none (leak probe)");
+}
+
+// Owning slot via container element assignment (`v[0] = s as Circle`).
+test_t0849_element_assign_success() `test {
+  Shape s = Circle(name: "es", radius: 6.0);
+  Circle?[] v = [];
+  v.push(none);
+  v[0] = s as Circle;
+  bool present = false;
+  Circle? c0 = v[0];
+  if c0 {
+    present = true;
+    assert(c0.radius == 6.0, "element-assign radius");
+  }
+  assert(present, "element-assign as success -> some (double-free probe)");
+}
+test_t0849_element_assign_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  Circle?[] v = [];
+  v.push(none);
+  v[0] = s as Circle;
+  bool present = false;
+  Circle? c0 = v[0];
+  if c0 {
+    present = true;
+  }
+  assert(!present, "element-assign as failure -> none (leak probe)");
+}
+
+// Owning slot via vector literal element (`[s as Circle]`).
+test_t0849_vector_literal_success() `test {
+  Shape s = Circle(name: "vs", radius: 7.0);
+  Circle?[] v = [s as Circle];
+  bool present = false;
+  Circle? c0 = v[0];
+  if c0 {
+    present = true;
+    assert(c0.radius == 7.0, "vector-literal radius");
+  }
+  assert(present, "vector-literal as success -> some (double-free probe)");
+}
+test_t0849_vector_literal_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  Circle?[] v = [s as Circle];
+  bool present = false;
+  Circle? c0 = v[0];
+  if c0 {
+    present = true;
+  }
+  assert(!present, "vector-literal as failure -> none (leak probe)");
+}
+
+// Owning slot via `~` callee argument (`consume_opt_circle(s as Circle)`).
+t0849_consume_opt_circle(~Circle? c) bool {
+  bool present = false;
+  if c {
+    present = true;
+  }
+  return present;
+}
+test_t0849_tilde_param_success() `test {
+  Shape s = Circle(name: "ps", radius: 8.0);
+  assert(t0849_consume_opt_circle(s as Circle), "~param as success -> some (double-free probe)");
+}
+test_t0849_tilde_param_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  assert(!t0849_consume_opt_circle(s as Circle), "~param as failure -> none (leak probe)");
+}
+
+// Owning slot via enum-variant payload (`T0849Variant.Wrap(s as Circle)`).
+enum T0849Variant {
+  Wrap(Circle? c),
+}
+test_t0849_enum_variant_success() `test {
+  Shape s = Circle(name: "ns", radius: 1.5);
+  T0849Variant v = T0849Variant.Wrap(s as Circle);
+  bool present = false;
+  match v {
+    Wrap(c) => {
+      if c {
+        present = true;
+        assert(c.radius == 1.5, "enum-variant radius");
+      }
+    },
+  }
+  assert(present, "enum-variant as success -> some (double-free probe)");
+}
+test_t0849_enum_variant_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  T0849Variant v = T0849Variant.Wrap(s as Circle);
+  bool present = false;
+  match v {
+    Wrap(c) => {
+      if c {
+        present = true;
+      }
+    },
+  }
+  assert(!present, "enum-variant as failure -> none (leak probe)");
+}
+
+// Owning slot via tuple element (`(s as Circle, 1)`).
+test_t0849_tuple_slot_success() `test {
+  Shape s = Circle(name: "ts", radius: 2.5);
+  (Circle?, int) t = (s as Circle, 1);
+  (c0, n) := t;
+  bool present = false;
+  if c0 {
+    present = true;
+    assert(c0.radius == 2.5, "tuple-slot radius");
+  }
+  assert(present, "tuple-slot as success -> some (double-free probe)");
+}
+test_t0849_tuple_slot_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  (Circle?, int) t = (s as Circle, 1);
+  (c0, n) := t;
+  bool present = false;
+  if c0 {
+    present = true;
+  }
+  assert(!present, "tuple-slot as failure -> none (leak probe)");
+}
+
+// Owning slot via map value (`m[0] = s as Circle`).
+test_t0849_map_slot_success() `test {
+  Shape s = Circle(name: "ms", radius: 3.5);
+  map[int, Circle?] m = map[int, Circle?]();
+  m[0] = s as Circle;
+  assert(m.contains(0), "map-slot as success -> stored (double-free probe)");
+}
+test_t0849_map_slot_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  map[int, Circle?] m = map[int, Circle?]();
+  m[0] = s as Circle;
+  assert(m.contains(0), "map-slot as failure -> none stored (leak probe)");
+}
+
+// Chained / parenthesized optional cast over an owned local, and an owned-temp
+// regression (a freshly produced subject is owned by the result, must still
+// pass). The paren/chain peel must reach the innermost subject.
+t0849_return_paren(~Shape s) Circle? {
+  return (s as Circle);
+}
+test_t0849_return_paren_success() `test {
+  Shape s = Circle(name: "pps", radius: 4.5);
+  Circle? c = t0849_return_paren(s);
+  bool present = false;
+  if c {
+    present = true;
+    assert(c.radius == 4.5, "return paren radius");
+  }
+  assert(present, "return paren as success -> some (double-free probe)");
+}
+test_t0849_owned_temp_regression() `test {
+  // make_circle() is an owned temp; the cast result owns it. The owning-slot
+  // store must not over-claim it as a subject move (no leak, no double-free).
+  T0849Box b = T0849Box(c: make_circle() as Circle);
+  assert(b.present(), "owned-temp ctor field-init as success -> some");
+}
+
+// --- T0849: remaining owning-slot consuming sites (super / channel / select) ---
+// The `as!` suite above (T0754/T0784) exercises super() args, ch.send and
+// select-send for the unconditional move; these mirror them for the conditional
+// optional `as` form. Each consuming site routes the cast subject through
+// consumeCastSubjectDropFlag, so success must not double-free (SEGV) and failure
+// must not leak. Both outcomes are exercised per site, with a read-back presence
+// probe (also a UAF probe on the inherited heap `name` on the success path).
+//
+// (The Arc/Mutex ctor-arg and map-key/raise consuming sites are NOT covered here:
+// Arc[T?]/Mutex[T?] of an optional element is independently broken — T0851 —
+// `raise x as T` and an optional map key are rejected by sema, so the `as` form
+// never reaches those sites. The borrowed-optional read-back `a.borrow as T`
+// panics separately — T0850.)
+
+// super() into a parent field of type Circle?, parent has an explicit new().
+type T0849AnimalBase {
+  Circle? avatar;
+  new(~this, ~Circle? a) {
+    this.avatar = a;
+  }
+  has(&this) bool {
+    Circle? cc = this.avatar as Circle;
+    bool p = false;
+    if cc {
+      p = true;
+    }
+    return p;
+  }
+  avatar_name(&this) string {
+    Circle? cc = this.avatar as Circle;
+    string n = "";
+    if cc {
+      n = cc.name;
+    }
+    return n;
+  }
+}
+type T0849Pet is T0849AnimalBase {
+  new(~this, ~Shape s) {
+    super(a: s as Circle);
+  }
+}
+test_t0849_super_explicit_success() `test {
+  Shape s = Circle(name: "src", radius: 7.0);
+  p := T0849Pet(s: s);
+  assert(p.has(), "super (explicit parent new) as success -> some (double-free probe)");
+  assert(p.avatar_name() == "src", "super (explicit) as success name (UAF probe)");
+}
+test_t0849_super_explicit_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  p := T0849Pet(s: s);
+  assert(!p.has(), "super (explicit parent new) as failure -> none (leak probe)");
+}
+
+// super() into a parent field of type Circle?, parent has an implicit ctor.
+type T0849SimpleHolder {
+  Circle? held;
+  has(&this) bool {
+    Circle? cc = this.held as Circle;
+    bool p = false;
+    if cc {
+      p = true;
+    }
+    return p;
+  }
+}
+type T0849ChildHolder is T0849SimpleHolder {
+  new(~this, ~Shape s) {
+    super(held: s as Circle);
+  }
+}
+test_t0849_super_implicit_success() `test {
+  Shape s = Circle(name: "src", radius: 8.0);
+  c := T0849ChildHolder(s: s);
+  assert(c.has(), "super (implicit parent ctor) as success -> some (double-free probe)");
+}
+test_t0849_super_implicit_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  c := T0849ChildHolder(s: s);
+  assert(!c.has(), "super (implicit parent ctor) as failure -> none (leak probe)");
+}
+
+// Owning slot via channel send (`ch.send(s as Circle)` on channel[Circle?]).
+test_t0849_channel_send_success() `test {
+  Shape s = Circle(name: "src", radius: 7.5);
+  channel[Circle?] ch = channel[Circle?](capacity: 1);
+  ch.send(s as Circle);
+  bool present = false;
+  if oc := <-ch {
+    if oc {
+      present = true;
+      assert(oc.radius == 7.5, "channel send as success radius");
+      assert(oc.name == "src", "channel send as success name (UAF probe)");
+    }
+  } else {
+    assert(false, "channel receive failed");
+  }
+  assert(present, "channel send as success -> some (double-free probe)");
+  ch.close();
+}
+test_t0849_channel_send_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  channel[Circle?] ch = channel[Circle?](capacity: 1);
+  ch.send(s as Circle);
+  bool got = false;
+  bool present = false;
+  if oc := <-ch {
+    got = true;
+    if oc {
+      present = true;
+    }
+  } else {
+    assert(false, "channel receive failed");
+  }
+  assert(got, "channel send as failure -> value received");
+  assert(!present, "channel send as failure -> none (leak probe)");
+  ch.close();
+}
+
+// Owning slot via select-send (`select { ch.send(s as Circle): ... }`).
+test_t0849_select_send_success() `test {
+  Shape s = Circle(name: "src", radius: 8.5);
+  channel[Circle?] ch = channel[Circle?](capacity: 1);
+  select {
+    ch.send(s as Circle):
+      {
+      }
+  }
+  bool present = false;
+  if oc := <-ch {
+    if oc {
+      present = true;
+      assert(oc.radius == 8.5, "select-send as success radius");
+      assert(oc.name == "src", "select-send as success name (UAF probe)");
+    }
+  } else {
+    assert(false, "channel receive failed");
+  }
+  assert(present, "select-send as success -> some (double-free probe)");
+  ch.close();
+}
+test_t0849_select_send_failure() `test {
+  Shape s = Square(name: "sq", side: 3.0);
+  channel[Circle?] ch = channel[Circle?](capacity: 1);
+  select {
+    ch.send(s as Circle):
+      {
+      }
+  }
+  bool got = false;
+  bool present = false;
+  if oc := <-ch {
+    got = true;
+    if oc {
+      present = true;
+    }
+  } else {
+    assert(false, "channel receive failed");
+  }
+  assert(got, "select-send as failure -> value received");
+  assert(!present, "select-send as failure -> none (leak probe)");
+  ch.close();
+}
+
+// --- T0849: castSubjectMatch state lifecycle across nested function bodies ---
+// The success flag is a per-LLVM-function SSA value, so it must follow dropFlags'
+// save/reset/restore exactly when codegen descends into a lambda / generator /
+// go-block body (genLambdaExpr / buildGeneratorCoroutine / genGoBlock). A leaked
+// entry would reference cross-function SSA (malformed IR) or clobber a pending
+// same-statement entry in the enclosing function (leak / double-free). These
+// exercise an optional `as` consumed at an owning slot INSIDE a nested body, and
+// the enclosing-function-cast-pending-while-a-lambda-is-built ordering.
+
+type T0849NBox {
+  Circle? c;
+  present(&this) bool {
+    Circle? cc = this.c as Circle;
+    bool p = false;
+    if cc {
+      p = true;
+    }
+    return p;
+  }
+}
+
+// Optional `as` consumed at an owning slot inside a lambda body.
+test_t0849_lambda_nested_success() `test {
+  f := || -> bool {
+    Shape s = Circle(name: "ls", radius: 2.0);
+    T0849NBox b = T0849NBox(c: s as Circle);
+    return b.present();
+  };
+  assert(f(), "lambda-nested as success -> some (double-free probe)");
+}
+test_t0849_lambda_nested_failure() `test {
+  f := || -> bool {
+    Shape s = Square(name: "sq", side: 3.0);
+    T0849NBox b = T0849NBox(c: s as Circle);
+    return b.present();
+  };
+  bool r = f();
+  assert(r == false, "lambda-nested as failure -> none (leak probe)");
+}
+
+// Enclosing-function cast pending while a lambda is generated mid-statement —
+// the lambda's fresh castSubjectMatch must not clobber/pollute the outer entry.
+test_t0849_outer_cast_then_lambda() `test {
+  Shape s = Circle(name: "os", radius: 4.0);
+  apply := |Circle? x| -> bool {
+    bool p = false;
+    if x {
+      p = true;
+    }
+    return p;
+  };
+  T0849NBox b = T0849NBox(c: s as Circle);
+  bool a = apply(none);
+  assert(b.present(), "outer cast consumed correctly (double-free probe)");
+  assert(a == false, "lambda body did not pollute outer cast state");
+}
+
+// Optional `as` consumed at an owning slot inside a go-block body.
+test_t0849_go_block_nested_success() `test {
+  channel[bool] done = channel[bool](capacity: 1);
+  go {
+    Shape s = Circle(name: "gs", radius: 5.0);
+    T0849NBox b = T0849NBox(c: s as Circle);
+    done.send(b.present());
+  };
+  bool got = false;
+  if r := <-done {
+    got = r;
+  }
+  assert(got, "go-block-nested as success -> some (double-free probe)");
+  done.close();
 }

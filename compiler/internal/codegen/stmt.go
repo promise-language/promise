@@ -336,6 +336,33 @@ func (c *Compiler) castSubjectMovableIdent(expr ast.Expr) *ast.IdentExpr {
 	return ident
 }
 
+// consumeCastSubjectDropFlag handles the cast subject's drop flag at a consuming
+// site (return / owning-slot store). For `as!` (Force) the move is unconditional
+// → clear the flag. For `as` (non-Force, T0849) the move is *conditional* on the
+// runtime downcast outcome → set the flag to `!isMatch` (drop the subject iff the
+// cast failed and produced None), reusing the success flag captured by
+// genCastExpr. This fixes the optional-`as` conditional move that previously
+// double-freed on success (return path: flag left set) or leaked on failure
+// (owning-slot path: flag cleared unconditionally).
+//
+// Force is read from expr (not from map staleness) so `as!` always takes the
+// unconditional branch even if an earlier non-Force view-bind left a stale entry;
+// the freshest isMatch for this consume is always set by the immediately
+// preceding genCastExpr of the same subject.
+func (c *Compiler) consumeCastSubjectDropFlag(expr ast.Expr, name string) {
+	if cast, ok := unwrapDestructureParens(expr).(*ast.CastExpr); ok && !cast.Force {
+		if matchFlag := c.castSubjectMatch[name]; matchFlag != nil {
+			delete(c.castSubjectMatch, name)
+			if flag, ok := c.dropFlags[name]; ok {
+				notMatch := c.block.NewXor(matchFlag, constant.NewInt(irtypes.I1, 1))
+				c.block.NewStore(notMatch, flag)
+			}
+			return
+		}
+	}
+	c.clearDropFlag(name)
+}
+
 // isGetterCallExpr reports whether expr is a MemberExpr whose Field resolves
 // to a getter method on its target's type. Getters return owned values
 // (tracked via trackGetterResult/claimStringTemp), so the LHS of
@@ -6243,9 +6270,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			// T0754: clear cast subject's drop flag — ownership moves it at
 			// the owning-slot store, so the subject's scope-exit drop must
-			// not fire on the same allocation the field now owns.
+			// not fire on the same allocation the field now owns. T0849: for
+			// the conditional `as` form, drop iff the downcast failed.
 			if ident := c.castSubjectMovableIdent(s.Value); ident != nil {
-				c.clearDropFlag(ident.Name)
+				c.consumeCastSubjectDropFlag(s.Value, ident.Name)
 			}
 			// B0168: Claim string temp — ownership transferred to field.
 			c.claimStringTemp(val)
@@ -6373,8 +6401,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// T0754: clear cast subject's drop flag — ownership moves it at
 			// the owning-slot store, so the subject's scope-exit drop must
 			// not fire on the same allocation the container element now owns.
+			// T0849: for the conditional `as` form, drop iff the downcast failed.
 			if ident := c.castSubjectMovableIdent(s.Value); ident != nil {
-				c.clearDropFlag(ident.Name)
+				c.consumeCastSubjectDropFlag(s.Value, ident.Name)
 			}
 			// B0168: Claim string temp — ownership transferred to container.
 			c.claimStringTemp(val)
@@ -7252,21 +7281,19 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	if s.Value != nil && !needsDup {
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
-		} else if cast, ok := unwrapDestructureParens(s.Value).(*ast.CastExpr); ok && cast.Force {
-			// T0783: `return x as! T` aliases x's instance into the returned
-			// value; ownership now moves x at the return, so clear x's drop flag
-			// to keep codegen symmetric — otherwise x's scope-exit drop fires on
-			// the same allocation the caller now owns (double-free).
+		} else if _, ok := unwrapDestructureParens(s.Value).(*ast.CastExpr); ok {
+			// T0783: `return x as! T` aliases x's instance into the returned value;
+			// ownership now moves x at the return, so clear x's drop flag to keep
+			// codegen symmetric — otherwise x's scope-exit drop fires on the same
+			// allocation the caller now owns (double-free).
 			//
-			// Gated on the outermost cast's Force: only the unconditional `as!`
-			// form is an unconditional move. The optional `as` form (Force ==
-			// false) yields `T?` and is a *conditional* move (None on a failed
-			// downcast); clearing the flag there would leak the subject on the
-			// failure path. That conditional-move case (and its owning-slot
-			// sibling) is tracked as T0849 — it needs runtime-outcome-conditioned
-			// drop handling rather than an unconditional clear here.
+			// T0849: the optional `as` form (Force == false) yields `T?` and is a
+			// *conditional* move (None on a failed downcast). consumeCastSubjectDropFlag
+			// reads the outermost cast's Force: `as!` clears unconditionally; `as`
+			// stores `!isMatch` so x is dropped iff the downcast failed (else the
+			// returned optional owns the aliased instance).
 			if ident := c.castSubjectMovableIdent(s.Value); ident != nil {
-				c.clearDropFlag(ident.Name)
+				c.consumeCastSubjectDropFlag(s.Value, ident.Name)
 			}
 		}
 	}
@@ -7549,7 +7576,8 @@ func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 	// this clear the subject's scope-exit drop fires on the same allocation
 	// the error slot now owns → double-free.
 	if ident := c.castSubjectMovableIdent(s.Value); ident != nil {
-		c.clearDropFlag(ident.Name)
+		// T0849: for the conditional `as` form, drop iff the downcast failed.
+		c.consumeCastSubjectDropFlag(s.Value, ident.Name)
 	}
 
 	// Emit close() for all active use bindings before raising
@@ -10919,8 +10947,9 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		}
 		// T0784: cast-of-borrow send (`select { ch.send(x as!/as T): ... }`) —
 		// the cast is a view over an owned local with the same double-free shape.
+		// T0849: for the conditional `as` form, drop iff the downcast failed.
 		if ident := c.castSubjectMovableIdent(ci.sendValueExpr); ident != nil {
-			c.clearDropFlag(ident.Name)
+			c.consumeCastSubjectDropFlag(ci.sendValueExpr, ident.Name)
 		}
 		// T0799: a freshly produced send value (`select { ch.send("a" + "b"): ... }`)
 		// is a tracked statement temp. Its bits are memcpy'd into the buffer below,

@@ -2220,6 +2220,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	savedBlockCounter := c.blockCounter
 	savedScopeBindings := c.scopeBindings
 	savedDropFlags := c.dropFlags
+	savedCastSubjectMatch := c.castSubjectMatch // T0849: function-scoped, like dropFlags
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
@@ -2236,6 +2237,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.currentRetType = nil
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil // T0849: fresh per generated function body
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
@@ -2404,6 +2406,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.blockCounter = savedBlockCounter
 	c.scopeBindings = savedScopeBindings
 	c.dropFlags = savedDropFlags
+	c.castSubjectMatch = savedCastSubjectMatch // T0849
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup

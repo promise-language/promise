@@ -85,6 +85,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	savedBlockCounter := c.blockCounter
 	savedScopeBindings := c.scopeBindings
 	savedDropFlags := c.dropFlags
+	savedCastSubjectMatch := c.castSubjectMatch // T0849: function-scoped, like dropFlags
 	savedDropBindings := c.dropBindings
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedInCoroutine := c.inCoroutine
@@ -112,6 +113,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.currentRetType = nil
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil // T0849: fresh per generated function body
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 	c.inCoroutine = false
@@ -325,6 +327,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.blockCounter = savedBlockCounter
 	c.scopeBindings = savedScopeBindings
 	c.dropFlags = savedDropFlags
+	c.castSubjectMatch = savedCastSubjectMatch // T0849
 	c.dropBindings = savedDropBindings
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.inCoroutine = savedInCoroutine
@@ -349,6 +352,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil // T0849: fresh per generated function body
 	c.dropBindings = make(map[string]scopeBinding)
 	c.blockCounter = 0
 

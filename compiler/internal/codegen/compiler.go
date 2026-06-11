@@ -165,6 +165,12 @@ type Compiler struct {
 	// Drop flag tracking: maps variable name to its drop flag alloca (i1)
 	dropFlags map[string]*ir.InstAlloca
 
+	// T0849: per-subject `i1` downcast-success flag from a non-Force RTTI cast
+	// (`x as T`) of an owned movable local. Set in genCastExpr, consumed at a
+	// consuming site (return / owning-slot store) to make the subject's
+	// scope-exit drop conditional: drop iff the downcast failed (`!isMatch`).
+	castSubjectMatch map[string]value.Value
+
 	// T0617: for-in loop binding name → alloca holding the current iteration's
 	// container slot address (i8**), for single-owner-handle (Task) Vector/array
 	// element loops. `<-handle` nulls *slot so the container's scope-exit drop
@@ -1668,6 +1674,7 @@ func (c *Compiler) compileTestCoroutine(nameStr string, fd *ast.FuncDecl) *ir.Fu
 	c.currentRetType = nil
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil
 	c.stmtTempMap = make(map[value.Value]int)
@@ -5722,6 +5729,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
@@ -6273,6 +6281,7 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 		c.locals = make(map[string]*ir.InstAlloca)
 		c.localNameCount = make(map[string]int)
 		c.dropFlags = make(map[string]*ir.InstAlloca)
+		c.castSubjectMatch = nil
 		c.dropBindings = make(map[string]scopeBinding)
 		c.stmtTemps = nil                         // T0073
 		c.stmtTempMap = make(map[value.Value]int) // T0073
@@ -6468,6 +6477,7 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			c.locals = make(map[string]*ir.InstAlloca)
 			c.localNameCount = make(map[string]int)
 			c.dropFlags = make(map[string]*ir.InstAlloca)
+			c.castSubjectMatch = nil
 			c.dropBindings = make(map[string]scopeBinding)
 			c.stmtTemps = nil                         // T0073
 			c.stmtTempMap = make(map[value.Value]int) // T0073
@@ -7182,6 +7192,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
@@ -9931,6 +9942,7 @@ type compilerState struct {
 	locals               map[string]*ir.InstAlloca
 	localNameCount       map[string]int
 	dropFlags            map[string]*ir.InstAlloca
+	castSubjectMatch     map[string]value.Value    // T0849: function-scoped, like dropFlags
 	forInHandleSlotPtr   map[string]*ir.InstAlloca // T0617
 	dropBindings         map[string]scopeBinding
 	blockCounter         int
@@ -9965,6 +9977,7 @@ func (c *Compiler) saveState() compilerState {
 		locals:               c.locals,
 		localNameCount:       c.localNameCount,
 		dropFlags:            c.dropFlags,
+		castSubjectMatch:     c.castSubjectMatch,   // T0849
 		forInHandleSlotPtr:   c.forInHandleSlotPtr, // T0617
 		dropBindings:         c.dropBindings,
 		blockCounter:         c.blockCounter,
@@ -10004,6 +10017,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.locals = s.locals
 	c.localNameCount = s.localNameCount
 	c.dropFlags = s.dropFlags
+	c.castSubjectMatch = s.castSubjectMatch     // T0849
 	c.forInHandleSlotPtr = s.forInHandleSlotPtr // T0617
 	c.dropBindings = s.dropBindings
 	c.stmtTemps = s.stmtTemps

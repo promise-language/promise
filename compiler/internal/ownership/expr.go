@@ -402,16 +402,18 @@ func (c *Checker) tryMoveConsumeCastSubject(expr ast.Expr) {
 // tryMoveConsumeCastSubject would wrongly reject it. The unsound
 // borrow-returned-as-owned case is handled separately by checkReturnRefSafety.
 //
-// Only the *unconditional* `as!` cast (Force == true) moves its subject. The
+// Only the *unconditional* `as!` cast (Force == true) moves its subject here. The
 // optional `as` form (Force == false) yields `T?` and is a *conditional* move:
 // the subject is aliased into the result only when the downcast succeeds; on
-// failure the result is None and the subject must still be dropped. Moving it
-// unconditionally here would desync from codegen (which, mirrored on Force,
-// declines to clear the drop flag) and misrepresent the subject's state. The
-// `as` conditional-move double-free (success) / leak (failure) — present at the
-// return path and at owning-slot stores alike — is tracked separately (T0849);
-// it needs runtime-outcome-conditioned drop handling, not an unconditional
-// move. The gate is on the *outermost* cast only: once an `as!` wrapper is
+// failure the result is None and the subject must still be dropped. The return
+// path is terminal (no later source-level use of the subject is possible), so
+// leaving the subject Owned here is sound — T0849 makes the *codegen* drop
+// conditional on the runtime downcast outcome (drop iff `!isMatch`, via
+// consumeCastSubjectDropFlag) rather than clearing the flag unconditionally. The
+// owning-slot sibling stays handled by tryMoveConsumeCastSubject (an
+// unconditional Moved over-claim, which conservatively rejects any later use);
+// its codegen drop is likewise made conditional by T0849. The gate is on the
+// *outermost* cast only: once an `as!` wrapper is
 // established, peel through any nested casts to the innermost subject (mirrors
 // codegen's castSubjectMovableIdent) so a chained `(x as! A) as! B` still moves x.
 func (c *Checker) tryMoveCastSubject(expr ast.Expr) {
@@ -428,7 +430,9 @@ func (c *Checker) tryMoveCastSubject(expr ast.Expr) {
 		return
 	}
 	if !cast.Force {
-		return // T0783/T0849: `as` is a conditional move — not handled here.
+		// T0849: `as` is a conditional move; the subject stays Owned here and
+		// codegen makes the scope-exit drop conditional on the runtime outcome.
+		return
 	}
 	// Peel through any number of nested casts / parens to the innermost subject.
 	// T0800: a chained cast `(x as! A) as! B` wraps another CastExpr.

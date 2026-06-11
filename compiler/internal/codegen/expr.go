@@ -2292,8 +2292,9 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 			// T0754: clear cast subject's drop flag — ownership moves it at
 			// the owning-slot store (super()'s parent constructor takes the
 			// arg into the parent's field), so the subject must not also drop.
+			// T0849: for the conditional `as` form, drop iff the downcast failed.
 			if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
-				c.clearDropFlag(ident.Name)
+				c.consumeCastSubjectDropFlag(arg.Value, ident.Name)
 			}
 		}
 		newMethod := parent.LookupMethod("new")
@@ -2353,8 +2354,9 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 			// T0754: clear cast subject's drop flag — ownership moves it at
 			// the owning-slot store (parent implicit-ctor field-init), so
 			// the subject must not also drop at scope exit.
+			// T0849: for the conditional `as` form, drop iff the downcast failed.
 			if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
-				c.clearDropFlag(ident.Name)
+				c.consumeCastSubjectDropFlag(arg.Value, ident.Name)
 			}
 		}
 	}
@@ -2488,8 +2490,9 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				// T0754: clear cast subject's drop flag — ownership moves it
 				// at the owning-slot store, so the subject's scope-exit drop
 				// must not fire on the same allocation new() now owns.
+				// T0849: for the conditional `as` form, drop iff the cast failed.
 				if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
-					c.clearDropFlag(ident.Name)
+					c.consumeCastSubjectDropFlag(arg.Value, ident.Name)
 				}
 				// B0301: Neutralize source optional for opt! args in new() constructors.
 				c.neutralizeForceUnwrapSource(arg.Value)
@@ -2695,7 +2698,8 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				// this owning-slot store. The branches below handle bare ident
 				// RHS; cover the cast-RHS shape here.
 				if castIdent := c.castSubjectMovableIdent(arg.Value); castIdent != nil {
-					c.clearDropFlag(castIdent.Name)
+					// T0849: for the conditional `as` form, drop iff the cast failed.
+					c.consumeCastSubjectDropFlag(arg.Value, castIdent.Name)
 				}
 				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 					if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
@@ -2730,8 +2734,9 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				// T0754: clear cast subject's drop flag — ownership moves it
 				// at the owning-slot store, so the subject's scope-exit drop
 				// must not fire on the same allocation the field now owns.
+				// T0849: for the conditional `as` form, drop iff the cast failed.
 				if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
-					c.clearDropFlag(ident.Name)
+					c.consumeCastSubjectDropFlag(arg.Value, ident.Name)
 				}
 				// B0301: When arg is opt! (force-unwrap), neutralize the source optional's
 				// present flag so its scope cleanup won't double-free the inner value
@@ -3335,9 +3340,10 @@ func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) valu
 	}
 	// T0784: also clear when the arg is `x as!/as T` over an owned local —
 	// the cast is a non-consuming view, so without this the subject and the
-	// new Arc both drop the same allocation.
+	// new Arc both drop the same allocation. T0849: for the conditional `as`
+	// form, drop iff the downcast failed.
 	if ident := c.castSubjectMovableIdent(e.Args[0].Value); ident != nil {
-		c.clearDropFlag(ident.Name)
+		c.consumeCastSubjectDropFlag(e.Args[0].Value, ident.Name)
 	}
 	c.neutralizeForceUnwrapSource(e.Args[0].Value)
 	c.claimStringTemp(val)
@@ -3604,8 +3610,9 @@ func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) va
 		c.clearDropFlag(ident.Name)
 	}
 	// T0784: also clear when the arg is `x as!/as T` over an owned local.
+	// T0849: for the conditional `as` form, drop iff the downcast failed.
 	if ident := c.castSubjectMovableIdent(e.Args[0].Value); ident != nil {
-		c.clearDropFlag(ident.Name)
+		c.consumeCastSubjectDropFlag(e.Args[0].Value, ident.Name)
 	}
 	c.neutralizeForceUnwrapSource(e.Args[0].Value)
 	c.claimStringTemp(val)
@@ -3958,8 +3965,9 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		c.clearDropFlag(ident.Name)
 	}
 	// T0784: also clear when the arg is `x as!/as T` over an owned local.
+	// T0849: for the conditional `as` form, drop iff the downcast failed.
 	if ident := c.castSubjectMovableIdent(e.Args[0].Value); ident != nil {
-		c.clearDropFlag(ident.Name)
+		c.consumeCastSubjectDropFlag(e.Args[0].Value, ident.Name)
 	}
 	// B0170: claim string temp — ownership transfers to channel buffer
 	c.claimStringTemp(argVal)
@@ -5852,8 +5860,9 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 			// T0754: a cast subject is consumed by ownership at `~`-param sites
 			// — clear the subject's drop flag so it doesn't double-free with the
 			// callee's consume drop. Mirrors the IdentExpr branch above.
+			// T0849: for the conditional `as` form, drop iff the downcast failed.
 			if ident := c.castSubjectMovableIdent(arg.Value); ident != nil {
-				c.clearDropFlag(ident.Name)
+				c.consumeCastSubjectDropFlag(arg.Value, ident.Name)
 			}
 			c.claimStringTemp(v)
 			c.claimHeapTemp(v) // B0201: prevent double-free for vector literals passed to ~ params
@@ -6253,8 +6262,9 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 				// payload — clear the subject's drop flag so it doesn't double-
 				// free at scope exit with the enum's variant drop. Also marks
 				// movedDroppable so the enum's stmt-temp drop is skipped.
+				// T0849: for the conditional `as` form, drop iff the cast failed.
 				movedDroppable = true
-				c.clearDropFlag(castIdent.Name)
+				c.consumeCastSubjectDropFlag(arg.Value, castIdent.Name)
 			} else if !movedDroppable {
 				// B0286: Function/method calls returning droppable values
 				// transfer ownership to the enum variant. Skip B0267 temp
@@ -8003,9 +8013,10 @@ func (c *Compiler) genTupleLit(e *ast.TupleLit) value.Value {
 			c.clearDropFlag(ident.Name)
 		}
 		// T0784: same for `x as!/as T` element — cast subject is moved into
-		// the tuple slot, so suppress its scope-exit drop binding.
+		// the tuple slot, so suppress its scope-exit drop binding. T0849: for
+		// the conditional `as` form, drop iff the downcast failed.
 		if ident := c.castSubjectMovableIdent(elem); ident != nil {
-			c.clearDropFlag(ident.Name)
+			c.consumeCastSubjectDropFlag(elem, ident.Name)
 		}
 		// T0371: Claim heap-tracked field temps so they are not double-freed at
 		// stmt end (their ownership is now in the tuple slot). Mirrors the
@@ -8242,7 +8253,8 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 					c.tupleNeedsDrop(elem) ||
 					c.vecElemNeedsOptionalDrop(elem) {
 					if ident := c.castSubjectMovableIdent(elemExpr); ident != nil {
-						c.clearDropFlag(ident.Name)
+						// T0849: conditional `as` form drops iff the cast failed.
+						c.consumeCastSubjectDropFlag(elemExpr, ident.Name)
 					}
 				}
 			}
@@ -9430,11 +9442,12 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 			}
 			// T0784: same for `x as!/as T` key/value — cast subject is moved
 			// into the map slot via []=, so suppress its scope-exit drop.
+			// T0849: for the conditional `as` form, drop iff the downcast failed.
 			if ident := c.castSubjectMovableIdent(entry.Value); ident != nil {
-				c.clearDropFlag(ident.Name)
+				c.consumeCastSubjectDropFlag(entry.Value, ident.Name)
 			}
 			if ident := c.castSubjectMovableIdent(entry.Key); ident != nil {
-				c.clearDropFlag(ident.Name)
+				c.consumeCastSubjectDropFlag(entry.Key, ident.Name)
 			}
 			// Claim heap temps: user type instances passed as map values
 			// transfer ownership to the map. Without this, the heap temp
@@ -9649,7 +9662,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedBlockCounter := c.blockCounter
 	savedScopeBindings := c.scopeBindings
 	savedDropFlags := c.dropFlags
-	savedDropBindings := c.dropBindings // B0035: must save/restore for NLL early drops
+	savedCastSubjectMatch := c.castSubjectMatch // T0849: function-scoped, like dropFlags
+	savedDropBindings := c.dropBindings         // B0035: must save/restore for NLL early drops
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedWritebacks := c.lambdaWritebacks
 	savedGoExprFF2 := c.goExprFireAndForget
@@ -9683,6 +9697,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.currentRetType = sig.Result()
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil // T0849: fresh per lambda body; restored below
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
@@ -9792,7 +9807,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.blockCounter = savedBlockCounter
 	c.scopeBindings = savedScopeBindings
 	c.dropFlags = savedDropFlags
-	c.dropBindings = savedDropBindings // B0035: restore for NLL early drops
+	c.castSubjectMatch = savedCastSubjectMatch // T0849
+	c.dropBindings = savedDropBindings         // B0035: restore for NLL early drops
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.lambdaWritebacks = savedWritebacks
 	c.goExprFireAndForget = savedGoExprFF2
@@ -10847,6 +10863,20 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 
 		c.block = okBlock
 		return castResult // same value struct, type is verified
+	}
+
+	// T0849: if the subject is a movable owned local/`~`-param, record the runtime
+	// downcast success flag so a consuming site (return / owning-slot store) can
+	// drop the subject iff the cast failed (None). castSubjectMovableIdent peels
+	// parens/chained casts to the innermost subject ident that carries a drop flag.
+	// `as` is a conditional move: the subject's instance is aliased into `some`
+	// only on success, untouched on failure — so an unconditional clear/keep is
+	// wrong in both consuming contexts. consumeCastSubjectDropFlag reuses isMatch.
+	if ident := c.castSubjectMovableIdent(e); ident != nil {
+		if c.castSubjectMatch == nil {
+			c.castSubjectMatch = map[string]value.Value{}
+		}
+		c.castSubjectMatch[ident.Name] = isMatch
 	}
 
 	// as — wrap in Optional { i1, { i8*, i8* } }. User types use value struct representation.
@@ -12343,7 +12373,8 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedBlockCounter := c.blockCounter
 	savedScopeBindings := c.scopeBindings
 	savedDropFlags := c.dropFlags
-	savedDropBindings := c.dropBindings // B0035: must save/restore for NLL early drops
+	savedCastSubjectMatch := c.castSubjectMatch // T0849: function-scoped, like dropFlags
+	savedDropBindings := c.dropBindings         // B0035: must save/restore for NLL early drops
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
@@ -12363,6 +12394,7 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.currentRetType = types.TypVoid
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil // T0849: fresh per function body; restored below
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
@@ -12553,7 +12585,8 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.blockCounter = savedBlockCounter
 	c.scopeBindings = savedScopeBindings
 	c.dropFlags = savedDropFlags
-	c.dropBindings = savedDropBindings // B0035: restore for NLL early drops
+	c.castSubjectMatch = savedCastSubjectMatch // T0849
+	c.dropBindings = savedDropBindings         // B0035: restore for NLL early drops
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup
@@ -12627,6 +12660,7 @@ func (c *Compiler) genGoExternWrapper(ext *ExternFunc, argLLVMTypes []irtypes.Ty
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil // T0849: fresh per function body (saved/restored via saveState)
 	c.dropBindings = make(map[string]scopeBinding)
 	c.scopeBindings = nil
 
@@ -13086,7 +13120,8 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	savedBlockCounter := c.blockCounter
 	savedScopeBindings := c.scopeBindings
 	savedDropFlags := c.dropFlags
-	savedDropBindings := c.dropBindings // B0035: must save/restore for NLL early drops
+	savedCastSubjectMatch := c.castSubjectMatch // T0849: function-scoped, like dropFlags
+	savedDropBindings := c.dropBindings         // B0035: must save/restore for NLL early drops
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
@@ -13121,6 +13156,7 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.currentRetType = types.TypVoid
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil // T0849: fresh per function body; restored below
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
@@ -13377,7 +13413,8 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.blockCounter = savedBlockCounter
 	c.scopeBindings = savedScopeBindings
 	c.dropFlags = savedDropFlags
-	c.dropBindings = savedDropBindings // B0035: restore for NLL early drops
+	c.castSubjectMatch = savedCastSubjectMatch // T0849
+	c.dropBindings = savedDropBindings         // B0035: restore for NLL early drops
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup

@@ -23,6 +23,7 @@ func (c *Compiler) defineEmbedGetter(fd *ast.FuncDecl, fn *ir.Func, embed *sema.
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.castSubjectMatch = nil // T0849: top-level getter body, no enclosing pending state
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073

@@ -27466,15 +27466,17 @@ func TestT0783_ReturnChainedCastClearsSubjectDropFlag(t *testing.T) {
 	assertContains(t, fn, "store i1 false, i1* %s.dropflag")
 }
 
-// The optional `as` form (Force == false, result `Circle?`) is a *conditional*
-// move: the subject is aliased into the result only on a successful downcast; on
-// failure the result is None and the subject must still be dropped. So the
-// return-path drop-flag clear is gated on the outermost cast's Force — for `as`
-// the subject's flag must NOT be cleared (clearing it would leak the subject on
-// the failure path). The conditional-move double-free (success) / leak (failure)
-// is tracked as T0849. This pins the Force gate at the IR level: s keeps its
-// conditional scope-exit drop (the flag is loaded, never force-cleared).
-func TestT0783_ReturnOptionalCastDoesNotClearSubjectDropFlag(t *testing.T) {
+// T0849: the optional `as` form (Force == false, result `Circle?`) is a
+// *conditional* move: the subject is aliased into the result only on a
+// successful downcast; on failure the result is None and the subject must still
+// be dropped. genReturnStmt routes the cast subject through
+// consumeCastSubjectDropFlag, which — for the non-Force form — stores `!isMatch`
+// into the subject's drop flag instead of clearing it unconditionally. So the
+// subject's scope-exit drop fires iff the downcast failed: no double-free on
+// success (was SEGV), no leak on failure. The IR signature is an
+// `xor i1 %isMatch, true` feeding a `store ..., i1* %s.dropflag`, NOT an
+// unconditional `store i1 false`.
+func TestT0849_ReturnOptionalCastConditionalSubjectDrop(t *testing.T) {
 	ir := generateIR(t, `
 		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
 		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
@@ -27488,10 +27490,39 @@ func TestT0783_ReturnOptionalCastDoesNotClearSubjectDropFlag(t *testing.T) {
 	if fn == "" {
 		t.Fatal("expected __user.helper in IR")
 	}
-	// s retains its conditional drop (flag loaded at scope exit) ...
+	// The drop flag is set to the negated downcast-success flag (drop iff the
+	// cast failed): `%n = xor i1 %isMatch, true` then `store i1 %n, ... s.dropflag`.
+	assertContainsMatch(t, fn, `%\w+ = xor i1 %\w+, true\n\s*store i1 %\w+, i1\* %s\.dropflag`)
+	// The conditional drop still executes at scope exit (flag is loaded) ...
 	assertContains(t, fn, "load i1, i1* %s.dropflag")
-	// ... and the flag is NOT force-cleared by the return (would leak on a
-	// failed downcast). `as` is not in T0783's scope — see T0849.
+	// ... and it is NOT an unconditional clear (that would leak on a failed
+	// downcast — the pre-T0849 buggy shape).
+	assertNotContains(t, fn, "store i1 false, i1* %s.dropflag")
+}
+
+// T0849 owning-slot sibling: `Box(c: s as Circle)` stores the conditional
+// success flag into the field-init constructor's subject drop flag the same way
+// (drop iff the cast failed). Before T0849 this site cleared the flag
+// unconditionally (`store i1 false`) → leak on the failure path.
+func TestT0849_OwningSlotOptionalCastConditionalDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { string name; area(&this) f64 `+"`abstract"+`; }
+		type Circle is Shape { f64 radius; area(&this) f64 { return this.radius; } }
+		type Box { Circle? c; }
+		helper(int dummy) bool {
+			Shape s = Circle(name: "src", radius: 2.0);
+			b := Box(c: s as Circle);
+			return true;
+		}
+		main() { _ := helper(0); }
+	`)
+	fn := extractFunction(ir, "__user.helper")
+	if fn == "" {
+		t.Fatal("expected __user.helper in IR")
+	}
+	// Conditional store of the negated success flag into the subject's drop flag.
+	assertContainsMatch(t, fn, `%\w+ = xor i1 %\w+, true\n\s*store i1 %\w+, i1\* %s\.dropflag`)
+	// Not an unconditional clear (the pre-T0849 leak-on-failure shape).
 	assertNotContains(t, fn, "store i1 false, i1* %s.dropflag")
 }
 

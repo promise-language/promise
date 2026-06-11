@@ -100,7 +100,7 @@ main() {
 promise run hello.pr
 ```
 
-Learn the language with **`promise guide`** (the full guide ships inside the
+Explore the language with **`promise guide`** (the full guide ships inside the
 toolchain — no repo checkout needed).
 
 **Editing `.pr` files?** The **Promise Lang** extension gives you syntax
@@ -131,6 +131,22 @@ Promises.)
 > with `promise build`, and run it. Write idiomatic Promise — explicit types, the
 > error operators, ownership annotations — and make it read cleanly: I should be
 > able to open the file and know exactly what it does.
+>
+> **If you hit a compiler bug, capture it — don't quietly work around it.** The
+> language is new enough that you may trip over a genuine codegen or compiler
+> failure. When you find a reproducible one, minimize it first: bisect to the
+> smallest source that still triggers it, and find the closest variant that *does*
+> compile, so the trigger is pinned down precisely (not just "my big program
+> failed"). Then write it to a `BUG-<slug>.md` file in the project root with a
+> one-line title, the `promise version` output, your platform, the minimal repro
+> (smallest `.pr` source plus the exact `promise build` command), the verbatim
+> error output, the expected behavior, a short table of what does and doesn't
+> trigger it, your best guess at the cause, and the workaround you used in the
+> real code. Verify the repro actually fails and the "compiles fine" controls
+> actually compile before writing them down — don't go from memory. Put `Please
+> file this upstream at https://github.com/promise-language/promise/issues` at the
+> top of the file, and mention the file in your summary so I remember to submit
+> it. Only write it if you actually hit a reproducible failure — don't invent one.
 
 Did it compile? Does the code read the way the prompt implies? That's the thesis,
 tested on your own setup.

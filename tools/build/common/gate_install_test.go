@@ -135,9 +135,9 @@ func TestRunGateInstallRejectsBadVariant(t *testing.T) {
 		nil,
 		{"--variant", "bogus"},
 		{"--system"},
-		{"--variant"},          // dangling flag, no value
-		{"-variant"},           // dash-form dangling, no value
-		{"--bogus"},            // unknown flag
+		{"--variant"},                    // dangling flag, no value
+		{"-variant"},                     // dash-form dangling, no value
+		{"--bogus"},                      // unknown flag
 		{"--variant", "thin", "--extra"}, // valid variant but trailing junk
 	}
 	for _, args := range bad {
@@ -155,7 +155,7 @@ func TestRunGateInstallRejectsBadVariant(t *testing.T) {
 func TestEnvWith(t *testing.T) {
 	base := []string{"HOME=/real/home", "PATH=/real/bin", "KEEP=1"}
 	got := envWith(base, map[string]string{
-		"HOME":        "/sandbox",      // replaces existing
+		"HOME":         "/sandbox",          // replaces existing
 		"PROMISE_HOME": "/sandbox/.promise", // brand new
 	})
 
@@ -264,6 +264,38 @@ func TestInstallTestFailures(t *testing.T) {
 
 	if got := installTestFailures(nil); got != 0 {
 		t.Errorf("installTestFailures(empty) = %d, want 0", got)
+	}
+}
+
+// TestIsFullGitSHA: the install gate treats the binary's `version --commit`
+// output as provenance only when it is a bare 40-char lowercase-hex SHA. Anything
+// else — empty (unstamped build), a "promise version <v>" line (binary predating
+// --commit support), an uppercase or wrong-length string — must be rejected so
+// the gate fails with the accurate "no provenance" error rather than feeding junk
+// to git cat-file (T0854).
+func TestIsFullGitSHA(t *testing.T) {
+	ok := []string{
+		"0123456789abcdef0123456789abcdef01234567",
+		"ffffffffffffffffffffffffffffffffffffffff",
+	}
+	for _, s := range ok {
+		if !isFullGitSHA(s) {
+			t.Errorf("isFullGitSHA(%q) = false, want true", s)
+		}
+	}
+	bad := []string{
+		"",                       // unstamped build
+		"promise version 2026.0", // pre-stamp binary fell through to printVersion
+		"0123456789abcdef0123456789abcdef0123456",   // 39 chars
+		"0123456789abcdef0123456789abcdef012345678", // 41 chars
+		"0123456789ABCDEF0123456789abcdef01234567",  // uppercase hex
+		"0123456789abcdefg123456789abcdef01234567",  // non-hex char
+		"unknown", // GitSHA's failure sentinel
+	}
+	for _, s := range bad {
+		if isFullGitSHA(s) {
+			t.Errorf("isFullGitSHA(%q) = true, want false", s)
+		}
 	}
 }
 

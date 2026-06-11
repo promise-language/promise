@@ -41,6 +41,18 @@ func GitSHA(root string) string {
 	return out
 }
 
+// GitSHAFull returns the full 40-char git commit hash at HEAD, or "" if
+// unavailable (so callers can treat a missing SHA as "no provenance"). Used to
+// stamp published compiler binaries with their build commit so the install gate
+// can pin test sources to the exact sources the binary was built from (T0854).
+func GitSHAFull(root string) string {
+	out, err := RunOutputIn(root, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
 // BuildVersion returns the version string for the compiler binary.
 // Dev: "<epoch>-<gitsha7>", Release: "<epoch>".
 func BuildVersion(root string, release bool) (string, error) {

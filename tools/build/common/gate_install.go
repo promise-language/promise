@@ -33,6 +33,14 @@ import (
 // hand-off to the real epoch compiler is on the critical path yet is not covered
 // by bin/test / bin/verify (which run the compiler directly). That hand-off, and
 // its Windows path in particular, is a primary reason this gate exists.
+//
+// Source provenance (T0854): the install gate validates the published
+// distribution against the sources it was BUILT FROM — NOT the developer's local
+// working tree. It resolves the binary's build commit via `promise version
+// --commit`, checks that SHA out into a detached worktree, and runs the suite
+// there. This prevents spurious failures when bugfix-plus-regression-test commits
+// land after the last prebuilt publish (the stale binary would otherwise fail the
+// newer tests). Local compiler/source edits stay covered by bin/verify / bin/test.
 
 // defaultInstallBaseURL is the published dist bucket the gate fetches the install
 // script + assets from while the repo is private (T0803). Overridable via
@@ -245,17 +253,62 @@ func runInstallPhases(root, work, variant, baseURL string, system bool) error {
 	}
 	phases["sanity"] = "pass"
 
+	// ── pin sources to the published binary's build commit (T0854) ────────────
+	// The gate validates the published distribution against ITS OWN sources, not
+	// the dev's working tree. Resolve the SHA the binary was built from, check it
+	// out into a detached worktree, and run the suite there. This is the swap that
+	// makes the gate test the published bytes — it MUST precede the shared testCmd
+	// block below (used by thin/full and --system).
+	shaCmd := exec.Command(promiseBin, "version", "--commit")
+	shaCmd.Env = baseEnv // resolve the SANDBOX epoch compiler (PROMISE_HOME lives in baseEnv)
+	shaOut, _ := shaCmd.Output()
+	sha := strings.TrimSpace(string(shaOut))
+	// A stamped binary prints exactly the 40-char hex SHA. An unstamped build
+	// prints "" (empty `main.commit`); a binary predating `version --commit`
+	// support falls through to printVersion and prints "promise version <v>".
+	// Treat anything that isn't a bare 40-hex SHA as "no provenance" so the error
+	// is accurate rather than a confusing downstream cat-file failure.
+	if !isFullGitSHA(sha) {
+		logf("test: published binary has no provenance (no build commit recorded)")
+		return fmt.Errorf("test: published binary has no provenance; re-publish a build that records its commit")
+	}
+	// Ensure the commit is present locally; fetch once if not.
+	if err := exec.Command("git", "-C", root, "cat-file", "-e", sha+"^{commit}").Run(); err != nil {
+		logf("commit %s not present locally; fetching...", sha)
+		_ = exec.Command("git", "-C", root, "fetch", "--quiet").Run()
+		if err := exec.Command("git", "-C", root, "cat-file", "-e", sha+"^{commit}").Run(); err != nil {
+			return fmt.Errorf("test: published build commit %s not found locally even after fetch; run `git fetch` and retry", sha)
+		}
+	}
+	srcDir := filepath.Join(work, "src")
+	wt := exec.Command("git", "-C", root, "worktree", "add", "--detach", srcDir, sha)
+	wt.Stdout, wt.Stderr = os.Stderr, os.Stderr
+	if err := wt.Run(); err != nil {
+		return fmt.Errorf("test: git worktree add %s @ %s: %w", srcDir, sha, err)
+	}
+	defer func() {
+		rm := exec.Command("git", "-C", root, "worktree", "remove", "--force", srcDir)
+		rm.Stdout, rm.Stderr = os.Stderr, os.Stderr
+		_ = rm.Run()
+	}()
+	// Defensive: tests/examples/modules don't need the flow submodules, but init
+	// them so a future submodule-touching test isn't surprised by a bare worktree.
+	sm := exec.Command("git", "-C", srcDir, "submodule", "update", "--init")
+	sm.Stdout, sm.Stderr = os.Stderr, os.Stderr
+	_ = sm.Run() // best-effort
+	logf("checked out published sources @ %s into %s", sha, srcDir)
+
 	// ── phase: run the full suite through the INSTALLED stub (always online) ───
 	// The suite runs WITH network for both variants: some tests legitimately
 	// fetch external catalog modules (e.g. wasi_preview_2 via git), which is a
 	// user-program dependency, not a compiler one. The full variant's offline
 	// guarantee (host LLVM toolchain pre-staged) is validated separately by the
 	// "offline" phase below, on a self-contained program.
-	logf("running full suite through installed stub (source=%s)", root)
+	logf("running full suite through installed stub (source=%s)", srcDir)
 	// examples are the floor; tests/ + modules/ are the target. stdout = the
 	// --json record stream (captured to tests.jsonl); stderr = human progress.
 	testCmd := exec.Command(promiseBin, "test", "-timeout", "10", "--json", "examples/...", "tests/...", "modules/...")
-	testCmd.Dir = root
+	testCmd.Dir = srcDir
 	testCmd.Env = baseEnv
 	testCmd.Stderr = os.Stderr
 	var buf bytes.Buffer
@@ -323,6 +376,22 @@ func installTestFailures(jsonl []byte) int {
 		}
 	}
 	return n
+}
+
+// isFullGitSHA reports whether s is a bare full-length (40-char) lowercase-hex
+// git commit hash — the exact form a stamped `promise version --commit` prints.
+// Anything else (empty, a "promise version ..." line from a pre-stamp binary,
+// stray output) is treated as "no provenance" by the install gate (T0854).
+func isFullGitSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // envWith returns base with the given key=value pairs applied — any existing

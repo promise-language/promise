@@ -61,6 +61,14 @@ func runReleasePublishInstall(root string, args []string) error {
 		return fmt.Errorf("publish-install: cross-target staging (%s on host %s) is not supported yet (T0524)", *host, CurrentBuildTarget())
 	}
 
+	// The published binary is stamped with HEAD's commit (T0854) so the install
+	// gate can pin its test sources to the exact sources the binary was built
+	// from. Refuse a dirty tree so that recorded SHA unambiguously matches the
+	// built bytes.
+	if status, _ := RunOutputIn(root, "git", "status", "--porcelain"); strings.TrimSpace(status) != "" {
+		return fmt.Errorf("publish-install: working tree is dirty; commit or stash so the stamped build commit matches the published bytes")
+	}
+
 	outDir := *out
 	if outDir == "" {
 		outDir = filepath.Join(root, installDistPrefix)

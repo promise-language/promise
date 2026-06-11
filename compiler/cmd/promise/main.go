@@ -61,6 +61,12 @@ func normalizeArgs(args []string) []string {
 // builds, "<epoch>" for release builds. Falls back to embedded catalog epoch.
 var version string
 
+// commit is the full 40-char git commit the binary was built from, set at build
+// time via `-X main.commit=` (T0854). Empty for binaries built without the
+// stamp. The install gate reads it (via `promise version --commit`) to pin its
+// test sources to the exact sources the published binary was built from.
+var commit string
+
 // timePhases enables per-phase compilation timing output on stderr (--time-phases).
 var timePhases bool
 
@@ -227,6 +233,10 @@ func printVersion() {
 			v = "unknown"
 		}
 	}
+	if commit != "" {
+		fmt.Printf("promise version %s (commit %s)\n", v, commit)
+		return
+	}
 	fmt.Printf("promise version %s\n", v)
 }
 
@@ -269,6 +279,13 @@ func main() {
 
 	switch cmd {
 	case "version":
+		// `promise version --commit` prints the bare build-commit SHA (machine
+		// hook for the install gate, T0854). Args are normalized so --commit →
+		// -commit. Prints an empty line when the binary carries no stamp.
+		if len(os.Args) > 2 && os.Args[2] == "-commit" {
+			fmt.Println(commit)
+			return
+		}
 		printVersion()
 		return
 	case "help":

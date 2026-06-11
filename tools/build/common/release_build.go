@@ -106,6 +106,9 @@ func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host string
 	if err != nil {
 		return fmt.Errorf("version: %w", err)
 	}
+	// Stamp the build commit so the install gate can pin test sources to the
+	// exact sources this binary was built from (T0854).
+	commit := GitSHAFull(root)
 
 	// Phase A — bootstrap compiler (no embedded stub).
 	bootstrap := filepath.Join(root, "bin", "promise.release-bootstrap"+ExeSuffix())
@@ -115,7 +118,7 @@ func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host string
 		bootTags = []string{"embed_llvm"}
 	}
 	fmt.Println("Building bootstrap compiler (phase A)...")
-	if err := goBuildCompiler(root, bootstrap, version, bootTags); err != nil {
+	if err := goBuildCompiler(root, bootstrap, version, commit, bootTags); err != nil {
 		return fmt.Errorf("phase A go build: %w", err)
 	}
 
@@ -140,7 +143,7 @@ func buildReleaseVariant(root, variant, manifestPath, out, blobsDir, host string
 		return err
 	}
 	fmt.Printf("Building final %s compiler (phase C)...\n", variant)
-	if err := goBuildCompiler(root, outBin, version, finalTags); err != nil {
+	if err := goBuildCompiler(root, outBin, version, commit, finalTags); err != nil {
 		return fmt.Errorf("phase C go build: %w", err)
 	}
 
@@ -178,15 +181,15 @@ func bundleReleaseLLVM(root, target, blobsDir, manifestPath string) error {
 	return BundleBrotliFromManifest(manifestPath, blobsDir, dst, tEntry.ClientFiles())
 }
 
-// goBuildCompiler runs `go build` for ./cmd/promise with the given build tags and
-// version ldflag, writing the binary to outBin. Shared by all release build
-// phases (mirrors RunBuild step 8).
-func goBuildCompiler(root, outBin, version string, tags []string) error {
+// goBuildCompiler runs `go build` for ./cmd/promise with the given build tags,
+// version, and build-commit ldflags, writing the binary to outBin. Shared by all
+// release build phases (mirrors RunBuild step 8).
+func goBuildCompiler(root, outBin, version, commit string, tags []string) error {
 	compilerDir := filepath.Join(root, "compiler")
 	buildArgs := []string{"build", "-buildvcs=false"}
 	if len(tags) > 0 {
 		buildArgs = append(buildArgs, "-tags="+strings.Join(tags, ","))
 	}
-	buildArgs = append(buildArgs, "-ldflags", "-X main.version="+version, "-o", outBin, "./cmd/promise")
+	buildArgs = append(buildArgs, "-ldflags", "-X main.version="+version+" -X main.commit="+commit, "-o", outBin, "./cmd/promise")
 	return RunIn(compilerDir, "go", buildArgs...)
 }

@@ -42,6 +42,29 @@ func TestPrintVersionWithLdflags(t *testing.T) {
 	}
 }
 
+func TestPrintVersionWithCommit(t *testing.T) {
+	// When both version and commit are set, printVersion appends "(commit <sha>)".
+	oldV, oldC := version, commit
+	version = "2026.0"
+	commit = "0123456789abcdef0123456789abcdef01234567"
+	defer func() { version = oldV; commit = oldC }()
+
+	r, w, _ := os.Pipe()
+	oldStdout := os.Stdout
+	os.Stdout = w
+	printVersion()
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf [256]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+	want := "promise version 2026.0 (commit 0123456789abcdef0123456789abcdef01234567)\n"
+	if output != want {
+		t.Fatalf("expected %q, got %q", want, output)
+	}
+}
+
 func TestPrintVersionFallback(t *testing.T) {
 	// When version is empty, printVersion falls back to embedded catalog epoch.
 	old := version

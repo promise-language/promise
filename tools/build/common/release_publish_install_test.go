@@ -200,6 +200,28 @@ func TestCopyInstallScript_MissingSource(t *testing.T) {
 	}
 }
 
+// TestRunReleasePublishInstall_RejectsDirtyTree: publish-install stamps the
+// built binary with HEAD's SHA, so it must refuse a dirty working tree — the
+// stamped commit would otherwise not match the published bytes (T0854). The
+// dirty-tree gate fires early (before any build), so we can assert the error
+// without an LLVM toolchain.
+func TestRunReleasePublishInstall_RejectsDirtyTree(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir) // one clean commit
+	// Dirty the tree with an untracked file (`git status --porcelain` non-empty).
+	if err := os.WriteFile(filepath.Join(dir, "dirty.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runReleasePublishInstall(dir, []string{"--no-upload"})
+	if err == nil {
+		t.Fatal("runReleasePublishInstall with dirty tree = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "working tree is dirty") {
+		t.Errorf("error = %q, want it to mention a dirty working tree", err.Error())
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

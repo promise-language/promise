@@ -161,7 +161,7 @@ func RunBuild(root string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("version: %w", err)
 	}
-	ldflags := "-X main.version=" + version
+	ldflags := "-X main.version=" + version + " -X main.commit=" + GitSHAFull(root)
 
 	// 9. Build
 	binaryPath := filepath.Join(binDir, BinaryName())

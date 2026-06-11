@@ -540,3 +540,17 @@ func TestDepsReleaseTagAndBlobAssetURL(t *testing.T) {
 		t.Fatal("BlobAssetURL must reject unknown codec")
 	}
 }
+
+func TestBlobMirrorURL(t *testing.T) {
+	// Flat CAS object on the mirror — no release-tag path, basename only.
+	url, err := BlobMirrorURL("abc123", compressionBrotli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := blobMirrorBase + "/abc123.br"; url != want {
+		t.Fatalf("BlobMirrorURL brotli = %q, want %q", url, want)
+	}
+	if _, err := BlobMirrorURL("abc123", "lz4"); err == nil {
+		t.Fatal("BlobMirrorURL must reject unknown codec")
+	}
+}

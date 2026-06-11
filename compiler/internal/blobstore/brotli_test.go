@@ -2,6 +2,7 @@ package blobstore
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,6 +91,60 @@ func TestResolveBrotliFallsThroughToArchive(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(p); !bytes.Equal(got, opt) {
 		t.Fatal("did not get archive bytes after brotli source failed")
+	}
+}
+
+// TestResolveArchiveDeclinedSurfacesSentinel: when the archive-confirm hook
+// declines the large fallback, fetch() returns errArchiveDeclined verbatim (not
+// the "promise doctor" broken-release message) and the archive host is never
+// contacted.
+func TestResolveArchiveDeclinedSurfacesSentinel(t *testing.T) {
+	opt := []byte("opt-binary-via-archive")
+	archive := makeTar(map[string][]byte{"bin/opt": opt})
+	archiveHash := sha256hex(archive)
+	badBlob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer badBlob.Close()
+	archiveHit := false
+	arcSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		archiveHit = true
+		w.Write(archive)
+	}))
+	defer arcSrv.Close()
+
+	store := newTestStore(t)
+	m := mustManifest(t, ManifestEntry{
+		Name: "llvm-opt", SHA256: sha256hex(opt), Size: int64(len(opt)), Kind: KindBlob,
+		Sources: []Source{
+			{Blob: badBlob.URL + "/opt.br", Compression: compressionBrotli},
+			{Archive: arcSrv.URL + "/llvm.tar", ArchivePath: "bin/opt", ArchiveSHA256: archiveHash},
+		},
+	})
+
+	r := NewResolver(store, m)
+	defer r.Close()
+	var prompted string
+	r.SetArchiveConfirm(func(name string) bool { prompted = name; return false })
+
+	_, err := r.Resolve("llvm-opt")
+	if err == nil {
+		t.Fatal("expected an error after declining the archive fallback")
+	}
+	if !errors.Is(err, errArchiveDeclined) {
+		t.Fatalf("decline should surface errArchiveDeclined, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "promise doctor") {
+		t.Fatalf("declined fallback must not show the broken-release message: %v", err)
+	}
+	if prompted != "llvm.tar" {
+		t.Errorf("archive-confirm should receive the tarball basename, got %q", prompted)
+	}
+	if archiveHit {
+		t.Error("declining must not download the archive")
+	}
+	if store.Has(sha256hex(opt)) {
+		t.Error("no CAS entry should be committed on decline")
 	}
 }
 

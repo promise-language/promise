@@ -172,6 +172,12 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 			fmt.Fprintf(os.Stderr, "Downloading Promise's LLVM toolchain (%d components, ~%s unpacked); cached for future runs...\n", len(needFetch), formatSize(unpacked))
 		}
 		resolver.SetProgress(newTTYProgress(os.Stderr))
+		// On an interactive terminal, confirm before the ~GB upstream-archive
+		// fallback (only reached if every blob host failed). No stdin to prompt
+		// on → leave the hook unset so the fetch proceeds as before.
+		if isCharDevice(os.Stdin) {
+			resolver.SetArchiveConfirm(confirmArchiveFallback)
+		}
 	}
 
 	for _, e := range entries {

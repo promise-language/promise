@@ -125,3 +125,22 @@ func confirmToolchainDownload(what string, components int, unpackedBytes int64) 
 		return false
 	}
 }
+
+// confirmArchiveFallback gates the last-resort upstream-archive download (a ~GB
+// tarball, reached only when every content-addressed blob host failed). Defaults
+// to NO — unlike the per-tool blobs this is a large, unexpected download — so the
+// user must opt in explicitly. Call only when stdin/stderr are terminals.
+func confirmArchiveFallback(archiveName string) bool {
+	fmt.Fprintf(os.Stderr, "\nThe LLVM toolchain blobs could not be fetched from the usual hosts.\n")
+	fmt.Fprintf(os.Stderr, "The only remaining source is the full upstream archive (%s) — a much\n", archiveName)
+	fmt.Fprintf(os.Stderr, "larger download (often 1 GB or more). You can skip it and try again later.\n")
+	fmt.Fprint(os.Stderr, "Download the full archive? [y/N] ")
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.TrimSpace(strings.ToLower(line)) {
+	case "y", "yes":
+		return true
+	default:
+		fmt.Fprintln(os.Stderr, "Skipped. The toolchain was not downloaded — re-run when the blob hosts are reachable.")
+		return false
+	}
+}

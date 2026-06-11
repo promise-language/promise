@@ -35,6 +35,14 @@ import (
 // across releases, no re-upload).
 const releaseAssetBase = "https://github.com/promise-language/promise/releases/download"
 
+// blobMirrorBase is the SECONDARY public host for content-addressed blobs — the
+// Cloudflare R2 mirror that `bin/release publish-blobs` pushes each `<sha>.br`
+// to (flat CAS, keyed by basename). It is emitted as a fallback blob source so
+// the toolchain resolves anonymously while the GitHub repo is still private (the
+// primary release-asset URL 404s without auth) — and as a plain mirror after
+// launch. Same host that serves the install binaries under /dist.
+const blobMirrorBase = "https://prebuilts.promise-lang.org"
+
 const releaseUsage = `usage: bin/release <subcommand> [flags]
 
 subcommands:
@@ -395,6 +403,16 @@ func BuildRuntimeManifestFromCatalog(root, target, epoch string) (*runtimeManife
 		if err != nil {
 			return nil, fmt.Errorf("entry %s: %w", blobIdent(*be), err)
 		}
+		mirrorURL, err := BlobMirrorURL(be.SHA256, be.Compression)
+		if err != nil {
+			return nil, fmt.Errorf("entry %s: %w", blobIdent(*be), err)
+		}
+		// Ranked sources, tried in order (resolve.go): (1) the GitHub release
+		// blob — primary, anonymous-public once the repo is, (2) the
+		// prebuilts.promise-lang.org mirror blob — public today, so blobs resolve
+		// during private early access instead of falling through, (3) the upstream
+		// LLVM archive — last resort (a ~GB download; the runtime gates it behind
+		// an interactive ack).
 		entries = append(entries, runtimeManifestEntry{
 			Name:   "llvm-" + f.Out,
 			SHA256: be.SHA256,
@@ -402,6 +420,7 @@ func BuildRuntimeManifestFromCatalog(root, target, epoch string) (*runtimeManife
 			Kind:   kind,
 			Sources: []runtimeSource{
 				{Blob: assetURL, Compression: be.Compression},
+				{Blob: mirrorURL, Compression: be.Compression},
 				{Archive: tEntry.URL, ArchivePath: f.Src, ArchiveSHA256: tEntry.SHA256},
 			},
 		})

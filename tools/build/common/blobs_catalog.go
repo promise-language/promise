@@ -272,6 +272,20 @@ func BlobAssetURL(tag, sha, compression string) (string, error) {
 	return releaseAssetBase + "/" + tag + "/" + sha + suffix, nil
 }
 
+// BlobMirrorURL returns the SECONDARY public URL for a blob on the
+// prebuilts.promise-lang.org R2 mirror: a flat content-addressed object
+// (`<sha>.br`), keyed solely by basename to match the publish step's
+// `mirror.Put(<sha>.br)`. Unlike BlobAssetURL — whose `/.../releases/download/
+// <tag>/` path is forced by GitHub's release-asset layout — the mirror needs no
+// tag. Emitted as a fallback source so blobs resolve while the repo is private.
+func BlobMirrorURL(sha, compression string) (string, error) {
+	suffix, err := assetSuffix(compression)
+	if err != nil {
+		return "", err
+	}
+	return blobMirrorBase + "/" + sha + suffix, nil
+}
+
 // blobIdent renders a short identity tag for error messages.
 func blobIdent(e BlobEntry) string {
 	return e.Dependency + "/" + e.Version + "/" + e.Target + "/" + e.Name

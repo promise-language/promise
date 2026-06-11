@@ -639,8 +639,8 @@ func TestReleaseManifestFromCatalogHit(t *testing.T) {
 	if opt.SHA256 != "1111111111111111111111111111111111111111111111111111111111111111" || opt.Size != 100 {
 		t.Fatalf("opt entry wrong: %+v", opt)
 	}
-	if len(opt.Sources) != 2 {
-		t.Fatalf("expected 2 ranked sources, got %d", len(opt.Sources))
+	if len(opt.Sources) != 3 {
+		t.Fatalf("expected 3 ranked sources (github blob, mirror blob, archive), got %d", len(opt.Sources))
 	}
 	wantBlob := releaseAssetBase + "/deps-llvm-22.1.0/" + opt.SHA256 + ".br"
 	if opt.Sources[0].Blob != wantBlob {
@@ -649,9 +649,14 @@ func TestReleaseManifestFromCatalogHit(t *testing.T) {
 	if opt.Sources[0].Compression != compressionBrotli {
 		t.Fatalf("Sources[0].Compression = %q", opt.Sources[0].Compression)
 	}
+	// Secondary blob source: the prebuilts.promise-lang.org mirror.
+	wantMirror := blobMirrorBase + "/" + opt.SHA256 + ".br"
+	if opt.Sources[1].Blob != wantMirror {
+		t.Fatalf("Sources[1].Blob (mirror) = %q, want %q", opt.Sources[1].Blob, wantMirror)
+	}
 	// Archive fallback is the upstream tarball.
-	if opt.Sources[1].Archive == "" || opt.Sources[1].ArchivePath == "" {
-		t.Fatalf("archive fallback missing: %+v", opt.Sources[1])
+	if opt.Sources[2].Archive == "" || opt.Sources[2].ArchivePath == "" {
+		t.Fatalf("archive fallback missing: %+v", opt.Sources[2])
 	}
 }
 

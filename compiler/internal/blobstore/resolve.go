@@ -21,6 +21,12 @@ import (
 // (the -full build / `promise fetch`).
 const OfflineError = "host toolchain not cached and no network; install the -full build or run promise fetch while online"
 
+// errArchiveDeclined marks the user opting out of the large upstream-archive
+// fallback at the interactive prompt. It is a deliberate choice — not a broken
+// release or a network failure — so fetch() surfaces it verbatim rather than the
+// "run promise doctor" / offline message.
+var errArchiveDeclined = errors.New("LLVM toolchain download declined (large-archive fallback)")
+
 // Resolver performs one resolution pass over the CAS + manifest. Reuse a single
 // Resolver across a batch of Resolve calls (e.g. building the LLVM view dir) so
 // a shared archive is downloaded once and bad sources are negative-cached for
@@ -46,7 +52,22 @@ type Resolver struct {
 	// feedback (set via SetProgress; nil = silent). Only the wire transfer is
 	// reported — local decompression and archive extraction are not.
 	progress DownloadProgress
+
+	// archiveConfirm, when non-nil, is consulted before downloading a last-resort
+	// upstream archive (a ~GB tarball, reached only after every content-addressed
+	// blob source failed). Returning false aborts the fetch. nil = proceed (the
+	// non-interactive default).
+	archiveConfirm ArchiveConfirm
 }
+
+// ArchiveConfirm gates the large upstream-archive fallback so the CLI can prompt
+// before a multi-hundred-MB download the user didn't ask for. archiveName is the
+// tarball basename (e.g. "LLVM-22.1.0-macOS-ARM64.tar.xz").
+type ArchiveConfirm func(archiveName string) bool
+
+// SetArchiveConfirm attaches an archive-fallback confirmation hook (nil = always
+// proceed). Set it before calling Resolve.
+func (r *Resolver) SetArchiveConfirm(c ArchiveConfirm) { r.archiveConfirm = c }
 
 // DownloadProgress receives streaming-download events so a CLI front-end can
 // render user feedback (a progress bar). Methods are called serially from the
@@ -190,7 +211,12 @@ func (r *Resolver) fetch(entry *ManifestEntry) (string, error) {
 		return path, nil
 	}
 
-	// All sources failed. Distinguish "no network" from "broken release".
+	// All sources failed. A deliberate decline of the archive fallback is surfaced
+	// verbatim (the CLI already printed actionable guidance); otherwise distinguish
+	// "no network" from "broken release".
+	if errors.Is(lastErr, errArchiveDeclined) {
+		return "", lastErr
+	}
 	if sawNetworkError {
 		return "", errors.New(OfflineError)
 	}
@@ -343,6 +369,14 @@ func (r *Resolver) obtainArchive(src Source, archiveURL string) (string, error) 
 	// Persistent archive cache hit (only meaningful with an asserted key).
 	if archiveHash != "" && r.store.HasArchive(archiveHash) {
 		return r.extractArchiveFile(r.store.ArchivePath(archiveHash), archiveURL)
+	}
+
+	// Last-resort fallback: every content-addressed blob source failed, so we're
+	// about to pull the full upstream tarball (~GB). Let the CLI confirm first.
+	// Wrap the sentinel so fetch() surfaces the decline verbatim instead of the
+	// "broken release / offline" message.
+	if r.archiveConfirm != nil && !r.archiveConfirm(filepath.Base(archiveURL)) {
+		return "", fmt.Errorf("%w: %s", errArchiveDeclined, filepath.Base(archiveURL))
 	}
 
 	tmp, err := os.CreateTemp(r.tmpDir, "archive-*")

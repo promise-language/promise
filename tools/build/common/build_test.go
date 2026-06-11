@@ -135,8 +135,8 @@ func TestBuildRuntimeManifestFromCatalog_PopulatesWithCatalogHit(t *testing.T) {
 	if !ok {
 		t.Fatal("missing llvm-opt entry")
 	}
-	if len(opt.Sources) != 2 {
-		t.Fatalf("expected 2 ranked sources (blob then archive), got %d", len(opt.Sources))
+	if len(opt.Sources) != 3 {
+		t.Fatalf("expected 3 ranked sources (github blob, mirror blob, archive), got %d", len(opt.Sources))
 	}
 	wantBlob := releaseAssetBase + "/deps-llvm-22.1.0/" + opt.SHA256 + ".br"
 	if opt.Sources[0].Blob != wantBlob {
@@ -145,8 +145,15 @@ func TestBuildRuntimeManifestFromCatalog_PopulatesWithCatalogHit(t *testing.T) {
 	if opt.Sources[0].Compression != compressionBrotli {
 		t.Errorf("source[0].Compression = %q", opt.Sources[0].Compression)
 	}
-	if opt.Sources[1].Archive == "" || opt.Sources[1].ArchivePath != "bin/opt" {
-		t.Errorf("source[1] (archive fallback) malformed: %+v", opt.Sources[1])
+	wantMirror := blobMirrorBase + "/" + opt.SHA256 + ".br"
+	if opt.Sources[1].Blob != wantMirror {
+		t.Errorf("source[1].Blob (mirror) = %q, want %q", opt.Sources[1].Blob, wantMirror)
+	}
+	if opt.Sources[1].Compression != compressionBrotli {
+		t.Errorf("source[1].Compression = %q", opt.Sources[1].Compression)
+	}
+	if opt.Sources[2].Archive == "" || opt.Sources[2].ArchivePath != "bin/opt" {
+		t.Errorf("source[2] (archive fallback) malformed: %+v", opt.Sources[2])
 	}
 
 	// Re-serialize and re-parse to prove the projected manifest validates

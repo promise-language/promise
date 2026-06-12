@@ -43,7 +43,7 @@ test_embed_dir_read_not_found() `test {
 
 test_embed_dir_files() `test {
   EmbeddedFiles fs = assets;
-  EmbeddedFile[] files = fs.files;
+  EmbeddedFile[] files = fs.files();
   assert(files.len == 4, "expected 4 files, got " + files.len.to_string());
 
   // Files are sorted by path: css, css/style.css, data.bin, hello.txt

@@ -25,7 +25,7 @@ test_embed_glob_read() `test {
 
 test_embed_glob_files() `test {
   EmbeddedFiles fs = text_files;
-  EmbeddedFile[] files = fs.files;
+  EmbeddedFile[] files = fs.files();
   assert(files.len == 2, "expected 2 files");
 
   // Files are sorted by path

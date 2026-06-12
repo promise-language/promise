@@ -78,7 +78,8 @@ If the field itself is intended to be part of the public API and there's no deri
 ## Naming
 
 - Use full English words in public APIs. Approved abbreviations are listed in `docs/language-design.md` §9.3a — when an approved abbreviation exists (e.g. `dir`, `env`, `id`, `len`, `min`, `max`), prefer the abbreviation; otherwise use the full word (`print_line`, not `println`).
-- Side-effect-free, parameterless public access is a getter (`get name T`), not a function (`name() T`). Use a function only when the operation has parameters or side effects.
+- A getter (`get name T`) is for access that is **both** side-effect-free **and** cheap — O(1), field-like (e.g. `len`, `is_empty`, `is_literal`). Use a method (`name() T`) when the operation takes parameters, has side effects, **or has material call cost** (allocation or non-trivial computation). The parentheses are a *cost signal*: they tell the caller "this does work." So `len` is a getter, but `to_string()` (allocates), `clone()` (allocates + deep-copies), `bytes()` (allocates), and `format(w)` (takes a `Writer`) are methods even when parameterless and side-effect-free. When in doubt, ask "is this a field-cheap read?" — yes ⇒ getter, no ⇒ method.
+- **Interface conformance overrides the cost signal.** When a `` `structural `` interface declares an accessor as a getter (e.g. `Hashable` declares `get hash int`), every implementor matches that form — even where a particular type's implementation is O(n) (e.g. `string.hash` scans all bytes). A uniform shape across the hierarchy is worth more than the per-type cost signal, and such an accessor still reads as a property.
 
 ## Construction
 

@@ -17,7 +17,7 @@ type EmbeddedFiles `public `doc("A collection of compile-time embedded files fro
   int[] _offsets;
   int[] _sizes;
 
-  get files EmbeddedFile[] `public `doc("All files and directories in the embedded tree.") => this._entries.clone();
+  files(this) EmbeddedFile[] `public `doc("Returns a fresh vector of all files and directories in the embedded tree. This allocates and copies the entry list on every call (it is a method, not a getter, for that reason).") => this._entries.clone();
 
   get len int `public `doc("The number of entries in the collection.") => this._entries.len;
 

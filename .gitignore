@@ -17,6 +17,9 @@ compiler/grammar/.antlr/PromiseParser.interp
 compiler/grammar/.antlr/PromiseParser.java
 compiler/grammar/.antlr/PromiseParser.tokens
 
+# winlink import libraries (.lib) generated from the tracked def/*.def files for lld-link
+tools/build/winlink/lib/
+
 # Debug build output
 .promise-build/
 

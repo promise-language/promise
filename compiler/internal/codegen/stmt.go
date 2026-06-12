@@ -1135,6 +1135,19 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			if c.typeSubst != nil && cmpExprType != nil {
 				cmpExprType = types.Substitute(cmpExprType, c.typeSubst)
 			}
+			// T0856: A borrowed optional (`T?&`/`T?~`, e.g. `Arc[T?]`/
+			// `Mutex[T?].borrow` with a value/Copy payload) auto-copies to a
+			// bare optional value at the borrow site — genArcBorrow/
+			// genMutexGuardBorrow load and return the full {i1,T} struct. The
+			// recorded exprType is still the ref-to-optional, so strip the ref
+			// before the wrap comparison; otherwise the already-optional value
+			// is spuriously re-wrapped (insertvalue elem-type-mismatch panic).
+			switch ref := cmpExprType.(type) {
+			case *types.SharedRef:
+				cmpExprType = ref.Elem()
+			case *types.MutRef:
+				cmpExprType = ref.Elem()
+			}
 			if _, isNone := cmpExprType.(*types.Named); isNone && cmpExprType == types.TypNone {
 				// NoneLit already handled via targetType
 			} else if !types.Identical(cmpExprType, declType) {

@@ -1,0 +1,107 @@
+// T0848: casting to a borrow/reference target type (`x as! T&` / `x as! T~`)
+// used to panic codegen (`unsupported cast target type *ast.SharedRefTypeRef`)
+// because genCastExpr never peeled the ref wrapper off the target TypeRef. The
+// fix resolves the underlying named type and runs the same RTTI cast, treating
+// the result as a borrow (no ownership transfer, no drop responsibility). The
+// owning subject stays alive and frees its instance exactly once — no leak, no
+// double-free.
+type Shape {
+  string name;
+  area(&this) f64 `abstract;
+}
+type Circle is Shape {
+  f64 radius;
+  area(&this) f64 {
+    return this.radius;
+  }
+}
+type Square is Shape {
+  f64 side;
+  area(&this) f64 {
+    return this.side;
+  }
+}
+
+// `as! T&` downcast through a borrow-returning function — the exact bug repro.
+// Returns a Circle borrow from a Shape borrow, read a field off the result.
+borrow_downcast(Shape &s) Circle & {
+  return s as! Circle &;
+}
+
+cast_to_shared_ref_downcast() `test {
+  Circle c = Circle(name: "c", radius: 1.5);
+  Circle &got = borrow_downcast(c);
+  assert(got.radius == 1.5, "downcast borrow should read back the held value");
+}
+
+// `as! T~` cast to a mut-ref target — exercises the MutRefTypeRef arm.
+mut_downcast(Shape ~s) Circle ~ {
+  return s as! Circle ~;
+}
+
+cast_to_mut_ref_downcast() `test {
+  Circle c = Circle(name: "c", radius: 2.5);
+  Circle ~got = mut_downcast(c);
+  assert(got.radius == 2.5, "mut-ref downcast should read back the held value");
+}
+
+// Round-trip through a borrow cast keeping the owner alive — confirms the owner
+// remains responsible for the single free (leak detection enforces this).
+cast_borrow_no_leak() `test {
+  Circle c = Circle(name: "c", radius: 3.5);
+  f64 sum = 0.0;
+  Circle &r1 = borrow_downcast(c);
+  sum = sum + r1.radius;
+  Circle &r2 = borrow_downcast(c);
+  sum = sum + r2.radius;
+  assert(sum == 7.0, "repeated borrow casts should both read the live owner");
+}
+
+// --- Non-force `as T&` / `as T~`: optional-borrow result + the `!targetIsBorrow`
+// guard (expr.go) that must NOT record a conditional move flag for a reborrow.
+
+// Owned-local subject reborrowed with the non-force form. The result is an
+// optional borrow (`Circle&?`); the owner `c` must stay fully owned (no move
+// into `some`), so it is freed exactly once at scope exit — leak detection
+// enforces the no-double-free / no-leak invariant the guard protects.
+nonforce_borrow_owned_local() `test {
+  Circle c = Circle(name: "c", radius: 1.5);
+  Circle & ? o = c as Circle &;
+  bool present = false;
+  if o {
+    present = true;
+  }
+  assert(present, "non-force borrow cast of matching owned local is present");
+  assert(c.radius == 1.5, "owner stays live and readable after the reborrow");
+}
+
+// None branch: a non-force borrow cast to a non-matching type yields an absent
+// optional. Exercises the cast.none/merge path for the borrow target.
+nonforce_borrow_none(Shape &s) bool {
+  Circle & ? o = s as Circle &;
+  bool present = false;
+  if o {
+    present = true;
+  }
+  return present;
+}
+
+nonforce_borrow_none_and_some() `test {
+  Square sq = Square(name: "sq", side: 2.0);
+  assert(!nonforce_borrow_none(sq), "Square is not a Circle: absent");
+  Circle c = Circle(name: "c", radius: 1.0);
+  assert(nonforce_borrow_none(c), "Circle matches Circle: present");
+}
+
+// Non-force mut-ref (`as T~`) variant — exercises the MutRefTypeRef arm on the
+// optional-returning path.
+nonforce_mut_borrow() `test {
+  Circle c = Circle(name: "c", radius: 4.0);
+  Circle ~? o = c as Circle ~;
+  f64 r = 0.0;
+  if o {
+    r = 4.0;
+  }
+  assert(r == 4.0, "non-force mut-ref borrow cast is present");
+  assert(c.radius == 4.0, "owner stays live after non-force mut reborrow");
+}

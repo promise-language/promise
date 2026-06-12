@@ -10833,8 +10833,24 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		}
 	}
 
-	// Resolve the target Named type from the TypeRef
-	targetRef, ok := e.Type.(*ast.NamedTypeRef)
+	// Resolve the target Named type from the TypeRef.
+	//
+	// A borrow/reference target (`x as! T&` / `x as! T~`) is an RTTI-checked
+	// reborrow: peel the ref to the underlying named type, do the same RTTI cast,
+	// and treat the result as a borrow (no ownership transfer, no drop
+	// responsibility) — mirroring how borrow-typed return values are handled. The
+	// downstream RTTI/result paths are already borrow-agnostic (the result is the
+	// bare `{vtable, instance}` value struct, which is exactly a user-type borrow).
+	// T0848.
+	targetTypeRef := e.Type
+	targetIsBorrow := false
+	switch ref := targetTypeRef.(type) {
+	case *ast.SharedRefTypeRef:
+		targetTypeRef, targetIsBorrow = ref.Inner, true
+	case *ast.MutRefTypeRef:
+		targetTypeRef, targetIsBorrow = ref.Inner, true
+	}
+	targetRef, ok := targetTypeRef.(*ast.NamedTypeRef)
 	if !ok {
 		panic(fmt.Sprintf("codegen: unsupported cast target type %T", e.Type))
 	}
@@ -10947,7 +10963,13 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 	// `as` is a conditional move: the subject's instance is aliased into `some`
 	// only on success, untouched on failure — so an unconditional clear/keep is
 	// wrong in both consuming contexts. consumeCastSubjectDropFlag reuses isMatch.
-	if ident := c.castSubjectMovableIdent(e); ident != nil {
+	// A borrow target (`x as T&`) is a reborrow with no ownership transfer, so the
+	// subject's instance is never moved into `some` — skip the conditional
+	// drop-flag handoff that would otherwise let a consuming site drop the subject
+	// (T0848). castSubjectMovableIdent already returns nil for borrow-param
+	// subjects; the guard makes the no-move invariant explicit and protects the
+	// `ownedLocal as T&` shape, where the local must remain owned.
+	if ident := c.castSubjectMovableIdent(e); !targetIsBorrow && ident != nil {
 		if c.castSubjectMatch == nil {
 			c.castSubjectMatch = map[string]value.Value{}
 		}

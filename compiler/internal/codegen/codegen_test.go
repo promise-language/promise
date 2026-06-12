@@ -2765,6 +2765,24 @@ func TestOptionalSubjectOptionalCast(t *testing.T) {
 	assertContains(t, ir, "call i32 @promise_type_is(")
 }
 
+// T0848: casting to a borrow target type (`x as! T&`) used to panic codegen with
+// "unsupported cast target type *ast.SharedRefTypeRef" — the target-type switch
+// had no ref case. genCastExpr now peels the ref to the underlying named type and
+// runs the same RTTI cast, so this compiles and emits the normal promise_type_is
+// query plus the `as!` force-cast panic block.
+func TestCastToBorrowTarget(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { string name; }
+		type Circle is Shape { f64 radius; }
+		borrow_return(Shape &s) Circle & {
+			return s as! Circle &;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "call i32 @promise_type_is(")
+	assertContains(t, ir, "cast.panic")
+}
+
 // T0850: an `Arc[T?]` (or `Mutex[T?]`) whose element is an Optional must drop
 // the inner optional's heap payload when the last reference is released. The
 // Arc/Mutex inner-drop path (emitInnerDrop) dispatched on extractNamed, which is

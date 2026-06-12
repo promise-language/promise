@@ -49,6 +49,20 @@ func (s *Store) Verify(repair bool) (VerifyResult, error) {
 }
 
 func (s *Store) verifyDir(kind, dir string, repair bool, res *VerifyResult) error {
+	// A store path that exists but is not a directory (e.g. blobs/sha256 is a
+	// regular file) is a corrupt store and must be reported. os.ReadDir surfaces
+	// this as ENOTDIR on Unix but not portably on Windows, so check explicitly
+	// for cross-platform parity (T0872).
+	fi, statErr := os.Stat(dir)
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			return nil
+		}
+		return statErr
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s store path %q is not a directory", kind, dir)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -24,13 +24,16 @@ param(
     [switch]$All,
     # Install only the compiler; download the toolchain on first build (skips the
     # install-time pre-fetch). No effect with -Full (it carries the toolchain).
-    [switch]$Thin
+    [switch]$Thin,
+    # Do not add %USERPROFILE%\.promise\bin to the User PATH. Equivalent to setting
+    # $env:PROMISE_NO_MODIFY_PATH=1 before running. `promise install` owns PATH
+    # setup (T0863), so this is forwarded to it as --no-modify-path.
+    [switch]$NoModifyPath
 )
 
 $ErrorActionPreference = "Stop"
 
 $GitHubRepo  = "promise-language/promise"
-$PromiseHome = if ($env:PROMISE_HOME) { $env:PROMISE_HOME } else { Join-Path $env:USERPROFILE ".promise" }
 
 # VARIANT selects the asset suffix: "" = thin (default), "-full" = host workflow
 # pre-staged (offline), "-all" = every target's blobs (deferred, T0774).
@@ -233,7 +236,10 @@ verify manually:
     # promise install copies itself to %USERPROFILE%\.promise\bin\promise.exe,
     # extracts stdlib, and — unless -Thin — pre-fetches the host LLVM toolchain so
     # the first build is instant instead of blocking for minutes.
-    if ($Thin) { & $TmpBin install --no-fetch-toolchain } else { & $TmpBin install }
+    $installArgs = @("install")
+    if ($Thin)         { $installArgs += "--no-fetch-toolchain" }
+    if ($NoModifyPath) { $installArgs += "--no-modify-path" }
+    & $TmpBin @installArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Error "promise install failed (exit code $LASTEXITCODE)"
         exit $LASTEXITCODE
@@ -242,23 +248,11 @@ verify manually:
     Remove-Item -Force -ErrorAction SilentlyContinue $TmpGz, $TmpBin, $TmpSums
 }
 
-# -- PATH setup (User scope) --------------------------------------------------
-
-$PromiseBin = Join-Path $PromiseHome "bin"
-$UserPath   = [Environment]::GetEnvironmentVariable("Path", "User")
-$onPath     = $false
-if ($UserPath) {
-    foreach ($p in $UserPath -split ';') {
-        if ($p.TrimEnd('\') -ieq $PromiseBin.TrimEnd('\')) { $onPath = $true; break }
-    }
-}
-
-if (-not $onPath) {
-    $newPath = if ([string]::IsNullOrEmpty($UserPath)) { $PromiseBin } else { "$UserPath;$PromiseBin" }
-    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-    Write-Host ""
-    Write-Host "Added $PromiseBin to your User PATH. Open a new terminal for it to take effect."
-}
+# -- PATH setup ---------------------------------------------------------------
+# `promise install` adds %USERPROFILE%\.promise\bin to the User PATH itself
+# (idempotently, via the registry) and prints what it did. We do NOT set PATH here
+# too: doing it in two places duplicated entries and defeated the -NoModifyPath /
+# PROMISE_NO_MODIFY_PATH opt-out (T0863).
 
 Write-Host ""
 Write-Host "Run 'promise version' to verify."

@@ -175,6 +175,12 @@ func runInstallPhases(root, work, variant, baseURL string, system bool) error {
 		// PROMISE_HOME points into the scratch dir.
 		promiseHome = filepath.Join(work, ".promise")
 		overrides["PROMISE_HOME"] = promiseHome
+		// Never modify the developer's real User PATH from a sandboxed gate run. On
+		// Windows `promise install` adds <PROMISE_HOME>\bin to the User PATH via the
+		// registry, which ignores PROMISE_HOME isolation and would leak the scratch
+		// dir into the real PATH every run (T0864). PROMISE_NO_MODIFY_PATH opts out;
+		// the sanity check below runs the installed stub by absolute path anyway.
+		overrides["PROMISE_NO_MODIFY_PATH"] = "1"
 		// Scrub PATH to a minimal toolchain set on POSIX so the gate doesn't lean
 		// on the dev environment. On Windows PowerShell needs the inherited PATH,
 		// so it's left intact there.

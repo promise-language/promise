@@ -7937,16 +7937,24 @@ func runInstall(args []string) {
 	//                         downloads lazily on the first compile. A full
 	//                         binary embeds the toolchain, so the pre-fetch is a
 	//                         no-network view build either way.
+	//   --no-modify-path      do not add <PROMISE_HOME>\bin to the User PATH
+	//                         (Windows only; no-op elsewhere). Also honored via
+	//                         the PROMISE_NO_MODIFY_PATH env var so the install
+	//                         scripts and the install gate can opt out without a
+	//                         flag (T0863/T0864).
 	devMode := false
 	fetchToolchain := true
+	modifyPath := os.Getenv("PROMISE_NO_MODIFY_PATH") == ""
 	for _, arg := range args {
 		switch arg {
 		case "-dev":
 			devMode = true
 		case "--no-fetch-toolchain", "-no-fetch-toolchain":
 			fetchToolchain = false
+		case "--no-modify-path", "-no-modify-path":
+			modifyPath = false
 		default:
-			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise install [-dev] [--no-fetch-toolchain]\n", arg)
+			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise install [-dev] [--no-fetch-toolchain] [--no-modify-path]\n", arg)
 			os.Exit(1)
 		}
 	}
@@ -8153,8 +8161,25 @@ func runInstall(args []string) {
 	fmt.Printf("  cache:   %s\n", epochCacheDir)
 	fmt.Printf("  active:  %s\n", epoch)
 	if runtime.GOOS == "windows" {
-		fmt.Printf("\nAdd to your PATH:\n\n")
-		fmt.Printf("  setx PATH \"%%PATH%%;%s\"\n", stubBinDir)
+		// Add <PROMISE_HOME>\bin to the User PATH ourselves (registry, idempotent)
+		// unless the user opted out. The previous advice — setx PATH "%PATH%;..." —
+		// is destructive in both PowerShell and cmd.exe (T0863); addToUserPath does
+		// it safely, and printWindowsPathHint shows the correct manual command.
+		if modifyPath {
+			switch changed, err := addToUserPath(stubBinDir); {
+			case err != nil:
+				fmt.Fprintf(os.Stderr, "\nwarning: could not update your User PATH automatically: %v\n", err)
+				printWindowsPathHint(stubBinDir)
+			case changed:
+				fmt.Printf("\nAdded %s to your User PATH.\n", stubBinDir)
+				fmt.Printf("Open a new terminal (or fully quit and reopen VS Code — Reload Window is not enough) for it to take effect.\n")
+			default:
+				fmt.Printf("\n%s is already on your User PATH.\n", stubBinDir)
+			}
+		} else {
+			fmt.Printf("\nSkipped PATH setup (--no-modify-path / PROMISE_NO_MODIFY_PATH set).\n")
+			printWindowsPathHint(stubBinDir)
+		}
 	} else {
 		fmt.Printf("\nAdd to your shell profile:\n\n")
 		fmt.Printf("  export PATH=\"%s:$PATH\"\n", stubBinDir)

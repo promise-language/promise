@@ -90,23 +90,16 @@ func EmbedResources(root string) error {
 		return fmt.Errorf("compute .sources.sha256: %w", err)
 	}
 
-	// winlink/ — the self-generated Windows import libraries (T0772). The .def
-	// symbol lists under tools/build/winlink/def/ are the source of truth; the
-	// .lib are a gitignored, reproducible build artifact generated here (via
-	// llvm-dlltool) when absent, then copied into the embedded resources tree
-	// unconditionally (any host may cross-compile a Windows target). The client
-	// running promise needs neither llvm-dlltool nor the .def/.lib — they are
-	// go:embedded into the compiler binary.
+	// winlink/ — self-generated Windows import libs (T0772). The .def symbol
+	// lists under tools/build/winlink/def/ are the source of truth;
+	// ensureWinlinkLibs regenerates the .lib in place into
+	// resources/winlink/windows-amd64/ (this build-cleared embed tree) whenever a
+	// .def is newer (T0835). Generated unconditionally (any host may
+	// cross-compile a Windows target); go:embedded into the compiler binary.
+	// llvm-dlltool is a build-only dependency — the client running promise needs
+	// neither it nor the .def/.lib.
 	if err := ensureWinlinkLibs(root); err != nil {
 		return fmt.Errorf("generate winlink libs: %w", err)
-	}
-	winlinkSrc := filepath.Join(root, "tools", "build", "winlink", "lib")
-	if Exists(winlinkSrc) {
-		winlinkRes := filepath.Join(res, "winlink")
-		os.RemoveAll(winlinkRes)
-		if err := copyDir(winlinkSrc, winlinkRes); err != nil {
-			return fmt.Errorf("copy winlink libs: %w", err)
-		}
 	}
 
 	// manifest.json — the always-embedded runtime dependency manifest (T0769).

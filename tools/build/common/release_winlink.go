@@ -21,26 +21,28 @@ import (
 // freely re-hostable and carry no Microsoft toolchain bytes. Each .def declares
 // its own `LIBRARY <name>.dll`, so the import name→DLL binding is single-sourced
 // in the .def (no per-file mapping here). The .def is the source of truth; the
-// generated .lib is a reproducible, gitignored build artifact — EmbedResources
-// generates it at build time (via ensureWinlinkLibs) when absent, and it can be
-// regenerated explicitly with `bin/release winlink`. The client running promise
-// needs neither llvm-dlltool nor the .def/.lib (the libs are go:embedded).
+// generated .lib is a reproducible build artifact — EmbedResources generates it
+// at build time (via ensureWinlinkLibs) straight into the build-cleared embed
+// resource dir, regenerating when a .def is newer, and it can be regenerated
+// explicitly with `bin/release winlink`. The client running promise needs
+// neither llvm-dlltool nor the .def/.lib (the libs are go:embedded).
 
 // winlinkDefDir is the .def source directory, relative to the repo root.
 const winlinkDefDir = "tools/build/winlink/def"
 
-// winlinkOutDir is the import-lib output directory, relative to root. The .lib
-// here are a gitignored build artifact: EmbedResources generates them (when
-// absent) and copies them into the resources/winlink tree the compiler binary
-// go:embeds.
-const winlinkOutDir = "tools/build/winlink/lib/windows-amd64"
+// winlinkResDir is the import-lib output directory, relative to root — the
+// go:embed tree itself (compiler/cmd/promise/resources/, gitignored and
+// repopulated each build). ensureWinlinkLibs generates the .lib straight here
+// and clears the dir when stale, so there is no intermediate dir and no copy
+// step. The compiler binary go:embeds them.
+const winlinkResDir = "compiler/cmd/promise/resources/winlink/windows-amd64"
 
 // runReleaseWinlink regenerates the Windows import libraries from the .def files.
 func runReleaseWinlink(root string, args []string) error {
 	fs := flag.NewFlagSet("winlink", flag.ContinueOnError)
 	dllTool := fs.String("llvm-dlltool", "", "path to llvm-dlltool (default: found on PATH)")
 	defDir := fs.String("def-dir", filepath.Join(root, filepath.FromSlash(winlinkDefDir)), "directory of .def symbol lists")
-	outDir := fs.String("out", filepath.Join(root, filepath.FromSlash(winlinkOutDir)), "output directory for generated import libs")
+	outDir := fs.String("out", filepath.Join(root, filepath.FromSlash(winlinkResDir)), "output directory for generated import libs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -118,9 +120,13 @@ func resolveWinlinkDllTool(root string) string {
 }
 
 // ensureWinlinkLibs generates the Windows import libraries from the .def symbol
-// lists when they are absent, so a fresh checkout (where the generated .lib are
-// gitignored) still embeds a complete link surface. No-op when the .def sources
-// are missing (a trimmed checkout) or the .lib already exist. llvm-dlltool is a
+// lists into the build-cleared embed resource dir, so a fresh checkout (where
+// the resources/ tree is gitignored and repopulated each build) still embeds a
+// complete link surface. No-op when the .def sources are missing (a trimmed
+// checkout) or the generated .lib are already fresh (up to date with every
+// .def). When stale — any .def newer than its .lib, or a .def added/removed —
+// the output dir is cleared and the libs are regenerated, so editing a .def and
+// rebuilding never embeds a stale artifact (T0835). llvm-dlltool is a
 // build-time-only dependency — the client running promise needs neither it nor
 // the .def/.lib, which are go:embedded into the compiler binary.
 func ensureWinlinkLibs(root string) error {
@@ -128,12 +134,41 @@ func ensureWinlinkLibs(root string) error {
 	if !Exists(defDir) {
 		return nil
 	}
-	outDir := filepath.Join(root, filepath.FromSlash(winlinkOutDir))
-	if libs, _ := filepath.Glob(filepath.Join(outDir, "*.lib")); len(libs) > 0 {
+	outDir := filepath.Join(root, filepath.FromSlash(winlinkResDir))
+	if winlinkLibsFresh(defDir, outDir) {
 		return nil
 	}
-	// The .lib are absent → run llvm-dlltool. resolveWinlinkDllTool (invoked by
-	// runReleaseWinlink) seeds the slim LLVM cache with the build-only
+	// Stale or absent → clear the embed dir and regenerate. resolveWinlinkDllTool
+	// (invoked by runReleaseWinlink) seeds the slim LLVM cache with the build-only
 	// llvm-dlltool (T0833/T0840) when it isn't already on PATH or in the cache.
+	os.RemoveAll(outDir)
 	return runReleaseWinlink(root, nil)
+}
+
+// winlinkLibsFresh reports whether the generated .lib in outDir are up to date
+// with the .def sources in defDir: every .def must have a matching <base>.lib
+// whose mtime is ≥ the .def's, and the counts must match (so a .def added or
+// removed — leaving an orphan .lib — is treated as stale). A missing .lib dir or
+// an empty one is not fresh, forcing initial generation.
+func winlinkLibsFresh(defDir, outDir string) bool {
+	defs, err := filepath.Glob(filepath.Join(defDir, "*.def"))
+	if err != nil || len(defs) == 0 {
+		return false
+	}
+	libs, err := filepath.Glob(filepath.Join(outDir, "*.lib"))
+	if err != nil || len(libs) != len(defs) {
+		return false
+	}
+	for _, def := range defs {
+		di, err := os.Stat(def)
+		if err != nil {
+			return false
+		}
+		base := strings.TrimSuffix(filepath.Base(def), ".def")
+		li, err := os.Stat(filepath.Join(outDir, base+".lib"))
+		if err != nil || li.ModTime().Before(di.ModTime()) {
+			return false
+		}
+	}
+	return true
 }

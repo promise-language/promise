@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRunBuild_RejectsFetchFlag confirms the legacy -fetch flag is no longer
@@ -250,4 +251,73 @@ files = [
 			t.Errorf("build-only llvm-dlltool leaked into the client manifest: %+v", e)
 		}
 	}
+}
+
+// writeUpToDateBinary lays down a fake compiler binary plus its .promise.buildinfo
+// in binDir under root, returns the binary's mtime. It uses a fixed mtime so a
+// caller can place sources before/after it deterministically.
+func writeUpToDateBinary(t *testing.T, root, binDir, version string) time.Time {
+	t.Helper()
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(binDir, BinaryName())
+	if err := os.WriteFile(binPath, []byte("fake"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, ".promise.buildinfo"), []byte(version), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Pin the binary mtime to a fixed instant so .def staleness is unambiguous.
+	mtime := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(binPath, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	return mtime
+}
+
+// TestIsBinaryUpToDateWinlinkDefStaleness is the build.go half of T0835: a .def
+// edited after the binary was built must make isBinaryUpToDate return false, so
+// RunBuild reruns the pipeline (and EmbedResources → ensureWinlinkLibs
+// regenerates the embedded .lib). An older .def must stay up to date.
+func TestIsBinaryUpToDateWinlinkDefStaleness(t *testing.T) {
+	const version = "test-version"
+	defFileRoot := func(t *testing.T) (root, defPath string) {
+		root = t.TempDir()
+		defDir := filepath.Join(root, filepath.FromSlash(winlinkDefDir))
+		if err := os.MkdirAll(defDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		defPath = filepath.Join(defDir, "kernel32.def")
+		if err := os.WriteFile(defPath, []byte("LIBRARY kernel32.dll\nEXPORTS\nExitProcess\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return root, defPath
+	}
+
+	t.Run("newer def invalidates", func(t *testing.T) {
+		root, defPath := defFileRoot(t)
+		binDir := filepath.Join(root, "bin")
+		mtime := writeUpToDateBinary(t, root, binDir, version)
+		newer := mtime.Add(2 * time.Second)
+		if err := os.Chtimes(defPath, newer, newer); err != nil {
+			t.Fatal(err)
+		}
+		if isBinaryUpToDate(root, binDir, version) {
+			t.Error("a .def newer than the binary must invalidate the up-to-date check")
+		}
+	})
+
+	t.Run("older def stays up to date", func(t *testing.T) {
+		root, defPath := defFileRoot(t)
+		binDir := filepath.Join(root, "bin")
+		mtime := writeUpToDateBinary(t, root, binDir, version)
+		older := mtime.Add(-2 * time.Second)
+		if err := os.Chtimes(defPath, older, older); err != nil {
+			t.Fatal(err)
+		}
+		if !isBinaryUpToDate(root, binDir, version) {
+			t.Error("an older .def (and no other newer sources) should stay up to date")
+		}
+	})
 }

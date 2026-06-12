@@ -77,6 +77,38 @@ function Show-NoPrebuiltForPlatform {
     exit 1
 }
 
+# -- checksum helper (Constrained Language Mode safe) ------------------------
+
+# Compute a file's SHA256 surviving Constrained Language Mode / stripped
+# PowerShell where Get-FileHash is unavailable (T0501). Get-FileHash lives in
+# Microsoft.PowerShell.Utility and is missing/blocked on locked-down corporate
+# machines (WDAC/AppLocker CLM). certutil.exe is a native Win32 binary present
+# on every Windows since Vista and runs regardless of language mode, so it is
+# the fallback. Returns the hex digest, or $null when no method is available.
+function Get-Sha256Hex {
+    param([string]$Path)
+
+    if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+        return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash
+    }
+
+    if (Get-Command certutil.exe -ErrorAction SilentlyContinue) {
+        Write-Host "Get-FileHash unavailable (Constrained Language Mode?); verifying checksum with certutil."
+        $out = & certutil.exe -hashfile $Path SHA256 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            # certutil prints a header line, the hash, then a footer line; some
+            # versions/locales space the hex bytes apart. Strip whitespace and
+            # take the line that is a 64-char hex digest.
+            foreach ($line in $out) {
+                $h = ($line -replace '\s', '')
+                if ($h -match '^[0-9a-fA-F]{64}$') { return $h }
+            }
+        }
+    }
+
+    return $null
+}
+
 # -- resolve release tag -----------------------------------------------------
 
 # T0804: remove this PROMISE_BASE_URL override when the repo goes public.
@@ -167,7 +199,20 @@ try {
         exit 1
     }
     $Expected = ($sumLine -split '\s+')[0]
-    $Actual   = (Get-FileHash -Algorithm SHA256 -Path $TmpGz).Hash
+    $Actual   = Get-Sha256Hex $TmpGz
+
+    if (-not $Actual) {
+        Write-Error @"
+cannot verify the download checksum: neither Get-FileHash nor certutil is
+available in this PowerShell session (often Constrained Language Mode on
+locked-down/corporate machines). Refusing to install an unverified binary.
+Re-run from a normal (Full Language Mode) PowerShell session, or download and
+verify manually:
+  binary: $DownloadUrl
+  sums:   $SumsUrl
+"@
+        exit 1
+    }
 
     if ($Expected -ne $Actual) {
         Write-Error "checksum mismatch`n  expected: $Expected`n  actual:   $Actual"

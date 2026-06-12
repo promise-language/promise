@@ -234,10 +234,14 @@ func isBinaryUpToDate(root, binDir, version string) bool {
 		return false
 	}
 
-	// Check module and example sources
+	// Check module and example sources, plus the winlink .def symbol lists — the
+	// source of truth for the go:embedded Windows import libs (T0835). A newer
+	// .def must invalidate the binary so EmbedResources reruns and ensureWinlinkLibs
+	// regenerates the .lib; otherwise an edited .def would embed a stale artifact.
 	for _, dir := range []string{
 		filepath.Join(root, "modules"),
 		filepath.Join(root, "examples"),
+		filepath.Join(root, filepath.FromSlash(winlinkDefDir)),
 	} {
 		if anySourceNewer(dir, nil, binaryMtime) {
 			return false

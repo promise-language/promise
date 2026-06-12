@@ -166,8 +166,10 @@ Commands:
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
   update    Update Promise (follow channel); also: update check, update channel
   epochs    List installed epochs
-  remove    Remove an installed epoch
+  remove    Remove an installed epoch (reclaims its exclusive cached blobs)
   use       Activate an epoch (downloads from releases if not installed)
+  fetch     Pre-stage the toolchain into the cache for offline builds (alias: warm)
+  gc        Reclaim cache space referenced by no installed epoch
 
   doctor    Check the local Promise environment for issues
   targets   List supported compile targets (e.g. -target wasm32-wasi)
@@ -355,6 +357,12 @@ func main() {
 		runUse(os.Args[2:])
 	case "remove":
 		runRemove(os.Args[2:])
+	case "fetch", "warm":
+		runFetch(os.Args[2:])
+		return
+	case "gc":
+		runGC(os.Args[2:])
+		return
 	case "bind":
 		runBind(os.Args[2:])
 	case "doctor":
@@ -8084,9 +8092,24 @@ func runInstall(args []string) {
 		fmt.Fprintf(os.Stderr, "error: cannot open dependency cache: %v\n", sErr)
 		os.Exit(1)
 	}
+	// Hold the CAS lock across blob staging + the blobs.refs write so a concurrent
+	// gc/remove (T0771) — which holds the same lock — can never observe this
+	// epoch's staged-but-not-yet-referenced blobs and sweep them out (§4.4). It is
+	// released immediately after WriteEpochRefs: prefetchHostToolchain below
+	// re-acquires the lock per-blob via the resolver, and a same-process flock on
+	// a second fd would self-deadlock. Best-effort like runRemove — a lock syscall
+	// failure (not contention; Lock blocks on contention) must not abort install,
+	// since the gc/remove fail-safe still keeps a half-installed epoch's blobs.
+	var casUnlock func()
+	if unlock, lerr := store.Lock("install " + epoch); lerr == nil {
+		casUnlock = unlock
+	}
 	stagedBlobs := false
 	if hasEmbeddedLLVM {
 		if err := stageEmbeddedLLVMBlobs(store); err != nil {
+			if casUnlock != nil {
+				casUnlock()
+			}
 			fmt.Fprintf(os.Stderr, "error staging LLVM blobs: %v\n", err)
 			os.Exit(1)
 		}
@@ -8094,6 +8117,9 @@ func runInstall(args []string) {
 	}
 	if err := blobstore.WriteEpochRefs(epochDir, manifest); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write blobs.refs: %v\n", err)
+	}
+	if casUnlock != nil {
+		casUnlock()
 	}
 
 	// Write active epoch file.
@@ -8281,6 +8307,18 @@ func runRemove(args []string) {
 		}
 	}
 
+	// Hold the CAS lock across removal + the reclaim sweep so a concurrent
+	// install/fetch can't race the live-set computation (§4.4). Lock failure is
+	// non-fatal: removal still proceeds (rm -rf needs no lock); only the
+	// exclusive-blob reclaim is skipped.
+	var store *blobstore.Store
+	if s, serr := blobstore.NewStore(); serr == nil {
+		if unlock, lerr := s.Lock("remove"); lerr == nil {
+			store = s
+			defer unlock()
+		}
+	}
+
 	for _, epoch := range targets {
 		if epoch == active && !force {
 			fmt.Fprintf(os.Stderr, "error: %q is the active epoch. Use -force to remove it.\n", epoch)
@@ -8302,6 +8340,136 @@ func runRemove(args []string) {
 		}
 		fmt.Printf("Removed epoch %s (%s)\n", epoch, formatSize(size))
 	}
+
+	// Reclaim the removed epochs' EXCLUSIVE blobs while leaving blobs shared with
+	// the remaining epochs intact (§4.4). The removed epoch dirs (and their
+	// blobs.refs) are already gone, so the union of the remaining epochs' ref
+	// sets is exactly the new live set.
+	if store != nil {
+		if liveBlobs, liveArchives, ok, lerr := blobstore.LiveSet(""); lerr == nil {
+			m, _ := loadEmbeddedManifest()
+			if res, serr := store.Sweep(liveBlobs, liveArchives, ok, m, false); serr == nil && res.BytesFreed > 0 {
+				fmt.Printf("Reclaimed %s of unreferenced blobs.\n", formatSize(res.BytesFreed))
+			}
+		}
+	}
+}
+
+// runFetch (a.k.a. warm) pre-stages the host workflow's dependency blobs into
+// the CAS while online, so a thin binary can subsequently build offline (§4.4).
+// It is the explicit, non-best-effort counterpart to the install-time prefetch
+// (prefetchHostToolchain): on any failure — notably blobstore.OfflineError — it
+// exits non-zero, since a user who ran `promise fetch` offline needs that
+// signal. It reuses the exact materialization path a build takes, so the blobs
+// land in the shared CAS just as the install prefetch does.
+func runFetch(args []string) {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise fetch\n", arg)
+			os.Exit(1)
+		}
+	}
+	// The user already opted in by running fetch — announce, don't re-prompt.
+	prefetchNoPrompt = true
+	defer func() { prefetchNoPrompt = false }()
+
+	viewDir, err := resolveLLVMView(true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if runtime.GOOS == "linux" {
+		target := "x86_64-unknown-linux-musl"
+		if runtime.GOARCH == "arm64" {
+			target = "aarch64-unknown-linux-musl"
+		}
+		if _, err := findMuslCRT(target); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if viewDir == "" {
+		fmt.Println("This build resolves its toolchain from PATH — nothing to pre-stage.")
+		return
+	}
+	blobCount := 0
+	if store, serr := blobstore.NewStore(); serr == nil {
+		if blobs, lerr := store.ListBlobs(); lerr == nil {
+			blobCount = len(blobs)
+		}
+	}
+	fmt.Printf("Host toolchain staged into the dependency cache (%d blobs).\n", blobCount)
+	fmt.Printf("  view: %s\n", viewDir)
+	fmt.Println("Offline builds with this epoch are now ready.")
+}
+
+// runGC bounds the dependency cache with union-rooted mark-and-sweep (§4.4):
+// the live set is the union of ALL installed epochs' blobs.refs, so a blob
+// shared by two epochs is never deleted while removing one. Holds the same
+// exclusive lock as install/fetch.
+func runGC(args []string) {
+	dryRun := false
+	jsonOut := false
+	for _, arg := range args {
+		switch arg {
+		case "-dry-run", "--dry-run":
+			dryRun = true
+		case "-json", "--json":
+			jsonOut = true
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise gc [-dry-run] [-json]\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	store, err := blobstore.NewStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot open dependency cache: %v\n", err)
+		os.Exit(1)
+	}
+	unlock, err := store.Lock("gc")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot lock dependency cache: %v\n", err)
+		os.Exit(1)
+	}
+	defer unlock()
+
+	liveBlobs, liveArchives, allRefsReadable, err := blobstore.LiveSet("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot compute live set: %v\n", err)
+		os.Exit(1)
+	}
+	m, _ := loadEmbeddedManifest()
+	res, err := store.Sweep(liveBlobs, liveArchives, allRefsReadable, m, dryRun)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: gc sweep failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(map[string]any{
+			"dry_run":           dryRun,
+			"all_refs_readable": allRefsReadable,
+			"blobs_removed":     res.BlobsRemoved,
+			"archives_removed":  res.ArchivesRemoved,
+			"bytes_freed":       res.BytesFreed,
+			"removed":           res.Removed,
+		})
+		return
+	}
+
+	if !allRefsReadable {
+		fmt.Println("Kept all blobs: an installed epoch's blobs.refs is missing or unreadable (fail-safe).")
+		return
+	}
+	verb := "Reclaimed"
+	if dryRun {
+		verb = "Would reclaim"
+	}
+	fmt.Printf("%s %s (%d blobs, %d archives).\n", verb, formatSize(res.BytesFreed), res.BlobsRemoved, res.ArchivesRemoved)
 }
 
 // dirSize computes the total size of all files under a directory.

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -652,5 +654,88 @@ func TestDoctorCheckModuleCacheNetworkUnreachable(t *testing.T) {
 	}
 	if !hasUnreachable {
 		t.Errorf("expected 'git host unreachable' detail, got details: %v", c.Details)
+	}
+}
+
+// seedCASBlob writes content into <home>/cache/blobs/sha256/<hash> with the
+// given content address; mismatch=true writes a corrupt entry (filename is the
+// address of `content` but the bytes on disk differ).
+func seedCASBlob(t *testing.T, home, content string, mismatch bool) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(content))
+	hash := hex.EncodeToString(sum[:])
+	dir := filepath.Join(home, "cache", "blobs", "sha256")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := content
+	if mismatch {
+		body = content + "-tampered"
+	}
+	if err := os.WriteFile(filepath.Join(dir, hash), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return hash
+}
+
+func TestDoctorCheckCASClean(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PROMISE_HOME", home)
+	seedCASBlob(t, home, "intact", false)
+
+	c := doctorCheckCAS(doctorFlags{})
+	if c.Status != "ok" {
+		t.Errorf("expected ok for a clean CAS, got %s (%s)", c.Status, c.Summary)
+	}
+}
+
+func TestDoctorCheckCASEmpty(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PROMISE_HOME", home)
+
+	c := doctorCheckCAS(doctorFlags{})
+	if c.Status != "ok" {
+		t.Errorf("expected ok for an empty CAS, got %s (%s)", c.Status, c.Summary)
+	}
+	if c.Summary != "No cached dependencies" {
+		t.Errorf("expected 'No cached dependencies' summary, got %q", c.Summary)
+	}
+}
+
+func TestDoctorCheckCASCorruptFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PROMISE_HOME", home)
+	seedCASBlob(t, home, "good", false)
+	seedCASBlob(t, home, "bad", true)
+
+	c := doctorCheckCAS(doctorFlags{})
+	if c.Status != "error" {
+		t.Errorf("expected error for a corrupt CAS, got %s", c.Status)
+	}
+	if !c.Required {
+		t.Error("corrupt CAS check must be Required (CI preflight exit 1)")
+	}
+	if c.Fix == "" {
+		t.Error("expected a fix hint pointing at --repair")
+	}
+}
+
+func TestDoctorCheckCASRepairQuarantines(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PROMISE_HOME", home)
+	seedCASBlob(t, home, "good", false)
+	badHash := seedCASBlob(t, home, "bad", true)
+
+	c := doctorCheckCAS(doctorFlags{repair: true})
+	if c.Status != "warning" {
+		t.Errorf("expected warning after repair, got %s (%s)", c.Status, c.Summary)
+	}
+	// The corrupt entry must be gone from the live CAS.
+	if _, err := os.Stat(filepath.Join(home, "cache", "blobs", "sha256", badHash)); !os.IsNotExist(err) {
+		t.Error("corrupt entry should be quarantined out of the live CAS")
+	}
+	// Its bytes must be preserved in quarantine.
+	if _, err := os.Stat(filepath.Join(home, "cache", "quarantine", "blob", badHash+".0")); err != nil {
+		t.Errorf("quarantined bytes not preserved: %v", err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/promise-language/promise/compiler/internal/blobstore"
 	"github.com/promise-language/promise/compiler/internal/module"
 )
 
@@ -52,6 +53,7 @@ type doctorFlags struct {
 	fix        bool
 	network    bool
 	dev        bool
+	repair     bool
 }
 
 func runDoctor(args []string) {
@@ -66,6 +68,8 @@ func runDoctor(args []string) {
 			flags.network = true
 		case "-dev":
 			flags.dev = true
+		case "-repair", "--repair":
+			flags.repair = true
 		}
 	}
 
@@ -81,6 +85,7 @@ func runDoctor(args []string) {
 		doctorCheckModuleCache(flags.network),
 		doctorCheckPromiseHome(),
 		doctorCheckEpochs(),
+		doctorCheckCAS(flags),
 	)
 	if runtime.GOOS == "darwin" {
 		checks = append(checks, doctorCheckXcodeCLT())
@@ -505,6 +510,77 @@ func doctorCheckEpochs() doctorCheck {
 		c.Details = append(c.Details, marker+ep)
 	}
 
+	return c
+}
+
+// doctorCheckCAS verifies the content-addressed dependency cache (§4.4/§6):
+// re-hash every blobs/ and archives/ entry against its content address. Because
+// the fetch path trusts the cache by presence, this is the only thing that
+// turns a bit-rotted / truncated CAS back into a working one. A corrupt entry
+// with no --repair fails the check (Required → exit 1, CI-preflight usable);
+// --repair quarantines it (recoverable, next build re-fetches) and drops the
+// status to a warning so the exit code is 0.
+func doctorCheckCAS(flags doctorFlags) doctorCheck {
+	c := makeDoctorCheck("Dependency cache integrity", doctorOK, true)
+
+	store, err := blobstore.NewStore()
+	if err != nil {
+		c.Status = doctorWarn.String()
+		c.Summary = "Cannot open dependency cache"
+		c.Details = append(c.Details, err.Error())
+		return c
+	}
+
+	var res blobstore.VerifyResult
+	if flags.repair {
+		// Destructive repair (quarantine) takes the same exclusive lock as
+		// install/fetch/gc so it can't race a concurrent fetch.
+		unlock, lerr := store.Lock("doctor --repair")
+		if lerr != nil {
+			c.Status = doctorWarn.String()
+			c.Summary = "Cannot lock dependency cache for repair"
+			c.Details = append(c.Details, lerr.Error())
+			return c
+		}
+		defer unlock()
+		res, err = store.Verify(true)
+	} else {
+		res, err = store.Verify(false)
+	}
+	if err != nil {
+		c.Status = doctorErr.String()
+		c.Summary = "Could not verify dependency cache"
+		c.Details = append(c.Details, err.Error())
+		c.Fix = "promise doctor --repair"
+		return c
+	}
+
+	c.Details = append(c.Details, fmt.Sprintf("Verified %d blobs, %d archives", res.BlobsChecked, res.ArchivesChecked))
+
+	if res.BlobsChecked == 0 && res.ArchivesChecked == 0 {
+		c.Summary = "No cached dependencies"
+		return c
+	}
+	if len(res.Corrupt) == 0 {
+		c.Summary = "All cached dependencies intact"
+		return c
+	}
+
+	if flags.repair {
+		c.Status = doctorWarn.String()
+		c.Summary = fmt.Sprintf("Quarantined %d corrupt cache entries; next build will re-fetch clean copies", len(res.Quarantined))
+		for _, ce := range res.Quarantined {
+			c.Details = append(c.Details, fmt.Sprintf("quarantined %s %s", ce.Kind, ce.Hash))
+		}
+		return c
+	}
+
+	c.Status = doctorErr.String()
+	c.Summary = fmt.Sprintf("%d corrupt cache entries detected", len(res.Corrupt))
+	for _, ce := range res.Corrupt {
+		c.Details = append(c.Details, fmt.Sprintf("corrupt %s %s", ce.Kind, ce.Hash))
+	}
+	c.Fix = "promise doctor --repair"
 	return c
 }
 

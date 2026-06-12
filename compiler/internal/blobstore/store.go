@@ -219,6 +219,81 @@ func WriteEpochRefs(epochDir string, m *Manifest) error {
 	return os.WriteFile(filepath.Join(epochDir, "blobs.refs"), []byte(content), 0o644)
 }
 
+// ListBlobs returns every well-formed CAS blob keyed by content hash → size.
+// Entries whose name is not a 64-char lowercase hex string (in-flight staging
+// residue like ".stage-*.tmp" / "blob-*") are skipped — only committed entries
+// are listed. A missing blobs dir yields an empty map (not an error).
+func (s *Store) ListBlobs() (map[string]int64, error) { return listHashed(s.blobsDir()) }
+
+// ListArchives returns every well-formed cached archive keyed by hash → size.
+func (s *Store) ListArchives() (map[string]int64, error) { return listHashed(s.archivesDir()) }
+
+func listHashed(dir string) (map[string]int64, error) {
+	out := map[string]int64{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return out, nil
+		}
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !isHexHash(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		out[e.Name()] = info.Size()
+	}
+	return out, nil
+}
+
+// isHexHash reports whether name is a 64-char lowercase hex sha256 — the exact
+// shape of a committed CAS entry's filename. Defends GC/verify against the
+// resolver's temp residue (".stage-*", "blob-*", "out-*", "archive-*").
+func isHexHash(name string) bool {
+	if len(name) != 64 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// ReadEpochRefs parses epochs/<epoch>/blobs.refs into its referenced blob +
+// archive hash sets. Returns ok=false (NOT an error) when the file is absent or
+// unreadable so callers can apply the §4.4 fail-safe (keep everything rather
+// than risk deleting a live blob). Lines are "blob <hash>" / "archive <hash>"
+// as written by WriteEpochRefs; malformed lines are ignored.
+func ReadEpochRefs(epochDir string) (blobs, archives map[string]bool, ok bool) {
+	data, err := os.ReadFile(filepath.Join(epochDir, "blobs.refs"))
+	if err != nil {
+		return nil, nil, false
+	}
+	blobs = map[string]bool{}
+	archives = map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		h := normalizeHash(fields[1])
+		switch fields[0] {
+		case "blob":
+			blobs[h] = true
+		case "archive":
+			archives[h] = true
+		}
+	}
+	return blobs, archives, true
+}
+
 // hashFile returns the lowercase hex sha256 of a file's contents.
 func hashFile(path string) (string, error) {
 	f, err := os.Open(path)

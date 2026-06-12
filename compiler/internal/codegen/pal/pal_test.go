@@ -3151,6 +3151,56 @@ func TestEmitSpawnWindows(t *testing.T) {
 	assertContains(t, out, "trunc i64", "truncates handle to i32")
 }
 
+// TestEmitSpawnEnvWindows is the regression test for the bug where os.execute()
+// failed on Windows with "failed to spawn process". os.execute routes through
+// _os_spawn_env → pal_spawn_env even when no env/cwd override is given, but
+// pal_spawn_env was an unimplemented stub (emitStubSpawnEnv) that always returned
+// -1. This asserts the Windows implementation is real (CreateProcessA + pipes +
+// the env-block builder), not the stub.
+func TestEmitSpawnEnvWindows(t *testing.T) {
+	p := &WindowsPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitFree(module)
+	p.EmitSpawnEnv(module)
+	out := module.String()
+
+	assertContains(t, out, "define i32 @pal_spawn_env(i8* %program, i8** %argv, i8** %envp, i8* %cwd,", "defines pal_spawn_env with env+cwd params")
+	// Regression guard: a real CreateProcessA-based impl, NOT the stub (store -1 / ret -1).
+	assertContains(t, out, "@CreateProcessA(", "pal_spawn_env actually calls CreateProcessA (not a stub)")
+	assertContains(t, out, "@CreatePipe(", "creates stdout/stderr pipes")
+	assertContains(t, out, "define i8* @__promise_envp_to_block(i8** %envp)", "emits the env-block builder")
+}
+
+// TestEmitSpawnStreamingEnvWindows is the regression test for os.Process.spawn()
+// on Windows, which routes through pal_spawn_streaming_env — also a stub before.
+func TestEmitSpawnStreamingEnvWindows(t *testing.T) {
+	p := &WindowsPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitFree(module)
+	p.EmitSpawnStreamingEnv(module)
+	out := module.String()
+
+	assertContains(t, out, "define i32 @pal_spawn_streaming_env(i8* %program, i8** %argv, i8** %envp, i8* %cwd,", "defines pal_spawn_streaming_env with env+cwd params")
+	assertContains(t, out, "@CreateProcessA(", "pal_spawn_streaming_env actually calls CreateProcessA (not a stub)")
+	if strings.Count(out, "call i32 @CreatePipe(") < 3 {
+		t.Error("expected at least 3 CreatePipe() calls for stdin/stdout/stderr")
+	}
+}
+
+// TestEmitArgvToCmdlineConditionalQuoting guards the fix for the second spawn bug:
+// argvToCmdline used to double-quote EVERY argument, producing `cmd "/c" "echo hi"`,
+// which cmd.exe rejects (exit 1). Arguments must be quoted only when needed, so the
+// builder must consult the __promise_arg_needs_quote predicate.
+func TestEmitArgvToCmdlineConditionalQuoting(t *testing.T) {
+	p := &WindowsPAL{}
+	module := newModuleWithAlloc(p)
+	emitArgvToCmdline(module)
+	out := module.String()
+
+	assertContains(t, out, "define i1 @__promise_arg_needs_quote(i8* %arg)", "emits the arg-needs-quote predicate")
+	assertContains(t, out, "call i1 @__promise_arg_needs_quote(", "argvToCmdline quotes conditionally via the predicate")
+}
+
 func TestEmitReadPipeWindows(t *testing.T) {
 	p := &WindowsPAL{}
 	module := newModuleForReadPipe(p)

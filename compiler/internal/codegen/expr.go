@@ -3317,6 +3317,7 @@ func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) valu
 	}
 	elemLLVM := c.resolveType(elemType)
 	elemSize := c.typeSize(elemLLVM)
+	_, elemIsOpt := elemType.(*types.Optional) // T0853
 
 	// Allocate: 8 bytes strong_count + 8 bytes weak_count + sizeof(T)
 	totalSize := 16 + elemSize
@@ -3337,7 +3338,14 @@ func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) valu
 	c.block.NewStore(constant.NewInt(irtypes.I64, 1), wcField)
 
 	// Generate and store value (moved into the Arc)
+	// T0853: when the element type is Optional, set targetType so a bare `none`
+	// arg lowers to a zero {i1,T} struct via genNoneLit (mirrors Vector.push, T0658).
+	savedTarget := c.targetType
+	if elemIsOpt {
+		c.targetType = elemType
+	}
 	val := c.genCallArgExpr(e.Args[0].Value)
+	c.targetType = savedTarget
 	c.claimHeapTemp(val)
 	// T0273: Clear drop flag — value is moved into Arc, caller must not double-drop.
 	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
@@ -3353,6 +3361,14 @@ func (c *Compiler) genArcConstructor(e *ast.CallExpr, inst *types.Instance) valu
 	c.neutralizeForceUnwrapSource(e.Args[0].Value)
 	c.claimStringTemp(val)
 	c.claimEnvTemp(val)
+	// T0853: widen a bare non-optional `T` arg to the `T?` element struct. Done
+	// last (after temp-claiming) because stmtTempMap tracks by val-identity,
+	// which is lost once val is wrapped. wrapReturnOptional doubles as the
+	// constructor-arg widener: it no-ops for `none` (targetType already zeroed
+	// it) and for an already-optional arg (types.Identical), else wrapOptional.
+	if elemIsOpt {
+		val = c.wrapReturnOptional(val, e.Args[0].Value, elemType)
+	}
 	valField := c.block.NewGetElementPtr(arcStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, arcFieldValue))
 	c.block.NewStore(val, valField)
@@ -3572,6 +3588,7 @@ func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) va
 		elemType = types.Substitute(elemType, c.typeSubst)
 	}
 	elemLLVM := c.resolveType(elemType)
+	_, elemIsOpt := elemType.(*types.Optional) // T0853
 
 	mutexStructTy := mutexStructType(elemLLVM)
 	mutexSize := c.typeSize(mutexStructTy)
@@ -3608,7 +3625,14 @@ func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) va
 	c.block.NewStore(constant.NewInt(irtypes.I8, 0), heldField)
 
 	// Field 5: user value (moved into the Mutex)
+	// T0853: when the element type is Optional, set targetType so a bare `none`
+	// arg lowers to a zero {i1,T} struct via genNoneLit (mirrors Vector.push, T0658).
+	savedTarget := c.targetType
+	if elemIsOpt {
+		c.targetType = elemType
+	}
 	val := c.genCallArgExpr(e.Args[0].Value)
+	c.targetType = savedTarget
 	c.claimHeapTemp(val)
 	// T0273: Clear drop flag — value is moved into Mutex, caller must not double-drop.
 	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
@@ -3622,6 +3646,14 @@ func (c *Compiler) genMutexConstructor(e *ast.CallExpr, inst *types.Instance) va
 	c.neutralizeForceUnwrapSource(e.Args[0].Value)
 	c.claimStringTemp(val)
 	c.claimEnvTemp(val)
+	// T0853: widen a bare non-optional `T` arg to the `T?` element struct. Done
+	// last (after temp-claiming) because stmtTempMap tracks by val-identity,
+	// which is lost once val is wrapped. wrapReturnOptional doubles as the
+	// constructor-arg widener: it no-ops for `none` (targetType already zeroed
+	// it) and for an already-optional arg (types.Identical), else wrapOptional.
+	if elemIsOpt {
+		val = c.wrapReturnOptional(val, e.Args[0].Value, elemType)
+	}
 	valField := c.block.NewGetElementPtr(mutexStructTy, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexFieldValue)))
 	c.block.NewStore(val, valField)

@@ -9065,6 +9065,14 @@ func (c *Compiler) variantFieldNeedsDrop(typ types.Type) bool {
 		if named == types.TypString || named == types.TypVector || named == types.TypChannel {
 			return true
 		}
+		// T0765: Structural-interface field (non-value-type) in a variant holds a
+		// {vtable, instance} value struct; the heap instance must be dropped via
+		// __promise_structural_drop (RTTI dispatch). Mirrors the struct-field case
+		// (T0460) — Writer itself carries no HasDrop/NeedsSynthDrop, so gate on
+		// IsStructural directly.
+		if named.IsStructural() && !named.IsValueType() {
+			return true
+		}
 		if named.HasDrop() || named.NeedsSynthDrop() {
 			return true
 		}
@@ -9340,6 +9348,20 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			// body / WASM main / go {}) parks instead of livelocking the
 			// single-threaded WASM scheduler.
 			c.emitTaskJoinAndFree(fieldVal, taskElem)
+			return
+		}
+		// T0765: Structural-interface field (non-value-type). The variant data slot
+		// holds a {vtable, instance} value struct; extract the instance pointer and
+		// dispatch through __promise_structural_drop (RTTI: typeinfo.drop_fn_ptr →
+		// concrete drop, else pal_free). Mirrors the struct-field walk (T0460). The
+		// null guard also covers a moved-out, zero-init'd variant slot (T0633).
+		if named.IsStructural() && !named.IsValueType() {
+			if c.structuralDrop != nil {
+				instancePtr := c.extractInstancePtr(fieldVal)
+				c.emitNullGuardedVariantDrop(instancePtr, func() {
+					c.block.NewCall(c.structuralDrop, instancePtr)
+				})
+			}
 			return
 		}
 		// T0387: Polymorphic heap user type — dispatch through typeinfo's

@@ -153,3 +153,68 @@ generic_wrap_string_value() `test {
   Builder b = Builder();
   StructuralBox[string] sb = StructuralBox[string](b, "hello");
 }
+
+// T0765: enum variant holding a structural-interface field. The synthesized
+// enum drop must walk the variant data and dispatch the structural field
+// through __promise_structural_drop. Without it the underlying Builder leaks.
+enum StructuralHolder `public {
+  WithWriter(Writer w),
+  Empty,
+}
+
+enum_variant_structural_drop() `test {
+  StructuralHolder h = StructuralHolder.WithWriter(make_writer());
+}
+
+// The Empty case guards that the tag switch still terminates cleanly when the
+// droppable variant isn't selected.
+enum_variant_structural_empty() `test {
+  StructuralHolder h = StructuralHolder.Empty;
+}
+
+// T0765: enum variant holding a concrete structural type with a user-defined
+// drop. RTTI must dispatch through typeinfo.drop_fn_ptr to Tracked.drop (not the
+// pal_free fallback) — the Builder cases above only cover pal_free. Tracked.drop
+// has an empty body, so its inner `log` vector is freed only by the synthesized
+// post-body field walk that runs as part of the concrete drop. No leak proves
+// the structural drop reached Tracked's real drop, not a bare pal_free.
+enum SinkHolder `public {
+  WithSink(Sink s),
+  Nothing,
+}
+
+make_sink() Sink {
+  return Tracked();
+}
+
+enum_variant_structural_user_drop() `test {
+  SinkHolder h = SinkHolder.WithSink(make_sink());
+}
+
+// T0765: move the structural payload out of the variant via match. The matched
+// binding takes ownership of the Sink and drops it at arm end; the subject's
+// synthesized enum drop must not double-free the same allocation (the null-guard
+// in emitVariantFieldDrop covers the zero-init'd moved-out slot). Zero leaks.
+enum_variant_structural_moved_out() `test {
+  SinkHolder h = SinkHolder.WithSink(make_sink());
+  match h {
+    SinkHolder.WithSink(s) => assert(true, "binding owns the sink"),
+    SinkHolder.Nothing => assert(false, "should hold a sink"),
+  }
+}
+
+// T0765: generic enum with a structural variant field — mirrors the struct-side
+// StructuralBox[T] generic coverage. Each instantiation's synthesized enum drop
+// must dispatch the structural field through __promise_structural_drop.
+enum StructuralHolderG[T] `public {
+  Has(Writer w, T v),
+  None,
+}
+
+enum_variant_structural_generic_int() `test {
+  StructuralHolderG[int] h = StructuralHolderG[int].Has(make_writer(), 7);
+}
+
+enum_variant_structural_generic_string() `test {
+  StructuralHolderG[string] h = StructuralHolderG[string].Has(make_writer(), "hi");
+}

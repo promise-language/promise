@@ -4547,6 +4547,17 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	}
 
 	method := named.LookupMethod(member.Field)
+	if method == nil && c.selfSubst != nil {
+		// T0766: Inside a synthesized structural default-method body, `this`
+		// (Self → concrete) may invoke a *sibling* default method that is declared
+		// on the interface, not on the concrete type's own method table. Resolve it
+		// through the interface and make sure the per-concrete synthesized function
+		// exists; dispatch below then mangles to `<concrete>.<method>`.
+		if im := c.selfSubst.iface.LookupMethod(member.Field); im != nil {
+			c.ensureDefaultMethodsSynthesized(c.selfSubst.concrete, c.selfSubst.iface)
+			method = im
+		}
+	}
 	if method == nil {
 		panic(fmt.Sprintf("codegen: no method %s on type %s", member.Field, named))
 	}

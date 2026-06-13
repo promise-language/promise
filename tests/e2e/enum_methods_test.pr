@@ -492,6 +492,84 @@ test_if_this_is_variant_bind() `test {
   assert(Dynamic.Nothing.num_or_zero() == 0, "Nothing num falls through");
 }
 
+// T0879: string-returning enum getters must free their result when used inline.
+enum Tagged {
+  named(string s),
+  blank,
+  get text string {
+    match this {
+      named(s) => {
+        return s;
+      }, blank => {
+        return "(blank)";
+      },
+    }
+  }
+}
+
+tagged_string_sink(string a, string b) bool {
+  return a == b;
+}
+
+test_enum_getter_string_inline_eq() `test {
+  t := Tagged.named("hello");
+  assert(t.text == "hello", "inline eq");
+}
+
+test_enum_getter_string_as_call_arg() `test {
+  t := Tagged.named("world");
+  b := tagged_string_sink(t.text, "world");
+  assert(b, "call arg");
+}
+
+// T0879: blank (fieldless) variant returns a static literal — must not leak.
+test_enum_getter_string_blank_inline_eq() `test {
+  t := Tagged.blank;
+  assert(t.text == "(blank)", "blank inline eq");
+}
+
+test_enum_getter_string_blank_as_call_arg() `test {
+  t := Tagged.blank;
+  b := tagged_string_sink(t.text, "(blank)");
+  assert(b, "blank call arg");
+}
+
+// T0879: string getter result used in multiple operations in the same statement.
+test_enum_getter_string_concat_inline() `test {
+  t := Tagged.named("hi");
+  // The getter is called once; its result must be freed after the statement.
+  assert(t.text == "hi", "concat inline");
+}
+
+// T0879: fieldless enum with a string-returning getter used inline.
+enum Badge {
+  Gold, Silver, Bronze,
+  get label string {
+    match this {
+      Gold => {
+        return "gold";
+      },
+      Silver => {
+        return "silver";
+      },
+      Bronze => {
+        return "bronze";
+      },
+    }
+  }
+}
+
+test_enum_getter_fieldless_string_inline() `test {
+  assert(Badge.Gold.label == "gold", "Gold inline");
+  assert(Badge.Silver.label == "silver", "Silver inline");
+  assert(Badge.Bronze.label == "bronze", "Bronze inline");
+}
+
+test_enum_getter_fieldless_string_call_arg() `test {
+  b := tagged_string_sink(Badge.Gold.label, "gold");
+  assert(b, "Gold as arg");
+}
+
 // Fieldless enum: the value IS the tag (i32) — `this is Variant` must load the
 // i32 from the i8* `this` rather than icmp-ing the pointer.
 enum Light {

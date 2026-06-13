@@ -2441,8 +2441,8 @@ func (p *WindowsPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 		constant.NewNull(irtypes.I8Ptr),
 		constant.NewInt(irtypes.I32, 1),
 		constant.NewInt(irtypes.I32, 0),
-		envBlock,  // lpEnvironment (NULL → inherit)
-		cwdParam,  // lpCurrentDirectory (NULL → inherit)
+		envBlock, // lpEnvironment (NULL → inherit)
+		cwdParam, // lpCurrentDirectory (NULL → inherit)
 		siPtr, piPtr)
 
 	cpFailed := stderrPipeOk.NewICmp(enum.IPredEQ, cpRet, constant.NewInt(irtypes.I32, 0))

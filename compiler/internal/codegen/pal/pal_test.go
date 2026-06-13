@@ -3221,6 +3221,120 @@ func TestEmitReadPipeWindows(t *testing.T) {
 	assertContains(t, out, "call i32 @CloseHandle(", "closes handle when done")
 }
 
+// T0900: streaming pipe I/O primitives must exist on every PAL.
+func TestEmitPipeReadWriteClose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+		{"WasmWeb", &WasmWebPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			if fn := tc.pal.EmitPipeRead(module); fn.Name() != "pal_pipe_read" {
+				t.Errorf("expected pal_pipe_read, got %s", fn.Name())
+			}
+			if fn := tc.pal.EmitPipeWrite(module); fn.Name() != "pal_pipe_write" {
+				t.Errorf("expected pal_pipe_write, got %s", fn.Name())
+			}
+			if fn := tc.pal.EmitPipeClose(module); fn.Name() != "pal_pipe_close" {
+				t.Errorf("expected pal_pipe_close, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i64 @pal_pipe_read(i32 %fd,", "defines pal_pipe_read")
+			assertContains(t, out, "define i64 @pal_pipe_write(i32 %fd,", "defines pal_pipe_write")
+			assertContains(t, out, "define i32 @pal_pipe_close(i32 %fd)", "defines pal_pipe_close")
+		})
+	}
+}
+
+// T0900: POSIX routes pipe I/O through libc read/write/close (the i32 is a real fd).
+func TestEmitPipeReadWriteClosePosix(t *testing.T) {
+	p := &PosixPAL{}
+	module := ir.NewModule()
+	p.EmitPipeRead(module)
+	p.EmitPipeWrite(module)
+	p.EmitPipeClose(module)
+	out := module.String()
+
+	assertContains(t, out, "call i64 @read(", "pipe read calls libc read")
+	assertContains(t, out, "call i64 @write(", "pipe write calls libc write")
+	assertContains(t, out, "call i32 @close(", "pipe close calls libc close")
+}
+
+// T0900: Windows routes pipe I/O through HANDLE-aware Win32 calls (the i32 is a
+// packed HANDLE, NOT a CRT fd), unpacking via sext+inttoptr and mapping
+// ERROR_BROKEN_PIPE (109) to EOF in the read path.
+func TestEmitPipeReadWriteCloseWindows(t *testing.T) {
+	p := &WindowsPAL{}
+	module := ir.NewModule()
+	p.EmitPipeRead(module)
+	p.EmitPipeWrite(module)
+	p.EmitPipeClose(module)
+	out := module.String()
+
+	// Handle unpacking (not a CRT fd).
+	assertContains(t, out, "sext i32 %fd to i64", "sign-extends fd to i64")
+	assertContains(t, out, "inttoptr i64", "converts i64 to handle")
+	// HANDLE-aware Win32 calls (NOT UCRT _read/_write/_close).
+	assertContains(t, out, "call i32 @ReadFile(", "pipe read calls ReadFile")
+	assertContains(t, out, "call i32 @WriteFile(", "pipe write calls WriteFile")
+	assertContains(t, out, "call i32 @CloseHandle(", "pipe close calls CloseHandle")
+	// Failure paths consult GetLastError, not errno.
+	assertContains(t, out, "call i32 @GetLastError(", "consults GetLastError on failure")
+	// Broken-pipe → EOF mapping in the read path.
+	assertContains(t, out, "icmp eq i32 %", "compares error code")
+	assertContains(t, out, "109", "checks ERROR_BROKEN_PIPE (109)")
+}
+
+// T0900: pins the Windows read-path EOF-vs-error *semantics* the prior test only
+// structurally implied — broken pipe yields a zero return (EOF), every other
+// failure yields a negated GetLastError code. A wrong-sign or swapped-branch
+// regression (e.g. returning the raw positive error, or 0 for real errors) would
+// pass TestEmitPipeReadWriteCloseWindows but fails here.
+func TestEmitPipeReadWindowsErrorSemantics(t *testing.T) {
+	p := &WindowsPAL{}
+	module := ir.NewModule()
+	p.EmitPipeRead(module)
+	out := module.String()
+
+	// On a ReadFile failure the code branches to a broken-pipe (EOF) block and a
+	// real-error block.
+	assertContains(t, out, "label %.eof", "has a dedicated EOF block for broken pipe")
+	assertContains(t, out, "label %.real_err", "has a dedicated real-error block")
+	// Broken pipe → EOF: the EOF block returns 0, never a negated error.
+	assertContains(t, out, ".eof:\n\tret i64 0", "broken pipe returns 0 (EOF)")
+	// Other failures → -error: the real-error block negates the GetLastError code.
+	assertContains(t, out, "sub i64 0,", "real error is negated to -error")
+}
+
+// T0900: the Windows write/close paths have no broken-pipe special case — every
+// failure is a negated error. This guards against accidentally copying the read
+// path's EOF mapping (which would silently swallow a write/close failure as success).
+func TestEmitPipeWriteCloseWindowsErrorSemantics(t *testing.T) {
+	p := &WindowsPAL{}
+
+	writeMod := ir.NewModule()
+	p.EmitPipeWrite(writeMod)
+	writeOut := writeMod.String()
+	assertContains(t, writeOut, "sub i64 0,", "write failure is negated to -error")
+	if strings.Contains(writeOut, "109") {
+		t.Error("write path must not special-case broken pipe (109) as EOF")
+	}
+
+	closeMod := ir.NewModule()
+	p.EmitPipeClose(closeMod)
+	closeOut := closeMod.String()
+	assertContains(t, closeOut, "sub i32 0,", "close failure is negated to -error")
+	assertContains(t, closeOut, "ret i32 0", "close success returns 0")
+	if strings.Contains(closeOut, "109") {
+		t.Error("close path must not special-case broken pipe (109) as EOF")
+	}
+}
+
 func TestEmitWaitPidWindows(t *testing.T) {
 	p := &WindowsPAL{}
 	module := newModuleWithAlloc(p)

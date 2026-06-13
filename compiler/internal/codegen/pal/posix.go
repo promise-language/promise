@@ -507,8 +507,8 @@ func (p *PosixPAL) EmitFileClose(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// EmitPipeRead defines @pal_pipe_read. On POSIX a subprocess pipe fd is an
-// ordinary file descriptor, so this is the same read(2) call as pal_file_read.
+// EmitPipeRead defines @pal_pipe_read for POSIX. The packed i32 is a real fd,
+// so this is identical to EmitFileRead (libc read → -errno on failure, 0=EOF).
 func (p *PosixPAL) EmitPipeRead(module *ir.Module) *ir.Func {
 	readFn := getOrDeclareFunc(module, "read", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
@@ -533,8 +533,7 @@ func (p *PosixPAL) EmitPipeRead(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// EmitPipeWrite defines @pal_pipe_write. On POSIX a pipe fd is an ordinary fd, so
-// this is the same write(2) call as pal_file_write.
+// EmitPipeWrite defines @pal_pipe_write for POSIX (libc write → -errno on failure).
 func (p *PosixPAL) EmitPipeWrite(module *ir.Module) *ir.Func {
 	writeFn := getOrDeclareFunc(module, "write", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
@@ -559,8 +558,7 @@ func (p *PosixPAL) EmitPipeWrite(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// EmitPipeClose defines @pal_pipe_close. On POSIX a pipe fd is an ordinary fd, so
-// this is the same close(2) call as pal_file_close.
+// EmitPipeClose defines @pal_pipe_close for POSIX (libc close → -errno on failure).
 func (p *PosixPAL) EmitPipeClose(module *ir.Module) *ir.Func {
 	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32))

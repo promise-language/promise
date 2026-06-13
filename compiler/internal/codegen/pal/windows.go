@@ -1783,11 +1783,11 @@ func (p *WindowsPAL) EmitReadPipe(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// EmitPipeRead defines @pal_pipe_read on Windows using ReadFile.
-// Signature: @pal_pipe_read(i32 fd, i8* buf, i64 len) → i64
-// The fd is a raw pipe HANDLE packed as i32 (NOT a CRT fd), so this must use
-// ReadFile rather than the CRT _read. Returns bytes read, 0 at EOF (a broken pipe
-// once the write end is closed), or -1 on other errors.
+// EmitPipeRead defines @pal_pipe_read on Windows. The i32 "fd" is a packed Win32
+// pipe HANDLE (see the packing convention above), NOT a CRT fd — so this uses
+// ReadFile, not the UCRT _read used by pal_file_read (T0900). Returns bytes read
+// (0 = EOF), or -error on failure. A child closing its write end surfaces as
+// ReadFile==0 with GetLastError()==ERROR_BROKEN_PIPE (109), which maps to EOF (0).
 func (p *WindowsPAL) EmitPipeRead(module *ir.Module) *ir.Func {
 	readFile := getOrDeclareFunc(module, "ReadFile", irtypes.I32,
 		ir.NewParam("hFile", irtypes.I8Ptr),
@@ -1809,34 +1809,32 @@ func (p *WindowsPAL) EmitPipeRead(module *ir.Module) *ir.Func {
 	bytesReadPtr := entry.NewAlloca(irtypes.I32)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), bytesReadPtr)
 	ret := entry.NewCall(readFile, handle, fn.Params[1], len32, bytesReadPtr, constant.NewNull(irtypes.I8Ptr))
-
-	failed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	isFailed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
 	okBlk := fn.NewBlock(".ok")
-	failBlk := fn.NewBlock(".fail")
-	entry.NewCondBr(failed, failBlk, okBlk)
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isFailed, errBlk, okBlk)
 
-	// ReadFile success: return bytes read (may be 0 at EOF).
-	nRead := okBlk.NewLoad(irtypes.I32, bytesReadPtr)
-	nRead64 := okBlk.NewZExt(nRead, irtypes.I64)
-	okBlk.NewRet(nRead64)
+	// Success: return bytes read (0 = EOF naturally).
+	n := okBlk.NewLoad(irtypes.I32, bytesReadPtr)
+	okBlk.NewRet(okBlk.NewSExt(n, irtypes.I64))
 
-	// ReadFile failure: a closed write end yields ERROR_BROKEN_PIPE (109) — that is
-	// a normal EOF, so return 0. Any other error returns -1.
-	errCode := failBlk.NewCall(getLastError)
-	isBrokenPipe := failBlk.NewICmp(enum.IPredEQ, errCode, constant.NewInt(irtypes.I32, 109))
+	// Failure: ERROR_BROKEN_PIPE (109) means the child closed its write end → EOF.
+	errCode := errBlk.NewCall(getLastError)
+	isBrokenPipe := errBlk.NewICmp(enum.IPredEQ, errCode, constant.NewInt(irtypes.I32, 109))
 	eofBlk := fn.NewBlock(".eof")
 	realErrBlk := fn.NewBlock(".real_err")
-	failBlk.NewCondBr(isBrokenPipe, eofBlk, realErrBlk)
+	errBlk.NewCondBr(isBrokenPipe, eofBlk, realErrBlk)
+
 	eofBlk.NewRet(constant.NewInt(irtypes.I64, 0))
-	realErrBlk.NewRet(constant.NewInt(irtypes.I64, -1))
+
+	ext := realErrBlk.NewSExt(errCode, irtypes.I64)
+	realErrBlk.NewRet(realErrBlk.NewSub(constant.NewInt(irtypes.I64, 0), ext))
 
 	return fn
 }
 
-// EmitPipeWrite defines @pal_pipe_write on Windows using WriteFile.
-// Signature: @pal_pipe_write(i32 fd, i8* buf, i64 len) → i64
-// The fd is a raw pipe HANDLE packed as i32, so this uses WriteFile rather than
-// the CRT _write. Returns bytes written, or -1 on error.
+// EmitPipeWrite defines @pal_pipe_write on Windows using WriteFile (the packed i32
+// is a Win32 HANDLE, not a CRT fd — T0900). Returns bytes written, or -error.
 func (p *WindowsPAL) EmitPipeWrite(module *ir.Module) *ir.Func {
 	writeFile := getOrDeclareFunc(module, "WriteFile", irtypes.I32,
 		ir.NewParam("hFile", irtypes.I8Ptr),
@@ -1844,6 +1842,7 @@ func (p *WindowsPAL) EmitPipeWrite(module *ir.Module) *ir.Func {
 		ir.NewParam("nNumberOfBytesToWrite", irtypes.I32),
 		ir.NewParam("lpNumberOfBytesWritten", irtypes.NewPointer(irtypes.I32)),
 		ir.NewParam("lpOverlapped", irtypes.I8Ptr))
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
 
 	fn := module.NewFunc("pal_pipe_write", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
@@ -1857,26 +1856,26 @@ func (p *WindowsPAL) EmitPipeWrite(module *ir.Module) *ir.Func {
 	bytesWrittenPtr := entry.NewAlloca(irtypes.I32)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), bytesWrittenPtr)
 	ret := entry.NewCall(writeFile, handle, fn.Params[1], len32, bytesWrittenPtr, constant.NewNull(irtypes.I8Ptr))
-
-	failed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	isFailed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
 	okBlk := fn.NewBlock(".ok")
 	errBlk := fn.NewBlock(".err")
-	entry.NewCondBr(failed, errBlk, okBlk)
+	entry.NewCondBr(isFailed, errBlk, okBlk)
 
-	nWritten := okBlk.NewLoad(irtypes.I32, bytesWrittenPtr)
-	nWritten64 := okBlk.NewZExt(nWritten, irtypes.I64)
-	okBlk.NewRet(nWritten64)
+	n := okBlk.NewLoad(irtypes.I32, bytesWrittenPtr)
+	okBlk.NewRet(okBlk.NewSExt(n, irtypes.I64))
 
-	errBlk.NewRet(constant.NewInt(irtypes.I64, -1))
+	errCode := errBlk.NewCall(getLastError)
+	ext := errBlk.NewSExt(errCode, irtypes.I64)
+	errBlk.NewRet(errBlk.NewSub(constant.NewInt(irtypes.I64, 0), ext))
+
 	return fn
 }
 
-// EmitPipeClose defines @pal_pipe_close on Windows using CloseHandle.
-// Signature: @pal_pipe_close(i32 fd) → i32
-// The fd is a raw pipe HANDLE packed as i32. Passing it to the CRT _close aborts
-// the process (invalid CRT fd), so this must use CloseHandle. 0=ok, -1=error.
+// EmitPipeClose defines @pal_pipe_close on Windows using CloseHandle (the packed
+// i32 is a Win32 HANDLE, not a CRT fd — T0900). Returns 0 on success, -error.
 func (p *WindowsPAL) EmitPipeClose(module *ir.Module) *ir.Func {
 	closeHandle := winDeclareCloseHandle(module)
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
 
 	fn := module.NewFunc("pal_pipe_close", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32))
@@ -1885,14 +1884,17 @@ func (p *WindowsPAL) EmitPipeClose(module *ir.Module) *ir.Func {
 	entry := fn.NewBlock(".entry")
 	handle := winI32ToHandle(entry, fn.Params[0])
 	ret := entry.NewCall(closeHandle, handle)
-
 	// CloseHandle returns 0 on failure, nonzero on success.
-	failed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	isFailed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
 	okBlk := fn.NewBlock(".ok")
 	errBlk := fn.NewBlock(".err")
-	entry.NewCondBr(failed, errBlk, okBlk)
+	entry.NewCondBr(isFailed, errBlk, okBlk)
+
 	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
-	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	errCode := errBlk.NewCall(getLastError)
+	errBlk.NewRet(errBlk.NewSub(constant.NewInt(irtypes.I32, 0), errCode))
+
 	return fn
 }
 

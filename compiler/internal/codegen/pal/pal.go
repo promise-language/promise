@@ -103,18 +103,15 @@ type PAL interface {
 	// EmitReadPipe defines @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
 	// Reads fd to EOF into malloc'd buffer, then closes fd. Caller must free out_buf.
 	EmitReadPipe(module *ir.Module) *ir.Func
-	// EmitPipeRead defines @pal_pipe_read(i32 fd, i8* buf, i64 len) → i64
-	// Single read from a subprocess pipe fd (streaming Process path). On POSIX a
-	// pipe fd is an ordinary fd (same syscall as pal_file_read); on Windows it is a
-	// raw HANDLE, so this uses ReadFile. Returns bytes read (0 at EOF), negative on error.
+	// Streaming pipe I/O primitives (T0900) — the i32 "fd" carries a packed pipe
+	// handle (real fd on POSIX, a packed Win32 HANDLE on Windows). These MUST be
+	// used instead of pal_file_read/write/close for the streaming os.Process pipes,
+	// because on Windows the UCRT _read/_write/_close require a CRT fd, not a HANDLE.
+	// EmitPipeRead defines @pal_pipe_read(i32 fd, i8* buf, i64 len) → i64 (bytes, 0=EOF, -errno on error)
 	EmitPipeRead(module *ir.Module) *ir.Func
-	// EmitPipeWrite defines @pal_pipe_write(i32 fd, i8* buf, i64 len) → i64
-	// Single write to a subprocess pipe fd (Windows: WriteFile on the HANDLE).
-	// Returns bytes written, negative on error.
+	// EmitPipeWrite defines @pal_pipe_write(i32 fd, i8* buf, i64 len) → i64 (bytes or -errno)
 	EmitPipeWrite(module *ir.Module) *ir.Func
-	// EmitPipeClose defines @pal_pipe_close(i32 fd) → i32
-	// Closes a subprocess pipe fd. On Windows the fd is a raw HANDLE, so this uses
-	// CloseHandle (NOT the CRT _close, which aborts on a non-CRT fd). 0=ok, -1=error.
+	// EmitPipeClose defines @pal_pipe_close(i32 fd) → i32 (0=ok, -errno on error)
 	EmitPipeClose(module *ir.Module) *ir.Func
 	// EmitWaitPid defines @pal_wait_pid(i32 pid) → i32
 	// Waits for child process. Returns exit code (0-255) on success, -1 on error.

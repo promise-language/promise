@@ -882,6 +882,9 @@ func (c *Compiler) defineSpawnStdinFdBody(fn *ir.Func) {
 // definePipeReadBytesBody: void @promise_os_pipe_read_bytes(i8* sret, i8* fd, i8* ~buf)
 // Reads up to buf.len bytes from fd into the provided u8[] buffer.
 // Returns bytes read as Promise int (negative = -errno on error, 0 = EOF).
+// Routes through the HANDLE-aware pal_pipe_read (NOT pal_file_read): the streaming
+// spawn packs a raw Win32 pipe HANDLE into the i32 fd, which the UCRT _read used
+// by pal_file_read would reject as an invalid CRT fd (T0900).
 func (c *Compiler) definePipeReadBytesBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	sret := fn.Params[0]
@@ -893,7 +896,7 @@ func (c *Compiler) definePipeReadBytesBody(fn *ir.Func) {
 	dataPtr, dataLen := extractVectorDataLen(entry, vecPtr)
 
 	c.emitEnterSyscall(entry)
-	// T0904: pipe fds are raw HANDLEs on Windows, so use the pipe (ReadFile) op,
+	// T0900: pipe fds are raw HANDLEs on Windows, so use the pipe (ReadFile) op,
 	// not the CRT _read of pal_file_read which aborts on a non-CRT fd.
 	n := entry.NewCall(c.palPipeRead, fdI32, dataPtr, dataLen)
 	c.emitExitSyscall(entry)
@@ -905,6 +908,8 @@ func (c *Compiler) definePipeReadBytesBody(fn *ir.Func) {
 // definePipeWriteBytesBody: void @promise_os_pipe_write_bytes(i8* sret, i8* fd, i8* buf)
 // Writes buf.len bytes from the u8[] buffer to fd.
 // Returns bytes written as Promise int (negative = -errno).
+// Routes through the HANDLE-aware pal_pipe_write (NOT pal_file_write) — see
+// definePipeReadBytesBody for why (T0900).
 func (c *Compiler) definePipeWriteBytesBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	sret := fn.Params[0]
@@ -916,7 +921,7 @@ func (c *Compiler) definePipeWriteBytesBody(fn *ir.Func) {
 	dataPtr, dataLen := extractVectorDataLen(entry, vecPtr)
 
 	c.emitEnterSyscall(entry)
-	// T0904: pipe fds are raw HANDLEs on Windows — use the pipe (WriteFile) op.
+	// T0900: pipe fds are raw HANDLEs on Windows — use the pipe (WriteFile) op.
 	written := entry.NewCall(c.palPipeWrite, fdI32, dataPtr, dataLen)
 	c.emitExitSyscall(entry)
 
@@ -926,6 +931,8 @@ func (c *Compiler) definePipeWriteBytesBody(fn *ir.Func) {
 
 // definePipeCloseBody: void @promise_os_pipe_close(i8* sret, i8* fd)
 // Closes a pipe fd. Returns 0 on success, negative on error.
+// Routes through the HANDLE-aware pal_pipe_close (NOT pal_file_close) — see
+// definePipeReadBytesBody for why (T0900).
 func (c *Compiler) definePipeCloseBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	sret := fn.Params[0]
@@ -935,7 +942,7 @@ func (c *Compiler) definePipeCloseBody(fn *ir.Func) {
 	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
 
 	c.emitEnterSyscall(entry)
-	// T0904: pipe fds are raw HANDLEs on Windows — use CloseHandle (pal_pipe_close),
+	// T0900: pipe fds are raw HANDLEs on Windows — use CloseHandle (pal_pipe_close),
 	// not the CRT _close of pal_file_close which aborts the process on a non-CRT fd.
 	rc := entry.NewCall(c.palPipeClose, fdI32)
 	c.emitExitSyscall(entry)

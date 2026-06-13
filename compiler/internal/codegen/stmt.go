@@ -1211,14 +1211,21 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// T0347: walk through chained method calls so `r := c.iter().iter()` also clears
 	// `c`'s drop flag; for `r := this.method()` (chain rooted at `this`), defer until
 	// after maybeRegisterDrop so we can clear the new binding's drop flag instead.
+	// T0882: operator dispatch (m := a + b, m := -d) has RHS BinaryExpr/UnaryExpr,
+	// not CallExpr, so use operatorReceiverOrigin to reach the same alias-clear when
+	// a user-defined operator body is `return this`.
 	if !isStructuralTarget {
+		var aliasOrigin ast.Expr
 		if call, ok := s.Value.(*ast.CallExpr); ok {
-			switch origin := chainOriginExpr(call).(type) {
-			case *ast.IdentExpr:
-				c.maybeClearReceiverDropFlag(val, origin.Name, resolvedExprType)
-			case *ast.ThisExpr:
-				c.pendingThisAliasClear = &thisAliasClearReq{val: val, retType: resolvedExprType}
-			}
+			aliasOrigin = chainOriginExpr(call)
+		} else {
+			aliasOrigin = operatorReceiverOrigin(s.Value)
+		}
+		switch origin := aliasOrigin.(type) {
+		case *ast.IdentExpr:
+			c.maybeClearReceiverDropFlag(val, origin.Name, resolvedExprType)
+		case *ast.ThisExpr:
+			c.pendingThisAliasClear = &thisAliasClearReq{val: val, retType: resolvedExprType}
 		}
 	}
 
@@ -1474,8 +1481,28 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// clear the receiver's drop flag to prevent double-free.
 	// T0347: walk through chained method calls; for chains rooted at `this`, defer
 	// the alias-clear so it targets the new binding's drop flag (set by maybeRegisterDrop).
-	if call, ok := s.Value.(*ast.CallExpr); ok {
-		switch origin := chainOriginExpr(call).(type) {
+	// T0882: operator dispatch (m := a + b, m := -d) has RHS BinaryExpr/UnaryExpr,
+	// not CallExpr, so use operatorReceiverOrigin to reach the same alias-clear when
+	// a user-defined operator body is `return this`.
+	//
+	// Skip when the inferred type is a structural interface (e.g., a structural
+	// default operator `-() Negatable { return this; }` resolving to `Negatable`):
+	// the result binding never takes an owning drop (maybeRegisterDrop skips
+	// structural types; maybeRegisterStructuralFree is itself alias-aware), so
+	// clearing the operand's drop flag would leave the shared instance unfreed.
+	// This mirrors the typed path's isStructuralTarget guard. T0882.
+	isStructuralTarget := false
+	if n := extractNamed(typ); n != nil && n.IsStructural() {
+		isStructuralTarget = true
+	}
+	if !isStructuralTarget {
+		var aliasOrigin ast.Expr
+		if call, ok := s.Value.(*ast.CallExpr); ok {
+			aliasOrigin = chainOriginExpr(call)
+		} else {
+			aliasOrigin = operatorReceiverOrigin(s.Value)
+		}
+		switch origin := aliasOrigin.(type) {
 		case *ast.IdentExpr:
 			c.maybeClearReceiverDropFlag(val, origin.Name, typ)
 		case *ast.ThisExpr:
@@ -7505,6 +7532,35 @@ func chainOriginExpr(call *ast.CallExpr) ast.Expr {
 		}
 		expr = m.Target
 	}
+}
+
+// operatorReceiverOrigin returns the receiver-origin expression of a binary or
+// prefix-unary operator that dispatches to a user-defined operator method — the
+// LEFT operand of a binary operator (it becomes `this`), or the operand of a
+// prefix unary operator. Used to extend the B0250/T0341 receiver-alias-clear to
+// operator dispatch: a user operator whose body is `return this` yields a result
+// that aliases this operand, and without the clear both would free the same
+// instance (T0882). Returns nil for non-operators, the AST-level special binary
+// forms (&&, ||, ?:, .., ..= — never alias a heap receiver) and <- receive.
+// The downstream maybeClearReceiverDropFlag / pendingThisAliasClear guards
+// (heap-user retType, exact {i8*,i8*} val shape) make a nil-safe over-call cheap
+// and correct, so no native/value-type pre-filtering is needed here.
+func operatorReceiverOrigin(e ast.Expr) ast.Expr {
+	switch ex := e.(type) {
+	case *ast.BinaryExpr:
+		switch ex.Op {
+		case ast.BinAnd, ast.BinOr, ast.BinElvis,
+			ast.BinExclusiveRange, ast.BinInclusiveRange:
+			return nil
+		}
+		return unwrapDestructureParens(ex.Left)
+	case *ast.UnaryExpr:
+		if ex.Op == ast.UnaryReceive {
+			return nil
+		}
+		return unwrapDestructureParens(ex.Operand)
+	}
+	return nil
 }
 
 // maybeClearReceiverDropFlag emits a runtime check: if the method call result's

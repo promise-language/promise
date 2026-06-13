@@ -1,0 +1,126 @@
+// T0882: A user-defined operator method whose body is `return this` returns the
+// borrowed receiver as an owned result. Operator dispatch (`a + b`, `-d`) bypassed
+// the receiver-alias-clear that method calls use, so the operand and the result
+// both freed the same instance → `fatal: double free`. These tests confirm the
+// result is correct and the program no longer double-frees (zero-leak gate enforced).
+type BinBox {
+  int v;
+  +(BinBox o) BinBox {
+    return this;
+  }
+}
+
+binary_return_this_inferred() `test {
+  a := BinBox(v: 11);
+  b := BinBox(v: 3);
+  m := a + b;
+  assert(m.v == 11, "binary inferred");
+}
+
+binary_return_this_typed() `test {
+  a := BinBox(v: 11);
+  b := BinBox(v: 3);
+  BinBox m = a + b;
+  assert(m.v == 11, "binary typed");
+}
+
+type NegBox {
+  int v;
+  -() NegBox {
+    return this;
+  }
+}
+
+unary_return_this() `test {
+  d := NegBox(v: 11);
+  m := -d;
+  assert(m.v == 11, "unary");
+}
+
+type GenBox[T] {
+  T v;
+  -() GenBox[T] {
+    return this;
+  }
+}
+
+generic_unary_return_this() `test {
+  d := GenBox[int](v: 7);
+  m := -d;
+  assert(m.v == 7, "generic unary");
+}
+
+type NegBoxTyped {
+  int v;
+  -() NegBoxTyped {
+    return this;
+  }
+}
+
+unary_typed_return_this() `test {
+  d := NegBoxTyped(v: 9);
+  NegBoxTyped m = -d;
+  assert(m.v == 9, "unary typed");
+}
+
+// Operator invoked with `this` as the left operand inside a method body, whose
+// result is bound to a local and returned: the alias-clear must defer to the new
+// binding's drop flag (ThisExpr origin → pendingThisAliasClear). Confirms the
+// in-method operator path also avoids the double-free at runtime.
+type CombBox {
+  int v;
+  +(CombBox o) CombBox {
+    return this;
+  }
+  combine(CombBox o) CombBox {
+    m := this + o;
+    return m;
+  }
+}
+
+method_body_operator_return_this() `test {
+  a := CombBox(v: 11);
+  b := CombBox(v: 3);
+  r := a.combine(b);
+  assert(r.v == 11, "method-body operator return this");
+}
+
+// Structural-interface default operator returning `this`, synthesized onto a
+// concrete type. The result binding is inferred to the structural interface type,
+// so it never takes an owning drop — the alias-clear MUST be skipped (the
+// isStructuralTarget guard), otherwise the operand's drop flag would be cleared
+// and the shared instance would leak. Confirms no double-free AND no leak.
+type NegatableIface `structural {
+  int v;
+  -() NegatableIface {
+    return this;
+  }
+}
+
+type NegItem is NegatableIface {
+  int v;
+}
+
+structural_unary_return_this() `test {
+  it := NegItem(v: 5);
+  m := -it;
+  assert(m.v == 5, "structural unary return this");
+}
+
+type AddableIface `structural {
+  int v;
+  +(AddableIface o) AddableIface {
+    return this;
+  }
+}
+
+type AddCell is AddableIface {
+  int v;
+}
+
+structural_binary_return_this() `test {
+  a := AddCell(v: 11);
+  b := AddCell(v: 3);
+  m := a + b;
+  assert(m.v == 11, "structural binary return this");
+}

@@ -2525,12 +2525,14 @@ func TestBuildInvalidInterpolation(t *testing.T) {
 		{
 			name: "escaped_quotes_in_interpolation",
 			src:  `main() { string s = "{\"a\":\"b\"}"; }`,
-			msg:  "invalid expression in string interpolation",
+			msg:  "string interpolation:",
 		},
 		{
+			// The parser's own diagnostic is surfaced verbatim (T0865) instead of
+			// the old generic "invalid expression in string interpolation".
 			name: "unconsumed_tokens",
 			src:  `main() { string s = "{1 2}"; }`,
-			msg:  "invalid expression in string interpolation",
+			msg:  "string interpolation: no viable alternative at input '2'",
 		},
 	}
 	for _, tt := range tests {
@@ -2557,6 +2559,112 @@ func TestBuildInvalidInterpolation(t *testing.T) {
 				t.Errorf("expected error containing %q, got: %v", tt.msg, errs)
 			}
 		})
+	}
+}
+
+// TestStringInterpBracesParse verifies that interpolated expressions containing
+// string literals with braces — and more than one level of real brace nesting —
+// parse without error (T0865). Before the string-aware lexer mode, a `{`/`}`
+// inside a nested string argument prematurely terminated the STRING_INTERP token.
+func TestStringInterpBracesParse(t *testing.T) {
+	srcs := []string{
+		// close-brace literal inside a nested string argument
+		`f() string { return "v={cat("a}b", "c")}"; }`,
+		// nested interpolation: the inner string carries its own {expr}
+		`f() string { return "v={cat("x{1+1}y", "z")}"; }`,
+		// two levels of real brace nesting (map literal inside the expression)
+		`f() string { return "n={sum({"a": 1, "b": 2})}"; }`,
+		// two-level nested interpolation
+		`f() string { return "{cat("{cat("a", "b")}", "c")}"; }`,
+		// a brace inside the innermost string, two interpolation levels deep
+		`f() string { return "{cat("{cat("}", "b")}", "c")}"; }`,
+		// escaped quote inside the nested string argument
+		`f() string { return "v={cat("a\"b", "c")}"; }`,
+	}
+	for _, src := range srcs {
+		t.Run(src, func(t *testing.T) {
+			if errs := buildErrs(t, src); len(errs) > 0 {
+				t.Fatalf("expected no build errors for %q, got: %v", src, errs)
+			}
+		})
+	}
+}
+
+// TestStringInterpSurfacedError verifies that a genuinely malformed interpolation
+// surfaces the real parser diagnostic (prefixed "string interpolation:") mapped to
+// the correct source line/column — not the old generic, misleading message (T0865).
+func TestStringInterpSurfacedError(t *testing.T) {
+	src := "f() {\n  s := \"x={1 +}\";\n}"
+	errs := buildErrs(t, src)
+	if len(errs) == 0 {
+		t.Fatal("expected an error for malformed interpolation, got none")
+	}
+	joined := ""
+	for _, e := range errs {
+		joined += e.Error() + "\n"
+	}
+	if !strings.Contains(joined, "string interpolation:") {
+		t.Errorf("expected surfaced interpolation error, got: %v", errs)
+	}
+	if strings.Contains(joined, "invalid expression in string interpolation") {
+		t.Errorf("the generic interpolation message must no longer be emitted, got: %v", errs)
+	}
+	// The `+` operand is on line 2; the error must map back there, not to the
+	// interpolation-text-relative line 1.
+	if !strings.Contains(joined, "test.pr:2:") {
+		t.Errorf("expected error mapped to source line 2, got: %v", errs)
+	}
+}
+
+// TestStringInterpSurfacedErrorMultiLine pins the multi-line position-mapping
+// branch of parseInterpolationExpr (T0865): when the interpolated expression spans
+// several source lines (a newline is legal between the braces) and the error lands
+// on interp-relative line >1, the diagnostic must be mapped to the corresponding
+// source line via the line offset — not collapsed onto the string's start line.
+func TestStringInterpSurfacedErrorMultiLine(t *testing.T) {
+	// The string starts on source line 2; the interpolation text is "1 +\n2 +",
+	// so the trailing, operand-less `+` sits on interp-line 2 → source line 3.
+	src := "f() {\n  s := \"x={1 +\n2 +}\";\n}"
+	errs := buildErrs(t, src)
+	if len(errs) == 0 {
+		t.Fatal("expected an error for malformed multi-line interpolation, got none")
+	}
+	joined := ""
+	for _, e := range errs {
+		joined += e.Error() + "\n"
+	}
+	if !strings.Contains(joined, "string interpolation:") {
+		t.Errorf("expected surfaced interpolation error, got: %v", errs)
+	}
+	if !strings.Contains(joined, "test.pr:3:") {
+		t.Errorf("expected error mapped to source line 3 (interp-line 2), got: %v", errs)
+	}
+}
+
+// TestStringInterpSingleToken pins the string-aware lexer mode (T0865): an
+// interpolation whose nested string argument contains a `}` must still lex to a
+// single STRING_INTERP token spanning the whole `{ … }`, not be cut short at the
+// inner brace.
+func TestStringInterpSingleToken(t *testing.T) {
+	const src = `"v={cat("a}b", "c")}"`
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	var interpTokens []antlr.Token
+	for {
+		tok := lexer.NextToken()
+		if tok.GetTokenType() == antlr.TokenEOF {
+			break
+		}
+		if tok.GetTokenType() == parser.PromiseLexerSTRING_INTERP {
+			interpTokens = append(interpTokens, tok)
+		}
+	}
+	if len(interpTokens) != 1 {
+		t.Fatalf("expected exactly 1 STRING_INTERP token, got %d", len(interpTokens))
+	}
+	if got, want := interpTokens[0].GetText(), `{cat("a}b", "c")}`; got != want {
+		t.Errorf("STRING_INTERP text = %q, want %q", got, want)
 	}
 }
 

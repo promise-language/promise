@@ -735,15 +735,22 @@ func (b *Builder) VisitArg(ctx *parser.ArgContext) interface{} {
 }
 
 // interpErrorListener detects syntax errors during interpolation expression re-parsing.
+// It captures the first syntax error's message and (interpolation-text-relative)
+// position so parseInterpolationExpr can surface the real diagnostic instead of a
+// generic one.
 type interpErrorListener struct {
 	antlr.DefaultErrorListener
 	hasErrors bool
+	msg       string
+	line, col int // interpolation-text-relative (ANTLR: 1-based line, 0-based col)
 }
 
 func (l *interpErrorListener) SyntaxError(
-	_ antlr.Recognizer, _ interface{}, _, _ int, _ string, _ antlr.RecognitionException,
+	_ antlr.Recognizer, _ interface{}, line, col int, msg string, _ antlr.RecognitionException,
 ) {
-	l.hasErrors = true
+	if !l.hasErrors {
+		l.hasErrors, l.msg, l.line, l.col = true, msg, line, col
+	}
 }
 
 // parseInterpolationExpr re-lexes/re-parses the text between {} in a string interpolation.
@@ -763,9 +770,31 @@ func (b *Builder) parseInterpolationExpr(text string, outerLine, outerCol int) E
 	p.RemoveErrorListeners()
 	p.AddErrorListener(el)
 	tree := p.Expression()
-	if el.hasErrors || stream.LT(1).GetTokenType() != antlr.TokenEOF {
-		pos := Pos{File: b.filename, Line: outerLine, Column: outerCol}
-		b.errorf(pos, "invalid expression in string interpolation")
+	if trailing := stream.LT(1); !el.hasErrors && trailing.GetTokenType() != antlr.TokenEOF {
+		// Parser stopped before consuming all of the interpolation text but never
+		// reported a syntax error (e.g. a stray operator). Surface the leftover
+		// token's position so the diagnostic points at it, not the string start.
+		el.hasErrors = true
+		el.line, el.col = trailing.GetLine(), trailing.GetColumn()
+		el.msg = "unexpected '" + trailing.GetText() + "'"
+	}
+	if el.hasErrors {
+		// Surface the real parser diagnostic, mapped back to the source position.
+		// interpActive is not yet set here, so map the position manually (mirrors
+		// offsetExprPositions): first-line errors offset the column, later lines
+		// offset the line.
+		line, column := outerLine, el.col
+		if el.line == 1 {
+			column = outerCol + el.col
+		} else {
+			line = outerLine + el.line - 1
+		}
+		msg := el.msg
+		if msg == "" {
+			msg = "syntax error"
+		}
+		b.errorf(Pos{File: b.filename, Line: line, Column: column},
+			"string interpolation: %s", msg)
 		return nil
 	}
 	// Errors emitted during Accept (e.g. the bare-`?` diagnostic, T0867) carry

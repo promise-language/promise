@@ -42,6 +42,14 @@ Bare numeric literals infer as `int` or `f64`. Use suffixes for specific types.
 
 **String escapes:** `\n` `\t` `\r` `\b` `\\` `\"` `\0` `\{` (literal `{`, suppresses interpolation). Raw strings (`r"..."`) skip all escapes.
 
+**String interpolation:** `{expr}` embeds any expression's value (its `to_string`). The interpolated expression is full-featured: it may contain string literals — including ones that hold `{`, `}`, or escaped quotes (`\"`) — call functions with multiple arguments, nest further interpolations to any depth, and use the explicit error-handling forms `?^` (propagate), `?!` (panic), and `? handler { … }` (handle). A literal `{` outside interpolation must be escaped as `\{`; a literal `}` needs no escape.
+
+```promise
+// nested string literals with braces, and a nested interpolation, all valid:
+print_line("payload={encode("\{\"id\": {id}\}")}");
+print_line("doubled={twice(n)?^}");   // ?^ propagates in a failable function
+```
+
 ## Type Declarations
 
 ```promise

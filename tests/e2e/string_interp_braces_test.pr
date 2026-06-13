@@ -1,0 +1,72 @@
+// T0865: string interpolation must not break on `{`/`}` inside nested string
+// literals or on more than one level of real brace nesting in the expression.
+cat(string a, string b) string `doc("Concatenates two strings — helper for interpolation tests.") {
+  return a + b;
+}
+
+sum(map[string, int] m) int `doc("Sums the values of a string-keyed int map.") {
+  total := 0;
+  for k, v in m {
+    total = total + v;
+  }
+  return total;
+}
+
+twice!(int x) int `doc("Doubles a value, failably.") {
+  return x * 2;
+}
+
+propagate_string!() string `doc("Builds a propagating-interpolation string.") {
+  return "a={twice(3)?^}";
+}
+
+// A literal `}` inside a nested string argument is an ordinary character and must
+// not terminate the interpolation token.
+close_brace_in_string_arg() `test {
+  assert("v={cat("a}b", "c")}" == "v=a}bc", "close brace in nested string arg");
+}
+
+// A literal `{` must be escaped (`\{`); the escaped form round-trips correctly.
+escaped_open_brace() `test {
+  assert("v={cat("a\{b", "c")}" == "v=a\{bc", "escaped open brace in nested string arg");
+}
+
+// A nested string argument may itself contain a balanced interpolation.
+nested_interpolation_in_arg() `test {
+  assert("v={cat("x{1+1}y", "z")}" == "v=x2yz", "nested interpolation inside string arg");
+}
+
+// Two levels of real brace nesting in the interpolated expression (map literal).
+two_level_brace_nesting() `test {
+  assert("n={sum({"a": 1, "b": 2})}" == "n=3", "map literal nested in interpolation");
+}
+
+// Two-level nested interpolation: an interpolation whose argument is an
+// interpolated string.
+two_level_nested_interpolation() `test {
+  assert("{cat("{cat("a", "b")}", "c")}" == "abc", "two-level nested interpolation");
+}
+
+// A `}` inside the innermost string of a nested interpolation must stay opaque
+// even two interpolation levels deep — the modes are mutually recursive.
+brace_in_deeply_nested_string() `test {
+  assert("{cat("{cat("}", "b")}", "c")}" == "}bc", "close brace in deeply nested string");
+}
+
+// JSON-shaped string: literal braces (escaped) wrapping an interpolated value.
+json_shaped_interpolation() `test {
+  value := 42;
+  assert("\{\"k\": {value}\}" == "\{\"k\": 42}", "json-shaped interpolation with literal braces");
+}
+
+// Regression: escaped quotes inside a nested string argument still parse.
+escaped_quote_in_arg() `test {
+  assert("v={cat("a\"b", "c")}" == "v=a\"bc", "escaped quote in nested string arg");
+}
+
+// Regression: the explicit error-handling forms still work inside interpolation.
+failable_forms_in_interpolation() `test {
+  assert(propagate_string()?! == "a=6", "propagate ?^ inside interpolation");
+  assert("b={twice(3)?!}" == "b=6", "panic ?! inside interpolation");
+  assert("c={twice(3)? e { 0 }}" == "c=6", "handler form inside interpolation");
+}

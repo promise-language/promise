@@ -172,8 +172,32 @@ mode STRING_MODE;
 
 STRING_TEXT        : ~["\\\r\n{]+;
 STRING_ESCAPE      : '\\' [nrtb\\"0{}];
-// Interpolation: captures {expr} as a single token including braces.
-// Handles one level of nested braces for expressions like {map[key]}.
-// Full nested-brace interpolation deferred to a later stage.
-STRING_INTERP      : '{' ( ~[{}]+ | '{' ~[}]* '}' )* '}';
+// Interpolation: accumulate the whole `{ ... }` (string- and nesting-aware) into
+// one STRING_INTERP token. The mode stack tracks brace depth; nested string
+// literals are skipped in INTERP_STR so their braces never end the token.
+INTERP_OPEN        : '{' -> more, pushMode(INTERP0);
 STRING_CLOSE       : '"' -> popMode;
+
+// Outermost interpolation level: a '}' here closes the token.
+mode INTERP0;
+STRING_INTERP   : '}' -> popMode;                 // emits {…}, returns to STRING_MODE
+INTERP0_LBRACE  : '{'      -> more, pushMode(INTERPN);
+INTERP0_STR     : '"'      -> more, pushMode(INTERP_STR);
+INTERP0_TEXT    : ~["{}]+  -> more;
+
+// Deeper brace levels: every '}' just pops back one level.
+mode INTERPN;
+INTERPN_RBRACE  : '}'      -> more, popMode;
+INTERPN_LBRACE  : '{'      -> more, pushMode(INTERPN);
+INTERPN_STR     : '"'      -> more, pushMode(INTERP_STR);
+INTERPN_TEXT    : ~["{}]+  -> more;
+
+// String literal inside an interpolation. `\"`/`\{` stay in-string; an unescaped
+// `{` opens a nested interpolation (tracked via INTERPN) so its own braces and
+// string literals are handled — making the modes mutually recursive and removing
+// any nesting-depth limit. A bare `}` (no matching `{`) is ordinary text.
+mode INTERP_STR;
+INTERP_STR_ESC    : '\\' .    -> more;
+INTERP_STR_CLOSE  : '"'       -> more, popMode;
+INTERP_STR_LBRACE : '{'       -> more, pushMode(INTERPN);
+INTERP_STR_TEXT   : ~["\\{]+  -> more;

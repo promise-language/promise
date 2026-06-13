@@ -121,3 +121,204 @@ enum_operator_returns_instance() `test {
   r := a + b;
   assert(r.v == 10, "4 + 6 should be 10");
 }
+
+// ===== T0878: user-defined prefix unary operators on enums =====
+// genUnaryExpr previously panicked "non-native unary <Type>.<op> not yet
+// implemented" for enum operands. The fix routes enums to genEnumUnaryOp (i8*
+// receiver). Covers fieldless and data-bearing variants, all three prefix ops,
+// `this` operands, and a generic enum (mono-mangled).
+
+enum USign {
+  Positive,
+  Negative,
+
+  -() USign {
+    match this {
+      Positive => {
+        return USign.Negative;
+      },
+      Negative => {
+        return USign.Positive;
+      },
+    }
+  }!() bool {
+    match this {
+      Positive => {
+        return false;
+      },
+      Negative => {
+        return true;
+      },
+    }
+  }
+
+  ~ () USign {
+    match this {
+      Positive => {
+        return USign.Negative;
+      },
+      Negative => {
+        return USign.Positive;
+      },
+    }
+  }
+
+  get is_positive bool {
+    match this {
+      Positive => {
+        return true;
+      },
+      Negative => {
+        return false;
+      },
+    }
+  }
+}
+
+enum_unary_neg_fieldless() `test {
+  s := USign.Negative;
+  f := -s;
+  assert(f.is_positive, "neg(Negative) should be Positive");
+}
+
+enum_unary_not() `test {
+  s := USign.Negative;
+  assert(!s, "!Negative should be true");
+  p := USign.Positive;
+  assert(!(!p), "!Positive should be false");
+}
+
+enum_unary_bitnot() `test {
+  s := USign.Positive;
+  f := ~s;
+  assert(!f.is_positive, "~Positive should be Negative");
+}
+
+// Data-bearing enum: exercises the i8* receiver path with a non-trivial payload
+// (a heap string). Binding the result to a local ensures the returned enum is
+// dropped — the zero-leak gate guards the receiver-temp path.
+enum Tagged {
+  named(string s),
+  blank,
+
+  -() Tagged {
+    match this {
+      named(s) => {
+        return Tagged.blank;
+      },
+      blank => {
+        return Tagged.named("restored");
+      },
+    }
+  }
+
+  get text string {
+    match this {
+      named(s) => {
+        return s;
+      },
+      blank => {
+        return "(blank)";
+      },
+    }
+  }
+}
+
+enum_unary_data_variant() `test {
+  t := Tagged.named("hello");
+  flipped := -t;
+  // Bind the getter result to a local before comparing: an inline getter
+  // temporary in `==` trips an unrelated pre-existing leak (T0879).
+  ft := flipped.text;
+  assert(ft == "(blank)", "neg(named) should be blank");
+  b := Tagged.blank;
+  restored := -b;
+  rt := restored.text;
+  assert(rt == "restored", "neg(blank) should be named restored");
+}
+
+// Generic enum: the operator method is monomorphized (Opt[int].- / Opt[string].-).
+enum Opt[T] {
+  nothing,
+  some(T v),
+
+  -() Opt[T] {
+    return Opt[T].nothing;
+  }
+
+  // Applies the unary operator to `this` inside a *generic* enum method: the
+  // operator is monomorphized and `this` (an i8*) is passed directly
+  // (genEnumUnaryOp's monoCtx + isThisReceiver branches).
+  double_neg(this) Opt[T] {
+    return -this;
+  }
+
+  get is_nothing bool {
+    match this {
+      nothing => {
+        return true;
+      },
+      some(v) => {
+        return false;
+      },
+    }
+  }
+}
+
+enum_unary_generic_int() `test {
+  o := Opt[int].some(3);
+  n := -o;
+  assert(n.is_nothing, "neg(some int) should be nothing");
+}
+
+enum_unary_generic_string() `test {
+  o := Opt[string].some("x");
+  n := -o;
+  assert(n.is_nothing, "neg(some string) should be nothing");
+}
+
+enum_unary_this_in_generic_method() `test {
+  o := Opt[int].some(3);
+  p := o.double_neg();
+  assert(p.is_nothing, "-this inside generic enum method should be nothing");
+}
+
+// `this` as the unary operand inside a method body: the receiver i8* is passed
+// directly (no synthesized temp).
+enum Toggle {
+  on,
+  off,
+
+  -() Toggle {
+    match this {
+      on => {
+        return Toggle.off;
+      },
+      off => {
+        return Toggle.on;
+      },
+    }
+  }
+
+  // Applies the unary operator to `this` inside a method.
+  flipped(this) Toggle {
+    return -this;
+  }
+
+  get is_on bool {
+    match this {
+      on => {
+        return true;
+      },
+      off => {
+        return false;
+      },
+    }
+  }
+}
+
+enum_unary_on_this_receiver() `test {
+  t := Toggle.on;
+  f := t.flipped();
+  assert(!f.is_on, "flipped(on) should be off");
+}

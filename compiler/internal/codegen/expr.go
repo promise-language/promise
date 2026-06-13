@@ -1356,12 +1356,24 @@ func (c *Compiler) genUnaryExpr(e *ast.UnaryExpr) value.Value {
 
 	operand := c.genExprAutoPropagate(e.Operand)
 	operandType := c.info.Types[e.Operand]
-	named := extractNamed(operandType)
-	if named == nil {
-		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for unary %s", operandType, e.Op))
+	if c.typeSubst != nil {
+		operandType = types.Substitute(operandType, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		operandType = types.SubstituteSelf(operandType, c.selfSubst.iface, c.selfSubst.concrete)
 	}
 
 	op := e.Op.String()
+
+	named := extractNamed(operandType)
+	if named == nil {
+		// Enum operands dispatch via the i8*-receiver convention (T0878),
+		// mirroring genEnumBinaryOp.
+		if en := extractEnum(operandType); en != nil {
+			return c.genEnumUnaryOp(e, en, operandType, operand)
+		}
+		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for unary %s", operandType, e.Op))
+	}
 
 	// For unary ops, look up the 0-param method variant
 	method := c.lookupUnaryMethod(named, op)
@@ -1373,7 +1385,144 @@ func (c *Compiler) genUnaryExpr(e *ast.UnaryExpr) value.Value {
 		return c.emitNativeOp(named, op, operand, nil)
 	}
 
-	panic(fmt.Sprintf("codegen: non-native unary %s.%s not yet implemented", named, op))
+	// Non-native unary operator: dispatch as a method call (T0878), mirroring
+	// genBinaryExpr's receiver handling but with no second operand.
+	if c.needsVtable(named) {
+		return c.genVirtualUnaryOp(e, named, method, operand)
+	}
+
+	// Direct dispatch: call the concrete type's operator method. Resolve the
+	// mangled name exactly as genBinaryExpr does (mono name for generic
+	// instances, structural-default synthesis under the concrete name).
+	ownerName := c.resolveMethodOwner(named, op)
+	var mangledName string
+	if ownerName != named.Obj().Name() {
+		if structParent := c.findStructuralOwner(named, op); structParent != nil {
+			concreteName := c.resolveTypeName(operandType)
+			c.ensureDefaultMethodsSynthesized(named, structParent)
+			mangledName = mangleMethodName(concreteName, op, false)
+		} else {
+			monoOwner := c.resolveMonoParentName(named, operandType, ownerName)
+			mangledName = mangleMethodName(monoOwner, op, false)
+		}
+	} else {
+		mangledName = mangleMethodName(c.resolveTypeName(operandType), op, false)
+	}
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared operator method %s", mangledName))
+	}
+
+	var args []value.Value
+	if method.Sig().Recv() != nil {
+		if isThisReceiver(e.Operand) {
+			args = append(args, operand)
+		} else if named.IsValueType() {
+			args = append(args, c.valueTypeReceiverPtr(operand, operandType))
+		} else {
+			args = append(args, c.extractInstancePtr(operand))
+		}
+	}
+	return c.block.NewCall(fn, args...)
+}
+
+// genEnumUnaryOp dispatches a user-defined prefix unary operator declared on an
+// enum (T0878). Enum operator methods receive the enum value via an i8* pointer
+// (mirroring genEnumBinaryOp), so the Named-type receiver convention in
+// genUnaryExpr does not apply.
+func (c *Compiler) genEnumUnaryOp(e *ast.UnaryExpr, en *types.Enum, operandType types.Type, operand value.Value) value.Value {
+	op := e.Op.String()
+
+	// Resolve the enum's mangled name (mono name for instances, monoCtx for the
+	// origin enum inside a generic method body).
+	enumName := en.Obj().Name()
+	if inst, ok := operandType.(*types.Instance); ok {
+		if _, ok := inst.Origin().(*types.Enum); ok {
+			enumName = monoName(inst)
+		}
+	} else if c.monoCtx != nil {
+		if origin, ok := c.monoCtx.origin.(*types.Enum); ok && en == origin {
+			enumName = c.monoCtx.name
+		}
+	}
+
+	method := en.LookupMethod(op)
+	if method == nil {
+		panic(fmt.Sprintf("codegen: no operator %q on enum %s", op, enumName))
+	}
+	mangledName := mangleMethodName(enumName, op, false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared enum operator method %s", mangledName))
+	}
+
+	// Receiver: pass an i8* pointer to the enum value. The original binding still
+	// owns/drops its data — this borrow matches genEnumBinaryOp's convention.
+	var args []value.Value
+	if isThisReceiver(e.Operand) {
+		args = append(args, operand)
+	} else {
+		alloca := c.entryBlock.NewAlloca(operand.Type())
+		alloca.SetName(c.uniqueLocalName("enum.this"))
+		c.block.NewStore(operand, alloca)
+		args = append(args, c.block.NewBitCast(alloca, irtypes.I8Ptr))
+	}
+	return c.block.NewCall(fn, args...)
+}
+
+// genVirtualUnaryOp dispatches a non-native prefix unary operator through the
+// vtable (T0878). Used when the static type is abstract or has children
+// requiring virtual dispatch. Mirrors genVirtualBinaryOp without a right operand.
+func (c *Compiler) genVirtualUnaryOp(e *ast.UnaryExpr, named *types.Named,
+	method *types.Method, operand value.Value) value.Value {
+
+	op := e.Op.String()
+
+	// Extract vtable and instance from the operand.
+	var vtableRaw, instance value.Value
+	if isThisReceiver(e.Operand) {
+		instance = operand
+		variantPtr := c.loadVariantPtr(operand)
+		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
+		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+	} else {
+		vtableRaw = c.extractVtablePtr(operand)
+		instance = c.extractInstancePtr(operand)
+	}
+
+	// Index into vtable.
+	slotIndex := named.VirtualMethodIndex(op, false)
+	if slotIndex < 0 {
+		panic(fmt.Sprintf("codegen: operator %s not in vtable for %s", op, named))
+	}
+	vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
+	fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
+		constant.NewInt(irtypes.I32, int64(slotIndex)))
+	fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+
+	// Build the function type (i8* receiver only) and bitcast.
+	retType := irtypes.Type(irtypes.Void)
+	if method.Sig().Result() != nil {
+		retType = c.resolveType(method.Sig().Result())
+	}
+	if method.Sig().CanError() {
+		retType = computeResultType(retType)
+	}
+	var paramTypes []irtypes.Type
+	if method.Sig().Recv() != nil {
+		paramTypes = append(paramTypes, irtypes.I8Ptr)
+	}
+	funcType := irtypes.NewFunc(retType, paramTypes...)
+	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
+
+	var args []value.Value
+	if method.Sig().Recv() != nil {
+		args = append(args, instance)
+	}
+	return c.block.NewCall(fnTyped, args...)
 }
 
 // lookupUnaryMethod finds the 0-param variant of a method by name.

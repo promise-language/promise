@@ -4798,6 +4798,94 @@ func TestGenericUnaryOperator(t *testing.T) {
 	`)
 }
 
+func TestEnumUnaryOperator(t *testing.T) {
+	// T0878: user-defined prefix unary operators (`-`, `!`, `~`) declared on an
+	// enum must type-check. checkUnaryOperator previously had no *types.Enum case,
+	// so `-s` reported "operator - not defined on type Sign". The result type must
+	// be taken from the operator method's signature.
+	checkOK(t, `
+		enum Sign {
+			Positive,
+			Negative,
+			-() Sign { match this { Positive => { return Sign.Negative; }, Negative => { return Sign.Positive; } } }
+			!() bool { match this { Positive => { return false; }, Negative => { return true; } } }
+			~() Sign { match this { Positive => { return Sign.Negative; }, Negative => { return Sign.Positive; } } }
+		}
+		test() {
+			Sign s = Sign.Negative;
+			Sign neg = -s;
+			bool not = !s;
+			Sign bnot = ~s;
+		}
+	`)
+}
+
+func TestEnumGenericUnaryOperatorReturnsInstance(t *testing.T) {
+	// T0878: a generic enum's unary operator whose result is the self-instance
+	// must have the result type substituted under the instance's type args
+	// (Opt[T] -> Opt[int]) and recorded for monomorphization.
+	checkOK(t, `
+		enum Opt[T] {
+			nothing,
+			some(T v),
+			-() Opt[T] { return Opt[T].nothing; }
+		}
+		test() {
+			Opt[int] o = Opt[int].some(3);
+			Opt[int] p = -o;
+		}
+	`)
+}
+
+func TestEnumUnaryOperatorErrors(t *testing.T) {
+	// T0878: error path inside checkEnumUnaryOperator — no 0-param operator
+	// method declared yields a clean "not defined" diagnostic rather than a
+	// codegen panic.
+	expectError(t, checkErrs(t, `
+		enum E {
+			some(int x),
+		}
+		test() {
+			E a = E.some(1);
+			E b = -a;
+		}
+	`), "operator - not defined on type E")
+}
+
+func TestEnumIncDecStillRejected(t *testing.T) {
+	// T0878 regression guard: `++`/`--` are NOT prefix unary operators that
+	// codegen can dispatch (genIncDecTarget only emits native ops). Accepting all
+	// enum unary operators in sema would have regressed enum `++` from a clean
+	// error into a codegen panic, so it must keep producing "not defined".
+	expectError(t, checkErrs(t, `
+		enum E {
+			some(int x),
+			++() E => this;
+		}
+		test() {
+			E a = E.some(1);
+			a++;
+		}
+	`), "operator ++ not defined on type E")
+}
+
+func TestGenericEnumIncDecStillRejected(t *testing.T) {
+	// T0878 regression guard, generic-enum-instance path: the *types.Instance
+	// branch must also gate `++`/`--` behind isPrefixUnaryOp, so a generic enum
+	// instance's `++` produces a clean "not defined" error rather than reaching
+	// checkEnumUnaryOperator (and ultimately a codegen path that can't dispatch).
+	expectError(t, checkErrs(t, `
+		enum Box[T] {
+			some(T x),
+			++() Box[T] => this;
+		}
+		test() {
+			Box[int] a = Box[int].some(1);
+			a++;
+		}
+	`), "operator ++ not defined on type Box[int]")
+}
+
 // ===== Stage 5b: Sema Completion Tests =====
 
 // --- Match Pattern Binding Tests ---

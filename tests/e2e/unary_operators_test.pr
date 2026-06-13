@@ -1,0 +1,118 @@
+// T0878: user-defined (non-native) prefix unary operators on Named and value
+// types must dispatch. genUnaryExpr previously panicked
+// "non-native unary <Type>.<op> not yet implemented". The fix emits the
+// operator method call mirroring genBinaryExpr's receiver handling (instance
+// pointer for heap types, valueTypeReceiverPtr for value types) and supports
+// virtual dispatch (genVirtualUnaryOp) for types with children.
+// Heap Named type with a prefix `-` operator.
+type Neg {
+  int v;
+
+  -() Neg {
+    return Neg(v: -this.v);
+  }
+}
+
+named_unary_neg() `test {
+  n := Neg(v: 5);
+  m := -n;
+  assert(m.v == -5, "neg of heap Named should negate field");
+}
+
+// Heap Named type with `!` (returning bool) and `~` operators.
+type Flags {
+  int bits;
+
+  !() bool {
+    return this.bits == 0;
+  }
+
+  ~ () Flags {
+    return Flags(bits: -this.bits - 1);
+  }
+}
+
+named_unary_not() `test {
+  empty := Flags(bits: 0);
+  assert(!empty, "!Flags(0) should be true");
+  full := Flags(bits: 7);
+  assert(!(!full), "!Flags(7) should be false");
+}
+
+named_unary_bitnot() `test {
+  f := Flags(bits: 5);
+  inv := ~f;
+  assert(inv.bits == -6, "~Flags(5).bits should be -6");
+}
+
+// Pure value type (all fields `value): the receiver is materialized via
+// valueTypeReceiverPtr, and the operator returns the value struct by value.
+type VNeg {
+  int v `value;
+
+  -() VNeg {
+    return VNeg(v: -this.v);
+  }
+}
+
+value_unary_neg() `test {
+  vn := VNeg(v: 9);
+  vm := -vn;
+  assert(vm.v == -9, "neg of value type should negate field");
+}
+
+// `this` as the unary operand inside a method body: the receiver pointer is
+// passed directly.
+type Counter {
+  int n;
+
+  new(~this, int n) {
+    this.n = n;
+  }
+
+  - () Counter {
+    return Counter(-this.n);
+  }
+
+  negated(this) Counter {
+    return -this;
+  }
+}
+
+named_unary_on_this_receiver() `test {
+  c := Counter(5);
+  d := c.negated();
+  assert(d.n == -5, "negated() applying unary `-` to this");
+}
+
+// Virtual dispatch: a base type with a child dispatches the unary operator
+// through the vtable (genVirtualUnaryOp).
+type VBase {
+  int n;
+
+  -() VBase {
+    return VBase(n: -this.n);
+  }
+
+  neg_via(this) VBase {
+    return -this;
+  }
+}
+
+type VDerived is VBase {
+}
+
+named_unary_virtual_dispatch() `test {
+  a := VBase(n: 7);
+  r := a.neg_via();
+  assert(r.n == -7, "virtual unary dispatch should negate field");
+}
+
+// Virtual dispatch on a non-`this` operand: `-a` where `a`'s static type needs a
+// vtable goes through genVirtualUnaryOp's else branch (vtable + instance pulled
+// from the operand value, not from `this`).
+named_unary_virtual_dispatch_non_this() `test {
+  a := VBase(n: 7);
+  r := -a;
+  assert(r.n == -7, "virtual unary dispatch on a value operand");
+}

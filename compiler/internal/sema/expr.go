@@ -819,11 +819,25 @@ func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string)
 	switch t := operand.(type) {
 	case *types.Named:
 		named = t
+	case *types.Enum:
+		// Prefix unary operators (`-`, `!`, `~`) on enums dispatch via
+		// genEnumUnaryOp (T0878). `++`/`--` have no non-native codegen path
+		// (genIncDecTarget only emits native ops), so they fall through to the
+		// default error rather than letting codegen panic.
+		if isPrefixUnaryOp(op) {
+			return c.checkEnumUnaryOperator(pos, t, nil, op)
+		}
+		c.errorf(pos, "operator %s not defined on type %s", op, operand)
+		return nil
 	case *types.Instance:
-		// Enum-origin instances fall through to the default error: user-defined
-		// unary operators on enums are not yet dispatchable in codegen, so sema
-		// rejects them cleanly rather than letting genUnaryExpr panic. Tracked
-		// (for both Named and enum) as T0878.
+		if en, ok := t.Origin().(*types.Enum); ok {
+			if isPrefixUnaryOp(op) {
+				subst := types.BuildSubstMap(en.TypeParams(), t.TypeArgs())
+				return c.checkEnumUnaryOperator(pos, en, subst, op)
+			}
+			c.errorf(pos, "operator %s not defined on type %s", op, operand)
+			return nil
+		}
 		origin, ok := t.Origin().(*types.Named)
 		if !ok {
 			c.errorf(pos, "operator %s not defined on type %s", op, operand)
@@ -854,6 +868,43 @@ func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string)
 		result = types.Substitute(result, subst)
 	}
 	if result != nil {
+		return result
+	}
+	return types.TypVoid
+}
+
+// isPrefixUnaryOp reports whether op is a prefix unary operator that codegen can
+// dispatch (`-`, `!`, `~`). `++`/`--` are excluded — they have no non-native
+// codegen path (genIncDecTarget only emits native ops); see T0880.
+func isPrefixUnaryOp(op string) bool {
+	return op == "-" || op == "!" || op == "~"
+}
+
+// checkEnumUnaryOperator type-checks a user-defined prefix unary operator
+// declared on an enum (T0878). Mirrors checkEnumOperator for the 0-param variant:
+// enums register operator methods on *types.Enum, which the Named-centric
+// checkUnaryOperator switch never consulted.
+func (c *Checker) checkEnumUnaryOperator(pos ast.Pos, en *types.Enum, subst map[*types.TypeParam]types.Type, op string) types.Type {
+	var m *types.Method
+	for _, method := range en.Methods() {
+		if method.Name() == op && len(method.Sig().Params()) == 0 {
+			m = method
+			break
+		}
+	}
+	if m == nil {
+		c.errorf(pos, "operator %s not defined on type %s", op, en)
+		return nil
+	}
+
+	result := m.Sig().Result()
+	if subst != nil && result != nil {
+		result = types.Substitute(result, subst)
+	}
+	if result != nil {
+		if inst, ok := result.(*types.Instance); ok {
+			c.recordInstance(inst)
+		}
 		return result
 	}
 	return types.TypVoid

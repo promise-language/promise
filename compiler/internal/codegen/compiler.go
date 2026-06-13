@@ -282,6 +282,9 @@ type Compiler struct {
 	palFileRead                *ir.Func // @pal_file_read(i32 fd, i8* buf, i64 len) → i64
 	palFileWrite               *ir.Func // @pal_file_write(i32 fd, i8* buf, i64 len) → i64
 	palFileClose               *ir.Func // @pal_file_close(i32 fd) → i32
+	palPipeRead                *ir.Func // @pal_pipe_read(i32 fd, i8* buf, i64 len) → i64 (HANDLE-based on Windows)
+	palPipeWrite               *ir.Func // @pal_pipe_write(i32 fd, i8* buf, i64 len) → i64 (HANDLE-based on Windows)
+	palPipeClose               *ir.Func // @pal_pipe_close(i32 fd) → i32 (HANDLE-based on Windows)
 	palFileSeek                *ir.Func // @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
 	palFileStatSize            *ir.Func // @pal_file_stat_size(i8* path) → i64
 	palFileRemove              *ir.Func // @pal_file_remove(i8* path) → i32
@@ -301,9 +304,6 @@ type Compiler struct {
 	palChdir                   *ir.Func // @pal_chdir(i8* path) → i32
 	palSpawn                   *ir.Func // @pal_spawn(i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd) → i32
 	palReadPipe                *ir.Func // @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
-	palPipeRead                *ir.Func // @pal_pipe_read(i32 fd, i8* buf, i64 len) → i64 (HANDLE-aware on Windows, T0900)
-	palPipeWrite               *ir.Func // @pal_pipe_write(i32 fd, i8* buf, i64 len) → i64 (HANDLE-aware on Windows, T0900)
-	palPipeClose               *ir.Func // @pal_pipe_close(i32 fd) → i32 (HANDLE-aware on Windows, T0900)
 	palWaitPid                 *ir.Func // @pal_wait_pid(i32 pid) → i32
 	palSpawnStreaming          *ir.Func // @pal_spawn_streaming(..., i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
 	palSpawnEnv                *ir.Func // @pal_spawn_env(i8* program, i8** argv, i8** envp, i8* cwd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
@@ -2047,6 +2047,9 @@ func (c *Compiler) declareIntrinsics() {
 	c.palFileRead = p.EmitFileRead(c.module)
 	c.palFileWrite = p.EmitFileWrite(c.module)
 	c.palFileClose = p.EmitFileClose(c.module)
+	c.palPipeRead = p.EmitPipeRead(c.module)
+	c.palPipeWrite = p.EmitPipeWrite(c.module)
+	c.palPipeClose = p.EmitPipeClose(c.module)
 	c.palFileSeek = p.EmitFileSeek(c.module)
 	c.palFileStatSize = p.EmitFileStatSize(c.module)
 	c.palFileRemove = p.EmitFileRemove(c.module)
@@ -2066,9 +2069,6 @@ func (c *Compiler) declareIntrinsics() {
 	c.palChdir = p.EmitChdir(c.module)
 	c.palSpawn = p.EmitSpawn(c.module)
 	c.palReadPipe = p.EmitReadPipe(c.module)
-	c.palPipeRead = p.EmitPipeRead(c.module)
-	c.palPipeWrite = p.EmitPipeWrite(c.module)
-	c.palPipeClose = p.EmitPipeClose(c.module)
 	c.palWaitPid = p.EmitWaitPid(c.module)
 	c.palSpawnStreaming = p.EmitSpawnStreaming(c.module)
 	c.palSpawnEnv = p.EmitSpawnEnv(c.module)

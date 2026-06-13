@@ -64,6 +64,16 @@ type PAL interface {
 	EmitFileWrite(module *ir.Module) *ir.Func
 	// EmitFileClose defines @pal_file_close(i32 fd) → i32 (0=ok, -1=error)
 	EmitFileClose(module *ir.Module) *ir.Func
+	// EmitPipeRead defines @pal_pipe_read(i32 fd, i8* buf, i64 len) → i64 (bytes, 0=EOF, <0=error)
+	// Streaming subprocess pipe read. On Windows, fd packs a raw HANDLE (ReadFile),
+	// not a CRT fd — unlike pal_file_read which uses UCRT _read.
+	EmitPipeRead(module *ir.Module) *ir.Func
+	// EmitPipeWrite defines @pal_pipe_write(i32 fd, i8* buf, i64 len) → i64 (bytes, <0=error)
+	// Streaming subprocess pipe write. On Windows, fd packs a raw HANDLE (WriteFile).
+	EmitPipeWrite(module *ir.Module) *ir.Func
+	// EmitPipeClose defines @pal_pipe_close(i32 fd) → i32 (0=ok, -1=error)
+	// Streaming subprocess pipe close. On Windows, fd packs a raw HANDLE (CloseHandle).
+	EmitPipeClose(module *ir.Module) *ir.Func
 	// EmitFileSeek defines @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
 	EmitFileSeek(module *ir.Module) *ir.Func
 	// EmitFileStatSize defines @pal_file_stat_size(i8* path) → i64 (-1=error)
@@ -103,16 +113,6 @@ type PAL interface {
 	// EmitReadPipe defines @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
 	// Reads fd to EOF into malloc'd buffer, then closes fd. Caller must free out_buf.
 	EmitReadPipe(module *ir.Module) *ir.Func
-	// Streaming pipe I/O primitives (T0900) — the i32 "fd" carries a packed pipe
-	// handle (real fd on POSIX, a packed Win32 HANDLE on Windows). These MUST be
-	// used instead of pal_file_read/write/close for the streaming os.Process pipes,
-	// because on Windows the UCRT _read/_write/_close require a CRT fd, not a HANDLE.
-	// EmitPipeRead defines @pal_pipe_read(i32 fd, i8* buf, i64 len) → i64 (bytes, 0=EOF, -errno on error)
-	EmitPipeRead(module *ir.Module) *ir.Func
-	// EmitPipeWrite defines @pal_pipe_write(i32 fd, i8* buf, i64 len) → i64 (bytes or -errno)
-	EmitPipeWrite(module *ir.Module) *ir.Func
-	// EmitPipeClose defines @pal_pipe_close(i32 fd) → i32 (0=ok, -errno on error)
-	EmitPipeClose(module *ir.Module) *ir.Func
 	// EmitWaitPid defines @pal_wait_pid(i32 pid) → i32
 	// Waits for child process. Returns exit code (0-255) on success, -1 on error.
 	// Retries on EINTR.

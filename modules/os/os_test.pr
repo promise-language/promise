@@ -1166,6 +1166,24 @@ test_process_spawn_echo_windows() `test(exclude: wasm) `target(windows) {
   assert(out.starts_with("hello"), "stdout should contain hello");
 }
 
+test_process_spawn_stdin_windows() `test(exclude: wasm) `target(windows) {
+  // Exercises the streaming-stdin path that crashed pre-T0904: pal_pipe_write
+  // (WriteFile) and pal_pipe_close (CloseHandle) on a raw Win32 HANDLE. Routing
+  // these through UCRT _write/_close aborts the process. `sort` reads all of
+  // stdin, sorts the lines, and echoes them back, so it round-trips stdin→stdout.
+  Process p = Process.spawn("sort", [])?!;
+  ProcessInput stdin = p.take_standard_input()?!;
+  ProcessOutput stdout = p.take_standard_output()?!;
+
+  stdin.write_string("hello from stdin")?!; // WriteFile on the HANDLE
+  stdin.close()?!; // CloseHandle on the HANDLE — the crash site
+
+  string out = stdout.read_all()?!;
+  int code = p.wait()?!;
+  assert(code == 0, "sort should exit with 0");
+  assert(out.starts_with("hello from stdin"), "sort should echo the single stdin line");
+}
+
 test_process_spawn_exit_code_windows() `test(exclude: wasm) `target(windows) {
   Process p = Process.spawn("cmd", ["/c", "exit 7"])?!;
   int code = p.wait()?!;

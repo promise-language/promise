@@ -649,6 +649,9 @@ func (p *WasmPAL) EmitFileOpen(module *ir.Module) *ir.Func     { return emitStub
 func (p *WasmPAL) EmitFileRead(module *ir.Module) *ir.Func     { return emitStubFileRead(module) }
 func (p *WasmPAL) EmitFileWrite(module *ir.Module) *ir.Func    { return emitStubFileWrite(module) }
 func (p *WasmPAL) EmitFileClose(module *ir.Module) *ir.Func    { return emitStubFileClose(module) }
+func (p *WasmPAL) EmitPipeRead(module *ir.Module) *ir.Func     { return emitStubPipeRead(module) }
+func (p *WasmPAL) EmitPipeWrite(module *ir.Module) *ir.Func    { return emitStubPipeWrite(module) }
+func (p *WasmPAL) EmitPipeClose(module *ir.Module) *ir.Func    { return emitStubPipeClose(module) }
 func (p *WasmPAL) EmitFileSeek(module *ir.Module) *ir.Func     { return emitStubFileSeek(module) }
 func (p *WasmPAL) EmitFileStatSize(module *ir.Module) *ir.Func { return emitStubFileStatSize(module) }
 func (p *WasmPAL) EmitFileStat(module *ir.Module) *ir.Func     { return emitStubFileStat(module) }
@@ -670,9 +673,6 @@ func (p *WasmPAL) EmitUnsetEnv(module *ir.Module) *ir.Func    { return emitStubU
 func (p *WasmPAL) EmitChdir(module *ir.Module) *ir.Func       { return emitStubChdir(module) }
 func (p *WasmPAL) EmitSpawn(module *ir.Module) *ir.Func       { return emitStubSpawn(module) }
 func (p *WasmPAL) EmitReadPipe(module *ir.Module) *ir.Func    { return emitStubReadPipe(module) }
-func (p *WasmPAL) EmitPipeRead(module *ir.Module) *ir.Func    { return emitStubPipeRead(module) }
-func (p *WasmPAL) EmitPipeWrite(module *ir.Module) *ir.Func   { return emitStubPipeWrite(module) }
-func (p *WasmPAL) EmitPipeClose(module *ir.Module) *ir.Func   { return emitStubPipeClose(module) }
 func (p *WasmPAL) EmitWaitPid(module *ir.Module) *ir.Func     { return emitStubWaitPid(module) }
 func (p *WasmPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	return emitStubSpawnStreaming(module)

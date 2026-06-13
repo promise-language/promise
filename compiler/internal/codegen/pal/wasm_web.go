@@ -79,6 +79,9 @@ func (p *WasmWebPAL) EmitFileOpen(module *ir.Module) *ir.Func  { return emitStub
 func (p *WasmWebPAL) EmitFileRead(module *ir.Module) *ir.Func  { return emitStubFileRead(module) }
 func (p *WasmWebPAL) EmitFileWrite(module *ir.Module) *ir.Func { return emitStubFileWrite(module) }
 func (p *WasmWebPAL) EmitFileClose(module *ir.Module) *ir.Func { return emitStubFileClose(module) }
+func (p *WasmWebPAL) EmitPipeRead(module *ir.Module) *ir.Func  { return emitStubPipeRead(module) }
+func (p *WasmWebPAL) EmitPipeWrite(module *ir.Module) *ir.Func { return emitStubPipeWrite(module) }
+func (p *WasmWebPAL) EmitPipeClose(module *ir.Module) *ir.Func { return emitStubPipeClose(module) }
 func (p *WasmWebPAL) EmitFileSeek(module *ir.Module) *ir.Func  { return emitStubFileSeek(module) }
 func (p *WasmWebPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
 	return emitStubFileStatSize(module)
@@ -100,9 +103,6 @@ func (p *WasmWebPAL) EmitUnsetEnv(module *ir.Module) *ir.Func    { return emitSt
 func (p *WasmWebPAL) EmitChdir(module *ir.Module) *ir.Func       { return emitStubChdir(module) }
 func (p *WasmWebPAL) EmitSpawn(module *ir.Module) *ir.Func       { return emitStubSpawn(module) }
 func (p *WasmWebPAL) EmitReadPipe(module *ir.Module) *ir.Func    { return emitStubReadPipe(module) }
-func (p *WasmWebPAL) EmitPipeRead(module *ir.Module) *ir.Func    { return emitStubPipeRead(module) }
-func (p *WasmWebPAL) EmitPipeWrite(module *ir.Module) *ir.Func   { return emitStubPipeWrite(module) }
-func (p *WasmWebPAL) EmitPipeClose(module *ir.Module) *ir.Func   { return emitStubPipeClose(module) }
 func (p *WasmWebPAL) EmitWaitPid(module *ir.Module) *ir.Func     { return emitStubWaitPid(module) }
 func (p *WasmWebPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	return emitStubSpawnStreaming(module)

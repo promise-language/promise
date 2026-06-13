@@ -1771,6 +1771,138 @@ func TestFileCloseAllPlatforms(t *testing.T) {
 	}
 }
 
+func TestPipeReadAllPlatforms(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+		decl string // expected platform call declaration
+	}{
+		{"POSIX", &PosixPAL{}, "@read("},
+		{"Windows", &WindowsPAL{}, "@ReadFile("},
+		{"WASM", &WasmPAL{}, ""},
+		{"WasmWeb", &WasmWebPAL{}, ""},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitPipeRead(module)
+			out := module.String()
+
+			if fn.Name() != "pal_pipe_read" {
+				t.Errorf("expected pal_pipe_read, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i64 @pal_pipe_read(i32 %fd, i8* %buf, i64 %len)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "platform declaration")
+			}
+		})
+	}
+}
+
+func TestPipeWriteAllPlatforms(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"POSIX", &PosixPAL{}, "@write("},
+		{"Windows", &WindowsPAL{}, "@WriteFile("},
+		{"WASM", &WasmPAL{}, ""},
+		{"WasmWeb", &WasmWebPAL{}, ""},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitPipeWrite(module)
+			out := module.String()
+
+			if fn.Name() != "pal_pipe_write" {
+				t.Errorf("expected pal_pipe_write, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i64 @pal_pipe_write(i32 %fd, i8* %buf, i64 %len)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "platform declaration")
+			}
+		})
+	}
+}
+
+func TestPipeCloseAllPlatforms(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"POSIX", &PosixPAL{}, "@close("},
+		{"Windows", &WindowsPAL{}, "@CloseHandle("},
+		{"WASM", &WasmPAL{}, ""},
+		{"WasmWeb", &WasmWebPAL{}, ""},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitPipeClose(module)
+			out := module.String()
+
+			if fn.Name() != "pal_pipe_close" {
+				t.Errorf("expected pal_pipe_close, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_pipe_close(i32 %fd)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "platform declaration")
+			}
+		})
+	}
+}
+
+// TestPipeOpsWindowsHandleBased verifies the Windows streaming pipe ops operate on
+// raw HANDLEs (ReadFile/WriteFile/CloseHandle) and never route through the UCRT
+// _read/_write/_close — passing a raw HANDLE to those aborts the process (T0904).
+func TestPipeOpsWindowsHandleBased(t *testing.T) {
+	t.Run("read", func(t *testing.T) {
+		module := ir.NewModule()
+		(&WindowsPAL{}).EmitPipeRead(module)
+		out := module.String()
+		assertContains(t, out, "@ReadFile(", "ReadFile declaration")
+		assertContains(t, out, "@GetLastError(", "GetLastError for broken-pipe EOF detection")
+		// ERROR_BROKEN_PIPE = 109 → treated as EOF (return 0)
+		assertContains(t, out, "icmp eq i32 %", "broken-pipe error comparison")
+		assertContains(t, out, "109", "ERROR_BROKEN_PIPE constant")
+		if strings.Contains(out, "@_read(") {
+			t.Error("Windows pal_pipe_read must NOT use UCRT _read on a raw HANDLE")
+		}
+	})
+	t.Run("write", func(t *testing.T) {
+		module := ir.NewModule()
+		(&WindowsPAL{}).EmitPipeWrite(module)
+		out := module.String()
+		assertContains(t, out, "@WriteFile(", "WriteFile declaration")
+		if strings.Contains(out, "@_write(") {
+			t.Error("Windows pal_pipe_write must NOT use UCRT _write on a raw HANDLE")
+		}
+	})
+	t.Run("close", func(t *testing.T) {
+		module := ir.NewModule()
+		(&WindowsPAL{}).EmitPipeClose(module)
+		out := module.String()
+		assertContains(t, out, "@CloseHandle(", "CloseHandle declaration")
+		if strings.Contains(out, "@_close(") {
+			t.Error("Windows pal_pipe_close must NOT use UCRT _close on a raw HANDLE")
+		}
+	})
+}
+
+// TestPipeOpsWasmStub verifies the WASM pipe ops are stubs (no subprocesses).
+func TestPipeOpsWasmStub(t *testing.T) {
+	module := ir.NewModule()
+	(&WasmPAL{}).EmitPipeRead(module)
+	(&WasmPAL{}).EmitPipeWrite(module)
+	(&WasmPAL{}).EmitPipeClose(module)
+	out := module.String()
+	assertContains(t, out, "ret i64 -1", "WASM read/write stub returns -1")
+	assertContains(t, out, "ret i32 -1", "WASM close stub returns -1")
+}
+
 func TestFileSeekAllPlatforms(t *testing.T) {
 	pals := []struct {
 		name string

@@ -1166,14 +1166,32 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 		if paramIdx < len(fn.Params) {
 			if st, ok := fn.Params[paramIdx].Typ.(*irtypes.StructType); ok {
 				if _, rightIsPtr := right.Type().(*irtypes.PointerType); rightIsPtr {
-					alloca := c.createEntryAlloca(st)
-					vtableField := c.block.NewGetElementPtr(st, alloca,
-						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-					c.block.NewStore(constant.NewNull(irtypes.I8Ptr), vtableField)
-					instField := c.block.NewGetElementPtr(st, alloca,
-						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-					c.block.NewStore(right, instField)
-					right = c.block.NewLoad(st, alloca)
+					rightType := c.info.Types[e.Right]
+					if c.typeSubst != nil {
+						rightType = types.Substitute(rightType, c.typeSubst)
+					}
+					if c.selfSubst != nil {
+						rightType = types.SubstituteSelf(rightType, c.selfSubst.iface, c.selfSubst.concrete)
+					}
+					rightNamed := extractNamed(rightType)
+					if rightNamed != nil && rightNamed.IsValueType() {
+						// Value-type `this`: the receiver i8* points at the value
+						// struct itself (see valueTypeReceiverPtr), so load the
+						// param directly rather than synthesizing {vtable, instance}.
+						valPtr := c.block.NewBitCast(right, irtypes.NewPointer(st))
+						right = c.block.NewLoad(st, valPtr)
+					} else {
+						// Heap type: `this` i8* IS the instance pointer; wrap it
+						// as {null_vtable, instance_ptr}.
+						alloca := c.createEntryAlloca(st)
+						vtableField := c.block.NewGetElementPtr(st, alloca,
+							constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+						c.block.NewStore(constant.NewNull(irtypes.I8Ptr), vtableField)
+						instField := c.block.NewGetElementPtr(st, alloca,
+							constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+						c.block.NewStore(right, instField)
+						right = c.block.NewLoad(st, alloca)
+					}
 				}
 			}
 		}

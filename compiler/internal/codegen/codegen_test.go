@@ -18943,6 +18943,28 @@ func TestGenericValueTypeOperatorDispatch(t *testing.T) {
 	assertContains(t, ir, `@"Pair[int].=="`)
 }
 
+// T0748: a value-type `this` used as the right-hand operand of a user-defined
+// binary operator must load the param via bitcast+load from the receiver pointer,
+// not synthesize a heap-style {vtable, instance} struct (which panicked:
+// "store operands are not compatible: src=i8*; dst=i64*").
+func TestValueTypeThisAsRightOperand(t *testing.T) {
+	ir := generateIR(t, `
+		type Cmp {
+			int x `+"`value"+`;
+			<(Cmp other) bool { return this.x < other.x; }
+			gt_via(this, Cmp other) bool { return other < this; }
+		}
+		main() {
+			a := Cmp(x: 5);
+			b := Cmp(x: 2);
+			_ := a.gt_via(b);
+		}
+	`)
+	// The value-type `this` right operand is materialized via bitcast to the
+	// param struct followed by a load — not a store of i8* into a data field.
+	assertContains(t, ir, `call i1 @"Cmp.<"(`)
+}
+
 func TestValueTypeOptional(t *testing.T) {
 	ir := generateIR(t, `
 		type Point {

@@ -378,6 +378,36 @@ test_paren_this_operator_arg() `test {
   assert(CmpBox(x: 9).gt_via_nested(CmpBox(x: 1)), "((this)) arg == true");
 }
 
+// Value-type form of the same gate — T0748. Here `this` is the operator argument
+// on a `value` type, so the `e.Right` this-as-arg wrap must bitcast+load the param
+// from the receiver pointer instead of synthesizing a heap-style {vtable, instance}
+// struct (which stored the i8* into the embedded `int x` data field and panicked).
+type VCmpBox {
+  int x `value;
+  < (VCmpBox other) bool {
+    return this.x < other.x;
+  }
+  // bare `this` as the right-hand argument.
+  gt_via(this, VCmpBox other) bool {
+    return other < this;
+  }
+  // paren `this` — must behave identically (T0613 peels the paren at the gate).
+  gt_via_paren(this, VCmpBox other) bool {
+    return other < (this);
+  }
+  // nested-paren `this`.
+  gt_via_nested(this, VCmpBox other) bool {
+    return other < ((this));
+  }
+}
+
+test_paren_this_operator_arg_value_type() `test {
+  assert(VCmpBox(x: 5).gt_via(VCmpBox(x: 2)), "value bare this: other(2) < this(5)");
+  assert(!VCmpBox(x: 2).gt_via(VCmpBox(x: 5)), "value bare this: other(5) < this(2) == false");
+  assert(VCmpBox(x: 5).gt_via_paren(VCmpBox(x: 2)), "value (this): other(2) < (this)(5)");
+  assert(VCmpBox(x: 9).gt_via_nested(VCmpBox(x: 1)), "value ((this)) arg == true");
+}
+
 // ---------------- virtual binary operator receiver ----------------
 // Base has a child, so the operator dispatches through the vtable
 // (genVirtualBinaryOp), a different gate from the direct operator above.
@@ -756,7 +786,9 @@ test_this_index_value_type() `test {
 // value as an owned temp) and now covered by test_this_cast_optional_unwrap.
 //
 // NOTE: value-type binary operator with `this` as the right-hand *argument*
-// (`other < this` where `<` is on a value type) is still broken for BOTH bare
-// and paren `this` — the arg-wrap stores the i8* into an embedded data field.
-// Filed as T0748. (The heap-type form of this gate IS covered above by
-// test_paren_this_operator_arg.) Once T0748 is fixed, add the `(this)` case here.
+// (`other < this` where `<` is on a value type) — FIXED (T0748). The arg-wrap
+// now bitcast+loads the param from the receiver pointer for value-type operands
+// instead of synthesizing a heap-style {vtable, instance} struct. Covered above
+// by test_paren_this_operator_arg_value_type (bare, paren, and nested forms) and
+// by tests/value_types/this_operand_test.pr. The heap-type form is covered by
+// test_paren_this_operator_arg.

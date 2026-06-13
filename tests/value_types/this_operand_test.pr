@@ -1,0 +1,35 @@
+// T0748: a value-type `this` used as the right-hand operand of a user-defined
+// binary operator must load the param from the receiver pointer (bitcast+load),
+// not synthesize a heap-style {vtable, instance} struct (which panicked in codegen).
+type Cmp {
+  int x `value;
+
+  < (Cmp other) bool {
+    return this.x < other.x;
+  }
+
+  // `other < this` puts the value-type `this` on the right-hand side.
+  gt_via(this, Cmp other) bool {
+    return other < this;
+  }
+
+  // paren-wrapped form must behave identically.
+  gt_via_paren(this, Cmp other) bool {
+    return other < (this);
+  }
+}
+
+value_type_this_as_right_operand() `test {
+  a := Cmp(x: 5);
+  b := Cmp(x: 2);
+  assert(a.gt_via(b), "2 < 5 should be true");
+  assert(!b.gt_via(a), "5 < 2 should be false");
+  assert(a.gt_via(a) == false, "5 < 5 should be false");
+}
+
+value_type_this_as_right_operand_paren() `test {
+  a := Cmp(x: 5);
+  b := Cmp(x: 2);
+  assert(a.gt_via_paren(b), "2 < 5 should be true (paren)");
+  assert(!b.gt_via_paren(a), "5 < 2 should be false (paren)");
+}

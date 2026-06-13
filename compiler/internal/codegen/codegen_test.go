@@ -137,6 +137,26 @@ func assertNotContainsMatch(t *testing.T, ir, pattern string) {
 }
 
 // extractFunction returns the IR text for a named function (from "define" to the closing "}").
+// extractGlobal returns the single-line `@name = ...` global definition, or ""
+// if absent. Useful for asserting on the contents of a constant vtable global.
+func extractGlobal(ir, name string) string {
+	marker := "@" + name + " ="
+	start := strings.Index(ir, marker)
+	if start < 0 {
+		// Globals with special characters are quoted: @"name = ...".
+		marker = "@\"" + name + "\" ="
+		start = strings.Index(ir, marker)
+		if start < 0 {
+			return ""
+		}
+	}
+	end := strings.Index(ir[start:], "\n")
+	if end < 0 {
+		return ir[start:]
+	}
+	return ir[start : start+end]
+}
+
 func extractFunction(ir, name string) string {
 	// Find "define ... @name("
 	marker := "@" + name + "("

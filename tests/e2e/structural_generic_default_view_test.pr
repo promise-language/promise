@@ -1,0 +1,157 @@
+// E2E regression tests for T0862: calling a *default* method through a *generic*
+// structural-interface view used to segfault at runtime ("fatal: segmentation
+// fault at 0x0").
+//
+// A non-generic structural interface compiles its own default methods (e.g.
+// IBox.put_two), and concrete implementors reference them directly in their
+// vtable. A *generic* interface instance (e.g. Box[int]) does not: the mono
+// pipeline skips structural instances, so no default method was emitted for the
+// concrete implementor's vtable slot. Coercing the concrete type into the
+// generic view and dispatching the inherited default then jumped to address 0.
+//
+// The fix synthesizes the inherited defaults onto the non-generic concrete type
+// (Counter.put_two) before its vtable is built.
+type Box[T] `structural {
+  put!(~this, T x) T `abstract;
+  put_two!(~this, T x) T {
+    return this.put(x);
+  }
+  put_three!(~this, T x) T {
+    return this.put_two(x);
+  }
+}
+
+type Counter is Box[int] {
+  int n;
+  put!(~this, int x) int {
+    return x + this.n;
+  }
+}
+
+type Holder is Box[string] {
+  string prefix;
+  put!(~this, string x) string {
+    return this.prefix + x;
+  }
+}
+
+// Default method through a generic view — the original crash.
+default_through_view() `test {
+  Counter ct = Counter(n: 10);
+  Box[int] b = ct;
+  assert(b.put_two(5)?! == 15, "put_two through Box[int] view");
+}
+
+// Chained defaults (put_three -> put_two -> put) through the view.
+chained_defaults_through_view() `test {
+  Counter ct = Counter(n: 0);
+  Box[int] b = ct;
+  assert(b.put_three(7)?! == 7, "put_three through Box[int] view");
+}
+
+// A different type argument (string) exercises a distinct mono instance.
+string_arg_through_view() `test {
+  Holder h = Holder(prefix: ">");
+  Box[string] b = h;
+  assert(b.put_two("hi")?! == ">hi", "put_two through Box[string] view");
+}
+
+// Abstract dispatch and direct (non-view) calls keep working.
+abstract_and_direct() `test {
+  Counter ct = Counter(n: 1);
+  assert(ct.put_two(4)?! == 5, "direct default call");
+  Box[int] b = ct;
+  assert(b.put(3)?! == 4, "abstract dispatch through view");
+}
+
+// A concrete type that *overrides* an inherited default must use its own
+// method through the view, not the synthesized default.
+type Override is Box[int] {
+  int n;
+  put!(~this, int x) int {
+    return x;
+  }
+  put_two!(~this, int x) int {
+    return x + 100;
+  }
+}
+override_default_through_view() `test {
+  Override o = Override(n: 0);
+  Box[int] b = o;
+  assert(b.put_two(5)?! == 105, "overridden put_two through view");
+}
+
+// Generic structural interface that itself inherits another generic structural
+// interface (Derived[T] is Base[T]). The inherited default `base_default` is
+// reached transitively and its type param (Base.T) must resolve to int — the
+// recursion previously left it unsubstituted and crashed codegen.
+type Base[T] `structural {
+  base_op!(~this, T x) T `abstract;
+  base_default!(~this, T x) T {
+    return this.base_op(x);
+  }
+}
+type Derived[T] is Base[T] `structural {
+  derived_default!(~this, T x) T {
+    return this.base_default(x);
+  }
+}
+type Impl is Derived[int] {
+  int k;
+  base_op!(~this, int x) int {
+    return x + this.k;
+  }
+}
+inherited_generic_iface_through_view() `test {
+  Impl im = Impl(k: 3);
+  Derived[int] d = im;
+  assert(d.derived_default(5)?! == 8, "derived_default through Derived[int] view");
+  assert(d.base_default(5)?! == 8, "transitively-inherited base_default through view");
+}
+
+// An interface with a *generic* default method (its own type param U). Such a
+// method is not virtual and is skipped by the synthesis path; the regular
+// (non-generic) defaults still work through the view, and the generic method
+// remains callable directly with explicit type args.
+type GBox[T] `structural {
+  put!(~this, T x) T `abstract;
+  put_two!(~this, T x) T {
+    return this.put(x);
+  }
+  wrap[U](~this, U y) U {
+    return y;
+  }
+}
+type GCounter is GBox[int] {
+  int n;
+  put!(~this, int x) int {
+    return x;
+  }
+}
+generic_default_method() `test {
+  GCounter ct = GCounter(n: 0);
+  assert(ct.wrap[int](9) == 9, "generic default method direct");
+  GBox[int] b = ct;
+  assert(b.put_two(5)?! == 5, "non-generic default through view alongside generic method");
+}
+
+// A non-generic concrete type implementing a generic structural interface that
+// lives in a *module* (std's Iterator[int]). Calling an inherited default
+// combinator through the view exercises the cross-module synthesis path.
+type UpTo is Iterator[int] {
+  int cur;
+  int limit;
+  next!(~this) int? {
+    if this.cur >= this.limit {
+      return none;
+    }
+    int v = this.cur;
+    this.cur = this.cur + 1;
+    return v;
+  }
+}
+module_interface_default_through_view() `test {
+  UpTo u = UpTo(cur: 0, limit: 3);
+  Iterator[int] it = u;
+  assert(it.count() == 3, "count() default through Iterator[int] view");
+}

@@ -814,6 +814,13 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.declareMonoInheritedDrops(monoInstances)             // T0468: drops inherited from generic parents
 	c.declareInheritedDrops(file)                          // T0507: drops inherited from non-generic parents
 
+	// T0862: non-generic types implementing a generic structural interface
+	// (e.g. `is Box[int]`) need their inherited default methods declared before
+	// the vtable is built — otherwise the vtable slot is left null and dispatch
+	// through the interface view segfaults. Bodies are generated later (after
+	// compileModules) by defineGenericStructuralDefaults.
+	c.declareGenericStructuralDefaults(file)
+
 	// Compute vtable info and emit vtable globals (after method stubs are declared)
 	c.computeVtableInfo(file)
 	c.computeMonoVtableInfo(monoInstances)
@@ -849,6 +856,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineMonoMethods(file, monoInstances)
 	c.defineMonoEnumMethods(file, monoInstances)
 	c.defineMonoSynthesizedDefaults(file, monoInstances)  // structural parent defaults
+	c.defineGenericStructuralDefaults(file)               // T0862: non-generic impls of generic structural interfaces
 	c.defineSynthesizedDrops(file)                        // B0158: auto-synthesized drops (non-generic)
 	c.defineSynthesizedEnumDrops(file)                    // T0102: auto-synthesized enum drops (non-generic)
 	c.defineSynthesizedMonoDrops(file, monoInstances)     // B0158: auto-synthesized drops (generic)
@@ -9874,6 +9882,122 @@ func (c *Compiler) findStructuralOwner(named *types.Named, methodName string) *t
 		}
 	}
 	return nil
+}
+
+// declareGenericStructuralDefaults declares (without bodies) the default methods
+// that a non-generic concrete type inherits from a *generic* structural interface
+// instance (e.g. `type Counter is Box[int]` inheriting Box[T]'s default
+// `put_two`). The bodies are generated later by defineGenericStructuralDefaults.
+//
+// A non-generic structural interface compiles its own default methods (e.g.
+// IBox.put_two), which concrete implementors reference directly in their vtable.
+// A *generic* interface instance does not: the mono pipeline skips structural
+// instances (declareMonoMethods / declareMonoSynthesizedDefaults), so no
+// Box__int.put_two is ever emitted. Without this, the concrete implementor's
+// vtable slot for the inherited default is left null, and dispatching it through
+// the interface view jumps to address 0 (T0862).
+//
+// Declaration must happen before emitVtableGlobals so the concrete vtable can
+// reference the stub; body generation is deferred (see
+// defineGenericStructuralDefaults) until after compileModules, because some
+// default bodies (e.g. Iterator combinators) reference mono instances/layouts
+// that are only available then. This mirrors the declare/define split the mono
+// pipeline uses for generic concrete types (declare/defineMonoSynthesizedDefaults).
+func (c *Compiler) declareGenericStructuralDefaults(file *ast.File) {
+	c.forEachConcreteGenericStructuralParent(file, func(named, iface *types.Named, subst map[*types.TypeParam]types.Type) {
+		// Reuse the mono declare path — its name uses the concrete type's plain
+		// name (no instance suffix) and it does not tag moduleOwnedFuncs/
+		// instanceOwnedFuncs, so the stub stays in the main IR.
+		c.declareStructuralDefaultStubs(file, named.Obj().Name(), named, iface, subst)
+	})
+}
+
+// defineGenericStructuralDefaults generates the bodies for the stubs declared by
+// declareGenericStructuralDefaults. Runs after compileModules so default bodies
+// that depend on mono layouts resolve correctly.
+func (c *Compiler) defineGenericStructuralDefaults(file *ast.File) {
+	c.forEachConcreteGenericStructuralParent(file, func(named, iface *types.Named, subst map[*types.TypeParam]types.Type) {
+		c.defineConcreteStructuralDefaultBodies(file, named, iface, subst)
+	})
+}
+
+// forEachConcreteGenericStructuralParent invokes fn for every (concrete, iface)
+// pair where concrete is a non-generic user type in file that inherits default
+// methods from the generic structural interface instance iface, passing the
+// type-arg substitution derived from the parent reference.
+func (c *Compiler) forEachConcreteGenericStructuralParent(file *ast.File, fn func(named, iface *types.Named, subst map[*types.TypeParam]types.Type)) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil || len(named.TypeParams()) > 0 || named.IsStructural() {
+			continue
+		}
+		for _, pr := range named.Parents() {
+			// Only generic structural parents need this — non-generic interfaces
+			// compile their own default methods, which the vtable references.
+			if pr.Named.IsStructural() && len(pr.TypeArgs) > 0 {
+				subst := types.BuildSubstMap(pr.Named.TypeParams(), pr.TypeArgs)
+				// Augment with the parent interface chain's own type params (e.g.
+				// `Derived[int] is Base[T]` adds Base.T → int) so default bodies
+				// inherited transitively through grandparent interfaces resolve
+				// their type params instead of leaving them as fat-pointer
+				// placeholders (which crashes wrapOk / method ABI).
+				mergeParentSubst(pr.Named, subst)
+				fn(named, pr.Named, subst)
+			}
+		}
+	}
+}
+
+// defineConcreteStructuralDefaultBodies generates method bodies for the default
+// methods a non-generic concrete type inherits from a generic structural
+// interface. Mirrors defineStructuralDefaultBodies but without the mono-instance
+// context (no monoCtx, no instanceOwnedFuncs tag) — the concrete type is a plain
+// non-generic type whose functions live in the main IR.
+func (c *Compiler) defineConcreteStructuralDefaultBodies(file *ast.File, concrete, iface *types.Named, subst map[*types.TypeParam]types.Type) {
+	ifaceTD, ifaceModInfo := c.findTypeDeclAnyFile(iface.Obj().Name())
+	if ifaceTD == nil {
+		return
+	}
+	if ifaceModInfo != nil {
+		savedInfo := c.info
+		c.info = ifaceModInfo
+		defer func() { c.info = savedInfo }()
+	}
+	for _, md := range ifaceTD.Methods {
+		if md.Body == nil {
+			continue
+		}
+		m := c.lookupAnyMethod(iface, md.Name, md.IsGetter, md.IsSetter)
+		if m == nil || m.IsAbstract() {
+			continue
+		}
+		if hasOwnMethod(concrete, md.Name) {
+			continue // concrete type overrides the default
+		}
+		if len(md.TypeParams) > 0 {
+			continue // generic methods require explicit type args at call sites
+		}
+		mangledName := mangleMethodName(concrete.Obj().Name(), md.Name, md.IsSetter)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue // not declared, or already defined
+		}
+		saved := c.saveState()
+		c.selfSubst = &selfSubstInfo{iface: iface, concrete: concrete}
+		c.typeSubst = subst
+		c.defineMethodFunc(md, m, fn, concrete)
+		c.restoreState(saved)
+	}
+	// Recurse into parent interfaces (e.g. Ordered inherits != from Equal).
+	for _, pr := range iface.Parents() {
+		if pr.Named.IsStructural() {
+			c.defineConcreteStructuralDefaultBodies(file, concrete, pr.Named, subst)
+		}
+	}
 }
 
 // ensureDefaultMethodsSynthesized triggers synthesis of default methods from a

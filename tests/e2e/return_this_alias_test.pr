@@ -1,0 +1,196 @@
+// T0893: a borrowing method/operator whose body is `return this` must hand back
+// an independent clone, not a value struct aliasing the receiver's heap instance.
+// Before the fix, the result and the receiver shared one allocation: reading the
+// result then the source printed 0 (early free of the shared instance).
+type Box {
+  int v;
+  dup() Box {
+    return this;
+  }
+}
+
+// Method `return this` — result and source must be independent (both read 11).
+return_this_method() `test {
+  d := Box(v: 11);
+  m := d.dup();
+  assert(m.v == 11, "m.v == 11");
+  assert(d.v == 11, "d.v == 11");
+}
+
+// Reversed read order — locks the regression from both directions.
+return_this_method_reversed() `test {
+  d := Box(v: 11);
+  m := d.dup();
+  assert(d.v == 11, "d.v == 11");
+  assert(m.v == 11, "m.v == 11");
+}
+
+type OpBox {
+  int v;
+  +(OpBox other) OpBox {
+    return this;
+  }
+}
+
+// Operator `return this` — also covers the `fatal: invalid free` repro.
+return_this_operator() `test {
+  d := OpBox(v: 11);
+  m := d + OpBox(v: 5);
+  assert(m.v == 11, "m.v == 11");
+  assert(d.v == 11, "d.v == 11");
+}
+
+type Chain {
+  int v;
+  self() Chain {
+    return this;
+  }
+  via() Chain {
+    return this.self();
+  }
+}
+
+// Chained `return this.self()` — the leaf clone makes the whole chain independent.
+return_this_chained() `test {
+  d := Chain(v: 11);
+  m := d.via();
+  assert(m.v == 11, "m.v == 11");
+  assert(d.v == 11, "d.v == 11");
+}
+
+type StrBox {
+  string s;
+  dup() StrBox {
+    return this;
+  }
+}
+
+// Heap type with a droppable field — exercises deep clone (no shared sub-alloc,
+// no double-free). Mutating one copy's view must not disturb the other.
+return_this_droppable_field() `test {
+  d := StrBox(s: "hello");
+  m := d.dup();
+  assert(m.s == "hello", "m.s == hello");
+  assert(d.s == "hello", "d.s == hello");
+}
+
+type Consumable {
+  int v;
+  consume(~this) Consumable {
+    return this;
+  }
+}
+
+// `~this` consuming method — genuine move, no clone, still leak-free.
+return_this_consume_moves() `test {
+  d := Consumable(v: 11);
+  m := d.consume();
+  assert(m.v == 11, "m.v == 11");
+}
+
+// Structural-interface operator `return this` — the operator result is typed as
+// the structural interface, so cleanup goes through the structural-free path
+// (not the normal drop path). The clone must still be registered for free, or it
+// leaks. Operators desugar to method calls and must be treated identically.
+type SNeg `structural {
+  int v;
+  -() SNeg {
+    return this;
+  }
+}
+type SNegItem is SNeg {
+  int v;
+}
+
+return_this_structural_operator() `test {
+  it := SNegItem(v: 8);
+  m := -it;
+  assert(m.v == 8, "m.v == 8");
+  assert(it.v == 8, "it.v == 8");
+}
+
+// Polymorphic `return this` — typeinfo clone dispatch must copy the concrete
+// subtype, not the abstract base.
+type Animal {
+  int legs;
+  clone_me() Animal {
+    return this;
+  }
+}
+type Dog is Animal {
+}
+
+return_this_polymorphic() `test {
+  d := Dog(legs: 4);
+  a := d.clone_me();
+  assert(a.legs == 4, "a.legs == 4");
+  assert(d.legs == 4, "d.legs == 4");
+}
+
+// Generic `return this` — the clone must be emitted in the monomorphized method
+// body (defineMonoMethods path), so each instantiation produces an independent copy.
+type GBox[T] {
+  T v;
+  dup() GBox[T] {
+    return this;
+  }
+}
+
+return_this_generic() `test {
+  d := GBox[int](v: 11);
+  m := d.dup();
+  assert(m.v == 11, "m.v == 11");
+  assert(d.v == 11, "d.v == 11");
+}
+
+type SAdd `structural {
+  int v;
+  +(SAdd other) SAdd {
+    return this;
+  }
+}
+type SAddItem is SAdd {
+  int v;
+}
+
+// Structural BINARY operator `return this` — exercises the BinaryExpr branch of
+// maybeRegisterStructuralFree (the structural-free path) alongside the unary case
+// above. The cloned operator result is owned and must be freed (no leak), while the
+// receiver stays intact.
+return_this_structural_binary_operator() `test {
+  a := SAddItem(v: 7);
+  m := a + SAddItem(v: 3);
+  assert(m.v == 7, "m.v == 7");
+  assert(a.v == 7, "a.v == 7");
+}
+
+type PBox {
+  int v;
+  dup() PBox {
+    return (this);
+  }
+}
+
+// `return (this)` — the parenthesized form (unwrapDestructureParens, T0582) must
+// take the same clone-on-return path as bare `return this`.
+return_this_parenthesized() `test {
+  d := PBox(v: 11);
+  m := d.dup();
+  assert(m.v == 11, "m.v == 11");
+  assert(d.v == 11, "d.v == 11");
+}
+
+type SConsumable {
+  string s;
+  consume(~this) SConsumable {
+    return this;
+  }
+}
+
+// `~this` consume with a droppable (heap) field — the move path (no clone) must
+// transfer ownership of the backing string exactly once: no double-free, no leak.
+return_this_consume_droppable_field() `test {
+  d := SConsumable(s: "hello");
+  m := d.consume();
+  assert(m.s == "hello", "m.s == hello");
+}

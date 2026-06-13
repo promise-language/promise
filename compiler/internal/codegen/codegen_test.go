@@ -8221,6 +8221,39 @@ func TestReturnThisValueType(t *testing.T) {
 	assertContains(t, ir, "load %promise_Point_v")
 }
 
+// T0893: a borrowing method whose body is bare `return this` must clone the
+// receiver instance so the returned owned value does not alias the receiver's
+// heap allocation (otherwise one binding's scope-drop frees memory the other
+// still reads). The clone shows up as a heapdup block in the method body.
+func TestReturnThisClonesBorrowedReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type BB { int v; dup() BB { return this; } }
+		main() { d := BB(v: 11); m := d.dup(); }
+	`)
+	assertContains(t, extractDefine(ir, "BB.dup"), "heapdup")
+}
+
+// T0893: a `~this` (owned/moved-in) receiver returning `this` is a genuine
+// ownership transfer — cloning would copy needlessly and leak the moved-in
+// instance. The method body must NOT contain a heapdup clone.
+func TestReturnThisOwnedReceiverDoesNotClone(t *testing.T) {
+	ir := generateIR(t, `
+		type BB { int v; consume(~this) BB { return this; } }
+		main() { d := BB(v: 11); m := d.consume(); }
+	`)
+	assertNotContains(t, extractDefine(ir, "BB.consume"), "heapdup")
+}
+
+// T0893: a method returning a borrow (`T&`) of `this` hands back a reference into
+// existing storage, not an owned copy — it must NOT clone.
+func TestReturnThisBorrowReturnDoesNotClone(t *testing.T) {
+	ir := generateIR(t, `
+		type BB { int v; ref() BB& { return this; } }
+		main() { d := BB(v: 11); r := d.ref(); }
+	`)
+	assertNotContains(t, extractDefine(ir, "BB.ref"), "heapdup")
+}
+
 // B0250: Assigning the result of a method that returns `this` must clear the
 // receiver's drop flag to prevent double-free (both variables share the same instance).
 func TestReturnThisClearsReceiverDropFlag(t *testing.T) {

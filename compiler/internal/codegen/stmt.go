@@ -2638,10 +2638,14 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 	if named == nil || !named.IsStructural() || named.IsValueType() {
 		return
 	}
-	// Only register when the RHS is a call expression that produces a fresh heap
-	// allocation (e.g., vec.iter(), iter.map(f)). Other RHS expressions — identifiers
-	// (borrow from existing variable), literals (value types, no heap alloc), member
-	// access (borrow) — should NOT get a free binding.
+	// Only register when the RHS produces a fresh heap allocation the variable
+	// owns. Call expressions (e.g., vec.iter(), iter.map(f)) qualify; so do
+	// overloaded operator expressions (e.g., `-it`, `a + b`) — a structural
+	// result type can only come from a user operator method, which returns an
+	// owned value (T0893: clone-on-`return this` makes operator results owned
+	// allocations that must be freed here). Other RHS expressions — identifiers
+	// (borrow from existing variable), literals (value types, no heap alloc),
+	// member access (borrow) — should NOT get a free binding.
 	// B0272: Unwrap error-handling wrappers (!, ^, ? {}) to find the inner call expression.
 	// Without this, failable structural interface returns leak their backing instance.
 	innerRHS := rhs
@@ -2662,7 +2666,10 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 		}
 		break
 	}
-	if _, isCall := innerRHS.(*ast.CallExpr); !isCall {
+	switch innerRHS.(type) {
+	case *ast.CallExpr, *ast.UnaryExpr, *ast.BinaryExpr:
+		// owned heap allocation — register the free binding below
+	default:
 		return
 	}
 	// Must be a struct alloca ({i8* vtable, i8* instance}) to extract instance ptr.
@@ -7508,6 +7515,23 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 	var result value.Value = constant.NewUndef(userValueType())
 	result = c.block.NewInsertValue(result, vtablePtr, 0)
 	result = c.block.NewInsertValue(result, val, 1)
+
+	// T0893: a borrowing method/operator whose body is `return this` (bare receiver)
+	// would otherwise hand back a value struct aliasing the receiver's heap instance —
+	// the result binding and the receiver then share the same mutable allocation, so
+	// one's scope-drop frees memory the other still reads. Clone the instance so the
+	// returned owned value is independent. The caller-side alias-clears (B0250/T0341/
+	// T0347) remain as harmless no-ops once the pointers differ.
+	//
+	// Skip when:
+	//   - the return type is a borrow (`T&`/`T~`): the caller expects a reference into
+	//     existing storage, not a copy (isRefType).
+	//   - the receiver is `~this` (RefMut): `this` is owned/moved-in, so `return this`
+	//     is a genuine ownership transfer — cloning would copy needlessly and leak the
+	//     moved-in instance (c.thisRecvIsOwned).
+	if !isRefType(retType) && !c.thisRecvIsOwned {
+		result = c.dupHeapValue(result, retType)
+	}
 	return result
 }
 

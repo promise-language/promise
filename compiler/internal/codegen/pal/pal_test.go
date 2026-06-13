@@ -4317,3 +4317,101 @@ func extractFuncBody(ir, name string) string {
 	}
 	return rest[:end]
 }
+
+// T0904: subprocess pipe fds are raw HANDLEs on Windows, not CRT fds. The
+// streaming Process path (pipe read/write/close) must operate on the HANDLE
+// directly (ReadFile/WriteFile/CloseHandle) rather than the CRT _read/_write/
+// _close used for real files — those abort the process on a non-CRT fd.
+
+func TestWindowsPALEmitPipeCloseUsesCloseHandle(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitPipeClose(module)
+
+	out := module.String()
+	if fn.Name() != "pal_pipe_close" {
+		t.Fatalf("expected pal_pipe_close, got %s", fn.Name())
+	}
+	if !strings.Contains(out, "define i32 @pal_pipe_close(i32 %fd)") {
+		t.Error("missing @pal_pipe_close definition")
+	}
+	// Must close via the Win32 CloseHandle, NOT the CRT _close.
+	if !strings.Contains(out, "call i32 @CloseHandle(") {
+		t.Error("pal_pipe_close must call @CloseHandle")
+	}
+	if strings.Contains(out, "@_close(") {
+		t.Error("pal_pipe_close must NOT call the CRT @_close (aborts on a raw HANDLE)")
+	}
+	// fd → HANDLE unpack: sext i32 then inttoptr.
+	if !strings.Contains(out, "inttoptr i64") {
+		t.Error("pal_pipe_close must unpack the i32 fd to a HANDLE via inttoptr")
+	}
+}
+
+func TestWindowsPALEmitPipeReadUsesReadFile(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitPipeRead(module)
+
+	out := module.String()
+	if fn.Name() != "pal_pipe_read" {
+		t.Fatalf("expected pal_pipe_read, got %s", fn.Name())
+	}
+	if !strings.Contains(out, "define i64 @pal_pipe_read(i32 %fd, i8* %buf, i64 %len)") {
+		t.Error("missing @pal_pipe_read definition")
+	}
+	if !strings.Contains(out, "call i32 @ReadFile(") {
+		t.Error("pal_pipe_read must call @ReadFile")
+	}
+	if strings.Contains(out, "@_read(") {
+		t.Error("pal_pipe_read must NOT call the CRT @_read")
+	}
+	// ERROR_BROKEN_PIPE (109) is treated as EOF (returns 0).
+	if !strings.Contains(out, "call i32 @GetLastError(") {
+		t.Error("pal_pipe_read must check @GetLastError to distinguish EOF from error")
+	}
+}
+
+func TestWindowsPALEmitPipeWriteUsesWriteFile(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitPipeWrite(module)
+
+	out := module.String()
+	if fn.Name() != "pal_pipe_write" {
+		t.Fatalf("expected pal_pipe_write, got %s", fn.Name())
+	}
+	if !strings.Contains(out, "define i64 @pal_pipe_write(i32 %fd, i8* %buf, i64 %len)") {
+		t.Error("missing @pal_pipe_write definition")
+	}
+	if !strings.Contains(out, "call i32 @WriteFile(") {
+		t.Error("pal_pipe_write must call @WriteFile")
+	}
+	if strings.Contains(out, "@_write(") {
+		t.Error("pal_pipe_write must NOT call the CRT @_write")
+	}
+}
+
+// On POSIX a pipe fd is an ordinary fd, so the pipe ops go through the same
+// read/write/close syscalls as files.
+func TestPosixPALEmitPipeOpsUseLibcSyscalls(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitPipeRead(module)
+	p.EmitPipeWrite(module)
+	p.EmitPipeClose(module)
+
+	out := module.String()
+	for _, want := range []string{
+		"define i64 @pal_pipe_read(i32 %fd, i8* %buf, i64 %len)",
+		"define i64 @pal_pipe_write(i32 %fd, i8* %buf, i64 %len)",
+		"define i32 @pal_pipe_close(i32 %fd)",
+		"call i64 @read(",
+		"call i64 @write(",
+		"call i32 @close(",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in POSIX pipe ops IR", want)
+		}
+	}
+}

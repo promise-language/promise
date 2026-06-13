@@ -670,6 +670,9 @@ func (p *WasmPAL) EmitUnsetEnv(module *ir.Module) *ir.Func    { return emitStubU
 func (p *WasmPAL) EmitChdir(module *ir.Module) *ir.Func       { return emitStubChdir(module) }
 func (p *WasmPAL) EmitSpawn(module *ir.Module) *ir.Func       { return emitStubSpawn(module) }
 func (p *WasmPAL) EmitReadPipe(module *ir.Module) *ir.Func    { return emitStubReadPipe(module) }
+func (p *WasmPAL) EmitPipeRead(module *ir.Module) *ir.Func    { return emitStubPipeRead(module) }
+func (p *WasmPAL) EmitPipeWrite(module *ir.Module) *ir.Func   { return emitStubPipeWrite(module) }
+func (p *WasmPAL) EmitPipeClose(module *ir.Module) *ir.Func   { return emitStubPipeClose(module) }
 func (p *WasmPAL) EmitWaitPid(module *ir.Module) *ir.Func     { return emitStubWaitPid(module) }
 func (p *WasmPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	return emitStubSpawnStreaming(module)

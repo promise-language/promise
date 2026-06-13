@@ -1,0 +1,115 @@
+// T0892: The receiver-alias-clear machinery lived only in the var-decl paths;
+// the assignment path (`m = expr`) had none. Reassigning a variable from an
+// operator/method result that returns the borrowed receiver (`return this`)
+// aliased the operand, so both bindings freed the same instance at scope exit →
+// double-free. These tests exercise the assignment path on the zero-leak gate:
+// they only assert the RESULT binding's value (reading an operand after an
+// aliasing return is a separate latent defect noted in T0882's plan).
+// A heap user type with a binary operator that returns the borrowed receiver.
+type BB `doc("Heap user type whose + operator returns the borrowed receiver.") {
+  int v;
+  +(BB o) BB {
+    return this;
+  }
+}
+
+// A heap user type with a method that returns the borrowed receiver.
+type DD `doc("Heap user type whose dup() returns the borrowed receiver.") {
+  int v;
+  dup() DD {
+    return this;
+  }
+  method_this_origin() DD {
+    m := DD(v: 0);
+    m = this.dup();
+    return m;
+  }
+}
+
+// A heap user type with a method that allocates a fresh instance.
+type FF `doc("Heap user type whose fresh() allocates a new instance.") {
+  int v;
+  fresh() FF {
+    return FF(v: 99);
+  }
+}
+
+// A generic heap user type with a binary operator that returns the borrowed receiver.
+type GB[T] `doc("Generic heap user type whose + operator returns the borrowed receiver.") {
+  T v;
+  +(GB[T] o) GB[T] {
+    return this;
+  }
+}
+
+// Binary operator returning `this`, assignment to an inferred local with a live
+// old value. Without the fix `a` and `m` both free the same instance.
+assign_binary_operator() `test {
+  a := BB(v: 11);
+  b := BB(v: 3);
+  m := BB(v: 0);
+  m = a + b;
+  assert(m.v == 11, "binary operator assignment result");
+}
+
+// Same, but the target is explicitly typed.
+assign_binary_operator_typed() `test {
+  a := BB(v: 7);
+  b := BB(v: 2);
+  BB m = BB(v: 0);
+  m = a + b;
+  assert(m.v == 7, "typed binary operator assignment result");
+}
+
+// Method returning `this`, assignment form — proves the (operator-independent)
+// method-level gap is closed.
+assign_method_return_this() `test {
+  d := DD(v: 5);
+  m := DD(v: 0);
+  m = d.dup();
+  assert(m.v == 5, "method return-this assignment result");
+}
+
+// Self-alias: `m = m + b` where + returns `this`. The old-value drop must be
+// skipped at runtime (the result aliases it) and m must own the instance once.
+assign_self_alias() `test {
+  b := BB(v: 4);
+  m := BB(v: 21);
+  m = m + b;
+  assert(m.v == 21, "self-alias assignment result");
+}
+
+// Self-alias via method.
+assign_self_alias_method() `test {
+  m := DD(v: 13);
+  m = m.dup();
+  assert(m.v == 13, "self-alias method assignment result");
+}
+
+// Fresh-value reassignment: the old value must STILL be dropped (the result does
+// not alias the operand). The zero-leak gate catches a regression where the
+// alias-clear wrongly fires and leaks the old instance or the operand.
+assign_fresh_value() `test {
+  f := FF(v: 1);
+  m := FF(v: 2);
+  m = f.fresh();
+  assert(m.v == 99, "fresh-value assignment result");
+  assert(f.v == 1, "operand untouched by fresh-value assignment");
+}
+
+// This-origin: a method-body local reassigned from `this.dup()` (chain rooted at
+// `this`). m must not free the borrowed `this`.
+assign_this_origin() `test {
+  d := DD(v: 8);
+  r := d.method_this_origin();
+  assert(r.v == 8, "this-origin assignment result");
+}
+
+// Generic type variant — exercises the monomorphized operator path.
+assign_generic_operator() `test {
+  a := GB[int](v: 17);
+  b := GB[int](v: 5);
+  m := GB[int](v: 0);
+  m = a + b;
+  assert(m.v == 17, "generic operator assignment result");
+}

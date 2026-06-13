@@ -103,6 +103,19 @@ type PAL interface {
 	// EmitReadPipe defines @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
 	// Reads fd to EOF into malloc'd buffer, then closes fd. Caller must free out_buf.
 	EmitReadPipe(module *ir.Module) *ir.Func
+	// EmitPipeRead defines @pal_pipe_read(i32 fd, i8* buf, i64 len) → i64
+	// Single read from a subprocess pipe fd (streaming Process path). On POSIX a
+	// pipe fd is an ordinary fd (same syscall as pal_file_read); on Windows it is a
+	// raw HANDLE, so this uses ReadFile. Returns bytes read (0 at EOF), negative on error.
+	EmitPipeRead(module *ir.Module) *ir.Func
+	// EmitPipeWrite defines @pal_pipe_write(i32 fd, i8* buf, i64 len) → i64
+	// Single write to a subprocess pipe fd (Windows: WriteFile on the HANDLE).
+	// Returns bytes written, negative on error.
+	EmitPipeWrite(module *ir.Module) *ir.Func
+	// EmitPipeClose defines @pal_pipe_close(i32 fd) → i32
+	// Closes a subprocess pipe fd. On Windows the fd is a raw HANDLE, so this uses
+	// CloseHandle (NOT the CRT _close, which aborts on a non-CRT fd). 0=ok, -1=error.
+	EmitPipeClose(module *ir.Module) *ir.Func
 	// EmitWaitPid defines @pal_wait_pid(i32 pid) → i32
 	// Waits for child process. Returns exit code (0-255) on success, -1 on error.
 	// Retries on EINTR.
@@ -1198,6 +1211,40 @@ func emitStubFileWrite(module *ir.Module) *ir.Func {
 // emitStubFileClose returns -1.
 func emitStubFileClose(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_file_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubPipeRead returns -1 (no subprocesses on WASM).
+func emitStubPipeRead(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_pipe_read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
+// emitStubPipeWrite returns -1 (no subprocesses on WASM).
+func emitStubPipeWrite(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_pipe_write", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
+// emitStubPipeClose returns -1 (no subprocesses on WASM).
+func emitStubPipeClose(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_pipe_close", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")

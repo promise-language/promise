@@ -301,6 +301,9 @@ type Compiler struct {
 	palChdir                   *ir.Func // @pal_chdir(i8* path) → i32
 	palSpawn                   *ir.Func // @pal_spawn(i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd) → i32
 	palReadPipe                *ir.Func // @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
+	palPipeRead                *ir.Func // @pal_pipe_read(i32 fd, i8* buf, i64 len) → i64 (Windows: ReadFile)
+	palPipeWrite               *ir.Func // @pal_pipe_write(i32 fd, i8* buf, i64 len) → i64 (Windows: WriteFile)
+	palPipeClose               *ir.Func // @pal_pipe_close(i32 fd) → i32 (Windows: CloseHandle)
 	palWaitPid                 *ir.Func // @pal_wait_pid(i32 pid) → i32
 	palSpawnStreaming          *ir.Func // @pal_spawn_streaming(..., i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
 	palSpawnEnv                *ir.Func // @pal_spawn_env(i8* program, i8** argv, i8** envp, i8* cwd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
@@ -2063,6 +2066,9 @@ func (c *Compiler) declareIntrinsics() {
 	c.palChdir = p.EmitChdir(c.module)
 	c.palSpawn = p.EmitSpawn(c.module)
 	c.palReadPipe = p.EmitReadPipe(c.module)
+	c.palPipeRead = p.EmitPipeRead(c.module)
+	c.palPipeWrite = p.EmitPipeWrite(c.module)
+	c.palPipeClose = p.EmitPipeClose(c.module)
 	c.palWaitPid = p.EmitWaitPid(c.module)
 	c.palSpawnStreaming = p.EmitSpawnStreaming(c.module)
 	c.palSpawnEnv = p.EmitSpawnEnv(c.module)

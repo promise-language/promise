@@ -507,6 +507,80 @@ func (p *PosixPAL) EmitFileClose(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitPipeRead defines @pal_pipe_read. On POSIX a subprocess pipe fd is an
+// ordinary file descriptor, so this is the same read(2) call as pal_file_read.
+func (p *PosixPAL) EmitPipeRead(module *ir.Module) *ir.Func {
+	readFn := getOrDeclareFunc(module, "read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("nbyte", irtypes.I64))
+
+	fn := module.NewFunc("pal_pipe_read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(readFn, fn.Params[0], fn.Params[1], fn.Params[2])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I64, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI64(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitPipeWrite defines @pal_pipe_write. On POSIX a pipe fd is an ordinary fd, so
+// this is the same write(2) call as pal_file_write.
+func (p *PosixPAL) EmitPipeWrite(module *ir.Module) *ir.Func {
+	writeFn := getOrDeclareFunc(module, "write", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+
+	fn := module.NewFunc("pal_pipe_write", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(writeFn, fn.Params[0], fn.Params[1], fn.Params[2])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I64, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI64(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
+// EmitPipeClose defines @pal_pipe_close. On POSIX a pipe fd is an ordinary fd, so
+// this is the same close(2) call as pal_file_close.
+func (p *PosixPAL) EmitPipeClose(module *ir.Module) *ir.Func {
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+
+	fn := module.NewFunc("pal_pipe_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(closeFn, fn.Params[0])
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
+	return fn
+}
+
 // EmitFileSeek declares libc @lseek and defines @pal_file_seek.
 func (p *PosixPAL) EmitFileSeek(module *ir.Module) *ir.Func {
 	lseekFn := getOrDeclareFunc(module, "lseek", irtypes.I64,

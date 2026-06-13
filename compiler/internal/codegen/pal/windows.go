@@ -1783,6 +1783,119 @@ func (p *WindowsPAL) EmitReadPipe(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitPipeRead defines @pal_pipe_read on Windows using ReadFile.
+// Signature: @pal_pipe_read(i32 fd, i8* buf, i64 len) → i64
+// The fd is a raw pipe HANDLE packed as i32 (NOT a CRT fd), so this must use
+// ReadFile rather than the CRT _read. Returns bytes read, 0 at EOF (a broken pipe
+// once the write end is closed), or -1 on other errors.
+func (p *WindowsPAL) EmitPipeRead(module *ir.Module) *ir.Func {
+	readFile := getOrDeclareFunc(module, "ReadFile", irtypes.I32,
+		ir.NewParam("hFile", irtypes.I8Ptr),
+		ir.NewParam("lpBuffer", irtypes.I8Ptr),
+		ir.NewParam("nNumberOfBytesToRead", irtypes.I32),
+		ir.NewParam("lpNumberOfBytesRead", irtypes.NewPointer(irtypes.I32)),
+		ir.NewParam("lpOverlapped", irtypes.I8Ptr))
+	getLastError := getOrDeclareFunc(module, "GetLastError", irtypes.I32)
+
+	fn := module.NewFunc("pal_pipe_read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	handle := winI32ToHandle(entry, fn.Params[0])
+	len32 := entry.NewTrunc(fn.Params[2], irtypes.I32)
+	bytesReadPtr := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), bytesReadPtr)
+	ret := entry.NewCall(readFile, handle, fn.Params[1], len32, bytesReadPtr, constant.NewNull(irtypes.I8Ptr))
+
+	failed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	failBlk := fn.NewBlock(".fail")
+	entry.NewCondBr(failed, failBlk, okBlk)
+
+	// ReadFile success: return bytes read (may be 0 at EOF).
+	nRead := okBlk.NewLoad(irtypes.I32, bytesReadPtr)
+	nRead64 := okBlk.NewZExt(nRead, irtypes.I64)
+	okBlk.NewRet(nRead64)
+
+	// ReadFile failure: a closed write end yields ERROR_BROKEN_PIPE (109) — that is
+	// a normal EOF, so return 0. Any other error returns -1.
+	errCode := failBlk.NewCall(getLastError)
+	isBrokenPipe := failBlk.NewICmp(enum.IPredEQ, errCode, constant.NewInt(irtypes.I32, 109))
+	eofBlk := fn.NewBlock(".eof")
+	realErrBlk := fn.NewBlock(".real_err")
+	failBlk.NewCondBr(isBrokenPipe, eofBlk, realErrBlk)
+	eofBlk.NewRet(constant.NewInt(irtypes.I64, 0))
+	realErrBlk.NewRet(constant.NewInt(irtypes.I64, -1))
+
+	return fn
+}
+
+// EmitPipeWrite defines @pal_pipe_write on Windows using WriteFile.
+// Signature: @pal_pipe_write(i32 fd, i8* buf, i64 len) → i64
+// The fd is a raw pipe HANDLE packed as i32, so this uses WriteFile rather than
+// the CRT _write. Returns bytes written, or -1 on error.
+func (p *WindowsPAL) EmitPipeWrite(module *ir.Module) *ir.Func {
+	writeFile := getOrDeclareFunc(module, "WriteFile", irtypes.I32,
+		ir.NewParam("hFile", irtypes.I8Ptr),
+		ir.NewParam("lpBuffer", irtypes.I8Ptr),
+		ir.NewParam("nNumberOfBytesToWrite", irtypes.I32),
+		ir.NewParam("lpNumberOfBytesWritten", irtypes.NewPointer(irtypes.I32)),
+		ir.NewParam("lpOverlapped", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_pipe_write", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	handle := winI32ToHandle(entry, fn.Params[0])
+	len32 := entry.NewTrunc(fn.Params[2], irtypes.I32)
+	bytesWrittenPtr := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), bytesWrittenPtr)
+	ret := entry.NewCall(writeFile, handle, fn.Params[1], len32, bytesWrittenPtr, constant.NewNull(irtypes.I8Ptr))
+
+	failed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(failed, errBlk, okBlk)
+
+	nWritten := okBlk.NewLoad(irtypes.I32, bytesWrittenPtr)
+	nWritten64 := okBlk.NewZExt(nWritten, irtypes.I64)
+	okBlk.NewRet(nWritten64)
+
+	errBlk.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
+// EmitPipeClose defines @pal_pipe_close on Windows using CloseHandle.
+// Signature: @pal_pipe_close(i32 fd) → i32
+// The fd is a raw pipe HANDLE packed as i32. Passing it to the CRT _close aborts
+// the process (invalid CRT fd), so this must use CloseHandle. 0=ok, -1=error.
+func (p *WindowsPAL) EmitPipeClose(module *ir.Module) *ir.Func {
+	closeHandle := winDeclareCloseHandle(module)
+
+	fn := module.NewFunc("pal_pipe_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	handle := winI32ToHandle(entry, fn.Params[0])
+	ret := entry.NewCall(closeHandle, handle)
+
+	// CloseHandle returns 0 on failure, nonzero on success.
+	failed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(failed, errBlk, okBlk)
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
 // EmitWaitPid defines @pal_wait_pid on Windows using WaitForSingleObject + GetExitCodeProcess.
 // Signature: @pal_wait_pid(i32 pid) → i32
 // Takes a process handle (packed as i32), waits for exit, returns exit code or -1.

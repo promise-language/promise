@@ -6110,6 +6110,23 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			panic(fmt.Sprintf("codegen: undefined variable %q in assignment", target.Name))
 		}
 		if s.Op == ast.OpAssign {
+			// T0892: an operator/method RHS whose body is `return this` returns the
+			// borrowed receiver as an owned result, aliasing the operand. Resolve the
+			// receiver-origin the same way the two var-decl paths do (genTypedVarDecl /
+			// genInferredVarDecl), so the assignment path gets the same
+			// B0250/T0341/T0882 alias-clear it currently lacks. selfAliasOrigin marks
+			// the case where the operand IS the target (`m = m + b`), which needs the
+			// guarded drop-old below instead of an operand-clear.
+			var aliasOrigin ast.Expr
+			if call, ok := s.Value.(*ast.CallExpr); ok {
+				aliasOrigin = chainOriginExpr(call)
+			} else {
+				aliasOrigin = operatorReceiverOrigin(s.Value)
+			}
+			selfAliasOrigin := false
+			if id, ok := aliasOrigin.(*ast.IdentExpr); ok && id.Name == target.Name {
+				selfAliasOrigin = true
+			}
 			// Drop old value before reassignment (if target is droppable)
 			if binding, ok := c.dropBindings[target.Name]; ok {
 				// Skip self-assignment (would drop then store dangling pointer)
@@ -6137,6 +6154,35 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 					c.emitTupleDropCall(binding)
 				} else if binding.kind == bindingDropArray {
 					c.emitArrayDropCall(binding)
+				} else if selfAliasOrigin &&
+					(binding.kind == bindingFree || binding.kind == bindingDrop) &&
+					isUserValueStructType(binding.alloca.ElemType) &&
+					isUserValueStructType(val.Type()) {
+					// T0892: `m = m + b` / `m = m.dup()` where the operator/method
+					// returns `this`. The RHS is evaluated before this drop, so val
+					// already holds the (possibly aliasing) instance pointer. Skip the
+					// drop when it aliases the old value — otherwise we free the very
+					// instance val points to (UAF/double-free). Mirrors the runtime
+					// old-vs-new alias check the bindingDropString branch above performs.
+					// Covers both heap-user kinds: bindingFree (no drop method →
+					// pal_free) and bindingDrop (has a drop method).
+					oldVal := c.block.NewLoad(binding.alloca.ElemType, binding.alloca)
+					oldInst := c.block.NewExtractValue(oldVal, 1)
+					newInst := c.block.NewExtractValue(val, 1)
+					diffBlk := c.newBlock("reassign.self.diff")
+					mergeBlk := c.newBlock("reassign.self.merge")
+					isSame := c.block.NewICmp(enum.IPredEQ, oldInst, newInst)
+					c.block.NewCondBr(isSame, mergeBlk, diffBlk)
+					c.block = diffBlk
+					if binding.kind == bindingFree {
+						c.emitFreeCall(binding)
+					} else {
+						c.emitDropCall(binding)
+					}
+					if c.block.Term == nil {
+						c.block.NewBr(mergeBlk)
+					}
+					c.block = mergeBlk
 				} else if binding.kind == bindingFree {
 					c.emitFreeCall(binding)
 				} else {
@@ -6186,6 +6232,27 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// Clear drop flag on RHS if it's being moved
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
+			}
+			// T0892: clear the operand/receiver drop flag when the operator/method
+			// result aliases it (user operator/method whose body is `return this`).
+			// Mirrors the two var-decl paths. Skip structural targets — the view
+			// borrows the original, which must keep its drop flag (T0082); and skip
+			// the self-alias case (handled by the guarded drop-old above — clearing
+			// here would compare post-store and wrongly clear the target's own flag,
+			// leaking the instance).
+			if binding, ok := c.dropBindings[target.Name]; ok && !selfAliasOrigin {
+				structuralTarget := false
+				if n := extractNamed(targetType); n != nil && n.IsStructural() {
+					structuralTarget = true
+				}
+				if !structuralTarget {
+					switch origin := aliasOrigin.(type) {
+					case *ast.IdentExpr:
+						c.maybeClearReceiverDropFlag(val, origin.Name, exprType)
+					case *ast.ThisExpr:
+						c.maybeClearBindingDropFlagOnThisAlias(val, binding.dropFlag, exprType)
+					}
+				}
 			}
 			// T0379/T0381: when RHS static type is `T&`/`T~`, override the
 			// unconditional re-arm above. The borrow returns a non-owning

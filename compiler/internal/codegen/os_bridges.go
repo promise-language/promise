@@ -893,7 +893,9 @@ func (c *Compiler) definePipeReadBytesBody(fn *ir.Func) {
 	dataPtr, dataLen := extractVectorDataLen(entry, vecPtr)
 
 	c.emitEnterSyscall(entry)
-	n := entry.NewCall(c.palFileRead, fdI32, dataPtr, dataLen)
+	// T0904: pipe fds are raw HANDLEs on Windows, so use the pipe (ReadFile) op,
+	// not the CRT _read of pal_file_read which aborts on a non-CRT fd.
+	n := entry.NewCall(c.palPipeRead, fdI32, dataPtr, dataLen)
 	c.emitExitSyscall(entry)
 
 	c.storeIntResult(entry, sret, n)
@@ -914,7 +916,8 @@ func (c *Compiler) definePipeWriteBytesBody(fn *ir.Func) {
 	dataPtr, dataLen := extractVectorDataLen(entry, vecPtr)
 
 	c.emitEnterSyscall(entry)
-	written := entry.NewCall(c.palFileWrite, fdI32, dataPtr, dataLen)
+	// T0904: pipe fds are raw HANDLEs on Windows — use the pipe (WriteFile) op.
+	written := entry.NewCall(c.palPipeWrite, fdI32, dataPtr, dataLen)
 	c.emitExitSyscall(entry)
 
 	c.storeIntResult(entry, sret, written)
@@ -932,7 +935,9 @@ func (c *Compiler) definePipeCloseBody(fn *ir.Func) {
 	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
 
 	c.emitEnterSyscall(entry)
-	rc := entry.NewCall(c.palFileClose, fdI32)
+	// T0904: pipe fds are raw HANDLEs on Windows — use CloseHandle (pal_pipe_close),
+	// not the CRT _close of pal_file_close which aborts the process on a non-CRT fd.
+	rc := entry.NewCall(c.palPipeClose, fdI32)
 	c.emitExitSyscall(entry)
 
 	rcI64 := entry.NewSExt(rc, irtypes.I64)

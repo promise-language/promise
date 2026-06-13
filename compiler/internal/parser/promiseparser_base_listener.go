@@ -596,6 +596,12 @@ func (s *BasePromiseParserListener) EnterExclusiveRangeExpr(ctx *ExclusiveRangeE
 // ExitExclusiveRangeExpr is called when production exclusiveRangeExpr is exited.
 func (s *BasePromiseParserListener) ExitExclusiveRangeExpr(ctx *ExclusiveRangeExprContext) {}
 
+// EnterErrorBareExpr is called when production errorBareExpr is entered.
+func (s *BasePromiseParserListener) EnterErrorBareExpr(ctx *ErrorBareExprContext) {}
+
+// ExitErrorBareExpr is called when production errorBareExpr is exited.
+func (s *BasePromiseParserListener) ExitErrorBareExpr(ctx *ErrorBareExprContext) {}
+
 // EnterMemberAccessExpr is called when production memberAccessExpr is entered.
 func (s *BasePromiseParserListener) EnterMemberAccessExpr(ctx *MemberAccessExprContext) {}
 

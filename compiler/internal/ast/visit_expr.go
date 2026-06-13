@@ -311,6 +311,28 @@ func (b *Builder) VisitErrorPanicExpr(ctx *parser.ErrorPanicExprContext) interfa
 	}
 }
 
+// VisitErrorBareExpr handles a bare postfix `?` (e.g. `foo()?`), which is NOT a
+// valid Promise operator (T0867). Promise intentionally has no Rust-style bare
+// `?`. Emit a teaching diagnostic pointing at the explicit forms, then return
+// the inner expression so the rest of the AST stays well-formed (compilation
+// already aborts because b.errors is non-empty).
+func (b *Builder) VisitErrorBareExpr(ctx *parser.ErrorBareExprContext) interface{} {
+	pos := b.posFromToken(ctx.QUESTION().GetSymbol()) // point at the `?`
+	// Lead line is context-aware: inside a failable (`!`) function a bare call
+	// already auto-propagates, so tell the user to just drop the `?`; otherwise
+	// explain that auto-propagation only happens in a failable function.
+	lead := "  - inside a failable (`!`) function, a bare call already auto-propagates:  foo()"
+	if b.inFailableFunc {
+		lead = "  - drop the `?` — inside a failable (`!`) function a bare call already auto-propagates:  foo()"
+	}
+	b.errorf(pos, "%s", "bare `?` is not an error-handling operator in Promise\n"+
+		lead+"\n"+
+		"  - to propagate explicitly:          foo()?^\n"+
+		"  - to panic on error (prototyping):  foo()?!\n"+
+		"  - to recover from the error:        foo()? e { ... }")
+	return b.visitExpr(ctx.Expression())
+}
+
 func (b *Builder) VisitOptionalUnwrapExpr(ctx *parser.OptionalUnwrapExprContext) interface{} {
 	return &OptionalUnwrapExpr{
 		nodeBase: b.baseFromContext(ctx),
@@ -498,12 +520,18 @@ func (b *Builder) VisitLambdaExpr(ctx *parser.LambdaExprContext) interface{} {
 		node.ReturnType = b.visitTypeRef(tr)
 	}
 
-	// Body: block or expression
+	// Body: block or expression. A bare call inside a lambda does NOT
+	// auto-propagate to the enclosing function (the lambda has its own
+	// failability, inferred later by sema), so reset inFailableFunc while
+	// visiting the body to avoid a false "drop the `?`" diagnostic (T0867).
+	prev := b.inFailableFunc
+	b.inFailableFunc = false
 	if blk := ctx.Block(); blk != nil {
 		node.Body = b.visitBlock(blk)
 	} else if expr := ctx.Expression(); expr != nil {
 		node.ExprBody = b.visitExpr(expr)
 	}
+	b.inFailableFunc = prev
 
 	return node
 }
@@ -588,11 +616,18 @@ func (b *Builder) VisitGoExpression(ctx *parser.GoExpressionContext) interface{}
 
 func (b *Builder) VisitGoExpr(ctx *parser.GoExprContext) interface{} {
 	node := &GoExpr{nodeBase: b.baseFromContext(ctx)}
+	// A goroutine body runs detached — a bare call inside it does NOT
+	// auto-propagate to the spawning (`!`) function, so reset inFailableFunc
+	// while visiting it to avoid a false "drop the `?`" lead (T0867), same as
+	// for lambda bodies.
+	prev := b.inFailableFunc
+	b.inFailableFunc = false
 	if blk := ctx.Block(); blk != nil {
 		node.Block = b.visitBlock(blk)
 	} else if expr := ctx.Expression(); expr != nil {
 		node.Expr = b.visitExpr(expr)
 	}
+	b.inFailableFunc = prev
 	return node
 }
 
@@ -729,7 +764,15 @@ func (b *Builder) parseInterpolationExpr(text string, outerLine, outerCol int) E
 		b.errorf(pos, "invalid expression in string interpolation")
 		return nil
 	}
+	// Errors emitted during Accept (e.g. the bare-`?` diagnostic, T0867) carry
+	// interpolation-relative positions; activate the offset so errorf maps them
+	// back to the real source. Saved/restored to compose with nested interp.
+	prevActive, prevLine, prevCol := b.interpActive, b.interpLineOffset, b.interpColOffset
+	b.interpActive = true
+	b.interpLineOffset = outerLine - 1
+	b.interpColOffset = outerCol
 	result := tree.Accept(b)
+	b.interpActive, b.interpLineOffset, b.interpColOffset = prevActive, prevLine, prevCol
 	if expr, ok := result.(Expr); ok {
 		offsetExprPositions(expr, outerLine-1, outerCol)
 		return expr

@@ -252,6 +252,144 @@ func TestOldFailableSyntaxRejected(t *testing.T) {
 	}
 }
 
+// buildErrs parses src and runs the AST builder, returning the accumulated
+// builder errors (it does not fail the test on errors — callers assert on them).
+func buildErrs(t *testing.T, src string) []error {
+	t.Helper()
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	_, errs := Build("test.pr", tree)
+	return errs
+}
+
+// TestBareQuestionRejected verifies the bare postfix `?` teaching diagnostic
+// (T0867): `foo()?` is not a valid Promise operator, and the error message must
+// point at the explicit forms (`?^`, `?!`, handler). The message is context
+// aware — inside a failable function it leads with "drop the `?`".
+func TestBareQuestionRejected(t *testing.T) {
+	const generic = "inside a failable (`!`) function, a bare call already auto-propagates"
+	const dropLead = "drop the `?` — inside a failable (`!`) function"
+	tests := []struct {
+		name     string
+		src      string
+		wantMsgs []string // all must be present
+		notMsgs  []string // none may be present
+	}{
+		{
+			name:     "non_failable_func",
+			src:      `f() { x := getValue()?; }`,
+			wantMsgs: []string{"bare `?` is not an error-handling operator in Promise", generic},
+			notMsgs:  []string{dropLead},
+		},
+		{
+			name:     "failable_func_leads_with_drop",
+			src:      `g!() int { x := h()?; return x; }`,
+			wantMsgs: []string{"bare `?` is not an error-handling operator in Promise", dropLead},
+		},
+		{
+			// The context-aware lead must work for failable methods too, not
+			// just free functions (visitMemberBodyFailable wires all decl sites).
+			name:     "failable_method_leads_with_drop",
+			src:      `type T { m!() int { x := h()?; return x; } }`,
+			wantMsgs: []string{"bare `?` is not an error-handling operator in Promise", dropLead},
+		},
+		{
+			name:     "failable_getter_leads_with_drop",
+			src:      `type T { get x! int { y := h()?; return y; } }`,
+			wantMsgs: []string{"bare `?` is not an error-handling operator in Promise", dropLead},
+		},
+		{
+			name:     "failable_setter_leads_with_drop",
+			src:      `type T { set x!(int v) { h()?; } }`,
+			wantMsgs: []string{"bare `?` is not an error-handling operator in Promise", dropLead},
+		},
+		{
+			// A non-failable method must use the generic lead, confirming the
+			// inFailableFunc flag is reset per-declaration (no leak from a
+			// preceding failable decl).
+			name:     "non_failable_method_uses_generic",
+			src:      `type T { m() int { x := h()?; return x; } }`,
+			wantMsgs: []string{"bare `?` is not an error-handling operator in Promise", generic},
+			notMsgs:  []string{dropLead},
+		},
+		{
+			name:     "lambda_inside_failable_uses_generic",
+			src:      `g!() int { f := |x| { y := h()?; return y; }; return 0; }`,
+			wantMsgs: []string{"bare `?` is not an error-handling operator in Promise", generic},
+			notMsgs:  []string{dropLead},
+		},
+		{
+			// A goroutine body is detached — it does not auto-propagate to the
+			// spawning failable function, so the message must use the generic
+			// lead, not "drop the `?`".
+			name:     "go_block_inside_failable_uses_generic",
+			src:      `g!() int { go { y := h()?; }; return 0; }`,
+			wantMsgs: []string{"bare `?` is not an error-handling operator in Promise", generic},
+			notMsgs:  []string{dropLead},
+		},
+		{
+			name:     "inside_string_interpolation",
+			src:      `f() { s := "${g()?}"; }`,
+			wantMsgs: []string{"bare `?` is not an error-handling operator in Promise"},
+			notMsgs:  []string{"invalid expression in string interpolation"},
+		},
+		{
+			// The interpolation is re-parsed in its own input stream; the error
+			// position must be mapped back to the real source line/column
+			// (T0865/T0867), not reported relative to the interpolation text.
+			name:     "interpolation_position_mapped_to_source",
+			src:      "f() {\n  s := \"x=${g()?}\";\n}",
+			wantMsgs: []string{"test.pr:2:15: bare `?` is not an error-handling operator in Promise"},
+			notMsgs:  []string{"invalid expression in string interpolation", "test.pr:1:"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := buildErrs(t, tt.src)
+			if len(errs) == 0 {
+				t.Fatalf("expected error for bare `?`, got none")
+			}
+			joined := ""
+			for _, e := range errs {
+				joined += e.Error() + "\n"
+			}
+			for _, want := range tt.wantMsgs {
+				if !strings.Contains(joined, want) {
+					t.Errorf("expected error containing %q, got: %v", want, errs)
+				}
+			}
+			for _, notWant := range tt.notMsgs {
+				if strings.Contains(joined, notWant) {
+					t.Errorf("did not expect error containing %q, got: %v", notWant, errs)
+				}
+			}
+		})
+	}
+}
+
+// TestValidErrorOpsStillParse guards that adding the bare-`?` grammar
+// alternative (T0867) did not break the three valid postfix error forms.
+func TestValidErrorOpsStillParse(t *testing.T) {
+	srcs := []string{
+		`g!() int { x := h()?^; return x; }`,
+		`g!() int { x := h()?!; return x; }`,
+		`g() int { x := h()? e { return 0; }; return x; }`,
+		`g() int { x := obj.foo()?!.bar()?^.baz; return x; }`,
+	}
+	for _, src := range srcs {
+		t.Run(src, func(t *testing.T) {
+			if errs := buildErrs(t, src); len(errs) > 0 {
+				t.Fatalf("expected no build errors for %q, got: %v", src, errs)
+			}
+		})
+	}
+}
+
 // TestBuildTypeDecl verifies type declaration AST structure.
 func TestBuildTypeDecl(t *testing.T) {
 	tests := []struct {

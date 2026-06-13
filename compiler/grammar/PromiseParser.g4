@@ -439,6 +439,7 @@ expression
     | expression QUESTION bindingName? (IS IDENT typeArgs?)? (block (ELSE bindingName? block | BANG)? | FAT_ARROW expression)  # errorHandlerExpr
     | expression QUESTION BANG                                 # errorPanicExpr
     | expression QUESTION CARET                                # errorPropagateExpr
+    | expression QUESTION                                      # errorBareExpr   // T0867: diagnosed in AST builder
     | expression BANG                                          # optionalUnwrapExpr
 
     // Precedence 2: Unary prefix

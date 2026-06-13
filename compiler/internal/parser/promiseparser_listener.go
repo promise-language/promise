@@ -295,6 +295,9 @@ type PromiseParserListener interface {
 	// EnterExclusiveRangeExpr is called when entering the exclusiveRangeExpr production.
 	EnterExclusiveRangeExpr(c *ExclusiveRangeExprContext)
 
+	// EnterErrorBareExpr is called when entering the errorBareExpr production.
+	EnterErrorBareExpr(c *ErrorBareExprContext)
+
 	// EnterMemberAccessExpr is called when entering the memberAccessExpr production.
 	EnterMemberAccessExpr(c *MemberAccessExprContext)
 
@@ -774,6 +777,9 @@ type PromiseParserListener interface {
 
 	// ExitExclusiveRangeExpr is called when exiting the exclusiveRangeExpr production.
 	ExitExclusiveRangeExpr(c *ExclusiveRangeExprContext)
+
+	// ExitErrorBareExpr is called when exiting the errorBareExpr production.
+	ExitErrorBareExpr(c *ErrorBareExprContext)
 
 	// ExitMemberAccessExpr is called when exiting the memberAccessExpr production.
 	ExitMemberAccessExpr(c *MemberAccessExprContext)

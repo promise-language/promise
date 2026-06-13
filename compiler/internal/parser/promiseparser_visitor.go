@@ -295,6 +295,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#exclusiveRangeExpr.
 	VisitExclusiveRangeExpr(ctx *ExclusiveRangeExprContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#errorBareExpr.
+	VisitErrorBareExpr(ctx *ErrorBareExprContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#memberAccessExpr.
 	VisitMemberAccessExpr(ctx *MemberAccessExprContext) interface{}
 

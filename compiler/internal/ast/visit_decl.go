@@ -100,7 +100,7 @@ func (b *Builder) visitTopLevelGetterDecl(ctx *parser.GetterDeclContext) *FuncDe
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
 	}
 	if mb := ctx.MemberBody(); mb != nil {
-		node.Body = b.visitMemberBody(mb, true)
+		node.Body = b.visitMemberBodyFailable(mb, true, node.ReturnType)
 	}
 	return node
 }
@@ -129,7 +129,7 @@ func (b *Builder) visitTopLevelSetterDecl(ctx *parser.SetterDeclContext) *FuncDe
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
 	}
 	if mb := ctx.MemberBody(); mb != nil {
-		node.Body = b.visitMemberBody(mb, false)
+		node.Body = b.visitMemberBodyFailable(mb, false, node.ReturnType)
 	}
 	return node
 }
@@ -213,7 +213,7 @@ func (b *Builder) VisitMethodDecl(ctx *parser.MethodDeclContext) interface{} {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
 	}
 	if mb := ctx.MemberBody(); mb != nil {
-		node.Body = b.visitMemberBody(mb, true)
+		node.Body = b.visitMemberBodyFailable(mb, true, node.ReturnType)
 	}
 	return node
 }
@@ -246,7 +246,7 @@ func (b *Builder) VisitGetterDecl(ctx *parser.GetterDeclContext) interface{} {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
 	}
 	if mb := ctx.MemberBody(); mb != nil {
-		node.Body = b.visitMemberBody(mb, true)
+		node.Body = b.visitMemberBodyFailable(mb, true, node.ReturnType)
 	}
 	return node
 }
@@ -274,7 +274,7 @@ func (b *Builder) VisitSetterDecl(ctx *parser.SetterDeclContext) interface{} {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
 	}
 	if mb := ctx.MemberBody(); mb != nil {
-		node.Body = b.visitMemberBody(mb, false)
+		node.Body = b.visitMemberBodyFailable(mb, false, node.ReturnType)
 	}
 	return node
 }
@@ -296,6 +296,19 @@ func (b *Builder) visitMemberBody(ctx parser.IMemberBodyContext, isReturn bool) 
 		stmt = &ExprStmt{nodeBase: base, Expr: expr}
 	}
 	return &Block{nodeBase: base, Stmts: []Stmt{stmt}}
+}
+
+// visitMemberBodyFailable visits a function/method/getter/setter body while
+// tracking whether the enclosing declaration is failable (`!`). The failability
+// is read from rt, the already-built ReturnTypeSpec (nil/non-CanError = not
+// failable). b.inFailableFunc drives the context-aware bare-`?` diagnostic
+// (T0867); it is saved and restored so nested declarations don't leak state.
+func (b *Builder) visitMemberBodyFailable(ctx parser.IMemberBodyContext, isReturn bool, rt *ReturnTypeSpec) *Block {
+	prev := b.inFailableFunc
+	b.inFailableFunc = rt != nil && rt.CanError
+	blk := b.visitMemberBody(ctx, isReturn)
+	b.inFailableFunc = prev
+	return blk
 }
 
 func (b *Builder) VisitMethodName(ctx *parser.MethodNameContext) interface{} {
@@ -472,7 +485,7 @@ func (b *Builder) VisitFuncDecl(ctx *parser.FuncDeclContext) interface{} {
 	}
 	if mb := ctx.MemberBody(); mb != nil {
 		hasReturn := node.ReturnType != nil
-		node.Body = b.visitMemberBody(mb, hasReturn)
+		node.Body = b.visitMemberBodyFailable(mb, hasReturn, node.ReturnType)
 	}
 	return node
 }

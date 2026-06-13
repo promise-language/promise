@@ -196,9 +196,9 @@ func TestB0314AllocasDominateFailableCall(t *testing.T) {
 			return a / b;
 		}
 		main!() {
-			x := divide(10, 2)?;
+			x := divide(10, 2);
 			if x > 0 {
-				y := divide(x, 3)?;
+				y := divide(x, 3);
 			}
 		}
 	`)

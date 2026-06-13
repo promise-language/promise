@@ -391,6 +391,10 @@ func (v *BasePromiseParserVisitor) VisitExclusiveRangeExpr(ctx *ExclusiveRangeEx
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitErrorBareExpr(ctx *ErrorBareExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitMemberAccessExpr(ctx *MemberAccessExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }

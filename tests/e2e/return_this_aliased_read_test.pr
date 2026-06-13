@@ -1,0 +1,95 @@
+// T0889: when `m := d.dup()` aliases m and d to the same instance via a
+// `return this` method body, reading the result before the source must NOT
+// corrupt the source. The NLL early-drop pass (B0035) used to free the shared
+// instance at m's last use, leaving d's later read dangling. These tests pin the
+// fix: both aliases read intact regardless of read order, with zero leaks /
+// double-frees (enforced by the test harness's leak gate).
+type DB {
+  int v;
+  dup() DB {
+    return this;
+  }
+  drop(~this) {
+  }
+}
+
+// Heap-field type returning `this` — exercises the drop path that would
+// double-free / use-after-free if the alias were mishandled.
+type Bag {
+  string label;
+  int[] items;
+  share() Bag {
+    return this;
+  }
+  drop(~this) {
+  }
+}
+
+// Fresh-value return control: not aliasing, but the same call shape. The
+// early-drop suppression is harmless here — both reads must still be correct.
+type Fresh {
+  int v;
+  copy() Fresh {
+    return Fresh(v: this.v);
+  }
+  drop(~this) {
+  }
+}
+
+// Core repro: read the aliased RESULT first, then the SOURCE. Before the fix the
+// source read returned 0 (freed instance).
+test_result_then_source() `test {
+  d := DB(v: 11);
+  m := d.dup();
+  assert(m.v == 11, "result alias must read 11");
+  assert(d.v == 11, "source must still read 11 after result is read");
+}
+
+// Reverse order regression guard: source first, then result.
+test_source_then_result() `test {
+  d := DB(v: 22);
+  m := d.dup();
+  assert(d.v == 22, "source must read 22");
+  assert(m.v == 22, "result alias must read 22");
+}
+
+// Three-statement interleave: neither alias may be freed mid-scope.
+test_interleaved_reads() `test {
+  d := DB(v: 33);
+  m := d.dup();
+  a := m.v;
+  b := d.v;
+  c := m.v;
+  assert(a == 33, "first result read");
+  assert(b == 33, "source read between result reads");
+  assert(c == 33, "second result read");
+}
+
+// Heap-field type: both aliases must observe intact heap fields, and the single
+// shared instance must be freed exactly once at scope exit (leak gate enforces).
+test_heap_field_alias() `test {
+  b := Bag(label: "tag", items: [1, 2, 3]);
+  s := b.share();
+  assert(s.label == "tag", "result alias label intact");
+  assert(b.label == "tag", "source label intact after result read");
+  assert(s.items.len == 3, "result alias vector intact");
+  assert(b.items.len == 3, "source vector intact after result read");
+}
+
+// Fresh-value return: distinct instances, both read correctly.
+test_fresh_value_return() `test {
+  d := Fresh(v: 44);
+  m := d.copy();
+  assert(m.v == 44, "fresh copy reads 44");
+  assert(d.v == 44, "source reads 44");
+}
+
+// Chained `return this`: m aliases d through two hops. The codegen alias-clear
+// follows the chain back to d (chainOriginExpr); reading the result first must
+// still leave the source intact, with the shared instance freed exactly once.
+test_chained_return_this() `test {
+  d := DB(v: 55);
+  m := d.dup().dup();
+  assert(m.v == 55, "chained result alias reads 55");
+  assert(d.v == 55, "source intact after chained result read");
+}

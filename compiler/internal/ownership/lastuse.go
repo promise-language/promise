@@ -74,11 +74,11 @@ func (a *lastUseAnalyzer) analyzeBlock(block *ast.Block) {
 	for i, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *ast.TypedVarDecl:
-			if s.Name != "_" && !a.isVarCopyType(s.Value) {
+			if s.Name != "_" && !a.isVarCopyType(s.Value) && !a.initMayAliasReceiver(s.Value) {
 				vars = append(vars, varInfo{name: s.Name, declIdx: i})
 			}
 		case *ast.InferredVarDecl:
-			if s.Name != "_" && !a.isVarCopyType(s.Value) {
+			if s.Name != "_" && !a.isVarCopyType(s.Value) && !a.initMayAliasReceiver(s.Value) {
 				vars = append(vars, varInfo{name: s.Name, declIdx: i})
 			}
 		case *ast.DestructureVarDecl:
@@ -371,6 +371,74 @@ func (a *lastUseAnalyzer) exprBackRefCapturesVar(expr ast.Expr, name string) boo
 		return false
 	}
 	return false
+}
+
+// initMayAliasReceiver reports whether a var-decl initializer may produce a heap
+// value that aliases a still-live local (or `this`) via the `return this` pattern.
+// A borrowing method/operator whose body is `return this` returns the receiver's
+// instance pointer as an owned result, so `m := d.dup()` leaves `m` and `d`
+// pointing at the same allocation (the codegen receiver-alias-clear, B0250/T0341/
+// T0882, makes only one of them free it at scope exit). If such an `m` were
+// registered for NLL early drop (B0035), its last-use drop would free the shared
+// instance while `d` is still read afterward — use-after-free (T0889). Suppressing
+// early drop for these bindings defers the free to scope exit, where every alias is
+// already dead, so exactly one free still happens (no leak) and no live alias is
+// invalidated. Conservative: also fires for fresh-value returns from the same call
+// shape, which merely defers a harmless early drop to scope exit.
+func (a *lastUseAnalyzer) initMayAliasReceiver(init ast.Expr) bool {
+	if init == nil {
+		return false
+	}
+	typ := a.info.Types[init]
+	if typ == nil || isCopyType(typ) {
+		return false
+	}
+	switch aliasReceiverOrigin(init).(type) {
+	case *ast.IdentExpr, *ast.ThisExpr:
+		return true
+	}
+	return false
+}
+
+// aliasReceiverOrigin returns the receiver-origin expression of a method-call
+// chain or a user-defined operator dispatch — the value a `return this` body
+// would alias. Mirrors codegen's chainOriginExpr (method chains) and the operator
+// receiver-origin used by the operator alias-clear (binary left operand / prefix
+// unary operand), returning nil for the AST-level special operator forms
+// (&&, ||, ?:, .., ..=, <-) that never dispatch to a heap-aliasing user operator.
+// The operator (BinaryExpr/UnaryExpr) arm is forward-compatible with the codegen
+// operator alias-clear (T0882): on its own it only defers a harmless early drop
+// to scope exit, and it becomes load-bearing once the operator clear lands. T0889.
+func aliasReceiverOrigin(e ast.Expr) ast.Expr {
+	e = unwrapDestructureParens(e)
+	switch ex := e.(type) {
+	case *ast.CallExpr:
+		for {
+			m, ok := ex.Callee.(*ast.MemberExpr)
+			if !ok {
+				return nil
+			}
+			inner := unwrapDestructureParens(m.Target)
+			if c2, ok := inner.(*ast.CallExpr); ok {
+				ex = c2
+				continue
+			}
+			return inner
+		}
+	case *ast.BinaryExpr:
+		switch ex.Op {
+		case ast.BinAnd, ast.BinOr, ast.BinElvis,
+			ast.BinExclusiveRange, ast.BinInclusiveRange:
+			return nil
+		}
+		return unwrapDestructureParens(ex.Left)
+	case *ast.UnaryExpr:
+		if ex.Op == ast.UnaryReceive {
+			return nil
+		}
+		return unwrapDestructureParens(ex.Operand)
+	}
+	return nil
 }
 
 // isVarCopyType returns true if the expression's resolved type is a copy type.

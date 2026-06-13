@@ -7700,6 +7700,12 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 // (which the caller's switch will ignore). T0347.
 // T0582: peel ParenExpr at each step so `(w).f()`, `(w.f()).g()`, and
 // `((w).f()).g()` all resolve to the underlying receiver.
+//
+// NOTE: keep in sync with ownership.aliasReceiverOrigin, which mirrors this to
+// suppress NLL early-drop of the aliasing `return this` result (T0889). If which
+// origins trigger the alias-clear here change, the NLL mirror must change too —
+// otherwise codegen clears a drop flag the NLL pass does not suppress,
+// reintroducing the use-after-free.
 func chainOriginExpr(call *ast.CallExpr) ast.Expr {
 	var expr ast.Expr = call
 	for {

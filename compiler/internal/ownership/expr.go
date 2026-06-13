@@ -1349,13 +1349,88 @@ func (c *Checker) rejectForInSingleOwnerBindingMove(expr ast.Expr) bool {
 // *types.Array, so native container indexing and fixed-size array indexing
 // (which alias the slot's owned pointer) are NOT exempted and remain correctly
 // rejected by rejectIndexExprSingleOwnerMove.
-func (c *Checker) isUserIndexExpr(idx *ast.IndexExpr) bool {
-	named := extractNamedType(c.info.Types[idx.Target])
+//
+// A free function (not a *Checker method) so the last-use analyzer
+// (lastUseAnalyzer, which holds *sema.Info but is not a Checker) can share the
+// same classification when narrowing closure-aggregate borrows (T0816).
+func isUserIndexExpr(info *sema.Info, idx *ast.IndexExpr) bool {
+	named := extractNamedType(info.Types[idx.Target])
 	if named == nil {
 		return false
 	}
 	m := named.LookupMethod("[]")
 	return m != nil && !m.IsNative()
+}
+
+// closureAggregateBorrowSource reports whether expr reads a closure (function
+// value, `*types.Signature`) out of an *owning aggregate* — a struct/optional
+// closure field (`h.cb`, `h.cb!`, `h.cb as! (...)`) or a container element
+// (`v[0]`) — and, if so, returns the peeled *ast.MemberExpr / *ast.IndexExpr
+// access. Returns nil otherwise.
+//
+// Codegen treats such a read as a borrow (T0812): the local copies the closure's
+// fat pointer `{fn, env}` by value while the aggregate retains sole ownership of
+// the heap env (closures aren't Cloneable, so there is no env dup on read), and
+// registers no owning env-free binding for the local. That borrow is only sound
+// when the aggregate strictly outlives every use of the local. Marking the local
+// Borrowed lets the existing escape/consume checks (returnsBorrowAsOwned on
+// return, tryMoveConsume on re-store into another aggregate / `~`-param / store /
+// raise / yield / channel-send) reject the unsound escapes at compile time, while
+// the same-scope read-and-invoke case stays valid (calling a Borrowed closure is
+// not a consume). Kept intentionally identical in shape to codegen's
+// isClosureAggregateBorrow (codegen/stmt.go) so the two stay in lockstep:
+// ownership marks Borrowed iff codegen suppresses the owning env-free binding.
+//
+// The type gate (closure-typed result) is explicit here — codegen gets it for
+// free via maybeRegisterEnvFree's *types.Signature check; without it, non-closure
+// field reads (strings, vectors) would be misclassified. Owned-return shapes —
+// a getter returning a closure, or a user-defined non-native `[]` — are excluded
+// (the local owns a fresh closure and keeps its owning binding). A plain
+// *ast.IdentExpr source falls through to nil: a local move transfers ownership.
+//
+// Exposing the peeled access (rather than just a bool) lets callers recover the
+// aggregate's root variable via destructureBorrowRoot so a shared borrow can be
+// registered against it (T0816) — preventing the source aggregate from being
+// moved/consumed/reassigned while the borrowing local is still live, which would
+// free the env out from under it (UAF / double-free). A free function (not a
+// *Checker method) so the last-use analyzer (lastUseAnalyzer, which holds
+// *sema.Info but is not a Checker) can share the same classification.
+func closureAggregateBorrowSource(info *sema.Info, expr ast.Expr) ast.Expr {
+	if expr == nil {
+		return nil
+	}
+	// Type gate: only closure-typed reads alias a heap env.
+	if _, isSig := info.Types[expr].(*types.Signature); !isSig {
+		return nil
+	}
+	e := unwrapDestructureParens(expr)
+	// Peel a force-unwrap of an optional closure field: `h.cb!` or `h.cb as! (...)`.
+	if unwrap, ok := e.(*ast.OptionalUnwrapExpr); ok {
+		e = unwrapDestructureParens(unwrap.Expr)
+	} else if cast, ok := e.(*ast.CastExpr); ok && cast.Force {
+		subj := unwrapDestructureParens(cast.Expr)
+		if _, isOpt := info.Types[subj].(*types.Optional); isOpt {
+			e = subj
+		}
+	}
+	switch e.(type) {
+	case *ast.MemberExpr, *ast.IndexExpr:
+		// struct/optional closure field, or container element — aliasing read
+	default:
+		return nil
+	}
+	// Owned-return shapes: the local owns a fresh closure, keep its binding.
+	if mem, ok := e.(*ast.MemberExpr); ok {
+		if n := extractNamedType(info.Types[mem.Target]); n != nil {
+			if n.LookupGetter(mem.Field) != nil {
+				return nil
+			}
+		}
+	}
+	if idx, ok := e.(*ast.IndexExpr); ok && isUserIndexExpr(info, idx) {
+		return nil
+	}
+	return e
 }
 
 // rejectIndexExprSingleOwnerMove emits an error if expr is an IndexExpr whose
@@ -1394,7 +1469,7 @@ func (c *Checker) rejectIndexExprSingleOwnerMove(expr ast.Expr) bool {
 	// trackUserIndexResult already makes the owned operator return leak-safe at
 	// codegen. Native container/array indexing resolves to a native/nil `[]`
 	// (extractNamedType→nil for arrays) and stays correctly rejected below.
-	if c.isUserIndexExpr(idx) {
+	if isUserIndexExpr(c.info, idx) {
 		return false
 	}
 	c.errorf(idx.Pos(),

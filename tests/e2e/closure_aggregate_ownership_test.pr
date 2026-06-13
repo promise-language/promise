@@ -16,6 +16,19 @@
 // read aliases (borrows) the aggregate's heap env rather than registering an
 // owning env-free binding for the local, so the env is freed exactly once by the
 // aggregate's own drop. See the "escape-then-invoke (T0812)" section below.
+//
+// T0816: the borrow's lifetime is now enforced by ownership. The local bound by
+// `f := h.cb` (struct/optional field or container element) is Borrowed AND holds
+// a shared borrow on the source aggregate's root, so the unsound escapes are
+// rejected at compile time (no runtime test possible):
+//   - returning it past the aggregate's lifetime (`return f;`) — UAF on escape;
+//   - re-storing it into another owning aggregate (`CbHolder(cb: f)`) — double
+//     free;
+//   - moving/consuming or reassigning the source while the local is still live
+//     (`sink(h)` / `h = ...`) — frees the env out from under the local (UAF).
+// All compile-rejection cases are covered in the Go ownership tests (TestT0816*).
+// Same-scope read-and-invoke below stays valid, and consuming the source after
+// the local's last use stays valid via NLL narrowing.
 enum Cb {
   holds(() -> int cb), empty,
 }

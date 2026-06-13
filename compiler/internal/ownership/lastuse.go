@@ -784,11 +784,18 @@ func (a *lastUseAnalyzer) analyzeRefBlock(block *ast.Block, result map[ast.Stmt]
 	for i, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *ast.TypedVarDecl:
-			if s.Name != "_" && isRefTypeRef(s.Type) {
+			if s.Name != "_" &&
+				(isRefTypeRef(s.Type) || closureAggregateBorrowSource(a.info, s.Value) != nil) {
 				refVars = append(refVars, varInfo{name: s.Name, declIdx: i})
 			}
 		case *ast.InferredVarDecl:
-			if s.Name != "_" && a.isVarRefType(s.Value) {
+			// T0816: a closure read out of an owning aggregate (`f := h.cb`) holds a
+			// shared borrow on the source's root (registered in checkTypedVarDecl /
+			// checkInferredVarDecl). Track its last use so the borrow expires there
+			// rather than at scope exit — otherwise read-then-consume-source after
+			// the local's last use would be falsely rejected.
+			if s.Name != "_" &&
+				(a.isVarRefType(s.Value) || closureAggregateBorrowSource(a.info, s.Value) != nil) {
 				refVars = append(refVars, varInfo{name: s.Name, declIdx: i})
 			}
 		case *ast.DestructureVarDecl:

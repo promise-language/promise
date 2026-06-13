@@ -156,6 +156,25 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 			}
 			return
 		}
+		// T0816: reading a closure (function value) out of an owning aggregate
+		// (struct/optional closure field, container element) aliases the
+		// aggregate's heap env — codegen treats it as a borrow (T0812: no owning
+		// env-free binding for the local). Mark the local Borrowed so escapes —
+		// returning it, or re-storing it into a longer-lived aggregate — are
+		// rejected by the existing Borrowed-state checks (returnsBorrowAsOwned /
+		// tryMoveConsume), while the same-scope read-and-invoke case stays valid.
+		// Returns before tryMove so the field-move check (checkFieldMoveOwnership)
+		// does not fire on the valid read.
+		if src := closureAggregateBorrowSource(c.info, s.Value); src != nil {
+			if s.Name != "_" {
+				c.state[s.Name] = Borrowed
+				c.registerClosureAggregateBorrow(s.Name, src, s.Pos())
+				if typ := c.info.Types[s.Value]; typ != nil {
+					c.trackDeclOrder(s.Name, typ)
+				}
+			}
+			return
+		}
 		// T0576: binding `this` to a fresh local crashes codegen — the
 		// receiver value at runtime is the raw `i8*` instance pointer, but
 		// the destination alloca expects the type's value-struct shape
@@ -361,6 +380,19 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 		}
 		return
 	}
+	// T0816: see checkTypedVarDecl — reading a closure out of an owning
+	// aggregate (`f := h.cb` / `f := h.cb!` / `f := v[0]`) aliases the heap env,
+	// so bind Borrowed before tryMove to reject escapes/re-stores.
+	if src := closureAggregateBorrowSource(c.info, s.Value); src != nil {
+		if s.Name != "_" {
+			c.state[s.Name] = Borrowed
+			c.registerClosureAggregateBorrow(s.Name, src, s.Pos())
+			if typ := c.info.Types[s.Value]; typ != nil {
+				c.trackDeclOrder(s.Name, typ)
+			}
+		}
+		return
+	}
 	// T0576: see checkTypedVarDecl — same crash class on `x := this`.
 	if this, isThis := s.Value.(*ast.ThisExpr); isThis {
 		if c.state["this"] == Moved {
@@ -515,6 +547,32 @@ func destructureBorrowRoot(expr ast.Expr) string {
 			return ""
 		}
 	}
+}
+
+// registerClosureAggregateBorrow records a shared borrow of the aggregate that a
+// closure-aggregate read borrows from (T0816). `borrower` is the local bound by
+// `f := h.cb` / `f := h.cb!` / `f := v[0]`; `src` is the peeled aggregate access
+// returned by closureAggregateBorrowSource (`h.cb` / `v[0]`). The borrow's origin
+// is the access's root variable, so the existing HasAnyBorrow checks reject
+// moving/consuming/reassigning the source while the borrowing local is still live
+// (which would free the heap env out from under the local — UAF / double-free).
+// NLL narrowing in AnalyzeRefLastUses expires the borrow at the borrower's last
+// use, so consume-after-last-use of the source stays valid. Mirrors the
+// destructure-from-aggregate borrow registration in checkDestructureVarDecl.
+func (c *Checker) registerClosureAggregateBorrow(borrower string, src ast.Expr, pos ast.Pos) {
+	if c.borrows == nil {
+		return
+	}
+	root := destructureBorrowRoot(src)
+	if root == "" {
+		return
+	}
+	c.borrows.Add(&Borrow{
+		Origin:   root,
+		Kind:     BorrowShared,
+		Borrower: borrower,
+		Pos:      pos,
+	})
 }
 
 // promoteCallBorrows promotes pending call-scoped borrows to variable-scoped

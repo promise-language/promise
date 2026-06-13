@@ -11011,3 +11011,212 @@ func TestT0800_ChainedCastIntoCtorArgFromBorrowedParamRejected(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
+
+// === T0816: closure read out of an owning aggregate is a borrow ===
+//
+// Reading a closure out of a struct/optional field or container element aliases
+// the aggregate's heap env (codegen treats it as a borrow, T0812). The local is
+// bound Borrowed, so escaping it (returning) or re-storing it into a
+// longer-lived aggregate is rejected, while same-scope read-and-invoke is valid.
+
+func TestT0816ReturnClosureReadFromStructField(t *testing.T) {
+	// Repro 1: returning a closure read out of a struct field escapes past the
+	// aggregate's lifetime -> reject as borrowed-returned-as-owned.
+	errs := ownerErrs(t, `
+		type CbHolder { () -> int cb; }
+		leak_out(CbHolder h) () -> int {
+			f := h.cb;
+			return f;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+func TestT0816RestoreClosureIntoAggregate(t *testing.T) {
+	// Repro 2: re-storing a borrowed closure into another owning aggregate would
+	// double-free the env -> reject the move into the constructor field.
+	errs := ownerErrs(t, `
+		type CbHolder { () -> int cb; }
+		make_cb(int n) CbHolder { return CbHolder(cb: move || -> n); }
+		restore_into_aggregate() {
+			h := make_cb(5);
+			f := h.cb;
+			h2 := CbHolder(cb: f);
+			_ = h2;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value 'f'")
+}
+
+func TestT0816ReturnClosureFromOptionalField(t *testing.T) {
+	// Optional closure field force-unwrap variant: `f := h.cb!`.
+	errs := ownerErrs(t, `
+		type OptHolder { (() -> int)? cb; }
+		escape_opt(OptHolder h) () -> int {
+			f := h.cb!;
+			return f;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+func TestT0816ReturnClosureFromVectorElement(t *testing.T) {
+	// Container element variant: `f := v[0]`.
+	errs := ownerErrs(t, `
+		escape_vec(Vector[() -> int] v) () -> int {
+			f := v[0];
+			return f;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+func TestT0816ReadAndInvokeInScopeOK(t *testing.T) {
+	// Positive: same-scope read-and-invoke is valid (calling a Borrowed closure
+	// is not a consume). Guards against over-rejection / T0812 regression.
+	ownerOK(t, `
+		type CbHolder { () -> int cb; }
+		make_cb(int n) CbHolder { return CbHolder(cb: move || -> n); }
+		read_invoke() {
+			h := make_cb(5);
+			f := h.cb;
+			r := f();
+			_ = r;
+		}
+	`)
+}
+
+func TestT0816GetterReturningClosureStaysOwned(t *testing.T) {
+	// Owned-return exclusion: a getter returning a *fresh* closure binds Owned, so
+	// returning it must remain accepted (not misclassified as a borrow).
+	ownerOK(t, `
+		type Factory {
+			int n;
+			get make () -> int { k := this.n; return move || -> k; }
+		}
+		use_getter(Factory fa) () -> int {
+			f := fa.make;
+			return f;
+		}
+	`)
+}
+
+func TestT0816ConsumeSourceWhileBorrowedRejected(t *testing.T) {
+	// Source-lifetime escape: consuming the aggregate (`sink(h)` into a `~`
+	// param) while the borrowing local is still live frees the heap env out
+	// from under it -> UAF. The shared borrow registered on `h` makes this a
+	// "cannot move 'h' while it is borrowed" rejection.
+	errs := ownerErrs(t, `
+		type CbHolder { () -> int cb; }
+		make_cb(int n) CbHolder { return CbHolder(cb: move || -> n); }
+		sink(~CbHolder h) {}
+		probe() {
+			h := make_cb(5);
+			f := h.cb;
+			sink(h);
+			r := f();
+			_ = r;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 'h' while it is borrowed")
+}
+
+func TestT0816ReassignSourceWhileBorrowedRejected(t *testing.T) {
+	// Reassigning the source aggregate drops the old env while the borrowing
+	// local is still live -> UAF. Rejected as "cannot assign to 'h' while it is
+	// borrowed".
+	errs := ownerErrs(t, `
+		type CbHolder { () -> int cb; }
+		make_cb(int n) CbHolder { return CbHolder(cb: move || -> n); }
+		probe() {
+			h := make_cb(5);
+			f := h.cb;
+			h = make_cb(6);
+			r := f();
+			_ = r;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign to 'h' while it is borrowed")
+}
+
+func TestT0816ConsumeSourceVectorWhileBorrowedRejected(t *testing.T) {
+	// Container-element variant: consuming the source vector while an element
+	// closure-borrow is live is rejected (here `src` is a borrowed param, so the
+	// `~`-affordance diagnostic fires).
+	errs := ownerErrs(t, `
+		sink(~Vector[() -> int] v) {}
+		probe(Vector[() -> int] src) {
+			f := src[0];
+			sink(src);
+			r := f();
+			_ = r;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'src'")
+}
+
+func TestT0816ConsumeSourceAfterLastUseOK(t *testing.T) {
+	// NLL narrowing: consuming the source AFTER the borrowing local's last use
+	// is valid — the shared borrow expires at `f`'s last use, not scope exit.
+	ownerOK(t, `
+		type CbHolder { () -> int cb; }
+		make_cb(int n) CbHolder { return CbHolder(cb: move || -> n); }
+		sink(~CbHolder h) {}
+		probe() {
+			h := make_cb(5);
+			f := h.cb;
+			r := f();
+			_ = r;
+			sink(h);
+		}
+	`)
+}
+
+func TestT0816ReturnClosureFromOptionalCastForce(t *testing.T) {
+	// Optional closure field unconditional cast `h.cb as! (() -> int)` — the
+	// CastExpr.Force peel arm of closureAggregateBorrowSource (distinct from the
+	// `!` OptionalUnwrapExpr arm). Returning the borrow escapes -> rejected.
+	errs := ownerErrs(t, `
+		type OptHolder { (() -> int)? cb; }
+		escape_cast(OptHolder h) () -> int {
+			f := h.cb as! (() -> int);
+			return f;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+func TestT0816ReturnClosureFromTemporaryAggregate(t *testing.T) {
+	// Rootless source: reading the closure field off a *temporary* call result
+	// (`make_cb(5).cb`) — destructureBorrowRoot yields "" so no source borrow is
+	// registered, but the local is still bound Borrowed, so returning it is still
+	// rejected as a borrowed-returned-as-owned escape (exercises the root == ""
+	// arm of registerClosureAggregateBorrow).
+	errs := ownerErrs(t, `
+		type CbHolder { () -> int cb; }
+		make_cb(int n) CbHolder { return CbHolder(cb: move || -> n); }
+		escape_tmp() () -> int {
+			f := make_cb(5).cb;
+			return f;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return a borrowed reference as owned")
+}
+
+func TestT0816UserIndexReturningClosureStaysOwned(t *testing.T) {
+	// Owned-return exclusion via a user-defined non-native `[]` that constructs a
+	// *fresh* closure: the local binds Owned (not Borrowed), so returning it is
+	// accepted (exercises the isUserIndexExpr arm of
+	// closureAggregateBorrowSource). Mirrors the getter exclusion above for the
+	// container-element shape.
+	ownerOK(t, `
+		type CbBox {
+			int n;
+			[](int i) () -> int { k := this.n + i; return move || -> k; }
+		}
+		use_idx(CbBox b) () -> int {
+			f := b[0];
+			return f;
+		}
+	`)
+}

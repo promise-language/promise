@@ -20,6 +20,7 @@ _getcwd
 _lseeki64
 _mkdir
 _open
+_open_osfhandle
 _pipe
 _putenv_s
 _read

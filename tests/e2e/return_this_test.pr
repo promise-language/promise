@@ -265,3 +265,104 @@ test_return_double_paren_this_value_type() `test {
   assert(q.x == 7, "value-type double-paren this preserves x");
   assert(q.y == 11, "value-type double-paren this preserves y");
 }
+
+// T0891: reading the aliased result first and the source second after a
+// return-this bind (`m := d.dup()`) must NOT corrupt the source. The
+// receiver-alias-clear makes `m` the sole owner; NLL early-drop of `m` (whose
+// last use precedes the final statement) would free the shared instance and
+// leave `d`'s subsequent field read a use-after-free. Suppressing the early
+// drop defers the single free to scope exit, where both aliases are dead.
+type T0891Box {
+  int v;
+  dup() T0891Box {
+    return this;
+  }
+}
+
+t0891_result_then_source() `test {
+  d := T0891Box(v: 11);
+  m := d.dup();
+  assert(m.v == 11, "result reads 11");
+  assert(d.v == 11, "source still reads 11 after result"); // was 0 — the bug
+}
+
+t0891_source_then_result() `test {
+  d := T0891Box(v: 22);
+  m := d.dup();
+  assert(d.v == 22, "source reads 22");
+  assert(m.v == 22, "result reads 22");
+}
+
+// Heap-field variant — exercises a real free of the shared instance, so a
+// use-after-free or double-free crashes rather than merely reading zero. `m`'s
+// last use (line 3) precedes the final statement (the `d` read), so the
+// early-drop path would fire absent the suppression.
+type T0891Heap {
+  string name;
+  dup() T0891Heap {
+    return this;
+  }
+}
+
+t0891_heap_result_then_source() `test {
+  d := T0891Heap(name: "hello world");
+  m := d.dup();
+  assert(m.name == "hello world", "result name");
+  assert(d.name == "hello world", "source name after result");
+}
+
+// Chained return-this: `r := c.dup().dup()` roots the chain at the live local
+// `c`; reading both `c` and `r` afterwards must stay consistent.
+t0891_chained_result_then_source() `test {
+  c := T0891Box(v: 33);
+  r := c.dup().dup();
+  assert(r.v == 33, "chained result reads 33");
+  assert(c.v == 33, "chained source still reads 33 after result");
+}
+
+// ~this-consuming return this — the receiver is moved into the call, so there
+// is no live source alias; confirm no regression and no double-free.
+type T0891Consume {
+  int v;
+  eat(~this) T0891Consume {
+    return this;
+  }
+}
+
+t0891_consume_return_this() `test {
+  d := T0891Consume(v: 44);
+  m := d.eat();
+  assert(m.v == 44, "consumed return this preserves value");
+}
+
+// `this`-rooted return-this bind: a method binds the result of `this.dup()`,
+// reads it, then the still-live receiver. Exercises the ThisExpr origin of the
+// alias-clear (pendingThisAliasClear) at runtime — the borrowed receiver and the
+// result alias the same instance, so a mis-fired free here would corrupt or
+// double-free. Heap field forces a real free of the shared instance.
+type T0891ThisOrigin {
+  string name;
+  dup() T0891ThisOrigin {
+    return this;
+  }
+  via_this() string {
+    m := this.dup();
+    n := m.name; // read result (last use of m before final stmt)
+    return n; // returns the receiver's still-live field
+  }
+}
+
+t0891_this_origin_bind() `test {
+  d := T0891ThisOrigin(name: "hello world");
+  s := d.via_this();
+  assert(s == "hello world", "this-origin bind returns the live field");
+  assert(d.name == "hello world", "source intact after this.dup() bind");
+}
+
+// NOTE: the failable-wrapped return-this forms `m := d.dup()?!` and `m := d.dup()?^`
+// double-free at runtime (T0907 — codegen alias-clear dispatch does not peel the
+// error wrappers), and the optional form `m := d.dup()!` crashes codegen (T0906).
+// The ownership-level early-drop suppression for those wrapper forms is covered by
+// unit tests in compiler/internal/ownership/ownership_test.go
+// (TestNLLNoEarlyDropReturnThisAliasThroughErrorWrappers). Runtime e2e tests for
+// them should be added once T0907/T0906 are fixed.

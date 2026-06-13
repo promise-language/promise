@@ -8452,6 +8452,33 @@ func TestReturnParenThisValueTypeLoads(t *testing.T) {
 	assertNotContains(t, body, "ret i8* %")
 }
 
+// T0891: a return-this aliased result bound to a local (`m := d.dup()`) must NOT
+// be NLL-early-dropped. The result aliases the still-live source `d`; the
+// receiver-alias-clear (B0250) leaves `m`'s drop flag set (clearing `d`'s), so an
+// early free of `m` after its last use would free the shared instance and make
+// `d`'s later read a use-after-free. The signature of the (now-suppressed) early
+// drop is `emitEarlyDrops` clearing `m`'s flag in the normal body flow —
+// `store i1 false, i1* %m.dropflag` — which must be absent. The alias-clear must
+// still fire, and `m`'s flag-guarded scope-exit free must remain.
+func TestReturnThisAliasNoEarlyDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type BB { int v; dup() BB { return this; } }
+		main() {
+			d := BB(v: 11);
+			m := d.dup();
+			a := m.v;
+			b := d.v;
+		}
+	`)
+	// The B0250 receiver alias-clear must still fire — `m` becomes sole owner.
+	assertContains(t, ir, "return.this.clear")
+	// No NLL early drop of `m`: emitEarlyDrops would force-clear its flag in the
+	// straight-line body after `a := m.v`. Absence proves the suppression (T0891).
+	assertNotContains(t, ir, "store i1 false, i1* %m.dropflag")
+	// `m` still has a flag-guarded free at scope exit (no leak, exactly one free).
+	assertContains(t, ir, "%m.dropflag")
+}
+
 func TestOptionalParamWrapping(t *testing.T) {
 	ir := generateIR(t, `
 		foo(int? x) int {

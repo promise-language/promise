@@ -1107,6 +1107,32 @@ func winI32ToHandle(blk *ir.Block, val value.Value) *ir.InstIntToPtr {
 	return blk.NewIntToPtr(ext, irtypes.I8Ptr)
 }
 
+// _O_BINARY disables the UCRT's CRLF text translation on a stream-mode fd. Pipe
+// I/O must be byte-exact, so every CRT fd wrapped around a pipe HANDLE uses it.
+const winOBinary = 0x8000
+
+// winDeclareOpenOsfHandle declares the UCRT _open_osfhandle(intptr_t, int) → int.
+// It wraps an existing Win32 HANDLE in a C runtime file descriptor; the new fd
+// takes ownership of the HANDLE, so a later _close(fd) releases the HANDLE too.
+func winDeclareOpenOsfHandle(module *ir.Module) *ir.Func {
+	return getOrDeclareFunc(module, "_open_osfhandle", irtypes.I32,
+		ir.NewParam("osfhandle", irtypes.I64),
+		ir.NewParam("flags", irtypes.I32))
+}
+
+// winHandleToFd converts a Win32 HANDLE (i8*) into a CRT file descriptor via
+// _open_osfhandle, returned as an i32. This is required for any pipe end handed
+// to Promise's streaming Process API: ProcessInput/ProcessOutput/Process read,
+// write, and close their pipes through pal_file_read/write/close, which call the
+// UCRT _read/_write/_close — those take CRT fds, NOT raw HANDLEs. Passing a raw
+// HANDLE trips the UCRT invalid-parameter handler (fast-fail 0xC0000409). On
+// POSIX pipe ends are already OS fds, so this conversion is Windows-only and
+// makes the streaming fds behave exactly like their POSIX counterparts.
+func winHandleToFd(blk *ir.Block, openOsf *ir.Func, handle value.Value) value.Value {
+	h64 := blk.NewPtrToInt(handle, irtypes.I64)
+	return blk.NewCall(openOsf, h64, constant.NewInt(irtypes.I32, winOBinary))
+}
+
 // emitArgNeedsQuote emits @__promise_arg_needs_quote(i8* arg) → i1
 // Reports whether an argument must be wrapped in double quotes on a Windows
 // command line: true when the argument is empty or contains a space, tab, or
@@ -1955,6 +1981,7 @@ func (p *WindowsPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	createProcessA := winDeclareCreateProcessA(module)
 	setHandleInfo := winDeclareSetHandleInformation(module)
 	argvToCmdline := emitArgvToCmdline(module)
+	openOsf := winDeclareOpenOsfHandle(module)
 	palFree := getOrDeclareFunc(module, "pal_free", irtypes.Void,
 		ir.NewParam("ptr", irtypes.I8Ptr))
 
@@ -2079,16 +2106,13 @@ func (p *WindowsPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	cpOkBlk.NewCall(closeHandle, hThread)
 	cpOkBlk.NewCall(palFree, cmdline)
 
-	// Pack HANDLEs into i32: parent writes to stdin, reads from stdout/stderr
-	stdinWriteI64 := cpOkBlk.NewPtrToInt(stdinWrite, irtypes.I64)
-	stdinWriteI32 := cpOkBlk.NewTrunc(stdinWriteI64, irtypes.I32)
-	cpOkBlk.NewStore(stdinWriteI32, fn.Params[2])
-	stdoutReadI64 := cpOkBlk.NewPtrToInt(stdoutRead, irtypes.I64)
-	stdoutReadI32 := cpOkBlk.NewTrunc(stdoutReadI64, irtypes.I32)
-	cpOkBlk.NewStore(stdoutReadI32, fn.Params[3])
-	stderrReadI64 := cpOkBlk.NewPtrToInt(stderrRead, irtypes.I64)
-	stderrReadI32 := cpOkBlk.NewTrunc(stderrReadI64, irtypes.I32)
-	cpOkBlk.NewStore(stderrReadI32, fn.Params[4])
+	// Wrap the parent-side pipe HANDLEs in CRT file descriptors: parent writes to
+	// stdin, reads from stdout/stderr. The streaming Process API reads/writes/
+	// closes these via the UCRT _read/_write/_close, which require CRT fds — a raw
+	// HANDLE would trip the invalid-parameter fast-fail. The fd owns the HANDLE.
+	cpOkBlk.NewStore(winHandleToFd(cpOkBlk, openOsf, stdinWrite), fn.Params[2])
+	cpOkBlk.NewStore(winHandleToFd(cpOkBlk, openOsf, stdoutRead), fn.Params[3])
+	cpOkBlk.NewStore(winHandleToFd(cpOkBlk, openOsf, stderrRead), fn.Params[4])
 
 	hProcess := winLoadI8PtrAtOffset(cpOkBlk, piAlloca, 0)
 	hProcessI64 := cpOkBlk.NewPtrToInt(hProcess, irtypes.I64)
@@ -2447,6 +2471,7 @@ func (p *WindowsPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 	createPipe := winDeclareCreatePipe(module)
 	argvToCmdline := emitArgvToCmdline(module)
 	envpToBlock := emitEnvpToBlock(module)
+	openOsf := winDeclareOpenOsfHandle(module)
 	palFree := getOrDeclareFunc(module, "pal_free", irtypes.Void,
 		ir.NewParam("ptr", irtypes.I8Ptr))
 
@@ -2583,16 +2608,13 @@ func (p *WindowsPAL) EmitSpawnStreamingEnv(module *ir.Module) *ir.Func {
 	cpOkBlk.NewCall(closeHandle, hThread)
 	freeTemps(cpOkBlk)
 
-	// Pack HANDLEs into i32: parent writes to stdin, reads from stdout/stderr
-	stdinWriteI64 := cpOkBlk.NewPtrToInt(stdinWrite, irtypes.I64)
-	stdinWriteI32 := cpOkBlk.NewTrunc(stdinWriteI64, irtypes.I32)
-	cpOkBlk.NewStore(stdinWriteI32, outStdin)
-	stdoutReadI64 := cpOkBlk.NewPtrToInt(stdoutRead, irtypes.I64)
-	stdoutReadI32 := cpOkBlk.NewTrunc(stdoutReadI64, irtypes.I32)
-	cpOkBlk.NewStore(stdoutReadI32, outStdout)
-	stderrReadI64 := cpOkBlk.NewPtrToInt(stderrRead, irtypes.I64)
-	stderrReadI32 := cpOkBlk.NewTrunc(stderrReadI64, irtypes.I32)
-	cpOkBlk.NewStore(stderrReadI32, outStderr)
+	// Wrap the parent-side pipe HANDLEs in CRT file descriptors: parent writes to
+	// stdin, reads from stdout/stderr. The streaming Process API reads/writes/
+	// closes these via the UCRT _read/_write/_close, which require CRT fds — a raw
+	// HANDLE would trip the invalid-parameter fast-fail. The fd owns the HANDLE.
+	cpOkBlk.NewStore(winHandleToFd(cpOkBlk, openOsf, stdinWrite), outStdin)
+	cpOkBlk.NewStore(winHandleToFd(cpOkBlk, openOsf, stdoutRead), outStdout)
+	cpOkBlk.NewStore(winHandleToFd(cpOkBlk, openOsf, stderrRead), outStderr)
 
 	hProcess := winLoadI8PtrAtOffset(cpOkBlk, piAlloca, 0)
 	hProcessI64 := cpOkBlk.NewPtrToInt(hProcess, irtypes.I64)

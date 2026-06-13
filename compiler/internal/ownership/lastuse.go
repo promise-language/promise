@@ -393,7 +393,11 @@ func (a *lastUseAnalyzer) initMayAliasReceiver(init ast.Expr) bool {
 	if typ == nil || isCopyType(typ) {
 		return false
 	}
-	switch aliasReceiverOrigin(init).(type) {
+	// Peel the value-carrying postfix wrappers (parens, error / optional-unwrap /
+	// clone) that do not change the receiver-aliasing relationship, so a
+	// return-this bind reached through `d.dup()?!` / `?^` / `? e {}` is still
+	// recognized. Mirrors the set the codegen alias-clear peels. T0891.
+	switch aliasReceiverOrigin(unwrapEarlyDropWrappers(init)).(type) {
 	case *ast.IdentExpr, *ast.ThisExpr:
 		return true
 	}
@@ -451,6 +455,31 @@ func (a *lastUseAnalyzer) isVarCopyType(expr ast.Expr) bool {
 		return true // unresolved → be conservative, don't track
 	}
 	return isCopyType(typ)
+}
+
+// unwrapEarlyDropWrappers peels the value-carrying postfix wrappers that do not
+// change an initializer's receiver-aliasing relationship: parentheses and the
+// error / optional-unwrap / clone operators. Mirrors the set codegen peels when
+// emitting the return-this alias-clear, so the two analyses stay in agreement.
+func unwrapEarlyDropWrappers(expr ast.Expr) ast.Expr {
+	for {
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			expr = e.Expr
+		case *ast.ErrorPanicExpr:
+			expr = e.Expr
+		case *ast.ErrorPropagateExpr:
+			expr = e.Expr
+		case *ast.OptionalUnwrapExpr:
+			expr = e.Expr
+		case *ast.ErrorHandlerExpr:
+			expr = e.Expr
+		case *ast.AutoCloneExpr:
+			expr = e.Expr
+		default:
+			return expr
+		}
+	}
 }
 
 // analyzeStmtSubBlocks recurses into sub-blocks of control flow statements

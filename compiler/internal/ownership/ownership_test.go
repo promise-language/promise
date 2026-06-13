@@ -2971,6 +2971,140 @@ func TestNLLEarlyDropNonGuardArgInCompoundAssign(t *testing.T) {
 	}
 }
 
+// TestNLLNoEarlyDropReturnThisAlias verifies that a binding initialized from a
+// return-this method call on a live local (`m := d.dup()`) is NOT registered for
+// NLL early drop. The result aliases the still-live source `d`; an early drop of
+// `m` would free the shared instance and make `d`'s later read a use-after-free
+// (T0891). The free must defer to scope exit instead.
+func TestNLLNoEarlyDropReturnThisAlias(t *testing.T) {
+	_, info := checkOwnershipWithInfo(t, `
+		type BB { int v; dup() BB { return this; } }
+		test() {
+			d := BB(v: 11);
+			m := d.dup();
+			int a = m.v;
+			int b = d.v;
+		}
+	`)
+	if hasEarlyDrop(info, "m") {
+		t.Error("should not early-drop 'm' — it aliases the still-live source 'd' (T0891)")
+	}
+}
+
+// TestNLLEarlyDropFreshConstructorResult is the over-suppression guard: a binding
+// initialized from a constructor (not a method call on a live local) must STILL
+// be early-dropped when its last use precedes the final statement. Confirms the
+// T0891 suppression is narrow and does not disable the NLL optimization.
+func TestNLLEarlyDropFreshConstructorResult(t *testing.T) {
+	_, info := checkOwnershipWithInfo(t, `
+		type BB { int n; }
+		test() {
+			t := BB(n: 5);
+			int x = t.n;
+			int sentinel = 1;
+		}
+	`)
+	if !hasEarlyDrop(info, "t") {
+		t.Error("expected early drop for 't' — constructor result is not a return-this alias")
+	}
+}
+
+// TestNLLEarlyDropFreeFunctionResult is a second over-suppression guard: a
+// binding initialized from a free-function call (chain origin is a func, not a
+// live local variable) must STILL be early-dropped.
+func TestNLLEarlyDropFreeFunctionResult(t *testing.T) {
+	_, info := checkOwnershipWithInfo(t, `
+		type BB { int n; }
+		make_bb() BB { return BB(n: 1); }
+		test() {
+			b := make_bb();
+			int x = b.n;
+			int sentinel = 1;
+		}
+	`)
+	if !hasEarlyDrop(info, "b") {
+		t.Error("expected early drop for 'b' — free-function result is not a return-this alias")
+	}
+}
+
+// TestNLLNoEarlyDropReturnThisAliasFromThis exercises the `this`-rooted branch of
+// initMayAliasReceiver (aliasReceiverOrigin → *ast.ThisExpr): a method that binds
+// the result of `this.dup()` (a return-this on its own receiver) must NOT
+// early-drop that binding — the result aliases the still-live `this`. T0891.
+func TestNLLNoEarlyDropReturnThisAliasFromThis(t *testing.T) {
+	_, info := checkOwnershipWithInfo(t, `
+		type BB {
+			int v;
+			dup() BB { return this; }
+			chain() {
+				m := this.dup();
+				int a = m.v;
+				int sentinel = 1;
+			}
+		}
+		test() {}
+	`)
+	if hasEarlyDrop(info, "m") {
+		t.Error("should not early-drop 'm' — it aliases the still-live receiver 'this' (T0891)")
+	}
+}
+
+// TestNLLNoEarlyDropReturnThisAliasThroughErrorWrappers exercises the
+// unwrapEarlyDropWrappers peel set: a return-this bind reached through the error
+// operators (`?!` ErrorPanicExpr, `?^` ErrorPropagateExpr, `? e {}` ErrorHandlerExpr)
+// must still be recognized as an aliasing init and NOT early-dropped. Mirrors the
+// wrapper set the codegen alias-clear is meant to peel. T0891.
+func TestNLLNoEarlyDropReturnThisAliasThroughErrorWrappers(t *testing.T) {
+	cases := []struct {
+		name string
+		bind string
+		fail bool // test function must be failable for ?^
+	}{
+		{"panic", `m := d.dup()?!;`, false},
+		{"propagate", `m := d.dup()?^;`, true},
+		{"handler", `m := d.dup() ? e { return; };`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fail := ""
+			if tc.fail {
+				fail = "!"
+			}
+			_, info := checkOwnershipWithInfo(t, `
+				type BB { int v; dup!() BB { return this; } }
+				test`+fail+`() {
+					d := BB(v: 11);
+					`+tc.bind+`
+					int a = m.v;
+					int sentinel = 1;
+				}
+			`)
+			if hasEarlyDrop(info, "m") {
+				t.Errorf("should not early-drop 'm' through %s wrapper — return-this alias (T0891)", tc.name)
+			}
+		})
+	}
+}
+
+// TestNLLEarlyDropFailableFreeFunctionThroughPanic is the over-suppression guard
+// for the wrapper-peel path: a NON-return-this failable free function reached
+// through `?!` must STILL be early-dropped. Confirms unwrapEarlyDropWrappers does
+// not blanket-suppress every wrapped initializer — only true return-this aliases.
+func TestNLLEarlyDropFailableFreeFunctionThroughPanic(t *testing.T) {
+	_, info := checkOwnershipWithInfo(t, `
+		type BB { int v; }
+		make_bb!() BB { return BB(v: 1); }
+		test() {
+			m := make_bb()?!;
+			int a = m.v;
+			int sentinel = 1;
+		}
+	`)
+	if !hasEarlyDrop(info, "m") {
+		t.Error("expected early drop for 'm' — failable free-function result through ?! is not a return-this alias")
+	}
+}
+
 // TestExprBackRefCapturesVar_AllWrappers exercises every AST wrapper branch in
 // exprBackRefCapturesVar by synthesizing AST trees with a `m.lock()` call (return
 // type MutexGuard[int]) nested inside each wrapper type. The function must

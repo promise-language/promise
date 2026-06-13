@@ -116,3 +116,82 @@ named_unary_virtual_dispatch_non_this() `test {
   r := -a;
   assert(r.n == -7, "virtual unary dispatch on a value operand");
 }
+
+// T0881: a unary operator inherited from a parent type must dispatch — sema
+// previously rejected it (only the operand type's own methods were scanned),
+// leaving the inherited-dispatch branch in genUnaryExpr unreachable.
+
+// (a) Derived inheriting a concrete parent's unary operator (direct dispatch to
+// the parent's method).
+type InhBase {
+  int v;
+
+  -() InhBase {
+    return InhBase(v: -this.v);
+  }
+}
+
+type InhDerived is InhBase {
+}
+
+inherited_concrete_unary() `test {
+  d := InhDerived(v: 5);
+  m := -d;
+  assert(m.v == -5, "inherited concrete unary `-` should negate field");
+}
+
+// (b) Structural-interface default unary operator inherited by a concrete type.
+type Negatable `structural {
+  int v;
+
+  -() Negatable {
+    return this;
+  }
+}
+
+type NegItem is Negatable {
+  int v;
+}
+
+inherited_structural_unary() `test {
+  it := NegItem(v: 8);
+  m := -it;
+  assert(m.v == 8, "structural default unary returning `this` keeps field");
+}
+
+// (c) Derived inheriting a generic parent's unary operator (the operator method
+// is monomorphized; the result type Base[T] resolves to Base[int]).
+type GenBase[T] {
+  T v;
+
+  -() GenBase[T] {
+    return GenBase[T](v: this.v);
+  }
+}
+
+type GenDerived is GenBase[int] {
+}
+
+inherited_generic_unary() `test {
+  d := GenDerived(v: 11);
+  m := -d;
+  assert(m.v == 11, "inherited generic unary keeps field");
+}
+
+// (d) Direct generic instance (not inherited): the operand is GenBox[int], an
+// *Instance, so sema combines the instance's own type-args with the result type
+// GenBox[T] -> GenBox[int]. The inherited cases above leave that mapping empty,
+// so this is the only case exercising the instance-arg substitution.
+type GenBox[T] {
+  T v;
+
+  -() GenBox[T] {
+    return GenBox[T](v: this.v);
+  }
+}
+
+direct_generic_instance_unary() `test {
+  b := GenBox[int](v: 7);
+  m := -b;
+  assert(m.v == 7, "direct generic instance unary keeps field");
+}

@@ -850,24 +850,32 @@ func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string)
 		return nil
 	}
 
-	// Find the unary variant (0 params, not counting receiver)
-	var m *types.Method
-	for _, method := range named.Methods() {
-		if method.Name() == op && len(method.Sig().Params()) == 0 {
-			m = method
-			break
-		}
-	}
+	// Find the unary variant (0 params, not counting receiver), walking
+	// is-parents and structural-interface parents — mirroring how the binary
+	// path (checkOperator) uses LookupMethod (T0881).
+	m := named.LookupUnaryMethod(op)
 	if m == nil {
 		c.errorf(pos, "operator %s not defined on type %s", op, operand)
 		return nil
 	}
 
+	// Combine instance type-args (subst) with inherited generic-parent mappings
+	// so a result type declared on a generic parent (e.g. Base[T]) resolves to
+	// Base[int].
+	fullSubst := map[*types.TypeParam]types.Type{}
+	for k, v := range subst {
+		fullSubst[k] = v
+	}
+	c.mergeParentSubstSema(named, fullSubst)
+
 	result := m.Sig().Result()
-	if subst != nil && result != nil {
-		result = types.Substitute(result, subst)
+	if result != nil && len(fullSubst) > 0 {
+		result = types.Substitute(result, fullSubst)
 	}
 	if result != nil {
+		if inst, ok := result.(*types.Instance); ok {
+			c.recordInstance(inst)
+		}
 		return result
 	}
 	return types.TypVoid

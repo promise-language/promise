@@ -202,6 +202,27 @@ func (n *Named) LookupMethod(name string) *Method {
 	return nil
 }
 
+// LookupUnaryMethod finds the 0-parameter (prefix-unary) variant of an operator
+// method by name, walking is-parents and structural-interface parents. Distinct
+// from LookupMethod, which returns the first same-named method regardless of arity
+// (so it can return a binary variant when both `-`/0-param and `-`/1-param exist).
+// Note: declaring both a unary and a binary variant of the same operator symbol on
+// one type is not yet end-to-end functional (codegen name collision + arity-blind
+// binary lookup) — tracked as T0883.
+func (n *Named) LookupUnaryMethod(name string) *Method {
+	for _, m := range n.methods {
+		if m.name == name && !m.isGetter && !m.isSetter && len(m.sig.Params()) == 0 {
+			return m
+		}
+	}
+	for _, p := range n.parents {
+		if m := p.Named.LookupUnaryMethod(name); m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
 // LookupAnyMethod searches for any method (regular, getter, or setter) by name.
 // Used by passes that need to find methods regardless of kind (e.g., codegen, returns).
 func (n *Named) LookupAnyMethod(name string) *Method {

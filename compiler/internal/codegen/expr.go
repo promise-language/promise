@@ -1525,14 +1525,11 @@ func (c *Compiler) genVirtualUnaryOp(e *ast.UnaryExpr, named *types.Named,
 	return c.block.NewCall(fnTyped, args...)
 }
 
-// lookupUnaryMethod finds the 0-param variant of a method by name.
+// lookupUnaryMethod finds the 0-param variant of a method by name, walking
+// is-parents and structural-interface parents (T0881) so inherited unary
+// operators dispatch the same way binary operators do.
 func (c *Compiler) lookupUnaryMethod(named *types.Named, op string) *types.Method {
-	for _, m := range named.Methods() {
-		if m.Name() == op && len(m.Sig().Params()) == 0 {
-			return m
-		}
-	}
-	return nil
+	return named.LookupUnaryMethod(op)
 }
 
 // --- Short-circuit boolean operators ---

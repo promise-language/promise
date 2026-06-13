@@ -1,0 +1,32 @@
+// T0861: owned (~) structural-view params defined in a *module* must drop the
+// backing concrete instance at the callee's exit (defineModuleFuncs /
+// defineModuleTypeMethods paths). Leak enforcement (T0067) is the real check.
+use ownedsink_mod "./ownedsink_mod";
+
+// User type satisfying the stdlib Writer interface, with a heap string field so a
+// missed drop leaks visibly.
+type OwnedSink `doc("Writer satisfier with a heap string field to make leaks observable.") {
+  string label;
+  write!(~this, u8[] ~buf) int `doc("Returns buf.len; ignores the bytes.") {
+    return buf.len;
+  }
+}
+
+// Module free function with an owned Writer view param.
+test_module_free_owned_param() `test {
+  OwnedSink s = OwnedSink(label: "mod-free");
+  ownedsink_mod.sink_in_module(s);
+}
+
+// Module `new` constructor with a by-value Writer view param.
+test_module_ctor_byvalue_param() `test {
+  OwnedSink s = OwnedSink(label: "mod-ctor");
+  ownedsink_mod.ModConsumer c = ownedsink_mod.ModConsumer(s);
+}
+
+// Module method with an owned Writer view param.
+test_module_method_owned_param() `test {
+  ownedsink_mod.ModConsumer c = ownedsink_mod.ModConsumer(OwnedSink(label: "x"));
+  OwnedSink s = OwnedSink(label: "mod-method");
+  c.consume(s);
+}

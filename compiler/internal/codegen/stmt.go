@@ -2673,6 +2673,44 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 	c.dropBindings[varName] = binding
 }
 
+// maybeRegisterStructuralParamFree registers an RTTI-dispatched free binding for an
+// owned (~) structural-interface view parameter (T0861). Unlike local structural
+// variables (maybeRegisterStructuralFree), an owned param is always a genuine ownership
+// transfer — the caller cleared its source drop flag at the move site — so the callee
+// must drop the backing concrete instance at scope exit. Uses RTTI drop dispatch
+// (typeinfo.drop_fn_ptr via __promise_structural_drop) so concrete field cleanup
+// (e.g. string fields) runs before the instance is freed.
+func (c *Compiler) maybeRegisterStructuralParamFree(varName string, alloca *ir.InstAlloca, typ types.Type) {
+	if _, hasBinding := c.dropBindings[varName]; hasBinding {
+		return
+	}
+	named := extractNamed(typ)
+	if named == nil || !named.IsStructural() || named.IsValueType() {
+		return
+	}
+	// Value-struct alloca ({i8* vtable, i8* instance}) required to extract the instance ptr.
+	if _, ok := alloca.ElemType.(*irtypes.StructType); !ok {
+		return
+	}
+
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.dropFlags[varName] = dropFlag
+
+	binding := scopeBinding{
+		kind:     bindingFree,
+		alloca:   alloca,
+		named:    named,
+		valType:  typ,
+		dropFlag: dropFlag,
+		varName:  varName,
+		rttiDrop: true, // RTTI-dispatched drop for standard-layout instances
+	}
+	c.scopeBindings = append(c.scopeBindings, binding)
+	c.dropBindings[varName] = binding
+}
+
 // registerErrorDrop registers a caught error instance for drop at scope exit (T0091).
 // Uses the concrete error type's drop when available (T0110), falling back to the
 // base error.drop for untyped catches. The concrete drop properly frees all string

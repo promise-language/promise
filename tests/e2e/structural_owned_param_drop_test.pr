@@ -1,0 +1,142 @@
+// E2E regression tests for T0861: an owned (~) structural-interface-view
+// function/method parameter must be dropped at the callee's exit. Previously the
+// owned view was never dropped — the caller cleared its source drop flag at the
+// move site, so the backing concrete instance leaked. The fix registers an
+// RTTI-dispatched free binding for owned structural params (the same
+// __promise_structural_drop path used for structural fields and call-produced
+// local structural variables).
+//
+// Leak enforcement (T0067) is the real check here: any orphaned allocation fails
+// the test. All cases pass a value into an owned `~Writer` parameter and must
+// report zero leaks.
+// A user type that satisfies the stdlib `Writer` interface (only write! own).
+// It owns a heap string field so a missed drop leaks visibly.
+type OwnedSink `public `doc("Writer satisfier with a heap string field to make leaks observable.") {
+  string label;
+  write!(~this, u8[] ~buf) int `doc("Returns buf.len; ignores the bytes.") {
+    return buf.len;
+  }
+}
+
+// Free function taking an owned Writer view — the original reproducer shape.
+sink_free(~Writer w) `doc("Consumes an owned Writer view; drops it at exit.") {
+}
+
+// Free function that actually uses the owned writer before exit, confirming the
+// instance is live up to the drop.
+sink_free_used(~Writer w) `doc("Uses then drops an owned Writer view.") {
+  w.write_string("payload")?!;
+}
+
+// --- Free-function owned param: stdlib Builder (the original reproducer) ---
+test_owned_param_builder() `test {
+  Builder b = Builder();
+  sink_free(b);
+}
+
+// --- Free-function owned param: user Writer type (independent of Builder) ---
+test_owned_param_user_type() `test {
+  OwnedSink s = OwnedSink(label: "user-sink");
+  sink_free(s);
+}
+
+// --- Owned param actually used before drop ---
+test_owned_param_used_before_drop() `test {
+  OwnedSink s = OwnedSink(label: "used");
+  sink_free_used(s);
+}
+
+// --- Method with an owned structural-view param (exercises defineMethodFunc) ---
+type Consumer `public `doc("Holds a writer it consumes via a method taking ~Writer.") {
+  string name;
+  consume(this, ~Writer w) `doc("Consumes an owned Writer view inside a method.") {
+    w.write_string("via-method")?!;
+  }
+}
+
+test_owned_param_method() `test {
+  Consumer c = Consumer(name: "c");
+  OwnedSink s = OwnedSink(label: "method-sink");
+  c.consume(s);
+}
+
+// --- Control: borrow param (Writer w, not owned) must NOT double-free ---
+sink_borrow(Writer w) `doc("Borrows a Writer view; caller retains ownership.") {
+}
+
+test_borrow_param_no_double_free() `test {
+  OwnedSink s = OwnedSink(label: "borrowed");
+  sink_borrow(s);
+  // s is still owned here and dropped at scope exit — no double free.
+}
+
+// --- `new` constructor by-value structural-view param (T0861) ---
+// A `new` constructor's by-value (non-~) params are owned: the call site clears
+// the source drop flag, so the param must be dropped at the constructor's exit.
+// Sema forbids moving a by-value param into a field, so it is always dropped here.
+type BoxByValue `public `doc("Holds nothing; consumes a Writer view by value in its constructor.") {
+  int tag;
+  new(~this, Writer w) `doc("Takes a Writer view by value; drops it at exit.") {
+    this.tag = 1;
+  }
+}
+
+test_new_by_value_param() `test {
+  OwnedSink s = OwnedSink(label: "ctor-byval");
+  BoxByValue b = BoxByValue(s);
+}
+
+// --- `new` constructor owned (~) structural-view param: stored into a field ---
+// The move into the field clears the param's drop flag, so the field drop (not
+// the param drop) frees the instance — no double free.
+type BoxStore `public `doc("Stores an owned Writer view in a field.") {
+  Writer w;
+  new(~this, ~Writer w) `doc("Moves an owned Writer view into a field.") {
+    this.w = w;
+  }
+  drop(~this) `doc("Drops the stored Writer view.") {
+  }
+}
+
+test_new_owned_param_stored() `test {
+  OwnedSink s = OwnedSink(label: "ctor-stored");
+  BoxStore b = BoxStore(s);
+}
+
+// --- Owned param moved OUT via return: drop flag must be cleared (no double free) ---
+// The return moves the view out of the callee, so the param drop must NOT also fire.
+passthrough(~Writer w) Writer `doc("Returns the owned Writer view, moving it out.") {
+  return w;
+}
+
+test_owned_param_returned() `test {
+  OwnedSink s = OwnedSink(label: "returned");
+  Writer w = passthrough(s);
+  // w now owns the instance and drops once at scope exit — no double free.
+}
+
+// --- Owned param re-passed to another owned consumer: move clears the flag ---
+inner_consume(~Writer w) `doc("Innermost owned Writer consumer.") {
+}
+forward_owned(~Writer w) `doc("Forwards an owned Writer view to another consumer.") {
+  inner_consume(w);
+}
+
+test_owned_param_repassed() `test {
+  OwnedSink s = OwnedSink(label: "forwarded");
+  forward_owned(s);
+}
+
+// --- `new` constructor owned (~) structural-view param: NOT stored ---
+// Not moved anywhere, so it must be dropped at the constructor's exit.
+type BoxDrop `public `doc("Consumes an owned Writer view without storing it.") {
+  int tag;
+  new(~this, ~Writer w) `doc("Takes an owned Writer view; drops it at exit.") {
+    this.tag = 2;
+  }
+}
+
+test_new_owned_param_dropped() `test {
+  OwnedSink s = OwnedSink(label: "ctor-dropped");
+  BoxDrop b = BoxDrop(s);
+}

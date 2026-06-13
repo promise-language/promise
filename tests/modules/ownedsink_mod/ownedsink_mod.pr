@@ -1,0 +1,18 @@
+// Module-side consumers of an owned (~) structural-interface view parameter
+// (T0861). Exercises the defineModuleFuncs / defineModuleTypeMethods drop-binding
+// paths: an owned `~Writer` param defined inside a *module* must be dropped at the
+// callee's exit, just like the user-file path.
+// Module free function taking an owned Writer view (defineModuleFuncs path).
+sink_in_module(~Writer w) `public `doc("Consumes an owned Writer view; drops it at module-function exit.") {
+}
+
+// Module type with a method and a constructor taking owned/by-value Writer views
+// (defineModuleTypeMethods path).
+type ModConsumer `public `doc("Module type that consumes Writer views.") {
+  int tag;
+  new(~this, Writer w) `doc("By-value Writer view param of a module `new` constructor; dropped at exit.") {
+    this.tag = 1;
+  }
+  consume(this, ~Writer w) `doc("Owned Writer view param of a module method; dropped at exit.") {
+  }
+}

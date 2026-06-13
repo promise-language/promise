@@ -5823,6 +5823,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 					paramType = types.Substitute(paramType, c.typeSubst)
 				}
 				c.maybeRegisterDrop(p.Name(), alloca, paramType)
+				c.maybeRegisterStructuralParamFree(p.Name(), alloca, paramType) // T0861
 			}
 
 			// B0191: Register drop binding for variadic parameters.
@@ -6344,6 +6345,7 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 				// T0087: Register drop binding for ~ (move) parameters.
 				if sp.Ref() == types.RefMut {
 					c.maybeRegisterDrop(sp.Name(), alloca, sp.Type())
+					c.maybeRegisterStructuralParamFree(sp.Name(), alloca, sp.Type()) // T0861
 				}
 
 				// B0191: Register drop binding for variadic parameters.
@@ -6551,6 +6553,7 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 					// T0087: Register drop binding for ~ (move) parameters.
 					if p.Ref() == types.RefMut {
 						c.maybeRegisterDrop(p.Name(), alloca, p.Type())
+						c.maybeRegisterStructuralParamFree(p.Name(), alloca, p.Type()) // T0861
 					}
 
 					// B0191: Register drop binding for variadic parameters.
@@ -6577,6 +6580,10 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 							skipDrop := extractNamed(p.Type()) == types.TypString && (recvNamed.HasDrop() || recvNamed.NeedsSynthDrop())
 							if !skipDrop {
 								c.maybeRegisterDrop(p.Name(), alloca, p.Type())
+								// T0861: a by-value structural-view param of a `new`
+								// constructor is owned (the call site clears the source
+								// drop flag), so it needs an RTTI-dispatched free.
+								c.maybeRegisterStructuralParamFree(p.Name(), alloca, p.Type())
 							}
 						}
 					}
@@ -7293,6 +7300,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 					paramType = types.Substitute(paramType, c.typeSubst)
 				}
 				c.maybeRegisterDrop(p.Name(), alloca, paramType)
+				c.maybeRegisterStructuralParamFree(p.Name(), alloca, paramType) // T0861
 			}
 
 			// B0191: Register drop binding for variadic parameters.
@@ -7327,6 +7335,10 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 							paramType = types.Substitute(paramType, c.typeSubst)
 						}
 						c.maybeRegisterDrop(p.Name(), alloca, paramType)
+						// T0861: a by-value structural-view param of a `new`
+						// constructor is owned (the call site clears the source
+						// drop flag), so it needs an RTTI-dispatched free.
+						c.maybeRegisterStructuralParamFree(p.Name(), alloca, paramType)
 					}
 				}
 			}

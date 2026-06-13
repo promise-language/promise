@@ -183,6 +183,22 @@ func AssignableTo(x, y Type) bool {
 		}
 	}
 
+	// Rule 4c: a bare generic Named is interchangeable with its own
+	// self-instance. Inside a generic type T[P...]'s method body, `this` is
+	// typed as the bare Named T, while parameters declared T[P...] are
+	// Instances whose type args are exactly T's own type params — these denote
+	// the same type. (T0874)
+	if xn, ok := x.(*Named); ok {
+		if yi, ok := y.(*Instance); ok && isSelfInstance(xn, yi) {
+			return true
+		}
+	}
+	if xi, ok := x.(*Instance); ok {
+		if yn, ok := y.(*Named); ok && isSelfInstance(yn, xi) {
+			return true
+		}
+	}
+
 	// Rule 5: TypeParam assignable to any of its constraints
 	if tp, ok := x.(*TypeParam); ok {
 		for _, c := range tp.Constraints() {
@@ -244,6 +260,29 @@ func AssignableTo(x, y Type) bool {
 	}
 
 	return false
+}
+
+// isSelfInstance reports whether inst is the self-instantiation of the generic
+// type n — i.e. inst.origin == n and inst's type args are exactly n's own type
+// params, in order. This captures the "T[P...] viewed from inside T's body"
+// relationship that makes `this` (typed as bare n) match a T[P...] parameter.
+func isSelfInstance(n *Named, inst *Instance) bool {
+	origin, ok := inst.Origin().(*Named)
+	if !ok || origin != n {
+		return false
+	}
+	tparams := n.TypeParams()
+	targs := inst.TypeArgs()
+	if len(tparams) == 0 || len(tparams) != len(targs) {
+		return false
+	}
+	for i, tp := range tparams {
+		ta, ok := targs[i].(*TypeParam)
+		if !ok || ta != tp {
+			return false
+		}
+	}
+	return true
 }
 
 // isChild reports whether child inherits from parent (directly or transitively).

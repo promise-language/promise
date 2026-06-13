@@ -4680,6 +4680,19 @@ func TestGenericBinaryOperator(t *testing.T) {
 	`)
 }
 
+func TestGenericThisAsRightOperand(t *testing.T) {
+	// T0874: inside a generic type's method, `this` used as the right-hand
+	// operand of a user-defined operator must type as the self-instantiation
+	// GCmp[T], not the bare Named GCmp, so it matches the GCmp[T] parameter.
+	checkOK(t, `
+		type GCmp[T: Ordered] {
+			T x;
+			<(GCmp[T] other) bool => this.x < other.x;
+			gt_via(this, GCmp[T] other) bool => other < this;
+		}
+	`)
+}
+
 func TestGenericUnaryOperator(t *testing.T) {
 	checkOK(t, `
 		type Wrapper[T] {

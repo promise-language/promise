@@ -1,0 +1,43 @@
+// T0874: inside a generic type's method, `this` used as the right-hand operand
+// of a user-defined binary operator must be typed as the self-instantiation
+// T[P...] (not the bare Named T), so it matches a T[P...]-typed parameter.
+// Covers both heap and value generic types (a sema typing bug, layout-independent).
+// Heap generic type.
+type GCmp[T: Ordered] {
+  T x;
+
+  < (GCmp[T] other) bool {
+    return this.x < other.x;
+  }
+
+  // `other < this` puts the generic `this` on the right-hand side.
+  gt_via(this, GCmp[T] other) bool {
+    return other < this;
+  }
+}
+
+// Value generic type (all fields `value).
+type VCmp[T: Ordered] {
+  T x `value;
+
+  < (VCmp[T] other) bool {
+    return this.x < other.x;
+  }
+
+  gt_via(this, VCmp[T] other) bool {
+    return other < this;
+  }
+}
+
+generic_heap_this_as_right_operand() `test {
+  // Each call consumes `other` by value, so construct fresh instances.
+  assert(GCmp[int](x: 5).gt_via(GCmp[int](x: 2)), "2 < 5 should be true");
+  assert(!GCmp[int](x: 2).gt_via(GCmp[int](x: 5)), "5 < 2 should be false");
+  assert(GCmp[int](x: 5).gt_via(GCmp[int](x: 5)) == false, "5 < 5 should be false");
+}
+
+generic_value_this_as_right_operand() `test {
+  assert(VCmp[int](x: 5).gt_via(VCmp[int](x: 2)), "2 < 5 should be true (value)");
+  assert(!VCmp[int](x: 2).gt_via(VCmp[int](x: 5)), "5 < 2 should be false (value)");
+  assert(VCmp[int](x: 5).gt_via(VCmp[int](x: 5)) == false, "5 < 5 should be false (value)");
+}

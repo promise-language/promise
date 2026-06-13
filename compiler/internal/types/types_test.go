@@ -956,6 +956,24 @@ func TestAssignableTo(t *testing.T) {
 	puppy := makeNamed("Puppy")
 	puppy.AddParent(dog)
 
+	// Set up a generic type GBox[T] and its self-instance GBox[T] for the
+	// "bare Named <-> self-instance" rule (Rule 4c / isSelfInstance, T0874).
+	gT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+	gBox := NewNamed(NewTypeName(Pos{}, "GBox", nil), []*TypeParam{gT})
+	gBoxSelf := NewInstance(gBox, []Type{gT}) // GBox[T] from inside GBox's body
+	gBoxInt := NewInstance(gBox, []Type{TypInt})
+	gU := NewTypeParam(NewTypeName(Pos{}, "U", nil), nil, 0)
+	gBoxU := NewInstance(gBox, []Type{gU}) // wrong type param
+
+	// A different generic type and a two-param generic, for negative cases.
+	gOtherT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+	gOther := NewNamed(NewTypeName(Pos{}, "GOther", nil), []*TypeParam{gOtherT})
+	gOtherSelf := NewInstance(gOther, []Type{gOtherT})
+	gpA := NewTypeParam(NewTypeName(Pos{}, "A", nil), nil, 0)
+	gpB := NewTypeParam(NewTypeName(Pos{}, "B", nil), nil, 1)
+	gPair := NewNamed(NewTypeName(Pos{}, "GPair", nil), []*TypeParam{gpA, gpB})
+	gPairArity := NewInstance(gPair, []Type{gpA}) // arity mismatch (1 arg, 2 params)
+
 	tests := []struct {
 		name string
 		x, y Type
@@ -1063,6 +1081,17 @@ func TestAssignableTo(t *testing.T) {
 			NewTuple([]Type{TypInt, TypBool}),
 			true,
 		},
+
+		// Rule 4c (T0874): a bare generic Named is interchangeable with its own
+		// self-instance (GBox[T] whose args are GBox's own type params).
+		{"named_to_self_instance", gBox, gBoxSelf, true},
+		{"self_instance_to_named", gBoxSelf, gBox, true},
+		// Negatives: only the exact self-instance matches.
+		{"named_to_concrete_instance", gBox, gBoxInt, false},                       // concrete arg, not a TypeParam
+		{"named_to_wrong_typeparam", gBox, gBoxU, false},                           // different TypeParam
+		{"named_to_other_generic", gBox, gOtherSelf, false},                        // different origin
+		{"non_generic_named_to_instance", animal, NewInstance(animal, nil), false}, // origin has no type params
+		{"named_to_arity_mismatch", gPair, gPairArity, false},                      // tparam/targ count mismatch
 
 		// Not assignable
 		{"int_to_string", TypInt, TypString, false},

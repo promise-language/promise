@@ -30,7 +30,7 @@ Verify, rebase, and commit the current changes. **Does NOT push** — the orches
    - If changes span multiple logical units, make separate commits.
 
 6. **Sync and rebase.**
-   - `git fetch origin` and `git rebase origin/master`.
+   - `git fetch origin` and `git rebase origin/main`.
    - If there are conflicts, resolve them carefully and continue the rebase.
 
 7. **Post-rebase verification.**

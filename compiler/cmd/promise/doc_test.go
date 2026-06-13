@@ -360,6 +360,80 @@ func TestDocEnumCompactPayload(t *testing.T) {
 	assertContainsDoc(t, out, "enum Shape { Circle(f64 r), Rect(f64 w, f64 h) }")
 }
 
+// === Enum compact mode: methods distinguish getters from methods (T0868) ===
+
+func TestDocEnumCompactWithMethods(t *testing.T) {
+	// In -signatures mode, an enum with methods must render a block that shows
+	// getters (no parens) and methods (parens) so the access form is
+	// unambiguous — the exact confusion the contributor flagged
+	// (`is_string` getter vs `as_string()` method on JsonValue).
+	out := docFromSource(t, `
+		enum Json `+"`public"+` {
+			Null,
+			Str(string value),
+
+			get is_null bool `+"`public"+` {
+				match this { Json.Null => { return true; }, _ => { return false; } }
+			}
+			as_string(&this) string? `+"`public"+` {
+				match this { Json.Str(s) => { return s; }, _ => { return none; } }
+			}
+		}
+	`, docOpts{publicOnly: true, sigOnly: true})
+
+	// Block form (multi-line), not the one-liner.
+	assertContainsDoc(t, out, "enum Json {")
+	assertContainsDoc(t, out, "Null, Str(string value)")
+	// Getter renders with `get`, no parens.
+	assertContainsDoc(t, out, "get is_null bool")
+	// Method renders with parens.
+	assertContainsDoc(t, out, "as_string(&this) string?")
+	// The getter must NOT appear in call form.
+	assertNotContainsDoc(t, out, "is_null()")
+}
+
+func TestDocEnumCompactMethodsFiltered(t *testing.T) {
+	// publicOnly must filter private enum methods out of the compact block too.
+	out := docFromSource(t, `
+		enum Status `+"`public"+` {
+			Active, Inactive,
+
+			get label int `+"`public"+` { return 1; }
+			_secret() int { return 0; }
+		}
+	`, docOpts{publicOnly: true, sigOnly: true})
+
+	assertContainsDoc(t, out, "enum Status {")
+	assertContainsDoc(t, out, "get label int")
+	assertNotContainsDoc(t, out, "_secret")
+}
+
+// === Type summary cost-signal distinction (T0868) ===
+
+func TestDocTypeSummaryGetterVsMethod(t *testing.T) {
+	// The canonical cost-signal scenario the task is about: in a type's
+	// -signatures summary block a cheap/pure getter renders WITHOUT parens
+	// (`get len int`) while a cost-bearing method renders WITH parens
+	// (`to_string() string`). This is what makes the access form — and the
+	// implied call cost — unambiguous in the generated API reference.
+	out := docFromSource(t, `
+		type Buffer `+"`public"+` {
+			int _len;
+
+			get len int `+"`public"+` { return this._len; }
+			to_string(&this) string `+"`public"+` { return "buf"; }
+		}
+	`, docOpts{publicOnly: true, sigOnly: true})
+
+	assertContainsDoc(t, out, "type Buffer {")
+	// Getter: no parens (cheap, field-like).
+	assertContainsDoc(t, out, "get len int")
+	// Method: parens (allocates) — the cost signal.
+	assertContainsDoc(t, out, "to_string(&this) string")
+	// The getter must NOT be rendered in call form anywhere.
+	assertNotContainsDoc(t, out, "len()")
+}
+
 // === Operators ===
 
 func TestDocOperators(t *testing.T) {

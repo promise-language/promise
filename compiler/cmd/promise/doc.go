@@ -733,7 +733,7 @@ func emitMethodSection(w io.Writer, typeName string, m *types.Method, info *sema
 
 func emitEnum(w io.Writer, d *ast.EnumDecl, enum *types.Enum, info *sema.Info, opts docOpts) {
 	if opts.sigOnly {
-		emitEnumCompact(w, d, enum)
+		emitEnumCompact(w, d, enum, info, opts)
 		return
 	}
 
@@ -800,7 +800,7 @@ func emitEnum(w io.Writer, d *ast.EnumDecl, enum *types.Enum, info *sema.Info, o
 	fmt.Fprintln(w, "---")
 }
 
-func emitEnumCompact(w io.Writer, d *ast.EnumDecl, enum *types.Enum) {
+func emitEnumCompact(w io.Writer, d *ast.EnumDecl, enum *types.Enum, info *sema.Info, opts docOpts) {
 	// Check if all flat
 	allFlat := true
 	for _, v := range enum.Variants() {
@@ -818,19 +818,32 @@ func emitEnumCompact(w io.Writer, d *ast.EnumDecl, enum *types.Enum) {
 		line += " `copy"
 	}
 
-	if allFlat {
-		names := make([]string, len(enum.Variants()))
-		for i, v := range enum.Variants() {
-			names[i] = v.Name()
-		}
-		fmt.Fprintf(w, "    %s { %s }\n", line, strings.Join(names, ", "))
-	} else {
-		variants := make([]string, len(enum.Variants()))
-		for i, v := range enum.Variants() {
+	variants := make([]string, len(enum.Variants()))
+	for i, v := range enum.Variants() {
+		if allFlat {
+			variants[i] = v.Name()
+		} else {
 			variants[i] = v.String()
 		}
-		fmt.Fprintf(w, "    %s { %s }\n", line, strings.Join(variants, ", "))
 	}
+	variantStr := strings.Join(variants, ", ")
+
+	// When the enum has methods, render a multi-line block (matching the
+	// type summary style) so getters and methods are visible and the access
+	// form is unambiguous in -signatures mode. Otherwise keep the one-liner.
+	methods := collectEnumMethods(enum, opts)
+	if len(methods) == 0 {
+		fmt.Fprintf(w, "    %s { %s }\n", line, variantStr)
+		return
+	}
+
+	fmt.Fprintf(w, "    %s {\n", line)
+	fmt.Fprintf(w, "        %s\n", variantStr)
+	fmt.Fprintln(w)
+	for _, m := range methods {
+		fmt.Fprintf(w, "        %s\n", formatMethodSig(m, info))
+	}
+	fmt.Fprintln(w, "    }")
 }
 
 // --- Function documentation ---

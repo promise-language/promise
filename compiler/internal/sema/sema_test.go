@@ -4693,6 +4693,99 @@ func TestGenericThisAsRightOperand(t *testing.T) {
 	`)
 }
 
+func TestEnumBinaryOperator(t *testing.T) {
+	// T0876: a user-defined binary operator declared on an enum must dispatch.
+	// checkOperator previously had no *types.Enum case, so `a < b` reported
+	// "operator < not defined on type ECmp".
+	checkOK(t, `
+		enum ECmp {
+			some(int x),
+			<(ECmp other) bool => this.unwrap() < other.unwrap();
+			unwrap(this) int { match this { some(x) => { return x; } } }
+		}
+		test() {
+			ECmp a = ECmp.some(2);
+			ECmp b = ECmp.some(5);
+			bool r = a < b;
+		}
+	`)
+}
+
+func TestEnumGenericThisAsRightOperand(t *testing.T) {
+	// T0876: inside a generic enum's method, `this` used as the right-hand
+	// operand of a user-defined operator must type as the self-instantiation
+	// GCmp[T], not the bare *Enum, so it matches the GCmp[T] parameter.
+	checkOK(t, `
+		enum GCmp[T: Ordered] {
+			one(T v),
+			<(GCmp[T] other) bool => this.unwrap() < other.unwrap();
+			gt_via(this, GCmp[T] other) bool => other < this;
+			unwrap(this) T { match this { one(v) => { return v; } } }
+		}
+	`)
+}
+
+func TestEnumBinaryOperatorErrors(t *testing.T) {
+	// T0876: error paths inside checkEnumOperator. Each must produce a clean
+	// sema diagnostic rather than falling through or panicking in codegen.
+
+	// (a) No operator method declared on the enum -> "not defined".
+	expectError(t, checkErrs(t, `
+		enum E {
+			some(int x),
+		}
+		test() {
+			E a = E.some(1);
+			E b = E.some(2);
+			bool r = a < b;
+		}
+	`), "operator < not defined on type E")
+
+	// (b) Right operand not assignable to the operator's parameter type.
+	expectError(t, checkErrs(t, `
+		enum E {
+			some(int x),
+			<(E other) bool => true;
+		}
+		test() {
+			E a = E.some(1);
+			bool r = a < 5;
+		}
+	`), "operator <: cannot use int as E")
+
+	// (c) Binary operator declared with the wrong arity (two params) ->
+	// "invalid signature" (the lookup succeeds but the signature is unusable).
+	expectError(t, checkErrs(t, `
+		enum E {
+			some(int x),
+			<(E a, E b) bool => true;
+		}
+		test() {
+			E a = E.some(1);
+			E b = E.some(2);
+			bool r = a < b;
+		}
+	`), "operator < has invalid signature")
+}
+
+func TestEnumBinaryOperatorReturnsInstance(t *testing.T) {
+	// T0876: an enum operator whose result is a generic instance must have that
+	// instance recorded (checkEnumOperator's recordInstance branch) so it is
+	// monomorphized.
+	checkOK(t, `
+		type Box[T] { T v `+"`value"+`; }
+		enum E {
+			some(int x),
+			+(E other) Box[int] { return Box[int](v: 1); }
+		}
+		test() {
+			E a = E.some(1);
+			E b = E.some(2);
+			Box[int] r = a + b;
+		}
+	`)
+}
+
 func TestGenericUnaryOperator(t *testing.T) {
 	checkOK(t, `
 		type Wrapper[T] {

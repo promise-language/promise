@@ -974,6 +974,20 @@ func TestAssignableTo(t *testing.T) {
 	gPair := NewNamed(NewTypeName(Pos{}, "GPair", nil), []*TypeParam{gpA, gpB})
 	gPairArity := NewInstance(gPair, []Type{gpA}) // arity mismatch (1 arg, 2 params)
 
+	// Generic enum GEnum[T] and its self-instance, for the enum analog
+	// (Rule 4d / isSelfEnumInstance, T0876).
+	geT := NewTypeParam(NewTypeName(Pos{}, "T", nil), nil, 0)
+	gEnum := NewEnum(NewTypeName(Pos{}, "GEnum", nil), []*TypeParam{geT})
+	gEnumSelf := NewInstance(gEnum, []Type{geT}) // GEnum[T] from inside GEnum's body
+	gEnumInt := NewInstance(gEnum, []Type{TypInt})
+
+	// A different generic enum's self-instance: same shape as gEnumSelf but a
+	// foreign origin, so isSelfEnumInstance(gEnum, otherEnumSelf) must be false
+	// (origin != e branch).
+	oeT := NewTypeParam(NewTypeName(Pos{}, "U", nil), nil, 0)
+	otherEnum := NewEnum(NewTypeName(Pos{}, "OtherEnum", nil), []*TypeParam{oeT})
+	otherEnumSelf := NewInstance(otherEnum, []Type{oeT})
+
 	tests := []struct {
 		name string
 		x, y Type
@@ -1092,6 +1106,13 @@ func TestAssignableTo(t *testing.T) {
 		{"named_to_other_generic", gBox, gOtherSelf, false},                        // different origin
 		{"non_generic_named_to_instance", animal, NewInstance(animal, nil), false}, // origin has no type params
 		{"named_to_arity_mismatch", gPair, gPairArity, false},                      // tparam/targ count mismatch
+
+		// Rule 4d (T0876): a bare generic enum is interchangeable with its own
+		// self-instance (GEnum[T] whose arg is GEnum's own type param).
+		{"enum_to_self_instance", gEnum, gEnumSelf, true},
+		{"self_instance_to_enum", gEnumSelf, gEnum, true},
+		{"enum_to_concrete_instance", gEnum, gEnumInt, false},             // concrete arg, not a TypeParam
+		{"enum_to_other_enum_self_instance", gEnum, otherEnumSelf, false}, // foreign origin
 
 		// Not assignable
 		{"int_to_string", TypInt, TypString, false},

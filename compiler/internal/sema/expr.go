@@ -633,7 +633,13 @@ func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right t
 	switch t := left.(type) {
 	case *types.Named:
 		named = t
+	case *types.Enum:
+		return c.checkEnumOperator(pos, t, nil, op, right)
 	case *types.Instance:
+		if en, ok := t.Origin().(*types.Enum); ok {
+			subst := types.BuildSubstMap(en.TypeParams(), t.TypeArgs())
+			return c.checkEnumOperator(pos, en, subst, op, right)
+		}
 		origin, ok := t.Origin().(*types.Named)
 		if !ok {
 			c.errorf(pos, "operator %s not defined on type %s", op, left)
@@ -714,6 +720,38 @@ func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right t
 	return types.TypVoid
 }
 
+// checkEnumOperator type-checks a user-defined binary operator declared on an
+// enum (T0876). Enums register operator methods on *types.Enum, which the
+// Named-centric checkOperator switch never consulted.
+func (c *Checker) checkEnumOperator(pos ast.Pos, en *types.Enum, subst map[*types.TypeParam]types.Type, op string, right types.Type) types.Type {
+	m := en.LookupMethod(op)
+	if m == nil {
+		c.errorf(pos, "operator %s not defined on type %s", op, en)
+		return nil
+	}
+	sig := m.Sig()
+	if subst != nil {
+		sig = types.Substitute(sig, subst).(*types.Signature)
+	}
+	if len(sig.Params()) != 1 {
+		c.errorf(pos, "operator %s has invalid signature", op)
+		return nil
+	}
+	paramType := sig.Params()[0].Type()
+	if !types.AssignableTo(right, paramType) {
+		c.errorf(pos, "operator %s: cannot use %s as %s", op, right, paramType)
+		return nil
+	}
+	if sig.Result() != nil {
+		result := sig.Result()
+		if inst, ok := result.(*types.Instance); ok {
+			c.recordInstance(inst)
+		}
+		return result
+	}
+	return types.TypVoid
+}
+
 func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 	// Set inUnaryNeg so that suffixed integer literals (e.g. 128i8 in -128i8)
 	// validate against the signed minimum instead of the signed maximum.
@@ -782,6 +820,10 @@ func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string)
 	case *types.Named:
 		named = t
 	case *types.Instance:
+		// Enum-origin instances fall through to the default error: user-defined
+		// unary operators on enums are not yet dispatchable in codegen, so sema
+		// rejects them cleanly rather than letting genUnaryExpr panic. Tracked
+		// (for both Named and enum) as T0878.
 		origin, ok := t.Origin().(*types.Named)
 		if !ok {
 			c.errorf(pos, "operator %s not defined on type %s", op, operand)

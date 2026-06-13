@@ -199,6 +199,20 @@ func AssignableTo(x, y Type) bool {
 		}
 	}
 
+	// Rule 4d: the enum analog of Rule 4c. Inside a generic enum E[P...]'s
+	// method body, `this` is typed as the bare *Enum, while parameters declared
+	// E[P...] are Instances over E's own type params — the same type. (T0876)
+	if xe, ok := x.(*Enum); ok {
+		if yi, ok := y.(*Instance); ok && isSelfEnumInstance(xe, yi) {
+			return true
+		}
+	}
+	if xi, ok := x.(*Instance); ok {
+		if ye, ok := y.(*Enum); ok && isSelfEnumInstance(ye, xi) {
+			return true
+		}
+	}
+
 	// Rule 5: TypeParam assignable to any of its constraints
 	if tp, ok := x.(*TypeParam); ok {
 		for _, c := range tp.Constraints() {
@@ -272,6 +286,28 @@ func isSelfInstance(n *Named, inst *Instance) bool {
 		return false
 	}
 	tparams := n.TypeParams()
+	targs := inst.TypeArgs()
+	if len(tparams) == 0 || len(tparams) != len(targs) {
+		return false
+	}
+	for i, tp := range tparams {
+		ta, ok := targs[i].(*TypeParam)
+		if !ok || ta != tp {
+			return false
+		}
+	}
+	return true
+}
+
+// isSelfEnumInstance is the enum analog of isSelfInstance: reports whether inst
+// is the self-instantiation of the generic enum e — origin == e and type args
+// are exactly e's own type params, in order. (T0876)
+func isSelfEnumInstance(e *Enum, inst *Instance) bool {
+	origin, ok := inst.Origin().(*Enum)
+	if !ok || origin != e {
+		return false
+	}
+	tparams := e.TypeParams()
 	targs := inst.TypeArgs()
 	if len(tparams) == 0 || len(tparams) != len(targs) {
 		return false

@@ -1,0 +1,123 @@
+// T0876: user-defined binary operators declared on an enum must dispatch.
+// Previously sema's checkOperator had no *types.Enum case, so any use of an
+// enum operator reported "operator < not defined on type E", and codegen
+// would panic resolving a Named type. Covers: non-generic enums, generic
+// enums, and `this` on either side of the operator inside a method body.
+// Non-generic enum with a user-defined `<` and a `>` that puts `this` on the RHS.
+enum ECmp {
+  some(int x),
+
+  < (ECmp other) bool {
+    return this.unwrap_x() < other.unwrap_x();
+  }
+
+  // `other < this` exercises an enum `this` as the right-hand operand.
+  > (ECmp other) bool {
+    return other < this;
+  }
+
+  unwrap_x(this) int {
+    match this {
+      some(x) => {
+        return x;
+      },
+    }
+  }
+}
+
+enum_binary_direct() `test {
+  a := ECmp.some(2);
+  b := ECmp.some(5);
+  assert(a < b, "2 < 5 should be true");
+}
+
+enum_binary_false() `test {
+  a := ECmp.some(5);
+  b := ECmp.some(2);
+  assert(!(a < b), "5 < 2 should be false");
+}
+
+enum_this_as_right_operand() `test {
+  a := ECmp.some(5);
+  b := ECmp.some(2);
+  assert(a > b, "5 > 2 should be true");
+  c := ECmp.some(2);
+  d := ECmp.some(5);
+  assert(!(c > d), "2 > 5 should be false");
+}
+
+// Generic enum with a user-defined operator over an Ordered type parameter.
+enum GCmp[T: Ordered] {
+  one(T v),
+
+  < (GCmp[T] other) bool {
+    return this.unwrap() < other.unwrap();
+  }
+
+  eq(this, GCmp[T] other) bool {
+    return !(this < other) && !(other < this);
+  }
+
+  // Chained use: `this` on both sides across two operator dispatches.
+  le(this, GCmp[T] other) bool {
+    return this < other || this.eq(other);
+  }
+
+  unwrap(this) T {
+    match this {
+      one(v) => {
+        return v;
+      },
+    }
+  }
+}
+
+enum_generic_int() `test {
+  a := GCmp[int].one(2);
+  b := GCmp[int].one(5);
+  assert(a < b, "2 < 5 should be true (generic int)");
+}
+
+enum_generic_string() `test {
+  a := GCmp[string].one("apple");
+  b := GCmp[string].one("banana");
+  assert(a < b, "apple < banana should be true (generic string)");
+}
+
+enum_generic_this_chained() `test {
+  a := GCmp[int].one(3);
+  b := GCmp[int].one(3);
+  assert(a.le(b), "3 <= 3 should be true (chained this operator)");
+  c := GCmp[int].one(2);
+  d := GCmp[int].one(5);
+  assert(c.le(d), "2 <= 5 should be true (chained this operator)");
+}
+
+// An enum operator whose result is a generic type instance: the returned
+// instance (Box[int]) must be monomorphized and dropped without leaking.
+type Box[T] {
+  T v `value;
+}
+
+enum Adder {
+  amount(int x),
+
+  +(Adder other) Box[int] {
+    return Box[int](v: this.unwrap() + other.unwrap());
+  }
+
+  unwrap(this) int {
+    match this {
+      amount(x) => {
+        return x;
+      },
+    }
+  }
+}
+
+enum_operator_returns_instance() `test {
+  a := Adder.amount(4);
+  b := Adder.amount(6);
+  r := a + b;
+  assert(r.v == 10, "4 + 6 should be 10");
+}

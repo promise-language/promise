@@ -1097,6 +1097,9 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	}
 	named := extractNamed(leftType)
 	if named == nil {
+		if en := extractEnum(leftType); en != nil {
+			return c.genEnumBinaryOp(e, en, leftType, left, right)
+		}
 		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for operator %s", leftType, e.Op))
 	}
 
@@ -1193,6 +1196,62 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 						right = c.block.NewLoad(st, alloca)
 					}
 				}
+			}
+		}
+	}
+	args = append(args, right)
+	return c.block.NewCall(fn, args...)
+}
+
+// genEnumBinaryOp dispatches a user-defined binary operator declared on an enum
+// (T0876). Enum operator methods receive the enum value via an i8* pointer
+// (mirroring genEnumMethodCall), so the Named-type arg convention in
+// genBinaryExpr does not apply.
+func (c *Compiler) genEnumBinaryOp(e *ast.BinaryExpr, en *types.Enum, leftType types.Type, left, right value.Value) value.Value {
+	op := e.Op.String()
+
+	// Resolve the enum's mangled name (mono name for instances, monoCtx for
+	// the origin enum inside a generic method body).
+	enumName := en.Obj().Name()
+	if inst, ok := leftType.(*types.Instance); ok {
+		if _, ok := inst.Origin().(*types.Enum); ok {
+			enumName = monoName(inst)
+		}
+	} else if c.monoCtx != nil {
+		if origin, ok := c.monoCtx.origin.(*types.Enum); ok && en == origin {
+			enumName = c.monoCtx.name
+		}
+	}
+
+	method := en.LookupMethod(op)
+	if method == nil {
+		panic(fmt.Sprintf("codegen: no operator %q on enum %s", op, enumName))
+	}
+	mangledName := mangleMethodName(enumName, op, false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared enum operator method %s", mangledName))
+	}
+
+	// Receiver: pass an i8* pointer to the enum value.
+	var args []value.Value
+	if isThisReceiver(e.Left) {
+		// `this` inside an enum method is already i8* pointing to the enum alloca.
+		args = append(args, left)
+	} else {
+		alloca := c.entryBlock.NewAlloca(left.Type())
+		alloca.SetName(c.uniqueLocalName("enum.this"))
+		c.block.NewStore(left, alloca)
+		args = append(args, c.block.NewBitCast(alloca, irtypes.I8Ptr))
+	}
+
+	// Operand: the method expects the enum value by value. If the right operand
+	// is `this` (i8* receiver pointer), load the enum value from it.
+	if isThisReceiver(e.Right) {
+		if len(fn.Params) > 1 {
+			if _, rightIsPtr := right.Type().(*irtypes.PointerType); rightIsPtr {
+				valPtr := c.block.NewBitCast(right, irtypes.NewPointer(fn.Params[1].Typ))
+				right = c.block.NewLoad(fn.Params[1].Typ, valPtr)
 			}
 		}
 	}

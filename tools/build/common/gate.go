@@ -95,7 +95,10 @@ func runGateTest(root string, args []string) error {
 
 	// Build the single-target host envelope (relativizes file paths against the
 	// repo root, groups by file, derives metrics from the records).
-	out := BuildGateOutput(root, hostTarget, "host", "promise-tests", hostJSONL)
+	out, err := BuildGateOutput(root, hostTarget, "host", "promise-tests", hostJSONL)
+	if err != nil {
+		return fmt.Errorf("build gate output: %w", err)
+	}
 
 	// Write gate-values.json sidecar so bin/commitgate can read the metrics.
 	gv := &GateValues{
@@ -162,7 +165,10 @@ func runGateWasmTests(root string, args []string) error {
 	wasmJSONL, wasmErr := RunPromiseTestsJSON(root, "wasm32-wasi")
 
 	// Build the single-target wasm envelope.
-	out := BuildGateOutput(root, "wasm32-wasi", "wasm", "wasm-test", wasmJSONL)
+	out, err := BuildGateOutput(root, "wasm32-wasi", "wasm", "wasm-test", wasmJSONL)
+	if err != nil {
+		return fmt.Errorf("build gate output: %w", err)
+	}
 
 	// Write gate-values.json sidecar so bin/commitgate can read the metrics.
 	// Platform is the host (where the gate ran); the metrics carry the wasm_

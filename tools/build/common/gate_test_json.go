@@ -2,6 +2,7 @@ package common
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -123,12 +124,17 @@ func clampContext(ctx string) string {
 }
 
 // BuildGateOutput parses the runner's JSONL, relativizes file paths against
-// root, groups records by file (preserving stream order), and derives metrics
+// base, groups records by file (preserving stream order), and derives metrics
 // named with the given prefix (e.g. "host" → host_test_count). metricKeys lists
 // every metric this prefix can emit so absent statuses are reported as 0 (a
 // gate must report a stable metric set, not omit a metric just because its
 // count happens to be zero this run).
-func BuildGateOutput(root, target, metricPrefix, complete, jsonl string) *GateOutput {
+//
+// base is the directory the test runner ran in — for host/wasm gates this is
+// the dev repo root; for the install gate this is the worktree srcDir. A path
+// that escapes base (i.e. starts with "..") is a hard error: it always signals
+// a base/cwd mismatch (programming error), so there is no silent fallback.
+func BuildGateOutput(base, target, metricPrefix, complete, jsonl string) (*GateOutput, error) {
 	records := ParseTestJSONL(jsonl)
 
 	metrics := map[string]float64{}
@@ -139,7 +145,10 @@ func BuildGateOutput(root, target, metricPrefix, complete, jsonl string) *GateOu
 	var files []TestFileGroup
 	indexByFile := map[string]int{}
 	for _, r := range records {
-		rel := relToRoot(root, r.File)
+		rel, err := relToBase(base, r.File)
+		if err != nil {
+			return nil, fmt.Errorf("BuildGateOutput: %w", err)
+		}
 		idx, ok := indexByFile[rel]
 		if !ok {
 			idx = len(files)
@@ -162,15 +171,19 @@ func BuildGateOutput(root, target, metricPrefix, complete, jsonl string) *GateOu
 		Metrics:  metrics,
 		Files:    files,
 		Complete: complete,
-	}
+	}, nil
 }
 
-// relToRoot returns file relative to root with forward slashes. file is the
-// absolute path emitted by the runner; if it is not under root (or Rel fails),
-// the cleaned original is returned so nothing is silently dropped.
-func relToRoot(root, file string) string {
-	if rel, err := filepath.Rel(root, file); err == nil && !strings.HasPrefix(rel, "..") {
-		return filepath.ToSlash(rel)
+// relToBase returns file relative to base with forward slashes.
+// A ..‑escaping result is a hard error — it always indicates a base/cwd mismatch
+// (programming error, not a user error), so there is no silent fallback.
+func relToBase(base, file string) (string, error) {
+	rel, err := filepath.Rel(base, file)
+	if err != nil {
+		return "", fmt.Errorf("rel(%q, %q): %w", base, file, err)
 	}
-	return filepath.ToSlash(file)
+	if strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("file %q is not under base %q", file, base)
+	}
+	return filepath.ToSlash(rel), nil
 }

@@ -108,7 +108,10 @@ func runGateInstall(root string, args []string) error {
 	phaseErr := runInstallPhases(root, work, variant, baseURL, system)
 
 	// Aggregate the phase artifacts into the standard envelope.
-	out := buildInstallGateOutput(root, hostTarget, variant, work)
+	out, err := buildInstallGateOutput(hostTarget, variant, work)
+	if err != nil {
+		return fmt.Errorf("aggregate gate output: %w", err)
+	}
 
 	// Sidecar so commit/periodic gate ingestion can read the metrics.
 	gv := &GateValues{
@@ -147,7 +150,7 @@ func runInstallPhases(root, work, variant, baseURL string, system bool) error {
 		fmt.Fprintf(os.Stderr, "[gate-install:%s] %s\n", variant, fmt.Sprintf(format, a...))
 	}
 	defer func() {
-		data, _ := json.Marshal(phases)
+		data, _ := json.Marshal(phases) // map[string]string marshal never fails
 		if err := os.WriteFile(filepath.Join(work, "phases.json"), data, 0o644); err != nil {
 			logf("warning: write phases.json: %v", err)
 		}
@@ -267,7 +270,10 @@ func runInstallPhases(root, work, variant, baseURL string, system bool) error {
 	// block below (used by thin/full and --system).
 	shaCmd := exec.Command(promiseBin, "version", "--commit")
 	shaCmd.Env = baseEnv // resolve the SANDBOX epoch compiler (PROMISE_HOME lives in baseEnv)
-	shaOut, _ := shaCmd.Output()
+	shaOut, shaErr := shaCmd.Output()
+	if shaErr != nil {
+		logf("warning: 'promise version --commit' failed: %v", shaErr)
+	}
 	sha := strings.TrimSpace(string(shaOut))
 	// A stamped binary prints exactly the 40-char hex SHA. An unstamped build
 	// prints "" (empty `main.commit`); a binary predating `version --commit`
@@ -450,10 +456,20 @@ func downloadFile(url, dest string) error {
 // (reusing the exact gate machinery); the per-phase signals merge in as
 // install_<variant>_<phase>_ok ∈ {0,1}. Pure (filesystem-read only) so the
 // aggregation is unit-testable without running the gate.
-func buildInstallGateOutput(root, hostTarget, variant, work string) *GateOutput {
+func buildInstallGateOutput(hostTarget, variant, work string) (*GateOutput, error) {
 	metricPrefix := "install_" + variant
-	jsonl, _ := os.ReadFile(filepath.Join(work, "tests.jsonl"))
-	out := BuildGateOutput(root, hostTarget, metricPrefix, "install-"+variant, string(jsonl))
+	// Relativize against srcDir (the worktree the suite ran in), not the dev
+	// repo root — the worktree lives under a random temp dir, so root-relative
+	// paths would escape root and produce unstable absolute identities (T0902).
+	srcDir := filepath.Join(work, "src")
+	data, readErr := os.ReadFile(filepath.Join(work, "tests.jsonl"))
+	if readErr != nil && !os.IsNotExist(readErr) {
+		fmt.Fprintf(os.Stderr, "warning: read tests.jsonl: %v\n", readErr)
+	}
+	out, err := BuildGateOutput(srcDir, hostTarget, metricPrefix, "install-"+variant, string(data))
+	if err != nil {
+		return nil, fmt.Errorf("buildInstallGateOutput: %w", err)
+	}
 
 	phases := readInstallPhases(filepath.Join(work, "phases.json"))
 	for _, p := range installPhasesFor(variant) {
@@ -463,19 +479,22 @@ func buildInstallGateOutput(root, hostTarget, variant, work string) *GateOutput 
 		}
 		out.Metrics[metricPrefix+"_"+p+"_ok"] = ok
 	}
-	return out
+	return out, nil
 }
 
 // readInstallPhases reads the phases.json ({"fetch":"pass|fail",...}). A missing
-// or malformed file yields an empty map so absent phases are reported as not-ok
-// (0) rather than crashing the gate.
+// file yields an empty map (expected when an early phase fails before the file is
+// written). A malformed file logs a warning and yields an empty map so absent
+// phases are reported as not-ok (0) rather than crashing the gate.
 func readInstallPhases(path string) map[string]string {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		// Missing is expected when an early phase fails before writing phases.json.
 		return map[string]string{}
 	}
 	var m map[string]string
 	if err := json.Unmarshal(data, &m); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: malformed phases.json: %v\n", err)
 		return map[string]string{}
 	}
 	return m

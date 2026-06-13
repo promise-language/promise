@@ -16,14 +16,15 @@ import (
 // metrics from the JSONL, per-phase _ok metrics from phases.json, and the file
 // grouping — all without running the script.
 func TestBuildInstallGateOutput(t *testing.T) {
-	root := t.TempDir()
 	work := t.TempDir()
 
 	// Two tests in one file: one pass, one fail. Build the fixture with
 	// json.Marshal (not string concatenation) so the OS-native path is escaped
 	// correctly — on Windows the path contains backslashes (e.g. C:\Users\...),
 	// which would form invalid JSON escapes inside a raw string literal (T0823).
-	f := filepath.Join(root, "tests", "e2e", "basics.pr")
+	// The path must be under work/src (the srcDir the suite ran in) so
+	// buildInstallGateOutput can relativize it — T0902.
+	f := filepath.Join(work, "src", "tests", "e2e", "basics.pr")
 	mk := func(test, status, ctx string, elapsed float64) string {
 		b, _ := json.Marshal(jsonlRecord{
 			File: f, Test: test, Status: status, Elapsed: elapsed, Context: ctx,
@@ -41,7 +42,10 @@ func TestBuildInstallGateOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := buildInstallGateOutput(root, "darwin-arm64", "thin", work)
+	out, err := buildInstallGateOutput("darwin-arm64", "thin", work)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if out.Target != "darwin-arm64" || out.Complete != "install-thin" {
 		t.Fatalf("envelope target/complete = %q/%q", out.Target, out.Complete)
@@ -95,10 +99,12 @@ func TestInstallFixtureBackslashPath(t *testing.T) {
 // phases.json, no tests.jsonl — e.g. fetch failed before the script wrote them)
 // reports all phases as not-ok and zero test counts rather than crashing.
 func TestBuildInstallGateOutputMissingArtifacts(t *testing.T) {
-	root := t.TempDir()
 	work := t.TempDir() // empty — no artifacts
 
-	out := buildInstallGateOutput(root, "linux-amd64", "full", work)
+	out, err := buildInstallGateOutput("linux-amd64", "full", work)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, p := range installPhasesFor("full") {
 		if got := out.Metrics["install_full_"+p+"_ok"]; got != 0 {
 			t.Errorf("missing-artifact phase %s_ok = %v, want 0", p, got)
@@ -231,6 +237,76 @@ func TestDownloadFile(t *testing.T) {
 	// Unreachable host → transport error.
 	if err := downloadFile("http://127.0.0.1:1/install.sh", filepath.Join(t.TempDir(), "y")); err == nil {
 		t.Error("downloadFile(unreachable) = nil, want error")
+	}
+}
+
+// TestDownloadFileCreateFails: when the server returns 200 but the destination
+// path is in a non-existent directory, os.Create fails and downloadFile must
+// surface that error rather than silently succeeding.
+func TestDownloadFileCreateFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer srv.Close()
+
+	// Parent directory does not exist → os.Create returns an error.
+	dest := filepath.Join(t.TempDir(), "nonexistent-subdir", "install.sh")
+	if err := downloadFile(srv.URL+"/install.sh", dest); err == nil {
+		t.Fatal("downloadFile with uncreateable dest = nil, want error")
+	}
+}
+
+// TestBuildInstallGateOutputReadWarning: when tests.jsonl exists but is not
+// readable (e.g. it's a directory — EISDIR, which is not os.IsNotExist), the
+// function must log a warning and continue, returning a valid output with zero
+// test counts rather than failing. This covers the non-NotExist read-error branch.
+func TestBuildInstallGateOutputReadWarning(t *testing.T) {
+	work := t.TempDir()
+	// Create tests.jsonl as a directory so os.ReadFile returns EISDIR — an error
+	// that is definitely not os.IsNotExist.
+	if err := os.Mkdir(filepath.Join(work, "tests.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// phases.json: all pass
+	phases := `{"fetch":"pass","install":"pass","sanity":"pass","test":"pass"}`
+	if err := os.WriteFile(filepath.Join(work, "phases.json"), []byte(phases), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Must succeed: the warning is printed to stderr but doesn't fail the gate.
+	out, err := buildInstallGateOutput("linux-amd64", "thin", work)
+	if err != nil {
+		t.Fatalf("buildInstallGateOutput with EISDIR tests.jsonl = error %v, want nil", err)
+	}
+	// No test records parsed → test_count == 0.
+	if got := out.Metrics["install_thin_test_count"]; got != 0 {
+		t.Errorf("install_thin_test_count = %v, want 0 (no records readable)", got)
+	}
+	// Phases still recorded correctly.
+	if got := out.Metrics["install_thin_fetch_ok"]; got != 1 {
+		t.Errorf("install_thin_fetch_ok = %v, want 1", got)
+	}
+}
+
+// TestBuildInstallGateOutputBuildError: when tests.jsonl contains a record whose
+// file path is outside srcDir (work/src), BuildGateOutput returns a hard error and
+// buildInstallGateOutput must propagate it. This exercises the
+// `return nil, fmt.Errorf("buildInstallGateOutput: %w", err)` branch.
+func TestBuildInstallGateOutputBuildError(t *testing.T) {
+	work := t.TempDir()
+	// Record whose file is NOT under work/src — it escapes srcDir, so relToBase
+	// returns a hard error.
+	badJSONL := `{"file":"/tmp/outside/x_test.pr","test":"main","status":"pass","elapsed":0.01}` + "\n"
+	if err := os.WriteFile(filepath.Join(work, "tests.jsonl"), []byte(badJSONL), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := buildInstallGateOutput("linux-amd64", "thin", work)
+	if err == nil {
+		t.Fatal("buildInstallGateOutput with escaping file path = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "buildInstallGateOutput") {
+		t.Errorf("error %q does not mention buildInstallGateOutput", err.Error())
 	}
 }
 

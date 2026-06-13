@@ -26,7 +26,10 @@ func TestBuildGateOutputGroupsAndRelativizes(t *testing.T) {
 		`{not valid json`, // malformed line skipped
 	}, "\n")
 
-	out := BuildGateOutput(root, "linux-amd64", "host", "promise-tests", jsonl)
+	out, err := BuildGateOutput(root, "linux-amd64", "host", "promise-tests", jsonl)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if out.Target != "linux-amd64" {
 		t.Errorf("target = %q, want linux-amd64", out.Target)
@@ -62,7 +65,10 @@ func TestBuildGateOutputMetrics(t *testing.T) {
 		jsonlLine(root, "a_test.pr", "n1", "not-run"),
 	}, "\n")
 
-	out := BuildGateOutput(root, "linux-amd64", "host", "promise-tests", jsonl)
+	out, err := BuildGateOutput(root, "linux-amd64", "host", "promise-tests", jsonl)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	want := map[string]float64{
 		"host_test_count":     2,
@@ -87,7 +93,10 @@ func TestBuildGateOutputMetrics(t *testing.T) {
 func TestBuildGateOutputZeroMetricsPresent(t *testing.T) {
 	root := t.TempDir()
 	jsonl := jsonlLine(root, "a_test.pr", "p1", "pass")
-	out := BuildGateOutput(root, "wasm32-wasi", "wasm", "wasm-test", jsonl)
+	out, err := BuildGateOutput(root, "wasm32-wasi", "wasm", "wasm-test", jsonl)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// All wasm_ metrics present; only test_count is non-zero.
 	if out.Metrics["wasm_test_count"] != 1 {
@@ -132,13 +141,27 @@ func TestParseTestJSONLSkipsIncompleteRecords(t *testing.T) {
 	}
 }
 
-func TestBuildGateOutputPathOutsideRootKept(t *testing.T) {
-	root := t.TempDir()
-	// A record whose file is not under root is kept verbatim (forward-slashed),
-	// never silently dropped.
+func TestBuildGateOutputPathOutsideBaseErrors(t *testing.T) {
+	base := t.TempDir()
+	// A record whose file escapes base is a hard error — it always signals a
+	// base/cwd mismatch (programming error), so there is no silent fallback.
 	jsonl := `{"file":"/somewhere/else/x_test.pr","test":"main","status":"pass","elapsed":0.01}`
-	out := BuildGateOutput(root, "linux-amd64", "host", "promise-tests", jsonl)
-	if len(out.Files) != 1 || out.Files[0].File != "/somewhere/else/x_test.pr" {
-		t.Fatalf("outside-root path not preserved: %+v", out.Files)
+	_, err := BuildGateOutput(base, "linux-amd64", "host", "promise-tests", jsonl)
+	if err == nil {
+		t.Fatal("expected error for path outside base, got nil")
+	}
+}
+
+// TestRelToBaseFilepathRelError: filepath.Rel returns an error when one path is
+// absolute and the other is relative (the two differ in "rootedness"). This is a
+// programming-error path (only reachable via a mismatched base/file pair), so the
+// function must surface it as a hard error rather than silently succeeding.
+func TestRelToBaseFilepathRelError(t *testing.T) {
+	// On Unix, filepath.Rel("relative/path", "/absolute/file") fails because the
+	// two paths have different rootedness (one is rooted, the other is not).
+	// This exercises the filepath.Rel error branch in relToBase.
+	_, err := relToBase("relative/base", "/absolute/file.pr")
+	if err == nil {
+		t.Fatal("relToBase(relative base, absolute file) = nil, want error")
 	}
 }

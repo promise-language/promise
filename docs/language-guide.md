@@ -446,6 +446,7 @@ wrap[int](42);   // works: resolves both wrap[int] and identity[int]
 ```promise
 // Vector (T[])
 int[] nums = [1, 2, 3];
+int[] empty_vec = [];     // empty-vector literal
 nums.push(4);
 int? last = nums.pop();
 nums[0] = 10;
@@ -458,6 +459,7 @@ int[] filled = int[].filled(0, count: 100);
 
 // Map (map[K, V] — keys must be Hashable + Equal)
 map[string, int] scores = {"alice": 100, "bob": 85};
+map[string, int] empty_map = {:};   // empty-map literal — note the colon; `{}` is rejected
 scores["charlie"] = 92;
 if v := scores["alice"] { print_line("{v}"); }   // subscript returns V?
 scores.contains("key");   // bool
@@ -466,7 +468,7 @@ scores.keys();             // K[]
 scores.values();           // V[]
 for k, v in scores { }     // iterate entries
 
-// Set (Set[T] — T must be Hashable + Equal)
+// Set (Set[T] — T must be Hashable + Equal) — no literal form; construct with Set[T]()
 Set[int] s = Set[int]();
 s.add(1);
 s.contains(1);            // true
@@ -872,3 +874,4 @@ Cross-compile to a non-host OS (e.g. Linux → Windows binary) is not yet wired 
 12. **`;` in blocks** — All statements need `;`. The trailing `;` on the last expression before `}` is optional: both `? { "default" }` and `? { "default"; }` work.
 13. **`?!` in failable functions** — `?!` always **panics**, even inside a `!` function. For propagation, just use bare call (or `?^` for self-documenting propagation).
 14. **API discovery** — Use `promise doc <module>` to explore module APIs instead of guessing. `promise doc std` for the standard library.
+15. **`{}` is not an empty map** — use `{:}` (empty map — note the colon), `[]` (empty vector), or `Set[T]()` (sets have no literal form). A bare `{}` in value position is rejected with a guiding error.

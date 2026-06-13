@@ -788,6 +788,12 @@ func (s *BasePromiseParserListener) EnterArrayLiteral(ctx *ArrayLiteralContext) 
 // ExitArrayLiteral is called when production arrayLiteral is exited.
 func (s *BasePromiseParserListener) ExitArrayLiteral(ctx *ArrayLiteralContext) {}
 
+// EnterEmptyBraceLiteral is called when production emptyBraceLiteral is entered.
+func (s *BasePromiseParserListener) EnterEmptyBraceLiteral(ctx *EmptyBraceLiteralContext) {}
+
+// ExitEmptyBraceLiteral is called when production emptyBraceLiteral is exited.
+func (s *BasePromiseParserListener) ExitEmptyBraceLiteral(ctx *EmptyBraceLiteralContext) {}
+
 // EnterMapLiteral is called when production mapLiteral is entered.
 func (s *BasePromiseParserListener) EnterMapLiteral(ctx *MapLiteralContext) {}
 

@@ -608,6 +608,8 @@ func hExpr(h hash.Hash, e ast.Expr) {
 	case *ast.TypeRefExpr:
 		wb(h, 51)
 		hTypeRef(h, ex.Ref)
+	case *ast.EmptyBraceLit:
+		wb(h, 52)
 	default:
 		panic(fmt.Sprintf("typehash: unhandled Expr %T", e))
 	}

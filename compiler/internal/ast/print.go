@@ -298,6 +298,8 @@ func (p *printer) printExpr(e Expr) {
 		p.line("Array(%d)", len(n.Elements))
 	case *MapLit:
 		p.line("Map(%d)", len(n.Entries))
+	case *EmptyBraceLit:
+		p.line("EmptyBrace")
 	case *MatchExpr:
 		p.line("Match (%d arms)", len(n.Arms))
 	case *IfExpr:

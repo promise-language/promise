@@ -391,6 +391,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#arrayLiteral.
 	VisitArrayLiteral(ctx *ArrayLiteralContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#emptyBraceLiteral.
+	VisitEmptyBraceLiteral(ctx *EmptyBraceLiteralContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#mapLiteral.
 	VisitMapLiteral(ctx *MapLiteralContext) interface{}
 

@@ -335,6 +335,10 @@ func (d *decoder) expr() ast.Expr {
 			n.Entries[i] = en
 		}
 		return n
+	case tagEmptyBraceLit:
+		n := &ast.EmptyBraceLit{}
+		d.setPosEnd(n)
+		return n
 	case tagTypeRefExpr:
 		n := &ast.TypeRefExpr{}
 		d.setPosEnd(n)

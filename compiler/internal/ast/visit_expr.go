@@ -486,6 +486,10 @@ func (b *Builder) VisitMapLiteral(ctx *parser.MapLiteralContext) interface{} {
 	return node
 }
 
+func (b *Builder) VisitEmptyBraceLiteral(ctx *parser.EmptyBraceLiteralContext) interface{} {
+	return &EmptyBraceLit{nodeBase: b.baseFromContext(ctx)}
+}
+
 func (b *Builder) VisitMapEntry(ctx *parser.MapEntryContext) interface{} {
 	exprs := ctx.AllExpression()
 	return &MapEntry{

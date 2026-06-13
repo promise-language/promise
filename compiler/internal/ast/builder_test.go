@@ -2579,3 +2579,27 @@ func TestBuildEmptyInterpolationStillWorks(t *testing.T) {
 		}
 	}
 }
+
+// TestT0866EmptyBraceLiteral verifies that a bare `{}` in expression position
+// builds to an *EmptyBraceLit node (sema then rejects it with a guiding error),
+// while `{:}` remains an empty *MapLit. (T0866)
+func TestT0866EmptyBraceLiteral(t *testing.T) {
+	t.Run("empty_brace", func(t *testing.T) {
+		file := parseAndBuild(t, `f() { x := {}; }`)
+		fn := file.Decls[0].(*FuncDecl)
+		vd := fn.Body.Stmts[0].(*InferredVarDecl)
+		if _, ok := vd.Value.(*EmptyBraceLit); !ok {
+			t.Fatalf("expected *EmptyBraceLit, got %T", vd.Value)
+		}
+	})
+	t.Run("empty_map_colon", func(t *testing.T) {
+		file := parseAndBuild(t, `f() { x := {:}; }`)
+		fn := file.Decls[0].(*FuncDecl)
+		vd := fn.Body.Stmts[0].(*InferredVarDecl)
+		ml, ok := vd.Value.(*MapLit)
+		if !ok {
+			t.Fatalf("expected *MapLit, got %T", vd.Value)
+		}
+		assertLen(t, ml.Entries, 0)
+	})
+}

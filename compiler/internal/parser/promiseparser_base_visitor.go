@@ -519,6 +519,10 @@ func (v *BasePromiseParserVisitor) VisitArrayLiteral(ctx *ArrayLiteralContext) i
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitEmptyBraceLiteral(ctx *EmptyBraceLiteralContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitMapLiteral(ctx *MapLiteralContext) interface{} {
 	return v.VisitChildren(ctx)
 }

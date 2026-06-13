@@ -2060,3 +2060,32 @@ func TestErrorListenerCap(t *testing.T) {
 		}
 	})
 }
+
+// TestT0866EmptyBraceParses verifies that a bare `{}` in value position now
+// parses cleanly (it builds to an *ast.EmptyBraceLit that sema rejects with a
+// guiding error), and that the existing collection-literal forms are unaffected.
+func TestT0866EmptyBraceParses(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{"empty_brace_var", `main() { map[string,int] m = {}; }`},
+		{"empty_brace_return", `f() map[string,int] { return {}; }`},
+		{"empty_brace_arg", `main() { take({}); }`},
+		{"empty_map_colon", `main() { map[string,int] m = {:}; }`},
+		{"populated_map", `main() { map[string,int] m = {"a": 1}; }`},
+		{"empty_vector", `main() { int[] v = []; }`},
+		{"empty_block_match_arm", `f(int n) { match n { 1 => {}, _ => {} } }`},
+		// The matchArm grammar reorder (block before expression) must not steal
+		// map-literal-valued arms: `{:}` and `{k: v}` are still expressions.
+		{"map_literal_match_arm", `f(int n) map[string,int] { return match n { _ => {"a": 1} }; }`},
+		{"empty_map_match_arm", `f(int n) { match n { _ => {:} } }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if errs := parseString(tc.code); errs != 0 {
+				t.Errorf("expected 0 parse errors, got %d for: %s", errs, tc.code)
+			}
+		})
+	}
+}

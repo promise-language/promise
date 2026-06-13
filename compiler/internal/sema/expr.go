@@ -238,6 +238,11 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	case *ast.MapLit:
 		typ = c.checkMapLit(e)
 
+	case *ast.EmptyBraceLit:
+		c.errorf(e.Pos(), "`{}` is not a valid empty-collection literal")
+		c.hintf(e.Pos(), "empty map: `{:}` (or `Map[K,V]()`); empty vector: `[]`; empty set: `Set[T]()`")
+		typ = nil
+
 	case *ast.BinaryExpr:
 		c.typeHint = hint // propagate through binary expressions
 		typ = c.checkBinaryExpr(e)

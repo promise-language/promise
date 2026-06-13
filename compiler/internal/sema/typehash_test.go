@@ -116,6 +116,22 @@ func TestHashTypeDeclMethodBodyChanged(t *testing.T) {
 	}
 }
 
+// T0866: a bare `{}` in a method body builds to an *ast.EmptyBraceLit. The node
+// must hash deterministically (hExpr handles it rather than panicking on an
+// unknown Expr), and a body containing it must hash distinctly from one without.
+func TestHashTypeDeclEmptyBraceLitInBody(t *testing.T) {
+	src := `type Foo { bar() { x := {}; } }`
+	h1 := HashTypeDecl(firstTypeDeclFrom(t, src))
+	h2 := HashTypeDecl(firstTypeDeclFrom(t, src))
+	if h1 != h2 {
+		t.Errorf("non-deterministic hash for body with `{}`: %q != %q", h1, h2)
+	}
+	h3 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { bar() { x := [];  } }`))
+	if h1 == h3 {
+		t.Error("expected different hash for `{}` body vs `[]` body")
+	}
+}
+
 func TestHashTypeDeclMethodSignatureChanged(t *testing.T) {
 	h1 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { int x; set(int v) { } }`))
 	h2 := HashTypeDecl(firstTypeDeclFrom(t, `type Foo { int x; set(string v) { } }`))

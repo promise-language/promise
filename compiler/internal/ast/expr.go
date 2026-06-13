@@ -382,6 +382,14 @@ type MapLit struct {
 
 func (*MapLit) exprTag() {}
 
+// EmptyBraceLit represents a bare `{}` in expression position — never valid;
+// sema emits a guiding error pointing to `{:}` / `[]` / `Set[T]()`. (T0866)
+type EmptyBraceLit struct {
+	nodeBase
+}
+
+func (*EmptyBraceLit) exprTag() {}
+
 // MapEntry represents a key-value pair in a map literal.
 type MapEntry struct {
 	nodeBase

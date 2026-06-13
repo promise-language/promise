@@ -501,6 +501,7 @@ primary
     | LPAREN expression RPAREN                                 # parenExpr
     | LPAREN expression COMMA expression (COMMA expression)* RPAREN  # tupleLiteral
     | LBRACKET (expression (COMMA expression)* COMMA?)? RBRACKET     # arrayLiteral
+    | LBRACE RBRACE                                              # emptyBraceLiteral
     | LBRACE (COLON | mapEntry (COMMA mapEntry)* COMMA?) RBRACE  # mapLiteral
     | lambdaExpr                                               # lambda
     | ifExpr                                                   # ifExpression
@@ -554,7 +555,7 @@ matchExpr
     ;
 
 matchArm
-    : matchPattern (IF expression)? FAT_ARROW (expression | block)
+    : matchPattern (IF expression)? FAT_ARROW (block | expression)
     ;
 
 matchPattern

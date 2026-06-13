@@ -263,6 +263,9 @@ func (e *encoder) expr(x ast.Expr) {
 			e.expr(en.Key)
 			e.expr(en.Value)
 		}
+	case *ast.EmptyBraceLit:
+		e.u8(tagEmptyBraceLit)
+		e.nodePos(n)
 	case *ast.TypeRefExpr:
 		e.u8(tagTypeRefExpr)
 		e.nodePos(n)

@@ -108,6 +108,19 @@ test_execute_exit_code() `test(exclude: wasm) `target(!windows) {
   assert(result.exit_code != 0, "false should exit with non-zero");
 }
 
+test_execute_echo_windows() `test(exclude: wasm) `target(windows) {
+  // Execution-level guard for the pal_spawn_env success path (was a -1 stub pre PR #1)
+  // and the emitArgvToCmdline over-quoting regression.
+  ProcessResult result = execute("cmd", ["/c", "echo hello"])?!;
+  assert(result.exit_code == 0, "cmd /c echo should exit 0");
+  assert(result.standard_output.starts_with("hello"), "stdout should contain hello");
+}
+
+test_execute_exit_code_windows() `test(exclude: wasm) `target(windows) {
+  ProcessResult result = execute("cmd", ["/c", "exit 3"])?!;
+  assert(result.exit_code == 3, "exit code should surface");
+}
+
 test_execute_true() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("true", [])?!;
   assert(result.exit_code == 0, "true should exit with 0");
@@ -298,6 +311,13 @@ test_execute_many_args() `test(exclude: wasm) `target(!windows) {
   assert(result.standard_output.starts_with("a b c d e f g h i j"), "all 10 arguments should be passed");
 }
 
+test_execute_multiple_args_windows() `test(exclude: wasm) `target(windows) {
+  // Pre-fix, emitArgvToCmdline over-quoted every arg, breaking `cmd /c`.
+  ProcessResult result = execute("cmd", ["/c", "echo", "a", "b", "c"])?!;
+  assert(result.exit_code == 0, "cmd /c echo should exit 0");
+  assert(result.standard_output.starts_with("a b c"), "args joined with spaces");
+}
+
 test_execute_inherits_env() `test(exclude: wasm) `target(!windows) {
   // Child process should see environment variables set by parent
   set_env_var("PROMISE_TEST_EXEC_ENV", "inherited_value");
@@ -327,6 +347,13 @@ test_execute_inherits_cwd() `test(exclude: wasm) `target(windows) {
   string cwd = working_dir?!;
   assert(cwd == "C:\\Windows", "working directory should be C:\\Windows after set");
   set_working_dir(original)?!;
+}
+
+test_execute_custom_cwd_windows() `test(exclude: wasm) `target(windows) {
+  // Spawns with lpCurrentDirectory set; `cd` with no args prints the current directory.
+  ProcessResult result = execute("cmd", ["/c", "cd"], working_directory: "C:\\Windows")?!;
+  assert(result.exit_code == 0, "cmd /c cd should exit 0");
+  assert(result.standard_output.trim() == "C:\\Windows", "child should run in C:\\Windows");
 }
 
 test_set_env_var_new() `test(exclude: wasm) {
@@ -1008,6 +1035,17 @@ test_execute_custom_env() `test(exclude: wasm) `target(!windows) {
   assert(result.standard_output.trim() == "custom_value", "child should see custom env var");
 }
 
+test_execute_custom_env_windows() `test(exclude: wasm) `target(windows) {
+  // env map fully replaces the child environment; seed from parent so cmd.exe keeps
+  // SystemRoot/ComSpec, then inject our own var. Guards emitEnvpToBlock.
+  map[string, string] custom_env = env;
+  custom_env["PROMISE_TEST_WIN_VAR"] = "custom_value";
+  ProcessResult result = execute("cmd", ["/c", "echo %PROMISE_TEST_WIN_VAR%"],
+  environment: custom_env)?!;
+  assert(result.exit_code == 0, "cmd /c echo should exit 0");
+  assert(result.standard_output.trim() == "custom_value", "child should see injected env var");
+}
+
 test_execute_custom_cwd() `test(exclude: wasm) `target(!windows) {
   ProcessResult result = execute("pwd", [], working_directory: "/usr")?!;
   assert(result.exit_code == 0, "pwd should exit with 0");
@@ -1093,4 +1131,75 @@ test_spawn_custom_cwd() `test(exclude: wasm) `target(!windows) {
   int code = p.wait()?!;
   assert(code == 0, "pwd should exit with 0");
   assert(out.trim() == "/usr", "streaming process should run in /usr");
+}
+
+_read_one_byte(Reader ~r) u8? {
+  return r.read_byte();
+}
+
+test_process_output_read_byte() `test(exclude: wasm) `target(!windows) {
+  // read_byte() is a non-failable default method on Reader — must be called via Reader type.
+  // Returns u8? (present with value, or absent at EOF).
+  Process p = Process.spawn("printf", ["AB"])?!;
+  ProcessOutput stdout = p.take_standard_output()?!;
+  u8? b1 = _read_one_byte(stdout);
+  u8? b2 = _read_one_byte(stdout);
+  int code = p.wait()?!;
+  assert(code == 0, "printf should exit with 0");
+  assert(b1 is present, "first read_byte should return 'A'");
+  assert(b2 is present, "second read_byte should return 'B'");
+  if a := b1 {
+    assert(a == 65u8, "first byte should be 65 (A)");
+  }
+  if b := b2 {
+    assert(b == 66u8, "second byte should be 66 (B)");
+  }
+}
+
+test_process_spawn_echo_windows() `test(exclude: wasm) `target(windows) {
+  // Guards pal_spawn_streaming_env success path on Windows (was a -1 stub pre PR #1).
+  Process p = Process.spawn("cmd", ["/c", "echo hello"])?!;
+  ProcessOutput stdout = p.take_standard_output()?!;
+  string out = stdout.read_all()?!;
+  int code = p.wait()?!;
+  assert(code == 0, "cmd /c echo should exit 0");
+  assert(out.starts_with("hello"), "stdout should contain hello");
+}
+
+test_process_spawn_exit_code_windows() `test(exclude: wasm) `target(windows) {
+  Process p = Process.spawn("cmd", ["/c", "exit 7"])?!;
+  int code = p.wait()?!;
+  assert(code == 7, "exit code should surface from streaming spawn");
+}
+
+test_process_spawn_custom_env_windows() `test(exclude: wasm) `target(windows) {
+  // Guards emitEnvpToBlock inside EmitSpawnStreamingEnv.
+  map[string, string] custom_env = env;
+  custom_env["PROMISE_TEST_SPAWN_WIN_VAR"] = "spawn_custom_value";
+  Process p = Process.spawn("cmd", ["/c", "echo %PROMISE_TEST_SPAWN_WIN_VAR%"],
+  environment: custom_env)?!;
+  ProcessOutput stdout = p.take_standard_output()?!;
+  string out = stdout.read_all()?!;
+  int code = p.wait()?!;
+  assert(code == 0, "cmd /c echo should exit 0");
+  assert(out.trim() == "spawn_custom_value", "streaming spawn should see custom env");
+}
+
+test_process_spawn_custom_cwd_windows() `test(exclude: wasm) `target(windows) {
+  // Guards lpCurrentDirectory in EmitSpawnStreamingEnv.
+  Process p = Process.spawn("cmd", ["/c", "cd"], working_directory: "C:\\Windows")?!;
+  ProcessOutput stdout = p.take_standard_output()?!;
+  string out = stdout.read_all()?!;
+  int code = p.wait()?!;
+  assert(code == 0, "cmd /c cd should exit 0");
+  assert(out.trim() == "C:\\Windows", "streaming spawn should run in C:\\Windows");
+}
+
+test_process_spawn_nonexistent_windows() `test(exclude: wasm) `target(windows) {
+  // On Windows, CreateProcessA fails immediately for nonexistent programs.
+  bool raised = false;
+  Process.spawn("__promise_no_such_program__", [])? e {
+    raised = true;
+  };
+  assert(raised, "spawn of nonexistent program should raise on Windows");
 }

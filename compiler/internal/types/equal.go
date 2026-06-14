@@ -136,9 +136,11 @@ func AssignableTo(x, y Type) bool {
 		return true
 	}
 
-	// Rule 2: T is assignable to T? (optional wrapping)
+	// Rule 2: T is assignable to T? (optional wrapping). The element match also
+	// allows the bare-Named/self-Instance interchangeability (Rules 4c/4d) so a
+	// generic method returning `T[P...]?` can `return this` (T0906).
 	if opt, ok := y.(*Optional); ok {
-		if Identical(x, opt.elem) {
+		if Identical(x, opt.elem) || selfInstanceInterchangeable(x, opt.elem) {
 			return true
 		}
 	}
@@ -183,34 +185,13 @@ func AssignableTo(x, y Type) bool {
 		}
 	}
 
-	// Rule 4c: a bare generic Named is interchangeable with its own
-	// self-instance. Inside a generic type T[P...]'s method body, `this` is
-	// typed as the bare Named T, while parameters declared T[P...] are
-	// Instances whose type args are exactly T's own type params — these denote
-	// the same type. (T0874)
-	if xn, ok := x.(*Named); ok {
-		if yi, ok := y.(*Instance); ok && isSelfInstance(xn, yi) {
-			return true
-		}
-	}
-	if xi, ok := x.(*Instance); ok {
-		if yn, ok := y.(*Named); ok && isSelfInstance(yn, xi) {
-			return true
-		}
-	}
-
-	// Rule 4d: the enum analog of Rule 4c. Inside a generic enum E[P...]'s
-	// method body, `this` is typed as the bare *Enum, while parameters declared
-	// E[P...] are Instances over E's own type params — the same type. (T0876)
-	if xe, ok := x.(*Enum); ok {
-		if yi, ok := y.(*Instance); ok && isSelfEnumInstance(xe, yi) {
-			return true
-		}
-	}
-	if xi, ok := x.(*Instance); ok {
-		if ye, ok := y.(*Enum); ok && isSelfEnumInstance(ye, xi) {
-			return true
-		}
+	// Rule 4c/4d: a bare generic Named/Enum is interchangeable with its own
+	// self-instance. Inside a generic type T[P...]'s (or enum E[P...]'s) method
+	// body, `this` is typed as the bare Named/Enum, while parameters declared
+	// T[P...] are Instances whose type args are exactly the own type params —
+	// these denote the same type. (T0874/T0876)
+	if selfInstanceInterchangeable(x, y) {
+		return true
 	}
 
 	// Rule 5: TypeParam assignable to any of its constraints
@@ -319,6 +300,36 @@ func isSelfEnumInstance(e *Enum, inst *Instance) bool {
 		}
 	}
 	return true
+}
+
+// selfInstanceInterchangeable reports whether x and y denote the same type up to
+// the bare-Named/self-Instance distinction (and the enum analog): inside a generic
+// type T[P...]'s method body, `this` is typed as the bare Named T while a T[P...]
+// parameter/return is an Instance over T's own type params — the same type
+// (T0874/T0876). Used by both the assignability rules and optional-wrapping (T0906,
+// e.g. `dup() T[P...]? { return this; }`).
+func selfInstanceInterchangeable(x, y Type) bool {
+	if xn, ok := x.(*Named); ok {
+		if yi, ok := y.(*Instance); ok && isSelfInstance(xn, yi) {
+			return true
+		}
+	}
+	if xi, ok := x.(*Instance); ok {
+		if yn, ok := y.(*Named); ok && isSelfInstance(yn, xi) {
+			return true
+		}
+	}
+	if xe, ok := x.(*Enum); ok {
+		if yi, ok := y.(*Instance); ok && isSelfEnumInstance(xe, yi) {
+			return true
+		}
+	}
+	if xi, ok := x.(*Instance); ok {
+		if ye, ok := y.(*Enum); ok && isSelfEnumInstance(ye, xi) {
+			return true
+		}
+	}
+	return false
 }
 
 // isChild reports whether child inherits from parent (directly or transitively).

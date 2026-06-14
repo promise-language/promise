@@ -1114,6 +1114,19 @@ func TestAssignableTo(t *testing.T) {
 		{"enum_to_concrete_instance", gEnum, gEnumInt, false},             // concrete arg, not a TypeParam
 		{"enum_to_other_enum_self_instance", gEnum, otherEnumSelf, false}, // foreign origin
 
+		// Rule 2 + self-instance interchangeability (T0906): a generic method
+		// returning `T[P...]?` whose body is `return this` checks the bare Named/Enum
+		// `this` against Optional[self-instance]. The optional element match must
+		// allow the bare-Named/self-Instance interchange, not just Identical.
+		{"named_to_optional_self_instance", gBox, NewOptional(gBoxSelf), true},  // return this : OGBox[T]?
+		{"self_instance_to_optional_named", gBoxSelf, NewOptional(gBox), true},  // symmetric
+		{"enum_to_optional_self_instance", gEnum, NewOptional(gEnumSelf), true}, // enum: return this : OGEnum[T]?
+		{"enum_self_instance_to_optional_enum", gEnumSelf, NewOptional(gEnum), true},
+		// Negatives: only the exact self-instance matches under the optional.
+		{"named_to_optional_concrete_instance", gBox, NewOptional(gBoxInt), false}, // concrete arg
+		{"named_to_optional_other_generic", gBox, NewOptional(gOtherSelf), false},  // foreign origin
+		{"enum_to_optional_concrete_instance", gEnum, NewOptional(gEnumInt), false},
+
 		// Not assignable
 		{"int_to_string", TypInt, TypString, false},
 		{"unrelated_types", makeNamed("Cat"), makeNamed("Fish"), false},

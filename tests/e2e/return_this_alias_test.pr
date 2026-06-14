@@ -194,3 +194,148 @@ return_this_consume_droppable_field() `test {
   m := d.consume();
   assert(m.s == "hello", "m.s == hello");
 }
+
+// T0906: a method whose return type is an optional of its own receiver type
+// (`OB?`) with body `return this` previously crashed codegen ("insertvalue elem
+// type mismatch, expected { i8*, i8* }, got i8*") — wrapThisReturnValue bailed
+// because extractNamed does not peel Optional, so the bare i8* instance pointer
+// flowed into the optional wrap. The clone-on-return (T0893) must still fire so
+// the unwrapped optional owns an independent instance, leaving the receiver
+// usable (guards the alias/double-free regression in the optional path).
+type OB {
+  int v;
+  dup() OB? {
+    return this;
+  }
+}
+
+return_this_optional_heap() `test {
+  d := OB(v: 1);
+  m := d.dup()!;
+  assert(m.v == 1, "m.v == 1");
+  assert(d.v == 1, "d.v == 1");
+}
+
+type OGBox[T] {
+  T v;
+  dup() OGBox[T]? {
+    return this;
+  }
+}
+
+// Generic heap type — exercises monomorphization + typeSubst through the optional
+// element type.
+return_this_optional_generic() `test {
+  d := OGBox[int](v: 42);
+  m := d.dup()!;
+  assert(m.v == 42, "m.v == 42");
+  assert(d.v == 42, "d.v == 42");
+}
+
+type VT {
+  int x `value;
+  int y `value;
+  dup() VT? {
+    return this;
+  }
+}
+
+// Pure value type — wrapThisReturnValue must load the full value struct from the
+// `this` pointer using the optional's element type before the optional wrap.
+return_this_optional_value() `test {
+  d := VT(x: 3, y: 4);
+  m := d.dup()!;
+  assert(m.x == 3, "m.x == 3");
+  assert(m.y == 4, "m.y == 4");
+}
+
+// T0906: enum receiver. `this` in an enum method is an i8* pointer, but the
+// method returns the enum by value ({i32 tag, [N x i8] data}). wrapThisReturnValue
+// must load the value struct via enumThisSubject — both for `E` and the optional
+// `E?` form — instead of letting the bare i8* flow into the result/optional wrap
+// (panic: insertvalue elem type mismatch). The droppable-payload variant
+// additionally exercises the T0893-analog deep clone (no double-free/leak).
+enum OE {
+  None,
+  Some(string s),
+  dup() OE? {
+    return this;
+  }
+  same() OE {
+    return this;
+  }
+}
+
+return_this_optional_enum() `test {
+  d := OE.Some("hello");
+  m := d.dup()!;
+  match m {
+    OE.Some(s) => assert(s == "hello", "m hello"),
+    OE.None => assert(false, "expected Some (m)"),
+  }
+  // Receiver must remain intact and independently droppable (deep clone fired).
+  match d {
+    OE.Some(s) => assert(s == "hello", "d hello"),
+    OE.None => assert(false, "expected Some (d)"),
+  }
+}
+
+return_this_enum_nonoptional() `test {
+  d := OE.Some("world");
+  m := d.same();
+  match m {
+    OE.Some(s) => assert(s == "world", "m world"),
+    OE.None => assert(false, "expected Some"),
+  }
+}
+
+enum OGEnum[T] {
+  Empty,
+  Full(T val),
+  dup() OGEnum[T]? {
+    return this;
+  }
+}
+
+// Generic enum — exercises monomorphization + self-instance interchangeability
+// (equal.go Rule 2) through the optional element type.
+return_this_optional_generic_enum() `test {
+  d := OGEnum[int].Full(99);
+  m := d.dup()!;
+  match m {
+    OGEnum.Full(v) => assert(v == 99, "m.v == 99"),
+    OGEnum.Empty => assert(false, "expected Full"),
+  }
+}
+
+// T0906: enum with an EXPLICIT `clone` method + droppable payload. The optional
+// return-this deep-clone (wrapThisReturnValue) must route through cloneEnumValue
+// (call @CEClone.clone) rather than the in-place strdup fallback used by OE — both
+// produce an independent owned value, but this exercises the clone-method branch.
+enum CEClone {
+  None,
+  Some(string s),
+  clone(this) CEClone {
+    return match this {
+      CEClone.Some(s) => CEClone.Some(s.clone()),
+      CEClone.None => CEClone.None,
+    };
+  }
+  dup() CEClone? {
+    return this;
+  }
+}
+
+return_this_optional_enum_clone_method() `test {
+  d := CEClone.Some("hi");
+  m := d.dup()!;
+  match m {
+    CEClone.Some(s) => assert(s == "hi", "m hi"),
+    CEClone.None => assert(false, "expected Some (m)"),
+  }
+  // Receiver remains intact and independently droppable (deep clone fired).
+  match d {
+    CEClone.Some(s) => assert(s == "hi", "d hi"),
+    CEClone.None => assert(false, "expected Some (d)"),
+  }
+}

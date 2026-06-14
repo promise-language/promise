@@ -7599,7 +7599,53 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 	if retType == nil {
 		return val
 	}
-	named := extractNamed(retType)
+	// T0906: a method returning an optional of the receiver type (`OB?`) reaches
+	// here with retType = Optional[OB]. Build the value-struct payload from the
+	// `this` instance pointer using the optional's element type; genReturnStmt's
+	// subsequent wrapReturnOptional call wraps that payload into the optional.
+	// extractNamed does not peel Optional, so without this the function bails and
+	// the bare i8* instance pointer flows into wrapOptional's {i8*,i8*} insertvalue
+	// (panic: insertvalue elem type mismatch).
+	effType := retType
+	if opt, ok := retType.(*types.Optional); ok {
+		effType = opt.Elem()
+	}
+
+	// Enum receiver: `this` is an i8* pointer (genThisExpr), but an enum method
+	// returns the enum value by value ({i32 tag, [N x i8] data} or a bare i32 for
+	// fieldless enums). Load the value struct via enumThisSubject so the bare i8*
+	// pointer never flows into the function result / optional wrap (panic:
+	// insertvalue elem type mismatch). Covers both `dup() E { return this; }` and
+	// the optional form `dup() E? { return this; }` (T0906). extractNamed returns
+	// nil for enums, so this must run before the Named handling below.
+	if enumT := extractEnum(effType); enumT != nil {
+		layout := c.lookupEnumLayout(effType)
+		if layout == nil {
+			return val
+		}
+		enumVal := c.enumThisSubject(val, layout)
+		// T0893 analog: a borrowing `return this` whose variant payload is droppable
+		// (e.g. `B(string)`) would hand back a shallow copy aliasing the receiver's
+		// heap data — both the result and the receiver would free it (double-free).
+		// Deep-clone the payload so the returned value owns it independently. Skip
+		// for borrow return types (caller expects a reference) and `~this` receivers
+		// (genuine ownership transfer — cloning would copy needlessly and leak).
+		if !isRefType(effType) && !c.thisRecvIsOwned && c.enumInstanceHasDrop(effType, enumT) {
+			if cloned, ok := c.cloneEnumValue(enumVal, effType); ok {
+				enumVal = cloned
+			} else {
+				// Droppable enum without a clone method — dup variant fields in
+				// place via an alloca round-trip (same path as maybeDupPushElement).
+				alloca := c.createEntryAlloca(enumVal.Type())
+				c.block.NewStore(enumVal, alloca)
+				c.dupEnumElementInPlace(alloca, effType)
+				enumVal = c.block.NewLoad(enumVal.Type(), alloca)
+			}
+		}
+		return enumVal
+	}
+
+	named := extractNamed(effType)
 	if named == nil {
 		return val
 	}
@@ -7609,7 +7655,7 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 
 	if named.IsValueType() {
 		// Value type: `this` is i8* pointing to the value struct — load it
-		layout := c.lookupTypeLayout(retType)
+		layout := c.lookupTypeLayout(effType)
 		if layout == nil {
 			return val
 		}
@@ -7619,7 +7665,7 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 
 	// Heap type: `this` is i8* instance pointer — build { vtable_ptr, instance_ptr }
 	var vtablePtr value.Value
-	if vtGlobal := c.lookupVtableGlobal(retType); vtGlobal != nil {
+	if vtGlobal := c.lookupVtableGlobal(effType); vtGlobal != nil {
 		vtablePtr = constant.NewBitCast(vtGlobal, irtypes.I8Ptr)
 	} else {
 		vtablePtr = constant.NewNull(irtypes.I8Ptr)
@@ -7641,8 +7687,8 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 	//   - the receiver is `~this` (RefMut): `this` is owned/moved-in, so `return this`
 	//     is a genuine ownership transfer — cloning would copy needlessly and leak the
 	//     moved-in instance (c.thisRecvIsOwned).
-	if !isRefType(retType) && !c.thisRecvIsOwned {
-		result = c.dupHeapValue(result, retType)
+	if !isRefType(effType) && !c.thisRecvIsOwned {
+		result = c.dupHeapValue(result, effType)
 	}
 	return result
 }

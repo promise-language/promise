@@ -1423,13 +1423,16 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// Optional[heap-user-type] from a Map index. The unwrap consumes the
 	// Optional and returns V; without the dup, b would alias the bucket.
 	//
-	// T0903: Also fire for no-drop heap user types (`b := vec[i]` for a plain
-	// `type` with no drop/synth-drop). isDroppableHeapUserType excludes these for
-	// the T0440 Map-clone gate, but the vector element read still aliases the
+	// T0903/T0898: Also fire for no-drop heap user types (`b := vec[i]` for a
+	// plain `type` with no drop/synth-drop). isDroppableHeapUserType excludes these
+	// for the T0440 Map-clone gate, but the vector element read still aliases the
 	// source instance — b's bindingFree (pal_free) and the vector's element
 	// scope-exit free would double-free. Matches the typed-var-decl (T0590) and
 	// assignment (genAssignStmt) paths, which already admit both predicates, and
-	// the genVectorIndex/genArrayIndex no-drop dup-on-read branches.
+	// the genVectorIndex/genArrayIndex no-drop dup-on-read branches. Also required
+	// so the drop-on-overwrite added to genVectorIndexAssign doesn't free a slot
+	// still aliased by a local on the swap idiom
+	// (`t := v[lo]; v[lo] = v[mid]; v[mid] = t`).
 	if isDroppableHeapUserType(typ) || isHeapUserNoDropPalFree(typ) {
 		if _, isIdx := s.Value.(*ast.IndexExpr); isIdx {
 			c.dupHeapUserFieldAccess = true

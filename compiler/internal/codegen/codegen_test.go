@@ -11678,6 +11678,65 @@ func TestT0398VectorHeapElementReadDupsOnVarDecl(t *testing.T) {
 	assertContains(t, ir, "call void @llvm.memcpy")
 }
 
+// T0898: `b := v[0]` where v is Vector[no-drop heap user type] must dup-on-read.
+// These types lack drop()/synth-drop (so isDroppableHeapUserType excludes them)
+// and lack clone(), so genVectorIndex dups via dupHeapValue (alloc+memcpy →
+// heapdup.copy block), not cloneHeapElement. Without this the new drop-on-
+// overwrite in genVectorIndexAssign would free a slot still aliased by b.
+func TestT0898VectorNoDropHeapElementReadDupsOnVarDecl(t *testing.T) {
+	ir := generateIR(t, `
+		type Bare { int n; dup() Bare { return this; } }
+		probe() {
+			v := Bare[]();
+			v.push(Bare(n: 1));
+			b := v[0];
+		}
+		main() { probe(); }
+	`)
+	// dupHeapValue emits a heapdup.copy block (alloc + memcpy). Scope to @probe:
+	// the stdAll clone funcs also emit heapdup.copy.
+	assertContains(t, extractFunction(ir, "__user.probe"), "heapdup.copy")
+}
+
+// T0898: `v[i] = X` where v is Vector[no-drop heap user type] must drop the old
+// element before storing. emitVariantFieldDrop's B0218 branch null-checks +
+// pal_frees the old instance (varfield.free block). Without this the overwrite
+// leaks the previous element.
+func TestT0898VectorNoDropHeapElementOverwriteDrops(t *testing.T) {
+	ir := generateIR(t, `
+		type Bare { int n; dup() Bare { return this; } }
+		probe() {
+			v := Bare[]();
+			v.push(Bare(n: 1));
+			v[0] = Bare(n: 2);
+		}
+		main() { probe(); }
+	`)
+	fn := extractFunction(ir, "__user.probe")
+	assertContains(t, fn, "varfield.free")
+	assertContains(t, fn, "call void @pal_free")
+}
+
+// T0898: `h.f = X` where f is a no-drop heap user-type field must drop the old
+// field value before storing. The T0410/T0908 droppable-field branch (broadened
+// to admit isHeapUserNoDropPalFree) emits the null + same-pointer guard
+// (field.userdrop block) followed by emitVariantFieldDrop's B0218 pal_free.
+// Without this the overwrite leaks the field's previous instance.
+func TestT0898MemberNoDropHeapFieldOverwriteDrops(t *testing.T) {
+	ir := generateIR(t, `
+		type Bare { int n; dup() Bare { return this; } }
+		type Holder { Bare f; }
+		probe() {
+			h := Holder(f: Bare(n: 1));
+			h.f = Bare(n: 2);
+		}
+		main() { probe(); }
+	`)
+	fn := extractFunction(ir, "__user.probe")
+	assertContains(t, fn, "field.userdrop")
+	assertContains(t, fn, "call void @pal_free")
+}
+
 // T0403: `f(v[0])` where v is Vector[heap-user-type-with-drop] and f takes a `~T`
 // param must deep-clone the element via cloneHeapElement so the callee receives an
 // independent instance. Without the dup, the callee's `~T` drop and v's element

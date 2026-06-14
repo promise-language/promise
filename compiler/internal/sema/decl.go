@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/promise-language/promise/compiler/internal/ast"
 	"github.com/promise-language/promise/compiler/internal/types"
@@ -634,6 +636,7 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 	if sig == nil {
 		return
 	}
+	c.validateNoMoveOperatorParam(md, sig, typeName)
 
 	placement := c.resolvePlacement(md.Annotations)
 	abstract := c.hasAnnotation(md.Annotations, "abstract")
@@ -723,6 +726,50 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 	m.SetDoc(extractDoc(md.Annotations))
 	m.SetDeprecated(extractDeprecated(md.Annotations))
 	named.AddMethod(m)
+}
+
+// isOperatorMethodName reports whether name is an operator method name (e.g. +,
+// -, ==, [], [:], []=). All identifier method names begin with a letter or '_';
+// every operator method name begins with a symbol. So the first rune being a
+// non-letter, non-'_' uniquely identifies an operator — exact and future-proof.
+func isOperatorMethodName(name string) bool {
+	if name == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(name)
+	return !(unicode.IsLetter(r) || r == '_')
+}
+
+// isSetterOperatorName reports whether name is an index/slice setter operator
+// ([]= or [:]=). Unlike value-result operators, setters are invoked from
+// `lhs[i] = rhs`, an assignment with a genuine call-site move of the RHS — so a
+// move (~) value/key parameter is correct and must not be rejected (T0916). (The
+// `set name` property-setter form has an identifier name, so it is already
+// excluded by isOperatorMethodName; its MethodDecl.IsSetter flag does not apply to
+// these symbol-named bracket operators.)
+func isSetterOperatorName(name string) bool {
+	return name == "[]=" || name == "[:]="
+}
+
+// validateNoMoveOperatorParam rejects move (~) value parameters on value-result
+// operator methods (T0916). Such operators (+, -, ==, [], [:], ...) are dispatched
+// from `a OP b` expressions where there is NO call-site move syntax — codegen does
+// not move the operand into the call, so a consuming (~) operand causes a hidden
+// move and a double-free/segfault. Setters ([]=, [:]=) are EXCLUDED: they are
+// invoked from `lhs[i] = rhs`, an assignment that genuinely moves the RHS into the
+// call, so a ~ value/key parameter is correct and is relied on by the stdlib (e.g.
+// Map.[]=(~K key, ~V value)). Only the param move modifier (RefMut) is checked; the
+// receiver (e.g. ~this) is a legitimate construct and is left alone, as are Type~
+// mut-ref and & shared-ref params.
+func (c *Checker) validateNoMoveOperatorParam(md *ast.MethodDecl, sig *types.Signature, typeName string) {
+	if !isOperatorMethodName(md.Name) || isSetterOperatorName(md.Name) {
+		return
+	}
+	for _, p := range sig.Params() {
+		if p.Ref() == types.RefMut {
+			c.errorf(md.Pos(), "operator method %s.%s cannot take a move (~) parameter '%s'; operators borrow their operands — there is no call-site move syntax for 'a %s b', so a consuming operand would be a hidden move. Remove the '~' (use a borrow), or move-consume via a named ~-parameter method instead.", typeName, md.Name, p.Name(), md.Name)
+		}
+	}
 }
 
 // nativeMethodExists checks if a native type already has a method with the same
@@ -930,6 +977,7 @@ func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumNam
 	if sig == nil {
 		return
 	}
+	c.validateNoMoveOperatorParam(md, sig, enumName)
 
 	abstract := c.hasAnnotation(md.Annotations, "abstract")
 	native := c.hasAnnotation(md.Annotations, "native")

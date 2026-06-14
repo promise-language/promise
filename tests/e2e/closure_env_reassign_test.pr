@@ -1,0 +1,97 @@
+// T0911: Reassigning a closure-typed local that owns a heap env must free the
+// old env (the drop-old logic in genAssignStmt previously ignored the
+// bindingFreeEnv / c.dropFlags env cleanup, leaking the old owned env).
+// 1. Owned -> owned reassign. Old env A (captures `s`) must be freed when f is
+//    reassigned to env B (captures `t`).
+plain_reassign_owned() `test {
+  s := "captured";
+  () -> int f = move || -> s.len + 1; // f owns heap env A
+  t := "other";
+  f = move || -> t.len + 2; // reassign to env B; env A must be freed
+  assert(f() == 7, "");
+}
+
+type CbHolder {
+  () -> int cb;
+}
+make_cb(int n) CbHolder {
+  return CbHolder(cb: move || -> n);
+}
+
+// 2. Owned -> aggregate-borrow reassign (T0895 interaction). Old env A must be
+//    freed; the borrowed env from `h.cb` must NOT be double-freed (h owns it).
+old_owned_env_then_borrow() `test {
+  s := "captured";
+  () -> int f = move || -> s.len + 1; // f owns heap env A
+  h := make_cb(5);
+  f = h.cb; // borrow h's env; env A must be freed
+  assert(f() == 5, "");
+}
+
+// 3. Owned -> null-env reassign. The new closure captures nothing (null env),
+//    so the old env must still be freed and nothing double-frees.
+owned_then_null_env() `test {
+  s := "captured";
+  () -> int f = move || -> s.len + 1; // f owns heap env A
+  f = || -> 42; // null env; env A must be freed
+  assert(f() == 42, "");
+}
+
+// 4. Reassign in a loop — multiple owned envs created, exactly one survivor
+//    freed at scope exit, the rest freed at each reassignment.
+reassign_in_loop() `test {
+  s := "base";
+  () -> int f = move || -> s.len; // initial env
+  total := 0;
+  for i in 0..5 {
+    f = move || -> i + 1; // each iteration frees the previous env
+  }
+  total = total + f();
+  assert(total == 5, "");
+}
+
+// 5. Reassign a closure that captures a heap value (string), so the env's deep
+//    drop path (captured-string drop, not just pal_free) is exercised on the
+//    old env.
+reassign_deep_drop_string() `test {
+  a := "first capture value";
+  () -> int f = move || -> a.len; // env captures a heap string
+  b := "second capture value here";
+  f = move || -> b.len + 1; // old env's deep drop must free `a`
+  assert(f() == 26, "");
+}
+
+// 6. Reassign a closure that captures a heap vector, exercising the deep-drop
+//    path with a vector capture.
+reassign_deep_drop_vector() `test {
+  v := [1, 2, 3];
+  () -> int f = move || -> v.len; // env captures a heap vector
+  w := [10, 20, 30, 40];
+  f = move || -> w.len + 100; // old env's deep drop must free `v`
+  assert(f() == 104, "");
+}
+
+// 7. Self-assignment (`f = f`) is a no-op — the local keeps owning its env and
+//    must still free it at scope exit (no leak, no UAF).
+reassign_self() `test {
+  s := "captured";
+  () -> int f = move || -> s.len + 1;
+  f = f;
+  assert(f() == 9, "");
+}
+
+// 8. Runtime same-env alias (`f = identity(f)`): not a literal self-assign, so
+//    it does NOT take the early-return path — it reaches the env-free block at
+//    codegen time. At runtime the old and new env pointers are identical (f was
+//    moved out and returned unchanged), so the alias guard (`doFree = flag AND
+//    old != new`) must be FALSE and the env must NOT be freed (no UAF/double-
+//    free), yet must still survive to be freed once at scope exit (no leak).
+identity_closure(() -> int x)() -> int {
+  return x;
+}
+reassign_runtime_alias() `test {
+  s := "captured";
+  () -> int f = move || -> s.len + 1;
+  f = identity_closure(f); // old env ptr == new env ptr: alias guard skips free
+  assert(f() == 9, "");
+}

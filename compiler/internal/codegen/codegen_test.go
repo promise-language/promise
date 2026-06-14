@@ -5275,6 +5275,46 @@ func TestClosureFieldReadBorrowsEnvNoFree(t *testing.T) {
 	assertContains(t, ir, "env.free")
 }
 
+// T0911: reassigning a closure-typed local that owns a heap env must free the
+// old env before the store (the drop-old logic previously ignored the
+// bindingFreeEnv / dropFlags env cleanup, leaking the old owned env). The
+// reassignment must emit a guarded env-free sequence.
+func TestClosureReassignFreesOldEnv(t *testing.T) {
+	ir := generateIR(t, `
+		reassign() int {
+			s := "captured";
+			() -> int f = move || -> s.len + 1;
+			t := "other";
+			f = move || -> t.len + 2;
+			return f();
+		}
+		main() {}
+	`)
+	// The reassignment emits the alias-guarded old-env free blocks.
+	assertContains(t, ir, "reassign.env.free")
+	assertContains(t, ir, "reassign.env.call")
+	assertContains(t, ir, "reassign.env.merge")
+}
+
+// T0911: literal closure self-assignment (`f = f`) must take the early-return
+// guard — the local keeps owning its env, so NO env-free blocks are emitted and
+// the post-store clearDropFlag never runs (which would otherwise zero the env
+// drop flag and leak the env at scope exit).
+func TestClosureSelfAssignNoEnvFree(t *testing.T) {
+	ir := generateIR(t, `
+		self_assign() int {
+			s := "captured";
+			() -> int f = move || -> s.len + 1;
+			f = f;
+			return f();
+		}
+		main() {}
+	`)
+	// Early return before any env-free blocks are emitted for the self-assign.
+	assertNotContains(t, ir, "reassign.env.free")
+	assertNotContains(t, ir, "reassign.env.call")
+}
+
 func TestNamedFuncRefThunk(t *testing.T) {
 	ir := generateIR(t, `
 		add(int x) int { return x + 1; }

@@ -6136,6 +6136,22 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if id, ok := aliasOrigin.(*ast.IdentExpr); ok && id.Name == target.Name {
 				selfAliasOrigin = true
 			}
+			// T0911: closure self-assignment (`f = f`) is a no-op — the local keeps
+			// owning its env. Return early (mirroring the dropBindings self-assign
+			// guard below) so the post-store clearDropFlag doesn't zero the env drop
+			// flag, which would leak the env at scope exit. Gated on the target
+			// being a Signature local with an env-free flag.
+			if ident, ok := s.Value.(*ast.IdentExpr); ok && ident.Name == target.Name {
+				if _, hasEnvFlag := c.dropFlags[target.Name]; hasEnvFlag {
+					tt := c.info.Types[target]
+					if c.typeSubst != nil {
+						tt = types.Substitute(tt, c.typeSubst)
+					}
+					if _, isSig := tt.(*types.Signature); isSig {
+						return
+					}
+				}
+			}
 			// Drop old value before reassignment (if target is droppable)
 			if binding, ok := c.dropBindings[target.Name]; ok {
 				// Skip self-assignment (would drop then store dangling pointer)
@@ -6199,6 +6215,47 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				}
 				// Reset drop flag: new value is now owned
 				c.block.NewStore(constant.NewInt(irtypes.I1, 1), binding.dropFlag)
+			}
+
+			// T0911: Closures aren't in dropBindings — their env cleanup is a
+			// bindingFreeEnv in scopeBindings with a flag in c.dropFlags (see
+			// maybeRegisterEnvFree). The drop-old logic above never frees the old
+			// env, so reassigning a closure local that owns a heap env leaks it.
+			// Free the old env here (guarded by the flag + an old-vs-new
+			// env-pointer alias check, since `f = <expr aliasing f's env>` could
+			// occur) and re-arm the flag so the new value is owned. The later
+			// T0895 borrow-clear (below) and the move-RHS clearDropFlag then
+			// adjust the flag for borrow/move RHS as appropriate.
+			if envFlag, hasEnvFlag := c.dropFlags[target.Name]; hasEnvFlag {
+				tt := c.info.Types[target]
+				if c.typeSubst != nil {
+					tt = types.Substitute(tt, c.typeSubst)
+				}
+				if _, isSig := tt.(*types.Signature); isSig {
+					oldClosure := c.block.NewLoad(alloca.ElemType, alloca)
+					oldEnv := c.block.NewExtractValue(oldClosure, 1) // field 1 = env ptr
+					newEnv := c.block.NewExtractValue(val, 1)
+					flag := c.block.NewLoad(irtypes.I1, envFlag)
+					isSame := c.block.NewICmp(enum.IPredEQ, oldEnv, newEnv)
+					notSame := c.block.NewXor(isSame, constant.NewInt(irtypes.I1, 1))
+					doFree := c.block.NewAnd(flag, notSame)
+					freeBlk := c.newBlock("reassign.env.free")
+					mergeBlk := c.newBlock("reassign.env.merge")
+					c.block.NewCondBr(doFree, freeBlk, mergeBlk)
+
+					c.block = freeBlk
+					isNull := c.block.NewICmp(enum.IPredEQ, oldEnv, constant.NewNull(irtypes.I8Ptr))
+					callBlk := c.newBlock("reassign.env.call")
+					c.block.NewCondBr(isNull, mergeBlk, callBlk)
+
+					c.block = callBlk
+					c.emitEnvDropOrFree(oldEnv) // drops captured values + frees env struct
+					c.block.NewBr(mergeBlk)
+
+					c.block = mergeBlk
+					// New value is now owned by the local.
+					c.block.NewStore(constant.NewInt(irtypes.I1, 1), envFlag)
+				}
 			}
 
 			// Coerce value struct vtable when crossing type boundaries

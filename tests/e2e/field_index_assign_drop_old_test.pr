@@ -1,0 +1,148 @@
+// T0903: Field assignment (`obj.field = expr`) and index assignment
+// (`arr[i] = expr`) must drop the overwritten slot's old value for *no-drop*
+// heap user types (a plain `type` with no `drop()`/synth-drop), the same way the
+// var-LHS path does via bindingFree/pal_free. The original double-free framing
+// no longer reproduces — T0893 made `return this` clone the instance, so a
+// `dup()` result never aliases the operand — but the field/index drop-old was
+// gated behind isDroppableHeapUserType, which excludes no-drop heap user types
+// for the T0440 Map-clone reason, so overwriting such a field/element leaked the
+// old instance. All tests run under the zero-leak gate.
+// A no-drop heap user type whose dup() returns a clone (T0893 clones on
+// `return this`).
+type BB_t0903 `doc("No-drop heap user type whose dup() returns the receiver (cloned by T0893).") {
+  int v;
+  dup() BB_t0903 {
+    return this;
+  }
+}
+
+// Holder of a no-drop heap user-type field.
+type Holder_t0903 `doc("Holds a no-drop heap user-type field for reassignment tests.") {
+  BB_t0903 field;
+}
+
+// Member LHS, aliasing form (the original item reproduction). Post-T0893 the
+// dup() result is an independent clone; the old field instance must be freed.
+member_lhs_dup() `test {
+  h := Holder_t0903(field: BB_t0903(v: 0));
+  a := BB_t0903(v: 11);
+  h.field = a.dup();
+  assert(h.field.v == 11, "member dup result");
+}
+
+// Index LHS, aliasing form (the original item reproduction).
+index_lhs_dup() `test {
+  arr := [BB_t0903(v: 0)];
+  a := BB_t0903(v: 11);
+  arr[0] = a.dup();
+  assert(arr[0].v == 11, "index dup result");
+}
+
+// Member LHS, no method / no alias — the minimal leak. The old field instance
+// must be freed before the new one is stored.
+member_lhs_plain() `test {
+  h := Holder_t0903(field: BB_t0903(v: 0));
+  h.field = BB_t0903(v: 11);
+  assert(h.field.v == 11, "member plain result");
+}
+
+// Index LHS, no method / no alias.
+index_lhs_plain() `test {
+  arr := [BB_t0903(v: 0)];
+  arr[0] = BB_t0903(v: 11);
+  assert(arr[0].v == 11, "index plain result");
+}
+
+// Member LHS reassigned from a container read (`h.field = vec[i]`). The
+// dup-on-read flag (set for no-drop heap user LHS in genAssignStmt) must clone
+// the source element so the freed old field never aliases a live source.
+member_lhs_from_vector() `test {
+  src := [BB_t0903(v: 7)];
+  h := Holder_t0903(field: BB_t0903(v: 0));
+  h.field = src[0];
+  assert(h.field.v == 7, "member from-vector result");
+  assert(src[0].v == 7, "source element untouched");
+}
+
+// Index LHS reassigned from another vector element (`arr[i] = src[j]`).
+index_lhs_from_vector() `test {
+  src := [BB_t0903(v: 9)];
+  arr := [BB_t0903(v: 0)];
+  arr[0] = src[0];
+  assert(arr[0].v == 9, "index from-vector result");
+  assert(src[0].v == 9, "source element untouched");
+}
+
+// T0903: inferred var-decl read of a no-drop heap user vector element
+// (`t := src[i]`) must clone — without the dup-on-read, t aliases src's element
+// and both free it at scope exit (the inferred-var-decl flag-set previously only
+// admitted drop-bearing types, the vector analog of the T0590 array gap).
+vardecl_read_no_drop() `test {
+  src := [BB_t0903(v: 5)];
+  t := src[0];
+  assert(t.v == 5, "var-decl read result");
+  assert(src[0].v == 5, "source element untouched by var-decl read");
+}
+
+// Typed var-decl read of a no-drop heap user vector element.
+typed_vardecl_read_no_drop() `test {
+  src := [BB_t0903(v: 6)];
+  BB_t0903 t = src[0];
+  assert(t.v == 6, "typed var-decl read result");
+  assert(src[0].v == 6, "source element untouched by typed var-decl read");
+}
+
+// Self-index assignment (`arr[i] = arr[i]`) is the one shape that crosses both new
+// branches in a single statement: the RHS goes through genVectorIndex's no-drop
+// dup-on-read (producing an independent clone) and the LHS through
+// genVectorIndexAssign's no-drop drop-old (freeing the old element). If the dup
+// were missing the drop-old would free a still-live alias → double free; if the
+// drop-old were missing the old element would leak. Passing under the zero-leak
+// gate proves the dup makes the drop-old safe. (The member analog `h.field =
+// h.field` is rejected by sema as a move-out of a non-copy field, so only the
+// index shape is expressible.)
+self_index_assign() `test {
+  arr := [BB_t0903(v: 4)];
+  arr[0] = arr[0];
+  assert(arr[0].v == 4, "self index keeps value");
+}
+
+// Repeated field reassignment: the drop-old must fire on every overwrite and free
+// exactly the prior instance — no per-iteration accumulation leak.
+loop_member_reassign() `test {
+  h := Holder_t0903(field: BB_t0903(v: 0));
+  i := 0;
+  while (i < 8) {
+    h.field = BB_t0903(v: i);
+    i = i + 1;
+  }
+  assert(h.field.v == 7, "loop member final value");
+}
+
+// Repeated index reassignment (the genVectorIndexAssign drop-old, run in a loop).
+loop_index_reassign() `test {
+  arr := [BB_t0903(v: 0)];
+  i := 0;
+  while (i < 8) {
+    arr[0] = BB_t0903(v: i);
+    i = i + 1;
+  }
+  assert(arr[0].v == 7, "loop index final value");
+}
+
+// Map value of a no-drop heap user type. `b := m[k]` / `b := m[k]!` set the
+// dup-on-read flag for the Optional-inner / unwrap shapes (the no-drop branches
+// genInferredVarDecl now admits), but the consumer (genMethodIndex) only deep-dups
+// drop-bearing values — the Map.[] getter already clones safely-dup'able no-drop
+// values, so the bound var owns an independent instance regardless. This pins that
+// the Map read path stays correct (independent copy, bucket untouched) under the
+// broadened flag.
+map_value_no_drop_read() `test {
+  m := map[string, BB_t0903]();
+  m["k"] = BB_t0903(v: 42);
+  b := m["k"];
+  assert(b!.v == 42, "map inferred read");
+  c := m["k"]!;
+  assert(c.v == 42, "map unwrap read");
+  assert(m["k"]!.v == 42, "map source untouched");
+}

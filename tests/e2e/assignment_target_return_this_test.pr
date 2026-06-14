@@ -1,0 +1,194 @@
+// T0899: T0892 added the receiver-alias-clear to the *variable* assignment path
+// (`m = expr`). The MemberExpr (`obj.field = expr`) and IndexExpr (`arr[i] = expr`)
+// target branches of genAssignStmt had none. Reassigning a field/element from an
+// operator/method result that returns the borrowed receiver (`return this`) aliased
+// the operand, so both the operand local and the field/element owner freed the same
+// instance at scope exit → double-free.
+//
+// Honesty note: on linux the aliasing double-free is silently absorbed by the
+// one-sided leak detector (it reports only positive alloc deltas), so the aliasing
+// cases below primarily guard the macOS/sanitizer abort and document intent. The
+// *fresh-value over-fire* cases are the ones the linux zero-leak gate actively
+// catches: if the alias-clear wrongly over-fires, the operand leaks (positive
+// delta, detectable). All types here have a `drop(~this)` so the separate no-drop
+// drop-old gap (T0908) does not contaminate the results.
+// Heap user type with a binary operator that returns the borrowed receiver.
+type BB `doc("Heap user type whose + operator returns the borrowed receiver.") {
+  int v;
+  +(BB o) BB {
+    return this;
+  }
+  drop(~this) {
+  }
+}
+
+// Heap user type with a method that returns the borrowed receiver, plus one that
+// allocates a fresh instance.
+type DD `doc("Heap user type with dup() returning `this` and fresh() allocating anew.") {
+  int v;
+  dup() DD {
+    return this;
+  }
+  fresh() DD {
+    return DD(v: 99);
+  }
+  drop(~this) {
+  }
+}
+
+// Generic heap user type with a binary operator that returns the borrowed receiver.
+type GB[T] `doc("Generic heap user type whose + operator returns the borrowed receiver.") {
+  T v;
+  +(GB[T] o) GB[T] {
+    return this;
+  }
+  drop(~this) {
+  }
+}
+
+// Holder of a droppable field, for MemberExpr-target tests.
+type Holder `doc("Holds a droppable BB field for field-target assignment tests.") {
+  BB f;
+  drop(~this) {
+  }
+}
+
+// Holder of a droppable generic field.
+type GHolder `doc("Holds a droppable GB[int] field for generic field-target tests.") {
+  GB[int] f;
+  drop(~this) {
+  }
+}
+
+// Field target, binary operator alias: `h.f = a + b` where + returns `this`.
+field_binary_operator() `test {
+  a := BB(v: 11);
+  b := BB(v: 3);
+  h := Holder(f: BB(v: 0));
+  h.f = a + b;
+  assert(h.f.v == 11, "field binary-operator assignment result");
+}
+
+// Field target, method alias: `hd.f = d.dup()` where dup() returns `this`.
+field_method_return_this() `test {
+  d := DD(v: 7);
+  hd := DDHolder(f: DD(v: 0));
+  hd.f = d.dup();
+  assert(hd.f.v == 7, "field method return-this assignment result");
+}
+
+// Index target, binary operator alias: `v[0] = a + b`.
+index_binary_operator() `test {
+  a := BB(v: 11);
+  b := BB(v: 3);
+  v := [BB(v: 0)];
+  v[0] = a + b;
+  assert(v[0].v == 11, "index binary-operator assignment result");
+}
+
+// Index target, method alias: `v[0] = d.dup()`.
+index_method_return_this() `test {
+  d := DD(v: 7);
+  v := [DD(v: 0)];
+  v[0] = d.dup();
+  assert(v[0].v == 7, "index method return-this assignment result");
+}
+
+// Self-alias field (`h.f = h.f + b`): the existing same-pointer drop-old guard in
+// genMemberAssign must still hold with the new operand-clear present.
+field_self_alias() `test {
+  b := BB(v: 4);
+  h := Holder(f: BB(v: 21));
+  h.f = h.f + b;
+  assert(h.f.v == 21, "self-alias field assignment result");
+}
+
+// Self-alias index (`v[0] = v[0] + b`).
+index_self_alias() `test {
+  b := BB(v: 4);
+  v := [BB(v: 21)];
+  v[0] = v[0] + b;
+  assert(v[0].v == 21, "self-alias index assignment result");
+}
+
+// Fresh-value over-fire guard (field): `h.f = f.fresh()` allocates a NEW instance,
+// so the operand `f` must be left untouched. If the alias-clear wrongly over-fires
+// here, `f` leaks — caught by the linux zero-leak gate.
+field_fresh_value() `test {
+  f := DD(v: 1);
+  hd := DDHolder(f: DD(v: 0));
+  hd.f = f.fresh();
+  assert(hd.f.v == 99, "fresh-value field assignment result");
+  assert(f.v == 1, "operand untouched by fresh-value field assignment");
+}
+
+// Fresh-value over-fire guard (index): `v[0] = f.fresh()`.
+index_fresh_value() `test {
+  f := DD(v: 1);
+  v := [DD(v: 0)];
+  v[0] = f.fresh();
+  assert(v[0].v == 99, "fresh-value index assignment result");
+  assert(f.v == 1, "operand untouched by fresh-value index assignment");
+}
+
+// Generic operator, field target: `gh.f = a + b` on GB[int].
+generic_operator_field() `test {
+  a := GB[int](v: 17);
+  b := GB[int](v: 5);
+  gh := GHolder(f: GB[int](v: 0));
+  gh.f = a + b;
+  assert(gh.f.v == 17, "generic operator field assignment result");
+}
+
+// Generic operator, index target: `v[0] = a + b` on GB[int].
+generic_operator_index() `test {
+  a := GB[int](v: 17);
+  b := GB[int](v: 5);
+  v := [GB[int](v: 0)];
+  v[0] = a + b;
+  assert(v[0].v == 17, "generic operator index assignment result");
+}
+
+// Generic-function-body field target: the operator-return-this assignment lives
+// INSIDE wrap[T], so monomorphization runs with c.typeSubst active and the RHS
+// type (GB[T]) is substituted before the alias-clear. The above generic_* tests
+// keep the assignment in a `test (no typeSubst); this is the substitution path.
+// The operands `a`/`b` are droppable locals — a missing clear would double-free
+// (macOS abort), an over-fire would leak (linux zero-leak gate).
+type GGHolder[T] `doc("Generic holder of a droppable GB[T] field for generic-body field tests.") {
+  GB[T] f;
+  drop(~this) {
+  }
+}
+
+generic_body_field[T](~GGHolder[T] h, ~T x, ~T y) `doc("Field-target assign inside a generic body.") {
+  a := GB[T](v: x);
+  b := GB[T](v: y);
+  h.f = a + b;
+}
+
+generic_field_in_generic_body() `test {
+  h := GGHolder[int](f: GB[int](v: 0));
+  generic_body_field[int](h, 6, 4);
+  assert(true, "generic-body field assignment completes without double-free");
+}
+
+// Generic-function-body index target: `v[0] = a + b` inside a generic body.
+generic_body_index[T](~T x, ~T y, ~T z) `doc("Index-target assign inside a generic body.") {
+  a := GB[T](v: x);
+  b := GB[T](v: y);
+  v := [GB[T](v: z)];
+  v[0] = a + b;
+}
+
+generic_index_in_generic_body() `test {
+  generic_body_index[int](6, 4, 1);
+  assert(true, "generic-body index assignment completes without double-free");
+}
+
+// Holder of a droppable DD field, used by the method/fresh field-target tests.
+type DDHolder `doc("Holds a droppable DD field for field-target assignment tests.") {
+  DD f;
+  drop(~this) {
+  }
+}

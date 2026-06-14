@@ -6444,6 +6444,15 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// B0312: When RHS is opt!, neutralize the source optional so its
 			// drop doesn't double-free the inner value now owned by this field.
 			c.neutralizeForceUnwrapSource(s.Value)
+			// T0899: an operator/method RHS whose body is `return this` returns the
+			// borrowed receiver as an owned result, aliasing the operand local. The
+			// field now owns that instance, so clear the operand's drop flag —
+			// otherwise both the operand local and the field owner free it
+			// (double-free). Mirrors the IdentExpr branch (T0892) and the two
+			// var-decl paths. The self-alias case (`h.f = h.f + b`) is handled by
+			// genMemberAssign's same-pointer drop-old guard (its non-Ident origin
+			// skips the clear); see clearOperandAliasForOwnedStore.
+			c.clearOperandAliasForOwnedStore(s.Value, val)
 		}
 
 	case *ast.IndexExpr:
@@ -6600,6 +6609,17 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				c.claimHeapTemp(c.optionalHeapDup)
 				c.optionalHeapDup = nil
 			}
+			// T0899: an operator/method RHS whose body is `return this` returns the
+			// borrowed receiver as an owned result, aliasing the operand local. The
+			// container element now owns that instance, so clear the operand's drop
+			// flag — otherwise both the operand local and the container free it
+			// (double-free). Mirrors the IdentExpr branch (T0892) and the two
+			// var-decl paths. The self-alias case (`v[0] = v[0] + b`) is handled by
+			// genVectorIndexAssign's same-pointer drop-old guard (its non-Ident
+			// origin skips the clear); see clearOperandAliasForOwnedStore. The
+			// Vector[string]/Map[K,string] sub-paths dup rather than alias and break
+			// before here.
+			c.clearOperandAliasForOwnedStore(s.Value, val)
 		}
 		// Clear drop flag on index key if it's being stored (e.g., map[key] = val).
 		// The map takes ownership of the key pointer.
@@ -7704,6 +7724,34 @@ func (c *Compiler) maybeClearReceiverDropFlag(val value.Value, recvName string, 
 	clearBlk.NewBr(skipBlk)
 
 	c.block = skipBlk
+}
+
+// clearOperandAliasForOwnedStore clears the drop flag of an operator/method
+// operand when the RHS result aliases it via `return this`, for owned-slot
+// assignment targets (field/element) that have no target-local drop flag. The
+// self-alias case (`h.f = h.f + b` / `v[0] = v[0] + b`) has a non-Ident origin
+// (MemberExpr/IndexExpr), so it is skipped here and handled by the target's own
+// same-pointer drop-old guard in genMemberAssign/genVectorIndexAssign. A
+// ThisExpr origin is likewise skipped (this is borrowed, and sema forbids moving
+// it into an owned slot). The downstream maybeClearReceiverDropFlag runtime icmp
+// makes a non-aliasing (fresh-value) call a no-op. T0899; shared by the
+// MemberExpr and IndexExpr branches of genAssignStmt.
+func (c *Compiler) clearOperandAliasForOwnedStore(rhs ast.Expr, val value.Value) {
+	var aliasOrigin ast.Expr
+	if call, ok := rhs.(*ast.CallExpr); ok {
+		aliasOrigin = chainOriginExpr(call)
+	} else {
+		aliasOrigin = operatorReceiverOrigin(rhs)
+	}
+	origin, ok := aliasOrigin.(*ast.IdentExpr)
+	if !ok {
+		return
+	}
+	exprType := c.info.Types[rhs]
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	c.maybeClearReceiverDropFlag(val, origin.Name, exprType)
 }
 
 // isUserValueStructType reports whether t is exactly the user value struct

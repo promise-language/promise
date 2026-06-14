@@ -290,7 +290,7 @@ string s = name!;
 // Default value (elvis operator)
 string s = name ?: "unknown";
 
-// Optional handler (note: no space before ?)
+// Optional handler (whitespace around ? is insignificant)
 string s = name? _ {
   "fallback";
 };
@@ -875,7 +875,7 @@ Cross-compile to a non-host OS (e.g. Linux → Windows binary) is not yet wired 
 5. **Getter parens** — `vec.len` not `vec.len()`. Getters use property syntax.
 6. **Mutable methods** — use `~this` for methods that modify state. `&this` is read-only.
 7. **Missing `use`** — `std` is auto-imported, but `io`, `os`, `path`, `json` need explicit `use`.
-8. **Optional handler spacing** — Error handler: `expr ? e { ... }` (space before `?`). Optional handler: `expr? _ { ... }` (no space before `?`).
+8. **`?` handler spacing is insignificant** — Whitespace around the `?` handler is optional: `expr?{...}`, `expr ?{...}`, `expr? {...}`, and `expr ? {...}` all parse identically (same for the binding forms `expr?e{...}` / `expr? e {...}`). This applies to both the error handler (on failable `!` values) and the optional handler (on `T?` values). Note the companion operators `?^` and `?!` are single tokens — no space is allowed between `?` and `^`/`!`.
 9. **Fixed arrays vs vectors** — `int[3]` is a fixed-size array (value type, stack). `u8[]` is a vector (heap, growable). Don't confuse them.
 10. **Tuple destructuring** — Use `(a, b) := expr;` not `a, b := expr;`. Tuples need parentheses.
 11. **Module type prefix** — Types always need the module prefix: `io.File.open(...)` not `File.open(...)`. Free functions don't: `read_line()` works after `use io;`.

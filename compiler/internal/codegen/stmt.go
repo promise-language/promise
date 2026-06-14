@@ -6279,6 +6279,20 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if c.isRttiCastBorrow(s.Value) {
 				c.clearDropFlag(target.Name)
 			}
+			// T0895: `f = h.cb` reads a closure out of an owning aggregate — the
+			// local borrows the heap env (the aggregate retains sole ownership;
+			// closures aren't Cloneable, so the fat pointer {fn,env} is copied by
+			// value with no env dup). Clear f's env-free drop flag (still 1 from
+			// the var-decl's maybeRegisterEnvFree — the drop-old re-arm above only
+			// runs for dropBindings entries, whereas closures register a
+			// bindingFreeEnv in scopeBindings) so scope-exit env-free doesn't
+			// double-free against the aggregate's drop. Mirrors
+			// maybeRegisterEnvFree's var-decl suppression; gated on a Signature
+			// target since isClosureAggregateBorrow alone also matches
+			// string/vector field reads.
+			if _, isSig := targetType.(*types.Signature); isSig && c.isClosureAggregateBorrow(s.Value) {
+				c.clearDropFlag(target.Name)
+			}
 			// T0073: Claim string temp — ownership transferred to this variable.
 			// Skip if already claimed above (optional target).
 			if exprType != nil && extractNamed(exprType) == types.TypString {

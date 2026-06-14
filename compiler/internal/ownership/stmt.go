@@ -630,7 +630,20 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	// "cannot move out of '.borrow' getter" diagnostic (T0380).
 	_, lhsIsIdent := s.Target.(*ast.IdentExpr)
 	rhsIsBorrowGetter := s.Op == ast.OpAssign && lhsIsIdent && c.isBorrowedExpr(s.Value)
-	if !rhsIsBorrowGetter {
+	// T0895: `f = h.cb` reassigns a pre-declared local from a closure read out
+	// of an owning aggregate (struct/optional closure field, container element).
+	// Mirrors T0816's var-decl handling (checkTypedVarDecl/checkInferredVarDecl):
+	// the read aliases the aggregate's heap env (codegen suppresses the local's
+	// owning env-free binding), so treat it as a borrow rather than a move —
+	// skip tryMoveConsume (else checkFieldMoveOwnership falsely fires on the
+	// valid read) and resurrect the LHS Borrowed below so escapes/re-stores are
+	// rejected. rhsClosureBorrowSrc != nil implies an IdentExpr target, so the
+	// MemberExpr arm below is unaffected.
+	rhsClosureBorrowSrc := ast.Expr(nil)
+	if s.Op == ast.OpAssign && lhsIsIdent {
+		rhsClosureBorrowSrc = closureAggregateBorrowSource(c.info, s.Value)
+	}
+	if !rhsIsBorrowGetter && rhsClosureBorrowSrc == nil {
 		// T0351: assignment consumes the RHS — borrowed params cause a double-free
 		// because the caller still drops the original. tryMoveConsume rejects them
 		// at compile time (matches T0338/T0349 pattern for raise/yield/select-send).
@@ -679,11 +692,18 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 				c.borrows.ExpireBorrower(ident.Name)
 			}
 			if _, tracked := c.state[ident.Name]; tracked {
-				if rhsIsBorrowGetter {
+				if rhsIsBorrowGetter || rhsClosureBorrowSrc != nil {
 					c.state[ident.Name] = Borrowed
 				} else {
 					c.state[ident.Name] = Owned
 				}
+			}
+			// T0895: register the shared borrow of the source aggregate *after*
+			// ExpireBorrower above so it is not immediately expired. Protects the
+			// source from being moved/consumed/reassigned while the borrowing
+			// local is live (UAF / double-free of the heap env otherwise).
+			if rhsClosureBorrowSrc != nil {
+				c.registerClosureAggregateBorrow(ident.Name, rhsClosureBorrowSrc, s.Pos())
 			}
 			// Promote call-scoped borrows if the RHS returns a ref type
 			c.promoteCallBorrows(ident.Name, s.Value)

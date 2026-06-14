@@ -798,6 +798,19 @@ func (a *lastUseAnalyzer) analyzeRefBlock(block *ast.Block, result map[ast.Stmt]
 				(a.isVarRefType(s.Value) || closureAggregateBorrowSource(a.info, s.Value) != nil) {
 				refVars = append(refVars, varInfo{name: s.Name, declIdx: i})
 			}
+		case *ast.AssignStmt:
+			// T0895: `f = h.cb` reassigns a pre-declared local from a closure
+			// read out of an owning aggregate, registering a shared borrow on
+			// the source's root (checkAssignStmt). Track its last use so the
+			// borrow expires there rather than at scope exit — otherwise
+			// read-then-consume-source after the local's last use would be
+			// falsely rejected. Mirrors the var-decl cases above.
+			if s.Op == ast.OpAssign {
+				if id, ok := s.Target.(*ast.IdentExpr); ok && id.Name != "_" &&
+					closureAggregateBorrowSource(a.info, s.Value) != nil {
+					refVars = append(refVars, varInfo{name: id.Name, declIdx: i})
+				}
+			}
 		case *ast.DestructureVarDecl:
 			// T0548: destructured locals from MemberExpr/IndexExpr sources
 			// hold shared borrows on the source's root variable (registered in

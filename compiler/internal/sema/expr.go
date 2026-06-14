@@ -615,6 +615,18 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
 	}
 }
 
+// lookupBinaryOperatorMethod resolves the binary (1-param) variant of an operator
+// method, falling back to a name-only lookup so a wrong-arity declaration still
+// surfaces the "invalid signature" diagnostic rather than "not defined". The
+// binary-first preference disambiguates a symbol that also has a prefix-unary
+// form (e.g. `-`) when both are declared on one type (T0883).
+func lookupBinaryOperatorMethod(named *types.Named, op string) *types.Method {
+	if m := named.LookupBinaryMethod(op); m != nil {
+		return m
+	}
+	return named.LookupMethod(op)
+}
+
 // checkOperator looks up a binary operator method on the left type
 // and validates the right operand matches.
 func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right types.Type) types.Type {
@@ -663,7 +675,7 @@ func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right t
 		}
 		// For TypeParam operators, the parameter type is Self (the constraint type).
 		// The right operand must be the same TypeParam type.
-		m := named.LookupMethod(op)
+		m := lookupBinaryOperatorMethod(named, op)
 		sig := m.Sig()
 		if len(sig.Params()) != 1 {
 			c.errorf(pos, "operator %s has invalid signature", op)
@@ -689,7 +701,9 @@ func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right t
 		return nil
 	}
 
-	m := named.LookupMethod(op)
+	// Binary operator: select the 1-param variant so a type that also declares a
+	// prefix-unary form of the same symbol (e.g. `-`) resolves correctly (T0883).
+	m := lookupBinaryOperatorMethod(named, op)
 	if m == nil {
 		c.errorf(pos, "operator %s not defined on type %s", op, left)
 		return nil
@@ -724,7 +738,12 @@ func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right t
 // enum (T0876). Enums register operator methods on *types.Enum, which the
 // Named-centric checkOperator switch never consulted.
 func (c *Checker) checkEnumOperator(pos ast.Pos, en *types.Enum, subst map[*types.TypeParam]types.Type, op string, right types.Type) types.Type {
-	m := en.LookupMethod(op)
+	// Binary operator: prefer the 1-param variant, falling back to a name-only
+	// lookup so a wrong-arity declaration still reports "invalid signature" (T0883).
+	m := en.LookupBinaryMethod(op)
+	if m == nil {
+		m = en.LookupMethod(op)
+	}
 	if m == nil {
 		c.errorf(pos, "operator %s not defined on type %s", op, en)
 		return nil
@@ -885,7 +904,7 @@ func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string)
 // dispatch (`-`, `!`, `~`). `++`/`--` are excluded — they have no non-native
 // codegen path (genIncDecTarget only emits native ops); see T0880.
 func isPrefixUnaryOp(op string) bool {
-	return op == "-" || op == "!" || op == "~"
+	return types.IsUnaryOperatorName(op)
 }
 
 // checkEnumUnaryOperator type-checks a user-defined prefix unary operator

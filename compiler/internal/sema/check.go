@@ -480,6 +480,14 @@ func lookupMethodByKind(named *types.Named, md *ast.MethodDecl) *types.Method {
 	if md.IsSetter {
 		return named.LookupSetter(md.Name)
 	}
+	// Disambiguate the unary vs binary variant of an operator symbol by arity, so
+	// each variant's body is checked against its own parameter scope (T0883).
+	if types.IsUnaryOperatorName(md.Name) {
+		if len(md.Params) == 0 {
+			return named.LookupUnaryMethod(md.Name)
+		}
+		return named.LookupBinaryMethod(md.Name)
+	}
 	return named.LookupMethod(md.Name)
 }
 
@@ -580,6 +588,13 @@ func (c *Checker) checkEnumDecl(d *ast.EnumDecl) {
 		var m *types.Method
 		if md.IsGetter {
 			m = enum.LookupGetter(md.Name)
+		} else if types.IsUnaryOperatorName(md.Name) {
+			// Arity-aware: unary vs binary variant of the same operator (T0883).
+			if len(md.Params) == 0 {
+				m = enum.LookupUnaryMethod(md.Name)
+			} else {
+				m = enum.LookupBinaryMethod(md.Name)
+			}
 		} else {
 			m = enum.LookupMethod(md.Name)
 		}

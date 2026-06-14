@@ -102,3 +102,11 @@ func (m *Method) Doc() string            { return m.doc }
 func (m *Method) SetDoc(s string)        { m.doc = s }
 func (m *Method) Deprecated() string     { return m.deprecated }
 func (m *Method) SetDeprecated(s string) { m.deprecated = s }
+
+// IsUnaryOperator reports whether this method is the prefix-unary (0-param)
+// variant of an operator symbol that also has a binary form (`-`, `!`, `~`).
+// Such methods get a "$unary" discriminator in their vtable slot and IR name so
+// they never collide with the binary variant (T0883).
+func (m *Method) IsUnaryOperator() bool {
+	return IsUnaryOperatorName(m.name) && !m.isGetter && !m.isSetter && len(m.sig.Params()) == 0
+}

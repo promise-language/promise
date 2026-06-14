@@ -206,9 +206,9 @@ func (n *Named) LookupMethod(name string) *Method {
 // method by name, walking is-parents and structural-interface parents. Distinct
 // from LookupMethod, which returns the first same-named method regardless of arity
 // (so it can return a binary variant when both `-`/0-param and `-`/1-param exist).
-// Note: declaring both a unary and a binary variant of the same operator symbol on
-// one type is not yet end-to-end functional (codegen name collision + arity-blind
-// binary lookup) — tracked as T0883.
+// A type may declare both a unary and a binary variant of the same operator
+// symbol; the two get distinct vtable slots and IR names via the "$unary"
+// discriminator (T0883).
 func (n *Named) LookupUnaryMethod(name string) *Method {
 	for _, m := range n.methods {
 		if m.name == name && !m.isGetter && !m.isSetter && len(m.sig.Params()) == 0 {
@@ -217,6 +217,25 @@ func (n *Named) LookupUnaryMethod(name string) *Method {
 	}
 	for _, p := range n.parents {
 		if m := p.Named.LookupUnaryMethod(name); m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
+// LookupBinaryMethod finds the 1-parameter (binary) variant of an operator method
+// by name, walking is-parents and structural-interface parents. Mirror of
+// LookupUnaryMethod for the binary side: when a type declares both a unary `-`
+// (0 params) and a binary `-` (1 param), LookupMethod returns whichever is
+// declared first, so operator dispatch must disambiguate by arity (T0883).
+func (n *Named) LookupBinaryMethod(name string) *Method {
+	for _, m := range n.methods {
+		if m.name == name && !m.isGetter && !m.isSetter && len(m.sig.Params()) == 1 {
+			return m
+		}
+	}
+	for _, p := range n.parents {
+		if m := p.Named.LookupBinaryMethod(name); m != nil {
 			return m
 		}
 	}
@@ -302,11 +321,24 @@ func (n *Named) lookupOwnMethodBySlotKey(key string) *Method {
 	return nil
 }
 
+// IsUnaryOperatorName reports whether name is an operator symbol that has a
+// prefix-unary form (negation `-`, logical not `!`, bitwise not `~`). Such a
+// symbol may be declared in both a unary (0-param) and binary (1-param) variant
+// on one type, so the variants must be disambiguated by arity (T0883). Matches
+// sema's isPrefixUnaryOp.
+func IsUnaryOperatorName(name string) bool {
+	return name == "-" || name == "!" || name == "~"
+}
+
 // methodSlotKey returns a deduplication key for vtable slot assignment.
-// Getter and setter with the same name occupy distinct slots.
+// Getter and setter with the same name occupy distinct slots, as do the unary
+// and binary variants of the same operator symbol (T0883).
 func methodSlotKey(m *Method) string {
 	if m.isSetter {
 		return m.name + "$set"
+	}
+	if m.IsUnaryOperator() {
+		return m.name + "$unary"
 	}
 	return m.name
 }
@@ -351,6 +383,20 @@ func (n *Named) VirtualMethodIndex(name string, isSetter bool) int {
 	if isSetter {
 		key = name + "$set"
 	}
+	for i, m := range n.AllVirtualMethods() {
+		if methodSlotKey(m) == key {
+			return i
+		}
+	}
+	return -1
+}
+
+// VirtualUnaryMethodIndex returns the vtable slot index for the prefix-unary
+// (0-param) variant of an operator method, or -1. Distinct from
+// VirtualMethodIndex(name, false), which finds the binary variant's slot when
+// both exist (T0883).
+func (n *Named) VirtualUnaryMethodIndex(name string) int {
+	key := name + "$unary"
 	for i, m := range n.AllVirtualMethods() {
 		if methodSlotKey(m) == key {
 			return i

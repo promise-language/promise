@@ -28,8 +28,8 @@ func TestT0878_NamedUnaryOperatorDispatch(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
 	}
-	if !strings.Contains(body, "@Neg.-(i8*") {
-		t.Fatalf("expected Named unary dispatch `@Neg.-(i8* ...)` in caller:\n%s", body)
+	if !strings.Contains(body, "@Neg.-$unary(i8*") {
+		t.Fatalf("expected Named unary dispatch `@Neg.-$unary(i8* ...)` in caller:\n%s", body)
 	}
 }
 
@@ -51,8 +51,8 @@ func TestT0878_ValueTypeUnaryOperatorDispatch(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
 	}
-	if !strings.Contains(body, "@VNeg.-(i8*") {
-		t.Fatalf("expected value-type unary dispatch `@VNeg.-(i8* ...)` in caller:\n%s", body)
+	if !strings.Contains(body, "@VNeg.-$unary(i8*") {
+		t.Fatalf("expected value-type unary dispatch `@VNeg.-$unary(i8* ...)` in caller:\n%s", body)
 	}
 }
 
@@ -80,8 +80,8 @@ func TestT0878_EnumUnaryOperatorDispatch(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
 	}
-	if !strings.Contains(body, "@Sign.-(i8*") {
-		t.Fatalf("expected enum unary dispatch `@Sign.-(i8* ...)` in caller:\n%s", body)
+	if !strings.Contains(body, "@Sign.-$unary(i8*") {
+		t.Fatalf("expected enum unary dispatch `@Sign.-$unary(i8* ...)` in caller:\n%s", body)
 	}
 	if !strings.Contains(body, "%enum.this") {
 		t.Fatalf("expected synthesized enum.this receiver temp in caller:\n%s", body)
@@ -107,8 +107,8 @@ func TestT0878_GenericEnumUnaryOperatorDispatch(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
 	}
-	if !strings.Contains(body, "@\"Opt[int].-\"(i8*") {
-		t.Fatalf("expected mono enum unary dispatch `@\"Opt[int].-\"(i8* ...)` in caller:\n%s", body)
+	if !strings.Contains(body, "@\"Opt[int].-$unary\"(i8*") {
+		t.Fatalf("expected mono enum unary dispatch `@\"Opt[int].-$unary\"(i8* ...)` in caller:\n%s", body)
 	}
 }
 
@@ -133,8 +133,8 @@ func TestT0878_UnaryOperatorOnThisReceiver(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected @Neg.twice in IR:\n%s", ir)
 	}
-	if !strings.Contains(body, "@Neg.-(i8*") {
-		t.Fatalf("expected Named unary dispatch `@Neg.-(i8* ...)` in twice:\n%s", body)
+	if !strings.Contains(body, "@Neg.-$unary(i8*") {
+		t.Fatalf("expected Named unary dispatch `@Neg.-$unary(i8* ...)` in twice:\n%s", body)
 	}
 }
 
@@ -165,7 +165,7 @@ func TestT0878_VirtualUnaryOperatorDispatchNonThis(t *testing.T) {
 		t.Fatalf("expected virtual unary dispatch via receiver-only fn ptr in caller:\n%s", body)
 	}
 	// Must NOT be a direct named call — virtual dispatch only.
-	if strings.Contains(body, "@VOpBase.-(i8*") {
+	if strings.Contains(body, "@VOpBase.-$unary(i8*") {
 		t.Fatalf("expected indirect (vtable) dispatch, found direct call in caller:\n%s", body)
 	}
 }
@@ -192,8 +192,8 @@ func TestT0878_EnumUnaryOperatorThisInGenericMethod(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected @\"Opt[int].double_neg\" in IR:\n%s", ir)
 	}
-	if !strings.Contains(body, "@\"Opt[int].-\"(i8*") {
-		t.Fatalf("expected mono enum unary dispatch `@\"Opt[int].-\"(i8* ...)` in double_neg:\n%s", body)
+	if !strings.Contains(body, "@\"Opt[int].-$unary\"(i8*") {
+		t.Fatalf("expected mono enum unary dispatch `@\"Opt[int].-$unary\"(i8* ...)` in double_neg:\n%s", body)
 	}
 	// `this` is passed directly — no synthesized enum.this temp here.
 	if strings.Contains(body, "%enum.this") {

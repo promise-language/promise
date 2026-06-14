@@ -6410,12 +6410,12 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 			if len(md.TypeParams) > 0 {
 				continue // generic method — handled by mono method instances
 			}
-			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+			m := c.lookupMethodForDecl(named, md)
 			if m == nil || m.Sig() == nil {
 				continue
 			}
 
-			mangledName := mangleModuleMethodName(moduleName, td.Name, md.Name, md.IsSetter)
+			mangledName := mangleModuleMethodDeclName(moduleName, td.Name, md)
 
 			var params []*ir.Param
 			if m.Sig().Recv() != nil {
@@ -6451,7 +6451,7 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 			c.moduleOwnedFuncs[mangledName] = moduleName
 
 			// Also register the non-prefixed method name for dispatch within the module
-			plainName := mangleMethodName(td.Name, md.Name, md.IsSetter)
+			plainName := mangleMethodDeclName(td.Name, md)
 			if _, exists := c.funcs[plainName]; !exists {
 				c.funcs[plainName] = fn
 			}
@@ -6481,12 +6481,12 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			if len(md.TypeParams) > 0 {
 				continue // generic method — handled by mono method instances
 			}
-			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+			m := c.lookupMethodForDecl(named, md)
 			if m == nil || m.Sig() == nil {
 				continue
 			}
 
-			mangledName := mangleModuleMethodName(moduleName, td.Name, md.Name, md.IsSetter)
+			mangledName := mangleModuleMethodDeclName(moduleName, td.Name, md)
 			fn, ok := c.funcs[mangledName]
 			if !ok {
 				continue
@@ -6851,12 +6851,12 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 			if len(md.TypeParams) > 0 {
 				continue // generic method — handled by mono method instances
 			}
-			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+			m := c.lookupMethodForDecl(named, md)
 			if m == nil || m.Sig() == nil {
 				continue
 			}
 
-			mangledName := mangleMethodName(td.Name, md.Name, md.IsSetter)
+			mangledName := mangleMethodDeclName(td.Name, md)
 
 			var params []*ir.Param
 			if m.Sig().Recv() != nil {
@@ -6917,12 +6917,12 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 			if len(md.TypeParams) > 0 {
 				continue // generic method — handled by mono method instances
 			}
-			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+			m := c.lookupMethodForDecl(named, md)
 			if m == nil || m.Sig() == nil {
 				continue
 			}
 
-			mangledName := mangleMethodName(td.Name, md.Name, md.IsSetter)
+			mangledName := mangleMethodDeclName(td.Name, md)
 			fn, ok := c.funcs[mangledName]
 			if !ok {
 				continue
@@ -6966,7 +6966,7 @@ func (c *Compiler) declareEnumMethods(file *ast.File) {
 				continue
 			}
 
-			mangledName := mangleMethodName(ed.Name, md.Name, md.IsSetter)
+			mangledName := mangleMethodDeclName(ed.Name, md)
 
 			var params []*ir.Param
 			if m.Sig().Recv() != nil {
@@ -7026,7 +7026,7 @@ func (c *Compiler) defineEnumMethods(file *ast.File) {
 				continue
 			}
 
-			mangledName := mangleMethodName(ed.Name, md.Name, md.IsSetter)
+			mangledName := mangleMethodDeclName(ed.Name, md)
 			fn, ok := c.funcs[mangledName]
 			if !ok {
 				continue
@@ -7081,12 +7081,12 @@ func (c *Compiler) declareModuleEnumMethods(file *ast.File, moduleName string) {
 				continue
 			}
 
-			mangledName := mangleModuleMethodName(moduleName, ed.Name, md.Name, md.IsSetter)
+			mangledName := mangleModuleMethodDeclName(moduleName, ed.Name, md)
 
 			// B0244: Skip if already forward-declared (cross-module clone forward-declare)
 			if fn, exists := c.funcs[mangledName]; exists {
 				c.moduleOwnedFuncs[mangledName] = moduleName
-				plainName := mangleMethodName(ed.Name, md.Name, md.IsSetter)
+				plainName := mangleMethodDeclName(ed.Name, md)
 				if _, exists := c.funcs[plainName]; !exists {
 					c.funcs[plainName] = fn
 				}
@@ -7123,7 +7123,7 @@ func (c *Compiler) declareModuleEnumMethods(file *ast.File, moduleName string) {
 			c.moduleOwnedFuncs[mangledName] = moduleName
 
 			// Also register the non-prefixed method name for dispatch within the module
-			plainName := mangleMethodName(ed.Name, md.Name, md.IsSetter)
+			plainName := mangleMethodDeclName(ed.Name, md)
 			if _, exists := c.funcs[plainName]; !exists {
 				c.funcs[plainName] = fn
 			}
@@ -7159,7 +7159,7 @@ func (c *Compiler) defineModuleEnumMethods(file *ast.File, moduleName string) {
 				continue
 			}
 
-			mangledName := mangleModuleMethodName(moduleName, ed.Name, md.Name, md.IsSetter)
+			mangledName := mangleModuleMethodDeclName(moduleName, ed.Name, md)
 			fn, ok := c.funcs[mangledName]
 			if !ok || len(fn.Blocks) > 0 {
 				continue
@@ -7192,6 +7192,13 @@ func (c *Compiler) lookupEnumMethod(enum *types.Enum, md *ast.MethodDecl) *types
 	if md.IsGetter {
 		return enum.LookupGetter(md.Name)
 	}
+	// Disambiguate the unary vs binary variant of an operator symbol by arity (T0883).
+	if types.IsUnaryOperatorName(md.Name) {
+		if len(md.Params) == 0 {
+			return enum.LookupUnaryMethod(md.Name)
+		}
+		return enum.LookupBinaryMethod(md.Name)
+	}
 	return enum.LookupMethod(md.Name)
 }
 
@@ -7215,6 +7222,39 @@ func mangleMethodName(typeName, methodName string, isSetter bool) string {
 	return typeName + "." + methodName
 }
 
+// isUnaryOperatorDecl reports whether an AST method declaration is the prefix-
+// unary (0-param) variant of an operator symbol that also has a binary form
+// (`-`, `!`, `~`). Such declarations get a "$unary" IR-name discriminator so
+// they never collide with the binary variant of the same symbol (T0883).
+func isUnaryOperatorDecl(md *ast.MethodDecl) bool {
+	return !md.IsGetter && !md.IsSetter && len(md.Params) == 0 && types.IsUnaryOperatorName(md.Name)
+}
+
+// mangleMethodDeclName mangles an LLVM method name from an AST method
+// declaration, applying the "$unary" discriminator for a prefix-unary operator
+// and the "$set" discriminator for a setter (T0883).
+func mangleMethodDeclName(typeName string, md *ast.MethodDecl) string {
+	if isUnaryOperatorDecl(md) {
+		return typeName + "." + md.Name + "$unary"
+	}
+	return mangleMethodName(typeName, md.Name, md.IsSetter)
+}
+
+// mangleModuleMethodDeclName is the module-qualified form of mangleMethodDeclName.
+func mangleModuleMethodDeclName(moduleName, typeName string, md *ast.MethodDecl) string {
+	return "__mod_" + moduleName + "_" + mangleMethodDeclName(typeName, md)
+}
+
+// mangleMethodNameForMethod mangles an LLVM method name from a resolved
+// *types.Method, applying the "$unary"/"$set" discriminators (T0883). Used where
+// only the method object is available (e.g., vtable emission).
+func mangleMethodNameForMethod(typeName string, m *types.Method) string {
+	if m.IsUnaryOperator() {
+		return typeName + "." + m.Name() + "$unary"
+	}
+	return mangleMethodName(typeName, m.Name(), m.IsSetter())
+}
+
 // lookupAnyMethod finds a method, getter, or setter by name, dispatching to
 // the appropriate typed lookup based on the AST declaration's getter/setter flags.
 func (c *Compiler) lookupAnyMethod(named *types.Named, name string, isGetter, isSetter bool) *types.Method {
@@ -7225,6 +7265,44 @@ func (c *Compiler) lookupAnyMethod(named *types.Named, name string, isGetter, is
 		return named.LookupSetter(name)
 	}
 	return named.LookupMethod(name)
+}
+
+// lookupMethodForMethod resolves the concrete *types.Method on named that
+// corresponds to an abstract/view method m, disambiguating the unary vs binary
+// variant of an operator symbol by arity (T0883).
+func (c *Compiler) lookupMethodForMethod(named *types.Named, m *types.Method) *types.Method {
+	if m.IsGetter() {
+		return named.LookupGetter(m.Name())
+	}
+	if m.IsSetter() {
+		return named.LookupSetter(m.Name())
+	}
+	if m.IsUnaryOperator() {
+		return named.LookupUnaryMethod(m.Name())
+	}
+	if types.IsUnaryOperatorName(m.Name()) {
+		return named.LookupBinaryMethod(m.Name())
+	}
+	return named.LookupMethod(m.Name())
+}
+
+// lookupMethodForDecl resolves the *types.Method for an AST method declaration,
+// disambiguating the unary vs binary variant of an operator symbol by arity
+// (T0883). Mirrors lookupAnyMethod for the getter/setter/regular cases.
+func (c *Compiler) lookupMethodForDecl(named *types.Named, md *ast.MethodDecl) *types.Method {
+	if md.IsGetter {
+		return named.LookupGetter(md.Name)
+	}
+	if md.IsSetter {
+		return named.LookupSetter(md.Name)
+	}
+	if types.IsUnaryOperatorName(md.Name) {
+		if len(md.Params) == 0 {
+			return named.LookupUnaryMethod(md.Name)
+		}
+		return named.LookupBinaryMethod(md.Name)
+	}
+	return named.LookupMethod(md.Name)
 }
 
 // defineMethodFunc generates the body of a single method.
@@ -9989,7 +10067,7 @@ func (c *Compiler) defineConcreteStructuralDefaultBodies(file *ast.File, concret
 		if md.Body == nil {
 			continue
 		}
-		m := c.lookupAnyMethod(iface, md.Name, md.IsGetter, md.IsSetter)
+		m := c.lookupMethodForDecl(iface, md)
 		if m == nil || m.IsAbstract() {
 			continue
 		}
@@ -9999,7 +10077,7 @@ func (c *Compiler) defineConcreteStructuralDefaultBodies(file *ast.File, concret
 		if len(md.TypeParams) > 0 {
 			continue // generic methods require explicit type args at call sites
 		}
-		mangledName := mangleMethodName(concrete.Obj().Name(), md.Name, md.IsSetter)
+		mangledName := mangleMethodDeclName(concrete.Obj().Name(), md)
 		fn, ok := c.funcs[mangledName]
 		if !ok || len(fn.Blocks) > 0 {
 			continue // not declared, or already defined
@@ -10286,7 +10364,7 @@ func (c *Compiler) synthesizeDefaultMethods(concrete, iface *types.Named) {
 		}
 
 		// Check if concrete already has this method (override)
-		ifaceMethod := c.lookupAnyMethod(iface, md.Name, md.IsGetter, md.IsSetter)
+		ifaceMethod := c.lookupMethodForDecl(iface, md)
 		if ifaceMethod == nil || ifaceMethod.IsAbstract() {
 			continue
 		}
@@ -10302,7 +10380,7 @@ func (c *Compiler) synthesizeDefaultMethods(concrete, iface *types.Named) {
 			continue
 		}
 
-		mangledName := mangleMethodName(concreteName, md.Name, md.IsSetter)
+		mangledName := mangleMethodDeclName(concreteName, md)
 		if _, exists := c.funcs[mangledName]; exists {
 			continue // already synthesized
 		}

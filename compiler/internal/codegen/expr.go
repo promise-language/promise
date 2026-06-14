@@ -1104,7 +1104,12 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	}
 
 	op := e.Op.String()
-	method := named.LookupMethod(op)
+	// Binary operator: select the 1-param variant so a type that also declares a
+	// prefix-unary form of the same symbol (e.g. `-`) dispatches correctly (T0883).
+	method := named.LookupBinaryMethod(op)
+	if method == nil {
+		method = named.LookupMethod(op)
+	}
 	if method == nil {
 		panic(fmt.Sprintf("codegen: no method %q on type %s", op, named))
 	}
@@ -1223,7 +1228,11 @@ func (c *Compiler) genEnumBinaryOp(e *ast.BinaryExpr, en *types.Enum, leftType t
 		}
 	}
 
-	method := en.LookupMethod(op)
+	// Binary operator: select the 1-param variant (T0883).
+	method := en.LookupBinaryMethod(op)
+	if method == nil {
+		method = en.LookupMethod(op)
+	}
 	if method == nil {
 		panic(fmt.Sprintf("codegen: no operator %q on enum %s", op, enumName))
 	}
@@ -1400,13 +1409,13 @@ func (c *Compiler) genUnaryExpr(e *ast.UnaryExpr) value.Value {
 		if structParent := c.findStructuralOwner(named, op); structParent != nil {
 			concreteName := c.resolveTypeName(operandType)
 			c.ensureDefaultMethodsSynthesized(named, structParent)
-			mangledName = mangleMethodName(concreteName, op, false)
+			mangledName = mangleMethodNameForMethod(concreteName, method)
 		} else {
 			monoOwner := c.resolveMonoParentName(named, operandType, ownerName)
-			mangledName = mangleMethodName(monoOwner, op, false)
+			mangledName = mangleMethodNameForMethod(monoOwner, method)
 		}
 	} else {
-		mangledName = mangleMethodName(c.resolveTypeName(operandType), op, false)
+		mangledName = mangleMethodNameForMethod(c.resolveTypeName(operandType), method)
 	}
 	fn, ok := c.funcs[mangledName]
 	if !ok {
@@ -1446,11 +1455,11 @@ func (c *Compiler) genEnumUnaryOp(e *ast.UnaryExpr, en *types.Enum, operandType 
 		}
 	}
 
-	method := en.LookupMethod(op)
+	method := en.LookupUnaryMethod(op)
 	if method == nil {
 		panic(fmt.Sprintf("codegen: no operator %q on enum %s", op, enumName))
 	}
-	mangledName := mangleMethodName(enumName, op, false)
+	mangledName := mangleMethodNameForMethod(enumName, method)
 	fn, ok := c.funcs[mangledName]
 	if !ok {
 		panic(fmt.Sprintf("codegen: undeclared enum operator method %s", mangledName))
@@ -1493,8 +1502,8 @@ func (c *Compiler) genVirtualUnaryOp(e *ast.UnaryExpr, named *types.Named,
 		instance = c.extractInstancePtr(operand)
 	}
 
-	// Index into vtable.
-	slotIndex := named.VirtualMethodIndex(op, false)
+	// Index into vtable (unary variant slot — distinct from the binary `-` slot, T0883).
+	slotIndex := named.VirtualUnaryMethodIndex(op)
 	if slotIndex < 0 {
 		panic(fmt.Sprintf("codegen: operator %s not in vtable for %s", op, named))
 	}

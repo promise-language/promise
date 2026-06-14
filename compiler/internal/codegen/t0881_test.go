@@ -31,8 +31,8 @@ func TestT0881_InheritedConcreteUnaryOperatorDispatch(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
 	}
-	if !strings.Contains(body, "@Base.-(i8*") {
-		t.Fatalf("expected inherited unary dispatch `@Base.-(i8* ...)` in caller:\n%s", body)
+	if !strings.Contains(body, "@Base.-$unary(i8*") {
+		t.Fatalf("expected inherited unary dispatch `@Base.-$unary(i8* ...)` in caller:\n%s", body)
 	}
 }
 
@@ -56,11 +56,11 @@ func TestT0881_StructuralDefaultUnaryOperatorDispatch(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
 	}
-	if !strings.Contains(body, "@Item.-(i8*") {
-		t.Fatalf("expected synthesized structural unary dispatch `@Item.-(i8* ...)` in caller:\n%s", body)
+	if !strings.Contains(body, "@Item.-$unary(i8*") {
+		t.Fatalf("expected synthesized structural unary dispatch `@Item.-$unary(i8* ...)` in caller:\n%s", body)
 	}
 	// The structural default method body must be synthesized on the concrete type.
-	if extractFunction(ir, "Item.-") == "" {
+	if extractFunction(ir, "Item.-$unary") == "" {
 		t.Fatalf("expected synthesized @Item.- definition in IR:\n%s", ir)
 	}
 }
@@ -87,7 +87,7 @@ func TestT0881_InheritedGenericUnaryOperatorDispatch(t *testing.T) {
 	if body == "" {
 		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
 	}
-	if !strings.Contains(body, "@\"Base[int].-\"(i8*") {
-		t.Fatalf("expected mono inherited unary dispatch `@\"Base[int].-\"(i8* ...)` in caller:\n%s", body)
+	if !strings.Contains(body, "@\"Base[int].-$unary\"(i8*") {
+		t.Fatalf("expected mono inherited unary dispatch `@\"Base[int].-$unary\"(i8* ...)` in caller:\n%s", body)
 	}
 }

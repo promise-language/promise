@@ -130,6 +130,28 @@ func (e *Enum) LookupMethod(name string) *Method {
 	return nil
 }
 
+// LookupUnaryMethod searches for the 0-param (prefix-unary) variant of an
+// operator method by name (T0883), mirroring (*Named).LookupUnaryMethod.
+func (e *Enum) LookupUnaryMethod(name string) *Method {
+	for _, m := range e.methods {
+		if m.name == name && !m.isGetter && !m.isSetter && len(m.sig.Params()) == 0 {
+			return m
+		}
+	}
+	return nil
+}
+
+// LookupBinaryMethod searches for the 1-param (binary) variant of an operator
+// method by name (T0883), mirroring (*Named).LookupBinaryMethod.
+func (e *Enum) LookupBinaryMethod(name string) *Method {
+	for _, m := range e.methods {
+		if m.name == name && !m.isGetter && !m.isSetter && len(m.sig.Params()) == 1 {
+			return m
+		}
+	}
+	return nil
+}
+
 // LookupGetter searches for a getter method by name.
 func (e *Enum) LookupGetter(name string) *Method {
 	for _, m := range e.methods {

@@ -1582,7 +1582,7 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 			if md.Body == nil {
 				// Native drop methods need LLVM stubs for scope cleanup dispatch (T0088).
 				// Other native methods (next, push, etc.) are handled inline at call sites.
-				m2 := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+				m2 := c.lookupMethodForDecl(named, md)
 				if m2 == nil || !m2.IsNative() || md.Name != "drop" {
 					continue
 				}
@@ -1590,12 +1590,12 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 			if len(md.TypeParams) > 0 {
 				continue // generic method — handled by mono method instances
 			}
-			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+			m := c.lookupMethodForDecl(named, md)
 			if m == nil || m.Sig() == nil {
 				continue
 			}
 
-			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
+			mangledName := mangleMethodDeclName(name, md)
 			if _, exists := c.funcs[mangledName]; exists {
 				continue // already declared (e.g., same instance from main file)
 			}
@@ -1660,7 +1660,7 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			isNativeDrop := false
 			if md.Body == nil {
 				// Native drop methods get synthesized bodies (T0088).
-				m2 := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+				m2 := c.lookupMethodForDecl(named, md)
 				if m2 != nil && m2.IsNative() && md.Name == "drop" {
 					isNativeDrop = true
 				} else {
@@ -1670,12 +1670,12 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			if len(md.TypeParams) > 0 {
 				continue // generic method — handled by mono method instances
 			}
-			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+			m := c.lookupMethodForDecl(named, md)
 			if m == nil || m.Sig() == nil {
 				continue
 			}
 
-			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
+			mangledName := mangleMethodDeclName(name, md)
 			fn, ok := c.funcs[mangledName]
 			if !ok {
 				continue
@@ -2163,7 +2163,7 @@ func (c *Compiler) declareStructuralDefaultStubs(file *ast.File, mName string, c
 		if md.Body == nil {
 			continue
 		}
-		m := c.lookupAnyMethod(iface, md.Name, md.IsGetter, md.IsSetter)
+		m := c.lookupMethodForDecl(iface, md)
 		if m == nil || m.IsAbstract() {
 			continue
 		}
@@ -2173,7 +2173,7 @@ func (c *Compiler) declareStructuralDefaultStubs(file *ast.File, mName string, c
 		if len(md.TypeParams) > 0 {
 			continue // generic methods are not virtual
 		}
-		mangledName := mangleMethodName(mName, md.Name, md.IsSetter)
+		mangledName := mangleMethodDeclName(mName, md)
 		if _, exists := c.funcs[mangledName]; exists {
 			continue
 		}
@@ -2239,7 +2239,7 @@ func (c *Compiler) defineStructuralDefaultBodies(file *ast.File, mName string, c
 		if md.Body == nil {
 			continue
 		}
-		m := c.lookupAnyMethod(iface, md.Name, md.IsGetter, md.IsSetter)
+		m := c.lookupMethodForDecl(iface, md)
 		if m == nil || m.IsAbstract() {
 			continue
 		}
@@ -2249,7 +2249,7 @@ func (c *Compiler) defineStructuralDefaultBodies(file *ast.File, mName string, c
 		if len(md.TypeParams) > 0 {
 			continue
 		}
-		mangledName := mangleMethodName(mName, md.Name, md.IsSetter)
+		mangledName := mangleMethodDeclName(mName, md)
 		fn, ok := c.funcs[mangledName]
 		if !ok {
 			continue
@@ -2515,7 +2515,7 @@ func (c *Compiler) declareMonoEnumMethods(file *ast.File, instances []*types.Ins
 				continue
 			}
 
-			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
+			mangledName := mangleMethodDeclName(name, md)
 			if _, exists := c.funcs[mangledName]; exists {
 				continue
 			}
@@ -2587,7 +2587,7 @@ func (c *Compiler) defineMonoEnumMethods(file *ast.File, instances []*types.Inst
 				continue
 			}
 
-			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
+			mangledName := mangleMethodDeclName(name, md)
 			fn, ok := c.funcs[mangledName]
 			if !ok {
 				continue

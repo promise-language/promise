@@ -104,6 +104,13 @@ func (c *Checker) checkMissingReturn(file *ast.File) {
 				var m *types.Method
 				if md.IsGetter {
 					m = enum.LookupGetter(md.Name)
+				} else if types.IsUnaryOperatorName(md.Name) {
+					// Arity-aware: unary vs binary variant of the same operator (T0883).
+					if len(md.Params) == 0 {
+						m = enum.LookupUnaryMethod(md.Name)
+					} else {
+						m = enum.LookupBinaryMethod(md.Name)
+					}
 				} else {
 					m = enum.LookupMethod(md.Name)
 				}

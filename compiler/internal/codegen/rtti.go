@@ -331,19 +331,19 @@ func (c *Compiler) emitVtableGlobal(named *types.Named) *ir.Global {
 	var entries []constant.Constant
 	for _, m := range methods {
 		ownerName := c.resolveMethodOwner(named, m.Name())
-		mangledName := mangleMethodName(ownerName, m.Name(), m.IsSetter())
+		mangledName := mangleMethodNameForMethod(ownerName, m)
 		// T0468/T0507: Prefer the child's own (possibly synthesized) implementation
 		// when the method is inherited — otherwise virtual dispatch through the
 		// vtable skips the child's cleanup. The T0507 inherited-drop synthesis adds
 		// e.g. _NgBox.drop even though drop is owned by _NgLogger.
 		if ownerName != named.Obj().Name() {
-			ownMangled := mangleMethodName(named.Obj().Name(), m.Name(), m.IsSetter())
+			ownMangled := mangleMethodNameForMethod(named.Obj().Name(), m)
 			if _, ok := c.funcs[ownMangled]; ok {
 				mangledName = ownMangled
 			} else if _, ok := c.funcs[mangledName]; !ok {
 				// Inherited method from a generic parent — resolve to mono name.
 				monoOwner := c.resolveMonoParentName(named, named, ownerName)
-				mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
+				mangledName = mangleMethodNameForMethod(monoOwner, m)
 			}
 		}
 		if fn, ok := c.funcs[mangledName]; ok {
@@ -482,19 +482,19 @@ func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 			var mangledName string
 			if ownerName == named.Obj().Name() {
 				// Method defined on this type — use mono instance name
-				mangledName = mangleMethodName(name, m.Name(), m.IsSetter())
+				mangledName = mangleMethodNameForMethod(name, m)
 			} else {
 				// Inherited method — prefer the child's own mono name if it
 				// exists (e.g. T0468 inherited-drop synthesis adds Box[int].drop
 				// even though drop is owned by Logger). Falls back to the parent's
 				// mono name otherwise. Without the child-first preference, virtual
 				// dispatch through the vtable would skip the child's field cleanup.
-				ownMangled := mangleMethodName(name, m.Name(), m.IsSetter())
+				ownMangled := mangleMethodNameForMethod(name, m)
 				if _, ok := c.funcs[ownMangled]; ok {
 					mangledName = ownMangled
 				} else {
 					monoOwner := c.resolveMonoParentName(named, inst, ownerName)
-					mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
+					mangledName = mangleMethodNameForMethod(monoOwner, m)
 					// Structural parents skip mono method generation — fall back to
 					// concrete mono name where synthesized defaults are registered.
 					if _, ok := c.funcs[mangledName]; !ok {
@@ -767,18 +767,18 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 	var entries []constant.Constant
 	for _, m := range methods {
 		ownerName := c.resolveMethodOwner(concrete, m.Name())
-		mangledName := mangleMethodName(ownerName, m.Name(), m.IsSetter())
+		mangledName := mangleMethodNameForMethod(ownerName, m)
 		// T0468: Prefer the concrete's mono name if it has its own (possibly
 		// synthesized) implementation — virtual dispatch must reach the child's
 		// override/synthesis, not the parent's directly.
-		concreteMonoMangled := mangleMethodName(concreteCacheKey, m.Name(), m.IsSetter())
+		concreteMonoMangled := mangleMethodNameForMethod(concreteCacheKey, m)
 		if _, ok := c.funcs[concreteMonoMangled]; ok && ownerName != concrete.Obj().Name() {
 			mangledName = concreteMonoMangled
 		} else if _, ok := c.funcs[mangledName]; !ok && ownerName != concrete.Obj().Name() {
 			// Inherited method from a generic parent — resolve to mono name,
 			// same fallback as emitVtableGlobal.
 			monoOwner := c.resolveMonoParentName(concrete, fromType, ownerName)
-			mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
+			mangledName = mangleMethodNameForMethod(monoOwner, m)
 		}
 		// Also try the mono concrete name (e.g., Entity__int.method)
 		if _, ok := c.funcs[mangledName]; !ok {
@@ -791,7 +791,7 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 			// (extra optional/default params, non-failable→failable, T→T? return,
 			// or primitive scalar receiver vs i8* receiver).
 			// If so, generate an adapter thunk with the interface's signature.
-			concreteMethod := c.lookupAnyMethod(concrete, m.Name(), m.IsGetter(), m.IsSetter())
+			concreteMethod := c.lookupMethodForMethod(concrete, m)
 			needsAdapter := concreteMethod != nil && (needsViewAdapter(concreteMethod.Sig(), m.Sig()) || isPrimitiveScalar(concrete))
 			if needsAdapter {
 				adapter := c.emitViewMethodAdapter(concrete, concreteMethod, m, fn)

@@ -1,0 +1,151 @@
+// T0883: a type may declare BOTH the prefix-unary (0-param) and binary (1-param)
+// variant of the same operator symbol (`-` negation + subtraction). Previously
+// both mangled to the same IR name (codegen redefinition error), and sema's
+// binary lookup + method-body resolution were arity-blind (rejecting the program
+// when the unary variant was declared first).
+//
+// Note: operator results are bound to locals before use — inline operator-result
+// temporaries leak via a separate pre-existing bug (T0918).
+// Binary `-` declared first, unary `-` second.
+type Base {
+  int v;
+  -(Base o) Base {
+    return Base(v: this.v - o.v);
+  }
+  - () Base {
+    return Base(v: -this.v);
+  }
+}
+
+// Unary `-` declared first, binary `-` second (the order that broke sema).
+type Rev {
+  int v;
+  -() Rev {
+    return Rev(v: -this.v);
+  }
+  - (Rev o) Rev {
+    return Rev(v: this.v - o.v);
+  }
+}
+
+// Parent declaring both variants; a child inherits them. The parent has a child,
+// so it gets a vtable — exercising the distinct unary/binary vtable slots.
+type Vec {
+  int v;
+  -(Vec o) Vec {
+    return Vec(v: this.v - o.v);
+  }
+  - () Vec {
+    return Vec(v: -this.v);
+  }
+}
+type Vec2 is Vec {
+}
+
+// Pure value type (all fields `value) declaring both variants: the receiver is
+// materialized via valueTypeReceiverPtr and the result is returned by value,
+// exercising the value-type codegen path with the unary/binary discriminator.
+type VBoth {
+  int v `value;
+  -(VBoth o) VBoth {
+    return VBoth(v: this.v - o.v);
+  }
+  - () VBoth {
+    return VBoth(v: -this.v);
+  }
+}
+
+// Generic type declaring both variants: instantiation drives the mono
+// declare/define path, where mangleMethodDeclName applies the "$unary"
+// discriminator. The bodies avoid arithmetic on T (carrying a `tag` to identify
+// which variant ran) so the type param has no operator constraint.
+type GenBoth[T] {
+  T v;
+  int tag;
+  -(GenBoth[T] o) GenBoth[T] {
+    return GenBoth[T](v: this.v, tag: 2);
+  }
+  - () GenBoth[T] {
+    return GenBoth[T](v: this.v, tag: 1);
+  }
+}
+
+// Enum declaring both variants.
+enum Num {
+  Val(int n),
+  -(Num o) Num {
+    return match this {
+      Val(a) => match o {
+        Val(b) => Num.Val(a - b),
+      },
+    };
+  }
+  - () Num {
+    return match this {
+      Val(a) => Num.Val(-a),
+    };
+  }
+  unwrap(this) int {
+    match this {
+      Val(n) => {
+        return n;
+      },
+    }
+  }
+}
+
+binary_first() `test {
+  a := Base(v: 5);
+  b := Base(v: 3);
+  u := -a;
+  assert(u.v == -5, "negation (binary declared first)");
+  d := a - b;
+  assert(d.v == 2, "subtraction (binary declared first)");
+}
+
+unary_first() `test {
+  a := Rev(v: 5);
+  b := Rev(v: 3);
+  u := -a;
+  assert(u.v == -5, "negation (unary declared first)");
+  d := a - b;
+  assert(d.v == 2, "subtraction (unary declared first)");
+}
+
+inherited_both_virtual() `test {
+  x := Vec2(v: 10);
+  y := Vec2(v: 4);
+  u := -x;
+  assert(u.v == -10, "inherited negation (virtual dispatch)");
+  d := x - y;
+  assert(d.v == 6, "inherited subtraction (virtual dispatch)");
+}
+
+value_both() `test {
+  a := VBoth(v: 5);
+  b := VBoth(v: 3);
+  u := -a;
+  assert(u.v == -5, "value-type negation");
+  d := a - b;
+  assert(d.v == 2, "value-type subtraction");
+}
+
+generic_both() `test {
+  a := GenBoth[int](v: 5, tag: 0);
+  b := GenBoth[int](v: 3, tag: 0);
+  u := -a;
+  assert(u.tag == 1, "generic unary variant dispatched");
+  assert(u.v == 5, "generic negation keeps left field");
+  d := a - b;
+  assert(d.tag == 2, "generic binary variant dispatched");
+  assert(d.v == 5, "generic subtraction keeps left field");
+}
+
+enum_both() `test {
+  x := Num.Val(7);
+  y := Num.Val(2);
+  d := x - y;
+  assert(d.unwrap() == 5, "enum subtraction");
+  u := -x;
+  assert(u.unwrap() == -7, "enum negation");
+}

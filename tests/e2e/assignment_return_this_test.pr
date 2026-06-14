@@ -113,3 +113,37 @@ assign_generic_operator() `test {
   m = a + b;
   assert(m.v == 17, "generic operator assignment result");
 }
+
+// A heap user type with a prefix-unary operator that returns the borrowed receiver.
+type NN `doc("Heap user type whose unary - operator returns the borrowed receiver.") {
+  int v;
+  -() NN {
+    return this;
+  }
+}
+
+// Prefix-unary operator returning `this`, assignment form (`m = -d`). Reached via
+// operatorReceiverOrigin on a UnaryExpr RHS rather than a BinaryExpr.
+assign_unary_operator() `test {
+  d := NN(v: 7);
+  m := NN(v: 0);
+  m = -d;
+  assert(m.v == 7, "unary operator assignment result");
+}
+
+// A generic heap user type with a method that returns the borrowed receiver.
+type GM[T] `doc("Generic heap user type whose dup() returns the borrowed receiver.") {
+  T v;
+  dup() GM[T] {
+    return this;
+  }
+}
+
+// Generic *method* (not operator) returning `this`, assignment form — exercises the
+// monomorphized method-call alias-clear path.
+assign_generic_method() `test {
+  a := GM[int](v: 42);
+  m := GM[int](v: 0);
+  m = a.dup();
+  assert(m.v == 42, "generic method assignment result");
+}

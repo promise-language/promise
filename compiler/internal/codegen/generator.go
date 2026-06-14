@@ -35,11 +35,13 @@ func (c *Compiler) defineGeneratorFunc(fd *ast.FuncDecl, fn *ir.Func, elemType t
 	if !ok {
 		return
 	}
+	c.currentOpValueParams = nil // T0897: free functions are never operators
 	c.buildGeneratorCoroutine(sig, fn, fd.Body, elemType, nil)
 }
 
 // defineGeneratorMethod compiles a generator method on a type.
 func (c *Compiler) defineGeneratorMethod(md *ast.MethodDecl, m *types.Method, fn *ir.Func, elemType types.Type, ownerNamed *types.Named) {
+	c.setOperatorValueParams(md.Name, m.Sig()) // T0897
 	c.buildGeneratorCoroutine(m.Sig(), fn, md.Body, elemType, ownerNamed)
 }
 
@@ -103,7 +105,8 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	savedLocalNameCount := c.localNameCount // T0261
 	savedPanicExitBlock := c.panicExitBlock
 	savedCoroutineReturnBlock := c.coroutineReturnBlock
-	savedThisRecvIsOwned := c.thisRecvIsOwned // T0436
+	savedThisRecvIsOwned := c.thisRecvIsOwned    // T0436
+	savedOpValueParams := c.currentOpValueParams // T0897: preserve caller-set value
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -345,7 +348,8 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.localNameCount = savedLocalNameCount // T0261
 	c.panicExitBlock = savedPanicExitBlock
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
-	c.thisRecvIsOwned = savedThisRecvIsOwned // T0436
+	c.thisRecvIsOwned = savedThisRecvIsOwned    // T0436
+	c.currentOpValueParams = savedOpValueParams // T0897
 
 	// 7. Build factory body for original function
 	c.fn = fn

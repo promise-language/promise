@@ -7497,6 +7497,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		c.dupHeapUserFieldAccess = false
 		c.targetType = nil
 		val = c.wrapThisReturnValue(val, s.Value, retType)
+		val = c.wrapOperatorParamReturnValue(val, s.Value, retType) // T0897
 	}
 
 	// B0189: Dup return value if it's a string that might be borrowed from a
@@ -7708,17 +7709,8 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 		// Deep-clone the payload so the returned value owns it independently. Skip
 		// for borrow return types (caller expects a reference) and `~this` receivers
 		// (genuine ownership transfer — cloning would copy needlessly and leak).
-		if !isRefType(effType) && !c.thisRecvIsOwned && c.enumInstanceHasDrop(effType, enumT) {
-			if cloned, ok := c.cloneEnumValue(enumVal, effType); ok {
-				enumVal = cloned
-			} else {
-				// Droppable enum without a clone method — dup variant fields in
-				// place via an alloca round-trip (same path as maybeDupPushElement).
-				alloca := c.createEntryAlloca(enumVal.Type())
-				c.block.NewStore(enumVal, alloca)
-				c.dupEnumElementInPlace(alloca, effType)
-				enumVal = c.block.NewLoad(enumVal.Type(), alloca)
-			}
+		if !isRefType(effType) && !c.thisRecvIsOwned {
+			enumVal = c.cloneOwnedReturnAlias(enumVal, effType)
 		}
 		return enumVal
 	}
@@ -7766,9 +7758,72 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 	//     is a genuine ownership transfer — cloning would copy needlessly and leak the
 	//     moved-in instance (c.thisRecvIsOwned).
 	if !isRefType(effType) && !c.thisRecvIsOwned {
-		result = c.dupHeapValue(result, effType)
+		result = c.cloneOwnedReturnAlias(result, effType)
 	}
 	return result
+}
+
+// cloneOwnedReturnAlias deep-clones an already-materialized owned return value
+// of effType so the returned value owns its heap data independently of whatever
+// borrowed source it currently aliases — the `this` receiver (T0893) or a
+// borrowed operator operand (T0897). For enums it clones droppable variant
+// payloads; for heap user types it dups the instance; value/Copy/string/void/
+// none types have no heap alias and are returned unchanged. Callers gate on
+// isRefType / ownership before invoking. `val` must already be the
+// function-ABI value (enum value, {vtable,instance} struct, or value struct).
+func (c *Compiler) cloneOwnedReturnAlias(val value.Value, effType types.Type) value.Value {
+	if enumT := extractEnum(effType); enumT != nil {
+		if !c.enumInstanceHasDrop(effType, enumT) {
+			return val
+		}
+		if cloned, ok := c.cloneEnumValue(val, effType); ok {
+			return cloned
+		}
+		// Droppable enum without a clone method — dup variant fields in place
+		// via an alloca round-trip (same path as maybeDupPushElement).
+		alloca := c.createEntryAlloca(val.Type())
+		c.block.NewStore(val, alloca)
+		c.dupEnumElementInPlace(alloca, effType)
+		return c.block.NewLoad(val.Type(), alloca)
+	}
+	named := extractNamed(effType)
+	if named == nil {
+		return val
+	}
+	if classify(named) != CatUnknown || named == types.TypString || named == types.TypVoid || named == types.TypNone {
+		return val
+	}
+	if named.IsValueType() {
+		return val
+	}
+	return c.dupHeapValue(val, effType)
+}
+
+// wrapOperatorParamReturnValue deep-clones the return value when an operator
+// method body returns one of its borrowed value operands unchanged
+// (e.g. `+(S other) S { return other; }`). Operator dispatch borrows operands
+// rather than moving them, so the returned value would otherwise alias the
+// caller's still-live operand and both bindings would free the same heap
+// instance (double-free). Mirrors wrapThisReturnValue's clone-on-`return this`
+// (T0893) for the right-hand operand (T0897). The value is already the
+// function-ABI value, so only the clone is needed (no i8*→struct wrapping).
+func (c *Compiler) wrapOperatorParamReturnValue(val value.Value, expr ast.Expr, retType types.Type) value.Value {
+	if val == nil || retType == nil || len(c.currentOpValueParams) == 0 {
+		return val
+	}
+	ident, ok := unwrapDestructureParens(expr).(*ast.IdentExpr)
+	if !ok || !c.currentOpValueParams[ident.Name] {
+		return val
+	}
+	// Borrow return type: hand back the reference into existing storage, not a copy.
+	if isRefType(retType) {
+		return val
+	}
+	effType := retType
+	if opt, ok := retType.(*types.Optional); ok {
+		effType = opt.Elem()
+	}
+	return c.cloneOwnedReturnAlias(val, effType)
 }
 
 // chainOriginExpr walks a possibly-chained method call back to its base

@@ -1,0 +1,157 @@
+// T0897: an overloaded operator borrows its operands (unlike a method value
+// param, which is moved). A body that returns a borrowed operand unchanged
+// (`return other`) must hand back an independent clone, not a value struct
+// aliasing the caller's still-live operand. Before the fix the result and the
+// operand shared one heap instance: both bindings dropped it → `fatal: invalid
+// free (bad header magic)` (or a segfault for droppable-field operands).
+// This is the symmetric twin of the T0893 `return this` (left-operand) fix.
+type S {
+  int v;
+  +(S other) S {
+    return other;
+  }
+}
+
+// Returning the right operand must clone — m and b are independent, b stays live.
+operator_return_other() `test {
+  a := S(v: 1);
+  b := S(v: 2);
+  m := a + b;
+  assert(m.v == 2, "m.v == 2");
+  assert(b.v == 2, "b.v == 2");
+}
+
+// Reversed read order — locks the regression from both directions.
+operator_return_other_reversed() `test {
+  a := S(v: 1);
+  b := S(v: 2);
+  m := a + b;
+  assert(b.v == 2, "b.v == 2");
+  assert(m.v == 2, "m.v == 2");
+}
+
+type Sd {
+  string s;
+  +(Sd other) Sd {
+    return other;
+  }
+}
+
+// Droppable-field operand: the clone must deep-copy so neither binding
+// double-frees the string (segfault before the fix).
+operator_return_other_droppable() `test {
+  a := Sd(s: "aaa");
+  b := Sd(s: "bbb");
+  m := a + b;
+  assert(m.s == "bbb", "m.s == bbb");
+  assert(b.s == "bbb", "b.s == bbb");
+}
+
+type Box[T] {
+  T v;
+  +(Box[T] other) Box[T] {
+    return other;
+  }
+}
+
+// Generic operator returning the operand — clones per monomorphization.
+operator_return_other_generic_int() `test {
+  a := Box[int](v: 1);
+  b := Box[int](v: 2);
+  m := a + b;
+  assert(m.v == 2, "m.v == 2");
+  assert(b.v == 2, "b.v == 2");
+}
+
+operator_return_other_generic_string() `test {
+  a := Box[string](v: "x");
+  b := Box[string](v: "y");
+  m := a + b;
+  assert(m.v == "y", "m.v == y");
+  assert(b.v == "y", "b.v == y");
+}
+
+enum E {
+  A(string s),
+  B(int n),
+}
+
+type W {
+  E e;
+  +(W other) W {
+    return other;
+  }
+}
+
+// Droppable-enum operand: the variant payload must be deep-cloned.
+operator_return_other_enum() `test {
+  a := W(e: E.A("xx"));
+  b := W(e: E.A("yy"));
+  m := a + b;
+  match m.e {
+    E.A(s) => assert(s == "yy", "m.e == yy"),
+    E.B(n) => assert(false, "unexpected B"),
+  }
+  match b.e {
+    E.A(s) => assert(s == "yy", "b.e == yy"),
+    E.B(n) => assert(false, "unexpected B"),
+  }
+}
+
+type O {
+  string s;
+  +(O other) O? {
+    return other;
+  }
+}
+
+// Optional return type wrapping a returned operand: the operand still aliases
+// the caller's live `b`, so the payload must be cloned before being wrapped in
+// the Optional — otherwise unwrapping `m` and dropping `b` double-frees the
+// string. Guards wrapOperatorParamReturnValue's Optional-unwrap branch.
+operator_return_other_optional() `test {
+  a := O(s: "aa");
+  b := O(s: "bb");
+  o := a + b;
+  if m := o {
+    assert(m.s == "bb", "m.s == bb");
+  } else {
+    assert(false, "expected some");
+  }
+  assert(b.s == "bb", "b still live");
+}
+
+// Regression guard: a comparison operator must keep BORROWING its operand —
+// `a == b` then reusing `b` must compile and run. Making operands move (the
+// rejected "fix A") would break every comparison/non-consuming operator.
+type C {
+  int v;
+  == (C other) bool {
+    return this.v == other.v;
+  }
+}
+
+operator_comparison_borrows_operand() `test {
+  a := C(v: 1);
+  b := C(v: 1);
+  assert(a == b, "a == b");
+  assert(b.v == 1, "b still live after ==");
+}
+
+// Regression guard: a fresh-result operator keeps both operands live (neither
+// is moved, and the fresh value is not cloned).
+type F {
+  int v;
+  +(F other) F {
+    return F(v: this.v + other.v);
+  }
+}
+
+operator_fresh_result_keeps_operands() `test {
+  a := F(v: 1);
+  b := F(v: 2);
+  m := a + b;
+  assert(m.v == 3, "m.v == 3");
+  assert(a.v == 1, "a still live");
+  assert(b.v == 2, "b still live");
+}

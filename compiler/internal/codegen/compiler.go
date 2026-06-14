@@ -231,6 +231,13 @@ type Compiler struct {
 	// genOptionalForceUnwrap to distinguish Cases 3A and 3B.
 	thisRecvIsOwned bool
 
+	// T0897: borrowed value parameters of the operator method currently being
+	// compiled. Operator operands are borrowed (not moved) by design, so
+	// `return other` would hand back a value aliasing the caller's still-live
+	// operand → double-free. genReturnStmt deep-clones a returned bare operand
+	// named in this set. nil for non-operator functions/methods.
+	currentOpValueParams map[string]bool
+
 	// B0290: Tracks enums currently being processed by dupEnumElementInPlace
 	// to detect recursive types and prevent infinite codegen.
 	enumDupInProgress map[*types.Enum]bool
@@ -5781,8 +5788,9 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.scopeBindings = nil // T0085: reset scope bindings for each new function
 	c.loopScopeDepth = 0
 	c.blockCounter = 0
-	c.enumCtorTemps = nil       // B0267: prevent cross-function alloca leak
-	c.matchBorrowedIdents = nil // T0485: clear cross-function stale entries
+	c.enumCtorTemps = nil        // B0267: prevent cross-function alloca leak
+	c.matchBorrowedIdents = nil  // T0485: clear cross-function stale entries
+	c.currentOpValueParams = nil // T0897: free functions are never operators
 
 	entry := fn.NewBlock(".entry")
 	c.block = entry
@@ -6499,6 +6507,7 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			// defineMethodFunc call, potentially causing a borrowed-this method to
 			// incorrectly clear the caller's Optional field present flag.
 			c.thisRecvIsOwned = m.Sig().Recv() != nil && m.Sig().Recv().Ref() == types.RefMut
+			c.setOperatorValueParams(md.Name, m.Sig()) // T0897
 
 			// Route generator methods to the generator codegen path
 			if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
@@ -7255,6 +7264,51 @@ func mangleMethodNameForMethod(typeName string, m *types.Method) string {
 	return mangleMethodName(typeName, m.Name(), m.IsSetter())
 }
 
+// operatorMethodNames is the set of operator symbols a method name can be (per
+// the grammar's methodName production, PromiseParser.g4). Operator operands are
+// borrowed, not moved, so a method whose name is one of these returns its value
+// params by alias unless codegen clones them (T0897).
+var operatorMethodNames = map[string]bool{
+	"+": true, "-": true, "*": true, "/": true, "%": true,
+	"==": true, "!=": true, "<": true, ">": true, "<=": true, ">=": true,
+	"&&": true, "||": true, "!": true,
+	"&": true, "|": true, "^": true, "<<": true, ">>": true, "~": true,
+	"++": true, "--": true, "..": true, "..=": true,
+	"[]": true, "[]=": true, "[:]": true, "[:]=": true,
+}
+
+// isOperatorMethodName reports whether a method name is an operator symbol.
+func isOperatorMethodName(name string) bool { return operatorMethodNames[name] }
+
+// setOperatorValueParams populates c.currentOpValueParams with the borrowed
+// value parameters of an operator method (T0897), or clears it (nil) for a
+// non-operator method. A borrowed value param is a plain (non-`~`, non-`&`,
+// non-variadic) parameter — the operand of an overloaded operator, which
+// operator dispatch borrows rather than moves. Mirrors the c.thisRecvIsOwned
+// assignment: call wherever a method body's compilation context is established.
+func (c *Compiler) setOperatorValueParams(name string, sig *types.Signature) {
+	c.currentOpValueParams = nil
+	if sig == nil || !isOperatorMethodName(name) {
+		return
+	}
+	for _, p := range sig.Params() {
+		if p.Name() == "" || p.Name() == "_" || p.IsVariadic() {
+			continue
+		}
+		if p.Ref() == types.RefMut || p.Ref() == types.RefShared {
+			continue
+		}
+		switch p.Type().(type) {
+		case *types.MutRef, *types.SharedRef:
+			continue
+		}
+		if c.currentOpValueParams == nil {
+			c.currentOpValueParams = make(map[string]bool)
+		}
+		c.currentOpValueParams[p.Name()] = true
+	}
+}
+
 // lookupAnyMethod finds a method, getter, or setter by name, dispatching to
 // the appropriate typed lookup based on the AST declaration's getter/setter flags.
 func (c *Compiler) lookupAnyMethod(named *types.Named, name string, isGetter, isSetter bool) *types.Method {
@@ -7344,6 +7398,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 
 	// T0428: track whether the receiver is owned (~this) for force-unwrap neutralization.
 	c.thisRecvIsOwned = m.Sig().Recv() != nil && m.Sig().Recv().Ref() == types.RefMut
+	c.setOperatorValueParams(md.Name, m.Sig()) // T0897
 
 	// Allocate receiver as "this"
 	if m.Sig().Recv() != nil {
@@ -10226,9 +10281,10 @@ type compilerState struct {
 	envTempMap           map[value.Value]int
 	enumCtorTemps        []enumCtorTemp // B0267
 	tempTrackingEnabled  bool
-	panicExitBlock       *ir.Block // T0262: prevent cross-function block references
-	coroutineReturnBlock *ir.Block // T0262: prevent cross-function block references
-	thisRecvIsOwned      bool      // T0428: true when current method has ~this receiver
+	panicExitBlock       *ir.Block       // T0262: prevent cross-function block references
+	coroutineReturnBlock *ir.Block       // T0262: prevent cross-function block references
+	thisRecvIsOwned      bool            // T0428: true when current method has ~this receiver
+	currentOpValueParams map[string]bool // T0897: borrowed value params of the current operator
 }
 
 func (c *Compiler) saveState() compilerState {
@@ -10264,6 +10320,7 @@ func (c *Compiler) saveState() compilerState {
 		panicExitBlock:       c.panicExitBlock,
 		coroutineReturnBlock: c.coroutineReturnBlock,
 		thisRecvIsOwned:      c.thisRecvIsOwned,
+		currentOpValueParams: c.currentOpValueParams,
 	}
 	// T0262: clear coroutine-specific blocks to prevent cross-function references
 	// when saveState is used before switching c.fn to a different LLVM function.
@@ -10304,6 +10361,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.panicExitBlock = s.panicExitBlock
 	c.coroutineReturnBlock = s.coroutineReturnBlock
 	c.thisRecvIsOwned = s.thisRecvIsOwned
+	c.currentOpValueParams = s.currentOpValueParams
 }
 
 // findTypeDeclAnyFile searches for a TypeDecl by name in c.file first,

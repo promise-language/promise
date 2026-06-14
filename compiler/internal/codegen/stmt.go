@@ -7269,10 +7269,12 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
-	named := extractNamed(targetType)
-	if named == nil {
-		panic(fmt.Sprintf("codegen: cannot resolve Named type for inc/dec on %s", targetType))
+	if c.selfSubst != nil {
+		targetType = types.SubstituteSelf(targetType, c.selfSubst.iface, c.selfSubst.concrete)
 	}
+	// targetType may be a primitive (native ++/--), a Named/value/enum user type
+	// (non-native dispatch, T0880), or an enum (extractNamed returns nil). Dispatch
+	// is handled per-target via emitUnaryOpResult, so no top-level Named is needed.
 
 	switch t := target.(type) {
 	case *ast.IdentExpr:
@@ -7281,7 +7283,10 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 			panic(fmt.Sprintf("codegen: undefined variable %q in inc/dec", t.Name))
 		}
 		current := c.block.NewLoad(alloca.ElemType, alloca)
-		result := c.emitNativeOp(named, op, current, nil)
+		result := c.emitUnaryOpResult(op, targetType, current, false)
+		// T0880: x++ is `x = x.++()`. A non-native operator returns a NEW value,
+		// so the old heap-owned value leaks unless dropped (zero-leak policy).
+		c.dropOldUserValueAtPtr(alloca, targetType, result)
 		c.block.NewStore(result, alloca)
 	case *ast.MemberExpr:
 		// T0712: property getter/setter dispatch. genFieldPtr panics ("no field")
@@ -7306,17 +7311,20 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 				if _, isStruct := current.Type().(*irtypes.StructType); isStruct {
 					current = c.genAutoPropagateValue(current)
 				}
-				result := c.emitNativeOp(named, op, current, nil)
+				result := c.emitUnaryOpResult(op, targetType, current, false)
+				// Drop-old is handled inside the setter (it assigns the backing
+				// field via genMemberAssign, which drops the old value).
 				c.genSetterCall(t, recvType, recvNamed, setter, result)
 				return
 			}
 		}
 		// Load field, apply op, store back
 		fieldPtr := c.genFieldPtr(t)
-		fieldType := c.info.Types[target]
-		llvmType := c.resolveType(fieldType)
+		llvmType := c.resolveType(targetType)
 		current := c.block.NewLoad(llvmType, fieldPtr)
-		result := c.emitNativeOp(named, op, current, nil)
+		result := c.emitUnaryOpResult(op, targetType, current, false)
+		// T0880: drop the old heap-owned field value before overwriting it.
+		c.dropOldUserValueAtPtr(fieldPtr, targetType, result)
 		c.block.NewStore(result, fieldPtr)
 	case *ast.IndexExpr:
 		indexTargetType := c.info.Types[t.Target]
@@ -7369,7 +7377,9 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 			dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 			elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
 			current := c.block.NewLoad(elemLLVM, elemPtr)
-			result := c.emitNativeOp(named, op, current, nil)
+			result := c.emitUnaryOpResult(op, targetType, current, false)
+			// T0880: drop the old heap-owned element value before overwriting it.
+			c.dropOldUserValueAtPtr(elemPtr, targetType, result)
 			c.block.NewStore(result, elemPtr)
 		} else if indexMethod != nil && assignMethod != nil {
 			// Non-native: read via [], apply op, write via []=
@@ -7414,7 +7424,9 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 			} else {
 				current = optVal
 			}
-			result := c.emitNativeOp(named, op, current, nil)
+			result := c.emitUnaryOpResult(op, targetType, current, false)
+			// Drop-old is handled inside the []= setter (Map.[]= drops the old
+			// slot value before storing), so no explicit drop here.
 			setCall := c.block.NewCall(setFn, instancePtr, keyVal, result)
 			c.propagateIfFailable(setCall) // T0708
 		} else {
@@ -7422,6 +7434,60 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 		}
 	default:
 		panic(fmt.Sprintf("codegen: unsupported inc/dec target %T", target))
+	}
+}
+
+// dropOldUserValueAtPtr drops the heap-owned value currently stored at ptr
+// before an inc/dec store-back overwrites it (T0880). `x++` is `x = x.++()`: a
+// non-native operator borrows the receiver and returns a NEW value, so the old
+// one leaks unless dropped (zero-leak policy). For a heap user type the drop is
+// guarded by a null + instance-pointer alias check, so a `return this` result
+// (which aliases the old value) is never freed. Value types and primitives own
+// no heap memory, making this a no-op for them. emitVariantFieldDrop is the
+// shared per-type drop walk; for an enum with no droppable data (a `copy` /
+// fieldless enum) it emits nothing.
+//
+// Enum caveat (T0922): the enum branch has no alias guard. A sane cycling
+// operator returns a FRESH variant, so dropping the old payload is correct and
+// leak-free (the realistic case). But an operator that returns a value aliasing
+// the receiver payload (e.g. `++() E => this`) double-frees that payload — the
+// same pre-existing enum receiver-alias hole that already affects plain methods
+// (`f := e.dup()` where `dup` returns `this`), since emitReceiverAliasCheck does
+// not cover enum-value receivers. The proper fix (reject the aliasing return in
+// ownership, or extend receiver-alias-clear to enums) is tracked in T0922; a
+// bytewise guard here would be a partial proxy that breaks on multi-field
+// variants, so it is deliberately not added.
+func (c *Compiler) dropOldUserValueAtPtr(ptr value.Value, valueType types.Type, newVal value.Value) {
+	if c.typeSubst != nil {
+		valueType = types.Substitute(valueType, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		valueType = types.SubstituteSelf(valueType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	llvmType := c.resolveType(valueType)
+
+	if isDroppableHeapUserType(valueType) || isHeapUserNoDropPalFree(valueType) {
+		oldVal := c.block.NewLoad(llvmType, ptr)
+		oldInstance := c.extractInstancePtr(oldVal)
+		newInstance := c.extractInstancePtr(newVal)
+		isNull := c.block.NewICmp(enum.IPredEQ, oldInstance, constant.NewNull(irtypes.I8Ptr))
+		isSame := c.block.NewICmp(enum.IPredEQ, oldInstance, newInstance)
+		skipDrop := c.block.NewOr(isNull, isSame)
+		dropBlock := c.newBlock("incdec.userdrop")
+		mergeBlock := c.newBlock("incdec.userdrop.done")
+		c.block.NewCondBr(skipDrop, mergeBlock, dropBlock)
+		c.block = dropBlock
+		c.emitVariantFieldDrop(oldVal, valueType)
+		c.block.NewBr(mergeBlock)
+		c.block = mergeBlock
+		return
+	}
+
+	// Non-`copy` enum: `++`/`--` returns a fresh value, so drop the old one.
+	// (For a copy/fieldless enum emitVariantFieldDrop emits nothing.)
+	if extractEnum(valueType) != nil {
+		oldVal := c.block.NewLoad(llvmType, ptr)
+		c.emitVariantFieldDrop(oldVal, valueType)
 	}
 }
 

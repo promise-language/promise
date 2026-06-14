@@ -4852,38 +4852,59 @@ func TestEnumUnaryOperatorErrors(t *testing.T) {
 	`), "operator - not defined on type E")
 }
 
-func TestEnumIncDecStillRejected(t *testing.T) {
-	// T0878 regression guard: `++`/`--` are NOT prefix unary operators that
-	// codegen can dispatch (genIncDecTarget only emits native ops). Accepting all
-	// enum unary operators in sema would have regressed enum `++` from a clean
-	// error into a codegen panic, so it must keep producing "not defined".
-	expectError(t, checkErrs(t, `
-		enum E {
-			some(int x),
-			++() E => this;
+func TestEnumIncDecAccepted(t *testing.T) {
+	// T0880: a user-defined `++`/`--` on an enum now type-checks and dispatches
+	// via genEnumUnaryOp (previously gated to a "not defined" sema error to avoid
+	// a codegen panic).
+	checkOK(t, `
+		enum Sign {
+			Positive,
+			Negative,
+			++() Sign {
+				match this {
+					Positive => { return Sign.Negative; },
+					Negative => { return Sign.Positive; },
+				}
+			}
 		}
 		test() {
-			E a = E.some(1);
+			Sign a = Sign.Positive;
 			a++;
 		}
-	`), "operator ++ not defined on type E")
+	`)
 }
 
-func TestGenericEnumIncDecStillRejected(t *testing.T) {
-	// T0878 regression guard, generic-enum-instance path: the *types.Instance
-	// branch must also gate `++`/`--` behind isPrefixUnaryOp, so a generic enum
-	// instance's `++` produces a clean "not defined" error rather than reaching
-	// checkEnumUnaryOperator (and ultimately a codegen path that can't dispatch).
-	expectError(t, checkErrs(t, `
+func TestGenericEnumIncDecAccepted(t *testing.T) {
+	// T0880, generic-enum-instance path: the operator's result type is resolved
+	// through the instance's type args (Box[int]) and matches the target, so the
+	// inc/dec type-checks.
+	checkOK(t, `
 		enum Box[T] {
 			some(T x),
-			++() Box[T] => this;
+			nothing,
+			++() Box[T] => Box[T].nothing;
 		}
 		test() {
 			Box[int] a = Box[int].some(1);
 			a++;
 		}
-	`), "operator ++ not defined on type Box[int]")
+	`)
+}
+
+func TestIncDecWrongResultTypeRejected(t *testing.T) {
+	// T0880: inc/dec stores the operator result back into the lvalue, so a
+	// `++` returning a different type must be rejected (it would otherwise
+	// miscompile at the store-back).
+	expectError(t, checkErrs(t, `
+		type Counter {
+			int n;
+			++() int { return this.n + 1; }
+		}
+		test() {
+			Counter c = Counter(n: 1);
+			c++;
+		}
+	`), "operator ++ must return Counter, got int")
 }
 
 // ===== Stage 5b: Sema Completion Tests =====

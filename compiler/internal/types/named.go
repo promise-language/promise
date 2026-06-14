@@ -324,8 +324,7 @@ func (n *Named) lookupOwnMethodBySlotKey(key string) *Method {
 // IsUnaryOperatorName reports whether name is an operator symbol that has a
 // prefix-unary form (negation `-`, logical not `!`, bitwise not `~`). Such a
 // symbol may be declared in both a unary (0-param) and binary (1-param) variant
-// on one type, so the variants must be disambiguated by arity (T0883). Matches
-// sema's isPrefixUnaryOp.
+// on one type, so the variants must be disambiguated by arity (T0883).
 func IsUnaryOperatorName(name string) bool {
 	return name == "-" || name == "!" || name == "~"
 }

@@ -1489,7 +1489,9 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 			if !s.UpdateIsInc {
 				op = "--"
 			}
-			c.checkUnaryOperator(s.Pos(), targetType, op)
+			// T0880: the for-update inc/dec also stores the result back, so the
+			// operator must return a type assignable to the target.
+			c.checkIncDecOperator(s.Pos(), targetType, op)
 		}
 	} else if s.UpdateTarget != nil {
 		c.checkExpr(s.UpdateTarget)
@@ -1512,7 +1514,9 @@ func (c *Checker) checkIncDecStmt(s *ast.IncDecStmt) {
 	if !s.IsInc {
 		op = "--"
 	}
-	c.checkUnaryOperator(s.Pos(), targetType, op)
+	// T0880: inc/dec stores the operator result back into the lvalue, so the
+	// operator must return a value assignable to the target's type.
+	c.checkIncDecOperator(s.Pos(), targetType, op)
 
 	// T0709: inc/dec reads the current value via [] — a failable getter propagates.
 	if c.indexGetterCanError(s.Target) && (c.curFunc == nil || !c.curFunc.CanError()) {

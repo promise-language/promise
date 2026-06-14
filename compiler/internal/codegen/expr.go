@@ -1372,16 +1372,24 @@ func (c *Compiler) genUnaryExpr(e *ast.UnaryExpr) value.Value {
 		operandType = types.SubstituteSelf(operandType, c.selfSubst.iface, c.selfSubst.concrete)
 	}
 
-	op := e.Op.String()
+	return c.emitUnaryOpResult(e.Op.String(), operandType, operand, isThisReceiver(e.Operand))
+}
 
+// emitUnaryOpResult dispatches a unary operator (prefix `-`/`!`/`~` from
+// genUnaryExpr, or `++`/`--` from genIncDecTarget) on operandType and returns
+// the result value. isThis reports whether the operand is the method receiver
+// (`this`). Centralizes the native/enum/virtual/direct dispatch so both the
+// prefix-unary path (T0878) and the inc/dec path (T0880) share one
+// implementation.
+func (c *Compiler) emitUnaryOpResult(op string, operandType types.Type, operand value.Value, isThis bool) value.Value {
 	named := extractNamed(operandType)
 	if named == nil {
 		// Enum operands dispatch via the i8*-receiver convention (T0878),
 		// mirroring genEnumBinaryOp.
 		if en := extractEnum(operandType); en != nil {
-			return c.genEnumUnaryOp(e, en, operandType, operand)
+			return c.genEnumUnaryOp(op, en, operandType, operand, isThis)
 		}
-		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for unary %s", operandType, e.Op))
+		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for unary %s", operandType, op))
 	}
 
 	// For unary ops, look up the 0-param method variant
@@ -1397,7 +1405,7 @@ func (c *Compiler) genUnaryExpr(e *ast.UnaryExpr) value.Value {
 	// Non-native unary operator: dispatch as a method call (T0878), mirroring
 	// genBinaryExpr's receiver handling but with no second operand.
 	if c.needsVtable(named) {
-		return c.genVirtualUnaryOp(e, named, method, operand)
+		return c.genVirtualUnaryOp(op, named, method, operand, isThis)
 	}
 
 	// Direct dispatch: call the concrete type's operator method. Resolve the
@@ -1424,7 +1432,7 @@ func (c *Compiler) genUnaryExpr(e *ast.UnaryExpr) value.Value {
 
 	var args []value.Value
 	if method.Sig().Recv() != nil {
-		if isThisReceiver(e.Operand) {
+		if isThis {
 			args = append(args, operand)
 		} else if named.IsValueType() {
 			args = append(args, c.valueTypeReceiverPtr(operand, operandType))
@@ -1435,13 +1443,12 @@ func (c *Compiler) genUnaryExpr(e *ast.UnaryExpr) value.Value {
 	return c.block.NewCall(fn, args...)
 }
 
-// genEnumUnaryOp dispatches a user-defined prefix unary operator declared on an
-// enum (T0878). Enum operator methods receive the enum value via an i8* pointer
-// (mirroring genEnumBinaryOp), so the Named-type receiver convention in
-// genUnaryExpr does not apply.
-func (c *Compiler) genEnumUnaryOp(e *ast.UnaryExpr, en *types.Enum, operandType types.Type, operand value.Value) value.Value {
-	op := e.Op.String()
-
+// genEnumUnaryOp dispatches a user-defined unary operator declared on an enum
+// (T0878 prefix, T0880 ++/--). Enum operator methods receive the enum value via
+// an i8* pointer (mirroring genEnumBinaryOp), so the Named-type receiver
+// convention in emitUnaryOpResult does not apply. isThis reports whether the
+// operand is the method receiver.
+func (c *Compiler) genEnumUnaryOp(op string, en *types.Enum, operandType types.Type, operand value.Value, isThis bool) value.Value {
 	// Resolve the enum's mangled name (mono name for instances, monoCtx for the
 	// origin enum inside a generic method body).
 	enumName := en.Obj().Name()
@@ -1468,7 +1475,7 @@ func (c *Compiler) genEnumUnaryOp(e *ast.UnaryExpr, en *types.Enum, operandType 
 	// Receiver: pass an i8* pointer to the enum value. The original binding still
 	// owns/drops its data — this borrow matches genEnumBinaryOp's convention.
 	var args []value.Value
-	if isThisReceiver(e.Operand) {
+	if isThis {
 		args = append(args, operand)
 	} else {
 		alloca := c.entryBlock.NewAlloca(operand.Type())
@@ -1479,17 +1486,16 @@ func (c *Compiler) genEnumUnaryOp(e *ast.UnaryExpr, en *types.Enum, operandType 
 	return c.block.NewCall(fn, args...)
 }
 
-// genVirtualUnaryOp dispatches a non-native prefix unary operator through the
-// vtable (T0878). Used when the static type is abstract or has children
-// requiring virtual dispatch. Mirrors genVirtualBinaryOp without a right operand.
-func (c *Compiler) genVirtualUnaryOp(e *ast.UnaryExpr, named *types.Named,
-	method *types.Method, operand value.Value) value.Value {
-
-	op := e.Op.String()
+// genVirtualUnaryOp dispatches a non-native unary operator through the vtable
+// (T0878 prefix, T0880 ++/--). Used when the static type is abstract or has
+// children requiring virtual dispatch. Mirrors genVirtualBinaryOp without a
+// right operand. isThis reports whether the operand is the method receiver.
+func (c *Compiler) genVirtualUnaryOp(op string, named *types.Named,
+	method *types.Method, operand value.Value, isThis bool) value.Value {
 
 	// Extract vtable and instance from the operand.
 	var vtableRaw, instance value.Value
-	if isThisReceiver(e.Operand) {
+	if isThis {
 		instance = operand
 		variantPtr := c.loadVariantPtr(operand)
 		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)

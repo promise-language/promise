@@ -1,0 +1,296 @@
+// T0880: user-defined (non-native) ++/-- operators dispatch through
+// genIncDecTarget. Covers value types, heap user types (must not leak), generic
+// heap types, enums, member-field and vector-element targets, and a classic
+// for-loop update on a user value type. Heap cases prove the old value is
+// dropped before the store-back (zero-leak policy).
+// --- value type ---
+type VCounter {
+  int n `value;
+  ++ () VCounter {
+    return VCounter(n: this.n + 1);
+  }
+  -- () VCounter {
+    return VCounter(n: this.n - 1);
+  }
+}
+
+value_type_inc() `test {
+  c := VCounter(n: 0);
+  c++;
+  c++;
+  c++;
+  assert(c.n == 3, "value type ++ x3");
+}
+
+value_type_dec() `test {
+  c := VCounter(n: 5);
+  c--;
+  c--;
+  assert(c.n == 3, "value type -- x2");
+}
+
+// --- heap user type (must not leak) ---
+
+type Counter {
+  int n;
+  ++ () Counter {
+    return Counter(n: this.n + 1);
+  }
+  -- () Counter {
+    return Counter(n: this.n - 1);
+  }
+}
+
+heap_type_inc_no_leak() `test {
+  c := Counter(n: 0);
+  c++;
+  c++;
+  c++;
+  c++;
+  assert(c.n == 4, "heap type ++ x4");
+}
+
+heap_type_dec_no_leak() `test {
+  c := Counter(n: 10);
+  c--;
+  c--;
+  c--;
+  assert(c.n == 7, "heap type -- x3");
+}
+
+// A heap-type `++` that returns `this` aliases the receiver. The drop-old
+// alias guard must skip freeing the old instance (it IS the new instance) —
+// otherwise this double-frees / use-after-frees.
+type IdentCounter {
+  int n;
+  ++ () IdentCounter => this;
+}
+
+heap_type_inc_returns_this_no_double_free() `test {
+  c := IdentCounter(n: 7);
+  c++;
+  c++;
+  assert(c.n == 7, "heap ++ returning this is a no-op");
+}
+
+// A heap type with an *explicit* drop exercises the B0257 drop-fn + pal_free
+// branch of the drop-old walk (the no-drop cases above only hit plain pal_free).
+// Returning a fresh value must drop+free the old instance exactly once (no leak);
+// returning `this` must skip the drop (no double-free / use-after-free).
+type DropCounter {
+  int n;
+  drop(~this) {
+  }
+  ++ () DropCounter {
+    return DropCounter(n: this.n + 1);
+  }
+}
+
+drop_heap_type_inc_fresh_no_leak() `test {
+  c := DropCounter(n: 0);
+  c++;
+  c++;
+  c++;
+  assert(c.n == 3, "explicit-drop heap ++ x3");
+}
+
+type DropIdentCounter {
+  int n;
+  drop(~this) {
+  }
+  ++ () DropIdentCounter => this;
+}
+
+drop_heap_type_inc_returns_this_no_double_free() `test {
+  c := DropIdentCounter(n: 9);
+  c++;
+  c++;
+  assert(c.n == 9, "explicit-drop heap ++ returning this is a no-op");
+}
+
+// --- generic heap type ---
+
+type Box[T] {
+  T v;
+  int count;
+  ++ () Box[T] {
+    return Box[T](v: this.v, count: this.count + 1);
+  }
+}
+
+generic_heap_inc() `test {
+  b := Box[int](v: 42, count: 0);
+  b++;
+  b++;
+  assert(b.count == 2, "generic heap ++ count");
+  assert(b.v == 42, "generic heap ++ preserves v");
+}
+
+// --- enum cycling ---
+
+enum Dir `copy {
+  North,
+  East,
+  South,
+  West,
+  ++ () Dir {
+    match this {
+      North => {
+        return Dir.East;
+      },
+      East => {
+        return Dir.South;
+      },
+      South => {
+        return Dir.West;
+      },
+      West => {
+        return Dir.North;
+      },
+    }
+  }
+}
+
+dir_to_int(Dir d) int {
+  match d {
+    North => {
+      return 0;
+    },
+    East => {
+      return 1;
+    },
+    South => {
+      return 2;
+    },
+    West => {
+      return 3;
+    },
+  }
+}
+
+enum_inc() `test {
+  d := Dir.North;
+  d++;
+  d++;
+  assert(dir_to_int(d) == 2, "enum ++ to South");
+  d++;
+  d++;
+  assert(dir_to_int(d) == 0, "enum ++ wraps to North");
+}
+
+// Non-`copy` enum with a heap payload: `++` returns a fresh value, so the old
+// variant's owned string must be dropped before the store-back (no leak).
+enum Tagged {
+  low(string label),
+  high(string label),
+  ++ () Tagged {
+    match this {
+      low(_) => {
+        return Tagged.high("HIGH");
+      },
+      high(_) => {
+        return Tagged.low("LOW");
+      },
+    }
+  }
+}
+
+enum_payload_inc_no_leak() `test {
+  t := Tagged.low("start");
+  t++;
+  t++;
+  match t {
+    low(s) => {
+      assert(s == "LOW", "tagged ++ x2 cycles back to low");
+    },
+    high(s) => {
+      assert(false, "tagged ++ x2 should be low");
+    },
+  }
+}
+
+// --- member field on a heap-typed field (must not leak) ---
+
+type Holder {
+  Counter c;
+}
+
+member_field_inc_no_leak() `test {
+  h := Holder(c: Counter(n: 5));
+  h.c++;
+  h.c++;
+  assert(h.c.n == 7, "member field ++ x2");
+}
+
+// --- vector element of a heap user type (must not leak) ---
+
+vector_element_inc_no_leak() `test {
+  v := [Counter(n: 1), Counter(n: 2), Counter(n: 3)];
+  v[0]++;
+  v[1]++;
+  v[1]++;
+  assert(v[0].n == 2, "vector elem [0] ++");
+  assert(v[1].n == 4, "vector elem [1] ++ x2");
+  assert(v[2].n == 3, "vector elem [2] untouched");
+}
+
+// --- classic for-loop update on a user value type ---
+
+type VInt {
+  int v `value;
+  ++ () VInt {
+    return VInt(v: this.v + 1);
+  }
+  < (VInt other) bool {
+    return this.v < other.v;
+  }
+}
+
+for_loop_value_type_update() `test {
+  count := 0;
+  for i := VInt(v: 0); i < VInt(v: 4); i++ {
+    count = count + 1;
+  }
+  assert(count == 4, "for-loop value-type i++ iterates 4 times");
+}
+
+// --- non-native indexed container ([k]++ via user [] / []=) ---
+// A custom container whose `[]` returns the element directly (non-optional)
+// drives genIncDecTarget's non-native index branch: read via `[]`, apply the
+// operator, write via `[]=`. (Map's `[]` returns V?, which sema rejects for
+// inc/dec, so this is the only way to reach that codegen branch.) Drop-old for
+// this branch is delegated to the `[]=` setter's field assignment.
+type VBox {
+  int n `value;
+  ++ () VBox {
+    return VBox(n: this.n + 1);
+  }
+  -- () VBox {
+    return VBox(n: this.n - 1);
+  }
+}
+
+type VSlot {
+  VBox held;
+  [](int i) VBox {
+    return this.held;
+  }
+  []=(int i, VBox b) {
+    this.held = b;
+  }
+}
+
+custom_container_index_inc() `test {
+  s := VSlot(held: VBox(n: 20));
+  s[0]++;
+  s[0]++;
+  assert(s[0].n == 22, "custom container [k]++ x2 on user value type");
+}
+
+custom_container_index_dec() `test {
+  s := VSlot(held: VBox(n: 5));
+  s[0]--;
+  s[0]--;
+  s[0]--;
+  assert(s[0].n == 2, "custom container [k]-- x3 on user value type");
+}

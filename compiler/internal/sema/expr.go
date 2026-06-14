@@ -839,23 +839,14 @@ func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string)
 	case *types.Named:
 		named = t
 	case *types.Enum:
-		// Prefix unary operators (`-`, `!`, `~`) on enums dispatch via
-		// genEnumUnaryOp (T0878). `++`/`--` have no non-native codegen path
-		// (genIncDecTarget only emits native ops), so they fall through to the
-		// default error rather than letting codegen panic.
-		if isPrefixUnaryOp(op) {
-			return c.checkEnumUnaryOperator(pos, t, nil, op)
-		}
-		c.errorf(pos, "operator %s not defined on type %s", op, operand)
-		return nil
+		// User-defined unary operators on enums dispatch via genEnumUnaryOp:
+		// prefix `-`/`!`/`~` (T0878) and `++`/`--` (T0880, reached only through
+		// inc/dec).
+		return c.checkEnumUnaryOperator(pos, t, nil, op)
 	case *types.Instance:
 		if en, ok := t.Origin().(*types.Enum); ok {
-			if isPrefixUnaryOp(op) {
-				subst := types.BuildSubstMap(en.TypeParams(), t.TypeArgs())
-				return c.checkEnumUnaryOperator(pos, en, subst, op)
-			}
-			c.errorf(pos, "operator %s not defined on type %s", op, operand)
-			return nil
+			subst := types.BuildSubstMap(en.TypeParams(), t.TypeArgs())
+			return c.checkEnumUnaryOperator(pos, en, subst, op)
 		}
 		origin, ok := t.Origin().(*types.Named)
 		if !ok {
@@ -900,15 +891,25 @@ func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string)
 	return types.TypVoid
 }
 
-// isPrefixUnaryOp reports whether op is a prefix unary operator that codegen can
-// dispatch (`-`, `!`, `~`). `++`/`--` are excluded — they have no non-native
-// codegen path (genIncDecTarget only emits native ops); see T0880.
-func isPrefixUnaryOp(op string) bool {
-	return types.IsUnaryOperatorName(op)
+// checkIncDecOperator type-checks a `++`/`--` operator on targetType and
+// enforces that it returns a value assignable back to the target — inc/dec
+// stores the operator result into the lvalue (`x++` is `x = x.++()`), so a
+// user-defined operator returning a different type would miscompile at the
+// store-back. (Native ops already return their own type.) This check lives here
+// rather than in checkUnaryOperator because prefix `!`/`-`/`~` legitimately
+// change type. Shared by the statement and classic-for-update paths (T0880).
+// Returns the operator's result type (nil on error).
+func (c *Checker) checkIncDecOperator(pos ast.Pos, targetType types.Type, op string) types.Type {
+	resultType := c.checkUnaryOperator(pos, targetType, op)
+	if resultType != nil && !types.AssignableTo(resultType, targetType) {
+		c.errorf(pos, "operator %s must return %s, got %s", op, targetType, resultType)
+	}
+	return resultType
 }
 
-// checkEnumUnaryOperator type-checks a user-defined prefix unary operator
-// declared on an enum (T0878). Mirrors checkEnumOperator for the 0-param variant:
+// checkEnumUnaryOperator type-checks a user-defined unary operator declared on
+// an enum (T0878 prefix, T0880 ++/--). Mirrors checkEnumOperator for the
+// 0-param variant:
 // enums register operator methods on *types.Enum, which the Named-centric
 // checkUnaryOperator switch never consulted.
 func (c *Checker) checkEnumUnaryOperator(pos ast.Pos, en *types.Enum, subst map[*types.TypeParam]types.Type, op string) types.Type {

@@ -6908,7 +6908,9 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 				// flag set in genAssignStmt) leaks h.f's previous instance. Symmetric
 				// with genVectorIndexAssign's heap user-type branch. Null + same-
 				// pointer guard mirrors the existing Vector/Channel branches above.
-				if isDroppableHeapUserType(fieldType) {
+				// T0908: also cover heap user types with NO drop (isHeapUserNoDropPalFree);
+				// emitVariantFieldDrop's B0218 branch pal_frees the old no-drop instance.
+				if isDroppableHeapUserType(fieldType) || isHeapUserNoDropPalFree(fieldType) {
 					fieldLLVM := c.resolveType(fieldType)
 					oldVal := c.block.NewLoad(fieldLLVM, fieldPtr)
 					oldInstance := c.extractInstancePtr(oldVal)
@@ -9721,11 +9723,13 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 			// an independent copy. Mirrors the Vector[string] B0204 pattern.
 			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 			c.emitVariantFieldDrop(oldVal, elemType)
-		} else if isDroppableHeapUserType(elemType) {
+		} else if isDroppableHeapUserType(elemType) || isHeapUserNoDropPalFree(elemType) {
 			// T0398: Drop old heap user-type element before overwriting. Without this,
 			// `vec[i] = X` leaks vec[i]'s previous instance. Safe because dup-on-read
 			// (T0398 in genVectorIndex, set above in genAssignStmt) ensures any RHS
 			// vec reads return independent clones — no live alias to the freed instance.
+			// T0908: also cover heap user types with NO drop (isHeapUserNoDropPalFree);
+			// emitVariantFieldDrop's B0218 branch pal_frees the old no-drop instance.
 			oldVal := c.block.NewLoad(elemLLVM, elemPtr)
 			c.emitVariantFieldDrop(oldVal, elemType)
 		} else if c.tupleNeedsDrop(elemType) {

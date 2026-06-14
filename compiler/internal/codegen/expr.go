@@ -9539,6 +9539,19 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 				return c.cloneHeapElement(val, resolvedElem, named)
 			}
 		}
+		// T0908: Heap user element with NO explicit/synthesized drop (pal_free-only
+		// path) needs the same dup-on-read as the droppable branch above. The
+		// droppable gate (isDroppableHeapUserType) excludes no-drop types for the
+		// T0440 Map-clone reason, so a truly-no-drop heap element (no heap fields,
+		// no drop method) would otherwise alias the source slot — combined with the
+		// no-drop drop-old in genVectorIndexAssign and the synth-drop owner free,
+		// both the destination and the source slot would free the same instance
+		// (double-free). dupHeapValue does alloc + memcpy (no sub-fields to dup for
+		// a field-less heap type). Mirrors genArrayIndex's T0590 no-drop branch.
+		if isHeapUserNoDropPalFree(resolvedElem) {
+			c.dupHeapUserFieldAccess = false // consume the flag
+			return c.dupHeapValue(val, resolvedElem)
+		}
 	}
 
 	// T0383: Dup-on-read for Vector[Vector|Channel|Arc|Weak] index access. The

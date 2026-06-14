@@ -196,3 +196,114 @@ test_t0410_generic_holder_member() `test {
   h = swap_into_holder[_T0410Box](h, v);
   assert(h.item.label == "gh", "generic holder member typeSubst");
 }
+
+// --- T0908: No-drop heap user type overwrite must free the old value. ---
+// A heap user type with NO drop method (isHeapUserNoDropPalFree) is still
+// heap-allocated and needs pal_free. The drop-old branches in genMemberAssign
+// and genVectorIndexAssign previously gated only on isDroppableHeapUserType,
+// so overwriting such a field/element leaked the old instance. The leak
+// detector (positive alloc-delta) fails these tests if the old value leaks.
+type _T0908NoDrop {
+  int v;
+}
+
+type _T0908Holder {
+  _T0908NoDrop f;
+}
+
+// Plain non-aliasing field overwrite (no container involved): the old
+// _T0908NoDrop(v:0) must be pal_freed before storing the new instance.
+test_t0908_member_plain_overwrite() `test {
+  h := _T0908Holder(f: _T0908NoDrop(v: 0));
+  h.f = _T0908NoDrop(v: 5);
+  assert(h.f.v == 5, "no-drop member plain overwrite");
+}
+
+// Repeated overwrites: each store must free the prior instance.
+test_t0908_member_repeated_overwrite() `test {
+  h := _T0908Holder(f: _T0908NoDrop(v: 0));
+  h.f = _T0908NoDrop(v: 1);
+  h.f = _T0908NoDrop(v: 2);
+  h.f = _T0908NoDrop(v: 3);
+  assert(h.f.v == 3, "no-drop member repeated overwrite");
+}
+
+// Plain non-aliasing vector element overwrite.
+test_t0908_vector_plain_overwrite() `test {
+  v := [_T0908NoDrop(v: 0)];
+  v[0] = _T0908NoDrop(v: 5);
+  assert(v[0].v == 5, "no-drop vector plain overwrite");
+}
+
+// Vector element repeated overwrite.
+test_t0908_vector_repeated_overwrite() `test {
+  v := [_T0908NoDrop(v: 0), _T0908NoDrop(v: 10)];
+  v[0] = _T0908NoDrop(v: 1);
+  v[1] = _T0908NoDrop(v: 2);
+  v[0] = _T0908NoDrop(v: 3);
+  assert(v[0].v == 3, "no-drop vector repeated [0]");
+  assert(v[1].v == 2, "no-drop vector repeated [1]");
+}
+
+// Array element overwrite (regression guard — array path already correct via
+// typeNeedsFieldDrop → emitVariantFieldDrop's B0218 pal_free).
+test_t0908_array_plain_overwrite() `test {
+  _T0908NoDrop[1] a = [_T0908NoDrop(v: 0)];
+  a[0] = _T0908NoDrop(v: 5);
+  assert(a[0].v == 5, "no-drop array plain overwrite");
+}
+
+// RHS-from-container aliasing for no-drop types: dup-on-read clones the source
+// element, drop-old frees the old destination — no double-free, no leak.
+test_t0908_vector_to_member_no_double_free() `test {
+  v := [_T0908NoDrop(v: 7), _T0908NoDrop(v: 8)];
+  h := _T0908Holder(f: _T0908NoDrop(v: 0));
+  h.f = v[0];
+  assert(h.f.v == 7, "no-drop vec-to-member value");
+  assert(v[0].v == 7, "no-drop source v[0] still readable");
+  assert(v[1].v == 8, "no-drop source v[1] unchanged");
+}
+
+// Vector slot-to-slot aliasing read + drop-old for no-drop types.
+test_t0908_vector_slot_to_slot_no_double_free() `test {
+  v := [_T0908NoDrop(v: 1), _T0908NoDrop(v: 2)];
+  v[0] = v[1];
+  assert(v[0].v == 2, "no-drop slot-to-slot [0]");
+  assert(v[1].v == 2, "no-drop slot-to-slot [1] still readable");
+}
+
+// Generic holder whose field type T resolves to a no-drop heap user type.
+// `h.item = v[0]` inside a generic function exercises the typeSubst path in
+// genMemberAssign's no-drop drop-old branch (fieldType is resolved via
+// c.typeSubst before isHeapUserNoDropPalFree fires). The holder itself has no
+// drop, so the old field instance can only be freed by the new no-drop branch.
+type _T0908GenHolder[T] {
+  T item;
+}
+
+swap_no_drop_member[T](~_T0908GenHolder[T] h, ~T[] v) _T0908GenHolder[T] {
+  h.item = v[0];
+  return h;
+}
+
+test_t0908_generic_member_typesubst() `test {
+  v := [_T0908NoDrop(v: 4), _T0908NoDrop(v: 5)];
+  h := _T0908GenHolder[_T0908NoDrop](item: _T0908NoDrop(v: 0));
+  h = swap_no_drop_member[_T0908NoDrop](h, v);
+  assert(h.item.v == 4, "no-drop generic member typeSubst");
+}
+
+// Generic vector element overwrite under typeSubst: `v[0] = x` inside a generic
+// function exercises genVectorIndexAssign's no-drop drop-old branch with the
+// element type resolved through c.typeSubst.
+overwrite_first[T](~T[] v, ~T x) T[] {
+  v[0] = x;
+  return v;
+}
+
+test_t0908_generic_vector_typesubst() `test {
+  v := [_T0908NoDrop(v: 1), _T0908NoDrop(v: 2)];
+  v = overwrite_first[_T0908NoDrop](v, _T0908NoDrop(v: 9));
+  assert(v[0].v == 9, "no-drop generic vector [0] overwritten");
+  assert(v[1].v == 2, "no-drop generic vector [1] unchanged");
+}

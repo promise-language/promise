@@ -6565,7 +6565,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				}
 				if extractNamed(resolvedElem) == types.TypString {
 					dupVal := c.dupString(val)
-					c.genIndexAssign(target, s.Op, dupVal)
+					c.genIndexAssign(target, s.Op, dupVal, s.Value)
 					// Note: do NOT neutralize opt! source here — dupString creates an
 					// independent copy for the vector, so the original stays owned by
 					// the source optional (whose drop frees it at scope exit).
@@ -6643,7 +6643,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				}
 			}
 		}
-		c.genIndexAssign(target, s.Op, val)
+		c.genIndexAssign(target, s.Op, val, s.Value)
 		// Clear drop flag on RHS if it's being moved via simple assign
 		if s.Op == ast.OpAssign {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
@@ -7021,6 +7021,27 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 			}
 		}
 		c.block.NewStore(val, fieldPtr)
+		// T0909: When RHS is a method/operator whose body is `return this`,
+		// the returned value aliases the receiver. Clear the receiver's drop
+		// flag so scope-exit doesn't double-free the instance now owned by
+		// this field.
+		if srcExpr != nil {
+			var aliasOrigin ast.Expr
+			if call, ok := srcExpr.(*ast.CallExpr); ok {
+				aliasOrigin = chainOriginExpr(call)
+			} else {
+				aliasOrigin = operatorReceiverOrigin(srcExpr)
+			}
+			fieldType := c.info.Types[target]
+			if c.typeSubst != nil {
+				fieldType = types.Substitute(fieldType, c.typeSubst)
+			}
+			if id, ok := aliasOrigin.(*ast.IdentExpr); ok {
+				c.maybeClearReceiverDropFlag(val, id.Name, fieldType)
+			}
+			// ThisExpr origin: inside a method body `this` has no per-variable
+			// drop flag (callers own the instance), so no clear needed.
+		}
 		return
 	}
 
@@ -9636,7 +9657,7 @@ func (c *Compiler) genContinueStmt() {
 // --- Index assignment ---
 
 // genIndexAssign handles assignment to a container element: arr[i] = val, m[k] = val.
-func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val value.Value) {
+func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val value.Value, srcExpr ast.Expr) {
 	targetType := c.info.Types[target.Target]
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
@@ -9659,7 +9680,7 @@ func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val va
 	if named != nil {
 		if m := named.LookupMethod("[]="); m != nil {
 			if m.IsNative() {
-				c.genNativeIndexAssign(target, targetType, op, val)
+				c.genNativeIndexAssign(target, targetType, op, val, srcExpr)
 				return
 			}
 			c.genMethodIndexAssign(target, targetType, val)
@@ -9723,9 +9744,9 @@ func (c *Compiler) genArrayIndexAssign(target *ast.IndexExpr, arr *types.Array, 
 }
 
 // genNativeIndexAssign dispatches native []= implementations for built-in types.
-func (c *Compiler) genNativeIndexAssign(target *ast.IndexExpr, targetType types.Type, op ast.AssignOp, val value.Value) {
+func (c *Compiler) genNativeIndexAssign(target *ast.IndexExpr, targetType types.Type, op ast.AssignOp, val value.Value, srcExpr ast.Expr) {
 	if elem, ok := types.AsVector(targetType); ok {
-		c.genVectorIndexAssign(target, elem, op, val)
+		c.genVectorIndexAssign(target, elem, op, val, srcExpr)
 		return
 	}
 	// Inside monomorphized method body: targetType is Named(Vector) not Instance(Vector[T]).
@@ -9733,7 +9754,7 @@ func (c *Compiler) genNativeIndexAssign(target *ast.IndexExpr, targetType types.
 	if named == types.TypVector && c.typeSubst != nil {
 		tp := named.TypeParams()[0]
 		if elem, ok := c.typeSubst[tp]; ok {
-			c.genVectorIndexAssign(target, elem, op, val)
+			c.genVectorIndexAssign(target, elem, op, val, srcExpr)
 			return
 		}
 	}
@@ -9796,7 +9817,7 @@ func (c *Compiler) genMethodIndexAssign(target *ast.IndexExpr, targetType types.
 }
 
 // genVectorIndexAssign handles vec[i] = val with bounds check.
-func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Type, op ast.AssignOp, val value.Value) {
+func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Type, op ast.AssignOp, val value.Value, srcExpr ast.Expr) {
 	slicePtr := c.genExpr(target.Target)
 	idx := c.genExpr(target.Index)
 	elemLLVM := c.resolveType(elemType)
@@ -9883,6 +9904,22 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 			c.emitVariantFieldDrop(oldVal, elemType)
 		}
 		c.block.NewStore(val, elemPtr)
+		// T0909: When RHS is a method/operator whose body is `return this`,
+		// the returned value aliases the receiver. Clear the receiver's drop
+		// flag so scope-exit doesn't double-free the instance now owned by
+		// this element slot.
+		if srcExpr != nil {
+			var aliasOrigin ast.Expr
+			if call, ok := srcExpr.(*ast.CallExpr); ok {
+				aliasOrigin = chainOriginExpr(call)
+			} else {
+				aliasOrigin = operatorReceiverOrigin(srcExpr)
+			}
+			if id, ok := aliasOrigin.(*ast.IdentExpr); ok {
+				c.maybeClearReceiverDropFlag(val, id.Name, elemType)
+			}
+			// ThisExpr origin: `this` has no per-variable drop flag, no clear needed.
+		}
 		return
 	}
 

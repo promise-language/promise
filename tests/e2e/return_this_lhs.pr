@@ -1,0 +1,75 @@
+type BB {
+  int v;
+  dup() BB {
+    return this;
+  }
+  add(BB other) BB {
+    return this;
+  }
+}
+type Holder {
+  BB inner;
+}
+type NestedHolder {
+  Holder h;
+}
+
+member_lhs() `test {
+  a := BB(v: 7);
+  h := Holder(inner: BB(v: 0));
+  h.inner = a.dup();
+  assert(h.inner.v == 7, "member lhs dup");
+}
+
+index_lhs() `test {
+  a := BB(v: 5);
+  v := [BB(v: 0), BB(v: 0)];
+  v[0] = a.dup();
+  assert(v[0].v == 5, "index lhs dup");
+}
+
+// Operator form: method taking two operands and returning this
+member_lhs_operator() `test {
+  a := BB(v: 3);
+  b := BB(v: 9);
+  h := Holder(inner: BB(v: 0));
+  h.inner = a.add(b);
+  assert(h.inner.v == 3, "member lhs operator");
+}
+
+index_lhs_operator() `test {
+  a := BB(v: 4);
+  b := BB(v: 8);
+  v := [BB(v: 0)];
+  v[0] = a.add(b);
+  assert(v[0].v == 4, "index lhs operator");
+}
+
+// Multiple sequential assignments to same field/slot
+member_lhs_multiple() `test {
+  a := BB(v: 1);
+  b := BB(v: 2);
+  h := Holder(inner: BB(v: 0));
+  h.inner = a.dup();
+  assert(h.inner.v == 1, "first assign");
+  h.inner = b.dup();
+  assert(h.inner.v == 2, "second assign");
+}
+
+index_lhs_multiple() `test {
+  a := BB(v: 10);
+  b := BB(v: 20);
+  v := [BB(v: 0)];
+  v[0] = a.dup();
+  assert(v[0].v == 10, "first assign");
+  v[0] = b.dup();
+  assert(v[0].v == 20, "second assign");
+}
+
+// Index slot at non-zero index
+index_lhs_nonzero() `test {
+  a := BB(v: 99);
+  v := [BB(v: 0), BB(v: 0), BB(v: 0)];
+  v[2] = a.dup();
+  assert(v[2].v == 99, "index lhs nonzero");
+}

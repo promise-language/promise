@@ -1508,8 +1508,10 @@ func (c *Compiler) genVirtualUnaryOp(op string, named *types.Named,
 		instance = c.extractInstancePtr(operand)
 	}
 
-	// Index into vtable (unary variant slot — distinct from the binary `-` slot, T0883).
-	slotIndex := named.VirtualUnaryMethodIndex(op)
+	// Index into the vtable via the method's own slot. For `-`/`!`/`~` this is the
+	// unary ($unary) slot — distinct from the binary `-` slot (T0883); for
+	// `++`/`--` it is the plain operator slot (T0880).
+	slotIndex := named.VirtualSlotIndexForMethod(method)
 	if slotIndex < 0 {
 		panic(fmt.Sprintf("codegen: operator %s not in vtable for %s", op, named))
 	}

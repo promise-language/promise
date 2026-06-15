@@ -404,6 +404,21 @@ func (n *Named) VirtualUnaryMethodIndex(name string) int {
 	return -1
 }
 
+// VirtualSlotIndexForMethod returns the vtable slot index for a specific method,
+// or -1. Unlike the name-based lookups, it keys off the method's own slot,
+// correctly handling operators whose slot key is plain (`++`/`--`) versus those
+// that carry a `$unary` discriminator (`-`/`!`/`~`, T0883). Used for non-native
+// unary operator dispatch (T0880).
+func (n *Named) VirtualSlotIndexForMethod(m *Method) int {
+	key := methodSlotKey(m)
+	for i, vm := range n.AllVirtualMethods() {
+		if methodSlotKey(vm) == key {
+			return i
+		}
+	}
+	return -1
+}
+
 // allAbstractMethods returns all abstract methods from this type
 // and its parents (used internally by IsAbstract).
 func (n *Named) allAbstractMethods() []*Method {

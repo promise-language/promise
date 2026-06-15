@@ -6139,19 +6139,26 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if id, ok := aliasOrigin.(*ast.IdentExpr); ok && id.Name == target.Name {
 				selfAliasOrigin = true
 			}
-			// T0911: closure self-assignment (`f = f`) is a no-op — the local keeps
-			// owning its env. Return early (mirroring the dropBindings self-assign
-			// guard below) so the post-store clearDropFlag doesn't zero the env drop
-			// flag, which would leak the env at scope exit. Gated on the target
-			// being a Signature local with an env-free flag.
-			if ident, ok := s.Value.(*ast.IdentExpr); ok && ident.Name == target.Name {
-				if _, hasEnvFlag := c.dropFlags[target.Name]; hasEnvFlag {
-					tt := c.info.Types[target]
-					if c.typeSubst != nil {
-						tt = types.Substitute(tt, c.typeSubst)
-					}
-					if _, isSig := tt.(*types.Signature); isSig {
+			// T0911/T0913: closure reassignment handling.
+			// T0911: Self-assignment (`f = f`) is a no-op — return early so the
+			// post-store clearDropFlag doesn't zero the env drop flag → leak at exit.
+			// T0913: For non-self-assign, free the old env before storing the new fat
+			// pointer; closure locals use bindingFreeEnv (not dropBindings), so the
+			// drop-old block below never fires for them.
+			{
+				tt := c.info.Types[target]
+				if c.typeSubst != nil {
+					tt = types.Substitute(tt, c.typeSubst)
+				}
+				if _, isSig := tt.(*types.Signature); isSig {
+					if ident, ok := s.Value.(*ast.IdentExpr); ok && ident.Name == target.Name {
 						return
+					}
+					for _, sb := range c.scopeBindings {
+						if sb.kind == bindingFreeEnv && sb.varName == target.Name {
+							c.emitEnvFree(sb)
+							break
+						}
 					}
 				}
 			}

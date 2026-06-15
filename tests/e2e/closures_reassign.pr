@@ -1,0 +1,55 @@
+// T0913: Reassigning a heap-capturing closure local must free the old env struct.
+reassign_heap_closure() `test {
+  s1 := "captured_one";
+  () -> int f = move || -> s1.len;
+  s2 := "captured_two_longer";
+  f = move || -> s2.len; // old env (capturing s1) must be freed here
+  assert(f() == 19, "expected len of captured_two_longer");
+}
+
+reassign_no_capture() `test {
+  // Non-capturing closure (null env): reassign should not crash
+  () -> int f = || -> 1;
+  f = || -> 2;
+  assert(f() == 2, "");
+}
+
+reassign_multiple_times() `test {
+  s1 := "a";
+  s2 := "bb";
+  s3 := "ccc";
+  () -> int f = move || -> s1.len;
+  f = move || -> s2.len;
+  f = move || -> s3.len;
+  assert(f() == 3, "");
+}
+
+// Self-assignment must not free the env (would use-after-free on next call).
+reassign_self() `test {
+  s := "hello";
+  () -> int f = move || -> s.len;
+  f = f;
+  assert(f() == 5, "");
+}
+
+// Reassign a closure that captures a vector (vector owns heap memory).
+reassign_captures_vector() `test {
+  v1 := [1, 2, 3];
+  () -> int f = move || -> v1.len;
+  v2 := [10, 20];
+  f = move || -> v2.len; // old env (owns v1) must be freed, including v1
+  assert(f() == 2, "");
+}
+
+// Reassign inside a loop — each iteration must free the previous env.
+reassign_in_loop() `test {
+  total := 0;
+  () -> int f = || -> 0;
+  for i in 0..5 {
+    s := "x".repeat(i + 1);
+    f = move || -> s.len;
+    total = total + f();
+  }
+  // lengths: 1+2+3+4+5 = 15, but f() at end is the last (len=5)
+  assert(f() == 5, "");
+}

@@ -294,3 +294,117 @@ custom_container_index_dec() `test {
   s[0]--;
   assert(s[0].n == 2, "custom container [k]-- x3 on user value type");
 }
+
+// --- inc/dec on a property (getter/setter) of a user value type (T0923) ---
+// `w.value++` reads via the getter, applies the operator, writes via the
+// setter. The getter returns VBox, whose Value struct is itself an LLVM struct
+// `{i8* vtable, ...}`; the old "struct result ⇒ failable getter" heuristic
+// misread that as a failable {i1, T, i8*} and crashed codegen. The getter here
+// is non-failable, so no error propagation must happen.
+type VWrapper {
+  VBox backing;
+  get value VBox {
+    return this.backing;
+  }
+  set value(VBox b) {
+    this.backing = b;
+  }
+}
+
+property_value_type_inc() `test {
+  w := VWrapper(backing: VBox(n: 5));
+  w.value++;
+  w.value++;
+  assert(w.value.n == 7, "value-type property ++ x2");
+}
+
+property_value_type_dec() `test {
+  w := VWrapper(backing: VBox(n: 10));
+  w.value--;
+  w.value--;
+  w.value--;
+  assert(w.value.n == 7, "value-type property -- x3");
+}
+
+// --- inc/dec on a property of a heap user type (T0923) ---
+// Same shape but with a heap (non-`value`) user type, so its Value struct is
+// `{i8* vtable, T_i* instance}`. The setter's field assignment drops the old
+// backing; the zero-leak gate confirms no heap value is leaked along the way.
+type HBox {
+  int n;
+  ++ () HBox {
+    return HBox(n: this.n + 1);
+  }
+  -- () HBox {
+    return HBox(n: this.n - 1);
+  }
+}
+
+type HWrapper {
+  HBox backing;
+  get value HBox {
+    return HBox(n: this.backing.n);
+  }
+  set value(HBox b) {
+    this.backing = b;
+  }
+}
+
+property_heap_type_inc() `test {
+  w := HWrapper(backing: HBox(n: 1));
+  w.value++;
+  w.value++;
+  w.value++;
+  assert(w.value.n == 4, "heap-type property ++ x3");
+}
+
+property_heap_type_dec() `test {
+  w := HWrapper(backing: HBox(n: 9));
+  w.value--;
+  w.value--;
+  assert(w.value.n == 7, "heap-type property -- x2");
+}
+
+// --- inc/dec on a FAILABLE-getter property (T0923) ---
+// The fix gates auto-propagation on `getter.Sig().CanError()`. The non-failable
+// cases above exercise the `false` branch; a failable getter exercises the
+// `true` branch — the inc/dec auto-propagates the getter's error to the
+// enclosing (failable) function. Because a `test` function can't be failable,
+// the inc/dec lives in a `bump_and_read!` helper that owns the wrapper.
+type FWrapper {
+  VBox backing;
+  bool should_fail;
+  get value! VBox {
+    if this.should_fail {
+      raise error(message: "boom");
+    }
+    return this.backing;
+  }
+  set value(VBox b) {
+    this.backing = b;
+  }
+}
+
+bump_and_read!(FWrapper w) int {
+  w.value++;
+  return w.backing.n;
+}
+
+property_failable_getter_inc_success() `test {
+  w := FWrapper(backing: VBox(n: 5), should_fail: false);
+  r := bump_and_read(w)? e {
+    -1;
+  };
+  assert(r == 6, "failable-getter property ++ applies when getter succeeds");
+}
+
+property_failable_getter_inc_propagates() `test {
+  w := FWrapper(backing: VBox(n: 5), should_fail: true);
+  caught := false;
+  r := bump_and_read(w)? e {
+    caught = true;
+    -1;
+  };
+  assert(caught, "failable-getter property ++ propagates the getter error");
+  assert(r == -1, "handler recovers after propagated getter error");
+}

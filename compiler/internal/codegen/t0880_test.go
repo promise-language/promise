@@ -211,6 +211,78 @@ func TestT0880_NonNativeIndexIncDecDispatch(t *testing.T) {
 	}
 }
 
+// T0923: inc/dec on a property whose getter returns a user type. The getter's
+// Value struct is itself an LLVM struct, but a non-failable getter must NOT be
+// treated as failable — so no `auto.propagate` error block is emitted. (The old
+// "struct result ⇒ failable" heuristic crashed codegen here.)
+func TestT0923_PropertyUserTypeIncDecNoPropagate(t *testing.T) {
+	ir := generateIR(t, `
+		type VBox {
+			int n `+"`value"+`;
+			++() VBox { return VBox(n: this.n + 1); }
+		}
+		type VWrapper {
+			VBox backing;
+			get value VBox { return this.backing; }
+			set value(VBox b) { this.backing = b; }
+		}
+		caller() {
+			w := VWrapper(backing: VBox(n: 0));
+			w.value++;
+		}
+		main() { caller(); }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
+	}
+	if !strings.Contains(body, "@VWrapper.value(") {
+		t.Fatalf("expected getter call `@VWrapper.value` in caller:\n%s", body)
+	}
+	if !strings.Contains(body, "@\"VBox.++\"(i8*") {
+		t.Fatalf("expected operator dispatch `@\"VBox.++\"(i8* ...)` in caller:\n%s", body)
+	}
+	if strings.Contains(body, "auto.propagate") {
+		t.Fatalf("non-failable getter must not emit an `auto.propagate` block:\n%s", body)
+	}
+}
+
+// T0923: inc/dec on a property whose getter is FAILABLE. This is the other side
+// of the getter.Sig().CanError() gate — a failable getter returns {i1, T, i8*},
+// so the operand must be unwrapped and the error auto-propagated to the enclosing
+// (failable) function. Verifies the `auto.propagate` block IS emitted here (the
+// inverse of TestT0923_PropertyUserTypeIncDecNoPropagate), confirming the gate
+// keys on the signature rather than the result shape.
+func TestT0923_PropertyFailableGetterIncPropagates(t *testing.T) {
+	ir := generateIR(t, `
+		type VBox {
+			int n `+"`value"+`;
+			++() VBox { return VBox(n: this.n + 1); }
+		}
+		type FWrapper {
+			VBox backing;
+			get value! VBox { return this.backing; }
+			set value(VBox b) { this.backing = b; }
+		}
+		caller!() {
+			w := FWrapper(backing: VBox(n: 0));
+			w.value++;
+		}
+		main() { caller()? e {}; }
+	`)
+	body := extractFunction(ir, "__user.caller")
+	if body == "" {
+		t.Fatalf("expected @__user.caller in IR:\n%s", ir)
+	}
+	if !strings.Contains(body, "@\"VBox.++\"(i8*") {
+		t.Fatalf("expected operator dispatch `@\"VBox.++\"(i8* ...)` in caller:\n%s", body)
+	}
+	// A failable getter MUST auto-propagate: the error block is emitted.
+	if !strings.Contains(body, "auto.propagate") {
+		t.Fatalf("failable getter inc/dec must emit an `auto.propagate` block:\n%s", body)
+	}
+}
+
 // For-loop update on a primitive stays on the native path (emitNativeOp): no
 // operator method call, just an integer add.
 func TestT0880_ForLoopNativeIncDecUnchanged(t *testing.T) {

@@ -7304,11 +7304,14 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 				}
 				current := c.genGetterCall(t, recvType, recvNamed, getter)
 				// A failable getter returns {i1, T, i8*}; unwrap + propagate the
-				// error. Safe detector: an inc/dec operand is always a numeric
-				// scalar, so a non-failable getter returns a scalar (non-struct);
-				// only a failable one returns a struct. genSetterCall already
-				// auto-propagates the setter result via propagateIfFailable (T0708).
-				if _, isStruct := current.Type().(*irtypes.StructType); isStruct {
+				// error. T0923: detect failability from the getter signature, NOT
+				// the result shape — since T0880 a non-native ++/-- operand can be
+				// a user type whose Value struct is itself a *StructType, so the old
+				// "struct ⇒ failable" heuristic misfired on non-failable user-type
+				// getters. Mirrors the index path's indexMethod.Sig().CanError().
+				// genSetterCall already auto-propagates the setter result via
+				// propagateIfFailable (T0708).
+				if getter.Sig().CanError() {
 					current = c.genAutoPropagateValue(current)
 				}
 				result := c.emitUnaryOpResult(op, targetType, current, false)

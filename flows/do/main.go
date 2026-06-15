@@ -143,7 +143,12 @@ func promiseConfig() doflow.Config {
 			Timeout: 1 * time.Hour,
 		},
 		LandBudget: flow.StepBudget{
-			Timeout: 1 * time.Hour, // land sometimes needs to do a complex smart rebase
+			// 3h: land does a complex smart rebase AND runs verify, which is
+			// serialized host-wide — under contention a flow can wait a long time
+			// for its verify turn before the ~20m run. The step wall-clock must
+			// cover (verify queue wait + verify run + rebase), so it is sized well
+			// above the runner's verify queue/run timeouts.
+			Timeout: 3 * time.Hour,
 		},
 		Prompts: doflow.Prompts{
 			Plan:           planPrompt,

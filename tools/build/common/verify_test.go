@@ -1,10 +1,12 @@
 package common
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRunVerify_UnknownFlagReturnsUsageError verifies that passing an unknown
@@ -15,7 +17,7 @@ func TestRunVerify_UnknownFlagReturnsUsageError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown flag, got nil")
 	}
-	const want = "usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push]"
+	const want = "usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push] [--lock-timeout=<dur>]"
 	if err.Error() != want {
 		t.Errorf("got %q, want %q", err.Error(), want)
 	}
@@ -54,7 +56,7 @@ func TestAcquireVerifyLock_WritesRepoDir(t *testing.T) {
 	lockDir := t.TempDir()
 	lockPath := filepath.Join(lockDir, "verify.lock")
 
-	unlock, err := acquireVerifyLockIn(lockPath, "/home/user/my-repo")
+	unlock, err := acquireVerifyLockIn(lockPath, "/home/user/my-repo", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,11 +75,89 @@ func TestAcquireVerifyLock_WritesRepoDir(t *testing.T) {
 	}
 }
 
+// TestRunVerify_LockTimeoutFlagIsValid confirms --lock-timeout with a duration
+// value passes arg validation (NormalizeArgs splits --lock-timeout=10m into two
+// tokens). The pipeline fails later in a temp dir, but never with a usage error.
+func TestRunVerify_LockTimeoutFlagIsValid(t *testing.T) {
+	err := RunVerify(t.TempDir(), []string{"--shared", "--lock-timeout=10m"})
+	if err != nil && strings.HasPrefix(err.Error(), "usage:") {
+		t.Errorf("--lock-timeout treated as unknown flag, got usage error: %v", err)
+	}
+}
+
+// TestRunVerify_LockTimeoutInvalidDuration rejects a non-duration value with a
+// clear, flag-specific error (not the generic usage error).
+func TestRunVerify_LockTimeoutInvalidDuration(t *testing.T) {
+	err := RunVerify(t.TempDir(), []string{"--lock-timeout=nope"})
+	if err == nil {
+		t.Fatal("expected error for invalid --lock-timeout duration, got nil")
+	}
+	if !strings.Contains(err.Error(), "lock-timeout") {
+		t.Errorf("error %q should name the offending flag", err.Error())
+	}
+}
+
+// TestAcquireVerifyLock_TimesOutWhenHeld holds the lock, then a second bounded
+// acquire on the same path returns ErrLockTimeout (not a verification failure).
+func TestAcquireVerifyLock_TimesOutWhenHeld(t *testing.T) {
+	lockDir := t.TempDir()
+	lockPath := filepath.Join(lockDir, "verify.lock")
+
+	unlock, err := acquireVerifyLockIn(lockPath, "/holder", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	start := time.Now()
+	_, err = acquireVerifyLockIn(lockPath, "/waiter", 150*time.Millisecond)
+	if !errors.Is(err, ErrLockTimeout) {
+		t.Fatalf("err = %v, want ErrLockTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Errorf("returned after %v, want it to wait ~the lock timeout before giving up", elapsed)
+	}
+}
+
+// TestAcquireVerifyLock_UnboundedAcquiresAfterRelease confirms lockTimeout=0
+// waits (does not time out) and succeeds once the holder releases.
+func TestAcquireVerifyLock_UnboundedAcquiresAfterRelease(t *testing.T) {
+	lockDir := t.TempDir()
+	lockPath := filepath.Join(lockDir, "verify.lock")
+
+	unlock, err := acquireVerifyLockIn(lockPath, "/holder", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	acquired := make(chan error, 1)
+	go func() {
+		inner, ierr := acquireVerifyLockIn(lockPath, "/waiter", 0)
+		if ierr == nil {
+			inner()
+		}
+		acquired <- ierr
+	}()
+
+	// Give the waiter a moment to start blocking, then release.
+	time.Sleep(100 * time.Millisecond)
+	unlock()
+
+	select {
+	case ierr := <-acquired:
+		if ierr != nil {
+			t.Fatalf("unbounded waiter failed: %v", ierr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("unbounded waiter did not acquire the lock after release")
+	}
+}
+
 func TestAcquireVerifyLock_ClearsOnUnlock(t *testing.T) {
 	lockDir := t.TempDir()
 	lockPath := filepath.Join(lockDir, "verify.lock")
 
-	unlock, err := acquireVerifyLockIn(lockPath, "/home/user/my-repo")
+	unlock, err := acquireVerifyLockIn(lockPath, "/home/user/my-repo", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

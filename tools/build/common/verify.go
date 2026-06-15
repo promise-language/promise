@@ -1,6 +1,8 @@
 package common
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +16,18 @@ import (
 
 var errInterrupted = fmt.Errorf("interrupted by Ctrl+C")
 
+// ErrLockTimeout is returned by RunVerify when --lock-timeout elapses before the
+// host verify lock could be acquired. It is NOT a verification failure — it
+// means another verify held the lock for the whole wait. Callers (the tracker
+// runner) detect it (via errors.Is, or the EX_TEMPFAIL exit code / the
+// VERIFY_LOCK_TIMEOUT stderr marker the verify binary prints) to retry for a
+// turn rather than treating the run as failed.
+var ErrLockTimeout = errors.New("verify lock acquisition timed out")
+
+// lockRetryDelay is how often acquireVerifyLockIn re-polls for the lock while
+// waiting under a bounded --lock-timeout.
+const lockRetryDelay = 500 * time.Millisecond
+
 // RunVerify orchestrates the full pre-commit verification pipeline:
 // format → build → vet → test. All steps are internal calls (no subprocess).
 // Flags: -shared (use ~/.promise), -wasm (include wasm32-wasi),
@@ -22,24 +36,50 @@ var errInterrupted = fmt.Errorf("interrupted by Ctrl+C")
 // Default cache is local (.promise-home/); -local is accepted for clarity.
 func RunVerify(root string, args []string) error {
 	args = NormalizeArgs(args)
-	shared := slices.Contains(args, "-shared")
-	wasm := slices.Contains(args, "-wasm")
-	wasmWeb := slices.Contains(args, "-wasm-web")
-	clean := slices.Contains(args, "-clean")
-	push := slices.Contains(args, "-push")
+	var shared, wasm, wasmWeb, clean, push bool
+	// lockTimeout bounds how long to wait for the host verify lock. 0 (the
+	// default, flag absent) waits UNBOUNDED — bin/verify is run on a variety of
+	// machines where any hardcoded timeout would be wrong; bounding the wait is
+	// the caller's choice via --lock-timeout (the tracker runner sets it so a
+	// lost turn can be retried).
+	var lockTimeout time.Duration
 
-	// Validate args
-	for _, arg := range args {
-		switch arg {
-		case "-local", "-shared", "-wasm", "-wasm-web", "-clean", "-push":
+	// Parse args. --lock-timeout takes a duration value (NormalizeArgs has
+	// already split --lock-timeout=10m into "-lock-timeout" "10m").
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-local":
+		case "-shared":
+			shared = true
+		case "-wasm":
+			wasm = true
+		case "-wasm-web":
+			wasmWeb = true
+		case "-clean":
+			clean = true
+		case "-push":
+			push = true
+		case "-lock-timeout":
+			if i+1 >= len(args) {
+				return fmt.Errorf("-lock-timeout requires a duration value (e.g. --lock-timeout=10m)")
+			}
+			i++
+			d, err := time.ParseDuration(args[i])
+			if err != nil || d < 0 {
+				return fmt.Errorf("-lock-timeout: invalid duration %q (use Go duration syntax, e.g. 10m)", args[i])
+			}
+			lockTimeout = d
 		default:
-			return fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push]")
+			return fmt.Errorf("usage: bin/verify [--shared] [--wasm] [--wasm-web] [--clean] [--push] [--lock-timeout=<dur>]")
 		}
 	}
 
-	// Acquire global lock to serialize concurrent verify runs
-	unlock, err := acquireVerifyLock(root)
+	// Acquire global lock to serialize concurrent verify runs.
+	unlock, err := acquireVerifyLock(root, lockTimeout)
 	if err != nil {
+		if errors.Is(err, ErrLockTimeout) {
+			return err
+		}
 		return fmt.Errorf("acquire verify lock: %w", err)
 	}
 	defer unlock()
@@ -271,7 +311,7 @@ func RunVerify(root string, args []string) error {
 // verify runs. The lock is automatically released by the OS if the process
 // dies, so there is no risk of orphaned locks.
 // Returns an unlock function that must be deferred.
-func acquireVerifyLock(root string) (func(), error) {
+func acquireVerifyLock(root string, lockTimeout time.Duration) (func(), error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return func() {}, nil
@@ -281,10 +321,13 @@ func acquireVerifyLock(root string) (func(), error) {
 	os.MkdirAll(lockDir, 0o755)
 	lockPath := filepath.Join(lockDir, "verify.lock")
 
-	return acquireVerifyLockIn(lockPath, root)
+	return acquireVerifyLockIn(lockPath, root, lockTimeout)
 }
 
-func acquireVerifyLockIn(lockPath, root string) (func(), error) {
+// acquireVerifyLockIn takes the host verify lock. lockTimeout <= 0 waits
+// indefinitely (the default); a positive lockTimeout bounds the wait and
+// returns ErrLockTimeout if the lock is still held when it elapses.
+func acquireVerifyLockIn(lockPath, root string, lockTimeout time.Duration) (func(), error) {
 	fl := flock.New(lockPath)
 	// Holder metadata lives in a sibling file, NOT lockPath itself: on Windows
 	// flock takes a mandatory byte-range lock on byte 0 of lockPath, so a
@@ -307,7 +350,17 @@ func acquireVerifyLockIn(lockPath, root string) (func(), error) {
 			}
 		}
 		fmt.Println(msg)
-		if err := fl.Lock(); err != nil {
+		if lockTimeout > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+			defer cancel()
+			ok, lerr := fl.TryLockContext(ctx, lockRetryDelay)
+			if lerr != nil && !errors.Is(lerr, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("acquire lock: %w", lerr)
+			}
+			if !ok {
+				return nil, ErrLockTimeout
+			}
+		} else if err := fl.Lock(); err != nil {
 			return nil, fmt.Errorf("acquire lock: %w", err)
 		}
 	}

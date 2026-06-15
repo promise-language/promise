@@ -92,7 +92,7 @@ func TestClean_AcquiresVerifyLock(t *testing.T) {
 	lockDir := t.TempDir()
 	lockPath := filepath.Join(lockDir, "verify.lock")
 
-	unlock, err := acquireVerifyLockIn(lockPath, "/holder")
+	unlock, err := acquireVerifyLockIn(lockPath, "/holder", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestClean_AcquiresVerifyLock(t *testing.T) {
 	cleanDone := make(chan struct{})
 	go func() {
 		defer wg.Done()
-		inner, err := acquireVerifyLockIn(lockPath, "/waiter")
+		inner, err := acquireVerifyLockIn(lockPath, "/waiter", 0)
 		if err != nil {
 			t.Errorf("acquireVerifyLockIn: %v", err)
 			return

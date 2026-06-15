@@ -41,7 +41,7 @@ func CleanHome(root string, shared bool) (string, error) {
 // already hold the lock (e.g. RunVerify with --clean) must use cleanLocked
 // instead to avoid a same-process flock deadlock.
 func Clean(root string, opts CleanOptions) error {
-	unlock, err := acquireVerifyLock(root)
+	unlock, err := acquireVerifyLock(root, 0)
 	if err != nil {
 		return fmt.Errorf("acquire verify lock: %w", err)
 	}

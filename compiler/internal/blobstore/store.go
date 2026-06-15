@@ -138,20 +138,29 @@ func (s *Store) StageBlob(data []byte) (string, error) {
 
 // Lock takes the CAS-wide exclusive lock (cache/.lock), shared with
 // install/fetch/gc. Mirrors prebuilts.acquireCacheLock and the canonical
-// acquireVerifyLockIn (tools/build/common/verify.go): TryLock, then announce
-// + block. The OS releases the lock on process death, so stale locks are
-// impossible. Returns an unlock func.
-//
-// Holder metadata lives in a sibling <lock>.owner file, NOT lockPath itself: on
-// Windows the file lock is a mandatory byte-range lock on byte 0 of lockPath, so
-// a concurrent read/write of lockPath while held fails (the identity write would
-// be silently lost and waiters couldn't read it). The .owner sibling is
-// unaffected by the lock and readable on every platform.
+// acquireVerifyLockIn (tools/build/common/verify.go). Delegates to the
+// path-targeted Lock helper; the OS releases the lock on process death, so stale
+// locks are impossible. Returns an unlock func.
 func (s *Store) Lock(identityHint string) (func(), error) {
-	if err := os.MkdirAll(s.root, 0o755); err != nil {
+	return Lock(filepath.Join(s.root, ".lock"), identityHint,
+		fmt.Sprintf("Waiting for dependency cache lock at %s...", s.root))
+}
+
+// Lock acquires an exclusive advisory lock at lockPath (its parent dir is created
+// if missing), announcing the current holder before blocking. waitMsg is printed
+// when the lock is contended (overridden by the holder's identity hint when the
+// sibling <lockPath>.owner file is readable). The OS releases the lock on process
+// death, so a crashed holder can never leave a permanently stale lock — no PID/TTL
+// bookkeeping is required. Returns an unlock func.
+//
+// Holder metadata lives in a sibling <lockPath>.owner file, NOT lockPath itself:
+// on Windows the file lock is a mandatory byte-range lock on byte 0 of lockPath,
+// so a concurrent read/write of lockPath while held fails. The .owner sibling is
+// unaffected by the lock and readable on every platform.
+func Lock(lockPath, identityHint, waitMsg string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		return nil, err
 	}
-	lockPath := filepath.Join(s.root, ".lock")
 	ownerPath := lockPath + ".owner"
 	fl := newFileLock(lockPath)
 	locked, err := fl.tryLock()
@@ -159,7 +168,7 @@ func (s *Store) Lock(identityHint string) (func(), error) {
 		return nil, fmt.Errorf("acquire lock %s: %w", lockPath, err)
 	}
 	if !locked {
-		msg := fmt.Sprintf("Waiting for dependency cache lock at %s...", s.root)
+		msg := waitMsg
 		if data, err := os.ReadFile(ownerPath); err == nil {
 			if holder := strings.TrimSpace(string(data)); holder != "" {
 				msg = fmt.Sprintf("Waiting for %s to finish...", holder)

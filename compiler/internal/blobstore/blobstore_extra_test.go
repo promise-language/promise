@@ -731,3 +731,33 @@ func TestStoreLock_ClearsOnUnlock(t *testing.T) {
 		t.Errorf("owner file should be removed after unlock, stat err = %v", err)
 	}
 }
+
+// TestLock_PathTargetedRoundTrip verifies the exported path-targeted Lock helper
+// (T0920): it creates the parent dir, records + clears the holder, and the flock
+// round-trips so a re-Lock after unlock succeeds non-blocking.
+func TestLock_PathTargetedRoundTrip(t *testing.T) {
+	// lockPath nested under a not-yet-existing dir → Lock must MkdirAll the parent.
+	lockPath := filepath.Join(t.TempDir(), "sub", "view.lock")
+
+	unlock, err := Lock(lockPath, "holder-a", "waiting...")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(lockPath + ".owner"); err != nil {
+		t.Fatalf("owner file: %v", err)
+	} else if got := strings.TrimSpace(string(data)); got != "holder-a" {
+		t.Errorf("owner = %q, want %q", got, "holder-a")
+	}
+	unlock()
+
+	if _, err := os.Stat(lockPath + ".owner"); !os.IsNotExist(err) {
+		t.Errorf("owner file should be removed after unlock, stat err = %v", err)
+	}
+
+	// The flock must be fully released: a second acquisition succeeds immediately.
+	unlock2, err := Lock(lockPath, "holder-b", "waiting...")
+	if err != nil {
+		t.Fatalf("re-Lock after unlock: %v", err)
+	}
+	unlock2()
+}

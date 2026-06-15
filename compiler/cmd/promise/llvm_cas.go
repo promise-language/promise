@@ -130,6 +130,27 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 		return viewDir, nil
 	}
 
+	// View not yet published. Serialize population across processes so a
+	// partially-built view is never observable: the first builder populates while
+	// others block until publish. The fast path above (viewComplete) is reached
+	// without the lock, so builds against an already-published view pay nothing.
+	// The lock lives OUTSIDE the llvm-view tree (a sibling file) so CleanLLVMCache
+	// (os.RemoveAll of cache/llvm-view) can't delete it mid-hold.
+	lockPath := filepath.Join(home, "cache", "llvm-view.lock")
+	unlock, err := blobstore.Lock(lockPath, "promise (materializing LLVM toolchain)",
+		"Waiting for another process to finish staging the LLVM toolchain...")
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+
+	// Double-checked: another process may have published the view while we waited
+	// for the lock. If so, we're done — and lock-free for the rest of our lifetime.
+	if viewComplete(viewDir, entries) {
+		llvmViewDir = viewDir
+		return viewDir, nil
+	}
+
 	if !allowFetch {
 		// No-fetch probe: only usable if every blob is already cached.
 		for _, e := range entries {
@@ -137,10 +158,6 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 				return "", nil
 			}
 		}
-	}
-
-	if err := os.MkdirAll(viewDir, 0o755); err != nil {
-		return "", err
 	}
 
 	resolver := blobstore.NewResolver(store, m)
@@ -180,29 +197,68 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 		}
 	}
 
-	for _, e := range entries {
-		var blobPath string
-		if store.Has(e.SHA256) {
-			blobPath = store.BlobPath(e.SHA256)
-		} else {
-			p, rerr := resolver.Resolve(e.Name)
-			if rerr != nil {
-				return "", rerr // surface offline / broken-release error
+	// Materialize into a sibling temp dir, then publish all-or-nothing via
+	// rename(2). A crashed populator leaves only an orphan temp dir (reclaimed by
+	// GC), never a half-built viewDir.
+	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
+		for _, e := range entries {
+			var blobPath string
+			if store.Has(e.SHA256) {
+				blobPath = store.BlobPath(e.SHA256)
+			} else {
+				p, rerr := resolver.Resolve(e.Name)
+				if rerr != nil {
+					return rerr // surface offline / broken-release error
+				}
+				blobPath = p
 			}
-			blobPath = p
+			dst := filepath.Join(tmpDir, strings.TrimPrefix(e.Name, llvmEntryPrefix))
+			if err := materializeViewFile(blobPath, dst); err != nil {
+				return err
+			}
 		}
-		dst := filepath.Join(viewDir, strings.TrimPrefix(e.Name, llvmEntryPrefix))
-		if err := materializeViewFile(blobPath, dst); err != nil {
-			return "", err
-		}
-	}
-
-	if err := makeLLDAliases(viewDir); err != nil {
+		return makeLLDAliases(tmpDir)
+	}); err != nil {
 		return "", err
 	}
 
 	llvmViewDir = viewDir
 	return viewDir, nil
+}
+
+// publishViewDir materializes a view directory atomically: it creates a sibling
+// temp dir under parent, runs populate(tmpDir), then publishes the result with a
+// single rename(2) so a partially-populated view is never observable. On any
+// failure (populate error or rename) the temp dir is removed and viewDir is left
+// untouched. Callers must hold the cross-process materialization lock and have
+// confirmed the view is incomplete (so the pre-publish RemoveAll of viewDir can't
+// race a completed reader).
+func publishViewDir(parent, viewDir string, populate func(tmpDir string) error) error {
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return err
+	}
+	tmpDir, err := os.MkdirTemp(parent, ".tmp-"+filepath.Base(viewDir)+"-*")
+	if err != nil {
+		return err
+	}
+	published := false
+	defer func() {
+		if !published {
+			os.RemoveAll(tmpDir)
+		}
+	}()
+	if err := populate(tmpDir); err != nil {
+		return err
+	}
+	// Atomic publish. Remove any incomplete leftover first (safe under the caller's
+	// lock + incompleteness precondition). rename(2) is atomic on POSIX; on Windows
+	// the target must not exist, hence the RemoveAll.
+	os.RemoveAll(viewDir)
+	if err := os.Rename(tmpDir, viewDir); err != nil {
+		return fmt.Errorf("publish view %s: %w", viewDir, err)
+	}
+	published = true
+	return nil
 }
 
 // blobSetKey returns a short, order-independent content key for a set of manifest
@@ -363,6 +419,7 @@ func resolveMuslCRTView(arch string) (string, error) {
 	// Content-key the view dir on the blob set (see resolveLLVMView) so a CRT
 	// version bump never serves stale objects from a name-only match.
 	viewDir := filepath.Join(home, "cache", "crt-view", arch+"-"+blobSetKey(entries))
+	// Fast path: a previously published view (lock-free).
 	if muslCRTComplete(viewDir) {
 		return viewDir, nil
 	}
@@ -370,26 +427,40 @@ func resolveMuslCRTView(arch string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(viewDir, 0o755); err != nil {
+	// Serialize population across processes (same atomic-publish barrier as the
+	// LLVM view) so a partially-built CRT view is never observable. Lock lives
+	// outside the crt-view tree so CleanCRTCache can't delete it mid-hold.
+	lockPath := filepath.Join(home, "cache", "crt-view.lock")
+	unlock, err := blobstore.Lock(lockPath, "promise (materializing musl CRT)",
+		"Waiting for another process to finish staging the musl CRT...")
+	if err != nil {
 		return "", err
+	}
+	defer unlock()
+	// Double-checked after acquiring the lock.
+	if muslCRTComplete(viewDir) {
+		return viewDir, nil
 	}
 	resolver := blobstore.NewResolver(store, m)
 	defer resolver.Close()
-	for _, f := range muslCRTFiles {
-		entry, _ := m.Lookup("musl-" + f)
-		var blobPath string
-		if store.Has(entry.SHA256) {
-			blobPath = store.BlobPath(entry.SHA256)
-		} else {
-			p, rerr := resolver.Resolve("musl-" + f)
-			if rerr != nil {
-				return "", rerr
+	if err := publishViewDir(filepath.Dir(viewDir), viewDir, func(tmpDir string) error {
+		for _, f := range muslCRTFiles {
+			entry, _ := m.Lookup("musl-" + f)
+			var blobPath string
+			if store.Has(entry.SHA256) {
+				blobPath = store.BlobPath(entry.SHA256)
+			} else {
+				p, rerr := resolver.Resolve("musl-" + f)
+				if rerr != nil {
+					return rerr
+				}
+				blobPath = p
 			}
-			blobPath = p
+			copyFile(blobPath, filepath.Join(tmpDir, f), 0o644)
 		}
-		dst := filepath.Join(viewDir, f)
-		os.Remove(dst)
-		copyFile(blobPath, dst, 0o644)
+		return nil
+	}); err != nil {
+		return "", err
 	}
 	return viewDir, nil
 }

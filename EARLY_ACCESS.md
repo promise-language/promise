@@ -1,7 +1,7 @@
 # Early access — thanks for taking a look
 
 You're seeing **Promise** a few days before it's public. Please keep it to
-yourself until launch (targeting **Tuesday, June 16, 2026** — the date may still
+yourself until launch (targeting **Tuesday, June 23, 2026** — the date may still
 move; I'll give you a heads-up the moment it's live).
 
 ## What this is

@@ -46,6 +46,11 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// T0659: Defensive — borrow returns are never owned temps. Today only
 		// string-concat hits I8Ptr here, but a future T&-returning user `+`
 		// would; mirror the T0649 CallExpr guard.
+		// T0918: heap user-type operator results are tracked at the operator-call
+		// sites inside genBinaryExpr/genUnaryExpr (via trackOperatorResult), NOT
+		// here — so the early-return special forms (short-circuit &&/||, elvis ?:,
+		// ranges), whose results may alias owned locals, are never tracked.
+		// Tracking those double-frees, e.g. `(optional ?: owned_local)` inline.
 		if result != nil && result.Type() == irtypes.I8Ptr {
 			rt := c.info.Types[e]
 			if c.typeSubst != nil && rt != nil {
@@ -1071,6 +1076,35 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 
 // --- Binary expressions ---
 
+// trackOperatorResult registers the result of a non-native user-defined operator
+// call as a heap temp (T0918) so an inline (unbound) heap user-type result is
+// dropped at statement end — exactly like an ordinary method-call result.
+// trackHeapUserTypeResult self-filters: it ignores scalars, value types, copy
+// types, structural/container/string results, so this is a no-op for native
+// operator results (scalars / value-type structs). Borrow returns (T&/T~) are
+// skipped — they are never owned temps (mirrors the T0649 CallExpr guard).
+// Returns result unchanged for use as a tail call.
+//
+// Tracking is placed at the operator-call sites rather than in genExpr's
+// BinaryExpr/UnaryExpr dispatch so the early-return special forms (short-circuit
+// &&/||, elvis ?:, ranges) are never tracked — their results may alias owned
+// locals (e.g. the default operand of `optional ?: owned_local`), and tracking
+// those would double-free at statement end.
+func (c *Compiler) trackOperatorResult(e ast.Expr, result value.Value) value.Value {
+	rt := c.info.Types[e]
+	if c.typeSubst != nil && rt != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	if c.selfSubst != nil && rt != nil {
+		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if rt != nil && isRefType(rt) {
+		return result
+	}
+	c.trackHeapUserTypeResult(e, result)
+	return result
+}
+
 func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	// Short-circuit and special operators at the AST level
 	switch e.Op {
@@ -1098,7 +1132,8 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	named := extractNamed(leftType)
 	if named == nil {
 		if en := extractEnum(leftType); en != nil {
-			return c.genEnumBinaryOp(e, en, leftType, left, right)
+			// T0918: track the heap user-type result for inline (unbound) use.
+			return c.trackOperatorResult(e, c.genEnumBinaryOp(e, en, leftType, left, right))
 		}
 		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for operator %s", leftType, e.Op))
 	}
@@ -1125,7 +1160,8 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	// Non-native operator: dispatch as a method call.
 	// Virtual dispatch when the type has a vtable (abstract/structural type or type with children).
 	if c.needsVtable(named) {
-		return c.genVirtualBinaryOp(e, named, method, left, right)
+		// T0918: track the heap user-type result for inline (unbound) use.
+		return c.trackOperatorResult(e, c.genVirtualBinaryOp(e, named, method, left, right))
 	}
 
 	// Direct dispatch: call the concrete type's operator method.
@@ -1205,7 +1241,8 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 		}
 	}
 	args = append(args, right)
-	return c.block.NewCall(fn, args...)
+	// T0918: track the heap user-type result for inline (unbound) use.
+	return c.trackOperatorResult(e, c.block.NewCall(fn, args...))
 }
 
 // genEnumBinaryOp dispatches a user-defined binary operator declared on an enum
@@ -1372,7 +1409,11 @@ func (c *Compiler) genUnaryExpr(e *ast.UnaryExpr) value.Value {
 		operandType = types.SubstituteSelf(operandType, c.selfSubst.iface, c.selfSubst.concrete)
 	}
 
-	return c.emitUnaryOpResult(e.Op.String(), operandType, operand, isThisReceiver(e.Operand))
+	// T0918: track the heap user-type result for inline (unbound) use. Placed in
+	// genUnaryExpr (not emitUnaryOpResult, which is shared with genIncDecTarget's
+	// ++/-- statement targets) so only prefix-unary expression results are
+	// tracked. The receive operator (<-) returned above and is never reached.
+	return c.trackOperatorResult(e, c.emitUnaryOpResult(e.Op.String(), operandType, operand, isThisReceiver(e.Operand)))
 }
 
 // emitUnaryOpResult dispatches a unary operator (prefix `-`/`!`/`~` from

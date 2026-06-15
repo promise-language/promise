@@ -1,0 +1,194 @@
+// T0918: A heap user-type value produced by a user-defined operator and used
+// inline (not bound to a local) must be dropped at statement end, exactly like
+// an ordinary method-call result. Before the fix these cases leaked one
+// allocation each (the operator-dispatch paths in genExpr did not register the
+// heap result as a drop temp). Leak enforcement is automatic — these fail as
+// LEAK pre-fix and pass clean after.
+type Vec {
+  int x;
+  // Method counterpart — already worked, kept as the control reference.
+  neg(this) Vec {
+    return Vec(x: -this.x);
+  }
+  // Unary prefix operator (direct dispatch).
+  - () Vec {
+    return Vec(x: -this.x);
+  }
+  // Binary operator (direct dispatch).
+  - (Vec o) Vec {
+    return Vec(x: this.x - o.x);
+  }
+}
+
+// Control: method-call result used inline never leaked.
+method_inline() `test {
+  a := Vec(x: 5);
+  assert(a.neg().x == -5, "method inline");
+}
+
+// Control: binding the operator result to a local never leaked.
+op_bound() `test {
+  a := Vec(x: 5);
+  m := -a;
+  assert(m.x == -5, "op bound");
+}
+
+// Regression: unary operator result used inline.
+unary_inline() `test {
+  a := Vec(x: 5);
+  assert((-a).x == -5, "unary inline");
+}
+
+// Regression: binary operator result used inline.
+binary_inline() `test {
+  a := Vec(x: 5);
+  b := Vec(x: 3);
+  assert((a - b).x == 2, "binary inline");
+}
+
+// Virtual dispatch: the operator is declared on the parent; the child inherits
+// it. Result used inline exercises genVirtualUnaryOp / genVirtualBinaryOp.
+type Shape {
+  int v;
+  -() Shape {
+    return Circle(v: -this.v);
+  }
+  - (Shape o) Shape {
+    return Circle(v: this.v - o.v);
+  }
+}
+type Circle is Shape {
+  int v;
+}
+
+virtual_unary_inline() `test {
+  Shape s = Circle(v: 7);
+  assert((-s).v == -7, "virtual unary inline");
+}
+
+virtual_binary_inline() `test {
+  Shape a = Circle(v: 7);
+  Shape b = Circle(v: 2);
+  assert((a - b).v == 5, "virtual binary inline");
+}
+
+// Enum-declared operator returning a heap user type, used inline. Exercises
+// genEnumUnaryOp / genEnumBinaryOp dispatch.
+type Boxed {
+  int n;
+}
+enum Sign {
+  positive,
+  negative,
+
+  -() Boxed {
+    return Boxed(n: -1);
+  }
+  - (Sign o) Boxed {
+    return Boxed(n: 2);
+  }
+}
+
+enum_unary_inline() `test {
+  s := Sign.positive;
+  assert((-s).n == -1, "enum unary inline");
+}
+
+enum_binary_inline() `test {
+  a := Sign.positive;
+  b := Sign.negative;
+  assert((a - b).n == 2, "enum binary inline");
+}
+
+// Generic heap type whose operator returns a heap generic instance, used inline.
+// Exercises the typeSubst substitution branch in trackOperatorResult /
+// trackHeapUserTypeResult (the concrete-type tests above never set typeSubst).
+// All existing generic-operator tests return a scalar (bool), so this is the
+// only coverage of a generic operator producing a droppable heap temp inline.
+type GBox[T] {
+  T v;
+  -() GBox[T] {
+    return GBox[T](v: this.v);
+  }
+  - (GBox[T] o) GBox[T] {
+    return GBox[T](v: this.v);
+  }
+}
+
+generic_unary_inline() `test {
+  a := GBox[int](v: 7);
+  assert((-a).v == 7, "generic unary inline");
+}
+
+generic_binary_inline() `test {
+  a := GBox[int](v: 5);
+  b := GBox[int](v: 3);
+  assert((a - b).v == 5, "generic binary inline");
+}
+
+// Operator result consumed by MOVE inline (not just read). The newly-tracked
+// temp must have its drop flag cleared at the move site, otherwise it would
+// double-free. Confirms the T0918 tracking composes with move-tracking.
+type Wrap {
+  Vec inner;
+}
+
+take_vec(~Vec v) int {
+  return v.x;
+}
+
+op_result_moved_into_ctor() `test {
+  a := Vec(x: 5);
+  w := Wrap(inner: -a);
+  assert(w.inner.x == -5, "op result moved into constructor");
+}
+
+op_result_moved_into_fn() `test {
+  a := Vec(x: 9);
+  b := Vec(x: 2);
+  assert(take_vec(a - b) == 7, "op result moved into function");
+}
+
+// Borrow-returning operator: the result aliases an owned local (`this`), so it
+// must NOT be registered as an owned temp — the isRefType guard in
+// trackOperatorResult skips it. Without that guard the borrowed `this` would be
+// dropped at statement end AND when `a` leaves scope → double free.
+type Borrowed {
+  int v;
+  -(Borrowed o) Borrowed & {
+    return this;
+  }
+}
+
+borrow_returning_op_inline() `test {
+  a := Borrowed(v: 11);
+  b := Borrowed(v: 4);
+  assert((a - b).v == 11, "borrow-returning op inline");
+}
+
+// Operator inherited as a default method from a structural parent, returning a
+// heap user type, used inline. A separate inheritance shape from Shape/Circle
+// above (structural `is` rather than concrete subclassing) routing through the
+// virtual dispatch path. Leaked pre-fix.
+type Heapy {
+  int v;
+}
+type Negatable {
+  get magnitude int {
+    return 0;
+  }
+  - () Heapy {
+    return Heapy(v: -this.magnitude);
+  }
+}
+type Mag is Negatable {
+  int n;
+  get magnitude int {
+    return this.n;
+  }
+}
+
+structural_default_op_inline() `test {
+  Mag x = Mag(n: 3);
+  assert((-x).v == -3, "structural default op inline");
+}

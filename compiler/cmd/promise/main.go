@@ -659,9 +659,19 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 
 	if filename == "" {
 		resolveDir(".")
-	} else if info, err := os.Stat(filename); err == nil && info.IsDir() {
-		resolveDir(filename)
+	} else if info, err := os.Stat(filename); err == nil {
+		if info.IsDir() {
+			resolveDir(filename)
+		} else if projRoot := findEnclosingProjectDir(filename); projRoot != "" {
+			fmt.Fprintf(os.Stderr,
+				"note: %s belongs to the project at %s — building the whole project "+
+					"(run `promise build` to build it directly)\n", filename, projRoot)
+			resolveDir(projRoot)
+		}
 	}
+	// A nonexistent filename falls through to compileFrontend below, which
+	// reports a clear file-not-found error rather than silently building the
+	// enclosing project for a name that doesn't exist (T0927).
 
 	if target == "" {
 		target = codegen.HostTargetTriple()
@@ -815,8 +825,16 @@ func runRun(args []string) {
 	}
 	if filename == "" {
 		resolveDir(".")
-	} else if info, err := os.Stat(filename); err == nil && info.IsDir() {
-		resolveDir(filename)
+	} else if info, err := os.Stat(filename); err == nil {
+		if info.IsDir() {
+			resolveDir(filename)
+		} else if projRoot := findEnclosingProjectDir(filename); projRoot != "" {
+			// A file inside a project builds the whole project (T0927); align the
+			// cache key with the project so it doesn't go stale when siblings change.
+			if cfg, _, err := discoverProject(projRoot); err == nil && cfg != nil {
+				projectDir = cfg.Dir
+			}
+		}
 	}
 
 	if target == "" {
@@ -5866,6 +5884,28 @@ func isModuleTestFile(filename string) string {
 		dir = parent
 	}
 	return ""
+}
+
+// findEnclosingProjectDir walks up from a source file to the nearest ancestor
+// directory containing a promise.toml, returning that directory, or "" if the
+// file is not inside any project. Used so `promise build file.pr` / `run file.pr`
+// builds the whole project instead of single-file-compiling (T0927).
+func findEnclosingProjectDir(file string) string {
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(abs)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "promise.toml")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 // compileModuleTestFrontend compiles a module's test suite by merging all module

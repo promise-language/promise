@@ -235,6 +235,265 @@ func TestEmitIRProjectMultiFile(t *testing.T) {
 	}
 }
 
+// TestBuildFileInsideProject verifies that `promise build main.pr` (a concrete
+// file argument, not `.`) run inside a project directory detects the enclosing
+// promise.toml and builds the whole project, so sibling declarations are visible
+// (T0927). The binary is named after [module].name and an informational note is
+// printed to stderr.
+func TestBuildFileInsideProject(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping build integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
+		[]byte("[module]\nname = \"insideproj\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.pr"),
+		[]byte("main!() {\n  h := Helper(value: 7);\n  print_line(\"{h.value}\");\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "helper.pr"),
+		[]byte("type Helper { int value; }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "build", "main.pr")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "belongs to the project") {
+		t.Errorf("expected 'belongs to the project' note on stderr; got:\n%s", out)
+	}
+
+	// Binary is named after the project, not the file basename.
+	binaryName := "insideproj"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	binPath := filepath.Join(dir, binaryName)
+	if _, err := os.Stat(binPath); err != nil {
+		t.Fatalf("expected binary at %s, got: %v\noutput: %s", binPath, err, out)
+	}
+
+	runCmd := exec.Command(binPath)
+	runOut, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running %s failed: %v\n%s", binPath, err, runOut)
+	}
+	if got := strings.TrimSpace(string(runOut)); got != "7" {
+		t.Errorf("output = %q, want %q", got, "7")
+	}
+}
+
+// TestRunFileInsideProject verifies that `promise run main.pr` inside a project
+// builds the whole project (sibling visibility) and that the project cache key is
+// aligned so a second run produces the same output (T0927, change #3).
+func TestRunFileInsideProject(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping run integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
+		[]byte("[module]\nname = \"runinside\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.pr"),
+		[]byte("main!() { h := Helper(value: 42); print_line(\"{h.value}\"); }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "helper.pr"),
+		[]byte("type Helper { int value; }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		cmd := exec.Command(bin, "run", "main.pr")
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("run #%d failed: %v\n%s", i, err, out)
+		}
+		// CombinedOutput includes the stderr project note on the cache-miss run;
+		// just assert the program's output is present.
+		if !strings.Contains(string(out), "42") {
+			t.Errorf("run #%d output = %q, want it to contain %q", i, string(out), "42")
+		}
+	}
+}
+
+// TestBuildFileNoProjectStillSingleFile guards the common no-project case: a
+// standalone .pr file with no promise.toml anywhere up the tree still
+// single-file-compiles and produces a binary named after the file (T0927).
+func TestBuildFileNoProjectStillSingleFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping build integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "solo.pr"),
+		[]byte("main() { print_line(\"hi\"); }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "build", "solo.pr")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("single-file build failed: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "belongs to the project") {
+		t.Errorf("did not expect project note for a standalone file; got:\n%s", out)
+	}
+
+	binaryName := "solo"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	if _, err := os.Stat(filepath.Join(dir, binaryName)); err != nil {
+		t.Fatalf("expected file-named binary at %s, got: %v\noutput: %s", binaryName, err, out)
+	}
+}
+
+// TestBuildNonexistentFileInsideProject guards the edge case where the named
+// file does not exist: the build must fail with a clear file-not-found error
+// rather than silently building the enclosing project for a bogus name (T0927).
+func TestBuildNonexistentFileInsideProject(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping build integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
+		[]byte("[module]\nname = \"bogusname\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.pr"),
+		[]byte("main() { print_line(\"hi\"); }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "build", "typo.pr")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected build of nonexistent file to fail; got success:\n%s", out)
+	}
+	if strings.Contains(string(out), "belongs to the project") {
+		t.Errorf("nonexistent file must not be claimed to belong to the project; got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "typo.pr") {
+		t.Errorf("expected error to name the missing file typo.pr; got:\n%s", out)
+	}
+	// The project binary must not have been produced.
+	binaryName := "bogusname"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	if _, err := os.Stat(filepath.Join(dir, binaryName)); err == nil {
+		t.Errorf("project binary %s should not exist after a failed build", binaryName)
+	}
+}
+
+// TestBuildFileInProjectSubdir exercises the multi-level walk-up in
+// findEnclosingProjectDir: the target file lives in a subdirectory and the
+// promise.toml is an ancestor, so the search loop must iterate past the file's
+// own directory before finding the project root (T0927). Every other test
+// places promise.toml in the same directory as the file, leaving the walk-up
+// loop body uncovered.
+func TestBuildFileInProjectSubdir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping build integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "promise.toml"),
+		[]byte("[module]\nname = \"subproj\"\nepoch = \"2026.0\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(src, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "main.pr"),
+		[]byte("main!() { h := Helper(value: 9); print_line(\"{h.value}\"); }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "helper.pr"),
+		[]byte("type Helper { int value; }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run from the project root with a subdirectory-relative file path so the
+	// walk-up must climb from src/ to the root to find promise.toml.
+	cmd := exec.Command(bin, "build", filepath.Join("src", "main.pr"))
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subdir build failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "belongs to the project") {
+		t.Errorf("expected 'belongs to the project' note for subdir file; got:\n%s", out)
+	}
+
+	// Binary is named after the project and placed at the project root.
+	binaryName := "subproj"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	binPath := filepath.Join(dir, binaryName)
+	if _, err := os.Stat(binPath); err != nil {
+		t.Fatalf("expected binary at %s, got: %v\noutput: %s", binPath, err, out)
+	}
+
+	runOut, err := exec.Command(binPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("running %s failed: %v\n%s", binPath, err, runOut)
+	}
+	if got := strings.TrimSpace(string(runOut)); got != "9" {
+		t.Errorf("output = %q, want %q", got, "9")
+	}
+}
+
+// TestRunFileNoProjectStillSingleFile is the run-side analogue of
+// TestBuildFileNoProjectStillSingleFile: `promise run file.pr` with no
+// promise.toml anywhere up the tree must still single-file-compile and execute,
+// without the project note (T0927).
+func TestRunFileNoProjectStillSingleFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping run integration test in short mode")
+	}
+	bin := findPromiseBinary(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "solo.pr"),
+		[]byte("main() { print_line(\"solo-ok\"); }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "run", "solo.pr")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("single-file run failed: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "belongs to the project") {
+		t.Errorf("did not expect project note for a standalone run; got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "solo-ok") {
+		t.Errorf("expected program output 'solo-ok'; got:\n%s", out)
+	}
+}
+
 // TestBindWebIdlJsValueDocParses is the end-to-end regression for T0717: an IDL
 // whose interface has a union-typed attribute flips HasJsValue, so `promise bind
 // webidl` emits the JsValue enum. That enum carries `doc annotations that, prior

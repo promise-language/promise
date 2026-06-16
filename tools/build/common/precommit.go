@@ -17,7 +17,10 @@ var blockedFiles = []string{
 // RunPreCommit implements the git pre-commit hook. It rejects commits that
 // include compiled binaries and validates baselines.json ratchet direction.
 func RunPreCommit(root string) error {
-	out, err := RunOutputIn(root, "git", "diff", "--cached", "--name-only")
+	// core.quotePath=false keeps non-ASCII bytes raw in the output (the
+	// default would octal-escape them into an all-ASCII quoted string,
+	// defeating the non-ASCII filename check below).
+	out, err := RunOutputIn(root, "git", "-c", "core.quotePath=false", "diff", "--cached", "--name-only")
 	if err != nil {
 		return fmt.Errorf("list staged files: %w", err)
 	}
@@ -34,6 +37,21 @@ func RunPreCommit(root string) error {
 		}
 	}
 
+	// Reject stray log files and files whose names contain non-ASCII
+	// characters — both are typically leftover temp artifacts (e.g. from
+	// flow runs) that should never be committed.
+	for _, f := range staged {
+		if f == "" {
+			continue
+		}
+		if strings.HasSuffix(f, ".log") {
+			return fmt.Errorf("staged file '%s' is a .log file — log files must not be committed.\n  git reset HEAD %s", f, f)
+		}
+		if !isASCII(f) {
+			return fmt.Errorf("staged file '%s' has a non-ASCII file name — rename it before committing.\n  git reset HEAD %s", f, f)
+		}
+	}
+
 	// Defense-in-depth: if baselines.json is staged, verify no metric regressed
 	// vs the committed (HEAD) version.
 	for _, f := range staged {
@@ -46,6 +64,16 @@ func RunPreCommit(root string) error {
 	}
 
 	return nil
+}
+
+// isASCII reports whether s contains only ASCII bytes (0x00–0x7F).
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 0x7F {
+			return false
+		}
+	}
+	return true
 }
 
 // validateBaselinesDiff compares staged baselines.json against HEAD and rejects

@@ -55,6 +55,89 @@ func setupGitRepo(t *testing.T, headBaselines, stagedBaselines Baselines) string
 	return root
 }
 
+// initGitRepoWithStagedFile creates a temp git repo with one initial commit,
+// then writes and stages a file at relPath. Returns the repo root.
+func initGitRepoWithStagedFile(t *testing.T, relPath string) string {
+	t.Helper()
+	root := t.TempDir()
+
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	git("init")
+	git("config", "user.name", "test")
+	git("config", "user.email", "test@test")
+
+	// Seed an initial commit so HEAD exists.
+	os.WriteFile(filepath.Join(root, "seed.txt"), []byte("seed\n"), 0o644)
+	git("add", "seed.txt")
+	git("commit", "-m", "seed")
+
+	full := filepath.Join(root, relPath)
+	os.MkdirAll(filepath.Dir(full), 0o755)
+	os.WriteFile(full, []byte("data\n"), 0o644)
+	git("add", relPath)
+
+	return root
+}
+
+func TestRunPreCommit_RejectsLogFile(t *testing.T) {
+	root := initGitRepoWithStagedFile(t, "Ctmpverify_t0925.log")
+	if err := RunPreCommit(root); err == nil {
+		t.Fatal("expected error for staged .log file, got nil")
+	}
+}
+
+func TestRunPreCommit_RejectsLogFileInSubdir(t *testing.T) {
+	root := initGitRepoWithStagedFile(t, "logs/run.log")
+	if err := RunPreCommit(root); err == nil {
+		t.Fatal("expected error for staged .log file in subdir, got nil")
+	}
+}
+
+func TestRunPreCommit_RejectsNonASCIIFilename(t *testing.T) {
+	root := initGitRepoWithStagedFile(t, "résumé.txt")
+	if err := RunPreCommit(root); err == nil {
+		t.Fatal("expected error for non-ASCII filename, got nil")
+	}
+}
+
+func TestRunPreCommit_AllowsNormalFile(t *testing.T) {
+	root := initGitRepoWithStagedFile(t, "src/main.go")
+	if err := RunPreCommit(root); err != nil {
+		t.Fatalf("expected no error for normal file, got: %v", err)
+	}
+}
+
+func TestIsASCII(t *testing.T) {
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"plain.txt", true},
+		{"with space.txt", true},
+		{"résumé.txt", false},
+		{"café", false},
+		{"", true},
+	}
+	for _, c := range cases {
+		if got := isASCII(c.s); got != c.want {
+			t.Errorf("isASCII(%q) = %v, want %v", c.s, got, c.want)
+		}
+	}
+}
+
 func TestValidateBaselinesDiff_NoRegression(t *testing.T) {
 	head := Baselines{
 		"linux-amd64": {

@@ -11,6 +11,13 @@ then emits LLVM IR and links a native (or WASM) binary. There is no C runtime �
 the scheduler, allocator, and PAL are all codegen-emitted LLVM IR. See
 [docs/runtime-architecture.md](docs/runtime-architecture.md) for the big picture.
 
+> **Before you start:** by contributing you agree to license your work under the
+> project's **Contributor License Agreement** — the CLA bot prompts you
+> automatically on your first pull request (see [INDIVIDUAL_CLA.md](INDIVIDUAL_CLA.md),
+> or [CORPORATE_CLA.md](CORPORATE_CLA.md) if you're contributing on behalf of an
+> employer). You keep your copyright; the CLA grants the project a license. All
+> participation is governed by our [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## 1. Prerequisites
 
 - **Go 1.25+** (the only thing needed to build the build tools)
@@ -177,6 +184,13 @@ Bugs and work items are tracked in the project's **tracker** (an MCP server), wh
 auto-assigns stable IDs by type (`B0001` bugs, `T0001` tasks, `D0001` deferred).
 Reference those IDs from code comments and commit messages. When you hit a
 compiler bug or language limitation, file it rather than hacking around it.
+
+**Reporting from outside the core team:** the tracker is the maintainers' internal
+workflow and isn't publicly accessible. If you don't have tracker access, open a
+regular **[GitHub Issue](https://github.com/promise-language/promise/issues)**
+instead — use the bug-report or feature-request template — and a maintainer will
+triage it into the tracker. A GitHub Issue is always a fine way to report a bug or
+propose a change.
 
 ## 12. The flows automation (optional)
 

@@ -2584,6 +2584,12 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 				valType:  typ,
 				dropFlag: dropFlag,
 				varName:  varName,
+				// T0917: Polymorphic heap types (abstract base / has children) may hold
+				// a concrete subtype clone (from clone-on-`return this`, T0387/T0893) with
+				// its own droppable fields. Dispatch the free through RTTI typeinfo
+				// drop_fn_ptr so the concrete drop frees those fields, not a bare pal_free
+				// that would leak them. Non-polymorphic leaves keep pal_free.
+				rttiDrop: c.needsVtable(named),
 			}
 			c.scopeBindings = append(c.scopeBindings, binding)
 			c.dropBindings[varName] = binding
@@ -7805,7 +7811,15 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 
 	// Heap type: `this` is i8* instance pointer — build { vtable_ptr, instance_ptr }
 	var vtablePtr value.Value
-	if vtGlobal := c.lookupVtableGlobal(effType); vtGlobal != nil {
+	if c.needsVtable(named) {
+		// T0917: For an abstract base / parent return type, lookupVtableGlobal(effType)
+		// yields the base's vtable global, whose slots are null for abstract methods —
+		// a later virtual call on the result loads a null fn ptr and segfaults. Load the
+		// concrete subtype's vtable from the receiver instance's RTTI instead
+		// (instance → variant ptr (field 0) → typeinfo vtable_ptr (field 0)) so virtual
+		// dispatch on the returned value resolves the override.
+		vtablePtr = c.loadVtablePtrFromInstance(val)
+	} else if vtGlobal := c.lookupVtableGlobal(effType); vtGlobal != nil {
 		vtablePtr = constant.NewBitCast(vtGlobal, irtypes.I8Ptr)
 	} else {
 		vtablePtr = constant.NewNull(irtypes.I8Ptr)

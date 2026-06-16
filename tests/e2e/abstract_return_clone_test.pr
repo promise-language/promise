@@ -1,0 +1,237 @@
+// T0917: Clone-on-`return this`/`return other` when the static return type is an
+// abstract/structural interface routes through the polymorphic `dupHeapValue`
+// clone-fn branch (T0387). Two defects fixed here:
+//   - Defect 1 (leak): the result binding, typed as the abstract base, registered a
+//     bare `pal_free` (B0164) that freed only the shell and leaked the clone's
+//     heap-allocated subtype fields. Fix A dispatches the free through RTTI typeinfo
+//     drop_fn_ptr so the concrete drop frees those fields.
+//   - Defect 2 (segfault): `wrapThisReturnValue` built the `return this` value struct
+//     with the abstract base's vtable global (null slots), so a virtual call on the
+//     result loaded a null fn ptr. Fix B loads the concrete subtype's vtable from the
+//     receiver instance's RTTI.
+// Every test reads a virtual method on the cloned result and relies on the leak
+// detector (zero-leak gate) to catch Defect 1.
+type SAdd {
+  get tag string `abstract;
+}
+
+type SAddItem is SAdd {
+  string name;
+  get tag string {
+    return this.name;
+  }
+  // Abstract-return clone: result typed SAdd, body `return this` (Defect 1 + 2).
+  dup() SAdd {
+    return this;
+  }
+  // Concrete-return clone regression guard: no abstract dispatch, must not leak.
+  dup_concrete() SAddItem {
+    return this;
+  }
+  // Operator `return this`, structural result (Defect 2).
+  + (SAdd other) SAdd {
+    return this;
+  }
+}
+
+type SAddOther is SAdd {
+  string label;
+  get tag string {
+    return this.label;
+  }
+  // Operator `return other`, structural result — the T0897 split-out (Defect 1).
+  + (SAdd other) SAdd {
+    return other;
+  }
+}
+
+// Subtype with two heap (string) fields to ensure the RTTI drop reaches all
+// subclass-only droppable fields, not just the first.
+type SAddPair is SAdd {
+  string first;
+  string second;
+  get tag string {
+    return this.first + this.second;
+  }
+  dup() SAdd {
+    return this;
+  }
+}
+
+// Fresh structural return (no clone) — regression guard, must not leak.
+fresh() SAdd {
+  return SAddItem(name: "fresh");
+}
+
+// Non-abstract base with a real method body plus a child override. Exercises the
+// OTHER half of needsVtable (`hasChildren`, not `IsAbstract`): lookupVtableGlobal
+// would return Base's non-null vtable, so the pre-fix path does NOT segfault — it
+// silently mis-dispatches to Base.tag. Fix B loads the concrete Child vtable from
+// RTTI so the override resolves. (Verified: pre-fix this FAILs the assert, not the
+// leak gate — a failure mode the abstract cases above cannot reach.)
+type NBase {
+  string id;
+  get tag string {
+    return this.id;
+  }
+  dup() NBase {
+    return this;
+  }
+}
+
+type NChild is NBase {
+  get tag string {
+    return "child:" + this.id;
+  }
+}
+
+// Three-level chain: abstract grandparent, concrete parent, concrete grandchild
+// with its own droppable field. Returned as the abstract grandparent — confirms
+// Fix B reaches the leaf vtable and Fix A's RTTI drop frees the grandchild field.
+type GParent {
+  get name string `abstract;
+}
+
+type GMid is GParent {
+  get name string {
+    return "mid";
+  }
+}
+
+type GLeaf is GMid {
+  string extra;
+  get name string {
+    return "leaf:" + this.extra;
+  }
+  dup() GParent {
+    return this;
+  }
+}
+
+// Subtype holding a NESTED heap user-type field (not just a string). Returned as
+// the abstract base — Fix A's RTTI drop must recurse into Inner's own droppable
+// field, not stop at the shell. Guards the leak path for non-string droppables.
+type Inner {
+  string payload;
+}
+
+type SAddNested is SAdd {
+  Inner box;
+  get tag string {
+    return this.box.payload;
+  }
+  dup() SAdd {
+    return this;
+  }
+}
+
+// Subtype with a Vector (container) field — exercises Fix A's RTTI drop reaching a
+// container, whose own heap buffer must be freed by the dispatched concrete drop.
+type SAddVec is SAdd {
+  string[] items;
+  get tag string {
+    return this.items[0];
+  }
+  dup() SAdd {
+    return this;
+  }
+}
+
+// `~this` owned receiver: wrapThisReturnValue SKIPS the clone (genuine ownership
+// transfer), but Fix B's vtable build still runs. Guards that the abstract-return
+// value struct carries the concrete vtable even on the no-clone path, and that the
+// moved-out receiver leaves nothing to leak.
+type OAddItem is SAdd {
+  string name;
+  get tag string {
+    return this.name;
+  }
+  dup(~this) SAdd {
+    return this;
+  }
+}
+
+abstract_return_clone() `test {
+  x := SAddItem(name: "hi");
+  m := x.dup();
+  assert(m.tag == "hi", "dup abstract return");
+}
+
+concrete_return_clone() `test {
+  x := SAddItem(name: "concrete");
+  m := x.dup_concrete();
+  assert(m.tag == "concrete", "dup concrete return");
+}
+
+operator_return_this() `test {
+  a := SAddItem(name: "aa");
+  b := SAddItem(name: "bb");
+  m := a + b;
+  assert(m.tag == "aa", "operator return this");
+}
+
+operator_return_other() `test {
+  a := SAddOther(label: "xx");
+  b := SAddItem(name: "yy");
+  m := a + b;
+  assert(m.tag == "yy", "operator return other");
+}
+
+fresh_structural_return() `test {
+  m := fresh();
+  assert(m.tag == "fresh", "fresh structural return");
+}
+
+abstract_return_clone_multi_field() `test {
+  x := SAddPair(first: "foo", second: "bar");
+  m := x.dup();
+  assert(m.tag == "foobar", "dup abstract return multi-field");
+}
+
+// hasChildren (non-abstract base) branch of needsVtable — must dispatch the
+// child override, not the base method.
+nonabstract_base_override() `test {
+  c := NChild(id: "x");
+  m := c.dup();
+  assert(m.tag == "child:x", "non-abstract base must dispatch child override");
+}
+
+// Three-level inheritance returned as abstract grandparent.
+multilevel_abstract_return() `test {
+  g := GLeaf(extra: "z");
+  m := g.dup();
+  assert(m.name == "leaf:z", "multilevel grandchild override");
+}
+
+// Fix B on the no-clone (`~this`) path.
+owned_this_abstract_return() `test {
+  x := OAddItem(name: "owned");
+  m := x.dup();
+  assert(m.tag == "owned", "owned this abstract return");
+}
+
+// Receiver alias-clear (B0250/T0341/T0889): after a borrowed `return this` clone,
+// the SOURCE must remain valid and free exactly once — reading the clone then the
+// source must not corrupt or double-free either. Pre-fix the source read could see
+// a zeroed/freed instance; the leak gate also catches a missed/extra free.
+read_source_after_abstract_clone() `test {
+  x := SAddItem(name: "src");
+  m := x.dup();
+  assert(m.tag == "src", "clone tag readable");
+  assert(x.tag == "src", "source still readable after clone");
+}
+
+// Fix A's RTTI drop must recurse into a nested heap user-type field, not just
+// strings. Returned as the abstract base; the leak gate confirms Inner is freed.
+abstract_return_clone_nested_field() `test {
+  x := SAddNested(box: Inner(payload: "deep"));
+  m := x.dup();
+  assert(m.tag == "deep", "nested field clone");
+}
+
+// Fix A's RTTI drop must free a container field's heap buffer.
+abstract_return_clone_vector_field() `test {
+  x := SAddVec(items: ["a", "b"]);
+  m := x.dup();
+  assert(m.tag == "a", "vector field clone");
+}

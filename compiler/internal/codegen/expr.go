@@ -943,12 +943,7 @@ func (c *Compiler) callFormatMethod(receiver, writerVal, originalVal value.Value
 			vtableRaw = c.extractVtablePtr(originalVal)
 		} else {
 			// this reference (i8*) — load vtable from variant→typeinfo chain
-			variantPtr := c.loadVariantPtr(originalVal)
-			typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
-			typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
-			vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+			vtableRaw = c.loadVtablePtrFromInstance(originalVal)
 		}
 
 		vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
@@ -1317,12 +1312,7 @@ func (c *Compiler) genVirtualBinaryOp(e *ast.BinaryExpr, named *types.Named,
 	var vtableRaw, instance value.Value
 	if isThisReceiver(e.Left) {
 		instance = left
-		variantPtr := c.loadVariantPtr(left)
-		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
-		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
-		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+		vtableRaw = c.loadVtablePtrFromInstance(left)
 	} else {
 		vtableRaw = c.extractVtablePtr(left)
 		instance = c.extractInstancePtr(left)
@@ -1538,12 +1528,7 @@ func (c *Compiler) genVirtualUnaryOp(op string, named *types.Named,
 	var vtableRaw, instance value.Value
 	if isThis {
 		instance = operand
-		variantPtr := c.loadVariantPtr(operand)
-		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
-		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
-		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+		vtableRaw = c.loadVtablePtrFromInstance(operand)
 	} else {
 		vtableRaw = c.extractVtablePtr(operand)
 		instance = c.extractInstancePtr(operand)
@@ -5189,12 +5174,7 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 	var vtableRaw, instance value.Value
 	if isThisReceiver(e.Target) {
 		instance = receiverVal
-		variantPtr := c.loadVariantPtr(receiverVal)
-		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
-		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
-		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+		vtableRaw = c.loadVtablePtrFromInstance(receiverVal)
 	} else {
 		vtableRaw = c.extractVtablePtr(receiverVal)
 		instance = c.extractInstancePtr(receiverVal)
@@ -5330,13 +5310,7 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	if isThisReceiver(member.Target) {
 		// `this` is already i8* — load vtable from typeinfo chain
 		instance = receiverVal
-		variantPtr := c.loadVariantPtr(receiverVal)
-		// typeinfo field 0 is vtable_ptr
-		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
-		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
-		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+		vtableRaw = c.loadVtablePtrFromInstance(receiverVal)
 	} else {
 		vtableRaw = c.extractVtablePtr(receiverVal)
 		instance = c.extractInstancePtr(receiverVal)
@@ -8313,12 +8287,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 
 // reconstructErrorValue builds a value struct {vtable_ptr, instance_ptr} from a raw i8* error pointer.
 func (c *Compiler) reconstructErrorValue(errPtr value.Value) value.Value {
-	variantPtr := c.loadVariantPtr(errPtr)
-	typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
-	typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
-	vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	vtablePtr := c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+	vtablePtr := c.loadVtablePtrFromInstance(errPtr)
 	var valStruct value.Value = constant.NewZeroInitializer(userValueType())
 	valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
 	valStruct = c.block.NewInsertValue(valStruct, errPtr, 1)
@@ -11129,6 +11098,21 @@ func (c *Compiler) loadVariantPtr(subject value.Value) value.Value {
 	variantFieldPtr := c.block.NewGetElementPtr(variantPtrStruct, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	return c.block.NewLoad(irtypes.I8Ptr, variantFieldPtr)
+}
+
+// loadVtablePtrFromInstance loads the dispatch vtable pointer for an i8* instance
+// pointer by following the instance's variant→typeinfo chain (instance[0] →
+// typeinfo[0] = vtable_ptr). Centralizes the load shared by virtual call sites,
+// RTTI error reconstruction, and the abstract-return `return this` value-struct
+// build (T0917) — keep a single implementation so the typeinfo layout assumption
+// lives in one place.
+func (c *Compiler) loadVtablePtrFromInstance(instance value.Value) value.Value {
+	variantPtr := c.loadVariantPtr(instance)
+	typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr) // field 0: vtable_ptr
+	typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+	vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	return c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
 }
 
 // genCastExpr generates code for `expr as Type` and `expr as! Type`.

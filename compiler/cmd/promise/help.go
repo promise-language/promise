@@ -83,7 +83,10 @@ Compiler: promise build file.pr | Run: promise run file.pr | Exec: promise exec 
   promise bind <format>   Generate bindings from WIT or WebIDL (e.g., promise bind wit api.wit)
   promise targets         List supported compile targets (e.g. -target wasm32-wasi)
   promise version         Compiler version
-  promise build file.pr   Compile to executable
+  promise init            Create a new project or module (writes promise.toml)
+  promise build           Compile the project/file in the current directory
+  promise build <dir>     Compile the project/file in <dir> (after promise init)
+  promise build file.pr   Compile a single file to an executable
   promise run file.pr     Compile and run
   promise test file.pr    Run tests
   promise exec '<code>'   Run inline code (failable main, ?^ works)

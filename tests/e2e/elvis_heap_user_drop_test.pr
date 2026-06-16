@@ -134,3 +134,56 @@ elvis_string_default() `test {
   string? s = none;
   assert((s ?: "default") == "default", "elvis string");
 }
+
+// some path, local string source — clearDropFlag hits (a local owned string
+// optional HAS a drop flag), so someOwned stays true and trackElvisResult runs,
+// but the `named == TypString` filter bails out and the result is NOT tracked.
+// Guards that the some-path extracted string inner is not double-freed/leaked.
+elvis_string_some_inline() `test {
+  string? s = "hello";
+  d := "world";
+  assert((s ?: d).len == 5, "elvis string some inline");
+}
+
+// --- borrowed-parameter source (T0931): a non-`~` `H? a` parameter is owned by
+//     the CALLER, not the callee. It has no scope-exit drop flag, so the elvis
+//     result must NOT take ownership of the some-path inner — the caller frees it
+//     once. Tracking it (as T0924 originally did for every IdentExpr) added a
+//     second owner → double free. These inline/discard cases are the exact gap
+//     that the return-context `ret_elvis` test above masked. ---
+discard_param(H? a, H b) {
+  a ?: b;
+}
+elvis_param_inline_some() `test {
+  H? a = H(v: 3);
+  b := H(v: 7);
+  discard_param(a, b);
+}
+elvis_param_inline_none() `test {
+  H? a = none;
+  b := H(v: 7);
+  discard_param(a, b);
+}
+
+// generic monomorphized borrowed parameter — same root cause via `pick_inline[H]`
+pick_inline[T](T? a, T b) {
+  a ?: b;
+}
+elvis_param_generic_some() `test {
+  H? a = H(v: 5);
+  b := H(v: 9);
+  pick_inline[H](a, b);
+}
+
+// owned (`~`) parameter source — the callee DOES own the moved-in optional (it has
+// a drop flag via maybeRegisterOptionalDrop), so clearDropFlag hits and the result
+// keeps ownership (some-flag stays 1). Frees once in the callee; the caller's local
+// was moved, so it does not drop. Must remain leak-free and double-free-free.
+owned_param(~H? a, H b) {
+  a ?: b;
+}
+elvis_owned_param_some() `test {
+  H? a = H(v: 3);
+  b := H(v: 7);
+  owned_param(a, b);
+}

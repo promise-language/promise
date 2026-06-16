@@ -68,6 +68,12 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
+    # bin/build and bin/test self-fetch the pinned LLVM slim blobs (opt/llc/lld
+    # plus the build-only llvm-dlltool) via `gh release download` from the
+    # deps-llvm-<version> release. On GitHub Actions `gh` needs GH_TOKEN; the
+    # read-only GITHUB_TOKEN suffices for downloading release assets.
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v6
         with:

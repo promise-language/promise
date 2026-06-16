@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/promise-language/promise/security/policy
+    about: "Do NOT file security issues publicly. Report them privately per our Security Policy (security@promise-lang.org)."
+  - name: Questions & discussion
+    url: https://github.com/promise-language/promise/discussions
+    about: "Usage questions, ideas, and general discussion belong in GitHub Discussions."
+  - name: Email the maintainers
+    url: mailto:hello@promise-lang.org
+    about: "For anything that isn't a bug report or feature request."

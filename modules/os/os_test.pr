@@ -63,6 +63,96 @@ test_working_dir_absolute() `test(exclude: wasm) {
   assert(is_abs, "working directory should be absolute path");
 }
 
+test_temp_dir_nonempty() `test(exclude: wasm) {
+  string tmp = temp_dir;
+  assert(tmp.len > 0, "temp directory should be non-empty");
+}
+
+test_temp_dir_no_trailing_separator() `test(exclude: wasm) {
+  string tmp = temp_dir;
+  // The getter strips a single trailing '/' or '\' so callers append uniformly.
+  bool trailing = tmp.ends_with("/") || tmp.ends_with("\\");
+  assert(!trailing, "temp directory should not end with a path separator");
+}
+
+test_temp_dir_is_stable() `test(exclude: wasm) {
+  string t1 = temp_dir;
+  string t2 = temp_dir;
+  assert(t1 == t2, "reading temp_dir twice should return the same value");
+}
+
+// --- temp_dir internals (T0930) ---
+// The env-derived temp dir on a typical runner has no trailing separator, so
+// these exercise _strip_trailing_sep's stripping/empty/lone-separator branches
+// directly, and drive _temp_dir_lookup's env-present and fallback branches via
+// controlled environment state (restored before asserting so a failed assert
+// cannot leak env mutations into later tests in this binary).
+
+test_strip_trailing_sep_forward_slash() `test(exclude: wasm) {
+  assert(_strip_trailing_sep("/tmp/") == "/tmp", "trailing '/' should be stripped");
+}
+
+test_strip_trailing_sep_backslash() `test(exclude: wasm) {
+  assert(_strip_trailing_sep("C:\\Temp\\") == "C:\\Temp", "trailing '\\' should be stripped");
+}
+
+test_strip_trailing_sep_no_separator() `test(exclude: wasm) {
+  assert(_strip_trailing_sep("/tmp") == "/tmp", "POSIX path without trailing separator is unchanged");
+  assert(_strip_trailing_sep("C:\\Temp") == "C:\\Temp", "Windows path without trailing separator is unchanged");
+}
+
+test_strip_trailing_sep_empty() `test(exclude: wasm) {
+  assert(_strip_trailing_sep("") == "", "empty string is unchanged");
+}
+
+test_strip_trailing_sep_lone_separator() `test(exclude: wasm) {
+  assert(_strip_trailing_sep("/") == "", "lone '/' becomes empty");
+  assert(_strip_trailing_sep("\\") == "", "lone '\\' becomes empty");
+}
+
+test_strip_trailing_sep_removes_one_only() `test(exclude: wasm) {
+  // Only a single trailing separator is removed, not a run of them.
+  assert(_strip_trailing_sep("a//") == "a/", "only one trailing separator is removed");
+}
+
+test_temp_dir_uses_env_with_strip() `test(exclude: wasm) `target(windows) {
+  string? orig_temp = get_env_var("TEMP");
+  set_env_var("TEMP", "C:\\PromiseTempDirTest\\");
+  string got = temp_dir;
+  set_env_var("TEMP", orig_temp); // restore (absent -> unset)
+  assert(got == "C:\\PromiseTempDirTest", "temp_dir should return TEMP with the trailing separator stripped");
+}
+
+test_temp_dir_uses_env_with_strip() `test(exclude: wasm) `target(!windows) {
+  string? orig = get_env_var("TMPDIR");
+  set_env_var("TMPDIR", "/promise/tmp/dir/");
+  string got = temp_dir;
+  set_env_var("TMPDIR", orig); // restore (absent -> unset)
+  assert(got == "/promise/tmp/dir", "temp_dir should return TMPDIR with the trailing separator stripped");
+}
+
+test_temp_dir_fallback_when_unset() `test(exclude: wasm) `target(windows) {
+  string? orig_temp = get_env_var("TEMP");
+  string? orig_tmp = get_env_var("TMP");
+  string? unset_temp;
+  set_env_var("TEMP", unset_temp);
+  string? unset_tmp;
+  set_env_var("TMP", unset_tmp);
+  string got = temp_dir;
+  set_env_var("TEMP", orig_temp); // restore both before asserting
+  set_env_var("TMP", orig_tmp);
+  assert(got == "C:\\Windows\\Temp", "temp_dir should fall back to C:\\Windows\\Temp when TEMP and TMP are unset");
+}
+
+test_temp_dir_fallback_when_unset() `test(exclude: wasm) `target(!windows) {
+  string? orig = get_env_var("TMPDIR");
+  string? unset;
+  set_env_var("TMPDIR", unset);
+  string got = temp_dir;
+  set_env_var("TMPDIR", orig); // restore before asserting
+  assert(got == "/tmp", "temp_dir should fall back to /tmp when TMPDIR is unset");
+}
+
 test_args_returns_empty_in_test_runner() `test(exclude: wasm) {
   string[] a = args;
   // Test runner passes no user args, so args should be empty

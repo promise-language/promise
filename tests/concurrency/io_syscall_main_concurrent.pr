@@ -2,11 +2,12 @@
 // Phase 6a: verifies P handoff from main's M allows other Gs to progress.
 // Uses main() form because `test annotation + goroutines is not yet supported.
 use io;
+use os;
 
 main() `test(expected: """main_io ok
 concurrent_main_io ok""", exclude: wasm) {
   // Test 1: Main does file IO, goroutine does CPU work + channel send
-  io.File.write_content("/tmp/pr_sc_main1", "from main")?!;
+  io.File.write_content(os.temp_dir + "/pr_sc_main1", "from main")?!;
   channel[int] ch = channel[int](capacity: 1);
   go {
     int sum = 0;
@@ -16,9 +17,9 @@ concurrent_main_io ok""", exclude: wasm) {
     ch.send(sum);
   };
   // Main does more IO while goroutine runs
-  string data = io.File.read_content("/tmp/pr_sc_main1")?!;
+  string data = io.File.read_content(os.temp_dir + "/pr_sc_main1")?!;
   assert(data == "from main", "main read");
-  io.File.remove("/tmp/pr_sc_main1")?!;
+  io.File.remove(os.temp_dir + "/pr_sc_main1")?!;
   r1 := <-ch;
   if val := r1 {
     assert(val == 499500, "goroutine computed sum");
@@ -28,21 +29,21 @@ concurrent_main_io ok""", exclude: wasm) {
   // Test 2: Main and goroutines both do IO simultaneously
   channel[string] done = channel[string](capacity: 3);
   go {
-    io.File.write_content("/tmp/pr_sc_main2a", "goroutine_a")?!;
-    string d = io.File.read_content("/tmp/pr_sc_main2a")?!;
-    io.File.remove("/tmp/pr_sc_main2a")?!;
+    io.File.write_content(os.temp_dir + "/pr_sc_main2a", "goroutine_a")?!;
+    string d = io.File.read_content(os.temp_dir + "/pr_sc_main2a")?!;
+    io.File.remove(os.temp_dir + "/pr_sc_main2a")?!;
     done.send(d);
   };
   go {
-    io.File.write_content("/tmp/pr_sc_main2b", "goroutine_b")?!;
-    string d = io.File.read_content("/tmp/pr_sc_main2b")?!;
-    io.File.remove("/tmp/pr_sc_main2b")?!;
+    io.File.write_content(os.temp_dir + "/pr_sc_main2b", "goroutine_b")?!;
+    string d = io.File.read_content(os.temp_dir + "/pr_sc_main2b")?!;
+    io.File.remove(os.temp_dir + "/pr_sc_main2b")?!;
     done.send(d);
   };
   // Main also does IO concurrently
-  io.File.write_content("/tmp/pr_sc_main2c", "main_data")?!;
-  string mainData = io.File.read_content("/tmp/pr_sc_main2c")?!;
-  io.File.remove("/tmp/pr_sc_main2c")?!;
+  io.File.write_content(os.temp_dir + "/pr_sc_main2c", "main_data")?!;
+  string mainData = io.File.read_content(os.temp_dir + "/pr_sc_main2c")?!;
+  io.File.remove(os.temp_dir + "/pr_sc_main2c")?!;
   assert(mainData == "main_data", "main concurrent IO");
 
   // Collect goroutine results

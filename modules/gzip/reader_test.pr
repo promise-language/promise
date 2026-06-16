@@ -1,4 +1,5 @@
 use io;
+use os;
 
 // Test-only: a minimal byte-array-backed Reader for exercising
 // `gunzip_from(Reader)` without depending on the io catalog module.
@@ -232,13 +233,13 @@ gunzip_from_file_test() `test(exclude: wasm) {
   u8[] input_bytes = input.bytes();
   u8[] to_compress = input_bytes.clone();
   u8[] compressed = gzip_encode(to_compress);
-  io.File fw = io.File.create("/tmp/pr_gzip_gff")?!;
+  io.File fw = io.File.create(os.temp_dir + "/pr_gzip_gff")?!;
   int _n = fw.write(compressed)?!;
   fw.close()?!;
-  io.File fr = io.File.open("/tmp/pr_gzip_gff", readonly: true)?!;
+  io.File fr = io.File.open(os.temp_dir + "/pr_gzip_gff", readonly: true)?!;
   u8[] decoded = gunzip_from(fr)?!;
   fr.close()?!;
   _assert_eq(decoded, input_bytes, "gunzip_from file round-trip");
-  io.File.remove("/tmp/pr_gzip_gff")? e {
+  io.File.remove(os.temp_dir + "/pr_gzip_gff")? e {
   };
 }

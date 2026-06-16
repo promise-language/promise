@@ -3,6 +3,7 @@
 // `use io;` imports file operations: read, write, create, remove.
 // File operations are failable — use main()?! for auto-propagation.
 use io;
+use os;
 
 main() `test(expected: """--- Write and Read ---
 wrote to file
@@ -15,11 +16,11 @@ And another line.""", exclude: wasm) {
   print_line("--- Write and Read ---");
 
   // Write a string to a file (creates or overwrites).
-  io.File.write_content("/tmp/promise_example.txt", "Hello from Promise!")?!;
+  io.File.write_content(os.temp_dir + "/promise_example.txt", "Hello from Promise!")?!;
   print_line("wrote to file");
 
   // Read the entire file back.
-  string content = io.File.read_content("/tmp/promise_example.txt")?!;
+  string content = io.File.read_content(os.temp_dir + "/promise_example.txt")?!;
   print_line("read back: {content}");
 
   // --- Append ---
@@ -27,13 +28,13 @@ And another line.""", exclude: wasm) {
   print_line("--- Append ---");
 
   // Append to an existing file.
-  io.File f = io.File.append("/tmp/promise_example.txt")?!;
+  io.File f = io.File.append(os.temp_dir + "/promise_example.txt")?!;
   f.write_line("\nAnd another line.")?!;
   f.close()?!;
 
-  string full = io.File.read_content("/tmp/promise_example.txt")?!;
+  string full = io.File.read_content(os.temp_dir + "/promise_example.txt")?!;
   print_line("appended content: {full}");
 
   // Clean up.
-  io.File.remove("/tmp/promise_example.txt")?!;
+  io.File.remove(os.temp_dir + "/promise_example.txt")?!;
 }

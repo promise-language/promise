@@ -313,6 +313,44 @@ get_env_var(string name) string? `public `doc("Returns the value of the named en
   return _os_get_env_var(name);
 }
 
+// Removes a single trailing '/' or '\' so callers can uniformly append "/" + name.
+_strip_trailing_sep(string s) string {
+  if s.len > 0 {
+    if s.ends_with("/") || s.ends_with("\\") {
+      return s[:s.len - 1];
+    }
+  }
+  return s;
+}
+
+// target-filtered: which env vars name the temp dir, and the fallback.
+_temp_dir_lookup() string `target(windows) {
+  // GitHub runners and normal Windows sessions set TEMP/TMP.
+  if v := _os_get_env_var("TEMP") {
+    if v.len > 0 {
+      return _strip_trailing_sep(v);
+    }
+  }
+  if v := _os_get_env_var("TMP") {
+    if v.len > 0 {
+      return _strip_trailing_sep(v);
+    }
+  }
+  return "C:\\Windows\\Temp";
+}
+_temp_dir_lookup() string `target(!windows) {
+  if v := _os_get_env_var("TMPDIR") {
+    if v.len > 0 {
+      return _strip_trailing_sep(v);
+    }
+  }
+  return "/tmp";
+}
+
+get temp_dir string `public `doc("Returns the directory for temporary files, without a trailing separator. On Windows this is the TEMP or TMP environment variable (falling back to C:\\Windows\\Temp); elsewhere it is TMPDIR (falling back to /tmp). Callers append a separator and a file name.") {
+  return _temp_dir_lookup();
+}
+
 // Module-level getter: accessed as os.working_dir (no parentheses).
 get working_dir! string `public `doc("Returns the absolute path of the current working directory. Raises an error if the OS call fails.") {
   return _os_get_working_dir();

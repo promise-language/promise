@@ -151,6 +151,11 @@ Promises.)
 Did it compile? Does the code read the way the prompt implies? That's the thesis,
 tested on your own setup.
 
+**Recorded sessions.** The [**Promise Zoo**](https://github.com/promise-language/zoo/tree/early-access)
+is a gallery of exactly this — real programs built in Promise by AI agents, each with
+the exact prompt, the generated code, an honest account of how the run went, and a
+faithful terminal recording you can replay.
+
 ## Already on my list (no need to report these)
 
 A couple of things I already know are rough — flagging them so you can look past

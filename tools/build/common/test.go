@@ -59,7 +59,10 @@ func RunTest(root string, args []string) error {
 	// Go tests
 	if suite == "go" || suite == "all" {
 		fmt.Println("\nRunning go tests...")
-		if err := RunIn(compilerDir, "go", "test", "./..."); err != nil {
+		// -timeout 30m: the codegen package runs a full LLVM compile+link per
+		// test and exceeds Go's default 10m per-package limit on slow runners
+		// (e.g. the GitHub windows-amd64 runner). 30m gives ample headroom.
+		if err := RunIn(compilerDir, "go", "test", "-timeout", "30m", "./..."); err != nil {
 			return fmt.Errorf("go tests: %w", err)
 		}
 	}
@@ -103,7 +106,9 @@ func RunTest(root string, args []string) error {
 // RunGoTests runs only Go unit tests. Used by verify.
 func RunGoTests(root string) error {
 	compilerDir := filepath.Join(root, "compiler")
-	return RunIn(compilerDir, "go", "test", "./...")
+	// -timeout 30m: see RunTests — the codegen package exceeds Go's default
+	// 10m per-package limit on slow runners (GitHub windows-amd64).
+	return RunIn(compilerDir, "go", "test", "-timeout", "30m", "./...")
 }
 
 // RunPromiseTests runs Promise tests for the given target (empty = host).

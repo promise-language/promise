@@ -1,0 +1,136 @@
+// T0924: Elvis `?:` some-path inner value leaks when used inline (not bound) for
+// heap user types. The some-path inner extracted from the optional is orphaned
+// once the source optional's drop flag is cleared, so the elvis result must own
+// it (and free it once at statement end). The none-path default keeps its own
+// owner, so the result must NOT free it. These tests are leak-checked by the
+// harness — any unfreed allocation fails the run.
+type H {
+  int v;
+  +(H o) H {
+    return H(v: this.v + o.v);
+  }
+}
+type Box {
+  H h;
+}
+type OptBox {
+  H? a;
+}
+
+mkOpt(int n) H? {
+  return H(v: n);
+}
+
+// --- some path: result owns the orphaned inner (was a leak) ---
+
+// some path, ident left
+elvis_inline_some_ident() `test {
+  H? a = H(v: 3);
+  b := H(v: 7);
+  assert((a ?: b).v == 3, "elvis some ident");
+}
+
+// some path, non-ident temp left (the source optional itself is a temp, never tracked)
+elvis_inline_some_temp() `test {
+  b := H(v: 7);
+  assert((mkOpt(3) ?: b).v == 3, "elvis some temp");
+}
+
+// some path, literal default operand
+elvis_inline_some_literal() `test {
+  H? a = H(v: 3);
+  assert((a ?: H(v: 7)).v == 3, "elvis some literal");
+}
+
+// --- none path: result must NOT free the default (it keeps its own owner) ---
+
+// none path, ident default
+elvis_inline_none_ident() `test {
+  H? a = none;
+  b := H(v: 7);
+  assert((a ?: b).v == 7, "elvis none ident");
+}
+
+// none path, literal default
+elvis_inline_none_literal() `test {
+  H? a = none;
+  assert((a ?: H(v: 7)).v == 7, "elvis none literal");
+}
+
+// none path, member-alias default — owner's drop frees it; result must keep owned=0
+elvis_inline_none_member() `test {
+  H? a = none;
+  bx := Box(h: H(v: 7));
+  assert((a ?: bx.h).v == 7, "elvis none member");
+}
+
+// some path, OWNER-GOVERNED optional member source — the owner (OptBox) still owns
+// the inner via its synthesized drop, so the elvis result must NOT free it. Tracking
+// the result as owned here would double-free (regression guard for T0924).
+elvis_inline_some_member() `test {
+  bx := OptBox(a: H(v: 3));
+  b := H(v: 7);
+  assert((bx.a ?: b).v == 3, "elvis some member");
+}
+
+// --- bound some path: binding claims the result; must stay leak-free ---
+elvis_bound_some() `test {
+  H? a = H(v: 3);
+  b := H(v: 7);
+  m := a ?: b;
+  assert(m.v == 3, "elvis bound some");
+}
+
+// --- return context: returned result is claimed by the return path ---
+ret_elvis(H? a, H b) H {
+  return a ?: b;
+}
+
+elvis_return_some() `test {
+  H? a = H(v: 3);
+  b := H(v: 7);
+  r := ret_elvis(a, b);
+  assert(r.v == 3, "elvis return some");
+}
+
+elvis_return_none() `test {
+  H? a = none;
+  b := H(v: 7);
+  r := ret_elvis(a, b);
+  assert(r.v == 7, "elvis return none");
+}
+
+// --- parenthesized source: `(a) ?: b` peels the ParenExpr and behaves exactly
+//     like `a ?: b` (exercises genElvis's paren-peel loop) ---
+elvis_inline_some_paren() `test {
+  H? a = H(v: 3);
+  b := H(v: 7);
+  assert(((a) ?: b).v == 3, "elvis some paren");
+}
+elvis_inline_none_paren() `test {
+  H? a = none;
+  b := H(v: 7);
+  assert(((a) ?: b).v == 7, "elvis none paren");
+}
+
+// --- index source: a vector element is owner-governed (the vector's drop frees
+//     it), so the result must NOT be tracked (leftIsIndex → someOwned == false).
+//     Tracking would double-free on the some path. ---
+elvis_inline_some_index() `test {
+  H? e = H(v: 3);
+  H?[] v = [e];
+  b := H(v: 7);
+  assert((v[0] ?: b).v == 3, "elvis some index");
+}
+elvis_inline_none_index() `test {
+  H? e = none;
+  H?[] v = [e];
+  b := H(v: 7);
+  assert((v[0] ?: b).v == 7, "elvis none index");
+}
+
+// --- string elvis: the string path must be untouched by the heap-user fix ---
+elvis_string_default() `test {
+  string? s = none;
+  assert((s ?: "default") == "default", "elvis string");
+}

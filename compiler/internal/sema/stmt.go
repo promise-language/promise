@@ -392,6 +392,14 @@ func (c *Checker) checkUseVarDecl(s *ast.UseVarDecl) {
 		return
 	}
 
+	// A failable initializer (bare call in a `!` function) must auto-propagate
+	// its error, exactly like a normal var decl (GitHub #3). Without this the
+	// success value is never unwrapped: in a failable function codegen would try
+	// to store the failable-result aggregate into the unwrapped slot (panic), and
+	// in a non-failable function the "failable call must be handled" diagnostic
+	// would be silently skipped.
+	c.checkVarDeclFailable(s.Value)
+
 	// Verify the type has a close() method (structural Closer satisfaction)
 	var named *types.Named
 	switch t := valType.(type) {

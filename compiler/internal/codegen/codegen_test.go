@@ -1948,6 +1948,31 @@ func TestSelfGenericMethodReturnCodegen(t *testing.T) {
 	assertContains(t, ir, "@\"Box[int].rewrap\"(")
 }
 
+func TestUseVarDeclFailableInitAutoPropagate(t *testing.T) {
+	// GitHub #3: a bare failable call as a `use` initializer must auto-propagate
+	// and unwrap to the ok value before the store. Previously codegen panicked
+	// storing the failable-result aggregate into the unwrapped slot.
+	ir := generateIR(t, `
+		type Res {
+			int id;
+			make!(int id) Res `+"`"+`factory { return Res(id: id); }
+			close!(~this) {}
+		}
+		build!() int {
+			use r := Res.make(7);
+			return r.id;
+		}
+		main() {}
+	`)
+	// The failable factory returns the {tag, value, errptr} result aggregate ...
+	assertContains(t, ir, "call { i1, { i8*, i8* }, i8* } @Res.make(")
+	// ... which is unwrapped on the auto-propagation ok path ...
+	assertContains(t, ir, "auto.ok")
+	// ... and the unwrapped Res value (not the raw aggregate) is stored into the
+	// `use` slot %r.
+	assertContains(t, ir, "{ i8*, i8* }* %r")
+}
+
 func TestSelfGenericMultiParamCodegen(t *testing.T) {
 	ir := generateIR(t, `
 		type Pair[A, B] {

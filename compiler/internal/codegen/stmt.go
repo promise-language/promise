@@ -1930,6 +1930,13 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 	alloca := c.createEntryAlloca(lt)
 	alloca.SetName(c.uniqueLocalName(s.Name))
 	val := c.genExpr(s.Value)
+	// GitHub #3: a failable initializer (bare call auto-propagating in a `!`
+	// function) yields the failable-result aggregate; unwrap it to the ok value
+	// before the store, exactly like the typed/inferred var-decl paths. Without
+	// this the aggregate is stored into the unwrapped slot → llir type panic.
+	if c.info.AutoPropagateExprs[s.Value] {
+		val = c.genAutoPropagateValue(val)
+	}
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	// B0233: Claim heap temp — ownership transferred to use binding.

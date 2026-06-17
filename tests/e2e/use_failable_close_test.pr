@@ -141,3 +141,140 @@ test_void_failable_close() `test {
   };
   assert(false, "should have gotten close error");
 }
+
+// --- Failable INITIALIZER with implicit auto-propagation (GitHub #3) ---
+//
+// A bare failable call as a `use` initializer must auto-propagate its error and
+// unwrap to the ok value, exactly like a normal var decl. Previously this
+// panicked codegen (the failable-result aggregate was stored into the unwrapped
+// slot). These tests exercise the bare-call form (no `?^`), which is the trigger.
+
+// Resource with a failable factory whose close() succeeds.
+type MakeOk {
+  int id;
+
+  make!(int id) MakeOk `factory {
+    return MakeOk(id: id);
+  }
+
+  close!(~this) void {
+    // success — no error
+  }
+}
+
+failable_init_returns_value!() int {
+  use r := MakeOk.make(7); // bare failable call — implicit auto-propagation
+  return r.id;
+}
+
+test_failable_init_returns_value() `test {
+  int result = failable_init_returns_value()?!;
+  assert(result == 7, "failable use initializer auto-propagates and unwraps to ok value");
+}
+
+// Resource whose failable factory FAILS, and whose close() raises a DISTINCT
+// error. If the init error propagates (not the close error), close() never ran —
+// proving the resource that was never created is never closed (no leak).
+type MakeFails {
+  int id;
+
+  make!(int id) MakeFails `factory {
+    raise CloseError(message: "factory failed", code: 1);
+  }
+
+  close!(~this) void {
+    raise CloseError(message: "close should not run", code: 2);
+  }
+}
+
+failable_init_failure_propagates!() int {
+  use r := MakeFails.make(3); // factory raises — error propagates before the bind
+  return r.id;
+}
+
+test_failable_init_failure_propagates() `test {
+  failable_init_failure_propagates()? e {
+    assert(e.message == "factory failed", "init error propagates; close() did NOT run");
+    return;
+  };
+  assert(false, "should have gotten the factory error");
+}
+
+// Failable initializer inside a nested block — auto-propagation + close both fire.
+failable_init_in_block!() int {
+  if true {
+    use r := MakeOk.make(11); // bare failable call inside a nested scope
+    return r.id;
+  }
+  return 0;
+}
+
+test_failable_init_in_nested_block() `test {
+  int result = failable_init_in_block()?!;
+  assert(result == 11, "failable use initializer works inside a nested block");
+}
+
+// Multiple failable initializers in one scope: both unwrap, both close in reverse.
+two_failable_inits!() int {
+  use a := MakeOk.make(20); // bare failable call
+  use b := MakeOk.make(22); // bare failable call
+  return a.id + b.id;
+}
+
+test_two_failable_inits() `test {
+  int result = two_failable_inits()?!;
+  assert(result == 42, "multiple failable use initializers each unwrap correctly");
+}
+
+// Failable factory AND failable close: init succeeds (auto-propagation), then the
+// close() at scope exit fails — the close error must propagate. Exercises the new
+// auto-propagate-init path together with the failable-close machinery.
+type MakeOkCloseFails {
+  int id;
+
+  make!(int id) MakeOkCloseFails `factory {
+    return MakeOkCloseFails(id: id);
+  }
+
+  close!(~this) void {
+    raise CloseError(message: "close failed late", code: 7);
+  }
+}
+
+failable_init_then_failable_close!() int {
+  use r := MakeOkCloseFails.make(4); // bare failable call — init succeeds
+  return r.id;
+}
+
+test_failable_init_then_failable_close() `test {
+  failable_init_then_failable_close()? e {
+    assert(e.message == "close failed late", "init unwraps; failable close error propagates");
+    return;
+  };
+  assert(false, "should have gotten the close error");
+}
+
+// Failable factory producing a resource that owns a heap string field. Exercises
+// heap/string-temp claiming through the auto-propagation unwrap (zero-leak audit):
+// the owned string must be dropped exactly once at close, never double-freed.
+type Handle {
+  string name;
+
+  open!(~string name) Handle `factory {
+    return Handle(name: name);
+  }
+
+  close!(~this) void {
+    // success — the owned `name` string is dropped with the instance
+  }
+}
+
+failable_init_heap_field!() int {
+  use h := Handle.open("socket"); // bare failable call — auto-propagation
+  return h.name.len; // string stays owned by h, dropped at close
+}
+
+test_failable_init_heap_field_no_leak() `test {
+  int result = failable_init_heap_field()?!;
+  assert(result == 6, "failable init of a resource with a heap string field; no leak on close");
+}

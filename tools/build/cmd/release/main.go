@@ -12,8 +12,11 @@
 //	bin/release fetch-blobs --manifest <m> --out <dir> [--keep-compressed]
 //	bin/release build --variant {thin|full} --manifest <m> --out <bin> [--blobs <dir>]
 //	bin/release verify-manifest <manifest>... --against <dir>
+//	bin/release cut next   [--dry-run] [--reason <text>] [--run-ci] [--no-ci-wait]
+//	bin/release cut stable [--dry-run] [--reason <text>] [--run-ci] [--no-ci-wait] [--confirm-year]
 //
-// See docs/release-automation.md §2 (build-order) and T0773, T0797.
+// See docs/release-automation.md §2 (build-order), §6.3 (gated cut), and T0773,
+// T0797, T0943.
 package main
 
 import (

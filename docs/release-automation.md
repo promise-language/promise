@@ -2,7 +2,7 @@
 
 > How Promise releases are built and published on GitHub. This is the pipeline behind the artifacts in [distribution.md](distribution.md) §3. It covers the new-model specifics the original distribution §7 did not: building the prebuilt dependency **blobs**, hashing them, embedding the manifest under a strict **build order**, producing **thin + full** binary variants, building the **Promise stub** per target, and publishing on an `epoch-*` tag.
 >
-> **Status (2026-06-17).** The repository lives on GitHub at [`github.com/promise-language/promise`](https://github.com/promise-language/promise) (currently **private**, default branch `main`). The CI and release workflows are **committed** at [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and [`.github/workflows/release.yml`](../.github/workflows/release.yml) (T0774) and wrap the `bin/release` driver (§7, T0773). The pipeline is now **exercised end-to-end**: CI is green on all three platforms (`linux-amd64`, `windows-amd64`, `darwin-arm64`), the `epoch-next` pre-release was cut, and the first stable release **`epoch-2026.0`** is published. CI and the release runners fetch dependency blobs **only from the `deps-<dep>-<version>` GitHub release** (`gh release download`) — the `prebuilts.promise-lang.org` R2 mirror is an end-user-install backstop, never a build source. The committed workflow files are the **source of truth**; the YAML excerpts below are the design rationale, kept in sync with them. The release *procedure* (which gates must pass before a tag) is currently followed by hand (§6.2); encoding it as `bin/release cut` is tracked as **T0943** (§6.3).
+> **Status (2026-06-17).** The repository lives on GitHub at [`github.com/promise-language/promise`](https://github.com/promise-language/promise) (currently **private**, default branch `main`). The CI and release workflows are **committed** at [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and [`.github/workflows/release.yml`](../.github/workflows/release.yml) (T0774) and wrap the `bin/release` driver (§7, T0773). The pipeline is now **exercised end-to-end**: CI is green on all three platforms (`linux-amd64`, `windows-amd64`, `darwin-arm64`), the `epoch-next` pre-release was cut, and the first stable release **`epoch-2026.0`** is published. CI and the release runners fetch dependency blobs **only from the `deps-<dep>-<version>` GitHub release** (`gh release download`) — the `prebuilts.promise-lang.org` R2 mirror is an end-user-install backstop, never a build source. The committed workflow files are the **source of truth**; the YAML excerpts below are the design rationale, kept in sync with them. The release *procedure* (which gates must pass before a tag) is now **enforced by `bin/release cut next` / `cut stable`** (T0943, §6): the gates run automatically and the tag/push happens only when every gate is green. The hand-run `git tag` fallback is documented in §6.2.
 
 ---
 
@@ -317,7 +317,7 @@ Flags: `--out` (staging dir, default `<root>/dist`), `--r2-bucket` (default `pre
 
 ## 6. Cutting a release
 
-A release is **a tag push** (§5): `epoch-YYYY.N` cuts a stable release, `epoch-next` cuts/refreshes the pre-release channel. The release pipeline builds and publishes but **runs no tests** — so every correctness guarantee comes from the gates *before* the tag. Until those gates are encoded in `bin/release cut` (§6.3, **T0943**), they are followed by hand; §6.2 is the source of truth.
+A release is **a tag push** (§5): `epoch-YYYY.N` cuts a stable release, `epoch-next` cuts/refreshes the pre-release channel. The release pipeline builds and publishes but **runs no tests** — so every correctness guarantee comes from the gates *before* the tag. Those gates are now **enforced by `bin/release cut`** (§6.3, **T0943**): run `bin/release cut next` / `bin/release cut stable` and the tag/push happens only when every gate is green. §6.2 documents the equivalent hand-run `git tag` fallback the commands replace.
 
 `epoch-next` is a **moving** tag — re-cut on every push; `release.yml` deletes + recreates its GitHub **pre-release** (the `publish` job detects `epoch-next` and passes `--prerelease`) while keeping the tag. Stable `epoch-X.Y` tags are **immutable**: `gh release create` refuses to clobber them and the workflow never deletes them, so they must never be force-moved.
 
@@ -335,39 +335,41 @@ bin/release publish-blobs --dependency llvm --host windows-amd64 --r2-bucket ""
 
 > The CI/release build steps must also set `GH_TOKEN` (job-level) so `gh release download` can authenticate on the runners — this is why the `compiler`/`test` jobs carry `env: GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}`. The read-only `GITHUB_TOKEN` suffices for downloading same-repo release assets.
 
-### 6.2 The procedure (manual today; gated by `bin/release cut` tomorrow)
+### 6.2 The procedure
 
-1. **Stage deps blobs** (§6.1) if the `deps-<dep>-<version>` release is missing or stale. Every `blobs.json` blob for the pinned versions × all hosts must be hosted, or the build fails mid-run.
+The steps below are **what `bin/release cut` enforces** (§6.3) — run as `bin/release cut next` then `bin/release cut stable`. The raw `git tag` snippets are the hand-run fallback the commands replace (and what a bypass with `--reason` reduces to); prefer the gated commands so no step is skipped.
+
+1. **Stage deps blobs** (§6.1) if the `deps-<dep>-<version>` release is missing or stale. Every `blobs.json` blob for the pinned versions × all hosts must be hosted, or the build fails mid-run. (Gate 4.)
 2. **Verify locally:** `bin/verify --wasm`.
-3. **Green CI at the release head.** Dispatch `ci.yml` for **all platforms** and confirm green at the exact commit — CI is manual `workflow_dispatch` and is the *only* test coverage a release gets. To de-risk the *release* build path cheaply first, dispatch `release.yml` with `platform=linux-amd64 publish=false` (1×; builds thin+full, cuts nothing).
-4. **Pre-release first.** Push `epoch-next` at the release commit and confirm its `release.yml` run is green — this validates the full blobs→manifest→thin→full→verify→publish chain on the exact tree:
+3. **Changelog + catalog epoch first.** Add the `## epoch X.Y` section to [changelog.md](changelog.md) — editorial, cannot be automated; the release notes link to it. Confirm `catalog.toml`'s `epoch` equals the epoch being cut (after each stable cut it is bumped to the next epoch — step 6 — so in steady state it already matches). Doing this **before** the pre-release means `epoch-next` validates the exact tree that will ship, so gates 8 + 9 are satisfied on the same hash. (Gates 3, 9.)
+4. **Green CI at the release head.** CI must be green on **all platforms** at the exact commit — CI is manual `workflow_dispatch` and is the *only* test coverage a release gets. `cut` checks this (gate 7) and, when no run covers the commit, offers to dispatch `ci.yml` for the missing platforms and watch them to green.
+5. **Pre-release, then stable — same hash.** Cut `epoch-next` at the release commit and confirm its `release.yml` run is green (this validates the full blobs→manifest→thin→full→verify→publish chain on the exact tree), then cut stable at the *same commit* `epoch-next` validated (gate 8):
 
    ```sh
-   git tag -f epoch-next <commit>     # moving tag; force expected
-   git push -f origin epoch-next
-   ```
-5. **Changelog.** Add the `## epoch X.Y` section to [changelog.md](changelog.md) — editorial, cannot be automated; the release notes link to it.
-6. **Catalog epoch must match.** `catalog.toml`'s `epoch` must equal the epoch being cut. After each stable cut it is bumped to the next epoch (step 8), so in steady state it already matches.
-7. **Cut stable** at the *same commit* `epoch-next` validated, and push:
+   bin/release cut next       # gated; refreshes the moving epoch-next pre-release
+   # …confirm the epoch-next release.yml run is green…
+   bin/release cut stable     # gated; derives the epoch, tags, pushes, bumps catalog
 
-   ```sh
-   git tag epoch-2026.0              # immutable — never force-move a stable tag
-   git push origin epoch-2026.0
+   # hand-run fallback (what the commands do):
+   #   git tag -f epoch-next <commit> && git push -f origin epoch-next   # moving tag; force expected
+   #   git tag epoch-2026.1 <commit>  && git push origin epoch-2026.1     # immutable — never force-move a stable tag
    ```
-8. **Bump for ongoing development.** Advance `catalog.toml`'s `epoch` to the next epoch (same-year increment) on `main` and push, so dev builds and the next `epoch-next` embed the upcoming epoch — not the shipped one (the side-by-side install layout dispatches on the embedded epoch).
+6. **Bump for ongoing development.** `cut stable` finishes by advancing `catalog.toml`'s `epoch` to the next epoch (same-year increment) on `main` and pushing, so dev builds and the next `epoch-next` embed the upcoming epoch — not the shipped one (the side-by-side install layout dispatches on the embedded epoch).
 
 > **Bootstrap exception — `epoch-2026.0`.** The first stable release predates the gates and could not satisfy "promote the exact hash `epoch-next` validated" (nothing preceded it). It was cut by hand after all-platform CI went green and the pipeline was proven via `epoch-next`; it ships slightly stale `os`/`http` module descriptions (corrected on `main` for `2026.1`). From `2026.1` onward every cut goes through §6.3's gates.
 
-### 6.3 Planned — `bin/release cut` with enforced gates (T0943)
+### 6.3 `bin/release cut` with enforced gates (T0943) — implemented
 
-Encode §6.2 as two gated orchestrator subcommands so neither a maintainer nor an agent can skip a step:
+§6.2 is encoded as two gated orchestrator subcommands so neither a maintainer nor an agent can skip a step (`tools/build/common/release_cut.go`):
 
 ```sh
 bin/release cut next       # refresh the epoch-next pre-release
 bin/release cut stable     # derive epoch, gate, tag, push, bump catalog — all automatic
 ```
 
-Both run a preflight checklist and only tag/push when **every** gate is green. `--dry-run` prints the checklist and changes nothing. A gate may be overridden only with `--reason "<text>"`, which is recorded into the tag/commit message so any bypass is auditable.
+Flags (both channels): `--dry-run` (run all gates, print the checklist, change nothing), `--reason "<text>"` (override the failed *overridable* gate(s); recorded into the tag/commit message so any bypass is auditable), `--run-ci` (non-interactively dispatch `ci.yml` for platforms with no run at the release SHA), `--no-ci-wait` (with `--run-ci`: dispatch then stop, re-run `cut` once green). `cut stable` additionally takes `--confirm-year` (non-interactively confirm a year-rollover epoch). There is **no `--epoch` flag** — `cut stable` owns the number (see derivation above).
+
+Both run a preflight checklist and only tag/push when **every** gate is green. A non-overridable gate (a tool error; an already-present immutable stable tag; the `--no-ci-wait` dispatch-and-stop) aborts regardless of `--reason`. The clock-behind epoch-derivation refusal is likewise never overridable.
 
 **Epoch derivation — `cut stable` owns the number (no `--epoch` flag):**
 
@@ -408,7 +410,7 @@ Gate 7 (all-platform green CI) applies to **both** channels — a pre-release us
 
 This keeps the happy path (CI already green) instant, turns the common "forgot to run CI" case into a one-keystroke dispatch, and still hard-stops on an actual CI failure.
 
-**Feasibility.** Every gate input is reachable from `bin/release` today: `git` (tree, reachability, tags), `gh` (CI run + per-job conclusions by `headSha`; `deps-*` release assets; the `epoch-next` release run), and a `catalog.toml` / `changelog.md` parse. Planned implementation: `tools/build/common/release_cut.go`, with `git`/`gh` behind interfaces (the existing `releaseUploader` / `blobFetcher` stub pattern) so the gate tests are hermetic.
+**Inputs.** Every gate input is reachable from `bin/release`: `git` (tree, reachability, tags), `gh` (CI run + per-job conclusions by `headSha`; `deps-*` release assets via the existing `releaseUploader`; the `epoch-next` release run), and a `catalog.toml` / `changelog.md` parse. The implementation puts `git`/`gh` behind the `cutGit` / `cutGH` interfaces (the same stub pattern as `releaseUploader` / `blobFetcher`), so `release_cut_test.go` is fully hermetic — no `git`/`gh` process is spawned and the CI watch loop's sleep is stubbed.
 
 ---
 
@@ -416,7 +418,7 @@ This keeps the happy path (CI already green) instant, turns the common "forgot t
 
 | Item | Notes |
 |------|-------|
-| Gated release orchestrator (**T0943**) | Encode the §6.2 procedure as `bin/release cut next` / `cut stable` so the gates (catalog-epoch match, all-platform green CI at the head, validate-via-next-then-promote-same-hash, changelog present, deps blobs hosted, rule-valid auto-derived epoch + post-cut catalog bump) are enforced by the tool, not by discipline. Design: §6.3. The manual procedure (§6.2) stands until this lands; `epoch-2026.0` is grandfathered. |
+| ~~Gated release orchestrator~~ (done, **T0943**) | The §6.2 procedure is encoded as `bin/release cut next` / `cut stable` (`tools/build/common/release_cut.go`): the gates (catalog-epoch match, all-platform green CI at the head with absent-vs-failed handling, validate-via-next-then-promote-same-hash, changelog present + changed, deps blobs hosted, rule-valid auto-derived epoch + post-cut catalog bump) are enforced by the tool, not by discipline. `--dry-run` reports without changing anything; `--reason` audits any override. Design + shipped flags: §6.3. `epoch-2026.0` is grandfathered (predates the gates); the rules apply from `2026.1` onward. |
 | ~~`bin/release` driver~~ (done, T0773) | The blob/hash/manifest/thin/full/stub steps + `verify-manifest` gate are implemented as a Go build tool alongside `bin/build` (`tools/build/cmd/release`, `tools/build/common/release*.go`). |
 | Blob hosting & packaging | **Decided (T0773):** primary `source` is a one-file-per-hash **GitHub release asset** (named by content `sha256`); the upstream vendor archive is a ranked fallback. A dedicated CDN/bucket ([T0523](#)) is a deferred optional source. `PROMISE_BLOB_MIRROR` base-URL override ([epoch-versioned-installs.md](epoch-versioned-installs.md) §3) and the *ranked* source list let the private→public transition add/promote a public source without changing content hashes (§1 private-repo caveat). |
 | Private→public release access (**T0786**) | While the repo is private, **nothing in the install path is anonymously fetchable**: the install scripts are themselves release assets (`releases/latest/download/install.sh`), and the binaries + dependency blobs they pull are too — all need auth or a public mirror. Resolve before advertising the public install (§1, [distribution.md](distribution.md) §2.1). Tracked as the standalone release-readiness blocker **T0786** (`needs-attention`); ties to T0523's public-origin requirement. |

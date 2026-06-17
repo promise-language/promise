@@ -238,6 +238,14 @@ type Compiler struct {
 	// named in this set. nil for non-operator functions/methods.
 	currentOpValueParams map[string]bool
 
+	// T0945: borrowed value parameters of ANY function/method currently being
+	// compiled — a plain (non-`~`) or `&` value parameter whose owner stays in
+	// the caller. An inline elvis `(a ?: b)` whose left operand is such a param
+	// must NOT free its some-path result: the inner aliases the caller's still-
+	// owned value, so freeing it double-frees ("bad header magic") when the
+	// caller drops the param. Populated per function via setBorrowedValueParams.
+	borrowedValueParams map[string]bool
+
 	// B0290: Tracks enums currently being processed by dupEnumElementInPlace
 	// to detect recursive types and prevent infinite codegen.
 	enumDupInProgress map[*types.Enum]bool
@@ -5807,6 +5815,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	}
 	c.canError = sig.CanError()
 	c.currentRetType = sig.Result()
+	c.setBorrowedValueParams(sig) // T0945
 
 	for i, p := range sig.Params() {
 		if p.Name() == "" || p.Name() == "_" {
@@ -6336,6 +6345,7 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 		c.scopeBindings = nil
 		c.canError = sig.CanError()
 		c.currentRetType = sig.Result()
+		c.setBorrowedValueParams(sig) // T0945
 		c.blockCounter = 0
 		c.enumCtorTemps = nil // B0267
 
@@ -6508,6 +6518,7 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			// incorrectly clear the caller's Optional field present flag.
 			c.thisRecvIsOwned = m.Sig().Recv() != nil && m.Sig().Recv().Ref() == types.RefMut
 			c.setOperatorValueParams(md.Name, m.Sig()) // T0897
+			c.setBorrowedValueParams(m.Sig())          // T0945
 
 			// Route generator methods to the generator codegen path
 			if genInfo := c.info.GeneratorFuncs[md]; genInfo != nil {
@@ -7309,6 +7320,38 @@ func (c *Compiler) setOperatorValueParams(name string, sig *types.Signature) {
 	}
 }
 
+// setBorrowedValueParams populates c.borrowedValueParams with the borrowed
+// value parameters of the function/method whose body is about to be compiled
+// (T0945). A borrowed value param is a plain (non-`~`) or `&` parameter that is
+// not variadic and not reference-typed: the caller retains ownership, so the
+// callee must not free its contents. `~` (RefMut) and variadic params are owned
+// by the callee (they receive scope-exit drop bindings) and are excluded.
+// Reference-typed params (MutRef/SharedRef) never reach the droppable-temp path,
+// so they are excluded too. Call wherever a function body's compilation context
+// is established (alongside c.currentRetType), like setOperatorValueParams.
+func (c *Compiler) setBorrowedValueParams(sig *types.Signature) {
+	c.borrowedValueParams = nil
+	if sig == nil {
+		return
+	}
+	for _, p := range sig.Params() {
+		if p.Name() == "" || p.Name() == "_" || p.IsVariadic() {
+			continue
+		}
+		if p.Ref() == types.RefMut {
+			continue // ~ owned: the callee drops it at scope exit
+		}
+		switch p.Type().(type) {
+		case *types.MutRef, *types.SharedRef:
+			continue // ref-typed: the elvis result would be a ref, never tracked
+		}
+		if c.borrowedValueParams == nil {
+			c.borrowedValueParams = make(map[string]bool)
+		}
+		c.borrowedValueParams[p.Name()] = true
+	}
+}
+
 // lookupAnyMethod finds a method, getter, or setter by name, dispatching to
 // the appropriate typed lookup based on the AST declaration's getter/setter flags.
 func (c *Compiler) lookupAnyMethod(named *types.Named, name string, isGetter, isSetter bool) *types.Method {
@@ -7399,6 +7442,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	// T0428: track whether the receiver is owned (~this) for force-unwrap neutralization.
 	c.thisRecvIsOwned = m.Sig().Recv() != nil && m.Sig().Recv().Ref() == types.RefMut
 	c.setOperatorValueParams(md.Name, m.Sig()) // T0897
+	c.setBorrowedValueParams(m.Sig())          // T0945
 
 	// Allocate receiver as "this"
 	if m.Sig().Recv() != nil {
@@ -10285,6 +10329,7 @@ type compilerState struct {
 	coroutineReturnBlock *ir.Block       // T0262: prevent cross-function block references
 	thisRecvIsOwned      bool            // T0428: true when current method has ~this receiver
 	currentOpValueParams map[string]bool // T0897: borrowed value params of the current operator
+	borrowedValueParams  map[string]bool // T0945: borrowed value params of the current function/method
 }
 
 func (c *Compiler) saveState() compilerState {
@@ -10321,11 +10366,16 @@ func (c *Compiler) saveState() compilerState {
 		coroutineReturnBlock: c.coroutineReturnBlock,
 		thisRecvIsOwned:      c.thisRecvIsOwned,
 		currentOpValueParams: c.currentOpValueParams,
+		borrowedValueParams:  c.borrowedValueParams,
 	}
 	// T0262: clear coroutine-specific blocks to prevent cross-function references
 	// when saveState is used before switching c.fn to a different LLVM function.
 	c.panicExitBlock = nil
 	c.coroutineReturnBlock = nil
+	// T0945: a nested function body must not inherit the outer's borrowed value
+	// params (an elvis there owns/borrows by its own param list). Define sites
+	// repopulate it; restoreState brings the outer's set back afterward.
+	c.borrowedValueParams = nil
 	return s
 }
 
@@ -10362,6 +10412,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.coroutineReturnBlock = s.coroutineReturnBlock
 	c.thisRecvIsOwned = s.thisRecvIsOwned
 	c.currentOpValueParams = s.currentOpValueParams
+	c.borrowedValueParams = s.borrowedValueParams
 }
 
 // findTypeDeclAnyFile searches for a TypeDecl by name in c.file first,

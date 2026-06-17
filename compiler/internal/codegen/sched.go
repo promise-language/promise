@@ -2227,7 +2227,8 @@ func (c *Compiler) wrapMainWithScheduler() {
 	savedCoroSuspend := c.coroSuspendBlk
 	savedPanicExitBlock := c.panicExitBlock
 	savedGoExprFF := c.goExprFireAndForget
-	c.goExprFireAndForget = false // reset for inner statements (B0109)
+	savedBorrowedValueParams := c.borrowedValueParams // T0945
+	c.goExprFireAndForget = false                     // reset for inner statements (B0109)
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -2235,6 +2236,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.blockCounter = 0
 	c.canError = false
 	c.currentRetType = nil
+	c.borrowedValueParams = nil // T0945: main body has no user value params
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.castSubjectMatch = nil // T0849: fresh per generated function body
@@ -2419,6 +2421,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.coroSuspendBlk = savedCoroSuspend
 	c.panicExitBlock = savedPanicExitBlock
 	c.goExprFireAndForget = savedGoExprFF
+	c.borrowedValueParams = savedBorrowedValueParams // T0945
 
 	// Back in @main: call the ramp, create G0, enqueue, run, shutdown
 	handle := entry.NewCall(coroFn)

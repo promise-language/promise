@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -187,12 +188,19 @@ func TestRunProjectMultiFile(t *testing.T) {
 
 	cmd := exec.Command(bin, "run", ".")
 	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run failed: %v\n%s", err, out)
+	// Capture stdout and stderr separately: the program's output goes to
+	// stdout, while diagnostics (the epoch-pin warning when this compiler's
+	// epoch differs from the project pin, the project note on a cache miss)
+	// go to stderr. Asserting on stdout alone keeps the exact-match robust to
+	// any stderr noise.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run failed: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 	}
-	if got := strings.TrimSpace(string(out)); got != "42" {
-		t.Errorf("output = %q, want %q", got, "42")
+	if got := strings.TrimSpace(stdout.String()); got != "42" {
+		t.Errorf("stdout = %q, want %q", got, "42")
 	}
 }
 

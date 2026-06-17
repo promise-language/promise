@@ -72,6 +72,33 @@ t_reuse_none() `test {
   assert(y == 1, "reuse y");
 }
 
+// --- T0945: borrowed (plain, non-`~`) optional-vector value parameter. The
+// caller owns the param and drops it after the call, so an inline elvis inside
+// the callee must NOT free its some-path inner — doing so double-frees the heap
+// buffer ("bad header magic"). The none-path default is borrowed too. This is
+// the non-generic analogue of t_generic_strvec_some; the bug also reproduces
+// without monomorphization, directly through a borrowed param. ---
+
+borrowed_strvec_len(string[]? a, string[] b) int {
+  return (a ?: b).len;
+}
+
+t_borrowed_param_some() `test {
+  string[] av = [];
+  av.push("k" + "v");
+  string[]? a = av;
+  string[] b = [];
+  b.push("d" + "e");
+  assert(borrowed_strvec_len(a, b) == 1, "borrowed some");
+}
+
+t_borrowed_param_none() `test {
+  string[]? a = none;
+  string[] b = [];
+  b.push("d" + "e");
+  assert(borrowed_strvec_len(a, b) == 1, "borrowed none");
+}
+
 // --- bound form must remain correct (claims the temp; variable drop handles it) ---
 
 t_bound() `test {

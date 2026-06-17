@@ -8410,11 +8410,21 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// Some path: extract inner value
 	c.block = someBlock
 	someVal := c.block.NewExtractValue(optVal, 1)
-	// B0194/T0111: Clear drop flag on elvis of optional identifier.
+	// B0194/T0111: Clear drop flag on elvis of an *owned* optional identifier.
 	// The inner value is extracted and transferred to the result — the optional's
 	// scope-exit drop should NOT also free it (double-free).
+	//
+	// T0945: a borrowed value parameter is owned by the caller, which drops it
+	// after the call. Moving its inner into the result and freeing it here would
+	// double-free ("bad header magic"). Such a result borrows the inner instead —
+	// someOwnsInner stays false so the inline result temp is never freed.
+	someOwnsInner := true
 	if ident, ok := e.Left.(*ast.IdentExpr); ok {
-		c.clearDropFlag(ident.Name)
+		if c.borrowedValueParams[ident.Name] {
+			someOwnsInner = false
+		} else {
+			c.clearDropFlag(ident.Name)
+		}
 	}
 	c.block.NewBr(mergeBlock)
 	someEnd := c.block
@@ -8437,7 +8447,7 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// borrows the still-owned default, so it must NOT be freed. A bound use
 	// claims this temp (claimStringTemp by value identity) and drops via the
 	// variable's own binding instead — leaving this path-flag inert.
-	c.trackElvisResultTemp(e, result, someEnd, noneEnd, mergeBlock)
+	c.trackElvisResultTemp(e, result, someEnd, noneEnd, mergeBlock, someOwnsInner)
 	return result
 }
 
@@ -8450,7 +8460,13 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 // strings. Other i8* result types fall through untracked, matching the prior
 // dispatch coverage. A bound use of the result claims the temp by value
 // identity, neutralizing the flag so only the variable's binding drops it.
-func (c *Compiler) trackElvisResultTemp(e *ast.BinaryExpr, result value.Value, someEnd, noneEnd, mergeBlock *ir.Block) {
+func (c *Compiler) trackElvisResultTemp(e *ast.BinaryExpr, result value.Value, someEnd, noneEnd, mergeBlock *ir.Block, someOwnsInner bool) {
+	// T0945: when the some-path inner is borrowed (e.g. the optional is a
+	// borrowed value parameter), the result owns nothing on either path — the
+	// none-path default is always borrowed too — so it must not be dropped.
+	if !someOwnsInner {
+		return
+	}
 	if !c.tempTrackingEnabled || result == nil || result.Type() != irtypes.I8Ptr {
 		return
 	}
@@ -10087,6 +10103,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.blockCounter = 0
 	c.canError = false
 	c.currentRetType = sig.Result()
+	savedBorrowedValueParams := c.borrowedValueParams // T0945
+	c.setBorrowedValueParams(sig)                     // T0945: lambda body sees its own params
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.castSubjectMatch = nil // T0849: fresh per lambda body; restored below
@@ -10204,6 +10222,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.lambdaWritebacks = savedWritebacks
 	c.goExprFireAndForget = savedGoExprFF2
+	c.borrowedValueParams = savedBorrowedValueParams   // T0945
 	c.stmtTemps = savedStmtTemps                       // T0073
 	c.stmtTempMap = savedStmtTempMap                   // T0073
 	c.heapTemps = savedHeapTemps                       // T0088
@@ -12861,16 +12880,18 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedPanicExitBlock := c.panicExitBlock
 	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	savedGoExprFF := c.goExprFireAndForget
-	savedLocalNameCount := c.localNameCount // T0261
-	savedStmtTemps := c.stmtTemps           // T0594: stmtTemps must not leak from coroutine body into outer function
-	savedStmtTempMap := c.stmtTempMap       // T0594: allocas created inside coroutine body live in a different function
-	savedEnumCtorTemps := c.enumCtorTemps   // B0267: enumCtorTemps must not leak from coroutine body into outer function
+	savedLocalNameCount := c.localNameCount           // T0261
+	savedStmtTemps := c.stmtTemps                     // T0594: stmtTemps must not leak from coroutine body into outer function
+	savedStmtTempMap := c.stmtTempMap                 // T0594: allocas created inside coroutine body live in a different function
+	savedEnumCtorTemps := c.enumCtorTemps             // B0267: enumCtorTemps must not leak from coroutine body into outer function
+	savedBorrowedValueParams := c.borrowedValueParams // T0945
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.blockCounter = 0
 	c.canError = false
 	c.currentRetType = types.TypVoid
+	c.borrowedValueParams = nil // T0945: coroutine body has no user value params
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.castSubjectMatch = nil // T0849: fresh per function body; restored below
@@ -13073,10 +13094,11 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	c.panicExitBlock = savedPanicExitBlock
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
 	c.goExprFireAndForget = savedGoExprFF
-	c.localNameCount = savedLocalNameCount // T0261
-	c.stmtTemps = savedStmtTemps           // T0594: restore outer function's temp state
-	c.stmtTempMap = savedStmtTempMap       // T0594
-	c.enumCtorTemps = savedEnumCtorTemps   // B0267
+	c.borrowedValueParams = savedBorrowedValueParams // T0945
+	c.localNameCount = savedLocalNameCount           // T0261
+	c.stmtTemps = savedStmtTemps                     // T0594: restore outer function's temp state
+	c.stmtTempMap = savedStmtTempMap                 // T0594
+	c.enumCtorTemps = savedEnumCtorTemps             // B0267
 
 	// B0354: Clear outer drop flags for captured droppable non-channel variables.
 	for name := range capturedDroppablesVB {
@@ -13608,15 +13630,16 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	savedPanicExitBlock := c.panicExitBlock
 	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	savedGoExprFF := c.goExprFireAndForget
-	savedLocalNameCount := c.localNameCount // T0261
-	savedEnumCtorTemps := c.enumCtorTemps   // B0267
-	savedStmtTemps := c.stmtTemps           // T0683/T0594: isolate coro-body temps from the outer fn
-	savedStmtTempMap := c.stmtTempMap       // T0683/T0594
-	savedHeapTemps := c.heapTemps           // T0686: isolate coro-body heap temps from the outer fn
-	savedHeapTempMap := c.heapTempMap       // T0686
-	savedEnvTemps := c.envTemps             // T0739: isolate coro-body closure env temps from the outer fn
-	savedEnvTempMap := c.envTempMap         // T0739
-	c.goExprFireAndForget = false           // reset for inner statements (B0109)
+	savedLocalNameCount := c.localNameCount           // T0261
+	savedEnumCtorTemps := c.enumCtorTemps             // B0267
+	savedStmtTemps := c.stmtTemps                     // T0683/T0594: isolate coro-body temps from the outer fn
+	savedStmtTempMap := c.stmtTempMap                 // T0683/T0594
+	savedHeapTemps := c.heapTemps                     // T0686: isolate coro-body heap temps from the outer fn
+	savedHeapTempMap := c.heapTempMap                 // T0686
+	savedEnvTemps := c.envTemps                       // T0739: isolate coro-body closure env temps from the outer fn
+	savedEnvTempMap := c.envTempMap                   // T0739
+	savedBorrowedValueParams := c.borrowedValueParams // T0945
+	c.goExprFireAndForget = false                     // reset for inner statements (B0109)
 
 	// T0683: Only a non-void, awaited (`<-task`) block needs its trailing
 	// value stored into G.result_ptr. A void block has no value; a
@@ -13639,7 +13662,8 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
-	c.enumCtorTemps = nil // B0267
+	c.enumCtorTemps = nil       // B0267
+	c.borrowedValueParams = nil // T0945: coroutine body has no user value params
 	if useGoBlockValuePath {
 		// T0683/T0594: fresh temp state for the coroutine body so its temps
 		// (which reference coroFn allocas) cannot leak into the outer fn.
@@ -13901,8 +13925,9 @@ func (c *Compiler) genGoBlock(e *ast.GoExpr) value.Value {
 	c.panicExitBlock = savedPanicExitBlock
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
 	c.goExprFireAndForget = savedGoExprFF
-	c.localNameCount = savedLocalNameCount // T0261
-	c.enumCtorTemps = savedEnumCtorTemps   // B0267
+	c.borrowedValueParams = savedBorrowedValueParams // T0945
+	c.localNameCount = savedLocalNameCount           // T0261
+	c.enumCtorTemps = savedEnumCtorTemps             // B0267
 	if useGoBlockValuePath {
 		c.stmtTemps = savedStmtTemps     // T0683/T0594: restore outer fn temp state
 		c.stmtTempMap = savedStmtTempMap // T0683/T0594

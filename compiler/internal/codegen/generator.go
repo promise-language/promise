@@ -107,6 +107,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	savedCoroutineReturnBlock := c.coroutineReturnBlock
 	savedThisRecvIsOwned := c.thisRecvIsOwned    // T0436
 	savedOpValueParams := c.currentOpValueParams // T0897: preserve caller-set value
+	savedBorrowedParams := c.borrowedValueParams // T0945: preserve caller-set value
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -132,6 +133,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	// Generator funcs (no receiver) get false. Without this, the flag leaks from
 	// the previous defineMethodFunc call into the coroutine body.
 	c.thisRecvIsOwned = sig.Recv() != nil && sig.Recv().Ref() == types.RefMut
+	c.setBorrowedValueParams(sig) // T0945: generator body sees its own params
 
 	// Yield slot is the second-to-last (or last for non-failable) parameter
 	yieldSlotParam := coroFn.Params[len(coroFn.Params)-1]
@@ -350,6 +352,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.coroutineReturnBlock = savedCoroutineReturnBlock
 	c.thisRecvIsOwned = savedThisRecvIsOwned    // T0436
 	c.currentOpValueParams = savedOpValueParams // T0897
+	c.borrowedValueParams = savedBorrowedParams // T0945
 
 	// 7. Build factory body for original function
 	c.fn = fn

@@ -79,16 +79,21 @@ const elvisPathFlag = `phi i1 \[ true, %elvis\.some\.\d+ \], \[ false, %elvis\.n
 // `inline_len[int]` must carry the path flag and drop via @Vector.drop — proving
 // the element type was substituted (otherwise the vector result would be
 // untracked or mis-dropped).
+//
+// The optional operand is an *owned local* (`opt`), not a parameter: T0945
+// established that a borrowed value param's inner is owned by the caller and must
+// NOT be freed by the callee's inline result temp, so the typeSubst-drop branch
+// is only reached for owned operands. The owned local keeps that coverage intact.
 func TestT0935GenericInlineElvisTypeSubst(t *testing.T) {
 	ir := generateIR(t, `
 		sink(int n) { }
-		inline_len[T](T[]? a, T[] b) int {
-			return (a ?: b).len;
+		inline_len[T](~T seed, T[] b) int {
+			T[]? opt = [seed];
+			return (opt ?: b).len;
 		}
 		demo() {
-			int[]? a = [1, 2, 3];
 			int[] b = [9];
-			sink(inline_len(a, b));
+			sink(inline_len(1, b));
 		}
 	`)
 	// The mono name is quoted in IR (@"inline_len[int]"); pass embedded quotes so
@@ -111,11 +116,16 @@ func TestT0935GenericInlineElvisTypeSubst(t *testing.T) {
 // @Box.pick_len body must carry the path flag and drop the vector via
 // @Vector.drop — confirming the result type is resolved through SubstituteSelf
 // rather than mis-dropped.
+//
+// The optional operand is an *owned local* (`maybe`), not a parameter: per T0945
+// a borrowed value param's inner is owned by the caller, so the result-temp drop
+// branch (where selfSubst runs) is only reached for owned operands.
 func TestT0935StructuralDefaultInlineElvisSelfSubst(t *testing.T) {
 	ir := generateIR(t, `
 		type Fallbackable `+"`structural"+` {
 			tag() int `+"`abstract"+`;
-			pick_len(int[]? maybe, int[] fallback) int {
+			pick_len(int[] fallback) int {
+				int[]? maybe = [1, 2, 3];
 				return (maybe ?: fallback).len;
 			}
 		}
@@ -124,9 +134,8 @@ func TestT0935StructuralDefaultInlineElvisSelfSubst(t *testing.T) {
 		}
 		demo() {
 			b := Box();
-			int[]? a = [1, 2, 3];
 			int[] fb = [9];
-			s := b.pick_len(a, fb);
+			s := b.pick_len(fb);
 		}
 	`)
 	// The concrete-type synthesized default (not the Fallbackable template) is the
@@ -140,4 +149,36 @@ func TestT0935StructuralDefaultInlineElvisSelfSubst(t *testing.T) {
 	if strings.Contains(fn, "@promise_string_drop") {
 		t.Errorf("structural-default vector inline elvis must NOT call @promise_string_drop (T0935)\n%s", fn)
 	}
+}
+
+// TestT0945BorrowedParamInlineElvisNoDrop locks the T0945 fix: when the inline
+// elvis left operand is a *borrowed value parameter*, the some-path inner is
+// owned by the caller (which drops the param after the call), so the callee must
+// NOT free it via the inline result temp. The function body must therefore carry
+// neither the path-flag phi nor a @Vector.drop for the elvis result. Without the
+// fix this double-freed the heap buffer ("fatal: invalid free (bad header
+// magic)"); the static-vector cases merely masked it because @Vector.drop no-ops
+// on .rodata vectors.
+func TestT0945BorrowedParamInlineElvisNoDrop(t *testing.T) {
+	ir := generateIR(t, `
+		sink(int n) { }
+		borrowed_len[T](T[]? a, T[] b) int {
+			return (a ?: b).len;
+		}
+		demo() {
+			int[]? a = [1, 2, 3];
+			int[] b = [9];
+			sink(borrowed_len(a, b));
+		}
+	`)
+	fn := extractDefine(ir, `"borrowed_len[int]"`)
+	if fn == "" {
+		t.Fatal("could not extract monomorphized borrowed_len[int]")
+	}
+	// The result borrows on both paths (some: aliases the caller-owned param;
+	// none: aliases the borrowed default), so it is never tracked for drop.
+	if strings.Contains(fn, "call void @Vector.drop") {
+		t.Errorf("borrowed-param inline elvis must NOT drop its result (T0945)\n%s", fn)
+	}
+	assertNotContainsMatch(t, fn, elvisPathFlag)
 }

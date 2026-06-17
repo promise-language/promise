@@ -82,7 +82,18 @@ subcommands:
         TEMPORARY (T0803/T0804): build the host's thin+full variants, gzip them
         to the published asset names, compute a merge-aware SHA256SUMS, and
         upload the assets + install scripts to the prebuilts R2 bucket under
-        dist/. Backs the end-to-end install gate while the repo is private.`
+        dist/. Backs the end-to-end install gate while the repo is private.
+  cut next   [--dry-run] [--reason <text>] [--run-ci] [--no-ci-wait]
+  cut stable [--dry-run] [--reason <text>] [--run-ci] [--no-ci-wait] [--confirm-year]
+        gated release orchestrator (T0943, docs/release-automation.md §6.3).
+        cut next refreshes the moving epoch-next pre-release at HEAD; cut stable
+        derives the epoch (no --epoch flag), runs every gate, then tags, pushes,
+        and bumps catalog.toml — all only when every gate is green. --dry-run
+        prints the checklist and changes nothing. A gate may be bypassed only
+        with --reason "<text>", which is recorded into the tag/commit message.
+        --run-ci dispatches ci.yml for platforms with no run at the release SHA
+        (--no-ci-wait dispatches then stops); --confirm-year confirms a
+        year-rollover epoch non-interactively.`
 
 // RunRelease dispatches a `bin/release` subcommand.
 func RunRelease(root string, args []string) error {
@@ -107,6 +118,8 @@ func RunRelease(root string, args []string) error {
 		return runReleaseVerifyManifest(root, rest)
 	case "winlink":
 		return runReleaseWinlink(root, rest)
+	case "cut":
+		return runReleaseCut(root, rest)
 	case "-h", "--help", "help":
 		fmt.Println(releaseUsage)
 		return nil

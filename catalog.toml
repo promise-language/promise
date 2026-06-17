@@ -20,10 +20,10 @@ description = "File and directory I/O: File (open/create/append/read/write/close
 description = "JSON encoding and decoding: JsonEncoder, JsonDecoder, encode_string, decode_string"
 
 [modules.http]
-description = "HTTP client and server (placeholder — pending native networking support)"
+description = "HTTP client and server over the net module: Request/Response, methods, headers, send; Server with Handler, ServerRequest, and graceful shutdown"
 
 [modules.os]
-description = "Operating system interface: args, env, exit (placeholder — pending native PAL support)"
+description = "Operating system interface: args, env vars, one-shot execute, streaming Process (spawn/wait/kill) with stdin/stdout/stderr pipes, OS info (user/hostname/pid), and signal handling"
 
 [modules.time]
 description = "Time and duration operations (placeholder — pending native PAL support)"

@@ -2967,8 +2967,35 @@ func (c *Compiler) emitOptionalLocalValueDrop(optVal value.Value, elemType types
 			// emitTaskJoinAndFreeByDropFn falls back to the legacy spin
 			// (returns true) when not in a coroutine.
 		} else if isContainerType(elemType) || b.named == types.TypString {
-			// String, vector, channel: inner is i8*, call drop directly
-			c.block.NewCall(b.dropFunc, innerVal)
+			// String, vector, channel: inner is i8*, call drop directly.
+			// T0938: For a vector inner with droppable elements (e.g. string[]?),
+			// b.dropFunc is the generic Vector.drop which frees only the buffer.
+			// Mirror emitStringDropCall: walk and drop elements first, under the
+			// same bit-63 static-vector guard. Static .rodata vectors skip both
+			// the element drops and the buffer free.
+			resolved := elemType
+			if c.typeSubst != nil {
+				resolved = types.Substitute(resolved, c.typeSubst)
+			}
+			if vecElem, isVec := types.AsVector(resolved); isVec {
+				headerType := vectorHeaderType()
+				headerPtr := c.block.NewBitCast(innerVal, irtypes.NewPointer(headerType))
+				rawLen := loadVectorLenRaw(c.block, headerPtr)
+				bit63 := c.block.NewAnd(rawLen, constant.NewInt(irtypes.I64, math.MinInt64))
+				isStatic := c.block.NewICmp(enum.IPredNE, bit63, constant.NewInt(irtypes.I64, 0))
+				vecDoneBlock := c.newBlock("optvecdrop.done")
+				nonStaticBlock := c.newBlock("optvecdrop.nonstatic")
+				c.block.NewCondBr(isStatic, vecDoneBlock, nonStaticBlock)
+
+				c.block = nonStaticBlock
+				c.emitVectorElementDropLoop(innerVal, vecElem)
+				c.block.NewCall(b.dropFunc, innerVal)
+				c.block.NewBr(vecDoneBlock)
+
+				c.block = vecDoneBlock
+			} else {
+				c.block.NewCall(b.dropFunc, innerVal)
+			}
 		} else {
 			// User type: inner is value struct {vtable, instance}, extract instance ptr
 			instance := c.extractInstancePtr(innerVal)

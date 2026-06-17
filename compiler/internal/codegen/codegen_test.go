@@ -23126,6 +23126,49 @@ func TestOptionalLocalVectorDrop(t *testing.T) {
 	assertContains(t, ir, "Vector.drop")
 }
 
+// T0938: Optional local with a vector inner whose elements are droppable
+// (string[]?) must walk and drop elements before freeing the buffer, under a
+// bit-63 static-vector guard — mirroring the non-optional emitStringDropCall
+// path. Without this, only the buffer is freed and the elements leak.
+func TestOptionalLocalVectorStringElementDrop(t *testing.T) {
+	ir := generateIR(t, `
+		dropfn_str() {
+			string[] v = [];
+			v.push("a");
+			string[]? a = v;
+		}
+		main() { dropfn_str(); }
+	`)
+	fn := extractFunction(ir, "__user.dropfn_str")
+	assertContains(t, fn, "optdrop.check")
+	assertContains(t, fn, "optdrop.inner")
+	// Static-vector guard: bit-63 mask before deciding to drop elements/buffer.
+	assertContains(t, fn, "optvecdrop.nonstatic")
+	assertContains(t, fn, "-9223372036854775808")
+	// Element-drop loop runs before the buffer free.
+	assertContains(t, fn, "vecdrop.head")
+	assertContains(t, fn, "call void @promise_string_drop")
+	assertContains(t, fn, "Vector.drop")
+}
+
+// T0938: A non-droppable element type (int[]?) must NOT emit a string element
+// drop loop — only the buffer free path under the static guard.
+func TestOptionalLocalVectorIntNoElementDrop(t *testing.T) {
+	ir := generateIR(t, `
+		dropfn_int() {
+			int[] v = [];
+			v.push(7);
+			int[]? a = v;
+		}
+		main() { dropfn_int(); }
+	`)
+	fn := extractFunction(ir, "__user.dropfn_int")
+	assertContains(t, fn, "optvecdrop.nonstatic")
+	// No element-drop loop and no string drop inside the function for non-droppable ints.
+	assertNotContains(t, fn, "vecdrop.head")
+	assertNotContains(t, fn, "call void @promise_string_drop")
+}
+
 // T0111: Force unwrap of optional field access dups the string via dupStringFieldAccess
 func TestOptionalFieldForceUnwrapDupsString(t *testing.T) {
 	ir := generateIR(t, `

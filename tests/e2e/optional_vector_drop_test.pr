@@ -176,3 +176,72 @@ test_multiple_overwrites_string() `test {
   v[0] = "fo" + "urth";
   assert(v[0] is present, "slot 0 present after multiple overwrites");
 }
+
+// === T0938: Optional vector with droppable elements (T[]?) ===
+// The inverse of Vector[T?]: an optional whose inner is a vector of
+// droppable elements. Scope-exit drop of the optional must walk and drop
+// the vector's elements before freeing the buffer, else the elements leak.
+
+// The exact repro: never-read string[]? dropped at scope exit.
+t_opt_vector_str() `test {
+  string[] v = [];
+  v.push("a" + "b");
+  string[]? a = v; // never read; dropped at scope exit -> must not leak "ab"
+  assert(true, "no leak on scope-exit drop of string[]?");
+}
+
+// Nested droppable elements: string[][]? never read.
+t_opt_vector_str_nested() `test {
+  string[] inner = [];
+  inner.push("x" + "y");
+  string[][] v = [];
+  v.push(inner);
+  string[][]? a = v; // never read; dropped at scope exit
+  assert(true, "no leak on scope-exit drop of string[][]?");
+}
+
+// Non-droppable elements: int[]? never read — guard against double-processing.
+t_opt_vector_int() `test {
+  int[] v = [];
+  v.push(7);
+  int[]? a = v; // never read; dropped at scope exit
+  assert(true, "no leak on scope-exit drop of int[]?");
+}
+
+// Static .rodata vector inner — exercises the static-skip branch.
+t_opt_vector_static() `test {
+  int[]? a = [1, 2, 3]; // static literal; never read
+  assert(true, "static int[]? dropped without buffer free");
+}
+
+// Present-path read then scope-exit drop — guard the some path still drops.
+t_opt_vector_str_read() `test {
+  string[] v = [];
+  v.push("c" + "d");
+  string[]? a = v;
+  assert(a is present, "string[]? present");
+  string[] got = a!;
+  assert(got[0] == "cd", "element preserved through read");
+}
+
+// Monomorphized generic: T[]? inside a generic function where T resolves to a
+// droppable type (string). Exercises the c.typeSubst substitution branch in
+// emitOptionalLocalValueDrop at runtime — elements must drop, no leak.
+wrap_opt_vector[T](T[] v) {
+  T[]? a = v; // never read; dropped at scope exit
+  assert(true, "generic T[]? dropped");
+}
+
+t_opt_vector_generic_str() `test {
+  string[] s = [];
+  s.push("p" + "q");
+  wrap_opt_vector[string](s); // T = string -> droppable elements
+}
+
+// Same generic path with a non-droppable element type — guard the mono path
+// does not over-drop ints.
+t_opt_vector_generic_int() `test {
+  int[] s = [];
+  s.push(9);
+  wrap_opt_vector[int](s); // T = int -> no element drop
+}

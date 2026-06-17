@@ -7456,6 +7456,42 @@ func TestUseVarDeclStructuralClose(t *testing.T) {
 	`)
 }
 
+func TestUseVarDeclFailableInitAutoPropagates(t *testing.T) {
+	// GitHub #3: a bare failable call as a `use` initializer in a failable
+	// function auto-propagates its error, exactly like a normal var decl — OK.
+	checkOK(t, `
+		type Res {
+			int id;
+			make!(int id) Res `+"`"+`factory { return Res(id: id); }
+			close!(~this) {}
+		}
+		open!() int {
+			use r := Res.make(7);
+			return r.id;
+		}
+		main() {}
+	`)
+}
+
+func TestUseVarDeclFailableInitNonFailableFn(t *testing.T) {
+	// GitHub #3: a bare failable call as a `use` initializer in a NON-failable
+	// function must be rejected with the standard "must be handled" diagnostic
+	// (previously this slipped through sema and panicked codegen).
+	errs := checkErrs(t, `
+		type Res {
+			int id;
+			make!(int id) Res `+"`"+`factory { return Res(id: id); }
+			close!(~this) {}
+		}
+		open() int {
+			use r := Res.make(7);
+			return r.id;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
 // --- Getter/Setter same name regression ---
 
 func TestGetterSetterSameName(t *testing.T) {

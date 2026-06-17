@@ -78,6 +78,13 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.compiler) }}
     runs-on: ${{ matrix.runner }}
+    # `bin/release build` embeds resources, which regenerates the winlink import
+    # libs via the build-only llvm-dlltool — self-fetched through
+    # `gh release download` from deps-llvm-<version>. That needs GH_TOKEN, so set
+    # it job-wide (the thin/full build steps run gh before the explicit
+    # fetch-blobs step does). Read-only GITHUB_TOKEN suffices for asset downloads.
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:

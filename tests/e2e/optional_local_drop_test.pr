@@ -69,6 +69,39 @@ test_optional_local_vector_none() `test {
   assert(v is absent, "none vector optional");
 }
 
+// --- T0938: optional vector with DROPPABLE elements must walk elements on drop ---
+// Pre-fix, the optional drop freed only the buffer (generic Vector.drop) and
+// leaked the droppable elements. Mirrors the non-optional vector drop path,
+// which walks elements before the buffer free.
+
+test_optional_local_vector_string_never_read() `test {
+  string[] v = [];
+  v.push("p" + "q");
+  string[]? a = v;
+  // a is never read; scope-exit drop must free the "pq" element AND the buffer.
+  assert(true, "no leak: optional string-vector element walked on drop");
+}
+
+test_optional_local_vector_string_read() `test {
+  string[] v = [];
+  v.push("a" + "b");
+  v.push("c" + "d");
+  string[]? a = v;
+  assert(a!.len == 2, "optional string-vector len");
+  // a freed at scope exit; both string elements must be dropped.
+}
+
+test_optional_local_vector_nested_string() `test {
+  string[] inner = [];
+  inner.push("x" + "y");
+  string[][] outer = [];
+  outer.push(inner);
+  string[][]? a = outer;
+  // Nested droppable elements: the inner string vectors (and their string
+  // elements) must all be walked on the optional's scope-exit drop.
+  assert(a!.len == 1, "optional nested string-vector len");
+}
+
 // --- Force unwrap of field access dups the string ---
 
 type Wrapper {

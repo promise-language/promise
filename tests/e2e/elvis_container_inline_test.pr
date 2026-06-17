@@ -1,0 +1,151 @@
+// T0935: Inline (used/discarded, not bound) elvis `?:` whose result is a
+// container (Vector[T]/T[]) must drop the result with the correct, path-aware
+// drop function. Previously the inline result was tracked as a *string* temp and
+// dropped via promise_string_drop, which read the static flag at the wrong offset
+// for a vector layout and called free() on a .rodata buffer:
+//   fatal: invalid free (bad header magic)
+// The fix routes the inline elvis result through Vector.drop (honors the bit-63
+// static flag, walks droppable elements) with a path-dependent drop flag: free on
+// the some-path (owns the moved inner), no-op on the none-path (borrows default).
+// --- static .rodata int[] operands (the reported repro) ---
+t_static_some() `test {
+  int[]? a = [1, 2, 3];
+  int[] b = [9];
+  assert((a ?: b).len == 3, "static some");
+}
+
+t_static_none() `test {
+  int[]? a = none;
+  int[] b = [9];
+  assert((a ?: b).len == 1, "static none");
+}
+
+// --- heap (push-built, bit-63 clear) int[] operands ---
+
+t_heap_some() `test {
+  int[] av = [];
+  av.push(1);
+  av.push(2);
+  av.push(3);
+  int[]? a = av;
+  int[] b = [];
+  b.push(9);
+  assert((a ?: b).len == 3, "heap some");
+}
+
+t_heap_none() `test {
+  int[]? a = none;
+  int[] b = [];
+  b.push(9);
+  assert((a ?: b).len == 1, "heap none");
+}
+
+// --- string[] operands: the result drop must walk droppable elements (leak
+// guard) and free exactly once (some-path) or not at all (none-path). ---
+
+t_strvec_some() `test {
+  string[] av = [];
+  av.push("x" + "y");
+  av.push("z" + "w");
+  string[]? a = av;
+  string[] b = [];
+  b.push("d" + "e");
+  assert((a ?: b).len == 2, "strvec some");
+}
+
+t_strvec_none() `test {
+  string[]? a = none;
+  string[] b = [];
+  b.push("d" + "e");
+  assert((a ?: b).len == 1, "strvec none");
+}
+
+// --- none-path operand reuse (use-after-free guard): the borrowed default `b`
+// must survive after an inline elvis that took the none path. ---
+
+t_reuse_none() `test {
+  int[]? a = none;
+  int[] b = [9];
+  x := (a ?: b).len;
+  y := b.len;
+  assert(x == 1, "reuse x");
+  assert(y == 1, "reuse y");
+}
+
+// --- bound form must remain correct (claims the temp; variable drop handles it) ---
+
+t_bound() `test {
+  int[]? a = [1, 2, 3];
+  int[] b = [9];
+  m := a ?: b;
+  assert(m.len == 3, "bound");
+}
+
+// --- string inline elvis regression guard (the string path was always correct) ---
+
+t_string_inline() `test {
+  string? a = "hello";
+  assert((a ?: "x").len == 5, "string inline");
+}
+
+// --- generic-function context: the inline elvis result type (T[]) is resolved
+// through c.typeSubst when the generic function is monomorphized. Both paths
+// must be correct and leak-free for the concrete vector type. ---
+
+inline_len[T](T[]? a, T[] b) int {
+  return (a ?: b).len;
+}
+
+t_generic_some() `test {
+  int[]? a = [1, 2, 3];
+  int[] b = [9];
+  assert(inline_len(a, b) == 3, "generic some");
+}
+
+t_generic_none() `test {
+  int[]? a = none;
+  int[] b = [9];
+  assert(inline_len(a, b) == 1, "generic none");
+}
+
+// generic with droppable element type (string[]): the result drop must walk
+// elements via the substituted Vector.drop (leak guard across monomorphization).
+t_generic_strvec_some() `test {
+  string[] av = [];
+  av.push("p" + "q");
+  string[]? a = av;
+  string[] b = [];
+  b.push("r" + "s");
+  assert(inline_len(a, b) == 1, "generic strvec some");
+}
+
+// --- structural-interface default-method context: the default body is
+// synthesized per concrete type with c.selfSubst active. The `this.base()`
+// none-path operand introduces a panic-check block, so the result-temp's
+// path-flag phi takes its none-incoming from that block — exercising the
+// non-elvis-labeled predecessor variant. Both paths must be leak-free. ---
+
+type HasFallback `structural {
+  base() int[] `abstract;
+  resolved_len(int[]? maybe) int {
+    return (maybe ?: this.base()).len;
+  }
+}
+
+type Config is HasFallback {
+  base() int[] {
+    return[7, 8];
+  }
+}
+
+t_struct_default_some() `test {
+  c := Config();
+  int[]? a = [1, 2, 3];
+  assert(c.resolved_len(a) == 3, "struct default some");
+}
+
+t_struct_default_none() `test {
+  c := Config();
+  int[]? a = none;
+  assert(c.resolved_len(a) == 2, "struct default none");
+}

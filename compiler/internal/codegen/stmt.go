@@ -4932,24 +4932,34 @@ func (c *Compiler) trackTempWithDrop(val value.Value, dropFn *ir.Func) {
 		return
 	}
 
+	// An ordinary temp is unconditionally live where it is created (flag = 1).
+	c.appendStmtTemp(val, dropFn, nil, constant.NewInt(irtypes.I1, 1))
+}
+
+// appendStmtTemp records a statement temp for cleanup at statement end: an
+// entry-block i8* alloca (init null) + i1 drop flag (init false) for defined
+// values on untaken paths (B0168), then stores val + liveFlag in the CURRENT
+// block. liveFlag is the i1 "this temp owns its value here" flag — a constant 1
+// for ordinary temps (trackTempWithDrop), or a per-branch phi for elvis results
+// (trackElvisResultTemp, T0935: owned on the some-path, borrowed on the none-path).
+// elemType (vector element type, nil otherwise) drives the per-element drop loop
+// in cleanupStmtTemps. Callers own the guards (tempTrackingEnabled, i8* type,
+// terminated-block, double-track) before calling this.
+func (c *Compiler) appendStmtTemp(val value.Value, dropFn *ir.Func, elemType types.Type, liveFlag value.Value) {
 	// Create entry-block allocas via createEntryAlloca (handles coroutine layout).
-	// Initialize alloca to null and flag to false in the ENTRY block so that temps
-	// created inside branches have defined values on untaken paths (B0168).
+	// The entry block's Insts list is separate from its Term, so appending stores
+	// after allocas is safe.
 	alloca := c.createEntryAlloca(irtypes.I8Ptr)
 	dropFlag := c.createEntryAlloca(irtypes.I1)
-
-	// Entry-block initialization: ensures defined values even if this branch is
-	// never taken at runtime. The entry block's Insts list is separate from its
-	// Term, so appending stores after allocas is safe.
 	c.entryBlock.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
 	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
 
 	// Store value and set flag in current block.
 	c.block.NewStore(val, alloca)
-	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.block.NewStore(liveFlag, dropFlag)
 
 	idx := len(c.stmtTemps)
-	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag, dropFunc: dropFn})
+	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag, dropFunc: dropFn, elemType: elemType})
 	c.stmtTempMap[val] = idx
 }
 

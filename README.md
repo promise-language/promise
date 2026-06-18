@@ -8,7 +8,7 @@ Statically-typed language designed for AI-agent efficiency. Explicit ownership (
 
 **Self-contained toolchain.** The compiler is a single Go binary that bundles the standard library, catalog modules, and runtime. Install with `curl -sSf https://github.com/promise-language/promise/releases/latest/download/install.sh | sh` — a small (~15MB) download that then sets up the LLVM 22 toolchain it builds with (a one-time fetch, cached under `~/.promise`) — then keep it current with `promise update`. No system dependencies beyond a linker. Multiple epochs can coexist side-by-side under `~/.promise/epochs/`.
 
-**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules are separate compilation units cached as LLVM bitcode for fast incremental builds. Implemented today: `io`, `json`, `os`, `net`, `path`, `math`, `strings`, `time`, `http`, `gzip`, `markdown`, `msgpack`, `toml`, `yaml`. Planned (design only): `ai`, `auth`, `cloud`, `mcp`, `sandbox`, `schema`, `term`.
+**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules are separate compilation units cached as LLVM bitcode for fast incremental builds. Implemented today: `io`, `json`, `os`, `net`, `path`, `math`, `strings`, `http`, `gzip`. Planned: `ai`, `auth`, `cloud`, `markdown`, `mcp`, `msgpack`, `sandbox`, `schema`, `term`, `time`, `toml`, `yaml`.
 
 ## Example
 

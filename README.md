@@ -6,9 +6,9 @@ Statically-typed language designed for AI-agent efficiency. Explicit ownership (
 
 **Mono-versioned catalog.** Promise eliminates dependency hell entirely. There are no per-package versions, no lockfiles, no version resolution. Instead, the entire ecosystem — compiler, standard library, and all catalog modules — ships as a single atomic release called an **epoch** (e.g., `2026.0`). Every module in an epoch is tested together as a unit. Your project declares which epoch it targets in `promise.toml`, and that's it. An AI agent only needs to know the epoch to generate correct imports — no version guessing, no compatibility reasoning, no `package.json` / `Cargo.toml` / `go.mod` boilerplate.
 
-**Self-contained toolchain.** The compiler is a single Go binary (~61MB release build) that embeds everything: LLVM tools, standard library, catalog modules, and runtime. `promise sync` downloads one file. `promise install` extracts it. No system dependencies beyond a linker. Multiple epochs can coexist side-by-side under `~/.promise/epochs/`.
+**Self-contained toolchain.** The compiler is a single Go binary that bundles the standard library, catalog modules, and runtime. Install with `curl -sSf https://promise-lang.org/install.sh | sh` — a small (~15MB) download that then sets up the LLVM 22 toolchain it builds with (a one-time fetch, cached under `~/.promise`) — then keep it current with `promise update`. No system dependencies beyond a linker. Multiple epochs can coexist side-by-side under `~/.promise/epochs/`.
 
-**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules (`io`, `json`, `os`, `net`, `path`, `math`, `strings`, `time`, `term`, `http`) are separate compilation units cached as LLVM bitcode for fast incremental builds.
+**Modules without ceremony.** Import a catalog module with `use io;` — no URL, no version, no path. The standard library (`std`) is auto-imported into every file. Catalog modules are separate compilation units cached as LLVM bitcode for fast incremental builds. Implemented today: `io`, `json`, `os`, `net`, `path`, `math`, `strings`, `time`, `http`, `gzip`, `markdown`, `msgpack`, `toml`, `yaml`. Planned (design only): `ai`, `auth`, `cloud`, `mcp`, `sandbox`, `schema`, `term`.
 
 ## Example
 
@@ -46,7 +46,7 @@ main() {
 
 **WARNING: Under active development, not for production use.**
 
-The compiler is functional end-to-end: parsing, type checking, ownership analysis, and LLVM IR codegen all work. 3600+ tests across 350+ files. Modules, generics, concurrency, and the standard library are implemented. Active development.
+The compiler is functional end-to-end: parsing, type checking, ownership analysis, and LLVM IR codegen all work. Modules, generics, concurrency, and the standard library are implemented and covered by an extensive test suite. Active development.
 
 ## Building
 
@@ -137,7 +137,7 @@ promise/
 │   │   └── parser/              # ANTLR4-generated Go code (gitignored)
 │   ├── testdata/                # Parse test fixtures
 │   └── tools/                   # ANTLR4 JAR (gitignored)
-├── modules/
+├── modules/                     # Catalog modules (separate compilation units)
 │   ├── std/                     # Standard library (auto-imported)
 │   ├── io/                      # File I/O
 │   ├── json/                    # JSON encode/decode
@@ -147,8 +147,13 @@ promise/
 │   ├── math/                    # Extended math
 │   ├── strings/                 # Extended string utilities
 │   ├── time/                    # Extended time utilities
-│   ├── term/                    # Terminal UI (raw mode, cell buffer, events)
-│   └── http/                    # HTTP client (in progress)
+│   ├── http/                    # HTTP client
+│   ├── gzip/                    # gzip/DEFLATE compression
+│   ├── markdown/                # Markdown parsing
+│   ├── msgpack/                 # MessagePack encode/decode
+│   ├── toml/                    # TOML parsing
+│   ├── yaml/                    # YAML parsing
+│   └── (ai, auth, cloud, mcp, sandbox, schema, term — planned, design only)
 ├── tests/                       # Integration and e2e tests
 ├── examples/                    # Runnable examples
 ├── bin/                         # Build tools (compiled by ./make)

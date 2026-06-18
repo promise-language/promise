@@ -912,13 +912,13 @@ API surface and the semantic signal of `use`, not about compilation mechanics.
 
 These need resolution before implementation:
 
-**Q1: `IoError.message()` source**
+**Q1: `IoError.message` source**
 Use `strerror` (libc, locale-aware, one call) or a manual switch over the top-20 errno values?
 **Lean**: manual table — keeps binaries fully self-contained and avoids locale dependency. Fallback
 string `"errno {code}"` for unrecognized values.
 
 **Q2: `IoError` vs `OsError` — is this split worth it?**
-Both carry an `int code` and a `message()`. One shared `SysError is error` type (in a new thin
+Both carry an `int code` and a `message` property. One shared `SysError is error` type (in a new thin
 `std/sys.pr`) avoids the duplication. But it bleeds OS error types into `std/`.
 **Lean**: keep them separate in their respective modules — the type system makes them
 distinguishable; programs that handle errors from both can use the base `error` type for shared

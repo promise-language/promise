@@ -1675,7 +1675,7 @@ In a **non-failable function**, calling a failable function without handling is 
 main() {
   // Handle with ? — block must provide recovery value or diverge (return/panic)
   string content = readFile("data.txt") ? e {
-    io.print_line("Failed: {e.message()}");
+    io.print_line("Failed: {e.message}");
     return;
   };
 
@@ -1751,7 +1751,7 @@ To inspect both the value and error without propagation, destructure into a tupl
 ```promise
 (content, err) := readFile("data.txt");
 if err is present {
-  io.print_line("Failed: {err.message()}");
+  io.print_line("Failed: {err.message}");
 } else {
   io.print_line(content);
 }
@@ -3646,7 +3646,7 @@ loadFromFile!(string &path) TodoList {
 
 main() {
   TodoList todos = loadFromFile("todos.json") ? err {
-    io.print_line("Starting fresh: {err.message()}");
+    io.print_line("Starting fresh: {err.message}");
     TodoList(items: []);
   };
 

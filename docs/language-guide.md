@@ -221,7 +221,7 @@ main() {
 
   // Handle with error binding
   string data = read_config("app.cfg") ? e {
-    print_line("Error: {e.message()}");
+    print_line("Error: {e.message}");
     return;
   };
 
@@ -525,7 +525,7 @@ divide(int a, int b) (int, int) {
 // Capturing raw failable result (value, error) as tuple
 (content, err) := read_file("data.txt");
 if err is present {
-  print_line("Error: {err.message()}");
+  print_line("Error: {err.message}");
 }
 ```
 

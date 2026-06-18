@@ -64,7 +64,7 @@ readFile!(String path) String {
 
 processFile!(String path) String {
   String content = readFile(path) ? e {
-    return "failed: " + e.message();
+    return "failed: " + e.message;
   };
   return content;
 }

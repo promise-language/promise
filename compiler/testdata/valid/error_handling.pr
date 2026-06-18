@@ -16,7 +16,7 @@ forceRead(String path) String {
 // Error handler with named binding
 safeRead(String path) String {
   String content = readAll(path) ? e {
-    return "error: " + e.message();
+    return "error: " + e.message;
   };
   return content;
 }

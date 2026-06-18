@@ -11226,6 +11226,17 @@ func TestPropertyCalledAsMethodMap(t *testing.T) {
 	expectError(t, errs, "not a method")
 }
 
+func TestPropertyCalledAsMethodErrorMessage(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			e := error(message: "oops");
+			print_line(e.message());
+		}
+	`)
+	expectError(t, errs, "is a property")
+	expectError(t, errs, "not a method")
+}
+
 // --- `global and `mono placement tests ---
 
 func TestGlobalMethodBasic(t *testing.T) {

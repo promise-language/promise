@@ -1069,9 +1069,11 @@ t_task_await_some() `test(exclude: wasm) {
 // borrowed-param: the orphan gate skips tracking, so the discarded inline result
 // borrows the selected task and the caller owns + joins both. (The await form
 // `<-(a ?: b)` is NOT used here — awaiting consumes the handle, which a borrowed
-// source must not do; that pattern crashes at HEAD independent of this fix (the
-// orphan gate doesn't track it), filed as T0953 — await-on-borrowed-task
-// double-consume.)
+// source must not do. T0953 (resolved) now makes that form a compile-time ownership
+// error — `cannot await borrowed task ...` — rather than the HEAD SEGV, so it can no
+// longer be a runtime test; the rejection is covered by the Go ownership tests
+// (TestT0953_*). This discard form stays as the runtime test for the legal
+// non-consuming borrowed-source path.)
 borrowed_task_discard(Task[int]? a, Task[int] b) {
   (a ?: b);
 }

@@ -10354,6 +10354,206 @@ func TestT0837_GetterReturningHandleOutOfBorrowAllowed(t *testing.T) {
 	`)
 }
 
+// === T0953: awaiting a BORROWED-source Task double-consumes the handle ===
+//
+// `<-` (await) on a Task is a *consuming* op (joins the goroutine, frees the G
+// struct + result buffer). Awaiting a task the current function does NOT own — a
+// bare borrowed ident (`<-a`) or an inline elvis whose selected operand is a borrow
+// (`<-(a ?: b)`) — double-joins/double-frees with the real owner's drop → SEGV.
+// rejectMemberHandleMoveOutOfBorrow (T0837) only sees member/index/transient owners;
+// rejectBorrowedTaskAwait closes the bare-ident and elvis holes. The IsTask gate
+// keeps non-consuming borrowed-Channel receive (also `<-`) legal.
+
+// Reject: the repro — awaiting an inline elvis whose `a` operand is a borrowed param.
+func TestT0953_AwaitBorrowedElvisParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		await_it(Task[int]? a, Task[int] b) int {
+			return <-(a ?: b);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot await borrowed task")
+}
+
+// Reject: the adjacent hole — awaiting a bare borrowed Task param (`<-a`).
+func TestT0953_AwaitBareBorrowedTaskParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		await_it(Task[int] a) int {
+			return <-a;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot await borrowed task")
+}
+
+// Reject: only the elvis RIGHT operand is borrowed (owned-optional left selects to
+// the borrowed default on the none-path) — recursion must check both operands.
+func TestT0953_AwaitBorrowedElvisRightOperandRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		await_it(Task[int] b) int {
+			Task[int]? local = go worker();
+			return <-(local ?: b);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot await borrowed task")
+}
+
+// Accept: owned-local elvis source — state is Owned, not Borrowed, so not rejected.
+func TestT0953_AwaitOwnedLocalElvisAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		test() {
+			a := go worker();
+			b := go worker();
+			Task[int]? oa = a;
+			_ = <-(oa ?: b);
+		}
+	`)
+}
+
+// Accept: owned-local direct await.
+func TestT0953_AwaitOwnedLocalDirectAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		test() {
+			b := go worker();
+			_ = <-b;
+		}
+	`)
+}
+
+// Accept: borrowed-Channel receive (also spelled `<-`) is NON-consuming — the IsTask
+// gate must not fire on it.
+func TestT0953_BorrowedChannelReceiveAllowed(t *testing.T) {
+	ownerOK(t, `
+		recv(Channel[int] ch) int { return (<-ch) ?: -1; }
+		test() {}
+	`)
+}
+
+// Accept: an owned `~Task` move-in param IS awaitable — the remedy works.
+func TestT0953_AwaitOwnedMoveParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		f(~Task[int] a) int { return <-a; }
+		test() {}
+	`)
+}
+
+// Reject: an if-expr surfacing a borrowed Task param (`<-(if c { a } else { b })`).
+// Codegen forwards the selected branch value directly, so the borrowed task reaches
+// the consuming `<-` unchanged — same crash class as the elvis form. The walker must
+// recurse into both branch blocks (mirrors findBorrowedNonAliasSafeIdent).
+func TestT0953_AwaitBorrowedIfExprRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		await_it(Task[int] a, Task[int] b, bool c) int {
+			return <-(if c { a } else { b });
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot await borrowed task")
+}
+
+// Reject: a match-expr surfacing a borrowed Task param. Both arm bodies (and arm
+// blocks) must be walked.
+func TestT0953_AwaitBorrowedMatchExprRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		await_it(Task[int] a, Task[int] b, int sel) int {
+			return <-(match sel { 0 => a, _ => b });
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot await borrowed task")
+}
+
+// Reject: force-unwrap of a borrowed optional Task param (`<-(a!)`). peelAwaitWrappers
+// peels the `!` so the borrowed ident leaf is reached.
+func TestT0953_AwaitForceUnwrapBorrowedOptParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		await_it(Task[int]? a) int {
+			return <-(a!);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot await borrowed task")
+}
+
+// Reject: a single-owner handle field read out of a borrowed owner as an elvis
+// operand (`<-(h.tsk ?: local)`). The member leaf delegates to the T0837 reject —
+// rejectMemberHandleMoveOutOfBorrow — so the diagnostic is the field-move message,
+// not the borrowed-ident message. Distinct from TestT0837_TaskAwaitOutOf* (direct
+// `<-(h.tsk!)`): here the member is buried inside an elvis whose other operand is
+// owned, the hole that the unified await walker closes.
+func TestT0953_AwaitMemberOutOfBorrowElvisOperandRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		type Holder { Task[int]? tsk; drop(~this) {} }
+		await_it(Holder &h) int {
+			Task[int] local = go worker();
+			return <-(h.tsk ?: local);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move single-owner handle field")
+}
+
+// Accept: an if-expr over owned locals is NOT falsely rejected — the walker must only
+// fire on Borrowed leaves. (Ownership-only acceptance; the owned-await runtime path is
+// exercised by the e2e suite.)
+func TestT0953_AwaitOwnedIfExprAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		test() {
+			a := go worker();
+			b := go worker();
+			c := true;
+			_ = <-(if c { a } else { b });
+		}
+	`)
+}
+
+// Reject: a block-bodied match arm surfacing a borrowed Task param
+// (`<-(match sel { 0 => { a }, _ => { b } })`). The expression-arm form is covered by
+// TestT0953_AwaitBorrowedMatchExprRejected; this exercises the arm.Block path of the
+// walker (rejectAwaitNonOwnedSourceInBlock), which recurses into the block's trailing
+// result expression. Codegen forwards the selected arm's block value directly, so a
+// borrowed task reaches the consuming `<-` unchanged — same crash class.
+func TestT0953_AwaitBorrowedMatchBlockArmRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		await_it(Task[int] a, Task[int] b, int sel) int {
+			return <-(match sel { 0 => { a }, _ => { b } });
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot await borrowed task")
+}
+
+// Accept: a match-expr over owned locals is NOT falsely rejected — the walker visits
+// both arms, finds only Owned leaves, and falls through (return false after the arm
+// loop). Mirrors TestT0953_AwaitOwnedIfExprAllowed for the match shape. Ownership-only
+// acceptance: the owned-match-await *runtime* path currently double-frees in codegen
+// (genValueMatch omits the arm-result drop-flag clear that genEnumMatch performs),
+// filed separately as T0975; ownership correctly accepts it (owned operands).
+func TestT0953_AwaitOwnedMatchExprAllowed(t *testing.T) {
+	ownerOK(t, `
+		worker() int { return 42; }
+		test() {
+			a := go worker();
+			b := go worker();
+			sel := 0;
+			_ = <-(match sel { 0 => a, _ => b });
+		}
+	`)
+}
+
 // === T0841: moving/consuming a single-owner handle out of a TRANSIENT owner ===
 //
 // Sibling hole to T0837: the same move/consume out of a transient owner (a

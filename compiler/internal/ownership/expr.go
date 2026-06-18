@@ -48,11 +48,18 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 
 	case *ast.UnaryExpr:
 		c.checkExpr(e.Operand)
-		// T0837: `<-(borrowed.tsk!)` consumes/frees the G through a shared borrow.
-		// The receive does not flow through tryMove/tryMoveConsume, so reject the
-		// out-of-borrow consume here. No-op for channel receives (not single-owner).
+		// T0837/T0953: `<-` (await) is a *consuming* op on a Task — genReceiveTask
+		// joins the goroutine and frees the G struct + result buffer. Awaiting a Task
+		// the current function does not own (a borrowed ident, or a single-owner
+		// handle field read out of a borrowed/transient owner) double-joins/double-
+		// frees with the real owner's drop → SEGV. The receive does not flow through
+		// tryMove/tryMoveConsume, so reject the out-of-borrow consume here.
+		// rejectBorrowedTaskAwait walks every transparent wrapper the receive surfaces
+		// the Task through (paren, force-unwrap, elvis, if/else, match). No-op for
+		// channel receives — the IsTask gate keeps them legal (Channel `<-` is
+		// non-consuming).
 		if e.Op == ast.UnaryReceive {
-			c.rejectMemberHandleMoveOutOfBorrow(e.Operand)
+			c.rejectBorrowedTaskAwait(e.Operand)
 		}
 
 	case *ast.IndexExpr:
@@ -1640,6 +1647,112 @@ func (c *Checker) rejectMemberHandleMoveOutOfBorrow(expr ast.Expr) bool {
 		"cannot move single-owner handle field '%s' (%s) out of borrowed '%s'; the real owner still drops it, so moving/consuming the handle here would double-free — %s",
 		member.Field, c.info.Types[member].String(), rootName, remedy)
 	return true
+}
+
+// rejectBorrowedTaskAwait rejects `<-` (await) on a Task[T] the current function
+// does not own. `<-` on a Task is a *consuming* op: genReceiveTask joins the
+// goroutine and frees the G struct + result buffer. If the awaited Task is not
+// owned here — a borrowed ident (`<-a`), an inline elvis whose selected operand is
+// a borrow (`<-(a ?: b)`), or a single-owner handle field read out of a borrowed/
+// transient owner (`<-(borrowed.tsk!)`) — the real owner still drops (joins+frees)
+// it at scope exit, so awaiting it here double-joins/double-frees the same G → SEGV
+// (T0837/T0953).
+//
+// The IsTask gate is essential: Channel receive is also spelled `<-` but is
+// non-consuming, so borrowed-channel receives must stay legal. The gate is keyed on
+// the operand's static type — for elvis/if/match operands that is the merged result
+// type (Task vs Channel), so the whole receive is classified correctly.
+func (c *Checker) rejectBorrowedTaskAwait(operand ast.Expr) {
+	if !types.IsTask(c.info.Types[unwrapDestructureParens(operand)]) {
+		return
+	}
+	c.rejectAwaitNonOwnedSource(operand)
+}
+
+// rejectAwaitNonOwnedSource walks an awaited Task operand through every transparent
+// wrapper the receive surfaces the handle through and rejects the first non-owned
+// leaf. Returns true once a leaf is rejected so recursion short-circuits (one error
+// per await). Wrappers peeled/recursed: paren and force-unwrap (`!`, via
+// peelAwaitWrappers), elvis (`?:`), if/else, match. Leaves:
+//   - IdentExpr in Borrowed state → reject (the caller still owns + drops the task).
+//   - member / index / transient owner → delegate to rejectMemberHandleMoveOutOfBorrow
+//     (T0837), which rejects a single-owner handle field read out of a borrowed or
+//     transient owner and leaves owned-owner reads (`~this`, owned local, owned
+//     container element) legal.
+//
+// The if/match recursion mirrors findBorrowedNonAliasSafeIdent: codegen forwards the
+// branch/arm value directly, so a non-owned Task surfaced through any branch reaches
+// the consuming `<-` as the same alias the real owner still drops.
+func (c *Checker) rejectAwaitNonOwnedSource(expr ast.Expr) bool {
+	expr = peelAwaitWrappers(expr)
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		if c.state[e.Name] != Borrowed {
+			return false
+		}
+		kind := "value"
+		if c.params[e.Name] {
+			kind = "parameter"
+		}
+		c.errorf(e.Pos(),
+			"cannot await borrowed task %s '%s'; `<-` consumes (joins and frees) the task, but the owner still drops it → double-free — take ownership with a `~` parameter, or await it where it is owned",
+			kind, e.Name)
+		return true
+	case *ast.BinaryExpr:
+		if e.Op != ast.BinElvis {
+			return false
+		}
+		if c.rejectAwaitNonOwnedSource(e.Left) {
+			return true
+		}
+		return c.rejectAwaitNonOwnedSource(e.Right)
+	case *ast.IfExpr:
+		if c.rejectAwaitNonOwnedSourceInBlock(e.Then) {
+			return true
+		}
+		return c.rejectAwaitNonOwnedSourceInBlock(e.Else)
+	case *ast.MatchExpr:
+		for _, arm := range e.Arms {
+			if arm.Body != nil && c.rejectAwaitNonOwnedSource(arm.Body) {
+				return true
+			}
+			if arm.Block != nil && c.rejectAwaitNonOwnedSourceInBlock(arm.Block) {
+				return true
+			}
+		}
+		return false
+	}
+	// member / index / transient owner (incl. `borrowed.tsk!`, `make_h().tsk!`).
+	return c.rejectMemberHandleMoveOutOfBorrow(expr)
+}
+
+// rejectAwaitNonOwnedSourceInBlock recurses into a block's trailing expression (its
+// result value). Mirrors findBorrowedNonAliasSafeIdentInBlock.
+func (c *Checker) rejectAwaitNonOwnedSourceInBlock(block *ast.Block) bool {
+	if block == nil || len(block.Stmts) == 0 {
+		return false
+	}
+	if es, ok := block.Stmts[len(block.Stmts)-1].(*ast.ExprStmt); ok {
+		return c.rejectAwaitNonOwnedSource(es.Expr)
+	}
+	return false
+}
+
+// peelAwaitWrappers peels paren and force-unwrap (`!`) wrappers from an awaited
+// operand so the underlying ident/member leaf is reached. Force-unwrap is peeled
+// because `<-(a!)` / `<-(borrowed.tsk!)` surface the inner Task to the consuming
+// receive unchanged — the awaited handle is the same alias the real owner drops.
+func peelAwaitWrappers(expr ast.Expr) ast.Expr {
+	for {
+		switch e := expr.(type) {
+		case *ast.ParenExpr:
+			expr = e.Expr
+		case *ast.OptionalUnwrapExpr:
+			expr = e.Expr
+		default:
+			return expr
+		}
+	}
 }
 
 // isAutoDupType returns true for types that codegen auto-dups on field read:

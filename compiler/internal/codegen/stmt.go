@@ -892,6 +892,44 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 	return nil
 }
 
+// trackUnwrappedFailableTemp registers the unwrapped success value of a
+// failable call as a statement-end temp so it is freed if not claimed by a
+// variable. `expr` is the node whose c.info.Types entry holds the success
+// type; `result` is the already-unwrapped value. Used by the explicit `?^`
+// (ErrorPropagateExpr) and `?!` (ErrorPanicExpr) paths and by the bare
+// auto-propagate form inside string interpolation (T0966). Borrow returns
+// (`T&`/`T~`) are never owned temps and are skipped.
+func (c *Compiler) trackUnwrappedFailableTemp(expr ast.Expr, result value.Value) {
+	exprType := c.info.Types[expr]
+	if c.typeSubst != nil && exprType != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	if c.selfSubst != nil && exprType != nil {
+		exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if exprType != nil && isRefType(exprType) {
+		return
+	}
+	if result != nil && result.Type() == irtypes.I8Ptr {
+		named := extractNamed(exprType)
+		if named == types.TypString {
+			if c.optionalFieldString {
+				c.optionalFieldString = false
+			} else {
+				c.trackStringTemp(result)
+			}
+		} else if named == types.TypVector {
+			if elemType, ok := types.AsVector(exprType); ok {
+				c.trackVectorTempWithElemType(result, elemType)
+			} else {
+				c.trackVectorTemp(result)
+			}
+		}
+	} else {
+		c.trackHeapUserTypeResult(expr, result)
+	}
+}
+
 // genReceiverExpr generates an expression used as a method receiver or member access target.
 // If the expression is a failable call registered for auto-propagation (B0322),
 // it extracts the success value (propagating the error on failure).

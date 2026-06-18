@@ -159,77 +159,20 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// heap-allocated temp that must be freed at statement end if not
 		// claimed (e.g., by push which dups the string). Without this,
 		// synthesized serializable decode methods leak decoded strings.
-		// T0350: Same gap for Vector results — i8* falls through with no tracking.
-		// T0659: Defensive — failable borrow returns (`T&`/`T~` via `?`)
-		// reach here only if the source allocates (T0649 Part 1 removed that
-		// today). Mirror the T0649 CallExpr guard so future regressions on a
-		// borrow-return path fail closed.
-		exprType := c.info.Types[e]
-		if c.typeSubst != nil && exprType != nil {
-			exprType = types.Substitute(exprType, c.typeSubst)
-		}
-		if c.selfSubst != nil && exprType != nil {
-			exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
-		}
-		if exprType != nil && isRefType(exprType) {
-			return result
-		}
-		if result != nil && result.Type() == irtypes.I8Ptr {
-			named := extractNamed(exprType)
-			if named == types.TypString {
-				if c.optionalFieldString {
-					c.optionalFieldString = false
-				} else {
-					c.trackStringTemp(result)
-				}
-			} else if named == types.TypVector {
-				if elemType, ok := types.AsVector(exprType); ok {
-					c.trackVectorTempWithElemType(result, elemType)
-				} else {
-					c.trackVectorTemp(result)
-				}
-			}
-		} else {
-			c.trackHeapUserTypeResult(e, result)
-		}
+		// T0350: Same gap for Vector results. T0659: borrow returns are
+		// skipped (never owned temps). Shared with `?!` and bare
+		// auto-propagate-in-interpolation (T0966).
+		c.trackUnwrappedFailableTemp(e, result)
 		return result
 	case *ast.ErrorPanicExpr:
 		result := c.genErrorPanicExpr(e)
 		// T0125: Track string temps from failable call panic paths.
 		// When func()?! returns a string, the unwrapped i8* is a heap-allocated
 		// temp that must be freed at statement end if not claimed by a variable.
-		// T0350: Same gap for Vector results — i8* falls through with no tracking.
-		// T0659: Defensive — failable borrow returns via `?!` reach here only
-		// if the source allocates (T0649 Part 1 removed that today). Mirror the
-		// T0649 CallExpr guard so future regressions fail closed.
-		exprType := c.info.Types[e]
-		if c.typeSubst != nil && exprType != nil {
-			exprType = types.Substitute(exprType, c.typeSubst)
-		}
-		if c.selfSubst != nil && exprType != nil {
-			exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
-		}
-		if exprType != nil && isRefType(exprType) {
-			return result
-		}
-		if result != nil && result.Type() == irtypes.I8Ptr {
-			named := extractNamed(exprType)
-			if named == types.TypString {
-				if c.optionalFieldString {
-					c.optionalFieldString = false
-				} else {
-					c.trackStringTemp(result)
-				}
-			} else if named == types.TypVector {
-				if elemType, ok := types.AsVector(exprType); ok {
-					c.trackVectorTempWithElemType(result, elemType)
-				} else {
-					c.trackVectorTemp(result)
-				}
-			}
-		} else {
-			c.trackHeapUserTypeResult(e, result)
-		}
+		// T0350: Same gap for Vector results. T0659: borrow returns are skipped
+		// (never owned temps). Shared with `?^` and bare
+		// auto-propagate-in-interpolation (T0966).
+		c.trackUnwrappedFailableTemp(e, result)
 		return result
 	case *ast.AutoCloneExpr:
 		result := c.genAutoCloneExpr(e)
@@ -585,8 +528,17 @@ func (c *Compiler) genInterpolatedString(e *ast.StringLit) value.Value {
 				parts = append(parts, c.makeRuntimeString(staticBuf.String()))
 				staticBuf.Reset()
 			}
-			// Evaluate expression and convert to string
-			val := c.genExpr(p.Expr)
+			// Evaluate expression and convert to string. Use the
+			// auto-propagate path so bare failable calls (`name!`) unwrap
+			// their result inside interpolation slots (T0966).
+			val := c.genExprAutoPropagate(p.Expr)
+			// T0966: a bare auto-propagated failable call leaves an unowned
+			// heap temp (string/vector/user type). convertToString copies it,
+			// so the original would leak. Track it for statement-end cleanup,
+			// mirroring the explicit `?^`/`?!` paths in genExpr.
+			if c.info.AutoPropagateExprs[p.Expr] {
+				c.trackUnwrappedFailableTemp(p.Expr, val)
+			}
 			strVal := c.convertToString(val, c.info.Types[p.Expr])
 			// B0168: Track convertToString results as temps (all types now allocate,
 			// including strings after B0248 copy fix).

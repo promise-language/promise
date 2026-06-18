@@ -210,6 +210,7 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 					}
 				} else {
 					c.checkExpr(interp.Expr)
+					c.checkSubExprFailable(interp.Expr)
 					c.validateInterpolationType(c.info.Types[interp.Expr], interp.Expr)
 				}
 			}

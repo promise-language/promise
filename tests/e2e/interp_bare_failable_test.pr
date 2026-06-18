@@ -1,0 +1,84 @@
+// T0966: A bare auto-propagating failable call (`name!` written without an
+// explicit `?^`/`?!`) used directly inside a string-interpolation slot must
+// unwrap its success value, exactly as it does in assignment / argument
+// positions. Previously the `int` case silently yielded the zero value (`0`)
+// and the `string` case crashed with `fatal: stack overflow`, because the
+// interpolation slot was evaluated without the auto-propagation transform and
+// without temp tracking.
+//
+// Test functions cannot be failable, so each interpolated string is built
+// inside a failable helper and unwrapped at the call site with `?!`.
+twice!(int n) int `doc("Doubles a value, failably — int-returning helper.") {
+  return n * 2;
+}
+
+greet_inner!(string n) string `doc("Builds a heap string, failably — string-returning helper.") {
+  return "hi " + n;
+}
+
+make_vec!(int n) int[] `doc("Builds a heap vector, failably — vector-returning helper.") {
+  return[n, n * 2, n * 3];
+}
+
+type Tag `doc("Heap user type with a droppable string field, for interpolation tests.") {
+  string label;
+  format!(Writer ~w) `doc("Formats the tag as Tag(<label>).") {
+    w.write_string("Tag({this.label})");
+  }
+}
+
+make_tag!(~string s) Tag `doc("Builds a Tag, failably — user-type-returning helper.") {
+  return Tag(label: s);
+}
+
+// --- int variant: regression guard against the silent-zero bug ---
+build_int!() string `doc("Interpolates a bare int-returning failable call.") {
+  return "bare={twice(21)}";
+}
+
+test_bare_int_in_interp() `test {
+  assert(build_int()?! == "bare=42", "bare int failable call in interpolation");
+}
+
+// --- string variant: regression guard against the stack overflow + leak ---
+build_string!() string `doc("Interpolates a bare string-returning failable call.") {
+  return "bare={greet_inner("x")}";
+}
+
+test_bare_string_in_interp() `test {
+  assert(build_string()?! == "bare=hi x", "bare string failable call in interpolation");
+}
+
+// --- vector variant: exercises the vector temp-tracking branch ---
+// Compare the bare form against the explicit-propagate form: both must agree,
+// which confirms the bare form unwraps without hardcoding the vector format.
+build_vec_bare!() string `doc("Interpolates a bare vector-returning failable call.") {
+  return "v={make_vec(3)}";
+}
+
+build_vec_prop!() string `doc("Interpolates an explicitly-propagated vector failable call.") {
+  return "v={make_vec(3)?^}";
+}
+
+test_bare_vector_in_interp() `test {
+  assert(build_vec_bare()?! == build_vec_prop()?!, "bare vector failable call in interpolation");
+}
+
+// --- user-type variant: exercises the heap-user-type temp-tracking branch ---
+build_tag!() string `doc("Interpolates a bare user-type-returning failable call.") {
+  return "t={make_tag("z")}";
+}
+
+test_bare_user_type_in_interp() `test {
+  assert(build_tag()?! == "t=Tag(z)", "bare user-type failable call in interpolation");
+}
+
+// --- sanity: bare, `?^`, `?!`, and a local must all agree in one string ---
+build_all_forms!() string `doc("Mixes bare, ?^, ?! and a local in one interpolation.") {
+  int local = twice(21);
+  return "{twice(21)} {twice(21)?^} {twice(21)?!} {local}";
+}
+
+test_all_forms_agree() `test {
+  assert(build_all_forms()?! == "42 42 42 42", "bare/?^/?!/local interpolation forms agree");
+}

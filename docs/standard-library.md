@@ -53,7 +53,7 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 26 tests. |
 | `json` | `modules/json/json.pr` | ~900 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value`. 157 tests. |
 | `os` | `modules/os/os.pr` | 4 | **Done** — get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal |
-| `time` | `modules/time/time.pr` | 4 | **Placeholder** — planned: extended time utilities beyond `std/time.pr` |
+| `time` | `modules/time/time.pr` | ~370 | **Done** (Phase 1–3) — wall-clock `DateTime` (`now`, Unix-epoch conversions, component accessors, `Duration` arithmetic, comparison, UTC offsets, ISO-8601 `to_string`/`parse`/`format_rfc3339`), `Date` (`today`, `add_days`, `at`), `Time` (`midnight`/`noon`, wrapping arithmetic). Native `promise_wallclock` (CLOCK_REALTIME / GetSystemTimePreciseAsFileTime); calendar math in Promise. 25 tests. |
 | `http` | `modules/http/http.pr` | 4 | **Placeholder** — planned: get, post, Request, Response, Server, Handler |
 
 **What's missing**: Networking, HTTP. OS access (args, env, cwd, execute, set env, set cwd, streaming process, env listing, user/group info, hostname, pid, signal handling) is done.

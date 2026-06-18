@@ -305,7 +305,7 @@ The standard library (`modules/std/`, 40 files) is auto-imported via `use std as
 | `math` | `modules/math/math.pr` | Extended math functions |
 | `strings` | `modules/strings/strings.pr` | Extended string utilities |
 | `os` | `modules/os/os.pr` | OS interaction, environment, one-shot `execute`, streaming `Process`/`ProcessInput`/`ProcessOutput`, OS info (user/group/hostname/pid), signal handling (`Signal` enum, `setup_signal_handling`, `receive_signal`) |
-| `time` | `modules/time/time.pr` | Extended time utilities |
+| `time` | `modules/time/time.pr` | Wall-clock `DateTime`/`Date`/`Time` — Unix epoch, calendar components, `Duration` arithmetic, UTC offsets, ISO-8601 format/parse (native `promise_wallclock`, calendar math in Promise) |
 | `net` | `modules/net/net.pr` | TCP networking: `TcpListener` (bind/accept/close), `TcpStream` (connect/read/write/close/shutdown), `NetError`, reactor-based non-blocking I/O |
 | `http` | `modules/http/http.pr` | HTTP client (in progress) |
 

@@ -559,6 +559,20 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 				if layout := c.lookupTypeLayout(typ); layout != nil {
 					return layout.Value.LLVMType
 				}
+				// Fallback: layout not yet computed. This happens when a main-file
+				// method stub references a value type from another module (e.g. a
+				// user type with a method taking std's `Duration`) before that
+				// module is compiled. The body phase resolves it correctly via the
+				// computed layout, so the stub must agree — returning the generic
+				// userValueType() here would mismatch ({i8*,i8*} vs {i8*,fields}).
+				// Compute the layout on demand and cache it so both phases (and the
+				// later module-layout pass, which skips already-computed entries)
+				// share one consistent named struct. (T0962)
+				if len(n.TypeParams()) == 0 {
+					layout := computeValueTypeLayout(c.module, n, c.layouts, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts, c.monoLayouts)
+					c.layouts[n] = layout
+					return layout.Value.LLVMType
+				}
 			}
 			return userValueType()
 		}

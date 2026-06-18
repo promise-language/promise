@@ -1,4 +1,342 @@
-// time module — time and duration operations.
-// Planned: now, sleep, Duration, Instant, format, parse.
-// Requires native runtime support (clock syscalls).
-// Currently a placeholder — functions will be added as native time support lands.
+// time module — wall-clock date and time.
+//
+// Builds on std's monotonic `Instant`/`Duration` (auto-imported) by adding
+// real (wall-clock) time anchored to the Unix epoch, plus calendar types.
+// Import with `use time;`.
+//
+// `DateTime`, `Date`, and `Time` are pure value types (heap-free). The only
+// native primitive is the wall-clock read; all calendar math, formatting, and
+// parsing is implemented in Promise (Howard Hinnant's civil-date algorithms).
+// Native extern — body defined in codegen/time_bridges.go defineTimeBodies().
+// Returns nanoseconds since the Unix epoch (1970-01-01T00:00:00Z, UTC).
+_wallclock() int `extern("promise_wallclock");
+
+// ---- internal calendar helpers (not exported) ----
+
+// Floor division — rounds toward negative infinity (Promise `/` truncates toward
+// zero, which is wrong for pre-epoch timestamps).
+_floor_div(int a, int b) int {
+  int q = a / b;
+  if (a % b != 0) && ((a < 0) != (b < 0)) {
+    return q - 1;
+  }
+  return q;
+}
+
+// Floor modulo — result has the same sign as the divisor, in [0, b) for b > 0.
+_floor_mod(int a, int b) int {
+  int r = a % b;
+  if (r != 0) && ((r < 0) != (b < 0)) {
+    return r + b;
+  }
+  return r;
+}
+
+// Days since 1970-01-01 for the given civil (proleptic Gregorian) date.
+_days_from_civil(int year, int month, int day) int {
+  int y = year;
+  if month <= 2 {
+    y = y - 1;
+  }
+  int era = _floor_div(y, 400);
+  int yoe = y - era * 400; // [0, 399]
+  int mp = month + 9;
+  if month > 2 {
+    mp = month - 3;
+  }
+  int doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
+  int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+  return era * 146097 + doe - 719468;
+}
+
+// Civil (year, month, day) for the given count of days since 1970-01-01.
+_civil_from_days(int z)(int, int, int) {
+  int zz = z + 719468;
+  int era = _floor_div(zz, 146097);
+  int doe = zz - era * 146097; // [0, 146096]
+  int yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+  int y = yoe + era * 400;
+  int doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+  int mp = (5 * doy + 2) / 153; // [0, 11]
+  int d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+  int m = mp + 3;
+  if mp >= 10 {
+    m = mp - 9;
+  }
+  if m <= 2 {
+    y = y + 1;
+  }
+  return (y, m, d);
+}
+
+// Day of week for a day count: 0 = Sunday .. 6 = Saturday (1970-01-01 was Thursday).
+_weekday_from_days(int z) int => _floor_mod(z + 4, 7);
+
+_pad2(int n) string => n.to_string().pad_left(2, '0');
+_pad4(int n) string => n.to_string().pad_left(4, '0');
+
+// "+HH:MM" / "-HH:MM" for a UTC offset in seconds.
+_offset_suffix(int offset_secs) string {
+  string sign = "+";
+  int o = offset_secs;
+  if o < 0 {
+    sign = "-";
+    o = -o;
+  }
+  return sign + _pad2(o / 3600) + ":" + _pad2((o % 3600) / 60);
+}
+
+// Reads `count` decimal digits from `s` starting at `start`, returning the value.
+_read_digits!(string s, int start, int count) int {
+  int v = 0;
+  for i in start..start + count {
+    if i >= s.len {
+      raise error(message: "unexpected end of time string");
+    }
+    int c = s.byte_at(i) as! int;
+    if c < 48 || c > 57 {
+      raise error(message: "expected digit in time string");
+    }
+    v = v * 10 + (c - 48);
+  }
+  return v;
+}
+
+// Verifies that `s` has `expected` at byte `at`, raising otherwise.
+_expect!(string s, int at, char expected) {
+  if at >= s.len || s[at] != expected {
+    raise error(message: "malformed time string: expected '" + expected.to_string() + "'");
+  }
+}
+
+// ---- DateTime ----
+
+type DateTime `public `doc("A calendar date and time anchored to the Unix epoch, with an optional fixed UTC offset. Pure value type.") {
+  int _epoch_nanos `value; // nanoseconds since 1970-01-01T00:00:00Z (the instant)
+  int _offset_secs `value; // displayed UTC offset in seconds (0 = UTC)
+
+  // --- factories ---
+  now() DateTime `factory `doc("The current wall-clock time, in UTC.") => DateTime(_epoch_nanos: _wallclock(), _offset_secs: 0);
+
+  from_unix_secs(int secs) DateTime `factory `doc("A UTC DateTime from a Unix timestamp in seconds.") => DateTime(_epoch_nanos: secs * 1000000000, _offset_secs: 0);
+
+  from_unix_millis(int ms) DateTime `factory `doc("A UTC DateTime from a Unix timestamp in milliseconds.") => DateTime(_epoch_nanos: ms * 1000000, _offset_secs: 0);
+
+  from_unix_nanos(int ns) DateTime `factory `doc("A UTC DateTime from a Unix timestamp in nanoseconds.") => DateTime(_epoch_nanos: ns, _offset_secs: 0);
+
+  create(int year, int month, int day, int hour, int minute, int second) DateTime `factory `doc("A UTC DateTime from individual calendar components.") {
+    int days = _days_from_civil(year, month, day);
+    int secs = days * 86400 + hour * 3600 + minute * 60 + second;
+    return DateTime(_epoch_nanos: secs * 1000000000, _offset_secs: 0);
+  }
+
+  parse!(string s) DateTime `factory `doc("Parses an ISO 8601 / RFC 3339 timestamp such as \"2026-04-11T14:30:00Z\" or \"2026-04-11T14:30:00+05:30\".") {
+    int year = _read_digits(s, 0, 4);
+    _expect(s, 4, '-');
+    int month = _read_digits(s, 5, 2);
+    _expect(s, 7, '-');
+    int day = _read_digits(s, 8, 2);
+    _expect(s, 10, 'T');
+    int hour = _read_digits(s, 11, 2);
+    _expect(s, 13, ':');
+    int minute = _read_digits(s, 14, 2);
+    _expect(s, 16, ':');
+    int second = _read_digits(s, 17, 2);
+
+    int offset_secs = 0;
+    if s.len <= 19 {
+      raise error(message: "missing time zone designator");
+    }
+    char zone = s[19];
+    if zone == 'Z' {
+      offset_secs = 0;
+    } else if zone == '+' || zone == '-' {
+      int oh = _read_digits(s, 20, 2);
+      _expect(s, 22, ':');
+      int om = _read_digits(s, 23, 2);
+      offset_secs = oh * 3600 + om * 60;
+      if zone == '-' {
+        offset_secs = -offset_secs;
+      }
+    } else {
+      raise error(message: "invalid time zone designator");
+    }
+
+    int local_secs = _days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
+    int epoch_secs = local_secs - offset_secs;
+    return DateTime(_epoch_nanos: epoch_secs * 1000000000, _offset_secs: offset_secs);
+  }
+
+  // --- internal decomposition (reflects the displayed local wall-clock) ---
+  get _local_secs int => _floor_div(this._epoch_nanos, 1000000000) + this._offset_secs;
+  get _local_days int => _floor_div(this._local_secs, 86400);
+  get _seconds_of_day int => _floor_mod(this._local_secs, 86400);
+  get _civil(int, int, int) => _civil_from_days(this._local_days);
+
+  // --- component accessors ---
+  get year int `doc("Calendar year (e.g. 2026).") {
+    (y, _, _) := this._civil;
+    return y;
+  }
+  get month int `doc("Month of year, 1-12.") {
+    (_, m, _) := this._civil;
+    return m;
+  }
+  get day int `doc("Day of month, 1-31.") {
+    (_, _, d) := this._civil;
+    return d;
+  }
+  get hour int `doc("Hour of day, 0-23.") => this._seconds_of_day / 3600;
+  get minute int `doc("Minute of hour, 0-59.") => (this._seconds_of_day % 3600) / 60;
+  get second int `doc("Second of minute, 0-59.") => this._seconds_of_day % 60;
+  get nanosecond int `doc("Sub-second nanoseconds, 0-999999999.") => _floor_mod(this._epoch_nanos, 1000000000);
+  get weekday int `doc("Day of week, 0 = Sunday .. 6 = Saturday.") => _weekday_from_days(this._local_days);
+  get day_of_year int `doc("Day of year, 1-366.") {
+    (y, _, _) := this._civil;
+    return this._local_days - _days_from_civil(y, 1, 1) + 1;
+  }
+
+  // --- Unix epoch accessors ---
+  get unix_secs int `doc("Whole seconds since the Unix epoch (floored).") => _floor_div(this._epoch_nanos, 1000000000);
+  get unix_millis int `doc("Whole milliseconds since the Unix epoch (floored).") => _floor_div(this._epoch_nanos, 1000000);
+  get unix_nanos int `doc("Nanoseconds since the Unix epoch.") => this._epoch_nanos;
+
+  // --- offset ---
+  with_offset(int offset_secs) DateTime `doc("Returns the same instant displayed at the given UTC offset (in seconds).") => DateTime(_epoch_nanos: this._epoch_nanos, _offset_secs: offset_secs);
+  to_utc() DateTime `doc("Returns the same instant displayed in UTC.") => DateTime(_epoch_nanos: this._epoch_nanos, _offset_secs: 0);
+  get offset_secs int `doc("The displayed UTC offset, in seconds.") => this._offset_secs;
+  get is_utc bool `doc("True if displayed in UTC (zero offset).") => this._offset_secs == 0;
+
+  // --- arithmetic with Duration ---
+  +(Duration d) DateTime => DateTime(_epoch_nanos: this._epoch_nanos + d.nanos, _offset_secs: this._offset_secs);
+  -(Duration d) DateTime => DateTime(_epoch_nanos: this._epoch_nanos - d.nanos, _offset_secs: this._offset_secs);
+  duration_since(DateTime earlier) Duration `doc("The Duration elapsed from `earlier` to this instant.") => Duration(nanos: this._epoch_nanos - earlier._epoch_nanos);
+
+  // --- comparison (by instant, offset-independent) ---
+  == (DateTime other) bool => this._epoch_nanos == other._epoch_nanos;
+  != (DateTime other) bool => this._epoch_nanos != other._epoch_nanos;
+  < (DateTime other) bool => this._epoch_nanos < other._epoch_nanos;
+  > (DateTime other) bool => this._epoch_nanos > other._epoch_nanos;
+  <= (DateTime other) bool => this._epoch_nanos <= other._epoch_nanos;
+  >= (DateTime other) bool => this._epoch_nanos >= other._epoch_nanos;
+
+  // --- formatting ---
+  to_string() string `public `doc("ISO 8601 form, e.g. \"2026-04-11T14:30:00Z\" (UTC) or \"...+05:30\".") {
+    (y, m, d) := this._civil;
+    string base = _pad4(y) + "-" + _pad2(m) + "-" + _pad2(d) + "T" + _pad2(this.hour) + ":" + _pad2(this.minute) + ":" + _pad2(this.second);
+    if this._offset_secs == 0 {
+      return base + "Z";
+    }
+    return base + _offset_suffix(this._offset_secs);
+  }
+
+  format_rfc3339() string `public `doc("RFC 3339 form with a numeric offset, e.g. \"2026-04-11T14:30:00+00:00\".") {
+    (y, m, d) := this._civil;
+    return _pad4(y) + "-" + _pad2(m) + "-" + _pad2(d) + "T" + _pad2(this.hour) + ":" + _pad2(this.minute) + ":" + _pad2(this.second) + _offset_suffix(this._offset_secs);
+  }
+
+  format!(Writer ~w) `public `doc("Writes the ISO 8601 form to a Writer.") {
+    w.write_string(this.to_string());
+  }
+}
+
+// ---- Date ----
+
+type Date `public `doc("A calendar date (year, month, day) without time-of-day. Pure value type.") {
+  int _days `value; // days since 1970-01-01
+
+  today() Date `factory `doc("The current UTC date.") => Date(_days: _floor_div(_wallclock(), 86400000000000));
+  create(int year, int month, int day) Date `factory `doc("A Date from calendar components.") => Date(_days: _days_from_civil(year, month, day));
+
+  parse!(string s) Date `factory `doc("Parses a date such as \"2026-04-11\".") {
+    int year = _read_digits(s, 0, 4);
+    _expect(s, 4, '-');
+    int month = _read_digits(s, 5, 2);
+    _expect(s, 7, '-');
+    int day = _read_digits(s, 8, 2);
+    return Date(_days: _days_from_civil(year, month, day));
+  }
+
+  get _civil(int, int, int) => _civil_from_days(this._days);
+  get year int `doc("Calendar year.") {
+    (y, _, _) := this._civil;
+    return y;
+  }
+  get month int `doc("Month of year, 1-12.") {
+    (_, m, _) := this._civil;
+    return m;
+  }
+  get day int `doc("Day of month, 1-31.") {
+    (_, _, d) := this._civil;
+    return d;
+  }
+  get weekday int `doc("Day of week, 0 = Sunday .. 6 = Saturday.") => _weekday_from_days(this._days);
+  get day_of_year int `doc("Day of year, 1-366.") {
+    (y, _, _) := this._civil;
+    return this._days - _days_from_civil(y, 1, 1) + 1;
+  }
+
+  add_days(int n) Date `doc("Returns the date `n` days later (n may be negative).") => Date(_days: this._days + n);
+  duration_since(Date earlier) Duration `doc("The Duration spanning from `earlier` to this date.") => Duration(nanos: (this._days - earlier._days) * 86400000000000);
+
+  at(int hour, int minute, int second) DateTime `doc("Combines this date with a time-of-day into a UTC DateTime.") {
+    int secs = this._days * 86400 + hour * 3600 + minute * 60 + second;
+    return DateTime(_epoch_nanos: secs * 1000000000, _offset_secs: 0);
+  }
+
+  == (Date other) bool => this._days == other._days;
+  != (Date other) bool => this._days != other._days;
+  < (Date other) bool => this._days < other._days;
+  > (Date other) bool => this._days > other._days;
+  <= (Date other) bool => this._days <= other._days;
+  >= (Date other) bool => this._days >= other._days;
+
+  to_string() string `public `doc("ISO 8601 date, e.g. \"2026-04-11\".") {
+    (y, m, d) := this._civil;
+    return _pad4(y) + "-" + _pad2(m) + "-" + _pad2(d);
+  }
+  format!(Writer ~w) `public `doc("Writes the ISO 8601 date to a Writer.") {
+    w.write_string(this.to_string());
+  }
+}
+
+// ---- Time ----
+
+type Time `public `doc("A time of day (hour, minute, second, nanosecond) without a date. Pure value type.") {
+  int _nanos `value; // nanoseconds since midnight, in [0, 86_400_000_000_000)
+
+  create(int hour, int minute, int second) Time `factory `doc("A Time from hour, minute, and second.") => Time(_nanos: (hour * 3600 + minute * 60 + second) * 1000000000);
+  midnight() Time `factory `doc("00:00:00.") => Time(_nanos: 0);
+  noon() Time `factory `doc("12:00:00.") => Time(_nanos: 43200000000000);
+
+  parse!(string s) Time `factory `doc("Parses a time such as \"14:30:00\".") {
+    int hour = _read_digits(s, 0, 2);
+    _expect(s, 2, ':');
+    int minute = _read_digits(s, 3, 2);
+    _expect(s, 5, ':');
+    int second = _read_digits(s, 6, 2);
+    return Time(_nanos: (hour * 3600 + minute * 60 + second) * 1000000000);
+  }
+
+  get hour int `doc("Hour of day, 0-23.") => (this._nanos / 1000000000) / 3600;
+  get minute int `doc("Minute of hour, 0-59.") => ((this._nanos / 1000000000) % 3600) / 60;
+  get second int `doc("Second of minute, 0-59.") => (this._nanos / 1000000000) % 60;
+  get nanosecond int `doc("Sub-second nanoseconds, 0-999999999.") => this._nanos % 1000000000;
+
+  // Arithmetic wraps within a 24-hour day.
+  +(Duration d) Time => Time(_nanos: _floor_mod(this._nanos + d.nanos, 86400000000000));
+  -(Duration d) Time => Time(_nanos: _floor_mod(this._nanos - d.nanos, 86400000000000));
+  duration_since(Time earlier) Duration `doc("The Duration from `earlier` to this time-of-day.") => Duration(nanos: this._nanos - earlier._nanos);
+
+  == (Time other) bool => this._nanos == other._nanos;
+  != (Time other) bool => this._nanos != other._nanos;
+  < (Time other) bool => this._nanos < other._nanos;
+  > (Time other) bool => this._nanos > other._nanos;
+  <= (Time other) bool => this._nanos <= other._nanos;
+  >= (Time other) bool => this._nanos >= other._nanos;
+
+  to_string() string `public `doc("Time-of-day, e.g. \"14:30:00\".") => _pad2(this.hour) + ":" + _pad2(this.minute) + ":" + _pad2(this.second);
+  format!(Writer ~w) `public `doc("Writes the time-of-day to a Writer.") {
+    w.write_string(this.to_string());
+  }
+}

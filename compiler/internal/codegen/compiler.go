@@ -869,6 +869,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineFileIOBodies()      // bridge io module externs → PAL file I/O functions
 	c.defineOSBodies()          // bridge os module externs → PAL OS functions
 	c.defineNetPALBodies()      // bridge net module externs → PAL socket functions (T0069)
+	c.defineTimeBodies()        // bridge time module wall-clock extern → realtime clock (T0962)
 
 	c.defineTypeMethods(file)
 	c.defineEnumMethods(file)

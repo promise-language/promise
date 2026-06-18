@@ -322,3 +322,23 @@ test_pad_right_no_op() `test {
 test_pad_right_empty() `test {
   assert("".pad_right(4, '*') == "****", "pad_right empty");
 }
+
+// T0962: the no-op path (len >= width) must return an owned clone, not the
+// borrowed receiver. When the receiver is a HEAP temporary (e.g. to_string())
+// returning `this` aliased the temporary, double-freeing on drop. A literal
+// receiver hid the bug (its drop is a no-op via the literal flag), so these
+// tests use heap-allocated receivers and then consume the result.
+test_pad_left_no_op_heap_receiver() `test {
+  string r = 1234.to_string().pad_left(4, '0') + "!";
+  assert(r == "1234!", "pad_left no-op on heap temp does not double-free");
+}
+
+test_pad_right_no_op_heap_receiver() `test {
+  string r = 1234.to_string().pad_right(4, '0') + "!";
+  assert(r == "1234!", "pad_right no-op on heap temp does not double-free");
+}
+
+test_replace_no_match_heap_receiver() `test {
+  string r = (10 + 5).to_string().replace("zzz", "x") + "!";
+  assert(r == "15!", "replace no-match on heap temp does not double-free");
+}

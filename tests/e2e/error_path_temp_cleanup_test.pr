@@ -88,3 +88,36 @@ test_auto_prop_with_temp() `test {
     assert(e.message == "fail", "auto-propagated");
   };
 }
+
+// T0962: temporaries created INSIDE a `raise <expr>` argument must be cleaned up.
+// A raise terminates the block with a ret before end-of-statement temp cleanup
+// runs, so intermediates like `99.to_string()` (consumed by the concat but still
+// tracked) would leak. The raised error (and its embedded message) must survive;
+// only the throwaway intermediate is freed.
+raise_with_concat_intermediate!() int {
+  int code = 99;
+  raise error(message: "code " + code.to_string());
+}
+
+test_raise_concat_intermediate_no_leak() `test {
+  raise_with_concat_intermediate()? e {
+    assert(e.message == "code 99", "raise concat message survives");
+  };
+}
+
+// Same leak shape, but propagated through an intermediate failable frame before
+// being caught — exercises the error-in-flight path through nested calls.
+raise_inner_concat!(char sep) {
+  raise error(message: "bad separator: " + sep.to_string());
+}
+
+raise_outer_propagate!() int {
+  raise_inner_concat(':');
+  return 0;
+}
+
+test_raise_concat_intermediate_propagated_no_leak() `test {
+  raise_outer_propagate()? e {
+    assert(e.message == "bad separator: :", "propagated raise message survives");
+  };
+}

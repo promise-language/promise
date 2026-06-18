@@ -1,5 +1,14 @@
 # Time Module Plan (`modules/time/`)
 
+> **Status (T0962): Phases 1–3 implemented.** `DateTime`, `Date`, and `Time` are
+> live with `now()`/`today()`, Unix-epoch conversions, calendar component
+> accessors, `Duration` arithmetic, comparison, ISO-8601 `to_string`/`parse`, and
+> fixed UTC offsets (`with_offset`/`to_utc`/`format_rfc3339`). The single native
+> primitive `promise_wallclock` reads CLOCK_REALTIME (POSIX) /
+> GetSystemTimePreciseAsFileTime (Windows); WASM returns 0. System-local timezone
+> offset (Phase 4's optional `promise_local_offset`) is not yet wired — only
+> manual offsets are supported. Tests in `time_test.pr`.
+
 ## Relationship to `std/time.pr`
 
 The two foundational time primitives are defined in the **standard library** (`modules/std/time.pr`), not here:

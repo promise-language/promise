@@ -1,0 +1,373 @@
+// Tests for the time module (compiled as part of the module) — DateTime / Date / Time.
+use io;
+use os;
+use path;
+
+// ---- DateTime: known-epoch decomposition ----
+
+datetime_epoch_zero() `test {
+  dt := DateTime.from_unix_secs(0);
+  assert(dt.to_string() == "1970-01-01T00:00:00Z", "unix epoch renders as 1970-01-01T00:00:00Z");
+  assert(dt.year == 1970, "year");
+  assert(dt.month == 1, "month");
+  assert(dt.day == 1, "day");
+  assert(dt.hour == 0, "hour");
+  assert(dt.minute == 0, "minute");
+  assert(dt.second == 0, "second");
+  assert(dt.weekday == 4, "1970-01-01 was a Thursday");
+}
+
+datetime_known_timestamps() `test {
+  // 2009-02-13T23:31:30Z = 1234567890
+  dt := DateTime.from_unix_secs(1234567890);
+  assert(dt.to_string() == "2009-02-13T23:31:30Z", "1234567890 → 2009-02-13T23:31:30Z");
+  assert(dt.year == 2009, "year");
+  assert(dt.month == 2, "month");
+  assert(dt.day == 13, "day");
+  assert(dt.hour == 23, "hour");
+  assert(dt.minute == 31, "minute");
+  assert(dt.second == 30, "second");
+}
+
+datetime_leap_day() `test {
+  // 2024-02-29 is a valid leap day.
+  dt := DateTime.create(2024, 2, 29, 12, 0, 0);
+  assert(dt.to_string() == "2024-02-29T12:00:00Z", "leap day round-trips");
+  assert(dt.day == 29, "day is 29");
+  assert(dt.day_of_year == 60, "Feb 29 is day-of-year 60 in a leap year");
+}
+
+datetime_year_boundary() `test {
+  // One second before 2000-01-01T00:00:00Z.
+  dt := DateTime.create(1999, 12, 31, 23, 59, 59);
+  assert(dt.to_string() == "1999-12-31T23:59:59Z", "end-of-year boundary");
+  end := DateTime.create(2000, 1, 1, 0, 0, 0);
+  assert(end.duration_since(dt) == Duration.from_secs(1), "one second apart across the boundary");
+}
+
+datetime_unix_accessors() `test {
+  dt := DateTime.from_unix_millis(1500);
+  assert(dt.unix_secs == 1, "1500ms → 1s (floored)");
+  assert(dt.unix_millis == 1500, "1500ms");
+  assert(dt.unix_nanos == 1500000000, "1500ms in nanos");
+  assert(dt.nanosecond == 500000000, "sub-second part is 500ms");
+}
+
+// ---- arithmetic ----
+
+datetime_add_duration() `test {
+  dt := DateTime.create(2026, 4, 11, 14, 0, 0);
+  later := dt + Duration.from_secs(3600);
+  assert(later.hour == 15, "adding one hour advances the hour");
+  assert(later.to_string() == "2026-04-11T15:00:00Z", "advanced timestamp");
+  assert(later.duration_since(dt) == Duration.from_secs(3600), "duration_since recovers the delta");
+}
+
+datetime_subtract_duration() `test {
+  dt := DateTime.create(2026, 4, 11, 0, 0, 30);
+  earlier := dt - Duration.from_secs(60);
+  assert(earlier.to_string() == "2026-04-10T23:59:30Z", "subtracting across midnight");
+}
+
+datetime_comparison() `test {
+  a := DateTime.from_unix_secs(100);
+  b := DateTime.from_unix_secs(200);
+  assert(a < b, "a before b");
+  assert(b > a, "b after a");
+  assert(a == DateTime.from_unix_secs(100), "equal instants compare equal");
+  assert(a != b, "distinct instants differ");
+}
+
+// ---- string round-trip (critical for persistence) ----
+
+datetime_string_round_trip() `test {
+  dt := DateTime.create(2026, 6, 18, 9, 45, 12);
+  back := DateTime.parse(dt.to_string())?!;
+  assert(back.unix_nanos == dt.unix_nanos, "parse(to_string) recovers the same instant");
+  assert(back.to_string() == dt.to_string(), "re-rendered string is identical");
+}
+
+datetime_parse_offset() `test {
+  // +05:30 offset: the instant is 5.5h before the local wall-clock reads.
+  dt := DateTime.parse("2026-04-11T14:30:00+05:30")?!;
+  assert(dt.offset_secs == 19800, "offset is 5h30m");
+  assert(dt.hour == 14, "displayed hour reflects the offset");
+  utc := dt.to_utc();
+  assert(utc.to_string() == "2026-04-11T09:00:00Z", "same instant in UTC");
+  assert(dt.format_rfc3339() == "2026-04-11T14:30:00+05:30", "rfc3339 round-trips the offset");
+}
+
+datetime_negative_offset() `test {
+  dt := DateTime.parse("2026-04-11T14:30:00-08:00")?!;
+  assert(dt.offset_secs == -28800, "offset is -8h");
+  assert(dt.to_utc().to_string() == "2026-04-11T22:30:00Z", "same instant in UTC");
+}
+
+// ---- negative (pre-1970) epoch — locks floor-division correctness ----
+
+datetime_pre_epoch() `test {
+  // 1969-12-31T23:59:59Z = -1
+  dt := DateTime.from_unix_secs(-1);
+  assert(dt.to_string() == "1969-12-31T23:59:59Z", "−1s decodes to 1969-12-31T23:59:59Z");
+  assert(dt.year == 1969, "year");
+  assert(dt.month == 12, "month");
+  assert(dt.day == 31, "day");
+  assert(dt.second == 59, "second");
+  // A clearly pre-epoch date.
+  old := DateTime.create(1900, 1, 1, 0, 0, 0);
+  assert(old.to_string() == "1900-01-01T00:00:00Z", "1900-01-01 round-trips");
+  assert(old.unix_secs < 0, "1900 is before the epoch");
+}
+
+// ---- now() sanity (real clock) — skipped on WASM (no realtime source) ----
+
+datetime_now_sane() `test(exclude: wasm) {
+  dt := DateTime.now();
+  assert(dt.unix_secs > 1700000000, "now() is after 2023-11");
+  assert(dt.year >= 2023, "now()'s year is recent");
+}
+
+// ---- Date ----
+
+date_components() `test {
+  d := Date.create(2026, 4, 11);
+  assert(d.to_string() == "2026-04-11", "date renders");
+  assert(d.year == 2026, "year");
+  assert(d.month == 4, "month");
+  assert(d.day == 11, "day");
+  assert(d.weekday == 6, "2026-04-11 is a Saturday");
+}
+
+date_arithmetic() `test {
+  d := Date.create(2026, 4, 11);
+  next := d.add_days(20);
+  assert(next.to_string() == "2026-05-01", "20 days later crosses into May");
+  assert(next.duration_since(d) == Duration.from_secs(20 * 86400), "duration spans 20 days");
+}
+
+date_at() `test {
+  d := Date.create(2026, 4, 11);
+  dt := d.at(14, 30, 0);
+  assert(dt.to_string() == "2026-04-11T14:30:00Z", "Date.at combines into a DateTime");
+}
+
+date_round_trip() `test {
+  d := Date.create(1995, 12, 25);
+  back := Date.parse(d.to_string())?!;
+  assert(back == d, "Date parse round-trips");
+}
+
+// ---- Time ----
+
+time_components() `test {
+  t := Time.create(14, 30, 45);
+  assert(t.to_string() == "14:30:45", "time renders");
+  assert(t.hour == 14, "hour");
+  assert(t.minute == 30, "minute");
+  assert(t.second == 45, "second");
+}
+
+time_midnight_noon() `test {
+  assert(Time.midnight().to_string() == "00:00:00", "midnight");
+  assert(Time.noon().to_string() == "12:00:00", "noon");
+}
+
+time_arithmetic_wraps() `test {
+  t := Time.create(23, 30, 0);
+  later := t + Duration.from_secs(3600);
+  assert(later.to_string() == "00:30:00", "adding an hour wraps past midnight");
+}
+
+time_round_trip() `test {
+  t := Time.create(9, 5, 3);
+  back := Time.parse(t.to_string())?!;
+  assert(back == t, "Time parse round-trips");
+}
+
+// ---- parse error paths ----
+
+datetime_parse_rejects_garbage() `test {
+  bool caught = false;
+  DateTime.parse("not-a-date")? e {
+    caught = true;
+  };
+  assert(caught, "garbage input fails to parse");
+}
+
+datetime_parse_rejects_missing_zone() `test {
+  bool caught = false;
+  DateTime.parse("2026-04-11T14:30:00")? e {
+    caught = true;
+  };
+  assert(caught, "missing time-zone designator fails");
+}
+
+time_parse_rejects_bad_separator() `test {
+  bool caught = false;
+  Time.parse("14-30-00")? e {
+    caught = true;
+  };
+  assert(caught, "wrong separators fail to parse");
+}
+
+datetime_parse_rejects_bad_zone() `test {
+  // A time-zone designator that is neither 'Z', '+', nor '-'.
+  bool caught = false;
+  DateTime.parse("2026-04-11T14:30:00X")? e {
+    caught = true;
+    assert(e.message == "invalid time zone designator", "bad zone char is rejected");
+  };
+  assert(caught, "invalid time-zone designator fails");
+}
+
+// ---- persist → reload → format round-trip (mirrors mini-git) ----
+
+// ---- offset display: with_offset / is_utc ----
+
+datetime_with_offset_and_is_utc() `test {
+  // Same instant, displayed at different fixed offsets.
+  dt := DateTime.from_unix_secs(0);
+  assert(dt.is_utc, "default DateTime is UTC");
+  shifted := dt.with_offset(3600); // +01:00
+  assert(!shifted.is_utc, "non-zero offset is not UTC");
+  assert(shifted.offset_secs == 3600, "offset stored");
+  assert(shifted.hour == 1, "wall-clock hour reflects +01:00 offset");
+  assert(shifted.unix_nanos == dt.unix_nanos, "with_offset preserves the instant");
+  assert(shifted.to_string() == "1970-01-01T01:00:00+01:00", "offset rendered in to_string");
+}
+
+// ---- DateTime <= / >= ----
+
+datetime_ordering_inclusive() `test {
+  a := DateTime.from_unix_secs(100);
+  b := DateTime.from_unix_secs(200);
+  same := DateTime.from_unix_secs(100);
+  assert(a <= b, "a <= b (strictly less)");
+  assert(a <= same, "a <= equal instant");
+  assert(b >= a, "b >= a (strictly greater)");
+  assert(a >= same, "a >= equal instant");
+  assert(!(b <= a), "b not <= a");
+  assert(!(a >= b), "a not >= b");
+}
+
+// ---- format!(Writer) via string interpolation ----
+
+datetime_format_interpolation() `test {
+  dt := DateTime.create(2026, 4, 11, 14, 30, 0);
+  string s = "{dt}";
+  assert(s == "2026-04-11T14:30:00Z", "interpolation invokes DateTime.format!");
+}
+
+// ---- format_rfc3339 at UTC renders +00:00 (offset_suffix zero branch) ----
+
+datetime_rfc3339_utc() `test {
+  dt := DateTime.from_unix_secs(0);
+  assert(dt.format_rfc3339() == "1970-01-01T00:00:00+00:00", "UTC rfc3339 uses +00:00");
+}
+
+// ---- Date: today (real clock), day_of_year, ordering, format ----
+
+date_today_sane() `test(exclude: wasm) {
+  d := Date.today();
+  assert(d.year >= 2023, "today()'s year is recent");
+}
+
+date_day_of_year() `test {
+  jan1 := Date.create(2026, 1, 1);
+  assert(jan1.day_of_year == 1, "Jan 1 is day-of-year 1");
+  dec31 := Date.create(2025, 12, 31);
+  assert(dec31.day_of_year == 365, "Dec 31 2025 (non-leap) is day-of-year 365");
+}
+
+date_ordering() `test {
+  a := Date.create(2026, 1, 1);
+  b := Date.create(2026, 12, 31);
+  same := Date.create(2026, 1, 1);
+  assert(a != b, "distinct dates differ");
+  assert(a < b, "earlier date is less");
+  assert(b > a, "later date is greater");
+  assert(a <= same, "a <= equal date");
+  assert(b >= a, "b >= a");
+  assert(!(a != same), "equal dates are not !=");
+}
+
+date_format_interpolation() `test {
+  d := Date.create(2026, 4, 11);
+  string s = "{d}";
+  assert(s == "2026-04-11", "interpolation invokes Date.format!");
+}
+
+// ---- Time: nanosecond, subtract, duration_since, ordering, format ----
+
+time_nanosecond() `test {
+  // 1.25 seconds past midnight.
+  t := Time(_nanos: 1250000000);
+  assert(t.second == 1, "whole second part");
+  assert(t.nanosecond == 250000000, "sub-second nanoseconds");
+}
+
+time_subtract_wraps() `test {
+  t := Time.create(0, 30, 0);
+  earlier := t - Duration.from_secs(3600);
+  assert(earlier.to_string() == "23:30:00", "subtracting an hour wraps before midnight");
+}
+
+time_duration_since() `test {
+  a := Time.create(9, 0, 0);
+  b := Time.create(10, 30, 0);
+  assert(b.duration_since(a) == Duration.from_secs(5400), "90 minutes between times");
+}
+
+time_ordering() `test {
+  a := Time.create(9, 0, 0);
+  b := Time.create(17, 0, 0);
+  same := Time.create(9, 0, 0);
+  assert(a != b, "distinct times differ");
+  assert(a < b, "morning before evening");
+  assert(b > a, "evening after morning");
+  assert(a <= same, "a <= equal time");
+  assert(b >= a, "b >= a");
+}
+
+time_format_interpolation() `test {
+  t := Time.create(14, 30, 45);
+  string s = "{t}";
+  assert(s == "14:30:45", "interpolation invokes Time.format!");
+}
+
+// ---- parse error path: input shorter than the field (read past end) ----
+
+date_parse_rejects_short() `test {
+  bool caught = false;
+  Date.parse("202")? e {
+    caught = true;
+    assert(e.message == "unexpected end of time string", "short input hits end-of-string guard");
+  };
+  assert(caught, "truncated date fails to parse");
+}
+
+datetime_persist_reload_round_trip() `test(exclude: wasm) {
+  dt := DateTime.create(2026, 6, 18, 9, 45, 12);
+
+  // Path strings are consumed (moved) by the io/path APIs, so clone for reuse.
+  string nanos_path = path.join(os.temp_dir, "promise_time_nanos.txt");
+  string iso_path = path.join(os.temp_dir, "promise_time_iso.txt");
+
+  // Persist both the raw epoch nanos and the ISO string.
+  io.File.write_content(nanos_path.clone(), dt.unix_nanos.to_string())?!;
+  io.File.write_content(iso_path.clone(), dt.to_string())?!;
+
+  // Reload on fresh strings and reconstruct.
+  string nanos_text = io.File.read_content(nanos_path.clone())?!;
+  string iso_text = io.File.read_content(iso_path.clone())?!;
+
+  reconstructed_from_nanos := DateTime.from_unix_nanos(scan[int](nanos_text)?!);
+  reconstructed_from_iso := DateTime.parse(iso_text)?!;
+
+  assert(reconstructed_from_nanos.to_string() == dt.to_string(), "nanos round-trip formats identically");
+  assert(reconstructed_from_iso.unix_nanos == dt.unix_nanos, "ISO round-trip recovers the same instant");
+  assert(reconstructed_from_iso.to_string() == dt.to_string(), "ISO round-trip formats identically");
+
+  io.File.remove(nanos_path)?!;
+  io.File.remove(iso_path)?!;
+}

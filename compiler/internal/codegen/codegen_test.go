@@ -714,6 +714,65 @@ func TestWasmImportAttributes(t *testing.T) {
 	assertContains(t, ir, "declare i64 @fd_write(i64 %fd)")
 }
 
+// --- wall-clock (realtime) extern body tests (T0962) ---
+
+// The time module's promise_wallclock extern gets its body from defineTimeBodies.
+// On POSIX it reads CLOCK_REALTIME (id 0 on both Linux and macOS), distinct from
+// the monotonic nanotime read (id 1 on Linux / 6 on macOS).
+func TestWallclockExternBodyPosix(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_wallclock() int `+"`extern(\"promise_wallclock\")"+`;
+		main() { int _x = _wallclock(); }
+	`, "x86_64-unknown-linux-gnu")
+	assertContains(t, ir, "define void @promise_wallclock(i8* %sret)")
+	// CLOCK_REALTIME is 0 — the realtime clock, not the monotonic one.
+	assertContains(t, ir, "call i32 @clock_gettime(i32 0,")
+}
+
+// On WASM there is no portable realtime source from emitted IR, so the body
+// returns 0 (no clock_gettime call).
+func TestWallclockExternBodyWasmReturnsZero(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_wallclock() int `+"`extern(\"promise_wallclock\")"+`;
+		main() { int _x = _wallclock(); }
+	`, "wasm32-wasi")
+	assertContains(t, ir, "define void @promise_wallclock(i8* %sret)")
+	if strings.Contains(ir, "@clock_gettime") {
+		t.Errorf("WASM wallclock body must not call clock_gettime\ngot:\n%s", ir)
+	}
+}
+
+// On Windows the body reads GetSystemTimePreciseAsFileTime and converts the
+// FILETIME (100ns ticks since 1601) to nanoseconds since the Unix epoch.
+func TestWallclockExternBodyWindows(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_wallclock() int `+"`extern(\"promise_wallclock\")"+`;
+		main() { int _x = _wallclock(); }
+	`, "x86_64-pc-windows-msvc")
+	assertContains(t, ir, "define void @promise_wallclock(i8* %sret)")
+	assertContains(t, ir, "@GetSystemTimePreciseAsFileTime")
+	// Unix-epoch shift constant: 116444736000000000 ticks from 1601 → 1970.
+	assertContains(t, ir, "116444736000000000")
+}
+
+// T0962: A main-file method taking a value-type parameter from another module
+// (here std's Duration) must declare its stub and define its body with the SAME
+// LLVM type. The stub is declared before the module is compiled, so the layout
+// isn't in c.layouts yet; resolveType must compute it on demand rather than fall
+// back to the generic {i8*,i8*} userValueType (which mismatched the body's
+// %promise_Duration_v and crashed codegen with a store-type error).
+func TestCrossModuleValueTypeParamLayout(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo `+"`public"+` {
+			int n;
+			bar(Duration d) int => this.n + d.nanos;
+		}
+		main() { f := Foo(n: 1); int _x = f.bar(Duration.from_nanos(2)); }
+	`)
+	// Both the declaration and definition agree on the value-struct param type.
+	assertContains(t, ir, "define i64 @Foo.bar(i8* %this, %promise_Duration_v %d)")
+}
+
 func TestWasmImportIgnoredOnNative(t *testing.T) {
 	// On native target, wasm_import annotations should not produce IR attributes.
 	// The function itself is filtered out by `target(wasm), so it won't appear at all.

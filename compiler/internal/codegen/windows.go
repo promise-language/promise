@@ -82,6 +82,30 @@ func (c *Compiler) buildWindowsNanotimeBody(entry *ir.Block) {
 	entry.NewRet(nanos)
 }
 
+// emitWindowsWallclockNanos emits a GetSystemTimePreciseAsFileTime call and returns
+// the realtime nanosecond value (nanos since the Unix epoch).
+// Does NOT emit a terminator — the caller uses the returned value and terminates.
+//
+// FILETIME counts 100ns ticks since 1601-01-01. The Unix epoch (1970-01-01) is
+// 116444736000000000 such ticks later, so:
+//
+//	nanos = (filetimeTicks - 116444736000000000) * 100
+func (c *Compiler) emitWindowsWallclockNanos(blk *ir.Block) value.Value {
+	// FILETIME is two contiguous 32-bit halves; an i64 alloca has the right size
+	// and alignment and lets us load the combined 100ns tick count directly.
+	getSysTime := c.getOrDeclareFunc("GetSystemTimePreciseAsFileTime", irtypes.Void,
+		ir.NewParam("lpSystemTimeAsFileTime", irtypes.NewPointer(irtypes.I64)))
+
+	ftPtr := blk.NewAlloca(irtypes.I64)
+	blk.NewCall(getSysTime, ftPtr)
+	ticks := blk.NewLoad(irtypes.I64, ftPtr)
+
+	// Shift epoch from 1601 to 1970, then convert 100ns ticks → ns.
+	const epochDeltaTicks = 116444736000000000
+	unixTicks := blk.NewSub(ticks, constant.NewInt(irtypes.I64, epochDeltaTicks))
+	return blk.NewMul(unixTicks, constant.NewInt(irtypes.I64, 100))
+}
+
 // emitWindowsEntry emits the self-contained Windows program entry: the
 // `@__promise_start` crt0 (used as the lld-link `/entry:`) plus the runtime
 // support symbols (`__chkstk`, `_fltused`, and the `_tls_used` TLS directory)

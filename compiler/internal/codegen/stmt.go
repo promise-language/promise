@@ -8194,6 +8194,24 @@ func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 		c.consumeCastSubjectDropFlag(s.Value, ident.Name)
 	}
 
+	// T0962: Clean up statement temps before raising. The raise expression may
+	// create intermediate temps that are normally freed at statement end (e.g.
+	// `raise error(message: "x: " + ch.to_string())` produces a throwaway
+	// `ch.to_string()` string). Since raise terminates the block, the
+	// post-statement cleanup never runs and those intermediaries leak. Use the
+	// error-path variants (T0103) — like emitFailableResultPropagation — which
+	// emit flag-guarded frees WITHOUT resetting the tracking state: a raise can
+	// be nested inside a larger statement (e.g. a match arm) whose sibling/ok
+	// path still needs the temp list intact for its own end-of-statement
+	// cleanup. Claim the raised value first so its instance and embedded message
+	// survive; only the throwaways are freed.
+	c.claimStringTemp(errVal)
+	c.claimHeapTemp(errVal)
+	if c.block != nil && c.block.Term == nil {
+		c.emitStmtTempCleanupForErrorPath()
+		c.emitHeapTempCleanupForErrorPath()
+	}
+
 	// Emit close() for all active use bindings before raising
 	if len(c.scopeBindings) > 0 {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors

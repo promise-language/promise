@@ -593,22 +593,29 @@ func (c *Compiler) defineNanotimeFunc() *ir.Func {
 	return fn
 }
 
+// packNanosToSret packs an i64 nanosecond value into the Promise int value struct
+// stored at the sret parameter, then emits `ret void`. Shared by the nanotime
+// (monotonic) and wallclock (realtime) extern bodies.
+func (c *Compiler) packNanosToSret(blk *ir.Block, sretParam, nanos value.Value) {
+	intLayout := c.layouts[types.TypInt]
+	valType := intLayout.Value.LLVMType
+	sretPtr := blk.NewBitCast(sretParam, irtypes.NewPointer(valType))
+	var agg value.Value = constant.NewUndef(valType)
+	agg = blk.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
+	instancePtrType := intLayout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
+	agg = blk.NewInsertValue(agg, constant.NewNull(instancePtrType), 1)
+	agg = blk.NewInsertValue(agg, nanos, 2)
+	blk.NewStore(agg, sretPtr)
+	blk.NewRet(nil)
+}
+
 // buildNanotimeExternBody adds a body to extern promise_nanotime(i8* %sret).
 // Computes monotonic nanos via clock_gettime, packs into Promise int value struct.
 func (c *Compiler) buildNanotimeExternBody(fn *ir.Func) {
-	intLayout := c.layouts[types.TypInt]
-	valType := intLayout.Value.LLVMType
 	entry := fn.NewBlock(".entry")
 
 	packNanosToSret := func(blk *ir.Block, nanos value.Value) {
-		sretPtr := blk.NewBitCast(fn.Params[0], irtypes.NewPointer(valType))
-		var agg value.Value = constant.NewUndef(valType)
-		agg = blk.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
-		instancePtrType := intLayout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
-		agg = blk.NewInsertValue(agg, constant.NewNull(instancePtrType), 1)
-		agg = blk.NewInsertValue(agg, nanos, 2)
-		blk.NewStore(agg, sretPtr)
-		blk.NewRet(nil)
+		c.packNanosToSret(blk, fn.Params[0], nanos)
 	}
 
 	if c.isWasm {

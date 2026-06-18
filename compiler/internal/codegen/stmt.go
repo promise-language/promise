@@ -5467,7 +5467,17 @@ func (c *Compiler) promoteHandleTempToScopeBinding(val value.Value, dropFunc *ir
 	c.entryBlock.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
 	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
 	c.block.NewStore(val, alloca)
-	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	// T0951: preserve the temp's live per-branch ownership flag instead of
+	// hardcoding 1. An ordinary handle temp (`Mutex[int](7).lock()`,
+	// `mk_mtx().lock()`) carries flag=1, so this is identical to the prior
+	// `store 1` for the T0655 case. But an inline elvis handle result
+	// (`(a ?: b).lock()`) carries a per-path flag — owned (1) on the orphaned
+	// some-path, borrowed (0) on the none-path where the default keeps its own
+	// owner. Hardcoding 1 would force-drop the borrowed none-path default, which
+	// its own scope binding also drops → double-free. Loaded before claimStringTemp
+	// below clears the source temp's flag.
+	curFlag := c.block.NewLoad(irtypes.I1, c.stmtTemps[idx].dropFlag)
+	c.block.NewStore(curFlag, dropFlag)
 	// bindingDropString: i8* alloca + void(i8*) drop — identical IR shape to the
 	// known-good bound-Mutex scope binding (stmt.go ~2097). The Vector
 	// static-flag branch in emitStringDropCall is inert for a Mutex valType.

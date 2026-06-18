@@ -704,3 +704,381 @@ t_index_strvec_some() `test {
   b.push("x" + "y");
   assert((v[0] ?: b).len == 2, "index strvec some");
 }
+
+// ============================================================================
+// T0951: single-owner native handle results (Arc/Channel/Mutex/Weak/Task). These
+// are bare i8* handles, not Vector/string (trackElvisResultTemp's only resolved
+// types) and not 2-word {i8*,i8*} value structs (trackElvisResultHeap's shape), so
+// an inline orphaned-source elvis result had no drop path in EITHER tracker → leak
+// (Arc/Weak/Channel each leaked their inner allocation; Mutex leaked 3, Task 2).
+// The fix (elvisResultHandleDrop) resolves the handle's native drop — Arc.drop /
+// Channel.drop / Mutex.drop / Weak.drop / Task drop — and registers it with the
+// SAME per-branch flag the other representations use: owned on the orphaned
+// some-path, borrowed on the none-path (the default keeps its own owner). Source
+// classification gates tracking exactly as for the other classes — owned local /
+// temporary optional → track; borrowed param → owner-governed (do NOT track, else
+// double-free). A bound use claims the temp (stmt.go handle-claim path), so only
+// the variable's binding drops it.
+// ============================================================================
+
+// --- Arc[T] ident source: the reported repro. some leaked 1 alloc at HEAD. ---
+
+t_arc_some() `test {
+  Arc[int]? a = Arc[int](7);
+  Arc[int] b = Arc[int](9);
+  assert((a ?: b).borrow == 7, "arc some");
+}
+
+t_arc_none() `test {
+  Arc[int]? a = none;
+  Arc[int] b = Arc[int](9);
+  assert((a ?: b).borrow == 9, "arc none");
+}
+
+// temporary-optional source: a call result is never scope-tracked, so the some-path
+// inner is orphaned and the result must own + free it once.
+mk_opt_arc() Arc[int]? {
+  return Arc[int](7);
+}
+
+t_arc_temp_some() `test {
+  Arc[int] b = Arc[int](9);
+  assert((mk_opt_arc() ?: b).borrow == 7, "arc temp some");
+}
+
+// bound form: the variable claims the handle temp; only its scope binding drops it.
+t_arc_bound() `test {
+  Arc[int]? a = Arc[int](7);
+  Arc[int] b = Arc[int](9);
+  x := a ?: b;
+  assert(x.borrow == 7, "arc bound");
+}
+
+// borrowed-param source: the caller owns and drops both operands; the some-path
+// inner is NOT orphaned, so the orphan gate skips tracking (no double-free, no leak).
+borrowed_arc_val(Arc[int]? a, Arc[int] b) int {
+  return (a ?: b).borrow;
+}
+
+t_arc_borrowed_some() `test {
+  Arc[int]? a = Arc[int](7);
+  Arc[int] b = Arc[int](9);
+  assert(borrowed_arc_val(a, b) == 7, "arc borrowed some");
+}
+
+t_arc_borrowed_none() `test {
+  Arc[int]? a = none;
+  Arc[int] b = Arc[int](9);
+  assert(borrowed_arc_val(a, b) == 9, "arc borrowed none");
+}
+
+// --- Channel[T] ident source: discarded close() on the inline result (bare i8*,
+// Channel.drop walks any buffered items then frees). Channel works single-threaded
+// so no wasm exclusion is needed. ---
+
+t_chan_some() `test {
+  Channel[int]? a = Channel[int](1);
+  Channel[int] b = Channel[int](1);
+  (a ?: b).close();
+}
+
+t_chan_none() `test {
+  Channel[int]? a = none;
+  Channel[int] b = Channel[int](1);
+  (a ?: b).close();
+}
+
+mk_opt_chan() Channel[int]? {
+  return Channel[int](1);
+}
+
+t_chan_temp_some() `test {
+  Channel[int] b = Channel[int](1);
+  (mk_opt_chan() ?: b).close();
+}
+
+t_chan_bound() `test {
+  Channel[int]? a = Channel[int](1);
+  Channel[int] b = Channel[int](1);
+  x := a ?: b;
+  x.close();
+}
+
+borrowed_chan_close(Channel[int]? a, Channel[int] b) {
+  (a ?: b).close();
+}
+
+t_chan_borrowed_some() `test {
+  Channel[int]? a = Channel[int](1);
+  Channel[int] b = Channel[int](1);
+  borrowed_chan_close(a, b);
+  assert(true, "chan borrowed some");
+}
+
+// --- Mutex[T] ident source: `.lock()` promotes the inline handle temp to a scope
+// binding (T0655) so it outlives the guard. The promotion now stores the temp's
+// per-branch flag instead of a hardcoded 1 — on the none-path the borrowed default
+// must NOT be force-dropped (its own binding drops it → would double-free). ---
+
+t_mutex_some() `test {
+  Mutex[int]? a = Mutex[int](7);
+  Mutex[int] b = Mutex[int](9);
+  g := (a ?: b).lock();
+  assert(g.borrow == 7, "mutex some");
+  g.close();
+}
+
+t_mutex_none() `test {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](9);
+  g := (a ?: b).lock();
+  assert(g.borrow == 9, "mutex none");
+  g.close();
+}
+
+mk_opt_mutex() Mutex[int]? {
+  return Mutex[int](7);
+}
+
+t_mutex_temp_some() `test {
+  Mutex[int] b = Mutex[int](9);
+  g := (mk_opt_mutex() ?: b).lock();
+  assert(g.borrow == 7, "mutex temp some");
+  g.close();
+}
+
+// bound some: the variable claims the Mutex handle temp; its scope binding drops it.
+t_mutex_bound() `test {
+  Mutex[int]? a = Mutex[int](7);
+  Mutex[int] b = Mutex[int](9);
+  m := a ?: b;
+  g := m.lock();
+  assert(g.borrow == 7, "mutex bound");
+  g.close();
+}
+
+// borrowed-param: orphan gate skips tracking → the `.lock()` promotion is a no-op
+// (the receiver is not a tracked temp). Caller owns and drops both mutexes.
+borrowed_mutex_val(Mutex[int]? a, Mutex[int] b) int {
+  g := (a ?: b).lock();
+  r := g.borrow;
+  g.close();
+  return r;
+}
+
+t_mutex_borrowed_some() `test {
+  Mutex[int]? a = Mutex[int](7);
+  Mutex[int] b = Mutex[int](9);
+  assert(borrowed_mutex_val(a, b) == 7, "mutex borrowed some");
+}
+
+t_mutex_borrowed_none() `test {
+  Mutex[int]? a = none;
+  Mutex[int] b = Mutex[int](9);
+  assert(borrowed_mutex_val(a, b) == 9, "mutex borrowed none");
+}
+
+// --- Weak[T] ident source: the inline elvis result is a Weak[int]; `.upgrade()`
+// borrows it (returning Arc[int]?) and the Weak temp must be dropped after. The
+// `?: Arc[int](0)` second elvis yields the Arc whose .borrow is read. ---
+
+t_weak_some() `test {
+  Arc[int] keep = Arc[int](7);
+  Weak[int]? a = keep.downgrade();
+  Weak[int] b = keep.downgrade();
+  assert(((a ?: b).upgrade() ?: Arc[int](0)).borrow == 7, "weak some");
+}
+
+t_weak_none() `test {
+  Arc[int] keep = Arc[int](7);
+  Weak[int]? a = none;
+  Weak[int] b = keep.downgrade();
+  assert(((a ?: b).upgrade() ?: Arc[int](0)).borrow == 7, "weak none");
+}
+
+mk_opt_weak(Arc[int] &src) Weak[int]? {
+  return src.downgrade();
+}
+
+t_weak_temp_some() `test {
+  Arc[int] keep = Arc[int](7);
+  Weak[int] b = keep.downgrade();
+  assert(((mk_opt_weak(keep) ?: b).upgrade() ?: Arc[int](0)).borrow == 7, "weak temp some");
+}
+
+t_weak_bound() `test {
+  Arc[int] keep = Arc[int](7);
+  Weak[int]? a = keep.downgrade();
+  Weak[int] b = keep.downgrade();
+  w := a ?: b;
+  assert((w.upgrade() ?: Arc[int](0)).borrow == 7, "weak bound");
+}
+
+borrowed_weak_val(Weak[int]? a, Weak[int] b) int {
+  return ((a ?: b).upgrade() ?: Arc[int](0)).borrow;
+}
+
+t_weak_borrowed_some() `test {
+  Arc[int] keep = Arc[int](7);
+  Weak[int]? a = keep.downgrade();
+  Weak[int] b = keep.downgrade();
+  assert(borrowed_weak_val(a, b) == 7, "weak borrowed some");
+}
+
+// --- MutexGuard[T] ident source: the inline elvis result is a MutexGuard[int] (the
+// value `.lock()` returns), used inline via `.borrow`. This is the one handle class
+// whose drop is a single non-parameterized function (`c.funcs["MutexGuard.drop"]`,
+// the `named == TypMutexGuard` arm of elvisResultHandleDrop), distinct from the
+// per-instantiation getOrCreate*Drop the other handles use. The orphaned some-path
+// guard must be released exactly once — at HEAD t_guard_some / t_guard_temp_some
+// each leaked 1 allocation (the guard had no drop path in either tracker). ---
+
+t_guard_some() `test {
+  Mutex[int] m1 = Mutex[int](7);
+  Mutex[int] m2 = Mutex[int](9);
+  MutexGuard[int]? a = m1.lock();
+  MutexGuard[int] b = m2.lock();
+  assert((a ?: b).borrow == 7, "guard some");
+}
+
+t_guard_none() `test {
+  Mutex[int] m1 = Mutex[int](7);
+  Mutex[int] m2 = Mutex[int](9);
+  MutexGuard[int]? a = none;
+  MutexGuard[int] b = m2.lock();
+  assert((a ?: b).borrow == 9, "guard none");
+}
+
+// temporary-optional source: the guard must outlive the Mutex it locks, so the
+// helper borrows the Mutex (`&m`) rather than owning a local one (which would be
+// dropped at return, dangling the guard).
+mk_opt_guard(Mutex[int] &m) MutexGuard[int]? {
+  return m.lock();
+}
+
+t_guard_temp_some() `test {
+  Mutex[int] m1 = Mutex[int](7);
+  Mutex[int] m2 = Mutex[int](9);
+  MutexGuard[int] b = m2.lock();
+  assert((mk_opt_guard(m1) ?: b).borrow == 7, "guard temp some");
+}
+
+// bound form: the variable claims the guard temp; only its scope binding drops it
+// (releasing m1's lock). `g.close()` is the explicit guard release.
+t_guard_bound() `test {
+  Mutex[int] m1 = Mutex[int](7);
+  Mutex[int] m2 = Mutex[int](9);
+  MutexGuard[int]? a = m1.lock();
+  MutexGuard[int] b = m2.lock();
+  g := a ?: b;
+  assert(g.borrow == 7, "guard bound");
+  g.close();
+}
+
+// borrowed-param source: the caller owns and releases both guards; the orphan gate
+// skips tracking so the inline result borrows (no double-free, no leak).
+borrowed_guard_val(MutexGuard[int]? a, MutexGuard[int] b) int {
+  return (a ?: b).borrow;
+}
+
+t_guard_borrowed_some() `test {
+  Mutex[int] m1 = Mutex[int](7);
+  Mutex[int] m2 = Mutex[int](9);
+  MutexGuard[int]? a = m1.lock();
+  MutexGuard[int] b = m2.lock();
+  assert(borrowed_guard_val(a, b) == 7, "guard borrowed some");
+}
+
+t_guard_borrowed_none() `test {
+  Mutex[int] m1 = Mutex[int](7);
+  Mutex[int] m2 = Mutex[int](9);
+  MutexGuard[int]? a = none;
+  MutexGuard[int] b = m2.lock();
+  assert(borrowed_guard_val(a, b) == 9, "guard borrowed none");
+}
+
+// --- generic-context handle elvis: the inline elvis result type is `Channel[T]`
+// (TypeParam T); elvisResultHandleDrop must substitute it to the concrete
+// `Channel[int]` before resolving the element type, else the drop resolves against
+// an unbound TypeParam. Locks the typeSubst arm at runtime — the orphaned some-path
+// channel inside the monomorphized body must be freed exactly once. ---
+
+pick_chan_close[T](T seed) {
+  Channel[T]? a = Channel[T](1);
+  Channel[T] b = Channel[T](1);
+  (a ?: b).close();
+}
+
+t_generic_handle_elvis() `test {
+  pick_chan_close(7);
+  pick_chan_close(true);
+  assert(true, "generic handle elvis");
+}
+
+// --- Task[T] ident source: discarded `(a ?: b);` is the leak repro (the handle is
+// neither awaited nor bound). The await form `<-(a ?: b)` already consumes the
+// handle, so only the discarded form leaked at HEAD. Tasks need the scheduler →
+// `exclude: wasm`. cleanupStmtTemps routes the Task drop through the cooperative
+// join automatically. ---
+
+get_42() int {
+  return 42;
+}
+
+t_task_some() `test(exclude: wasm) {
+  Task[int]? a = go get_42();
+  Task[int] b = go get_42();
+  (a ?: b);
+}
+
+t_task_none() `test(exclude: wasm) {
+  Task[int]? a = none;
+  Task[int] b = go get_42();
+  (a ?: b);
+}
+
+mk_opt_task() Task[int]? {
+  return go get_42();
+}
+
+t_task_temp_some() `test(exclude: wasm) {
+  Task[int] b = go get_42();
+  (mk_opt_task() ?: b);
+}
+
+t_task_bound() `test(exclude: wasm) {
+  Task[int]? a = go get_42();
+  Task[int] b = go get_42();
+  t := a ?: b;
+  assert((<-t) == 42, "task bound");
+}
+
+// await form, SOME path only: `<-(a ?: b)` consumes the handle (already correct at
+// HEAD); guards that handle tracking does not double-free the awaited handle. On the
+// some-path genElvis clears the source ident's drop flag, so the awaited orphaned
+// inner has no other owner. The NONE-path analog (`a = none`, owned-local default
+// `b`) double-frees `b` — the await joins+frees b's G and b's scope binding frees it
+// again — and crashes at HEAD independent of this fix; filed as T0954
+// (await-on-elvis-none-path-owned-default double-free), so no `t_task_await_none`.
+t_task_await_some() `test(exclude: wasm) {
+  Task[int]? a = go get_42();
+  Task[int] b = go get_42();
+  assert((<-(a ?: b)) == 42, "task await some");
+}
+
+// borrowed-param: the orphan gate skips tracking, so the discarded inline result
+// borrows the selected task and the caller owns + joins both. (The await form
+// `<-(a ?: b)` is NOT used here — awaiting consumes the handle, which a borrowed
+// source must not do; that pattern crashes at HEAD independent of this fix (the
+// orphan gate doesn't track it), filed as T0953 — await-on-borrowed-task
+// double-consume.)
+borrowed_task_discard(Task[int]? a, Task[int] b) {
+  (a ?: b);
+}
+
+t_task_borrowed_some() `test(exclude: wasm) {
+  Task[int]? a = go get_42();
+  Task[int] b = go get_42();
+  borrowed_task_discard(a, b);
+  assert(true, "task borrowed some");
+}

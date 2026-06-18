@@ -8615,6 +8615,47 @@ func (c *Compiler) elvisResultDrop(e *ast.BinaryExpr) (*ir.Func, types.Type, boo
 	return nil, nil, false
 }
 
+// elvisResultHandleDrop resolves the per-instantiation drop function for an elvis
+// result that is a single-owner native handle represented as a bare i8* — Arc[T],
+// Channel[T], Weak[T], Mutex[T], MutexGuard[T], Task[T] (T0951). These bypass
+// elvisResultDrop (which only resolves Vector/string) and trackElvisResultHeap
+// (which requires a 2-word {i8*,i8*} value struct), so the orphaned some-path
+// handle had no drop path → leak. Mirrors the handle dispatch in trackGetterResult.
+// rt is substituted first, so the element types from types.As* are concrete.
+// Returns nil for every non-handle / ref result type.
+func (c *Compiler) elvisResultHandleDrop(e *ast.BinaryExpr) *ir.Func {
+	rt := c.info.Types[e]
+	if c.typeSubst != nil && rt != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	if c.selfSubst != nil && rt != nil {
+		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	if rt == nil || isRefType(rt) {
+		return nil
+	}
+	named := extractNamed(rt)
+	if chElem, ok := types.AsChannel(rt); ok || named == types.TypChannel {
+		return c.getOrCreateChannelDrop(chElem)
+	}
+	if arcElem, ok := types.AsArc(rt); ok {
+		return c.getOrCreateArcDrop(arcElem)
+	}
+	if weakElem, ok := types.AsWeak(rt); ok {
+		return c.getOrCreateWeakDrop(weakElem)
+	}
+	if mutexElem, ok := types.AsMutex(rt); ok {
+		return c.getOrCreateMutexDrop(mutexElem)
+	}
+	if _, ok := types.AsMutexGuard(rt); ok || named == types.TypMutexGuard {
+		return c.funcs["MutexGuard.drop"]
+	}
+	if taskElem, ok := types.AsTask(rt); ok {
+		return c.getOrCreateTaskDrop(taskElem)
+	}
+	return nil
+}
+
 // trackElvisResultTemp registers an inline (used/discarded) elvis `?:` result as
 // a statement temp with a path-dependent drop flag (T0935/T0945/T0936/T0937). The
 // flag is true on a path only when the result actually owns the buffer selected on
@@ -8649,7 +8690,16 @@ func (c *Compiler) trackElvisResultTemp(e *ast.BinaryExpr, result value.Value, s
 
 	dropFn, elemType, owned := c.elvisResultDrop(e)
 	if !owned {
-		return // other result types untracked (T0940)
+		// T0951: a single-owner native handle (Arc/Channel/Weak/Mutex/MutexGuard/
+		// Task) is a bare i8*, not a Vector/string, so elvisResultDrop returns
+		// owned=false. Resolve the handle's native drop here so the orphaned
+		// some-path handle is freed exactly once. cleanupStmtTemps routes a Task
+		// drop through the cooperative join automatically.
+		if handleDrop := c.elvisResultHandleDrop(e); handleDrop != nil {
+			dropFn, elemType = handleDrop, nil
+		} else {
+			return // other result types untracked (T0940)
+		}
 	}
 
 	// Path-dependent drop flag: per-path ownership computed in genElvis. Created in

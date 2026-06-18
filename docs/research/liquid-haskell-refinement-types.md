@@ -2,7 +2,6 @@
 
 *A grounded assessment built from the Promise compiler source and design docs.*
 
-**Date:** 2026-06-14
 **Scope:** Whether — and in what form — Liquid Haskell's refinement-type approach should map onto Promise's type system, judged against the actual language rather than assumptions about it.
 
 ---

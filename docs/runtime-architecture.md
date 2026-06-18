@@ -60,12 +60,12 @@ No C runtime files remain. All runtime functions are codegen-emitted LLVM IR or 
 | **7b** | Linux: `opt` + `llc` + `ld.lld` (system glibc CRT) | **Done** |
 | **7b'** | Linux: bundled musl CRT (fully static binaries) | **Done** |
 | **7c** | macOS: `llc` + system `ld` (SDK sysroot) | **Done** |
-| **7d** | Windows: `llc` + `lld-link` (MSVC paths) | Planned |
+| **7d** | Windows: `llc` + `lld-link` (MSVC paths) | **Done** |
 | **7e** | `--target` flag + cross-compilation | Planned |
 | **7f** | Self-contained binary: embed compressed LLVM tools via `go:embed` | **Done** |
 | **8** | Rewrite scheduler in Promise | Planned |
 
-Phases 1-5d, 4b, 7a, 7b, 7b', 7c, and 7f are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phase 4b added a WASM bump allocator (later replaced by a free-list allocator). Phase 5d added a cooperative scheduler for WASM (single-threaded, no atomics). Phase 7a added the WASM build pipeline (`opt` + `llc` + `wasm-ld`). Phase 7b replaced clang with `opt` + `llc` + `ld.lld` on Linux with system glibc CRT. Phase 7b' bundled musl libc CRT objects via `go:embed`, making fully static binaries the default on Linux — target triple is now `x86_64-unknown-linux-musl`; clang remains as fallback via `PROMISE_USE_CLANG=1`. Phase 7c added macOS opt+llc+system ld pipeline. Phase 7f embeds compressed LLVM tools (opt, llc, lld) in the Go binary for release builds (`go build -tags embed_llvm`), making the promise binary fully self-contained on Linux (~61MB). The embedded codec is self-describing via the file extension: the dist-CAS publish path (`bin/release publish-install`) embeds the brotli `<sha>.br` directly — byte-identical to the CAS asset, no gzip recompress, smaller binary (T0807) — while the dev/slim `bin/build --release` and Homebrew bundle paths embed `.gz`. The runtime dispatches on the extension when staging into the CAS (`decompressEmbeddedLLVM`). Phase 6 (IO reactor) and remaining Phase 7 (d-e) are planned. Phase 8 is polish.
+Phases 1-5d, 4b, 7a, 7b, 7b', 7c, 7d, and 7f are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phase 4b added a WASM bump allocator (later replaced by a free-list allocator). Phase 5d added a cooperative scheduler for WASM (single-threaded, no atomics). Phase 7a added the WASM build pipeline (`opt` + `llc` + `wasm-ld`). Phase 7b replaced clang with `opt` + `llc` + `ld.lld` on Linux with system glibc CRT. Phase 7b' bundled musl libc CRT objects via `go:embed`, making fully static binaries the default on Linux — target triple is now `x86_64-unknown-linux-musl`; clang remains as fallback via `PROMISE_USE_CLANG=1`. Phase 7c added macOS opt+llc+system ld pipeline. Phase 7f embeds compressed LLVM tools (opt, llc, lld) in the Go binary for release builds (`go build -tags embed_llvm`), making the promise binary fully self-contained on Linux (~61MB). The embedded codec is self-describing via the file extension: the dist-CAS publish path (`bin/release publish-install`) embeds the brotli `<sha>.br` directly — byte-identical to the CAS asset, no gzip recompress, smaller binary (T0807) — while the dev/slim `bin/build --release` and Homebrew bundle paths embed `.gz`. The runtime dispatches on the extension when staging into the CAS (`decompressEmbeddedLLVM`). Phase 6 (IO reactor) and remaining Phase 7 (e) are planned. Phase 8 is polish.
 
 ---
 
@@ -691,7 +691,7 @@ Both paths support x86_64 and aarch64 (different emulation mode and dynamic link
 | macOS (ld64.lld) | `opt → .bc → ld64.lld --lto-O1` | **Done** |
 | macOS (system ld) | `opt → .bc → llc → .o → system ld` | No LTO (system ld can't process bitcode) |
 | WASM | `opt → .bc → wasm-ld --lto-O2` | **Done** (O2 needed for math intrinsic folding) |
-| Windows | `opt → .bc → llc → .o → lld-link` | Not yet (MSVC COFF LTO not wired up) |
+| Windows | `opt → llc → .o → lld-link` | **Done** — no LTO yet (MSVC COFF, T0049) |
 
 `lld` supports all four output formats (Mach-O, ELF, PE/COFF, WASM) via different driver modes.
 
@@ -818,12 +818,12 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 | 7b' | Linux: bundled musl CRT (fully static binaries) | **Done** |
 | 7a | WASM target via `llc` + `wasm-ld` | **Done** |
 | 7c | macOS target via `llc` + system `ld` (or `ld64.lld`) | **Done** |
-| 7d | Windows target via `llc` + `lld-link` | Planned (high — MSVC paths) |
+| 7d | Windows target via `llc` + `lld-link` | **Done** |
 | 7e | `--target` flag + cross-compilation | Planned (low — plumbing) |
 | 7f | Bundle `llc` + `lld` + musl CRT into release tarball | Planned (medium — CI) |
 | 7g | Remove clang fallback (optional) | Planned (low — cleanup) |
 
-**Fallback strategy**: `PROMISE_USE_CLANG=1` forces the clang pipeline on any platform. This lets users on platforms without native linker support (Windows) continue working.
+**Fallback strategy**: `PROMISE_USE_CLANG=1` forces the clang pipeline on any platform. This lets users on platforms without native linker support continue working.
 
 ### Coroutine Pass Verification (Done)
 

@@ -472,7 +472,8 @@ EmitWaitPid(module *ir.Module) *ir.Func     // i32 pid → i32 (exit code 0-255,
 EmitSpawnStreaming(module *ir.Module) *ir.Func // i8* program, i8** argv, i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd → i32 (pid or -1)
 EmitKill(module *ir.Module) *ir.Func          // i32 pid, i32 signal → i32 (0 or -1)
 // POSIX: fork + execvp + pipe (spawn/spawn_streaming), read loop + close (read_pipe), waitpid (wait_pid), kill(2) (kill)
-// Windows/WASM: stubs returning -1
+// Windows: CreateProcessA + CreatePipe (spawn), ReadFile (read_pipe), WaitForSingleObject + GetExitCodeProcess (wait_pid), TerminateProcess / GenerateConsoleCtrlEvent (kill) (T0053)
+// WASM: stubs returning -1
 ```
 
 `execute()` in `modules/os/os.pr` reads stdout and stderr concurrently using `go _os_read_pipe(stderr_fd)` while the main goroutine reads stdout. This prevents deadlock when a child writes >64KB to stderr.

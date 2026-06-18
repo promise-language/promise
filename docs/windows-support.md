@@ -1,44 +1,43 @@
 # Windows Support
 
-> Native Windows support for the Promise compiler. No MinGW — full MSVC-compatible toolchain targeting the Windows SDK and UCRT.
+> Native Windows support for the Promise compiler. No MinGW — full MSVC-compatible toolchain targeting the Windows SDK and UCRT, with a self-generated link surface that needs no Visual Studio Build Tools.
 
 ---
 
 ## 1. Overview
 
-Promise targets Windows natively via the MSVC ABI (`x86_64-pc-windows-msvc`). The compiler binary (`promise.exe`) is built on Windows using Go, and produces Windows executables by compiling LLVM IR through `opt` → `llc` → `lld-link`, linking against the Windows SDK and UCRT.
+Promise targets Windows natively via the MSVC ABI (`x86_64-pc-windows-msvc`). The compiler binary (`promise.exe`) is built on Windows using Go, and produces Windows executables by compiling LLVM IR through `opt` → `llc` → `lld-link`, linking against a self-generated link surface (own import libs + codegen-emitted crt0/TLS/builtins) that resolves only to DLLs shipped with Windows.
 
 **Non-goals:** MinGW/Cygwin, cross-compilation from Linux to Windows.
 
 ---
 
-## 2. Current State (2026-03-21)
+## 2. Current State
 
-**Phase 1 complete** — hello world works. Core language, standard library, M:N scheduler, and file I/O all function correctly on Windows.
+Windows is a first-class, fully-supported target. Core language, standard library, M:N scheduler, file I/O, process execution, signals, stack-overflow detection, and release builds all work. `windows-amd64` is a full CI matrix member (built + tested on every PR and `main`/`next` push, see T0774), and the full test suite passes on Windows.
 
 ### Working
 
-- Compiler builds on Windows (`build.ps1`, prerequisite installer `bin/install-prereqs.ps1`)
-- Core language: variables, types, enums, generics, match, lambdas, closures
-- Standard library: int/float/bool/char/string, Vector, Map, Set, iterators, sorting
-- M:N scheduler: goroutines, channels, select, tasks (full GMP model)
-- File I/O: open, read, write, close, seek, stat, mkdir, rmdir, dir listing
-- Environment: getenv, setenv, getcwd, chdir, hostname, user info
-- Monotonic time: QueryPerformanceCounter/Frequency
-- Sleep: Win32 Sleep(ms)
-- Threading: `_beginthreadex`, CRITICAL_SECTION, CONDITION_VARIABLE
-- Panic recovery: `__intrinsic_setjmp`/`longjmp` with 16-byte aligned jmp_buf
-- Build cache with `LockFileEx`/`UnlockFileEx` file locking
-- Batch tests pass (e.g., `tests/std/int_test.pr`, `tests/concurrency/batch_goroutine_test.pr`)
+- **Build & toolchain:** compiler builds on Windows; release builds (`bin/build --release`) embed LLVM tools (T0056); **zero-dependency link surface** — no Visual Studio Build Tools, no Windows SDK, no Microsoft `.lib` redistribution (T0772)
+- **Core language:** variables, types, enums, generics, match, lambdas, closures
+- **Standard library:** int/float/bool/char/string, Vector, Map, Set, iterators, sorting
+- **M:N scheduler:** goroutines, channels, select, tasks (full GMP model)
+- **File I/O:** open, read, write, close, seek, stat, mkdir, rmdir, dir listing
+- **Process execution:** spawn, streaming spawn, wait_pid, kill, pipe redirection (T0053)
+- **Signals:** Ctrl+C → SIGINT, Ctrl+Break → SIGTERM via `SetConsoleCtrlHandler`; self-signaling via `GenerateConsoleCtrlEvent` (T0054)
+- **Stack overflow detection:** Vectored Exception Handler catches `STATUS_STACK_OVERFLOW`, prints `fatal: stack overflow`, exits (T0051)
+- **Environment:** getenv, setenv, getcwd, chdir, hostname, user info, process id
+- **Monotonic time:** QueryPerformanceCounter/Frequency
+- **Sleep:** Win32 `Sleep(ms)`
+- **Threading:** `CreateThread` (2MB stack), CRITICAL_SECTION, CONDITION_VARIABLE
+- **Panic recovery:** TLS-flag propagation (no `setjmp`/`longjmp` on any target)
+- **Build cache** with `LockFileEx`/`UnlockFileEx` file locking
+- **Tests:** both batch and snapshot tests pass; `\r\n` output is normalized in the harness (T0046)
 
-### Not Working
+### Known limitations
 
-- Snapshot tests fail due to `\r\n` line endings (`Platform.line_separator` is `\r\n` on Windows, test `expected:` strings use `\n`) — **T0046**
-- Process execution stubbed (spawn, streaming spawn, wait_pid, kill all return -1) — **T0053**
-- Signal handling stubbed (signal_init, signal_register return -1) — **T0054**
-- Stack overflow detection stubbed (no SEH handler) — **T0051**
-- No LTO in link pipeline (opt → llc → lld-link, not opt → lld-link --lto) — **T0049**
-- Some Go unit tests fail on Windows (path separators, absolute path detection) — **T0047**
+- **No LTO in the link pipeline** — Windows uses `opt → llc → lld-link` (no cross-module LTO, unlike Linux/macOS which use bitcode → linker with `--lto-O1`). Deferred — **T0049**.
+- **POSIX-only signals are unsupported by design** — only SIGINT/SIGTERM map to Windows console control events; SIGHUP and other POSIX signals return an error.
 
 ---
 
@@ -111,9 +110,9 @@ points `/libpath:` at the extracted import-lib dir and `/entry:__promise_start`.
 
 ## 4. Platform Abstraction Layer (PAL)
 
-The WindowsPAL in `codegen/pal/windows.go` emits LLVM IR that calls Win32 API functions. All Win32 functions are declared as LLVM externals — the linker resolves them from `kernel32.lib` and UCRT.
+The WindowsPAL in `codegen/pal/windows.go` emits LLVM IR that calls Win32 API functions. All Win32 functions are declared as LLVM externals — the linker resolves them from the self-generated import libs (kernel32, advapi32, ws2_32, ucrtbase). All PAL methods are implemented; there are no stubs.
 
-### 4.1 Fully Implemented (47/52 methods)
+### 4.1 Implemented
 
 | Category | PAL Functions | Win32 API |
 |----------|--------------|-----------|
@@ -129,38 +128,33 @@ The WindowsPAL in `codegen/pal/windows.go` emits LLVM IR that calls Win32 API fu
 | Dirs | `pal_file_mkdir`, `pal_dir_remove/exists/open/next_name/close` | FindFirstFileW/FindNextFileW |
 | Env | `pal_getenv/setenv/unsetenv/getcwd/chdir/get_environ` | UCRT getenv/_putenv_s etc. |
 | User | `pal_get_user_info`, `pal_get_hostname` | GetUserNameEx, GetComputerNameEx |
+| Process | `pal_spawn`, `pal_spawn_streaming`, `pal_read_pipe`, `pal_wait_pid`, `pal_kill` | CreateProcessA + CreatePipe, ReadFile, WaitForSingleObject + GetExitCodeProcess, TerminateProcess / GenerateConsoleCtrlEvent |
+| Signals | `pal_signal_init`, `pal_signal_register` | SetConsoleCtrlHandler + UCRT `_pipe` |
+| Stack overflow | `pal_stack_overflow_init` | AddVectoredExceptionHandler (process-global; thread init is a no-op) |
 
 **Thread trampoline:** `CreateThread` expects `DWORD (*)(LPVOID)` (= `i32(i8*)`).
-PAL signature is `i8*(i8*)`. The WindowsPAL emits a trampoline adapter. As of
-T0772, `pal_thread_create` uses kernel32 **`CreateThread`** rather than the UCRT
-`_beginthreadex` — part of the zero-dependency surface (kernel32 is always
-present). This is safe because Promise's panic recovery uses **TLS-flag
-propagation, not `setjmp`/`longjmp`** (T0146–T0148), so no CRT per-thread state is
-needed; the dynamically-linked `ucrtbase.dll` still initializes per-thread errno
-via its `DLL_THREAD_ATTACH` callback on bare `CreateThread` threads. (The earlier
-`_beginthreadex` rationale below in §8 is obsolete.)
+PAL signature is `i8*(i8*)`. The WindowsPAL emits a trampoline adapter.
+`pal_thread_create` uses kernel32 **`CreateThread`** (T0772) — part of the
+zero-dependency surface (kernel32 is always present). This is safe because
+Promise's panic recovery uses **TLS-flag propagation, not `setjmp`/`longjmp`**
+(T0146–T0148), so no CRT per-thread state is needed; the dynamically-linked
+`ucrtbase.dll` still initializes per-thread errno via its `DLL_THREAD_ATTACH`
+callback on bare `CreateThread` threads.
 
-### 4.2 Stubbed (5/52 methods)
+### 4.2 Process & signal behavior notes
 
-| PAL Function | Status | Notes |
-|--------------|--------|-------|
-| `pal_spawn` | Returns -1 | T0053: needs CreateProcessW |
-| `pal_spawn_streaming` | Returns -1 | T0053: needs pipe redirection |
-| `pal_read_pipe` | Returns -1 | T0053 |
-| `pal_wait_pid` | Returns -1 | T0053: needs WaitForSingleObject + GetExitCodeProcess |
-| `pal_kill` | Returns -1 | T0053: needs TerminateProcess |
-| `pal_signal_init` | Returns -1 | T0054: needs SetConsoleCtrlHandler |
-| `pal_signal_register` | Returns -1 | T0054 |
-| `pal_stack_overflow_init` | No-op | T0051: needs VEH handler |
-| `pal_stack_overflow_thread_init` | No-op | T0051 |
+- **Self-signaling** (`pal_kill` with `pid == GetCurrentProcessId()`): SIGINT →
+  `GenerateConsoleCtrlEvent(CTRL_C_EVENT)`, SIGTERM → `CTRL_BREAK_EVENT`. Other
+  PIDs use `TerminateProcess`. Unsupported signals (SIGHUP etc.) return -1 (B0154).
+- **Console control events:** only SIGINT/SIGTERM have Windows equivalents; per-signal
+  enable flags ensure only registered signals are delivered.
 
 ### 4.3 Windows-Specific Codegen (`codegen/windows.go`)
 
 | Function | Purpose |
 |----------|---------|
-| `callSetjmp()` | Calls `__intrinsic_setjmp(env, llvm.frameaddress(0))` on Windows (POSIX: `_setjmp(env)`) |
 | `defineWindowsUsleep()` | Wraps Win32 `Sleep(ms)` as `usleep(usec)` with 1ms minimum |
-| `buildWindowsNanotimeBody()` | QPC/QPF → nanoseconds (two-step to avoid i64 overflow) |
+| `emitWindowsQPCNanos()` | QPC/QPF → nanoseconds (shared by nanotime + sleep_nanos; two-step to avoid i64 overflow) |
 | `buildWindowsSleepNanosBody()` | Nanoseconds → milliseconds → Win32 `Sleep` |
 
 ---
@@ -171,104 +165,47 @@ via its `DLL_THREAD_ATTACH` callback on bare `CreateThread` threads. (The earlie
 
 - **Go 1.25+** — builds the compiler itself
 - **LLVM 22+** — full clang+llvm release (needs `opt.exe`, `llc.exe`, `lld-link.exe`)
-- **Visual Studio Build Tools** or **Visual Studio** — provides MSVC libs
-- **Windows SDK** — provides `kernel32.lib`, `libucrt.lib`
-- **Java 11+** — ANTLR4 parser generation (optional if parser already generated)
+- **Java 11+** — ANTLR4 parser generation (optional if the parser is already generated; the generated parser is committed)
 
-Install via: `powershell -ExecutionPolicy Bypass -File bin\install-prereqs.ps1`
+No Visual Studio Build Tools and no Windows SDK are required — the link surface is
+self-generated (T0772, §3.3). Release builds (`bin/build --release`) embed the LLVM
+tools into the binary, so an installed LLVM is only needed for non-release builds.
 
-### 5.2 Build Script
+### 5.2 Bootstrap & Build
 
-`build.ps1` at repo root — Windows equivalent of `./build`:
-
-```powershell
-.\build.ps1              # embed resources + build → bin\promise.exe
-.\build.ps1 -Generate    # also regenerate ANTLR parser (requires Java)
+```cmd
+.\make.cmd               :: bootstrap — compile build tools to bin\
+bin\build                :: embed resources + build → bin\promise.exe
+bin\build --release      :: release build with embedded LLVM tools
+bin\test --wasm          :: build + run all tests (incl. wasm32-wasi)
+bin\verify --wasm        :: format + vet + all tests (pre-commit check)
 ```
 
-Steps: check prerequisites → embed resources (modules, catalog) → `go build` → write hash sidecar → smoke test.
+`bin\build` handles ANTLR generation (when Java is present), resource embedding,
+and compilation. `bin\` is gitignored and the forge tools refuse to run stale, so
+re-run `.\make.cmd` after changing `tools/` sources.
 
 ---
 
-## 6. Implementation Plan
+## 6. Remaining Work
 
-### Phase 1: Build Infrastructure — DONE
+Windows has reached full parity for the language, standard library, runtime, and
+test suite. The one outstanding item is a performance optimization:
 
-- [x] `build.ps1` — self-contained Windows build script
-- [x] `bin/install-prereqs.ps1` — prerequisite installer
-- [x] Windows codegen: setjmp/longjmp, usleep, nanotime, sleep_nanos
-- [x] PAL: _beginthreadex, CRITICAL_SECTION, CONDITION_VARIABLE, file I/O
-- [x] Module cache file locking (LockFileEx/UnlockFileEx)
-- [x] `.exe` extension for run/exec/test temp binaries
-
-### Phase 2: Test Infrastructure
-
-Fix the test harness so the full test suite runs on Windows with meaningful results.
-
-- **T0046**: Snapshot test `\r\n` normalization — strip `\r` from actual output before comparing against `expected:` strings. Unblocks ~100 snapshot tests.
-- **T0047**: Fix Go unit tests for Windows paths — path separators, absolute path detection, colon-in-path issues.
-- **T0048**: Windows CI pipeline — GitHub Actions `windows-latest`, run `build.ps1` + Go tests + batch tests.
-
-### Phase 3: Link Pipeline & Codegen Cleanup
-
-- **T0049**: Windows LTO support — investigate `lld-link` LTO for COFF targets in LLVM 22. Current: `opt → llc → lld-link` (no LTO). Target: bitcode → `lld-link` with LTO.
-- **T0050**: Codegen cleanup — deduplicate B0143 (`@Sleep` declarations) and B0144 (QPC/QPF logic). Ensure all Win32 declarations use `getOrDeclareFunc`.
-
-### Phase 4: Runtime Hardening
-
-- **T0051**: Stack overflow detection (B0141) — register a Vectored Exception Handler (VEH) via `AddVectoredExceptionHandler` at startup. Check for `EXCEPTION_STACK_OVERFLOW` (0xC00000FD). Print "fatal: stack overflow" and `ExitProcess(2)`.
-- **T0052**: Snapshot test portability audit — after T0046, check for path separator assumptions in expected output, error messages, etc.
-
-### Phase 5: Process Execution & Signals
-
-- **T0053**: Windows process execution — implement `pal_spawn` via `CreateProcessW`, `pal_wait_pid` via `WaitForSingleObject` + `GetExitCodeProcess`, `pal_read_pipe` via `ReadFile`, `pal_spawn_streaming` with pipe redirection, `pal_kill` via `TerminateProcess`.
-- **T0054**: Windows signal handling — `SetConsoleCtrlHandler` for Ctrl+C/Ctrl+Break. Map CTRL_C_EVENT → SIGINT, CTRL_BREAK_EVENT → SIGTERM. Other signals return "not supported" on Windows.
-
-### Phase 6: Full Parity & Polish
-
-- **T0055**: Run full test suite on Windows (`tests/e2e/...`, `tests/std/...`, `tests/concurrency/...`, `tests/modules/...`, `tests/value_types/...`, `tests/arrays/...`). Fix remaining failures. Add Windows-specific tests. Stress test the scheduler.
-- **T0056**: Release build support — `build.ps1 -Release` embeds LLVM tools into the binary. Windows-specific embed file (`llvm_windows_amd64.go`). Self-contained ~60-70MB binary.
-
-### Dependencies
-
-```
-Phase 1 (DONE)
-  |
-  v
-Phase 2 (Test Infrastructure)  ← unblocks all testing
-  |
-  +--> Phase 3 (Link Pipeline)  ← independent, improves perf
-  |
-  +--> Phase 4 (Runtime Hardening)  ← independent, improves reliability
-  |
-  v
-Phase 5 (Process Execution & Signals)  ← needs Phase 2 for testing
-  |
-  v
-Phase 6 (Full Parity & Polish)  ← needs all above
-```
+- **T0049** — Windows LTO. Current link pipeline is `opt -O1 → llc -filetype=obj → lld-link`
+  (no LTO). Linux/macOS use bitcode → linker with `--lto-O1` for cross-module
+  inlining and DCE. Investigate `lld-link` LTO support for COFF targets. Affects
+  binary size and performance, not correctness. Deferred, low priority.
 
 ---
 
-## 7. Existing Tracker Items
+## 7. Key Design Decisions
 
-| ID | Title | Phase | Status |
-|----|-------|-------|--------|
-| B0140 | Go codegen tests assume POSIX PAL (fail on Windows) | Phase 2 | open |
-| B0141 | Windows: no stack overflow detection | Phase 4 | open |
-| B0142 | Windows PAL tests assert CreateThread but impl uses _beginthreadex | Phase 1 | done |
-| B0143 | defineWindowsUsleep may declare duplicate @Sleep | Phase 3 | open |
-| B0144 | nanotime QPC/QPF logic duplicated in windows.go and io.go | Phase 3 | open |
-
----
-
-## 8. Key Design Decisions
-
-- **MSVC ABI, not MinGW**: Native Windows experience. MSVC ABI is what Windows developers and tools expect.
-- **No Visual Studio Build Tools / Windows SDK required (T0772)**: Superseded the original "Build Tools required" decision. The link surface is self-generated (own import libs from license-clean `.def` symbol lists + codegen-emitted crt0/TLS/`__chkstk`/`_fltused`), so a fresh machine links runnable `.exe`s with zero local dependencies and no Microsoft `.lib` redistribution. See §3.3.
+- **MSVC ABI, not MinGW**: native Windows experience. MSVC ABI is what Windows developers and tools expect.
+- **No Visual Studio Build Tools / Windows SDK (T0772)**: the link surface is self-generated (own import libs from license-clean `.def` symbol lists + codegen-emitted crt0/TLS/`__chkstk`/`_fltused`), so a fresh machine links runnable `.exe`s with zero local dependencies and no Microsoft `.lib` redistribution. See §3.3.
 - **lld-link, not link.exe**: LLD ships with LLVM, is open-source, and works identically across platforms.
-- **CRITICAL_SECTION, not SRWLock**: Safer match for `pthread_mutex_t` semantics (recursive, owning).
-- **CreateThread, not _beginthreadex (T0772)**: Superseded the original `_beginthreadex` decision. kernel32 `CreateThread` keeps the worker-thread surface on an always-present DLL. Safe because panic recovery uses TLS-flag propagation, not `setjmp`/`longjmp` (T0146–T0148), so no CRT per-thread state is required; ucrtbase's `DLL_THREAD_ATTACH` still initializes per-thread errno on bare `CreateThread` threads.
-- **No `setjmp`/`longjmp` (obsolete decision)**: Panic recovery once used `__intrinsic_setjmp`; as of T0146–T0148 it is TLS-flag propagation instead, so no `setjmp`/`longjmp` is emitted on any target. This is what makes the `CreateThread` switch (above) safe.
-- **`Platform.line_separator`**: `\r\n` on Windows, `\n` elsewhere. Correct for console output. Test harness must normalize.
+- **CRITICAL_SECTION, not SRWLock**: safer match for `pthread_mutex_t` semantics (recursive, owning).
+- **CreateThread, not _beginthreadex (T0772)**: keeps the worker-thread surface on an always-present DLL. Safe because panic recovery uses TLS-flag propagation, not `setjmp`/`longjmp` (T0146–T0148), so no CRT per-thread state is required; ucrtbase's `DLL_THREAD_ATTACH` still initializes per-thread errno on bare `CreateThread` threads.
+- **No `setjmp`/`longjmp`**: panic recovery uses TLS-flag propagation on every target. This is what makes the `CreateThread` choice safe.
+- **`Platform.line_separator`**: `\r\n` on Windows, `\n` elsewhere. Correct for console output; the test harness normalizes `\r\n` before comparing snapshot output (T0046).
 - **Self-supplied TLS directory (T0772)**: LLVM `thread_local` compiles to Windows TLS on MSVC targets automatically, but the loader only allocates per-thread storage when the PE has a TLS directory (`_tls_used`). The MSVC CRT (tlssup) normally supplies it; since we link no CRT, codegen emits `_tls_used`/`_tls_index` + the `.tls` start/end markers itself (see `emitWindowsTLSSupport`).

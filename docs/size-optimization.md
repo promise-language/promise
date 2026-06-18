@@ -2,19 +2,7 @@
 
 ## Motivation
 
-Promise targets browser WebAssembly where download size directly impacts load time. Binary size has not been actively tracked, risking silent regressions. This document defines a phased plan: prevent regressions first, then optimize.
-
-## Current Baseline (2026-03-23)
-
-| Program | Features used | WASM size |
-|---------|--------------|-----------|
-| `print_line("hello")` | minimal runtime | 6 KB |
-| channels example | concurrency stubs | 12 KB |
-| vectors example | generics, collections | 13 KB |
-| variables example | strings, formatting | 24 KB |
-| basics.pr (large e2e) | broad stdlib | 38 KB |
-
-Native (macOS arm64) hello is ~53 KB for comparison. Sizes are already reasonable thanks to `--lto-O2` but there is no mechanism to detect regressions.
+Promise targets browser WebAssembly where download size directly impacts load time. This document defines a phased plan: prevent regressions first, then optimize. Per-canary size baselines are tracked by the `wasm_size_*` gates (see `tools/gates/baselines.json`), not duplicated here.
 
 ## Phase 1: Regression Prevention
 

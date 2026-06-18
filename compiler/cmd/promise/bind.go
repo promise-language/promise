@@ -7,9 +7,20 @@ import (
 	"strings"
 
 	"github.com/promise-language/promise/compiler/internal/bindgen"
+	"github.com/promise-language/promise/compiler/internal/module"
 	"github.com/promise-language/promise/compiler/internal/webidl"
 	"github.com/promise-language/promise/compiler/internal/wit"
 )
+
+// bindEpoch returns the running compiler's epoch for generated promise.toml
+// scaffolds, falling back to a recent epoch if the catalog can't be read (T0972).
+func bindEpoch() string {
+	epoch, err := module.CompilerEpoch(embeddedCatalog)
+	if err != nil || epoch == "" {
+		return "2026.1"
+	}
+	return epoch
+}
 
 func runBind(args []string) {
 	if len(args) == 0 {
@@ -174,7 +185,7 @@ func runBindWit(args []string) {
 
 	// Write promise.toml
 	tomlPath := filepath.Join(outDir, "promise.toml")
-	tomlContent := fmt.Sprintf("[module]\nname = \"%s\"\nepoch = \"2026.0\"\n", moduleName)
+	tomlContent := fmt.Sprintf("[module]\nname = %q\nepoch = %q\n", moduleName, bindEpoch())
 	if err := os.WriteFile(tomlPath, []byte(tomlContent), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing %s: %v\n", tomlPath, err)
 		os.Exit(1)
@@ -333,7 +344,7 @@ func runBindWebIdl(args []string) {
 
 	// Write promise.toml
 	tomlPath := filepath.Join(outDir, "promise.toml")
-	tomlContent := fmt.Sprintf("[module]\nname = \"%s\"\nepoch = \"2026.0\"\n", moduleName)
+	tomlContent := fmt.Sprintf("[module]\nname = %q\nepoch = %q\n", moduleName, bindEpoch())
 	if err := os.WriteFile(tomlPath, []byte(tomlContent), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing %s: %v\n", tomlPath, err)
 		os.Exit(1)

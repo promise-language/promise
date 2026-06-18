@@ -7820,7 +7820,13 @@ func runPkgUpdate(args []string) {
 }
 
 func runInit(args []string) {
-	const defaultEpoch = "2026.0"
+	// Derive the epoch from the running compiler so a fresh scaffold always
+	// targets an epoch this toolchain can actually build (T0972).
+	defaultEpoch, err := module.CompilerEpoch(embeddedCatalog)
+	if err != nil || defaultEpoch == "" {
+		// Should never trigger in a real build (the catalog is always embedded).
+		defaultEpoch = "2026.1"
+	}
 
 	// Parse --force flag and optional target directory
 	force := false

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/promise/compiler/internal/module"
 )
 
 func TestRunInitCreatesFiles(t *testing.T) {
@@ -43,6 +46,23 @@ func TestRunInitCreatesFiles(t *testing.T) {
 	toml, _ := os.ReadFile(filepath.Join(target, "promise.toml"))
 	if !strings.Contains(string(toml), "myproject") {
 		t.Errorf("promise.toml missing directory name %q", "myproject")
+	}
+
+	// T0972: the scaffolded epoch must be derived from the running compiler,
+	// not a stale hardcoded literal, so a fresh project actually builds.
+	wantEpoch, err := module.CompilerEpoch(embeddedCatalog)
+	if err != nil || wantEpoch == "" {
+		wantEpoch = "2026.1" // mirror runInit's fallback
+	}
+	if !strings.Contains(string(toml), fmt.Sprintf("epoch = %q", wantEpoch)) {
+		t.Errorf("promise.toml epoch missing %q; got:\n%s", wantEpoch, toml)
+	}
+	if wantEpoch != "2026.0" && strings.Contains(string(toml), `epoch = "2026.0"`) {
+		t.Errorf("promise.toml carries stale hardcoded epoch 2026.0")
+	}
+	// The confirmation line should advertise the same epoch.
+	if !strings.Contains(output, "epoch: "+wantEpoch) {
+		t.Errorf("output missing 'epoch: %s'; got:\n%s", wantEpoch, output)
 	}
 
 	// Check main.pr content.

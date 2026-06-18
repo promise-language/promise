@@ -25,6 +25,7 @@ GetFileAttributesA
 GetLastError
 GetStdHandle
 GetSystemInfo
+GetSystemTimePreciseAsFileTime
 InitializeConditionVariable
 InitializeCriticalSection
 LeaveCriticalSection

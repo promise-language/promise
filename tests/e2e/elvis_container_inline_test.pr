@@ -5,8 +5,13 @@
 // for a vector layout and called free() on a .rodata buffer:
 //   fatal: invalid free (bad header magic)
 // The fix routes the inline elvis result through Vector.drop (honors the bit-63
-// static flag, walks droppable elements) with a path-dependent drop flag: free on
-// the some-path (owns the moved inner), no-op on the none-path (borrows default).
+// static flag, walks droppable elements) with a path-dependent drop flag. T0936
+// then made that flag per-operand-ownership: the result frees a path's buffer only
+// when it actually owns it — the moved-out inner on the some-path, and (for a LOCAL
+// default, as in t_*_none below) the transferred default on the none-path, whose
+// own scope-exit drop is neutralized. A parameter/borrowed/static default keeps its
+// own owner, so the result borrows it (none-path flag false) — see the generic and
+// structural-default tests, whose operands are parameters.
 // --- static .rodata int[] operands (the reported repro) ---
 t_static_some() `test {
   int[]? a = [1, 2, 3];
@@ -60,17 +65,12 @@ t_strvec_none() `test {
   assert((a ?: b).len == 1, "strvec none");
 }
 
-// --- none-path operand reuse (use-after-free guard): the borrowed default `b`
-// must survive after an inline elvis that took the none path. ---
-
-t_reuse_none() `test {
-  int[]? a = none;
-  int[] b = [9];
-  x := (a ?: b).len;
-  y := b.len;
-  assert(x == 1, "reuse x");
-  assert(y == 1, "reuse y");
-}
+// T0936 changed elvis to move-at-ownership: `a ?: b` now CONSUMES both operands,
+// so reusing `b` after the elvis is a compile error (`use of moved variable 'b'`),
+// not a runtime use-after-free. The former `t_reuse_none` runtime guard (which
+// relied on the old borrow-on-none semantics) is replaced by the negative ownership
+// tests in compiler/internal/ownership/t0936_test.go and the memory-safety matrix
+// in tests/e2e/elvis_container_ownership_test.pr.
 
 // --- T0945: borrowed (plain, non-`~`) optional-vector value parameter. The
 // caller owns the param and drops it after the call, so an inline elvis inside

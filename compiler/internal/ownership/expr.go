@@ -29,6 +29,22 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 	case *ast.BinaryExpr:
 		c.checkExpr(e.Left)
 		c.checkExpr(e.Right)
+		// T0936: elvis `?:` consumes both operands (move-at-ownership). The some-path
+		// moves the optional's inner out (codegen clears its drop flag); the none-path
+		// moves the default into the result (codegen neutralizes the default's own
+		// owner). Both are statically consumed, so reusing either afterward is a
+		// use-after-move. Mark after checking BOTH operands so the two reads inside one
+		// elvis aren't falsely flagged against each other. Only ident operands carry
+		// move state (tryMove no-ops on non-idents and Copy types — matching genElvis,
+		// which only clears drop flags on ident operands).
+		if e.Op == ast.BinElvis {
+			if _, ok := e.Left.(*ast.IdentExpr); ok {
+				c.tryMove(e.Left)
+			}
+			if _, ok := e.Right.(*ast.IdentExpr); ok {
+				c.tryMove(e.Right)
+			}
+		}
 
 	case *ast.UnaryExpr:
 		c.checkExpr(e.Operand)

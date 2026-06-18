@@ -1,0 +1,186 @@
+// T0936: elvis `?:` whose result is a container (Vector[T]/T[]) or string must
+// agree between the ownership pass and codegen on operand ownership. Under
+// move-at-ownership, `a ?: b` consumes BOTH operands and the elvis result is the
+// sole owner of the selected buffer on EVERY path:
+//   - some-path: the optional's inner is moved out (drop flag cleared) and owned
+//     by the result; the *unselected* default keeps its own binding drop;
+//   - none-path: the default is transferred into the result (its own binding drop
+//     is neutralized path-conditionally) so exactly one owner frees it.
+// Before this fix, heap (non-.rodata) operands hit a some-path use-after-free
+// (result + optional both freed the inner) and a bound none-path double-free
+// (`m` and `b` both freed the same buffer). Static .rodata operands masked both
+// because Vector.drop no-ops on the bit-63 static flag. Every test here uses HEAP
+// operands (push-built vectors / concatenated strings) and runs under the suite's
+// zero-leak enforcement, so a leak, double-free, or UAF fails the batch.
+// --- bound result: m := a ?: b (the item's bug-2 repro) ---
+t_bound_some_heap() `test {
+  int[] av = [];
+  av.push(1);
+  av.push(2);
+  av.push(3);
+  int[]? a = av;
+  int[] b = [];
+  b.push(9);
+  m := a ?: b; // some → m owns a's buffer; b dropped by its own binding
+  assert(m.len == 3, "bound some heap");
+}
+
+t_bound_none_heap() `test {
+  int[]? a = none;
+  int[] b = [];
+  b.push(9);
+  m := a ?: b; // none → m owns b's buffer; b's binding drop neutralized
+  assert(m.len == 1, "bound none heap");
+}
+
+// --- inline result: (a ?: b).len ---
+
+t_inline_some_heap() `test {
+  int[] av = [];
+  av.push(1);
+  av.push(2);
+  av.push(3);
+  int[]? a = av;
+  int[] b = [];
+  b.push(9);
+  x := (a ?: b).len; // some → result temp frees a's buffer; b's binding frees b
+  assert(x == 3, "inline some heap");
+}
+
+t_inline_none_heap() `test {
+  int[]? a = none;
+  int[] b = [];
+  b.push(9);
+  x := (a ?: b).len; // none → result temp frees b's buffer; b's binding skipped
+  assert(x == 1, "inline none heap");
+}
+
+// --- heap STRING operands (concatenation allocates, bit-63 clear) ---
+
+t_bound_some_string() `test {
+  string a_inner = "h" + "i";
+  string? a = a_inner;
+  string b = "x" + "y";
+  m := a ?: b; // some → m owns a's buffer; b dropped by its own binding
+  assert(m.len == 2, "bound some string");
+}
+
+t_bound_none_string() `test {
+  string? a = none;
+  string b = "x" + "y" + "z";
+  m := a ?: b; // none → m owns b's buffer; b's binding drop neutralized
+  assert(m.len == 3, "bound none string");
+}
+
+t_inline_some_string() `test {
+  string a_inner = "h" + "i";
+  string? a = a_inner;
+  string b = "x" + "y";
+  x := (a ?: b).len; // some → result temp frees a's buffer; b's binding frees b
+  assert(x == 2, "inline some string");
+}
+
+t_inline_none_string() `test {
+  string? a = none;
+  string b = "x" + "y" + "z";
+  x := (a ?: b).len; // none → result temp frees b's buffer; b's binding skipped
+  assert(x == 3, "inline none string");
+}
+
+// --- fresh-temp default (call result), not an ident: claimStringTemp/claimHeapTemp
+// must neutralize the default's own temp so only the result frees it. ---
+
+heap_vec() int[] {
+  int[] v = [];
+  v.push(7);
+  v.push(8);
+  return v;
+}
+
+t_default_call_some() `test {
+  int[] av = [];
+  av.push(1);
+  av.push(2);
+  av.push(3);
+  int[]? a = av;
+  x := (a ?: heap_vec()).len; // some → heap_vec() not evaluated (lazy); result frees a
+  assert(x == 3, "default call some");
+}
+
+t_default_call_none() `test {
+  int[]? a = none;
+  x := (a ?: heap_vec()).len; // none → default temp claimed; result frees it once
+  assert(x == 2, "default call none");
+}
+
+// --- fresh-temp STRING default (concatenation allocates, bit-63 clear), not an
+// ident: claimElvisDefaultTemp must claim the concat temp (claimStringTemp /
+// stmtTempMap branch) so the result frees it exactly once on the none-path. The
+// some-path never evaluates the default (lazy `?:`), so no leak there either. ---
+
+t_default_strconcat_none() `test {
+  string? a = none;
+  x := (a ?: ("x" + "y" + "z")).len; // none → concat temp claimed; result frees once
+  assert(x == 3, "default strconcat none");
+}
+
+t_default_strconcat_some() `test {
+  string a_inner = "h" + "i";
+  string? a = a_inner;
+  x := (a ?: ("p" + "q" + "r")).len; // some → result frees a; concat (none block) unevaluated
+  assert(x == 2, "default strconcat some");
+}
+
+t_default_strconcat_bound_none() `test {
+  string? a = none;
+  m := a ?: ("p" + "q" + "r" + "s"); // none → m owns the claimed concat temp; one free
+  assert(m.len == 4, "default strconcat bound none");
+}
+
+// --- non-ident .rodata LITERAL default: claimElvisDefaultTemp finds no owned temp
+// to claim (static buffer), so the result BORROWS it (noneOwned=false). Vector.drop
+// / promise_string_drop no-op on the bit-63 static flag — must run clean with no
+// bad-free (the T0935 crash) and no double-free. ---
+
+t_default_veclit_borrow_none() `test {
+  int[]? a = none;
+  x := (a ?: [1, 2, 3, 4]).len; // none → static literal borrowed; result drop no-ops
+  assert(x == 4, "default veclit borrow none");
+}
+
+t_default_strlit_borrow_none() `test {
+  string? a = none;
+  x := (a ?: "literal").len; // none → static string literal borrowed; result drop no-ops
+  assert(x == 7, "default strlit borrow none");
+}
+
+t_default_veclit_borrow_some_heap() `test {
+  int[] av = [];
+  av.push(5);
+  av.push(6);
+  int[]? a = av;
+  x := (a ?: [1, 2, 3, 4]).len; // some → result frees heap av; static default unevaluated
+  assert(x == 2, "default veclit borrow some heap");
+}
+
+// --- string[] default: the result drop must also walk droppable elements
+// (leak guard) and free exactly once. ---
+
+t_strvec_bound_none() `test {
+  string[]? a = none;
+  string[] b = [];
+  b.push("p" + "q");
+  b.push("r" + "s");
+  m := a ?: b; // none → m owns b (and its element strings); one free each
+  assert(m.len == 2, "strvec bound none");
+}
+
+t_strvec_inline_some() `test {
+  string[] av = [];
+  av.push("a" + "b");
+  string[]? a = av;
+  string[] b = [];
+  b.push("c" + "d");
+  x := (a ?: b).len; // some → result frees av+elems; b's binding frees b+elem
+  assert(x == 1, "strvec inline some");
+}

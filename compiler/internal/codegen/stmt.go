@@ -4975,7 +4975,9 @@ func (c *Compiler) trackTempWithDrop(val value.Value, dropFn *ir.Func) {
 // values on untaken paths (B0168), then stores val + liveFlag in the CURRENT
 // block. liveFlag is the i1 "this temp owns its value here" flag — a constant 1
 // for ordinary temps (trackTempWithDrop), or a per-branch phi for elvis results
-// (trackElvisResultTemp, T0935: owned on the some-path, borrowed on the none-path).
+// whose per-path value is whether the result owns the selected buffer on that path
+// (trackElvisResultTemp, T0936: own a transferred local/fresh operand, borrow a
+// parameter/static one).
 // elemType (vector element type, nil otherwise) drives the per-element drop loop
 // in cleanupStmtTemps. Callers own the guards (tempTrackingEnabled, i8* type,
 // terminated-block, double-track) before calling this.

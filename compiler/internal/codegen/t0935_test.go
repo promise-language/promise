@@ -12,10 +12,16 @@ import (
 // offset for the vector layout and called free() on a .rodata buffer:
 //   fatal: invalid free (bad header magic)
 //
-// These tests lock the IR signature: the elvis result temp must (1) carry a
-// path-dependent flag phi (true on the some-path — owns the moved inner; false
-// on the none-path — borrows the default), and (2) NOT route a vector result
-// through @promise_string_drop.
+// T0936 refined the per-path ownership to move-at-ownership: the result owns the
+// some-path inner (moved out) AND owns the none-path default WHEN that default is a
+// transferable local/fresh temp (its scope-exit owner is neutralized in the none
+// block). When the default is a parameter/borrowed/static operand the result still
+// borrows it (none-incoming false) — see the generic/structural tests below.
+//
+// These tests lock the IR signature: the elvis result temp must (1) carry the
+// correct per-path flag phi, (2) clear a local default's drop flag on the none-path
+// when ownership transfers, and (3) NOT route a vector result through
+// @promise_string_drop (nor a string result through @Vector.drop).
 
 // elvisFunc returns the IR body of the user `demo` function for the given body.
 func elvisFunc(t *testing.T, body string) string {
@@ -24,8 +30,15 @@ func elvisFunc(t *testing.T, body string) string {
 	return extractFunction(ir, "__user.demo")
 }
 
-// TestT0935VectorInlineElvisPathFlag verifies the inline vector elvis result is
-// tracked with a path-dependent drop flag phi (true on some, false on none).
+// elvisOwnsBoth is the regex for the T0936 per-path drop flag phi when BOTH
+// operands are transferable locals: the result owns the moved inner on the
+// some-path AND the neutralized local default on the none-path (true, true).
+const elvisOwnsBoth = `phi i1 \[ true, %elvis\.some\.\d+ \], \[ true, %elvis\.none\.\d+ \]`
+
+// TestT0935VectorInlineElvisPathFlag verifies the inline vector elvis result with
+// LOCAL operands owns the buffer on both paths (T0936): true on the some-path
+// (moved inner) and true on the none-path (local default `b`, whose own drop flag
+// is cleared in the none block so exactly one owner frees it).
 func TestT0935VectorInlineElvisPathFlag(t *testing.T) {
 	fn := elvisFunc(t, `
 		int[]? a = [1, 2, 3];
@@ -35,10 +48,11 @@ func TestT0935VectorInlineElvisPathFlag(t *testing.T) {
 	if fn == "" {
 		t.Fatal("could not extract __user.demo")
 	}
-	// Path-dependent drop flag: free on some-path (sole owner of moved inner),
-	// no-op on none-path (default is borrowed).
-	assertContainsMatch(t, fn,
-		`phi i1 \[ true, %elvis\.some\.\d+ \], \[ false, %elvis\.none\.\d+ \]`)
+	// Per-path drop flag: result owns on both paths (local operands).
+	assertContainsMatch(t, fn, elvisOwnsBoth)
+	// The none-path transfers the local default into the result, so it clears the
+	// default's own scope-exit drop flag (path-conditional, none block only).
+	assertContainsMatch(t, fn, `elvis\.none\.\d+:[\s\S]*store i1 false, i1\* %b\.dropflag`)
 	// A vector result must never be dropped via the string drop helper.
 	if strings.Contains(fn, "@promise_string_drop") {
 		t.Errorf("vector inline elvis must NOT call @promise_string_drop (T0935)\n%s", fn)
@@ -47,9 +61,9 @@ func TestT0935VectorInlineElvisPathFlag(t *testing.T) {
 	assertContains(t, fn, "call void @Vector.drop")
 }
 
-// TestT0935StringInlineElvisPathFlag verifies the string path still works: a
-// path-dependent flag phi is emitted and the result is dropped via
-// @promise_string_drop (never @Vector.drop, since no vector exists here).
+// TestT0935StringInlineElvisPathFlag verifies the string path: LOCAL operands own
+// on both paths (T0936), the none-path clears the local default's drop flag, and
+// the result is dropped via @promise_string_drop (never @Vector.drop).
 func TestT0935StringInlineElvisPathFlag(t *testing.T) {
 	fn := elvisFunc(t, `
 		string? a = "hi" + "!";
@@ -59,17 +73,19 @@ func TestT0935StringInlineElvisPathFlag(t *testing.T) {
 	if fn == "" {
 		t.Fatal("could not extract __user.demo")
 	}
-	assertContainsMatch(t, fn,
-		`phi i1 \[ true, %elvis\.some\.\d+ \], \[ false, %elvis\.none\.\d+ \]`)
+	assertContainsMatch(t, fn, elvisOwnsBoth)
+	assertContainsMatch(t, fn, `elvis\.none\.\d+:[\s\S]*store i1 false, i1\* %b\.dropflag`)
 	assertContains(t, fn, "@promise_string_drop")
 	if strings.Contains(fn, "call void @Vector.drop") {
 		t.Errorf("string inline elvis must NOT call @Vector.drop (T0935)\n%s", fn)
 	}
 }
 
-// elvisPathFlag is the regex for the T0935 path-dependent drop flag phi: true on
-// the some-path (result owns the moved inner), false on the none-path (the
-// default is borrowed and keeps its own owner).
+// elvisPathFlag is the regex for the per-path drop flag phi when the none-path
+// default is a parameter/borrowed operand: true on the some-path (result owns the
+// moved inner), false on the none-path (the borrowed default keeps its own owner —
+// the caller frees it). Used by the generic/structural tests, whose elvis operands
+// are method/function parameters (no local drop flag to transfer).
 const elvisPathFlag = `phi i1 \[ true, %elvis\.some\.\d+ \], \[ false, %elvis\.none\.\d+ \]`
 
 // TestT0935GenericInlineElvisTypeSubst exercises the typeSubst substitution
@@ -181,4 +197,80 @@ func TestT0945BorrowedParamInlineElvisNoDrop(t *testing.T) {
 		t.Errorf("borrowed-param inline elvis must NOT drop its result (T0945)\n%s", fn)
 	}
 	assertNotContainsMatch(t, fn, elvisPathFlag)
+}
+
+// TestT0936NonIdentStringDefaultClaimed exercises claimElvisDefaultTemp on a
+// NON-ident none-path default that is a fresh heap-string temp (a `+`-concat,
+// which always allocates — bit-63 clear). genElvis takes the `else` branch
+// (default is not an ident) and claimElvisDefaultTemp claims the temp, so the
+// result owns the buffer on the none-path too: the flag phi is [true, true]. The
+// claimed concat must not get its own separate drop — only the result frees it.
+func TestT0936NonIdentStringDefaultClaimed(t *testing.T) {
+	fn := elvisFunc(t, `
+		string? a = none;
+		x := (a ?: ("p" + "q")).len;
+	`)
+	if fn == "" {
+		t.Fatal("could not extract __user.demo")
+	}
+	// Fresh heap-string default claimed → result owns on both paths.
+	assertContainsMatch(t, fn, elvisOwnsBoth)
+	assertContains(t, fn, "@promise_string_drop")
+	if strings.Contains(fn, "call void @Vector.drop") {
+		t.Errorf("string inline elvis must NOT call @Vector.drop (T0936)\n%s", fn)
+	}
+}
+
+// TestT0936NonIdentLiteralDefaultBorrows exercises claimElvisDefaultTemp returning
+// false: a NON-ident none-path default that is a `.rodata` vector literal has no
+// owned temp to claim (static buffer), so the result BORROWS it on the none-path —
+// the flag phi is [true, false]. The result still routes through @Vector.drop
+// (which no-ops on the bit-63 static flag), never @promise_string_drop.
+func TestT0936NonIdentLiteralDefaultBorrows(t *testing.T) {
+	fn := elvisFunc(t, `
+		int[]? a = none;
+		x := (a ?: [1, 2, 3, 4]).len;
+	`)
+	if fn == "" {
+		t.Fatal("could not extract __user.demo")
+	}
+	// Static literal default not claimed → result borrows on the none-path.
+	assertContainsMatch(t, fn, elvisPathFlag)
+	assertContains(t, fn, "call void @Vector.drop")
+	if strings.Contains(fn, "@promise_string_drop") {
+		t.Errorf("vector inline elvis must NOT call @promise_string_drop (T0936)\n%s", fn)
+	}
+}
+
+// TestT0936NonIdentCallDefaultClaimed exercises the claimHeapTemp branch of
+// claimElvisDefaultTemp (sets c.lastClaimedDropFunc) for a NON-ident none-path
+// default that is a heap-vector call result. Distinct from the string case: the
+// call introduces a panic-check block, so the result temp's flag-phi none-incoming
+// comes from a `%panic.ok` predecessor (not `%elvis.none`) — exercising the
+// non-elvis-labeled predecessor variant — and the flag is still true (claimed).
+func TestT0936NonIdentCallDefaultClaimed(t *testing.T) {
+	ir := generateIR(t, `
+		heap_vec() int[] {
+			int[] v = [];
+			v.push(7);
+			v.push(8);
+			return v;
+		}
+		demo() {
+			int[]? a = none;
+			x := (a ?: heap_vec()).len;
+		}
+	`)
+	fn := extractFunction(ir, "__user.demo")
+	if fn == "" {
+		t.Fatal("could not extract __user.demo")
+	}
+	// Claimed heap-call default → owns on none-path; none-incoming is the call's
+	// panic.ok block, not an elvis.none block.
+	assertContainsMatch(t, fn,
+		`phi i1 \[ true, %elvis\.some\.\d+ \], \[ true, %panic\.ok\.\d+ \]`)
+	assertContains(t, fn, "call void @Vector.drop")
+	if strings.Contains(fn, "@promise_string_drop") {
+		t.Errorf("vector inline elvis must NOT call @promise_string_drop (T0936)\n%s", fn)
+	}
 }

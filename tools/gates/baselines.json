@@ -215,7 +215,9 @@
       "type": "informational"
     },
     "host_leak_count": {
-      "type": "informational"
+      "value": 0,
+      "direction": "down",
+      "updated": "2026-06-18"
     },
     "host_memory_count": {
       "value": 0,
@@ -228,10 +230,14 @@
       "updated": "2026-06-03"
     },
     "host_test_count": {
-      "type": "informational"
+      "value": 0,
+      "direction": "up",
+      "updated": "2026-06-18"
     },
     "host_test_failures": {
-      "type": "informational"
+      "value": 0,
+      "direction": "down",
+      "updated": "2026-06-18"
     },
     "host_timeout_count": {
       "value": 0,

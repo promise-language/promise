@@ -2,7 +2,7 @@
 
 > **Status.** This document describes the **target** distribution architecture. Some of it is implemented today, some is planned; each section is marked. The headline change from the original model is twofold: (1) heavy dependencies (LLVM tools, wasm runner, CRTs, target sysroots) move from *embedded-in-the-binary* to a *content-addressed cache fetched on demand*, so the compiler ships in **thin** and **full** variants that behave identically; and (2) the on-`PATH` entry point becomes a **tiny stub** (written in Promise, extracted at install) instead of a full copy of the compiler. See §1 for the model, §7 / [release-automation.md](release-automation.md) for how releases are built and published.
 >
-> **Implemented:** self-contained `--release` binary (embeds *everything* — LLVM, musl CRT, stdlib) on Linux (amd64) and macOS arm64 (Intel/amd64 builds exist but are **deferred** — unverifiable without working Xcode CLT); `promise install` with the epoch layout; epoch dispatch via *shim-in-binary*; `promise update`/`promise use` to fetch and activate epochs. **Planned:** thin/full split + content-addressed dependency store (§1, §4); the embedded Promise stub replacing shim-in-binary (§2.5); `promise update` self-update rename (§2.6); Windows end-user install flow (§5.2). Windows compiler support is complete, including the zero-dependency link surface — no VS Build Tools / Windows SDK required (see [windows-support.md](windows-support.md)).
+> **Implemented:** self-contained `--release` binary (embeds *everything* — LLVM, musl CRT, stdlib) on Linux (amd64) and macOS arm64 (Intel/amd64 builds exist but are **deferred** — unverifiable without working Xcode CLT); `promise install` with the epoch layout; epoch dispatch via *shim-in-binary*; `promise update`/`promise use` to fetch and activate epochs. **Planned:** thin/full split + content-addressed dependency store (§1, §4); the embedded Promise stub replacing shim-in-binary (§2.5); `promise update` self-update rename (§2.6); `promise install <epoch>` fetch-without-activate + corrected missing-epoch recovery hint (§2.5 step 4, §2.6 — T0977); Windows end-user install flow (§5.2). Windows compiler support is complete, including the zero-dependency link surface — no VS Build Tools / Windows SDK required (see [windows-support.md](windows-support.md)).
 
 ---
 
@@ -184,7 +184,7 @@ The stub is a tiny Promise-written binary ([tools/stub/main.pr](../tools/stub/ma
 1. **Check its reserved env vars first.** If `PROMISE_STUB_VERSION` is set, the stub prints its own version and exits; `PROMISE_STUB_INFO` additionally prints the resolved epoch and the target binary it *would* exec. These are checked *before* epoch resolution. Using an **env var, not a flag**, keeps the stub a pure pass-through that **never parses args** — it forwards every argument untouched — and matches how it reads `PROMISE_EPOCH`. So `promise --version` still trampolines to the active compiler, as users expect; you opt into stub introspection explicitly via the env var.
 2. Resolve the target epoch: `PROMISE_EPOCH` → project `promise.toml` `[module].epoch` → `~/.promise/active`.
 3. `exec` `~/.promise/epochs/<epoch>/bin/promise`, forwarding all args.
-4. If that epoch is not installed → clear error (`run: promise update <epoch>`).
+4. If that epoch is not installed → clear error directing the user to an **explicit** recovery: `run: promise install <epoch>` (stage it without changing the active epoch — §2.6) **or** edit `[module].epoch` in `promise.toml` to an already-installed epoch. The stub **never** auto-downloads the pinned epoch: `promise.toml` is attacker-controllable, so silently fetching+installing+executing the pinned toolchain on `promise build` would let a crafted repo run a known-vulnerable epoch. Auto-install on build is off by default, permanently — recovery is always an explicit user step. *(planned: T0977 — the stub today still prints the stale `promise update <epoch>` hint, which fails since `update` is forward-only; T0977 corrects the text and adds `install <epoch>`.)*
 
 The stub knows only the *epoch-resolution contract* (the `active` file format and the `promise.toml` epoch key) plus its own `PROMISE_STUB_*` env vars — a small, stable surface, not the full install layout. Because it does so little, **newer stubs are guaranteed to support older compilers**, which is what makes the forward-only update rule (§2.4 step 4) safe.
 
@@ -210,10 +210,21 @@ active epoch (which compiler runs builds). The channel is persisted in
   `epochs/<epoch>/build-id`) against the remote `SHA256SUMS`.
 - **`promise update channel [stable|next]`** — print the channel, or set it and
   immediately follow it.
-- **`promise use <epoch>`** — activate a specific/historical epoch, **downloading it on
-  demand** if not installed. The shared download+verify+install machinery lives in
-  [update.go](../compiler/cmd/promise/update.go) (`downloadAndInstall`), reused by both
-  `update` and `use`. (`sync` is deleted — no separate side-by-side install command.)
+- **`promise install <epoch>`** — *(planned: T0977)* make a specific/historical epoch
+  **present on disk without activating it**: download + stage `epochs/<epoch>/`, leaving
+  `~/.promise/active` untouched. This is the install-vs-activate split (rustup's `toolchain
+  install` vs `default`): because epoch resolution prefers a project's `promise.toml` pin
+  over the active epoch (§2.5 step 2), a pinned project only needs its epoch **present** —
+  it never needs to be active. This is the recovery the missing-epoch error points at
+  (§2.5 step 4), and it avoids the global side effects of activation (a later `promise init`
+  scaffolding the now-active epoch; other *unpinned* projects silently switching toolchains).
+  **`promise install` with no argument is unchanged — it is the bootstrap installer (§2.4),
+  a different operation on the critical install path.**
+- **`promise use <epoch>`** — activate a specific/historical epoch (= `install <epoch>`
+  **+ set active**), **downloading it on demand** if not installed. The shared
+  download+verify+install machinery lives in
+  [update.go](../compiler/cmd/promise/update.go) (`downloadAndInstall`), reused by `update`,
+  `use`, and `install <epoch>`. (`sync` is deleted — no separate side-by-side install command.)
 - **Dependency updates moved to the package-manager namespace.** The old `promise update` behavior — updating `[require]` git-dependency pins in `promise.toml` — is now `promise pkg update [name|url]` (`runPkgUpdate`), so the bare `update` means "update the toolchain." The broader `pkg` fetch/resolve/lock surface is tracked under T0175.
 
 Re-running install with a newer binary replaces the installation in place and forward-updates the stub.

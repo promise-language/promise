@@ -169,24 +169,24 @@ func resolveLLVMView(allowFetch bool) (string, error) {
 	// terminal, summarize + confirm before starting, and stream a progress bar;
 	// in scripts/CI (no TTY) we stay silent and just proceed as before.
 	var needFetch []*blobstore.ManifestEntry
-	var unpacked int64
+	var download int64
 	for _, e := range entries {
 		if !store.Has(e.SHA256) {
 			needFetch = append(needFetch, e)
-			unpacked += e.Size
+			download += e.DownloadSize()
 		}
 	}
 	if len(needFetch) > 0 && isCharDevice(os.Stderr) {
 		switch {
 		case !prefetchNoPrompt && isCharDevice(os.Stdin):
 			// Lazy first-compile fetch on an interactive terminal — confirm first.
-			if !confirmToolchainDownload("LLVM toolchain", len(needFetch), unpacked) {
+			if !confirmToolchainDownload("LLVM toolchain", len(needFetch), download) {
 				return "", fmt.Errorf("LLVM toolchain download declined — run again and accept, or install the -full build (offline). See `promise --help`")
 			}
 		default:
 			// Install-time prefetch (prefetchNoPrompt), or no stdin to prompt on:
 			// announce rather than ask — the user already opted in.
-			fmt.Fprintf(os.Stderr, "Downloading Promise's LLVM toolchain (%d components, ~%s unpacked); cached for future runs...\n", len(needFetch), formatSize(unpacked))
+			fmt.Fprintf(os.Stderr, "Downloading Promise's LLVM toolchain (%d components, ~%s download); cached for future runs...\n", len(needFetch), formatSize(download))
 		}
 		resolver.SetProgress(newTTYProgress(os.Stderr))
 		// On an interactive terminal, confirm before the ~GB upstream-archive

@@ -10,7 +10,8 @@
       "sources": [
         {
           "blob": "https://example.com/blobs/aaaa.br",
-          "compression": "brotli"
+          "compression": "brotli",
+          "compressed_size": 4567890
         },
         {
           "archive": "https://example.com/llvm-linux.tar.xz",

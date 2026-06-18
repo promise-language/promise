@@ -59,11 +59,12 @@ const (
 // such an archive once. ArchiveSHA256, when given, makes the archive safe to
 // persistently cache across runs (§4.2 Archive reuse).
 type Source struct {
-	Blob          string `json:"blob,omitempty"`
-	Compression   string `json:"compression,omitempty"` // transport codec of the Blob asset ("" / "brotli")
-	Archive       string `json:"archive,omitempty"`
-	ArchivePath   string `json:"archive_path,omitempty"`
-	ArchiveSHA256 string `json:"archive_sha256,omitempty"`
+	Blob           string `json:"blob,omitempty"`
+	Compression    string `json:"compression,omitempty"`     // transport codec of the Blob asset ("" / "brotli")
+	CompressedSize int64  `json:"compressed_size,omitempty"` // download (over-the-wire) byte count of the Blob asset; 0 = unknown
+	Archive        string `json:"archive,omitempty"`
+	ArchivePath    string `json:"archive_path,omitempty"`
+	ArchiveSHA256  string `json:"archive_sha256,omitempty"`
 }
 
 // compressionBrotli is the only transport codec understood today (brotli-11 per
@@ -75,6 +76,20 @@ const compressionBrotli = "brotli"
 
 // IsArchive reports whether the source extracts a path from a compressed archive.
 func (s Source) IsArchive() bool { return s.Archive != "" }
+
+// DownloadSize returns the over-the-wire byte count for fetching this entry: the
+// CompressedSize of its first (highest-ranked) blob source that records one. When
+// no source carries a compressed size (e.g. an archive-only bootstrap manifest,
+// or a pre-compressed-size manifest), it falls back to the uncompressed Size so
+// callers always have a non-zero estimate to display.
+func (e *ManifestEntry) DownloadSize() int64 {
+	for _, s := range e.Sources {
+		if s.Blob != "" && s.CompressedSize > 0 {
+			return s.CompressedSize
+		}
+	}
+	return e.Size
+}
 
 // ParseManifest parses embedded manifest JSON and validates it.
 func ParseManifest(data []byte) (*Manifest, error) {
@@ -117,6 +132,9 @@ func (m *Manifest) validate() error {
 			}
 			if s.Archive != "" && s.Compression != "" {
 				return fmt.Errorf("entry %q source[%d]: compression only applies to blob sources", e.Name, j)
+			}
+			if s.Archive != "" && s.CompressedSize != 0 {
+				return fmt.Errorf("entry %q source[%d]: compressed_size only applies to blob sources", e.Name, j)
 			}
 			switch s.Compression {
 			case "", "none", compressionBrotli:

@@ -129,6 +129,15 @@ func TestReleaseManifest(t *testing.T) {
 	if got != wantHash {
 		t.Fatalf("packed artifact decompresses to %s, want %s", got, wantHash)
 	}
+	// The blob source records the over-the-wire download size — the packed
+	// .br artifact's byte count — so the runtime can report download size.
+	pinfo, err := os.Stat(packed)
+	if err != nil {
+		t.Fatalf("stat packed artifact: %v", err)
+	}
+	if opt.Sources[0].CompressedSize != pinfo.Size() {
+		t.Fatalf("source[0].CompressedSize = %d, want packed size %d", opt.Sources[0].CompressedSize, pinfo.Size())
+	}
 }
 
 func TestReleaseManifestCachingIdempotent(t *testing.T) {

@@ -33,11 +33,12 @@ type runtimeManifestEntry struct {
 }
 
 type runtimeSource struct {
-	Blob          string `json:"blob,omitempty"`
-	Compression   string `json:"compression,omitempty"` // transport codec of the Blob asset ("" / "brotli")
-	Archive       string `json:"archive,omitempty"`
-	ArchivePath   string `json:"archive_path,omitempty"`
-	ArchiveSHA256 string `json:"archive_sha256,omitempty"`
+	Blob           string `json:"blob,omitempty"`
+	Compression    string `json:"compression,omitempty"`     // transport codec of the Blob asset ("" / "brotli")
+	CompressedSize int64  `json:"compressed_size,omitempty"` // download (over-the-wire) byte count of the Blob asset; 0 = unknown
+	Archive        string `json:"archive,omitempty"`
+	ArchivePath    string `json:"archive_path,omitempty"`
+	ArchiveSHA256  string `json:"archive_sha256,omitempty"`
 }
 
 // compressionBrotli is the only transport codec emitted today (brotli-11 per

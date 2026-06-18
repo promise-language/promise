@@ -109,9 +109,9 @@ func mbProgress(b int64) string {
 // proceed with a first-run component download. Call only when both stderr and
 // stdin are terminals. Returns true to proceed; Enter (empty) defaults to yes.
 // Set PROMISE_ASSUME_YES=1 to auto-accept without prompting (still on a TTY).
-func confirmToolchainDownload(what string, components int, unpackedBytes int64) bool {
+func confirmToolchainDownload(what string, components int, downloadBytes int64) bool {
 	fmt.Fprintf(os.Stderr, "\nPromise needs to download its %s to compile (one-time setup).\n", what)
-	fmt.Fprintf(os.Stderr, "  %d component(s), ~%s unpacked — cached under ~/.promise for future runs.\n", components, formatSize(unpackedBytes))
+	fmt.Fprintf(os.Stderr, "  %d component(s), ~%s download — cached under ~/.promise for future runs.\n", components, formatSize(downloadBytes))
 	if v := strings.TrimSpace(os.Getenv("PROMISE_ASSUME_YES")); v != "" && v != "0" {
 		fmt.Fprintln(os.Stderr, "  (PROMISE_ASSUME_YES set — proceeding without prompt)")
 		return true

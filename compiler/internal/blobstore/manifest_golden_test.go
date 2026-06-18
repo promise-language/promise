@@ -48,6 +48,23 @@ func TestManifestGoldenFixture(t *testing.T) {
 			t.Errorf("fixture missing entry with Kind=%q; add one to exercise the constant", want)
 		}
 	}
+	// DownloadSize prefers a blob source's compressed_size, falling back to the
+	// uncompressed size when no blob source records one (archive-only entry).
+	byName := make(map[string]*ManifestEntry, len(m.Entries))
+	for i := range m.Entries {
+		byName[m.Entries[i].Name] = &m.Entries[i]
+	}
+	if e := byName["llvm-opt"]; e == nil {
+		t.Fatal("fixture missing llvm-opt entry")
+	} else if got := e.DownloadSize(); got != 4567890 {
+		t.Errorf("llvm-opt DownloadSize = %d, want compressed_size 4567890", got)
+	}
+	if e := byName["llvm-lld"]; e == nil {
+		t.Fatal("fixture missing llvm-lld entry")
+	} else if got := e.DownloadSize(); got != e.Size {
+		t.Errorf("llvm-lld DownloadSize = %d, want fallback to Size %d", got, e.Size)
+	}
+
 	// Round-trip: Marshal -> ParseManifest must succeed.
 	b, err := m.Marshal()
 	if err != nil {

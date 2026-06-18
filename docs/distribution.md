@@ -257,9 +257,11 @@ Each manifest entry separates *what the blob is* from *where/how to get it*. The
 {
   "name":   "llvm-opt",            // logical name the compiler asks for
   "sha256": "3f9a…",               // content address of the EXTRACTED blob — cache key + integrity
-  "size":   41234567,              // extracted size, bytes
+  "size":   41234567,              // extracted (unpacked) size, bytes
   "sources": [                     // ranked; first that verifies wins
-    { "blob": "https://github.com/promise-language/promise/releases/download/epoch-2026.0/3f9a…" },
+    { "blob": "https://github.com/promise-language/promise/releases/download/epoch-2026.0/3f9a….br",
+      "compression": "brotli",     // transport codec of the asset
+      "compressed_size": 8123456 },// over-the-wire download size — what the first-run prompt reports
                                    // primary: GitHub release asset named by content sha256
     { "archive": "https://…/LLVM-22.1.0-macOS-ARM64.tar.xz",
       "archive_path": "bin/opt",   // fallback: path to extract from *inside* the upstream archive

@@ -344,12 +344,18 @@ func runReleaseManifest(root string, args []string) error {
 	for i, f := range tEntry.ClientFiles() {
 		src := filepath.Join(blobsDir, f.Out)
 		dst := filepath.Join(*pack, entries[i].SHA256+suffix)
-		if Exists(dst) {
-			continue // same hash already packed — caching skip
+		if !Exists(dst) { // same hash already packed → reuse (brotli-11 is slow; §3)
+			if err := compressFileBrotli(src, dst); err != nil {
+				return fmt.Errorf("pack %s: %w", f.Out, err)
+			}
 		}
-		if err := compressFileBrotli(src, dst); err != nil {
-			return fmt.Errorf("pack %s: %w", f.Out, err)
+		// Record the over-the-wire download size from the packed artifact so the
+		// runtime can report the download (not unpacked) size of the blob source.
+		fi, err := os.Stat(dst)
+		if err != nil {
+			return fmt.Errorf("stat packed %s: %w", f.Out, err)
 		}
+		entries[i].Sources[0].CompressedSize = fi.Size()
 	}
 
 	m := runtimeManifest{Schema: runtimeManifestSchema, Epoch: epoch, Entries: entries}
@@ -432,8 +438,8 @@ func BuildRuntimeManifestFromCatalog(root, target, epoch string) (*runtimeManife
 			Size:   be.Size,
 			Kind:   kind,
 			Sources: []runtimeSource{
-				{Blob: assetURL, Compression: be.Compression},
-				{Blob: mirrorURL, Compression: be.Compression},
+				{Blob: assetURL, Compression: be.Compression, CompressedSize: be.CompressedSize},
+				{Blob: mirrorURL, Compression: be.Compression, CompressedSize: be.CompressedSize},
 				{Archive: tEntry.URL, ArchivePath: f.Src, ArchiveSHA256: tEntry.SHA256},
 			},
 		})

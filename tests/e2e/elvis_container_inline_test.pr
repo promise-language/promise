@@ -176,3 +176,531 @@ t_struct_default_none() `test {
   int[]? a = none;
   assert(c.resolved_len(a) == 2, "struct default none");
 }
+
+// ============================================================================
+// T0937: value-struct container results (Map/Set) and heap user types. These are
+// 2-word Value structs {i8* vtable, i8* instance}, not bare i8*, so they bypass
+// trackElvisResultTemp (T0935's i8*-only path) and need the heapTemp path with a
+// per-branch flag. The some-path inner is owned (must free exactly once); the
+// none-path borrows the default (must NOT free). Source classification gates
+// tracking: owned local ident → track; member/index source and borrowed param →
+// owner-governed (do NOT track, else double-free); temporary optional → track.
+// ============================================================================
+
+// --- map[K,V] ident source: the reported repro. some leaks 2 / none unaffected. ---
+
+t_map_some() `test {
+  map[string, int]? a = {
+    "x": 1, "y": 2
+  };
+  map[string, int] b = {
+    "z": 9
+  };
+  assert((a ?: b).len == 2, "map some");
+}
+
+t_map_none() `test {
+  map[string, int]? a = none;
+  map[string, int] b = {
+    "z": 9
+  };
+  assert((a ?: b).len == 1, "map none");
+}
+
+// --- Set[T] (wrapper around Map[T, bool], same {i8*,i8*} layout) ident source ---
+
+t_set_some() `test {
+  Set[int] av = Set[int]();
+  av.add(1);
+  av.add(2);
+  av.add(3);
+  Set[int]? a = av;
+  Set[int] b = Set[int]();
+  b.add(9);
+  assert((a ?: b).len == 3, "set some");
+}
+
+t_set_none() `test {
+  Set[int]? a = none;
+  Set[int] b = Set[int]();
+  b.add(9);
+  assert((a ?: b).len == 1, "set none");
+}
+
+// --- member source: the extracted inner aliases the owned field; the container's
+// own drop frees it. The elvis result must NOT be tracked (double-free guard). ---
+
+type MBox {
+  map[string, int]? m;
+}
+
+t_map_member_some() `test {
+  MBox bx = MBox(m: {
+    "x": 1, "y": 2
+  });
+  map[string, int] b = {
+    "z": 9
+  };
+  assert((bx.m ?: b).len == 2, "map member some");
+}
+
+t_map_member_none() `test {
+  MBox bx = MBox(m: none);
+  map[string, int] b = {
+    "z": 9
+  };
+  assert((bx.m ?: b).len == 1, "map member none");
+}
+
+// --- bound form: the binding claims the temp (claimHeapTemp by runtime pointer
+// identity), neutralizing the path-flag so only the variable's drop fires. ---
+
+t_map_bound() `test {
+  map[string, int]? a = {
+    "x": 1, "y": 2
+  };
+  map[string, int] b = {
+    "z": 9
+  };
+  m := a ?: b;
+  assert(m.len == 2, "map bound");
+}
+
+// --- temporary-optional source: a call result is never scope-tracked, so the
+// some-path inner is orphaned and the result must own it. ---
+
+mk_opt_map() map[string, int]? {
+  return {
+    "x": 1, "y": 2
+  };
+}
+
+t_map_temp_some() `test {
+  map[string, int] b = {
+    "z": 9
+  };
+  assert((mk_opt_map() ?: b).len == 2, "map temp some");
+}
+
+// --- paren-ident source: proves the paren-peel at the clearDropFlag site —
+// `(a) ?: b` must clear a's drop flag, else the local's drop double-frees. ---
+
+t_map_paren_some() `test {
+  map[string, int]? a = {
+    "x": 1, "y": 2
+  };
+  map[string, int] b = {
+    "z": 9
+  };
+  assert(((a) ?: b).len == 2, "map paren some");
+}
+
+// NB: a none-path operand-REUSE test (`x := (a ?: b).len; y := b.len`) is
+// intentionally omitted. Under T0936 the elvis `?:` consumes (moves) BOTH ident
+// operands — the none-path default is moved into the result — so reusing `b`
+// afterward is a static use-after-move, rejected by the ownership pass (see
+// compiler/internal/ownership/t0936_test.go). The none-path leak behavior is
+// covered by t_map_none / t_set_none above.
+
+// --- heap user type {i8*, i8*} (T0924 subsumption): a droppable non-value type
+// used inline. some owns the moved inner; member source is owner-governed. ---
+
+type HVal {
+  string s;
+}
+
+t_huser_some() `test {
+  HVal av = HVal(s: "a" + "b");
+  HVal? a = av;
+  HVal b = HVal(s: "c" + "d");
+  assert((a ?: b).s.len == 2, "huser some");
+}
+
+t_huser_none() `test {
+  HVal? a = none;
+  HVal b = HVal(s: "c" + "d");
+  assert((a ?: b).s.len == 2, "huser none");
+}
+
+type HBox {
+  HVal? h;
+}
+
+t_huser_member_some() `test {
+  HBox bx = HBox(h: HVal(s: "a" + "b"));
+  HVal b = HVal(s: "c" + "d");
+  assert((bx.h ?: b).s.len == 2, "huser member some");
+}
+
+// heap-user temporary-optional source: a call result is never scope-tracked, so
+// the some-path inner is orphaned and the elvis result must own + free it once.
+mk_opt_hval() HVal? {
+  return HVal(s: "a" + "b");
+}
+
+t_huser_temp_some() `test {
+  HVal b = HVal(s: "c" + "d");
+  assert((mk_opt_hval() ?: b).s.len == 2, "huser temp some");
+}
+
+// heap-user bound form: the binding claims the temp by runtime pointer identity
+// (claimHeapTemp on the value struct), neutralizing the path-flag so only the
+// variable's own drop fires — no leak, no double-free.
+t_huser_bound() `test {
+  HVal av = HVal(s: "a" + "b");
+  HVal? a = av;
+  HVal b = HVal(s: "c" + "d");
+  h := a ?: b;
+  assert(h.s.len == 2, "huser bound");
+}
+
+// heap-user index source (IndexExpr arm): the extracted inner aliases the vector
+// element the container's drop frees, so the result must NOT be tracked. some is
+// a single free (no double-free); none borrows the default.
+t_huser_index_some() `test {
+  (HVal?)[] v = [];
+  v.push(HVal(s: "a" + "b"));
+  HVal b = HVal(s: "c" + "d");
+  assert((v[0] ?: b).s.len == 2, "huser index some");
+}
+
+t_huser_index_none() `test {
+  (HVal?)[] v = [];
+  v.push(none);
+  HVal b = HVal(s: "c" + "d");
+  assert((v[0] ?: b).s.len == 2, "huser index none");
+}
+
+// heap-user borrowed-param source (T0931 gate for the value-struct path): the
+// param has no local drop flag → the caller owns it. The result must NOT be
+// tracked (no double-free) and the some-path must not leak (caller drops it).
+borrowed_hval_len(HVal? a, HVal b) int {
+  return (a ?: b).s.len;
+}
+
+t_huser_borrowed_some() `test {
+  HVal av = HVal(s: "a" + "b");
+  HVal? a = av;
+  HVal b = HVal(s: "c" + "d");
+  assert(borrowed_hval_len(a, b) == 2, "huser borrowed some");
+}
+
+t_huser_borrowed_none() `test {
+  HVal? a = none;
+  HVal b = HVal(s: "c" + "d");
+  assert(borrowed_hval_len(a, b) == 2, "huser borrowed none");
+}
+
+// --- heap-user type WITH a vtable (has a child → needsVtable): exercises
+// resolveDropFuncForTemp on a virtual-dispatch type. The inline some-path must
+// own + drop the moved inner exactly once via the type's drop. ---
+
+type Animal {
+  string name;
+  speak() string {
+    return "base";
+  }
+}
+
+type Dog is Animal {
+  speak() string {
+    return "woof";
+  }
+}
+
+t_huser_vtable_some() `test {
+  Animal av = Animal(name: "x" + "y");
+  Animal? a = av;
+  Animal b = Animal(name: "z" + "w");
+  assert((a ?: b).speak().len == 4, "huser vtable some");
+}
+
+t_huser_vtable_none() `test {
+  Animal? a = none;
+  Animal b = Animal(name: "z" + "w");
+  assert((a ?: b).speak().len == 4, "huser vtable none");
+}
+
+t_huser_vtable_temp_some() `test {
+  Animal b = Animal(name: "z" + "w");
+  assert((mk_opt_animal() ?: b).speak().len == 4, "huser vtable temp some");
+}
+
+mk_opt_animal() Animal? {
+  return Animal(name: "a" + "b");
+}
+
+// --- borrowed-param source (T0931 gate): the parameter has no local drop flag,
+// so the caller owns it. The elvis result must NOT be tracked (no double-free)
+// and the some-path must not leak (the caller still owns and drops the original). ---
+
+borrowed_map_len(map[string, int]? a, map[string, int] b) int {
+  return (a ?: b).len;
+}
+
+t_map_borrowed_some() `test {
+  map[string, int]? a = {
+    "x": 1, "y": 2
+  };
+  map[string, int] b = {
+    "z": 9
+  };
+  assert(borrowed_map_len(a, b) == 2, "map borrowed some");
+}
+
+t_map_borrowed_none() `test {
+  map[string, int]? a = none;
+  map[string, int] b = {
+    "z": 9
+  };
+  assert(borrowed_map_len(a, b) == 1, "map borrowed none");
+}
+
+// ============================================================================
+// T0937 (i8*-container gap closure): the i8* result path (trackElvisResultTemp,
+// T0935) must apply the SAME orphan classifier as the value-struct path. A
+// member-source or borrowed-param string[]/vector elvis aliases an allocation the
+// owner already drops; the some-path inner is NOT orphaned, so tracking it as an
+// owned temp double-frees. With droppable element types (string[]) this freed the
+// elements twice and crashed (use-after-free / segfault). These guard that the
+// inline some-path is a single free (owner drops once) — no leak, no crash.
+// ============================================================================
+
+type SVBox {
+  string[]? v;
+}
+
+// member-source string[] elvis (droppable elements): the field owner (bx) drops
+// the inner exactly once; the inline result must NOT also free it.
+t_strvec_member_some() `test {
+  string[] inner = [];
+  inner.push("p" + "q");
+  inner.push("r" + "s");
+  SVBox bx = SVBox(v: inner);
+  string[] b = [];
+  b.push("x" + "y");
+  assert((bx.v ?: b).len == 2, "strvec member some");
+}
+
+t_strvec_member_none() `test {
+  SVBox bx = SVBox(v: none);
+  string[] b = [];
+  b.push("x" + "y");
+  assert((bx.v ?: b).len == 1, "strvec member none");
+}
+
+// borrowed-param string[] elvis (droppable elements): the caller owns the moved-in
+// vector and drops it once; the callee's inline some-path must NOT free it. Reuses
+// the borrowed_strvec_len helper defined above (T0945) — same borrowed-param shape,
+// exercised here with droppable elements and a 2-element source.
+
+t_strvec_borrowed_some() `test {
+  string[] av = [];
+  av.push("p" + "q");
+  av.push("r" + "s");
+  string[]? a = av;
+  string[] b = [];
+  b.push("x" + "y");
+  assert(borrowed_strvec_len(a, b) == 2, "strvec borrowed some");
+}
+
+t_strvec_borrowed_none() `test {
+  string[]? a = none;
+  string[] b = [];
+  b.push("x" + "y");
+  assert(borrowed_strvec_len(a, b) == 1, "strvec borrowed none");
+}
+
+// owned `~`-param string[] elvis: the consume param HAS a local drop flag, so the
+// callee owns the inner. The some-path clears that flag (ownership → result), so
+// the inline result MUST be tracked and freed exactly once (no leak).
+consume_strvec_len(~string[]? a, string[] b) int {
+  return (a ?: b).len;
+}
+
+t_strvec_consume_some() `test {
+  string[] av = [];
+  av.push("p" + "q");
+  av.push("r" + "s");
+  string[]? a = av;
+  string[] b = [];
+  b.push("x" + "y");
+  assert(consume_strvec_len(a, b) == 2, "strvec consume some");
+}
+
+t_strvec_consume_none() `test {
+  string[] b = [];
+  b.push("x" + "y");
+  assert(consume_strvec_len(none, b) == 1, "strvec consume none");
+}
+
+// --- bound member-source elvis (`string[] x = (bx.v ?: b)`): the variable
+// binding context sets the dup-field flag, so the field read CLONES the inner —
+// the clone is tracked and claimed by the variable independently of the elvis
+// result. The orphan gate (which skips tracking the member-source result) must
+// not regress this: the clone is freed once by the variable, the original once by
+// the container's drop. Guards that the gate is inert for the bound/clone path. ---
+
+t_strvec_bound_member_some() `test {
+  string[] inner = [];
+  inner.push("p" + "q");
+  inner.push("r" + "s");
+  SVBox bx = SVBox(v: inner);
+  string[] b = [];
+  b.push("x" + "y");
+  string[] x = (bx.v ?: b);
+  assert(x.len == 2, "strvec bound member some");
+}
+// NB: the bound member-source NONE variant (`SVBox(v: none)` → `string[] x =
+// (bx.v ?: b)`) is intentionally NOT tested here — it triggers a pre-existing,
+// unrelated crash (T0939): the binding context eagerly dup-clones the
+// optional-container field, and the clone loop walks a `none` field's garbage
+// inner when the element type is droppable. Independent of elvis-result tracking
+// and of this fix (reproduces identically at HEAD).
+
+// ============================================================================
+// T0937 (substitution-context closure): the orphan gate added by this fix makes
+// the existing `t_generic_*` / `t_struct_default_*` tests (borrowed params)
+// short-circuit BEFORE the result-type substitution in the tracking functions —
+// a borrowed source is not orphaned, so tracking returns at the gate. The cases
+// below use an ORPHANED source (owned `~`-param or owned local) inside a generic
+// function and a structural-interface default method, so tracking proceeds and
+// the elvis result type is resolved through c.typeSubst (monomorphization) /
+// c.selfSubst (default-body synthesis) before the drop func is chosen. Both the
+// value-struct path (Map, via trackElvisResultHeap) and the i8* path (string[],
+// via trackElvisResultTemp) are covered. All must be leak-free.
+// ============================================================================
+
+// --- generic `~map[K,V]?` consume: orphaned some-path → result owns the inner;
+// result type resolved through typeSubst at monomorphization (value-struct path). ---
+
+gconsume_map_len[K: Hashable + Equal, V](~map[K, V]? a, map[K, V] b) int {
+  return (a ?: b).len;
+}
+
+t_gmap_consume_some() `test {
+  map[string, int]? a = {
+    "x": 1, "y": 2
+  };
+  map[string, int] b = {
+    "z": 9
+  };
+  assert(gconsume_map_len(a, b) == 2, "gmap consume some");
+}
+
+t_gmap_consume_none() `test {
+  map[string, int] b = {
+    "z": 9
+  };
+  assert(gconsume_map_len(none, b) == 1, "gmap consume none");
+}
+
+// --- generic `~T[]?` consume: same, for the i8* container path (string[]). ---
+
+gconsume_vec_len[T](~T[]? a, T[] b) int {
+  return (a ?: b).len;
+}
+
+t_gvec_consume_some() `test {
+  string[] av = [];
+  av.push("p" + "q");
+  av.push("r" + "s");
+  string[]? a = av;
+  string[] b = [];
+  b.push("x" + "y");
+  assert(gconsume_vec_len(a, b) == 2, "gvec consume some");
+}
+
+t_gvec_consume_none() `test {
+  string[] b = [];
+  b.push("x" + "y");
+  assert(gconsume_vec_len(none, b) == 1, "gvec consume none");
+}
+
+// --- structural default method, owned-local map source: selfSubst active during
+// per-concrete-type body synthesis. The none-path `this.base_map()` call also
+// makes the result-flag phi's none-incoming a non-`elvis.none` block. ---
+
+type HasMapFallback `structural {
+  base_map() map[string, int] `abstract;
+  resolved_map_len() int {
+    map[string, int]? a = {
+      "x": 1, "y": 2
+    };
+    return (a ?: this.base_map()).len;
+  }
+}
+
+type MapConfig is HasMapFallback {
+  base_map() map[string, int] {
+    return {
+      "k": 7
+    };
+  }
+}
+
+t_struct_map_default_some() `test {
+  c := MapConfig();
+  assert(c.resolved_map_len() == 2, "struct map default some");
+}
+
+// --- structural default method, owned-local vector source (i8* path). ---
+
+type HasVecFallback `structural {
+  base_vec() string[] `abstract;
+  resolved_vec_len() int {
+    string[] av = [];
+    av.push("p" + "q");
+    string[]? a = av;
+    return (a ?: this.base_vec()).len;
+  }
+}
+
+type VecConfig is HasVecFallback {
+  base_vec() string[] {
+    r := ["z" + "w"];
+    return r;
+  }
+}
+
+t_struct_vec_default_some() `test {
+  c := VecConfig();
+  assert(c.resolved_vec_len() == 1, "struct vec default some");
+}
+
+// --- index source (`v[i] ?: b`): the IndexExpr arm of elvisSomeInnerOrphaned —
+// the extracted inner aliases a container element the container's drop frees, so
+// the result must NOT be tracked (double-free guard), and the some-path must be a
+// single free. Covered for both the value-struct (map) and i8* (string[]) paths
+// with droppable contents. ---
+
+t_index_map_some() `test {
+  (map[string, int]?)[] v = [];
+  v.push( {
+    "x": 1, "y": 2
+  });
+  map[string, int] b = {
+    "z": 9
+  };
+  assert((v[0] ?: b).len == 2, "index map some");
+}
+
+t_index_map_none() `test {
+  (map[string, int]?)[] v = [];
+  v.push(none);
+  map[string, int] b = {
+    "z": 9
+  };
+  assert((v[0] ?: b).len == 1, "index map none");
+}
+
+t_index_strvec_some() `test {
+  (string[]?)[] v = [];
+  string[] inner = [];
+  inner.push("p" + "q");
+  inner.push("r" + "s");
+  v.push(inner);
+  string[] b = [];
+  b.push("x" + "y");
+  assert((v[0] ?: b).len == 2, "index strvec some");
+}

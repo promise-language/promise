@@ -8412,17 +8412,19 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	someVal := c.block.NewExtractValue(optVal, 1)
 	// B0194/T0111: Clear drop flag on elvis of an *owned* optional identifier.
 	// The inner value is extracted and transferred to the result — the optional's
-	// scope-exit drop should NOT also free it (double-free).
+	// scope-exit drop should NOT also free it (double-free). Peel ParenExpr so
+	// `(a) ?: b` clears `a`'s flag too (T0937), matching the orphan classifier
+	// (which also peels parens).
 	//
-	// T0945: a borrowed value parameter is owned by the caller, which drops it
-	// after the call. Moving its inner into the result and freeing it here would
-	// double-free ("bad header magic"). Such a result borrows the inner instead —
-	// someOwnsInner stays false so the inline result temp is never freed.
-	someOwnsInner := true
-	if ident, ok := e.Left.(*ast.IdentExpr); ok {
-		if c.borrowedValueParams[ident.Name] {
-			someOwnsInner = false
-		} else {
+	// someOwnsInner records whether the result OWNS the moved-out inner on the
+	// some-path. It owns it only when the inner is "orphaned" — an owned local
+	// (whose scope drop flag is cleared here) or a temporary optional. A borrowed
+	// value parameter (T0945; caller-owned) and a member/index source (T0937;
+	// container-owned) leave the inner with an existing owner, so the result
+	// borrows it (someOwnsInner=false) and the inline result temp is never freed.
+	someOwnsInner := c.elvisSomeInnerOrphaned(e.Left)
+	if someOwnsInner {
+		if ident, ok := unwrapDestructureParens(e.Left).(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		}
 	}
@@ -8464,14 +8466,36 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 		&ir.Incoming{X: someVal, Pred: someEnd},
 		&ir.Incoming{X: defaultVal, Pred: noneEnd},
 	)
-	// T0935/T0945/T0936: register the inline result with a path-dependent drop flag.
-	// The some-path owns the moved-out inner only when it was actually transferred
-	// (someOwnsInner — false for a borrowed value parameter, T0945); the none-path
-	// owns only when the default's owner was neutralized above (noneOwned, T0936).
-	// A bound use claims this temp (by value identity) and drops via the variable's
-	// own binding instead — leaving these path-flags inert.
+	// T0935/T0945/T0936/T0937: register the inline result with a path-dependent drop
+	// flag. The some-path owns the moved-out inner only when it was actually orphaned
+	// (someOwnsInner — false for a borrowed value parameter (T0945) or a member/index
+	// source (T0937)); the none-path owns only when the default's owner was
+	// neutralized above (noneOwned, T0936). A bound use claims this temp (by value
+	// identity) and drops via the variable's own binding instead — leaving these
+	// path-flags inert. trackElvisResultTemp handles the i8* container representation
+	// (string, Vector[T]/T[]); trackElvisResultHeap handles the 2-word value-struct
+	// representation (Map/Set and droppable heap user types, T0937).
 	c.trackElvisResultTemp(e, result, someEnd, noneEnd, mergeBlock, someOwnsInner, noneOwned)
+	c.trackElvisResultHeap(e, result, someEnd, noneEnd, mergeBlock, someOwnsInner, noneOwned)
 	return result
+}
+
+// elvisSomeInnerOrphaned reports whether the some-path inner extracted by `?:`
+// from `left` is left without an owner (so the elvis result must own it). True for
+// an owned droppable LOCAL ident (its scope drop flag is cleared on the some-path)
+// and for a temporary optional (call/expr result — never scope-tracked). False for
+// member/index sources (the container's drop frees the inner) and for borrowed-param
+// idents (the caller owns it; no local drop flag — T0931/T0945).
+func (c *Compiler) elvisSomeInnerOrphaned(left ast.Expr) bool {
+	switch l := unwrapDestructureParens(left).(type) {
+	case *ast.IdentExpr:
+		_, hasFlag := c.dropFlags[l.Name]
+		return hasFlag
+	case *ast.MemberExpr, *ast.IndexExpr:
+		return false
+	default:
+		return true // temporary optional
+	}
 }
 
 // claimElvisDefaultTemp neutralizes a fresh string/heap temp selected as an elvis
@@ -8493,6 +8517,74 @@ func (c *Compiler) claimElvisDefaultTemp(val value.Value) bool {
 		claimed = true
 	}
 	return claimed
+}
+
+// trackElvisResultHeap registers an inline elvis result that is a value-struct
+// container (Map/Set) or heap user type {i8*, i8*} as an owned heap drop temp with
+// a per-branch flag (someOwned on the some path where the inner is orphaned,
+// noneOwned on the none path). T0937 (subsumes T0924's heap-user case — same
+// representation + mechanism). Type filtering mirrors trackHeapUserTypeResult
+// exactly, so single-owner handles (Arc/Mutex/Task/...), strings, vectors,
+// value/copy/primitive/structural results are excluded; only Map/Set and droppable
+// heap user types pass. (Map/Set receive no none-ownership today — genElvis's T0936
+// none-path transfer is gated to the i8* Vector/string representations via
+// elvisResultDrop — so noneOwned is false here in practice, but it is honored for
+// symmetry with trackElvisResultTemp.) A bound use claims this temp by runtime
+// pointer identity (claimHeapTemp), neutralizing the flag.
+func (c *Compiler) trackElvisResultHeap(e *ast.BinaryExpr, result value.Value, someEnd, noneEnd, mergeBlock *ir.Block, someOwned, noneOwned bool) {
+	if !someOwned && !noneOwned {
+		return // borrows on both paths (owner-governed source + borrowed default)
+	}
+	if !c.tempTrackingEnabled || result == nil {
+		return
+	}
+	st, ok := result.Type().(*irtypes.StructType)
+	if !ok || len(st.Fields) != 2 || st.Fields[0] != irtypes.I8Ptr || st.Fields[1] != irtypes.I8Ptr {
+		return // not a 2-word value struct (i8* containers go through trackElvisResultTemp)
+	}
+	if c.entryBlock == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	rt := c.info.Types[e]
+	if c.typeSubst != nil && rt != nil {
+		rt = types.Substitute(rt, c.typeSubst)
+	}
+	if c.selfSubst != nil && rt != nil {
+		rt = types.SubstituteSelf(rt, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	named := extractNamed(rt)
+	if named == nil {
+		return
+	}
+	if named.IsValueType() || named.IsCopy() || isPrimitiveScalar(named) || named.IsStructural() {
+		return
+	}
+	if isContainerType(rt) || named == types.TypString {
+		return // keeps Map/Set; excludes handles/string (i8* containers go through trackElvisResultTemp)
+	}
+	dropFunc := c.resolveDropFuncForTemp(named, rt)
+	if dropFunc == nil {
+		return
+	}
+
+	// Per-branch live flag: owned on the some path when the extracted inner is
+	// orphaned, owned on the none path when the default's owner was neutralized
+	// (T0936; not reached for Map/Set today). Created in the merge block immediately
+	// after the result phi (phis-first).
+	someFlag := int64(0)
+	if someOwned {
+		someFlag = 1
+	}
+	noneFlag := int64(0)
+	if noneOwned {
+		noneFlag = 1
+	}
+	owned := mergeBlock.NewPhi(
+		&ir.Incoming{X: constant.NewInt(irtypes.I1, someFlag), Pred: someEnd},
+		&ir.Incoming{X: constant.NewInt(irtypes.I1, noneFlag), Pred: noneEnd},
+	)
+	instPtr := c.block.NewExtractValue(result, 1)
+	c.trackHeapTempWithFlag(instPtr, dropFunc, owned)
 }
 
 // elvisResultDrop resolves the elvis result type and returns the matching temp
@@ -8524,22 +8616,24 @@ func (c *Compiler) elvisResultDrop(e *ast.BinaryExpr) (*ir.Func, types.Type, boo
 }
 
 // trackElvisResultTemp registers an inline (used/discarded) elvis `?:` result as
-// a statement temp with a path-dependent drop flag (T0935/T0945/T0936). The flag is
-// true on a path only when the result actually owns the buffer selected on that
-// path — someOwned on the some-path (the optional's inner was transferred out, false
-// for a borrowed value parameter per T0945) and noneOwned on the none-path (the
-// default's owner was neutralized, T0936). When a path's operand is a
-// parameter/borrowed/static value the caller (or no one, for .rodata) retains
-// ownership, so the flag is false there and the result borrows — avoiding a
-// double-free. The drop function matches the result type — Vector.drop for vectors
-// (honors the bit-63 static flag and walks droppable elements), promise_string_drop
-// for strings. Other i8* result types fall through untracked (T0940). A bound use
-// of the result claims the temp by value identity, neutralizing the flag so only
-// the variable's binding drops it.
+// a statement temp with a path-dependent drop flag (T0935/T0945/T0936/T0937). The
+// flag is true on a path only when the result actually owns the buffer selected on
+// that path — someOwned on the some-path (the optional's inner was orphaned, false
+// for a borrowed value parameter (T0945) or a member/index source (T0937)) and
+// noneOwned on the none-path (the default's owner was neutralized, T0936). When a
+// path's operand keeps an existing owner (caller param, container field, or
+// .rodata) the flag is false there and the result borrows — avoiding a double-free.
+// The drop function matches the result type — Vector.drop for vectors (honors the
+// bit-63 static flag and walks droppable elements), promise_string_drop for
+// strings. Other i8* result types fall through untracked (T0940). A bound use of
+// the result claims the temp by value identity, neutralizing the flag so only the
+// variable's binding drops it. The value-struct representation (Map/Set, heap user
+// types) is handled by trackElvisResultHeap instead.
 func (c *Compiler) trackElvisResultTemp(e *ast.BinaryExpr, result value.Value, someEnd, noneEnd, mergeBlock *ir.Block, someOwned, noneOwned bool) {
 	// When neither path transfers ownership to the result (e.g. a borrowed value
-	// parameter on the some-path with a borrowed/static default on the none-path),
-	// the result borrows on both paths and must not be dropped (T0945/T0936).
+	// parameter or a member/index source on the some-path with a borrowed/static
+	// default on the none-path), the result borrows on both paths and must not be
+	// dropped (T0945/T0936/T0937).
 	if !someOwned && !noneOwned {
 		return
 	}

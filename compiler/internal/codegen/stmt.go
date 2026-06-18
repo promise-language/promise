@@ -5262,6 +5262,14 @@ func (c *Compiler) trackVectorHeapTempWithElemType(rawPtr value.Value, elemType 
 // statement end (T0088). The instance pointer and drop function are stored so
 // unclaimed temps can be dropped at statement end.
 func (c *Compiler) trackHeapTemp(instancePtr value.Value, dropFunc *ir.Func) {
+	c.trackHeapTempWithFlag(instancePtr, dropFunc, constant.NewInt(irtypes.I1, 1))
+}
+
+// trackHeapTempWithFlag is trackHeapTemp with a caller-supplied initial live-flag
+// (an i1). Used by genElvis to register the elvis result with a per-branch flag
+// (owned on the some path where the extracted inner is orphaned, not-owned on the
+// none path where the default keeps its own owner). T0937.
+func (c *Compiler) trackHeapTempWithFlag(instancePtr value.Value, dropFunc *ir.Func, flagVal value.Value) {
 	if instancePtr == nil || dropFunc == nil || c.block == nil || c.block.Term != nil {
 		return
 	}
@@ -5282,7 +5290,7 @@ func (c *Compiler) trackHeapTemp(instancePtr value.Value, dropFunc *ir.Func) {
 	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
 
 	c.block.NewStore(instancePtr, alloca)
-	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.block.NewStore(flagVal, dropFlag)
 
 	idx := len(c.heapTemps)
 	c.heapTemps = append(c.heapTemps, heapTemp{alloca: alloca, dropFlag: dropFlag, dropFunc: dropFunc})

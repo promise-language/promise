@@ -4827,6 +4827,223 @@ func TestElvisOperator(t *testing.T) {
 	assertContains(t, ir, "elvis.merge")
 }
 
+// T0937: an inline (unbound) elvis whose result is a value-struct container
+// (map[K,V] / Set[T] — a 2-word {i8*, i8*} Value struct, not a bare i8*) on an
+// owned-local source must register the result as a heap drop temp with a
+// per-branch flag: owned (true) on the some-path where the extracted inner is
+// orphaned, borrowed (false) on the none-path where the default keeps its owner.
+// Without this the some-path inner leaks (the i8*-only trackElvisResultTemp path
+// skips value structs).
+func TestElvisMapResultDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			map[string, int]? a = {"x": 1};
+			map[string, int] b = {"z": 9};
+			c := (a ?: b).len;
+		}
+	`)
+	assertContains(t, ir, "elvis.merge")
+	// Per-branch live flag: true on the some-path, false on the none-path.
+	assertContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ false, %elvis\.none`)
+	// The tracked heap temp dispatches to the synthesized Map drop.
+	assertContains(t, ir, `call void @"Map[string, int].drop"`)
+}
+
+// T0937: a member-source elvis (`bx.m ?: b`) is owner-governed — the extracted
+// inner aliases the owned field and the container's own drop frees it. The elvis
+// result must NOT be tracked (tracking would double-free), so no per-branch
+// owned-flag phi is emitted.
+func TestElvisMapMemberSourceNoDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type MBox { map[string, int]? m; }
+		main() {
+			MBox bx = MBox(m: {"x": 1});
+			map[string, int] b = {"z": 9};
+			c := (bx.m ?: b).len;
+		}
+	`)
+	assertContains(t, ir, "elvis.merge")
+	assertNotContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ false, %elvis\.none`)
+}
+
+// T0937 (i8*-container gap): the i8* result path (trackElvisResultTemp, T0935)
+// applies the same orphan classifier as the value-struct path. An owned-local
+// string[] source is orphaned on the some-path → tracked with a per-branch flag.
+// Here the none-path default `b` is ALSO an owned local, so T0936 neutralizes its
+// scope-exit owner and the result owns it on the none-path too — the flag phi is
+// [true, true] (the `true` on the some-incoming is what proves orphan tracking).
+func TestElvisStrvecOwnedLocalDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[]? a = ["x" + "y"];
+			string[] b = ["z" + "w"];
+			c := (a ?: b).len;
+		}
+	`)
+	assertContains(t, ir, "elvis.merge")
+	// Per-branch live flag drives the stmt-temp Vector.drop dispatch: owned on the
+	// some-path (orphaned inner) and on the none-path (neutralized local default).
+	assertContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ true, %elvis\.none`)
+}
+
+// T0937 (i8*-container gap): a member-source string[] elvis (`bx.v ?: b`) aliases
+// the owned field; the container's drop frees it. The inline result must NOT be
+// tracked (tracking double-freed the elements → use-after-free crash before the
+// gate was applied to the i8* path), so no per-branch flag phi is emitted.
+func TestElvisStrvecMemberSourceNoDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type SVBox { string[]? v; }
+		main() {
+			SVBox bx = SVBox(v: ["x" + "y"]);
+			string[] b = ["z" + "w"];
+			c := (bx.v ?: b).len;
+		}
+	`)
+	assertContains(t, ir, "elvis.merge")
+	assertNotContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ false, %elvis\.none`)
+}
+
+// T0937: a value-struct-container elvis inside a generic function with an owned
+// (`~`) optional param is orphaned on the some-path, so the result is tracked.
+// The result type (`map[K,V]`) is resolved through c.typeSubst during
+// monomorphization, so the synthesized drop dispatches on the concrete
+// instantiation (`Map[string, int].drop`). Exercises the typeSubst branch of
+// trackElvisResultHeap (uncovered by the non-generic ident-source tests).
+func TestElvisMapGenericOwnedParamDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		gconsume[K: Hashable + Equal, V](~map[K, V]? a, map[K, V] b) int {
+			return (a ?: b).len;
+		}
+		main() {
+			map[string, int]? a = {"x": 1};
+			map[string, int] b = {"z": 9};
+			c := gconsume(a, b);
+		}
+	`)
+	assertContains(t, ir, "elvis.merge")
+	assertContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ false, %elvis\.none`)
+	assertContains(t, ir, `call void @"Map[string, int].drop"`)
+}
+
+// T0937: a value-struct-container elvis inside a structural-interface default
+// method, with an owned-local source (orphaned on the some-path), is tracked.
+// The default body is synthesized per concrete type with c.selfSubst active, so
+// the result type passes through types.SubstituteSelf before the drop is
+// resolved. Exercises the selfSubst branch of trackElvisResultHeap.
+func TestElvisMapStructuralDefaultDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type HasMapFallback `+"`"+`structural {
+			base_map() map[string, int] `+"`"+`abstract;
+			resolved_len() int {
+				map[string, int]? a = {"x": 1};
+				return (a ?: this.base_map()).len;
+			}
+		}
+		type MapConfig is HasMapFallback {
+			base_map() map[string, int] { return {"k": 7}; }
+		}
+		main() {
+			c := MapConfig();
+			d := c.resolved_len();
+		}
+	`)
+	assertContains(t, ir, "elvis.merge")
+	// The none-incoming predecessor is the this.base_map() call continuation
+	// block, not %elvis.none — so match only the some-path true incoming.
+	assertContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ false, `)
+	assertContains(t, ir, `call void @"Map[string, int].drop"`)
+}
+
+// T0937 (i8*-container gap): a generic vector elvis with an owned (`~`) optional
+// param is orphaned on the some-path → tracked via trackElvisResultTemp. The
+// result type (`T[]`) resolves through c.typeSubst at monomorphization.
+// Exercises the typeSubst branch of trackElvisResultTemp (the existing generic
+// tests use borrowed params, which now short-circuit at the orphan gate).
+func TestElvisStrvecGenericOwnedParamDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		gconsume[T](~T[]? a, T[] b) int {
+			return (a ?: b).len;
+		}
+		main() {
+			string[]? a = ["x" + "y"];
+			string[] b = ["z" + "w"];
+			c := gconsume(a, b);
+		}
+	`)
+	assertContains(t, ir, "elvis.merge")
+	assertContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ false, %elvis\.none`)
+}
+
+// T0937 (i8*-container gap): a vector elvis inside a structural-interface default
+// method with an owned-local source is orphaned → tracked. The default body is
+// synthesized with c.selfSubst active. Exercises the selfSubst branch of
+// trackElvisResultTemp.
+func TestElvisStrvecStructuralDefaultDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type HasVecFallback `+"`"+`structural {
+			base_vec() string[] `+"`"+`abstract;
+			resolved_len() int {
+				string[]? a = ["x" + "y"];
+				return (a ?: this.base_vec()).len;
+			}
+		}
+		type VecConfig is HasVecFallback {
+			base_vec() string[] { return ["z" + "w"]; }
+		}
+		main() {
+			c := VecConfig();
+			d := c.resolved_len();
+		}
+	`)
+	assertContains(t, ir, "elvis.merge")
+	// The none-incoming predecessor is the this.base_vec() call continuation
+	// block, not %elvis.none. The default is a FRESH temp (base_vec() returns a
+	// new vector), so T0936 claims it and the result owns it on the none-path too:
+	// the flag phi is [true, true] (the some-incoming `true` proves orphan tracking).
+	assertContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ true, `)
+}
+
+// T0937: an index-source elvis (`v[i] ?: b`) is owner-governed — the extracted
+// inner aliases the container element, which the container's own drop frees. The
+// result must NOT be tracked (tracking would double-free), so no per-branch
+// owned-flag phi is emitted. Exercises the IndexExpr arm of
+// elvisSomeInnerOrphaned (the ident/member tests cover the other arms).
+func TestElvisMapIndexSourceNoDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			(map[string, int]?)[] v = [];
+			v.push({"x": 1});
+			map[string, int] b = {"z": 9};
+			c := (v[0] ?: b).len;
+		}
+	`)
+	assertContains(t, ir, "elvis.merge")
+	assertNotContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ false, %elvis\.none`)
+}
+
+// T0937 (T0924 subsumption): a heap *user* type (a droppable non-value type, also
+// a 2-word {i8*, i8*} Value struct) used inline on an owned-local source goes
+// through the SAME trackElvisResultHeap path as Map/Set — distinct from the i8*
+// container path. It must emit the per-branch owned-flag phi and dispatch the
+// tracked temp to the type's own synthesized drop (@HVal.drop). This proves the
+// heap-user representation arm fires (the Map tests only cover the container arm
+// of the shared function); without it the some-path inner leaks (T0924).
+func TestElvisHeapUserResultDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type HVal { string s; }
+		main() {
+			HVal? a = HVal(s: "a" + "b");
+			HVal b = HVal(s: "c" + "d");
+			c := (a ?: b).s.len;
+		}
+	`)
+	assertContains(t, ir, "elvis.merge")
+	// Per-branch live flag: owned (true) on some, borrowed (false) on none.
+	assertContainsMatch(t, ir, `phi i1 \[ true, %elvis\.some[^]]*\], \[ false, %elvis\.none`)
+	// The tracked heap temp dispatches to the user type's own drop.
+	assertContains(t, ir, "call void @HVal.drop")
+}
+
 func TestOptionalStringNone(t *testing.T) {
 	ir := generateIR(t, `main() { string? x = none; }`)
 	assertContains(t, ir, "alloca { i1, i8* }")

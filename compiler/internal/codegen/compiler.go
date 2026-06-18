@@ -389,6 +389,7 @@ type Compiler struct {
 	coroutineReturnBlock *ir.Block  // B0353: if set, goroutine return branches here instead of ret
 	inCoroutine          bool       // true when compiling inside a go block coroutine body
 	goExprFireAndForget  bool       // true when go expr result is discarded (no <-task receiver)
+	elvisResultConsumed  bool       // T0954: true when an inline elvis `?:` result is the operand of a consuming `<-` await
 	coroCleanupBlk       *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
 	coroSuspendBlk       *ir.Block  // coroutine suspend block (suspend path: coro.end + ret)
 

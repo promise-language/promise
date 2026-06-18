@@ -8396,6 +8396,12 @@ func (c *Compiler) wrapReturnOptional(val value.Value, expr ast.Expr, retType ty
 }
 
 func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
+	// T0954: capture+reset the consumed-by-await signal so it does not leak into
+	// operand subexpressions (a nested elvis in e.Left/e.Right is not itself the
+	// await operand). Used below to neutralize the none-path default's owner.
+	consumedByReceive := c.elvisResultConsumed
+	c.elvisResultConsumed = false
+
 	optVal := c.genExprAutoPropagate(e.Left)
 
 	// Extract the present flag (field 0)
@@ -8455,6 +8461,19 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 			}
 		} else {
 			noneOwned = c.claimElvisDefaultTemp(defaultVal)
+		}
+	} else if consumedByReceive {
+		// T0954: result consumed by an enclosing `<-` await (Task[T] handle, not a
+		// Vector/string result elvisResultDrop tracks). The await joins+frees the
+		// selected G, so the none-path default must not be freed again by its own
+		// owner. Clear an owned-local default's drop flag / claim a fresh-temp
+		// default. noneOwned stays false (the await is the single owner). A borrowed
+		// param default has no drop flag → clearDropFlag no-ops, leaving T0953's
+		// borrowed-source crash to its own fix.
+		if ident, ok := e.Right.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		} else {
+			c.claimElvisDefaultTemp(defaultVal)
 		}
 	}
 	noneEnd := c.block
@@ -14239,7 +14258,16 @@ func unwrapTaskOptionalMemberSource(expr ast.Expr) *ast.MemberExpr {
 // genReceiveTask generates code for `<-task` — waits for goroutine G to complete, returns T.
 // The task handle is now a G pointer (i8*). Checks G.done and loads from G.result_ptr.
 func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.Value {
+	// T0954: `<-(a ?: b)` — when the await operand (peeling parens) is an inline
+	// elvis, signal genElvis so it neutralizes the none-path default's owner on
+	// the none block (path-conditionally). `<-` binds tighter than `?:`, so an
+	// awaited elvis is always written `<-(a ?: b)` — the paren peel is required.
+	prevElvisConsumed := c.elvisResultConsumed
+	if be, ok := unwrapDestructureParens(e.Operand).(*ast.BinaryExpr); ok && be.Op == ast.BinElvis {
+		c.elvisResultConsumed = true
+	}
 	gRaw := c.genExpr(e.Operand)
+	c.elvisResultConsumed = prevElvisConsumed
 	// T0503: `<-t` consumes the task — clear the scope-exit drop flag so the
 	// receive's own pal_free(G) isn't followed by a double-free at scope exit.
 	// Same for tracked getter temps (e.g. `<-obj.task_getter`).

@@ -1,0 +1,59 @@
+// T0954: awaiting an inline elvis `?:` Task on the none-path must not double-free
+// the none-path owned-local default. `<-(a ?: b)` joins+frees the selected G; the
+// default `b`'s scope-exit drop must be neutralized path-conditionally so the await
+// is the single owner. Sibling of T0953 (borrowed-source) but distinct root cause.
+get_42() int {
+  return 42;
+}
+
+// none-path, owned-local default — the repro. `a` is none, so the elvis selects the
+// owned local `b`; awaiting it must free `b`'s G exactly once.
+t_none_owned_local() `test(exclude: wasm) {
+  Task[int]? a = none;
+  Task[int] b = go get_42();
+  assert((<-(a ?: b)) == 42, "task await none owned-local");
+}
+
+// some-path, default unselected — the inner is awaited (freed once), and the
+// UNselected `b` must still be dropped exactly once by its own binding (leak guard).
+t_some_unselected_default_dropped() `test(exclude: wasm) {
+  Task[int]? a = go get_42();
+  Task[int] b = go get_42();
+  assert((<-(a ?: b)) == 42, "task await some unselected default");
+}
+
+// none-path, fresh-temp `go` default — the default is a fresh handle temp (not a
+// named local); claimElvisDefaultTemp must claim it so the await is the only owner.
+t_none_fresh_temp_default() `test(exclude: wasm) {
+  Task[int]? a = none;
+  assert((<-(a ?: (go get_42()))) == 42, "task await none fresh-temp default");
+}
+
+// none-path, parenthesized source `<-((a) ?: b)` — the paren peel on the source must
+// not change neutralization; `a` none selects owned-local `b`, awaited once.
+t_none_paren_source() `test(exclude: wasm) {
+  Task[int]? a = none;
+  Task[int] b = go get_42();
+  assert((<-((a) ?: b)) == 42, "task await none paren source");
+}
+
+// some-path, fresh-temp default unselected — the inner is awaited (freed once) and the
+// UNselected fresh `go` default must still be dropped exactly once (leak guard for the
+// claimElvisDefaultTemp branch on the some-path, complementing the named-local guard).
+t_some_unselected_fresh_temp_default() `test(exclude: wasm) {
+  Task[int]? a = go get_42();
+  assert((<-(a ?: (go get_42()))) == 42, "task await some unselected fresh-temp default");
+}
+
+// nested-elvis default whose deeper owned-local is UNSELECTED — `a` none selects the
+// default `(c ?: b)`; `c` is some so the inner picks `c` (a temp optional), leaving the
+// deeper owned-local `b` to be dropped by its own binding. Confirms the consume-signal
+// reset in genElvis (the nested elvis runs un-consumed) is correct on this path.
+// NOTE: the sibling case where the deeper owned-local IS selected (both `a` and `c`
+// none) double-frees `b` — tracked as T0955 (out of scope for T0954's single-level fix).
+t_nested_default_deeper_unselected() `test(exclude: wasm) {
+  Task[int]? a = none;
+  Task[int]? c = go get_42();
+  Task[int] b = go get_42();
+  assert((<-(a ?: (c ?: b))) == 42, "task await nested default deeper unselected");
+}

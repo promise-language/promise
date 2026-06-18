@@ -4276,6 +4276,78 @@ func TestForInBoolNotIterable(t *testing.T) {
 	expectError(t, errs, "cannot iterate")
 }
 
+// T0971: a for-in over a borrowed vector (T[]&) must type-check — the dispatch
+// strips the borrow wrapper — and the binding must be the element type (int),
+// not the un-unwrapped int[]& (which produced a cascading operator error).
+func TestT0971_ForInBorrowedVectorTypeChecks(t *testing.T) {
+	info := checkOK(t, `
+		f(int[] &data) {
+			total := 0;
+			for x in data { total = total + x; }
+		}
+	`)
+	// The binding `x` must resolve to int, not int[]&.
+	found := false
+	for expr, typ := range info.Types {
+		if id, ok := expr.(*ast.IdentExpr); ok && id.Name == "x" {
+			found = true
+			assertType(t, info, typ, "int")
+		}
+	}
+	if !found {
+		t.Fatalf("binding 'x' not found in type map")
+	}
+}
+
+// T0971: a borrowed vector with a non-Copy element type (string) also
+// type-checks (it goes through the same dispatch).
+func TestT0971_ForInBorrowedStringVectorTypeChecks(t *testing.T) {
+	checkOK(t, `
+		f(string[] &data) {
+			n := 0;
+			for x in data { n = n + x.len; }
+		}
+	`)
+}
+
+// T0971: other borrowed container forms (map, string, fixed array) and the
+// mutable borrow (~) all type-check after the borrow-strip.
+func TestT0971_ForInBorrowedMapTypeChecks(t *testing.T) {
+	checkOK(t, `
+		f(map[string, int] &m) {
+			total := 0;
+			for k, v in m { total = total + v; }
+		}
+	`)
+}
+
+func TestT0971_ForInBorrowedStringTypeChecks(t *testing.T) {
+	checkOK(t, `
+		f(string &s) {
+			n := 0;
+			for ch in s { n = n + 1; }
+		}
+	`)
+}
+
+func TestT0971_ForInBorrowedArrayTypeChecks(t *testing.T) {
+	checkOK(t, `
+		f(int[3] &a) {
+			total := 0;
+			for x in a { total = total + x; }
+		}
+	`)
+}
+
+func TestT0971_ForInMutBorrowedVectorTypeChecks(t *testing.T) {
+	checkOK(t, `
+		f(int[] ~data) {
+			total := 0;
+			for x in data { total = total + x; }
+		}
+	`)
+}
+
 // --- Map Type Annotation ---
 
 func TestMapTypeAnnotation(t *testing.T) {

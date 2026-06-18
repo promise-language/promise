@@ -1351,14 +1351,23 @@ func (c *Checker) rejectForInSingleOwnerBindingMove(expr ast.Expr) bool {
 	if !ok {
 		return false
 	}
-	if !c.forInSingleOwnerBindings[ident.Name] {
-		return false
+	if c.forInSingleOwnerBindings[ident.Name] {
+		typ := c.info.Types[ident]
+		c.errorf(ident.Pos(),
+			"cannot move for-in loop binding '%s' (%s); the binding aliases the container's slot — moving it would leave the container with a dangling pointer that double-frees at scope exit. Use `<-%s` to receive the value directly, or call `.pop()` / `.remove()` on the container to take ownership of an element",
+			ident.Name, typ.String(), ident.Name)
+		return true
 	}
-	typ := c.info.Types[ident]
-	c.errorf(ident.Pos(),
-		"cannot move for-in loop binding '%s' (%s); the binding aliases the container's slot — moving it would leave the container with a dangling pointer that double-frees at scope exit. Use `<-%s` to receive the value directly, or call `.pop()` / `.remove()` on the container to take ownership of an element",
-		ident.Name, typ.String(), ident.Name)
-	return true
+	// T0971: moving a binding out of a *borrowed* container aliases storage the
+	// container's owner will free.
+	if c.forInBorrowedAliasBindings[ident.Name] {
+		typ := c.info.Types[ident]
+		c.errorf(ident.Pos(),
+			"cannot move for-in loop binding '%s' (%s) out of a borrowed container; the binding aliases storage the container's owner will free, so moving it would double-free at the owner's drop. Call `.clone()` to take an independent copy",
+			ident.Name, typ.String())
+		return true
+	}
+	return false
 }
 
 // isUserIndexExpr reports whether idx dispatches to a user-defined *non-native*

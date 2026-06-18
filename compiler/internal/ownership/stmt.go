@@ -1216,6 +1216,30 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 		}
 	}
 
+	// T0971: a for-in over a *borrowed* container — one whose static type is a
+	// SharedRef/MutRef (`&`/`~` parameter, `T[] &b = v` local, `.borrow` getter,
+	// if/match composition) — does not consume the container, so its owner still
+	// drops every element. The loop binding aliases that owned storage, so moving
+	// it out (`sink.push(x)`, `y := x`, `return x`, passing to a `~` param) would
+	// double-free at the owner's drop. Flag it so tryMove/tryMoveConsume reject
+	// the move. Copy elements are value copies and string elements are cloned per
+	// iteration (genForInVector dupStrings), so both stay freely movable and are
+	// not flagged. (The matching double-free for *owned* / plain-borrow-param
+	// containers — which already type-checked before T0971 — is a pre-existing,
+	// broader gap tracked separately; T0652 only narrows it to single-owner
+	// native handles.)
+	var prevBorrowedAlias bool
+	var hadPrevBorrowedAlias bool
+	flaggedBorrowedAlias := false
+	if s.Binding != "_" && iterableIsBorrowedContainer(c.info.Types[s.Iterable]) {
+		elem := forInAliasingElementType(stripRefType(c.info.Types[s.Iterable]))
+		if elem != nil && !isCopyType(elem) && extractNamedType(elem) != types.TypString {
+			prevBorrowedAlias, hadPrevBorrowedAlias = c.forInBorrowedAliasBindings[s.Binding]
+			c.forInBorrowedAliasBindings[s.Binding] = true
+			flaggedBorrowedAlias = true
+		}
+	}
+
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
@@ -1229,6 +1253,44 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 			delete(c.forInSingleOwnerBindings, s.Binding)
 		}
 	}
+	if flaggedBorrowedAlias {
+		if hadPrevBorrowedAlias {
+			c.forInBorrowedAliasBindings[s.Binding] = prevBorrowedAlias
+		} else {
+			delete(c.forInBorrowedAliasBindings, s.Binding)
+		}
+	}
+}
+
+// iterableIsBorrowedContainer reports whether a for-in iterable's static type is
+// a borrow (SharedRef/MutRef). Such an iterable — an `&`/`~` parameter, a
+// `T[] &b = v` local, a `.borrow` getter result, or an if/match composition that
+// preserves the borrow type — is never consumed by the loop (refs are Copy, so
+// tryMove is a no-op on it), so its container's owner still drops every element.
+// Iterating it was rejected at sema before T0971 ("cannot iterate over type
+// T[]&"); now that it is allowed, moving an aliasing element binding out would
+// double-free, so the binding is flagged. Plain-borrow-param (`T[] src`) and
+// owned-container iteration are NOT ref-typed and already type-checked before
+// T0971, so their (pre-existing) move-out gap is out of scope here.
+func iterableIsBorrowedContainer(typ types.Type) bool {
+	switch typ.(type) {
+	case *types.SharedRef, *types.MutRef:
+		return true
+	}
+	return false
+}
+
+// stripRefType peels one borrow layer (MutRef/SharedRef) and returns the
+// underlying type. Unlike extractNamedType it preserves the container type
+// (Array/Vector/Map Instance) needed by forInAliasingElementType.
+func stripRefType(typ types.Type) types.Type {
+	switch t := typ.(type) {
+	case *types.SharedRef:
+		return t.Elem()
+	case *types.MutRef:
+		return t.Elem()
+	}
+	return typ
 }
 
 func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {

@@ -621,6 +621,55 @@ func TestForInRange(t *testing.T) {
 	assertContains(t, ir, "forin.exit")
 }
 
+// T0971: a for-in over a borrowed vector parameter (int[]&) lowers through the
+// normal vector for-in path (the borrow is stripped) and must NOT drop the
+// borrowed buffer at loop exit (the buffer is owned by the caller).
+func TestT0971_ForInBorrowedVectorNoBufferDrop(t *testing.T) {
+	ir := generateIR(t, `
+		sum(int[] &data) int {
+			total := 0;
+			for x in data { total = total + x; }
+			return total;
+		}
+		main() {}
+	`)
+	fn := extractFunction(ir, "__user.sum")
+	if fn == "" {
+		t.Fatalf("function @sum not found in IR")
+	}
+	// Lowering ran on the unwrapped buffer.
+	assertContains(t, fn, "forin.header")
+	assertContains(t, fn, "forin.body")
+	assertContains(t, fn, "forin.exit")
+	// No vector buffer drop is emitted inside @sum — the borrowed param has no
+	// drop binding (the buffer is owned by the caller).
+	assertNotContains(t, fn, "@Vector.drop")
+}
+
+// T0971: a borrowed string vector (string[]&) iterates with the per-iteration
+// element clone/drop path (dupStrings), but still must not drop the borrowed
+// buffer itself.
+func TestT0971_ForInBorrowedStringVectorNoBufferDrop(t *testing.T) {
+	ir := generateIR(t, `
+		total_len(string[] &data) int {
+			n := 0;
+			for x in data { n = n + x.len; }
+			return n;
+		}
+		main() {}
+	`)
+	fn := extractFunction(ir, "__user.total_len")
+	if fn == "" {
+		t.Fatalf("function @total_len not found in IR")
+	}
+	assertContains(t, fn, "forin.header")
+	assertContains(t, fn, "forin.body")
+	// Per-iteration string clones are dropped (dupStrings path)...
+	assertContains(t, fn, "@promise_string_drop")
+	// ...but the borrowed vector buffer itself is never dropped inside the fn.
+	assertNotContains(t, fn, "@Vector.drop")
+}
+
 func TestReturnValue(t *testing.T) {
 	ir := generateIR(t, `
 		answer() int { return 42; }

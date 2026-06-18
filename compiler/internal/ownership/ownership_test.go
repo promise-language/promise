@@ -10172,6 +10172,182 @@ func TestT0652_IteratorChainAllowed(t *testing.T) {
 	`)
 }
 
+// === T0971: for-in over a *borrowed* container (T[]&/T[]~/.borrow). Reading is
+// fine; moving an aliasing element binding out double-frees at the owner's drop,
+// so it must be rejected. Copy and string elements stay movable. ===
+
+// Read-only iteration of a borrowed-vector parameter must be accepted, and the
+// borrow is not consumed (the iterable can be iterated again).
+func TestT0971_ForInBorrowedVectorNoConsume(t *testing.T) {
+	ownerOK(t, `
+		type Box { string name; }
+		count_twice(Box[] &src) int {
+			n := 0;
+			for x in src { n = n + x.name.len; }
+			for x in src { n = n + 1; }
+			return n;
+		}
+		test() {}
+	`)
+}
+
+// Moving a non-Copy element binding out of a borrowed-vector parameter
+// (push into another container) must be rejected.
+func TestT0971_ForInBorrowedMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		drain(Box[] &src) int {
+			sink := Box[]();
+			for x in src { sink.push(x); }
+			return sink.len;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "out of a borrowed container")
+}
+
+// Var-decl form (`Box y = x;`) of the move-out — same tryMove path.
+func TestT0971_ForInBorrowedMoveOutVarDeclRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		drain(Box[] &src) {
+			for x in src {
+				Box y = x;
+				_ = y;
+			}
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "out of a borrowed container")
+}
+
+// A `T[] &b = v` local is also ref-typed → its move-out is rejected too.
+func TestT0971_ForInBorrowedLocalMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			boxes := [Box(name: "a"), Box(name: "b")];
+			Box[] &b = boxes;
+			sink := Box[]();
+			for x in b { sink.push(x); }
+		}
+	`)
+	expectOwnerError(t, errs, "out of a borrowed container")
+}
+
+// Mutable-borrow (`~`) parameter — also ref-typed, move-out rejected.
+func TestT0971_ForInMutBorrowedMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		drain(Box[] ~src) int {
+			sink := Box[]();
+			for x in src { sink.push(x); }
+			return sink.len;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "out of a borrowed container")
+}
+
+// Consume-arg form (`take(x)` into a `~` param) of the move-out.
+func TestT0971_ForInBorrowedConsumeArgRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		take(~Box b) int { return b.name.len; }
+		drain(Box[] &src) {
+			for x in src { _ = take(x); }
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "out of a borrowed container")
+}
+
+// Copy elements (int) copy by value — move-out of a borrowed int[] is fine.
+func TestT0971_ForInBorrowedCopyElementMovable(t *testing.T) {
+	ownerOK(t, `
+		drain(int[] &src) int[] {
+			sink := int[]();
+			for x in src { sink.push(x); }
+			return sink;
+		}
+		test() {}
+	`)
+}
+
+// String elements are cloned per iteration (genForInVector dupStrings) — move-out
+// of a borrowed string[] is sound and must be accepted.
+func TestT0971_ForInBorrowedStringElementMovable(t *testing.T) {
+	ownerOK(t, `
+		drain(string[] &src) string[] {
+			sink := string[]();
+			for x in src { sink.push(x); }
+			return sink;
+		}
+		test() {}
+	`)
+}
+
+// Regression: move-out of an OWNED container's element stays accepted (the
+// pre-existing, broader double-free gap is tracked by T0978, not T0971). The new
+// guard keys on the ref type, so owned containers are unaffected.
+func TestT0971_ForInOwnedMoveOutStillOK(t *testing.T) {
+	ownerOK(t, `
+		type Box { string name; }
+		test() {
+			boxes := [Box(name: "a"), Box(name: "b")];
+			sink := Box[]();
+			for x in boxes { sink.push(x); }
+		}
+	`)
+}
+
+// Borrowed *map* with a non-Copy value type: moving a value binding out (the
+// second binding of `for k, v in`) aliases the map's owned storage → rejected.
+// Exercises the Map branch of forInAliasingElementType.
+func TestT0971_ForInBorrowedMapMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		drain(map[string, Box] &src) {
+			sink := Box[]();
+			for k, v in src { sink.push(v); }
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "out of a borrowed container")
+}
+
+// Borrowed *fixed-size array* with a non-Copy element: move-out rejected.
+// Exercises the Array branch of forInAliasingElementType.
+func TestT0971_ForInBorrowedArrayMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		drain(Box[3] &src) {
+			sink := Box[]();
+			for x in src { sink.push(x); }
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "out of a borrowed container")
+}
+
+// Borrowed map/array whose element IS Copy (int) stays freely movable — the
+// isCopyType skip must not flag these.
+func TestT0971_ForInBorrowedCopyMapArrayMovable(t *testing.T) {
+	ownerOK(t, `
+		drain_map(map[string, int] &m) int[] {
+			sink := int[]();
+			for k, v in m { sink.push(v); }
+			return sink;
+		}
+		drain_arr(int[3] &a) int[] {
+			sink := int[]();
+			for x in a { sink.push(x); }
+			return sink;
+		}
+		test() {}
+	`)
+}
+
 // === T0837: moving/consuming a single-owner handle field out of a shared
 // borrow must be rejected ===
 //

@@ -1309,14 +1309,21 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	c.openScope(s.Body, "for-in")
 
 	if iterType != nil {
+		// T0971: a borrowed container (`T[]&`, `string&`, `map[K,V]&`, `Range&`,
+		// borrowed custom iterator) has the same runtime layout as the owned form,
+		// so iteration must dispatch on the unwrapped type. Strip one borrow layer
+		// (MutRef/SharedRef) before the element-type dispatch — exactly as indexing
+		// and member access already auto-deref a borrow. The binding type stays the
+		// raw element type, matching `b[i]`.
+		dispatchType := stripRef(iterType)
 		// Determine element type from iterable
 		var elemType types.Type
 		var mapKeyType types.Type // non-nil when iterating a map with 2 bindings
-		if arr, ok := iterType.(*types.Array); ok {
+		if arr, ok := dispatchType.(*types.Array); ok {
 			elemType = arr.Elem()
-		} else if elem, ok := types.AsVector(iterType); ok {
+		} else if elem, ok := types.AsVector(dispatchType); ok {
 			elemType = elem
-		} else if key, val, ok := types.AsMap(iterType); ok {
+		} else if key, val, ok := types.AsMap(dispatchType); ok {
 			if s.Index != "" {
 				// for k, v in map: k = key type, v = value type
 				elemType = val
@@ -1325,16 +1332,16 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 				// for entry in map: entry = (key, value) tuple
 				elemType = types.NewTuple([]types.Type{key, val})
 			}
-		} else if elem, ok := types.AsRange(iterType); ok {
+		} else if elem, ok := types.AsRange(dispatchType); ok {
 			elemType = elem
-		} else if inst, ok := iterType.(*types.Instance); ok {
+		} else if inst, ok := dispatchType.(*types.Instance); ok {
 			origin := inst.Origin()
 			if origin == types.TypIter {
 				// Iterator[T] yields T via next() — record for duck-typed codegen
 				if len(inst.TypeArgs()) > 0 {
 					elemType = inst.TypeArgs()[0]
 				} else {
-					elemType = iterType
+					elemType = dispatchType
 				}
 				c.info.ForInKinds[s] = ForInNext
 			} else if origin == types.TypStream {
@@ -1342,7 +1349,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 				if len(inst.TypeArgs()) > 0 {
 					elemType = inst.TypeArgs()[0]
 				} else {
-					elemType = iterType
+					elemType = dispatchType
 				}
 				// Stream still uses genForInGenerator (raw coroutine path)
 			} else if origin == types.TypChannel {
@@ -1350,21 +1357,21 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 				if len(inst.TypeArgs()) > 0 {
 					elemType = inst.TypeArgs()[0]
 				} else {
-					elemType = iterType
+					elemType = dispatchType
 				}
-			} else if duckElem := c.checkDuckTypedForIn(s, iterType); duckElem != nil {
+			} else if duckElem := c.checkDuckTypedForIn(s, dispatchType); duckElem != nil {
 				elemType = duckElem
 			} else {
-				c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", iterType)
-				elemType = iterType
+				c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", dispatchType)
+				elemType = dispatchType
 			}
-		} else if types.Identical(iterType, types.TypString) {
+		} else if types.Identical(dispatchType, types.TypString) {
 			elemType = types.TypChar
-		} else if duckElem := c.checkDuckTypedForIn(s, iterType); duckElem != nil {
+		} else if duckElem := c.checkDuckTypedForIn(s, dispatchType); duckElem != nil {
 			elemType = duckElem
 		} else {
-			c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", iterType)
-			elemType = iterType
+			c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", dispatchType)
+			elemType = dispatchType
 		}
 
 		if s.Binding != "_" {

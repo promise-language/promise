@@ -9288,11 +9288,28 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 
 // --- For-in loop ---
 
-func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
-	iterableType := c.info.Types[s.Iterable]
+// forInIterableType returns the substituted iterable type of a for-in loop with
+// one borrow layer stripped. A borrowed container (T0971) has the same runtime
+// layout as the owned form, and genExpr(s.Iterable) already yields the same
+// slice/map/string/range value (resolveType unwraps refs), so the type dispatch
+// must run on the unwrapped type. Centralizes the strip for every site that
+// re-derives the iterable type (genForInStmt, genForInRange, genForInMap).
+func (c *Compiler) forInIterableType(s *ast.ForInStmt) types.Type {
+	t := c.info.Types[s.Iterable]
 	if c.typeSubst != nil {
-		iterableType = types.Substitute(iterableType, c.typeSubst)
+		t = types.Substitute(t, c.typeSubst)
 	}
+	if mr, ok := t.(*types.MutRef); ok {
+		return mr.Elem()
+	}
+	if sr, ok := t.(*types.SharedRef); ok {
+		return sr.Elem()
+	}
+	return t
+}
+
+func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
+	iterableType := c.forInIterableType(s)
 
 	if arr, ok := iterableType.(*types.Array); ok {
 		c.genForInArray(s, arr)
@@ -9635,11 +9652,9 @@ func (c *Compiler) emitIterNext(receiverVal value.Value, receiverType types.Type
 func (c *Compiler) genForInRange(s *ast.ForInStmt, elemType types.Type) {
 	rangeVal := c.genExpr(s.Iterable)
 
-	// Get the layout to find field indices
-	iterableType := c.info.Types[s.Iterable]
-	if c.typeSubst != nil {
-		iterableType = types.Substitute(iterableType, c.typeSubst)
-	}
+	// Get the layout to find field indices. T0971: unwrap a borrowed Range so
+	// its value-type layout resolves.
+	iterableType := c.forInIterableType(s)
 	layout := c.lookupTypeLayout(iterableType)
 	if layout == nil {
 		panic(fmt.Sprintf("codegen: no layout for range type %s", iterableType))
@@ -11111,11 +11126,9 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 	keyLLVM := c.resolveType(keyType)
 	valLLVM := c.resolveType(valType)
 
-	// Resolve monomorphized type name for method lookup
-	iterType := c.info.Types[s.Iterable]
-	if c.typeSubst != nil {
-		iterType = types.Substitute(iterType, c.typeSubst)
-	}
+	// Resolve monomorphized type name for method lookup. T0971: unwrap a borrowed
+	// map (map[K,V]&) so the underlying Instance resolves.
+	iterType := c.forInIterableType(s)
 	inst, ok := iterType.(*types.Instance)
 	if !ok {
 		panic(fmt.Sprintf("codegen: for-in map target is %T, want Instance", iterType))

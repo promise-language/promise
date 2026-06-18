@@ -2,7 +2,7 @@
 
 Statically-typed language designed for AI-agent efficiency. Explicit ownership (like Rust), goroutine-style concurrency (like Go), algebraic errors, generics, exhaustive pattern matching — zero hidden effects. Native LLVM compilation to Linux, macOS, Windows, and WASM.
 
-**Designed for AI agents.** Read the [Language Guide](docs/language-guide.md) to start writing Promise code. Every design decision optimizes for an AI generating correct, self-contained programs in one shot. Reading a single `.pr` file tells you exactly what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?^`/`?!`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic.
+**Designed for AI agents.** Read the [Language Guide](docs/language-guide.md) to start writing Promise code. Every design decision optimizes for an AI generating correct, self-contained programs. Reading any `.pr` file tells you exactly what it does — no hidden effects, no implicit behaviors, no action-at-a-distance. Types are explicit. Errors are explicit (`?^`/`?!`/`!`). Ownership is explicit (`~`/`&`). Mutability is explicit. There is one obvious way to do things, so code generation is deterministic.
 
 **Mono-versioned catalog.** Promise eliminates dependency hell entirely. There are no per-package versions, no lockfiles, no version resolution. Instead, the entire ecosystem — compiler, standard library, and all catalog modules — ships as a single atomic release called an **epoch** (e.g., `2026.0`). Every module in an epoch is tested together as a unit. Your project declares which epoch it targets in `promise.toml`, and that's it. An AI agent only needs to know the epoch to generate correct imports — no version guessing, no compatibility reasoning, no `package.json` / `Cargo.toml` / `go.mod` boilerplate.
 
@@ -24,7 +24,7 @@ main() {
   print_line("Area: {c.area}");
 
   numbers := [1, 2, 3, 4, 5];
-  sum := numbers.filter(|n| -> n > 2).fold(0, |acc, n| -> acc + n);
+  sum := numbers.iter().filter(|int n| -> n > 2).fold(0, |int acc, int n| -> acc + n);
   print_line("Sum: {sum}");
 }
 ```

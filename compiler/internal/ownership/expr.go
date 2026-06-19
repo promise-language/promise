@@ -1391,12 +1391,13 @@ func (c *Checker) rejectForInSingleOwnerBindingMove(expr ast.Expr) bool {
 			ident.Name, typ.String(), ident.Name)
 		return true
 	}
-	// T0971: moving a binding out of a *borrowed* container aliases storage the
-	// container's owner will free.
-	if c.forInBorrowedAliasBindings[ident.Name] {
+	// T0971/T0978: moving a binding out of a native container (owned,
+	// plain-borrow-param, or borrowed-ref) aliases the container's element
+	// storage, which its owner still drops at scope exit.
+	if c.forInAliasBindings[ident.Name] {
 		typ := c.info.Types[ident]
 		c.errorf(ident.Pos(),
-			"cannot move for-in loop binding '%s' (%s) out of a borrowed container; the binding aliases storage the container's owner will free, so moving it would double-free at the owner's drop. Call `.clone()` to take an independent copy",
+			"cannot move for-in loop binding '%s' (%s); the binding aliases the container's element storage, so moving it would double-free when the container drops its elements. Call `.clone()` to take an independent copy, or `.pop()` / `.remove()` to take ownership of an element",
 			ident.Name, typ.String())
 		return true
 	}

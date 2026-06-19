@@ -696,8 +696,12 @@ test_t0399_for_in_slice_push() `test {
     v := (string, int)[]();
     v.push(("a" + "b", 1));
     v.push(("c" + "d", 2));
-    for elem in v[0:1] {
-      v2.push(elem);
+    // T0978: a for-in binding aliases the slice's element storage, so moving it
+    // into v2 (`v2.push(elem)`) would double-free at the slice temp's drop. Drain
+    // the slice with `.pop()`, which transfers ownership of each element.
+    slice := v[0:1];
+    while slice.len > 0 {
+      v2.push(slice.pop()!);
     }
   }
   t := v2[0];

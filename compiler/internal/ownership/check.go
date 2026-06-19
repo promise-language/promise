@@ -28,15 +28,17 @@ type Checker struct {
 	// codegen already nulls the slot).
 	forInSingleOwnerBindings map[string]bool
 
-	// T0971: for-in loop binding names whose iterable is a *borrowed* native
-	// container (Vector/Array/Map-value) of non-Copy, non-string elements. The
-	// loop binding aliases storage the container's owner will free, and a
-	// borrowed container is not consumed by the loop (unlike an owned one), so
-	// moving the binding out (`sink.push(x)`, `y := x`, `return x`, passing to a
-	// `~` param) would double-free at the owner's drop. Copy elements are value
-	// copies and string elements are cloned per iteration (genForInVector
-	// dupStrings), so both stay freely movable and are not flagged here.
-	forInBorrowedAliasBindings map[string]bool
+	// T0971/T0978: for-in loop binding names whose iterable is a native container
+	// (Vector/Array/Map-value) of non-Copy, non-string elements — whether owned,
+	// a plain-borrow parameter (`T[] src`), or a borrowed ref (`T[]&`/`T[]~`/
+	// `.borrow`). The loop binding aliases the container's element storage, which
+	// its owner still drops at scope exit, so moving the binding out
+	// (`sink.push(x)`, `y := x`, `return x`, passing to a `~` param) would
+	// double-free. Copy elements are value copies and string elements are cloned
+	// per iteration (genForInVector dupStrings), so both stay freely movable and
+	// are not flagged here. Single-owner native handles use the separate
+	// forInSingleOwnerBindings set (T0652) so they keep their dedicated message.
+	forInAliasBindings map[string]bool
 
 	// Drop ordering: tracks declaration order for LIFO drop-order validation.
 	// Variables are dropped in reverse declaration order at scope exit.
@@ -142,7 +144,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedSig := c.curSig
 	savedPinned := c.pinned
 	savedForInSingleOwner := c.forInSingleOwnerBindings
-	savedForInBorrowedAlias := c.forInBorrowedAliasBindings
+	savedForInAlias := c.forInAliasBindings
 	savedDeclOrder := c.declOrder
 	savedNextOrder := c.nextOrder
 	savedVarTypes := c.varTypes
@@ -154,7 +156,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.curSig = sig
 	c.pinned = make(map[string]bool)
 	c.forInSingleOwnerBindings = make(map[string]bool)
-	c.forInBorrowedAliasBindings = make(map[string]bool)
+	c.forInAliasBindings = make(map[string]bool)
 	c.declOrder = make(map[string]int)
 	c.nextOrder = 0
 	c.varTypes = make(map[string]types.Type)
@@ -178,7 +180,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.params = savedParams
 	c.pinned = savedPinned
 	c.forInSingleOwnerBindings = savedForInSingleOwner
-	c.forInBorrowedAliasBindings = savedForInBorrowedAlias
+	c.forInAliasBindings = savedForInAlias
 	c.curSig = savedSig
 	c.declOrder = savedDeclOrder
 	c.nextOrder = savedNextOrder
@@ -257,7 +259,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedSig := c.curSig
 	savedPinned := c.pinned
 	savedForInSingleOwner := c.forInSingleOwnerBindings
-	savedForInBorrowedAlias := c.forInBorrowedAliasBindings
+	savedForInAlias := c.forInAliasBindings
 	savedDeclOrder := c.declOrder
 	savedNextOrder := c.nextOrder
 	savedVarTypes := c.varTypes
@@ -269,7 +271,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.curSig = m.Sig()
 	c.pinned = make(map[string]bool)
 	c.forInSingleOwnerBindings = make(map[string]bool)
-	c.forInBorrowedAliasBindings = make(map[string]bool)
+	c.forInAliasBindings = make(map[string]bool)
 	c.declOrder = make(map[string]int)
 	c.nextOrder = 0
 	c.varTypes = make(map[string]types.Type)
@@ -301,7 +303,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.curSig = savedSig
 	c.pinned = savedPinned
 	c.forInSingleOwnerBindings = savedForInSingleOwner
-	c.forInBorrowedAliasBindings = savedForInBorrowedAlias
+	c.forInAliasBindings = savedForInAlias
 	c.declOrder = savedDeclOrder
 	c.nextOrder = savedNextOrder
 	c.varTypes = savedVarTypes

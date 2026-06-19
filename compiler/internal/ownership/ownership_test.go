@@ -10410,10 +10410,13 @@ func TestT0652_VectorStringForInMoveAllowed(t *testing.T) {
 	`)
 }
 
-// User heap type (non-single-owner-native) — current behavior unchanged;
-// the new check is type-driven on single-owner natives only.
-func TestT0652_VectorBoxForInMoveAllowed(t *testing.T) {
-	ownerOK(t, `
+// T0978: User heap type (non-Copy, non-single-owner-native) move-out of an
+// OWNED vector — the loop binding aliases the container's slot, so `x := h`
+// would double-free at scope exit (both `x` and the container free the same
+// instance). Previously allowed (silent double-free); now rejected by the
+// broadened for-in alias guard.
+func TestT0978_VectorBoxForInMoveRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		type Box { int v; }
 		test() {
 			Box b0 = Box(v: 1);
@@ -10425,6 +10428,7 @@ func TestT0652_VectorBoxForInMoveAllowed(t *testing.T) {
 			}
 		}
 	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
 }
 
 // Range iteration — Range elements are Copy, no aliasing concern.
@@ -10507,7 +10511,7 @@ func TestT0971_ForInBorrowedMoveOutRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "out of a borrowed container")
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
 }
 
 // Var-decl form (`Box y = x;`) of the move-out — same tryMove path.
@@ -10522,7 +10526,7 @@ func TestT0971_ForInBorrowedMoveOutVarDeclRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "out of a borrowed container")
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
 }
 
 // A `T[] &b = v` local is also ref-typed → its move-out is rejected too.
@@ -10536,7 +10540,7 @@ func TestT0971_ForInBorrowedLocalMoveOutRejected(t *testing.T) {
 			for x in b { sink.push(x); }
 		}
 	`)
-	expectOwnerError(t, errs, "out of a borrowed container")
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
 }
 
 // Mutable-borrow (`~`) parameter — also ref-typed, move-out rejected.
@@ -10550,7 +10554,7 @@ func TestT0971_ForInMutBorrowedMoveOutRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "out of a borrowed container")
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
 }
 
 // Consume-arg form (`take(x)` into a `~` param) of the move-out.
@@ -10563,7 +10567,7 @@ func TestT0971_ForInBorrowedConsumeArgRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "out of a borrowed container")
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
 }
 
 // Copy elements (int) copy by value — move-out of a borrowed int[] is fine.
@@ -10591,11 +10595,12 @@ func TestT0971_ForInBorrowedStringElementMovable(t *testing.T) {
 	`)
 }
 
-// Regression: move-out of an OWNED container's element stays accepted (the
-// pre-existing, broader double-free gap is tracked by T0978, not T0971). The new
-// guard keys on the ref type, so owned containers are unaffected.
-func TestT0971_ForInOwnedMoveOutStillOK(t *testing.T) {
-	ownerOK(t, `
+// T0978: move-out of an OWNED container's element is now rejected — the guard
+// no longer keys on the ref type, so owned, plain-borrow-param, and borrowed-ref
+// containers are all covered. (T0971 deliberately left this case passing; this
+// is the broader gap T0978 closes.)
+func TestT0978_ForInOwnedMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
 		type Box { string name; }
 		test() {
 			boxes := [Box(name: "a"), Box(name: "b")];
@@ -10603,6 +10608,7 @@ func TestT0971_ForInOwnedMoveOutStillOK(t *testing.T) {
 			for x in boxes { sink.push(x); }
 		}
 	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
 }
 
 // Borrowed *map* with a non-Copy value type: moving a value binding out (the
@@ -10617,7 +10623,7 @@ func TestT0971_ForInBorrowedMapMoveOutRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "out of a borrowed container")
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
 }
 
 // Borrowed *fixed-size array* with a non-Copy element: move-out rejected.
@@ -10631,7 +10637,7 @@ func TestT0971_ForInBorrowedArrayMoveOutRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "out of a borrowed container")
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
 }
 
 // Borrowed map/array whose element IS Copy (int) stays freely movable — the
@@ -10650,6 +10656,401 @@ func TestT0971_ForInBorrowedCopyMapArrayMovable(t *testing.T) {
 		}
 		test() {}
 	`)
+}
+
+// === T0978: move-out of a for-in element binding over an OWNED or
+// plain-borrow-param container (not just a borrowed-ref one) double-frees,
+// because the binding aliases the container's element storage and the
+// container still drops every element at scope exit. The broadened guard
+// rejects move-out for all aliasing-container shapes. ===
+
+// Owned vector, push into another container — the canonical repro.
+func TestT0978_ForInOwnedVectorPushRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			boxes := [Box(name: "a"), Box(name: "b")];
+			sink := Box[]();
+			for x in boxes { sink.push(x); }
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
+}
+
+// Plain-borrow parameter (`Box[] src`, not `Box[]&`) — the element binding
+// still aliases the caller's storage, which the caller drops.
+func TestT0978_ForInPlainBorrowParamPushRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		drain(Box[] src) int {
+			sink := Box[]();
+			for x in src { sink.push(x); }
+			return sink.len;
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
+}
+
+// Var-decl form of the move-out over an owned vector.
+func TestT0978_ForInOwnedVarDeclRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			boxes := [Box(name: "a"), Box(name: "b")];
+			for x in boxes {
+				Box y = x;
+				_ = y;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
+}
+
+// Nested vector (`Box[][]`): the element binding is itself a non-Copy
+// `Box[]`, so moving it out double-frees the inner vector.
+func TestT0978_ForInNestedVectorPushRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			a := [Box(name: "a")];
+			b := [Box(name: "b")];
+			nested := [a, b];
+			sink := Box[][]();
+			for inner in nested { sink.push(inner); }
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
+}
+
+// Owned map, moving the *value* binding (second binding of `for k, v in`) out.
+func TestT0978_ForInOwnedMapValuePushRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			m := map[string, Box]();
+			m["a"] = Box(name: "a");
+			sink := Box[]();
+			for k, v in m { sink.push(v); }
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
+}
+
+// Owned map iterated as a single pair binding — the pair carries the aliased
+// value, so moving the pair out is rejected too.
+func TestT0978_ForInOwnedMapPairMoveRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			m := map[string, Box]();
+			m["a"] = Box(name: "a");
+			for pair in m {
+				y := pair;
+				_ = y;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
+}
+
+// --- Negative cases that must still type-check ---
+
+// Read-only iteration of an owned vector — no move, accepted.
+func TestT0978_ForInOwnedReadOnlyAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box { string name; }
+		test() {
+			boxes := [Box(name: "a"), Box(name: "b")];
+			n := 0;
+			for x in boxes { n = n + x.name.len; }
+			_ = n;
+		}
+	`)
+}
+
+// Passing the binding to a plain (borrow) parameter is a read, not a move —
+// accepted (the callee borrows, the container keeps ownership).
+func TestT0978_ForInOwnedBorrowCallAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box { string name; }
+		read_box(Box b) int { return b.name.len; }
+		test() {
+			boxes := [Box(name: "a"), Box(name: "b")];
+			n := 0;
+			for x in boxes { n = n + read_box(x); }
+			_ = n;
+		}
+	`)
+}
+
+// Pushing the *key* of an owned map (a string, cloned per iteration) is sound;
+// only the aliased value binding is flagged.
+func TestT0978_ForInOwnedMapKeyPushAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box { string name; }
+		test() {
+			m := map[string, Box]();
+			m["a"] = Box(name: "a");
+			keys := string[]();
+			for k, v in m { keys.push(k); }
+			_ = keys;
+		}
+	`)
+}
+
+// String elements are cloned per iteration (genForInVector dupStrings), so
+// move-out of a string element from an owned vector is sound.
+func TestT0978_ForInOwnedStringElementMovable(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			names := ["a", "b"];
+			sink := string[]();
+			for s in names { sink.push(s); }
+			_ = sink;
+		}
+	`)
+}
+
+// Copy elements (int) copy by value — move-out of an owned int[] is fine.
+func TestT0978_ForInOwnedCopyElementMovable(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			nums := [1, 2, 3];
+			sink := int[]();
+			for x in nums { sink.push(x); }
+			_ = sink;
+		}
+	`)
+}
+
+// Generic body with a bare type-parameter element is NOT flagged — the
+// ownership pass checks the generic body once with `T` unbound and never
+// re-checks monomorphized instances; flagging `T` would over-reject legitimate
+// Copy-`T` instantiations. (Concrete element types are still caught.)
+func TestT0978_ForInGenericTypeParamElementNotFlagged(t *testing.T) {
+	ownerOK(t, `
+		drain[T](T[] v) T[] {
+			sink := T[]();
+			for x in v { sink.push(x); }
+			return sink;
+		}
+		test() {}
+	`)
+}
+
+// A *borrowed* container of single-owner native handles (`Task[int][]&`, only
+// iterable since T0971) must still reject move-out — and keep the dedicated
+// single-owner message (the T0652 block now strips the ref type so it covers
+// borrowed containers too, instead of the broadened alias message). Guards the
+// regression where excluding single-owner natives from the alias set left this
+// shape unflagged.
+func TestT0978_ForInBorrowedSingleOwnerMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		worker() int { return 42; }
+		drain(Task[int][] &src) {
+			sink := Task[int][]();
+			for h in src { sink.push(h); }
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "to receive the value directly")
+}
+
+// Borrow-destructure of a for-in pair binding (`(a, b) := tup`) must still
+// type-check — codegen (T0371) gives the pieces no drop bindings, so the
+// destructure is a borrow, not a move. The carve-out skips the move check.
+func TestT0978_ForInOwnedTupleDestructureAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box { string name; }
+		test() {
+			m := map[string, Box]();
+			m["a"] = Box(name: "a");
+			n := 0;
+			for pair in m {
+				(k, b) := pair;
+				n = n + b.name.len;
+			}
+			_ = n;
+		}
+	`)
+}
+
+// The destructure is a *borrow*, so the carve-out marks each non-Copy piece
+// Borrowed — moving one out (`sink.push(b)`) must still be rejected. (Marking
+// the pieces Owned, as an earlier draft did, let the aliased value escape and
+// double-free at the map's drop.)
+func TestT0978_ForInDestructurePieceConsumeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			m := map[string, Box]();
+			m["a"] = Box(name: "a");
+			sink := Box[]();
+			for pair in m {
+				(k, b) := pair;
+				sink.push(b);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value")
+}
+
+// Re-binding a non-Copy destructure piece (`y := b`) and then moving it out is
+// also rejected: the var-decl of a Borrowed ident is caught by the T0568
+// rejectBorrowedIdentVarDecl path, so the alias cannot be laundered into an
+// Owned local.
+func TestT0978_ForInDestructurePieceRebindRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			m := map[string, Box]();
+			m["a"] = Box(name: "a");
+			for pair in m {
+				(k, b) := pair;
+				y := b;
+				_ = y;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value")
+}
+
+// String and Copy destructure pieces stay movable (forInElementAliasesContainer
+// excludes both): a `(string, int)[]` for-in whose pieces are pushed onto other
+// containers must still type-check. String elements are dup'd on store and Copy
+// elements are value copies, so neither double-frees — moving them is sound
+// (verified leak-free at runtime in tests/e2e/forin_move_out_test). Regression
+// guard for the over-rejection an all-non-Copy-Borrowed marking would cause.
+func TestT0978_ForInDestructureStringCopyPieceMovable(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			v := (string, int)[]();
+			v.push(("ab", 1));
+			strs := string[]();
+			nums := int[]();
+			for tup in v {
+				(s, n) := tup;
+				strs.push(s);
+				nums.push(n);
+			}
+			_ = strs; _ = nums;
+		}
+	`)
+}
+
+// A string destructure piece can also be *read* into a fresh string (the
+// `concat = concat + s` shape that tuples_test.pr's T0370 regression guard
+// exercises) — strings are not flagged, so the read is not mistaken for a move.
+func TestT0978_ForInDestructureStringPieceReadAllowed(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			v := (string, int)[]();
+			v.push(("ab", 1));
+			concat := "";
+			for tup in v {
+				(s, n) := tup;
+				concat = concat + s;
+				_ = n;
+			}
+			_ = concat;
+		}
+	`)
+}
+
+// `return x` is a distinct move form (ReturnStmt → tryMove) from the
+// push/var-decl/consume-arg forms above. Returning a for-in alias binding out
+// of a plain-borrow-param container escapes an alias of the caller's storage,
+// so it must be rejected too.
+func TestT0978_ForInPlainBorrowParamReturnRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		extract(Box[] src) Box {
+			for x in src { return x; }
+			return Box(name: "z");
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
+}
+
+// Owned fixed-size array (`Box[2]`) of a non-Copy, non-single-owner heap user
+// type — the for-in binding aliases the array slot, so move-out double-frees
+// at the array's drop. T0652 covers fixed arrays of single-owner natives and
+// T0971 covers borrowed arrays; this is the owned/heap-user-type T0978 case.
+func TestT0978_ForInOwnedArrayMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			Box[2] arr = [Box(name: "a"), Box(name: "b")];
+			sink := Box[]();
+			for x in arr { sink.push(x); }
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
+}
+
+// Destructure piece named `_` is skipped (the carve-out's `name == "_"`
+// branch): `(_, b) := pair` discards the key and binds only the value. The `_`
+// must not disturb the marking of the remaining pieces — `b` (a non-Copy Box)
+// still becomes Borrowed, so moving it out is rejected.
+func TestT0978_ForInDestructureWildcardPieceConsumeRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			m := map[string, Box]();
+			m["a"] = Box(name: "a");
+			sink := Box[]();
+			for pair in m {
+				(_, b) := pair;
+				sink.push(b);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed value")
+}
+
+// Companion allow case: `(_, b) := pair` then only *reading* `b` is fine — the
+// wildcard piece is skipped and the read of the Borrowed `b` is not a move.
+func TestT0978_ForInDestructureWildcardPieceReadAllowed(t *testing.T) {
+	ownerOK(t, `
+		type Box { string name; }
+		test() {
+			m := map[string, Box]();
+			m["a"] = Box(name: "a");
+			n := 0;
+			for pair in m {
+				(_, b) := pair;
+				n = n + b.name.len;
+			}
+			_ = n;
+		}
+	`)
+}
+
+// Nested for-in over DIFFERENT-named aliasing bindings: the outer `x` must stay
+// flagged across the inner loop's flag-clear (the inner loop deletes its own
+// `y` entry on exit, not `x`). Move-out of the outer `x` after the inner loop is
+// still rejected. (The same-binding-name nesting that would exercise the
+// hadPrev* save/restore branches is unreachable — Promise rejects shadowing at
+// sema, so a nested for-in can never reuse the outer binding name.)
+func TestT0978_ForInNestedDistinctBindingAliasGuardHolds(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string name; }
+		test() {
+			v1 := [Box(name: "a")];
+			v2 := [Box(name: "b")];
+			sink := Box[]();
+			for x in v1 {
+				for y in v2 {
+					n := y.name.len;
+					_ = n;
+				}
+				sink.push(x);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move for-in loop binding")
 }
 
 // === T0837: moving/consuming a single-owner handle field out of a shared

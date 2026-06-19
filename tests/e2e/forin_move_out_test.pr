@@ -1,0 +1,154 @@
+// T0978: a `for x in v` loop binding aliases the container's element storage —
+// it is NOT an owning copy. Moving the binding out (`sink.push(x)`, `y := x`,
+// `return x`) over an OWNED or plain-borrow-param container double-frees: the
+// container still drops every element (an owned container is dropped by the loop
+// itself, a borrowed one by its owner) while the destination aliases the same
+// instances. The ownership pass now rejects those moves (covered by the Go
+// ownership tests). This file is the runtime counterpart: it proves the SOUND
+// idioms — `.pop()` to take ownership out of an owned container, `.clone()` to
+// copy out of a borrow — run correctly and leak-free (the batch test infra
+// enforces zero leaks, which a double-free or under-free would trip) across
+// owned-vector, plain-borrow-param, nested `Box[][]`, and map-value shapes.
+use std as _;
+
+type Box {
+  string name `doc("A droppable string field — exercises per-element drop.");
+
+  clone(this) Box `doc("Returns an independent copy; the string field is duped on store.") {
+    return Box(name: this.name);
+  }
+}
+
+// Owned vector: take ownership of each element with `.pop()` (a real ownership
+// transfer — `.pop()` removes the slot), draining into another container. The
+// source ends empty, so each Box is dropped exactly once via `sink`.
+drain_owned_vector_via_pop() `test {
+  boxes := [Box(name: "a"), Box(name: "b"), Box(name: "c")];
+  sink := Box[]();
+  while boxes.len > 0 {
+    sink.push(boxes.pop()!);
+  }
+  assert(sink.len == 3, "drained all three");
+  assert(boxes.len == 0, "source emptied");
+  assert(sink[0].name == "c", "pop is LIFO: first out is last in");
+  assert(sink[2].name == "a", "pop is LIFO: last out is first in");
+}
+
+// Plain-borrow parameter (`Box[] src`): the caller owns the vector, so a for-in
+// binding only borrows each element. The sound way to move data out is to
+// `.clone()` each element into a fresh vector the function returns; the caller's
+// vector is untouched and stays valid.
+copy_from_borrow_param(Box[] src) Box[] {
+  sink := Box[]();
+  for x in src {
+    sink.push(x.clone());
+  }
+  return sink;
+}
+
+forin_borrow_param_clone() `test {
+  boxes := [Box(name: "x"), Box(name: "y")];
+  copies := copy_from_borrow_param(boxes);
+  assert(copies.len == 2, "copies len");
+  assert(boxes.len == 2, "original retained by caller");
+  assert(copies[0].name == "x", "copy 0");
+  assert(copies[1].name == "y", "copy 1");
+}
+
+// Read-only iteration over a borrow parameter — no move, the loop just reads.
+// The caller's vector remains valid.
+sum_name_lengths(Box[] src) int {
+  total := 0;
+  for x in src {
+    total = total + x.name.len;
+  }
+  return total;
+}
+
+forin_borrow_param_read_only() `test {
+  boxes := [Box(name: "ab"), Box(name: "cde")];
+  total := sum_name_lengths(boxes);
+  assert(total == 5, "summed name lengths");
+  assert(boxes.len == 2, "source intact");
+}
+
+// Nested vector (`Box[][]`): each element is itself a non-Copy `Box[]`. Take
+// ownership of each inner vector with `.pop()` — the inner vectors transfer to
+// sink, each dropped exactly once.
+drain_nested_vector_via_pop() `test {
+  inner_a := [Box(name: "a0"), Box(name: "a1")];
+  inner_b := [Box(name: "b0")];
+  nested := [inner_a, inner_b];
+  sink := Box[][]();
+  while nested.len > 0 {
+    sink.push(nested.pop()!);
+  }
+  assert(sink.len == 2, "two inner vectors moved");
+  assert(sink[0].len == 1, "first popped inner (LIFO) is inner_b");
+  assert(sink[0][0].name == "b0", "inner_b element");
+  assert(sink[1].len == 2, "second popped inner is inner_a");
+  assert(sink[1][1].name == "a1", "inner_a element");
+}
+
+// Map value (borrow parameter): the value binding of `for k, v in m` aliases the
+// map's value storage. Copy each value with `.clone()`; the caller's map keeps
+// ownership of the originals.
+copy_map_values(map[string, Box] src) Box[] {
+  sink := Box[]();
+  for k, v in src {
+    sink.push(v.clone());
+  }
+  return sink;
+}
+
+forin_map_value_clone() `test {
+  m := map[string, Box]();
+  m["a"] = Box(name: "a");
+  m["b"] = Box(name: "b");
+  copies := copy_map_values(m);
+  assert(copies.len == 2, "both values copied");
+  assert(m.len == 2, "map retains originals");
+}
+
+// Single-pair binding destructured into `(k, b)`: the pieces are borrows that
+// alias the map's storage, so the sound way to keep a value is `.clone()`. The
+// map keeps ownership of the originals; each clone is dropped once via sink.
+copy_map_pairs(map[string, Box] src) Box[] {
+  sink := Box[]();
+  for pair in src {
+    (k, b) := pair;
+    sink.push(b.clone());
+  }
+  return sink;
+}
+
+forin_map_pair_destructure_clone() `test {
+  m := map[string, Box]();
+  m["a"] = Box(name: "a");
+  m["b"] = Box(name: "b");
+  copies := copy_map_pairs(m);
+  assert(copies.len == 2, "both values cloned via destructure");
+  assert(m.len == 2, "map retains originals");
+}
+
+// String pieces destructured from a `(string, int)[]` for-in binding stay
+// freely movable: strings are dup'd on store, so pushing them into another
+// vector does NOT double-free (unlike a non-Copy heap user type, which the
+// ownership pass rejects). Copy pieces (the int) are plain value copies. Proves
+// the carve-out's Copy/string exclusion is sound at runtime, not just accepted.
+forin_tuple_string_piece_push() `test {
+  v := (string, int)[]();
+  v.push(("a" + "b", 1));
+  v.push(("c" + "d", 2));
+  strs := string[]();
+  total := 0;
+  for tup in v {
+    (s, n) := tup;
+    strs.push(s);
+    total += n;
+  }
+  assert(strs.len == 2, "two strings moved out");
+  assert(strs[0] == "ab", "first string content");
+  assert(strs[1] == "cd", "second string content");
+  assert(total == 3, "ints summed");
+}

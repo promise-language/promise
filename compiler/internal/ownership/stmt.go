@@ -451,6 +451,46 @@ func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 	// for non-IdentExpr/ThisExpr/MemberExpr) leaving the destructured names
 	// Owned and the parent un-borrowed → consume of the parent slips through
 	// to a runtime UAF / double-free.
+	//
+	// T0978: `for tup in v { (a, b) := tup }` is a borrow destructure — codegen
+	// (T0371) gives the pieces no drop bindings because the source ident (a for-in
+	// alias binding) has none. Routing it through tryMove(tup) would hit the
+	// broadened for-in alias guard and falsely reject the destructure itself, even
+	// when the pieces are only read. Carve it out: skip tryMove, and mark each
+	// piece per the same aliasing predicate the for-in guard uses on whole
+	// bindings (forInElementAliasesContainer). A piece that aliases droppable
+	// container storage (a non-Copy heap user type, nested container, …) is marked
+	// Borrowed so a later move/consume of it (`sink.push(b)`, `y := b`) is rejected
+	// by tryMoveConsume / rejectBorrowedIdentVarDecl. Copy pieces (value copies)
+	// and string pieces (dup'd on store, verified leak-free at runtime) stay Owned
+	// and freely movable — matching the whole-binding guard's Copy/string
+	// exclusions, so `(s, n) := tup; concat = concat + s` over a `(string, int)[]`
+	// keeps working. The single-owner set is checked defensively; in practice it
+	// never matches here because single-owner handles are not tuples, so a
+	// destructure of one fails to type-check earlier.
+	destructureSrc := unwrapDestructureParens(s.Value)
+	if id, ok := destructureSrc.(*ast.IdentExpr); ok &&
+		(c.forInAliasBindings[id.Name] || c.forInSingleOwnerBindings[id.Name]) {
+		var elems []types.Type
+		if tup, ok := c.info.Types[s.Value].(*types.Tuple); ok {
+			elems = tup.Elems()
+		}
+		for i, name := range s.Names {
+			if name == "_" {
+				continue
+			}
+			var elem types.Type
+			if i < len(elems) {
+				elem = elems[i]
+			}
+			if forInElementAliasesContainer(elem) {
+				c.state[name] = Borrowed
+			} else {
+				c.state[name] = Owned
+			}
+		}
+		return
+	}
 	switch unwrapDestructureParens(s.Value).(type) {
 	case *ast.MemberExpr, *ast.IndexExpr:
 		rootName := destructureBorrowRoot(s.Value)
@@ -1207,12 +1247,15 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	// T0652: for native Vector/Array/Map iteration whose element type is a
 	// single-owner native handle, mark the binding so moves (x := h, foo(h),
 	// use x := h, return h) are rejected — the binding aliases the slot.
+	// stripRefType so a *borrowed* such container (`Task[int][]&`, newly
+	// iterable since T0971) is covered too, keeping the dedicated single-owner
+	// message (and disjoint from the T0978 alias set, which excludes these).
 	// Save/restore for nested-loop safety (e.g., `for x in v1 { for x in v2 {} }`).
 	var prevSingleOwner bool
 	var hadPrevSingleOwner bool
 	flaggedSingleOwner := false
 	if s.Binding != "_" {
-		iterType := c.info.Types[s.Iterable]
+		iterType := stripRefType(c.info.Types[s.Iterable])
 		if elem := forInAliasingElementType(iterType); elem != nil && isSingleOwnerNativeType(elem) {
 			prevSingleOwner, hadPrevSingleOwner = c.forInSingleOwnerBindings[s.Binding]
 			c.forInSingleOwnerBindings[s.Binding] = true
@@ -1220,27 +1263,33 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 		}
 	}
 
-	// T0971: a for-in over a *borrowed* container — one whose static type is a
-	// SharedRef/MutRef (`&`/`~` parameter, `T[] &b = v` local, `.borrow` getter,
-	// if/match composition) — does not consume the container, so its owner still
-	// drops every element. The loop binding aliases that owned storage, so moving
-	// it out (`sink.push(x)`, `y := x`, `return x`, passing to a `~` param) would
-	// double-free at the owner's drop. Flag it so tryMove/tryMoveConsume reject
-	// the move. Copy elements are value copies and string elements are cloned per
-	// iteration (genForInVector dupStrings), so both stay freely movable and are
-	// not flagged. (The matching double-free for *owned* / plain-borrow-param
-	// containers — which already type-checked before T0971 — is a pre-existing,
-	// broader gap tracked separately; T0652 only narrows it to single-owner
-	// native handles.)
-	var prevBorrowedAlias bool
-	var hadPrevBorrowedAlias bool
-	flaggedBorrowedAlias := false
-	if s.Binding != "_" && iterableIsBorrowedContainer(c.info.Types[s.Iterable]) {
+	// T0971/T0978: a for-in loop binding over a native Vector/Array/Map-value
+	// container *aliases* the container's element storage (genForInVector /
+	// genForInArray / genForInMap load each slot's Value struct directly — only
+	// `string` elements are cloned via dupStrings). Whether the container is
+	// owned, a plain-borrow parameter (`T[] src`), or a borrowed ref (`T[]&` /
+	// `T[]~` / `.borrow`), its owner still drops every element at scope exit, so
+	// moving the binding out (`sink.push(x)`, `y := x`, `return x`, passing to a
+	// `~` param) would double-free. Flag it so tryMove/tryMoveConsume reject the
+	// move and direct the user to `.clone()` / `.pop()` / `.remove()`. stripRefType
+	// is an identity for owned/plain-borrow Instances and peels SharedRef/MutRef
+	// for the borrowed-ref case, so one rule covers all three. The
+	// movable/aliasing decision (Copy, string, and bare-TypeParam exclusions) lives
+	// in forInElementAliasesContainer, shared with the destructure carve-out;
+	// single-owner native handles keep the dedicated T0652 message (excluded here
+	// so the two flag sets stay disjoint).
+	var prevAlias bool
+	var hadPrevAlias bool
+	flaggedAlias := false
+	if s.Binding != "_" {
 		elem := forInAliasingElementType(stripRefType(c.info.Types[s.Iterable]))
-		if elem != nil && !isCopyType(elem) && extractNamedType(elem) != types.TypString {
-			prevBorrowedAlias, hadPrevBorrowedAlias = c.forInBorrowedAliasBindings[s.Binding]
-			c.forInBorrowedAliasBindings[s.Binding] = true
-			flaggedBorrowedAlias = true
+		// Single-owner native handles are routed to forInSingleOwnerBindings above
+		// (T0652) for their dedicated message, so exclude them here to keep the two
+		// flag sets disjoint.
+		if forInElementAliasesContainer(elem) && !isSingleOwnerNativeType(elem) {
+			prevAlias, hadPrevAlias = c.forInAliasBindings[s.Binding]
+			c.forInAliasBindings[s.Binding] = true
+			flaggedAlias = true
 		}
 	}
 
@@ -1257,31 +1306,41 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 			delete(c.forInSingleOwnerBindings, s.Binding)
 		}
 	}
-	if flaggedBorrowedAlias {
-		if hadPrevBorrowedAlias {
-			c.forInBorrowedAliasBindings[s.Binding] = prevBorrowedAlias
+	if flaggedAlias {
+		if hadPrevAlias {
+			c.forInAliasBindings[s.Binding] = prevAlias
 		} else {
-			delete(c.forInBorrowedAliasBindings, s.Binding)
+			delete(c.forInAliasBindings, s.Binding)
 		}
 	}
 }
 
-// iterableIsBorrowedContainer reports whether a for-in iterable's static type is
-// a borrow (SharedRef/MutRef). Such an iterable — an `&`/`~` parameter, a
-// `T[] &b = v` local, a `.borrow` getter result, or an if/match composition that
-// preserves the borrow type — is never consumed by the loop (refs are Copy, so
-// tryMove is a no-op on it), so its container's owner still drops every element.
-// Iterating it was rejected at sema before T0971 ("cannot iterate over type
-// T[]&"); now that it is allowed, moving an aliasing element binding out would
-// double-free, so the binding is flagged. Plain-borrow-param (`T[] src`) and
-// owned-container iteration are NOT ref-typed and already type-checked before
-// T0971, so their (pre-existing) move-out gap is out of scope here.
-func iterableIsBorrowedContainer(typ types.Type) bool {
-	switch typ.(type) {
-	case *types.SharedRef, *types.MutRef:
-		return true
+// forInElementAliasesContainer reports whether a for-in element type (or a
+// destructured piece of one) aliases the container's droppable storage such that
+// moving the binding out would double-free at the container's drop. True for
+// non-Copy heap user types, nested containers, Maps/Sets-as-elements, etc.
+// (T0978). False — i.e. freely movable — for:
+//   - nil (no aliasing element shape).
+//   - Copy elements: value copies, independent of the container.
+//   - string elements: dup'd on store (genForInVector dupStrings / push-time
+//     string dup), verified leak/double-free-free at runtime.
+//   - bare TypeParam elements: the ownership pass checks each generic body once
+//     with `T` unbound and never re-checks monomorphized instances, so flagging
+//     `T` would over-reject legitimate Copy-`T` instantiations (concrete element
+//     types are still caught).
+//
+// Note: single-owner native handles (Mutex/MutexGuard/Task) ARE aliasing and
+// return true here; the whole-binding for-in guard additionally routes them to
+// the dedicated forInSingleOwnerBindings set (T0652) for a tailored message, but
+// a single-owner *destructured piece* relies on this predicate to be flagged.
+func forInElementAliasesContainer(elem types.Type) bool {
+	if elem == nil {
+		return false
 	}
-	return false
+	if _, isTypeParam := elem.(*types.TypeParam); isTypeParam {
+		return false
+	}
+	return !isCopyType(elem) && extractNamedType(elem) != types.TypString
 }
 
 // stripRefType peels one borrow layer (MutRef/SharedRef) and returns the

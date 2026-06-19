@@ -234,6 +234,18 @@ type Info struct {
 	// Used by codegen to extract fields into bindings in the then-block.
 	IsDestructureNarrowings map[*ast.IfStmt]*IsDestructureNarrowing
 
+	// IsNarrowings maps if-statement nodes to non-destructive is-pattern narrowing
+	// info (`if x is T { ... }`). For the class case codegen needs no special path
+	// (the shadow Var recorded in sema makes member/method access resolve against
+	// the subtype over the uniform value representation); the enum case is consumed
+	// via NarrowedVariantField. T0993.
+	IsNarrowings map[*ast.IfStmt]*IsNarrowing
+
+	// NarrowedVariantField maps a member-access node (`x.field`) to the enum
+	// variant-data field it reads, when `x` was narrowed via `if x is Variant`.
+	// Codegen emits a variant-data GEP+load. T0993.
+	NarrowedVariantField map[*ast.MemberExpr]*VariantFieldAccess
+
 	// FailableExprs records expressions whose evaluation can produce an error
 	// (failable function/method calls, failable constructor calls). Used by
 	// error operators (?, !, ? handler) to validate their inner expression.
@@ -375,6 +387,33 @@ type IsDestructureNarrowing struct {
 	IsEnum      bool                   // true if checking an enum variant
 	VariantName string                 // for enums: the variant name
 	TargetType  types.Type             // the target type (Named or Instance)
+}
+
+// IsNarrowing records that an if-statement's condition is a non-destructive
+// is-pattern (`if x is T { ... }`) that narrows the subject variable `x` to the
+// tested subtype/variant `T` for the then-block. Classes and enums share this
+// single record (T0993); IsEnum selects the branch. The class case shadows the
+// subject with a Var of the subtype (no codegen narrowing record needed — the
+// value representation is uniform). The enum case exposes the variant's named
+// payload members via NarrowedVariantField for codegen variant-data reads.
+type IsNarrowing struct {
+	SubjectName string                          // the variable being narrowed (always an IdentExpr)
+	IsEnum      bool                            // false: class subtype; true: enum variant
+	NarrowType  types.Type                      // class case: the subtype Named/Instance to shadow with
+	Enum        *types.Enum                     // enum case: the enum origin
+	Variant     *types.Variant                  // enum case: the matched variant
+	Subst       map[*types.TypeParam]types.Type // enum case: generic substitution (nil if non-generic)
+	TargetType  types.Type                      // enum case: the subject's enum type (Enum or Instance)
+}
+
+// VariantFieldAccess records that a member access (`x.field`) reads a named
+// payload field of an enum variant the subject was narrowed to via `if x is V`
+// (T0993). Codegen uses it to emit a variant-data GEP+load.
+type VariantFieldAccess struct {
+	TargetType  types.Type // the enum type (Enum or Instance)
+	VariantName string     // the variant whose data layout to use
+	FieldIndex  int        // index of the field within the variant payload
+	FieldType   types.Type // resolved field type (substitution applied)
 }
 
 // recordType stores the resolved type for an expression.

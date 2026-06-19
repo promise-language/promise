@@ -1,0 +1,129 @@
+// T0993: non-destructive `if x is Variant { x.namedField }` narrows an enum
+// value to the variant and exposes its named payload members directly — the
+// same narrowing operation as the class-subtype case, at discriminant
+// granularity. The `is V(a, b)` destructure form remains for positional payloads.
+enum Shape {
+  Circle(f64 radius),
+  Rectangle(f64 width, f64 height),
+}
+
+// Named payload field exposed directly after narrowing.
+enum_named_field() `test {
+  Shape s = Shape.Circle(radius: 5.0);
+  if s is Circle {
+    assert(s.radius == 5.0, "named field");
+  }
+}
+
+// Multiple named fields of a variant.
+enum_multi_field() `test {
+  Shape s = Shape.Rectangle(width: 3.0, height: 4.0);
+  if s is Rectangle {
+    assert(s.width == 3.0, "width");
+    assert(s.height == 4.0, "height");
+  }
+}
+
+// `&&` propagation over a narrowed enum field.
+enum_and_propagation() `test {
+  Shape s = Shape.Circle(radius: 7.0);
+  entered := false;
+  if s is Circle && s.radius > 2.0 {
+    entered = true;
+    assert(s.radius == 7.0, "and rhs narrowed");
+  }
+  assert(entered, "and true");
+}
+
+// Negative: a non-matching variant skips the block.
+enum_negative() `test {
+  Shape s = Shape.Rectangle(width: 1.0, height: 2.0);
+  hit := false;
+  if s is Circle {
+    hit = true;
+  }
+  assert(!hit, "negative skip");
+}
+
+// String payload — non-destructive read is a borrow; no leak / double-free.
+enum Msg {
+  Text(string body),
+  Code(int n),
+}
+
+make_msg(string a, string b) Msg {
+  return Msg.Text(body: a + b);
+}
+
+enum_string_borrow() `test {
+  Msg m = make_msg("foo", "bar");
+  if m is Text {
+    assert(m.body == "foobar", "string payload borrow");
+    b := m.body;
+    assert(b.len == 6, "bound copy");
+  }
+}
+
+// The destructure form still works alongside non-destructive narrowing.
+enum_destructure_still_works() `test {
+  Msg m = make_msg("hi", "there");
+  if m is Text(body) {
+    assert(body == "hithere", "destructure binding");
+  }
+}
+
+// A common enum getter/method accessed inside a narrowed block falls through
+// the variant-field lookup to the normal enum member resolution (the field
+// `radius` is variant-specific, `tag_name` is a common getter).
+enum Tagged {
+  Circle(f64 radius),
+  Rect(f64 w, f64 h),
+
+  get tag_name string => match this {
+    Circle(_) => "c",
+    Rect(_, _) => "r",
+  };
+}
+enum_common_member_fallthrough() `test {
+  Tagged s = Tagged.Circle(radius: 5.0);
+  if s is Circle {
+    assert(s.radius == 5.0, "variant field");
+    assert(s.tag_name == "c", "common getter falls through narrowing");
+  }
+}
+
+// Generic enum narrowing: the variant's named payload field type is the
+// substituted concrete type (int / string) — exercises the Subst + typeSubst
+// path in detection and codegen.
+enum Opt[T] {
+  Some(T val),
+  None,
+}
+enum_generic_int_narrow() `test {
+  Opt[int] o = Opt[int].Some(val: 42);
+  if o is Some {
+    assert(o.val == 42, "generic int payload");
+  }
+}
+enum_generic_and_propagation() `test {
+  Opt[int] o = Opt[int].Some(val: 10);
+  entered := false;
+  if o is Some && o.val > 3 {
+    entered = true;
+    assert(o.val == 10, "generic && rhs narrowed");
+  }
+  assert(entered, "generic and true");
+}
+// Generic enum with a heap (string) payload — non-destructive read is a borrow;
+// zero-leak enforcement covers cleanup.
+make_opt(string a, string b) Opt[string] {
+  return Opt[string].Some(val: a + b);
+}
+enum_generic_string_borrow() `test {
+  Opt[string] o = make_opt("ab", "cd");
+  if o is Some {
+    assert(o.val == "abcd", "generic string payload borrow");
+    v := o.val;
+    assert(v.len == 4, "bound copy");
+  }
+}

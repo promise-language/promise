@@ -348,7 +348,15 @@ if animal is Dog { animal.breed; }   // narrowed
 Dog? dog = animal as Dog;            // safe cast (returns optional)
 Dog dog = animal as! Dog;            // forced cast (panics on failure)
 
-// Destructure is-patterns (enum variants and named types)
+// Non-destructive variant narrowing: `is Variant` exposes the variant's NAMED
+// payload members directly (a borrow — the value stays intact). Same narrowing
+// as the class-subtype case above.
+if shape is Circle {
+  print_line("radius: {shape.radius}");  // shape narrowed to the Circle variant
+}
+
+// Destructure is-patterns (enum variants and named types) — bind fields to
+// fresh names. Required for variants with positional (unnamed) payloads.
 if shape is Circle(r) {
   print_line("radius: {r}");        // r is bound from Circle's field
 }
@@ -358,6 +366,14 @@ if opt is Some(val) {
 if animal is Dog(name, breed) {
   print_line("{name} is a {breed}");  // named type field extraction
 }
+
+// match dispatches type-patterns on the runtime subtype (RTTI), binding the
+// narrowed subtype to a name:
+string label = match shape {
+  Circle c => "circle r={c.r}",
+  Square s => "square s={s.s}",
+  _ => "other",
+};
 ```
 
 ## Ownership & Borrowing

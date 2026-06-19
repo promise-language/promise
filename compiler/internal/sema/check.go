@@ -38,6 +38,7 @@ type Checker struct {
 	moduleScopes       map[string]*types.Scope // pre-loaded module scopes (catalog name or path → scope)
 	target             TargetInfo              // compile target for `target(cond)` filtering (zero = no filtering)
 	pendingNarrowings  []NarrowedVar           // post-divergence narrowings to apply before next statement
+	narrowedVariants   map[string]*IsNarrowing // T0993: enum subjects narrowed to a variant in the current scope (var name → narrowing); save/restore around narrowed if-blocks
 }
 
 // selfType returns the current type as Self would resolve:
@@ -104,6 +105,8 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 			LambdaCaptures:           make(map[*ast.LambdaExpr][]*CapturedVar),
 			OptionalNarrowings:       make(map[*ast.IfStmt]*OptionalNarrowing),
 			IsDestructureNarrowings:  make(map[*ast.IfStmt]*IsDestructureNarrowing),
+			IsNarrowings:             make(map[*ast.IfStmt]*IsNarrowing),
+			NarrowedVariantField:     make(map[*ast.MemberExpr]*VariantFieldAccess),
 			IsPatternTypes:           make(map[ast.IsPattern]types.Type),
 			ErrorHandlerTypes:        make(map[*ast.ErrorHandlerExpr]types.Type),
 			FailableExprs:            make(map[ast.Expr]bool),
@@ -191,6 +194,8 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 			LambdaCaptures:           make(map[*ast.LambdaExpr][]*CapturedVar),
 			OptionalNarrowings:       make(map[*ast.IfStmt]*OptionalNarrowing),
 			IsDestructureNarrowings:  make(map[*ast.IfStmt]*IsDestructureNarrowing),
+			IsNarrowings:             make(map[*ast.IfStmt]*IsNarrowing),
+			NarrowedVariantField:     make(map[*ast.MemberExpr]*VariantFieldAccess),
 			IsPatternTypes:           make(map[ast.IsPattern]types.Type),
 			ErrorHandlerTypes:        make(map[*ast.ErrorHandlerExpr]types.Type),
 			FailableExprs:            make(map[ast.Expr]bool),

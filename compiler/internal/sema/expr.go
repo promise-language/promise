@@ -1295,6 +1295,33 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 	return types.TypVoid
 }
 
+// resolveNarrowedVariantField resolves a member access against the named payload
+// fields of the variant the subject was narrowed to via `if x is Variant`
+// (T0993). On a match it records a VariantFieldAccess for codegen and returns
+// the field type. Positional (unnamed) payload fields are not exposed (they
+// require the `is V(a, b)` destructure form), and a non-matching field returns
+// false so the caller falls through to common enum getter/method lookup.
+func (c *Checker) resolveNarrowedVariantField(e *ast.MemberExpr, n *IsNarrowing) (types.Type, bool) {
+	for i, f := range n.Variant.Fields() {
+		if f.Name() == "" || f.Name() != e.Field {
+			continue
+		}
+		ft := f.Type()
+		if n.Subst != nil {
+			ft = types.Substitute(ft, n.Subst)
+		}
+		c.info.NarrowedVariantField[e] = &VariantFieldAccess{
+			TargetType:  n.TargetType,
+			VariantName: n.Variant.Name(),
+			FieldIndex:  i,
+			FieldType:   ft,
+		}
+		c.recordType(e, ft)
+		return ft, true
+	}
+	return nil, false
+}
+
 func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	// Handle module-qualified access: mod.symbol
 	if ident, ok := e.Target.(*ast.IdentExpr); ok {
@@ -1323,6 +1350,18 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	}
 	if ref, ok := target.(*types.SharedRef); ok {
 		target = ref.Elem()
+	}
+
+	// T0993: non-destructive enum narrowing — `if x is Variant { x.namedField }`.
+	// When x was narrowed to a variant in the current scope, resolve the member
+	// against the variant's named payload fields. A non-field member (common enum
+	// getter/method) falls through to the normal lookup below.
+	if ident, ok := e.Target.(*ast.IdentExpr); ok {
+		if n := c.narrowedVariants[ident.Name]; n != nil {
+			if ft, ok := c.resolveNarrowedVariantField(e, n); ok {
+				return ft
+			}
+		}
 	}
 
 	switch t := target.(type) {
@@ -3071,10 +3110,33 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subject ast.Expr, subj
 		}
 
 	case *ast.TypeBindingMatchPattern:
+		// Reject type-binding arms over an enum subject: genEnumMatch dispatches on
+		// the tag (not RTTI), so such an arm would be a silent dead arm. Enum
+		// matches use variant patterns (Variant or Variant(fields)). T0993.
+		if subjectType != nil {
+			if en := extractEnum(subjectType); en != nil {
+				c.errorf(p.Pos(), "match type-pattern %s is not valid over enum %s; use a variant pattern (Variant or Variant(fields))",
+					p.TypeName, en.Obj().Name())
+				return
+			}
+		}
 		obj := c.lookup(p.TypeName)
 		if obj == nil {
 			c.errorf(p.Pos(), "undefined type: %s", p.TypeName)
 			c.suggestForUndefinedType(p.Pos(), p.TypeName)
+			return
+		}
+		// T0993: a class type-pattern arm dispatches on the runtime subtype via
+		// RTTI; the bound type must be a subtype of the match subject, otherwise
+		// the arm can never match (a silent dead arm). Validate the is-relation.
+		if tn, ok := obj.(*types.TypeName); ok && subjectType != nil {
+			if patNamed, ok := tn.Type().(*types.Named); ok {
+				if subjNamed := namedOfType(subjectType); subjNamed != nil {
+					if !patNamed.InheritsFrom(subjNamed) && !subjNamed.InheritsFrom(patNamed) {
+						c.errorf(p.Pos(), "match type-pattern %s is unrelated to subject type %s", p.TypeName, subjNamed.Obj().Name())
+					}
+				}
+			}
 		}
 
 	case *ast.ShortDestructureMatchPattern:

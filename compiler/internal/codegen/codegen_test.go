@@ -28384,3 +28384,87 @@ func TestT0745ThisIndexValueType(t *testing.T) {
 		t.Fatal("expected T0745VPair.first in IR")
 	}
 }
+
+// T0993: a class `match { Circle c => }` type-pattern arm must dispatch on the
+// runtime subtype via the promise_type_is RTTI machinery — not emit nothing and
+// silently fall through to the wildcard (the merged T0992 miscompilation).
+func TestMatchTypePatternEmitsRTTI(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { area(this) f64 => 0.0; }
+		type Circle is Shape { f64 r; }
+		type Square is Shape { f64 s; }
+		describe(Shape sh) string {
+			return match sh {
+				Circle c => "circle",
+				Square q => "square",
+				_ => "other",
+			};
+		}
+		main() { Shape s = Circle(r: 1.0); d := describe(s); print_line(d); }
+	`)
+	// Each class type-pattern arm lowers to an RTTI subtype check (Circle + Square).
+	if n := strings.Count(ir, "call i32 @promise_type_is"); n < 2 {
+		t.Errorf("expected >=2 promise_type_is calls for type-pattern arms, got %d\n%s", n, ir)
+	}
+}
+
+// T0993: a class type-pattern arm whose runtime type is the tested subtype must
+// not be a no-op — the arm body's value must reach the match result.
+func TestMatchTypePatternBindsSubtype(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape { area(this) f64 => 0.0; }
+		type Circle is Shape { f64 r; area(this) f64 => this.r; }
+		describe(Shape sh) f64 {
+			return match sh {
+				Circle c => c.r,
+				_ => -1.0,
+			};
+		}
+		main() { Shape s = Circle(r: 2.0); d := describe(s); }
+	`)
+	assertContains(t, ir, "call i32 @promise_type_is")
+}
+
+// T0993: a non-destructive enum variant narrowing (`if x is V { x.named }`)
+// reads the named payload via a variant-data GEP+load. The function must
+// compile (no codegen panic) and the field value must be produced.
+func TestEnumNarrowVariantFieldRead(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Rectangle(f64 width, f64 height) }
+		main() {
+			Shape s = Shape.Circle(radius: 5.0);
+			f64 out = 0.0;
+			if s is Circle {
+				out = s.radius;
+			}
+		}
+	`)
+	// The narrowed read lowers to a variant-data field load of a double.
+	assertContains(t, ir, "load double")
+	assertContains(t, ir, "getelementptr")
+}
+
+// T0993: `match this { Subtype c => }` over a class hierarchy. genThisExpr
+// returns the raw i8* instance pointer; genValueMatch must normalize it into the
+// {vtable, instance} value struct before the type-pattern arm extracts the
+// instance for RTTI — otherwise it emits `extractvalue` on an i8* (invalid IR
+// that fails `opt`). This guards that normalization.
+func TestMatchTypePatternThisReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape {
+			describe(this) string => match this {
+				Circle c => "circle",
+				Square s => "square",
+				_ => "other",
+			};
+		}
+		type Circle is Shape { f64 r; }
+		type Square is Shape { f64 s; }
+		main() { Shape a = Circle(r: 1.0); d := a.describe(); }
+	`)
+	assertContains(t, ir, "call i32 @promise_type_is")
+	// No extractvalue on an i8* — the subject was wrapped into a value struct.
+	if strings.Contains(ir, "extractvalue i8* ") {
+		t.Errorf("expected no extractvalue on i8* (this subject must be normalized)\n%s", ir)
+	}
+}

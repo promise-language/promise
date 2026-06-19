@@ -1,0 +1,121 @@
+// T0993 (merged from T0992): `match { T c => }` type-pattern arms dispatch on
+// the runtime subtype via RTTI — they must NOT silently fall through to `_`.
+type Shape {
+  area(this) f64 => 0.0;
+  // `match this` over the hierarchy: the `this` receiver (a raw instance
+  // pointer) is normalized to the value struct before RTTI dispatch.
+  describe_self(this) string => match this {
+    Circle c => "circle",
+    Square s => "square",
+    _ => "other",
+  };
+}
+type Circle is Shape {
+  f64 r;
+  area(this) f64 => 3.14 * this.r * this.r;
+}
+type Square is Shape {
+  f64 s;
+  area(this) f64 => this.s * this.s;
+}
+type Triangle is Shape {
+  f64 base;
+  f64 height;
+}
+
+describe(Shape sh) string {
+  return match sh {
+    Circle c => "circle",
+    Square s => "square",
+    _ => "other",
+  };
+}
+
+// Repro B: the type-pattern arms fire on the runtime subtype (not "other").
+match_dispatch() `test {
+  Shape a = Circle(r: 2.0);
+  Shape b = Square(s: 3.0);
+  Shape c = Triangle(base: 1.0, height: 2.0);
+  assert(describe(a) == "circle", "circle arm");
+  assert(describe(b) == "square", "square arm");
+  assert(describe(c) == "other", "wildcard fallthrough");
+}
+
+// The bound name is the narrowed subtype — its subtype members are accessible.
+classify(Shape sh) f64 {
+  return match sh {
+    Circle c => c.r,
+    Square s => s.s,
+    _ => -1.0,
+  };
+}
+match_binding_narrowed() `test {
+  Shape a = Circle(r: 5.0);
+  Shape b = Square(s: 9.0);
+  assert(classify(a) == 5.0, "circle field");
+  assert(classify(b) == 9.0, "square field");
+}
+
+// Guarded type-pattern arm: the RTTI match AND the guard must both hold. When
+// the guard fails, control falls to the next arm (here: the wildcard).
+guarded(Shape sh) string {
+  return match sh {
+    Circle c if c.r > 10.0 => "big-circle",
+    Circle c => "small-circle",
+    _ => "other",
+  };
+}
+match_guarded_type_pattern() `test {
+  Shape big = Circle(r: 20.0);
+  Shape small = Circle(r: 1.0);
+  Shape sq = Square(s: 5.0);
+  assert(guarded(big) == "big-circle", "guard true");
+  assert(guarded(small) == "small-circle", "guard false -> next arm");
+  assert(guarded(sq) == "other", "wildcard");
+}
+
+match_this_receiver() `test {
+  Shape a = Circle(r: 2.0);
+  Shape b = Square(s: 3.0);
+  Shape c = Triangle(base: 1.0, height: 2.0);
+  assert(a.describe_self() == "circle", "this circle");
+  assert(b.describe_self() == "square", "this square");
+  assert(c.describe_self() == "other", "this wildcard");
+}
+
+// A type-pattern arm with a BLOCK body and a `_` (discard) binding. The discard
+// binding skips the alloca/shadow path; the block body returns via its tail.
+classify_block(Shape sh) f64 {
+  return match sh {
+    Circle _ => {
+      1.0
+    },
+    Square s => {
+      s.s
+    },
+    _ => {
+      -1.0
+    },
+  };
+}
+match_block_body_and_discard() `test {
+  Shape a = Circle(r: 2.0);
+  Shape b = Square(s: 8.0);
+  Shape c = Triangle(base: 1.0, height: 1.0);
+  assert(classify_block(a) == 1.0, "discard-binding block arm");
+  assert(classify_block(b) == 8.0, "named-binding block arm");
+  assert(classify_block(c) == -1.0, "wildcard block arm");
+}
+
+// A type-pattern whose type is a SUPERtype of the subject (widening) always
+// matches — the RTTI `is` check holds for the declared base of any subtype.
+widen(Circle c) string {
+  return match c {
+    Shape s => "shape",
+    _ => "other",
+  };
+}
+match_widen_to_supertype() `test {
+  Circle c = Circle(r: 3.0);
+  assert(widen(c) == "shape", "widening type-pattern matches base");
+}

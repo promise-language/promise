@@ -1,0 +1,130 @@
+// T0993: non-destructive `if x is T { x.member }` narrows the subject variable
+// `x` to the tested class subtype for the then-block (member access + method
+// calls), propagates across `&&`, and does NOT narrow the else branch.
+type Shape {
+  int x;
+  base_kind(this) string => "shape";
+}
+type Circle is Shape {
+  int r;
+  area(this) int => this.r * this.r;
+}
+type Square is Shape {
+  int s;
+}
+
+// Repro A: subtype-specific field access compiles and reads correctly.
+narrow_field() `test {
+  Shape s = Circle(x: 1, r: 5);
+  if s is Circle {
+    assert(s.r == 5, "field access");
+  }
+}
+
+// Subtype-specific method and inherited base method both dispatch.
+narrow_methods() `test {
+  Shape s = Circle(x: 1, r: 4);
+  if s is Circle {
+    assert(s.area() == 16, "subtype method");
+    assert(s.base_kind() == "shape", "base method");
+  }
+}
+
+// Narrowing propagates within the condition after `&&`.
+narrow_and_propagation() `test {
+  Shape s = Circle(x: 1, r: 5);
+  entered := false;
+  if s is Circle && s.r > 3 {
+    entered = true;
+    assert(s.r == 5, "and rhs narrowed");
+  }
+  assert(entered, "and true");
+
+  skipped := false;
+  if s is Circle && s.r > 100 {
+    skipped = true;
+  }
+  assert(!skipped, "and false guard");
+}
+
+// The else branch does NOT narrow — only base members are usable there.
+else_does_not_narrow() `test {
+  Shape s = Square(x: 2, s: 9);
+  kind := "";
+  if s is Circle {
+    kind = "circle";
+  } else {
+    kind = s.base_kind();
+  }
+  assert(kind == "shape", "else uses base type");
+}
+
+// Negative: a non-matching runtime subtype skips the block.
+narrow_negative() `test {
+  Shape s = Square(x: 1, s: 4);
+  hit := false;
+  if s is Circle {
+    hit = true;
+  }
+  assert(!hit, "negative skip");
+}
+
+// Nested narrowing of independent subjects.
+narrow_nested() `test {
+  Shape a = Circle(x: 1, r: 3);
+  Shape b = Circle(x: 2, r: 7);
+  total := 0;
+  if a is Circle {
+    if b is Circle {
+      total = a.r + b.r;
+    }
+  }
+  assert(total == 10, "nested narrow");
+}
+
+// Droppable (string) subtype field read inside a narrowed block — no leak,
+// no double-free (zero-leak enforcement covers this).
+type Animal {
+  string name;
+}
+type Dog is Animal {
+  string breed;
+}
+
+make_dog(~string a, ~string b) Dog {
+  return Dog(name: a, breed: b);
+}
+
+narrow_string_field() `test {
+  Animal a = make_dog("Rex", "La" + "b");
+  if a is Dog {
+    b := a.breed;
+    assert(b == "Lab", "string field borrow");
+  }
+}
+
+// `is` against the IDENTICAL declared type is a no-op narrowing — it must still
+// compile as a plain bool condition (falls through the narrow detector).
+narrow_identity_noop() `test {
+  Shape s = Circle(x: 7, r: 3);
+  hit := false;
+  if s is Shape {
+    hit = true;
+    assert(s.x == 7, "base field still usable");
+  }
+  assert(hit, "identity is matches");
+}
+
+// `is` on a non-identifier subject (a field access, not a plain variable) is
+// not narrowable in place — it must still type-check as a plain bool condition.
+type Garage {
+  Shape vehicle;
+}
+narrow_non_ident_subject() `test {
+  Garage g = Garage(vehicle: Circle(x: 1, r: 9));
+  hit := false;
+  if g.vehicle is Circle {
+    hit = true;
+  }
+  assert(hit, "non-ident is condition works");
+}

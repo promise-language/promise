@@ -119,6 +119,20 @@ func (c *Checker) matchIsExhaustive(e *ast.MatchExpr, subjectType types.Type) bo
 	return true
 }
 
+// namedOfType returns the underlying Named from a type, handling both a direct
+// *Named and an *Instance wrapping a Named origin. Returns nil otherwise.
+func namedOfType(typ types.Type) *types.Named {
+	switch t := typ.(type) {
+	case *types.Named:
+		return t
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			return n
+		}
+	}
+	return nil
+}
+
 // extractEnum returns the underlying Enum from a type, handling both
 // direct *Enum and *Instance wrapping an Enum origin.
 func extractEnum(typ types.Type) *types.Enum {

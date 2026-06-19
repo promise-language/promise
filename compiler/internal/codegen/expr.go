@@ -3385,6 +3385,12 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 
 // genMemberExpr generates a field access on a user type instance or an enum variant value.
 func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
+	// T0993: non-destructive enum variant field read — `if x is V { x.namedField }`.
+	// Sema recorded the variant + field index; emit a variant-data GEP+load.
+	if access := c.info.NarrowedVariantField[e]; access != nil {
+		return c.genNarrowedVariantField(e, access)
+	}
+
 	// Module-level getter: mod.property → call getter function with no args.
 	// Guard: only intercept when sema resolved this as a getter (non-Signature type).
 	// A Signature type means it's a function reference (e.g., auto f = mod.func),
@@ -7150,6 +7156,31 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 
 	named := extractNamed(subjectType)
 
+	// T0993: normalize a `this`-style heap receiver into the value struct
+	// {vtable, instance} for RTTI type-pattern dispatch. genThisExpr returns the
+	// raw i8* instance pointer for heap types, but a type-pattern arm (RTTI
+	// extraction, name binding, member access on the bound name) expects the
+	// uniform value representation. Without this, `match this { Subtype c => }`
+	// would emit an `extractvalue` on an i8* and produce invalid IR. Guarded to
+	// only fire when a type-pattern arm is actually present, so native-comparison
+	// subjects (strings/primitives, also i8*) and value types are left untouched.
+	hasTypePattern := false
+	for _, arm := range e.Arms {
+		if _, ok := arm.Pattern.(*ast.TypeBindingMatchPattern); ok {
+			hasTypePattern = true
+			break
+		}
+	}
+	if _, isPtr := subject.Type().(*irtypes.PointerType); isPtr && hasTypePattern && named != nil && !named.IsValueType() {
+		if layout := c.lookupTypeLayout(subjectType); layout != nil && layout.Value != nil {
+			vst := layout.Value.LLVMType
+			vtable := c.loadVtablePtrFromInstance(subject)
+			instPtr := c.block.NewBitCast(subject, vst.Fields[1])
+			vs := c.block.NewInsertValue(constant.NewUndef(vst), vtable, 0)
+			subject = c.block.NewInsertValue(vs, instPtr, 1)
+		}
+	}
+
 	var arms []matchArmInfo
 
 	for i, arm := range e.Arms {
@@ -7195,6 +7226,73 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				c.block.NewBr(mergeBlock)
 			}
 			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
+
+			c.block = nextBlock
+
+		case *ast.TypeBindingMatchPattern:
+			// T0993: class type-pattern arm — dispatch on the runtime subtype via
+			// RTTI (the SAME promise_type_is machinery as `is`/`as!`), NOT an exact
+			// type-id comparison. Without this case the arm emitted nothing and
+			// control silently fell through to `_` (the merged T0992 miscompilation).
+			targetNamed := c.lookupNamedType(p.TypeName)
+			if targetNamed == nil {
+				panic(fmt.Sprintf("codegen: undefined type %s in match type-pattern", p.TypeName))
+			}
+			targetID := c.assignTypeID(targetNamed)
+			instance := c.instancePtrForRTTI(subject, subjectType)
+			variantPtr := c.loadVariantPtr(instance)
+			result := c.block.NewCall(c.funcs["promise_type_is"],
+				variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
+			cond := c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+
+			armBlock := c.newBlock(fmt.Sprintf("match.arm%d", i))
+			nextBlock := c.newBlock(fmt.Sprintf("match.next%d", i))
+			c.block.NewCondBr(cond, armBlock, nextBlock)
+
+			c.block = armBlock
+			// Bind the narrowed view. The value representation is uniform
+			// ({vtable, instance}); sema bound the name to the subtype, so member
+			// access inside the arm resolves against the subtype layout.
+			var savedBinding *ir.InstAlloca
+			var hadBinding bool
+			if p.Binding != "_" {
+				lt := subject.Type()
+				alloca := c.createEntryAlloca(lt)
+				alloca.SetName(c.uniqueLocalName(p.Binding))
+				c.block.NewStore(subject, alloca)
+				savedBinding, hadBinding = c.locals[p.Binding]
+				c.locals[p.Binding] = alloca
+			}
+
+			// Optional guard: RTTI match AND guard must both hold.
+			if arm.Guard != nil {
+				guardVal := c.genExpr(arm.Guard)
+				guardArmBlock := c.newBlock(fmt.Sprintf("match.arm%d.guard", i))
+				c.block.NewCondBr(guardVal, guardArmBlock, nextBlock)
+				c.block = guardArmBlock
+			}
+
+			var armVal value.Value
+			if arm.Body != nil {
+				armVal = c.genExpr(arm.Body)
+			} else if arm.Block != nil {
+				armVal = c.genBlockValue(arm.Block)
+			}
+			c.claimStringTemp(armVal) // T0073
+			armEnd := c.block
+			if c.block.Term == nil {
+				c.block.NewBr(mergeBlock)
+			}
+			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
+
+			// Restore any shadowed binding so later arms / merge don't see it.
+			if p.Binding != "_" {
+				if hadBinding {
+					c.locals[p.Binding] = savedBinding
+				} else {
+					delete(c.locals, p.Binding)
+				}
+			}
 
 			c.block = nextBlock
 
@@ -11369,6 +11467,47 @@ func (c *Compiler) genIsOptionalType(expr ast.Expr, typeName string, opt *types.
 	c.block = mergeBlock
 	phi := c.block.NewPhi(ir.NewIncoming(rttiResult, thenExit), ir.NewIncoming(constant.NewInt(irtypes.I1, 0), elseExit))
 	return phi
+}
+
+// genNarrowedVariantField reads a named payload field of an enum value that was
+// narrowed to a variant via `if x is Variant` (T0993). Mirrors the field-extract
+// logic in bindIsDestructureEnum but for a single, non-destructive read: the
+// subject is left intact (this is a borrow), so no drop flag / dup is involved.
+func (c *Compiler) genNarrowedVariantField(e *ast.MemberExpr, access *sema.VariantFieldAccess) value.Value {
+	subject := c.genExpr(e.Target)
+
+	targetType := access.TargetType
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	enumLayout := c.lookupEnumLayout(targetType)
+	if enumLayout == nil {
+		panic(fmt.Sprintf("codegen: no enum layout for %s", targetType))
+	}
+	// A `this` enum receiver is an i8* pointer — load to a by-value enum.
+	subject = c.enumThisSubject(subject, enumLayout)
+
+	dataType := enumLayout.VariantDataTypes[access.VariantName]
+	if dataType == nil {
+		panic(fmt.Sprintf("codegen: no variant data layout for %s.%s", targetType, access.VariantName))
+	}
+
+	internalType := enumLayout.EnumInternalType.(*irtypes.StructType)
+	alloca := c.createEntryAlloca(internalType)
+	c.block.NewStore(subject, alloca)
+
+	dataPtr := c.block.NewGetElementPtr(internalType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	typedDataPtr := c.block.NewBitCast(dataPtr, irtypes.NewPointer(dataType))
+
+	idx := access.FieldIndex
+	if idx >= len(dataType.Fields) {
+		panic(fmt.Sprintf("codegen: variant field index %d out of range for %s.%s", idx, targetType, access.VariantName))
+	}
+	fieldType := dataType.Fields[idx]
+	fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
+	return c.block.NewLoad(fieldType, fieldPtr)
 }
 
 // enumThisSubject converts a `this` enum receiver (an i8* pointer returned by

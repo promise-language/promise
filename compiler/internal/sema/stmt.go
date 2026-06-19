@@ -433,6 +433,18 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		return
 	}
 
+	// T0993: a non-destructively narrowed enum variant field (`if x is V { x.f }`)
+	// is a read-only BORROW of x's payload — assigning through it would have to
+	// mutate the variant data in place (and drop any heap-owning old value), which
+	// this view deliberately does not support. Reject cleanly rather than letting
+	// codegen panic (it has no field-pointer path for a variant-data member).
+	if me, ok := s.Target.(*ast.MemberExpr); ok {
+		if c.info.NarrowedVariantField[me] != nil {
+			c.errorf(me.Pos(), "cannot assign through a narrowed enum variant field '%s'; the `is` narrowing borrows the payload for reading — use a match/destructure to rebuild the value", me.Field)
+			return
+		}
+	}
+
 	// Check for failable calls in the assigned value.
 	c.checkVarDeclFailable(s.Value)
 
@@ -1000,12 +1012,29 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		// type-checked normally, so we intercept them first.
 		narrow := c.preDetectIfNarrowing(s.Cond)
 		var cond types.Type
+		var isNarrow *IsNarrowing
+		var isCondExpr *ast.IsExpr
+		var isRestConds []ast.Expr
 		if narrow == nil {
-			// Normal: type-check condition, then detect simple narrowing
-			cond = c.checkExpr(s.Cond)
-			narrow = c.detectOptionalNarrowing(s.Cond, cond)
+			// Try non-destructive is-narrowing (`if x is T { x.member }`) BEFORE the
+			// normal checkExpr — the compound `&&` form would otherwise produce a
+			// spurious error type-checking `x.member` against the un-narrowed type.
+			isNarrow, isCondExpr, isRestConds = c.detectIsNarrowing(s.Cond)
+			if isNarrow == nil {
+				// Normal: type-check condition, then detect simple narrowing
+				cond = c.checkExpr(s.Cond)
+				narrow = c.detectOptionalNarrowing(s.Cond, cond)
+			}
 		}
-		if narrow != nil {
+		if isNarrow != nil {
+			// Non-destructive is-narrowing: narrow the subject in the then-block.
+			// The else branch (handled below) does NOT narrow. T0993.
+			c.info.IsNarrowings[s] = isNarrow
+			// Type-check the is-condition in the OUTER scope (subject not yet
+			// narrowed) so codegen has the subject type + bool result recorded.
+			c.checkExpr(isCondExpr)
+			c.applyIsNarrowing(s, isNarrow, isRestConds)
+		} else if narrow != nil {
 			// Optional narrowing: record and shadow variables in the appropriate branch
 			c.info.OptionalNarrowings[s] = narrow
 			if narrow.Negated {
@@ -1218,6 +1247,151 @@ func (c *Checker) detectIsDestructureNarrowing(cond ast.Expr) *IsDestructureNarr
 		IsEnum:      false,
 		TargetType:  named,
 	}
+}
+
+// flattenAnd flattens a left-associative chain of `&&` (BinAnd) operators into
+// a flat list of conjuncts. `((a && b) && c)` → [a, b, c]. A non-`&&` expression
+// returns a single-element slice. Used by is-narrowing detection (T0993).
+func flattenAnd(e ast.Expr) []ast.Expr {
+	bin, ok := e.(*ast.BinaryExpr)
+	if !ok || bin.Op != ast.BinAnd {
+		return []ast.Expr{e}
+	}
+	return append(flattenAnd(bin.Left), bin.Right)
+}
+
+// detectIsNarrowing checks if an if-condition is a non-destructive is-pattern
+// (`if x is T` or `if x is T && rest...`) that narrows the subject variable x to
+// the tested subtype/variant T for the then-block (T0993). Classes and enums
+// share this one detector; the IsEnum flag selects the branch. Returns the
+// narrowing, the leftmost is-condition (which the caller type-checks in the
+// outer scope to record codegen info), and the remaining `&&` conjuncts (which
+// the caller type-checks inside the narrowed scope), or (nil, nil, nil) if no
+// such pattern is present.
+//
+// Detection resolves the subject's type via scope lookup (NOT checkExpr) so that
+// a non-narrowing condition is left for the normal checkExpr path without being
+// double-checked (which would double-report errors).
+func (c *Checker) detectIsNarrowing(cond ast.Expr) (*IsNarrowing, *ast.IsExpr, []ast.Expr) {
+	conjuncts := flattenAnd(cond)
+	isExpr, ok := conjuncts[0].(*ast.IsExpr)
+	if !ok {
+		return nil, nil, nil
+	}
+	pat, ok := isExpr.Pattern.(*ast.IdentIsPattern)
+	if !ok {
+		return nil, nil, nil
+	}
+	// "present"/"absent" are optional-presence checks, not type narrowing.
+	if pat.Name == "present" || pat.Name == "absent" {
+		return nil, nil, nil
+	}
+	// Generic type-arg patterns (`x is Box[int]`) are not yet narrowable here;
+	// fall back to a plain bool condition (preserves existing behavior).
+	if len(pat.TypeArgs) > 0 {
+		return nil, nil, nil
+	}
+	ident, ok := isExpr.Expr.(*ast.IdentExpr)
+	if !ok {
+		return nil, nil, nil
+	}
+	obj := c.lookup(ident.Name)
+	if obj == nil {
+		return nil, nil, nil
+	}
+	subjectType := obj.Type()
+	if subjectType == nil {
+		return nil, nil, nil
+	}
+
+	// Enum variant narrowing: `if x is Variant`.
+	var enum *types.Enum
+	var subst map[*types.TypeParam]types.Type
+	switch st := subjectType.Underlying().(type) {
+	case *types.Enum:
+		enum = st
+	case *types.Instance:
+		if e, ok := st.Origin().(*types.Enum); ok {
+			enum = e
+			subst = types.BuildSubstMap(e.TypeParams(), st.TypeArgs())
+		}
+	}
+	if enum != nil {
+		v := enum.LookupVariant(pat.Name)
+		if v == nil {
+			return nil, nil, nil
+		}
+		return &IsNarrowing{
+			SubjectName: ident.Name,
+			IsEnum:      true,
+			Enum:        enum,
+			Variant:     v,
+			Subst:       subst,
+			TargetType:  subjectType,
+		}, isExpr, conjuncts[1:]
+	}
+
+	// Class subtype narrowing: `if x is Subtype`.
+	subjectNamed := namedOfType(subjectType)
+	if subjectNamed == nil {
+		return nil, nil, nil
+	}
+	to := c.lookup(pat.Name)
+	if to == nil {
+		return nil, nil, nil
+	}
+	tn, ok := to.(*types.TypeName)
+	if !ok {
+		return nil, nil, nil
+	}
+	narrowNamed, ok := tn.Type().(*types.Named)
+	if !ok {
+		return nil, nil, nil
+	}
+	// Only narrow to a proper, non-generic subtype. Narrowing to the identical
+	// type is a no-op; generic subtypes would need instance reconstruction and
+	// fall back to the (unchanged) plain-bool path.
+	if narrowNamed == subjectNamed || len(narrowNamed.TypeParams()) > 0 || !narrowNamed.InheritsFrom(subjectNamed) {
+		return nil, nil, nil
+	}
+	return &IsNarrowing{
+		SubjectName: ident.Name,
+		IsEnum:      false,
+		NarrowType:  narrowNamed,
+	}, isExpr, conjuncts[1:]
+}
+
+// applyIsNarrowing type-checks the then-block of an is-narrowing if-statement
+// with the subject narrowed to the tested subtype/variant. For the class case
+// it shadows the subject with a Var of the subtype; for the enum case it records
+// the narrowing in narrowedVariants so checkMemberExpr resolves variant payload
+// members. The remaining `&&` conjuncts are checked inside the narrowed scope.
+// T0993.
+func (c *Checker) applyIsNarrowing(s *ast.IfStmt, n *IsNarrowing, restConds []ast.Expr) {
+	c.openScope(s.Body, "if-is-narrow")
+	defer c.closeScope()
+
+	if n.IsEnum {
+		if c.narrowedVariants == nil {
+			c.narrowedVariants = make(map[string]*IsNarrowing)
+		}
+		prev, had := c.narrowedVariants[n.SubjectName]
+		c.narrowedVariants[n.SubjectName] = n
+		defer func() {
+			if had {
+				c.narrowedVariants[n.SubjectName] = prev
+			} else {
+				delete(c.narrowedVariants, n.SubjectName)
+			}
+		}()
+	} else {
+		c.insert(types.NewVar(tpos(s.Pos()), n.SubjectName, n.NarrowType))
+	}
+
+	for _, r := range restConds {
+		c.checkExpr(r)
+	}
+	c.checkBlock(s.Body)
 }
 
 // preDetectIfNarrowing detects compound (!cc, a && b) and negated (is absent)

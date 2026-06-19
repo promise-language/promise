@@ -8888,6 +8888,277 @@ func TestParamAnnotationNamedArgsStillWork(t *testing.T) {
 
 // --- Optional narrowing tests ---
 
+// T0993: non-destructive `if x is T { x.member }` narrows the subject to the
+// tested subtype/variant for the then-block. These tests exercise the sema
+// detection + member resolution paths shared by classes and enums.
+
+func TestIsNarrowingClassSubtype(t *testing.T) {
+	info := checkOK(t, `
+		type Shape { int x; }
+		type Circle is Shape { int r; }
+		test() {
+			Shape s = Circle(x: 1, r: 5);
+			if s is Circle {
+				int got = s.r;
+			}
+		}
+	`)
+	if len(info.IsNarrowings) != 1 {
+		t.Fatalf("expected 1 is-narrowing, got %d", len(info.IsNarrowings))
+	}
+	for _, n := range info.IsNarrowings {
+		if n.IsEnum {
+			t.Errorf("expected class narrowing, got enum")
+		}
+		if n.SubjectName != "s" {
+			t.Errorf("expected subject 's', got %q", n.SubjectName)
+		}
+	}
+}
+
+func TestIsNarrowingClassMethodAccess(t *testing.T) {
+	// Subtype-only method resolves inside the narrowed block.
+	checkOK(t, `
+		type Shape { int x; }
+		type Circle is Shape { int r; area(this) int => this.r * this.r; }
+		test() {
+			Shape s = Circle(x: 1, r: 5);
+			if s is Circle {
+				int a = s.area();
+			}
+		}
+	`)
+}
+
+func TestIsNarrowingAndPropagation(t *testing.T) {
+	// The `&&` right-hand side is type-checked with the subject narrowed.
+	checkOK(t, `
+		type Shape { int x; }
+		type Circle is Shape { int r; }
+		test() {
+			Shape s = Circle(x: 1, r: 5);
+			if s is Circle && s.r > 3 {
+				int got = s.r;
+			}
+		}
+	`)
+}
+
+func TestIsNarrowingElseDoesNotNarrow(t *testing.T) {
+	// `s.r` is invalid in the else branch — the subject is NOT narrowed there.
+	errs := checkErrs(t, `
+		type Shape { int x; }
+		type Circle is Shape { int r; }
+		test() {
+			Shape s = Circle(x: 1, r: 5);
+			if s is Circle {
+			} else {
+				int got = s.r;
+			}
+		}
+	`)
+	expectError(t, errs, "has no field or method r")
+}
+
+func TestIsNarrowingNoNarrowOutsideBlock(t *testing.T) {
+	// After the if-block, the subject reverts to its declared base type.
+	errs := checkErrs(t, `
+		type Shape { int x; }
+		type Circle is Shape { int r; }
+		test() {
+			Shape s = Circle(x: 1, r: 5);
+			if s is Circle {
+			}
+			int got = s.r;
+		}
+	`)
+	expectError(t, errs, "has no field or method r")
+}
+
+func TestIsNarrowingEnumVariant(t *testing.T) {
+	info := checkOK(t, `
+		enum Shape { Circle(f64 radius), Rectangle(f64 width, f64 height) }
+		test() {
+			Shape s = Shape.Circle(radius: 5.0);
+			if s is Circle {
+				f64 r = s.radius;
+			}
+		}
+	`)
+	if len(info.IsNarrowings) != 1 {
+		t.Fatalf("expected 1 is-narrowing, got %d", len(info.IsNarrowings))
+	}
+	for _, n := range info.IsNarrowings {
+		if !n.IsEnum {
+			t.Errorf("expected enum narrowing")
+		}
+	}
+	if len(info.NarrowedVariantField) != 1 {
+		t.Errorf("expected 1 narrowed variant field access, got %d", len(info.NarrowedVariantField))
+	}
+}
+
+func TestIsNarrowingEnumFieldAssignRejected(t *testing.T) {
+	// A non-destructive enum variant field is a read-only borrow — assigning
+	// through it is rejected at sema (codegen has no variant-data store path).
+	errs := checkErrs(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		test() {
+			Shape s = Shape.Circle(radius: 5.0);
+			if s is Circle {
+				s.radius = 9.0;
+			}
+		}
+	`)
+	expectError(t, errs, "cannot assign through a narrowed enum variant field")
+}
+
+func TestIsNarrowingEnumUnnamedFieldNotExposed(t *testing.T) {
+	// A positional (unnamed) payload exposes nothing after `x.` — still requires
+	// the destructure form.
+	errs := checkErrs(t, `
+		enum Box { Val(int) }
+		test() {
+			Box b = Box.Val(7);
+			if b is Val {
+				int v = b.foo;
+			}
+		}
+	`)
+	expectError(t, errs, "has no variant or method foo")
+}
+
+func TestMatchTypePatternUnrelatedRejected(t *testing.T) {
+	// A type-pattern arm whose type is unrelated to the subject can never match.
+	errs := checkErrs(t, `
+		type Shape { int x; }
+		type Circle is Shape { int r; }
+		type Other { int y; }
+		describe(Shape sh) string {
+			return match sh {
+				Other o => "other",
+				_ => "x",
+			};
+		}
+	`)
+	expectError(t, errs, "unrelated to subject type")
+}
+
+func TestMatchTypePatternOverEnumRejected(t *testing.T) {
+	// A type-binding arm over an enum subject would be a silent dead arm
+	// (genEnumMatch dispatches on the tag, not RTTI) — reject it at sema.
+	errs := checkErrs(t, `
+		enum Shape { Circle(f64 r), Square(f64 s) }
+		type Other { int x; }
+		describe(Shape sh) string {
+			return match sh {
+				Other o => "other",
+				_ => "x",
+			};
+		}
+	`)
+	expectError(t, errs, "is not valid over enum")
+}
+
+func TestMatchTypePatternSubtypeOK(t *testing.T) {
+	checkOK(t, `
+		type Shape { int x; }
+		type Circle is Shape { int r; }
+		type Square is Shape { int s; }
+		describe(Shape sh) string {
+			return match sh {
+				Circle c => "circle",
+				Square q => "square",
+				_ => "other",
+			};
+		}
+	`)
+}
+
+func TestMatchTypePatternWidening(t *testing.T) {
+	// A type-pattern whose type is a SUPERtype of the subject (widening) is
+	// allowed — the subject `is`-relation holds in the supertype direction.
+	checkOK(t, `
+		type Shape { int x; }
+		type Circle is Shape { int r; }
+		classify(Circle c) string {
+			return match c {
+				Shape s => "shape",
+				_ => "other",
+			};
+		}
+	`)
+}
+
+func TestIsNarrowingGenericEnumVariant(t *testing.T) {
+	// Narrowing a generic enum records a substitution so the variant field type
+	// resolves to the concrete arg (int), not the type param T.
+	info := checkOK(t, `
+		enum Opt[T] { Some(T val), None }
+		test() {
+			Opt[int] o = Opt[int].Some(val: 42);
+			if o is Some {
+				int got = o.val;
+			}
+		}
+	`)
+	if len(info.IsNarrowings) != 1 {
+		t.Fatalf("expected 1 is-narrowing, got %d", len(info.IsNarrowings))
+	}
+	for _, n := range info.IsNarrowings {
+		if !n.IsEnum {
+			t.Errorf("expected enum narrowing")
+		}
+		if n.Subst == nil {
+			t.Errorf("expected non-nil generic substitution for Opt[int]")
+		}
+	}
+	if len(info.NarrowedVariantField) != 1 {
+		t.Fatalf("expected 1 narrowed variant field access, got %d", len(info.NarrowedVariantField))
+	}
+	for _, vf := range info.NarrowedVariantField {
+		if vf.FieldType != types.TypInt {
+			t.Errorf("expected substituted field type int, got %v", vf.FieldType)
+		}
+	}
+}
+
+func TestIsNarrowingIdenticalTypeNoNarrow(t *testing.T) {
+	// `if s is Shape` (narrow to the identical declared type) is a no-op — no
+	// IsNarrowing is recorded; it stays a plain bool condition.
+	info := checkOK(t, `
+		type Shape { int x; }
+		type Circle is Shape { int r; }
+		test() {
+			Shape s = Circle(x: 1, r: 5);
+			if s is Shape {
+				int got = s.x;
+			}
+		}
+	`)
+	if len(info.IsNarrowings) != 0 {
+		t.Errorf("expected no is-narrowing for identical-type test, got %d", len(info.IsNarrowings))
+	}
+}
+
+func TestIsNarrowingNonIdentSubjectNoNarrow(t *testing.T) {
+	// `if h.sh is Circle` — the subject is a field access, not a plain variable.
+	// No in-place narrowing is recorded; it stays a plain bool condition.
+	info := checkOK(t, `
+		type Shape { int x; }
+		type Circle is Shape { int r; }
+		type Holder { Shape sh; }
+		test() {
+			Holder h = Holder(sh: Circle(x: 1, r: 5));
+			if h.sh is Circle {
+			}
+		}
+	`)
+	if len(info.IsNarrowings) != 0 {
+		t.Errorf("expected no is-narrowing for non-ident subject, got %d", len(info.IsNarrowings))
+	}
+}
+
 func TestOptionalTruthinessNarrowing(t *testing.T) {
 	// if cc { ... } where cc is string? should narrow cc to string
 	info := checkOK(t, `

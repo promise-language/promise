@@ -1,0 +1,22 @@
+// T0964: passing a value to a plain `T` parameter is a borrow — the callee
+// does NOT drop it. The caller retains ownership and drops it exactly once.
+//
+// Output ordering proves the drop happens on the CALLER side: `takes_plain(a)`
+// is `a`'s last use, so NLL drops `a` right after the call returns — before
+// "after call" prints — and the callee never drops it. Exactly one "drop 1".
+type Tracked {
+  int id;
+  drop(~this) {
+    print_line("drop {this.id}");
+  }
+}
+
+takes_plain(Tracked t) {
+  print_line("in callee {t.id}");
+}
+
+main() `test(expected: "in callee 1\ndrop 1\nafter call\n") {
+  Tracked a = Tracked(id: 1);
+  takes_plain(a);
+  print_line("after call");
+}

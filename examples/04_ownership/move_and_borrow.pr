@@ -1,7 +1,9 @@
 // Ownership and borrowing in Promise.
 //
-// Heap types (types with non-value fields) are moved by default.
-// Function signatures declare borrow mode: &param (shared) or ~param (mutable).
+// Heap types (types with non-value fields) are moved on assignment by default.
+// Function signatures declare the parameter mode: a plain `T` param or `T&`
+// is a shared borrow (caller keeps ownership), `T ~name` is a mutable borrow,
+// and `~T` consumes the value (moved into the callee).
 // At the call site, just pass the variable — the compiler auto-borrows.
 // Copy types (primitives, value types) are always copied.
 type Document {
@@ -20,8 +22,10 @@ append_to_doc(Document ~doc, string text) {
   doc.content = doc.content + text;
 }
 
-// Takes ownership — the caller can no longer use the value.
-archive(Document doc) string {
+// Takes ownership — `~Document` consumes the value, so the caller can no
+// longer use it. A plain `Document` parameter (no `~`) would be a shared
+// borrow that leaves the caller's value valid.
+archive(~Document doc) string {
   return "archived: {doc.title}";
 }
 

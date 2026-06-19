@@ -111,7 +111,7 @@ func TestUseAfterMove(t *testing.T) {
 
 func TestUseAfterMoveInCall(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hi";
 			consume(s);
@@ -123,7 +123,7 @@ func TestUseAfterMoveInCall(t *testing.T) {
 
 func TestDoubleMove(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hi";
 			consume(s);
@@ -208,7 +208,7 @@ func TestAssignResurrectsAfterCall(t *testing.T) {
 func TestMoveInIfBranch(t *testing.T) {
 	// Conservative: moved in then-branch without else means possibly moved after.
 	errs := ownerErrs(t, `
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hi";
 			bool b = true;
@@ -240,7 +240,7 @@ func TestMoveInBothBranchesNoUse(t *testing.T) {
 func TestMoveInLoopBody(t *testing.T) {
 	// Conservative: moved in loop body means possibly moved after.
 	errs := ownerErrs(t, `
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hi";
 			while true {
@@ -487,7 +487,7 @@ func TestIsCopyType(t *testing.T) {
 
 func TestInferredVarDeclMove(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			s := "hi";
 			consume(s);
@@ -536,7 +536,7 @@ func TestDestructureVarDeclCopy(t *testing.T) {
 
 func TestForInMoveInsideBody(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hi";
 			for i in 0..3 {
@@ -562,7 +562,7 @@ func TestForInBindingOK(t *testing.T) {
 
 func TestClassicForMoveInBody(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hi";
 			for int i = 0; i < 3; i += 1 {
@@ -578,7 +578,7 @@ func TestClassicForMoveInBody(t *testing.T) {
 
 func TestInfiniteLoopMove(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hi";
 			for {
@@ -609,7 +609,7 @@ func TestMatchPatternBindingOK(t *testing.T) {
 func TestMatchMoveInOneArm(t *testing.T) {
 	errs := ownerErrs(t, `
 		enum Color { Red, Green, Blue }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			Color c = Color.Red;
 			string s = "hi";
@@ -628,7 +628,7 @@ func TestMatchMoveInOneArm(t *testing.T) {
 
 func TestIfExprMoveInBranch(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hi";
 			bool b = true;
@@ -745,7 +745,7 @@ func TestMapLitMoveValues(t *testing.T) {
 
 func TestIndexExprMovedTarget(t *testing.T) {
 	errs := ownerErrs(t, `
-		consume(int[] a) {}
+		consume(~int[] a) {}
 		test() {
 			int[] items = [1, 2, 3];
 			consume(items);
@@ -909,7 +909,7 @@ func TestStoredBorrowBlocksMove(t *testing.T) {
 	// while the borrower is still alive (T0164: NLL narrows to last-use).
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -988,7 +988,7 @@ func TestBorrowerReassignExpiresBorrow(t *testing.T) {
 	// s is still borrowed (T0164: NLL narrows to last-use of borrower).
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -1073,7 +1073,7 @@ func TestMethodReceiverStoredBorrow(t *testing.T) {
 			int x;
 			getRef(&this) int& { return this.x; }
 		}
-		consume(T t) {}
+		consume(~T t) {}
 		test() {
 			T t = T(x: 1);
 			int &r = t.getRef();
@@ -1090,7 +1090,7 @@ func TestBorrowInIfBranch(t *testing.T) {
 	// Stored borrow created in then-branch persists while borrower is alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			bool b = true;
@@ -1109,7 +1109,7 @@ func TestBorrowInLoop(t *testing.T) {
 	// Stored borrow created in loop body persists while borrower is alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			string &r = "";
@@ -1128,7 +1128,7 @@ func TestBorrowInBothBranches(t *testing.T) {
 	// Stored borrow in both branches persists while borrower is alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			bool b = true;
@@ -1207,7 +1207,7 @@ func TestStoredBorrowInferredVarDecl(t *testing.T) {
 	// Borrow promotion works with inferred var decls; persists while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			r := getRef(s);
@@ -1469,7 +1469,7 @@ func TestUseVarCannotBeMoved(t *testing.T) {
 		type Resource {
 			close() {}
 		}
-		consume(Resource r) {}
+		consume(~Resource r) {}
 		test() {
 			use r := Resource();
 			consume(r);
@@ -1517,7 +1517,7 @@ func TestDroppableVariableUseAfterMove(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		consume(Resource r) { }
+		consume(~Resource r) { }
 		test() {
 			r := Resource(id: 1);
 			consume(r);
@@ -1534,7 +1534,7 @@ func TestDroppableConditionalMoveUseAfter(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		consume(Resource r) { }
+		consume(~Resource r) { }
 		test(bool cond) {
 			r := Resource(id: 1);
 			if cond {
@@ -1624,7 +1624,7 @@ func TestDroppableMoveToMethodArgUseAfter(t *testing.T) {
 		}
 		type Container {
 			int id;
-			take(Resource r) { }
+			take(~Resource r) { }
 		}
 		test() {
 			c := Container(id: 0);
@@ -1692,7 +1692,7 @@ func TestDroppableReturnMoveUseAfter(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		consume(Resource r) { }
+		consume(~Resource r) { }
 		test() Resource {
 			r := Resource(id: 1);
 			consume(r);
@@ -1801,7 +1801,7 @@ func TestAssignTargetIndexSubExpressions(t *testing.T) {
 			consume_arr(arr);
 			arr[0] = 5;
 		}
-		consume_arr(int[] a) { }
+		consume_arr(~int[] a) { }
 	`)
 	expectOwnerError(t, errs, "use of moved variable 'arr'")
 }
@@ -1812,7 +1812,7 @@ func TestAssignTargetMemberSubExpressions(t *testing.T) {
 		type Box {
 			int val;
 		}
-		consume(Box b) { }
+		consume(~Box b) { }
 		test() {
 			b := Box(val: 1);
 			consume(b);
@@ -1830,7 +1830,7 @@ func TestAssignTargetSliceSubExpressions(t *testing.T) {
 			consume_arr(arr);
 			arr[0:2] = [5, 6];
 		}
-		consume_arr(int[] a) { }
+		consume_arr(~int[] a) { }
 	`)
 	expectOwnerError(t, errs, "use of moved variable 'arr'")
 }
@@ -1843,7 +1843,7 @@ func TestAssignTargetIndexExprChecksIndex(t *testing.T) {
 			int id;
 			drop(~this) { }
 		}
-		consume(Resource r) { }
+		consume(~Resource r) { }
 		test() {
 			r := Resource(id: 0);
 			consume(r);
@@ -2202,7 +2202,7 @@ func TestStoredBorrowStillBlocksInWhileUnwrapBody(t *testing.T) {
 	// Variable-scoped borrow persists into while-unwrap body while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -2220,7 +2220,7 @@ func TestStoredBorrowCreatedInLoopPersists(t *testing.T) {
 	// A stored borrow created in a while-unwrap body persists while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			string &r = "";
@@ -2256,7 +2256,7 @@ func TestStoredBorrowStillBlocksInForInBody(t *testing.T) {
 	// Variable-scoped borrow persists into for-in body while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -2274,7 +2274,7 @@ func TestStoredBorrowStillBlocksInClassicForBody(t *testing.T) {
 	// Variable-scoped borrow persists into classic for body while borrower alive.
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -3366,7 +3366,7 @@ func TestNLLBorrowActiveWhenUsedAfterConflict(t *testing.T) {
 	errs := ownerErrs(t, `
 		getRef(string &s) string& { return s; }
 		readRef(string &s) {}
-		consume(string s) {}
+		consume(~string s) {}
 		test() {
 			string s = "hello";
 			string &r = getRef(s);
@@ -7647,15 +7647,21 @@ func TestT0568_TypedDeclInheritanceUpcastRejected(t *testing.T) {
 	expectOwnerError(t, errs, "cannot move borrowed parameter 'c'")
 }
 
-// --- T0586 ---
-// T0586 broadens the T0556 call-arg reject from the Mutex/MutexGuard/Task
-// subset to all non-Copy, non-auto-dup, droppable types. Passing a Borrowed
-// plain heap user type to a plain (non-`~`, non-`&`) callee parameter has no
-// codegen-side dup, so both the caller's drop binding and the downstream
-// callee chain's drop fire on the same heap allocation → runtime double-free
-// / segfault. Sema must reject before codegen ever sees the unsafe shape.
-func TestT0586_CallPlainBorrowedParamUserTypeRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// --- T0586 / T0964 ---
+// T0586 originally rejected passing a Borrowed non-Copy, non-auto-dup,
+// droppable value to a plain (non-`~`, non-`&`) callee parameter, on the
+// theory that no codegen-side dup existed so the caller's drop and the
+// callee's drop would fire on the same allocation. T0964 corrects the model:
+// a plain `T` parameter of a *general* call is a SHARED BORROW (the caller
+// retains ownership and is the sole dropper; the callee never drops a plain-T
+// arg), so these cases are now ACCEPTED as borrows — no double-free. The
+// consume/dup rejection survives only for the container-store native path
+// (Vector.push), which still takes ownership of its element; those are covered
+// by the TestT0556_Push* tests. The taxonomy tests below now all assert that
+// diverse droppable types (heap user type, generic, Map, Set, enum, tuple,
+// Optional) borrow cleanly through a plain-T general call.
+func TestT0586_CallPlainBorrowedParamUserTypeBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _BoxStr { string s; }
 		take(_BoxStr b) {}
 		forward(_BoxStr s) {
@@ -7663,14 +7669,13 @@ func TestT0586_CallPlainBorrowedParamUserTypeRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
 
-// T0586: generic instance — `_Holder[T]` with a string field is heap-user
-// type after substitution; the predicate also catches Borrowed generic
-// instances via the `instanceHasDroppableField` branch of `isDroppableType`.
-func TestT0586_CallPlainBorrowedParamGenericTypeRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964: generic instance — `_Holder[T]` with a string field is a
+// heap-user type after substitution. Once a droppable generic instance, it
+// now borrows cleanly through a plain-T general call (no consume).
+func TestT0586_CallPlainBorrowedParamGenericTypeBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _Holder[T] { T value; }
 		take(_Holder[string] h) {}
 		forward(_Holder[string] h) {
@@ -7678,39 +7683,37 @@ func TestT0586_CallPlainBorrowedParamGenericTypeRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'h'")
 }
 
-// T0586: Map[K,V] is a heap container with synth drop. Not in
-// isVarDeclAliasSafeType, so the broadened predicate catches it.
-func TestT0586_CallPlainBorrowedParamMapRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964: Map[K,V] is a heap container with synth drop. It borrows
+// cleanly through a plain-T general call.
+func TestT0586_CallPlainBorrowedParamMapBorrows(t *testing.T) {
+	ownerOK(t, `
 		take(map[string, int] m) {}
 		forward(map[string, int] m) {
 			take(m);
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
 }
 
-// T0586: Set[T] follows the same shape as Map — non-auto-dup heap container.
-func TestT0586_CallPlainBorrowedParamSetRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964: Set[T] follows the same shape as Map — a heap container that
+// borrows cleanly through a plain-T general call.
+func TestT0586_CallPlainBorrowedParamSetBorrows(t *testing.T) {
+	ownerOK(t, `
 		take(Set[int] s) {}
 		forward(Set[int] s) {
 			take(s);
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
 
-// T0586: method call — the predicate fires on argument position regardless of
-// whether the callee is a free function or a method (receiver borrow is
-// orthogonal to the call-arg check).
-func TestT0586_CallPlainBorrowedMethodArgRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964: a plain-T value argument borrows whether the callee is a free
+// function or a method (the receiver borrow is orthogonal to the call-arg
+// borrow).
+func TestT0586_CallPlainBorrowedMethodArgBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _BoxStr { string s; }
 		type Holder {
 			take(this, _BoxStr b) {}
@@ -7721,13 +7724,12 @@ func TestT0586_CallPlainBorrowedMethodArgRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
 
-// T0586 wrapper coverage: paren-wrapped `take((s))` — the walk peels
-// ParenExpr to find the borrowed ident inside.
-func TestT0586_CallPlainBorrowedThroughParenRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964 wrapper coverage: paren-wrapped `take((s))` — the borrowed
+// ident surfaced through a ParenExpr borrows cleanly.
+func TestT0586_CallPlainBorrowedThroughParenBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _BoxStr { string s; }
 		take(_BoxStr b) {}
 		forward(_BoxStr s) {
@@ -7735,14 +7737,12 @@ func TestT0586_CallPlainBorrowedThroughParenRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
 
-// T0586 wrapper coverage: if-expression branches that surface a borrowed
-// ident. Codegen forwards the PHI value as a raw alias, so the same crash
-// class applies.
-func TestT0586_CallPlainBorrowedThroughIfElseRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964 wrapper coverage: if-expression branches that surface a
+// borrowed ident — the value borrows cleanly through the plain-T call.
+func TestT0586_CallPlainBorrowedThroughIfElseBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _BoxStr { string s; }
 		take(_BoxStr b) {}
 		forward(_BoxStr s, bool flag) {
@@ -7750,13 +7750,12 @@ func TestT0586_CallPlainBorrowedThroughIfElseRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
 
-// T0586 wrapper coverage: match arm Body (`=> expr`) form — walk recurses
-// into arm.Body via findBorrowedNonAliasSafeIdent.
-func TestT0586_CallPlainBorrowedThroughMatchBodyRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964 wrapper coverage: match arm Body (`=> expr`) form — a borrowed
+// ident surfaced from an arm Body borrows cleanly.
+func TestT0586_CallPlainBorrowedThroughMatchBodyBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _BoxStr { string s; }
 		take(_BoxStr b) {}
 		forward(_BoxStr s, int k) {
@@ -7764,13 +7763,12 @@ func TestT0586_CallPlainBorrowedThroughMatchBodyRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
 
-// T0586 wrapper coverage: match arm Block (`=> { stmts; expr }`) form —
-// walk recurses into arm.Block via findBorrowedNonAliasSafeIdentInBlock.
-func TestT0586_CallPlainBorrowedThroughMatchBlockRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964 wrapper coverage: match arm Block (`=> { stmts; expr }`) form
+// — a borrowed ident surfaced from an arm Block borrows cleanly.
+func TestT0586_CallPlainBorrowedThroughMatchBlockBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _BoxStr { string s; }
 		take(_BoxStr b) {}
 		forward(_BoxStr s, int k) {
@@ -7778,12 +7776,11 @@ func TestT0586_CallPlainBorrowedThroughMatchBlockRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 's'")
 }
 
-// T0586 carve-out: string is in isVarDeclAliasSafeType and codegen auto-dups
-// at the call site for any push/store; passing it through a plain-T callee
-// is runtime-safe. Regression guard.
+// T0586/T0964: string is an auto-dup container; passing it through a plain-T
+// callee borrows cleanly. Regression guard (was always allowed; pre-T0964 via
+// the call-site auto-dup carve-out, now uniformly via plain-T borrow).
 func TestT0586_CallPlainBorrowedParamStringAllowed(t *testing.T) {
 	ownerOK(t, `
 		take(string s) {}
@@ -7794,7 +7791,7 @@ func TestT0586_CallPlainBorrowedParamStringAllowed(t *testing.T) {
 	`)
 }
 
-// T0586 carve-out: Vector[T] is also auto-dup at the call site.
+// T0586/T0964: Vector[T] borrows cleanly through a plain-T call.
 func TestT0586_CallPlainBorrowedParamVectorAllowed(t *testing.T) {
 	ownerOK(t, `
 		take(int[] v) {}
@@ -7805,8 +7802,7 @@ func TestT0586_CallPlainBorrowedParamVectorAllowed(t *testing.T) {
 	`)
 }
 
-// T0586 carve-out: Arc[T] is refcount-duppable; codegen emits dupArc at the
-// call site.
+// T0586/T0964: Arc[T] borrows cleanly through a plain-T call.
 func TestT0586_CallPlainBorrowedParamArcAllowed(t *testing.T) {
 	ownerOK(t, `
 		take(Arc[int] a) {}
@@ -7817,8 +7813,8 @@ func TestT0586_CallPlainBorrowedParamArcAllowed(t *testing.T) {
 	`)
 }
 
-// T0586 carve-out: Optional[Channel[int]] — Optional wrapping a codegen-safe
-// element recurses through the Optional branch of isVarDeclAliasSafeType.
+// T0586/T0964: Optional[Channel[int]] borrows cleanly through a plain-T
+// call.
 func TestT0586_CallPlainBorrowedParamOptionalChannelAllowed(t *testing.T) {
 	ownerOK(t, `
 		take(Channel[int]? ch) {}
@@ -7829,10 +7825,10 @@ func TestT0586_CallPlainBorrowedParamOptionalChannelAllowed(t *testing.T) {
 	`)
 }
 
-// T0586: a `~_BoxStr` callee param transitions the local out of Borrowed via
-// the consume path; the rejection check does not fire because the param's
-// initial state is Owned. Regression guard that the mut-param path is
-// unaffected.
+// T0586/T0964: a `~_BoxStr` callee param consumes the local via the move
+// path (the local's state is Owned, so the consume succeeds). Regression
+// guard that the `~`-param consume path is unaffected by the plain-T borrow
+// reclassification.
 func TestT0586_CallMutParamUserTypeOK(t *testing.T) {
 	ownerOK(t, `
 		type _BoxStr { string s; }
@@ -7844,12 +7840,11 @@ func TestT0586_CallMutParamUserTypeOK(t *testing.T) {
 	`)
 }
 
-// T0586 non-parameter coverage: a destructured local from a MemberExpr
-// source is marked Borrowed (T0548); passing it as a plain-T call arg must
-// emit the non-param diagnostic. Covers the `else` branch of the call-site
-// error in `checkCallExpr`.
-func TestT0586_CallPlainBorrowedDestructuredLocalRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964 non-parameter coverage: a destructured local from a MemberExpr
+// source is marked Borrowed (T0548); passing it as a plain-T general call arg
+// now borrows cleanly (the caller retains ownership).
+func TestT0586_CallPlainBorrowedDestructuredLocalBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _BoxStr { string s; }
 		type Holder { (_BoxStr, int) pair; }
 		take(_BoxStr b) {}
@@ -7860,16 +7855,14 @@ func TestT0586_CallPlainBorrowedDestructuredLocalRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed value 'b'")
 }
 
-// T0586 enum coverage: a plain enum with a droppable variant payload (e.g.
-// a string field) has NeedsSynthDrop=true via the synthesized variant-data
-// drop function. Exercises the `*types.Enum` branch of `isDroppableType`.
-// Without the broadened predicate, a borrowed enum-typed param would slip
-// through and double-free at scope exit.
-func TestT0586_CallPlainBorrowedParamEnumRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964 enum coverage: a plain enum with a droppable variant payload
+// (e.g. a string field) has NeedsSynthDrop=true via the synthesized
+// variant-data drop function. A borrowed enum-typed param borrows cleanly
+// through a plain-T general call — the caller remains the sole dropper.
+func TestT0586_CallPlainBorrowedParamEnumBorrows(t *testing.T) {
+	ownerOK(t, `
 		enum Msg { Text(string s); Ping; }
 		take(Msg m) {}
 		forward(Msg m) {
@@ -7877,17 +7870,14 @@ func TestT0586_CallPlainBorrowedParamEnumRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
 }
 
-// T0586 generic enum instance coverage: `Maybe[_BoxStr]` substitutes a
-// droppable heap user type into the `Just(T)` variant. Exercises the
-// `*types.Instance` with `*types.Enum` origin branch via
-// `enumInstanceHasDroppableField`, which mirrors codegen's
-// monoEnumInstNeedsSynthDrop. T0506 added the recursion; T0586 ensures the
-// call-arg site reject fires on it.
-func TestT0586_CallPlainBorrowedParamGenericEnumRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964 generic enum instance coverage: `Maybe[_BoxStr]` substitutes a
+// droppable heap user type into the `Just(T)` variant (synth drop via
+// monoEnumInstNeedsSynthDrop; T0506 added the recursion). A borrowed value of
+// this type borrows cleanly through a plain-T general call.
+func TestT0586_CallPlainBorrowedParamGenericEnumBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _BoxStr { string s; }
 		enum Maybe[T] { Just(T val); Nothing; }
 		take(Maybe[_BoxStr] m) {}
@@ -7896,17 +7886,13 @@ func TestT0586_CallPlainBorrowedParamGenericEnumRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'")
 }
 
-// T0586 Optional-of-heap-user-type coverage: `_BoxStr?` recurses through
-// `isDroppableType`'s Optional branch (returns droppable). The
-// `isVarDeclAliasSafeType` Optional branch only carves out Optionals of the
-// auto-dup set (string/Vector/Channel/Arc/Weak/Mutex/MutexGuard/Task), so
-// `_BoxStr?` falls through and gets caught. Mirrors T0568's
-// TestT0568_TypedDeclOptionalSameDepthRejected but at the call-arg site.
-func TestT0586_CallPlainBorrowedParamOptionalHeapUserTypeRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964 Optional-of-heap-user-type coverage: `_BoxStr?` is droppable
+// (Optional of a droppable heap user type). A borrowed value of this type
+// borrows cleanly through a plain-T general call.
+func TestT0586_CallPlainBorrowedParamOptionalHeapUserTypeBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _BoxStr { string s; }
 		take(_BoxStr? b) {}
 		forward(_BoxStr? b) {
@@ -7914,15 +7900,13 @@ func TestT0586_CallPlainBorrowedParamOptionalHeapUserTypeRejected(t *testing.T) 
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'b'")
 }
 
-// T0586 Tuple coverage: a tuple-typed param like `(_BoxStr, int)` recurses
-// through `isDroppableType`'s Tuple branch (any droppable element makes the
-// tuple droppable). Tuples are not in `isVarDeclAliasSafeType`, so the
-// predicate fires.
-func TestT0586_CallPlainBorrowedParamTupleRejected(t *testing.T) {
-	errs := ownerErrs(t, `
+// T0586/T0964 Tuple coverage: a tuple-typed param like `(_BoxStr, int)` is
+// droppable (any droppable element makes the tuple droppable). A borrowed
+// value of this type borrows cleanly through a plain-T general call.
+func TestT0586_CallPlainBorrowedParamTupleBorrows(t *testing.T) {
+	ownerOK(t, `
 		type _BoxStr { string s; }
 		take((_BoxStr, int) p) {}
 		forward((_BoxStr, int) p) {
@@ -7930,12 +7914,11 @@ func TestT0586_CallPlainBorrowedParamTupleRejected(t *testing.T) {
 		}
 		test() {}
 	`)
-	expectOwnerError(t, errs, "cannot move borrowed parameter 'p'")
 }
 
-// T0586 carve-out: a plain enum with no droppable variant payloads
-// (NeedsSynthDrop=false, HasDrop=false) is not droppable, so the predicate
-// doesn't fire. Regression guard that pure tag-only enums still pass freely.
+// T0586/T0964: a plain tag-only enum (NeedsSynthDrop=false, HasDrop=false) is
+// a Copy-like value; passing it through a plain-T call is a no-op copy.
+// Regression guard that pure tag-only enums still pass freely.
 func TestT0586_CallPlainBorrowedParamPlainEnumAllowed(t *testing.T) {
 	ownerOK(t, `
 		enum Color { Red; Green; Blue; }
@@ -7960,6 +7943,327 @@ func TestT0586_CallPlainBorrowedParamOptionalPrimitiveAllowed(t *testing.T) {
 		}
 		test() {}
 	`)
+}
+
+// --- T0964 ---
+// T0964: a plain (unmarked) move-type parameter is a SHARED BORROW. The caller
+// retains ownership and may reuse the value (including passing it again) after
+// the call; the callee may NOT move it out (it must declare `~T` to consume).
+// These tests pin the borrow/consume boundary for string, a heap user type,
+// and a vector — the three representative non-Copy categories.
+
+// Plain `T` borrow + reuse: the argument stays usable after the call, and may
+// be passed again to the same plain-T callee.
+func TestT0964_PlainStringBorrowReuse(t *testing.T) {
+	ownerOK(t, `
+		read(string s) int { return s.len; }
+		test() {
+			string a = "hello";
+			int n = read(a);
+			int m = read(a);
+			int k = a.len;
+		}
+	`)
+}
+
+func TestT0964_PlainHeapBorrowReuse(t *testing.T) {
+	ownerOK(t, `
+		type Heavy { int x; drop(~this) {} }
+		read(Heavy h) int { return h.x; }
+		test() {
+			Heavy a = Heavy(x: 7);
+			int n = read(a);
+			int m = read(a);
+			int k = a.x;
+		}
+	`)
+}
+
+func TestT0964_PlainVectorBorrowReuse(t *testing.T) {
+	ownerOK(t, `
+		read(int[] v) int { return v.len; }
+		test() {
+			int[] v = [1, 2, 3];
+			int n = read(v);
+			int m = read(v);
+			int k = v.len;
+		}
+	`)
+}
+
+// Forwarding a borrowed plain-T param onward to another plain-T callee is a
+// clean borrow chain (the old T0586 reject no longer applies to general calls).
+func TestT0964_ForwardBorrowedParamOnward(t *testing.T) {
+	ownerOK(t, `
+		type Heavy { int x; drop(~this) {} }
+		read(Heavy h) int { return h.x; }
+		forward(Heavy h) int { return read(h); }
+		test() {
+			Heavy a = Heavy(x: 7);
+			int n = forward(a);
+			int k = a.x;
+		}
+	`)
+}
+
+// A plain `T` param may NOT be moved out of the callee — the value belongs to
+// the caller. Author must write `~T` to consume. Repro #2 shape (string).
+func TestT0964_PlainStringMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { string val; }
+		sink(string s) Box { return Box(val: s); }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 's'; add '~'")
+}
+
+func TestT0964_PlainHeapMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Heavy { int x; drop(~this) {} }
+		type Box { Heavy h; }
+		sink(Heavy h) Box { return Box(h: h); }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'h'; add '~'")
+}
+
+func TestT0964_PlainVectorMoveOutRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box { int[] v; }
+		sink(int[] v) Box { return Box(v: v); }
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'v'; add '~'")
+}
+
+// `~T` continues to consume: the callee may move the value out (into a field).
+// Caller loses ownership.
+func TestT0964_MutParamConsumeMoveOut(t *testing.T) {
+	ownerOK(t, `
+		type Heavy { int x; drop(~this) {} }
+		type Box { Heavy h; }
+		sink(~Heavy h) Box { return Box(h: h); }
+		test() {
+			Heavy a = Heavy(x: 7);
+			Box b = sink(a);
+		}
+	`)
+}
+
+// `~T` consume + move-out for a vector — the callee may move the value into a
+// field; the caller loses ownership (parallels the heap-user-type case above).
+func TestT0964_MutVectorParamConsumeMoveOut(t *testing.T) {
+	ownerOK(t, `
+		type VecBox { int[] v; }
+		sink(~int[] v) VecBox { return VecBox(v: v); }
+		test() {
+			int[] a = [1, 2, 3];
+			VecBox b = sink(a);
+		}
+	`)
+}
+
+// `~T` consume marks the caller's variable moved — reuse after is rejected.
+func TestT0964_MutParamConsumeUseAfterRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Heavy { int x; drop(~this) {} }
+		consume(~Heavy h) {}
+		test() {
+			Heavy a = Heavy(x: 7);
+			consume(a);
+			int k = a.x;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'a'")
+}
+
+// Copy-type params auto-copy — caller retains the value (unchanged by T0964).
+func TestT0964_CopyTypePassthrough(t *testing.T) {
+	ownerOK(t, `
+		inc(int n) int { return n + 1; }
+		test() {
+			int x = 5;
+			int y = inc(x);
+			int z = inc(x);
+			int w = x + 1;
+		}
+	`)
+}
+
+// `x = f(x)` self-assign: the transient call-scoped borrow on `v` produced by
+// the reassignment's own RHS (plain `T[]` param) must not block reassigning v.
+func TestT0964_SelfAssignPlainParam(t *testing.T) {
+	ownerOK(t, `
+		roundtrip(int[] v) int[] { return [v.len]; }
+		test() {
+			int[] v = [1, 2, 3];
+			v = roundtrip(v);
+			int k = v.len;
+		}
+	`)
+}
+
+// Same for an explicit `T&` param on the RHS — the pre-existing self-assign
+// limitation is fixed as a bonus (T0964).
+func TestT0964_SelfAssignRefParam(t *testing.T) {
+	ownerOK(t, `
+		combine(int[] &v) int[] { return [v.len]; }
+		test() {
+			int[] v = [1, 2, 3];
+			v = combine(v);
+			int k = v.len;
+		}
+	`)
+}
+
+// A call-scoped plain-T borrow expires at statement end, so a later `~` consume
+// of the same variable in a subsequent statement is allowed (the borrow does
+// not persist past the borrowing call). Pins the borrow-then-move sequencing.
+func TestT0964_BorrowThenConsumeOK(t *testing.T) {
+	ownerOK(t, `
+		type Heavy { int x; drop(~this) {} }
+		read(Heavy h) int { return h.x; }
+		consume(~Heavy h) {}
+		test() {
+			Heavy a = Heavy(x: 1);
+			int n = read(a);
+			consume(a);
+		}
+	`)
+}
+
+// The same variable may be passed to two plain-T params in one call: each slot
+// is an independent shared borrow, and shared borrows never conflict.
+func TestT0964_DoubleBorrowSameVarInOneCall(t *testing.T) {
+	ownerOK(t, `
+		type Heavy { int x; drop(~this) {} }
+		read2(Heavy a, Heavy b) int { return a.x + b.x; }
+		test() {
+			Heavy a = Heavy(x: 5);
+			int n = read2(a, a);
+			int k = a.x;
+		}
+	`)
+}
+
+// A single call may mix a plain-T borrow with a `~T` move of two different
+// variables: the borrowed arg stays usable afterward, the moved arg does not.
+func TestT0964_MixedBorrowAndMoveInOneCall(t *testing.T) {
+	ownerOK(t, `
+		type Heavy { int x; drop(~this) {} }
+		mix(Heavy a, ~Heavy b) int { return a.x + b.x; }
+		test() {
+			Heavy a = Heavy(x: 3);
+			Heavy b = Heavy(x: 4);
+			int n = mix(a, b);
+			int k = a.x;
+		}
+	`)
+}
+
+// The moved (`~T`) arg of a mixed call is consumed — using it after is rejected
+// even though the plain-T arg of the same call is only borrowed.
+func TestT0964_MixedMovedArgUseAfterRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Heavy { int x; drop(~this) {} }
+		mix(Heavy a, ~Heavy b) int { return a.x + b.x; }
+		test() {
+			Heavy a = Heavy(x: 3);
+			Heavy b = Heavy(x: 4);
+			int n = mix(a, b);
+			int k = b.x;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'b'")
+}
+
+// A plain `this` receiver is a borrow too (the receiver audit): the caller
+// retains ownership and may call again / use the value after the method call.
+func TestT0964_PlainThisReceiverBorrows(t *testing.T) {
+	ownerOK(t, `
+		type Heavy { int x; drop(~this) {} get_x(this) int { return this.x; } }
+		test() {
+			Heavy a = Heavy(x: 5);
+			int n = a.get_x();
+			int m = a.get_x();
+			int k = a.x;
+		}
+	`)
+}
+
+// --- T0964 storeNative (Vector.push) path ---
+// Vector.push declares a plain `T elem` but the native store TAKES OWNERSHIP of
+// (or dups) the element — so unlike a general plain-T call, push does NOT borrow
+// its argument. The T0556 tests pin the single-owner-handle subset (Mutex/Task/
+// MutexGuard); these pin the broadened T0586 category (plain heap user type,
+// Map) that T0964 now distinguishes via storeNative — caught at the push site
+// only, NOT at general calls (which now borrow it cleanly). Plus the auto-dup
+// carve-out (string/Vector element) that still pushes a borrowed arg safely.
+
+// Pushing a borrowed plain heap-user-type param is rejected at the store site
+// (no codegen dup path → callee element drop + caller drop double-free).
+func TestT0964_PushBorrowedPlainHeapParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Heavy { int x; drop(~this) {} }
+		take(Heavy h) {
+			Heavy[] v = [];
+			v.push(h);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'h'; add '~'")
+}
+
+// Pushing a borrowed plain Map element param is rejected for the same reason —
+// Map is a non-auto-dup heap container.
+func TestT0964_PushBorrowedPlainMapParamRejected(t *testing.T) {
+	errs := ownerErrs(t, `
+		take(map[string, int] m) {
+			map[string, int][] v = [];
+			v.push(m);
+		}
+		test() {}
+	`)
+	expectOwnerError(t, errs, "cannot move borrowed parameter 'm'; add '~'")
+}
+
+// Pushing a borrowed plain string param is allowed — string is auto-dup, so
+// codegen dups it at the push site and the caller's owner is untouched.
+func TestT0964_PushBorrowedStringParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(string s) {
+			string[] v = [];
+			v.push(s);
+		}
+		test() {}
+	`)
+}
+
+// Pushing a borrowed plain Vector element param is likewise allowed — Vector is
+// auto-dup at the push site.
+func TestT0964_PushBorrowedVectorParamAllowed(t *testing.T) {
+	ownerOK(t, `
+		take(int[] inner) {
+			int[][] v = [];
+			v.push(inner);
+		}
+		test() {}
+	`)
+}
+
+// An OWNED local pushed into a Vector is consumed by the store (the storeNative
+// tryMove path), so using it after the push is rejected.
+func TestT0964_PushOwnedLocalConsumed(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Heavy { int x; drop(~this) {} }
+		test() {
+			Heavy[] v = [];
+			Heavy h = Heavy(x: 1);
+			v.push(h);
+			int k = h.x;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'h'")
 }
 
 // --- T0581 ---

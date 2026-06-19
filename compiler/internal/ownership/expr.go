@@ -730,6 +730,11 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 	if sig != nil {
 		// Function/method call: process args left-to-right.
 		params := sig.Params()
+		// T0964: a container-store native method (Vector.push) takes ownership
+		// of (or dups) its value argument at the store site, so a plain `T`
+		// argument is consumed/duped — NOT borrowed. General calls below treat
+		// a plain `T` parameter as a shared borrow.
+		storeNative := c.isElementStoringNativeCall(e.Callee)
 		for i, arg := range e.Args {
 			c.checkExpr(arg.Value)
 			if i < len(params) {
@@ -770,28 +775,39 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 							continue
 						}
 					}
-					// T0556/T0586: Reject moves of borrowed non-Copy, non-auto-dup,
-					// droppable values into plain-param call args. Originally T0556
-					// covered the single-owner handle subset (Mutex/MutexGuard/Task);
-					// T0586 broadens to all non-auto-dup droppable types (plain heap
-					// user types, generic user types, Map, Set). For these types no
-					// codegen path dups the value at the call site, so the callee's
-					// consumer drop and the caller's drop fire on the same allocation
-					// → runtime double-free. The predicate matches T0568's var-decl
-					// reject (`!isCopyType && !isVarDeclAliasSafeType &&
-					// isDroppableType`), so the call-arg and var-decl sites use the
-					// same rule and same `~`-affordance diagnostic.
-					if ident := c.findBorrowedNonAliasSafeIdent(arg.Value); ident != nil {
-						if c.params[ident.Name] {
-							c.errorf(ident.Pos(),
-								"cannot move borrowed parameter '%s'; add '~' to the parameter declaration to consume it",
-								ident.Name)
-						} else {
-							c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
+					if storeNative {
+						// T0556/T0586: a container-store native method (Vector.push)
+						// consumes or dups its element. Reject moving a borrowed
+						// non-Copy, non-auto-dup, droppable value into the store site
+						// (single-owner handles, plain heap user types, Map, Set):
+						// codegen has no dup path for these, so the callee's element
+						// drop and the caller's drop fire on the same allocation →
+						// runtime double-free. The predicate matches T0568's var-decl
+						// reject; auto-dup containers (string/Vector/Channel/Arc/Weak)
+						// fall through and are duped by codegen at the push site.
+						if ident := c.findBorrowedNonAliasSafeIdent(arg.Value); ident != nil {
+							if c.params[ident.Name] {
+								c.errorf(ident.Pos(),
+									"cannot move borrowed parameter '%s'; add '~' to the parameter declaration to consume it",
+									ident.Name)
+							} else {
+								c.errorf(ident.Pos(), "cannot move borrowed value '%s'", ident.Name)
+							}
+							continue
 						}
-						continue
+						// An owned arg is consumed (marked Moved); a borrowed auto-dup
+						// arg is a no-op here (tryMove short-circuits on Borrowed) and
+						// duped by codegen.
+						c.tryMove(arg.Value)
+					} else {
+						// T0964: a plain (unmarked) move-type parameter of a general
+						// call is a SHARED BORROW, matching docs/language-guide.md — the
+						// caller retains ownership and the value stays usable after the
+						// call. Register a call-scoped shared borrow (expires at
+						// statement end) exactly like a `T&` param, rather than marking
+						// the arg Moved.
+						c.createBorrowWithKind(arg.Value, BorrowShared, e.Pos())
 					}
-					c.tryMove(arg.Value)
 				} else if params[i].Ref() == types.RefMut {
 					// T0087: ~ on regular params means move (callee owns).
 					// T0338: a `~` callee genuinely consumes the value, so the
@@ -932,6 +948,23 @@ func (c *Checker) createBorrowWithKind(expr ast.Expr, kind BorrowKind, pos ast.P
 // if another free-on-`~this` native method is added.
 func isConsumingNativeMethod(recvType types.Type, methodName string) bool {
 	return methodName == "close" && types.IsMutexGuard(recvType)
+}
+
+// isElementStoringNativeCall reports whether the call is to a native container
+// method that takes ownership of (or dups) its value argument at the store
+// site — currently only Vector.push(T elem). For these, a plain `T` argument is
+// consumed (owned source) or duped by codegen (auto-dup source), and a borrowed
+// single-owner handle / non-auto-dup heap value is rejected (T0556/T0586). A
+// plain `T` parameter of any OTHER call is a shared borrow (T0964). Mirrors the
+// hardcoded-native-method pattern of isConsumingNativeMethod; extend the method
+// set here if another ownership-taking native container method is added (note
+// Channel.send/Map._set/Set.add already declare `~T` and need no entry).
+func (c *Checker) isElementStoringNativeCall(callee ast.Expr) bool {
+	member, ok := callee.(*ast.MemberExpr)
+	if !ok {
+		return false
+	}
+	return member.Field == "push" && types.IsVector(c.info.Types[member.Target])
 }
 
 // checkReceiverBorrow creates a borrow for method calls with &this or ~this receivers.

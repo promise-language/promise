@@ -683,8 +683,12 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	// Simple assignment resurrects the target variable.
 	if s.Op == ast.OpAssign {
 		if ident, ok := s.Target.(*ast.IdentExpr); ok {
-			// Cannot reassign a variable that is actively borrowed by others
-			if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
+			// Cannot reassign a variable that is actively borrowed by a named
+			// borrower (ref local). A transient call-scoped borrow created by the
+			// reassignment's own RHS — e.g. `v = sort(v)`, where the plain-`T[]`
+			// param borrows v (T0964) — is not a conflict; it expires at statement
+			// end or is promoted below for a ref-returning RHS.
+			if c.borrows != nil && c.borrows.HasPersistentBorrow(ident.Name) {
 				c.errorf(s.Pos(), "cannot assign to '%s' while it is borrowed", ident.Name)
 			}
 			// Expire borrows where this variable is the borrower

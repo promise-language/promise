@@ -1,0 +1,209 @@
+// T0964: a plain (unmarked) move-type parameter is a SHARED BORROW.
+//
+// The caller retains ownership and may reuse the value after passing it to a
+// plain `T` parameter, including passing it again or forwarding it onward. A
+// `~T` parameter still consumes (the callee may move the value out or let it
+// drop). Copy-type params auto-copy as before. These tests exercise the
+// runtime: the batch harness enforces zero leaks, and a double-free would
+// crash — so a clean run proves the value is dropped exactly once, on the
+// caller side.
+// --- Heap user type with an explicit drop (forces heap alloc + drop tracking) ---
+type Tracked {
+  int id;
+  drop(~this) {
+  }
+}
+
+read_tracked(Tracked t) int {
+  return t.id;
+}
+// Forwarding a borrowed param onward to another plain-T borrow used to be
+// rejected (old T0586 reject); under T0964 it is a clean borrow chain.
+forward_tracked(Tracked t) int {
+  return read_tracked(t);
+}
+
+plain_heap_borrow_reuse() `test {
+  Tracked a = Tracked(id: 7);
+  assert(read_tracked(a) == 7, "first borrow");
+  assert(read_tracked(a) == 7, "second borrow — caller still owns");
+  assert(forward_tracked(a) == 7, "forward borrowed param onward");
+  assert(a.id == 7, "caller still owns after all borrows");
+}
+
+// --- String (auto-dup container) ---
+str_len(string s) int {
+  return s.len;
+}
+forward_str(string s) int {
+  return str_len(s);
+}
+
+plain_string_borrow_reuse() `test {
+  string a = "hello";
+  assert(str_len(a) == 5, "first borrow");
+  assert(str_len(a) == 5, "second borrow");
+  assert(forward_str(a) == 5, "forward borrowed string onward");
+  assert(a == "hello", "caller still owns the string");
+}
+
+// --- Vector ---
+vec_len(int[] v) int {
+  return v.len;
+}
+forward_vec(int[] v) int {
+  return vec_len(v);
+}
+
+plain_vector_borrow_reuse() `test {
+  int[] v = [1, 2, 3];
+  assert(vec_len(v) == 3, "first borrow");
+  assert(vec_len(v) == 3, "second borrow");
+  assert(forward_vec(v) == 3, "forward borrowed vector onward");
+  assert(v.len == 3 && v[0] == 1, "caller still owns the vector");
+}
+
+// --- `~T` consume + move-out into a field ---
+type Box {
+  Tracked inner;
+}
+sink_tracked(~Tracked t) Box {
+  return Box(inner: t);
+}
+
+consume_heap_moveout() `test {
+  Tracked a = Tracked(id: 9);
+  Box b = sink_tracked(a); // `a` consumed; ownership moved into the Box
+  assert(b.inner.id == 9, "value moved into the box");
+}
+
+type StrBox {
+  string val;
+}
+sink_str(~string s) StrBox {
+  return StrBox(val: s);
+}
+
+consume_string_moveout() `test {
+  string a = "owned";
+  StrBox b = sink_str(a); // `a` consumed; ownership moved into the box
+  assert(b.val == "owned", "string moved into the box");
+}
+
+type VecBox {
+  int[] v;
+}
+sink_vec(~int[] v) VecBox {
+  return VecBox(v: v);
+}
+
+consume_vector_moveout() `test {
+  int[] a = [1, 2, 3];
+  VecBox b = sink_vec(a); // `a` consumed; ownership moved into the box
+  assert(b.v.len == 3 && b.v[0] == 1, "vector moved into the box");
+}
+
+// --- Copy-type passthrough (unaffected by T0964) ---
+inc(int n) int {
+  return n + 1;
+}
+
+copy_passthrough() `test {
+  int x = 5;
+  assert(inc(x) == 6, "copy arg works");
+  assert(x == 5, "copy type retained by caller");
+  bool flag = true;
+  assert(flag == true, "bool retained");
+}
+
+// --- `x = f(x)` self-assign where the RHS call borrows x ---
+// Plain `T[]` param (sort returns a fresh handle) — the transient call-scoped
+// borrow on `v` must not block reassigning `v`.
+self_assign_plain() `test {
+  int[] v = [3, 1, 2];
+  v = sort(v);
+  assert(v.len == 3 && v[0] == 1 && v[1] == 2 && v[2] == 3, "v = sort(v)");
+}
+
+// Explicit `T&` param on the RHS — same transient-borrow-does-not-block rule.
+combine(int[] &v) int[] {
+  return[v.len];
+}
+self_assign_ref() `test {
+  int[] v = [1, 2, 3];
+  v = combine(v);
+  assert(v.len == 1 && v[0] == 3, "v = combine(v) with T& arg");
+}
+
+// --- Method-call plain param is a borrow too (receiver + arg both borrowed) ---
+type Scaler {
+  int factor;
+  scale(this, Tracked t) int {
+    return t.id * this.factor;
+  }
+}
+method_plain_borrow_reuse() `test {
+  Scaler s = Scaler(factor: 2);
+  Tracked a = Tracked(id: 5);
+  assert(s.scale(a) == 10, "first method borrow");
+  assert(s.scale(a) == 10, "second method borrow — caller still owns");
+  assert(a.id == 5, "caller owns after method borrows");
+}
+
+// --- A call-scoped borrow expires at statement end: borrow, then move ---
+sink_tracked2(~Tracked t) int {
+  return t.id;
+}
+borrow_then_consume() `test {
+  Tracked a = Tracked(id: 8);
+  assert(read_tracked(a) == 8, "borrow first");
+  assert(sink_tracked2(a) == 8, "then consume — borrow already expired");
+}
+
+// --- Same variable passed to two plain params in one call (two shared borrows) ---
+sum_two(Tracked a, Tracked b) int {
+  return a.id + b.id;
+}
+double_borrow_same_var() `test {
+  Tracked a = Tracked(id: 6);
+  assert(sum_two(a, a) == 12, "same var to two plain params");
+  assert(a.id == 6, "still owned after double borrow");
+}
+
+// --- One call mixing a plain-T borrow with a `~T` move ---
+mix(Tracked borrowed, ~Tracked moved) int {
+  return borrowed.id + moved.id;
+}
+mixed_borrow_and_move() `test {
+  Tracked a = Tracked(id: 3);
+  Tracked b = Tracked(id: 4);
+  assert(mix(a, b) == 7, "mixed borrow + move"); // a borrowed, b moved
+  assert(a.id == 3, "borrowed arg still owned; moved arg gone");
+}
+
+// --- Vector.push storeNative path: a plain-string param is duped at the push
+// site (NOT borrowed-through), so the caller keeps its string and no double-free ---
+collect_string(string s) string[] {
+  string[] out = [];
+  out.push(s); // auto-dup at the store site
+  return out;
+}
+push_dups_borrowed_string() `test {
+  string a = "keep";
+  string[] got = collect_string(a);
+  assert(got.len == 1 && got[0] == "keep", "string duped into vector");
+  assert(a == "keep", "caller still owns the source string");
+}
+
+// An OWNED heap value pushed into a vector is consumed by the store (no leak,
+// no double-free — the vector becomes the sole owner).
+build_tracked_vec() Tracked[] {
+  Tracked[] v = [];
+  Tracked h = Tracked(id: 11);
+  v.push(h); // h owned -> consumed by push
+  return v;
+}
+push_consumes_owned() `test {
+  Tracked[] v = build_tracked_vec();
+  assert(v.len == 1 && v[0].id == 11, "owned value moved into vector");
+}

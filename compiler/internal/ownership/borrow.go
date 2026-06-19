@@ -72,6 +72,26 @@ func (bs *BorrowSet) HasAnyBorrow(name string) bool {
 	return false
 }
 
+// HasPersistentBorrow reports whether the given variable has an active borrow
+// held by a named borrower (a ref local / destructure binding), as opposed to a
+// transient call-scoped borrow created while evaluating the current statement.
+// Reassigning a variable is blocked only by persistent borrows: a call-scoped
+// borrow of the target produced by its own reassignment RHS (e.g. `v = sort(v)`,
+// where the plain-`T[]` param borrows v) is not a real conflict — it expires at
+// statement end, or is promoted to a persistent borrow for a ref-returning RHS
+// (promoteCallBorrows). T0964.
+func (bs *BorrowSet) HasPersistentBorrow(name string) bool {
+	if bs == nil {
+		return false
+	}
+	for _, b := range bs.borrows {
+		if b.Origin == name && b.Borrower != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // ExpireCallScoped removes all call-scoped borrows (those with empty Borrower).
 func (bs *BorrowSet) ExpireCallScoped() {
 	if bs == nil {

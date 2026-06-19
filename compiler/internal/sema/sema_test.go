@@ -10487,14 +10487,78 @@ func TestValueTypeNoDrop(t *testing.T) {
 	expectError(t, errs, "value type Bad cannot have a drop() method")
 }
 
-func TestValueTypeMixedNotValueType(t *testing.T) {
-	// Mix of `value and default placement is NOT a value type — it's a regular type
-	checkOK(t, `
+func TestHybridValueInstanceFieldRejected(t *testing.T) {
+	// Hybrid value+instance types are designed but not yet implemented (T0994):
+	// they must produce a clean source-located diagnostic, never a codegen panic.
+	errs := checkErrs(t, `
 		type Mixed {
 			int x `+"`value"+`;
 			int y;
 		}
 	`)
+	expectError(t, errs, "mixes `value` and instance fields")
+}
+
+func TestHybridValueInstanceHeapFieldRejected(t *testing.T) {
+	// Item repro: a `value field mixed with a heap (string) instance field.
+	errs := checkErrs(t, `
+		type Hybrid {
+			f64 x `+"`value"+`;
+			string name;
+		}
+	`)
+	expectError(t, errs, "mixes `value` and instance fields")
+}
+
+func TestPureInstanceTypeNotRejected(t *testing.T) {
+	// Regression guard (T0994): a plain heap type with no `value fields must
+	// still type-check cleanly.
+	checkOK(t, `
+		type Plain {
+			int x;
+			string name;
+		}
+	`)
+}
+
+func TestHybridInstanceFieldFirstRejected(t *testing.T) {
+	// Field order must not matter: a value field appearing *after* an instance
+	// field is still a hybrid and must be rejected (T0994). Guards the
+	// firstValueField scan that walks the whole field list.
+	errs := checkErrs(t, `
+		type Hybrid {
+			string name;
+			f64 x `+"`value"+`;
+		}
+	`)
+	expectError(t, errs, "mixes `value` and instance fields")
+}
+
+func TestHybridDiagnosticIsSourceLocated(t *testing.T) {
+	// Acceptance criterion 1 (T0994): the diagnostic must be source-located,
+	// pointing at the offending `value field rather than crashing codegen.
+	// The `value field is on line 4 (line 1 is empty from the raw-string
+	// newline, line 2 is the type decl, line 3 is the instance field).
+	errs := checkErrs(t, `
+		type Hybrid {
+			string name;
+			f64 x `+"`value"+`;
+		}
+	`)
+	expectError(t, errs, ":4:")
+	expectError(t, errs, "mixes `value` and instance fields")
+}
+
+func TestHybridThreeFieldsRejected(t *testing.T) {
+	// A type with multiple value and multiple instance fields is still hybrid.
+	errs := checkErrs(t, `
+		type Hybrid {
+			int a `+"`value"+`;
+			int b `+"`value"+`;
+			string c;
+		}
+	`)
+	expectError(t, errs, "mixes `value` and instance fields")
 }
 
 func TestValueTypeWithMethods(t *testing.T) {

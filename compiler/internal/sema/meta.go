@@ -859,18 +859,39 @@ func (c *Checker) validateCopyEnum(enum *types.Enum, d *ast.EnumDecl) {
 // detectValueType checks if a type is a pure value type (all fields are `value placement)
 // and validates the constraints. If valid, sets IsValueType and auto-enables Copy.
 func (c *Checker) detectValueType(named *types.Named, d *ast.TypeDecl) {
-	// Must have at least one field, and all must be `value placed
+	// Must have at least one field
 	if named.NumFields() == 0 {
 		return
-	}
-	for _, f := range named.Fields() {
-		if f.Placement() != types.PlaceValue {
-			return // not a pure value type
-		}
 	}
 
 	// Native types handle their own layout — skip value type detection
 	if c.hasAnnotation(d.Annotations, "native") {
+		return
+	}
+
+	// Classify own field placements: pure-value, pure-instance, or hybrid.
+	hasValue, hasInstance := false, false
+	var firstValueField *types.Field
+	for _, f := range named.Fields() {
+		if f.Placement() == types.PlaceValue {
+			hasValue = true
+			if firstValueField == nil {
+				firstValueField = f
+			}
+		} else {
+			hasInstance = true
+		}
+	}
+	if !hasValue {
+		return // pure-instance regular type — unchanged behavior
+	}
+	if hasInstance {
+		// Hybrid value+instance types are part of the unified 4-struct model
+		// but not yet implemented (T0994). Emit a clean source-located
+		// diagnostic instead of letting codegen panic on the value field.
+		p := firstValueField.Pos()
+		c.errorf(ast.Pos{File: p.File, Line: p.Line, Column: p.Column},
+			"type %s mixes `value` and instance fields; hybrid value+instance types are not yet supported (place all fields `value`, or none)", d.Name)
 		return
 	}
 

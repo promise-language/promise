@@ -342,7 +342,9 @@ func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map
 
 	for _, f := range named.AllFields() {
 		if f.Placement() != types.PlaceInstance {
-			panic("codegen: non-instance field placement not yet supported for " + name + "." + f.Name())
+			// Sema rejects hybrid value+instance types before codegen (T0994);
+			// reaching here means that invariant was violated — a compiler bug.
+			panic("codegen invariant: hybrid value+instance type " + name + " reached layout (should be rejected by sema, T0994): " + f.Name())
 		}
 		fType := types.Substitute(f.Type(), parentSubst)
 		llvmFT := instanceFieldLLVMType(fType, allLayouts, ptrSize, enumLayouts, monoEnumLayouts, monoLayouts)

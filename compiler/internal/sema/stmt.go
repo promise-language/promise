@@ -870,6 +870,7 @@ func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 	if !types.AssignableTo(valType, expected) {
 		c.errorf(s.Pos(), "cannot return %s from function returning %s", valType, expected)
 	}
+	c.checkSubExprFailable(s.Value) // T0976: reject bare failable in non-failable fn
 }
 
 func (c *Checker) checkRaiseStmt(s *ast.RaiseStmt) {

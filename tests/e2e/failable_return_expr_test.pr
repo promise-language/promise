@@ -1,0 +1,68 @@
+// T0976: Failable call in return expression — auto-propagation (case B)
+// and explicit propagate (case C) still work correctly.
+use std as _;
+
+parse_int!(string s) int {
+  if s == "42" {
+    return 42;
+  }
+  raise error(message: "bad: " + s);
+}
+
+get_string!(bool fail) string {
+  if fail {
+    raise error(message: "no string");
+  }
+  return "hello";
+}
+
+direct_return_int!() int {
+  return parse_int("42");
+}
+direct_return_int_fail!() int {
+  return parse_int("bad");
+}
+
+test_direct_return_int_success() `test {
+  int r = direct_return_int()?!;
+  assert(r == 42, "direct return auto-propagate success");
+}
+
+test_direct_return_int_fail() `test {
+  bool caught = false;
+  direct_return_int_fail()? e {
+    caught = true;
+    assert(e.message == "bad: bad", "error message preserved through direct return");
+  };
+  assert(caught, "direct return propagates error to caller");
+}
+
+explicit_return!() int {
+  return parse_int("42")?^;
+}
+
+test_explicit_return() `test {
+  int r = explicit_return()?!;
+  assert(r == 42, "explicit ?^ in return works");
+}
+
+direct_return_string!() string {
+  return get_string(false);
+}
+direct_return_string_fail!() string {
+  return get_string(true);
+}
+
+test_direct_return_string_success() `test {
+  string s = direct_return_string()?!;
+  assert(s == "hello", "string direct return success");
+}
+
+test_direct_return_string_fail() `test {
+  bool caught = false;
+  direct_return_string_fail()? e {
+    caught = true;
+    assert(e.message == "no string", "string direct return propagates error");
+  };
+  assert(caught, "string direct return error path");
+}

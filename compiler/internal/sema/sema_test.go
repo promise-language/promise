@@ -15679,6 +15679,41 @@ func TestFailableUnaryOperandFailable(t *testing.T) {
 	`)
 }
 
+// T0976: Bare failable call in return expression in non-failable fn must error.
+func TestFailableReturnExprNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		parse!() int { return 42; }
+		demo() int { return parse(); }
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+// T0976: Bare failable call in return expression in failable fn auto-propagates.
+func TestFailableReturnExprFailable(t *testing.T) {
+	checkOK(t, `
+		parse!() int { return 42; }
+		demo!() int { return parse(); }
+	`)
+}
+
+// T0976: Generic failable call in return position in non-failable fn must error.
+func TestFailableReturnExprGenericNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		read![T]() T { return 0; }
+		demo() int { return read[int](); }
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+// T0976: Failable call returning string in non-failable fn must error.
+func TestFailableReturnStringNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		get_str!() string { return "hi"; }
+		demo() string { return get_str(); }
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
 // T0330: Failable call as left operand of && must error in non-failable context.
 func TestFailableAndOperandNonFailable(t *testing.T) {
 	errs := checkErrs(t, `

@@ -5520,7 +5520,11 @@ func (c *Compiler) resolveTypeParam(tp *types.TypeParam) types.Type {
 }
 
 func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
-	slicePtr := c.genExprAutoPropagate(member.Target) // B0323
+	// T0595: capture the receiver slot once. `receiverSlot` is non-nil only for an
+	// arr[i]/vov[i] receiver; the push/pop/remove store-back below writes through
+	// it instead of re-evaluating the index. Held in a local (not a Compiler field)
+	// so a nested vector method call during argument evaluation can't clobber it.
+	slicePtr, receiverSlot := c.evalVectorReceiver(member.Target)
 	elemLLVM := c.resolveType(elemType)
 	elemSize := int64(c.typeSize(elemLLVM))
 
@@ -5718,14 +5722,14 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		newSlice := c.block.NewCall(c.funcs["promise_vector_push"],
 			cowSlice, argPtr, constant.NewInt(irtypes.I64, elemSize))
 		// Store the (possibly reallocated) pointer back
-		c.storeBackSlicePtr(member.Target, newSlice)
+		c.storeVectorReceiverBack(member.Target, receiverSlot, newSlice)
 		return newSlice
 
 	case "pop":
 		// COW: if static (.rodata), copy to heap first (T0062)
 		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
 			slicePtr, constant.NewInt(irtypes.I64, elemSize))
-		c.storeBackSlicePtr(member.Target, cowSlice)
+		c.storeVectorReceiverBack(member.Target, receiverSlot, cowSlice)
 		outAlloca := c.createEntryAlloca(elemLLVM)
 		outPtr := c.block.NewBitCast(outAlloca, irtypes.I8Ptr)
 		found := c.block.NewCall(c.funcs["promise_vector_pop"],
@@ -5787,7 +5791,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		// COW: if static (.rodata), copy to heap first (T0062)
 		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
 			slicePtr, constant.NewInt(irtypes.I64, elemSize))
-		c.storeBackSlicePtr(member.Target, cowSlice)
+		c.storeVectorReceiverBack(member.Target, receiverSlot, cowSlice)
 
 		// B0189: Drop the element being removed if it's droppable (e.g., string).
 		// The remove operation shifts subsequent elements, overwriting the removed one.
@@ -5961,8 +5965,145 @@ func (c *Compiler) storeBackSlicePtr(target ast.Expr, newPtr value.Value) {
 		fieldPtr := c.genFieldPtr(t)
 		c.block.NewStore(newPtr, fieldPtr)
 	case *ast.IndexExpr:
-		panic("codegen: push on nested slice (e.g. slices[i].push) not yet supported")
+		// T0595: nested slice receiver (arr[i].push / slices[i].push) reached via a
+		// path that did NOT pre-capture the slot. The Vector method-call path uses
+		// storeVectorReceiverBack with a slot captured once by evalVectorReceiver, so
+		// it never lands here; this recompute is a defensive fallback. NOTE: it
+		// re-evaluates e.Index — sound only for a side-effect-free index.
+		slotPtr := c.genIndexSlotPtr(t)
+		c.block.NewStore(newPtr, slotPtr)
 	}
+}
+
+// emitIndexBoundsCheck branches on idx < length (unsigned). On the false path it
+// emits an out-of-bounds panic with msg and returns; execution continues in a
+// fresh block named "<prefix>.ok". Shared by array index read, vector index
+// assign, and the T0595 nested-slice store-back so the OOB shape lives in one
+// place.
+func (c *Compiler) emitIndexBoundsCheck(idx, length value.Value, prefix, msg string) {
+	inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
+	okBlock := c.newBlock(prefix + ".ok")
+	panicBlock := c.newBlock(prefix + ".oob")
+	c.block.NewCondBr(inBounds, okBlock, panicBlock)
+
+	c.block = panicBlock
+	oobMsg := c.makeGlobalString(msg)
+	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
+	c.emitPanicReturn()
+
+	c.block = okBlock
+}
+
+// indexTargetIsArrayOrVector reports whether e.Target is a fixed-size array or a
+// Vector — i.e. an index whose element slot genIndexSlotPtr can address. Mirrors
+// the type-unwrap prologue of genIndexSlotPtr. Used to gate the single-eval
+// receiver path in genVectorMethodCall (T0595).
+func (c *Compiler) indexTargetIsArrayOrVector(e *ast.IndexExpr) bool {
+	t := c.info.Types[e.Target]
+	if c.typeSubst != nil {
+		t = types.Substitute(t, c.typeSubst)
+	}
+	if ref, ok := t.(*types.MutRef); ok {
+		t = ref.Elem()
+	}
+	if ref, ok := t.(*types.SharedRef); ok {
+		t = ref.Elem()
+	}
+	if _, ok := t.(*types.Array); ok {
+		return true
+	}
+	if _, ok := types.AsVector(t); ok {
+		return true
+	}
+	return extractNamed(t) == types.TypVector && c.typeSubst != nil
+}
+
+// evalVectorReceiver evaluates a Vector method-call receiver. For an arr[i] /
+// vov[i] receiver it computes the element slot pointer EXACTLY ONCE, returning
+// both the loaded inner-Vector pointer (slicePtr) and that slot pointer (T0595).
+// The caller stores any grown pointer back through the returned slot rather than
+// recomputing it — recomputing would re-evaluate e.Index, which for an impure
+// index yields a DIFFERENT slot and writes the grown buffer into the wrong slot
+// (use-after-free on the real slot + leak). For non-index receivers it falls back
+// to genExprAutoPropagate and returns a nil slot (store-back recomputes as before).
+func (c *Compiler) evalVectorReceiver(target ast.Expr) (slicePtr, slot value.Value) {
+	if idxExpr, ok := target.(*ast.IndexExpr); ok && c.indexTargetIsArrayOrVector(idxExpr) {
+		// T0648: suppress whole-container field dup while evaluating the outer
+		// target (matches the genVectorIndex/genArrayIndex read path this replaces);
+		// we want the real slot, not a clone of the outer field.
+		savedDupContainer := c.dupContainerFieldAccess
+		c.dupContainerFieldAccess = false
+		slot = c.genIndexSlotPtr(idxExpr)
+		c.dupContainerFieldAccess = savedDupContainer
+		// The slot holds the inner Vector's i8* (resolveType(Vector[T]) == i8*),
+		// matching what cow/push/pop/remove consume below.
+		return c.block.NewLoad(irtypes.I8Ptr, slot), slot
+	}
+	return c.genExprAutoPropagate(target), nil // B0323
+}
+
+// storeVectorReceiverBack writes a grown/relocated Vector pointer back into its
+// receiver. When the receiver slot was pre-captured by evalVectorReceiver (T0595),
+// it stores through that slot directly (single evaluation); otherwise it defers to
+// storeBackSlicePtr, which handles ident/field/index-recompute targets.
+func (c *Compiler) storeVectorReceiverBack(target ast.Expr, slot, newPtr value.Value) {
+	if slot != nil {
+		c.block.NewStore(newPtr, slot)
+		return
+	}
+	c.storeBackSlicePtr(target, newPtr)
+}
+
+// genIndexSlotPtr returns a pointer to the element slot of a fixed-size array or
+// Vector at e.Index, bounds-checked. Used by storeBackSlicePtr to write a grown
+// nested Vector's pointer back into its slot (T0595). Mirrors the element-pointer
+// computation in genArrayIndex / genVectorIndexAssign.
+func (c *Compiler) genIndexSlotPtr(e *ast.IndexExpr) value.Value {
+	targetType := c.info.Types[e.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
+	}
+
+	// Fixed-size array (Vector[int][2]): GEP into the array storage.
+	if arr, ok := targetType.(*types.Array); ok {
+		basePtr := c.genArrayBasePtr(e.Target, arr)
+		idx := c.genExpr(e.Index)
+		elemLLVM := c.resolveType(arr.Elem())
+		arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
+		c.emitIndexBoundsCheck(idx, constant.NewInt(irtypes.I64, arr.Size()),
+			"arridx", "array index out of bounds")
+		return c.block.NewGetElementPtr(arrType, basePtr,
+			constant.NewInt(irtypes.I32, 0), idx)
+	}
+
+	// Vector (Vector[int][]): GEP into the heap buffer after the header. The outer
+	// vector is always heap-allocated (a vector-of-vectors can never be a .rodata
+	// static literal — T0062 statics require compile-time-constant scalar elements),
+	// so the inner push never reallocates it and the loaded pointer is stable.
+	elemType, ok := types.AsVector(targetType)
+	if !ok && extractNamed(targetType) == types.TypVector && c.typeSubst != nil {
+		elemType = c.resolveTypeParam(types.TypVector.TypeParams()[0])
+		ok = elemType != nil
+	}
+	if !ok {
+		panic(fmt.Sprintf("codegen: storeBackSlicePtr index target is not array/vector: %s", targetType))
+	}
+	slicePtr := c.genExpr(e.Target)
+	idx := c.genExpr(e.Index)
+	elemLLVM := c.resolveType(elemType)
+	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(vectorHeaderType()))
+	length := loadVectorLen(c.block, headerPtr)
+	c.emitIndexBoundsCheck(idx, length, "nestedpush", "index out of bounds")
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+	return c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
 }
 
 // genMutRefArg returns a pointer to the caller's storage for a MutRef argument (B0149).
@@ -9269,18 +9410,8 @@ func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value
 	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
 
 	// Bounds check: idx < N
-	size := constant.NewInt(irtypes.I64, arr.Size())
-	inBounds := c.block.NewICmp(enum.IPredULT, idx, size)
-	okBlock := c.newBlock("arridx.ok")
-	panicBlock := c.newBlock("arridx.oob")
-	c.block.NewCondBr(inBounds, okBlock, panicBlock)
-
-	c.block = panicBlock
-	oobMsg := c.makeGlobalString("array index out of bounds")
-	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
-	c.emitPanicReturn()
-
-	c.block = okBlock
+	c.emitIndexBoundsCheck(idx, constant.NewInt(irtypes.I64, arr.Size()),
+		"arridx", "array index out of bounds")
 	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
 		constant.NewInt(irtypes.I32, 0), idx)
 	val := c.block.NewLoad(elemLLVM, elemPtr)

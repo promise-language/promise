@@ -521,8 +521,8 @@ test_slot_to_slot_string() `test {
 test_slot_to_slot_vector() `test {
   // Vector — pre-fix this aliased the buffer; leak-free completion verifies the
   // independent buffer allocation (each slot's drop releases its own buffer).
-  // T0595 prevents direct `arr[1].push(...)`, so independence is confirmed via
-  // leak-free scope exit.
+  // With T0595 fixed, slot independence is also confirmed directly: mutating
+  // arr[1] after the slot-to-slot clone must not affect arr[0].
   Vector[int] v0 = Vector[int]();
   v0.push(10);
   Vector[int] v1 = Vector[int]();
@@ -533,6 +533,12 @@ test_slot_to_slot_vector() `test {
   assert(arr[0][0] == 10, "slot 0 value preserved");
   assert(arr[1].len == 1, "slot 1 has its own buffer with cloned data");
   assert(arr[1][0] == 10, "slot 1 value cloned");
+  // T0595: directly mutate slot 1 and confirm slot 0 is unaffected.
+  arr[1].push(11);
+  assert(arr[1].len == 2, "slot 1 grew after push");
+  assert(arr[1][1] == 11, "slot 1 new value");
+  assert(arr[0].len == 1, "slot 0 unaffected by slot 1 push");
+  assert(arr[0][0] == 10, "slot 0 value still intact");
 }
 
 test_slot_to_slot_arc() `test {
@@ -984,4 +990,152 @@ _set_opt_arr_first[T](~T x) bool {
 test_bare_generic_typeparam_to_optional_slot() `test {
   assert(_set_opt_arr_first[int](7), "generic int slot present");
   assert(_set_opt_arr_first[string]("hi" + "!"), "generic string slot present");
+}
+
+// T0595: push on a nested slice (arr[i].push) — previously panicked in codegen.
+// The grown inner Vector's pointer is stored back into the array slot.
+
+test_nested_push_fixed_array() `test {
+  // Fixed array of Vectors: push into one slot, verify the right slot grew and
+  // the other slot is untouched (slot independence).
+  Vector[int][2] arr = [Vector[int](), Vector[int]()];
+  arr[1].push(99);
+  assert(arr[1].len == 1, "slot 1 grew");
+  assert(arr[1][0] == 99, "slot 1 value");
+  assert(arr[0].len == 0, "slot 0 untouched");
+  arr[0].push(7);
+  arr[0].push(8);
+  assert(arr[0].len == 2, "slot 0 grew independently");
+  assert(arr[0][0] == 7, "slot 0 value 0");
+  assert(arr[0][1] == 8, "slot 0 value 1");
+  assert(arr[1].len == 1, "slot 1 still independent");
+}
+
+test_nested_pop_remove_fixed_array() `test {
+  // pop()/remove() on a slot exercise the same store-back path (bonus paths).
+  Vector[int][2] arr = [Vector[int](), Vector[int]()];
+  arr[0].push(10);
+  arr[0].push(20);
+  arr[0].push(30);
+  popped := arr[0].pop();
+  assert(popped! == 30, "popped last");
+  assert(arr[0].len == 2, "len after pop");
+  arr[0].remove(0);
+  assert(arr[0].len == 1, "len after remove");
+  assert(arr[0][0] == 20, "value after remove");
+  assert(arr[1].len == 0, "other slot untouched");
+}
+
+test_nested_push_vector_of_vectors() `test {
+  // Vector of Vectors: push into a heap-stored inner Vector slot.
+  Vector[int][] vov = [Vector[int](), Vector[int]()];
+  vov[0].push(1);
+  vov[0].push(2);
+  vov[1].push(42);
+  assert(vov[0].len == 2, "vov[0] grew");
+  assert(vov[0][0] == 1, "vov[0][0]");
+  assert(vov[0][1] == 2, "vov[0][1]");
+  assert(vov[1].len == 1, "vov[1] grew independently");
+  assert(vov[1][0] == 42, "vov[1][0]");
+}
+
+test_nested_push_inner_realloc() `test {
+  // Force the inner Vector to realloc (grow past its initial capacity) and
+  // verify the stored-back relocated pointer is read correctly afterwards.
+  Vector[int][] vov = [Vector[int]()];
+  i := 0;
+  while (i < 200) {
+    vov[0].push(i * 2);
+    i = i + 1;
+  }
+  assert(vov[0].len == 200, "inner len after realloc");
+  assert(vov[0][0] == 0, "first element after realloc");
+  assert(vov[0][199] == 398, "last element after realloc");
+  assert(vov[0][100] == 200, "middle element after realloc");
+}
+
+type T0595Counter {
+  int n;
+  // `next` mutates and returns the pre-increment value, so two evaluations of the
+  // same call yield different indices.
+  next(~this) int {
+    v := this.n;
+    this.n = v + 1;
+    return v;
+  }
+}
+
+test_nested_push_impure_index_evaluated_once() `test {
+  // T0595: the receiver index must be evaluated exactly once. A naive store-back
+  // that recomputes the slot re-runs the index: the grown buffer lands in the
+  // WRONG slot, the real slot dangles at the freed pre-push buffer (use-after-free
+  // + leak). With one evaluation the same slot is read and written back.
+  T0595Counter c = T0595Counter(n: 0);
+  Vector[int][] vov = [Vector[int](), Vector[int]()];
+  vov[c.next()].push(99);
+  assert(c.n == 1, "index evaluated exactly once");
+  assert(vov[0].len == 1, "the evaluated slot grew");
+  assert(vov[0][0] == 99, "the evaluated slot holds the pushed value");
+  assert(vov[1].len == 0, "the other slot is untouched");
+}
+
+test_nested_index_assign_fixed_array() `test {
+  // T0595 bonus path: index-assign into a nested slice (arr[i][j] = x) reaches
+  // storeBackSlicePtr's IndexExpr case (slot store-back via the assignment route,
+  // not the push receiver route). Pre-fix this panicked the same way as push.
+  Vector[int][2] arr = [Vector[int](), Vector[int]()];
+  arr[0].push(1);
+  arr[0].push(2);
+  arr[0][1] = 20;
+  assert(arr[0][0] == 1, "slot 0 elem 0 preserved");
+  assert(arr[0][1] == 20, "slot 0 elem 1 reassigned");
+  assert(arr[1].len == 0, "slot 1 untouched");
+}
+
+test_nested_index_assign_vector_of_vectors() `test {
+  // Same store-back path for a heap-stored inner Vector slot.
+  Vector[int][] vov = [Vector[int](), Vector[int]()];
+  vov[1].push(5);
+  vov[1].push(6);
+  vov[1][0] = 50;
+  assert(vov[1][0] == 50, "vov[1] elem 0 reassigned");
+  assert(vov[1][1] == 6, "vov[1] elem 1 preserved");
+  assert(vov[0].len == 0, "vov[0] untouched");
+}
+
+// T0595: nested push reached from a monomorphized generic body — the receiver's
+// outer-container type is substituted before genIndexSlotPtr computes the slot
+// (exercises the c.typeSubst != nil prologue). Verifies the slot store-back is
+// correct under monomorphization for both Vector-of-Vectors and array-of-Vectors,
+// and for a droppable element type (string) so the no-leak gate covers it.
+
+push_into_vov[T](Vector[Vector[T]] vov, int i, T val) {
+  vov[i].push(val);
+}
+
+push_into_arr[T](Vector[T][2] arr, int i, T val) {
+  arr[i].push(val);
+}
+
+test_generic_nested_push_vov_int() `test {
+  Vector[Vector[int]] vov = [Vector[int](), Vector[int]()];
+  push_into_vov[int](vov, 1, 7);
+  assert(vov[1].len == 1, "generic slot grew");
+  assert(vov[1][0] == 7, "generic slot value");
+  assert(vov[0].len == 0, "other generic slot untouched");
+}
+
+test_generic_nested_push_vov_string() `test {
+  Vector[Vector[string]] vov = [Vector[string]()];
+  push_into_vov[string](vov, 0, "hi" + "!");
+  assert(vov[0].len == 1, "generic string slot grew");
+  assert(vov[0][0] == "hi!", "generic string slot value");
+}
+
+test_generic_nested_push_fixed_array() `test {
+  Vector[int][2] arr = [Vector[int](), Vector[int]()];
+  push_into_arr[int](arr, 0, 42);
+  assert(arr[0].len == 1, "generic array slot grew");
+  assert(arr[0][0] == 42, "generic array slot value");
+  assert(arr[1].len == 0, "other generic array slot untouched");
 }

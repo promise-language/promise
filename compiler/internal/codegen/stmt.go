@@ -10163,17 +10163,7 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 	headerPtr := c.block.NewBitCast(cowSlice, irtypes.NewPointer(headerType))
 	length := loadVectorLen(c.block, headerPtr)
 
-	inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
-	okBlock := c.newBlock("indexassign.ok")
-	panicBlock := c.newBlock("indexassign.oob")
-	c.block.NewCondBr(inBounds, okBlock, panicBlock)
-
-	c.block = panicBlock
-	oobMsg := c.makeGlobalString("index out of bounds")
-	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
-	c.emitPanicReturn()
-
-	c.block = okBlock
+	c.emitIndexBoundsCheck(idx, length, "indexassign", "index out of bounds")
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, cowSlice,
 		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
